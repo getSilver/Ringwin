@@ -4,10 +4,18 @@
 //! and venue fact deduplication.
 
 const std = @import("std");
+const journal = @import("journal.zig");
 const private = @import("okx_private_reconciliation.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const asset_scale: i128 = 100_000_000;
+const stable_schema_version: u16 = 1;
+
+const StableEventType = enum(u16) {
+    okx_spot_execution_report = 1001,
+    okx_spot_fill = 1002,
+    okx_spot_balance_snapshot = 1003,
+};
 
 pub const OrderState = enum(u8) { live, partially_filled, filled, canceled };
 
@@ -191,6 +199,290 @@ pub const Projection = struct {
         if (!std.meta.eql(self.portfolio, self.exchange)) return error.EconomicLayerMismatch;
     }
 };
+
+pub fn appendStable(log: *journal.Journal, sequence: u64, event: private.CanonicalEvent) !void {
+    var encoded: StablePayload = .{};
+    try encoded.put(u64, event.envelope.raw_evidence.stream_sequence);
+    try encoded.bytesValue(&event.envelope.raw_evidence.sha256);
+    try encoded.bytesValue(&event.envelope.source_fact_identity);
+    const event_type: StableEventType = switch (event.payload) {
+        .execution_report => |value| blk: {
+            if (!value.owned_by_ringwin or value.instrument != .btc_usdt_spot)
+                return error.UnownedOrUnsupportedFact;
+            try encodeReport(&encoded, value);
+            break :blk .okx_spot_execution_report;
+        },
+        .fill => |value| blk: {
+            if (!value.owned_by_ringwin or value.instrument != .btc_usdt_spot)
+                return error.UnownedOrUnsupportedFact;
+            try encodeFill(&encoded, value);
+            break :blk .okx_spot_fill;
+        },
+        .exchange_balance_snapshot => |value| blk: {
+            try encodeBalance(&encoded, value);
+            break :blk .okx_spot_balance_snapshot;
+        },
+        else => return error.UnsupportedStableEvent,
+    };
+    try log.append(.{
+        .type_id = @intFromEnum(event_type),
+        .schema_version = stable_schema_version,
+        .flags = journal.input_flag,
+        .sequence = sequence,
+        .source_time = event.envelope.source_time_utc_ns orelse 0,
+        .receive_time = event.envelope.receive_time_utc_ns,
+        .monotonic_time = event.envelope.monotonic_time_ns,
+        .wall_time = event.envelope.wall_time_utc_ns,
+        .time_presence = .{
+            .source = event.envelope.source_time_utc_ns != null,
+            .receive = true,
+            .monotonic = true,
+            .wall = true,
+        },
+        .payload = encoded.slice(),
+    });
+}
+
+pub fn replayStable(bytes: []const u8) !Projection {
+    var projection: Projection = .{};
+    var reader = try journal.Reader.init(bytes);
+    while (true) switch (try reader.next()) {
+        .record => |record| try projection.apply(try decodeStable(record)),
+        .end => |status| {
+            if (status != .clean) return error.TruncatedStableReplay;
+            return projection;
+        },
+    };
+}
+
+fn decodeStable(record: journal.Record) !private.CanonicalEvent {
+    if (record.schema_version != stable_schema_version) return error.UnknownStableSchema;
+    if (record.flags != journal.input_flag) return error.InvalidStableFlags;
+    if (!record.time_presence.receive or !record.time_presence.monotonic or
+        !record.time_presence.wall or record.time_presence.reserved != 0 or
+        (!record.time_presence.source and record.source_time != 0))
+        return error.InvalidStableTimes;
+    const event_type = std.enums.fromInt(StableEventType, record.type_id) orelse
+        return error.UnknownStableEventType;
+    var decoder: StableDecoder = .{ .bytes = record.payload };
+    const raw_sequence = try decoder.take(u64);
+    const raw_hash = try decoder.takeBytes(Sha256.digest_length);
+    const fact_identity = try decoder.takeBytes(Sha256.digest_length);
+    const payload: private.EventPayload = switch (event_type) {
+        .okx_spot_execution_report => .{ .execution_report = try decodeReport(&decoder) },
+        .okx_spot_fill => .{ .fill = try decodeFill(&decoder) },
+        .okx_spot_balance_snapshot => .{ .exchange_balance_snapshot = try decodeBalance(&decoder) },
+    };
+    if (decoder.offset != decoder.bytes.len) return error.TrailingStablePayload;
+    var evidence_hash: [Sha256.digest_length]u8 = undefined;
+    var identity: [Sha256.digest_length]u8 = undefined;
+    @memcpy(&evidence_hash, raw_hash);
+    @memcpy(&identity, fact_identity);
+    return .{
+        .envelope = .{
+            .source_time_utc_ns = if (record.time_presence.source) record.source_time else null,
+            .receive_time_utc_ns = record.receive_time,
+            .monotonic_time_ns = record.monotonic_time,
+            .wall_time_utc_ns = record.wall_time,
+            .raw_evidence = .{ .stream_sequence = raw_sequence, .sha256 = evidence_hash },
+            .source_fact_identity = identity,
+        },
+        .payload = payload,
+    };
+}
+
+const StablePayload = struct {
+    bytes: [2048]u8 = undefined,
+    len: usize = 0,
+
+    fn slice(self: *const StablePayload) []const u8 {
+        return self.bytes[0..self.len];
+    }
+
+    fn put(self: *StablePayload, comptime T: type, value: T) !void {
+        if (self.bytes.len - self.len < @sizeOf(T)) return error.StablePayloadTooLarge;
+        std.mem.writeInt(T, self.bytes[self.len..][0..@sizeOf(T)], value, .little);
+        self.len += @sizeOf(T);
+    }
+
+    fn bytesValue(self: *StablePayload, value: []const u8) !void {
+        if (self.bytes.len - self.len < value.len) return error.StablePayloadTooLarge;
+        @memcpy(self.bytes[self.len..][0..value.len], value);
+        self.len += value.len;
+    }
+
+    fn boolean(self: *StablePayload, value: bool) !void {
+        try self.put(u8, @intFromBool(value));
+    }
+
+    fn decimal(self: *StablePayload, value: private.Decimal) !void {
+        try self.put(i128, value.coefficient);
+        try self.put(u8, value.scale);
+    }
+
+    fn optionalDecimal(self: *StablePayload, value: ?private.Decimal) !void {
+        try self.boolean(value != null);
+        if (value) |present| try self.decimal(present);
+    }
+
+    fn text(self: *StablePayload, value: anytype) !void {
+        const bytes = value.slice();
+        if (bytes.len > std.math.maxInt(u8)) return error.StableTextTooLong;
+        try self.put(u8, @intCast(bytes.len));
+        try self.bytesValue(bytes);
+    }
+};
+
+const StableDecoder = struct {
+    bytes: []const u8,
+    offset: usize = 0,
+
+    fn take(self: *StableDecoder, comptime T: type) !T {
+        if (self.bytes.len - self.offset < @sizeOf(T)) return error.TruncatedStablePayload;
+        defer self.offset += @sizeOf(T);
+        return std.mem.readInt(T, self.bytes[self.offset..][0..@sizeOf(T)], .little);
+    }
+
+    fn takeBytes(self: *StableDecoder, length: usize) ![]const u8 {
+        if (self.bytes.len - self.offset < length) return error.TruncatedStablePayload;
+        defer self.offset += length;
+        return self.bytes[self.offset..][0..length];
+    }
+
+    fn boolean(self: *StableDecoder) !bool {
+        return switch (try self.take(u8)) {
+            0 => false,
+            1 => true,
+            else => error.InvalidStableBoolean,
+        };
+    }
+
+    fn decimal(self: *StableDecoder) !private.Decimal {
+        const value: private.Decimal = .{ .coefficient = try self.take(i128), .scale = try self.take(u8) };
+        if (value.scale > 0 and @mod(value.coefficient, 10) == 0)
+            return error.NonCanonicalStableDecimal;
+        return value;
+    }
+
+    fn optionalDecimal(self: *StableDecoder) !?private.Decimal {
+        return if (try self.boolean()) try self.decimal() else null;
+    }
+
+    fn text(self: *StableDecoder, comptime T: type) !T {
+        return T.init(try self.takeBytes(try self.take(u8)));
+    }
+};
+
+fn encodeReport(encoded: *StablePayload, value: private.ExecutionReport) !void {
+    try encoded.put(u64, @intFromEnum(value.venue_order_id));
+    try encoded.text(value.client_order_id);
+    try encoded.put(u8, @intFromEnum(value.instrument));
+    try encoded.put(u8, @intFromEnum(value.side));
+    try encoded.put(u8, @intFromEnum(value.order_type));
+    try encoded.put(u8, @intFromEnum(value.status));
+    try encoded.decimal(value.quantity);
+    try encoded.optionalDecimal(value.limit_price);
+    try encoded.decimal(value.cumulative_filled_quantity);
+    try encoded.optionalDecimal(value.average_fill_price);
+    try encoded.text(value.request_id);
+    try encoded.boolean(value.last_trade_id != null);
+    if (value.last_trade_id) |trade_id| try encoded.put(i64, @intFromEnum(trade_id));
+    try encoded.put(u64, value.venue_update_time_utc_ns);
+    try encoded.boolean(value.owned_by_ringwin);
+}
+
+fn decodeReport(decoder: *StableDecoder) !private.ExecutionReport {
+    return .{
+        .venue_order_id = @enumFromInt(try decoder.take(u64)),
+        .client_order_id = try decoder.text(private.ClientOrderId),
+        .instrument = std.enums.fromInt(private.Instrument, try decoder.take(u8)) orelse return error.InvalidStableEnum,
+        .side = std.enums.fromInt(private.Side, try decoder.take(u8)) orelse return error.InvalidStableEnum,
+        .order_type = std.enums.fromInt(private.OrderType, try decoder.take(u8)) orelse return error.InvalidStableEnum,
+        .status = std.enums.fromInt(private.ExecutionStatus, try decoder.take(u8)) orelse return error.InvalidStableEnum,
+        .quantity = try decoder.decimal(),
+        .limit_price = try decoder.optionalDecimal(),
+        .cumulative_filled_quantity = try decoder.decimal(),
+        .average_fill_price = try decoder.optionalDecimal(),
+        .request_id = try decoder.text(private.FixedText(32)),
+        .last_trade_id = if (try decoder.boolean()) @enumFromInt(try decoder.take(i64)) else null,
+        .venue_update_time_utc_ns = try decoder.take(u64),
+        .owned_by_ringwin = try decoder.boolean(),
+    };
+}
+
+fn encodeFill(encoded: *StablePayload, value: private.Fill) !void {
+    try encoded.put(i64, @intFromEnum(value.venue_trade_id));
+    try encoded.boolean(value.venue_bill_id != null);
+    if (value.venue_bill_id) |bill_id| try encoded.put(u64, @intFromEnum(bill_id));
+    try encoded.put(u64, @intFromEnum(value.venue_order_id));
+    try encoded.text(value.client_order_id);
+    try encoded.put(u8, @intFromEnum(value.instrument));
+    try encoded.put(u8, @intFromEnum(value.side));
+    try encoded.decimal(value.quantity);
+    try encoded.decimal(value.price);
+    try encoded.decimal(value.fee);
+    try encoded.text(value.fee_asset);
+    try encoded.optionalDecimal(value.realized_pnl);
+    try encoded.boolean(value.liquidity != null);
+    if (value.liquidity) |liquidity| try encoded.put(u8, @intFromEnum(liquidity));
+    try encoded.put(u64, value.venue_fill_time_utc_ns);
+    try encoded.boolean(value.owned_by_ringwin);
+}
+
+fn decodeFill(decoder: *StableDecoder) !private.Fill {
+    return .{
+        .venue_trade_id = @enumFromInt(try decoder.take(i64)),
+        .venue_bill_id = if (try decoder.boolean()) @enumFromInt(try decoder.take(u64)) else null,
+        .venue_order_id = @enumFromInt(try decoder.take(u64)),
+        .client_order_id = try decoder.text(private.ClientOrderId),
+        .instrument = std.enums.fromInt(private.Instrument, try decoder.take(u8)) orelse return error.InvalidStableEnum,
+        .side = std.enums.fromInt(private.Side, try decoder.take(u8)) orelse return error.InvalidStableEnum,
+        .quantity = try decoder.decimal(),
+        .price = try decoder.decimal(),
+        .fee = try decoder.decimal(),
+        .fee_asset = try decoder.text(private.AssetCode),
+        .realized_pnl = try decoder.optionalDecimal(),
+        .liquidity = if (try decoder.boolean()) std.enums.fromInt(private.Liquidity, try decoder.take(u8)) orelse return error.InvalidStableEnum else null,
+        .venue_fill_time_utc_ns = try decoder.take(u64),
+        .owned_by_ringwin = try decoder.boolean(),
+    };
+}
+
+fn encodeBalance(encoded: *StablePayload, value: private.ExchangeBalanceSnapshot) !void {
+    try encoded.put(u8, @intFromEnum(value.scope));
+    try encoded.put(u64, value.venue_update_time_utc_ns);
+    try encoded.put(u8, value.balance_count);
+    for (value.balances[0..value.balance_count]) |balance| {
+        try encoded.text(balance.asset);
+        try encoded.optionalDecimal(balance.cash_balance);
+        try encoded.optionalDecimal(balance.available_balance);
+        try encoded.optionalDecimal(balance.equity);
+        try encoded.optionalDecimal(balance.frozen_balance);
+        try encoded.optionalDecimal(balance.liability);
+        try encoded.optionalDecimal(balance.isolated_liability);
+        try encoded.optionalDecimal(balance.cross_liability);
+    }
+}
+
+fn decodeBalance(decoder: *StableDecoder) !private.ExchangeBalanceSnapshot {
+    var result: private.ExchangeBalanceSnapshot = .{
+        .scope = std.enums.fromInt(private.SnapshotScope, try decoder.take(u8)) orelse return error.InvalidStableEnum,
+        .venue_update_time_utc_ns = try decoder.take(u64),
+    };
+    result.balance_count = try decoder.take(u8);
+    if (result.balance_count > result.balances.len) return error.InvalidStableBalanceCount;
+    for (result.balances[0..result.balance_count]) |*balance| balance.* = .{
+        .asset = try decoder.text(private.AssetCode),
+        .cash_balance = try decoder.optionalDecimal(),
+        .available_balance = try decoder.optionalDecimal(),
+        .equity = try decoder.optionalDecimal(),
+        .frozen_balance = try decoder.optionalDecimal(),
+        .liability = try decoder.optionalDecimal(),
+        .isolated_liability = try decoder.optionalDecimal(),
+        .cross_liability = try decoder.optionalDecimal(),
+    };
+    return result;
+}
 
 fn validateOrderState(state: OrderState, filled: i64, quantity: i64) !void {
     const valid = switch (state) {
@@ -379,13 +671,24 @@ test "OKX spot fill projects native fee dual layers and replays deterministicall
     final.scope = .ws_reported;
     final.balances[0].cash_balance = try private.Decimal.parse("1.00009992");
     final.balances[1].cash_balance = try private.Decimal.parse("995");
-    try first.apply(.{ .envelope = envelope(5), .payload = .{ .exchange_balance_snapshot = final } });
+    const final_event: private.CanonicalEvent = .{ .envelope = envelope(5), .payload = .{ .exchange_balance_snapshot = final } };
+    try first.apply(final_event);
     try std.testing.expect(first.economicReconciled());
 
-    var replayed: Projection = .{};
-    for (events) |event| try replayed.apply(event);
-    try replayed.apply(.{ .envelope = envelope(5), .payload = .{ .exchange_balance_snapshot = final } });
+    var stable = journal.Journal.init();
+    for (events, 1..) |event, sequence| try appendStable(&stable, sequence, event);
+    try appendStable(&stable, events.len + 1, final_event);
+    try stable.seal();
+    const replayed = try replayStable(stable.bytes());
     try std.testing.expectEqualSlices(u8, &first.digest(), &replayed.digest());
+    try std.testing.expectError(
+        error.TruncatedStableReplay,
+        replayStable(stable.bytes()[0 .. stable.bytes().len - 1]),
+    );
+    var reader = try journal.Reader.init(stable.bytes());
+    var first_record = (try reader.next()).record;
+    first_record.schema_version = 2;
+    try std.testing.expectError(error.UnknownStableSchema, decodeStable(first_record));
 }
 
 test "spot partial sell releases average cost and records venue USDT fee" {
