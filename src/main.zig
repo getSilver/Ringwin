@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const journal = @import("journal.zig");
 const host_gateway = @import("strategy_host_gateway.zig");
+const venue_adapter = @import("venue_adapter.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const schema_version: u16 = 1;
@@ -993,8 +994,76 @@ const TradingShard = struct {
     }
 };
 
-const SimVenue = struct {
-    fn execute(command: OrderCommand) ![5]InputEvent {
+const AdapterRequest = union(enum) {
+    order_command: OrderCommand,
+};
+
+const AdapterOutputBatch = struct {
+    dispatch_result: InputEvent,
+    ingress: [5]InputEvent,
+};
+
+const VenueAdapter = venue_adapter.Interface(AdapterRequest, AdapterOutputBatch);
+
+const SimulatedVenue = struct {
+    const State = enum { idle, running, stopped };
+
+    state: State = .idle,
+    pending: ?AdapterOutputBatch = null,
+
+    fn adapter(self: *SimulatedVenue) VenueAdapter {
+        return .{ .ptr = self, .vtable = &.{
+            .start = startOpaque,
+            .try_send = trySendOpaque,
+            .try_drain = tryDrainOpaque,
+            .stop = stopOpaque,
+        } };
+    }
+
+    fn startOpaque(ptr: *anyopaque, config: venue_adapter.Config) venue_adapter.StartError!void {
+        const self: *SimulatedVenue = @ptrCast(@alignCast(ptr));
+        if (self.state == .running) return error.AlreadyStarted;
+        if (self.state == .stopped) return error.Stopped;
+        if (config.environment != .simulation or
+            config.request_capacity != 1 or config.output_capacity != 1)
+            return error.InvalidConfig;
+        self.state = .running;
+    }
+
+    fn trySendOpaque(
+        ptr: *anyopaque,
+        request: AdapterRequest,
+    ) venue_adapter.SendError!venue_adapter.SendResult {
+        const self: *SimulatedVenue = @ptrCast(@alignCast(ptr));
+        if (self.state == .idle) return error.NotStarted;
+        if (self.state == .stopped) return .stopped;
+        if (self.pending != null) return .backpressure;
+        self.pending = switch (request) {
+            .order_command => |command| makeOutput(command) catch return error.InvalidRequest,
+        };
+        return .accepted;
+    }
+
+    fn tryDrainOpaque(ptr: *anyopaque) venue_adapter.DrainError!?AdapterOutputBatch {
+        const self: *SimulatedVenue = @ptrCast(@alignCast(ptr));
+        if (self.state == .idle) return error.NotStarted;
+        const pending = self.pending orelse return null;
+        self.pending = null;
+        return pending;
+    }
+
+    fn stopOpaque(
+        ptr: *anyopaque,
+        deadline: venue_adapter.DrainDeadline,
+    ) venue_adapter.StopError!void {
+        const self: *SimulatedVenue = @ptrCast(@alignCast(ptr));
+        _ = deadline;
+        if (self.state == .idle) return error.NotStarted;
+        if (self.pending != null) return error.OutputPending;
+        self.state = .stopped;
+    }
+
+    fn makeOutput(command: OrderCommand) !AdapterOutputBatch {
         if (command.command_id != 1 or command.order_id != 1 or
             command.quantity != happy_order_quantity or
             command.limit_price_micros != 50_100_000_000 or
@@ -1003,34 +1072,40 @@ const SimVenue = struct {
             return error.InvalidOrderCommand;
 
         return .{
-            atGroup(16, .{ .identity = 1, .payload = .{ .execution_report = .{
-                .report_id = 1,
-                .status = .accepted,
-                .cumulative_qty = 0,
-                .remaining_qty = 100,
-            } } }),
-            atGroup(17, .{ .identity = 1, .payload = .{ .fill = .{
-                .fill_id = 1,
-                .quantity = 40,
-                .price_micros = 49_900_000_000,
-            } } }),
-            atGroup(17, .{ .identity = 2, .payload = .{ .execution_report = .{
-                .report_id = 2,
-                .status = .partially_filled,
-                .cumulative_qty = 40,
-                .remaining_qty = 60,
-            } } }),
-            atGroup(18, .{ .identity = 2, .payload = .{ .fill = .{
-                .fill_id = 2,
-                .quantity = 60,
-                .price_micros = 50_100_000_000,
-            } } }),
-            atGroup(18, .{ .identity = 3, .payload = .{ .execution_report = .{
-                .report_id = 3,
-                .status = .filled,
-                .cumulative_qty = 100,
-                .remaining_qty = 0,
-            } } }),
+            .dispatch_result = atGroup(15, .{
+                .identity = 1,
+                .payload = .{ .order_dispatch_result = .submitted },
+            }),
+            .ingress = .{
+                atGroup(16, .{ .identity = 1, .payload = .{ .execution_report = .{
+                    .report_id = 1,
+                    .status = .accepted,
+                    .cumulative_qty = 0,
+                    .remaining_qty = 100,
+                } } }),
+                atGroup(17, .{ .identity = 1, .payload = .{ .fill = .{
+                    .fill_id = 1,
+                    .quantity = 40,
+                    .price_micros = 49_900_000_000,
+                } } }),
+                atGroup(17, .{ .identity = 2, .payload = .{ .execution_report = .{
+                    .report_id = 2,
+                    .status = .partially_filled,
+                    .cumulative_qty = 40,
+                    .remaining_qty = 60,
+                } } }),
+                atGroup(18, .{ .identity = 2, .payload = .{ .fill = .{
+                    .fill_id = 2,
+                    .quantity = 60,
+                    .price_micros = 50_100_000_000,
+                } } }),
+                atGroup(18, .{ .identity = 3, .payload = .{ .execution_report = .{
+                    .report_id = 3,
+                    .status = .filled,
+                    .cumulative_qty = 100,
+                    .remaining_qty = 0,
+                } } }),
+            },
         };
     }
 };
@@ -1207,6 +1282,13 @@ fn finishScenario(run: *LiveRun) !LiveRun {
 
 fn runHappyPath() !LiveRun {
     var run = try startScenario();
+    var simulated: SimulatedVenue = .{};
+    const adapter = simulated.adapter();
+    try adapter.start(.{
+        .environment = .simulation,
+        .request_capacity = 1,
+        .output_capacity = 1,
+    });
     try applyHealthyPrelude(&run);
     const command = (try applyLive(
         &run.shard,
@@ -1215,17 +1297,17 @@ fn runHappyPath() !LiveRun {
             .timer = .{ .quantity = happy_order_quantity },
         } }),
     )) orelse return error.MissingOrderCommand;
-    if (try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{
-        .identity = 1,
-        .payload = .{ .order_dispatch_result = .submitted },
-    })) != null)
+    if (try adapter.trySend(.{ .order_command = command }) != .accepted)
+        return error.AdapterDidNotAccept;
+    const output = (try adapter.tryDrain()) orelse return error.MissingAdapterOutput;
+    if (try applyLive(&run.shard, &run.decision_journal, output.dispatch_result) != null)
         return error.UnexpectedCommand;
-    const venue_events = try SimVenue.execute(command);
-    for (venue_events, 0..) |event, index| {
+    for (output.ingress, 0..) |event, index| {
         if (try applyLive(&run.shard, &run.decision_journal, event) != null)
             return error.UnexpectedCommand;
         if (index == 1) try assertPartialState(run.shard);
     }
+    try adapter.stop(.{ .monotonic_ns = fixture_monotonic_base + 20_000_000 });
     if (try applyLive(&run.shard, &run.decision_journal, atGroup(19, .{
         .identity = 2,
         .payload = .{ .mark_price = 50_200_000_000 },
@@ -2019,19 +2101,24 @@ fn duplicateAtGroup(group: u64, original: InputEvent) InputEvent {
 
 fn runDuplicateReport() !LiveRun {
     var run = try startScenario();
+    var simulated: SimulatedVenue = .{};
+    const adapter = simulated.adapter();
+    try adapter.start(.{
+        .environment = .simulation,
+        .request_capacity = 1,
+        .output_capacity = 1,
+    });
     try applyHealthyPrelude(&run);
     const command = (try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{
         .identity = 1,
         .payload = .{ .timer = .{ .quantity = happy_order_quantity } },
     }))) orelse return error.MissingOrderCommand;
-    if (try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{
-        .identity = 1,
-        .payload = .{ .order_dispatch_result = .submitted },
-    })) != null)
+    if (try adapter.trySend(.{ .order_command = command }) != .accepted)
+        return error.AdapterDidNotAccept;
+    const output = (try adapter.tryDrain()) orelse return error.MissingAdapterOutput;
+    if (try applyLive(&run.shard, &run.decision_journal, output.dispatch_result) != null)
         return error.UnexpectedCommand;
-
-    const venue_events = try SimVenue.execute(command);
-    for (venue_events[0..3]) |event| {
+    for (output.ingress[0..3]) |event| {
         if (try applyLive(&run.shard, &run.decision_journal, event) != null)
             return error.UnexpectedCommand;
     }
@@ -2039,13 +2126,13 @@ fn runDuplicateReport() !LiveRun {
     if (try applyLive(
         &run.shard,
         &run.decision_journal,
-        duplicateAtGroup(18, venue_events[1]),
+        duplicateAtGroup(18, output.ingress[1]),
     ) != null)
         return error.UnexpectedCommand;
     if (try applyLive(
         &run.shard,
         &run.decision_journal,
-        duplicateAtGroup(18, venue_events[2]),
+        duplicateAtGroup(18, output.ingress[2]),
     ) != null)
         return error.UnexpectedCommand;
     try assertPartialState(run.shard);
@@ -2055,13 +2142,13 @@ fn runDuplicateReport() !LiveRun {
     if (try applyLive(
         &run.shard,
         &run.decision_journal,
-        atGroup(19, venue_events[3]),
+        atGroup(19, output.ingress[3]),
     ) != null)
         return error.UnexpectedCommand;
     if (try applyLive(
         &run.shard,
         &run.decision_journal,
-        atGroup(19, venue_events[4]),
+        atGroup(19, output.ingress[4]),
     ) != null)
         return error.UnexpectedCommand;
     if (try applyLive(&run.shard, &run.decision_journal, atGroup(20, .{
@@ -2069,6 +2156,7 @@ fn runDuplicateReport() !LiveRun {
         .payload = .{ .mark_price = 50_200_000_000 },
     })) != null)
         return error.UnexpectedCommand;
+    try adapter.stop(.{ .monotonic_ns = fixture_monotonic_base + 20_000_000 });
     return finishScenario(&run);
 }
 
@@ -2540,6 +2628,51 @@ pub fn main(init: std.process.Init) !void {
 
 test "all authoritative acceptance traces close and replay" {
     _ = try selfCheck();
+}
+
+test "venue adapter seam is bounded and drain-safe" {
+    var simulated: SimulatedVenue = .{};
+    const adapter = simulated.adapter();
+    try std.testing.expectError(error.NotStarted, adapter.tryDrain());
+    try adapter.start(.{
+        .environment = .simulation,
+        .request_capacity = 1,
+        .output_capacity = 1,
+    });
+    try std.testing.expectError(error.AlreadyStarted, adapter.start(.{
+        .environment = .simulation,
+        .request_capacity = 1,
+        .output_capacity = 1,
+    }));
+
+    const command: OrderCommand = .{
+        .command_id = 1,
+        .order_id = 1,
+        .quantity = happy_order_quantity,
+        .limit_price_micros = order_limit_price,
+        .reservation_micros = 11_397_750,
+        .client_id = client_order_id,
+    };
+    try std.testing.expectEqual(
+        venue_adapter.SendResult.accepted,
+        try adapter.trySend(.{ .order_command = command }),
+    );
+    try std.testing.expectEqual(
+        venue_adapter.SendResult.backpressure,
+        try adapter.trySend(.{ .order_command = command }),
+    );
+    try std.testing.expectError(
+        error.OutputPending,
+        adapter.stop(.{ .monotonic_ns = fixture_monotonic_base }),
+    );
+
+    try std.testing.expect((try adapter.tryDrain()) != null);
+    try std.testing.expect((try adapter.tryDrain()) == null);
+    try adapter.stop(.{ .monotonic_ns = fixture_monotonic_base });
+    try std.testing.expectEqual(
+        venue_adapter.SendResult.stopped,
+        try adapter.trySend(.{ .order_command = command }),
+    );
 }
 
 test "four shards replay and isolate overload" {

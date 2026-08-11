@@ -536,6 +536,10 @@ _Avoid_: Not Found response, missing open order, retry permission without eviden
 提供交易、账户及市场事实的中心化交易所。
 _Avoid_: Exchange name, market
 
+**VenueAdapter**:
+在 Execution Gateway 与某个 Venue 或 SimulatedVenue 之间接收规范 OrderCommand、输出 OrderDispatchResult 与外部事实的执行角色；它隐藏认证、传输、重连、对账和 Venue 字段，调用方不能绕过它直接发送订单。
+_Avoid_: Exchange client, transport wrapper, Venue plugin
+
 **Asset**:
 可以持有、结算或计价的经济资产。
 _Avoid_: Currency, coin

@@ -29,6 +29,7 @@ Status: open
 - [选择 Zig 0.17 OKX 传输基线](issues/02-choose-zig-transport-baseline.md) — 固定 libcurl 8.21.0 统一承载 HTTPS/WSS，单 owner 驱动取消与恢复边界。
 - [冻结 Venue Adapter interface 与验收合同](issues/03-freeze-adapter-interface-and-acceptance.md) — 使用四操作、双向有界异步 seam 隔离 TradingShard 与 Venue I/O，并以 RawIngress 优先、分离就绪、失败关闭及五层轨迹验收。
 - [资格化 Demo 账户与实盘式安全栅栏](issues/04-qualify-demo-account-and-safety.md) — Demo/global 专用 Key、Futures/net/isolated 配置与零遗留风险已通过只读资格；固定双 Instrument 白名单、25 USDT 单笔及账户总名义上限、显式 `--demo-live`、发送前对账和失败关闭清理合同。
+- [建立 Venue Adapter seam 并保留 SimVenue](issues/05-establish-venue-adapter-seam.md) — 四操作运行时 seam 已落地，SimulatedVenue 通过容量 1 的无分配有界输出保留原权威轨迹、digest、重放与 Python StrategyHost 验收；未引入插件框架。
 
 ## Not yet specified
 

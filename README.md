@@ -30,7 +30,7 @@ zig version
 从仓库根目录执行：
 
 ```powershell
-zig fmt --check src\main.zig src\journal.zig
+zig fmt --check src\main.zig src\journal.zig src\venue_adapter.zig
 zig test src\main.zig -O ReleaseSafe
 zig run src\main.zig -O ReleaseSafe
 ```
@@ -303,5 +303,7 @@ SystemOwner 已于 2026-07-31 确认
 能力波次完成。按照已确认的首批 Venue 顺序，下一能力波次选择
 **OKX Venue Adapter 最小纵向接入**。
 
-该下一波次尚未创建或认领实施地图；Binance、Gate.io、Bitget Adapter 仍按既定顺序
-后置。Linux 五核生产性能资格继续作为独立波次，不与首个 OKX 业务接入混合。
+该能力波次已建立[实施地图](.scratch/okx-venue-adapter/map.md)，并完成 OKX v5/传输研究、
+Demo 账户安全资格和首个四操作 VenueAdapter seam；现有 SimulatedVenue 已只通过该 seam
+接收 OrderCommand、返回 dispatch 与 ingress。OKX 行情、私有对账和交易实现仍按地图逐票推进。
+Binance、Gate.io、Bitget Adapter 继续后置；Linux 五核生产性能资格仍是独立波次。
