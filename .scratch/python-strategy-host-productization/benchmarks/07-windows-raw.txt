@@ -1,0 +1,45 @@
+Date: 2026-07-31
+OS: Microsoft Windows 10 Enterprise LTSC 10.0.17763 x64
+CPU: Intel Core i5-4200U, 2 physical cores / 4 logical processors
+Qualification: Windows development regression only; not Linux product qualification
+Decision sample: one strategy callback for one input TimerEvent
+Latency sample: input batch published_monotonic_ns to Host output observed; every callback
+in the completed batch receives that conservative batch-completion latency
+
+Command:
+.\.scratch\strategy_host_capacity.exe .\.scratch\strategy_host_ipc.dll python python\strategy_host.py
+
+python_strategy_host_capacity: zig=0.17.0-dev.315+5b647b792 mode=ReleaseSafe os=windows hosts=4 strategies_per_host=25 samples_per_distribution>=1000000 latency=monotonic network=excluded
+scenario=normal state=running batches=1400
+scenario=normal samples=1400000 p50_us=2200 p99_us=13100 p99_9_us=37700 max_us=62485 throughput_decisions_s=230691 healthy_p99_us=13100 healthy_p99_9_us=37700 queue_hwm=1 input_full=0 rejected=0 stale=0 recovery_intents=0
+scenario=gc_exception state=running batches=1400
+scenario=gc_exception samples=1386500 p50_us=2150 p99_us=4750 p99_9_us=7400 max_us=8037 throughput_decisions_s=369414 healthy_p99_us=4700 healthy_p99_9_us=7400 queue_hwm=1 input_full=0 rejected=0 stale=0 recovery_intents=0
+scenario=slow state=running batches=1400
+scenario=slow samples=1400000 p50_us=2200 p99_us=16500 p99_9_us=33750 max_us=82012 throughput_decisions_s=75833 healthy_p99_us=6500 healthy_p99_9_us=23650 queue_hwm=1 input_full=0 rejected=0 stale=0 recovery_intents=0
+scenario=crash state=running batches=1400
+scenario=crash samples=1050000 p50_us=1250 p99_us=3100 p99_9_us=4850 max_us=5661 throughput_decisions_s=395566 healthy_p99_us=3100 healthy_p99_9_us=4850 queue_hwm=1 input_full=0 rejected=0 stale=0 recovery_intents=0
+scenario=recovery state=running batches=1400
+scenario=recovery samples=1400000 p50_us=2200 p99_us=5500 p99_9_us=7150 max_us=9845 throughput_decisions_s=277670 healthy_p99_us=5050 healthy_p99_9_us=6750 queue_hwm=1 input_full=0 rejected=0 stale=0 recovery_intents=0
+
+Concurrent interference command pair:
+.\.scratch\strategy_host_capacity.exe .\.scratch\strategy_host_ipc.dll python python\strategy_host.py slow 1400
+.\.scratch\four-shard-benchmark.exe --benchmark-four-shard
+
+Concurrent StrategyHost result:
+scenario=slow samples=1400000 p50_us=2400 p99_us=19500 p99_9_us=29850 max_us=85599 throughput_decisions_s=71328 healthy_p99_us=13050 healthy_p99_9_us=27300 queue_hwm=1 input_full=0 rejected=0 stale=0 recovery_intents=0
+
+Four-shard baseline:
+four_shard_merged: samples=4000000 target_throughput_eps=2000000 p50_ns=4000 p99_ns=2034500 p999_ns=3812000 max_ns=23687000 aggregate_throughput_eps=1998688 producer_late_max_ns=22444400 p99_change_bp=20335000 throughput_change_bp=-752 queue_full_observations=5
+
+Four-shard while slow-Host scenario ran:
+four_shard_merged: samples=4000000 target_throughput_eps=2000000 p50_ns=1738000 p99_ns=8230500 p999_ns=13513000 max_ns=25397000 aggregate_throughput_eps=1957742 producer_late_max_ns=37152400 p99_change_bp=82295000 throughput_change_bp=8978 queue_full_observations=36
+
+Interpretation:
+- All five StrategyHost distributions pass P99 <= 50 ms and P99.9 <= 100 ms.
+- input_full, rejected, stale and recovery_intents are zero in every distribution.
+- A perturbed Host does not push the other three Hosts outside the Python contract.
+- The 2C/4T Windows node already fails the four-shard core contract before Python load and
+  degrades further under concurrent load. It cannot qualify the required deployment shape
+  of four dedicated TradingShard physical cores plus peripheral CPU capacity.
+- x86_64-linux-gnu bridge and capacity executables cross-build successfully. No Linux runtime
+  was available, so Linux product latency and core-interference qualification remain unpassed.

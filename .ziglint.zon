@@ -1,0 +1,32 @@
+.{
+    .paths = .{
+        "src",
+    },
+    .rules = .{
+        // Initial gate: keep correctness and public-boundary checks enabled.
+        // Naming and cosmetic rules stay off until the existing code has a reviewed baseline.
+        .Z001 = .{ .enabled = false },
+        .Z004 = .{ .enabled = false },
+        .Z005 = .{ .enabled = false },
+        .Z006 = .{ .enabled = false },
+        .Z009 = .{ .enabled = false },
+        .Z010 = .{ .enabled = false },
+        .Z014 = .{ .enabled = false },
+        .Z016 = .{ .enabled = false },
+        .Z017 = .{ .enabled = false },
+        .Z018 = .{ .enabled = false },
+        .Z019 = .{ .enabled = false },
+        .Z020 = .{ .enabled = false },
+        .Z021 = .{ .enabled = false },
+        .Z022 = .{ .enabled = false },
+        .Z023 = .{ .enabled = false },
+        .Z024 = .{ .enabled = false },
+        .Z025 = .{ .enabled = false },
+        .Z027 = .{ .enabled = false },
+        .Z028 = .{ .enabled = false },
+        .Z029 = .{ .enabled = false },
+        .Z031 = .{ .enabled = false },
+        .Z032 = .{ .enabled = false },
+        .Z033 = .{ .enabled = false },
+    },
+}

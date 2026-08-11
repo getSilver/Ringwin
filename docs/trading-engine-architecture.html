@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ringwin · Deterministic Trading Engine</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080b12;
+      --panel: #101622;
+      --line: #293348;
+      --text: #eef4ff;
+      --muted: #8491a8;
+      --data: #20d5d2;
+      --strategy: #a98bff;
+      --risk: #ffbd5c;
+      --order: #59e391;
+      --fact: #ff769a;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      overflow-x: hidden;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 50% -20%, #17243c 0, transparent 38%),
+        radial-gradient(circle at 95% 40%, #122727 0, transparent 24%),
+        var(--bg);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(1500px, 100%);
+      margin: 0 auto;
+      padding: 42px 24px 30px;
+    }
+
+    header {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+
+    .eyebrow {
+      margin: 0 0 9px;
+      color: var(--data);
+      font: 700 11px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      max-width: 840px;
+      font-size: clamp(28px, 4vw, 52px);
+      font-weight: 590;
+      letter-spacing: -.045em;
+    }
+
+    .subtitle {
+      margin: 12px 0 0;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    button {
+      min-width: 110px;
+      padding: 10px 14px;
+      color: #dce7fa;
+      border: 1px solid #33405a;
+      border-radius: 10px;
+      background: #111827;
+      font: 650 12px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+      cursor: pointer;
+    }
+
+    button:hover { border-color: var(--data); }
+    button:focus-visible { outline: 2px solid var(--data); outline-offset: 3px; }
+
+    .canvas {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid #202a3c;
+      border-radius: 22px;
+      background:
+        linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px),
+        linear-gradient(145deg, rgba(15,22,35,.97), rgba(7,10,17,.98));
+      background-size: 42px 42px, 42px 42px, auto;
+      box-shadow: 0 34px 100px rgba(0,0,0,.42), inset 0 1px rgba(255,255,255,.03);
+    }
+
+    .canvas::before {
+      position: absolute;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      content: "";
+      background: radial-gradient(circle at 50% 45%, rgba(32,213,210,.055), transparent 35%);
+    }
+
+    svg {
+      position: relative;
+      z-index: 1;
+      display: block;
+      width: 100%;
+      height: auto;
+      min-height: 620px;
+    }
+
+    .zone {
+      fill: rgba(255,255,255,.012);
+      stroke: #263147;
+      stroke-width: 1;
+      stroke-dasharray: 4 7;
+    }
+
+    .zone-title {
+      fill: #65728a;
+      font: 700 12px ui-monospace, SFMono-Regular, Consolas, monospace;
+      letter-spacing: .13em;
+      text-transform: uppercase;
+    }
+
+    .node .surface {
+      fill: url(#node-surface);
+      stroke: #344159;
+      stroke-width: 1.2;
+      transition: stroke .18s ease, filter .18s ease, transform .18s ease;
+    }
+
+    .node.core .surface {
+      fill: url(#core-surface);
+      stroke: #35706f;
+    }
+
+    .node:hover .surface {
+      stroke: var(--data);
+      filter: url(#soft-glow);
+      transform: translateY(-2px);
+    }
+
+    .node text { pointer-events: none; }
+
+    .node-title {
+      fill: #f1f5ff;
+      font: 650 15px ui-sans-serif, system-ui, sans-serif;
+    }
+
+    .node-sub {
+      fill: #8290a8;
+      font: 500 11px ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+
+    .chip { fill: rgba(255,255,255,.045); stroke: rgba(255,255,255,.08); }
+    .chip-text {
+      fill: #9eabc0;
+      font: 600 9px ui-monospace, SFMono-Regular, Consolas, monospace;
+      letter-spacing: .04em;
+    }
+
+    .shard-id {
+      fill: var(--data);
+      font: 750 11px ui-monospace, SFMono-Regular, Consolas, monospace;
+      letter-spacing: .08em;
+    }
+
+    .flow-line {
+      fill: none;
+      stroke: var(--flow-color);
+      stroke-width: 1.35;
+      stroke-opacity: .29;
+      marker-end: url(#arrow);
+    }
+
+    .flow-line[data-kind="data"] { --flow-color: var(--data); }
+    .flow-line[data-kind="strategy"] { --flow-color: var(--strategy); }
+    .flow-line[data-kind="risk"] { --flow-color: var(--risk); }
+    .flow-line[data-kind="order"] { --flow-color: var(--order); }
+    .flow-line[data-kind="fact"] { --flow-color: var(--fact); }
+    .flow-line[data-bus] { marker-end: none; }
+
+    .packet {
+      filter: url(#packet-glow);
+      pointer-events: none;
+    }
+
+    .packet.data { fill: var(--data); }
+    .packet.strategy { fill: var(--strategy); }
+    .packet.risk { fill: var(--risk); }
+    .packet.order { fill: var(--order); }
+    .packet.fact { fill: var(--fact); }
+
+    .status-dot {
+      fill: var(--order);
+      filter: url(#packet-glow);
+      animation: breathe 1.8s ease-in-out infinite;
+    }
+
+    @keyframes breathe {
+      50% { opacity: .35; }
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 20px;
+      padding: 18px 16px 20px;
+      color: var(--muted);
+      border-top: 1px solid #1e2738;
+      font: 600 11px ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+
+    .legend span { display: inline-flex; align-items: center; gap: 8px; }
+    .legend i { width: 7px; height: 7px; border-radius: 50%; box-shadow: 0 0 9px currentColor; }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 16px 4px 0;
+      color: #66738a;
+      font-size: 11px;
+    }
+
+    @media (max-width: 760px) {
+      main { padding: 28px 12px 20px; }
+      header { align-items: flex-start; flex-direction: column; }
+      svg { min-width: 980px; min-height: 0; }
+      .canvas { overflow-x: auto; }
+      .legend { justify-content: flex-start; }
+      footer { flex-direction: column; gap: 5px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .status-dot { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <p class="eyebrow">Ringwin system topology · prototype</p>
+        <h1>Deterministic multi-strategy trading engine</h1>
+        <p class="subtitle">首个纵向闭环启用 1 个分片 · 同一实现扩到 4 个专用核心 · 可重放经济事实</p>
+      </div>
+      <button id="motion-toggle" type="button" aria-pressed="false">暂停流转</button>
+    </header>
+
+    <section class="canvas" aria-label="量化交易引擎动态架构图">
+      <svg id="architecture" viewBox="0 0 1440 900" role="img" aria-labelledby="diagram-title diagram-desc">
+        <title id="diagram-title">Ringwin 确定性多策略交易引擎</title>
+        <desc id="diagram-desc">行情和 Python 策略事件进入四个单写者交易分片，订单命令经执行网关发送至四家交易所，执行事实返回分片并写入日志。</desc>
+
+        <defs>
+          <linearGradient id="node-surface" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#171f2e"/>
+            <stop offset="1" stop-color="#0c111b"/>
+          </linearGradient>
+          <linearGradient id="core-surface" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#11282d"/>
+            <stop offset="1" stop-color="#0d151f"/>
+          </linearGradient>
+          <filter id="soft-glow" x="-30%" y="-30%" width="160%" height="160%">
+            <feGaussianBlur stdDeviation="5" result="blur"/>
+            <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+          <filter id="packet-glow" x="-300%" y="-300%" width="700%" height="700%">
+            <feGaussianBlur stdDeviation="3" result="blur"/>
+            <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+          <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="context-stroke"/>
+          </marker>
+        </defs>
+
+        <!-- Zones -->
+        <rect class="zone" x="35" y="42" width="1370" height="168" rx="18"/>
+        <text class="zone-title" x="58" y="70">SHARED ASYNC PARALLEL PERIPHERY · NO PER-SHARD ADAPTER COPIES</text>
+        <rect class="zone" x="35" y="250" width="1370" height="348" rx="18"/>
+        <text class="zone-title" x="58" y="278">SINGLE-WRITER TRADING CORE · 1 FIRST VERTICAL SLICE · 4-CORE CAPACITY TARGET</text>
+        <rect class="zone" x="35" y="640" width="1370" height="205" rx="18"/>
+        <text class="zone-title" x="58" y="668">SHARED EXECUTION &amp; DURABILITY PERIPHERY</text>
+
+        <!-- Flow paths: rendered before nodes -->
+        <g aria-hidden="true">
+          <path id="p-md-normalize" class="flow-line" data-kind="data" data-dur="3.1" d="M 245 130 C 285 130, 300 130, 335 130"/>
+          <path id="p-normalize-s1" class="flow-line" data-kind="data" data-dur="4.2" d="M 525 130 C 525 235, 250 225, 250 315"/>
+          <path id="p-normalize-s2" class="flow-line" data-kind="data" data-dur="3.8" d="M 525 130 C 525 230, 565 230, 565 315"/>
+          <path id="p-normalize-s3" class="flow-line" data-kind="data" data-dur="3.8" d="M 525 130 C 525 230, 875 230, 875 315"/>
+          <path id="p-normalize-s4" class="flow-line" data-kind="data" data-dur="4.2" d="M 525 130 C 525 235, 1190 225, 1190 315"/>
+
+          <path id="p-python-s2" class="flow-line" data-kind="strategy" data-dur="4.1" d="M 975 130 C 900 205, 660 230, 600 315"/>
+          <path id="p-python-s3" class="flow-line" data-kind="strategy" data-dur="3.9" d="M 975 130 C 990 220, 930 245, 910 315"/>
+
+          <path id="p-risk-bus" class="flow-line" data-kind="risk" data-bus data-dur="5.2" d="M 112 491 L 112 575 L 1235 575"/>
+          <path id="p-risk-s1" class="flow-line" data-kind="risk" data-dur="2.4" d="M 250 575 L 250 535"/>
+          <path id="p-risk-s2" class="flow-line" data-kind="risk" data-dur="2.4" d="M 565 575 L 565 535"/>
+          <path id="p-risk-s3" class="flow-line" data-kind="risk" data-dur="2.4" d="M 875 575 L 875 535"/>
+          <path id="p-risk-s4" class="flow-line" data-kind="risk" data-dur="2.4" d="M 1190 575 L 1190 535"/>
+
+          <path id="p-s1-gateway" class="flow-line" data-kind="order" data-dur="4.1" d="M 250 535 C 250 650, 555 615, 610 705"/>
+          <path id="p-s2-gateway" class="flow-line" data-kind="order" data-dur="3.7" d="M 565 535 C 565 620, 650 630, 675 705"/>
+          <path id="p-s3-gateway" class="flow-line" data-kind="order" data-dur="3.7" d="M 875 535 C 875 620, 790 630, 765 705"/>
+          <path id="p-s4-gateway" class="flow-line" data-kind="order" data-dur="4.1" d="M 1190 535 C 1190 650, 885 615, 830 705"/>
+
+          <path id="p-gateway-venues" class="flow-line" data-kind="order" data-dur="3.2" d="M 845 750 C 910 750, 940 750, 990 750"/>
+          <path id="p-venues-gateway" class="flow-line" data-kind="fact" data-dur="3.5" d="M 990 790 C 930 815, 885 805, 835 785"/>
+
+          <path id="p-gateway-facts" class="flow-line" data-kind="fact" data-dur="5.0" d="M 690 705 C 690 625, 565 615, 565 535"/>
+          <path id="p-journal" class="flow-line" data-kind="fact" data-dur="4.4" d="M 250 535 C 250 620, 200 635, 200 690"/>
+        </g>
+
+        <!-- Async inputs -->
+        <g class="node" tabindex="0" role="group" aria-label="行情适配器：OKX、Binance、Gate.io、Bitget">
+          <title>共享异步行情接入，不拥有权威交易状态。</title>
+          <rect class="surface" x="75" y="88" width="170" height="84" rx="13"/>
+          <circle cx="97" cy="111" r="4" fill="#20d5d2"/>
+          <text class="node-title" x="110" y="116">Shared Market Data</text>
+          <text class="node-sub" x="94" y="140">OKX · Binance</text>
+          <text class="node-sub" x="94" y="157">Gate.io · Bitget</text>
+        </g>
+
+        <g class="node core" tabindex="0" role="group" aria-label="行情规范化、缺口检测和确定性路由">
+          <title>检查 Venue 序号缺口，规范化事件并按 DecisionDomain 路由。</title>
+          <rect class="surface" x="335" y="88" width="190" height="84" rx="13"/>
+          <text class="node-title" x="355" y="116">Shared Normalize &amp; Route</text>
+          <text class="node-sub" x="355" y="140">gap detection · health</text>
+          <text class="node-sub" x="355" y="157">bounded fan-out</text>
+        </g>
+
+        <g class="node" tabindex="0" role="group" aria-label="Python 中低频策略 Host">
+          <title>独立进程承载中低频策略；落后时暂停交易并通过 checkpoint 和重放恢复。</title>
+          <rect class="surface" x="865" y="88" width="220" height="84" rx="13"/>
+          <text class="node-title" x="885" y="116">Python Strategy Hosts</text>
+          <text class="node-sub" x="885" y="140">~25 strategies / host</text>
+          <text class="node-sub" x="885" y="157">checkpoint · replay</text>
+        </g>
+
+        <g class="node" tabindex="0" role="group" aria-label="全局风险额度租约">
+          <title>只分配额度租约；不进入每个订单的同步热路径。</title>
+          <rect class="surface" x="55" y="405" width="115" height="86" rx="13"/>
+          <text class="node-title" x="74" y="433">Global</text>
+          <text class="node-title" x="74" y="451">Risk Lease</text>
+          <text class="node-sub" x="74" y="473">budget only</text>
+        </g>
+
+        <!-- Four shards -->
+        <g class="node core" tabindex="0" role="group" aria-label="TradingShard 1">
+          <title>一个 DecisionDomain 的唯一写入者，固定运行于专用 CPU 核心。</title>
+          <rect class="surface" x="170" y="315" width="250" height="220" rx="16"/>
+          <text class="shard-id" x="192" y="344">SHARD 01 · FIRST SLICE</text>
+          <text class="node-title" x="192" y="371">DecisionDomain α</text>
+          <rect class="chip" x="192" y="392" width="96" height="25" rx="7"/><text class="chip-text" x="204" y="408">LOCAL L2 VIEW</text>
+          <rect class="chip" x="298" y="392" width="99" height="25" rx="7"/><text class="chip-text" x="310" y="408">NATIVE STRATEGY</text>
+          <rect class="chip" x="192" y="427" width="96" height="25" rx="7"/><text class="chip-text" x="204" y="443">PORTFOLIO</text>
+          <rect class="chip" x="298" y="427" width="99" height="25" rx="7"/><text class="chip-text" x="310" y="443">LOCAL RISK</text>
+          <rect class="chip" x="192" y="462" width="205" height="25" rx="7"/><text class="chip-text" x="204" y="478">INTENT → COMMAND → ORDER</text>
+          <circle class="status-dot" cx="195" cy="510" r="4"/><text class="node-sub" x="207" y="514">single writer · replayable</text>
+        </g>
+
+        <g class="node core" tabindex="0" role="group" aria-label="TradingShard 2">
+          <title>一个 DecisionDomain 的唯一写入者，固定运行于专用 CPU 核心。</title>
+          <rect class="surface" x="485" y="315" width="250" height="220" rx="16"/>
+          <text class="shard-id" x="507" y="344">SHARD 02 · SCALE TARGET</text>
+          <text class="node-title" x="507" y="371">DecisionDomain β</text>
+          <rect class="chip" x="507" y="392" width="96" height="25" rx="7"/><text class="chip-text" x="519" y="408">LOCAL L2 VIEW</text>
+          <rect class="chip" x="613" y="392" width="99" height="25" rx="7"/><text class="chip-text" x="625" y="408">NATIVE STRATEGY</text>
+          <rect class="chip" x="507" y="427" width="96" height="25" rx="7"/><text class="chip-text" x="519" y="443">PORTFOLIO</text>
+          <rect class="chip" x="613" y="427" width="99" height="25" rx="7"/><text class="chip-text" x="625" y="443">LOCAL RISK</text>
+          <rect class="chip" x="507" y="462" width="205" height="25" rx="7"/><text class="chip-text" x="519" y="478">INTENT → COMMAND → ORDER</text>
+          <circle class="status-dot" cx="510" cy="510" r="4"/><text class="node-sub" x="522" y="514">single writer · replayable</text>
+        </g>
+
+        <g class="node core" tabindex="0" role="group" aria-label="TradingShard 3">
+          <title>一个 DecisionDomain 的唯一写入者，固定运行于专用 CPU 核心。</title>
+          <rect class="surface" x="795" y="315" width="250" height="220" rx="16"/>
+          <text class="shard-id" x="817" y="344">SHARD 03 · SCALE TARGET</text>
+          <text class="node-title" x="817" y="371">DecisionDomain γ</text>
+          <rect class="chip" x="817" y="392" width="96" height="25" rx="7"/><text class="chip-text" x="829" y="408">LOCAL L2 VIEW</text>
+          <rect class="chip" x="923" y="392" width="99" height="25" rx="7"/><text class="chip-text" x="935" y="408">NATIVE STRATEGY</text>
+          <rect class="chip" x="817" y="427" width="96" height="25" rx="7"/><text class="chip-text" x="829" y="443">PORTFOLIO</text>
+          <rect class="chip" x="923" y="427" width="99" height="25" rx="7"/><text class="chip-text" x="935" y="443">LOCAL RISK</text>
+          <rect class="chip" x="817" y="462" width="205" height="25" rx="7"/><text class="chip-text" x="829" y="478">INTENT → COMMAND → ORDER</text>
+          <circle class="status-dot" cx="820" cy="510" r="4"/><text class="node-sub" x="832" y="514">single writer · replayable</text>
+        </g>
+
+        <g class="node core" tabindex="0" role="group" aria-label="TradingShard 4">
+          <title>一个 DecisionDomain 的唯一写入者，固定运行于专用 CPU 核心。</title>
+          <rect class="surface" x="1110" y="315" width="250" height="220" rx="16"/>
+          <text class="shard-id" x="1132" y="344">SHARD 04 · SCALE TARGET</text>
+          <text class="node-title" x="1132" y="371">DecisionDomain δ</text>
+          <rect class="chip" x="1132" y="392" width="96" height="25" rx="7"/><text class="chip-text" x="1144" y="408">LOCAL L2 VIEW</text>
+          <rect class="chip" x="1238" y="392" width="99" height="25" rx="7"/><text class="chip-text" x="1250" y="408">NATIVE STRATEGY</text>
+          <rect class="chip" x="1132" y="427" width="96" height="25" rx="7"/><text class="chip-text" x="1144" y="443">PORTFOLIO</text>
+          <rect class="chip" x="1238" y="427" width="99" height="25" rx="7"/><text class="chip-text" x="1250" y="443">LOCAL RISK</text>
+          <rect class="chip" x="1132" y="462" width="205" height="25" rx="7"/><text class="chip-text" x="1144" y="478">INTENT → COMMAND → ORDER</text>
+          <circle class="status-dot" cx="1135" cy="510" r="4"/><text class="node-sub" x="1147" y="514">single writer · replayable</text>
+        </g>
+
+        <!-- Execution and persistence -->
+        <g class="node core" tabindex="0" role="group" aria-label="执行网关和安全栅栏">
+          <title>验证账户、能力版本、fencing token 和最终安全限制；负责网络发送与对账。</title>
+          <rect class="surface" x="590" y="705" width="255" height="100" rx="15"/>
+          <text class="node-title" x="615" y="738">Shared Execution Gateway</text>
+          <text class="node-sub" x="615" y="760">safety fence · reconcile</text>
+          <text class="node-sub" x="615" y="779">Unknown → evidence recovery</text>
+        </g>
+
+        <g class="node" tabindex="0" role="group" aria-label="首批四家交易所">
+          <title>首批 Venue：OKX、Binance、Gate.io、Bitget。</title>
+          <rect class="surface" x="990" y="705" width="205" height="100" rx="15"/>
+          <text class="node-title" x="1015" y="738">Venues</text>
+          <text class="node-sub" x="1015" y="760">OKX · Binance</text>
+          <text class="node-sub" x="1015" y="779">Gate.io · Bitget</text>
+        </g>
+
+        <g class="node" tabindex="0" role="group" aria-label="原始日志、决策日志和快照">
+          <title>原始接入日志和分片决策日志是恢复依据；快照只是重放加速点。</title>
+          <rect class="surface" x="82" y="690" width="235" height="125" rx="15"/>
+          <text class="node-title" x="107" y="724">Durable History</text>
+          <text class="node-sub" x="107" y="747">raw ingress journal</text>
+          <text class="node-sub" x="107" y="767">shard decision journal</text>
+          <text class="node-sub" x="107" y="787">periodic snapshots</text>
+        </g>
+      </svg>
+
+      <div class="legend" aria-label="数据流图例">
+        <span><i style="color:var(--data);background:var(--data)"></i>行情事实</span>
+        <span><i style="color:var(--strategy);background:var(--strategy)"></i>Python 策略事件</span>
+        <span><i style="color:var(--risk);background:var(--risk)"></i>风险额度</span>
+        <span><i style="color:var(--order);background:var(--order)"></i>订单命令</span>
+        <span><i style="color:var(--fact);background:var(--fact)"></i>执行事实与日志</span>
+      </div>
+    </section>
+
+    <footer>
+      <span>Hover / focus a node to inspect its responsibility.</span>
+      <span>One shard first · same implementation scales to four pinned cores.</span>
+    </footer>
+  </main>
+
+  <script>
+    const svg = document.querySelector("#architecture");
+    const lines = [...svg.querySelectorAll(".flow-line")];
+    const ns = "http://www.w3.org/2000/svg";
+    const packets = [];
+
+    for (const [lineIndex, line] of lines.entries()) {
+      for (let packetIndex = 0; packetIndex < 2; packetIndex++) {
+        const packet = document.createElementNS(ns, "circle");
+        packet.setAttribute("class", `packet ${line.dataset.kind}`);
+        packet.setAttribute("r", "3.4");
+        packet.setAttribute("aria-hidden", "true");
+        line.parentNode.append(packet);
+        packets.push({
+          element: packet,
+          path: line,
+          length: line.getTotalLength(),
+          duration: Number(line.dataset.dur) + packetIndex * .35,
+          phase: (lineIndex % 5) * .63 + packetIndex * 1.4,
+        });
+      }
+    }
+
+    function placePacket(packet, elapsedSeconds) {
+      const progress = ((elapsedSeconds + packet.phase) % packet.duration) / packet.duration;
+      const point = packet.path.getPointAtLength(progress * packet.length);
+      packet.element.setAttribute("cx", point.x);
+      packet.element.setAttribute("cy", point.y);
+    }
+
+    packets.forEach((packet) => placePacket(packet, 0));
+
+    console.assert(
+      lines.length >= 15 &&
+      packets.length === lines.length * 2 &&
+      packets.every((packet) => packet.length > 0 && packet.element.hasAttribute("cx")),
+      "Architecture flow animation did not initialize",
+    );
+
+    const toggle = document.querySelector("#motion-toggle");
+    let paused = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let pausedAt = paused ? performance.now() : 0;
+    let origin = performance.now();
+
+    function render(now) {
+      if (paused) return;
+      const elapsedSeconds = (now - origin) / 1000;
+      packets.forEach((packet) => placePacket(packet, elapsedSeconds));
+      requestAnimationFrame(render);
+    }
+
+    if (paused) {
+      toggle.setAttribute("aria-pressed", "true");
+      toggle.textContent = "启用流转";
+    } else {
+      requestAnimationFrame(render);
+    }
+
+    toggle.addEventListener("click", () => {
+      const now = performance.now();
+      if (paused) {
+        origin += now - pausedAt;
+        requestAnimationFrame(render);
+      } else {
+        pausedAt = now;
+      }
+      paused = !paused;
+      toggle.setAttribute("aria-pressed", String(paused));
+      toggle.textContent = paused ? "继续流转" : "暂停流转";
+    });
+  </script>
+</body>
+</html>

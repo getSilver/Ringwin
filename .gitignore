@@ -1,0 +1,12 @@
+.zig-cache/
+zig-out/
+zig-pkg/
+
+__pycache__/
+*.py[cod]
+
+.scratch/build/
+.scratch/*.dll
+.scratch/*.exe
+.scratch/*.lib
+.scratch/*.pdb
