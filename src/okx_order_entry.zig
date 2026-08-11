@@ -156,6 +156,15 @@ pub const Guard = struct {
     cumulative_filled_quantity: Decimal,
 };
 
+pub const GuardSource = struct {
+    ptr: *anyopaque,
+    load_fn: *const fn (*anyopaque, *const OrderCommand) ?Guard,
+
+    pub fn load(self: GuardSource, command: *const OrderCommand) ?Guard {
+        return self.load_fn(self.ptr, command);
+    }
+};
+
 pub const RejectReason = enum(u8) {
     capability_unsupported,
     invalid_spec,
@@ -324,15 +333,19 @@ pub const Scheduler = struct {
         return .queued;
     }
 
-    pub fn next(self: *Scheduler, now_ns: u64) ?Next {
+    pub fn next(self: *Scheduler, now_ns: u64, guards: GuardSource) ?Next {
         const prefer_normal = self.safe_burst >= 8 and self.normal.count != 0;
         var queue = if (!prefer_normal and self.safety.count != 0) &self.safety else &self.normal;
         if (queue.count == 0) queue = &self.safety;
         const best_index = queue.best() orelse return null;
         const first = queue.items[best_index];
-        if (first.dispatch_deadline_monotonic_ns <= now_ns) {
+        const current_guard = guards.load(&first) orelse {
             _ = queue.remove(best_index);
-            return .{ .dispatch = self.notSent(first.command_id, .deadline_expired) };
+            return .{ .dispatch = self.notSent(first.command_id, .order_entry_not_ready) };
+        };
+        if (validateCommand(&self.profile, &first, current_guard, now_ns)) |reason| {
+            _ = queue.remove(best_index);
+            return .{ .dispatch = self.notSent(first.command_id, reason) };
         }
         if (!self.rateAvailable(&first, now_ns, 1)) {
             if (bestMatching(queue, &first) == null or !self.rateAvailable(&first, now_ns, 2))
@@ -345,7 +358,8 @@ pub const Scheduler = struct {
         while (batch.count < self.profile.batch_max) {
             const index = bestMatching(queue, &first) orelse break;
             const candidate = queue.items[index];
-            if (candidate.dispatch_deadline_monotonic_ns <= now_ns) break;
+            const candidate_guard = guards.load(&candidate) orelse break;
+            if (validateCommand(&self.profile, &candidate, candidate_guard, now_ns) != null) break;
             if (!self.rateAvailable(&candidate, now_ns, batch.count + 1)) break;
             batch.commands[batch.count] = queue.remove(index);
             batch.count += 1;
@@ -853,6 +867,19 @@ fn testGuard() Guard {
     };
 }
 
+const TestGuardSource = struct {
+    guard: Guard = testGuard(),
+
+    fn interface(self: *TestGuardSource) GuardSource {
+        return .{ .ptr = self, .load_fn = load };
+    }
+
+    fn load(ptr: *anyopaque, _: *const OrderCommand) ?Guard {
+        const self: *TestGuardSource = @ptrCast(@alignCast(ptr));
+        return self.guard;
+    }
+};
+
 fn limitPlace(reduce_only: bool) Payload {
     return .{ .place = .{
         .side = .buy,
@@ -949,6 +976,7 @@ test "all qualified limit kinds map directly and spot omits derivatives fields" 
 
 test "market requires a protection price but never encodes an unreviewed limit" {
     var scheduler = try Scheduler.init(test_profile);
+    var guards: TestGuardSource = .{};
     var unprotected = testCommand(1, .{ .place = .{
         .side = .buy,
         .kind = .market,
@@ -963,7 +991,7 @@ test "market requires a protection price but never encodes an unreviewed limit" 
 
     unprotected.payload.place.market_protection_price = .{ .coefficient = 51_000, .scale = 0 };
     try std.testing.expect(scheduler.enqueue(unprotected, testGuard(), 1) == .queued);
-    const batch = scheduler.next(2).?.batch;
+    const batch = scheduler.next(2, guards.interface()).?.batch;
     const request = try encode(&batch);
     try std.testing.expect(std.mem.indexOf(u8, request.bytes(), "\"ordType\":\"ioc\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, request.bytes(), "\"px\":\"51000\"") != null);
@@ -972,23 +1000,24 @@ test "market requires a protection price but never encodes an unreviewed limit" 
 
 test "bounded scheduler prioritizes safety batches and charges every item" {
     var scheduler = try Scheduler.init(test_profile);
+    var guards: TestGuardSource = .{};
     try std.testing.expect(scheduler.enqueue(testCommand(2, limitPlace(false)), testGuard(), 1) == .queued);
     try std.testing.expect(scheduler.enqueue(testCommand(3, .{ .cancel = .{} }), testGuard(), 1) == .queued);
     try std.testing.expect(scheduler.enqueue(testCommand(4, .{ .cancel = .{} }), testGuard(), 1) == .queued);
 
-    const first = scheduler.next(2).?.batch;
+    const first = scheduler.next(2, guards.interface()).?.batch;
     try std.testing.expectEqual(@as(u8, 2), first.count);
     try std.testing.expectEqual(Operation.cancel, first.commands[0].operation());
-    const second = scheduler.next(2).?.batch;
+    const second = scheduler.next(2, guards.interface()).?.batch;
     try std.testing.expectEqual(@as(u8, 1), second.count);
     try std.testing.expectEqual(Operation.place, second.commands[0].operation());
 
     try std.testing.expect(scheduler.enqueue(testCommand(5, limitPlace(false)), testGuard(), 2) == .queued);
     try std.testing.expect(scheduler.enqueue(testCommand(6, limitPlace(false)), testGuard(), 2) == .queued);
-    try std.testing.expect(scheduler.next(2) != null);
+    try std.testing.expect(scheduler.next(2, guards.interface()) != null);
     try std.testing.expect(scheduler.enqueue(testCommand(7, limitPlace(false)), testGuard(), 2) == .queued);
-    try std.testing.expect(scheduler.next(2) == null);
-    try std.testing.expect(scheduler.next(std.time.ns_per_s + 2) != null);
+    try std.testing.expect(scheduler.next(2, guards.interface()) == null);
+    try std.testing.expect(scheduler.next(std.time.ns_per_s + 2, guards.interface()) != null);
 }
 
 test "stale versions revisions deadlines and queue pressure are proven not sent" {
@@ -1012,6 +1041,26 @@ test "stale versions revisions deadlines and queue pressure are proven not sent"
         ) == .queued);
     const full = scheduler.enqueue(testCommand(999, .{ .cancel = .{} }), testGuard(), 1);
     try std.testing.expectEqual(RejectReason.adapter_backpressure, full.dispatch.reason.?);
+}
+
+test "queued amend is revalidated after a concurrent fill before dispatch" {
+    var scheduler = try Scheduler.init(test_profile);
+    var guards: TestGuardSource = .{};
+    var amend = testCommand(77, .{ .amend = .{
+        .request_id = amendRequestId(77),
+        .target_remaining_quantity = .{ .coefficient = 6, .scale = 1 },
+        .cumulative_filled_quantity = .{ .coefficient = 4, .scale = 1 },
+        .new_limit_price = .{ .coefficient = 49_900, .scale = 0 },
+        .increases_risk = false,
+    } });
+    amend.venue_order_id = @enumFromInt(7001);
+    try std.testing.expect(scheduler.enqueue(amend, guards.guard, 1) == .queued);
+
+    guards.guard.current_order_revision = 2;
+    guards.guard.cumulative_filled_quantity = .{ .coefficient = 5, .scale = 1 };
+    const result = scheduler.next(2, guards.interface()).?.dispatch;
+    try std.testing.expectEqual(DispatchState.not_sent, result.state);
+    try std.testing.expectEqual(RejectReason.stale_order_revision, result.reason.?);
 }
 
 test "batch response is itemized and transport ambiguity makes every item unknown" {

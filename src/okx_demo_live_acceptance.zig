@@ -20,6 +20,7 @@ const source_session: u64 = 1;
 const RestEndpoint = struct {
     source: private.IngressSource,
     path: []const u8,
+    cursor: enum { none, order_id, bill_id } = .none,
 };
 
 const rest_endpoints = [_]RestEndpoint{
@@ -27,11 +28,11 @@ const rest_endpoints = [_]RestEndpoint{
     .{ .source = .rest_leverage, .path = "/api/v5/account/leverage-info?instId=BTC-USDT-SWAP&mgnMode=isolated" },
     .{ .source = .rest_balance, .path = "/api/v5/account/balance?ccy=BTC,USDT" },
     .{ .source = .rest_positions, .path = "/api/v5/account/positions?instId=BTC-USDT-SWAP" },
-    .{ .source = .rest_orders_pending, .path = "/api/v5/trade/orders-pending?limit=20" },
-    .{ .source = .rest_orders_history_spot, .path = "/api/v5/trade/orders-history?instType=SPOT&limit=20" },
-    .{ .source = .rest_orders_history_swap, .path = "/api/v5/trade/orders-history?instType=SWAP&limit=20" },
-    .{ .source = .rest_fills_history_spot, .path = "/api/v5/trade/fills-history?instType=SPOT&limit=20" },
-    .{ .source = .rest_fills_history_swap, .path = "/api/v5/trade/fills-history?instType=SWAP&limit=20" },
+    .{ .source = .rest_orders_pending, .path = "/api/v5/trade/orders-pending?limit=20", .cursor = .order_id },
+    .{ .source = .rest_orders_history_spot, .path = "/api/v5/trade/orders-history?instType=SPOT&limit=20", .cursor = .order_id },
+    .{ .source = .rest_orders_history_swap, .path = "/api/v5/trade/orders-history?instType=SWAP&limit=20", .cursor = .order_id },
+    .{ .source = .rest_fills_history_spot, .path = "/api/v5/trade/fills-history?instType=SPOT&limit=20", .cursor = .bill_id },
+    .{ .source = .rest_fills_history_swap, .path = "/api/v5/trade/fills-history?instType=SWAP&limit=20", .cursor = .bill_id },
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -197,20 +198,64 @@ fn establishReady(init: std.process.Init, owner: *curl.TransportOwner, raw: *Raw
     try progress(init.io, "private_stream");
     try reconciler.beginReconciliation(raw.count);
     for (0..2) |_| {
-        for (rest_endpoints) |endpoint| {
-            try refresh(owner, init.io);
-            const response = owner.request(.get, endpoint.path, "");
-            if (response.outcome != .response) return error.PrivateRequestUncertain;
-            const batch = try reconciler.ingest(init.gpa, raw.interface(), source_session, (try clock(init.io)).times, endpoint.source, .{ .final = true }, response.response.?);
-            if (batch.rejection) |reason| {
-                try diagnostic(init.io, "rest_rejection_source", @tagName(endpoint.source));
-                try diagnostic(init.io, "rest_rejection_reason", @tagName(reason));
-                return error.RestBootstrapRejected;
-            }
-        }
+        for (rest_endpoints) |endpoint|
+            try ingestRestEndpoint(init, owner, raw, reconciler, endpoint);
         _ = try reconciler.tryComplete();
     }
     if (!reconciler.readiness().reconciliation_ready) return error.ReconciliationNotReady;
+}
+
+fn ingestRestEndpoint(
+    init: std.process.Init,
+    owner: *curl.TransportOwner,
+    raw: *RawSink,
+    reconciler: *private.Reconciler,
+    endpoint: RestEndpoint,
+) !void {
+    var after: ?u64 = null;
+    for (0..32) |_| {
+        var path_buffer: [256]u8 = undefined;
+        const path = if (after) |cursor|
+            try std.fmt.bufPrint(&path_buffer, "{s}&after={d}", .{ endpoint.path, cursor })
+        else
+            endpoint.path;
+        try refresh(owner, init.io);
+        const response = owner.request(.get, path, "");
+        if (response.outcome != .response) return error.PrivateRequestUncertain;
+        const row_count = try restRowCount(init.gpa, response.response.?);
+        const final = endpoint.cursor == .none or row_count < 20;
+        const batch = try reconciler.ingest(
+            init.gpa,
+            raw.interface(),
+            source_session,
+            (try clock(init.io)).times,
+            endpoint.source,
+            .{ .requested_after = after, .final = final },
+            response.response.?,
+        );
+        if (batch.rejection) |reason| {
+            try diagnostic(init.io, "rest_rejection_source", @tagName(endpoint.source));
+            try diagnostic(init.io, "rest_rejection_reason", @tagName(reason));
+            return error.RestBootstrapRejected;
+        }
+        if (final) return;
+        after = batch.oldest_cursor orelse return error.MissingRestPageCursor;
+    }
+    return error.RestPageLimitExceeded;
+}
+
+fn restRowCount(gpa: std.mem.Allocator, raw: []const u8) !usize {
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, raw, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |value| value,
+        else => return error.InvalidRestPage,
+    };
+    const data = switch (root.get("data") orelse return error.InvalidRestPage) {
+        .array => |value| value,
+        else => return error.InvalidRestPage,
+    };
+    return data.items.len;
 }
 
 fn record(projection: *spot.Projection, stable: *journal.Journal, sequence: *u64, event: private.CanonicalEvent) !void {

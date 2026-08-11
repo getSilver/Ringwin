@@ -254,6 +254,13 @@ pub const ReconciliationReady = struct {
     last_raw_sequence: u64,
 };
 
+pub const UnknownResolution = enum(u8) {
+    found_live,
+    found_terminal,
+    confirmed_absent,
+    still_unknown,
+};
+
 const Stage = enum(u8) { offline, subscribing, buffering, reconciling, ready, failed };
 
 const SeenFact = struct {
@@ -336,14 +343,20 @@ pub const Reconciler = struct {
         self.drain_ws_index = 0;
     }
 
-    pub fn setUnresolvedUnknowns(self: *Reconciler, count: usize) void {
-        self.unresolved_unknowns = count;
-        if (self.stage == .ready and count != 0) {
+    pub fn registerUnknown(self: *Reconciler) !void {
+        self.unresolved_unknowns = try std.math.add(usize, self.unresolved_unknowns, 1);
+        if (self.stage == .ready) {
             self.stage = .reconciling;
             self.rest = @splat(.{});
             self.stability_round = 1;
             self.bootstrap_watermark = self.last_raw_sequence;
         }
+    }
+
+    pub fn resolveUnknown(self: *Reconciler, result: UnknownResolution) !void {
+        if (self.unresolved_unknowns == 0) return error.NoUnresolvedUnknown;
+        if (result == .still_unknown) return;
+        self.unresolved_unknowns -= 1;
     }
 
     pub fn readiness(self: *const Reconciler) Readiness {
@@ -1630,6 +1643,57 @@ test "private snapshots and two stable REST reads open then disconnect revokes b
     reconciler.disconnect();
     try std.testing.expect(!reconciler.readiness().private_stream_ready);
     try std.testing.expect(!reconciler.readiness().reconciliation_ready);
+}
+
+test "Unknown requires stable rebootstrap and an explicit reconciliation result" {
+    var reconciler: Reconciler = .{};
+    var sink: TestRawSink = .{};
+    try establishPrivateStream(&reconciler, &sink);
+    try reconciler.beginReconciliation(sink.append_count);
+    try ingestRestRound(&reconciler, &sink);
+    try std.testing.expect((try reconciler.tryComplete()) == null);
+    try ingestRestRound(&reconciler, &sink);
+    _ = (try reconciler.tryComplete()).?;
+
+    try reconciler.registerUnknown();
+    try std.testing.expect(!reconciler.readiness().reconciliation_ready);
+    try reconciler.resolveUnknown(.still_unknown);
+    try ingestRestRound(&reconciler, &sink);
+    try std.testing.expect((try reconciler.tryComplete()) == null);
+    try ingestRestRound(&reconciler, &sink);
+    try std.testing.expect((try reconciler.tryComplete()) == null);
+
+    try reconciler.resolveUnknown(.confirmed_absent);
+    try std.testing.expect((try reconciler.tryComplete()) != null);
+    try std.testing.expectError(error.NoUnresolvedUnknown, reconciler.resolveUnknown(.confirmed_absent));
+}
+
+test "REST pagination requires the exact descending endpoint cursor" {
+    var reconciler: Reconciler = .{};
+    var sink: TestRawSink = .{};
+    try establishPrivateStream(&reconciler, &sink);
+    try reconciler.beginReconciliation(sink.append_count);
+
+    const first = try ingestTest(&reconciler, &sink, .rest_orders_history_spot, .{ .final = false },
+        \\{"code":"0","data":[{"instId":"BTC-USDT","ordId":"200","clOrdId":"RWNTEST0200","side":"buy","ordType":"limit","state":"filled","sz":"0.0002","px":"50000","accFillSz":"0.0002","avgPx":"50000","uTime":"1800000000200","tradeId":"","reqId":""}]}
+    );
+    try std.testing.expectEqual(@as(?RejectReason, null), first.rejection);
+    const final = try ingestTest(&reconciler, &sink, .rest_orders_history_spot, .{ .requested_after = 200, .final = true },
+        \\{"code":"0","data":[{"instId":"BTC-USDT","ordId":"100","clOrdId":"RWNTEST0100","side":"buy","ordType":"limit","state":"canceled","sz":"0.0002","px":"50000","accFillSz":"0","avgPx":"","uTime":"1800000000100","tradeId":"","reqId":""}]}
+    );
+    try std.testing.expectEqual(@as(?RejectReason, null), final.rejection);
+
+    var invalid: Reconciler = .{};
+    var invalid_sink: TestRawSink = .{};
+    try establishPrivateStream(&invalid, &invalid_sink);
+    try invalid.beginReconciliation(invalid_sink.append_count);
+    _ = try ingestTest(&invalid, &invalid_sink, .rest_orders_history_spot, .{ .final = false },
+        \\{"code":"0","data":[{"instId":"BTC-USDT","ordId":"200","clOrdId":"RWNTEST0200","side":"buy","ordType":"limit","state":"filled","sz":"0.0002","px":"50000","accFillSz":"0.0002","avgPx":"50000","uTime":"1800000000200","tradeId":"","reqId":""}]}
+    );
+    const skipped = try ingestTest(&invalid, &invalid_sink, .rest_orders_history_spot, .{ .requested_after = 199, .final = true },
+        \\{"code":"0","data":[]}
+    );
+    try std.testing.expectEqual(RejectReason.invalid_page_cursor, skipped.rejection.?);
 }
 
 test "REST balance stability ignores observation uTime but not economic values" {

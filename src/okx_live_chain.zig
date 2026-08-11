@@ -128,7 +128,8 @@ pub const Chain = struct {
 
 const TestTransport = struct {
     calls: u32 = 0,
-    response: []const u8 = "{\"code\":\"0\",\"data\":[{\"sCode\":\"0\",\"ordId\":\"1\"}]}",
+    outcome: order.TransportOutcome = .response,
+    response: ?[]const u8 = "{\"code\":\"0\",\"data\":[{\"sCode\":\"0\",\"ordId\":\"1\"}]}",
 
     fn interface(self: *TestTransport) Transport {
         return .{ .ptr = self, .submit_fn = submit };
@@ -140,7 +141,7 @@ const TestTransport = struct {
         std.debug.assert(std.mem.eql(u8, path, "/api/v5/trade/order"));
         std.debug.assert(body.len != 0);
         return .{
-            .outcome = .response,
+            .outcome = self.outcome,
             .response = self.response,
             .source_session = 9,
             .times = .{
@@ -266,4 +267,46 @@ test "qualification and aggregate notional fail closed before transport" {
     const oversized = [_]AuthorizedCommand{too_large};
     try std.testing.expectError(error.NotionalLimitExceeded, chain.dispatch(std.testing.allocator, &oversized));
     try std.testing.expectEqual(@as(u32, 0), transport.calls);
+}
+
+test "uncertain submission and rejected cleanup are never replayed automatically" {
+    var raw: TestRawSink = .{};
+    var uncertain_transport: TestTransport = .{
+        .outcome = .write_or_response_uncertain,
+        .response = null,
+    };
+    var uncertain_chain: Chain = .{
+        .mode = .demo_live,
+        .qualification = qualified(),
+        .raw_sink = raw.interface(),
+        .transport = uncertain_transport.interface(),
+    };
+    const commands = [_]AuthorizedCommand{command()};
+    const uncertain = try uncertain_chain.dispatch(std.testing.allocator, &commands);
+    try std.testing.expectEqual(order.DispatchState.unknown, uncertain.dispatch.items[0].state);
+    try std.testing.expectEqual(@as(u32, 1), uncertain_transport.calls);
+    uncertain_chain.qualification.no_unknown_orders = false;
+    try std.testing.expectError(
+        error.DemoNotQualified,
+        uncertain_chain.dispatch(std.testing.allocator, &commands),
+    );
+    try std.testing.expectEqual(@as(u32, 1), uncertain_transport.calls);
+
+    var cleanup_transport: TestTransport = .{
+        .response = "{\"code\":\"1\",\"data\":[{\"sCode\":\"51020\",\"ordId\":\"\"}]}",
+    };
+    var cleanup_chain: Chain = .{
+        .mode = .demo_live,
+        .qualification = qualified(),
+        .raw_sink = raw.interface(),
+        .transport = cleanup_transport.interface(),
+    };
+    var cleanup = command();
+    cleanup.command.payload.place.side = .sell;
+    cleanup.command.payload.place.portfolio_reduce_only = true;
+    const cleanup_commands = [_]AuthorizedCommand{cleanup};
+    const rejected = try cleanup_chain.dispatch(std.testing.allocator, &cleanup_commands);
+    try std.testing.expectEqual(order.DispatchState.submitted, rejected.dispatch.items[0].state);
+    try std.testing.expectEqual(order.RejectReason.other_venue_reject, rejected.dispatch.items[0].reason.?);
+    try std.testing.expectEqual(@as(u32, 1), cleanup_transport.calls);
 }

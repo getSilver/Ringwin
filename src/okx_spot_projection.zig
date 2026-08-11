@@ -746,6 +746,16 @@ test "OKX spot fill projects native fee dual layers and replays deterministicall
     try std.testing.expectError(error.UnknownStableSchema, decodeStable(first_record));
 }
 
+test "late execution report cannot regress a terminal order" {
+    var projection: Projection = .{};
+    try projection.apply(try fixtureReport(.filled, "0.0001"));
+    try std.testing.expectError(
+        error.RegressedOrderFact,
+        projection.apply(try fixtureReport(.partially_filled, "0.00005")),
+    );
+    try std.testing.expectEqual(OrderState.filled, projection.state().?);
+}
+
 test "spot partial sell releases average cost and records venue USDT fee" {
     var layer: Layer = .{};
     try applyEconomic(

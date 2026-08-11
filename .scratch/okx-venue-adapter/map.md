@@ -34,10 +34,11 @@ Status: open
 - [接入 OKX 私有事实与启动重连对账](issues/07-implement-okx-private-reconciliation.md) — 固定私有 decoder 与订阅缓冲、九端点 REST 双读稳定屏障已闭合 ExecutionReport、Fill、余额、仓位、margin 和账户配置；断线、冲突、Unknown 或未归属活动订单均撤销新增风险就绪。
 - [落实既定 OKX 订单能力与有界调度](issues/08-implement-complete-okx-order-capabilities.md) — 固定 REST order codec 与双队列调度已闭合版本化纯字母数字身份、全部既定 order kind、受保护 Market、原地 amend、VenueReduceOnly、CancelConfirmCreate、逐项 batch、真实限流成本及 NotSent/Submitted/Unknown。
 - [闭合 TradingShard 到 OKX Demo 的真实交易链](issues/09-close-live-trading-chain.md) — 固定策略已穿过 Gateway、SPOT 现金风控、OrderCommand、同一 libcurl owner、Demo 私有回报、双层经济投影与稳定重放；真实 0.0002 BTC 买入/净额清理闭合且最终账户无残余。
+- [证明断连、Unknown、部分成功与幂等恢复](issues/10-prove-failure-recovery-and-idempotency.md) — 故障 fixture 固定在 ingress、dispatch、REST reconciliation 与权威 projection seam；断连、缺口、认证、限流、Unknown、部分成功、并发 Fill、分页、迟到事实和清理失败均已证明失败关闭且不自动重放副作用。
 
 ## Not yet specified
 
-暂无；Demo 无法稳定制造的部分成交、传输 Unknown 与断线窗口由[证明断连、Unknown、部分成功与幂等恢复](issues/10-prove-failure-recovery-and-idempotency.md)选择可审计故障注入位置。
+暂无；第 10 票已固定可审计故障注入位置，整波单命令资格、Linux 交叉构建证据及运行手册由[资格化 Demo 整波与 Linux 构建](issues/11-qualify-demo-wave-and-linux-build.md)统一关闭。
 
 ## Out of scope
 

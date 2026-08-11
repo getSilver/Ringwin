@@ -288,8 +288,8 @@ Windows 2C/4T 开发节点接近 `2M events/s`，但四分片合并 P99 为
 
 尚未实现或资格化：
 
-- OKX 断连、Unknown、逐项部分成功与幂等恢复的可审计故障注入、Linux 交叉构建和整波资格；
-  固定 Strategy `OrderIntent` 到 Demo 成交/清理、经济投影及稳定重放已经通过；
+- OKX 单命令整波资格、Linux 交叉构建证据和运行手册；固定 Strategy `OrderIntent` 到 Demo
+  成交/清理、经济投影、稳定重放及断连/Unknown/部分成功/幂等恢复矩阵已经通过；
 - Binance、Gate.io、Bitget 的真实行情与交易适配器；
 - Python StrategyHost 与四分片核心在合格 Linux 节点上的产品性能资格；
 - Linux 独占核心、CPU affinity、NUMA、真实网络/日志 I/O 和硬件性能计数器；
@@ -314,5 +314,7 @@ Market、原地 amend、逐项 batch 和安全优先有界调度；现有 Simula
 OrderCommand、返回 dispatch 与 ingress。显式授权的 BTC-USDT Demo 成交/清理验收可运行
 `tools\run-okx-demo-live-acceptance.ps1 -DemoLive`；它固定使用 Demo endpoint/header、USDT-only
 零 BTC baseline、两轮 REST 稳定屏障、25 USDT 上限和最终零残余预检；固定策略已真实穿过
-Gateway、TradingShard 现金风控、OrderCommand、OKX 回报、经济投影与稳定重放。其余故障恢复闭环仍按地图逐票推进。
+Gateway、TradingShard 现金风控、OrderCommand、OKX 回报、经济投影与稳定重放。断连、L2 缺口、
+认证失败、限流、Unknown、部分成功、并发 Fill、REST 分页、迟到事实和清理失败矩阵也已闭合；
+整波自动资格与证据关闭仍按第 11、12 票推进。
 Binance、Gate.io、Bitget Adapter 继续后置；Linux 五核生产性能资格仍是独立波次。
