@@ -51,6 +51,7 @@ int ringwin_curl_probe(unsigned int required_version) {
 int ringwin_curl_request(const char *url, const char *method,
                          const char *const *headers, size_t header_count,
                          const unsigned char *body, size_t body_len,
+                         const char *proxy,
                          unsigned char *response_bytes, size_t response_capacity,
                          size_t *response_len, long *http_status, int *curl_code) {
   CURL *easy = curl_easy_init();
@@ -73,6 +74,7 @@ int ringwin_curl_request(const char *url, const char *method,
      curl_easy_setopt(easy, CURLOPT_CUSTOMREQUEST, method) != CURLE_OK ||
      curl_easy_setopt(easy, CURLOPT_PROTOCOLS_STR, "https") != CURLE_OK ||
      curl_easy_setopt(easy, CURLOPT_HTTPHEADER, list) != CURLE_OK ||
+     (proxy && curl_easy_setopt(easy, CURLOPT_PROXY, proxy) != CURLE_OK) ||
      curl_easy_setopt(easy, CURLOPT_POSTFIELDS, body_len ? body : "") != CURLE_OK ||
      curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)body_len) != CURLE_OK ||
      curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, ringwin_write) != CURLE_OK ||

@@ -10,6 +10,7 @@ pub fn main(init: std.process.Init) !void {
         "GET",
         &.{},
         "",
+        null,
         &response,
     );
     var out_buffer: [128]u8 = undefined;

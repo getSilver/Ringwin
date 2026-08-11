@@ -14,6 +14,7 @@ extern fn ringwin_curl_request(
     header_count: usize,
     body: [*]const u8,
     body_len: usize,
+    proxy: ?[*:0]const u8,
     response: [*]u8,
     response_capacity: usize,
     response_len: *usize,
@@ -61,6 +62,7 @@ pub fn perform(
     method: [:0]const u8,
     headers: []const [:0]const u8,
     body: []const u8,
+    proxy: ?[:0]const u8,
     response_buffer: []u8,
 ) !Response {
     if (headers.len > max_headers) return error.TooManyHeaders;
@@ -77,6 +79,7 @@ pub fn perform(
         headers.len,
         body.ptr,
         body.len,
+        if (proxy) |value| value.ptr else null,
         response_buffer.ptr,
         response_buffer.len,
         &response_len,

@@ -22,8 +22,18 @@ if (-not $include -or -not $library) { throw 'Run tools/bootstrap-libcurl.ps1 fi
     -lws2_32 -lcrypt32 -lsecur32 -ladvapi32 -lbcrypt -lwldap32 -lnormaliz -liphlpapi
 if ($LASTEXITCODE -ne 0) { throw 'libcurl qualification test failed' }
 
-& zig run (Join-Path $PSScriptRoot '..\src\okx_curl_public_smoke.zig') `
-    (Join-Path $PSScriptRoot '..\src\okx_curl_shim.c') `
-    "-I$include" "-L$($library.DirectoryName)" -lc -lcurl `
-    -lws2_32 -lcrypt32 -lsecur32 -ladvapi32 -lbcrypt -lwldap32 -lnormaliz -liphlpapi
-if ($LASTEXITCODE -ne 0) { throw 'libcurl public HTTPS smoke failed' }
+$previousHttpsProxy = $env:HTTPS_PROXY
+try {
+    $destination = [Uri]'https://openapi.okx.com'
+    $systemProxy = [Net.WebRequest]::DefaultWebProxy
+    if ($systemProxy -and -not $systemProxy.IsBypassed($destination)) {
+        $env:HTTPS_PROXY = $systemProxy.GetProxy($destination).AbsoluteUri
+    }
+    & zig run (Join-Path $PSScriptRoot '..\src\okx_curl_public_smoke.zig') `
+        (Join-Path $PSScriptRoot '..\src\okx_curl_shim.c') `
+        "-I$include" "-L$($library.DirectoryName)" -lc -lcurl `
+        -lws2_32 -lcrypt32 -lsecur32 -ladvapi32 -lbcrypt -lwldap32 -lnormaliz -liphlpapi
+    if ($LASTEXITCODE -ne 0) { throw 'libcurl public HTTPS smoke failed' }
+} finally {
+    $env:HTTPS_PROXY = $previousHttpsProxy
+}
