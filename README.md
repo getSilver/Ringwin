@@ -30,7 +30,7 @@ zig version
 从仓库根目录执行：
 
 ```powershell
-zig fmt --check src\main.zig src\journal.zig src\venue_adapter.zig
+zig fmt --check src\main.zig src\journal.zig src\venue_adapter.zig src\okx_public_market.zig
 zig test src\main.zig -O ReleaseSafe
 zig run src\main.zig -O ReleaseSafe
 ```
@@ -70,6 +70,8 @@ digest=9951db6c2ea314b42fa0ce5887225cb4d026a95358b2ca026984dc59330adb08
 - 重复成交、订单回报、取消和对账不重复改变经济状态；
 - 四个 DecisionDomain 分别重放等价；
 - 一个分片的行情 Gap、慢消费者和队列饱和不改变其他分片的顺序及健康状态。
+- OKX 固定 SPOT/SWAP 白名单的 Instrument、L2、标记价、指数价和资金费率只以定点数
+  标准化，RawIngress 先于解析提交；重复、损坏、断档和重订阅均失败关闭并等待新快照。
 
 ## Python StrategyHost 完整验收
 
@@ -286,7 +288,9 @@ Windows 2C/4T 开发节点接近 `2M events/s`，但四分片合并 P99 为
 
 尚未实现或资格化：
 
-- OKX、Binance、Gate.io、Bitget 的真实行情、交易、签名、限流和对账适配器；
+- OKX 的 libcurl 在线传输、私有事实、交易、签名、限流和对账；公共 REST/WS 事实
+  标准化与 L2 缺口恢复已实现，但尚不构成在线行情资格；
+- Binance、Gate.io、Bitget 的真实行情与交易适配器；
 - Python StrategyHost 与四分片核心在合格 Linux 节点上的产品性能资格；
 - Linux 独占核心、CPU affinity、NUMA、真实网络/日志 I/O 和硬件性能计数器；
 - testnet 协议资格、生产密钥、单活热备、fencing 和部署；
@@ -304,6 +308,7 @@ SystemOwner 已于 2026-07-31 确认
 **OKX Venue Adapter 最小纵向接入**。
 
 该能力波次已建立[实施地图](.scratch/okx-venue-adapter/map.md)，并完成 OKX v5/传输研究、
-Demo 账户安全资格和首个四操作 VenueAdapter seam；现有 SimulatedVenue 已只通过该 seam
-接收 OrderCommand、返回 dispatch 与 ingress。OKX 行情、私有对账和交易实现仍按地图逐票推进。
+Demo 账户安全资格、首个四操作 VenueAdapter seam，以及 OKX 公共 Instrument/L2/参考价/资金费率
+标准化与失败关闭恢复；现有 SimulatedVenue 已只通过该 seam 接收 OrderCommand、返回 dispatch 与
+ingress。OKX 在线传输、私有对账和交易实现仍按地图逐票推进。
 Binance、Gate.io、Bitget Adapter 继续后置；Linux 五核生产性能资格仍是独立波次。
