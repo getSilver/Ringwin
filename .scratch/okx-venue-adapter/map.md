@@ -31,6 +31,7 @@ Status: open
 - [资格化 Demo 账户与实盘式安全栅栏](issues/04-qualify-demo-account-and-safety.md) — Demo/global 专用 Key、Futures/net/isolated 配置与零遗留风险已通过只读资格；固定双 Instrument 白名单、25 USDT 单笔及账户总名义上限、显式 `--demo-live`、发送前对账和失败关闭清理合同。
 - [建立 Venue Adapter seam 并保留 SimVenue](issues/05-establish-venue-adapter-seam.md) — 四操作运行时 seam 已落地，SimulatedVenue 通过容量 1 的无分配有界输出保留原权威轨迹、digest、重放与 Python StrategyHost 验收；未引入插件框架。
 - [接入 OKX 公共市场事实与缺口恢复](issues/06-implement-okx-public-market-path.md) — 固定 SPOT/SWAP 公共 decoder 已以 RawIngress 优先、定点数、确定性身份和 snapshot/prevSeqId 状态机闭合规则、L2、参考价、资金费率及失败关闭恢复。
+- [接入 OKX 私有事实与启动重连对账](issues/07-implement-okx-private-reconciliation.md) — 固定私有 decoder 与订阅缓冲、九端点 REST 双读稳定屏障已闭合 ExecutionReport、Fill、余额、仓位、margin 和账户配置；断线、冲突、Unknown 或未归属活动订单均撤销新增风险就绪。
 
 ## Not yet specified
 
