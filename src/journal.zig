@@ -5,7 +5,7 @@ const segment_magic: u32 = 0x474c5351; // QSLG
 const record_magic: u32 = 0x544e5651; // QVNT
 const footer_magic: u32 = 0x444e4551; // QEND
 const segment_header_len = 64;
-const record_header_len = 56;
+const record_header_len = 72;
 const footer_len = 32;
 const max_payload_len = 256;
 
@@ -21,7 +21,17 @@ pub const Record = struct {
     source_time: u64,
     receive_time: u64,
     monotonic_time: u64,
+    wall_time: u64,
+    time_presence: TimePresence,
     payload: []const u8,
+};
+
+pub const TimePresence = packed struct(u8) {
+    source: bool = false,
+    receive: bool = false,
+    monotonic: bool = false,
+    wall: bool = false,
+    reserved: u4 = 0,
 };
 
 pub const ScanStatus = enum { clean, truncated_tail };
@@ -51,7 +61,7 @@ pub const Journal = struct {
         const header = self.storage[0..segment_header_len];
         @memset(header, 0);
         put(u32, header, 0, segment_magic);
-        put(u16, header, 4, 1);
+        put(u16, header, 4, 2);
         put(u16, header, 6, segment_header_len);
         put(u64, header, 8, 1);
         put(u64, header, 24, 1);
@@ -77,9 +87,11 @@ pub const Journal = struct {
         put(u64, encoded, 24, record.source_time);
         put(u64, encoded, 32, record.receive_time);
         put(u64, encoded, 40, record.monotonic_time);
+        put(u64, encoded, 48, record.wall_time);
+        encoded[56] = @bitCast(record.time_presence);
         @memcpy(encoded[record_header_len..], record.payload);
-        put(u32, encoded, 48, Crc32c.hash(encoded[record_header_len..]));
-        put(u32, encoded, 52, Crc32c.hash(encoded[0..52]));
+        put(u32, encoded, 64, Crc32c.hash(encoded[record_header_len..]));
+        put(u32, encoded, 68, Crc32c.hash(encoded[0..68]));
 
         self.len += record_len;
         self.records += 1;
@@ -117,7 +129,7 @@ pub const Reader = struct {
         if (bytes.len < segment_header_len) return error.TruncatedSegmentHeader;
         const header = bytes[0..segment_header_len];
         if (get(u32, header, 0) != segment_magic or
-            get(u16, header, 4) != 1 or
+            get(u16, header, 4) != 2 or
             get(u16, header, 6) != segment_header_len or
             get(u32, header, 60) != Crc32c.hash(header[0..60]))
             return error.InvalidSegmentHeader;
@@ -167,14 +179,14 @@ pub const Reader = struct {
             self.done = true;
             return .{ .end = .truncated_tail };
         }
-        if (get(u32, header, 52) != Crc32c.hash(header[0..52]))
+        if (get(u32, header, 68) != Crc32c.hash(header[0..68]))
             return error.InvalidHeaderChecksum;
 
         const sequence = get(u64, header, 16);
         if (sequence != self.next_sequence) return error.SequenceGap;
         const encoded = self.bytes[self.offset..][0..encoded_len];
         const payload = encoded[record_header_len..];
-        if (get(u32, header, 48) != Crc32c.hash(payload))
+        if (get(u32, header, 64) != Crc32c.hash(payload))
             return error.InvalidPayloadChecksum;
 
         const record: Record = .{
@@ -185,6 +197,8 @@ pub const Reader = struct {
             .source_time = get(u64, header, 24),
             .receive_time = get(u64, header, 32),
             .monotonic_time = get(u64, header, 40),
+            .wall_time = get(u64, header, 48),
+            .time_presence = @bitCast(header[56]),
             .payload = payload,
         };
         self.offset += encoded_len;
@@ -207,6 +221,8 @@ pub fn selfCheck() !void {
         .source_time = 10,
         .receive_time = 11,
         .monotonic_time = 12,
+        .wall_time = 13,
+        .time_presence = .{ .source = true, .receive = true, .monotonic = true, .wall = true },
         .payload = &first_payload,
     });
     try journal.append(.{
@@ -217,6 +233,8 @@ pub fn selfCheck() !void {
         .source_time = 10,
         .receive_time = 11,
         .monotonic_time = 12,
+        .wall_time = 13,
+        .time_presence = .{ .source = true, .receive = true, .monotonic = true, .wall = true },
         .payload = &second_payload,
     });
     try journal.seal();
@@ -244,8 +262,8 @@ pub fn selfCheck() !void {
     put(
         u32,
         gap.storage[second_offset..],
-        52,
-        Crc32c.hash(gap.storage[second_offset..][0..52]),
+        68,
+        Crc32c.hash(gap.storage[second_offset..][0..68]),
     );
     var gap_reader = try Reader.init(gap.bytes());
     _ = try gap_reader.next();

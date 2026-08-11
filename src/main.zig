@@ -6,6 +6,7 @@ const venue_adapter = @import("venue_adapter.zig");
 const okx_public_market = @import("okx_public_market.zig");
 const okx_private_reconciliation = @import("okx_private_reconciliation.zig");
 const okx_order_entry = @import("okx_order_entry.zig");
+const okx_live_chain = @import("okx_live_chain.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const schema_version: u16 = 1;
@@ -189,6 +190,8 @@ const InputEvent = struct {
     source_time: u64 = 0,
     receive_time: u64 = 0,
     monotonic_time: u64 = 0,
+    wall_time: u64 = 0,
+    time_presence: journal.TimePresence = .{},
     payload: Payload,
 };
 
@@ -198,6 +201,13 @@ fn atGroup(group_index: u64, input: InputEvent) InputEvent {
     timed.receive_time = timed.source_time + std.time.ns_per_ms;
     timed.monotonic_time = fixture_monotonic_base +
         group_index * 10 * std.time.ns_per_ms + std.time.ns_per_ms;
+    timed.wall_time = timed.receive_time + std.time.ns_per_ms;
+    timed.time_presence = .{
+        .source = true,
+        .receive = true,
+        .monotonic = true,
+        .wall = true,
+    };
     return timed;
 }
 
@@ -394,6 +404,8 @@ fn decodeInput(record: journal.Record) !InputEvent {
         .source_time = record.source_time,
         .receive_time = record.receive_time,
         .monotonic_time = record.monotonic_time,
+        .wall_time = record.wall_time,
+        .time_presence = record.time_presence,
         .payload = payload,
     };
 }
@@ -1153,6 +1165,8 @@ fn applyLive(
             .source_time = input.source_time,
             .receive_time = input.receive_time,
             .monotonic_time = input.monotonic_time,
+            .wall_time = input.wall_time,
+            .time_presence = input.time_presence,
             .payload = if (index == 0)
                 encoded_input.bytes[0..encoded_input.len]
             else
@@ -2302,7 +2316,9 @@ fn validateReplayRecord(
         return error.ReplayFactMismatch;
     if (record.source_time != input.source_time or
         record.receive_time != input.receive_time or
-        record.monotonic_time != input.monotonic_time)
+        record.monotonic_time != input.monotonic_time or
+        record.wall_time != input.wall_time or
+        @as(u8, @bitCast(record.time_presence)) != @as(u8, @bitCast(input.time_presence)))
         return error.ReplayTimeMismatch;
     if (is_input) {
         if (record.flags != journal.input_flag) return error.InputFlagMissing;
@@ -2633,6 +2649,7 @@ test "all authoritative acceptance traces close and replay" {
     _ = okx_public_market;
     _ = okx_private_reconciliation;
     _ = okx_order_entry;
+    _ = okx_live_chain;
     _ = try selfCheck();
 }
 

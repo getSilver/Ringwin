@@ -453,6 +453,8 @@ test "checkpoint replay is deterministic and fenced until cutover" {
             .source_time = 0,
             .receive_time = 0,
             .monotonic_time = 0,
+            .wall_time = 0,
+            .time_presence = .{},
             .payload = &payload,
         });
     }
