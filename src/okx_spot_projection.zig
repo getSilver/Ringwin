@@ -547,8 +547,7 @@ fn applyEconomic(
                 layer.position_base_atoms = try std.math.add(i64, layer.position_base_atoms, fee_atoms);
                 if (fee_atoms < 0) {
                     const fee_cost_product = try std.math.mul(i128, -@as(i128, fee_atoms), price);
-                    if (@mod(fee_cost_product, asset_scale) != 0) return error.InexactQuoteAmount;
-                    const fee_cost = std.math.cast(i64, @divTrunc(fee_cost_product, asset_scale)) orelse
+                    const fee_cost = std.math.cast(i64, @divFloor(fee_cost_product, asset_scale)) orelse
                         return error.Overflow;
                     layer.open_cost_quote_atoms = try std.math.sub(i64, layer.open_cost_quote_atoms, fee_cost);
                 }
@@ -578,7 +577,8 @@ fn applyEconomic(
     try applyFee(layer, venue_fee, fee_asset);
     if (venue_realized_pnl) |reported| {
         const venue_value = try atoms(reported);
-        if (venue_value != layer.realized_pnl_quote_atoms - realized_before)
+        // OKX SPOT reports fillPnl as zero; local inventory cost owns SPOT realized PnL.
+        if (venue_value != 0 and venue_value != layer.realized_pnl_quote_atoms - realized_before)
             return error.RealizedPnlMismatch;
     }
 }
@@ -760,6 +760,21 @@ test "spot partial sell releases average cost and records venue USDT fee" {
     try std.testing.expectEqual(@as(u64, 4), layer.ledger_transactions);
 }
 
+test "spot base fee cost uses quote-atom floor at live tick precision" {
+    var layer: Layer = .{};
+    try applyEconomic(
+        &layer,
+        .buy,
+        5_000,
+        6_354_790_000_000,
+        try private.Decimal.parse("-0.00000004"),
+        try private.AssetCode.init("BTC"),
+        try private.Decimal.parse("0"),
+    );
+    try std.testing.expectEqual(@as(i64, 4_996), layer.position_base_atoms);
+    try std.testing.expectEqual(@as(i64, 317_485_309), layer.open_cost_quote_atoms);
+}
+
 test "spot projection retains strategy and cleanup orders across stable replay" {
     const events = [_]private.CanonicalEvent{
         try fixtureOrderReport(10, "RWN1BUY", .buy, .filled, "0.0001", "0.0001"),
@@ -791,7 +806,7 @@ test "spot projection retains strategy and cleanup orders across stable replay" 
             .price = try private.Decimal.parse("50100"),
             .fee = try private.Decimal.parse("-0.00400599"),
             .fee_asset = try private.AssetCode.init("USDT"),
-            .realized_pnl = try private.Decimal.parse("0.009992"),
+            .realized_pnl = try private.Decimal.parse("0"),
             .liquidity = .taker,
             .venue_fill_time_utc_ns = 1,
             .owned_by_ringwin = true,

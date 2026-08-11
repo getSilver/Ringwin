@@ -288,8 +288,9 @@ Windows 2C/4T 开发节点接近 `2M events/s`，但四分片合并 P99 为
 
 尚未实现或资格化：
 
-- OKX 的 libcurl 在线传输、签名和 Demo WSS/交易资格；公共市场、私有事实、启动/重连
-  对账以及完整 REST 订单 codec/有界限流调度已实现，但尚不构成在线 Adapter 资格；
+- OKX 固定 Strategy `OrderIntent` 到已资格化 Demo 成交/清理入口的最后接线，以及故障注入、
+  Linux 交叉构建和整波资格；libcurl REST/private WSS、签名、稳定对账、受保护现货 IOC
+  成交、反向清理、经济投影及稳定重放已经在 Demo 通过；
 - Binance、Gate.io、Bitget 的真实行情与交易适配器；
 - Python StrategyHost 与四分片核心在合格 Linux 节点上的产品性能资格；
 - Linux 独占核心、CPU affinity、NUMA、真实网络/日志 I/O 和硬件性能计数器；
@@ -311,5 +312,7 @@ SystemOwner 已于 2026-07-31 确认
 Demo 账户安全资格、首个四操作 VenueAdapter seam、OKX 公共 Instrument/L2/参考价/资金费率
 标准化、私有 ExecutionReport/Fill/账户事实和 REST 双读恢复屏障，以及完整订单 codec、受保护
 Market、原地 amend、逐项 batch 和安全优先有界调度；现有 SimulatedVenue 已只通过该 seam 接收
-OrderCommand、返回 dispatch 与 ingress。OKX libcurl 在线传输和 Demo 交易闭环仍按地图逐票推进。
+OrderCommand、返回 dispatch 与 ingress。显式授权的 BTC-USDT Demo 成交/清理验收可运行
+`tools\run-okx-demo-live-acceptance.ps1 -DemoLive`；它固定使用 Demo endpoint/header、USDT-only
+零 BTC baseline、两轮 REST 稳定屏障、25 USDT 上限和最终零残余预检。其余闭环仍按地图逐票推进。
 Binance、Gate.io、Bitget Adapter 继续后置；Linux 五核生产性能资格仍是独立波次。
