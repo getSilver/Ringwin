@@ -5,6 +5,7 @@ const host_gateway = @import("strategy_host_gateway.zig");
 const venue_adapter = @import("venue_adapter.zig");
 const okx_public_market = @import("okx_public_market.zig");
 const okx_private_reconciliation = @import("okx_private_reconciliation.zig");
+const okx_order_entry = @import("okx_order_entry.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const schema_version: u16 = 1;
@@ -2631,6 +2632,7 @@ pub fn main(init: std.process.Init) !void {
 test "all authoritative acceptance traces close and replay" {
     _ = okx_public_market;
     _ = okx_private_reconciliation;
+    _ = okx_order_entry;
     _ = try selfCheck();
 }
 

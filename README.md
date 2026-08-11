@@ -288,8 +288,8 @@ Windows 2C/4T 开发节点接近 `2M events/s`，但四分片合并 P99 为
 
 尚未实现或资格化：
 
-- OKX 的 libcurl 在线传输、交易、签名、限流和 Demo WSS 资格；公共市场标准化、
-  私有事实标准化及启动/重连 REST 双读对账屏障已实现，但尚不构成在线 Adapter 资格；
+- OKX 的 libcurl 在线传输、签名和 Demo WSS/交易资格；公共市场、私有事实、启动/重连
+  对账以及完整 REST 订单 codec/有界限流调度已实现，但尚不构成在线 Adapter 资格；
 - Binance、Gate.io、Bitget 的真实行情与交易适配器；
 - Python StrategyHost 与四分片核心在合格 Linux 节点上的产品性能资格；
 - Linux 独占核心、CPU affinity、NUMA、真实网络/日志 I/O 和硬件性能计数器；
@@ -309,6 +309,7 @@ SystemOwner 已于 2026-07-31 确认
 
 该能力波次已建立[实施地图](.scratch/okx-venue-adapter/map.md)，并完成 OKX v5/传输研究、
 Demo 账户安全资格、首个四操作 VenueAdapter seam、OKX 公共 Instrument/L2/参考价/资金费率
-标准化，以及私有 ExecutionReport/Fill/账户事实和 REST 双读恢复屏障；现有 SimulatedVenue 已只通过
-该 seam 接收 OrderCommand、返回 dispatch 与 ingress。OKX 在线传输和交易实现仍按地图逐票推进。
+标准化、私有 ExecutionReport/Fill/账户事实和 REST 双读恢复屏障，以及完整订单 codec、受保护
+Market、原地 amend、逐项 batch 和安全优先有界调度；现有 SimulatedVenue 已只通过该 seam 接收
+OrderCommand、返回 dispatch 与 ingress。OKX libcurl 在线传输和 Demo 交易闭环仍按地图逐票推进。
 Binance、Gate.io、Bitget Adapter 继续后置；Linux 五核生产性能资格仍是独立波次。

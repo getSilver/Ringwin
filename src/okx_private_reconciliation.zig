@@ -1111,7 +1111,7 @@ fn containsCsv(csv: []const u8, expected: []const u8) bool {
 }
 
 fn isOwnedClientId(text: []const u8) bool {
-    return std.mem.startsWith(u8, text, "RWN-");
+    return std.mem.startsWith(u8, text, "RWN");
 }
 
 fn makeEvent(
