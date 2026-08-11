@@ -10,6 +10,7 @@ const private = @import("okx_private_reconciliation.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const asset_scale: i128 = 100_000_000;
 const stable_schema_version: u16 = 1;
+const max_orders = 4;
 
 const StableEventType = enum(u16) {
     okx_spot_execution_report = 1001,
@@ -48,7 +49,8 @@ const SeenFill = struct {
 };
 
 pub const Projection = struct {
-    order: ?Order = null,
+    orders: [max_orders]Order = undefined,
+    order_count: u8 = 0,
     portfolio: Layer = .{},
     exchange: Layer = .{},
     seen_fills: [16]SeenFill = undefined,
@@ -69,7 +71,12 @@ pub const Projection = struct {
     }
 
     pub fn state(self: *const Projection) ?OrderState {
-        return if (self.order) |order| order.state else null;
+        return if (self.order_count == 0) null else self.orders[self.order_count - 1].state;
+    }
+
+    pub fn orderState(self: *const Projection, venue_order_id: private.VenueOrderId) ?OrderState {
+        const index = self.orderIndex(venue_order_id) orelse return null;
+        return self.orders[index].state;
     }
 
     pub fn economicReconciled(self: *const Projection) bool {
@@ -83,15 +90,15 @@ pub const Projection = struct {
 
     pub fn digest(self: *const Projection) [Sha256.digest_length]u8 {
         var hasher = Sha256.init(.{});
-        if (self.order) |order| {
-            hasher.update(&.{1});
+        hasher.update(&.{self.order_count});
+        for (self.orders[0..self.order_count]) |order| {
             hashInt(&hasher, u64, @intFromEnum(order.venue_order_id));
             hasher.update(order.client_order_id.slice());
             hasher.update(&.{ @intFromEnum(order.side), @intFromEnum(order.state) });
             hashInt(&hasher, i64, order.quantity_base_atoms);
             hashInt(&hasher, i64, order.reported_filled_base_atoms);
             hashInt(&hasher, i64, order.projected_filled_base_atoms);
-        } else hasher.update(&.{0});
+        }
         hashLayer(&hasher, self.portfolio);
         hashLayer(&hasher, self.exchange);
         hasher.update(&.{self.seen_fill_count});
@@ -121,9 +128,9 @@ pub const Projection = struct {
             .canceled => .canceled,
         };
         try validateOrderState(next_state, filled, quantity);
-        if (self.order) |*order| {
-            if (order.venue_order_id != report.venue_order_id or
-                !std.mem.eql(u8, order.client_order_id.slice(), report.client_order_id.slice()) or
+        if (self.orderIndex(report.venue_order_id)) |index| {
+            const order = &self.orders[index];
+            if (!std.mem.eql(u8, order.client_order_id.slice(), report.client_order_id.slice()) or
                 order.side != report.side or order.quantity_base_atoms != quantity)
                 return error.ConflictingOrderIdentity;
             if (filled < order.reported_filled_base_atoms or filled < order.projected_filled_base_atoms)
@@ -132,7 +139,8 @@ pub const Projection = struct {
             order.reported_filled_base_atoms = filled;
             order.state = next_state;
         } else {
-            self.order = .{
+            if (self.order_count == self.orders.len) return error.OrderSetFull;
+            self.orders[self.order_count] = .{
                 .venue_order_id = report.venue_order_id,
                 .client_order_id = report.client_order_id,
                 .side = report.side,
@@ -140,6 +148,7 @@ pub const Projection = struct {
                 .reported_filled_base_atoms = filled,
                 .state = next_state,
             };
+            self.order_count += 1;
         }
     }
 
@@ -158,9 +167,9 @@ pub const Projection = struct {
             }
         }
         if (self.seen_fill_count == self.seen_fills.len) return error.FillSetFull;
-        const order = &(self.order orelse return error.FillBeforeOrder);
-        if (order.venue_order_id != fill.venue_order_id or
-            !std.mem.eql(u8, order.client_order_id.slice(), fill.client_order_id.slice()) or
+        const order_index = self.orderIndex(fill.venue_order_id) orelse return error.FillBeforeOrder;
+        const order = &self.orders[order_index];
+        if (!std.mem.eql(u8, order.client_order_id.slice(), fill.client_order_id.slice()) or
             order.side != fill.side)
             return error.FillOrderMismatch;
         const quantity = try atoms(fill.quantity);
@@ -197,6 +206,12 @@ pub const Projection = struct {
 
     fn assertLayers(self: *const Projection) !void {
         if (!std.meta.eql(self.portfolio, self.exchange)) return error.EconomicLayerMismatch;
+    }
+
+    fn orderIndex(self: *const Projection, venue_order_id: private.VenueOrderId) ?usize {
+        for (self.orders[0..self.order_count], 0..) |order, index|
+            if (order.venue_order_id == venue_order_id) return index;
+        return null;
     }
 };
 
@@ -512,6 +527,10 @@ fn applyEconomic(
     fee_asset: private.AssetCode,
     venue_realized_pnl: ?private.Decimal,
 ) !void {
+    const fee_atoms = try atoms(venue_fee);
+    const fee_is_btc = std.mem.eql(u8, fee_asset.slice(), "BTC");
+    if (side == .sell and fee_is_btc and fee_atoms != 0)
+        return error.UnsupportedSellBaseFee;
     const product = try std.math.mul(i128, quantity, price);
     if (@mod(product, asset_scale) != 0) return error.InexactQuoteAmount;
     const quote = std.math.cast(i64, @divTrunc(product, asset_scale)) orelse return error.Overflow;
@@ -522,6 +541,18 @@ fn applyEconomic(
             layer.usdt_balance_atoms = try std.math.sub(i64, layer.usdt_balance_atoms, quote);
             layer.position_base_atoms = try std.math.add(i64, layer.position_base_atoms, quantity);
             layer.open_cost_quote_atoms = try std.math.add(i64, layer.open_cost_quote_atoms, quote);
+            if (fee_is_btc and fee_atoms != 0) {
+                const net_quantity = try std.math.add(i64, quantity, fee_atoms);
+                if (net_quantity <= 0) return error.InvalidBaseFee;
+                layer.position_base_atoms = try std.math.add(i64, layer.position_base_atoms, fee_atoms);
+                if (fee_atoms < 0) {
+                    const fee_cost_product = try std.math.mul(i128, -@as(i128, fee_atoms), price);
+                    if (@mod(fee_cost_product, asset_scale) != 0) return error.InexactQuoteAmount;
+                    const fee_cost = std.math.cast(i64, @divTrunc(fee_cost_product, asset_scale)) orelse
+                        return error.Overflow;
+                    layer.open_cost_quote_atoms = try std.math.sub(i64, layer.open_cost_quote_atoms, fee_cost);
+                }
+            }
         },
         .sell => {
             if (quantity > layer.position_base_atoms) return error.SpotShortNotAllowed;
@@ -613,14 +644,25 @@ fn envelope(identity: u8) private.EventEnvelope {
 }
 
 fn fixtureReport(status: private.ExecutionStatus, filled: []const u8) !private.CanonicalEvent {
+    return fixtureOrderReport(10, "RWN1DEMO", .buy, status, "0.0001", filled);
+}
+
+fn fixtureOrderReport(
+    venue_order_id: u64,
+    client_order_id: []const u8,
+    side: private.Side,
+    status: private.ExecutionStatus,
+    quantity: []const u8,
+    filled: []const u8,
+) !private.CanonicalEvent {
     return .{ .envelope = envelope(@intFromEnum(status) + 1), .payload = .{ .execution_report = .{
-        .venue_order_id = @enumFromInt(10),
-        .client_order_id = try private.ClientOrderId.init("RWN1DEMO"),
+        .venue_order_id = @enumFromInt(venue_order_id),
+        .client_order_id = try private.ClientOrderId.init(client_order_id),
         .instrument = .btc_usdt_spot,
-        .side = .buy,
+        .side = side,
         .order_type = .market,
         .status = status,
-        .quantity = try private.Decimal.parse("0.0001"),
+        .quantity = try private.Decimal.parse(quantity),
         .limit_price = null,
         .cumulative_filled_quantity = try private.Decimal.parse(filled),
         .average_fill_price = if (status == .filled) try private.Decimal.parse("50000") else null,
@@ -660,8 +702,8 @@ test "OKX spot fill projects native fee dual layers and replays deterministicall
     var first: Projection = .{};
     for (events) |event| try first.apply(event);
     try std.testing.expectEqual(OrderState.filled, first.state().?);
-    try std.testing.expectEqual(@as(i64, 10_000), first.portfolio.position_base_atoms);
-    try std.testing.expectEqual(@as(i64, 500_000_000), first.portfolio.open_cost_quote_atoms);
+    try std.testing.expectEqual(@as(i64, 9_992), first.portfolio.position_base_atoms);
+    try std.testing.expectEqual(@as(i64, 499_600_000), first.portfolio.open_cost_quote_atoms);
     try std.testing.expectEqual(@as(i64, 8), first.portfolio.fee_btc_atoms);
     try std.testing.expectEqual(@as(i64, 9_992), first.portfolio.btc_balance_atoms);
     try std.testing.expectEqual(@as(i64, -500_000_000), first.portfolio.usdt_balance_atoms);
@@ -711,9 +753,62 @@ test "spot partial sell releases average cost and records venue USDT fee" {
         try private.AssetCode.init("USDT"),
         try private.Decimal.parse("0.04"),
     );
-    try std.testing.expectEqual(@as(i64, 6_000), layer.position_base_atoms);
-    try std.testing.expectEqual(@as(i64, 300_000_000), layer.open_cost_quote_atoms);
+    try std.testing.expectEqual(@as(i64, 5_992), layer.position_base_atoms);
+    try std.testing.expectEqual(@as(i64, 299_600_000), layer.open_cost_quote_atoms);
     try std.testing.expectEqual(@as(i64, 4_000_000), layer.realized_pnl_quote_atoms);
     try std.testing.expectEqual(@as(i64, 100_000), layer.fee_usdt_atoms);
     try std.testing.expectEqual(@as(u64, 4), layer.ledger_transactions);
+}
+
+test "spot projection retains strategy and cleanup orders across stable replay" {
+    const events = [_]private.CanonicalEvent{
+        try fixtureOrderReport(10, "RWN1BUY", .buy, .filled, "0.0001", "0.0001"),
+        .{ .envelope = envelope(10), .payload = .{ .fill = .{
+            .venue_trade_id = @enumFromInt(20),
+            .venue_bill_id = @enumFromInt(30),
+            .venue_order_id = @enumFromInt(10),
+            .client_order_id = try private.ClientOrderId.init("RWN1BUY"),
+            .instrument = .btc_usdt_spot,
+            .side = .buy,
+            .quantity = try private.Decimal.parse("0.0001"),
+            .price = try private.Decimal.parse("50000"),
+            .fee = try private.Decimal.parse("-0.00000008"),
+            .fee_asset = try private.AssetCode.init("BTC"),
+            .realized_pnl = try private.Decimal.parse("0"),
+            .liquidity = .taker,
+            .venue_fill_time_utc_ns = 1,
+            .owned_by_ringwin = true,
+        } } },
+        try fixtureOrderReport(11, "RWN1SELL", .sell, .filled, "0.00009992", "0.00009992"),
+        .{ .envelope = envelope(11), .payload = .{ .fill = .{
+            .venue_trade_id = @enumFromInt(21),
+            .venue_bill_id = @enumFromInt(31),
+            .venue_order_id = @enumFromInt(11),
+            .client_order_id = try private.ClientOrderId.init("RWN1SELL"),
+            .instrument = .btc_usdt_spot,
+            .side = .sell,
+            .quantity = try private.Decimal.parse("0.00009992"),
+            .price = try private.Decimal.parse("50100"),
+            .fee = try private.Decimal.parse("-0.00400599"),
+            .fee_asset = try private.AssetCode.init("USDT"),
+            .realized_pnl = try private.Decimal.parse("0.009992"),
+            .liquidity = .taker,
+            .venue_fill_time_utc_ns = 1,
+            .owned_by_ringwin = true,
+        } } },
+    };
+    var projection: Projection = .{};
+    var stable = journal.Journal.init();
+    for (events, 1..) |event, sequence| {
+        try projection.apply(event);
+        try appendStable(&stable, sequence, event);
+    }
+    try stable.seal();
+    try std.testing.expectEqual(@as(u8, 2), projection.order_count);
+    try std.testing.expectEqual(OrderState.filled, projection.orderState(@enumFromInt(10)).?);
+    try std.testing.expectEqual(OrderState.filled, projection.orderState(@enumFromInt(11)).?);
+    try std.testing.expectEqual(@as(i64, 0), projection.portfolio.position_base_atoms);
+    try std.testing.expectEqual(@as(i64, 0), projection.portfolio.open_cost_quote_atoms);
+    const replayed = try replayStable(stable.bytes());
+    try std.testing.expectEqualSlices(u8, &projection.digest(), &replayed.digest());
 }
