@@ -2,7 +2,7 @@
 
 Type: grilling
 Status: open
-Assignee:
+Assignee: Codex
 Blocked by: 01, 02
 Parent: [产品化接入 OKX Venue Adapter](../map.md)
 
