@@ -25,12 +25,11 @@ Status: open
 
 ## Decisions so far
 
-暂无。
+- [选择 Zig 0.17 OKX 传输基线](issues/02-choose-zig-transport-baseline.md) — 固定 libcurl 8.21.0 统一承载 HTTPS/WSS，单 owner 驱动取消与恢复边界。
 
 ## Not yet specified
 
 - OKX API v5 与 Demo 环境当前 endpoint、schema、序号、限流、分页、错误和生产差异，等待官方资料刷新后固化。
-- Zig 0.17 当前可用的 TLS、HTTP 与 WebSocket 组合及是否需要最小第三方依赖，等待传输研究后决定。
 - Demo 环境能否稳定制造部分成交、传输 Unknown 与私有流断线窗口；不能直接制造的场景需在研究结论后确定可审计故障注入位置。
 
 ## Out of scope
