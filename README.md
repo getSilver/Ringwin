@@ -1,6 +1,6 @@
 # Ringwin 量化交易引擎产品原型
 
-这是一个可执行的 Zig 交易引擎纵向闭环，不是流程图演示，也不是已连接真实交易所的生产系统。
+这是一个可执行的 Zig 交易引擎纵向闭环，并包含显式授权下的 OKX Demo Trading 验收；它不是生产交易系统。
 
 当前原型用一个模拟 Venue、一个 Gate.io 形状的 `BTC_USDT` USDT 线性永续品种、
 一个 VirtualPortfolio、一个 ExchangeAccount 和一个静态编译原生策略，证明：
@@ -10,7 +10,7 @@
 - 行情缺口、风险拒绝、Unknown 对账和重复回报走同一个核心状态机。
 - 四个 `TradingShard` 实例可以保持独立状态、日志、队列和故障边界。
 
-它不连接 OKX、Binance、Gate.io 或 Bitget，不使用真实 API 密钥，也不证明策略盈利。
+默认路径不连接真实 Venue；独立入口只使用本机 Demo Key 连接 OKX 模拟交易。项目不接入生产账户，也不证明策略盈利。
 
 ## 环境
 
@@ -288,9 +288,8 @@ Windows 2C/4T 开发节点接近 `2M events/s`，但四分片合并 P99 为
 
 尚未实现或资格化：
 
-- OKX 固定 Strategy `OrderIntent` 到已资格化 Demo 成交/清理入口的最后接线，以及故障注入、
-  Linux 交叉构建和整波资格；libcurl REST/private WSS、签名、稳定对账、受保护现货 IOC
-  成交、反向清理、经济投影及稳定重放已经在 Demo 通过；
+- OKX 断连、Unknown、逐项部分成功与幂等恢复的可审计故障注入、Linux 交叉构建和整波资格；
+  固定 Strategy `OrderIntent` 到 Demo 成交/清理、经济投影及稳定重放已经通过；
 - Binance、Gate.io、Bitget 的真实行情与交易适配器；
 - Python StrategyHost 与四分片核心在合格 Linux 节点上的产品性能资格；
 - Linux 独占核心、CPU affinity、NUMA、真实网络/日志 I/O 和硬件性能计数器；
@@ -314,5 +313,6 @@ Demo 账户安全资格、首个四操作 VenueAdapter seam、OKX 公共 Instrum
 Market、原地 amend、逐项 batch 和安全优先有界调度；现有 SimulatedVenue 已只通过该 seam 接收
 OrderCommand、返回 dispatch 与 ingress。显式授权的 BTC-USDT Demo 成交/清理验收可运行
 `tools\run-okx-demo-live-acceptance.ps1 -DemoLive`；它固定使用 Demo endpoint/header、USDT-only
-零 BTC baseline、两轮 REST 稳定屏障、25 USDT 上限和最终零残余预检。其余闭环仍按地图逐票推进。
+零 BTC baseline、两轮 REST 稳定屏障、25 USDT 上限和最终零残余预检；固定策略已真实穿过
+Gateway、TradingShard 现金风控、OrderCommand、OKX 回报、经济投影与稳定重放。其余故障恢复闭环仍按地图逐票推进。
 Binance、Gate.io、Bitget Adapter 继续后置；Linux 五核生产性能资格仍是独立波次。

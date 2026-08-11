@@ -2,6 +2,7 @@
 //! This executable is intentionally separate from replay-capable product code.
 
 const std = @import("std");
+const engine = @import("main.zig");
 const journal = @import("journal.zig");
 const auth = @import("okx_rest_auth.zig");
 const curl = @import("okx_curl_transport.zig");
@@ -10,8 +11,9 @@ const market = @import("okx_public_market.zig");
 const order = @import("okx_order_entry.zig");
 const private = @import("okx_private_reconciliation.zig");
 const spot = @import("okx_spot_projection.zig");
+const strategy = @import("strategy_host_gateway.zig");
 
-const buy_quantity_atoms: i64 = 5_000; // 0.00005 BTC
+const buy_quantity_atoms: i64 = 20_000; // 0.0002 BTC; Demo minimum plus exact 1e-8 fee/quote projection
 const min_quantity_atoms: i64 = 1_000; // current BTC-USDT minSz 0.00001
 const source_session: u64 = 1;
 
@@ -33,7 +35,7 @@ const rest_endpoints = [_]RestEndpoint{
 };
 
 pub fn main(init: std.process.Init) !void {
-    try requireExplicitDemoLive(init);
+    const mode = try runMode(init);
     const key = init.environ_map.get("RINGWIN_OKX_KEY") orelse return error.MissingCredential;
     const secret = init.environ_map.get("RINGWIN_OKX_SECRET") orelse return error.MissingCredential;
     const passphrase = init.environ_map.get("RINGWIN_OKX_PASSPHRASE") orelse return error.MissingCredential;
@@ -49,20 +51,31 @@ pub fn main(init: std.process.Init) !void {
     var stable_sequence: u64 = 1;
 
     try establishReady(init, &owner, &raw, &reconciler);
+    try progress(init.io, "bootstrap");
     while (reconciler.drainReconciled()) |event| switch (event.payload) {
         .exchange_balance_snapshot => |snapshot| if (snapshot.scope == .full_rest) {
             try record(&projection, &stable, &stable_sequence, event);
         },
         else => {},
     };
-    if (projection.baseline_btc_atoms == null or projection.baseline_btc_atoms.? != 0)
-        return error.NonzeroBaselineBtc;
+    if (projection.baseline_btc_atoms == null) return error.MissingBaselineBtc;
+    try progress(init.io, "baseline");
+
+    if (mode == .cleanup_only) {
+        try cleanupResidual(init, &owner, &raw);
+        return;
+    }
+    if (projection.baseline_btc_atoms.? != 0) return error.NonzeroBaselineBtc;
 
     const prices = try ticker(init, &owner);
-    const buy_price_tenths = ceilDiv(prices.ask_tenths * 101, 100);
+    const limits = try priceLimits(init, &owner);
+    const buy_price_tenths = try protectedBuyPrice(prices, limits);
     try requireNotional(buy_quantity_atoms, buy_price_tenths);
     const run_identity = try currentUnixSeconds(init.io);
-    const buy_client = order.clientOrderId((@as(u128, run_identity) << 32) | 1);
+    const strategy_buy = try fixedStrategyBuy(init, run_identity, buy_price_tenths);
+    try progress(init.io, "strategy_order_command");
+    if (mode == .prepare_only) return;
+    const buy_client = strategy_buy.command.command.client_order_id;
     const sell_client = order.clientOrderId((@as(u128, run_identity) << 32) | 2);
 
     var chain: live.Chain = .{
@@ -72,12 +85,11 @@ pub fn main(init: std.process.Init) !void {
         .transport = owner.transport(),
     };
     var cleanup_needed = false;
-    defer if (cleanup_needed) emergencyCleanup(init, &owner, &chain, sell_client, prices.bid_tenths) catch {};
+    defer if (cleanup_needed) emergencyCleanup(init, &owner, &chain, sell_client) catch {};
 
     try refresh(&owner, init.io);
-    const buy = authorizedPlace(1, buy_client, .buy, buy_quantity_atoms, buy_price_tenths);
-    const buy_attempt = try chain.dispatch(init.gpa, &.{buy});
-    if (buy_attempt.dispatch.items[0].state == .not_sent) return error.BuyNotSent;
+    const buy_attempt = try chain.dispatch(init.gpa, &.{strategy_buy.command});
+    try requireVenueAccepted(init.io, buy_attempt.dispatch.items[0], error.BuyNotSent, error.BuyRejected);
     cleanup_needed = true;
     const buy_result = try waitForOrder(init, &owner, &raw, &reconciler, &projection, &stable, &stable_sequence, buy_client);
     if (!buy_result.terminal or projection.portfolio.position_base_atoms < min_quantity_atoms)
@@ -85,11 +97,12 @@ pub fn main(init: std.process.Init) !void {
 
     const cleanup_atoms = projection.portfolio.position_base_atoms;
     const fresh_prices = try ticker(init, &owner);
-    const sell_price_tenths = @divFloor(fresh_prices.bid_tenths * 99, 100);
+    const fresh_limits = try priceLimits(init, &owner);
+    const sell_price_tenths = try protectedSellPrice(fresh_prices, fresh_limits);
     try refresh(&owner, init.io);
-    const sell = authorizedPlace(2, sell_client, .sell, cleanup_atoms, sell_price_tenths);
+    const sell = authorizedPlace(2, 2, sell_client, .sell, .market, cleanup_atoms, sell_price_tenths);
     const sell_attempt = try chain.dispatch(init.gpa, &.{sell});
-    if (sell_attempt.dispatch.items[0].state == .not_sent) return error.CleanupNotSent;
+    try requireVenueAccepted(init.io, sell_attempt.dispatch.items[0], error.CleanupNotSent, error.CleanupRejected);
     // A possibly-sent cleanup is never replayed by the emergency path.
     cleanup_needed = false;
     const sell_result = try waitForOrder(init, &owner, &raw, &reconciler, &projection, &stable, &stable_sequence, sell_client);
@@ -132,7 +145,10 @@ fn waitForOrder(
             else => return err,
         };
         const batch = try reconciler.ingestWsMessage(init.gpa, raw.interface(), source_session, (try clock(init.io)).times, message);
-        if (batch.rejection != null) return error.PrivateIngressRejected;
+        if (batch.rejection) |reason| {
+            try diagnostic(init.io, "private_rejection", @tagName(reason));
+            return error.PrivateIngressRejected;
+        }
         for (batch.eventSlice()) |event| switch (event.payload) {
             .execution_report => |report| if (std.mem.eql(u8, report.client_order_id.slice(), client_order_id.slice())) {
                 try record(projection, stable, stable_sequence, event);
@@ -147,7 +163,7 @@ fn waitForOrder(
             },
             else => {},
         };
-        if (result.terminal and result.saw_balance) return result;
+        if (result.terminal and result.saw_balance and projection.economicReconciled()) return result;
     }
     return result;
 }
@@ -178,6 +194,7 @@ fn establishReady(init: std.process.Init, owner: *curl.TransportOwner, raw: *Raw
         if (reconciler.readiness().private_stream_ready) break;
     }
     if (!reconciler.readiness().private_stream_ready) return error.IncompletePrivateStream;
+    try progress(init.io, "private_stream");
     try reconciler.beginReconciliation(raw.count);
     for (0..2) |_| {
         for (rest_endpoints) |endpoint| {
@@ -185,7 +202,11 @@ fn establishReady(init: std.process.Init, owner: *curl.TransportOwner, raw: *Raw
             const response = owner.request(.get, endpoint.path, "");
             if (response.outcome != .response) return error.PrivateRequestUncertain;
             const batch = try reconciler.ingest(init.gpa, raw.interface(), source_session, (try clock(init.io)).times, endpoint.source, .{ .final = true }, response.response.?);
-            if (batch.rejection != null) return error.RestBootstrapRejected;
+            if (batch.rejection) |reason| {
+                try diagnostic(init.io, "rest_rejection_source", @tagName(endpoint.source));
+                try diagnostic(init.io, "rest_rejection_reason", @tagName(reason));
+                return error.RestBootstrapRejected;
+            }
         }
         _ = try reconciler.tryComplete();
     }
@@ -199,6 +220,7 @@ fn record(projection: *spot.Projection, stable: *journal.Journal, sequence: *u64
 }
 
 const Prices = struct { bid_tenths: i128, ask_tenths: i128 };
+const PriceLimits = struct { buy_tenths: i128, sell_tenths: i128 };
 
 fn ticker(init: std.process.Init, owner: *curl.TransportOwner) !Prices {
     try refresh(owner, init.io);
@@ -225,6 +247,50 @@ fn ticker(init: std.process.Init, owner: *curl.TransportOwner) !Prices {
     };
 }
 
+fn priceLimits(init: std.process.Init, owner: *curl.TransportOwner) !PriceLimits {
+    try refresh(owner, init.io);
+    const response = owner.request(.get, "/api/v5/public/price-limit?instId=BTC-USDT", "");
+    if (response.outcome != .response) return error.PriceLimitUnavailable;
+    const parsed = try std.json.parseFromSlice(std.json.Value, init.gpa, response.response.?, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |value| value,
+        else => return error.InvalidPriceLimit,
+    };
+    const data = switch (root.get("data") orelse return error.InvalidPriceLimit) {
+        .array => |value| value,
+        else => return error.InvalidPriceLimit,
+    };
+    if (data.items.len != 1) return error.InvalidPriceLimit;
+    const row = switch (data.items[0]) {
+        .object => |value| value,
+        else => return error.InvalidPriceLimit,
+    };
+    const enabled = switch (row.get("enabled") orelse return error.InvalidPriceLimit) {
+        .bool => |value| value,
+        else => return error.InvalidPriceLimit,
+    };
+    if (!enabled) return error.PriceLimitDisabled;
+    return .{
+        .buy_tenths = try priceTenths(row.get("buyLmt") orelse return error.InvalidPriceLimit, false),
+        .sell_tenths = try priceTenths(row.get("sellLmt") orelse return error.InvalidPriceLimit, true),
+    };
+}
+
+fn protectedBuyPrice(prices: Prices, limits: PriceLimits) !i128 {
+    const crossing_with_headroom = ceilDiv(prices.ask_tenths * 1_001, 1_000);
+    const price = @min(crossing_with_headroom, limits.buy_tenths);
+    if (price < prices.ask_tenths) return error.NoExecutableBuyPrice;
+    return price;
+}
+
+fn protectedSellPrice(prices: Prices, limits: PriceLimits) !i128 {
+    const crossing_with_headroom = @divFloor(prices.bid_tenths * 999, 1_000);
+    const price = @max(crossing_with_headroom, limits.sell_tenths);
+    if (price > prices.bid_tenths) return error.NoExecutableSellPrice;
+    return price;
+}
+
 fn priceTenths(value: std.json.Value, round_up: bool) !i128 {
     const text = switch (value) {
         .string => |bytes| bytes,
@@ -237,12 +303,76 @@ fn priceTenths(value: std.json.Value, round_up: bool) !i128 {
     return if (round_up) ceilDiv(decimal.coefficient, divisor) else @divFloor(decimal.coefficient, divisor);
 }
 
-fn authorizedPlace(command_id: u64, client_id: order.ClientOrderId, side: order.Side, quantity_atoms: i64, price_tenths: i128) live.AuthorizedCommand {
+const StrategyBuy = struct {
+    command: live.AuthorizedCommand,
+};
+
+fn fixedStrategyBuy(init: std.process.Init, intent_sequence: u64, price_tenths: i128) !StrategyBuy {
+    const strategy_identity: u128 = 0x4f4b585f44454d4f5f4254435f494f43;
+    const authorization: strategy.Authorization = .{
+        .strategy_identity = strategy_identity,
+        .config_version = 1,
+        .activation_identity = 1,
+        .activation_barrier = 10,
+    };
+    const config: strategy.Config = .{
+        .schema_registry = 1,
+        .decision_domain = 1,
+        .session = .{ .fencing = 1, .shard = 0, .generation = 1 },
+        .authorization = authorization,
+    };
+    const subscriptions = [_]strategy.Subscription{
+        strategy.Subscription.of(strategy_identity, &.{ .mark_price, .l2_delta }),
+    };
+    var gateway = try strategy.Gateway.init(config, &subscriptions);
+    const now_ns = std.math.cast(i64, std.Io.Clock.awake.now(init.io).nanoseconds) orelse
+        return error.ClockOutOfRange;
+    try gateway.recordPublished(1, 14, now_ns);
+    var frame_storage: [256]u8 = undefined;
+    const frame = try strategy.encodeOutputOrderFrame(&frame_storage, config, 1, 14, intent_sequence, .{
+        .instrument_identity = 3,
+        .side = .buy,
+        .time_in_force = .immediate_or_cancel,
+        .quantity = buy_quantity_atoms,
+        .limit_price_micros = std.math.cast(i64, price_tenths * 100_000) orelse return error.InvalidTicker,
+    });
+    const decision = gateway.ingest(frame, now_ns);
+    if (decision != .accepted) return error.FixedStrategyRejected;
+    var ingress = try engine.TradingShardHostIngress.initHealthySpotFixture();
+    const host_order = (try ingress.applyDecisionCommand(decision)) orelse return error.RiskRejected;
+    if (host_order.instrument_identity != 3 or host_order.side != .buy or
+        host_order.time_in_force != .immediate_or_cancel or host_order.portfolio_reduce_only or
+        host_order.quantity != buy_quantity_atoms or host_order.limit_price_micros <= 0 or
+        host_order.reservation_micros <= 0)
+        return error.InvalidQualifiedCommand;
+    try ingress.verifyReplay();
+    const order_identity = strategy_identity ^ @as(u128, intent_sequence);
+    return .{ .command = authorizedPlace(
+        host_order.command_id,
+        host_order.order_id,
+        order.clientOrderId(order_identity),
+        .buy,
+        .limit_ioc,
+        host_order.quantity,
+        @divExact(@as(i128, host_order.limit_price_micros), 100_000),
+    ) };
+}
+
+fn authorizedPlace(
+    command_id: u64,
+    order_id: u64,
+    client_id: order.ClientOrderId,
+    side: order.Side,
+    kind: order.OrderKind,
+    quantity_atoms: i64,
+    price_tenths: i128,
+) live.AuthorizedCommand {
+    const protected_notional = @divFloor(@as(i128, quantity_atoms) * price_tenths, 1_000);
     return .{
-        .reserved_notional_usdt_micros = 5_000_000,
+        .reserved_notional_usdt_micros = std.math.cast(u64, protected_notional) orelse std.math.maxInt(u64),
         .command = .{
             .command_id = command_id,
-            .order_id = command_id,
+            .order_id = order_id,
             .order_revision = 1,
             .shard_sequence = command_id,
             .instrument = .btc_usdt_spot,
@@ -256,10 +386,10 @@ fn authorizedPlace(command_id: u64, client_id: order.ClientOrderId, side: order.
             .risk_reservation_id = command_id,
             .payload = .{ .place = .{
                 .side = side,
-                .kind = .market,
+                .kind = kind,
                 .quantity = .{ .coefficient = quantity_atoms, .scale = 8 },
-                .limit_price = null,
-                .market_protection_price = .{ .coefficient = price_tenths, .scale = 1 },
+                .limit_price = if (kind == .market) null else .{ .coefficient = price_tenths, .scale = 1 },
+                .market_protection_price = if (kind == .market) .{ .coefficient = price_tenths, .scale = 1 } else null,
                 .portfolio_reduce_only = side == .sell,
                 .venue_reduce_only = false,
             } },
@@ -272,12 +402,84 @@ fn requireNotional(quantity_atoms: i64, price_tenths: i128) !void {
     if (micros <= 0 or micros > live.max_notional_usdt_micros) return error.NotionalLimitExceeded;
 }
 
-fn emergencyCleanup(init: std.process.Init, owner: *curl.TransportOwner, chain: *live.Chain, client_id: order.ClientOrderId, bid_tenths: i128) !void {
+fn requireVenueAccepted(io: std.Io, item: order.DispatchResult, not_sent: anyerror, rejected: anyerror) !void {
+    if (item.state == .not_sent) return not_sent;
+    if (item.reason != null or !std.mem.eql(u8, item.venue_code.slice(), "0")) {
+        try diagnostic(io, "venue_s_code", item.venue_code.slice());
+        return rejected;
+    }
+    if (item.state != .submitted) return error.DispatchUnknown;
+}
+
+fn diagnostic(io: std.Io, name: []const u8, value: []const u8) !void {
+    var buffer: [160]u8 = undefined;
+    var out = std.Io.File.stderr().writer(io, &buffer);
+    try out.interface.print("{s}={s}\n", .{ name, value });
+    try out.interface.flush();
+}
+
+fn emergencyCleanup(init: std.process.Init, owner: *curl.TransportOwner, chain: *live.Chain, client_id: order.ClientOrderId) !void {
     const balance_atoms = try availableBtcAtoms(init, owner);
     if (balance_atoms < min_quantity_atoms) return;
+    const prices = try ticker(init, owner);
+    const limits = try priceLimits(init, owner);
+    const sell_price_tenths = try protectedSellPrice(prices, limits);
     try refresh(owner, init.io);
-    const cleanup = authorizedPlace(99, client_id, .sell, balance_atoms, @divFloor(bid_tenths * 98, 100));
-    _ = try chain.dispatch(init.gpa, &.{cleanup});
+    const cleanup = authorizedPlace(99, 99, client_id, .sell, .market, balance_atoms, sell_price_tenths);
+    const attempt = try chain.dispatch(init.gpa, &.{cleanup});
+    try requireVenueAccepted(init.io, attempt.dispatch.items[0], error.CleanupNotSent, error.CleanupRejected);
+}
+
+fn cleanupResidual(init: std.process.Init, owner: *curl.TransportOwner, raw: *RawSink) !void {
+    var balance_atoms = try availableBtcAtoms(init, owner);
+    if (balance_atoms < min_quantity_atoms) return error.NoCleanableBtc;
+    if (balance_atoms < buy_quantity_atoms) {
+        try topUpDemoCleanupBalance(init, owner);
+        balance_atoms = try availableBtcAtoms(init, owner);
+        if (balance_atoms < buy_quantity_atoms) return error.CleanupTopUpMissing;
+    }
+    const prices = try ticker(init, owner);
+    const limits = try priceLimits(init, owner);
+    const sell_price_tenths = try protectedSellPrice(prices, limits);
+    const run_identity = try currentUnixSeconds(init.io);
+    const client_id = order.clientOrderId((@as(u128, run_identity) << 32) | 3);
+    var chain: live.Chain = .{
+        .mode = .demo_live,
+        .qualification = qualified(),
+        .raw_sink = raw.interface(),
+        .transport = owner.transport(),
+    };
+    try refresh(owner, init.io);
+    const cleanup = authorizedPlace(99, 99, client_id, .sell, .market, balance_atoms, sell_price_tenths);
+    const attempt = try chain.dispatch(init.gpa, &.{cleanup});
+    try requireVenueAccepted(init.io, attempt.dispatch.items[0], error.CleanupNotSent, error.CleanupRejected);
+    for (0..6) |_| if (try availableBtcAtoms(init, owner) == 0) {
+        try progress(init.io, "residual_cleanup");
+        return;
+    };
+    return error.CleanupBalanceNotZero;
+}
+
+fn topUpDemoCleanupBalance(init: std.process.Init, owner: *curl.TransportOwner) !void {
+    try refresh(owner, init.io);
+    const response = owner.request(
+        .post,
+        "/api/v5/account/demo-adjust-balance",
+        "{\"type\":\"increase\",\"adjustments\":[{\"ccy\":\"BTC\",\"amt\":\"0.0001\"}]}",
+    );
+    if (response.outcome != .response) return error.CleanupTopUpUncertain;
+    const parsed = try std.json.parseFromSlice(std.json.Value, init.gpa, response.response.?, .{});
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |value| value,
+        else => return error.CleanupTopUpRejected,
+    };
+    const code = switch (root.get("code") orelse return error.CleanupTopUpRejected) {
+        .string => |value| value,
+        else => return error.CleanupTopUpRejected,
+    };
+    if (!std.mem.eql(u8, code, "0")) return error.CleanupTopUpRejected;
+    try progress(init.io, "demo_cleanup_top_up");
 }
 
 fn availableBtcAtoms(init: std.process.Init, owner: *curl.TransportOwner) !i64 {
@@ -324,12 +526,13 @@ fn availableBtcAtoms(init: std.process.Init, owner: *curl.TransportOwner) !i64 {
 }
 
 const Clock = struct {
-    timestamp: [24]u8,
+    timestamp: [32]u8,
+    timestamp_len: u8,
     seconds: [20]u8,
     seconds_len: u8,
     times: market.Times,
     fn timestampSlice(self: *const Clock) []const u8 {
-        return &self.timestamp;
+        return self.timestamp[0..self.timestamp_len];
     }
     fn secondsSlice(self: *const Clock) []const u8 {
         return self.seconds[0..self.seconds_len];
@@ -341,12 +544,14 @@ fn clock(io: std.Io) !Clock {
     const monotonic_ns = std.math.cast(i64, std.Io.Clock.awake.now(io).nanoseconds) orelse return error.ClockOutOfRange;
     if (real_ns <= 0 or monotonic_ns <= 0) return error.ClockUnavailable;
     const epoch_seconds: u64 = @intCast(@divFloor(real_ns, std.time.ns_per_s));
+    const milliseconds: u16 = @intCast(@divFloor(@mod(real_ns, std.time.ns_per_s), std.time.ns_per_ms));
     const epoch = std.time.epoch.EpochSeconds{ .secs = epoch_seconds };
     const year_day = epoch.getEpochDay().calculateYearDay();
     const month_day = year_day.calculateMonthDay();
     const day_seconds = epoch.getDaySeconds();
     var result: Clock = .{
         .timestamp = undefined,
+        .timestamp_len = 0,
         .seconds = undefined,
         .seconds_len = 0,
         .times = .{
@@ -356,11 +561,12 @@ fn clock(io: std.Io) !Clock {
         },
     };
     const timestamp = try std.fmt.bufPrint(&result.timestamp, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
-        year_day.year,                                                   month_day.month.numeric(),        month_day.day_index + 1,
-        day_seconds.getHoursIntoDay(),                                   day_seconds.getMinutesIntoHour(), day_seconds.getSecondsIntoMinute(),
-        @divFloor(@mod(real_ns, std.time.ns_per_s), std.time.ns_per_ms),
+        year_day.year,                 month_day.month.numeric(),        month_day.day_index + 1,
+        day_seconds.getHoursIntoDay(), day_seconds.getMinutesIntoHour(), day_seconds.getSecondsIntoMinute(),
+        milliseconds,
     });
-    if (timestamp.len != result.timestamp.len) return error.ClockFormat;
+    if (timestamp.len != 24) return error.ClockFormat;
+    result.timestamp_len = @intCast(timestamp.len);
     const seconds = try std.fmt.bufPrint(&result.seconds, "{d}", .{epoch_seconds});
     result.seconds_len = @intCast(seconds.len);
     return result;
@@ -377,12 +583,25 @@ fn currentUnixSeconds(io: std.Io) !u64 {
     return @intCast(@divFloor(ns, std.time.ns_per_s));
 }
 
-fn requireExplicitDemoLive(init: std.process.Init) !void {
+const RunMode = enum { prepare_only, demo_live, cleanup_only };
+
+fn runMode(init: std.process.Init) !RunMode {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer args.deinit();
     _ = args.next();
-    const flag = args.next() orelse return error.ExplicitDemoLiveRequired;
-    if (!std.mem.eql(u8, flag, "--demo-live") or args.next() != null) return error.ExplicitDemoLiveRequired;
+    const flag = args.next() orelse return error.ExplicitModeRequired;
+    if (args.next() != null) return error.ExplicitModeRequired;
+    if (std.mem.eql(u8, flag, "--demo-live")) return .demo_live;
+    if (std.mem.eql(u8, flag, "--prepare-only")) return .prepare_only;
+    if (std.mem.eql(u8, flag, "--cleanup-only")) return .cleanup_only;
+    return error.ExplicitModeRequired;
+}
+
+fn progress(io: std.Io, phase: []const u8) !void {
+    var buffer: [128]u8 = undefined;
+    var out = std.Io.File.stdout().writer(io, &buffer);
+    try out.interface.print("phase={s} ok\n", .{phase});
+    try out.interface.flush();
 }
 
 fn qualified() live.Qualification {

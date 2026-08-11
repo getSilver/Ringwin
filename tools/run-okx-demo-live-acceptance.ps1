@@ -1,20 +1,29 @@
 [CmdletBinding()]
 param(
     [switch]$DemoLive,
+    [switch]$PrepareOnly,
+    [switch]$CleanupOnly,
+    [ValidateSet('Debug','ReleaseSafe')] [string]$Optimize = 'ReleaseSafe',
     [string]$EnvFile = (Join-Path $PSScriptRoot '..\.env.local')
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-if (-not $DemoLive) { throw 'Explicit -DemoLive authorization is required' }
+if (@($DemoLive, $PrepareOnly, $CleanupOnly).Where({ $_ }).Count -ne 1) {
+    throw 'Choose exactly one of -DemoLive, -PrepareOnly, or -CleanupOnly'
+}
+if (($DemoLive -or $CleanupOnly) -and $Optimize -ne 'ReleaseSafe') { throw 'Demo writes require ReleaseSafe' }
 
 $preflight = & (Join-Path $PSScriptRoot 'okx-demo-preflight.ps1') -EnvFile $EnvFile | ConvertFrom-Json
 if (-not $preflight.qualified -or $preflight.environment -ne 'demo' -or $preflight.pending_orders -ne 0 -or
     $preflight.pending_algo_orders -ne 0 -or $preflight.open_positions -ne 0 -or $preflight.liabilities -ne 0) {
     throw 'OKX Demo preflight did not qualify a clean account'
 }
-if (@($preflight.funded_currencies | Where-Object { $_ -ne 'USDT' }).Count -ne 0) {
+if (-not $CleanupOnly -and @($preflight.funded_currencies | Where-Object { $_ -ne 'USDT' }).Count -ne 0) {
     throw 'Demo acceptance requires a zero BTC baseline and USDT-only funding'
+}
+if ($CleanupOnly -and @($preflight.funded_currencies | Where-Object { $_ -notin @('BTC', 'USDT') }).Count -ne 0) {
+    throw 'Demo cleanup permits only BTC and USDT funding'
 }
 
 $values = @{}
@@ -41,7 +50,7 @@ try {
     & zig run (Join-Path $PSScriptRoot '..\src\okx_demo_live_acceptance.zig') `
         (Join-Path $PSScriptRoot '..\src\okx_curl_shim.c') "-I$source" "-L$(Join-Path $build 'lib')" `
         -lc -lcurl -lws2_32 -lcrypt32 -lsecur32 -ladvapi32 -lbcrypt -lwldap32 -lnormaliz -liphlpapi `
-        -OReleaseSafe -- --demo-live
+        "-O$Optimize" -- $(if ($DemoLive) { '--demo-live' } elseif ($CleanupOnly) { '--cleanup-only' } else { '--prepare-only' })
     if ($LASTEXITCODE -ne 0) { throw 'OKX Demo live acceptance failed' }
 } finally {
     $env:RINGWIN_OKX_KEY = $null

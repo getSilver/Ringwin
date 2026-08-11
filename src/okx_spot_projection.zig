@@ -84,8 +84,10 @@ pub const Projection = struct {
         const base_usdt = self.baseline_usdt_atoms orelse return false;
         const observed_btc = self.observed_btc_atoms orelse return false;
         const observed_usdt = self.observed_usdt_atoms orelse return false;
-        return observed_btc - base_btc == self.exchange.btc_balance_atoms and
-            observed_usdt - base_usdt == self.exchange.usdt_balance_atoms;
+        if (observed_btc - base_btc != self.exchange.btc_balance_atoms) return false;
+        const usdt_delta = observed_usdt - base_usdt;
+        const usdt_difference = std.math.sub(i64, usdt_delta, self.exchange.usdt_balance_atoms) catch return false;
+        return usdt_difference >= -1 and usdt_difference <= 1;
     }
 
     pub fn digest(self: *const Projection) [Sha256.digest_length]u8 {
@@ -193,14 +195,18 @@ pub const Projection = struct {
         var usdt: ?i64 = null;
         for (snapshot.balances[0..snapshot.balance_count]) |balance| {
             const cash = balance.cash_balance orelse continue;
-            if (std.mem.eql(u8, balance.asset.slice(), "BTC")) btc = try atoms(cash);
-            if (std.mem.eql(u8, balance.asset.slice(), "USDT")) usdt = try atoms(cash);
+            if (std.mem.eql(u8, balance.asset.slice(), "BTC")) btc = try venueAssetAtoms(cash);
+            if (std.mem.eql(u8, balance.asset.slice(), "USDT")) usdt = try venueAssetAtoms(cash);
         }
         if (snapshot.scope == .full_rest and self.seen_fill_count == 0) {
-            if (btc) |value| self.baseline_btc_atoms = value;
+            self.baseline_btc_atoms = btc orelse 0;
             if (usdt) |value| self.baseline_usdt_atoms = value;
         }
-        if (btc) |value| self.observed_btc_atoms = value;
+        if (btc) |value| {
+            self.observed_btc_atoms = value;
+        } else if (snapshot.scope == .full_rest) {
+            self.observed_btc_atoms = 0;
+        }
         if (usdt) |value| self.observed_usdt_atoms = value;
     }
 
@@ -527,7 +533,7 @@ fn applyEconomic(
     fee_asset: private.AssetCode,
     venue_realized_pnl: ?private.Decimal,
 ) !void {
-    const fee_atoms = try atoms(venue_fee);
+    const fee_atoms = try venueAssetAtoms(venue_fee);
     const fee_is_btc = std.mem.eql(u8, fee_asset.slice(), "BTC");
     if (side == .sell and fee_is_btc and fee_atoms != 0)
         return error.UnsupportedSellBaseFee;
@@ -576,7 +582,7 @@ fn applyEconomic(
     layer.ledger_transactions = try std.math.add(u64, layer.ledger_transactions, 1);
     try applyFee(layer, venue_fee, fee_asset);
     if (venue_realized_pnl) |reported| {
-        const venue_value = try atoms(reported);
+        const venue_value = try venueAssetAtoms(reported);
         // OKX SPOT reports fillPnl as zero; local inventory cost owns SPOT realized PnL.
         if (venue_value != 0 and venue_value != layer.realized_pnl_quote_atoms - realized_before)
             return error.RealizedPnlMismatch;
@@ -584,7 +590,7 @@ fn applyEconomic(
 }
 
 fn applyFee(layer: *Layer, venue_fee: private.Decimal, fee_asset: private.AssetCode) !void {
-    const signed = try atoms(venue_fee);
+    const signed = try venueAssetAtoms(venue_fee);
     if (signed == 0) return;
     const btc = std.mem.eql(u8, fee_asset.slice(), "BTC");
     const usdt = std.mem.eql(u8, fee_asset.slice(), "USDT");
@@ -613,6 +619,13 @@ fn atoms(value: private.Decimal) !i64 {
         scaled = @divTrunc(scaled, divisor);
     }
     return std.math.cast(i64, scaled) orelse error.Overflow;
+}
+
+fn venueAssetAtoms(value: private.Decimal) !i64 {
+    if (value.scale <= 8) return atoms(value);
+    var divisor: i128 = 1;
+    for (8..value.scale) |_| divisor = try std.math.mul(i128, divisor, 10);
+    return std.math.cast(i64, @divTrunc(value.coefficient, divisor)) orelse return error.Overflow;
 }
 
 fn hashLayer(hasher: *Sha256, layer: Layer) void {
@@ -773,6 +786,37 @@ test "spot base fee cost uses quote-atom floor at live tick precision" {
     );
     try std.testing.expectEqual(@as(i64, 4_996), layer.position_base_atoms);
     try std.testing.expectEqual(@as(i64, 317_485_309), layer.open_cost_quote_atoms);
+}
+
+test "exchange balances quantize toward zero at projection precision" {
+    try std.testing.expectEqual(
+        @as(i64, 250_778_264_613),
+        try venueAssetAtoms(try private.Decimal.parse("2507.7826461328514")),
+    );
+    try std.testing.expectEqual(
+        @as(i64, -697_136),
+        try venueAssetAtoms(try private.Decimal.parse("-0.006971366655")),
+    );
+    try std.testing.expectError(
+        error.InexactAssetAmount,
+        atoms(try private.Decimal.parse("2507.7826461328514")),
+    );
+}
+
+test "economic reconciliation admits one USDT atom of endpoint quantization" {
+    var projection: Projection = .{
+        .baseline_btc_atoms = 0,
+        .observed_btc_atoms = 0,
+        .baseline_usdt_atoms = 1_000,
+        .observed_usdt_atoms = 899,
+    };
+    projection.exchange.usdt_balance_atoms = -100;
+    try std.testing.expect(projection.economicReconciled());
+    projection.observed_usdt_atoms = 898;
+    try std.testing.expect(!projection.economicReconciled());
+    projection.observed_usdt_atoms = 899;
+    projection.observed_btc_atoms = 1;
+    try std.testing.expect(!projection.economicReconciled());
 }
 
 test "spot projection retains strategy and cleanup orders across stable replay" {

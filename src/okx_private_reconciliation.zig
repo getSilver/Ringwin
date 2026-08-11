@@ -675,6 +675,10 @@ pub const Reconciler = struct {
             }));
         }
 
+        // REST order history exposes only the latest fill-shaped fields and
+        // cumulative fees. Authoritative historical fills come from fills-history.
+        if (source != .ws_orders) return;
+
         const trade_text = try optionalStringField(row, "tradeId") orelse return;
         if (trade_text.len == 0) return;
         const fill_size = try optionalDecimalField(row, "fillSz") orelse return error.InvalidField;
@@ -754,6 +758,10 @@ pub const Reconciler = struct {
         batch: *IngressBatch,
     ) !void {
         const identity = fillIdentity(fill.instrument, fill.venue_trade_id);
+        if (fill.venue_bill_id) |bill_id| {
+            _ = try self.remember(fillBillIdentity(fill.instrument, fill.venue_trade_id), hashBillId(bill_id));
+            _ = try self.remember(billIdentity(bill_id), identity);
+        }
         if (!try self.remember(identity, hashFill(&fill))) {
             try batch.append(makeEvent(
                 times,
@@ -797,7 +805,8 @@ pub const Reconciler = struct {
             snapshot.balance_count += 1;
         }
         const balance_identity = scopedTimeIdentity("balance", snapshot.scope, update_time);
-        if (!try self.remember(balance_identity, hashBalance(&snapshot)))
+        const balance_duplicate = try self.remember(balance_identity, hashBalance(&snapshot));
+        if (!balance_duplicate or is_rest)
             try batch.append(makeEvent(times, update_time, evidence, balance_identity, .{
                 .exchange_balance_snapshot = snapshot,
             }));
@@ -813,7 +822,8 @@ pub const Reconciler = struct {
             .isolated_equity_usd = try optionalDecimalField(row, "isoEq"),
         };
         const margin_identity = scopedTimeIdentity("margin", snapshot.scope, update_time);
-        if (!try self.remember(margin_identity, hashMargin(&margin)))
+        const margin_duplicate = try self.remember(margin_identity, hashMargin(&margin));
+        if (!margin_duplicate or is_rest)
             try batch.append(makeEvent(times, update_time, evidence, margin_identity, .{
                 .exchange_margin_snapshot = margin,
             }));
@@ -958,7 +968,7 @@ pub const Reconciler = struct {
         endpoint.complete = page.final;
         var hasher = Sha256.init(.{});
         hasher.update(&endpoint.digest);
-        hasher.update(&raw_hash);
+        hasher.update(&restPageDigest(source, raw_hash, batch));
         endpoint.digest = hasher.finalResult();
         endpoint.page_count += 1;
     }
@@ -974,7 +984,12 @@ pub const Reconciler = struct {
         const page = try unsignedField(object, "curPage");
         const last_page = try boolField(object, "lastPage");
         const snapshot = &self.ws_snapshots[index];
-        if (snapshot.complete or page != snapshot.next_page) return error.InvalidPageCursor;
+        if (snapshot.complete) {
+            if (page != 1) return error.InvalidPageCursor;
+            snapshot.next_page = 1;
+            snapshot.complete = false;
+        }
+        if (page != snapshot.next_page) return error.InvalidPageCursor;
         snapshot.next_page += 1;
         snapshot.complete = last_page;
         self.updatePrivateStreamStage();
@@ -987,6 +1002,20 @@ pub const Reconciler = struct {
             self.stage = .buffering;
     }
 };
+
+fn restPageDigest(
+    source: IngressSource,
+    raw_hash: [Sha256.digest_length]u8,
+    batch: *const IngressBatch,
+) [Sha256.digest_length]u8 {
+    if (source != .rest_balance) return raw_hash;
+    var hasher = Sha256.init(.{});
+    for (batch.eventSlice()) |event| switch (event.payload) {
+        .exchange_balance_snapshot => |snapshot| hasher.update(&hashBalance(&snapshot)),
+        else => {},
+    };
+    return hasher.finalResult();
+}
 
 fn allTrue(values: []const bool) bool {
     for (values) |value| if (!value) return false;
@@ -1239,6 +1268,27 @@ fn fillIdentity(instrument: Instrument, trade_id: VenueTradeId) [32]u8 {
     return hasher.finalResult();
 }
 
+fn fillBillIdentity(instrument: Instrument, trade_id: VenueTradeId) [32]u8 {
+    var hasher = Sha256.init(.{});
+    hasher.update("fill-bill");
+    hasher.update(&.{@intFromEnum(instrument)});
+    hashI64(&hasher, @intFromEnum(trade_id));
+    return hasher.finalResult();
+}
+
+fn billIdentity(bill_id: VenueBillId) [32]u8 {
+    var hasher = Sha256.init(.{});
+    hasher.update("bill");
+    hashU64(&hasher, @intFromEnum(bill_id));
+    return hasher.finalResult();
+}
+
+fn hashBillId(bill_id: VenueBillId) [32]u8 {
+    var hasher = Sha256.init(.{});
+    hashU64(&hasher, @intFromEnum(bill_id));
+    return hasher.finalResult();
+}
+
 fn scopedTimeIdentity(prefix: []const u8, scope: SnapshotScope, update_time: u64) [32]u8 {
     var hasher = Sha256.init(.{});
     hasher.update(prefix);
@@ -1277,7 +1327,6 @@ fn hashReport(report: *const ExecutionReport) [32]u8 {
 fn hashFill(fill: *const Fill) [32]u8 {
     var hasher = Sha256.init(.{});
     hashI64(&hasher, @intFromEnum(fill.venue_trade_id));
-    if (fill.venue_bill_id) |bill_id| hashU64(&hasher, @intFromEnum(bill_id));
     hashU64(&hasher, @intFromEnum(fill.venue_order_id));
     hasher.update(fill.client_order_id.slice());
     hasher.update(&.{ @intFromEnum(fill.instrument), @intFromEnum(fill.side) });
@@ -1583,6 +1632,41 @@ test "private snapshots and two stable REST reads open then disconnect revokes b
     try std.testing.expect(!reconciler.readiness().reconciliation_ready);
 }
 
+test "REST balance stability ignores observation uTime but not economic values" {
+    var batch: IngressBatch = .{
+        .raw_evidence = .{ .stream_sequence = 1, .sha256 = @splat(1) },
+    };
+    var snapshot: ExchangeBalanceSnapshot = .{
+        .scope = .full_rest,
+        .venue_update_time_utc_ns = 1,
+    };
+    snapshot.balances[0] = .{
+        .asset = try AssetCode.init("USDT"),
+        .cash_balance = try Decimal.parse("25"),
+        .available_balance = try Decimal.parse("25"),
+        .equity = try Decimal.parse("25"),
+        .frozen_balance = try Decimal.parse("0"),
+        .liability = try Decimal.parse("0"),
+        .isolated_liability = try Decimal.parse("0"),
+        .cross_liability = try Decimal.parse("0"),
+    };
+    snapshot.balance_count = 1;
+    try batch.append(makeEvent(
+        .{ .receive_time_utc_ns = 2, .monotonic_time_ns = 3, .wall_time_utc_ns = 4 },
+        1,
+        batch.raw_evidence,
+        @splat(2),
+        .{ .exchange_balance_snapshot = snapshot },
+    ));
+    const first = restPageDigest(.rest_balance, @splat(3), &batch);
+    batch.events[0].payload.exchange_balance_snapshot.venue_update_time_utc_ns = 2;
+    const later_observation = restPageDigest(.rest_balance, @splat(4), &batch);
+    try std.testing.expectEqualSlices(u8, &first, &later_observation);
+    batch.events[0].payload.exchange_balance_snapshot.balances[0].cash_balance = try Decimal.parse("24");
+    const changed = restPageDigest(.rest_balance, @splat(5), &batch);
+    try std.testing.expect(!std.mem.eql(u8, &first, &changed));
+}
+
 test "orders duplicate with a changed update time is semantically idempotent" {
     var reconciler: Reconciler = .{};
     var sink: TestRawSink = .{};
@@ -1598,4 +1682,43 @@ test "orders duplicate with a changed update time is semantically idempotent" {
     try std.testing.expect(duplicate.buffered);
     try std.testing.expectEqual(initial_event_count + 1, reconciler.ws_event_count);
     try std.testing.expectEqual(@as(?RejectReason, null), duplicate.rejection);
+}
+
+test "account snapshot after initial private-stream page starts a new observation" {
+    var reconciler: Reconciler = .{};
+    var sink: TestRawSink = .{};
+    try establishPrivateStream(&reconciler, &sink);
+
+    const batch = try ingestTest(&reconciler, &sink, .ws_account, null,
+        \\{"arg":{"channel":"account"},"eventType":"snapshot","curPage":1,"lastPage":true,"data":[{"uTime":"1800000000001","totalEq":"","adjEq":"","imr":"","mmr":"","mgnRatio":"","isoEq":"","details":[]}]}
+    );
+    try std.testing.expectEqual(@as(?RejectReason, null), batch.rejection);
+}
+
+test "REST bill identity enriches an otherwise identical WS fill" {
+    var reconciler: Reconciler = .{};
+    const fill: Fill = .{
+        .venue_trade_id = @enumFromInt(2001),
+        .venue_bill_id = null,
+        .venue_order_id = @enumFromInt(1001),
+        .client_order_id = try ClientOrderId.init("RWNTEST1"),
+        .instrument = .btc_usdt_spot,
+        .side = .buy,
+        .quantity = try Decimal.parse("0.00005"),
+        .price = try Decimal.parse("63500"),
+        .fee = try Decimal.parse("-0.00000005"),
+        .fee_asset = try AssetCode.init("BTC"),
+        .realized_pnl = try Decimal.parse("0"),
+        .liquidity = .taker,
+        .venue_fill_time_utc_ns = 1_800_000_000_100_000_000,
+        .owned_by_ringwin = true,
+    };
+    var ws_batch: IngressBatch = .{ .raw_evidence = .{ .stream_sequence = 1, .sha256 = @splat(1) } };
+    try reconciler.appendFill(fill, test_times, ws_batch.raw_evidence, &ws_batch);
+
+    var rest_fill = fill;
+    rest_fill.venue_bill_id = @enumFromInt(3001);
+    var rest_batch: IngressBatch = .{ .raw_evidence = .{ .stream_sequence = 2, .sha256 = @splat(2) } };
+    try reconciler.appendFill(rest_fill, test_times, rest_batch.raw_evidence, &rest_batch);
+    try std.testing.expectEqual(@as(u8, 0), rest_batch.event_count);
 }

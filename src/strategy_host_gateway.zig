@@ -58,7 +58,16 @@ pub const Config = struct {
 
 pub const Side = enum(u8) { buy = 1, sell = 2 };
 pub const OrderType = enum(u8) { limit = 1 };
-pub const TimeInForce = enum(u8) { good_til_canceled = 1 };
+pub const TimeInForce = enum(u8) { good_til_canceled = 1, immediate_or_cancel = 2 };
+
+pub const OutputOrder = struct {
+    instrument_identity: u128 = 3,
+    side: Side = .buy,
+    time_in_force: TimeInForce = .good_til_canceled,
+    portfolio_reduce_only: bool = false,
+    quantity: i64,
+    limit_price_micros: i64,
+};
 
 pub const OrderIntent = struct {
     strategy_identity: u128,
@@ -351,6 +360,20 @@ pub fn encodeOutputFrame(
     quantity: i64,
     limit_price_micros: i64,
 ) ![]u8 {
+    return encodeOutputOrderFrame(destination, config, source_batch_sequence, strategy_cursor, intent_sequence, .{
+        .quantity = quantity,
+        .limit_price_micros = limit_price_micros,
+    });
+}
+
+pub fn encodeOutputOrderFrame(
+    destination: []u8,
+    config: Config,
+    source_batch_sequence: u64,
+    strategy_cursor: u64,
+    intent_sequence: u64,
+    order: OutputOrder,
+) ![]u8 {
     const total_len = output_header_len + order_intent_len;
     if (destination.len < total_len) return error.FrameTooLarge;
     const frame = destination[0..total_len];
@@ -374,16 +397,16 @@ pub fn encodeOutputFrame(
     put(u128, frame, 108, config.authorization.activation_identity);
     const payload = frame[128..];
     put(u16, payload, 0, 1);
-    payload[2] = @intFromEnum(Side.buy);
+    payload[2] = @intFromEnum(order.side);
     payload[3] = @intFromEnum(OrderType.limit);
-    payload[4] = @intFromEnum(TimeInForce.good_til_canceled);
-    payload[5] = 0;
+    payload[4] = @intFromEnum(order.time_in_force);
+    payload[5] = @intFromBool(order.portfolio_reduce_only);
     put(u64, payload, 8, intent_sequence);
     put(u128, payload, 16, 1);
     put(u128, payload, 32, 2);
-    put(u128, payload, 48, 3);
-    put(i64, payload, 64, quantity);
-    put(i64, payload, 72, limit_price_micros);
+    put(u128, payload, 48, order.instrument_identity);
+    put(i64, payload, 64, order.quantity);
+    put(i64, payload, 72, order.limit_price_micros);
     put(u32, frame, 124, wireCrc(frame));
     return frame;
 }

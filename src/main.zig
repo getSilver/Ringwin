@@ -441,6 +441,8 @@ const Position = struct {
     open_cost_micros: i64 = 0,
 };
 
+const ReservationModel = enum { leveraged, cash };
+
 fn ceilDivPositive(numerator: i128, denominator: i128) !i64 {
     if (numerator < 0 or denominator <= 0) return error.InvalidPositiveDivision;
     return std.math.cast(i64, @divFloor(numerator + denominator - 1, denominator)) orelse
@@ -448,10 +450,15 @@ fn ceilDivPositive(numerator: i128, denominator: i128) !i64 {
 }
 
 fn notionalMicros(quantity: i64, price_micros: i64) !i64 {
-    if (quantity < 0 or price_micros <= 0) return error.InvalidNotionalInput;
+    return notionalMicrosScaled(quantity, price_micros, contract_denominator);
+}
+
+fn notionalMicrosScaled(quantity: i64, price_micros: i64, quantity_denominator: i64) !i64 {
+    if (quantity < 0 or price_micros <= 0 or quantity_denominator <= 0)
+        return error.InvalidNotionalInput;
     return ceilDivPositive(
         @as(i128, quantity) * price_micros,
-        contract_denominator,
+        quantity_denominator,
     );
 }
 
@@ -465,8 +472,12 @@ fn internalMarginMicros(notional_micros: i64) !i64 {
 }
 
 fn openOrderReservationMicros(remaining_quantity: i64, limit_price_micros: i64) !i64 {
+    return openOrderReservationMicrosScaled(remaining_quantity, limit_price_micros, contract_denominator);
+}
+
+fn openOrderReservationMicrosScaled(remaining_quantity: i64, limit_price_micros: i64, quantity_denominator: i64) !i64 {
     if (remaining_quantity == 0) return 0;
-    const notional = try notionalMicros(remaining_quantity, limit_price_micros);
+    const notional = try notionalMicrosScaled(remaining_quantity, limit_price_micros, quantity_denominator);
     return try std.math.add(i64, try internalMarginMicros(notional), try feeMicros(notional));
 }
 
@@ -583,13 +594,27 @@ const TradingShard = struct {
     exchange_ledger_debits_micros: i64 = 0,
     exchange_ledger_credits_micros: i64 = 0,
     economic_projections_complete: bool = false,
+    quantity_denominator: i64 = contract_denominator,
+    reservation_model: ReservationModel = .leveraged,
+
+    fn shardNotionalMicros(self: *const TradingShard, quantity: i64, price_micros: i64) !i64 {
+        return notionalMicrosScaled(quantity, price_micros, self.quantity_denominator);
+    }
+
+    fn shardOpenOrderReservationMicros(self: *const TradingShard, quantity: i64, price_micros: i64) !i64 {
+        const notional = try self.shardNotionalMicros(quantity, price_micros);
+        return switch (self.reservation_model) {
+            .leveraged => try std.math.add(i64, try internalMarginMicros(notional), try feeMicros(notional)),
+            .cash => try std.math.add(i64, notional, try feeMicros(notional)),
+        };
+    }
 
     fn revalue(self: *TradingShard) !void {
         if (self.portfolio_position.quantity == 0) {
             self.unrealized_pnl_micros = 0;
             return;
         }
-        const mark_value = try notionalMicros(
+        const mark_value = try self.shardNotionalMicros(
             self.portfolio_position.quantity,
             self.mark_price_micros,
         );
@@ -604,7 +629,7 @@ const TradingShard = struct {
         self.position_margin_requirement_micros = if (self.portfolio_position.quantity == 0)
             0
         else
-            try internalMarginMicros(try notionalMicros(
+            try internalMarginMicros(try self.shardNotionalMicros(
                 self.portfolio_position.quantity,
                 self.mark_price_micros,
             ));
@@ -618,7 +643,7 @@ const TradingShard = struct {
             self.order_state == .filled or self.order_state == .canceled)
             0
         else
-            try openOrderReservationMicros(
+            try self.shardOpenOrderReservationMicros(
                 remaining_quantity,
                 self.order_limit_price_micros,
             );
@@ -666,7 +691,7 @@ const TradingShard = struct {
             next_filled > self.order_quantity)
             return error.InvalidFill;
 
-        const fill_cost = try notionalMicros(fill.quantity, fill.price_micros);
+        const fill_cost = try self.shardNotionalMicros(fill.quantity, fill.price_micros);
         const fee = try feeMicros(fill_cost);
         self.filled_quantity = next_filled;
         self.portfolio_position.quantity = next_filled;
@@ -720,18 +745,19 @@ const TradingShard = struct {
 
     fn submitOrderIntent(self: *TradingShard, intent: host_gateway.OrderIntent) !?OrderCommand {
         if (intent.side != .buy or intent.order_type != .limit or
-            intent.time_in_force != .good_til_canceled or intent.portfolio_reduce_only or
+            (intent.time_in_force != .good_til_canceled and intent.time_in_force != .immediate_or_cancel) or
+            intent.portfolio_reduce_only or
             intent.quantity <= 0 or intent.limit_price_micros <= 0)
             return error.InvalidOrderIntent;
         if (self.order_state != .none) return error.IntentArrivedWithOpenOrder;
         try self.trace.append(.order_intent, intent.intent_sequence);
 
-        const requested_notional = try notionalMicros(
+        const requested_notional = try self.shardNotionalMicros(
             intent.quantity,
             intent.limit_price_micros,
         );
         self.last_risk_tier = try riskTier(requested_notional);
-        self.last_risk_required_micros = try openOrderReservationMicros(
+        self.last_risk_required_micros = try self.shardOpenOrderReservationMicros(
             intent.quantity,
             intent.limit_price_micros,
         );
@@ -1239,6 +1265,20 @@ pub const HostIngressSummary = struct {
     reservation_micros: i64,
 };
 
+pub const QualifiedHostOrder = struct {
+    command_id: u64,
+    order_id: u64,
+    strategy_identity: u128,
+    intent_sequence: u64,
+    instrument_identity: u128,
+    side: host_gateway.Side,
+    time_in_force: host_gateway.TimeInForce,
+    portfolio_reduce_only: bool,
+    quantity: i64,
+    limit_price_micros: i64,
+    reservation_micros: i64,
+};
+
 pub const TradingShardHostIngress = struct {
     run: LiveRun,
 
@@ -1248,7 +1288,18 @@ pub const TradingShardHostIngress = struct {
         return .{ .run = run };
     }
 
+    pub fn initHealthySpotFixture() !TradingShardHostIngress {
+        var result = try initHealthyFixture();
+        result.run.shard.quantity_denominator = 100_000_000;
+        result.run.shard.reservation_model = .cash;
+        return result;
+    }
+
     pub fn applyDecision(self: *TradingShardHostIngress, decision: host_gateway.Decision) !bool {
+        return (try self.applyDecisionCommand(decision)) != null;
+    }
+
+    pub fn applyDecisionCommand(self: *TradingShardHostIngress, decision: host_gateway.Decision) !?QualifiedHostOrder {
         const payload: Payload = switch (decision) {
             .accepted => |intent| .{ .external_order_intent = intent },
             .rejected => |rejection| .{ .strategy_intent_rejected = rejection },
@@ -1257,11 +1308,28 @@ pub const TradingShardHostIngress = struct {
             .accepted => |intent| intent.intent_sequence,
             .rejected => |rejection| rejection.intent_sequence,
         };
-        return (try applyLive(
+        const command = try applyLive(
             &self.run.shard,
             &self.run.decision_journal,
             atGroup(15, .{ .identity = identity, .payload = payload }),
-        )) != null;
+        ) orelse return null;
+        const intent = switch (decision) {
+            .accepted => |value| value,
+            .rejected => return error.RejectionProducedCommand,
+        };
+        return .{
+            .command_id = command.command_id,
+            .order_id = command.order_id,
+            .strategy_identity = intent.strategy_identity,
+            .intent_sequence = intent.intent_sequence,
+            .instrument_identity = intent.instrument_identity,
+            .side = intent.side,
+            .time_in_force = intent.time_in_force,
+            .portfolio_reduce_only = intent.portfolio_reduce_only,
+            .quantity = command.quantity,
+            .limit_price_micros = command.limit_price_micros,
+            .reservation_micros = command.reservation_micros,
+        };
     }
 
     pub fn summary(self: TradingShardHostIngress) HostIngressSummary {
@@ -1289,8 +1357,10 @@ pub const TradingShardHostIngress = struct {
     }
 
     pub fn verifyReplay(self: *TradingShardHostIngress) !void {
+        const quantity_denominator = self.run.shard.quantity_denominator;
+        const reservation_model = self.run.shard.reservation_model;
         try self.run.decision_journal.seal();
-        _ = try assertReplayEquivalent(self.run);
+        _ = try assertReplayEquivalentConfigured(self.run, quantity_denominator, reservation_model);
     }
 };
 
@@ -2330,8 +2400,15 @@ fn validateReplayRecord(
 }
 
 fn replay(bytes: []const u8) !ReplayResult {
+    return replayConfigured(bytes, contract_denominator, .leveraged);
+}
+
+fn replayConfigured(bytes: []const u8, quantity_denominator: i64, reservation_model: ReservationModel) !ReplayResult {
     var reader = try journal.Reader.init(bytes);
-    var shard: TradingShard = .{};
+    var shard: TradingShard = .{
+        .quantity_denominator = quantity_denominator,
+        .reservation_model = reservation_model,
+    };
 
     while (true) {
         const next = try reader.next();
@@ -2370,8 +2447,12 @@ fn expectReplayError(bytes: []const u8, expected: anyerror) !void {
 }
 
 fn assertReplayEquivalent(run: LiveRun) ![Sha256.digest_length]u8 {
+    return assertReplayEquivalentConfigured(run, contract_denominator, .leveraged);
+}
+
+fn assertReplayEquivalentConfigured(run: LiveRun, quantity_denominator: i64, reservation_model: ReservationModel) ![Sha256.digest_length]u8 {
     const live_digest = stateDigest(run.shard);
-    const replayed = try replay(run.decision_journal.bytes());
+    const replayed = try replayConfigured(run.decision_journal.bytes(), quantity_denominator, reservation_model);
     if (replayed.status != .clean or
         !sameTrace(run.shard.trace, replayed.shard.trace) or
         !std.mem.eql(u8, &live_digest, &stateDigest(replayed.shard)))
@@ -2707,4 +2788,38 @@ test "four shards replay and isolate overload" {
 
 test "OKX spot authoritative projection" {
     _ = okx_spot_projection;
+}
+
+test "qualified SPOT IOC intent crosses Gateway and cash risk before OrderCommand" {
+    const authorization: host_gateway.Authorization = .{
+        .strategy_identity = 40,
+        .config_version = 1,
+        .activation_identity = 50,
+        .activation_barrier = 10,
+    };
+    const config: host_gateway.Config = .{
+        .schema_registry = 1,
+        .decision_domain = 1,
+        .session = .{ .fencing = 1, .shard = 0, .generation = 1 },
+        .authorization = authorization,
+    };
+    const subscriptions = [_]host_gateway.Subscription{
+        host_gateway.Subscription.of(authorization.strategy_identity, &.{.mark_price}),
+    };
+    var gateway = try host_gateway.Gateway.init(config, &subscriptions);
+    try gateway.recordPublished(1, 14, 100);
+    var frame_storage: [256]u8 = undefined;
+    const frame = try host_gateway.encodeOutputOrderFrame(&frame_storage, config, 1, 14, 7, .{
+        .time_in_force = .immediate_or_cancel,
+        .quantity = 5_000,
+        .limit_price_micros = 63_500_000_000,
+    });
+    const decision = gateway.ingest(frame, 100);
+    try std.testing.expect(decision == .accepted);
+    var ingress = try TradingShardHostIngress.initHealthySpotFixture();
+    const command = (try ingress.applyDecisionCommand(decision)).?;
+    try std.testing.expectEqual(host_gateway.TimeInForce.immediate_or_cancel, command.time_in_force);
+    try std.testing.expectEqual(@as(i64, 5_000), command.quantity);
+    try std.testing.expectEqual(@as(i64, 3_177_382), command.reservation_micros);
+    try ingress.verifyReplay();
 }

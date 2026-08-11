@@ -33,6 +33,7 @@ Status: open
 - [接入 OKX 公共市场事实与缺口恢复](issues/06-implement-okx-public-market-path.md) — 固定 SPOT/SWAP 公共 decoder 已以 RawIngress 优先、定点数、确定性身份和 snapshot/prevSeqId 状态机闭合规则、L2、参考价、资金费率及失败关闭恢复。
 - [接入 OKX 私有事实与启动重连对账](issues/07-implement-okx-private-reconciliation.md) — 固定私有 decoder 与订阅缓冲、九端点 REST 双读稳定屏障已闭合 ExecutionReport、Fill、余额、仓位、margin 和账户配置；断线、冲突、Unknown 或未归属活动订单均撤销新增风险就绪。
 - [落实既定 OKX 订单能力与有界调度](issues/08-implement-complete-okx-order-capabilities.md) — 固定 REST order codec 与双队列调度已闭合版本化纯字母数字身份、全部既定 order kind、受保护 Market、原地 amend、VenueReduceOnly、CancelConfirmCreate、逐项 batch、真实限流成本及 NotSent/Submitted/Unknown。
+- [闭合 TradingShard 到 OKX Demo 的真实交易链](issues/09-close-live-trading-chain.md) — 固定策略已穿过 Gateway、SPOT 现金风控、OrderCommand、同一 libcurl owner、Demo 私有回报、双层经济投影与稳定重放；真实 0.0002 BTC 买入/净额清理闭合且最终账户无残余。
 
 ## Not yet specified
 
