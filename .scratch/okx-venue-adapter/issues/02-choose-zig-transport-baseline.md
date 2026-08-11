@@ -2,7 +2,7 @@
 
 Type: research
 Status: open
-Assignee:
+Assignee: Codex research/zig-okx-transport
 Blocked by:
 Parent: [产品化接入 OKX Venue Adapter](../map.md)
 

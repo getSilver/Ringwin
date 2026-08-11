@@ -2,7 +2,7 @@
 
 Type: research
 Status: open
-Assignee:
+Assignee: Codex research/okx-v5-demo
 Blocked by:
 Parent: [产品化接入 OKX Venue Adapter](../map.md)
 
