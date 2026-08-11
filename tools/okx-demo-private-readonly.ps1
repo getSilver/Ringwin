@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$EnvFile = (Join-Path $PSScriptRoot '..\.env.local'),
-    [int]$TimeoutSeconds = 20
+    [int]$TimeoutSeconds = 20,
+    [string]$WebSocketUrl = 'wss://wspap.okx.com:8443/ws/v5/private'
 )
 
 Set-StrictMode -Version Latest
@@ -32,7 +33,7 @@ function Send-Json([Net.WebSockets.ClientWebSocket]$Socket, [object]$Value, [Thr
     $json = $Value | ConvertTo-Json -Compress -Depth 8
     $bytes = [Text.Encoding]::UTF8.GetBytes($json)
     $segment = [ArraySegment[byte]]::new($bytes)
-    $Socket.SendAsync($segment, [Net.WebSockets.WebSocketMessageType]::Text, $true, $Token).GetAwaiter().GetResult()
+    $Socket.SendAsync($segment, [Net.WebSockets.WebSocketMessageType]::Text, $true, $Token).GetAwaiter().GetResult() | Out-Null
 }
 
 function Receive-Json([Net.WebSockets.ClientWebSocket]$Socket, [Threading.CancellationToken]$Token) {
@@ -61,6 +62,12 @@ $passphrase = Require-Value $values 'OKX_DEMO_PASSPHRASE'
 $entity = Require-Value $values 'OKX_ENTITY'
 if ($entity -ne 'global') { throw 'This qualified probe currently supports OKX_ENTITY=global only' }
 if ($TimeoutSeconds -lt 5 -or $TimeoutSeconds -gt 120) { throw 'TimeoutSeconds must be between 5 and 120' }
+$wsUri = [Uri]$WebSocketUrl
+if ($wsUri.Scheme -ne 'wss' -or $wsUri.Host -ne 'wspap.okx.com' -or
+    $wsUri.AbsolutePath -ne '/ws/v5/private' -or $wsUri.Port -notin @(443, 8443) -or
+    $wsUri.Query -or $wsUri.Fragment) {
+    throw 'WebSocketUrl must be the fixed OKX Demo private WSS endpoint on port 443 or 8443'
+}
 
 $timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString([Globalization.CultureInfo]::InvariantCulture)
 $hmac = [Security.Cryptography.HMACSHA256]::new([Text.Encoding]::UTF8.GetBytes($secretKey))
@@ -71,15 +78,17 @@ try {
 }
 
 $socket = [Net.WebSockets.ClientWebSocket]::new()
+$socket.Options.Proxy = [Net.WebRequest]::DefaultWebProxy
 $timeout = [Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($TimeoutSeconds))
 try {
-    $socket.ConnectAsync([Uri]'wss://wspap.okx.com:8443/ws/v5/private', $timeout.Token).GetAwaiter().GetResult()
+    $socket.ConnectAsync($wsUri, $timeout.Token).GetAwaiter().GetResult() | Out-Null
     Send-Json $socket ([ordered]@{ op = 'login'; args = @([ordered]@{
         apiKey = $apiKey; passphrase = $passphrase; timestamp = $timestamp; sign = $signature
     }) }) $timeout.Token
     $login = Receive-Json $socket $timeout.Token
-    if ([string]$login.event -ne 'login' -or [string]$login.code -ne '0') {
-        throw "OKX private WebSocket login rejected with code $($login.code)"
+    $loginCode = if ('code' -in $login.PSObject.Properties.Name) { [string]$login.code } else { '0' }
+    if ([string]$login.event -ne 'login' -or $loginCode -ne '0') {
+        throw "OKX private WebSocket login rejected with code $loginCode"
     }
 
     Send-Json $socket ([ordered]@{ op = 'subscribe'; args = @(
@@ -92,15 +101,23 @@ try {
     $snapshots = @{}
     while ($acks.Count -lt 3 -or -not $snapshots.ContainsKey('account') -or -not $snapshots.ContainsKey('positions')) {
         $message = Receive-Json $socket $timeout.Token
-        if ([string]$message.event -eq 'error') { throw "OKX private WebSocket error code $($message.code)" }
-        if ([string]$message.event -eq 'subscribe') {
-            if ([string]$message.code -ne '0') { throw "OKX subscription rejected with code $($message.code)" }
+        $event = if ('event' -in $message.PSObject.Properties.Name) { [string]$message.event } else { '' }
+        if ($event -eq 'error') {
+            $errorCode = if ('code' -in $message.PSObject.Properties.Name) { [string]$message.code } else { 'missing' }
+            throw "OKX private WebSocket error code $errorCode"
+        }
+        if ($event -eq 'subscribe') {
+            $subscribeCode = if ('code' -in $message.PSObject.Properties.Name) { [string]$message.code } else { '0' }
+            if ($subscribeCode -ne '0') { throw "OKX subscription rejected with code $subscribeCode" }
             $acks[[string]$message.arg.channel] = $true
             continue
         }
-        if ($null -eq $message.arg -or [string]::IsNullOrWhiteSpace([string]$message.arg.channel)) { continue }
+        if ('arg' -notin $message.PSObject.Properties.Name -or $null -eq $message.arg -or
+            'channel' -notin $message.arg.PSObject.Properties.Name -or
+            [string]::IsNullOrWhiteSpace([string]$message.arg.channel)) { continue }
         $channel = [string]$message.arg.channel
-        if ($channel -in @('account', 'positions') -and [string]$message.eventType -eq 'snapshot') {
+        $eventType = if ('eventType' -in $message.PSObject.Properties.Name) { [string]$message.eventType } else { '' }
+        if ($channel -in @('account', 'positions') -and $eventType -eq 'snapshot') {
             $snapshots[$channel] = @($message.data).Count
         }
     }
@@ -110,6 +127,7 @@ try {
         environment = 'demo'
         entity = 'global'
         private_ws_host = 'wspap.okx.com'
+        private_ws_port = $wsUri.Port
         login = 'acknowledged'
         subscribed_channels = @($acks.Keys | Sort-Object)
         orders_initial_snapshot_expected = $false
@@ -119,7 +137,7 @@ try {
     } | ConvertTo-Json -Depth 4
 } finally {
     if ($socket.State -eq [Net.WebSockets.WebSocketState]::Open) {
-        try { $socket.CloseAsync([Net.WebSockets.WebSocketCloseStatus]::NormalClosure, 'qualification complete', [Threading.CancellationToken]::None).GetAwaiter().GetResult() } catch {}
+        try { $socket.CloseAsync([Net.WebSockets.WebSocketCloseStatus]::NormalClosure, 'qualification complete', [Threading.CancellationToken]::None).GetAwaiter().GetResult() | Out-Null } catch {}
     }
     $timeout.Dispose()
     $socket.Dispose()
