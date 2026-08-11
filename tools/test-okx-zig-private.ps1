@@ -19,6 +19,7 @@ try {
     $env:RINGWIN_OKX_SECRET = [string]$values.OKX_DEMO_SECRET_KEY
     $env:RINGWIN_OKX_PASSPHRASE = [string]$values.OKX_DEMO_PASSPHRASE
     $env:RINGWIN_OKX_TIMESTAMP = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ', [Globalization.CultureInfo]::InvariantCulture)
+    $env:RINGWIN_OKX_TIMESTAMP_SECONDS = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString([Globalization.CultureInfo]::InvariantCulture)
     $uri = [Uri]'https://openapi.okx.com'
     if (-not [Net.WebRequest]::DefaultWebProxy.IsBypassed($uri)) { $env:HTTPS_PROXY = [Net.WebRequest]::DefaultWebProxy.GetProxy($uri).AbsoluteUri }
     & zig run (Join-Path $PSScriptRoot '..\src\okx_curl_private_smoke.zig') `
@@ -26,6 +27,6 @@ try {
         -lc -lcurl -lws2_32 -lcrypt32 -lsecur32 -ladvapi32 -lbcrypt -lwldap32 -lnormaliz -liphlpapi
     if ($LASTEXITCODE -ne 0) { throw 'Zig private REST smoke failed' }
 } finally {
-    $env:RINGWIN_OKX_KEY=$null; $env:RINGWIN_OKX_SECRET=$null; $env:RINGWIN_OKX_PASSPHRASE=$null; $env:RINGWIN_OKX_TIMESTAMP=$null
+    $env:RINGWIN_OKX_KEY=$null; $env:RINGWIN_OKX_SECRET=$null; $env:RINGWIN_OKX_PASSPHRASE=$null; $env:RINGWIN_OKX_TIMESTAMP=$null; $env:RINGWIN_OKX_TIMESTAMP_SECONDS=$null
     $env:HTTPS_PROXY=$previousProxy; $values.Clear()
 }

@@ -62,6 +62,39 @@ pub const Headers = struct {
     }
 };
 
+pub const LoginPayload = struct {
+    bytes: [768]u8 = @splat(0),
+    len: u16 = 0,
+
+    pub fn slice(self: *const LoginPayload) []const u8 {
+        return self.bytes[0..self.len];
+    }
+
+    pub fn clear(self: *LoginPayload) void {
+        @memset(&self.bytes, 0);
+        self.len = 0;
+    }
+};
+
+pub fn websocketLogin(credentials: *const Credentials, timestamp_seconds: []const u8) !LoginPayload {
+    if (timestamp_seconds.len == 0 or timestamp_seconds.len > 20) return error.InvalidTimestamp;
+    const signature = sign(credentials, timestamp_seconds, "GET", "/users/self/verify", "");
+    var result: LoginPayload = .{};
+    var writer: std.Io.Writer = .fixed(result.bytes[0 .. result.bytes.len - 1]);
+    try std.json.Stringify.value(.{
+        .op = "login",
+        .args = &.{.{
+            .apiKey = credentials.api_key.slice(),
+            .passphrase = credentials.passphrase.slice(),
+            .timestamp = timestamp_seconds,
+            .sign = &signature,
+        }},
+    }, .{}, &writer);
+    result.len = @intCast(writer.end);
+    result.bytes[result.len] = 0;
+    return result;
+}
+
 pub fn sign(
     credentials: *const Credentials,
     timestamp: []const u8,
@@ -119,6 +152,10 @@ test "OKX signature and Demo headers are stable and credentials are cleared" {
     const built = try headers(&credentials, timestamp, "POST", path, body);
     const values = built.slices();
     try std.testing.expectEqualStrings("x-simulated-trading: 1", values[4]);
+    var login = try websocketLogin(&credentials, "1607447337");
+    try std.testing.expect(std.mem.indexOf(u8, login.slice(), "\"op\":\"login\"") != null);
+    login.clear();
+    try std.testing.expect(std.mem.allEqual(u8, &login.bytes, 0));
     credentials.deinit();
     try std.testing.expect(credentials.secret_key.len == 0);
     try std.testing.expect(std.mem.allEqual(u8, &credentials.secret_key.bytes, 0));

@@ -407,6 +407,59 @@ pub const Reconciler = struct {
         page: ?Page,
         raw: []const u8,
     ) (RawSinkError || error{ OutOfMemory, FrameTooLarge })!IngressBatch {
+        var batch = try self.commitRaw(raw_sink, source_session, times, raw);
+        return self.ingestCommitted(gpa, source_session, times, source, page, raw, &batch);
+    }
+
+    pub fn ingestWsMessage(
+        self: *Reconciler,
+        gpa: std.mem.Allocator,
+        raw_sink: RawSink,
+        source_session: u64,
+        times: Times,
+        raw: []const u8,
+    ) (RawSinkError || error{ OutOfMemory, FrameTooLarge })!IngressBatch {
+        var batch = try self.commitRaw(raw_sink, source_session, times, raw);
+        if (source_session != self.session or self.stage == .offline) {
+            batch.rejection = .stale_session;
+            return batch;
+        }
+        if (self.stage == .failed) {
+            batch.rejection = .conflicting_fact;
+            return batch;
+        }
+        const parsed = std.json.parseFromSlice(std.json.Value, gpa, raw, .{}) catch
+            return self.reject(&batch, .malformed_json);
+        defer parsed.deinit();
+        const object = asObject(parsed.value) catch return self.reject(&batch, .malformed_envelope);
+        if (optionalStringField(object, "event") catch return self.reject(&batch, .invalid_field)) |event| {
+            if (optionalStringField(object, "code") catch return self.reject(&batch, .invalid_field)) |code|
+                if (!std.mem.eql(u8, code, "0")) return self.reject(&batch, .venue_error);
+            if (std.mem.eql(u8, event, "login")) return batch;
+            if (std.mem.eql(u8, event, "error")) return self.reject(&batch, .venue_error);
+            if (std.mem.eql(u8, event, "subscribe")) {
+                const channel = wsChannel(object) catch return self.reject(&batch, .malformed_envelope);
+                self.subscriptionAcknowledged(channel) catch return self.reject(&batch, .invalid_field);
+                return batch;
+            }
+            return batch;
+        }
+        const channel = wsChannel(object) catch return self.reject(&batch, .source_mismatch);
+        const source: IngressSource = switch (channel) {
+            .orders => .ws_orders,
+            .account => .ws_account,
+            .positions => .ws_positions,
+        };
+        return self.ingestParsed(parsed.value, times, source, &batch);
+    }
+
+    fn commitRaw(
+        self: *Reconciler,
+        raw_sink: RawSink,
+        source_session: u64,
+        times: Times,
+        raw: []const u8,
+    ) (RawSinkError || error{FrameTooLarge})!IngressBatch {
         if (raw.len > market.max_raw_frame_bytes or raw.len > std.math.maxInt(u32))
             return error.FrameTooLarge;
         var raw_hash: [Sha256.digest_length]u8 = undefined;
@@ -420,46 +473,67 @@ pub const Reconciler = struct {
             .sha256 = raw_hash,
         }, raw);
         self.last_raw_sequence = @max(self.last_raw_sequence, evidence.stream_sequence);
+        return .{ .raw_evidence = evidence };
+    }
 
-        var batch: IngressBatch = .{ .raw_evidence = evidence };
+    fn ingestCommitted(
+        self: *Reconciler,
+        gpa: std.mem.Allocator,
+        source_session: u64,
+        times: Times,
+        source: IngressSource,
+        page: ?Page,
+        raw: []const u8,
+        batch: *IngressBatch,
+    ) error{OutOfMemory}!IngressBatch {
         if (source_session != self.session or self.stage == .offline) {
             batch.rejection = .stale_session;
-            return batch;
+            return batch.*;
         }
         if (self.stage == .failed) {
             batch.rejection = .conflicting_fact;
-            return batch;
+            return batch.*;
         }
         if (source.isWebSocket()) {
             if (page != null) {
                 batch.rejection = .invalid_field;
-                return batch;
+                return batch.*;
             }
         } else if (self.stage != .reconciling or page == null) {
             batch.rejection = .invalid_field;
-            return batch;
+            return batch.*;
         }
 
         const parsed = std.json.parseFromSlice(std.json.Value, gpa, raw, .{}) catch {
-            return self.reject(&batch, .malformed_json);
+            return self.reject(batch, .malformed_json);
         };
         defer parsed.deinit();
-        self.decode(parsed.value, source, times, evidence, &batch) catch |err| {
-            return self.reject(&batch, mapDecodeError(err));
+        self.decode(parsed.value, source, times, batch.raw_evidence, batch) catch |err| {
+            return self.reject(batch, mapDecodeError(err));
         };
         if (!source.isWebSocket()) {
-            self.recordPage(source, page.?, evidence.sha256, &batch) catch |err| {
-                return self.reject(&batch, mapDecodeError(err));
+            self.recordPage(source, page.?, batch.raw_evidence.sha256, batch) catch |err| {
+                return self.reject(batch, mapDecodeError(err));
             };
         }
 
-        if (self.stage == .ready) return batch;
+        if (self.stage == .ready) return batch.*;
         batch.buffered = true;
-        self.bufferBatch(source, &batch) catch {
-            return self.reject(&batch, .bootstrap_buffer_full);
+        self.bufferBatch(source, batch) catch {
+            return self.reject(batch, .bootstrap_buffer_full);
         };
         batch.event_count = 0;
-        return batch;
+        return batch.*;
+    }
+
+    fn ingestParsed(self: *Reconciler, root: std.json.Value, times: Times, source: IngressSource, batch: *IngressBatch) IngressBatch {
+        self.decode(root, source, times, batch.raw_evidence, batch) catch |err|
+            return self.reject(batch, mapDecodeError(err));
+        if (self.stage == .ready) return batch.*;
+        batch.buffered = true;
+        self.bufferBatch(source, batch) catch return self.reject(batch, .bootstrap_buffer_full);
+        batch.event_count = 0;
+        return batch.*;
     }
 
     fn reject(self: *Reconciler, batch: *IngressBatch, reason: RejectReason) IngressBatch {
@@ -987,6 +1061,15 @@ fn optionalStringField(object: std.json.ObjectMap, name: []const u8) !?[]const u
     };
 }
 
+fn wsChannel(object: std.json.ObjectMap) !PrivateChannel {
+    const arg = try asObject(try field(object, "arg"));
+    const channel = try stringField(arg, "channel");
+    if (std.mem.eql(u8, channel, "orders")) return .orders;
+    if (std.mem.eql(u8, channel, "account")) return .account;
+    if (std.mem.eql(u8, channel, "positions")) return .positions;
+    return error.InvalidField;
+}
+
 fn boolField(object: std.json.ObjectMap, name: []const u8) !bool {
     return switch (try field(object, name)) {
         .bool => |value| value,
@@ -1376,6 +1459,54 @@ fn establishPrivateStream(reconciler: *Reconciler, sink: *TestRawSink) !void {
         \\{"arg":{"channel":"positions"},"eventType":"snapshot","curPage":1,"lastPage":true,"data":[]}
     );
     try std.testing.expect(reconciler.readiness().private_stream_ready);
+}
+
+test "unified private WS ingress raw-commits login ACKs and snapshots before routing" {
+    var reconciler: Reconciler = .{};
+    var sink: TestRawSink = .{};
+    reconciler.beginSession(7);
+    const frames = [_][]const u8{
+        \\{"event":"login","code":"0"}
+        ,
+        \\{"event":"subscribe","arg":{"channel":"orders","instType":"ANY"}}
+        ,
+        \\{"event":"subscribe","arg":{"channel":"account"}}
+        ,
+        \\{"event":"subscribe","arg":{"channel":"positions","instType":"ANY"}}
+        ,
+        \\{"arg":{"channel":"account"},"eventType":"snapshot","curPage":1,"lastPage":true,"data":[{"uTime":"1800000000000","totalEq":"","adjEq":"","imr":"","mmr":"","mgnRatio":"","isoEq":"","details":[]}]}
+        ,
+        \\{"arg":{"channel":"positions"},"eventType":"snapshot","curPage":1,"lastPage":true,"data":[]}
+        ,
+    };
+    for (frames) |frame| {
+        const batch = try reconciler.ingestWsMessage(
+            std.testing.allocator,
+            sink.sink(),
+            7,
+            test_times,
+            frame,
+        );
+        try std.testing.expect(batch.rejection == null);
+    }
+    try std.testing.expectEqual(@as(u64, frames.len), sink.append_count);
+    try std.testing.expect(reconciler.readiness().private_stream_ready);
+}
+
+test "unified private WS ingress rejects a nonzero venue event after raw commit" {
+    var reconciler: Reconciler = .{};
+    var sink: TestRawSink = .{};
+    reconciler.beginSession(8);
+    const batch = try reconciler.ingestWsMessage(
+        std.testing.allocator,
+        sink.sink(),
+        8,
+        test_times,
+        \\{"event":"login","code":"60009","msg":"Login failed"}
+        ,
+    );
+    try std.testing.expectEqual(@as(u64, 1), sink.append_count);
+    try std.testing.expectEqual(RejectReason.venue_error, batch.rejection.?);
 }
 
 const rest_sources = [_]IngressSource{
