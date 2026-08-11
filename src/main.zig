@@ -7,6 +7,7 @@ const okx_public_market = @import("okx_public_market.zig");
 const okx_private_reconciliation = @import("okx_private_reconciliation.zig");
 const okx_order_entry = @import("okx_order_entry.zig");
 const okx_live_chain = @import("okx_live_chain.zig");
+const okx_rest_auth = @import("okx_rest_auth.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const schema_version: u16 = 1;
@@ -2650,6 +2651,7 @@ test "all authoritative acceptance traces close and replay" {
     _ = okx_private_reconciliation;
     _ = okx_order_entry;
     _ = okx_live_chain;
+    _ = okx_rest_auth;
     _ = try selfCheck();
 }
 

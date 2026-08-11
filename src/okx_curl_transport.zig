@@ -2,6 +2,11 @@
 //! This module is built separately because its headers and static library are
 //! bootstrapped into the ignored build area by tools/bootstrap-libcurl.ps1.
 
+const std = @import("std");
+const auth = @import("okx_rest_auth.zig");
+const live = @import("okx_live_chain.zig");
+const market = @import("okx_public_market.zig");
+
 pub const required_version: u32 = 0x081500; // 8.21.0
 
 extern fn ringwin_curl_global_init() c_int;
@@ -30,6 +35,90 @@ pub const Response = struct {
     body_len: usize,
     http_status: c_long,
     curl_code: c_int,
+};
+
+pub const RestOwner = struct {
+    pub const Method = enum { get, post };
+    credentials: auth.Credentials,
+    proxy: ?[:0]const u8,
+    source_session: u64,
+    timestamp: [25]u8 = @splat(0),
+    timestamp_len: u8 = 0,
+    times: market.Times = .{ .receive_time_utc_ns = 0, .monotonic_time_ns = 0, .wall_time_utc_ns = 0 },
+    response: [market.max_raw_frame_bytes]u8 = undefined,
+
+    pub fn init(credentials: auth.Credentials, proxy: ?[:0]const u8, source_session: u64) !RestOwner {
+        if (source_session == 0) return error.InvalidSourceSession;
+        return .{ .credentials = credentials, .proxy = proxy, .source_session = source_session };
+    }
+
+    pub fn deinit(self: *RestOwner) void {
+        self.credentials.deinit();
+        @memset(&self.timestamp, 0);
+        @memset(&self.response, 0);
+    }
+
+    pub fn prepare(self: *RestOwner, timestamp: []const u8, times: market.Times) !void {
+        if (timestamp.len != 24 or timestamp[10] != 'T' or timestamp[23] != 'Z')
+            return error.InvalidTimestamp;
+        @memcpy(self.timestamp[0..timestamp.len], timestamp);
+        self.timestamp[timestamp.len] = 0;
+        self.timestamp_len = @intCast(timestamp.len);
+        self.times = times;
+    }
+
+    pub fn transport(self: *RestOwner) live.Transport {
+        return .{ .ptr = self, .submit_fn = submit };
+    }
+
+    fn submit(ptr: *anyopaque, path: []const u8, body: []const u8) live.TransportResult {
+        const self: *RestOwner = @ptrCast(@alignCast(ptr));
+        return self.request(.post, path, body);
+    }
+
+    pub fn request(self: *RestOwner, method: Method, path: []const u8, body: []const u8) live.TransportResult {
+        if (self.timestamp_len == 0) return self.beforeSend();
+        if (path.len == 0 or path[0] != '/') return self.beforeSend();
+        var url_buffer: [512]u8 = @splat(0);
+        const url = std.fmt.bufPrint(url_buffer[0 .. url_buffer.len - 1], "https://openapi.okx.com{s}", .{path}) catch
+            return self.beforeSend();
+        url_buffer[url.len] = 0;
+        const timestamp = self.timestamp[0..self.timestamp_len];
+        const method_text: [:0]const u8 = switch (method) { .get => "GET", .post => "POST" };
+        const signed = auth.headers(&self.credentials, timestamp, method_text, path, body) catch
+            return self.beforeSend();
+        const signed_slices = signed.slices();
+        const headers = [_][:0]const u8{
+            signed_slices[0], signed_slices[1], signed_slices[2], signed_slices[3], signed_slices[4],
+            "Content-Type: application/json",
+        };
+        const response = perform(
+            url_buffer[0..url.len :0],
+            method_text,
+            &headers,
+            body,
+            self.proxy,
+            &self.response,
+        ) catch return self.beforeSend();
+        return .{
+            .outcome = switch (response.outcome) {
+                .proven_before_send => .proven_before_send,
+                .response => .response,
+                .write_or_response_uncertain => .write_or_response_uncertain,
+            },
+            .response = if (response.outcome == .response) self.response[0..response.body_len] else null,
+            .source_session = self.source_session,
+            .times = self.times,
+        };
+    }
+
+    fn beforeSend(self: *const RestOwner) live.TransportResult {
+        return .{
+            .outcome = .proven_before_send,
+            .source_session = self.source_session,
+            .times = self.times,
+        };
+    }
 };
 
 pub const Runtime = struct {
@@ -102,4 +191,12 @@ pub fn perform(
 test "linked libcurl is exactly the resolved Schannel websocket baseline" {
     var runtime = try Runtime.init();
     defer runtime.deinit();
+}
+
+test "REST owner fails before send until a signing time is prepared" {
+    var owner = try RestOwner.init(try auth.Credentials.init("key", "secret", "pass"), null, 1);
+    defer owner.deinit();
+    const result = owner.transport().submit("/api/v5/trade/order", "{}");
+    try std.testing.expect(result.outcome == .proven_before_send);
+    try std.testing.expect(result.response == null);
 }
