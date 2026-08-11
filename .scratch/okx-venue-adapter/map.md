@@ -28,6 +28,7 @@ Status: open
 - [刷新 OKX API v5 与 Demo Trading 契约](issues/01-refresh-okx-v5-demo-contract.md) — OKX v5 可实现目标闭环，但须以版本化 endpoint/rules、序号连续性及 WS+REST Unknown 对账作为硬合同。
 - [选择 Zig 0.17 OKX 传输基线](issues/02-choose-zig-transport-baseline.md) — 固定 libcurl 8.21.0 统一承载 HTTPS/WSS，单 owner 驱动取消与恢复边界。
 - [冻结 Venue Adapter interface 与验收合同](issues/03-freeze-adapter-interface-and-acceptance.md) — 使用四操作、双向有界异步 seam 隔离 TradingShard 与 Venue I/O，并以 RawIngress 优先、分离就绪、失败关闭及五层轨迹验收。
+- [资格化 Demo 账户与实盘式安全栅栏](issues/04-qualify-demo-account-and-safety.md) — Demo/global 专用 Key、Futures/net/isolated 配置与零遗留风险已通过只读资格；固定双 Instrument 白名单、25 USDT 单笔及账户总名义上限、显式 `--demo-live`、发送前对账和失败关闭清理合同。
 
 ## Not yet specified
 

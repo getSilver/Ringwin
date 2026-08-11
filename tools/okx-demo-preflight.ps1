@@ -34,7 +34,7 @@ function Require-Value([hashtable]$Values, [string]$Name) {
 
 function Test-Zero([object]$Value) {
     if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return $true }
-    $number = 0m
+    $number = [decimal]0
     return [decimal]::TryParse([string]$Value, [Globalization.NumberStyles]::Number, [Globalization.CultureInfo]::InvariantCulture, [ref]$number) -and $number -eq 0
 }
 
@@ -132,6 +132,10 @@ $positions = @( (Invoke-OkxGet '/api/v5/account/positions').data | Where-Object 
 if ($positions.Count -ne 0) { throw "Preflight requires zero open positions; found $($positions.Count)" }
 $orders = @( (Invoke-OkxGet '/api/v5/trade/orders-pending').data )
 if ($orders.Count -ne 0) { throw "Preflight requires zero pending orders; found $($orders.Count)" }
+$algoOrders = @(@('conditional', 'oco', 'trigger', 'move_order_stop', 'iceberg', 'twap', 'chase') | ForEach-Object {
+    @((Invoke-OkxGet "/api/v5/trade/orders-algo-pending?ordType=$_").data)
+})
+if ($algoOrders.Count -ne 0) { throw "Preflight requires zero pending algo orders; found $($algoOrders.Count)" }
 
 $balanceRows = @( (Invoke-OkxGet '/api/v5/account/balance').data )
 $liabilities = @($balanceRows | ForEach-Object { @($_.details) } | Where-Object {
@@ -155,6 +159,7 @@ $nonZeroCurrencies = @($balanceRows | ForEach-Object { @($_.details) } | Where-O
     max_order_notional_usdt = $MaxNotionalUsdt
     open_positions = 0
     pending_orders = 0
+    pending_algo_orders = 0
     liabilities = 0
     funded_currencies = $nonZeroCurrencies
 } | ConvertTo-Json -Depth 4
