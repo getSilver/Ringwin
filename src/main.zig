@@ -5,6 +5,7 @@ const host_gateway = @import("strategy_host_gateway.zig");
 const venue_adapter = @import("venue_adapter.zig");
 const okx_public_market = @import("okx_public_market.zig");
 const okx_private_reconciliation = @import("okx_private_reconciliation.zig");
+const okx_spot_projection = @import("okx_spot_projection.zig");
 const okx_order_entry = @import("okx_order_entry.zig");
 const okx_live_chain = @import("okx_live_chain.zig");
 const okx_rest_auth = @import("okx_rest_auth.zig");
@@ -2702,4 +2703,8 @@ test "venue adapter seam is bounded and drain-safe" {
 
 test "four shards replay and isolate overload" {
     _ = try assertFourShardIsolation();
+}
+
+test "OKX spot authoritative projection" {
+    _ = okx_spot_projection;
 }
