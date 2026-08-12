@@ -330,14 +330,13 @@ Windows 2C/4T 开发节点接近 `2M events/s`，但四分片合并 P99 为
 [动态架构图](docs/trading-engine-architecture.html)，本阶段完整决策路线见
 [纵向闭环 Wayfinder 地图](.scratch/quant-trading-engine-vertical-slice/map.md)。
 
-## 下一能力波次
+## 已完成能力波次与下一步
 
-SystemOwner 已于 2026-07-31 确认
-[Python StrategyHost 产品化接入](.scratch/python-strategy-host-productization/map.md)
-能力波次完成。按照已确认的首批 Venue 顺序，下一能力波次选择
-**OKX Venue Adapter 最小纵向接入**。
+SystemOwner 已确认
+[Python StrategyHost 产品化接入](.scratch/python-strategy-host-productization/map.md)和
+[OKX Venue Adapter 最小纵向接入](.scratch/okx-venue-adapter/map.md)能力波次完成。
 
-该能力波次已建立[实施地图](.scratch/okx-venue-adapter/map.md)，并完成 OKX v5/传输研究、
+OKX 波次完成了 v5/传输研究、
 Demo 账户安全资格、首个四操作 VenueAdapter seam、OKX 公共 Instrument/L2/参考价/资金费率
 标准化、私有 ExecutionReport/Fill/账户事实和 REST 双读恢复屏障，以及完整订单 codec、受保护
 Market、原地 amend、逐项 batch 和安全优先有界调度；现有 SimulatedVenue 已只通过该 seam 接收
@@ -346,5 +345,8 @@ OrderCommand、返回 dispatch 与 ingress。显式授权的 BTC-USDT Demo 成�
 零 BTC baseline、两轮 REST 稳定屏障、25 USDT 上限和最终零残余预检；固定策略已真实穿过
 Gateway、TradingShard 现金风控、OrderCommand、OKX 回报、经济投影与稳定重放。断连、L2 缺口、
 认证失败、限流、Unknown、部分成功、并发 Fill、REST 分页、迟到事实和清理失败矩阵也已闭合；
-整波自动资格与证据已闭合，最终能力波次边界由第 12 票确认。
-Binance、Gate.io、Bitget Adapter 继续后置；Linux 五核生产性能资格仍是独立波次。
+整波自动资格、异常关机后复验与最终证据边界均已闭合。
+
+按照已冻结的首批 Venue 顺序 `OKX -> Binance -> Gate.io -> Bitget`，下一能力波次选择
+**Binance Venue Adapter 最小纵向接入**。它尚未建立实施地图或产品代码；Linux 五核生产性能、
+OKX 生产账户、密钥托管和部署资格仍是独立波次。
