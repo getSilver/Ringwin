@@ -133,12 +133,15 @@ pub const TransportOwner = struct {
             return self.beforeSend();
         url_buffer[url.len] = 0;
         const timestamp = self.timestamp[0..self.timestamp_len];
-        const method_text: [:0]const u8 = switch (method) { .get => "GET", .post => "POST" };
+        const method_text: [:0]const u8 = switch (method) {
+            .get => "GET",
+            .post => "POST",
+        };
         const signed = auth.headers(&self.credentials, timestamp, method_text, path, body) catch
             return self.beforeSend();
         const signed_slices = signed.slices();
         const headers = [_][:0]const u8{
-            signed_slices[0], signed_slices[1], signed_slices[2], signed_slices[3], signed_slices[4],
+            signed_slices[0],                 signed_slices[1], signed_slices[2], signed_slices[3], signed_slices[4],
             "Content-Type: application/json",
         };
         const response = perform(

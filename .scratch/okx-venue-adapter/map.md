@@ -35,10 +35,11 @@ Status: open
 - [落实既定 OKX 订单能力与有界调度](issues/08-implement-complete-okx-order-capabilities.md) — 固定 REST order codec 与双队列调度已闭合版本化纯字母数字身份、全部既定 order kind、受保护 Market、原地 amend、VenueReduceOnly、CancelConfirmCreate、逐项 batch、真实限流成本及 NotSent/Submitted/Unknown。
 - [闭合 TradingShard 到 OKX Demo 的真实交易链](issues/09-close-live-trading-chain.md) — 固定策略已穿过 Gateway、SPOT 现金风控、OrderCommand、同一 libcurl owner、Demo 私有回报、双层经济投影与稳定重放；真实 0.0002 BTC 买入/净额清理闭合且最终账户无残余。
 - [证明断连、Unknown、部分成功与幂等恢复](issues/10-prove-failure-recovery-and-idempotency.md) — 故障 fixture 固定在 ingress、dispatch、REST reconciliation 与权威 projection seam；断连、缺口、认证、限流、Unknown、部分成功、并发 Fill、分页、迟到事实和清理失败均已证明失败关闭且不自动重放副作用。
+- [资格化 OKX Demo 波次并保持 Linux 构建](issues/11-qualify-demo-wave-and-linux-build.md) — 单一 Windows 入口现以精确 Zig/libcurl 版本、三优化级别合同、公共 HTTPS、Demo preflight/private WSS/分页对账、显式 Demo-live 成交清理及 Linux compile-only 门槛关闭整波，且明确不宣称生产或 Linux 性能资格。
 
 ## Not yet specified
 
-暂无；第 10 票已固定可审计故障注入位置，整波单命令资格、Linux 交叉构建证据及运行手册由[资格化 Demo 整波与 Linux 构建](issues/11-qualify-demo-wave-and-linux-build.md)统一关闭。
+暂无；功能与资格证据已闭合，最终交付边界、已知限制及后续路线由[关闭 OKX Adapter 能力波次](issues/12-close-okx-adapter-wave.md)确认。
 
 ## Out of scope
 

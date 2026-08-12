@@ -4,7 +4,8 @@ param(
     [switch]$PrepareOnly,
     [switch]$CleanupOnly,
     [ValidateSet('Debug','ReleaseSafe')] [string]$Optimize = 'ReleaseSafe',
-    [string]$EnvFile = (Join-Path $PSScriptRoot '..\.env.local')
+    [string]$EnvFile = (Join-Path $PSScriptRoot '..\.env.local'),
+    [string]$BuildRoot = (Join-Path $PSScriptRoot '..\.scratch\build\libcurl-8.21.0-windows-x86_64-schannel')
 )
 
 Set-StrictMode -Version Latest
@@ -36,8 +37,12 @@ foreach ($line in [IO.File]::ReadLines((Resolve-Path -LiteralPath $EnvFile))) {
     $values[$matches[1]] = $value
 }
 
-$build = Join-Path $PSScriptRoot '..\.scratch\build\curl-win64-schannel-3'
-$source = Join-Path $PSScriptRoot '..\.scratch\build\bootstrap\curl\curl-8.21.0\include'
+$sourceRoot = Join-Path $PSScriptRoot '..\.scratch\build\bootstrap\curl-source'
+$include = (Get-ChildItem -LiteralPath $sourceRoot -Recurse -Directory -Filter include | Where-Object {
+    Test-Path -LiteralPath (Join-Path $_.FullName 'curl\curl.h')
+} | Select-Object -First 1).FullName
+$library = Get-ChildItem -LiteralPath $BuildRoot -Recurse -File -Filter 'libcurl.a' | Select-Object -First 1
+if (-not $include -or -not $library) { throw 'Run tools/bootstrap-libcurl.ps1 first' }
 $previousProxy = $env:HTTPS_PROXY
 try {
     $env:RINGWIN_OKX_KEY = [string]$values.OKX_DEMO_API_KEY
@@ -48,7 +53,7 @@ try {
         $env:HTTPS_PROXY = [Net.WebRequest]::DefaultWebProxy.GetProxy($uri).AbsoluteUri
     }
     & zig run (Join-Path $PSScriptRoot '..\src\okx_demo_live_acceptance.zig') `
-        (Join-Path $PSScriptRoot '..\src\okx_curl_shim.c') "-I$source" "-L$(Join-Path $build 'lib')" `
+        (Join-Path $PSScriptRoot '..\src\okx_curl_shim.c') "-I$include" "-L$($library.DirectoryName)" `
         -lc -lcurl -lws2_32 -lcrypt32 -lsecur32 -ladvapi32 -lbcrypt -lwldap32 -lnormaliz -liphlpapi `
         "-O$Optimize" -- $(if ($DemoLive) { '--demo-live' } elseif ($CleanupOnly) { '--cleanup-only' } else { '--prepare-only' })
     if ($LASTEXITCODE -ne 0) { throw 'OKX Demo live acceptance failed' }

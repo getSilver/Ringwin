@@ -12,6 +12,36 @@
 
 默认路径不连接真实 Venue；独立入口只使用本机 Demo Key 连接 OKX 模拟交易。项目不接入生产账户，也不证明策略盈利。
 
+## OKX Demo 整波验收
+
+默认入口只读，但仍要求本机 `.env.local` 中存在合格的 Demo Key：
+
+```powershell
+tools\verify-okx-demo-wave.ps1
+```
+
+它失败即停，验证精确 Zig/libcurl 版本、格式、Debug/ReleaseSafe/ReleaseFast 核心合同、
+确定性摘要、公共 HTTPS、Demo private WSS 与分页 REST 对账，并完成 `x86_64-linux-gnu`
+compile-only 检查。成功输出：
+
+```text
+okx_demo_wave_acceptance=passed mode=read_only linux=compile_only production_qualification=false
+```
+
+只有 SystemOwner 明确允许 Demo 成交时才运行：
+
+```powershell
+tools\verify-okx-demo-wave.ps1 -DemoLive
+```
+
+它额外执行固定 BTC-USDT IOC 策略、真实 Demo 回报、反向清理、经济投影与稳定重放，
+并在结束时再次验证零挂单、零仓位、零负债及无 BTC 残余。异常后不得重复普通入口；若
+preflight 只报告 BTC 残余，使用 `tools\run-okx-demo-live-acceptance.ps1 -CleanupOnly`。
+凭证只从被 Git 忽略的 `.env.local` 临时注入，不进入命令行或输出。
+
+该入口只证明 Windows Demo 功能和 Linux 源码可交叉编译；不证明 Linux 运行时/性能、
+策略收益、生产账户或生产部署资格。
+
 ## 环境
 
 - Zig `0.17.0-dev.315+5b647b792`
@@ -288,8 +318,8 @@ Windows 2C/4T 开发节点接近 `2M events/s`，但四分片合并 P99 为
 
 尚未实现或资格化：
 
-- OKX 单命令整波资格、Linux 交叉构建证据和运行手册；固定 Strategy `OrderIntent` 到 Demo
-  成交/清理、经济投影、稳定重放及断连/Unknown/部分成功/幂等恢复矩阵已经通过；
+- OKX 生产账户、Linux 运行时/性能和部署资格；单命令 Windows Demo 整波与 Linux
+  compile-only 证据已经通过；
 - Binance、Gate.io、Bitget 的真实行情与交易适配器；
 - Python StrategyHost 与四分片核心在合格 Linux 节点上的产品性能资格；
 - Linux 独占核心、CPU affinity、NUMA、真实网络/日志 I/O 和硬件性能计数器；
@@ -316,5 +346,5 @@ OrderCommand、返回 dispatch 与 ingress。显式授权的 BTC-USDT Demo 成�
 零 BTC baseline、两轮 REST 稳定屏障、25 USDT 上限和最终零残余预检；固定策略已真实穿过
 Gateway、TradingShard 现金风控、OrderCommand、OKX 回报、经济投影与稳定重放。断连、L2 缺口、
 认证失败、限流、Unknown、部分成功、并发 Fill、REST 分页、迟到事实和清理失败矩阵也已闭合；
-整波自动资格与证据关闭仍按第 11、12 票推进。
+整波自动资格与证据已闭合，最终能力波次边界由第 12 票确认。
 Binance、Gate.io、Bitget Adapter 继续后置；Linux 五核生产性能资格仍是独立波次。

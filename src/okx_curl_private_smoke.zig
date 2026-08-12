@@ -23,7 +23,10 @@ pub fn main(init: std.process.Init) !void {
     if (result.outcome != .response) return error.PrivateRequestUncertain;
     const parsed = try std.json.parseFromSlice(std.json.Value, init.gpa, result.response.?, .{});
     defer parsed.deinit();
-    const object = switch (parsed.value) { .object => |value| value, else => return error.InvalidResponse };
+    const object = switch (parsed.value) {
+        .object => |value| value,
+        else => return error.InvalidResponse,
+    };
     const code = switch (object.get("code") orelse return error.InvalidResponse) {
         .string => |value| value,
         else => return error.InvalidResponse,
@@ -45,7 +48,10 @@ pub fn main(init: std.process.Init) !void {
         if (batch.rejection != null) return error.PrivateIngressRejected;
         const frame = try std.json.parseFromSlice(std.json.Value, init.gpa, message, .{});
         defer frame.deinit();
-        const frame_object = switch (frame.value) { .object => |value| value, else => continue };
+        const frame_object = switch (frame.value) {
+            .object => |value| value,
+            else => continue,
+        };
         if (stringField(frame_object, "event")) |event| {
             if (std.mem.eql(u8, event, "login")) {
                 if (stringField(frame_object, "code")) |login_code|
@@ -94,5 +100,8 @@ const RawSink = struct {
 
 fn stringField(object: std.json.ObjectMap, name: []const u8) ?[]const u8 {
     const value = object.get(name) orelse return null;
-    return switch (value) { .string => |text| text, else => null };
+    return switch (value) {
+        .string => |text| text,
+        else => null,
+    };
 }
