@@ -55,8 +55,8 @@ Status: resolved
 
 - [形成可复现演示并关闭 Python 能力波次](issues/08-close-python-wave.md)
   已形成一条跨平台、失败即停的 14 项自动验收入口并在当前 Windows 环境完整通过；
-  README 固化权威状态边界和未资格事项。下一能力波次选择 OKX Venue Adapter
-  最小纵向接入，Linux 专用核心性能资格继续独立处理。
+  README 固化权威状态边界和未资格事项。随后完成的 OKX Venue Adapter 已足以验证
+  真实 Venue seam；当前能力波次转入交易核心系统闭环，Linux 专用核心性能资格继续独立处理。
 - [验证四 Host、约百策略的容量与延迟](issues/07-capacity-and-latency.md)
   已用产品 SPSC seam 在五种场景各采集至少 100 万决策样本；Windows 上 Python
   延迟合同与 Host 隔离通过，Linux 目标可交叉构建。2C/4T Windows 节点无法满足
@@ -93,8 +93,8 @@ Status: resolved
 
 ## Frontier
 
-无；本地图已完成。下一能力波次为 **OKX Venue Adapter 最小纵向接入**，
-后续以独立地图认领，不在本地图追加实现。
+无；本地图已完成。OKX Venue Adapter 最小纵向接入亦已完成；当前能力波次见
+[完成交易核心系统闭环](../trading-core-system-closure/map.md)，不在本地图追加实现。
 
 ## Reused evidence
 

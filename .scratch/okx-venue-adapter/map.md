@@ -36,7 +36,7 @@ Status: resolved
 - [闭合 TradingShard 到 OKX Demo 的真实交易链](issues/09-close-live-trading-chain.md) — 固定策略已穿过 Gateway、SPOT 现金风控、OrderCommand、同一 libcurl owner、Demo 私有回报、双层经济投影与稳定重放；真实 0.0002 BTC 买入/净额清理闭合且最终账户无残余。
 - [证明断连、Unknown、部分成功与幂等恢复](issues/10-prove-failure-recovery-and-idempotency.md) — 故障 fixture 固定在 ingress、dispatch、REST reconciliation 与权威 projection seam；断连、缺口、认证、限流、Unknown、部分成功、并发 Fill、分页、迟到事实和清理失败均已证明失败关闭且不自动重放副作用。
 - [资格化 OKX Demo 波次并保持 Linux 构建](issues/11-qualify-demo-wave-and-linux-build.md) — 单一 Windows 入口现以精确 Zig/libcurl 版本、三优化级别合同、公共 HTTPS、Demo preflight/private WSS/分页对账、显式 Demo-live 成交清理及 Linux compile-only 门槛关闭整波，且明确不宣称生产或 Linux 性能资格。
-- [形成可复现证据并关闭 OKX Adapter 波次](issues/12-close-okx-adapter-wave.md) — SystemOwner 已在异常关机后从干净 Demo preflight 重新运行只读与会成交整波并再次证明零残余；交付、未资格及凭证边界已冻结，本地图关闭且下一 Venue 选择 Binance。
+- [形成可复现证据并关闭 OKX Adapter 波次](issues/12-close-okx-adapter-wave.md) — SystemOwner 已在异常关机后从干净 Demo preflight 重新运行只读与会成交整波并再次证明零残余；交付、未资格及凭证边界已冻结，本地图关闭，Adapter 能力停止扩展。
 
 ## Not yet specified
 
@@ -62,4 +62,4 @@ Status: resolved
 
 ## Continuation
 
-OKX Demo Adapter 最小纵向接入已完成并关闭。按既定 `OKX -> Binance -> Gate.io -> Bitget` 顺序，下一能力波次是 Binance Venue Adapter；它须独立建图，不在本地图追加实现票据。OKX 生产工程、Linux 运行时/性能和部署资格继续作为独立后续范围，不由本地图结论推断。
+OKX Demo Adapter 最小纵向接入已完成并关闭。SystemOwner 明确现有 Adapter 已足以验证业务闭环，后续不再推进 Binance、Gate.io、Bitget 或扩展 OKX；下一能力波次转入[交易核心系统闭环](../trading-core-system-closure/map.md)。OKX 生产工程、Linux 运行时/性能和部署资格继续作为独立后续范围，不由本地图结论推断。

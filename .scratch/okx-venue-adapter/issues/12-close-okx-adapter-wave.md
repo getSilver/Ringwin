@@ -47,4 +47,4 @@ okx_demo_wave_acceptance=passed mode=demo_live linux=compile_only production_qua
 
 明确未资格：OKX 生产账户与生产下单、真实资金、Linux libcurl OpenSSL/CA artifact 的冻结链接与运行、Linux 性能、生产部署/密钥托管、单活热备/fencing、币本位/双向持仓/组合保证金/期权/算法单，以及 ETH-USDT、ETH-USDT-SWAP 和其他 Instrument。`.env.local`、libcurl 构建目录和 Linux 对象继续由 Git 忽略；未发现 SecretMaterial 或生成物进入提交。
 
-因此本地图在当前 Demo 功能范围内关闭，不继续混入 OKX 生产工程或下一 Venue 实现。按已冻结的首批 Venue 顺序 `OKX -> Binance -> Gate.io -> Bitget`，下一能力波次选择 **Binance Venue Adapter 最小纵向接入**；它需要独立地图和独立 SystemOwner 范围确认，不在本提交中预建代码或通用插件框架。
+因此本地图在当前 Demo 功能范围内关闭，不继续混入 OKX 生产工程或下一 Venue 实现。SystemOwner 随后明确停止扩展 Adapter 能力；下一能力波次改为 **交易核心系统闭环**，OKX 只作为既有真实 Venue 验证工具。Binance、Gate.io、Bitget 不建立实施地图、产品代码或通用插件框架。
