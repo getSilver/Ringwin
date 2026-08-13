@@ -46,6 +46,19 @@ pub const ShardSummary = struct {
 
 const SummaryRecord = struct { identity: u128 = 0, value: ShardSummary = undefined, present: bool = false };
 
+/// Versioned risk authority granted to one DecisionDomain.
+pub const RiskLease = struct {
+    identity: u128,
+    exchange_account: u128,
+    shard_id: ShardId,
+    decision_domain: u128,
+    version: u64,
+    valid_through_barrier: u64,
+    limit_micros: i64,
+    used_micros: i64,
+    open: bool,
+};
+
 /// Fixed-capacity owner of cross-shard leases and account reconciliation only.
 pub const AccountCoordinator = struct {
     exchange_account: u128,
@@ -53,6 +66,9 @@ pub const AccountCoordinator = struct {
     global_ceiling_micros: i64,
     barrier: u64 = 0,
     summaries: [max_shards]SummaryRecord = @splat(.{}),
+    leases: [max_shards]RiskLease = undefined,
+    lease_count: u8 = 0,
+    account_netting_benefit_micros: i64 = 0,
 
     /// Creates one coordinator for exactly one ExchangeAccount.
     pub fn init(exchange_account: u128, account_ceiling: i64, global_ceiling: i64) AccountCoordinator {
@@ -102,6 +118,44 @@ pub const AccountCoordinator = struct {
         hasher.final(&result);
         return result;
     }
+
+    /// Returns the non-netted sum of all published Portfolio reservations.
+    pub fn grossPortfolioMargin(self: *const AccountCoordinator) i64 {
+        var total: i64 = 0;
+        for (self.summaries) |record| {
+            if (record.present) total += record.value.reservation_micros;
+        }
+        return total;
+    }
+
+    /// Allocates deterministic leases without turning account netting into buying power.
+    pub fn allocateLeases(self: *AccountCoordinator, version: u64, valid_through_barrier: u64) ![]const RiskLease {
+        if (version == 0 or valid_through_barrier < self.barrier) return error.InvalidRiskLease;
+        for (self.summaries) |record| if (!record.present) return error.IncompleteShardSummaries;
+        const gross = self.grossPortfolioMargin();
+        const ceiling = @min(self.account_safety_ceiling_micros, self.global_ceiling_micros);
+        if (gross > ceiling or ceiling <= 0) return error.AccountSafetyCeilingExceeded;
+        const base = @divFloor(ceiling, max_shards);
+        const remainder = @mod(ceiling, max_shards);
+        self.lease_count = max_shards;
+        for (&self.leases, 0..) |*lease, index| {
+            const summary = self.summaries[index].value;
+            const limit = base + @as(i64, if (index < remainder) 1 else 0);
+            if (summary.reservation_micros > limit) return error.RiskLeaseOversubscribed;
+            lease.* = .{
+                .identity = (@as(u128, version) << 64) | index + 1,
+                .exchange_account = self.exchange_account,
+                .shard_id = @enumFromInt(index),
+                .decision_domain = summary.decision_domain,
+                .version = version,
+                .valid_through_barrier = valid_through_barrier,
+                .limit_micros = limit,
+                .used_micros = summary.reservation_micros,
+                .open = true,
+            };
+        }
+        return self.leases[0..self.lease_count];
+    }
 };
 
 test "shared account protocol rejects conflicting shard summaries" {
@@ -111,4 +165,19 @@ test "shared account protocol rejects conflicting shard summaries" {
     var conflict = summary;
     conflict.reservation_micros += 1;
     try std.testing.expectError(error.SummaryIdentityConflict, coordinator.publishSummary(1, conflict));
+}
+
+test "risk leases allocate from gross reservations without netting benefit" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    for (0..max_shards) |index| {
+        var summary = ShardSummary.fixture(@enumFromInt(index), 1, 100);
+        summary.swap_quantity = if (index % 2 == 0) 5 else -5;
+        _ = try coordinator.publishSummary(index + 1, summary);
+    }
+    const leases = try coordinator.allocateLeases(1, 10);
+    try std.testing.expectEqual(@as(i64, 400), coordinator.grossPortfolioMargin());
+    var total: i64 = 0;
+    for (leases) |lease| total += lease.limit_micros;
+    try std.testing.expectEqual(@as(i64, 1_000), total);
+    try std.testing.expectEqual(@as(i64, 0), coordinator.account_netting_benefit_micros);
 }
