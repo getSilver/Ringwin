@@ -917,6 +917,13 @@ pub const SnapshotRestore = struct {
     barrier: u64,
 };
 
+/// Recovered authoritative state and the stable tail scan result.
+pub const SnapshotRecovery = struct {
+    shard: TradingShard,
+    barrier: u64,
+    status: journal.ScanStatus,
+};
+
 const OrderState = enum(u8) {
     none,
     pending_submit,
@@ -1215,6 +1222,15 @@ pub const TradingShard = struct {
             !std.mem.eql(u8, encoded[60..92], &digest))
             return error.InvalidSnapshotState;
         return .{ .shard = recovered.shard, .barrier = barrier };
+    }
+
+    /// Restores a snapshot and semantically replays its immediately following journal segment.
+    pub fn restore(encoded: []const u8, stable_tail: []const u8) !SnapshotRecovery {
+        const restored = try restoreSnapshot(encoded);
+        var reader = try journal.Reader.init(stable_tail);
+        if (reader.next_sequence != restored.barrier + 1) return error.SnapshotJournalGap;
+        const recovered = try replayReader(&reader, restored.shard);
+        return .{ .shard = recovered.shard, .barrier = restored.barrier, .status = recovered.status };
     }
 
     pub fn economicSummary(self: *const TradingShard) EconomicSummary {
@@ -3749,10 +3765,14 @@ fn replay(bytes: []const u8) !ReplayResult {
 
 fn replayConfigured(bytes: []const u8, quantity_denominator: i64, reservation_model: ReservationModel) !ReplayResult {
     var reader = try journal.Reader.init(bytes);
-    var shard: TradingShard = .{
+    return replayReader(&reader, .{
         .quantity_denominator = quantity_denominator,
         .reservation_model = reservation_model,
-    };
+    });
+}
+
+fn replayReader(reader: *journal.Reader, initial: TradingShard) !ReplayResult {
+    var shard = initial;
 
     while (true) {
         const next = try reader.next();
@@ -4796,6 +4816,30 @@ test "authoritative snapshot round trips at an exact shard barrier" {
     damaged_storage[encoded.len - 1] ^= 1;
     try std.testing.expectError(error.InvalidSnapshotPayload, TradingShard.restoreSnapshot(damaged_storage[0..encoded.len]));
     try std.testing.expectError(error.InvalidSnapshotBarrier, run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence - 1, &duplicate_storage));
+}
+
+test "snapshot restore replays only the stable journal tail without send capability" {
+    var prefix = try startScenario();
+    try prefix.decision_journal.seal();
+    var snapshot_storage: [32 * 1024]u8 = undefined;
+    const encoded = try prefix.shard.snapshot(&prefix.decision_journal, prefix.decision_journal.last_sequence, &snapshot_storage);
+
+    var live = prefix.shard;
+    var tail = journal.Journal.initAt(prefix.decision_journal.last_sequence + 1);
+    _ = try applyLive(&live, &tail, atGroup(12, .{ .identity = 9, .payload = .{ .mark_price = 50_000_000_000 } }));
+    try tail.seal();
+
+    const recovered = try TradingShard.restore(encoded, tail.bytes());
+    try std.testing.expectEqual(journal.ScanStatus.clean, recovered.status);
+    try std.testing.expectEqualSlices(u8, &live.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
+    comptime std.debug.assert(!@hasDecl(SnapshotRecovery, "trySend"));
+
+    const truncated = try TradingShard.restore(encoded, tail.bytes()[0 .. tail.len - 1]);
+    try std.testing.expectEqual(journal.ScanStatus.truncated_tail, truncated.status);
+    try std.testing.expectEqualSlices(u8, &live.canonicalStateDigest(), &truncated.shard.canonicalStateDigest());
+
+    var gap = journal.Journal.initAt(prefix.decision_journal.last_sequence + 2);
+    try std.testing.expectError(error.SnapshotJournalGap, TradingShard.restore(encoded, gap.bytes()));
 }
 
 test "OKX spot authoritative projection" {

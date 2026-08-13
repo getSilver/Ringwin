@@ -57,6 +57,12 @@ pub const Journal = struct {
     sealed: bool = false,
 
     pub fn init() Journal {
+        return initAt(1);
+    }
+
+    /// Creates a segment whose first record must have the supplied sequence.
+    pub fn initAt(first_sequence: u64) Journal {
+        std.debug.assert(first_sequence != 0);
         var self: Journal = .{};
         const header = self.storage[0..segment_header_len];
         @memset(header, 0);
@@ -64,8 +70,9 @@ pub const Journal = struct {
         put(u16, header, 4, 2);
         put(u16, header, 6, segment_header_len);
         put(u64, header, 8, 1);
-        put(u64, header, 24, 1);
+        put(u64, header, 24, first_sequence);
         put(u32, header, 60, Crc32c.hash(header[0..60]));
+        self.last_sequence = first_sequence - 1;
         return self;
     }
 
