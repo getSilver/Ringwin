@@ -2,6 +2,7 @@ const std = @import("std");
 const trading = @import("trading_shard.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const snapshot_magic: u64 = 0x54434341574e4952;
+const account_margin_gate_identity: u128 = 0x414343544d415247;
 
 pub const max_shards = 4;
 
@@ -24,6 +25,9 @@ pub const ShardSummary = struct {
     open_orders: u8,
     unknown_orders: u8,
     local_gate_closed: bool,
+    exchange_margin_micros: i64 = 0,
+    risk_tier: u8 = 0,
+    liquidation_distance_ticks: i64 = std.math.maxInt(i64),
 
     fn fixture(shard_id: ShardId, sequence: u64, reservation: i64) ShardSummary {
         return .{
@@ -68,7 +72,7 @@ pub const RiskLease = struct {
 
 /// Account-wide observations normalized once before deterministic fan-out.
 pub const AccountFactPayload = union(enum) {
-    account_snapshot: struct { cash_micros: i64, swap_quantity: i64, margin_micros: i64 },
+    account_snapshot: struct { cash_micros: i64, spot_quantity: i64 = 0, swap_quantity: i64, margin_micros: i64 },
     forced_execution: struct { owner: ?ShardId, quantity: i64, price_micros: i64, fee_micros: i64 },
 };
 
@@ -92,12 +96,79 @@ pub const MarginObservation = struct {
     venue_swap_quantity: i64,
     margin_mode: enum(u8) { isolated },
     rules_version: u32,
+    venue_risk_tier: u8 = 0,
+    venue_liquidation_distance_ticks: i64 = std.math.maxInt(i64),
 };
 
 /// Account-level authority result that every affected shard must consume.
 pub const AccountGate = struct { identity: u128, open: bool, latched: bool };
 /// One account-wide gate delivery to a specific shard.
 pub const GateDelivery = struct { shard_id: ShardId, gate: AccountGate };
+
+/// Converts one routed account fact into the target shard's stable event seam.
+pub fn accountFactEvent(delivery: Delivery) !trading.CanonicalEvent {
+    const identity = std.math.cast(u64, delivery.fact.identity) orelse return error.IdentityOutOfRange;
+    return .{
+        .identity = identity,
+        .payload = switch (delivery.fact.payload) {
+            .account_snapshot => |snapshot| .{ .economic_account_snapshot = .{
+                .snapshot_id = identity,
+                .usdt_balance_micros = snapshot.cash_micros,
+                .spot_asset_quantity = snapshot.spot_quantity,
+                .swap_position_quantity = snapshot.swap_quantity,
+                .margin_micros = snapshot.margin_micros,
+            } },
+            .forced_execution => |execution| .{ .venue_forced_execution = .{
+                .execution_id = identity,
+                .side = if (execution.quantity < 0) .sell else .buy,
+                .quantity = if (execution.quantity == std.math.minInt(i64))
+                    return error.InvalidAccountFact
+                else
+                    @intCast(@abs(execution.quantity)),
+                .price_micros = execution.price_micros,
+                .fee_micros = execution.fee_micros,
+            } },
+        },
+    };
+}
+
+/// Converts one lease grant into the existing shard risk-lease event.
+pub fn riskLeaseEvent(lease: RiskLease) !trading.CanonicalEvent {
+    const identity = std.math.cast(u64, lease.identity) orelse return error.IdentityOutOfRange;
+    return .{ .identity = identity, .payload = .{ .risk_lease_granted = .{
+        .lease_identity = identity,
+        .version = lease.version,
+        .valid_through_barrier = lease.valid_through_barrier,
+        .open = lease.open,
+        .amount_micros = if (lease.open) lease.limit_micros else 0,
+        .strategy_limit_micros = if (lease.open) lease.limit_micros else 0,
+        .portfolio_limit_micros = if (lease.open) lease.limit_micros else 0,
+        .exchange_account_limit_micros = if (lease.open) lease.limit_micros else 0,
+        .global_limit_micros = if (lease.open) lease.limit_micros else 0,
+    } } };
+}
+
+/// Converts one account-wide restriction into a shard-local stable gate fact.
+pub fn accountGateEvent(delivery: GateDelivery, target_identity: u128) !trading.CanonicalEvent {
+    const identity = std.math.cast(u64, delivery.gate.identity) orelse return error.IdentityOutOfRange;
+    return .{ .identity = identity, .payload = .{ .safety_gate_change = .{
+        .gate_identity = delivery.gate.identity,
+        .target_identity = target_identity,
+        .kind = .latched,
+        .reason = .reconciliation_break,
+        .open = delivery.gate.open,
+    } } };
+}
+
+/// Durably applies one routed account fact through the shard's transactional seam.
+pub fn applyAccountFactStable(delivery: Delivery, shard: *trading.TradingShard, stable_journal: *trading.journal.Journal) !void {
+    _ = try trading.applyStable(shard, stable_journal, try accountFactEvent(delivery));
+}
+
+/// Durably applies one account restriction through the shard's transactional seam.
+pub fn applyAccountGateStable(delivery: GateDelivery, shard: *trading.TradingShard, stable_journal: *trading.journal.Journal) !void {
+    _ = try trading.applyStable(shard, stable_journal, try accountGateEvent(delivery, shard.operational_state.target_identity));
+}
 
 /// One qualified command submitted through the shared transport periphery.
 pub const GatewayRequest = struct {
@@ -111,7 +182,15 @@ pub const GatewayRequest = struct {
 pub const GatewayReceipt = struct { shard_id: ShardId, command_id: u64 };
 
 /// One itemized transport outcome routed to its sole owner.
-pub const GatewayOutcome = struct { shard_id: ShardId, command_id: u64, state: trading.oms.DispatchState };
+pub const GatewayOutcome = struct {
+    exchange_account: u128,
+    shard_id: ShardId,
+    command_id: u64,
+    order_id: u64,
+    revision: u32,
+    fencing_token: u64,
+    state: trading.oms.DispatchState,
+};
 
 const GatewayRecord = struct { exchange_account: u128, shard_id: ShardId, command_id: u64, order_id: u64, revision: u32, fencing_token: u64 };
 
@@ -119,20 +198,21 @@ const GatewayRecord = struct { exchange_account: u128, shard_id: ShardId, comman
 pub const SharedExecutionGateway = struct {
     records: [32]GatewayRecord = undefined,
     count: u8 = 0,
-    latest_fencing_token: u64 = 0,
+    latest_fencing_tokens: [max_shards]u64 = @splat(0),
 
     /// Admits one uniquely owned command before the transport send attempt.
     pub fn submit(self: *SharedExecutionGateway, request: GatewayRequest) !GatewayReceipt {
         if (request.exchange_account == 0 or request.fencing_token == 0 or request.command.command_id == 0 or
             request.command.order_id == 0 or request.command.revision == 0)
             return error.InvalidGatewayRequest;
-        if (request.fencing_token < self.latest_fencing_token) return error.StaleFencingToken;
+        const shard_index: usize = @intFromEnum(request.shard_id);
+        if (request.fencing_token < self.latest_fencing_tokens[shard_index]) return error.StaleFencingToken;
         for (self.records[0..self.count]) |known| {
             if (known.shard_id == request.shard_id and known.command_id == request.command.command_id)
                 return error.DuplicateCommandIdentity;
         }
         if (self.count == self.records.len) return error.GatewayCapacityExceeded;
-        self.latest_fencing_token = @max(self.latest_fencing_token, request.fencing_token);
+        self.latest_fencing_tokens[shard_index] = request.fencing_token;
         self.records[self.count] = .{
             .exchange_account = request.exchange_account,
             .shard_id = request.shard_id,
@@ -148,9 +228,22 @@ pub const SharedExecutionGateway = struct {
     /// Routes an itemized result only when its owner and command identity match.
     pub fn complete(self: *const SharedExecutionGateway, outcome: GatewayOutcome) !GatewayOutcome {
         for (self.records[0..self.count]) |known| {
-            if (known.command_id == outcome.command_id and known.shard_id == outcome.shard_id) return outcome;
+            if (known.command_id == outcome.command_id and known.shard_id == outcome.shard_id) {
+                if (known.exchange_account != outcome.exchange_account or known.order_id != outcome.order_id or
+                    known.revision != outcome.revision or known.fencing_token != outcome.fencing_token)
+                    return error.GatewayOutcomeIdentityConflict;
+                return outcome;
+            }
         }
         return error.UnknownGatewayCommand;
+    }
+
+    /// Converts an itemized transport outcome into the owning OMS apply seam.
+    pub fn outcomeEvent(self: *const SharedExecutionGateway, outcome: GatewayOutcome) !trading.CanonicalEvent {
+        _ = try self.complete(outcome);
+        var items: [trading.oms.max_commands]trading.oms.DispatchItem = undefined;
+        items[0] = .{ .command_id = outcome.command_id, .state = outcome.state };
+        return .{ .identity = outcome.command_id, .payload = .{ .oms_dispatch_batch = .{ .items = items, .count = 1 } } };
     }
 };
 
@@ -265,7 +358,7 @@ pub const AccountCoordinator = struct {
             const limit = base + @as(i64, if (index < remainder) 1 else 0);
             if (summary.reservation_micros > limit) return error.RiskLeaseOversubscribed;
             lease.* = .{
-                .identity = (@as(u128, version) << 64) | index + 1,
+                .identity = try std.math.add(u128, try std.math.mul(u128, version, max_shards), index + 1),
                 .exchange_account = self.exchange_account,
                 .shard_id = @enumFromInt(index),
                 .decision_domain = summary.decision_domain,
@@ -276,9 +369,33 @@ pub const AccountCoordinator = struct {
                 .open = true,
             };
         }
+        if (self.lease_count != 0) {
+            if (version < self.leases[0].version) return error.StaleRiskLease;
+            if (version == self.leases[0].version) {
+                if (!std.meta.eql(candidate, self.leases)) return error.RiskLeaseIdentityConflict;
+                return self.leases[0..self.lease_count];
+            }
+        }
         self.leases = candidate;
         self.lease_count = max_shards;
         return self.leases[0..self.lease_count];
+    }
+
+    /// Closes every lease whose durable coordination barrier has expired.
+    pub fn expireLeases(self: *AccountCoordinator, barrier: u64) bool {
+        var changed = false;
+        for (self.leases[0..self.lease_count], 0..) |*lease, index| {
+            if (lease.open and barrier > lease.valid_through_barrier) {
+                lease.version += 1;
+                lease.identity = @as(u128, lease.version) * max_shards + index + 1;
+                lease.valid_through_barrier = barrier;
+                lease.limit_micros = 0;
+                lease.used_micros = 0;
+                lease.open = false;
+                changed = true;
+            }
+        }
+        return changed;
     }
 
     /// Normalizes one account fact and returns its stable per-shard routing plan.
@@ -295,10 +412,11 @@ pub const AccountCoordinator = struct {
         self.last_account_fact = fact;
         const count: usize = switch (fact.payload) {
             .account_snapshot => max_shards,
-            .forced_execution => |forced| if (forced.owner == null) max_shards else 1,
+            .forced_execution => 1,
         };
-        if (fact.payload == .forced_execution and fact.payload.forced_execution.owner != null) {
-            self.deliveries[0] = .{ .shard_id = fact.payload.forced_execution.owner.?, .fact = fact };
+        if (fact.payload == .forced_execution) {
+            // Unowned economics enter exactly one deterministic SuspenseAccount projection.
+            self.deliveries[0] = .{ .shard_id = fact.payload.forced_execution.owner orelse .shard_0, .fact = fact };
         } else {
             for (self.deliveries[0..count], 0..) |*delivery, index|
                 delivery.* = .{ .shard_id = @enumFromInt(index), .fact = fact };
@@ -319,16 +437,53 @@ pub const AccountCoordinator = struct {
             if (observation.barrier <= known.barrier) return error.StaleMarginObservation;
         }
         var projected_quantity: i64 = 0;
+        var projected_margin: i64 = 0;
+        var projected_risk_tier: u8 = 0;
+        var projected_liquidation_distance: i64 = std.math.maxInt(i64);
         for (self.summaries) |record| {
             if (!record.present) return error.IncompleteShardSummaries;
             projected_quantity = try std.math.add(i64, projected_quantity, record.value.swap_quantity);
+            projected_margin = try std.math.add(i64, projected_margin, record.value.exchange_margin_micros);
+            projected_risk_tier = @max(projected_risk_tier, record.value.risk_tier);
+            projected_liquidation_distance = @min(projected_liquidation_distance, record.value.liquidation_distance_ticks);
         }
         const gross = try self.grossPortfolioMargin();
         self.account_netting_benefit_micros = @max(gross - observation.venue_net_margin_micros, 0);
         const closed = projected_quantity == observation.venue_swap_quantity and
+            projected_margin == observation.venue_net_margin_micros and
+            projected_risk_tier == observation.venue_risk_tier and
+            projected_liquidation_distance == observation.venue_liquidation_distance_ticks and
             observation.venue_net_margin_micros <= gross;
         self.last_margin_observation = observation;
-        self.margin_gate = .{ .identity = observation.identity, .open = closed, .latched = !closed };
+        self.margin_gate = if (self.margin_gate.latched)
+            .{ .identity = account_margin_gate_identity, .open = false, .latched = true }
+        else
+            .{ .identity = account_margin_gate_identity, .open = closed, .latched = !closed };
+        return self.margin_gate;
+    }
+
+    /// Clears the account margin latch only after healthy evidence and explicit resolution.
+    pub fn resolveMarginGate(self: *AccountCoordinator, observation_identity: u128) !AccountGate {
+        const observation = self.last_margin_observation orelse return error.MarginObservationRequired;
+        if (observation.identity != observation_identity) return error.MarginObservationIdentityConflict;
+        var projected_quantity: i64 = 0;
+        var projected_margin: i64 = 0;
+        var projected_risk_tier: u8 = 0;
+        var projected_liquidation_distance: i64 = std.math.maxInt(i64);
+        for (self.summaries) |record| {
+            if (!record.present) return error.IncompleteShardSummaries;
+            projected_quantity = try std.math.add(i64, projected_quantity, record.value.swap_quantity);
+            projected_margin = try std.math.add(i64, projected_margin, record.value.exchange_margin_micros);
+            projected_risk_tier = @max(projected_risk_tier, record.value.risk_tier);
+            projected_liquidation_distance = @min(projected_liquidation_distance, record.value.liquidation_distance_ticks);
+        }
+        if (projected_quantity != observation.venue_swap_quantity or
+            projected_margin != observation.venue_net_margin_micros or
+            projected_risk_tier != observation.venue_risk_tier or
+            projected_liquidation_distance != observation.venue_liquidation_distance_ticks or
+            observation.venue_net_margin_micros > try self.grossPortfolioMargin())
+            return error.MarginReconciliationStillBroken;
+        self.margin_gate = .{ .identity = account_margin_gate_identity, .open = true, .latched = false };
         return self.margin_gate;
     }
 
@@ -489,6 +644,7 @@ fn writeOptionalAccountFact(writer: *std.Io.Writer, fact: ?AccountFact) !void {
         .account_snapshot => |snapshot| {
             try writer.writeByte(0);
             try writer.writeInt(i64, snapshot.cash_micros, .little);
+            try writer.writeInt(i64, snapshot.spot_quantity, .little);
             try writer.writeInt(i64, snapshot.swap_quantity, .little);
             try writer.writeInt(i64, snapshot.margin_micros, .little);
         },
@@ -512,6 +668,7 @@ fn readOptionalAccountFact(reader: *std.Io.Reader) !?AccountFact {
     const payload: AccountFactPayload = switch (try reader.takeByte()) {
         0 => .{ .account_snapshot = .{
             .cash_micros = try reader.takeInt(i64, .little),
+            .spot_quantity = try reader.takeInt(i64, .little),
             .swap_quantity = try reader.takeInt(i64, .little),
             .margin_micros = try reader.takeInt(i64, .little),
         } },
@@ -538,6 +695,8 @@ fn writeOptionalMarginObservation(writer: *std.Io.Writer, observation: ?MarginOb
         try writer.writeInt(i64, value.venue_swap_quantity, .little);
         try writer.writeByte(@intFromEnum(value.margin_mode));
         try writer.writeInt(u32, value.rules_version, .little);
+        try writer.writeByte(value.venue_risk_tier);
+        try writer.writeInt(i64, value.venue_liquidation_distance_ticks, .little);
     }
 }
 
@@ -550,6 +709,8 @@ fn readOptionalMarginObservation(reader: *std.Io.Reader) !?MarginObservation {
         .venue_swap_quantity = try reader.takeInt(i64, .little),
         .margin_mode = std.enums.fromInt(@FieldType(MarginObservation, "margin_mode"), try reader.takeByte()) orelse return error.InvalidCoordinatorSnapshot,
         .rules_version = try reader.takeInt(u32, .little),
+        .venue_risk_tier = try reader.takeByte(),
+        .venue_liquidation_distance_ticks = try reader.takeInt(i64, .little),
     };
 }
 
@@ -628,7 +789,11 @@ test "account facts fan out once in stable shard order" {
 
 test "margin reconciliation preserves netting benefit but latches unexplained differences" {
     var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
-    for (0..max_shards) |index| _ = try coordinator.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, 100));
+    for (0..max_shards) |index| {
+        var summary = ShardSummary.fixture(@enumFromInt(index), 1, 100);
+        summary.exchange_margin_micros = if (index < 2) 63 else 62;
+        _ = try coordinator.publishSummary(index + 1, summary);
+    }
     const healthy = try coordinator.reconcileMargin(.{ .identity = 20, .barrier = 5, .venue_net_margin_micros = 250, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 });
     try std.testing.expect(healthy.open);
     try std.testing.expectEqual(@as(i64, 150), coordinator.account_netting_benefit_micros);
@@ -636,6 +801,35 @@ test "margin reconciliation preserves netting benefit but latches unexplained di
     const broken = try coordinator.reconcileMargin(.{ .identity = 21, .barrier = 6, .venue_net_margin_micros = 250, .venue_swap_quantity = 1, .margin_mode = .isolated, .rules_version = 1 });
     try std.testing.expect(!broken.open);
     try std.testing.expect(broken.latched);
+    const still_latched = try coordinator.reconcileMargin(.{ .identity = 22, .barrier = 7, .venue_net_margin_micros = 250, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 });
+    try std.testing.expect(still_latched.latched);
+    const resolved = try coordinator.resolveMarginGate(22);
+    try std.testing.expect(resolved.open);
+    try std.testing.expect(!resolved.latched);
+}
+
+test "unowned economics route once and account gates enter the stable shard seam" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    const deliveries = try coordinator.acceptAccountFact(.{
+        .identity = 33,
+        .exchange_account = 900,
+        .version = 1,
+        .barrier = 1,
+        .payload = .{ .forced_execution = .{ .owner = null, .quantity = -1, .price_micros = 100, .fee_micros = 1 } },
+    });
+    try std.testing.expectEqual(@as(usize, 1), deliveries.len);
+    try std.testing.expectEqual(ShardId.shard_0, deliveries[0].shard_id);
+
+    var shard: trading.TradingShard = .{};
+    shard.quantity_denominator = 1;
+    shard.operational_state = trading.operational.State.init(100);
+    var stable_journal = trading.journal.Journal.init();
+    try applyAccountFactStable(deliveries[0], &shard, &stable_journal);
+    try std.testing.expect(shard.economicSummary().reconciliation_break);
+    const gate_delivery: GateDelivery = .{ .shard_id = .shard_0, .gate = .{ .identity = 44, .open = false, .latched = true } };
+    try applyAccountGateStable(gate_delivery, &shard, &stable_journal);
+    try std.testing.expect(!shard.operational_state.effectiveTradingAuthority());
+    try std.testing.expect(shard.operational_state.latch_count > 0);
 }
 
 test "shared gateway routes itemized outcomes to the unique owning shard" {
@@ -645,7 +839,15 @@ test "shared gateway routes itemized outcomes to the unique owning shard" {
     try std.testing.expectEqual(ShardId.shard_0, first.shard_id);
     try std.testing.expectEqual(ShardId.shard_1, second.shard_id);
     try std.testing.expectError(error.DuplicateCommandIdentity, gateway.submit(.{ .exchange_account = 900, .shard_id = .shard_0, .fencing_token = 7, .command = commandFixture(1, 1) }));
-    const routed = try gateway.complete(.{ .shard_id = .shard_1, .command_id = second.command_id, .state = .unknown });
+    const routed = try gateway.complete(.{
+        .exchange_account = 900,
+        .shard_id = .shard_1,
+        .command_id = second.command_id,
+        .order_id = 1,
+        .revision = 1,
+        .fencing_token = 7,
+        .state = .unknown,
+    });
     try std.testing.expectEqual(ShardId.shard_1, routed.shard_id);
     try std.testing.expectEqual(trading.oms.DispatchState.unknown, routed.state);
 }
@@ -668,7 +870,11 @@ test "local faults stay local while account gates tighten every shard" {
 
 test "four shard coordinator snapshot restores deterministic authority" {
     var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
-    for (0..max_shards) |index| _ = try coordinator.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, 100));
+    for (0..max_shards) |index| {
+        var summary = ShardSummary.fixture(@enumFromInt(index), 1, 100);
+        summary.exchange_margin_micros = if (index < 2) 63 else 62;
+        _ = try coordinator.publishSummary(index + 1, summary);
+    }
     _ = try coordinator.allocateLeases(1, 10);
     _ = try coordinator.reconcileMargin(.{ .identity = 20, .barrier = 5, .venue_net_margin_micros = 250, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 });
     var storage: [4096]u8 = undefined;

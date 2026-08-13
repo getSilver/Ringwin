@@ -20,13 +20,13 @@ const okx_rest_auth = @import("okx_rest_auth.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Crc32c = std.hash.crc.Crc32Iscsi;
 
-pub const schema_version: u16 = 3;
+pub const schema_version: u16 = 4;
 /// Current physical schema for AuthoritativeTradingState snapshots.
-pub const state_schema_version: u32 = 1;
+pub const state_schema_version: u32 = 2;
 /// Release artifact producing the current snapshot schema.
 pub const release_artifact_identity: u64 = 1;
 /// Registry entry defining the current snapshot and journal schemas.
-pub const schema_registry_identity: u64 = 1;
+pub const schema_registry_identity: u64 = 2;
 const snapshot_magic: u64 = 0x50414e53574e4952; // RINWSNAP
 const snapshot_header_len: usize = 144;
 const SnapshotHeader = packed struct {
@@ -177,11 +177,11 @@ const order_limit_price: i64 = 50_100_000_000;
 const initial_exchange_cash: i64 = 25_000 * money_scale;
 const portfolio_allocation: i64 = 20_000 * money_scale;
 const risk_lease_total: i64 = 10_000 * money_scale;
-const expected_happy_digest = "674ff4b1e0018280a198b85b580d4e9d5da46ee81cb034783f9d4f637765b7d6";
-const expected_market_gap_digest = "9f7890e42b707ce31803f50af9c53e359a13b9b45c0685f497129a731cf5dbad";
-const expected_risk_rejection_digest = "ff1d46e6c479eff7e25a7c00fd0750d92bdb0da09eab5923e3fb19dc179315e1";
-const expected_unknown_digest = "2ce777b8a2625b2c0e9d44aea74f12e2395d81092fba6c154bd4b3ba5a1129da";
-const expected_duplicate_digest = "e45ce49f98a7ae623bee6e4eedbef70f3afa0901692f7340c823540265371d54";
+const expected_happy_digest = "05512551eb6da3d137e0476015e262f16df155035d2ac292db700e15edb10ef3";
+const expected_market_gap_digest = "9bd0c661b449be191751ebc63648d884302e65292a3a2240f93ef4b2c1e2fe21";
+const expected_risk_rejection_digest = "34aec497178098873f556d1e786f19b02576c5a7e9d568435fea40a4709dd6f9";
+const expected_unknown_digest = "32d6ff5537d4adc99e57d159fde6c77cb353030929eafe63726bf71c7efaf661";
+const expected_duplicate_digest = "14f3be1e51ef6aa7e16dd5cf5ca4aff2355e7d17d06a6d44ea27342b32d13f53";
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 const benchmark_samples: usize = 1_000_000;
@@ -419,6 +419,10 @@ pub const StrategyActivation = struct {
 };
 pub const PrimaryLease = struct { fencing_token: u64 };
 pub const RiskLease = struct {
+    lease_identity: u64 = 0,
+    version: u64 = 1,
+    valid_through_barrier: u64 = std.math.maxInt(u64),
+    open: bool = true,
     amount_micros: i64,
     strategy_limit_micros: i64 = 0,
     portfolio_limit_micros: i64 = 0,
@@ -564,6 +568,10 @@ fn encodeInput(input: InputEvent) !EncodedInput {
         },
         .primary_lease_granted => |value| try encoded.put(u64, value.fencing_token),
         .risk_lease_granted => |value| {
+            try encoded.put(u64, value.lease_identity);
+            try encoded.put(u64, value.version);
+            try encoded.put(u64, value.valid_through_barrier);
+            try encoded.put(u8, @intFromBool(value.open));
             try encoded.put(i64, value.amount_micros);
             try encoded.put(i64, value.strategy_limit_micros);
             try encoded.put(i64, value.portfolio_limit_micros);
@@ -765,6 +773,14 @@ fn readInputValue(comptime T: type, bytes: []const u8, offset: *usize) !T {
     return value;
 }
 
+fn readInputBool(bytes: []const u8, offset: *usize) !bool {
+    return switch (try readInputValue(u8, bytes, offset)) {
+        0 => false,
+        1 => true,
+        else => error.InvalidInputPayload,
+    };
+}
+
 fn decodeInput(record: journal.Record) !InputEvent {
     if (record.schema_version != schema_version) return error.UnsupportedSchema;
     var offset: usize = 0;
@@ -825,6 +841,10 @@ fn decodeInput(record: journal.Record) !InputEvent {
             .fencing_token = try readInputValue(u64, record.payload, &offset),
         } },
         .risk_lease_granted => .{ .risk_lease_granted = .{
+            .lease_identity = try readInputValue(u64, record.payload, &offset),
+            .version = try readInputValue(u64, record.payload, &offset),
+            .valid_through_barrier = try readInputValue(u64, record.payload, &offset),
+            .open = try readInputBool(record.payload, &offset),
             .amount_micros = try readInputValue(i64, record.payload, &offset),
             .strategy_limit_micros = try readInputValue(i64, record.payload, &offset),
             .portfolio_limit_micros = try readInputValue(i64, record.payload, &offset),
@@ -1288,6 +1308,9 @@ pub const TradingShard = struct {
     position_margin_requirement_micros: i64 = 0,
     risk_lease_micros: i64 = 0,
     risk_lease_remaining_micros: i64 = 0,
+    risk_lease_identity: u64 = 0,
+    risk_lease_version: u64 = 0,
+    risk_lease_valid_through_barrier: u64 = 0,
     strategy_limit_micros: i64 = 0,
     portfolio_limit_micros: i64 = 0,
     exchange_account_limit_micros: i64 = 0,
@@ -2066,7 +2089,7 @@ pub const TradingShard = struct {
                     return error.InvalidPrimaryLease;
                 self.fencing_token = lease.fencing_token;
                 if (self.operational_state.initialized) try self.applyOperationalGate(.{
-                    .gate_identity = input.identity,
+                    .gate_identity = primary_lease_gate_identity,
                     .target_identity = self.operational_state.target_identity,
                     .kind = .self_recovering,
                     .reason = .primary_lease,
@@ -2076,8 +2099,22 @@ pub const TradingShard = struct {
                 try self.trace.append(.primary_lease_granted, input.identity);
             },
             .risk_lease_granted => |lease| {
-                if (self.fencing_token == 0 or lease.amount_micros <= 0 or self.risk_lease_micros != 0)
+                const lease_identity = if (lease.lease_identity == 0) input.identity else lease.lease_identity;
+                if (self.fencing_token == 0 or lease.version == 0 or
+                    lease.version < self.risk_lease_version)
                     return error.InvalidRiskLease;
+                if (lease.version == self.risk_lease_version) {
+                    if (lease_identity != self.risk_lease_identity or
+                        lease.valid_through_barrier != self.risk_lease_valid_through_barrier or
+                        lease.amount_micros != self.risk_lease_micros or lease.open != (self.risk_lease_micros > 0))
+                        return error.RiskLeaseIdentityConflict;
+                    return null;
+                }
+                if (lease.open and lease.amount_micros <= 0) return error.InvalidRiskLease;
+                if (!lease.open and lease.amount_micros != 0) return error.InvalidRiskLease;
+                self.risk_lease_identity = lease_identity;
+                self.risk_lease_version = lease.version;
+                self.risk_lease_valid_through_barrier = lease.valid_through_barrier;
                 self.risk_lease_micros = lease.amount_micros;
                 self.risk_lease_remaining_micros = lease.amount_micros;
                 self.strategy_limit_micros = if (lease.strategy_limit_micros == 0) lease.amount_micros else lease.strategy_limit_micros;
@@ -2085,12 +2122,12 @@ pub const TradingShard = struct {
                 self.exchange_account_limit_micros = if (lease.exchange_account_limit_micros == 0) lease.amount_micros else lease.exchange_account_limit_micros;
                 self.global_limit_micros = if (lease.global_limit_micros == 0) lease.amount_micros else lease.global_limit_micros;
                 if (self.operational_state.initialized) try self.applyOperationalGate(.{
-                    .gate_identity = input.identity,
+                    .gate_identity = risk_lease_gate_identity,
                     .target_identity = self.operational_state.target_identity,
                     .kind = .self_recovering,
                     .reason = .risk_lease,
-                    .open = true,
-                    .continuity_proven = true,
+                    .open = lease.open,
+                    .continuity_proven = lease.open,
                 });
                 if (self.strategy_limit_micros > self.portfolio_limit_micros or
                     self.portfolio_limit_micros > self.exchange_account_limit_micros or
@@ -4012,6 +4049,9 @@ fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     digestInt(&hasher, i64, shard.position_margin_requirement_micros);
     digestInt(&hasher, i64, shard.risk_lease_micros);
     digestInt(&hasher, i64, shard.risk_lease_remaining_micros);
+    digestInt(&hasher, u64, shard.risk_lease_identity);
+    digestInt(&hasher, u64, shard.risk_lease_version);
+    digestInt(&hasher, u64, shard.risk_lease_valid_through_barrier);
     digestInt(&hasher, i64, shard.strategy_limit_micros);
     digestInt(&hasher, i64, shard.portfolio_limit_micros);
     digestInt(&hasher, i64, shard.exchange_account_limit_micros);
