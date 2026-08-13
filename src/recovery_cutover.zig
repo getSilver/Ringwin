@@ -97,6 +97,122 @@ fn hasIntent(events: []const strategy_recovery.ReplayEvent) bool {
     return false;
 }
 
+/// Strategy-private-state handling declared by one candidate version.
+pub const StrategyStateTransition = enum(u8) { keep, migrate, rebuild };
+/// Cutover progresses only through explicit persisted barriers.
+pub const CutoverPhase = enum(u8) { idle, candidate, quiescing, draining, recovery_only, active };
+
+/// Immutable activation fact deciding the sole active version during replay.
+pub const VersionActivationEvent = struct {
+    activation_identity: u128,
+    generation: u64,
+    old_release: u64,
+    new_release: u64,
+    old_strategy_instance: u128,
+    new_strategy_instance: u128,
+    strategy_definition: u128,
+    parameter_version: u64,
+    state_schema_version: u32,
+    transition: StrategyStateTransition,
+    barrier: u64,
+    canonical_state_digest: [32]u8,
+};
+
+/// One candidate validated without trading authority before atomic activation.
+pub const Candidate = struct {
+    release: u64,
+    strategy_instance: u128,
+    strategy_definition: u128,
+    parameter_version: u64,
+    state_schema_version: u32,
+    transition: StrategyStateTransition,
+    structure_valid: bool,
+    economic_digest_valid: bool,
+    strategy_invariants_valid: bool,
+    history_complete: bool = true,
+};
+
+/// Bounded low-frequency cutover state; economic state remains in TradingShard.
+pub const Cutover = struct {
+    phase: CutoverPhase = .idle,
+    generation: u64,
+    active_release: u64,
+    active_strategy_instance: u128,
+    candidate: Candidate = undefined,
+    quiesce_barrier: u64 = 0,
+    activations: [8]VersionActivationEvent = undefined,
+    activation_count: u8 = 0,
+
+    /// Validates one candidate while leaving the active version authoritative.
+    pub fn prepare(self: *Cutover, candidate: Candidate) !void {
+        if (self.phase != .idle and self.phase != .active) return error.CutoverInProgress;
+        if (candidate.release == 0 or candidate.strategy_instance == 0 or
+            !candidate.structure_valid or !candidate.economic_digest_valid or
+            !candidate.strategy_invariants_valid)
+            return error.InvalidCutoverCandidate;
+        if (candidate.transition == .rebuild and !candidate.history_complete)
+            return error.CandidateWarmingUp;
+        if (candidate.transition == .keep and self.activation_count != 0 and
+            candidate.state_schema_version != self.activations[self.activation_count - 1].state_schema_version)
+            return error.IncompatibleKeepSchema;
+        self.candidate = candidate;
+        self.phase = .candidate;
+    }
+
+    /// Stops new intent production at one exact ShardSequence.
+    pub fn quiesce(self: *Cutover, barrier: u64) !void {
+        if (self.phase != .candidate or barrier == 0) return error.InvalidCutoverTransition;
+        self.quiesce_barrier = barrier;
+        self.phase = .quiescing;
+    }
+
+    /// Proves CutoverDrain through authoritative order and Venue evidence.
+    pub fn drain(self: *Cutover, evidence: VenueEvidence) !void {
+        if (self.phase != .quiescing) return error.InvalidCutoverTransition;
+        if (!evidence.open_orders_closed or !evidence.ledger_closed or evidence.reconciliation_break)
+            return error.CutoverDrainIncomplete;
+        self.phase = .draining;
+    }
+
+    /// Atomically records and activates a candidate at the later stable barrier.
+    pub fn activate(
+        self: *Cutover,
+        activation_identity: u128,
+        barrier: u64,
+        digest: [32]u8,
+        stable: bool,
+    ) !VersionActivationEvent {
+        if (self.phase != .draining or barrier < self.quiesce_barrier or activation_identity == 0)
+            return error.InvalidCutoverTransition;
+        if (!stable) {
+            self.phase = .recovery_only;
+            return error.ActivationNotStable;
+        }
+        if (self.activation_count == self.activations.len) return error.ActivationHistoryFull;
+        const event: VersionActivationEvent = .{
+            .activation_identity = activation_identity,
+            .generation = self.generation + 1,
+            .old_release = self.active_release,
+            .new_release = self.candidate.release,
+            .old_strategy_instance = self.active_strategy_instance,
+            .new_strategy_instance = self.candidate.strategy_instance,
+            .strategy_definition = self.candidate.strategy_definition,
+            .parameter_version = self.candidate.parameter_version,
+            .state_schema_version = self.candidate.state_schema_version,
+            .transition = self.candidate.transition,
+            .barrier = barrier,
+            .canonical_state_digest = digest,
+        };
+        self.activations[self.activation_count] = event;
+        self.activation_count += 1;
+        self.generation = event.generation;
+        self.active_release = event.new_release;
+        self.active_strategy_instance = event.new_strategy_instance;
+        self.phase = .active;
+        return event;
+    }
+};
+
 test "restart recovery remains fenced until exact venue evidence closes" {
     var shard: trading.TradingShard = .{};
     shard.operational_state = trading.operational.State.init(7);
@@ -154,4 +270,30 @@ test "strategy checkpoint catches up to the core barrier without publishing inte
     try std.testing.expectError(error.InvalidCheckpoint, catchUpStrategy(&coordinator, damaged[0..checkpoint.len], metadata, &.{}));
     coordinator.phase = .recovery_only;
     try std.testing.expectError(error.CoreRecoveryIncomplete, catchUpStrategy(&coordinator, checkpoint, metadata, &.{}));
+}
+
+test "cutover drain activates exactly one version at a stable barrier" {
+    var cutover: Cutover = .{ .generation = 4, .active_release = 10, .active_strategy_instance = 20 };
+    try cutover.prepare(.{
+        .release = 11,
+        .strategy_instance = 21,
+        .strategy_definition = 30,
+        .parameter_version = 2,
+        .state_schema_version = 1,
+        .transition = .migrate,
+        .structure_valid = true,
+        .economic_digest_valid = true,
+        .strategy_invariants_valid = true,
+    });
+    try cutover.quiesce(100);
+    var evidence: VenueEvidence = std.mem.zeroes(VenueEvidence);
+    evidence.open_orders_closed = true;
+    evidence.ledger_closed = true;
+    try cutover.drain(evidence);
+    const digest: [32]u8 = @splat(7);
+    const event = try cutover.activate(40, 101, digest, true);
+    try std.testing.expectEqual(@as(u64, 11), cutover.active_release);
+    try std.testing.expectEqual(@as(u128, 21), cutover.active_strategy_instance);
+    try std.testing.expectEqual(@as(u64, 5), event.generation);
+    try std.testing.expectEqual(CutoverPhase.active, cutover.phase);
 }
