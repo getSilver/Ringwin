@@ -60,7 +60,7 @@ zig version
 从仓库根目录执行：
 
 ```powershell
-zig fmt --check src\main.zig src\journal.zig src\venue_adapter.zig src\okx_public_market.zig
+zig fmt --check src\main.zig src\trading_shard.zig src\oms.zig src\risk.zig src\journal.zig src\venue_adapter.zig src\okx_public_market.zig
 zig test src\main.zig -O ReleaseSafe
 zig run src\main.zig -O ReleaseSafe
 ```
@@ -80,17 +80,17 @@ happy_path: events=31, order=filled, qty=100, open_cost=500200000, fees=375150,
 upl=1800000, risk_remaining=9988956000, ledger=closed, economic_projections=complete
 journal_records=31
 replay=equivalent
-digest=9951db6c2ea314b42fa0ce5887225cb4d026a95358b2ca026984dc59330adb08
+digest=592081f6ee59acdf8869be0cd6b81bcdc6a6607a9a6d25086f8bfe95247e4cf4
 ```
 
 失败轨迹固定摘要：
 
-| 轨迹 | 事实数 | StateDigestV1 |
+| 轨迹 | 事实数 | CanonicalStateDigestV3 |
 |---|---:|---|
-| Market gap | 23 | `e857b9c12bdea00ea176249c2c8686057b0c618ef60ad7b111df05efbdeda5d4` |
-| Risk rejection | 18 | `b5fe808878d1394479092619a00a99c562c3a89f111de3d4a79964e7045caebd` |
-| Unknown reconciliation | 23 | `a61e0e5e863601fe44daf55806a506591ec7c6081216000ebda8c5e0686c029c` |
-| Duplicate report | 33 | `7bb91e2c0f375481a7d62f772ac68953dc0b97fcb913ba994a53ce01ae3d0040` |
+| Market gap | 23 | `eaef670bde5b2e1ecc311571ca60285129366cf2e18dae5cfcf2f90f7029eab0` |
+| Risk rejection | 18 | `921d2d8d386e89383c3beccd7f41c5b4abb0df408acbf6add2400980dbe91794` |
+| Unknown reconciliation | 23 | `d744dd5dbf387e43fb958274496cc17394f6f4082104dc460deb2d8d1c4d62cb` |
+| Duplicate report | 32 | `d6c2881a6f84e922b59d31e305cc51a94f23a8a9152ad52f31da2ba96942b7ab` |
 
 `zig test` 还会验证：
 
@@ -98,6 +98,10 @@ digest=9951db6c2ea314b42fa0ce5887225cb4d026a95358b2ca026984dc59330adb08
 - 实时事实序列、重放事实序列和最终摘要一致；
 - 截断尾部安全恢复，CRC 损坏、序号缺口和未知 schema 失败关闭；
 - 重复成交、订单回报、取消和对账不重复改变经济状态；
+- 同一分片内 BTC-USDT SPOT 与 isolated/net USDT SWAP 的有界多订单 place/amend/cancel、
+  IntentGroup 部分执行、逐项 batch、Unknown 对账及授权 CancelConfirmCreate 可稳定重放；
+- SPOT 现金和 SWAP 逐仓保证金、费用缓冲、五层额度、双 Reduce-only 与三档 MarginSafetyGate
+  在 OrderCommand 前由核心纯定点计算；调用方不能指定 reservation，Unknown 不提前释放。
 - 四个 DecisionDomain 分别重放等价；
 - 一个分片的行情 Gap、慢消费者和队列饱和不改变其他分片的顺序及健康状态。
 - OKX 固定 SPOT/SWAP 白名单的 Instrument、L2、标记价、指数价和资金费率只以定点数

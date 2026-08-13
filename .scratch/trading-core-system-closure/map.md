@@ -43,11 +43,15 @@ Status: open
 
 ## Frontier
 
-[把 fixture 形状的 TradingShard 深化为产品核心模块](issues/02-deepen-trading-shard-module.md)
+[实现操作生命周期、授权与安全栅栏](issues/06-operational-lifecycle-and-safety.md)
 
 ## Decisions so far
 
 - [冻结交易核心产品闭环与权威所有权](issues/01-freeze-core-product-contract.md) — 后续只深化一套 TradingShard；冻结 `apply/snapshot/restore` 核心 interface、九类权威所有权和十一条成功/故障矩阵。Adapter、StrategyHost、journal 与账户协调器保持外围 seam，OKX spot projection 的经济规则必须回收到同一核心，历史重放不得持有发送能力。
+- [把 fixture 形状的 TradingShard 深化为产品核心模块](issues/02-deepen-trading-shard-module.md) — TradingShard 已成为唯一产品模块；显式、版本化 Genesis 与有界 `apply(CanonicalEvent)` 统一原生/Python 意图和 SimulatedVenue/OKX 执行结果，ReplayTradingShard 不持有发送能力，当前 CanonicalStateDigest 覆盖产品配置。
+- [闭合多 Instrument SPOT 与永续 OMS 生命周期](issues/03-close-multi-instrument-oms.md) — 同一 TradingShard 以固定容量领域 OMS 闭合 SPOT/SWAP 多订单、原地 amend/cancel、IntentGroup 部分政策、逐项 batch、Unknown、授权 CancelConfirmCreate、reservation 生命周期与终态语义幂等；Venue 字段和调度仍停留在 Adapter seam。
+- [闭合分层风险、现金与逐仓保证金占用](issues/04-close-layered-risk-and-margin.md) — TradingShard 在 OrderCommand 前以纯定点核计算 SPOT 现金、isolated/net USDT SWAP 保证金与费用，强制 StrategyInstance/VirtualPortfolio/DecisionDomain/ExchangeAccount/global 五层额度、双 Reduce-only 和两层 MarginSafetyGate；reservation 由核心拥有，Unknown 及未确认终态不会提前释放。
+- [闭合双层经济投影、账本与账户对账](issues/05-close-economic-projections.md) — TradingShard 内部经济深模块从 OMS Order 取得 Fill 归属，以纯定点投影双层余额、仓位、OpenCost、margin、费用、返佣、资金费及 Realized/UnrealizedPnL；不可变账本逐事务借贷闭合，强制执行与 snapshot 差异进入 SuspenseAccount/ReconciliationBreak 而不覆盖本地状态。
 
 ## Reused evidence
 

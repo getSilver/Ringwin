@@ -2,7 +2,7 @@
 //! This executable is intentionally separate from replay-capable product code.
 
 const std = @import("std");
-const engine = @import("main.zig");
+const engine = @import("trading_shard.zig");
 const journal = @import("journal.zig");
 const auth = @import("okx_rest_auth.zig");
 const curl = @import("okx_curl_transport.zig");
@@ -73,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
     const buy_price_tenths = try protectedBuyPrice(prices, limits);
     try requireNotional(buy_quantity_atoms, buy_price_tenths);
     const run_identity = try currentUnixSeconds(init.io);
-    const strategy_buy = try fixedStrategyBuy(init, run_identity, buy_price_tenths);
+    var strategy_buy = try fixedStrategyBuy(init, run_identity, buy_price_tenths);
     try progress(init.io, "strategy_order_command");
     if (mode == .prepare_only) return;
     const buy_client = strategy_buy.command.command.client_order_id;
@@ -90,6 +90,14 @@ pub fn main(init: std.process.Init) !void {
 
     try refresh(&owner, init.io);
     const buy_attempt = try chain.dispatch(init.gpa, &.{strategy_buy.command});
+    try strategy_buy.ingress.applyDispatchResult(
+        buy_attempt.dispatch.items[0].attempt_id,
+        switch (buy_attempt.dispatch.items[0].state) {
+            .submitted => .submitted,
+            .unknown => .unknown,
+            .not_sent => return error.BuyNotSent,
+        },
+    );
     try requireVenueAccepted(init.io, buy_attempt.dispatch.items[0], error.BuyNotSent, error.BuyRejected);
     cleanup_needed = true;
     const buy_result = try waitForOrder(init, &owner, &raw, &reconciler, &projection, &stable, &stable_sequence, buy_client);
@@ -350,6 +358,7 @@ fn priceTenths(value: std.json.Value, round_up: bool) !i128 {
 
 const StrategyBuy = struct {
     command: live.AuthorizedCommand,
+    ingress: engine.TradingShardHostIngress,
 };
 
 fn fixedStrategyBuy(init: std.process.Init, intent_sequence: u64, price_tenths: i128) !StrategyBuy {
@@ -383,7 +392,7 @@ fn fixedStrategyBuy(init: std.process.Init, intent_sequence: u64, price_tenths: 
     });
     const decision = gateway.ingest(frame, now_ns);
     if (decision != .accepted) return error.FixedStrategyRejected;
-    var ingress = try engine.TradingShardHostIngress.initHealthySpotFixture();
+    var ingress = try engine.TradingShardHostIngress.initHealthySpotFixtureFor(authorization);
     const host_order = (try ingress.applyDecisionCommand(decision)) orelse return error.RiskRejected;
     if (host_order.instrument_identity != 3 or host_order.side != .buy or
         host_order.time_in_force != .immediate_or_cancel or host_order.portfolio_reduce_only or
@@ -392,15 +401,18 @@ fn fixedStrategyBuy(init: std.process.Init, intent_sequence: u64, price_tenths: 
         return error.InvalidQualifiedCommand;
     try ingress.verifyReplay();
     const order_identity = strategy_identity ^ @as(u128, intent_sequence);
-    return .{ .command = authorizedPlace(
-        host_order.command_id,
-        host_order.order_id,
-        order.clientOrderId(order_identity),
-        .buy,
-        .limit_ioc,
-        host_order.quantity,
-        @divExact(@as(i128, host_order.limit_price_micros), 100_000),
-    ) };
+    return .{
+        .command = authorizedPlace(
+            host_order.command_id,
+            host_order.order_id,
+            order.clientOrderId(order_identity),
+            .buy,
+            .limit_ioc,
+            host_order.quantity,
+            @divExact(@as(i128, host_order.limit_price_micros), 100_000),
+        ),
+        .ingress = ingress,
+    };
 }
 
 fn authorizedPlace(
