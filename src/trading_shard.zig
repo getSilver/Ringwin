@@ -50,6 +50,116 @@ const SnapshotHeader = packed struct {
 comptime {
     std.debug.assert(@sizeOf(SnapshotHeader) == snapshot_header_len);
 }
+
+const SnapshotWriter = struct {
+    bytes: []u8,
+    position: usize = 0,
+
+    fn put(self: *SnapshotWriter, value: anytype) !void {
+        const T = @TypeOf(value);
+        const width = if (T == usize or T == isize) @sizeOf(u64) else @sizeOf(T);
+        if (self.position + width > self.bytes.len) return error.SnapshotTooLarge;
+        if (T == usize) {
+            std.mem.writeInt(u64, self.bytes[self.position..][0..width], @intCast(value), .little);
+        } else if (T == isize) {
+            std.mem.writeInt(i64, self.bytes[self.position..][0..width], @intCast(value), .little);
+        } else {
+            std.mem.writeInt(T, self.bytes[self.position..][0..width], value, .little);
+        }
+        self.position += width;
+    }
+};
+
+const SnapshotReader = struct {
+    bytes: []const u8,
+    position: usize = 0,
+
+    fn get(self: *SnapshotReader, comptime T: type) !T {
+        const width = if (T == usize or T == isize) @sizeOf(u64) else @sizeOf(T);
+        if (self.position + width > self.bytes.len) return error.InvalidSnapshotLength;
+        const value = if (T == usize)
+            std.math.cast(usize, std.mem.readInt(u64, self.bytes[self.position..][0..width], .little)) orelse return error.InvalidSnapshotValue
+        else if (T == isize)
+            std.math.cast(isize, std.mem.readInt(i64, self.bytes[self.position..][0..width], .little)) orelse return error.InvalidSnapshotValue
+        else
+            std.mem.readInt(T, self.bytes[self.position..][0..width], .little);
+        self.position += width;
+        return value;
+    }
+};
+
+fn snapshotEncode(writer: *SnapshotWriter, value: anytype) !void {
+    const T = @TypeOf(value);
+    switch (@typeInfo(T)) {
+        .bool => try writer.put(@as(u8, if (value) 1 else 0)),
+        .int => try writer.put(value),
+        .@"enum" => try snapshotEncode(writer, @intFromEnum(value)),
+        .array => for (value) |item| try snapshotEncode(writer, item),
+        .optional => if (value) |item| {
+            try writer.put(@as(u8, 1));
+            try snapshotEncode(writer, item);
+        } else try writer.put(@as(u8, 0)),
+        .@"struct" => |info| inline for (info.fields) |field|
+            try snapshotEncode(writer, @field(value, field.name)),
+        .@"union" => |info| {
+            const Tag = info.tag_type orelse @compileError("snapshot unions must be tagged");
+            try snapshotEncode(writer, std.meta.activeTag(value));
+            switch (value) {
+                inline else => |payload, tag| {
+                    _ = tag;
+                    if (@TypeOf(payload) != void) try snapshotEncode(writer, payload);
+                },
+            }
+            _ = Tag;
+        },
+        else => @compileError("unsupported snapshot field type: " ++ @typeName(T)),
+    }
+}
+
+fn snapshotDecode(reader: *SnapshotReader, comptime T: type) !T {
+    return switch (@typeInfo(T)) {
+        .bool => switch (try reader.get(u8)) {
+            0 => false,
+            1 => true,
+            else => error.InvalidSnapshotValue,
+        },
+        .int => try reader.get(T),
+        .@"enum" => |info| blk: {
+            const raw = try snapshotDecode(reader, info.tag_type);
+            inline for (info.fields) |field|
+                if (raw == field.value) break :blk @field(T, field.name);
+            return error.InvalidSnapshotValue;
+        },
+        .array => |info| blk: {
+            var result: T = undefined;
+            for (&result) |*item| item.* = try snapshotDecode(reader, info.child);
+            break :blk result;
+        },
+        .optional => |info| switch (try reader.get(u8)) {
+            0 => null,
+            1 => try snapshotDecode(reader, info.child),
+            else => error.InvalidSnapshotValue,
+        },
+        .@"struct" => |info| blk: {
+            var result: T = undefined;
+            inline for (info.fields) |field|
+                @field(result, field.name) = try snapshotDecode(reader, field.type);
+            break :blk result;
+        },
+        .@"union" => |info| blk: {
+            const Tag = info.tag_type orelse @compileError("snapshot unions must be tagged");
+            const tag = try snapshotDecode(reader, Tag);
+            inline for (info.fields) |field| {
+                if (tag == @field(Tag, field.name)) {
+                    const payload = if (field.type == void) {} else try snapshotDecode(reader, field.type);
+                    break :blk @unionInit(T, field.name, payload);
+                }
+            }
+            return error.InvalidSnapshotValue;
+        },
+        else => @compileError("unsupported snapshot field type: " ++ @typeName(T)),
+    };
+}
 const client_order_id = "RWN-00000001-01-000000000001";
 const money_scale: i64 = 1_000_000;
 const contract_denominator: i64 = 10_000;
@@ -1247,15 +1357,14 @@ pub const TradingShard = struct {
         if (!stable_journal.sealed or barrier == 0 or
             barrier != stable_journal.last_sequence or self.trace.len != barrier)
             return error.InvalidSnapshotBarrier;
-        var authoritative: TradingShard = std.mem.zeroes(TradingShard);
-        inline for (@typeInfo(TradingShard).@"struct".fields) |field|
-            @field(authoritative, field.name) = @field(self, field.name);
-        authoritative.oms.begin();
-        const payload = std.mem.asBytes(&authoritative);
-        const total_len = std.math.add(usize, snapshot_header_len, payload.len) catch
-            return error.SnapshotTooLarge;
-        if (destination.len < total_len or payload.len > std.math.maxInt(u32))
-            return error.SnapshotTooLarge;
+        if (destination.len < snapshot_header_len) return error.SnapshotTooLarge;
+        var authoritative = self;
+        canonicalizeSnapshotState(&authoritative);
+        var writer: SnapshotWriter = .{ .bytes = destination[snapshot_header_len..] };
+        try snapshotEncode(&writer, authoritative);
+        const payload = destination[snapshot_header_len .. snapshot_header_len + writer.position];
+        const total_len = snapshot_header_len + payload.len;
+        if (payload.len > std.math.maxInt(u32)) return error.SnapshotTooLarge;
         const encoded = destination[0..total_len];
         const digest = self.canonicalStateDigest();
         var payload_digest: [Sha256.digest_length]u8 = undefined;
@@ -1279,7 +1388,6 @@ pub const TradingShard = struct {
         };
         header.header_crc = Crc32c.hash(std.mem.asBytes(&header)[0..@offsetOf(SnapshotHeader, "header_crc")]);
         @memcpy(encoded[0..snapshot_header_len], std.mem.asBytes(&header));
-        @memcpy(encoded[snapshot_header_len..], payload);
         return encoded;
     }
 
@@ -1303,9 +1411,9 @@ pub const TradingShard = struct {
         if (header.payload_crc != Crc32c.hash(payload) or
             header.payload_digest != std.mem.readInt(u256, &payload_digest, .little))
             return error.InvalidSnapshotPayload;
-        if (payload.len != @sizeOf(TradingShard)) return error.InvalidSnapshotLength;
-        var recovered: TradingShard = undefined;
-        @memcpy(std.mem.asBytes(&recovered), payload);
+        var reader: SnapshotReader = .{ .bytes = payload };
+        var recovered = try snapshotDecode(&reader, TradingShard);
+        if (reader.position != payload.len) return error.InvalidSnapshotLength;
         recovered.oms.begin();
         try validateSnapshotState(&recovered);
         const barrier = header.barrier;
@@ -2283,16 +2391,42 @@ pub const TradingShard = struct {
     }
 };
 
+fn zeroUnused(comptime T: type, storage: []T) void {
+    @memset(storage, std.mem.zeroes(T));
+}
+
+fn canonicalizeSnapshotState(shard: *TradingShard) void {
+    zeroUnused(Fact, shard.trace.events[shard.trace.len..]);
+    zeroUnused(Fill, shard.fill_facts[shard.fill_fact_count..]);
+    zeroUnused(ExecutionReport, shard.report_facts[shard.report_fact_count..]);
+    zeroUnused(oms_module.Order, shard.oms.orders[shard.oms.order_count..]);
+    shard.oms.command_count = 0;
+    zeroUnused(oms_module.Command, shard.oms.commands[0..]);
+    zeroUnused(oms_module.Command, shard.oms.command_history[shard.oms.command_history_count..]);
+    zeroUnused(oms_module.ExecutionReport, shard.oms.report_history[shard.oms.report_history_count..]);
+    zeroUnused(oms_module.ReconciliationResult, shard.oms.reconciliation_history[shard.oms.reconciliation_history_count..]);
+    zeroUnused(operational.SafetyGateChange, shard.operational_state.gates[shard.operational_state.gate_count..]);
+    zeroUnused(@TypeOf(shard.operational_state.command_history[0]), shard.operational_state.command_history[shard.operational_state.command_count..]);
+    zeroUnused(operational.Latch, shard.operational_state.latches[shard.operational_state.latch_count..]);
+    zeroUnused(u64, shard.economic_projection.reconciliation_break_identities[shard.economic_projection.reconciliation_break_count..]);
+    zeroUnused(@TypeOf(shard.economic_projection.seen[0]), shard.economic_projection.seen[shard.economic_projection.seen_count..]);
+    for (shard.economic_projection.ledger[0..shard.economic_projection.ledger_count]) |*transaction|
+        zeroUnused(economics_module.LedgerPosting, transaction.postings[transaction.posting_count..]);
+    zeroUnused(economics_module.LedgerTransaction, shard.economic_projection.ledger[shard.economic_projection.ledger_count..]);
+}
+
 fn validateSnapshotState(shard: *const TradingShard) !void {
     if (shard.trace.len > shard.trace.events.len or
         shard.fill_fact_count > shard.fill_facts.len or
         shard.report_fact_count > shard.report_facts.len or
         shard.oms.order_count > oms_module.max_orders or
+        shard.oms.command_count > shard.oms.commands.len or
         shard.oms.command_history_count > shard.oms.command_history.len or
         shard.oms.report_history_count > shard.oms.report_history.len or
         shard.oms.reconciliation_history_count > shard.oms.reconciliation_history.len or
         shard.economic_projection.seen_count > shard.economic_projection.seen.len or
         shard.economic_projection.ledger_count > shard.economic_projection.ledger.len or
+        shard.economic_projection.reconciliation_break_count > shard.economic_projection.reconciliation_break_identities.len or
         shard.operational_state.command_count > operational.max_commands or
         shard.operational_state.gate_count > operational.max_gates or
         shard.operational_state.latch_count > operational.max_latches)
@@ -2302,6 +2436,8 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         for (shard.oms.orders[0..index]) |previous|
             if (previous.id == order.id) return error.InvalidSnapshotState;
     }
+    for (shard.economic_projection.ledger[0..shard.economic_projection.ledger_count]) |transaction|
+        if (transaction.posting_count > transaction.postings.len) return error.InvalidSnapshotState;
 }
 
 const AdapterRequest = union(enum) {

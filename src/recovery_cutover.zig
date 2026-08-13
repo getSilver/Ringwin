@@ -86,23 +86,36 @@ pub const RecoveryCoordinator = struct {
             return;
         }
         if (identity < self.last_reconciliation_identity) return error.StaleReconciliationIdentity;
-        if (!venueEvidenceCloses(self.shard, evidence)) {
-            self.shard.economic_projection.reconciliation_break = true;
-            self.shard.economic_projection.reconciliation_break_identity = identity;
-            if (self.shard.operational_state.initialized) _ = try self.shard.operational_state.applyGate(.{
-                .gate_identity = identity,
-                .target_identity = self.shard.operational_state.target_identity,
-                .kind = .latched,
-                .reason = .reconciliation_break,
-                .open = false,
-            });
-            return error.VenueReconciliationMismatch;
-        }
+        if (!venueEvidenceCloses(self.shard, evidence)) return error.VenueReconciliationMismatch;
         self.last_reconciliation_identity = identity;
         self.last_evidence = evidence;
         self.phase = .ready;
         self.shard.operational_state.mode = .ready;
         self.shard.operational_state.trading_authorized = false;
+    }
+
+    /// Persists reconciliation failure as a canonical latched gate before returning it.
+    pub fn reconcileStable(
+        self: *RecoveryCoordinator,
+        stable_journal: *trading.journal.Journal,
+        identity: u64,
+        evidence: VenueEvidence,
+    ) !void {
+        self.reconcile(identity, evidence) catch |err| {
+            if (err == error.VenueReconciliationMismatch) {
+                _ = try trading.applyStable(&self.shard, stable_journal, .{
+                    .identity = identity,
+                    .payload = .{ .safety_gate_change = .{
+                        .gate_identity = identity,
+                        .target_identity = self.shard.operational_state.target_identity,
+                        .kind = .latched,
+                        .reason = .reconciliation_break,
+                        .open = false,
+                    } },
+                });
+            }
+            return err;
+        };
     }
 };
 
@@ -116,7 +129,7 @@ fn venueEvidenceCloses(shard: trading.TradingShard, evidence: VenueEvidence) boo
         evidence.exchange_open_cost_micros != expected.exchange_open_cost_micros or
         evidence.portfolio_cash_micros != expected.portfolio_cash_micros or
         evidence.exchange_cash_micros != expected.exchange_cash_micros or
-        evidence.margin_micros != expected.margin_micros or !evidence.open_orders_closed or
+        evidence.margin_micros != expected.margin_micros or
         !evidence.ledger_closed or evidence.reconciliation_break)
         return false;
     for (evidence.orders[0..evidence.order_count], 0..) |observed, index| {
@@ -131,7 +144,11 @@ fn venueEvidenceCloses(shard: trading.TradingShard, evidence: VenueEvidence) boo
                 .filled, .canceled, .rejected => {},
                 else => return false,
             },
-            .found_live, .unresolved => return false,
+            .found_live => switch (order.state) {
+                .pending_submit, .unknown, .live, .partially_filled, .pending_amend, .pending_cancel => {},
+                else => return false,
+            },
+            .unresolved => return false,
         }
     }
     return true;
@@ -253,66 +270,44 @@ pub const Cutover = struct {
     }
 
     /// Stops new intent production at one exact ShardSequence.
-    pub fn quiesce(self: *Cutover, barrier: u64) !void {
+    fn quiesce(self: *Cutover, barrier: u64) !void {
         if (self.phase != .candidate or barrier == 0) return error.InvalidCutoverTransition;
         self.quiesce_barrier = barrier;
         self.phase = .quiescing;
     }
 
     /// Revokes intent authority and emits authoritative cancels for CutoverDrain scope.
-    pub fn quiesceShard(self: *Cutover, shard: *trading.TradingShard, barrier: u64) ![]const trading.oms.Command {
-        try self.quiesce(barrier);
-        shard.operational_state.trading_authorized = false;
-        if (shard.operational_state.mode == .trading) shard.operational_state.mode = .draining;
-        shard.oms.begin();
-        try shard.oms.cancelOpenOrders(false);
+    pub fn quiesceShard(
+        self: *Cutover,
+        shard: *trading.TradingShard,
+        stable_journal: *trading.journal.Journal,
+        command_identity: u128,
+    ) ![]const trading.oms.Command {
+        if (self.phase != .candidate) return error.InvalidCutoverTransition;
+        const barrier = shard.trace.len + 1;
+        _ = try trading.applyStable(shard, stable_journal, .{
+            .identity = @truncate(command_identity),
+            .payload = .{ .control_command = .{
+                .command_identity = command_identity,
+                .content_hash = command_identity,
+                .target_identity = shard.operational_state.target_identity,
+                .expected_version = shard.operational_state.version,
+                .expires_at = std.math.maxInt(u64),
+                .kind = .trading_pause,
+            } },
+        });
+        self.quiesce_barrier = barrier;
+        self.phase = .quiescing;
         return shard.oms.emitted();
     }
 
     /// Proves CutoverDrain through authoritative order and Venue evidence.
-    pub fn drain(self: *Cutover, evidence: VenueEvidence) !void {
+    pub fn drain(self: *Cutover, shard: trading.TradingShard, evidence: VenueEvidence) !void {
         if (self.phase != .quiescing) return error.InvalidCutoverTransition;
-        if (!evidence.open_orders_closed or !evidence.ledger_closed or evidence.reconciliation_break)
+        if (!shard.oms.openOrdersClosed() or !evidence.open_orders_closed or
+            !venueEvidenceCloses(shard, evidence))
             return error.CutoverDrainIncomplete;
         self.phase = .draining;
-    }
-
-    /// Atomically records and activates a candidate at the later stable barrier.
-    pub fn activate(
-        self: *Cutover,
-        activation_identity: u128,
-        barrier: u64,
-        digest: [32]u8,
-        stable: bool,
-    ) !VersionActivationEvent {
-        if (self.phase != .draining or barrier < self.quiesce_barrier or activation_identity == 0)
-            return error.InvalidCutoverTransition;
-        if (!stable) {
-            self.phase = .recovery_only;
-            return error.ActivationNotStable;
-        }
-        if (self.activation_count == self.activations.len) return error.ActivationHistoryFull;
-        const event: VersionActivationEvent = .{
-            .activation_identity = activation_identity,
-            .generation = self.generation + 1,
-            .old_release = self.active_release,
-            .new_release = self.candidate.release,
-            .old_strategy_instance = self.active_strategy_instance,
-            .new_strategy_instance = self.candidate.strategy_instance,
-            .strategy_definition = self.candidate.strategy_definition,
-            .parameter_version = self.candidate.parameter_version,
-            .state_schema_version = self.candidate.state_schema_version,
-            .transition = @enumFromInt(@intFromEnum(self.candidate.transition)),
-            .barrier = barrier,
-            .canonical_state_digest = digest,
-        };
-        self.activations[self.activation_count] = event;
-        self.activation_count += 1;
-        self.generation = event.generation;
-        self.active_release = event.new_release;
-        self.active_strategy_instance = event.new_strategy_instance;
-        self.phase = .active;
-        return event;
     }
 
     /// Persists activation through TradingShard.apply and stable journal before committing cutover state.
@@ -392,7 +387,18 @@ pub const Cutover = struct {
 
 test "restart recovery remains fenced until exact venue evidence closes" {
     var shard: trading.TradingShard = .{};
-    shard.operational_state = trading.operational.State.init(7);
+    var stable_journal = trading.journal.Journal.init();
+    _ = try trading.applyStable(&shard, &stable_journal, .{
+        .identity = 90,
+        .payload = .{ .control_command = .{
+            .command_identity = 90,
+            .content_hash = 90,
+            .target_identity = 7,
+            .expected_version = 0,
+            .expires_at = std.math.maxInt(u64),
+            .kind = .start_recovery,
+        } },
+    });
     shard.operational_state.mode = .trading;
     shard.operational_state.trading_authorized = true;
     shard.portfolio_cash_micros = 12;
@@ -406,10 +412,18 @@ test "restart recovery remains fenced until exact venue evidence closes" {
 
     var mismatch = recovery.expectedVenueEvidence();
     mismatch.exchange_cash_micros += 1;
-    try std.testing.expectError(error.VenueReconciliationMismatch, recovery.reconcile(1, mismatch));
+    try std.testing.expectError(error.VenueReconciliationMismatch, recovery.reconcileStable(&stable_journal, 1, mismatch));
     try std.testing.expectEqual(RecoveryPhase.recovery_only, recovery.phase);
-    try std.testing.expect(recovery.shard.economic_projection.reconciliation_break);
     try std.testing.expectEqual(@as(u8, 1), recovery.shard.operational_state.latch_count);
+    try std.testing.expectEqual(@as(u64, 2), stable_journal.last_sequence);
+    try stable_journal.seal();
+    var reader = try trading.journal.Reader.init(stable_journal.bytes());
+    var replayed: trading.ReplayTradingShard = .{};
+    while (true) switch (try reader.next()) {
+        .record => |record| _ = try replayed.apply(try trading.decodeStableInput(record)),
+        .end => break,
+    };
+    try std.testing.expectEqual(recovery.shard.operational_state.latch_count, replayed.shard.operational_state.latch_count);
 
     recovery = RecoveryCoordinator.begin(shard, 11);
     try recovery.reconcile(2, recovery.expectedVenueEvidence());
@@ -488,6 +502,8 @@ test "strategy recovery falls back from a damaged newest published checkpoint" {
 }
 
 test "cutover drain activates exactly one version at a stable barrier" {
+    var shard: trading.TradingShard = .{ .release_generation = 4, .active_release = 10, .active_strategy_instance = 20 };
+    var stable_journal = trading.journal.Journal.init();
     var cutover: Cutover = .{ .generation = 4, .active_release = 10, .active_strategy_instance = 20 };
     try cutover.prepare(.{
         .release = 11,
@@ -504,9 +520,8 @@ test "cutover drain activates exactly one version at a stable barrier" {
     var evidence: VenueEvidence = std.mem.zeroes(VenueEvidence);
     evidence.open_orders_closed = true;
     evidence.ledger_closed = true;
-    try cutover.drain(evidence);
-    const digest: [32]u8 = @splat(7);
-    const event = try cutover.activate(40, 101, digest, true);
+    try cutover.drain(shard, evidence);
+    const event = try cutover.activateStable(&shard, &stable_journal, 40);
     try std.testing.expectEqual(@as(u64, 11), cutover.active_release);
     try std.testing.expectEqual(@as(u128, 21), cutover.active_strategy_instance);
     try std.testing.expectEqual(@as(u64, 5), event.generation);
@@ -532,7 +547,7 @@ test "cutover activation is a stable canonical fact before authority switches" {
     var evidence: VenueEvidence = std.mem.zeroes(VenueEvidence);
     evidence.open_orders_closed = true;
     evidence.ledger_closed = true;
-    try cutover.drain(evidence);
+    try cutover.drain(shard, evidence);
     const activation = try cutover.activateStable(&shard, &stable_journal, 40);
     try std.testing.expectEqual(@as(u64, 1), stable_journal.last_sequence);
     try std.testing.expectEqual(@as(u64, 11), shard.active_release);
@@ -550,6 +565,13 @@ test "cutover activation is a stable canonical fact before authority switches" {
 }
 
 test "cutover failures and forward rollback never regress economic state or generation" {
+    var shard: trading.TradingShard = .{ .release_generation = 4, .active_release = 10, .active_strategy_instance = 20 };
+    shard.economic_projection.portfolio.spot.quantity = 3;
+    shard.economic_projection.portfolio.spot.open_cost_micros = 150;
+    shard.economic_projection.portfolio.fee_micros = 7;
+    shard.economic_projection.exchange.spot = shard.economic_projection.portfolio.spot;
+    shard.economic_projection.exchange.fee_micros = 7;
+    var stable_journal = trading.journal.Journal.init();
     var cutover: Cutover = .{ .generation = 4, .active_release = 10, .active_strategy_instance = 20, .phase = .active };
     const candidate: Candidate = .{
         .release = 11,
@@ -573,17 +595,15 @@ test "cutover failures and forward rollback never regress economic state or gene
     var evidence: VenueEvidence = std.mem.zeroes(VenueEvidence);
     evidence.open_orders_closed = true;
     evidence.ledger_closed = true;
-    try cutover.drain(evidence);
-    const filled_state_digest: [32]u8 = @splat(9);
-    try std.testing.expectError(error.ActivationNotStable, cutover.activate(40, 101, filled_state_digest, false));
-    try std.testing.expectEqual(CutoverPhase.recovery_only, cutover.phase);
+    try cutover.drain(shard, evidence);
+    try cutover.failBeforeActivation();
     try std.testing.expectEqual(@as(u64, 10), cutover.active_release);
 
     cutover.phase = .active;
     try cutover.prepare(candidate);
     try cutover.quiesce(102);
-    try cutover.drain(evidence);
-    const activated = try cutover.activate(41, 103, filled_state_digest, true);
+    try cutover.drain(shard, evidence);
+    const activated = try cutover.activateStable(&shard, &stable_journal, 41);
 
     const rollback: Candidate = .{
         .release = 10,
@@ -598,12 +618,14 @@ test "cutover failures and forward rollback never regress economic state or gene
     };
     try cutover.prepare(rollback);
     try cutover.quiesce(104);
-    try cutover.drain(evidence);
-    const rolled_back = try cutover.activate(42, 105, filled_state_digest, true);
+    try cutover.drain(shard, evidence);
+    const rolled_back = try cutover.activateStable(&shard, &stable_journal, 42);
     try std.testing.expectEqual(activated.generation + 1, rolled_back.generation);
     try std.testing.expectEqual(@as(u64, 10), rolled_back.new_release);
     try std.testing.expectEqual(@as(u128, 22), rolled_back.new_strategy_instance);
-    try std.testing.expectEqualSlices(u8, &activated.canonical_state_digest, &rolled_back.canonical_state_digest);
+    try std.testing.expectEqual(@as(i64, 3), shard.economic_projection.portfolio.spot.quantity);
+    try std.testing.expectEqual(@as(i64, 150), shard.economic_projection.portfolio.spot.open_cost_micros);
+    try std.testing.expectEqual(@as(i64, 7), shard.economic_projection.portfolio.fee_micros);
 
     const replayed = try Cutover.replayActivations(cutover.activations[0..cutover.activation_count]);
     try std.testing.expectEqual(cutover.active_release, replayed.active_release);
