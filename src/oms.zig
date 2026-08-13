@@ -149,6 +149,18 @@ pub const Oms = struct {
         return self.commands[0..self.command_count];
     }
 
+    /// Emits at most one cancel for every non-terminal order in scope.
+    pub fn cancelOpenOrders(self: *Oms, increasing_only: bool) !void {
+        for (self.orders[0..self.order_count]) |*order| {
+            if (order.state == .filled or order.state == .canceled or order.state == .rejected or
+                order.state == .pending_cancel or
+                (increasing_only and order.portfolio_reduce_only and order.venue_reduce_only))
+                continue;
+            order.state = .pending_cancel;
+            try self.emit(order.*, .cancel);
+        }
+    }
+
     pub fn activeReservations(self: *const Oms) !i64 {
         var total: i64 = 0;
         for (self.orders[0..self.order_count]) |order| {
@@ -156,6 +168,15 @@ pub const Oms = struct {
                 total = try std.math.add(i64, total, order.reservation_micros);
         }
         return total;
+    }
+
+    /// True only when authoritative order state contains no live or unknown order.
+    pub fn openOrdersClosed(self: *const Oms) bool {
+        for (self.orders[0..self.order_count]) |order| switch (order.state) {
+            .filled, .canceled, .rejected => {},
+            else => return false,
+        };
+        return true;
     }
 
     pub fn orderById(self: *const Oms, id: u64) ?Order {

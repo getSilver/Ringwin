@@ -76,21 +76,21 @@ stable journal detects tail, corruption, and sequence gap
 正常演示固定输出的关键结果：
 
 ```text
-happy_path: events=31, order=filled, qty=100, open_cost=500200000, fees=375150,
+happy_path: events=34, order=filled, qty=100, open_cost=500200000, fees=375150,
 upl=1800000, risk_remaining=9988956000, ledger=closed, economic_projections=complete
-journal_records=31
+journal_records=34
 replay=equivalent
-digest=592081f6ee59acdf8869be0cd6b81bcdc6a6607a9a6d25086f8bfe95247e4cf4
+digest=674ff4b1e0018280a198b85b580d4e9d5da46ee81cb034783f9d4f637765b7d6
 ```
 
 失败轨迹固定摘要：
 
 | 轨迹 | 事实数 | CanonicalStateDigestV3 |
 |---|---:|---|
-| Market gap | 23 | `eaef670bde5b2e1ecc311571ca60285129366cf2e18dae5cfcf2f90f7029eab0` |
-| Risk rejection | 18 | `921d2d8d386e89383c3beccd7f41c5b4abb0df408acbf6add2400980dbe91794` |
-| Unknown reconciliation | 23 | `d744dd5dbf387e43fb958274496cc17394f6f4082104dc460deb2d8d1c4d62cb` |
-| Duplicate report | 32 | `d6c2881a6f84e922b59d31e305cc51a94f23a8a9152ad52f31da2ba96942b7ab` |
+| Market gap | 25 | `9f7890e42b707ce31803f50af9c53e359a13b9b45c0685f497129a731cf5dbad` |
+| Risk rejection | 21 | `ff1d46e6c479eff7e25a7c00fd0750d92bdb0da09eab5923e3fb19dc179315e1` |
+| Unknown reconciliation | 26 | `2ce777b8a2625b2c0e9d44aea74f12e2395d81092fba6c154bd4b3ba5a1129da` |
+| Duplicate report | 35 | `e45ce49f98a7ae623bee6e4eedbef70f3afa0901692f7340c823540265371d54` |
 
 `zig test` 还会验证：
 

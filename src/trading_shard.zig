@@ -7,6 +7,7 @@ pub const risk = @import("risk.zig");
 const risk_module = risk;
 pub const economics = @import("economics.zig");
 const economics_module = economics;
+pub const operational = @import("operational.zig");
 const host_gateway = @import("strategy_host_gateway.zig");
 const venue_adapter = @import("venue_adapter.zig");
 const okx_public_market = @import("okx_public_market.zig");
@@ -22,6 +23,11 @@ const client_order_id = "RWN-00000001-01-000000000001";
 const money_scale: i64 = 1_000_000;
 const contract_denominator: i64 = 10_000;
 const fee_ppm: i64 = 750;
+const market_data_gate_identity: u128 = 0x4d41524b455444415441;
+const margin_warning_gate_identity: u128 = 0x4d415247494e5741524e;
+const margin_kill_gate_identity: u128 = 0x4d415247494e4b494c4c;
+const primary_lease_gate_identity: u128 = 0x5052494d4152594c45415345;
+const risk_lease_gate_identity: u128 = 0x5249534b4c45415345;
 const rate_scale: i64 = 1_000_000;
 const leverage: i64 = 50;
 const internal_margin_percent: i64 = 110;
@@ -30,11 +36,11 @@ const order_limit_price: i64 = 50_100_000_000;
 const initial_exchange_cash: i64 = 25_000 * money_scale;
 const portfolio_allocation: i64 = 20_000 * money_scale;
 const risk_lease_total: i64 = 10_000 * money_scale;
-const expected_happy_digest = "592081f6ee59acdf8869be0cd6b81bcdc6a6607a9a6d25086f8bfe95247e4cf4";
-const expected_market_gap_digest = "eaef670bde5b2e1ecc311571ca60285129366cf2e18dae5cfcf2f90f7029eab0";
-const expected_risk_rejection_digest = "921d2d8d386e89383c3beccd7f41c5b4abb0df408acbf6add2400980dbe91794";
-const expected_unknown_digest = "d744dd5dbf387e43fb958274496cc17394f6f4082104dc460deb2d8d1c4d62cb";
-const expected_duplicate_digest = "d6c2881a6f84e922b59d31e305cc51a94f23a8a9152ad52f31da2ba96942b7ab";
+const expected_happy_digest = "674ff4b1e0018280a198b85b580d4e9d5da46ee81cb034783f9d4f637765b7d6";
+const expected_market_gap_digest = "9f7890e42b707ce31803f50af9c53e359a13b9b45c0685f497129a731cf5dbad";
+const expected_risk_rejection_digest = "ff1d46e6c479eff7e25a7c00fd0750d92bdb0da09eab5923e3fb19dc179315e1";
+const expected_unknown_digest = "2ce777b8a2625b2c0e9d44aea74f12e2395d81092fba6c154bd4b3ba5a1129da";
+const expected_duplicate_digest = "e45ce49f98a7ae623bee6e4eedbef70f3afa0901692f7340c823540265371d54";
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 const benchmark_samples: usize = 1_000_000;
@@ -83,6 +89,12 @@ const EventKind = enum(u16) {
     funding_settlement,
     venue_forced_execution,
     economic_account_snapshot,
+    control_command_applied,
+    recovery_completed,
+    safety_gate_changed,
+    lifecycle_progressed,
+    risk_warning_recorded,
+    lease_gate_changed,
 };
 
 pub const Fact = struct {
@@ -217,6 +229,12 @@ const PayloadTag = enum(u16) {
     funding_settlement,
     venue_forced_execution,
     economic_account_snapshot,
+    control_command,
+    recovery_completed,
+    safety_gate_change,
+    lifecycle_progress,
+    risk_warning,
+    lease_gate_change,
 };
 
 pub const ReservationModel = enum(u8) { leveraged, cash };
@@ -293,6 +311,12 @@ pub const Payload = union(PayloadTag) {
     funding_settlement: FundingSettlement,
     venue_forced_execution: VenueForcedExecution,
     economic_account_snapshot: EconomicAccountSnapshot,
+    control_command: operational.ControlCommand,
+    recovery_completed,
+    safety_gate_change: operational.SafetyGateChange,
+    lifecycle_progress: operational.LifecycleProgress,
+    risk_warning: operational.RiskWarning,
+    lease_gate_change: operational.SafetyGateChange,
 };
 
 pub const CanonicalEvent = struct {
@@ -506,6 +530,46 @@ fn encodeInput(input: InputEvent) !EncodedInput {
             try encoded.put(i64, value.spot_asset_quantity);
             try encoded.put(i64, value.swap_position_quantity);
             try encoded.put(i64, value.margin_micros);
+        },
+        .control_command => |value| {
+            try encoded.put(u128, value.command_identity);
+            try encoded.put(u128, value.content_hash);
+            try encoded.put(u128, value.target_identity);
+            try encoded.put(u64, value.expected_version);
+            try encoded.put(u64, value.expires_at);
+            try encoded.put(u8, @intFromEnum(value.kind));
+            try encoded.put(i64, value.target_position);
+            try encoded.put(u128, value.referenced_latch_identity);
+            try encoded.put(u8, @intFromBool(value.risk_warning_acknowledged));
+            try encoded.put(u128, value.risk_warning_identity);
+        },
+        .recovery_completed => {},
+        .safety_gate_change => |value| {
+            try encoded.put(u128, value.gate_identity);
+            try encoded.put(u128, value.target_identity);
+            try encoded.put(u8, @intFromEnum(value.kind));
+            try encoded.put(u8, @intFromEnum(value.reason));
+            try encoded.put(u8, @intFromBool(value.open));
+            try encoded.put(u8, @intFromBool(value.continuity_proven));
+            try encoded.put(u8, @intFromBool(value.blocks_buy));
+            try encoded.put(u8, @intFromBool(value.blocks_sell));
+        },
+        .lifecycle_progress => |value| {
+            try encoded.put(u128, value.operation_identity);
+            try encoded.put(u128, value.target_identity);
+            try encoded.put(u8, @intFromBool(value.open_orders_closed));
+            try encoded.put(u8, @intFromBool(value.reconciliation_complete));
+            try encoded.put(i64, value.position_quantity);
+        },
+        .risk_warning => |value| {
+            try encoded.put(u128, value.warning_identity);
+            try encoded.put(u128, value.target_identity);
+        },
+        .lease_gate_change => |value| {
+            try encoded.put(u128, value.gate_identity);
+            try encoded.put(u128, value.target_identity);
+            try encoded.put(u8, @intFromEnum(value.reason));
+            try encoded.put(u8, @intFromBool(value.open));
         },
         else => {},
     }
@@ -752,6 +816,48 @@ fn decodeInput(record: journal.Record) !InputEvent {
             .spot_asset_quantity = try readInputValue(i64, record.payload, &offset),
             .swap_position_quantity = try readInputValue(i64, record.payload, &offset),
             .margin_micros = try readInputValue(i64, record.payload, &offset),
+        } },
+        .control_command => .{ .control_command = .{
+            .command_identity = try readInputValue(u128, record.payload, &offset),
+            .content_hash = try readInputValue(u128, record.payload, &offset),
+            .target_identity = try readInputValue(u128, record.payload, &offset),
+            .expected_version = try readInputValue(u64, record.payload, &offset),
+            .expires_at = try readInputValue(u64, record.payload, &offset),
+            .kind = std.enums.fromInt(operational.CommandKind, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownControlCommand,
+            .target_position = try readInputValue(i64, record.payload, &offset),
+            .referenced_latch_identity = try readInputValue(u128, record.payload, &offset),
+            .risk_warning_acknowledged = (try readInputValue(u8, record.payload, &offset)) == 1,
+            .risk_warning_identity = try readInputValue(u128, record.payload, &offset),
+        } },
+        .recovery_completed => .recovery_completed,
+        .safety_gate_change => .{ .safety_gate_change = .{
+            .gate_identity = try readInputValue(u128, record.payload, &offset),
+            .target_identity = try readInputValue(u128, record.payload, &offset),
+            .kind = std.enums.fromInt(operational.GateKind, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownSafetyGateKind,
+            .reason = std.enums.fromInt(operational.GateReason, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownSafetyGateReason,
+            .open = (try readInputValue(u8, record.payload, &offset)) == 1,
+            .continuity_proven = (try readInputValue(u8, record.payload, &offset)) == 1,
+            .blocks_buy = (try readInputValue(u8, record.payload, &offset)) == 1,
+            .blocks_sell = (try readInputValue(u8, record.payload, &offset)) == 1,
+        } },
+        .lifecycle_progress => .{ .lifecycle_progress = .{
+            .operation_identity = try readInputValue(u128, record.payload, &offset),
+            .target_identity = try readInputValue(u128, record.payload, &offset),
+            .open_orders_closed = (try readInputValue(u8, record.payload, &offset)) == 1,
+            .reconciliation_complete = (try readInputValue(u8, record.payload, &offset)) == 1,
+            .position_quantity = try readInputValue(i64, record.payload, &offset),
+        } },
+        .risk_warning => .{ .risk_warning = .{
+            .warning_identity = try readInputValue(u128, record.payload, &offset),
+            .target_identity = try readInputValue(u128, record.payload, &offset),
+        } },
+        .lease_gate_change => .{ .lease_gate_change = .{
+            .gate_identity = try readInputValue(u128, record.payload, &offset),
+            .target_identity = try readInputValue(u128, record.payload, &offset),
+            .kind = .self_recovering,
+            .reason = std.enums.fromInt(operational.GateReason, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownSafetyGateReason,
+            .open = (try readInputValue(u8, record.payload, &offset)) == 1,
+            .continuity_proven = false,
         } },
     };
     if (offset != record.payload.len) return error.TrailingInputPayload;
@@ -1008,6 +1114,7 @@ pub const TradingShard = struct {
     portfolio_funded: bool = false,
     oms: oms_module.Oms = .{},
     economic_projection: economics_module.Projection = .{},
+    operational_state: operational.State = .{},
 
     pub fn apply(self: *TradingShard, event: CanonicalEvent) !ApplyResult {
         var candidate = self.*;
@@ -1105,6 +1212,32 @@ pub const TradingShard = struct {
                 .btc_usdt_spot => self.spot_exchange_position.quantity,
                 .btc_usdt_swap => self.exchange_position.quantity,
             };
+            const signed_delta = (if (intent.side == .buy) intent.quantity else -intent.quantity);
+            const next_portfolio = try std.math.add(i64, portfolio_position_quantity, signed_delta);
+            const reduces_portfolio = @abs(next_portfolio) <= @abs(portfolio_position_quantity) and
+                !(portfolio_position_quantity != 0 and next_portfolio != 0 and
+                    (portfolio_position_quantity < 0) != (next_portfolio < 0));
+            const next_exchange = try std.math.add(i64, exchange_position_quantity, signed_delta);
+            const reduces_exchange = @abs(next_exchange) <= @abs(exchange_position_quantity) and
+                !(exchange_position_quantity != 0 and next_exchange != 0 and
+                    (exchange_position_quantity < 0) != (next_exchange < 0));
+            const reduces_only = reduces_portfolio and reduces_exchange;
+            if (self.operational_state.mode == .draining and
+                self.operational_state.active_operation_kind == .de_risk)
+            {
+                const target = self.operational_state.target_position;
+                if ((portfolio_position_quantity > target and
+                    (intent.side != .sell or next_portfolio < target)) or
+                    (portfolio_position_quantity < target and
+                        (intent.side != .buy or next_portfolio > target)) or
+                    portfolio_position_quantity == target)
+                    return error.DeRiskTargetViolation;
+            }
+            if (!reduces_only and !self.operational_state.mayIncrease(intent.side == .buy))
+                return error.TradingNotAuthorized;
+            if (reduces_only and !self.operational_state.effectiveTradingAuthority() and
+                !self.operational_state.mayReduceOnly())
+                return error.TradingNotAuthorized;
             const assessment = try risk_module.assess(self.riskRules(), self.riskLimits(), .{
                 .portfolio_cash_micros = self.portfolio_cash_micros,
                 .exchange_cash_micros = self.exchange_cash_micros,
@@ -1133,6 +1266,20 @@ pub const TradingShard = struct {
             self.exchange_liquidation_distance_ticks = assessment.exchange_liquidation_distance_ticks;
             self.portfolio_margin_gate = assessment.portfolio_gate;
             self.exchange_margin_gate = assessment.exchange_gate;
+            const strict_gate = if (@intFromEnum(assessment.portfolio_gate) >= @intFromEnum(assessment.exchange_gate))
+                assessment.portfolio_gate
+            else
+                assessment.exchange_gate;
+            if (self.operational_state.initialized) try self.applyOperationalGate(.{
+                .gate_identity = if (strict_gate == .kill) margin_kill_gate_identity else margin_warning_gate_identity,
+                .target_identity = self.operational_state.target_identity,
+                .kind = if (strict_gate == .kill) .latched else .warning,
+                .reason = if (strict_gate == .kill) .margin_kill else .margin_warning,
+                .open = strict_gate == .healthy,
+                .blocks_buy = true,
+                .blocks_sell = true,
+            });
+            if (!reduces_only and strict_gate != .healthy) return error.MarginSafetyGateClosed;
         }
         return qualified;
     }
@@ -1151,6 +1298,7 @@ pub const TradingShard = struct {
             error.ExchangeOpeningGateClosed,
             error.InsufficientSpotAsset,
             error.PortfolioReduceOnlyViolation,
+            error.MarginSafetyGateClosed,
             => {
                 try self.oms.discardReplacement(order_id);
                 return;
@@ -1168,6 +1316,12 @@ pub const TradingShard = struct {
         self.layered_risk_reserved_micros = current;
         self.portfolio_margin_buffer_micros = try std.math.sub(i64, self.portfolio_margin_buffer_micros, change);
         self.exchange_margin_buffer_micros = try std.math.sub(i64, self.exchange_margin_buffer_micros, change);
+    }
+
+    fn applyOperationalGate(self: *TradingShard, change: operational.SafetyGateChange) !void {
+        const action = try self.operational_state.applyGate(change);
+        if (action.cancel_open_orders)
+            try self.oms.cancelOpenOrders(action.cancel_increasing_only);
     }
 
     fn recalculateRisk(self: *TradingShard, fail_if_exceeded: bool) !void {
@@ -1272,6 +1426,11 @@ pub const TradingShard = struct {
             intent.quantity <= 0 or intent.limit_price_micros <= 0)
             return error.InvalidOrderIntent;
         if (!self.genesisReady()) return error.GenesisIncomplete;
+        if (!self.operational_state.effectiveTradingAuthority()) {
+            self.last_reject_reason = .market_data_gap;
+            try self.trace.append(.strategy_intent_rejected, intent.intent_sequence);
+            return null;
+        }
         if (intent.strategy_identity != self.strategy_identity or
             intent.config_version != self.strategy_config_version or
             intent.activation_identity != self.strategy_activation_identity or
@@ -1347,6 +1506,68 @@ pub const TradingShard = struct {
         if (input.version != schema_version) return error.UnsupportedSchema;
 
         switch (input.payload) {
+            .control_command => |command| {
+                const action = try self.operational_state.applyCommand(command, input.wall_time);
+                if (!action.changed) return null;
+                if (command.kind == .start_recovery) {
+                    try self.applyOperationalGate(.{
+                        .gate_identity = primary_lease_gate_identity,
+                        .target_identity = command.target_identity,
+                        .kind = .self_recovering,
+                        .reason = .primary_lease,
+                        .open = self.fencing_token != 0,
+                        .continuity_proven = self.fencing_token != 0,
+                    });
+                    try self.applyOperationalGate(.{
+                        .gate_identity = risk_lease_gate_identity,
+                        .target_identity = command.target_identity,
+                        .kind = .self_recovering,
+                        .reason = .risk_lease,
+                        .open = self.risk_lease_micros > 0,
+                        .continuity_proven = self.risk_lease_micros > 0,
+                    });
+                }
+                if (action.cancel_open_orders)
+                    try self.oms.cancelOpenOrders(action.cancel_increasing_only);
+                try self.trace.append(.control_command_applied, input.identity);
+            },
+            .recovery_completed => {
+                try self.operational_state.recoveryCompleted();
+                try self.trace.append(.recovery_completed, input.identity);
+            },
+            .safety_gate_change => |change| {
+                if (change.kind == .self_recovering and change.open and change.continuity_proven)
+                    return error.UnverifiedContinuityProof;
+                try self.applyOperationalGate(change);
+                try self.trace.append(.safety_gate_changed, input.identity);
+            },
+            .lifecycle_progress => |progress| {
+                if (progress.position_quantity != self.portfolio_position.quantity or
+                    progress.open_orders_closed != self.oms.openOrdersClosed() or
+                    progress.reconciliation_complete != !self.economic_projection.reconciliation_break or
+                    self.portfolio_position.quantity != self.exchange_position.quantity or
+                    self.portfolio_cash_micros + self.treasury_cash_micros != self.exchange_cash_micros)
+                    return error.InvalidLifecycleProgress;
+                try self.assertClosures();
+                try self.operational_state.applyProgress(progress);
+                try self.trace.append(.lifecycle_progressed, input.identity);
+            },
+            .risk_warning => |warning| {
+                try self.operational_state.applyRiskWarning(warning);
+                try self.trace.append(.risk_warning_recorded, input.identity);
+            },
+            .lease_gate_change => |change| {
+                if (change.kind != .self_recovering or
+                    (change.reason != .primary_lease and change.reason != .risk_lease))
+                    return error.InvalidLeaseGate;
+                var normalized = change;
+                normalized.gate_identity = if (change.reason == .primary_lease)
+                    primary_lease_gate_identity
+                else
+                    risk_lease_gate_identity;
+                try self.applyOperationalGate(normalized);
+                try self.trace.append(.lease_gate_changed, input.identity);
+            },
             .instrument_rules_activated => |rules| {
                 if (rules.version == 0 or rules.instrument_identity == 0 or
                     rules.quantity_denominator <= 0 or self.instrument_rules_version != 0)
@@ -1481,6 +1702,14 @@ pub const TradingShard = struct {
                 if (!self.strategy_active or lease.fencing_token == 0 or self.fencing_token != 0)
                     return error.InvalidPrimaryLease;
                 self.fencing_token = lease.fencing_token;
+                if (self.operational_state.initialized) try self.applyOperationalGate(.{
+                    .gate_identity = input.identity,
+                    .target_identity = self.operational_state.target_identity,
+                    .kind = .self_recovering,
+                    .reason = .primary_lease,
+                    .open = true,
+                    .continuity_proven = true,
+                });
                 try self.trace.append(.primary_lease_granted, input.identity);
             },
             .risk_lease_granted => |lease| {
@@ -1492,6 +1721,14 @@ pub const TradingShard = struct {
                 self.portfolio_limit_micros = if (lease.portfolio_limit_micros == 0) lease.amount_micros else lease.portfolio_limit_micros;
                 self.exchange_account_limit_micros = if (lease.exchange_account_limit_micros == 0) lease.amount_micros else lease.exchange_account_limit_micros;
                 self.global_limit_micros = if (lease.global_limit_micros == 0) lease.amount_micros else lease.global_limit_micros;
+                if (self.operational_state.initialized) try self.applyOperationalGate(.{
+                    .gate_identity = input.identity,
+                    .target_identity = self.operational_state.target_identity,
+                    .kind = .self_recovering,
+                    .reason = .risk_lease,
+                    .open = true,
+                    .continuity_proven = true,
+                });
                 if (self.strategy_limit_micros > self.portfolio_limit_micros or
                     self.portfolio_limit_micros > self.exchange_account_limit_micros or
                     self.exchange_account_limit_micros > self.global_limit_micros or
@@ -1532,6 +1769,13 @@ pub const TradingShard = struct {
                 {
                     try self.trace.append(.l2_delta, input.identity);
                     self.market_health = .gap;
+                    if (self.operational_state.initialized) try self.applyOperationalGate(.{
+                        .gate_identity = market_data_gate_identity,
+                        .target_identity = self.operational_state.target_identity,
+                        .kind = .self_recovering,
+                        .reason = .market_data,
+                        .open = false,
+                    });
                     try self.trace.append(.market_gap, 1);
                     return null;
                 }
@@ -1541,6 +1785,14 @@ pub const TradingShard = struct {
                 try self.trace.append(.l2_delta, input.identity);
                 if (self.market_health != .healthy) {
                     self.market_health = .healthy;
+                    if (self.operational_state.initialized) try self.applyOperationalGate(.{
+                        .gate_identity = market_data_gate_identity,
+                        .target_identity = self.operational_state.target_identity,
+                        .kind = .self_recovering,
+                        .reason = .market_data,
+                        .open = true,
+                        .continuity_proven = true,
+                    });
                     try self.trace.append(.market_healthy, 1);
                 }
             },
@@ -1580,7 +1832,14 @@ pub const TradingShard = struct {
             .oms_intent_group => |group| {
                 if (!self.genesisReady()) return error.GenesisIncomplete;
                 var candidate = self.*;
-                const qualified = try candidate.qualifyOmsGroup(group);
+                const qualified = candidate.qualifyOmsGroup(group) catch |err| switch (err) {
+                    error.MarginSafetyGateClosed => {
+                        try candidate.trace.append(.strategy_intent_rejected, group.first_intent_sequence);
+                        self.* = candidate;
+                        return null;
+                    },
+                    else => return err,
+                };
                 try candidate.oms.applyGroup(qualified);
                 try candidate.refreshLayeredReservations();
                 try candidate.trace.append(.oms_intent_group, group.first_intent_sequence);
@@ -1601,6 +1860,13 @@ pub const TradingShard = struct {
             },
             .oms_reconciliation_result => |result| {
                 try self.oms.applyReconciliation(result);
+                if (result.status == .unresolved and self.operational_state.initialized) try self.applyOperationalGate(.{
+                    .gate_identity = result.reconciliation_id,
+                    .target_identity = self.operational_state.target_identity,
+                    .kind = .latched,
+                    .reason = .reconciliation_break,
+                    .open = false,
+                });
                 try self.confirmPendingReplacement(result.order_id, result.reconciliation_id);
                 try self.refreshLayeredReservations();
                 try self.trace.append(.oms_reconciliation_result, result.reconciliation_id);
@@ -1641,6 +1907,15 @@ pub const TradingShard = struct {
                     .exchange_margin_ppm = self.venue_initial_margin_ppm,
                 } });
                 if (changed) {
+                    if (self.operational_state.initialized) {
+                        try self.applyOperationalGate(.{
+                            .gate_identity = forced.execution_id,
+                            .target_identity = self.operational_state.target_identity,
+                            .kind = .latched,
+                            .reason = .venue_forced_execution,
+                            .open = false,
+                        });
+                    }
                     try self.recalculateRisk(false);
                     try self.trace.append(.venue_forced_execution, forced.execution_id);
                 }
@@ -1653,7 +1928,18 @@ pub const TradingShard = struct {
                     .swap_position_quantity = snapshot.swap_position_quantity,
                     .margin_micros = snapshot.margin_micros,
                 } });
-                if (changed) try self.trace.append(.economic_account_snapshot, snapshot.snapshot_id);
+                if (changed) {
+                    if (self.operational_state.initialized and self.economic_projection.reconciliation_break) {
+                        try self.applyOperationalGate(.{
+                            .gate_identity = snapshot.snapshot_id,
+                            .target_identity = self.operational_state.target_identity,
+                            .kind = .latched,
+                            .reason = .reconciliation_break,
+                            .open = false,
+                        });
+                    }
+                    try self.trace.append(.economic_account_snapshot, snapshot.snapshot_id);
+                }
             },
             .order_dispatch_result => |status| {
                 if (self.order_state != .pending_submit) return error.InvalidDispatchResult;
@@ -1927,6 +2213,23 @@ const genesis = [_]InputEvent{
     } } }),
     atGroup(10, .{ .identity = 1, .payload = .{ .primary_lease_granted = .{ .fencing_token = 1 } } }),
     atGroup(11, .{ .identity = 1, .payload = .{ .risk_lease_granted = .{ .amount_micros = risk_lease_total } } }),
+    atGroup(11, .{ .identity = 1, .payload = .{ .control_command = .{
+        .command_identity = 1,
+        .content_hash = 1,
+        .target_identity = 1,
+        .expected_version = 0,
+        .expires_at = std.math.maxInt(u64),
+        .kind = .start_recovery,
+    } } }),
+    atGroup(11, .{ .identity = 1, .payload = .recovery_completed }),
+    atGroup(11, .{ .identity = 2, .payload = .{ .control_command = .{
+        .command_identity = 2,
+        .content_hash = 2,
+        .target_identity = 1,
+        .expected_version = 2,
+        .expires_at = std.math.maxInt(u64),
+        .kind = .enable_trading,
+    } } }),
 };
 
 const LiveRun = struct {
@@ -3107,6 +3410,49 @@ fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     digestInt(&hasher, u128, shard.strategy_identity);
     digestInt(&hasher, u64, shard.strategy_config_version);
     digestInt(&hasher, u128, shard.strategy_activation_identity);
+    digestBool(&hasher, shard.operational_state.initialized);
+    digestInt(&hasher, u128, shard.operational_state.target_identity);
+    digestInt(&hasher, u64, shard.operational_state.version);
+    digestInt(&hasher, u8, @intFromEnum(shard.operational_state.mode));
+    digestBool(&hasher, shard.operational_state.trading_authorized);
+    digestBool(&hasher, shard.operational_state.self_recovering_closed);
+    digestBool(&hasher, shard.operational_state.warning_blocks_buy);
+    digestBool(&hasher, shard.operational_state.warning_blocks_sell);
+    digestInt(&hasher, u8, shard.operational_state.command_count);
+    for (shard.operational_state.command_history[0..shard.operational_state.command_count]) |command| {
+        digestInt(&hasher, u128, command.command.command_identity);
+        digestInt(&hasher, u128, command.command.content_hash);
+        digestInt(&hasher, u128, command.command.target_identity);
+        digestInt(&hasher, u64, command.command.expected_version);
+        digestInt(&hasher, u64, command.command.expires_at);
+        digestInt(&hasher, u8, @intFromEnum(command.command.kind));
+        digestInt(&hasher, i64, command.command.target_position);
+        digestInt(&hasher, u128, command.command.referenced_latch_identity);
+        digestBool(&hasher, command.command.risk_warning_acknowledged);
+        digestInt(&hasher, u128, command.command.risk_warning_identity);
+    }
+    digestInt(&hasher, u8, shard.operational_state.latch_count);
+    for (shard.operational_state.latches[0..shard.operational_state.latch_count]) |latch_record| {
+        digestInt(&hasher, u128, latch_record.identity);
+        digestInt(&hasher, u8, @intFromEnum(latch_record.reason));
+        digestBool(&hasher, latch_record.resolved);
+    }
+    digestInt(&hasher, u128, shard.operational_state.active_operation_identity);
+    digestInt(&hasher, u8, @intFromEnum(shard.operational_state.active_operation_kind));
+    digestInt(&hasher, i64, shard.operational_state.target_position);
+    digestBool(&hasher, shard.operational_state.continuity_intact);
+    digestInt(&hasher, u128, shard.operational_state.last_risk_warning_identity);
+    digestInt(&hasher, u8, shard.operational_state.gate_count);
+    for (shard.operational_state.gates[0..shard.operational_state.gate_count]) |gate| {
+        digestInt(&hasher, u128, gate.gate_identity);
+        digestInt(&hasher, u128, gate.target_identity);
+        digestInt(&hasher, u8, @intFromEnum(gate.kind));
+        digestInt(&hasher, u8, @intFromEnum(gate.reason));
+        digestBool(&hasher, gate.open);
+        digestBool(&hasher, gate.continuity_proven);
+        digestBool(&hasher, gate.blocks_buy);
+        digestBool(&hasher, gate.blocks_sell);
+    }
     digestInt(&hasher, u8, shard.oms.order_count);
     for (shard.oms.orders[0..shard.oms.order_count]) |order| {
         digestInt(&hasher, u64, order.id);
@@ -3362,7 +3708,12 @@ fn assertReplayEquivalentConfigured(run: LiveRun, quantity_denominator: i64, res
     if (replayed.status != .clean or
         !sameTrace(run.shard.trace, replayed.shard.trace) or
         !std.mem.eql(u8, &live_digest, &stateDigest(replayed.shard)))
+    {
+        const live_hex = std.fmt.bytesToHex(live_digest, .lower);
+        const replay_hex = std.fmt.bytesToHex(stateDigest(replayed.shard), .lower);
+        std.debug.print("replay mismatch live={s} replay={s} trace={d}/{d}\n", .{ &live_hex, &replay_hex, run.shard.trace.len, replayed.shard.trace.len });
         return error.ReplayNotEquivalent;
+    }
     return live_digest;
 }
 
@@ -3404,7 +3755,7 @@ fn selfCheck() !LiveRun {
     const truncated_record = try replay(
         first.decision_journal.bytes()[0 .. first.decision_journal.len - 40],
     );
-    if (truncated_record.status != .truncated_tail or truncated_record.shard.trace.len != 30)
+    if (truncated_record.status != .truncated_tail or truncated_record.shard.trace.len != 33)
         return error.TruncatedRecordRecoveryMismatch;
 
     var corrupted = first.decision_journal;
@@ -3428,7 +3779,7 @@ fn selfCheck() !LiveRun {
         try assertReplayEquivalent(market_gap),
         expected_market_gap_digest,
     );
-    if (market_gap.shard.trace.len != 23 or
+    if (market_gap.shard.trace.len != 25 or
         market_gap.shard.market_health != .healthy or
         market_gap.shard.expected_source_sequence != 201 or
         market_gap.shard.last_reject_reason != .market_data_gap or
@@ -3445,7 +3796,7 @@ fn selfCheck() !LiveRun {
         try assertReplayEquivalent(risk_rejection),
         expected_risk_rejection_digest,
     );
-    if (risk_rejection.shard.trace.len != 18 or
+    if (risk_rejection.shard.trace.len != 21 or
         risk_rejection.shard.last_reject_reason != .global_risk_lease_exceeded or
         risk_rejection.shard.last_risk_tier != 2 or
         risk_rejection.shard.last_risk_required_micros != 0 or
@@ -3460,7 +3811,7 @@ fn selfCheck() !LiveRun {
         try assertReplayEquivalent(unknown),
         expected_unknown_digest,
     );
-    if (unknown.shard.trace.len != 23 or unknown.shard.order_state != .live or
+    if (unknown.shard.trace.len != 26 or unknown.shard.order_state != .live or
         unknown.shard.order_counter != 1 or unknown.shard.dispatch_attempt_count != 1 or
         unknown.shard.reconciliation_id != 1 or unknown.shard.venue_order_id != 9_001 or
         unknown.shard.open_order_reservation_micros != 11_397_750 or
@@ -3515,7 +3866,7 @@ fn selfCheck() !LiveRun {
         try assertReplayEquivalent(duplicate),
         expected_duplicate_digest,
     );
-    if (duplicate.shard.trace.len != 32 or duplicate.shard.order_state != .filled or
+    if (duplicate.shard.trace.len != 35 or duplicate.shard.order_state != .filled or
         duplicate.shard.fill_fact_count != 2 or duplicate.shard.report_fact_count != 3 or
         duplicate.shard.portfolio_position.quantity != first.shard.portfolio_position.quantity or
         duplicate.shard.portfolio_position.open_cost_micros !=
@@ -3539,8 +3890,8 @@ fn selfCheck() !LiveRun {
     }
 
     if (first.shard.order_state != .filled or first.shard.filled_quantity != 100 or
-        first.shard.trace.len != 31 or
-        first.shard.trace.events[first.shard.trace.len - 1].sequence != 31 or
+        first.shard.trace.len != 34 or
+        first.shard.trace.events[first.shard.trace.len - 1].sequence != 34 or
         !first.shard.economic_projections_complete)
         return error.IncompleteHappyPath;
     if (first.shard.portfolio_position.quantity != 100 or
@@ -3743,6 +4094,151 @@ test "native and Python intents cross the same authority and risk seam" {
             .limit_price_micros = order_limit_price,
         } },
     })));
+}
+
+test "control commands authorize pause cancel and replay lifecycle deterministically" {
+    var run = try startScenario();
+    try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
+
+    const duplicate = try run.shard.apply(genesis[genesis.len - 1]);
+    try std.testing.expectEqual(@as(usize, 0), duplicate.facts.len);
+    try std.testing.expectError(error.ControlCommandWrongTarget, run.shard.apply(atGroup(12, .{ .identity = 9, .payload = .{ .control_command = .{
+        .command_identity = 9,
+        .content_hash = 9,
+        .target_identity = 2,
+        .expected_version = 3,
+        .expires_at = std.math.maxInt(u64),
+        .kind = .cancel_open_orders,
+    } } })));
+    try std.testing.expectError(error.ControlCommandExpired, run.shard.apply(atGroup(12, .{ .identity = 9, .payload = .{ .control_command = .{
+        .command_identity = 9,
+        .content_hash = 9,
+        .target_identity = 1,
+        .expected_version = 3,
+        .expires_at = 1,
+        .kind = .cancel_open_orders,
+    } } })));
+
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(12, .{ .identity = 3, .payload = .{ .control_command = .{
+        .command_identity = 3,
+        .content_hash = 3,
+        .target_identity = 1,
+        .expected_version = 3,
+        .expires_at = std.math.maxInt(u64),
+        .kind = .trading_pause,
+    } } }));
+    try std.testing.expectEqual(operational.OperationalMode.draining, run.shard.operational_state.mode);
+    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(13, .{ .identity = 1, .payload = .{ .timer = .{ .quantity = 1 } } }))) == null);
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(14, .{ .identity = 3, .payload = .{ .lifecycle_progress = .{
+        .operation_identity = 3,
+        .target_identity = 1,
+        .open_orders_closed = true,
+        .reconciliation_complete = true,
+        .position_quantity = 0,
+    } } }));
+    try std.testing.expectEqual(operational.OperationalMode.ready, run.shard.operational_state.mode);
+    try run.decision_journal.seal();
+    _ = try assertReplayEquivalent(run);
+}
+
+test "layered gates latch kill while warning and self recovery stay narrow" {
+    var run = try startScenario();
+    _ = try run.shard.apply(atGroup(12, .{ .identity = 10, .payload = .{ .safety_gate_change = .{
+        .gate_identity = 10,
+        .target_identity = 1,
+        .kind = .warning,
+        .reason = .margin_warning,
+        .open = false,
+        .blocks_buy = true,
+        .blocks_sell = false,
+    } } }));
+    try std.testing.expect(!run.shard.operational_state.mayIncrease(true));
+    try std.testing.expect(run.shard.operational_state.mayIncrease(false));
+    _ = try run.shard.apply(atGroup(13, .{ .identity = 11, .payload = .{ .safety_gate_change = .{
+        .gate_identity = 11,
+        .target_identity = 1,
+        .kind = .self_recovering,
+        .reason = .observability,
+        .open = false,
+    } } }));
+    try std.testing.expect(!run.shard.operational_state.effectiveTradingAuthority());
+    try std.testing.expectError(error.UnverifiedContinuityProof, run.shard.apply(atGroup(14, .{ .identity = 11, .payload = .{ .safety_gate_change = .{
+        .gate_identity = 11,
+        .target_identity = 1,
+        .kind = .self_recovering,
+        .reason = .observability,
+        .open = true,
+        .continuity_proven = true,
+    } } })));
+    try run.shard.applyOperationalGate(.{
+        .gate_identity = 11,
+        .target_identity = 1,
+        .kind = .self_recovering,
+        .reason = .observability,
+        .open = true,
+        .continuity_proven = true,
+    });
+    try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
+    _ = try run.shard.apply(atGroup(15, .{ .identity = 12, .payload = .{ .safety_gate_change = .{
+        .gate_identity = 12,
+        .target_identity = 1,
+        .kind = .latched,
+        .reason = .margin_kill,
+        .open = false,
+    } } }));
+    try std.testing.expect(!run.shard.operational_state.trading_authorized);
+    _ = try run.shard.apply(atGroup(16, .{ .identity = 12, .payload = .{ .safety_gate_change = .{
+        .gate_identity = 12,
+        .target_identity = 1,
+        .kind = .latched,
+        .reason = .margin_kill,
+        .open = true,
+    } } }));
+    try std.testing.expectError(error.TradingSafetyGateClosed, run.shard.apply(atGroup(17, .{ .identity = 4, .payload = .{ .control_command = .{
+        .command_identity = 4,
+        .content_hash = 4,
+        .target_identity = 1,
+        .expected_version = 3,
+        .expires_at = std.math.maxInt(u64),
+        .kind = .enable_trading,
+    } } })));
+}
+
+test "de risk locks target and flatten requires warning" {
+    var run = try startScenario();
+    run.shard.portfolio_position.quantity = 10;
+    run.shard.exchange_position.quantity = 10;
+    run.shard.mark_price_micros = 50_000_000;
+    try std.testing.expectError(error.RiskWarningRequired, run.shard.apply(atGroup(12, .{ .identity = 3, .payload = .{ .control_command = .{
+        .command_identity = 3,
+        .content_hash = 3,
+        .target_identity = 1,
+        .expected_version = 3,
+        .expires_at = std.math.maxInt(u64),
+        .kind = .de_risk,
+        .target_position = 0,
+    } } })));
+    _ = try run.shard.apply(atGroup(12, .{ .identity = 30, .payload = .{ .risk_warning = .{
+        .warning_identity = 30,
+        .target_identity = 1,
+    } } }));
+    _ = try run.shard.apply(atGroup(12, .{ .identity = 3, .payload = .{ .control_command = .{
+        .command_identity = 3,
+        .content_hash = 3,
+        .target_identity = 1,
+        .expected_version = 4,
+        .expires_at = std.math.maxInt(u64),
+        .kind = .de_risk,
+        .target_position = 0,
+        .risk_warning_acknowledged = true,
+        .risk_warning_identity = 30,
+    } } }));
+    var group: oms_module.IntentGroup = .{ .first_intent_sequence = 100, .count = 1 };
+    group.members[0] = .{ .intent_sequence = 100, .operation = .place, .instrument = .btc_usdt_swap, .side = .sell, .quantity = 5, .limit_price_micros = 50_000_000 };
+    const reducing = try run.shard.apply(atGroup(13, .{ .identity = 100, .payload = .{ .oms_intent_group = group } }));
+    try std.testing.expectEqual(@as(usize, 1), reducing.oms_commands.len);
+    group.members[0].side = .buy;
+    try std.testing.expectError(error.DeRiskTargetViolation, run.shard.apply(atGroup(14, .{ .identity = 101, .payload = .{ .oms_intent_group = group } })));
 }
 
 test "venue facts and replay use apply without replay send capability" {
