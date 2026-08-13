@@ -301,6 +301,7 @@ pub const AccountCoordinator = struct {
     margin_gate: AccountGate = .{ .identity = 0, .open = false, .latched = false },
     gate_deliveries: [max_shards]GateDelivery = undefined,
     recovery_only: bool = false,
+    recovery_margin_identity: u128 = 0,
 
     /// Creates one coordinator for exactly one ExchangeAccount.
     pub fn init(exchange_account: u128, account_ceiling: i64, global_ceiling: i64) AccountCoordinator {
@@ -514,6 +515,7 @@ pub const AccountCoordinator = struct {
             projected_liquidation_distance == observation.venue_liquidation_distance_ticks and
             observation.venue_net_margin_micros <= gross;
         self.last_margin_observation = observation;
+        if (self.recovery_only) self.recovery_margin_identity = observation.identity;
         self.margin_gate = if (self.margin_gate.latched)
             .{ .identity = account_margin_gate_identity, .open = false, .latched = true }
         else
@@ -560,6 +562,7 @@ pub const AccountCoordinator = struct {
     /// Leaves RecoveryOnly only after current leases and account reconciliation are healthy.
     pub fn completeRecovery(self: *AccountCoordinator) !void {
         if (!self.recovery_only) return error.CoordinatorNotRecovering;
+        if (self.recovery_margin_identity == 0) return error.FreshMarginObservationRequired;
         if (!self.margin_gate.open or self.margin_gate.latched) return error.MarginReconciliationRequired;
         if (self.lease_count != max_shards) return error.IncompleteRiskLeases;
         for (self.leases[0..self.lease_count]) |lease| {
@@ -662,6 +665,7 @@ pub const AccountCoordinator = struct {
         if (reader.seek != encoded.len or !std.mem.eql(u8, expected, &encoded_digest))
             return error.InvalidCoordinatorSnapshot;
         result.recovery_only = true;
+        result.recovery_margin_identity = 0;
         return result;
     }
 };
@@ -689,6 +693,9 @@ pub const AccountRecovery = struct {
             result.shards[index].operational_state.trading_authorized = false;
             result.shards[index].operational_state.mode = .recovering;
             result.shard_barriers[index] = recovered.barrier;
+            const summary = result.coordinator.summaries[index];
+            if (!summary.present or summary.value.shard_sequence != recovered.barrier)
+                return error.AccountRecoveryBarrierMismatch;
         }
         return result;
     }
@@ -893,7 +900,7 @@ test "summary barrier and lease expiry fail atomically on overflow" {
 
     coordinator.barrier = 0;
     for (0..max_shards) |index| _ = try coordinator.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, 100));
-    _ = try coordinator.allocateLeases(1, 10);
+    _ = try coordinator.allocateLeases(1, 20);
     coordinator.leases[2].version = std.math.maxInt(u64);
     const before = coordinator.leases;
     try std.testing.expectError(error.Overflow, coordinator.expireLeases(11));
@@ -1042,4 +1049,43 @@ test "four shard coordinator snapshot restores deterministic authority" {
     try std.testing.expectEqual(try coordinator.grossPortfolioMargin(), try recovered.grossPortfolioMargin());
     try std.testing.expectEqual(coordinator.account_netting_benefit_micros, recovered.account_netting_benefit_micros);
     try std.testing.expectEqual(coordinator.barrier, recovered.barrier);
+}
+
+test "account recovery restores four matching shard tails under fresh evidence fence" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    var shard_snapshots_storage: [max_shards][32 * 1024]u8 = undefined;
+    var shard_snapshots: [max_shards][]const u8 = undefined;
+    var shard_tails: [max_shards][]const u8 = undefined;
+    var tail_journals: [max_shards]trading.journal.Journal = undefined;
+    for (0..max_shards) |index| {
+        var shard: trading.TradingShard = .{};
+        var stable_journal = trading.journal.Journal.init();
+        _ = try trading.applyStable(&shard, &stable_journal, .{
+            .identity = 1,
+            .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 1, .quantity_denominator = 1, .reservation_model = .leveraged } },
+        });
+        _ = try trading.applyStable(&shard, &stable_journal, .{
+            .identity = 1,
+            .payload = .{ .margin_rules_activated = .{ .version = 1 } },
+        });
+        _ = try trading.applyStable(&shard, &stable_journal, .{
+            .identity = 1,
+            .payload = .{ .account_configuration = .{ .exchange_account_identity = 900 } },
+        });
+        try stable_journal.seal();
+        shard_snapshots[index] = try shard.snapshot(&stable_journal, 3, &shard_snapshots_storage[index]);
+        tail_journals[index] = trading.journal.Journal.initAt(4);
+        try tail_journals[index].seal();
+        shard_tails[index] = tail_journals[index].bytes();
+        _ = try coordinator.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, 100));
+        _ = try coordinator.publishSummary(index + 11, ShardSummary.fixture(@enumFromInt(index), 2, 100));
+        _ = try coordinator.publishSummary(index + 21, ShardSummary.fixture(@enumFromInt(index), 3, 100));
+    }
+    _ = try coordinator.allocateLeases(1, 20);
+    var coordinator_storage: [4096]u8 = undefined;
+    const coordinator_snapshot = try coordinator.snapshot(&coordinator_storage);
+    var recovered = try AccountRecovery.begin(coordinator_snapshot, shard_snapshots, shard_tails);
+    try std.testing.expect(recovered.coordinator.recovery_only);
+    for (recovered.shards) |shard| try std.testing.expectEqual(trading.operational.OperationalMode.recovering, shard.operational_state.mode);
+    try std.testing.expectError(error.FreshMarginObservationRequired, recovered.completeCoordinatorRecovery());
 }
