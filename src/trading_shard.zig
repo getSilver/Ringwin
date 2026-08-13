@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const journal = @import("journal.zig");
+pub const journal = @import("journal.zig");
 pub const oms = @import("oms.zig");
 const oms_module = oms;
 pub const risk = @import("risk.zig");
@@ -17,8 +17,14 @@ const okx_order_entry = @import("okx_order_entry.zig");
 const okx_live_chain = @import("okx_live_chain.zig");
 const okx_rest_auth = @import("okx_rest_auth.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const Crc32c = std.hash.crc.Crc32Iscsi;
 
 pub const schema_version: u16 = 3;
+pub const state_schema_version: u32 = 1;
+pub const release_artifact_identity: u64 = 1;
+pub const schema_registry_identity: u64 = 1;
+const snapshot_magic: u64 = 0x50414e53574e4952; // RINWSNAP
+const snapshot_header_len: usize = 144;
 const client_order_id = "RWN-00000001-01-000000000001";
 const money_scale: i64 = 1_000_000;
 const contract_denominator: i64 = 10_000;
@@ -905,6 +911,12 @@ pub const ReplayTradingShard = struct {
     }
 };
 
+/// Strictly decoded authoritative snapshot and its exact journal barrier.
+pub const SnapshotRestore = struct {
+    shard: TradingShard,
+    barrier: u64,
+};
+
 const OrderState = enum(u8) {
     none,
     pending_submit,
@@ -1131,6 +1143,78 @@ pub const TradingShard = struct {
 
     pub fn canonicalStateDigest(self: TradingShard) [Sha256.digest_length]u8 {
         return stateDigest(self);
+    }
+
+    /// Encodes authoritative state at the exact sealed stable-journal barrier.
+    pub fn snapshot(
+        self: TradingShard,
+        stable_journal: *const journal.Journal,
+        barrier: u64,
+        destination: []u8,
+    ) ![]const u8 {
+        if (!stable_journal.sealed or barrier == 0 or
+            barrier != stable_journal.last_sequence or self.trace.len != barrier)
+            return error.InvalidSnapshotBarrier;
+        const payload = stable_journal.bytes();
+        const total_len = std.math.add(usize, snapshot_header_len, payload.len) catch
+            return error.SnapshotTooLarge;
+        if (destination.len < total_len or payload.len > std.math.maxInt(u32))
+            return error.SnapshotTooLarge;
+        const encoded = destination[0..total_len];
+        @memset(encoded[0..snapshot_header_len], 0);
+        snapshotPut(u64, encoded, 0, snapshot_magic);
+        snapshotPut(u16, encoded, 8, 1);
+        snapshotPut(u16, encoded, 10, snapshot_header_len);
+        snapshotPut(u32, encoded, 12, @intCast(total_len));
+        snapshotPut(u32, encoded, 16, state_schema_version);
+        snapshotPut(u64, encoded, 20, release_artifact_identity);
+        snapshotPut(u64, encoded, 28, schema_registry_identity);
+        snapshotPut(u64, encoded, 36, barrier);
+        snapshotPut(u32, encoded, 44, self.instrument_rules_version);
+        snapshotPut(u32, encoded, 48, self.margin_rules_version);
+        snapshotPut(u32, encoded, 52, @intCast(payload.len));
+        snapshotPut(u32, encoded, 56, Crc32c.hash(payload));
+        const digest = self.canonicalStateDigest();
+        @memcpy(encoded[60..92], &digest);
+        var payload_digest: [Sha256.digest_length]u8 = undefined;
+        Sha256.hash(payload, &payload_digest, .{});
+        @memcpy(encoded[92..124], &payload_digest);
+        snapshotPut(u32, encoded, 124, Crc32c.hash(encoded[0..124]));
+        @memcpy(encoded[snapshot_header_len..], payload);
+        return encoded;
+    }
+
+    /// Restores a validated snapshot through the side-effect-free replay seam.
+    pub fn restoreSnapshot(encoded: []const u8) !SnapshotRestore {
+        if (encoded.len < snapshot_header_len) return error.InvalidSnapshotHeader;
+        if (snapshotGet(u64, encoded, 0) != snapshot_magic or
+            snapshotGet(u16, encoded, 8) != 1 or
+            snapshotGet(u16, encoded, 10) != snapshot_header_len or
+            snapshotGet(u32, encoded, 12) != encoded.len or
+            snapshotGet(u32, encoded, 16) != state_schema_version or
+            snapshotGet(u64, encoded, 20) != release_artifact_identity or
+            snapshotGet(u64, encoded, 28) != schema_registry_identity or
+            snapshotGet(u32, encoded, 124) != Crc32c.hash(encoded[0..124]))
+            return error.InvalidSnapshotHeader;
+        const payload_len = snapshotGet(u32, encoded, 52);
+        if (payload_len != encoded.len - snapshot_header_len)
+            return error.InvalidSnapshotLength;
+        const payload = encoded[snapshot_header_len..];
+        var payload_digest: [Sha256.digest_length]u8 = undefined;
+        Sha256.hash(payload, &payload_digest, .{});
+        if (snapshotGet(u32, encoded, 56) != Crc32c.hash(payload) or
+            !std.mem.eql(u8, encoded[92..124], &payload_digest))
+            return error.InvalidSnapshotPayload;
+        const recovered = try replay(payload);
+        if (recovered.status != .clean) return error.InvalidSnapshotPayload;
+        const barrier = snapshotGet(u64, encoded, 36);
+        const digest = recovered.shard.canonicalStateDigest();
+        if (recovered.shard.trace.len != barrier or
+            recovered.shard.instrument_rules_version != snapshotGet(u32, encoded, 44) or
+            recovered.shard.margin_rules_version != snapshotGet(u32, encoded, 48) or
+            !std.mem.eql(u8, encoded[60..92], &digest))
+            return error.InvalidSnapshotState;
+        return .{ .shard = recovered.shard, .barrier = barrier };
     }
 
     pub fn economicSummary(self: *const TradingShard) EconomicSummary {
@@ -1746,19 +1830,19 @@ pub const TradingShard = struct {
                 try self.trace.append(.mark_price, input.identity);
                 if (self.order_state == .filled) self.economic_projections_complete = true;
             },
-            .l2_snapshot => |snapshot| {
-                if (snapshot.bid_price_micros <= 0 or snapshot.bid_quantity <= 0 or
-                    snapshot.ask_1_price_micros <= 0 or snapshot.ask_1_quantity <= 0 or
-                    snapshot.ask_2_price_micros <= snapshot.ask_1_price_micros or
-                    snapshot.ask_2_quantity <= 0)
+            .l2_snapshot => |book_snapshot| {
+                if (book_snapshot.bid_price_micros <= 0 or book_snapshot.bid_quantity <= 0 or
+                    book_snapshot.ask_1_price_micros <= 0 or book_snapshot.ask_1_quantity <= 0 or
+                    book_snapshot.ask_2_price_micros <= book_snapshot.ask_1_price_micros or
+                    book_snapshot.ask_2_quantity <= 0)
                     return error.InvalidBookSnapshot;
-                self.expected_source_sequence = snapshot.source_sequence;
-                self.bid_price_micros = snapshot.bid_price_micros;
-                self.bid_quantity = snapshot.bid_quantity;
-                self.ask_1_price_micros = snapshot.ask_1_price_micros;
-                self.ask_1_quantity = snapshot.ask_1_quantity;
-                self.ask_2_price_micros = snapshot.ask_2_price_micros;
-                self.ask_2_quantity = snapshot.ask_2_quantity;
+                self.expected_source_sequence = book_snapshot.source_sequence;
+                self.bid_price_micros = book_snapshot.bid_price_micros;
+                self.bid_quantity = book_snapshot.bid_quantity;
+                self.ask_1_price_micros = book_snapshot.ask_1_price_micros;
+                self.ask_1_quantity = book_snapshot.ask_1_quantity;
+                self.ask_2_price_micros = book_snapshot.ask_2_price_micros;
+                self.ask_2_quantity = book_snapshot.ask_2_quantity;
                 try self.trace.append(.l2_snapshot, input.identity);
             },
             .l2_delta => |delta| {
@@ -1920,25 +2004,25 @@ pub const TradingShard = struct {
                     try self.trace.append(.venue_forced_execution, forced.execution_id);
                 }
             },
-            .economic_account_snapshot => |snapshot| {
+            .economic_account_snapshot => |account_snapshot| {
                 const changed = try self.applyEconomicProjection(.{ .account_snapshot = .{
-                    .identity = snapshot.snapshot_id,
-                    .usdt_balance_micros = snapshot.usdt_balance_micros,
-                    .spot_asset_quantity = snapshot.spot_asset_quantity,
-                    .swap_position_quantity = snapshot.swap_position_quantity,
-                    .margin_micros = snapshot.margin_micros,
+                    .identity = account_snapshot.snapshot_id,
+                    .usdt_balance_micros = account_snapshot.usdt_balance_micros,
+                    .spot_asset_quantity = account_snapshot.spot_asset_quantity,
+                    .swap_position_quantity = account_snapshot.swap_position_quantity,
+                    .margin_micros = account_snapshot.margin_micros,
                 } });
                 if (changed) {
                     if (self.operational_state.initialized and self.economic_projection.reconciliation_break) {
                         try self.applyOperationalGate(.{
-                            .gate_identity = snapshot.snapshot_id,
+                            .gate_identity = account_snapshot.snapshot_id,
                             .target_identity = self.operational_state.target_identity,
                             .kind = .latched,
                             .reason = .reconciliation_break,
                             .open = false,
                         });
                     }
-                    try self.trace.append(.economic_account_snapshot, snapshot.snapshot_id);
+                    try self.trace.append(.economic_account_snapshot, account_snapshot.snapshot_id);
                 }
             },
             .order_dispatch_result => |status| {
@@ -2075,6 +2159,14 @@ pub const TradingShard = struct {
         return null;
     }
 };
+
+fn snapshotPut(comptime T: type, destination: []u8, offset: usize, value: T) void {
+    std.mem.writeInt(T, destination[offset..][0..@sizeOf(T)], value, .little);
+}
+
+fn snapshotGet(comptime T: type, source: []const u8, offset: usize) T {
+    return std.mem.readInt(T, source[offset..][0..@sizeOf(T)], .little);
+}
 
 const AdapterRequest = union(enum) {
     order_command: OrderCommand,
@@ -4684,6 +4776,26 @@ test "venue adapter seam is bounded and drain-safe" {
 
 test "four shards replay and isolate overload" {
     _ = try assertFourShardIsolation();
+}
+
+test "authoritative snapshot round trips at an exact shard barrier" {
+    const run = try runHappyPath();
+    var storage: [32 * 1024]u8 = undefined;
+    const encoded = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &storage);
+    const restored = try TradingShard.restoreSnapshot(encoded);
+
+    try std.testing.expectEqual(run.decision_journal.last_sequence, restored.barrier);
+    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+
+    var duplicate_storage: [32 * 1024]u8 = undefined;
+    const duplicate = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &duplicate_storage);
+    try std.testing.expectEqualSlices(u8, encoded, duplicate);
+
+    var damaged_storage: [32 * 1024]u8 = undefined;
+    @memcpy(damaged_storage[0..encoded.len], encoded);
+    damaged_storage[encoded.len - 1] ^= 1;
+    try std.testing.expectError(error.InvalidSnapshotPayload, TradingShard.restoreSnapshot(damaged_storage[0..encoded.len]));
+    try std.testing.expectError(error.InvalidSnapshotBarrier, run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence - 1, &duplicate_storage));
 }
 
 test "OKX spot authoritative projection" {
