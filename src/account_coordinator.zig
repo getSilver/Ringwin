@@ -59,6 +59,21 @@ pub const RiskLease = struct {
     open: bool,
 };
 
+/// Account-wide observations normalized once before deterministic fan-out.
+pub const AccountFact = struct {
+    identity: u128,
+    exchange_account: u128,
+    version: u64,
+    barrier: u64,
+    payload: union(enum) {
+        account_snapshot: struct { cash_micros: i64, swap_quantity: i64, margin_micros: i64 },
+        forced_execution: struct { owner: ?ShardId, quantity: i64, price_micros: i64, fee_micros: i64 },
+    },
+};
+
+/// One target assignment; the target shard still applies the canonical fact.
+pub const Delivery = struct { shard_id: ShardId, fact: AccountFact };
+
 /// Fixed-capacity owner of cross-shard leases and account reconciliation only.
 pub const AccountCoordinator = struct {
     exchange_account: u128,
@@ -69,6 +84,8 @@ pub const AccountCoordinator = struct {
     leases: [max_shards]RiskLease = undefined,
     lease_count: u8 = 0,
     account_netting_benefit_micros: i64 = 0,
+    last_account_fact: ?AccountFact = null,
+    deliveries: [max_shards]Delivery = undefined,
 
     /// Creates one coordinator for exactly one ExchangeAccount.
     pub fn init(exchange_account: u128, account_ceiling: i64, global_ceiling: i64) AccountCoordinator {
@@ -156,6 +173,31 @@ pub const AccountCoordinator = struct {
         }
         return self.leases[0..self.lease_count];
     }
+
+    /// Normalizes one account fact and returns its stable per-shard routing plan.
+    pub fn acceptAccountFact(self: *AccountCoordinator, fact: AccountFact) ![]const Delivery {
+        if (fact.identity == 0 or fact.exchange_account != self.exchange_account or fact.version == 0 or fact.barrier == 0)
+            return error.InvalidAccountFact;
+        if (self.last_account_fact) |known| {
+            if (fact.identity == known.identity) {
+                if (!std.meta.eql(known, fact)) return error.AccountFactIdentityConflict;
+                return self.deliveries[0..0];
+            }
+            if (fact.barrier <= known.barrier) return error.StaleAccountFact;
+        }
+        self.last_account_fact = fact;
+        const count: usize = switch (fact.payload) {
+            .account_snapshot => max_shards,
+            .forced_execution => |forced| if (forced.owner == null) max_shards else 1,
+        };
+        if (fact.payload == .forced_execution and fact.payload.forced_execution.owner != null) {
+            self.deliveries[0] = .{ .shard_id = fact.payload.forced_execution.owner.?, .fact = fact };
+        } else {
+            for (self.deliveries[0..count], 0..) |*delivery, index|
+                delivery.* = .{ .shard_id = @enumFromInt(index), .fact = fact };
+        }
+        return self.deliveries[0..count];
+    }
 };
 
 test "shared account protocol rejects conflicting shard summaries" {
@@ -180,4 +222,24 @@ test "risk leases allocate from gross reservations without netting benefit" {
     for (leases) |lease| total += lease.limit_micros;
     try std.testing.expectEqual(@as(i64, 1_000), total);
     try std.testing.expectEqual(@as(i64, 0), coordinator.account_netting_benefit_micros);
+}
+
+test "account facts fan out once in stable shard order" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    const deliveries = try coordinator.acceptAccountFact(.{
+        .identity = 7,
+        .exchange_account = 900,
+        .version = 1,
+        .barrier = 1,
+        .payload = .{ .account_snapshot = .{ .cash_micros = 800, .swap_quantity = 0, .margin_micros = 100 } },
+    });
+    try std.testing.expectEqual(@as(usize, 4), deliveries.len);
+    for (deliveries, 0..) |delivery, index| try std.testing.expectEqual(@as(ShardId, @enumFromInt(index)), delivery.shard_id);
+    try std.testing.expectEqual(@as(usize, 0), (try coordinator.acceptAccountFact(.{
+        .identity = 7,
+        .exchange_account = 900,
+        .version = 1,
+        .barrier = 1,
+        .payload = .{ .account_snapshot = .{ .cash_micros = 800, .swap_quantity = 0, .margin_micros = 100 } },
+    })).len);
 }
