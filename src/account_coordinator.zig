@@ -242,10 +242,10 @@ pub const AccountCoordinator = struct {
     }
 
     /// Returns the non-netted sum of all published Portfolio reservations.
-    pub fn grossPortfolioMargin(self: *const AccountCoordinator) i64 {
+    pub fn grossPortfolioMargin(self: *const AccountCoordinator) !i64 {
         var total: i64 = 0;
         for (self.summaries) |record| {
-            if (record.present) total += record.value.reservation_micros;
+            if (record.present) total = try std.math.add(i64, total, record.value.reservation_micros);
         }
         return total;
     }
@@ -254,13 +254,13 @@ pub const AccountCoordinator = struct {
     pub fn allocateLeases(self: *AccountCoordinator, version: u64, valid_through_barrier: u64) ![]const RiskLease {
         if (version == 0 or valid_through_barrier < self.barrier) return error.InvalidRiskLease;
         for (self.summaries) |record| if (!record.present) return error.IncompleteShardSummaries;
-        const gross = self.grossPortfolioMargin();
+        const gross = try self.grossPortfolioMargin();
         const ceiling = @min(self.account_safety_ceiling_micros, self.global_ceiling_micros);
         if (gross > ceiling or ceiling <= 0) return error.AccountSafetyCeilingExceeded;
         const base = @divFloor(ceiling, max_shards);
         const remainder = @mod(ceiling, max_shards);
-        self.lease_count = max_shards;
-        for (&self.leases, 0..) |*lease, index| {
+        var candidate: [max_shards]RiskLease = undefined;
+        for (&candidate, 0..) |*lease, index| {
             const summary = self.summaries[index].value;
             const limit = base + @as(i64, if (index < remainder) 1 else 0);
             if (summary.reservation_micros > limit) return error.RiskLeaseOversubscribed;
@@ -276,6 +276,8 @@ pub const AccountCoordinator = struct {
                 .open = true,
             };
         }
+        self.leases = candidate;
+        self.lease_count = max_shards;
         return self.leases[0..self.lease_count];
     }
 
@@ -321,7 +323,7 @@ pub const AccountCoordinator = struct {
             if (!record.present) return error.IncompleteShardSummaries;
             projected_quantity = try std.math.add(i64, projected_quantity, record.value.swap_quantity);
         }
-        const gross = self.grossPortfolioMargin();
+        const gross = try self.grossPortfolioMargin();
         self.account_netting_benefit_micros = @max(gross - observation.venue_net_margin_micros, 0);
         const closed = projected_quantity == observation.venue_swap_quantity and
             observation.venue_net_margin_micros <= gross;
@@ -576,11 +578,32 @@ test "risk leases allocate from gross reservations without netting benefit" {
         _ = try coordinator.publishSummary(index + 1, summary);
     }
     const leases = try coordinator.allocateLeases(1, 10);
-    try std.testing.expectEqual(@as(i64, 400), coordinator.grossPortfolioMargin());
+    try std.testing.expectEqual(@as(i64, 400), try coordinator.grossPortfolioMargin());
     var total: i64 = 0;
     for (leases) |lease| total += lease.limit_micros;
     try std.testing.expectEqual(@as(i64, 1_000), total);
     try std.testing.expectEqual(@as(i64, 0), coordinator.account_netting_benefit_micros);
+}
+
+test "failed risk lease allocation is atomic and gross overflow fails closed" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    for (0..max_shards) |index| {
+        const reservation: i64 = if (index == 2) 251 else 100;
+        _ = try coordinator.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, reservation));
+    }
+    const before = coordinator.digest();
+    try std.testing.expectError(error.RiskLeaseOversubscribed, coordinator.allocateLeases(1, 10));
+    try std.testing.expectEqual(@as(u8, 0), coordinator.lease_count);
+    try std.testing.expectEqualSlices(u8, &before, &coordinator.digest());
+
+    var overflowing = AccountCoordinator.init(900, std.math.maxInt(i64), std.math.maxInt(i64));
+    for (0..max_shards) |index| {
+        const reservation: i64 = if (index < 2) std.math.maxInt(i64) else 0;
+        _ = try overflowing.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, reservation));
+    }
+    try std.testing.expectError(error.Overflow, overflowing.grossPortfolioMargin());
+    try std.testing.expectError(error.Overflow, overflowing.allocateLeases(1, 10));
+    try std.testing.expectEqual(@as(u8, 0), overflowing.lease_count);
 }
 
 test "account facts fan out once in stable shard order" {
@@ -609,7 +632,7 @@ test "margin reconciliation preserves netting benefit but latches unexplained di
     const healthy = try coordinator.reconcileMargin(.{ .identity = 20, .barrier = 5, .venue_net_margin_micros = 250, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 });
     try std.testing.expect(healthy.open);
     try std.testing.expectEqual(@as(i64, 150), coordinator.account_netting_benefit_micros);
-    try std.testing.expectEqual(@as(i64, 400), coordinator.grossPortfolioMargin());
+    try std.testing.expectEqual(@as(i64, 400), try coordinator.grossPortfolioMargin());
     const broken = try coordinator.reconcileMargin(.{ .identity = 21, .barrier = 6, .venue_net_margin_micros = 250, .venue_swap_quantity = 1, .margin_mode = .isolated, .rules_version = 1 });
     try std.testing.expect(!broken.open);
     try std.testing.expect(broken.latched);
@@ -652,7 +675,7 @@ test "four shard coordinator snapshot restores deterministic authority" {
     const encoded = try coordinator.snapshot(&storage);
     const recovered = try AccountCoordinator.restore(encoded);
     try std.testing.expectEqualSlices(u8, &coordinator.digest(), &recovered.digest());
-    try std.testing.expectEqual(coordinator.grossPortfolioMargin(), recovered.grossPortfolioMargin());
+    try std.testing.expectEqual(try coordinator.grossPortfolioMargin(), try recovered.grossPortfolioMargin());
     try std.testing.expectEqual(coordinator.account_netting_benefit_micros, recovered.account_netting_benefit_micros);
     try std.testing.expectEqual(coordinator.barrier, recovered.barrier);
 }
