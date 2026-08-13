@@ -1,6 +1,7 @@
 const std = @import("std");
 const trading = @import("trading_shard.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const snapshot_magic: u64 = 0x54434341574e4952;
 
 pub const max_shards = 4;
 
@@ -66,15 +67,18 @@ pub const RiskLease = struct {
 };
 
 /// Account-wide observations normalized once before deterministic fan-out.
+pub const AccountFactPayload = union(enum) {
+    account_snapshot: struct { cash_micros: i64, swap_quantity: i64, margin_micros: i64 },
+    forced_execution: struct { owner: ?ShardId, quantity: i64, price_micros: i64, fee_micros: i64 },
+};
+
+/// Account-wide observations normalized once before deterministic fan-out.
 pub const AccountFact = struct {
     identity: u128,
     exchange_account: u128,
     version: u64,
     barrier: u64,
-    payload: union(enum) {
-        account_snapshot: struct { cash_micros: i64, swap_quantity: i64, margin_micros: i64 },
-        forced_execution: struct { owner: ?ShardId, quantity: i64, price_micros: i64, fee_micros: i64 },
-    },
+    payload: AccountFactPayload,
 };
 
 /// One target assignment; the target shard still applies the canonical fact.
@@ -215,18 +219,23 @@ pub const AccountCoordinator = struct {
     /// Computes a stable digest of coordination-owned state only.
     pub fn digest(self: *const AccountCoordinator) [Sha256.digest_length]u8 {
         var hasher = Sha256.init(.{});
-        hasher.update(std.mem.asBytes(&self.exchange_account));
-        hasher.update(std.mem.asBytes(&self.account_safety_ceiling_micros));
-        hasher.update(std.mem.asBytes(&self.global_ceiling_micros));
-        hasher.update(std.mem.asBytes(&self.barrier));
+        digestInt(&hasher, u128, self.exchange_account);
+        digestInt(&hasher, i64, self.account_safety_ceiling_micros);
+        digestInt(&hasher, i64, self.global_ceiling_micros);
+        digestInt(&hasher, u64, self.barrier);
         for (self.summaries) |record| {
             hasher.update(&.{@intFromBool(record.present)});
             if (record.present) {
-                hasher.update(std.mem.asBytes(&record.identity));
-                inline for (@typeInfo(ShardSummary).@"struct".fields) |field|
-                    hasher.update(std.mem.asBytes(&@field(record.value, field.name)));
+                digestInt(&hasher, u128, record.identity);
+                digestStruct(&hasher, ShardSummary, record.value);
             }
         }
+        digestInt(&hasher, u8, self.lease_count);
+        for (self.leases[0..self.lease_count]) |lease| digestStruct(&hasher, RiskLease, lease);
+        digestInt(&hasher, i64, self.account_netting_benefit_micros);
+        digestOptionalAccountFact(&hasher, self.last_account_fact);
+        digestOptionalMarginObservation(&hasher, self.last_margin_observation);
+        digestStruct(&hasher, AccountGate, self.margin_gate);
         var result: [Sha256.digest_length]u8 = undefined;
         hasher.final(&result);
         return result;
@@ -327,7 +336,228 @@ pub const AccountCoordinator = struct {
             delivery.* = .{ .shard_id = @enumFromInt(index), .gate = gate };
         return &self.gate_deliveries;
     }
+
+    /// Encodes coordination-owned state at its exact barrier without shard internals.
+    pub fn snapshot(self: *const AccountCoordinator, destination: []u8) ![]const u8 {
+        var writer: std.Io.Writer = .fixed(destination);
+        try writer.writeInt(u64, snapshot_magic, .little);
+        try writer.writeInt(u16, 1, .little);
+        try writer.writeInt(u128, self.exchange_account, .little);
+        try writer.writeInt(i64, self.account_safety_ceiling_micros, .little);
+        try writer.writeInt(i64, self.global_ceiling_micros, .little);
+        try writer.writeInt(u64, self.barrier, .little);
+        for (self.summaries) |record| {
+            try writer.writeByte(@intFromBool(record.present));
+            if (!record.present) continue;
+            try writer.writeInt(u128, record.identity, .little);
+            inline for (@typeInfo(ShardSummary).@"struct".fields) |field| {
+                const value = @field(record.value, field.name);
+                if (field.type == bool)
+                    try writer.writeByte(@intFromBool(value))
+                else if (@typeInfo(field.type) == .@"enum")
+                    try writer.writeInt(@typeInfo(field.type).@"enum".tag_type, @intFromEnum(value), .little)
+                else
+                    try writer.writeInt(field.type, value, .little);
+            }
+        }
+        try writer.writeInt(u8, self.lease_count, .little);
+        for (self.leases[0..self.lease_count]) |lease| inline for (@typeInfo(RiskLease).@"struct".fields) |field| {
+            const value = @field(lease, field.name);
+            if (field.type == bool)
+                try writer.writeByte(@intFromBool(value))
+            else if (@typeInfo(field.type) == .@"enum")
+                try writer.writeInt(@typeInfo(field.type).@"enum".tag_type, @intFromEnum(value), .little)
+            else
+                try writer.writeInt(field.type, value, .little);
+        };
+        try writer.writeInt(i64, self.account_netting_benefit_micros, .little);
+        try writeOptionalAccountFact(&writer, self.last_account_fact);
+        try writeOptionalMarginObservation(&writer, self.last_margin_observation);
+        try writer.writeInt(u128, self.margin_gate.identity, .little);
+        try writer.writeByte(@intFromBool(self.margin_gate.open));
+        try writer.writeByte(@intFromBool(self.margin_gate.latched));
+        const digest_value = self.digest();
+        try writer.writeAll(&digest_value);
+        return writer.buffered();
+    }
+
+    /// Restores a validated coordination snapshot into RecoveryOnly account authority.
+    pub fn restore(encoded: []const u8) !AccountCoordinator {
+        var reader: std.Io.Reader = .fixed(encoded);
+        if (try reader.takeInt(u64, .little) != snapshot_magic or try reader.takeInt(u16, .little) != 1)
+            return error.InvalidCoordinatorSnapshot;
+        var result = AccountCoordinator.init(
+            try reader.takeInt(u128, .little),
+            try reader.takeInt(i64, .little),
+            try reader.takeInt(i64, .little),
+        );
+        result.barrier = try reader.takeInt(u64, .little);
+        for (&result.summaries) |*record| {
+            record.present = try readBool(&reader);
+            if (!record.present) continue;
+            record.identity = try reader.takeInt(u128, .little);
+            inline for (@typeInfo(ShardSummary).@"struct".fields) |field| {
+                @field(record.value, field.name) = if (field.type == bool)
+                    try readBool(&reader)
+                else if (@typeInfo(field.type) == .@"enum")
+                    std.enums.fromInt(field.type, try reader.takeInt(@typeInfo(field.type).@"enum".tag_type, .little)) orelse return error.InvalidCoordinatorSnapshot
+                else
+                    try reader.takeInt(field.type, .little);
+            }
+        }
+        result.lease_count = try reader.takeInt(u8, .little);
+        if (result.lease_count > result.leases.len) return error.InvalidCoordinatorSnapshot;
+        for (result.leases[0..result.lease_count]) |*lease| inline for (@typeInfo(RiskLease).@"struct".fields) |field| {
+            @field(lease, field.name) = if (field.type == bool)
+                try readBool(&reader)
+            else if (@typeInfo(field.type) == .@"enum")
+                std.enums.fromInt(field.type, try reader.takeInt(@typeInfo(field.type).@"enum".tag_type, .little)) orelse return error.InvalidCoordinatorSnapshot
+            else
+                try reader.takeInt(field.type, .little);
+        };
+        result.account_netting_benefit_micros = try reader.takeInt(i64, .little);
+        result.last_account_fact = try readOptionalAccountFact(&reader);
+        result.last_margin_observation = try readOptionalMarginObservation(&reader);
+        result.margin_gate = .{
+            .identity = try reader.takeInt(u128, .little),
+            .open = try readBool(&reader),
+            .latched = try readBool(&reader),
+        };
+        const expected = try reader.take(32);
+        if (reader.seek != encoded.len or !std.mem.eql(u8, expected, &result.digest()))
+            return error.InvalidCoordinatorSnapshot;
+        return result;
+    }
 };
+
+fn digestInt(hasher: *Sha256, comptime T: type, value: T) void {
+    var bytes: [@sizeOf(T)]u8 = undefined;
+    std.mem.writeInt(T, &bytes, value, .little);
+    hasher.update(&bytes);
+}
+
+fn digestStruct(hasher: *Sha256, comptime T: type, value: T) void {
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        const item = @field(value, field.name);
+        if (field.type == bool)
+            hasher.update(&.{@intFromBool(item)})
+        else if (@typeInfo(field.type) == .@"enum")
+            digestInt(hasher, @typeInfo(field.type).@"enum".tag_type, @intFromEnum(item))
+        else
+            digestInt(hasher, field.type, item);
+    }
+}
+
+fn digestOptionalAccountFact(hasher: *Sha256, fact: ?AccountFact) void {
+    hasher.update(&.{@intFromBool(fact != null)});
+    const value = fact orelse return;
+    digestInt(hasher, u128, value.identity);
+    digestInt(hasher, u128, value.exchange_account);
+    digestInt(hasher, u64, value.version);
+    digestInt(hasher, u64, value.barrier);
+    switch (value.payload) {
+        .account_snapshot => |snapshot| {
+            digestInt(hasher, u8, 0);
+            digestStruct(hasher, @TypeOf(snapshot), snapshot);
+        },
+        .forced_execution => |execution| {
+            digestInt(hasher, u8, 1);
+            hasher.update(&.{@intFromBool(execution.owner != null)});
+            if (execution.owner) |owner| digestInt(hasher, u8, @intFromEnum(owner));
+            digestInt(hasher, i64, execution.quantity);
+            digestInt(hasher, i64, execution.price_micros);
+            digestInt(hasher, i64, execution.fee_micros);
+        },
+    }
+}
+
+fn digestOptionalMarginObservation(hasher: *Sha256, observation: ?MarginObservation) void {
+    hasher.update(&.{@intFromBool(observation != null)});
+    if (observation) |value| digestStruct(hasher, MarginObservation, value);
+}
+
+fn writeOptionalAccountFact(writer: *std.Io.Writer, fact: ?AccountFact) !void {
+    try writer.writeByte(@intFromBool(fact != null));
+    const value = fact orelse return;
+    try writer.writeInt(u128, value.identity, .little);
+    try writer.writeInt(u128, value.exchange_account, .little);
+    try writer.writeInt(u64, value.version, .little);
+    try writer.writeInt(u64, value.barrier, .little);
+    switch (value.payload) {
+        .account_snapshot => |snapshot| {
+            try writer.writeByte(0);
+            try writer.writeInt(i64, snapshot.cash_micros, .little);
+            try writer.writeInt(i64, snapshot.swap_quantity, .little);
+            try writer.writeInt(i64, snapshot.margin_micros, .little);
+        },
+        .forced_execution => |execution| {
+            try writer.writeByte(1);
+            try writer.writeByte(@intFromBool(execution.owner != null));
+            if (execution.owner) |owner| try writer.writeByte(@intFromEnum(owner));
+            try writer.writeInt(i64, execution.quantity, .little);
+            try writer.writeInt(i64, execution.price_micros, .little);
+            try writer.writeInt(i64, execution.fee_micros, .little);
+        },
+    }
+}
+
+fn readOptionalAccountFact(reader: *std.Io.Reader) !?AccountFact {
+    if (!try readBool(reader)) return null;
+    const identity = try reader.takeInt(u128, .little);
+    const exchange_account = try reader.takeInt(u128, .little);
+    const version = try reader.takeInt(u64, .little);
+    const barrier = try reader.takeInt(u64, .little);
+    const payload: AccountFactPayload = switch (try reader.takeByte()) {
+        0 => .{ .account_snapshot = .{
+            .cash_micros = try reader.takeInt(i64, .little),
+            .swap_quantity = try reader.takeInt(i64, .little),
+            .margin_micros = try reader.takeInt(i64, .little),
+        } },
+        1 => .{ .forced_execution = .{
+            .owner = if (try readBool(reader))
+                std.enums.fromInt(ShardId, try reader.takeByte()) orelse return error.InvalidCoordinatorSnapshot
+            else
+                null,
+            .quantity = try reader.takeInt(i64, .little),
+            .price_micros = try reader.takeInt(i64, .little),
+            .fee_micros = try reader.takeInt(i64, .little),
+        } },
+        else => return error.InvalidCoordinatorSnapshot,
+    };
+    return .{ .identity = identity, .exchange_account = exchange_account, .version = version, .barrier = barrier, .payload = payload };
+}
+
+fn writeOptionalMarginObservation(writer: *std.Io.Writer, observation: ?MarginObservation) !void {
+    try writer.writeByte(@intFromBool(observation != null));
+    if (observation) |value| {
+        try writer.writeInt(u128, value.identity, .little);
+        try writer.writeInt(u64, value.barrier, .little);
+        try writer.writeInt(i64, value.venue_net_margin_micros, .little);
+        try writer.writeInt(i64, value.venue_swap_quantity, .little);
+        try writer.writeByte(@intFromEnum(value.margin_mode));
+        try writer.writeInt(u32, value.rules_version, .little);
+    }
+}
+
+fn readOptionalMarginObservation(reader: *std.Io.Reader) !?MarginObservation {
+    if (!try readBool(reader)) return null;
+    return .{
+        .identity = try reader.takeInt(u128, .little),
+        .barrier = try reader.takeInt(u64, .little),
+        .venue_net_margin_micros = try reader.takeInt(i64, .little),
+        .venue_swap_quantity = try reader.takeInt(i64, .little),
+        .margin_mode = std.enums.fromInt(@FieldType(MarginObservation, "margin_mode"), try reader.takeByte()) orelse return error.InvalidCoordinatorSnapshot,
+        .rules_version = try reader.takeInt(u32, .little),
+    };
+}
+
+fn readBool(reader: *std.Io.Reader) !bool {
+    return switch (try reader.takeByte()) {
+        0 => false,
+        1 => true,
+        else => error.InvalidCoordinatorSnapshot,
+    };
+}
 
 test "shared account protocol rejects conflicting shard summaries" {
     var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
@@ -411,4 +641,18 @@ test "local faults stay local while account gates tighten every shard" {
         try std.testing.expectEqual(@as(ShardId, @enumFromInt(index)), delivery.shard_id);
         try std.testing.expect(!delivery.gate.open);
     }
+}
+
+test "four shard coordinator snapshot restores deterministic authority" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    for (0..max_shards) |index| _ = try coordinator.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, 100));
+    _ = try coordinator.allocateLeases(1, 10);
+    _ = try coordinator.reconcileMargin(.{ .identity = 20, .barrier = 5, .venue_net_margin_micros = 250, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 });
+    var storage: [4096]u8 = undefined;
+    const encoded = try coordinator.snapshot(&storage);
+    const recovered = try AccountCoordinator.restore(encoded);
+    try std.testing.expectEqualSlices(u8, &coordinator.digest(), &recovered.digest());
+    try std.testing.expectEqual(coordinator.grossPortfolioMargin(), recovered.grossPortfolioMargin());
+    try std.testing.expectEqual(coordinator.account_netting_benefit_micros, recovered.account_netting_benefit_micros);
+    try std.testing.expectEqual(coordinator.barrier, recovered.barrier);
 }
