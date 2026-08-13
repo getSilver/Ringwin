@@ -304,8 +304,9 @@ pub const AccountCoordinator = struct {
             }
             if (summary.shard_sequence <= known.value.shard_sequence) return error.StaleShardSummary;
         }
+        const next_barrier = try std.math.add(u64, self.barrier, 1);
         known.* = .{ .identity = identity, .value = summary, .present = true };
-        self.barrier += 1;
+        self.barrier = next_barrier;
         return true;
     }
 
@@ -382,12 +383,17 @@ pub const AccountCoordinator = struct {
     }
 
     /// Closes every lease whose durable coordination barrier has expired.
-    pub fn expireLeases(self: *AccountCoordinator, barrier: u64) bool {
+    pub fn expireLeases(self: *AccountCoordinator, barrier: u64) !bool {
+        var candidate = self.leases;
         var changed = false;
-        for (self.leases[0..self.lease_count], 0..) |*lease, index| {
+        for (candidate[0..self.lease_count], 0..) |*lease, index| {
             if (lease.open and barrier > lease.valid_through_barrier) {
-                lease.version += 1;
-                lease.identity = @as(u128, lease.version) * max_shards + index + 1;
+                lease.version = try std.math.add(u64, lease.version, 1);
+                lease.identity = try std.math.add(
+                    u128,
+                    try std.math.mul(u128, lease.version, max_shards),
+                    index + 1,
+                );
                 lease.valid_through_barrier = barrier;
                 lease.limit_micros = 0;
                 lease.used_micros = 0;
@@ -395,6 +401,7 @@ pub const AccountCoordinator = struct {
                 changed = true;
             }
         }
+        if (changed) self.leases = candidate;
         return changed;
     }
 
@@ -765,6 +772,21 @@ test "failed risk lease allocation is atomic and gross overflow fails closed" {
     try std.testing.expectError(error.Overflow, overflowing.grossPortfolioMargin());
     try std.testing.expectError(error.Overflow, overflowing.allocateLeases(1, 10));
     try std.testing.expectEqual(@as(u8, 0), overflowing.lease_count);
+}
+
+test "summary barrier and lease expiry fail atomically on overflow" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    coordinator.barrier = std.math.maxInt(u64);
+    try std.testing.expectError(error.Overflow, coordinator.publishSummary(1, ShardSummary.fixture(.shard_0, 1, 100)));
+    try std.testing.expect(!coordinator.summaries[0].present);
+
+    coordinator.barrier = 0;
+    for (0..max_shards) |index| _ = try coordinator.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, 100));
+    _ = try coordinator.allocateLeases(1, 10);
+    coordinator.leases[2].version = std.math.maxInt(u64);
+    const before = coordinator.leases;
+    try std.testing.expectError(error.Overflow, coordinator.expireLeases(11));
+    try std.testing.expectEqualDeep(before, coordinator.leases);
 }
 
 test "account facts fan out once in stable shard order" {
