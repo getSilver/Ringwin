@@ -1547,8 +1547,6 @@ pub const TradingShard = struct {
                 if (intent.strategy_instance == fenced and intent.operation != .cancel)
                     return error.StrategyCutoverFenced;
             if (intent.operation == .cancel) continue;
-            if (self.trace.len > self.risk_lease_valid_through_barrier)
-                return error.RiskLeaseExpired;
             var replaced: i64 = 0;
             if (intent.operation == .amend) {
                 const target = self.oms.orderById(intent.target_order_id) orelse return error.UnknownOrder;

@@ -254,6 +254,18 @@ pub const SharedExecutionGateway = struct {
         items[0] = .{ .command_id = outcome.command_id, .state = outcome.state };
         return .{ .identity = outcome.command_id, .payload = .{ .oms_dispatch_batch = .{ .items = items, .count = 1 } } };
     }
+
+    /// Durably applies one transport outcome only to its exact owning shard.
+    pub fn applyOutcomeStable(
+        self: *const SharedExecutionGateway,
+        outcome: GatewayOutcome,
+        target_shard_id: ShardId,
+        shard: *trading.TradingShard,
+        stable_journal: *trading.journal.Journal,
+    ) !void {
+        if (outcome.shard_id != target_shard_id) return error.CrossShardDelivery;
+        _ = try trading.applyStable(shard, stable_journal, try self.outcomeEvent(outcome));
+    }
 };
 
 fn commandFixture(command_id: u64, order_id: u64) trading.oms.Command {
@@ -424,6 +436,17 @@ pub const AccountCoordinator = struct {
         return changed;
     }
 
+    /// Returns the stable close events that must be applied to every expired lease owner.
+    pub fn expiredLeaseEvents(self: *const AccountCoordinator, events: *[max_shards]trading.CanonicalEvent) ![]const trading.CanonicalEvent {
+        var count: usize = 0;
+        for (self.leases[0..self.lease_count]) |lease| {
+            if (lease.open) continue;
+            events[count] = try riskLeaseEvent(lease);
+            count += 1;
+        }
+        return events[0..count];
+    }
+
     /// Normalizes one account fact and returns its stable per-shard routing plan.
     pub fn acceptAccountFact(self: *AccountCoordinator, fact: AccountFact) ![]const Delivery {
         if (fact.identity == 0 or fact.exchange_account != self.exchange_account or fact.version == 0 or fact.barrier == 0)
@@ -484,7 +507,7 @@ pub const AccountCoordinator = struct {
         const gross = try self.grossPortfolioMargin();
         self.account_netting_benefit_micros = @max(gross - observation.venue_net_margin_micros, 0);
         const closed = projected_quantity == observation.venue_swap_quantity and
-            projected_margin == observation.venue_net_margin_micros and
+            try std.math.add(i64, projected_spot_margin, projected_margin) == observation.venue_net_margin_micros and
             projected_spot_margin == observation.venue_spot_margin_micros and
             projected_margin == observation.venue_swap_margin_micros and
             projected_risk_tier == observation.venue_risk_tier and
@@ -516,7 +539,7 @@ pub const AccountCoordinator = struct {
             projected_liquidation_distance = @min(projected_liquidation_distance, record.value.liquidation_distance_ticks);
         }
         if (projected_quantity != observation.venue_swap_quantity or
-            projected_margin != observation.venue_net_margin_micros or
+            try std.math.add(i64, projected_spot_margin, projected_margin) != observation.venue_net_margin_micros or
             projected_spot_margin != observation.venue_spot_margin_micros or
             projected_margin != observation.venue_swap_margin_micros or
             projected_risk_tier != observation.venue_risk_tier or
@@ -538,7 +561,11 @@ pub const AccountCoordinator = struct {
     pub fn completeRecovery(self: *AccountCoordinator) !void {
         if (!self.recovery_only) return error.CoordinatorNotRecovering;
         if (!self.margin_gate.open or self.margin_gate.latched) return error.MarginReconciliationRequired;
-        for (self.leases[0..self.lease_count]) |lease| if (!lease.open) return error.RiskLeaseClosed;
+        if (self.lease_count != max_shards) return error.IncompleteRiskLeases;
+        for (self.leases[0..self.lease_count]) |lease| {
+            if (!lease.open) return error.RiskLeaseClosed;
+            if (lease.valid_through_barrier < self.barrier) return error.RiskLeaseExpired;
+        }
         self.recovery_only = false;
     }
 
@@ -636,6 +663,41 @@ pub const AccountCoordinator = struct {
             return error.InvalidCoordinatorSnapshot;
         result.recovery_only = true;
         return result;
+    }
+};
+
+/// Recovery-only bundle tying one coordinator snapshot to four restored shard barriers.
+pub const AccountRecovery = struct {
+    coordinator: AccountCoordinator,
+    shards: [max_shards]trading.TradingShard,
+    shard_barriers: [max_shards]u64,
+
+    /// Restores all five authoritative snapshots before any Venue reconciliation.
+    pub fn begin(
+        coordinator_snapshot: []const u8,
+        shard_snapshots: [max_shards][]const u8,
+        shard_tails: [max_shards][]const u8,
+    ) !AccountRecovery {
+        var result: AccountRecovery = .{
+            .coordinator = try AccountCoordinator.restore(coordinator_snapshot),
+            .shards = undefined,
+            .shard_barriers = undefined,
+        };
+        for (0..max_shards) |index| {
+            const recovered = try trading.TradingShard.restore(shard_snapshots[index], shard_tails[index]);
+            result.shards[index] = recovered.shard;
+            result.shards[index].operational_state.trading_authorized = false;
+            result.shards[index].operational_state.mode = .recovering;
+            result.shard_barriers[index] = recovered.barrier;
+        }
+        return result;
+    }
+
+    /// Releases only the coordinator fence; each shard still requires Venue recovery and enable.
+    pub fn completeCoordinatorRecovery(self: *AccountRecovery) !void {
+        try self.coordinator.completeRecovery();
+        for (self.shards) |shard| if (shard.operational_state.mode != .recovering)
+            return error.ShardRecoveryFenceLost;
     }
 };
 
