@@ -364,7 +364,9 @@ pub const Cutover = struct {
         stable_journal: *trading.journal.Journal,
         strategy_instance: u128,
     ) ![]const trading.oms.Command {
-        if (self.phase != .candidate or strategy_instance == 0) return error.InvalidCutoverTransition;
+        if (self.phase != .candidate or strategy_instance == 0 or
+            strategy_instance != self.active_strategy_instance)
+            return error.InvalidCutoverTransition;
         _ = try trading.applyStable(shard, stable_journal, .{
             .identity = @truncate(strategy_instance),
             .payload = .{ .strategy_cutover_fence = .{ .strategy_instance = strategy_instance } },
@@ -661,7 +663,7 @@ test "strategy cutover persists a scoped fence and leaves unrelated orders live"
     group.members[0] = .{ .intent_sequence = 1, .strategy_instance = 11, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 1, .limit_price_micros = 2, .reservation_micros = 2 };
     group.members[1] = .{ .intent_sequence = 2, .strategy_instance = 12, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 1, .limit_price_micros = 2, .reservation_micros = 2 };
     try shard.oms.applyGroup(group);
-    var cutover: Cutover = .{};
+    var cutover: Cutover = .{ .active_strategy_instance = 11 };
     try cutover.prepare(.{ .release = 1, .strategy_instance = 21, .strategy_definition = 1, .parameter_version = 1, .state_schema_version = 1, .transition = .keep, .structure_valid = true, .economic_digest_valid = true, .strategy_invariants_valid = true });
     const commands = try cutover.quiesceStrategy(&shard, &journal, 11);
     try std.testing.expectEqual(@as(usize, 1), commands.len);

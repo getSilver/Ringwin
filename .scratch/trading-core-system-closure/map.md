@@ -43,9 +43,11 @@ Status: open
 
 ## Frontier
 
-[实现核心快照、重启恢复与版本屏障](issues/07-snapshot-recovery-and-cutover.md)
+[闭合四分片与共享账户协调](issues/08-shards-and-account-coordination.md)
 
 ## Decisions so far
+
+- [实现核心快照、重启恢复与版本屏障](issues/07-snapshot-recovery-and-cutover.md) — 已闭合显式稳定快照、日志尾恢复、Venue 对账、StrategyCheckpoint 回退追赶、持久 cutover fence/cancel outbox、candidate barrier 验证、VersionActivationEvent 与 ForwardRollback 重放守恒；Debug/ReleaseSafe 各 95 项测试通过。
 
 - [冻结交易核心产品闭环与权威所有权](issues/01-freeze-core-product-contract.md) — 后续只深化一套 TradingShard；冻结 `apply/snapshot/restore` 核心 interface、九类权威所有权和十一条成功/故障矩阵。Adapter、StrategyHost、journal 与账户协调器保持外围 seam，OKX spot projection 的经济规则必须回收到同一核心，历史重放不得持有发送能力。
 - [把 fixture 形状的 TradingShard 深化为产品核心模块](issues/02-deepen-trading-shard-module.md) — TradingShard 已成为唯一产品模块；显式、版本化 Genesis 与有界 `apply(CanonicalEvent)` 统一原生/Python 意图和 SimulatedVenue/OKX 执行结果，ReplayTradingShard 不持有发送能力，当前 CanonicalStateDigest 覆盖产品配置。
