@@ -87,6 +87,78 @@ pub const MarginObservation = struct {
 /// Account-level authority result that every affected shard must consume.
 pub const AccountGate = struct { identity: u128, open: bool, latched: bool };
 
+/// One qualified command submitted through the shared transport periphery.
+pub const GatewayRequest = struct {
+    exchange_account: u128,
+    shard_id: ShardId,
+    fencing_token: u64,
+    command: trading.oms.Command,
+};
+
+/// Stable owner key assigned by the gateway without owning OMS state.
+pub const GatewayReceipt = struct { shard_id: ShardId, command_id: u64 };
+
+/// One itemized transport outcome routed to its sole owner.
+pub const GatewayOutcome = struct { shard_id: ShardId, command_id: u64, state: trading.oms.DispatchState };
+
+const GatewayRecord = struct { exchange_account: u128, shard_id: ShardId, command_id: u64, order_id: u64, revision: u32, fencing_token: u64 };
+
+/// Fixed-capacity shared sender that owns routing and transport attempts only.
+pub const SharedExecutionGateway = struct {
+    records: [32]GatewayRecord = undefined,
+    count: u8 = 0,
+    latest_fencing_token: u64 = 0,
+
+    /// Admits one uniquely owned command before the transport send attempt.
+    pub fn submit(self: *SharedExecutionGateway, request: GatewayRequest) !GatewayReceipt {
+        if (request.exchange_account == 0 or request.fencing_token == 0 or request.command.command_id == 0 or
+            request.command.order_id == 0 or request.command.revision == 0)
+            return error.InvalidGatewayRequest;
+        if (request.fencing_token < self.latest_fencing_token) return error.StaleFencingToken;
+        for (self.records[0..self.count]) |known| {
+            if (known.shard_id == request.shard_id and known.command_id == request.command.command_id)
+                return error.DuplicateCommandIdentity;
+        }
+        if (self.count == self.records.len) return error.GatewayCapacityExceeded;
+        self.latest_fencing_token = @max(self.latest_fencing_token, request.fencing_token);
+        self.records[self.count] = .{
+            .exchange_account = request.exchange_account,
+            .shard_id = request.shard_id,
+            .command_id = request.command.command_id,
+            .order_id = request.command.order_id,
+            .revision = request.command.revision,
+            .fencing_token = request.fencing_token,
+        };
+        self.count += 1;
+        return .{ .shard_id = request.shard_id, .command_id = request.command.command_id };
+    }
+
+    /// Routes an itemized result only when its owner and command identity match.
+    pub fn complete(self: *const SharedExecutionGateway, outcome: GatewayOutcome) !GatewayOutcome {
+        for (self.records[0..self.count]) |known| {
+            if (known.command_id == outcome.command_id and known.shard_id == outcome.shard_id) return outcome;
+        }
+        return error.UnknownGatewayCommand;
+    }
+};
+
+fn commandFixture(command_id: u64, order_id: u64) trading.oms.Command {
+    return .{
+        .command_id = command_id,
+        .order_id = order_id,
+        .strategy_instance = 1,
+        .revision = 1,
+        .operation = .place,
+        .instrument = .btc_usdt_swap,
+        .side = .buy,
+        .portfolio_reduce_only = false,
+        .venue_reduce_only = false,
+        .quantity = 1,
+        .limit_price_micros = 1,
+        .reservation_micros = 1,
+    };
+}
+
 /// Fixed-capacity owner of cross-shard leases and account reconciliation only.
 pub const AccountCoordinator = struct {
     exchange_account: u128,
@@ -295,4 +367,16 @@ test "margin reconciliation preserves netting benefit but latches unexplained di
     const broken = try coordinator.reconcileMargin(.{ .identity = 21, .barrier = 6, .venue_net_margin_micros = 250, .venue_swap_quantity = 1, .margin_mode = .isolated, .rules_version = 1 });
     try std.testing.expect(!broken.open);
     try std.testing.expect(broken.latched);
+}
+
+test "shared gateway routes itemized outcomes to the unique owning shard" {
+    var gateway: SharedExecutionGateway = .{};
+    const first = try gateway.submit(.{ .exchange_account = 900, .shard_id = .shard_0, .fencing_token = 7, .command = commandFixture(1, 1) });
+    const second = try gateway.submit(.{ .exchange_account = 900, .shard_id = .shard_1, .fencing_token = 7, .command = commandFixture(1, 1) });
+    try std.testing.expectEqual(ShardId.shard_0, first.shard_id);
+    try std.testing.expectEqual(ShardId.shard_1, second.shard_id);
+    try std.testing.expectError(error.DuplicateCommandIdentity, gateway.submit(.{ .exchange_account = 900, .shard_id = .shard_0, .fencing_token = 7, .command = commandFixture(1, 1) }));
+    const routed = try gateway.complete(.{ .shard_id = .shard_1, .command_id = second.command_id, .state = .unknown });
+    try std.testing.expectEqual(ShardId.shard_1, routed.shard_id);
+    try std.testing.expectEqual(trading.oms.DispatchState.unknown, routed.state);
 }
