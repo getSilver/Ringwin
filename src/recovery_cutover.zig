@@ -12,10 +12,18 @@ pub const VenueEvidence = struct {
     open_orders_closed: bool,
     portfolio_quantity: i64,
     exchange_quantity: i64,
+    portfolio_spot_quantity: i64,
+    exchange_spot_quantity: i64,
     portfolio_open_cost_micros: i64,
     exchange_open_cost_micros: i64,
+    portfolio_spot_open_cost_micros: i64,
+    exchange_spot_open_cost_micros: i64,
     portfolio_cash_micros: i64,
     exchange_cash_micros: i64,
+    portfolio_fee_micros: i64,
+    exchange_fee_micros: i64,
+    suspense_micros: i64,
+    active_reservations_micros: i64,
     margin_micros: i64,
     ledger_closed: bool,
     reconciliation_break: bool,
@@ -53,10 +61,18 @@ pub const RecoveryCoordinator = struct {
             .open_orders_closed = self.shard.oms.openOrdersClosed(),
             .portfolio_quantity = economic.portfolio.swap.quantity,
             .exchange_quantity = economic.exchange.swap.quantity,
+            .portfolio_spot_quantity = economic.portfolio.spot_asset_quantity,
+            .exchange_spot_quantity = economic.exchange.spot_asset_quantity,
             .portfolio_open_cost_micros = economic.portfolio.swap.open_cost_micros,
             .exchange_open_cost_micros = economic.exchange.swap.open_cost_micros,
+            .portfolio_spot_open_cost_micros = economic.portfolio.spot.open_cost_micros,
+            .exchange_spot_open_cost_micros = economic.exchange.spot.open_cost_micros,
             .portfolio_cash_micros = self.shard.portfolio_cash_micros,
             .exchange_cash_micros = self.shard.exchange_cash_micros,
+            .portfolio_fee_micros = economic.portfolio.fee_micros,
+            .exchange_fee_micros = economic.exchange.fee_micros,
+            .suspense_micros = economic.suspense_usdt_micros,
+            .active_reservations_micros = self.shard.oms.activeReservations() catch std.math.maxInt(i64),
             .margin_micros = self.shard.position_margin_requirement_micros,
             .ledger_closed = self.shard.portfolio_ledger_debits_micros == self.shard.portfolio_ledger_credits_micros and
                 self.shard.exchange_ledger_debits_micros == self.shard.exchange_ledger_credits_micros,
@@ -125,10 +141,18 @@ fn venueEvidenceCloses(shard: trading.TradingShard, evidence: VenueEvidence) boo
     if (evidence.order_count != shard.oms.order_count or
         evidence.portfolio_quantity != expected.portfolio_quantity or
         evidence.exchange_quantity != expected.exchange_quantity or
+        evidence.portfolio_spot_quantity != expected.portfolio_spot_quantity or
+        evidence.exchange_spot_quantity != expected.exchange_spot_quantity or
         evidence.portfolio_open_cost_micros != expected.portfolio_open_cost_micros or
         evidence.exchange_open_cost_micros != expected.exchange_open_cost_micros or
+        evidence.portfolio_spot_open_cost_micros != expected.portfolio_spot_open_cost_micros or
+        evidence.exchange_spot_open_cost_micros != expected.exchange_spot_open_cost_micros or
         evidence.portfolio_cash_micros != expected.portfolio_cash_micros or
         evidence.exchange_cash_micros != expected.exchange_cash_micros or
+        evidence.portfolio_fee_micros != expected.portfolio_fee_micros or
+        evidence.exchange_fee_micros != expected.exchange_fee_micros or
+        evidence.suspense_micros != expected.suspense_micros or
+        evidence.active_reservations_micros != expected.active_reservations_micros or
         evidence.margin_micros != expected.margin_micros or
         !evidence.ledger_closed or evidence.reconciliation_break)
         return false;
@@ -160,10 +184,16 @@ fn sameVenueEvidence(left: VenueEvidence, right: VenueEvidence) bool {
         if (!std.meta.eql(left_order, right_order)) return false;
     return left.open_orders_closed == right.open_orders_closed and
         left.portfolio_quantity == right.portfolio_quantity and left.exchange_quantity == right.exchange_quantity and
+        left.portfolio_spot_quantity == right.portfolio_spot_quantity and left.exchange_spot_quantity == right.exchange_spot_quantity and
         left.portfolio_open_cost_micros == right.portfolio_open_cost_micros and
         left.exchange_open_cost_micros == right.exchange_open_cost_micros and
+        left.portfolio_spot_open_cost_micros == right.portfolio_spot_open_cost_micros and
+        left.exchange_spot_open_cost_micros == right.exchange_spot_open_cost_micros and
         left.portfolio_cash_micros == right.portfolio_cash_micros and
-        left.exchange_cash_micros == right.exchange_cash_micros and left.margin_micros == right.margin_micros and
+        left.exchange_cash_micros == right.exchange_cash_micros and
+        left.portfolio_fee_micros == right.portfolio_fee_micros and left.exchange_fee_micros == right.exchange_fee_micros and
+        left.suspense_micros == right.suspense_micros and left.active_reservations_micros == right.active_reservations_micros and
+        left.margin_micros == right.margin_micros and
         left.ledger_closed == right.ledger_closed and left.reconciliation_break == right.reconciliation_break;
 }
 
@@ -222,6 +252,8 @@ fn hasIntent(events: []const strategy_recovery.ReplayEvent) bool {
 
 /// Strategy-private-state handling declared by one candidate version.
 pub const StrategyStateTransition = enum(u8) { keep, migrate, rebuild };
+/// Scope of intent fencing and cancellation for a cutover.
+pub const CutoverScope = enum(u8) { decision_domain, strategy_instance };
 /// Cutover progresses only through explicit persisted barriers.
 pub const CutoverPhase = enum(u8) { idle, candidate, quiescing, draining, recovery_only, active };
 
@@ -252,6 +284,9 @@ pub const Cutover = struct {
     quiesce_barrier: u64 = 0,
     activations: [8]VersionActivationEvent = undefined,
     activation_count: u8 = 0,
+    candidate_digest: [32]u8 = @splat(0),
+    candidate_barrier: u64 = 0,
+    scope: CutoverScope = .decision_domain,
 
     /// Validates one candidate while leaving the active version authoritative.
     pub fn prepare(self: *Cutover, candidate: Candidate) !void {
@@ -267,6 +302,13 @@ pub const Cutover = struct {
             return error.IncompatibleKeepSchema;
         self.candidate = candidate;
         self.phase = .candidate;
+    }
+
+    /// Records that the candidate consumed authoritative facts through the final barrier.
+    pub fn catchUpCandidate(self: *Cutover, shard: trading.TradingShard) !void {
+        if (self.phase != .draining) return error.InvalidCutoverTransition;
+        self.candidate_barrier = shard.trace.len;
+        self.candidate_digest = shard.canonicalStateDigest();
     }
 
     /// Stops new intent production at one exact ShardSequence.
@@ -301,6 +343,24 @@ pub const Cutover = struct {
         return shard.oms.emitted();
     }
 
+    /// Fences and cancels only the candidate strategy while unrelated strategies continue.
+    pub fn quiesceStrategy(
+        self: *Cutover,
+        shard: *trading.TradingShard,
+        stable_journal: *trading.journal.Journal,
+        strategy_instance: u128,
+    ) ![]const trading.oms.Command {
+        if (self.phase != .candidate or strategy_instance == 0) return error.InvalidCutoverTransition;
+        _ = try trading.applyStable(shard, stable_journal, .{
+            .identity = @truncate(strategy_instance),
+            .payload = .{ .strategy_cutover_fence = .{ .strategy_instance = strategy_instance } },
+        });
+        self.scope = .strategy_instance;
+        self.quiesce_barrier = shard.trace.len;
+        self.phase = .quiescing;
+        return shard.oms.emitted();
+    }
+
     /// Proves CutoverDrain through authoritative order and Venue evidence.
     pub fn drain(self: *Cutover, shard: trading.TradingShard, evidence: VenueEvidence) !void {
         if (self.phase != .quiescing) return error.InvalidCutoverTransition;
@@ -319,6 +379,8 @@ pub const Cutover = struct {
     ) !VersionActivationEvent {
         if (self.phase != .draining) return error.InvalidCutoverTransition;
         const digest = shard.canonicalStateDigest();
+        if (self.candidate_barrier != shard.trace.len or !std.mem.eql(u8, &self.candidate_digest, &digest))
+            return error.CandidateBehindCutoverBarrier;
         const barrier = shard.trace.len + 1;
         const event: VersionActivationEvent = .{
             .activation_identity = activation_identity,
@@ -346,6 +408,16 @@ pub const Cutover = struct {
         self.active_strategy_instance = event.new_strategy_instance;
         self.phase = .active;
         return event;
+    }
+
+    /// Reconstructs durable pending-cancel work after a crash between commit and send.
+    pub fn recoverCancelOutbox(
+        self: *Cutover,
+        shard: *const trading.TradingShard,
+        destination: []trading.oms.Command,
+    ) ![]const trading.oms.Command {
+        if (self.phase != .quiescing and self.phase != .draining) return error.InvalidCutoverTransition;
+        return shard.oms.pendingCancelCommands(destination);
     }
 
     /// Discards an uncommitted candidate; the current active version remains authoritative.
@@ -521,6 +593,7 @@ test "cutover drain activates exactly one version at a stable barrier" {
     evidence.open_orders_closed = true;
     evidence.ledger_closed = true;
     try cutover.drain(shard, evidence);
+    try cutover.catchUpCandidate(shard);
     const event = try cutover.activateStable(&shard, &stable_journal, 40);
     try std.testing.expectEqual(@as(u64, 11), cutover.active_release);
     try std.testing.expectEqual(@as(u128, 21), cutover.active_strategy_instance);
@@ -548,6 +621,7 @@ test "cutover activation is a stable canonical fact before authority switches" {
     evidence.open_orders_closed = true;
     evidence.ledger_closed = true;
     try cutover.drain(shard, evidence);
+    try cutover.catchUpCandidate(shard);
     const activation = try cutover.activateStable(&shard, &stable_journal, 40);
     try std.testing.expectEqual(@as(u64, 1), stable_journal.last_sequence);
     try std.testing.expectEqual(@as(u64, 11), shard.active_release);
@@ -562,6 +636,23 @@ test "cutover activation is a stable canonical fact before authority switches" {
     const input = try trading.decodeStableInput(record);
     _ = try replayed.apply(input);
     try std.testing.expectEqual(shard.active_release, replayed.shard.active_release);
+}
+
+test "strategy cutover persists a scoped fence and leaves unrelated orders live" {
+    var shard: trading.TradingShard = .{};
+    var journal = trading.journal.Journal.init();
+    var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 1, .count = 2 };
+    group.members[0] = .{ .intent_sequence = 1, .strategy_instance = 11, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 1, .limit_price_micros = 2, .reservation_micros = 2 };
+    group.members[1] = .{ .intent_sequence = 2, .strategy_instance = 12, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 1, .limit_price_micros = 2, .reservation_micros = 2 };
+    try shard.oms.applyGroup(group);
+    var cutover: Cutover = .{};
+    try cutover.prepare(.{ .release = 1, .strategy_instance = 21, .strategy_definition = 1, .parameter_version = 1, .state_schema_version = 1, .transition = .keep, .structure_valid = true, .economic_digest_valid = true, .strategy_invariants_valid = true });
+    const commands = try cutover.quiesceStrategy(&shard, &journal, 11);
+    try std.testing.expectEqual(@as(usize, 1), commands.len);
+    try std.testing.expectEqual(@as(u128, 11), commands[0].strategy_instance);
+    try std.testing.expectEqual(trading.oms.OrderState.pending_cancel, shard.oms.orders[0].state);
+    try std.testing.expectEqual(trading.oms.OrderState.pending_submit, shard.oms.orders[1].state);
+    try std.testing.expectEqual(@as(u64, 1), journal.last_sequence);
 }
 
 test "cutover failures and forward rollback never regress economic state or generation" {
@@ -592,9 +683,7 @@ test "cutover failures and forward rollback never regress economic state or gene
 
     try cutover.prepare(candidate);
     try cutover.quiesce(100);
-    var evidence: VenueEvidence = std.mem.zeroes(VenueEvidence);
-    evidence.open_orders_closed = true;
-    evidence.ledger_closed = true;
+    const evidence = (RecoveryCoordinator{ .shard = shard, .barrier = 1 }).expectedVenueEvidence();
     try cutover.drain(shard, evidence);
     try cutover.failBeforeActivation();
     try std.testing.expectEqual(@as(u64, 10), cutover.active_release);
@@ -603,6 +692,7 @@ test "cutover failures and forward rollback never regress economic state or gene
     try cutover.prepare(candidate);
     try cutover.quiesce(102);
     try cutover.drain(shard, evidence);
+    try cutover.catchUpCandidate(shard);
     const activated = try cutover.activateStable(&shard, &stable_journal, 41);
 
     const rollback: Candidate = .{
@@ -619,6 +709,7 @@ test "cutover failures and forward rollback never regress economic state or gene
     try cutover.prepare(rollback);
     try cutover.quiesce(104);
     try cutover.drain(shard, evidence);
+    try cutover.catchUpCandidate(shard);
     const rolled_back = try cutover.activateStable(&shard, &stable_journal, 42);
     try std.testing.expectEqual(activated.generation + 1, rolled_back.generation);
     try std.testing.expectEqual(@as(u64, 10), rolled_back.new_release);

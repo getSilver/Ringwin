@@ -27,6 +27,7 @@ pub const ReconciliationStatus = enum(u8) { found_live, found_terminal, confirme
 
 pub const Intent = struct {
     intent_sequence: u64,
+    strategy_instance: u128 = 0,
     operation: Operation,
     instrument: Instrument,
     side: Side = .buy,
@@ -81,6 +82,7 @@ pub const ReconciliationResult = struct {
 pub const Command = struct {
     command_id: u64,
     order_id: u64,
+    strategy_instance: u128,
     revision: u32,
     operation: Operation,
     instrument: Instrument,
@@ -95,6 +97,7 @@ pub const Command = struct {
 
 pub const Order = struct {
     id: u64,
+    strategy_instance: u128,
     instrument: Instrument,
     side: Side,
     portfolio_reduce_only: bool,
@@ -149,12 +152,44 @@ pub const Oms = struct {
         return self.commands[0..self.command_count];
     }
 
+    /// Rebuilds the durable cancel outbox after replay without changing order state.
+    pub fn pendingCancelCommands(self: *const Oms, destination: []Command) ![]const Command {
+        var count: usize = 0;
+        for (self.orders[0..self.order_count]) |order| {
+            if (order.state != .pending_cancel) continue;
+            var index = self.command_history_count;
+            while (index != 0) {
+                index -= 1;
+                const command = self.command_history[index];
+                if (command.order_id == order.id and command.operation == .cancel) {
+                    if (count == destination.len) return error.CommandCapacityExceeded;
+                    destination[count] = command;
+                    count += 1;
+                    break;
+                }
+            }
+        }
+        return destination[0..count];
+    }
+
     /// Emits at most one cancel for every non-terminal order in scope.
     pub fn cancelOpenOrders(self: *Oms, increasing_only: bool) !void {
         for (self.orders[0..self.order_count]) |*order| {
             if (order.state == .filled or order.state == .canceled or order.state == .rejected or
                 order.state == .pending_cancel or
                 (increasing_only and order.portfolio_reduce_only and order.venue_reduce_only))
+                continue;
+            order.state = .pending_cancel;
+            try self.emit(order.*, .cancel);
+        }
+    }
+
+    /// Cancels only orders owned by one strategy instance.
+    pub fn cancelStrategyOrders(self: *Oms, strategy_instance: u128) !void {
+        if (strategy_instance == 0) return error.InvalidStrategyInstance;
+        for (self.orders[0..self.order_count]) |*order| {
+            if (order.strategy_instance != strategy_instance or order.state == .filled or
+                order.state == .canceled or order.state == .rejected or order.state == .pending_cancel)
                 continue;
             order.state = .pending_cancel;
             try self.emit(order.*, .cancel);
@@ -200,7 +235,7 @@ pub const Oms = struct {
         switch (intent.operation) {
             .place => {
                 if (intent.quantity <= 0 or intent.limit_price_micros <= 0 or intent.reservation_micros <= 0) return error.InvalidOrderSpec;
-                const order = try self.createOrder(intent.instrument, intent.side, intent.portfolio_reduce_only, intent.venue_reduce_only, intent.quantity, intent.limit_price_micros, intent.reservation_micros, 0, group, policy);
+                const order = try self.createOrder(intent.strategy_instance, intent.instrument, intent.side, intent.portfolio_reduce_only, intent.venue_reduce_only, intent.quantity, intent.limit_price_micros, intent.reservation_micros, 0, group, policy);
                 try self.emit(order.*, .place);
             },
             .amend => {
@@ -383,18 +418,18 @@ pub const Oms = struct {
         predecessor.replacement = null;
     }
 
-    fn createOrder(self: *Oms, instrument: Instrument, side: Side, portfolio_reduce_only: bool, venue_reduce_only: bool, quantity: i64, price: i64, reservation_micros: i64, predecessor: u64, group: u64, policy: PartialExecutionPolicy) !*Order {
+    fn createOrder(self: *Oms, strategy_instance: u128, instrument: Instrument, side: Side, portfolio_reduce_only: bool, venue_reduce_only: bool, quantity: i64, price: i64, reservation_micros: i64, predecessor: u64, group: u64, policy: PartialExecutionPolicy) !*Order {
         if (self.order_count == max_orders) return error.OrderCapacityExceeded;
         const index = self.order_count;
         self.order_count += 1;
-        self.orders[index] = .{ .id = self.next_order_id, .instrument = instrument, .side = side, .portfolio_reduce_only = portfolio_reduce_only, .venue_reduce_only = venue_reduce_only, .quantity = quantity, .limit_price_micros = price, .reservation_micros = reservation_micros, .confirmed_reservation_micros = reservation_micros, .predecessor_order_id = predecessor, .group_first_sequence = group, .group_policy = policy };
+        self.orders[index] = .{ .id = self.next_order_id, .strategy_instance = strategy_instance, .instrument = instrument, .side = side, .portfolio_reduce_only = portfolio_reduce_only, .venue_reduce_only = venue_reduce_only, .quantity = quantity, .limit_price_micros = price, .reservation_micros = reservation_micros, .confirmed_reservation_micros = reservation_micros, .predecessor_order_id = predecessor, .group_first_sequence = group, .group_policy = policy };
         self.next_order_id += 1;
         return &self.orders[index];
     }
 
     fn emit(self: *Oms, order: Order, operation: Operation) !void {
         if (self.command_count == max_commands or self.command_history_count == max_command_history) return error.CommandCapacityExceeded;
-        const command_value: Command = .{ .command_id = self.next_command_id, .order_id = order.id, .revision = order.revision, .operation = operation, .instrument = order.instrument, .side = order.side, .portfolio_reduce_only = order.portfolio_reduce_only, .venue_reduce_only = order.venue_reduce_only, .quantity = order.quantity - order.cumulative_quantity, .limit_price_micros = order.limit_price_micros, .predecessor_order_id = order.predecessor_order_id, .reservation_micros = order.reservation_micros };
+        const command_value: Command = .{ .command_id = self.next_command_id, .order_id = order.id, .strategy_instance = order.strategy_instance, .revision = order.revision, .operation = operation, .instrument = order.instrument, .side = order.side, .portfolio_reduce_only = order.portfolio_reduce_only, .venue_reduce_only = order.venue_reduce_only, .quantity = order.quantity - order.cumulative_quantity, .limit_price_micros = order.limit_price_micros, .predecessor_order_id = order.predecessor_order_id, .reservation_micros = order.reservation_micros };
         self.commands[self.command_count] = command_value;
         self.command_count += 1;
         self.command_history[self.command_history_count] = command_value;
@@ -405,7 +440,7 @@ pub const Oms = struct {
     fn createReplacement(self: *Oms, predecessor: *Order) !void {
         const replacement = predecessor.replacement.?;
         predecessor.replacement = null;
-        const next = try self.createOrder(replacement.instrument, replacement.side, replacement.portfolio_reduce_only, replacement.venue_reduce_only, replacement.quantity, replacement.limit_price_micros, replacement.reservation_micros, predecessor.id, predecessor.group_first_sequence, predecessor.group_policy);
+        const next = try self.createOrder(predecessor.strategy_instance, replacement.instrument, replacement.side, replacement.portfolio_reduce_only, replacement.venue_reduce_only, replacement.quantity, replacement.limit_price_micros, replacement.reservation_micros, predecessor.id, predecessor.group_first_sequence, predecessor.group_policy);
         try self.emit(next.*, .place);
     }
 
@@ -465,6 +500,23 @@ fn validateTarget(order: *const Order, intent: Intent) !void {
         .live, .partially_filled => {},
         else => return error.OrderNotMutable,
     }
+}
+
+test "pending cancel outbox is reconstructed after replay" {
+    var state: Oms = .{};
+    var group: IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
+    group.members[0] = .{ .intent_sequence = 1, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 2, .limit_price_micros = 3, .reservation_micros = 6 };
+    try state.applyGroup(group);
+    state.begin();
+    try state.cancelOpenOrders(false);
+    const cancel = state.emitted()[0];
+    var replayed = state;
+    replayed.begin();
+    var storage: [max_orders]Command = undefined;
+    const recovered = try replayed.pendingCancelCommands(&storage);
+    try std.testing.expectEqual(@as(usize, 1), recovered.len);
+    try std.testing.expectEqual(cancel.command_id, recovered[0].command_id);
+    try std.testing.expectEqual(Operation.cancel, recovered[0].operation);
 }
 
 fn rememberReport(order: *Order, report: ExecutionReport) void {

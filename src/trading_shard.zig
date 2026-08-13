@@ -237,6 +237,7 @@ const EventKind = enum(u16) {
     risk_warning_recorded,
     lease_gate_changed,
     version_activated,
+    strategy_cutover_fenced,
 };
 
 pub const Fact = struct {
@@ -378,6 +379,7 @@ const PayloadTag = enum(u16) {
     risk_warning,
     lease_gate_change,
     version_activation,
+    strategy_cutover_fence,
 };
 
 pub const ReservationModel = enum(u8) { leveraged, cash };
@@ -423,6 +425,8 @@ pub const RiskLease = struct {
     exchange_account_limit_micros: i64 = 0,
     global_limit_micros: i64 = 0,
 };
+/// Stable strategy-scoped intent fence used during cutover.
+pub const StrategyCutoverFence = struct { strategy_instance: u128 };
 /// Stable strategy-private-state handling recorded at cutover.
 pub const StrategyStateTransition = enum(u8) { keep, migrate, rebuild };
 /// Immutable fact selecting the sole active release after one cutover barrier.
@@ -478,6 +482,7 @@ pub const Payload = union(PayloadTag) {
     risk_warning: operational.RiskWarning,
     lease_gate_change: operational.SafetyGateChange,
     version_activation: VersionActivationEvent,
+    strategy_cutover_fence: StrategyCutoverFence,
 };
 
 pub const CanonicalEvent = struct {
@@ -626,6 +631,7 @@ fn encodeInput(input: InputEvent) !EncodedInput {
             try encoded.put(u8, value.count);
             for (value.members[0..value.count]) |member| {
                 try encoded.put(u64, member.intent_sequence);
+                try encoded.put(u128, member.strategy_instance);
                 try encoded.put(u8, @intFromEnum(member.operation));
                 try encoded.put(u8, @intFromEnum(member.instrument));
                 try encoded.put(u8, @intFromEnum(member.side));
@@ -732,6 +738,7 @@ fn encodeInput(input: InputEvent) !EncodedInput {
             try encoded.put(u8, @intFromEnum(value.reason));
             try encoded.put(u8, @intFromBool(value.open));
         },
+        .strategy_cutover_fence => |value| try encoded.put(u128, value.strategy_instance),
         .version_activation => |value| {
             try encoded.put(u128, value.activation_identity);
             try encoded.put(u64, value.generation);
@@ -915,6 +922,7 @@ fn decodeInput(record: journal.Record) !InputEvent {
             if (value.count > oms_module.max_group_members) return error.InvalidIntentGroup;
             for (value.members[0..value.count]) |*member| member.* = .{
                 .intent_sequence = try readInputValue(u64, record.payload, &offset),
+                .strategy_instance = try readInputValue(u128, record.payload, &offset),
                 .operation = std.enums.fromInt(oms_module.Operation, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOmsOperation,
                 .instrument = std.enums.fromInt(oms_module.Instrument, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOmsInstrument,
                 .side = std.enums.fromInt(oms_module.Side, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOmsSide,
@@ -1033,6 +1041,9 @@ fn decodeInput(record: journal.Record) !InputEvent {
             .reason = std.enums.fromInt(operational.GateReason, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownSafetyGateReason,
             .open = (try readInputValue(u8, record.payload, &offset)) == 1,
             .continuity_proven = false,
+        } },
+        .strategy_cutover_fence => .{ .strategy_cutover_fence = .{
+            .strategy_instance = try readInputValue(u128, record.payload, &offset),
         } },
         .version_activation => blk: {
             var value: VersionActivationEvent = .{
@@ -1869,6 +1880,11 @@ pub const TradingShard = struct {
                     risk_lease_gate_identity;
                 try self.applyOperationalGate(normalized);
                 try self.trace.append(.lease_gate_changed, input.identity);
+            },
+            .strategy_cutover_fence => |fence| {
+                if (fence.strategy_instance == 0) return error.InvalidStrategyInstance;
+                try self.oms.cancelStrategyOrders(fence.strategy_instance);
+                try self.trace.append(.strategy_cutover_fenced, input.identity);
             },
             .version_activation => |activation| {
                 if (activation.activation_identity == 0 or activation.new_release == 0 or
@@ -3833,6 +3849,7 @@ fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     digestInt(&hasher, u8, shard.oms.order_count);
     for (shard.oms.orders[0..shard.oms.order_count]) |order| {
         digestInt(&hasher, u64, order.id);
+        if (order.strategy_instance != 0) digestInt(&hasher, u128, order.strategy_instance);
         digestInt(&hasher, u8, @intFromEnum(order.instrument));
         digestInt(&hasher, u8, @intFromEnum(order.side));
         digestBool(&hasher, order.portfolio_reduce_only);
