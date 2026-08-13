@@ -1,5 +1,6 @@
 const std = @import("std");
 const trading = @import("trading_shard.zig");
+const strategy_recovery = @import("strategy_host_recovery.zig");
 
 /// Restart admission phase; only ready may later accept a fresh EnableTrading.
 pub const RecoveryPhase = enum(u8) { recovery_only, ready };
@@ -71,6 +72,31 @@ pub const RecoveryCoordinator = struct {
     }
 };
 
+/// Restores one published checkpoint and catches it up behind the core recovery fence.
+pub fn catchUpStrategy(
+    coordinator: *const RecoveryCoordinator,
+    checkpoint: []const u8,
+    expected: strategy_recovery.Metadata,
+    events: []const strategy_recovery.ReplayEvent,
+) !strategy_recovery.Recovered {
+    if (coordinator.phase != .ready) return error.CoreRecoveryIncomplete;
+    var recovery = try strategy_recovery.Recovery.begin(checkpoint, expected, coordinator.barrier);
+    if (expected.strategy_cursor < coordinator.barrier) {
+        if (events.len == 0) return error.StrategyHistoryGap;
+        _ = try recovery.applyBatch(expected.strategy_cursor + 1, coordinator.barrier, events);
+    } else if (events.len != 0) return error.StrategyReplayPastBarrier;
+    const recovered = try recovery.finishRecovery();
+    if (recovery.canTrade() or recovery.suppressed_intents == 0 and hasIntent(events)) {
+        return error.StrategyRecoveryFenceFailed;
+    }
+    return recovered;
+}
+
+fn hasIntent(events: []const strategy_recovery.ReplayEvent) bool {
+    for (events) |event| if (event.would_emit_intent) return true;
+    return false;
+}
+
 test "restart recovery remains fenced until exact venue evidence closes" {
     var shard: trading.TradingShard = .{};
     shard.operational_state = trading.operational.State.init(7);
@@ -96,4 +122,36 @@ test "restart recovery remains fenced until exact venue evidence closes" {
     try std.testing.expect(!recovery.shard.operational_state.trading_authorized);
     try recovery.reconcile(2, recovery.expectedVenueEvidence());
     try std.testing.expectError(error.ReconciliationIdentityConflict, recovery.reconcile(2, mismatch));
+}
+
+test "strategy checkpoint catches up to the core barrier without publishing intents" {
+    var coordinator = RecoveryCoordinator.begin(.{}, 5);
+    coordinator.phase = .ready;
+    coordinator.shard.operational_state.mode = .ready;
+    const metadata: strategy_recovery.Metadata = .{
+        .schema_registry = 1,
+        .strategy_instance = 2,
+        .strategy_definition = 3,
+        .state_schema = 4,
+        .state_schema_version = 1,
+        .strategy_config_version = 7,
+        .strategy_cursor = 2,
+        .next_intent_sequence = 5,
+    };
+    var storage: [512]u8 = undefined;
+    const checkpoint = try strategy_recovery.encodeCheckpoint(&storage, metadata, .{ .accumulator = 30, .event_count = 2 });
+    const recovered = try catchUpStrategy(&coordinator, checkpoint, metadata, &.{
+        .{ .sequence = 3, .delta = 30, .would_emit_intent = false },
+        .{ .sequence = 4, .delta = 40, .would_emit_intent = true },
+        .{ .sequence = 5, .delta = 50, .would_emit_intent = false },
+    });
+    try std.testing.expectEqual(@as(u64, 5), recovered.cursor);
+    try std.testing.expectEqual(@as(u64, 6), recovered.next_intent_sequence);
+
+    var damaged: [512]u8 = undefined;
+    @memcpy(damaged[0..checkpoint.len], checkpoint);
+    damaged[checkpoint.len - 1] ^= 1;
+    try std.testing.expectError(error.InvalidCheckpoint, catchUpStrategy(&coordinator, damaged[0..checkpoint.len], metadata, &.{}));
+    coordinator.phase = .recovery_only;
+    try std.testing.expectError(error.CoreRecoveryIncomplete, catchUpStrategy(&coordinator, checkpoint, metadata, &.{}));
 }
