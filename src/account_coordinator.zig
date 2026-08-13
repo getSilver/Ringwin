@@ -42,6 +42,12 @@ pub const ShardSummary = struct {
             .local_gate_closed = false,
         };
     }
+
+    fn withSequence(self: ShardSummary, sequence: u64) ShardSummary {
+        var result = self;
+        result.shard_sequence = sequence;
+        return result;
+    }
 };
 
 const SummaryRecord = struct { identity: u128 = 0, value: ShardSummary = undefined, present: bool = false };
@@ -86,6 +92,8 @@ pub const MarginObservation = struct {
 
 /// Account-level authority result that every affected shard must consume.
 pub const AccountGate = struct { identity: u128, open: bool, latched: bool };
+/// One account-wide gate delivery to a specific shard.
+pub const GateDelivery = struct { shard_id: ShardId, gate: AccountGate };
 
 /// One qualified command submitted through the shared transport periphery.
 pub const GatewayRequest = struct {
@@ -173,6 +181,7 @@ pub const AccountCoordinator = struct {
     deliveries: [max_shards]Delivery = undefined,
     last_margin_observation: ?MarginObservation = null,
     margin_gate: AccountGate = .{ .identity = 0, .open = false, .latched = false },
+    gate_deliveries: [max_shards]GateDelivery = undefined,
 
     /// Creates one coordinator for exactly one ExchangeAccount.
     pub fn init(exchange_account: u128, account_ceiling: i64, global_ceiling: i64) AccountCoordinator {
@@ -311,6 +320,13 @@ pub const AccountCoordinator = struct {
         self.margin_gate = .{ .identity = observation.identity, .open = closed, .latched = !closed };
         return self.margin_gate;
     }
+
+    /// Produces a stable fan-out plan for an account-level authority restriction.
+    pub fn accountGateDeliveries(self: *AccountCoordinator, gate: AccountGate) []const GateDelivery {
+        for (&self.gate_deliveries, 0..) |*delivery, index|
+            delivery.* = .{ .shard_id = @enumFromInt(index), .gate = gate };
+        return &self.gate_deliveries;
+    }
 };
 
 test "shared account protocol rejects conflicting shard summaries" {
@@ -379,4 +395,20 @@ test "shared gateway routes itemized outcomes to the unique owning shard" {
     const routed = try gateway.complete(.{ .shard_id = .shard_1, .command_id = second.command_id, .state = .unknown });
     try std.testing.expectEqual(ShardId.shard_1, routed.shard_id);
     try std.testing.expectEqual(trading.oms.DispatchState.unknown, routed.state);
+}
+
+test "local faults stay local while account gates tighten every shard" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    for (0..max_shards) |index| _ = try coordinator.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, 100));
+    const before = coordinator.summaries[1].value;
+    var local = coordinator.summaries[0].value;
+    local.local_gate_closed = true;
+    _ = try coordinator.publishSummary(10, local.withSequence(2));
+    try std.testing.expectEqualDeep(before, coordinator.summaries[1].value);
+    const gates = coordinator.accountGateDeliveries(.{ .identity = 30, .open = false, .latched = true });
+    try std.testing.expectEqual(@as(usize, 4), gates.len);
+    for (gates, 0..) |delivery, index| {
+        try std.testing.expectEqual(@as(ShardId, @enumFromInt(index)), delivery.shard_id);
+        try std.testing.expect(!delivery.gate.open);
+    }
 }
