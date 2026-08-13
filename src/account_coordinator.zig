@@ -74,6 +74,19 @@ pub const AccountFact = struct {
 /// One target assignment; the target shard still applies the canonical fact.
 pub const Delivery = struct { shard_id: ShardId, fact: AccountFact };
 
+/// Venue account-margin evidence used only for reconciliation.
+pub const MarginObservation = struct {
+    identity: u128,
+    barrier: u64,
+    venue_net_margin_micros: i64,
+    venue_swap_quantity: i64,
+    margin_mode: enum(u8) { isolated },
+    rules_version: u32,
+};
+
+/// Account-level authority result that every affected shard must consume.
+pub const AccountGate = struct { identity: u128, open: bool, latched: bool };
+
 /// Fixed-capacity owner of cross-shard leases and account reconciliation only.
 pub const AccountCoordinator = struct {
     exchange_account: u128,
@@ -86,6 +99,8 @@ pub const AccountCoordinator = struct {
     account_netting_benefit_micros: i64 = 0,
     last_account_fact: ?AccountFact = null,
     deliveries: [max_shards]Delivery = undefined,
+    last_margin_observation: ?MarginObservation = null,
+    margin_gate: AccountGate = .{ .identity = 0, .open = false, .latched = false },
 
     /// Creates one coordinator for exactly one ExchangeAccount.
     pub fn init(exchange_account: u128, account_ceiling: i64, global_ceiling: i64) AccountCoordinator {
@@ -198,6 +213,32 @@ pub const AccountCoordinator = struct {
         }
         return self.deliveries[0..count];
     }
+
+    /// Reconciles gross portfolio state with Venue net margin without allocating the difference.
+    pub fn reconcileMargin(self: *AccountCoordinator, observation: MarginObservation) !AccountGate {
+        if (observation.identity == 0 or observation.barrier < self.barrier or
+            observation.venue_net_margin_micros < 0 or observation.rules_version == 0)
+            return error.InvalidMarginObservation;
+        if (self.last_margin_observation) |known| {
+            if (observation.identity == known.identity) {
+                if (!std.meta.eql(known, observation)) return error.MarginObservationIdentityConflict;
+                return self.margin_gate;
+            }
+            if (observation.barrier <= known.barrier) return error.StaleMarginObservation;
+        }
+        var projected_quantity: i64 = 0;
+        for (self.summaries) |record| {
+            if (!record.present) return error.IncompleteShardSummaries;
+            projected_quantity = try std.math.add(i64, projected_quantity, record.value.swap_quantity);
+        }
+        const gross = self.grossPortfolioMargin();
+        self.account_netting_benefit_micros = @max(gross - observation.venue_net_margin_micros, 0);
+        const closed = projected_quantity == observation.venue_swap_quantity and
+            observation.venue_net_margin_micros <= gross;
+        self.last_margin_observation = observation;
+        self.margin_gate = .{ .identity = observation.identity, .open = closed, .latched = !closed };
+        return self.margin_gate;
+    }
 };
 
 test "shared account protocol rejects conflicting shard summaries" {
@@ -242,4 +283,16 @@ test "account facts fan out once in stable shard order" {
         .barrier = 1,
         .payload = .{ .account_snapshot = .{ .cash_micros = 800, .swap_quantity = 0, .margin_micros = 100 } },
     })).len);
+}
+
+test "margin reconciliation preserves netting benefit but latches unexplained differences" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    for (0..max_shards) |index| _ = try coordinator.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, 100));
+    const healthy = try coordinator.reconcileMargin(.{ .identity = 20, .barrier = 5, .venue_net_margin_micros = 250, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 });
+    try std.testing.expect(healthy.open);
+    try std.testing.expectEqual(@as(i64, 150), coordinator.account_netting_benefit_micros);
+    try std.testing.expectEqual(@as(i64, 400), coordinator.grossPortfolioMargin());
+    const broken = try coordinator.reconcileMargin(.{ .identity = 21, .barrier = 6, .venue_net_margin_micros = 250, .venue_swap_quantity = 1, .margin_mode = .isolated, .rules_version = 1 });
+    try std.testing.expect(!broken.open);
+    try std.testing.expect(broken.latched);
 }
