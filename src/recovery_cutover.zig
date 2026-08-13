@@ -263,8 +263,8 @@ fn hasIntent(events: []const strategy_recovery.ReplayEvent) bool {
 
 /// Strategy-private-state handling declared by one candidate version.
 pub const StrategyStateTransition = enum(u8) { keep, migrate, rebuild };
-/// Scope of intent fencing and cancellation for a cutover.
-pub const CutoverScope = enum(u8) { decision_domain, strategy_instance };
+/// Exact scope of intent fencing and cancellation for a cutover.
+pub const CutoverScope = union(enum) { decision_domain, strategy_instance: u128 };
 /// Cutover progresses only through explicit persisted barriers.
 pub const CutoverPhase = enum(u8) { idle, candidate, quiescing, draining, recovery_only, active };
 
@@ -369,7 +369,7 @@ pub const Cutover = struct {
             .identity = @truncate(strategy_instance),
             .payload = .{ .strategy_cutover_fence = .{ .strategy_instance = strategy_instance } },
         });
-        self.scope = .strategy_instance;
+        self.scope = .{ .strategy_instance = strategy_instance };
         self.quiesce_barrier = shard.trace.len;
         self.phase = .quiescing;
         return shard.oms.emitted();
@@ -380,7 +380,7 @@ pub const Cutover = struct {
         if (self.phase != .quiescing) return error.InvalidCutoverTransition;
         const orders_closed = switch (self.scope) {
             .decision_domain => shard.oms.openOrdersClosed(),
-            .strategy_instance => strategyOrdersClosed(shard, self.active_strategy_instance),
+            .strategy_instance => |identity| strategyOrdersClosed(shard, identity),
         };
         if (!orders_closed or !venueEvidenceCloses(shard, evidence))
             return error.CutoverDrainIncomplete;
@@ -683,12 +683,14 @@ test "strategy cutover persists a scoped fence and leaves unrelated orders live"
 
 test "cutover failures and forward rollback never regress economic state or generation" {
     var shard: trading.TradingShard = .{ .release_generation = 4, .active_release = 10, .active_strategy_instance = 20 };
-    try shard.economic_projection.apply(.{ .fill = .{ .identity = 1, .instrument = .btc_usdt_swap, .side = .buy, .quantity = 3, .price_micros = 50, .quantity_denominator = 1, .fee_micros = 7 } });
+    try shard.economic_projection.apply(.{ .fill = .{ .identity = 1, .instrument = .btc_usdt_swap, .side = .buy, .quantity = 3, .price_micros = 50_000_000, .quantity_denominator = 1, .fee_micros = 7 } });
     var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
-    group.members[0] = .{ .intent_sequence = 1, .strategy_instance = 20, .operation = .place, .instrument = .btc_usdt_swap, .quantity = 1, .limit_price_micros = 50, .reservation_micros = 50 };
+    group.members[0] = .{ .intent_sequence = 1, .strategy_instance = 20, .operation = .place, .instrument = .btc_usdt_swap, .quantity = 1, .limit_price_micros = 50_000_000, .reservation_micros = 50 };
     try shard.oms.applyGroup(group);
     shard.oms.begin();
     try shard.oms.applyReport(.{ .report_id = 1, .order_id = 1, .revision = 1, .status = .filled, .cumulative_quantity = 1, .remaining_quantity = 0 });
+    shard.quantity_denominator = 1;
+    shard.mark_price_micros = 50_000_000;
     var stable_journal = trading.journal.Journal.init();
     var cutover: Cutover = .{ .generation = 4, .active_release = 10, .active_strategy_instance = 20, .phase = .active };
     const candidate: Candidate = .{
@@ -720,8 +722,9 @@ test "cutover failures and forward rollback never regress economic state or gene
     try cutover.quiesce(102);
     try cutover.drain(shard, evidence);
     try cutover.catchUpCandidate(shard, shard);
+    const replay_baseline = shard;
     const activated = try cutover.activateStable(&shard, &stable_journal, 41);
-    try shard.economic_projection.apply(.{ .venue_forced_execution = .{ .identity = 2, .side = .sell, .quantity = 1, .price_micros = 55, .quantity_denominator = 1, .fee_micros = 3, .penalty_micros = 2 } });
+    _ = try trading.applyStable(&shard, &stable_journal, .{ .identity = 50, .payload = .{ .venue_forced_execution = .{ .execution_id = 2, .side = .sell, .quantity = 1, .price_micros = 55_000_000, .fee_micros = 3, .penalty_micros = 2 } } });
 
     const rollback: Candidate = .{
         .release = 10,
@@ -744,10 +747,21 @@ test "cutover failures and forward rollback never regress economic state or gene
     try std.testing.expectEqual(@as(u64, 10), rolled_back.new_release);
     try std.testing.expectEqual(@as(u128, 22), rolled_back.new_strategy_instance);
     try std.testing.expectEqual(@as(i64, 2), shard.economic_projection.portfolio.swap.quantity);
-    try std.testing.expectEqual(@as(i64, 100), shard.economic_projection.portfolio.swap.open_cost_micros);
+    try std.testing.expectEqual(@as(i64, 100_000_000), shard.economic_projection.portfolio.swap.open_cost_micros);
     try std.testing.expectEqual(@as(i64, 10), shard.economic_projection.portfolio.fee_micros);
     try std.testing.expectEqual(@as(i64, 2), shard.economic_projection.portfolio.penalty_micros);
     try std.testing.expectEqual(@as(i64, 50), try shard.oms.activeReservations());
+
+    try stable_journal.seal();
+    var replay_reader = try trading.journal.Reader.init(stable_journal.bytes());
+    var replayed_shard: trading.ReplayTradingShard = .{ .shard = replay_baseline };
+    while (true) switch (try replay_reader.next()) {
+        .record => |record| _ = try replayed_shard.apply(try trading.decodeStableInput(record)),
+        .end => break,
+    };
+    try std.testing.expectEqualSlices(u8, &shard.canonicalStateDigest(), &replayed_shard.canonicalStateDigest());
+    try std.testing.expectEqual(shard.economic_projection.portfolio.swap.quantity, replayed_shard.shard.economic_projection.portfolio.swap.quantity);
+    try std.testing.expectEqual(shard.economic_projection.ledger_count, replayed_shard.shard.economic_projection.ledger_count);
 
     const replayed = try Cutover.replayActivations(cutover.activations[0..cutover.activation_count]);
     try std.testing.expectEqual(cutover.active_release, replayed.active_release);
