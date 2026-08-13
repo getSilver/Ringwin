@@ -1340,6 +1340,8 @@ pub const TradingShard = struct {
     release_generation: u64 = 0,
     active_release: u64 = 0,
     active_strategy_instance: u128 = 0,
+    fenced_strategy_instances: [8]u128 = @splat(0),
+    fenced_strategy_count: u8 = 0,
 
     pub fn apply(self: *TradingShard, event: CanonicalEvent) !ApplyResult {
         var candidate = self.*;
@@ -1356,6 +1358,13 @@ pub const TradingShard = struct {
 
     pub fn canonicalStateDigest(self: TradingShard) [Sha256.digest_length]u8 {
         return stateDigest(self);
+    }
+
+    /// Reports whether one strategy is durably fenced from new risk intent.
+    pub fn strategyFenced(self: *const TradingShard, strategy_instance: u128) bool {
+        for (self.fenced_strategy_instances[0..self.fenced_strategy_count]) |identity|
+            if (identity == strategy_instance) return true;
+        return false;
     }
 
     /// Encodes authoritative state at the exact sealed stable-journal barrier.
@@ -1511,6 +1520,9 @@ pub const TradingShard = struct {
         var qualified = group;
         var active = try self.oms.activeReservations();
         for (qualified.members[0..qualified.count]) |*intent| {
+            for (self.fenced_strategy_instances[0..self.fenced_strategy_count]) |fenced|
+                if (intent.strategy_instance == fenced and intent.operation != .cancel)
+                    return error.StrategyCutoverFenced;
             if (intent.operation == .cancel) continue;
             var replaced: i64 = 0;
             if (intent.operation == .amend) {
@@ -1883,6 +1895,16 @@ pub const TradingShard = struct {
             },
             .strategy_cutover_fence => |fence| {
                 if (fence.strategy_instance == 0) return error.InvalidStrategyInstance;
+                var known = false;
+                for (self.fenced_strategy_instances[0..self.fenced_strategy_count]) |identity| {
+                    if (identity == fence.strategy_instance) known = true;
+                }
+                if (!known) {
+                    if (self.fenced_strategy_count == self.fenced_strategy_instances.len)
+                        return error.StrategyFenceCapacityExceeded;
+                    self.fenced_strategy_instances[self.fenced_strategy_count] = fence.strategy_instance;
+                    self.fenced_strategy_count += 1;
+                }
                 try self.oms.cancelStrategyOrders(fence.strategy_instance);
                 try self.trace.append(.strategy_cutover_fenced, input.identity);
             },
@@ -1897,6 +1919,16 @@ pub const TradingShard = struct {
                 self.release_generation = activation.generation;
                 self.active_release = activation.new_release;
                 self.active_strategy_instance = activation.new_strategy_instance;
+                var index: usize = 0;
+                while (index < self.fenced_strategy_count) {
+                    if (self.fenced_strategy_instances[index] == activation.old_strategy_instance) {
+                        self.fenced_strategy_count -= 1;
+                        self.fenced_strategy_instances[index] = self.fenced_strategy_instances[self.fenced_strategy_count];
+                        self.fenced_strategy_instances[self.fenced_strategy_count] = 0;
+                        break;
+                    }
+                    index += 1;
+                }
                 try self.trace.append(.version_activated, input.identity);
             },
             .instrument_rules_activated => |rules| {
@@ -2429,6 +2461,7 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
     for (shard.economic_projection.ledger[0..shard.economic_projection.ledger_count]) |*transaction|
         zeroUnused(economics_module.LedgerPosting, transaction.postings[transaction.posting_count..]);
     zeroUnused(economics_module.LedgerTransaction, shard.economic_projection.ledger[shard.economic_projection.ledger_count..]);
+    zeroUnused(u128, shard.fenced_strategy_instances[shard.fenced_strategy_count..]);
 }
 
 fn validateSnapshotState(shard: *const TradingShard) !void {
@@ -2445,7 +2478,8 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         shard.economic_projection.reconciliation_break_count > shard.economic_projection.reconciliation_break_identities.len or
         shard.operational_state.command_count > operational.max_commands or
         shard.operational_state.gate_count > operational.max_gates or
-        shard.operational_state.latch_count > operational.max_latches)
+        shard.operational_state.latch_count > operational.max_latches or
+        shard.fenced_strategy_count > shard.fenced_strategy_instances.len)
         return error.InvalidSnapshotState;
     for (shard.oms.orders[0..shard.oms.order_count], 0..) |order, index| {
         if (order.id == 0) return error.InvalidSnapshotState;
@@ -3845,6 +3879,11 @@ fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, u64, shard.release_generation);
         digestInt(&hasher, u64, shard.active_release);
         digestInt(&hasher, u128, shard.active_strategy_instance);
+    }
+    if (shard.fenced_strategy_count != 0) {
+        digestInt(&hasher, u8, shard.fenced_strategy_count);
+        for (shard.fenced_strategy_instances[0..shard.fenced_strategy_count]) |identity|
+            digestInt(&hasher, u128, identity);
     }
     digestInt(&hasher, u8, shard.oms.order_count);
     for (shard.oms.orders[0..shard.oms.order_count]) |order| {
