@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+/// Stable journal codec used by snapshot and semantic replay.
 pub const journal = @import("journal.zig");
 pub const oms = @import("oms.zig");
 const oms_module = oms;
@@ -20,11 +21,35 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 const Crc32c = std.hash.crc.Crc32Iscsi;
 
 pub const schema_version: u16 = 3;
+/// Current physical schema for AuthoritativeTradingState snapshots.
 pub const state_schema_version: u32 = 1;
+/// Release artifact producing the current snapshot schema.
 pub const release_artifact_identity: u64 = 1;
+/// Registry entry defining the current snapshot and journal schemas.
 pub const schema_registry_identity: u64 = 1;
 const snapshot_magic: u64 = 0x50414e53574e4952; // RINWSNAP
 const snapshot_header_len: usize = 144;
+const SnapshotHeader = packed struct {
+    magic: u64,
+    encoding_version: u16,
+    header_len: u16,
+    total_len: u32,
+    state_schema: u32,
+    release_artifact: u64,
+    schema_registry: u64,
+    barrier: u64,
+    instrument_rules_version: u32,
+    margin_rules_version: u32,
+    payload_len: u32,
+    payload_crc: u32,
+    state_digest: u256,
+    payload_digest: u256,
+    header_crc: u32,
+    reserved: u128 = 0,
+};
+comptime {
+    std.debug.assert(@sizeOf(SnapshotHeader) == snapshot_header_len);
+}
 const client_order_id = "RWN-00000001-01-000000000001";
 const money_scale: i64 = 1_000_000;
 const contract_denominator: i64 = 10_000;
@@ -101,6 +126,7 @@ const EventKind = enum(u16) {
     lifecycle_progressed,
     risk_warning_recorded,
     lease_gate_changed,
+    version_activated,
 };
 
 pub const Fact = struct {
@@ -241,6 +267,7 @@ const PayloadTag = enum(u16) {
     lifecycle_progress,
     risk_warning,
     lease_gate_change,
+    version_activation,
 };
 
 pub const ReservationModel = enum(u8) { leveraged, cash };
@@ -286,6 +313,23 @@ pub const RiskLease = struct {
     exchange_account_limit_micros: i64 = 0,
     global_limit_micros: i64 = 0,
 };
+/// Stable strategy-private-state handling recorded at cutover.
+pub const StrategyStateTransition = enum(u8) { keep, migrate, rebuild };
+/// Immutable fact selecting the sole active release after one cutover barrier.
+pub const VersionActivationEvent = struct {
+    activation_identity: u128,
+    generation: u64,
+    old_release: u64,
+    new_release: u64,
+    old_strategy_instance: u128,
+    new_strategy_instance: u128,
+    strategy_definition: u128,
+    parameter_version: u64,
+    state_schema_version: u32,
+    transition: StrategyStateTransition,
+    barrier: u64,
+    canonical_state_digest: [32]u8,
+};
 
 pub const Payload = union(PayloadTag) {
     instrument_rules_activated: InstrumentRules,
@@ -323,6 +367,7 @@ pub const Payload = union(PayloadTag) {
     lifecycle_progress: operational.LifecycleProgress,
     risk_warning: operational.RiskWarning,
     lease_gate_change: operational.SafetyGateChange,
+    version_activation: VersionActivationEvent,
 };
 
 pub const CanonicalEvent = struct {
@@ -576,6 +621,20 @@ fn encodeInput(input: InputEvent) !EncodedInput {
             try encoded.put(u128, value.target_identity);
             try encoded.put(u8, @intFromEnum(value.reason));
             try encoded.put(u8, @intFromBool(value.open));
+        },
+        .version_activation => |value| {
+            try encoded.put(u128, value.activation_identity);
+            try encoded.put(u64, value.generation);
+            try encoded.put(u64, value.old_release);
+            try encoded.put(u64, value.new_release);
+            try encoded.put(u128, value.old_strategy_instance);
+            try encoded.put(u128, value.new_strategy_instance);
+            try encoded.put(u128, value.strategy_definition);
+            try encoded.put(u64, value.parameter_version);
+            try encoded.put(u32, value.state_schema_version);
+            try encoded.put(u8, @intFromEnum(value.transition));
+            try encoded.put(u64, value.barrier);
+            for (value.canonical_state_digest) |byte| try encoded.put(u8, byte);
         },
         else => {},
     }
@@ -865,6 +924,24 @@ fn decodeInput(record: journal.Record) !InputEvent {
             .open = (try readInputValue(u8, record.payload, &offset)) == 1,
             .continuity_proven = false,
         } },
+        .version_activation => blk: {
+            var value: VersionActivationEvent = .{
+                .activation_identity = try readInputValue(u128, record.payload, &offset),
+                .generation = try readInputValue(u64, record.payload, &offset),
+                .old_release = try readInputValue(u64, record.payload, &offset),
+                .new_release = try readInputValue(u64, record.payload, &offset),
+                .old_strategy_instance = try readInputValue(u128, record.payload, &offset),
+                .new_strategy_instance = try readInputValue(u128, record.payload, &offset),
+                .strategy_definition = try readInputValue(u128, record.payload, &offset),
+                .parameter_version = try readInputValue(u64, record.payload, &offset),
+                .state_schema_version = try readInputValue(u32, record.payload, &offset),
+                .transition = std.enums.fromInt(StrategyStateTransition, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownStrategyStateTransition,
+                .barrier = try readInputValue(u64, record.payload, &offset),
+                .canonical_state_digest = undefined,
+            };
+            for (&value.canonical_state_digest) |*byte| byte.* = try readInputValue(u8, record.payload, &offset);
+            break :blk .{ .version_activation = value };
+        },
     };
     if (offset != record.payload.len) return error.TrailingInputPayload;
     return .{
@@ -877,6 +954,11 @@ fn decodeInput(record: journal.Record) !InputEvent {
         .time_presence = record.time_presence,
         .payload = payload,
     };
+}
+
+/// Decodes one stable input record for side-effect-free recovery verification.
+pub fn decodeStableInput(record: journal.Record) !CanonicalEvent {
+    return decodeInput(record);
 }
 
 fn eventIdentity(payload: []const u8) !u64 {
@@ -1134,6 +1216,9 @@ pub const TradingShard = struct {
     oms: oms_module.Oms = .{},
     economic_projection: economics_module.Projection = .{},
     operational_state: operational.State = .{},
+    release_generation: u64 = 0,
+    active_release: u64 = 0,
+    active_strategy_instance: u128 = 0,
 
     pub fn apply(self: *TradingShard, event: CanonicalEvent) !ApplyResult {
         var candidate = self.*;
@@ -1162,31 +1247,38 @@ pub const TradingShard = struct {
         if (!stable_journal.sealed or barrier == 0 or
             barrier != stable_journal.last_sequence or self.trace.len != barrier)
             return error.InvalidSnapshotBarrier;
-        const payload = stable_journal.bytes();
+        var authoritative: TradingShard = std.mem.zeroes(TradingShard);
+        inline for (@typeInfo(TradingShard).@"struct".fields) |field|
+            @field(authoritative, field.name) = @field(self, field.name);
+        authoritative.oms.begin();
+        const payload = std.mem.asBytes(&authoritative);
         const total_len = std.math.add(usize, snapshot_header_len, payload.len) catch
             return error.SnapshotTooLarge;
         if (destination.len < total_len or payload.len > std.math.maxInt(u32))
             return error.SnapshotTooLarge;
         const encoded = destination[0..total_len];
-        @memset(encoded[0..snapshot_header_len], 0);
-        snapshotPut(u64, encoded, 0, snapshot_magic);
-        snapshotPut(u16, encoded, 8, 1);
-        snapshotPut(u16, encoded, 10, snapshot_header_len);
-        snapshotPut(u32, encoded, 12, @intCast(total_len));
-        snapshotPut(u32, encoded, 16, state_schema_version);
-        snapshotPut(u64, encoded, 20, release_artifact_identity);
-        snapshotPut(u64, encoded, 28, schema_registry_identity);
-        snapshotPut(u64, encoded, 36, barrier);
-        snapshotPut(u32, encoded, 44, self.instrument_rules_version);
-        snapshotPut(u32, encoded, 48, self.margin_rules_version);
-        snapshotPut(u32, encoded, 52, @intCast(payload.len));
-        snapshotPut(u32, encoded, 56, Crc32c.hash(payload));
         const digest = self.canonicalStateDigest();
-        @memcpy(encoded[60..92], &digest);
         var payload_digest: [Sha256.digest_length]u8 = undefined;
         Sha256.hash(payload, &payload_digest, .{});
-        @memcpy(encoded[92..124], &payload_digest);
-        snapshotPut(u32, encoded, 124, Crc32c.hash(encoded[0..124]));
+        var header: SnapshotHeader = .{
+            .magic = snapshot_magic,
+            .encoding_version = 1,
+            .header_len = snapshot_header_len,
+            .total_len = @intCast(total_len),
+            .state_schema = state_schema_version,
+            .release_artifact = release_artifact_identity,
+            .schema_registry = schema_registry_identity,
+            .barrier = barrier,
+            .instrument_rules_version = self.instrument_rules_version,
+            .margin_rules_version = self.margin_rules_version,
+            .payload_len = @intCast(payload.len),
+            .payload_crc = Crc32c.hash(payload),
+            .state_digest = std.mem.readInt(u256, &digest, .little),
+            .payload_digest = std.mem.readInt(u256, &payload_digest, .little),
+            .header_crc = 0,
+        };
+        header.header_crc = Crc32c.hash(std.mem.asBytes(&header)[0..@offsetOf(SnapshotHeader, "header_crc")]);
+        @memcpy(encoded[0..snapshot_header_len], std.mem.asBytes(&header));
         @memcpy(encoded[snapshot_header_len..], payload);
         return encoded;
     }
@@ -1194,34 +1286,36 @@ pub const TradingShard = struct {
     /// Restores a validated snapshot through the side-effect-free replay seam.
     pub fn restoreSnapshot(encoded: []const u8) !SnapshotRestore {
         if (encoded.len < snapshot_header_len) return error.InvalidSnapshotHeader;
-        if (snapshotGet(u64, encoded, 0) != snapshot_magic or
-            snapshotGet(u16, encoded, 8) != 1 or
-            snapshotGet(u16, encoded, 10) != snapshot_header_len or
-            snapshotGet(u32, encoded, 12) != encoded.len or
-            snapshotGet(u32, encoded, 16) != state_schema_version or
-            snapshotGet(u64, encoded, 20) != release_artifact_identity or
-            snapshotGet(u64, encoded, 28) != schema_registry_identity or
-            snapshotGet(u32, encoded, 124) != Crc32c.hash(encoded[0..124]))
+        var header: SnapshotHeader = undefined;
+        @memcpy(std.mem.asBytes(&header), encoded[0..snapshot_header_len]);
+        if (header.magic != snapshot_magic or header.encoding_version != 1 or
+            header.header_len != snapshot_header_len or header.total_len != encoded.len or
+            header.state_schema != state_schema_version or
+            header.release_artifact != release_artifact_identity or
+            header.schema_registry != schema_registry_identity or
+            header.header_crc != Crc32c.hash(encoded[0..@offsetOf(SnapshotHeader, "header_crc")]))
             return error.InvalidSnapshotHeader;
-        const payload_len = snapshotGet(u32, encoded, 52);
-        if (payload_len != encoded.len - snapshot_header_len)
+        if (header.payload_len != encoded.len - snapshot_header_len)
             return error.InvalidSnapshotLength;
         const payload = encoded[snapshot_header_len..];
         var payload_digest: [Sha256.digest_length]u8 = undefined;
         Sha256.hash(payload, &payload_digest, .{});
-        if (snapshotGet(u32, encoded, 56) != Crc32c.hash(payload) or
-            !std.mem.eql(u8, encoded[92..124], &payload_digest))
+        if (header.payload_crc != Crc32c.hash(payload) or
+            header.payload_digest != std.mem.readInt(u256, &payload_digest, .little))
             return error.InvalidSnapshotPayload;
-        const recovered = try replay(payload);
-        if (recovered.status != .clean) return error.InvalidSnapshotPayload;
-        const barrier = snapshotGet(u64, encoded, 36);
-        const digest = recovered.shard.canonicalStateDigest();
-        if (recovered.shard.trace.len != barrier or
-            recovered.shard.instrument_rules_version != snapshotGet(u32, encoded, 44) or
-            recovered.shard.margin_rules_version != snapshotGet(u32, encoded, 48) or
-            !std.mem.eql(u8, encoded[60..92], &digest))
+        if (payload.len != @sizeOf(TradingShard)) return error.InvalidSnapshotLength;
+        var recovered: TradingShard = undefined;
+        @memcpy(std.mem.asBytes(&recovered), payload);
+        recovered.oms.begin();
+        try validateSnapshotState(&recovered);
+        const barrier = header.barrier;
+        const digest = recovered.canonicalStateDigest();
+        if (recovered.trace.len != barrier or
+            recovered.instrument_rules_version != header.instrument_rules_version or
+            recovered.margin_rules_version != header.margin_rules_version or
+            header.state_digest != std.mem.readInt(u256, &digest, .little))
             return error.InvalidSnapshotState;
-        return .{ .shard = recovered.shard, .barrier = barrier };
+        return .{ .shard = recovered, .barrier = barrier };
     }
 
     /// Restores a snapshot and semantically replays its immediately following journal segment.
@@ -1667,6 +1761,19 @@ pub const TradingShard = struct {
                     risk_lease_gate_identity;
                 try self.applyOperationalGate(normalized);
                 try self.trace.append(.lease_gate_changed, input.identity);
+            },
+            .version_activation => |activation| {
+                if (activation.activation_identity == 0 or activation.new_release == 0 or
+                    activation.generation != self.release_generation + 1 or
+                    activation.old_release != self.active_release or
+                    activation.old_strategy_instance != self.active_strategy_instance or
+                    activation.barrier != self.trace.len + 1 or
+                    !std.mem.eql(u8, &activation.canonical_state_digest, &self.canonicalStateDigest()))
+                    return error.InvalidVersionActivation;
+                self.release_generation = activation.generation;
+                self.active_release = activation.new_release;
+                self.active_strategy_instance = activation.new_strategy_instance;
+                try self.trace.append(.version_activated, input.identity);
             },
             .instrument_rules_activated => |rules| {
                 if (rules.version == 0 or rules.instrument_identity == 0 or
@@ -2176,12 +2283,25 @@ pub const TradingShard = struct {
     }
 };
 
-fn snapshotPut(comptime T: type, destination: []u8, offset: usize, value: T) void {
-    std.mem.writeInt(T, destination[offset..][0..@sizeOf(T)], value, .little);
-}
-
-fn snapshotGet(comptime T: type, source: []const u8, offset: usize) T {
-    return std.mem.readInt(T, source[offset..][0..@sizeOf(T)], .little);
+fn validateSnapshotState(shard: *const TradingShard) !void {
+    if (shard.trace.len > shard.trace.events.len or
+        shard.fill_fact_count > shard.fill_facts.len or
+        shard.report_fact_count > shard.report_facts.len or
+        shard.oms.order_count > oms_module.max_orders or
+        shard.oms.command_history_count > shard.oms.command_history.len or
+        shard.oms.report_history_count > shard.oms.report_history.len or
+        shard.oms.reconciliation_history_count > shard.oms.reconciliation_history.len or
+        shard.economic_projection.seen_count > shard.economic_projection.seen.len or
+        shard.economic_projection.ledger_count > shard.economic_projection.ledger.len or
+        shard.operational_state.command_count > operational.max_commands or
+        shard.operational_state.gate_count > operational.max_gates or
+        shard.operational_state.latch_count > operational.max_latches)
+        return error.InvalidSnapshotState;
+    for (shard.oms.orders[0..shard.oms.order_count], 0..) |order, index| {
+        if (order.id == 0) return error.InvalidSnapshotState;
+        for (shard.oms.orders[0..index]) |previous|
+            if (previous.id == order.id) return error.InvalidSnapshotState;
+    }
 }
 
 const AdapterRequest = union(enum) {
@@ -2345,19 +2465,22 @@ const LiveRun = struct {
     decision_journal: journal.Journal,
 };
 
-fn applyLive(
+/// Atomically applies one canonical event and appends every resulting fact to stable journal.
+pub fn applyStable(
     shard: *TradingShard,
     decision_journal: *journal.Journal,
     input: InputEvent,
 ) !?OrderCommand {
-    const result = try shard.apply(input);
+    var candidate_shard = shard.*;
+    var candidate_journal = decision_journal.*;
+    const result = try candidate_shard.apply(input);
     if (result.facts.len == 0) return error.InputProducedNoFact;
     const encoded_input = try encodeInput(input);
 
     for (result.facts, 0..) |event, index| {
         var identity_bytes: [@sizeOf(u64)]u8 = undefined;
         std.mem.writeInt(u64, &identity_bytes, event.identity, .little);
-        try decision_journal.append(.{
+        try candidate_journal.append(.{
             .type_id = @intFromEnum(event.kind),
             .schema_version = schema_version,
             .flags = if (index == 0) journal.input_flag else 0,
@@ -2373,8 +2496,12 @@ fn applyLive(
                 &identity_bytes,
         });
     }
+    shard.* = candidate_shard;
+    decision_journal.* = candidate_journal;
     return result.order_command;
 }
+
+const applyLive = applyStable;
 
 fn snapshotAt(group: u64, source_sequence: u64) InputEvent {
     return atGroup(group, .{ .identity = source_sequence, .payload = .{ .l2_snapshot = .{
@@ -3560,6 +3687,12 @@ fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestBool(&hasher, gate.continuity_proven);
         digestBool(&hasher, gate.blocks_buy);
         digestBool(&hasher, gate.blocks_sell);
+    }
+    if (shard.release_generation != 0) {
+        hasher.update("VersionActivation\x00");
+        digestInt(&hasher, u64, shard.release_generation);
+        digestInt(&hasher, u64, shard.active_release);
+        digestInt(&hasher, u128, shard.active_strategy_instance);
     }
     digestInt(&hasher, u8, shard.oms.order_count);
     for (shard.oms.orders[0..shard.oms.order_count]) |order| {
@@ -4810,6 +4943,11 @@ test "authoritative snapshot round trips at an exact shard barrier" {
     var duplicate_storage: [32 * 1024]u8 = undefined;
     const duplicate = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &duplicate_storage);
     try std.testing.expectEqualSlices(u8, encoded, duplicate);
+
+    const independent = try runHappyPath();
+    var independent_storage: [32 * 1024]u8 = undefined;
+    const independent_encoded = try independent.shard.snapshot(&independent.decision_journal, independent.decision_journal.last_sequence, &independent_storage);
+    try std.testing.expectEqualSlices(u8, encoded, independent_encoded);
 
     var damaged_storage: [32 * 1024]u8 = undefined;
     @memcpy(damaged_storage[0..encoded.len], encoded);

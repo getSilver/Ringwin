@@ -7,6 +7,8 @@ pub const RecoveryPhase = enum(u8) { recovery_only, ready };
 
 /// Exact Venue evidence required to close restart uncertainty.
 pub const VenueEvidence = struct {
+    orders: [trading.oms.max_orders]VenueOrderEvidence = undefined,
+    order_count: u8 = 0,
     open_orders_closed: bool,
     portfolio_quantity: i64,
     exchange_quantity: i64,
@@ -17,6 +19,15 @@ pub const VenueEvidence = struct {
     margin_micros: i64,
     ledger_closed: bool,
     reconciliation_break: bool,
+};
+
+/// One authoritative Venue observation for an order owned by this shard.
+pub const VenueOrderEvidence = struct {
+    order_id: u64,
+    status: trading.oms.ReconciliationStatus,
+    revision: u32,
+    cumulative_quantity: i64,
+    remaining_quantity: i64,
 };
 
 /// Bounded recovery state owning a restored shard until exact Venue reconciliation.
@@ -38,7 +49,7 @@ pub const RecoveryCoordinator = struct {
     /// Derives the exact economic and order evidence the Venue must corroborate.
     pub fn expectedVenueEvidence(self: *const RecoveryCoordinator) VenueEvidence {
         const economic = self.shard.economicSummary();
-        return .{
+        var evidence: VenueEvidence = .{
             .open_orders_closed = self.shard.oms.openOrdersClosed(),
             .portfolio_quantity = economic.portfolio.swap.quantity,
             .exchange_quantity = economic.exchange.swap.quantity,
@@ -51,19 +62,42 @@ pub const RecoveryCoordinator = struct {
                 self.shard.exchange_ledger_debits_micros == self.shard.exchange_ledger_credits_micros,
             .reconciliation_break = economic.reconciliation_break,
         };
+        for (self.shard.oms.orders[0..self.shard.oms.order_count]) |order| {
+            evidence.orders[evidence.order_count] = .{
+                .order_id = order.id,
+                .status = switch (order.state) {
+                    .filled, .canceled, .rejected => .found_terminal,
+                    else => .found_live,
+                },
+                .revision = order.revision,
+                .cumulative_quantity = order.cumulative_quantity,
+                .remaining_quantity = order.quantity - order.cumulative_quantity,
+            };
+            evidence.order_count += 1;
+        }
+        return evidence;
     }
 
     /// Accepts one semantic reconciliation identity and enters Ready only on exact closure.
     pub fn reconcile(self: *RecoveryCoordinator, identity: u64, evidence: VenueEvidence) !void {
         if (identity == 0) return error.InvalidReconciliationIdentity;
         if (identity == self.last_reconciliation_identity) {
-            if (!std.meta.eql(self.last_evidence, evidence)) return error.ReconciliationIdentityConflict;
+            if (!sameVenueEvidence(self.last_evidence, evidence)) return error.ReconciliationIdentityConflict;
             return;
         }
         if (identity < self.last_reconciliation_identity) return error.StaleReconciliationIdentity;
-        if (!std.meta.eql(self.expectedVenueEvidence(), evidence) or !evidence.open_orders_closed or
-            !evidence.ledger_closed or evidence.reconciliation_break)
+        if (!venueEvidenceCloses(self.shard, evidence)) {
+            self.shard.economic_projection.reconciliation_break = true;
+            self.shard.economic_projection.reconciliation_break_identity = identity;
+            if (self.shard.operational_state.initialized) _ = try self.shard.operational_state.applyGate(.{
+                .gate_identity = identity,
+                .target_identity = self.shard.operational_state.target_identity,
+                .kind = .latched,
+                .reason = .reconciliation_break,
+                .open = false,
+            });
             return error.VenueReconciliationMismatch;
+        }
         self.last_reconciliation_identity = identity;
         self.last_evidence = evidence;
         self.phase = .ready;
@@ -71,6 +105,50 @@ pub const RecoveryCoordinator = struct {
         self.shard.operational_state.trading_authorized = false;
     }
 };
+
+fn venueEvidenceCloses(shard: trading.TradingShard, evidence: VenueEvidence) bool {
+    const coordinator: RecoveryCoordinator = .{ .shard = shard, .barrier = 1 };
+    const expected = coordinator.expectedVenueEvidence();
+    if (evidence.order_count != shard.oms.order_count or
+        evidence.portfolio_quantity != expected.portfolio_quantity or
+        evidence.exchange_quantity != expected.exchange_quantity or
+        evidence.portfolio_open_cost_micros != expected.portfolio_open_cost_micros or
+        evidence.exchange_open_cost_micros != expected.exchange_open_cost_micros or
+        evidence.portfolio_cash_micros != expected.portfolio_cash_micros or
+        evidence.exchange_cash_micros != expected.exchange_cash_micros or
+        evidence.margin_micros != expected.margin_micros or !evidence.open_orders_closed or
+        !evidence.ledger_closed or evidence.reconciliation_break)
+        return false;
+    for (evidence.orders[0..evidence.order_count], 0..) |observed, index| {
+        const order = shard.oms.orderById(observed.order_id) orelse return false;
+        for (evidence.orders[0..index]) |previous| if (previous.order_id == observed.order_id) return false;
+        if (observed.revision != order.revision or
+            observed.cumulative_quantity != order.cumulative_quantity or
+            observed.remaining_quantity != order.quantity - order.cumulative_quantity)
+            return false;
+        switch (observed.status) {
+            .found_terminal, .confirmed_absent => switch (order.state) {
+                .filled, .canceled, .rejected => {},
+                else => return false,
+            },
+            .found_live, .unresolved => return false,
+        }
+    }
+    return true;
+}
+
+fn sameVenueEvidence(left: VenueEvidence, right: VenueEvidence) bool {
+    if (left.order_count != right.order_count) return false;
+    for (left.orders[0..left.order_count], right.orders[0..right.order_count]) |left_order, right_order|
+        if (!std.meta.eql(left_order, right_order)) return false;
+    return left.open_orders_closed == right.open_orders_closed and
+        left.portfolio_quantity == right.portfolio_quantity and left.exchange_quantity == right.exchange_quantity and
+        left.portfolio_open_cost_micros == right.portfolio_open_cost_micros and
+        left.exchange_open_cost_micros == right.exchange_open_cost_micros and
+        left.portfolio_cash_micros == right.portfolio_cash_micros and
+        left.exchange_cash_micros == right.exchange_cash_micros and left.margin_micros == right.margin_micros and
+        left.ledger_closed == right.ledger_closed and left.reconciliation_break == right.reconciliation_break;
+}
 
 /// Restores one published checkpoint and catches it up behind the core recovery fence.
 pub fn catchUpStrategy(
@@ -92,6 +170,34 @@ pub fn catchUpStrategy(
     return recovered;
 }
 
+/// Published checkpoint candidate ordered from newest cursor to oldest.
+pub const PublishedCheckpoint = struct {
+    container: []const u8,
+    metadata: strategy_recovery.Metadata,
+};
+
+/// Selects the newest valid published checkpoint and falls back deterministically.
+pub fn catchUpPublishedStrategy(
+    coordinator: *const RecoveryCoordinator,
+    candidates: []const PublishedCheckpoint,
+    events: []const strategy_recovery.ReplayEvent,
+) !strategy_recovery.Recovered {
+    var previous_cursor: ?u64 = null;
+    for (candidates) |candidate| {
+        if (previous_cursor) |cursor| if (candidate.metadata.strategy_cursor >= cursor)
+            return error.CheckpointsNotNewestFirst;
+        previous_cursor = candidate.metadata.strategy_cursor;
+        const start = candidate.metadata.strategy_cursor + 1;
+        var first_index: usize = 0;
+        while (first_index < events.len and events[first_index].sequence < start) : (first_index += 1) {}
+        return catchUpStrategy(coordinator, candidate.container, candidate.metadata, events[first_index..]) catch |err| switch (err) {
+            error.InvalidCheckpoint, error.CheckpointMismatch => continue,
+            else => return err,
+        };
+    }
+    return error.NoValidStrategyCheckpoint;
+}
+
 fn hasIntent(events: []const strategy_recovery.ReplayEvent) bool {
     for (events) |event| if (event.would_emit_intent) return true;
     return false;
@@ -103,20 +209,7 @@ pub const StrategyStateTransition = enum(u8) { keep, migrate, rebuild };
 pub const CutoverPhase = enum(u8) { idle, candidate, quiescing, draining, recovery_only, active };
 
 /// Immutable activation fact deciding the sole active version during replay.
-pub const VersionActivationEvent = struct {
-    activation_identity: u128,
-    generation: u64,
-    old_release: u64,
-    new_release: u64,
-    old_strategy_instance: u128,
-    new_strategy_instance: u128,
-    strategy_definition: u128,
-    parameter_version: u64,
-    state_schema_version: u32,
-    transition: StrategyStateTransition,
-    barrier: u64,
-    canonical_state_digest: [32]u8,
-};
+pub const VersionActivationEvent = trading.VersionActivationEvent;
 
 /// One candidate validated without trading authority before atomic activation.
 pub const Candidate = struct {
@@ -166,6 +259,16 @@ pub const Cutover = struct {
         self.phase = .quiescing;
     }
 
+    /// Revokes intent authority and emits authoritative cancels for CutoverDrain scope.
+    pub fn quiesceShard(self: *Cutover, shard: *trading.TradingShard, barrier: u64) ![]const trading.oms.Command {
+        try self.quiesce(barrier);
+        shard.operational_state.trading_authorized = false;
+        if (shard.operational_state.mode == .trading) shard.operational_state.mode = .draining;
+        shard.oms.begin();
+        try shard.oms.cancelOpenOrders(false);
+        return shard.oms.emitted();
+    }
+
     /// Proves CutoverDrain through authoritative order and Venue evidence.
     pub fn drain(self: *Cutover, evidence: VenueEvidence) !void {
         if (self.phase != .quiescing) return error.InvalidCutoverTransition;
@@ -199,10 +302,48 @@ pub const Cutover = struct {
             .strategy_definition = self.candidate.strategy_definition,
             .parameter_version = self.candidate.parameter_version,
             .state_schema_version = self.candidate.state_schema_version,
-            .transition = self.candidate.transition,
+            .transition = @enumFromInt(@intFromEnum(self.candidate.transition)),
             .barrier = barrier,
             .canonical_state_digest = digest,
         };
+        self.activations[self.activation_count] = event;
+        self.activation_count += 1;
+        self.generation = event.generation;
+        self.active_release = event.new_release;
+        self.active_strategy_instance = event.new_strategy_instance;
+        self.phase = .active;
+        return event;
+    }
+
+    /// Persists activation through TradingShard.apply and stable journal before committing cutover state.
+    pub fn activateStable(
+        self: *Cutover,
+        shard: *trading.TradingShard,
+        stable_journal: *trading.journal.Journal,
+        activation_identity: u128,
+    ) !VersionActivationEvent {
+        if (self.phase != .draining) return error.InvalidCutoverTransition;
+        const digest = shard.canonicalStateDigest();
+        const barrier = shard.trace.len + 1;
+        const event: VersionActivationEvent = .{
+            .activation_identity = activation_identity,
+            .generation = self.generation + 1,
+            .old_release = self.active_release,
+            .new_release = self.candidate.release,
+            .old_strategy_instance = self.active_strategy_instance,
+            .new_strategy_instance = self.candidate.strategy_instance,
+            .strategy_definition = self.candidate.strategy_definition,
+            .parameter_version = self.candidate.parameter_version,
+            .state_schema_version = self.candidate.state_schema_version,
+            .transition = @enumFromInt(@intFromEnum(self.candidate.transition)),
+            .barrier = barrier,
+            .canonical_state_digest = digest,
+        };
+        _ = try trading.applyStable(shard, stable_journal, .{
+            .identity = @truncate(activation_identity),
+            .payload = .{ .version_activation = event },
+        });
+        if (stable_journal.last_sequence != barrier) return error.ActivationNotStable;
         self.activations[self.activation_count] = event;
         self.activation_count += 1;
         self.generation = event.generation;
@@ -267,7 +408,10 @@ test "restart recovery remains fenced until exact venue evidence closes" {
     mismatch.exchange_cash_micros += 1;
     try std.testing.expectError(error.VenueReconciliationMismatch, recovery.reconcile(1, mismatch));
     try std.testing.expectEqual(RecoveryPhase.recovery_only, recovery.phase);
+    try std.testing.expect(recovery.shard.economic_projection.reconciliation_break);
+    try std.testing.expectEqual(@as(u8, 1), recovery.shard.operational_state.latch_count);
 
+    recovery = RecoveryCoordinator.begin(shard, 11);
     try recovery.reconcile(2, recovery.expectedVenueEvidence());
     try std.testing.expectEqual(RecoveryPhase.ready, recovery.phase);
     try std.testing.expectEqual(trading.operational.OperationalMode.ready, recovery.shard.operational_state.mode);
@@ -308,6 +452,41 @@ test "strategy checkpoint catches up to the core barrier without publishing inte
     try std.testing.expectError(error.CoreRecoveryIncomplete, catchUpStrategy(&coordinator, checkpoint, metadata, &.{}));
 }
 
+test "strategy recovery falls back from a damaged newest published checkpoint" {
+    var coordinator = RecoveryCoordinator.begin(.{}, 5);
+    coordinator.phase = .ready;
+    const older: strategy_recovery.Metadata = .{
+        .schema_registry = 1,
+        .strategy_instance = 2,
+        .strategy_definition = 3,
+        .state_schema = 4,
+        .state_schema_version = 1,
+        .strategy_config_version = 7,
+        .strategy_cursor = 2,
+        .next_intent_sequence = 5,
+    };
+    var older_storage: [512]u8 = undefined;
+    const older_checkpoint = try strategy_recovery.encodeCheckpoint(&older_storage, older, .{ .accumulator = 30, .event_count = 2 });
+    var newest_storage: [512]u8 = undefined;
+    const newest_metadata = blk: {
+        var value = older;
+        value.strategy_cursor = 4;
+        value.next_intent_sequence = 6;
+        break :blk value;
+    };
+    const newest = try strategy_recovery.encodeCheckpoint(&newest_storage, newest_metadata, .{ .accumulator = 100, .event_count = 4 });
+    newest_storage[newest.len - 1] ^= 1;
+    const recovered = try catchUpPublishedStrategy(&coordinator, &.{
+        .{ .container = newest_storage[0..newest.len], .metadata = newest_metadata },
+        .{ .container = older_checkpoint, .metadata = older },
+    }, &.{
+        .{ .sequence = 3, .delta = 30, .would_emit_intent = false },
+        .{ .sequence = 4, .delta = 40, .would_emit_intent = true },
+        .{ .sequence = 5, .delta = 50, .would_emit_intent = false },
+    });
+    try std.testing.expectEqual(@as(u64, 5), recovered.cursor);
+}
+
 test "cutover drain activates exactly one version at a stable barrier" {
     var cutover: Cutover = .{ .generation = 4, .active_release = 10, .active_strategy_instance = 20 };
     try cutover.prepare(.{
@@ -332,6 +511,42 @@ test "cutover drain activates exactly one version at a stable barrier" {
     try std.testing.expectEqual(@as(u128, 21), cutover.active_strategy_instance);
     try std.testing.expectEqual(@as(u64, 5), event.generation);
     try std.testing.expectEqual(CutoverPhase.active, cutover.phase);
+}
+
+test "cutover activation is a stable canonical fact before authority switches" {
+    var shard: trading.TradingShard = .{};
+    var stable_journal = trading.journal.Journal.init();
+    var cutover: Cutover = .{ .generation = 0, .active_release = 0, .active_strategy_instance = 0 };
+    try cutover.prepare(.{
+        .release = 11,
+        .strategy_instance = 21,
+        .strategy_definition = 30,
+        .parameter_version = 2,
+        .state_schema_version = 1,
+        .transition = .keep,
+        .structure_valid = true,
+        .economic_digest_valid = true,
+        .strategy_invariants_valid = true,
+    });
+    try cutover.quiesce(1);
+    var evidence: VenueEvidence = std.mem.zeroes(VenueEvidence);
+    evidence.open_orders_closed = true;
+    evidence.ledger_closed = true;
+    try cutover.drain(evidence);
+    const activation = try cutover.activateStable(&shard, &stable_journal, 40);
+    try std.testing.expectEqual(@as(u64, 1), stable_journal.last_sequence);
+    try std.testing.expectEqual(@as(u64, 11), shard.active_release);
+    try std.testing.expectEqual(activation.new_release, cutover.active_release);
+    try stable_journal.seal();
+    var replayed: trading.ReplayTradingShard = .{};
+    var reader = try trading.journal.Reader.init(stable_journal.bytes());
+    const record = switch (try reader.next()) {
+        .record => |value| value,
+        .end => return error.MissingActivation,
+    };
+    const input = try trading.decodeStableInput(record);
+    _ = try replayed.apply(input);
+    try std.testing.expectEqual(shard.active_release, replayed.shard.active_release);
 }
 
 test "cutover failures and forward rollback never regress economic state or generation" {
