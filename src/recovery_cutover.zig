@@ -135,9 +135,9 @@ pub const Candidate = struct {
 /// Bounded low-frequency cutover state; economic state remains in TradingShard.
 pub const Cutover = struct {
     phase: CutoverPhase = .idle,
-    generation: u64,
-    active_release: u64,
-    active_strategy_instance: u128,
+    generation: u64 = 0,
+    active_release: u64 = 0,
+    active_strategy_instance: u128 = 0,
     candidate: Candidate = undefined,
     quiesce_barrier: u64 = 0,
     activations: [8]VersionActivationEvent = undefined,
@@ -210,6 +210,42 @@ pub const Cutover = struct {
         self.active_strategy_instance = event.new_strategy_instance;
         self.phase = .active;
         return event;
+    }
+
+    /// Discards an uncommitted candidate; the current active version remains authoritative.
+    pub fn failBeforeActivation(self: *Cutover) !void {
+        switch (self.phase) {
+            .candidate, .quiescing, .draining => self.phase = if (self.active_release == 0) .idle else .active,
+            else => return error.InvalidCutoverTransition,
+        }
+        self.quiesce_barrier = 0;
+    }
+
+    /// Rebuilds the sole active version from stable activation facts.
+    pub fn replayActivations(events: []const VersionActivationEvent) !Cutover {
+        var replayed: Cutover = .{};
+        for (events) |event| {
+            if (replayed.activation_count == 0) {
+                if (event.generation == 0) return error.InvalidActivationHistory;
+                replayed.generation = event.generation - 1;
+                replayed.active_release = event.old_release;
+                replayed.active_strategy_instance = event.old_strategy_instance;
+            }
+            if (event.activation_identity == 0 or event.generation != replayed.generation + 1 or
+                event.barrier == 0 or (replayed.activation_count != 0 and
+                (event.old_release != replayed.active_release or
+                    event.old_strategy_instance != replayed.active_strategy_instance or
+                    event.barrier < replayed.activations[replayed.activation_count - 1].barrier)))
+                return error.InvalidActivationHistory;
+            if (replayed.activation_count == replayed.activations.len) return error.ActivationHistoryFull;
+            replayed.activations[replayed.activation_count] = event;
+            replayed.activation_count += 1;
+            replayed.generation = event.generation;
+            replayed.active_release = event.new_release;
+            replayed.active_strategy_instance = event.new_strategy_instance;
+        }
+        replayed.phase = if (events.len == 0) .idle else .active;
+        return replayed;
     }
 };
 
@@ -296,4 +332,66 @@ test "cutover drain activates exactly one version at a stable barrier" {
     try std.testing.expectEqual(@as(u128, 21), cutover.active_strategy_instance);
     try std.testing.expectEqual(@as(u64, 5), event.generation);
     try std.testing.expectEqual(CutoverPhase.active, cutover.phase);
+}
+
+test "cutover failures and forward rollback never regress economic state or generation" {
+    var cutover: Cutover = .{ .generation = 4, .active_release = 10, .active_strategy_instance = 20, .phase = .active };
+    const candidate: Candidate = .{
+        .release = 11,
+        .strategy_instance = 21,
+        .strategy_definition = 30,
+        .parameter_version = 2,
+        .state_schema_version = 1,
+        .transition = .keep,
+        .structure_valid = true,
+        .economic_digest_valid = true,
+        .strategy_invariants_valid = true,
+    };
+    try cutover.prepare(candidate);
+    try cutover.quiesce(100);
+    try cutover.failBeforeActivation();
+    try std.testing.expectEqual(@as(u64, 10), cutover.active_release);
+    try std.testing.expectEqual(@as(u64, 4), cutover.generation);
+
+    try cutover.prepare(candidate);
+    try cutover.quiesce(100);
+    var evidence: VenueEvidence = std.mem.zeroes(VenueEvidence);
+    evidence.open_orders_closed = true;
+    evidence.ledger_closed = true;
+    try cutover.drain(evidence);
+    const filled_state_digest: [32]u8 = @splat(9);
+    try std.testing.expectError(error.ActivationNotStable, cutover.activate(40, 101, filled_state_digest, false));
+    try std.testing.expectEqual(CutoverPhase.recovery_only, cutover.phase);
+    try std.testing.expectEqual(@as(u64, 10), cutover.active_release);
+
+    cutover.phase = .active;
+    try cutover.prepare(candidate);
+    try cutover.quiesce(102);
+    try cutover.drain(evidence);
+    const activated = try cutover.activate(41, 103, filled_state_digest, true);
+
+    const rollback: Candidate = .{
+        .release = 10,
+        .strategy_instance = 22,
+        .strategy_definition = 30,
+        .parameter_version = 3,
+        .state_schema_version = 1,
+        .transition = .rebuild,
+        .structure_valid = true,
+        .economic_digest_valid = true,
+        .strategy_invariants_valid = true,
+    };
+    try cutover.prepare(rollback);
+    try cutover.quiesce(104);
+    try cutover.drain(evidence);
+    const rolled_back = try cutover.activate(42, 105, filled_state_digest, true);
+    try std.testing.expectEqual(activated.generation + 1, rolled_back.generation);
+    try std.testing.expectEqual(@as(u64, 10), rolled_back.new_release);
+    try std.testing.expectEqual(@as(u128, 22), rolled_back.new_strategy_instance);
+    try std.testing.expectEqualSlices(u8, &activated.canonical_state_digest, &rolled_back.canonical_state_digest);
+
+    const replayed = try Cutover.replayActivations(cutover.activations[0..cutover.activation_count]);
+    try std.testing.expectEqual(cutover.active_release, replayed.active_release);
+    try std.testing.expectEqual(cutover.active_strategy_instance, replayed.active_strategy_instance);
+    try std.testing.expectEqual(cutover.generation, replayed.generation);
 }
