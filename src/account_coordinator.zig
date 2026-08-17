@@ -903,7 +903,7 @@ test "summary barrier and lease expiry fail atomically on overflow" {
     _ = try coordinator.allocateLeases(1, 20);
     coordinator.leases[2].version = std.math.maxInt(u64);
     const before = coordinator.leases;
-    try std.testing.expectError(error.Overflow, coordinator.expireLeases(11));
+    try std.testing.expectError(error.Overflow, coordinator.expireLeases(21));
     try std.testing.expectEqualDeep(before, coordinator.leases);
 }
 
