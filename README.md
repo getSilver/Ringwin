@@ -355,3 +355,6 @@ Gateway、TradingShard 现金风控、OrderCommand、OKX 回报、经济投影�
 下一能力波次转入[交易核心系统闭环](.scratch/trading-core-system-closure/map.md)：补齐核心拥有的
 多品种 OMS、风险与账务、操作安全栅栏、持久恢复、分片/账户协调及同核整波验收。OKX 仅作为
 既有真实 Venue 证据；Linux 五核生产性能、生产账户、密钥托管和部署资格仍是独立波次。
+
+## License
+MIT License
