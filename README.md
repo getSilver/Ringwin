@@ -1,11 +1,11 @@
-[简体中文](README.zh.md)
+<div align="center">
 
 # Ringwin
-
+[简体中文](README.zh.md)
 **Ringwin is an experimental deterministic trading engine written in Zig.**
 
 It is designed as both a practical trading-system prototype and an open-source reference for developers interested in applying Zig to complex, stateful, reliability-sensitive software.
-
+</div>
 Ringwin focuses on deterministic state transitions, fixed-point financial arithmetic, explicit risk and order-management boundaries, replayable event processing, and fault isolation.
 
 > [!WARNING]
