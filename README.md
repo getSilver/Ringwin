@@ -1,3 +1,6 @@
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Bash](https://img.shields.io/badge/language-bash-green.svg)]()
+
 [简体中文](README.zh.md)
 
 # Ringwin
