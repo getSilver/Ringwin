@@ -43,9 +43,13 @@ Status: open
 
 ## Frontier
 
-[闭合四分片与共享账户协调](issues/08-shards-and-account-coordination.md)
+[形成可复现证据并关闭交易核心波次](issues/10-close-trading-core-wave.md)
 
 ## Decisions so far
+
+- [形成核心成功/故障整波自动验收](issues/09-core-wave-acceptance.md) — 新增一条失败即停入口 `tools/verify-core-wave.ps1`：`zig fmt --check` 全部 src、Debug/ReleaseSafe 各 111 项核心测试、单分片 happy path 与 market-gap/risk-rejection/unknown-reconciliation/duplicate-report 四条故障轨迹（SimulatedVenue seam，live/replay 等价、journal 自检与截断恢复）、四分片协调波（`--four-shard-acceptance` 输出 barrier=16、四个 CanonicalStateDigest 与共享摘要 `39dde211ff7044fb…cb2ee39`，三条恢复路径收敛、恢复期 RecoveryOnly 不重发历史副作用）、Python StrategyHost 产品验收与 Linux `x86_64-linux-gnu` 交叉编译检查；OKX Demo 事实默认 offline 完全不触碰，仅 `-DemoLive` 显式启用且 preflight 门禁不变。
+
+- [闭合四分片与共享账户协调](issues/08-shards-and-account-coordination.md) — 四个单写者 TradingShard 经共享账户协调协议闭合：稳定不可复用身份与 per-shard 摘要、按 GrossPortfolioMargin 分配可重放 RiskLease（AccountNettingBenefit 不进任何可用额度）、共享账户/Venue 事实确定性扇出、GrossPortfolioMargin vs VenueNetMargin 双口径对账差异锁存 MarginReconciliationBreak/SafetyGate 并向下收紧全部 shard、共享 Execution Gateway 唯一归属 fail-closed、局部故障只冻结本 DecisionDomain；三条恢复路径（全量重放 / snapshot+日志尾 / 中途再崩溃）收敛到同一 barrier=16 与四个 CanonicalStateDigest。
 
 - [实现核心快照、重启恢复与版本屏障](issues/07-snapshot-recovery-and-cutover.md) — 已闭合显式稳定快照、日志尾恢复、Venue 对账、StrategyCheckpoint 回退追赶、持久 cutover fence/cancel outbox、candidate barrier 验证、VersionActivationEvent 与 ForwardRollback 重放守恒；Debug/ReleaseSafe 各 95 项测试通过。
 
