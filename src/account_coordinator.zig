@@ -175,6 +175,57 @@ pub fn applyAccountGateStable(delivery: GateDelivery, target_shard_id: ShardId, 
     _ = try trading.applyStable(shard, stable_journal, try accountGateEvent(delivery, shard.operational_state.target_identity));
 }
 
+/// Derives one shard's own publication strictly from its authoritative state.
+pub fn shardSummaryFromShard(
+    shard: *const trading.TradingShard,
+    shard_id: ShardId,
+    shard_sequence: u64,
+    decision_domain: u128,
+) !ShardSummary {
+    if (decision_domain == 0 or shard_sequence == 0 or
+        !shard.account_configured or shard.exchange_account_identity == 0)
+        return error.InvalidShardSummary;
+    const rules_version = @min(shard.instrument_rules_version, shard.margin_rules_version);
+    if (rules_version == 0 or shard.portfolio_identity == 0) return error.InvalidShardSummary;
+    var open_orders: u8 = 0;
+    var unknown_orders: u8 = 0;
+    for (shard.oms.orders[0..shard.oms.order_count]) |order| switch (order.state) {
+        .unknown => unknown_orders += 1,
+        .filled, .canceled, .rejected => {},
+        else => open_orders += 1,
+    };
+    const economics_summary = shard.economicSummary();
+    const portfolio_distance = if (shard.portfolio_liquidation_distance_ticks == 0)
+        std.math.maxInt(i64)
+    else
+        shard.portfolio_liquidation_distance_ticks;
+    const exchange_distance = if (shard.exchange_liquidation_distance_ticks == 0)
+        std.math.maxInt(i64)
+    else
+        shard.exchange_liquidation_distance_ticks;
+    return .{
+        .shard_id = shard_id,
+        .decision_domain = decision_domain,
+        .virtual_portfolio = shard.portfolio_identity,
+        .exchange_account = shard.exchange_account_identity,
+        .shard_sequence = shard_sequence,
+        .rules_version = rules_version,
+        .lease_version = shard.risk_lease_version,
+        .reservation_micros = shard.layered_risk_reserved_micros,
+        .spot_quantity = economics_summary.portfolio.spot.quantity,
+        .swap_quantity = economics_summary.portfolio.swap.quantity,
+        .cash_micros = economics_summary.portfolio.usdt_balance_micros,
+        .open_orders = open_orders,
+        .unknown_orders = unknown_orders,
+        .local_gate_closed = shard.operational_state.latch_count > 0 or
+            shard.portfolio_margin_gate != .healthy or
+            shard.exchange_margin_gate != .healthy,
+        .exchange_margin_micros = economics_summary.exchange.margin_micros,
+        .risk_tier = shard.last_risk_tier,
+        .liquidation_distance_ticks = @min(portfolio_distance, exchange_distance),
+    };
+}
+
 /// One qualified command submitted through the shared transport periphery.
 pub const GatewayRequest = struct {
     exchange_account: u128,
@@ -1088,4 +1139,103 @@ test "account recovery restores four matching shard tails under fresh evidence f
     try std.testing.expect(recovered.coordinator.recovery_only);
     for (recovered.shards) |shard| try std.testing.expectEqual(trading.operational.OperationalMode.recovering, shard.operational_state.mode);
     try std.testing.expectError(error.FreshMarginObservationRequired, recovered.completeCoordinatorRecovery());
+}
+
+test "shard summaries derive from authoritative state and coordinate four real shards" {
+    var shards: [max_shards]trading.TradingShard = undefined;
+    var journals: [max_shards]trading.journal.Journal = undefined;
+    for (0..max_shards) |index| {
+        shards[index] = .{};
+        journals[index] = trading.journal.Journal.init();
+        const journal = &journals[index];
+        _ = try trading.applyStable(&shards[index], journal, .{
+            .identity = 1,
+            .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 1, .quantity_denominator = 1, .reservation_model = .leveraged } },
+        });
+        _ = try trading.applyStable(&shards[index], journal, .{
+            .identity = 2,
+            .payload = .{ .margin_rules_activated = .{ .version = 1 } },
+        });
+        _ = try trading.applyStable(&shards[index], journal, .{
+            .identity = 3,
+            .payload = .{ .account_configuration = .{ .exchange_account_identity = 900 } },
+        });
+        _ = try trading.applyStable(&shards[index], journal, .{
+            .identity = 4,
+            .payload = .{ .exchange_balance = .{ .cash_micros = 10_000 } },
+        });
+        _ = try trading.applyStable(&shards[index], journal, .{
+            .identity = 5,
+            .payload = .exchange_positions,
+        });
+        _ = try trading.applyStable(&shards[index], journal, .{
+            .identity = 6,
+            .payload = .{ .opening_balance = .{ .cash_micros = 10_000 } },
+        });
+        _ = try trading.applyStable(&shards[index], journal, .{
+            .identity = 7,
+            .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = index + 11 } },
+        });
+    }
+    try std.testing.expectError(error.InvalidShardSummary, shardSummaryFromShard(&trading.TradingShard{}, .shard_0, 1, 1));
+
+    var coordinator = AccountCoordinator.init(900, 4_000, 4_000);
+    var initial: [max_shards]ShardSummary = undefined;
+    for (0..max_shards) |index| {
+        initial[index] = try shardSummaryFromShard(&shards[index], @enumFromInt(index), 1, @intCast(index + 1));
+        try std.testing.expect(try coordinator.publishSummary(index + 100, initial[index]));
+    }
+    try std.testing.expectEqual(@as(i64, 0), try coordinator.grossPortfolioMargin());
+    const first_leases = try coordinator.allocateLeases(1, 10);
+    for (first_leases) |lease| {
+        try std.testing.expectEqual(@as(i64, 0), lease.used_micros);
+        try std.testing.expectEqual(@as(i64, 1_000), lease.limit_micros);
+    }
+
+    shards[3].layered_risk_reserved_micros = 500;
+    shards[3].last_risk_tier = 2;
+    const advanced = try shardSummaryFromShard(&shards[3], .shard_3, 2, 4);
+    try std.testing.expectEqual(@as(i64, 500), advanced.reservation_micros);
+    try std.testing.expect(!advanced.local_gate_closed);
+    try std.testing.expect(try coordinator.publishSummary(203, advanced));
+    try std.testing.expectEqual(@as(i64, 500), try coordinator.grossPortfolioMargin());
+    const renewed = try coordinator.allocateLeases(2, 20);
+    try std.testing.expectEqual(@as(i64, 500), renewed[3].used_micros);
+    try std.testing.expectEqual(@as(i64, 1_000), renewed[3].limit_micros);
+    _ = try coordinator.reconcileMargin(.{
+        .identity = 300,
+        .barrier = 25,
+        .venue_net_margin_micros = 0,
+        .venue_swap_margin_micros = 0,
+        .venue_swap_quantity = 0,
+        .margin_mode = .isolated,
+        .rules_version = 1,
+        .venue_risk_tier = 2,
+        .venue_liquidation_distance_ticks = std.math.maxInt(i64),
+    });
+    try std.testing.expect(coordinator.margin_gate.open);
+    try std.testing.expectEqual(@as(i64, 500), coordinator.account_netting_benefit_micros);
+
+    var gated_shard = shards[0];
+    try applyAccountGateStable(.{ .shard_id = .shard_0, .gate = .{ .identity = 8, .open = false, .latched = true } }, .shard_0, &gated_shard, &journals[0]);
+    const latched = try shardSummaryFromShard(&gated_shard, .shard_0, 3, 1);
+    try std.testing.expect(latched.local_gate_closed);
+
+    var replayed = AccountCoordinator.init(900, 4_000, 4_000);
+    for (0..max_shards) |index| _ = try replayed.publishSummary(index + 100, initial[index]);
+    _ = try replayed.allocateLeases(1, 10);
+    _ = try replayed.publishSummary(203, try shardSummaryFromShard(&shards[3], .shard_3, 2, 4));
+    _ = try replayed.allocateLeases(2, 20);
+    _ = try replayed.reconcileMargin(.{
+        .identity = 300,
+        .barrier = 25,
+        .venue_net_margin_micros = 0,
+        .venue_swap_margin_micros = 0,
+        .venue_swap_quantity = 0,
+        .margin_mode = .isolated,
+        .rules_version = 1,
+        .venue_risk_tier = 2,
+        .venue_liquidation_distance_ticks = std.math.maxInt(i64),
+    });
+    try std.testing.expectEqualSlices(u8, &coordinator.digest(), &replayed.digest());
 }
