@@ -1,7 +1,7 @@
 # 完成交易核心系统闭环
 
 Label: wayfinder:map
-Status: open
+Status: closed
 
 ## Destination
 
@@ -43,9 +43,11 @@ Status: open
 
 ## Frontier
 
-[形成可复现证据并关闭交易核心波次](issues/10-close-trading-core-wave.md)
+（无；交易核心波次已关闭。）
 
 ## Decisions so far
+
+- [形成可复现证据并关闭交易核心波次](issues/10-close-trading-core-wave.md) — 在干净 worktree 重跑 `tools/verify-core-wave.ps1` 全波通过：`zig fmt --check`、Debug/ReleaseSafe 各 111 项测试、单分片 happy path（digest `05512551…b10ef3`）与四条故障轨迹 live/replay 等价、四分片 barrier=16 四个 CanonicalStateDigest 与共享摘要 `39dde211ff7044fb…cb2ee39` 复现一致、Python seam `strategy_host_product_acceptance=passed`、Linux 交叉编译通过；OKX Demo 事实保持默认 offline，仅 `-DemoLive` 显式启用。Definition of done 八条逐项核对：冻结 interface 与版本化事实（01/02）、SPOT/SWAP 多 Instrument OMS 生命周期（03）、五层风险与 reservation 所有权（04）、双层经济投影与账本闭合（05）、操作生命周期与 SafetyGate 状态机（06）、快照/恢复/cutover 收敛同一 digest（07）、四分片单写者与共享账户协调不复制 Venue 接入且禁跨分片净额收益（08）、一条失败即停入口覆盖离线轨迹且历史重放永不重发副作用（09）。排除项未越界：未新增 Venue、未扩展 OKX 协议、未建生产部署/控制面 UI/研究平台/Linux 生产资格。
 
 - [形成核心成功/故障整波自动验收](issues/09-core-wave-acceptance.md) — 新增一条失败即停入口 `tools/verify-core-wave.ps1`：`zig fmt --check` 全部 src、Debug/ReleaseSafe 各 111 项核心测试、单分片 happy path 与 market-gap/risk-rejection/unknown-reconciliation/duplicate-report 四条故障轨迹（SimulatedVenue seam，live/replay 等价、journal 自检与截断恢复）、四分片协调波（`--four-shard-acceptance` 输出 barrier=16、四个 CanonicalStateDigest 与共享摘要 `39dde211ff7044fb…cb2ee39`，三条恢复路径收敛、恢复期 RecoveryOnly 不重发历史副作用）、Python StrategyHost 产品验收与 Linux `x86_64-linux-gnu` 交叉编译检查；OKX Demo 事实默认 offline 完全不触碰，仅 `-DemoLive` 显式启用且 preflight 门禁不变。
 
