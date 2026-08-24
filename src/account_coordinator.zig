@@ -2,9 +2,18 @@ const std = @import("std");
 const trading = @import("trading_shard.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const snapshot_magic: u64 = 0x54434341574e4952;
+const coordinator_snapshot_version: u16 = 2;
 const account_margin_gate_identity: u128 = 0x414343544d415247;
 
 pub const max_shards = 4;
+
+/// Account-level margin mode; IsolatedLinearUsdtV1 stays the only supported model.
+pub const AccountMarginMode = enum(u8) { isolated, cross };
+
+/// Deterministic classification of one margin reconciliation observation.
+pub const MarginReconciliationState = enum(u8) { unknown, healthy, broken };
+
+const unknown_liquidation_distance: i64 = std.math.maxInt(i64);
 
 /// Stable identity of one of the four single-writer shards.
 pub const ShardId = enum(u8) { shard_0, shard_1, shard_2, shard_3 };
@@ -28,7 +37,8 @@ pub const ShardSummary = struct {
     spot_margin_micros: i64 = 0,
     exchange_margin_micros: i64 = 0,
     risk_tier: u8 = 0,
-    liquidation_distance_ticks: i64 = std.math.maxInt(i64),
+    liquidation_distance_ticks: i64 = unknown_liquidation_distance,
+    margin_mode: AccountMarginMode = .isolated,
 
     fn fixture(shard_id: ShardId, sequence: u64, reservation: i64) ShardSummary {
         return .{
@@ -95,12 +105,14 @@ pub const MarginObservation = struct {
     barrier: u64,
     venue_net_margin_micros: i64,
     venue_swap_quantity: i64,
+    venue_spot_quantity: i64 = 0,
     venue_spot_margin_micros: i64 = 0,
     venue_swap_margin_micros: i64 = 0,
-    margin_mode: enum(u8) { isolated },
+    margin_mode: AccountMarginMode,
     rules_version: u32,
     venue_risk_tier: u8 = 0,
-    venue_liquidation_distance_ticks: i64 = std.math.maxInt(i64),
+    venue_liquidation_distance_ticks: i64 = unknown_liquidation_distance,
+    bucket_rounding_micros: i64 = 0,
 };
 
 /// Account-level authority result that every affected shard must consume.
@@ -350,6 +362,7 @@ pub const AccountCoordinator = struct {
     deliveries: [max_shards]Delivery = undefined,
     last_margin_observation: ?MarginObservation = null,
     margin_gate: AccountGate = .{ .identity = 0, .open = false, .latched = false },
+    margin_reconciliation_state: MarginReconciliationState = .unknown,
     gate_deliveries: [max_shards]GateDelivery = undefined,
     recovery_only: bool = false,
     recovery_margin_identity: u128 = 0,
@@ -408,10 +421,10 @@ pub const AccountCoordinator = struct {
         digestInt(&hasher, u8, self.lease_count);
         for (self.leases[0..self.lease_count]) |lease| digestStruct(&hasher, RiskLease, lease);
         digestInt(&hasher, i64, self.account_netting_benefit_micros);
-        hasher.update(&.{@intFromBool(self.recovery_only)});
         digestOptionalAccountFact(&hasher, self.last_account_fact);
         digestOptionalMarginObservation(&hasher, self.last_margin_observation);
         digestStruct(&hasher, AccountGate, self.margin_gate);
+        digestInt(&hasher, u8, @intFromEnum(self.margin_reconciliation_state));
         var result: [Sha256.digest_length]u8 = undefined;
         hasher.final(&result);
         return result;
@@ -429,6 +442,8 @@ pub const AccountCoordinator = struct {
     /// Allocates deterministic leases without turning account netting into buying power.
     pub fn allocateLeases(self: *AccountCoordinator, version: u64, valid_through_barrier: u64) ![]const RiskLease {
         if (self.recovery_only) return error.CoordinatorRecoveryOnly;
+        if (self.margin_gate.latched or self.margin_reconciliation_state == .broken)
+            return error.MarginReconciliationRequired;
         if (version == 0 or valid_through_barrier < self.barrier) return error.InvalidRiskLease;
         for (self.summaries) |record| if (!record.present) return error.IncompleteShardSummaries;
         const gross = try self.grossPortfolioMargin();
@@ -439,7 +454,9 @@ pub const AccountCoordinator = struct {
         var candidate: [max_shards]RiskLease = undefined;
         for (&candidate, 0..) |*lease, index| {
             const summary = self.summaries[index].value;
-            const limit = base + @as(i64, if (index < remainder) 1 else 0);
+            var limit = base + @as(i64, if (index < remainder) 1 else 0);
+            if (self.lease_count != 0 and self.leases[index].open)
+                limit = @min(limit, self.leases[index].limit_micros);
             if (summary.reservation_micros > limit) return error.RiskLeaseOversubscribed;
             lease.* = .{
                 .identity = try std.math.add(u128, try std.math.mul(u128, version, max_shards), index + 1),
@@ -534,7 +551,8 @@ pub const AccountCoordinator = struct {
     /// Reconciles gross portfolio state with Venue net margin without allocating the difference.
     pub fn reconcileMargin(self: *AccountCoordinator, observation: MarginObservation) !AccountGate {
         if (observation.identity == 0 or observation.barrier < self.barrier or
-            observation.venue_net_margin_micros < 0 or observation.rules_version == 0)
+            observation.venue_net_margin_micros < 0 or observation.rules_version == 0 or
+            observation.venue_spot_quantity < 0 or observation.bucket_rounding_micros < 0)
             return error.InvalidMarginObservation;
         if (self.last_margin_observation) |known| {
             if (observation.identity == known.identity) {
@@ -543,34 +561,20 @@ pub const AccountCoordinator = struct {
             }
             if (observation.barrier <= known.barrier) return error.StaleMarginObservation;
         }
-        var projected_quantity: i64 = 0;
-        var projected_margin: i64 = 0;
-        var projected_spot_margin: i64 = 0;
-        var projected_risk_tier: u8 = 0;
-        var projected_liquidation_distance: i64 = std.math.maxInt(i64);
-        for (self.summaries) |record| {
-            if (!record.present) return error.IncompleteShardSummaries;
-            projected_quantity = try std.math.add(i64, projected_quantity, record.value.swap_quantity);
-            projected_margin = try std.math.add(i64, projected_margin, record.value.exchange_margin_micros);
-            projected_spot_margin = try std.math.add(i64, projected_spot_margin, record.value.spot_margin_micros);
-            projected_risk_tier = @max(projected_risk_tier, record.value.risk_tier);
-            projected_liquidation_distance = @min(projected_liquidation_distance, record.value.liquidation_distance_ticks);
-        }
+        const projected = try self.projectAccounts();
         const gross = try self.grossPortfolioMargin();
         self.account_netting_benefit_micros = @max(gross - observation.venue_net_margin_micros, 0);
-        const closed = projected_quantity == observation.venue_swap_quantity and
-            try std.math.add(i64, projected_spot_margin, projected_margin) == observation.venue_net_margin_micros and
-            projected_spot_margin == observation.venue_spot_margin_micros and
-            projected_margin == observation.venue_swap_margin_micros and
-            projected_risk_tier == observation.venue_risk_tier and
-            projected_liquidation_distance == observation.venue_liquidation_distance_ticks and
-            observation.venue_net_margin_micros <= gross;
         self.last_margin_observation = observation;
+        self.margin_reconciliation_state = classifyObservation(projected, gross, observation);
         if (self.recovery_only) self.recovery_margin_identity = observation.identity;
-        self.margin_gate = if (self.margin_gate.latched)
-            .{ .identity = account_margin_gate_identity, .open = false, .latched = true }
-        else
-            .{ .identity = account_margin_gate_identity, .open = closed, .latched = !closed };
+        if (!self.margin_gate.latched) switch (self.margin_reconciliation_state) {
+            .unknown => self.margin_gate = .{ .identity = account_margin_gate_identity, .open = false, .latched = false },
+            .healthy => self.margin_gate = .{ .identity = account_margin_gate_identity, .open = true, .latched = false },
+            .broken => {
+                self.margin_gate = .{ .identity = account_margin_gate_identity, .open = false, .latched = true };
+                try self.revokeNewRiskHeadroom();
+            },
+        };
         return self.margin_gate;
     }
 
@@ -578,29 +582,108 @@ pub const AccountCoordinator = struct {
     pub fn resolveMarginGate(self: *AccountCoordinator, observation_identity: u128) !AccountGate {
         const observation = self.last_margin_observation orelse return error.MarginObservationRequired;
         if (observation.identity != observation_identity) return error.MarginObservationIdentityConflict;
-        var projected_quantity: i64 = 0;
-        var projected_margin: i64 = 0;
-        var projected_spot_margin: i64 = 0;
-        var projected_risk_tier: u8 = 0;
-        var projected_liquidation_distance: i64 = std.math.maxInt(i64);
-        for (self.summaries) |record| {
-            if (!record.present) return error.IncompleteShardSummaries;
-            projected_quantity = try std.math.add(i64, projected_quantity, record.value.swap_quantity);
-            projected_margin = try std.math.add(i64, projected_margin, record.value.exchange_margin_micros);
-            projected_spot_margin = try std.math.add(i64, projected_spot_margin, record.value.spot_margin_micros);
-            projected_risk_tier = @max(projected_risk_tier, record.value.risk_tier);
-            projected_liquidation_distance = @min(projected_liquidation_distance, record.value.liquidation_distance_ticks);
-        }
-        if (projected_quantity != observation.venue_swap_quantity or
-            try std.math.add(i64, projected_spot_margin, projected_margin) != observation.venue_net_margin_micros or
-            projected_spot_margin != observation.venue_spot_margin_micros or
-            projected_margin != observation.venue_swap_margin_micros or
-            projected_risk_tier != observation.venue_risk_tier or
-            projected_liquidation_distance != observation.venue_liquidation_distance_ticks or
-            observation.venue_net_margin_micros > try self.grossPortfolioMargin())
+        const projected = try self.projectAccounts();
+        if (classifyObservation(projected, try self.grossPortfolioMargin(), observation) != .healthy)
             return error.MarginReconciliationStillBroken;
+        self.margin_reconciliation_state = .healthy;
         self.margin_gate = .{ .identity = account_margin_gate_identity, .open = true, .latched = false };
         return self.margin_gate;
+    }
+
+    const AccountProjection = struct {
+        swap_quantity: i64 = 0,
+        spot_quantity: i64 = 0,
+        swap_margin_micros: i64 = 0,
+        spot_margin_micros: i64 = 0,
+        total_margin_micros: i64 = 0,
+        risk_tier: u8 = 0,
+        liquidation_distance_ticks: i64 = unknown_liquidation_distance,
+    };
+
+    fn projectAccounts(self: *const AccountCoordinator) !AccountProjection {
+        var projected: AccountProjection = .{};
+        for (self.summaries) |record| {
+            if (!record.present) return error.IncompleteShardSummaries;
+            projected.swap_quantity = try std.math.add(i64, projected.swap_quantity, record.value.swap_quantity);
+            projected.spot_quantity = try std.math.add(i64, projected.spot_quantity, record.value.spot_quantity);
+            projected.swap_margin_micros = try std.math.add(i64, projected.swap_margin_micros, record.value.exchange_margin_micros);
+            projected.spot_margin_micros = try std.math.add(i64, projected.spot_margin_micros, record.value.spot_margin_micros);
+            projected.total_margin_micros = try std.math.add(i64, projected.total_margin_micros, try std.math.add(i64, record.value.exchange_margin_micros, record.value.spot_margin_micros));
+            projected.risk_tier = @max(projected.risk_tier, record.value.risk_tier);
+            projected.liquidation_distance_ticks = @min(projected.liquidation_distance_ticks, record.value.liquidation_distance_ticks);
+        }
+        return projected;
+    }
+
+    fn classifyObservation(projected: AccountProjection, gross: i64, observation: MarginObservation) MarginReconciliationState {
+        var inputs_known = true;
+        if ((projected.liquidation_distance_ticks == unknown_liquidation_distance) !=
+            (observation.venue_liquidation_distance_ticks == unknown_liquidation_distance)) inputs_known = false;
+        if ((projected.risk_tier == 0) != (observation.venue_risk_tier == 0)) inputs_known = false;
+        if (!inputs_known) return .unknown;
+        const unit = observation.bucket_rounding_micros;
+        const explained = observation.margin_mode == .isolated and
+            projected.swap_quantity == observation.venue_swap_quantity and
+            projected.spot_quantity == observation.venue_spot_quantity and
+            withinRoundingUnit(projected.swap_margin_micros, observation.venue_swap_margin_micros, unit) and
+            withinRoundingUnit(projected.spot_margin_micros, observation.venue_spot_margin_micros, unit) and
+            withinRoundingUnit(projected.total_margin_micros, observation.venue_net_margin_micros, unit) and
+            projected.risk_tier == observation.venue_risk_tier and
+            projected.liquidation_distance_ticks == observation.venue_liquidation_distance_ticks and
+            observation.venue_net_margin_micros <= gross;
+        return if (explained) .healthy else .broken;
+    }
+
+    /// Caps every open lease at its used reservation so no shard keeps new risk headroom.
+    fn revokeNewRiskHeadroom(self: *AccountCoordinator) !void {
+        for (self.leases[0..self.lease_count], 0..) |*lease, index| {
+            if (!lease.open) continue;
+            const capped = @min(lease.limit_micros, lease.used_micros);
+            if (capped == lease.limit_micros) continue;
+            lease.limit_micros = capped;
+            lease.version = try std.math.add(u64, lease.version, 1);
+            lease.identity = try leaseIdentity(lease.version, index);
+        }
+    }
+
+    /// Deterministically lowers open leases to the requested caps without ever adding headroom.
+    pub fn tightenLeases(
+        self: *AccountCoordinator,
+        valid_through_barrier: u64,
+        requested_limits: [max_shards]i64,
+    ) ![]const RiskLease {
+        if (self.recovery_only) return error.CoordinatorRecoveryOnly;
+        if (self.lease_count != max_shards) return error.IncompleteRiskLeases;
+        if (valid_through_barrier < self.barrier) return error.StaleRiskLease;
+        var candidate = self.leases;
+        var changed = false;
+        for (&candidate, 0..) |*lease, index| {
+            if (requested_limits[index] < 0) return error.InvalidRiskLease;
+            if (!lease.open) continue;
+            const target = @min(requested_limits[index], lease.limit_micros);
+            if (target == lease.limit_micros and valid_through_barrier <= lease.valid_through_barrier) continue;
+            lease.limit_micros = target;
+            if (valid_through_barrier > lease.valid_through_barrier) lease.valid_through_barrier = valid_through_barrier;
+            lease.version = try std.math.add(u64, lease.version, 1);
+            lease.identity = try leaseIdentity(lease.version, index);
+            changed = true;
+        }
+        if (changed) self.leases = candidate;
+        return self.leases[0..self.lease_count];
+    }
+
+    /// Returns stable events carrying every current lease to its owning shard.
+    pub fn currentLeaseEvents(self: *const AccountCoordinator, events: *[max_shards]trading.CanonicalEvent) ![]const trading.CanonicalEvent {
+        for (self.leases[0..self.lease_count], 0..) |lease, index|
+            events[index] = try riskLeaseEvent(lease);
+        return events[0..self.lease_count];
+    }
+
+    /// Reports whether one lease's used reservation exceeds its tightened limit.
+    pub fn leaseOverTightened(self: *const AccountCoordinator, shard_id: ShardId) bool {
+        if (self.lease_count != max_shards) return false;
+        const lease = self.leases[@intFromEnum(shard_id)];
+        return lease.open and lease.used_micros > lease.limit_micros;
     }
 
     /// Produces a stable fan-out plan for an account-level authority restriction.
@@ -627,7 +710,7 @@ pub const AccountCoordinator = struct {
     pub fn snapshot(self: *const AccountCoordinator, destination: []u8) ![]const u8 {
         var writer: std.Io.Writer = .fixed(destination);
         try writer.writeInt(u64, snapshot_magic, .little);
-        try writer.writeInt(u16, 1, .little);
+        try writer.writeInt(u16, coordinator_snapshot_version, .little);
         try writer.writeInt(u128, self.exchange_account, .little);
         try writer.writeInt(i64, self.account_safety_ceiling_micros, .little);
         try writer.writeInt(i64, self.global_ceiling_micros, .little);
@@ -663,6 +746,7 @@ pub const AccountCoordinator = struct {
         try writer.writeInt(u128, self.margin_gate.identity, .little);
         try writer.writeByte(@intFromBool(self.margin_gate.open));
         try writer.writeByte(@intFromBool(self.margin_gate.latched));
+        try writer.writeByte(@intFromEnum(self.margin_reconciliation_state));
         const digest_value = self.digest();
         try writer.writeAll(&digest_value);
         return writer.buffered();
@@ -671,7 +755,8 @@ pub const AccountCoordinator = struct {
     /// Restores a validated coordination snapshot into RecoveryOnly account authority.
     pub fn restore(encoded: []const u8) !AccountCoordinator {
         var reader: std.Io.Reader = .fixed(encoded);
-        if (try reader.takeInt(u64, .little) != snapshot_magic or try reader.takeInt(u16, .little) != 1)
+        if (try reader.takeInt(u64, .little) != snapshot_magic or
+            try reader.takeInt(u16, .little) != coordinator_snapshot_version)
             return error.InvalidCoordinatorSnapshot;
         var result = AccountCoordinator.init(
             try reader.takeInt(u128, .little),
@@ -711,6 +796,10 @@ pub const AccountCoordinator = struct {
             .open = try readBool(&reader),
             .latched = try readBool(&reader),
         };
+        result.margin_reconciliation_state = std.enums.fromInt(
+            MarginReconciliationState,
+            try reader.takeByte(),
+        ) orelse return error.InvalidCoordinatorSnapshot;
         const expected = try reader.take(32);
         const encoded_digest = result.digest();
         if (reader.seek != encoded.len or !std.mem.eql(u8, expected, &encoded_digest))
@@ -745,7 +834,14 @@ pub const AccountRecovery = struct {
             result.shards[index].operational_state.mode = .recovering;
             result.shard_barriers[index] = recovered.barrier;
             const summary = result.coordinator.summaries[index];
-            if (!summary.present or summary.value.shard_sequence != recovered.barrier)
+            if (!summary.present) return error.AccountRecoveryBarrierMismatch;
+            const derived = try shardSummaryFromShard(
+                &result.shards[index],
+                @enumFromInt(index),
+                summary.value.shard_sequence,
+                summary.value.decision_domain,
+            );
+            if (!std.meta.eql(derived, summary.value))
                 return error.AccountRecoveryBarrierMismatch;
         }
         return result;
@@ -758,6 +854,15 @@ pub const AccountRecovery = struct {
             return error.ShardRecoveryFenceLost;
     }
 };
+
+fn leaseIdentity(version: u64, index: usize) !u128 {
+    return std.math.add(u128, try std.math.mul(u128, version, max_shards), index + 1);
+}
+
+fn withinRoundingUnit(projected: i64, venue: i64, unit: i64) bool {
+    if (unit <= 0) return projected == venue;
+    return venue >= projected -| unit and venue <= projected +| unit;
+}
 
 fn digestInt(hasher: *Sha256, comptime T: type, value: T) void {
     var bytes: [@sizeOf(T)]u8 = undefined;
@@ -865,12 +970,14 @@ fn writeOptionalMarginObservation(writer: *std.Io.Writer, observation: ?MarginOb
         try writer.writeInt(u64, value.barrier, .little);
         try writer.writeInt(i64, value.venue_net_margin_micros, .little);
         try writer.writeInt(i64, value.venue_swap_quantity, .little);
+        try writer.writeInt(i64, value.venue_spot_quantity, .little);
         try writer.writeInt(i64, value.venue_spot_margin_micros, .little);
         try writer.writeInt(i64, value.venue_swap_margin_micros, .little);
         try writer.writeByte(@intFromEnum(value.margin_mode));
         try writer.writeInt(u32, value.rules_version, .little);
         try writer.writeByte(value.venue_risk_tier);
         try writer.writeInt(i64, value.venue_liquidation_distance_ticks, .little);
+        try writer.writeInt(i64, value.bucket_rounding_micros, .little);
     }
 }
 
@@ -881,12 +988,14 @@ fn readOptionalMarginObservation(reader: *std.Io.Reader) !?MarginObservation {
         .barrier = try reader.takeInt(u64, .little),
         .venue_net_margin_micros = try reader.takeInt(i64, .little),
         .venue_swap_quantity = try reader.takeInt(i64, .little),
+        .venue_spot_quantity = try reader.takeInt(i64, .little),
         .venue_spot_margin_micros = try reader.takeInt(i64, .little),
         .venue_swap_margin_micros = try reader.takeInt(i64, .little),
-        .margin_mode = std.enums.fromInt(@FieldType(MarginObservation, "margin_mode"), try reader.takeByte()) orelse return error.InvalidCoordinatorSnapshot,
+        .margin_mode = std.enums.fromInt(AccountMarginMode, try reader.takeByte()) orelse return error.InvalidCoordinatorSnapshot,
         .rules_version = try reader.takeInt(u32, .little),
         .venue_risk_tier = try reader.takeByte(),
         .venue_liquidation_distance_ticks = try reader.takeInt(i64, .little),
+        .bucket_rounding_micros = try reader.takeInt(i64, .little),
     };
 }
 
@@ -1123,16 +1232,33 @@ test "account recovery restores four matching shard tails under fresh evidence f
             .identity = 1,
             .payload = .{ .account_configuration = .{ .exchange_account_identity = 900 } },
         });
+        _ = try trading.applyStable(&shard, &stable_journal, .{
+            .identity = 1,
+            .payload = .{ .exchange_balance = .{ .cash_micros = 10_000 } },
+        });
+        _ = try trading.applyStable(&shard, &stable_journal, .{
+            .identity = 1,
+            .payload = .exchange_positions,
+        });
+        _ = try trading.applyStable(&shard, &stable_journal, .{
+            .identity = 1,
+            .payload = .{ .opening_balance = .{ .cash_micros = 10_000 } },
+        });
+        _ = try trading.applyStable(&shard, &stable_journal, .{
+            .identity = 1,
+            .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = index + 11 } },
+        });
         try stable_journal.seal();
-        shard_snapshots[index] = try shard.snapshot(&stable_journal, 3, &shard_snapshots_storage[index]);
-        tail_journals[index] = trading.journal.Journal.initAt(4);
+        shard_snapshots[index] = try shard.snapshot(&stable_journal, 7, &shard_snapshots_storage[index]);
+        tail_journals[index] = trading.journal.Journal.initAt(8);
         try tail_journals[index].seal();
         shard_tails[index] = tail_journals[index].bytes();
-        _ = try coordinator.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, 100));
-        _ = try coordinator.publishSummary(index + 11, ShardSummary.fixture(@enumFromInt(index), 2, 100));
-        _ = try coordinator.publishSummary(index + 21, ShardSummary.fixture(@enumFromInt(index), 3, 100));
+        for (1..8) |sequence| {
+            const derived = try shardSummaryFromShard(&shard, @enumFromInt(index), sequence, @intCast(index + 1));
+            _ = try coordinator.publishSummary(index * 100 + sequence, derived);
+        }
     }
-    _ = try coordinator.allocateLeases(1, 20);
+    _ = try coordinator.allocateLeases(1, 40);
     var coordinator_storage: [4096]u8 = undefined;
     const coordinator_snapshot = try coordinator.snapshot(&coordinator_storage);
     var recovered = try AccountRecovery.begin(coordinator_snapshot, shard_snapshots, shard_tails);
@@ -1238,4 +1364,207 @@ test "shard summaries derive from authoritative state and coordinate four real s
         .venue_liquidation_distance_ticks = std.math.maxInt(i64),
     });
     try std.testing.expectEqualSlices(u8, &coordinator.digest(), &replayed.digest());
+}
+
+test "explicit lease tightening is a replayable deterministic fact" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    for (0..max_shards) |index| _ = try coordinator.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, 100));
+    const leases = try coordinator.allocateLeases(1, 10);
+    try std.testing.expectEqual(@as(i64, 250), leases[0].limit_micros);
+    try std.testing.expectEqual(@as(i64, 100), leases[0].used_micros);
+
+    const tightened = try coordinator.tightenLeases(12, .{ 100, 200, 250, 40 });
+    try std.testing.expectEqual(@as(i64, 100), tightened[0].limit_micros);
+    try std.testing.expectEqual(@as(i64, 200), tightened[1].limit_micros);
+    try std.testing.expectEqual(@as(i64, 250), tightened[2].limit_micros);
+    try std.testing.expectEqual(@as(u64, 2), tightened[3].version);
+    try std.testing.expectEqual(@as(i64, 40), tightened[3].limit_micros);
+    try std.testing.expectEqual(@as(i64, 100), tightened[3].used_micros);
+    try std.testing.expect(tightened[3].open);
+    try std.testing.expect(coordinator.leaseOverTightened(.shard_3));
+    try std.testing.expect(!coordinator.leaseOverTightened(.shard_1));
+    try std.testing.expect(!coordinator.leaseOverTightened(.shard_0));
+
+    const digest_after_tighten = coordinator.digest();
+    const duplicated = try coordinator.tightenLeases(12, .{ 100, 200, 250, 40 });
+    try std.testing.expectEqual(@as(u64, 2), duplicated[0].version);
+    try std.testing.expectEqualSlices(u8, &digest_after_tighten, &coordinator.digest());
+    try std.testing.expectError(error.StaleRiskLease, coordinator.tightenLeases(3, .{ 100, 200, 250, 40 }));
+    try std.testing.expectError(error.InvalidRiskLease, coordinator.tightenLeases(13, .{ -1, 200, 250, 40 }));
+    try std.testing.expectEqualSlices(u8, &digest_after_tighten, &coordinator.digest());
+
+    var grown = ShardSummary.fixture(.shard_1, 2, 201);
+    grown.exchange_account = 900;
+    _ = try coordinator.publishSummary(51, grown);
+    const digest_before_renewal = coordinator.digest();
+    try std.testing.expectError(error.RiskLeaseOversubscribed, coordinator.allocateLeases(2, 20));
+    try std.testing.expectEqualSlices(u8, &digest_before_renewal, &coordinator.digest());
+    try std.testing.expectError(error.MarginReconciliationRequired, blk: {
+        var gated = coordinator;
+        gated.margin_gate = .{ .identity = 1, .open = false, .latched = true };
+        break :blk gated.allocateLeases(2, 20);
+    });
+
+    var events: [max_shards]trading.CanonicalEvent = undefined;
+    const lease_events = try coordinator.currentLeaseEvents(&events);
+    try std.testing.expectEqual(max_shards, lease_events.len);
+    for (lease_events, 0..) |event, index| switch (event.payload) {
+        .risk_lease_granted => |grant| {
+            try std.testing.expect(grant.open);
+            try std.testing.expectEqual(@as(u128, @intCast(index)), (grant.lease_identity - 1) % max_shards);
+        },
+        else => return error.UnexpectedLeaseEvent,
+    };
+
+    var replayed = AccountCoordinator.init(900, 1_000, 1_000);
+    for (0..max_shards) |index| _ = try replayed.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, 100));
+    _ = try replayed.allocateLeases(1, 10);
+    _ = try replayed.tightenLeases(12, .{ 100, 200, 250, 40 });
+    _ = try replayed.tightenLeases(12, .{ 100, 200, 250, 40 });
+    var replay_grown = ShardSummary.fixture(.shard_1, 2, 201);
+    replay_grown.exchange_account = 900;
+    _ = try replayed.publishSummary(51, replay_grown);
+    try std.testing.expectError(error.RiskLeaseOversubscribed, replayed.allocateLeases(2, 20));
+    try std.testing.expectEqualSlices(u8, &coordinator.digest(), &replayed.digest());
+}
+
+fn fourBucketSummaries() !AccountCoordinator {
+    var coordinator = AccountCoordinator.init(900, 10_000, 10_000);
+    for (0..max_shards) |index| {
+        var summary = ShardSummary.fixture(@enumFromInt(index), 1, 500);
+        summary.exchange_margin_micros = if (index % 2 == 0) 120 else 80;
+        summary.spot_margin_micros = 10;
+        summary.spot_quantity = 3;
+        summary.swap_quantity = if (index < 2) 5 else -5;
+        summary.risk_tier = 2;
+        summary.liquidation_distance_ticks = 900;
+        _ = try coordinator.publishSummary(index + 1, summary);
+    }
+    return coordinator;
+}
+
+fn bucketObservation(identity: u128, barrier: u64) MarginObservation {
+    return .{
+        .identity = identity,
+        .barrier = barrier,
+        .venue_net_margin_micros = 440,
+        .venue_swap_quantity = 0,
+        .venue_spot_quantity = 12,
+        .venue_spot_margin_micros = 40,
+        .venue_swap_margin_micros = 400,
+        .margin_mode = .isolated,
+        .rules_version = 1,
+        .venue_risk_tier = 2,
+        .venue_liquidation_distance_ticks = 900,
+    };
+}
+
+test "margin reconciliation covers mode buckets rounding and unknown evidence" {
+    var coordinator = try fourBucketSummaries();
+    const leases = try coordinator.allocateLeases(1, 60);
+    for (leases) |lease| try std.testing.expectEqual(@as(i64, 2_500), lease.limit_micros);
+
+    const healthy = try coordinator.reconcileMargin(bucketObservation(30, 50));
+    try std.testing.expect(healthy.open);
+    try std.testing.expectEqual(MarginReconciliationState.healthy, coordinator.margin_reconciliation_state);
+    try std.testing.expectEqual(@as(i64, 1_560), coordinator.account_netting_benefit_micros);
+    for (leases) |lease| try std.testing.expectEqual(@as(i64, 2_500), lease.limit_micros);
+
+    var rounded = bucketObservation(31, 51);
+    rounded.bucket_rounding_micros = 5;
+    rounded.venue_swap_margin_micros = 403;
+    rounded.venue_spot_margin_micros = 38;
+    rounded.venue_net_margin_micros = 441;
+    const explained = try coordinator.reconcileMargin(rounded);
+    try std.testing.expect(explained.open);
+
+    var beyond_unit = rounded;
+    beyond_unit.identity = 32;
+    beyond_unit.barrier = 52;
+    beyond_unit.venue_net_margin_micros = 450;
+    const broken = try coordinator.reconcileMargin(beyond_unit);
+    const digest_at_break = coordinator.digest();
+    try std.testing.expect(!broken.open);
+    try std.testing.expect(broken.latched);
+    try std.testing.expectEqual(MarginReconciliationState.broken, coordinator.margin_reconciliation_state);
+    for (coordinator.leases[0..coordinator.lease_count]) |lease| {
+        try std.testing.expect(lease.open);
+        try std.testing.expectEqual(@as(i64, 500), lease.limit_micros);
+        try std.testing.expectEqual(@as(i64, 500), lease.used_micros);
+    }
+
+    const still_latched = try coordinator.reconcileMargin(bucketObservation(33, 53));
+    try std.testing.expect(still_latched.latched);
+    const resolved = try coordinator.resolveMarginGate(33);
+    try std.testing.expect(resolved.open);
+    try std.testing.expect(!resolved.latched);
+
+    var cross_mode = bucketObservation(34, 54);
+    cross_mode.margin_mode = .cross;
+    const mode_break = try coordinator.reconcileMargin(cross_mode);
+    try std.testing.expect(mode_break.latched);
+    try std.testing.expectEqual(MarginReconciliationState.broken, coordinator.margin_reconciliation_state);
+    try std.testing.expectError(error.MarginReconciliationStillBroken, coordinator.resolveMarginGate(cross_mode.identity));
+
+    var netting_only = AccountCoordinator.init(900, 10_000, 10_000);
+    for (0..max_shards) |index| {
+        var summary = ShardSummary.fixture(@enumFromInt(index), 1, 500);
+        summary.swap_quantity = if (index < 2) 5 else -5;
+        _ = try netting_only.publishSummary(index + 1, summary);
+    }
+    const gross = try netting_only.grossPortfolioMargin();
+    _ = try netting_only.reconcileMargin(.{
+        .identity = 40,
+        .barrier = 70,
+        .venue_net_margin_micros = @intCast(@divFloor(gross, 4)),
+        .venue_swap_quantity = 0,
+        .margin_mode = .isolated,
+        .rules_version = 1,
+    });
+    try std.testing.expectEqual(@as(i64, gross - @divFloor(gross, 4)), netting_only.account_netting_benefit_micros);
+
+    var unknown_holder = try fourBucketSummaries();
+    _ = try unknown_holder.allocateLeases(1, 60);
+    var unknown_distance = bucketObservation(41, 80);
+    unknown_distance.venue_liquidation_distance_ticks = unknown_liquidation_distance;
+    _ = try unknown_holder.reconcileMargin(unknown_distance);
+    try std.testing.expectEqual(MarginReconciliationState.unknown, unknown_holder.margin_reconciliation_state);
+    try std.testing.expect(!unknown_holder.margin_gate.open);
+    try std.testing.expect(!unknown_holder.margin_gate.latched);
+    for (unknown_holder.leases[0..unknown_holder.lease_count]) |lease|
+        try std.testing.expectEqual(@as(i64, 2_500), lease.limit_micros);
+
+    var unknown_tier = bucketObservation(42, 81);
+    unknown_tier.venue_risk_tier = 0;
+    _ = try unknown_holder.reconcileMargin(unknown_tier);
+    try std.testing.expectEqual(MarginReconciliationState.unknown, unknown_holder.margin_reconciliation_state);
+
+    const recovered = try unknown_holder.reconcileMargin(bucketObservation(43, 82));
+    try std.testing.expect(recovered.open);
+    try std.testing.expectEqual(MarginReconciliationState.healthy, unknown_holder.margin_reconciliation_state);
+
+    var spot_mismatch = bucketObservation(44, 83);
+    spot_mismatch.venue_spot_quantity = 13;
+    const position_break = try unknown_holder.reconcileMargin(spot_mismatch);
+    try std.testing.expect(position_break.latched);
+    for (unknown_holder.leases[0..unknown_holder.lease_count]) |lease| {
+        try std.testing.expect(lease.open);
+        try std.testing.expectEqual(@as(i64, 500), lease.limit_micros);
+    }
+
+    var replayed = try fourBucketSummaries();
+    _ = try replayed.allocateLeases(1, 60);
+    _ = try replayed.reconcileMargin(bucketObservation(30, 50));
+    var replay_rounded = bucketObservation(31, 51);
+    replay_rounded.bucket_rounding_micros = 5;
+    replay_rounded.venue_swap_margin_micros = 403;
+    replay_rounded.venue_spot_margin_micros = 38;
+    replay_rounded.venue_net_margin_micros = 441;
+    _ = try replayed.reconcileMargin(replay_rounded);
+    var replay_beyond = replay_rounded;
+    replay_beyond.identity = 32;
+    replay_beyond.barrier = 52;
+    replay_beyond.venue_net_margin_micros = 450;
+    _ = try replayed.reconcileMargin(replay_beyond);
+    try std.testing.expectEqualSlices(u8, &digest_at_break, &replayed.digest());
 }
