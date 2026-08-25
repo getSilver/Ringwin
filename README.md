@@ -1,13 +1,13 @@
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Bash](https://img.shields.io/badge/language-bash-green.svg)]()
-
-[简体中文](README.zh.md)
+<div align="center">
 
 # Ringwin
-
+[简体中文](README.zh.md)
 **Ringwin is an experimental deterministic trading engine written in Zig.**
 
 It is designed as both a practical trading-system prototype and an open-source reference for developers interested in applying Zig to complex, stateful, reliability-sensitive software.
+</div>
+
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Ringwin focuses on deterministic state transitions, fixed-point financial arithmetic, explicit risk and order-management boundaries, replayable event processing, and fault isolation.
 
