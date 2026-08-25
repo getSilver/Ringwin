@@ -1489,7 +1489,7 @@ pub const TradingShard = struct {
         };
     }
 
-    fn genesisReady(self: *const TradingShard) bool {
+    pub fn genesisReady(self: *const TradingShard) bool {
         return self.instrument_rules_version != 0 and self.margin_rules_version != 0 and
             self.account_configured and self.exchange_balance_observed and
             self.exchange_positions_observed and self.opening_balance_observed and

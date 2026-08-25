@@ -6,6 +6,9 @@
 
 It is designed as both a practical trading-system prototype and an open-source reference for developers interested in applying Zig to complex, stateful, reliability-sensitive software.
 </div>
+
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Ringwin focuses on deterministic state transitions, fixed-point financial arithmetic, explicit risk and order-management boundaries, replayable event processing, and fault isolation.
 
 > [!WARNING]
