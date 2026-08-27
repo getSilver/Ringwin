@@ -21,7 +21,7 @@ Python StrategyHost seam 和 Linux 交叉编译检查；OKX Demo 事实只在显
 tools\verify-core-wave.ps1
 ```
 
-任一断言失败立即停止。成功输出 `core_wave_acceptance=passed mode=offline ...`。
+任一断言失败立即停止。成功输出 `core_wave_acceptance=passed schema=1 mode=offline ...`。
 显式启用 OKX Demo 成交事实时追加 `-DemoLive`（要求 `.env.local` 中合格的 Demo Key）。
 
 ## OKX Demo 整波验收

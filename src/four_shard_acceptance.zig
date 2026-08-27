@@ -18,6 +18,9 @@ const fill_price_micros: i64 = 49_900_000_000;
 const order_quantity: i64 = 100;
 const place_fee_micros: i64 = 400_000;
 const exchange_account: u128 = 900;
+/// Frozen schema version for emitted four-shard acceptance evidence.
+pub const acceptance_schema_version: u16 = 1;
+const expected_shared_summary_v1 = "e652a69fc3977ddb395edb6f0f2e6a7efc32d9e07d529c712aea33be6f09e6c2";
 
 const OpLog = struct {
     const Entry = union(enum) {
@@ -240,14 +243,23 @@ fn assertLedgersClosed(world: *const World) !void {
     }
 }
 
+/// Versioned deterministic evidence emitted by the four-shard acceptance entry.
 pub const FourShardEvidence = struct {
-    barrier: u64,
+    schema_version: u16,
+    coordinator_barrier: u64,
+    shard_barriers: [max_shards]u64,
     shard_digests: [max_shards][Sha256.digest_length]u8,
     coordinator_digest: [Sha256.digest_length]u8,
     shared_summary: [Sha256.digest_length]u8,
+    live_gateway_submissions: u8,
+    replay_send_capability: bool,
 };
 
+/// Runs the fail-fast four-shard live, replay, snapshot-tail, and recovery fixture.
 pub fn runFourShardAcceptance() !FourShardEvidence {
+    const replay_send_capability = @hasField(coordination.AccountRecovery, "gateway") or
+        @hasDecl(coordination.AccountRecovery, "trySend");
+    comptime std.debug.assert(!replay_send_capability);
     var world = World.init();
     for (&world.shards, &world.journals, 0..) |*shard, *journal, index| {
         shard.* = .{};
@@ -642,14 +654,26 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     const shared_c = sharedSummary(path_c.coordinator.barrier, &path_c.shards, &path_c.coordinator.digest());
     try std.testing.expectEqualSlices(u8, &shared_a, &shared_b);
     try std.testing.expectEqualSlices(u8, &shared_b, &shared_c);
+    const shared_hex = std.fmt.bytesToHex(shared_a, .lower);
+    if (!std.mem.eql(u8, expected_shared_summary_v1, &shared_hex))
+        return error.FourShardEvidenceDrift;
+    try std.testing.expectEqual(@as(u8, max_shards), world.gateway.count);
 
     var shard_digests: [max_shards][Sha256.digest_length]u8 = undefined;
-    for (0..max_shards) |index| shard_digests[index] = fenced_live[index].canonicalStateDigest();
+    var shard_barriers: [max_shards]u64 = undefined;
+    for (0..max_shards) |index| {
+        shard_digests[index] = fenced_live[index].canonicalStateDigest();
+        shard_barriers[index] = fenced_live[index].trace.len;
+    }
     return .{
-        .barrier = path_b.coordinator.barrier,
+        .schema_version = acceptance_schema_version,
+        .coordinator_barrier = path_b.coordinator.barrier,
+        .shard_barriers = shard_barriers,
         .shard_digests = shard_digests,
         .coordinator_digest = evidence_coordinator.digest(),
         .shared_summary = shared_a,
+        .live_gateway_submissions = world.gateway.count,
+        .replay_send_capability = replay_send_capability,
     };
 }
 

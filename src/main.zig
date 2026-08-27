@@ -11,7 +11,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.next()) |argument| {
         if (std.mem.eql(u8, argument, "--four-shard-acceptance"))
             return runFourShardAcceptanceEntry(init);
-        return trading_shard.main(init);
+        return error.UnknownArgument;
     }
     return trading_shard.main(init);
 }
@@ -22,17 +22,21 @@ fn runFourShardAcceptanceEntry(init: std.process.Init) !void {
     const out = &stdout.interface;
     const evidence = try four_shard_acceptance.runFourShardAcceptance();
     try out.print(
-        "four_shard_acceptance: shards={d}, replay=equivalent, recovery_paths=3\n",
-        .{evidence.shard_digests.len},
+        "four_shard_acceptance: schema={d}, shards={d}, replay=equivalent, recovery_paths=3\n",
+        .{ evidence.schema_version, evidence.shard_digests.len },
     );
     for (evidence.shard_digests, 0..) |digest, index| {
         const hex = std.fmt.bytesToHex(digest, .lower);
-        try out.print("shard_{d}: barrier={d}, digest={s}\n", .{ index, evidence.barrier, &hex });
+        try out.print("shard_{d}: barrier={d}, digest={s}\n", .{ index, evidence.shard_barriers[index], &hex });
     }
     const coordinator_hex = std.fmt.bytesToHex(evidence.coordinator_digest, .lower);
     const shared_hex = std.fmt.bytesToHex(evidence.shared_summary, .lower);
-    try out.print("coordinator_digest={s}\n", .{&coordinator_hex});
+    try out.print("coordinator_barrier={d}, coordinator_digest={s}\n", .{ evidence.coordinator_barrier, &coordinator_hex });
     try out.print("shared_summary={s}\n", .{&shared_hex});
+    try out.print(
+        "side_effects: live_gateway_submissions={d}, replay_send_capability={}\n",
+        .{ evidence.live_gateway_submissions, evidence.replay_send_capability },
+    );
     try out.flush();
 }
 

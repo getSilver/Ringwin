@@ -43,9 +43,11 @@ Status: open
 
 ## Frontier
 
-[闭合四分片与共享账户协调](issues/08-shards-and-account-coordination.md)
+[形成可复现证据并关闭交易核心波次](issues/10-close-trading-core-wave.md)
 
 ## Decisions so far
+
+- [形成核心成功/故障整波自动验收](issues/09-core-wave-acceptance.md) — 已形成 schema 1 失败即停入口，组合 Debug/ReleaseSafe、固定单分片与四分片摘要、Python seam、SimulatedVenue、协调器/shard tail 恢复和 Linux compile-only；恢复路径不持有发送能力，OKX Demo 事实仅在 `-DemoLive` 显式授权时运行。
 
 - [实现核心快照、重启恢复与版本屏障](issues/07-snapshot-recovery-and-cutover.md) — 已闭合显式稳定快照、日志尾恢复、Venue 对账、StrategyCheckpoint 回退追赶、持久 cutover fence/cancel outbox、candidate barrier 验证、VersionActivationEvent 与 ForwardRollback 重放守恒；Debug/ReleaseSafe 各 95 项测试通过。
 
