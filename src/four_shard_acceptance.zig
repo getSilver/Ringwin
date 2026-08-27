@@ -169,8 +169,7 @@ fn genesisEvents(index: usize) [14]trading.CanonicalEvent {
     };
 }
 
-fn replayShardFromJournal(bytes: []const u8) !trading.TradingShard {
-    var shard: trading.TradingShard = .{};
+fn replayJournalSegment(shard: *trading.TradingShard, bytes: []const u8) !void {
     var reader = try trading.journal.Reader.init(bytes);
     while (true) {
         switch (try reader.next()) {
@@ -178,9 +177,18 @@ fn replayShardFromJournal(bytes: []const u8) !trading.TradingShard {
                 if (record.flags & trading.journal.input_flag != 0)
                     _ = try shard.apply(try trading.decodeStableInput(record));
             },
-            .end => return shard,
+            .end => |status| {
+                if (status != .clean) return error.TruncatedShardTail;
+                return;
+            },
         }
     }
+}
+
+fn replayShardFromJournal(bytes: []const u8) !trading.TradingShard {
+    var shard: trading.TradingShard = .{};
+    try replayJournalSegment(&shard, bytes);
+    return shard;
 }
 
 fn replayCoordination(live: *const World) !coordination.AccountCoordinator {
@@ -250,7 +258,7 @@ pub fn runFourShardAcceptance() !void {
             .intent_sequence = 10,
             .operation = .place,
             .instrument = .btc_usdt_swap,
-            .side = .buy,
+            .side = if (index == max_shards - 1) .sell else .buy,
             .quantity = order_quantity,
             .limit_price_micros = order_price_micros,
             .reservation_micros = 11_400_000,
@@ -314,6 +322,16 @@ pub fn runFourShardAcceptance() !void {
             .remaining_quantity = order_quantity,
         } } });
     }
+    const unknown_outcome = try world.gateway.complete(.{
+        .exchange_account = exchange_account,
+        .shard_id = .shard_2,
+        .command_id = world.commands[2].command_id,
+        .order_id = world.commands[2].order_id,
+        .revision = world.commands[2].revision,
+        .fencing_token = 3,
+        .state = .unknown,
+    });
+    try std.testing.expectEqual(trading.oms.DispatchState.unknown, unknown_outcome.state);
     var conflicting = coordination.GatewayOutcome{
         .exchange_account = exchange_account,
         .shard_id = .shard_0,
@@ -347,7 +365,7 @@ pub fn runFourShardAcceptance() !void {
     try std.testing.expectEqual(order_quantity, world.shards[0].economicSummary().portfolio.swap.quantity);
     try std.testing.expectEqual(@as(i64, 40), world.shards[1].economicSummary().exchange.swap.quantity);
     try std.testing.expectEqual(@as(i64, 40), world.shards[2].economicSummary().exchange.swap.quantity);
-    try std.testing.expectEqual(@as(i64, 40), world.shards[3].economicSummary().exchange.swap.quantity);
+    try std.testing.expectEqual(@as(i64, -40), world.shards[3].economicSummary().exchange.swap.quantity);
 
     for (0..max_shards) |index| try world.publishDerivedSummary(index);
     const allocated_version: u64 = 2;
@@ -496,14 +514,45 @@ pub fn runFourShardAcceptance() !void {
         live_barriers[index] = world.shards[index].trace.len;
         shard_snapshots[index] = try world.shards[index].snapshot(&world.journals[index], live_barriers[index], &shard_snapshot_storage[index]);
         tail_journals[index] = trading.journal.Journal.initAt(live_barriers[index] + 1);
-        try tail_journals[index].seal();
-        shard_tails[index] = tail_journals[index].bytes();
     }
     const coordinator_snapshot = try world.coordinator.snapshot(&coordinator_snapshot_storage);
 
+    // The recovery point is the five sealed snapshots. Both tails advance only after it.
+    _ = try trading.applyStable(&world.shards[1], &tail_journals[1], .{
+        .identity = 500,
+        .payload = .{ .l2_snapshot = .{
+            .source_sequence = 1,
+            .bid_price_micros = mark_price_micros - 100_000_000,
+            .bid_quantity = 1_000,
+            .ask_1_price_micros = mark_price_micros + 100_000_000,
+            .ask_1_quantity = 1_000,
+            .ask_2_price_micros = mark_price_micros + 200_000_000,
+            .ask_2_quantity = 1_000,
+        } },
+    });
+    const tail_summary_identity = world.nextId();
+    const tail_summary_sequence = world.summary_sequences[1] + 1;
+    const tail_summary = try coordination.shardSummaryFromShard(&world.shards[1], .shard_1, tail_summary_sequence, 2);
+    var coordinator_tail = coordination.CoordinationJournal.initAt(1);
+    const tail_event: coordination.CoordinationEvent = .{ .publish_summary = .{
+        .identity = tail_summary_identity,
+        .summary = tail_summary,
+    } };
+    try coordinator_tail.append(tail_event);
+    _ = try world.coordinator.publishSummary(tail_summary_identity, tail_summary);
+    world.summary_sequences[1] = tail_summary_sequence;
+    try world.ops.record(.{ .publish = .{ .identity = tail_summary_identity, .summary = tail_summary } });
+    try coordinator_tail.seal();
+    for (0..max_shards) |index| {
+        try tail_journals[index].seal();
+        shard_tails[index] = tail_journals[index].bytes();
+    }
+
     var replayed_shards: [max_shards]trading.TradingShard = undefined;
-    for (0..max_shards) |index|
+    for (0..max_shards) |index| {
         replayed_shards[index] = try replayShardFromJournal(world.journals[index].bytes());
+        try replayJournalSegment(&replayed_shards[index], shard_tails[index]);
+    }
     for (0..max_shards) |index|
         try std.testing.expectEqualSlices(
             u8,
@@ -514,7 +563,7 @@ pub fn runFourShardAcceptance() !void {
     try std.testing.expectEqualSlices(u8, &world.coordinator.digest(), &replayed_coordinator.digest());
     try std.testing.expectEqual(world.coordinator.barrier, replayed_coordinator.barrier);
 
-    var path_b = try coordination.AccountRecovery.begin(coordinator_snapshot, shard_snapshots, shard_tails);
+    var path_b = try coordination.AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
     try std.testing.expect(path_b.coordinator.recovery_only);
     try std.testing.expectEqualSlices(u8, &world.coordinator.digest(), &path_b.coordinator.digest());
     try std.testing.expectEqual(world.coordinator.barrier, path_b.coordinator.barrier);
@@ -525,18 +574,32 @@ pub fn runFourShardAcceptance() !void {
         try std.testing.expectEqual(world.shards[index].oms.order_count, path_b.shards[index].oms.order_count);
     }
     try std.testing.expectError(error.FreshMarginObservationRequired, path_b.completeCoordinatorRecovery());
-    var recovery_observation = healthy_observation;
-    recovery_observation.identity = 9001;
+    var recovery_observation = try world.projectedObservation(9001);
     recovery_observation.barrier = path_b.coordinator.barrier;
     const latched_recovery = try path_b.coordinator.reconcileMargin(recovery_observation);
     try std.testing.expect(latched_recovery.latched);
     try std.testing.expectError(error.MarginReconciliationRequired, path_b.completeCoordinatorRecovery());
 
-    var path_c = try coordination.AccountRecovery.begin(coordinator_snapshot, shard_snapshots, shard_tails);
+    var path_success = try coordination.AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
+    _ = try path_success.coordinator.reconcileMargin(recovery_observation);
+    _ = try path_success.coordinator.resolveMarginGate(recovery_observation.identity);
+    try path_success.completeCoordinatorRecovery();
+    try std.testing.expect(!path_success.coordinator.recovery_only);
+    try std.testing.expectEqual(try world.coordinator.grossPortfolioMargin(), try path_success.coordinator.grossPortfolioMargin());
+    try std.testing.expectEqual(
+        @max((try path_success.coordinator.grossPortfolioMargin()) - recovery_observation.venue_net_margin_micros, 0),
+        path_success.coordinator.account_netting_benefit_micros,
+    );
+    for (0..max_shards) |index| {
+        try std.testing.expectEqual(world.shards[index].oms.order_count, path_success.shards[index].oms.order_count);
+        try std.testing.expectEqual(@as(usize, 0), path_success.shards[index].oms.emitted().len);
+    }
+
+    var path_c = try coordination.AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
     try std.testing.expectEqualSlices(u8, &world.coordinator.digest(), &path_c.coordinator.digest());
     const mid_crash_observation = recovery_observation;
     _ = try path_c.coordinator.reconcileMargin(mid_crash_observation);
-    path_c = try coordination.AccountRecovery.begin(coordinator_snapshot, shard_snapshots, shard_tails);
+    path_c = try coordination.AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
     try std.testing.expectEqualSlices(u8, &world.coordinator.digest(), &path_c.coordinator.digest());
     try std.testing.expectError(error.FreshMarginObservationRequired, path_c.completeCoordinatorRecovery());
     _ = try path_c.coordinator.reconcileMargin(mid_crash_observation);

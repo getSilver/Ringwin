@@ -1673,11 +1673,15 @@ pub const TradingShard = struct {
     }
 
     fn recalculateRisk(self: *TradingShard, fail_if_exceeded: bool) !void {
+        const position_quantity = if (self.portfolio_position.quantity < 0)
+            try std.math.sub(i64, 0, self.portfolio_position.quantity)
+        else
+            self.portfolio_position.quantity;
         self.position_margin_requirement_micros = if (self.portfolio_position.quantity == 0)
             0
         else
             try internalMarginMicros(try self.shardNotionalMicros(
-                self.portfolio_position.quantity,
+                position_quantity,
                 self.mark_price_micros,
             ));
 
