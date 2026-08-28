@@ -2659,13 +2659,15 @@ const AdapterOutputBatch = struct {
 
 const VenueAdapter = venue_adapter.Interface(AdapterRequest, AdapterOutputBatch);
 
-const SimulatedVenue = struct {
+/// Legacy deterministic fixture for the pre-adapter TradingShard acceptance
+/// path. The shared SimulatedVenue lives in simulated_venue.zig.
+const LegacyFixtureVenue = struct {
     const State = enum { idle, running, stopped };
 
     state: State = .idle,
     pending: ?AdapterOutputBatch = null,
 
-    fn adapter(self: *SimulatedVenue) VenueAdapter {
+    fn adapter(self: *LegacyFixtureVenue) VenueAdapter {
         return .{ .ptr = self, .vtable = &.{
             .start = startOpaque,
             .try_send = trySendOpaque,
@@ -2675,7 +2677,7 @@ const SimulatedVenue = struct {
     }
 
     fn startOpaque(ptr: *anyopaque, config: venue_adapter.Config) venue_adapter.StartError!void {
-        const self: *SimulatedVenue = @ptrCast(@alignCast(ptr));
+        const self: *LegacyFixtureVenue = @ptrCast(@alignCast(ptr));
         if (self.state == .running) return error.AlreadyStarted;
         if (self.state == .stopped) return error.Stopped;
         if (config.environment != .simulation or
@@ -2688,7 +2690,7 @@ const SimulatedVenue = struct {
         ptr: *anyopaque,
         request: AdapterRequest,
     ) venue_adapter.SendError!venue_adapter.SendResult {
-        const self: *SimulatedVenue = @ptrCast(@alignCast(ptr));
+        const self: *LegacyFixtureVenue = @ptrCast(@alignCast(ptr));
         if (self.state == .idle) return error.NotStarted;
         if (self.state == .stopped) return .stopped;
         if (self.pending != null) return .backpressure;
@@ -2699,7 +2701,7 @@ const SimulatedVenue = struct {
     }
 
     fn tryDrainOpaque(ptr: *anyopaque) venue_adapter.DrainError!?AdapterOutputBatch {
-        const self: *SimulatedVenue = @ptrCast(@alignCast(ptr));
+        const self: *LegacyFixtureVenue = @ptrCast(@alignCast(ptr));
         if (self.state == .idle) return error.NotStarted;
         const pending = self.pending orelse return null;
         self.pending = null;
@@ -2710,7 +2712,7 @@ const SimulatedVenue = struct {
         ptr: *anyopaque,
         deadline: venue_adapter.DrainDeadline,
     ) venue_adapter.StopError!void {
-        const self: *SimulatedVenue = @ptrCast(@alignCast(ptr));
+        const self: *LegacyFixtureVenue = @ptrCast(@alignCast(ptr));
         _ = deadline;
         if (self.state == .idle) return error.NotStarted;
         if (self.pending != null) return error.OutputPending;
@@ -3059,7 +3061,7 @@ fn finishScenario(run: *LiveRun) !LiveRun {
 
 fn runHappyPath() !LiveRun {
     var run = try startScenario();
-    var simulated: SimulatedVenue = .{};
+    var simulated: LegacyFixtureVenue = .{};
     const adapter = simulated.adapter();
     try adapter.start(.{
         .environment = .simulation,
@@ -3878,7 +3880,7 @@ fn duplicateAtGroup(group: u64, original: InputEvent) InputEvent {
 
 fn runDuplicateReport() !LiveRun {
     var run = try startScenario();
-    var simulated: SimulatedVenue = .{};
+    var simulated: LegacyFixtureVenue = .{};
     const adapter = simulated.adapter();
     try adapter.start(.{
         .environment = .simulation,
@@ -5133,7 +5135,7 @@ test "venue facts and replay use apply without replay send capability" {
         .identity = 1,
         .payload = .{ .timer = .{ .quantity = happy_order_quantity } },
     }))).order_command.?;
-    var simulated: SimulatedVenue = .{};
+    var simulated: LegacyFixtureVenue = .{};
     const adapter = simulated.adapter();
     try adapter.start(.{ .environment = .simulation, .request_capacity = 1, .output_capacity = 1 });
     try std.testing.expectEqual(venue_adapter.SendResult.accepted, try adapter.trySend(.{ .order_command = command }));
@@ -5522,7 +5524,7 @@ fn applyHealthyPreludeReplay(replay_shard: *ReplayTradingShard) !void {
 }
 
 test "venue adapter seam is bounded and drain-safe" {
-    var simulated: SimulatedVenue = .{};
+    var simulated: LegacyFixtureVenue = .{};
     const adapter = simulated.adapter();
     try std.testing.expectError(error.NotStarted, adapter.tryDrain());
     try adapter.start(.{
