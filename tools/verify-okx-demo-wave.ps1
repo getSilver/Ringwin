@@ -7,6 +7,17 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Invoke-Zig {
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & zig @args
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+}
+
 $ExpectedZig = '0.17.0-dev.315+5b647b792'
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $buildRoot = Join-Path $workspace '.scratch\build'
@@ -22,13 +33,13 @@ if ($LASTEXITCODE -ne 0 -or $zigVersion -ne $ExpectedZig) {
 }
 
 $zigSources = @(Get-ChildItem (Join-Path $workspace 'src') -File -Filter '*.zig' | ForEach-Object FullName)
-& zig fmt --check $zigSources
+Invoke-Zig fmt --check $zigSources
 if ($LASTEXITCODE -ne 0) { throw 'Zig format check failed' }
 foreach ($optimize in @('Debug', 'ReleaseSafe', 'ReleaseFast')) {
-    & zig test (Join-Path $workspace 'src\main.zig') "-O$optimize"
+    Invoke-Zig test (Join-Path $workspace 'src\main.zig') "-O$optimize"
     if ($LASTEXITCODE -ne 0) { throw "Core $optimize tests failed" }
 }
-& zig run (Join-Path $workspace 'src\main.zig') -OReleaseSafe
+Invoke-Zig run (Join-Path $workspace 'src\main.zig') -OReleaseSafe
 if ($LASTEXITCODE -ne 0) { throw 'Deterministic core acceptance failed' }
 
 $curlLibrary = Get-ChildItem -LiteralPath $curlBuild -Recurse -File -Filter 'libcurl.a' -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -41,9 +52,9 @@ $include = (Get-ChildItem -LiteralPath $curlSource -Recurse -Directory -Filter i
     Test-Path -LiteralPath (Join-Path $_.FullName 'curl\curl.h')
 } | Select-Object -First 1).FullName
 if (-not $include) { throw 'Pinned libcurl headers are missing after bootstrap' }
-& zig build-exe (Join-Path $workspace 'src\main.zig') -target x86_64-linux-gnu -OReleaseSafe -fno-emit-bin
+Invoke-Zig build-exe (Join-Path $workspace 'src\main.zig') -target x86_64-linux-gnu -OReleaseSafe -fno-emit-bin
 if ($LASTEXITCODE -ne 0) { throw 'Linux core cross-build failed' }
-& zig build-obj (Join-Path $workspace 'src\okx_demo_live_acceptance.zig') `
+Invoke-Zig build-obj (Join-Path $workspace 'src\okx_demo_live_acceptance.zig') `
     (Join-Path $workspace 'src\okx_curl_shim.c') -target x86_64-linux-gnu -lc "-I$include" `
     "-femit-bin=$(Join-Path $buildRoot 'okx-demo-live-acceptance-linux.o')"
 if ($LASTEXITCODE -ne 0) { throw 'Linux OKX Adapter compile check failed' }

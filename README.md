@@ -11,6 +11,8 @@ It is designed as both a practical trading-system prototype and an open-source r
 
 Ringwin focuses on deterministic state transitions, fixed-point financial arithmetic, explicit risk and order-management boundaries, replayable event processing, and fault isolation.
 
+Its formal multi-Venue target is OKX, Binance, and Bybit spot and linear perpetual support. The first delivery is limited to an OKX unified seam and Binance Demo/Testnet validation; production account qualification remains separate.
+
 > [!WARNING]
 > Ringwin is under active development and is **not currently intended for production trading or real-fund deployment**.
 
@@ -174,43 +176,33 @@ git clone https://github.com/getSilver/Ringwin.git
 cd Ringwin
 ```
 
-Run the main test suite:
+Use the unified build entrypoint:
 
 ```console
-zig test src/main.zig -O ReleaseSafe
+zig build
+zig build test
+zig build run
 ```
 
-Run the deterministic acceptance fixture:
-
-```console
-zig run src/main.zig -O ReleaseSafe
-```
-
-Run the Python StrategyHost acceptance suite:
-
-```console
-python python/verify_strategy_host.py
-```
-
-Or run the whole trading core wave as a single fail-fast entry covering the offline success/fault/restart trajectories, SimulatedVenue, four-shard coordination, the Python seam, and a Linux cross-compile check. OKX Demo facts run only when explicitly enabled with `-DemoLive`:
+Run the full offline core wave:
 
 ```powershell
-tools\verify-core-wave.ps1
+zig build core-wave
 ```
 
-For OKX Demo acceptance on Windows:
+Run the explicit OKX Demo wave (read-only preparation by default):
 
 ```powershell
-tools\verify-okx-demo-wave.ps1
+zig build demo-wave
 ```
 
-Explicit Demo order execution requires:
+Only run Demo order execution with SystemOwner authorization:
 
 ```powershell
-tools\verify-okx-demo-wave.ps1 -DemoLive
+zig build demo-wave -Ddemo-live
 ```
 
-Use Demo credentials only.
+All build steps reject a Zig version other than `0.17.0-dev.315+5b647b792` before running tests. The existing PowerShell wave scripts remain available as their underlying acceptance implementation. Use Demo credentials only.
 
 ## Deterministic Replay
 

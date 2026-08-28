@@ -14,6 +14,17 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Invoke-Zig {
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & zig @args
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+}
+
 if (-not $EnvFile) { $EnvFile = Join-Path $PSScriptRoot '..\.env.local' }
 $ExpectedZig = '0.17.0-dev.315+5b647b792'
 $AcceptanceSchema = 1
@@ -32,15 +43,15 @@ if ($LASTEXITCODE -ne 0 -or $zigVersion -ne $ExpectedZig) {
 
 Write-Output '== phase=format'
 $zigSources = @(Get-ChildItem (Join-Path $workspace 'src') -File -Filter '*.zig' | ForEach-Object FullName)
-& zig fmt --check $zigSources
+Invoke-Zig fmt --check $zigSources
 if ($LASTEXITCODE -ne 0) { throw 'Zig format check failed' }
 
 Write-Output '== phase=core_tests mode=Debug'
-& zig test (Join-Path $workspace 'src\main.zig') '-ODebug'
+Invoke-Zig test (Join-Path $workspace 'src\main.zig') '-ODebug'
 if ($LASTEXITCODE -ne 0) { throw 'Core Debug tests failed' }
 
 Write-Output '== phase=core_tests mode=ReleaseSafe'
-& zig test (Join-Path $workspace 'src\main.zig') '-OReleaseSafe'
+Invoke-Zig test (Join-Path $workspace 'src\main.zig') '-OReleaseSafe'
 if ($LASTEXITCODE -ne 0) { throw 'Core ReleaseSafe tests failed' }
 
 Write-Output '== phase=single_shard_wave'
@@ -48,14 +59,14 @@ Write-Output '== phase=single_shard_wave'
 # unknown-reconciliation / duplicate-report fault trajectories through the
 # SimulatedVenue adapter seam, with frozen digests and live/replay/recovery
 # equivalence checks.
-& zig run (Join-Path $workspace 'src\main.zig') '-OReleaseSafe'
+Invoke-Zig run (Join-Path $workspace 'src\main.zig') '-OReleaseSafe'
 if ($LASTEXITCODE -ne 0) { throw 'Single-shard deterministic acceptance failed' }
 
 Write-Output '== phase=four_shard_wave'
 # Four shards + shared gateway + account coordination: success path, local
 # faults, margin break latching, and three recovery paths that must converge
 # to one shared summary digest. Historical replay never resends side effects.
-& zig run (Join-Path $workspace 'src\main.zig') '-OReleaseSafe' '--' '--four-shard-acceptance'
+Invoke-Zig run (Join-Path $workspace 'src\main.zig') '-OReleaseSafe' '--' '--four-shard-acceptance'
 if ($LASTEXITCODE -ne 0) { throw 'Four-shard acceptance failed' }
 
 Write-Output '== phase=python_seam'
@@ -66,7 +77,7 @@ Write-Output '== phase=python_seam'
 if ($LASTEXITCODE -ne 0) { throw 'Python StrategyHost acceptance failed' }
 
 Write-Output '== phase=linux_cross_compile'
-& zig build-exe (Join-Path $workspace 'src\main.zig') -target x86_64-linux-gnu -OReleaseSafe -fno-emit-bin
+Invoke-Zig build-exe (Join-Path $workspace 'src\main.zig') -target x86_64-linux-gnu -OReleaseSafe -fno-emit-bin
 if ($LASTEXITCODE -ne 0) { throw 'Linux core cross-build failed' }
 
 $mode = 'offline'
@@ -83,7 +94,7 @@ if ($DemoLive) {
         Test-Path -LiteralPath (Join-Path $_.FullName 'curl\curl.h')
     } | Select-Object -First 1).FullName
     if (-not $include) { throw 'Pinned libcurl headers are missing after bootstrap' }
-    & zig build-obj (Join-Path $workspace 'src\okx_demo_live_acceptance.zig') `
+    Invoke-Zig build-obj (Join-Path $workspace 'src\okx_demo_live_acceptance.zig') `
         (Join-Path $workspace 'src\okx_curl_shim.c') -target x86_64-linux-gnu -lc "-I$include" `
         "-femit-bin=$(Join-Path $buildRoot 'okx-demo-live-acceptance-linux.o')"
     if ($LASTEXITCODE -ne 0) { throw 'Linux OKX Adapter compile check failed' }
