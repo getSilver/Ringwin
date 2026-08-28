@@ -1701,43 +1701,77 @@ pub const TradingShard = struct {
 
     /// Authoritative economics that KeepPositions must preserve verbatim.
     const LifecycleEconomics = struct {
-        portfolio_swap_quantity: i64 = 0,
-        portfolio_swap_open_cost_micros: i64 = 0,
-        exchange_swap_quantity: i64 = 0,
-        exchange_swap_open_cost_micros: i64 = 0,
-        portfolio_spot_quantity: i64 = 0,
-        portfolio_spot_open_cost_micros: i64 = 0,
-        exchange_spot_quantity: i64 = 0,
-        exchange_spot_open_cost_micros: i64 = 0,
-        portfolio_cash_micros: i64 = 0,
-        treasury_cash_micros: i64 = 0,
-        exchange_cash_micros: i64 = 0,
-        portfolio_fee_expense_micros: i64 = 0,
-        exchange_fee_expense_micros: i64 = 0,
-        target_position: i64 = 0,
+        positions: struct {
+            portfolio_swap: Position = .{},
+            exchange_swap: Position = .{},
+            portfolio_spot: Position = .{},
+            exchange_spot: Position = .{},
+        } = .{},
+        cash: struct {
+            portfolio_micros: i64 = 0,
+            treasury_micros: i64 = 0,
+            exchange_micros: i64 = 0,
+        } = .{},
+        fees: struct {
+            portfolio_micros: i64 = 0,
+            exchange_micros: i64 = 0,
+            total_micros: i64 = 0,
+        } = .{},
+        pnl: struct {
+            realized_micros: i64 = 0,
+            unrealized_micros: i64 = 0,
+        } = .{},
+        ledger: struct {
+            transaction_count: u64 = 0,
+            portfolio_transfer_count: u64 = 0,
+            portfolio_debits_micros: i64 = 0,
+            portfolio_credits_micros: i64 = 0,
+            exchange_debits_micros: i64 = 0,
+            exchange_credits_micros: i64 = 0,
+            projections_complete: bool = false,
+        } = .{},
+        projection_digest: [Sha256.digest_length]u8 = @splat(0),
+        de_risk_target_position: i64 = 0,
     };
 
-    fn captureLifecycleEconomics(self: *const TradingShard) !LifecycleEconomics {
+    fn captureLifecycleEconomics(self: *const TradingShard) LifecycleEconomics {
         return .{
-            .portfolio_swap_quantity = self.portfolio_position.quantity,
-            .portfolio_swap_open_cost_micros = self.portfolio_position.open_cost_micros,
-            .exchange_swap_quantity = self.exchange_position.quantity,
-            .exchange_swap_open_cost_micros = self.exchange_position.open_cost_micros,
-            .portfolio_spot_quantity = self.spot_portfolio_position.quantity,
-            .portfolio_spot_open_cost_micros = self.spot_portfolio_position.open_cost_micros,
-            .exchange_spot_quantity = self.spot_exchange_position.quantity,
-            .exchange_spot_open_cost_micros = self.spot_exchange_position.open_cost_micros,
-            .portfolio_cash_micros = self.portfolio_cash_micros,
-            .treasury_cash_micros = self.treasury_cash_micros,
-            .exchange_cash_micros = self.exchange_cash_micros,
-            .portfolio_fee_expense_micros = self.portfolio_fee_expense_micros,
-            .exchange_fee_expense_micros = self.exchange_fee_expense_micros,
-            .target_position = self.operational_state.target_position,
+            .positions = .{
+                .portfolio_swap = self.portfolio_position,
+                .exchange_swap = self.exchange_position,
+                .portfolio_spot = self.spot_portfolio_position,
+                .exchange_spot = self.spot_exchange_position,
+            },
+            .cash = .{
+                .portfolio_micros = self.portfolio_cash_micros,
+                .treasury_micros = self.treasury_cash_micros,
+                .exchange_micros = self.exchange_cash_micros,
+            },
+            .fees = .{
+                .portfolio_micros = self.portfolio_fee_expense_micros,
+                .exchange_micros = self.exchange_fee_expense_micros,
+                .total_micros = self.total_fees_micros,
+            },
+            .pnl = .{
+                .realized_micros = self.realized_pnl_micros,
+                .unrealized_micros = self.unrealized_pnl_micros,
+            },
+            .ledger = .{
+                .transaction_count = self.ledger_transaction_count,
+                .portfolio_transfer_count = self.portfolio_transfer_count,
+                .portfolio_debits_micros = self.portfolio_ledger_debits_micros,
+                .portfolio_credits_micros = self.portfolio_ledger_credits_micros,
+                .exchange_debits_micros = self.exchange_ledger_debits_micros,
+                .exchange_credits_micros = self.exchange_ledger_credits_micros,
+                .projections_complete = self.economic_projections_complete,
+            },
+            .projection_digest = self.economic_projection.digest(),
+            .de_risk_target_position = self.operational_state.target_position,
         };
     }
 
     fn assertLifecycleEconomicsPreserved(self: *const TradingShard, preserved: LifecycleEconomics) !void {
-        const current = try self.captureLifecycleEconomics();
+        const current = self.captureLifecycleEconomics();
         if (!std.meta.eql(preserved, current))
             return error.KeepPositionsEconomicsChanged;
     }
@@ -1931,7 +1965,7 @@ pub const TradingShard = struct {
             .control_command => |command| {
                 const keep_positions = command.kind == .stop_keep_positions;
                 const preserved = if (keep_positions)
-                    try self.captureLifecycleEconomics()
+                    self.captureLifecycleEconomics()
                 else
                     LifecycleEconomics{};
                 const action = try self.operational_state.applyCommand(command, input.wall_time);
@@ -1959,7 +1993,7 @@ pub const TradingShard = struct {
                 if (keep_positions) {
                     if (action.cancel_increasing_only or
                         self.operational_state.mode != .stopped or
-                        preserved.target_position != self.operational_state.target_position)
+                        preserved.de_risk_target_position != self.operational_state.target_position)
                         return error.KeepPositionsMisreadAsDeRisk;
                     try self.assertLifecycleEconomicsPreserved(preserved);
                     try self.assertClosures();
@@ -4832,6 +4866,17 @@ fn placeIntentGroup(
     return emitted[0];
 }
 
+fn expectKeepPositionsStopped(run: *const LiveRun, preserved: TradingShard.LifecycleEconomics) !void {
+    try std.testing.expectEqual(@as(usize, 1), run.shard.oms.emitted().len);
+    try std.testing.expectEqual(oms_module.Operation.cancel, run.shard.oms.emitted()[0].operation);
+    try std.testing.expectEqual(operational.OperationalMode.stopped, run.shard.operational_state.mode);
+    try std.testing.expect(!run.shard.operational_state.trading_authorized);
+    try std.testing.expect(!run.shard.operational_state.effectiveTradingAuthority());
+    try std.testing.expect(!run.shard.operational_state.mayReduceOnly());
+    try std.testing.expectEqual(@as(u128, 0), run.shard.operational_state.active_operation_identity);
+    try std.testing.expectEqualDeep(preserved, run.shard.captureLifecycleEconomics());
+}
+
 test "keep positions stops through shard seam preserving economics" {
     var run = try startScenario();
     try applyHealthyPrelude(&run);
@@ -4844,10 +4889,9 @@ test "keep positions stops through shard seam preserving economics" {
         .price_micros = 49_900_000_000,
         .fee_micros = 30,
     } } }));
-    const preserved_quantity = run.shard.portfolio_position.quantity;
-    const preserved_cash = run.shard.exchange_cash_micros;
-    const preserved_fees = run.shard.portfolio_fee_expense_micros;
-    try std.testing.expect(preserved_quantity != 0);
+    const preserved = run.shard.captureLifecycleEconomics();
+    try std.testing.expect(preserved.positions.portfolio_swap.quantity != 0);
+    try std.testing.expect(preserved.ledger.transaction_count != 0);
 
     try std.testing.expectError(error.ControlCommandWrongTarget, run.shard.apply(atGroup(17, .{ .identity = 900, .payload = .{ .control_command = .{
         .command_identity = 40,
@@ -4869,17 +4913,7 @@ test "keep positions stops through shard seam preserving economics" {
 
     const stopped = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(40, 3, .stop_keep_positions));
     _ = stopped;
-    try std.testing.expectEqual(@as(usize, 1), run.shard.oms.emitted().len);
-    try std.testing.expectEqual(oms_module.Operation.cancel, run.shard.oms.emitted()[0].operation);
-    try std.testing.expectEqual(operational.OperationalMode.stopped, run.shard.operational_state.mode);
-    try std.testing.expect(!run.shard.operational_state.trading_authorized);
-    try std.testing.expect(!run.shard.operational_state.effectiveTradingAuthority());
-    try std.testing.expect(!run.shard.operational_state.mayReduceOnly());
-    try std.testing.expectEqual(@as(u128, 0), run.shard.operational_state.active_operation_identity);
-    try std.testing.expectEqual(preserved_quantity, run.shard.portfolio_position.quantity);
-    try std.testing.expectEqual(preserved_quantity, run.shard.exchange_position.quantity);
-    try std.testing.expectEqual(preserved_cash, run.shard.exchange_cash_micros);
-    try std.testing.expectEqual(preserved_fees, run.shard.portfolio_fee_expense_micros);
+    try expectKeepPositionsStopped(&run, preserved);
 
     const duplicate_stop = try run.shard.apply(lifecycleCommand(40, 3, .stop_keep_positions));
     try std.testing.expectEqual(@as(usize, 0), duplicate_stop.facts.len);
@@ -4911,7 +4945,7 @@ test "keep positions stops through shard seam preserving economics" {
     _ = try applyLive(&run.shard, &run.decision_journal, resolveLatchCommand(51, 8, risk_lease_gate_identity));
     _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(52, 9, .enable_trading));
     try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
-    try std.testing.expectEqual(preserved_quantity, run.shard.portfolio_position.quantity);
+    try std.testing.expectEqual(preserved.positions.portfolio_swap.quantity, run.shard.portfolio_position.quantity);
 
     const resumed_reduce = try placeIntentGroup(&run, 22, 130, 130, .sell, 40);
     try std.testing.expect(resumed_reduce.portfolio_reduce_only);
@@ -4978,19 +5012,13 @@ test "full lifecycle trajectories authorize only prescribed risk cancel and redu
         .price_micros = 49_900_000_000,
         .fee_micros = 30,
     } } }));
-    const preserved_quantity = run.shard.portfolio_position.quantity;
-    const preserved_cash = run.shard.exchange_cash_micros;
-    try std.testing.expectEqual(@as(i64, 100), preserved_quantity);
-    try std.testing.expectEqual(preserved_quantity, run.shard.exchange_position.quantity);
+    const preserved = run.shard.captureLifecycleEconomics();
+    try std.testing.expectEqual(@as(i64, 100), preserved.positions.portfolio_swap.quantity);
+    try std.testing.expectEqual(preserved.positions.portfolio_swap.quantity, preserved.positions.exchange_swap.quantity);
 
     const stopped = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(6, 7, .stop_keep_positions));
     _ = stopped;
-    try std.testing.expectEqual(@as(usize, 1), run.shard.oms.emitted().len);
-    try std.testing.expectEqual(oms_module.Operation.cancel, run.shard.oms.emitted()[0].operation);
-    try std.testing.expectEqual(operational.OperationalMode.stopped, run.shard.operational_state.mode);
-    try std.testing.expect(!run.shard.operational_state.mayReduceOnly());
-    try std.testing.expectEqual(preserved_quantity, run.shard.portfolio_position.quantity);
-    try std.testing.expectEqual(preserved_cash, run.shard.exchange_cash_micros);
+    try expectKeepPositionsStopped(&run, preserved);
     var stop_buy_group: oms_module.IntentGroup = .{ .first_intent_sequence = 103, .count = 1 };
     stop_buy_group.members[0] = .{ .intent_sequence = 103, .operation = .place, .instrument = .btc_usdt_swap, .side = .buy, .quantity = 10, .limit_price_micros = order_limit_price };
     try std.testing.expectError(error.TradingNotAuthorized, run.shard.apply(atGroup(23, .{ .identity = 108, .payload = .{ .oms_intent_group = stop_buy_group } })));
@@ -5010,7 +5038,7 @@ test "full lifecycle trajectories authorize only prescribed risk cancel and redu
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(24, .{ .identity = 109, .payload = .recovery_completed }));
     _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(8, 10, .enable_trading));
     try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
-    try std.testing.expectEqual(preserved_quantity, run.shard.portfolio_position.quantity);
+    try std.testing.expectEqual(preserved.positions.portfolio_swap.quantity, run.shard.portfolio_position.quantity);
 
     _ = try applyLive(&run.shard, &run.decision_journal, deRiskCommand(9, 11, 40, 0));
     try std.testing.expectEqual(operational.OperationalMode.draining, run.shard.operational_state.mode);
