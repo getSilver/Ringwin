@@ -120,6 +120,54 @@ pub const AccountGate = struct { identity: u128, open: bool, latched: bool };
 /// One account-wide gate delivery to a specific shard.
 pub const GateDelivery = struct { shard_id: ShardId, gate: AccountGate };
 
+/// One durable coordinator input that can be replayed after a coordinator snapshot.
+pub const CoordinationEvent = union(enum) {
+    publish_summary: struct { identity: u128, summary: ShardSummary },
+    allocate_leases: struct { version: u64, valid_through_barrier: u64 },
+    account_fact: AccountFact,
+    margin_observation: MarginObservation,
+    resolve_margin_gate: u128,
+    tighten_leases: struct { valid_through_barrier: u64, requested_limits: [max_shards]i64 },
+};
+
+/// Append-only, checksummed durable tail for inputs owned by AccountCoordinator.
+pub const CoordinationJournal = struct {
+    stable: trading.journal.Journal,
+
+    /// Creates a tail with an explicit, independent durable input sequence.
+    pub fn initAt(first_sequence: u64) CoordinationJournal {
+        return .{ .stable = trading.journal.Journal.initAt(first_sequence) };
+    }
+
+    /// Appends one normalized coordinator input before it is applied live.
+    pub fn append(self: *CoordinationJournal, event: CoordinationEvent) !void {
+        var storage: [256]u8 = undefined;
+        const encoded = try encodeCoordinationEvent(&storage, event);
+        try self.stable.append(.{
+            .type_id = coordinationEventType(event),
+            .schema_version = 1,
+            .flags = trading.journal.input_flag,
+            .sequence = try std.math.add(u64, self.stable.last_sequence, 1),
+            .source_time = 0,
+            .receive_time = 0,
+            .monotonic_time = 0,
+            .wall_time = 0,
+            .time_presence = .{},
+            .payload = encoded,
+        });
+    }
+
+    /// Seals this segment so recovery can distinguish a clean tail from a truncation.
+    pub fn seal(self: *CoordinationJournal) !void {
+        try self.stable.seal();
+    }
+
+    /// Returns the immutable bytes to persist with the coordinator snapshot.
+    pub fn bytes(self: *const CoordinationJournal) []const u8 {
+        return self.stable.bytes();
+    }
+};
+
 /// Converts one routed account fact into the target shard's stable event seam.
 pub fn accountFactEvent(delivery: Delivery) !trading.CanonicalEvent {
     const identity = std.math.cast(u64, delivery.fact.identity) orelse return error.IdentityOutOfRange;
@@ -706,6 +754,21 @@ pub const AccountCoordinator = struct {
         self.recovery_only = false;
     }
 
+    /// Replays a durable pre-crash coordinator input without treating it as fresh recovery evidence.
+    fn applyHistoricalEvent(self: *AccountCoordinator, event: CoordinationEvent) !void {
+        const was_recovery_only = self.recovery_only;
+        self.recovery_only = false;
+        defer self.recovery_only = was_recovery_only;
+        switch (event) {
+            .publish_summary => |publish| _ = try self.publishSummary(publish.identity, publish.summary),
+            .allocate_leases => |allocation| _ = try self.allocateLeases(allocation.version, allocation.valid_through_barrier),
+            .account_fact => |fact| _ = try self.acceptAccountFact(fact),
+            .margin_observation => |observation| _ = try self.reconcileMargin(observation),
+            .resolve_margin_gate => |identity| _ = try self.resolveMarginGate(identity),
+            .tighten_leases => |tightening| _ = try self.tightenLeases(tightening.valid_through_barrier, tightening.requested_limits),
+        }
+    }
+
     /// Encodes coordination-owned state at its exact barrier without shard internals.
     pub fn snapshot(self: *const AccountCoordinator, destination: []u8) ![]const u8 {
         var writer: std.Io.Writer = .fixed(destination);
@@ -810,6 +873,145 @@ pub const AccountCoordinator = struct {
     }
 };
 
+fn coordinationEventType(event: CoordinationEvent) u16 {
+    return switch (event) {
+        .publish_summary => 1,
+        .allocate_leases => 2,
+        .account_fact => 3,
+        .margin_observation => 4,
+        .resolve_margin_gate => 5,
+        .tighten_leases => 6,
+    };
+}
+
+fn writeScalar(writer: *std.Io.Writer, comptime T: type, value: T) !void {
+    if (T == bool)
+        try writer.writeByte(@intFromBool(value))
+    else if (@typeInfo(T) == .@"enum")
+        try writer.writeInt(@typeInfo(T).@"enum".tag_type, @intFromEnum(value), .little)
+    else
+        try writer.writeInt(T, value, .little);
+}
+
+fn readScalar(reader: *std.Io.Reader, comptime T: type) !T {
+    if (T == bool) return readBool(reader);
+    if (@typeInfo(T) == .@"enum")
+        return std.enums.fromInt(T, try reader.takeInt(@typeInfo(T).@"enum".tag_type, .little)) orelse error.InvalidCoordinationTail;
+    return reader.takeInt(T, .little);
+}
+
+fn writePlainStruct(writer: *std.Io.Writer, comptime T: type, value: T) !void {
+    inline for (@typeInfo(T).@"struct".fields) |field|
+        try writeScalar(writer, field.type, @field(value, field.name));
+}
+
+fn readPlainStruct(reader: *std.Io.Reader, comptime T: type) !T {
+    var value: T = undefined;
+    inline for (@typeInfo(T).@"struct".fields) |field|
+        @field(value, field.name) = try readScalar(reader, field.type);
+    return value;
+}
+
+fn writeAccountFact(writer: *std.Io.Writer, fact: AccountFact) !void {
+    try writer.writeInt(u128, fact.identity, .little);
+    try writer.writeInt(u128, fact.exchange_account, .little);
+    try writer.writeInt(u64, fact.version, .little);
+    try writer.writeInt(u64, fact.barrier, .little);
+    switch (fact.payload) {
+        .account_snapshot => |snapshot| {
+            try writer.writeByte(0);
+            try writePlainStruct(writer, @TypeOf(snapshot), snapshot);
+        },
+        .forced_execution => |execution| {
+            try writer.writeByte(1);
+            try writer.writeByte(@intFromBool(execution.owner != null));
+            if (execution.owner) |owner| try writeScalar(writer, ShardId, owner);
+            try writer.writeInt(i64, execution.quantity, .little);
+            try writer.writeInt(i64, execution.price_micros, .little);
+            try writer.writeInt(i64, execution.fee_micros, .little);
+        },
+    }
+}
+
+fn readAccountFact(reader: *std.Io.Reader) !AccountFact {
+    const identity = try reader.takeInt(u128, .little);
+    const exchange_account = try reader.takeInt(u128, .little);
+    const version = try reader.takeInt(u64, .little);
+    const barrier = try reader.takeInt(u64, .little);
+    const payload: AccountFactPayload = switch (try reader.takeByte()) {
+        0 => .{ .account_snapshot = try readPlainStruct(reader, @FieldType(AccountFactPayload, "account_snapshot")) },
+        1 => .{ .forced_execution = .{
+            .owner = if (try readBool(reader)) try readScalar(reader, ShardId) else null,
+            .quantity = try reader.takeInt(i64, .little),
+            .price_micros = try reader.takeInt(i64, .little),
+            .fee_micros = try reader.takeInt(i64, .little),
+        } },
+        else => return error.InvalidCoordinationTail,
+    };
+    return .{ .identity = identity, .exchange_account = exchange_account, .version = version, .barrier = barrier, .payload = payload };
+}
+
+fn encodeCoordinationEvent(destination: []u8, event: CoordinationEvent) ![]const u8 {
+    var writer: std.Io.Writer = .fixed(destination);
+    switch (event) {
+        .publish_summary => |publish| {
+            try writer.writeInt(u128, publish.identity, .little);
+            try writePlainStruct(&writer, ShardSummary, publish.summary);
+        },
+        .allocate_leases => |allocation| {
+            try writer.writeInt(u64, allocation.version, .little);
+            try writer.writeInt(u64, allocation.valid_through_barrier, .little);
+        },
+        .account_fact => |fact| try writeAccountFact(&writer, fact),
+        .margin_observation => |observation| try writePlainStruct(&writer, MarginObservation, observation),
+        .resolve_margin_gate => |identity| try writer.writeInt(u128, identity, .little),
+        .tighten_leases => |tightening| {
+            try writer.writeInt(u64, tightening.valid_through_barrier, .little);
+            for (tightening.requested_limits) |limit| try writer.writeInt(i64, limit, .little);
+        },
+    }
+    return writer.buffered();
+}
+
+fn decodeCoordinationEvent(record: trading.journal.Record) !CoordinationEvent {
+    if (record.schema_version != 1 or record.flags != trading.journal.input_flag)
+        return error.InvalidCoordinationTail;
+    var reader: std.Io.Reader = .fixed(record.payload);
+    const event: CoordinationEvent = switch (record.type_id) {
+        1 => .{ .publish_summary = .{
+            .identity = try reader.takeInt(u128, .little),
+            .summary = try readPlainStruct(&reader, ShardSummary),
+        } },
+        2 => .{ .allocate_leases = .{
+            .version = try reader.takeInt(u64, .little),
+            .valid_through_barrier = try reader.takeInt(u64, .little),
+        } },
+        3 => .{ .account_fact = try readAccountFact(&reader) },
+        4 => .{ .margin_observation = try readPlainStruct(&reader, MarginObservation) },
+        5 => .{ .resolve_margin_gate = try reader.takeInt(u128, .little) },
+        6 => blk: {
+            var requested_limits: [max_shards]i64 = undefined;
+            const valid_through_barrier = try reader.takeInt(u64, .little);
+            for (&requested_limits) |*limit| limit.* = try reader.takeInt(i64, .little);
+            break :blk .{ .tighten_leases = .{ .valid_through_barrier = valid_through_barrier, .requested_limits = requested_limits } };
+        },
+        else => return error.InvalidCoordinationTail,
+    };
+    if (reader.seek != record.payload.len) return error.InvalidCoordinationTail;
+    return event;
+}
+
+fn replayCoordinationTail(coordinator: *AccountCoordinator, encoded: []const u8) !void {
+    var reader = try trading.journal.Reader.init(encoded);
+    while (true) switch (try reader.next()) {
+        .record => |record| try coordinator.applyHistoricalEvent(try decodeCoordinationEvent(record)),
+        .end => |status| {
+            if (status != .clean) return error.TruncatedCoordinationTail;
+            return;
+        },
+    };
+}
+
 /// Recovery-only bundle tying one coordinator snapshot to four restored shard barriers.
 pub const AccountRecovery = struct {
     coordinator: AccountCoordinator,
@@ -822,11 +1024,24 @@ pub const AccountRecovery = struct {
         shard_snapshots: [max_shards][]const u8,
         shard_tails: [max_shards][]const u8,
     ) !AccountRecovery {
+        var empty_tail = CoordinationJournal.initAt(1);
+        try empty_tail.seal();
+        return beginWithCoordinatorTail(coordinator_snapshot, empty_tail.bytes(), shard_snapshots, shard_tails);
+    }
+
+    /// Restores a coordinator snapshot and its durable input tail before validating shard recovery.
+    pub fn beginWithCoordinatorTail(
+        coordinator_snapshot: []const u8,
+        coordinator_tail: []const u8,
+        shard_snapshots: [max_shards][]const u8,
+        shard_tails: [max_shards][]const u8,
+    ) !AccountRecovery {
         var result: AccountRecovery = .{
             .coordinator = try AccountCoordinator.restore(coordinator_snapshot),
             .shards = undefined,
             .shard_barriers = undefined,
         };
+        try replayCoordinationTail(&result.coordinator, coordinator_tail);
         for (0..max_shards) |index| {
             const recovered = try trading.TradingShard.restore(shard_snapshots[index], shard_tails[index]);
             result.shards[index] = recovered.shard;
@@ -1261,8 +1476,20 @@ test "account recovery restores four matching shard tails under fresh evidence f
     _ = try coordinator.allocateLeases(1, 40);
     var coordinator_storage: [4096]u8 = undefined;
     const coordinator_snapshot = try coordinator.snapshot(&coordinator_storage);
-    var recovered = try AccountRecovery.begin(coordinator_snapshot, shard_snapshots, shard_tails);
+    var coordinator_tail = CoordinationJournal.initAt(1);
+    for (0..max_shards) |index| {
+        var summary = coordinator.summaries[index].value;
+        summary.shard_sequence += 1;
+        const event: CoordinationEvent = .{ .publish_summary = .{ .identity = 1_000 + index, .summary = summary } };
+        try coordinator_tail.append(event);
+        _ = try coordinator.publishSummary(event.publish_summary.identity, event.publish_summary.summary);
+    }
+    try coordinator_tail.seal();
+    var recovered = try AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
     try std.testing.expect(recovered.coordinator.recovery_only);
+    var expected = coordinator;
+    expected.recovery_only = true;
+    try std.testing.expectEqualSlices(u8, &expected.digest(), &recovered.coordinator.digest());
     for (recovered.shards) |shard| try std.testing.expectEqual(trading.operational.OperationalMode.recovering, shard.operational_state.mode);
     try std.testing.expectError(error.FreshMarginObservationRequired, recovered.completeCoordinatorRecovery());
 }
