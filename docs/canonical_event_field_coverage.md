@@ -611,16 +611,16 @@ pub const Fill = struct {
 // Payload 联合体新增
 pub const Payload = union(PayloadTag) {
     // ... 现有 36 种 ...
-    
+
     // 持仓增量更新（非全量快照）
     position_update: PositionUpdate,
-    
+
     // 算法单事件
     algo_order_event: AlgoOrderEvent,
-    
+
     // 爆仓预警/强平警告
     liquidation_warning: LiquidationWarning,
-    
+
     // 保证金明细（逐币种）
     account_margin_detail: AccountMarginDetail,
 };
