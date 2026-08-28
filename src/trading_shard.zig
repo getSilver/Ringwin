@@ -518,6 +518,33 @@ fn atGroup(group_index: u64, input: InputEvent) InputEvent {
     return timed;
 }
 
+fn lifecycleCommand(command_identity: u128, expected_version: u64, kind: operational.CommandKind) InputEvent {
+    return atGroup(40, .{ .identity = @intCast(1_000 + command_identity), .payload = .{ .control_command = .{
+        .command_identity = command_identity,
+        .content_hash = command_identity * 7_919,
+        .target_identity = 1,
+        .expected_version = expected_version,
+        .expires_at = std.math.maxInt(u64),
+        .kind = kind,
+    } } });
+}
+
+fn deRiskCommand(command_identity: u128, expected_version: u64, target_position: i64, warning_identity: u128) InputEvent {
+    var command_event = lifecycleCommand(command_identity, expected_version, .de_risk);
+    command_event.payload.control_command.target_position = target_position;
+    if (warning_identity != 0) {
+        command_event.payload.control_command.risk_warning_acknowledged = true;
+        command_event.payload.control_command.risk_warning_identity = warning_identity;
+    }
+    return command_event;
+}
+
+fn resolveLatchCommand(command_identity: u128, expected_version: u64, latch_identity: u128) InputEvent {
+    var command_event = lifecycleCommand(command_identity, expected_version, .resolve_latch);
+    command_event.payload.control_command.referenced_latch_identity = latch_identity;
+    return command_event;
+}
+
 const EncodedInput = struct {
     bytes: [512]u8 = undefined,
     len: usize = 0,
@@ -1672,6 +1699,83 @@ pub const TradingShard = struct {
             try self.oms.cancelOpenOrders(action.cancel_increasing_only);
     }
 
+    /// Authoritative economics that KeepPositions must preserve verbatim.
+    const LifecycleEconomics = struct {
+        positions: struct {
+            portfolio_swap: Position = .{},
+            exchange_swap: Position = .{},
+            portfolio_spot: Position = .{},
+            exchange_spot: Position = .{},
+        } = .{},
+        cash: struct {
+            portfolio_micros: i64 = 0,
+            treasury_micros: i64 = 0,
+            exchange_micros: i64 = 0,
+        } = .{},
+        fees: struct {
+            portfolio_micros: i64 = 0,
+            exchange_micros: i64 = 0,
+            total_micros: i64 = 0,
+        } = .{},
+        pnl: struct {
+            realized_micros: i64 = 0,
+            unrealized_micros: i64 = 0,
+        } = .{},
+        ledger: struct {
+            transaction_count: u64 = 0,
+            portfolio_transfer_count: u64 = 0,
+            portfolio_debits_micros: i64 = 0,
+            portfolio_credits_micros: i64 = 0,
+            exchange_debits_micros: i64 = 0,
+            exchange_credits_micros: i64 = 0,
+            projections_complete: bool = false,
+        } = .{},
+        projection_digest: [Sha256.digest_length]u8 = @splat(0),
+        de_risk_target_position: i64 = 0,
+    };
+
+    fn captureLifecycleEconomics(self: *const TradingShard) LifecycleEconomics {
+        return .{
+            .positions = .{
+                .portfolio_swap = self.portfolio_position,
+                .exchange_swap = self.exchange_position,
+                .portfolio_spot = self.spot_portfolio_position,
+                .exchange_spot = self.spot_exchange_position,
+            },
+            .cash = .{
+                .portfolio_micros = self.portfolio_cash_micros,
+                .treasury_micros = self.treasury_cash_micros,
+                .exchange_micros = self.exchange_cash_micros,
+            },
+            .fees = .{
+                .portfolio_micros = self.portfolio_fee_expense_micros,
+                .exchange_micros = self.exchange_fee_expense_micros,
+                .total_micros = self.total_fees_micros,
+            },
+            .pnl = .{
+                .realized_micros = self.realized_pnl_micros,
+                .unrealized_micros = self.unrealized_pnl_micros,
+            },
+            .ledger = .{
+                .transaction_count = self.ledger_transaction_count,
+                .portfolio_transfer_count = self.portfolio_transfer_count,
+                .portfolio_debits_micros = self.portfolio_ledger_debits_micros,
+                .portfolio_credits_micros = self.portfolio_ledger_credits_micros,
+                .exchange_debits_micros = self.exchange_ledger_debits_micros,
+                .exchange_credits_micros = self.exchange_ledger_credits_micros,
+                .projections_complete = self.economic_projections_complete,
+            },
+            .projection_digest = self.economic_projection.digest(),
+            .de_risk_target_position = self.operational_state.target_position,
+        };
+    }
+
+    fn assertLifecycleEconomicsPreserved(self: *const TradingShard, preserved: LifecycleEconomics) !void {
+        const current = self.captureLifecycleEconomics();
+        if (!std.meta.eql(preserved, current))
+            return error.KeepPositionsEconomicsChanged;
+    }
+
     fn recalculateRisk(self: *TradingShard, fail_if_exceeded: bool) !void {
         const position_quantity = if (self.portfolio_position.quantity < 0)
             try std.math.sub(i64, 0, self.portfolio_position.quantity)
@@ -1859,6 +1963,11 @@ pub const TradingShard = struct {
 
         switch (input.payload) {
             .control_command => |command| {
+                const keep_positions = command.kind == .stop_keep_positions;
+                const preserved = if (keep_positions)
+                    self.captureLifecycleEconomics()
+                else
+                    LifecycleEconomics{};
                 const action = try self.operational_state.applyCommand(command, input.wall_time);
                 if (!action.changed) return null;
                 if (command.kind == .start_recovery) {
@@ -1881,6 +1990,14 @@ pub const TradingShard = struct {
                 }
                 if (action.cancel_open_orders)
                     try self.oms.cancelOpenOrders(action.cancel_increasing_only);
+                if (keep_positions) {
+                    if (action.cancel_increasing_only or
+                        self.operational_state.mode != .stopped or
+                        preserved.de_risk_target_position != self.operational_state.target_position)
+                        return error.KeepPositionsMisreadAsDeRisk;
+                    try self.assertLifecycleEconomicsPreserved(preserved);
+                    try self.assertClosures();
+                }
                 try self.trace.append(.control_command_applied, input.identity);
             },
             .recovery_completed => {
@@ -4720,6 +4837,292 @@ test "de risk locks target and flatten requires warning" {
     try std.testing.expectEqual(@as(usize, 1), reducing.oms_commands.len);
     group.members[0].side = .buy;
     try std.testing.expectError(error.DeRiskTargetViolation, run.shard.apply(atGroup(14, .{ .identity = 101, .payload = .{ .oms_intent_group = group } })));
+}
+
+fn placeIntentGroup(
+    run: *LiveRun,
+    group_index: u64,
+    event_identity: u64,
+    first_intent_sequence: u64,
+    side: oms_module.Side,
+    quantity: i64,
+) !oms_module.Command {
+    var group: oms_module.IntentGroup = .{ .first_intent_sequence = first_intent_sequence, .count = 1 };
+    group.members[0] = .{
+        .intent_sequence = first_intent_sequence,
+        .operation = .place,
+        .instrument = .btc_usdt_swap,
+        .side = side,
+        .quantity = quantity,
+        .limit_price_micros = order_limit_price,
+    };
+    const placed = try applyLive(&run.shard, &run.decision_journal, atGroup(group_index, .{
+        .identity = event_identity,
+        .payload = .{ .oms_intent_group = group },
+    }));
+    _ = placed;
+    const emitted = run.shard.oms.emitted();
+    if (emitted.len != 1) return error.UnexpectedCommandCount;
+    return emitted[0];
+}
+
+fn expectKeepPositionsStopped(run: *const LiveRun, preserved: TradingShard.LifecycleEconomics) !void {
+    try std.testing.expectEqual(@as(usize, 1), run.shard.oms.emitted().len);
+    try std.testing.expectEqual(oms_module.Operation.cancel, run.shard.oms.emitted()[0].operation);
+    try std.testing.expectEqual(operational.OperationalMode.stopped, run.shard.operational_state.mode);
+    try std.testing.expect(!run.shard.operational_state.trading_authorized);
+    try std.testing.expect(!run.shard.operational_state.effectiveTradingAuthority());
+    try std.testing.expect(!run.shard.operational_state.mayReduceOnly());
+    try std.testing.expectEqual(@as(u128, 0), run.shard.operational_state.active_operation_identity);
+    try std.testing.expectEqualDeep(preserved, run.shard.captureLifecycleEconomics());
+}
+
+test "keep positions stops through shard seam preserving economics" {
+    var run = try startScenario();
+    try applyHealthyPrelude(&run);
+
+    const opened = try placeIntentGroup(&run, 15, 100, 100, .buy, happy_order_quantity);
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(16, .{ .identity = 101, .payload = .{ .economic_fill = .{
+        .fill_id = 101,
+        .order_id = opened.order_id,
+        .quantity = happy_order_quantity,
+        .price_micros = 49_900_000_000,
+        .fee_micros = 30,
+    } } }));
+    const preserved = run.shard.captureLifecycleEconomics();
+    try std.testing.expect(preserved.positions.portfolio_swap.quantity != 0);
+    try std.testing.expect(preserved.ledger.transaction_count != 0);
+
+    try std.testing.expectError(error.ControlCommandWrongTarget, run.shard.apply(atGroup(17, .{ .identity = 900, .payload = .{ .control_command = .{
+        .command_identity = 40,
+        .content_hash = 40,
+        .target_identity = 2,
+        .expected_version = 3,
+        .expires_at = std.math.maxInt(u64),
+        .kind = .stop_keep_positions,
+    } } })));
+    try std.testing.expectError(error.ControlCommandExpired, run.shard.apply(atGroup(17, .{ .identity = 901, .payload = .{ .control_command = .{
+        .command_identity = 40,
+        .content_hash = 40,
+        .target_identity = 1,
+        .expected_version = 3,
+        .expires_at = 1,
+        .kind = .stop_keep_positions,
+    } } })));
+    try std.testing.expectError(error.ControlCommandVersionMismatch, run.shard.apply(lifecycleCommand(40, 999, .stop_keep_positions)));
+
+    const stopped = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(40, 3, .stop_keep_positions));
+    _ = stopped;
+    try expectKeepPositionsStopped(&run, preserved);
+
+    const duplicate_stop = try run.shard.apply(lifecycleCommand(40, 3, .stop_keep_positions));
+    try std.testing.expectEqual(@as(usize, 0), duplicate_stop.facts.len);
+    try std.testing.expectEqual(@as(usize, 0), run.shard.oms.emitted().len);
+
+    var buy_group: oms_module.IntentGroup = .{ .first_intent_sequence = 110, .count = 1 };
+    buy_group.members[0] = .{ .intent_sequence = 110, .operation = .place, .instrument = .btc_usdt_swap, .side = .buy, .quantity = 10, .limit_price_micros = order_limit_price };
+    try std.testing.expectError(error.TradingNotAuthorized, run.shard.apply(atGroup(18, .{ .identity = 110, .payload = .{ .oms_intent_group = buy_group } })));
+    var reduce_group: oms_module.IntentGroup = .{ .first_intent_sequence = 111, .count = 1 };
+    reduce_group.members[0] = .{ .intent_sequence = 111, .operation = .place, .instrument = .btc_usdt_swap, .side = .sell, .portfolio_reduce_only = true, .quantity = 40, .limit_price_micros = order_limit_price };
+    try std.testing.expectError(error.TradingNotAuthorized, run.shard.apply(atGroup(19, .{ .identity = 111, .payload = .{ .oms_intent_group = reduce_group } })));
+    try std.testing.expectError(error.TradingSafetyGateClosed, run.shard.apply(lifecycleCommand(41, 4, .enable_trading)));
+
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(20, .{ .identity = 120, .payload = .{ .safety_gate_change = .{
+        .gate_identity = 77,
+        .target_identity = 1,
+        .kind = .latched,
+        .reason = .uncertain_order,
+        .open = false,
+    } } }));
+    try std.testing.expect(run.shard.operational_state.latch_count > 0);
+
+    _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(42, 4, .start_recovery));
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(21, .{ .identity = 121, .payload = .recovery_completed }));
+    try std.testing.expectEqual(operational.OperationalMode.ready, run.shard.operational_state.mode);
+    try std.testing.expectError(error.TradingSafetyGateClosed, run.shard.apply(lifecycleCommand(43, 6, .enable_trading)));
+    _ = try applyLive(&run.shard, &run.decision_journal, resolveLatchCommand(49, 6, 77));
+    _ = try applyLive(&run.shard, &run.decision_journal, resolveLatchCommand(50, 7, primary_lease_gate_identity));
+    _ = try applyLive(&run.shard, &run.decision_journal, resolveLatchCommand(51, 8, risk_lease_gate_identity));
+    _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(52, 9, .enable_trading));
+    try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
+    try std.testing.expectEqual(preserved.positions.portfolio_swap.quantity, run.shard.portfolio_position.quantity);
+
+    const resumed_reduce = try placeIntentGroup(&run, 22, 130, 130, .sell, 40);
+    try std.testing.expect(resumed_reduce.portfolio_reduce_only);
+    try std.testing.expectEqual(@as(i64, 40), resumed_reduce.quantity);
+
+    try run.decision_journal.seal();
+    _ = try assertReplayEquivalent(run);
+}
+
+test "full lifecycle trajectories authorize only prescribed risk cancel and reduce behavior" {
+    var run = try startScenario();
+    try applyHealthyPrelude(&run);
+
+    const first_order = try placeIntentGroup(&run, 15, 100, 100, .buy, happy_order_quantity);
+    _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(3, 3, .cancel_open_orders));
+    try std.testing.expectEqual(@as(usize, 1), run.shard.oms.emitted().len);
+    try std.testing.expectEqual(oms_module.Operation.cancel, run.shard.oms.emitted()[0].operation);
+    try std.testing.expectEqual(operational.OperationalMode.trading, run.shard.operational_state.mode);
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(16, .{ .identity = 101, .payload = .{ .oms_execution_report = .{
+        .report_id = 101,
+        .order_id = first_order.order_id,
+        .revision = 1,
+        .status = .canceled,
+        .cumulative_quantity = 0,
+        .remaining_quantity = happy_order_quantity,
+    } } }));
+    const requote_order = try placeIntentGroup(&run, 17, 101, 101, .buy, happy_order_quantity);
+    try std.testing.expectEqual(operational.OperationalMode.trading, run.shard.operational_state.mode);
+
+    _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(4, 4, .trading_pause));
+    try std.testing.expectEqual(operational.OperationalMode.draining, run.shard.operational_state.mode);
+    try std.testing.expectError(error.InvalidLifecycleProgress, run.shard.apply(atGroup(18, .{ .identity = 103, .payload = .{ .lifecycle_progress = .{
+        .operation_identity = 4,
+        .target_identity = 1,
+        .open_orders_closed = true,
+        .reconciliation_complete = true,
+        .position_quantity = 0,
+    } } })));
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(19, .{ .identity = 104, .payload = .{ .oms_execution_report = .{
+        .report_id = 104,
+        .order_id = requote_order.order_id,
+        .revision = 1,
+        .status = .canceled,
+        .cumulative_quantity = 0,
+        .remaining_quantity = happy_order_quantity,
+    } } }));
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(20, .{ .identity = 105, .payload = .{ .lifecycle_progress = .{
+        .operation_identity = 4,
+        .target_identity = 1,
+        .open_orders_closed = true,
+        .reconciliation_complete = true,
+        .position_quantity = 0,
+    } } }));
+    try std.testing.expectEqual(operational.OperationalMode.ready, run.shard.operational_state.mode);
+
+    _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(5, 6, .enable_trading));
+    try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
+
+    const position_order = try placeIntentGroup(&run, 21, 102, 102, .buy, happy_order_quantity);
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(22, .{ .identity = 107, .payload = .{ .economic_fill = .{
+        .fill_id = 107,
+        .order_id = position_order.order_id,
+        .quantity = happy_order_quantity,
+        .price_micros = 49_900_000_000,
+        .fee_micros = 30,
+    } } }));
+    const preserved = run.shard.captureLifecycleEconomics();
+    try std.testing.expectEqual(@as(i64, 100), preserved.positions.portfolio_swap.quantity);
+    try std.testing.expectEqual(preserved.positions.portfolio_swap.quantity, preserved.positions.exchange_swap.quantity);
+
+    const stopped = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(6, 7, .stop_keep_positions));
+    _ = stopped;
+    try expectKeepPositionsStopped(&run, preserved);
+    var stop_buy_group: oms_module.IntentGroup = .{ .first_intent_sequence = 103, .count = 1 };
+    stop_buy_group.members[0] = .{ .intent_sequence = 103, .operation = .place, .instrument = .btc_usdt_swap, .side = .buy, .quantity = 10, .limit_price_micros = order_limit_price };
+    try std.testing.expectError(error.TradingNotAuthorized, run.shard.apply(atGroup(23, .{ .identity = 108, .payload = .{ .oms_intent_group = stop_buy_group } })));
+    const duplicate_stop = try run.shard.apply(lifecycleCommand(6, 7, .stop_keep_positions));
+    try std.testing.expectEqual(@as(usize, 0), duplicate_stop.facts.len);
+    try std.testing.expectEqual(@as(usize, 0), run.shard.oms.emitted().len);
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(24, .{ .identity = 121, .payload = .{ .oms_execution_report = .{
+        .report_id = 121,
+        .order_id = position_order.order_id,
+        .revision = 1,
+        .status = .canceled,
+        .cumulative_quantity = happy_order_quantity,
+        .remaining_quantity = 0,
+    } } }));
+
+    _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(7, 8, .start_recovery));
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(24, .{ .identity = 109, .payload = .recovery_completed }));
+    _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(8, 10, .enable_trading));
+    try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
+    try std.testing.expectEqual(preserved.positions.portfolio_swap.quantity, run.shard.portfolio_position.quantity);
+
+    _ = try applyLive(&run.shard, &run.decision_journal, deRiskCommand(9, 11, 40, 0));
+    try std.testing.expectEqual(operational.OperationalMode.draining, run.shard.operational_state.mode);
+    var increase_group: oms_module.IntentGroup = .{ .first_intent_sequence = 104, .count = 1 };
+    increase_group.members[0] = .{ .intent_sequence = 104, .operation = .place, .instrument = .btc_usdt_swap, .side = .buy, .quantity = 10, .limit_price_micros = order_limit_price };
+    try std.testing.expectError(error.DeRiskTargetViolation, run.shard.apply(atGroup(25, .{ .identity = 110, .payload = .{ .oms_intent_group = increase_group } })));
+    const derisk_sell = try placeIntentGroup(&run, 26, 105, 105, .sell, 60);
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(27, .{ .identity = 112, .payload = .{ .economic_fill = .{
+        .fill_id = 112,
+        .order_id = derisk_sell.order_id,
+        .quantity = 60,
+        .price_micros = 50_000_000_000,
+        .fee_micros = 25,
+    } } }));
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(28, .{ .identity = 118, .payload = .{ .oms_execution_report = .{
+        .report_id = 118,
+        .order_id = derisk_sell.order_id,
+        .revision = 1,
+        .status = .filled,
+        .cumulative_quantity = 60,
+        .remaining_quantity = 0,
+    } } }));
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(29, .{ .identity = 113, .payload = .{ .lifecycle_progress = .{
+        .operation_identity = 9,
+        .target_identity = 1,
+        .open_orders_closed = true,
+        .reconciliation_complete = true,
+        .position_quantity = 40,
+    } } }));
+    try std.testing.expectEqual(operational.OperationalMode.ready, run.shard.operational_state.mode);
+
+    try std.testing.expectError(error.RiskWarningRequired, run.shard.apply(deRiskCommand(10, 13, 0, 0)));
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(29, .{ .identity = 114, .payload = .{ .risk_warning = .{
+        .warning_identity = 31,
+        .target_identity = 1,
+    } } }));
+    _ = try applyLive(&run.shard, &run.decision_journal, deRiskCommand(10, 14, 0, 31));
+    try std.testing.expectEqual(operational.OperationalMode.draining, run.shard.operational_state.mode);
+    const flatten_sell = try placeIntentGroup(&run, 30, 106, 106, .sell, 40);
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(31, .{ .identity = 116, .payload = .{ .economic_fill = .{
+        .fill_id = 116,
+        .order_id = flatten_sell.order_id,
+        .quantity = 40,
+        .price_micros = 50_000_000_000,
+        .fee_micros = 20,
+    } } }));
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(32, .{ .identity = 119, .payload = .{ .oms_execution_report = .{
+        .report_id = 119,
+        .order_id = flatten_sell.order_id,
+        .revision = 1,
+        .status = .filled,
+        .cumulative_quantity = 40,
+        .remaining_quantity = 0,
+    } } }));
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(33, .{ .identity = 117, .payload = .{ .lifecycle_progress = .{
+        .operation_identity = 10,
+        .target_identity = 1,
+        .open_orders_closed = true,
+        .reconciliation_complete = true,
+        .position_quantity = 0,
+    } } }));
+    try std.testing.expectEqual(operational.OperationalMode.ready, run.shard.operational_state.mode);
+
+    _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(11, 16, .enable_trading));
+    try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(34, .{ .identity = 120, .payload = .{ .safety_gate_change = .{
+        .gate_identity = margin_kill_gate_identity,
+        .target_identity = 1,
+        .kind = .latched,
+        .reason = .margin_kill,
+        .open = false,
+    } } }));
+    try std.testing.expect(!run.shard.operational_state.effectiveTradingAuthority());
+    try std.testing.expect(run.shard.operational_state.mayReduceOnly());
+    try std.testing.expectError(error.TradingSafetyGateClosed, run.shard.apply(lifecycleCommand(12, 17, .enable_trading)));
+    try std.testing.expectError(error.UnknownLatchIdentity, run.shard.apply(resolveLatchCommand(13, 17, 999)));
+    _ = try applyLive(&run.shard, &run.decision_journal, resolveLatchCommand(13, 17, margin_kill_gate_identity));
+    try std.testing.expectEqual(operational.OperationalMode.ready, run.shard.operational_state.mode);
+    try std.testing.expect(!run.shard.operational_state.trading_authorized);
+    _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(14, 18, .enable_trading));
+    try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
+
+    try run.decision_journal.seal();
+    _ = try assertReplayEquivalent(run);
 }
 
 test "venue facts and replay use apply without replay send capability" {

@@ -298,6 +298,18 @@ _Avoid_: File name, process id, connection id
 StreamIdentity 内每条稳定记录严格连续递增且永不重置的序号；在 TradingShard 决策日志中称为 ShardSequence。
 _Avoid_: SourceSequence, global sequence, per-segment offset
 
+**VenueSourceStreamIdentity**:
+标识一个 AdapterSession 内可独立判断连续性的 Venue REST 或 WebSocket 来源流；来源序列重置或失去连续性时必须形成新身份。
+_Avoid_: StreamIdentity, channel name, connection object
+
+**VenueSourceSequence**:
+VenueSourceStreamIdentity 内由 Venue 提供或由适配器按接收顺序分配的序号；它只证明该来源可观察范围内的顺序，不得跨来源比较或伪装成全局顺序。
+_Avoid_: StreamSequence, global sequence, exchange-time order
+
+**BootstrapSnapshotIdentity**:
+一次完整 Venue 账户或行情快照屏障的身份；后续单项观察只有明确引用该身份且来源连续时才能推进相应投影。
+_Avoid_: Snapshot file, latest state, reconnect generation
+
 **MonotonicEpochIdentity**:
 标识一段可安全比较和相减的本机单调时钟域；进程重启或时钟域变化产生新身份，跨 epoch 不得计算持续时间。
 _Avoid_: StreamIdentity, boot time, UTC clock
@@ -321,6 +333,10 @@ _Avoid_: StableEventSchema, global event union, serialized struct image
 **StableEventSchema**:
 一个 EventType 与 SchemaVersion 对应的不可变字段、整数宽度、单位、枚举和长度契约，用于日志与策略 Host IPC；任何字段语义变化都必须形成新版本并由显式编解码器处理。
 _Avoid_: InMemoryEvent layout, best-effort decoder, self-describing object
+
+**ProvisionalEventSchema**:
+尚未进入任何受支持 RecoverySchemaHorizon 的开发期事件契约，可以与其快照、夹具和摘要原子替换；一旦进入受支持恢复基线即成为 StableEventSchema。
+_Avoid_: StableEventSchema, backward-compatible release, production schema
 
 **EventType**:
 CanonicalEvent 的永久稳定类型身份，具有唯一且永不复用的整数编号、规范名称和唯一 EventFamily；领域事实的含义或所有者改变时必须形成新的 EventType。
@@ -537,12 +553,24 @@ _Avoid_: Not Found response, missing open order, retry permission without eviden
 _Avoid_: Exchange name, market
 
 **VenueAdapter**:
-在 Execution Gateway 与某个 Venue 或 SimulatedVenue 之间接收规范 OrderCommand、输出 OrderDispatchResult 与外部事实的执行角色；它隐藏认证、传输、重连、对账和 Venue 字段，调用方不能绕过它直接发送订单。
+在 Execution Gateway 与某个 Venue 或 SimulatedVenue 之间接收规范 OrderCommand、订单对账及账户对账请求，输出 OrderDispatchResult 与外部事实的执行角色；它隐藏认证、传输、重连、对账和 Venue 字段，调用方不能绕过它直接发送订单。
 _Avoid_: Exchange client, transport wrapper, Venue plugin
+
+**MarketFeedAdapter**:
+在 Venue 公共行情与交易核心之间输出规范市场事实的接入角色；它独立于 ExchangeAccount 生命周期并隐藏订阅、重连、快照恢复和 Venue 字段。
+_Avoid_: VenueAdapter, market-data client, public WebSocket wrapper
+
+**AdapterSessionIdentity**:
+一次固定绑定 Venue、环境、ExchangeAccount 与 TradingCredential 的 VenueAdapter 运行身份；凭证、账户或环境改变必须创建新身份。
+_Avoid_: Process id, connection id, ConfigVersion
 
 **Asset**:
 可以持有、结算或计价的经济资产。
 _Avoid_: Currency, coin
+
+**AssetAmount**:
+以某个 Asset 的已激活原子精度表示的整数金额；离开适配器后的权威资金、费用和损益不得使用浮点或无 Asset 的裸数值。
+_Avoid_: Money, decimal string, global micros
 
 **Instrument**:
 某个 Venue 上可交易的具体产品，其身份包含产品类型、相关 Asset 及合约规格；交易所字符串代码不是其权威身份。
@@ -551,6 +579,14 @@ _Avoid_: Symbol, pair, market
 **InstrumentRules**:
 在明确生效期间内适用于某个 Instrument 的版本化交易规则，包括交易状态、价格与数量约束、合约及结算规则。
 _Avoid_: Current metadata, timeless symbol config
+
+**InstrumentPrice**:
+按明确 InstrumentRulesVersion 表示的整数价格单位；Venue 小数只有可被该规则精确表达时才能转换为 InstrumentPrice。
+_Avoid_: Float price, price_micros, Venue decimal string
+
+**InstrumentQuantity**:
+按明确 InstrumentRulesVersion 表示的整数数量单位；它不能脱离 Instrument 与合约规格解释。
+_Avoid_: Float quantity, raw size, universal lot
 
 **InstrumentDefinitionObserved**:
 适配器从 Venue 观察并标准化的产品身份、交易状态及规则候选事实；它在经验证的 ConfigEvent 生效前不能直接替换当前 InstrumentRules。
@@ -584,13 +620,25 @@ _Avoid_: Trade, ExecutionReport
 Venue 在明确范围、来源游标和时点声明的 ExchangeAccount 完整资产余额事实；它用于对账，不能作为覆盖本地账本的命令。
 _Avoid_: PortfolioBalance, ledger overwrite, balance delta
 
+**ExchangeBalanceObserved**:
+Venue 对 ExchangeAccount 中单个 Asset 最新绝对余额的不可变观察；它必须衔接有效 BootstrapSnapshotIdentity，不能表达数值差或直接覆盖本地账本。
+_Avoid_: Balance delta, ExchangeBalanceSnapshot, ledger correction
+
 **ExchangePositionSnapshot**:
 Venue 在明确范围、来源游标和时点声明的 ExchangeAccount 完整真实仓位事实；它用于核对 ExchangePosition，不能直接重分配 VirtualPortfolio 归属。
 _Avoid_: PortfolioPosition, position overwrite, local projection
 
+**ExchangePositionObserved**:
+Venue 对 ExchangeAccount 中单个 Instrument 与 PositionSide 最新绝对持仓的不可变观察；它只有衔接有效 BootstrapSnapshotIdentity 和连续来源序列时才能推进 ExchangePosition 投影。
+_Avoid_: Position delta, ExchangePositionSnapshot, PortfolioPosition
+
 **ExchangeMarginSnapshot**:
 Venue 在明确时点声明的保证金余额、风险档位、维持保证金及强平参考值集合，用于保证金状态对账。
 _Avoid_: MarginRules, PortfolioMarginBuffer, inferred liquidation model
+
+**ExchangeMarginObserved**:
+Venue 对 ExchangeAccount 或逐仓 Instrument 最新绝对保证金状态的不可变观察；它不能替代 MarginRules 或由本地风险模型反推。
+_Avoid_: Margin delta, ExchangeMarginSnapshot, calculated margin
 
 **VenueAccountConfigurationSnapshot**:
 Venue 声明的账户持仓模式、保证金模式、杠杆和自动追加保证金等交易配置事实，用于安全准入与对账。

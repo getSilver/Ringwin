@@ -6,7 +6,7 @@
 
 **Status:** done
 
-- [ ] ControlCommand 具有稳定身份、明确目标、版本前置条件和有效期限；错误目标、过期、旧版本、前置版本不匹配及身份冲突均失败关闭，语义重复为 no-op。
-- [ ] OperationalMode 与 TradingAuthorization 保持正交；未处于 Ready 或任一必需 SafetyGate 关闭时，`EnableTrading` 不得进入 Trading。
-- [ ] 未授权的原生或 Python OrderIntent 不进入风险准入，也不产生 OrderCommand。
-- [ ] 模式、授权、命令身份及拒绝原因进入稳定日志和 CanonicalStateDigest，实时与 replay 得到相同结果。
+- [x] ControlCommand 具有稳定身份、明确目标、版本前置条件和有效期限；错误目标、过期、旧版本、前置版本不匹配及身份冲突均失败关闭，语义重复为 no-op。
+- [x] OperationalMode 与 TradingAuthorization 保持正交；未处于 Ready 或任一必需 SafetyGate 关闭时，`EnableTrading` 不得进入 Trading。
+- [x] 未授权的原生或 Python OrderIntent 不进入风险准入，也不产生 OrderCommand。
+- [x] 模式、授权、命令身份及拒绝原因进入稳定日志和 CanonicalStateDigest，实时与 replay 得到相同结果。

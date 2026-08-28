@@ -10,7 +10,29 @@
 - 行情缺口、风险拒绝、Unknown 对账和重复回报走同一个核心状态机。
 - 四个 `TradingShard` 实例可以保持独立状态、日志、队列和故障边界。
 
-默认路径不连接真实 Venue；独立入口只使用本机 Demo Key 连接 OKX 模拟交易。项目不接入生产账户，也不证明策略盈利。
+默认路径不连接真实 Venue；独立入口只使用本机 Demo Key 连接 OKX 模拟交易。项目不接入生产账户，也不证明策略盈利。多 Venue 的正式目标是 OKX、Binance、Bybit 的现货与线性永续；首个交付限于 OKX 统一接缝和 Binance Demo/Testnet 验证，生产账户资格仍是独立阶段。
+
+## 统一构建入口
+
+仓库统一通过 `build.zig` 执行；每个入口都会先精确验证 Zig
+`0.17.0-dev.315+5b647b792`。
+
+```powershell
+zig build
+zig build test
+zig build run
+zig build core-wave
+zig build demo-wave
+```
+
+`core-wave` 执行完整离线回归。`demo-wave` 是显式 OKX Demo wave，默认只做只读准备；只有
+SystemOwner 授权 Demo 成交时才执行：
+
+```powershell
+zig build demo-wave -Ddemo-live
+```
+
+既有 PowerShell 验收脚本仍作为上述 wave 的底层实现。
 
 ## 交易核心整波验收
 
@@ -336,7 +358,7 @@ Windows 2C/4T 开发节点接近 `2M events/s`，但四分片合并 P99 为
 
 - OKX 生产账户、Linux 运行时/性能和部署资格；单命令 Windows Demo 整波与 Linux
   compile-only 证据已经通过；
-- Binance、Gate.io、Bitget 的真实行情与交易适配器；当前路线明确不继续扩展 Adapter；
+- Binance 与 Bybit 的真实行情与交易适配器；它们按已接受的多 Venue 路线在 OKX 统一接缝之后推进；
 - Python StrategyHost 与四分片核心在合格 Linux 节点上的产品性能资格；
 - Linux 独占核心、CPU affinity、NUMA、真实网络/日志 I/O 和硬件性能计数器；
 - testnet 协议资格、生产密钥、单活热备、fencing 和部署；
@@ -363,10 +385,8 @@ Gateway、TradingShard 现金风控、OrderCommand、OKX 回报、经济投影�
 认证失败、限流、Unknown、部分成功、并发 Fill、REST 分页、迟到事实和清理失败矩阵也已闭合；
 整波自动资格、异常关机后复验与最终证据边界均已闭合。
 
-现有 OKX Adapter 已足够验证真实 Venue 业务闭环，SystemOwner 明确停止继续扩展 Adapter。
-下一能力波次转入[交易核心系统闭环](.scratch/trading-core-system-closure/map.md)：补齐核心拥有的
-多品种 OMS、风险与账务、操作安全栅栏、持久恢复、分片/账户协调及同核整波验收。OKX 仅作为
-既有真实 Venue 证据；Linux 五核生产性能、生产账户、密钥托管和部署资格仍是独立波次。
+现有 OKX Adapter 已足够验证真实 Venue 业务闭环；现在按已接受的多 Venue 路线，先建立共享契约并
+迁移 OKX，再验证 Binance 和 Bybit。Linux 五核生产性能、生产账户、密钥托管和部署资格仍是独立波次。
 
 ## License
 
