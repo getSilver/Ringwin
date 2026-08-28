@@ -3,6 +3,10 @@ const trading_shard = @import("trading_shard.zig");
 const recovery_cutover = @import("recovery_cutover.zig");
 const account_coordinator = @import("account_coordinator.zig");
 const four_shard_acceptance = @import("four_shard_acceptance.zig");
+const canonical_event = @import("canonical_event.zig");
+const market_feed_adapter = @import("market_feed_adapter.zig");
+const simulated_venue = @import("simulated_venue.zig");
+const venue_adapter_contract = @import("venue_adapter_contract.zig");
 
 pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
@@ -45,4 +49,8 @@ test {
     _ = recovery_cutover;
     _ = account_coordinator;
     _ = four_shard_acceptance;
+    _ = canonical_event;
+    _ = market_feed_adapter;
+    _ = simulated_venue;
+    _ = venue_adapter_contract;
 }
