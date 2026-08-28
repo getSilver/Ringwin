@@ -7,6 +7,7 @@ const canonical_event = @import("canonical_event.zig");
 const market_feed_adapter = @import("market_feed_adapter.zig");
 const simulated_venue = @import("simulated_venue.zig");
 const venue_adapter_contract = @import("venue_adapter_contract.zig");
+const simulated_lifecycle_projection = @import("simulated_lifecycle_projection.zig");
 
 pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
@@ -53,4 +54,5 @@ test {
     _ = market_feed_adapter;
     _ = simulated_venue;
     _ = venue_adapter_contract;
+    _ = simulated_lifecycle_projection;
 }

@@ -18,6 +18,7 @@ pub const SimulatedVenue = struct {
     state: State = .idle,
     binding: ?Binding = null,
     pending: ?canonical.AdapterOutputBatch = null,
+    next_event_identity: u64 = 1,
 
     pub fn adapter(self: *SimulatedVenue) venue.VenueAdapter {
         return .{ .ptr = self, .vtable = &.{
@@ -50,26 +51,30 @@ pub const SimulatedVenue = struct {
         const binding = self.binding orelse return error.InvalidRequest;
         const account = switch (request) {
             .order_command => |value| value.exchange_account,
+            .order_batch => |value| blk: {
+                if (value.len == 0) return error.InvalidRequest;
+                for (value.slice()) |command|
+                    if (command.exchange_account != binding.exchange_account or command.adapter_session != binding.adapter_session) return error.InvalidRequest;
+                break :blk binding.exchange_account;
+            },
             .order_reconciliation => |value| value.exchange_account,
             .account_reconciliation => |value| value.exchange_account,
         };
         if (account != binding.exchange_account) return error.InvalidRequest;
         switch (request) {
             .order_command => |value| if (value.adapter_session != binding.adapter_session) return error.InvalidRequest,
+            .order_batch => {},
             .account_reconciliation => |value| if (value.expected_session != binding.adapter_session) return error.InvalidRequest,
             .order_reconciliation => {},
         }
 
-        const identity: u128, const event: canonical.CanonicalEvent = switch (request) {
-            .order_command => |command| .{ command.identity, .{ .order_dispatch_result = .{
-                .command = command.identity,
-                .state = .submitted,
-            } } },
-            .order_reconciliation => |reconciliation| .{ reconciliation.identity, .{ .reconciliation_started = reconciliation.identity } },
-            .account_reconciliation => |reconciliation| .{ reconciliation.identity, .{ .account_reconciliation_started = reconciliation.identity } },
-        };
         var batch: canonical.AdapterOutputBatch = .{};
-        batch.append(.{ .envelope = envelope(binding, identity), .event = event }) catch return error.InvalidRequest;
+        switch (request) {
+            .order_command => |command| self.emitOrderCommand(&batch, binding, command) catch return error.InvalidRequest,
+            .order_batch => |commands| for (commands.slice()) |command| self.emitOrderCommand(&batch, binding, command) catch return error.InvalidRequest,
+            .order_reconciliation => |reconciliation| self.append(&batch, binding, reconciliation.identity, .{ .reconciliation_started = reconciliation.identity }) catch return error.InvalidRequest,
+            .account_reconciliation => |reconciliation| self.append(&batch, binding, reconciliation.identity, .{ .account_reconciliation_started = reconciliation.identity }) catch return error.InvalidRequest,
+        }
         self.pending = batch;
         return .accepted;
     }
@@ -90,20 +95,119 @@ pub const SimulatedVenue = struct {
         self.state = .stopped;
     }
 
-    fn envelope(binding: Binding, identity: u128) canonical.EventEnvelope {
+    fn emitOrderCommand(self: *SimulatedVenue, batch: *canonical.AdapterOutputBatch, binding: Binding, command: canonical.OrderCommand) !void {
+        const dispatch_state: canonical.DispatchState = if (command.dispatch_deadline_monotonic_ns == 0)
+            .unknown
+        else if (!validOrderCommand(command))
+            .not_sent
+        else
+            .submitted;
+        try self.append(batch, binding, command.identity, .{ .order_dispatch_result = .{
+            .command = command.identity,
+            .state = dispatch_state,
+        } });
+        if (dispatch_state != .submitted) return;
+
+        const quantity = command.quantity.?;
+        const price = command.limit_price.?;
+        const zero_quantity = canonical.InstrumentQuantity{
+            .instrument = command.instrument,
+            .rules_version = command.rules_version,
+            .lots = 0,
+        };
+        const venue_order = try venueOrder(binding.venue, command.identity);
+        switch (command.operation) {
+            .place => {
+                try self.append(batch, binding, command.identity + 1, .{ .execution_report = .{
+                    .identity = command.identity + 1,
+                    .order = command.identity,
+                    .client_order_id = command.client_order_id,
+                    .venue_order = venue_order,
+                    .instrument = command.instrument,
+                    .exchange_account = command.exchange_account,
+                    .revision = command.revision,
+                    .status = .accepted,
+                    .cumulative_quantity = zero_quantity,
+                    .remaining_quantity = quantity,
+                } });
+                try self.append(batch, binding, command.identity + 2, .{ .fill = .{
+                    .identity = command.identity + 2,
+                    .order = command.identity,
+                    .client_order_id = command.client_order_id,
+                    .venue_order = venue_order,
+                    .venue_trade = try venueTrade(binding.venue, command.identity),
+                    .instrument = command.instrument,
+                    .exchange_account = command.exchange_account,
+                    .side = command.side,
+                    .quantity = quantity,
+                    .price = price,
+                    .fee = if (command.fee_asset) |asset| .{ .asset = asset, .atoms = command.fee_atoms } else null,
+                    .rebate = if (command.rebate_asset) |asset| .{ .asset = asset, .atoms = command.rebate_atoms } else null,
+                    .realized_pnl = if (command.realized_pnl_asset) |asset| .{ .asset = asset, .atoms = command.realized_pnl_atoms } else null,
+                    .liquidity = command.liquidity,
+                } });
+                try self.append(batch, binding, command.identity + 3, .{ .execution_report = .{
+                    .identity = command.identity + 3,
+                    .order = command.identity,
+                    .client_order_id = command.client_order_id,
+                    .venue_order = venue_order,
+                    .instrument = command.instrument,
+                    .exchange_account = command.exchange_account,
+                    .revision = command.revision,
+                    .status = .filled,
+                    .cumulative_quantity = quantity,
+                    .remaining_quantity = zero_quantity,
+                } });
+            },
+            .amend, .cancel => try self.append(batch, binding, command.identity + 1, .{ .execution_report = .{
+                .identity = command.identity + 1,
+                .order = command.identity,
+                .client_order_id = command.client_order_id,
+                .venue_order = venue_order,
+                .instrument = command.instrument,
+                .exchange_account = command.exchange_account,
+                .revision = command.revision,
+                .status = if (command.operation == .amend) .amended else .canceled,
+                .cumulative_quantity = zero_quantity,
+                .remaining_quantity = if (command.operation == .amend) quantity else zero_quantity,
+            } }),
+        }
+    }
+
+    fn validOrderCommand(command: canonical.OrderCommand) bool {
+        return command.quantity != null and command.limit_price != null and command.quantity.?.lots > 0 and command.limit_price.?.ticks > 0;
+    }
+
+    fn append(self: *SimulatedVenue, batch: *canonical.AdapterOutputBatch, binding: Binding, source_fact_identity: u128, event: canonical.CanonicalEvent) !void {
+        const identity = self.next_event_identity;
+        self.next_event_identity += 1;
+        try batch.append(.{ .envelope = envelope(binding, identity, source_fact_identity), .event = event });
+    }
+
+    fn venueOrder(venue_identity: canonical.VenueIdentity, order: canonical.OrderIdentity) !canonical.VenueOrderRef {
+        var buffer: [64]u8 = undefined;
+        return canonical.VenueOrderRef.init(venue_identity, try std.fmt.bufPrint(&buffer, "sim-order-{d}", .{order}));
+    }
+
+    fn venueTrade(venue_identity: canonical.VenueIdentity, order: canonical.OrderIdentity) !canonical.VenueTradeRef {
+        var buffer: [64]u8 = undefined;
+        return canonical.VenueTradeRef.init(venue_identity, try std.fmt.bufPrint(&buffer, "sim-trade-{d}", .{order}));
+    }
+
+    fn envelope(binding: Binding, identity: u64, source_fact_identity: u128) canonical.EventEnvelope {
         return .{
             .event_type = 1,
             .schema_version = 1,
-            .identity = .{ .stream = 1, .sequence = @intCast(identity) },
-            .source_fact_identity = identity,
+            .identity = .{ .stream = 1, .sequence = identity },
+            .source_fact_identity = source_fact_identity,
             .scope = .account,
             .venue = binding.venue,
             .exchange_account = binding.exchange_account,
             .source_stream = 1,
-            .source_sequence = @intCast(identity),
+            .source_sequence = identity,
             .adapter_session = binding.adapter_session,
             .times = .{ .receive_utc_ns = 1, .monotonic_ns = 1, .audit_utc_ns = 1 },
-            .raw_evidence = .{ .stream = 1, .sequence = @intCast(identity), .digest = @splat(0) },
+            .raw_evidence = .{ .stream = 1, .sequence = identity, .digest = @splat(0) },
         };
     }
 };
@@ -165,5 +269,72 @@ test "simulated venue rejects requests outside its fixed account session" {
         .exchange_account = 4,
         .expected_session = 3,
     } }));
+    try adapter.stop(.{ .monotonic_ns = 1 });
+}
+
+test "simulated venue emits deterministic order lifecycle facts" {
+    var simulated: SimulatedVenue = .{};
+    const adapter = simulated.adapter();
+    try adapter.start(.{
+        .venue = 1,
+        .environment = .simulation,
+        .exchange_account = 2,
+        .adapter_session = 3,
+        .request_capacity = 2,
+        .output_capacity = 8,
+    });
+    const command: canonical.OrderCommand = .{
+        .identity = 10,
+        .exchange_account = 2,
+        .instrument = 4,
+        .client_order_id = try canonical.ClientOrderId.init("lifecycle-10"),
+        .capability_version = 1,
+        .rules_version = 1,
+        .config_version = 1,
+        .adapter_session = 3,
+        .dispatch_deadline_monotonic_ns = 9,
+        .quantity = .{ .instrument = 4, .rules_version = 1, .lots = 100 },
+        .limit_price = .{ .instrument = 4, .rules_version = 1, .ticks = 50_100 },
+        .fee_asset = 5,
+        .fee_atoms = 15,
+        .rebate_asset = 6,
+        .rebate_atoms = 2,
+        .realized_pnl_asset = 7,
+        .realized_pnl_atoms = 7,
+    };
+    try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .order_command = command }));
+    const batch = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(@as(u8, 4), batch.len);
+    try std.testing.expectEqual(canonical.DispatchState.submitted, batch.events[0].event.order_dispatch_result.state);
+    try std.testing.expectEqual(canonical.ExecutionReportStatus.accepted, batch.events[1].event.execution_report.status);
+    try std.testing.expectEqual(@as(i128, 15), batch.events[2].event.fill.fee.?.atoms);
+    try std.testing.expectEqual(@as(canonical.AssetIdentity, 6), batch.events[2].event.fill.rebate.?.asset);
+    try std.testing.expectEqual(canonical.ExecutionReportStatus.filled, batch.events[3].event.execution_report.status);
+
+    var unknown = command;
+    unknown.identity = 11;
+    unknown.dispatch_deadline_monotonic_ns = 0;
+    _ = try adapter.trySend(.{ .order_command = unknown });
+    const unknown_batch = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(canonical.DispatchState.unknown, unknown_batch.events[0].event.order_dispatch_result.state);
+
+    var cancel = command;
+    cancel.identity = 12;
+    cancel.operation = .cancel;
+    _ = try adapter.trySend(.{ .order_command = cancel });
+    const cancel_batch = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(canonical.ExecutionReportStatus.canceled, cancel_batch.events[1].event.execution_report.status);
+
+    var commands = canonical.OrderCommandBatch{};
+    try commands.append(command);
+    var amended = command;
+    amended.identity = 13;
+    amended.operation = .amend;
+    try commands.append(amended);
+    _ = try adapter.trySend(.{ .order_batch = commands });
+    const command_batch = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(@as(u8, 6), command_batch.len);
+    try std.testing.expectEqual(canonical.DispatchState.submitted, command_batch.events[0].event.order_dispatch_result.state);
+    try std.testing.expectEqual(canonical.ExecutionReportStatus.amended, command_batch.events[5].event.execution_report.status);
     try adapter.stop(.{ .monotonic_ns = 1 });
 }

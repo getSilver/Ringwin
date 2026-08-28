@@ -191,6 +191,10 @@ pub const CanonicalRejectReason = enum(u8) {
 };
 
 pub const DispatchState = enum(u8) { not_sent, submitted, unknown };
+pub const OrderOperation = enum(u8) { place, amend, cancel };
+pub const OrderSide = enum(u8) { buy, sell };
+pub const LiquidityRole = enum(u8) { maker, taker };
+pub const ExecutionReportStatus = enum(u8) { accepted, partially_filled, filled, canceled, rejected, amended };
 
 pub const OrderCommand = struct {
     identity: OrderIdentity,
@@ -202,6 +206,34 @@ pub const OrderCommand = struct {
     config_version: u64,
     adapter_session: AdapterSessionIdentity,
     dispatch_deadline_monotonic_ns: u64,
+    operation: OrderOperation = .place,
+    side: OrderSide = .buy,
+    revision: u32 = 1,
+    quantity: ?InstrumentQuantity = null,
+    limit_price: ?InstrumentPrice = null,
+    fee_asset: ?AssetIdentity = null,
+    fee_atoms: i128 = 0,
+    rebate_asset: ?AssetIdentity = null,
+    rebate_atoms: i128 = 0,
+    realized_pnl_asset: ?AssetIdentity = null,
+    realized_pnl_atoms: i128 = 0,
+    liquidity: LiquidityRole = .taker,
+};
+
+pub const max_order_commands_per_batch = 4;
+pub const OrderCommandBatch = struct {
+    commands: [max_order_commands_per_batch]OrderCommand = undefined,
+    len: u8 = 0,
+
+    pub fn append(self: *OrderCommandBatch, command: OrderCommand) !void {
+        if (self.len == self.commands.len) return error.OrderBatchFull;
+        self.commands[self.len] = command;
+        self.len += 1;
+    }
+
+    pub fn slice(self: *const OrderCommandBatch) []const OrderCommand {
+        return self.commands[0..self.len];
+    }
 };
 
 pub const OrderReconciliationRequest = struct {
@@ -219,6 +251,7 @@ pub const AccountReconciliationRequest = struct {
 
 pub const AdapterRequest = union(enum) {
     order_command: OrderCommand,
+    order_batch: OrderCommandBatch,
     order_reconciliation: OrderReconciliationRequest,
     account_reconciliation: AccountReconciliationRequest,
 };
@@ -229,8 +262,40 @@ pub const OrderDispatchResult = struct {
     reason: ?CanonicalRejectReason = null,
 };
 
+pub const ExecutionReport = struct {
+    identity: SourceFactIdentity,
+    order: OrderIdentity,
+    client_order_id: ClientOrderId,
+    venue_order: ?VenueOrderRef = null,
+    instrument: InstrumentIdentity,
+    exchange_account: ExchangeAccountIdentity,
+    revision: u32,
+    status: ExecutionReportStatus,
+    cumulative_quantity: InstrumentQuantity,
+    remaining_quantity: InstrumentQuantity,
+};
+
+pub const Fill = struct {
+    identity: SourceFactIdentity,
+    order: OrderIdentity,
+    client_order_id: ClientOrderId,
+    venue_order: VenueOrderRef,
+    venue_trade: VenueTradeRef,
+    instrument: InstrumentIdentity,
+    exchange_account: ExchangeAccountIdentity,
+    side: OrderSide,
+    quantity: InstrumentQuantity,
+    price: InstrumentPrice,
+    fee: ?AssetAmount = null,
+    rebate: ?AssetAmount = null,
+    realized_pnl: ?AssetAmount = null,
+    liquidity: LiquidityRole,
+};
+
 pub const CanonicalEvent = union(enum) {
     order_dispatch_result: OrderDispatchResult,
+    execution_report: ExecutionReport,
+    fill: Fill,
     reconciliation_started: u128,
     account_reconciliation_started: u128,
 };
