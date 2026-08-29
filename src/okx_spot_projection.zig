@@ -60,7 +60,7 @@ pub const Projection = struct {
     observed_btc_atoms: ?i64 = null,
     observed_usdt_atoms: ?i64 = null,
 
-    pub fn apply(self: *Projection, event: private.CanonicalEvent) !void {
+    pub fn apply(self: *Projection, event: private.PrivateEvent) !void {
         switch (event.payload) {
             .execution_report => |report| try self.applyReport(report),
             .fill => |fill| try self.applyFill(fill, event.envelope.source_fact_identity),
@@ -221,7 +221,7 @@ pub const Projection = struct {
     }
 };
 
-pub fn appendStable(log: *journal.Journal, sequence: u64, event: private.CanonicalEvent) !void {
+pub fn appendStable(log: *journal.Journal, sequence: u64, event: private.PrivateEvent) !void {
     var encoded: StablePayload = .{};
     try encoded.put(u64, event.envelope.raw_evidence.stream_sequence);
     try encoded.bytesValue(&event.envelope.raw_evidence.sha256);
@@ -276,7 +276,7 @@ pub fn replayStable(bytes: []const u8) !Projection {
     };
 }
 
-fn decodeStable(record: journal.Record) !private.CanonicalEvent {
+fn decodeStable(record: journal.Record) !private.PrivateEvent {
     if (record.schema_version != stable_schema_version) return error.UnknownStableSchema;
     if (record.flags != journal.input_flag) return error.InvalidStableFlags;
     if (!record.time_presence.receive or !record.time_presence.monotonic or
@@ -656,7 +656,7 @@ fn envelope(identity: u8) private.EventEnvelope {
     };
 }
 
-fn fixtureReport(status: private.ExecutionStatus, filled: []const u8) !private.CanonicalEvent {
+fn fixtureReport(status: private.ExecutionStatus, filled: []const u8) !private.PrivateEvent {
     return fixtureOrderReport(10, "RWN1DEMO", .buy, status, "0.0001", filled);
 }
 
@@ -667,7 +667,7 @@ fn fixtureOrderReport(
     status: private.ExecutionStatus,
     quantity: []const u8,
     filled: []const u8,
-) !private.CanonicalEvent {
+) !private.PrivateEvent {
     return .{ .envelope = envelope(@intFromEnum(status) + 1), .payload = .{ .execution_report = .{
         .venue_order_id = @enumFromInt(venue_order_id),
         .client_order_id = try private.ClientOrderId.init(client_order_id),
@@ -691,7 +691,7 @@ test "OKX spot fill projects native fee dual layers and replays deterministicall
     initial.balances[0] = .{ .asset = try private.AssetCode.init("BTC"), .cash_balance = try private.Decimal.parse("1"), .available_balance = null, .equity = null, .frozen_balance = null, .liability = null, .isolated_liability = null, .cross_liability = null };
     initial.balances[1] = .{ .asset = try private.AssetCode.init("USDT"), .cash_balance = try private.Decimal.parse("1000"), .available_balance = null, .equity = null, .frozen_balance = null, .liability = null, .isolated_liability = null, .cross_liability = null };
     initial.balance_count = 2;
-    const events = [_]private.CanonicalEvent{
+    const events = [_]private.PrivateEvent{
         .{ .envelope = envelope(1), .payload = .{ .exchange_balance_snapshot = initial } },
         try fixtureReport(.live, "0"),
         try fixtureReport(.filled, "0.0001"),
@@ -726,7 +726,7 @@ test "OKX spot fill projects native fee dual layers and replays deterministicall
     final.scope = .ws_reported;
     final.balances[0].cash_balance = try private.Decimal.parse("1.00009992");
     final.balances[1].cash_balance = try private.Decimal.parse("995");
-    const final_event: private.CanonicalEvent = .{ .envelope = envelope(5), .payload = .{ .exchange_balance_snapshot = final } };
+    const final_event: private.PrivateEvent = .{ .envelope = envelope(5), .payload = .{ .exchange_balance_snapshot = final } };
     try first.apply(final_event);
     try std.testing.expect(first.economicReconciled());
 
@@ -830,7 +830,7 @@ test "economic reconciliation admits one USDT atom of endpoint quantization" {
 }
 
 test "spot projection retains strategy and cleanup orders across stable replay" {
-    const events = [_]private.CanonicalEvent{
+    const events = [_]private.PrivateEvent{
         try fixtureOrderReport(10, "RWN1BUY", .buy, .filled, "0.0001", "0.0001"),
         .{ .envelope = envelope(10), .payload = .{ .fill = .{
             .venue_trade_id = @enumFromInt(20),

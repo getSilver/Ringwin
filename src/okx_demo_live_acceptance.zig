@@ -266,7 +266,7 @@ fn restRowCount(gpa: std.mem.Allocator, raw: []const u8) !usize {
     return data.items.len;
 }
 
-fn record(projection: *spot.Projection, stable: *journal.Journal, sequence: *u64, event: private.CanonicalEvent) !void {
+fn record(projection: *spot.Projection, stable: *journal.Journal, sequence: *u64, event: private.PrivateEvent) !void {
     try spot.appendStable(stable, sequence.*, event);
     try projection.apply(event);
     sequence.* += 1;

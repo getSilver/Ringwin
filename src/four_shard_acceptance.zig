@@ -5,6 +5,8 @@ const coordination = @import("account_coordinator.zig");
 const ShardId = coordination.ShardId;
 const max_shards = coordination.max_shards;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const swap_instrument: trading.oms.Instrument = 2;
+const settlement_asset: trading.canonical.AssetIdentity = 1;
 
 const money_scale: i64 = 1_000_000;
 const initial_cash: i64 = 25_000 * money_scale;
@@ -20,7 +22,7 @@ const place_fee_micros: i64 = 400_000;
 const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
 pub const acceptance_schema_version: u16 = 1;
-const expected_shared_summary_v1 = "e652a69fc3977ddb395edb6f0f2e6a7efc32d9e07d529c712aea33be6f09e6c2";
+const expected_shared_summary_v1 = "8e409fa2eb7e31bfde27a14d39804754eec10468a621fad1b2f88ebc8c27afef";
 
 const OpLog = struct {
     const Entry = union(enum) {
@@ -57,7 +59,7 @@ const World = struct {
         };
     }
 
-    fn apply(self: *World, index: usize, event: trading.CanonicalEvent) !void {
+    fn apply(self: *World, index: usize, event: trading.CoreEvent) !void {
         _ = try trading.applyStable(&self.shards[index], &self.journals[index], event);
     }
 
@@ -129,7 +131,7 @@ var shard_snapshot_storage: [max_shards][256 * 1024]u8 = undefined;
 var coordinator_snapshot_storage: [16384]u8 = undefined;
 var tail_journals: [max_shards]trading.journal.Journal = undefined;
 
-fn genesisEvents(index: usize) [14]trading.CanonicalEvent {
+fn genesisEvents(index: usize) [14]trading.CoreEvent {
     const target: u128 = @intCast(index + 1);
     return .{
         .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{
@@ -276,11 +278,11 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         group.members[0] = .{
             .intent_sequence = 10,
             .operation = .place,
-            .instrument = .btc_usdt_swap,
+            .instrument = swap_instrument,
             .side = if (index == max_shards - 1) .sell else .buy,
             .quantity = order_quantity,
-            .limit_price_micros = order_price_micros,
-            .reservation_micros = 11_400_000,
+            .limit_price = .{ .instrument = swap_instrument, .rules_version = 1, .ticks = order_price_micros },
+            .reservation = .{ .asset = settlement_asset, .atoms = 11_400_000 },
         };
         const placed = try trading.applyStable(&world.shards[index], &world.journals[index], .{
             .identity = 6,
@@ -511,12 +513,12 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     reduce_group.members[0] = .{
         .intent_sequence = 21,
         .operation = .place,
-        .instrument = .btc_usdt_swap,
+        .instrument = swap_instrument,
         .side = .sell,
         .portfolio_reduce_only = true,
         .quantity = 38,
-        .limit_price_micros = fill_price_micros,
-        .reservation_micros = 200_000,
+        .limit_price = .{ .instrument = swap_instrument, .rules_version = 1, .ticks = fill_price_micros },
+        .reservation = .{ .asset = settlement_asset, .atoms = 200_000 },
     };
     _ = try trading.applyStable(&world.shards[1], &world.journals[1], .{ .identity = 43, .payload = .{ .oms_intent_group = reduce_group } });
     const reducing = world.shards[1].oms.emitted();

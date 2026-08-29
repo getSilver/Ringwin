@@ -1,5 +1,8 @@
 const std = @import("std");
 const trading = @import("trading_shard.zig");
+const spot_instrument: trading.oms.Instrument = 1;
+const swap_instrument: trading.oms.Instrument = 2;
+const settlement_asset: trading.canonical.AssetIdentity = 1;
 const strategy_recovery = @import("strategy_host_recovery.zig");
 
 /// Restart admission phase; only ready may later accept a fresh EnableTrading.
@@ -72,7 +75,10 @@ pub const RecoveryCoordinator = struct {
             .portfolio_fee_micros = economic.portfolio.fee_micros,
             .exchange_fee_micros = economic.exchange.fee_micros,
             .suspense_micros = economic.suspense_usdt_micros,
-            .active_reservations_micros = self.shard.oms.activeReservations() catch std.math.maxInt(i64),
+            .active_reservations_micros = blk: {
+                const reservations = self.shard.oms.activeReservations(settlement_asset) catch break :blk std.math.maxInt(i64);
+                break :blk std.math.cast(i64, reservations.atoms) orelse std.math.maxInt(i64);
+            },
             .margin_micros = self.shard.position_margin_requirement_micros,
             .ledger_closed = self.shard.portfolio_ledger_debits_micros == self.shard.portfolio_ledger_credits_micros and
                 self.shard.exchange_ledger_debits_micros == self.shard.exchange_ledger_credits_micros,
@@ -660,8 +666,8 @@ test "strategy cutover persists a scoped fence and leaves unrelated orders live"
     var shard: trading.TradingShard = .{};
     var journal = trading.journal.Journal.init();
     var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 1, .count = 2 };
-    group.members[0] = .{ .intent_sequence = 1, .strategy_instance = 11, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 1, .limit_price_micros = 2, .reservation_micros = 2 };
-    group.members[1] = .{ .intent_sequence = 2, .strategy_instance = 12, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 1, .limit_price_micros = 2, .reservation_micros = 2 };
+    group.members[0] = .{ .intent_sequence = 1, .strategy_instance = 11, .operation = .place, .instrument = spot_instrument, .quantity = 1, .limit_price = .{ .instrument = spot_instrument, .rules_version = 1, .ticks = 2 }, .reservation = .{ .asset = settlement_asset, .atoms = 2 } };
+    group.members[1] = .{ .intent_sequence = 2, .strategy_instance = 12, .operation = .place, .instrument = spot_instrument, .quantity = 1, .limit_price = .{ .instrument = spot_instrument, .rules_version = 1, .ticks = 2 }, .reservation = .{ .asset = settlement_asset, .atoms = 2 } };
     try shard.oms.applyGroup(group);
     var cutover: Cutover = .{ .active_strategy_instance = 11 };
     try cutover.prepare(.{ .release = 1, .strategy_instance = 21, .strategy_definition = 1, .parameter_version = 1, .state_schema_version = 1, .transition = .keep, .structure_valid = true, .economic_digest_valid = true, .strategy_invariants_valid = true });
@@ -685,9 +691,9 @@ test "strategy cutover persists a scoped fence and leaves unrelated orders live"
 
 test "cutover failures and forward rollback never regress economic state or generation" {
     var shard: trading.TradingShard = .{ .release_generation = 4, .active_release = 10, .active_strategy_instance = 20 };
-    try shard.economic_projection.apply(.{ .fill = .{ .identity = 1, .instrument = .btc_usdt_swap, .side = .buy, .quantity = 3, .price_micros = 50_000_000, .quantity_denominator = 1, .fee_micros = 7 } });
+    try shard.economic_projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = .{ .instrument = swap_instrument, .rules_version = 1, .lots = 3 }, .price = .{ .instrument = swap_instrument, .rules_version = 1, .ticks = 50_000_000 }, .quantity_denominator = 1, .fee = .{ .asset = 1, .atoms = 7 } } });
     var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
-    group.members[0] = .{ .intent_sequence = 1, .strategy_instance = 20, .operation = .place, .instrument = .btc_usdt_swap, .quantity = 1, .limit_price_micros = 50_000_000, .reservation_micros = 50 };
+    group.members[0] = .{ .intent_sequence = 1, .strategy_instance = 20, .operation = .place, .instrument = swap_instrument, .quantity = 1, .limit_price = .{ .instrument = swap_instrument, .rules_version = 1, .ticks = 50_000_000 }, .reservation = .{ .asset = settlement_asset, .atoms = 50 } };
     try shard.oms.applyGroup(group);
     shard.oms.begin();
     try shard.oms.applyReport(.{ .report_id = 1, .order_id = 1, .revision = 1, .status = .filled, .cumulative_quantity = 1, .remaining_quantity = 0 });
@@ -752,7 +758,7 @@ test "cutover failures and forward rollback never regress economic state or gene
     try std.testing.expectEqual(@as(i64, 100_000_000), shard.economic_projection.portfolio.swap.open_cost_micros);
     try std.testing.expectEqual(@as(i64, 10), shard.economic_projection.portfolio.fee_micros);
     try std.testing.expectEqual(@as(i64, 2), shard.economic_projection.portfolio.penalty_micros);
-    try std.testing.expectEqual(@as(i64, 50), try shard.oms.activeReservations());
+    try std.testing.expectEqual(@as(i128, 50), (try shard.oms.activeReservations(1)).atoms);
 
     try stable_journal.seal();
     var replay_reader = try trading.journal.Reader.init(stable_journal.bytes());

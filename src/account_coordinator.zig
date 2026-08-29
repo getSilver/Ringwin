@@ -169,7 +169,7 @@ pub const CoordinationJournal = struct {
 };
 
 /// Converts one routed account fact into the target shard's stable event seam.
-pub fn accountFactEvent(delivery: Delivery) !trading.CanonicalEvent {
+pub fn accountFactEvent(delivery: Delivery) !trading.CoreEvent {
     const identity = std.math.cast(u64, delivery.fact.identity) orelse return error.IdentityOutOfRange;
     return .{
         .identity = identity,
@@ -196,7 +196,7 @@ pub fn accountFactEvent(delivery: Delivery) !trading.CanonicalEvent {
 }
 
 /// Converts one lease grant into the existing shard risk-lease event.
-pub fn riskLeaseEvent(lease: RiskLease) !trading.CanonicalEvent {
+pub fn riskLeaseEvent(lease: RiskLease) !trading.CoreEvent {
     const identity = std.math.cast(u64, lease.identity) orelse return error.IdentityOutOfRange;
     return .{ .identity = identity, .payload = .{ .risk_lease_granted = .{
         .lease_identity = identity,
@@ -212,7 +212,7 @@ pub fn riskLeaseEvent(lease: RiskLease) !trading.CanonicalEvent {
 }
 
 /// Converts one account-wide restriction into a shard-local stable gate fact.
-pub fn accountGateEvent(delivery: GateDelivery, target_identity: u128) !trading.CanonicalEvent {
+pub fn accountGateEvent(delivery: GateDelivery, target_identity: u128) !trading.CoreEvent {
     const identity = std.math.cast(u64, delivery.gate.identity) orelse return error.IdentityOutOfRange;
     return .{ .identity = identity, .payload = .{ .safety_gate_change = .{
         .gate_identity = delivery.gate.identity,
@@ -359,7 +359,7 @@ pub const SharedExecutionGateway = struct {
     }
 
     /// Converts an itemized transport outcome into the owning OMS apply seam.
-    pub fn outcomeEvent(self: *const SharedExecutionGateway, outcome: GatewayOutcome) !trading.CanonicalEvent {
+    pub fn outcomeEvent(self: *const SharedExecutionGateway, outcome: GatewayOutcome) !trading.CoreEvent {
         _ = try self.complete(outcome);
         var items: [trading.oms.max_commands]trading.oms.DispatchItem = undefined;
         items[0] = .{ .command_id = outcome.command_id, .state = outcome.state };
@@ -379,6 +379,9 @@ pub const SharedExecutionGateway = struct {
     }
 };
 
+const fixture_swap_instrument: trading.oms.Instrument = 2;
+const fixture_settlement_asset: trading.canonical.AssetIdentity = 1;
+
 fn commandFixture(command_id: u64, order_id: u64) trading.oms.Command {
     return .{
         .command_id = command_id,
@@ -386,13 +389,13 @@ fn commandFixture(command_id: u64, order_id: u64) trading.oms.Command {
         .strategy_instance = 1,
         .revision = 1,
         .operation = .place,
-        .instrument = .btc_usdt_swap,
+        .instrument = fixture_swap_instrument,
         .side = .buy,
         .portfolio_reduce_only = false,
         .venue_reduce_only = false,
         .quantity = 1,
-        .limit_price_micros = 1,
-        .reservation_micros = 1,
+        .limit_price = .{ .instrument = fixture_swap_instrument, .rules_version = 1, .ticks = 1 },
+        .reservation = .{ .asset = fixture_settlement_asset, .atoms = 1 },
     };
 }
 
@@ -554,7 +557,7 @@ pub const AccountCoordinator = struct {
     }
 
     /// Returns the stable close events that must be applied to every expired lease owner.
-    pub fn expiredLeaseEvents(self: *const AccountCoordinator, events: *[max_shards]trading.CanonicalEvent) ![]const trading.CanonicalEvent {
+    pub fn expiredLeaseEvents(self: *const AccountCoordinator, events: *[max_shards]trading.CoreEvent) ![]const trading.CoreEvent {
         var count: usize = 0;
         for (self.leases[0..self.lease_count]) |lease| {
             if (lease.open) continue;
@@ -721,7 +724,7 @@ pub const AccountCoordinator = struct {
     }
 
     /// Returns stable events carrying every current lease to its owning shard.
-    pub fn currentLeaseEvents(self: *const AccountCoordinator, events: *[max_shards]trading.CanonicalEvent) ![]const trading.CanonicalEvent {
+    pub fn currentLeaseEvents(self: *const AccountCoordinator, events: *[max_shards]trading.CoreEvent) ![]const trading.CoreEvent {
         for (self.leases[0..self.lease_count], 0..) |lease, index|
             events[index] = try riskLeaseEvent(lease);
         return events[0..self.lease_count];
@@ -1632,7 +1635,7 @@ test "explicit lease tightening is a replayable deterministic fact" {
         break :blk gated.allocateLeases(2, 20);
     });
 
-    var events: [max_shards]trading.CanonicalEvent = undefined;
+    var events: [max_shards]trading.CoreEvent = undefined;
     const lease_events = try coordinator.currentLeaseEvents(&events);
     try std.testing.expectEqual(max_shards, lease_events.len);
     for (lease_events, 0..) |event, index| switch (event.payload) {

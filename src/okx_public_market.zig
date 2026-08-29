@@ -238,7 +238,7 @@ pub const EventPayload = union(enum) {
     market_data_health_changed: MarketDataHealthChanged,
 };
 
-pub const CanonicalEvent = struct {
+pub const PrivateEvent = struct {
     envelope: EventEnvelope,
     payload: EventPayload,
 };
@@ -254,15 +254,15 @@ pub const RejectReason = enum(u8) {
 
 pub const IngressBatch = struct {
     raw_evidence: RawEvidenceRef,
-    events: [max_events_per_ingress]CanonicalEvent = undefined,
+    events: [max_events_per_ingress]PrivateEvent = undefined,
     event_count: u8 = 0,
     rejection: ?RejectReason = null,
 
-    pub fn eventSlice(self: *const IngressBatch) []const CanonicalEvent {
+    pub fn eventSlice(self: *const IngressBatch) []const PrivateEvent {
         return self.events[0..self.event_count];
     }
 
-    fn append(self: *IngressBatch, event: CanonicalEvent) !void {
+    fn append(self: *IngressBatch, event: PrivateEvent) !void {
         if (self.event_count == self.events.len) return error.TooManyEvents;
         self.events[self.event_count] = event;
         self.event_count += 1;
@@ -708,7 +708,7 @@ fn makeEvent(
     raw_evidence: RawEvidenceRef,
     identity: [Sha256.digest_length]u8,
     payload: EventPayload,
-) CanonicalEvent {
+) PrivateEvent {
     return .{
         .envelope = .{
             .source_time_utc_ns = source_time_utc_ns,
@@ -732,7 +732,7 @@ fn healthEvent(
     last: ?i64,
     previous: ?i64,
     sequence: ?i64,
-) CanonicalEvent {
+) PrivateEvent {
     return makeEvent(times, source_time_utc_ns, raw_evidence, healthIdentity(
         instrument,
         health,

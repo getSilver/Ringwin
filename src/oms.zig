@@ -1,4 +1,5 @@
 const std = @import("std");
+const canonical = @import("canonical_event.zig");
 
 pub const max_orders = 8;
 pub const max_group_members = 4;
@@ -6,7 +7,10 @@ pub const max_commands = 8;
 const max_command_history = 32;
 const max_fact_history = 32;
 
-pub const Instrument = enum(u8) { btc_usdt_spot, btc_usdt_swap };
+pub const Instrument = canonical.InstrumentIdentity;
+pub const Quantity = canonical.InstrumentQuantity;
+pub const Price = canonical.InstrumentPrice;
+pub const Reservation = canonical.AssetAmount;
 pub const Side = enum(u8) { buy, sell };
 pub const Operation = enum(u8) { place, amend, cancel };
 pub const PartialExecutionPolicy = enum(u8) { independent, cancel_remaining };
@@ -37,10 +41,10 @@ pub const Intent = struct {
     expected_revision: u32 = 0,
     expected_cumulative_quantity: i64 = 0,
     quantity: i64 = 0,
-    limit_price_micros: i64 = 0,
+    limit_price: Price = .{ .instrument = 0, .rules_version = 0, .ticks = 0 },
     native_amend: bool = true,
     allow_cancel_confirm_create: bool = false,
-    reservation_micros: i64 = 0,
+    reservation: Reservation = .{ .asset = 0, .atoms = 0 },
 };
 
 pub const IntentGroup = struct {
@@ -90,9 +94,9 @@ pub const Command = struct {
     portfolio_reduce_only: bool,
     venue_reduce_only: bool,
     quantity: i64,
-    limit_price_micros: i64,
+    limit_price: Price,
     predecessor_order_id: u64 = 0,
-    reservation_micros: i64,
+    reservation: Reservation,
 };
 
 pub const Order = struct {
@@ -105,12 +109,12 @@ pub const Order = struct {
     revision: u32 = 1,
     state: OrderState = .pending_submit,
     quantity: i64,
-    limit_price_micros: i64,
+    limit_price: Price,
     cumulative_quantity: i64 = 0,
     predecessor_order_id: u64 = 0,
-    reservation_micros: i64,
-    confirmed_reservation_micros: i64,
-    pending_reservation_micros: ?i64 = null,
+    reservation: Reservation,
+    confirmed_reservation: Reservation,
+    pending_reservation: ?Reservation = null,
     reservation_active: bool = true,
     dispatch_submitted: bool = false,
     group_first_sequence: u64,
@@ -128,7 +132,7 @@ pub const Order = struct {
     last_reconciliation_remaining_quantity: i64 = 0,
 };
 
-const Replacement = struct { instrument: Instrument, side: Side, portfolio_reduce_only: bool, venue_reduce_only: bool, quantity: i64, limit_price_micros: i64, reservation_micros: i64 };
+const Replacement = struct { instrument: Instrument, side: Side, portfolio_reduce_only: bool, venue_reduce_only: bool, quantity: i64, limit_price: Price, reservation: Reservation };
 
 pub const Oms = struct {
     orders: [max_orders]Order = undefined,
@@ -196,11 +200,12 @@ pub const Oms = struct {
         }
     }
 
-    pub fn activeReservations(self: *const Oms) !i64 {
-        var total: i64 = 0;
+    pub fn activeReservations(self: *const Oms, asset: canonical.AssetIdentity) !Reservation {
+        var total: Reservation = .{ .asset = asset, .atoms = 0 };
         for (self.orders[0..self.order_count]) |order| {
-            if (order.reservation_active)
-                total = try std.math.add(i64, total, order.reservation_micros);
+            if (!order.reservation_active) continue;
+            if (total.asset != order.reservation.asset) return error.MixedReservationAssets;
+            total.atoms = try std.math.add(i128, total.atoms, order.reservation.atoms);
         }
         return total;
     }
@@ -234,27 +239,28 @@ pub const Oms = struct {
     fn applyIntent(self: *Oms, intent: Intent, group: u64, policy: PartialExecutionPolicy) !void {
         switch (intent.operation) {
             .place => {
-                if (intent.quantity <= 0 or intent.limit_price_micros <= 0 or intent.reservation_micros <= 0) return error.InvalidOrderSpec;
-                const order = try self.createOrder(intent.strategy_instance, intent.instrument, intent.side, intent.portfolio_reduce_only, intent.venue_reduce_only, intent.quantity, intent.limit_price_micros, intent.reservation_micros, 0, group, policy);
+                if (intent.quantity <= 0 or intent.limit_price.ticks <= 0 or intent.reservation.atoms <= 0 or intent.limit_price.instrument != intent.instrument) return error.InvalidOrderSpec;
+                const order = try self.createOrder(intent.strategy_instance, intent.instrument, intent.side, intent.portfolio_reduce_only, intent.venue_reduce_only, intent.quantity, intent.limit_price, intent.reservation, 0, group, policy);
                 try self.emit(order.*, .place);
             },
             .amend => {
                 const order = try self.mutableOrder(intent.target_order_id);
                 try validateTarget(order, intent);
-                if (intent.quantity <= 0 or intent.limit_price_micros <= 0) return error.InvalidOrderSpec;
+                if (intent.quantity <= 0 or intent.limit_price.ticks <= 0 or intent.limit_price.instrument != intent.instrument) return error.InvalidOrderSpec;
                 if (intent.native_amend) {
                     order.revision += 1;
                     order.state = .pending_amend;
                     order.quantity = order.cumulative_quantity + intent.quantity;
-                    order.limit_price_micros = intent.limit_price_micros;
-                    order.pending_reservation_micros = intent.reservation_micros;
-                    order.reservation_micros = @max(order.reservation_micros, intent.reservation_micros);
+                    order.limit_price = intent.limit_price;
+                    order.pending_reservation = intent.reservation;
+                    if (order.reservation.asset != intent.reservation.asset) return error.MixedReservationAssets;
+                    if (intent.reservation.atoms > order.reservation.atoms) order.reservation = intent.reservation;
                     try self.emit(order.*, .amend);
                 } else {
                     if (!intent.allow_cancel_confirm_create) return error.CancelConfirmCreateNotAuthorized;
                     order.state = .pending_cancel;
-                    if (intent.reservation_micros <= 0) return error.InvalidOrderSpec;
-                    order.replacement = .{ .instrument = order.instrument, .side = intent.side, .portfolio_reduce_only = intent.portfolio_reduce_only, .venue_reduce_only = intent.venue_reduce_only, .quantity = intent.quantity, .limit_price_micros = intent.limit_price_micros, .reservation_micros = intent.reservation_micros };
+                    if (intent.reservation.atoms <= 0) return error.InvalidOrderSpec;
+                    order.replacement = .{ .instrument = order.instrument, .side = intent.side, .portfolio_reduce_only = intent.portfolio_reduce_only, .venue_reduce_only = intent.venue_reduce_only, .quantity = intent.quantity, .limit_price = intent.limit_price, .reservation = intent.reservation };
                     try self.emit(order.*, .cancel);
                 }
             },
@@ -342,9 +348,9 @@ pub const Oms = struct {
         if (report.status == .canceled or report.status == .rejected)
             order.reservation_active = false;
         if (report.status == .amended) {
-            order.confirmed_reservation_micros = order.pending_reservation_micros orelse order.confirmed_reservation_micros;
-            order.reservation_micros = order.confirmed_reservation_micros;
-            order.pending_reservation_micros = null;
+            order.confirmed_reservation = order.pending_reservation orelse order.confirmed_reservation;
+            order.reservation = order.confirmed_reservation;
+            order.pending_reservation = null;
         }
         if (report.status == .filled) order.replacement = null;
     }
@@ -400,14 +406,14 @@ pub const Oms = struct {
             .side = replacement.side,
             .portfolio_reduce_only = replacement.portfolio_reduce_only,
             .quantity = replacement.quantity,
-            .limit_price_micros = replacement.limit_price_micros,
+            .limit_price = replacement.limit_price,
         };
     }
 
-    pub fn confirmReplacement(self: *Oms, order_id: u64, reservation_micros: i64, portfolio_reduce_only: bool, venue_reduce_only: bool) !void {
+    pub fn confirmReplacement(self: *Oms, order_id: u64, reservation: Reservation, portfolio_reduce_only: bool, venue_reduce_only: bool) !void {
         const predecessor = try self.mutableOrder(order_id);
         if (predecessor.state != .canceled or predecessor.replacement == null) return error.ReplacementNotReady;
-        predecessor.replacement.?.reservation_micros = reservation_micros;
+        predecessor.replacement.?.reservation = reservation;
         predecessor.replacement.?.portfolio_reduce_only = portfolio_reduce_only;
         predecessor.replacement.?.venue_reduce_only = venue_reduce_only;
         try self.createReplacement(predecessor);
@@ -418,18 +424,18 @@ pub const Oms = struct {
         predecessor.replacement = null;
     }
 
-    fn createOrder(self: *Oms, strategy_instance: u128, instrument: Instrument, side: Side, portfolio_reduce_only: bool, venue_reduce_only: bool, quantity: i64, price: i64, reservation_micros: i64, predecessor: u64, group: u64, policy: PartialExecutionPolicy) !*Order {
+    fn createOrder(self: *Oms, strategy_instance: u128, instrument: Instrument, side: Side, portfolio_reduce_only: bool, venue_reduce_only: bool, quantity: i64, price: Price, reservation: Reservation, predecessor: u64, group: u64, policy: PartialExecutionPolicy) !*Order {
         if (self.order_count == max_orders) return error.OrderCapacityExceeded;
         const index = self.order_count;
         self.order_count += 1;
-        self.orders[index] = .{ .id = self.next_order_id, .strategy_instance = strategy_instance, .instrument = instrument, .side = side, .portfolio_reduce_only = portfolio_reduce_only, .venue_reduce_only = venue_reduce_only, .quantity = quantity, .limit_price_micros = price, .reservation_micros = reservation_micros, .confirmed_reservation_micros = reservation_micros, .predecessor_order_id = predecessor, .group_first_sequence = group, .group_policy = policy };
+        self.orders[index] = .{ .id = self.next_order_id, .strategy_instance = strategy_instance, .instrument = instrument, .side = side, .portfolio_reduce_only = portfolio_reduce_only, .venue_reduce_only = venue_reduce_only, .quantity = quantity, .limit_price = price, .reservation = reservation, .confirmed_reservation = reservation, .predecessor_order_id = predecessor, .group_first_sequence = group, .group_policy = policy };
         self.next_order_id += 1;
         return &self.orders[index];
     }
 
     fn emit(self: *Oms, order: Order, operation: Operation) !void {
         if (self.command_count == max_commands or self.command_history_count == max_command_history) return error.CommandCapacityExceeded;
-        const command_value: Command = .{ .command_id = self.next_command_id, .order_id = order.id, .strategy_instance = order.strategy_instance, .revision = order.revision, .operation = operation, .instrument = order.instrument, .side = order.side, .portfolio_reduce_only = order.portfolio_reduce_only, .venue_reduce_only = order.venue_reduce_only, .quantity = order.quantity - order.cumulative_quantity, .limit_price_micros = order.limit_price_micros, .predecessor_order_id = order.predecessor_order_id, .reservation_micros = order.reservation_micros };
+        const command_value: Command = .{ .command_id = self.next_command_id, .order_id = order.id, .strategy_instance = order.strategy_instance, .revision = order.revision, .operation = operation, .instrument = order.instrument, .side = order.side, .portfolio_reduce_only = order.portfolio_reduce_only, .venue_reduce_only = order.venue_reduce_only, .quantity = order.quantity - order.cumulative_quantity, .limit_price = order.limit_price, .predecessor_order_id = order.predecessor_order_id, .reservation = order.reservation };
         self.commands[self.command_count] = command_value;
         self.command_count += 1;
         self.command_history[self.command_history_count] = command_value;
@@ -440,7 +446,7 @@ pub const Oms = struct {
     fn createReplacement(self: *Oms, predecessor: *Order) !void {
         const replacement = predecessor.replacement.?;
         predecessor.replacement = null;
-        const next = try self.createOrder(predecessor.strategy_instance, replacement.instrument, replacement.side, replacement.portfolio_reduce_only, replacement.venue_reduce_only, replacement.quantity, replacement.limit_price_micros, replacement.reservation_micros, predecessor.id, predecessor.group_first_sequence, predecessor.group_policy);
+        const next = try self.createOrder(predecessor.strategy_instance, replacement.instrument, replacement.side, replacement.portfolio_reduce_only, replacement.venue_reduce_only, replacement.quantity, replacement.limit_price, replacement.reservation, predecessor.id, predecessor.group_first_sequence, predecessor.group_policy);
         try self.emit(next.*, .place);
     }
 
@@ -452,8 +458,8 @@ pub const Oms = struct {
             },
             .amend => {
                 order.state = if (order.cumulative_quantity == 0) .live else .partially_filled;
-                order.reservation_micros = order.confirmed_reservation_micros;
-                order.pending_reservation_micros = null;
+                order.reservation = order.confirmed_reservation;
+                order.pending_reservation = null;
             },
             .cancel => order.state = if (order.cumulative_quantity == 0) .live else .partially_filled,
         }
@@ -505,7 +511,7 @@ fn validateTarget(order: *const Order, intent: Intent) !void {
 test "pending cancel outbox is reconstructed after replay" {
     var state: Oms = .{};
     var group: IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
-    group.members[0] = .{ .intent_sequence = 1, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 2, .limit_price_micros = 3, .reservation_micros = 6 };
+    group.members[0] = .{ .intent_sequence = 1, .operation = .place, .instrument = 1, .quantity = 2, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 6 } };
     try state.applyGroup(group);
     state.begin();
     try state.cancelOpenOrders(false);
@@ -517,6 +523,27 @@ test "pending cancel outbox is reconstructed after replay" {
     try std.testing.expectEqual(@as(usize, 1), recovered.len);
     try std.testing.expectEqual(cancel.command_id, recovered[0].command_id);
     try std.testing.expectEqual(Operation.cancel, recovered[0].operation);
+}
+
+test "OMS rejects a price for another instrument and preserves reservation assets" {
+    var state: Oms = .{};
+    var group: IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
+    group.members[0] = .{
+        .intent_sequence = 1,
+        .operation = .place,
+        .instrument = 1,
+        .quantity = 1,
+        .limit_price = .{ .instrument = 2, .rules_version = 1, .ticks = 1 },
+        .reservation = .{ .asset = 3, .atoms = 4 },
+    };
+    try std.testing.expectError(error.InvalidOrderSpec, state.applyGroup(group));
+
+    group.members[0].limit_price.instrument = 1;
+    try state.applyGroup(group);
+    const reservations = try state.activeReservations(3);
+    try std.testing.expectEqual(@as(canonical.AssetIdentity, 3), reservations.asset);
+    try std.testing.expectEqual(@as(i128, 4), reservations.atoms);
+    try std.testing.expectError(error.MixedReservationAssets, state.activeReservations(1));
 }
 
 fn rememberReport(order: *Order, report: ExecutionReport) void {
