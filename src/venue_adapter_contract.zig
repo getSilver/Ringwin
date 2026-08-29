@@ -47,6 +47,7 @@ const FixtureVenue = struct {
         if (self.pending != null) return .backpressure;
         const identity = switch (adapter_request) {
             .order_command => |value| value.identity,
+            .order_batch => |value| if (value.len == 0) return error.InvalidRequest else value.commands[0].identity,
             .order_reconciliation => |value| value.identity,
             .account_reconciliation => |value| value.identity,
         };
