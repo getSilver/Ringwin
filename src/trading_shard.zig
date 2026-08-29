@@ -5300,6 +5300,39 @@ test "layered risk owns reservations until authoritative absence" {
     try std.testing.expectEqual(@as(u8, 0), limited.shard.oms.order_count);
 }
 
+test "unknown OMS dispatch blocks a later place until the order is resolved" {
+    var run = try startScenario();
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    var first: oms_module.IntentGroup = .{ .first_intent_sequence = 90, .count = 1 };
+    first.members[0] = .{
+        .intent_sequence = 90,
+        .operation = .place,
+        .instrument = .btc_usdt_spot,
+        .quantity = 10,
+        .limit_price_micros = 50_000_000,
+    };
+    const placed = try run.shard.apply(atGroup(12, .{ .identity = 90, .payload = .{ .oms_intent_group = first } }));
+    var dispatch: oms_module.DispatchBatch = .{ .count = 1 };
+    dispatch.items[0] = .{ .command_id = placed.oms_commands[0].command_id, .state = .unknown };
+    _ = try run.shard.apply(atGroup(13, .{ .identity = 1, .payload = .{ .oms_dispatch_batch = dispatch } }));
+
+    const before = run.shard.canonicalStateDigest();
+    var next: oms_module.IntentGroup = .{ .first_intent_sequence = 91, .count = 1 };
+    next.members[0] = .{
+        .intent_sequence = 91,
+        .operation = .place,
+        .instrument = .btc_usdt_swap,
+        .quantity = 10,
+        .limit_price_micros = 50_000_000,
+    };
+    try std.testing.expectError(error.UncertainOrderBlocksSend, run.shard.apply(atGroup(14, .{
+        .identity = 91,
+        .payload = .{ .oms_intent_group = next },
+    })));
+    try std.testing.expectEqualSlices(u8, &before, &run.shard.canonicalStateDigest());
+    try std.testing.expectEqual(@as(u8, 1), run.shard.oms.order_count);
+}
+
 test "TradingShard preserves maintenance margin in the projected buffer" {
     var run = try startScenario();
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
