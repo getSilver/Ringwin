@@ -192,6 +192,12 @@ Run the Python StrategyHost acceptance suite:
 python python/verify_strategy_host.py
 ```
 
+Or run the whole trading core wave as a single fail-fast entry covering the offline success/fault/restart trajectories, SimulatedVenue, four-shard coordination, the Python seam, and a Linux cross-compile check. OKX Demo facts run only when explicitly enabled with `-DemoLive`:
+
+```powershell
+tools\verify-core-wave.ps1
+```
+
 For OKX Demo acceptance on Windows:
 
 ```powershell
