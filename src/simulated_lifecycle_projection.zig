@@ -61,6 +61,7 @@ fn eventFingerprint(event: canonical.CanonicalEvent) u64 {
         .execution_report => |value| fingerprintPart(value.identity ^ value.order ^ @as(u128, @bitCast(value.cumulative_quantity.lots))),
         .fill => |value| fingerprintPart(value.identity ^ value.order ^ @as(u128, @bitCast(value.quantity.lots)) ^ @as(u128, @bitCast(value.price.ticks))),
         .reconciliation_started, .account_reconciliation_started => |identity| fingerprintPart(identity),
+        else => 0,
     } ^ @as(u64, @intFromEnum(std.meta.activeTag(event)));
 }
 
