@@ -12,18 +12,6 @@
 
 默认路径不连接真实 Venue；独立入口只使用本机 Demo Key 连接 OKX 模拟交易。项目不接入生产账户，也不证明策略盈利。
 
-## 交易核心整波验收
-
-一条失败即停的自动入口覆盖离线成功/故障/重启轨迹、SimulatedVenue、四分片协调、
-Python StrategyHost seam 和 Linux 交叉编译检查；OKX Demo 事实只在显式启用时执行：
-
-```powershell
-tools\verify-core-wave.ps1
-```
-
-任一断言失败立即停止。成功输出 `core_wave_acceptance=passed mode=offline ...`。
-显式启用 OKX Demo 成交事实时追加 `-DemoLive`（要求 `.env.local` 中合格的 Demo Key）。
-
 ## OKX Demo 整波验收
 
 默认入口只读，但仍要求本机 `.env.local` 中存在合格的 Demo Key：

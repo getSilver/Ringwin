@@ -232,14 +232,7 @@ fn assertLedgersClosed(world: *const World) !void {
     }
 }
 
-pub const FourShardEvidence = struct {
-    barrier: u64,
-    shard_digests: [max_shards][Sha256.digest_length]u8,
-    coordinator_digest: [Sha256.digest_length]u8,
-    shared_summary: [Sha256.digest_length]u8,
-};
-
-pub fn runFourShardAcceptance() !FourShardEvidence {
+pub fn runFourShardAcceptance() !void {
     var world = World.init();
     for (&world.shards, &world.journals, 0..) |*shard, *journal, index| {
         shard.* = .{};
@@ -579,17 +572,8 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     const shared_c = sharedSummary(path_c.coordinator.barrier, &path_c.shards, &path_c.coordinator.digest());
     try std.testing.expectEqualSlices(u8, &shared_a, &shared_b);
     try std.testing.expectEqualSlices(u8, &shared_b, &shared_c);
-
-    var shard_digests: [max_shards][Sha256.digest_length]u8 = undefined;
-    for (0..max_shards) |index| shard_digests[index] = fenced_live[index].canonicalStateDigest();
-    return .{
-        .barrier = path_b.coordinator.barrier,
-        .shard_digests = shard_digests,
-        .coordinator_digest = evidence_coordinator.digest(),
-        .shared_summary = shared_a,
-    };
 }
 
 test "four-shard acceptance entry stops at the first broken assertion" {
-    _ = try runFourShardAcceptance();
+    try runFourShardAcceptance();
 }
