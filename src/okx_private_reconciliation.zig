@@ -173,7 +173,7 @@ pub const EventPayload = union(enum) {
     venue_account_configuration_snapshot: VenueAccountConfigurationSnapshot,
 };
 
-pub const CanonicalEvent = struct {
+pub const PrivateEvent = struct {
     envelope: EventEnvelope,
     payload: EventPayload,
 };
@@ -224,17 +224,17 @@ pub const RejectReason = enum(u8) {
 
 pub const IngressBatch = struct {
     raw_evidence: RawEvidenceRef,
-    events: [max_events_per_ingress]CanonicalEvent = undefined,
+    events: [max_events_per_ingress]PrivateEvent = undefined,
     event_count: u8 = 0,
     rejection: ?RejectReason = null,
     buffered: bool = false,
     oldest_cursor: ?u64 = null,
 
-    pub fn eventSlice(self: *const IngressBatch) []const CanonicalEvent {
+    pub fn eventSlice(self: *const IngressBatch) []const PrivateEvent {
         return self.events[0..self.event_count];
     }
 
-    fn append(self: *IngressBatch, event: CanonicalEvent) !void {
+    fn append(self: *IngressBatch, event: PrivateEvent) !void {
         if (self.event_count == self.events.len) return error.BufferFull;
         self.events[self.event_count] = event;
         self.event_count += 1;
@@ -309,9 +309,9 @@ pub const Reconciler = struct {
     unattributed_fact_seen: bool = false,
     seen: [max_seen_facts]SeenFact = undefined,
     seen_count: usize = 0,
-    bootstrap_events: [max_bootstrap_events]CanonicalEvent = undefined,
+    bootstrap_events: [max_bootstrap_events]PrivateEvent = undefined,
     bootstrap_event_count: usize = 0,
-    ws_events: [max_ws_events]CanonicalEvent = undefined,
+    ws_events: [max_ws_events]PrivateEvent = undefined,
     ws_event_count: usize = 0,
     drain_bootstrap_index: usize = 0,
     drain_ws_index: usize = 0,
@@ -397,7 +397,7 @@ pub const Reconciler = struct {
         };
     }
 
-    pub fn drainReconciled(self: *Reconciler) ?CanonicalEvent {
+    pub fn drainReconciled(self: *Reconciler) ?PrivateEvent {
         if (self.stage != .ready) return null;
         if (self.drain_bootstrap_index < self.bootstrap_event_count) {
             defer self.drain_bootstrap_index += 1;
@@ -1245,7 +1245,7 @@ fn makeEvent(
     evidence: RawEvidenceRef,
     identity: [Sha256.digest_length]u8,
     payload: EventPayload,
-) CanonicalEvent {
+) PrivateEvent {
     return .{
         .envelope = .{
             .source_time_utc_ns = source_time_utc_ns,

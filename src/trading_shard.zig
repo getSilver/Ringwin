@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 /// Stable journal codec used by snapshot and semantic replay.
 pub const journal = @import("journal.zig");
+pub const canonical = @import("canonical_event.zig");
 pub const oms = @import("oms.zig");
 const oms_module = oms;
 pub const risk = @import("risk.zig");
@@ -10,7 +11,6 @@ pub const economics = @import("economics.zig");
 const economics_module = economics;
 pub const operational = @import("operational.zig");
 const host_gateway = @import("strategy_host_gateway.zig");
-const venue_adapter = @import("venue_adapter.zig");
 const okx_public_market = @import("okx_public_market.zig");
 const okx_private_reconciliation = @import("okx_private_reconciliation.zig");
 const okx_spot_projection = @import("okx_spot_projection.zig");
@@ -161,6 +161,9 @@ fn snapshotDecode(reader: *SnapshotReader, comptime T: type) !T {
     };
 }
 const client_order_id = "RWN-00000001-01-000000000001";
+const settlement_asset: canonical.AssetIdentity = 1;
+const spot_instrument: oms_module.Instrument = 1;
+const swap_instrument: oms_module.Instrument = 2;
 const money_scale: i64 = 1_000_000;
 const contract_denominator: i64 = 10_000;
 const fee_ppm: i64 = 750;
@@ -177,14 +180,22 @@ const order_limit_price: i64 = 50_100_000_000;
 const initial_exchange_cash: i64 = 25_000 * money_scale;
 const portfolio_allocation: i64 = 20_000 * money_scale;
 const risk_lease_total: i64 = 10_000 * money_scale;
-const expected_happy_digest = "05512551eb6da3d137e0476015e262f16df155035d2ac292db700e15edb10ef3";
-const expected_market_gap_digest = "9bd0c661b449be191751ebc63648d884302e65292a3a2240f93ef4b2c1e2fe21";
-const expected_risk_rejection_digest = "34aec497178098873f556d1e786f19b02576c5a7e9d568435fea40a4709dd6f9";
-const expected_unknown_digest = "32d6ff5537d4adc99e57d159fde6c77cb353030929eafe63726bf71c7efaf661";
-const expected_duplicate_digest = "14f3be1e51ef6aa7e16dd5cf5ca4aff2355e7d17d06a6d44ea27342b32d13f53";
+const expected_happy_digest = "e808e7fbff88fe99d0c8b7a5b8674370f90fbdc13113ae6968a5ef94e8459a7d";
+const expected_market_gap_digest = "1cdd3643b80fca5812281e67e364ba8045cf607ae7bebd9e4b418f75d41d2473";
+const expected_risk_rejection_digest = "cf52f4bca716ee67ab2679e8cbe1ab953a0a313f4be20d5e828f776ea0943fb7";
+const expected_unknown_digest = "59f9b64ffd9e24cc74b3f90a1d81f8bee0d3ce8f61889593519d5cba82e3e341";
+const expected_duplicate_digest = "86060e196351daaba6bf1734b5eb62a1ba27d145a28f32562e03f88682839650";
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 const benchmark_samples: usize = 1_000_000;
+
+fn fixtureOmsPrice(instrument: oms_module.Instrument, ticks: i64) oms_module.Price {
+    return .{ .instrument = instrument, .rules_version = 1, .ticks = ticks };
+}
+
+fn fixtureReservation(atoms: i64) oms_module.Reservation {
+    return .{ .asset = settlement_asset, .atoms = atoms };
+}
 const benchmark_warmup: usize = 50_000;
 
 const EventKind = enum(u16) {
@@ -489,7 +500,13 @@ pub const Payload = union(PayloadTag) {
     strategy_cutover_fence: StrategyCutoverFence,
 };
 
-pub const CanonicalEvent = struct {
+/// The only public CanonicalEvent is the shared adapter/core record.
+pub const CanonicalEvent = canonical.EventRecord;
+
+/// Transitional core input used by the provisional v4 journal codec.
+/// It is intentionally distinct from the shared CanonicalEvent so adapter
+/// facts cannot be mistaken for an internal encoded fixture.
+pub const CoreEvent = struct {
     version: u16 = schema_version,
     identity: u64,
     source_time: u64 = 0,
@@ -500,7 +517,70 @@ pub const CanonicalEvent = struct {
     payload: Payload,
 };
 
-const InputEvent = CanonicalEvent;
+const InputEvent = CoreEvent;
+
+fn inputFromSharedEvent(record: canonical.EventRecord) !InputEvent {
+    const sequence = std.math.cast(u64, record.envelope.identity.sequence) orelse return error.IdentityOutOfRange;
+    var input: InputEvent = .{
+        .identity = sequence,
+        .source_time = record.envelope.times.source_utc_ns orelse 0,
+        .receive_time = record.envelope.times.receive_utc_ns orelse 0,
+        .monotonic_time = record.envelope.times.monotonic_ns orelse 0,
+        .wall_time = record.envelope.times.audit_utc_ns orelse 0,
+        .time_presence = .{
+            .source = record.envelope.times.source_utc_ns != null,
+            .receive = record.envelope.times.receive_utc_ns != null,
+            .monotonic = record.envelope.times.monotonic_ns != null,
+            .wall = record.envelope.times.audit_utc_ns != null,
+        },
+        .payload = undefined,
+    };
+    input.payload = switch (record.event) {
+        .order_dispatch_result => |value| .{ .order_dispatch_result = switch (value.state) {
+            .submitted => .submitted,
+            .unknown => .unknown,
+            .not_sent => return error.UnsupportedCanonicalEvent,
+        } },
+        .execution_report => |value| .{ .execution_report = .{
+            .report_id = std.math.cast(u64, value.identity) orelse return error.IdentityOutOfRange,
+            .status = switch (value.status) {
+                .accepted => .accepted,
+                .partially_filled => .partially_filled,
+                .filled => .filled,
+                .canceled => .canceled,
+                .rejected, .amended => return error.UnsupportedCanonicalEvent,
+            },
+            .cumulative_qty = std.math.cast(i64, value.cumulative_quantity.lots) orelse return error.QuantityOutOfRange,
+            .remaining_qty = std.math.cast(i64, value.remaining_quantity.lots) orelse return error.QuantityOutOfRange,
+        } },
+        .fill => |value| .{ .fill = .{
+            .fill_id = std.math.cast(u64, value.identity) orelse return error.IdentityOutOfRange,
+            .quantity = std.math.cast(i64, value.quantity.lots) orelse return error.QuantityOutOfRange,
+            .price_micros = std.math.cast(i64, value.price.ticks) orelse return error.PriceOutOfRange,
+        } },
+        .l2_book_snapshot => |value| .{ .l2_snapshot = .{
+            .source_sequence = value.sequence,
+            .bid_price_micros = std.math.cast(i64, value.best_bid.ticks) orelse return error.PriceOutOfRange,
+            .bid_quantity = 1,
+            .ask_1_price_micros = std.math.cast(i64, value.best_ask.ticks) orelse return error.PriceOutOfRange,
+            .ask_1_quantity = 1,
+            .ask_2_price_micros = std.math.cast(i64, value.best_ask.ticks) orelse return error.PriceOutOfRange,
+            .ask_2_quantity = 1,
+        } },
+        .l2_book_delta => |value| .{ .l2_delta = .{
+            .previous = value.previous_sequence,
+            .current = value.sequence,
+            .bid_price_micros = std.math.cast(i64, value.best_bid.ticks) orelse return error.PriceOutOfRange,
+            .bid_quantity = 1,
+        } },
+        .reference_price => |value| if (value.kind == .mark)
+            .{ .mark_price = std.math.cast(i64, value.price.ticks) orelse return error.PriceOutOfRange }
+        else
+            return error.UnsupportedCanonicalEvent,
+        else => return error.UnsupportedCanonicalEvent,
+    };
+    return input;
+}
 
 fn atGroup(group_index: u64, input: InputEvent) InputEvent {
     var timed = input;
@@ -668,7 +748,7 @@ fn encodeInput(input: InputEvent) !EncodedInput {
                 try encoded.put(u64, member.intent_sequence);
                 try encoded.put(u128, member.strategy_instance);
                 try encoded.put(u8, @intFromEnum(member.operation));
-                try encoded.put(u8, @intFromEnum(member.instrument));
+                try encoded.put(u128, member.instrument);
                 try encoded.put(u8, @intFromEnum(member.side));
                 try encoded.put(u8, @intFromBool(member.portfolio_reduce_only));
                 try encoded.put(u8, @intFromBool(member.venue_reduce_only));
@@ -676,10 +756,13 @@ fn encodeInput(input: InputEvent) !EncodedInput {
                 try encoded.put(u32, member.expected_revision);
                 try encoded.put(i64, member.expected_cumulative_quantity);
                 try encoded.put(i64, member.quantity);
-                try encoded.put(i64, member.limit_price_micros);
+                try encoded.put(u128, member.limit_price.instrument);
+                try encoded.put(u64, member.limit_price.rules_version);
+                try encoded.put(i128, member.limit_price.ticks);
                 try encoded.put(u8, @intFromBool(member.native_amend));
                 try encoded.put(u8, @intFromBool(member.allow_cancel_confirm_create));
-                try encoded.put(i64, member.reservation_micros);
+                try encoded.put(u64, member.reservation.asset);
+                try encoded.put(i128, member.reservation.atoms);
             }
         },
         .oms_dispatch_batch => |value| {
@@ -971,7 +1054,7 @@ fn decodeInput(record: journal.Record) !InputEvent {
                 .intent_sequence = try readInputValue(u64, record.payload, &offset),
                 .strategy_instance = try readInputValue(u128, record.payload, &offset),
                 .operation = std.enums.fromInt(oms_module.Operation, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOmsOperation,
-                .instrument = std.enums.fromInt(oms_module.Instrument, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOmsInstrument,
+                .instrument = try readInputValue(u128, record.payload, &offset),
                 .side = std.enums.fromInt(oms_module.Side, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOmsSide,
                 .portfolio_reduce_only = switch (try readInputValue(u8, record.payload, &offset)) {
                     0 => false,
@@ -987,10 +1070,17 @@ fn decodeInput(record: journal.Record) !InputEvent {
                 .expected_revision = try readInputValue(u32, record.payload, &offset),
                 .expected_cumulative_quantity = try readInputValue(i64, record.payload, &offset),
                 .quantity = try readInputValue(i64, record.payload, &offset),
-                .limit_price_micros = try readInputValue(i64, record.payload, &offset),
+                .limit_price = .{
+                    .instrument = try readInputValue(u128, record.payload, &offset),
+                    .rules_version = try readInputValue(u64, record.payload, &offset),
+                    .ticks = try readInputValue(i128, record.payload, &offset),
+                },
                 .native_amend = (try readInputValue(u8, record.payload, &offset)) == 1,
                 .allow_cancel_confirm_create = (try readInputValue(u8, record.payload, &offset)) == 1,
-                .reservation_micros = try readInputValue(i64, record.payload, &offset),
+                .reservation = .{
+                    .asset = try readInputValue(u64, record.payload, &offset),
+                    .atoms = try readInputValue(i128, record.payload, &offset),
+                },
             };
             break :blk .{ .oms_intent_group = value };
         },
@@ -1125,7 +1215,7 @@ fn decodeInput(record: journal.Record) !InputEvent {
 }
 
 /// Decodes one stable input record for side-effect-free recovery verification.
-pub fn decodeStableInput(record: journal.Record) !CanonicalEvent {
+pub fn decodeStableInput(record: journal.Record) !CoreEvent {
     return decodeInput(record);
 }
 
@@ -1137,9 +1227,9 @@ fn eventIdentity(payload: []const u8) !u64 {
 pub const OrderCommand = struct {
     command_id: u64,
     order_id: u64,
-    quantity: i64,
-    limit_price_micros: i64,
-    reservation_micros: i64,
+    quantity: canonical.InstrumentQuantity,
+    limit_price: canonical.InstrumentPrice,
+    reservation: canonical.AssetAmount,
     client_id: []const u8,
 };
 
@@ -1152,7 +1242,7 @@ pub const ApplyResult = struct {
 pub const ReplayTradingShard = struct {
     shard: TradingShard = .{},
 
-    pub fn apply(self: *ReplayTradingShard, event: CanonicalEvent) ![]const Fact {
+    pub fn apply(self: *ReplayTradingShard, event: CoreEvent) ![]const Fact {
         return (try self.shard.apply(event)).facts;
     }
 
@@ -1393,7 +1483,16 @@ pub const TradingShard = struct {
     fenced_strategy_instances: [8]u128 = @splat(0),
     fenced_strategy_count: u8 = 0,
 
-    pub fn apply(self: *TradingShard, event: CanonicalEvent) !ApplyResult {
+    pub fn apply(self: *TradingShard, event: anytype) !ApplyResult {
+        if (comptime @TypeOf(event) == InputEvent)
+            return self.applyInput(event)
+        else if (comptime @TypeOf(event) == CanonicalEvent)
+            return self.applyInput(try inputFromSharedEvent(event))
+        else
+            @compileError("TradingShard.apply accepts only canonical.EventRecord or CoreEvent");
+    }
+
+    fn applyInput(self: *TradingShard, event: InputEvent) !ApplyResult {
         var candidate = self.*;
         const before = candidate.trace.len;
         candidate.oms.begin();
@@ -1538,27 +1637,30 @@ pub const TradingShard = struct {
 
     fn riskLimits(self: *const TradingShard) risk_module.Limits {
         return .{
-            .strategy_micros = self.strategy_limit_micros,
-            .portfolio_micros = self.portfolio_limit_micros,
-            .decision_domain_micros = self.risk_lease_micros,
-            .exchange_account_micros = self.exchange_account_limit_micros,
-            .global_micros = self.global_limit_micros,
+            .strategy = .{ .asset = settlement_asset, .atoms = self.strategy_limit_micros },
+            .portfolio = .{ .asset = settlement_asset, .atoms = self.portfolio_limit_micros },
+            .decision_domain = .{ .asset = settlement_asset, .atoms = self.risk_lease_micros },
+            .exchange_account = .{ .asset = settlement_asset, .atoms = self.exchange_account_limit_micros },
+            .global = .{ .asset = settlement_asset, .atoms = self.global_limit_micros },
         };
     }
 
-    fn riskRules(self: *const TradingShard) risk_module.Rules {
+    fn riskRules(self: *const TradingShard, instrument: canonical.InstrumentIdentity) risk_module.Rules {
         return .{
+            .settlement_asset = settlement_asset,
+            .instrument = instrument,
+            .rules_version = self.instrument_rules_version,
             .quantity_denominator = self.quantity_denominator,
-            .price_tick_micros = self.price_tick_micros,
+            .price_tick_value = .{ .asset = settlement_asset, .atoms = self.price_tick_micros },
             .venue_initial_margin_ppm = self.venue_initial_margin_ppm,
             .internal_initial_margin_ppm = self.internal_initial_margin_ppm,
             .internal_maintenance_margin_ppm = self.internal_maintenance_margin_ppm,
             .fee_ppm = self.risk_fee_ppm,
-            .opening_buffer_micros = self.opening_buffer_micros,
+            .opening_buffer = .{ .asset = settlement_asset, .atoms = self.opening_buffer_micros },
             .opening_buffer_bps = self.opening_buffer_bps,
             .opening_liquidation_distance_ticks = self.opening_liquidation_distance_ticks,
-            .warning_buffer_micros = self.warning_buffer_micros,
-            .kill_buffer_micros = self.kill_buffer_micros,
+            .warning_buffer = .{ .asset = settlement_asset, .atoms = self.warning_buffer_micros },
+            .kill_buffer = .{ .asset = settlement_asset, .atoms = self.kill_buffer_micros },
             .warning_buffer_bps = self.warning_buffer_bps,
             .kill_buffer_bps = self.kill_buffer_bps,
             .warning_liquidation_distance_ticks = self.warning_liquidation_distance_ticks,
@@ -1568,24 +1670,26 @@ pub const TradingShard = struct {
 
     fn qualifyOmsGroup(self: *TradingShard, group: oms_module.IntentGroup) !oms_module.IntentGroup {
         var qualified = group;
-        var active = try self.oms.activeReservations();
+        var active = try self.oms.activeReservations(settlement_asset);
         for (qualified.members[0..qualified.count]) |*intent| {
             for (self.fenced_strategy_instances[0..self.fenced_strategy_count]) |fenced|
                 if (intent.strategy_instance == fenced and intent.operation != .cancel)
                     return error.StrategyCutoverFenced;
             if (intent.operation == .cancel) continue;
-            var replaced: i64 = 0;
+            var replaced: canonical.AssetAmount = .{ .asset = settlement_asset, .atoms = 0 };
             if (intent.operation == .amend) {
                 const target = self.oms.orderById(intent.target_order_id) orelse return error.UnknownOrder;
-                if (target.reservation_active) replaced = target.reservation_micros;
+                if (target.reservation_active) replaced = target.reservation;
             }
             const portfolio_position_quantity = switch (intent.instrument) {
-                .btc_usdt_spot => self.spot_portfolio_position.quantity,
-                .btc_usdt_swap => self.portfolio_position.quantity,
+                spot_instrument => self.spot_portfolio_position.quantity,
+                swap_instrument => self.portfolio_position.quantity,
+                else => return error.UnknownOmsInstrument,
             };
             const exchange_position_quantity = switch (intent.instrument) {
-                .btc_usdt_spot => self.spot_exchange_position.quantity,
-                .btc_usdt_swap => self.exchange_position.quantity,
+                spot_instrument => self.spot_exchange_position.quantity,
+                swap_instrument => self.exchange_position.quantity,
+                else => return error.UnknownOmsInstrument,
             };
             const signed_delta = (if (intent.side == .buy) intent.quantity else -intent.quantity);
             const next_portfolio = try std.math.add(i64, portfolio_position_quantity, signed_delta);
@@ -1613,28 +1717,28 @@ pub const TradingShard = struct {
             if (reduces_only and !self.operational_state.effectiveTradingAuthority() and
                 !self.operational_state.mayReduceOnly())
                 return error.TradingNotAuthorized;
-            const assessment = try risk_module.assess(self.riskRules(), self.riskLimits(), .{
-                .portfolio_cash_micros = self.portfolio_cash_micros,
-                .exchange_cash_micros = self.exchange_cash_micros,
-                .portfolio_position_quantity = portfolio_position_quantity,
-                .exchange_position_quantity = exchange_position_quantity,
-                .active_order_reservations_micros = active,
-                .replaced_order_reservation_micros = replaced,
-                .mark_price_micros = self.mark_price_micros,
+            const assessment = try risk_module.assess(self.riskRules(intent.instrument), self.riskLimits(), .{
+                .portfolio_cash = .{ .asset = settlement_asset, .atoms = self.portfolio_cash_micros },
+                .exchange_cash = .{ .asset = settlement_asset, .atoms = self.exchange_cash_micros },
+                .portfolio_position = .{ .instrument = intent.instrument, .rules_version = self.instrument_rules_version, .lots = portfolio_position_quantity },
+                .exchange_position = .{ .instrument = intent.instrument, .rules_version = self.instrument_rules_version, .lots = exchange_position_quantity },
+                .active_order_reservations = active,
+                .replaced_order_reservation = replaced,
+                .mark_price = .{ .instrument = intent.instrument, .rules_version = self.instrument_rules_version, .ticks = self.mark_price_micros },
             }, .{
-                .product = if (intent.instrument == .btc_usdt_spot) .spot else .isolated_linear_usdt,
+                .product = if (intent.instrument == spot_instrument) .spot else .isolated_linear_usdt,
                 .side = if (intent.side == .buy) .buy else .sell,
-                .quantity = intent.quantity,
-                .risk_price_micros = @max(intent.limit_price_micros, self.mark_price_micros),
+                .quantity = .{ .instrument = intent.instrument, .rules_version = self.instrument_rules_version, .lots = intent.quantity },
+                .risk_price = .{ .instrument = intent.instrument, .rules_version = self.instrument_rules_version, .ticks = @max(intent.limit_price.ticks, self.mark_price_micros) },
                 .portfolio_reduce_only = intent.portfolio_reduce_only,
             });
-            intent.reservation_micros = assessment.order_reservation_micros;
+            intent.reservation = assessment.order_reservation;
             intent.portfolio_reduce_only = assessment.portfolio_reduce_only;
             intent.venue_reduce_only = assessment.venue_reduce_only;
-            active = assessment.total_reserved_micros;
-            self.layered_risk_reserved_micros = assessment.total_reserved_micros;
-            self.portfolio_margin_buffer_micros = assessment.portfolio_margin_buffer_micros;
-            self.exchange_margin_buffer_micros = assessment.exchange_margin_buffer_micros;
+            active = assessment.total_reserved;
+            self.layered_risk_reserved_micros = std.math.cast(i64, active.atoms) orelse return error.Overflow;
+            self.portfolio_margin_buffer_micros = std.math.cast(i64, assessment.portfolio_margin_buffer.atoms) orelse return error.Overflow;
+            self.exchange_margin_buffer_micros = std.math.cast(i64, assessment.exchange_margin_buffer.atoms) orelse return error.Overflow;
             self.portfolio_buffer_bps = assessment.portfolio_buffer_bps;
             self.exchange_buffer_bps = assessment.exchange_buffer_bps;
             self.portfolio_liquidation_distance_ticks = assessment.portfolio_liquidation_distance_ticks;
@@ -1681,14 +1785,15 @@ pub const TradingShard = struct {
             else => return err,
         };
         const intent = qualified.members[0];
-        try self.oms.confirmReplacement(order_id, intent.reservation_micros, intent.portfolio_reduce_only, intent.venue_reduce_only);
+        try self.oms.confirmReplacement(order_id, intent.reservation, intent.portfolio_reduce_only, intent.venue_reduce_only);
     }
 
     fn refreshLayeredReservations(self: *TradingShard) !void {
         const previous = self.layered_risk_reserved_micros;
-        const current = try self.oms.activeReservations();
-        const change = try std.math.sub(i64, current, previous);
-        self.layered_risk_reserved_micros = current;
+        const current = try self.oms.activeReservations(settlement_asset);
+        const current_atoms = std.math.cast(i64, current.atoms) orelse return error.Overflow;
+        const change = try std.math.sub(i64, current_atoms, previous);
+        self.layered_risk_reserved_micros = current_atoms;
         self.portfolio_margin_buffer_micros = try std.math.sub(i64, self.portfolio_margin_buffer_micros, change);
         self.exchange_margin_buffer_micros = try std.math.sub(i64, self.exchange_margin_buffer_micros, change);
     }
@@ -1911,9 +2016,9 @@ pub const TradingShard = struct {
         group.members[0] = .{
             .intent_sequence = intent.intent_sequence,
             .operation = .place,
-            .instrument = if (self.reservation_model == .cash) .btc_usdt_spot else .btc_usdt_swap,
+            .instrument = if (self.reservation_model == .cash) spot_instrument else swap_instrument,
             .quantity = intent.quantity,
-            .limit_price_micros = intent.limit_price_micros,
+            .limit_price = .{ .instrument = if (self.reservation_model == .cash) spot_instrument else swap_instrument, .rules_version = self.instrument_rules_version, .ticks = intent.limit_price_micros },
         };
         const qualified = self.qualifyOmsGroup(group) catch |err| switch (err) {
             error.StrategyLimitExceeded,
@@ -1932,7 +2037,7 @@ pub const TradingShard = struct {
             },
             else => return err,
         };
-        self.last_risk_required_micros = qualified.members[0].reservation_micros;
+        self.last_risk_required_micros = std.math.cast(i64, qualified.members[0].reservation.atoms) orelse return error.Overflow;
         self.last_reject_reason = .none;
         try self.trace.append(.risk_accepted, intent.intent_sequence);
         try self.oms.applyGroup(qualified);
@@ -1944,16 +2049,16 @@ pub const TradingShard = struct {
         self.order_id = oms_command.order_id;
         self.order_command_id = oms_command.command_id;
         self.order_quantity = oms_command.quantity;
-        self.order_limit_price_micros = oms_command.limit_price_micros;
+        self.order_limit_price_micros = std.math.cast(i64, oms_command.limit_price.ticks) orelse return error.Overflow;
         try self.recalculateRisk(true);
         try self.trace.append(.risk_reservation_created, intent.intent_sequence);
         try self.trace.append(.order_command, intent.intent_sequence);
         return .{
             .command_id = self.order_command_id,
             .order_id = self.order_id,
-            .quantity = intent.quantity,
-            .limit_price_micros = intent.limit_price_micros,
-            .reservation_micros = self.open_order_reservation_micros,
+            .quantity = .{ .instrument = oms_command.instrument, .rules_version = self.instrument_rules_version, .lots = intent.quantity },
+            .limit_price = oms_command.limit_price,
+            .reservation = oms_command.reservation,
             .client_id = client_order_id,
         };
     }
@@ -2394,15 +2499,15 @@ pub const TradingShard = struct {
             },
             .economic_fill => |fill| {
                 const order = self.oms.orderById(fill.order_id) orelse return error.UnknownOrder;
+                const instrument = if (order.instrument == spot_instrument) spot_instrument else swap_instrument;
                 const changed = try self.applyEconomicProjection(.{ .fill = .{
                     .identity = fill.fill_id,
-                    .instrument = if (order.instrument == .btc_usdt_spot) .btc_usdt_spot else .btc_usdt_swap,
                     .side = if (order.side == .buy) .buy else .sell,
-                    .quantity = fill.quantity,
-                    .price_micros = fill.price_micros,
+                    .quantity = .{ .instrument = instrument, .rules_version = self.instrument_rules_version, .lots = fill.quantity },
+                    .price = .{ .instrument = instrument, .rules_version = self.instrument_rules_version, .ticks = fill.price_micros },
                     .quantity_denominator = self.quantity_denominator,
-                    .fee_micros = fill.fee_micros,
-                    .rebate_micros = fill.rebate_micros,
+                    .fee = .{ .asset = self.economic_projection.settlement_asset, .atoms = fill.fee_micros },
+                    .rebate = .{ .asset = self.economic_projection.settlement_asset, .atoms = fill.rebate_micros },
                     .portfolio_margin_ppm = self.internal_initial_margin_ppm,
                     .exchange_margin_ppm = self.venue_initial_margin_ppm,
                 } });
@@ -2412,18 +2517,18 @@ pub const TradingShard = struct {
                 }
             },
             .funding_settlement => |funding| {
-                const changed = try self.applyEconomicProjection(.{ .funding_settlement = .{ .identity = funding.settlement_id, .amount_micros = funding.amount_micros } });
+                const changed = try self.applyEconomicProjection(.{ .funding_settlement = .{ .identity = funding.settlement_id, .amount = .{ .asset = self.economic_projection.settlement_asset, .atoms = funding.amount_micros } } });
                 if (changed) try self.trace.append(.funding_settlement, funding.settlement_id);
             },
             .venue_forced_execution => |forced| {
                 const changed = try self.applyEconomicProjection(.{ .venue_forced_execution = .{
                     .identity = forced.execution_id,
                     .side = if (forced.side == .buy) .buy else .sell,
-                    .quantity = forced.quantity,
-                    .price_micros = forced.price_micros,
+                    .quantity = .{ .instrument = swap_instrument, .rules_version = self.instrument_rules_version, .lots = forced.quantity },
+                    .price = .{ .instrument = swap_instrument, .rules_version = self.instrument_rules_version, .ticks = forced.price_micros },
                     .quantity_denominator = self.quantity_denominator,
-                    .fee_micros = forced.fee_micros,
-                    .penalty_micros = forced.penalty_micros,
+                    .fee = .{ .asset = self.economic_projection.settlement_asset, .atoms = forced.fee_micros },
+                    .penalty = .{ .asset = self.economic_projection.settlement_asset, .atoms = forced.penalty_micros },
                     .portfolio_margin_ppm = self.internal_initial_margin_ppm,
                     .exchange_margin_ppm = self.venue_initial_margin_ppm,
                 } });
@@ -2444,10 +2549,10 @@ pub const TradingShard = struct {
             .economic_account_snapshot => |account_snapshot| {
                 const changed = try self.applyEconomicProjection(.{ .account_snapshot = .{
                     .identity = account_snapshot.snapshot_id,
-                    .usdt_balance_micros = account_snapshot.usdt_balance_micros,
+                    .balance = .{ .asset = self.economic_projection.settlement_asset, .atoms = account_snapshot.usdt_balance_micros },
                     .spot_asset_quantity = account_snapshot.spot_asset_quantity,
                     .swap_position_quantity = account_snapshot.swap_position_quantity,
-                    .margin_micros = account_snapshot.margin_micros,
+                    .margin = .{ .asset = self.economic_projection.settlement_asset, .atoms = account_snapshot.margin_micros },
                 } });
                 if (changed) {
                     if (self.operational_state.initialized and self.economic_projection.reconciliation_break) {
@@ -2577,14 +2682,14 @@ pub const TradingShard = struct {
                 );
                 if (!is_new) return null;
                 try self.trace.append(.fill, fill.fill_id);
+                const instrument = if (self.reservation_model == .cash) spot_instrument else swap_instrument;
                 _ = try self.applyEconomicProjection(.{ .fill = .{
                     .identity = fill.fill_id,
-                    .instrument = if (self.reservation_model == .cash) .btc_usdt_spot else .btc_usdt_swap,
                     .side = .buy,
-                    .quantity = fill.quantity,
-                    .price_micros = fill.price_micros,
+                    .quantity = .{ .instrument = instrument, .rules_version = self.instrument_rules_version, .lots = fill.quantity },
+                    .price = .{ .instrument = instrument, .rules_version = self.instrument_rules_version, .ticks = fill.price_micros },
                     .quantity_denominator = self.quantity_denominator,
-                    .fee_micros = try feeMicros(try self.shardNotionalMicros(fill.quantity, fill.price_micros)),
+                    .fee = .{ .asset = self.economic_projection.settlement_asset, .atoms = try feeMicros(try self.shardNotionalMicros(fill.quantity, fill.price_micros)) },
                     .portfolio_margin_ppm = self.internal_initial_margin_ppm,
                     .exchange_margin_ppm = self.venue_initial_margin_ppm,
                 } });
@@ -2648,123 +2753,49 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         if (transaction.posting_count > transaction.postings.len) return error.InvalidSnapshotState;
 }
 
-const AdapterRequest = union(enum) {
-    order_command: OrderCommand,
-};
+/// Deterministic external facts used by the legacy-state acceptance scenario.
+/// Transport behavior is covered exclusively by the shared SimulatedVenue
+/// contract, so TradingShard no longer owns a direct VenueAdapter path.
+fn happyPathVenueFacts(command: OrderCommand) ![6]InputEvent {
+    if (command.command_id != 1 or command.order_id != 1 or
+        command.quantity.lots != happy_order_quantity or
+        command.limit_price.ticks != 50_100_000_000 or
+        command.reservation.atoms != 11_397_750 or
+        !std.mem.eql(u8, command.client_id, client_order_id))
+        return error.InvalidOrderCommand;
 
-const AdapterOutputBatch = struct {
-    dispatch_result: InputEvent,
-    ingress: [5]InputEvent,
-};
-
-const VenueAdapter = venue_adapter.Interface(AdapterRequest, AdapterOutputBatch);
-
-/// Legacy deterministic fixture for the pre-adapter TradingShard acceptance
-/// path. The shared SimulatedVenue lives in simulated_venue.zig.
-const LegacyFixtureVenue = struct {
-    const State = enum { idle, running, stopped };
-
-    state: State = .idle,
-    pending: ?AdapterOutputBatch = null,
-
-    fn adapter(self: *LegacyFixtureVenue) VenueAdapter {
-        return .{ .ptr = self, .vtable = &.{
-            .start = startOpaque,
-            .try_send = trySendOpaque,
-            .try_drain = tryDrainOpaque,
-            .stop = stopOpaque,
-        } };
-    }
-
-    fn startOpaque(ptr: *anyopaque, config: venue_adapter.Config) venue_adapter.StartError!void {
-        const self: *LegacyFixtureVenue = @ptrCast(@alignCast(ptr));
-        if (self.state == .running) return error.AlreadyStarted;
-        if (self.state == .stopped) return error.Stopped;
-        if (config.environment != .simulation or
-            config.request_capacity != 1 or config.output_capacity != 1)
-            return error.InvalidConfig;
-        self.state = .running;
-    }
-
-    fn trySendOpaque(
-        ptr: *anyopaque,
-        request: AdapterRequest,
-    ) venue_adapter.SendError!venue_adapter.SendResult {
-        const self: *LegacyFixtureVenue = @ptrCast(@alignCast(ptr));
-        if (self.state == .idle) return error.NotStarted;
-        if (self.state == .stopped) return .stopped;
-        if (self.pending != null) return .backpressure;
-        self.pending = switch (request) {
-            .order_command => |command| makeOutput(command) catch return error.InvalidRequest,
-        };
-        return .accepted;
-    }
-
-    fn tryDrainOpaque(ptr: *anyopaque) venue_adapter.DrainError!?AdapterOutputBatch {
-        const self: *LegacyFixtureVenue = @ptrCast(@alignCast(ptr));
-        if (self.state == .idle) return error.NotStarted;
-        const pending = self.pending orelse return null;
-        self.pending = null;
-        return pending;
-    }
-
-    fn stopOpaque(
-        ptr: *anyopaque,
-        deadline: venue_adapter.DrainDeadline,
-    ) venue_adapter.StopError!void {
-        const self: *LegacyFixtureVenue = @ptrCast(@alignCast(ptr));
-        _ = deadline;
-        if (self.state == .idle) return error.NotStarted;
-        if (self.pending != null) return error.OutputPending;
-        self.state = .stopped;
-    }
-
-    fn makeOutput(command: OrderCommand) !AdapterOutputBatch {
-        if (command.command_id != 1 or command.order_id != 1 or
-            command.quantity != happy_order_quantity or
-            command.limit_price_micros != 50_100_000_000 or
-            command.reservation_micros != 11_397_750 or
-            !std.mem.eql(u8, command.client_id, client_order_id))
-            return error.InvalidOrderCommand;
-
-        return .{
-            .dispatch_result = atGroup(15, .{
-                .identity = 1,
-                .payload = .{ .order_dispatch_result = .submitted },
-            }),
-            .ingress = .{
-                atGroup(16, .{ .identity = 1, .payload = .{ .execution_report = .{
-                    .report_id = 1,
-                    .status = .accepted,
-                    .cumulative_qty = 0,
-                    .remaining_qty = 100,
-                } } }),
-                atGroup(17, .{ .identity = 1, .payload = .{ .fill = .{
-                    .fill_id = 1,
-                    .quantity = 40,
-                    .price_micros = 49_900_000_000,
-                } } }),
-                atGroup(17, .{ .identity = 2, .payload = .{ .execution_report = .{
-                    .report_id = 2,
-                    .status = .partially_filled,
-                    .cumulative_qty = 40,
-                    .remaining_qty = 60,
-                } } }),
-                atGroup(18, .{ .identity = 2, .payload = .{ .fill = .{
-                    .fill_id = 2,
-                    .quantity = 60,
-                    .price_micros = 50_100_000_000,
-                } } }),
-                atGroup(18, .{ .identity = 3, .payload = .{ .execution_report = .{
-                    .report_id = 3,
-                    .status = .filled,
-                    .cumulative_qty = 100,
-                    .remaining_qty = 0,
-                } } }),
-            },
-        };
-    }
-};
+    return .{
+        atGroup(15, .{ .identity = 1, .payload = .{ .order_dispatch_result = .submitted } }),
+        atGroup(16, .{ .identity = 1, .payload = .{ .execution_report = .{
+            .report_id = 1,
+            .status = .accepted,
+            .cumulative_qty = 0,
+            .remaining_qty = 100,
+        } } }),
+        atGroup(17, .{ .identity = 1, .payload = .{ .fill = .{
+            .fill_id = 1,
+            .quantity = 40,
+            .price_micros = 49_900_000_000,
+        } } }),
+        atGroup(17, .{ .identity = 2, .payload = .{ .execution_report = .{
+            .report_id = 2,
+            .status = .partially_filled,
+            .cumulative_qty = 40,
+            .remaining_qty = 60,
+        } } }),
+        atGroup(18, .{ .identity = 2, .payload = .{ .fill = .{
+            .fill_id = 2,
+            .quantity = 60,
+            .price_micros = 50_100_000_000,
+        } } }),
+        atGroup(18, .{ .identity = 3, .payload = .{ .execution_report = .{
+            .report_id = 3,
+            .status = .filled,
+            .cumulative_qty = 100,
+            .remaining_qty = 0,
+        } } }),
+    };
+}
 
 const genesis = [_]InputEvent{
     atGroup(1, .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{
@@ -2942,9 +2973,9 @@ pub const QualifiedHostOrder = struct {
     side: host_gateway.Side,
     time_in_force: host_gateway.TimeInForce,
     portfolio_reduce_only: bool,
-    quantity: i64,
-    limit_price_micros: i64,
-    reservation_micros: i64,
+    quantity: canonical.InstrumentQuantity,
+    limit_price: canonical.InstrumentPrice,
+    reservation: canonical.AssetAmount,
 };
 
 pub const TradingShardHostIngress = struct {
@@ -3009,8 +3040,8 @@ pub const TradingShardHostIngress = struct {
             .time_in_force = intent.time_in_force,
             .portfolio_reduce_only = intent.portfolio_reduce_only,
             .quantity = command.quantity,
-            .limit_price_micros = command.limit_price_micros,
-            .reservation_micros = command.reservation_micros,
+            .limit_price = command.limit_price,
+            .reservation = command.reservation,
         };
     }
 
@@ -3061,13 +3092,6 @@ fn finishScenario(run: *LiveRun) !LiveRun {
 
 fn runHappyPath() !LiveRun {
     var run = try startScenario();
-    var simulated: LegacyFixtureVenue = .{};
-    const adapter = simulated.adapter();
-    try adapter.start(.{
-        .environment = .simulation,
-        .request_capacity = 1,
-        .output_capacity = 1,
-    });
     try applyHealthyPrelude(&run);
     const command = (try applyLive(
         &run.shard,
@@ -3076,17 +3100,12 @@ fn runHappyPath() !LiveRun {
             .timer = .{ .quantity = happy_order_quantity },
         } }),
     )) orelse return error.MissingOrderCommand;
-    if (try adapter.trySend(.{ .order_command = command }) != .accepted)
-        return error.AdapterDidNotAccept;
-    const output = (try adapter.tryDrain()) orelse return error.MissingAdapterOutput;
-    if (try applyLive(&run.shard, &run.decision_journal, output.dispatch_result) != null)
-        return error.UnexpectedCommand;
-    for (output.ingress, 0..) |event, index| {
+    const facts = try happyPathVenueFacts(command);
+    for (facts, 0..) |event, index| {
         if (try applyLive(&run.shard, &run.decision_journal, event) != null)
             return error.UnexpectedCommand;
-        if (index == 1) try assertPartialState(run.shard);
+        if (index == 2) try assertPartialState(run.shard);
     }
-    try adapter.stop(.{ .monotonic_ns = fixture_monotonic_base + 20_000_000 });
     if (try applyLive(&run.shard, &run.decision_journal, atGroup(19, .{
         .identity = 2,
         .payload = .{ .mark_price = 50_200_000_000 },
@@ -3335,7 +3354,7 @@ fn runOrderBenchmark(io: std.Io, samples: usize, burst_size: usize) !BenchmarkRe
             telemetry.dequeue();
             telemetry.events += 1;
             telemetry.commands += 1;
-            if (command.reservation_micros != 11_397_750 or
+            if (command.reservation.atoms != 11_397_750 or
                 work.shard.order_state != .pending_submit or
                 work.decision_journal.records != 5)
                 return error.BenchmarkCorrectnessFailure;
@@ -3880,36 +3899,25 @@ fn duplicateAtGroup(group: u64, original: InputEvent) InputEvent {
 
 fn runDuplicateReport() !LiveRun {
     var run = try startScenario();
-    var simulated: LegacyFixtureVenue = .{};
-    const adapter = simulated.adapter();
-    try adapter.start(.{
-        .environment = .simulation,
-        .request_capacity = 1,
-        .output_capacity = 1,
-    });
     try applyHealthyPrelude(&run);
     const command = (try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{
         .identity = 1,
         .payload = .{ .timer = .{ .quantity = happy_order_quantity } },
     }))) orelse return error.MissingOrderCommand;
-    if (try adapter.trySend(.{ .order_command = command }) != .accepted)
-        return error.AdapterDidNotAccept;
-    const output = (try adapter.tryDrain()) orelse return error.MissingAdapterOutput;
-    if (try applyLive(&run.shard, &run.decision_journal, output.dispatch_result) != null)
-        return error.UnexpectedCommand;
-    for (output.ingress[0..3]) |event| {
+    const facts = try happyPathVenueFacts(command);
+    for (facts[0..4]) |event| {
         if (try applyLive(&run.shard, &run.decision_journal, event) != null)
             return error.UnexpectedCommand;
     }
     try assertPartialState(run.shard);
     const before_duplicate_fill = run.shard.canonicalStateDigest();
-    const duplicate_fill_result = try run.shard.apply(duplicateAtGroup(18, output.ingress[1]));
+    const duplicate_fill_result = try run.shard.apply(duplicateAtGroup(18, facts[2]));
     if (duplicate_fill_result.facts.len != 0 or duplicate_fill_result.order_command != null or duplicate_fill_result.oms_commands.len != 0) return error.DuplicateFillChangedState;
     try std.testing.expectEqualSlices(u8, &before_duplicate_fill, &run.shard.canonicalStateDigest());
     if (try applyLive(
         &run.shard,
         &run.decision_journal,
-        duplicateAtGroup(18, output.ingress[2]),
+        duplicateAtGroup(18, facts[3]),
     ) != null)
         return error.UnexpectedCommand;
     try assertPartialState(run.shard);
@@ -3919,13 +3927,13 @@ fn runDuplicateReport() !LiveRun {
     if (try applyLive(
         &run.shard,
         &run.decision_journal,
-        atGroup(19, output.ingress[3]),
+        atGroup(19, facts[4]),
     ) != null)
         return error.UnexpectedCommand;
     if (try applyLive(
         &run.shard,
         &run.decision_journal,
-        atGroup(19, output.ingress[4]),
+        atGroup(19, facts[5]),
     ) != null)
         return error.UnexpectedCommand;
     if (try applyLive(&run.shard, &run.decision_journal, atGroup(20, .{
@@ -3933,7 +3941,6 @@ fn runDuplicateReport() !LiveRun {
         .payload = .{ .mark_price = 50_200_000_000 },
     })) != null)
         return error.UnexpectedCommand;
-    try adapter.stop(.{ .monotonic_ns = fixture_monotonic_base + 20_000_000 });
     return finishScenario(&run);
 }
 
@@ -4049,20 +4056,26 @@ fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     for (shard.oms.orders[0..shard.oms.order_count]) |order| {
         digestInt(&hasher, u64, order.id);
         if (order.strategy_instance != 0) digestInt(&hasher, u128, order.strategy_instance);
-        digestInt(&hasher, u8, @intFromEnum(order.instrument));
+        digestInt(&hasher, u128, order.instrument);
         digestInt(&hasher, u8, @intFromEnum(order.side));
         digestBool(&hasher, order.portfolio_reduce_only);
         digestBool(&hasher, order.venue_reduce_only);
         digestInt(&hasher, u32, order.revision);
         digestInt(&hasher, u8, @intFromEnum(order.state));
         digestInt(&hasher, i64, order.quantity);
-        digestInt(&hasher, i64, order.limit_price_micros);
+        digestInt(&hasher, u128, order.limit_price.instrument);
+        digestInt(&hasher, u64, order.limit_price.rules_version);
+        digestInt(&hasher, i128, order.limit_price.ticks);
         digestInt(&hasher, i64, order.cumulative_quantity);
         digestInt(&hasher, u64, order.predecessor_order_id);
-        digestInt(&hasher, i64, order.reservation_micros);
-        digestInt(&hasher, i64, order.confirmed_reservation_micros);
-        digestBool(&hasher, order.pending_reservation_micros != null);
-        digestInt(&hasher, i64, order.pending_reservation_micros orelse 0);
+        digestInt(&hasher, u64, order.reservation.asset);
+        digestInt(&hasher, i128, order.reservation.atoms);
+        digestInt(&hasher, u64, order.confirmed_reservation.asset);
+        digestInt(&hasher, i128, order.confirmed_reservation.atoms);
+        const pending_reservation = order.pending_reservation orelse canonical.AssetAmount{ .asset = 0, .atoms = 0 };
+        digestBool(&hasher, order.pending_reservation != null);
+        digestInt(&hasher, u64, pending_reservation.asset);
+        digestInt(&hasher, i128, pending_reservation.atoms);
         digestBool(&hasher, order.reservation_active);
         digestBool(&hasher, order.dispatch_submitted);
         digestInt(&hasher, u64, order.group_first_sequence);
@@ -4616,7 +4629,7 @@ test "configurable Genesis fails closed until authority is complete" {
     }));
 
     var out_of_order: TradingShard = .{};
-    try std.testing.expectError(error.InvalidMarginRules, out_of_order.apply(.{
+    try std.testing.expectError(error.InvalidMarginRules, out_of_order.apply(CoreEvent{
         .identity = 1,
         .payload = .{ .margin_rules_activated = .{ .version = 1 } },
     }));
@@ -4670,8 +4683,8 @@ test "native and Python intents cross the same authority and risk seam" {
         } },
     }))).order_command.?;
     try std.testing.expectEqual(native_command.quantity, python_command.quantity);
-    try std.testing.expectEqual(native_command.limit_price_micros, python_command.limit_price_micros);
-    try std.testing.expectEqual(native_command.reservation_micros, python_command.reservation_micros);
+    try std.testing.expectEqual(native_command.limit_price, python_command.limit_price);
+    try std.testing.expectEqual(native_command.reservation, python_command.reservation);
 
     var unauthorized = try startScenarioAuthorized(authorization, .leveraged);
     try applyHealthyPrelude(&unauthorized);
@@ -4834,7 +4847,7 @@ test "de risk locks target and flatten requires warning" {
         .risk_warning_identity = 30,
     } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 100, .count = 1 };
-    group.members[0] = .{ .intent_sequence = 100, .operation = .place, .instrument = .btc_usdt_swap, .side = .sell, .quantity = 5, .limit_price_micros = 50_000_000 };
+    group.members[0] = .{ .intent_sequence = 100, .operation = .place, .instrument = swap_instrument, .side = .sell, .quantity = 5, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
     const reducing = try run.shard.apply(atGroup(13, .{ .identity = 100, .payload = .{ .oms_intent_group = group } }));
     try std.testing.expectEqual(@as(usize, 1), reducing.oms_commands.len);
     group.members[0].side = .buy;
@@ -4853,10 +4866,10 @@ fn placeIntentGroup(
     group.members[0] = .{
         .intent_sequence = first_intent_sequence,
         .operation = .place,
-        .instrument = .btc_usdt_swap,
+        .instrument = swap_instrument,
         .side = side,
         .quantity = quantity,
-        .limit_price_micros = order_limit_price,
+        .limit_price = fixtureOmsPrice(swap_instrument, order_limit_price),
     };
     const placed = try applyLive(&run.shard, &run.decision_journal, atGroup(group_index, .{
         .identity = event_identity,
@@ -4922,10 +4935,10 @@ test "keep positions stops through shard seam preserving economics" {
     try std.testing.expectEqual(@as(usize, 0), run.shard.oms.emitted().len);
 
     var buy_group: oms_module.IntentGroup = .{ .first_intent_sequence = 110, .count = 1 };
-    buy_group.members[0] = .{ .intent_sequence = 110, .operation = .place, .instrument = .btc_usdt_swap, .side = .buy, .quantity = 10, .limit_price_micros = order_limit_price };
+    buy_group.members[0] = .{ .intent_sequence = 110, .operation = .place, .instrument = swap_instrument, .side = .buy, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, order_limit_price) };
     try std.testing.expectError(error.TradingNotAuthorized, run.shard.apply(atGroup(18, .{ .identity = 110, .payload = .{ .oms_intent_group = buy_group } })));
     var reduce_group: oms_module.IntentGroup = .{ .first_intent_sequence = 111, .count = 1 };
-    reduce_group.members[0] = .{ .intent_sequence = 111, .operation = .place, .instrument = .btc_usdt_swap, .side = .sell, .portfolio_reduce_only = true, .quantity = 40, .limit_price_micros = order_limit_price };
+    reduce_group.members[0] = .{ .intent_sequence = 111, .operation = .place, .instrument = swap_instrument, .side = .sell, .portfolio_reduce_only = true, .quantity = 40, .limit_price = fixtureOmsPrice(swap_instrument, order_limit_price) };
     try std.testing.expectError(error.TradingNotAuthorized, run.shard.apply(atGroup(19, .{ .identity = 111, .payload = .{ .oms_intent_group = reduce_group } })));
     try std.testing.expectError(error.TradingSafetyGateClosed, run.shard.apply(lifecycleCommand(41, 4, .enable_trading)));
 
@@ -5022,7 +5035,7 @@ test "full lifecycle trajectories authorize only prescribed risk cancel and redu
     _ = stopped;
     try expectKeepPositionsStopped(&run, preserved);
     var stop_buy_group: oms_module.IntentGroup = .{ .first_intent_sequence = 103, .count = 1 };
-    stop_buy_group.members[0] = .{ .intent_sequence = 103, .operation = .place, .instrument = .btc_usdt_swap, .side = .buy, .quantity = 10, .limit_price_micros = order_limit_price };
+    stop_buy_group.members[0] = .{ .intent_sequence = 103, .operation = .place, .instrument = swap_instrument, .side = .buy, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, order_limit_price) };
     try std.testing.expectError(error.TradingNotAuthorized, run.shard.apply(atGroup(23, .{ .identity = 108, .payload = .{ .oms_intent_group = stop_buy_group } })));
     const duplicate_stop = try run.shard.apply(lifecycleCommand(6, 7, .stop_keep_positions));
     try std.testing.expectEqual(@as(usize, 0), duplicate_stop.facts.len);
@@ -5045,7 +5058,7 @@ test "full lifecycle trajectories authorize only prescribed risk cancel and redu
     _ = try applyLive(&run.shard, &run.decision_journal, deRiskCommand(9, 11, 40, 0));
     try std.testing.expectEqual(operational.OperationalMode.draining, run.shard.operational_state.mode);
     var increase_group: oms_module.IntentGroup = .{ .first_intent_sequence = 104, .count = 1 };
-    increase_group.members[0] = .{ .intent_sequence = 104, .operation = .place, .instrument = .btc_usdt_swap, .side = .buy, .quantity = 10, .limit_price_micros = order_limit_price };
+    increase_group.members[0] = .{ .intent_sequence = 104, .operation = .place, .instrument = swap_instrument, .side = .buy, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, order_limit_price) };
     try std.testing.expectError(error.DeRiskTargetViolation, run.shard.apply(atGroup(25, .{ .identity = 110, .payload = .{ .oms_intent_group = increase_group } })));
     const derisk_sell = try placeIntentGroup(&run, 26, 105, 105, .sell, 60);
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(27, .{ .identity = 112, .payload = .{ .economic_fill = .{
@@ -5135,13 +5148,8 @@ test "venue facts and replay use apply without replay send capability" {
         .identity = 1,
         .payload = .{ .timer = .{ .quantity = happy_order_quantity } },
     }))).order_command.?;
-    var simulated: LegacyFixtureVenue = .{};
-    const adapter = simulated.adapter();
-    try adapter.start(.{ .environment = .simulation, .request_capacity = 1, .output_capacity = 1 });
-    try std.testing.expectEqual(venue_adapter.SendResult.accepted, try adapter.trySend(.{ .order_command = command }));
-    const venue_output = (try adapter.tryDrain()).?;
-    try std.testing.expect((try live.shard.apply(venue_output.dispatch_result)).order_command == null);
-    for (venue_output.ingress) |event|
+    const facts = try happyPathVenueFacts(command);
+    for (facts) |event|
         try std.testing.expect((try live.shard.apply(event)).order_command == null);
 
     var replay_shard: ReplayTradingShard = .{};
@@ -5151,17 +5159,76 @@ test "venue facts and replay use apply without replay send capability" {
         .identity = 1,
         .payload = .{ .timer = .{ .quantity = happy_order_quantity } },
     }));
-    _ = try replay_shard.apply(venue_output.dispatch_result);
-    for (venue_output.ingress) |event| _ = try replay_shard.apply(event);
+    for (facts) |event| _ = try replay_shard.apply(event);
     try std.testing.expectEqualSlices(u8, &live.shard.canonicalStateDigest(), &replay_shard.canonicalStateDigest());
+}
+
+test "shared canonical adapter facts enter the TradingShard state seam" {
+    const Fixture = struct {
+        fn record(sequence: u64, event: canonical.CanonicalEvent) canonical.EventRecord {
+            return .{ .envelope = .{
+                .event_type = 1,
+                .schema_version = 1,
+                .identity = .{ .stream = 1, .sequence = sequence },
+                .source_fact_identity = sequence,
+                .scope = .account,
+                .venue = 1,
+                .exchange_account = 2,
+                .source_stream = 1,
+                .source_sequence = sequence,
+                .adapter_session = 4,
+                .times = .{ .receive_utc_ns = sequence, .monotonic_ns = sequence, .audit_utc_ns = sequence },
+                .raw_evidence = .{ .stream = 1, .sequence = sequence, .digest = @splat(0) },
+            }, .event = event };
+        }
+    };
+
+    var run = try startScenario();
+    try applyHealthyPrelude(&run);
+    const command = (try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{
+        .identity = 1,
+        .payload = .{ .timer = .{ .quantity = happy_order_quantity } },
+    }))) orelse return error.MissingOrderCommand;
+    const client_order = try canonical.ClientOrderId.init(command.client_id);
+    const venue_order = try canonical.VenueOrderRef.init(1, "shared-order-1");
+    const quantity = canonical.InstrumentQuantity{ .instrument = swap_instrument, .rules_version = run.shard.instrument_rules_version, .lots = happy_order_quantity };
+    const price = canonical.InstrumentPrice{ .instrument = swap_instrument, .rules_version = run.shard.instrument_rules_version, .ticks = order_limit_price };
+
+    try std.testing.expect((try run.shard.apply(Fixture.record(1, .{ .order_dispatch_result = .{ .command = command.command_id, .state = .submitted } }))).order_command == null);
+    try std.testing.expect((try run.shard.apply(Fixture.record(2, .{ .execution_report = .{
+        .identity = 2,
+        .order = command.order_id,
+        .client_order_id = client_order,
+        .venue_order = venue_order,
+        .instrument = swap_instrument,
+        .exchange_account = 2,
+        .revision = 1,
+        .status = .accepted,
+        .cumulative_quantity = .{ .instrument = swap_instrument, .rules_version = run.shard.instrument_rules_version, .lots = 0 },
+        .remaining_quantity = quantity,
+    } }))).order_command == null);
+    try std.testing.expect((try run.shard.apply(Fixture.record(3, .{ .fill = .{
+        .identity = 3,
+        .order = command.order_id,
+        .client_order_id = client_order,
+        .venue_order = venue_order,
+        .venue_trade = try canonical.VenueTradeRef.init(1, "shared-trade-1"),
+        .instrument = swap_instrument,
+        .exchange_account = 2,
+        .side = .buy,
+        .quantity = quantity,
+        .price = price,
+        .liquidity = .taker,
+    } }))).order_command == null);
+    try std.testing.expectEqual(@as(i64, happy_order_quantity), run.shard.portfolio_position.quantity);
 }
 
 test "bounded multi instrument OMS closes lifecycle and partial policy" {
     var run = try startScenario();
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 10, .policy = .independent, .count = 2 };
-    group.members[0] = .{ .intent_sequence = 10, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 100, .limit_price_micros = 50_000_000, .reservation_micros = 5_000_000 };
-    group.members[1] = .{ .intent_sequence = 11, .operation = .place, .instrument = .btc_usdt_swap, .quantity = 20, .limit_price_micros = 50_100_000, .reservation_micros = 1_000_000 };
+    group.members[0] = .{ .intent_sequence = 10, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000), .reservation = fixtureReservation(5_000_000) };
+    group.members[1] = .{ .intent_sequence = 11, .operation = .place, .instrument = swap_instrument, .quantity = 20, .limit_price = fixtureOmsPrice(swap_instrument, 50_100_000), .reservation = fixtureReservation(1_000_000) };
     const placed = try run.shard.apply(atGroup(12, .{ .identity = 10, .payload = .{ .oms_intent_group = group } }));
     try std.testing.expectEqual(@as(usize, 2), placed.oms_commands.len);
     try std.testing.expect(placed.oms_commands[0].instrument != placed.oms_commands[1].instrument);
@@ -5190,15 +5257,15 @@ test "bounded multi instrument OMS closes lifecycle and partial policy" {
         .remaining_quantity = 100,
     } } }));
     var amend: oms_module.IntentGroup = .{ .first_intent_sequence = 12, .count = 1 };
-    amend.members[0] = .{ .intent_sequence = 12, .operation = .amend, .instrument = .btc_usdt_spot, .target_order_id = 1, .expected_revision = 1, .quantity = 80, .limit_price_micros = 49_900_000, .reservation_micros = 4_000_000 };
+    amend.members[0] = .{ .intent_sequence = 12, .operation = .amend, .instrument = spot_instrument, .target_order_id = 1, .expected_revision = 1, .quantity = 80, .limit_price = fixtureOmsPrice(spot_instrument, 49_900_000), .reservation = fixtureReservation(4_000_000) };
     const amended = try run.shard.apply(atGroup(16, .{ .identity = 12, .payload = .{ .oms_intent_group = amend } }));
     try std.testing.expectEqual(oms_module.Operation.amend, amended.oms_commands[0].operation);
     try std.testing.expectEqual(@as(u32, 2), run.shard.oms.orders[0].revision);
-    try std.testing.expectEqual(placed.oms_commands[0].reservation_micros, run.shard.oms.orders[0].reservation_micros);
+    try std.testing.expectEqual(placed.oms_commands[0].reservation.atoms, run.shard.oms.orders[0].reservation.atoms);
     try std.testing.expectError(error.StaleOrderRevision, run.shard.apply(atGroup(17, .{ .identity = 13, .payload = .{ .oms_intent_group = amend } })));
 
     var cancel: oms_module.IntentGroup = .{ .first_intent_sequence = 13, .count = 1 };
-    cancel.members[0] = .{ .intent_sequence = 13, .operation = .cancel, .instrument = .btc_usdt_swap, .target_order_id = 2, .expected_revision = 1 };
+    cancel.members[0] = .{ .intent_sequence = 13, .operation = .cancel, .instrument = swap_instrument, .target_order_id = 2, .expected_revision = 1 };
     const canceled = try run.shard.apply(atGroup(18, .{ .identity = 13, .payload = .{ .oms_intent_group = cancel } }));
     try std.testing.expectEqual(oms_module.Operation.cancel, canceled.oms_commands[0].operation);
     _ = try run.shard.apply(atGroup(19, .{ .identity = 2, .payload = .{ .oms_execution_report = .{
@@ -5227,7 +5294,7 @@ test "CancelConfirmCreate never overlaps and records predecessor" {
     var run = try startScenario();
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 20, .count = 1 };
-    place.members[0] = .{ .intent_sequence = 20, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 100, .limit_price_micros = 50_000_000, .reservation_micros = 5_000_000 };
+    place.members[0] = .{ .intent_sequence = 20, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000), .reservation = fixtureReservation(5_000_000) };
     const placed = try run.shard.apply(atGroup(12, .{ .identity = 20, .payload = .{ .oms_intent_group = place } }));
     var dispatch: oms_module.DispatchBatch = .{ .count = 1 };
     dispatch.items[0] = .{ .command_id = placed.oms_commands[0].command_id, .state = .submitted };
@@ -5235,7 +5302,7 @@ test "CancelConfirmCreate never overlaps and records predecessor" {
     _ = try run.shard.apply(atGroup(14, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
 
     var replace: oms_module.IntentGroup = .{ .first_intent_sequence = 21, .count = 1 };
-    replace.members[0] = .{ .intent_sequence = 21, .operation = .amend, .instrument = .btc_usdt_spot, .target_order_id = 1, .expected_revision = 1, .quantity = 75, .limit_price_micros = 49_800_000, .native_amend = false, .allow_cancel_confirm_create = true, .reservation_micros = 3_750_000 };
+    replace.members[0] = .{ .intent_sequence = 21, .operation = .amend, .instrument = spot_instrument, .target_order_id = 1, .expected_revision = 1, .quantity = 75, .limit_price = fixtureOmsPrice(spot_instrument, 49_800_000), .native_amend = false, .allow_cancel_confirm_create = true, .reservation = fixtureReservation(3_750_000) };
     const cancel_first = try run.shard.apply(atGroup(15, .{ .identity = 21, .payload = .{ .oms_intent_group = replace } }));
     try std.testing.expectEqual(@as(usize, 1), cancel_first.oms_commands.len);
     try std.testing.expectEqual(oms_module.Operation.cancel, cancel_first.oms_commands[0].operation);
@@ -5262,7 +5329,10 @@ test "IntentGroup batch results remain itemized" {
     var run = try startScenario();
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 30, .policy = .cancel_remaining, .count = 3 };
-    for (group.members[0..3], 0..) |*member, index| member.* = .{ .intent_sequence = 30 + index, .operation = .place, .instrument = if (index == 1) .btc_usdt_swap else .btc_usdt_spot, .quantity = 10, .limit_price_micros = 50_000_000, .reservation_micros = 500_000 };
+    for (group.members[0..3], 0..) |*member, index| {
+        const instrument = if (index == 1) swap_instrument else spot_instrument;
+        member.* = .{ .intent_sequence = 30 + index, .operation = .place, .instrument = instrument, .quantity = 10, .limit_price = fixtureOmsPrice(instrument, 50_000_000), .reservation = fixtureReservation(500_000) };
+    }
     const commands = try run.shard.apply(atGroup(12, .{ .identity = 30, .payload = .{ .oms_intent_group = group } }));
     var batch: oms_module.DispatchBatch = .{ .count = 3 };
     batch.items[0] = .{ .command_id = commands.oms_commands[0].command_id, .state = .submitted };
@@ -5283,9 +5353,9 @@ test "layered risk owns reservations until authoritative absence" {
     var run = try startScenario();
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 40, .count = 1 };
-    group.members[0] = .{ .intent_sequence = 40, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 100, .limit_price_micros = 50_000_000, .reservation_micros = 1 };
+    group.members[0] = .{ .intent_sequence = 40, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000), .reservation = fixtureReservation(1) };
     const placed = try run.shard.apply(atGroup(12, .{ .identity = 40, .payload = .{ .oms_intent_group = group } }));
-    try std.testing.expectEqual(@as(i64, 500_375), placed.oms_commands[0].reservation_micros);
+    try std.testing.expectEqual(@as(i128, 500_375), run.shard.oms.orders[0].reservation.atoms);
     try std.testing.expectEqual(@as(i64, 500_375), run.shard.layered_risk_reserved_micros);
 
     var dispatch: oms_module.DispatchBatch = .{ .count = 1 };
@@ -5306,7 +5376,7 @@ test "TradingShard preserves maintenance margin in the projected buffer" {
     var run = try startScenario();
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 45, .count = 1 };
-    group.members[0] = .{ .intent_sequence = 45, .operation = .place, .instrument = .btc_usdt_swap, .quantity = 100, .limit_price_micros = 50_000_000 };
+    group.members[0] = .{ .intent_sequence = 45, .operation = .place, .instrument = swap_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
     _ = try run.shard.apply(atGroup(12, .{ .identity = 45, .payload = .{ .oms_intent_group = group } }));
     try std.testing.expectEqual(@as(i64, 11_375), run.shard.layered_risk_reserved_micros);
     try std.testing.expectEqual(@as(i64, 19_999_982_750), run.shard.portfolio_margin_buffer_micros);
@@ -5317,8 +5387,8 @@ test "rejected IntentGroup leaves authoritative state unchanged" {
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
     const before = run.shard.canonicalStateDigest();
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 50, .count = 2 };
-    group.members[0] = .{ .intent_sequence = 50, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 10, .limit_price_micros = 50_000_000 };
-    group.members[1] = .{ .intent_sequence = 51, .operation = .cancel, .instrument = .btc_usdt_spot, .target_order_id = 999, .expected_revision = 1 };
+    group.members[0] = .{ .intent_sequence = 50, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
+    group.members[1] = .{ .intent_sequence = 51, .operation = .cancel, .instrument = spot_instrument, .target_order_id = 999, .expected_revision = 1 };
     try std.testing.expectError(error.UnknownOrder, run.shard.apply(atGroup(12, .{ .identity = 50, .payload = .{ .oms_intent_group = group } })));
     try std.testing.expectEqualSlices(u8, &before, &run.shard.canonicalStateDigest());
 }
@@ -5327,7 +5397,7 @@ test "rejected dispatch batch leaves authoritative state unchanged" {
     var run = try startScenario();
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 55, .count = 1 };
-    group.members[0] = .{ .intent_sequence = 55, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 10, .limit_price_micros = 50_000_000 };
+    group.members[0] = .{ .intent_sequence = 55, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
     _ = try run.shard.apply(atGroup(12, .{ .identity = 55, .payload = .{ .oms_intent_group = group } }));
     const before = run.shard.canonicalStateDigest();
     var batch: oms_module.DispatchBatch = .{ .count = 2 };
@@ -5355,7 +5425,7 @@ test "authoritative reconciliation cannot regress a terminal order" {
     var run = try startScenario();
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 60, .count = 1 };
-    group.members[0] = .{ .intent_sequence = 60, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 10, .limit_price_micros = 50_000_000 };
+    group.members[0] = .{ .intent_sequence = 60, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
     _ = try run.shard.apply(atGroup(12, .{ .identity = 60, .payload = .{ .oms_intent_group = group } }));
     _ = try run.shard.apply(atGroup(13, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 10 } } }));
     try std.testing.expectEqual(oms_module.OrderState.canceled, run.shard.oms.orders[0].state);
@@ -5369,11 +5439,11 @@ test "CancelConfirmCreate re-risks replacement against latest facts" {
     var run = try startScenario();
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 70, .count = 1 };
-    place.members[0] = .{ .intent_sequence = 70, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 100, .limit_price_micros = 50_000_000 };
+    place.members[0] = .{ .intent_sequence = 70, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
     _ = try run.shard.apply(atGroup(12, .{ .identity = 70, .payload = .{ .oms_intent_group = place } }));
     _ = try run.shard.apply(atGroup(13, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
     var replace: oms_module.IntentGroup = .{ .first_intent_sequence = 71, .count = 1 };
-    replace.members[0] = .{ .intent_sequence = 71, .operation = .amend, .instrument = .btc_usdt_spot, .target_order_id = 1, .expected_revision = 1, .quantity = 80, .limit_price_micros = 49_000_000, .native_amend = false, .allow_cancel_confirm_create = true };
+    replace.members[0] = .{ .intent_sequence = 71, .operation = .amend, .instrument = spot_instrument, .target_order_id = 1, .expected_revision = 1, .quantity = 80, .limit_price = fixtureOmsPrice(spot_instrument, 49_000_000), .native_amend = false, .allow_cancel_confirm_create = true };
     _ = try run.shard.apply(atGroup(14, .{ .identity = 71, .payload = .{ .oms_intent_group = replace } }));
     run.shard.strategy_limit_micros = 100;
     const result = try run.shard.apply(atGroup(15, .{ .identity = 2, .payload = .{ .oms_execution_report = .{ .report_id = 2, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
@@ -5388,7 +5458,7 @@ test "qualified command carries independently inferred reduce-only flags" {
     run.shard.portfolio_position.quantity = 10;
     run.shard.exchange_position.quantity = -5;
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 75, .count = 1 };
-    group.members[0] = .{ .intent_sequence = 75, .operation = .place, .instrument = .btc_usdt_swap, .side = .sell, .quantity = 8, .limit_price_micros = 50_000_000 };
+    group.members[0] = .{ .intent_sequence = 75, .operation = .place, .instrument = swap_instrument, .side = .sell, .quantity = 8, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
     const result = try run.shard.apply(atGroup(12, .{ .identity = 75, .payload = .{ .oms_intent_group = group } }));
     try std.testing.expectEqual(@as(usize, 1), result.oms_commands.len);
     try std.testing.expect(result.oms_commands[0].portfolio_reduce_only);
@@ -5401,7 +5471,7 @@ test "SPOT asset risk is isolated from SWAP positions" {
     run.shard.portfolio_position.quantity = 10;
     run.shard.exchange_position.quantity = 10;
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 79, .count = 1 };
-    group.members[0] = .{ .intent_sequence = 79, .operation = .place, .instrument = .btc_usdt_spot, .side = .sell, .quantity = 1, .limit_price_micros = 50_000_000 };
+    group.members[0] = .{ .intent_sequence = 79, .operation = .place, .instrument = spot_instrument, .side = .sell, .quantity = 1, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
     try std.testing.expectError(error.InsufficientSpotAsset, run.shard.apply(atGroup(12, .{ .identity = 79, .payload = .{ .oms_intent_group = group } })));
 }
 
@@ -5409,7 +5479,7 @@ test "economic fills derive ownership from OMS and close Portfolio Exchange ledg
     var run = try startScenario();
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 79, .count = 1 };
-    group.members[0] = .{ .intent_sequence = 79, .operation = .place, .instrument = .btc_usdt_swap, .side = .buy, .quantity = 10, .limit_price_micros = 50_000_000 };
+    group.members[0] = .{ .intent_sequence = 79, .operation = .place, .instrument = swap_instrument, .side = .buy, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
     _ = try run.shard.apply(atGroup(12, .{ .identity = 79, .payload = .{ .oms_intent_group = group } }));
     run.shard.risk_lease_micros = 1;
     run.shard.risk_lease_remaining_micros = 1;
@@ -5464,11 +5534,11 @@ test "CancelConfirmCreate accepts authoritative reconciliation as confirmation" 
     var run = try startScenario();
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 76, .count = 1 };
-    place.members[0] = .{ .intent_sequence = 76, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 100, .limit_price_micros = 50_000_000 };
+    place.members[0] = .{ .intent_sequence = 76, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
     _ = try run.shard.apply(atGroup(12, .{ .identity = 76, .payload = .{ .oms_intent_group = place } }));
     _ = try run.shard.apply(atGroup(13, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
     var replace: oms_module.IntentGroup = .{ .first_intent_sequence = 77, .count = 1 };
-    replace.members[0] = .{ .intent_sequence = 77, .operation = .amend, .instrument = .btc_usdt_spot, .target_order_id = 1, .expected_revision = 1, .quantity = 80, .limit_price_micros = 49_000_000, .native_amend = false, .allow_cancel_confirm_create = true };
+    replace.members[0] = .{ .intent_sequence = 77, .operation = .amend, .instrument = spot_instrument, .target_order_id = 1, .expected_revision = 1, .quantity = 80, .limit_price = fixtureOmsPrice(spot_instrument, 49_000_000), .native_amend = false, .allow_cancel_confirm_create = true };
     _ = try run.shard.apply(atGroup(14, .{ .identity = 77, .payload = .{ .oms_intent_group = replace } }));
     const result = try run.shard.apply(atGroup(15, .{ .identity = 1, .payload = .{ .oms_reconciliation_result = .{ .reconciliation_id = 1, .order_id = 1, .status = .confirmed_absent, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
     try std.testing.expectEqual(@as(u8, 2), run.shard.oms.order_count);
@@ -5480,7 +5550,7 @@ test "older reconciliation identity still rejects semantic conflict" {
     var run = try startScenario();
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 78, .count = 1 };
-    place.members[0] = .{ .intent_sequence = 78, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 10, .limit_price_micros = 50_000_000 };
+    place.members[0] = .{ .intent_sequence = 78, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
     _ = try run.shard.apply(atGroup(12, .{ .identity = 78, .payload = .{ .oms_intent_group = place } }));
     _ = try run.shard.apply(atGroup(13, .{ .identity = 1, .payload = .{ .oms_reconciliation_result = .{ .reconciliation_id = 1, .order_id = 1, .status = .unresolved, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 10 } } }));
     _ = try run.shard.apply(atGroup(14, .{ .identity = 2, .payload = .{ .oms_reconciliation_result = .{ .reconciliation_id = 2, .order_id = 1, .status = .found_live, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 10 } } }));
@@ -5491,26 +5561,26 @@ test "multiple SPOT and SWAP orders independently close place amend and cancel" 
     var run = try startScenario();
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 80, .count = 4 };
-    place.members[0] = .{ .intent_sequence = 80, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 10, .limit_price_micros = 50_000_000 };
-    place.members[1] = .{ .intent_sequence = 81, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 10, .limit_price_micros = 50_000_000 };
-    place.members[2] = .{ .intent_sequence = 82, .operation = .place, .instrument = .btc_usdt_swap, .quantity = 10, .limit_price_micros = 50_000_000 };
-    place.members[3] = .{ .intent_sequence = 83, .operation = .place, .instrument = .btc_usdt_swap, .quantity = 10, .limit_price_micros = 50_000_000 };
+    place.members[0] = .{ .intent_sequence = 80, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
+    place.members[1] = .{ .intent_sequence = 81, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
+    place.members[2] = .{ .intent_sequence = 82, .operation = .place, .instrument = swap_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
+    place.members[3] = .{ .intent_sequence = 83, .operation = .place, .instrument = swap_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
     _ = try run.shard.apply(atGroup(12, .{ .identity = 80, .payload = .{ .oms_intent_group = place } }));
     for ([_]u64{ 1, 2, 3, 4 }, 0..) |order_id, index| _ = try run.shard.apply(atGroup(13 + index, .{ .identity = 1 + index, .payload = .{ .oms_execution_report = .{ .report_id = 1 + index, .order_id = order_id, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 10 } } }));
 
     var amend: oms_module.IntentGroup = .{ .first_intent_sequence = 84, .count = 4 };
-    amend.members[0] = .{ .intent_sequence = 84, .operation = .amend, .instrument = .btc_usdt_spot, .target_order_id = 1, .expected_revision = 1, .quantity = 8, .limit_price_micros = 49_000_000 };
-    amend.members[1] = .{ .intent_sequence = 85, .operation = .amend, .instrument = .btc_usdt_spot, .target_order_id = 2, .expected_revision = 1, .quantity = 8, .limit_price_micros = 49_000_000 };
-    amend.members[2] = .{ .intent_sequence = 86, .operation = .amend, .instrument = .btc_usdt_swap, .target_order_id = 3, .expected_revision = 1, .quantity = 8, .limit_price_micros = 49_000_000 };
-    amend.members[3] = .{ .intent_sequence = 87, .operation = .amend, .instrument = .btc_usdt_swap, .target_order_id = 4, .expected_revision = 1, .quantity = 8, .limit_price_micros = 49_000_000 };
+    amend.members[0] = .{ .intent_sequence = 84, .operation = .amend, .instrument = spot_instrument, .target_order_id = 1, .expected_revision = 1, .quantity = 8, .limit_price = fixtureOmsPrice(spot_instrument, 49_000_000) };
+    amend.members[1] = .{ .intent_sequence = 85, .operation = .amend, .instrument = spot_instrument, .target_order_id = 2, .expected_revision = 1, .quantity = 8, .limit_price = fixtureOmsPrice(spot_instrument, 49_000_000) };
+    amend.members[2] = .{ .intent_sequence = 86, .operation = .amend, .instrument = swap_instrument, .target_order_id = 3, .expected_revision = 1, .quantity = 8, .limit_price = fixtureOmsPrice(swap_instrument, 49_000_000) };
+    amend.members[3] = .{ .intent_sequence = 87, .operation = .amend, .instrument = swap_instrument, .target_order_id = 4, .expected_revision = 1, .quantity = 8, .limit_price = fixtureOmsPrice(swap_instrument, 49_000_000) };
     _ = try run.shard.apply(atGroup(17, .{ .identity = 84, .payload = .{ .oms_intent_group = amend } }));
     for ([_]u64{ 1, 2, 3, 4 }, 0..) |order_id, index| _ = try run.shard.apply(atGroup(18 + index, .{ .identity = 5 + index, .payload = .{ .oms_execution_report = .{ .report_id = 5 + index, .order_id = order_id, .revision = 2, .status = .amended, .cumulative_quantity = 0, .remaining_quantity = 8 } } }));
 
     var cancel: oms_module.IntentGroup = .{ .first_intent_sequence = 88, .count = 4 };
-    cancel.members[0] = .{ .intent_sequence = 88, .operation = .cancel, .instrument = .btc_usdt_spot, .target_order_id = 1, .expected_revision = 2 };
-    cancel.members[1] = .{ .intent_sequence = 89, .operation = .cancel, .instrument = .btc_usdt_spot, .target_order_id = 2, .expected_revision = 2 };
-    cancel.members[2] = .{ .intent_sequence = 90, .operation = .cancel, .instrument = .btc_usdt_swap, .target_order_id = 3, .expected_revision = 2 };
-    cancel.members[3] = .{ .intent_sequence = 91, .operation = .cancel, .instrument = .btc_usdt_swap, .target_order_id = 4, .expected_revision = 2 };
+    cancel.members[0] = .{ .intent_sequence = 88, .operation = .cancel, .instrument = spot_instrument, .target_order_id = 1, .expected_revision = 2 };
+    cancel.members[1] = .{ .intent_sequence = 89, .operation = .cancel, .instrument = spot_instrument, .target_order_id = 2, .expected_revision = 2 };
+    cancel.members[2] = .{ .intent_sequence = 90, .operation = .cancel, .instrument = swap_instrument, .target_order_id = 3, .expected_revision = 2 };
+    cancel.members[3] = .{ .intent_sequence = 91, .operation = .cancel, .instrument = swap_instrument, .target_order_id = 4, .expected_revision = 2 };
     _ = try run.shard.apply(atGroup(22, .{ .identity = 88, .payload = .{ .oms_intent_group = cancel } }));
     for ([_]u64{ 1, 2, 3, 4 }, 0..) |order_id, index| _ = try run.shard.apply(atGroup(23 + index, .{ .identity = 9 + index, .payload = .{ .oms_execution_report = .{ .report_id = 9 + index, .order_id = order_id, .revision = 2, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 8 } } }));
     for (run.shard.oms.orders[0..4]) |order| try std.testing.expectEqual(oms_module.OrderState.canceled, order.state);
@@ -5521,51 +5591,6 @@ fn applyHealthyPreludeReplay(replay_shard: *ReplayTradingShard) !void {
     _ = try replay_shard.apply(atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000_000 } }));
     _ = try replay_shard.apply(snapshotAt(13, 100));
     _ = try replay_shard.apply(deltaAt(14, 100, 101, 49_850_000_000));
-}
-
-test "venue adapter seam is bounded and drain-safe" {
-    var simulated: LegacyFixtureVenue = .{};
-    const adapter = simulated.adapter();
-    try std.testing.expectError(error.NotStarted, adapter.tryDrain());
-    try adapter.start(.{
-        .environment = .simulation,
-        .request_capacity = 1,
-        .output_capacity = 1,
-    });
-    try std.testing.expectError(error.AlreadyStarted, adapter.start(.{
-        .environment = .simulation,
-        .request_capacity = 1,
-        .output_capacity = 1,
-    }));
-
-    const command: OrderCommand = .{
-        .command_id = 1,
-        .order_id = 1,
-        .quantity = happy_order_quantity,
-        .limit_price_micros = order_limit_price,
-        .reservation_micros = 11_397_750,
-        .client_id = client_order_id,
-    };
-    try std.testing.expectEqual(
-        venue_adapter.SendResult.accepted,
-        try adapter.trySend(.{ .order_command = command }),
-    );
-    try std.testing.expectEqual(
-        venue_adapter.SendResult.backpressure,
-        try adapter.trySend(.{ .order_command = command }),
-    );
-    try std.testing.expectError(
-        error.OutputPending,
-        adapter.stop(.{ .monotonic_ns = fixture_monotonic_base }),
-    );
-
-    try std.testing.expect((try adapter.tryDrain()) != null);
-    try std.testing.expect((try adapter.tryDrain()) == null);
-    try adapter.stop(.{ .monotonic_ns = fixture_monotonic_base });
-    try std.testing.expectEqual(
-        venue_adapter.SendResult.stopped,
-        try adapter.trySend(.{ .order_command = command }),
-    );
 }
 
 test "four shards replay and isolate overload" {
@@ -5654,7 +5679,7 @@ test "qualified SPOT IOC intent crosses Gateway and cash risk before OrderComman
     var ingress = try TradingShardHostIngress.initHealthySpotFixtureFor(authorization);
     const command = (try ingress.applyDecisionCommand(decision)).?;
     try std.testing.expectEqual(host_gateway.TimeInForce.immediate_or_cancel, command.time_in_force);
-    try std.testing.expectEqual(@as(i64, 5_000), command.quantity);
-    try std.testing.expectEqual(@as(i64, 3_177_382), command.reservation_micros);
+    try std.testing.expectEqual(@as(i128, 5_000), command.quantity.lots);
+    try std.testing.expectEqual(@as(i128, 3_177_382), command.reservation.atoms);
     try ingress.verifyReplay();
 }
