@@ -228,6 +228,14 @@ pub const OrderDispatchResult = struct {
     state: DispatchState,
     reason: ?CanonicalRejectReason = null,
 };
+pub const InstrumentDefinitionObserved = struct { instrument: InstrumentIdentity, rules_version: u64 };
+pub const L2BookSnapshot = struct { instrument: InstrumentIdentity, sequence: VenueSourceSequence, best_bid: InstrumentPrice, best_ask: InstrumentPrice };
+pub const L2BookDelta = struct { instrument: InstrumentIdentity, previous_sequence: VenueSourceSequence, sequence: VenueSourceSequence, best_bid: InstrumentPrice, best_ask: InstrumentPrice };
+pub const ReferencePriceKind = enum(u8) { mark, index };
+pub const ReferencePrice = struct { instrument: InstrumentIdentity, kind: ReferencePriceKind, price: InstrumentPrice };
+pub const FundingRatePublished = struct { instrument: InstrumentIdentity, rate_ppm: i64, funding_time_utc_ns: u64 };
+pub const MarketDataHealth = enum(u8) { awaiting_snapshot, healthy, gap };
+pub const MarketDataHealthChanged = struct { instrument: InstrumentIdentity, health: MarketDataHealth };
 
 pub const PositionSide = enum(u8) { long, short };
 pub const AccountBalance = struct { asset: AssetIdentity, total: AssetAmount, available: AssetAmount, held: AssetAmount };
@@ -271,6 +279,12 @@ pub const CanonicalEvent = union(enum) {
     order_dispatch_result: OrderDispatchResult,
     reconciliation_started: u128,
     account_reconciliation_started: u128,
+    instrument_definition_observed: InstrumentDefinitionObserved,
+    l2_book_snapshot: L2BookSnapshot,
+    l2_book_delta: L2BookDelta,
+    reference_price: ReferencePrice,
+    funding_rate_published: FundingRatePublished,
+    market_data_health_changed: MarketDataHealthChanged,
     account_bootstrap_snapshot: AccountBootstrapSnapshot,
     account_observed: AccountObservation,
     order_reconciliation_result: ReconciliationResult,
