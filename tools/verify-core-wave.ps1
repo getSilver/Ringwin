@@ -16,6 +16,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if (-not $EnvFile) { $EnvFile = Join-Path $PSScriptRoot '..\.env.local' }
 $ExpectedZig = '0.17.0-dev.315+5b647b792'
+$AcceptanceSchema = 1
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $buildRoot = Join-Path $workspace '.scratch\build'
 $curlBuild = Join-Path $buildRoot 'libcurl-8.21.0-windows-x86_64-schannel'
@@ -100,4 +101,4 @@ else {
     Write-Output '== phase=okx_demo_facts mode=offline (skipped; enable explicitly with -DemoLive)'
 }
 
-Write-Output "core_wave_acceptance=passed mode=$mode demo_facts=$(if ($DemoLive) { 'explicit_okx_demo' } else { 'disabled' }) linux=compile_only production_qualification=false"
+Write-Output "core_wave_acceptance=passed schema=$AcceptanceSchema mode=$mode demo_facts=$(if ($DemoLive) { 'explicit_okx_demo' } else { 'disabled' }) linux=compile_only production_qualification=false"

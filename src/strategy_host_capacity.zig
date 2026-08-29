@@ -172,7 +172,10 @@ fn runScenario(
                 remaining -= 1;
             }
             if (remaining != 0 and monotonicNow(init.io) > deadline) return error.HostOutputTimeout;
-            std.Thread.yield() catch {};
+            if (remaining != 0) try std.Io.Clock.Duration.sleep(
+                .{ .clock = .awake, .raw = .fromMilliseconds(1) },
+                init.io,
+            );
         }
     }
     result.elapsed_ns = @intCast(monotonicNow(init.io) - started);
