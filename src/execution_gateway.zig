@@ -1,0 +1,121 @@
+const canonical = @import("canonical_event.zig");
+const venue = @import("venue_adapter.zig");
+const std = @import("std");
+
+pub const CapabilityProfile = struct { version: u64, rules_version: u64, config_version: u64, session: canonical.AdapterSessionIdentity, supports_place: bool = true };
+pub const LatchedSafetyGate = enum { open, latched };
+pub const OpeningGate = enum { open, blocked };
+pub const Route = struct { account: canonical.ExchangeAccountIdentity, adapter: venue.VenueAdapter, capability: CapabilityProfile, safety_gate: LatchedSafetyGate = .open };
+pub const InstrumentOpeningGate = struct { instrument: canonical.InstrumentIdentity, state: OpeningGate = .open };
+pub const max_routes = 4;
+pub const max_adapter_batches_per_turn: u8 = 1;
+pub const Gateway = struct {
+    routes: [max_routes]Route = undefined,
+    count: u8 = 0,
+    instrument_gates: [max_routes]InstrumentOpeningGate = undefined,
+    instrument_gate_count: u8 = 0,
+    pub fn add(self: *Gateway, route: Route) !void {
+        if (self.count == self.routes.len) return error.RouteCapacity;
+        self.routes[self.count] = route;
+        self.count += 1;
+    }
+    pub fn send(self: *Gateway, request: canonical.OrderCommand) !venue.SendResult {
+        for (self.routes[0..self.count]) |*route| if (route.account == request.exchange_account) {
+            if (route.safety_gate == .latched or self.instrumentGapped(request.instrument) or !route.capability.supports_place or route.capability.version != request.capability_version or route.capability.rules_version != request.rules_version or route.capability.config_version != request.config_version or route.capability.session != request.adapter_session) return error.Rejected;
+            return route.adapter.trySend(.{ .order_command = request });
+        };
+        return error.UnknownAccount;
+    }
+    pub fn latchAccount(self: *Gateway, account: canonical.ExchangeAccountIdentity) void {
+        for (self.routes[0..self.count]) |*route| {
+            if (route.account == account) route.safety_gate = .latched;
+        }
+    }
+    pub fn setInstrumentGap(self: *Gateway, instrument: canonical.InstrumentIdentity) void {
+        if (!self.instrumentGapped(instrument) and self.instrument_gate_count < self.instrument_gates.len) {
+            self.instrument_gates[self.instrument_gate_count] = .{ .instrument = instrument, .state = .blocked };
+            self.instrument_gate_count += 1;
+        }
+    }
+    fn instrumentGapped(self: *const Gateway, instrument: canonical.InstrumentIdentity) bool {
+        for (self.instrument_gates[0..self.instrument_gate_count]) |gate| if (gate.instrument == instrument and gate.state == .blocked) return true;
+        return false;
+    }
+    pub fn drainFair(self: *Gateway, output: *[max_routes]canonical.AdapterOutputBatch) !u8 {
+        var count: u8 = 0;
+        for (self.routes[0..self.count]) |route| if (try route.adapter.tryDrain()) |batch| {
+            output[count] = batch;
+            count += 1;
+        };
+        return count;
+    }
+};
+fn command(account: canonical.ExchangeAccountIdentity, instrument: canonical.InstrumentIdentity) !canonical.OrderCommand {
+    return .{ .identity = 1, .exchange_account = account, .instrument = instrument, .client_order_id = try canonical.ClientOrderId.init("x"), .capability_version = 1, .rules_version = 1, .config_version = 1, .adapter_session = 1, .dispatch_deadline_monotonic_ns = 1 };
+}
+
+const Fixture = struct {
+    pending: ?canonical.AdapterOutputBatch = .{},
+    sent: u8 = 0,
+    fn adapter(self: *Fixture) venue.VenueAdapter {
+        return .{ .ptr = self, .vtable = &.{ .start = start, .try_send = send, .try_drain = drain, .stop = stop } };
+    }
+    fn start(_: *anyopaque, _: venue.VenueConfig) venue.StartError!void {}
+    fn send(ptr: *anyopaque, _: canonical.AdapterRequest) venue.SendError!venue.SendResult {
+        const self: *Fixture = @ptrCast(@alignCast(ptr));
+        self.sent += 1;
+        return .accepted;
+    }
+    fn drain(ptr: *anyopaque) venue.DrainError!?canonical.AdapterOutputBatch {
+        const self: *Fixture = @ptrCast(@alignCast(ptr));
+        const batch = self.pending;
+        self.pending = null;
+        return batch;
+    }
+    fn stop(_: *anyopaque, _: venue.DrainDeadline) venue.StopError!void {}
+};
+test "gateway fixes route and rechecks every command dependency" {
+    var first = Fixture{};
+    var second = Fixture{};
+    var gateway = Gateway{};
+    const profile: CapabilityProfile = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 };
+    try gateway.add(.{ .account = 1, .adapter = first.adapter(), .capability = profile });
+    try gateway.add(.{ .account = 2, .adapter = second.adapter(), .capability = profile });
+    var request = try command(1, 10);
+    try std.testing.expectEqual(.accepted, try gateway.send(request));
+    try std.testing.expectEqual(@as(u8, 1), first.sent);
+    request.config_version = 2;
+    try std.testing.expectError(error.Rejected, gateway.send(request));
+    try std.testing.expectEqual(@as(u8, 1), first.sent);
+    request.config_version = 1;
+    request.capability_version = 2;
+    try std.testing.expectError(error.Rejected, gateway.send(request));
+    request.capability_version = 1;
+    request.rules_version = 2;
+    try std.testing.expectError(error.Rejected, gateway.send(request));
+    request.rules_version = 1;
+    request.adapter_session = 2;
+    try std.testing.expectError(error.Rejected, gateway.send(request));
+    request.adapter_session = 1;
+    gateway.latchAccount(1);
+    try std.testing.expectError(error.Rejected, gateway.send(request));
+    request.exchange_account = 2;
+    try std.testing.expectEqual(.accepted, try gateway.send(request));
+    gateway.setInstrumentGap(10);
+    try std.testing.expectError(error.Rejected, gateway.send(request));
+    request.instrument = 11;
+    try std.testing.expectEqual(.accepted, try gateway.send(request));
+    gateway.routes[1].capability.supports_place = false;
+    try std.testing.expectError(error.Rejected, gateway.send(request));
+    try std.testing.expectEqual(@as(u8, 2), second.sent);
+}
+test "gateway drains each fixed route once" {
+    var first = Fixture{};
+    var second = Fixture{};
+    var gateway = Gateway{};
+    const profile: CapabilityProfile = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 };
+    try gateway.add(.{ .account = 1, .adapter = first.adapter(), .capability = profile });
+    try gateway.add(.{ .account = 2, .adapter = second.adapter(), .capability = profile });
+    var output: [max_routes]canonical.AdapterOutputBatch = undefined;
+    try std.testing.expectEqual(@as(u8, 2), try gateway.drainFair(&output));
+}
