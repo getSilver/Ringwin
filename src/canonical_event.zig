@@ -237,6 +237,44 @@ pub const FundingRatePublished = struct { instrument: InstrumentIdentity, rate_p
 pub const MarketDataHealth = enum(u8) { awaiting_snapshot, healthy, gap };
 pub const MarketDataHealthChanged = struct { instrument: InstrumentIdentity, health: MarketDataHealth };
 
+pub const PositionSide = enum(u8) { long, short };
+pub const AccountBalance = struct { asset: AssetIdentity, total: AssetAmount, available: AssetAmount, held: AssetAmount };
+pub const AccountPosition = struct { instrument: InstrumentIdentity, side: PositionSide, quantity: InstrumentQuantity };
+pub const AccountMargin = struct { instrument: ?InstrumentIdentity = null, amount: AssetAmount };
+pub const max_account_facts = 8;
+pub const AccountSnapshotScope = struct { balances_complete: bool, positions_complete: bool, margins_complete: bool };
+
+pub const AccountBootstrapSnapshot = struct {
+    identity: BootstrapSnapshotIdentity,
+    exchange_account: ExchangeAccountIdentity,
+    scope: AccountSnapshotScope,
+    source_stream: VenueSourceStreamIdentity,
+    source_sequence: VenueSourceSequence,
+    balances: [max_account_facts]AccountBalance = undefined,
+    balance_count: u8,
+    positions: [max_account_facts]AccountPosition = undefined,
+    position_count: u8,
+    margins: [max_account_facts]AccountMargin = undefined,
+    margin_count: u8,
+};
+
+pub const AccountObserved = union(enum) {
+    balance: struct { asset: AssetIdentity, value: AccountBalance, removed: bool = false },
+    position: struct { instrument: InstrumentIdentity, side: PositionSide, value: InstrumentQuantity, removed: bool = false },
+    margin: struct { instrument: ?InstrumentIdentity = null, value: AccountMargin, removed: bool = false },
+};
+
+pub const AccountObservation = struct {
+    identity: SourceFactIdentity,
+    exchange_account: ExchangeAccountIdentity,
+    bootstrap: BootstrapSnapshotIdentity,
+    source_stream: VenueSourceStreamIdentity,
+    source_sequence: VenueSourceSequence,
+    value: AccountObserved,
+};
+
+pub const ReconciliationResult = struct { identity: u128, complete: bool };
+
 pub const CanonicalEvent = union(enum) {
     order_dispatch_result: OrderDispatchResult,
     reconciliation_started: u128,
@@ -247,6 +285,10 @@ pub const CanonicalEvent = union(enum) {
     reference_price: ReferencePrice,
     funding_rate_published: FundingRatePublished,
     market_data_health_changed: MarketDataHealthChanged,
+    account_bootstrap_snapshot: AccountBootstrapSnapshot,
+    account_observed: AccountObservation,
+    order_reconciliation_result: ReconciliationResult,
+    account_reconciliation_result: ReconciliationResult,
 };
 
 pub const EventRecord = struct { envelope: EventEnvelope, event: CanonicalEvent };

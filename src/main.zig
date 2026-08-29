@@ -9,6 +9,7 @@ const simulated_venue = @import("simulated_venue.zig");
 const venue_adapter_contract = @import("venue_adapter_contract.zig");
 const simulated_market_feed = @import("simulated_market_feed.zig");
 const market_projection = @import("market_projection.zig");
+const account_projection = @import("account_projection.zig");
 
 pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
@@ -57,4 +58,5 @@ test {
     _ = venue_adapter_contract;
     _ = simulated_market_feed;
     _ = market_projection;
+    _ = account_projection;
 }

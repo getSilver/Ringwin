@@ -4,6 +4,7 @@
 //! as real Venue implementations without giving replay a side-effect path.
 
 const canonical = @import("canonical_event.zig");
+const account_projection = @import("account_projection.zig");
 const std = @import("std");
 const venue = @import("venue_adapter.zig");
 
@@ -70,6 +71,54 @@ pub const SimulatedVenue = struct {
         };
         var batch: canonical.AdapterOutputBatch = .{};
         batch.append(.{ .envelope = envelope(binding, identity), .event = event }) catch return error.InvalidRequest;
+        switch (request) {
+            .order_reconciliation => |reconciliation| batch.append(.{
+                .envelope = envelope(binding, reconciliation.identity + 1),
+                .event = .{ .order_reconciliation_result = .{ .identity = reconciliation.identity, .complete = true } },
+            }) catch return error.InvalidRequest,
+            .account_reconciliation => |reconciliation| {
+                var snapshot: canonical.AccountBootstrapSnapshot = .{
+                    .identity = reconciliation.identity,
+                    .exchange_account = reconciliation.exchange_account,
+                    .scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true },
+                    .source_stream = 1,
+                    .source_sequence = 0,
+                    .balance_count = 1,
+                    .position_count = 1,
+                    .margin_count = 1,
+                };
+                snapshot.balances[0] = .{ .asset = 1, .total = .{ .asset = 1, .atoms = 100 }, .available = .{ .asset = 1, .atoms = 100 }, .held = .{ .asset = 1, .atoms = 0 } };
+                snapshot.positions[0] = .{ .instrument = 1, .side = .long, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 0 } };
+                snapshot.margins[0] = .{ .amount = .{ .asset = 1, .atoms = 0 } };
+                batch.append(.{ .envelope = envelope(binding, reconciliation.identity + 1), .event = .{ .account_bootstrap_snapshot = snapshot } }) catch return error.InvalidRequest;
+                batch.append(.{ .envelope = envelope(binding, reconciliation.identity + 2), .event = .{ .account_observed = .{
+                    .identity = reconciliation.identity + 2,
+                    .exchange_account = reconciliation.exchange_account,
+                    .bootstrap = snapshot.identity,
+                    .source_stream = 1,
+                    .source_sequence = 1,
+                    .value = .{ .balance = .{ .asset = 1, .value = .{ .asset = 1, .total = .{ .asset = 1, .atoms = 100 }, .available = .{ .asset = 1, .atoms = 100 }, .held = .{ .asset = 1, .atoms = 0 } } } },
+                } } }) catch return error.InvalidRequest;
+                batch.append(.{ .envelope = envelope(binding, reconciliation.identity + 3), .event = .{ .account_observed = .{
+                    .identity = reconciliation.identity + 3,
+                    .exchange_account = reconciliation.exchange_account,
+                    .bootstrap = snapshot.identity,
+                    .source_stream = 1,
+                    .source_sequence = 2,
+                    .value = .{ .position = .{ .instrument = 1, .side = .long, .value = .{ .instrument = 1, .rules_version = 1, .lots = 0 } } },
+                } } }) catch return error.InvalidRequest;
+                batch.append(.{ .envelope = envelope(binding, reconciliation.identity + 4), .event = .{ .account_observed = .{
+                    .identity = reconciliation.identity + 4,
+                    .exchange_account = reconciliation.exchange_account,
+                    .bootstrap = snapshot.identity,
+                    .source_stream = 1,
+                    .source_sequence = 3,
+                    .value = .{ .margin = .{ .value = .{ .amount = .{ .asset = 1, .atoms = 0 } } } },
+                } } }) catch return error.InvalidRequest;
+                batch.append(.{ .envelope = envelope(binding, reconciliation.identity + 5), .event = .{ .account_reconciliation_result = .{ .identity = reconciliation.identity, .complete = true } } }) catch return error.InvalidRequest;
+            },
+            .order_command => {},
+        }
         self.pending = batch;
         return .accepted;
     }
@@ -143,7 +192,7 @@ test "simulated venue returns a canonical result for every request kind" {
     for (requests, expected_tags) |request, expected_tag| {
         try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(request));
         const batch = (try adapter.tryDrain()).?;
-        try std.testing.expectEqual(@as(u8, 1), batch.len);
+        try std.testing.expect(batch.len >= 1);
         try std.testing.expectEqual(expected_tag, std.meta.activeTag(batch.events[0].event));
     }
     try adapter.stop(.{ .monotonic_ns = 1 });
@@ -165,5 +214,35 @@ test "simulated venue rejects requests outside its fixed account session" {
         .exchange_account = 4,
         .expected_session = 3,
     } }));
+    try adapter.stop(.{ .monotonic_ns = 1 });
+}
+
+test "account reconciliation drains replayable bootstrap facts" {
+    var simulated: SimulatedVenue = .{};
+    const adapter = simulated.adapter();
+    try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 8 });
+    _ = try adapter.trySend(.{ .account_reconciliation = .{ .identity = 9, .exchange_account = 2, .expected_session = 3 } });
+    const batch = (try adapter.tryDrain()).?;
+    var live = account_projection.AccountProjection{};
+    var replay = account_projection.AccountProjection{};
+    for (batch.slice()) |record| {
+        try live.apply(record.event);
+        try replay.apply(record.event);
+    }
+    try std.testing.expect(live.valid and replay.valid);
+    try std.testing.expectEqual(live.last_sequence, replay.last_sequence);
+    try adapter.stop(.{ .monotonic_ns = 1 });
+}
+
+test "both reconciliation result types leave through tryDrain" {
+    var simulated: SimulatedVenue = .{};
+    const adapter = simulated.adapter();
+    try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 8 });
+    _ = try adapter.trySend(.{ .order_reconciliation = .{ .identity = 7, .exchange_account = 2, .order = 1 } });
+    const order_batch = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(canonical.ReconciliationResult{ .identity = 7, .complete = true }, order_batch.events[1].event.order_reconciliation_result);
+    _ = try adapter.trySend(.{ .account_reconciliation = .{ .identity = 8, .exchange_account = 2, .expected_session = 3 } });
+    const account_batch = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(canonical.ReconciliationResult{ .identity = 8, .complete = true }, account_batch.events[5].event.account_reconciliation_result);
     try adapter.stop(.{ .monotonic_ns = 1 });
 }
