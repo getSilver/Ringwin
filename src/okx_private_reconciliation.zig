@@ -82,6 +82,8 @@ pub const Fill = struct {
     price: Decimal,
     fee: Decimal,
     fee_asset: AssetCode,
+    rebate: ?Decimal = null,
+    rebate_asset: ?AssetCode = null,
     realized_pnl: ?Decimal,
     liquidity: ?Liquidity,
     venue_fill_time_utc_ns: u64,
@@ -367,6 +369,10 @@ pub const Reconciler = struct {
             .session = self.session,
             .bootstrap_watermark = self.bootstrap_watermark,
         };
+    }
+
+    pub fn rawWatermark(self: *const Reconciler) u64 {
+        return self.last_raw_sequence;
     }
 
     pub fn tryComplete(self: *Reconciler) !?ReconciliationReady {
@@ -713,6 +719,11 @@ pub const Reconciler = struct {
             .price = fill_price,
             .fee = fee,
             .fee_asset = try AssetCode.init(fee_ccy),
+            .rebate = try optionalDecimalField(row, "rebate"),
+            .rebate_asset = if (try optionalStringField(row, "rebateCcy")) |asset|
+                try AssetCode.init(asset)
+            else
+                null,
             .realized_pnl = try optionalDecimalField(row, "fillPnl"),
             .liquidity = try optionalLiquidity(row),
             .venue_fill_time_utc_ns = fill_time,
@@ -749,6 +760,11 @@ pub const Reconciler = struct {
                 (try optionalStringField(row, "feeCcy")) orelse
                     (try optionalStringField(row, "fillFeeCcy")) orelse return error.InvalidField,
             ),
+            .rebate = try optionalDecimalField(row, "rebate"),
+            .rebate_asset = if (try optionalStringField(row, "rebateCcy")) |asset|
+                try AssetCode.init(asset)
+            else
+                null,
             .realized_pnl = (try optionalDecimalField(row, "fillPnl")) orelse
                 (try optionalDecimalField(row, "pnl")),
             .liquidity = try optionalLiquidity(row),
@@ -1347,6 +1363,8 @@ fn hashFill(fill: *const Fill) [32]u8 {
     hashDecimal(&hasher, fill.price);
     hashDecimal(&hasher, fill.fee);
     hasher.update(fill.fee_asset.slice());
+    hashOptionalDecimal(&hasher, fill.rebate);
+    if (fill.rebate_asset) |asset| hasher.update(asset.slice()) else hasher.update(&.{});
     hashOptionalDecimal(&hasher, fill.realized_pnl);
     if (fill.liquidity) |liquidity| hasher.update(&.{ 1, @intFromEnum(liquidity) }) else hasher.update(&.{0});
     hashU64(&hasher, fill.venue_fill_time_utc_ns);

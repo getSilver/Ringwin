@@ -193,6 +193,7 @@ pub const CanonicalRejectReason = enum(u8) {
 pub const DispatchState = enum(u8) { not_sent, submitted, unknown };
 pub const OrderOperation = enum(u8) { place, amend, cancel };
 pub const OrderSide = enum(u8) { buy, sell };
+pub const OrderType = enum(u8) { market, limit, post_only, fok, ioc };
 pub const LiquidityRole = enum(u8) { maker, taker };
 pub const ExecutionReportStatus = enum(u8) { accepted, partially_filled, filled, canceled, rejected, amended };
 
@@ -272,9 +273,36 @@ pub const MarketDataHealth = enum(u8) { awaiting_snapshot, healthy, gap };
 pub const MarketDataHealthChanged = struct { instrument: InstrumentIdentity, health: MarketDataHealth };
 
 pub const PositionSide = enum(u8) { long, short };
-pub const AccountBalance = struct { asset: AssetIdentity, total: AssetAmount, available: AssetAmount, held: AssetAmount };
-pub const AccountPosition = struct { instrument: InstrumentIdentity, side: PositionSide, quantity: InstrumentQuantity };
-pub const AccountMargin = struct { instrument: ?InstrumentIdentity = null, amount: AssetAmount };
+pub const AccountBalance = struct {
+    asset: AssetIdentity,
+    total: AssetAmount,
+    available: AssetAmount,
+    held: AssetAmount,
+    liability: ?AssetAmount = null,
+    cash_balance: ?AssetAmount = null,
+    isolated_liability: ?AssetAmount = null,
+    cross_liability: ?AssetAmount = null,
+};
+pub const AccountPosition = struct {
+    instrument: InstrumentIdentity,
+    side: PositionSide,
+    quantity: InstrumentQuantity,
+    average_price: ?InstrumentPrice = null,
+    mark_price: ?InstrumentPrice = null,
+    liquidation_price: ?InstrumentPrice = null,
+    margin: ?AssetAmount = null,
+    leverage: ?Decimal = null,
+    unrealized_pnl: ?AssetAmount = null,
+};
+pub const AccountMargin = struct {
+    instrument: ?InstrumentIdentity = null,
+    amount: AssetAmount,
+    adjusted_equity: ?AssetAmount = null,
+    initial_margin: ?AssetAmount = null,
+    maintenance_margin: ?AssetAmount = null,
+    isolated_equity: ?AssetAmount = null,
+    margin_ratio: ?Decimal = null,
+};
 pub const max_account_facts = 8;
 pub const AccountSnapshotScope = struct { balances_complete: bool, positions_complete: bool, margins_complete: bool };
 
@@ -307,7 +335,12 @@ pub const AccountObservation = struct {
     value: AccountObserved,
 };
 
-pub const ReconciliationResult = struct { identity: u128, complete: bool };
+pub const ReconciliationStatus = enum(u8) { found_live, found_terminal, confirmed_absent, unresolved };
+pub const ReconciliationResult = struct {
+    identity: u128,
+    complete: bool,
+    status: ReconciliationStatus = .unresolved,
+};
 
 pub const ExecutionReport = struct {
     identity: SourceFactIdentity,
@@ -317,9 +350,14 @@ pub const ExecutionReport = struct {
     instrument: InstrumentIdentity,
     exchange_account: ExchangeAccountIdentity,
     revision: u32,
+    side: OrderSide = .buy,
+    order_type: ?OrderType = null,
     status: ExecutionReportStatus,
+    original_quantity: ?InstrumentQuantity = null,
     cumulative_quantity: InstrumentQuantity,
     remaining_quantity: InstrumentQuantity,
+    limit_price: ?InstrumentPrice = null,
+    average_fill_price: ?InstrumentPrice = null,
 };
 
 pub const Fill = struct {
@@ -339,6 +377,21 @@ pub const Fill = struct {
     liquidity: LiquidityRole,
 };
 
+pub const AccountConfigurationSnapshot = struct {
+    identity: SourceFactIdentity,
+    exchange_account: ExchangeAccountIdentity,
+    position_mode_net: bool,
+    margin_mode_isolated: bool,
+    can_read: bool,
+    can_trade: bool,
+    can_withdraw: bool,
+    auto_loan: bool = false,
+    spot_borrow_enabled: bool = false,
+    contract_isolated_autonomy: ?bool = null,
+    leverage: ?Decimal = null,
+    instrument: ?InstrumentIdentity = null,
+};
+
 pub const CanonicalEvent = union(enum) {
     order_dispatch_result: OrderDispatchResult,
     execution_report: ExecutionReport,
@@ -353,6 +406,7 @@ pub const CanonicalEvent = union(enum) {
     market_data_health_changed: MarketDataHealthChanged,
     account_bootstrap_snapshot: AccountBootstrapSnapshot,
     account_observed: AccountObservation,
+    account_configuration_snapshot: AccountConfigurationSnapshot,
     order_reconciliation_result: ReconciliationResult,
     account_reconciliation_result: ReconciliationResult,
 };
