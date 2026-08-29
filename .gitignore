@@ -12,3 +12,6 @@ __pycache__/
 .scratch/*.exe
 .scratch/*.lib
 .scratch/*.pdb
+
+.multica/tmp/
+

@@ -1,7 +1,7 @@
 # 完成交易核心系统闭环
 
 Label: wayfinder:map
-Status: open
+Status: closed
 
 ## Destination
 
@@ -43,9 +43,15 @@ Status: open
 
 ## Frontier
 
-[闭合四分片与共享账户协调](issues/08-shards-and-account-coordination.md)
+（无；交易核心波次已关闭。）
 
 ## Decisions so far
+
+- [形成可复现证据并关闭交易核心波次](issues/10-close-trading-core-wave.md) — 已在干净 worktree 通过 schema 1 失败即停整波：Debug/ReleaseSafe 各 111 项，单分片五条固定轨迹，四分片 coordinator barrier 17、shard barriers 23/25/21/21 与共享摘要 `e652a69f…6f09e6c2`，实时 Gateway 提交 4 次且重放无发送能力；Python seam 与 Linux compile-only 通过，OKX Demo 仅在 `-DemoLive` 显式授权时运行。README 已同步实际摘要与未资格边界；未新增 Venue、生产部署或研究平台范围。
+
+- [形成核心成功/故障整波自动验收](issues/09-core-wave-acceptance.md) — 已形成 schema 1 失败即停入口，组合 Debug/ReleaseSafe、固定单分片与四分片摘要、Python seam、SimulatedVenue、协调器/shard tail 恢复和 Linux compile-only；恢复路径不持有发送能力，OKX Demo 事实仅在 `-DemoLive` 显式授权时运行。
+
+- [闭合四分片与共享账户协调](issues/08-shards-and-account-coordination.md) — 四个单写者 TradingShard 经唯一共享 Gateway 与账户协调器闭合：RiskLease 仅使用 GrossPortfolioMargin，AccountNettingBenefit 不进入可用额度；事实扇出、margin 差异、唯一订单归属和局部/账户故障边界均失败关闭。coordinator 持久 tail 与非空 shard tail 支持成功、失败及途中再崩溃恢复，历史路径无发送能力。
 
 - [实现核心快照、重启恢复与版本屏障](issues/07-snapshot-recovery-and-cutover.md) — 已闭合显式稳定快照、日志尾恢复、Venue 对账、StrategyCheckpoint 回退追赶、持久 cutover fence/cancel outbox、candidate barrier 验证、VersionActivationEvent 与 ForwardRollback 重放守恒；Debug/ReleaseSafe 各 95 项测试通过。
 

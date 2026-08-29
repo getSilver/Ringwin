@@ -21,7 +21,7 @@ Python StrategyHost seam 和 Linux 交叉编译检查；OKX Demo 事实只在显
 tools\verify-core-wave.ps1
 ```
 
-任一断言失败立即停止。成功输出 `core_wave_acceptance=passed mode=offline ...`。
+任一断言失败立即停止。成功输出 `core_wave_acceptance=passed schema=1 mode=offline ...`。
 显式启用 OKX Demo 成交事实时追加 `-DemoLive`（要求 `.env.local` 中合格的 Demo Key）。
 
 ## OKX Demo 整波验收
@@ -92,17 +92,17 @@ happy_path: events=34, order=filled, qty=100, open_cost=500200000, fees=375150,
 upl=1800000, risk_remaining=9988956000, ledger=closed, economic_projections=complete
 journal_records=34
 replay=equivalent
-digest=674ff4b1e0018280a198b85b580d4e9d5da46ee81cb034783f9d4f637765b7d6
+digest=05512551eb6da3d137e0476015e262f16df155035d2ac292db700e15edb10ef3
 ```
 
 失败轨迹固定摘要：
 
 | 轨迹 | 事实数 | CanonicalStateDigestV3 |
 |---|---:|---|
-| Market gap | 25 | `9f7890e42b707ce31803f50af9c53e359a13b9b45c0685f497129a731cf5dbad` |
-| Risk rejection | 21 | `ff1d46e6c479eff7e25a7c00fd0750d92bdb0da09eab5923e3fb19dc179315e1` |
-| Unknown reconciliation | 26 | `2ce777b8a2625b2c0e9d44aea74f12e2395d81092fba6c154bd4b3ba5a1129da` |
-| Duplicate report | 35 | `e45ce49f98a7ae623bee6e4eedbef70f3afa0901692f7340c823540265371d54` |
+| Market gap | 25 | `9bd0c661b449be191751ebc63648d884302e65292a3a2240f93ef4b2c1e2fe21` |
+| Risk rejection | 21 | `34aec497178098873f556d1e786f19b02576c5a7e9d568435fea40a4709dd6f9` |
+| Unknown reconciliation | 26 | `32d6ff5537d4adc99e57d159fde6c77cb353030929eafe63726bf71c7efaf661` |
+| Duplicate report | 35 | `14f3be1e51ef6aa7e16dd5cf5ca4aff2355e7d17d06a6d44ea27342b32d13f53` |
 
 `zig test` 还会验证：
 
