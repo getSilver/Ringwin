@@ -209,6 +209,7 @@ pub const OrderCommand = struct {
     operation: OrderOperation = .place,
     side: OrderSide = .buy,
     revision: u32 = 1,
+    venue_order: ?VenueOrderRef = null,
     quantity: ?InstrumentQuantity = null,
     limit_price: ?InstrumentPrice = null,
     fee_asset: ?AssetIdentity = null,

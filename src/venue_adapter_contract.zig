@@ -6,15 +6,19 @@ const simulated = @import("simulated_venue.zig");
 const venue = @import("venue_adapter.zig");
 
 pub fn exercise(adapter: venue.VenueAdapter, adapter_request: canonical.AdapterRequest) !void {
-    try std.testing.expectError(error.NotStarted, adapter.tryDrain());
-    try adapter.start(.{
+    return exerciseWith(adapter, .{
         .venue = 1,
         .environment = .simulation,
         .exchange_account = 2,
         .adapter_session = 3,
         .request_capacity = 1,
         .output_capacity = 1,
-    });
+    }, adapter_request);
+}
+
+pub fn exerciseWith(adapter: venue.VenueAdapter, config: venue.VenueConfig, adapter_request: canonical.AdapterRequest) !void {
+    try std.testing.expectError(error.NotStarted, adapter.tryDrain());
+    try adapter.start(config);
     try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(adapter_request));
     try std.testing.expectEqual(venue.SendResult.backpressure, try adapter.trySend(adapter_request));
     const batch = (try adapter.tryDrain()).?;
