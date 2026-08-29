@@ -41,6 +41,13 @@ pub const MarketFeedAdapter = struct {
     }
 };
 
+/// Shared test entry for every MarketFeedAdapter implementation.
+pub fn testStartupContract(adapter: MarketFeedAdapter, config: Config) !void {
+    try std.testing.expectError(error.NotStarted, adapter.tryDrain());
+    try adapter.start(config);
+    try std.testing.expectError(error.AlreadyStarted, adapter.start(config));
+}
+
 const FixtureFeed = struct {
     state: enum { idle, running, stopped } = .idle,
     pending: ?MarketEventBatch = null,
@@ -81,8 +88,7 @@ const FixtureFeed = struct {
 test "market feed contract drains without blocking and stops at a boundary" {
     var fixture = FixtureFeed{};
     const adapter = fixture.adapter();
-    try std.testing.expectError(error.NotStarted, adapter.tryDrain());
-    try adapter.start(.{
+    try testStartupContract(adapter, .{
         .venue = 1,
         .environment = .simulation,
         .subscription_set = 2,

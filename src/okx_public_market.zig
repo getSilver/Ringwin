@@ -405,7 +405,7 @@ pub const Decoder = struct {
         if (std.mem.eql(u8, channel, "mark-price"))
             return self.decodeReference(.mark, .btc_usdt_swap, datum, times, raw_evidence, batch);
         if (std.mem.eql(u8, channel, "index-tickers"))
-            return self.decodeReference(.index, .btc_usdt_swap, datum, times, raw_evidence, batch);
+            return self.decodeReference(.index, .btc_usdt_spot, datum, times, raw_evidence, batch);
         if (std.mem.eql(u8, channel, "funding-rate"))
             return self.decodeFunding(datum, times, raw_evidence, batch);
         return error.UnsupportedChannel;
