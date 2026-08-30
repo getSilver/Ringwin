@@ -16,6 +16,7 @@ const okx_market_feed = @import("okx_market_feed.zig");
 const binance_market_feed = @import("binance_market_feed.zig");
 const okx_venue_adapter = @import("okx_venue_adapter.zig");
 const binance_venue_adapter = @import("binance_venue_adapter.zig");
+const binance_private_reconciliation = @import("binance_private_reconciliation.zig");
 const trading_shard_fixture = @import("trading_shard_fixture.zig");
 const trading_shard_benchmark = @import("trading_shard_benchmark.zig");
 
@@ -81,5 +82,6 @@ test {
     _ = binance_market_feed;
     _ = okx_venue_adapter;
     _ = binance_venue_adapter;
+    _ = binance_private_reconciliation;
     _ = trading_shard_fixture;
 }
