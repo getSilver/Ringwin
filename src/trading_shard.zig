@@ -12,7 +12,7 @@ const economics_module = economics;
 pub const operational = @import("operational.zig");
 const host_gateway = @import("strategy_host_gateway.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
-const Crc32c = std.hash.crc.Crc32Iscsi;
+const snapshot_codec = @import("snapshot_codec.zig");
 
 pub const schema_version: u16 = 4;
 /// Current physical schema for AuthoritativeTradingState snapshots.
@@ -21,139 +21,6 @@ pub const state_schema_version: u32 = 2;
 pub const release_artifact_identity: u64 = 1;
 /// Registry entry defining the current snapshot and journal schemas.
 pub const schema_registry_identity: u64 = 2;
-const snapshot_magic: u64 = 0x50414e53574e4952; // RINWSNAP
-const snapshot_header_len: usize = 144;
-const SnapshotHeader = packed struct {
-    magic: u64,
-    encoding_version: u16,
-    header_len: u16,
-    total_len: u32,
-    state_schema: u32,
-    release_artifact: u64,
-    schema_registry: u64,
-    barrier: u64,
-    instrument_rules_version: u32,
-    margin_rules_version: u32,
-    payload_len: u32,
-    payload_crc: u32,
-    state_digest: u256,
-    payload_digest: u256,
-    header_crc: u32,
-    reserved: u128 = 0,
-};
-comptime {
-    std.debug.assert(@sizeOf(SnapshotHeader) == snapshot_header_len);
-}
-
-const SnapshotWriter = struct {
-    bytes: []u8,
-    position: usize = 0,
-
-    fn put(self: *SnapshotWriter, value: anytype) !void {
-        const T = @TypeOf(value);
-        const width = if (T == usize or T == isize) @sizeOf(u64) else @sizeOf(T);
-        if (self.position + width > self.bytes.len) return error.SnapshotTooLarge;
-        if (T == usize) {
-            std.mem.writeInt(u64, self.bytes[self.position..][0..width], @intCast(value), .little);
-        } else if (T == isize) {
-            std.mem.writeInt(i64, self.bytes[self.position..][0..width], @intCast(value), .little);
-        } else {
-            std.mem.writeInt(T, self.bytes[self.position..][0..width], value, .little);
-        }
-        self.position += width;
-    }
-};
-
-const SnapshotReader = struct {
-    bytes: []const u8,
-    position: usize = 0,
-
-    fn get(self: *SnapshotReader, comptime T: type) !T {
-        const width = if (T == usize or T == isize) @sizeOf(u64) else @sizeOf(T);
-        if (self.position + width > self.bytes.len) return error.InvalidSnapshotLength;
-        const value = if (T == usize)
-            std.math.cast(usize, std.mem.readInt(u64, self.bytes[self.position..][0..width], .little)) orelse return error.InvalidSnapshotValue
-        else if (T == isize)
-            std.math.cast(isize, std.mem.readInt(i64, self.bytes[self.position..][0..width], .little)) orelse return error.InvalidSnapshotValue
-        else
-            std.mem.readInt(T, self.bytes[self.position..][0..width], .little);
-        self.position += width;
-        return value;
-    }
-};
-
-fn snapshotEncode(writer: *SnapshotWriter, value: anytype) !void {
-    const T = @TypeOf(value);
-    switch (@typeInfo(T)) {
-        .bool => try writer.put(@as(u8, if (value) 1 else 0)),
-        .int => try writer.put(value),
-        .@"enum" => try snapshotEncode(writer, @intFromEnum(value)),
-        .array => for (value) |item| try snapshotEncode(writer, item),
-        .optional => if (value) |item| {
-            try writer.put(@as(u8, 1));
-            try snapshotEncode(writer, item);
-        } else try writer.put(@as(u8, 0)),
-        .@"struct" => |info| inline for (info.fields) |field|
-            try snapshotEncode(writer, @field(value, field.name)),
-        .@"union" => |info| {
-            const Tag = info.tag_type orelse @compileError("snapshot unions must be tagged");
-            try snapshotEncode(writer, std.meta.activeTag(value));
-            switch (value) {
-                inline else => |payload, tag| {
-                    _ = tag;
-                    if (@TypeOf(payload) != void) try snapshotEncode(writer, payload);
-                },
-            }
-            _ = Tag;
-        },
-        else => @compileError("unsupported snapshot field type: " ++ @typeName(T)),
-    }
-}
-
-fn snapshotDecode(reader: *SnapshotReader, comptime T: type) !T {
-    return switch (@typeInfo(T)) {
-        .bool => switch (try reader.get(u8)) {
-            0 => false,
-            1 => true,
-            else => error.InvalidSnapshotValue,
-        },
-        .int => try reader.get(T),
-        .@"enum" => |info| blk: {
-            const raw = try snapshotDecode(reader, info.tag_type);
-            inline for (info.fields) |field|
-                if (raw == field.value) break :blk @field(T, field.name);
-            return error.InvalidSnapshotValue;
-        },
-        .array => |info| blk: {
-            var result: T = undefined;
-            for (&result) |*item| item.* = try snapshotDecode(reader, info.child);
-            break :blk result;
-        },
-        .optional => |info| switch (try reader.get(u8)) {
-            0 => null,
-            1 => try snapshotDecode(reader, info.child),
-            else => error.InvalidSnapshotValue,
-        },
-        .@"struct" => |info| blk: {
-            var result: T = undefined;
-            inline for (info.fields) |field|
-                @field(result, field.name) = try snapshotDecode(reader, field.type);
-            break :blk result;
-        },
-        .@"union" => |info| blk: {
-            const Tag = info.tag_type orelse @compileError("snapshot unions must be tagged");
-            const tag = try snapshotDecode(reader, Tag);
-            inline for (info.fields) |field| {
-                if (tag == @field(Tag, field.name)) {
-                    const payload = if (field.type == void) {} else try snapshotDecode(reader, field.type);
-                    break :blk @unionInit(T, field.name, payload);
-                }
-            }
-            return error.InvalidSnapshotValue;
-        },
-        else => @compileError("unsupported snapshot field type: " ++ @typeName(T)),
-    };
-}
 const client_order_id = "RWN-00000001-01-000000000001";
 const settlement_asset: canonical.AssetIdentity = 1;
 const spot_instrument: oms_module.Instrument = 1;
@@ -1520,73 +1387,39 @@ pub const TradingShard = struct {
         if (!stable_journal.sealed or barrier == 0 or
             barrier != stable_journal.last_sequence or self.trace.len != barrier)
             return error.InvalidSnapshotBarrier;
-        if (destination.len < snapshot_header_len) return error.SnapshotTooLarge;
         var authoritative = self;
         canonicalizeSnapshotState(&authoritative);
-        var writer: SnapshotWriter = .{ .bytes = destination[snapshot_header_len..] };
-        try snapshotEncode(&writer, authoritative);
-        const payload = destination[snapshot_header_len .. snapshot_header_len + writer.position];
-        const total_len = snapshot_header_len + payload.len;
-        if (payload.len > std.math.maxInt(u32)) return error.SnapshotTooLarge;
-        const encoded = destination[0..total_len];
-        const digest = self.canonicalStateDigest();
-        var payload_digest: [Sha256.digest_length]u8 = undefined;
-        Sha256.hash(payload, &payload_digest, .{});
-        var header: SnapshotHeader = .{
-            .magic = snapshot_magic,
-            .encoding_version = 1,
-            .header_len = snapshot_header_len,
-            .total_len = @intCast(total_len),
+        return snapshot_codec.write(destination, .{
             .state_schema = state_schema_version,
             .release_artifact = release_artifact_identity,
             .schema_registry = schema_registry_identity,
             .barrier = barrier,
             .instrument_rules_version = self.instrument_rules_version,
             .margin_rules_version = self.margin_rules_version,
-            .payload_len = @intCast(payload.len),
-            .payload_crc = Crc32c.hash(payload),
-            .state_digest = std.mem.readInt(u256, &digest, .little),
-            .payload_digest = std.mem.readInt(u256, &payload_digest, .little),
-            .header_crc = 0,
-        };
-        header.header_crc = Crc32c.hash(std.mem.asBytes(&header)[0..@offsetOf(SnapshotHeader, "header_crc")]);
-        @memcpy(encoded[0..snapshot_header_len], std.mem.asBytes(&header));
-        return encoded;
+            .state_digest = self.canonicalStateDigest(),
+        }, authoritative);
     }
 
     /// Restores a validated snapshot through the side-effect-free replay seam.
     pub fn restoreSnapshot(encoded: []const u8) !SnapshotRestore {
-        if (encoded.len < snapshot_header_len) return error.InvalidSnapshotHeader;
-        var header: SnapshotHeader = undefined;
-        @memcpy(std.mem.asBytes(&header), encoded[0..snapshot_header_len]);
-        if (header.magic != snapshot_magic or header.encoding_version != 1 or
-            header.header_len != snapshot_header_len or header.total_len != encoded.len or
-            header.state_schema != state_schema_version or
-            header.release_artifact != release_artifact_identity or
-            header.schema_registry != schema_registry_identity or
-            header.header_crc != Crc32c.hash(encoded[0..@offsetOf(SnapshotHeader, "header_crc")]))
-            return error.InvalidSnapshotHeader;
-        if (header.payload_len != encoded.len - snapshot_header_len)
-            return error.InvalidSnapshotLength;
-        const payload = encoded[snapshot_header_len..];
-        var payload_digest: [Sha256.digest_length]u8 = undefined;
-        Sha256.hash(payload, &payload_digest, .{});
-        if (header.payload_crc != Crc32c.hash(payload) or
-            header.payload_digest != std.mem.readInt(u256, &payload_digest, .little))
-            return error.InvalidSnapshotPayload;
-        var reader: SnapshotReader = .{ .bytes = payload };
-        var recovered = try snapshotDecode(&reader, TradingShard);
-        if (reader.position != payload.len) return error.InvalidSnapshotLength;
+        const decoded = try snapshot_codec.read(
+            encoded,
+            TradingShard,
+            state_schema_version,
+            release_artifact_identity,
+            schema_registry_identity,
+        );
+        var recovered = decoded.value;
         recovered.oms.begin();
         try validateSnapshotState(&recovered);
-        const barrier = header.barrier;
+        const metadata = decoded.metadata;
         const digest = recovered.canonicalStateDigest();
-        if (recovered.trace.len != barrier or
-            recovered.instrument_rules_version != header.instrument_rules_version or
-            recovered.margin_rules_version != header.margin_rules_version or
-            header.state_digest != std.mem.readInt(u256, &digest, .little))
+        if (metadata.barrier == 0 or recovered.trace.len != metadata.barrier or
+            recovered.instrument_rules_version != metadata.instrument_rules_version or
+            recovered.margin_rules_version != metadata.margin_rules_version or
+            !std.mem.eql(u8, &metadata.state_digest, &digest))
             return error.InvalidSnapshotState;
-        return .{ .shard = recovered, .barrier = barrier };
+        return .{ .shard = recovered, .barrier = metadata.barrier };
     }
 
     /// Restores a snapshot and semantically replays its immediately following journal segment.
