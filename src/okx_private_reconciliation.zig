@@ -61,6 +61,10 @@ pub const ExecutionReport = struct {
     side: Side,
     order_type: OrderType,
     status: ExecutionStatus,
+    margin_mode: ?MarginMode = null,
+    position_side: ?PositionSide = null,
+    venue_reduce_only: ?bool = null,
+    leverage: ?Decimal = null,
     quantity: Decimal,
     limit_price: ?Decimal,
     cumulative_filled_quantity: Decimal,
@@ -669,6 +673,10 @@ pub const Reconciler = struct {
             .side = try parseSide(try stringField(row, "side")),
             .order_type = try parseOrderType(try stringField(row, "ordType")),
             .status = try parseExecutionStatus(try stringField(row, "state")),
+            .margin_mode = try optionalOrderMarginMode(row),
+            .position_side = try optionalPositionSide(row),
+            .venue_reduce_only = try optionalBoolishField(row, "reduceOnly"),
+            .leverage = try optionalDecimalField(row, "lever"),
             .quantity = try decimalField(row, "sz"),
             .limit_price = try optionalDecimalField(row, "px"),
             .cumulative_filled_quantity = try decimalField(row, "accFillSz"),
@@ -1135,6 +1143,16 @@ fn boolField(object: std.json.ObjectMap, name: []const u8) !bool {
     };
 }
 
+fn optionalBoolishField(object: std.json.ObjectMap, name: []const u8) !?bool {
+    const value = object.get(name) orelse return null;
+    return switch (value) {
+        .bool => |result| result,
+        .string => |text| if (std.mem.eql(u8, text, "true")) true else if (std.mem.eql(u8, text, "false")) false else error.InvalidField,
+        .null => null,
+        else => error.InvalidField,
+    };
+}
+
 fn unsignedField(object: std.json.ObjectMap, name: []const u8) !u32 {
     return switch (try field(object, name)) {
         .integer => |value| if (value >= 0)
@@ -1209,9 +1227,20 @@ fn parsePositionSide(text: []const u8) !PositionSide {
     return error.UnsupportedValue;
 }
 
+fn optionalPositionSide(object: std.json.ObjectMap) !?PositionSide {
+    const text = try optionalStringField(object, "posSide") orelse return null;
+    return @as(?PositionSide, try parsePositionSide(text));
+}
+
 fn parseMarginMode(text: []const u8) !MarginMode {
     if (std.mem.eql(u8, text, "isolated")) return .isolated;
     return error.UnsupportedValue;
+}
+
+fn optionalOrderMarginMode(object: std.json.ObjectMap) !?MarginMode {
+    const text = try optionalStringField(object, "tdMode") orelse return null;
+    if (std.mem.eql(u8, text, "cash")) return null;
+    return @as(?MarginMode, try parseMarginMode(text));
 }
 
 fn parseOrderType(text: []const u8) !OrderType {
@@ -1343,6 +1372,10 @@ fn hashReport(report: *const ExecutionReport) [32]u8 {
         @intFromEnum(report.order_type),
         @intFromEnum(report.status),
     });
+    if (report.margin_mode) |mode| hasher.update(&.{ 1, @intFromEnum(mode) }) else hasher.update(&.{0});
+    if (report.position_side) |side| hasher.update(&.{ 1, @intFromEnum(side) }) else hasher.update(&.{0});
+    if (report.venue_reduce_only) |reduce_only| hasher.update(&.{ 1, @intFromBool(reduce_only) }) else hasher.update(&.{0});
+    hashOptionalDecimal(&hasher, report.leverage);
     hashDecimal(&hasher, report.quantity);
     hashOptionalDecimal(&hasher, report.limit_price);
     hashDecimal(&hasher, report.cumulative_filled_quantity);
@@ -1755,14 +1788,19 @@ test "orders duplicate with a changed update time is semantically idempotent" {
     try establishPrivateStream(&reconciler, &sink);
     const initial_event_count = reconciler.ws_event_count;
     const first = try ingestTest(&reconciler, &sink, .ws_orders, null,
-        \\{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT-SWAP","ordId":"1001","clOrdId":"RWN-0001","side":"buy","ordType":"limit","state":"live","sz":"1","px":"50000","accFillSz":"0","avgPx":"","uTime":"1800000000100","tradeId":"","reqId":""}]}
+        \\{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT-SWAP","ordId":"1001","clOrdId":"RWN-0001","side":"buy","ordType":"limit","state":"live","tdMode":"isolated","posSide":"net","reduceOnly":"true","lever":"3","sz":"1","px":"50000","accFillSz":"0","avgPx":"","uTime":"1800000000100","tradeId":"","reqId":""}]}
     );
     const duplicate = try ingestTest(&reconciler, &sink, .ws_orders, null,
-        \\{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT-SWAP","ordId":"1001","clOrdId":"RWN-0001","side":"buy","ordType":"limit","state":"live","sz":"1","px":"50000","accFillSz":"0","avgPx":"","uTime":"1800000000200","tradeId":"","reqId":""}]}
+        \\{"arg":{"channel":"orders"},"data":[{"instId":"BTC-USDT-SWAP","ordId":"1001","clOrdId":"RWN-0001","side":"buy","ordType":"limit","state":"live","tdMode":"isolated","posSide":"net","reduceOnly":"true","lever":"3","sz":"1","px":"50000","accFillSz":"0","avgPx":"","uTime":"1800000000200","tradeId":"","reqId":""}]}
     );
     try std.testing.expect(first.buffered);
     try std.testing.expect(duplicate.buffered);
     try std.testing.expectEqual(initial_event_count + 1, reconciler.ws_event_count);
+    const report = reconciler.ws_events[initial_event_count].payload.execution_report;
+    try std.testing.expectEqual(MarginMode.isolated, report.margin_mode.?);
+    try std.testing.expectEqual(PositionSide.net, report.position_side.?);
+    try std.testing.expect(report.venue_reduce_only.?);
+    try std.testing.expectEqual(@as(i128, 3), report.leverage.?.coefficient);
     try std.testing.expectEqual(@as(?RejectReason, null), duplicate.rejection);
 }
 

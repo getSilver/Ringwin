@@ -70,12 +70,12 @@ pub const AccountProjection = struct {
     }
     fn applyPosition(self: *AccountProjection, observed: anytype) !void {
         for (self.positions[0..self.position_count], 0..) |_, index| if (self.positions[index].instrument == observed.instrument and self.positions[index].side == observed.side) {
-            if (observed.removed) remove(canonical.AccountPosition, &self.positions, &self.position_count, index) else self.positions[index] = .{ .instrument = observed.instrument, .side = observed.side, .quantity = observed.value };
+            if (observed.removed) remove(canonical.AccountPosition, &self.positions, &self.position_count, index) else self.positions[index] = observed.value;
             return;
         };
         if (observed.removed) return;
         if (self.position_count == self.positions.len) return self.invalidate(error.ObservationCapacityExceeded);
-        self.positions[self.position_count] = .{ .instrument = observed.instrument, .side = observed.side, .quantity = observed.value };
+        self.positions[self.position_count] = observed.value;
         self.position_count += 1;
     }
     fn applyMargin(self: *AccountProjection, observed: anytype) !void {

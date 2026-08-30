@@ -243,6 +243,8 @@ pub const OrderReconciliationRequest = struct {
     exchange_account: ExchangeAccountIdentity,
     order: OrderIdentity,
     venue_order: ?VenueOrderRef = null,
+    visibility_delay_elapsed: bool = false,
+    prior_session_inactive: bool = false,
 };
 
 pub const AccountReconciliationRequest = struct {
@@ -322,7 +324,7 @@ pub const AccountBootstrapSnapshot = struct {
 
 pub const AccountObserved = union(enum) {
     balance: struct { asset: AssetIdentity, value: AccountBalance, removed: bool = false },
-    position: struct { instrument: InstrumentIdentity, side: PositionSide, value: InstrumentQuantity, removed: bool = false },
+    position: struct { instrument: InstrumentIdentity, side: PositionSide, value: AccountPosition, removed: bool = false },
     margin: struct { instrument: ?InstrumentIdentity = null, value: AccountMargin, removed: bool = false },
 };
 
@@ -352,12 +354,18 @@ pub const ExecutionReport = struct {
     revision: u32,
     side: OrderSide = .buy,
     order_type: ?OrderType = null,
+    time_in_force: ?TimeInForce = null,
+    venue_reduce_only: ?bool = null,
+    position_mode_net: ?bool = null,
+    margin_mode_isolated: ?bool = null,
+    leverage: ?Decimal = null,
     status: ExecutionReportStatus,
     original_quantity: ?InstrumentQuantity = null,
     cumulative_quantity: InstrumentQuantity,
     remaining_quantity: InstrumentQuantity,
     limit_price: ?InstrumentPrice = null,
     average_fill_price: ?InstrumentPrice = null,
+    venue_update_time_utc_ns: ?u64 = null,
 };
 
 pub const Fill = struct {
@@ -377,19 +385,26 @@ pub const Fill = struct {
     liquidity: LiquidityRole,
 };
 
-pub const AccountConfigurationSnapshot = struct {
+pub const VenueAccountConfigurationSnapshot = struct {
     identity: SourceFactIdentity,
     exchange_account: ExchangeAccountIdentity,
-    position_mode_net: bool,
-    margin_mode_isolated: bool,
-    can_read: bool,
-    can_trade: bool,
-    can_withdraw: bool,
-    auto_loan: bool = false,
-    spot_borrow_enabled: bool = false,
-    contract_isolated_autonomy: ?bool = null,
-    leverage: ?Decimal = null,
-    instrument: ?InstrumentIdentity = null,
+    value: union(enum) {
+        account: struct {
+            position_mode_net: bool,
+            contract_isolated_autonomy: bool,
+            auto_loan: bool,
+            spot_borrow_enabled: bool,
+            can_read: bool,
+            can_trade: bool,
+            can_withdraw: bool,
+        },
+        isolated_leverage: struct {
+            instrument: InstrumentIdentity,
+            position_mode_net: bool,
+            margin_mode_isolated: bool,
+            leverage: Decimal,
+        },
+    },
 };
 
 pub const CanonicalEvent = union(enum) {
@@ -406,10 +421,41 @@ pub const CanonicalEvent = union(enum) {
     market_data_health_changed: MarketDataHealthChanged,
     account_bootstrap_snapshot: AccountBootstrapSnapshot,
     account_observed: AccountObservation,
-    account_configuration_snapshot: AccountConfigurationSnapshot,
+    venue_account_configuration_snapshot: VenueAccountConfigurationSnapshot,
     order_reconciliation_result: ReconciliationResult,
     account_reconciliation_result: ReconciliationResult,
 };
+
+pub const EventType = enum(u32) {
+    order_dispatch_result = 1,
+    execution_report = 3,
+    fill = 4,
+    reconciliation_started = 5,
+    account_reconciliation_started = 6,
+    account_bootstrap_snapshot = 11,
+    account_observed = 12,
+    venue_account_configuration_snapshot = 13,
+    order_reconciliation_result = 14,
+    account_reconciliation_result = 15,
+};
+
+pub const TimeInForce = enum(u8) { good_til_canceled, immediate_or_cancel, fill_or_kill, post_only };
+
+pub fn eventType(event: CanonicalEvent) EventType {
+    return switch (event) {
+        .order_dispatch_result => .order_dispatch_result,
+        .execution_report => .execution_report,
+        .fill => .fill,
+        .reconciliation_started => .reconciliation_started,
+        .account_reconciliation_started => .account_reconciliation_started,
+        .account_bootstrap_snapshot => .account_bootstrap_snapshot,
+        .account_observed => .account_observed,
+        .venue_account_configuration_snapshot => .venue_account_configuration_snapshot,
+        .order_reconciliation_result => .order_reconciliation_result,
+        .account_reconciliation_result => .account_reconciliation_result,
+        else => .order_dispatch_result,
+    };
+}
 
 pub const EventRecord = struct { envelope: EventEnvelope, event: CanonicalEvent };
 pub const max_events_per_adapter_batch = 32;

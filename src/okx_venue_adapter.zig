@@ -61,6 +61,7 @@ const PendingOrderReconciliation = struct {
     identity: u128,
     order: canonical.OrderIdentity,
     venue_order: ?canonical.VenueOrderRef,
+    confirmed_absent_allowed: bool,
     result: canonical.ReconciliationStatus = .unresolved,
 };
 
@@ -202,6 +203,7 @@ pub const OkxVenueAdapter = struct {
             .identity = request.identity,
             .order = request.order,
             .venue_order = request.venue_order,
+            .confirmed_absent_allowed = request.visibility_delay_elapsed and request.prior_session_inactive,
         };
         self.pending_order_reconciliation_count += 1;
         self.appendControl(.{ .reconciliation_started = request.identity }, request.identity);
@@ -226,7 +228,7 @@ pub const OkxVenueAdapter = struct {
         const sequence = self.next_event_sequence;
         self.next_event_sequence +%= 1;
         output.append(.{ .envelope = .{
-            .event_type = 1,
+            .event_type = @intFromEnum(canonical.eventType(event)),
             .schema_version = 1,
             .identity = .{ .stream = binding.session, .sequence = sequence },
             .source_fact_identity = source_fact_identity,
@@ -271,7 +273,7 @@ pub const OkxVenueAdapter = struct {
             self.pending_account_reconciliation = null;
         }
         for (self.pending_order_reconciliations[0..self.pending_order_reconciliation_count]) |*request| {
-            if (request.result == .unresolved) request.result = .confirmed_absent;
+            if (request.result == .unresolved and request.confirmed_absent_allowed) request.result = .confirmed_absent;
             self.appendPrivateResult(output, .order_reconciliation_result, request.identity, .{ .identity = request.identity, .complete = request.result != .unresolved, .status = request.result });
         }
         self.pending_order_reconciliation_count = 0;
@@ -280,19 +282,17 @@ pub const OkxVenueAdapter = struct {
     fn finishReconciliation(self: *OkxVenueAdapter, complete: bool) void {
         if (self.pending_output != null) return;
         var output: canonical.AdapterOutputBatch = .{};
-        if (self.pending_account_reconciliation) |identity| {
-            self.appendPrivateResult(&output, .account_reconciliation_result, identity, .{ .identity = identity, .complete = complete, .status = .unresolved });
-            self.pending_account_reconciliation = null;
-        }
-        for (self.pending_order_reconciliations[0..self.pending_order_reconciliation_count]) |request|
-            self.appendPrivateResult(&output, .order_reconciliation_result, request.identity, .{ .identity = request.identity, .complete = false, .status = .unresolved });
-        self.pending_order_reconciliation_count = 0;
+        self.appendUnresolvedResults(&output, complete);
         if (output.len != 0) self.pending_output = output;
     }
 
     fn finishPrivateFailure(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch) void {
+        self.appendUnresolvedResults(output, false);
+    }
+
+    fn appendUnresolvedResults(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, account_complete: bool) void {
         if (self.pending_account_reconciliation) |identity| {
-            self.appendPrivateResult(output, .account_reconciliation_result, identity, .{ .identity = identity, .complete = false, .status = .unresolved });
+            self.appendPrivateResult(output, .account_reconciliation_result, identity, .{ .identity = identity, .complete = account_complete, .status = .unresolved });
             self.pending_account_reconciliation = null;
         }
         for (self.pending_order_reconciliations[0..self.pending_order_reconciliation_count]) |request|
@@ -344,12 +344,18 @@ pub const OkxVenueAdapter = struct {
             .revision = 1,
             .side = switch (report.side) { .buy => .buy, .sell => .sell },
             .order_type = switch (report.order_type) { .market => .market, .limit => .limit, .post_only => .post_only, .fok => .fok, .ioc => .ioc },
+            .time_in_force = switch (report.order_type) { .fok => .fill_or_kill, .ioc => .immediate_or_cancel, .post_only => .post_only, else => .good_til_canceled },
+            .venue_reduce_only = report.venue_reduce_only,
+            .position_mode_net = if (report.position_side) |_| true else null,
+            .margin_mode_isolated = if (report.margin_mode) |mode| mode == .isolated else null,
+            .leverage = if (report.leverage) |leverage| decimal(leverage) else null,
             .status = switch (report.status) { .live => .accepted, .partially_filled => .partially_filled, .filled => .filled, .canceled => .canceled },
             .original_quantity = quantity,
             .cumulative_quantity = cumulative,
             .remaining_quantity = .{ .instrument = rules.identity, .rules_version = self.profile.rules_version, .lots = quantity.lots - cumulative.lots },
             .limit_price = if (report.limit_price) |value| try self.privatePrice(rules.identity, rules.rules, value) else null,
             .average_fill_price = if (report.average_fill_price) |value| try self.privatePrice(rules.identity, rules.rules, value) else null,
+            .venue_update_time_utc_ns = report.venue_update_time_utc_ns,
         } });
     }
 
@@ -382,20 +388,21 @@ pub const OkxVenueAdapter = struct {
     fn translateAccountConfiguration(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, envelope: private.EventEnvelope, snapshot: private.VenueAccountConfigurationSnapshot) !void {
         const binding = self.binding orelse return error.InvalidBinding;
         switch (snapshot) {
-            .account => |account| try self.appendPrivate(output, envelope, .account, null, null, digestIdentity(envelope.source_fact_identity), .{ .account_configuration_snapshot = .{
-                .identity = digestIdentity(envelope.source_fact_identity), .exchange_account = binding.account,
-                .position_mode_net = account.position_mode == .net,
-                .margin_mode_isolated = true,
-                .can_read = account.can_read, .can_trade = account.can_trade, .can_withdraw = account.can_withdraw,
-                .auto_loan = account.auto_loan, .spot_borrow_enabled = account.spot_borrow_enabled,
-                .contract_isolated_autonomy = account.contract_isolated_mode == .autonomy,
+            .account => |account| try self.appendPrivate(output, envelope, .account, null, null, digestIdentity(envelope.source_fact_identity), .{ .venue_account_configuration_snapshot = .{
+                .identity = digestIdentity(envelope.source_fact_identity), .exchange_account = binding.account, .value = .{ .account = .{
+                    .position_mode_net = account.position_mode == .net,
+                    .can_read = account.can_read, .can_trade = account.can_trade, .can_withdraw = account.can_withdraw,
+                    .auto_loan = account.auto_loan, .spot_borrow_enabled = account.spot_borrow_enabled,
+                    .contract_isolated_autonomy = account.contract_isolated_mode == .autonomy,
+                } },
             } }),
             .isolated_leverage => |leverage| {
                 const rules = self.mapPrivateInstrument(leverage.instrument) orelse return error.UnsupportedInstrument;
-                try self.appendPrivate(output, envelope, .account, rules.identity, null, digestIdentity(envelope.source_fact_identity), .{ .account_configuration_snapshot = .{
-                    .identity = digestIdentity(envelope.source_fact_identity), .exchange_account = binding.account,
-                    .position_mode_net = leverage.position_side == .net, .margin_mode_isolated = leverage.margin_mode == .isolated,
-                    .can_read = true, .can_trade = true, .can_withdraw = false, .leverage = decimal(leverage.leverage), .instrument = rules.identity,
+                try self.appendPrivate(output, envelope, .account, rules.identity, null, digestIdentity(envelope.source_fact_identity), .{ .venue_account_configuration_snapshot = .{
+                    .identity = digestIdentity(envelope.source_fact_identity), .exchange_account = binding.account, .value = .{ .isolated_leverage = .{
+                        .instrument = rules.identity, .position_mode_net = leverage.position_side == .net,
+                        .margin_mode_isolated = leverage.margin_mode == .isolated, .leverage = decimal(leverage.leverage),
+                    } },
                 } });
             },
         }
@@ -453,7 +460,7 @@ pub const OkxVenueAdapter = struct {
             try self.appendPrivate(output, envelope, .instrument, position.instrument, null, digestIdentity(envelope.source_fact_identity), .{ .account_observed = .{
                 .identity = digestIdentity(envelope.source_fact_identity) + self.account_source_sequence,
                 .exchange_account = binding.account, .bootstrap = bootstrap, .source_stream = binding.session, .source_sequence = self.account_source_sequence,
-                .value = .{ .position = .{ .instrument = position.instrument, .side = position.side, .value = position.quantity, .removed = position.quantity.lots == 0 } },
+                .value = .{ .position = .{ .instrument = position.instrument, .side = position.side, .value = position, .removed = position.quantity.lots == 0 } },
             } });
         }
     }
@@ -700,14 +707,14 @@ pub const OkxVenueAdapter = struct {
         const sequence = self.next_event_sequence;
         self.next_event_sequence = try std.math.add(u64, self.next_event_sequence, 1);
         const private_envelope = envelope orelse return output.append(.{ .envelope = .{
-            .event_type = 1, .schema_version = 1, .identity = .{ .stream = binding.session, .sequence = sequence },
+            .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = 1, .identity = .{ .stream = binding.session, .sequence = sequence },
             .source_fact_identity = source_fact_identity, .scope = scope, .venue = binding.venue, .exchange_account = binding.account,
             .instrument = instrument, .asset = asset, .source_stream = binding.session, .source_sequence = sequence,
             .adapter_session = binding.session, .times = .{ .monotonic_ns = self.clock.now() },
             .raw_evidence = .{ .stream = binding.session, .sequence = sequence, .digest = @splat(0) },
         }, .event = event });
         try output.append(.{ .envelope = .{
-            .event_type = 1, .schema_version = 1, .identity = .{ .stream = binding.session, .sequence = sequence },
+            .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = 1, .identity = .{ .stream = binding.session, .sequence = sequence },
             .source_fact_identity = source_fact_identity, .scope = scope, .venue = binding.venue, .exchange_account = binding.account,
             .instrument = instrument, .asset = asset, .source_stream = binding.session, .source_sequence = private_envelope.raw_evidence.stream_sequence,
             .adapter_session = binding.session,
@@ -1000,14 +1007,17 @@ test "OKX adapter releases buffered private bootstrap only after stable REST sco
     var bootstrap_index: ?usize = null;
     var observed_index: ?usize = null;
     var complete = false;
-    for (output.slice(), 0..) |record, index| switch (record.event) {
-        .account_bootstrap_snapshot => bootstrap_index = index,
-        .account_observed => {
-            if (observed_index == null) observed_index = index;
-        },
-        .account_reconciliation_result => |result| complete = result.complete,
-        else => {},
-    };
+    for (output.slice(), 0..) |record, index| {
+        try std.testing.expectEqual(@intFromEnum(canonical.eventType(record.event)), record.envelope.event_type);
+        switch (record.event) {
+            .account_bootstrap_snapshot => bootstrap_index = index,
+            .account_observed => {
+                if (observed_index == null) observed_index = index;
+            },
+            .account_reconciliation_result => |result| complete = result.complete,
+            else => {},
+        }
+    }
     try std.testing.expect(bootstrap_index != null);
     try std.testing.expect(observed_index != null and bootstrap_index.? < observed_index.?);
     try std.testing.expect(complete);
@@ -1032,7 +1042,7 @@ test "OKX private facts map losslessly to canonical execution fill and account f
     var output: canonical.AdapterOutputBatch = .{};
     try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(1, 1), .payload = .{ .execution_report = .{
         .venue_order_id = @enumFromInt(1001), .client_order_id = try private.ClientOrderId.init("RWN-16"), .instrument = .btc_usdt_spot,
-        .side = .buy, .order_type = .limit, .status = .partially_filled, .quantity = try private.Decimal.parse("0.0002"), .limit_price = try private.Decimal.parse("50000"),
+        .side = .buy, .order_type = .limit, .status = .partially_filled, .margin_mode = .isolated, .position_side = .net, .venue_reduce_only = true, .leverage = try private.Decimal.parse("3"), .quantity = try private.Decimal.parse("0.0002"), .limit_price = try private.Decimal.parse("50000"),
         .cumulative_filled_quantity = try private.Decimal.parse("0.0001"), .average_fill_price = try private.Decimal.parse("50000"), .request_id = try private.FixedText(32).init("request"),
         .last_trade_id = @enumFromInt(2001), .venue_update_time_utc_ns = 1, .owned_by_ringwin = true,
     } } });
@@ -1045,6 +1055,9 @@ test "OKX private facts map losslessly to canonical execution fill and account f
     try std.testing.expectEqual(@as(u8, 2), output.len);
     try std.testing.expectEqual(canonical.ExecutionReportStatus.partially_filled, output.events[0].event.execution_report.status);
     try std.testing.expectEqual(@as(i128, 1), output.events[0].event.execution_report.cumulative_quantity.lots);
+    try std.testing.expect(output.events[0].event.execution_report.venue_reduce_only.?);
+    try std.testing.expect(output.events[0].event.execution_report.margin_mode_isolated.?);
+    try std.testing.expectEqual(@as(i128, 3), output.events[0].event.execution_report.leverage.?.coefficient);
     try std.testing.expectEqual(btc, output.events[1].event.fill.fee.?.asset);
     try std.testing.expectEqual(usdt, output.events[1].event.fill.rebate.?.asset);
 
@@ -1061,6 +1074,15 @@ test "OKX private facts map losslessly to canonical execution fill and account f
     try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(5, 5), .payload = .{ .exchange_margin_snapshot = margin } });
     try std.testing.expectEqual(@as(u8, 1), output.events[2].event.account_bootstrap_snapshot.balance_count);
     try std.testing.expectEqual(@as(i128, 25_000_000), output.events[2].event.account_bootstrap_snapshot.balances[0].total.atoms);
+    var observed_positions: private.ExchangePositionSnapshot = undefined;
+    observed_positions.scope = .ws_reported;
+    observed_positions.position_count = 1;
+    observed_positions.includes_zero_positions = true;
+    observed_positions.positions[0] = .{ .venue_position_id = @enumFromInt(1), .instrument = .btc_usdt_swap, .margin_mode = .isolated, .position_side = .net, .quantity = try private.Decimal.parse("1"), .average_price = try private.Decimal.parse("50000"), .mark_price = try private.Decimal.parse("50001"), .liquidation_price = try private.Decimal.parse("40000"), .margin = try private.Decimal.parse("2"), .leverage = try private.Decimal.parse("3"), .unrealized_pnl = try private.Decimal.parse("1"), .venue_update_time_utc_ns = 1 };
+    try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(6, 6), .payload = .{ .exchange_position_snapshot = observed_positions } });
+    const observed = output.events[3].event.account_observed.value.position;
+    try std.testing.expectEqual(@as(i128, 500_010), observed.value.mark_price.?.ticks);
+    try std.testing.expectEqual(@as(i128, 2_000_000), observed.value.margin.?.atoms);
     try adapter.stop(.{ .monotonic_ns = 1 });
 }
 
@@ -1079,7 +1101,7 @@ test "OKX reconciliation result states are deterministic and bounded" {
     const requests = [_]canonical.ReconciliationStatus{ .found_live, .found_terminal, .confirmed_absent };
     for (requests, 0..) |expected, index| {
         const identity: u128 = index + 1;
-        try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .order_reconciliation = .{ .identity = identity, .exchange_account = 2, .order = 16, .venue_order = try canonical.VenueOrderRef.init(1, "1001") } }));
+        try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .order_reconciliation = .{ .identity = identity, .exchange_account = 2, .order = 16, .venue_order = try canonical.VenueOrderRef.init(1, "1001"), .visibility_delay_elapsed = expected == .confirmed_absent, .prior_session_inactive = expected == .confirmed_absent } }));
         _ = (try adapter.tryDrain()).?;
         if (expected != .confirmed_absent)
             implementation.observeOrder(@enumFromInt(1001), 16, if (expected == .found_live) .live else .filled);
@@ -1089,6 +1111,13 @@ test "OKX reconciliation result states are deterministic and bounded" {
         try std.testing.expectEqual(expected, output.events[0].event.order_reconciliation_result.status);
         try std.testing.expect(output.events[0].event.order_reconciliation_result.complete);
     }
+
+    try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .order_reconciliation = .{ .identity = 40, .exchange_account = 2, .order = 16, .venue_order = try canonical.VenueOrderRef.init(1, "1001") } }));
+    _ = (try adapter.tryDrain()).?;
+    var incomplete: canonical.AdapterOutputBatch = .{};
+    implementation.finishPrivateBatch(&incomplete);
+    try std.testing.expectEqual(canonical.ReconciliationStatus.unresolved, incomplete.events[0].event.order_reconciliation_result.status);
+    try std.testing.expect(!incomplete.events[0].event.order_reconciliation_result.complete);
 
     try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .order_reconciliation = .{ .identity = 4, .exchange_account = 2, .order = 16 } }));
     _ = (try adapter.tryDrain()).?;
