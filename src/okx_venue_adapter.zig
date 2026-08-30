@@ -342,14 +342,33 @@ pub const OkxVenueAdapter = struct {
             .instrument = rules.identity,
             .exchange_account = (self.binding orelse return error.InvalidBinding).account,
             .revision = 1,
-            .side = switch (report.side) { .buy => .buy, .sell => .sell },
-            .order_type = switch (report.order_type) { .market => .market, .limit => .limit, .post_only => .post_only, .fok => .fok, .ioc => .ioc },
-            .time_in_force = switch (report.order_type) { .fok => .fill_or_kill, .ioc => .immediate_or_cancel, .post_only => .post_only, else => .good_til_canceled },
+            .side = switch (report.side) {
+                .buy => .buy,
+                .sell => .sell,
+            },
+            .order_type = switch (report.order_type) {
+                .market => .market,
+                .limit => .limit,
+                .post_only => .post_only,
+                .fok => .fok,
+                .ioc => .ioc,
+            },
+            .time_in_force = switch (report.order_type) {
+                .fok => .fill_or_kill,
+                .ioc => .immediate_or_cancel,
+                .post_only => .post_only,
+                else => .good_til_canceled,
+            },
             .venue_reduce_only = report.venue_reduce_only,
             .position_mode_net = if (report.position_side) |_| true else null,
             .margin_mode_isolated = if (report.margin_mode) |mode| mode == .isolated else null,
             .leverage = if (report.leverage) |leverage| decimal(leverage) else null,
-            .status = switch (report.status) { .live => .accepted, .partially_filled => .partially_filled, .filled => .filled, .canceled => .canceled },
+            .status = switch (report.status) {
+                .live => .accepted,
+                .partially_filled => .partially_filled,
+                .filled => .filled,
+                .canceled => .canceled,
+            },
             .original_quantity = quantity,
             .cumulative_quantity = cumulative,
             .remaining_quantity = .{ .instrument = rules.identity, .rules_version = self.profile.rules_version, .lots = quantity.lots - cumulative.lots },
@@ -375,13 +394,19 @@ pub const OkxVenueAdapter = struct {
             .venue_trade = venue_trade,
             .instrument = rules.identity,
             .exchange_account = binding.account,
-            .side = switch (fill.side) { .buy => .buy, .sell => .sell },
+            .side = switch (fill.side) {
+                .buy => .buy,
+                .sell => .sell,
+            },
             .quantity = try self.privateQuantity(rules.identity, rules.rules, fill.quantity),
             .price = try self.privatePrice(rules.identity, rules.rules, fill.price),
             .fee = try assetAmount(fee_asset, fill.fee),
             .rebate = if (fill.rebate) |value| try assetAmount(try assetIdentity((fill.rebate_asset orelse return error.MissingRebateAsset).slice()), value) else null,
             .realized_pnl = if (fill.realized_pnl) |value| try assetAmount(usdt, value) else null,
-            .liquidity = switch (fill.liquidity orelse return error.MissingLiquidity) { .maker => .maker, .taker => .taker },
+            .liquidity = switch (fill.liquidity orelse return error.MissingLiquidity) {
+                .maker => .maker,
+                .taker => .taker,
+            },
         } });
     }
 
@@ -389,19 +414,28 @@ pub const OkxVenueAdapter = struct {
         const binding = self.binding orelse return error.InvalidBinding;
         switch (snapshot) {
             .account => |account| try self.appendPrivate(output, envelope, .account, null, null, digestIdentity(envelope.source_fact_identity), .{ .venue_account_configuration_snapshot = .{
-                .identity = digestIdentity(envelope.source_fact_identity), .exchange_account = binding.account, .value = .{ .account = .{
+                .identity = digestIdentity(envelope.source_fact_identity),
+                .exchange_account = binding.account,
+                .value = .{ .account = .{
                     .position_mode_net = account.position_mode == .net,
-                    .can_read = account.can_read, .can_trade = account.can_trade, .can_withdraw = account.can_withdraw,
-                    .auto_loan = account.auto_loan, .spot_borrow_enabled = account.spot_borrow_enabled,
+                    .can_read = account.can_read,
+                    .can_trade = account.can_trade,
+                    .can_withdraw = account.can_withdraw,
+                    .auto_loan = account.auto_loan,
+                    .spot_borrow_enabled = account.spot_borrow_enabled,
                     .contract_isolated_autonomy = account.contract_isolated_mode == .autonomy,
                 } },
             } }),
             .isolated_leverage => |leverage| {
                 const rules = self.mapPrivateInstrument(leverage.instrument) orelse return error.UnsupportedInstrument;
                 try self.appendPrivate(output, envelope, .account, rules.identity, null, digestIdentity(envelope.source_fact_identity), .{ .venue_account_configuration_snapshot = .{
-                    .identity = digestIdentity(envelope.source_fact_identity), .exchange_account = binding.account, .value = .{ .isolated_leverage = .{
-                        .instrument = rules.identity, .position_mode_net = leverage.position_side == .net,
-                        .margin_mode_isolated = leverage.margin_mode == .isolated, .leverage = decimal(leverage.leverage),
+                    .identity = digestIdentity(envelope.source_fact_identity),
+                    .exchange_account = binding.account,
+                    .value = .{ .isolated_leverage = .{
+                        .instrument = rules.identity,
+                        .position_mode_net = leverage.position_side == .net,
+                        .margin_mode_isolated = leverage.margin_mode == .isolated,
+                        .leverage = decimal(leverage.leverage),
                     } },
                 } });
             },
@@ -445,7 +479,10 @@ pub const OkxVenueAdapter = struct {
             const balance = try balanceFor(value);
             try self.appendPrivate(output, envelope, .asset, null, balance.asset, digestIdentity(envelope.source_fact_identity), .{ .account_observed = .{
                 .identity = digestIdentity(envelope.source_fact_identity) + self.account_source_sequence,
-                .exchange_account = binding.account, .bootstrap = bootstrap, .source_stream = binding.session, .source_sequence = self.account_source_sequence,
+                .exchange_account = binding.account,
+                .bootstrap = bootstrap,
+                .source_stream = binding.session,
+                .source_sequence = self.account_source_sequence,
                 .value = .{ .balance = .{ .asset = balance.asset, .value = balance } },
             } });
         }
@@ -459,7 +496,10 @@ pub const OkxVenueAdapter = struct {
             const position = try self.positionFor(value);
             try self.appendPrivate(output, envelope, .instrument, position.instrument, null, digestIdentity(envelope.source_fact_identity), .{ .account_observed = .{
                 .identity = digestIdentity(envelope.source_fact_identity) + self.account_source_sequence,
-                .exchange_account = binding.account, .bootstrap = bootstrap, .source_stream = binding.session, .source_sequence = self.account_source_sequence,
+                .exchange_account = binding.account,
+                .bootstrap = bootstrap,
+                .source_stream = binding.session,
+                .source_sequence = self.account_source_sequence,
                 .value = .{ .position = .{ .instrument = position.instrument, .side = position.side, .value = position, .removed = position.quantity.lots == 0 } },
             } });
         }
@@ -472,7 +512,10 @@ pub const OkxVenueAdapter = struct {
         const margin = try marginFor(snapshot);
         try self.appendPrivate(output, envelope, .account, null, null, digestIdentity(envelope.source_fact_identity), .{ .account_observed = .{
             .identity = digestIdentity(envelope.source_fact_identity) + self.account_source_sequence,
-            .exchange_account = binding.account, .bootstrap = bootstrap, .source_stream = binding.session, .source_sequence = self.account_source_sequence,
+            .exchange_account = binding.account,
+            .bootstrap = bootstrap,
+            .source_stream = binding.session,
+            .source_sequence = self.account_source_sequence,
             .value = .{ .margin = .{ .value = margin } },
         } });
     }
@@ -483,7 +526,9 @@ pub const OkxVenueAdapter = struct {
         const side: canonical.PositionSide = if (signed.lots < 0) .short else .long;
         const quantity = canonical.InstrumentQuantity{ .instrument = mapped.identity, .rules_version = self.profile.rules_version, .lots = if (signed.lots < 0) -signed.lots else signed.lots };
         return .{
-            .instrument = mapped.identity, .side = side, .quantity = quantity,
+            .instrument = mapped.identity,
+            .side = side,
+            .quantity = quantity,
             .average_price = if (value.average_price) |price| try self.privatePrice(mapped.identity, mapped.rules, price) else null,
             .mark_price = if (value.mark_price) |price| try self.privatePrice(mapped.identity, mapped.rules, price) else null,
             .liquidation_price = if (value.liquidation_price) |price| try self.privatePrice(mapped.identity, mapped.rules, price) else null,
@@ -574,17 +619,17 @@ pub const OkxVenueAdapter = struct {
         switch (command.operation) {
             .place => {
                 const quantity = command.quantity orelse return error.UnsupportedValue;
-                const price = command.limit_price orelse return error.UnsupportedValue;
-                if (quantity.rules_version != command.rules_version or price.rules_version != command.rules_version)
+                if (quantity.rules_version != command.rules_version)
                     return error.StaleVersion;
-                try validateValues(command, mapped.rules);
+                try validatePlace(command, mapped.rules);
                 const quantity_decimal = try decimalFor(quantity.lots, mapped.rules.lot_size);
-                const price_decimal = try decimalFor(price.ticks, mapped.rules.tick_size);
+                const limit_price = if (command.limit_price) |price| try decimalFor(price.ticks, mapped.rules.tick_size) else null;
+                const protection_price = if (command.market_protection_price) |price| try decimalFor(price.ticks, mapped.rules.tick_size) else null;
                 result.payload = .{ .place = .{ .side = switch (command.side) {
                     .buy => .buy,
                     .sell => .sell,
-                }, .kind = .limit_gtc, .quantity = quantity_decimal, .limit_price = price_decimal, .market_protection_price = null, .portfolio_reduce_only = false, .venue_reduce_only = false } };
-                return .{ .command = result, .notional_usdt_micros = try notionalMicros(quantity_decimal, price_decimal) };
+                }, .kind = try orderKind(command), .quantity = quantity_decimal, .limit_price = limit_price, .market_protection_price = protection_price, .portfolio_reduce_only = command.portfolio_reduce_only, .venue_reduce_only = command.venue_reduce_only } };
+                return .{ .command = result, .notional_usdt_micros = try notionalMicros(quantity_decimal, limit_price orelse protection_price orelse return error.UnsupportedValue) };
             },
             .amend => {
                 const quantity = command.quantity orelse return error.UnsupportedValue;
@@ -707,16 +752,33 @@ pub const OkxVenueAdapter = struct {
         const sequence = self.next_event_sequence;
         self.next_event_sequence = try std.math.add(u64, self.next_event_sequence, 1);
         const private_envelope = envelope orelse return output.append(.{ .envelope = .{
-            .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = 1, .identity = .{ .stream = binding.session, .sequence = sequence },
-            .source_fact_identity = source_fact_identity, .scope = scope, .venue = binding.venue, .exchange_account = binding.account,
-            .instrument = instrument, .asset = asset, .source_stream = binding.session, .source_sequence = sequence,
-            .adapter_session = binding.session, .times = .{ .monotonic_ns = self.clock.now() },
+            .event_type = @intFromEnum(canonical.eventType(event)),
+            .schema_version = 1,
+            .identity = .{ .stream = binding.session, .sequence = sequence },
+            .source_fact_identity = source_fact_identity,
+            .scope = scope,
+            .venue = binding.venue,
+            .exchange_account = binding.account,
+            .instrument = instrument,
+            .asset = asset,
+            .source_stream = binding.session,
+            .source_sequence = sequence,
+            .adapter_session = binding.session,
+            .times = .{ .monotonic_ns = self.clock.now() },
             .raw_evidence = .{ .stream = binding.session, .sequence = sequence, .digest = @splat(0) },
         }, .event = event });
         try output.append(.{ .envelope = .{
-            .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = 1, .identity = .{ .stream = binding.session, .sequence = sequence },
-            .source_fact_identity = source_fact_identity, .scope = scope, .venue = binding.venue, .exchange_account = binding.account,
-            .instrument = instrument, .asset = asset, .source_stream = binding.session, .source_sequence = private_envelope.raw_evidence.stream_sequence,
+            .event_type = @intFromEnum(canonical.eventType(event)),
+            .schema_version = 1,
+            .identity = .{ .stream = binding.session, .sequence = sequence },
+            .source_fact_identity = source_fact_identity,
+            .scope = scope,
+            .venue = binding.venue,
+            .exchange_account = binding.account,
+            .instrument = instrument,
+            .asset = asset,
+            .source_stream = binding.session,
+            .source_sequence = private_envelope.raw_evidence.stream_sequence,
             .adapter_session = binding.session,
             .times = .{ .source_utc_ns = private_envelope.source_time_utc_ns, .receive_utc_ns = private_envelope.receive_time_utc_ns, .monotonic_ns = private_envelope.monotonic_time_ns, .audit_utc_ns = private_envelope.wall_time_utc_ns },
             .raw_evidence = .{ .stream = binding.session, .sequence = private_envelope.raw_evidence.stream_sequence, .digest = private_envelope.raw_evidence.sha256 },
@@ -753,9 +815,35 @@ pub const OkxVenueAdapter = struct {
     }
 };
 
-fn validateValues(command: canonical.OrderCommand, instrument_rules: InstrumentRules) !void {
+fn validatePlace(command: canonical.OrderCommand, instrument_rules: InstrumentRules) !void {
     try validateQuantity(command.quantity orelse return error.UnsupportedValue, instrument_rules);
-    try validatePrice(command.limit_price orelse return error.UnsupportedValue, instrument_rules);
+    const expected_tif: canonical.TimeInForce = switch (command.order_type) {
+        .limit => .good_til_canceled,
+        .market, .ioc => .immediate_or_cancel,
+        .fok => .fill_or_kill,
+        .post_only => .post_only,
+    };
+    if (command.time_in_force != expected_tif) return error.UnsupportedValue;
+    switch (command.order_type) {
+        .market => {
+            if (command.limit_price != null) return error.UnsupportedValue;
+            try validatePrice(command.market_protection_price orelse return error.UnsupportedValue, instrument_rules);
+        },
+        else => {
+            try validatePrice(command.limit_price orelse return error.UnsupportedValue, instrument_rules);
+            if (command.market_protection_price != null) return error.UnsupportedValue;
+        },
+    }
+}
+
+fn orderKind(command: canonical.OrderCommand) !order.OrderKind {
+    return switch (command.order_type) {
+        .limit => .limit_gtc,
+        .market => .market,
+        .ioc => .limit_ioc,
+        .fok => .limit_fok,
+        .post_only => .post_only,
+    };
 }
 
 fn digestIdentity(digest: [32]u8) u128 {
@@ -797,7 +885,10 @@ fn balanceFor(value: private.Balance) !canonical.AccountBalance {
     const available = try assetAmount(asset, value.available_balance orelse return error.MissingBalanceAvailable);
     const held = try assetAmount(asset, value.frozen_balance orelse return error.MissingBalanceHeld);
     return .{
-        .asset = asset, .total = total, .available = available, .held = held,
+        .asset = asset,
+        .total = total,
+        .available = available,
+        .held = held,
         .liability = if (value.liability) |amount| try assetAmount(asset, amount) else null,
         .cash_balance = if (value.cash_balance) |amount| try assetAmount(asset, amount) else null,
         .isolated_liability = if (value.isolated_liability) |amount| try assetAmount(asset, amount) else null,
@@ -1041,16 +1132,42 @@ test "OKX private facts map losslessly to canonical execution fill and account f
 
     var output: canonical.AdapterOutputBatch = .{};
     try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(1, 1), .payload = .{ .execution_report = .{
-        .venue_order_id = @enumFromInt(1001), .client_order_id = try private.ClientOrderId.init("RWN-16"), .instrument = .btc_usdt_spot,
-        .side = .buy, .order_type = .limit, .status = .partially_filled, .margin_mode = .isolated, .position_side = .net, .venue_reduce_only = true, .leverage = try private.Decimal.parse("3"), .quantity = try private.Decimal.parse("0.0002"), .limit_price = try private.Decimal.parse("50000"),
-        .cumulative_filled_quantity = try private.Decimal.parse("0.0001"), .average_fill_price = try private.Decimal.parse("50000"), .request_id = try private.FixedText(32).init("request"),
-        .last_trade_id = @enumFromInt(2001), .venue_update_time_utc_ns = 1, .owned_by_ringwin = true,
+        .venue_order_id = @enumFromInt(1001),
+        .client_order_id = try private.ClientOrderId.init("RWN-16"),
+        .instrument = .btc_usdt_spot,
+        .side = .buy,
+        .order_type = .limit,
+        .status = .partially_filled,
+        .margin_mode = .isolated,
+        .position_side = .net,
+        .venue_reduce_only = true,
+        .leverage = try private.Decimal.parse("3"),
+        .quantity = try private.Decimal.parse("0.0002"),
+        .limit_price = try private.Decimal.parse("50000"),
+        .cumulative_filled_quantity = try private.Decimal.parse("0.0001"),
+        .average_fill_price = try private.Decimal.parse("50000"),
+        .request_id = try private.FixedText(32).init("request"),
+        .last_trade_id = @enumFromInt(2001),
+        .venue_update_time_utc_ns = 1,
+        .owned_by_ringwin = true,
     } } });
     try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(2, 2), .payload = .{ .fill = .{
-        .venue_trade_id = @enumFromInt(2001), .venue_bill_id = @enumFromInt(3001), .venue_order_id = @enumFromInt(1001), .client_order_id = try private.ClientOrderId.init("RWN-16"),
-        .instrument = .btc_usdt_spot, .side = .buy, .quantity = try private.Decimal.parse("0.0001"), .price = try private.Decimal.parse("50000"), .fee = try private.Decimal.parse("-0.00000001"),
-        .fee_asset = try private.AssetCode.init("BTC"), .rebate = try private.Decimal.parse("0.01"), .rebate_asset = try private.AssetCode.init("USDT"), .realized_pnl = try private.Decimal.parse("0"),
-        .liquidity = .maker, .venue_fill_time_utc_ns = 1, .owned_by_ringwin = true,
+        .venue_trade_id = @enumFromInt(2001),
+        .venue_bill_id = @enumFromInt(3001),
+        .venue_order_id = @enumFromInt(1001),
+        .client_order_id = try private.ClientOrderId.init("RWN-16"),
+        .instrument = .btc_usdt_spot,
+        .side = .buy,
+        .quantity = try private.Decimal.parse("0.0001"),
+        .price = try private.Decimal.parse("50000"),
+        .fee = try private.Decimal.parse("-0.00000001"),
+        .fee_asset = try private.AssetCode.init("BTC"),
+        .rebate = try private.Decimal.parse("0.01"),
+        .rebate_asset = try private.AssetCode.init("USDT"),
+        .realized_pnl = try private.Decimal.parse("0"),
+        .liquidity = .maker,
+        .venue_fill_time_utc_ns = 1,
+        .owned_by_ringwin = true,
     } } });
     try std.testing.expectEqual(@as(u8, 2), output.len);
     try std.testing.expectEqual(canonical.ExecutionReportStatus.partially_filled, output.events[0].event.execution_report.status);
@@ -1148,6 +1265,37 @@ test "OKX venue adapter translates canonical commands and itemizes a batch" {
     try std.testing.expectEqual(@as(u64, 1), transport.calls);
     try std.testing.expectEqual(@as(u64, 1), raw.calls);
     try adapter.stop(.{ .monotonic_ns = 1 });
+}
+
+test "OKX adapter preserves canonical order semantics at the execution seam" {
+    var raw: TestRawSink = .{};
+    var transport: TestTransport = .{};
+    var chain: live.Chain = .{ .mode = .demo_live, .qualification = qualification(), .raw_sink = raw.interface(), .transport = transport.interface() };
+    var clock: TestClock = .{};
+    var implementation = OkxVenueAdapter.init(std.testing.allocator, &chain, clock.interface(), testProfile(), testRules());
+    try startTest(implementation.adapter());
+
+    var market_command = try testCommand(1);
+    market_command.order_type = .market;
+    market_command.time_in_force = .immediate_or_cancel;
+    market_command.limit_price = null;
+    market_command.market_protection_price = .{ .instrument = btc_usdt_spot, .rules_version = 8, .ticks = 500_000 };
+    market_command.portfolio_reduce_only = true;
+    market_command.venue_reduce_only = true;
+    const translated = try implementation.translate(market_command, 1);
+    switch (translated.command.payload) {
+        .place => |place| {
+            try std.testing.expectEqual(order.OrderKind.market, place.kind);
+            try std.testing.expect(place.limit_price == null);
+            try std.testing.expect(place.market_protection_price != null);
+            try std.testing.expect(place.portfolio_reduce_only);
+            try std.testing.expect(place.venue_reduce_only);
+        },
+        else => return error.ExpectedPlace,
+    }
+
+    market_command.time_in_force = .good_til_canceled;
+    try std.testing.expectError(error.UnsupportedValue, implementation.translate(market_command, 2));
 }
 
 test "OKX venue adapter preserves not-sent and unknown without retrying transport" {

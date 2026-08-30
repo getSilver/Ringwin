@@ -2,20 +2,25 @@
 //! This executable is intentionally separate from replay-capable product code.
 
 const std = @import("std");
+const account_projection = @import("account_projection.zig");
+const canonical = @import("canonical_event.zig");
 const engine = @import("trading_shard.zig");
-const journal = @import("journal.zig");
 const auth = @import("okx_rest_auth.zig");
 const curl = @import("okx_curl_transport.zig");
 const live = @import("okx_live_chain.zig");
 const market = @import("okx_public_market.zig");
 const order = @import("okx_order_entry.zig");
 const private = @import("okx_private_reconciliation.zig");
-const spot = @import("okx_spot_projection.zig");
+const okx_adapter = @import("okx_venue_adapter.zig");
+const lifecycle = @import("simulated_lifecycle_projection.zig");
 const strategy = @import("strategy_host_gateway.zig");
+const venue = @import("venue_adapter.zig");
 
 const buy_quantity_atoms: i64 = 20_000; // 0.0002 BTC; Demo minimum plus exact 1e-8 fee/quote projection
 const min_quantity_atoms: i64 = 1_000; // current BTC-USDT minSz 0.00001
 const source_session: u64 = 1;
+const demo_venue: canonical.VenueIdentity = 1;
+const demo_account: canonical.ExchangeAccountIdentity = 2;
 
 const RestEndpoint = struct {
     source: private.IngressSource,
@@ -47,26 +52,30 @@ pub fn main(init: std.process.Init) !void {
     defer owner.deinit();
     var raw: RawSink = .{};
     var reconciler: private.Reconciler = .{};
-    var projection: spot.Projection = .{};
-    var stable = journal.Journal.init();
-    var stable_sequence: u64 = 1;
-
-    try establishReady(init, &owner, &raw, &reconciler);
-    try progress(init.io, "bootstrap");
-    while (reconciler.drainReconciled()) |event| switch (event.payload) {
-        .exchange_balance_snapshot => |snapshot| if (snapshot.scope == .full_rest) {
-            try record(&projection, &stable, &stable_sequence, event);
-        },
-        else => {},
+    var chain: live.Chain = .{
+        .mode = .demo_live,
+        .qualification = qualified(),
+        .raw_sink = raw.interface(),
+        .transport = owner.transport(),
     };
-    if (projection.baseline_btc_atoms == null) return error.MissingBaselineBtc;
+    var adapter_clock: AdapterClock = .{};
+    var implementation = okx_adapter.OkxVenueAdapter.init(init.gpa, &chain, adapter_clock.interface(), demoProfile(), demoRules());
+    implementation.attachPrivateReconciler(&reconciler);
+    const adapter = implementation.adapter();
+    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4 });
+    var projection: DemoProjection = .{};
+
+    try establishReady(init, &owner, &implementation, &reconciler);
+    try projection.drain(adapter);
+    try progress(init.io, "bootstrap");
+    const baseline_btc_atoms = projection.btcBalance() orelse return error.MissingBaselineBtc;
     try progress(init.io, "baseline");
 
     if (mode == .cleanup_only) {
         try cleanupResidual(init, &owner, &raw);
         return;
     }
-    if (projection.baseline_btc_atoms.? != 0) return error.NonzeroBaselineBtc;
+    if (baseline_btc_atoms != 0) return error.NonzeroBaselineBtc;
 
     const prices = try ticker(init, &owner);
     const limits = try priceLimits(init, &owner);
@@ -79,71 +88,164 @@ pub fn main(init: std.process.Init) !void {
     const buy_client = strategy_buy.command.command.client_order_id;
     const sell_client = order.clientOrderId((@as(u128, run_identity) << 32) | 2);
 
-    var chain: live.Chain = .{
-        .mode = .demo_live,
-        .qualification = qualified(),
-        .raw_sink = raw.interface(),
-        .transport = owner.transport(),
-    };
     var cleanup_needed = false;
-    defer if (cleanup_needed) emergencyCleanup(init, &owner, &chain, sell_client) catch {};
+    defer if (cleanup_needed) emergencyCleanup(init, &owner, adapter, sell_client) catch {};
 
     try refresh(&owner, init.io);
-    const buy_attempt = try chain.dispatch(init.gpa, &.{strategy_buy.command});
+    const buy_attempt = try dispatch(adapter, strategy_buy.command);
+    const buy_dispatch = switch (buy_attempt.event) {
+        .order_dispatch_result => |value| value,
+        else => return error.MissingDispatchResult,
+    };
     try strategy_buy.ingress.applyDispatchResult(
-        buy_attempt.dispatch.items[0].attempt_id,
-        switch (buy_attempt.dispatch.items[0].state) {
+        buy_attempt.envelope.identity.sequence,
+        switch (buy_dispatch.state) {
             .submitted => .submitted,
             .unknown => .unknown,
             .not_sent => return error.BuyNotSent,
         },
     );
-    try requireVenueAccepted(init.io, buy_attempt.dispatch.items[0], error.BuyNotSent, error.BuyRejected);
+    try requireVenueAccepted(init.io, buy_dispatch, error.BuyNotSent, error.BuyRejected);
     cleanup_needed = true;
-    const buy_result = try waitForOrder(init, &owner, &raw, &reconciler, &projection, &stable, &stable_sequence, buy_client);
-    if (!buy_result.terminal or projection.portfolio.position_base_atoms < min_quantity_atoms)
+    const buy_result = try waitForOrder(init, &owner, &implementation, &projection, buy_client.slice());
+    if (!buy_result.terminal or projection.positionLots() < min_quantity_atoms)
         return error.BuyDidNotFillMinimum;
 
-    const cleanup_atoms = projection.portfolio.position_base_atoms;
+    const cleanup_atoms: i64 = @intCast(projection.positionLots());
     const fresh_prices = try ticker(init, &owner);
     const fresh_limits = try priceLimits(init, &owner);
     const sell_price_tenths = try protectedSellPrice(fresh_prices, fresh_limits);
     try refresh(&owner, init.io);
     const sell = authorizedPlace(2, 2, sell_client, .sell, .market, cleanup_atoms, sell_price_tenths);
-    const sell_attempt = try chain.dispatch(init.gpa, &.{sell});
-    try requireVenueAccepted(init.io, sell_attempt.dispatch.items[0], error.CleanupNotSent, error.CleanupRejected);
+    const sell_attempt = try dispatch(adapter, sell);
+    const sell_result_dispatch = switch (sell_attempt.event) {
+        .order_dispatch_result => |value| value,
+        else => return error.MissingDispatchResult,
+    };
+    try requireVenueAccepted(init.io, sell_result_dispatch, error.CleanupNotSent, error.CleanupRejected);
     // A possibly-sent cleanup is never replayed by the emergency path.
     cleanup_needed = false;
-    const sell_result = try waitForOrder(init, &owner, &raw, &reconciler, &projection, &stable, &stable_sequence, sell_client);
+    const sell_result = try waitForOrder(init, &owner, &implementation, &projection, sell_client.slice());
     if (!sell_result.terminal or !sell_result.saw_balance) return error.CleanupUnconfirmed;
-    if (projection.portfolio.position_base_atoms != 0 or projection.portfolio.open_cost_quote_atoms != 0)
+    if (projection.positionLots() != 0)
         return error.CleanupIncomplete;
-    if (!projection.economicReconciled()) return error.FinalBalanceMismatch;
-
-    try stable.seal();
-    const replayed = try spot.replayStable(stable.bytes());
-    if (!std.mem.eql(u8, &projection.digest(), &replayed.digest())) return error.ReplayDigestMismatch;
+    if (projection.has_unknown) return error.FinalUnknown;
+    try projection.verifyReplay();
     const digest_text = std.fmt.bytesToHex(projection.digest(), .lower);
     var out_buffer: [512]u8 = undefined;
     var out = std.Io.File.stdout().writer(init.io, &out_buffer);
     try out.interface.print(
-        "environment=demo strategy=fixed-btc-usdt-ioc orders=2 cleanup=closed position_atoms=0 open_cost_atoms=0 raw_ingress={d} stable_records={d} replay_digest={s}\n",
-        .{ raw.count, stable_sequence - 1, &digest_text },
+        "environment=demo strategy=fixed-btc-usdt-ioc orders=2 cleanup=closed position_atoms=0 raw_ingress={d} canonical_records={d} replay_digest={s}\n",
+        .{ raw.count, projection.record_count, &digest_text },
     );
     try out.interface.flush();
 }
 
 const WaitResult = struct { terminal: bool = false, saw_balance: bool = false };
 
+const max_demo_records = 256;
+
+const DemoProjection = struct {
+    account: account_projection.AccountProjection = .{},
+    fills: lifecycle.Projection = .{},
+    records: [max_demo_records]canonical.EventRecord = undefined,
+    record_count: u16 = 0,
+    has_unknown: bool = false,
+
+    fn drain(self: *DemoProjection, adapter: venue.VenueAdapter) !void {
+        while (try adapter.tryDrain()) |batch| try self.applyBatch(batch);
+    }
+
+    fn applyBatch(self: *DemoProjection, batch: canonical.AdapterOutputBatch) !void {
+        for (batch.slice()) |event_record| try self.apply(event_record, true);
+    }
+
+    fn apply(self: *DemoProjection, event_record: canonical.EventRecord, retain: bool) !void {
+        switch (event_record.event) {
+            .account_bootstrap_snapshot, .account_observed => try self.account.apply(event_record.event),
+            .fill => _ = try self.fills.apply(event_record),
+            .order_dispatch_result => |result| {
+                if (result.state == .unknown) self.has_unknown = true;
+            },
+            .order_reconciliation_result, .account_reconciliation_result => |result| {
+                if (result.status == .unresolved) self.has_unknown = true;
+            },
+            else => {},
+        }
+        if (!retain) return;
+        if (self.record_count == self.records.len) return error.DemoRecordCapacity;
+        self.records[self.record_count] = event_record;
+        self.record_count += 1;
+    }
+
+    fn positionLots(self: *const DemoProjection) i128 {
+        return self.fills.position_lots;
+    }
+
+    fn btcBalance(self: *const DemoProjection) ?i128 {
+        for (self.account.balances[0..self.account.balance_count]) |balance|
+            if (balance.asset == okx_adapter.btc) return balance.total.atoms;
+        return null;
+    }
+
+    fn verifyReplay(self: *const DemoProjection) !void {
+        var replay: DemoProjection = .{};
+        for (self.records[0..self.record_count]) |event_record|
+            try replay.apply(event_record, false);
+        if (!std.mem.eql(u8, &self.digest(), &replay.digest())) return error.ReplayDigestMismatch;
+    }
+
+    fn digest(self: *const DemoProjection) [32]u8 {
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(std.mem.asBytes(&self.fills.position_lots));
+        hasher.update(std.mem.asBytes(&self.fills.fee_atoms));
+        hasher.update(std.mem.asBytes(&self.fills.realized_pnl_atoms));
+        hasher.update(std.mem.asBytes(&self.account.valid));
+        for (self.account.balances[0..self.account.balance_count]) |balance| {
+            hasher.update(std.mem.asBytes(&balance.asset));
+            hasher.update(std.mem.asBytes(&balance.total.atoms));
+            hasher.update(std.mem.asBytes(&balance.available.atoms));
+            hasher.update(std.mem.asBytes(&balance.held.atoms));
+        }
+        hasher.update(std.mem.asBytes(&self.has_unknown));
+        var result: [32]u8 = undefined;
+        hasher.final(&result);
+        return result;
+    }
+};
+
+test "Demo acceptance replays canonical Adapter output and rejects Unknown" {
+    const envelope = canonical.EventEnvelope{
+        .event_type = @intFromEnum(canonical.EventType.order_dispatch_result),
+        .schema_version = 1,
+        .identity = .{ .stream = 1, .sequence = 1 },
+        .source_fact_identity = 1,
+        .scope = .account,
+        .venue = demo_venue,
+        .exchange_account = demo_account,
+        .source_stream = 1,
+        .source_sequence = 1,
+        .adapter_session = source_session,
+        .times = .{ .monotonic_ns = 1 },
+        .raw_evidence = .{ .stream = 1, .sequence = 1, .digest = @splat(0) },
+    };
+    var projection: DemoProjection = .{};
+    try projection.apply(.{ .envelope = envelope, .event = .{ .order_dispatch_result = .{ .command = 1, .state = .submitted } } }, true);
+    try projection.verifyReplay();
+    var unknown = envelope;
+    unknown.identity.sequence = 2;
+    unknown.source_fact_identity = 2;
+    unknown.source_sequence = 2;
+    try projection.apply(.{ .envelope = unknown, .event = .{ .order_dispatch_result = .{ .command = 2, .state = .unknown } } }, true);
+    try std.testing.expect(projection.has_unknown);
+}
+
 fn waitForOrder(
     init: std.process.Init,
     owner: *curl.TransportOwner,
-    raw: *RawSink,
-    reconciler: *private.Reconciler,
-    projection: *spot.Projection,
-    stable: *journal.Journal,
-    stable_sequence: *u64,
-    client_order_id: order.ClientOrderId,
+    implementation: *okx_adapter.OkxVenueAdapter,
+    projection: *DemoProjection,
+    client_order_id: []const u8,
 ) !WaitResult {
     const message_buffer = try init.gpa.alloc(u8, market.max_raw_frame_bytes);
     defer init.gpa.free(message_buffer);
@@ -153,32 +255,29 @@ fn waitForOrder(
             error.WebSocketTimeout => continue,
             else => return err,
         };
-        const batch = try reconciler.ingestWsMessage(init.gpa, raw.interface(), source_session, (try clock(init.io)).times, message);
+        const batch = try implementation.ingestPrivateWs((try clock(init.io)).times, message);
         if (batch.rejection) |reason| {
             try diagnostic(init.io, "private_rejection", @tagName(reason));
             return error.PrivateIngressRejected;
         }
-        for (batch.eventSlice()) |event| switch (event.payload) {
-            .execution_report => |report| if (std.mem.eql(u8, report.client_order_id.slice(), client_order_id.slice())) {
-                try record(projection, stable, stable_sequence, event);
-                result.terminal = report.status == .filled or report.status == .canceled;
-            },
-            .fill => |fill| if (std.mem.eql(u8, fill.client_order_id.slice(), client_order_id.slice())) {
-                try record(projection, stable, stable_sequence, event);
-            },
-            .exchange_balance_snapshot => {
-                try record(projection, stable, stable_sequence, event);
-                result.saw_balance = true;
-            },
-            else => {},
-        };
-        if (result.terminal and result.saw_balance and projection.economicReconciled()) return result;
+        if (try implementation.adapter().tryDrain()) |output| {
+            for (output.slice()) |record| switch (record.event) {
+                .execution_report => |report| {
+                    if (std.mem.eql(u8, report.client_order_id.slice(), client_order_id))
+                        result.terminal = report.status == .filled or report.status == .canceled;
+                },
+                .account_bootstrap_snapshot, .account_observed => result.saw_balance = true,
+                else => {},
+            };
+            try projection.applyBatch(output);
+        }
+        if (result.terminal and result.saw_balance and !projection.has_unknown) return result;
     }
     return result;
 }
 
-fn establishReady(init: std.process.Init, owner: *curl.TransportOwner, raw: *RawSink, reconciler: *private.Reconciler) !void {
-    reconciler.beginSession(source_session);
+fn establishReady(init: std.process.Init, owner: *curl.TransportOwner, implementation: *okx_adapter.OkxVenueAdapter, reconciler: *private.Reconciler) !void {
+    try implementation.beginPrivateSession();
     try owner.wsConnect();
     var stamp = try clock(init.io);
     try owner.wsLogin(stamp.secondsSlice());
@@ -187,7 +286,7 @@ fn establishReady(init: std.process.Init, owner: *curl.TransportOwner, raw: *Raw
     var login_ok = false;
     for (0..8) |_| {
         const message = try owner.wsReceive(message_buffer, 5_000);
-        const batch = try reconciler.ingestWsMessage(init.gpa, raw.interface(), source_session, (try clock(init.io)).times, message);
+        const batch = try implementation.ingestPrivateWs((try clock(init.io)).times, message);
         if (batch.rejection != null) return error.PrivateIngressRejected;
         if (std.mem.indexOf(u8, message, "\"event\":\"login\"") != null) {
             login_ok = true;
@@ -198,16 +297,19 @@ fn establishReady(init: std.process.Init, owner: *curl.TransportOwner, raw: *Raw
     try owner.wsSend("{\"op\":\"subscribe\",\"args\":[{\"channel\":\"orders\",\"instType\":\"ANY\"},{\"channel\":\"account\"},{\"channel\":\"positions\",\"instType\":\"ANY\"}]}");
     for (0..24) |_| {
         const message = try owner.wsReceive(message_buffer, 5_000);
-        const batch = try reconciler.ingestWsMessage(init.gpa, raw.interface(), source_session, (try clock(init.io)).times, message);
+        const batch = try implementation.ingestPrivateWs((try clock(init.io)).times, message);
         if (batch.rejection != null) return error.PrivateIngressRejected;
         if (reconciler.readiness().private_stream_ready) break;
     }
     if (!reconciler.readiness().private_stream_ready) return error.IncompletePrivateStream;
     try progress(init.io, "private_stream");
-    try reconciler.beginReconciliation(raw.count);
+    const adapter = implementation.adapter();
+    if (try adapter.trySend(.{ .account_reconciliation = .{ .identity = 1, .exchange_account = demo_account, .expected_session = source_session } }) != .accepted)
+        return error.AdapterRejectedReconciliation;
+    _ = try adapter.tryDrain();
     for (0..2) |_| {
         for (rest_endpoints) |endpoint|
-            try ingestRestEndpoint(init, owner, raw, reconciler, endpoint);
+            try ingestRestEndpoint(init, owner, implementation, endpoint);
         _ = try reconciler.tryComplete();
     }
     if (!reconciler.readiness().reconciliation_ready) return error.ReconciliationNotReady;
@@ -216,8 +318,7 @@ fn establishReady(init: std.process.Init, owner: *curl.TransportOwner, raw: *Raw
 fn ingestRestEndpoint(
     init: std.process.Init,
     owner: *curl.TransportOwner,
-    raw: *RawSink,
-    reconciler: *private.Reconciler,
+    implementation: *okx_adapter.OkxVenueAdapter,
     endpoint: RestEndpoint,
 ) !void {
     var after: ?u64 = null;
@@ -232,10 +333,7 @@ fn ingestRestEndpoint(
         if (response.outcome != .response) return error.PrivateRequestUncertain;
         const row_count = try restRowCount(init.gpa, response.response.?);
         const final = endpoint.cursor == .none or row_count < 20;
-        const batch = try reconciler.ingest(
-            init.gpa,
-            raw.interface(),
-            source_session,
+        const batch = try implementation.ingestPrivateRest(
             (try clock(init.io)).times,
             endpoint.source,
             .{ .requested_after = after, .final = final },
@@ -264,12 +362,6 @@ fn restRowCount(gpa: std.mem.Allocator, raw: []const u8) !usize {
         else => return error.InvalidRestPage,
     };
     return data.items.len;
-}
-
-fn record(projection: *spot.Projection, stable: *journal.Journal, sequence: *u64, event: private.PrivateEvent) !void {
-    try spot.appendStable(stable, sequence.*, event);
-    try projection.apply(event);
-    sequence.* += 1;
 }
 
 const Prices = struct { bid_tenths: i128, ask_tenths: i128 };
@@ -396,8 +488,8 @@ fn fixedStrategyBuy(init: std.process.Init, intent_sequence: u64, price_tenths: 
     const host_order = (try ingress.applyDecisionCommand(decision)) orelse return error.RiskRejected;
     if (host_order.instrument_identity != 3 or host_order.side != .buy or
         host_order.time_in_force != .immediate_or_cancel or host_order.portfolio_reduce_only or
-        host_order.quantity != buy_quantity_atoms or host_order.limit_price_micros <= 0 or
-        host_order.reservation_micros <= 0)
+        host_order.quantity.lots != buy_quantity_atoms or host_order.limit_price.ticks <= 0 or
+        host_order.reservation.atoms <= 0)
         return error.InvalidQualifiedCommand;
     try ingress.verifyReplay();
     const order_identity = strategy_identity ^ @as(u128, intent_sequence);
@@ -408,8 +500,8 @@ fn fixedStrategyBuy(init: std.process.Init, intent_sequence: u64, price_tenths: 
             order.clientOrderId(order_identity),
             .buy,
             .limit_ioc,
-            host_order.quantity,
-            @divExact(@as(i128, host_order.limit_price_micros), 100_000),
+            @intCast(host_order.quantity.lots),
+            @divExact(host_order.limit_price.ticks, 100_000),
         ),
         .ingress = ingress,
     };
@@ -459,10 +551,86 @@ fn requireNotional(quantity_atoms: i64, price_tenths: i128) !void {
     if (micros <= 0 or micros > live.max_notional_usdt_micros) return error.NotionalLimitExceeded;
 }
 
-fn requireVenueAccepted(io: std.Io, item: order.DispatchResult, not_sent: anyerror, rejected: anyerror) !void {
+fn dispatch(adapter: venue.VenueAdapter, legacy: live.AuthorizedCommand) !canonical.EventRecord {
+    if (try adapter.trySend(.{ .order_command = try canonicalCommand(legacy) }) != .accepted)
+        return error.AdapterRejectedCommand;
+    const batch = (try adapter.tryDrain()) orelse return error.MissingDispatchResult;
+    for (batch.slice()) |event_record| switch (event_record.event) {
+        .order_dispatch_result => |result| if (result.command == legacy.command.command_id)
+            return event_record,
+        else => {},
+    };
+    return error.MissingDispatchResult;
+}
+
+fn canonicalCommand(authorized: live.AuthorizedCommand) !canonical.OrderCommand {
+    const command = authorized.command;
+    const place = switch (command.payload) {
+        .place => |value| value,
+        else => return error.UnsupportedDemoCommand,
+    };
+    const instrument: canonical.InstrumentIdentity = switch (command.instrument) {
+        .btc_usdt_spot => okx_adapter.btc_usdt_spot,
+        .btc_usdt_swap => okx_adapter.btc_usdt_swap,
+    };
+    const quantity = canonical.InstrumentQuantity{
+        .instrument = instrument,
+        .rules_version = command.rules_version,
+        .lots = try canonicalDecimal(place.quantity).exactAtoms(8),
+    };
+    const price = if (place.limit_price) |value| canonical.InstrumentPrice{
+        .instrument = instrument,
+        .rules_version = command.rules_version,
+        .ticks = try canonicalDecimal(value).exactAtoms(1),
+    } else null;
+    const protection = if (place.market_protection_price) |value| canonical.InstrumentPrice{
+        .instrument = instrument,
+        .rules_version = command.rules_version,
+        .ticks = try canonicalDecimal(value).exactAtoms(1),
+    } else null;
+    return .{
+        .identity = command.command_id,
+        .exchange_account = demo_account,
+        .instrument = instrument,
+        .client_order_id = try canonical.ClientOrderId.init(command.client_order_id.slice()),
+        .capability_version = command.capability_version,
+        .rules_version = command.rules_version,
+        .config_version = command.config_version,
+        .adapter_session = command.gateway_session,
+        .dispatch_deadline_monotonic_ns = command.dispatch_deadline_monotonic_ns,
+        .side = switch (place.side) {
+            .buy => .buy,
+            .sell => .sell,
+        },
+        .order_type = switch (place.kind) {
+            .limit_gtc => .limit,
+            .market => .market,
+            .limit_ioc => .ioc,
+            .limit_fok => .fok,
+            .post_only => .post_only,
+        },
+        .time_in_force = switch (place.kind) {
+            .limit_gtc => .good_til_canceled,
+            .market, .limit_ioc => .immediate_or_cancel,
+            .limit_fok => .fill_or_kill,
+            .post_only => .post_only,
+        },
+        .portfolio_reduce_only = place.portfolio_reduce_only,
+        .venue_reduce_only = place.venue_reduce_only,
+        .quantity = quantity,
+        .limit_price = price,
+        .market_protection_price = protection,
+    };
+}
+
+fn canonicalDecimal(value: order.Decimal) canonical.Decimal {
+    return .{ .coefficient = value.coefficient, .scale = value.scale };
+}
+
+fn requireVenueAccepted(io: std.Io, item: canonical.OrderDispatchResult, not_sent: anyerror, rejected: anyerror) !void {
     if (item.state == .not_sent) return not_sent;
-    if (item.reason != null or !std.mem.eql(u8, item.venue_code.slice(), "0")) {
-        try diagnostic(io, "venue_s_code", item.venue_code.slice());
+    if (item.reason) |reason| {
+        try diagnostic(io, "canonical_reject_reason", @tagName(reason));
         return rejected;
     }
     if (item.state != .submitted) return error.DispatchUnknown;
@@ -475,7 +643,7 @@ fn diagnostic(io: std.Io, name: []const u8, value: []const u8) !void {
     try out.interface.flush();
 }
 
-fn emergencyCleanup(init: std.process.Init, owner: *curl.TransportOwner, chain: *live.Chain, client_id: order.ClientOrderId) !void {
+fn emergencyCleanup(init: std.process.Init, owner: *curl.TransportOwner, adapter: venue.VenueAdapter, client_id: order.ClientOrderId) !void {
     const balance_atoms = try availableBtcAtoms(init, owner);
     if (balance_atoms < min_quantity_atoms) return;
     const prices = try ticker(init, owner);
@@ -483,8 +651,12 @@ fn emergencyCleanup(init: std.process.Init, owner: *curl.TransportOwner, chain: 
     const sell_price_tenths = try protectedSellPrice(prices, limits);
     try refresh(owner, init.io);
     const cleanup = authorizedPlace(99, 99, client_id, .sell, .market, balance_atoms, sell_price_tenths);
-    const attempt = try chain.dispatch(init.gpa, &.{cleanup});
-    try requireVenueAccepted(init.io, attempt.dispatch.items[0], error.CleanupNotSent, error.CleanupRejected);
+    const attempt = try dispatch(adapter, cleanup);
+    const result = switch (attempt.event) {
+        .order_dispatch_result => |value| value,
+        else => return error.MissingDispatchResult,
+    };
+    try requireVenueAccepted(init.io, result, error.CleanupNotSent, error.CleanupRejected);
 }
 
 fn cleanupResidual(init: std.process.Init, owner: *curl.TransportOwner, raw: *RawSink) !void {
@@ -506,10 +678,18 @@ fn cleanupResidual(init: std.process.Init, owner: *curl.TransportOwner, raw: *Ra
         .raw_sink = raw.interface(),
         .transport = owner.transport(),
     };
+    var adapter_clock: AdapterClock = .{};
+    var implementation = okx_adapter.OkxVenueAdapter.init(init.gpa, &chain, adapter_clock.interface(), demoProfile(), demoRules());
+    const adapter = implementation.adapter();
+    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4 });
     try refresh(owner, init.io);
     const cleanup = authorizedPlace(99, 99, client_id, .sell, .market, balance_atoms, sell_price_tenths);
-    const attempt = try chain.dispatch(init.gpa, &.{cleanup});
-    try requireVenueAccepted(init.io, attempt.dispatch.items[0], error.CleanupNotSent, error.CleanupRejected);
+    const attempt = try dispatch(adapter, cleanup);
+    const result = switch (attempt.event) {
+        .order_dispatch_result => |value| value,
+        else => return error.MissingDispatchResult,
+    };
+    try requireVenueAccepted(init.io, result, error.CleanupNotSent, error.CleanupRejected);
     for (0..6) |_| if (try availableBtcAtoms(init, owner) == 0) {
         try progress(init.io, "residual_cleanup");
         return;
@@ -672,6 +852,48 @@ fn qualified() live.Qualification {
         .reconciliation_stable = true,
         .no_unknown_orders = true,
         .cleanup_armed = true,
+    };
+}
+
+const AdapterClock = struct {
+    fn interface(self: *AdapterClock) okx_adapter.Clock {
+        return .{ .ptr = self, .now_fn = now };
+    }
+
+    fn now(_: *anyopaque) u64 {
+        return 1;
+    }
+};
+
+fn demoProfile() order.CapabilityProfile {
+    return .{
+        .version = 1,
+        .rules_version = 1,
+        .config_version = 1,
+        .gateway_session = source_session,
+        .qualification = .demo_qualified,
+        .batch_max = 4,
+        .place_limit = .{ .requests = 4, .window_ns = 1 },
+        .place_batch_limit = .{ .requests = 4, .window_ns = 1 },
+        .amend_limit = .{ .requests = 4, .window_ns = 1 },
+        .amend_batch_limit = .{ .requests = 4, .window_ns = 1 },
+        .cancel_limit = .{ .requests = 4, .window_ns = 1 },
+        .cancel_batch_limit = .{ .requests = 4, .window_ns = 1 },
+        .subaccount_place_amend_limit = .{ .requests = 4, .window_ns = 1 },
+        .limit = true,
+        .protected_market_ioc = true,
+        .ioc = true,
+        .fok = true,
+        .native_amend = true,
+        .native_post_only = true,
+        .swap_venue_reduce_only = true,
+    };
+}
+
+fn demoRules() okx_adapter.Rules {
+    return .{
+        .spot = .{ .identity = okx_adapter.btc_usdt_spot, .tick_size = .{ .coefficient = 1, .scale = 1 }, .lot_size = .{ .coefficient = 1, .scale = 8 } },
+        .swap = .{ .identity = okx_adapter.btc_usdt_swap, .tick_size = .{ .coefficient = 1, .scale = 1 }, .lot_size = .{ .coefficient = 1, .scale = 2 } },
     };
 }
 

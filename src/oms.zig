@@ -526,13 +526,13 @@ fn validateTarget(order: *const Order, intent: Intent) !void {
 test "unknown order rejects a later place without changing identity" {
     var state: Oms = .{};
     var first: IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
-    first.members[0] = .{ .intent_sequence = 1, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 2, .limit_price_micros = 3, .reservation_micros = 6 };
+    first.members[0] = .{ .intent_sequence = 1, .operation = .place, .instrument = 1, .quantity = 2, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 6 } };
     try state.applyGroup(first);
     var dispatch: DispatchBatch = .{ .count = 1 };
     dispatch.items[0] = .{ .command_id = state.emitted()[0].command_id, .state = .unknown };
     try state.applyDispatch(dispatch);
     var second: IntentGroup = .{ .first_intent_sequence = 2, .count = 1 };
-    second.members[0] = .{ .intent_sequence = 2, .operation = .place, .instrument = .btc_usdt_swap, .quantity = 1, .limit_price_micros = 3, .reservation_micros = 4 };
+    second.members[0] = .{ .intent_sequence = 2, .operation = .place, .instrument = 2, .quantity = 1, .limit_price = .{ .instrument = 2, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 4 } };
     try std.testing.expectError(error.UncertainOrderBlocksSend, state.applyGroup(second));
     try std.testing.expectEqual(@as(u8, 1), state.order_count);
 }
