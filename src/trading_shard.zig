@@ -2947,50 +2947,6 @@ pub fn applyHealthyPrelude(run: *LiveRun) !void {
     }
 }
 
-fn finishScenario(run: *LiveRun) !LiveRun {
-    try run.decision_journal.seal();
-    return run.*;
-}
-
-pub fn runHappyPath() !LiveRun {
-    var run = try startScenario();
-    try applyHealthyPrelude(&run);
-    const command = (try applyLive(
-        &run.shard,
-        &run.decision_journal,
-        atGroup(15, .{ .identity = 1, .payload = .{
-            .timer = .{ .quantity = happy_order_quantity },
-        } }),
-    )) orelse return error.MissingOrderCommand;
-    const facts = try happyPathVenueFacts(command);
-    for (facts, 0..) |event, index| {
-        if (try applyLive(&run.shard, &run.decision_journal, event) != null)
-            return error.UnexpectedCommand;
-        if (index == 2) try assertPartialState(run.shard);
-    }
-    if (try applyLive(&run.shard, &run.decision_journal, atGroup(19, .{
-        .identity = 2,
-        .payload = .{ .mark_price = 50_200_000_000 },
-    })) != null)
-        return error.UnexpectedCommand;
-
-    return finishScenario(&run);
-}
-
-fn assertPartialState(shard: TradingShard) !void {
-    if (shard.portfolio_position.quantity != 40 or
-        shard.portfolio_position.open_cost_micros != 199_600_000 or
-        shard.exchange_position.quantity != 40 or
-        shard.exchange_position.open_cost_micros != 199_600_000 or
-        shard.total_fees_micros != 149_700 or
-        shard.portfolio_cash_micros != 19_999_850_300 or
-        shard.exchange_cash_micros != 24_999_850_300 or
-        shard.position_margin_requirement_micros != 4_400_000 or
-        shard.open_order_reservation_micros != 6_838_650 or
-        shard.risk_lease_remaining_micros != 9_988_761_350)
-        return error.PartialEconomicProjectionMismatch;
-}
-
 fn sameTrace(left: Trace, right: Trace) bool {
     if (left.len != right.len) return false;
     for (left.events[0..left.len], right.events[0..right.len]) |a, b| {
@@ -4419,53 +4375,4 @@ fn applyHealthyPreludeReplay(replay_shard: *ReplayTradingShard) !void {
     _ = try replay_shard.apply(atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000_000 } }));
     _ = try replay_shard.apply(snapshotAt(13, 100));
     _ = try replay_shard.apply(deltaAt(14, 100, 101, 49_850_000_000));
-}
-
-test "authoritative snapshot round trips at an exact shard barrier" {
-    const run = try runHappyPath();
-    var storage: [32 * 1024]u8 = undefined;
-    const encoded = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &storage);
-    const restored = try TradingShard.restoreSnapshot(encoded);
-
-    try std.testing.expectEqual(run.decision_journal.last_sequence, restored.barrier);
-    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
-
-    var duplicate_storage: [32 * 1024]u8 = undefined;
-    const duplicate = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &duplicate_storage);
-    try std.testing.expectEqualSlices(u8, encoded, duplicate);
-
-    const independent = try runHappyPath();
-    var independent_storage: [32 * 1024]u8 = undefined;
-    const independent_encoded = try independent.shard.snapshot(&independent.decision_journal, independent.decision_journal.last_sequence, &independent_storage);
-    try std.testing.expectEqualSlices(u8, encoded, independent_encoded);
-
-    var damaged_storage: [32 * 1024]u8 = undefined;
-    @memcpy(damaged_storage[0..encoded.len], encoded);
-    damaged_storage[encoded.len - 1] ^= 1;
-    try std.testing.expectError(error.InvalidSnapshotPayload, TradingShard.restoreSnapshot(damaged_storage[0..encoded.len]));
-    try std.testing.expectError(error.InvalidSnapshotBarrier, run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence - 1, &duplicate_storage));
-}
-
-test "snapshot restore replays only the stable journal tail without send capability" {
-    var prefix = try startScenario();
-    try prefix.decision_journal.seal();
-    var snapshot_storage: [32 * 1024]u8 = undefined;
-    const encoded = try prefix.shard.snapshot(&prefix.decision_journal, prefix.decision_journal.last_sequence, &snapshot_storage);
-
-    var live = prefix.shard;
-    var tail = journal.Journal.initAt(prefix.decision_journal.last_sequence + 1);
-    _ = try applyLive(&live, &tail, atGroup(12, .{ .identity = 9, .payload = .{ .mark_price = 50_000_000_000 } }));
-    try tail.seal();
-
-    const recovered = try TradingShard.restore(encoded, tail.bytes());
-    try std.testing.expectEqual(journal.ScanStatus.clean, recovered.status);
-    try std.testing.expectEqualSlices(u8, &live.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
-    comptime std.debug.assert(!@hasDecl(SnapshotRecovery, "trySend"));
-
-    const truncated = try TradingShard.restore(encoded, tail.bytes()[0 .. tail.len - 1]);
-    try std.testing.expectEqual(journal.ScanStatus.truncated_tail, truncated.status);
-    try std.testing.expectEqualSlices(u8, &live.canonicalStateDigest(), &truncated.shard.canonicalStateDigest());
-
-    var gap = journal.Journal.initAt(prefix.decision_journal.last_sequence + 2);
-    try std.testing.expectError(error.SnapshotJournalGap, TradingShard.restore(encoded, gap.bytes()));
 }

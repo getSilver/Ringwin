@@ -449,3 +449,45 @@ test "fixed trajectories retain their sealed barriers and recovery digests" {
         try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &replayed.digest);
     }
 }
+
+test "authoritative snapshot round trips at an exact shard barrier" {
+    const run = try runHappyPath();
+    var storage: [32 * 1024]u8 = undefined;
+    const encoded = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &storage);
+    const restored = try engine.TradingShard.restoreSnapshot(encoded);
+    try std.testing.expectEqual(run.decision_journal.last_sequence, restored.barrier);
+    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+
+    var duplicate_storage: [32 * 1024]u8 = undefined;
+    const duplicate = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &duplicate_storage);
+    try std.testing.expectEqualSlices(u8, encoded, duplicate);
+    const independent = try runHappyPath();
+    var independent_storage: [32 * 1024]u8 = undefined;
+    const independent_encoded = try independent.shard.snapshot(&independent.decision_journal, independent.decision_journal.last_sequence, &independent_storage);
+    try std.testing.expectEqualSlices(u8, encoded, independent_encoded);
+    var damaged_storage: [32 * 1024]u8 = undefined;
+    @memcpy(damaged_storage[0..encoded.len], encoded);
+    damaged_storage[encoded.len - 1] ^= 1;
+    try std.testing.expectError(error.InvalidSnapshotPayload, engine.TradingShard.restoreSnapshot(damaged_storage[0..encoded.len]));
+    try std.testing.expectError(error.InvalidSnapshotBarrier, run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence - 1, &duplicate_storage));
+}
+
+test "snapshot restore replays only the stable journal tail without send capability" {
+    var prefix = try start(defaultAuthorization(), .leveraged);
+    try prefix.decision_journal.seal();
+    var snapshot_storage: [32 * 1024]u8 = undefined;
+    const encoded = try prefix.shard.snapshot(&prefix.decision_journal, prefix.decision_journal.last_sequence, &snapshot_storage);
+    var live = prefix.shard;
+    var tail = journal.Journal.initAt(prefix.decision_journal.last_sequence + 1);
+    _ = try engine.applyStable(&live, &tail, atGroup(12, .{ .identity = 9, .payload = .{ .mark_price = 50_000_000_000 } }));
+    try tail.seal();
+    const recovered = try engine.TradingShard.restore(encoded, tail.bytes());
+    try std.testing.expectEqual(journal.ScanStatus.clean, recovered.status);
+    try std.testing.expectEqualSlices(u8, &live.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
+    comptime std.debug.assert(!@hasDecl(engine.SnapshotRecovery, "trySend"));
+    const truncated = try engine.TradingShard.restore(encoded, tail.bytes()[0 .. tail.len - 1]);
+    try std.testing.expectEqual(journal.ScanStatus.truncated_tail, truncated.status);
+    try std.testing.expectEqualSlices(u8, &live.canonicalStateDigest(), &truncated.shard.canonicalStateDigest());
+    var gap = journal.Journal.initAt(prefix.decision_journal.last_sequence + 2);
+    try std.testing.expectError(error.SnapshotJournalGap, engine.TradingShard.restore(encoded, gap.bytes()));
+}
