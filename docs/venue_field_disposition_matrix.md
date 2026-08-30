@@ -119,6 +119,7 @@
 | Spot `balanceUpdate` | `a`, `d`, `T` | `RE:balance-change/C4` | 增量变动不能伪装为绝对余额；用来触发对账。 |
 | Spot `exchangeInfo` | `symbols[].symbol`, `status`, `baseAsset`, `baseAssetPrecision`, `quoteAsset`, `quotePrecision`, `baseCommissionPrecision`, `quoteCommissionPrecision`, `orderTypes[]`, `icebergAllowed`, `ocoAllowed`, `quoteOrderQtyMarketAllowed`, `allowTrailingStop`, `cancelReplaceAllowed`, `amendAllowed` | `C6/C7`（身份/精度/状态/普通 order types）；`U:attached-algo`（iceberg/OCO/trailing）；`RE:capability-detail`（其余） | 形成规则候选与 Profile 资料，不据文档直接授权。 |
 | Spot `exchangeInfo` | `filters[].filterType`, `minPrice`, `maxPrice`, `tickSize`, `minQty`, `maxQty`, `stepSize`, `minNotional`, `maxNotional`, `limit`, `maxNumOrders`, `maxNumAlgoOrders`, `applyToMarket`, `avgPriceMins` | `C7`（价格/数量/名义规则）；`AI:limit`（limit）；`U:attached-algo`（maxNumAlgoOrders）；`RE:rule-detail`（其余） | 精确规则和有界限制。 |
+| Spot order transport | canonical `OrderCommand` 的 client order id、side、type、TIF、quantity、price、reduce-only、revision 与 deadline | `AI:transport`；结果为 `OrderDispatchResult` | 私有 codec 只接收 Canonical 值；TIF/post-only/reduce-only/amend 必须在已激活 CapabilityProfile 下复核，超时或过期版本不得发送。 |
 
 ### 3.4 Binance：USD-M user stream 与 exchangeInfo
 
@@ -131,6 +132,7 @@
 | `ACCOUNT_UPDATE` | `e`, `E`, `T`, `a.m`, `a` | `C4`（时间）；`RE:account-detail`（reason） | reason 不可成为余额语义替代。 |
 | USD-M `exchangeInfo.symbols[]` | `symbol`, `pair`, `contractType`, `deliveryDate`, `onboardDate`, `status`, `baseAsset`, `quoteAsset`, `marginAsset`, `pricePrecision`, `quantityPrecision`, `baseAssetPrecision`, `quotePrecision`, `underlyingType`, `underlyingSubType[]`, `settlePlan`, `triggerProtect`, `liquidationFee`, `marketTakeBound`, `maxMoveOrderLimit` | `C6/C7`（目标线性身份/规则）；`U:product`（非 perpetual）；`U:attached-algo`（triggerProtect）；`RE:rule-detail`（其余） | 只激活 USDT perpetual。 |
 | USD-M `exchangeInfo.filters[]` | `filterType`, `minPrice`, `maxPrice`, `tickSize`, `maxPrice`, `minQty`, `maxQty`, `stepSize`, `limit`, `notional`, `multiplierUp`, `multiplierDown`, `multiplierDecimal`, `maxNumOrders`, `maxNumAlgoOrders`, `maxNumIcebergOrders`, `maxPosition` | `C7`（price/qty/notional）；`AI:limit`（limit）；`U:attached-algo`（algo/iceberg）；`RE:rule-detail`（其余） | 规则必须在 ConfigEvent 处激活。 |
+| USD-M order transport | canonical `OrderCommand` 的 client order id、side、type、TIF、quantity、price、VenueReduceOnly、revision 与 deadline | `AI:transport`；结果为 `OrderDispatchResult` | 签名、限流和响应关联不越过 seam；无完整 RawIngress 响应、写入不确定或未知状态均失败关闭，绝不自动重发。 |
 
 ### 3.5 Bybit：private order、execution、wallet、position 与 instruments-info
 
