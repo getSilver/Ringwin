@@ -58,7 +58,7 @@ pub const SimulatedMarketFeed = struct {
     }
 };
 fn record(venue: canonical.VenueIdentity, sequence: u64, event: canonical.CanonicalEvent) canonical.EventRecord {
-    return .{ .envelope = .{ .event_type = 2, .schema_version = 1, .identity = .{ .stream = 2, .sequence = sequence }, .source_fact_identity = sequence, .scope = .instrument, .venue = venue, .instrument = 1, .source_stream = 2, .source_sequence = sequence, .times = .{ .receive_utc_ns = 1, .monotonic_ns = 1, .audit_utc_ns = 1 }, .raw_evidence = .{ .stream = 2, .sequence = sequence, .digest = @splat(0) } }, .event = event };
+    return .{ .envelope = .{ .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = 1, .identity = .{ .stream = 2, .sequence = sequence }, .source_fact_identity = sequence, .scope = .instrument, .venue = venue, .instrument = 1, .source_stream = 2, .source_sequence = sequence, .times = .{ .receive_utc_ns = 1, .monotonic_ns = 1, .audit_utc_ns = 1 }, .raw_evidence = .{ .stream = 2, .sequence = sequence, .digest = @splat(0) } }, .event = event };
 }
 test "simulated feed is account independent and starts with a bounded healthy snapshot" {
     var feed = SimulatedMarketFeed{};
