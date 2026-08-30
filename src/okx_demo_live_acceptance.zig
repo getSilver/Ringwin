@@ -4,7 +4,7 @@
 const std = @import("std");
 const account_projection = @import("account_projection.zig");
 const canonical = @import("canonical_event.zig");
-const engine = @import("trading_shard.zig");
+const fixture = @import("trading_shard_fixture.zig");
 const auth = @import("okx_rest_auth.zig");
 const curl = @import("okx_curl_transport.zig");
 const live = @import("okx_live_chain.zig");
@@ -450,7 +450,7 @@ fn priceTenths(value: std.json.Value, round_up: bool) !i128 {
 
 const StrategyBuy = struct {
     command: live.AuthorizedCommand,
-    ingress: engine.TradingShardHostIngress,
+    ingress: fixture.TradingShardHostIngress,
 };
 
 fn fixedStrategyBuy(init: std.process.Init, intent_sequence: u64, price_tenths: i128) !StrategyBuy {
@@ -484,7 +484,7 @@ fn fixedStrategyBuy(init: std.process.Init, intent_sequence: u64, price_tenths: 
     });
     const decision = gateway.ingest(frame, now_ns);
     if (decision != .accepted) return error.FixedStrategyRejected;
-    var ingress = try engine.TradingShardHostIngress.initHealthySpotFixtureFor(authorization);
+    var ingress = try fixture.TradingShardHostIngress.initHealthySpotFixtureFor(authorization);
     const host_order = (try ingress.applyDecisionCommand(decision)) orelse return error.RiskRejected;
     if (host_order.instrument_identity != 3 or host_order.side != .buy or
         host_order.time_in_force != .immediate_or_cancel or host_order.portfolio_reduce_only or

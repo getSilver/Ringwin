@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const engine = @import("trading_shard.zig");
+const fixture = @import("trading_shard_fixture.zig");
 const gateway_module = @import("strategy_host_gateway.zig");
 const ipc = @import("strategy_host_ipc.zig");
 const lifecycle = @import("strategy_host_lifecycle.zig");
@@ -89,7 +89,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8, brid
     );
     try std.testing.expect(accepted == .accepted);
 
-    var ingress = try engine.TradingShardHostIngress.initHealthyFixtureFor(authorization);
+    var ingress = try fixture.TradingShardHostIngress.initHealthyFixtureFor(authorization);
     try std.testing.expect(try ingress.applyDecision(accepted));
 
     try applyRejected(&ingress, gateway.ingest(frame, published_ns + 1), .duplicate_identity);
@@ -196,7 +196,7 @@ fn event(
 }
 
 fn applyRejected(
-    ingress: *engine.TradingShardHostIngress,
+    ingress: *fixture.TradingShardHostIngress,
     decision: gateway_module.Decision,
     expected: gateway_module.RejectReason,
 ) !void {
