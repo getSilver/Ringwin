@@ -16,6 +16,7 @@ const portfolio_allocation: i64 = 20_000_000_000;
 const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
+const happy_order_quantity: i64 = 100;
 
 pub const LiveRun = struct {
     shard: engine.TradingShard,
@@ -45,17 +46,22 @@ fn snapshotAt(group: u64, source_sequence: u64) engine.CoreEvent {
     } } });
 }
 
-fn deltaAt(group: u64, previous: u64, current: u64) engine.CoreEvent {
+fn deltaAt(group: u64, previous: u64, current: u64, bid_price_micros: i64) engine.CoreEvent {
     return atGroup(group, .{ .identity = current, .payload = .{ .l2_delta = .{
         .previous = previous,
         .current = current,
-        .bid_price_micros = 49_850_000_000,
+        .bid_price_micros = bid_price_micros,
         .bid_quantity = 1_000,
     } } });
 }
 
 fn apply(run: *LiveRun, event: engine.CoreEvent) !?engine.OrderCommand {
     return engine.applyStable(&run.shard, &run.decision_journal, event);
+}
+
+fn finish(run: *LiveRun) !LiveRun {
+    try run.decision_journal.seal();
+    return run.*;
 }
 
 fn start(authorization: host_gateway.Authorization, reservation_model: engine.ReservationModel) !LiveRun {
@@ -107,10 +113,92 @@ fn start(authorization: host_gateway.Authorization, reservation_model: engine.Re
     const prelude = [_]engine.CoreEvent{
         atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000_000 } }),
         snapshotAt(13, 100),
-        deltaAt(14, 100, 101),
+        deltaAt(14, 100, 101, 49_850_000_000),
     };
     for (prelude) |event| if (try apply(&run, event) != null) return error.UnexpectedCommand;
     return run;
+}
+
+fn defaultAuthorization() host_gateway.Authorization {
+    return .{
+        .strategy_identity = 1,
+        .config_version = 1,
+        .activation_identity = 1,
+        .activation_barrier = 0,
+    };
+}
+
+fn healthyRun() !LiveRun {
+    return start(defaultAuthorization(), .leveraged);
+}
+
+fn happyVenueFacts(command: engine.OrderCommand) ![6]engine.CoreEvent {
+    if (command.command_id != 1 or command.order_id != 1 or
+        command.quantity.lots != happy_order_quantity or
+        command.limit_price.ticks != 50_100_000_000 or
+        command.reservation.atoms != 11_397_750)
+        return error.InvalidOrderCommand;
+    return .{
+        atGroup(15, .{ .identity = 1, .payload = .{ .order_dispatch_result = .submitted } }),
+        atGroup(16, .{ .identity = 1, .payload = .{ .execution_report = .{ .report_id = 1, .status = .accepted, .cumulative_qty = 0, .remaining_qty = 100 } } }),
+        atGroup(17, .{ .identity = 1, .payload = .{ .fill = .{ .fill_id = 1, .quantity = 40, .price_micros = 49_900_000_000 } } }),
+        atGroup(17, .{ .identity = 2, .payload = .{ .execution_report = .{ .report_id = 2, .status = .partially_filled, .cumulative_qty = 40, .remaining_qty = 60 } } }),
+        atGroup(18, .{ .identity = 2, .payload = .{ .fill = .{ .fill_id = 2, .quantity = 60, .price_micros = 50_100_000_000 } } }),
+        atGroup(18, .{ .identity = 3, .payload = .{ .execution_report = .{ .report_id = 3, .status = .filled, .cumulative_qty = 100, .remaining_qty = 0 } } }),
+    };
+}
+
+fn assertPartialState(shard: engine.TradingShard) !void {
+    if (shard.portfolio_position.quantity != 40 or
+        shard.portfolio_position.open_cost_micros != 199_600_000 or
+        shard.exchange_position.quantity != 40 or
+        shard.exchange_position.open_cost_micros != 199_600_000 or
+        shard.total_fees_micros != 149_700 or
+        shard.portfolio_cash_micros != 19_999_850_300 or
+        shard.exchange_cash_micros != 24_999_850_300 or
+        shard.position_margin_requirement_micros != 4_400_000 or
+        shard.open_order_reservation_micros != 6_838_650 or
+        shard.risk_lease_remaining_micros != 9_988_761_350)
+        return error.PartialEconomicProjectionMismatch;
+}
+
+pub fn runHappyPath() !LiveRun {
+    var run = try healthyRun();
+    const command = (try apply(&run, atGroup(15, .{ .identity = 1, .payload = .{ .timer = .{ .quantity = happy_order_quantity } } }))) orelse return error.MissingOrderCommand;
+    const facts = try happyVenueFacts(command);
+    for (facts, 0..) |event, index| {
+        if (try apply(&run, event) != null) return error.UnexpectedCommand;
+        if (index == 2) try assertPartialState(run.shard);
+    }
+    if (try apply(&run, atGroup(19, .{ .identity = 2, .payload = .{ .mark_price = 50_200_000_000 } })) != null)
+        return error.UnexpectedCommand;
+    return finish(&run);
+}
+
+pub fn runMarketGap() !LiveRun {
+    var run = try healthyRun();
+    if (try apply(&run, deltaAt(15, 102, 103, 49_860_000_000)) != null) return error.UnexpectedCommand;
+    if (try apply(&run, atGroup(16, .{ .identity = 1, .payload = .{ .timer = .{ .quantity = happy_order_quantity } } })) != null)
+        return error.CommandEscapedMarketGap;
+    if (try apply(&run, snapshotAt(17, 200)) != null) return error.UnexpectedCommand;
+    if (try apply(&run, deltaAt(18, 200, 201, 49_850_000_000)) != null) return error.UnexpectedCommand;
+    return finish(&run);
+}
+
+pub fn runRiskRejection() !LiveRun {
+    var run = try healthyRun();
+    if (try apply(&run, atGroup(15, .{ .identity = 1, .payload = .{ .timer = .{ .quantity = 100_001 } } })) != null)
+        return error.CommandEscapedRiskRejection;
+    return finish(&run);
+}
+
+pub fn runUnknownReconciliation() !LiveRun {
+    var run = try healthyRun();
+    _ = (try apply(&run, atGroup(15, .{ .identity = 1, .payload = .{ .timer = .{ .quantity = happy_order_quantity } } }))) orelse return error.MissingOrderCommand;
+    if (try apply(&run, atGroup(16, .{ .identity = 1, .payload = .{ .order_dispatch_result = .unknown } })) != null) return error.UnexpectedCommand;
+    if (try apply(&run, atGroup(17, .{ .identity = 1, .payload = .{ .order_reconciliation_result = .{ .reconciliation_id = 1, .status = .found_live, .venue_order_id = 9_001 } } })) != null) return error.UnexpectedCommand;
+    if (try apply(&run, atGroup(17, .{ .identity = 1, .payload = .{ .execution_report = .{ .report_id = 1, .status = .accepted, .cumulative_qty = 0, .remaining_qty = happy_order_quantity } } })) != null) return error.UnexpectedCommand;
+    return finish(&run);
 }
 
 pub const HostIngressSummary = struct {
@@ -253,4 +341,23 @@ test "qualified SPOT IOC intent crosses Gateway and cash risk before OrderComman
     try std.testing.expectEqual(@as(i128, 5_000), command.quantity.lots);
     try std.testing.expectEqual(@as(i128, 3_177_382), command.reservation.atoms);
     try ingress.verifyReplay();
+}
+
+test "fixed trajectories retain their sealed barriers and recovery digests" {
+    const runs = [_]LiveRun{
+        try runHappyPath(),
+        try runMarketGap(),
+        try runRiskRejection(),
+        try runUnknownReconciliation(),
+    };
+    for (runs) |run| {
+        try std.testing.expect(run.decision_journal.sealed);
+        const replayed = try engine.replayDigest(
+            run.decision_journal.bytes(),
+            run.shard.quantity_denominator,
+            run.shard.reservation_model,
+        );
+        try std.testing.expectEqual(journal.ScanStatus.clean, replayed.status);
+        try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &replayed.digest);
+    }
 }
