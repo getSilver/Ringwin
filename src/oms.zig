@@ -219,6 +219,15 @@ pub const Oms = struct {
         return true;
     }
 
+    /// Unknown and PendingCancel must not overlap a later place or amend send.
+    pub fn blocksNewSend(self: *const Oms) bool {
+        for (self.orders[0..self.order_count]) |order| switch (order.state) {
+            .unknown, .pending_cancel => return true,
+            else => {},
+        };
+        return false;
+    }
+
     pub fn orderById(self: *const Oms, id: u64) ?Order {
         for (self.orders[0..self.order_count]) |order| if (order.id == id) return order;
         return null;
@@ -226,6 +235,12 @@ pub const Oms = struct {
 
     pub fn applyGroup(self: *Oms, group: IntentGroup) !void {
         if (group.count == 0 or group.count > max_group_members) return error.InvalidIntentGroup;
+        if (self.blocksNewSend()) {
+            for (group.members[0..group.count]) |intent| switch (intent.operation) {
+                .place, .amend => return error.UncertainOrderBlocksSend,
+                .cancel => {},
+            };
+        }
         for (group.members[0..group.count], 0..) |intent, index| {
             if (intent.intent_sequence != group.first_intent_sequence + index)
                 return error.NonConsecutiveIntentGroup;
@@ -506,6 +521,20 @@ fn validateTarget(order: *const Order, intent: Intent) !void {
         .live, .partially_filled => {},
         else => return error.OrderNotMutable,
     }
+}
+
+test "unknown order rejects a later place without changing identity" {
+    var state: Oms = .{};
+    var first: IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
+    first.members[0] = .{ .intent_sequence = 1, .operation = .place, .instrument = .btc_usdt_spot, .quantity = 2, .limit_price_micros = 3, .reservation_micros = 6 };
+    try state.applyGroup(first);
+    var dispatch: DispatchBatch = .{ .count = 1 };
+    dispatch.items[0] = .{ .command_id = state.emitted()[0].command_id, .state = .unknown };
+    try state.applyDispatch(dispatch);
+    var second: IntentGroup = .{ .first_intent_sequence = 2, .count = 1 };
+    second.members[0] = .{ .intent_sequence = 2, .operation = .place, .instrument = .btc_usdt_swap, .quantity = 1, .limit_price_micros = 3, .reservation_micros = 4 };
+    try std.testing.expectError(error.UncertainOrderBlocksSend, state.applyGroup(second));
+    try std.testing.expectEqual(@as(u8, 1), state.order_count);
 }
 
 test "pending cancel outbox is reconstructed after replay" {

@@ -57,6 +57,7 @@ pub const Chain = struct {
     raw_sink: market.RawSink,
     transport: Transport,
     next_attempt_id: u64 = 1,
+    uncertain_outstanding: bool = false,
 
     pub fn dispatch(
         self: *Chain,
@@ -92,19 +93,24 @@ pub const Chain = struct {
         if (response.outcome == .response and evidence == null)
             return error.ResponseMissingRawEvidence;
 
+        const classified = try order.classifyResponse(
+            gpa,
+            &request,
+            attempt_base,
+            response.outcome,
+            response.response,
+        );
+        for (classified.items[0..classified.count]) |item| {
+            if (item.state == .unknown) self.uncertain_outstanding = true;
+        }
         return .{
-            .dispatch = try order.classifyResponse(
-                gpa,
-                &request,
-                attempt_base,
-                response.outcome,
-                response.response,
-            ),
+            .dispatch = classified,
             .raw_evidence = evidence,
         };
     }
 
     fn authorize(self: *const Chain, commands: []const AuthorizedCommand) !void {
+        if (self.uncertain_outstanding) return error.UncertainOrderBlocksSend;
         if (self.mode != .demo_live) return error.SideEffectsDisabled;
         const q = self.qualification;
         if (!q.explicit_demo_live or !q.endpoint_is_demo or !q.simulated_header or
@@ -269,6 +275,26 @@ test "qualification and aggregate notional fail closed before transport" {
     try std.testing.expectEqual(@as(u32, 0), transport.calls);
 }
 
+test "unknown dispatch latches and blocks the next send without a caller flag flip" {
+    var raw: TestRawSink = .{};
+    var transport: TestTransport = .{
+        .outcome = .write_or_response_uncertain,
+        .response = null,
+    };
+    var chain: Chain = .{
+        .mode = .demo_live,
+        .qualification = qualified(),
+        .raw_sink = raw.interface(),
+        .transport = transport.interface(),
+    };
+    const commands = [_]AuthorizedCommand{command()};
+    const first = try chain.dispatch(std.testing.allocator, &commands);
+    try std.testing.expectEqual(order.DispatchState.unknown, first.dispatch.items[0].state);
+    try std.testing.expectEqual(@as(u32, 1), transport.calls);
+    try std.testing.expectError(error.UncertainOrderBlocksSend, chain.dispatch(std.testing.allocator, &commands));
+    try std.testing.expectEqual(@as(u32, 1), transport.calls);
+}
+
 test "uncertain submission and rejected cleanup are never replayed automatically" {
     var raw: TestRawSink = .{};
     var uncertain_transport: TestTransport = .{
@@ -287,7 +313,7 @@ test "uncertain submission and rejected cleanup are never replayed automatically
     try std.testing.expectEqual(@as(u32, 1), uncertain_transport.calls);
     uncertain_chain.qualification.no_unknown_orders = false;
     try std.testing.expectError(
-        error.DemoNotQualified,
+        error.UncertainOrderBlocksSend,
         uncertain_chain.dispatch(std.testing.allocator, &commands),
     );
     try std.testing.expectEqual(@as(u32, 1), uncertain_transport.calls);
