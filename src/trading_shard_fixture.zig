@@ -9,6 +9,7 @@ const canonical = @import("canonical_event.zig");
 const journal = @import("journal.zig");
 const host_gateway = @import("strategy_host_gateway.zig");
 const engine = @import("trading_shard.zig");
+const benchmark = @import("trading_shard_benchmark.zig");
 
 const contract_denominator: i64 = 10_000;
 const initial_exchange_cash: i64 = 25_000_000_000;
@@ -240,10 +241,10 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.next();
     if (args.next()) |argument| {
-        if (std.mem.eql(u8, argument, "--benchmark")) return engine.runBenchmark(init, false, false);
-        if (std.mem.eql(u8, argument, "--benchmark-raw")) return engine.runBenchmark(init, false, true);
-        if (std.mem.eql(u8, argument, "--benchmark-four-shard")) return engine.runBenchmark(init, true, false);
-        if (std.mem.eql(u8, argument, "--benchmark-four-shard-raw")) return engine.runBenchmark(init, true, true);
+        if (std.mem.eql(u8, argument, "--benchmark")) return benchmark.runBenchmark(init, false, false);
+        if (std.mem.eql(u8, argument, "--benchmark-raw")) return benchmark.runBenchmark(init, false, true);
+        if (std.mem.eql(u8, argument, "--benchmark-four-shard")) return benchmark.runBenchmark(init, true, false);
+        if (std.mem.eql(u8, argument, "--benchmark-four-shard-raw")) return benchmark.runBenchmark(init, true, true);
         return error.UnknownArgument;
     }
     try journal.selfCheck();
