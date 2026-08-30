@@ -14,6 +14,7 @@ const market_projection = @import("market_projection.zig");
 const account_projection = @import("account_projection.zig");
 const okx_market_feed = @import("okx_market_feed.zig");
 const okx_venue_adapter = @import("okx_venue_adapter.zig");
+const trading_shard_fixture = @import("trading_shard_fixture.zig");
 
 pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
@@ -67,4 +68,5 @@ test {
     _ = account_projection;
     _ = okx_market_feed;
     _ = okx_venue_adapter;
+    _ = trading_shard_fixture;
 }

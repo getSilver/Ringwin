@@ -2947,138 +2947,6 @@ fn applyHealthyPrelude(run: *LiveRun) !void {
     }
 }
 
-pub const HostIngressSummary = struct {
-    order_intents: usize,
-    risk_accepts: usize,
-    order_commands: usize,
-    host_rejections: usize,
-    journal_records: u64,
-    order_quantity: i64,
-    order_limit_price_micros: i64,
-    reservation_micros: i64,
-};
-
-pub const QualifiedHostOrder = struct {
-    command_id: u64,
-    order_id: u64,
-    strategy_identity: u128,
-    intent_sequence: u64,
-    instrument_identity: u128,
-    side: host_gateway.Side,
-    time_in_force: host_gateway.TimeInForce,
-    portfolio_reduce_only: bool,
-    quantity: canonical.InstrumentQuantity,
-    limit_price: canonical.InstrumentPrice,
-    reservation: canonical.AssetAmount,
-};
-
-pub const TradingShardHostIngress = struct {
-    run: LiveRun,
-
-    pub fn initHealthyFixture() !TradingShardHostIngress {
-        var run = try startScenario();
-        try applyHealthyPrelude(&run);
-        return .{ .run = run };
-    }
-
-    pub fn initHealthyFixtureFor(authorization: host_gateway.Authorization) !TradingShardHostIngress {
-        var run = try startScenarioAuthorized(authorization, .leveraged);
-        try applyHealthyPrelude(&run);
-        return .{ .run = run };
-    }
-
-    pub fn initHealthySpotFixture() !TradingShardHostIngress {
-        return initHealthySpotFixtureFor(.{
-            .strategy_identity = 1,
-            .config_version = 1,
-            .activation_identity = 1,
-            .activation_barrier = 0,
-        });
-    }
-
-    pub fn initHealthySpotFixtureFor(authorization: host_gateway.Authorization) !TradingShardHostIngress {
-        var run = try startScenarioAuthorized(authorization, .cash);
-        try applyHealthyPrelude(&run);
-        return .{ .run = run };
-    }
-
-    pub fn applyDecision(self: *TradingShardHostIngress, decision: host_gateway.Decision) !bool {
-        return (try self.applyDecisionCommand(decision)) != null;
-    }
-
-    pub fn applyDecisionCommand(self: *TradingShardHostIngress, decision: host_gateway.Decision) !?QualifiedHostOrder {
-        const payload: Payload = switch (decision) {
-            .accepted => |intent| .{ .external_order_intent = intent },
-            .rejected => |rejection| .{ .strategy_intent_rejected = rejection },
-        };
-        const identity: u64 = switch (decision) {
-            .accepted => |intent| intent.intent_sequence,
-            .rejected => |rejection| rejection.intent_sequence,
-        };
-        const command = try applyLive(
-            &self.run.shard,
-            &self.run.decision_journal,
-            atGroup(15, .{ .identity = identity, .payload = payload }),
-        ) orelse return null;
-        const intent = switch (decision) {
-            .accepted => |value| value,
-            .rejected => return error.RejectionProducedCommand,
-        };
-        return .{
-            .command_id = command.command_id,
-            .order_id = command.order_id,
-            .strategy_identity = intent.strategy_identity,
-            .intent_sequence = intent.intent_sequence,
-            .instrument_identity = intent.instrument_identity,
-            .side = intent.side,
-            .time_in_force = intent.time_in_force,
-            .portfolio_reduce_only = intent.portfolio_reduce_only,
-            .quantity = command.quantity,
-            .limit_price = command.limit_price,
-            .reservation = command.reservation,
-        };
-    }
-
-    pub fn summary(self: TradingShardHostIngress) HostIngressSummary {
-        var order_intents: usize = 0;
-        var risk_accepts: usize = 0;
-        var order_commands: usize = 0;
-        var host_rejections: usize = 0;
-        for (self.run.shard.trace.events[0..self.run.shard.trace.len]) |event| switch (event.kind) {
-            .order_intent => order_intents += 1,
-            .risk_accepted => risk_accepts += 1,
-            .order_command => order_commands += 1,
-            .strategy_intent_rejected => host_rejections += 1,
-            else => {},
-        };
-        return .{
-            .order_intents = order_intents,
-            .risk_accepts = risk_accepts,
-            .order_commands = order_commands,
-            .host_rejections = host_rejections,
-            .journal_records = self.run.decision_journal.records,
-            .order_quantity = self.run.shard.order_quantity,
-            .order_limit_price_micros = self.run.shard.order_limit_price_micros,
-            .reservation_micros = self.run.shard.open_order_reservation_micros,
-        };
-    }
-
-    pub fn applyDispatchResult(self: *TradingShardHostIngress, identity: u64, status: DispatchStatus) !void {
-        if ((try applyLive(
-            &self.run.shard,
-            &self.run.decision_journal,
-            atGroup(16, .{ .identity = identity, .payload = .{ .order_dispatch_result = status } }),
-        )) != null) return error.DispatchProducedCommand;
-    }
-
-    pub fn verifyReplay(self: *TradingShardHostIngress) !void {
-        const quantity_denominator = self.run.shard.quantity_denominator;
-        const reservation_model = self.run.shard.reservation_model;
-        try self.run.decision_journal.seal();
-        _ = try assertReplayEquivalentConfigured(self.run, quantity_denominator, reservation_model);
-    }
-};
-
 fn finishScenario(run: *LiveRun) !LiveRun {
     try run.decision_journal.seal();
     return run.*;
@@ -4264,6 +4132,17 @@ fn replayConfigured(bytes: []const u8, quantity_denominator: i64, reservation_mo
         .quantity_denominator = quantity_denominator,
         .reservation_model = reservation_model,
     });
+}
+
+/// Replays a stable journal and reports only its externally comparable digest.
+/// It observes recovery; all state transitions remain inside `TradingShard.apply`.
+pub fn replayDigest(
+    bytes: []const u8,
+    quantity_denominator: i64,
+    reservation_model: ReservationModel,
+) !struct { status: journal.ScanStatus, digest: [Sha256.digest_length]u8 } {
+    const recovered = try replayConfigured(bytes, quantity_denominator, reservation_model);
+    return .{ .status = recovered.status, .digest = recovered.shard.canonicalStateDigest() };
 }
 
 fn replayReader(reader: *journal.Reader, initial: TradingShard) !ReplayResult {
@@ -5685,38 +5564,4 @@ test "snapshot restore replays only the stable journal tail without send capabil
 
     var gap = journal.Journal.initAt(prefix.decision_journal.last_sequence + 2);
     try std.testing.expectError(error.SnapshotJournalGap, TradingShard.restore(encoded, gap.bytes()));
-}
-
-test "qualified SPOT IOC intent crosses Gateway and cash risk before OrderCommand" {
-    const authorization: host_gateway.Authorization = .{
-        .strategy_identity = 40,
-        .config_version = 1,
-        .activation_identity = 50,
-        .activation_barrier = 10,
-    };
-    const config: host_gateway.Config = .{
-        .schema_registry = 1,
-        .decision_domain = 1,
-        .session = .{ .fencing = 1, .shard = 0, .generation = 1 },
-        .authorization = authorization,
-    };
-    const subscriptions = [_]host_gateway.Subscription{
-        host_gateway.Subscription.of(authorization.strategy_identity, &.{.mark_price}),
-    };
-    var gateway = try host_gateway.Gateway.init(config, &subscriptions);
-    try gateway.recordPublished(1, 14, 100);
-    var frame_storage: [256]u8 = undefined;
-    const frame = try host_gateway.encodeOutputOrderFrame(&frame_storage, config, 1, 14, 7, .{
-        .time_in_force = .immediate_or_cancel,
-        .quantity = 5_000,
-        .limit_price_micros = 63_500_000_000,
-    });
-    const decision = gateway.ingest(frame, 100);
-    try std.testing.expect(decision == .accepted);
-    var ingress = try TradingShardHostIngress.initHealthySpotFixtureFor(authorization);
-    const command = (try ingress.applyDecisionCommand(decision)).?;
-    try std.testing.expectEqual(host_gateway.TimeInForce.immediate_or_cancel, command.time_in_force);
-    try std.testing.expectEqual(@as(i128, 5_000), command.quantity.lots);
-    try std.testing.expectEqual(@as(i128, 3_177_382), command.reservation.atoms);
-    try ingress.verifyReplay();
 }
