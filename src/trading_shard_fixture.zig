@@ -201,6 +201,28 @@ pub fn runUnknownReconciliation() !LiveRun {
     return finish(&run);
 }
 
+pub fn runDuplicateReport() !LiveRun {
+    var run = try healthyRun();
+    const command = (try apply(&run, atGroup(15, .{ .identity = 1, .payload = .{ .timer = .{ .quantity = happy_order_quantity } } }))) orelse return error.MissingOrderCommand;
+    const facts = try happyVenueFacts(command);
+    for (facts[0..4]) |event| if (try apply(&run, event) != null) return error.UnexpectedCommand;
+    try assertPartialState(run.shard);
+    const before_duplicate_fill = run.shard.canonicalStateDigest();
+    const duplicate_fill = try run.shard.apply(atGroup(18, facts[2]));
+    if (duplicate_fill.facts.len != 0 or duplicate_fill.order_command != null or duplicate_fill.oms_commands.len != 0)
+        return error.DuplicateFillChangedState;
+    if (!std.mem.eql(u8, &before_duplicate_fill, &run.shard.canonicalStateDigest()))
+        return error.DuplicateFillChangedState;
+    if (try apply(&run, atGroup(18, facts[3])) != null) return error.UnexpectedCommand;
+    try assertPartialState(run.shard);
+    if (run.shard.ledger_transaction_count != 2) return error.DuplicateCreatedLedgerTransaction;
+    if (try apply(&run, atGroup(19, facts[4])) != null) return error.UnexpectedCommand;
+    if (try apply(&run, atGroup(19, facts[5])) != null) return error.UnexpectedCommand;
+    if (try apply(&run, atGroup(20, .{ .identity = 2, .payload = .{ .mark_price = 50_200_000_000 } })) != null)
+        return error.UnexpectedCommand;
+    return finish(&run);
+}
+
 pub const HostIngressSummary = struct {
     order_intents: usize,
     risk_accepts: usize,
@@ -349,6 +371,7 @@ test "fixed trajectories retain their sealed barriers and recovery digests" {
         try runMarketGap(),
         try runRiskRejection(),
         try runUnknownReconciliation(),
+        try runDuplicateReport(),
     };
     for (runs) |run| {
         try std.testing.expect(run.decision_journal.sealed);
