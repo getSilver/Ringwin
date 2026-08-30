@@ -223,6 +223,58 @@ pub fn runDuplicateReport() !LiveRun {
     return finish(&run);
 }
 
+fn verifyScenario(run: LiveRun) !void {
+    const replayed = try engine.replayDigest(
+        run.decision_journal.bytes(),
+        run.shard.quantity_denominator,
+        run.shard.reservation_model,
+    );
+    if (replayed.status != .clean or
+        !std.mem.eql(u8, &run.shard.canonicalStateDigest(), &replayed.digest))
+        return error.ReplayNotEquivalent;
+}
+
+/// Runs the deterministic acceptance fixture outside the production state module.
+pub fn main(init: std.process.Init) !void {
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
+    defer args.deinit();
+    _ = args.next();
+    if (args.next()) |argument| {
+        if (std.mem.eql(u8, argument, "--benchmark")) return engine.runBenchmark(init, false, false);
+        if (std.mem.eql(u8, argument, "--benchmark-raw")) return engine.runBenchmark(init, false, true);
+        if (std.mem.eql(u8, argument, "--benchmark-four-shard")) return engine.runBenchmark(init, true, false);
+        if (std.mem.eql(u8, argument, "--benchmark-four-shard-raw")) return engine.runBenchmark(init, true, true);
+        return error.UnknownArgument;
+    }
+    try journal.selfCheck();
+    const happy = try runHappyPath();
+    const market_gap = try runMarketGap();
+    const risk_rejection = try runRiskRejection();
+    const unknown = try runUnknownReconciliation();
+    const duplicate = try runDuplicateReport();
+    for ([_]LiveRun{ happy, market_gap, risk_rejection, unknown, duplicate }) |run| try verifyScenario(run);
+    try happy.shard.assertClosures();
+
+    var buffer: [4096]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(init.io, &buffer);
+    const out = &stdout.interface;
+    const digest_hex = std.fmt.bytesToHex(engine.stateDigest(happy.shard), .lower);
+    try out.print("trading_engine: zig={s}, mode={s}, self_check=ok\n", .{ @import("builtin").zig_version_string, @tagName(@import("builtin").mode) });
+    for (happy.shard.trace.events[0..happy.shard.trace.len]) |event|
+        try out.print("{d:0>2} {s} id={d}\n", .{ event.sequence, @tagName(event.kind), event.identity });
+    try out.print("happy_path: events={d}, order={s}, qty={d}, open_cost={d}, fees={d}, upl={d}, risk_remaining={d}, ledger=closed, economic_projections=complete\ndigest={s}\n", .{ happy.shard.trace.len, @tagName(happy.shard.order_state), happy.shard.filled_quantity, happy.shard.portfolio_position.open_cost_micros, happy.shard.total_fees_micros, happy.shard.unrealized_pnl_micros, happy.shard.risk_lease_remaining_micros, &digest_hex });
+    try out.print("journal_records={d}, journal_bytes={d}, replay=equivalent, recovery_checks=ok\n", .{ happy.decision_journal.records, happy.decision_journal.len });
+    const scenarios = [_]struct { name: []const u8, run: *const LiveRun }{
+        .{ .name = "market-gap-v1", .run = &market_gap },          .{ .name = "risk-rejection-v1", .run = &risk_rejection },
+        .{ .name = "unknown-reconciliation-v1", .run = &unknown }, .{ .name = "duplicate-report-v1", .run = &duplicate },
+    };
+    for (scenarios) |scenario| {
+        const digest = std.fmt.bytesToHex(engine.stateDigest(scenario.run.shard), .lower);
+        try out.print("{s}: events={d}, replay=equivalent, digest={s}\n", .{ scenario.name, scenario.run.shard.trace.len, &digest });
+    }
+    try out.flush();
+}
+
 pub const HostIngressSummary = struct {
     order_intents: usize,
     risk_accepts: usize,

@@ -25,7 +25,7 @@ pub fn main(init: std.process.Init) !void {
             return runFourShardAcceptanceEntry(init);
         return error.UnknownArgument;
     }
-    return trading_shard.main(init);
+    return trading_shard_fixture.main(init);
 }
 
 fn runFourShardAcceptanceEntry(init: std.process.Init) !void {

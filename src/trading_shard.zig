@@ -1911,7 +1911,7 @@ pub const TradingShard = struct {
         if (fail_if_exceeded and self.risk_lease_remaining_micros < 0) return error.RiskLeaseExceeded;
     }
 
-    fn assertClosures(self: TradingShard) !void {
+    pub fn assertClosures(self: TradingShard) !void {
         if (self.portfolio_position.quantity != self.exchange_position.quantity or
             self.portfolio_position.open_cost_micros != self.exchange_position.open_cost_micros)
             return error.PositionLayerMismatch;
@@ -3719,6 +3719,11 @@ fn benchmarkFourShards(init: std.process.Init, raw: bool) !void {
     try out.flush();
 }
 
+/// Temporary benchmark dispatch seam while benchmark orchestration is extracted.
+pub fn runBenchmark(init: std.process.Init, four_shards: bool, raw: bool) !void {
+    return if (four_shards) benchmarkFourShards(init, raw) else benchmark(init, raw);
+}
+
 fn runUnknownReconciliation() !LiveRun {
     var run = try startScenario();
     try applyHealthyPrelude(&run);
@@ -3839,7 +3844,7 @@ fn digestBool(hasher: *Sha256, value: bool) void {
     digestInt(hasher, u8, @intFromBool(value));
 }
 
-fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
+pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     var hasher = Sha256.init(.{});
     hasher.update("StateDigestV3\x00");
     digestInt(&hasher, u16, schema_version);
