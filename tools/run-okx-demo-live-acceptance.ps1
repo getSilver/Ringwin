@@ -4,12 +4,18 @@ param(
     [switch]$PrepareOnly,
     [switch]$CleanupOnly,
     [ValidateSet('Debug','ReleaseSafe')] [string]$Optimize = 'ReleaseSafe',
-    [string]$EnvFile = (Join-Path $PSScriptRoot '..\.env.local'),
-    [string]$BuildRoot = (Join-Path $PSScriptRoot '..\.scratch\build\libcurl-8.21.0-windows-x86_64-schannel')
+    [string]$EnvFile,
+    [string]$BuildRoot
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($EnvFile)) {
+    $EnvFile = Join-Path $PSScriptRoot '..\.env.local'
+}
+if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
+    $BuildRoot = Join-Path $PSScriptRoot '..\.scratch\build\libcurl-8.21.0-windows-x86_64-schannel'
+}
 if (@($DemoLive, $PrepareOnly, $CleanupOnly).Where({ $_ }).Count -ne 1) {
     throw 'Choose exactly one of -DemoLive, -PrepareOnly, or -CleanupOnly'
 }
