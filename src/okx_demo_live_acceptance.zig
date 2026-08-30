@@ -2,6 +2,7 @@
 //! This executable is intentionally separate from replay-capable product code.
 
 const std = @import("std");
+const canonical = @import("canonical_event.zig");
 const engine = @import("trading_shard.zig");
 const journal = @import("journal.zig");
 const auth = @import("okx_rest_auth.zig");
@@ -11,11 +12,15 @@ const market = @import("okx_public_market.zig");
 const order = @import("okx_order_entry.zig");
 const private = @import("okx_private_reconciliation.zig");
 const spot = @import("okx_spot_projection.zig");
+const okx_adapter = @import("okx_venue_adapter.zig");
 const strategy = @import("strategy_host_gateway.zig");
+const venue = @import("venue_adapter.zig");
 
 const buy_quantity_atoms: i64 = 20_000; // 0.0002 BTC; Demo minimum plus exact 1e-8 fee/quote projection
 const min_quantity_atoms: i64 = 1_000; // current BTC-USDT minSz 0.00001
 const source_session: u64 = 1;
+const demo_venue: canonical.VenueIdentity = 1;
+const demo_account: canonical.ExchangeAccountIdentity = 2;
 
 const RestEndpoint = struct {
     source: private.IngressSource,
@@ -47,11 +52,22 @@ pub fn main(init: std.process.Init) !void {
     defer owner.deinit();
     var raw: RawSink = .{};
     var reconciler: private.Reconciler = .{};
+    var chain: live.Chain = .{
+        .mode = .demo_live,
+        .qualification = qualified(),
+        .raw_sink = raw.interface(),
+        .transport = owner.transport(),
+    };
+    var adapter_clock: AdapterClock = .{};
+    var implementation = okx_adapter.OkxVenueAdapter.init(init.gpa, &chain, adapter_clock.interface(), demoProfile(), demoRules());
+    implementation.attachPrivateReconciler(&reconciler);
+    const adapter = implementation.adapter();
+    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4 });
     var projection: spot.Projection = .{};
     var stable = journal.Journal.init();
     var stable_sequence: u64 = 1;
 
-    try establishReady(init, &owner, &raw, &reconciler);
+    try establishReady(init, &owner, &implementation, &reconciler);
     try progress(init.io, "bootstrap");
     while (reconciler.drainReconciled()) |event| switch (event.payload) {
         .exchange_balance_snapshot => |snapshot| if (snapshot.scope == .full_rest) {
@@ -79,28 +95,26 @@ pub fn main(init: std.process.Init) !void {
     const buy_client = strategy_buy.command.command.client_order_id;
     const sell_client = order.clientOrderId((@as(u128, run_identity) << 32) | 2);
 
-    var chain: live.Chain = .{
-        .mode = .demo_live,
-        .qualification = qualified(),
-        .raw_sink = raw.interface(),
-        .transport = owner.transport(),
-    };
     var cleanup_needed = false;
-    defer if (cleanup_needed) emergencyCleanup(init, &owner, &chain, sell_client) catch {};
+    defer if (cleanup_needed) emergencyCleanup(init, &owner, adapter, sell_client) catch {};
 
     try refresh(&owner, init.io);
-    const buy_attempt = try chain.dispatch(init.gpa, &.{strategy_buy.command});
+    const buy_attempt = try dispatch(adapter, strategy_buy.command);
+    const buy_dispatch = switch (buy_attempt.event) {
+        .order_dispatch_result => |value| value,
+        else => return error.MissingDispatchResult,
+    };
     try strategy_buy.ingress.applyDispatchResult(
-        buy_attempt.dispatch.items[0].attempt_id,
-        switch (buy_attempt.dispatch.items[0].state) {
+        buy_attempt.envelope.identity.sequence,
+        switch (buy_dispatch.state) {
             .submitted => .submitted,
             .unknown => .unknown,
             .not_sent => return error.BuyNotSent,
         },
     );
-    try requireVenueAccepted(init.io, buy_attempt.dispatch.items[0], error.BuyNotSent, error.BuyRejected);
+    try requireVenueAccepted(init.io, buy_dispatch, error.BuyNotSent, error.BuyRejected);
     cleanup_needed = true;
-    const buy_result = try waitForOrder(init, &owner, &raw, &reconciler, &projection, &stable, &stable_sequence, buy_client);
+    const buy_result = try waitForOrder(init, &owner, &implementation, &projection, &stable, &stable_sequence, buy_client);
     if (!buy_result.terminal or projection.portfolio.position_base_atoms < min_quantity_atoms)
         return error.BuyDidNotFillMinimum;
 
@@ -110,11 +124,15 @@ pub fn main(init: std.process.Init) !void {
     const sell_price_tenths = try protectedSellPrice(fresh_prices, fresh_limits);
     try refresh(&owner, init.io);
     const sell = authorizedPlace(2, 2, sell_client, .sell, .market, cleanup_atoms, sell_price_tenths);
-    const sell_attempt = try chain.dispatch(init.gpa, &.{sell});
-    try requireVenueAccepted(init.io, sell_attempt.dispatch.items[0], error.CleanupNotSent, error.CleanupRejected);
+    const sell_attempt = try dispatch(adapter, sell);
+    const sell_result_dispatch = switch (sell_attempt.event) {
+        .order_dispatch_result => |value| value,
+        else => return error.MissingDispatchResult,
+    };
+    try requireVenueAccepted(init.io, sell_result_dispatch, error.CleanupNotSent, error.CleanupRejected);
     // A possibly-sent cleanup is never replayed by the emergency path.
     cleanup_needed = false;
-    const sell_result = try waitForOrder(init, &owner, &raw, &reconciler, &projection, &stable, &stable_sequence, sell_client);
+    const sell_result = try waitForOrder(init, &owner, &implementation, &projection, &stable, &stable_sequence, sell_client);
     if (!sell_result.terminal or !sell_result.saw_balance) return error.CleanupUnconfirmed;
     if (projection.portfolio.position_base_atoms != 0 or projection.portfolio.open_cost_quote_atoms != 0)
         return error.CleanupIncomplete;
@@ -138,8 +156,7 @@ const WaitResult = struct { terminal: bool = false, saw_balance: bool = false };
 fn waitForOrder(
     init: std.process.Init,
     owner: *curl.TransportOwner,
-    raw: *RawSink,
-    reconciler: *private.Reconciler,
+    implementation: *okx_adapter.OkxVenueAdapter,
     projection: *spot.Projection,
     stable: *journal.Journal,
     stable_sequence: *u64,
@@ -153,7 +170,7 @@ fn waitForOrder(
             error.WebSocketTimeout => continue,
             else => return err,
         };
-        const batch = try reconciler.ingestWsMessage(init.gpa, raw.interface(), source_session, (try clock(init.io)).times, message);
+        const batch = try implementation.ingestPrivateWs((try clock(init.io)).times, message);
         if (batch.rejection) |reason| {
             try diagnostic(init.io, "private_rejection", @tagName(reason));
             return error.PrivateIngressRejected;
@@ -177,8 +194,8 @@ fn waitForOrder(
     return result;
 }
 
-fn establishReady(init: std.process.Init, owner: *curl.TransportOwner, raw: *RawSink, reconciler: *private.Reconciler) !void {
-    reconciler.beginSession(source_session);
+fn establishReady(init: std.process.Init, owner: *curl.TransportOwner, implementation: *okx_adapter.OkxVenueAdapter, reconciler: *private.Reconciler) !void {
+    try implementation.beginPrivateSession();
     try owner.wsConnect();
     var stamp = try clock(init.io);
     try owner.wsLogin(stamp.secondsSlice());
@@ -187,7 +204,7 @@ fn establishReady(init: std.process.Init, owner: *curl.TransportOwner, raw: *Raw
     var login_ok = false;
     for (0..8) |_| {
         const message = try owner.wsReceive(message_buffer, 5_000);
-        const batch = try reconciler.ingestWsMessage(init.gpa, raw.interface(), source_session, (try clock(init.io)).times, message);
+        const batch = try implementation.ingestPrivateWs((try clock(init.io)).times, message);
         if (batch.rejection != null) return error.PrivateIngressRejected;
         if (std.mem.indexOf(u8, message, "\"event\":\"login\"") != null) {
             login_ok = true;
@@ -198,16 +215,19 @@ fn establishReady(init: std.process.Init, owner: *curl.TransportOwner, raw: *Raw
     try owner.wsSend("{\"op\":\"subscribe\",\"args\":[{\"channel\":\"orders\",\"instType\":\"ANY\"},{\"channel\":\"account\"},{\"channel\":\"positions\",\"instType\":\"ANY\"}]}");
     for (0..24) |_| {
         const message = try owner.wsReceive(message_buffer, 5_000);
-        const batch = try reconciler.ingestWsMessage(init.gpa, raw.interface(), source_session, (try clock(init.io)).times, message);
+        const batch = try implementation.ingestPrivateWs((try clock(init.io)).times, message);
         if (batch.rejection != null) return error.PrivateIngressRejected;
         if (reconciler.readiness().private_stream_ready) break;
     }
     if (!reconciler.readiness().private_stream_ready) return error.IncompletePrivateStream;
     try progress(init.io, "private_stream");
-    try reconciler.beginReconciliation(raw.count);
+    const adapter = implementation.adapter();
+    if (try adapter.trySend(.{ .account_reconciliation = .{ .identity = 1, .exchange_account = demo_account, .expected_session = source_session } }) != .accepted)
+        return error.AdapterRejectedReconciliation;
+    _ = try adapter.tryDrain();
     for (0..2) |_| {
         for (rest_endpoints) |endpoint|
-            try ingestRestEndpoint(init, owner, raw, reconciler, endpoint);
+            try ingestRestEndpoint(init, owner, implementation, endpoint);
         _ = try reconciler.tryComplete();
     }
     if (!reconciler.readiness().reconciliation_ready) return error.ReconciliationNotReady;
@@ -216,8 +236,7 @@ fn establishReady(init: std.process.Init, owner: *curl.TransportOwner, raw: *Raw
 fn ingestRestEndpoint(
     init: std.process.Init,
     owner: *curl.TransportOwner,
-    raw: *RawSink,
-    reconciler: *private.Reconciler,
+    implementation: *okx_adapter.OkxVenueAdapter,
     endpoint: RestEndpoint,
 ) !void {
     var after: ?u64 = null;
@@ -232,10 +251,7 @@ fn ingestRestEndpoint(
         if (response.outcome != .response) return error.PrivateRequestUncertain;
         const row_count = try restRowCount(init.gpa, response.response.?);
         const final = endpoint.cursor == .none or row_count < 20;
-        const batch = try reconciler.ingest(
-            init.gpa,
-            raw.interface(),
-            source_session,
+        const batch = try implementation.ingestPrivateRest(
             (try clock(init.io)).times,
             endpoint.source,
             .{ .requested_after = after, .final = final },
@@ -396,8 +412,8 @@ fn fixedStrategyBuy(init: std.process.Init, intent_sequence: u64, price_tenths: 
     const host_order = (try ingress.applyDecisionCommand(decision)) orelse return error.RiskRejected;
     if (host_order.instrument_identity != 3 or host_order.side != .buy or
         host_order.time_in_force != .immediate_or_cancel or host_order.portfolio_reduce_only or
-        host_order.quantity != buy_quantity_atoms or host_order.limit_price_micros <= 0 or
-        host_order.reservation_micros <= 0)
+        host_order.quantity.lots != buy_quantity_atoms or host_order.limit_price.ticks <= 0 or
+        host_order.reservation.atoms <= 0)
         return error.InvalidQualifiedCommand;
     try ingress.verifyReplay();
     const order_identity = strategy_identity ^ @as(u128, intent_sequence);
@@ -408,8 +424,8 @@ fn fixedStrategyBuy(init: std.process.Init, intent_sequence: u64, price_tenths: 
             order.clientOrderId(order_identity),
             .buy,
             .limit_ioc,
-            host_order.quantity,
-            @divExact(@as(i128, host_order.limit_price_micros), 100_000),
+            @intCast(host_order.quantity.lots),
+            @divExact(host_order.limit_price.ticks, 100_000),
         ),
         .ingress = ingress,
     };
@@ -459,10 +475,86 @@ fn requireNotional(quantity_atoms: i64, price_tenths: i128) !void {
     if (micros <= 0 or micros > live.max_notional_usdt_micros) return error.NotionalLimitExceeded;
 }
 
-fn requireVenueAccepted(io: std.Io, item: order.DispatchResult, not_sent: anyerror, rejected: anyerror) !void {
+fn dispatch(adapter: venue.VenueAdapter, legacy: live.AuthorizedCommand) !canonical.EventRecord {
+    if (try adapter.trySend(.{ .order_command = try canonicalCommand(legacy) }) != .accepted)
+        return error.AdapterRejectedCommand;
+    const batch = (try adapter.tryDrain()) orelse return error.MissingDispatchResult;
+    for (batch.slice()) |event_record| switch (event_record.event) {
+        .order_dispatch_result => |result| if (result.command == legacy.command.command_id)
+            return event_record,
+        else => {},
+    };
+    return error.MissingDispatchResult;
+}
+
+fn canonicalCommand(authorized: live.AuthorizedCommand) !canonical.OrderCommand {
+    const command = authorized.command;
+    const place = switch (command.payload) {
+        .place => |value| value,
+        else => return error.UnsupportedDemoCommand,
+    };
+    const instrument: canonical.InstrumentIdentity = switch (command.instrument) {
+        .btc_usdt_spot => okx_adapter.btc_usdt_spot,
+        .btc_usdt_swap => okx_adapter.btc_usdt_swap,
+    };
+    const quantity = canonical.InstrumentQuantity{
+        .instrument = instrument,
+        .rules_version = command.rules_version,
+        .lots = try canonicalDecimal(place.quantity).exactAtoms(8),
+    };
+    const price = if (place.limit_price) |value| canonical.InstrumentPrice{
+        .instrument = instrument,
+        .rules_version = command.rules_version,
+        .ticks = try canonicalDecimal(value).exactAtoms(1),
+    } else null;
+    const protection = if (place.market_protection_price) |value| canonical.InstrumentPrice{
+        .instrument = instrument,
+        .rules_version = command.rules_version,
+        .ticks = try canonicalDecimal(value).exactAtoms(1),
+    } else null;
+    return .{
+        .identity = command.command_id,
+        .exchange_account = demo_account,
+        .instrument = instrument,
+        .client_order_id = try canonical.ClientOrderId.init(command.client_order_id.slice()),
+        .capability_version = command.capability_version,
+        .rules_version = command.rules_version,
+        .config_version = command.config_version,
+        .adapter_session = command.gateway_session,
+        .dispatch_deadline_monotonic_ns = command.dispatch_deadline_monotonic_ns,
+        .side = switch (place.side) {
+            .buy => .buy,
+            .sell => .sell,
+        },
+        .order_type = switch (place.kind) {
+            .limit_gtc => .limit,
+            .market => .market,
+            .limit_ioc => .ioc,
+            .limit_fok => .fok,
+            .post_only => .post_only,
+        },
+        .time_in_force = switch (place.kind) {
+            .limit_gtc => .good_til_canceled,
+            .market, .limit_ioc => .immediate_or_cancel,
+            .limit_fok => .fill_or_kill,
+            .post_only => .post_only,
+        },
+        .portfolio_reduce_only = place.portfolio_reduce_only,
+        .venue_reduce_only = place.venue_reduce_only,
+        .quantity = quantity,
+        .limit_price = price,
+        .market_protection_price = protection,
+    };
+}
+
+fn canonicalDecimal(value: order.Decimal) canonical.Decimal {
+    return .{ .coefficient = value.coefficient, .scale = value.scale };
+}
+
+fn requireVenueAccepted(io: std.Io, item: canonical.OrderDispatchResult, not_sent: anyerror, rejected: anyerror) !void {
     if (item.state == .not_sent) return not_sent;
-    if (item.reason != null or !std.mem.eql(u8, item.venue_code.slice(), "0")) {
-        try diagnostic(io, "venue_s_code", item.venue_code.slice());
+    if (item.reason) |reason| {
+        try diagnostic(io, "canonical_reject_reason", @tagName(reason));
         return rejected;
     }
     if (item.state != .submitted) return error.DispatchUnknown;
@@ -475,7 +567,7 @@ fn diagnostic(io: std.Io, name: []const u8, value: []const u8) !void {
     try out.interface.flush();
 }
 
-fn emergencyCleanup(init: std.process.Init, owner: *curl.TransportOwner, chain: *live.Chain, client_id: order.ClientOrderId) !void {
+fn emergencyCleanup(init: std.process.Init, owner: *curl.TransportOwner, adapter: venue.VenueAdapter, client_id: order.ClientOrderId) !void {
     const balance_atoms = try availableBtcAtoms(init, owner);
     if (balance_atoms < min_quantity_atoms) return;
     const prices = try ticker(init, owner);
@@ -483,8 +575,12 @@ fn emergencyCleanup(init: std.process.Init, owner: *curl.TransportOwner, chain: 
     const sell_price_tenths = try protectedSellPrice(prices, limits);
     try refresh(owner, init.io);
     const cleanup = authorizedPlace(99, 99, client_id, .sell, .market, balance_atoms, sell_price_tenths);
-    const attempt = try chain.dispatch(init.gpa, &.{cleanup});
-    try requireVenueAccepted(init.io, attempt.dispatch.items[0], error.CleanupNotSent, error.CleanupRejected);
+    const attempt = try dispatch(adapter, cleanup);
+    const result = switch (attempt.event) {
+        .order_dispatch_result => |value| value,
+        else => return error.MissingDispatchResult,
+    };
+    try requireVenueAccepted(init.io, result, error.CleanupNotSent, error.CleanupRejected);
 }
 
 fn cleanupResidual(init: std.process.Init, owner: *curl.TransportOwner, raw: *RawSink) !void {
@@ -506,10 +602,18 @@ fn cleanupResidual(init: std.process.Init, owner: *curl.TransportOwner, raw: *Ra
         .raw_sink = raw.interface(),
         .transport = owner.transport(),
     };
+    var adapter_clock: AdapterClock = .{};
+    var implementation = okx_adapter.OkxVenueAdapter.init(init.gpa, &chain, adapter_clock.interface(), demoProfile(), demoRules());
+    const adapter = implementation.adapter();
+    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4 });
     try refresh(owner, init.io);
     const cleanup = authorizedPlace(99, 99, client_id, .sell, .market, balance_atoms, sell_price_tenths);
-    const attempt = try chain.dispatch(init.gpa, &.{cleanup});
-    try requireVenueAccepted(init.io, attempt.dispatch.items[0], error.CleanupNotSent, error.CleanupRejected);
+    const attempt = try dispatch(adapter, cleanup);
+    const result = switch (attempt.event) {
+        .order_dispatch_result => |value| value,
+        else => return error.MissingDispatchResult,
+    };
+    try requireVenueAccepted(init.io, result, error.CleanupNotSent, error.CleanupRejected);
     for (0..6) |_| if (try availableBtcAtoms(init, owner) == 0) {
         try progress(init.io, "residual_cleanup");
         return;
@@ -672,6 +776,48 @@ fn qualified() live.Qualification {
         .reconciliation_stable = true,
         .no_unknown_orders = true,
         .cleanup_armed = true,
+    };
+}
+
+const AdapterClock = struct {
+    fn interface(self: *AdapterClock) okx_adapter.Clock {
+        return .{ .ptr = self, .now_fn = now };
+    }
+
+    fn now(_: *anyopaque) u64 {
+        return 1;
+    }
+};
+
+fn demoProfile() order.CapabilityProfile {
+    return .{
+        .version = 1,
+        .rules_version = 1,
+        .config_version = 1,
+        .gateway_session = source_session,
+        .qualification = .demo_qualified,
+        .batch_max = 4,
+        .place_limit = .{ .requests = 4, .window_ns = 1 },
+        .place_batch_limit = .{ .requests = 4, .window_ns = 1 },
+        .amend_limit = .{ .requests = 4, .window_ns = 1 },
+        .amend_batch_limit = .{ .requests = 4, .window_ns = 1 },
+        .cancel_limit = .{ .requests = 4, .window_ns = 1 },
+        .cancel_batch_limit = .{ .requests = 4, .window_ns = 1 },
+        .subaccount_place_amend_limit = .{ .requests = 4, .window_ns = 1 },
+        .limit = true,
+        .protected_market_ioc = true,
+        .ioc = true,
+        .fok = true,
+        .native_amend = true,
+        .native_post_only = true,
+        .swap_venue_reduce_only = true,
+    };
+}
+
+fn demoRules() okx_adapter.Rules {
+    return .{
+        .spot = .{ .identity = okx_adapter.btc_usdt_spot, .tick_size = .{ .coefficient = 1, .scale = 1 }, .lot_size = .{ .coefficient = 1, .scale = 8 } },
+        .swap = .{ .identity = okx_adapter.btc_usdt_swap, .tick_size = .{ .coefficient = 1, .scale = 1 }, .lot_size = .{ .coefficient = 1, .scale = 2 } },
     };
 }
 
