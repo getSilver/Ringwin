@@ -9,7 +9,6 @@ const canonical = @import("canonical_event.zig");
 const journal = @import("journal.zig");
 const host_gateway = @import("strategy_host_gateway.zig");
 const engine = @import("trading_shard.zig");
-const benchmark = @import("trading_shard_benchmark.zig");
 
 const contract_denominator: i64 = 10_000;
 const initial_exchange_cash: i64 = 25_000_000_000;
@@ -24,7 +23,7 @@ pub const LiveRun = struct {
     decision_journal: journal.Journal,
 };
 
-fn atGroup(group_index: u64, input: engine.CoreEvent) engine.CoreEvent {
+pub fn atGroup(group_index: u64, input: engine.CoreEvent) engine.CoreEvent {
     var timed = input;
     timed.source_time = fixture_utc_base + group_index * 10 * std.time.ns_per_ms;
     timed.receive_time = timed.source_time + std.time.ns_per_ms;
@@ -47,7 +46,7 @@ fn snapshotAt(group: u64, source_sequence: u64) engine.CoreEvent {
     } } });
 }
 
-fn deltaAt(group: u64, previous: u64, current: u64, bid_price_micros: i64) engine.CoreEvent {
+pub fn deltaAt(group: u64, previous: u64, current: u64, bid_price_micros: i64) engine.CoreEvent {
     return atGroup(group, .{ .identity = current, .payload = .{ .l2_delta = .{
         .previous = previous,
         .current = current,
@@ -131,6 +130,23 @@ fn defaultAuthorization() host_gateway.Authorization {
 
 fn healthyRun() !LiveRun {
     return start(defaultAuthorization(), .leveraged);
+}
+
+pub fn initializedBenchmarkRun() !LiveRun {
+    var run = try healthyRun();
+    run.shard.trace.len = 0;
+    run.decision_journal = journal.Journal.init();
+    return run;
+}
+
+pub fn replayDigest(run: LiveRun) ![32]u8 {
+    const replayed = try engine.replayDigest(
+        run.decision_journal.bytes(),
+        run.shard.quantity_denominator,
+        run.shard.reservation_model,
+    );
+    if (replayed.status != .clean) return error.ReplayNotEquivalent;
+    return replayed.digest;
 }
 
 fn happyVenueFacts(command: engine.OrderCommand) ![6]engine.CoreEvent {
@@ -240,11 +256,7 @@ pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer args.deinit();
     _ = args.next();
-    if (args.next()) |argument| {
-        if (std.mem.eql(u8, argument, "--benchmark")) return benchmark.runBenchmark(init, false, false);
-        if (std.mem.eql(u8, argument, "--benchmark-raw")) return benchmark.runBenchmark(init, false, true);
-        if (std.mem.eql(u8, argument, "--benchmark-four-shard")) return benchmark.runBenchmark(init, true, false);
-        if (std.mem.eql(u8, argument, "--benchmark-four-shard-raw")) return benchmark.runBenchmark(init, true, true);
+    if (args.next() != null) {
         return error.UnknownArgument;
     }
     try journal.selfCheck();

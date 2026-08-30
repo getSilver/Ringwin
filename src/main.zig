@@ -15,6 +15,7 @@ const account_projection = @import("account_projection.zig");
 const okx_market_feed = @import("okx_market_feed.zig");
 const okx_venue_adapter = @import("okx_venue_adapter.zig");
 const trading_shard_fixture = @import("trading_shard_fixture.zig");
+const trading_shard_benchmark = @import("trading_shard_benchmark.zig");
 
 pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
@@ -23,6 +24,14 @@ pub fn main(init: std.process.Init) !void {
     if (args.next()) |argument| {
         if (std.mem.eql(u8, argument, "--four-shard-acceptance"))
             return runFourShardAcceptanceEntry(init);
+        if (std.mem.eql(u8, argument, "--benchmark"))
+            return trading_shard_benchmark.runBenchmark(init, false, false);
+        if (std.mem.eql(u8, argument, "--benchmark-raw"))
+            return trading_shard_benchmark.runBenchmark(init, false, true);
+        if (std.mem.eql(u8, argument, "--benchmark-four-shard"))
+            return trading_shard_benchmark.runBenchmark(init, true, false);
+        if (std.mem.eql(u8, argument, "--benchmark-four-shard-raw"))
+            return trading_shard_benchmark.runBenchmark(init, true, true);
         return error.UnknownArgument;
     }
     return trading_shard_fixture.main(init);

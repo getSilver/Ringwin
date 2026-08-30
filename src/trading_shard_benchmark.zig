@@ -2,19 +2,16 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const engine = @import("trading_shard.zig");
+const fixture = @import("trading_shard_fixture.zig");
 const journal = engine.journal;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const InputEvent = engine.CoreEvent;
 const TradingShard = engine.TradingShard;
-const LiveRun = engine.LiveRun;
+const LiveRun = fixture.LiveRun;
 const applyLive = engine.applyStable;
-const deltaAt = engine.deltaAt;
-const snapshotAt = engine.snapshotAt;
-const atGroup = engine.atGroup;
-const startScenario = engine.startScenario;
-const applyHealthyPrelude = engine.applyHealthyPrelude;
-const runHappyPath = engine.runHappyPath;
-const assertReplayEquivalent = engine.assertReplayEquivalent;
+const deltaAt = fixture.deltaAt;
+const atGroup = fixture.atGroup;
+const runHappyPath = fixture.runHappyPath;
 const assertExpectedDigest = engine.assertExpectedDigest;
 const expected_happy_digest = engine.expected_happy_digest;
 const happy_order_quantity: i64 = 100;
@@ -111,11 +108,7 @@ fn nowNs(io: std.Io) u64 {
 }
 
 fn initializedBenchmarkRun() !LiveRun {
-    var run = try startScenario();
-    try applyHealthyPrelude(&run);
-    run.shard.trace.len = 0;
-    run.decision_journal = journal.Journal.init();
-    return run;
+    return fixture.initializedBenchmarkRun();
 }
 
 fn runMarketBenchmark(
@@ -247,7 +240,7 @@ fn runRecoveryBenchmark(io: std.Io, samples: usize) !BenchmarkResult {
         const snapshot_sequence = source_sequence + 100;
         const inputs = [_]InputEvent{
             deltaAt(15 + completed, source_sequence + 1, source_sequence + 2, 49_860_000_000),
-            snapshotAt(16 + completed, snapshot_sequence),
+            engine.snapshotAt(16 + completed, snapshot_sequence),
             deltaAt(
                 17 + completed,
                 snapshot_sequence,
@@ -416,7 +409,7 @@ fn assertFourShardIsolation() ![4][Sha256.digest_length]u8 {
     var digests: [4][Sha256.digest_length]u8 = undefined;
     for (&digests) |*digest| {
         const run = try runHappyPath();
-        digest.* = try assertReplayEquivalent(run);
+        digest.* = try fixture.replayDigest(run);
         try assertExpectedDigest(digest.*, expected_happy_digest);
     }
 
