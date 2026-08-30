@@ -2,17 +2,17 @@
 //! This executable is intentionally separate from replay-capable product code.
 
 const std = @import("std");
+const account_projection = @import("account_projection.zig");
 const canonical = @import("canonical_event.zig");
 const engine = @import("trading_shard.zig");
-const journal = @import("journal.zig");
 const auth = @import("okx_rest_auth.zig");
 const curl = @import("okx_curl_transport.zig");
 const live = @import("okx_live_chain.zig");
 const market = @import("okx_public_market.zig");
 const order = @import("okx_order_entry.zig");
 const private = @import("okx_private_reconciliation.zig");
-const spot = @import("okx_spot_projection.zig");
 const okx_adapter = @import("okx_venue_adapter.zig");
+const lifecycle = @import("simulated_lifecycle_projection.zig");
 const strategy = @import("strategy_host_gateway.zig");
 const venue = @import("venue_adapter.zig");
 
@@ -63,26 +63,19 @@ pub fn main(init: std.process.Init) !void {
     implementation.attachPrivateReconciler(&reconciler);
     const adapter = implementation.adapter();
     try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4 });
-    var projection: spot.Projection = .{};
-    var stable = journal.Journal.init();
-    var stable_sequence: u64 = 1;
+    var projection: DemoProjection = .{};
 
     try establishReady(init, &owner, &implementation, &reconciler);
+    try projection.drain(adapter);
     try progress(init.io, "bootstrap");
-    while (reconciler.drainReconciled()) |event| switch (event.payload) {
-        .exchange_balance_snapshot => |snapshot| if (snapshot.scope == .full_rest) {
-            try record(&projection, &stable, &stable_sequence, event);
-        },
-        else => {},
-    };
-    if (projection.baseline_btc_atoms == null) return error.MissingBaselineBtc;
+    const baseline_btc_atoms = projection.btcBalance() orelse return error.MissingBaselineBtc;
     try progress(init.io, "baseline");
 
     if (mode == .cleanup_only) {
         try cleanupResidual(init, &owner, &raw);
         return;
     }
-    if (projection.baseline_btc_atoms.? != 0) return error.NonzeroBaselineBtc;
+    if (baseline_btc_atoms != 0) return error.NonzeroBaselineBtc;
 
     const prices = try ticker(init, &owner);
     const limits = try priceLimits(init, &owner);
@@ -114,11 +107,11 @@ pub fn main(init: std.process.Init) !void {
     );
     try requireVenueAccepted(init.io, buy_dispatch, error.BuyNotSent, error.BuyRejected);
     cleanup_needed = true;
-    const buy_result = try waitForOrder(init, &owner, &implementation, &projection, &stable, &stable_sequence, buy_client);
-    if (!buy_result.terminal or projection.portfolio.position_base_atoms < min_quantity_atoms)
+    const buy_result = try waitForOrder(init, &owner, &implementation, &projection, buy_client.slice());
+    if (!buy_result.terminal or projection.positionLots() < min_quantity_atoms)
         return error.BuyDidNotFillMinimum;
 
-    const cleanup_atoms = projection.portfolio.position_base_atoms;
+    const cleanup_atoms: i64 = @intCast(projection.positionLots());
     const fresh_prices = try ticker(init, &owner);
     const fresh_limits = try priceLimits(init, &owner);
     const sell_price_tenths = try protectedSellPrice(fresh_prices, fresh_limits);
@@ -132,35 +125,127 @@ pub fn main(init: std.process.Init) !void {
     try requireVenueAccepted(init.io, sell_result_dispatch, error.CleanupNotSent, error.CleanupRejected);
     // A possibly-sent cleanup is never replayed by the emergency path.
     cleanup_needed = false;
-    const sell_result = try waitForOrder(init, &owner, &implementation, &projection, &stable, &stable_sequence, sell_client);
+    const sell_result = try waitForOrder(init, &owner, &implementation, &projection, sell_client.slice());
     if (!sell_result.terminal or !sell_result.saw_balance) return error.CleanupUnconfirmed;
-    if (projection.portfolio.position_base_atoms != 0 or projection.portfolio.open_cost_quote_atoms != 0)
+    if (projection.positionLots() != 0)
         return error.CleanupIncomplete;
-    if (!projection.economicReconciled()) return error.FinalBalanceMismatch;
-
-    try stable.seal();
-    const replayed = try spot.replayStable(stable.bytes());
-    if (!std.mem.eql(u8, &projection.digest(), &replayed.digest())) return error.ReplayDigestMismatch;
+    if (projection.has_unknown) return error.FinalUnknown;
+    try projection.verifyReplay();
     const digest_text = std.fmt.bytesToHex(projection.digest(), .lower);
     var out_buffer: [512]u8 = undefined;
     var out = std.Io.File.stdout().writer(init.io, &out_buffer);
     try out.interface.print(
-        "environment=demo strategy=fixed-btc-usdt-ioc orders=2 cleanup=closed position_atoms=0 open_cost_atoms=0 raw_ingress={d} stable_records={d} replay_digest={s}\n",
-        .{ raw.count, stable_sequence - 1, &digest_text },
+        "environment=demo strategy=fixed-btc-usdt-ioc orders=2 cleanup=closed position_atoms=0 raw_ingress={d} canonical_records={d} replay_digest={s}\n",
+        .{ raw.count, projection.record_count, &digest_text },
     );
     try out.interface.flush();
 }
 
 const WaitResult = struct { terminal: bool = false, saw_balance: bool = false };
 
+const max_demo_records = 256;
+
+const DemoProjection = struct {
+    account: account_projection.AccountProjection = .{},
+    fills: lifecycle.Projection = .{},
+    records: [max_demo_records]canonical.EventRecord = undefined,
+    record_count: u16 = 0,
+    has_unknown: bool = false,
+
+    fn drain(self: *DemoProjection, adapter: venue.VenueAdapter) !void {
+        while (try adapter.tryDrain()) |batch| try self.applyBatch(batch);
+    }
+
+    fn applyBatch(self: *DemoProjection, batch: canonical.AdapterOutputBatch) !void {
+        for (batch.slice()) |event_record| try self.apply(event_record, true);
+    }
+
+    fn apply(self: *DemoProjection, event_record: canonical.EventRecord, retain: bool) !void {
+        switch (event_record.event) {
+            .account_bootstrap_snapshot, .account_observed => try self.account.apply(event_record.event),
+            .fill => _ = try self.fills.apply(event_record),
+            .order_dispatch_result => |result| {
+                if (result.state == .unknown) self.has_unknown = true;
+            },
+            .order_reconciliation_result, .account_reconciliation_result => |result| {
+                if (result.status == .unresolved) self.has_unknown = true;
+            },
+            else => {},
+        }
+        if (!retain) return;
+        if (self.record_count == self.records.len) return error.DemoRecordCapacity;
+        self.records[self.record_count] = event_record;
+        self.record_count += 1;
+    }
+
+    fn positionLots(self: *const DemoProjection) i128 {
+        return self.fills.position_lots;
+    }
+
+    fn btcBalance(self: *const DemoProjection) ?i128 {
+        for (self.account.balances[0..self.account.balance_count]) |balance|
+            if (balance.asset == okx_adapter.btc) return balance.total.atoms;
+        return null;
+    }
+
+    fn verifyReplay(self: *const DemoProjection) !void {
+        var replay: DemoProjection = .{};
+        for (self.records[0..self.record_count]) |event_record|
+            try replay.apply(event_record, false);
+        if (!std.mem.eql(u8, &self.digest(), &replay.digest())) return error.ReplayDigestMismatch;
+    }
+
+    fn digest(self: *const DemoProjection) [32]u8 {
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update(std.mem.asBytes(&self.fills.position_lots));
+        hasher.update(std.mem.asBytes(&self.fills.fee_atoms));
+        hasher.update(std.mem.asBytes(&self.fills.realized_pnl_atoms));
+        hasher.update(std.mem.asBytes(&self.account.valid));
+        for (self.account.balances[0..self.account.balance_count]) |balance| {
+            hasher.update(std.mem.asBytes(&balance.asset));
+            hasher.update(std.mem.asBytes(&balance.total.atoms));
+            hasher.update(std.mem.asBytes(&balance.available.atoms));
+            hasher.update(std.mem.asBytes(&balance.held.atoms));
+        }
+        hasher.update(std.mem.asBytes(&self.has_unknown));
+        var result: [32]u8 = undefined;
+        hasher.final(&result);
+        return result;
+    }
+};
+
+test "Demo acceptance replays canonical Adapter output and rejects Unknown" {
+    const envelope = canonical.EventEnvelope{
+        .event_type = @intFromEnum(canonical.EventType.order_dispatch_result),
+        .schema_version = 1,
+        .identity = .{ .stream = 1, .sequence = 1 },
+        .source_fact_identity = 1,
+        .scope = .account,
+        .venue = demo_venue,
+        .exchange_account = demo_account,
+        .source_stream = 1,
+        .source_sequence = 1,
+        .adapter_session = source_session,
+        .times = .{ .monotonic_ns = 1 },
+        .raw_evidence = .{ .stream = 1, .sequence = 1, .digest = @splat(0) },
+    };
+    var projection: DemoProjection = .{};
+    try projection.apply(.{ .envelope = envelope, .event = .{ .order_dispatch_result = .{ .command = 1, .state = .submitted } } }, true);
+    try projection.verifyReplay();
+    var unknown = envelope;
+    unknown.identity.sequence = 2;
+    unknown.source_fact_identity = 2;
+    unknown.source_sequence = 2;
+    try projection.apply(.{ .envelope = unknown, .event = .{ .order_dispatch_result = .{ .command = 2, .state = .unknown } } }, true);
+    try std.testing.expect(projection.has_unknown);
+}
+
 fn waitForOrder(
     init: std.process.Init,
     owner: *curl.TransportOwner,
     implementation: *okx_adapter.OkxVenueAdapter,
-    projection: *spot.Projection,
-    stable: *journal.Journal,
-    stable_sequence: *u64,
-    client_order_id: order.ClientOrderId,
+    projection: *DemoProjection,
+    client_order_id: []const u8,
 ) !WaitResult {
     const message_buffer = try init.gpa.alloc(u8, market.max_raw_frame_bytes);
     defer init.gpa.free(message_buffer);
@@ -175,21 +260,18 @@ fn waitForOrder(
             try diagnostic(init.io, "private_rejection", @tagName(reason));
             return error.PrivateIngressRejected;
         }
-        for (batch.eventSlice()) |event| switch (event.payload) {
-            .execution_report => |report| if (std.mem.eql(u8, report.client_order_id.slice(), client_order_id.slice())) {
-                try record(projection, stable, stable_sequence, event);
-                result.terminal = report.status == .filled or report.status == .canceled;
-            },
-            .fill => |fill| if (std.mem.eql(u8, fill.client_order_id.slice(), client_order_id.slice())) {
-                try record(projection, stable, stable_sequence, event);
-            },
-            .exchange_balance_snapshot => {
-                try record(projection, stable, stable_sequence, event);
-                result.saw_balance = true;
-            },
-            else => {},
-        };
-        if (result.terminal and result.saw_balance and projection.economicReconciled()) return result;
+        if (try implementation.adapter().tryDrain()) |output| {
+            for (output.slice()) |record| switch (record.event) {
+                .execution_report => |report| {
+                    if (std.mem.eql(u8, report.client_order_id.slice(), client_order_id))
+                        result.terminal = report.status == .filled or report.status == .canceled;
+                },
+                .account_bootstrap_snapshot, .account_observed => result.saw_balance = true,
+                else => {},
+            };
+            try projection.applyBatch(output);
+        }
+        if (result.terminal and result.saw_balance and !projection.has_unknown) return result;
     }
     return result;
 }
@@ -280,12 +362,6 @@ fn restRowCount(gpa: std.mem.Allocator, raw: []const u8) !usize {
         else => return error.InvalidRestPage,
     };
     return data.items.len;
-}
-
-fn record(projection: *spot.Projection, stable: *journal.Journal, sequence: *u64, event: private.PrivateEvent) !void {
-    try spot.appendStable(stable, sequence.*, event);
-    try projection.apply(event);
-    sequence.* += 1;
 }
 
 const Prices = struct { bid_tenths: i128, ask_tenths: i128 };
