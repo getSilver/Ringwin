@@ -11,12 +11,6 @@ pub const economics = @import("economics.zig");
 const economics_module = economics;
 pub const operational = @import("operational.zig");
 const host_gateway = @import("strategy_host_gateway.zig");
-const okx_public_market = @import("okx_public_market.zig");
-const okx_private_reconciliation = @import("okx_private_reconciliation.zig");
-const okx_spot_projection = @import("okx_spot_projection.zig");
-const okx_order_entry = @import("okx_order_entry.zig");
-const okx_live_chain = @import("okx_live_chain.zig");
-const okx_rest_auth = @import("okx_rest_auth.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Crc32c = std.hash.crc.Crc32Iscsi;
 
@@ -4601,12 +4595,15 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test "all authoritative acceptance traces close and replay" {
-    _ = okx_public_market;
-    _ = okx_private_reconciliation;
-    _ = okx_order_entry;
-    _ = okx_live_chain;
-    _ = okx_rest_auth;
     _ = try selfCheck();
+}
+
+test "TradingShard has no Venue implementation dependency" {
+    const source = @embedFile("trading_shard.zig");
+    comptime {
+        @setEvalBranchQuota(100_000);
+        std.debug.assert(std.mem.indexOf(u8, source, "@import(\"okx_") == null);
+    }
 }
 
 test "configurable Genesis fails closed until authority is complete" {
@@ -4929,6 +4926,17 @@ test "keep positions stops through shard seam preserving economics" {
     const stopped = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(40, 3, .stop_keep_positions));
     _ = stopped;
     try expectKeepPositionsStopped(&run, preserved);
+
+    // A stopped shard may preserve a position, but the cancellation it issued
+    // must still be reconciled before a later session sends another order.
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(18, .{ .identity = 102, .payload = .{ .oms_execution_report = .{
+        .report_id = 102,
+        .order_id = opened.order_id,
+        .revision = 1,
+        .status = .canceled,
+        .cumulative_quantity = happy_order_quantity,
+        .remaining_quantity = 0,
+    } } }));
 
     const duplicate_stop = try run.shard.apply(lifecycleCommand(40, 3, .stop_keep_positions));
     try std.testing.expectEqual(@as(usize, 0), duplicate_stop.facts.len);
@@ -5379,9 +5387,9 @@ test "unknown OMS dispatch blocks a later place until the order is resolved" {
     first.members[0] = .{
         .intent_sequence = 90,
         .operation = .place,
-        .instrument = .btc_usdt_spot,
+        .instrument = spot_instrument,
         .quantity = 10,
-        .limit_price_micros = 50_000_000,
+        .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000),
     };
     const placed = try run.shard.apply(atGroup(12, .{ .identity = 90, .payload = .{ .oms_intent_group = first } }));
     var dispatch: oms_module.DispatchBatch = .{ .count = 1 };
@@ -5393,9 +5401,9 @@ test "unknown OMS dispatch blocks a later place until the order is resolved" {
     next.members[0] = .{
         .intent_sequence = 91,
         .operation = .place,
-        .instrument = .btc_usdt_swap,
+        .instrument = swap_instrument,
         .quantity = 10,
-        .limit_price_micros = 50_000_000,
+        .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000),
     };
     try std.testing.expectError(error.UncertainOrderBlocksSend, run.shard.apply(atGroup(14, .{
         .identity = 91,
@@ -5677,10 +5685,6 @@ test "snapshot restore replays only the stable journal tail without send capabil
 
     var gap = journal.Journal.initAt(prefix.decision_journal.last_sequence + 2);
     try std.testing.expectError(error.SnapshotJournalGap, TradingShard.restore(encoded, gap.bytes()));
-}
-
-test "OKX spot authoritative projection" {
-    _ = okx_spot_projection;
 }
 
 test "qualified SPOT IOC intent crosses Gateway and cash risk before OrderCommand" {
