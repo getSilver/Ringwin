@@ -32,8 +32,39 @@ pub const Gateway = struct {
         }
     }
     pub fn setInstrumentGap(self: *Gateway, instrument: canonical.InstrumentIdentity) void {
-        if (!self.instrumentGapped(instrument) and self.instrument_gate_count < self.instrument_gates.len) {
-            self.instrument_gates[self.instrument_gate_count] = .{ .instrument = instrument, .state = .blocked };
+        self.setInstrumentGate(instrument, .blocked);
+    }
+    /// Adapter uncertainty is account-private.  The caller drains it through
+    /// the common seam, so a Venue implementation never needs a Gateway branch.
+    pub fn observeAdapterOutput(self: *Gateway, batch: canonical.AdapterOutputBatch) void {
+        for (batch.slice()) |record| switch (record.event) {
+            .order_dispatch_result => |result| if (result.state == .unknown) {
+                if (record.envelope.exchange_account) |account| self.latchAccount(account);
+            },
+            .order_reconciliation_result, .account_reconciliation_result => |result| if (result.status == .unresolved) {
+                if (record.envelope.exchange_account) |account| self.latchAccount(account);
+            },
+            else => {},
+        };
+    }
+    /// Market feeds stay independent of account routes; only their canonical
+    /// health fact controls the affected Instrument opening gate.
+    pub fn observeMarketOutput(self: *Gateway, batch: canonical.AdapterOutputBatch) void {
+        for (batch.slice()) |record| switch (record.event) {
+            .market_data_health_changed => |health| switch (health.health) {
+                .healthy => self.setInstrumentGate(health.instrument, .open),
+                .awaiting_snapshot, .gap => self.setInstrumentGap(health.instrument),
+            },
+            else => {},
+        };
+    }
+    fn setInstrumentGate(self: *Gateway, instrument: canonical.InstrumentIdentity, state: OpeningGate) void {
+        for (self.instrument_gates[0..self.instrument_gate_count]) |*gate| if (gate.instrument == instrument) {
+            gate.state = state;
+            return;
+        };
+        if (self.instrument_gate_count < self.instrument_gates.len) {
+            self.instrument_gates[self.instrument_gate_count] = .{ .instrument = instrument, .state = state };
             self.instrument_gate_count += 1;
         }
     }
@@ -44,6 +75,7 @@ pub const Gateway = struct {
     pub fn drainFair(self: *Gateway, output: *[max_routes]canonical.AdapterOutputBatch) !u8 {
         var count: u8 = 0;
         for (self.routes[0..self.count]) |route| if (try route.adapter.tryDrain()) |batch| {
+            self.observeAdapterOutput(batch);
             output[count] = batch;
             count += 1;
         };
@@ -118,4 +150,54 @@ test "gateway drains each fixed route once" {
     try gateway.add(.{ .account = 2, .adapter = second.adapter(), .capability = profile });
     var output: [max_routes]canonical.AdapterOutputBatch = undefined;
     try std.testing.expectEqual(@as(u8, 2), try gateway.drainFair(&output));
+}
+test "Gateway scopes uncertainty and market health to the affected route" {
+    var first = Fixture{ .pending = null };
+    var second = Fixture{ .pending = null };
+    var gateway = Gateway{};
+    const profile: CapabilityProfile = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 };
+    try gateway.add(.{ .account = 11, .adapter = first.adapter(), .capability = profile });
+    try gateway.add(.{ .account = 22, .adapter = second.adapter(), .capability = profile });
+
+    var unknown: canonical.AdapterOutputBatch = .{};
+    try unknown.append(.{ .envelope = .{
+        .event_type = @intFromEnum(canonical.EventType.order_dispatch_result),
+        .schema_version = 1,
+        .identity = .{ .stream = 1, .sequence = 1 },
+        .source_fact_identity = 1,
+        .scope = .account,
+        .venue = 2,
+        .exchange_account = 11,
+        .source_stream = 1,
+        .source_sequence = 1,
+        .adapter_session = 1,
+        .times = .{ .monotonic_ns = 1 },
+        .raw_evidence = .{ .stream = 1, .sequence = 1, .digest = @splat(0) },
+    }, .event = .{ .order_dispatch_result = .{ .command = 1, .state = .unknown } } });
+    gateway.observeAdapterOutput(unknown);
+    try std.testing.expectError(error.Rejected, gateway.send(try command(11, 101)));
+    try std.testing.expectEqual(.accepted, try gateway.send(try command(22, 202)));
+
+    var gap: canonical.AdapterOutputBatch = .{};
+    try gap.append(.{ .envelope = .{
+        .event_type = @intFromEnum(canonical.EventType.market_data_health_changed),
+        .schema_version = 1,
+        .identity = .{ .stream = 2, .sequence = 1 },
+        .source_fact_identity = 2,
+        .scope = .instrument,
+        .venue = 2,
+        .instrument = 202,
+        .source_stream = 2,
+        .source_sequence = 1,
+        .adapter_session = 2,
+        .times = .{ .monotonic_ns = 1 },
+        .raw_evidence = .{ .stream = 2, .sequence = 1, .digest = @splat(0) },
+    }, .event = .{ .market_data_health_changed = .{ .instrument = 202, .health = .gap } } });
+    gateway.observeMarketOutput(gap);
+    try std.testing.expectError(error.Rejected, gateway.send(try command(22, 202)));
+    try std.testing.expectError(error.Rejected, gateway.send(try command(11, 101)));
+
+    gap.events[0].event.market_data_health_changed.health = .healthy;
+    gateway.observeMarketOutput(gap);
+    try std.testing.expectEqual(.accepted, try gateway.send(try command(22, 202)));
 }
