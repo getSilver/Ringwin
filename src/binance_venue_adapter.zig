@@ -8,6 +8,7 @@ const canonical = @import("canonical_event.zig");
 const venue = @import("venue_adapter.zig");
 const contract = @import("venue_adapter_contract.zig");
 const raw = @import("binance_order_raw.zig");
+const private = @import("binance_private_reconciliation.zig");
 
 pub const btc_usdt_spot: canonical.InstrumentIdentity = 0x424e_00000001;
 pub const btc_usdt_linear: canonical.InstrumentIdentity = 0x424e_00000002;
@@ -70,6 +71,8 @@ pub const BinanceVenueAdapter = struct {
     next_event_sequence: u64 = 1,
     rate: Rate = .{},
     unknown_outstanding: bool = false,
+    private_reconciler: ?*private.Reconciler = null,
+    pending_account_reconciliation: ?u128 = null,
 
     pub const Clock = struct {
         ptr: *anyopaque,
@@ -84,6 +87,28 @@ pub const BinanceVenueAdapter = struct {
     pub fn adapter(self: *BinanceVenueAdapter) venue.VenueAdapter {
         return .{ .ptr = self, .vtable = &.{ .start = start, .try_send = send, .try_drain = drain, .stop = stop } };
     }
+    /// The transport remains private; callers can only retrieve the resulting
+    /// CanonicalEvent records through the shared adapter drain seam.
+    pub fn attachPrivateReconciler(self: *BinanceVenueAdapter, reconciler: *private.Reconciler) void {
+        self.private_reconciler = reconciler;
+    }
+    pub fn beginPrivateReconciliation(self: *BinanceVenueAdapter) !void {
+        if (self.state != .running) return error.NotStarted;
+        const reconciler = self.private_reconciler orelse return error.PrivateReconcilerMissing;
+        try reconciler.beginReconciliation(reconciler.readiness().raw_watermark);
+    }
+    pub fn beginPrivateSession(self: *BinanceVenueAdapter) !void {
+        const binding = self.binding orelse return error.NotStarted;
+        const reconciler = self.private_reconciler orelse return error.PrivateReconcilerMissing;
+        reconciler.beginSession(.{ .venue = binding.venue, .account = binding.account, .session = binding.session });
+    }
+    pub fn ingestPrivate(self: *BinanceVenueAdapter, allocator: std.mem.Allocator, source: private.Source, page: ?private.Page, times: raw.Times, bytes: []const u8) !raw.RawEvidenceRef {
+        if (self.state != .running) return error.NotStarted;
+        return (self.private_reconciler orelse return error.PrivateReconcilerMissing).ingest(allocator, source, page, times, bytes);
+    }
+    pub fn privateSourceGap(self: *BinanceVenueAdapter) void {
+        if (self.private_reconciler) |reconciler| reconciler.sourceGap();
+    }
 
     fn start(ptr: *anyopaque, config: venue.VenueConfig) venue.StartError!void {
         const self: *BinanceVenueAdapter = @ptrCast(@alignCast(ptr));
@@ -91,6 +116,8 @@ pub const BinanceVenueAdapter = struct {
         if (self.state == .stopped) return error.Stopped;
         if (config.environment != .demo or config.venue == 0 or config.exchange_account == 0 or config.adapter_session == 0 or config.adapter_session > std.math.maxInt(u64) or config.request_capacity == 0 or config.output_capacity < canonical.max_order_commands_per_batch or self.profile.session != @as(u64, @intCast(config.adapter_session))) return error.InvalidConfig;
         self.binding = .{ .venue = config.venue, .account = config.exchange_account, .session = config.adapter_session };
+        if (self.private_reconciler) |reconciler|
+            reconciler.beginSession(.{ .venue = config.venue, .account = config.exchange_account, .session = config.adapter_session });
         self.state = .running;
     }
     fn send(ptr: *anyopaque, request: canonical.AdapterRequest) venue.SendError!venue.SendResult {
@@ -98,6 +125,11 @@ pub const BinanceVenueAdapter = struct {
         if (self.state == .idle) return error.NotStarted;
         if (self.state == .stopped) return .stopped;
         if (self.pending != null) return .backpressure;
+        switch (request) {
+            .order_reconciliation => |reconciliation| return self.reconcileOrder(reconciliation),
+            .account_reconciliation => |reconciliation| return self.reconcileAccount(reconciliation),
+            else => {},
+        }
         var commands: [canonical.max_order_commands_per_batch]canonical.OrderCommand = undefined;
         const count: usize = switch (request) {
             .order_command => |value| blk: {
@@ -136,12 +168,22 @@ pub const BinanceVenueAdapter = struct {
         if (self.state == .idle) return error.NotStarted;
         const pending = self.pending;
         self.pending = null;
-        return pending;
+        if (pending != null) return pending;
+        if (self.private_reconciler) |reconciler| if (reconciler.drain()) |private_output| {
+            var output = private_output;
+            if (self.pending_account_reconciliation != null) for (output.slice()) |record| if (record.event == .account_bootstrap_snapshot) {
+                self.appendEvent(&output, self.pending_account_reconciliation.?, .{ .account_reconciliation_result = .{ .identity = self.pending_account_reconciliation.?, .complete = true, .status = .found_terminal } });
+                self.pending_account_reconciliation = null;
+                break;
+            };
+            return output;
+        };
+        return null;
     }
     fn stop(ptr: *anyopaque, _: venue.DrainDeadline) venue.StopError!void {
         const self: *BinanceVenueAdapter = @ptrCast(@alignCast(ptr));
         if (self.state == .idle) return error.NotStarted;
-        if (self.pending != null) return error.OutputPending;
+        if (self.pending != null or (self.private_reconciler != null and self.private_reconciler.?.hasPending())) return error.OutputPending;
         self.state = .stopped;
     }
 
@@ -176,6 +218,11 @@ pub const BinanceVenueAdapter = struct {
         return null;
     }
     fn dispatchOne(self: *BinanceVenueAdapter, output: *canonical.AdapterOutputBatch, command: canonical.OrderCommand) void {
+        if (command.operation == .place) if (self.private_reconciler) |reconciler|
+            reconciler.registerOrder(command.identity, command.client_order_id) catch {
+                self.append(output, command, .not_sent, .adapter_backpressure, null);
+                return;
+            };
         const encoded = self.encode(command) catch {
             self.append(output, command, .not_sent, .unsupported_value, null);
             return;
@@ -194,6 +241,33 @@ pub const BinanceVenueAdapter = struct {
         const result = classify(response.outcome, response.response);
         if (result == .unknown) self.unknown_outstanding = true;
         self.append(output, command, result, if (result == .not_sent) .other_venue_reject else null, evidence);
+    }
+    fn reconcileOrder(self: *BinanceVenueAdapter, request: canonical.OrderReconciliationRequest) venue.SendError!venue.SendResult {
+        const binding = self.binding orelse return error.InvalidRequest;
+        if (request.exchange_account != binding.account) return error.InvalidRequest;
+        var output: canonical.AdapterOutputBatch = .{};
+        self.appendEvent(&output, request.identity, .{ .reconciliation_started = request.identity });
+        const status = if (self.private_reconciler) |reconciler| reconciler.resolveOrder(request.order) else canonical.ReconciliationStatus.unresolved;
+        if (status != .unresolved) self.unknown_outstanding = false;
+        self.appendEvent(&output, request.identity, .{ .order_reconciliation_result = .{ .identity = request.identity, .complete = status != .unresolved, .status = status } });
+        self.pending = output;
+        return .accepted;
+    }
+    fn reconcileAccount(self: *BinanceVenueAdapter, request: canonical.AccountReconciliationRequest) venue.SendError!venue.SendResult {
+        const binding = self.binding orelse return error.InvalidRequest;
+        if (request.exchange_account != binding.account or request.expected_session != binding.session) return error.InvalidRequest;
+        var output: canonical.AdapterOutputBatch = .{};
+        self.appendEvent(&output, request.identity, .{ .account_reconciliation_started = request.identity });
+        const reconciler = self.private_reconciler orelse {
+            self.appendEvent(&output, request.identity, .{ .account_reconciliation_result = .{ .identity = request.identity, .complete = false, .status = .unresolved } });
+            self.pending = output;
+            return .accepted;
+        };
+        if (reconciler.readiness().stage == .buffering)
+            reconciler.beginReconciliation(reconciler.readiness().raw_watermark) catch return error.InvalidRequest;
+        self.pending_account_reconciliation = request.identity;
+        self.pending = output;
+        return .accepted;
     }
     fn commitResponse(self: *BinanceVenueAdapter, response: TransportResult) !?raw.RawEvidenceRef {
         const bytes = response.response orelse return if (response.outcome == .response) error.MissingResponse else null;
@@ -252,6 +326,12 @@ pub const BinanceVenueAdapter = struct {
         const sequence = self.next_event_sequence;
         self.next_event_sequence +%= 1;
         output.append(.{ .envelope = .{ .event_type = @intFromEnum(canonical.EventType.order_dispatch_result), .schema_version = 1, .identity = .{ .stream = binding.session, .sequence = sequence }, .source_fact_identity = command.identity, .scope = .account, .venue = binding.venue, .exchange_account = binding.account, .instrument = command.instrument, .source_stream = binding.session, .source_sequence = sequence, .adapter_session = binding.session, .times = .{ .monotonic_ns = self.clock.now() }, .raw_evidence = if (evidence) |value| .{ .stream = binding.session, .sequence = value.stream_sequence, .digest = value.sha256 } else .{ .stream = binding.session, .sequence = sequence, .digest = @splat(0) } }, .event = .{ .order_dispatch_result = .{ .command = command.identity, .state = state, .reason = reason } } }) catch return;
+    }
+    fn appendEvent(self: *BinanceVenueAdapter, output: *canonical.AdapterOutputBatch, source_fact_identity: u128, event: canonical.CanonicalEvent) void {
+        const binding = self.binding orelse return;
+        const sequence = self.next_event_sequence;
+        self.next_event_sequence +%= 1;
+        output.append(.{ .envelope = .{ .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = 1, .identity = .{ .stream = binding.session, .sequence = sequence }, .source_fact_identity = source_fact_identity, .scope = .account, .venue = binding.venue, .exchange_account = binding.account, .source_stream = binding.session, .source_sequence = sequence, .adapter_session = binding.session, .times = .{ .monotonic_ns = self.clock.now() }, .raw_evidence = .{ .stream = binding.session, .sequence = sequence, .digest = @splat(0) } }, .event = event }) catch return;
     }
 };
 
@@ -339,6 +419,12 @@ fn testProfile() CapabilityProfile {
 fn testCommand(identity: u128) !canonical.OrderCommand {
     return .{ .identity = identity, .exchange_account = 2, .instrument = btc_usdt_spot, .client_order_id = try canonical.ClientOrderId.init("BINANCE21"), .capability_version = 7, .rules_version = 8, .config_version = 9, .adapter_session = 6, .dispatch_deadline_monotonic_ns = 10, .quantity = .{ .instrument = btc_usdt_spot, .rules_version = 8, .lots = 1 }, .limit_price = .{ .instrument = btc_usdt_spot, .rules_version = 8, .ticks = 500_000 } };
 }
+fn privateRules(profile: CapabilityProfile) private.Rules {
+    return .{
+        .spot = .{ .identity = profile.spot.identity, .rules_version = profile.rules_version, .tick_size = profile.spot.tick_size, .lot_size = profile.spot.lot_size },
+        .linear = .{ .identity = profile.linear.identity, .rules_version = profile.rules_version, .tick_size = profile.linear.tick_size, .lot_size = profile.linear.lot_size },
+    };
+}
 fn startTest(adapter: venue.VenueAdapter) !void {
     try adapter.start(.{ .venue = 21, .environment = .demo, .exchange_account = 2, .adapter_session = 6, .request_capacity = 4, .output_capacity = 4 });
 }
@@ -419,4 +505,31 @@ test "Binance implementation exercises the shared VenueAdapter contract" {
     var transport = TestTransport{};
     var implementation = BinanceVenueAdapter.init(clock.interface(), testProfile(), auth.interface(), sink.interface(), transport.interface());
     try contract.exerciseWith(implementation.adapter(), .{ .venue = 21, .environment = .demo, .exchange_account = 2, .adapter_session = 6, .request_capacity = 4, .output_capacity = 4 }, .{ .order_command = try testCommand(1) });
+}
+
+test "Binance private bootstrap drains through the shared VenueAdapter seam" {
+    var clock = TestClock{};
+    var auth = TestAuth{};
+    var sink = TestRaw{};
+    var transport = TestTransport{};
+    const profile = testProfile();
+    var reconciler = private.Reconciler.init(sink.interface(), privateRules(profile));
+    var implementation = BinanceVenueAdapter.init(clock.interface(), profile, auth.interface(), sink.interface(), transport.interface());
+    implementation.attachPrivateReconciler(&reconciler);
+    const adapter = implementation.adapter();
+    try startTest(adapter);
+    try implementation.beginPrivateReconciliation();
+    try reconciler.registerOrder(9, try canonical.ClientOrderId.init("RWN-9"));
+    const times = raw.Times{ .receive_time_utc_ns = 1, .monotonic_time_ns = 2, .wall_time_utc_ns = 3 };
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_spot_account, .{ .final = true }, times, "{\"balances\":[]}");
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_orders, .{ .final = true }, times, "[]");
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_fills, .{ .final = true }, times, "[]");
+    const output = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(@as(u8, 1), output.len);
+    try std.testing.expect(output.events[0].event == .account_bootstrap_snapshot);
+    _ = try adapter.trySend(.{ .order_reconciliation = .{ .identity = 99, .exchange_account = 2, .order = 9 } });
+    const resolved = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(@as(u8, 2), resolved.len);
+    try std.testing.expect(output.events[0].envelope.identity.stream != resolved.events[0].envelope.identity.stream);
+    try std.testing.expectEqual(canonical.ReconciliationStatus.confirmed_absent, resolved.events[1].event.order_reconciliation_result.status);
 }
