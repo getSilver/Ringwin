@@ -14,6 +14,7 @@ const market_projection = @import("market_projection.zig");
 const account_projection = @import("account_projection.zig");
 const okx_market_feed = @import("okx_market_feed.zig");
 const binance_market_feed = @import("binance_market_feed.zig");
+const bybit_market_feed = @import("bybit_market_feed.zig");
 const okx_venue_adapter = @import("okx_venue_adapter.zig");
 const binance_venue_adapter = @import("binance_venue_adapter.zig");
 const binance_private_reconciliation = @import("binance_private_reconciliation.zig");
@@ -83,6 +84,7 @@ test {
     _ = account_projection;
     _ = okx_market_feed;
     _ = binance_market_feed;
+    _ = bybit_market_feed;
     _ = okx_venue_adapter;
     _ = binance_venue_adapter;
     _ = binance_private_reconciliation;
