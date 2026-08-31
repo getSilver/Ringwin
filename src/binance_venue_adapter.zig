@@ -14,6 +14,20 @@ pub const btc_usdt_spot: canonical.InstrumentIdentity = 0x424e_00000001;
 pub const btc_usdt_linear: canonical.InstrumentIdentity = 0x424e_00000002;
 
 pub const InstrumentRules = struct { identity: canonical.InstrumentIdentity, tick_size: canonical.Decimal, lot_size: canonical.Decimal };
+/// Execution authority for this fixed Binance Testnet session.  It is private
+/// to the Venue implementation: the generic Gateway only sees canonical facts.
+pub const TestnetAdmission = struct {
+    explicit_enable: bool = false,
+    endpoint_is_testnet: bool = false,
+    credential_can_read: bool = false,
+    credential_can_trade: bool = false,
+    credential_can_withdraw: bool = true,
+    max_order_notional_usdt_micros: u64 = 25_000_000,
+
+    pub fn permitsPlace(self: TestnetAdmission) bool {
+        return self.explicit_enable and self.endpoint_is_testnet and self.credential_can_read and self.credential_can_trade and !self.credential_can_withdraw and self.max_order_notional_usdt_micros > 0;
+    }
+};
 pub const CapabilityProfile = struct {
     version: u64,
     rules_version: u64,
@@ -27,6 +41,7 @@ pub const CapabilityProfile = struct {
     venue_reduce_only_linear: bool = true,
     requests_per_window: u8 = 4,
     window_ns: u64 = std.time.ns_per_s,
+    testnet_admission: TestnetAdmission = .{},
 };
 
 pub const Authenticator = struct {
@@ -154,6 +169,11 @@ pub const BinanceVenueAdapter = struct {
             self.pending = output;
             return .accepted;
         }
+        if (!self.batchWithinNotional(commands[0..count])) {
+            for (commands[0..count]) |command| self.append(&output, command, .not_sent, .unsupported_value, null);
+            self.pending = output;
+            return .accepted;
+        }
         for (commands[0..count]) |command| if (self.validate(command)) |reason| {
             self.append(&output, command, .not_sent, reason, null);
         } else {
@@ -203,6 +223,7 @@ pub const BinanceVenueAdapter = struct {
         if (command.order_type == .post_only and !self.profile.native_post_only) return .capability_unsupported;
         if (command.venue_reduce_only and (command.instrument != btc_usdt_linear or !self.profile.venue_reduce_only_linear)) return .capability_unsupported;
         if (command.operation == .place) {
+            if (!self.profile.testnet_admission.permitsPlace()) return .venue_unavailable;
             const expected: canonical.TimeInForce = switch (command.order_type) {
                 .market, .ioc => .immediate_or_cancel,
                 .fok => .fill_or_kill,
@@ -213,9 +234,40 @@ pub const BinanceVenueAdapter = struct {
             if (command.order_type == .market) {
                 if (command.limit_price != null or command.market_protection_price == null) return .unsupported_value;
             } else if (command.limit_price == null or command.market_protection_price != null) return .unsupported_value;
+            const price = command.limit_price orelse command.market_protection_price orelse return .unsupported_value;
+            const notional = self.notionalMicros(command.quantity orelse return .unsupported_value, price, instrument_rules) orelse return .unsupported_value;
+            if (notional > self.profile.testnet_admission.max_order_notional_usdt_micros) return .unsupported_value;
         }
         if (command.limit_price) |price| if (price.instrument != instrument_rules.identity or price.rules_version != command.rules_version or price.ticks <= 0) return .unsupported_value;
         return null;
+    }
+    fn notionalMicros(self: *const BinanceVenueAdapter, quantity: canonical.InstrumentQuantity, price_value: canonical.InstrumentPrice, instrument_rules: InstrumentRules) ?u64 {
+        _ = self;
+        if (quantity.lots <= 0 or price_value.ticks <= 0 or instrument_rules.lot_size.coefficient <= 0 or instrument_rules.tick_size.coefficient <= 0) return null;
+        var numerator = std.math.mul(i128, quantity.lots, instrument_rules.lot_size.coefficient) catch return null;
+        numerator = std.math.mul(i128, numerator, price_value.ticks) catch return null;
+        numerator = std.math.mul(i128, numerator, instrument_rules.tick_size.coefficient) catch return null;
+        const scale = std.math.add(u8, instrument_rules.lot_size.scale, instrument_rules.tick_size.scale) catch return null;
+        if (scale <= 6) {
+            const factor = powerOfTen(6 - scale) orelse return null;
+            return std.math.cast(u64, std.math.mul(i128, numerator, factor) catch return null);
+        }
+        const divisor = powerOfTen(scale - 6) orelse return null;
+        const adjusted = std.math.add(i128, numerator, divisor - 1) catch return null;
+        return std.math.cast(u64, @divFloor(adjusted, divisor));
+    }
+    fn batchWithinNotional(self: *const BinanceVenueAdapter, commands: []const canonical.OrderCommand) bool {
+        var total: u64 = 0;
+        for (commands) |command| {
+            if (command.operation != .place) continue;
+            const instrument_rules = self.rules(command.instrument) orelse return false;
+            const quantity = command.quantity orelse return false;
+            const price = command.limit_price orelse command.market_protection_price orelse return false;
+            const notional = self.notionalMicros(quantity, price, instrument_rules) orelse return false;
+            total = std.math.add(u64, total, notional) catch return false;
+            if (total > self.profile.testnet_admission.max_order_notional_usdt_micros) return false;
+        }
+        return true;
     }
     fn dispatchOne(self: *BinanceVenueAdapter, output: *canonical.AdapterOutputBatch, command: canonical.OrderCommand) void {
         if (command.operation == .place) if (self.private_reconciler) |reconciler|
@@ -361,6 +413,12 @@ fn pow10(scale: u8) !i128 {
     while (index < scale) : (index += 1) result = try std.math.mul(i128, result, 10);
     return result;
 }
+fn powerOfTen(exponent: u8) ?i128 {
+    var value: i128 = 1;
+    for (0..exponent) |_| value = std.math.mul(i128, value, 10) catch return null;
+    return value;
+}
+
 fn classify(outcome: TransportOutcome, response: ?[]const u8) canonical.DispatchState {
     if (outcome == .proven_before_send) return .not_sent;
     if (outcome == .write_or_response_uncertain) return .unknown;
@@ -414,7 +472,7 @@ const TestTransport = struct {
 };
 fn testProfile() CapabilityProfile {
     const rules = InstrumentRules{ .identity = btc_usdt_spot, .tick_size = .{ .coefficient = 1, .scale = 1 }, .lot_size = .{ .coefficient = 1, .scale = 4 } };
-    return .{ .version = 7, .rules_version = 8, .config_version = 9, .session = 6, .spot = rules, .linear = .{ .identity = btc_usdt_linear, .tick_size = rules.tick_size, .lot_size = rules.lot_size } };
+    return .{ .version = 7, .rules_version = 8, .config_version = 9, .session = 6, .spot = rules, .linear = .{ .identity = btc_usdt_linear, .tick_size = rules.tick_size, .lot_size = rules.lot_size }, .testnet_admission = .{ .explicit_enable = true, .endpoint_is_testnet = true, .credential_can_read = true, .credential_can_trade = true, .credential_can_withdraw = false } };
 }
 fn testCommand(identity: u128) !canonical.OrderCommand {
     return .{ .identity = identity, .exchange_account = 2, .instrument = btc_usdt_spot, .client_order_id = try canonical.ClientOrderId.init("BINANCE21"), .capability_version = 7, .rules_version = 8, .config_version = 9, .adapter_session = 6, .dispatch_deadline_monotonic_ns = 10, .quantity = .{ .instrument = btc_usdt_spot, .rules_version = 8, .lots = 1 }, .limit_price = .{ .instrument = btc_usdt_spot, .rules_version = 8, .ticks = 500_000 } };
@@ -471,6 +529,48 @@ test "Binance rejects stale and expired commands and latches unknown without ret
     const blocked = (try adapter.tryDrain()).?;
     try std.testing.expectEqual(canonical.DispatchState.not_sent, blocked.events[0].event.order_dispatch_result.state);
     try std.testing.expectEqual(@as(u64, 1), transport.calls);
+}
+
+test "Binance Testnet sends require explicit no-withdraw admission and bounded notional" {
+    var clock = TestClock{};
+    var auth = TestAuth{};
+    var sink = TestRaw{};
+    var transport = TestTransport{};
+    var profile = testProfile();
+    profile.testnet_admission.explicit_enable = false;
+    var implementation = BinanceVenueAdapter.init(clock.interface(), profile, auth.interface(), sink.interface(), transport.interface());
+    const adapter = implementation.adapter();
+    try startTest(adapter);
+
+    _ = try adapter.trySend(.{ .order_command = try testCommand(1) });
+    const disabled = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(canonical.CanonicalRejectReason.venue_unavailable, disabled.events[0].event.order_dispatch_result.reason.?);
+    try std.testing.expectEqual(@as(u64, 0), transport.calls);
+
+    implementation.profile.testnet_admission.explicit_enable = true;
+    implementation.profile.testnet_admission.credential_can_withdraw = true;
+    _ = try adapter.trySend(.{ .order_command = try testCommand(2) });
+    const withdrawal_capable = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(canonical.CanonicalRejectReason.venue_unavailable, withdrawal_capable.events[0].event.order_dispatch_result.reason.?);
+    try std.testing.expectEqual(@as(u64, 0), transport.calls);
+
+    implementation.profile.testnet_admission.credential_can_withdraw = false;
+    implementation.profile.testnet_admission.max_order_notional_usdt_micros = 4_999_999;
+    _ = try adapter.trySend(.{ .order_command = try testCommand(3) });
+    const excessive = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(canonical.CanonicalRejectReason.unsupported_value, excessive.events[0].event.order_dispatch_result.reason.?);
+    try std.testing.expectEqual(@as(u64, 0), transport.calls);
+
+    implementation.profile.testnet_admission.max_order_notional_usdt_micros = 9_999_999;
+    var batch: canonical.OrderCommandBatch = .{};
+    try batch.append(try testCommand(4));
+    try batch.append(try testCommand(5));
+    _ = try adapter.trySend(.{ .order_batch = batch });
+    const aggregate_excess = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(@as(u8, 2), aggregate_excess.len);
+    try std.testing.expectEqual(canonical.CanonicalRejectReason.unsupported_value, aggregate_excess.events[0].event.order_dispatch_result.reason.?);
+    try std.testing.expectEqual(@as(u64, 0), transport.calls);
+    try adapter.stop(.{ .monotonic_ns = 1 });
 }
 
 test "Binance validates TIF, post-only, reduce-only, amend, and deadline before transport" {
