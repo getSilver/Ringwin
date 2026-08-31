@@ -1,7 +1,7 @@
 # Venue 字段处置矩阵与 CapabilityProfile 证据
 
 > 状态：已审核的设计输入；不授予任何交易权限
-> 更新：2026-08-28
+> 更新：2026-08-31
 > 范围：OKX、Binance、Bybit 的现货和 USDT 线性永续；对应 #7、父 Spec #5
 > 架构：[`docs/adr/0001-separate-venue-execution-and-market-feed-seams.md`](adr/0001-separate-venue-execution-and-market-feed-seams.md)
 
@@ -168,8 +168,8 @@ Profile 是一项不可变配置事实，键为
 | `okx-demo-linear-v1` | OKX + Demo + 指定 ExchangeAccount + BTC-USDT-SWAP isolated | §1.1 OKX orders/positions/instruments | 同上；只声明明确测试过的 limit/IOC/FOK/post-only、native amend、批量和 VenueReduceOnly | 不得扩展到 cross、hedge、auto-add margin 或其它 instrument。 |
 | `binance-spot-testnet-v1` | Binance Spot Testnet + 指定账户 + BTC-USDT | §1.1 Spot messages/exchangeInfo；§3.5 public depth | `src/binance_market_feed.zig` 的官方 fixture、RawIngress 与 MarketFeedAdapter contract；`src/binance_venue_adapter.zig` 与 `src/binance_private_reconciliation.zig` 的私有 seam、分页 bootstrap、去重和显式 Testnet/no-withdraw/notional guard tests；`src/binance_testnet_acceptance.zig` 的前后清洁状态与证据范围 tests | `testnet_run`；不授予生产交易或 Linux 性能资格。 |
 | `binance-usdm-testnet-v1` | Binance USD-M Testnet + 指定账户 + BTCUSDT perpetual | §1.1 USD-M messages/exchangeInfo；§3.5 public depth / mark price | 同上，含线性 L2、mark/index/funding，以及 USD-M private order/account 定向 tests；相同 TestnetRun guard 与清洁状态证据 | `testnet_run`；不授予生产交易或 Linux 性能资格。 |
-| `bybit-spot-testnet-v1` | Bybit Testnet + 指定账户 + BTCUSDT spot | §1.1 Bybit private/instrument messages | 仅资料证据；尚无 Adapter/qualification evidence | `official_confirmed`，所有发送仍 `U:authority`。 |
-| `bybit-linear-testnet-v1` | Bybit Testnet + 指定账户 + BTCUSDT linear | §1.1 Bybit private/instrument messages | 仅资料证据；尚无 Adapter/qualification evidence | `official_confirmed`，所有发送仍 `U:authority`。 |
+| `bybit-spot-testnet-v1` | Bybit Testnet + 指定账户 + BTCUSDT spot | §1.1 Bybit private/instrument messages | `src/bybit_venue_adapter.zig` 与 `src/bybit_private_reconciliation.zig` 的 canonical command、RawIngress、order/fill 去重、bootstrap/absolute observed 和共享 Adapter contract tests | `official_confirmed`；尚无真实 Testnet 准入与清理证据，发送仍 `U:authority`。 |
+| `bybit-linear-testnet-v1` | Bybit Testnet + 指定账户 + BTCUSDT linear | §1.1 Bybit private/instrument messages | 同上；linear position、VenueReduceOnly 与 execution sequence 只在私有 adapter seam 中映射 | `official_confirmed`；尚无真实 Testnet 准入与清理证据，发送仍 `U:authority`。 |
 
 每个未来 `demo_qualified` / `testnet_qualified` Profile 必须附带：资料版本/URL、fixture hash、
 账户与环境证明、权限（无提现）、完整 bootstrap、限流/分页边界、RawIngress 可写证明、
