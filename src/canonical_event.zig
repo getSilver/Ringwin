@@ -442,6 +442,12 @@ pub const EventType = enum(u32) {
     venue_account_configuration_snapshot = 13,
     order_reconciliation_result = 14,
     account_reconciliation_result = 15,
+    instrument_definition_observed = 16,
+    l2_book_snapshot = 17,
+    l2_book_delta = 18,
+    reference_price = 19,
+    funding_rate_published = 20,
+    market_data_health_changed = 21,
 };
 
 pub const TimeInForce = enum(u8) { good_til_canceled, immediate_or_cancel, fill_or_kill, post_only };
@@ -458,7 +464,12 @@ pub fn eventType(event: CanonicalEvent) EventType {
         .venue_account_configuration_snapshot => .venue_account_configuration_snapshot,
         .order_reconciliation_result => .order_reconciliation_result,
         .account_reconciliation_result => .account_reconciliation_result,
-        else => .order_dispatch_result,
+        .instrument_definition_observed => .instrument_definition_observed,
+        .l2_book_snapshot => .l2_book_snapshot,
+        .l2_book_delta => .l2_book_delta,
+        .reference_price => .reference_price,
+        .funding_rate_published => .funding_rate_published,
+        .market_data_health_changed => .market_data_health_changed,
     };
 }
 

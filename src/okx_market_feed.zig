@@ -196,7 +196,7 @@ pub const OkxMarketFeed = struct {
         const config = self.config orelse return error.NotStarted;
         self.next_event_sequence = std.math.add(u64, self.next_event_sequence, 1) catch return error.EventSequenceOverflow;
         try output.append(.{ .envelope = .{
-            .event_type = 2,
+            .event_type = @intFromEnum(canonical.eventType(event)),
             .schema_version = 1,
             .identity = .{ .stream = config.session, .sequence = self.next_event_sequence },
             .source_fact_identity = std.mem.readInt(u128, envelope.source_fact_identity[0..16], .little),
