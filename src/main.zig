@@ -21,6 +21,8 @@ const binance_private_reconciliation = @import("binance_private_reconciliation.z
 const binance_testnet_acceptance = @import("binance_testnet_acceptance.zig");
 const bybit_private_reconciliation = @import("bybit_private_reconciliation.zig");
 const bybit_venue_adapter = @import("bybit_venue_adapter.zig");
+const bybit_testnet_acceptance = @import("bybit_testnet_acceptance.zig");
+const multi_venue_testnet_acceptance = @import("multi_venue_testnet_acceptance.zig");
 const trading_shard_fixture = @import("trading_shard_fixture.zig");
 const trading_shard_benchmark = @import("trading_shard_benchmark.zig");
 
@@ -91,5 +93,7 @@ test {
     _ = binance_testnet_acceptance;
     _ = bybit_private_reconciliation;
     _ = bybit_venue_adapter;
+    _ = bybit_testnet_acceptance;
+    _ = multi_venue_testnet_acceptance;
     _ = trading_shard_fixture;
 }
