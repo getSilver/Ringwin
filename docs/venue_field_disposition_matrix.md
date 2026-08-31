@@ -1,7 +1,7 @@
 # Venue 字段处置矩阵与 CapabilityProfile 证据
 
 > 状态：已审核的设计输入；不授予任何交易权限
-> 更新：2026-08-28
+> 更新：2026-08-31
 > 范围：OKX、Binance、Bybit 的现货和 USDT 线性永续；对应 #7、父 Spec #5
 > 架构：[`docs/adr/0001-separate-venue-execution-and-market-feed-seams.md`](adr/0001-separate-venue-execution-and-market-feed-seams.md)
 
@@ -25,7 +25,7 @@
 |---|---|---|---|
 | OKX | 私有 `orders`、`fills`、`balance_and_position`；`public/instruments?instType=SPOT` | 私有 `orders`、`fills`、`positions`、`balance_and_position`；`public/instruments?instType=SWAP` | [orders](https://www.okx.com/docs-v5/en/#web3-dex-solana-trading-websocket-private-channel-order-channel)、[account/positions](https://www.okx.com/docs-v5/en/#trading-account-rest-api-get-positions)、[instruments](https://www.okx.com/docs-v5/en/#public-data-rest-api-get-instruments) |
 | Binance | User Data Stream `executionReport`、`outboundAccountPosition`、`balanceUpdate`；`exchangeInfo`；public depth | USD-M User Data Stream `ORDER_TRADE_UPDATE`、`ACCOUNT_UPDATE`；`exchangeInfo`；public depth / mark price | [Spot user stream](https://developers.binance.com/docs/binance-spot-api-docs/user-data-stream)、[Spot exchange info](https://developers.binance.com/docs/binance-spot-api-docs/rest-api/general-endpoints#exchange-information)、[Spot depth](https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams#diff-depth-stream)、[USD-M user stream](https://developers.binance.com/docs/derivatives/usds-margined-futures/user-data-streams/Event-Order-Update)、[USD-M exchange info](https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Exchange-Information)、[USD-M market streams](https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Mark-Price-Stream) |
-| Bybit | v5 private `order`、`execution`、`wallet`；`instruments-info?category=spot` | v5 private `order`、`execution`、`position`、`wallet`；`instruments-info?category=linear` | [order](https://bybit-exchange.github.io/docs/v5/websocket/private/order)、[execution](https://bybit-exchange.github.io/docs/v5/websocket/private/execution)、[wallet](https://bybit-exchange.github.io/docs/v5/websocket/private/wallet)、[position](https://bybit-exchange.github.io/docs/v5/websocket/private/position)、[instruments](https://bybit-exchange.github.io/docs/v5/market/instrument) |
+| Bybit | v5 private `order`、`execution`、`wallet`；`instruments-info?category=spot`；public orderbook | v5 private `order`、`execution`、`position`、`wallet`；`instruments-info?category=linear`；public orderbook/ticker | [order](https://bybit-exchange.github.io/docs/v5/websocket/private/order)、[execution](https://bybit-exchange.github.io/docs/v5/websocket/private/execution)、[wallet](https://bybit-exchange.github.io/docs/v5/websocket/private/wallet)、[position](https://bybit-exchange.github.io/docs/v5/websocket/private/position)、[instruments](https://bybit-exchange.github.io/docs/v5/market/instrument)、[orderbook](https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook)、[ticker](https://bybit-exchange.github.io/docs/v5/websocket/public/ticker) |
 
 仅限 `SPOT`、`SWAP` / USD-M、Bybit `spot` / `linear`。期权、交割合约、组合保证金和
 算法订单不在产品范围；它们出现的字段仍在本表中标明拒绝原因，不能被忽略。
@@ -156,6 +156,16 @@
 | `instruments-info.list[]` | `category`, `symbol`, `baseCoin`, `quoteCoin`, `settleCoin`, `contractType`, `status`, `launchTime`, `deliveryTime`, `priceScale`, `leverageFilter.minLeverage`, `leverageFilter.maxLeverage`, `leverageFilter.leverageStep`, `priceFilter.minPrice`, `priceFilter.maxPrice`, `priceFilter.tickSize`, `lotSizeFilter.maxOrderQty`, `lotSizeFilter.minOrderQty`, `lotSizeFilter.qtyStep`, `lotSizeFilter.maxMktOrderQty`, `lotSizeFilter.minNotionalValue`, `unifiedMarginTrade`, `fundingInterval`, `copyTrading`, `forbidUplWithdrawal` | `C6/C7/C13`（身份/规则/线性账户资格）；`U:product`（非 spot/linear）；`RE:rule-detail`（交割/copy 等） | Profile 仅在目标产品、账户和环境都匹配时可激活。 |
 | `instruments-info.list[]` | `optionsType`, `innovation`, `riskParameters`, `preListingInfo`, `stTag`, `marginTrading` | `U:product`（options）；`RE:rule-detail`（其余） | 不创建跨产品的 optional core 字段。 |
 
+### 3.7 Bybit：公共 orderbook、ticker 与 instruments-info
+
+| 目标消息 | 字段 | 处置 | 原因 |
+|---|---|---|---|
+| `instruments-info.result.list[]` | `category`, `symbol`, `status`, `contractType`, `settleCoin`, `priceFilter.tickSize` | `C6/C7` 与 `InstrumentDefinitionObserved` | 仅接受 BTCUSDT spot 与 USDT LinearPerpetual；规则仍需通过配置屏障激活。 |
+| public `orderbook.{depth}.BTCUSDT` | `topic`, `type`, `ts`, `cts`, `data.s`, `data.b[][price,size]`, `data.a[][price,size]`, `data.u`, `data.seq` | `C3/C4/C5` 与 `L2BookSnapshot` / `L2BookDelta`；`AI:sequence`（`u`）；`C3` cross sequence（`seq`） | snapshot 重置本地簿；不连续 delta、删除当前最优价或解析失败进入 gap，直至新 snapshot。 |
+| linear public `tickers.BTCUSDT` | `ts`, `cs`, `data.symbol`, `markPrice`, `indexPrice`, `fundingRate`, `nextFundingTime` | `C4/C5` 与 `ReferencePrice.mark`、`ReferencePrice.index`、`FundingRatePublished`；`C3` cross sequence（`cs`） | mark、index 和 funding 分别保留；接受数字或数字字符串的 funding time。 |
+| public ticker 其它字段 | `lastPrice`, `bid1Price`, `ask1Price`, `openInterest`, `volume24h`, `deliveryTime`, pre-listing / futures 字段 | `RE:market-detail`；`U:product`（非目标产品） | 不用展示值替代 L2、mark、index 或 funding 事实。 |
+| subscribe acknowledgement / reconnect | `success`, `op`, `req_id`, `retCode`, `retMsg` 与新的订阅边界 | `AI:session/C5` 与 `MarketDataHealthChanged.awaiting_snapshot` | control frame 先写 RawIngress；新订阅前不得用旧 delta 恢复健康。 |
+
 ## 4. CapabilityProfile 证据登记
 
 Profile 是一项不可变配置事实，键为
@@ -168,8 +178,8 @@ Profile 是一项不可变配置事实，键为
 | `okx-demo-linear-v1` | OKX + Demo + 指定 ExchangeAccount + BTC-USDT-SWAP isolated | §1.1 OKX orders/positions/instruments | 同上；只声明明确测试过的 limit/IOC/FOK/post-only、native amend、批量和 VenueReduceOnly | 不得扩展到 cross、hedge、auto-add margin 或其它 instrument。 |
 | `binance-spot-testnet-v1` | Binance Spot Testnet + 指定账户 + BTC-USDT | §1.1 Spot messages/exchangeInfo；§3.5 public depth | `src/binance_market_feed.zig` 的官方 fixture、RawIngress 与 MarketFeedAdapter contract；`src/binance_venue_adapter.zig` 与 `src/binance_private_reconciliation.zig` 的私有 seam、分页 bootstrap、去重和显式 Testnet/no-withdraw/notional guard tests；`src/binance_testnet_acceptance.zig` 的前后清洁状态与证据范围 tests | `testnet_run`；不授予生产交易或 Linux 性能资格。 |
 | `binance-usdm-testnet-v1` | Binance USD-M Testnet + 指定账户 + BTCUSDT perpetual | §1.1 USD-M messages/exchangeInfo；§3.5 public depth / mark price | 同上，含线性 L2、mark/index/funding，以及 USD-M private order/account 定向 tests；相同 TestnetRun guard 与清洁状态证据 | `testnet_run`；不授予生产交易或 Linux 性能资格。 |
-| `bybit-spot-testnet-v1` | Bybit Testnet + 指定账户 + BTCUSDT spot | §1.1 Bybit private/instrument messages | 仅资料证据；尚无 Adapter/qualification evidence | `official_confirmed`，所有发送仍 `U:authority`。 |
-| `bybit-linear-testnet-v1` | Bybit Testnet + 指定账户 + BTCUSDT linear | §1.1 Bybit private/instrument messages | 仅资料证据；尚无 Adapter/qualification evidence | `official_confirmed`，所有发送仍 `U:authority`。 |
+| `bybit-spot-testnet-v1` | Bybit Testnet + 指定账户 + BTCUSDT spot | §1.1 Bybit private/instrument messages；§3.7 public orderbook | `src/bybit_market_feed.zig` 的官方 V5 fixture、RawIngress、序列与 MarketFeedAdapter contract tests；尚无私有/发送 qualification evidence | `official_confirmed`，所有发送仍 `U:authority`。 |
+| `bybit-linear-testnet-v1` | Bybit Testnet + 指定账户 + BTCUSDT linear | §1.1 Bybit private/instrument messages；§3.7 public orderbook/ticker | 同上，含线性 mark/index/funding 与 cross sequence；尚无私有/发送 qualification evidence | `official_confirmed`，所有发送仍 `U:authority`。 |
 
 每个未来 `demo_qualified` / `testnet_qualified` Profile 必须附带：资料版本/URL、fixture hash、
 账户与环境证明、权限（无提现）、完整 bootstrap、限流/分页边界、RawIngress 可写证明、
