@@ -65,6 +65,7 @@ pub const Transport = struct {
 const State = enum { idle, running, stopped };
 const Binding = struct { venue: canonical.VenueIdentity, account: canonical.ExchangeAccountIdentity, session: canonical.AdapterSessionIdentity };
 const Rate = struct { window_start: u64 = 0, count: u8 = 0 };
+const max_unknown_orders = 32;
 const Encoded = struct {
     path: []const u8,
     bytes: [512]u8 = undefined,
@@ -85,7 +86,9 @@ pub const BinanceVenueAdapter = struct {
     pending: ?canonical.AdapterOutputBatch = null,
     next_event_sequence: u64 = 1,
     rate: Rate = .{},
-    unknown_outstanding: bool = false,
+    unknown_orders: [max_unknown_orders]canonical.OrderIdentity = undefined,
+    unknown_count: u8 = 0,
+    unknown_overflow: bool = false,
     private_reconciler: ?*private.Reconciler = null,
     pending_account_reconciliation: ?u128 = null,
 
@@ -209,7 +212,7 @@ pub const BinanceVenueAdapter = struct {
 
     fn validate(self: *const BinanceVenueAdapter, command: canonical.OrderCommand) ?canonical.CanonicalRejectReason {
         const binding = self.binding orelse return .unsupported_value;
-        if (self.unknown_outstanding) return .venue_unavailable;
+        if (self.hasUnknown() and command.operation != .cancel) return .venue_unavailable;
         if (command.exchange_account != binding.account) return .unsupported_value;
         if (command.capability_version != self.profile.version or command.rules_version != self.profile.rules_version or command.config_version != self.profile.config_version or command.adapter_session != binding.session) return .stale_version;
         if (command.dispatch_deadline_monotonic_ns <= self.clock.now()) return .deadline_expired;
@@ -287,11 +290,11 @@ pub const BinanceVenueAdapter = struct {
         const response = self.transport.submit(.{ .path = encoded.path, .body = encoded.body(), .timestamp_ns = timestamp, .signature = signature });
         const evidence = self.commitResponse(response) catch {
             self.append(output, command, .unknown, null, null);
-            self.unknown_outstanding = true;
+            self.markUnknown(command.identity);
             return;
         };
         const result = classify(response.outcome, response.response);
-        if (result == .unknown) self.unknown_outstanding = true;
+        if (result == .unknown) self.markUnknown(command.identity);
         self.append(output, command, result, if (result == .not_sent) .other_venue_reject else null, evidence);
     }
     fn reconcileOrder(self: *BinanceVenueAdapter, request: canonical.OrderReconciliationRequest) venue.SendError!venue.SendResult {
@@ -299,11 +302,32 @@ pub const BinanceVenueAdapter = struct {
         if (request.exchange_account != binding.account) return error.InvalidRequest;
         var output: canonical.AdapterOutputBatch = .{};
         self.appendEvent(&output, request.identity, .{ .reconciliation_started = request.identity });
-        const status = if (self.private_reconciler) |reconciler| reconciler.resolveOrder(request.order) else canonical.ReconciliationStatus.unresolved;
-        if (status != .unresolved) self.unknown_outstanding = false;
+        const confirmed_absent_allowed = request.visibility_delay_elapsed and request.prior_session_inactive;
+        const status = if (self.private_reconciler) |reconciler| reconciler.resolveOrder(request.order, confirmed_absent_allowed) else canonical.ReconciliationStatus.unresolved;
+        if (status != .unresolved) self.clearUnknown(request.order);
         self.appendEvent(&output, request.identity, .{ .order_reconciliation_result = .{ .identity = request.identity, .complete = status != .unresolved, .status = status } });
         self.pending = output;
         return .accepted;
+    }
+
+    fn hasUnknown(self: *const BinanceVenueAdapter) bool {
+        return self.unknown_overflow or self.unknown_count != 0;
+    }
+    fn markUnknown(self: *BinanceVenueAdapter, order: canonical.OrderIdentity) void {
+        for (self.unknown_orders[0..self.unknown_count]) |existing| if (existing == order) return;
+        if (self.unknown_count == self.unknown_orders.len) {
+            self.unknown_overflow = true;
+            return;
+        }
+        self.unknown_orders[self.unknown_count] = order;
+        self.unknown_count += 1;
+    }
+    fn clearUnknown(self: *BinanceVenueAdapter, order: canonical.OrderIdentity) void {
+        for (self.unknown_orders[0..self.unknown_count], 0..) |existing, index| if (existing == order) {
+            self.unknown_count -= 1;
+            self.unknown_orders[index] = self.unknown_orders[self.unknown_count];
+            return;
+        };
     }
     fn reconcileAccount(self: *BinanceVenueAdapter, request: canonical.AccountReconciliationRequest) venue.SendError!venue.SendResult {
         const binding = self.binding orelse return error.InvalidRequest;
@@ -423,7 +447,25 @@ fn classify(outcome: TransportOutcome, response: ?[]const u8) canonical.Dispatch
     if (outcome == .proven_before_send) return .not_sent;
     if (outcome == .write_or_response_uncertain) return .unknown;
     const bytes = response orelse return .unknown;
-    return if (std.mem.indexOf(u8, bytes, "\"code\":0") != null) .submitted else .not_sent;
+    const parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, bytes, .{}) catch return .unknown;
+    defer parsed.deinit();
+    const object = switch (parsed.value) {
+        .object => |value| value,
+        else => return .unknown,
+    };
+    if (object.get("code")) |value| {
+        const code = jsonInteger(value) orelse return .unknown;
+        return if (code == 0) .submitted else .not_sent;
+    }
+    return if (object.get("orderId") != null) .submitted else .unknown;
+}
+
+fn jsonInteger(value: std.json.Value) ?i64 {
+    return switch (value) {
+        .integer => |number| number,
+        .number_string, .string => |text| std.fmt.parseInt(i64, text, 10) catch null,
+        else => null,
+    };
 }
 
 const TestClock = struct {
@@ -508,6 +550,56 @@ test "Binance canonical commands authenticate, raw-commit, and dispatch independ
     try std.testing.expectEqual(@as(u64, 2), sink.calls);
     try std.testing.expectEqual(@as(u64, 2), transport.calls);
     try adapter.stop(.{ .monotonic_ns = 1 });
+}
+
+test "Binance parses response JSON instead of matching formatting" {
+    try std.testing.expectEqual(canonical.DispatchState.not_sent, classify(.response, "{\"code\":-2010}"));
+    try std.testing.expectEqual(canonical.DispatchState.unknown, classify(.response, "{\"code\":false}"));
+    try std.testing.expectEqual(canonical.DispatchState.unknown, classify(.response, "not-json"));
+    var clock = TestClock{};
+    var auth = TestAuth{};
+    var sink = TestRaw{};
+    var transport = TestTransport{ .response = "{\"code\" : 0, \"orderId\" : \"1\"}" };
+    var implementation = BinanceVenueAdapter.init(clock.interface(), testProfile(), auth.interface(), sink.interface(), transport.interface());
+    const adapter = implementation.adapter();
+    try startTest(adapter);
+    _ = try adapter.trySend(.{ .order_command = try testCommand(1) });
+    try std.testing.expectEqual(canonical.DispatchState.submitted, (try adapter.tryDrain()).?.events[0].event.order_dispatch_result.state);
+}
+
+test "Binance Unknown gate still permits cancel" {
+    var clock = TestClock{};
+    var auth = TestAuth{};
+    var sink = TestRaw{};
+    var transport = TestTransport{ .outcome = .write_or_response_uncertain, .response = null };
+    var implementation = BinanceVenueAdapter.init(clock.interface(), testProfile(), auth.interface(), sink.interface(), transport.interface());
+    const adapter = implementation.adapter();
+    try startTest(adapter);
+    _ = try adapter.trySend(.{ .order_command = try testCommand(1) });
+    _ = try adapter.tryDrain();
+    transport.outcome = .response;
+    transport.response = "{\"orderId\":\"1\"}";
+    var cancel = try testCommand(2);
+    cancel.operation = .cancel;
+    cancel.venue_order = try canonical.VenueOrderRef.init(21, "1");
+    cancel.quantity = null;
+    cancel.limit_price = null;
+    _ = try adapter.trySend(.{ .order_command = cancel });
+    try std.testing.expectEqual(canonical.DispatchState.submitted, (try adapter.tryDrain()).?.events[0].event.order_dispatch_result.state);
+}
+
+test "Binance clears only the reconciled Unknown order" {
+    var clock = TestClock{};
+    var auth = TestAuth{};
+    var sink = TestRaw{};
+    var transport = TestTransport{};
+    var implementation = BinanceVenueAdapter.init(clock.interface(), testProfile(), auth.interface(), sink.interface(), transport.interface());
+    implementation.markUnknown(1);
+    implementation.markUnknown(2);
+    implementation.clearUnknown(1);
+    try std.testing.expect(implementation.hasUnknown());
+    implementation.clearUnknown(2);
+    try std.testing.expect(!implementation.hasUnknown());
 }
 test "Binance rejects stale and expired commands and latches unknown without retry" {
     var clock = TestClock{};
@@ -631,5 +723,8 @@ test "Binance private bootstrap drains through the shared VenueAdapter seam" {
     const resolved = (try adapter.tryDrain()).?;
     try std.testing.expectEqual(@as(u8, 2), resolved.len);
     try std.testing.expect(output.events[0].envelope.identity.stream != resolved.events[0].envelope.identity.stream);
-    try std.testing.expectEqual(canonical.ReconciliationStatus.confirmed_absent, resolved.events[1].event.order_reconciliation_result.status);
+    try std.testing.expectEqual(canonical.ReconciliationStatus.unresolved, resolved.events[1].event.order_reconciliation_result.status);
+    _ = try adapter.trySend(.{ .order_reconciliation = .{ .identity = 100, .exchange_account = 2, .order = 9, .visibility_delay_elapsed = true, .prior_session_inactive = true } });
+    const absent = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(canonical.ReconciliationStatus.confirmed_absent, absent.events[1].event.order_reconciliation_result.status);
 }

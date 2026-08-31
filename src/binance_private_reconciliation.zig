@@ -13,6 +13,7 @@ pub const InstrumentRules = struct { identity: canonical.InstrumentIdentity, rul
 pub const Rules = struct { spot: InstrumentRules, linear: InstrumentRules };
 pub const Binding = struct { venue: canonical.VenueIdentity, account: canonical.ExchangeAccountIdentity, session: canonical.AdapterSessionIdentity };
 pub const Source = enum(u8) { ws, rest_spot_account, rest_linear_account, rest_orders, rest_fills };
+const source_count = @typeInfo(Source).@"enum".fields.len;
 pub const Page = struct { final: bool };
 pub const Stage = enum(u8) { offline, buffering, reconciling, ready, failed };
 pub const Readiness = struct { stage: Stage, session: canonical.AdapterSessionIdentity, raw_watermark: u64, bootstrap: ?canonical.BootstrapSnapshotIdentity };
@@ -23,9 +24,9 @@ const max_pending_observations = 24;
 const SeenFact = struct { key: [32]u8, content: [32]u8 };
 const OrderLink = struct { order: canonical.OrderIdentity, client_order_id: canonical.ClientOrderId, status: ?canonical.ExecutionReportStatus = null };
 const PendingObservation = union(enum) {
-    balance: struct { value: canonical.AccountBalance, times: raw.Times, evidence: raw.RawEvidenceRef },
-    position: struct { value: canonical.AccountPosition, times: raw.Times, evidence: raw.RawEvidenceRef },
-    margin: struct { value: canonical.AccountMargin, times: raw.Times, evidence: raw.RawEvidenceRef },
+    balance: struct { value: canonical.AccountBalance, times: raw.Times, evidence: raw.RawEvidenceRef, source: Source, source_sequence: u64 },
+    position: struct { value: canonical.AccountPosition, times: raw.Times, evidence: raw.RawEvidenceRef, source: Source, source_sequence: u64 },
+    margin: struct { value: canonical.AccountMargin, times: raw.Times, evidence: raw.RawEvidenceRef, source: Source, source_sequence: u64 },
 };
 
 pub const Reconciler = struct {
@@ -36,6 +37,9 @@ pub const Reconciler = struct {
     raw_watermark: u64 = 0,
     next_event_sequence: u64 = 1,
     account_sequence: u64 = 0,
+    source_sequences: [source_count]u64 = @splat(0),
+    active_source: Source = .ws,
+    active_source_sequence: u64 = 0,
     bootstrap: ?canonical.BootstrapSnapshotIdentity = null,
     balances_complete: bool = false,
     positions_complete: bool = false,
@@ -108,6 +112,10 @@ pub const Reconciler = struct {
         if (self.stage == .offline or self.stage == .failed) return error.StaleSession;
         if (source == .ws and page != null) return error.InvalidPage;
         if (source != .ws and (page == null or self.stage != .reconciling)) return error.InvalidPage;
+        const source_index: usize = @intFromEnum(source);
+        self.source_sequences[source_index] = try std.math.add(u64, self.source_sequences[source_index], 1);
+        self.active_source = source;
+        self.active_source_sequence = self.source_sequences[source_index];
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{ .parse_numbers = false }) catch return error.InvalidFrame;
         defer parsed.deinit();
         self.decode(source, page, times, evidence, parsed.value) catch |err| {
@@ -132,12 +140,12 @@ pub const Reconciler = struct {
     pub fn hasPending(self: *const Reconciler) bool {
         return self.ready_index < self.ready_count;
     }
-    pub fn resolveOrder(self: *const Reconciler, order: canonical.OrderIdentity) canonical.ReconciliationStatus {
+    pub fn resolveOrder(self: *const Reconciler, order: canonical.OrderIdentity, confirmed_absent_allowed: bool) canonical.ReconciliationStatus {
         for (self.links[0..self.link_count]) |link| if (link.order == order) {
             return if (link.status) |status| switch (status) {
                 .accepted, .partially_filled, .amended => .found_live,
                 .filled, .canceled, .rejected => .found_terminal,
-            } else if (self.stage == .ready) .confirmed_absent else .unresolved;
+            } else if (self.stage == .ready and confirmed_absent_allowed) .confirmed_absent else .unresolved;
         };
         return .unresolved;
     }
@@ -277,7 +285,7 @@ pub const Reconciler = struct {
         snapshot.identity = identity;
         snapshot.exchange_account = binding.account;
         snapshot.scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true };
-        snapshot.source_stream = privateStream(binding.session);
+        snapshot.source_stream = reconciliationStream(binding.session);
         snapshot.source_sequence = 0;
         snapshot.balance_count = self.balance_count;
         snapshot.position_count = self.position_count;
@@ -291,32 +299,44 @@ pub const Reconciler = struct {
         for (self.buffered[0..self.buffered_count]) |event| try self.appendReady(event);
         self.buffered_count = 0;
         for (self.pending_observations[0..self.pending_observation_count]) |pending| switch (pending) {
-            .balance => |value| try self.emitBalanceObserved(value.value, value.times, value.evidence),
-            .position => |value| try self.emitPositionObserved(value.value, value.times, value.evidence),
-            .margin => |value| try self.emitMarginObserved(value.value, value.times, value.evidence),
+            .balance => |value| {
+                self.active_source = value.source;
+                self.active_source_sequence = value.source_sequence;
+                try self.emitBalanceObserved(value.value, value.times, value.evidence);
+            },
+            .position => |value| {
+                self.active_source = value.source;
+                self.active_source_sequence = value.source_sequence;
+                try self.emitPositionObserved(value.value, value.times, value.evidence);
+            },
+            .margin => |value| {
+                self.active_source = value.source;
+                self.active_source_sequence = value.source_sequence;
+                try self.emitMarginObserved(value.value, value.times, value.evidence);
+            },
         };
         self.pending_observation_count = 0;
     }
     fn emitBalanceObserved(self: *Reconciler, balance: canonical.AccountBalance, times: raw.Times, evidence: raw.RawEvidenceRef) !void {
-        const bootstrap = self.bootstrap orelse return self.queueObservation(.{ .balance = .{ .value = balance, .times = times, .evidence = evidence } });
+        const bootstrap = self.bootstrap orelse return self.queueObservation(.{ .balance = .{ .value = balance, .times = times, .evidence = evidence, .source = self.active_source, .source_sequence = self.active_source_sequence } });
         self.account_sequence += 1;
         const identity = digestIdentity(evidence.sha256) +% self.account_sequence;
         const binding = self.binding orelse return error.StaleSession;
-        try self.emit(.asset, null, balance.asset, identity, null, times, evidence, .{ .account_observed = .{ .identity = identity, .exchange_account = binding.account, .bootstrap = bootstrap, .source_stream = privateStream(binding.session), .source_sequence = self.account_sequence, .value = .{ .balance = .{ .asset = balance.asset, .value = balance } } } });
+        try self.emit(.asset, null, balance.asset, identity, null, times, evidence, .{ .account_observed = .{ .identity = identity, .exchange_account = binding.account, .bootstrap = bootstrap, .source_stream = sourceStream(binding.session, self.active_source), .source_sequence = self.active_source_sequence, .value = .{ .balance = .{ .asset = balance.asset, .value = balance } } } });
     }
     fn emitPositionObserved(self: *Reconciler, position: canonical.AccountPosition, times: raw.Times, evidence: raw.RawEvidenceRef) !void {
-        const bootstrap = self.bootstrap orelse return self.queueObservation(.{ .position = .{ .value = position, .times = times, .evidence = evidence } });
+        const bootstrap = self.bootstrap orelse return self.queueObservation(.{ .position = .{ .value = position, .times = times, .evidence = evidence, .source = self.active_source, .source_sequence = self.active_source_sequence } });
         self.account_sequence += 1;
         const identity = digestIdentity(evidence.sha256) +% self.account_sequence;
         const binding = self.binding orelse return error.StaleSession;
-        try self.emit(.instrument, position.instrument, null, identity, null, times, evidence, .{ .account_observed = .{ .identity = identity, .exchange_account = binding.account, .bootstrap = bootstrap, .source_stream = privateStream(binding.session), .source_sequence = self.account_sequence, .value = .{ .position = .{ .instrument = position.instrument, .side = position.side, .value = position, .removed = position.quantity.lots == 0 } } } });
+        try self.emit(.instrument, position.instrument, null, identity, null, times, evidence, .{ .account_observed = .{ .identity = identity, .exchange_account = binding.account, .bootstrap = bootstrap, .source_stream = sourceStream(binding.session, self.active_source), .source_sequence = self.active_source_sequence, .value = .{ .position = .{ .instrument = position.instrument, .side = position.side, .value = position, .removed = position.quantity.lots == 0 } } } });
     }
     fn emitMarginObserved(self: *Reconciler, margin: canonical.AccountMargin, times: raw.Times, evidence: raw.RawEvidenceRef) !void {
-        const bootstrap = self.bootstrap orelse return self.queueObservation(.{ .margin = .{ .value = margin, .times = times, .evidence = evidence } });
+        const bootstrap = self.bootstrap orelse return self.queueObservation(.{ .margin = .{ .value = margin, .times = times, .evidence = evidence, .source = self.active_source, .source_sequence = self.active_source_sequence } });
         self.account_sequence += 1;
         const identity = digestIdentity(evidence.sha256) +% self.account_sequence;
         const binding = self.binding orelse return error.StaleSession;
-        try self.emit(.account, margin.instrument, null, identity, null, times, evidence, .{ .account_observed = .{ .identity = identity, .exchange_account = binding.account, .bootstrap = bootstrap, .source_stream = privateStream(binding.session), .source_sequence = self.account_sequence, .value = .{ .margin = .{ .instrument = margin.instrument, .value = margin } } } });
+        try self.emit(.account, margin.instrument, null, identity, null, times, evidence, .{ .account_observed = .{ .identity = identity, .exchange_account = binding.account, .bootstrap = bootstrap, .source_stream = sourceStream(binding.session, self.active_source), .source_sequence = self.active_source_sequence, .value = .{ .margin = .{ .instrument = margin.instrument, .value = margin } } } });
     }
     fn queueObservation(self: *Reconciler, value: PendingObservation) !void {
         if (self.pending_observation_count == self.pending_observations.len) return error.PrivateBufferFull;
@@ -336,7 +356,7 @@ pub const Reconciler = struct {
         const sequence = self.next_event_sequence;
         self.next_event_sequence = try std.math.add(u64, sequence, 1);
         const stream = privateStream(binding.session);
-        return .{ .envelope = .{ .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = 1, .identity = .{ .stream = stream, .sequence = sequence }, .source_fact_identity = identity, .scope = scope, .venue = binding.venue, .exchange_account = binding.account, .instrument = instrument, .asset = asset, .source_stream = stream, .source_sequence = evidence.stream_sequence, .adapter_session = binding.session, .times = .{ .source_utc_ns = source_time, .receive_utc_ns = times.receive_time_utc_ns, .monotonic_ns = times.monotonic_time_ns, .audit_utc_ns = times.wall_time_utc_ns }, .raw_evidence = .{ .stream = stream, .sequence = evidence.stream_sequence, .digest = evidence.sha256 } }, .event = event };
+        return .{ .envelope = .{ .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = 1, .identity = .{ .stream = stream, .sequence = sequence }, .source_fact_identity = identity, .scope = scope, .venue = binding.venue, .exchange_account = binding.account, .instrument = instrument, .asset = asset, .source_stream = sourceStream(binding.session, self.active_source), .source_sequence = self.active_source_sequence, .adapter_session = binding.session, .times = .{ .source_utc_ns = source_time, .receive_utc_ns = times.receive_time_utc_ns, .monotonic_ns = times.monotonic_time_ns, .audit_utc_ns = times.wall_time_utc_ns }, .raw_evidence = .{ .stream = rawStream(binding.session), .sequence = evidence.stream_sequence, .digest = evidence.sha256 } }, .event = event };
     }
     fn appendReady(self: *Reconciler, event: canonical.EventRecord) !void {
         if (self.ready_count == self.ready.len) return error.PrivateOutputFull;
@@ -482,6 +502,15 @@ fn digestIdentity(digest: [32]u8) u128 {
 fn privateStream(session: canonical.AdapterSessionIdentity) canonical.StreamIdentity {
     return session ^ 0x4249_4e41_4e43_455f_5052_4956_4154_455f;
 }
+fn sourceStream(session: canonical.AdapterSessionIdentity, source: Source) canonical.VenueSourceStreamIdentity {
+    return privateStream(session) ^ (@as(u128, @intFromEnum(source)) + 1);
+}
+fn rawStream(session: canonical.AdapterSessionIdentity) canonical.VenueSourceStreamIdentity {
+    return privateStream(session) ^ 0x100;
+}
+fn reconciliationStream(session: canonical.AdapterSessionIdentity) canonical.VenueSourceStreamIdentity {
+    return privateStream(session) ^ 0x200;
+}
 fn assetIdentity(code: []const u8) !canonical.AssetIdentity {
     if (std.mem.eql(u8, code, "USDT")) return usdt;
     if (std.mem.eql(u8, code, "BTC")) return btc;
@@ -585,6 +614,8 @@ test "Binance separates report and fill, maps economics, and dedupes Venue refs"
     try std.testing.expect(output.events[0].event == .account_bootstrap_snapshot);
     try std.testing.expect(output.events[1].event == .execution_report);
     try std.testing.expect(output.events[2].event == .fill);
+    try std.testing.expect(output.events[0].envelope.source_stream != output.events[1].envelope.source_stream);
+    try std.testing.expectEqual(@as(u64, 1), output.events[1].envelope.source_sequence);
     try std.testing.expectEqual(canonical.LiquidityRole.maker, output.events[2].event.fill.liquidity);
     try std.testing.expectEqual(@as(i128, 100), output.events[2].event.fill.rebate.?.atoms);
     _ = try reconciler.ingest(std.testing.allocator, .ws, null, fixture_times, message);

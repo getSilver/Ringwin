@@ -25,6 +25,7 @@ pub const InstrumentRules = struct { identity: canonical.InstrumentIdentity, rul
 pub const Rules = struct { spot: InstrumentRules, linear: InstrumentRules };
 pub const Binding = struct { venue: canonical.VenueIdentity, account: canonical.ExchangeAccountIdentity, session: canonical.AdapterSessionIdentity };
 pub const Source = enum(u8) { ws, rest_wallet, rest_positions, rest_orders, rest_executions };
+const source_count = @typeInfo(Source).@"enum".fields.len;
 pub const Page = struct { final: bool };
 pub const Stage = enum(u8) { offline, buffering, reconciling, ready, failed };
 pub const Readiness = struct { stage: Stage, session: canonical.AdapterSessionIdentity, raw_watermark: u64, bootstrap: ?canonical.BootstrapSnapshotIdentity };
@@ -42,6 +43,9 @@ pub const Reconciler = struct {
     raw_watermark: u64 = 0,
     bootstrap: ?canonical.BootstrapSnapshotIdentity = null,
     next_sequence: u64 = 1,
+    source_sequences: [source_count]u64 = @splat(0),
+    active_source: Source = .ws,
+    active_source_sequence: u64 = 0,
     balances_complete: bool = false,
     positions_complete: bool = false,
     orders_complete: bool = false,
@@ -94,11 +98,11 @@ pub const Reconciler = struct {
         self.links[self.link_count] = .{ .order = order, .client = client };
         self.link_count += 1;
     }
-    pub fn resolveOrder(self: *const Reconciler, order: canonical.OrderIdentity) canonical.ReconciliationStatus {
+    pub fn resolveOrder(self: *const Reconciler, order: canonical.OrderIdentity, confirmed_absent_allowed: bool) canonical.ReconciliationStatus {
         for (self.links[0..self.link_count]) |link| if (link.order == order) return if (link.status) |status| switch (status) {
             .accepted, .partially_filled, .amended => .found_live,
             .filled, .canceled, .rejected => .found_terminal,
-        } else if (self.stage == .ready) .confirmed_absent else .unresolved;
+        } else if (self.stage == .ready and confirmed_absent_allowed) .confirmed_absent else .unresolved;
         return .unresolved;
     }
     pub fn hasPending(self: *const Reconciler) bool {
@@ -127,6 +131,10 @@ pub const Reconciler = struct {
         if (self.stage == .offline or self.stage == .failed) return error.StaleSession;
         if ((source == .ws) != (page == null)) return error.InvalidPage;
         if (source != .ws and self.stage != .reconciling) return error.PrivateStreamNotReady;
+        const source_index: usize = @intFromEnum(source);
+        self.source_sequences[source_index] = try std.math.add(u64, self.source_sequences[source_index], 1);
+        self.active_source = source;
+        self.active_source_sequence = self.source_sequences[source_index];
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{ .parse_numbers = false }) catch return error.InvalidFrame;
         defer parsed.deinit();
         self.decode(source, page, times, evidence, parsed.value) catch |err| {
@@ -184,7 +192,7 @@ pub const Reconciler = struct {
             const executed = try quantity(rules, cumulative);
             if (executed.lots > original.lots) return error.InvalidReportQuantity;
             const update = try optionalMillis(item, "updatedTime");
-            try self.emit(.account, rules.identity, null, identity(key), update, times, evidence, .{ .execution_report = .{ .identity = identity(key), .order = link.order, .client_order_id = link.client, .venue_order = try canonical.VenueOrderRef.init((self.binding orelse return error.StaleSession).venue, order_id), .instrument = rules.identity, .exchange_account = (self.binding orelse return error.StaleSession).account, .revision = 1, .side = try side(try string(item, "side")), .order_type = try orderType(try string(item, "orderType")), .time_in_force = try tif(try string(item, "timeInForce")), .venue_reduce_only = try optionalBool(item, "reduceOnly"), .position_mode_net = true, .status = status, .original_quantity = original, .cumulative_quantity = executed, .remaining_quantity = .{ .instrument = rules.identity, .rules_version = rules.rules_version, .lots = original.lots - executed.lots }, .limit_price = try optionalPrice(rules, (try optionalString(item, "price")) orelse "0"), .average_fill_price = try optionalPrice(rules, (try optionalString(item, "avgPrice")) orelse "0"), .venue_update_time_utc_ns = update } });
+            try self.emit(.account, rules.identity, null, identity(key), update, times, evidence, .{ .execution_report = .{ .identity = identity(key), .order = link.order, .client_order_id = link.client, .venue_order = try canonical.VenueOrderRef.init((self.binding orelse return error.StaleSession).venue, order_id), .instrument = rules.identity, .exchange_account = (self.binding orelse return error.StaleSession).account, .revision = 1, .side = try side(try string(item, "side")), .order_type = try orderType(try string(item, "orderType")), .time_in_force = try tif(try string(item, "timeInForce")), .venue_reduce_only = try optionalBool(item, "reduceOnly"), .position_mode_net = try positionModeNet(item), .status = status, .original_quantity = original, .cumulative_quantity = executed, .remaining_quantity = .{ .instrument = rules.identity, .rules_version = rules.rules_version, .lots = original.lots - executed.lots }, .limit_price = try optionalPrice(rules, (try optionalString(item, "price")) orelse "0"), .average_fill_price = try optionalPrice(rules, (try optionalString(item, "avgPrice")) orelse "0"), .venue_update_time_utc_ns = update } });
         }
     }
     fn decodeExecutions(self: *Reconciler, times: Times, evidence: RawEvidenceRef, value: std.json.Value) !void {
@@ -246,8 +254,8 @@ pub const Reconciler = struct {
         snapshot.identity = snapshot_id;
         snapshot.exchange_account = binding.account;
         snapshot.scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true };
-        snapshot.source_stream = privateStream(binding.session);
-        snapshot.source_sequence = evidence.stream_sequence;
+        snapshot.source_stream = reconciliationStream(binding.session);
+        snapshot.source_sequence = 1;
         snapshot.balance_count = self.balance_count;
         snapshot.position_count = self.position_count;
         snapshot.margin_count = self.margin_count;
@@ -266,17 +274,17 @@ pub const Reconciler = struct {
     fn emitObservedBalance(self: *Reconciler, value: canonical.AccountBalance, times: Times, evidence: RawEvidenceRef) !void {
         const bootstrap = self.bootstrap orelse return error.BootstrapRequired;
         const key = identity(evidence.sha256) +% self.next_sequence;
-        try self.emit(.asset, null, value.asset, key, null, times, evidence, .{ .account_observed = .{ .identity = key, .exchange_account = (self.binding orelse return error.StaleSession).account, .bootstrap = bootstrap, .source_stream = privateStream((self.binding orelse return error.StaleSession).session), .source_sequence = evidence.stream_sequence, .value = .{ .balance = .{ .asset = value.asset, .value = value } } } });
+        try self.emit(.asset, null, value.asset, key, null, times, evidence, .{ .account_observed = .{ .identity = key, .exchange_account = (self.binding orelse return error.StaleSession).account, .bootstrap = bootstrap, .source_stream = sourceStream((self.binding orelse return error.StaleSession).session, self.active_source), .source_sequence = self.active_source_sequence, .value = .{ .balance = .{ .asset = value.asset, .value = value } } } });
     }
     fn emitObservedPosition(self: *Reconciler, value: canonical.AccountPosition, times: Times, evidence: RawEvidenceRef) !void {
         const bootstrap = self.bootstrap orelse return error.BootstrapRequired;
         const key = identity(evidence.sha256) +% self.next_sequence;
-        try self.emit(.instrument, value.instrument, null, key, null, times, evidence, .{ .account_observed = .{ .identity = key, .exchange_account = (self.binding orelse return error.StaleSession).account, .bootstrap = bootstrap, .source_stream = privateStream((self.binding orelse return error.StaleSession).session), .source_sequence = evidence.stream_sequence, .value = .{ .position = .{ .instrument = value.instrument, .side = value.side, .value = value, .removed = value.quantity.lots == 0 } } } });
+        try self.emit(.instrument, value.instrument, null, key, null, times, evidence, .{ .account_observed = .{ .identity = key, .exchange_account = (self.binding orelse return error.StaleSession).account, .bootstrap = bootstrap, .source_stream = sourceStream((self.binding orelse return error.StaleSession).session, self.active_source), .source_sequence = self.active_source_sequence, .value = .{ .position = .{ .instrument = value.instrument, .side = value.side, .value = value, .removed = value.quantity.lots == 0 } } } });
     }
     fn emitObservedMargin(self: *Reconciler, value: canonical.AccountMargin, times: Times, evidence: RawEvidenceRef) !void {
         const bootstrap = self.bootstrap orelse return error.BootstrapRequired;
         const key = identity(evidence.sha256) +% self.next_sequence;
-        try self.emit(.account, value.instrument, null, key, null, times, evidence, .{ .account_observed = .{ .identity = key, .exchange_account = (self.binding orelse return error.StaleSession).account, .bootstrap = bootstrap, .source_stream = privateStream((self.binding orelse return error.StaleSession).session), .source_sequence = evidence.stream_sequence, .value = .{ .margin = .{ .instrument = value.instrument, .value = value } } } });
+        try self.emit(.account, value.instrument, null, key, null, times, evidence, .{ .account_observed = .{ .identity = key, .exchange_account = (self.binding orelse return error.StaleSession).account, .bootstrap = bootstrap, .source_stream = sourceStream((self.binding orelse return error.StaleSession).session, self.active_source), .source_sequence = self.active_source_sequence, .value = .{ .margin = .{ .instrument = value.instrument, .value = value } } } });
     }
     fn emit(self: *Reconciler, scope: canonical.CanonicalEventScope, instrument: ?canonical.InstrumentIdentity, asset_id: ?canonical.AssetIdentity, source_id: u128, source_time: ?u64, times: Times, evidence: RawEvidenceRef, event: canonical.CanonicalEvent) !void {
         const emitted = try self.record(scope, instrument, asset_id, source_id, source_time, times, evidence, event);
@@ -291,7 +299,7 @@ pub const Reconciler = struct {
         const sequence = self.next_sequence;
         self.next_sequence = try std.math.add(u64, sequence, 1);
         const stream = privateStream(binding.session);
-        return .{ .envelope = .{ .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = 1, .identity = .{ .stream = stream, .sequence = sequence }, .source_fact_identity = source_id, .scope = scope, .venue = binding.venue, .exchange_account = binding.account, .instrument = instrument, .asset = asset_id, .source_stream = stream, .source_sequence = evidence.stream_sequence, .adapter_session = binding.session, .times = .{ .source_utc_ns = source_time, .receive_utc_ns = times.receive_time_utc_ns, .monotonic_ns = times.monotonic_time_ns, .audit_utc_ns = times.wall_time_utc_ns }, .raw_evidence = .{ .stream = stream, .sequence = evidence.stream_sequence, .digest = evidence.sha256 } }, .event = event };
+        return .{ .envelope = .{ .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = 1, .identity = .{ .stream = stream, .sequence = sequence }, .source_fact_identity = source_id, .scope = scope, .venue = binding.venue, .exchange_account = binding.account, .instrument = instrument, .asset = asset_id, .source_stream = sourceStream(binding.session, self.active_source), .source_sequence = self.active_source_sequence, .adapter_session = binding.session, .times = .{ .source_utc_ns = source_time, .receive_utc_ns = times.receive_time_utc_ns, .monotonic_ns = times.monotonic_time_ns, .audit_utc_ns = times.wall_time_utc_ns }, .raw_evidence = .{ .stream = rawStream(binding.session), .sequence = evidence.stream_sequence, .digest = evidence.sha256 } }, .event = event };
     }
     fn appendReady(self: *Reconciler, event: canonical.EventRecord) !void {
         if (self.ready_count == self.ready.len) return error.PrivateOutputFull;
@@ -424,6 +432,23 @@ fn identity(digest: [32]u8) u128 {
 fn privateStream(session: canonical.AdapterSessionIdentity) canonical.StreamIdentity {
     return session ^ 0x4259_4259_5052_4956_4154_455f_0000_0000;
 }
+fn sourceStream(session: canonical.AdapterSessionIdentity, source: Source) canonical.VenueSourceStreamIdentity {
+    return privateStream(session) ^ (@as(u128, @intFromEnum(source)) + 1);
+}
+fn rawStream(session: canonical.AdapterSessionIdentity) canonical.VenueSourceStreamIdentity {
+    return privateStream(session) ^ 0x100;
+}
+fn reconciliationStream(session: canonical.AdapterSessionIdentity) canonical.VenueSourceStreamIdentity {
+    return privateStream(session) ^ 0x200;
+}
+fn positionModeNet(item: std.json.ObjectMap) !?bool {
+    const value = (try optionalString(item, "positionIdx")) orelse return null;
+    return switch (try std.fmt.parseInt(u8, value, 10)) {
+        0 => true,
+        1, 2 => false,
+        else => error.UnsupportedValue,
+    };
+}
 fn asset(code: []const u8) !canonical.AssetIdentity {
     if (std.mem.eql(u8, code, "BTC")) return btc;
     if (std.mem.eql(u8, code, "USDT")) return usdt;
@@ -518,12 +543,32 @@ test "Bybit separates deduplicated reports and fills from economic facts" {
     _ = try reconciler.ingest(std.testing.allocator, .rest_executions, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
     var count: usize = 0;
     var fills: usize = 0;
+    var reports: usize = 0;
     while (reconciler.drain()) |batch| for (batch.slice()) |event| {
         count += 1;
         if (event.event == .fill) fills += 1;
+        if (event.event == .execution_report) {
+            reports += 1;
+            try std.testing.expectEqual(@as(?bool, null), event.event.execution_report.position_mode_net);
+        }
     };
     try std.testing.expect(count >= 3);
+    try std.testing.expectEqual(@as(usize, 1), reports);
     try std.testing.expectEqual(@as(usize, 1), fills);
+}
+
+test "Bybit derives position mode from positionIdx" {
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, "{\"positionIdx\":0}", .{ .parse_numbers = false });
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(?bool, true), try positionModeNet(parsed.value.object));
+
+    var hedged = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, "{\"positionIdx\":\"2\"}", .{ .parse_numbers = false });
+    defer hedged.deinit();
+    try std.testing.expectEqual(@as(?bool, false), try positionModeNet(hedged.value.object));
+
+    var absent = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, "{}", .{ .parse_numbers = false });
+    defer absent.deinit();
+    try std.testing.expectEqual(@as(?bool, null), try positionModeNet(absent.value.object));
 }
 
 test "Bybit emits absolute observations only after a complete bootstrap" {
@@ -538,5 +583,5 @@ test "Bybit emits absolute observations only after a complete bootstrap" {
     _ = try reconciler.ingest(std.testing.allocator, .ws, null, test_times, "{\"topic\":\"wallet\",\"data\":[{\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"11.000000\",\"availableToWithdraw\":\"10.000000\"}]}]}");
     const output = reconciler.drain().?;
     try std.testing.expectEqual(canonical.EventType.account_observed, canonical.eventType(output.slice()[0].event));
-    try std.testing.expectEqual(raw.calls, output.slice()[0].envelope.source_sequence);
+    try std.testing.expectEqual(@as(u64, 1), output.slice()[0].envelope.source_sequence);
 }
