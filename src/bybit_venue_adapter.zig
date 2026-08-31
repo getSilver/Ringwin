@@ -6,6 +6,20 @@ const contract = @import("venue_adapter_contract.zig");
 const private = @import("bybit_private_reconciliation.zig");
 
 pub const InstrumentRules = struct { identity: canonical.InstrumentIdentity, tick_size: canonical.Decimal, lot_size: canonical.Decimal };
+/// Explicit authority for a bounded Bybit TestnetRun. It never qualifies
+/// production trading or Linux performance.
+pub const TestnetAdmission = struct {
+    explicit_enable: bool = false,
+    endpoint_is_testnet: bool = false,
+    credential_can_read: bool = false,
+    credential_can_trade: bool = false,
+    credential_can_withdraw: bool = true,
+    max_order_notional_usdt_micros: u64 = 25_000_000,
+
+    pub fn permitsPlace(self: TestnetAdmission) bool {
+        return self.explicit_enable and self.endpoint_is_testnet and self.credential_can_read and self.credential_can_trade and !self.credential_can_withdraw and self.max_order_notional_usdt_micros > 0;
+    }
+};
 pub const CapabilityProfile = struct {
     version: u64,
     rules_version: u64,
@@ -19,6 +33,7 @@ pub const CapabilityProfile = struct {
     venue_reduce_only_linear: bool = true,
     can_read: bool = true,
     can_trade: bool = true,
+    testnet_admission: TestnetAdmission = .{},
     requests_per_window: u8 = 4,
     window_ns: u64 = std.time.ns_per_s,
 };
@@ -138,6 +153,11 @@ pub const BybitVenueAdapter = struct {
             self.pending = output;
             return .accepted;
         }
+        if (!self.batchWithinNotional(commands[0..count])) {
+            for (commands[0..count]) |command| self.appendDispatch(&output, command, .not_sent, .unsupported_value, null);
+            self.pending = output;
+            return .accepted;
+        }
         for (commands[0..count]) |command| if (self.validate(command)) |reason| self.appendDispatch(&output, command, .not_sent, reason, null) else self.dispatch(&output, command);
         self.consumeRate(self.clock.now());
         self.pending = output;
@@ -168,7 +188,7 @@ pub const BybitVenueAdapter = struct {
     }
     fn validate(self: *const BybitVenueAdapter, command: canonical.OrderCommand) ?canonical.CanonicalRejectReason {
         const binding = self.binding orelse return .unsupported_value;
-        if (self.unknown_outstanding or !self.profile.can_read or !self.profile.can_trade) return .venue_unavailable;
+        if (self.unknown_outstanding or !self.profile.can_read or !self.profile.can_trade or !self.profile.testnet_admission.permitsPlace()) return .venue_unavailable;
         if (command.exchange_account != binding.account or command.capability_version != self.profile.version or command.rules_version != self.profile.rules_version or command.config_version != self.profile.config_version or command.adapter_session != binding.session) return .stale_version;
         if (command.dispatch_deadline_monotonic_ns <= self.clock.now()) return .deadline_expired;
         const rules = self.rulesFor(command.instrument) orelse return .unsupported_instrument;
@@ -192,8 +212,33 @@ pub const BybitVenueAdapter = struct {
             if (command.order_type == .market) {
                 if (command.limit_price != null or command.market_protection_price == null) return .unsupported_value;
             } else if (command.limit_price == null or command.market_protection_price != null) return .unsupported_value;
+            const price = command.limit_price orelse command.market_protection_price orelse return .unsupported_value;
+            if ((self.notionalMicros(command.quantity orelse return .unsupported_value, price, rules) orelse return .unsupported_value) > self.profile.testnet_admission.max_order_notional_usdt_micros) return .unsupported_value;
         }
         return null;
+    }
+    fn notionalMicros(self: *const BybitVenueAdapter, quantity: canonical.InstrumentQuantity, price_value: canonical.InstrumentPrice, rules: InstrumentRules) ?u64 {
+        _ = self;
+        if (quantity.lots <= 0 or price_value.ticks <= 0) return null;
+        var numerator = std.math.mul(i128, quantity.lots, rules.lot_size.coefficient) catch return null;
+        numerator = std.math.mul(i128, numerator, price_value.ticks) catch return null;
+        numerator = std.math.mul(i128, numerator, rules.tick_size.coefficient) catch return null;
+        const scale = std.math.add(u8, rules.lot_size.scale, rules.tick_size.scale) catch return null;
+        if (scale <= 6) return std.math.cast(u64, std.math.mul(i128, numerator, powerOfTen(6 - scale) orelse return null) catch return null);
+        const divisor = powerOfTen(scale - 6) orelse return null;
+        return std.math.cast(u64, @divFloor(std.math.add(i128, numerator, divisor - 1) catch return null, divisor));
+    }
+    fn batchWithinNotional(self: *const BybitVenueAdapter, commands: []const canonical.OrderCommand) bool {
+        var total: u64 = 0;
+        for (commands) |command| {
+            if (command.operation != .place) continue;
+            const rules = self.rulesFor(command.instrument) orelse return false;
+            const quantity = command.quantity orelse return false;
+            const price = command.limit_price orelse command.market_protection_price orelse return false;
+            total = std.math.add(u64, total, self.notionalMicros(quantity, price, rules) orelse return false) catch return false;
+            if (total > self.profile.testnet_admission.max_order_notional_usdt_micros) return false;
+        }
+        return true;
     }
     fn dispatch(self: *BybitVenueAdapter, output: *canonical.AdapterOutputBatch, command: canonical.OrderCommand) void {
         if (command.operation == .place) if (self.reconciler) |value| value.registerOrder(command.identity, command.client_order_id) catch {
@@ -328,6 +373,11 @@ fn pow10(scale: u8) !i128 {
     for (0..scale) |_| value = try std.math.mul(i128, value, 10);
     return value;
 }
+fn powerOfTen(exponent: u8) ?i128 {
+    var value: i128 = 1;
+    for (0..exponent) |_| value = std.math.mul(i128, value, 10) catch return null;
+    return value;
+}
 fn classify(outcome: TransportOutcome, response: ?[]const u8) canonical.DispatchState {
     if (outcome == .proven_before_send) return .not_sent;
     if (outcome == .write_or_response_uncertain) return .unknown;
@@ -378,7 +428,7 @@ const TestTransport = struct {
 };
 fn testProfile() CapabilityProfile {
     const spot = InstrumentRules{ .identity = private.btc_usdt_spot, .tick_size = .{ .coefficient = 1, .scale = 1 }, .lot_size = .{ .coefficient = 1, .scale = 4 } };
-    return .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 3, .spot = spot, .linear = .{ .identity = private.btc_usdt_linear, .tick_size = spot.tick_size, .lot_size = spot.lot_size } };
+    return .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 3, .spot = spot, .linear = .{ .identity = private.btc_usdt_linear, .tick_size = spot.tick_size, .lot_size = spot.lot_size }, .testnet_admission = .{ .explicit_enable = true, .endpoint_is_testnet = true, .credential_can_read = true, .credential_can_trade = true, .credential_can_withdraw = false } };
 }
 fn testCommand() !canonical.OrderCommand {
     return .{
@@ -409,6 +459,24 @@ test "Bybit sends canonical commands only after response raw commit" {
     const output = (try adapter.adapter().tryDrain()).?;
     try std.testing.expectEqual(canonical.DispatchState.submitted, output.slice()[0].event.order_dispatch_result.state);
     try std.testing.expectEqual(@as(u64, 1), raw.calls);
+}
+test "Bybit Testnet sends require explicit no-withdraw admission and bounded notional" {
+    var clock = TestClock{};
+    var auth = TestAuth{};
+    var raw = TestRaw{};
+    var transport = TestTransport{};
+    var profile = testProfile();
+    profile.testnet_admission = .{};
+    var adapter = BybitVenueAdapter.init(clock.interface(), profile, auth.interface(), raw.sink(), transport.interface());
+    try adapter.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
+    try std.testing.expectEqual(venue.SendResult.accepted, try adapter.adapter().trySend(.{ .order_command = try testCommand() }));
+    try std.testing.expectEqual(canonical.DispatchState.not_sent, (try adapter.adapter().tryDrain()).?.slice()[0].event.order_dispatch_result.state);
+    profile = testProfile();
+    profile.testnet_admission.max_order_notional_usdt_micros = 1;
+    adapter = BybitVenueAdapter.init(clock.interface(), profile, auth.interface(), raw.sink(), transport.interface());
+    try adapter.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
+    try std.testing.expectEqual(venue.SendResult.accepted, try adapter.adapter().trySend(.{ .order_command = try testCommand() }));
+    try std.testing.expectEqual(canonical.CanonicalRejectReason.unsupported_value, (try adapter.adapter().tryDrain()).?.slice()[0].event.order_dispatch_result.reason.?);
 }
 test "Bybit unknown dispatch remains closed until private reconciliation resolves it" {
     var clock = TestClock{};
