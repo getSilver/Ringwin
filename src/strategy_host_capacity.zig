@@ -151,6 +151,14 @@ fn runScenario(
         while (remaining != 0) {
             for (&hosts, &plans, 0..) |*host, *plan, index| {
                 if (!pending[index]) continue;
+                if (host.*.?.input_mapping.failureStatus()) |status| {
+                    if (status == .stale) {
+                        result.stale += 1;
+                        return error.HostInputStale;
+                    }
+                    result.rejected += 1;
+                    return error.HostInputRejected;
+                }
                 var output = try host.*.?.output_mapping.ring(.output, plan.session);
                 const status = output.tryRead(&output_storage[index]);
                 if (status == .empty) continue;
@@ -172,10 +180,10 @@ fn runScenario(
                 remaining -= 1;
             }
             if (remaining != 0 and monotonicNow(init.io) > deadline) return error.HostOutputTimeout;
-            if (remaining != 0) try std.Io.Clock.Duration.sleep(
-                .{ .clock = .awake, .raw = .fromMilliseconds(1) },
-                init.io,
-            );
+            // A nominal 1 ms sleep is a ~15.6 ms scheduling quantum on the
+            // supported Windows baseline and can push a ready Host past the
+            // frozen 50 ms input-stale boundary. Yield without adding a timer.
+            if (remaining != 0) std.Thread.yield() catch {};
         }
     }
     result.elapsed_ns = @intCast(monotonicNow(init.io) - started);

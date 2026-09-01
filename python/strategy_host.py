@@ -260,12 +260,17 @@ def trade_once(args, session, bridge, handle):
         bridge.qsh_close_v1(handle)
 
 
-def benchmark_once(args, session, bridge, handle):
+def prepare_benchmark(args):
     states = [index + 1 for index in range(args.benchmark_strategies)]
     active = [True] * args.benchmark_strategies
     storage = bytearray(1_048_576)
     view = (ctypes.c_ubyte * len(storage)).from_buffer(storage)
     length = ctypes.c_uint32()
+    return states, active, storage, view, length
+
+
+def benchmark_once(args, session, bridge, handle, prepared):
+    states, active, storage, view, length = prepared
     try:
         for batch_index in range(args.benchmark_batches):
             empty_polls = 0
@@ -568,6 +573,7 @@ def main():
         if args.mode != "benchmark" and (not args.strategy_identity or not args.activation_identity):
             raise ValueError("data mode requires strategy and activation identities")
         trade_bridge = open_trade_bridge(args, session)
+    benchmark_state = prepare_benchmark(args) if args.mode == "benchmark" else None
     write_frame(sys.stdout.buffer, HOST_HEARTBEAT, session, 2, struct.pack("<QQ", 0, 0))
     if args.mode == "hang":
         while True:
@@ -586,7 +592,7 @@ def main():
                 raise ValueError("strategy-fault mode requires fault strategy identity")
             recovery_once(args, session, *trade_bridge, control_sequence, fault_strategy)
         elif args.mode == "benchmark":
-            benchmark_once(args, session, *trade_bridge)
+            benchmark_once(args, session, *trade_bridge, benchmark_state)
     except RecoveryNeeded as failure:
         payload = struct.pack(
             "<HHIQQ",

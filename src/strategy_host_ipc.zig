@@ -115,7 +115,13 @@ pub const OwnedMapping = struct {
     }
 
     pub fn expire(self: *OwnedMapping) void {
-        header(self.bytes).lifecycle.store(1, .release);
+        header(self.bytes).lifecycle.store(@intFromEnum(QshStatusV1.closed), .release);
+    }
+
+    pub fn failureStatus(self: *const OwnedMapping) ?QshStatusV1 {
+        const value = header(self.bytes).lifecycle.load(.acquire);
+        if (value == 0) return null;
+        return std.enums.fromInt(QshStatusV1, value) orelse .closed;
     }
 
     pub fn deinit(self: *OwnedMapping) void {
@@ -153,8 +159,9 @@ const Ring = struct {
         return .{ .bytes = bytes, .h = h };
     }
 
-    fn failClosed(self: Ring) void {
-        self.h.lifecycle.store(1, .release);
+    fn failClosed(self: Ring, status: QshStatusV1) void {
+        std.debug.assert(status != .ok);
+        self.h.lifecycle.store(@intCast(@intFromEnum(status)), .release);
     }
 
     fn cursors(self: Ring) !struct { producer: u64, consumer: u64 } {
@@ -162,7 +169,7 @@ const Ring = struct {
         const producer = self.h.producer.load(.acquire);
         const consumer = self.h.consumer.load(.acquire);
         if (producer < consumer or producer - consumer > self.h.slot_count) {
-            self.failClosed();
+            self.failClosed(.protocol_error);
             return error.CorruptCursors;
         }
         return .{ .producer = producer, .consumer = consumer };
@@ -198,7 +205,7 @@ const Ring = struct {
         const slot_bytes = self.slot(cursors_now.consumer);
         const len = get(u32, slot_bytes, 0);
         if (get(u32, slot_bytes, 4) != 0 or len == 0 or len > self.h.slot_capacity) {
-            self.failClosed();
+            self.failClosed(.protocol_error);
             return .{ .status = .protocol_error };
         }
         return .{ .bytes = slot_bytes[slot_header_len..][0..len] };
@@ -287,7 +294,7 @@ pub export fn qsh_read_input_v1(
     };
     const validation = validateBatch(item, h.session, h.next_batch_sequence, h.last_shard_sequence);
     if (validation.status != .ok) {
-        h.input.failClosed();
+        h.input.failClosed(validation.status);
         return validation.status;
     }
     if (destination_capacity < item.len) return .invalid;
@@ -314,7 +321,7 @@ pub export fn qsh_publish_many_v1(
         const bytes = descriptor.data.?[0..descriptor.len];
         const status = validateOutput(bytes, h.session, h.next_batch_sequence - 1);
         if (status != .ok) {
-            h.output.failClosed();
+            h.output.failClosed(status);
             return status;
         }
         slices[index] = bytes;
@@ -586,7 +593,21 @@ fn localChecks() !void {
     try expectStatus(.ok, corrupt_owner.tryPublishMany(&.{corrupt_batch}));
     corrupt_owner.slot(0)[slot_header_len + 128] ^= 1;
     try expectStatus(.protocol_error, qsh_read_input_v1(corrupt_host, &read_buffer, read_buffer.len, &read_len));
+    try expectStatus(.protocol_error, corrupt_input.failureStatus().?);
     try expectStatus(.closed, qsh_read_input_v1(corrupt_host, &read_buffer, read_buffer.len, &read_len));
+
+    var stale_input = try OwnedMapping.create(.input, session, 2, 512);
+    defer stale_input.deinit();
+    var stale_output = try OwnedMapping.create(.output, session, 2, 512);
+    defer stale_output.deinit();
+    var stale_owner = try stale_input.ring(.input, session);
+    var stale_host: ?*QshHandle = null;
+    try expectStatus(.ok, qsh_open_v1(stale_input.raw, stale_output.raw, session.fencing, session.shard, session.generation, &stale_host));
+    defer qsh_close_v1(stale_host);
+    const stale_batch = makeBatch(&batch_storage[0], session, 1, 1, try monotonicNowNs() - stale_batch_ns - 1);
+    try expectStatus(.ok, stale_owner.tryPublishMany(&.{stale_batch}));
+    try expectStatus(.stale, qsh_read_input_v1(stale_host, &read_buffer, read_buffer.len, &read_len));
+    try expectStatus(.stale, stale_input.failureStatus().?);
 
     var old_input = try OwnedMapping.create(.input, .{ .fencing = 41, .shard = 2, .generation = 6 }, 2, 512);
     defer old_input.deinit();

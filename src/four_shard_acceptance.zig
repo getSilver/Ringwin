@@ -59,7 +59,7 @@ const World = struct {
         };
     }
 
-    fn apply(self: *World, index: usize, event: trading.CoreEvent) !void {
+    fn apply(self: *World, index: usize, event: trading.ShardEvent) !void {
         _ = try trading.applyStable(&self.shards[index], &self.journals[index], event);
     }
 
@@ -131,7 +131,7 @@ var shard_snapshot_storage: [max_shards][256 * 1024]u8 = undefined;
 var coordinator_snapshot_storage: [16384]u8 = undefined;
 var tail_journals: [max_shards]trading.journal.Journal = undefined;
 
-fn genesisEvents(index: usize) [14]trading.CoreEvent {
+fn genesisEvents(index: usize) [14]trading.ShardEvent {
     const target: u128 = @intCast(index + 1);
     return .{
         .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{
@@ -180,7 +180,7 @@ fn replayJournalSegment(shard: *trading.TradingShard, bytes: []const u8) !void {
         switch (try reader.next()) {
             .record => |record| {
                 if (record.flags & trading.journal.input_flag != 0)
-                    _ = try shard.apply(try trading.decodeStableInput(record));
+                    _ = try shard.applyInternal(try trading.decodeStableInput(record));
             },
             .end => |status| {
                 if (status != .clean) return error.TruncatedShardTail;

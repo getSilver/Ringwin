@@ -151,8 +151,17 @@ fn encodeValue(writer: *Writer, value: anytype) !void {
     const T = @TypeOf(value);
     switch (@typeInfo(T)) {
         .bool => try writer.put(@as(u8, if (value) 1 else 0)),
-        .int => try writer.put(value),
-        .@"enum" => try encodeValue(writer, @intFromEnum(value)),
+        .int => |info| if (info.bits % 8 == 0)
+            try writer.put(value)
+        else if (info.signedness == .signed)
+            try writer.put(@as(i64, @intCast(value)))
+        else
+            try writer.put(@as(u64, @intCast(value))),
+        .@"enum" => |info| if (@typeInfo(info.tag_type).int.bits % 8 == 0)
+            try encodeValue(writer, @intFromEnum(value))
+        else
+            // Auto-tagged enums may use non-byte-sized tags such as u1.
+            try writer.put(@as(u64, @intCast(@intFromEnum(value)))),
         .array => for (value) |item| try encodeValue(writer, item),
         .optional => if (value) |item| {
             try writer.put(@as(u8, 1));
@@ -182,9 +191,17 @@ fn decodeValue(reader: *Reader, comptime T: type) !T {
             1 => true,
             else => error.InvalidSnapshotValue,
         },
-        .int => try reader.get(T),
+        .int => |info| if (info.bits % 8 == 0)
+            try reader.get(T)
+        else if (info.signedness == .signed)
+            std.math.cast(T, try reader.get(i64)) orelse error.InvalidSnapshotValue
+        else
+            std.math.cast(T, try reader.get(u64)) orelse error.InvalidSnapshotValue,
         .@"enum" => |info| blk: {
-            const raw = try decodeValue(reader, info.tag_type);
+            const raw = if (@typeInfo(info.tag_type).int.bits % 8 == 0)
+                try decodeValue(reader, info.tag_type)
+            else
+                try reader.get(u64);
             inline for (info.fields) |field|
                 if (raw == field.value) break :blk @field(T, field.name);
             return error.InvalidSnapshotValue;

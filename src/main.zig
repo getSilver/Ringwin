@@ -1,5 +1,6 @@
 const std = @import("std");
 const trading_shard = @import("trading_shard.zig");
+const trading_shard_tests = @import("trading_shard_tests.zig");
 const recovery_cutover = @import("recovery_cutover.zig");
 const account_coordinator = @import("account_coordinator.zig");
 const four_shard_acceptance = @import("four_shard_acceptance.zig");
@@ -72,6 +73,7 @@ fn runFourShardAcceptanceEntry(init: std.process.Init) !void {
 
 test {
     _ = trading_shard;
+    _ = trading_shard_tests;
     _ = recovery_cutover;
     _ = account_coordinator;
     _ = four_shard_acceptance;

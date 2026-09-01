@@ -23,7 +23,7 @@ pub const LiveRun = struct {
     decision_journal: journal.Journal,
 };
 
-pub fn atGroup(group_index: u64, input: engine.CoreEvent) engine.CoreEvent {
+pub fn atGroup(group_index: u64, input: engine.ShardEvent) engine.ShardEvent {
     var timed = input;
     timed.source_time = fixture_utc_base + group_index * 10 * std.time.ns_per_ms;
     timed.receive_time = timed.source_time + std.time.ns_per_ms;
@@ -34,7 +34,7 @@ pub fn atGroup(group_index: u64, input: engine.CoreEvent) engine.CoreEvent {
     return timed;
 }
 
-fn snapshotAt(group: u64, source_sequence: u64) engine.CoreEvent {
+fn snapshotAt(group: u64, source_sequence: u64) engine.ShardEvent {
     return atGroup(group, .{ .identity = source_sequence, .payload = .{ .l2_snapshot = .{
         .source_sequence = source_sequence,
         .bid_price_micros = 49_800_000_000,
@@ -46,7 +46,7 @@ fn snapshotAt(group: u64, source_sequence: u64) engine.CoreEvent {
     } } });
 }
 
-pub fn deltaAt(group: u64, previous: u64, current: u64, bid_price_micros: i64) engine.CoreEvent {
+pub fn deltaAt(group: u64, previous: u64, current: u64, bid_price_micros: i64) engine.ShardEvent {
     return atGroup(group, .{ .identity = current, .payload = .{ .l2_delta = .{
         .previous = previous,
         .current = current,
@@ -55,7 +55,7 @@ pub fn deltaAt(group: u64, previous: u64, current: u64, bid_price_micros: i64) e
     } } });
 }
 
-fn apply(run: *LiveRun, event: engine.CoreEvent) !?engine.OrderCommand {
+fn apply(run: *LiveRun, event: engine.ShardEvent) !?engine.OrderCommand {
     return engine.applyStable(&run.shard, &run.decision_journal, event);
 }
 
@@ -70,7 +70,7 @@ fn start(authorization: host_gateway.Authorization, reservation_model: engine.Re
         .leveraged => contract_denominator,
         .cash => 100_000_000,
     };
-    const genesis = [_]engine.CoreEvent{
+    const genesis = [_]engine.ShardEvent{
         atGroup(1, .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{
             .version = 1,
             .instrument_identity = 3,
@@ -110,7 +110,7 @@ fn start(authorization: host_gateway.Authorization, reservation_model: engine.Re
         } } }),
     };
     for (genesis) |event| if (try apply(&run, event) != null) return error.UnexpectedCommand;
-    const prelude = [_]engine.CoreEvent{
+    const prelude = [_]engine.ShardEvent{
         atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000_000 } }),
         snapshotAt(13, 100),
         deltaAt(14, 100, 101, 49_850_000_000),
@@ -149,7 +149,7 @@ pub fn replayDigest(run: LiveRun) ![32]u8 {
     return replayed.digest;
 }
 
-fn happyVenueFacts(command: engine.OrderCommand) ![6]engine.CoreEvent {
+fn happyVenueFacts(command: engine.OrderCommand) ![6]engine.ShardEvent {
     if (command.command_id != 1 or command.order_id != 1 or
         command.quantity.lots != happy_order_quantity or
         command.limit_price.ticks != 50_100_000_000 or
@@ -225,7 +225,7 @@ pub fn runDuplicateReport() !LiveRun {
     for (facts[0..4]) |event| if (try apply(&run, event) != null) return error.UnexpectedCommand;
     try assertPartialState(run.shard);
     const before_duplicate_fill = run.shard.canonicalStateDigest();
-    const duplicate_fill = try run.shard.apply(atGroup(18, facts[2]));
+    const duplicate_fill = try run.shard.applyInternal(atGroup(18, facts[2]));
     if (duplicate_fill.facts.len != 0 or duplicate_fill.order_command != null or duplicate_fill.oms_commands.len != 0)
         return error.DuplicateFillChangedState;
     if (!std.mem.eql(u8, &before_duplicate_fill, &run.shard.canonicalStateDigest()))
