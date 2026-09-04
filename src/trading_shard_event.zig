@@ -8,7 +8,7 @@ const journal = @import("journal.zig");
 const oms_module = @import("oms.zig");
 const operational = @import("operational.zig");
 
-pub const schema_version: u16 = 4;
+pub const schema_version: u16 = 5;
 
 pub const EventKind = enum(u16) {
     instrument_rules_activated,
@@ -97,50 +97,11 @@ pub const Trace = struct {
     }
 };
 
-pub const ExecutionStatus = enum(u8) { accepted, partially_filled, filled, canceled };
-pub const DispatchStatus = enum(u8) { submitted, unknown };
-pub const ReconciliationStatus = enum(u8) { found_live };
 pub const MarketHealth = enum(u8) { initializing, healthy, gap };
 pub const RejectReason = enum(u8) { none, market_data_gap, global_risk_lease_exceeded };
 
-pub const ExecutionReport = struct {
-    report_id: u64,
-    status: ExecutionStatus,
-    cumulative_qty: i64,
-    remaining_qty: i64,
-};
-
-pub const Fill = struct {
-    fill_id: u64,
-    quantity: i64,
-    price_micros: i64,
-};
-
-pub const L2Snapshot = struct {
-    source_sequence: u64,
-    bid_price_micros: i64,
-    bid_quantity: i64,
-    ask_1_price_micros: i64,
-    ask_1_quantity: i64,
-    ask_2_price_micros: i64,
-    ask_2_quantity: i64,
-};
-
-pub const L2Delta = struct {
-    previous: u64,
-    current: u64,
-    bid_price_micros: i64,
-    bid_quantity: i64,
-};
-
 pub const TimerRequest = struct {
     quantity: i64,
-};
-
-pub const ReconciliationResult = struct {
-    reconciliation_id: u64,
-    status: ReconciliationStatus,
-    venue_order_id: u64,
 };
 
 pub const EconomicFill = struct {
@@ -191,13 +152,7 @@ pub const PayloadTag = enum(u16) {
     primary_lease_granted,
     risk_lease_granted,
     mark_price,
-    l2_snapshot,
-    l2_delta,
     timer,
-    order_dispatch_result,
-    order_reconciliation_result,
-    execution_report,
-    fill,
     external_order_intent,
     strategy_intent_rejected,
     oms_intent_group,
@@ -285,7 +240,7 @@ pub const VersionActivationEvent = struct {
     canonical_state_digest: [32]u8,
 };
 
-pub const Payload = union(PayloadTag) {
+pub const CorePayload = union(PayloadTag) {
     instrument_rules_activated: InstrumentRules,
     margin_rules_activated: MarginRules,
     account_configuration: AccountConfiguration,
@@ -298,13 +253,7 @@ pub const Payload = union(PayloadTag) {
     primary_lease_granted: PrimaryLease,
     risk_lease_granted: RiskLease,
     mark_price: i64,
-    l2_snapshot: L2Snapshot,
-    l2_delta: L2Delta,
     timer: TimerRequest,
-    order_dispatch_result: DispatchStatus,
-    order_reconciliation_result: ReconciliationResult,
-    execution_report: ExecutionReport,
-    fill: Fill,
     external_order_intent: host_gateway.OrderIntent,
     strategy_intent_rejected: host_gateway.Rejection,
     oms_intent_group: oms_module.IntentGroup,
@@ -325,9 +274,17 @@ pub const Payload = union(PayloadTag) {
     strategy_cutover_fence: StrategyCutoverFence,
 };
 
-/// Versioned internal shard input used by coordinator, lifecycle, replay, and
-/// deterministic fixtures. Venue and market facts never use this type.
-pub const ShardEvent = struct {
+/// Internal command/fact transition carried as the `core_input` payload of the
+/// single canonical EventRecord protocol. Timing and schema live only in the
+/// outer canonical envelope.
+pub const CoreTransition = struct {
+    identity: u64,
+    payload: CorePayload,
+};
+
+/// Decoded execution view reconstructed from the canonical envelope during
+/// apply and from journal record metadata during replay.
+pub const InputEvent = struct {
     version: u16 = schema_version,
     identity: u64,
     source_time: u64 = 0,
@@ -335,13 +292,11 @@ pub const ShardEvent = struct {
     monotonic_time: u64 = 0,
     wall_time: u64 = 0,
     time_presence: journal.TimePresence = .{},
-    payload: Payload,
+    payload: CorePayload,
 };
 
-pub const InputEvent = ShardEvent;
-
 pub const EncodedInput = struct {
-    bytes: [512]u8 = undefined,
+    bytes: [2048]u8 = undefined,
     len: usize = 0,
 
     fn put(self: *EncodedInput, comptime T: type, value: T) !void {
@@ -351,7 +306,7 @@ pub const EncodedInput = struct {
     }
 };
 
-pub fn encodeInput(input: InputEvent) !EncodedInput {
+pub fn encodeInput(input: CoreTransition) !EncodedInput {
     var encoded: EncodedInput = .{};
     try encoded.put(u64, input.identity);
     try encoded.put(u16, @intFromEnum(std.meta.activeTag(input.payload)));
@@ -401,39 +356,7 @@ pub fn encodeInput(input: InputEvent) !EncodedInput {
             try encoded.put(i64, value.global_limit_micros);
         },
         .mark_price => |value| try encoded.put(i64, value),
-        .l2_snapshot => |value| {
-            try encoded.put(u64, value.source_sequence);
-            try encoded.put(i64, value.bid_price_micros);
-            try encoded.put(i64, value.bid_quantity);
-            try encoded.put(i64, value.ask_1_price_micros);
-            try encoded.put(i64, value.ask_1_quantity);
-            try encoded.put(i64, value.ask_2_price_micros);
-            try encoded.put(i64, value.ask_2_quantity);
-        },
-        .l2_delta => |value| {
-            try encoded.put(u64, value.previous);
-            try encoded.put(u64, value.current);
-            try encoded.put(i64, value.bid_price_micros);
-            try encoded.put(i64, value.bid_quantity);
-        },
         .timer => |value| try encoded.put(i64, value.quantity),
-        .order_dispatch_result => |value| try encoded.put(u8, @intFromEnum(value)),
-        .order_reconciliation_result => |value| {
-            try encoded.put(u64, value.reconciliation_id);
-            try encoded.put(u8, @intFromEnum(value.status));
-            try encoded.put(u64, value.venue_order_id);
-        },
-        .execution_report => |value| {
-            try encoded.put(u64, value.report_id);
-            try encoded.put(u8, @intFromEnum(value.status));
-            try encoded.put(i64, value.cumulative_qty);
-            try encoded.put(i64, value.remaining_qty);
-        },
-        .fill => |value| {
-            try encoded.put(u64, value.fill_id);
-            try encoded.put(i64, value.quantity);
-            try encoded.put(i64, value.price_micros);
-        },
         .external_order_intent => |value| {
             try encoded.put(u128, value.strategy_identity);
             try encoded.put(u64, value.intent_sequence);
@@ -614,7 +537,7 @@ pub fn decodeInput(record: journal.Record) !InputEvent {
         PayloadTag,
         try readInputValue(u16, record.payload, &offset),
     ) orelse return error.UnknownInputType;
-    const payload: Payload = switch (tag) {
+    const payload: CorePayload = switch (tag) {
         .instrument_rules_activated => .{ .instrument_rules_activated = .{
             .version = try readInputValue(u32, record.payload, &offset),
             .instrument_identity = try readInputValue(u128, record.payload, &offset),
@@ -677,49 +600,8 @@ pub fn decodeInput(record: journal.Record) !InputEvent {
             .global_limit_micros = try readInputValue(i64, record.payload, &offset),
         } },
         .mark_price => .{ .mark_price = try readInputValue(i64, record.payload, &offset) },
-        .l2_snapshot => .{ .l2_snapshot = .{
-            .source_sequence = try readInputValue(u64, record.payload, &offset),
-            .bid_price_micros = try readInputValue(i64, record.payload, &offset),
-            .bid_quantity = try readInputValue(i64, record.payload, &offset),
-            .ask_1_price_micros = try readInputValue(i64, record.payload, &offset),
-            .ask_1_quantity = try readInputValue(i64, record.payload, &offset),
-            .ask_2_price_micros = try readInputValue(i64, record.payload, &offset),
-            .ask_2_quantity = try readInputValue(i64, record.payload, &offset),
-        } },
-        .l2_delta => .{ .l2_delta = .{
-            .previous = try readInputValue(u64, record.payload, &offset),
-            .current = try readInputValue(u64, record.payload, &offset),
-            .bid_price_micros = try readInputValue(i64, record.payload, &offset),
-            .bid_quantity = try readInputValue(i64, record.payload, &offset),
-        } },
         .timer => .{ .timer = .{
             .quantity = try readInputValue(i64, record.payload, &offset),
-        } },
-        .order_dispatch_result => .{ .order_dispatch_result = std.enums.fromInt(
-            DispatchStatus,
-            try readInputValue(u8, record.payload, &offset),
-        ) orelse return error.UnknownDispatchStatus },
-        .order_reconciliation_result => .{ .order_reconciliation_result = .{
-            .reconciliation_id = try readInputValue(u64, record.payload, &offset),
-            .status = std.enums.fromInt(
-                ReconciliationStatus,
-                try readInputValue(u8, record.payload, &offset),
-            ) orelse return error.UnknownReconciliationStatus,
-            .venue_order_id = try readInputValue(u64, record.payload, &offset),
-        } },
-        .execution_report => .{ .execution_report = .{
-            .report_id = try readInputValue(u64, record.payload, &offset),
-            .status = std.enums.fromInt(
-                ExecutionStatus,
-                try readInputValue(u8, record.payload, &offset),
-            ) orelse return error.UnknownExecutionStatus,
-            .cumulative_qty = try readInputValue(i64, record.payload, &offset),
-            .remaining_qty = try readInputValue(i64, record.payload, &offset),
-        } },
-        .fill => .{ .fill = .{
-            .fill_id = try readInputValue(u64, record.payload, &offset),
-            .quantity = try readInputValue(i64, record.payload, &offset),
-            .price_micros = try readInputValue(i64, record.payload, &offset),
         } },
         .external_order_intent => .{ .external_order_intent = .{
             .strategy_identity = try readInputValue(u128, record.payload, &offset),
@@ -930,7 +812,7 @@ pub fn decodeInput(record: journal.Record) !InputEvent {
 }
 
 /// Decodes one stable input record for side-effect-free recovery verification.
-pub fn decodeStableInput(record: journal.Record) !ShardEvent {
+pub fn decodeStableInput(record: journal.Record) !InputEvent {
     return decodeInput(record);
 }
 

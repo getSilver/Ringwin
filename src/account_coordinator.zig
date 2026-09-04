@@ -5,6 +5,10 @@ const snapshot_magic: u64 = 0x54434341574e4952;
 const coordinator_snapshot_version: u16 = 2;
 const account_margin_gate_identity: u128 = 0x414343544d415247;
 
+fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreTransition) !?trading.OrderCommand {
+    return trading.applyStable(shard, stable_journal, try trading.coreRecord(input));
+}
+
 pub const max_shards = 4;
 
 /// Account-level margin mode; IsolatedLinearUsdtV1 stays the only supported model.
@@ -169,7 +173,7 @@ pub const CoordinationJournal = struct {
 };
 
 /// Converts one routed account fact into the target shard's stable event seam.
-pub fn accountFactEvent(delivery: Delivery) !trading.ShardEvent {
+pub fn accountFactEvent(delivery: Delivery) !trading.CoreTransition {
     const identity = std.math.cast(u64, delivery.fact.identity) orelse return error.IdentityOutOfRange;
     return .{
         .identity = identity,
@@ -196,7 +200,7 @@ pub fn accountFactEvent(delivery: Delivery) !trading.ShardEvent {
 }
 
 /// Converts one lease grant into the existing shard risk-lease event.
-pub fn riskLeaseEvent(lease: RiskLease) !trading.ShardEvent {
+pub fn riskLeaseEvent(lease: RiskLease) !trading.CoreTransition {
     const identity = std.math.cast(u64, lease.identity) orelse return error.IdentityOutOfRange;
     return .{ .identity = identity, .payload = .{ .risk_lease_granted = .{
         .lease_identity = identity,
@@ -212,7 +216,7 @@ pub fn riskLeaseEvent(lease: RiskLease) !trading.ShardEvent {
 }
 
 /// Converts one account-wide restriction into a shard-local stable gate fact.
-pub fn accountGateEvent(delivery: GateDelivery, target_identity: u128) !trading.ShardEvent {
+pub fn accountGateEvent(delivery: GateDelivery, target_identity: u128) !trading.CoreTransition {
     const identity = std.math.cast(u64, delivery.gate.identity) orelse return error.IdentityOutOfRange;
     return .{ .identity = identity, .payload = .{ .safety_gate_change = .{
         .gate_identity = delivery.gate.identity,
@@ -226,13 +230,13 @@ pub fn accountGateEvent(delivery: GateDelivery, target_identity: u128) !trading.
 /// Durably applies one routed account fact through the shard's transactional seam.
 pub fn applyAccountFactStable(delivery: Delivery, target_shard_id: ShardId, shard: *trading.TradingShard, stable_journal: *trading.journal.Journal) !void {
     if (delivery.shard_id != target_shard_id) return error.CrossShardDelivery;
-    _ = try trading.applyStable(shard, stable_journal, try accountFactEvent(delivery));
+    _ = try applyCoreStable(shard, stable_journal, try accountFactEvent(delivery));
 }
 
 /// Durably applies one account restriction through the shard's transactional seam.
 pub fn applyAccountGateStable(delivery: GateDelivery, target_shard_id: ShardId, shard: *trading.TradingShard, stable_journal: *trading.journal.Journal) !void {
     if (delivery.shard_id != target_shard_id) return error.CrossShardDelivery;
-    _ = try trading.applyStable(shard, stable_journal, try accountGateEvent(delivery, shard.operational_state.target_identity));
+    _ = try applyCoreStable(shard, stable_journal, try accountGateEvent(delivery, shard.operational_state.target_identity));
 }
 
 /// Derives one shard's own publication strictly from its authoritative state.
@@ -359,7 +363,7 @@ pub const SharedExecutionGateway = struct {
     }
 
     /// Converts an itemized transport outcome into the owning OMS apply seam.
-    pub fn outcomeEvent(self: *const SharedExecutionGateway, outcome: GatewayOutcome) !trading.ShardEvent {
+    pub fn outcomeEvent(self: *const SharedExecutionGateway, outcome: GatewayOutcome) !trading.CoreTransition {
         _ = try self.complete(outcome);
         var items: [trading.oms.max_commands]trading.oms.DispatchItem = undefined;
         items[0] = .{ .command_id = outcome.command_id, .state = outcome.state };
@@ -375,7 +379,7 @@ pub const SharedExecutionGateway = struct {
         stable_journal: *trading.journal.Journal,
     ) !void {
         if (outcome.shard_id != target_shard_id) return error.CrossShardDelivery;
-        _ = try trading.applyStable(shard, stable_journal, try self.outcomeEvent(outcome));
+        _ = try applyCoreStable(shard, stable_journal, try self.outcomeEvent(outcome));
     }
 };
 
@@ -557,7 +561,7 @@ pub const AccountCoordinator = struct {
     }
 
     /// Returns the stable close events that must be applied to every expired lease owner.
-    pub fn expiredLeaseEvents(self: *const AccountCoordinator, events: *[max_shards]trading.ShardEvent) ![]const trading.ShardEvent {
+    pub fn expiredLeaseEvents(self: *const AccountCoordinator, events: *[max_shards]trading.CoreTransition) ![]const trading.CoreTransition {
         var count: usize = 0;
         for (self.leases[0..self.lease_count]) |lease| {
             if (lease.open) continue;
@@ -724,7 +728,7 @@ pub const AccountCoordinator = struct {
     }
 
     /// Returns stable events carrying every current lease to its owning shard.
-    pub fn currentLeaseEvents(self: *const AccountCoordinator, events: *[max_shards]trading.ShardEvent) ![]const trading.ShardEvent {
+    pub fn currentLeaseEvents(self: *const AccountCoordinator, events: *[max_shards]trading.CoreTransition) ![]const trading.CoreTransition {
         for (self.leases[0..self.lease_count], 0..) |lease, index|
             events[index] = try riskLeaseEvent(lease);
         return events[0..self.lease_count];
@@ -1438,31 +1442,31 @@ test "account recovery restores four matching shard tails under fresh evidence f
     for (0..max_shards) |index| {
         var shard: trading.TradingShard = .{};
         var stable_journal = trading.journal.Journal.init();
-        _ = try trading.applyStable(&shard, &stable_journal, .{
+        _ = try applyCoreStable(&shard, &stable_journal, .{
             .identity = 1,
             .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 1, .quantity_denominator = 1, .reservation_model = .leveraged } },
         });
-        _ = try trading.applyStable(&shard, &stable_journal, .{
+        _ = try applyCoreStable(&shard, &stable_journal, .{
             .identity = 1,
             .payload = .{ .margin_rules_activated = .{ .version = 1 } },
         });
-        _ = try trading.applyStable(&shard, &stable_journal, .{
+        _ = try applyCoreStable(&shard, &stable_journal, .{
             .identity = 1,
             .payload = .{ .account_configuration = .{ .exchange_account_identity = 900 } },
         });
-        _ = try trading.applyStable(&shard, &stable_journal, .{
+        _ = try applyCoreStable(&shard, &stable_journal, .{
             .identity = 1,
             .payload = .{ .exchange_balance = .{ .cash_micros = 10_000 } },
         });
-        _ = try trading.applyStable(&shard, &stable_journal, .{
+        _ = try applyCoreStable(&shard, &stable_journal, .{
             .identity = 1,
             .payload = .exchange_positions,
         });
-        _ = try trading.applyStable(&shard, &stable_journal, .{
+        _ = try applyCoreStable(&shard, &stable_journal, .{
             .identity = 1,
             .payload = .{ .opening_balance = .{ .cash_micros = 10_000 } },
         });
-        _ = try trading.applyStable(&shard, &stable_journal, .{
+        _ = try applyCoreStable(&shard, &stable_journal, .{
             .identity = 1,
             .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = index + 11 } },
         });
@@ -1504,31 +1508,31 @@ test "shard summaries derive from authoritative state and coordinate four real s
         shards[index] = .{};
         journals[index] = trading.journal.Journal.init();
         const journal = &journals[index];
-        _ = try trading.applyStable(&shards[index], journal, .{
+        _ = try applyCoreStable(&shards[index], journal, .{
             .identity = 1,
             .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 1, .quantity_denominator = 1, .reservation_model = .leveraged } },
         });
-        _ = try trading.applyStable(&shards[index], journal, .{
+        _ = try applyCoreStable(&shards[index], journal, .{
             .identity = 2,
             .payload = .{ .margin_rules_activated = .{ .version = 1 } },
         });
-        _ = try trading.applyStable(&shards[index], journal, .{
+        _ = try applyCoreStable(&shards[index], journal, .{
             .identity = 3,
             .payload = .{ .account_configuration = .{ .exchange_account_identity = 900 } },
         });
-        _ = try trading.applyStable(&shards[index], journal, .{
+        _ = try applyCoreStable(&shards[index], journal, .{
             .identity = 4,
             .payload = .{ .exchange_balance = .{ .cash_micros = 10_000 } },
         });
-        _ = try trading.applyStable(&shards[index], journal, .{
+        _ = try applyCoreStable(&shards[index], journal, .{
             .identity = 5,
             .payload = .exchange_positions,
         });
-        _ = try trading.applyStable(&shards[index], journal, .{
+        _ = try applyCoreStable(&shards[index], journal, .{
             .identity = 6,
             .payload = .{ .opening_balance = .{ .cash_micros = 10_000 } },
         });
-        _ = try trading.applyStable(&shards[index], journal, .{
+        _ = try applyCoreStable(&shards[index], journal, .{
             .identity = 7,
             .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = index + 11 } },
         });
@@ -1635,7 +1639,7 @@ test "explicit lease tightening is a replayable deterministic fact" {
         break :blk gated.allocateLeases(2, 20);
     });
 
-    var events: [max_shards]trading.ShardEvent = undefined;
+    var events: [max_shards]trading.CoreTransition = undefined;
     const lease_events = try coordinator.currentLeaseEvents(&events);
     try std.testing.expectEqual(max_shards, lease_events.len);
     for (lease_events, 0..) |event, index| switch (event.payload) {

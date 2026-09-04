@@ -21,8 +21,12 @@ const order_quantity: i64 = 100;
 const place_fee_micros: i64 = 400_000;
 const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
-pub const acceptance_schema_version: u16 = 1;
-const expected_shared_summary_v1 = "8e409fa2eb7e31bfde27a14d39804754eec10468a621fad1b2f88ebc8c27afef";
+pub const acceptance_schema_version: u16 = 2;
+const expected_shared_summary_v2 = "b1c7afd8a5806ee00e4bfce7b3f552c5ed5653b21ae28202de2f16abfa1353ed";
+
+fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreTransition) !?trading.OrderCommand {
+    return trading.applyStable(shard, stable_journal, try trading.coreRecord(input));
+}
 
 const OpLog = struct {
     const Entry = union(enum) {
@@ -59,8 +63,8 @@ const World = struct {
         };
     }
 
-    fn apply(self: *World, index: usize, event: trading.ShardEvent) !void {
-        _ = try trading.applyStable(&self.shards[index], &self.journals[index], event);
+    fn apply(self: *World, index: usize, event: trading.CoreTransition) !void {
+        _ = try applyCoreStable(&self.shards[index], &self.journals[index], event);
     }
 
     fn nextId(self: *World) u128 {
@@ -131,7 +135,7 @@ var shard_snapshot_storage: [max_shards][256 * 1024]u8 = undefined;
 var coordinator_snapshot_storage: [16384]u8 = undefined;
 var tail_journals: [max_shards]trading.journal.Journal = undefined;
 
-fn genesisEvents(index: usize) [14]trading.ShardEvent {
+fn genesisEvents(index: usize) [14]trading.CoreTransition {
     const target: u128 = @intCast(index + 1);
     return .{
         .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{
@@ -174,26 +178,10 @@ fn genesisEvents(index: usize) [14]trading.ShardEvent {
     };
 }
 
-fn replayJournalSegment(shard: *trading.TradingShard, bytes: []const u8) !void {
-    var reader = try trading.journal.Reader.init(bytes);
-    while (true) {
-        switch (try reader.next()) {
-            .record => |record| {
-                if (record.flags & trading.journal.input_flag != 0)
-                    _ = try shard.applyInternal(try trading.decodeStableInput(record));
-            },
-            .end => |status| {
-                if (status != .clean) return error.TruncatedShardTail;
-                return;
-            },
-        }
-    }
-}
-
 fn replayShardFromJournal(bytes: []const u8) !trading.TradingShard {
-    var shard: trading.TradingShard = .{};
-    try replayJournalSegment(&shard, bytes);
-    return shard;
+    const recovered = try trading.recoverStable(.{}, bytes);
+    if (recovered.status != .clean) return error.TruncatedShardTail;
+    return recovered.shard;
 }
 
 fn replayCoordination(live: *const World) !coordination.AccountCoordinator {
@@ -267,7 +255,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         shard.* = .{};
         journal.* = trading.journal.Journal.init();
         const events = genesisEvents(index);
-        for (events) |event| _ = try trading.applyStable(shard, journal, event);
+        for (events) |event| _ = try applyCoreStable(shard, journal, event);
         try std.testing.expect(shard.genesisReady());
         try std.testing.expect(shard.operational_state.effectiveTradingAuthority());
     }
@@ -284,7 +272,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
             .limit_price = .{ .instrument = swap_instrument, .rules_version = 1, .ticks = order_price_micros },
             .reservation = .{ .asset = settlement_asset, .atoms = 11_400_000 },
         };
-        const placed = try trading.applyStable(&world.shards[index], &world.journals[index], .{
+        const placed = try applyCoreStable(&world.shards[index], &world.journals[index], .{
             .identity = 6,
             .payload = .{ .oms_intent_group = group },
         });
@@ -520,7 +508,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         .limit_price = .{ .instrument = swap_instrument, .rules_version = 1, .ticks = fill_price_micros },
         .reservation = .{ .asset = settlement_asset, .atoms = 200_000 },
     };
-    _ = try trading.applyStable(&world.shards[1], &world.journals[1], .{ .identity = 43, .payload = .{ .oms_intent_group = reduce_group } });
+    _ = try applyCoreStable(&world.shards[1], &world.journals[1], .{ .identity = 43, .payload = .{ .oms_intent_group = reduce_group } });
     const reducing = world.shards[1].oms.emitted();
     try std.testing.expectEqual(@as(usize, 1), reducing.len);
     try std.testing.expectEqual(trading.oms.Operation.place, reducing[0].operation);
@@ -539,16 +527,41 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     const coordinator_snapshot = try world.coordinator.snapshot(&coordinator_snapshot_storage);
 
     // The recovery point is the five sealed snapshots. Both tails advance only after it.
+    const canonical_envelope: trading.canonical.EventEnvelope = .{
+        .event_type = @intFromEnum(trading.canonical.EventType.instrument_definition_observed),
+        .schema_version = 1,
+        .identity = .{ .stream = 2, .sequence = 500 },
+        .source_fact_identity = 500,
+        .scope = .instrument,
+        .venue = 1,
+        .exchange_account = exchange_account,
+        .source_stream = 2,
+        .source_sequence = 500,
+        .adapter_session = 1,
+        .times = .{ .monotonic_ns = 500 },
+        .raw_evidence = .{ .stream = 2, .sequence = 500, .digest = @splat(0) },
+    };
     _ = try trading.applyStable(&world.shards[1], &tail_journals[1], .{
-        .identity = 500,
-        .payload = .{ .l2_snapshot = .{
-            .source_sequence = 1,
-            .bid_price_micros = mark_price_micros - 100_000_000,
-            .bid_quantity = 1_000,
-            .ask_1_price_micros = mark_price_micros + 100_000_000,
-            .ask_1_quantity = 1_000,
-            .ask_2_price_micros = mark_price_micros + 200_000_000,
-            .ask_2_quantity = 1_000,
+        .envelope = canonical_envelope,
+        .event = .{ .instrument_definition_observed = .{ .instrument = 3, .rules_version = 1 } },
+    });
+    var snapshot_envelope = canonical_envelope;
+    snapshot_envelope.event_type = @intFromEnum(trading.canonical.EventType.l2_book_snapshot);
+    snapshot_envelope.identity.sequence = 501;
+    snapshot_envelope.source_fact_identity = 501;
+    snapshot_envelope.source_sequence = 501;
+    snapshot_envelope.raw_evidence.sequence = 501;
+    _ = try trading.applyStable(&world.shards[1], &tail_journals[1], .{
+        .envelope = snapshot_envelope,
+        .event = .{ .l2_book_snapshot = .{
+            .instrument = 3,
+            .sequence = 1,
+            .best_bid = .{ .instrument = 3, .rules_version = 1, .ticks = mark_price_micros - 100_000_000 },
+            .best_ask = .{ .instrument = 3, .rules_version = 1, .ticks = mark_price_micros + 100_000_000 },
+            .best_bid_quantity = .{ .instrument = 3, .rules_version = 1, .lots = 1_000 },
+            .best_ask_quantity = .{ .instrument = 3, .rules_version = 1, .lots = 1_000 },
+            .next_ask = .{ .instrument = 3, .rules_version = 1, .ticks = mark_price_micros + 200_000_000 },
+            .next_ask_quantity = .{ .instrument = 3, .rules_version = 1, .lots = 1_000 },
         } },
     });
     const tail_summary_identity = world.nextId();
@@ -572,7 +585,9 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     var replayed_shards: [max_shards]trading.TradingShard = undefined;
     for (0..max_shards) |index| {
         replayed_shards[index] = try replayShardFromJournal(world.journals[index].bytes());
-        try replayJournalSegment(&replayed_shards[index], shard_tails[index]);
+        const tail = try trading.recoverStable(replayed_shards[index], shard_tails[index]);
+        if (tail.status != .clean) return error.TruncatedShardTail;
+        replayed_shards[index] = tail.shard;
     }
     for (0..max_shards) |index|
         try std.testing.expectEqualSlices(
@@ -657,8 +672,10 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     try std.testing.expectEqualSlices(u8, &shared_a, &shared_b);
     try std.testing.expectEqualSlices(u8, &shared_b, &shared_c);
     const shared_hex = std.fmt.bytesToHex(shared_a, .lower);
-    if (!std.mem.eql(u8, expected_shared_summary_v1, &shared_hex))
+    if (!std.mem.eql(u8, expected_shared_summary_v2, &shared_hex)) {
+        std.debug.print("four-shard evidence mismatch: expected {s}, actual {s}\n", .{ expected_shared_summary_v2, &shared_hex });
         return error.FourShardEvidenceDrift;
+    }
     try std.testing.expectEqual(@as(u8, max_shards), world.gateway.count);
 
     var shard_digests: [max_shards][Sha256.digest_length]u8 = undefined;

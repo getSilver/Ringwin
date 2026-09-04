@@ -7,9 +7,10 @@ const footer_magic: u32 = 0x444e4551; // QEND
 const segment_header_len = 64;
 const record_header_len = 72;
 const footer_len = 32;
-const max_payload_len = 2048;
+const max_payload_len = 4096;
 
 pub const input_flag: u32 = 1;
+pub const canonical_input_flag: u32 = 2;
 pub const segment_header_size = segment_header_len;
 pub const record_header_size = record_header_len;
 
@@ -55,6 +56,29 @@ pub const Journal = struct {
     records: u64 = 0,
     last_sequence: u64 = 0,
     sealed: bool = false,
+
+    pub const Checkpoint = struct {
+        len: usize,
+        records: u64,
+        last_sequence: u64,
+        sealed: bool,
+    };
+
+    pub fn checkpoint(self: *const Journal) Checkpoint {
+        return .{
+            .len = self.len,
+            .records = self.records,
+            .last_sequence = self.last_sequence,
+            .sealed = self.sealed,
+        };
+    }
+
+    pub fn restore(self: *Journal, saved: Checkpoint) void {
+        self.len = saved.len;
+        self.records = saved.records;
+        self.last_sequence = saved.last_sequence;
+        self.sealed = saved.sealed;
+    }
 
     pub fn init() Journal {
         return initAt(1);

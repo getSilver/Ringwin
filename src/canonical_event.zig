@@ -6,6 +6,8 @@
 
 const std = @import("std");
 
+pub const schema_version: u16 = 1;
+
 pub const VenueIdentity = u64;
 pub const AssetIdentity = u64;
 pub const ExchangeAccountIdentity = u128;
@@ -29,7 +31,7 @@ pub const EventIdentity = struct {
 
 pub fn OpaqueRef(comptime capacity: usize) type {
     return struct {
-        bytes: [capacity]u8 = undefined,
+        bytes: [capacity]u8 = @splat(0),
         len: std.math.IntFittingRange(0, capacity) = 0,
 
         pub fn init(value: []const u8) !@This() {
@@ -271,15 +273,34 @@ pub const OrderDispatchResult = struct {
     reason: ?CanonicalRejectReason = null,
 };
 pub const InstrumentDefinitionObserved = struct { instrument: InstrumentIdentity, rules_version: u64 };
-pub const L2BookSnapshot = struct { instrument: InstrumentIdentity, sequence: VenueSourceSequence, best_bid: InstrumentPrice, best_ask: InstrumentPrice };
-pub const L2BookDelta = struct { instrument: InstrumentIdentity, previous_sequence: VenueSourceSequence, sequence: VenueSourceSequence, best_bid: InstrumentPrice, best_ask: InstrumentPrice };
+pub const L2BookSnapshot = struct {
+    instrument: InstrumentIdentity,
+    sequence: VenueSourceSequence,
+    best_bid: InstrumentPrice,
+    best_ask: InstrumentPrice,
+    best_bid_quantity: ?InstrumentQuantity = null,
+    best_ask_quantity: ?InstrumentQuantity = null,
+    next_ask: ?InstrumentPrice = null,
+    next_ask_quantity: ?InstrumentQuantity = null,
+};
+pub const L2BookDelta = struct {
+    instrument: InstrumentIdentity,
+    previous_sequence: VenueSourceSequence,
+    sequence: VenueSourceSequence,
+    best_bid: InstrumentPrice,
+    best_ask: InstrumentPrice,
+    best_bid_quantity: ?InstrumentQuantity = null,
+    best_ask_quantity: ?InstrumentQuantity = null,
+    next_ask: ?InstrumentPrice = null,
+    next_ask_quantity: ?InstrumentQuantity = null,
+};
 pub const ReferencePriceKind = enum(u8) { mark, index };
 pub const ReferencePrice = struct { instrument: InstrumentIdentity, kind: ReferencePriceKind, price: InstrumentPrice };
 pub const FundingRatePublished = struct { instrument: InstrumentIdentity, rate_ppm: i64, funding_time_utc_ns: u64 };
 pub const MarketDataHealth = enum(u8) { awaiting_snapshot, healthy, gap };
 pub const MarketDataHealthChanged = struct { instrument: InstrumentIdentity, health: MarketDataHealth };
 
-pub const PositionSide = enum(u8) { long, short };
+pub const PositionSide = enum(u8) { net, long, short };
 pub const AccountBalance = struct {
     asset: AssetIdentity,
     total: AssetAmount,
@@ -365,11 +386,15 @@ pub const ExecutionReport = struct {
     margin_mode_isolated: ?bool = null,
     leverage: ?Decimal = null,
     status: ExecutionReportStatus,
+    reject_reason: ?CanonicalRejectReason = null,
+    portfolio_reduce_only: ?bool = null,
+    position_side: ?PositionSide = null,
     original_quantity: ?InstrumentQuantity = null,
     cumulative_quantity: InstrumentQuantity,
     remaining_quantity: InstrumentQuantity,
     limit_price: ?InstrumentPrice = null,
     average_fill_price: ?InstrumentPrice = null,
+    venue_create_time_utc_ns: ?u64 = null,
     venue_update_time_utc_ns: ?u64 = null,
 };
 
@@ -388,6 +413,7 @@ pub const Fill = struct {
     rebate: ?AssetAmount = null,
     realized_pnl: ?AssetAmount = null,
     liquidity: LiquidityRole,
+    venue_fill_time_utc_ns: ?u64 = null,
 };
 
 pub const VenueAccountConfigurationSnapshot = struct {
@@ -412,7 +438,19 @@ pub const VenueAccountConfigurationSnapshot = struct {
     },
 };
 
+/// Bounded, versioned core command/fact encoding. Internal shard transitions
+/// use the same EventRecord envelope and public apply seam as venue facts.
+pub const CoreInput = struct {
+    bytes: [2048]u8 = @splat(0),
+    len: u16,
+
+    pub fn slice(self: *const CoreInput) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
 pub const CanonicalEvent = union(enum) {
+    core_input: CoreInput,
     order_dispatch_result: OrderDispatchResult,
     execution_report: ExecutionReport,
     fill: Fill,
@@ -433,6 +471,7 @@ pub const CanonicalEvent = union(enum) {
 
 pub const EventType = enum(u32) {
     order_dispatch_result = 1,
+    core_input = 2,
     execution_report = 3,
     fill = 4,
     reconciliation_started = 5,
@@ -454,6 +493,7 @@ pub const TimeInForce = enum(u8) { good_til_canceled, immediate_or_cancel, fill_
 
 pub fn eventType(event: CanonicalEvent) EventType {
     return switch (event) {
+        .core_input => .core_input,
         .order_dispatch_result => .order_dispatch_result,
         .execution_report => .execution_report,
         .fill => .fill,
@@ -474,6 +514,26 @@ pub fn eventType(event: CanonicalEvent) EventType {
 }
 
 pub const EventRecord = struct { envelope: EventEnvelope, event: CanonicalEvent };
+
+/// Validates bounded counts and removes undefined fixed-array tails before an
+/// event participates in hashing or durable encoding.
+pub fn normalizedForStorage(record: EventRecord) !EventRecord {
+    var normalized = record;
+    switch (normalized.event) {
+        .account_bootstrap_snapshot => |*snapshot| {
+            if (snapshot.balance_count > snapshot.balances.len or
+                snapshot.position_count > snapshot.positions.len or
+                snapshot.margin_count > snapshot.margins.len)
+                return error.InvalidAccountFactCount;
+            for (snapshot.balances[snapshot.balance_count..]) |*value| value.* = std.mem.zeroes(AccountBalance);
+            for (snapshot.positions[snapshot.position_count..]) |*value| value.* = std.mem.zeroes(AccountPosition);
+            for (snapshot.margins[snapshot.margin_count..]) |*value| value.* = std.mem.zeroes(AccountMargin);
+        },
+        else => {},
+    }
+    return normalized;
+}
+
 pub const max_events_per_adapter_batch = 32;
 pub const AdapterOutputBatch = struct {
     events: [max_events_per_adapter_batch]EventRecord = undefined,

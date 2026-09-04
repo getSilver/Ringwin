@@ -246,7 +246,7 @@ pub const BybitVenueAdapter = struct {
         return true;
     }
     fn dispatch(self: *BybitVenueAdapter, output: *canonical.AdapterOutputBatch, command: canonical.OrderCommand) void {
-        if (command.operation == .place) if (self.reconciler) |value| value.registerOrder(command.identity, command.client_order_id) catch {
+        if (command.operation == .place) if (self.reconciler) |value| value.registerOrder(command.identity, command.client_order_id, command.portfolio_reduce_only) catch {
             self.appendDispatch(output, command, .not_sent, .adapter_backpressure, null);
             return;
         };

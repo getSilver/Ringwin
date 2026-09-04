@@ -55,6 +55,7 @@ const reconciliation_capacity = 8;
 const OrderLink = struct {
     order: canonical.OrderIdentity,
     client_order_id: canonical.ClientOrderId,
+    portfolio_reduce_only: bool,
 };
 
 const PendingOrderReconciliation = struct {
@@ -360,6 +361,8 @@ pub const OkxVenueAdapter = struct {
                 else => .good_til_canceled,
             },
             .venue_reduce_only = report.venue_reduce_only,
+            .portfolio_reduce_only = link.portfolio_reduce_only,
+            .position_side = if (report.position_side) |_| .net else null,
             .position_mode_net = if (report.position_side) |_| true else null,
             .margin_mode_isolated = if (report.margin_mode) |mode| mode == .isolated else null,
             .leverage = if (report.leverage) |leverage| decimal(leverage) else null,
@@ -374,6 +377,7 @@ pub const OkxVenueAdapter = struct {
             .remaining_quantity = .{ .instrument = rules.identity, .rules_version = self.profile.rules_version, .lots = quantity.lots - cumulative.lots },
             .limit_price = if (report.limit_price) |value| try self.privatePrice(rules.identity, rules.rules, value) else null,
             .average_fill_price = if (report.average_fill_price) |value| try self.privatePrice(rules.identity, rules.rules, value) else null,
+            .venue_create_time_utc_ns = report.venue_create_time_utc_ns,
             .venue_update_time_utc_ns = report.venue_update_time_utc_ns,
         } });
     }
@@ -407,6 +411,7 @@ pub const OkxVenueAdapter = struct {
                 .maker => .maker,
                 .taker => .taker,
             },
+            .venue_fill_time_utc_ns = fill.venue_fill_time_utc_ns,
         } });
     }
 
@@ -700,11 +705,17 @@ pub const OkxVenueAdapter = struct {
     fn rememberOrder(self: *OkxVenueAdapter, command: canonical.OrderCommand) !void {
         for (self.order_links[0..self.order_link_count]) |*link| {
             if (link.order != command.identity) continue;
-            if (!std.meta.eql(link.client_order_id, command.client_order_id)) return error.ConflictingOrderIdentity;
+            if (!std.meta.eql(link.client_order_id, command.client_order_id) or
+                link.portfolio_reduce_only != command.portfolio_reduce_only)
+                return error.ConflictingOrderIdentity;
             return;
         }
         if (self.order_link_count == self.order_links.len) return error.Full;
-        self.order_links[self.order_link_count] = .{ .order = command.identity, .client_order_id = command.client_order_id };
+        self.order_links[self.order_link_count] = .{
+            .order = command.identity,
+            .client_order_id = command.client_order_id,
+            .portfolio_reduce_only = command.portfolio_reduce_only,
+        };
         self.order_link_count += 1;
     }
 

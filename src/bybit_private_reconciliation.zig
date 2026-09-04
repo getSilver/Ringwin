@@ -33,7 +33,7 @@ pub const Readiness = struct { stage: Stage, session: canonical.AdapterSessionId
 const max_events = 96;
 const max_links = 32;
 const max_seen = 128;
-const Link = struct { order: canonical.OrderIdentity, client: canonical.ClientOrderId, status: ?canonical.ExecutionReportStatus = null };
+const Link = struct { order: canonical.OrderIdentity, client: canonical.ClientOrderId, portfolio_reduce_only: bool, status: ?canonical.ExecutionReportStatus = null };
 
 pub const Reconciler = struct {
     raw_sink: RawSink,
@@ -89,13 +89,13 @@ pub const Reconciler = struct {
     pub fn readiness(self: *const Reconciler) Readiness {
         return .{ .stage = self.stage, .session = if (self.binding) |value| value.session else 0, .raw_watermark = self.raw_watermark, .bootstrap = self.bootstrap };
     }
-    pub fn registerOrder(self: *Reconciler, order: canonical.OrderIdentity, client: canonical.ClientOrderId) !void {
+    pub fn registerOrder(self: *Reconciler, order: canonical.OrderIdentity, client: canonical.ClientOrderId, portfolio_reduce_only: bool) !void {
         for (self.links[0..self.link_count]) |link| if (std.mem.eql(u8, link.client.slice(), client.slice())) {
-            if (link.order != order) return error.ConflictingOrderLink;
+            if (link.order != order or link.portfolio_reduce_only != portfolio_reduce_only) return error.ConflictingOrderLink;
             return;
         };
         if (self.link_count == self.links.len) return error.OrderLinkCapacity;
-        self.links[self.link_count] = .{ .order = order, .client = client };
+        self.links[self.link_count] = .{ .order = order, .client = client, .portfolio_reduce_only = portfolio_reduce_only };
         self.link_count += 1;
     }
     pub fn resolveOrder(self: *const Reconciler, order: canonical.OrderIdentity, confirmed_absent_allowed: bool) canonical.ReconciliationStatus {
@@ -192,7 +192,8 @@ pub const Reconciler = struct {
             const executed = try quantity(rules, cumulative);
             if (executed.lots > original.lots) return error.InvalidReportQuantity;
             const update = try optionalMillis(item, "updatedTime");
-            try self.emit(.account, rules.identity, null, identity(key), update, times, evidence, .{ .execution_report = .{ .identity = identity(key), .order = link.order, .client_order_id = link.client, .venue_order = try canonical.VenueOrderRef.init((self.binding orelse return error.StaleSession).venue, order_id), .instrument = rules.identity, .exchange_account = (self.binding orelse return error.StaleSession).account, .revision = 1, .side = try side(try string(item, "side")), .order_type = try orderType(try string(item, "orderType")), .time_in_force = try tif(try string(item, "timeInForce")), .venue_reduce_only = try optionalBool(item, "reduceOnly"), .position_mode_net = try positionModeNet(item), .status = status, .original_quantity = original, .cumulative_quantity = executed, .remaining_quantity = .{ .instrument = rules.identity, .rules_version = rules.rules_version, .lots = original.lots - executed.lots }, .limit_price = try optionalPrice(rules, (try optionalString(item, "price")) orelse "0"), .average_fill_price = try optionalPrice(rules, (try optionalString(item, "avgPrice")) orelse "0"), .venue_update_time_utc_ns = update } });
+            const position_side = try positionSide(item);
+            try self.emit(.account, rules.identity, null, identity(key), update, times, evidence, .{ .execution_report = .{ .identity = identity(key), .order = link.order, .client_order_id = link.client, .venue_order = try canonical.VenueOrderRef.init((self.binding orelse return error.StaleSession).venue, order_id), .instrument = rules.identity, .exchange_account = (self.binding orelse return error.StaleSession).account, .revision = 1, .side = try side(try string(item, "side")), .order_type = try orderType(try string(item, "orderType")), .time_in_force = try tif(try string(item, "timeInForce")), .venue_reduce_only = try optionalBool(item, "reduceOnly"), .portfolio_reduce_only = link.portfolio_reduce_only, .position_mode_net = if (position_side) |position| position == .net else null, .position_side = position_side, .status = status, .reject_reason = if (status == .rejected) .other_venue_reject else null, .original_quantity = original, .cumulative_quantity = executed, .remaining_quantity = .{ .instrument = rules.identity, .rules_version = rules.rules_version, .lots = original.lots - executed.lots }, .limit_price = try optionalPrice(rules, (try optionalString(item, "price")) orelse "0"), .average_fill_price = try optionalPrice(rules, (try optionalString(item, "avgPrice")) orelse "0"), .venue_create_time_utc_ns = try optionalMillis(item, "createdTime"), .venue_update_time_utc_ns = update } });
         }
     }
     fn decodeExecutions(self: *Reconciler, times: Times, evidence: RawEvidenceRef, value: std.json.Value) !void {
@@ -208,7 +209,8 @@ pub const Reconciler = struct {
             const rules = try self.rulesFor(item);
             const fee = if (try optionalString(item, "execFee")) |value_text| try amount(try asset((try optionalString(item, "feeCurrency")) orelse "USDT"), value_text) else null;
             const pnl = if (try optionalString(item, "execPnl")) |value_text| try amount(usdt, value_text) else null;
-            try self.emit(.account, rules.identity, null, identity(key), try optionalMillis(item, "execTime"), times, evidence, .{ .fill = .{ .identity = identity(key), .order = link.order, .client_order_id = link.client, .venue_order = try canonical.VenueOrderRef.init((self.binding orelse return error.StaleSession).venue, try string(item, "orderId")), .venue_trade = try canonical.VenueTradeRef.init((self.binding orelse return error.StaleSession).venue, execution_id), .instrument = rules.identity, .exchange_account = (self.binding orelse return error.StaleSession).account, .side = try side(try string(item, "side")), .quantity = try quantity(rules, try string(item, "execQty")), .price = try price(rules, try string(item, "execPrice")), .fee = if (fee) |value_fee| if (value_fee.atoms > 0) value_fee else null else null, .rebate = if (fee) |value_fee| if (value_fee.atoms < 0) .{ .asset = value_fee.asset, .atoms = -value_fee.atoms } else null else null, .realized_pnl = pnl, .liquidity = if (try boolField(item, "isMaker")) .maker else .taker } });
+            const execution_time = try optionalMillis(item, "execTime");
+            try self.emit(.account, rules.identity, null, identity(key), execution_time, times, evidence, .{ .fill = .{ .identity = identity(key), .order = link.order, .client_order_id = link.client, .venue_order = try canonical.VenueOrderRef.init((self.binding orelse return error.StaleSession).venue, try string(item, "orderId")), .venue_trade = try canonical.VenueTradeRef.init((self.binding orelse return error.StaleSession).venue, execution_id), .instrument = rules.identity, .exchange_account = (self.binding orelse return error.StaleSession).account, .side = try side(try string(item, "side")), .quantity = try quantity(rules, try string(item, "execQty")), .price = try price(rules, try string(item, "execPrice")), .fee = if (fee) |value_fee| if (value_fee.atoms > 0) value_fee else null else null, .rebate = if (fee) |value_fee| if (value_fee.atoms < 0) .{ .asset = value_fee.asset, .atoms = -value_fee.atoms } else null else null, .realized_pnl = pnl, .liquidity = if (try boolField(item, "isMaker")) .maker else .taker, .venue_fill_time_utc_ns = execution_time } });
         }
     }
     fn decodeWallet(self: *Reconciler, observed: bool, times: Times, evidence: RawEvidenceRef, value: std.json.Value) !void {
@@ -442,10 +444,15 @@ fn reconciliationStream(session: canonical.AdapterSessionIdentity) canonical.Ven
     return privateStream(session) ^ 0x200;
 }
 fn positionModeNet(item: std.json.ObjectMap) !?bool {
+    const value = try positionSide(item) orelse return null;
+    return value == .net;
+}
+fn positionSide(item: std.json.ObjectMap) !?canonical.PositionSide {
     const value = (try optionalString(item, "positionIdx")) orelse return null;
     return switch (try std.fmt.parseInt(u8, value, 10)) {
-        0 => true,
-        1, 2 => false,
+        0 => .net,
+        1 => .long,
+        2 => .short,
         else => error.UnsupportedValue,
     };
 }
@@ -517,7 +524,7 @@ fn testRules() Rules {
 }
 fn startTest(reconciler: *Reconciler) !void {
     reconciler.beginSession(.{ .venue = 42, .account = 2, .session = 7 });
-    try reconciler.registerOrder(9, try canonical.ClientOrderId.init("RWN-9"));
+    try reconciler.registerOrder(9, try canonical.ClientOrderId.init("RWN-9"), false);
     try reconciler.beginReconciliation(0);
 }
 const test_times = Times{ .receive_time_utc_ns = 1, .monotonic_time_ns = 2, .wall_time_utc_ns = 3 };

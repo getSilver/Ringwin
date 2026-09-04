@@ -110,6 +110,22 @@ pub fn read(encoded: []const u8, comptime T: type, expected_state_schema: u32, e
     } };
 }
 
+/// Encodes a bounded value without the snapshot header. Used by the stable
+/// event journal, which already supplies framing and integrity checks.
+pub fn encodeBare(destination: []u8, value: anytype) ![]const u8 {
+    var writer: Writer = .{ .bytes = destination };
+    try encodeValue(&writer, value);
+    return destination[0..writer.position];
+}
+
+/// Decodes one complete bounded value from a journal payload.
+pub fn decodeBare(encoded: []const u8, comptime T: type) !T {
+    var reader: Reader = .{ .bytes = encoded };
+    const value = try decodeValue(&reader, T);
+    if (reader.position != encoded.len) return error.InvalidSnapshotLength;
+    return value;
+}
+
 const Writer = struct {
     bytes: []u8,
     position: usize = 0,

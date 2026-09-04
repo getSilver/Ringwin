@@ -71,6 +71,7 @@ pub const ExecutionReport = struct {
     average_fill_price: ?Decimal,
     request_id: FixedText(32),
     last_trade_id: ?VenueTradeId,
+    venue_create_time_utc_ns: ?u64 = null,
     venue_update_time_utc_ns: u64,
     owned_by_ringwin: bool,
 };
@@ -688,6 +689,7 @@ pub const Reconciler = struct {
                 try parseId(VenueTradeId, trade_id)
             else
                 null,
+            .venue_create_time_utc_ns = try optionalMillisField(row, "cTime"),
             .venue_update_time_utc_ns = update_time,
             .owned_by_ringwin = isOwnedClientId(client_order_id.slice()),
         };
@@ -1382,6 +1384,10 @@ fn hashReport(report: *const ExecutionReport) [32]u8 {
     hashOptionalDecimal(&hasher, report.average_fill_price);
     hasher.update(report.request_id.slice());
     if (report.last_trade_id) |trade_id| hashI64(&hasher, @intFromEnum(trade_id));
+    if (report.venue_create_time_utc_ns) |create_time| {
+        hasher.update(&.{1});
+        hashU64(&hasher, create_time);
+    } else hasher.update(&.{0});
     hasher.update(&.{@intFromBool(report.owned_by_ringwin)});
     return hasher.finalResult();
 }

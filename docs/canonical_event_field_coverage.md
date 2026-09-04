@@ -1,11 +1,34 @@
 # CanonicalEvent 字段覆盖率分析
 
+## 2026-09-01 收口状态
+
+当前跨 Adapter、`TradingShard.apply`、稳定日志和语义回放只使用
+`canonical_event.EventRecord` / `canonical_event.CanonicalEvent`。核心控制事实先编码为
+`CanonicalEvent.core_input`；它承载的是无独立 schema/timing envelope 的 `CoreTransition`
+payload，不是第二套事件协议，也不会形成第二个公开状态迁移入口。Venue decoder 的私有事件
+只在各自实现内存在，跨 seam 前必须翻译成共享事件。
+
+共享 `ExecutionReport` 已覆盖拒绝原因、Portfolio/Venue 双 reduce-only、position side、
+position/margin mode、杠杆、原始/累计/剩余数量、限价/均价以及 Venue 创建/更新时间；共享
+`Fill` 已覆盖 fee、rebate、realized PnL、liquidity 与 Venue fill time。OKX、Binance、Bybit
+在源字段可用时直接填充这些字段，不可获得的事实保持 `null`，不猜测 Venue 数据。
+
+稳定性约束如下：
+
+- `TradingShard.apply(EventRecord)` 是唯一公开内存状态迁移接口；
+- `applyStable` 将同一个 `EventRecord` 原子写入 journal，回放仍调用同一个 `apply`；
+- `canonical_event_codec` 显式冻结 union dispatch，只编码 core bytes 与 bootstrap arrays 的有效区间；
+- envelope event type、schema version、identity、raw evidence 与规范 payload 一起参与校验；
+- 相同 identity 但 payload 不同会返回 `ConflictingCanonicalIdentity`，不会被当作重复事件吞掉。
+
+以下内容保留为 2026-08-27 的差距基线，用于说明本次收口前的问题，不代表当前实现。
+
 > 对标 Nautilus Trader 规范事件模型 + Binance / Bybit / OKX 三大交易所 API 字段
 > 调研日期：2026-08-27 | 数据来源：RingWin 源码 + Nautilus 官方文档 + 交易所 API 文档
 
 ---
 
-## 一、RingWin 现有 CanonicalEvent 结构总览
+## 一、历史基线：RingWin 当时的 CanonicalEvent 结构
 
 ### 1.1 核心层 CanonicalEvent（`trading_shard.zig:492`）
 

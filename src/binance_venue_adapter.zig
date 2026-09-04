@@ -274,7 +274,7 @@ pub const BinanceVenueAdapter = struct {
     }
     fn dispatchOne(self: *BinanceVenueAdapter, output: *canonical.AdapterOutputBatch, command: canonical.OrderCommand) void {
         if (command.operation == .place) if (self.private_reconciler) |reconciler|
-            reconciler.registerOrder(command.identity, command.client_order_id) catch {
+            reconciler.registerOrder(command.identity, command.client_order_id, command.portfolio_reduce_only) catch {
                 self.append(output, command, .not_sent, .adapter_backpressure, null);
                 return;
             };
@@ -711,7 +711,7 @@ test "Binance private bootstrap drains through the shared VenueAdapter seam" {
     const adapter = implementation.adapter();
     try startTest(adapter);
     try implementation.beginPrivateReconciliation();
-    try reconciler.registerOrder(9, try canonical.ClientOrderId.init("RWN-9"));
+    try reconciler.registerOrder(9, try canonical.ClientOrderId.init("RWN-9"), false);
     const times = raw.Times{ .receive_time_utc_ns = 1, .monotonic_time_ns = 2, .wall_time_utc_ns = 3 };
     _ = try implementation.ingestPrivate(std.testing.allocator, .rest_spot_account, .{ .final = true }, times, "{\"balances\":[]}");
     _ = try implementation.ingestPrivate(std.testing.allocator, .rest_orders, .{ .final = true }, times, "[]");

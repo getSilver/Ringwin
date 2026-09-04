@@ -5,6 +5,10 @@ const swap_instrument: trading.oms.Instrument = 2;
 const settlement_asset: trading.canonical.AssetIdentity = 1;
 const strategy_recovery = @import("strategy_host_recovery.zig");
 
+fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreTransition) !?trading.OrderCommand {
+    return trading.applyStable(shard, stable_journal, try trading.coreRecord(input));
+}
+
 /// Restart admission phase; only ready may later accept a fresh EnableTrading.
 pub const RecoveryPhase = enum(u8) { recovery_only, ready };
 
@@ -125,7 +129,7 @@ pub const RecoveryCoordinator = struct {
     ) !void {
         self.reconcile(identity, evidence) catch |err| {
             if (err == error.VenueReconciliationMismatch) {
-                _ = try trading.applyStable(&self.shard, stable_journal, .{
+                _ = try applyCoreStable(&self.shard, stable_journal, .{
                     .identity = identity,
                     .payload = .{ .safety_gate_change = .{
                         .gate_identity = identity,
@@ -347,7 +351,7 @@ pub const Cutover = struct {
     ) ![]const trading.oms.Command {
         if (self.phase != .candidate) return error.InvalidCutoverTransition;
         const barrier = shard.trace.len + 1;
-        _ = try trading.applyStable(shard, stable_journal, .{
+        _ = try applyCoreStable(shard, stable_journal, .{
             .identity = @truncate(command_identity),
             .payload = .{ .control_command = .{
                 .command_identity = command_identity,
@@ -373,7 +377,7 @@ pub const Cutover = struct {
         if (self.phase != .candidate or strategy_instance == 0 or
             strategy_instance != self.active_strategy_instance)
             return error.InvalidCutoverTransition;
-        _ = try trading.applyStable(shard, stable_journal, .{
+        _ = try applyCoreStable(shard, stable_journal, .{
             .identity = @truncate(strategy_instance),
             .payload = .{ .strategy_cutover_fence = .{ .strategy_instance = strategy_instance } },
         });
@@ -421,7 +425,7 @@ pub const Cutover = struct {
             .barrier = barrier,
             .canonical_state_digest = digest,
         };
-        _ = try trading.applyStable(shard, stable_journal, .{
+        _ = try applyCoreStable(shard, stable_journal, .{
             .identity = @truncate(activation_identity),
             .payload = .{ .version_activation = event },
         });
@@ -484,7 +488,7 @@ pub const Cutover = struct {
 test "restart recovery remains fenced until exact venue evidence closes" {
     var shard: trading.TradingShard = .{};
     var stable_journal = trading.journal.Journal.init();
-    _ = try trading.applyStable(&shard, &stable_journal, .{
+    _ = try applyCoreStable(&shard, &stable_journal, .{
         .identity = 90,
         .payload = .{ .control_command = .{
             .command_identity = 90,
@@ -732,7 +736,7 @@ test "cutover failures and forward rollback never regress economic state or gene
     try cutover.catchUpCandidate(shard, shard);
     const replay_baseline = shard;
     const activated = try cutover.activateStable(&shard, &stable_journal, 41);
-    _ = try trading.applyStable(&shard, &stable_journal, .{ .identity = 50, .payload = .{ .venue_forced_execution = .{ .execution_id = 2, .side = .sell, .quantity = 1, .price_micros = 55_000_000, .fee_micros = 3, .penalty_micros = 2 } } });
+    _ = try applyCoreStable(&shard, &stable_journal, .{ .identity = 50, .payload = .{ .venue_forced_execution = .{ .execution_id = 2, .side = .sell, .quantity = 1, .price_micros = 55_000_000, .fee_micros = 3, .penalty_micros = 2 } } });
 
     const rollback: Candidate = .{
         .release = 10,

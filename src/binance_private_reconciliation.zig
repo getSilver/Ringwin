@@ -22,7 +22,7 @@ const max_seen_facts = 128;
 const max_order_links = 32;
 const max_pending_observations = 24;
 const SeenFact = struct { key: [32]u8, content: [32]u8 };
-const OrderLink = struct { order: canonical.OrderIdentity, client_order_id: canonical.ClientOrderId, status: ?canonical.ExecutionReportStatus = null };
+const OrderLink = struct { order: canonical.OrderIdentity, client_order_id: canonical.ClientOrderId, portfolio_reduce_only: bool, status: ?canonical.ExecutionReportStatus = null };
 const PendingObservation = union(enum) {
     balance: struct { value: canonical.AccountBalance, times: raw.Times, evidence: raw.RawEvidenceRef, source: Source, source_sequence: u64 },
     position: struct { value: canonical.AccountPosition, times: raw.Times, evidence: raw.RawEvidenceRef, source: Source, source_sequence: u64 },
@@ -91,13 +91,13 @@ pub const Reconciler = struct {
     pub fn readiness(self: *const Reconciler) Readiness {
         return .{ .stage = self.stage, .session = (self.binding orelse Binding{ .venue = 0, .account = 0, .session = 0 }).session, .raw_watermark = self.raw_watermark, .bootstrap = self.bootstrap };
     }
-    pub fn registerOrder(self: *Reconciler, order: canonical.OrderIdentity, client_order_id: canonical.ClientOrderId) !void {
+    pub fn registerOrder(self: *Reconciler, order: canonical.OrderIdentity, client_order_id: canonical.ClientOrderId, portfolio_reduce_only: bool) !void {
         for (self.links[0..self.link_count]) |link| if (std.mem.eql(u8, link.client_order_id.slice(), client_order_id.slice())) {
-            if (link.order != order) return error.ConflictingOrderLink;
+            if (link.order != order or link.portfolio_reduce_only != portfolio_reduce_only) return error.ConflictingOrderLink;
             return;
         };
         if (self.link_count == self.links.len) return error.OrderLinkCapacity;
-        self.links[self.link_count] = .{ .order = order, .client_order_id = client_order_id };
+        self.links[self.link_count] = .{ .order = order, .client_order_id = client_order_id, .portfolio_reduce_only = portfolio_reduce_only };
         self.link_count += 1;
     }
     /// This is the sole live/replay ingress point: a RawSink failure prevents
@@ -208,6 +208,7 @@ pub const Reconciler = struct {
         if (kind == .report) {
             const status = try anyStringField(object, &.{ "X", "status" });
             const mapped_status = try statusFor(status);
+            const position_side = try positionSideFor(object, linear);
             self.observeOrder(link.order, mapped_status);
             const cumulative_text = try anyStringField(object, &.{ "z", "executedQty" });
             const cumulative = try quantityFor(rules, cumulative_text);
@@ -215,7 +216,8 @@ pub const Reconciler = struct {
             if (cumulative.lots > original.lots) return error.InvalidReportQuantity;
             const key = reportFactKey(order_id, status, cumulative_text, update_ms);
             if (try self.seenBefore(key, evidence.sha256)) return;
-            const event: canonical.CanonicalEvent = .{ .execution_report = .{ .identity = digestIdentity(key), .order = link.order, .client_order_id = link.client_order_id, .venue_order = try canonical.VenueOrderRef.init(binding.venue, order_id), .instrument = rules.identity, .exchange_account = binding.account, .revision = 1, .side = try sideFor(try anyStringField(object, &.{ "S", "side" })), .order_type = try orderTypeFor(try anyStringField(object, &.{ "o", "type" })), .time_in_force = try tifFor(try anyStringField(object, &.{ "f", "timeInForce" })), .venue_reduce_only = try optionalBoolField(object, "R"), .position_mode_net = if (linear) true else null, .status = mapped_status, .original_quantity = original, .cumulative_quantity = cumulative, .remaining_quantity = .{ .instrument = rules.identity, .rules_version = rules.rules_version, .lots = original.lots - cumulative.lots }, .limit_price = try optionalPrice(rules, try anyStringField(object, &.{ "p", "price" })), .average_fill_price = if (try optionalStringAny(object, &.{ "ap", "avgPrice", "L" })) |value| try optionalPrice(rules, value) else null, .venue_update_time_utc_ns = source_time } };
+            const create_ms = try optionalU64Field(object, &.{ "O", "createTime" });
+            const event: canonical.CanonicalEvent = .{ .execution_report = .{ .identity = digestIdentity(key), .order = link.order, .client_order_id = link.client_order_id, .venue_order = try canonical.VenueOrderRef.init(binding.venue, order_id), .instrument = rules.identity, .exchange_account = binding.account, .revision = 1, .side = try sideFor(try anyStringField(object, &.{ "S", "side" })), .order_type = try orderTypeFor(try anyStringField(object, &.{ "o", "type" })), .time_in_force = try tifFor(try anyStringField(object, &.{ "f", "timeInForce" })), .venue_reduce_only = try optionalBoolField(object, "R"), .portfolio_reduce_only = link.portfolio_reduce_only, .position_mode_net = if (position_side) |value| value == .net else null, .position_side = position_side, .status = mapped_status, .reject_reason = if (mapped_status == .rejected) .other_venue_reject else null, .original_quantity = original, .cumulative_quantity = cumulative, .remaining_quantity = .{ .instrument = rules.identity, .rules_version = rules.rules_version, .lots = original.lots - cumulative.lots }, .limit_price = try optionalPrice(rules, try anyStringField(object, &.{ "p", "price" })), .average_fill_price = if (try optionalStringAny(object, &.{ "ap", "avgPrice", "L" })) |value| try optionalPrice(rules, value) else null, .venue_create_time_utc_ns = if (create_ms) |millis| try std.math.mul(u64, millis, 1_000_000) else null, .venue_update_time_utc_ns = source_time } };
             try self.emit(.account, rules.identity, null, digestIdentity(key), source_time, times, evidence, event);
         } else {
             const trade_id = try anyStringField(object, &.{ "t", "id" });
@@ -223,7 +225,7 @@ pub const Reconciler = struct {
             const key = try factKey("fill", &.{trade_id});
             if (try self.seenBefore(key, evidence.sha256)) return;
             const fee = try amountFor(try assetIdentity(try anyStringField(object, &.{ "N", "commissionAsset" })), try canonical.Decimal.parse(try anyStringField(object, &.{ "n", "commission" })));
-            const event: canonical.CanonicalEvent = .{ .fill = .{ .identity = digestIdentity(key), .order = link.order, .client_order_id = link.client_order_id, .venue_order = try canonical.VenueOrderRef.init(binding.venue, order_id), .venue_trade = try canonical.VenueTradeRef.init(binding.venue, trade_id), .instrument = rules.identity, .exchange_account = binding.account, .side = try sideFor(try anyStringField(object, &.{ "S", "side" })), .quantity = try quantityFor(rules, try anyStringField(object, &.{ "l", "qty" })), .price = try priceFor(rules, try anyStringField(object, &.{ "L", "price" })), .fee = if (fee.atoms > 0) fee else null, .rebate = if (fee.atoms < 0) .{ .asset = fee.asset, .atoms = -fee.atoms } else null, .realized_pnl = if (try optionalStringAny(object, &.{ "rp", "realizedPnl" })) |value| try amountFor(usdt, try canonical.Decimal.parse(value)) else null, .liquidity = if (try makerFor(object)) .maker else .taker } };
+            const event: canonical.CanonicalEvent = .{ .fill = .{ .identity = digestIdentity(key), .order = link.order, .client_order_id = link.client_order_id, .venue_order = try canonical.VenueOrderRef.init(binding.venue, order_id), .venue_trade = try canonical.VenueTradeRef.init(binding.venue, trade_id), .instrument = rules.identity, .exchange_account = binding.account, .side = try sideFor(try anyStringField(object, &.{ "S", "side" })), .quantity = try quantityFor(rules, try anyStringField(object, &.{ "l", "qty" })), .price = try priceFor(rules, try anyStringField(object, &.{ "L", "price" })), .fee = if (fee.atoms > 0) fee else null, .rebate = if (fee.atoms < 0) .{ .asset = fee.asset, .atoms = -fee.atoms } else null, .realized_pnl = if (try optionalStringAny(object, &.{ "rp", "realizedPnl" })) |value| try amountFor(usdt, try canonical.Decimal.parse(value)) else null, .liquidity = if (try makerFor(object)) .maker else .taker, .venue_fill_time_utc_ns = source_time } };
             try self.emit(.account, rules.identity, null, digestIdentity(key), source_time, times, evidence, event);
         }
     }
@@ -566,6 +568,14 @@ fn statusFor(value: []const u8) !canonical.ExecutionReportStatus {
     if (std.mem.eql(u8, value, "REJECTED")) return .rejected;
     return error.UnsupportedValue;
 }
+fn positionSideFor(object: std.json.ObjectMap, linear: bool) !?canonical.PositionSide {
+    if (!linear) return null;
+    const value = (try optionalStringAny(object, &.{ "ps", "positionSide" })) orelse return .net;
+    if (std.mem.eql(u8, value, "BOTH")) return .net;
+    if (std.mem.eql(u8, value, "LONG")) return .long;
+    if (std.mem.eql(u8, value, "SHORT")) return .short;
+    return error.UnsupportedValue;
+}
 fn makerFor(object: std.json.ObjectMap) !bool {
     if (try optionalBoolField(object, "m")) |value| return value;
     if (try optionalBoolField(object, "isMaker")) |value| return value;
@@ -589,7 +599,7 @@ fn testRules() Rules {
 }
 fn start(reconciler: *Reconciler) !void {
     reconciler.beginSession(.{ .venue = 21, .account = 2, .session = 6 });
-    try reconciler.registerOrder(9, try canonical.ClientOrderId.init("RWN-9"));
+    try reconciler.registerOrder(9, try canonical.ClientOrderId.init("RWN-9"), false);
     try reconciler.beginReconciliation(0);
 }
 const fixture_times = raw.Times{ .receive_time_utc_ns = 1, .monotonic_time_ns = 2, .wall_time_utc_ns = 3 };

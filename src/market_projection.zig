@@ -48,7 +48,16 @@ pub const Projection = struct {
             return self.gap(error.ConflictingBookDelta);
         }
         if (delta.previous_sequence != previous.sequence or delta.sequence != previous.sequence + 1) return self.gap(error.BookSequenceGap);
-        self.last_book = .{ .instrument = delta.instrument, .sequence = delta.sequence, .best_bid = delta.best_bid, .best_ask = delta.best_ask };
+        self.last_book = .{
+            .instrument = delta.instrument,
+            .sequence = delta.sequence,
+            .best_bid = delta.best_bid,
+            .best_ask = delta.best_ask,
+            .best_bid_quantity = delta.best_bid_quantity,
+            .best_ask_quantity = delta.best_ask_quantity,
+            .next_ask = delta.next_ask,
+            .next_ask_quantity = delta.next_ask_quantity,
+        };
     }
 
     fn gap(self: *Projection, err: anyerror) anyerror!void {

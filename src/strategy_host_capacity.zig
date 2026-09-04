@@ -12,6 +12,18 @@ const bucket_count = 2_000;
 const tail_bucket_ns = 1_000_000;
 const tail_count = 1_000;
 
+fn pausePolling() void {
+    if (builtin.os.tag == .windows) {
+        // A bounded kernel wait takes the polling process off-CPU. This is
+        // deliberate backoff: Sleep(0)/Thread.yield may return immediately
+        // while the Python worker is ready on another processor.
+        var relative_100ns: std.os.windows.LARGE_INTEGER = -10_000;
+        _ = std.os.windows.ntdll.NtDelayExecution(.FALSE, &relative_100ns);
+    } else {
+        std.Thread.yield() catch {};
+    }
+}
+
 const Scenario = enum { normal, gc_exception, slow, crash, recovery };
 
 const Histogram = struct {
@@ -154,6 +166,10 @@ fn runScenario(
                 if (host.*.?.input_mapping.failureStatus()) |status| {
                     if (status == .stale) {
                         result.stale += 1;
+                        std.debug.print(
+                            "stale_input scenario={s} host={d} batch={d} observed_age_us={d}\n",
+                            .{ @tagName(scenario), index, batch_index, @divTrunc(monotonicNow(init.io) - published_at[index], std.time.ns_per_us) },
+                        );
                         return error.HostInputStale;
                     }
                     result.rejected += 1;
@@ -180,10 +196,7 @@ fn runScenario(
                 remaining -= 1;
             }
             if (remaining != 0 and monotonicNow(init.io) > deadline) return error.HostOutputTimeout;
-            // A nominal 1 ms sleep is a ~15.6 ms scheduling quantum on the
-            // supported Windows baseline and can push a ready Host past the
-            // frozen 50 ms input-stale boundary. Yield without adding a timer.
-            if (remaining != 0) std.Thread.yield() catch {};
+            if (remaining != 0) pausePolling();
         }
     }
     result.elapsed_ns = @intCast(monotonicNow(init.io) - started);

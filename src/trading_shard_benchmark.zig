@@ -5,7 +5,7 @@ const engine = @import("trading_shard.zig");
 const fixture = @import("trading_shard_fixture.zig");
 const journal = engine.journal;
 const Sha256 = std.crypto.hash.sha2.Sha256;
-const InputEvent = engine.ShardEvent;
+const InputEvent = engine.canonical.EventRecord;
 const TradingShard = engine.TradingShard;
 const LiveRun = fixture.LiveRun;
 const applyLive = engine.applyStable;
@@ -13,7 +13,7 @@ const deltaAt = fixture.deltaAt;
 const atGroup = fixture.atGroup;
 const runHappyPath = fixture.runHappyPath;
 const assertExpectedDigest = engine.assertExpectedDigest;
-const expected_happy_digest = engine.expected_happy_digest;
+const expected_happy_digest = fixture.expected_happy_digest;
 const happy_order_quantity: i64 = 100;
 const benchmark_samples: usize = 1_000_000;
 const benchmark_warmup: usize = 50_000;
@@ -240,7 +240,7 @@ fn runRecoveryBenchmark(io: std.Io, samples: usize) !BenchmarkResult {
         const snapshot_sequence = source_sequence + 100;
         const inputs = [_]InputEvent{
             deltaAt(15 + completed, source_sequence + 1, source_sequence + 2, 49_860_000_000),
-            engine.snapshotAt(16 + completed, snapshot_sequence),
+            fixture.snapshotAt(16 + completed, snapshot_sequence),
             deltaAt(
                 17 + completed,
                 snapshot_sequence,
