@@ -14,17 +14,69 @@ pub const Gateway = struct {
     count: u8 = 0,
     instrument_gates: [max_routes]InstrumentOpeningGate = undefined,
     instrument_gate_count: u8 = 0,
+    instrument_gate_capacity_exhausted: bool = false,
     pub fn add(self: *Gateway, route: Route) !void {
+        for (self.routes[0..self.count]) |existing|
+            if (existing.account == route.account) return error.DuplicateAccountRoute;
         if (self.count == self.routes.len) return error.RouteCapacity;
         self.routes[self.count] = route;
         self.count += 1;
     }
     pub fn send(self: *Gateway, request: canonical.OrderCommand) !venue.SendResult {
         for (self.routes[0..self.count]) |*route| if (route.account == request.exchange_account) {
-            if (route.safety_gate == .latched or self.instrumentGapped(request.instrument) or !route.capability.supports_place or route.capability.version != request.capability_version or route.capability.rules_version != request.rules_version or route.capability.config_version != request.config_version or route.capability.session != request.adapter_session) return error.Rejected;
-            return route.adapter.trySend(.{ .order_command = request });
+            const increasing = request.operation != .cancel and
+                !(request.portfolio_reduce_only or request.venue_reduce_only);
+            if (increasing and (route.safety_gate == .latched or self.instrumentGapped(request.instrument)))
+                return error.Rejected;
+            if (request.operation != .cancel and !route.capability.supports_place)
+                return error.Rejected;
+            if (route.capability.version != request.capability_version or
+                route.capability.rules_version != request.rules_version or
+                route.capability.config_version != request.config_version or
+                route.capability.session != request.adapter_session)
+                return error.Rejected;
+            return sendRequestForRoute(route, .{ .order_command = request });
         };
         return error.UnknownAccount;
+    }
+
+    /// Sends a non-order request through the same account-owned route.  Only
+    /// the canonical request crosses this seam; replay callers never own a
+    /// Gateway and therefore cannot send anything.
+    pub fn sendRequest(self: *Gateway, request: canonical.AdapterRequest) !venue.SendResult {
+        switch (request) {
+            .order_command => |order_command| return self.send(order_command),
+            else => {},
+        }
+        const account = switch (request) {
+            .order_batch => |batch| if (batch.len == 0) return error.EmptyOrderBatch else batch.commands[0].exchange_account,
+            .order_reconciliation => |reconciliation| reconciliation.exchange_account,
+            .account_reconciliation => |reconciliation| reconciliation.exchange_account,
+            .order_command => unreachable,
+        };
+        for (self.routes[0..self.count]) |*route| if (route.account == account) {
+            switch (request) {
+                .order_batch => |batch| for (batch.slice()) |order| {
+                    if (order.exchange_account != account) return error.AmbiguousRoute;
+                    const increasing = order.operation != .cancel and
+                        !(order.portfolio_reduce_only or order.venue_reduce_only);
+                    if (increasing and (route.safety_gate == .latched or self.instrumentGapped(order.instrument)))
+                        return error.Rejected;
+                    if (order.operation != .cancel and !route.capability.supports_place)
+                        return error.Rejected;
+                },
+                else => {},
+            }
+            return sendRequestForRoute(route, request);
+        };
+        return error.UnknownAccount;
+    }
+
+    fn sendRequestForRoute(route: *Route, request: canonical.AdapterRequest) !venue.SendResult {
+        return route.adapter.trySend(request) catch |err| {
+            route.safety_gate = .latched;
+            return err;
+        };
     }
     pub fn latchAccount(self: *Gateway, account: canonical.ExchangeAccountIdentity) void {
         for (self.routes[0..self.count]) |*route| {
@@ -52,9 +104,12 @@ pub const Gateway = struct {
     pub fn observeMarketOutput(self: *Gateway, batch: canonical.AdapterOutputBatch) void {
         for (batch.slice()) |record| switch (record.event) {
             .market_data_health_changed => |health| switch (health.health) {
-                .healthy => self.setInstrumentGate(health.instrument, .open),
+                // A health notification is an observation, not continuity
+                // proof. Only a validated L2 snapshot may reopen a gate.
+                .healthy => {},
                 .awaiting_snapshot, .gap => self.setInstrumentGap(health.instrument),
             },
+            .l2_book_snapshot => |snapshot| self.setInstrumentGate(snapshot.instrument, .open),
             else => {},
         };
     }
@@ -66,11 +121,11 @@ pub const Gateway = struct {
         if (self.instrument_gate_count < self.instrument_gates.len) {
             self.instrument_gates[self.instrument_gate_count] = .{ .instrument = instrument, .state = state };
             self.instrument_gate_count += 1;
-        }
+        } else self.instrument_gate_capacity_exhausted = true;
     }
     fn instrumentGapped(self: *const Gateway, instrument: canonical.InstrumentIdentity) bool {
         for (self.instrument_gates[0..self.instrument_gate_count]) |gate| if (gate.instrument == instrument and gate.state == .blocked) return true;
-        return false;
+        return self.instrument_gate_capacity_exhausted;
     }
     pub fn drainFair(self: *Gateway, output: *[max_routes]canonical.AdapterOutputBatch) !u8 {
         var count: u8 = 0;
@@ -131,6 +186,9 @@ test "gateway fixes route and rechecks every command dependency" {
     request.adapter_session = 1;
     gateway.latchAccount(1);
     try std.testing.expectError(error.Rejected, gateway.send(request));
+    request.operation = .cancel;
+    try std.testing.expectEqual(.accepted, try gateway.send(request));
+    request.operation = .place;
     request.exchange_account = 2;
     try std.testing.expectEqual(.accepted, try gateway.send(request));
     gateway.setInstrumentGap(10);
@@ -139,7 +197,9 @@ test "gateway fixes route and rechecks every command dependency" {
     try std.testing.expectEqual(.accepted, try gateway.send(request));
     gateway.routes[1].capability.supports_place = false;
     try std.testing.expectError(error.Rejected, gateway.send(request));
-    try std.testing.expectEqual(@as(u8, 2), second.sent);
+    request.operation = .cancel;
+    try std.testing.expectEqual(.accepted, try gateway.send(request));
+    try std.testing.expectEqual(@as(u8, 3), second.sent);
 }
 test "gateway drains each fixed route once" {
     var first = Fixture{};
@@ -198,6 +258,15 @@ test "Gateway scopes uncertainty and market health to the affected route" {
     try std.testing.expectError(error.Rejected, gateway.send(try command(11, 101)));
 
     gap.events[0].event.market_data_health_changed.health = .healthy;
+    gateway.observeMarketOutput(gap);
+    try std.testing.expectError(error.Rejected, gateway.send(try command(22, 202)));
+    gap.events[0].envelope.event_type = @intFromEnum(canonical.EventType.l2_book_snapshot);
+    gap.events[0].event = .{ .l2_book_snapshot = .{
+        .instrument = 202,
+        .sequence = 2,
+        .best_bid = .{ .instrument = 202, .rules_version = 1, .ticks = 1 },
+        .best_ask = .{ .instrument = 202, .rules_version = 1, .ticks = 2 },
+    } };
     gateway.observeMarketOutput(gap);
     try std.testing.expectEqual(.accepted, try gateway.send(try command(22, 202)));
 }

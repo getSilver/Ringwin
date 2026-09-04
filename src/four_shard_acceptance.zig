@@ -22,7 +22,7 @@ const place_fee_micros: i64 = 400_000;
 const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
 pub const acceptance_schema_version: u16 = 2;
-const expected_shared_summary_v2 = "b1c7afd8a5806ee00e4bfce7b3f552c5ed5653b21ae28202de2f16abfa1353ed";
+const expected_shared_summary_v2 = "e124735e7c33b86358e0a9fe23d9d1a51a86436627821b7cfc48ffbfc7f23476";
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreTransition) !?trading.OrderCommand {
     return trading.applyStable(shard, stable_journal, try trading.coreRecord(input));

@@ -55,6 +55,7 @@ pub const Fill = struct {
     rebate: canonical.AssetAmount = .{ .asset = 0, .atoms = 0 },
     portfolio_margin_ppm: i64 = 0,
     exchange_margin_ppm: i64 = 0,
+    product: ?canonical.Product = null,
 };
 
 pub const FundingSettlement = struct {
@@ -201,14 +202,14 @@ pub const Projection = struct {
         var exchange = self.exchange;
         const portfolio_movement = try applyFillToLayer(&portfolio, fill);
         const exchange_movement = try applyFillToLayer(&exchange, fill);
-        if (fill.quantity.instrument == swap_instrument) {
+        if (fillProduct(fill) == .isolated_linear_usdt) {
             portfolio.margin_micros = try rateMicros(portfolio.swap.open_cost_micros, fill.portfolio_margin_ppm);
             exchange.margin_micros = try rateMicros(exchange.swap.open_cost_micros, fill.exchange_margin_ppm);
         }
         if (portfolio_movement != exchange_movement) return error.EconomicLayerMismatch;
         const position_delta: i64 = if (fill.side == .buy) std.math.cast(i64, fill.quantity.lots) orelse return error.Overflow else -(std.math.cast(i64, fill.quantity.lots) orelse return error.Overflow);
-        try self.appendPositionLedger(fill.identity, kind, .portfolio, fill.quantity.instrument, position_delta);
-        try self.appendPositionLedger(fill.identity, kind, .exchange, fill.quantity.instrument, position_delta);
+        try self.appendPositionLedger(fill.identity, kind, .portfolio, fillProduct(fill), position_delta);
+        try self.appendPositionLedger(fill.identity, kind, .exchange, fillProduct(fill), position_delta);
         try self.appendLedger(fill.identity, kind, .portfolio, .trade, portfolio_movement);
         try self.appendLedger(fill.identity, kind, .exchange, .trade, exchange_movement);
         if (fill.fee.atoms > 0) {
@@ -292,8 +293,8 @@ pub const Projection = struct {
             portfolio.margin_micros = try rateMicros(portfolio.swap.open_cost_micros, fill.portfolio_margin_ppm);
             exchange.margin_micros = try rateMicros(exchange.swap.open_cost_micros, fill.exchange_margin_ppm);
             const position_delta: i64 = if (forced.side == .buy) quantity else -quantity;
-            try self.appendPositionLedger(forced.identity, .forced_execution, .portfolio, forced.quantity.instrument, position_delta);
-            try self.appendPositionLedger(forced.identity, .forced_execution, .exchange, forced.quantity.instrument, position_delta);
+            try self.appendPositionLedger(forced.identity, .forced_execution, .portfolio, .isolated_linear_usdt, position_delta);
+            try self.appendPositionLedger(forced.identity, .forced_execution, .exchange, .isolated_linear_usdt, position_delta);
             try self.appendLedger(forced.identity, .forced_execution, .portfolio, .trade, portfolio_movement);
             try self.appendLedger(forced.identity, .forced_execution, .exchange, .trade, exchange_movement);
             if (fee > 0) {
@@ -322,7 +323,7 @@ pub const Projection = struct {
         exchange.usdt_balance_micros = try std.math.sub(i64, exchange.usdt_balance_micros, penalty);
         const cash_change = try std.math.sub(i64, exchange.usdt_balance_micros, self.exchange.usdt_balance_micros);
         const position_delta: i64 = if (forced.side == .buy) quantity else -quantity;
-        try self.appendPositionLedger(forced.identity, .forced_execution, .exchange, forced.quantity.instrument, position_delta);
+        try self.appendPositionLedger(forced.identity, .forced_execution, .exchange, .isolated_linear_usdt, position_delta);
         try self.appendLedger(forced.identity, .forced_execution, .exchange, .trade, movement);
         if (fee > 0) try self.appendLedger(forced.identity, .forced_execution, .exchange, .fee_expense, -fee);
         if (penalty > 0) try self.appendLedger(forced.identity, .forced_execution, .exchange, .penalty_expense, -penalty);
@@ -388,11 +389,11 @@ pub const Projection = struct {
         self.ledger_count += 1;
     }
 
-    fn appendPositionLedger(self: *Projection, identity: u64, kind: FactKind, layer: LedgerLayer, instrument: Instrument, quantity_delta: i64) !void {
+    fn appendPositionLedger(self: *Projection, identity: u64, kind: FactKind, layer: LedgerLayer, product: canonical.Product, quantity_delta: i64) !void {
         if (quantity_delta == 0) return;
         if (self.ledger_count == max_ledger_transactions) return error.LedgerCapacityExceeded;
-        const unit: LedgerUnit = if (instrument == spot_instrument) .spot_quantity else .swap_quantity;
-        const account: LedgerAccount = if (instrument == spot_instrument) .spot_asset else .swap_position;
+        const unit: LedgerUnit = if (product == .spot) .spot_quantity else .swap_quantity;
+        const account: LedgerAccount = if (product == .spot) .spot_asset else .swap_position;
         self.ledger[self.ledger_count] = .{
             .source_identity = identity,
             .kind = kind,
@@ -456,7 +457,7 @@ fn applyFillToLayer(layer: *Layer, fill: Fill) !i64 {
     const net_fee = try std.math.sub(i64, fee, rebate);
     layer.fee_micros = try std.math.add(i64, layer.fee_micros, fee);
     layer.rebate_micros = try std.math.add(i64, layer.rebate_micros, rebate);
-    if (fill.quantity.instrument == spot_instrument) {
+    if (fillProduct(fill) == .spot) {
         const direction: i64 = if (fill.side == .buy) 1 else -1;
         const next_asset = try std.math.add(i64, layer.spot_asset_quantity, try std.math.mul(i64, direction, quantity));
         if (next_asset < 0) return error.InsufficientSpotAsset;
@@ -466,13 +467,17 @@ fn applyFillToLayer(layer: *Layer, fill: Fill) !i64 {
         layer.usdt_balance_micros = try std.math.add(i64, layer.usdt_balance_micros, try std.math.sub(i64, trade_cash_delta, net_fee));
         layer.realized_pnl_micros = try std.math.add(i64, layer.realized_pnl_micros, realized);
         return trade_cash_delta;
-    } else if (fill.quantity.instrument == swap_instrument) {
+    } else if (fillProduct(fill) == .isolated_linear_usdt) {
         const direction: i64 = if (fill.side == .buy) 1 else -1;
         const realized = try updatePosition(&layer.swap, direction, quantity, notional);
         layer.usdt_balance_micros = try std.math.add(i64, layer.usdt_balance_micros, try std.math.sub(i64, realized, net_fee));
         layer.realized_pnl_micros = try std.math.add(i64, layer.realized_pnl_micros, realized);
         return realized;
     } else return error.UnknownInstrument;
+}
+
+fn fillProduct(fill: Fill) canonical.Product {
+    return fill.product orelse if (fill.quantity.instrument == spot_instrument) .spot else .isolated_linear_usdt;
 }
 
 fn updatePosition(position: *Position, direction: i64, quantity: i64, notional: i64) !i64 {

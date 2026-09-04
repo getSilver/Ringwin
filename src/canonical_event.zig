@@ -9,6 +9,7 @@ const std = @import("std");
 pub const schema_version: u16 = 1;
 
 pub const VenueIdentity = u64;
+pub const Product = enum(u8) { spot, isolated_linear_usdt };
 pub const AssetIdentity = u64;
 pub const ExchangeAccountIdentity = u128;
 pub const InstrumentIdentity = u128;
@@ -276,6 +277,7 @@ pub const InstrumentDefinitionObserved = struct { instrument: InstrumentIdentity
 pub const L2BookSnapshot = struct {
     instrument: InstrumentIdentity,
     sequence: VenueSourceSequence,
+    complete: bool = true,
     best_bid: InstrumentPrice,
     best_ask: InstrumentPrice,
     best_bid_quantity: ?InstrumentQuantity = null,

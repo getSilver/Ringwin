@@ -25,9 +25,23 @@ function Invoke-Zig {
     }
 }
 
+function Invoke-Captured {
+    param([string[]]$ZigArguments)
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $captured = @(& zig @ZigArguments 2>&1)
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    $captured | ForEach-Object { $_ | Out-Host }
+    if ($LASTEXITCODE -ne 0) { throw "Command failed: zig $($ZigArguments -join ' ')" }
+    return $captured
+}
+
 if (-not $EnvFile) { $EnvFile = Join-Path $PSScriptRoot '..\.env.local' }
 $ExpectedZig = '0.17.0-dev.315+5b647b792'
-$AcceptanceSchema = 1
+$AcceptanceSchema = $null
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $buildRoot = Join-Path $workspace '.scratch\build'
 $curlBuild = Join-Path $buildRoot 'libcurl-8.21.0-windows-x86_64-schannel'
@@ -47,33 +61,36 @@ Invoke-Zig fmt --check $zigSources
 if ($LASTEXITCODE -ne 0) { throw 'Zig format check failed' }
 
 Write-Output '== phase=core_tests mode=Debug'
-Invoke-Zig test (Join-Path $workspace 'src\main.zig') '-ODebug'
-if ($LASTEXITCODE -ne 0) { throw 'Core Debug tests failed' }
+$debugTests = Invoke-Captured @('test', (Join-Path $workspace 'src\main.zig'), '-ODebug')
 
 Write-Output '== phase=core_tests mode=ReleaseSafe'
-Invoke-Zig test (Join-Path $workspace 'src\main.zig') '-OReleaseSafe'
-if ($LASTEXITCODE -ne 0) { throw 'Core ReleaseSafe tests failed' }
+$releaseTests = Invoke-Captured @('test', (Join-Path $workspace 'src\main.zig'), '-OReleaseSafe')
 
 Write-Output '== phase=single_shard_wave'
 # Deterministic fixture: happy path plus market-gap / risk-rejection /
 # unknown-reconciliation / duplicate-report fault trajectories through the
 # SimulatedVenue adapter seam, with frozen digests and live/replay/recovery
 # equivalence checks.
-Invoke-Zig run (Join-Path $workspace 'src\main.zig') '-OReleaseSafe'
-if ($LASTEXITCODE -ne 0) { throw 'Single-shard deterministic acceptance failed' }
+$singleShardEvidence = Invoke-Captured @('run', (Join-Path $workspace 'src\main.zig'), '-OReleaseSafe')
 
 Write-Output '== phase=four_shard_wave'
 # Four shards + shared gateway + account coordination: success path, local
 # faults, margin break latching, and three recovery paths that must converge
 # to one shared summary digest. Historical replay never resends side effects.
-Invoke-Zig run (Join-Path $workspace 'src\main.zig') '-OReleaseSafe' '--' '--four-shard-acceptance'
-if ($LASTEXITCODE -ne 0) { throw 'Four-shard acceptance failed' }
+$fourShardEvidence = Invoke-Captured @('run', (Join-Path $workspace 'src\main.zig'), '-OReleaseSafe', '--', '--four-shard-acceptance')
 
 Write-Output '== phase=python_seam'
 # StrategyHost product acceptance: same core risk/OMS seam for Python
 # intents, crash rebuild, hang kill, stale-session fencing, checkpoint
 # catch-up recovery. Fails fast on the first broken check.
-& python (Join-Path $workspace 'python\verify_strategy_host.py')
+$previousErrorActionPreference = $ErrorActionPreference
+try {
+    $ErrorActionPreference = 'Continue'
+    $pythonEvidence = @(& python (Join-Path $workspace 'python\verify_strategy_host.py') 2>&1)
+} finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+}
+$pythonEvidence | ForEach-Object { $_ | Out-Host }
 if ($LASTEXITCODE -ne 0) { throw 'Python StrategyHost acceptance failed' }
 
 Write-Output '== phase=linux_cross_compile'
@@ -112,4 +129,35 @@ else {
     Write-Output '== phase=okx_demo_facts mode=offline (skipped; enable explicitly with -DemoLive)'
 }
 
-Write-Output "core_wave_acceptance=passed schema=$AcceptanceSchema mode=$mode demo_facts=$(if ($DemoLive) { 'explicit_okx_demo' } else { 'disabled' }) linux=compile_only production_qualification=false"
+$debugText = $debugTests -join "`n"
+$releaseText = $releaseTests -join "`n"
+$fourText = $fourShardEvidence -join "`n"
+$singleText = $singleShardEvidence -join "`n"
+$schemaMatch = [regex]::Match($fourText, 'four_shard_acceptance: schema=(\d+)')
+if (-not $schemaMatch.Success) { throw 'Four-shard machine-readable schema evidence is missing' }
+$AcceptanceSchema = [int]$schemaMatch.Groups[1].Value
+$debugMatch = [regex]::Match($debugText, 'All (\d+) tests passed')
+$releaseMatch = [regex]::Match($releaseText, 'All (\d+) tests passed')
+$barrierMatch = [regex]::Match($fourText, 'coordinator_barrier=(\d+), coordinator_digest=([0-9a-f]+)')
+$sendMatch = [regex]::Match($fourText, 'live_gateway_submissions=(\d+), replay_send_capability=(\w+)')
+if (-not $debugMatch.Success -or -not $releaseMatch.Success -or -not $barrierMatch.Success -or -not $sendMatch.Success) {
+    throw 'Acceptance child output did not contain complete machine-readable evidence'
+}
+$pythonPassed = [regex]::IsMatch(($pythonEvidence -join "`n"), 'strategy_host_product_acceptance=passed')
+if (-not $pythonPassed) { throw 'Python machine-readable acceptance evidence is missing' }
+$evidence = [ordered]@{
+    acceptance = 'passed'
+    schema = $AcceptanceSchema
+    mode = $mode
+    debug_tests = [int]$debugMatch.Groups[1].Value
+    release_safe_tests = [int]$releaseMatch.Groups[1].Value
+    coordinator_barrier = [int64]$barrierMatch.Groups[1].Value
+    coordinator_digest = $barrierMatch.Groups[2].Value
+    live_gateway_submissions = [int]$sendMatch.Groups[1].Value
+    replay_send_capability = $sendMatch.Groups[2].Value
+    single_shard_output = @($singleText | Where-Object { $_ -match '(happy_path:|market-gap-v1:|risk-rejection-v1:|unknown-reconciliation-v1:|duplicate-report-v1:)' })
+    python = 'passed'
+    linux = 'compile_only'
+    production_qualification = $false
+}
+Write-Output ("core_wave_evidence=" + ($evidence | ConvertTo-Json -Compress))

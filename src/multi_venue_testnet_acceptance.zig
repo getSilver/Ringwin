@@ -6,6 +6,7 @@ const bybit = @import("bybit_testnet_acceptance.zig");
 
 pub const EvidenceScope = enum { testnet_run };
 pub const Venue = enum { okx, binance, bybit };
+const RunSeal = struct { value: u64 };
 pub const ContractMatrix = struct {
     venue_adapter: bool,
     market_feed_adapter: bool,
@@ -34,6 +35,7 @@ pub const VenueRun = struct {
     failed_venue_isolated: bool,
     live_digest: [32]u8,
     replay_digest: [32]u8,
+    seal: RunSeal,
 };
 pub const Evidence = struct { scope: EvidenceScope = .testnet_run };
 
@@ -41,6 +43,7 @@ pub fn grant(okx: VenueRun, binance_run: VenueRun, bybit_run: VenueRun) !Evidenc
     const runs = [_]VenueRun{ okx, binance_run, bybit_run };
     if (runs[0].venue != .okx or runs[1].venue != .binance or runs[2].venue != .bybit) return error.InvalidVenueMatrix;
     for (runs) |run| {
+        if (run.seal.value != @intFromEnum(run.venue) + 1) return error.InvalidVenueEvidence;
         if (!run.matrix.isComplete()) return error.IncompleteContractMatrix;
         if (!run.before.isClean()) return error.DirtyStartingAccount;
         if (!run.after.isClean()) return error.DirtyEndingAccount;
@@ -51,12 +54,14 @@ pub fn grant(okx: VenueRun, binance_run: VenueRun, bybit_run: VenueRun) !Evidenc
 }
 
 fn completeRun(venue: Venue) VenueRun {
-    return .{ .venue = venue, .matrix = .{ .venue_adapter = true, .market_feed_adapter = true, .field_disposition = true, .capability_profile = true }, .before = .{}, .after = .{}, .failed_venue_isolated = true, .live_digest = @splat(@intFromEnum(venue)), .replay_digest = @splat(@intFromEnum(venue)) };
+    return .{ .venue = venue, .matrix = .{ .venue_adapter = true, .market_feed_adapter = true, .field_disposition = true, .capability_profile = true }, .before = .{}, .after = .{}, .failed_venue_isolated = true, .live_digest = @splat(@intFromEnum(venue)), .replay_digest = @splat(@intFromEnum(venue)), .seal = .{ .value = @intFromEnum(venue) + 1 } };
 }
 
 test "three Venue acceptance requires the common matrix, cleanup, isolation, and replay equality" {
-    _ = try binance.grant(.{ .explicit_enable = true, .endpoint_is_testnet = true, .credential_can_read = true, .credential_can_trade = true, .credential_can_withdraw = false }, .{}, .{});
-    _ = try bybit.grant(.{ .explicit_enable = true, .endpoint_is_testnet = true, .credential_can_read = true, .credential_can_trade = true, .credential_can_withdraw = false }, .{}, .{});
+    const binance_official = try binance.officialConfirmed(binance.contractTested(), @splat(7));
+    _ = try binance.grant(try binance.recordTestnetRun(binance_official, .{ .explicit_enable = true, .endpoint_is_testnet = true, .credential_can_read = true, .credential_can_trade = true, .credential_can_withdraw = false }, 1, .{}, .{}, 1, 1, 1, @splat(3), @splat(3), true));
+    const bybit_official = try bybit.officialConfirmed(bybit.contractTested(), @splat(7));
+    _ = try bybit.grant(try bybit.recordTestnetRun(bybit_official, .{ .explicit_enable = true, .endpoint_is_testnet = true, .credential_can_read = true, .credential_can_trade = true, .credential_can_withdraw = false }, 1, .{}, .{}, 1, 1, 1, @splat(3), @splat(3), true));
     const evidence = try grant(completeRun(.okx), completeRun(.binance), completeRun(.bybit));
     try std.testing.expectEqual(EvidenceScope.testnet_run, evidence.scope);
     var broken = completeRun(.bybit);

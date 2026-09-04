@@ -4,10 +4,12 @@ const canonical = @import("canonical_event.zig");
 const std = @import("std");
 
 pub const Projection = struct {
+    pub const Failure = enum(u8) { missing_snapshot, sequence_gap, conflicting_delta, stale_snapshot, incomplete_snapshot, scope_mismatch };
     definition: ?canonical.InstrumentDefinitionObserved = null,
     active_rules_version: ?u64 = null,
     last_book: ?canonical.L2BookSnapshot = null,
     health: canonical.MarketDataHealth = .awaiting_snapshot,
+    failure: ?Failure = null,
     mark: ?canonical.InstrumentPrice = null,
     index: ?canonical.InstrumentPrice = null,
 
@@ -34,20 +36,37 @@ pub const Projection = struct {
     }
 
     fn applySnapshot(self: *Projection, snapshot: canonical.L2BookSnapshot) !void {
+        if (!snapshot.complete) {
+            self.health = .gap;
+            self.failure = .incomplete_snapshot;
+            return error.IncompleteBookSnapshot;
+        }
+        if ((self.definition != null and self.definition.?.instrument != snapshot.instrument) or
+            snapshot.best_bid.instrument != snapshot.instrument or snapshot.best_ask.instrument != snapshot.instrument)
+            return self.gap(.scope_mismatch, error.MarketInstrumentMismatch);
         if (self.active_rules_version == null or self.active_rules_version.? != snapshot.best_bid.rules_version or snapshot.best_bid.rules_version != snapshot.best_ask.rules_version)
             return error.InstrumentRulesInactive;
+        if (self.last_book) |previous| if (self.health != .gap and snapshot.sequence <= previous.sequence) {
+            self.health = .gap;
+            self.failure = .stale_snapshot;
+            return error.StaleBookSnapshot;
+        };
         self.last_book = snapshot;
         self.health = .healthy;
+        self.failure = null;
     }
 
     fn applyDelta(self: *Projection, delta: canonical.L2BookDelta) !void {
-        const previous = self.last_book orelse return self.gap(error.MissingBookSnapshot);
+        const previous = self.last_book orelse return self.gap(.missing_snapshot, error.MissingBookSnapshot);
+        if (delta.instrument != previous.instrument or delta.best_bid.instrument != delta.instrument or
+            delta.best_ask.instrument != delta.instrument)
+            return self.gap(.scope_mismatch, error.MarketInstrumentMismatch);
         if (self.health != .healthy) return error.MarketGap;
         if (delta.sequence == previous.sequence) {
             if (delta.previous_sequence == previous.sequence - 1 and std.meta.eql(delta.best_bid, previous.best_bid) and std.meta.eql(delta.best_ask, previous.best_ask)) return;
-            return self.gap(error.ConflictingBookDelta);
+            return self.gap(.conflicting_delta, error.ConflictingBookDelta);
         }
-        if (delta.previous_sequence != previous.sequence or delta.sequence != previous.sequence + 1) return self.gap(error.BookSequenceGap);
+        if (delta.previous_sequence != previous.sequence or delta.sequence != previous.sequence + 1) return self.gap(.sequence_gap, error.BookSequenceGap);
         self.last_book = .{
             .instrument = delta.instrument,
             .sequence = delta.sequence,
@@ -60,8 +79,9 @@ pub const Projection = struct {
         };
     }
 
-    fn gap(self: *Projection, err: anyerror) anyerror!void {
+    fn gap(self: *Projection, failure: Failure, err: anyerror) anyerror!void {
         self.health = .gap;
+        self.failure = failure;
         return err;
     }
 };

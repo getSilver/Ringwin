@@ -74,6 +74,8 @@ pub const EventKind = enum(u16) {
     order_not_sent,
     order_rejected,
     order_amended,
+    canonical_account_invalidated,
+    canonical_market_invalidated,
 };
 
 pub const Fact = struct {
@@ -174,16 +176,23 @@ pub const PayloadTag = enum(u16) {
 };
 
 pub const ReservationModel = enum(u8) { leveraged, cash };
+pub const Product = canonical.Product;
 
 pub const InstrumentRules = struct {
     version: u32,
     instrument_identity: u128,
     quantity_denominator: i64,
     reservation_model: ReservationModel,
+    /// Explicit product semantics. A zero-value legacy Genesis is normalized
+    /// from reservation_model at the compatibility boundary only.
+    product: Product = .isolated_linear_usdt,
+    venue: canonical.VenueIdentity = 0,
+    settlement_asset: canonical.AssetIdentity = 1,
 };
 
 pub const MarginRules = struct {
     version: u32,
+    instrument: canonical.InstrumentIdentity = 0,
     price_tick_micros: i64 = 1,
     venue_initial_margin_ppm: i64 = 20_000,
     internal_initial_margin_ppm: i64 = 22_000,
@@ -316,9 +325,13 @@ pub fn encodeInput(input: CoreTransition) !EncodedInput {
             try encoded.put(u128, value.instrument_identity);
             try encoded.put(i64, value.quantity_denominator);
             try encoded.put(u8, @intFromEnum(value.reservation_model));
+            try encoded.put(u8, @intFromEnum(value.product));
+            try encoded.put(u64, value.venue);
+            try encoded.put(u64, value.settlement_asset);
         },
         .margin_rules_activated => |value| {
             try encoded.put(u32, value.version);
+            try encoded.put(u128, value.instrument);
             try encoded.put(i64, value.price_tick_micros);
             try encoded.put(i64, value.venue_initial_margin_ppm);
             try encoded.put(i64, value.internal_initial_margin_ppm);
@@ -546,9 +559,16 @@ pub fn decodeInput(record: journal.Record) !InputEvent {
                 ReservationModel,
                 try readInputValue(u8, record.payload, &offset),
             ) orelse return error.UnknownReservationModel,
+            .product = std.enums.fromInt(
+                Product,
+                try readInputValue(u8, record.payload, &offset),
+            ) orelse return error.UnknownProduct,
+            .venue = try readInputValue(u64, record.payload, &offset),
+            .settlement_asset = try readInputValue(u64, record.payload, &offset),
         } },
         .margin_rules_activated => .{ .margin_rules_activated = .{
             .version = try readInputValue(u32, record.payload, &offset),
+            .instrument = try readInputValue(u128, record.payload, &offset),
             .price_tick_micros = try readInputValue(i64, record.payload, &offset),
             .venue_initial_margin_ppm = try readInputValue(i64, record.payload, &offset),
             .internal_initial_margin_ppm = try readInputValue(i64, record.payload, &offset),

@@ -4,11 +4,13 @@ const canonical = @import("canonical_event.zig");
 const std = @import("std");
 
 pub const AccountProjection = struct {
+    pub const Failure = enum(u8) { invalid_snapshot, incomplete_snapshot, sequence_gap, identity_conflict, capacity_exhausted, invalid_bootstrap };
     bootstrap: ?canonical.BootstrapSnapshotIdentity = null,
     exchange_account: ?canonical.ExchangeAccountIdentity = null,
     source_stream: ?canonical.VenueSourceStreamIdentity = null,
     last_sequence: canonical.VenueSourceSequence = 0,
     valid: bool = false,
+    failure: ?Failure = null,
     seen: [canonical.max_account_facts]canonical.AccountObservation = undefined,
     seen_count: u8 = 0,
     balances: [canonical.max_account_facts]canonical.AccountBalance = undefined,
@@ -22,9 +24,15 @@ pub const AccountProjection = struct {
         switch (event) {
             .account_bootstrap_snapshot => |snapshot| {
                 if (snapshot.balance_count > canonical.max_account_facts or snapshot.position_count > canonical.max_account_facts or snapshot.margin_count > canonical.max_account_facts)
-                    return error.InvalidSnapshot;
-                if (!snapshot.scope.balances_complete or !snapshot.scope.positions_complete or !snapshot.scope.margins_complete) return error.IncompleteSnapshotScope;
-                self.* = .{ .bootstrap = snapshot.identity, .exchange_account = snapshot.exchange_account, .source_stream = snapshot.source_stream, .last_sequence = snapshot.source_sequence, .valid = true };
+                    return self.invalidate(.invalid_snapshot, error.InvalidSnapshot);
+                if (!snapshot.scope.balances_complete or !snapshot.scope.positions_complete or !snapshot.scope.margins_complete)
+                    return self.invalidate(.incomplete_snapshot, error.IncompleteSnapshotScope);
+                if (self.bootstrap) |identity| {
+                    if (identity == snapshot.identity and self.valid) return;
+                    if (self.source_stream == snapshot.source_stream and snapshot.source_sequence < self.last_sequence)
+                        return self.invalidate(.sequence_gap, error.StaleBootstrap);
+                }
+                self.* = .{ .bootstrap = snapshot.identity, .exchange_account = snapshot.exchange_account, .source_stream = snapshot.source_stream, .last_sequence = snapshot.source_sequence, .valid = true, .failure = null };
                 @memcpy(self.balances[0..snapshot.balance_count], snapshot.balances[0..snapshot.balance_count]);
                 @memcpy(self.positions[0..snapshot.position_count], snapshot.positions[0..snapshot.position_count]);
                 @memcpy(self.margins[0..snapshot.margin_count], snapshot.margins[0..snapshot.margin_count]);
@@ -40,14 +48,16 @@ pub const AccountProjection = struct {
     fn applyObserved(self: *AccountProjection, observation: canonical.AccountObservation) !void {
         for (self.seen[0..self.seen_count]) |known| if (known.identity == observation.identity) {
             if (std.meta.eql(known, observation)) return;
-            return self.invalidate(error.ConflictingObservationIdentity);
+            return self.invalidate(.identity_conflict, error.ConflictingObservationIdentity);
         };
-        if (!self.valid or self.bootstrap != observation.bootstrap or self.exchange_account != observation.exchange_account) return self.invalidate(error.InvalidBootstrap);
+        if (!self.valid) return error.InvalidProjection;
+        if (self.bootstrap != observation.bootstrap or self.exchange_account != observation.exchange_account)
+            return self.invalidate(.invalid_bootstrap, error.InvalidBootstrap);
         if (self.source_stream) |stream| {
             if (stream != observation.source_stream or observation.source_sequence != self.last_sequence + 1)
-                return self.invalidate(error.SourceSequenceGap);
+                return self.invalidate(.sequence_gap, error.SourceSequenceGap);
         } else self.source_stream = observation.source_stream;
-        if (self.seen_count == self.seen.len) return self.invalidate(error.ObservationCapacityExceeded);
+        if (self.seen_count == self.seen.len) return self.invalidate(.capacity_exhausted, error.ObservationCapacityExceeded);
         self.seen[self.seen_count] = observation;
         self.seen_count += 1;
         self.last_sequence = observation.source_sequence;
@@ -64,7 +74,7 @@ pub const AccountProjection = struct {
             return;
         };
         if (observed.removed) return;
-        if (self.balance_count == self.balances.len) return self.invalidate(error.ObservationCapacityExceeded);
+        if (self.balance_count == self.balances.len) return self.invalidate(.capacity_exhausted, error.ObservationCapacityExceeded);
         self.balances[self.balance_count] = observed.value;
         self.balance_count += 1;
     }
@@ -74,7 +84,7 @@ pub const AccountProjection = struct {
             return;
         };
         if (observed.removed) return;
-        if (self.position_count == self.positions.len) return self.invalidate(error.ObservationCapacityExceeded);
+        if (self.position_count == self.positions.len) return self.invalidate(.capacity_exhausted, error.ObservationCapacityExceeded);
         self.positions[self.position_count] = observed.value;
         self.position_count += 1;
     }
@@ -84,7 +94,7 @@ pub const AccountProjection = struct {
             return;
         };
         if (observed.removed) return;
-        if (self.margin_count == self.margins.len) return self.invalidate(error.ObservationCapacityExceeded);
+        if (self.margin_count == self.margins.len) return self.invalidate(.capacity_exhausted, error.ObservationCapacityExceeded);
         self.margins[self.margin_count] = observed.value;
         self.margin_count += 1;
     }
@@ -94,8 +104,9 @@ pub const AccountProjection = struct {
         count.* -= 1;
     }
 
-    fn invalidate(self: *AccountProjection, err: anyerror) anyerror!void {
+    fn invalidate(self: *AccountProjection, failure: Failure, err: anyerror) anyerror!void {
         self.valid = false;
+        self.failure = failure;
         return err;
     }
 };

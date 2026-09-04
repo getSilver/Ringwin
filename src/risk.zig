@@ -3,7 +3,7 @@ const canonical = @import("canonical_event.zig");
 
 pub const ppm_scale: i128 = 1_000_000;
 
-pub const Product = enum(u8) { spot, isolated_linear_usdt };
+pub const Product = canonical.Product;
 pub const Side = enum(u8) { buy, sell };
 pub const MarginGate = enum(u8) { healthy, warning, kill };
 

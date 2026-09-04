@@ -11,7 +11,7 @@ It is designed as both a practical trading-system prototype and an open-source r
 
 Ringwin focuses on deterministic state transitions, fixed-point financial arithmetic, explicit risk and order-management boundaries, replayable event processing, and fault isolation.
 
-Its formal multi-Venue target is OKX, Binance, and Bybit spot and linear perpetual support. The first delivery is limited to an OKX unified seam and Binance Demo/Testnet validation; production account qualification remains separate.
+The offline implementation now exercises a shared OKX, Binance, and Bybit VenueAdapter/MarketFeedAdapter seam for spot and isolated linear USDT contracts. Real Testnet and production-account qualification remain separate and are never inferred from offline evidence.
 
 > [!WARNING]
 > Ringwin is under active development and is **not currently intended for production trading or real-fund deployment**.

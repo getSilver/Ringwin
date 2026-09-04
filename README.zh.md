@@ -2,7 +2,8 @@
 
 这是一个可执行的 Zig 交易引擎纵向闭环，并包含显式授权下的 OKX Demo Trading 验收；它不是生产交易系统。
 
-当前原型用一个模拟 Venue、一个 Gate.io 形状的 `BTC_USDT` USDT 线性永续品种、
+当前原型用模拟 Venue 以及统一的 OKX、Binance、Bybit Adapter seam，覆盖规范 SPOT 与
+`isolated linear USDT` 品种、
 一个 VirtualPortfolio、一个 ExchangeAccount 和一个静态编译原生策略，证明：
 
 - 同一 `TradingShard` 状态转换可以用于实时、仿真驱动和日志重放。
@@ -10,7 +11,7 @@
 - 行情缺口、风险拒绝、Unknown 对账和重复回报走同一个核心状态机。
 - 四个 `TradingShard` 实例可以保持独立状态、日志、队列和故障边界。
 
-默认路径不连接真实 Venue；独立入口只使用本机 Demo Key 连接 OKX 模拟交易。项目不接入生产账户，也不证明策略盈利。多 Venue 的正式目标是 OKX、Binance、Bybit 的现货与线性永续；首个交付限于 OKX 统一接缝和 Binance Demo/Testnet 验证，生产账户资格仍是独立阶段。
+默认路径不连接真实 Venue；独立入口只使用本机 Demo Key 连接 OKX 模拟交易。项目不接入生产账户，也不证明策略盈利。三家 Venue 的离线 canonical/adapter 契约已接入；真实 Testnet/生产资格仍是独立阶段。
 
 ## 统一构建入口
 
@@ -43,7 +44,7 @@ Python StrategyHost seam 和 Linux 交叉编译检查；OKX Demo 事实只在显
 tools\verify-core-wave.ps1
 ```
 
-任一断言失败立即停止。成功输出 `core_wave_acceptance=passed schema=1 mode=offline ...`。
+任一断言失败立即停止。成功输出由子验收实际结果汇总的 `core_wave_evidence={...}` JSON；当前离线 schema 为 2，Testnet 未运行。
 显式启用 OKX Demo 成交事实时追加 `-DemoLive`（要求 `.env.local` 中合格的 Demo Key）。
 
 ## OKX Demo 整波验收
@@ -358,7 +359,7 @@ Windows 2C/4T 开发节点接近 `2M events/s`，但四分片合并 P99 为
 
 - OKX 生产账户、Linux 运行时/性能和部署资格；单命令 Windows Demo 整波与 Linux
   compile-only 证据已经通过；
-- Binance 与 Bybit 的真实行情与交易适配器；它们按已接受的多 Venue 路线在 OKX 统一接缝之后推进；
+- Binance 与 Bybit 的真实 Testnet/生产账户资格；离线 adapter 与 canonical 契约已通过，不能替代真实运行证据；
 - Python StrategyHost 与四分片核心在合格 Linux 节点上的产品性能资格；
 - Linux 独占核心、CPU affinity、NUMA、真实网络/日志 I/O 和硬件性能计数器；
 - testnet 协议资格、生产密钥、单活热备、fencing 和部署；
@@ -385,8 +386,10 @@ Gateway、TradingShard 现金风控、OrderCommand、OKX 回报、经济投影�
 认证失败、限流、Unknown、部分成功、并发 Fill、REST 分页、迟到事实和清理失败矩阵也已闭合；
 整波自动资格、异常关机后复验与最终证据边界均已闭合。
 
-现有 OKX Adapter 已足够验证真实 Venue 业务闭环；现在按已接受的多 Venue 路线，先建立共享契约并
-迁移 OKX，再验证 Binance 和 Bybit。Linux 五核生产性能、生产账户、密钥托管和部署资格仍是独立波次。
+当前多 Venue 离线实现均通过共享 `VenueAdapter`/`MarketFeedAdapter` 契约；Testnet 证据默认停在
+`ContractTested`/`OfficialConfirmed`，不会由布尔值或摘要自授予 `TestnetQualified`。Linux 生产性能、
+生产账户、密钥托管和部署资格仍是独立波次。当前修复波次与剩余 contract 工作见
+[trading-core-integrity-repair map](.scratch/trading-core-integrity-repair/map.md)。
 
 ## License
 
