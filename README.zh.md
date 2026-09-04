@@ -60,7 +60,7 @@ tools\verify-okx-demo-wave.ps1
 compile-only 检查。成功输出：
 
 ```text
-okx_demo_wave_acceptance=passed mode=read_only linux=compile_only production_qualification=false
+okx_demo_wave_acceptance=passed mode=read_only qualification=not_run linux=compile_only production_qualification=false
 ```
 
 只有 SystemOwner 明确允许 Demo 成交时才运行：
@@ -386,9 +386,10 @@ Gateway、TradingShard 现金风控、OrderCommand、OKX 回报、经济投影�
 认证失败、限流、Unknown、部分成功、并发 Fill、REST 分页、迟到事实和清理失败矩阵也已闭合；
 整波自动资格、异常关机后复验与最终证据边界均已闭合。
 
-当前多 Venue 离线实现均通过共享 `VenueAdapter`/`MarketFeedAdapter` 契约；Testnet 证据默认停在
-`ContractTested`/`OfficialConfirmed`，不会由布尔值或摘要自授予 `TestnetQualified`。Linux 生产性能、
-生产账户、密钥托管和部署资格仍是独立波次。当前修复波次与剩余 contract 工作见
+当前资格使用统一证据结构，但环境不会被抹平：OKX 的真实 Demo 整波结论为
+`DemoQualified`，Binance/Bybit 只有目标 Testnet 的真实运行才能结论为
+`TestnetQualified`。默认离线波次不会生成任一真实运行资格，也不会由布尔值或摘要自授予资格。
+Linux 生产性能、生产账户、密钥托管和部署资格仍是独立波次。当前修复波次与剩余 contract 工作见
 [trading-core-integrity-repair map](.scratch/trading-core-integrity-repair/map.md)。
 
 ## License

@@ -158,6 +158,9 @@ $evidence = [ordered]@{
     single_shard_output = @($singleText | Where-Object { $_ -match '(happy_path:|market-gap-v1:|risk-rejection-v1:|unknown-reconciliation-v1:|duplicate-report-v1:)' })
     python = 'passed'
     linux = 'compile_only'
+    okx_demo_qualification = if ($DemoLive) { 'demo_qualified' } else { 'not_run' }
+    binance_testnet_qualification = 'not_run'
+    bybit_testnet_qualification = 'not_run'
     production_qualification = $false
 }
 Write-Output ("core_wave_evidence=" + ($evidence | ConvertTo-Json -Compress))

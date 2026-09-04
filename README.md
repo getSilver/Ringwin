@@ -152,7 +152,9 @@ The current implementation supports areas such as:
 
 The Demo integration is intended for testing and validation only.
 
-It does **not** imply production account support or production trading qualification.
+Its live result is recorded as `DemoQualified` in the shared venue evidence
+model. It is never promoted to `TestnetQualified` or production qualification;
+those require the matching environment and venue-specific run evidence.
 
 ## Requirements
 
@@ -201,6 +203,10 @@ Only run Demo order execution with SystemOwner authorization:
 ```powershell
 zig build demo-wave -Ddemo-live
 ```
+
+The offline core wave reports OKX Demo, Binance Testnet, and Bybit Testnet
+qualification independently. Without an explicit live run, each real-run
+qualification remains `not_run`.
 
 All build steps reject a Zig version other than `0.17.0-dev.315+5b647b792` before running tests. The existing PowerShell wave scripts remain available as their underlying acceptance implementation. Use Demo credentials only.
 

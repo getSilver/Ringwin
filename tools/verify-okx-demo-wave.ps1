@@ -68,4 +68,5 @@ if ($DemoLive) { $liveArgs.DemoLive = $true } else { $liveArgs.PrepareOnly = $tr
 & (Join-Path $PSScriptRoot 'run-okx-demo-live-acceptance.ps1') @liveArgs
 
 $mode = if ($DemoLive) { 'demo_live' } else { 'read_only' }
-Write-Output "okx_demo_wave_acceptance=passed mode=$mode linux=compile_only production_qualification=false"
+$qualification = if ($DemoLive) { 'demo_qualified' } else { 'not_run' }
+Write-Output "okx_demo_wave_acceptance=passed mode=$mode qualification=$qualification linux=compile_only production_qualification=false"

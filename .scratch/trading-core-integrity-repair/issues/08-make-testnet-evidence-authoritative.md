@@ -14,8 +14,9 @@ Parent: [修复交易核心权威接缝与验收完整性](../map.md)
 ## What to build
 
 让每一级 Venue 证据由对应执行入口产生并携带可验证来源。离线合约测试只能证明 ContractTested；
-官方资料确认只能证明 OfficialConfirmed；TestnetQualified 必须来自显式 opt-in runner 完成的真实请求、
-私有事实、reconciliation 和隔离轨迹。没有该记录时，聚合结果必须诚实停在较低等级。
+官方资料确认只能证明 OfficialConfirmed；OKX DemoQualified 必须来自 OKX Demo 的显式 opt-in runner；
+TestnetQualified 必须来自目标 Testnet 的显式 opt-in runner，完成真实请求、私有事实、reconciliation
+和隔离轨迹。没有对应环境记录时，聚合结果必须诚实停在较低等级。
 
 ## Blocked by
 
@@ -29,10 +30,12 @@ Parent: [修复交易核心权威接缝与验收完整性](../map.md)
 - [ ] Testnet runner 默认不运行，只有 SystemOwner 显式授权且所需外部输入完整时才访问网络。
 - [ ] 缺少真实运行、部分失败或隔离失败时保存失败证据并返回非 qualified，不生成成功替代摘要。
 - [ ] 离线自动测试证明伪造状态、任意 digest、重放旧 run 和跨 Venue 复用证据均被拒绝。
+- [ ] OKX Demo 只能映射为 DemoQualified；不能升级、复用或伪装为任一 Venue 的 TestnetQualified。
 - [ ] 当前状态输出在未执行真实 Testnet 时明确显示“未运行”，且不要求任何生产账户、资金或密钥。
 
 ## Evidence
 
-- Binance/Bybit acceptance now has distinct `ContractTested`, `OfficialConfirmed` and sealed `TestnetRun` types; `grant` no longer accepts a caller-constructed boolean matrix.
+- Shared evidence now carries `Venue + Environment + Qualification`; OKX Demo maps to `DemoQualified`, while
+  Binance/Bybit TestnetRun maps to `TestnetQualified` only after their own sealed run is granted.
 - Testnet status remains contract-only by default; network access is absent unless an explicit adapter admission and complete run record are supplied.
 - Offline Zig tests cover dirty accounts, missing authorization, replay mismatch and incomplete run evidence.

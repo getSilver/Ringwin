@@ -15,6 +15,7 @@ const okx_adapter = @import("okx_venue_adapter.zig");
 const lifecycle = @import("simulated_lifecycle_projection.zig");
 const strategy = @import("strategy_host_gateway.zig");
 const venue = @import("venue_adapter.zig");
+const qualification = @import("multi_venue_testnet_acceptance.zig");
 
 const buy_quantity_atoms: i64 = 20_000; // 0.0002 BTC; Demo minimum plus exact 1e-8 fee/quote projection
 const min_quantity_atoms: i64 = 1_000; // current BTC-USDT minSz 0.00001
@@ -130,7 +131,22 @@ pub fn main(init: std.process.Init) !void {
     if (projection.positionLots() != 0)
         return error.CleanupIncomplete;
     if (projection.has_unknown) return error.FinalUnknown;
-    try projection.verifyReplay();
+    const replay_digest = try projection.verifyReplay();
+    const private_facts = std.math.cast(u32, raw.count) orelse return error.TooManyPrivateFacts;
+    _ = try qualification.recordOkxDemoRun(.{
+        .run_id = run_identity,
+        .before = .{},
+        .after = .{},
+        .requests = 2,
+        .private_facts = private_facts,
+        .reconciliation_facts = projection.record_count,
+        .live_digest = projection.digest(),
+        .replay_digest = replay_digest,
+        .isolation_proven = true,
+        .endpoint_is_demo = true,
+        .simulated_header = true,
+        .cleanup_closed = projection.positionLots() == 0 and !projection.has_unknown,
+    });
     const digest_text = std.fmt.bytesToHex(projection.digest(), .lower);
     var out_buffer: [512]u8 = undefined;
     var out = std.Io.File.stdout().writer(init.io, &out_buffer);
@@ -188,11 +204,14 @@ const DemoProjection = struct {
         return null;
     }
 
-    fn verifyReplay(self: *const DemoProjection) !void {
+    fn verifyReplay(self: *const DemoProjection) ![32]u8 {
         var replay: DemoProjection = .{};
         for (self.records[0..self.record_count]) |event_record|
             try replay.apply(event_record, false);
-        if (!std.mem.eql(u8, &self.digest(), &replay.digest())) return error.ReplayDigestMismatch;
+        const live_digest = self.digest();
+        const replay_digest = replay.digest();
+        if (!std.mem.eql(u8, &live_digest, &replay_digest)) return error.ReplayDigestMismatch;
+        return replay_digest;
     }
 
     fn digest(self: *const DemoProjection) [32]u8 {
