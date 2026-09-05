@@ -19,15 +19,13 @@ const market_projection = @import("market_projection.zig");
 const instrument_registry = @import("instrument_registry.zig");
 
 /// Current physical schema for AuthoritativeTradingState snapshots.
-pub const state_schema_version: u32 = 5;
+pub const state_schema_version: u32 = 6;
 /// Release artifact producing the current snapshot schema.
 pub const release_artifact_identity: u64 = 1;
 /// Registry entry defining the current snapshot and journal schemas.
-pub const schema_registry_identity: u64 = 3;
+pub const schema_registry_identity: u64 = 4;
 const client_order_id = "RWN-00000001-01-000000000001";
 const settlement_asset: canonical.AssetIdentity = 1;
-const spot_instrument: oms_module.Instrument = 1;
-const swap_instrument: oms_module.Instrument = 2;
 const money_scale: i64 = 1_000_000;
 const contract_denominator: i64 = 10_000;
 const fee_ppm: i64 = 750;
@@ -311,7 +309,7 @@ pub const TradingShard = struct {
     fn applyCanonical(self: *TradingShard, event: canonical.EventRecord) !ApplyResult {
         var candidate = self.*;
         const account_failure_before = candidate.canonical_account.failure;
-        const market_failure_before = candidate.canonical_market.failure;
+        const market_failure_generation_before = candidate.canonical_market.failure_generation;
         const before = candidate.trace.len;
         candidate.oms.begin();
         const command = blk: {
@@ -331,7 +329,7 @@ pub const TradingShard = struct {
                 });
                 try candidate.trace.append(.canonical_account_invalidated, event.envelope.identity.sequence);
                 self.* = candidate;
-            } else if (candidate.canonical_market.failure != market_failure_before) {
+            } else if (candidate.canonical_market.failure_generation != market_failure_generation_before) {
                 if (candidate.operational_state.initialized) try candidate.applyOperationalGate(.{
                     .gate_identity = market_data_gate_identity,
                     .target_identity = candidate.operational_state.target_identity,
@@ -468,12 +466,8 @@ pub const TradingShard = struct {
         return .{
             .account_valid = self.canonical_account.valid,
             .account_failure = self.canonical_account.failure,
-            .market_health = switch (self.canonical_market.health) {
-                .awaiting_snapshot => .awaiting_snapshot,
-                .healthy => .healthy,
-                .gap => .gap,
-            },
-            .market_failure = self.canonical_market.failure,
+            .market_health = self.canonical_market.aggregateHealth(),
+            .market_failure = self.canonical_market.latestFailure(),
             .effective_trading_authority = self.operational_state.effectiveTradingAuthority(),
             .canonical_state_digest = self.canonicalStateDigest(),
         };
@@ -626,6 +620,9 @@ pub const TradingShard = struct {
             if (reduces_only and !self.operational_state.effectiveTradingAuthority() and
                 !self.operational_state.mayReduceOnly())
                 return error.TradingNotAuthorized;
+            const market = self.canonical_market.get(intent.instrument) orelse return error.MissingInstrumentDefinition;
+            const mark = market.mark orelse return error.InvalidMarkPrice;
+            const mark_price = std.math.cast(i64, mark.ticks) orelse return error.PriceOutOfRange;
             const assessment = try risk_module.assess(self.riskRules(intent.instrument), self.riskLimits(), .{
                 .portfolio_cash = .{ .asset = settlement_asset, .atoms = self.portfolioCash() },
                 .exchange_cash = .{ .asset = settlement_asset, .atoms = self.exchangeCash() },
@@ -633,12 +630,12 @@ pub const TradingShard = struct {
                 .exchange_position = .{ .instrument = intent.instrument, .rules_version = instrument_config.rules.version, .lots = exchange_position_quantity },
                 .active_order_reservations = active,
                 .replaced_order_reservation = replaced,
-                .mark_price = .{ .instrument = intent.instrument, .rules_version = self.instrument_rules_version, .ticks = self.mark_price_micros },
+                .mark_price = mark,
             }, .{
                 .product = instrument_config.product,
                 .side = if (intent.side == .buy) .buy else .sell,
                 .quantity = .{ .instrument = intent.instrument, .rules_version = instrument_config.rules.version, .lots = intent.quantity },
-                .risk_price = .{ .instrument = intent.instrument, .rules_version = instrument_config.rules.version, .ticks = @max(intent.limit_price.ticks, self.mark_price_micros) },
+                .risk_price = .{ .instrument = intent.instrument, .rules_version = instrument_config.rules.version, .ticks = @max(intent.limit_price.ticks, mark_price) },
                 .portfolio_reduce_only = intent.portfolio_reduce_only,
             });
             intent.reservation = assessment.order_reservation;
@@ -673,23 +670,17 @@ pub const TradingShard = struct {
     }
 
     fn instrumentEntry(self: *const TradingShard, instrument_id: canonical.InstrumentIdentity) ?instrument_registry.Entry {
-        if (self.instrument_registry.get(instrument_id)) |entry| return entry;
-        // Legacy Genesis used 1/2 as internal OMS layer tags while the
-        // canonical instrument identity was a separate value. Normalize only
-        // this one-entry compatibility shape; multi-instrument state never
-        // guesses an unregistered identity.
-        if (self.instrument_registry.count == 1 and
-            (instrument_id == spot_instrument or instrument_id == swap_instrument))
-        {
-            var legacy = self.instrument_registry.entries[0];
-            if (instrument_id == spot_instrument) {
-                legacy.product = .spot;
-                legacy.rules.product = .spot;
-                legacy.rules.reservation_model = .cash;
-            }
-            return legacy;
+        return self.instrument_registry.get(instrument_id);
+    }
+
+    fn singleProductEntry(self: *const TradingShard, product: canonical.Product) ?instrument_registry.Entry {
+        var found: ?instrument_registry.Entry = null;
+        for (self.instrument_registry.entries[0..self.instrument_registry.count]) |entry| {
+            if (entry.product != product) continue;
+            if (found != null) return null;
+            found = entry;
         }
-        return null;
+        return found;
     }
 
     /// Returns the immutable registry view used by risk, OMS and economics.
@@ -1033,10 +1024,9 @@ pub const TradingShard = struct {
             .instrument_definition_observed => {
                 try self.canonical_market.apply(record.event);
                 const definition = record.event.instrument_definition_observed;
-                if (self.instrument_rules_version != 0 and
-                    definition.rules_version == self.instrument_rules_version and
-                    definition.instrument == self.instrument_identity)
-                    try self.canonical_market.activateRules(definition.instrument, definition.rules_version);
+                if (self.instrument_registry.get(definition.instrument)) |entry|
+                    if (definition.rules_version == entry.rules.version)
+                        try self.canonical_market.activateRules(definition.instrument, definition.rules_version);
                 try self.trace.append(.canonical_instrument_definition, fact_identity);
             },
             .l2_book_snapshot => |book_snapshot| {
@@ -1091,8 +1081,14 @@ pub const TradingShard = struct {
             .reference_price => |price| {
                 try self.canonical_market.apply(record.event);
                 if (price.kind == .mark) {
-                    self.mark_price_micros = std.math.cast(i64, price.price.ticks) orelse return error.PriceOutOfRange;
-                    _ = try self.applyEconomicProjection(.{ .mark_price = self.mark_price_micros });
+                    const instrument = self.instrument_registry.get(price.instrument) orelse return error.UnknownInstrument;
+                    const mark_price = std.math.cast(i64, price.price.ticks) orelse return error.PriceOutOfRange;
+                    if (price.instrument == self.instrument_identity) self.mark_price_micros = mark_price;
+                    _ = try self.applyEconomicProjection(.{ .mark_price = .{
+                        .product = instrument.product,
+                        .price_micros = mark_price,
+                        .quantity_denominator = instrument.rules.quantity_denominator,
+                    } });
                     try self.trace.append(.mark_price, fact_identity);
                 } else try self.trace.append(.canonical_index_price, fact_identity);
             },
@@ -1445,7 +1441,12 @@ pub const TradingShard = struct {
                     .margin = .{ .version = 1 },
                 };
                 const added = try self.instrument_registry.register(entry);
-                if (self.instrument_rules_version == 0) {
+                try self.canonical_market.apply(.{ .instrument_definition_observed = .{
+                    .instrument = normalized.instrument_identity,
+                    .rules_version = normalized.version,
+                } });
+                try self.canonical_market.activateRules(normalized.instrument_identity, normalized.version);
+                if (self.instrument_rules_version == 0 or normalized.instrument_identity == self.instrument_identity) {
                     self.instrument_rules_version = normalized.version;
                     self.instrument_identity = normalized.instrument_identity;
                     self.quantity_denominator = normalized.quantity_denominator;
@@ -1632,9 +1633,19 @@ pub const TradingShard = struct {
                 try self.trace.append(.risk_lease_granted, input.identity);
             },
             .mark_price => |price| {
-                if (price <= 0) return error.InvalidMarkPrice;
-                self.mark_price_micros = price;
-                _ = try self.applyEconomicProjection(.{ .mark_price = price });
+                if (price.price_micros <= 0) return error.InvalidMarkPrice;
+                const instrument = self.instrument_registry.get(price.instrument) orelse return error.UnknownInstrument;
+                try self.canonical_market.apply(.{ .reference_price = .{
+                    .instrument = price.instrument,
+                    .kind = .mark,
+                    .price = .{ .instrument = price.instrument, .rules_version = instrument.rules.version, .ticks = price.price_micros },
+                } });
+                if (price.instrument == self.instrument_identity) self.mark_price_micros = price.price_micros;
+                _ = try self.applyEconomicProjection(.{ .mark_price = .{
+                    .product = instrument.product,
+                    .price_micros = price.price_micros,
+                    .quantity_denominator = instrument.rules.quantity_denominator,
+                } });
                 try self.recalculateRisk(false);
                 try self.assertClosures();
                 try self.trace.append(.mark_price, input.identity);
@@ -1741,16 +1752,18 @@ pub const TradingShard = struct {
                 if (changed) try self.trace.append(.funding_settlement, funding.settlement_id);
             },
             .venue_forced_execution => |forced| {
+                const instrument_config = self.singleProductEntry(.isolated_linear_usdt) orelse return error.UnknownOmsInstrument;
                 const changed = try self.applyEconomicProjection(.{ .venue_forced_execution = .{
                     .identity = forced.execution_id,
                     .side = if (forced.side == .buy) .buy else .sell,
-                    .quantity = .{ .instrument = swap_instrument, .rules_version = self.instrument_rules_version, .lots = forced.quantity },
-                    .price = .{ .instrument = swap_instrument, .rules_version = self.instrument_rules_version, .ticks = forced.price_micros },
-                    .quantity_denominator = self.quantity_denominator,
+                    .quantity = .{ .instrument = instrument_config.instrument, .rules_version = instrument_config.rules.version, .lots = forced.quantity },
+                    .price = .{ .instrument = instrument_config.instrument, .rules_version = instrument_config.rules.version, .ticks = forced.price_micros },
+                    .quantity_denominator = instrument_config.rules.quantity_denominator,
                     .fee = .{ .asset = self.economic_projection.settlement_asset, .atoms = forced.fee_micros },
                     .penalty = .{ .asset = self.economic_projection.settlement_asset, .atoms = forced.penalty_micros },
-                    .portfolio_margin_ppm = self.internal_initial_margin_ppm,
-                    .exchange_margin_ppm = self.venue_initial_margin_ppm,
+                    .portfolio_margin_ppm = instrument_config.margin.internal_initial_margin_ppm,
+                    .exchange_margin_ppm = instrument_config.margin.venue_initial_margin_ppm,
+                    .product = instrument_config.product,
                 } });
                 if (changed) {
                     if (self.operational_state.initialized) {
@@ -1798,6 +1811,7 @@ fn zeroUnused(comptime T: type, storage: []T) void {
 
 fn canonicalizeSnapshotState(shard: *TradingShard) void {
     zeroUnused(instrument_registry.Entry, shard.instrument_registry.entries[shard.instrument_registry.count..]);
+    zeroUnused(market_projection.InstrumentProjection, shard.canonical_market.entries[shard.canonical_market.count..]);
     zeroUnused(Fact, shard.trace.events[shard.trace.len..]);
     zeroUnused(oms_module.Order, shard.oms.orders[shard.oms.order_count..]);
     shard.oms.command_count = 0;
@@ -1844,6 +1858,7 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
 fn validateSnapshotState(shard: *const TradingShard) !void {
     if (shard.trace.len > shard.trace.events.len or
         shard.instrument_registry.count > shard.instrument_registry.entries.len or
+        shard.canonical_market.count > shard.canonical_market.entries.len or
         shard.oms.order_count > oms_module.max_orders or
         shard.oms.command_count > shard.oms.commands.len or
         shard.oms.command_history_count > shard.oms.command_history.len or
@@ -1960,14 +1975,14 @@ fn applyCanonicalStable(
     const checkpoint = decision_journal.checkpoint();
     const before = shard.trace.len;
     const account_failure_before = shard.canonical_account.failure;
-    const market_failure_before = shard.canonical_market.failure;
+    const market_failure_generation_before = shard.canonical_market.failure_generation;
     var candidate_shard = shard.*;
     const result = candidate_shard.apply(input) catch |err| {
         // Account/market projection failure is itself a durable fact. Keep
         // the invalid candidate and journal its fact group before surfacing
         // the original observation error to the caller.
         if (candidate_shard.canonical_account.failure != account_failure_before or
-            candidate_shard.canonical_market.failure != market_failure_before)
+            candidate_shard.canonical_market.failure_generation != market_failure_generation_before)
         {
             appendStableFactGroup(decision_journal, input, candidate_shard.trace.events[before..candidate_shard.trace.len]) catch |journal_err| {
                 decision_journal.restore(checkpoint);
@@ -2266,16 +2281,27 @@ fn digestCanonicalProjections(hasher: *Sha256, shard: TradingShard) void {
     digestInt(hasher, u8, shard.canonical_account.balance_count);
     digestInt(hasher, u8, shard.canonical_account.position_count);
     digestInt(hasher, u8, shard.canonical_account.margin_count);
-    digestBool(hasher, shard.canonical_market.last_book != null);
-    if (shard.canonical_market.last_book) |book| {
-        digestInt(hasher, u128, book.instrument);
-        digestInt(hasher, u64, book.sequence);
-        digestInt(hasher, i128, book.best_bid.ticks);
-        digestInt(hasher, i128, book.best_ask.ticks);
+    digestInt(hasher, u8, shard.canonical_market.count);
+    digestInt(hasher, u64, shard.canonical_market.failure_generation);
+    for (shard.canonical_market.entries[0..shard.canonical_market.count]) |market| {
+        digestInt(hasher, u128, market.instrument);
+        digestInt(hasher, u64, market.definition.rules_version);
+        digestBool(hasher, market.active_rules_version != null);
+        digestInt(hasher, u64, market.active_rules_version orelse 0);
+        digestBool(hasher, market.last_book != null);
+        if (market.last_book) |book| {
+            digestInt(hasher, u64, book.sequence);
+            digestInt(hasher, i128, book.best_bid.ticks);
+            digestInt(hasher, i128, book.best_ask.ticks);
+        }
+        digestInt(hasher, u8, @intFromEnum(market.health));
+        digestBool(hasher, market.failure != null);
+        if (market.failure) |failure| digestInt(hasher, u8, @intFromEnum(failure));
+        digestBool(hasher, market.mark != null);
+        if (market.mark) |mark| digestInt(hasher, i128, mark.ticks);
+        digestBool(hasher, market.index != null);
+        if (market.index) |index| digestInt(hasher, i128, index.ticks);
     }
-    digestInt(hasher, u8, @intFromEnum(shard.canonical_market.health));
-    digestBool(hasher, shard.canonical_market.failure != null);
-    if (shard.canonical_market.failure) |failure| digestInt(hasher, u8, @intFromEnum(failure));
 }
 
 fn digestEconomicProjection(hasher: *Sha256, projection: economics_module.Projection) void {
@@ -2411,7 +2437,7 @@ fn replayReader(reader: *journal.Reader, initial: TradingShard) !ReplayResult {
             };
         }
         if (replay_error != null and candidate.canonical_account.failure == null and
-            candidate.canonical_market.failure == null)
+            candidate.canonical_market.latestFailure() == null)
             return replay_error.?;
         const generated = candidate.trace.events[before..candidate.trace.len];
         if (generated.len == 0) return error.InputProducedNoFact;

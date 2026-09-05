@@ -8,7 +8,7 @@ const journal = @import("journal.zig");
 const oms_module = @import("oms.zig");
 const operational = @import("operational.zig");
 
-pub const schema_version: u16 = 5;
+pub const schema_version: u16 = 6;
 
 pub const EventKind = enum(u16) {
     instrument_rules_activated,
@@ -218,6 +218,7 @@ pub const StrategyActivation = struct {
     activation_identity: u128,
 };
 pub const PrimaryLease = struct { fencing_token: u64 };
+pub const MarkPrice = struct { instrument: canonical.InstrumentIdentity, price_micros: i64 };
 pub const RiskLease = struct {
     lease_identity: u64 = 0,
     version: u64 = 1,
@@ -261,7 +262,7 @@ pub const CorePayload = union(PayloadTag) {
     strategy_activated: StrategyActivation,
     primary_lease_granted: PrimaryLease,
     risk_lease_granted: RiskLease,
-    mark_price: i64,
+    mark_price: MarkPrice,
     timer: TimerRequest,
     external_order_intent: host_gateway.OrderIntent,
     strategy_intent_rejected: host_gateway.Rejection,
@@ -377,7 +378,10 @@ pub fn encodeInput(destination: []u8, input: CoreTransition) !EncodedInput {
             try encoded.put(i64, value.exchange_account_limit_micros);
             try encoded.put(i64, value.global_limit_micros);
         },
-        .mark_price => |value| try encoded.put(i64, value),
+        .mark_price => |value| {
+            try encoded.put(u128, value.instrument);
+            try encoded.put(i64, value.price_micros);
+        },
         .timer => |value| try encoded.put(i64, value.quantity),
         .external_order_intent => |value| {
             try encoded.put(u128, value.strategy_identity);
@@ -628,7 +632,10 @@ pub fn decodeInput(record: journal.Record) !InputEvent {
             .exchange_account_limit_micros = try readInputValue(i64, record.payload, &offset),
             .global_limit_micros = try readInputValue(i64, record.payload, &offset),
         } },
-        .mark_price => .{ .mark_price = try readInputValue(i64, record.payload, &offset) },
+        .mark_price => .{ .mark_price = .{
+            .instrument = try readInputValue(u128, record.payload, &offset),
+            .price_micros = try readInputValue(i64, record.payload, &offset),
+        } },
         .timer => .{ .timer = .{
             .quantity = try readInputValue(i64, record.payload, &offset),
         } },

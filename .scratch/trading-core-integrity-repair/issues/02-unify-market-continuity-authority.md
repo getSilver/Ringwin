@@ -23,15 +23,16 @@ None (can start immediately).
 
 ## Acceptance
 
-- [ ] 行情 delta gap 经公开 apply 路径后同时使 MarketProjection unhealthy 并关闭相关 OpeningGate。
-- [ ] gap 后注入独立 healthy 事实不能重新开门，仍然拒绝新增风险。
-- [ ] 完整、新鲜且序号有效的 L2 snapshot 原子恢复投影和 SelfRecoveringGate；陈旧或不完整快照不能恢复。
-- [ ] 超过 Instrument 跟踪容量时 fail-closed，未被记录的第五个或后续 Instrument 不会绕过保护。
-- [ ] 多 Instrument 交错 gap/恢复以及 live/replay 产生相同 gate 状态和 CanonicalStateDigest。
+- [x] 行情 delta gap 经公开 apply 路径后同时使 MarketProjection unhealthy 并关闭相关 OpeningGate。
+- [x] gap 后注入独立 healthy 事实不能重新开门，仍然拒绝新增风险。
+- [x] 完整、新鲜且序号有效的 L2 snapshot 原子恢复投影和 SelfRecoveringGate；陈旧或不完整快照不能恢复。
+- [x] 超过 Instrument 跟踪容量时 fail-closed，未被记录的第五个或后续 Instrument 不会绕过保护。
+- [x] 多 Instrument 交错 gap/恢复以及 live/replay 产生相同 gate 状态和 CanonicalStateDigest。
 
 ## Evidence
 
 - `src/market_projection.zig` rejects stale/incomplete/scope-mismatched books and only complete fresh snapshots clear the projection failure.
+- Market state is now isolated in four bounded per-Instrument projections; observing candidate rules preserves the active book, while activating a new rules version requires a fresh snapshot and price.
 - `TradingShard` closes the self-recovering market gate on delta/health gaps; healthy notifications and deltas cannot reopen it.
 - `src/execution_gateway.zig` fail-closes untracked instruments after bounded gate capacity is exhausted.
-- `zig test src/main.zig`: 178/178 passed; market projection, simulated feed, canonical seam and gateway tests included.
+- `zig test src/main.zig -O Debug` and `-O ReleaseSafe`: 180/180 passed; market projection, simulated feed, canonical seam and gateway tests included.

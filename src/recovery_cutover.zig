@@ -695,7 +695,19 @@ test "strategy cutover persists a scoped fence and leaves unrelated orders live"
 
 test "cutover failures and forward rollback never regress economic state or generation" {
     var shard: trading.TradingShard = .{ .release_generation = 4, .active_release = 10, .active_strategy_instance = 20 };
-    try shard.economic_projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = .{ .instrument = swap_instrument, .rules_version = 1, .lots = 3 }, .price = .{ .instrument = swap_instrument, .rules_version = 1, .ticks = 50_000_000 }, .quantity_denominator = 1, .fee = .{ .asset = 1, .atoms = 7 } } });
+    _ = try shard.apply(@as(trading.CoreTransition, .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{
+        .version = 1,
+        .instrument_identity = swap_instrument,
+        .quantity_denominator = 1,
+        .reservation_model = .leveraged,
+        .product = .isolated_linear_usdt,
+        .venue = 1,
+    } } }));
+    _ = try shard.apply(@as(trading.CoreTransition, .{ .identity = 2, .payload = .{ .margin_rules_activated = .{
+        .version = 1,
+        .instrument = swap_instrument,
+    } } }));
+    try shard.economic_projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = .{ .instrument = swap_instrument, .rules_version = 1, .lots = 3 }, .price = .{ .instrument = swap_instrument, .rules_version = 1, .ticks = 50_000_000 }, .quantity_denominator = 1, .fee = .{ .asset = 1, .atoms = 7 }, .product = .isolated_linear_usdt } });
     var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
     group.members[0] = .{ .intent_sequence = 1, .strategy_instance = 20, .operation = .place, .instrument = swap_instrument, .quantity = 1, .limit_price = .{ .instrument = swap_instrument, .rules_version = 1, .ticks = 50_000_000 }, .reservation = .{ .asset = settlement_asset, .atoms = 50 } };
     try shard.oms.applyGroup(group);
@@ -703,7 +715,7 @@ test "cutover failures and forward rollback never regress economic state or gene
     try shard.oms.applyReport(.{ .report_id = 1, .order_id = 1, .revision = 1, .status = .filled, .cumulative_quantity = 1, .remaining_quantity = 0 });
     shard.quantity_denominator = 1;
     shard.mark_price_micros = 50_000_000;
-    var stable_journal = trading.journal.Journal.init();
+    var stable_journal = trading.journal.Journal.initAt(shard.trace.len + 1);
     var cutover: Cutover = .{ .generation = 4, .active_release = 10, .active_strategy_instance = 20, .phase = .active };
     const candidate: Candidate = .{
         .release = 11,

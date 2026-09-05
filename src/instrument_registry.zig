@@ -35,20 +35,23 @@ pub const Registry = struct {
     /// Adds an entry or confirms an exact duplicate. A changed identity is
     /// never silently replaced, which keeps replay and snapshot state stable.
     pub fn register(self: *Registry, entry: Entry) !bool {
-        if (self.get(entry.instrument)) |known| {
-            // Margin is activated by a separate canonical fact. Registration
-            // therefore compares only the immutable identity/rules portion;
-            // re-registering after margin activation remains an exact no-op.
-            if (known.venue != entry.venue or known.product != entry.product or
-                !std.meta.eql(known.rules, entry.rules))
-                return error.InstrumentIdentityConflict;
-            return false;
-        }
         if (entry.instrument == 0 or entry.rules.version == 0 or
             entry.rules.instrument_identity != entry.instrument or
             entry.rules.quantity_denominator <= 0 or
             entry.rules.product != entry.product)
             return error.InvalidInstrumentConfiguration;
+        if (self.getPtr(entry.instrument)) |known| {
+            // Margin is activated by a separate canonical fact. Registration
+            // therefore compares only the immutable identity/rules portion;
+            // re-registering after margin activation remains an exact no-op.
+            if (known.venue != entry.venue or known.product != entry.product)
+                return error.InstrumentIdentityConflict;
+            if (std.meta.eql(known.rules, entry.rules)) return false;
+            if (entry.rules.version < known.rules.version) return error.InstrumentRulesRegression;
+            if (entry.rules.version == known.rules.version) return error.InstrumentRulesConflict;
+            known.* = entry;
+            return true;
+        }
         if (self.count == self.entries.len) return error.InstrumentRegistryFull;
         self.entries[self.count] = entry;
         self.count += 1;
@@ -118,6 +121,24 @@ test "instrument registry is bounded, explicit, and idempotent" {
     try std.testing.expect(try registry.register(entry));
     try std.testing.expect(!(try registry.register(entry)));
     var conflict = entry;
-    conflict.product = .isolated_linear_usdt;
+    conflict.venue = 3;
     try std.testing.expectError(error.InstrumentIdentityConflict, registry.register(conflict));
+    try std.testing.expectEqualDeep(entry, registry.get(10).?);
+    var upgraded = entry;
+    upgraded.rules.version = 2;
+    try std.testing.expect(try registry.register(upgraded));
+    try std.testing.expectEqual(@as(u32, 2), registry.get(10).?.rules.version);
+    try std.testing.expectError(error.InstrumentRulesRegression, registry.register(entry));
+    try std.testing.expectEqualDeep(upgraded, registry.get(10).?);
+    for ([_]u128{ 11, 12, 13 }) |identity| {
+        var next = entry;
+        next.instrument = identity;
+        next.rules.instrument_identity = identity;
+        try std.testing.expect(try registry.register(next));
+    }
+    var overflow = entry;
+    overflow.instrument = 14;
+    overflow.rules.instrument_identity = 14;
+    try std.testing.expectError(error.InstrumentRegistryFull, registry.register(overflow));
+    try std.testing.expectEqual(@as(u8, max_entries), registry.count);
 }

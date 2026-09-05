@@ -772,7 +772,12 @@ test "an existing account failure does not commit an unrelated rejected event" {
     try std.testing.expect(run.shard.integritySnapshot().account_failure == .sequence_gap);
     const failed_digest = run.shard.canonicalStateDigest();
 
-    try std.testing.expectError(error.InstrumentRulesInactive, applyLive(&run.shard, &run.decision_journal, snapshotAt(13, 99)));
+    const unrelated = fixture.canonicalAt(13, 99, .{ .reference_price = .{
+        .instrument = 999,
+        .kind = .mark,
+        .price = .{ .instrument = 999, .rules_version = 1, .ticks = 50_000_000 },
+    } });
+    try std.testing.expectError(error.MissingInstrumentDefinition, applyLive(&run.shard, &run.decision_journal, unrelated));
     try std.testing.expectEqualSlices(u8, &failed_digest, &run.shard.canonicalStateDigest());
     try run.decision_journal.seal();
     const replay_digest = try fixture.replayDigest(run);
@@ -809,7 +814,7 @@ test "canonical not-sent is terminal without entering the legacy shard schema" {
 
 test "bounded multi instrument OMS closes lifecycle and partial policy" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 10, .policy = .independent, .count = 2 };
     group.members[0] = .{ .intent_sequence = 10, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000), .reservation = fixtureReservation(5_000_000) };
     group.members[1] = .{ .intent_sequence = 11, .operation = .place, .instrument = swap_instrument, .quantity = 20, .limit_price = fixtureOmsPrice(swap_instrument, 50_100_000), .reservation = fixtureReservation(1_000_000) };
@@ -863,7 +868,7 @@ test "bounded multi instrument OMS closes lifecycle and partial policy" {
     const digest = run.shard.canonicalStateDigest();
     var replayed: ReplayTradingShard = .{};
     for (genesis) |event| _ = try replayed.apply(event);
-    _ = try replayed.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try replayed.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     _ = try replayed.apply(atGroup(12, .{ .identity = 10, .payload = .{ .oms_intent_group = group } }));
     _ = try replayed.apply(atGroup(13, .{ .identity = 1, .payload = .{ .oms_dispatch_batch = dispatch } }));
     _ = try replayed.apply(atGroup(14, .{ .identity = 1, .payload = .{ .oms_reconciliation_result = .{ .reconciliation_id = 1, .order_id = 2, .status = .found_live, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 20 } } }));
@@ -874,9 +879,72 @@ test "bounded multi instrument OMS closes lifecycle and partial policy" {
     try std.testing.expectEqualSlices(u8, &digest, &replayed.canonicalStateDigest());
 }
 
+test "SPOT and linear instruments close economics and replay independently" {
+    var prefix = try startScenario();
+    var group: oms_module.IntentGroup = .{ .first_intent_sequence = 200, .policy = .independent, .count = 2 };
+    group.members[0] = .{ .intent_sequence = 200, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 30_000_000) };
+    group.members[1] = .{ .intent_sequence = 201, .operation = .place, .instrument = swap_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
+    const place = atGroup(12, .{ .identity = 200, .payload = .{ .oms_intent_group = group } });
+    _ = try applyLive(&prefix.shard, &prefix.decision_journal, place);
+    const commands = prefix.shard.oms.emitted();
+    try std.testing.expectEqual(@as(usize, 2), commands.len);
+    try std.testing.expectEqual(spot_instrument, commands[0].instrument);
+    try std.testing.expectEqual(swap_instrument, commands[1].instrument);
+    try std.testing.expect(commands[0].reservation.atoms != commands[1].reservation.atoms);
+
+    try prefix.decision_journal.seal();
+    var snapshot_storage: [64 * 1024]u8 = undefined;
+    const snapshot = try prefix.shard.snapshot(&prefix.decision_journal, prefix.decision_journal.last_sequence, &snapshot_storage);
+    const tail_events = [_]CoreTransition{
+        atGroup(13, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .partially_filled, .cumulative_quantity = 40, .remaining_quantity = 60 } } }),
+        atGroup(14, .{ .identity = 1, .payload = .{ .economic_fill = .{ .fill_id = 1, .order_id = 1, .quantity = 40, .price_micros = 30_000_000 } } }),
+        atGroup(15, .{ .identity = 2, .payload = .{ .oms_execution_report = .{ .report_id = 2, .order_id = 1, .revision = 1, .status = .filled, .cumulative_quantity = 100, .remaining_quantity = 0 } } }),
+        atGroup(16, .{ .identity = 2, .payload = .{ .economic_fill = .{ .fill_id = 2, .order_id = 1, .quantity = 60, .price_micros = 30_000_000 } } }),
+        atGroup(17, .{ .identity = 3, .payload = .{ .oms_execution_report = .{ .report_id = 3, .order_id = 2, .revision = 1, .status = .filled, .cumulative_quantity = 10, .remaining_quantity = 0 } } }),
+        atGroup(18, .{ .identity = 3, .payload = .{ .economic_fill = .{ .fill_id = 3, .order_id = 2, .quantity = 10, .price_micros = 50_000_000 } } }),
+        atGroup(19, .{ .identity = 5, .payload = .{ .mark_price = .{ .instrument = spot_instrument, .price_micros = 40_000_000 } } }),
+        atGroup(20, .{ .identity = 6, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 60_000_000 } } }),
+    };
+
+    var live = prefix.shard;
+    var tail = engine.journal.Journal.initAt(prefix.decision_journal.last_sequence + 1);
+    for (tail_events) |event| _ = try engine.applyTypedStable(&live, &tail, event);
+    try tail.seal();
+    try std.testing.expectEqual(oms_module.OrderState.filled, live.oms.orders[0].state);
+    try std.testing.expectEqual(oms_module.OrderState.filled, live.oms.orders[1].state);
+    try std.testing.expectEqual(@as(i64, 100), live.economicSummary().portfolio.spot.quantity);
+    try std.testing.expectEqual(@as(i64, 10), live.economicSummary().portfolio.swap.quantity);
+    try std.testing.expectEqual(@as(i64, 10_010), live.economicSummary().portfolio.unrealized_pnl_micros);
+
+    var replayed: ReplayTradingShard = .{};
+    for (genesis) |event| _ = try replayed.apply(event);
+    _ = try replayed.apply(place);
+    for (tail_events) |event| _ = try replayed.apply(event);
+    try std.testing.expectEqualSlices(u8, &live.canonicalStateDigest(), &replayed.canonicalStateDigest());
+    const recovered = try TradingShard.restore(snapshot, tail.bytes());
+    try std.testing.expectEqualSlices(u8, &live.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
+
+    const before_mismatch = live.canonicalStateDigest();
+    const wrong_fill = fixture.canonicalAt(21, 500, .{ .fill = .{
+        .identity = 500,
+        .order = 1,
+        .client_order_id = try canonical.ClientOrderId.init("spot-order"),
+        .venue_order = try canonical.VenueOrderRef.init(1, "spot-venue-order"),
+        .venue_trade = try canonical.VenueTradeRef.init(1, "wrong-swap-fill"),
+        .instrument = swap_instrument,
+        .exchange_account = 2,
+        .side = .buy,
+        .quantity = .{ .instrument = swap_instrument, .rules_version = 1, .lots = 1 },
+        .price = .{ .instrument = swap_instrument, .rules_version = 1, .ticks = 60_000_000 },
+        .liquidity = .taker,
+    } });
+    try std.testing.expectError(error.CanonicalScopeMismatch, live.apply(wrong_fill));
+    try std.testing.expectEqualSlices(u8, &before_mismatch, &live.canonicalStateDigest());
+}
+
 test "CancelConfirmCreate never overlaps and records predecessor" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 20, .count = 1 };
     place.members[0] = .{ .intent_sequence = 20, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000), .reservation = fixtureReservation(5_000_000) };
     const placed = try run.shard.apply(atGroup(12, .{ .identity = 20, .payload = .{ .oms_intent_group = place } }));
@@ -911,7 +979,7 @@ test "CancelConfirmCreate never overlaps and records predecessor" {
 
 test "IntentGroup batch results remain itemized" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 30, .policy = .cancel_remaining, .count = 3 };
     for (group.members[0..3], 0..) |*member, index| {
         const instrument = if (index == 1) swap_instrument else spot_instrument;
@@ -935,30 +1003,30 @@ test "IntentGroup batch results remain itemized" {
 
 test "layered risk owns reservations until authoritative absence" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 40, .count = 1 };
     group.members[0] = .{ .intent_sequence = 40, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000), .reservation = fixtureReservation(1) };
     const placed = try run.shard.apply(atGroup(12, .{ .identity = 40, .payload = .{ .oms_intent_group = group } }));
-    try std.testing.expectEqual(@as(i128, 500_375), run.shard.oms.orders[0].reservation.atoms);
-    try std.testing.expectEqual(@as(i64, 500_375), run.shard.layered_risk_reserved_micros);
+    try std.testing.expectEqual(@as(i128, 51), run.shard.oms.orders[0].reservation.atoms);
+    try std.testing.expectEqual(@as(i64, 51), run.shard.layered_risk_reserved_micros);
 
     var dispatch: oms_module.DispatchBatch = .{ .count = 1 };
     dispatch.items[0] = .{ .command_id = placed.oms_commands[0].command_id, .state = .unknown };
     _ = try run.shard.apply(atGroup(13, .{ .identity = 1, .payload = .{ .oms_dispatch_batch = dispatch } }));
-    try std.testing.expectEqual(@as(i64, 500_375), run.shard.layered_risk_reserved_micros);
+    try std.testing.expectEqual(@as(i64, 51), run.shard.layered_risk_reserved_micros);
     _ = try run.shard.apply(atGroup(14, .{ .identity = 1, .payload = .{ .oms_reconciliation_result = .{ .reconciliation_id = 1, .order_id = 1, .status = .confirmed_absent, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
     try std.testing.expectEqual(@as(i64, 0), run.shard.layered_risk_reserved_micros);
 
     var limited = try startScenario();
-    _ = try limited.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
-    limited.shard.strategy_limit_micros = 500_000;
+    _ = try limited.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
+    limited.shard.strategy_limit_micros = 50;
     try std.testing.expectError(error.StrategyLimitExceeded, limited.shard.apply(atGroup(12, .{ .identity = 40, .payload = .{ .oms_intent_group = group } })));
     try std.testing.expectEqual(@as(u8, 0), limited.shard.oms.order_count);
 }
 
 test "unknown OMS dispatch blocks a later place until the order is resolved" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     var first: oms_module.IntentGroup = .{ .first_intent_sequence = 90, .count = 1 };
     first.members[0] = .{
         .intent_sequence = 90,
@@ -991,7 +1059,7 @@ test "unknown OMS dispatch blocks a later place until the order is resolved" {
 
 test "TradingShard preserves maintenance margin in the projected buffer" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 45, .count = 1 };
     group.members[0] = .{ .intent_sequence = 45, .operation = .place, .instrument = swap_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
     _ = try run.shard.apply(atGroup(12, .{ .identity = 45, .payload = .{ .oms_intent_group = group } }));
@@ -1001,7 +1069,7 @@ test "TradingShard preserves maintenance margin in the projected buffer" {
 
 test "rejected IntentGroup leaves authoritative state unchanged" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     const before = run.shard.canonicalStateDigest();
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 50, .count = 2 };
     group.members[0] = .{ .intent_sequence = 50, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
@@ -1012,7 +1080,7 @@ test "rejected IntentGroup leaves authoritative state unchanged" {
 
 test "rejected dispatch batch leaves authoritative state unchanged" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 55, .count = 1 };
     group.members[0] = .{ .intent_sequence = 55, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
     _ = try run.shard.apply(atGroup(12, .{ .identity = 55, .payload = .{ .oms_intent_group = group } }));
@@ -1040,7 +1108,7 @@ test "rejected execution report leaves authoritative state unchanged" {
 
 test "authoritative reconciliation cannot regress a terminal order" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 60, .count = 1 };
     group.members[0] = .{ .intent_sequence = 60, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
     _ = try run.shard.apply(atGroup(12, .{ .identity = 60, .payload = .{ .oms_intent_group = group } }));
@@ -1054,7 +1122,7 @@ test "authoritative reconciliation cannot regress a terminal order" {
 
 test "CancelConfirmCreate re-risks replacement against latest facts" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 70, .count = 1 };
     place.members[0] = .{ .intent_sequence = 70, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
     _ = try run.shard.apply(atGroup(12, .{ .identity = 70, .payload = .{ .oms_intent_group = place } }));
@@ -1062,7 +1130,7 @@ test "CancelConfirmCreate re-risks replacement against latest facts" {
     var replace: oms_module.IntentGroup = .{ .first_intent_sequence = 71, .count = 1 };
     replace.members[0] = .{ .intent_sequence = 71, .operation = .amend, .instrument = spot_instrument, .target_order_id = 1, .expected_revision = 1, .quantity = 80, .limit_price = fixtureOmsPrice(spot_instrument, 49_000_000), .native_amend = false, .allow_cancel_confirm_create = true };
     _ = try run.shard.apply(atGroup(14, .{ .identity = 71, .payload = .{ .oms_intent_group = replace } }));
-    run.shard.strategy_limit_micros = 100;
+    run.shard.strategy_limit_micros = 10;
     const result = try run.shard.apply(atGroup(15, .{ .identity = 2, .payload = .{ .oms_execution_report = .{ .report_id = 2, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
     try std.testing.expectEqual(oms_module.OrderState.canceled, run.shard.oms.orders[0].state);
     try std.testing.expectEqual(@as(u8, 1), run.shard.oms.order_count);
@@ -1071,7 +1139,7 @@ test "CancelConfirmCreate re-risks replacement against latest facts" {
 
 test "qualified command carries independently inferred reduce-only flags" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     run.shard.economic_projection.portfolio.swap.quantity = 10;
     run.shard.economic_projection.exchange.swap.quantity = -5;
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 75, .count = 1 };
@@ -1084,7 +1152,7 @@ test "qualified command carries independently inferred reduce-only flags" {
 
 test "SPOT asset risk is isolated from SWAP positions" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     run.shard.economic_projection.portfolio.swap.quantity = 10;
     run.shard.economic_projection.exchange.swap.quantity = 10;
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 79, .count = 1 };
@@ -1094,7 +1162,7 @@ test "SPOT asset risk is isolated from SWAP positions" {
 
 test "economic fills derive ownership from OMS and close Portfolio Exchange ledgers" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 79, .count = 1 };
     group.members[0] = .{ .intent_sequence = 79, .operation = .place, .instrument = swap_instrument, .side = .buy, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
     _ = try run.shard.apply(atGroup(12, .{ .identity = 79, .payload = .{ .oms_intent_group = group } }));
@@ -1118,7 +1186,7 @@ test "economic fills derive ownership from OMS and close Portfolio Exchange ledg
 
 test "funding forced execution and snapshots preserve auditable local economics" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     const before = run.shard.economicSummary();
     _ = try run.shard.apply(atGroup(12, .{ .identity = 10, .payload = .{ .funding_settlement = .{ .settlement_id = 10, .amount_micros = -25 } } }));
     _ = try run.shard.apply(atGroup(13, .{ .identity = 11, .payload = .{ .venue_forced_execution = .{ .execution_id = 11, .side = .sell, .quantity = 2, .price_micros = 50_000_000, .fee_micros = 3, .penalty_micros = 2 } } }));
@@ -1149,7 +1217,7 @@ test "duplicate economic facts are no-op at the TradingShard seam" {
 
 test "CancelConfirmCreate accepts authoritative reconciliation as confirmation" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 76, .count = 1 };
     place.members[0] = .{ .intent_sequence = 76, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
     _ = try run.shard.apply(atGroup(12, .{ .identity = 76, .payload = .{ .oms_intent_group = place } }));
@@ -1165,7 +1233,7 @@ test "CancelConfirmCreate accepts authoritative reconciliation as confirmation" 
 
 test "older reconciliation identity still rejects semantic conflict" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 78, .count = 1 };
     place.members[0] = .{ .intent_sequence = 78, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
     _ = try run.shard.apply(atGroup(12, .{ .identity = 78, .payload = .{ .oms_intent_group = place } }));
@@ -1176,7 +1244,7 @@ test "older reconciliation identity still rejects semantic conflict" {
 
 test "multiple SPOT and SWAP orders independently close place amend and cancel" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 80, .count = 4 };
     place.members[0] = .{ .intent_sequence = 80, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
     place.members[1] = .{ .intent_sequence = 81, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
@@ -1205,7 +1273,7 @@ test "multiple SPOT and SWAP orders independently close place amend and cancel" 
 }
 
 fn applyHealthyPreludeReplay(replay_shard: *ReplayTradingShard) !void {
-    _ = try replay_shard.apply(atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000_000 } }));
+    _ = try replay_shard.apply(atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000_000 } } }));
     _ = try replay_shard.apply(fixture.canonicalAt(12, 99, .{ .instrument_definition_observed = .{ .instrument = 3, .rules_version = 1 } }));
     _ = try replay_shard.apply(snapshotAt(13, 100));
     _ = try replay_shard.apply(deltaAt(14, 100, 101, 49_850_000_000));

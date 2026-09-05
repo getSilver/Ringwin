@@ -5,7 +5,7 @@ const coordination = @import("account_coordinator.zig");
 const ShardId = coordination.ShardId;
 const max_shards = coordination.max_shards;
 const Sha256 = std.crypto.hash.sha2.Sha256;
-const swap_instrument: trading.oms.Instrument = 2;
+const swap_instrument: trading.oms.Instrument = 3;
 const settlement_asset: trading.canonical.AssetIdentity = 1;
 
 const money_scale: i64 = 1_000_000;
@@ -22,7 +22,7 @@ const place_fee_micros: i64 = 400_000;
 const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
 pub const acceptance_schema_version: u16 = 2;
-const expected_shared_summary_v2 = "e124735e7c33b86358e0a9fe23d9d1a51a86436627821b7cfc48ffbfc7f23476";
+const expected_shared_summary_v2 = "f182d1406d24c5ae9a4ceeb6be0245613922786fc467cfe731b3e28a8346a0a4";
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreTransition) !?trading.OrderCommand {
     return trading.applyTypedStable(shard, stable_journal, input);
@@ -261,7 +261,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     }
 
     for (0..max_shards) |index| {
-        try world.apply(index, .{ .identity = 5, .payload = .{ .mark_price = mark_price_micros } });
+        try world.apply(index, .{ .identity = 5, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = mark_price_micros } } });
         var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 10, .count = 1 };
         group.members[0] = .{
             .intent_sequence = 10,

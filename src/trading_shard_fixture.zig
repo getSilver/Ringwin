@@ -17,18 +17,18 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-pub const expected_happy_digest = "06fbeb256cfb02360c40668a8ccc34de0d4c8a532a1e0b1ebd4ff50b683c1048";
+pub const expected_happy_digest = "0968f5010031c9310d9d295b0fb9d7e027893f749386f2dc0b49cb819576d5c4";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "b95c50d8d0b8c79b2b82f5191bb4ee031bac8369ebf4f838ff1bc80f86da4cdc",
-    "dded7fe60cc6693de322664fbf66b00ee05d177e990c3830644961a6ad514850",
-    "103e070525340114edb9fae1bd5c3b880f29c01b990f0fdf4ed3dd45adb938d4",
+    "aab56348cb838b2d801e9779bb552216f6918b2f8d7f2fbd33acf1fe1d46f828",
+    "1e0e55dead9f1d27c863c9dbf7cc153ea742e9623fbf07bed4ea14c4cab09f06",
+    "eafc295182e334d2ca4c5e756b215a07010307b3aeae63254ec22941f64eaf46",
     expected_happy_digest,
 };
 pub const order_limit_price: i64 = 50_100_000_000;
 pub const settlement_asset: canonical.AssetIdentity = 1;
-pub const spot_instrument: engine.oms.Instrument = 1;
-pub const swap_instrument: engine.oms.Instrument = 2;
+pub const swap_instrument: engine.oms.Instrument = 3;
+pub const spot_instrument: engine.oms.Instrument = 4;
 pub const margin_kill_gate_identity: u128 = 0x4d415247494e4b494c4c;
 pub const primary_lease_gate_identity: u128 = 0x5052494d4152594c45415345;
 pub const risk_lease_gate_identity: u128 = 0x5249534b4c45415345;
@@ -174,7 +174,7 @@ fn finish(run: *LiveRun) !LiveRun {
     return run.*;
 }
 
-pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_model: engine.ReservationModel) [14]engine.CoreTransition {
+pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_model: engine.ReservationModel) [18]engine.CoreTransition {
     const denominator: i64 = switch (reservation_model) {
         .leveraged => contract_denominator,
         .cash => 100_000_000,
@@ -185,8 +185,30 @@ pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_mode
             .instrument_identity = 3,
             .quantity_denominator = denominator,
             .reservation_model = reservation_model,
+            .product = if (reservation_model == .cash) .spot else .isolated_linear_usdt,
+            .venue = 1,
         } } }),
         atGroup(2, .{ .identity = 1, .payload = .{ .margin_rules_activated = .{ .version = 1 } } }),
+        atGroup(2, .{ .identity = 2, .payload = .{ .instrument_rules_activated = .{
+            .version = 1,
+            .instrument_identity = spot_instrument,
+            .quantity_denominator = 100_000_000,
+            .reservation_model = .cash,
+            .product = .spot,
+            .venue = 1,
+        } } }),
+        atGroup(2, .{ .identity = 2, .payload = .{ .margin_rules_activated = .{
+            .version = 1,
+            .instrument = spot_instrument,
+        } } }),
+        atGroup(2, .{ .identity = 3, .payload = .{ .mark_price = .{
+            .instrument = swap_instrument,
+            .price_micros = 50_000_000,
+        } } }),
+        atGroup(2, .{ .identity = 4, .payload = .{ .mark_price = .{
+            .instrument = spot_instrument,
+            .price_micros = 50_000_000,
+        } } }),
         atGroup(3, .{ .identity = 1, .payload = .{ .account_configuration = .{ .exchange_account_identity = 2 } } }),
         atGroup(4, .{ .identity = 1, .payload = .{ .exchange_balance = .{ .cash_micros = initial_exchange_cash } } }),
         atGroup(5, .{ .identity = 1, .payload = .exchange_positions }),
@@ -232,7 +254,7 @@ pub fn startScenario() !LiveRun {
 }
 
 pub fn applyHealthyPrelude(run: *LiveRun) !void {
-    if (try apply(run, atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000_000 } })) != null)
+    if (try apply(run, atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000_000 } } })) != null)
         return error.UnexpectedCommand;
     const prelude = [_]canonical.EventRecord{
         canonicalAt(12, 99, .{ .instrument_definition_observed = .{ .instrument = 3, .rules_version = 1 } }),
@@ -382,7 +404,7 @@ pub fn runHappyPath() !LiveRun {
         if (try apply(&run, event) != null) return error.UnexpectedCommand;
         if (index == 2) try assertPartialState(run.shard);
     }
-    if (try apply(&run, atGroup(19, .{ .identity = 2, .payload = .{ .mark_price = 50_200_000_000 } })) != null)
+    if (try apply(&run, atGroup(19, .{ .identity = 2, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_200_000_000 } } })) != null)
         return error.UnexpectedCommand;
     return finish(&run);
 }
@@ -434,7 +456,7 @@ pub fn runDuplicateReport() !LiveRun {
     if (run.shard.economic_projection.ledger_summary.transaction_count != 2) return error.DuplicateCreatedLedgerTransaction;
     if (try apply(&run, facts[4]) != null) return error.UnexpectedCommand;
     if (try apply(&run, facts[5]) != null) return error.UnexpectedCommand;
-    if (try apply(&run, atGroup(20, .{ .identity = 2, .payload = .{ .mark_price = 50_200_000_000 } })) != null)
+    if (try apply(&run, atGroup(20, .{ .identity = 2, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_200_000_000 } } })) != null)
         return error.UnexpectedCommand;
     return finish(&run);
 }
@@ -681,7 +703,7 @@ test "snapshot restore replays only the stable journal tail without send capabil
     const encoded = try prefix.shard.snapshot(&prefix.decision_journal, prefix.decision_journal.last_sequence, &snapshot_storage);
     var live = prefix.shard;
     var tail = journal.Journal.initAt(prefix.decision_journal.last_sequence + 1);
-    _ = try engine.applyStable(&live, &tail, atGroup(12, .{ .identity = 9, .payload = .{ .mark_price = 50_000_000_000 } }));
+    _ = try engine.applyStable(&live, &tail, atGroup(12, .{ .identity = 9, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000_000 } } }));
     try tail.seal();
     const recovered = try engine.TradingShard.restore(encoded, tail.bytes());
     try std.testing.expectEqual(journal.ScanStatus.clean, recovered.status);

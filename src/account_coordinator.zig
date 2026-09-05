@@ -1343,9 +1343,20 @@ test "unowned economics route once and account gates enter the stable shard seam
     try std.testing.expectEqual(ShardId.shard_0, deliveries[0].shard_id);
 
     var shard: trading.TradingShard = .{};
-    shard.quantity_denominator = 1;
     shard.operational_state = trading.operational.State.init(100);
     var stable_journal = trading.journal.Journal.init();
+    _ = try applyCoreStable(&shard, &stable_journal, .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{
+        .version = 1,
+        .instrument_identity = 3,
+        .quantity_denominator = 1,
+        .reservation_model = .leveraged,
+        .product = .isolated_linear_usdt,
+        .venue = 1,
+    } } });
+    _ = try applyCoreStable(&shard, &stable_journal, .{ .identity = 2, .payload = .{ .margin_rules_activated = .{
+        .version = 1,
+        .instrument = 3,
+    } } });
     try applyAccountFactStable(deliveries[0], .shard_0, &shard, &stable_journal);
     try std.testing.expect(shard.economicSummary().reconciliation_break);
     const gate_delivery: GateDelivery = .{ .shard_id = .shard_0, .gate = .{ .identity = 44, .open = false, .latched = true } };
