@@ -1,93 +1,87 @@
-//! Evidence boundary for a bounded Bybit TestnetRun.
-//! It cannot express production or Linux-performance qualification.
-const adapter = @import("bybit_venue_adapter.zig");
+//! Honest qualification state for Bybit Testnet.
+//! No public function can turn caller-supplied counters, booleans or digests
+//! into TestnetQualified evidence. A real opt-in runner may add that transition
+//! when its external inputs and network workflow exist.
+
 const std = @import("std");
 
-pub const EvidenceScope = enum { contract_tested, official_confirmed, testnet_run };
-pub const Evidence = struct { scope: EvidenceScope, run_id: u64 = 0 };
+pub const RunFailure = enum { incomplete_external_input, request_failed, private_facts_missing, reconciliation_failed, isolation_failed, replay_mismatch };
 
-const ContractSeal = struct { value: u64 };
-pub const ContractTested = struct { seal: ContractSeal, digest: [32]u8 };
-pub const OfficialConfirmed = struct { contract: ContractTested, source_digest: [32]u8 };
-pub const TestnetRun = struct {
-    official: OfficialConfirmed,
-    run_id: u64,
-    before: AccountState,
-    after: AccountState,
-    requests: u32,
-    private_facts: u32,
-    reconciliation_facts: u32,
-    live_digest: [32]u8,
-    replay_digest: [32]u8,
-    isolation_proven: bool,
-    seal: u64,
+const ContractSeal = opaque {};
+const OfficialSeal = opaque {};
+const TestnetSeal = opaque {};
+var contract_marker: u8 = 0;
+var official_marker: u8 = 0;
+
+pub const ContractTested = struct {
+    source: *const ContractSeal,
 };
 
-pub const AccountState = struct {
-    open_orders: u16 = 0,
-    position_atoms: i128 = 0,
-    liability_atoms: i128 = 0,
-    has_unknown: bool = false,
+pub const OfficialConfirmed = struct {
+    contract: ContractTested,
+    source: *const OfficialSeal,
+};
 
-    pub fn isClean(self: AccountState) bool {
-        return self.open_orders == 0 and self.position_atoms == 0 and self.liability_atoms == 0 and !self.has_unknown;
+pub const TestnetQualified = struct {
+    source: *const TestnetSeal,
+    run_id: u64,
+    live_digest: [32]u8,
+    replay_digest: [32]u8,
+};
+
+pub const FailedRun = struct {
+    run_id: u64,
+    reason: RunFailure,
+};
+
+pub const RunStatus = union(enum) {
+    not_run,
+    failed: FailedRun,
+    qualified: TestnetQualified,
+};
+
+pub const RunLedger = struct {
+    latest_run_id: u64 = 0,
+    current: RunStatus = .not_run,
+
+    pub fn recordFailure(self: *RunLedger, failure: FailedRun) !void {
+        if (failure.run_id == 0 or failure.run_id <= self.latest_run_id) return error.StaleTestnetRun;
+        self.latest_run_id = failure.run_id;
+        self.current = .{ .failed = failure };
+    }
+
+    pub fn status(self: *const RunLedger) RunStatus {
+        return self.current;
     }
 };
 
 pub fn contractTested() ContractTested {
-    return .{ .seal = .{ .value = 0x4259424954 }, .digest = @splat(0x42) };
+    return .{ .source = @ptrCast(&contract_marker) };
 }
 
-pub fn officialConfirmed(contract: ContractTested, source_digest: [32]u8) !OfficialConfirmed {
-    if (contract.seal.value == 0 or std.mem.eql(u8, &source_digest, &@as([32]u8, @splat(0)))) return error.InvalidOfficialEvidence;
-    return .{ .contract = contract, .source_digest = source_digest };
-}
-
-pub fn status() EvidenceScope {
-    return .contract_tested;
-}
-
-pub fn recordTestnetRun(
-    official: OfficialConfirmed,
-    admission: adapter.TestnetAdmission,
-    run_id: u64,
-    before: AccountState,
-    after: AccountState,
-    requests: u32,
-    private_facts: u32,
-    reconciliation_facts: u32,
-    live_digest: [32]u8,
-    replay_digest: [32]u8,
-    isolation_proven: bool,
-) !TestnetRun {
-    if (!admission.permitsPlace()) return error.TestnetNotAuthorized;
-    if (run_id == 0 or requests == 0 or private_facts == 0 or reconciliation_facts == 0)
-        return error.IncompleteTestnetRun;
-    if (!std.mem.eql(u8, &live_digest, &replay_digest)) return error.ReplayDigestMismatch;
-    return .{ .official = official, .run_id = run_id, .before = before, .after = after, .requests = requests, .private_facts = private_facts, .reconciliation_facts = reconciliation_facts, .live_digest = live_digest, .replay_digest = replay_digest, .isolation_proven = isolation_proven, .seal = official.contract.seal.value ^ run_id };
-}
-
-pub fn grant(run: TestnetRun) !Evidence {
-    if (run.seal != run.official.contract.seal.value ^ run.run_id) return error.InvalidTestnetEvidence;
-    if (!run.before.isClean()) return error.DirtyStartingAccount;
-    if (!run.after.isClean()) return error.DirtyEndingAccount;
-    if (!run.isolation_proven) return error.FailureIsolationMissing;
-    return .{ .scope = .testnet_run, .run_id = run.run_id };
-}
-
-test "Bybit TestnetRun evidence is fail-closed and scope-limited" {
-    const admitted = adapter.TestnetAdmission{
-        .explicit_enable = true,
-        .endpoint_is_testnet = true,
-        .credential_can_read = true,
-        .credential_can_trade = true,
-        .credential_can_withdraw = false,
+pub fn officialConfirmed(contract: ContractTested) !OfficialConfirmed {
+    if (contract.source != @as(*const ContractSeal, @ptrCast(&contract_marker))) return error.InvalidContractEvidence;
+    return .{
+        .contract = contract,
+        .source = @ptrCast(&official_marker),
     };
-    const official = try officialConfirmed(contractTested(), @splat(7));
-    const evidence = try grant(try recordTestnetRun(official, admitted, 1, .{}, .{}, 1, 1, 1, @splat(3), @splat(3), true));
-    try std.testing.expectEqual(EvidenceScope.testnet_run, evidence.scope);
-    try std.testing.expectError(error.TestnetNotAuthorized, recordTestnetRun(official, .{}, 1, .{}, .{}, 1, 1, 1, @splat(3), @splat(3), true));
-    try std.testing.expectError(error.DirtyStartingAccount, grant(try recordTestnetRun(official, admitted, 2, .{ .open_orders = 1 }, .{}, 1, 1, 1, @splat(3), @splat(3), true)));
-    try std.testing.expectError(error.DirtyEndingAccount, grant(try recordTestnetRun(official, admitted, 3, .{}, .{ .position_atoms = 1 }, 1, 1, 1, @splat(3), @splat(3), true)));
-    try std.testing.expectError(error.DirtyEndingAccount, grant(try recordTestnetRun(official, admitted, 4, .{}, .{ .has_unknown = true }, 1, 1, 1, @splat(3), @splat(3), true)));
+}
+
+pub fn status() RunStatus {
+    return .not_run;
+}
+
+test "Bybit qualification stays not-run without an authoritative runner" {
+    try std.testing.expect(status() == .not_run);
+    try std.testing.expect(!@hasDecl(@This(), "recordTestnetRun"));
+    try std.testing.expect(!@hasDecl(@This(), "grant"));
+    _ = try officialConfirmed(contractTested());
+}
+
+test "Bybit failure evidence is retained and old run ids are rejected" {
+    var ledger: RunLedger = .{};
+    try ledger.recordFailure(.{ .run_id = 13, .reason = .reconciliation_failed });
+    try std.testing.expectEqual(RunFailure.reconciliation_failed, ledger.status().failed.reason);
+    try std.testing.expectError(error.StaleTestnetRun, ledger.recordFailure(.{ .run_id = 12, .reason = .request_failed }));
+    try std.testing.expectEqual(RunFailure.reconciliation_failed, ledger.status().failed.reason);
 }

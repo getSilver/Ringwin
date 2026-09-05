@@ -25,17 +25,23 @@ TestnetQualified 必须来自目标 Testnet 的显式 opt-in runner，完成真�
 
 ## Acceptance
 
-- [ ] 公共 API 不再接受可由调用者任意构造的“全部通过”布尔矩阵来生成 TestnetQualified。
-- [ ] ContractTested、OfficialConfirmed、TestnetRun/TestnetQualified 具有互不冒充的证据类型和明确聚合规则。
-- [ ] Testnet runner 默认不运行，只有 SystemOwner 显式授权且所需外部输入完整时才访问网络。
-- [ ] 缺少真实运行、部分失败或隔离失败时保存失败证据并返回非 qualified，不生成成功替代摘要。
-- [ ] 离线自动测试证明伪造状态、任意 digest、重放旧 run 和跨 Venue 复用证据均被拒绝。
-- [ ] OKX Demo 只能映射为 DemoQualified；不能升级、复用或伪装为任一 Venue 的 TestnetQualified。
-- [ ] 当前状态输出在未执行真实 Testnet 时明确显示“未运行”，且不要求任何生产账户、资金或密钥。
+- [x] 公共 API 不再接受可由调用者任意构造的“全部通过”布尔矩阵来生成 TestnetQualified。
+- [x] ContractTested、OfficialConfirmed、TestnetRun/TestnetQualified 具有互不冒充的证据类型和明确聚合规则。
+- [x] Testnet runner 默认不运行，只有 SystemOwner 显式授权且所需外部输入完整时才访问网络。
+- [x] 缺少真实运行、部分失败或隔离失败时保存失败证据并返回非 qualified，不生成成功替代摘要。
+- [x] 离线自动测试证明伪造状态、任意 digest、重放旧 run 和跨 Venue 复用证据均被拒绝。
+- [x] OKX Demo 只能映射为 DemoQualified；不能升级、复用或伪装为任一 Venue 的 TestnetQualified。
+- [x] 当前状态输出在未执行真实 Testnet 时明确显示“未运行”，且不要求任何生产账户、资金或密钥。
 
 ## Evidence
 
-- Shared evidence now carries `Venue + Environment + Qualification`; OKX Demo maps to `DemoQualified`, while
-  Binance/Bybit TestnetRun maps to `TestnetQualified` only after their own sealed run is granted.
-- Testnet status remains contract-only by default; network access is absent unless an explicit adapter admission and complete run record are supplied.
-- Offline Zig tests cover dirty accounts, missing authorization, replay mismatch and incomplete run evidence.
+- Removed the public `recordTestnetRun`/`grant` path that accepted caller-provided counters, booleans and
+  equal digests. Binance and Bybit now expose distinct sealed qualification types with no synthetic constructor.
+- The checked-in aggregate reports OKX Demo, Binance Testnet and Bybit Testnet as `not_run`; it cannot accept
+  fabricated run records. The existing OKX executable emits `demo_qualified` only after its explicit live path,
+  cleanup and replay checks succeed.
+- Venue-local ledgers retain failure reasons and reject zero, duplicate and regressing run ids. Offline tests
+  assert the promotion APIs are absent, stale evidence is rejected and Venue qualification types are distinct.
+- No Binance/Bybit live Testnet runner or external run record exists in this repository; therefore no
+  `TestnetQualified` value is produced. Adding such a runner requires explicit owner authorization and complete
+  Testnet inputs, and remains outside the default offline entrypoint.
