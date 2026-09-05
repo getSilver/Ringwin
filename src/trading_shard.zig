@@ -32,6 +32,7 @@ const money_scale: i64 = 1_000_000;
 const contract_denominator: i64 = 10_000;
 const fee_ppm: i64 = 750;
 const market_data_gate_identity: u128 = 0x4d41524b455444415441;
+const account_data_gate_identity: u128 = 0x4143434f554e5444415441;
 const margin_warning_gate_identity: u128 = 0x4d415247494e5741524e;
 const margin_kill_gate_identity: u128 = 0x4d415247494e4b494c4c;
 const primary_lease_gate_identity: u128 = 0x5052494d4152594c45415345;
@@ -309,6 +310,8 @@ pub const TradingShard = struct {
 
     fn applyCanonical(self: *TradingShard, event: canonical.EventRecord) !ApplyResult {
         var candidate = self.*;
+        const account_failure_before = candidate.canonical_account.failure;
+        const market_failure_before = candidate.canonical_market.failure;
         const before = candidate.trace.len;
         candidate.oms.begin();
         const command = blk: {
@@ -318,25 +321,25 @@ pub const TradingShard = struct {
             // Projection invalidation is authoritative even when the public
             // apply call reports the rejected observation. This is the only
             // exception to the ordinary candidate-commit-on-success rule.
-            if (candidate.canonical_account.failure != null) {
-                if (candidate.operational_state.initialized) candidate.applyOperationalGate(.{
-                    .gate_identity = event.envelope.identity.sequence,
+            if (candidate.canonical_account.failure != account_failure_before) {
+                if (candidate.operational_state.initialized) try candidate.applyOperationalGate(.{
+                    .gate_identity = account_data_gate_identity,
                     .target_identity = candidate.operational_state.target_identity,
                     .kind = .latched,
                     .reason = .reconciliation_break,
                     .open = false,
-                }) catch {};
-                candidate.trace.append(.canonical_account_invalidated, event.envelope.identity.sequence) catch {};
+                });
+                try candidate.trace.append(.canonical_account_invalidated, event.envelope.identity.sequence);
                 self.* = candidate;
-            } else if (candidate.canonical_market.failure != null) {
-                if (candidate.operational_state.initialized) candidate.applyOperationalGate(.{
-                    .gate_identity = event.envelope.identity.sequence,
+            } else if (candidate.canonical_market.failure != market_failure_before) {
+                if (candidate.operational_state.initialized) try candidate.applyOperationalGate(.{
+                    .gate_identity = market_data_gate_identity,
                     .target_identity = candidate.operational_state.target_identity,
                     .kind = .self_recovering,
                     .reason = .market_data,
                     .open = false,
-                }) catch {};
-                candidate.trace.append(.canonical_market_invalidated, event.envelope.identity.sequence) catch {};
+                });
+                try candidate.trace.append(.canonical_market_invalidated, event.envelope.identity.sequence);
                 self.* = candidate;
             }
             return err;
@@ -1955,23 +1958,30 @@ fn applyCanonicalStable(
     input: canonical.EventRecord,
 ) !?OrderCommand {
     const checkpoint = decision_journal.checkpoint();
-    errdefer decision_journal.restore(checkpoint);
     const before = shard.trace.len;
+    const account_failure_before = shard.canonical_account.failure;
+    const market_failure_before = shard.canonical_market.failure;
     var candidate_shard = shard.*;
     const result = candidate_shard.apply(input) catch |err| {
         // Account/market projection failure is itself a durable fact. Keep
         // the invalid candidate and journal its fact group before surfacing
         // the original observation error to the caller.
-        if (candidate_shard.canonical_account.failure != null or
-            candidate_shard.canonical_market.failure != null)
+        if (candidate_shard.canonical_account.failure != account_failure_before or
+            candidate_shard.canonical_market.failure != market_failure_before)
         {
-            try appendStableFactGroup(decision_journal, input, candidate_shard.trace.events[before..candidate_shard.trace.len]);
+            appendStableFactGroup(decision_journal, input, candidate_shard.trace.events[before..candidate_shard.trace.len]) catch |journal_err| {
+                decision_journal.restore(checkpoint);
+                return journal_err;
+            };
             shard.* = candidate_shard;
         }
         return err;
     };
     if (result.facts.len == 0) return error.InputProducedNoFact;
-    try appendStableFactGroup(decision_journal, input, result.facts);
+    appendStableFactGroup(decision_journal, input, result.facts) catch |err| {
+        decision_journal.restore(checkpoint);
+        return err;
+    };
     shard.* = candidate_shard;
     return result.order_command;
 }

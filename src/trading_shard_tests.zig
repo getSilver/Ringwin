@@ -686,8 +686,7 @@ test "shared canonical adapter facts enter the TradingShard state seam" {
 
 test "account bootstrap snapshot is normalized before stable journal replay" {
     const Envelope = struct {
-        fn record(sequence: u64, snapshot: canonical.AccountBootstrapSnapshot) canonical.EventRecord {
-            const event: canonical.CanonicalEvent = .{ .account_bootstrap_snapshot = snapshot };
+        fn record(sequence: u64, event: canonical.CanonicalEvent) canonical.EventRecord {
             return .{ .envelope = .{
                 .event_type = @intFromEnum(canonical.eventType(event)),
                 .schema_version = 1,
@@ -716,15 +715,68 @@ test "account bootstrap snapshot is normalized before stable journal replay" {
         .position_count = 0,
         .margin_count = 0,
     };
-    _ = try applyLive(&run.shard, &run.decision_journal, Envelope.record(1, snapshot));
+    _ = try applyLive(&run.shard, &run.decision_journal, Envelope.record(1, .{ .account_bootstrap_snapshot = snapshot }));
     try run.decision_journal.seal();
     _ = try assertReplayEquivalent(run);
 
     var invalid = snapshot;
     invalid.balance_count = canonical.max_account_facts + 1;
     const before = run.shard.canonicalStateDigest();
-    try std.testing.expectError(error.InvalidAccountFactCount, run.shard.apply(Envelope.record(2, invalid)));
+    try std.testing.expectError(error.InvalidAccountFactCount, run.shard.apply(Envelope.record(2, .{ .account_bootstrap_snapshot = invalid })));
     try std.testing.expectEqualSlices(u8, &before, &run.shard.canonicalStateDigest());
+}
+
+test "an existing account failure does not commit an unrelated rejected event" {
+    const Envelope = struct {
+        fn record(sequence: u64, event: canonical.CanonicalEvent) canonical.EventRecord {
+            return .{ .envelope = .{
+                .event_type = @intFromEnum(canonical.eventType(event)),
+                .schema_version = 1,
+                .identity = .{ .stream = 7, .sequence = sequence },
+                .source_fact_identity = sequence,
+                .scope = .account,
+                .venue = 1,
+                .exchange_account = 2,
+                .source_stream = 7,
+                .source_sequence = sequence,
+                .adapter_session = 1,
+                .times = .{ .receive_utc_ns = sequence, .monotonic_ns = sequence, .audit_utc_ns = sequence },
+                .raw_evidence = .{ .stream = 7, .sequence = sequence, .digest = @splat(0) },
+            }, .event = event };
+        }
+    };
+
+    var run = try startScenario();
+    const snapshot: canonical.AccountBootstrapSnapshot = .{
+        .identity = 77,
+        .exchange_account = 2,
+        .scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true },
+        .source_stream = 7,
+        .source_sequence = 1,
+        .balance_count = 0,
+        .position_count = 0,
+        .margin_count = 0,
+    };
+    _ = try applyLive(&run.shard, &run.decision_journal, Envelope.record(1, .{ .account_bootstrap_snapshot = snapshot }));
+    const amount: canonical.AssetAmount = .{ .asset = settlement_asset, .atoms = 0 };
+    const balance: canonical.AccountBalance = .{ .asset = settlement_asset, .total = amount, .available = amount, .held = amount };
+    const gap: canonical.AccountObservation = .{
+        .identity = 2,
+        .exchange_account = 2,
+        .bootstrap = snapshot.identity,
+        .source_stream = snapshot.source_stream,
+        .source_sequence = 3,
+        .value = .{ .balance = .{ .asset = settlement_asset, .value = balance } },
+    };
+    try std.testing.expectError(error.SourceSequenceGap, applyLive(&run.shard, &run.decision_journal, Envelope.record(2, .{ .account_observed = gap })));
+    try std.testing.expect(run.shard.integritySnapshot().account_failure == .sequence_gap);
+    const failed_digest = run.shard.canonicalStateDigest();
+
+    try std.testing.expectError(error.InstrumentRulesInactive, applyLive(&run.shard, &run.decision_journal, snapshotAt(13, 99)));
+    try std.testing.expectEqualSlices(u8, &failed_digest, &run.shard.canonicalStateDigest());
+    try run.decision_journal.seal();
+    const replay_digest = try fixture.replayDigest(run);
+    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &replay_digest);
 }
 
 test "canonical not-sent is terminal without entering the legacy shard schema" {
