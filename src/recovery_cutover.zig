@@ -1,12 +1,13 @@
 const std = @import("std");
 const trading = @import("trading_shard.zig");
+const fixture = @import("trading_shard_fixture.zig");
 const spot_instrument: trading.oms.Instrument = 1;
 const swap_instrument: trading.oms.Instrument = 2;
 const settlement_asset: trading.canonical.AssetIdentity = 1;
 const strategy_recovery = @import("strategy_host_recovery.zig");
 
-fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreTransition) !?trading.OrderCommand {
-    return trading.applyTypedStable(shard, stable_journal, input);
+fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
+    return trading.applyStable(shard, stable_journal, .{ .core = input });
 }
 
 /// Restart admission phase; only ready may later accept a fresh EnableTrading.
@@ -486,27 +487,34 @@ pub const Cutover = struct {
 };
 
 test "restart recovery remains fenced until exact venue evidence closes" {
-    var shard: trading.TradingShard = .{};
-    var stable_journal = trading.journal.Journal.init();
+    const run = try fixture.startScenario();
+    var shard = run.shard;
+    var stable_journal = run.decision_journal;
+    _ = try applyCoreStable(&shard, &stable_journal, .{
+        .identity = 89,
+        .payload = .{ .control_command = .{
+            .command_identity = 89,
+            .content_hash = 89,
+            .target_identity = shard.operational_state.target_identity,
+            .expected_version = shard.operational_state.version,
+            .expires_at = std.math.maxInt(u64),
+            .kind = .stop_keep_positions,
+        } },
+    });
+    const first_recovery_sequence = stable_journal.last_sequence + 1;
     _ = try applyCoreStable(&shard, &stable_journal, .{
         .identity = 90,
         .payload = .{ .control_command = .{
             .command_identity = 90,
             .content_hash = 90,
-            .target_identity = 7,
-            .expected_version = 0,
+            .target_identity = shard.operational_state.target_identity,
+            .expected_version = shard.operational_state.version,
             .expires_at = std.math.maxInt(u64),
             .kind = .start_recovery,
         } },
     });
-    shard.operational_state.mode = .trading;
-    shard.operational_state.trading_authorized = true;
-    shard.economic_projection.portfolio.usdt_balance_micros = 12;
-    shard.economic_projection.exchange.usdt_balance_micros = 12;
-    shard.risk_lease_micros = 9;
-    shard.risk_lease_remaining_micros = 9;
 
-    var recovery = RecoveryCoordinator.begin(shard, 11);
+    var recovery = RecoveryCoordinator.begin(shard, first_recovery_sequence);
     try std.testing.expectEqual(RecoveryPhase.recovery_only, recovery.phase);
     try std.testing.expect(!recovery.shard.operational_state.trading_authorized);
 
@@ -515,17 +523,12 @@ test "restart recovery remains fenced until exact venue evidence closes" {
     try std.testing.expectError(error.VenueReconciliationMismatch, recovery.reconcileStable(&stable_journal, 1, mismatch));
     try std.testing.expectEqual(RecoveryPhase.recovery_only, recovery.phase);
     try std.testing.expectEqual(@as(u8, 1), recovery.shard.operational_state.latch_count);
-    try std.testing.expectEqual(@as(u64, 2), stable_journal.last_sequence);
+    try std.testing.expectEqual(first_recovery_sequence + 1, stable_journal.last_sequence);
     try stable_journal.seal();
-    var reader = try trading.journal.Reader.init(stable_journal.bytes());
-    var replayed: trading.ReplayTradingShard = .{};
-    while (true) switch (try reader.next()) {
-        .record => |record| _ = try replayed.apply(try trading.decodeStableInput(record)),
-        .end => break,
-    };
+    const replayed = try trading.recoverStable(.{}, stable_journal.bytes());
     try std.testing.expectEqual(recovery.shard.operational_state.latch_count, replayed.shard.operational_state.latch_count);
 
-    recovery = RecoveryCoordinator.begin(shard, 11);
+    recovery = RecoveryCoordinator.begin(shard, first_recovery_sequence);
     try recovery.reconcile(2, recovery.expectedVenueEvidence());
     try std.testing.expectEqual(RecoveryPhase.ready, recovery.phase);
     try std.testing.expectEqual(trading.operational.OperationalMode.ready, recovery.shard.operational_state.mode);
@@ -695,26 +698,34 @@ test "strategy cutover persists a scoped fence and leaves unrelated orders live"
 
 test "cutover failures and forward rollback never regress economic state or generation" {
     var shard: trading.TradingShard = .{ .release_generation = 4, .active_release = 10, .active_strategy_instance = 20 };
-    _ = try shard.apply(@as(trading.CoreTransition, .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{
+    _ = try shard.apply(.{ .core = .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{
         .version = 1,
         .instrument_identity = swap_instrument,
         .quantity_denominator = 1,
         .reservation_model = .leveraged,
         .product = .isolated_linear_usdt,
         .venue = 1,
-    } } }));
-    _ = try shard.apply(@as(trading.CoreTransition, .{ .identity = 2, .payload = .{ .margin_rules_activated = .{
+    } } } });
+    _ = try shard.apply(.{ .core = .{ .identity = 2, .payload = .{ .margin_rules_activated = .{
         .version = 1,
         .instrument = swap_instrument,
-    } } }));
-    try shard.economic_projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = .{ .instrument = swap_instrument, .rules_version = 1, .lots = 3 }, .price = .{ .instrument = swap_instrument, .rules_version = 1, .ticks = 50_000_000 }, .quantity_denominator = 1, .fee = .{ .asset = 1, .atoms = 7 }, .product = .isolated_linear_usdt } });
+    } } } });
     var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
     group.members[0] = .{ .intent_sequence = 1, .strategy_instance = 20, .operation = .place, .instrument = swap_instrument, .quantity = 1, .limit_price = .{ .instrument = swap_instrument, .rules_version = 1, .ticks = 50_000_000 }, .reservation = .{ .asset = settlement_asset, .atoms = 50 } };
     try shard.oms.applyGroup(group);
     shard.oms.begin();
     try shard.oms.applyReport(.{ .report_id = 1, .order_id = 1, .revision = 1, .status = .filled, .cumulative_quantity = 1, .remaining_quantity = 0 });
-    shard.quantity_denominator = 1;
-    shard.mark_price_micros = 50_000_000;
+    _ = try shard.apply(.{ .core = .{ .identity = 3, .payload = .{ .mark_price = .{
+        .instrument = swap_instrument,
+        .price_micros = 50_000_000,
+    } } } });
+    _ = try shard.apply(.{ .core = .{ .identity = 4, .payload = .{ .economic_fill = .{
+        .fill_id = 1,
+        .order_id = 1,
+        .quantity = 3,
+        .price_micros = 50_000_000,
+        .fee_micros = 7,
+    } } } });
     var stable_journal = trading.journal.Journal.initAt(shard.trace.len + 1);
     var cutover: Cutover = .{ .generation = 4, .active_release = 10, .active_strategy_instance = 20, .phase = .active };
     const candidate: Candidate = .{

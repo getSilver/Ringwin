@@ -115,7 +115,7 @@ fn decodeBootstrap(reader: *Reader) !canonical.AccountBootstrapSnapshot {
     return snapshot;
 }
 
-fn encodeEvent(cursor: *Cursor, event: canonical.CanonicalEvent) !void {
+fn encodeEvent(cursor: *Cursor, event: canonical.Payload) !void {
     switch (event) {
         .account_bootstrap_snapshot => |snapshot| try encodeBootstrap(cursor, snapshot),
         .order_dispatch_result => |value| try putValue(cursor, value),
@@ -137,7 +137,7 @@ fn encodeEvent(cursor: *Cursor, event: canonical.CanonicalEvent) !void {
 }
 
 /// Encodes only the canonical payload for identity and deduplication hashing.
-pub fn encodePayload(destination: []u8, event: canonical.CanonicalEvent) ![]const u8 {
+pub fn encodePayload(destination: []u8, event: canonical.Payload) ![]const u8 {
     var cursor: Cursor = .{ .bytes = destination };
     try cursor.putInt(u32, @intFromEnum(canonical.eventType(event)));
     try encodeEvent(&cursor, event);
@@ -160,7 +160,7 @@ pub fn decode(encoded: []const u8) !canonical.EventRecord {
     if (try reader.takeInt(u16) != encoding_version) return error.UnsupportedCanonicalEncoding;
     const envelope = try takeValue(&reader, canonical.EventEnvelope);
     const event_type = std.enums.fromInt(canonical.EventType, envelope.event_type) orelse return error.InvalidCanonicalEnvelope;
-    const event: canonical.CanonicalEvent = switch (event_type) {
+    const event: canonical.Payload = switch (event_type) {
         .account_bootstrap_snapshot => .{ .account_bootstrap_snapshot = try decodeBootstrap(&reader) },
         .order_dispatch_result => .{ .order_dispatch_result = try takeValue(&reader, canonical.OrderDispatchResult) },
         .execution_report => .{ .execution_report = try takeValue(&reader, canonical.ExecutionReport) },

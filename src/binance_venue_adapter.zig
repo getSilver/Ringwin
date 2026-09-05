@@ -404,7 +404,7 @@ pub const BinanceVenueAdapter = struct {
         self.next_event_sequence +%= 1;
         output.append(.{ .envelope = .{ .event_type = @intFromEnum(canonical.EventType.order_dispatch_result), .schema_version = 1, .identity = .{ .stream = binding.session, .sequence = sequence }, .source_fact_identity = command.identity, .scope = .account, .venue = binding.venue, .exchange_account = binding.account, .instrument = command.instrument, .source_stream = binding.session, .source_sequence = sequence, .adapter_session = binding.session, .times = .{ .monotonic_ns = self.clock.now() }, .raw_evidence = if (evidence) |value| .{ .stream = binding.session, .sequence = value.stream_sequence, .digest = value.sha256 } else .{ .stream = binding.session, .sequence = sequence, .digest = @splat(0) } }, .event = .{ .order_dispatch_result = .{ .command = command.identity, .state = state, .reason = reason } } }) catch return;
     }
-    fn appendEvent(self: *BinanceVenueAdapter, output: *canonical.AdapterOutputBatch, source_fact_identity: u128, event: canonical.CanonicalEvent) void {
+    fn appendEvent(self: *BinanceVenueAdapter, output: *canonical.AdapterOutputBatch, source_fact_identity: u128, event: canonical.Payload) void {
         const binding = self.binding orelse return;
         const sequence = self.next_event_sequence;
         self.next_event_sequence +%= 1;

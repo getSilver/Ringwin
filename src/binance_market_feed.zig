@@ -215,7 +215,7 @@ pub const BinanceMarketFeed = struct {
         });
     }
 
-    fn append(self: *BinanceMarketFeed, output: *canonical.AdapterOutputBatch, instrument: Instrument, source_sequence: u64, previous: ?u64, source_time: ?u64, times: raw.Times, evidence: raw.RawEvidenceRef, kind: []const u8, event: canonical.CanonicalEvent) !void {
+    fn append(self: *BinanceMarketFeed, output: *canonical.AdapterOutputBatch, instrument: Instrument, source_sequence: u64, previous: ?u64, source_time: ?u64, times: raw.Times, evidence: raw.RawEvidenceRef, kind: []const u8, event: canonical.Payload) !void {
         const config = self.config orelse return error.NotStarted;
         if (output.len >= config.output_capacity) return error.OutputCapacityExceeded;
         self.next_event_sequence = std.math.add(u64, self.next_event_sequence, 1) catch return error.EventSequenceOverflow;

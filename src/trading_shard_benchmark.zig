@@ -5,12 +5,7 @@ const engine = @import("trading_shard.zig");
 const fixture = @import("trading_shard_fixture.zig");
 const journal = engine.journal;
 const Sha256 = std.crypto.hash.sha2.Sha256;
-const CanonicalInput = engine.canonical.EventRecord;
-const CoreTransitionInput = engine.CoreTransition;
-const RoutedInput = union(enum) {
-    core: CoreTransitionInput,
-    canonical: CanonicalInput,
-};
+const CanonicalInput = engine.CanonicalEvent;
 const TradingShard = engine.TradingShard;
 const LiveRun = fixture.LiveRun;
 const applyLive = engine.applyStable;
@@ -178,7 +173,7 @@ fn runMarketBenchmark(
 const OrderBenchmarkWork = struct {
     shard: TradingShard,
     decision_journal: journal.Journal,
-    input: CoreTransitionInput,
+    input: CanonicalInput,
     enqueued_ns: u64,
 };
 
@@ -360,19 +355,19 @@ fn benchmark(init: std.process.Init, raw: bool) !void {
 const ShardInbox = struct {
     const capacity = 8;
 
-    events: [capacity]RoutedInput = undefined,
+    events: [capacity]CanonicalInput = undefined,
     head: usize = 0,
     len: usize = 0,
     high_water: usize = 0,
 
-    fn push(self: *ShardInbox, event: RoutedInput) !void {
+    fn push(self: *ShardInbox, event: CanonicalInput) !void {
         if (self.len == self.events.len) return error.ShardQueueFull;
         self.events[(self.head + self.len) % self.events.len] = event;
         self.len += 1;
         self.high_water = @max(self.high_water, self.len);
     }
 
-    fn pop(self: *ShardInbox) ?RoutedInput {
+    fn pop(self: *ShardInbox) ?CanonicalInput {
         if (self.len == 0) return null;
         const event = self.events[self.head];
         self.head = (self.head + 1) % self.events.len;
@@ -399,17 +394,14 @@ const SharedMarketRouter = struct {
     ) !void {
         self.normalized_events += 1;
         if (target_domain >= shards.len) return error.UnknownDecisionDomain;
-        try shards[target_domain].inbox.push(.{ .canonical = normalized_event });
+        try shards[target_domain].inbox.push(normalized_event);
         self.routed_deliveries += 1;
     }
 };
 
 fn drainOne(shard: *QualifiedShard) !void {
     const input = shard.inbox.pop() orelse return error.EmptyShardQueue;
-    const command = switch (input) {
-        .core => |transition| try applyLive(&shard.run.shard, &shard.run.decision_journal, transition),
-        .canonical => |event| try applyLive(&shard.run.shard, &shard.run.decision_journal, event),
-    };
+    const command = try applyLive(&shard.run.shard, &shard.run.decision_journal, input);
     if (command != null)
         return error.UnexpectedCommand;
 }
@@ -441,14 +433,14 @@ fn assertFourShardIsolation() ![4][Sha256.digest_length]u8 {
         shards[0].run.shard.trace.len != 2)
         return error.GapIsolationFailed;
 
-    try shards[0].inbox.push(.{ .core = atGroup(16, .{
+    try shards[0].inbox.push(atGroup(16, .{
         .identity = 1,
         .payload = .{ .timer = .{ .quantity = happy_order_quantity } },
-    }) });
+    }));
     while (shards[0].inbox.len < ShardInbox.capacity) {
-        try shards[0].inbox.push(.{ .canonical = deltaAt(16, 103, 104, 49_860_000_000) });
+        try shards[0].inbox.push(deltaAt(16, 103, 104, 49_860_000_000));
     }
-    if (shards[0].inbox.push(.{ .canonical = deltaAt(17, 104, 105, 49_860_000_000) })) |_|
+    if (shards[0].inbox.push(deltaAt(17, 104, 105, 49_860_000_000))) |_|
         return error.QueueSaturationNotDetected
     else |err| if (err != error.ShardQueueFull) return err;
 

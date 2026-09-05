@@ -288,7 +288,7 @@ pub const Reconciler = struct {
         const key = identity(evidence.sha256) +% self.next_sequence;
         try self.emit(.account, value.instrument, null, key, null, times, evidence, .{ .account_observed = .{ .identity = key, .exchange_account = (self.binding orelse return error.StaleSession).account, .bootstrap = bootstrap, .source_stream = sourceStream((self.binding orelse return error.StaleSession).session, self.active_source), .source_sequence = self.active_source_sequence, .value = .{ .margin = .{ .instrument = value.instrument, .value = value } } } });
     }
-    fn emit(self: *Reconciler, scope: canonical.CanonicalEventScope, instrument: ?canonical.InstrumentIdentity, asset_id: ?canonical.AssetIdentity, source_id: u128, source_time: ?u64, times: Times, evidence: RawEvidenceRef, event: canonical.CanonicalEvent) !void {
+    fn emit(self: *Reconciler, scope: canonical.CanonicalEventScope, instrument: ?canonical.InstrumentIdentity, asset_id: ?canonical.AssetIdentity, source_id: u128, source_time: ?u64, times: Times, evidence: RawEvidenceRef, event: canonical.Payload) !void {
         const emitted = try self.record(scope, instrument, asset_id, source_id, source_time, times, evidence, event);
         if (self.stage == .ready) try self.appendReady(emitted) else {
             if (self.buffered_count == self.buffered.len) return error.PrivateOutputFull;
@@ -296,7 +296,7 @@ pub const Reconciler = struct {
             self.buffered_count += 1;
         }
     }
-    fn record(self: *Reconciler, scope: canonical.CanonicalEventScope, instrument: ?canonical.InstrumentIdentity, asset_id: ?canonical.AssetIdentity, source_id: u128, source_time: ?u64, times: Times, evidence: RawEvidenceRef, event: canonical.CanonicalEvent) !canonical.EventRecord {
+    fn record(self: *Reconciler, scope: canonical.CanonicalEventScope, instrument: ?canonical.InstrumentIdentity, asset_id: ?canonical.AssetIdentity, source_id: u128, source_time: ?u64, times: Times, evidence: RawEvidenceRef, event: canonical.Payload) !canonical.EventRecord {
         const binding = self.binding orelse return error.StaleSession;
         const sequence = self.next_sequence;
         self.next_sequence = try std.math.add(u64, sequence, 1);

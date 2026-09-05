@@ -8,7 +8,7 @@ const journal = @import("journal.zig");
 const oms_module = @import("oms.zig");
 const operational = @import("operational.zig");
 
-pub const schema_version: u16 = 6;
+pub const schema_version: u16 = 7;
 
 pub const EventKind = enum(u16) {
     instrument_rules_activated,
@@ -284,10 +284,8 @@ pub const CorePayload = union(PayloadTag) {
     strategy_cutover_fence: StrategyCutoverFence,
 };
 
-/// Typed internal command/fact transition used by the native and stable
-/// journal seams. Timing is part of the transition metadata; payload values
-/// remain fully typed and are never wrapped in an opaque canonical event.
-pub const CoreTransition = struct {
+/// Typed core-originated event carried by the authoritative CanonicalEvent.
+pub const CoreEvent = struct {
     identity: u64,
     source_time: u64 = 0,
     receive_time: u64 = 0,
@@ -297,17 +295,10 @@ pub const CoreTransition = struct {
     payload: CorePayload,
 };
 
-/// Decoded execution view reconstructed from the canonical envelope during
-/// apply and from journal record metadata during replay.
-pub const InputEvent = struct {
-    version: u16 = schema_version,
-    identity: u64,
-    source_time: u64 = 0,
-    receive_time: u64 = 0,
-    monotonic_time: u64 = 0,
-    wall_time: u64 = 0,
-    time_presence: journal.TimePresence = .{},
-    payload: CorePayload,
+/// The only event admitted by TradingShard, stable journal and replay.
+pub const CanonicalEvent = union(enum) {
+    core: CoreEvent,
+    venue: canonical.EventRecord,
 };
 
 pub const EncodedInput = struct {
@@ -325,7 +316,7 @@ pub const EncodedInput = struct {
     }
 };
 
-pub fn encodeInput(destination: []u8, input: CoreTransition) !EncodedInput {
+pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
     var encoded = EncodedInput.init(destination);
     try encoded.put(u64, input.identity);
     try encoded.put(u16, @intFromEnum(std.meta.activeTag(input.payload)));
@@ -555,7 +546,7 @@ fn readInputBool(bytes: []const u8, offset: *usize) !bool {
     };
 }
 
-pub fn decodeInput(record: journal.Record) !InputEvent {
+pub fn decodeInput(record: journal.Record) !CoreEvent {
     if (record.schema_version != schema_version) return error.UnsupportedSchema;
     var offset: usize = 0;
     const identity = try readInputValue(u64, record.payload, &offset);
@@ -836,7 +827,6 @@ pub fn decodeInput(record: journal.Record) !InputEvent {
     };
     if (offset != record.payload.len) return error.TrailingInputPayload;
     return .{
-        .version = record.schema_version,
         .identity = identity,
         .source_time = record.source_time,
         .receive_time = record.receive_time,
@@ -844,20 +834,6 @@ pub fn decodeInput(record: journal.Record) !InputEvent {
         .wall_time = record.wall_time,
         .time_presence = record.time_presence,
         .payload = payload,
-    };
-}
-
-/// Decodes one stable input record into the typed transition used by replay.
-pub fn decodeStableInput(record: journal.Record) !CoreTransition {
-    const input = try decodeInput(record);
-    return .{
-        .identity = input.identity,
-        .source_time = input.source_time,
-        .receive_time = input.receive_time,
-        .monotonic_time = input.monotonic_time,
-        .wall_time = input.wall_time,
-        .time_presence = input.time_presence,
-        .payload = input.payload,
     };
 }
 

@@ -55,7 +55,7 @@ pub const Projection = struct {
     }
 };
 
-fn eventFingerprint(event: canonical.CanonicalEvent) u64 {
+fn eventFingerprint(event: canonical.Payload) u64 {
     return switch (event) {
         .order_dispatch_result => |value| fingerprintPart(value.command),
         .execution_report => |value| fingerprintPart(value.identity ^ value.order ^ @as(u128, @bitCast(value.cumulative_quantity.lots))),

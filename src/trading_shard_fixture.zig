@@ -17,12 +17,12 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-pub const expected_happy_digest = "0968f5010031c9310d9d295b0fb9d7e027893f749386f2dc0b49cb819576d5c4";
+pub const expected_happy_digest = "b8aa3c906ec10468b87630fc593ba1068ee4e6a9ea770202b3b031433afed100";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "aab56348cb838b2d801e9779bb552216f6918b2f8d7f2fbd33acf1fe1d46f828",
-    "1e0e55dead9f1d27c863c9dbf7cc153ea742e9623fbf07bed4ea14c4cab09f06",
-    "eafc295182e334d2ca4c5e756b215a07010307b3aeae63254ec22941f64eaf46",
+    "8818cea074c195271629d21c4c90ac25a76b0d2747b343bed18690e3ee903a8b",
+    "cd327b5bf139b2b4ad836b51dacd2c52475a87e47b4a95599a3e1e668c07845c",
+    "d4788166cdeb56162012c8187c8c358a7f3ac8edb01931cbad0e6ffdcfa9ee9c",
     expected_happy_digest,
 };
 pub const order_limit_price: i64 = 50_100_000_000;
@@ -46,25 +46,25 @@ pub const LiveRun = struct {
     decision_journal: journal.Journal,
 };
 
-pub fn atGroup(group_index: u64, input: engine.CoreTransition) engine.CoreTransition {
-    var transition = input;
+pub fn atGroup(group_index: u64, input: engine.CoreEvent) engine.CanonicalEvent {
+    var event = input;
     const source_time = fixture_utc_base + group_index * 10 * std.time.ns_per_ms;
-    transition.source_time = source_time;
-    transition.receive_time = source_time + std.time.ns_per_ms;
-    transition.monotonic_time = fixture_monotonic_base + group_index * 10 * std.time.ns_per_ms + std.time.ns_per_ms;
-    transition.wall_time = source_time + 2 * std.time.ns_per_ms;
-    transition.time_presence = .{
+    event.source_time = source_time;
+    event.receive_time = source_time + std.time.ns_per_ms;
+    event.monotonic_time = fixture_monotonic_base + group_index * 10 * std.time.ns_per_ms + std.time.ns_per_ms;
+    event.wall_time = source_time + 2 * std.time.ns_per_ms;
+    event.time_presence = .{
         .source = true,
         .receive = true,
         .monotonic = true,
         .wall = true,
     };
-    return transition;
+    return .{ .core = event };
 }
 
-pub fn canonicalAt(group_index: u64, source_sequence: u64, event: canonical.CanonicalEvent) canonical.EventRecord {
+pub fn canonicalAt(group_index: u64, source_sequence: u64, event: canonical.Payload) engine.CanonicalEvent {
     const source_time = fixture_utc_base + group_index * 10 * std.time.ns_per_ms;
-    return .{ .envelope = .{
+    return .{ .venue = .{ .envelope = .{
         .event_type = @intFromEnum(canonical.eventType(event)),
         .schema_version = 1,
         .identity = .{ .stream = 1, .sequence = source_sequence },
@@ -82,7 +82,7 @@ pub fn canonicalAt(group_index: u64, source_sequence: u64, event: canonical.Cano
             .audit_utc_ns = source_time + 2 * std.time.ns_per_ms,
         },
         .raw_evidence = .{ .stream = 1, .sequence = source_sequence, .digest = @splat(0) },
-    }, .event = event };
+    }, .event = event } };
 }
 
 fn quantity(lots: i128) canonical.InstrumentQuantity {
@@ -93,7 +93,7 @@ fn price(ticks: i128) canonical.InstrumentPrice {
     return .{ .instrument = 3, .rules_version = 1, .ticks = ticks };
 }
 
-pub fn snapshotAt(group: u64, source_sequence: u64) canonical.EventRecord {
+pub fn snapshotAt(group: u64, source_sequence: u64) engine.CanonicalEvent {
     return canonicalAt(group, source_sequence, .{ .l2_book_snapshot = .{
         .instrument = 3,
         .sequence = source_sequence,
@@ -106,7 +106,7 @@ pub fn snapshotAt(group: u64, source_sequence: u64) canonical.EventRecord {
     } });
 }
 
-pub fn deltaAt(group: u64, previous: u64, current: u64, bid_price_micros: i64) canonical.EventRecord {
+pub fn deltaAt(group: u64, previous: u64, current: u64, bid_price_micros: i64) engine.CanonicalEvent {
     return canonicalAt(group, current, .{ .l2_book_delta = .{
         .instrument = 3,
         .previous_sequence = previous,
@@ -120,15 +120,11 @@ pub fn deltaAt(group: u64, previous: u64, current: u64, bid_price_micros: i64) c
     } });
 }
 
-pub fn apply(run: *LiveRun, event: anytype) !?engine.OrderCommand {
-    return switch (@TypeOf(event)) {
-        engine.CoreTransition => engine.applyTypedStable(&run.shard, &run.decision_journal, event),
-        canonical.EventRecord => engine.applyStable(&run.shard, &run.decision_journal, event),
-        else => @compileError("fixture.apply expects a typed transition or canonical event"),
-    };
+pub fn apply(run: *LiveRun, event: engine.CanonicalEvent) !?engine.OrderCommand {
+    return engine.applyStable(&run.shard, &run.decision_journal, event);
 }
 
-pub fn lifecycleCommand(command_identity: u128, expected_version: u64, kind: engine.operational.CommandKind) engine.CoreTransition {
+pub fn lifecycleCommand(command_identity: u128, expected_version: u64, kind: engine.operational.CommandKind) engine.CanonicalEvent {
     return atGroup(40, .{ .identity = @intCast(1_000 + command_identity), .payload = .{ .control_command = .{
         .command_identity = command_identity,
         .content_hash = command_identity * 7_919,
@@ -139,8 +135,8 @@ pub fn lifecycleCommand(command_identity: u128, expected_version: u64, kind: eng
     } } });
 }
 
-pub fn deRiskCommand(command_identity: u128, expected_version: u64, target_position: i64, warning_identity: u128) engine.CoreTransition {
-    var input: engine.CoreTransition = .{ .identity = @intCast(1_000 + command_identity), .payload = .{ .control_command = .{
+pub fn deRiskCommand(command_identity: u128, expected_version: u64, target_position: i64, warning_identity: u128) engine.CanonicalEvent {
+    var input: engine.CoreEvent = .{ .identity = @intCast(1_000 + command_identity), .payload = .{ .control_command = .{
         .command_identity = command_identity,
         .content_hash = command_identity * 7_919,
         .target_identity = 1,
@@ -156,8 +152,8 @@ pub fn deRiskCommand(command_identity: u128, expected_version: u64, target_posit
     return atGroup(40, input);
 }
 
-pub fn resolveLatchCommand(command_identity: u128, expected_version: u64, latch_identity: u128) engine.CoreTransition {
-    var input: engine.CoreTransition = .{ .identity = @intCast(1_000 + command_identity), .payload = .{ .control_command = .{
+pub fn resolveLatchCommand(command_identity: u128, expected_version: u64, latch_identity: u128) engine.CanonicalEvent {
+    var input: engine.CoreEvent = .{ .identity = @intCast(1_000 + command_identity), .payload = .{ .control_command = .{
         .command_identity = command_identity,
         .content_hash = command_identity * 7_919,
         .target_identity = 1,
@@ -174,7 +170,7 @@ fn finish(run: *LiveRun) !LiveRun {
     return run.*;
 }
 
-pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_model: engine.ReservationModel) [18]engine.CoreTransition {
+pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_model: engine.ReservationModel) [18]engine.CanonicalEvent {
     const denominator: i64 = switch (reservation_model) {
         .leveraged => contract_denominator,
         .cash => 100_000_000,
@@ -256,7 +252,7 @@ pub fn startScenario() !LiveRun {
 pub fn applyHealthyPrelude(run: *LiveRun) !void {
     if (try apply(run, atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000_000 } } })) != null)
         return error.UnexpectedCommand;
-    const prelude = [_]canonical.EventRecord{
+    const prelude = [_]engine.CanonicalEvent{
         canonicalAt(12, 99, .{ .instrument_definition_observed = .{ .instrument = 3, .rules_version = 1 } }),
         snapshotAt(13, 100),
         deltaAt(14, 100, 101, 49_850_000_000),
@@ -314,7 +310,7 @@ pub fn assertReplayEquivalent(run: LiveRun) ![32]u8 {
     return assertReplayEquivalentConfigured(run, contract_denominator, .leveraged);
 }
 
-pub fn happyVenueFacts(command: engine.OrderCommand) ![6]canonical.EventRecord {
+pub fn happyVenueFacts(command: engine.OrderCommand) ![6]engine.CanonicalEvent {
     if (command.command_id != 1 or command.order_id != 1 or
         command.quantity.lots != happy_order_quantity or
         command.limit_price.ticks != 50_100_000_000 or
@@ -433,9 +429,9 @@ pub fn runUnknownReconciliation() !LiveRun {
     if (try apply(&run, canonicalAt(16, 102, .{ .order_dispatch_result = .{ .command = command.command_id, .state = .unknown } })) != null) return error.UnexpectedCommand;
     if (try apply(&run, canonicalAt(17, 103, .{ .order_reconciliation_result = .{ .identity = 1, .complete = true, .status = .found_live } })) != null) return error.UnexpectedCommand;
     var accepted = facts[1];
-    accepted.envelope.identity.sequence = 104;
-    accepted.envelope.source_sequence = 104;
-    accepted.envelope.raw_evidence.sequence = 104;
+    accepted.venue.envelope.identity.sequence = 104;
+    accepted.venue.envelope.source_sequence = 104;
+    accepted.venue.envelope.raw_evidence.sequence = 104;
     if (try apply(&run, accepted) != null) return error.UnexpectedCommand;
     return finish(&run);
 }

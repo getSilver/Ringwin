@@ -365,10 +365,10 @@ pub const BybitVenueAdapter = struct {
     fn appendDispatch(self: *BybitVenueAdapter, output: *canonical.AdapterOutputBatch, command: canonical.OrderCommand, state: canonical.DispatchState, reason: ?canonical.CanonicalRejectReason, evidence: ?private.RawEvidenceRef) void {
         self.append(output, command.identity, command.instrument, .{ .order_dispatch_result = .{ .command = command.identity, .state = state, .reason = reason } }, evidence);
     }
-    fn appendEvent(self: *BybitVenueAdapter, output: *canonical.AdapterOutputBatch, source: u128, event: canonical.CanonicalEvent) void {
+    fn appendEvent(self: *BybitVenueAdapter, output: *canonical.AdapterOutputBatch, source: u128, event: canonical.Payload) void {
         self.append(output, source, null, event, null);
     }
-    fn append(self: *BybitVenueAdapter, output: *canonical.AdapterOutputBatch, source: u128, instrument: ?canonical.InstrumentIdentity, event: canonical.CanonicalEvent, evidence: ?private.RawEvidenceRef) void {
+    fn append(self: *BybitVenueAdapter, output: *canonical.AdapterOutputBatch, source: u128, instrument: ?canonical.InstrumentIdentity, event: canonical.Payload, evidence: ?private.RawEvidenceRef) void {
         const binding = self.binding orelse return;
         const sequence = self.next_sequence;
         self.next_sequence +%= 1;

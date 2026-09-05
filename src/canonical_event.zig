@@ -440,7 +440,7 @@ pub const VenueAccountConfigurationSnapshot = struct {
     },
 };
 
-pub const CanonicalEvent = union(enum) {
+pub const Payload = union(enum) {
     order_dispatch_result: OrderDispatchResult,
     execution_report: ExecutionReport,
     fill: Fill,
@@ -480,7 +480,7 @@ pub const EventType = enum(u32) {
 
 pub const TimeInForce = enum(u8) { good_til_canceled, immediate_or_cancel, fill_or_kill, post_only };
 
-pub fn eventType(event: CanonicalEvent) EventType {
+pub fn eventType(event: Payload) EventType {
     return switch (event) {
         .order_dispatch_result => .order_dispatch_result,
         .execution_report => .execution_report,
@@ -501,7 +501,7 @@ pub fn eventType(event: CanonicalEvent) EventType {
     };
 }
 
-pub const EventRecord = struct { envelope: EventEnvelope, event: CanonicalEvent };
+pub const EventRecord = struct { envelope: EventEnvelope, event: Payload };
 
 /// Validates bounded counts and removes undefined fixed-array tails before an
 /// event participates in hashing or durable encoding.

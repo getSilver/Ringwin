@@ -22,10 +22,10 @@ const place_fee_micros: i64 = 400_000;
 const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
 pub const acceptance_schema_version: u16 = 2;
-const expected_shared_summary_v2 = "f182d1406d24c5ae9a4ceeb6be0245613922786fc467cfe731b3e28a8346a0a4";
+const expected_shared_summary_v2 = "aa0df1c6767e47c53c450d15d467c9624e92b9025e7a3c4ca8fa5ebe78d1bb3d";
 
-fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreTransition) !?trading.OrderCommand {
-    return trading.applyTypedStable(shard, stable_journal, input);
+fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
+    return trading.applyStable(shard, stable_journal, .{ .core = input });
 }
 
 const OpLog = struct {
@@ -63,7 +63,7 @@ const World = struct {
         };
     }
 
-    fn apply(self: *World, index: usize, event: trading.CoreTransition) !void {
+    fn apply(self: *World, index: usize, event: trading.CoreEvent) !void {
         _ = try applyCoreStable(&self.shards[index], &self.journals[index], event);
     }
 
@@ -135,7 +135,7 @@ var shard_snapshot_storage: [max_shards][256 * 1024]u8 = undefined;
 var coordinator_snapshot_storage: [16384]u8 = undefined;
 var tail_journals: [max_shards]trading.journal.Journal = undefined;
 
-fn genesisEvents(index: usize) [14]trading.CoreTransition {
+fn genesisEvents(index: usize) [14]trading.CoreEvent {
     const target: u128 = @intCast(index + 1);
     return .{
         .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{
@@ -545,7 +545,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         .envelope = canonical_envelope,
         .event = .{ .instrument_definition_observed = .{ .instrument = 3, .rules_version = 1 } },
     };
-    _ = try trading.applyStable(&world.shards[1], &tail_journals[1], instrument_definition);
+    _ = try trading.applyStable(&world.shards[1], &tail_journals[1], .{ .venue = instrument_definition });
     var snapshot_envelope = canonical_envelope;
     snapshot_envelope.event_type = @intFromEnum(trading.canonical.EventType.l2_book_snapshot);
     snapshot_envelope.identity.sequence = 501;
@@ -565,7 +565,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
             .next_ask_quantity = .{ .instrument = 3, .rules_version = 1, .lots = 1_000 },
         } },
     };
-    _ = try trading.applyStable(&world.shards[1], &tail_journals[1], book_snapshot);
+    _ = try trading.applyStable(&world.shards[1], &tail_journals[1], .{ .venue = book_snapshot });
     const tail_summary_identity = world.nextId();
     const tail_summary_sequence = world.summary_sequences[1] + 1;
     const tail_summary = try coordination.shardSummaryFromShard(&world.shards[1], .shard_1, tail_summary_sequence, 2);

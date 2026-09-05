@@ -192,7 +192,7 @@ pub const OkxMarketFeed = struct {
         });
     }
 
-    fn append(self: *OkxMarketFeed, output: *canonical.AdapterOutputBatch, envelope: okx.EventEnvelope, instrument: canonical.InstrumentIdentity, source_sequence: u64, previous: ?u64, event: canonical.CanonicalEvent) !void {
+    fn append(self: *OkxMarketFeed, output: *canonical.AdapterOutputBatch, envelope: okx.EventEnvelope, instrument: canonical.InstrumentIdentity, source_sequence: u64, previous: ?u64, event: canonical.Payload) !void {
         const config = self.config orelse return error.NotStarted;
         self.next_event_sequence = std.math.add(u64, self.next_event_sequence, 1) catch return error.EventSequenceOverflow;
         try output.append(.{ .envelope = .{

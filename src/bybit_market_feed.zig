@@ -186,7 +186,7 @@ pub const BybitMarketFeed = struct {
         book.* = .{ .health = .gap };
         try self.append(output, instrument, observed, previous, cross, source_time, times, evidence, "gap", .{ .market_data_health_changed = .{ .instrument = instrumentIdentity(instrument), .health = .gap } });
     }
-    fn append(self: *BybitMarketFeed, output: *canonical.AdapterOutputBatch, instrument: Instrument, source_sequence: u64, previous_sequence: ?u64, cross_sequence: ?u64, source_time: ?u64, times: Times, evidence: RawEvidenceRef, kind: []const u8, event: canonical.CanonicalEvent) !void {
+    fn append(self: *BybitMarketFeed, output: *canonical.AdapterOutputBatch, instrument: Instrument, source_sequence: u64, previous_sequence: ?u64, cross_sequence: ?u64, source_time: ?u64, times: Times, evidence: RawEvidenceRef, kind: []const u8, event: canonical.Payload) !void {
         const config = self.config orelse return error.NotStarted;
         if (output.len >= config.output_capacity) return error.OutputCapacityExceeded;
         self.next_event_sequence = std.math.add(u64, self.next_event_sequence, 1) catch return error.EventSequenceOverflow;

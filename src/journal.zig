@@ -12,7 +12,6 @@ const max_payload_len = 4096;
 pub const max_payload_size = max_payload_len;
 
 pub const input_flag: u32 = 1;
-pub const canonical_input_flag: u32 = 2;
 pub const segment_header_size = segment_header_len;
 pub const record_header_size = record_header_len;
 

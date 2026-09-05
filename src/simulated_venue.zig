@@ -204,7 +204,7 @@ pub const SimulatedVenue = struct {
         return command.quantity != null and command.limit_price != null and command.quantity.?.lots > 0 and command.limit_price.?.ticks > 0;
     }
 
-    fn append(self: *SimulatedVenue, batch: *canonical.AdapterOutputBatch, binding: Binding, source_fact_identity: u128, event: canonical.CanonicalEvent) !void {
+    fn append(self: *SimulatedVenue, batch: *canonical.AdapterOutputBatch, binding: Binding, source_fact_identity: u128, event: canonical.Payload) !void {
         const identity = self.next_event_identity;
         self.next_event_identity += 1;
         var event_envelope = envelope(binding, identity, source_fact_identity);
@@ -267,7 +267,7 @@ test "simulated venue returns a canonical result for every request kind" {
         .{ .order_reconciliation = .{ .identity = 6, .exchange_account = 2, .order = 1 } },
         .{ .account_reconciliation = .{ .identity = 7, .exchange_account = 2, .expected_session = 4 } },
     };
-    const expected_tags = [_]std.meta.Tag(canonical.CanonicalEvent){
+    const expected_tags = [_]std.meta.Tag(canonical.Payload){
         .order_dispatch_result,
         .reconciliation_started,
         .account_reconciliation_started,

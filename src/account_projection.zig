@@ -20,7 +20,7 @@ pub const AccountProjection = struct {
     margins: [canonical.max_account_facts]canonical.AccountMargin = undefined,
     margin_count: u8 = 0,
 
-    pub fn apply(self: *AccountProjection, event: canonical.CanonicalEvent) !void {
+    pub fn apply(self: *AccountProjection, event: canonical.Payload) !void {
         switch (event) {
             .account_bootstrap_snapshot => |snapshot| {
                 if (snapshot.balance_count > canonical.max_account_facts or snapshot.position_count > canonical.max_account_facts or snapshot.margin_count > canonical.max_account_facts)

@@ -8,14 +8,14 @@ Parent: [修复交易核心权威接缝与验收完整性](../map.md)
 
 ## Question
 
-如何在保持所有现有调用和 replay 绿色的前提下，为 core input 增加明确类型化的 CanonicalEvent 形态，
-停止让新增路径继续依赖固定大小 opaque payload？
+如何让 core 与 Venue 输入共享一个明确、类型化的 CanonicalEvent 边界，并只通过一套 stable journal
+协议进入 replay？
 
 ## What to build
 
-执行 expand 阶段：在旧 CoreInput 适配器旁增加版本化、类型化的核心事件载荷和唯一编码规则，并让统一
-Gateway 的新端到端轨迹原生使用 typed 形态。旧日志和调用者暂时通过一个边界适配进入相同 apply
-语义，不复制状态机或业务分支。
+完成 expand-contract：先迁移调用者，再让 `CanonicalEvent` 以 `core`/`venue` 两个有界分支承载全部
+权威输入。`TradingShard.apply`、stable journal 与 replay 使用同一类型和同一编码协议，不复制状态机、
+输入元数据或持久化分支。
 
 ## Blocked by
 
@@ -23,14 +23,17 @@ Gateway 的新端到端轨迹原生使用 typed 形态。旧日志和调用者�
 
 ## Acceptance
 
-- [ ] OrderIntent、风险/执行事实、账户/行情事实和控制事实具有有界、显式、版本化的 typed payload。
-- [ ] 新 Gateway 与 Venue 合约轨迹不再先编码到 opaque CoreInput 再立即解码。
-- [ ] 旧 CoreInput 只有一个兼容适配入口，并与 typed 输入产生相同状态、错误分类和 CanonicalStateDigest。
-- [ ] 未知版本、非法 tag、超界 payload 和尾随数据原子拒绝，不改变 TradingShard。
-- [ ] 现有调用、旧 snapshot/log replay、Debug 和 ReleaseSafe 在 expand 阶段持续绿色。
+- [x] OrderIntent、风险/执行事实、账户/行情事实和控制事实具有有界、显式、版本化的 typed payload。
+- [x] Gateway 与 Venue 合约轨迹不再先编码到 opaque CoreInput 再立即解码。
+- [x] core 与 Venue 输入只经 `CanonicalEvent`、`TradingShard.apply` 和一套 stable journal/replay 协议演进。
+- [x] 未知版本、非法 tag、超界 payload 和尾随数据原子拒绝，不改变 TradingShard。
+- [x] journal/state schema 显式升级为 7；当前 snapshot/log replay、Debug 和 ReleaseSafe 持续绿色。
 
 ## Evidence
 
-- Added versioned typed `CorePayload`/`CoreTransition` and public `TradingShard.applyTyped` plus `applyTypedStable` native entry points.
-- The legacy `CoreInput` adapter remains isolated to compatibility decoding and old stable records; typed application does not encode then immediately decode.
-- Debug and ReleaseSafe both pass 178/178 tests, including canonical codec and replay coverage.
+- `trading_shard_event.CanonicalEvent` 是唯一输入 union，包含 `core: CoreEvent` 与
+  `venue: canonical.EventRecord`；Venue 私有 payload 类型更名为 `canonical.Payload`。
+- `TradingShard.apply(CanonicalEvent)`、`applyStable` 与 `decodeStableInput` 共用一套类型；journal 只保留
+  `input_flag`，payload 首字节区分 core/venue，不再存在双协议。
+- 新增 malformed stable envelope 回归，覆盖旧 schema、空载荷、非法 tag、尾随数据和超界编码；
+  Debug/ReleaseSafe 均通过 185/185。

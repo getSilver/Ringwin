@@ -224,7 +224,7 @@ pub const OkxVenueAdapter = struct {
         self.appendControl(.{ .account_reconciliation_started = request.identity }, request.identity);
     }
 
-    fn appendControl(self: *OkxVenueAdapter, event: canonical.CanonicalEvent, source_fact_identity: u128) void {
+    fn appendControl(self: *OkxVenueAdapter, event: canonical.Payload, source_fact_identity: u128) void {
         var output = self.pending_output orelse canonical.AdapterOutputBatch{};
         const binding = self.binding orelse return;
         const sequence = self.next_event_sequence;
@@ -302,8 +302,8 @@ pub const OkxVenueAdapter = struct {
         self.pending_order_reconciliation_count = 0;
     }
 
-    fn appendPrivateResult(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, comptime tag: std.meta.Tag(canonical.CanonicalEvent), source_fact_identity: u128, result: canonical.ReconciliationResult) void {
-        const event: canonical.CanonicalEvent = @unionInit(canonical.CanonicalEvent, @tagName(tag), result);
+    fn appendPrivateResult(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, comptime tag: std.meta.Tag(canonical.Payload), source_fact_identity: u128, result: canonical.ReconciliationResult) void {
+        const event: canonical.Payload = @unionInit(canonical.Payload, @tagName(tag), result);
         self.appendPrivate(output, null, .account, null, null, source_fact_identity, event) catch {};
     }
 
@@ -759,7 +759,7 @@ pub const OkxVenueAdapter = struct {
         }
     }
 
-    fn appendPrivate(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, envelope: ?private.EventEnvelope, scope: canonical.CanonicalEventScope, instrument: ?canonical.InstrumentIdentity, asset: ?canonical.AssetIdentity, source_fact_identity: u128, event: canonical.CanonicalEvent) !void {
+    fn appendPrivate(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, envelope: ?private.EventEnvelope, scope: canonical.CanonicalEventScope, instrument: ?canonical.InstrumentIdentity, asset: ?canonical.AssetIdentity, source_fact_identity: u128, event: canonical.Payload) !void {
         const binding = self.binding orelse return error.InvalidBinding;
         const sequence = self.next_event_sequence;
         self.next_event_sequence = try std.math.add(u64, self.next_event_sequence, 1);

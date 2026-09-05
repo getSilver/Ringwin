@@ -5,8 +5,8 @@ const snapshot_magic: u64 = 0x54434341574e4952;
 const coordinator_snapshot_version: u16 = 2;
 const account_margin_gate_identity: u128 = 0x414343544d415247;
 
-fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreTransition) !?trading.OrderCommand {
-    return trading.applyTypedStable(shard, stable_journal, input);
+fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
+    return trading.applyStable(shard, stable_journal, .{ .core = input });
 }
 
 pub const max_shards = 4;
@@ -173,7 +173,7 @@ pub const CoordinationJournal = struct {
 };
 
 /// Converts one routed account fact into the target shard's stable event seam.
-pub fn accountFactEvent(delivery: Delivery) !trading.CoreTransition {
+pub fn accountFactEvent(delivery: Delivery) !trading.CoreEvent {
     const identity = std.math.cast(u64, delivery.fact.identity) orelse return error.IdentityOutOfRange;
     return .{
         .identity = identity,
@@ -200,7 +200,7 @@ pub fn accountFactEvent(delivery: Delivery) !trading.CoreTransition {
 }
 
 /// Converts one lease grant into the existing shard risk-lease event.
-pub fn riskLeaseEvent(lease: RiskLease) !trading.CoreTransition {
+pub fn riskLeaseEvent(lease: RiskLease) !trading.CoreEvent {
     const identity = std.math.cast(u64, lease.identity) orelse return error.IdentityOutOfRange;
     return .{ .identity = identity, .payload = .{ .risk_lease_granted = .{
         .lease_identity = identity,
@@ -216,7 +216,7 @@ pub fn riskLeaseEvent(lease: RiskLease) !trading.CoreTransition {
 }
 
 /// Converts one account-wide restriction into a shard-local stable gate fact.
-pub fn accountGateEvent(delivery: GateDelivery, target_identity: u128) !trading.CoreTransition {
+pub fn accountGateEvent(delivery: GateDelivery, target_identity: u128) !trading.CoreEvent {
     const identity = std.math.cast(u64, delivery.gate.identity) orelse return error.IdentityOutOfRange;
     return .{ .identity = identity, .payload = .{ .safety_gate_change = .{
         .gate_identity = delivery.gate.identity,
@@ -363,7 +363,7 @@ pub const GatewayOwnership = struct {
     }
 
     /// Converts an itemized transport outcome into the owning OMS apply seam.
-    pub fn outcomeEvent(self: *const GatewayOwnership, outcome: GatewayOutcome) !trading.CoreTransition {
+    pub fn outcomeEvent(self: *const GatewayOwnership, outcome: GatewayOutcome) !trading.CoreEvent {
         _ = try self.complete(outcome);
         var items: [trading.oms.max_commands]trading.oms.DispatchItem = undefined;
         items[0] = .{ .command_id = outcome.command_id, .state = outcome.state };
@@ -561,7 +561,7 @@ pub const AccountCoordinator = struct {
     }
 
     /// Returns the stable close events that must be applied to every expired lease owner.
-    pub fn expiredLeaseEvents(self: *const AccountCoordinator, events: *[max_shards]trading.CoreTransition) ![]const trading.CoreTransition {
+    pub fn expiredLeaseEvents(self: *const AccountCoordinator, events: *[max_shards]trading.CoreEvent) ![]const trading.CoreEvent {
         var count: usize = 0;
         for (self.leases[0..self.lease_count]) |lease| {
             if (lease.open) continue;
@@ -728,7 +728,7 @@ pub const AccountCoordinator = struct {
     }
 
     /// Returns stable events carrying every current lease to its owning shard.
-    pub fn currentLeaseEvents(self: *const AccountCoordinator, events: *[max_shards]trading.CoreTransition) ![]const trading.CoreTransition {
+    pub fn currentLeaseEvents(self: *const AccountCoordinator, events: *[max_shards]trading.CoreEvent) ![]const trading.CoreEvent {
         for (self.leases[0..self.lease_count], 0..) |lease, index|
             events[index] = try riskLeaseEvent(lease);
         return events[0..self.lease_count];
@@ -1650,7 +1650,7 @@ test "explicit lease tightening is a replayable deterministic fact" {
         break :blk gated.allocateLeases(2, 20);
     });
 
-    var events: [max_shards]trading.CoreTransition = undefined;
+    var events: [max_shards]trading.CoreEvent = undefined;
     const lease_events = try coordinator.currentLeaseEvents(&events);
     try std.testing.expectEqual(max_shards, lease_events.len);
     for (lease_events, 0..) |event, index| switch (event.payload) {

@@ -94,7 +94,7 @@ pub const Projection = struct {
         entry.active_rules_version = rules_version;
     }
 
-    pub fn apply(self: *Projection, event: canonical.CanonicalEvent) !void {
+    pub fn apply(self: *Projection, event: canonical.Payload) !void {
         switch (event) {
             .instrument_definition_observed => |definition| try self.applyDefinition(definition),
             .l2_book_snapshot => |snapshot| try self.applyFor(snapshot.instrument, event),
@@ -117,7 +117,7 @@ pub const Projection = struct {
         self.count += 1;
     }
 
-    fn applyFor(self: *Projection, instrument: canonical.InstrumentIdentity, event: canonical.CanonicalEvent) !void {
+    fn applyFor(self: *Projection, instrument: canonical.InstrumentIdentity, event: canonical.Payload) !void {
         const entry = self.getPtr(instrument) orelse return error.MissingInstrumentDefinition;
         const failure_before = entry.failure;
         (switch (event) {

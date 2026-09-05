@@ -1,5 +1,6 @@
 const std = @import("std");
 const engine = @import("trading_shard.zig");
+const shard_event = @import("trading_shard_event.zig");
 const fixture = @import("trading_shard_fixture.zig");
 const canonical = engine.canonical;
 const execution_gateway = @import("execution_gateway.zig");
@@ -10,7 +11,7 @@ const host_gateway = @import("strategy_host_gateway.zig");
 
 const TradingShard = engine.TradingShard;
 const ReplayTradingShard = engine.ReplayTradingShard;
-const CoreTransition = engine.CoreTransition;
+const CanonicalEvent = engine.CanonicalEvent;
 const LiveRun = fixture.LiveRun;
 const OrderState = engine.OrderState;
 const contract_denominator = fixture.contract_denominator;
@@ -39,6 +40,77 @@ const assertReplayEquivalentConfigured = fixture.assertReplayEquivalentConfigure
 const applyHealthyPrelude = fixture.applyHealthyPrelude;
 const atGroup = fixture.atGroup;
 
+fn establishSwapPosition(shard: *TradingShard, identity: u64, quantity: i64) !void {
+    _ = try shard.apply(atGroup(identity, .{ .identity = identity, .payload = .{ .mark_price = .{
+        .instrument = swap_instrument,
+        .price_micros = 50_000_000,
+    } } }));
+    var group: oms_module.IntentGroup = .{ .first_intent_sequence = identity, .count = 1 };
+    group.members[0] = .{
+        .intent_sequence = identity,
+        .operation = .place,
+        .instrument = swap_instrument,
+        .side = .buy,
+        .quantity = quantity,
+        .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000),
+    };
+    const placed = try shard.apply(atGroup(identity + 1, .{ .identity = identity, .payload = .{ .oms_intent_group = group } }));
+    const order_id = placed.oms_commands[0].order_id;
+    _ = try shard.apply(atGroup(identity + 2, .{ .identity = identity, .payload = .{ .oms_execution_report = .{
+        .report_id = identity,
+        .order_id = order_id,
+        .revision = 1,
+        .status = .filled,
+        .cumulative_quantity = quantity,
+        .remaining_quantity = 0,
+    } } }));
+    _ = try shard.apply(atGroup(identity + 3, .{ .identity = identity, .payload = .{ .economic_fill = .{
+        .fill_id = identity,
+        .order_id = order_id,
+        .quantity = quantity,
+        .price_micros = 50_000_000,
+    } } }));
+}
+
+test "stable CanonicalEvent decoder rejects malformed envelopes without state change" {
+    var shard: TradingShard = .{};
+    const before = shard.canonicalStateDigest();
+    const core = atGroup(1, .{
+        .identity = 1,
+        .payload = .{ .timer = .{ .quantity = 1 } },
+    }).core;
+    var payload: [engine.journal.max_payload_size]u8 = undefined;
+    payload[0] = 1; // StableInputTag.core
+    const encoded = try shard_event.encodeInput(payload[1..], core);
+    var record: engine.journal.Record = .{
+        .type_id = 0,
+        .schema_version = engine.schema_version,
+        .flags = engine.journal.input_flag,
+        .sequence = 1,
+        .source_time = 0,
+        .receive_time = 0,
+        .monotonic_time = 0,
+        .wall_time = 0,
+        .time_presence = .{},
+        .payload = payload[0 .. encoded.len + 1],
+    };
+
+    record.schema_version -= 1;
+    try std.testing.expectError(error.UnsupportedSchema, engine.decodeStableInput(record));
+    record.schema_version = engine.schema_version;
+    record.payload = payload[0..0];
+    try std.testing.expectError(error.TruncatedInputPayload, engine.decodeStableInput(record));
+    payload[0] = 255;
+    record.payload = payload[0..1];
+    try std.testing.expectError(error.UnknownInputType, engine.decodeStableInput(record));
+    payload[0] = 1;
+    record.payload = payload[0 .. encoded.len + 2];
+    payload[encoded.len + 1] = 0;
+    try std.testing.expectError(error.TrailingInputPayload, engine.decodeStableInput(record));
+    try std.testing.expectError(error.InputPayloadTooLarge, shard_event.encodeInput(payload[0..0], core));
+    try std.testing.expectEqualSlices(u8, &before, &shard.canonicalStateDigest());
+}
+
 test "configurable Genesis fails closed until authority is complete" {
     var incomplete: TradingShard = .{};
     try std.testing.expectError(error.GenesisIncomplete, incomplete.apply(atGroup(1, .{
@@ -47,10 +119,10 @@ test "configurable Genesis fails closed until authority is complete" {
     })));
 
     var out_of_order: TradingShard = .{};
-    try std.testing.expectError(error.InvalidMarginRules, out_of_order.apply(CoreTransition{
+    try std.testing.expectError(error.InvalidMarginRules, out_of_order.apply(.{ .core = .{
         .identity = 1,
         .payload = .{ .margin_rules_activated = .{ .version = 1 } },
-    }));
+    } }));
 
     var configured = try startScenarioAuthorized(.{
         .strategy_identity = 9,
@@ -229,9 +301,7 @@ test "layered gates latch kill while warning and self recovery stay narrow" {
 
 test "de risk locks target and flatten requires warning" {
     var run = try startScenario();
-    run.shard.economic_projection.portfolio.swap.quantity = 10;
-    run.shard.economic_projection.exchange.swap.quantity = 10;
-    run.shard.mark_price_micros = 50_000_000;
+    try establishSwapPosition(&run.shard, 500, 10);
     try std.testing.expectError(error.RiskWarningRequired, run.shard.apply(atGroup(12, .{ .identity = 3, .payload = .{ .control_command = .{
         .command_identity = 3,
         .content_hash = 3,
@@ -586,8 +656,8 @@ test "venue facts and replay use apply without replay send capability" {
 
 test "shared canonical adapter facts enter the TradingShard state seam" {
     const Fixture = struct {
-        fn record(sequence: u64, event: canonical.CanonicalEvent) canonical.EventRecord {
-            return .{ .envelope = .{
+        fn record(sequence: u64, event: canonical.Payload) engine.CanonicalEvent {
+            return .{ .venue = .{ .envelope = .{
                 .event_type = @intFromEnum(canonical.eventType(event)),
                 .schema_version = 1,
                 .identity = .{ .stream = 2, .sequence = sequence },
@@ -600,7 +670,7 @@ test "shared canonical adapter facts enter the TradingShard state seam" {
                 .adapter_session = 4,
                 .times = .{ .receive_utc_ns = sequence, .monotonic_ns = sequence, .audit_utc_ns = sequence },
                 .raw_evidence = .{ .stream = 2, .sequence = sequence, .digest = @splat(0) },
-            }, .event = event };
+            }, .event = event } };
         }
     };
 
@@ -650,7 +720,7 @@ test "shared canonical adapter facts enter the TradingShard state seam" {
     try std.testing.expectError(error.ConflictingReportIdentity, run.shard.apply(Fixture.record(2, .{ .execution_report = conflicting_report })));
     try std.testing.expectEqualSlices(u8, &accepted_digest, &run.shard.canonicalStateDigest());
     var unsupported_schema = Fixture.record(20, .{ .reconciliation_started = 20 });
-    unsupported_schema.envelope.schema_version = 2;
+    unsupported_schema.venue.envelope.schema_version = 2;
     try std.testing.expectError(error.UnsupportedSchema, run.shard.apply(unsupported_schema));
     try std.testing.expectEqualSlices(u8, &accepted_digest, &run.shard.canonicalStateDigest());
     try std.testing.expect((try engine.applyStable(&run.shard, &run.decision_journal, Fixture.record(3, .{ .fill = .{
@@ -688,8 +758,8 @@ test "shared canonical adapter facts enter the TradingShard state seam" {
 
 test "account bootstrap snapshot is normalized before stable journal replay" {
     const Envelope = struct {
-        fn record(sequence: u64, event: canonical.CanonicalEvent) canonical.EventRecord {
-            return .{ .envelope = .{
+        fn record(sequence: u64, event: canonical.Payload) engine.CanonicalEvent {
+            return .{ .venue = .{ .envelope = .{
                 .event_type = @intFromEnum(canonical.eventType(event)),
                 .schema_version = 1,
                 .identity = .{ .stream = 7, .sequence = sequence },
@@ -702,7 +772,7 @@ test "account bootstrap snapshot is normalized before stable journal replay" {
                 .adapter_session = 1,
                 .times = .{ .receive_utc_ns = sequence, .monotonic_ns = sequence, .audit_utc_ns = sequence },
                 .raw_evidence = .{ .stream = 7, .sequence = sequence, .digest = @splat(0) },
-            }, .event = event };
+            }, .event = event } };
         }
     };
 
@@ -730,8 +800,8 @@ test "account bootstrap snapshot is normalized before stable journal replay" {
 
 test "an existing account failure does not commit an unrelated rejected event" {
     const Envelope = struct {
-        fn record(sequence: u64, event: canonical.CanonicalEvent) canonical.EventRecord {
-            return .{ .envelope = .{
+        fn record(sequence: u64, event: canonical.Payload) engine.CanonicalEvent {
+            return .{ .venue = .{ .envelope = .{
                 .event_type = @intFromEnum(canonical.eventType(event)),
                 .schema_version = 1,
                 .identity = .{ .stream = 7, .sequence = sequence },
@@ -744,7 +814,7 @@ test "an existing account failure does not commit an unrelated rejected event" {
                 .adapter_session = 1,
                 .times = .{ .receive_utc_ns = sequence, .monotonic_ns = sequence, .audit_utc_ns = sequence },
                 .raw_evidence = .{ .stream = 7, .sequence = sequence, .digest = @splat(0) },
-            }, .event = event };
+            }, .event = event } };
         }
     };
 
@@ -788,9 +858,9 @@ test "an existing account failure does not commit an unrelated rejected event" {
 
 test "canonical not-sent is terminal without entering the legacy shard schema" {
     const Fixture = struct {
-        fn record(command: u64) canonical.EventRecord {
-            const event: canonical.CanonicalEvent = .{ .order_dispatch_result = .{ .command = command, .state = .not_sent, .reason = .capability_unsupported } };
-            return .{ .envelope = .{
+        fn record(command: u64) engine.CanonicalEvent {
+            const event: canonical.Payload = .{ .order_dispatch_result = .{ .command = command, .state = .not_sent, .reason = .capability_unsupported } };
+            return .{ .venue = .{ .envelope = .{
                 .event_type = @intFromEnum(canonical.eventType(event)),
                 .schema_version = 1,
                 .identity = .{ .stream = 2, .sequence = 1 },
@@ -803,7 +873,7 @@ test "canonical not-sent is terminal without entering the legacy shard schema" {
                 .adapter_session = 4,
                 .times = .{ .monotonic_ns = 1 },
                 .raw_evidence = .{ .stream = 2, .sequence = 1, .digest = @splat(0) },
-            }, .event = event };
+            }, .event = event } };
         }
     };
     var run = try startScenario();
@@ -897,7 +967,7 @@ test "SPOT and linear instruments close economics and replay independently" {
     try prefix.decision_journal.seal();
     var snapshot_storage: [64 * 1024]u8 = undefined;
     const snapshot = try prefix.shard.snapshot(&prefix.decision_journal, prefix.decision_journal.last_sequence, &snapshot_storage);
-    const tail_events = [_]CoreTransition{
+    const tail_events = [_]CanonicalEvent{
         atGroup(13, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .partially_filled, .cumulative_quantity = 40, .remaining_quantity = 60 } } }),
         atGroup(14, .{ .identity = 1, .payload = .{ .economic_fill = .{ .fill_id = 1, .order_id = 1, .quantity = 40, .price_micros = 30_000_000 } } }),
         atGroup(15, .{ .identity = 2, .payload = .{ .oms_execution_report = .{ .report_id = 2, .order_id = 1, .revision = 1, .status = .filled, .cumulative_quantity = 100, .remaining_quantity = 0 } } }),
@@ -910,7 +980,7 @@ test "SPOT and linear instruments close economics and replay independently" {
 
     var live = prefix.shard;
     var tail = engine.journal.Journal.initAt(prefix.decision_journal.last_sequence + 1);
-    for (tail_events) |event| _ = try engine.applyTypedStable(&live, &tail, event);
+    for (tail_events) |event| _ = try engine.applyStable(&live, &tail, event);
     try tail.seal();
     try std.testing.expectEqual(oms_module.OrderState.filled, live.oms.orders[0].state);
     try std.testing.expectEqual(oms_module.OrderState.filled, live.oms.orders[1].state);
@@ -968,14 +1038,14 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     try std.testing.expectEqual(@as(u64, 1), gateway.send_attempt_count);
     var output: [execution_gateway.max_routes]canonical.AdapterOutputBatch = undefined;
     try std.testing.expectEqual(@as(u8, 1), try gateway.drainFair(&output));
-    for (output[0].slice()) |event| _ = try live.shard.apply(event);
+    for (output[0].slice()) |event| _ = try live.shard.apply(.{ .venue = event });
     try std.testing.expectEqual(oms_module.OrderState.filled, live.shard.oms.orders[0].state);
     try std.testing.expectEqual(@as(i64, 10), live.shard.economicSummary().portfolio.swap.quantity);
 
     var replayed: ReplayTradingShard = .{};
     for (genesis) |event| _ = try replayed.apply(event);
     _ = try replayed.apply(place);
-    for (output[0].slice()) |event| _ = try replayed.apply(event);
+    for (output[0].slice()) |event| _ = try replayed.apply(.{ .venue = event });
     try std.testing.expectEqualSlices(u8, &live.shard.canonicalStateDigest(), &replayed.canonicalStateDigest());
     comptime std.debug.assert(!@hasField(ReplayTradingShard, "gateway"));
 }
@@ -1057,7 +1127,15 @@ test "layered risk owns reservations until authoritative absence" {
 
     var limited = try startScenario();
     _ = try limited.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
-    limited.shard.strategy_limit_micros = 50;
+    _ = try limited.shard.apply(atGroup(12, .{ .identity = 2, .payload = .{ .risk_lease_granted = .{
+        .lease_identity = 2,
+        .version = 2,
+        .amount_micros = 1_000,
+        .strategy_limit_micros = 50,
+        .portfolio_limit_micros = 1_000,
+        .exchange_account_limit_micros = 1_000,
+        .global_limit_micros = 1_000,
+    } } }));
     try std.testing.expectError(error.StrategyLimitExceeded, limited.shard.apply(atGroup(12, .{ .identity = 40, .payload = .{ .oms_intent_group = group } })));
     try std.testing.expectEqual(@as(u8, 0), limited.shard.oms.order_count);
 }
@@ -1168,31 +1246,40 @@ test "CancelConfirmCreate re-risks replacement against latest facts" {
     var replace: oms_module.IntentGroup = .{ .first_intent_sequence = 71, .count = 1 };
     replace.members[0] = .{ .intent_sequence = 71, .operation = .amend, .instrument = spot_instrument, .target_order_id = 1, .expected_revision = 1, .quantity = 80, .limit_price = fixtureOmsPrice(spot_instrument, 49_000_000), .native_amend = false, .allow_cancel_confirm_create = true };
     _ = try run.shard.apply(atGroup(14, .{ .identity = 71, .payload = .{ .oms_intent_group = replace } }));
-    run.shard.strategy_limit_micros = 10;
+    _ = try run.shard.apply(atGroup(15, .{ .identity = 72, .payload = .{ .risk_lease_granted = .{
+        .lease_identity = 72,
+        .version = 2,
+        .amount_micros = 1_000,
+        .strategy_limit_micros = 10,
+        .portfolio_limit_micros = 1_000,
+        .exchange_account_limit_micros = 1_000,
+        .global_limit_micros = 1_000,
+    } } }));
     const result = try run.shard.apply(atGroup(15, .{ .identity = 2, .payload = .{ .oms_execution_report = .{ .report_id = 2, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
     try std.testing.expectEqual(oms_module.OrderState.canceled, run.shard.oms.orders[0].state);
     try std.testing.expectEqual(@as(u8, 1), run.shard.oms.order_count);
     try std.testing.expectEqual(@as(usize, 0), result.oms_commands.len);
 }
 
-test "qualified command carries independently inferred reduce-only flags" {
+test "forced position divergence blocks new qualification" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
-    run.shard.economic_projection.portfolio.swap.quantity = 10;
-    run.shard.economic_projection.exchange.swap.quantity = -5;
+    try establishSwapPosition(&run.shard, 600, 10);
+    _ = try run.shard.apply(atGroup(604, .{ .identity = 601, .payload = .{ .venue_forced_execution = .{
+        .execution_id = 601,
+        .side = .sell,
+        .quantity = 15,
+        .price_micros = 50_000_000,
+    } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 75, .count = 1 };
     group.members[0] = .{ .intent_sequence = 75, .operation = .place, .instrument = swap_instrument, .side = .sell, .quantity = 8, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
-    const result = try run.shard.apply(atGroup(12, .{ .identity = 75, .payload = .{ .oms_intent_group = group } }));
-    try std.testing.expectEqual(@as(usize, 1), result.oms_commands.len);
-    try std.testing.expect(result.oms_commands[0].portfolio_reduce_only);
-    try std.testing.expect(!result.oms_commands[0].venue_reduce_only);
+    try std.testing.expectError(error.TradingNotAuthorized, run.shard.apply(atGroup(12, .{ .identity = 75, .payload = .{ .oms_intent_group = group } })));
+    try std.testing.expectEqual(@as(i64, 10), run.shard.economicSummary().portfolio.swap.quantity);
+    try std.testing.expectEqual(@as(i64, -5), run.shard.economicSummary().exchange.swap.quantity);
 }
 
 test "SPOT asset risk is isolated from SWAP positions" {
     var run = try startScenario();
-    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
-    run.shard.economic_projection.portfolio.swap.quantity = 10;
-    run.shard.economic_projection.exchange.swap.quantity = 10;
+    try establishSwapPosition(&run.shard, 700, 10);
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 79, .count = 1 };
     group.members[0] = .{ .intent_sequence = 79, .operation = .place, .instrument = spot_instrument, .side = .sell, .quantity = 1, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
     try std.testing.expectError(error.InsufficientSpotAsset, run.shard.apply(atGroup(12, .{ .identity = 79, .payload = .{ .oms_intent_group = group } })));
@@ -1204,8 +1291,6 @@ test "economic fills derive ownership from OMS and close Portfolio Exchange ledg
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 79, .count = 1 };
     group.members[0] = .{ .intent_sequence = 79, .operation = .place, .instrument = swap_instrument, .side = .buy, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
     _ = try run.shard.apply(atGroup(12, .{ .identity = 79, .payload = .{ .oms_intent_group = group } }));
-    run.shard.risk_lease_micros = 1;
-    run.shard.risk_lease_remaining_micros = 1;
     _ = try run.shard.apply(atGroup(13, .{ .identity = 1, .payload = .{ .economic_fill = .{ .fill_id = 1, .order_id = 1, .quantity = 4, .price_micros = 50_000_000, .fee_micros = 15 } } }));
     _ = try run.shard.apply(atGroup(14, .{ .identity = 2, .payload = .{ .economic_fill = .{ .fill_id = 2, .order_id = 1, .quantity = 6, .price_micros = 51_000_000, .fee_micros = 20, .rebate_micros = 5 } } }));
     const summary = run.shard.economicSummary();
@@ -1216,7 +1301,7 @@ test "economic fills derive ownership from OMS and close Portfolio Exchange ledg
     try std.testing.expectEqual(@as(i64, 35), summary.portfolio.fee_micros);
     try std.testing.expectEqual(@as(i64, 5), summary.portfolio.rebate_micros);
     try std.testing.expectEqual(@as(u8, 10), summary.ledger_transactions);
-    try std.testing.expect(run.shard.risk_lease_remaining_micros < 0);
+    try std.testing.expect(run.shard.risk_lease_remaining_micros < run.shard.risk_lease_micros);
     try std.testing.expectEqual(summary.portfolio.swap.quantity, run.shard.economicSummary().portfolio.swap.quantity);
     try std.testing.expectEqual(summary.portfolio.usdt_balance_micros, run.shard.economicSummary().portfolio.usdt_balance_micros);
     try std.testing.expect(!summary.reconciliation_break);

@@ -19,11 +19,11 @@ const market_projection = @import("market_projection.zig");
 const instrument_registry = @import("instrument_registry.zig");
 
 /// Current physical schema for AuthoritativeTradingState snapshots.
-pub const state_schema_version: u32 = 6;
+pub const state_schema_version: u32 = 7;
 /// Release artifact producing the current snapshot schema.
 pub const release_artifact_identity: u64 = 1;
 /// Registry entry defining the current snapshot and journal schemas.
-pub const schema_registry_identity: u64 = 4;
+pub const schema_registry_identity: u64 = 5;
 const client_order_id = "RWN-00000001-01-000000000001";
 const settlement_asset: canonical.AssetIdentity = 1;
 const money_scale: i64 = 1_000_000;
@@ -69,17 +69,13 @@ pub const StrategyCutoverFence = shard_event.StrategyCutoverFence;
 pub const StrategyStateTransition = shard_event.StrategyStateTransition;
 pub const VersionActivationEvent = shard_event.VersionActivationEvent;
 pub const CorePayload = shard_event.CorePayload;
-pub const CoreTransition = shard_event.CoreTransition;
-const InputEvent = shard_event.InputEvent;
+pub const CoreEvent = shard_event.CoreEvent;
+pub const CanonicalEvent = shard_event.CanonicalEvent;
 
 const EncodedInput = shard_event.EncodedInput;
 const encodeInput = shard_event.encodeInput;
 const decodeInput = shard_event.decodeInput;
 const eventIdentity = shard_event.eventIdentity;
-
-pub fn decodeStableInput(record: journal.Record) !CoreTransition {
-    return shard_event.decodeStableInput(record);
-}
 
 pub const OrderCommand = struct {
     command_id: u64,
@@ -99,12 +95,8 @@ pub const ApplyResult = struct {
 pub const ReplayTradingShard = struct {
     shard: TradingShard = .{},
 
-    pub fn apply(self: *ReplayTradingShard, input: anytype) ![]const Fact {
-        return switch (@TypeOf(input)) {
-            canonical.EventRecord => (try self.shard.apply(input)).facts,
-            CoreTransition => (try self.shard.applyTyped(input)).facts,
-            else => @compileError("ReplayTradingShard.apply expects a canonical event or typed core transition"),
-        };
+    pub fn apply(self: *ReplayTradingShard, input: CanonicalEvent) ![]const Fact {
+        return (try self.shard.apply(input)).facts;
     }
 
     pub fn canonicalStateDigest(self: ReplayTradingShard) [Sha256.digest_length]u8 {
@@ -293,20 +285,16 @@ pub const TradingShard = struct {
     /// retained only as the normalized legacy active-instrument view.
     instrument_registry: instrument_registry.Registry = .{},
 
-    /// The sole public Venue/market ingress seam. Canonical fields are
-    /// projected directly; they are never narrowed through the legacy shard
-    /// journal schema.
-    /// Applies either a typed core transition or a canonical Venue event.
-    /// Both routes commit only after the candidate state has succeeded.
-    pub fn apply(self: *TradingShard, input: anytype) !ApplyResult {
-        return switch (@TypeOf(input)) {
-            canonical.EventRecord => self.applyCanonical(input),
-            CoreTransition => self.applyTyped(input),
-            else => @compileError("TradingShard.apply expects a typed transition or canonical event"),
+    /// The sole public core ingress seam. Both typed core events and canonical
+    /// Venue records enter through this tagged event and commit transactionally.
+    pub fn apply(self: *TradingShard, input: CanonicalEvent) !ApplyResult {
+        return switch (input) {
+            .core => |event| self.applyCore(event),
+            .venue => |event| self.applyVenue(event),
         };
     }
 
-    fn applyCanonical(self: *TradingShard, event: canonical.EventRecord) !ApplyResult {
+    fn applyVenue(self: *TradingShard, event: canonical.EventRecord) !ApplyResult {
         var candidate = self.*;
         const account_failure_before = candidate.canonical_account.failure;
         const market_failure_generation_before = candidate.canonical_market.failure_generation;
@@ -350,7 +338,7 @@ pub const TradingShard = struct {
         };
     }
 
-    fn applyInput(self: *TradingShard, event: InputEvent) !ApplyResult {
+    fn applyCore(self: *TradingShard, event: CoreEvent) !ApplyResult {
         var candidate = self.*;
         const before = candidate.trace.len;
         candidate.oms.begin();
@@ -361,20 +349,6 @@ pub const TradingShard = struct {
             .order_command = command,
             .oms_commands = self.oms.emitted(),
         };
-    }
-
-    /// Native typed transition entry point. The stable journal persists this
-    /// typed transition directly; no canonical opaque wrapper is involved.
-    pub fn applyTyped(self: *TradingShard, transition: CoreTransition) !ApplyResult {
-        return self.applyInput(.{
-            .identity = transition.identity,
-            .source_time = transition.source_time,
-            .receive_time = transition.receive_time,
-            .monotonic_time = transition.monotonic_time,
-            .wall_time = transition.wall_time,
-            .time_presence = transition.time_presence,
-            .payload = transition.payload,
-        });
     }
 
     pub fn canonicalStateDigest(self: TradingShard) [Sha256.digest_length]u8 {
@@ -1312,9 +1286,7 @@ pub const TradingShard = struct {
         try self.trace.append(.risk_reservation_rebalanced, fact_identity);
     }
 
-    fn handle(self: *TradingShard, input: InputEvent) !?OrderCommand {
-        if (input.version != schema_version) return error.UnsupportedSchema;
-
+    fn handle(self: *TradingShard, input: CoreEvent) !?OrderCommand {
         switch (input.payload) {
             .control_command => |command| {
                 const keep_positions = command.kind == .stop_keep_positions;
@@ -1629,6 +1601,7 @@ pub const TradingShard = struct {
                     self.exchange_account_limit_micros > self.global_limit_micros or
                     self.risk_lease_micros > self.exchange_account_limit_micros)
                     return error.InvalidRiskLeaseHierarchy;
+                try self.recalculateRisk(false);
                 try self.assertClosures();
                 try self.trace.append(.risk_lease_granted, input.identity);
             },
@@ -1887,55 +1860,79 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         if (transaction.posting_count > transaction.postings.len) return error.InvalidSnapshotState;
 }
 
-/// Atomically applies one canonical EventRecord and appends every resulting
-/// fact to the stable journal.
-fn appendStableFactGroup(
-    decision_journal: *journal.Journal,
-    input: canonical.EventRecord,
-    facts: []const Fact,
-) !void {
-    var canonical_bytes: [canonical_event_codec.max_encoded_len]u8 = undefined;
-    const encoded_input = try canonical_event_codec.encode(&canonical_bytes, input);
-    const times = input.envelope.times;
-    const time_presence: journal.TimePresence = .{
-        .source = times.source_utc_ns != null,
-        .receive = times.receive_utc_ns != null,
-        .monotonic = times.monotonic_ns != null,
-        .wall = times.audit_utc_ns != null,
+const StableInputTag = enum(u8) { core = 1, venue = 2 };
+
+const StableTimes = struct {
+    source: u64,
+    receive: u64,
+    monotonic: u64,
+    wall: u64,
+    presence: journal.TimePresence,
+};
+
+fn stableTimes(input: CanonicalEvent) StableTimes {
+    return switch (input) {
+        .core => |event| .{
+            .source = event.source_time,
+            .receive = event.receive_time,
+            .monotonic = event.monotonic_time,
+            .wall = event.wall_time,
+            .presence = event.time_presence,
+        },
+        .venue => |record| .{
+            .source = record.envelope.times.source_utc_ns orelse 0,
+            .receive = record.envelope.times.receive_utc_ns orelse 0,
+            .monotonic = record.envelope.times.monotonic_ns orelse 0,
+            .wall = record.envelope.times.audit_utc_ns orelse 0,
+            .presence = .{
+                .source = record.envelope.times.source_utc_ns != null,
+                .receive = record.envelope.times.receive_utc_ns != null,
+                .monotonic = record.envelope.times.monotonic_ns != null,
+                .wall = record.envelope.times.audit_utc_ns != null,
+            },
+        },
     };
-    for (facts, 0..) |event, index| {
-        var identity_bytes: [@sizeOf(u64)]u8 = undefined;
-        std.mem.writeInt(u64, &identity_bytes, event.identity, .little);
-        try decision_journal.append(.{
-            .type_id = @intFromEnum(event.kind),
-            .schema_version = schema_version,
-            .flags = if (index == 0) journal.canonical_input_flag else 0,
-            .sequence = event.sequence,
-            .source_time = times.source_utc_ns orelse 0,
-            .receive_time = times.receive_utc_ns orelse 0,
-            .monotonic_time = times.monotonic_ns orelse 0,
-            .wall_time = times.audit_utc_ns orelse 0,
-            .time_presence = time_presence,
-            .payload = if (index == 0) encoded_input else &identity_bytes,
-        });
-    }
 }
 
-/// Stable-journal adapter for the typed path. The payload is the versioned
-/// typed transition encoding, applied natively before persistence.
-pub fn applyTypedStable(
-    shard: *TradingShard,
+fn encodeStableInput(destination: []u8, input: CanonicalEvent) ![]const u8 {
+    if (destination.len == 0) return error.InputPayloadTooLarge;
+    return switch (input) {
+        .core => |event| blk: {
+            destination[0] = @intFromEnum(StableInputTag.core);
+            const encoded = try encodeInput(destination[1..], event);
+            break :blk destination[0 .. encoded.len + 1];
+        },
+        .venue => |record| blk: {
+            destination[0] = @intFromEnum(StableInputTag.venue);
+            const encoded = try canonical_event_codec.encode(destination[1..], record);
+            break :blk destination[0 .. encoded.len + 1];
+        },
+    };
+}
+
+pub fn decodeStableInput(record: journal.Record) !CanonicalEvent {
+    if (record.schema_version != schema_version) return error.UnsupportedSchema;
+    if (record.payload.len == 0) return error.TruncatedInputPayload;
+    const tag = std.enums.fromInt(StableInputTag, record.payload[0]) orelse return error.UnknownInputType;
+    var nested = record;
+    nested.payload = record.payload[1..];
+    return switch (tag) {
+        .core => .{ .core = try shard_event.decodeInput(nested) },
+        .venue => .{ .venue = try canonical_event_codec.decode(nested.payload) },
+    };
+}
+
+/// Appends one authoritative input and every resulting fact to one stable
+/// journal format, regardless of whether the source was core or Venue.
+fn appendStableFactGroup(
     decision_journal: *journal.Journal,
-    transition: CoreTransition,
-) !?OrderCommand {
-    const checkpoint = decision_journal.checkpoint();
-    errdefer decision_journal.restore(checkpoint);
-    var candidate = shard.*;
-    const result = try candidate.applyTyped(transition);
-    if (result.facts.len == 0) return error.InputProducedNoFact;
-    var encoded_storage: [journal.max_payload_size]u8 = undefined;
-    const encoded = try encodeInput(&encoded_storage, transition);
-    for (result.facts, 0..) |event, index| {
+    input: CanonicalEvent,
+    facts: []const Fact,
+) !void {
+    var storage: [journal.max_payload_size]u8 = undefined;
+    const encoded_input = try encodeStableInput(&storage, input);
+    const times = stableTimes(input);
+    for (facts, 0..) |event, index| {
         var identity_bytes: [@sizeOf(u64)]u8 = undefined;
         std.mem.writeInt(u64, &identity_bytes, event.identity, .little);
         try decision_journal.append(.{
@@ -1943,34 +1940,20 @@ pub fn applyTypedStable(
             .schema_version = schema_version,
             .flags = if (index == 0) journal.input_flag else 0,
             .sequence = event.sequence,
-            .source_time = transition.source_time,
-            .receive_time = transition.receive_time,
-            .monotonic_time = transition.monotonic_time,
-            .wall_time = transition.wall_time,
-            .time_presence = transition.time_presence,
-            .payload = if (index == 0) encoded.bytes[0..encoded.len] else &identity_bytes,
+            .source_time = times.source,
+            .receive_time = times.receive,
+            .monotonic_time = times.monotonic,
+            .wall_time = times.wall,
+            .time_presence = times.presence,
+            .payload = if (index == 0) encoded_input else &identity_bytes,
         });
     }
-    shard.* = candidate;
-    return result.order_command;
 }
 
 pub fn applyStable(
     shard: *TradingShard,
     decision_journal: *journal.Journal,
-    input: anytype,
-) !?OrderCommand {
-    if (@TypeOf(input) == CoreTransition)
-        return applyTypedStable(shard, decision_journal, input);
-    if (@hasField(@TypeOf(input), "envelope") and @hasField(@TypeOf(input), "event"))
-        return applyCanonicalStable(shard, decision_journal, .{ .envelope = input.envelope, .event = input.event });
-    @compileError("applyStable expects a typed transition or canonical event");
-}
-
-fn applyCanonicalStable(
-    shard: *TradingShard,
-    decision_journal: *journal.Journal,
-    input: canonical.EventRecord,
+    input: CanonicalEvent,
 ) !?OrderCommand {
     const checkpoint = decision_journal.checkpoint();
     const before = shard.trace.len;
@@ -2322,7 +2305,7 @@ pub const StableRecovery = struct {
 fn validateReplayRecord(
     record: journal.Record,
     expected: Fact,
-    input: CoreTransition,
+    input: CanonicalEvent,
     is_input: bool,
 ) !void {
     if (record.schema_version != schema_version) return error.UnsupportedSchema;
@@ -2331,44 +2314,15 @@ fn validateReplayRecord(
     if (record.sequence != expected.sequence or kind != expected.kind or
         (!is_input and try eventIdentity(record.payload) != expected.identity))
         return error.ReplayFactMismatch;
-    if (record.source_time != input.source_time or
-        record.receive_time != input.receive_time or
-        record.monotonic_time != input.monotonic_time or
-        record.wall_time != input.wall_time or
-        @as(u8, @bitCast(record.time_presence)) != @as(u8, @bitCast(input.time_presence)))
+    const times = stableTimes(input);
+    if (record.source_time != times.source or
+        record.receive_time != times.receive or
+        record.monotonic_time != times.monotonic or
+        record.wall_time != times.wall or
+        @as(u8, @bitCast(record.time_presence)) != @as(u8, @bitCast(times.presence)))
         return error.ReplayTimeMismatch;
     if (is_input) {
         if (record.flags != journal.input_flag) return error.InputFlagMissing;
-    } else if (record.flags != 0 or record.payload.len != @sizeOf(u64)) {
-        return error.InvalidDerivedFactRecord;
-    }
-}
-
-fn validateCanonicalReplayRecord(
-    record: journal.Record,
-    expected: Fact,
-    input: canonical.EventRecord,
-    is_input: bool,
-) !void {
-    if (record.schema_version != schema_version) return error.UnsupportedSchema;
-    const kind = std.enums.fromInt(EventKind, record.type_id) orelse return error.UnknownEventType;
-    if (record.sequence != expected.sequence or kind != expected.kind) return error.ReplayFactMismatch;
-    if (!is_input and try eventIdentity(record.payload) != expected.identity) return error.ReplayFactMismatch;
-    const times = input.envelope.times;
-    const presence: journal.TimePresence = .{
-        .source = times.source_utc_ns != null,
-        .receive = times.receive_utc_ns != null,
-        .monotonic = times.monotonic_ns != null,
-        .wall = times.audit_utc_ns != null,
-    };
-    if (record.source_time != (times.source_utc_ns orelse 0) or
-        record.receive_time != (times.receive_utc_ns orelse 0) or
-        record.monotonic_time != (times.monotonic_ns orelse 0) or
-        record.wall_time != (times.audit_utc_ns orelse 0) or
-        @as(u8, @bitCast(record.time_presence)) != @as(u8, @bitCast(presence)))
-        return error.ReplayTimeMismatch;
-    if (is_input) {
-        if (record.flags != journal.canonical_input_flag) return error.InputFlagMissing;
     } else if (record.flags != 0 or record.payload.len != @sizeOf(u64)) {
         return error.InvalidDerivedFactRecord;
     }
@@ -2397,8 +2351,7 @@ pub fn replayDigest(
     return .{ .status = recovered.status, .digest = recovered.shard.canonicalStateDigest() };
 }
 
-/// Replays typed stable inputs and canonical venue inputs from an explicit
-/// recovery point.
+/// Replays authoritative CanonicalEvents from an explicit recovery point.
 pub fn recoverStable(initial: TradingShard, bytes: []const u8) !StableRecovery {
     var reader = try journal.Reader.init(bytes);
     const recovered = try replayReader(&reader, initial);
@@ -2414,28 +2367,14 @@ fn replayReader(reader: *journal.Reader, initial: TradingShard) !ReplayResult {
             .end => |status| return .{ .shard = shard, .status = status },
             .record => |record| record,
         };
-        if (first_record.flags != journal.input_flag and first_record.flags != journal.canonical_input_flag)
-            return error.OrphanDerivedFact;
+        if (first_record.flags != journal.input_flag) return error.OrphanDerivedFact;
         var candidate = shard;
-        const typed_input: ?CoreTransition = if (first_record.flags == journal.input_flag)
-            try shard_event.decodeStableInput(first_record)
-        else
-            null;
-        const canonical_input: ?canonical.EventRecord = if (first_record.flags == journal.canonical_input_flag)
-            try canonical_event_codec.decode(first_record.payload)
-        else
-            null;
+        const input = try decodeStableInput(first_record);
         const before = candidate.trace.len;
         var replay_error: ?anyerror = null;
-        if (typed_input) |input| {
-            _ = candidate.applyTyped(input) catch |err| {
-                replay_error = err;
-            };
-        } else {
-            _ = candidate.apply(canonical_input.?) catch |err| {
-                replay_error = err;
-            };
-        }
+        _ = candidate.apply(input) catch |err| {
+            replay_error = err;
+        };
         if (replay_error != null and candidate.canonical_account.failure == null and
             candidate.canonical_market.latestFailure() == null)
             return replay_error.?;
@@ -2451,10 +2390,7 @@ fn replayReader(reader: *journal.Reader, initial: TradingShard) !ReplayResult {
                     return error.IncompleteFactGroup;
                 },
             };
-            if (typed_input) |input|
-                try validateReplayRecord(record, expected, input, index == 0)
-            else
-                try validateCanonicalReplayRecord(record, expected, canonical_input.?, index == 0);
+            try validateReplayRecord(record, expected, input, index == 0);
         }
         shard = candidate;
     }
