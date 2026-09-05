@@ -1,6 +1,7 @@
 const std = @import("std");
 const trading = @import("trading_shard.zig");
 const coordination = @import("account_coordinator.zig");
+const production_contract = @import("production_contract.zig");
 
 const ShardId = coordination.ShardId;
 const max_shards = coordination.max_shards;
@@ -21,8 +22,8 @@ const order_quantity: i64 = 100;
 const place_fee_micros: i64 = 400_000;
 const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
-pub const acceptance_schema_version: u16 = 2;
-const expected_shared_summary_v2 = "aa0df1c6767e47c53c450d15d467c9624e92b9025e7a3c4ca8fa5ebe78d1bb3d";
+pub const acceptance_schema_version: u16 = production_contract.acceptance_schema_version;
+const expected_shared_summary_v2 = "841e5425827f7d12ba771fd2de14303bfb4923b22a4cc6615cd7d348b8332dfe";
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
     return trading.applyStable(shard, stable_journal, .{ .core = input });
@@ -236,6 +237,8 @@ fn assertLedgersClosed(world: *const World) !void {
 /// Versioned deterministic evidence emitted by the four-shard acceptance entry.
 pub const FourShardEvidence = struct {
     schema_version: u16,
+    journal_schema_version: u16,
+    state_schema_version: u32,
     coordinator_barrier: u64,
     shard_barriers: [max_shards]u64,
     shard_digests: [max_shards][Sha256.digest_length]u8,
@@ -688,6 +691,8 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     }
     return .{
         .schema_version = acceptance_schema_version,
+        .journal_schema_version = production_contract.journal_schema_version,
+        .state_schema_version = production_contract.state_schema_version,
         .coordinator_barrier = path_b.coordinator.barrier,
         .shard_barriers = shard_barriers,
         .shard_digests = shard_digests,

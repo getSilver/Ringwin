@@ -7,8 +7,9 @@ const host_gateway = @import("strategy_host_gateway.zig");
 const journal = @import("journal.zig");
 const oms_module = @import("oms.zig");
 const operational = @import("operational.zig");
+const production_contract = @import("production_contract.zig");
 
-pub const schema_version: u16 = 7;
+pub const schema_version: u16 = production_contract.journal_schema_version;
 
 pub const EventKind = enum(u16) {
     instrument_rules_activated,

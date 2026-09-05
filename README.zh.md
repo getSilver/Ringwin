@@ -108,11 +108,11 @@ four shards replay and isolate overload
 stable journal detects tail, corruption, and sequence gap
 ```
 
-当前离线基线（2026-09-05）由 `tools\verify-core-wave.ps1` 实际运行汇总：schema 为 `2`，
-Debug/ReleaseSafe 均为 `178/178`，coordinator barrier 为 `17`，四个 shard barrier 为
-`23/26/21/21`，Gateway 实时发送 `4` 次，重放发送能力为 `false`，共享摘要为：
+当前离线基线（2026-09-06）由 `tools\verify-core-wave.ps1` 实际运行汇总：acceptance schema 为 `2`，
+journal/state schema 为 `8`，Debug/ReleaseSafe 均为 `188/188`，coordinator barrier 为 `17`，
+四个 shard barrier 为 `23/26/21/21`，Gateway 实时发送 `4` 次，重放发送能力为 `false`，共享摘要为：
 
-`e124735e7c33b86358e0a9fe23d9d1a51a86436627821b7cfc48ffbfc7f23476`
+`841e5425827f7d12ba771fd2de14303bfb4923b22a4cc6615cd7d348b8332dfe`
 
 正常轨迹实际摘要：
 

@@ -17,13 +17,14 @@ const canonical_event_codec = @import("canonical_event_codec.zig");
 const account_projection = @import("account_projection.zig");
 const market_projection = @import("market_projection.zig");
 const instrument_registry = @import("instrument_registry.zig");
+const production_contract = @import("production_contract.zig");
 
 /// Current physical schema for AuthoritativeTradingState snapshots.
-pub const state_schema_version: u32 = 7;
+pub const state_schema_version: u32 = production_contract.state_schema_version;
 /// Release artifact producing the current snapshot schema.
 pub const release_artifact_identity: u64 = 1;
 /// Registry entry defining the current snapshot and journal schemas.
-pub const schema_registry_identity: u64 = 5;
+pub const schema_registry_identity: u64 = production_contract.schema_registry_identity;
 const client_order_id = "RWN-00000001-01-000000000001";
 const settlement_asset: canonical.AssetIdentity = 1;
 const money_scale: i64 = 1_000_000;

@@ -29,7 +29,7 @@ Ringwin explores how Zig can be used in a larger real-world system involving:
 * positions and balances;
 * accounting, fees, and PnL;
 * exchange integration;
-* durable event logging;
+* bounded in-memory event logging in the offline fixture;
 * deterministic replay;
 * process and shard fault isolation.
 
@@ -126,7 +126,7 @@ The current implementation includes:
 * position and balance tracking;
 * fees and PnL accounting;
 * margin reservations;
-* durable event journals;
+* bounded in-memory journal encoding with integrity checks;
 * CRC32C integrity checks;
 * deterministic replay;
 * duplicate-event handling;
@@ -163,6 +163,10 @@ The current development environment uses:
 * Zig `0.17.0-dev.315+5b647b792`
 * Python `3.9+`
 
+The first production support contract is Linux-only and uses `ReleaseSafe` by
+default. Windows is limited to development and fast regression; the exact
+support matrix and schema gate live in [`src/production_contract.zig`](src/production_contract.zig).
+
 Check your Zig version:
 
 ```console
@@ -192,6 +196,13 @@ Run the full offline core wave:
 zig build core-wave
 ```
 
+For a Linux target from a native Linux/WSL toolchain, compile the production
+baseline with:
+
+```console
+zig test src/main.zig -target x86_64-linux-gnu -OReleaseSafe --test-no-exec
+```
+
 Run the explicit OKX Demo wave (read-only preparation by default):
 
 ```powershell
@@ -210,11 +221,11 @@ qualification remains `not_run`; OKX Demo evidence is never promoted to
 `TestnetQualified`.
 
 The current offline baseline uses acceptance schema `2` and journal/state schema
-`7`: Debug and ReleaseSafe each pass `185/185` tests, the four-shard coordinator
+`8`: Debug and ReleaseSafe each pass `188/188` tests, the four-shard coordinator
 barrier is `17`, and shard barriers are `23/26/21/21`. The offline Gateway
 contract makes `5` adapter submissions, the four-shard ownership ledger records
 `4` commands, and replay has no send capability. The shared summary is
-`aa0df1c6767e47c53c450d15d467c9624e92b9025e7a3c4ca8fa5ebe78d1bb3d`.
+`841e5425827f7d12ba771fd2de14303bfb4923b22a4cc6615cd7d348b8332dfe`.
 The four shard CanonicalStateDigests and the five single-shard trajectory
 digests are recorded in the [local acceptance ticket](.scratch/trading-core-integrity-repair/issues/12-rebuild-trusted-acceptance-baseline.md).
 
@@ -222,7 +233,9 @@ All build steps reject a Zig version other than `0.17.0-dev.315+5b647b792` befor
 
 ## Deterministic Replay
 
-Ringwin records authoritative events in a durable journal.
+The offline fixture records authoritative events in a bounded in-memory journal.
+It proves integrity checks and deterministic replay only; the Linux durable
+disk journal and snapshot store are the separate scope of production ticket 03.
 
 The journal can be used to:
 

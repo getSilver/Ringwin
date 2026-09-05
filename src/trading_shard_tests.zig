@@ -8,6 +8,7 @@ const oms_module = engine.oms;
 const operational = engine.operational;
 const simulated_venue = @import("simulated_venue.zig");
 const host_gateway = @import("strategy_host_gateway.zig");
+const production_contract = @import("production_contract.zig");
 
 const TradingShard = engine.TradingShard;
 const ReplayTradingShard = engine.ReplayTradingShard;
@@ -95,7 +96,7 @@ test "stable CanonicalEvent decoder rejects malformed envelopes without state ch
         .payload = payload[0 .. encoded.len + 1],
     };
 
-    record.schema_version -= 1;
+    record.schema_version = production_contract.previous_journal_schema_version;
     try std.testing.expectError(error.UnsupportedSchema, engine.decodeStableInput(record));
     record.schema_version = engine.schema_version;
     record.payload = payload[0..0];

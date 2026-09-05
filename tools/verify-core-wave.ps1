@@ -136,6 +136,11 @@ $singleText = $singleShardEvidence -join "`n"
 $schemaMatch = [regex]::Match($fourText, 'four_shard_acceptance: schema=(\d+)')
 if (-not $schemaMatch.Success) { throw 'Four-shard machine-readable schema evidence is missing' }
 $AcceptanceSchema = [int]$schemaMatch.Groups[1].Value
+$stableSchemaMatch = [regex]::Match($fourText, 'journal_schema=(\d+), state_schema=(\d+)')
+if (-not $stableSchemaMatch.Success) { throw 'Stable journal/state schema evidence is missing' }
+$JournalSchema = [int]$stableSchemaMatch.Groups[1].Value
+$StateSchema = [int]$stableSchemaMatch.Groups[2].Value
+if ($JournalSchema -ne 8 -or $StateSchema -ne 8) { throw "Unexpected production journal/state schema: $JournalSchema/$StateSchema" }
 $debugMatch = [regex]::Match($debugText, 'All (\d+) tests passed')
 $releaseMatch = [regex]::Match($releaseText, 'All (\d+) tests passed')
 $barrierMatch = [regex]::Match($fourText, 'coordinator_barrier=(\d+), coordinator_digest=([0-9a-f]+)')
@@ -178,6 +183,8 @@ if (-not $pythonPassed) { throw 'Python machine-readable acceptance evidence is 
 $evidence = [ordered]@{
     acceptance = 'passed'
     schema = $AcceptanceSchema
+    journal_schema = $JournalSchema
+    state_schema = $StateSchema
     mode = $mode
     debug_tests = [int]$debugMatch.Groups[1].Value
     release_safe_tests = [int]$releaseMatch.Groups[1].Value

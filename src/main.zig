@@ -27,6 +27,7 @@ const bybit_testnet_acceptance = @import("bybit_testnet_acceptance.zig");
 const multi_venue_testnet_acceptance = @import("multi_venue_testnet_acceptance.zig");
 const trading_shard_fixture = @import("trading_shard_fixture.zig");
 const trading_shard_benchmark = @import("trading_shard_benchmark.zig");
+const production_contract = @import("production_contract.zig");
 
 pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
@@ -54,8 +55,8 @@ fn runFourShardAcceptanceEntry(init: std.process.Init) !void {
     const out = &stdout.interface;
     const evidence = try four_shard_acceptance.runFourShardAcceptance();
     try out.print(
-        "four_shard_acceptance: schema={d}, shards={d}, replay=equivalent, recovery_paths=3\n",
-        .{ evidence.schema_version, evidence.shard_digests.len },
+        "four_shard_acceptance: schema={d}, journal_schema={d}, state_schema={d}, shards={d}, replay=equivalent, recovery_paths=3\n",
+        .{ evidence.schema_version, evidence.journal_schema_version, evidence.state_schema_version, evidence.shard_digests.len },
     );
     for (evidence.shard_digests, 0..) |digest, index| {
         const hex = std.fmt.bytesToHex(digest, .lower);
@@ -100,4 +101,5 @@ test {
     _ = bybit_testnet_acceptance;
     _ = multi_venue_testnet_acceptance;
     _ = trading_shard_fixture;
+    _ = production_contract;
 }

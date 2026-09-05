@@ -258,7 +258,7 @@
     <section class="canvas" aria-label="量化交易引擎动态架构图">
       <svg id="architecture" viewBox="0 0 1440 900" role="img" aria-labelledby="diagram-title diagram-desc">
         <title id="diagram-title">Ringwin 确定性多策略交易引擎</title>
-        <desc id="diagram-desc">行情和 Python 策略事件进入四个单写者交易分片，订单命令经执行网关发送至四家交易所，执行事实返回分片并写入日志。</desc>
+        <desc id="diagram-desc">行情和 Python 策略事件进入四个单写者交易分片，订单命令经执行网关发送至三家目标交易所，执行事实返回分片并写入离线内存日志。</desc>
 
         <defs>
           <linearGradient id="node-surface" x1="0" y1="0" x2="1" y2="1">
@@ -320,13 +320,13 @@
         </g>
 
         <!-- Async inputs -->
-        <g class="node" tabindex="0" role="group" aria-label="行情适配器：OKX、Binance、Gate.io、Bitget">
+        <g class="node" tabindex="0" role="group" aria-label="行情适配器：OKX、Binance、Bybit">
           <title>共享异步行情接入，不拥有权威交易状态。</title>
           <rect class="surface" x="75" y="88" width="170" height="84" rx="13"/>
           <circle cx="97" cy="111" r="4" fill="#20d5d2"/>
           <text class="node-title" x="110" y="116">Shared Market Data</text>
           <text class="node-sub" x="94" y="140">OKX · Binance</text>
-          <text class="node-sub" x="94" y="157">Gate.io · Bitget</text>
+          <text class="node-sub" x="94" y="157">Bybit</text>
         </g>
 
         <g class="node core" tabindex="0" role="group" aria-label="行情规范化、缺口检测和确定性路由">
@@ -415,20 +415,20 @@
           <text class="node-sub" x="615" y="779">Unknown → evidence recovery</text>
         </g>
 
-        <g class="node" tabindex="0" role="group" aria-label="首批四家交易所">
-          <title>首批 Venue：OKX、Binance、Gate.io、Bitget。</title>
+        <g class="node" tabindex="0" role="group" aria-label="首批三家交易所">
+          <title>首个生产目标 Venue：OKX、Binance、Bybit；Gate.io 与 Bitget 禁用。</title>
           <rect class="surface" x="990" y="705" width="205" height="100" rx="15"/>
           <text class="node-title" x="1015" y="738">Venues</text>
           <text class="node-sub" x="1015" y="760">OKX · Binance</text>
-          <text class="node-sub" x="1015" y="779">Gate.io · Bitget</text>
+          <text class="node-sub" x="1015" y="779">Bybit · Gate.io/Bitget disabled</text>
         </g>
 
         <g class="node" tabindex="0" role="group" aria-label="原始日志、决策日志和快照">
           <title>原始接入日志和分片决策日志是恢复依据；快照只是重放加速点。</title>
           <rect class="surface" x="82" y="690" width="235" height="125" rx="15"/>
-          <text class="node-title" x="107" y="724">Durable History</text>
-          <text class="node-sub" x="107" y="747">raw ingress journal</text>
-          <text class="node-sub" x="107" y="767">shard decision journal</text>
+          <text class="node-title" x="107" y="724">Offline History</text>
+          <text class="node-sub" x="107" y="747">raw ingress memory journal</text>
+          <text class="node-sub" x="107" y="767">shard decision memory journal</text>
           <text class="node-sub" x="107" y="787">periodic snapshots</text>
         </g>
       </svg>

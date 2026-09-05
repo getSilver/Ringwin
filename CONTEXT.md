@@ -346,6 +346,14 @@ _Avoid_: SchemaVersion, in-memory union tag, reused enum value
 由全部已发布 EventType 与 StableEventSchema 规范内容确定的注册表身份；日志段、策略 Host 会话和 ReleaseArtifact 用它声明准确兼容集合，不能引用浮动的最新版。
 _Avoid_: Release version, database service, latest schema
 
+**ProductionSupportContract**:
+首个生产 ReleaseArtifact 必须满足的失败关闭平台、环境、产品、账户范围、订单能力和 schema 组合；它不等同于某次账户或节点已经取得资格。
+_Avoid_: Deployment config, qualification result, runtime feature flags
+
+**ProductionSupportMatrix**:
+ProductionSupportContract 中按 Venue、Environment、ExchangeAccount 范围、产品、Instrument 和订单能力列出的唯一支持与禁用行；Demo/Testnet 行只能作为独立证据范围，不能升级生产行。
+_Avoid_: Adapter capability flags, venue checklist, inferred account support
+
 **StructuralScan**:
 不解释事件业务语义，只验证稳定日志的记录边界、长度、序号和校验和并定位下一条记录的扫描；它可以越过未知记录，但不能据此恢复权威状态。
 _Avoid_: SemanticReplay, event decoding, recovery qualification
