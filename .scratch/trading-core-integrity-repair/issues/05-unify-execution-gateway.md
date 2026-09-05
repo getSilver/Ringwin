@@ -26,15 +26,18 @@ Gateway 模型和测试合成结果，同时保持恢复路径无发送能力？
 
 ## Acceptance
 
-- [ ] 一个 OrderIntent 经风险与 OMS 后由唯一 Gateway 发送到 SimulatedVenue，并由返回事实推进同一 Order 生命周期。
-- [ ] OKX 使用同一 Gateway/VenueAdapter 契约完成离线 place、cancel、reject 和 reconciliation 轨迹，不再有核心旁路。
-- [ ] 同一 ExchangeAccountIdentity 的重复或歧义 route 配置被拒绝，不再采用“第一个匹配”或静默覆盖。
-- [ ] OpeningGate 关闭时新增风险命令被拒绝，但授权撤单、PortfolioReduceOnly/VenueReduceOnly 和 reconciliation 可执行。
-- [ ] adapter 或 route 容量耗尽时 fail-closed；一个账户失败不会错误发送到其他账户或 Venue。
-- [ ] live 轨迹记录确定发送次数；全量 replay、snapshot-tail replay 和恢复构造均证明发送次数为零。
+- [x] 一个 OrderIntent 经风险与 OMS 后由唯一 Gateway 发送到 SimulatedVenue，并由返回事实推进同一 Order 生命周期。
+- [x] OKX 使用同一 Gateway/VenueAdapter 契约完成离线 place、cancel、reject 和 reconciliation 轨迹，不再有核心旁路。
+- [x] 同一 ExchangeAccountIdentity 的重复或歧义 route 配置被拒绝，不再采用“第一个匹配”或静默覆盖。
+- [x] OpeningGate 关闭时新增风险命令被拒绝，但授权撤单、PortfolioReduceOnly/VenueReduceOnly 和 reconciliation 可执行。
+- [x] adapter 或 route 容量耗尽时 fail-closed；一个账户失败不会错误发送到其他账户或 Venue。
+- [x] live 轨迹记录确定发送次数；全量 replay、snapshot-tail replay 和恢复构造均证明发送次数为零。
 
 ## Evidence
 
-- `src/execution_gateway.zig` now rejects duplicate account routes, scopes unknown/reconciliation failures, bounds instrument gates and exposes one canonical adapter request route.
+- `src/execution_gateway.zig` is the sole sender; the former synthetic `SharedExecutionGateway` is now explicitly a non-transport `GatewayOwnership` ledger.
+- `OMS outbox crosses the sole Gateway and SimulatedVenue seam` covers risk/OMS outbox conversion, one real send, returned canonical dispatch/report/fill facts and send-free replay equivalence.
+- Gateway route/batch admission rechecks capability, rules, config, session, account and bounded capacity before any adapter call.
 - Restricted mode permits cancel and reduce-only commands while blocking increasing risk; adapter errors latch only the owning account.
-- Offline adapter contract suites cover SimulatedVenue, OKX, Binance and Bybit; four-shard evidence reports `live_gateway_submissions=4` and `replay_send_capability=false`.
+- Offline adapter suites route SimulatedVenue, OKX, Binance and Bybit through the same Gateway; four-shard evidence separately reports `owned_command_count=4` and `replay_send_capability=false`.
+- `zig test src/main.zig -O Debug` and `-O ReleaseSafe`: 182/182 passed.

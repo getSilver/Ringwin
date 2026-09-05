@@ -991,8 +991,6 @@ pub const TradingShard = struct {
         switch (record.event) {
             .order_dispatch_result => |result| {
                 const command_id = std.math.cast(u64, result.command) orelse return error.IdentityOutOfRange;
-                if (command_id != self.order_command_id or self.order_state != .pending_submit)
-                    return error.InvalidDispatchResult;
                 var batch: oms_module.DispatchBatch = .{ .count = 1 };
                 batch.items[0] = .{
                     .command_id = command_id,
@@ -1006,13 +1004,15 @@ pub const TradingShard = struct {
                 self.dispatch_attempt_count = try std.math.add(u64, self.dispatch_attempt_count, 1);
                 switch (result.state) {
                     .not_sent => {
-                        self.order_state = .canceled;
+                        if (command_id == self.order_command_id and self.order_state == .pending_submit)
+                            self.order_state = .canceled;
                         try self.recalculateRisk(false);
                         try self.trace.append(.order_not_sent, fact_identity);
                     },
                     .submitted => try self.trace.append(.order_dispatched, fact_identity),
                     .unknown => {
-                        self.order_state = .unknown;
+                        if (command_id == self.order_command_id and self.order_state == .pending_submit)
+                            self.order_state = .unknown;
                         try self.trace.append(.order_dispatch_unknown, fact_identity);
                     },
                 }

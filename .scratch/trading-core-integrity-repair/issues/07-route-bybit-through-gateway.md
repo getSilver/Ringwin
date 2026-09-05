@@ -22,14 +22,15 @@ transport 覆盖完整离线执行轨迹。任何 Bybit 特有枚举、身份或
 
 ## Acceptance
 
-- [ ] Bybit SPOT 与 linear Instrument 使用 registry 中的规范身份和规则完成 place、cancel、reject、fill 与 reconciliation。
-- [ ] 行情与账户事实只以 CanonicalEvent 进入核心，原始枚举、错误码和 transport 结构保留为边界证据。
-- [ ] 重复、乱序、未知结果、行情 gap 和账户 gap 满足统一幂等及 fail-closed 合同。
-- [ ] Bybit adapter 故障只收紧其所属 ExchangeAccount/Instrument，不改变 Binance、OKX 或 SimulatedVenue 状态。
-- [ ] 离线合约轨迹无需生产账户或密钥，且 live/replay 的核心摘要相同、replay 无发送。
+- [x] Bybit SPOT 与 linear Instrument 使用 registry 中的规范身份和规则完成 place、cancel、reject、fill 与 reconciliation。
+- [x] 行情与账户事实只以 CanonicalEvent 进入核心，原始枚举、错误码和 transport 结构保留为边界证据。
+- [x] 重复、乱序、未知结果、行情 gap 和账户 gap 满足统一幂等及 fail-closed 合同。
+- [x] Bybit adapter 故障只收紧其所属 ExchangeAccount/Instrument，不改变 Binance、OKX 或 SimulatedVenue 状态。
+- [x] 离线合约轨迹无需生产账户或密钥，且 live/replay 的核心摘要相同、replay 无发送。
 
 ## Evidence
 
-- Bybit venue and private-reconciliation suites use the common `VenueAdapter` and canonical market/account/output facts.
-- `zig test src/main.zig`: 178/178 passed, including duplicate/gap/unknown/reconciliation and Bybit adapter tests.
+- Bybit execution now enters its existing `VenueAdapter` through `execution_gateway.Gateway`; account/capability/config/session checks precede transport.
+- Bybit venue and private-reconciliation suites use canonical market/account/output facts and cover duplicate/gap/unknown/reconciliation behavior.
+- `zig test src/main.zig -O Debug` and `-O ReleaseSafe`: 182/182 passed.
 - Default core wave is offline and does not require credentials.

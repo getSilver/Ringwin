@@ -1,6 +1,7 @@
 //! Bybit V5 execution adapter; raw protocol details do not leave this module.
 const std = @import("std");
 const canonical = @import("canonical_event.zig");
+const execution = @import("execution_gateway.zig");
 const venue = @import("venue_adapter.zig");
 const contract = @import("venue_adapter_contract.zig");
 const private = @import("bybit_private_reconciliation.zig");
@@ -497,8 +498,12 @@ test "Bybit sends canonical commands only after response raw commit" {
     var raw = TestRaw{};
     var transport = TestTransport{};
     var adapter = testAdapter(&clock, &auth, &raw, &transport);
-    try adapter.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
-    try std.testing.expectEqual(venue.SendResult.accepted, try adapter.adapter().trySend(.{ .order_command = try testCommand() }));
+    const venue_adapter = adapter.adapter();
+    try venue_adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
+    var gateway: execution.Gateway = .{};
+    try gateway.add(.{ .account = 2, .adapter = venue_adapter, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 3 } });
+    try std.testing.expectEqual(venue.SendResult.accepted, try gateway.send(try testCommand()));
+    try std.testing.expectEqual(@as(u64, 1), gateway.send_attempt_count);
     const output = (try adapter.adapter().tryDrain()).?;
     try std.testing.expectEqual(canonical.DispatchState.submitted, output.slice()[0].event.order_dispatch_result.state);
     try std.testing.expectEqual(@as(u64, 1), raw.calls);

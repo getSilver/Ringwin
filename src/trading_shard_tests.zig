@@ -2,8 +2,10 @@ const std = @import("std");
 const engine = @import("trading_shard.zig");
 const fixture = @import("trading_shard_fixture.zig");
 const canonical = engine.canonical;
+const execution_gateway = @import("execution_gateway.zig");
 const oms_module = engine.oms;
 const operational = engine.operational;
+const simulated_venue = @import("simulated_venue.zig");
 const host_gateway = @import("strategy_host_gateway.zig");
 
 const TradingShard = engine.TradingShard;
@@ -940,6 +942,42 @@ test "SPOT and linear instruments close economics and replay independently" {
     } });
     try std.testing.expectError(error.CanonicalScopeMismatch, live.apply(wrong_fill));
     try std.testing.expectEqualSlices(u8, &before_mismatch, &live.canonicalStateDigest());
+}
+
+test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
+    var live = try startScenario();
+    var group: oms_module.IntentGroup = .{ .first_intent_sequence = 220, .count = 1 };
+    group.members[0] = .{ .intent_sequence = 220, .operation = .place, .instrument = swap_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
+    const place = atGroup(12, .{ .identity = 220, .payload = .{ .oms_intent_group = group } });
+    const placed = try live.shard.apply(place);
+    try std.testing.expectEqual(@as(usize, 1), placed.oms_commands.len);
+
+    var implementation: simulated_venue.SimulatedVenue = .{};
+    const adapter = implementation.adapter();
+    try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1 });
+    var gateway: execution_gateway.Gateway = .{};
+    try gateway.add(.{ .account = 2, .adapter = adapter, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+    try std.testing.expectEqual(.accepted, try gateway.sendOms(.{
+        .account = 2,
+        .capability_version = 1,
+        .rules_version = 1,
+        .config_version = 1,
+        .adapter_session = 1,
+        .dispatch_deadline_monotonic_ns = 1,
+    }, placed.oms_commands[0]));
+    try std.testing.expectEqual(@as(u64, 1), gateway.send_attempt_count);
+    var output: [execution_gateway.max_routes]canonical.AdapterOutputBatch = undefined;
+    try std.testing.expectEqual(@as(u8, 1), try gateway.drainFair(&output));
+    for (output[0].slice()) |event| _ = try live.shard.apply(event);
+    try std.testing.expectEqual(oms_module.OrderState.filled, live.shard.oms.orders[0].state);
+    try std.testing.expectEqual(@as(i64, 10), live.shard.economicSummary().portfolio.swap.quantity);
+
+    var replayed: ReplayTradingShard = .{};
+    for (genesis) |event| _ = try replayed.apply(event);
+    _ = try replayed.apply(place);
+    for (output[0].slice()) |event| _ = try replayed.apply(event);
+    try std.testing.expectEqualSlices(u8, &live.shard.canonicalStateDigest(), &replayed.canonicalStateDigest());
+    comptime std.debug.assert(!@hasField(ReplayTradingShard, "gateway"));
 }
 
 test "CancelConfirmCreate never overlaps and records predecessor" {

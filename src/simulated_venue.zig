@@ -207,7 +207,9 @@ pub const SimulatedVenue = struct {
     fn append(self: *SimulatedVenue, batch: *canonical.AdapterOutputBatch, binding: Binding, source_fact_identity: u128, event: canonical.CanonicalEvent) !void {
         const identity = self.next_event_identity;
         self.next_event_identity += 1;
-        try batch.append(.{ .envelope = envelope(binding, identity, source_fact_identity), .event = event });
+        var event_envelope = envelope(binding, identity, source_fact_identity);
+        event_envelope.event_type = @intFromEnum(canonical.eventType(event));
+        try batch.append(.{ .envelope = event_envelope, .event = event });
     }
 
     fn venueOrder(venue_identity: canonical.VenueIdentity, order: canonical.OrderIdentity) !canonical.VenueOrderRef {

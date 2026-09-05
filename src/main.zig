@@ -66,8 +66,8 @@ fn runFourShardAcceptanceEntry(init: std.process.Init) !void {
     try out.print("coordinator_barrier={d}, coordinator_digest={s}\n", .{ evidence.coordinator_barrier, &coordinator_hex });
     try out.print("shared_summary={s}\n", .{&shared_hex});
     try out.print(
-        "side_effects: live_gateway_submissions={d}, replay_send_capability={}\n",
-        .{ evidence.live_gateway_submissions, evidence.replay_send_capability },
+        "side_effects: owned_command_count={d}, replay_send_capability={}\n",
+        .{ evidence.owned_command_count, evidence.replay_send_capability },
     );
     try out.flush();
 }

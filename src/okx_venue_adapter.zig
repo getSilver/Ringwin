@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const canonical = @import("canonical_event.zig");
+const execution = @import("execution_gateway.zig");
 const account_projection = @import("account_projection.zig");
 const live = @import("okx_live_chain.zig");
 const order = @import("okx_order_entry.zig");
@@ -1264,10 +1265,13 @@ test "OKX venue adapter translates canonical commands and itemizes a batch" {
     var implementation = OkxVenueAdapter.init(std.testing.allocator, &chain, clock.interface(), testProfile(), testRules());
     const adapter = implementation.adapter();
     try startTest(adapter);
+    var gateway: execution.Gateway = .{};
+    try gateway.add(.{ .account = 2, .adapter = adapter, .capability = .{ .version = 7, .rules_version = 8, .config_version = 9, .session = 6 } });
     var batch = canonical.OrderCommandBatch{};
     try batch.append(try testCommand(100));
     try batch.append(try testCommand(101));
-    try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .order_batch = batch }));
+    try std.testing.expectEqual(venue.SendResult.accepted, try gateway.sendRequest(.{ .order_batch = batch }));
+    try std.testing.expectEqual(@as(u64, 1), gateway.send_attempt_count);
     const output = (try adapter.tryDrain()).?;
     try std.testing.expectEqual(@as(u8, 2), output.len);
     try std.testing.expectEqual(canonical.DispatchState.submitted, output.events[0].event.order_dispatch_result.state);

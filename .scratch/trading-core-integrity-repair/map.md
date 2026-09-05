@@ -58,7 +58,7 @@ VenueAdapter seam 完成可重放闭环；并以不可伪造、可重复的自�
 
 ## Frontier
 
-- [05: 收敛为唯一 Execution Gateway](issues/05-unify-execution-gateway.md)
+- [08: 使 Testnet 资格证据不可自行声明](issues/08-make-testnet-evidence-authoritative.md)
 
 ## Decisions so far
 
@@ -73,6 +73,7 @@ VenueAdapter seam 完成可重放闭环；并以不可伪造、可重复的自�
 - 2026-09-05：01–11 的实现与离线证据已落入本地图；11 已完成 contract 删除，12 已重建可信验收基线并关闭本波。
 - 2026-09-05：复审后重新打开本波；01 修复了既有 failure 误提交无关失败事件、失败事实日志被 `errdefer` 回滚，以及 Gate/trace 错误被吞掉的问题，Debug/ReleaseSafe 179/179。
 - 2026-09-05：02–04 复验并修复：MarketProjection 改为有界 per-Instrument 状态，Instrument 配置支持显式版本前进并拒绝冲突/倒退，SPOT/SWAP 风险与经济语义不再依赖特殊整数；schema 6 Debug/ReleaseSafe 180/180。
+- 2026-09-05：05–07 复验并修复：`execution_gateway.Gateway` 成为唯一发送能力，四分片同名对象收敛为纯 ownership ledger；SimulatedVenue、OKX、Binance、Bybit 均由统一 Gateway 调用，Debug/ReleaseSafe 182/182。
 - 2026-09-05：最终离线证据为 schema 2、Debug/ReleaseSafe 各 178/178、coordinator barrier 17、
   shard barriers 23/26/21/21、Gateway 发送 4 次且 replay 无发送能力；共享摘要为
   `e124735e7c33b86358e0a9fe23d9d1a51a86436627821b7cfc48ffbfc7f23476`。OKX Demo、Binance Testnet、

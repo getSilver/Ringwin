@@ -50,7 +50,7 @@ const World = struct {
     journals: [max_shards]trading.journal.Journal,
     commands: [max_shards]trading.oms.Command = undefined,
     coordinator: coordination.AccountCoordinator,
-    gateway: coordination.SharedExecutionGateway = .{},
+    ownership: coordination.GatewayOwnership = .{},
     ops: OpLog = .{},
     summary_sequences: [max_shards]u64 = @splat(0),
     next_identity: u128 = 100,
@@ -241,7 +241,7 @@ pub const FourShardEvidence = struct {
     shard_digests: [max_shards][Sha256.digest_length]u8,
     coordinator_digest: [Sha256.digest_length]u8,
     shared_summary: [Sha256.digest_length]u8,
-    live_gateway_submissions: u8,
+    owned_command_count: u8,
     replay_send_capability: bool,
 };
 
@@ -283,7 +283,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     }
 
     for (0..max_shards) |index| {
-        const receipt = try world.gateway.submit(.{
+        const receipt = try world.ownership.record(.{
             .exchange_account = exchange_account,
             .shard_id = @enumFromInt(index),
             .fencing_token = @intCast(index + 1),
@@ -291,13 +291,13 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         });
         try std.testing.expectEqual(@as(ShardId, @enumFromInt(index)), receipt.shard_id);
     }
-    try std.testing.expectError(error.DuplicateCommandIdentity, world.gateway.submit(.{
+    try std.testing.expectError(error.DuplicateCommandIdentity, world.ownership.record(.{
         .exchange_account = exchange_account,
         .shard_id = .shard_0,
         .fencing_token = 1,
         .command = world.commands[0],
     }));
-    try std.testing.expectError(error.CrossAccountGatewayRequest, world.gateway.submit(.{
+    try std.testing.expectError(error.CrossAccountGatewayRequest, world.ownership.record(.{
         .exchange_account = 901,
         .shard_id = .shard_0,
         .fencing_token = 99,
@@ -314,9 +314,9 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
             .fencing_token = @intCast(index + 1),
             .state = .submitted,
         };
-        _ = try world.gateway.complete(outcome);
-        try world.gateway.applyOutcomeStable(outcome, @enumFromInt(index), &world.shards[index], &world.journals[index]);
-        try std.testing.expectError(error.CrossShardDelivery, world.gateway.applyOutcomeStable(
+        _ = try world.ownership.complete(outcome);
+        try world.ownership.applyOutcomeStable(outcome, @enumFromInt(index), &world.shards[index], &world.journals[index]);
+        try std.testing.expectError(error.CrossShardDelivery, world.ownership.applyOutcomeStable(
             outcome,
             @enumFromInt((index + 1) % max_shards),
             &world.shards[(index + 1) % max_shards],
@@ -331,7 +331,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
             .remaining_quantity = order_quantity,
         } } });
     }
-    const unknown_outcome = try world.gateway.complete(.{
+    const unknown_outcome = try world.ownership.complete(.{
         .exchange_account = exchange_account,
         .shard_id = .shard_2,
         .command_id = world.commands[2].command_id,
@@ -350,9 +350,9 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         .fencing_token = 1,
         .state = .submitted,
     };
-    try std.testing.expectError(error.GatewayOutcomeIdentityConflict, world.gateway.complete(conflicting));
+    try std.testing.expectError(error.GatewayOutcomeIdentityConflict, world.ownership.complete(conflicting));
     conflicting.state = .not_sent;
-    try std.testing.expectError(error.GatewayOutcomeIdentityConflict, world.gateway.outcomeEvent(conflicting));
+    try std.testing.expectError(error.GatewayOutcomeIdentityConflict, world.ownership.outcomeEvent(conflicting));
 
     for (0..max_shards) |index| {
         try world.apply(index, .{ .identity = @intCast(30 + index), .payload = .{ .economic_fill = .{
@@ -678,7 +678,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         std.debug.print("four-shard evidence mismatch: expected {s}, actual {s}\n", .{ expected_shared_summary_v2, &shared_hex });
         return error.FourShardEvidenceDrift;
     }
-    try std.testing.expectEqual(@as(u8, max_shards), world.gateway.count);
+    try std.testing.expectEqual(@as(u8, max_shards), world.ownership.count);
 
     var shard_digests: [max_shards][Sha256.digest_length]u8 = undefined;
     var shard_barriers: [max_shards]u64 = undefined;
@@ -693,7 +693,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         .shard_digests = shard_digests,
         .coordinator_digest = evidence_coordinator.digest(),
         .shared_summary = shared_a,
-        .live_gateway_submissions = world.gateway.count,
+        .owned_command_count = world.ownership.count,
         .replay_send_capability = replay_send_capability,
     };
 }

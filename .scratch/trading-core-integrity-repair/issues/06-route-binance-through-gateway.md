@@ -23,14 +23,15 @@ CanonicalEvent。
 
 ## Acceptance
 
-- [ ] Binance SPOT 与 linear Instrument 使用 registry 中的规范身份和规则完成 place、cancel、reject、fill 与 reconciliation。
-- [ ] 行情 snapshot/delta、账户观察和执行回报均经过统一 CanonicalEvent seam，不向 TradingShard 泄漏 Venue 私有字段。
-- [ ] 重复、乱序、未知结果、行情 gap 和账户 gap 均触发与 SimulatedVenue/OKX 相同的幂等或 fail-closed 合同。
-- [ ] Binance adapter 故障只收紧其所属 ExchangeAccount/Instrument，不改变 OKX 或 SimulatedVenue 的权威状态。
-- [ ] 离线合约轨迹无需生产账户或密钥，且 live/replay 的核心摘要相同、replay 无发送。
+- [x] Binance SPOT 与 linear Instrument 使用 registry 中的规范身份和规则完成 place、cancel、reject、fill 与 reconciliation。
+- [x] 行情 snapshot/delta、账户观察和执行回报均经过统一 CanonicalEvent seam，不向 TradingShard 泄漏 Venue 私有字段。
+- [x] 重复、乱序、未知结果、行情 gap 和账户 gap 均触发与 SimulatedVenue/OKX 相同的幂等或 fail-closed 合同。
+- [x] Binance adapter 故障只收紧其所属 ExchangeAccount/Instrument，不改变 OKX 或 SimulatedVenue 的权威状态。
+- [x] 离线合约轨迹无需生产账户或密钥，且 live/replay 的核心摘要相同、replay 无发送。
 
 ## Evidence
 
-- Binance venue and private-reconciliation suites use the common `VenueAdapter` and canonical market/account/output facts.
-- `zig test src/main.zig`: 178/178 passed, including duplicate/gap/unknown/reconciliation and Binance adapter tests.
+- Binance execution now enters its existing `VenueAdapter` through `execution_gateway.Gateway`; its batch cannot bypass capability/config/session validation.
+- Binance venue and private-reconciliation suites use canonical market/account/output facts and cover duplicate/gap/unknown/reconciliation behavior.
+- `zig test src/main.zig -O Debug` and `-O ReleaseSafe`: 182/182 passed.
 - Default core wave is offline and does not require credentials.
