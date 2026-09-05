@@ -1,7 +1,7 @@
 # 修复交易核心权威接缝与验收完整性
 
 Label: wayfinder:map
-Status: active
+Status: closed
 
 ## Destination
 
@@ -58,8 +58,7 @@ VenueAdapter seam 完成可重放闭环；并以不可伪造、可重复的自�
 
 ## Frontier
 
-- [删除 CoreInput 包装与重复影子状态](issues/11-contract-legacy-core-input.md)
-- [重建可信验收基线并校正文档](issues/12-rebuild-trusted-acceptance-baseline.md)
+无；01–12 全部完成。本地图保留为当前修复波次的审计入口。
 
 ## Decisions so far
 
@@ -71,7 +70,11 @@ VenueAdapter seam 完成可重放闭环；并以不可伪造、可重复的自�
 - Testnet runner 的实现和证据约束属于本波；缺少真实 opt-in 运行时必须诚实停在 ContractTested 或
   OfficialConfirmed，不能用合成数据代替 TestnetQualified。
 - Windows 功能与容量回归、现有 Linux compile-only 属于开发闭环；生产 Linux 性能资格不属于本波。
-- 2026-09-05：01–10 的实现与离线证据已落入本地图；11 保持 active，因为旧日志兼容包装和经济影子字段尚未完成 contract 删除。
+- 2026-09-05：01–11 的实现与离线证据已落入本地图；11 已完成 contract 删除，12 已重建可信验收基线并关闭本波。
+- 2026-09-05：最终离线证据为 schema 2、Debug/ReleaseSafe 各 178/178、coordinator barrier 17、
+  shard barriers 23/26/21/21、Gateway 发送 4 次且 replay 无发送能力；共享摘要为
+  `e124735e7c33b86358e0a9fe23d9d1a51a86436627821b7cfc48ffbfc7f23476`。OKX Demo、Binance Testnet、
+  Bybit Testnet 均未在默认入口运行，未产生真实运行资格。
 
 ## Not yet specified
 

@@ -108,24 +108,30 @@ four shards replay and isolate overload
 stable journal detects tail, corruption, and sequence gap
 ```
 
-正常演示固定输出的关键结果：
+当前离线基线（2026-09-05）由 `tools\verify-core-wave.ps1` 实际运行汇总：schema 为 `2`，
+Debug/ReleaseSafe 均为 `178/178`，coordinator barrier 为 `17`，四个 shard barrier 为
+`23/26/21/21`，Gateway 实时发送 `4` 次，重放发送能力为 `false`，共享摘要为：
+
+`e124735e7c33b86358e0a9fe23d9d1a51a86436627821b7cfc48ffbfc7f23476`
+
+正常轨迹实际摘要：
 
 ```text
 happy_path: events=34, order=filled, qty=100, open_cost=500200000, fees=375150,
 upl=1800000, risk_remaining=9988956000, ledger=closed, economic_projections=complete
 journal_records=34
 replay=equivalent
-digest=05512551eb6da3d137e0476015e262f16df155035d2ac292db700e15edb10ef3
+digest=06fbeb256cfb02360c40668a8ccc34de0d4c8a532a1e0b1ebd4ff50b683c1048
 ```
 
 失败轨迹固定摘要：
 
 | 轨迹 | 事实数 | CanonicalStateDigestV3 |
 |---|---:|---|
-| Market gap | 25 | `9bd0c661b449be191751ebc63648d884302e65292a3a2240f93ef4b2c1e2fe21` |
-| Risk rejection | 21 | `34aec497178098873f556d1e786f19b02576c5a7e9d568435fea40a4709dd6f9` |
-| Unknown reconciliation | 26 | `32d6ff5537d4adc99e57d159fde6c77cb353030929eafe63726bf71c7efaf661` |
-| Duplicate report | 35 | `14f3be1e51ef6aa7e16dd5cf5ca4aff2355e7d17d06a6d44ea27342b32d13f53` |
+| Market gap | 24 | `b95c50d8d0b8c79b2b82f5191bb4ee031bac8369ebf4f838ff1bc80f86da4cdc` |
+| Risk rejection | 21 | `dded7fe60cc6693de322664fbf66b00ee05d177e990c3830644961a6ad514850` |
+| Unknown reconciliation | 26 | `103e070525340114edb9fae1bd5c3b880f29c01b990f0fdf4ed3dd45adb938d4` |
+| Duplicate report | 34 | `06fbeb256cfb02360c40668a8ccc34de0d4c8a532a1e0b1ebd4ff50b683c1048` |
 
 `zig test` 还会验证：
 
@@ -366,8 +372,8 @@ Windows 2C/4T 开发节点接近 `2M events/s`，但四分片合并 P99 为
 - 多资产、现货、期权、组合保证金、跨分片多腿原子决策和 SOR。
 
 详细业务词汇和不变量见 [CONTEXT.md](CONTEXT.md)，架构关系见
-[动态架构图](docs/trading-engine-architecture.html)，本阶段完整决策路线见
-[纵向闭环 Wayfinder 地图](.scratch/quant-trading-engine-vertical-slice/map.md)。
+[动态架构图](docs/trading-engine-architecture.html)，当前修复波次证据见
+[交易核心完整性修复地图](.scratch/trading-core-integrity-repair/map.md)。
 
 ## 已完成能力波次与下一步
 
@@ -389,8 +395,8 @@ Gateway、TradingShard 现金风控、OrderCommand、OKX 回报、经济投影�
 当前资格使用统一证据结构，但环境不会被抹平：OKX 的真实 Demo 整波结论为
 `DemoQualified`，Binance/Bybit 只有目标 Testnet 的真实运行才能结论为
 `TestnetQualified`。默认离线波次不会生成任一真实运行资格，也不会由布尔值或摘要自授予资格。
-Linux 生产性能、生产账户、密钥托管和部署资格仍是独立波次。当前修复波次与剩余 contract 工作见
-[trading-core-integrity-repair map](.scratch/trading-core-integrity-repair/map.md)。
+Linux 生产性能、生产账户、密钥托管和部署资格仍是独立波次。当前修复波次已完成，地图中的
+最终证据与未资格化边界见 [trading-core-integrity-repair map](.scratch/trading-core-integrity-repair/map.md)。
 
 ## License
 

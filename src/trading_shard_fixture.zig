@@ -18,6 +18,13 @@ const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
 pub const expected_happy_digest = "06fbeb256cfb02360c40668a8ccc34de0d4c8a532a1e0b1ebd4ff50b683c1048";
+const expected_trajectory_digests = [_][]const u8{
+    expected_happy_digest,
+    "b95c50d8d0b8c79b2b82f5191bb4ee031bac8369ebf4f838ff1bc80f86da4cdc",
+    "dded7fe60cc6693de322664fbf66b00ee05d177e990c3830644961a6ad514850",
+    "103e070525340114edb9fae1bd5c3b880f29c01b990f0fdf4ed3dd45adb938d4",
+    expected_happy_digest,
+};
 pub const order_limit_price: i64 = 50_100_000_000;
 pub const settlement_asset: canonical.AssetIdentity = 1;
 pub const spot_instrument: engine.oms.Instrument = 1;
@@ -620,7 +627,7 @@ test "fixed trajectories retain their sealed barriers and recovery digests" {
         try runUnknownReconciliation(),
         try runDuplicateReport(),
     };
-    for (runs) |run| {
+    for (runs, 0..) |run, index| {
         try std.testing.expect(run.decision_journal.sealed);
         const replayed = try engine.replayDigest(
             run.decision_journal.bytes(),
@@ -629,6 +636,8 @@ test "fixed trajectories retain their sealed barriers and recovery digests" {
         );
         try std.testing.expectEqual(journal.ScanStatus.clean, replayed.status);
         try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &replayed.digest);
+        const digest_hex = std.fmt.bytesToHex(run.shard.canonicalStateDigest(), .lower);
+        try std.testing.expectEqualSlices(u8, expected_trajectory_digests[index], &digest_hex);
     }
 }
 

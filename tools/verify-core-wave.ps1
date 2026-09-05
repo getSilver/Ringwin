@@ -139,8 +139,37 @@ $AcceptanceSchema = [int]$schemaMatch.Groups[1].Value
 $debugMatch = [regex]::Match($debugText, 'All (\d+) tests passed')
 $releaseMatch = [regex]::Match($releaseText, 'All (\d+) tests passed')
 $barrierMatch = [regex]::Match($fourText, 'coordinator_barrier=(\d+), coordinator_digest=([0-9a-f]+)')
+$sharedMatch = [regex]::Match($fourText, 'shared_summary=([0-9a-f]{64})')
 $sendMatch = [regex]::Match($fourText, 'live_gateway_submissions=(\d+), replay_send_capability=(\w+)')
-if (-not $debugMatch.Success -or -not $releaseMatch.Success -or -not $barrierMatch.Success -or -not $sendMatch.Success) {
+$shardMatches = [regex]::Matches($fourText, 'shard_(\d+): barrier=(\d+), digest=([0-9a-f]{64})')
+if ($shardMatches.Count -ne 4) { throw 'Four-shard barrier/digest evidence is incomplete' }
+$shardBarriers = @()
+$shardDigests = @()
+foreach ($match in $shardMatches) {
+    $index = [int]$match.Groups[1].Value
+    if ($index -ne $shardBarriers.Count) { throw 'Four-shard evidence indexes are not contiguous' }
+    $shardBarriers += [int64]$match.Groups[2].Value
+    $shardDigests += $match.Groups[3].Value
+}
+$singleDigestMatches = [regex]::Matches($singleText, 'digest=([0-9a-f]{64})')
+if ($singleDigestMatches.Count -ne 5) { throw 'Single-shard trajectory digest evidence is incomplete' }
+$singleDigests = @($singleDigestMatches | ForEach-Object { $_.Groups[1].Value })
+$pythonScenarioMatches = [regex]::Matches(($pythonEvidence -join "`n"), 'scenario=(\w+) samples=(\d+)')
+if ($pythonScenarioMatches.Count -ne 5) { throw 'Python capacity scenario evidence is incomplete' }
+$requiredVenueMarkers = [ordered]@{
+    SimulatedVenue = 'simulated_venue\.'
+    OKX = 'okx_venue_adapter\.'
+    Binance = 'binance_venue_adapter\.'
+    Bybit = 'bybit_venue_adapter\.'
+}
+$offlineVenueContracts = @()
+foreach ($venue in $requiredVenueMarkers.Keys) {
+    $marker = $requiredVenueMarkers[$venue]
+    if (-not [regex]::IsMatch($debugText, $marker)) { throw "Offline venue evidence is missing: $marker" }
+    $offlineVenueContracts += $venue
+}
+if (-not $debugMatch.Success -or -not $releaseMatch.Success -or -not $barrierMatch.Success -or
+    -not $sharedMatch.Success -or -not $sendMatch.Success) {
     throw 'Acceptance child output did not contain complete machine-readable evidence'
 }
 $pythonPassed = [regex]::IsMatch(($pythonEvidence -join "`n"), 'strategy_host_product_acceptance=passed')
@@ -153,9 +182,15 @@ $evidence = [ordered]@{
     release_safe_tests = [int]$releaseMatch.Groups[1].Value
     coordinator_barrier = [int64]$barrierMatch.Groups[1].Value
     coordinator_digest = $barrierMatch.Groups[2].Value
+    shard_barriers = $shardBarriers
+    shard_digests = $shardDigests
+    shared_summary = $sharedMatch.Groups[1].Value
     live_gateway_submissions = [int]$sendMatch.Groups[1].Value
     replay_send_capability = $sendMatch.Groups[2].Value
     single_shard_output = @($singleText | Where-Object { $_ -match '(happy_path:|market-gap-v1:|risk-rejection-v1:|unknown-reconciliation-v1:|duplicate-report-v1:)' })
+    single_shard_digests = $singleDigests
+    offline_venue_contracts = $offlineVenueContracts
+    python_scenarios = @($pythonScenarioMatches | ForEach-Object { $_.Groups[1].Value })
     python = 'passed'
     linux = 'compile_only'
     okx_demo_qualification = if ($DemoLive) { 'demo_qualified' } else { 'not_run' }

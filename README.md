@@ -205,8 +205,17 @@ zig build demo-wave -Ddemo-live
 ```
 
 The offline core wave reports OKX Demo, Binance Testnet, and Bybit Testnet
-qualification independently. Without an explicit live run, each real-run
-qualification remains `not_run`.
+contract evidence independently. Without an explicit live run, each real-run
+qualification remains `not_run`; OKX Demo evidence is never promoted to
+`TestnetQualified`.
+
+The current offline baseline is schema `2`: Debug and ReleaseSafe each pass
+`178/178` tests, the four-shard coordinator barrier is `17`, shard barriers are
+`23/26/21/21`, live Gateway submissions are `4`, and replay has no send
+capability. The shared summary is
+`e124735e7c33b86358e0a9fe23d9d1a51a86436627821b7cfc48ffbfc7f23476`.
+The four shard CanonicalStateDigests and the five single-shard trajectory
+digests are recorded in the [local acceptance ticket](.scratch/trading-core-integrity-repair/issues/12-rebuild-trusted-acceptance-baseline.md).
 
 All build steps reject a Zig version other than `0.17.0-dev.315+5b647b792` before running tests. The existing PowerShell wave scripts remain available as their underlying acceptance implementation. Use Demo credentials only.
 
@@ -252,7 +261,9 @@ Performance measurements in the repository are development regression benchmarks
 
 ## Project Status
 
-Ringwin is actively evolving.
+Ringwin is actively evolving. The current repair wave has completed tickets
+01–12 and its offline acceptance baseline is reproducible with
+`tools\verify-core-wave.ps1`.
 
 The current repository demonstrates a functional end-to-end trading-engine prototype, but several areas remain outside production qualification, including:
 
@@ -263,6 +274,12 @@ The current repository demonstrates a functional end-to-end trading-engine proto
 * production failover and deployment fencing.
 
 The project deliberately distinguishes between **implemented behavior**, **development testing**, and **production qualification**.
+
+The completed repair wave does not grant real Venue qualification: Binance and
+Bybit Testnet runs remain `not_run`, OKX Demo remains `DemoQualified` only when
+its explicit live run has produced sealed evidence, and production/Linux
+qualification remains outside this baseline. Historical closure maps are
+retained for audit and do not override the current repair-wave evidence.
 
 ## Security
 
