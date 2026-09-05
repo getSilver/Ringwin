@@ -19,11 +19,11 @@ const market_projection = @import("market_projection.zig");
 const instrument_registry = @import("instrument_registry.zig");
 
 /// Current physical schema for AuthoritativeTradingState snapshots.
-pub const state_schema_version: u32 = 4;
+pub const state_schema_version: u32 = 5;
 /// Release artifact producing the current snapshot schema.
 pub const release_artifact_identity: u64 = 1;
 /// Registry entry defining the current snapshot and journal schemas.
-pub const schema_registry_identity: u64 = 2;
+pub const schema_registry_identity: u64 = 3;
 const client_order_id = "RWN-00000001-01-000000000001";
 const settlement_asset: canonical.AssetIdentity = 1;
 const spot_instrument: oms_module.Instrument = 1;
@@ -78,61 +78,8 @@ const encodeInput = shard_event.encodeInput;
 const decodeInput = shard_event.decodeInput;
 const eventIdentity = shard_event.eventIdentity;
 
-pub fn decodeStableInput(record: journal.Record) !canonical.EventRecord {
-    return coreRecordFromInput(try shard_event.decodeStableInput(record));
-}
-
-/// Lifts a typed core fact/command into the single canonical EventRecord seam.
-pub fn coreRecord(input: CoreTransition) !canonical.EventRecord {
-    const encoded = try encodeInput(input);
-    var core: canonical.CoreInput = .{ .len = @intCast(encoded.len) };
-    @memcpy(core.bytes[0..encoded.len], encoded.bytes[0..encoded.len]);
-    return .{
-        .envelope = .{
-            .event_type = @intFromEnum(canonical.EventType.core_input),
-            .schema_version = schema_version,
-            .identity = .{ .stream = 0, .sequence = input.identity },
-            .source_fact_identity = input.identity,
-            .scope = .account,
-            .venue = 0,
-            .source_stream = 0,
-            .source_sequence = input.identity,
-            .times = .{},
-            .raw_evidence = .{ .stream = 0, .sequence = input.identity, .digest = @splat(0) },
-        },
-        .event = .{ .core_input = core },
-    };
-}
-
-fn coreRecordFromInput(input: InputEvent) !canonical.EventRecord {
-    var record = try coreRecord(.{ .identity = input.identity, .payload = input.payload });
-    record.envelope.times = .{
-        .source_utc_ns = if (input.time_presence.source) input.source_time else null,
-        .receive_utc_ns = if (input.time_presence.receive) input.receive_time else null,
-        .monotonic_ns = if (input.time_presence.monotonic) input.monotonic_time else null,
-        .audit_utc_ns = if (input.time_presence.wall) input.wall_time else null,
-    };
-    return record;
-}
-
-fn decodeCoreInput(envelope: canonical.EventEnvelope, encoded: canonical.CoreInput) !InputEvent {
-    return decodeInput(.{
-        .type_id = 0,
-        .schema_version = envelope.schema_version,
-        .flags = journal.input_flag,
-        .sequence = envelope.identity.sequence,
-        .source_time = envelope.times.source_utc_ns orelse 0,
-        .receive_time = envelope.times.receive_utc_ns orelse 0,
-        .monotonic_time = envelope.times.monotonic_ns orelse 0,
-        .wall_time = envelope.times.audit_utc_ns orelse 0,
-        .time_presence = .{
-            .source = envelope.times.source_utc_ns != null,
-            .receive = envelope.times.receive_utc_ns != null,
-            .monotonic = envelope.times.monotonic_ns != null,
-            .wall = envelope.times.audit_utc_ns != null,
-        },
-        .payload = encoded.slice(),
-    });
+pub fn decodeStableInput(record: journal.Record) !CoreTransition {
+    return shard_event.decodeStableInput(record);
 }
 
 pub const OrderCommand = struct {
@@ -153,8 +100,12 @@ pub const ApplyResult = struct {
 pub const ReplayTradingShard = struct {
     shard: TradingShard = .{},
 
-    pub fn apply(self: *ReplayTradingShard, event: canonical.EventRecord) ![]const Fact {
-        return (try self.shard.apply(event)).facts;
+    pub fn apply(self: *ReplayTradingShard, input: anytype) ![]const Fact {
+        return switch (@TypeOf(input)) {
+            canonical.EventRecord => (try self.shard.apply(input)).facts,
+            CoreTransition => (try self.shard.applyTyped(input)).facts,
+            else => @compileError("ReplayTradingShard.apply expects a canonical event or typed core transition"),
+        };
     }
 
     pub fn canonicalStateDigest(self: ReplayTradingShard) [Sha256.digest_length]u8 {
@@ -275,18 +226,6 @@ pub const TradingShard = struct {
     last_risk_tier: u8 = 0,
     filled_quantity: i64 = 0,
     mark_price_micros: i64 = 0,
-    spot_portfolio_position: Position = .{},
-    spot_exchange_position: Position = .{},
-    portfolio_position: Position = .{},
-    exchange_position: Position = .{},
-    portfolio_cash_micros: i64 = 0,
-    treasury_cash_micros: i64 = 0,
-    exchange_cash_micros: i64 = 0,
-    portfolio_fee_expense_micros: i64 = 0,
-    exchange_fee_expense_micros: i64 = 0,
-    total_fees_micros: i64 = 0,
-    realized_pnl_micros: i64 = 0,
-    unrealized_pnl_micros: i64 = 0,
     open_order_reservation_micros: i64 = 0,
     position_margin_requirement_micros: i64 = 0,
     risk_lease_micros: i64 = 0,
@@ -321,13 +260,6 @@ pub const TradingShard = struct {
     exchange_liquidation_distance_ticks: i64 = 0,
     portfolio_margin_gate: risk_module.MarginGate = .healthy,
     exchange_margin_gate: risk_module.MarginGate = .healthy,
-    ledger_transaction_count: u64 = 0,
-    portfolio_transfer_count: u64 = 0,
-    portfolio_ledger_debits_micros: i64 = 0,
-    portfolio_ledger_credits_micros: i64 = 0,
-    exchange_ledger_debits_micros: i64 = 0,
-    exchange_ledger_credits_micros: i64 = 0,
-    economic_projections_complete: bool = false,
     quantity_denominator: i64 = contract_denominator,
     reservation_model: ReservationModel = .leveraged,
     instrument_identity: u128 = 0,
@@ -365,20 +297,24 @@ pub const TradingShard = struct {
     /// The sole public Venue/market ingress seam. Canonical fields are
     /// projected directly; they are never narrowed through the legacy shard
     /// journal schema.
-    pub fn apply(self: *TradingShard, event: canonical.EventRecord) !ApplyResult {
+    /// Applies either a typed core transition or a canonical Venue event.
+    /// Both routes commit only after the candidate state has succeeded.
+    pub fn apply(self: *TradingShard, input: anytype) !ApplyResult {
+        return switch (@TypeOf(input)) {
+            canonical.EventRecord => self.applyCanonical(input),
+            CoreTransition => self.applyTyped(input),
+            else => @compileError("TradingShard.apply expects a typed transition or canonical event"),
+        };
+    }
+
+    fn applyCanonical(self: *TradingShard, event: canonical.EventRecord) !ApplyResult {
         var candidate = self.*;
         const before = candidate.trace.len;
         candidate.oms.begin();
-        const command = (switch (event.event) {
-            .core_input => |encoded| blk: {
-                if (event.envelope.schema_version != schema_version) return error.UnsupportedSchema;
-                break :blk candidate.handle(try decodeCoreInput(event.envelope, encoded));
-            },
-            else => blk: {
-                if (event.envelope.schema_version != canonical.schema_version) return error.UnsupportedSchema;
-                break :blk candidate.handleCanonical(event);
-            },
-        }) catch |err| {
+        const command = blk: {
+            if (event.envelope.schema_version != canonical.schema_version) return error.UnsupportedSchema;
+            break :blk candidate.handleCanonical(event);
+        } catch |err| {
             // Projection invalidation is authoritative even when the public
             // apply call reports the rejected observation. This is the only
             // exception to the ordinary candidate-commit-on-success rule.
@@ -426,11 +362,18 @@ pub const TradingShard = struct {
         };
     }
 
-    /// Native typed transition entry point. New adapters use this method and
-    /// do not perform an encode/decode round trip through CoreInput. The
-    /// canonical record adapter remains available solely for old journals.
+    /// Native typed transition entry point. The stable journal persists this
+    /// typed transition directly; no canonical opaque wrapper is involved.
     pub fn applyTyped(self: *TradingShard, transition: CoreTransition) !ApplyResult {
-        return self.applyInput(.{ .identity = transition.identity, .payload = transition.payload });
+        return self.applyInput(.{
+            .identity = transition.identity,
+            .source_time = transition.source_time,
+            .receive_time = transition.receive_time,
+            .monotonic_time = transition.monotonic_time,
+            .wall_time = transition.wall_time,
+            .time_presence = transition.time_presence,
+            .payload = transition.payload,
+        });
     }
 
     pub fn canonicalStateDigest(self: TradingShard) [Sha256.digest_length]u8 {
@@ -553,6 +496,47 @@ pub const TradingShard = struct {
         };
     }
 
+    fn portfolioPosition(self: *const TradingShard) Position {
+        return .{ .quantity = self.economic_projection.portfolio.swap.quantity, .open_cost_micros = self.economic_projection.portfolio.swap.open_cost_micros };
+    }
+
+    fn exchangePosition(self: *const TradingShard) Position {
+        return .{ .quantity = self.economic_projection.exchange.swap.quantity, .open_cost_micros = self.economic_projection.exchange.swap.open_cost_micros };
+    }
+
+    fn spotPortfolioPosition(self: *const TradingShard) Position {
+        return .{ .quantity = self.economic_projection.portfolio.spot.quantity, .open_cost_micros = self.economic_projection.portfolio.spot.open_cost_micros };
+    }
+
+    fn spotExchangePosition(self: *const TradingShard) Position {
+        return .{ .quantity = self.economic_projection.exchange.spot.quantity, .open_cost_micros = self.economic_projection.exchange.spot.open_cost_micros };
+    }
+
+    fn portfolioCash(self: *const TradingShard) i64 {
+        return self.economic_projection.portfolio.usdt_balance_micros;
+    }
+    fn treasuryCash(self: *const TradingShard) i64 {
+        return self.economic_projection.treasury_usdt_micros;
+    }
+    fn exchangeCash(self: *const TradingShard) i64 {
+        return self.economic_projection.exchange.usdt_balance_micros;
+    }
+    fn portfolioFee(self: *const TradingShard) i64 {
+        return self.economic_projection.portfolio.fee_micros;
+    }
+    fn exchangeFee(self: *const TradingShard) i64 {
+        return self.economic_projection.exchange.fee_micros;
+    }
+    fn totalFees(self: *const TradingShard) i64 {
+        return self.portfolioFee();
+    }
+    fn realizedPnl(self: *const TradingShard) i64 {
+        return self.economic_projection.portfolio.realized_pnl_micros;
+    }
+    fn unrealizedPnl(self: *const TradingShard) i64 {
+        return self.economic_projection.portfolio.unrealized_pnl_micros;
+    }
+
     fn riskLimits(self: *const TradingShard) risk_module.Limits {
         return .{
             .strategy = .{ .asset = settlement_asset, .atoms = self.strategy_limit_micros },
@@ -606,13 +590,13 @@ pub const TradingShard = struct {
             const instrument_config = self.instrumentEntry(intent.instrument) orelse return error.UnknownOmsInstrument;
             if (!instrument_config.margin_configured) return error.InstrumentRulesInactive;
             const portfolio_position_quantity = if (instrument_config.product == .spot)
-                self.spot_portfolio_position.quantity
+                self.spotPortfolioPosition().quantity
             else
-                self.portfolio_position.quantity;
+                self.portfolioPosition().quantity;
             const exchange_position_quantity = if (instrument_config.product == .spot)
-                self.spot_exchange_position.quantity
+                self.spotExchangePosition().quantity
             else
-                self.exchange_position.quantity;
+                self.exchangePosition().quantity;
             const signed_delta = (if (intent.side == .buy) intent.quantity else -intent.quantity);
             const next_portfolio = try std.math.add(i64, portfolio_position_quantity, signed_delta);
             const reduces_portfolio = @abs(next_portfolio) <= @abs(portfolio_position_quantity) and
@@ -640,8 +624,8 @@ pub const TradingShard = struct {
                 !self.operational_state.mayReduceOnly())
                 return error.TradingNotAuthorized;
             const assessment = try risk_module.assess(self.riskRules(intent.instrument), self.riskLimits(), .{
-                .portfolio_cash = .{ .asset = settlement_asset, .atoms = self.portfolio_cash_micros },
-                .exchange_cash = .{ .asset = settlement_asset, .atoms = self.exchange_cash_micros },
+                .portfolio_cash = .{ .asset = settlement_asset, .atoms = self.portfolioCash() },
+                .exchange_cash = .{ .asset = settlement_asset, .atoms = self.exchangeCash() },
                 .portfolio_position = .{ .instrument = intent.instrument, .rules_version = instrument_config.rules.version, .lots = portfolio_position_quantity },
                 .exchange_position = .{ .instrument = intent.instrument, .rules_version = instrument_config.rules.version, .lots = exchange_position_quantity },
                 .active_order_reservations = active,
@@ -790,33 +774,33 @@ pub const TradingShard = struct {
     pub fn captureLifecycleEconomics(self: *const TradingShard) LifecycleEconomics {
         return .{
             .positions = .{
-                .portfolio_swap = self.portfolio_position,
-                .exchange_swap = self.exchange_position,
-                .portfolio_spot = self.spot_portfolio_position,
-                .exchange_spot = self.spot_exchange_position,
+                .portfolio_swap = self.portfolioPosition(),
+                .exchange_swap = self.exchangePosition(),
+                .portfolio_spot = self.spotPortfolioPosition(),
+                .exchange_spot = self.spotExchangePosition(),
             },
             .cash = .{
-                .portfolio_micros = self.portfolio_cash_micros,
-                .treasury_micros = self.treasury_cash_micros,
-                .exchange_micros = self.exchange_cash_micros,
+                .portfolio_micros = self.portfolioCash(),
+                .treasury_micros = self.treasuryCash(),
+                .exchange_micros = self.exchangeCash(),
             },
             .fees = .{
-                .portfolio_micros = self.portfolio_fee_expense_micros,
-                .exchange_micros = self.exchange_fee_expense_micros,
-                .total_micros = self.total_fees_micros,
+                .portfolio_micros = self.portfolioFee(),
+                .exchange_micros = self.exchangeFee(),
+                .total_micros = self.totalFees(),
             },
             .pnl = .{
-                .realized_micros = self.realized_pnl_micros,
-                .unrealized_micros = self.unrealized_pnl_micros,
+                .realized_micros = self.realizedPnl(),
+                .unrealized_micros = self.unrealizedPnl(),
             },
             .ledger = .{
-                .transaction_count = self.ledger_transaction_count,
-                .portfolio_transfer_count = self.portfolio_transfer_count,
-                .portfolio_debits_micros = self.portfolio_ledger_debits_micros,
-                .portfolio_credits_micros = self.portfolio_ledger_credits_micros,
-                .exchange_debits_micros = self.exchange_ledger_debits_micros,
-                .exchange_credits_micros = self.exchange_ledger_credits_micros,
-                .projections_complete = self.economic_projections_complete,
+                .transaction_count = self.economic_projection.ledger_summary.transaction_count,
+                .portfolio_transfer_count = self.economic_projection.ledger_summary.portfolio_transfer_count,
+                .portfolio_debits_micros = self.economic_projection.ledger_summary.portfolio_debits_micros,
+                .portfolio_credits_micros = self.economic_projection.ledger_summary.portfolio_credits_micros,
+                .exchange_debits_micros = self.economic_projection.ledger_summary.exchange_debits_micros,
+                .exchange_credits_micros = self.economic_projection.ledger_summary.exchange_credits_micros,
+                .projections_complete = self.economic_projection.ledger_summary.projections_complete,
             },
             .projection_digest = self.economic_projection.digest(),
             .de_risk_target_position = self.operational_state.target_position,
@@ -830,11 +814,12 @@ pub const TradingShard = struct {
     }
 
     fn recalculateRisk(self: *TradingShard, fail_if_exceeded: bool) !void {
-        const position_quantity = if (self.portfolio_position.quantity < 0)
-            try std.math.sub(i64, 0, self.portfolio_position.quantity)
+        const portfolio_position = self.portfolioPosition();
+        const position_quantity = if (portfolio_position.quantity < 0)
+            try std.math.sub(i64, 0, portfolio_position.quantity)
         else
-            self.portfolio_position.quantity;
-        self.position_margin_requirement_micros = if (self.portfolio_position.quantity == 0)
+            portfolio_position.quantity;
+        self.position_margin_requirement_micros = if (portfolio_position.quantity == 0)
             0
         else
             try internalMarginMicros(try self.shardNotionalMicros(
@@ -866,20 +851,23 @@ pub const TradingShard = struct {
     }
 
     pub fn assertClosures(self: TradingShard) !void {
-        if (self.portfolio_position.quantity != self.exchange_position.quantity or
-            self.portfolio_position.open_cost_micros != self.exchange_position.open_cost_micros)
+        const portfolio_position = self.portfolioPosition();
+        const exchange_position = self.exchangePosition();
+        if (portfolio_position.quantity != exchange_position.quantity or
+            portfolio_position.open_cost_micros != exchange_position.open_cost_micros)
             return error.PositionLayerMismatch;
         if (try std.math.add(
             i64,
-            self.portfolio_cash_micros,
-            self.treasury_cash_micros,
-        ) != self.exchange_cash_micros)
+            self.portfolioCash(),
+            self.treasuryCash(),
+        ) != self.exchangeCash())
             return error.CashLayerMismatch;
-        if (self.portfolio_fee_expense_micros != self.exchange_fee_expense_micros or
-            self.total_fees_micros != self.portfolio_fee_expense_micros)
+        if (self.portfolioFee() != self.exchangeFee() or
+            self.totalFees() != self.portfolioFee())
             return error.FeeLayerMismatch;
-        if (self.portfolio_ledger_debits_micros != self.portfolio_ledger_credits_micros or
-            self.exchange_ledger_debits_micros != self.exchange_ledger_credits_micros)
+        const ledger = self.economic_projection.ledger_summary;
+        if (ledger.portfolio_debits_micros != ledger.portfolio_credits_micros or
+            ledger.exchange_debits_micros != ledger.exchange_credits_micros)
             return error.LedgerPostingsDoNotClose;
         if (try std.math.add(
             i64,
@@ -905,32 +893,13 @@ pub const TradingShard = struct {
         // quantity first. Legacy economic_fill callers have no report, so
         // retain the compatibility scalar only for the legacy active order.
         if (order_id == self.order_id) self.filled_quantity = next_filled;
-        self.syncCompatibilityEconomics();
-        self.ledger_transaction_count = try std.math.add(u64, self.ledger_transaction_count, 1);
+        self.economic_projection.ledger_summary.transaction_count = try std.math.add(u64, self.economic_projection.ledger_summary.transaction_count, 1);
         try self.recalculateRisk(false);
         try self.assertClosures();
     }
 
-    fn syncCompatibilityEconomics(self: *TradingShard) void {
-        const projection = self.economic_projection;
-        self.portfolio_position = .{ .quantity = projection.portfolio.swap.quantity, .open_cost_micros = projection.portfolio.swap.open_cost_micros };
-        self.exchange_position = .{ .quantity = projection.exchange.swap.quantity, .open_cost_micros = projection.exchange.swap.open_cost_micros };
-        self.spot_portfolio_position = .{ .quantity = projection.portfolio.spot.quantity, .open_cost_micros = projection.portfolio.spot.open_cost_micros };
-        self.spot_exchange_position = .{ .quantity = projection.exchange.spot.quantity, .open_cost_micros = projection.exchange.spot.open_cost_micros };
-        self.portfolio_cash_micros = projection.portfolio.usdt_balance_micros;
-        self.treasury_cash_micros = projection.treasury_usdt_micros;
-        self.exchange_cash_micros = projection.exchange.usdt_balance_micros;
-        self.portfolio_fee_expense_micros = projection.portfolio.fee_micros;
-        self.exchange_fee_expense_micros = projection.exchange.fee_micros;
-        self.total_fees_micros = projection.portfolio.fee_micros;
-        self.realized_pnl_micros = projection.portfolio.realized_pnl_micros;
-        self.unrealized_pnl_micros = projection.portfolio.unrealized_pnl_micros;
-    }
-
     fn applyEconomicProjection(self: *TradingShard, event: economics.Event) !bool {
-        const changed = try self.economic_projection.applyChanged(event);
-        if (changed) self.syncCompatibilityEconomics();
-        return changed;
+        return self.economic_projection.applyChanged(event);
     }
 
     fn submitOrderIntent(self: *TradingShard, intent: host_gateway.OrderIntent) !?OrderCommand {
@@ -1026,7 +995,6 @@ pub const TradingShard = struct {
         if (try self.rememberCanonicalIngress(record)) return null;
         const fact_identity = record.envelope.identity.sequence;
         switch (record.event) {
-            .core_input => unreachable,
             .order_dispatch_result => |result| {
                 const command_id = std.math.cast(u64, result.command) orelse return error.IdentityOutOfRange;
                 if (command_id != self.order_command_id or self.order_state != .pending_submit)
@@ -1398,11 +1366,11 @@ pub const TradingShard = struct {
                 try self.trace.append(.safety_gate_changed, input.identity);
             },
             .lifecycle_progress => |progress| {
-                if (progress.position_quantity != self.portfolio_position.quantity or
+                if (progress.position_quantity != self.portfolioPosition().quantity or
                     progress.open_orders_closed != self.oms.openOrdersClosed() or
                     progress.reconciliation_complete != !self.economic_projection.reconciliation_break or
-                    self.portfolio_position.quantity != self.exchange_position.quantity or
-                    self.portfolio_cash_micros + self.treasury_cash_micros != self.exchange_cash_micros)
+                    self.portfolioPosition().quantity != self.exchangePosition().quantity or
+                    self.portfolioCash() + self.treasuryCash() != self.exchangeCash())
                     return error.InvalidLifecycleProgress;
                 try self.assertClosures();
                 try self.operational_state.applyProgress(progress);
@@ -1535,7 +1503,6 @@ pub const TradingShard = struct {
             .exchange_balance => |balance| {
                 if (!self.account_configured or balance.cash_micros <= 0 or self.exchange_balance_observed)
                     return error.InvalidExchangeBalance;
-                self.exchange_cash_micros = balance.cash_micros;
                 self.economic_projection.exchange.usdt_balance_micros = balance.cash_micros;
                 self.exchange_balance_observed = true;
                 try self.trace.append(.exchange_balance, input.identity);
@@ -1548,15 +1515,16 @@ pub const TradingShard = struct {
             },
             .opening_balance => |balance| {
                 if (!self.exchange_positions_observed or balance.cash_micros <= 0 or
-                    balance.cash_micros != self.exchange_cash_micros or self.opening_balance_observed)
+                    balance.cash_micros != self.exchangeCash() or self.opening_balance_observed)
                     return error.InvalidOpeningBalance;
-                self.treasury_cash_micros = balance.cash_micros;
                 self.economic_projection.treasury_usdt_micros = balance.cash_micros;
-                self.portfolio_ledger_debits_micros = balance.cash_micros;
-                self.portfolio_ledger_credits_micros = balance.cash_micros;
-                self.exchange_ledger_debits_micros = balance.cash_micros;
-                self.exchange_ledger_credits_micros = balance.cash_micros;
-                self.ledger_transaction_count = 1;
+                self.economic_projection.ledger_summary = .{
+                    .transaction_count = 1,
+                    .portfolio_debits_micros = balance.cash_micros,
+                    .portfolio_credits_micros = balance.cash_micros,
+                    .exchange_debits_micros = balance.cash_micros,
+                    .exchange_credits_micros = balance.cash_micros,
+                };
                 self.opening_balance_observed = true;
                 try self.trace.append(.opening_balance, input.identity);
             },
@@ -1570,31 +1538,29 @@ pub const TradingShard = struct {
             },
             .portfolio_transfer => |transfer| {
                 if (!self.virtual_portfolio_active or transfer.amount_micros <= 0 or
-                    transfer.amount_micros > self.treasury_cash_micros or self.portfolio_funded)
+                    transfer.amount_micros > self.treasuryCash() or self.portfolio_funded)
                     return error.InvalidPortfolioTransfer;
-                self.treasury_cash_micros = try std.math.sub(
+                self.economic_projection.treasury_usdt_micros = try std.math.sub(
                     i64,
-                    self.treasury_cash_micros,
+                    self.treasuryCash(),
                     transfer.amount_micros,
                 );
-                self.portfolio_cash_micros = try std.math.add(
+                self.economic_projection.portfolio.usdt_balance_micros = try std.math.add(
                     i64,
-                    self.portfolio_cash_micros,
+                    self.portfolioCash(),
                     transfer.amount_micros,
                 );
-                self.economic_projection.treasury_usdt_micros = try std.math.sub(i64, self.economic_projection.treasury_usdt_micros, transfer.amount_micros);
-                self.economic_projection.portfolio.usdt_balance_micros = try std.math.add(i64, self.economic_projection.portfolio.usdt_balance_micros, transfer.amount_micros);
-                self.portfolio_ledger_debits_micros = try std.math.add(
+                self.economic_projection.ledger_summary.portfolio_debits_micros = try std.math.add(
                     i64,
-                    self.portfolio_ledger_debits_micros,
+                    self.economic_projection.ledger_summary.portfolio_debits_micros,
                     transfer.amount_micros,
                 );
-                self.portfolio_ledger_credits_micros = try std.math.add(
+                self.economic_projection.ledger_summary.portfolio_credits_micros = try std.math.add(
                     i64,
-                    self.portfolio_ledger_credits_micros,
+                    self.economic_projection.ledger_summary.portfolio_credits_micros,
                     transfer.amount_micros,
                 );
-                self.portfolio_transfer_count = 1;
+                self.economic_projection.ledger_summary.portfolio_transfer_count = 1;
                 self.portfolio_funded = true;
                 try self.trace.append(.portfolio_transfer, input.identity);
             },
@@ -1669,7 +1635,7 @@ pub const TradingShard = struct {
                 try self.recalculateRisk(false);
                 try self.assertClosures();
                 try self.trace.append(.mark_price, input.identity);
-                if (self.order_state == .filled) self.economic_projections_complete = true;
+                if (self.order_state == .filled) self.economic_projection.ledger_summary.projections_complete = true;
             },
             .timer => |request| {
                 if (request.quantity <= 0) return error.InvalidOrderQuantity;
@@ -1866,7 +1832,7 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
     zeroUnused(canonical.AccountMargin, shard.canonical_account.margins[shard.canonical_account.margin_count..]);
     for (shard.canonical_ingress_cursors[shard.canonical_ingress_cursor_count..]) |*identity| identity.* = .{
         .identity = .{ .stream = 0, .sequence = 0 },
-        .event_type = .core_input,
+        .event_type = .order_dispatch_result,
         .raw_digest = @splat(0),
         .payload_digest = @splat(0),
     };
@@ -1911,11 +1877,7 @@ fn appendStableFactGroup(
     facts: []const Fact,
 ) !void {
     var canonical_bytes: [canonical_event_codec.max_encoded_len]u8 = undefined;
-    const is_core = std.meta.activeTag(input.event) == .core_input;
-    const encoded_input = if (is_core)
-        input.event.core_input.slice()
-    else
-        try canonical_event_codec.encode(&canonical_bytes, input);
+    const encoded_input = try canonical_event_codec.encode(&canonical_bytes, input);
     const times = input.envelope.times;
     const time_presence: journal.TimePresence = .{
         .source = times.source_utc_ns != null,
@@ -1929,7 +1891,7 @@ fn appendStableFactGroup(
         try decision_journal.append(.{
             .type_id = @intFromEnum(event.kind),
             .schema_version = schema_version,
-            .flags = if (index == 0) if (is_core) journal.input_flag else journal.canonical_input_flag else 0,
+            .flags = if (index == 0) journal.canonical_input_flag else 0,
             .sequence = event.sequence,
             .source_time = times.source_utc_ns orelse 0,
             .receive_time = times.receive_utc_ns orelse 0,
@@ -1942,8 +1904,7 @@ fn appendStableFactGroup(
 }
 
 /// Stable-journal adapter for the typed path. The payload is the versioned
-/// CoreTransition encoding, but it is applied natively before persistence;
-/// there is no CoreInput construction or immediate decode on this path.
+/// typed transition encoding, applied natively before persistence.
 pub fn applyTypedStable(
     shard: *TradingShard,
     decision_journal: *journal.Journal,
@@ -1954,7 +1915,8 @@ pub fn applyTypedStable(
     var candidate = shard.*;
     const result = try candidate.applyTyped(transition);
     if (result.facts.len == 0) return error.InputProducedNoFact;
-    const encoded = try encodeInput(transition);
+    var encoded_storage: [journal.max_payload_size]u8 = undefined;
+    const encoded = try encodeInput(&encoded_storage, transition);
     for (result.facts, 0..) |event, index| {
         var identity_bytes: [@sizeOf(u64)]u8 = undefined;
         std.mem.writeInt(u64, &identity_bytes, event.identity, .little);
@@ -1963,11 +1925,11 @@ pub fn applyTypedStable(
             .schema_version = schema_version,
             .flags = if (index == 0) journal.input_flag else 0,
             .sequence = event.sequence,
-            .source_time = 0,
-            .receive_time = 0,
-            .monotonic_time = 0,
-            .wall_time = 0,
-            .time_presence = .{},
+            .source_time = transition.source_time,
+            .receive_time = transition.receive_time,
+            .monotonic_time = transition.monotonic_time,
+            .wall_time = transition.wall_time,
+            .time_presence = transition.time_presence,
             .payload = if (index == 0) encoded.bytes[0..encoded.len] else &identity_bytes,
         });
     }
@@ -1976,6 +1938,18 @@ pub fn applyTypedStable(
 }
 
 pub fn applyStable(
+    shard: *TradingShard,
+    decision_journal: *journal.Journal,
+    input: anytype,
+) !?OrderCommand {
+    if (@TypeOf(input) == CoreTransition)
+        return applyTypedStable(shard, decision_journal, input);
+    if (@hasField(@TypeOf(input), "envelope") and @hasField(@TypeOf(input), "event"))
+        return applyCanonicalStable(shard, decision_journal, .{ .envelope = input.envelope, .event = input.event });
+    @compileError("applyStable expects a typed transition or canonical event");
+}
+
+fn applyCanonicalStable(
     shard: *TradingShard,
     decision_journal: *journal.Journal,
     input: canonical.EventRecord,
@@ -2014,6 +1988,11 @@ fn digestBool(hasher: *Sha256, value: bool) void {
 
 pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     var hasher = Sha256.init(.{});
+    const portfolio_position = shard.portfolioPosition();
+    const exchange_position = shard.exchangePosition();
+    const spot_portfolio_position = shard.spotPortfolioPosition();
+    const spot_exchange_position = shard.spotExchangePosition();
+    const ledger = shard.economic_projection.ledger_summary;
     hasher.update("StateDigestV3\x00");
     digestInt(&hasher, u16, schema_version);
     digestInt(&hasher, u8, shard.instrument_registry.count);
@@ -2208,22 +2187,22 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     }
     digestInt(&hasher, i64, shard.filled_quantity);
     digestInt(&hasher, i64, shard.mark_price_micros);
-    digestInt(&hasher, i64, shard.portfolio_position.quantity);
-    digestInt(&hasher, i64, shard.portfolio_position.open_cost_micros);
-    digestInt(&hasher, i64, shard.exchange_position.quantity);
-    digestInt(&hasher, i64, shard.exchange_position.open_cost_micros);
-    digestInt(&hasher, i64, shard.spot_portfolio_position.quantity);
-    digestInt(&hasher, i64, shard.spot_portfolio_position.open_cost_micros);
-    digestInt(&hasher, i64, shard.spot_exchange_position.quantity);
-    digestInt(&hasher, i64, shard.spot_exchange_position.open_cost_micros);
-    digestInt(&hasher, i64, shard.portfolio_cash_micros);
-    digestInt(&hasher, i64, shard.treasury_cash_micros);
-    digestInt(&hasher, i64, shard.exchange_cash_micros);
-    digestInt(&hasher, i64, shard.portfolio_fee_expense_micros);
-    digestInt(&hasher, i64, shard.exchange_fee_expense_micros);
-    digestInt(&hasher, i64, shard.total_fees_micros);
-    digestInt(&hasher, i64, shard.realized_pnl_micros);
-    digestInt(&hasher, i64, shard.unrealized_pnl_micros);
+    digestInt(&hasher, i64, portfolio_position.quantity);
+    digestInt(&hasher, i64, portfolio_position.open_cost_micros);
+    digestInt(&hasher, i64, exchange_position.quantity);
+    digestInt(&hasher, i64, exchange_position.open_cost_micros);
+    digestInt(&hasher, i64, spot_portfolio_position.quantity);
+    digestInt(&hasher, i64, spot_portfolio_position.open_cost_micros);
+    digestInt(&hasher, i64, spot_exchange_position.quantity);
+    digestInt(&hasher, i64, spot_exchange_position.open_cost_micros);
+    digestInt(&hasher, i64, shard.portfolioCash());
+    digestInt(&hasher, i64, shard.treasuryCash());
+    digestInt(&hasher, i64, shard.exchangeCash());
+    digestInt(&hasher, i64, shard.portfolioFee());
+    digestInt(&hasher, i64, shard.exchangeFee());
+    digestInt(&hasher, i64, shard.totalFees());
+    digestInt(&hasher, i64, shard.realizedPnl());
+    digestInt(&hasher, i64, shard.unrealizedPnl());
     digestInt(&hasher, i64, shard.open_order_reservation_micros);
     digestInt(&hasher, i64, shard.position_margin_requirement_micros);
     digestInt(&hasher, i64, shard.risk_lease_micros);
@@ -2258,13 +2237,13 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     digestInt(&hasher, i64, shard.exchange_liquidation_distance_ticks);
     digestInt(&hasher, u8, @intFromEnum(shard.portfolio_margin_gate));
     digestInt(&hasher, u8, @intFromEnum(shard.exchange_margin_gate));
-    digestInt(&hasher, u64, shard.ledger_transaction_count);
-    digestInt(&hasher, u64, shard.portfolio_transfer_count);
-    digestInt(&hasher, i64, shard.portfolio_ledger_debits_micros);
-    digestInt(&hasher, i64, shard.portfolio_ledger_credits_micros);
-    digestInt(&hasher, i64, shard.exchange_ledger_debits_micros);
-    digestInt(&hasher, i64, shard.exchange_ledger_credits_micros);
-    digestBool(&hasher, shard.economic_projections_complete);
+    digestInt(&hasher, u64, ledger.transaction_count);
+    digestInt(&hasher, u64, ledger.portfolio_transfer_count);
+    digestInt(&hasher, i64, ledger.portfolio_debits_micros);
+    digestInt(&hasher, i64, ledger.portfolio_credits_micros);
+    digestInt(&hasher, i64, ledger.exchange_debits_micros);
+    digestInt(&hasher, i64, ledger.exchange_credits_micros);
+    digestBool(&hasher, ledger.projections_complete);
     digestCanonicalProjections(&hasher, shard);
     return hasher.finalResult();
 }
@@ -2307,7 +2286,7 @@ pub const StableRecovery = struct {
 fn validateReplayRecord(
     record: journal.Record,
     expected: Fact,
-    input: InputEvent,
+    input: CoreTransition,
     is_input: bool,
 ) !void {
     if (record.schema_version != schema_version) return error.UnsupportedSchema;
@@ -2382,8 +2361,8 @@ pub fn replayDigest(
     return .{ .status = recovered.status, .digest = recovered.shard.canonicalStateDigest() };
 }
 
-/// Replays core and venue canonical inputs through the same `apply` seam from
-/// an explicit recovery point.
+/// Replays typed stable inputs and canonical venue inputs from an explicit
+/// recovery point.
 pub fn recoverStable(initial: TradingShard, bytes: []const u8) !StableRecovery {
     var reader = try journal.Reader.init(bytes);
     const recovered = try replayReader(&reader, initial);
@@ -2402,15 +2381,18 @@ fn replayReader(reader: *journal.Reader, initial: TradingShard) !ReplayResult {
         if (first_record.flags != journal.input_flag and first_record.flags != journal.canonical_input_flag)
             return error.OrphanDerivedFact;
         var candidate = shard;
-        const core_input: ?InputEvent = if (first_record.flags == journal.input_flag) try decodeInput(first_record) else null;
+        const typed_input: ?CoreTransition = if (first_record.flags == journal.input_flag)
+            try shard_event.decodeStableInput(first_record)
+        else
+            null;
         const canonical_input: ?canonical.EventRecord = if (first_record.flags == journal.canonical_input_flag)
             try canonical_event_codec.decode(first_record.payload)
         else
             null;
         const before = candidate.trace.len;
         var replay_error: ?anyerror = null;
-        if (core_input) |input| {
-            _ = candidate.apply(try coreRecordFromInput(input)) catch |err| {
+        if (typed_input) |input| {
+            _ = candidate.applyTyped(input) catch |err| {
                 replay_error = err;
             };
         } else {
@@ -2433,7 +2415,7 @@ fn replayReader(reader: *journal.Reader, initial: TradingShard) !ReplayResult {
                     return error.IncompleteFactGroup;
                 },
             };
-            if (core_input) |input|
+            if (typed_input) |input|
                 try validateReplayRecord(record, expected, input, index == 0)
             else
                 try validateCanonicalReplayRecord(record, expected, canonical_input.?, index == 0);

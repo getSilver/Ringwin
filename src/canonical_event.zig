@@ -440,19 +440,7 @@ pub const VenueAccountConfigurationSnapshot = struct {
     },
 };
 
-/// Bounded, versioned core command/fact encoding. Internal shard transitions
-/// use the same EventRecord envelope and public apply seam as venue facts.
-pub const CoreInput = struct {
-    bytes: [2048]u8 = @splat(0),
-    len: u16,
-
-    pub fn slice(self: *const CoreInput) []const u8 {
-        return self.bytes[0..self.len];
-    }
-};
-
 pub const CanonicalEvent = union(enum) {
-    core_input: CoreInput,
     order_dispatch_result: OrderDispatchResult,
     execution_report: ExecutionReport,
     fill: Fill,
@@ -473,7 +461,6 @@ pub const CanonicalEvent = union(enum) {
 
 pub const EventType = enum(u32) {
     order_dispatch_result = 1,
-    core_input = 2,
     execution_report = 3,
     fill = 4,
     reconciliation_started = 5,
@@ -495,7 +482,6 @@ pub const TimeInForce = enum(u8) { good_til_canceled, immediate_or_cancel, fill_
 
 pub fn eventType(event: CanonicalEvent) EventType {
     return switch (event) {
-        .core_input => .core_input,
         .order_dispatch_result => .order_dispatch_result,
         .execution_report => .execution_report,
         .fill => .fill,

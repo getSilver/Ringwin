@@ -6,7 +6,7 @@ const settlement_asset: trading.canonical.AssetIdentity = 1;
 const strategy_recovery = @import("strategy_host_recovery.zig");
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreTransition) !?trading.OrderCommand {
-    return trading.applyStable(shard, stable_journal, try trading.coreRecord(input));
+    return trading.applyTypedStable(shard, stable_journal, input);
 }
 
 /// Restart admission phase; only ready may later accept a fresh EnableTrading.
@@ -74,8 +74,8 @@ pub const RecoveryCoordinator = struct {
             .exchange_open_cost_micros = economic.exchange.swap.open_cost_micros,
             .portfolio_spot_open_cost_micros = economic.portfolio.spot.open_cost_micros,
             .exchange_spot_open_cost_micros = economic.exchange.spot.open_cost_micros,
-            .portfolio_cash_micros = self.shard.portfolio_cash_micros,
-            .exchange_cash_micros = self.shard.exchange_cash_micros,
+            .portfolio_cash_micros = economic.portfolio.usdt_balance_micros,
+            .exchange_cash_micros = economic.exchange.usdt_balance_micros,
             .portfolio_fee_micros = economic.portfolio.fee_micros,
             .exchange_fee_micros = economic.exchange.fee_micros,
             .suspense_micros = economic.suspense_usdt_micros,
@@ -84,8 +84,8 @@ pub const RecoveryCoordinator = struct {
                 break :blk std.math.cast(i64, reservations.atoms) orelse std.math.maxInt(i64);
             },
             .margin_micros = self.shard.position_margin_requirement_micros,
-            .ledger_closed = self.shard.portfolio_ledger_debits_micros == self.shard.portfolio_ledger_credits_micros and
-                self.shard.exchange_ledger_debits_micros == self.shard.exchange_ledger_credits_micros,
+            .ledger_closed = self.shard.economic_projection.ledger_summary.portfolio_debits_micros == self.shard.economic_projection.ledger_summary.portfolio_credits_micros and
+                self.shard.economic_projection.ledger_summary.exchange_debits_micros == self.shard.economic_projection.ledger_summary.exchange_credits_micros,
             .reconciliation_break = economic.reconciliation_break,
         };
         for (self.shard.oms.orders[0..self.shard.oms.order_count]) |order| {
@@ -501,8 +501,8 @@ test "restart recovery remains fenced until exact venue evidence closes" {
     });
     shard.operational_state.mode = .trading;
     shard.operational_state.trading_authorized = true;
-    shard.portfolio_cash_micros = 12;
-    shard.exchange_cash_micros = 12;
+    shard.economic_projection.portfolio.usdt_balance_micros = 12;
+    shard.economic_projection.exchange.usdt_balance_micros = 12;
     shard.risk_lease_micros = 9;
     shard.risk_lease_remaining_micros = 9;
 

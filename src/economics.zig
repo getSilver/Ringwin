@@ -45,6 +45,19 @@ pub const LedgerTransaction = struct {
 
 pub const LedgerPosting = struct { account: LedgerAccount, unit: LedgerUnit, amount: i64 };
 
+/// Lifecycle ledger facts that are not represented by a market transaction
+/// posting. Kept inside the economic projection so TradingShard has no second
+/// ledger state to synchronize.
+pub const LedgerSummary = struct {
+    transaction_count: u64 = 0,
+    portfolio_transfer_count: u64 = 0,
+    portfolio_debits_micros: i64 = 0,
+    portfolio_credits_micros: i64 = 0,
+    exchange_debits_micros: i64 = 0,
+    exchange_credits_micros: i64 = 0,
+    projections_complete: bool = false,
+};
+
 pub const Fill = struct {
     identity: u64,
     side: Side,
@@ -111,6 +124,7 @@ pub const Projection = struct {
     seen_count: u8 = 0,
     ledger: [max_ledger_transactions]LedgerTransaction = undefined,
     ledger_count: u8 = 0,
+    ledger_summary: LedgerSummary = .{},
     mark_price_micros: i64 = 0,
     quantity_denominator: i64 = 1,
 

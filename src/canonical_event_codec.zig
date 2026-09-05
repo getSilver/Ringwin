@@ -2,7 +2,7 @@
 //!
 //! Event framing and union dispatch are frozen here rather than inferred from
 //! the in-memory `EventRecord` layout. Bounded arrays encode only their active
-//! elements; internal core bytes encode only their declared length.
+//! elements.
 
 const std = @import("std");
 const canonical = @import("canonical_event.zig");
@@ -117,11 +117,6 @@ fn decodeBootstrap(reader: *Reader) !canonical.AccountBootstrapSnapshot {
 
 fn encodeEvent(cursor: *Cursor, event: canonical.CanonicalEvent) !void {
     switch (event) {
-        .core_input => |core| {
-            if (core.len > core.bytes.len) return error.InvalidCoreInput;
-            try cursor.putInt(u16, core.len);
-            try cursor.put(core.slice());
-        },
         .account_bootstrap_snapshot => |snapshot| try encodeBootstrap(cursor, snapshot),
         .order_dispatch_result => |value| try putValue(cursor, value),
         .execution_report => |value| try putValue(cursor, value),
@@ -166,13 +161,6 @@ pub fn decode(encoded: []const u8) !canonical.EventRecord {
     const envelope = try takeValue(&reader, canonical.EventEnvelope);
     const event_type = std.enums.fromInt(canonical.EventType, envelope.event_type) orelse return error.InvalidCanonicalEnvelope;
     const event: canonical.CanonicalEvent = switch (event_type) {
-        .core_input => blk: {
-            const len = try reader.takeInt(u16);
-            if (len > @as(u16, @intCast((canonical.CoreInput{ .len = 0 }).bytes.len))) return error.InvalidCoreInput;
-            var core: canonical.CoreInput = .{ .len = len };
-            @memcpy(core.bytes[0..len], try reader.take(len));
-            break :blk .{ .core_input = core };
-        },
         .account_bootstrap_snapshot => .{ .account_bootstrap_snapshot = try decodeBootstrap(&reader) },
         .order_dispatch_result => .{ .order_dispatch_result = try takeValue(&reader, canonical.OrderDispatchResult) },
         .execution_report => .{ .execution_report = try takeValue(&reader, canonical.ExecutionReport) },
@@ -210,19 +198,6 @@ fn testEnvelope(event_type: canonical.EventType) canonical.EventEnvelope {
         .times = .{ .source_utc_ns = 5, .receive_utc_ns = 6 },
         .raw_evidence = .{ .stream = 3, .sequence = 4, .digest = @splat(0xaa) },
     };
-}
-
-test "core input encodes only active bytes and round trips" {
-    var core: canonical.CoreInput = .{ .len = 3 };
-    @memcpy(core.bytes[0..3], "abc");
-    var encoded_storage: [max_encoded_len]u8 = undefined;
-    const encoded = try encode(&encoded_storage, .{
-        .envelope = testEnvelope(.core_input),
-        .event = .{ .core_input = core },
-    });
-    try std.testing.expect(encoded.len < 256);
-    const decoded = try decode(encoded);
-    try std.testing.expectEqualSlices(u8, "abc", decoded.event.core_input.slice());
 }
 
 test "bootstrap encodes active facts without fixed-array tails" {

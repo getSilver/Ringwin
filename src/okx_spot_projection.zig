@@ -222,7 +222,8 @@ pub const Projection = struct {
 };
 
 pub fn appendStable(log: *journal.Journal, sequence: u64, event: private.PrivateEvent) !void {
-    var encoded: StablePayload = .{};
+    var encoded_storage: [journal.max_payload_size]u8 = undefined;
+    var encoded = StablePayload.init(&encoded_storage);
     try encoded.put(u64, event.envelope.raw_evidence.stream_sequence);
     try encoded.bytesValue(&event.envelope.raw_evidence.sha256);
     try encoded.bytesValue(&event.envelope.source_fact_identity);
@@ -313,8 +314,12 @@ fn decodeStable(record: journal.Record) !private.PrivateEvent {
 }
 
 const StablePayload = struct {
-    bytes: [2048]u8 = undefined,
+    bytes: []u8,
     len: usize = 0,
+
+    fn init(bytes: []u8) @This() {
+        return .{ .bytes = bytes };
+    }
 
     fn slice(self: *const StablePayload) []const u8 {
         return self.bytes[0..self.len];

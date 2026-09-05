@@ -6,7 +6,7 @@ const coordinator_snapshot_version: u16 = 2;
 const account_margin_gate_identity: u128 = 0x414343544d415247;
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreTransition) !?trading.OrderCommand {
-    return trading.applyStable(shard, stable_journal, try trading.coreRecord(input));
+    return trading.applyTypedStable(shard, stable_journal, input);
 }
 
 pub const max_shards = 4;

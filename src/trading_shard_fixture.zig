@@ -46,16 +46,20 @@ pub const LiveRun = struct {
     decision_journal: journal.Journal,
 };
 
-pub fn atGroup(group_index: u64, input: engine.CoreTransition) canonical.EventRecord {
-    var record = engine.coreRecord(input) catch unreachable;
+pub fn atGroup(group_index: u64, input: engine.CoreTransition) engine.CoreTransition {
+    var transition = input;
     const source_time = fixture_utc_base + group_index * 10 * std.time.ns_per_ms;
-    record.envelope.times = .{
-        .source_utc_ns = source_time,
-        .receive_utc_ns = source_time + std.time.ns_per_ms,
-        .monotonic_ns = fixture_monotonic_base + group_index * 10 * std.time.ns_per_ms + std.time.ns_per_ms,
-        .audit_utc_ns = source_time + 2 * std.time.ns_per_ms,
+    transition.source_time = source_time;
+    transition.receive_time = source_time + std.time.ns_per_ms;
+    transition.monotonic_time = fixture_monotonic_base + group_index * 10 * std.time.ns_per_ms + std.time.ns_per_ms;
+    transition.wall_time = source_time + 2 * std.time.ns_per_ms;
+    transition.time_presence = .{
+        .source = true,
+        .receive = true,
+        .monotonic = true,
+        .wall = true,
     };
-    return record;
+    return transition;
 }
 
 pub fn canonicalAt(group_index: u64, source_sequence: u64, event: canonical.CanonicalEvent) canonical.EventRecord {
@@ -116,11 +120,15 @@ pub fn deltaAt(group: u64, previous: u64, current: u64, bid_price_micros: i64) c
     } });
 }
 
-pub fn apply(run: *LiveRun, event: canonical.EventRecord) !?engine.OrderCommand {
-    return engine.applyStable(&run.shard, &run.decision_journal, event);
+pub fn apply(run: *LiveRun, event: anytype) !?engine.OrderCommand {
+    return switch (@TypeOf(event)) {
+        engine.CoreTransition => engine.applyTypedStable(&run.shard, &run.decision_journal, event),
+        canonical.EventRecord => engine.applyStable(&run.shard, &run.decision_journal, event),
+        else => @compileError("fixture.apply expects a typed transition or canonical event"),
+    };
 }
 
-pub fn lifecycleCommand(command_identity: u128, expected_version: u64, kind: engine.operational.CommandKind) canonical.EventRecord {
+pub fn lifecycleCommand(command_identity: u128, expected_version: u64, kind: engine.operational.CommandKind) engine.CoreTransition {
     return atGroup(40, .{ .identity = @intCast(1_000 + command_identity), .payload = .{ .control_command = .{
         .command_identity = command_identity,
         .content_hash = command_identity * 7_919,
@@ -131,7 +139,7 @@ pub fn lifecycleCommand(command_identity: u128, expected_version: u64, kind: eng
     } } });
 }
 
-pub fn deRiskCommand(command_identity: u128, expected_version: u64, target_position: i64, warning_identity: u128) canonical.EventRecord {
+pub fn deRiskCommand(command_identity: u128, expected_version: u64, target_position: i64, warning_identity: u128) engine.CoreTransition {
     var input: engine.CoreTransition = .{ .identity = @intCast(1_000 + command_identity), .payload = .{ .control_command = .{
         .command_identity = command_identity,
         .content_hash = command_identity * 7_919,
@@ -148,7 +156,7 @@ pub fn deRiskCommand(command_identity: u128, expected_version: u64, target_posit
     return atGroup(40, input);
 }
 
-pub fn resolveLatchCommand(command_identity: u128, expected_version: u64, latch_identity: u128) canonical.EventRecord {
+pub fn resolveLatchCommand(command_identity: u128, expected_version: u64, latch_identity: u128) engine.CoreTransition {
     var input: engine.CoreTransition = .{ .identity = @intCast(1_000 + command_identity), .payload = .{ .control_command = .{
         .command_identity = command_identity,
         .content_hash = command_identity * 7_919,
@@ -166,7 +174,7 @@ fn finish(run: *LiveRun) !LiveRun {
     return run.*;
 }
 
-pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_model: engine.ReservationModel) [14]canonical.EventRecord {
+pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_model: engine.ReservationModel) [14]engine.CoreTransition {
     const denominator: i64 = switch (reservation_model) {
         .leveraged => contract_denominator,
         .cash => 100_000_000,
@@ -224,8 +232,9 @@ pub fn startScenario() !LiveRun {
 }
 
 pub fn applyHealthyPrelude(run: *LiveRun) !void {
+    if (try apply(run, atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000_000 } })) != null)
+        return error.UnexpectedCommand;
     const prelude = [_]canonical.EventRecord{
-        atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000_000 } }),
         canonicalAt(12, 99, .{ .instrument_definition_observed = .{ .instrument = 3, .rules_version = 1 } }),
         snapshotAt(13, 100),
         deltaAt(14, 100, 101, 49_850_000_000),
@@ -351,13 +360,14 @@ pub fn happyVenueFacts(command: engine.OrderCommand) ![6]canonical.EventRecord {
 }
 
 fn assertPartialState(shard: engine.TradingShard) !void {
-    if (shard.portfolio_position.quantity != 40 or
-        shard.portfolio_position.open_cost_micros != 199_600_000 or
-        shard.exchange_position.quantity != 40 or
-        shard.exchange_position.open_cost_micros != 199_600_000 or
-        shard.total_fees_micros != 149_700 or
-        shard.portfolio_cash_micros != 19_999_850_300 or
-        shard.exchange_cash_micros != 24_999_850_300 or
+    const economic = shard.economicSummary();
+    if (economic.portfolio.swap.quantity != 40 or
+        economic.portfolio.swap.open_cost_micros != 199_600_000 or
+        economic.exchange.swap.quantity != 40 or
+        economic.exchange.swap.open_cost_micros != 199_600_000 or
+        economic.portfolio.fee_micros != 149_700 or
+        economic.portfolio.usdt_balance_micros != 19_999_850_300 or
+        economic.exchange.usdt_balance_micros != 24_999_850_300 or
         shard.position_margin_requirement_micros != 4_400_000 or
         shard.open_order_reservation_micros != 6_838_650 or
         shard.risk_lease_remaining_micros != 9_988_761_350)
@@ -421,7 +431,7 @@ pub fn runDuplicateReport() !LiveRun {
     if (!std.mem.eql(u8, &before_duplicate_fill, &run.shard.canonicalStateDigest()))
         return error.DuplicateFillChangedState;
     try assertPartialState(run.shard);
-    if (run.shard.ledger_transaction_count != 2) return error.DuplicateCreatedLedgerTransaction;
+    if (run.shard.economic_projection.ledger_summary.transaction_count != 2) return error.DuplicateCreatedLedgerTransaction;
     if (try apply(&run, facts[4]) != null) return error.UnexpectedCommand;
     if (try apply(&run, facts[5]) != null) return error.UnexpectedCommand;
     if (try apply(&run, atGroup(20, .{ .identity = 2, .payload = .{ .mark_price = 50_200_000_000 } })) != null)
@@ -464,7 +474,8 @@ pub fn main(init: std.process.Init) !void {
     try out.print("trading_engine: zig={s}, mode={s}, self_check=ok\n", .{ @import("builtin").zig_version_string, @tagName(@import("builtin").mode) });
     for (happy.shard.trace.events[0..happy.shard.trace.len]) |event|
         try out.print("{d:0>2} {s} id={d}\n", .{ event.sequence, @tagName(event.kind), event.identity });
-    try out.print("happy_path: events={d}, order={s}, qty={d}, open_cost={d}, fees={d}, upl={d}, risk_remaining={d}, ledger=closed, economic_projections=complete\ndigest={s}\n", .{ happy.shard.trace.len, @tagName(happy.shard.order_state), happy.shard.filled_quantity, happy.shard.portfolio_position.open_cost_micros, happy.shard.total_fees_micros, happy.shard.unrealized_pnl_micros, happy.shard.risk_lease_remaining_micros, &digest_hex });
+    const economic = happy.shard.economicSummary();
+    try out.print("happy_path: events={d}, order={s}, qty={d}, open_cost={d}, fees={d}, upl={d}, risk_remaining={d}, ledger=closed, economic_projections=complete\ndigest={s}\n", .{ happy.shard.trace.len, @tagName(happy.shard.order_state), happy.shard.filled_quantity, economic.portfolio.swap.open_cost_micros, economic.portfolio.fee_micros, economic.portfolio.unrealized_pnl_micros, happy.shard.risk_lease_remaining_micros, &digest_hex });
     try out.print("journal_records={d}, journal_bytes={d}, replay=equivalent, recovery_checks=ok\n", .{ happy.decision_journal.records, happy.decision_journal.len });
     const scenarios = [_]struct { name: []const u8, run: *const LiveRun }{
         .{ .name = "market-gap-v1", .run = &market_gap },          .{ .name = "risk-rejection-v1", .run = &risk_rejection },

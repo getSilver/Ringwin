@@ -45,10 +45,10 @@ test "configurable Genesis fails closed until authority is complete" {
     })));
 
     var out_of_order: TradingShard = .{};
-    try std.testing.expectError(error.InvalidMarginRules, out_of_order.apply(try engine.coreRecord(CoreTransition{
+    try std.testing.expectError(error.InvalidMarginRules, out_of_order.apply(CoreTransition{
         .identity = 1,
         .payload = .{ .margin_rules_activated = .{ .version = 1 } },
-    })));
+    }));
 
     var configured = try startScenarioAuthorized(.{
         .strategy_identity = 9,
@@ -227,8 +227,8 @@ test "layered gates latch kill while warning and self recovery stay narrow" {
 
 test "de risk locks target and flatten requires warning" {
     var run = try startScenario();
-    run.shard.portfolio_position.quantity = 10;
-    run.shard.exchange_position.quantity = 10;
+    run.shard.economic_projection.portfolio.swap.quantity = 10;
+    run.shard.economic_projection.exchange.swap.quantity = 10;
     run.shard.mark_price_micros = 50_000_000;
     try std.testing.expectError(error.RiskWarningRequired, run.shard.apply(atGroup(12, .{ .identity = 3, .payload = .{ .control_command = .{
         .command_identity = 3,
@@ -379,7 +379,7 @@ test "keep positions stops through shard seam preserving economics" {
     _ = try applyLive(&run.shard, &run.decision_journal, resolveLatchCommand(51, 8, risk_lease_gate_identity));
     _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(52, 9, .enable_trading));
     try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
-    try std.testing.expectEqual(preserved.positions.portfolio_swap.quantity, run.shard.portfolio_position.quantity);
+    try std.testing.expectEqual(preserved.positions.portfolio_swap.quantity, run.shard.economicSummary().portfolio.swap.quantity);
 
     const resumed_reduce = try placeIntentGroup(&run, 22, 130, 130, .sell, 40);
     try std.testing.expect(resumed_reduce.portfolio_reduce_only);
@@ -472,7 +472,7 @@ test "full lifecycle trajectories authorize only prescribed risk cancel and redu
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(24, .{ .identity = 109, .payload = .recovery_completed }));
     _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(8, 10, .enable_trading));
     try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
-    try std.testing.expectEqual(preserved.positions.portfolio_swap.quantity, run.shard.portfolio_position.quantity);
+    try std.testing.expectEqual(preserved.positions.portfolio_swap.quantity, run.shard.economicSummary().portfolio.swap.quantity);
 
     _ = try applyLive(&run.shard, &run.decision_journal, deRiskCommand(9, 11, 40, 0));
     try std.testing.expectEqual(operational.OperationalMode.draining, run.shard.operational_state.mode);
@@ -668,7 +668,7 @@ test "shared canonical adapter facts enter the TradingShard state seam" {
         .liquidity = .maker,
         .venue_fill_time_utc_ns = 100,
     } }))) == null);
-    try std.testing.expectEqual(@as(i64, happy_order_quantity), run.shard.portfolio_position.quantity);
+    try std.testing.expectEqual(@as(i64, happy_order_quantity), run.shard.economicSummary().portfolio.swap.quantity);
     try std.testing.expectEqual(canonical.LiquidityRole.maker, run.shard.last_canonical_fill.?.liquidity);
     try std.testing.expectEqual(@as(i128, 12), run.shard.last_canonical_fill.?.fee.?.atoms);
     try std.testing.expectEqual(@as(i128, 2), run.shard.last_canonical_fill.?.rebate.?.atoms);
@@ -1020,8 +1020,8 @@ test "CancelConfirmCreate re-risks replacement against latest facts" {
 test "qualified command carries independently inferred reduce-only flags" {
     var run = try startScenario();
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
-    run.shard.portfolio_position.quantity = 10;
-    run.shard.exchange_position.quantity = -5;
+    run.shard.economic_projection.portfolio.swap.quantity = 10;
+    run.shard.economic_projection.exchange.swap.quantity = -5;
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 75, .count = 1 };
     group.members[0] = .{ .intent_sequence = 75, .operation = .place, .instrument = swap_instrument, .side = .sell, .quantity = 8, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
     const result = try run.shard.apply(atGroup(12, .{ .identity = 75, .payload = .{ .oms_intent_group = group } }));
@@ -1033,8 +1033,8 @@ test "qualified command carries independently inferred reduce-only flags" {
 test "SPOT asset risk is isolated from SWAP positions" {
     var run = try startScenario();
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = 50_000_000 } }));
-    run.shard.portfolio_position.quantity = 10;
-    run.shard.exchange_position.quantity = 10;
+    run.shard.economic_projection.portfolio.swap.quantity = 10;
+    run.shard.economic_projection.exchange.swap.quantity = 10;
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 79, .count = 1 };
     group.members[0] = .{ .intent_sequence = 79, .operation = .place, .instrument = spot_instrument, .side = .sell, .quantity = 1, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
     try std.testing.expectError(error.InsufficientSpotAsset, run.shard.apply(atGroup(12, .{ .identity = 79, .payload = .{ .oms_intent_group = group } })));
@@ -1059,8 +1059,8 @@ test "economic fills derive ownership from OMS and close Portfolio Exchange ledg
     try std.testing.expectEqual(@as(i64, 5), summary.portfolio.rebate_micros);
     try std.testing.expectEqual(@as(u8, 10), summary.ledger_transactions);
     try std.testing.expect(run.shard.risk_lease_remaining_micros < 0);
-    try std.testing.expectEqual(summary.portfolio.swap.quantity, run.shard.portfolio_position.quantity);
-    try std.testing.expectEqual(summary.portfolio.usdt_balance_micros, run.shard.portfolio_cash_micros);
+    try std.testing.expectEqual(summary.portfolio.swap.quantity, run.shard.economicSummary().portfolio.swap.quantity);
+    try std.testing.expectEqual(summary.portfolio.usdt_balance_micros, run.shard.economicSummary().portfolio.usdt_balance_micros);
     try std.testing.expect(!summary.reconciliation_break);
 }
 
@@ -1074,8 +1074,8 @@ test "funding forced execution and snapshots preserve auditable local economics"
     try std.testing.expectEqual(@as(i64, 0), projected.portfolio.swap.quantity);
     try std.testing.expectEqual(@as(i64, -2), projected.exchange.swap.quantity);
     try std.testing.expectEqual(@as(i64, -30), projected.suspense_usdt_micros);
-    try std.testing.expectEqual(projected.exchange.swap.quantity, run.shard.exchange_position.quantity);
-    try std.testing.expectEqual(projected.exchange.usdt_balance_micros, run.shard.exchange_cash_micros);
+    try std.testing.expectEqual(projected.exchange.swap.quantity, run.shard.economicSummary().exchange.swap.quantity);
+    try std.testing.expectEqual(projected.exchange.usdt_balance_micros, run.shard.economicSummary().exchange.usdt_balance_micros);
     try std.testing.expect(projected.reconciliation_break);
     try std.testing.expectEqual(@as(u8, 4), projected.ledger_transactions);
 

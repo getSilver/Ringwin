@@ -283,11 +283,16 @@ pub const CorePayload = union(PayloadTag) {
     strategy_cutover_fence: StrategyCutoverFence,
 };
 
-/// Internal command/fact transition carried as the `core_input` payload of the
-/// single canonical EventRecord protocol. Timing and schema live only in the
-/// outer canonical envelope.
+/// Typed internal command/fact transition used by the native and stable
+/// journal seams. Timing is part of the transition metadata; payload values
+/// remain fully typed and are never wrapped in an opaque canonical event.
 pub const CoreTransition = struct {
     identity: u64,
+    source_time: u64 = 0,
+    receive_time: u64 = 0,
+    monotonic_time: u64 = 0,
+    wall_time: u64 = 0,
+    time_presence: journal.TimePresence = .{},
     payload: CorePayload,
 };
 
@@ -305,8 +310,12 @@ pub const InputEvent = struct {
 };
 
 pub const EncodedInput = struct {
-    bytes: [2048]u8 = undefined,
+    bytes: []u8,
     len: usize = 0,
+
+    fn init(bytes: []u8) @This() {
+        return .{ .bytes = bytes };
+    }
 
     fn put(self: *EncodedInput, comptime T: type, value: T) !void {
         if (self.bytes.len - self.len < @sizeOf(T)) return error.InputPayloadTooLarge;
@@ -315,8 +324,8 @@ pub const EncodedInput = struct {
     }
 };
 
-pub fn encodeInput(input: CoreTransition) !EncodedInput {
-    var encoded: EncodedInput = .{};
+pub fn encodeInput(destination: []u8, input: CoreTransition) !EncodedInput {
+    var encoded = EncodedInput.init(destination);
     try encoded.put(u64, input.identity);
     try encoded.put(u16, @intFromEnum(std.meta.activeTag(input.payload)));
     switch (input.payload) {
@@ -831,9 +840,18 @@ pub fn decodeInput(record: journal.Record) !InputEvent {
     };
 }
 
-/// Decodes one stable input record for side-effect-free recovery verification.
-pub fn decodeStableInput(record: journal.Record) !InputEvent {
-    return decodeInput(record);
+/// Decodes one stable input record into the typed transition used by replay.
+pub fn decodeStableInput(record: journal.Record) !CoreTransition {
+    const input = try decodeInput(record);
+    return .{
+        .identity = input.identity,
+        .source_time = input.source_time,
+        .receive_time = input.receive_time,
+        .monotonic_time = input.monotonic_time,
+        .wall_time = input.wall_time,
+        .time_presence = input.time_presence,
+        .payload = input.payload,
+    };
 }
 
 pub fn eventIdentity(payload: []const u8) !u64 {

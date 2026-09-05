@@ -25,7 +25,7 @@ pub const acceptance_schema_version: u16 = 2;
 const expected_shared_summary_v2 = "e124735e7c33b86358e0a9fe23d9d1a51a86436627821b7cfc48ffbfc7f23476";
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreTransition) !?trading.OrderCommand {
-    return trading.applyStable(shard, stable_journal, try trading.coreRecord(input));
+    return trading.applyTypedStable(shard, stable_journal, input);
 }
 
 const OpLog = struct {
@@ -221,7 +221,7 @@ fn assertLedgersClosed(world: *const World) !void {
         const shard = &world.shards[index];
         try std.testing.expectEqual(
             shard.economicSummary().portfolio.usdt_balance_micros +
-                shard.treasury_cash_micros +
+                shard.economicSummary().treasury_usdt_micros +
                 shard.economicSummary().suspense_usdt_micros,
             shard.economicSummary().exchange.usdt_balance_micros,
         );
@@ -541,17 +541,18 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         .times = .{ .monotonic_ns = 500 },
         .raw_evidence = .{ .stream = 2, .sequence = 500, .digest = @splat(0) },
     };
-    _ = try trading.applyStable(&world.shards[1], &tail_journals[1], .{
+    const instrument_definition: trading.canonical.EventRecord = .{
         .envelope = canonical_envelope,
         .event = .{ .instrument_definition_observed = .{ .instrument = 3, .rules_version = 1 } },
-    });
+    };
+    _ = try trading.applyStable(&world.shards[1], &tail_journals[1], instrument_definition);
     var snapshot_envelope = canonical_envelope;
     snapshot_envelope.event_type = @intFromEnum(trading.canonical.EventType.l2_book_snapshot);
     snapshot_envelope.identity.sequence = 501;
     snapshot_envelope.source_fact_identity = 501;
     snapshot_envelope.source_sequence = 501;
     snapshot_envelope.raw_evidence.sequence = 501;
-    _ = try trading.applyStable(&world.shards[1], &tail_journals[1], .{
+    const book_snapshot: trading.canonical.EventRecord = .{
         .envelope = snapshot_envelope,
         .event = .{ .l2_book_snapshot = .{
             .instrument = 3,
@@ -563,7 +564,8 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
             .next_ask = .{ .instrument = 3, .rules_version = 1, .ticks = mark_price_micros + 200_000_000 },
             .next_ask_quantity = .{ .instrument = 3, .rules_version = 1, .lots = 1_000 },
         } },
-    });
+    };
+    _ = try trading.applyStable(&world.shards[1], &tail_journals[1], book_snapshot);
     const tail_summary_identity = world.nextId();
     const tail_summary_sequence = world.summary_sequences[1] + 1;
     const tail_summary = try coordination.shardSummaryFromShard(&world.shards[1], .shard_1, tail_summary_sequence, 2);

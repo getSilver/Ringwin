@@ -2,11 +2,11 @@
 
 ## 2026-09-01 收口状态
 
-当前跨 Adapter、`TradingShard.apply`、稳定日志和语义回放只使用
-`canonical_event.EventRecord` / `canonical_event.CanonicalEvent`。核心控制事实先编码为
-`CanonicalEvent.core_input`；它承载的是无独立 schema/timing envelope 的 `CoreTransition`
-payload，不是第二套事件协议，也不会形成第二个公开状态迁移入口。Venue decoder 的私有事件
-只在各自实现内存在，跨 seam 前必须翻译成共享事件。
+当前跨 Adapter、`TradingShard.apply`、稳定日志和语义回放使用两条明确的 typed seam：核心
+控制事实使用带版本与时间元数据的 `CoreTransition`，Venue 事实使用
+`canonical_event.EventRecord` / `canonical_event.CanonicalEvent`。两者都不再经过
+旧 opaque 包装或隐式转换。Venue decoder 的私有事件只在各自实现内存在，跨 seam
+前必须翻译成共享事件。
 
 共享 `ExecutionReport` 已覆盖拒绝原因、Portfolio/Venue 双 reduce-only、position side、
 position/margin mode、杠杆、原始/累计/剩余数量、限价/均价以及 Venue 创建/更新时间；共享
@@ -15,9 +15,9 @@ position/margin mode、杠杆、原始/累计/剩余数量、限价/均价以及
 
 稳定性约束如下：
 
-- `TradingShard.apply(EventRecord)` 是唯一公开内存状态迁移接口；
-- `applyStable` 将同一个 `EventRecord` 原子写入 journal，回放仍调用同一个 `apply`；
-- `canonical_event_codec` 显式冻结 union dispatch，只编码 core bytes 与 bootstrap arrays 的有效区间；
+- `TradingShard.apply(CoreTransition|EventRecord)` 是唯一公开内存状态迁移接口；
+- `applyTypedStable` 与 `applyStable` 分别原子持久化 typed core 和 canonical Venue 输入；
+- `canonical_event_codec` 显式冻结 canonical union dispatch，只编码 bootstrap arrays 的有效区间；
 - envelope event type、schema version、identity、raw evidence 与规范 payload 一起参与校验；
 - 相同 identity 但 payload 不同会返回 `ConflictingCanonicalIdentity`，不会被当作重复事件吞掉。
 
