@@ -244,6 +244,8 @@ test "gateway fixes route and rechecks every command dependency" {
     request.operation = .cancel;
     try std.testing.expectEqual(.accepted, try gateway.send(request));
     try std.testing.expectEqual(@as(u8, 3), second.sent);
+    try std.testing.expectEqual(@as(u64, 5), gateway.send_attempt_count);
+    std.debug.print("execution_gateway_acceptance: adapter_submissions={d}\n", .{gateway.send_attempt_count});
 }
 test "gateway drains each fixed route once" {
     var first = Fixture{};

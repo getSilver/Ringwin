@@ -209,11 +209,12 @@ contract evidence independently. Without an explicit live run, each real-run
 qualification remains `not_run`; OKX Demo evidence is never promoted to
 `TestnetQualified`.
 
-The current offline baseline is schema `2`: Debug and ReleaseSafe each pass
-`178/178` tests, the four-shard coordinator barrier is `17`, shard barriers are
-`23/26/21/21`, live Gateway submissions are `4`, and replay has no send
-capability. The shared summary is
-`e124735e7c33b86358e0a9fe23d9d1a51a86436627821b7cfc48ffbfc7f23476`.
+The current offline baseline uses acceptance schema `2` and journal/state schema
+`7`: Debug and ReleaseSafe each pass `185/185` tests, the four-shard coordinator
+barrier is `17`, and shard barriers are `23/26/21/21`. The offline Gateway
+contract makes `5` adapter submissions, the four-shard ownership ledger records
+`4` commands, and replay has no send capability. The shared summary is
+`aa0df1c6767e47c53c450d15d467c9624e92b9025e7a3c4ca8fa5ebe78d1bb3d`.
 The four shard CanonicalStateDigests and the five single-shard trajectory
 digests are recorded in the [local acceptance ticket](.scratch/trading-core-integrity-repair/issues/12-rebuild-trusted-acceptance-baseline.md).
 

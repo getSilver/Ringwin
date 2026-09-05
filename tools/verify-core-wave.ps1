@@ -140,7 +140,8 @@ $debugMatch = [regex]::Match($debugText, 'All (\d+) tests passed')
 $releaseMatch = [regex]::Match($releaseText, 'All (\d+) tests passed')
 $barrierMatch = [regex]::Match($fourText, 'coordinator_barrier=(\d+), coordinator_digest=([0-9a-f]+)')
 $sharedMatch = [regex]::Match($fourText, 'shared_summary=([0-9a-f]{64})')
-$sendMatch = [regex]::Match($fourText, 'live_gateway_submissions=(\d+), replay_send_capability=(\w+)')
+$gatewayMatch = [regex]::Match($debugText, 'execution_gateway_acceptance: adapter_submissions=(\d+)')
+$ownershipMatch = [regex]::Match($fourText, 'owned_command_count=(\d+), replay_send_capability=(\w+)')
 $shardMatches = [regex]::Matches($fourText, 'shard_(\d+): barrier=(\d+), digest=([0-9a-f]{64})')
 if ($shardMatches.Count -ne 4) { throw 'Four-shard barrier/digest evidence is incomplete' }
 $shardBarriers = @()
@@ -169,7 +170,7 @@ foreach ($venue in $requiredVenueMarkers.Keys) {
     $offlineVenueContracts += $venue
 }
 if (-not $debugMatch.Success -or -not $releaseMatch.Success -or -not $barrierMatch.Success -or
-    -not $sharedMatch.Success -or -not $sendMatch.Success) {
+    -not $sharedMatch.Success -or -not $gatewayMatch.Success -or -not $ownershipMatch.Success) {
     throw 'Acceptance child output did not contain complete machine-readable evidence'
 }
 $pythonPassed = [regex]::IsMatch(($pythonEvidence -join "`n"), 'strategy_host_product_acceptance=passed')
@@ -185,8 +186,9 @@ $evidence = [ordered]@{
     shard_barriers = $shardBarriers
     shard_digests = $shardDigests
     shared_summary = $sharedMatch.Groups[1].Value
-    live_gateway_submissions = [int]$sendMatch.Groups[1].Value
-    replay_send_capability = $sendMatch.Groups[2].Value
+    gateway_adapter_submissions = [int]$gatewayMatch.Groups[1].Value
+    owned_command_count = [int]$ownershipMatch.Groups[1].Value
+    replay_send_capability = $ownershipMatch.Groups[2].Value
     single_shard_output = @($singleText | Where-Object { $_ -match '(happy_path:|market-gap-v1:|risk-rejection-v1:|unknown-reconciliation-v1:|duplicate-report-v1:)' })
     single_shard_digests = $singleDigests
     offline_venue_contracts = $offlineVenueContracts

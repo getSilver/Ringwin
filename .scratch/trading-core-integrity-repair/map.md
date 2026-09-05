@@ -1,7 +1,7 @@
 # 修复交易核心权威接缝与验收完整性
 
 Label: wayfinder:map
-Status: in_progress
+Status: closed
 
 ## Destination
 
@@ -58,7 +58,7 @@ VenueAdapter seam 完成可重放闭环；并以不可伪造、可重复的自�
 
 ## Frontier
 
-- [12: 重建可信验收基线并校正文档](issues/12-rebuild-trusted-acceptance-baseline.md)
+- 无（本波已关闭）
 
 ## Decisions so far
 
@@ -78,10 +78,11 @@ VenueAdapter seam 完成可重放闭环；并以不可伪造、可重复的自�
 - 2026-09-06：10–11 完成 contract 收口：核心只保留 `CanonicalEvent(core|venue)`、一个 typed apply
   和一套 stable journal/replay；删除 `CoreTransition`、`InputEvent`、双 input flag 与 `anytype` 入口，
   fixture/recovery 不再直接写经济投影。journal/state schema 升级为 7，Debug/ReleaseSafe 185/185。
-- 2026-09-05：最终离线证据为 schema 2、Debug/ReleaseSafe 各 178/178、coordinator barrier 17、
-  shard barriers 23/26/21/21、Gateway 发送 4 次且 replay 无发送能力；共享摘要为
-  `e124735e7c33b86358e0a9fe23d9d1a51a86436627821b7cfc48ffbfc7f23476`。OKX Demo、Binance Testnet、
-  Bybit Testnet 均未在默认入口运行，未产生真实运行资格。
+- 2026-09-06：12 号票以 `tools\verify-core-wave.ps1` 重建最终离线证据：acceptance schema 2、
+  journal/state schema 7、Debug/ReleaseSafe 各 185/185、coordinator barrier 17、shard barriers
+  23/26/21/21、Gateway 到 Adapter 提交 5 次、四分片 ownership 4 条且 replay 无发送能力；共享摘要为
+  `aa0df1c6767e47c53c450d15d467c9624e92b9025e7a3c4ca8fa5ebe78d1bb3d`。OKX Demo、Binance Testnet、
+  Bybit Testnet 均为 `not_run`，生产资格为 false；本地图据此关闭。
 
 ## Not yet specified
 
