@@ -151,26 +151,27 @@ pub const RuntimeContext = struct {
 pub const ProtectionReport = struct {
     locked: bool,
     dont_dump: bool,
+    access_protected: bool,
     wipe_on_release: bool,
 
     pub fn accepted(self: ProtectionReport) bool {
-        return self.locked and self.dont_dump and self.wipe_on_release;
+        return self.locked and self.dont_dump and self.access_protected and self.wipe_on_release;
     }
 };
 
 /// The lease owns the only secret copy produced by an unlock. Its fields are
 /// private; callers can only ask the execution-gateway callback to consume it.
 pub const GatewayLease = struct {
-    memory: ProtectedMemory,
+    secret: Secret,
     metadata: Metadata,
 
     pub fn deinit(self: *GatewayLease) void {
-        self.memory.deinit();
+        self.secret.deinit();
         self.metadata = undefined;
     }
 
     pub fn report(self: *const GatewayLease) ProtectionReport {
-        return self.memory.report;
+        return self.secret.report();
     }
 
     pub fn metadataView(self: *const GatewayLease) Metadata {
@@ -178,7 +179,7 @@ pub const GatewayLease = struct {
     }
 
     pub fn withReadOnlyMaterial(self: *GatewayLease, comptime callback: fn (*const SecretMaterial) void) void {
-        callback(self.memory.material());
+        self.secret.expose(callback);
     }
 };
 
@@ -254,12 +255,13 @@ pub const CredentialStore = struct {
     }
 
     pub fn admitObservationReadOnly(self: *CredentialStore, io: std.Io, password: PasswordSource, expected: Metadata, runtime: RuntimeContext, now_unix: u64, protection: ProtectionMode, self_check: SecuritySelfCheck) !Admission {
+        if (protection == .test_bypass and !builtin.is_test) return error.TestProtectionModeNotAllowed;
         if (!self.admission_gate or !self_check.passes()) return error.SecurityGateClosed;
         if (expected.kind != .observation or expected.state != .active) return error.ObservationCredentialRequired;
         if (!expected.can_read or expected.can_trade or expected.can_withdraw) return error.ReadOnlyPolicyViolation;
         if (expected.environment != .production or expected.endpoint_environment != .production) return error.EnvironmentMismatch;
         if (expected.expires_at_unix <= now_unix) return error.CredentialExpired;
-        var lease = try self.unlock(io, .observation, password, expected, protection);
+        var lease = try self.unlock(io, .observation, password, expected, protection, true);
         defer lease.deinit();
         if (!matchesRuntime(lease.metadataView(), runtime)) return error.RuntimeContextMismatch;
         if (!lease.report().accepted()) return error.SecurityGateClosed;
@@ -281,15 +283,16 @@ pub const CredentialStore = struct {
             .revoked => false,
         };
         if (!allowed or expected.kind != kind) return error.InvalidCredentialTransition;
-        var lease = try self.unlock(io, kind, password, expected, .test_bypass);
+        const protection: ProtectionMode = if (builtin.is_test) .test_bypass else .native;
+        var lease = try self.unlock(io, kind, password, expected, protection, false);
         defer lease.deinit();
         var next_metadata = expected;
         next_metadata.state = next;
         next_metadata.generation += 1;
-        try self.writeEncrypted(io, next_metadata, lease.memory.material(), password);
+        try self.writeEncrypted(io, next_metadata, lease.secret.material(), password);
     }
 
-    fn unlock(self: *CredentialStore, io: std.Io, kind: CredentialKind, password: PasswordSource, expected: Metadata, protection: ProtectionMode) !GatewayLease {
+    fn unlock(self: *CredentialStore, io: std.Io, kind: CredentialKind, password: PasswordSource, expected: Metadata, protection: ProtectionMode, require_active: bool) !GatewayLease {
         if (password.kind == .test_only and protection == .native) return error.TestPasswordSourceNotAllowed;
         if (password.bytes.len == 0 or password.bytes.len > max_password) return error.InvalidPasswordSource;
         if (expected.kind != kind) return error.CredentialKindMismatch;
@@ -301,19 +304,16 @@ pub const CredentialStore = struct {
         const plaintext_len = try decrypt(self.allocator, io, file_bytes[0..file_len], password.bytes, &metadata, &plaintext);
         if (metadata.state == .revoked) return error.CredentialRevoked;
         if (!sameImmutableMetadata(metadata, expected) or metadata.state != expected.state or metadata.generation != expected.generation) return error.MetadataMismatch;
-        if (metadata.state != .active and protection == .native) return error.CredentialNotActive;
+        if (require_active and metadata.state != .active) return error.CredentialNotActive;
         var material = try decodeMaterial(plaintext[0..plaintext_len]);
         errdefer material.clear();
-        const memory = try ProtectedMemory.init(self.allocator, material, protection);
+        const secret = try Secret.init(self.allocator, material, protection);
         material.clear();
-        return .{ .memory = memory, .metadata = metadata };
+        return .{ .secret = secret, .metadata = metadata };
     }
 
     fn writeEncrypted(self: *CredentialStore, io: std.Io, metadata: Metadata, material: *const SecretMaterial, password: PasswordSource) !void {
-        if (password.kind == .test_only and builtin.os.tag == .linux) {
-            // Test fixtures are accepted only by explicit test paths; they are
-            // never read from process argv/environment by this module.
-        }
+        if (password.kind == .test_only and !builtin.is_test) return error.TestPasswordSourceNotAllowed;
         if (password.bytes.len == 0 or password.bytes.len > max_password) return error.InvalidPasswordSource;
         var payload: [max_payload]u8 = undefined;
         defer std.crypto.secureZero(u8, &payload);
@@ -337,39 +337,63 @@ pub const CredentialStore = struct {
     }
 };
 
-const ProtectedMemory = struct {
+/// Owns a credential payload in a dedicated page. The payload is readable only
+/// through `expose`; the page is read-only while the Secret is alive and is
+/// restored, wiped, unlocked, and freed by `deinit`.
+const Secret = struct {
     allocator: Allocator,
     storage: []align(std.heap.page_size_min) u8,
-    report: ProtectionReport,
+    protection_report: ProtectionReport,
 
-    fn init(allocator: Allocator, secret_material: SecretMaterial, mode: ProtectionMode) !ProtectedMemory {
+    fn init(allocator: Allocator, secret_material: SecretMaterial, mode: ProtectionMode) !Secret {
         var owned_material = secret_material;
         defer owned_material.clear();
-        const storage = try allocator.alignedAlloc(u8, .fromByteUnits(std.heap.page_size_min), @sizeOf(SecretMaterial));
-        errdefer allocator.free(storage);
+        const storage = try allocator.alignedAlloc(u8, .fromByteUnits(std.heap.page_size_min), std.heap.page_size_min);
+        var locked = false;
+        var access_protected = false;
+        errdefer {
+            if (access_protected) std.process.protectMemory(storage, .{ .read = true, .write = true }) catch {};
+            std.crypto.secureZero(u8, storage);
+            if (locked) std.process.unlockMemory(storage) catch {};
+            allocator.free(storage);
+        }
         @memset(storage, 0);
-        @memcpy(storage, std.mem.asBytes(&owned_material));
-        var report = ProtectionReport{ .locked = mode == .test_bypass, .dont_dump = mode == .test_bypass, .wipe_on_release = true };
+        @memcpy(storage[0..@sizeOf(SecretMaterial)], std.mem.asBytes(&owned_material));
+        var protection_report = ProtectionReport{ .locked = mode == .test_bypass, .dont_dump = mode == .test_bypass, .access_protected = false, .wipe_on_release = true };
         if (mode == .native) {
             if (builtin.os.tag != .linux) return error.LinuxProtectedMemoryRequired;
             std.process.lockMemory(storage, .{}) catch return error.MemoryLockFailed;
+            locked = true;
             std.posix.madvise(storage.ptr, storage.len, std.os.linux.MADV.DONTDUMP) catch return error.DontDumpFailed;
-            report.locked = true;
-            report.dont_dump = true;
+            protection_report.locked = true;
+            protection_report.dont_dump = true;
         }
-        if (!report.accepted()) return error.SecurityGateClosed;
-        return .{ .allocator = allocator, .storage = storage, .report = report };
+        std.process.protectMemory(storage, .{ .read = true }) catch return error.MemoryProtectionFailed;
+        access_protected = true;
+        protection_report.access_protected = true;
+        if (!protection_report.accepted()) return error.SecurityGateClosed;
+        return .{ .allocator = allocator, .storage = storage, .protection_report = protection_report };
     }
 
-    fn material(self: *const ProtectedMemory) *const SecretMaterial {
+    fn expose(self: *const Secret, comptime callback: fn (*const SecretMaterial) void) void {
+        callback(self.material());
+    }
+
+    fn material(self: *const Secret) *const SecretMaterial {
         return @ptrCast(@alignCast(self.storage.ptr));
     }
 
-    fn deinit(self: *ProtectedMemory) void {
+    fn report(self: *const Secret) ProtectionReport {
+        return self.protection_report;
+    }
+
+    fn deinit(self: *Secret) void {
+        std.process.protectMemory(self.storage, .{ .read = true, .write = true }) catch |err|
+            std.debug.panic("credential memory protection restore failed: {s}", .{@errorName(err)});
         std.crypto.secureZero(u8, self.storage);
-        if (self.report.locked and builtin.os.tag == .linux) std.process.unlockMemory(self.storage) catch {};
+        if (self.protection_report.locked and builtin.os.tag == .linux) std.process.unlockMemory(self.storage) catch {};
         self.allocator.free(self.storage);
-        self.report.wipe_on_release = true;
+        self.protection_report.wipe_on_release = true;
     }
 };
 
@@ -632,4 +656,21 @@ test "policy, lifecycle, and security failures close admission" {
     try std.testing.expectError(error.ExecutionAdmissionOutOfScope, store.admitExecution(std.testing.io, password, metadata, .test_bypass, .{}));
     try store.revoke(std.testing.io, .observation, password, metadata);
     try std.testing.expectError(error.InvalidCredentialTransition, store.activate(std.testing.io, .observation, password, metadata));
+}
+
+test "Secret exposes only read-only material and reports page protection" {
+    if (builtin.os.tag != .linux) return;
+    var material = try SecretMaterial.init("key", "secret", "pass");
+    defer material.clear();
+    var secret = try Secret.init(std.testing.allocator, material, .test_bypass);
+    defer secret.deinit();
+
+    try std.testing.expect(secret.report().accepted());
+    secret.expose(assertTestSecretMaterial);
+}
+
+fn assertTestSecretMaterial(material: *const SecretMaterial) void {
+    std.debug.assert(std.mem.eql(u8, material.api_key[0..material.api_key_len], "key"));
+    std.debug.assert(std.mem.eql(u8, material.secret_key[0..material.secret_key_len], "secret"));
+    std.debug.assert(std.mem.eql(u8, material.passphrase[0..material.passphrase_len], "pass"));
 }

@@ -166,8 +166,9 @@ pub const TransportOwner = struct {
             .get => "GET",
             .post => "POST",
         };
-        const signed = auth.headers(&self.credentials, timestamp, method_text, path, body) catch
+        var signed = auth.headers(&self.credentials, timestamp, method_text, path, body) catch
             return self.beforeSend();
+        defer signed.clear();
         const signed_slices = signed.slices();
         const headers = [_][:0]const u8{
             signed_slices[0],                 signed_slices[1], signed_slices[2], signed_slices[3], signed_slices[4],
