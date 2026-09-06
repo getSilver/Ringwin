@@ -28,7 +28,7 @@ ObservationCredential 对账和 FailoverAdmission。首先用可注入的测试 
 - [x] PlannedSwitch 仅在挂单为零且 ReplayRPO 为零时通过；Unknown、ReconciliationBreak 或状态缺口阻止新增风险。
 - [x] ProcessFailure、NodeFailure 的自动路径分别满足既定 SafetyRTO/TradingRTO；超过上限不跳过准入。
 - [x] 故障矩阵覆盖进程退出、整机断电、复制中断、双向分区、Fence 失败、旧 token/旧节点重现、存储损坏和准入中断。
-- [x] 每条允许自动提升的路径在可注入测试 adapter 中连续三次通过，并生成不可变 FailoverReport。
+- [ ] 每条允许自动提升的路径在生产等价环境连续三次通过，并生成不可变 FailoverReport。
 - [x] 自动提升最多尝试一个候选；旧节点重新加入只能作为无交易权限热备，回切必须是新的 PlannedSwitch。
 
 ## Out of scope
