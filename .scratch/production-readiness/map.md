@@ -76,6 +76,7 @@ Status: active
   签名 ControlCommand、OwnerSession、OperatorRecord 和发布生命周期。
 - 2026-09-07：票 05 已补 Linux 原生 OKX acceptance 入口并完成 x86_64 ELF/libcurl 8.21.0/OpenSSL runtime probe；当前 WSL1 对官方 Demo private WSS `:8443` 返回 `SSL_ERROR_SYSCALL`，`PrepareOnly` 仍失败关闭，未取得在线资格，未执行 Demo 写入。
 - 2026-09-07：票 08 绑定现有 `D:\github\Ringwin-control-plane` Web 控制面，控制面提交 `f7ac68d`；补齐签名 ReleaseArtifact 校验、版本目录原子发布、ForwardRollback、生命周期 outbox、OwnerSession/CSRF/RiskWarning 接线和持久命令去重，定向验收通过。目标 Linux systemd/凭证/NodeFence 生产等价验收仍待执行，OKX Demo 资格不因本票升级。
+- 2026-09-07：票 09 接入固定容量 per-shard Telemetry、非阻塞 TelemetryPublish、30 秒/5 分钟 observability fail-closed、BenchmarkManifest 和不可变 QualificationReport；WSL 原生 ELF SimulatedVenue smoke 通过并生成报告。目标节点性能、soak、真实 exporter 和生产资格仍未宣告。
 - 当前可信离线基线为 acceptance schema 2、journal/state schema 8、Debug/ReleaseSafe 各 195 项；
   OKX Demo、Binance Testnet、Bybit Testnet 的当前共享在线状态仍为 `not_run`。
 
