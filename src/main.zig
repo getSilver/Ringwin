@@ -30,6 +30,7 @@ const trading_shard_benchmark = @import("trading_shard_benchmark.zig");
 const production_contract = @import("production_contract.zig");
 const production_runtime = @import("production_runtime.zig");
 const telemetry_qualification = @import("telemetry_qualification.zig");
+const failover = @import("failover.zig");
 const durable_store = @import("durable_store.zig");
 const credential_store = @import("credential_store.zig");
 
@@ -55,6 +56,11 @@ pub fn main(init: std.process.Init) !void {
             const report_path = args.next() orelse "qualification-report.json";
             if (args.next() != null) return error.UnknownArgument;
             return telemetry_qualification.runSmoke(init, report_path);
+        }
+        if (std.mem.eql(u8, argument, "--failover-smoke")) {
+            const report_path = args.next() orelse "failover-report.json";
+            if (args.next() != null) return error.UnknownArgument;
+            return failover.runSmoke(init, report_path);
         }
         if (std.mem.eql(u8, argument, "--durable-store-test")) {
             if (args.next() != null) return error.UnknownArgument;
@@ -136,6 +142,7 @@ test {
     _ = production_contract;
     _ = production_runtime;
     _ = telemetry_qualification;
+    _ = failover;
     _ = durable_store;
     _ = credential_store;
 }
