@@ -28,14 +28,30 @@ const multi_venue_testnet_acceptance = @import("multi_venue_testnet_acceptance.z
 const trading_shard_fixture = @import("trading_shard_fixture.zig");
 const trading_shard_benchmark = @import("trading_shard_benchmark.zig");
 const production_contract = @import("production_contract.zig");
+const production_runtime = @import("production_runtime.zig");
 
 pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer args.deinit();
-    _ = args.next();
+    const executable = args.next() orelse return error.MissingExecutable;
     if (args.next()) |argument| {
+        if (std.mem.eql(u8, argument, "--production-role")) {
+            const role = try production_runtime.parseRole(args.next() orelse return error.MissingRole);
+            if (!std.mem.eql(u8, args.next() orelse return error.MissingSocketFlag, "--socket")) return error.MissingSocketFlag;
+            const socket = args.next() orelse return error.MissingSocket;
+            if (!std.mem.eql(u8, args.next() orelse return error.MissingGenerationFlag, "--generation")) return error.MissingGenerationFlag;
+            const generation = try std.fmt.parseInt(u64, args.next() orelse return error.MissingGeneration, 10);
+            if (args.next() != null) return error.UnknownArgument;
+            return production_runtime.runRole(init, role, socket, generation);
+        }
+        if (std.mem.eql(u8, argument, "--production-chain-test")) {
+            if (args.next() != null) return error.UnknownArgument;
+            return production_runtime.runIntegration(init, executable);
+        }
         if (std.mem.eql(u8, argument, "--four-shard-acceptance"))
             return runFourShardAcceptanceEntry(init);
+        if (std.mem.eql(u8, argument, "--offline-fixture"))
+            return trading_shard_fixture.main(init);
         if (std.mem.eql(u8, argument, "--benchmark"))
             return trading_shard_benchmark.runBenchmark(init, false, false);
         if (std.mem.eql(u8, argument, "--benchmark-raw"))
@@ -46,7 +62,7 @@ pub fn main(init: std.process.Init) !void {
             return trading_shard_benchmark.runBenchmark(init, true, true);
         return error.UnknownArgument;
     }
-    return trading_shard_fixture.main(init);
+    return error.RoleRequired;
 }
 
 fn runFourShardAcceptanceEntry(init: std.process.Init) !void {
@@ -102,4 +118,5 @@ test {
     _ = multi_venue_testnet_acceptance;
     _ = trading_shard_fixture;
     _ = production_contract;
+    _ = production_runtime;
 }

@@ -71,7 +71,7 @@ Write-Output '== phase=single_shard_wave'
 # unknown-reconciliation / duplicate-report fault trajectories through the
 # SimulatedVenue adapter seam, with frozen digests and live/replay/recovery
 # equivalence checks.
-$singleShardEvidence = Invoke-Captured @('run', (Join-Path $workspace 'src\main.zig'), '-OReleaseSafe')
+$singleShardEvidence = Invoke-Captured @('run', (Join-Path $workspace 'src\main.zig'), '-OReleaseSafe', '--', '--offline-fixture')
 
 Write-Output '== phase=four_shard_wave'
 # Four shards + shared gateway + account coordination: success path, local

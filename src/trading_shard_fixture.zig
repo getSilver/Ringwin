@@ -473,8 +473,9 @@ pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer args.deinit();
     _ = args.next();
-    if (args.next() != null) {
-        return error.UnknownArgument;
+    if (args.next()) |argument| {
+        if (!std.mem.eql(u8, argument, "--offline-fixture") or args.next() != null)
+            return error.UnknownArgument;
     }
     try journal.selfCheck();
     const happy = try runHappyPath();

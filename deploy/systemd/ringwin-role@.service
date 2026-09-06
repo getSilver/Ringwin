@@ -1,0 +1,35 @@
+[Unit]
+Description=RingWin restricted production role (%i)
+After=local-fs.target
+PartOf=ringwin-role.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/ringwin --production-role %i --socket /run/ringwin-%i/control.sock --generation 1
+User=ringwin-%i
+Group=ringwin-%i
+RuntimeDirectory=ringwin-%i
+RuntimeDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/run/ringwin-%i
+KillSignal=SIGTERM
+TimeoutStopSec=5s
+Restart=on-failure
+RestartSec=1s
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

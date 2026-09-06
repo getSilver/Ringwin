@@ -51,7 +51,6 @@ Status: active
 
 ## Frontier
 
-- [启动可安全排空的 Linux 生产进程链](issues/02-run-linux-production-process-chain.md)
 - [从真实磁盘日志与快照恢复一个 TradingShard](issues/03-persist-and-recover-authoritative-state.md)
 - [通过 CredentialStore 完成只读安全准入](issues/04-unlock-credential-and-pass-security-admission.md)
 
@@ -61,13 +60,15 @@ Status: active
 - 2026-09-06：票 01 冻结 `src/production_contract.zig`；Linux 是唯一生产平台，目标仅为 OKX、
   Binance、Bybit 的 SPOT 与 isolated linear USDT perpetual；Gate.io/Bitget 禁用；journal/state
   schema 为 8，ReleaseSafe 为默认构建，io_uring 不构成前置架构要求。
+- 2026-09-06：票 02 完成单一 role dispatcher、固定容量 Unix IPC、systemd 受限模板和 SimulatedVenue
+  原生 Linux 进程验收；SIGTERM drain/forced-stop 与 generation restart 已通过。
 - 生产支持候选固定为 OKX、Binance、Bybit 的 SPOT 与 USDT 线性永续；未列能力保持失败关闭。
 - Linux 使用同一签名二进制的受限 role 进程与 systemd unit，不为每个 role 建设独立框架。
 - 首版 CredentialStore 使用人工解锁的加密文件与锁定内存，不引入 Vault、TPM 或无人值守解封。
 - 首版 HA 为一主一热备、外部 fencing authority、无自动 failback，不建设 Raft/etcd 集群。
 - 已有 Web 控制面作为 SystemOwner 的唯一常规入口；不重复实现控制面 CLI，本地图只负责把它接入
   签名 ControlCommand、OwnerSession、OperatorRecord 和发布生命周期。
-- 当前可信离线基线为 acceptance schema 2、journal/state schema 8、Debug/ReleaseSafe 各 188 项；
+- 当前可信离线基线为 acceptance schema 2、journal/state schema 8、Debug/ReleaseSafe 各 191 项；
   OKX Demo、Binance Testnet、Bybit Testnet 的当前共享在线状态仍为 `not_run`。
 
 ## Not yet specified

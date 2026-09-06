@@ -354,6 +354,14 @@ _Avoid_: Deployment config, qualification result, runtime feature flags
 ProductionSupportContract 中按 Venue、Environment、ExchangeAccount 范围、产品、Instrument 和订单能力列出的唯一支持与禁用行；Demo/Testnet 行只能作为独立证据范围，不能升级生产行。
 _Avoid_: Adapter capability flags, venue checklist, inferred account support
 
+**ProductionRole**:
+由同一个签名 ReleaseArtifact 以显式 dispatcher 参数启动的受限 Linux 进程角色；首版角色为 engine、market-feed、execution-gateway、telemetry 和 control-fence。
+_Avoid_: Independent binary, Windows service, public API server
+
+**ProductionProcessChain**:
+五个 ProductionRole 通过固定容量 Unix-domain control seam 共同形成的生命周期边界；它负责启动、恢复、交易授权、排空和失败关闭，但不拥有 TradingShard 经济状态或 SecretMaterial。
+_Avoid_: Service mesh, process-local authority, credential store
+
 **StructuralScan**:
 不解释事件业务语义，只验证稳定日志的记录边界、长度、序号和校验和并定位下一条记录的扫描；它可以越过未知记录，但不能据此恢复权威状态。
 _Avoid_: SemanticReplay, event decoding, recovery qualification

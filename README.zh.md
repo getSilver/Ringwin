@@ -21,7 +21,7 @@
 ```powershell
 zig build
 zig build test
-zig build run
+zig build run -- --offline-fixture
 zig build core-wave
 zig build demo-wave
 ```
@@ -34,6 +34,19 @@ zig build demo-wave -Ddemo-live
 ```
 
 既有 PowerShell 验收脚本仍作为上述 wave 的底层实现。
+
+Linux 生产入口使用同一个签名二进制的显式 role dispatcher。WSL/Linux 原生 ELF 可运行五 role
+进程链，验证 Unix domain IPC、有界队列、正常 drain、SIGTERM forced-stop、风险撤销和 generation
+重启恢复：
+
+```bash
+zig build-exe src/main.zig -target x86_64-linux-gnu -OReleaseSafe -femit-bin=ringwin
+./ringwin --production-chain-test
+```
+
+systemd 模板位于 [`deploy/systemd`](deploy/systemd)；每个 role 使用独立 `ringwin-%i` 用户和
+runtime directory。基础 unit 只允许 Unix socket，只有 execution-gateway drop-in 放开 Internet
+address family。
 
 ## 交易核心整波验收
 
@@ -109,7 +122,7 @@ stable journal detects tail, corruption, and sequence gap
 ```
 
 当前离线基线（2026-09-06）由 `tools\verify-core-wave.ps1` 实际运行汇总：acceptance schema 为 `2`，
-journal/state schema 为 `8`，Debug/ReleaseSafe 均为 `188/188`，coordinator barrier 为 `17`，
+journal/state schema 为 `8`，Debug/ReleaseSafe 均为 `191/191`，coordinator barrier 为 `17`，
 四个 shard barrier 为 `23/26/21/21`，Gateway 实时发送 `4` 次，重放发送能力为 `false`，共享摘要为：
 
 `841e5425827f7d12ba771fd2de14303bfb4923b22a4cc6615cd7d348b8332dfe`

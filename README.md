@@ -187,7 +187,7 @@ Use the unified build entrypoint:
 ```console
 zig build
 zig build test
-zig build run
+zig build run -- --offline-fixture
 ```
 
 Run the full offline core wave:
@@ -202,6 +202,20 @@ baseline with:
 ```console
 zig test src/main.zig -target x86_64-linux-gnu -OReleaseSafe --test-no-exec
 ```
+
+The Linux production dispatcher is explicit about roles. Native Linux/WSL
+process acceptance starts five restricted roles, exercises Unix-domain IPC,
+drain, SIGTERM forced-stop, risk revocation, and generation-based restart:
+
+```console
+zig build-exe src/main.zig -target x86_64-linux-gnu -OReleaseSafe -femit-bin=ringwin
+./ringwin --production-chain-test
+```
+
+The systemd template and target are in [`deploy/systemd`](deploy/systemd):
+each role uses a separate `ringwin-%i` user and runtime directory. Only the
+execution-gateway drop-in allows Internet address families; the base unit is
+Unix-domain-socket-only.
 
 Run the explicit OKX Demo wave (read-only preparation by default):
 
@@ -221,7 +235,7 @@ qualification remains `not_run`; OKX Demo evidence is never promoted to
 `TestnetQualified`.
 
 The current offline baseline uses acceptance schema `2` and journal/state schema
-`8`: Debug and ReleaseSafe each pass `188/188` tests, the four-shard coordinator
+`8`: Debug and ReleaseSafe each pass `191/191` tests, the four-shard coordinator
 barrier is `17`, and shard barriers are `23/26/21/21`. The offline Gateway
 contract makes `5` adapter submissions, the four-shard ownership ledger records
 `4` commands, and replay has no send capability. The shared summary is

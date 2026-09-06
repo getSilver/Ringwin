@@ -1,0 +1,11 @@
+[Unit]
+Description=RingWin production role group
+Wants=ringwin-role@engine.service
+Wants=ringwin-role@market-feed.service
+Wants=ringwin-role@execution-gateway.service
+Wants=ringwin-role@telemetry.service
+Wants=ringwin-role@control-fence.service
+After=ringwin-role@engine.service ringwin-role@market-feed.service ringwin-role@execution-gateway.service ringwin-role@telemetry.service ringwin-role@control-fence.service
+
+[Install]
+WantedBy=multi-user.target
