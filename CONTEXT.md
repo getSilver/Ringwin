@@ -362,6 +362,31 @@ _Avoid_: Independent binary, Windows service, public API server
 五个 ProductionRole 通过固定容量 Unix-domain control seam 共同形成的生命周期边界；它负责启动、恢复、交易授权、排空和失败关闭，但不拥有 TradingShard 经济状态或 SecretMaterial。
 _Avoid_: Service mesh, process-local authority, credential store
 
+**CredentialStore**:
+按 CredentialKind 分离保存 observation 与 execution 加密凭证的 Linux 人工解锁 seam；它认证固定
+metadata、执行 Argon2id/XChaCha20-Poly1305、持久化单向生命周期，并在失败时关闭准入。
+_Avoid_: Environment secret, argv password, Vault auto-unseal
+
+**ObservationCredential**:
+只允许账户读取和对账、绑定 production environment/account/node/egress IP 且不得形成订单发送能力的
+凭证；它可以使节点进入 Ready，但不能调用 EnableTrading。
+_Avoid_: Read-only API key by convention, execution credential, Demo credential
+
+**ExecutionCredential**:
+与 ObservationCredential 使用独立文件、metadata、生命周期和授权的凭证类型；本首版只冻结其
+`can_withdraw=false`、固定出口 IP 和独立存储边界，不授予本票的发送能力。
+_Avoid_: Shared API key, reusable testnet key, unrestricted secret
+
+**ProtectedSecretMemory**:
+ExecutionGateway 所有者持有的页对齐 SecretMaterial 内存；Linux 准入必须证明锁页、禁止 core dump
+和释放清零均成功，任何失败都不能进入生产准入。
+_Avoid_: Heap secret, log copy, process environment
+
+**SecurityAdmission**:
+在 CredentialStore metadata、当前节点上下文、有效期、保护内存自检和能力 allowlist 全部通过后
+形成的有界准入结果；票 04 的结果只能是 Ready/read-only，不等同于 EnableTrading。
+_Avoid_: Health check, owner boolean, trading authorization
+
 **DurableStore**:
 RawIngress、分片决策日志和控制事实共享的深持久化 seam；调用者只提交 StreamIdentity、稳定 record、commit barrier、seal/rotate 和 snapshot，文件布局、manifest、同步顺序、原子发布及合法截尾恢复由 implementation 拥有。
 _Avoid_: File path in caller, telemetry retry, database replacement

@@ -51,7 +51,7 @@ Status: active
 
 ## Frontier
 
-- [通过 CredentialStore 完成只读安全准入](issues/04-unlock-credential-and-pass-security-admission.md)
+- [在 Linux 闭合 OKX Demo 在线链路](issues/05-qualify-okx-linux-online-chain.md)
 
 ## Decisions so far
 
@@ -64,13 +64,17 @@ Status: active
 - 2026-09-06：票 03 完成 `DurableStore` 双 adapter；Linux 文件 adapter 已通过 WSL 原生 ELF 的三域
   segment、manifest、提交同步、atomic snapshot 和 close/reopen recovery 验收；目标文件系统断电资格待
   节点清单冻结后执行。
+- 2026-09-06：票 04 完成 `CredentialStore`；Argon2id/XChaCha20-Poly1305 认证 metadata、
+  Observation/Execution 分文件、单向生命周期、Linux 受保护内存和节点/出口上下文校验已贯通；
+  `--credential-store-test` 只进入 read-only Ready，目标节点 secret-scan、core dump、真实
+  RLIMIT_MEMLOCK 与生产账户资格仍未执行。
 - 生产支持候选固定为 OKX、Binance、Bybit 的 SPOT 与 USDT 线性永续；未列能力保持失败关闭。
 - Linux 使用同一签名二进制的受限 role 进程与 systemd unit，不为每个 role 建设独立框架。
 - 首版 CredentialStore 使用人工解锁的加密文件与锁定内存，不引入 Vault、TPM 或无人值守解封。
 - 首版 HA 为一主一热备、外部 fencing authority、无自动 failback，不建设 Raft/etcd 集群。
 - 已有 Web 控制面作为 SystemOwner 的唯一常规入口；不重复实现控制面 CLI，本地图只负责把它接入
   签名 ControlCommand、OwnerSession、OperatorRecord 和发布生命周期。
-- 当前可信离线基线为 acceptance schema 2、journal/state schema 8、Debug/ReleaseSafe 各 193 项；
+- 当前可信离线基线为 acceptance schema 2、journal/state schema 8、Debug/ReleaseSafe 各 195 项；
   OKX Demo、Binance Testnet、Bybit Testnet 的当前共享在线状态仍为 `not_run`。
 
 ## Not yet specified

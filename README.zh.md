@@ -43,7 +43,13 @@ Linux 生产入口使用同一个签名二进制的显式 role dispatcher。WSL/
 zig build-exe src/main.zig -target x86_64-linux-gnu -OReleaseSafe -femit-bin=ringwin
 ./ringwin --production-chain-test
 ./ringwin --durable-store-test
+./ringwin --credential-store-test
 ```
+
+`--credential-store-test` 验证 Linux-only `CredentialStore`：Argon2id/XChaCha20-Poly1305 认证
+metadata、Observation/Execution 凭证分文件、单向生命周期、锁页与禁止 dump 自检、节点和固定
+出口 IP 匹配，以及只读 `Ready` 准入。它不会启用交易，也不会输出凭证字节；目标节点的密钥扫描、
+RLIMIT_MEMLOCK、core dump、真实生产账户和资格仍需独立证据。
 
 systemd 模板位于 [`deploy/systemd`](deploy/systemd)；每个 role 使用独立 `ringwin-%i` 用户和
 runtime directory。基础 unit 只允许 Unix socket，只有 execution-gateway drop-in 放开 Internet

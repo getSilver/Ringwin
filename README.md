@@ -211,7 +211,14 @@ drain, SIGTERM forced-stop, risk revocation, and generation-based restart:
 zig build-exe src/main.zig -target x86_64-linux-gnu -OReleaseSafe -femit-bin=ringwin
 ./ringwin --production-chain-test
 ./ringwin --durable-store-test
+./ringwin --credential-store-test
 ```
+
+`--credential-store-test` exercises the Linux-only encrypted `CredentialStore`: Argon2id and
+XChaCha20-Poly1305 authenticated metadata, separate observation/execution files, forward-only
+credential lifecycle, protected-memory self-checks, fixed node/egress context, and a read-only
+`Ready` admission. It never enables trading or prints credential bytes. Target-node secret scanning,
+RLIMIT_MEMLOCK, crash-dump, and real production-account qualification remain separate evidence.
 
 The systemd template and target are in [`deploy/systemd`](deploy/systemd):
 each role uses a separate `ringwin-%i` user and runtime directory. Only the
