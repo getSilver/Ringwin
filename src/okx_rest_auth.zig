@@ -12,11 +12,13 @@ pub const Credentials = struct {
     passphrase: Secret(128),
 
     pub fn init(api_key: []const u8, secret_key: []const u8, passphrase: []const u8) !Credentials {
-        return .{
-            .api_key = try Secret(128).init(api_key),
-            .secret_key = try Secret(128).init(secret_key),
-            .passphrase = try Secret(128).init(passphrase),
-        };
+        var result: Credentials = undefined;
+        result.api_key = try Secret(128).init(api_key);
+        errdefer result.api_key.clear();
+        result.secret_key = try Secret(128).init(secret_key);
+        errdefer result.secret_key.clear();
+        result.passphrase = try Secret(128).init(passphrase);
+        return result;
     }
 
     pub fn deinit(self: *Credentials) void {
@@ -43,7 +45,7 @@ fn Secret(comptime capacity: usize) type {
         }
 
         fn clear(self: *@This()) void {
-            @memset(&self.bytes, 0);
+            std.crypto.secureZero(u8, &self.bytes);
             self.len = 0;
         }
     };
@@ -60,6 +62,11 @@ pub const Headers = struct {
         }
         return result;
     }
+
+    pub fn clear(self: *Headers) void {
+        std.crypto.secureZero(u8, std.mem.asBytes(&self.storage));
+        std.crypto.secureZero(u8, &self.lengths);
+    }
 };
 
 pub const LoginPayload = struct {
@@ -71,7 +78,7 @@ pub const LoginPayload = struct {
     }
 
     pub fn clear(self: *LoginPayload) void {
-        @memset(&self.bytes, 0);
+        std.crypto.secureZero(u8, &self.bytes);
         self.len = 0;
     }
 };
@@ -80,6 +87,7 @@ pub fn websocketLogin(credentials: *const Credentials, timestamp_seconds: []cons
     if (timestamp_seconds.len == 0 or timestamp_seconds.len > 20) return error.InvalidTimestamp;
     const signature = sign(credentials, timestamp_seconds, "GET", "/users/self/verify", "");
     var result: LoginPayload = .{};
+    errdefer result.clear();
     var writer: std.Io.Writer = .fixed(result.bytes[0 .. result.bytes.len - 1]);
     try std.json.Stringify.value(.{
         .op = "login",
@@ -125,6 +133,7 @@ pub fn headers(
         return error.InvalidRequest;
     const signature = sign(credentials, timestamp, method, request_path, body);
     var result: Headers = .{};
+    errdefer result.clear();
     try putHeader(&result, 0, "OK-ACCESS-KEY: ", credentials.api_key.slice());
     try putHeader(&result, 1, "OK-ACCESS-SIGN: ", &signature);
     try putHeader(&result, 2, "OK-ACCESS-TIMESTAMP: ", timestamp);
