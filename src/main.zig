@@ -29,6 +29,7 @@ const trading_shard_fixture = @import("trading_shard_fixture.zig");
 const trading_shard_benchmark = @import("trading_shard_benchmark.zig");
 const production_contract = @import("production_contract.zig");
 const production_runtime = @import("production_runtime.zig");
+const durable_store = @import("durable_store.zig");
 
 pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
@@ -47,6 +48,10 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, argument, "--production-chain-test")) {
             if (args.next() != null) return error.UnknownArgument;
             return production_runtime.runIntegration(init, executable);
+        }
+        if (std.mem.eql(u8, argument, "--durable-store-test")) {
+            if (args.next() != null) return error.UnknownArgument;
+            return durable_store.runLinuxAcceptance(init);
         }
         if (std.mem.eql(u8, argument, "--four-shard-acceptance"))
             return runFourShardAcceptanceEntry(init);
@@ -119,4 +124,5 @@ test {
     _ = trading_shard_fixture;
     _ = production_contract;
     _ = production_runtime;
+    _ = durable_store;
 }

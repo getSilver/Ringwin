@@ -17,7 +17,8 @@ position/margin mode、杠杆、原始/累计/剩余数量、限价/均价以及
 
 - `TradingShard.apply(CoreTransition|EventRecord)` 是唯一公开内存状态迁移接口；
 - `applyTypedStable` 与 `applyStable` 分别把 typed core 和 canonical Venue 输入原子追加到离线有界内存
-  journal；真实 Linux 磁盘持久化属于生产票 03，不能由当前 fixture 验收推断；
+  journal；`src/durable_store.zig` 提供相同稳定 record/snapshot codec 的 Linux 文件适配器，目标文件系统
+  断电资格仍需独立验收；
 - `canonical_event_codec` 显式冻结 canonical union dispatch，只编码 bootstrap arrays 的有效区间；
 - envelope event type、schema version、identity、raw evidence 与规范 payload 一起参与校验；
 - 相同 identity 但 payload 不同会返回 `ConflictingCanonicalIdentity`，不会被当作重复事件吞掉。

@@ -210,6 +210,7 @@ drain, SIGTERM forced-stop, risk revocation, and generation-based restart:
 ```console
 zig build-exe src/main.zig -target x86_64-linux-gnu -OReleaseSafe -femit-bin=ringwin
 ./ringwin --production-chain-test
+./ringwin --durable-store-test
 ```
 
 The systemd template and target are in [`deploy/systemd`](deploy/systemd):
@@ -235,7 +236,7 @@ qualification remains `not_run`; OKX Demo evidence is never promoted to
 `TestnetQualified`.
 
 The current offline baseline uses acceptance schema `2` and journal/state schema
-`8`: Debug and ReleaseSafe each pass `191/191` tests, the four-shard coordinator
+`8`: Debug and ReleaseSafe each pass `193/193` tests, the four-shard coordinator
 barrier is `17`, and shard barriers are `23/26/21/21`. The offline Gateway
 contract makes `5` adapter submissions, the four-shard ownership ledger records
 `4` commands, and replay has no send capability. The shared summary is
@@ -248,8 +249,11 @@ All build steps reject a Zig version other than `0.17.0-dev.315+5b647b792` befor
 ## Deterministic Replay
 
 The offline fixture records authoritative events in a bounded in-memory journal.
-It proves integrity checks and deterministic replay only; the Linux durable
-disk journal and snapshot store are the separate scope of production ticket 03.
+`--durable-store-test` additionally exercises the same store interface with a
+real Linux directory: three permission-domain streams, a synced manifest,
+atomic snapshot publication, close/reopen recovery, and injected fail-closed
+errors. Target-filesystem power-loss and performance qualification remain
+separate from this WSL/offline evidence.
 
 The journal can be used to:
 

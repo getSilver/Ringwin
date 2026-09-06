@@ -42,6 +42,7 @@ Linux 生产入口使用同一个签名二进制的显式 role dispatcher。WSL/
 ```bash
 zig build-exe src/main.zig -target x86_64-linux-gnu -OReleaseSafe -femit-bin=ringwin
 ./ringwin --production-chain-test
+./ringwin --durable-store-test
 ```
 
 systemd 模板位于 [`deploy/systemd`](deploy/systemd)；每个 role 使用独立 `ringwin-%i` 用户和
@@ -122,7 +123,7 @@ stable journal detects tail, corruption, and sequence gap
 ```
 
 当前离线基线（2026-09-06）由 `tools\verify-core-wave.ps1` 实际运行汇总：acceptance schema 为 `2`，
-journal/state schema 为 `8`，Debug/ReleaseSafe 均为 `191/191`，coordinator barrier 为 `17`，
+journal/state schema 为 `8`，Debug/ReleaseSafe 均为 `193/193`，coordinator barrier 为 `17`，
 四个 shard barrier 为 `23/26/21/21`，Gateway 实时发送 `4` 次，重放发送能力为 `false`，共享摘要为：
 
 `841e5425827f7d12ba771fd2de14303bfb4923b22a4cc6615cd7d348b8332dfe`

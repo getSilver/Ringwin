@@ -362,6 +362,18 @@ _Avoid_: Independent binary, Windows service, public API server
 五个 ProductionRole 通过固定容量 Unix-domain control seam 共同形成的生命周期边界；它负责启动、恢复、交易授权、排空和失败关闭，但不拥有 TradingShard 经济状态或 SecretMaterial。
 _Avoid_: Service mesh, process-local authority, credential store
 
+**DurableStore**:
+RawIngress、分片决策日志和控制事实共享的深持久化 seam；调用者只提交 StreamIdentity、稳定 record、commit barrier、seal/rotate 和 snapshot，文件布局、manifest、同步顺序、原子发布及合法截尾恢复由 implementation 拥有。
+_Avoid_: File path in caller, telemetry retry, database replacement
+
+**StreamIdentity**:
+由权限域与稳定流编号组成的持久化身份；raw_ingress、decision_log 和 control 流必须分别记录、校验和恢复，不能因共享 segment 而混淆所有权。
+_Avoid_: Venue symbol, process id, mutable stream name
+
+**SegmentManifest**:
+描述每个持久 segment 的权限域、StreamIdentity、序号范围、提交 barrier、字节长度和内容摘要的稳定索引；缺段、冲突或未知格式时恢复进入 RecoveryOnly。
+_Avoid_: Directory listing, best-effort index, unverified tail
+
 **StructuralScan**:
 不解释事件业务语义，只验证稳定日志的记录边界、长度、序号和校验和并定位下一条记录的扫描；它可以越过未知记录，但不能据此恢复权威状态。
 _Avoid_: SemanticReplay, event decoding, recovery qualification

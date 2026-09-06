@@ -21,10 +21,12 @@ date: 2026-09-06
   双读、双写或迁移层。
 - 首个生产默认优化模式是 ReleaseSafe。io_uring、epoll、libcurl、专用日志线程和批量同步不是
   架构前置条件，只有目标 Linux 测量证明必要时才选择实现。
-- 当前 `Journal` 仍是离线有界内存 codec。真实磁盘日志、快照、进程链、凭证和在线资格分别属于
-  后续 production-readiness tickets，不得由离线摘要宣称完成。
+- `Journal` 仍保留为稳定 record codec；`src/durable_store.zig` 已把它接入 Linux 文件
+  segment、manifest、提交同步和原子快照发布。真实目标文件系统的断电、磁盘和性能资格仍属于
+  后续 production-readiness 验收，不得由 WSL 或离线摘要宣称完成。
 
 ## Consequences
 
 构建、TradingShard schema、四分片资格输出和离线测试共享同一生产合同常量。开发期格式不再具有
-生产兼容承诺；后续 DurableStore 必须直接实现 schema 8，并在未知或旧格式时保持 RecoveryOnly。
+生产兼容承诺；DurableStore 直接实现 schema 8，并在未知或旧格式、manifest 冲突和损坏时保持
+RecoveryOnly。
