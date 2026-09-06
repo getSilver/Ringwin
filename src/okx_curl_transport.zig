@@ -9,6 +9,22 @@ const market = @import("okx_public_market.zig");
 
 pub const required_version: u32 = 0x081500; // 8.21.0
 
+pub const DemoEndpointProfile = struct {
+    rest_base_url: []const u8,
+    private_ws_url: []const u8,
+};
+
+pub fn demoEndpointProfile(rest_base_url: []const u8, entity: []const u8) !DemoEndpointProfile {
+    // The current credential file is global-entity. Regional profiles must be
+    // added as explicit endpoint pairs instead of silently reusing global URLs.
+    if (!std.mem.eql(u8, entity, "global")) return error.UnsupportedEntity;
+    if (!std.mem.eql(u8, rest_base_url, "https://openapi.okx.com")) return error.UnsupportedDemoRestEndpoint;
+    return .{
+        .rest_base_url = rest_base_url,
+        .private_ws_url = "wss://wspap.okx.com:8443/ws/v5/private",
+    };
+}
+
 extern fn ringwin_curl_global_init() c_int;
 extern fn ringwin_curl_global_cleanup() void;
 extern fn ringwin_curl_probe(required_version: u32) c_int;
@@ -48,6 +64,7 @@ pub const TransportOwner = struct {
     credentials: auth.Credentials,
     proxy: ?[:0]const u8,
     source_session: u64,
+    endpoint: DemoEndpointProfile,
     timestamp: [25]u8 = @splat(0),
     timestamp_len: u8 = 0,
     times: market.Times = .{ .receive_time_utc_ns = 0, .monotonic_time_ns = 0, .wall_time_utc_ns = 0 },
@@ -55,8 +72,17 @@ pub const TransportOwner = struct {
     ws: ?*anyopaque = null,
 
     pub fn init(credentials: auth.Credentials, proxy: ?[:0]const u8, source_session: u64) !TransportOwner {
+        return initWithEndpoint(credentials, proxy, source_session, try demoEndpointProfile("https://openapi.okx.com", "global"));
+    }
+
+    pub fn initWithEndpoint(
+        credentials: auth.Credentials,
+        proxy: ?[:0]const u8,
+        source_session: u64,
+        endpoint: DemoEndpointProfile,
+    ) !TransportOwner {
         if (source_session == 0) return error.InvalidSourceSession;
-        return .{ .credentials = credentials, .proxy = proxy, .source_session = source_session };
+        return .{ .credentials = credentials, .proxy = proxy, .source_session = source_session, .endpoint = endpoint };
     }
 
     pub fn deinit(self: *RestOwner) void {
@@ -81,8 +107,11 @@ pub const TransportOwner = struct {
 
     pub fn wsConnect(self: *RestOwner) !void {
         if (self.ws != null) return error.AlreadyConnected;
+        var ws_url: [128]u8 = @splat(0);
+        const endpoint = std.fmt.bufPrint(ws_url[0 .. ws_url.len - 1], "{s}", .{self.endpoint.private_ws_url}) catch return error.WebSocketInitFailed;
+        ws_url[endpoint.len] = 0;
         const session = ringwin_ws_create(
-            "wss://wspap.okx.com/ws/v5/private",
+            ws_url[0..endpoint.len :0],
             if (self.proxy) |value| value.ptr else null,
         ) orelse return error.WebSocketInitFailed;
         errdefer ringwin_ws_destroy(session);
@@ -129,7 +158,7 @@ pub const TransportOwner = struct {
         if (self.timestamp_len == 0) return self.beforeSend();
         if (path.len == 0 or path[0] != '/') return self.beforeSend();
         var url_buffer: [512]u8 = @splat(0);
-        const url = std.fmt.bufPrint(url_buffer[0 .. url_buffer.len - 1], "https://openapi.okx.com{s}", .{path}) catch
+        const url = std.fmt.bufPrint(url_buffer[0 .. url_buffer.len - 1], "{s}{s}", .{ self.endpoint.rest_base_url, path }) catch
             return self.beforeSend();
         url_buffer[url.len] = 0;
         const timestamp = self.timestamp[0..self.timestamp_len];
@@ -256,7 +285,7 @@ pub fn perform(
     };
 }
 
-test "linked libcurl is exactly the resolved Schannel websocket baseline" {
+test "linked libcurl is exactly the resolved websocket baseline" {
     var runtime = try Runtime.init();
     defer runtime.deinit();
 }

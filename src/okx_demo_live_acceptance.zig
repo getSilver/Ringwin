@@ -45,10 +45,18 @@ pub fn main(init: std.process.Init) !void {
     const key = init.environ_map.get("RINGWIN_OKX_KEY") orelse return error.MissingCredential;
     const secret = init.environ_map.get("RINGWIN_OKX_SECRET") orelse return error.MissingCredential;
     const passphrase = init.environ_map.get("RINGWIN_OKX_PASSPHRASE") orelse return error.MissingCredential;
+    const rest_base_url = init.environ_map.get("RINGWIN_OKX_REST_BASE_URL") orelse return error.MissingEndpointProfile;
+    const entity = init.environ_map.get("RINGWIN_OKX_ENTITY") orelse return error.MissingEndpointProfile;
+    const endpoint = try curl.demoEndpointProfile(rest_base_url, entity);
 
     var runtime = try curl.Runtime.init();
     defer runtime.deinit();
-    var owner = try curl.TransportOwner.init(try auth.Credentials.init(key, secret, passphrase), null, source_session);
+    var owner = try curl.TransportOwner.initWithEndpoint(
+        try auth.Credentials.init(key, secret, passphrase),
+        null,
+        source_session,
+        endpoint,
+    );
     defer owner.deinit();
     var raw: RawSink = .{};
     var reconciler: private.Reconciler = .{};

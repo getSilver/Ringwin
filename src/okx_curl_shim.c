@@ -44,8 +44,13 @@ int ringwin_curl_probe(unsigned int required_version) {
     return 1;
   if(info->version_num != required_version)
     return 2;
+#ifdef _WIN32
   if(!info->ssl_version || strncmp(info->ssl_version, "Schannel", 8) != 0)
     return 3;
+#else
+  if(!info->ssl_version || strncmp(info->ssl_version, "OpenSSL/", 8) != 0)
+    return 3;
+#endif
   for(protocol = info->protocols; protocol && *protocol; ++protocol) {
     if(strcmp(*protocol, "https") == 0)
       https = 1;
