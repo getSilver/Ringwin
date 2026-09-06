@@ -74,7 +74,7 @@ Status: active
 - 首版 HA 为一主一热备、外部 fencing authority、无自动 failback，不建设 Raft/etcd 集群。
 - 已有 Web 控制面作为 SystemOwner 的唯一常规入口；不重复实现控制面 CLI，本地图只负责把它接入
   签名 ControlCommand、OwnerSession、OperatorRecord 和发布生命周期。
-- 2026-09-07：票 05 已补 Linux 原生 OKX acceptance 入口并完成 x86_64 ELF/libcurl 8.21.0/OpenSSL runtime probe；当前 WSL1 对官方 Demo private WSS `:8443` 返回 `SSL_ERROR_SYSCALL`，`PrepareOnly` 仍失败关闭，未取得在线资格，未执行 Demo 写入。
+- 2026-09-07：票 05 已补 Linux 原生 OKX acceptance 入口并完成 x86_64 ELF/libcurl 8.21.0/OpenSSL runtime probe；SystemOwner 已授权 DemoLive，但 WSL1 在官方 Demo private WSS `:8443` 的 `establishReady` 阶段返回 `WebSocketTransport`/`SSL_ERROR_SYSCALL`，且 WSL1 无法连接仅监听 Windows 回环的代理，未进入 dispatch、未执行 Demo 写入，仍未取得在线资格。另以 Windows 443 路径完成 Demo 私有 WSS 登录/订阅及受限 place/cancel 清理验收，证明 Venue 功能可用但不替代 Linux 资格。
 - 2026-09-07：票 08 绑定现有 `D:\github\Ringwin-control-plane` Web 控制面，控制面提交 `f7ac68d`；补齐签名 ReleaseArtifact 校验、版本目录原子发布、ForwardRollback、生命周期 outbox、OwnerSession/CSRF/RiskWarning 接线和持久命令去重，定向验收通过。目标 Linux systemd/凭证/NodeFence 生产等价验收仍待执行，OKX Demo 资格不因本票升级。
 - 2026-09-07：票 09 接入固定容量 per-shard Telemetry、非阻塞 TelemetryPublish、30 秒/5 分钟 observability fail-closed、BenchmarkManifest 和不可变 QualificationReport；WSL 原生 ELF SimulatedVenue smoke 通过并生成报告。目标节点性能、soak、真实 exporter 和生产资格仍未宣告。
 - 2026-09-07：票 10 接入可注入 FencingAuthority、1 秒 PrimaryLease/250 ms 续租、ObservationCredential 热备、NodeFence read-back、FailoverAdmission 和不可变 FailoverReport；9 条自动路径连续三次通过，6 类故障保持阻断。真实独立 fencing authority、目标节点故障矩阵和生产等价资格仍未执行。

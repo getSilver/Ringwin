@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$DemoLive,
+    [switch]$SystemOwnerAuthorized,
     [switch]$PrepareOnly,
     [switch]$CleanupOnly,
     [ValidateSet('Debug','ReleaseSafe')] [string]$Optimize = 'ReleaseSafe',
@@ -19,6 +20,7 @@ if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
 if (@($DemoLive, $PrepareOnly, $CleanupOnly).Where({ $_ }).Count -ne 1) {
     throw 'Choose exactly one of -DemoLive, -PrepareOnly, or -CleanupOnly'
 }
+if (($DemoLive -or $CleanupOnly) -and -not $SystemOwnerAuthorized) { throw 'Demo writes require -SystemOwnerAuthorized' }
 if (($DemoLive -or $CleanupOnly) -and $Optimize -ne 'ReleaseSafe') { throw 'Demo writes require ReleaseSafe' }
 
 $preflight = & (Join-Path $PSScriptRoot 'okx-demo-preflight.ps1') -EnvFile $EnvFile | ConvertFrom-Json
@@ -54,6 +56,8 @@ try {
     $env:RINGWIN_OKX_KEY = [string]$values.OKX_DEMO_API_KEY
     $env:RINGWIN_OKX_SECRET = [string]$values.OKX_DEMO_SECRET_KEY
     $env:RINGWIN_OKX_PASSPHRASE = [string]$values.OKX_DEMO_PASSPHRASE
+    $env:RINGWIN_OKX_REST_BASE_URL = [string]$values.OKX_DEMO_REST_BASE_URL
+    $env:RINGWIN_OKX_ENTITY = [string]$values.OKX_ENTITY
     $uri = [Uri]'https://openapi.okx.com'
     if (-not [Net.WebRequest]::DefaultWebProxy.IsBypassed($uri)) {
         $env:HTTPS_PROXY = [Net.WebRequest]::DefaultWebProxy.GetProxy($uri).AbsoluteUri
@@ -67,6 +71,8 @@ try {
     $env:RINGWIN_OKX_KEY = $null
     $env:RINGWIN_OKX_SECRET = $null
     $env:RINGWIN_OKX_PASSPHRASE = $null
+    $env:RINGWIN_OKX_REST_BASE_URL = $null
+    $env:RINGWIN_OKX_ENTITY = $null
     $env:HTTPS_PROXY = $previousProxy
     $values.Clear()
     $final = & (Join-Path $PSScriptRoot 'okx-demo-preflight.ps1') -EnvFile $EnvFile | ConvertFrom-Json

@@ -1,12 +1,14 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)] [switch]$DemoLive,
+    [switch]$SystemOwnerAuthorized,
     [string]$EnvFile = (Join-Path $PSScriptRoot '..\.env.local')
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if (-not $DemoLive) { throw 'Explicit -DemoLive is required' }
+if (-not $SystemOwnerAuthorized) { throw 'DemoLive requires -SystemOwnerAuthorized' }
 & (Join-Path $PSScriptRoot 'okx-demo-preflight.ps1') -EnvFile $EnvFile | Out-Null
 & (Join-Path $PSScriptRoot 'okx-demo-private-readonly.ps1') -EnvFile $EnvFile `
     -WebSocketUrl 'wss://wspap.okx.com/ws/v5/private' | Out-Null

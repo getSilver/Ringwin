@@ -51,7 +51,32 @@ WSL1 网络出口对官方 `wss://wspap.okx.com:8443/ws/v5/private` 的 TLS 握�
 - 下单权限仍为 Trade；place/amend/cancel 单请求限流为 60 requests/2 seconds，且共享相关
   REST/WS 交易限流桶；`50011`/`50061` 必须保留为原始限流事实。
 
-尚未执行 `DemoLive`：按生产 readiness 规则，`.env.local` 提供凭证不等于本次
-SystemOwner 下单授权。要关闭本票，还需要在具备官方 WSS 出口的 Linux 节点重新跑
-`PrepareOnly`，再由 SystemOwner 明确授权 `DemoLive`，完成真实受限订单、清理、对账和
-live/replay digest 证据。
+此前尚未执行 `DemoLive`：按生产 readiness 规则，`.env.local` 提供凭证不等于本次
+SystemOwner 下单授权。现在授权已补齐，但要关闭本票仍需要在具备官方 WSS 出口的
+Linux 节点重新跑 `PrepareOnly`，再完成真实受限订单、清理、对账和 live/replay
+digest 证据。
+
+追加执行记录（2026-09-07）：SystemOwner 已明确授权 Demo 下单，并实际运行
+`tools/run-okx-linux-acceptance.ps1 -Mode DemoLive -SystemOwnerAuthorized`。运行在
+`establishReady` 的 private WSS 连接阶段失败，原始 Linux 输出为
+`error: WebSocketTransport`；对应底层无凭证分层探针为：WSL1 DNS 能解析
+`wspap.okx.com`，`https://openapi.okx.com` 连接超时，官方 private WSS 的 8443 和
+443 TLS 均返回 `SSL_ERROR_SYSCALL`。`example.com` 在同一 WSL1 中可达，因此不是
+WSL1 完全断网。Windows 默认代理对 REST 可达且对 WSS 443 返回 HTTP 400，但代理仅
+监听 Windows `127.0.0.1:7890`，WSL1 无法连接该回环代理；将该代理传给 Linux 入口
+仍在 WSS 阶段失败。
+
+本次 DemoLive 没有进入第一次 `dispatch`，没有发送订单；DemoLive 与无写入
+`PrepareOnly` 均失败关闭。本票仍为 `ready-for-agent`，未取得 Demo 在线资格，
+生产资格保持 false。需要在具备官方 WSS 出口的 Linux 节点，或提供 WSL1 可达的
+代理/网络出口后重新运行。
+
+Windows 功能性分流验收（2026-09-07）：为区分 Venue/API 功能与 Linux 运行环境，先用
+现有 Windows 路径验证官方 443 Demo WSS。`tools/okx-demo-private-readonly.ps1`
+对 `wss://wspap.okx.com/ws/v5/private` 登录成功，`orders`、`account`、`positions`
+订阅成功，账户快照 1 行、仓位快照 0 行、`writes_sent=0`。随后在显式
+`tools/okx-demo-live-postonly.ps1 -DemoLive -SystemOwnerAuthorized`
+通过：`BTC-USDT` 受限
+`post_only place/cancel`、最大名义 25 USDT、`cleanup=verified`、`filled=false`。
+这证明 Windows 下 Demo WSS、认证、REST 写入和撤单清理功能可用，但不替代 Linux
+生产运行链资格；票据仍保持 `ready-for-agent`，生产资格保持 false。
