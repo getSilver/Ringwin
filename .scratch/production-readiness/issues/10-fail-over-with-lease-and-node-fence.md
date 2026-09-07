@@ -1,7 +1,7 @@
 # 以 PrimaryLease 和 NodeFence 完成主备切换
 
 Type: task
-Status: resolved
+Status: ready-for-agent
 Assignee:
 Blocked by: [03 从真实磁盘日志与快照恢复一个 TradingShard](03-persist-and-recover-authoritative-state.md), [04 通过 CredentialStore 完成只读安全准入](04-unlock-credential-and-pass-security-admission.md), [08 通过现有 Web 控制面完成签名发布与操作生命周期](08-operate-and-deploy-signed-release.md), [09 发布生产遥测并生成 Linux 资格报告](09-publish-telemetry-and-build-qualification-report.md)
 Parent: [Linux 生产资格收口](../map.md)
@@ -22,7 +22,7 @@ ObservationCredential 对账和 FailoverAdmission。首先用可注入的测试 
 - [x] fencing authority 按 ExchangeAccount + DecisionDomain 持久化严格递增且永不复用的 FencingToken。
 - [x] Gateway 每次发送前检查当前 token 和单调时钟 lease；续租失败后 1 秒内拒绝新增风险。
 - [x] 热备只持 ObservationCredential 并持续应用日志/快照；超过 50 ms 或 25,000 事件进入 HADegraded。
-- [x] 提升严格执行冻结、撤销 lease、外部建立并读回 NodeFence、等待过期、分配新 token、恢复/对账、最后授权。
+- [ ] 提升顺序和 read-back 状态机已实现；目标环境唯一的外部 NodeFence adapter 尚未指定和接入。
 - [x] 心跳消失、请求建立 fence 或 Venue 可达不能替代已验证 NodeFence。
 - [x] NetworkPartition 与 UntrustedState 永不自动提升；fencing authority 不可用时租约到期并停在 RecoveryOnly。
 - [x] PlannedSwitch 仅在挂单为零且 ReplayRPO 为零时通过；Unknown、ReconciliationBreak 或状态缺口阻止新增风险。
@@ -52,6 +52,10 @@ ObservationCredential 对账和 FailoverAdmission。首先用可注入的测试 
 - `FailoverReport` 封存后不可追加，保留 9 条自动路径通过记录（PlannedSwitch、ProcessFailure、
   NodeFailure 各连续 3 次）和 6 条阻断故障记录：NetworkPartition、复制中断、存储损坏、Fence
   失败、旧 token/节点重现、准入中断。
+
+2026-09-07 修复复核：新增 Linux `LinuxFencingStore`，acquire/revoke 在返回前原子同步 token、owner
+和 durable barrier；重启加载校验后的 checkpoint，token 从上次值继续递增。目标 NodeFence 与
+生产等价三次故障资格仍未完成，因此状态恢复为 `ready-for-agent`。
 
 定向证据：
 

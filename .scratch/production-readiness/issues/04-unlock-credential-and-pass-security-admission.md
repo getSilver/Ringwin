@@ -1,7 +1,7 @@
 # 通过 CredentialStore 完成只读安全准入
 
 Type: task
-Status: resolved
+Status: ready-for-agent
 Assignee:
 Blocked by: [01 冻结首个 Linux 生产合同与 schema](01-freeze-linux-production-contract.md)
 Parent: [Linux 生产资格收口](../map.md)
@@ -44,6 +44,9 @@ observation 的只读准入在本票开放，execution admission 明确保持 ou
 `readPassword` 只接收 TTY 或受限 fd；`ProtectedMemory` 在 Linux 使用 `mlock` 和
 `MADV_DONTDUMP`，释放时清零；运行时上下文独立校验 account、environment、node 和固定出口 IP。
 当前票据故意保留目标节点 secret-scan、core-dump 与真实 RLIMIT_MEMLOCK 资格为未完成项。
+
+2026-09-07 修复复核：删除 `PasswordSource.tty/restricted/testOnly` 的公开构造器，生产调用方只能
+通过实际 `readPassword` 路径取得来源标记；密钥内存加固沿用提交 `549282f`。
 
 ## Evidence
 

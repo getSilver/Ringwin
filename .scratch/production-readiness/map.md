@@ -51,7 +51,7 @@ Status: active
 
 ## Frontier
 
-- [在 Linux 闭合 OKX Demo 在线链路](issues/05-qualify-okx-linux-online-chain.md)
+- [启动可安全排空的 Linux 生产进程链](issues/02-run-linux-production-process-chain.md)
 
 ## Decisions so far
 
@@ -80,6 +80,11 @@ Status: active
 - 2026-09-07：票 10 接入可注入 FencingAuthority、1 秒 PrimaryLease/250 ms 续租、ObservationCredential 热备、NodeFence read-back、FailoverAdmission 和不可变 FailoverReport；9 条自动路径连续三次通过，6 类故障保持阻断。真实独立 fencing authority、目标节点故障矩阵和生产等价资格仍未执行。
 - 当前可信离线基线为 acceptance schema 2、journal/state schema 8、Debug/ReleaseSafe 各 207 项；
   OKX Demo、Binance Testnet、Bybit Testnet 的当前共享在线状态仍为 `not_run`。
+- 2026-09-07：源码复审撤销票 02/03/04/08/09/10 的过早 `resolved`。安全修复提交 `7917079`
+  收口 DurableStore 原子更新和完整 manifest 校验、资格报告 passed 推导、Linux fencing token
+  持久化及子 role 授权/信号撤销；控制面提交 `b04d942` 收口 TOTP、认证文件和版本链接切换。
+  目标节点故障/密钥资格、真实业务 role 链、生产 exporter、外部 NodeFence 和 Web 到节点端到端
+  生命周期仍未完成，不能宣称生产就绪。
 
 ## Not yet specified
 

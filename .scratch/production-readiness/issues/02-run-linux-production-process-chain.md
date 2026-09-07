@@ -1,7 +1,7 @@
 # 启动可安全排空的 Linux 生产进程链
 
 Type: task
-Status: resolved
+Status: ready-for-agent
 Assignee:
 Blocked by: [01 冻结首个 Linux 生产合同与 schema](01-freeze-linux-production-contract.md)
 Parent: [Linux 生产资格收口](../map.md)
@@ -22,11 +22,11 @@ Recovering → Ready → Trading → Draining → Stopped，证明进程身份�
 
 - [x] 默认入口是生产 role dispatcher；fixture、benchmark 和 qualification 只能由显式子命令进入。
 - [x] TradingShard 没有公网 socket 或 SecretMaterial；ExecutionGateway 是唯一私有交易网络 owner。
-- [x] role 间只使用既定共享内存或 Unix domain socket seam，队列固定容量且背压失败关闭。
+- [ ] role 间业务数据尚未贯通；当前 Unix domain socket 只承载生命周期控制帧，队列固定容量且背压失败关闭。
 - [x] systemd unit 使用独立非 root 用户、明确可写目录、私有临时目录、能力裁剪和禁止提权配置。
-- [x] SIGTERM 完成 Draining、撤销授权、排空有界输出并在截止时间内退出；超时形成 ForcedStop 事实。
-- [x] 任一必需 role 未启动、异常退出、身份不匹配或 IPC 断开都不能进入或保持新增风险状态。
-- [x] SimulatedVenue 的冷启动、正常停机、强制终止和重启恢复集成测试在 Linux 原生运行通过。
+- [ ] SIGTERM 已在子 role 撤销授权并完成 Draining；真实业务输出排空仍待业务链接入后验证，超时形成 ForcedStop 事实。
+- [ ] 测试协调器能因缺失 role/IPC 断开而失败关闭；常驻 HostSupervisor 尚未接入生产 role。
+- [ ] SimulatedVenue 尚未真正贯通五个 role；当前 Linux 原生测试只证明进程生命周期、授权、超时强停和 generation 重启。
 - [x] Windows 仍能运行离线单元/契约测试，但不存在 Windows 生产服务分支。
 
 ## Out of scope

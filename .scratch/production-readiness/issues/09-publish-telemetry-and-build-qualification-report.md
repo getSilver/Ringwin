@@ -1,7 +1,7 @@
 # 发布生产遥测并生成 Linux 资格报告
 
 Type: task
-Status: resolved
+Status: ready-for-agent
 Assignee:
 Blocked by: [02 启动可安全排空的 Linux 生产进程链](02-run-linux-production-process-chain.md), [03 从真实磁盘日志与快照恢复一个 TradingShard](03-persist-and-recover-authoritative-state.md)
 Parent: [Linux 生产资格收口](../map.md)
@@ -23,7 +23,7 @@ Invalid 运行及原始 bucket/健康证据。
 - [x] 指标覆盖吞吐、队列、水位/年龄、Unknown、对账、账本、时钟、日志/热备游标、CPU/NUMA/IRQ、磁盘与 io_uring/transport 状态。
 - [x] 热路径指标固定容量、无动态分配、阻塞锁或跨 shard 共享写；跨 shard 先合并 bucket 再计算分位数。
 - [x] 常驻标签只有有界集合；订单、Instrument、StrategyInstance 和 client order id 不成为 metrics label。
-- [x] TelemetryPublish 变慢或失败不占满交易通道；30 秒失明进入 ObservabilityDegraded，5 分钟失明禁止新增风险。
+- [ ] 固定容量 Publisher 与失明状态机已实现；生产 TelemetryPublish role 尚未接到 TradingShard 与真实 exporter。
 - [x] exporter 重启、缓冲耗尽、丢样、直方图溢出和 manifest 不匹配均有失败关闭或 Invalid 证据。
 - [x] BenchmarkManifest 绑定 workload、数据/种子、规则、策略、artifact、节点、配置和观测开关。
 - [x] QualificationReport 包含全部运行、原始 bucket、样本数、overflow、P50/P90/P99/P99.9/max、正确性和环境证据。
@@ -51,6 +51,9 @@ Invalid 运行及原始 bucket/健康证据。
 - smoke runner 实际启动 `SimulatedVenue`，执行四 shard 核心验收后才原子写报告；任何前置
   错误在写入前返回非零，因此不会产生成功报告。报告明确写出
   `production_qualification=false`，不升级 OKX/Binance/Bybit 资格。
+
+2026-09-07 修复复核：`QualificationReport.append` 不再信任调用方提供的 `passed`；只有全部 shard
+样本、正确性、manifest、观测预算、零 overflow/丢样/exporter 错误及强制指标同时成立才接受通过。
 
 定向证据：
 

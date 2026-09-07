@@ -1,7 +1,7 @@
 # 从真实磁盘日志与快照恢复一个 TradingShard
 
 Type: task
-Status: resolved
+Status: ready-for-agent
 Assignee:
 Blocked by: [01 冻结首个 Linux 生产合同与 schema](01-freeze-linux-production-contract.md)
 Parent: [Linux 生产资格收口](../map.md)
@@ -48,6 +48,10 @@ manifest 冲突或 I/O 故障进入 `RecoveryOnly` 并关闭 SafetyGate。合法
 
 目标 Linux 文件系统的断电、随机 kill、磁盘性能和真实生产资格尚未执行；WSL1 仅作为原生 ELF
 文件路径回归环境，目录 fsync 使用明确的兼容回退，不作为目标耐久性证据。
+
+2026-09-07 修复复核：segment 更新改为同目录临时文件原子替换，未提交追加不会先截断已提交
+前缀；manifest schema 2 的 CRC32C 覆盖完整 entries。rotate 只允许在当前 segment 已 seal 且精确
+barrier 快照已发布后执行，因此恢复接口不会静默跳过多个未被快照覆盖的 segment。
 
 ## Evidence
 
