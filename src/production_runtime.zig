@@ -72,9 +72,10 @@ pub const ChainState = struct {
         if (!self.allReady() or self.phase != .ready or self.forced_stop) return error.SafetyGateClosed;
         self.phase = .trading;
         self.risk_authorized = true;
-        for (&self.roles) |*role| {
-            role.phase = .trading;
-            role.trading_authorized = true;
+        for (&self.roles, 0..) |*role, index| {
+            const owns_authorization = ownsTradingAuthorization(@enumFromInt(index));
+            role.phase = if (owns_authorization) .trading else .ready;
+            role.trading_authorized = owns_authorization;
         }
     }
 
@@ -113,6 +114,10 @@ pub const ChainState = struct {
 
 pub fn roleName(role: Role) []const u8 {
     return @tagName(role);
+}
+
+fn ownsTradingAuthorization(role: Role) bool {
+    return role == .engine or role == .execution_gateway;
 }
 
 pub fn parseRole(value: []const u8) !Role {
@@ -227,12 +232,16 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, gene
             trading_authorized = false;
             draining = true;
             try writeStatus(&stream, init.io, .draining);
+            // Role-specific output draining is not wired yet. Reporting a
+            // graceful stop here would turn missing evidence into success.
+            try writeStatus(&stream, init.io, .forced_stop);
             try writeStatus(&stream, init.io, .stopped);
             return;
         };
         switch (command) {
             .authorize => {
-                if (draining or trading_authorized) return error.InvalidRoleTransition;
+                if (!ownsTradingAuthorization(role) or draining or trading_authorized)
+                    return error.InvalidRoleTransition;
                 trading_authorized = true;
                 try writeStatus(&stream, init.io, .trading);
             },
@@ -323,7 +332,8 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
     try chain.completeRecovery();
     if (!chain.allReady()) return error.RoleChainNotReady;
     try chain.enableTrading();
-    for (&streams) |*stream| {
+    for (&streams, roles) |*stream, role| {
+        if (!ownsTradingAuthorization(role)) continue;
         try sendCommand(stream, init.io, .authorize);
         try expectStatus(stream, init.io, .trading);
     }
@@ -367,6 +377,7 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
     try expectStatus(&restart_stream, init.io, .trading);
     try std.posix.kill(restart_child.id.?, std.posix.SIG.TERM);
     try expectStatus(&restart_stream, init.io, .draining);
+    try expectStatus(&restart_stream, init.io, .forced_stop);
     try expectStatus(&restart_stream, init.io, .stopped);
     const restart_term = try restart_child.wait(init.io);
     if (restart_term != .exited or restart_term.exited != 0) return error.RestartRecoveryFailed;
@@ -394,6 +405,9 @@ test "role chain revokes risk before draining and force stop" {
     try chain.completeRecovery();
     try chain.enableTrading();
     try std.testing.expect(chain.risk_authorized);
+    var authorized_roles: usize = 0;
+    for (chain.roles) |role| authorized_roles += @intFromBool(role.trading_authorized);
+    try std.testing.expectEqual(@as(usize, 2), authorized_roles);
     try chain.beginDrain();
     try std.testing.expect(!chain.risk_authorized);
     try chain.stop();

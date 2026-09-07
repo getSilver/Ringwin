@@ -357,8 +357,13 @@ pub const QualificationReport = struct {
     }
 
     fn finalStatus(self: *const QualificationReport) RunStatus {
-        for (self.runs[0..self.run_count]) |run| if (run.status != .passed) return run.status;
-        return .passed;
+        var result: RunStatus = .passed;
+        for (self.runs[0..self.run_count]) |run| switch (run.status) {
+            .invalid => return .invalid,
+            .failed => result = .failed,
+            .passed => {},
+        };
+        return result;
     }
 
     fn writeDigest(writer: *std.Io.Writer, digest: *const [32]u8) !void {
@@ -597,7 +602,7 @@ test "qualification report preserves failed and invalid run states" {
         });
     }
     try report.seal();
-    try std.testing.expectEqual(RunStatus.failed, report.finalStatus());
+    try std.testing.expectEqual(RunStatus.invalid, report.finalStatus());
     try std.testing.expectError(error.ReportSealed, report.append(.{
         .run_id = 4,
         .status = .passed,
@@ -615,6 +620,19 @@ test "caller cannot promote incomplete evidence to passed" {
         .simulated_venue = true,
     }));
     try std.testing.expectEqual(@as(usize, 0), report.run_count);
+}
+
+test "qualification conclusion is independent of run order" {
+    var left: QualificationReport = .{ .manifest = smokeManifest() };
+    var right: QualificationReport = .{ .manifest = smokeManifest() };
+    const failed: RunEvidence = .{ .run_id = 1, .status = .failed, .reason = Text.literal("failed"), .simulated_venue = true };
+    const invalid: RunEvidence = .{ .run_id = 2, .status = .invalid, .reason = Text.literal("invalid"), .simulated_venue = true };
+    try left.append(failed);
+    try left.append(invalid);
+    try right.append(invalid);
+    try right.append(failed);
+    try std.testing.expectEqual(RunStatus.invalid, left.finalStatus());
+    try std.testing.expectEqual(left.finalStatus(), right.finalStatus());
 }
 
 test "manifest mismatch cannot be treated as the same qualification" {

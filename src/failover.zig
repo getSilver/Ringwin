@@ -106,7 +106,7 @@ pub const FencingAuthority = struct {
     records: [max_domains]AuthorityRecord = undefined,
     count: usize = 0,
     available: bool = true,
-    durable: bool = true,
+    durable: bool = false,
     persistence: ?AuthorityPersistence = null,
 
     fn bindPersistence(self: *FencingAuthority, persistence: AuthorityPersistence) void {
@@ -150,7 +150,7 @@ pub const FencingAuthority = struct {
         if (count > max_domains or bytes.len != authority_header_len + count * authority_entry_len or
             getAuthority(u32, bytes, 12) != authorityChecksum(bytes))
             return error.InvalidFencingCheckpoint;
-        var authority: FencingAuthority = .{};
+        var authority: FencingAuthority = .{ .durable = true };
         authority.count = count;
         for (authority.records[0..count], 0..) |*record, index| {
             const entry = bytes[authority_header_len + index * authority_entry_len ..][0..authority_entry_len];
@@ -269,7 +269,7 @@ pub const LinuxFencingStore = struct {
             error.PathAlreadyExists => {},
             else => return err,
         };
-        const dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{});
+        const dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{ .iterate = true });
         errdefer dir.close(io);
         try dir.setPermissions(io, private_dir_permissions);
         return .{ .io = io, .dir = dir };
@@ -283,7 +283,7 @@ pub const LinuxFencingStore = struct {
         var encoded: [authority_file_max]u8 = undefined;
         var file = self.dir.openFile(self.io, "authority.bin", .{}) catch |err| switch (err) {
             error.FileNotFound => {
-                var empty: FencingAuthority = .{};
+                var empty: FencingAuthority = .{ .durable = true };
                 empty.bindPersistence(.{ .context = self, .saveFn = save });
                 return empty;
             },
@@ -300,6 +300,7 @@ pub const LinuxFencingStore = struct {
             length += amount;
         }
         var authority = try FencingAuthority.decode(encoded[0..length]);
+        authority.durable = true;
         authority.bindPersistence(.{ .context = self, .saveFn = save });
         return authority;
     }
@@ -556,6 +557,10 @@ fn isAutomaticCause(cause: FailoverCause) bool {
     return cause == .planned_switch or cause == .process_failure or cause == .node_failure;
 }
 
+fn memoryAuthorityForTesting() FencingAuthority {
+    return .{ .durable = true };
+}
+
 pub const FailoverReport = struct {
     schema_version: u16 = 1,
     entries: [max_report_entries]AdmissionEvidence = undefined,
@@ -631,7 +636,7 @@ fn freshStandby(now_ns: u64, sequence: u64) !Standby {
 
 fn runAllowed(cause: FailoverCause, now_ns: u64) !AdmissionEvidence {
     const key: DomainKey = .{ .exchange_account = 900, .decision_domain = 1 };
-    var authority: FencingAuthority = .{};
+    var authority = memoryAuthorityForTesting();
     var old_lease = try authority.acquire(key, 1, now_ns);
     var fence: NodeFence = .{};
     try fence.bootstrap(1);
@@ -696,7 +701,7 @@ pub fn runSmoke(init: std.process.Init, report_path: []const u8) !void {
     }
 
     const key: DomainKey = .{ .exchange_account = 900, .decision_domain = 1 };
-    var authority: FencingAuthority = .{};
+    var authority = memoryAuthorityForTesting();
     var old_lease = try authority.acquire(key, 1, 1_000_000_000);
     var fence: NodeFence = .{};
     try fence.bootstrap(1);
@@ -789,7 +794,7 @@ pub fn runSmoke(init: std.process.Init, report_path: []const u8) !void {
 
 test "fencing tokens are strictly increasing and stale sends fail" {
     const key: DomainKey = .{ .exchange_account = 900, .decision_domain = 1 };
-    var authority: FencingAuthority = .{};
+    var authority = memoryAuthorityForTesting();
     var first = try authority.acquire(key, 1, 0);
     try std.testing.expectEqual(@as(u64, 1), first.token);
     try std.testing.expectError(error.LeaseExpired, authority.renew(&first, lease_duration_ns + 1));
@@ -798,9 +803,17 @@ test "fencing tokens are strictly increasing and stale sends fail" {
     try std.testing.expectEqual(@as(u64, 2), second.token);
 }
 
+test "unbound fencing authority fails closed" {
+    var authority: FencingAuthority = .{};
+    try std.testing.expectError(
+        error.FencingAuthorityUnavailable,
+        authority.acquire(.{ .exchange_account = 900, .decision_domain = 1 }, 1, 0),
+    );
+}
+
 test "fencing checkpoint preserves token monotonicity across restart" {
     const key: DomainKey = .{ .exchange_account = 901, .decision_domain = 7 };
-    var authority: FencingAuthority = .{};
+    var authority = memoryAuthorityForTesting();
     var first = try authority.acquire(key, 1, 0);
     try authority.revoke(&first);
     var encoded: [authority_file_max]u8 = undefined;
@@ -819,7 +832,7 @@ test "fencing checkpoint preserves token monotonicity across restart" {
 
 test "lease renewal failure enters recovery only and gateway checks clock" {
     const key: DomainKey = .{ .exchange_account = 900, .decision_domain = 1 };
-    var authority: FencingAuthority = .{};
+    var authority = memoryAuthorityForTesting();
     var lease = try authority.acquire(key, 1, 0);
     var guard = GatewayLeaseGuard{ .authority = &authority, .lease = &lease };
     try guard.check(100, lease.token, true);
@@ -849,7 +862,7 @@ test "failover fences old node before allocating a new token" {
 
 test "network partition and untrusted state never auto promote" {
     const key: DomainKey = .{ .exchange_account = 900, .decision_domain = 1 };
-    var authority: FencingAuthority = .{};
+    var authority = memoryAuthorityForTesting();
     var old_lease = try authority.acquire(key, 1, 0);
     var fence: NodeFence = .{};
     try fence.bootstrap(1);

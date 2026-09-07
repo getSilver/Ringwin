@@ -637,7 +637,10 @@ pub const LinuxFileAdapter = struct {
     fn persistSegment(self: *LinuxFileAdapter, io: std.Io, stream: *Stream, sync: bool) !void {
         const identity = stream.identity;
         const name = try segmentName(identity, stream.segment_index);
-        try writeAtomicFile(self.dir, io, name.slice(), stream.journal.bytes(), sync);
+        // Replacing a segment with an unsynchronised inode can lose an older
+        // committed prefix on power failure, so segment publication is always
+        // durable even when the following manifest update is only advisory.
+        try writeAtomicFile(self.dir, io, name.slice(), stream.journal.bytes(), true);
         const entry = try findManifest(&self.manifest, identity, stream.segment_index, true);
         entry.records = @intCast(stream.journal.records);
         entry.first_sequence = if (stream.journal.records == 0) stream.journal.last_sequence + 1 else stream.journal.last_sequence - stream.journal.records + 1;

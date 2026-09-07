@@ -92,8 +92,6 @@ Status: active
 - 三家生产 ExchangeAccount、区域 endpoint、允许 Instrument 与最终 AccountSafetyCeiling。
 - NodeFence 的生产 adapter 是出口防火墙、Venue IP 白名单控制还是独立凭证吊销。
 - 小资金 Canary 的绝对资金上限、最大单笔、日累计风险与人工值守窗口。
-- 现有 Web 控制面的源码或 ReleaseArtifact 位置、版本身份和当前鉴权能力；票 08 执行时必须绑定，
-  但不得以此为理由另建 CLI。
 
 这些值必须在对应票执行时由实际节点、账户和 SystemOwner 决策冻结，不能由开发 fixture 推断。
 

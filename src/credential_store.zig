@@ -103,7 +103,7 @@ pub const SecretMaterial = struct {
     }
 };
 
-pub const PasswordSource = struct {
+const PasswordSource = struct {
     kind: InputKind,
     bytes: []const u8,
 
