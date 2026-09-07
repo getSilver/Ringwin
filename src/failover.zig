@@ -264,11 +264,15 @@ pub const LinuxFencingStore = struct {
 
     pub fn open(io: std.Io, absolute_path: []const u8) !LinuxFencingStore {
         if (builtin.os.tag != .linux) return error.LinuxFencingStoreRequired;
-        std.Io.Dir.createDirAbsolute(io, absolute_path, .default_dir) catch |err| switch (err) {
+        const private_dir_permissions = std.Io.File.Permissions.fromMode(0o700);
+        std.Io.Dir.createDirAbsolute(io, absolute_path, private_dir_permissions) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
-        return .{ .io = io, .dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{}) };
+        const dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{});
+        errdefer dir.close(io);
+        try dir.setPermissions(io, private_dir_permissions);
+        return .{ .io = io, .dir = dir };
     }
 
     pub fn close(self: *LinuxFencingStore) void {
@@ -305,7 +309,10 @@ pub const LinuxFencingStore = struct {
         var encoded: [authority_file_max]u8 = undefined;
         const bytes = authority.encode(&encoded);
         {
-            var file = try self.dir.createFile(self.io, "authority.tmp", .{ .truncate = true });
+            var file = try self.dir.createFile(self.io, "authority.tmp", .{
+                .truncate = true,
+                .permissions = std.Io.File.Permissions.fromMode(0o600),
+            });
             defer file.close(self.io);
             try file.writeStreamingAll(self.io, bytes);
             try file.sync(self.io);
