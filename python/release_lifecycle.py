@@ -11,6 +11,8 @@ import hashlib
 import hmac
 import json
 import os
+import re
+import secrets
 import shutil
 import threading
 from dataclasses import dataclass
@@ -171,11 +173,34 @@ class FilesystemApplier:
         self.version_root = os.path.realpath(version_root)
         self.systemd_runner = systemd_runner
 
+    def _sync_root(self) -> None:
+        if os.name == "posix":
+            descriptor = os.open(self.version_root, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+
+    def _publish_pointer(self, target: str) -> None:
+        pointer = os.path.join(self.version_root, "current")
+        temporary = os.path.join(
+            self.version_root, f".current.{secrets.token_hex(8)}.tmp")
+        os.symlink(target, temporary, target_is_directory=True)
+        try:
+            os.replace(temporary, pointer)
+            self._sync_root()
+        finally:
+            if os.path.lexists(temporary):
+                os.unlink(temporary)
+
     def activate(self, artifact: ReleaseArtifact) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", artifact.artifact_id):
+            raise ReleaseError("release artifact identity is unsafe for a version directory")
         os.makedirs(self.version_root, mode=0o750, exist_ok=True)
         final_dir = os.path.join(self.version_root, artifact.artifact_id)
-        temporary_dir = f"{final_dir}.tmp"
-        shutil.rmtree(temporary_dir, ignore_errors=True)
+        temporary_dir = os.path.join(
+            self.version_root,
+            f".{artifact.artifact_id}.{secrets.token_hex(8)}.tmp")
         os.makedirs(temporary_dir, mode=0o750)
         try:
             payload = os.path.join(temporary_dir, "ringwin")
@@ -190,18 +215,41 @@ class FilesystemApplier:
                     os.fsync(directory_fd)
                 finally:
                     os.close(directory_fd)
-            if os.path.exists(final_dir):
-                shutil.rmtree(final_dir)
-            os.replace(temporary_dir, final_dir)
-            if self.systemd_runner is not None:
-                self.systemd_runner(["systemctl", "reload-or-restart", "ringwin-role.target"])
             pointer = os.path.join(self.version_root, "current")
-            temporary_pointer = f"{pointer}.tmp"
-            with open(temporary_pointer, "w", encoding="ascii", newline="\n") as handle:
-                handle.write(artifact.artifact_id + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary_pointer, pointer)
+            if os.path.exists(final_dir):
+                deployed_payload = os.path.join(final_dir, "ringwin")
+                with open(deployed_payload, "rb") as handle:
+                    deployed_hash = hashlib.sha256(handle.read()).hexdigest()
+                if not hmac.compare_digest(deployed_hash, artifact.payload_sha256):
+                    raise ReleaseError("artifact identity already names different payload bytes")
+                shutil.rmtree(temporary_dir)
+            else:
+                os.replace(temporary_dir, final_dir)
+                self._sync_root()
+
+            previous_target = None
+            if os.path.islink(pointer):
+                previous_target = os.readlink(pointer)
+            elif os.path.lexists(pointer):
+                raise ReleaseError("current version pointer is not a symlink")
+
+            self._publish_pointer(artifact.artifact_id)
+            try:
+                if self.systemd_runner is not None:
+                    self.systemd_runner(
+                        ["systemctl", "reload-or-restart", "ringwin-role.target"])
+            except Exception:
+                if previous_target is None:
+                    os.unlink(pointer)
+                    self._sync_root()
+                else:
+                    self._publish_pointer(previous_target)
+                    try:
+                        self.systemd_runner(
+                            ["systemctl", "reload-or-restart", "ringwin-role.target"])
+                    except Exception:
+                        pass
+                raise
         except Exception:
             shutil.rmtree(temporary_dir, ignore_errors=True)
             raise

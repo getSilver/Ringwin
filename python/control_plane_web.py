@@ -229,10 +229,6 @@ class ControlPlaneApp:
             secret = self.totp.initialize()
         return 200, {"ok": True, "totp_secret": secret}
 
-    def initialize_totp(self) -> tuple[int, dict]:
-        secret = self.totp.read_secret()
-        return 200, {"ok": True, "totp_secret": secret}
-
     def login(self, passphrase: str, code: str, client_identity: str) -> tuple[int, dict]:
         if not self.rate_limiter.check(client_identity, self.clock):
             return 429, {"ok": False, "error": "rate limited"}
@@ -570,7 +566,6 @@ def make_handler(app: ControlPlaneApp):
                 "/operator-records": lambda: self._get(app.operator_records),
                 "/api/projection": lambda: self._get(app.projection),
                 "/api/releases": lambda: self._get(app.releases),
-                "/totp-secret": lambda: self._get(lambda headers: app.initialize_totp()),
             }
             handler = routes.get(self.path)
             if handler is None:

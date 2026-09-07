@@ -11,6 +11,8 @@ Storage layout under one runtime directory:
   session.json     {token_hash, expires_at} of the single active session
 """
 
+from __future__ import annotations
+
 import base64
 import hashlib
 import hmac
@@ -29,6 +31,43 @@ TOTP_WINDOW_STEPS = 1
 SESSION_TTL_SECONDS = 900
 RATE_LIMIT_MAX_FAILURES = 5
 RATE_LIMIT_COOLDOWN_SECONDS = 60
+
+
+def _write_private_atomic(path: str, contents: str, *, create_only: bool = False) -> None:
+    """Durably publish a complete owner-authentication file with mode 0600."""
+    directory = os.path.dirname(os.path.abspath(path))
+    temporary = os.path.join(
+        directory, f".{os.path.basename(path)}.{secrets.token_hex(8)}.tmp")
+    descriptor = None
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor = None
+            handle.write(contents)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if create_only:
+            try:
+                os.link(temporary, path)
+            except FileExistsError as error:
+                raise PermissionError(f"{os.path.basename(path)} already initialized") from error
+            os.unlink(temporary)
+        else:
+            os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        if os.name == "posix":
+            directory_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def default_clock() -> int:
@@ -55,8 +94,7 @@ class PassphraseStore:
             "n": SCRYPT_N, "r": SCRYPT_R, "p": SCRYPT_P,
             "hash": digest.hex(),
         }
-        with open(self.path, "w") as handle:
-            json.dump(payload, handle)
+        _write_private_atomic(self.path, json.dumps(payload), create_only=True)
 
     def verify(self, passphrase: str, clock=default_clock) -> bool:
         if not self.exists():
@@ -88,8 +126,7 @@ class TotpStore:
         return secret
 
     def _write_secret(self, secret: str) -> None:
-        with open(self.path, "w") as handle:
-            handle.write(secret)
+        _write_private_atomic(self.path, secret, create_only=True)
 
     def read_secret(self) -> str:
         with open(self.path) as handle:
@@ -122,8 +159,8 @@ class TotpStore:
         cutoff = (now // TOTP_STEP) - 10 * 60
         kept = sorted(counter for counter in counters
                       if counter >= cutoff - TOTP_WINDOW_STEPS)
-        with open(self.consumed_path, "w") as handle:
-            handle.write("\n".join(str(counter) for counter in kept))
+        _write_private_atomic(
+            self.consumed_path, "\n".join(str(counter) for counter in kept))
 
 
 def hotp(base32_secret: str, counter: int) -> str:
@@ -148,8 +185,7 @@ class SessionManager:
         token = secrets.token_urlsafe(32)
         payload = {"token_hash": hashlib.sha256(token.encode()).hexdigest(),
                    "expires_at": clock() + self.ttl_seconds}
-        with open(self.path, "w") as handle:
-            json.dump(payload, handle)
+        _write_private_atomic(self.path, json.dumps(payload))
         return token
 
     def validate(self, token: str, clock=default_clock) -> bool:
@@ -168,8 +204,7 @@ class SessionManager:
         with open(self.path) as handle:
             payload = json.load(handle)
         payload["expires_at"] = clock() + self.ttl_seconds
-        with open(self.path, "w") as handle:
-            json.dump(payload, handle)
+        _write_private_atomic(self.path, json.dumps(payload))
         return True
 
     def revoke(self) -> None:

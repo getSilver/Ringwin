@@ -45,6 +45,40 @@ def write_artifact(root: str, artifact_id: str, payload: bytes, signature_key: b
     return path
 
 
+def filesystem_phase(root: str, good: str) -> None:
+    if os.name == "nt":
+        return
+    observed_at_restart = []
+    filesystem_root = os.path.join(root, "filesystem-versions")
+
+    def restart(_command):
+        pointer = os.path.join(filesystem_root, "current")
+        observed_at_restart.append(os.path.basename(os.path.realpath(pointer)))
+        if observed_at_restart[-1] == "release-b":
+            raise RuntimeError("candidate restart failed")
+
+    manager = release_lifecycle.ReleaseManager(
+        root, filesystem_root, os.path.join(root, "filesystem-records.jsonl"), KEY,
+        candidate_check=lambda artifact: True,
+        applier=release_lifecycle.FilesystemApplier(
+            filesystem_root, systemd_runner=restart),
+    )
+    result = manager.deploy(103, good, expected_active=None)
+    expect(result["status"] == "activated", "filesystem release activation")
+    current = os.path.join(filesystem_root, "current")
+    expect(os.path.islink(current), "current version pointer must be a symlink")
+    expect(os.path.basename(os.path.realpath(current)) == "release-a",
+           "atomic current version pointer")
+    expect(observed_at_restart == ["release-a"],
+           "current must be published before systemd restart")
+
+    second_manifest = write_artifact(root, "release-b", b"second-release", KEY)
+    failed = manager.deploy(104, second_manifest, expected_active="release-a")
+    expect(failed["status"] == "rejected", "failed restart must reject activation")
+    expect(os.path.basename(os.path.realpath(current)) == "release-a",
+           "failed restart must restore the previous current release")
+
+
 def main() -> None:
     root = tempfile.mkdtemp(prefix="ringwin-release-")
     try:
@@ -73,18 +107,7 @@ def main() -> None:
         expect(rollback["status"] == "activated", "forward rollback is a new activation")
         expect(rollback["activation_sequence"] == 2, "activation sequence only moves forward")
 
-        filesystem_manager = release_lifecycle.ReleaseManager(
-            root, os.path.join(root, "filesystem-versions"),
-            os.path.join(root, "filesystem-records.jsonl"), KEY,
-            candidate_check=lambda artifact: True,
-            applier=release_lifecycle.FilesystemApplier(
-                os.path.join(root, "filesystem-versions")),
-        )
-        filesystem_result = filesystem_manager.deploy(103, good, expected_active=None)
-        expect(filesystem_result["status"] == "activated", "filesystem release activation")
-        with open(os.path.join(root, "filesystem-versions", "current"),
-                  encoding="ascii") as handle:
-            expect(handle.read().strip() == "release-a", "atomic current version pointer")
+        filesystem_phase(root, good)
 
         outbox = release_lifecycle.LifecycleOutbox(os.path.join(root, "outbox"), KEY)
         first = outbox.submit(200, "credential_rotate", "okx-demo-account", {"version": 2})
