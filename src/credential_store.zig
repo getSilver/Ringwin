@@ -122,7 +122,7 @@ const PasswordSource = struct {
 
 /// Reads one line from an interactive TTY or an inherited restricted fd.
 /// There is intentionally no constructor for argv/environment/file-path input.
-pub fn readPassword(io: std.Io, file: std.Io.File, kind: InputKind, destination: []u8) !PasswordSource {
+fn readPassword(io: std.Io, file: std.Io.File, kind: InputKind, destination: []u8) !PasswordSource {
     if (kind == .test_only) return error.TestPasswordSourceNotAllowed;
     if (kind == .tty and !(try file.isTty(io))) return error.NotATty;
     var length: usize = 0;
@@ -235,26 +235,56 @@ pub const CredentialStore = struct {
         self.dir.close(io);
     }
 
-    pub fn stage(self: *CredentialStore, io: std.Io, metadata: Metadata, material: *SecretMaterial, password: PasswordSource) !void {
+    pub fn stage(self: *CredentialStore, io: std.Io, metadata: Metadata, material: *SecretMaterial, file: std.Io.File, input_kind: InputKind, password_buffer: []u8) !void {
+        const password = try readPassword(io, file, input_kind, password_buffer);
+        defer std.crypto.secureZero(u8, password_buffer);
+        try self.stageWithPassword(io, metadata, material, password);
+    }
+
+    pub fn activate(self: *CredentialStore, io: std.Io, kind: CredentialKind, file: std.Io.File, input_kind: InputKind, password_buffer: []u8, expected: Metadata) !void {
+        const password = try readPassword(io, file, input_kind, password_buffer);
+        defer std.crypto.secureZero(u8, password_buffer);
+        try self.activateWithPassword(io, kind, password, expected);
+    }
+
+    pub fn retire(self: *CredentialStore, io: std.Io, kind: CredentialKind, file: std.Io.File, input_kind: InputKind, password_buffer: []u8, expected: Metadata) !void {
+        const password = try readPassword(io, file, input_kind, password_buffer);
+        defer std.crypto.secureZero(u8, password_buffer);
+        try self.retireWithPassword(io, kind, password, expected);
+    }
+
+    pub fn revoke(self: *CredentialStore, io: std.Io, kind: CredentialKind, file: std.Io.File, input_kind: InputKind, password_buffer: []u8, expected: Metadata) !void {
+        const password = try readPassword(io, file, input_kind, password_buffer);
+        defer std.crypto.secureZero(u8, password_buffer);
+        try self.revokeWithPassword(io, kind, password, expected);
+    }
+
+    pub fn admitObservationReadOnly(self: *CredentialStore, io: std.Io, file: std.Io.File, input_kind: InputKind, password_buffer: []u8, expected: Metadata, runtime: RuntimeContext, now_unix: u64, self_check: SecuritySelfCheck) !Admission {
+        const password = try readPassword(io, file, input_kind, password_buffer);
+        defer std.crypto.secureZero(u8, password_buffer);
+        return self.admitObservationWithPassword(io, password, expected, runtime, now_unix, .native, self_check);
+    }
+
+    fn stageWithPassword(self: *CredentialStore, io: std.Io, metadata: Metadata, material: *SecretMaterial, password: PasswordSource) !void {
         if (!self.admission_gate) return error.SecurityGateClosed;
         if (metadata.state != .staged) return error.InvalidInitialState;
         defer material.clear();
         try self.writeEncrypted(io, metadata, material, password);
     }
 
-    pub fn activate(self: *CredentialStore, io: std.Io, kind: CredentialKind, password: PasswordSource, expected: Metadata) !void {
+    fn activateWithPassword(self: *CredentialStore, io: std.Io, kind: CredentialKind, password: PasswordSource, expected: Metadata) !void {
         try self.transition(io, kind, password, expected, .active);
     }
 
-    pub fn retire(self: *CredentialStore, io: std.Io, kind: CredentialKind, password: PasswordSource, expected: Metadata) !void {
+    fn retireWithPassword(self: *CredentialStore, io: std.Io, kind: CredentialKind, password: PasswordSource, expected: Metadata) !void {
         try self.transition(io, kind, password, expected, .retiring);
     }
 
-    pub fn revoke(self: *CredentialStore, io: std.Io, kind: CredentialKind, password: PasswordSource, expected: Metadata) !void {
+    fn revokeWithPassword(self: *CredentialStore, io: std.Io, kind: CredentialKind, password: PasswordSource, expected: Metadata) !void {
         try self.transition(io, kind, password, expected, .revoked);
     }
 
-    pub fn admitObservationReadOnly(self: *CredentialStore, io: std.Io, password: PasswordSource, expected: Metadata, runtime: RuntimeContext, now_unix: u64, protection: ProtectionMode, self_check: SecuritySelfCheck) !Admission {
+    fn admitObservationWithPassword(self: *CredentialStore, io: std.Io, password: PasswordSource, expected: Metadata, runtime: RuntimeContext, now_unix: u64, protection: ProtectionMode, self_check: SecuritySelfCheck) !Admission {
         if (protection == .test_bypass and !builtin.is_test) return error.TestProtectionModeNotAllowed;
         if (!self.admission_gate or !self_check.passes()) return error.SecurityGateClosed;
         if (expected.kind != .observation or expected.state != .active) return error.ObservationCredentialRequired;
@@ -270,7 +300,7 @@ pub const CredentialStore = struct {
 
     /// Execution credentials remain a separate file and authority. Ticket 04
     /// cannot turn them into a send-capable gateway.
-    pub fn admitExecution(_: *CredentialStore, _: std.Io, _: PasswordSource, _: Metadata, _: ProtectionMode, _: SecuritySelfCheck) !Admission {
+    pub fn admitExecution(_: *CredentialStore) !Admission {
         return error.ExecutionAdmissionOutOfScope;
     }
 
@@ -593,16 +623,35 @@ pub fn runLinuxAcceptance(init: std.process.Init) !void {
     defer store.close(init.io);
     var metadata = try Metadata.init(.observation, 42, .production, 4_000_000_000, "obs-prod-42", "linux-node-1", "198.51.100.42");
     var material = try SecretMaterial.init("observation-key", "observation-secret", "observation-pass");
-    const password = PasswordSource.restricted("fixture-password");
-    try store.stage(init.io, metadata, &material, password);
-    try store.activate(init.io, .observation, password, metadata);
+    var password_pipe: [2]std.posix.fd_t = undefined;
+    if (std.os.linux.errno(std.os.linux.pipe(&password_pipe)) != .SUCCESS)
+        return error.PasswordPipeFailed;
+    var read_file: std.Io.File = .{
+        .handle = password_pipe[0],
+        .flags = .{ .nonblocking = false },
+    };
+    defer read_file.close(init.io);
+    const fixture_password = "fixture-password\n";
+    const write_result = std.os.linux.write(
+        password_pipe[1],
+        fixture_password.ptr,
+        fixture_password.len,
+    );
+    _ = std.os.linux.close(password_pipe[1]);
+    if (std.os.linux.errno(write_result) != .SUCCESS or write_result != fixture_password.len)
+        return error.PasswordPipeFailed;
+    var password_bytes: [max_password]u8 = undefined;
+    defer std.crypto.secureZero(u8, &password_bytes);
+    const password = try readPassword(init.io, read_file, .restricted_fd, &password_bytes);
+    try store.stageWithPassword(init.io, metadata, &material, password);
+    try store.activateWithPassword(init.io, .observation, password, metadata);
     metadata.state = .active;
     metadata.generation += 1;
     const runtime = RuntimeContext{ .account = 42, .environment = .production, .endpoint_environment = .production, .node_id = "linux-node-1", .egress_ip = "198.51.100.42" };
-    const admission = try store.admitObservationReadOnly(init.io, password, metadata, runtime, 1_700_000_000, .native, .{});
+    const admission = try store.admitObservationWithPassword(init.io, password, metadata, runtime, 1_700_000_000, .native, .{});
     if (!admission.isReady() or admission.send_capability or admission.trading_enabled) return error.SecurityGateClosed;
-    try store.revoke(init.io, .observation, password, metadata);
-    const revoked = store.admitObservationReadOnly(init.io, password, metadata, runtime, 1_700_000_000, .native, .{});
+    try store.revokeWithPassword(init.io, .observation, password, metadata);
+    const revoked = store.admitObservationWithPassword(init.io, password, metadata, runtime, 1_700_000_000, .native, .{});
     if (revoked != error.CredentialRevoked) return error.RevocationNotPersistent;
     const evidence = AcceptanceEvidence{ .observation_state = admission.state, .send_capability = admission.send_capability, .execution_separate = true, .encrypted_file = true, .authenticated_metadata = true, .lifecycle_persisted = true };
     var output: [2048]u8 = undefined;
@@ -619,20 +668,20 @@ test "credential metadata and secret payload are authenticated" {
     const metadata = try Metadata.init(.observation, 7, .production, 4_000_000_000, "obs", "node", "203.0.113.7");
     var material = try SecretMaterial.init("key", "secret", "pass");
     const password = PasswordSource.testOnly("password");
-    try store.stage(std.testing.io, metadata, &material, password);
-    try store.activate(std.testing.io, .observation, password, metadata);
+    try store.stageWithPassword(std.testing.io, metadata, &material, password);
+    try store.activateWithPassword(std.testing.io, .observation, password, metadata);
     var active = metadata;
     active.state = .active;
     active.generation += 1;
     const runtime = RuntimeContext{ .account = 7, .environment = .production, .endpoint_environment = .production, .node_id = "node", .egress_ip = "203.0.113.7" };
-    const admission = try store.admitObservationReadOnly(std.testing.io, password, active, runtime, 1, .test_bypass, .{});
+    const admission = try store.admitObservationWithPassword(std.testing.io, password, active, runtime, 1, .test_bypass, .{});
     try std.testing.expect(admission.isReady());
     try std.testing.expect(!admission.send_capability);
     var wrong_runtime = runtime;
     wrong_runtime.egress_ip = "203.0.113.99";
-    try std.testing.expectError(error.RuntimeContextMismatch, store.admitObservationReadOnly(std.testing.io, password, active, wrong_runtime, 1, .test_bypass, .{}));
-    try std.testing.expectError(error.CredentialExpired, store.admitObservationReadOnly(std.testing.io, password, active, runtime, 4_000_000_000, .test_bypass, .{}));
-    try std.testing.expectError(error.AuthenticationFailed, store.admitObservationReadOnly(std.testing.io, PasswordSource.testOnly("wrong"), active, runtime, 1, .test_bypass, .{}));
+    try std.testing.expectError(error.RuntimeContextMismatch, store.admitObservationWithPassword(std.testing.io, password, active, wrong_runtime, 1, .test_bypass, .{}));
+    try std.testing.expectError(error.CredentialExpired, store.admitObservationWithPassword(std.testing.io, password, active, runtime, 4_000_000_000, .test_bypass, .{}));
+    try std.testing.expectError(error.AuthenticationFailed, store.admitObservationWithPassword(std.testing.io, PasswordSource.testOnly("wrong"), active, runtime, 1, .test_bypass, .{}));
 }
 
 test "policy, lifecycle, and security failures close admission" {
@@ -643,19 +692,19 @@ test "policy, lifecycle, and security failures close admission" {
     var metadata = try Metadata.init(.observation, 8, .production, 4_000_000_000, "obs", "node", "203.0.113.8");
     var material = try SecretMaterial.init("key", "secret", "pass");
     const password = PasswordSource.testOnly("password");
-    try store.stage(std.testing.io, metadata, &material, password);
-    try store.activate(std.testing.io, .observation, password, metadata);
+    try store.stageWithPassword(std.testing.io, metadata, &material, password);
+    try store.activateWithPassword(std.testing.io, .observation, password, metadata);
     metadata.state = .active;
     metadata.generation += 1;
     var check = SecuritySelfCheck{};
     check.dont_dump = false;
     const runtime = RuntimeContext{ .account = 8, .environment = .production, .endpoint_environment = .production, .node_id = "node", .egress_ip = "203.0.113.8" };
-    try std.testing.expectError(error.SecurityGateClosed, store.admitObservationReadOnly(std.testing.io, password, metadata, runtime, 1, .test_bypass, check));
+    try std.testing.expectError(error.SecurityGateClosed, store.admitObservationWithPassword(std.testing.io, password, metadata, runtime, 1, .test_bypass, check));
     try std.testing.expect(!allowsReadOnly(.order_write));
     try std.testing.expect(!allowsReadOnly(.funds_transfer));
-    try std.testing.expectError(error.ExecutionAdmissionOutOfScope, store.admitExecution(std.testing.io, password, metadata, .test_bypass, .{}));
-    try store.revoke(std.testing.io, .observation, password, metadata);
-    try std.testing.expectError(error.InvalidCredentialTransition, store.activate(std.testing.io, .observation, password, metadata));
+    try std.testing.expectError(error.ExecutionAdmissionOutOfScope, store.admitExecution());
+    try store.revokeWithPassword(std.testing.io, .observation, password, metadata);
+    try std.testing.expectError(error.InvalidCredentialTransition, store.activateWithPassword(std.testing.io, .observation, password, metadata));
 }
 
 test "Secret exposes only read-only material and reports page protection" {

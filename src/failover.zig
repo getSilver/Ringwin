@@ -102,7 +102,7 @@ pub const PrimaryLease = struct {
     }
 };
 
-pub const FencingAuthority = struct {
+const FencingAuthority = struct {
     records: [max_domains]AuthorityRecord = undefined,
     count: usize = 0,
     available: bool = true,
@@ -298,6 +298,14 @@ pub const LinuxFencingStore = struct {
             };
             if (amount == 0) break;
             length += amount;
+        }
+        if (length == encoded.len) {
+            var extra: [1]u8 = undefined;
+            const extra_len = file.readStreaming(self.io, &.{&extra}) catch |err| switch (err) {
+                error.EndOfStream => 0,
+                else => return err,
+            };
+            if (extra_len != 0) return error.InvalidFencingCheckpoint;
         }
         var authority = try FencingAuthority.decode(encoded[0..length]);
         authority.durable = true;

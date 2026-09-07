@@ -11,9 +11,10 @@ pub const max_frame_bytes = 1;
 
 pub const Role = enum { engine, market_feed, execution_gateway, telemetry, control_fence };
 pub const Phase = enum { stopped, starting, ready, recovering, trading, draining, forced_stop, failed };
+pub const RolePhase = enum { stopped, starting, ready, recovering, draining, forced_stop, failed };
 pub const Venue = enum { simulated };
-pub const Command = enum(u8) { authorize = 'A', drain = 'D', stop = 'S' };
-pub const Status = enum(u8) { hello = 'H', ready = 'R', trading = 'A', draining = 'G', stopped = 'T', forced_stop = 'F', failed = 'X' };
+pub const Command = enum(u8) { enable_risk = 'A', drain = 'D', stop = 'S' };
+pub const Status = enum(u8) { hello = 'H', ready = 'R', risk_enabled = 'A', draining = 'G', stopped = 'T', forced_stop = 'F', failed = 'X' };
 
 pub const BoundedQueue = struct {
     values: [max_control_queue]Command = undefined,
@@ -38,9 +39,9 @@ pub const BoundedQueue = struct {
 };
 
 pub const RoleState = struct {
-    phase: Phase = .stopped,
+    phase: RolePhase = .stopped,
     generation: u64 = 0,
-    trading_authorized: bool = false,
+    risk_gate_open: bool = false,
 };
 
 pub const ChainState = struct {
@@ -73,9 +74,7 @@ pub const ChainState = struct {
         self.phase = .trading;
         self.risk_authorized = true;
         for (&self.roles, 0..) |*role, index| {
-            const owns_authorization = ownsTradingAuthorization(@enumFromInt(index));
-            role.phase = if (owns_authorization) .trading else .ready;
-            role.trading_authorized = owns_authorization;
+            role.risk_gate_open = enforcesRiskGate(@enumFromInt(index));
         }
     }
 
@@ -85,7 +84,7 @@ pub const ChainState = struct {
         self.risk_authorized = false;
         for (&self.roles) |*role| {
             role.phase = .draining;
-            role.trading_authorized = false;
+            role.risk_gate_open = false;
         }
     }
 
@@ -101,7 +100,7 @@ pub const ChainState = struct {
         self.risk_authorized = false;
         for (&self.roles) |*role| {
             role.phase = .forced_stop;
-            role.trading_authorized = false;
+            role.risk_gate_open = false;
         }
     }
 
@@ -116,7 +115,7 @@ pub fn roleName(role: Role) []const u8 {
     return @tagName(role);
 }
 
-fn ownsTradingAuthorization(role: Role) bool {
+fn enforcesRiskGate(role: Role) bool {
     return role == .engine or role == .execution_gateway;
 }
 
@@ -214,7 +213,7 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, gene
     try writeStatus(&stream, init.io, .ready);
 
     var draining = false;
-    var trading_authorized = false;
+    var risk_gate_open = false;
     while (true) {
         const command = waitForCommand(&stream, init.io, draining) catch |err| {
             if (err == error.DrainDeadline) {
@@ -229,7 +228,7 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, gene
                 try writeStatus(&stream, init.io, .failed);
                 return error.RoleIpcDisconnected;
             }
-            trading_authorized = false;
+            risk_gate_open = false;
             draining = true;
             try writeStatus(&stream, init.io, .draining);
             // Role-specific output draining is not wired yet. Reporting a
@@ -239,14 +238,14 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, gene
             return;
         };
         switch (command) {
-            .authorize => {
-                if (!ownsTradingAuthorization(role) or draining or trading_authorized)
+            .enable_risk => {
+                if (!enforcesRiskGate(role) or draining or risk_gate_open)
                     return error.InvalidRoleTransition;
-                trading_authorized = true;
-                try writeStatus(&stream, init.io, .trading);
+                risk_gate_open = true;
+                try writeStatus(&stream, init.io, .risk_enabled);
             },
             .drain => {
-                trading_authorized = false;
+                risk_gate_open = false;
                 draining = true;
                 try writeStatus(&stream, init.io, .draining);
             },
@@ -333,9 +332,9 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
     if (!chain.allReady()) return error.RoleChainNotReady;
     try chain.enableTrading();
     for (&streams, roles) |*stream, role| {
-        if (!ownsTradingAuthorization(role)) continue;
-        try sendCommand(stream, init.io, .authorize);
-        try expectStatus(stream, init.io, .trading);
+        if (!enforcesRiskGate(role)) continue;
+        try sendCommand(stream, init.io, .enable_risk);
+        try expectStatus(stream, init.io, .risk_enabled);
     }
     try chain.beginDrain();
     for (&streams) |*stream| {
@@ -357,8 +356,8 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
     defer forced_stream.close(init.io);
     try expectStatus(&forced_stream, init.io, .hello);
     try expectStatus(&forced_stream, init.io, .ready);
-    try sendCommand(&forced_stream, init.io, .authorize);
-    try expectStatus(&forced_stream, init.io, .trading);
+    try sendCommand(&forced_stream, init.io, .enable_risk);
+    try expectStatus(&forced_stream, init.io, .risk_enabled);
     try sendCommand(&forced_stream, init.io, .drain);
     try expectStatus(&forced_stream, init.io, .draining);
     try expectStatus(&forced_stream, init.io, .forced_stop);
@@ -373,8 +372,8 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
     defer restart_stream.close(init.io);
     try expectStatus(&restart_stream, init.io, .hello);
     try expectStatus(&restart_stream, init.io, .ready);
-    try sendCommand(&restart_stream, init.io, .authorize);
-    try expectStatus(&restart_stream, init.io, .trading);
+    try sendCommand(&restart_stream, init.io, .enable_risk);
+    try expectStatus(&restart_stream, init.io, .risk_enabled);
     try std.posix.kill(restart_child.id.?, std.posix.SIG.TERM);
     try expectStatus(&restart_stream, init.io, .draining);
     try expectStatus(&restart_stream, init.io, .forced_stop);
@@ -406,7 +405,7 @@ test "role chain revokes risk before draining and force stop" {
     try chain.enableTrading();
     try std.testing.expect(chain.risk_authorized);
     var authorized_roles: usize = 0;
-    for (chain.roles) |role| authorized_roles += @intFromBool(role.trading_authorized);
+    for (chain.roles) |role| authorized_roles += @intFromBool(role.risk_gate_open);
     try std.testing.expectEqual(@as(usize, 2), authorized_roles);
     try chain.beginDrain();
     try std.testing.expect(!chain.risk_authorized);
