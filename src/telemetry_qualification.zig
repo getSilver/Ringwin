@@ -295,6 +295,41 @@ pub const RunEvidence = struct {
         self.merged = .{};
         for (&self.shards) |*shard| self.merged.merge(shard);
     }
+
+    fn supportsPassedConclusion(self: *const RunEvidence, manifest: *const BenchmarkManifest) bool {
+        if (!manifest.observation_enabled or !manifest.forced_metrics_enabled or
+            !self.coordinated_omission_free or !self.correctness_ok or
+            !self.simulated_venue or self.environment_evidence.len == 0 or
+            !self.manifest_match or !self.observation_budget.within_budget or
+            self.publisher_dropped != 0 or self.publisher_failures != 0 or
+            self.publisher_restarts != 0)
+            return false;
+
+        const calculated = ObservationBudget.calculate(
+            self.observation_budget.disabled_ns_per_event,
+            self.observation_budget.enabled_ns_per_event,
+            self.observation_budget.budget_basis_points,
+        ) catch return false;
+        if (!std.meta.eql(calculated, self.observation_budget)) return false;
+
+        for (&self.shards) |*shard| {
+            const counters = shard.counters;
+            if (counters.cpu_samples == 0 or counters.irq_samples == 0 or
+                counters.reconciliation == 0 or counters.ledger == 0 or
+                counters.queue_capacity == 0 or
+                counters.queue_high_water > counters.queue_capacity or
+                counters.unknown != 0 or counters.clock_anomalies != 0 or
+                counters.numa_migrations != 0 or counters.disk_errors != 0 or
+                counters.io_uring_errors != 0 or counters.transport_errors != 0 or
+                counters.correctness_failures != 0 or shard.publish_dropped != 0)
+                return false;
+            for (&shard.latency) |*histogram| {
+                if (histogram.samples == 0 or histogram.overflow != 0) return false;
+                _ = histogram.percentile(99, 100) catch return false;
+            }
+        }
+        return true;
+    }
 };
 
 pub const QualificationReport = struct {
@@ -304,10 +339,14 @@ pub const QualificationReport = struct {
     run_count: usize = 0,
     sealed: bool = false,
 
-    pub fn append(self: *QualificationReport, run: RunEvidence) !void {
+    pub fn append(self: *QualificationReport, supplied: RunEvidence) !void {
         if (self.sealed) return error.ReportSealed;
         if (self.run_count == self.runs.len) return error.ReportFull;
+        var run = supplied;
         if (!run.simulated_venue) return error.MissingEnvironmentEvidence;
+        run.mergeShards();
+        if (run.status == .passed and !run.supportsPassedConclusion(&self.manifest))
+            return error.InvalidPassedEvidence;
         self.runs[self.run_count] = run;
         self.run_count += 1;
     }
@@ -547,9 +586,9 @@ test "publisher drops without blocking and observability revokes risk" {
     try std.testing.expectEqual(ObservabilityState.risk_revoked, try observabilityState(revoke_risk_after_ns, 0));
 }
 
-test "qualification report preserves passed failed and invalid run states" {
+test "qualification report preserves failed and invalid run states" {
     var report: QualificationReport = .{ .manifest = smokeManifest() };
-    for ([_]RunStatus{ .passed, .failed, .invalid }) |status| {
+    for ([_]RunStatus{ .failed, .invalid }) |status| {
         try report.append(.{
             .run_id = @intFromEnum(status) + 1,
             .status = status,
@@ -565,6 +604,17 @@ test "qualification report preserves passed failed and invalid run states" {
         .reason = Text.literal("immutable"),
         .simulated_venue = true,
     }));
+}
+
+test "caller cannot promote incomplete evidence to passed" {
+    var report: QualificationReport = .{ .manifest = smokeManifest() };
+    try std.testing.expectError(error.InvalidPassedEvidence, report.append(.{
+        .run_id = 1,
+        .status = .passed,
+        .reason = Text.literal("caller-claimed-pass"),
+        .simulated_venue = true,
+    }));
+    try std.testing.expectEqual(@as(usize, 0), report.run_count);
 }
 
 test "manifest mismatch cannot be treated as the same qualification" {

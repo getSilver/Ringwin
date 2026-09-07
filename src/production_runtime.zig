@@ -12,8 +12,8 @@ pub const max_frame_bytes = 1;
 pub const Role = enum { engine, market_feed, execution_gateway, telemetry, control_fence };
 pub const Phase = enum { stopped, starting, ready, recovering, trading, draining, forced_stop, failed };
 pub const Venue = enum { simulated };
-pub const Command = enum(u8) { drain = 'D', stop = 'S' };
-pub const Status = enum(u8) { hello = 'H', ready = 'R', draining = 'G', stopped = 'T', forced_stop = 'F', failed = 'X' };
+pub const Command = enum(u8) { authorize = 'A', drain = 'D', stop = 'S' };
+pub const Status = enum(u8) { hello = 'H', ready = 'R', trading = 'A', draining = 'G', stopped = 'T', forced_stop = 'F', failed = 'X' };
 
 pub const BoundedQueue = struct {
     values: [max_control_queue]Command = undefined,
@@ -209,6 +209,7 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, gene
     try writeStatus(&stream, init.io, .ready);
 
     var draining = false;
+    var trading_authorized = false;
     while (true) {
         const command = waitForCommand(&stream, init.io, draining) catch |err| {
             if (err == error.DrainDeadline) {
@@ -223,11 +224,20 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, gene
                 try writeStatus(&stream, init.io, .failed);
                 return error.RoleIpcDisconnected;
             }
+            trading_authorized = false;
+            draining = true;
             try writeStatus(&stream, init.io, .draining);
-            break;
+            try writeStatus(&stream, init.io, .stopped);
+            return;
         };
         switch (command) {
+            .authorize => {
+                if (draining or trading_authorized) return error.InvalidRoleTransition;
+                trading_authorized = true;
+                try writeStatus(&stream, init.io, .trading);
+            },
             .drain => {
+                trading_authorized = false;
                 draining = true;
                 try writeStatus(&stream, init.io, .draining);
             },
@@ -236,11 +246,6 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, gene
                 return;
             },
         }
-    }
-
-    if (termination_requested.load(.seq_cst)) {
-        try writeStatus(&stream, init.io, .forced_stop);
-        try writeStatus(&stream, init.io, .stopped);
     }
 }
 
@@ -318,6 +323,10 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
     try chain.completeRecovery();
     if (!chain.allReady()) return error.RoleChainNotReady;
     try chain.enableTrading();
+    for (&streams) |*stream| {
+        try sendCommand(stream, init.io, .authorize);
+        try expectStatus(stream, init.io, .trading);
+    }
     try chain.beginDrain();
     for (&streams) |*stream| {
         try sendCommand(stream, init.io, .drain);
@@ -338,7 +347,9 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
     defer forced_stream.close(init.io);
     try expectStatus(&forced_stream, init.io, .hello);
     try expectStatus(&forced_stream, init.io, .ready);
-    try std.posix.kill(forced_child.id.?, std.posix.SIG.TERM);
+    try sendCommand(&forced_stream, init.io, .authorize);
+    try expectStatus(&forced_stream, init.io, .trading);
+    try sendCommand(&forced_stream, init.io, .drain);
     try expectStatus(&forced_stream, init.io, .draining);
     try expectStatus(&forced_stream, init.io, .forced_stop);
     try expectStatus(&forced_stream, init.io, .stopped);
@@ -352,7 +363,10 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
     defer restart_stream.close(init.io);
     try expectStatus(&restart_stream, init.io, .hello);
     try expectStatus(&restart_stream, init.io, .ready);
-    try sendCommand(&restart_stream, init.io, .stop);
+    try sendCommand(&restart_stream, init.io, .authorize);
+    try expectStatus(&restart_stream, init.io, .trading);
+    try std.posix.kill(restart_child.id.?, std.posix.SIG.TERM);
+    try expectStatus(&restart_stream, init.io, .draining);
     try expectStatus(&restart_stream, init.io, .stopped);
     const restart_term = try restart_child.wait(init.io);
     if (restart_term != .exited or restart_term.exited != 0) return error.RestartRecoveryFailed;

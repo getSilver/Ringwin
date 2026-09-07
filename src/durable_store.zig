@@ -18,6 +18,7 @@ pub const max_manifest_entries = 32;
 const manifest_magic: u32 = 0x544e414d; // MANT
 const snapshot_magic: u32 = 0x504e5352; // RSNP
 const format_schema: u16 = 1;
+const manifest_schema: u16 = 2;
 const manifest_header_len = 16;
 const manifest_entry_len = 96;
 const snapshot_header_len = 96;
@@ -153,6 +154,13 @@ fn digest(bytes: []const u8) [Sha256.digest_length]u8 {
     var result: [Sha256.digest_length]u8 = undefined;
     Sha256.hash(bytes, &result, .{});
     return result;
+}
+
+fn manifestChecksum(bytes: []const u8) u32 {
+    var checksum = Crc32c.init();
+    checksum.update(bytes[0..12]);
+    if (bytes.len > manifest_header_len) checksum.update(bytes[manifest_header_len..]);
+    return checksum.final();
 }
 
 fn put(comptime T: type, destination: []u8, offset: usize, value: T) void {
@@ -294,8 +302,16 @@ pub const MemoryAdapter = struct {
 
     fn rotateImpl(context: *anyopaque, _: std.Io, identity: StreamIdentity) anyerror!void {
         const self: *MemoryAdapter = @ptrCast(@alignCast(context));
-        try sealImpl(context, undefined, identity);
         const stream = try findStream(&self.streams, identity, false);
+        if (!stream.journal.sealed) {
+            self.gate = .closed;
+            return error.SegmentMustBeSealedBeforeRotation;
+        }
+        const index = streamIndex(&self.streams, stream);
+        if (self.snapshot_lens[index] == 0 or self.snapshot_barriers[index] != stream.journal.last_sequence) {
+            self.gate = .closed;
+            return error.SnapshotRequiredBeforeRotation;
+        }
         stream.segment_index += 1;
         stream.journal = journal.Journal.initAt(stream.journal.last_sequence + 1);
     }
@@ -406,9 +422,9 @@ pub const LinuxFileAdapter = struct {
             error.FileNotFound => return,
             else => return err,
         };
-        if (len < manifest_header_len or get(u32, bytes[0..], 0) != manifest_magic or get(u16, bytes[0..], 4) != format_schema or get(u16, bytes[0..], 6) != manifest_header_len) return error.InvalidManifest;
+        if (len < manifest_header_len or get(u32, bytes[0..], 0) != manifest_magic or get(u16, bytes[0..], 4) != manifest_schema or get(u16, bytes[0..], 6) != manifest_header_len) return error.InvalidManifest;
         const count = get(u32, bytes[0..], 8);
-        if (count > max_manifest_entries or len != manifest_header_len + count * manifest_entry_len or get(u32, bytes[0..], 12) != Crc32c.hash(bytes[0..12])) return error.InvalidManifest;
+        if (count > max_manifest_entries or len != manifest_header_len + count * manifest_entry_len or get(u32, bytes[0..], 12) != manifestChecksum(bytes[0..len])) return error.InvalidManifest;
         for (0..count) |index| {
             const encoded = bytes[manifest_header_len + index * manifest_entry_len ..][0..manifest_entry_len];
             if (encoded[0] > @intFromEnum(StreamDomain.control)) return error.UnknownStreamDomain;
@@ -516,11 +532,21 @@ pub const LinuxFileAdapter = struct {
 
     fn rotateImpl(context: *anyopaque, io: std.Io, identity: StreamIdentity) anyerror!void {
         const self: *LinuxFileAdapter = @ptrCast(@alignCast(context));
-        try sealImpl(context, io, identity);
         const stream = self.loadStream(io, identity, false) catch |err| {
             self.gate = .closed;
             return err;
         };
+        if (!stream.journal.sealed) {
+            self.gate = .closed;
+            return error.SegmentMustBeSealedBeforeRotation;
+        }
+        const snapshot_index = streamIndex(&self.streams, stream);
+        if (self.snapshot_lens[snapshot_index] == 0)
+            _ = self.loadSnapshot(io, identity, stream, snapshot_index) catch false;
+        if (self.snapshot_lens[snapshot_index] == 0 or self.snapshot_barriers[snapshot_index] != stream.journal.last_sequence) {
+            self.gate = .closed;
+            return error.SnapshotRequiredBeforeRotation;
+        }
         stream.segment_index += 1;
         stream.journal = journal.Journal.initAt(stream.journal.last_sequence + 1);
         self.persistSegment(io, stream, true) catch |err| {
@@ -611,7 +637,7 @@ pub const LinuxFileAdapter = struct {
     fn persistSegment(self: *LinuxFileAdapter, io: std.Io, stream: *Stream, sync: bool) !void {
         const identity = stream.identity;
         const name = try segmentName(identity, stream.segment_index);
-        try writeFile(self.dir, io, name.slice(), stream.journal.bytes(), sync);
+        try writeAtomicFile(self.dir, io, name.slice(), stream.journal.bytes(), sync);
         const entry = try findManifest(&self.manifest, identity, stream.segment_index, true);
         entry.records = @intCast(stream.journal.records);
         entry.first_sequence = if (stream.journal.records == 0) stream.journal.last_sequence + 1 else stream.journal.last_sequence - stream.journal.records + 1;
@@ -630,7 +656,7 @@ pub const LinuxFileAdapter = struct {
             if (entry.used) count += 1;
         }
         put(u32, &bytes, 0, manifest_magic);
-        put(u16, &bytes, 4, format_schema);
+        put(u16, &bytes, 4, manifest_schema);
         put(u16, &bytes, 6, manifest_header_len);
         put(u32, &bytes, 8, @intCast(count));
         var index: usize = 0;
@@ -647,8 +673,9 @@ pub const LinuxFileAdapter = struct {
             @memcpy(encoded[52..84], &entry.digest);
             index += 1;
         };
-        put(u32, &bytes, 12, Crc32c.hash(bytes[0..12]));
-        try writeFile(self.dir, io, "manifest.tmp", bytes[0 .. manifest_header_len + count * manifest_entry_len], sync);
+        const encoded_len = manifest_header_len + count * manifest_entry_len;
+        put(u32, &bytes, 12, manifestChecksum(bytes[0..encoded_len]));
+        try writeFile(self.dir, io, "manifest.tmp", bytes[0..encoded_len], sync);
         try self.dir.rename("manifest.tmp", self.dir, "manifest.bin", io);
         if (sync) try syncDirectory(self.dir);
     }
@@ -725,6 +752,14 @@ fn writeFile(dir: std.Io.Dir, io: std.Io, name: []const u8, bytes: []const u8, s
     if (sync) try file.sync(io);
 }
 
+fn writeAtomicFile(dir: std.Io.Dir, io: std.Io, name: []const u8, bytes: []const u8, sync: bool) !void {
+    var temporary_buffer: [112]u8 = undefined;
+    const temporary = try std.fmt.bufPrint(&temporary_buffer, "{s}.tmp", .{name});
+    try writeFile(dir, io, temporary, bytes, sync);
+    try dir.rename(temporary, dir, name, io);
+    if (sync) try syncDirectory(dir);
+}
+
 fn syncDirectory(dir: std.Io.Dir) !void {
     if (builtin.os.tag == .linux) switch (std.os.linux.errno(std.os.linux.fsync(dir.handle))) {
         .SUCCESS => {},
@@ -764,6 +799,10 @@ pub fn runLinuxAcceptance(init: std.process.Init) !void {
             var snapshot: [64]u8 = undefined;
             @memset(&snapshot, @as(u8, @intCast(index + 7)));
             try store.publishSnapshot(init.io, stream, 1, &snapshot);
+            try store.rotate(init.io, stream);
+            try store.append(init.io, .{ .stream = stream, .record = .{ .type_id = @intCast(index + 1), .schema_version = 8, .flags = 0, .sequence = 2, .source_time = 0, .receive_time = 0, .monotonic_time = 0, .wall_time = 0, .time_presence = .{}, .payload = &payloads[index] } });
+            try store.commit(init.io, stream, 2);
+            try store.seal(init.io, stream);
         }
     }
 
@@ -772,7 +811,7 @@ pub fn runLinuxAcceptance(init: std.process.Init) !void {
     const store = file_store.interface();
     for (streams) |stream| {
         const recovered = try store.recover(init.io, stream);
-        if (recovered.status != .ready or recovered.committed_barrier != 1 or recovered.last_sequence != 1 or recovered.snapshot.len != 64) {
+        if (recovered.status != .ready or recovered.committed_barrier != 2 or recovered.last_sequence != 2 or recovered.snapshot.len != 64 or recovered.tail.len == 0) {
             return error.DurableRecoveryMismatch;
         }
     }
@@ -784,7 +823,7 @@ pub fn runLinuxAcceptance(init: std.process.Init) !void {
 
     var stdout_buffer: [512]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &stdout_buffer);
-    try stdout.interface.print("durable_store_acceptance: adapter=linux_file, streams=3, recovery=ready, committed_barriers=3, snapshot=atomic, manifest=verified, faults=memory\n", .{});
+    try stdout.interface.print("durable_store_acceptance: adapter=linux_file, streams=3, recovery=ready, committed_barriers=6, rotations=3, snapshot=atomic, manifest=verified, faults=memory\n", .{});
     try stdout.interface.flush();
 }
 
@@ -824,4 +863,27 @@ test "memory fault injection always closes the safety gate" {
         if (store.append(undefined, .{ .stream = stream, .record = .{ .type_id = 1, .schema_version = 8, .flags = 0, .sequence = 1, .source_time = 0, .receive_time = 0, .monotonic_time = 0, .wall_time = 0, .time_presence = .{}, .payload = &payload } })) |_| return error.FaultInjectionNotObserved else |_| {}
         try std.testing.expectEqual(GateState.closed, store.safetyGate());
     }
+}
+
+test "manifest checksum covers entries as well as the header" {
+    var encoded: [manifest_header_len + manifest_entry_len]u8 = @splat(0);
+    put(u32, &encoded, 0, manifest_magic);
+    put(u16, &encoded, 4, manifest_schema);
+    put(u16, &encoded, 6, manifest_header_len);
+    put(u32, &encoded, 8, 1);
+    const before = manifestChecksum(&encoded);
+    encoded[manifest_header_len + 52] ^= 1;
+    try std.testing.expect(before != manifestChecksum(&encoded));
+}
+
+test "segment rotation requires a snapshot at the sealed barrier" {
+    var memory = MemoryAdapter.init();
+    const store = memory.interface();
+    const stream: StreamIdentity = .{ .domain = .decision_log, .id = 44 };
+    const payload = [_]u8{1};
+    try store.append(undefined, .{ .stream = stream, .record = .{ .type_id = 1, .schema_version = 8, .flags = 0, .sequence = 1, .source_time = 0, .receive_time = 0, .monotonic_time = 0, .wall_time = 0, .time_presence = .{}, .payload = &payload } });
+    try store.commit(undefined, stream, 1);
+    try store.seal(undefined, stream);
+    try std.testing.expectError(error.SnapshotRequiredBeforeRotation, store.rotate(undefined, stream));
+    try std.testing.expectEqual(GateState.closed, store.safetyGate());
 }

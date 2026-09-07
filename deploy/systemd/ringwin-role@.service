@@ -5,7 +5,7 @@ PartOf=ringwin-role.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/libexec/ringwin --production-role %i --socket /run/ringwin-%i/control.sock --generation 1
+ExecStart=/var/lib/ringwin/versions/current/ringwin --production-role %i --socket /run/ringwin-%i/control.sock --generation 1
 User=ringwin-%i
 Group=ringwin-%i
 RuntimeDirectory=ringwin-%i

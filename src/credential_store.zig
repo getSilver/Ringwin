@@ -107,15 +107,15 @@ pub const PasswordSource = struct {
     kind: InputKind,
     bytes: []const u8,
 
-    pub fn testOnly(bytes: []const u8) PasswordSource {
+    fn testOnly(bytes: []const u8) PasswordSource {
         return .{ .kind = .test_only, .bytes = bytes };
     }
 
-    pub fn restricted(bytes: []const u8) PasswordSource {
+    fn restricted(bytes: []const u8) PasswordSource {
         return .{ .kind = .restricted_fd, .bytes = bytes };
     }
 
-    pub fn tty(bytes: []const u8) PasswordSource {
+    fn tty(bytes: []const u8) PasswordSource {
         return .{ .kind = .tty, .bytes = bytes };
     }
 };

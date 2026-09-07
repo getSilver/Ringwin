@@ -5,6 +5,14 @@
 //! that an offline test is a target-node qualification.
 
 const std = @import("std");
+const builtin = @import("builtin");
+
+const authority_magic: u32 = 0x434e4546; // FENC
+const authority_schema: u16 = 1;
+const authority_header_len = 16;
+const authority_entry_len = 56;
+const authority_file_max = authority_header_len + max_domains * authority_entry_len;
+const Crc32c = std.hash.crc.Crc32Iscsi;
 
 pub const lease_duration_ns: u64 = std.time.ns_per_s;
 pub const lease_renew_interval_ns: u64 = 250 * std.time.ns_per_ms;
@@ -72,6 +80,15 @@ const AuthorityRecord = struct {
     durable_barrier: u64 = 0,
 };
 
+const AuthorityPersistence = struct {
+    context: *anyopaque,
+    saveFn: *const fn (*anyopaque, *const FencingAuthority) anyerror!void,
+
+    fn save(self: AuthorityPersistence, authority: *const FencingAuthority) !void {
+        try self.saveFn(self.context, authority);
+    }
+};
+
 pub const PrimaryLease = struct {
     key: DomainKey,
     node: u64,
@@ -90,6 +107,69 @@ pub const FencingAuthority = struct {
     count: usize = 0,
     available: bool = true,
     durable: bool = true,
+    persistence: ?AuthorityPersistence = null,
+
+    fn bindPersistence(self: *FencingAuthority, persistence: AuthorityPersistence) void {
+        self.persistence = persistence;
+    }
+
+    fn persist(self: *FencingAuthority) !void {
+        if (self.persistence) |persistence| persistence.save(self) catch |err| {
+            self.durable = false;
+            return err;
+        };
+    }
+
+    fn encode(self: *const FencingAuthority, destination: *[authority_file_max]u8) []const u8 {
+        @memset(destination, 0);
+        putAuthority(u32, destination, 0, authority_magic);
+        putAuthority(u16, destination, 4, authority_schema);
+        putAuthority(u16, destination, 6, authority_header_len);
+        putAuthority(u32, destination, 8, @intCast(self.count));
+        for (self.records[0..self.count], 0..) |record, index| {
+            const entry = destination[authority_header_len + index * authority_entry_len ..][0..authority_entry_len];
+            putAuthority(u128, entry, 0, record.key.exchange_account);
+            putAuthority(u64, entry, 16, record.key.decision_domain);
+            putAuthority(u64, entry, 24, record.current_token);
+            putAuthority(u64, entry, 32, record.next_token);
+            putAuthority(u64, entry, 40, record.owner_node);
+            putAuthority(u64, entry, 48, record.durable_barrier);
+        }
+        const length = authority_header_len + self.count * authority_entry_len;
+        putAuthority(u32, destination, 12, authorityChecksum(destination[0..length]));
+        return destination[0..length];
+    }
+
+    fn decode(bytes: []const u8) !FencingAuthority {
+        if (bytes.len < authority_header_len or
+            getAuthority(u32, bytes, 0) != authority_magic or
+            getAuthority(u16, bytes, 4) != authority_schema or
+            getAuthority(u16, bytes, 6) != authority_header_len)
+            return error.InvalidFencingCheckpoint;
+        const count: usize = getAuthority(u32, bytes, 8);
+        if (count > max_domains or bytes.len != authority_header_len + count * authority_entry_len or
+            getAuthority(u32, bytes, 12) != authorityChecksum(bytes))
+            return error.InvalidFencingCheckpoint;
+        var authority: FencingAuthority = .{};
+        authority.count = count;
+        for (authority.records[0..count], 0..) |*record, index| {
+            const entry = bytes[authority_header_len + index * authority_entry_len ..][0..authority_entry_len];
+            record.* = .{
+                .key = .{
+                    .exchange_account = getAuthority(u128, entry, 0),
+                    .decision_domain = getAuthority(u64, entry, 16),
+                },
+                .current_token = getAuthority(u64, entry, 24),
+                .next_token = getAuthority(u64, entry, 32),
+                .owner_node = getAuthority(u64, entry, 40),
+                .durable_barrier = getAuthority(u64, entry, 48),
+            };
+            if (record.next_token == 0 or record.durable_barrier == 0 or
+                (record.current_token == 0) != (record.owner_node == 0))
+                return error.InvalidFencingCheckpoint;
+        }
+        return authority;
+    }
 
     fn find(self: *FencingAuthority, key: DomainKey) ?*AuthorityRecord {
         for (self.records[0..self.count]) |*record| if (record.key.eql(key)) return record;
@@ -111,10 +191,15 @@ pub const FencingAuthority = struct {
         const next_token = std.math.add(u64, token, 1) catch return error.FencingTokenExhausted;
         const durable_barrier = std.math.add(u64, record.durable_barrier, 1) catch return error.DurableBarrierExhausted;
         const expires_at_ns = std.math.add(u64, now_ns, lease_duration_ns) catch return error.LeaseTimeOverflow;
+        const previous = record.*;
         record.next_token = next_token;
         record.current_token = token;
         record.owner_node = node;
         record.durable_barrier = durable_barrier;
+        self.persist() catch |err| {
+            record.* = previous;
+            return err;
+        };
         return .{
             .key = key,
             .node = node,
@@ -137,8 +222,13 @@ pub const FencingAuthority = struct {
         const record = self.find(lease.key) orelse return error.StaleFencingToken;
         if (record.current_token != lease.token or record.owner_node != lease.node)
             return error.StaleFencingToken;
+        const previous = record.*;
         record.current_token = 0;
         record.owner_node = 0;
+        self.persist() catch |err| {
+            record.* = previous;
+            return err;
+        };
         lease.revoked = true;
     }
 
@@ -150,6 +240,82 @@ pub const FencingAuthority = struct {
     pub fn accepts(self: *FencingAuthority, key: DomainKey, node: u64, token: u64) bool {
         const record = self.find(key) orelse return false;
         return token != 0 and record.current_token == token and record.owner_node == node;
+    }
+};
+
+fn putAuthority(comptime T: type, destination: []u8, offset: usize, value: T) void {
+    std.mem.writeInt(T, destination[offset..][0..@sizeOf(T)], value, .little);
+}
+
+fn getAuthority(comptime T: type, source: []const u8, offset: usize) T {
+    return std.mem.readInt(T, source[offset..][0..@sizeOf(T)], .little);
+}
+
+fn authorityChecksum(bytes: []const u8) u32 {
+    var checksum = Crc32c.init();
+    checksum.update(bytes[0..12]);
+    if (bytes.len > authority_header_len) checksum.update(bytes[authority_header_len..]);
+    return checksum.final();
+}
+
+pub const LinuxFencingStore = struct {
+    io: std.Io,
+    dir: std.Io.Dir,
+
+    pub fn open(io: std.Io, absolute_path: []const u8) !LinuxFencingStore {
+        if (builtin.os.tag != .linux) return error.LinuxFencingStoreRequired;
+        std.Io.Dir.createDirAbsolute(io, absolute_path, .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+        return .{ .io = io, .dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{}) };
+    }
+
+    pub fn close(self: *LinuxFencingStore) void {
+        self.dir.close(self.io);
+    }
+
+    pub fn load(self: *LinuxFencingStore) !FencingAuthority {
+        var encoded: [authority_file_max]u8 = undefined;
+        var file = self.dir.openFile(self.io, "authority.bin", .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                var empty: FencingAuthority = .{};
+                empty.bindPersistence(.{ .context = self, .saveFn = save });
+                return empty;
+            },
+            else => return err,
+        };
+        defer file.close(self.io);
+        var length: usize = 0;
+        while (length < encoded.len) {
+            const amount = file.readStreaming(self.io, &.{encoded[length..]}) catch |err| switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            };
+            if (amount == 0) break;
+            length += amount;
+        }
+        var authority = try FencingAuthority.decode(encoded[0..length]);
+        authority.bindPersistence(.{ .context = self, .saveFn = save });
+        return authority;
+    }
+
+    fn save(context: *anyopaque, authority: *const FencingAuthority) anyerror!void {
+        const self: *LinuxFencingStore = @ptrCast(@alignCast(context));
+        var encoded: [authority_file_max]u8 = undefined;
+        const bytes = authority.encode(&encoded);
+        {
+            var file = try self.dir.createFile(self.io, "authority.tmp", .{ .truncate = true });
+            defer file.close(self.io);
+            try file.writeStreamingAll(self.io, bytes);
+            try file.sync(self.io);
+        }
+        try self.dir.rename("authority.tmp", self.dir, "authority.bin", self.io);
+        if (builtin.os.tag == .linux) switch (std.os.linux.errno(std.os.linux.fsync(self.dir.handle))) {
+            .SUCCESS => {},
+            .INVAL, .BADF, .OPNOTSUPP => std.posix.sync(),
+            else => return error.FencingDirectorySyncFailed,
+        };
     }
 };
 
@@ -482,7 +648,36 @@ fn runAllowed(cause: FailoverCause, now_ns: u64) !AdmissionEvidence {
     return evidence;
 }
 
+fn verifyLinuxFencingPersistence(io: std.Io) !void {
+    if (builtin.os.tag != .linux) return;
+    var path_buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(
+        &path_buffer,
+        "/tmp/ringwin-fencing-authority-{d}",
+        .{std.os.linux.getpid()},
+    );
+    std.Io.Dir.cwd().deleteTree(io, path) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, path) catch {};
+    const key: DomainKey = .{ .exchange_account = 902, .decision_domain = 8 };
+    {
+        var persistence = try LinuxFencingStore.open(io, path);
+        defer persistence.close();
+        var authority = try persistence.load();
+        var first = try authority.acquire(key, 10, 0);
+        if (first.token != 1) return error.FencingPersistenceMismatch;
+        try authority.revoke(&first);
+    }
+    {
+        var persistence = try LinuxFencingStore.open(io, path);
+        defer persistence.close();
+        var authority = try persistence.load();
+        const second = try authority.acquire(key, 11, lease_duration_ns + 1);
+        if (second.token != 2) return error.FencingPersistenceMismatch;
+    }
+}
+
 pub fn runSmoke(init: std.process.Init, report_path: []const u8) !void {
+    try verifyLinuxFencingPersistence(init.io);
     var report: FailoverReport = .{};
     for (0..3) |attempt| {
         const now = 1_000_000_000 + @as(u64, @intCast(attempt)) * 100_000_000;
@@ -594,6 +789,25 @@ test "fencing tokens are strictly increasing and stale sends fail" {
     try authority.revoke(&first);
     const second = try authority.acquire(key, 2, lease_duration_ns + 1);
     try std.testing.expectEqual(@as(u64, 2), second.token);
+}
+
+test "fencing checkpoint preserves token monotonicity across restart" {
+    const key: DomainKey = .{ .exchange_account = 901, .decision_domain = 7 };
+    var authority: FencingAuthority = .{};
+    var first = try authority.acquire(key, 1, 0);
+    try authority.revoke(&first);
+    var encoded: [authority_file_max]u8 = undefined;
+    const checkpoint = authority.encode(&encoded);
+
+    var restarted = try FencingAuthority.decode(checkpoint);
+    const second = try restarted.acquire(key, 2, lease_duration_ns + 1);
+    try std.testing.expectEqual(@as(u64, 2), second.token);
+
+    encoded[authority_header_len + 32] ^= 1;
+    try std.testing.expectError(
+        error.InvalidFencingCheckpoint,
+        FencingAuthority.decode(encoded[0..checkpoint.len]),
+    );
 }
 
 test "lease renewal failure enters recovery only and gateway checks clock" {
