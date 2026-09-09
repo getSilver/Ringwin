@@ -85,6 +85,8 @@ Status: active
   持久化及子 role 授权/信号撤销；控制面提交 `b04d942` 收口 TOTP、认证文件和版本链接切换。
   目标节点故障/密钥资格、真实业务 role 链、生产 exporter、外部 NodeFence 和 Web 到节点端到端
   生命周期仍未完成，不能宣称生产就绪。
+- 2026-09-09：控制面安全复审收口至 `71e0ba2`；TOTP 消费并发串行化，ReleaseArtifact 版本目录
+  绑定完整 manifest，发布指针或旧 runtime 恢复不能证明成功时记录 `unknown`，不得误报活动版本。
 
 ## Not yet specified
 

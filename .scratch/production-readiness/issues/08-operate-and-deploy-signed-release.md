@@ -38,7 +38,7 @@ CutoverBarrier 和 VersionActivationEvent；激活后只允许停单或 ForwardR
 ## 当前实现与绑定（2026-09-07）
 
 已绑定现有 Web 控制面仓库 `D:\github\Ringwin-control-plane`，分支为
-`control-plane-and-operator-ui`，当前安全修复提交为 `b04d942`。本票没有复制页面或新增控制面 CLI；现有入口仍为
+`control-plane-and-operator-ui`，当前安全修复提交为 `71e0ba2`。本票没有复制页面或新增控制面 CLI；现有入口仍为
 `python/control_plane_web.py` + `python/operator_ui.html`，OwnerSession 实现在
 `python/owner_session.py`，签名分片命令通道在 `python/control_plane.py` 与
 `src/control_channel.zig`。
@@ -54,6 +54,8 @@ CutoverBarrier 和 VersionActivationEvent；激活后只允许停单或 ForwardR
   不回滚经济状态。`LifecycleOutbox` 为 credential lifecycle/failover 生成幂等 HMAC 命令。
 - TOTP 密钥只在首次 setup 响应返回，旧的无认证读取端点已删除；认证文件原子落盘并在 Linux
   固定为 `0600`。`current` 改为原子符号链接，systemd 从该链接启动；重启失败恢复旧链接和旧版本。
+- 版本目录持久绑定完整 manifest 哈希；候选发布、指针同步或旧版本恢复无法确定最终运行版本时，
+  ReleaseRecord 明确记录 `unknown` 及候选 artifact/manifest 身份，不把软链接状态冒充运行状态。
 - Web 新增 `/lifecycle` 和 `/api/releases`，DeployRelease、ForwardRollback、credential
   lifecycle、failover 继续使用 OwnerSession、CSRF 和高风险 RiskWarning；分片命令按
   `command_identity` 持久去重。OperatorRecord 只写非敏感精简字段并同步落盘。
