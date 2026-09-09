@@ -20,6 +20,7 @@ import json
 import os
 import secrets
 import struct
+import threading
 import time
 
 SCRYPT_N = 2 ** 14
@@ -117,6 +118,7 @@ class TotpStore:
     def __init__(self, directory: str):
         self.path = os.path.join(directory, "totp.secret")
         self.consumed_path = os.path.join(directory, "totp.consumed")
+        self._verify_lock = threading.Lock()
 
     def initialize(self) -> str:
         if os.path.exists(self.path):
@@ -133,21 +135,22 @@ class TotpStore:
             return handle.read().strip()
 
     def verify(self, code: str, clock=default_clock) -> bool:
-        if not os.path.exists(self.path) or not code.isdigit():
+        with self._verify_lock:
+            if not os.path.exists(self.path) or not code.isdigit():
+                return False
+            code = code.zfill(TOTP_DIGITS)
+            now = clock()
+            consumed = self._read_consumed(now)
+            for offset in range(-TOTP_WINDOW_STEPS, TOTP_WINDOW_STEPS + 1):
+                counter = (now // TOTP_STEP) + offset
+                if counter in consumed:
+                    continue
+                expected = hotp(self.read_secret(), counter)
+                if hmac.compare_digest(expected.zfill(TOTP_DIGITS), code):
+                    consumed.add(counter)
+                    self._write_consumed(consumed, now)
+                    return True
             return False
-        code = code.zfill(TOTP_DIGITS)
-        now = clock()
-        consumed = self._read_consumed(now)
-        for offset in range(-TOTP_WINDOW_STEPS, TOTP_WINDOW_STEPS + 1):
-            counter = (now // TOTP_STEP) + offset
-            if counter in consumed:
-                continue
-            expected = hotp(self.read_secret(), counter)
-            if hmac.compare_digest(expected.zfill(TOTP_DIGITS), code):
-                consumed.add(counter)
-                self._write_consumed(consumed, now)
-                return True
-        return False
 
     def _read_consumed(self, now: int) -> set[int]:
         if not os.path.exists(self.consumed_path):

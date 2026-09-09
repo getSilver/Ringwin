@@ -12,9 +12,32 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import control_plane  # noqa: E402
 import control_plane_web  # noqa: E402
+import owner_session  # noqa: E402
 
 
 class OwnerSessionSecurityTests(unittest.TestCase):
+    def test_totp_code_is_consumed_once_under_concurrency(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = owner_session.TotpStore(directory)
+            secret = store.initialize()
+            now = 1_700_000_000
+            code = owner_session.hotp(secret, now // owner_session.TOTP_STEP)
+            ready = threading.Barrier(2)
+
+            def verify() -> bool:
+                ready.wait()
+                return store.verify(code, clock=lambda: now)
+
+            results = []
+            threads = [threading.Thread(target=lambda: results.append(verify()))
+                       for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+
+            self.assertEqual(1, sum(results))
+
     def test_totp_secret_is_only_returned_by_initial_setup(self):
         with tempfile.TemporaryDirectory() as directory:
             app = control_plane_web.ControlPlaneApp(
