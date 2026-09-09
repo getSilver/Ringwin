@@ -78,6 +78,30 @@ def filesystem_phase(root: str, good: str) -> None:
     expect(os.path.basename(os.path.realpath(current)) == "release-a",
            "failed restart must restore the previous current release")
 
+    changed_manifest = write_artifact(
+        root, "release-a", b"release-safe-linux-binary", KEY,
+        source_revision="different-revision")
+    identity_conflict = manager.deploy(
+        105, changed_manifest, expected_active="release-a")
+    expect(identity_conflict["status"] == "rejected",
+           "same artifact id must bind the complete signed manifest")
+
+    fail_previous_restart = False
+
+    def restart_with_failed_recovery(_command):
+        target = os.path.basename(os.path.realpath(current))
+        if target == "release-c" or fail_previous_restart:
+            raise RuntimeError(f"restart failed for {target}")
+
+    manager.applier.systemd_runner = restart_with_failed_recovery
+    third_manifest = write_artifact(root, "release-c", b"third-release", KEY)
+    fail_previous_restart = True
+    unknown = manager.deploy(106, third_manifest, expected_active="release-a")
+    expect(unknown["status"] == "unknown",
+           "failed recovery restart must report unknown activation state")
+    expect(manager.active_artifact() is None,
+           "unknown runtime must not claim the previous artifact is active")
+
 
 def main() -> None:
     root = tempfile.mkdtemp(prefix="ringwin-release-")
@@ -108,6 +132,12 @@ def main() -> None:
         expect(rollback["activation_sequence"] == 2, "activation sequence only moves forward")
 
         filesystem_phase(root, good)
+
+        try:
+            release_lifecycle.FilesystemApplier(os.path.join(root, "no-runner"))
+            raise SystemExit("acceptance failed: filesystem activation requires systemd")
+        except release_lifecycle.ReleaseError:
+            pass
 
         outbox = release_lifecycle.LifecycleOutbox(os.path.join(root, "outbox"), KEY)
         first = outbox.submit(200, "credential_rotate", "okx-demo-account", {"version": 2})

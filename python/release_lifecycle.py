@@ -55,6 +55,10 @@ class ReleaseError(ValueError):
     pass
 
 
+class ActivationStateUnknown(RuntimeError):
+    pass
+
+
 def _canonical(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=True).encode("utf-8")
@@ -170,6 +174,8 @@ class FilesystemApplier:
     """Atomic version-directory publisher for a Linux deployment adapter."""
 
     def __init__(self, version_root: str, systemd_runner=None):
+        if systemd_runner is None:
+            raise ReleaseError("Linux filesystem activation requires a systemd runner")
         self.version_root = os.path.realpath(version_root)
         self.systemd_runner = systemd_runner
 
@@ -209,6 +215,12 @@ class FilesystemApplier:
                 target.flush()
                 os.fsync(target.fileno())
             os.chmod(payload, 0o550)
+            manifest_identity = os.path.join(temporary_dir, "manifest.sha256")
+            with open(manifest_identity, "w", encoding="ascii", newline="\n") as handle:
+                handle.write(f"{artifact.manifest_sha256}\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(manifest_identity, 0o440)
             if os.name != "nt":
                 directory_fd = os.open(temporary_dir, os.O_RDONLY)
                 try:
@@ -222,6 +234,16 @@ class FilesystemApplier:
                     deployed_hash = hashlib.sha256(handle.read()).hexdigest()
                 if not hmac.compare_digest(deployed_hash, artifact.payload_sha256):
                     raise ReleaseError("artifact identity already names different payload bytes")
+                try:
+                    with open(os.path.join(final_dir, "manifest.sha256"),
+                              encoding="ascii") as handle:
+                        deployed_manifest_hash = handle.read().strip()
+                except OSError as error:
+                    raise ReleaseError(
+                        "artifact identity is missing its deployed manifest") from error
+                if not hmac.compare_digest(deployed_manifest_hash,
+                                           artifact.manifest_sha256):
+                    raise ReleaseError("artifact identity already names a different manifest")
                 shutil.rmtree(temporary_dir)
             else:
                 os.replace(temporary_dir, final_dir)
@@ -235,21 +257,23 @@ class FilesystemApplier:
 
             self._publish_pointer(artifact.artifact_id)
             try:
-                if self.systemd_runner is not None:
-                    self.systemd_runner(
-                        ["systemctl", "reload-or-restart", "ringwin-role.target"])
-            except Exception:
+                self.systemd_runner(
+                    ["systemctl", "reload-or-restart", "ringwin-role.target"])
+            except Exception as activation_error:
                 if previous_target is None:
                     os.unlink(pointer)
                     self._sync_root()
+                    raise ActivationStateUnknown(
+                        "candidate restart failed with no previous runtime to restore") from activation_error
                 else:
                     self._publish_pointer(previous_target)
                     try:
                         self.systemd_runner(
                             ["systemctl", "reload-or-restart", "ringwin-role.target"])
-                    except Exception:
-                        pass
-                raise
+                    except Exception as rollback_error:
+                        raise ActivationStateUnknown(
+                            "candidate and previous runtime restarts both failed") from rollback_error
+                raise activation_error
         except Exception:
             shutil.rmtree(temporary_dir, ignore_errors=True)
             raise
@@ -284,6 +308,8 @@ class ReleaseManager:
 
     def active_artifact(self) -> Optional[str]:
         for record in reversed(self._records):
+            if record.get("event") == "release_activation_unknown":
+                return None
             if record.get("event") == "release_activated":
                 return record["artifact_id"]
         return None
@@ -335,6 +361,11 @@ class ReleaseManager:
         try:
             os.makedirs(self.version_root, exist_ok=True)
             self.applier.activate(artifact)
+        except ActivationStateUnknown as error:
+            result = {"status": "unknown", "reason": f"activation state unknown: {error}",
+                      "active_artifact": None}
+            self._record_result(command_identity, operation, result, current, fingerprint)
+            return result
         except Exception as error:
             result = {"status": "rejected", "reason": f"activation failed: {error}",
                       "active_artifact": current}
@@ -350,8 +381,11 @@ class ReleaseManager:
     def _record_result(self, command_identity: int, operation: str, result: dict,
                        current: Optional[str], command_fingerprint: str,
                        artifact: Optional[ReleaseArtifact] = None) -> None:
+        event = {"activated": "release_activated",
+                 "unknown": "release_activation_unknown"}.get(
+                     result["status"], "release_rejected")
         record = {
-            "event": "release_activated" if result["status"] == "activated" else "release_rejected",
+            "event": event,
             "command_identity": str(command_identity),
             "command_fingerprint": command_fingerprint,
             "operation": operation,
