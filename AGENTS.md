@@ -1,12 +1,8 @@
 ## Agent skills
 
-### Issue tracker
+### Local issue tracker
 
-创建、读取、更新或发布 issue/spec 时，使用 `getSilver/Ringwin` 的 GitHub Issues。详见 `docs/agents/issue-tracker.md`。
-
-### Triage labels
-
-对 issue 进行分诊或发布可执行 spec 时，使用默认五角色标签。详见 `docs/agents/triage-labels.md`。
+创建、读取、更新或执行 issue/spec 时，使用 `.scratch/<module>/map.md` 与其 `issues/` 目录；除非用户明确要求，不同步到 GitHub Issues。详见 `docs/agents/issue-tracker.md`。
 
 ### Domain docs
 
