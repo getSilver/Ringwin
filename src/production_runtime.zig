@@ -250,6 +250,10 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, gene
                 try writeStatus(&stream, init.io, .draining);
             },
             .stop => {
+                if (!draining) {
+                    try writeStatus(&stream, init.io, .failed);
+                    return error.InvalidRoleTransition;
+                }
                 try writeStatus(&stream, init.io, .stopped);
                 return;
             },

@@ -125,6 +125,17 @@ const PasswordSource = struct {
 fn readPassword(io: std.Io, file: std.Io.File, kind: InputKind, destination: []u8) !PasswordSource {
     if (kind == .test_only) return error.TestPasswordSourceNotAllowed;
     if (kind == .tty and !(try file.isTty(io))) return error.NotATty;
+    if (kind == .restricted_fd) {
+        if (builtin.os.tag != .linux) return error.LinuxCredentialInputRequired;
+        var descriptor_path: [64]u8 = undefined;
+        const path = try std.fmt.bufPrint(&descriptor_path, "/proc/self/fd/{d}", .{file.handle});
+        var target_buffer: [256]u8 = undefined;
+        const target_len = std.Io.Dir.cwd().readLink(io, path, &target_buffer) catch
+            return error.RestrictedStreamInspectionFailed;
+        const target = target_buffer[0..target_len];
+        if (!std.mem.startsWith(u8, target, "pipe:[") and !std.mem.startsWith(u8, target, "socket:["))
+            return error.RestrictedStreamRequired;
+    }
     var length: usize = 0;
     while (length < destination.len) {
         const amount = file.readStreaming(io, &.{destination[length..]}) catch |err| switch (err) {
@@ -236,32 +247,33 @@ pub const CredentialStore = struct {
     }
 
     pub fn stage(self: *CredentialStore, io: std.Io, metadata: Metadata, material: *SecretMaterial, file: std.Io.File, input_kind: InputKind, password_buffer: []u8) !void {
-        const password = try readPassword(io, file, input_kind, password_buffer);
+        defer material.clear();
         defer std.crypto.secureZero(u8, password_buffer);
+        const password = try readPassword(io, file, input_kind, password_buffer);
         try self.stageWithPassword(io, metadata, material, password);
     }
 
     pub fn activate(self: *CredentialStore, io: std.Io, kind: CredentialKind, file: std.Io.File, input_kind: InputKind, password_buffer: []u8, expected: Metadata) !void {
-        const password = try readPassword(io, file, input_kind, password_buffer);
         defer std.crypto.secureZero(u8, password_buffer);
+        const password = try readPassword(io, file, input_kind, password_buffer);
         try self.activateWithPassword(io, kind, password, expected);
     }
 
     pub fn retire(self: *CredentialStore, io: std.Io, kind: CredentialKind, file: std.Io.File, input_kind: InputKind, password_buffer: []u8, expected: Metadata) !void {
-        const password = try readPassword(io, file, input_kind, password_buffer);
         defer std.crypto.secureZero(u8, password_buffer);
+        const password = try readPassword(io, file, input_kind, password_buffer);
         try self.retireWithPassword(io, kind, password, expected);
     }
 
     pub fn revoke(self: *CredentialStore, io: std.Io, kind: CredentialKind, file: std.Io.File, input_kind: InputKind, password_buffer: []u8, expected: Metadata) !void {
-        const password = try readPassword(io, file, input_kind, password_buffer);
         defer std.crypto.secureZero(u8, password_buffer);
+        const password = try readPassword(io, file, input_kind, password_buffer);
         try self.revokeWithPassword(io, kind, password, expected);
     }
 
     pub fn admitObservationReadOnly(self: *CredentialStore, io: std.Io, file: std.Io.File, input_kind: InputKind, password_buffer: []u8, expected: Metadata, runtime: RuntimeContext, now_unix: u64, self_check: SecuritySelfCheck) !Admission {
-        const password = try readPassword(io, file, input_kind, password_buffer);
         defer std.crypto.secureZero(u8, password_buffer);
+        const password = try readPassword(io, file, input_kind, password_buffer);
         return self.admitObservationWithPassword(io, password, expected, runtime, now_unix, .native, self_check);
     }
 
@@ -623,6 +635,22 @@ pub fn runLinuxAcceptance(init: std.process.Init) !void {
     defer store.close(init.io);
     var metadata = try Metadata.init(.observation, 42, .production, 4_000_000_000, "obs-prod-42", "linux-node-1", "198.51.100.42");
     var material = try SecretMaterial.init("observation-key", "observation-secret", "observation-pass");
+    var created_regular_file = try store.dir.createFile(init.io, "password.txt", .{ .truncate = true });
+    created_regular_file.close(init.io);
+    var regular_file = try store.dir.openFile(init.io, "password.txt", .{});
+    defer regular_file.close(init.io);
+    var rejected_material = try SecretMaterial.init("rejected-key", "rejected-secret", "rejected-pass");
+    var rejected_password: [max_password]u8 = undefined;
+    @memset(&rejected_password, 0xa5);
+    var restricted_rejected = false;
+    store.stage(init.io, metadata, &rejected_material, regular_file, .restricted_fd, &rejected_password) catch |err| switch (err) {
+        error.RestrictedStreamRequired => restricted_rejected = true,
+        else => return err,
+    };
+    if (!restricted_rejected) return error.RegularPasswordFileAccepted;
+    if (rejected_material.api_key_len != 0 or rejected_material.secret_key_len != 0 or rejected_material.passphrase_len != 0)
+        return error.RejectedSecretNotCleared;
+    for (rejected_password) |byte| if (byte != 0) return error.RejectedPasswordNotCleared;
     var password_pipe: [2]std.posix.fd_t = undefined;
     if (std.os.linux.errno(std.os.linux.pipe(&password_pipe)) != .SUCCESS)
         return error.PasswordPipeFailed;
