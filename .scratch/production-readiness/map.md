@@ -78,7 +78,7 @@ Status: active
 - 2026-09-07：票 08 绑定现有 `D:\github\Ringwin-control-plane` Web 控制面，控制面提交 `f7ac68d`；补齐签名 ReleaseArtifact 校验、版本目录原子发布、ForwardRollback、生命周期 outbox、OwnerSession/CSRF/RiskWarning 接线和持久命令去重，定向验收通过。目标 Linux systemd/凭证/NodeFence 生产等价验收仍待执行，OKX Demo 资格不因本票升级。
 - 2026-09-07：票 09 接入固定容量 per-shard Telemetry、非阻塞 TelemetryPublish、30 秒/5 分钟 observability fail-closed、BenchmarkManifest 和不可变 QualificationReport；WSL 原生 ELF SimulatedVenue smoke 通过并生成报告。目标节点性能、soak、真实 exporter 和生产资格仍未宣告。
 - 2026-09-07：票 10 接入可注入 FencingAuthority、1 秒 PrimaryLease/250 ms 续租、ObservationCredential 热备、NodeFence read-back、FailoverAdmission 和不可变 FailoverReport；9 条自动路径连续三次通过，6 类故障保持阻断。真实独立 fencing authority、目标节点故障矩阵和生产等价资格仍未执行。
-- 当前可信离线基线为 acceptance schema 2、journal/state schema 8、Debug/ReleaseSafe 各 207 项；
+- 当前可信离线基线为 acceptance schema 2、journal/state schema 8、Debug/ReleaseSafe 各 214 项；
   OKX Demo、Binance Testnet、Bybit Testnet 的当前共享在线状态仍为 `not_run`。
 - 2026-09-07：源码复审撤销票 02/03/04/08/09/10 的过早 `resolved`。安全修复提交 `7917079`
   收口 DurableStore 原子更新和完整 manifest 校验、资格报告 passed 推导、Linux fencing token
