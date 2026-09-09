@@ -199,6 +199,25 @@ class FilesystemApplier:
             if os.path.lexists(temporary):
                 os.unlink(temporary)
 
+    def _restore_previous(self, pointer: str, previous_target: Optional[str]) -> None:
+        if previous_target is None:
+            try:
+                if os.path.lexists(pointer):
+                    os.unlink(pointer)
+                self._sync_root()
+            except Exception as cleanup_error:
+                raise ActivationStateUnknown(
+                    "candidate pointer could not be removed") from cleanup_error
+            raise ActivationStateUnknown(
+                "activation failed with no previous runtime to restore")
+        try:
+            self._publish_pointer(previous_target)
+            self.systemd_runner(
+                ["systemctl", "reload-or-restart", "ringwin-role.target"])
+        except Exception as rollback_error:
+            raise ActivationStateUnknown(
+                "previous runtime could not be restored") from rollback_error
+
     def activate(self, artifact: ReleaseArtifact) -> None:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", artifact.artifact_id):
             raise ReleaseError("release artifact identity is unsafe for a version directory")
@@ -255,24 +274,12 @@ class FilesystemApplier:
             elif os.path.lexists(pointer):
                 raise ReleaseError("current version pointer is not a symlink")
 
-            self._publish_pointer(artifact.artifact_id)
             try:
+                self._publish_pointer(artifact.artifact_id)
                 self.systemd_runner(
                     ["systemctl", "reload-or-restart", "ringwin-role.target"])
             except Exception as activation_error:
-                if previous_target is None:
-                    os.unlink(pointer)
-                    self._sync_root()
-                    raise ActivationStateUnknown(
-                        "candidate restart failed with no previous runtime to restore") from activation_error
-                else:
-                    self._publish_pointer(previous_target)
-                    try:
-                        self.systemd_runner(
-                            ["systemctl", "reload-or-restart", "ringwin-role.target"])
-                    except Exception as rollback_error:
-                        raise ActivationStateUnknown(
-                            "candidate and previous runtime restarts both failed") from rollback_error
+                self._restore_previous(pointer, previous_target)
                 raise activation_error
         except Exception:
             shutil.rmtree(temporary_dir, ignore_errors=True)
@@ -356,7 +363,8 @@ class ReleaseManager:
         if not self.candidate_check(artifact):
             result = {"status": "rejected", "reason": "candidate safety check failed",
                       "active_artifact": current}
-            self._record_result(command_identity, operation, result, current, fingerprint)
+            self._record_result(command_identity, operation, result, current, fingerprint,
+                                artifact=artifact)
             return result
         try:
             os.makedirs(self.version_root, exist_ok=True)
@@ -364,12 +372,14 @@ class ReleaseManager:
         except ActivationStateUnknown as error:
             result = {"status": "unknown", "reason": f"activation state unknown: {error}",
                       "active_artifact": None}
-            self._record_result(command_identity, operation, result, current, fingerprint)
+            self._record_result(command_identity, operation, result, current, fingerprint,
+                                artifact=artifact)
             return result
         except Exception as error:
             result = {"status": "rejected", "reason": f"activation failed: {error}",
                       "active_artifact": current}
-            self._record_result(command_identity, operation, result, current, fingerprint)
+            self._record_result(command_identity, operation, result, current, fingerprint,
+                                artifact=artifact)
             return result
         sequence = sum(1 for item in self._records if item.get("event") == "release_activated") + 1
         result = {"status": "activated", "artifact_id": artifact.artifact_id,

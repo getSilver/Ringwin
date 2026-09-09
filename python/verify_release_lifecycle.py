@@ -86,6 +86,22 @@ def filesystem_phase(root: str, good: str) -> None:
     expect(identity_conflict["status"] == "rejected",
            "same artifact id must bind the complete signed manifest")
 
+    publish_pointer = manager.applier._publish_pointer
+
+    def fail_after_pointer_publish(target):
+        publish_pointer(target)
+        if target == "release-d":
+            raise OSError("injected directory sync failure")
+
+    manager.applier._publish_pointer = fail_after_pointer_publish
+    fourth_manifest = write_artifact(root, "release-d", b"fourth-release", KEY)
+    pointer_failure = manager.deploy(107, fourth_manifest, expected_active="release-a")
+    expect(pointer_failure["status"] == "rejected",
+           "partial pointer publication must restore the previous runtime")
+    expect(os.path.basename(os.path.realpath(current)) == "release-a",
+           "pointer publication failure must restore the previous pointer")
+    manager.applier._publish_pointer = publish_pointer
+
     fail_previous_restart = False
 
     def restart_with_failed_recovery(_command):
@@ -101,6 +117,11 @@ def filesystem_phase(root: str, good: str) -> None:
            "failed recovery restart must report unknown activation state")
     expect(manager.active_artifact() is None,
            "unknown runtime must not claim the previous artifact is active")
+    unknown_record = manager.records()[-1]
+    expect(unknown_record["artifact_id"] == "release-c",
+           "unknown activation must retain candidate identity")
+    expect(unknown_record["manifest_sha256"],
+           "unknown activation must retain candidate manifest identity")
 
 
 def main() -> None:
