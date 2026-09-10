@@ -13,6 +13,8 @@ const order = @import("okx_order_entry.zig");
 const private = @import("okx_private_reconciliation.zig");
 const okx_adapter = @import("okx_venue_adapter.zig");
 const lifecycle = @import("simulated_lifecycle_projection.zig");
+const execution = @import("execution_gateway.zig");
+const oms = @import("oms.zig");
 const strategy = @import("strategy_host_gateway.zig");
 const venue = @import("venue_adapter.zig");
 
@@ -567,7 +569,59 @@ fn requireNotional(quantity_atoms: i64, price_tenths: i128) !void {
 }
 
 fn dispatch(adapter: venue.VenueAdapter, legacy: live.AuthorizedCommand) !canonical.EventRecord {
-    if (try adapter.trySend(.{ .order_command = try canonicalCommand(legacy) }) != .accepted)
+    const request = try canonicalCommand(legacy);
+    const price = request.limit_price orelse request.market_protection_price orelse return error.UnsupportedDemoCommand;
+    const reservation = canonical.AssetAmount{ .asset = 1, .atoms = legacy.reserved_notional_usdt_micros };
+    const command_value: oms.Command = .{
+        .command_id = legacy.command.command_id,
+        .order_id = legacy.command.order_id,
+        .strategy_instance = 1,
+        .revision = legacy.command.order_revision,
+        .operation = .place,
+        .instrument = request.instrument,
+        .side = if (request.side == .buy) .buy else .sell,
+        .portfolio_reduce_only = request.portfolio_reduce_only,
+        .venue_reduce_only = request.venue_reduce_only,
+        .quantity = request.quantity.?.lots,
+        .limit_price = price,
+        .reservation = reservation,
+        .order_type = request.order_type,
+        .time_in_force = request.time_in_force,
+        .market_protection_price = request.market_protection_price,
+        .client_order_id = request.client_order_id,
+        .intent_sequence = legacy.command.shard_sequence,
+        .risk_decision_identity = legacy.command.risk_reservation_id,
+        .reservation_identity = legacy.command.risk_reservation_id,
+    };
+    var gateway: execution.Gateway = .{};
+    try gateway.add(.{ .account = demo_account, .adapter = adapter, .capability = .{
+        .version = request.capability_version,
+        .rules_version = request.rules_version,
+        .config_version = request.config_version,
+        .session = request.adapter_session,
+        .supports_post_only = true,
+        .supports_market_protection = true,
+    } });
+    if (try gateway.sendProof(.{
+        .context = .{
+            .account = demo_account,
+            .capability_version = request.capability_version,
+            .rules_version = request.rules_version,
+            .config_version = request.config_version,
+            .adapter_session = request.adapter_session,
+            .dispatch_deadline_monotonic_ns = request.dispatch_deadline_monotonic_ns,
+        },
+        .command = command_value,
+        .effective_trading_authority = true,
+        .reservation = reservation,
+        .primary_lease_expires_at_monotonic_ns = request.dispatch_deadline_monotonic_ns,
+        .fencing_token = request.adapter_session,
+        .current_fencing_token = request.adapter_session,
+        .exchange_position = .{ .instrument = request.instrument, .rules_version = request.rules_version, .lots = 0 },
+        .authority_barrier = 1,
+        .current_barrier = 1,
+        .now_monotonic_ns = 0,
+    }) != .accepted)
         return error.AdapterRejectedCommand;
     const batch = (try adapter.tryDrain()) orelse return error.MissingDispatchResult;
     for (batch.slice()) |event_record| switch (event_record.event) {

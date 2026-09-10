@@ -14,7 +14,6 @@ const TradingShard = engine.TradingShard;
 const ReplayTradingShard = engine.ReplayTradingShard;
 const CanonicalEvent = engine.CanonicalEvent;
 const LiveRun = fixture.LiveRun;
-const OrderState = engine.OrderState;
 const contract_denominator = fixture.contract_denominator;
 const happy_order_quantity = fixture.happy_order_quantity;
 const order_limit_price = fixture.order_limit_price;
@@ -40,6 +39,18 @@ const assertReplayEquivalent = fixture.assertReplayEquivalent;
 const assertReplayEquivalentConfigured = fixture.assertReplayEquivalentConfigured;
 const applyHealthyPrelude = fixture.applyHealthyPrelude;
 const atGroup = fixture.atGroup;
+
+fn applyGenesisReplay(replay: *ReplayTradingShard) !void {
+    for (genesis) |event| _ = try replay.apply(event);
+    const digest = replay.canonicalStateDigest();
+    _ = try replay.apply(atGroup(11, .{ .identity = 3, .payload = .{ .host_activated = .{
+        .strategy_identity = 1,
+        .config_version = 1,
+        .activation_identity = 1,
+        .activation_barrier = 0,
+        .state_digest = digest,
+    } } }));
+}
 
 fn establishSwapPosition(shard: *TradingShard, identity: u64, quantity: i64) !void {
     _ = try shard.apply(atGroup(identity, .{ .identity = identity, .payload = .{ .mark_price = .{
@@ -78,7 +89,7 @@ test "stable CanonicalEvent decoder rejects malformed envelopes without state ch
     const before = shard.canonicalStateDigest();
     const core = atGroup(1, .{
         .identity = 1,
-        .payload = .{ .timer = .{ .quantity = 1 } },
+        .payload = .{ .timer = fixture.timer(1) },
     }).core;
     var payload: [engine.journal.max_payload_size]u8 = undefined;
     payload[0] = 1; // StableInputTag.core
@@ -152,7 +163,7 @@ test "native and Python intents cross the same authority and risk seam" {
 
     const native_command = (try native.shard.apply(atGroup(15, .{
         .identity = 1,
-        .payload = .{ .timer = .{ .quantity = happy_order_quantity } },
+        .payload = .{ .timer = fixture.timer(happy_order_quantity) },
     }))).order_command.?;
     const python_command = (try python.shard.apply(atGroup(15, .{
         .identity = 1,
@@ -232,7 +243,7 @@ test "control commands authorize pause cancel and replay lifecycle deterministic
         .kind = .trading_pause,
     } } }));
     try std.testing.expectEqual(operational.OperationalMode.draining, run.shard.operational_state.mode);
-    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(13, .{ .identity = 1, .payload = .{ .timer = .{ .quantity = 1 } } }))) == null);
+    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(13, .{ .identity = 1, .payload = .{ .timer = fixture.timer(1) } }))) == null);
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(14, .{ .identity = 3, .payload = .{ .lifecycle_progress = .{
         .operation_identity = 3,
         .target_identity = 1,
@@ -638,18 +649,18 @@ test "venue facts and replay use apply without replay send capability" {
     try applyHealthyPrelude(&live);
     const command = (try live.shard.apply(atGroup(15, .{
         .identity = 1,
-        .payload = .{ .timer = .{ .quantity = happy_order_quantity } },
+        .payload = .{ .timer = fixture.timer(happy_order_quantity) },
     }))).order_command.?;
     const facts = try happyPathVenueFacts(command);
     for (facts) |event|
         try std.testing.expect((try live.shard.apply(event)).order_command == null);
 
     var replay_shard: ReplayTradingShard = .{};
-    for (genesis) |event| _ = try replay_shard.apply(event);
+    try applyGenesisReplay(&replay_shard);
     try applyHealthyPreludeReplay(&replay_shard);
     _ = try replay_shard.apply(atGroup(15, .{
         .identity = 1,
-        .payload = .{ .timer = .{ .quantity = happy_order_quantity } },
+        .payload = .{ .timer = fixture.timer(happy_order_quantity) },
     }));
     for (facts) |event| _ = try replay_shard.apply(event);
     try std.testing.expectEqualSlices(u8, &live.shard.canonicalStateDigest(), &replay_shard.canonicalStateDigest());
@@ -679,9 +690,9 @@ test "shared canonical adapter facts enter the TradingShard state seam" {
     try applyHealthyPrelude(&run);
     const command = (try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{
         .identity = 1,
-        .payload = .{ .timer = .{ .quantity = happy_order_quantity } },
+        .payload = .{ .timer = fixture.timer(happy_order_quantity) },
     }))) orelse return error.MissingOrderCommand;
-    const client_order = try canonical.ClientOrderId.init(command.client_id);
+    const client_order = command.client_order_id;
     const venue_order = try canonical.VenueOrderRef.init(1, "shared-order-1");
     const instrument = run.shard.instrument_identity;
     const quantity = canonical.InstrumentQuantity{ .instrument = instrument, .rules_version = run.shard.instrument_rules_version, .lots = happy_order_quantity };
@@ -879,9 +890,9 @@ test "canonical not-sent is terminal without entering the legacy shard schema" {
     };
     var run = try startScenario();
     try applyHealthyPrelude(&run);
-    const command = (try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{ .identity = 1, .payload = .{ .timer = .{ .quantity = happy_order_quantity } } }))) orelse return error.MissingOrderCommand;
+    const command = (try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{ .identity = 1, .payload = .{ .timer = fixture.timer(happy_order_quantity) } }))) orelse return error.MissingOrderCommand;
     _ = try run.shard.apply(Fixture.record(command.command_id));
-    try std.testing.expectEqual(OrderState.canceled, run.shard.order_state);
+    try std.testing.expectEqual(oms_module.OrderState.rejected, run.shard.oms.orders[0].state);
     try std.testing.expectEqual(oms_module.OrderState.rejected, run.shard.oms.orders[0].state);
 }
 
@@ -924,7 +935,8 @@ test "bounded multi instrument OMS closes lifecycle and partial policy" {
     try std.testing.expectEqual(oms_module.Operation.amend, amended.oms_commands[0].operation);
     try std.testing.expectEqual(@as(u32, 2), run.shard.oms.orders[0].revision);
     try std.testing.expectEqual(placed.oms_commands[0].reservation.atoms, run.shard.oms.orders[0].reservation.atoms);
-    try std.testing.expectError(error.StaleOrderRevision, run.shard.apply(atGroup(17, .{ .identity = 13, .payload = .{ .oms_intent_group = amend } })));
+    const duplicate_amend = try run.shard.apply(atGroup(17, .{ .identity = 13, .payload = .{ .oms_intent_group = amend } }));
+    try std.testing.expectEqual(@as(usize, 0), duplicate_amend.oms_commands.len);
 
     var cancel: oms_module.IntentGroup = .{ .first_intent_sequence = 13, .count = 1 };
     cancel.members[0] = .{ .intent_sequence = 13, .operation = .cancel, .instrument = swap_instrument, .target_order_id = 2, .expected_revision = 1 };
@@ -940,7 +952,7 @@ test "bounded multi instrument OMS closes lifecycle and partial policy" {
     } } }));
     const digest = run.shard.canonicalStateDigest();
     var replayed: ReplayTradingShard = .{};
-    for (genesis) |event| _ = try replayed.apply(event);
+    try applyGenesisReplay(&replayed);
     _ = try replayed.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     _ = try replayed.apply(atGroup(12, .{ .identity = 10, .payload = .{ .oms_intent_group = group } }));
     _ = try replayed.apply(atGroup(13, .{ .identity = 1, .payload = .{ .oms_dispatch_batch = dispatch } }));
@@ -990,7 +1002,7 @@ test "SPOT and linear instruments close economics and replay independently" {
     try std.testing.expectEqual(@as(i64, 10_010), live.economicSummary().portfolio.unrealized_pnl_micros);
 
     var replayed: ReplayTradingShard = .{};
-    for (genesis) |event| _ = try replayed.apply(event);
+    try applyGenesisReplay(&replayed);
     _ = try replayed.apply(place);
     for (tail_events) |event| _ = try replayed.apply(event);
     try std.testing.expectEqualSlices(u8, &live.canonicalStateDigest(), &replayed.canonicalStateDigest());
@@ -1028,14 +1040,26 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1 });
     var gateway: execution_gateway.Gateway = .{};
     try gateway.add(.{ .account = 2, .adapter = adapter, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
-    try std.testing.expectEqual(.accepted, try gateway.sendOms(.{
-        .account = 2,
-        .capability_version = 1,
-        .rules_version = 1,
-        .config_version = 1,
-        .adapter_session = 1,
-        .dispatch_deadline_monotonic_ns = 1,
-    }, placed.oms_commands[0]));
+    try std.testing.expectEqual(.accepted, try gateway.sendProof(.{
+        .context = .{
+            .account = 2,
+            .capability_version = 1,
+            .rules_version = 1,
+            .config_version = 1,
+            .adapter_session = 1,
+            .dispatch_deadline_monotonic_ns = 1,
+        },
+        .command = placed.oms_commands[0],
+        .effective_trading_authority = true,
+        .reservation = placed.oms_commands[0].reservation,
+        .primary_lease_expires_at_monotonic_ns = 1,
+        .fencing_token = 1,
+        .current_fencing_token = 1,
+        .exchange_position = .{ .instrument = swap_instrument, .rules_version = 1, .lots = 0 },
+        .authority_barrier = 1,
+        .current_barrier = 1,
+        .now_monotonic_ns = 1,
+    }));
     try std.testing.expectEqual(@as(u64, 1), gateway.send_attempt_count);
     var output: [execution_gateway.max_routes]canonical.AdapterOutputBatch = undefined;
     try std.testing.expectEqual(@as(u8, 1), try gateway.drainFair(&output));
@@ -1044,7 +1068,7 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     try std.testing.expectEqual(@as(i64, 10), live.shard.economicSummary().portfolio.swap.quantity);
 
     var replayed: ReplayTradingShard = .{};
-    for (genesis) |event| _ = try replayed.apply(event);
+    try applyGenesisReplay(&replayed);
     _ = try replayed.apply(place);
     for (output[0].slice()) |event| _ = try replayed.apply(.{ .venue = event });
     try std.testing.expectEqualSlices(u8, &live.shard.canonicalStateDigest(), &replayed.canonicalStateDigest());
@@ -1302,7 +1326,7 @@ test "economic fills derive ownership from OMS and close Portfolio Exchange ledg
     try std.testing.expectEqual(@as(i64, 35), summary.portfolio.fee_micros);
     try std.testing.expectEqual(@as(i64, 5), summary.portfolio.rebate_micros);
     try std.testing.expectEqual(@as(u8, 10), summary.ledger_transactions);
-    try std.testing.expect(run.shard.risk_lease_remaining_micros < run.shard.risk_lease_micros);
+    try std.testing.expect(try run.shard.riskLeaseRemainingMicros() < run.shard.risk_lease_micros);
     try std.testing.expectEqual(summary.portfolio.swap.quantity, run.shard.economicSummary().portfolio.swap.quantity);
     try std.testing.expectEqual(summary.portfolio.usdt_balance_micros, run.shard.economicSummary().portfolio.usdt_balance_micros);
     try std.testing.expect(!summary.reconciliation_break);

@@ -195,7 +195,7 @@ fn runOrderBenchmark(io: std.Io, samples: usize, burst_size: usize) !BenchmarkRe
                 .decision_journal = journal.Journal.init(),
                 .input = atGroup(completed + index + 15, .{
                     .identity = completed + index + 1,
-                    .payload = .{ .timer = .{ .quantity = happy_order_quantity } },
+                    .payload = .{ .timer = fixture.timer(happy_order_quantity) },
                 }),
                 .enqueued_ns = nowNs(io),
             };
@@ -213,7 +213,7 @@ fn runOrderBenchmark(io: std.Io, samples: usize, burst_size: usize) !BenchmarkRe
             telemetry.events += 1;
             telemetry.commands += 1;
             if (command.reservation.atoms != 11_397_750 or
-                work.shard.order_state != .pending_submit or
+                work.shard.oms.orders[0].state != .pending_submit or
                 work.decision_journal.records != 5)
                 return error.BenchmarkCorrectnessFailure;
         }
@@ -435,7 +435,7 @@ fn assertFourShardIsolation() ![4][Sha256.digest_length]u8 {
 
     try shards[0].inbox.push(atGroup(16, .{
         .identity = 1,
-        .payload = .{ .timer = .{ .quantity = happy_order_quantity } },
+        .payload = .{ .timer = fixture.timer(happy_order_quantity) },
     }));
     while (shards[0].inbox.len < ShardInbox.capacity) {
         try shards[0].inbox.push(deltaAt(16, 103, 104, 49_860_000_000));

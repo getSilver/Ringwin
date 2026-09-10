@@ -3,7 +3,15 @@ const oms = @import("oms.zig");
 const venue = @import("venue_adapter.zig");
 const std = @import("std");
 
-pub const CapabilityProfile = struct { version: u64, rules_version: u64, config_version: u64, session: canonical.AdapterSessionIdentity, supports_place: bool = true };
+pub const CapabilityProfile = struct {
+    version: u64,
+    rules_version: u64,
+    config_version: u64,
+    session: canonical.AdapterSessionIdentity,
+    supports_place: bool = true,
+    supports_post_only: bool = false,
+    supports_market_protection: bool = false,
+};
 pub const LatchedSafetyGate = enum { open, latched };
 pub const OpeningGate = enum { open, blocked };
 pub const Route = struct { account: canonical.ExchangeAccountIdentity, adapter: venue.VenueAdapter, capability: CapabilityProfile, safety_gate: LatchedSafetyGate = .open };
@@ -15,6 +23,19 @@ pub const OmsDispatchContext = struct {
     config_version: u64,
     adapter_session: canonical.AdapterSessionIdentity,
     dispatch_deadline_monotonic_ns: u64,
+};
+pub const DispatchProof = struct {
+    context: OmsDispatchContext,
+    command: oms.Command,
+    effective_trading_authority: bool,
+    reservation: canonical.AssetAmount,
+    primary_lease_expires_at_monotonic_ns: u64,
+    fencing_token: u64,
+    current_fencing_token: u64,
+    exchange_position: canonical.InstrumentQuantity,
+    authority_barrier: u64,
+    current_barrier: u64,
+    now_monotonic_ns: u64,
 };
 pub const max_routes = 4;
 pub const max_adapter_batches_per_turn: u8 = 1;
@@ -32,23 +53,21 @@ pub const Gateway = struct {
         self.routes[self.count] = route;
         self.count += 1;
     }
-    pub fn send(self: *Gateway, request: canonical.OrderCommand) !venue.SendResult {
+    fn sendUnprovedForContractTest(self: *Gateway, request: canonical.OrderCommand) !venue.SendResult {
         const route = self.routeFor(request.exchange_account) orelse return error.UnknownAccount;
         try self.validateOrder(route, request);
         return self.sendRequestForRoute(route, .{ .order_command = request });
     }
 
     /// Converts a qualified OMS outbox item once at the execution boundary.
-    pub fn sendOms(self: *Gateway, context: OmsDispatchContext, command_value: oms.Command) !venue.SendResult {
+    fn sendOms(self: *Gateway, context: OmsDispatchContext, command_value: oms.Command) !venue.SendResult {
         const route = self.routeFor(context.account) orelse return error.UnknownAccount;
         if (command_value.limit_price.rules_version != context.rules_version) return error.Rejected;
-        var client_storage: [64]u8 = undefined;
-        const client_text = try std.fmt.bufPrint(&client_storage, "RWN-{d}", .{command_value.order_id});
         const request: canonical.OrderCommand = .{
             .identity = command_value.command_id,
             .exchange_account = context.account,
             .instrument = command_value.instrument,
-            .client_order_id = try canonical.ClientOrderId.init(client_text),
+            .client_order_id = command_value.client_order_id,
             .capability_version = context.capability_version,
             .rules_version = context.rules_version,
             .config_version = context.config_version,
@@ -63,11 +82,39 @@ pub const Gateway = struct {
             .revision = command_value.revision,
             .portfolio_reduce_only = command_value.portfolio_reduce_only,
             .venue_reduce_only = command_value.venue_reduce_only,
+            .order_type = command_value.order_type,
+            .time_in_force = command_value.time_in_force,
             .quantity = if (command_value.operation == .cancel) null else .{ .instrument = command_value.instrument, .rules_version = command_value.limit_price.rules_version, .lots = command_value.quantity },
-            .limit_price = if (command_value.operation == .cancel) null else command_value.limit_price,
+            .limit_price = if (command_value.operation == .cancel or command_value.order_type == .market) null else command_value.limit_price,
+            .market_protection_price = command_value.market_protection_price,
+            // The simulated/core boundary knows zero fees explicitly. Venue
+            // adapters must replace this with the authoritative charged fee.
+            .fee_asset = command_value.reservation.asset,
+            .fee_atoms = 0,
         };
         try self.validateOrder(route, request);
         return self.sendRequestForRoute(route, .{ .order_command = request });
+    }
+
+    /// The sole business-order boundary. Every mutable authority dependency is
+    /// rechecked immediately before the VenueAdapter external effect.
+    pub fn sendProof(self: *Gateway, proof: DispatchProof) !venue.SendResult {
+        const command_value = proof.command;
+        if (command_value.intent_sequence == 0 or command_value.risk_decision_identity == 0 or command_value.reservation_identity == 0 or
+            command_value.order_id == 0 or command_value.revision == 0 or command_value.client_order_id.len == 0 or
+            proof.authority_barrier == 0 or proof.authority_barrier != proof.current_barrier or
+            proof.fencing_token == 0 or proof.fencing_token != proof.current_fencing_token or
+            proof.now_monotonic_ns > proof.context.dispatch_deadline_monotonic_ns or
+            proof.now_monotonic_ns > proof.primary_lease_expires_at_monotonic_ns or
+            proof.exchange_position.instrument != command_value.instrument or
+            proof.exchange_position.rules_version != command_value.limit_price.rules_version)
+            return error.NotSent;
+        const reducing = genuinelyReduces(proof.exchange_position.lots, command_value.side, command_value.quantity);
+        if (!proof.effective_trading_authority and !reducing) return error.NotSent;
+        if (command_value.operation != .cancel and
+            (proof.reservation.asset != command_value.reservation.asset or proof.reservation.atoms != command_value.reservation.atoms or proof.reservation.atoms <= 0))
+            return error.NotSent;
+        return self.sendOms(proof.context, command_value) catch return error.NotSent;
     }
 
     /// Sends a non-order request through the same account-owned route.  Only
@@ -75,23 +122,15 @@ pub const Gateway = struct {
     /// Gateway and therefore cannot send anything.
     pub fn sendRequest(self: *Gateway, request: canonical.AdapterRequest) !venue.SendResult {
         switch (request) {
-            .order_command => |order_command| return self.send(order_command),
+            .order_command, .order_batch => return error.OrderProofRequired,
             else => {},
         }
         const account = switch (request) {
-            .order_batch => |batch| if (batch.len == 0) return error.EmptyOrderBatch else batch.commands[0].exchange_account,
             .order_reconciliation => |reconciliation| reconciliation.exchange_account,
             .account_reconciliation => |reconciliation| reconciliation.exchange_account,
-            .order_command => unreachable,
+            .order_command, .order_batch => unreachable,
         };
         const route = self.routeFor(account) orelse return error.UnknownAccount;
-        switch (request) {
-            .order_batch => |batch| for (batch.slice()) |order| {
-                if (order.exchange_account != account) return error.AmbiguousRoute;
-                try self.validateOrder(route, order);
-            },
-            else => {},
-        }
         return self.sendRequestForRoute(route, request);
     }
 
@@ -108,6 +147,8 @@ pub const Gateway = struct {
             return error.Rejected;
         if (request.operation != .cancel and !route.capability.supports_place)
             return error.Rejected;
+        if (request.order_type == .post_only and !route.capability.supports_post_only) return error.Rejected;
+        if (request.market_protection_price != null and !route.capability.supports_market_protection) return error.Rejected;
         if (route.capability.version != request.capability_version or
             route.capability.rules_version != request.rules_version or
             route.capability.config_version != request.config_version or
@@ -181,6 +222,13 @@ pub const Gateway = struct {
         return count;
     }
 };
+
+fn genuinelyReduces(position: i128, side: oms.Side, quantity: i64) bool {
+    if (quantity <= 0 or position == 0) return false;
+    const after = std.math.add(i128, position, if (side == .buy) quantity else -@as(i128, quantity)) catch return false;
+    if ((position > 0 and after < 0) or (position < 0 and after > 0)) return false;
+    return if (position > 0) after < position else after > position;
+}
 fn command(account: canonical.ExchangeAccountIdentity, instrument: canonical.InstrumentIdentity) !canonical.OrderCommand {
     return .{ .identity = 1, .exchange_account = account, .instrument = instrument, .client_order_id = try canonical.ClientOrderId.init("x"), .capability_version = 1, .rules_version = 1, .config_version = 1, .adapter_session = 1, .dispatch_deadline_monotonic_ns = 1 };
 }
@@ -213,36 +261,36 @@ test "gateway fixes route and rechecks every command dependency" {
     try gateway.add(.{ .account = 1, .adapter = first.adapter(), .capability = profile });
     try gateway.add(.{ .account = 2, .adapter = second.adapter(), .capability = profile });
     var request = try command(1, 10);
-    try std.testing.expectEqual(.accepted, try gateway.send(request));
+    try std.testing.expectEqual(.accepted, try gateway.sendUnprovedForContractTest(request));
     try std.testing.expectEqual(@as(u8, 1), first.sent);
     request.config_version = 2;
-    try std.testing.expectError(error.Rejected, gateway.send(request));
+    try std.testing.expectError(error.Rejected, gateway.sendUnprovedForContractTest(request));
     try std.testing.expectEqual(@as(u8, 1), first.sent);
     request.config_version = 1;
     request.capability_version = 2;
-    try std.testing.expectError(error.Rejected, gateway.send(request));
+    try std.testing.expectError(error.Rejected, gateway.sendUnprovedForContractTest(request));
     request.capability_version = 1;
     request.rules_version = 2;
-    try std.testing.expectError(error.Rejected, gateway.send(request));
+    try std.testing.expectError(error.Rejected, gateway.sendUnprovedForContractTest(request));
     request.rules_version = 1;
     request.adapter_session = 2;
-    try std.testing.expectError(error.Rejected, gateway.send(request));
+    try std.testing.expectError(error.Rejected, gateway.sendUnprovedForContractTest(request));
     request.adapter_session = 1;
     gateway.latchAccount(1);
-    try std.testing.expectError(error.Rejected, gateway.send(request));
+    try std.testing.expectError(error.Rejected, gateway.sendUnprovedForContractTest(request));
     request.operation = .cancel;
-    try std.testing.expectEqual(.accepted, try gateway.send(request));
+    try std.testing.expectEqual(.accepted, try gateway.sendUnprovedForContractTest(request));
     request.operation = .place;
     request.exchange_account = 2;
-    try std.testing.expectEqual(.accepted, try gateway.send(request));
+    try std.testing.expectEqual(.accepted, try gateway.sendUnprovedForContractTest(request));
     gateway.setInstrumentGap(10);
-    try std.testing.expectError(error.Rejected, gateway.send(request));
+    try std.testing.expectError(error.Rejected, gateway.sendUnprovedForContractTest(request));
     request.instrument = 11;
-    try std.testing.expectEqual(.accepted, try gateway.send(request));
+    try std.testing.expectEqual(.accepted, try gateway.sendUnprovedForContractTest(request));
     gateway.routes[1].capability.supports_place = false;
-    try std.testing.expectError(error.Rejected, gateway.send(request));
+    try std.testing.expectError(error.Rejected, gateway.sendUnprovedForContractTest(request));
     request.operation = .cancel;
-    try std.testing.expectEqual(.accepted, try gateway.send(request));
+    try std.testing.expectEqual(.accepted, try gateway.sendUnprovedForContractTest(request));
     try std.testing.expectEqual(@as(u8, 3), second.sent);
     try std.testing.expectEqual(@as(u64, 5), gateway.send_attempt_count);
     std.debug.print("execution_gateway_acceptance: adapter_submissions={d}\n", .{gateway.send_attempt_count});
@@ -256,6 +304,33 @@ test "gateway drains each fixed route once" {
     try gateway.add(.{ .account = 2, .adapter = second.adapter(), .capability = profile });
     var output: [max_routes]canonical.AdapterOutputBatch = undefined;
     try std.testing.expectEqual(@as(u8, 2), try gateway.drainFair(&output));
+}
+
+test "DispatchProof rechecks authority reservation lease fencing and true reduce-only" {
+    var adapter_fixture = Fixture{ .pending = null };
+    var gateway = Gateway{};
+    try gateway.add(.{ .account = 1, .adapter = adapter_fixture.adapter(), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+    const command_value: oms.Command = .{ .command_id = 1, .order_id = 1, .strategy_instance = 1, .revision = 1, .operation = .place, .instrument = 10, .side = .sell, .portfolio_reduce_only = true, .venue_reduce_only = true, .quantity = 2, .limit_price = .{ .instrument = 10, .rules_version = 1, .ticks = 100 }, .reservation = .{ .asset = 1, .atoms = 20 }, .client_order_id = try canonical.ClientOrderId.init("RWN-1"), .intent_sequence = 1, .risk_decision_identity = 1, .reservation_identity = 1 };
+    var proof: DispatchProof = .{
+        .context = .{ .account = 1, .capability_version = 1, .rules_version = 1, .config_version = 1, .adapter_session = 1, .dispatch_deadline_monotonic_ns = 10 },
+        .command = command_value,
+        .effective_trading_authority = false,
+        .reservation = command_value.reservation,
+        .primary_lease_expires_at_monotonic_ns = 10,
+        .fencing_token = 7,
+        .current_fencing_token = 7,
+        .exchange_position = .{ .instrument = 10, .rules_version = 1, .lots = 3 },
+        .authority_barrier = 5,
+        .current_barrier = 5,
+        .now_monotonic_ns = 9,
+    };
+    try std.testing.expectEqual(venue.SendResult.accepted, try gateway.sendProof(proof));
+    proof.exchange_position.lots = -3;
+    try std.testing.expectError(error.NotSent, gateway.sendProof(proof));
+    proof.exchange_position.lots = 3;
+    proof.current_fencing_token = 8;
+    try std.testing.expectError(error.NotSent, gateway.sendProof(proof));
+    try std.testing.expectEqual(@as(u8, 1), adapter_fixture.sent);
 }
 test "Gateway route and batch admission fail atomically" {
     var adapter_fixture = Fixture{ .pending = null };
@@ -272,7 +347,7 @@ test "Gateway route and batch admission fail atomically" {
     var invalid = try command(1, 10);
     invalid.config_version = 2;
     try batch.append(invalid);
-    try std.testing.expectError(error.Rejected, gateway.sendRequest(.{ .order_batch = batch }));
+    try std.testing.expectError(error.OrderProofRequired, gateway.sendRequest(.{ .order_batch = batch }));
     try std.testing.expectEqual(@as(u64, 0), gateway.send_attempt_count);
     try std.testing.expectEqual(@as(u8, 0), adapter_fixture.sent);
 }
@@ -300,8 +375,8 @@ test "Gateway scopes uncertainty and market health to the affected route" {
         .raw_evidence = .{ .stream = 1, .sequence = 1, .digest = @splat(0) },
     }, .event = .{ .order_dispatch_result = .{ .command = 1, .state = .unknown } } });
     gateway.observeAdapterOutput(unknown);
-    try std.testing.expectError(error.Rejected, gateway.send(try command(11, 101)));
-    try std.testing.expectEqual(.accepted, try gateway.send(try command(22, 202)));
+    try std.testing.expectError(error.Rejected, gateway.sendUnprovedForContractTest(try command(11, 101)));
+    try std.testing.expectEqual(.accepted, try gateway.sendUnprovedForContractTest(try command(22, 202)));
 
     var gap: canonical.AdapterOutputBatch = .{};
     try gap.append(.{ .envelope = .{
@@ -319,12 +394,12 @@ test "Gateway scopes uncertainty and market health to the affected route" {
         .raw_evidence = .{ .stream = 2, .sequence = 1, .digest = @splat(0) },
     }, .event = .{ .market_data_health_changed = .{ .instrument = 202, .health = .gap } } });
     gateway.observeMarketOutput(gap);
-    try std.testing.expectError(error.Rejected, gateway.send(try command(22, 202)));
-    try std.testing.expectError(error.Rejected, gateway.send(try command(11, 101)));
+    try std.testing.expectError(error.Rejected, gateway.sendUnprovedForContractTest(try command(22, 202)));
+    try std.testing.expectError(error.Rejected, gateway.sendUnprovedForContractTest(try command(11, 101)));
 
     gap.events[0].event.market_data_health_changed.health = .healthy;
     gateway.observeMarketOutput(gap);
-    try std.testing.expectError(error.Rejected, gateway.send(try command(22, 202)));
+    try std.testing.expectError(error.Rejected, gateway.sendUnprovedForContractTest(try command(22, 202)));
     gap.events[0].envelope.event_type = @intFromEnum(canonical.EventType.l2_book_snapshot);
     gap.events[0].event = .{ .l2_book_snapshot = .{
         .instrument = 202,
@@ -333,9 +408,9 @@ test "Gateway scopes uncertainty and market health to the affected route" {
         .best_ask = .{ .instrument = 202, .rules_version = 1, .ticks = 2 },
     } };
     gateway.observeMarketOutput(gap);
-    try std.testing.expectEqual(.accepted, try gateway.send(try command(22, 202)));
+    try std.testing.expectEqual(.accepted, try gateway.sendUnprovedForContractTest(try command(22, 202)));
 
     for (0..max_routes + 1) |index| gateway.setInstrumentGap(1_000 + index);
     try std.testing.expect(gateway.instrument_gate_capacity_exhausted);
-    try std.testing.expectError(error.Rejected, gateway.send(try command(22, 999)));
+    try std.testing.expectError(error.Rejected, gateway.sendUnprovedForContractTest(try command(22, 999)));
 }

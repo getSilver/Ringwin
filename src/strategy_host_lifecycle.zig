@@ -5,7 +5,7 @@ const ipc = @import("strategy_host_ipc.zig");
 const Crc32c = std.hash.crc.Crc32Iscsi;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const control_header_len: usize = 64;
-const max_control_payload: usize = 65_536;
+const max_control_payload: usize = 1_048_576;
 const max_checkpoint_payload: usize = 8 * 1024 * 1024 + 192 + 8;
 const plan_len: usize = 176;
 const hello_len: usize = 160;
@@ -20,11 +20,13 @@ const MessageType = enum(u16) {
     session_plan = 1,
     begin_recovery = 2,
     activate_strategy = 3,
+    input_batch = 4,
     shutdown = 6,
     host_hello = 101,
     strategy_recovered = 102,
     strategy_faulted = 103,
     recovery_required = 104,
+    strategy_output = 105,
     host_heartbeat = 106,
     shutdown_ack = 107,
 };
@@ -271,7 +273,7 @@ pub const HostSupervisor = struct {
         destination: []u8,
         activation: Activation,
     ) ![]u8 {
-        if (self.state != .recovered or activation.activation_identity == 0)
+        if ((self.state != .recovered and self.state != .ready_for_recovery) or activation.activation_identity == 0)
             return error.InvalidState;
         var payload: [72]u8 = @splat(0);
         put(u128, &payload, 0, activation.strategy_identity);
@@ -509,9 +511,9 @@ fn decodeControl(frame: []const u8) !DecodedControl {
 
 pub const ManagedHost = struct {
     child: std.process.Child,
-    input_mapping: ipc.OwnedMapping,
-    output_mapping: ipc.OwnedMapping,
     supervisor: HostSupervisor,
+    next_input_batch: u64 = 1,
+    last_input_cursor: ?u64 = null,
 
     pub fn start(
         init: std.process.Init,
@@ -521,27 +523,17 @@ pub const ManagedHost = struct {
         mode: []const u8,
         extra_args: []const []const u8,
     ) !ManagedHost {
-        var input_mapping = try ipc.OwnedMapping.create(.input, plan.session, plan.input_slots, plan.input_capacity);
-        errdefer input_mapping.deinit();
-        var output_mapping = try ipc.OwnedMapping.create(.output, plan.session, plan.output_slots, plan.output_capacity);
-        errdefer output_mapping.deinit();
-        var input_text: [32]u8 = undefined;
-        var output_text: [32]u8 = undefined;
         var argv: [24][]const u8 = undefined;
-        if (8 + extra_args.len > argv.len) return error.TooManyHostArguments;
-        argv[0..8].* = .{
+        if (4 + extra_args.len > argv.len) return error.TooManyHostArguments;
+        argv[0..4].* = .{
             python,
             script,
             "--mode",
             mode,
-            "--input-mapping",
-            try std.fmt.bufPrint(&input_text, "{d}", .{input_mapping.raw}),
-            "--output-mapping",
-            try std.fmt.bufPrint(&output_text, "{d}", .{output_mapping.raw}),
         };
-        @memcpy(argv[8..][0..extra_args.len], extra_args);
+        @memcpy(argv[4..][0..extra_args.len], extra_args);
         const child = try std.process.spawn(init.io, .{
-            .argv = argv[0 .. 8 + extra_args.len],
+            .argv = argv[0 .. 4 + extra_args.len],
             .stdin = .pipe,
             .stdout = .pipe,
             .stderr = .inherit,
@@ -549,8 +541,6 @@ pub const ManagedHost = struct {
         });
         return .{
             .child = child,
-            .input_mapping = input_mapping,
-            .output_mapping = output_mapping,
             .supervisor = try HostSupervisor.init(plan, 0),
         };
     }
@@ -566,6 +556,43 @@ pub const ManagedHost = struct {
         var frame_storage: [control_header_len + max_control_payload]u8 = undefined;
         const frame = try readPipeFrame(self.child.stdout.?, io, &frame_storage);
         return self.supervisor.acceptHostFrame(frame, now_ns);
+    }
+
+    pub fn sendInput(self: *ManagedHost, io: std.Io, batch: []const u8, now_ns: i64) !void {
+        if (batch.len > self.supervisor.plan.input_capacity) return error.InputFrameTooLarge;
+        if (ipc.validateBatchAt(batch, self.supervisor.plan.session, self.next_input_batch, self.last_input_cursor, now_ns).status != .ok)
+            return error.InvalidInputBatch;
+        try writePipeParts(
+            self.child.stdin.?,
+            io,
+            .input_batch,
+            self.supervisor.plan.session,
+            self.supervisor.next_zig_sequence,
+            batch,
+        );
+        self.supervisor.next_zig_sequence += 1;
+        self.next_input_batch += 1;
+        self.last_input_cursor = std.mem.readInt(u64, batch[88..96], .little);
+    }
+
+    pub fn receiveOutput(self: *ManagedHost, io: std.Io, now_ns: i64, storage: []u8) ![]const u8 {
+        const frame = try readPipeFrame(self.child.stdout.?, io, storage);
+        const decoded = decodeControl(frame) catch {
+            self.supervisor.state = .failed;
+            return error.InvalidOutputFrame;
+        };
+        if (decoded.message_type != .strategy_output or
+            !sameSession(decoded.session, self.supervisor.plan.session) or
+            decoded.sequence != self.supervisor.next_host_sequence or
+            decoded.payload.len > self.supervisor.plan.output_capacity or
+            ipc.validateOutput(decoded.payload, self.supervisor.plan.session, self.next_input_batch - 1) != .ok)
+        {
+            self.supervisor.state = .failed;
+            return error.InvalidOutputFrame;
+        }
+        self.supervisor.next_host_sequence += 1;
+        _ = now_ns;
+        return decoded.payload;
     }
 
     pub fn beginRecovery(
@@ -611,10 +638,22 @@ pub const ManagedHost = struct {
 
     pub fn deinit(self: *ManagedHost, io: std.Io) void {
         self.child.kill(io);
-        self.input_mapping.deinit();
-        self.output_mapping.deinit();
     }
 };
+
+fn writePipeParts(file: std.Io.File, io: std.Io, message_type: MessageType, session: ipc.Session, sequence: u64, payload: []const u8) !void {
+    if (payload.len > max_control_payload) return error.ControlFrameTooLarge;
+    var header: [control_header_len]u8 = @splat(0);
+    encodeControlHeader(&header, message_type, session, sequence, payload.len);
+    put(u32, &header, 16, @intCast(control_header_len + payload.len));
+    put(u32, &header, 56, Crc32c.hash(payload));
+    put(u32, &header, 60, Crc32c.hash(header[0..60]));
+    var prefix: [4]u8 = undefined;
+    put(u32, &prefix, 0, @intCast(control_header_len + payload.len));
+    try file.writeStreamingAll(io, &prefix);
+    try file.writeStreamingAll(io, &header);
+    try file.writeStreamingAll(io, payload);
+}
 
 fn writePipeFrame(file: std.Io.File, io: std.Io, frame: []const u8) !void {
     var prefix: [4]u8 = undefined;

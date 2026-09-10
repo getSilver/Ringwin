@@ -21,6 +21,7 @@ pub const EventKind = enum(u16) {
     virtual_portfolio_activated,
     portfolio_transfer,
     strategy_activated,
+    host_activated,
     primary_lease_granted,
     risk_lease_granted,
     mark_price,
@@ -101,10 +102,29 @@ pub const Trace = struct {
 };
 
 pub const MarketHealth = enum(u8) { initializing, healthy, gap };
-pub const RejectReason = enum(u8) { none, market_data_gap, global_risk_lease_exceeded };
+/// Stable decision rejection taxonomy.  The trace may group these into a
+/// coarse risk event, but the authoritative state retains the exact layer.
+pub const RejectReason = enum(u8) {
+    none,
+    authorization_closed,
+    market_data_gap,
+    strategy_limit_exceeded,
+    portfolio_limit_exceeded,
+    decision_domain_limit_exceeded,
+    exchange_account_limit_exceeded,
+    global_limit_exceeded,
+    portfolio_opening_gate_closed,
+    exchange_opening_gate_closed,
+    insufficient_spot_asset,
+    portfolio_reduce_only_violation,
+};
 
 pub const TimerRequest = struct {
+    side: host_gateway.Side,
+    time_in_force: host_gateway.TimeInForce,
+    portfolio_reduce_only: bool,
     quantity: i64,
+    limit_price_micros: i64,
 };
 
 pub const EconomicFill = struct {
@@ -152,6 +172,7 @@ pub const PayloadTag = enum(u16) {
     virtual_portfolio_activated,
     portfolio_transfer,
     strategy_activated,
+    host_activated,
     primary_lease_granted,
     risk_lease_granted,
     mark_price,
@@ -218,6 +239,16 @@ pub const StrategyActivation = struct {
     config_version: u64,
     activation_identity: u128,
 };
+/// Persisted authorization fact required before a StrategyHost session may
+/// submit an external intent.  Strategy deployment and host capability
+/// activation are deliberately separate facts.
+pub const HostActivated = struct {
+    strategy_identity: u128,
+    config_version: u64,
+    activation_identity: u128,
+    activation_barrier: u64,
+    state_digest: [32]u8,
+};
 pub const PrimaryLease = struct { fencing_token: u64 };
 pub const MarkPrice = struct { instrument: canonical.InstrumentIdentity, price_micros: i64 };
 pub const RiskLease = struct {
@@ -261,6 +292,7 @@ pub const CorePayload = union(PayloadTag) {
     virtual_portfolio_activated: VirtualPortfolioActivation,
     portfolio_transfer: PortfolioTransfer,
     strategy_activated: StrategyActivation,
+    host_activated: HostActivated,
     primary_lease_granted: PrimaryLease,
     risk_lease_granted: RiskLease,
     mark_price: MarkPrice,
@@ -358,6 +390,13 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u64, value.config_version);
             try encoded.put(u128, value.activation_identity);
         },
+        .host_activated => |value| {
+            try encoded.put(u128, value.strategy_identity);
+            try encoded.put(u64, value.config_version);
+            try encoded.put(u128, value.activation_identity);
+            try encoded.put(u64, value.activation_barrier);
+            for (value.state_digest) |byte| try encoded.put(u8, byte);
+        },
         .primary_lease_granted => |value| try encoded.put(u64, value.fencing_token),
         .risk_lease_granted => |value| {
             try encoded.put(u64, value.lease_identity);
@@ -374,7 +413,13 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u128, value.instrument);
             try encoded.put(i64, value.price_micros);
         },
-        .timer => |value| try encoded.put(i64, value.quantity),
+        .timer => |value| {
+            try encoded.put(u8, @intFromEnum(value.side));
+            try encoded.put(u8, @intFromEnum(value.time_in_force));
+            try encoded.put(u8, @intFromBool(value.portfolio_reduce_only));
+            try encoded.put(i64, value.quantity);
+            try encoded.put(i64, value.limit_price_micros);
+        },
         .external_order_intent => |value| {
             try encoded.put(u128, value.strategy_identity);
             try encoded.put(u64, value.intent_sequence);
@@ -419,6 +464,16 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
                 try encoded.put(u8, @intFromBool(member.allow_cancel_confirm_create));
                 try encoded.put(u64, member.reservation.asset);
                 try encoded.put(i128, member.reservation.atoms);
+                try encoded.put(u8, @intFromEnum(member.order_type));
+                try encoded.put(u8, @intFromEnum(member.time_in_force));
+                try encoded.put(u8, @intFromBool(member.market_protection_price != null));
+                if (member.market_protection_price) |price| {
+                    try encoded.put(u128, price.instrument);
+                    try encoded.put(u64, price.rules_version);
+                    try encoded.put(i128, price.ticks);
+                }
+                try encoded.put(u8, member.client_order_id.len);
+                for (member.client_order_id.slice()) |byte| try encoded.put(u8, byte);
             }
         },
         .oms_dispatch_batch => |value| {
@@ -444,6 +499,8 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u32, value.revision);
             try encoded.put(i64, value.cumulative_quantity);
             try encoded.put(i64, value.remaining_quantity);
+            try encoded.put(u8, @intFromBool(value.terminal_state != null));
+            if (value.terminal_state) |terminal| try encoded.put(u8, @intFromEnum(terminal));
         },
         .economic_fill => |value| {
             try encoded.put(u64, value.fill_id);
@@ -610,6 +667,17 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             .config_version = try readInputValue(u64, record.payload, &offset),
             .activation_identity = try readInputValue(u128, record.payload, &offset),
         } },
+        .host_activated => .{ .host_activated = .{
+            .strategy_identity = try readInputValue(u128, record.payload, &offset),
+            .config_version = try readInputValue(u64, record.payload, &offset),
+            .activation_identity = try readInputValue(u128, record.payload, &offset),
+            .activation_barrier = try readInputValue(u64, record.payload, &offset),
+            .state_digest = blk: {
+                var digest: [32]u8 = undefined;
+                for (&digest) |*byte| byte.* = try readInputValue(u8, record.payload, &offset);
+                break :blk digest;
+            },
+        } },
         .primary_lease_granted => .{ .primary_lease_granted = .{
             .fencing_token = try readInputValue(u64, record.payload, &offset),
         } },
@@ -629,7 +697,11 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             .price_micros = try readInputValue(i64, record.payload, &offset),
         } },
         .timer => .{ .timer = .{
+            .side = std.enums.fromInt(host_gateway.Side, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOrderSide,
+            .time_in_force = std.enums.fromInt(host_gateway.TimeInForce, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownTimeInForce,
+            .portfolio_reduce_only = try readInputBool(record.payload, &offset),
             .quantity = try readInputValue(i64, record.payload, &offset),
+            .limit_price_micros = try readInputValue(i64, record.payload, &offset),
         } },
         .external_order_intent => .{ .external_order_intent = .{
             .strategy_identity = try readInputValue(u128, record.payload, &offset),
@@ -675,38 +747,54 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
                 .count = try readInputValue(u8, record.payload, &offset),
             };
             if (value.count > oms_module.max_group_members) return error.InvalidIntentGroup;
-            for (value.members[0..value.count]) |*member| member.* = .{
-                .intent_sequence = try readInputValue(u64, record.payload, &offset),
-                .strategy_instance = try readInputValue(u128, record.payload, &offset),
-                .operation = std.enums.fromInt(oms_module.Operation, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOmsOperation,
-                .instrument = try readInputValue(u128, record.payload, &offset),
-                .side = std.enums.fromInt(oms_module.Side, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOmsSide,
-                .portfolio_reduce_only = switch (try readInputValue(u8, record.payload, &offset)) {
-                    0 => false,
-                    1 => true,
-                    else => return error.InvalidIntentBoolean,
-                },
-                .venue_reduce_only = switch (try readInputValue(u8, record.payload, &offset)) {
-                    0 => false,
-                    1 => true,
-                    else => return error.InvalidIntentBoolean,
-                },
-                .target_order_id = try readInputValue(u64, record.payload, &offset),
-                .expected_revision = try readInputValue(u32, record.payload, &offset),
-                .expected_cumulative_quantity = try readInputValue(i64, record.payload, &offset),
-                .quantity = try readInputValue(i64, record.payload, &offset),
-                .limit_price = .{
+            for (value.members[0..value.count]) |*member| {
+                member.* = .{
+                    .intent_sequence = try readInputValue(u64, record.payload, &offset),
+                    .strategy_instance = try readInputValue(u128, record.payload, &offset),
+                    .operation = std.enums.fromInt(oms_module.Operation, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOmsOperation,
                     .instrument = try readInputValue(u128, record.payload, &offset),
-                    .rules_version = try readInputValue(u64, record.payload, &offset),
-                    .ticks = try readInputValue(i128, record.payload, &offset),
-                },
-                .native_amend = (try readInputValue(u8, record.payload, &offset)) == 1,
-                .allow_cancel_confirm_create = (try readInputValue(u8, record.payload, &offset)) == 1,
-                .reservation = .{
-                    .asset = try readInputValue(u64, record.payload, &offset),
-                    .atoms = try readInputValue(i128, record.payload, &offset),
-                },
-            };
+                    .side = std.enums.fromInt(oms_module.Side, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOmsSide,
+                    .portfolio_reduce_only = switch (try readInputValue(u8, record.payload, &offset)) {
+                        0 => false,
+                        1 => true,
+                        else => return error.InvalidIntentBoolean,
+                    },
+                    .venue_reduce_only = switch (try readInputValue(u8, record.payload, &offset)) {
+                        0 => false,
+                        1 => true,
+                        else => return error.InvalidIntentBoolean,
+                    },
+                    .target_order_id = try readInputValue(u64, record.payload, &offset),
+                    .expected_revision = try readInputValue(u32, record.payload, &offset),
+                    .expected_cumulative_quantity = try readInputValue(i64, record.payload, &offset),
+                    .quantity = try readInputValue(i64, record.payload, &offset),
+                    .limit_price = .{
+                        .instrument = try readInputValue(u128, record.payload, &offset),
+                        .rules_version = try readInputValue(u64, record.payload, &offset),
+                        .ticks = try readInputValue(i128, record.payload, &offset),
+                    },
+                    .native_amend = (try readInputValue(u8, record.payload, &offset)) == 1,
+                    .allow_cancel_confirm_create = (try readInputValue(u8, record.payload, &offset)) == 1,
+                    .reservation = .{
+                        .asset = try readInputValue(u64, record.payload, &offset),
+                        .atoms = try readInputValue(i128, record.payload, &offset),
+                    },
+                    .order_type = std.enums.fromInt(canonical.OrderType, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOrderType,
+                    .time_in_force = std.enums.fromInt(canonical.TimeInForce, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownTimeInForce,
+                    .market_protection_price = if ((try readInputValue(u8, record.payload, &offset)) == 1) .{
+                        .instrument = try readInputValue(u128, record.payload, &offset),
+                        .rules_version = try readInputValue(u64, record.payload, &offset),
+                        .ticks = try readInputValue(i128, record.payload, &offset),
+                    } else null,
+                };
+                const client_len = try readInputValue(u8, record.payload, &offset);
+                if (client_len > 64 or record.payload.len - offset < client_len) return error.InvalidClientOrderId;
+                member.client_order_id = if (client_len == 0)
+                    .{}
+                else
+                    try canonical.ClientOrderId.init(record.payload[offset..][0..client_len]);
+                offset += client_len;
+            }
             break :blk .{ .oms_intent_group = value };
         },
         .oms_dispatch_batch => blk: {
@@ -734,6 +822,10 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             .revision = try readInputValue(u32, record.payload, &offset),
             .cumulative_quantity = try readInputValue(i64, record.payload, &offset),
             .remaining_quantity = try readInputValue(i64, record.payload, &offset),
+            .terminal_state = if ((try readInputValue(u8, record.payload, &offset)) == 1)
+                std.enums.fromInt(oms_module.TerminalState, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownTerminalState
+            else
+                null,
         } },
         .economic_fill => .{ .economic_fill = .{
             .fill_id = try readInputValue(u64, record.payload, &offset),

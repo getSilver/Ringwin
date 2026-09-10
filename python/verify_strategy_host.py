@@ -16,11 +16,6 @@ def main():
     if not zig:
         raise SystemExit("zig is required")
     BUILD.mkdir(parents=True, exist_ok=True)
-    bridge = BUILD / (
-        "strategy_host_ipc-current.dll"
-        if IS_WINDOWS
-        else "libstrategy_host_ipc-current.so"
-    )
     capacity = BUILD / (
         "strategy_host_capacity-current.exe"
         if IS_WINDOWS
@@ -34,15 +29,6 @@ def main():
         [zig, "test", "src/strategy_host_recovery.zig", "-O", "ReleaseSafe"],
         [zig, "test", "src/strategy_host_failures.zig", "-O", "ReleaseSafe"],
         [zig, "run", "src/strategy_host_ipc.zig", "-O", "ReleaseSafe"],
-        [
-            zig,
-            "build-lib",
-            "src/strategy_host_ipc.zig",
-            "-dynamic",
-            "-O",
-            "ReleaseSafe",
-            f"-femit-bin={bridge}",
-        ],
         [zig, "run", "src/strategy_host_lifecycle.zig", "-O", "ReleaseSafe"],
         [
             zig,
@@ -50,8 +36,6 @@ def main():
             "src/strategy_host_integration.zig",
             "-O",
             "ReleaseSafe",
-            "--",
-            str(bridge),
         ],
         [
             zig,
@@ -59,8 +43,6 @@ def main():
             "src/strategy_host_recovery_integration.zig",
             "-O",
             "ReleaseSafe",
-            "--",
-            str(bridge),
         ],
         [
             zig,
@@ -68,8 +50,6 @@ def main():
             "src/strategy_host_failure_integration.zig",
             "-O",
             "ReleaseSafe",
-            "--",
-            str(bridge),
         ],
         [
             zig,
@@ -79,7 +59,7 @@ def main():
             "ReleaseSafe",
             f"-femit-bin={capacity}",
         ],
-        [str(capacity), str(bridge), sys.executable, "python/strategy_host.py"],
+        [str(capacity), sys.executable, "python/strategy_host.py"],
     ]
     for index, command in enumerate(checks, 1):
         print(f"[{index}/{len(checks)}] {subprocess.list2cmdline(command)}", flush=True)

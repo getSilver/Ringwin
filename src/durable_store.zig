@@ -796,14 +796,14 @@ pub fn runLinuxAcceptance(init: std.process.Init) !void {
         defer file_store.close(init.io);
         const store = file_store.interface();
         for (streams, 0..) |stream, index| {
-            try store.append(init.io, .{ .stream = stream, .record = .{ .type_id = @intCast(index + 1), .schema_version = 8, .flags = 0, .sequence = 1, .source_time = 0, .receive_time = 0, .monotonic_time = 0, .wall_time = 0, .time_presence = .{}, .payload = &payloads[index] } });
+            try store.append(init.io, .{ .stream = stream, .record = .{ .type_id = @intCast(index + 1), .schema_version = production_contract.journal_schema_version, .flags = 0, .sequence = 1, .source_time = 0, .receive_time = 0, .monotonic_time = 0, .wall_time = 0, .time_presence = .{}, .payload = &payloads[index] } });
             try store.commit(init.io, stream, 1);
             try store.seal(init.io, stream);
             var snapshot: [64]u8 = undefined;
             @memset(&snapshot, @as(u8, @intCast(index + 7)));
             try store.publishSnapshot(init.io, stream, 1, &snapshot);
             try store.rotate(init.io, stream);
-            try store.append(init.io, .{ .stream = stream, .record = .{ .type_id = @intCast(index + 1), .schema_version = 8, .flags = 0, .sequence = 2, .source_time = 0, .receive_time = 0, .monotonic_time = 0, .wall_time = 0, .time_presence = .{}, .payload = &payloads[index] } });
+            try store.append(init.io, .{ .stream = stream, .record = .{ .type_id = @intCast(index + 1), .schema_version = production_contract.journal_schema_version, .flags = 0, .sequence = 2, .source_time = 0, .receive_time = 0, .monotonic_time = 0, .wall_time = 0, .time_presence = .{}, .payload = &payloads[index] } });
             try store.commit(init.io, stream, 2);
             try store.seal(init.io, stream);
         }
@@ -839,7 +839,7 @@ test "memory and file stores preserve sealed barrier and reject unsafe recovery"
     const store = memory.interface();
     const stream: StreamIdentity = .{ .domain = .decision_log, .id = 7 };
     const payload = [_]u8{ 1, 2, 3 };
-    try store.append(undefined, .{ .stream = stream, .record = .{ .type_id = 1, .schema_version = 8, .flags = 0, .sequence = 1, .source_time = 0, .receive_time = 0, .monotonic_time = 0, .wall_time = 0, .time_presence = .{}, .payload = &payload } });
+    try store.append(undefined, .{ .stream = stream, .record = .{ .type_id = 1, .schema_version = production_contract.journal_schema_version, .flags = 0, .sequence = 1, .source_time = 0, .receive_time = 0, .monotonic_time = 0, .wall_time = 0, .time_presence = .{}, .payload = &payload } });
     try store.commit(undefined, stream, 1);
     try store.seal(undefined, stream);
     var snapshot: [128]u8 = undefined;
@@ -863,7 +863,7 @@ test "memory fault injection always closes the safety gate" {
         var adapter = MemoryAdapter.init();
         adapter.injectFault(fault);
         const store = adapter.interface();
-        if (store.append(undefined, .{ .stream = stream, .record = .{ .type_id = 1, .schema_version = 8, .flags = 0, .sequence = 1, .source_time = 0, .receive_time = 0, .monotonic_time = 0, .wall_time = 0, .time_presence = .{}, .payload = &payload } })) |_| return error.FaultInjectionNotObserved else |_| {}
+        if (store.append(undefined, .{ .stream = stream, .record = .{ .type_id = 1, .schema_version = production_contract.journal_schema_version, .flags = 0, .sequence = 1, .source_time = 0, .receive_time = 0, .monotonic_time = 0, .wall_time = 0, .time_presence = .{}, .payload = &payload } })) |_| return error.FaultInjectionNotObserved else |_| {}
         try std.testing.expectEqual(GateState.closed, store.safetyGate());
     }
 }
@@ -884,7 +884,7 @@ test "segment rotation requires a snapshot at the sealed barrier" {
     const store = memory.interface();
     const stream: StreamIdentity = .{ .domain = .decision_log, .id = 44 };
     const payload = [_]u8{1};
-    try store.append(undefined, .{ .stream = stream, .record = .{ .type_id = 1, .schema_version = 8, .flags = 0, .sequence = 1, .source_time = 0, .receive_time = 0, .monotonic_time = 0, .wall_time = 0, .time_presence = .{}, .payload = &payload } });
+    try store.append(undefined, .{ .stream = stream, .record = .{ .type_id = 1, .schema_version = production_contract.journal_schema_version, .flags = 0, .sequence = 1, .source_time = 0, .receive_time = 0, .monotonic_time = 0, .wall_time = 0, .time_presence = .{}, .payload = &payload } });
     try store.commit(undefined, stream, 1);
     try store.seal(undefined, stream);
     try std.testing.expectError(error.SnapshotRequiredBeforeRotation, store.rotate(undefined, stream));

@@ -1,7 +1,6 @@
-"""Minimal StrategyHost lifecycle process. Trading logic arrives in later tickets."""
+"""Bounded StrategyHost process; Zig validates and copies every data-plane frame."""
 
 import argparse
-import ctypes
 import gc
 import hashlib
 import json
@@ -21,17 +20,15 @@ PYTHON_ABI = (sys.version_info.major << 16) | (sys.version_info.minor << 8)
 SESSION_PLAN = 1
 BEGIN_RECOVERY = 2
 ACTIVATE_STRATEGY = 3
+INPUT_BATCH = 4
 SHUTDOWN = 6
 HOST_HELLO = 101
 STRATEGY_RECOVERED = 102
 STRATEGY_FAULTED = 103
 RECOVERY_REQUIRED = 104
+STRATEGY_OUTPUT = 105
 HOST_HEARTBEAT = 106
 SHUTDOWN_ACK = 107
-QSH_OK = 0
-QSH_EMPTY = 1
-QSH_FULL = 2
-QSH_STALE = 3
 
 
 class RecoveryNeeded(RuntimeError):
@@ -40,14 +37,6 @@ class RecoveryNeeded(RuntimeError):
         self.reason = reason
         self.last_batch = last_batch
         self.last_cursor = last_cursor
-
-
-class QshBuffer(ctypes.Structure):
-    _fields_ = [
-        ("data", ctypes.POINTER(ctypes.c_ubyte)),
-        ("len", ctypes.c_uint32),
-        ("reserved", ctypes.c_uint32),
-    ]
 
 
 def crc32c(data):
@@ -142,7 +131,19 @@ def output_frame(batch, args, session, intent_sequence=None):
     frame[64:80] = strategy_identity.to_bytes(16, "little")
     struct.pack_into("<QQHHII", frame, 80, strategy_cursor, args.config_version, 1, 1, 1, 80)
     frame[108:124] = activation_identity.to_bytes(16, "little")
-    struct.pack_into("<HBBBBH", frame, 128, 1, 1, 1, 1, 0, 0)
+    side = 1 if args.side == "buy" else 2
+    time_in_force = 1 if args.time_in_force == "gtc" else 2
+    struct.pack_into(
+        "<HBBBBH",
+        frame,
+        128,
+        1,
+        side,
+        1,
+        time_in_force,
+        int(args.portfolio_reduce_only),
+        0,
+    )
     struct.pack_into("<Q", frame, 136, args.intent_sequence if intent_sequence is None else intent_sequence)
     frame[144:160] = (1).to_bytes(16, "little")
     frame[160:176] = (2).to_bytes(16, "little")
@@ -168,69 +169,17 @@ def benchmark_frame(batch, session, callbacks, disabled, checksum):
     return bytes(frame)
 
 
-def open_trade_bridge(args, session):
-    if not args.bridge:
-        raise ValueError("trade mode requires --bridge")
-    bridge = ctypes.CDLL(args.bridge)
-    bridge.qsh_open_v1.argtypes = [
-        ctypes.c_size_t,
-        ctypes.c_size_t,
-        ctypes.c_uint64,
-        ctypes.c_uint32,
-        ctypes.c_uint64,
-        ctypes.POINTER(ctypes.c_void_p),
-    ]
-    bridge.qsh_open_v1.restype = ctypes.c_int32
-    bridge.qsh_read_input_v1.argtypes = [
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_ubyte),
-        ctypes.c_uint32,
-        ctypes.POINTER(ctypes.c_uint32),
-    ]
-    bridge.qsh_read_input_v1.restype = ctypes.c_int32
-    bridge.qsh_publish_many_v1.argtypes = [ctypes.c_void_p, ctypes.POINTER(QshBuffer), ctypes.c_uint32]
-    bridge.qsh_publish_many_v1.restype = ctypes.c_int32
-    bridge.qsh_close_v1.argtypes = [ctypes.c_void_p]
-
-    handle = ctypes.c_void_p()
-    status = bridge.qsh_open_v1(
-        int(args.input_mapping),
-        int(args.output_mapping),
-        session[0],
-        session[1],
-        session[2],
-        ctypes.byref(handle),
-    )
-    if status != QSH_OK:
-        raise RuntimeError(f"qsh_open_v1={status}")
-    return bridge, handle
-
-
-def read_input(bridge, handle):
-    storage = bytearray(1_048_576)
-    view = (ctypes.c_ubyte * len(storage)).from_buffer(storage)
-    length = ctypes.c_uint32()
-    while True:
-        status = bridge.qsh_read_input_v1(handle, view, len(storage), ctypes.byref(length))
-        if status == QSH_OK:
-            return bytes(storage[: length.value])
-        if status != QSH_EMPTY:
-            raise RecoveryNeeded(1 if status == QSH_STALE else 2)
-        time.sleep(0)
-
-
-def publish_intent(bridge, handle, frame):
-    frame_storage = ctypes.create_string_buffer(frame)
-    descriptor = QshBuffer(
-        ctypes.cast(frame_storage, ctypes.POINTER(ctypes.c_ubyte)),
-        len(frame),
-        0,
-    )
-    status = bridge.qsh_publish_many_v1(handle, ctypes.byref(descriptor), 1)
-    if status == QSH_FULL:
-        raise RecoveryNeeded(3)
-    if status != QSH_OK:
+def read_input(session, zig_sequence):
+    message_type, received_session, sequence, payload = read_frame(sys.stdin.buffer)
+    if message_type != INPUT_BATCH or received_session != session or sequence != zig_sequence[0]:
         raise RecoveryNeeded(2)
+    zig_sequence[0] += 1
+    return payload
+
+
+def publish_intent(session, host_sequence, frame):
+    write_frame(sys.stdout.buffer, STRATEGY_OUTPUT, session, host_sequence[0], frame)
+    host_sequence[0] += 1
 
 
 def validate_batch_schema(batch):
@@ -244,82 +193,72 @@ def validate_batch_schema(batch):
         offset += record_len
 
 
-def trade_once(args, session, bridge, handle):
-    try:
-        for index in range(args.trade_batches):
-            batch = read_input(bridge, handle)
-            validate_batch_schema(batch)
-            frame = output_frame(batch, args, session, args.intent_sequence + index)
-            try:
-                publish_intent(bridge, handle, frame)
-            except RecoveryNeeded as failure:
-                failure.last_batch = struct.unpack_from("<Q", batch, 72)[0]
-                failure.last_cursor = struct.unpack_from("<Q", batch, 88)[0]
-                raise
-    finally:
-        bridge.qsh_close_v1(handle)
+def trade_once(args, session, zig_sequence, host_sequence):
+    for index in range(args.trade_batches):
+        batch = read_input(session, zig_sequence)
+        validate_batch_schema(batch)
+        publish_intent(session, host_sequence, output_frame(batch, args, session, args.intent_sequence + index))
+
+
+def await_direct_activation(args, session, zig_sequence):
+    message_type, received_session, sequence, activation = read_frame(sys.stdin.buffer)
+    if (
+        message_type != ACTIVATE_STRATEGY
+        or received_session != session
+        or sequence != zig_sequence[0]
+        or len(activation) != 72
+        or int.from_bytes(activation[0:16], "little") != int(args.strategy_identity, 0)
+        or int.from_bytes(activation[16:32], "little") != int(args.activation_identity, 0)
+        or not any(activation[40:72])
+    ):
+        raise ValueError("invalid direct activation")
+    zig_sequence[0] += 1
 
 
 def prepare_benchmark(args):
     states = [index + 1 for index in range(args.benchmark_strategies)]
     active = [True] * args.benchmark_strategies
-    storage = bytearray(1_048_576)
-    view = (ctypes.c_ubyte * len(storage)).from_buffer(storage)
-    length = ctypes.c_uint32()
-    return states, active, storage, view, length
+    return states, active
 
 
-def benchmark_once(args, session, bridge, handle, prepared):
-    states, active, storage, view, length = prepared
-    try:
-        for batch_index in range(args.benchmark_batches):
-            empty_polls = 0
-            while True:
-                status = bridge.qsh_read_input_v1(handle, view, len(storage), ctypes.byref(length))
-                if status == QSH_OK:
-                    break
-                if status != QSH_EMPTY:
-                    raise RecoveryNeeded(1 if status == QSH_STALE else 2)
-                empty_polls += 1
-                if empty_polls % 16 == 0:
-                    time.sleep(0)
-            batch = memoryview(storage)[: length.value]
-            validate_batch_schema(batch)
-            callbacks = 0
-            event_count = struct.unpack_from("<I", batch, 104)[0]
-            if args.benchmark_perturbed and args.benchmark_scenario == "gc_exception":
-                if batch_index % 250 == 0:
-                    gc.collect()
-                if batch_index == 50:
-                    try:
-                        raise RuntimeError("representative strategy failure")
-                    except RuntimeError:
-                        active[0] = False
-            for event_index in range(event_count):
-                for index, enabled in enumerate(active):
-                    if not enabled:
-                        continue
-                    value = states[index]
-                    value = (
-                        value * 1_103_515_245 + batch_index + event_index + index
-                    ) & 0x7FFFFFFF
-                    if args.benchmark_perturbed and args.benchmark_scenario == "recovery":
-                        for replay in range(8):
-                            value = (value * 33 + replay) & 0x7FFFFFFF
-                    states[index] = value
-                    callbacks += 1
-            if args.benchmark_perturbed and args.benchmark_scenario == "slow":
-                value = states[-1]
-                for spin in range(20_000):
-                    value = (value * 33 + spin) & 0x7FFFFFFF
-                states[-1] = value
-            publish_intent(
-                bridge,
-                handle,
-                benchmark_frame(batch, session, callbacks, active.count(False), sum(states)),
-            )
-    finally:
-        bridge.qsh_close_v1(handle)
+def benchmark_once(args, session, zig_sequence, host_sequence, prepared):
+    states, active = prepared
+    for batch_index in range(args.benchmark_batches):
+        batch = read_input(session, zig_sequence)
+        validate_batch_schema(batch)
+        callbacks = 0
+        event_count = struct.unpack_from("<I", batch, 104)[0]
+        if args.benchmark_perturbed and args.benchmark_scenario == "gc_exception":
+            if batch_index % 250 == 0:
+                gc.collect()
+            if batch_index == 50:
+                try:
+                    raise RuntimeError("representative strategy failure")
+                except RuntimeError:
+                    active[0] = False
+        for event_index in range(event_count):
+            for index, enabled in enumerate(active):
+                if not enabled:
+                    continue
+                value = states[index]
+                value = (
+                    value * 1_103_515_245 + batch_index + event_index + index
+                ) & 0x7FFFFFFF
+                if args.benchmark_perturbed and args.benchmark_scenario == "recovery":
+                    for replay in range(8):
+                        value = (value * 33 + replay) & 0x7FFFFFFF
+                states[index] = value
+                callbacks += 1
+        if args.benchmark_perturbed and args.benchmark_scenario == "slow":
+            value = states[-1]
+            for spin in range(20_000):
+                value = (value * 33 + spin) & 0x7FFFFFFF
+            states[-1] = value
+        publish_intent(
+            session,
+            host_sequence,
+            benchmark_frame(batch, session, callbacks, active.count(False), sum(states)),
+        )
 
 
 def decode_checkpoint(container):
@@ -434,11 +373,12 @@ def apply_replay_batch(batch, metadata, state, allow_output):
     return output_sequences
 
 
-def recovery_once(args, session, bridge, handle, control_sequence, fault_strategy):
+def recovery_once(args, session, zig_sequence, control_sequence, fault_strategy):
     try:
         message_type, received_session, sequence, payload = read_frame(sys.stdin.buffer)
-        if message_type != BEGIN_RECOVERY or received_session != session or sequence != 2 or len(payload) < 200:
+        if message_type != BEGIN_RECOVERY or received_session != session or sequence != zig_sequence[0] or len(payload) < 200:
             raise ValueError("expected BeginRecovery v1")
+        zig_sequence[0] += 1
         barrier = struct.unpack_from("<Q", payload)[0]
         metadata, state = decode_checkpoint(payload[8:])
         if (
@@ -448,7 +388,7 @@ def recovery_once(args, session, bridge, handle, control_sequence, fault_strateg
         ):
             raise ValueError("checkpoint identity mismatch")
         while metadata["cursor"] < barrier:
-            if apply_replay_batch(read_input(bridge, handle), metadata, state, False):
+            if apply_replay_batch(read_input(session, zig_sequence), metadata, state, False):
                 raise AssertionError("recovery emitted intent")
         if metadata["cursor"] != barrier:
             raise ValueError("recovery crossed barrier")
@@ -470,8 +410,9 @@ def recovery_once(args, session, bridge, handle, control_sequence, fault_strateg
         control_sequence[0] += 1
 
         message_type, received_session, sequence, activation = read_frame(sys.stdin.buffer)
-        if message_type != ACTIVATE_STRATEGY or received_session != session or sequence != 3 or len(activation) != 72:
+        if message_type != ACTIVATE_STRATEGY or received_session != session or sequence != zig_sequence[0] or len(activation) != 72:
             raise ValueError("expected ActivateStrategy v1")
+        zig_sequence[0] += 1
         strategy = int.from_bytes(activation[0:16], "little")
         activation_identity = int.from_bytes(activation[16:32], "little")
         activation_barrier = struct.unpack_from("<Q", activation, 32)[0]
@@ -483,10 +424,10 @@ def recovery_once(args, session, bridge, handle, control_sequence, fault_strateg
         ):
             raise ValueError("invalid activation")
         while metadata["cursor"] < activation_barrier:
-            if apply_replay_batch(read_input(bridge, handle), metadata, state, False):
+            if apply_replay_batch(read_input(session, zig_sequence), metadata, state, False):
                 raise AssertionError("catch-up emitted intent")
         while True:
-            batch = read_input(bridge, handle)
+            batch = read_input(session, zig_sequence)
             if fault_strategy:
                 diagnostic = b"fixture callback exception"
                 fault = bytearray(40 + len(diagnostic))
@@ -515,14 +456,14 @@ def recovery_once(args, session, bridge, handle, control_sequence, fault_strateg
             sequences = apply_replay_batch(batch, metadata, state, True)
             if sequences:
                 try:
-                    publish_intent(bridge, handle, output_frame(batch, args, session, sequences[0]))
+                    publish_intent(session, control_sequence, output_frame(batch, args, session, sequences[0]))
                 except RecoveryNeeded as failure:
                     failure.last_batch = struct.unpack_from("<Q", batch, 72)[0]
                     failure.last_cursor = metadata["cursor"]
                     raise
                 break
     finally:
-        bridge.qsh_close_v1(handle)
+        pass
 
 
 def main():
@@ -532,9 +473,6 @@ def main():
         choices=("normal", "crash", "hang", "trade", "recovery", "strategy-fault", "benchmark"),
         default="normal",
     )
-    parser.add_argument("--input-mapping", required=True)
-    parser.add_argument("--output-mapping", required=True)
-    parser.add_argument("--bridge")
     parser.add_argument("--strategy-identity")
     parser.add_argument("--activation-identity")
     parser.add_argument("--fault-strategy-identity")
@@ -543,6 +481,9 @@ def main():
     parser.add_argument("--trade-batches", type=int, default=1)
     parser.add_argument("--quantity", type=int, default=100)
     parser.add_argument("--limit-price", type=int, default=50_100_000_000)
+    parser.add_argument("--side", choices=("buy", "sell"), default="buy")
+    parser.add_argument("--time-in-force", choices=("gtc", "ioc"), default="gtc")
+    parser.add_argument("--portfolio-reduce-only", action="store_true")
     parser.add_argument("--benchmark-strategies", type=int, default=25)
     parser.add_argument("--benchmark-batches", type=int, default=10_500)
     parser.add_argument(
@@ -556,10 +497,6 @@ def main():
         raise ValueError("trade batches must be positive")
     if args.benchmark_strategies <= 0 or args.benchmark_batches <= 0:
         raise ValueError("benchmark dimensions must be positive")
-    # Handles are intentionally opaque here; the bridge opens them when the data plane is integrated.
-    int(args.input_mapping)
-    int(args.output_mapping)
-
     message_type, session, sequence, plan = read_frame(sys.stdin.buffer)
     if message_type != SESSION_PLAN or sequence != 1 or len(plan) != 176:
         raise ValueError("expected SessionPlan v1")
@@ -568,20 +505,20 @@ def main():
     if args.mode == "crash":
         return 23
 
-    trade_bridge = None
     if args.mode in ("trade", "recovery", "strategy-fault", "benchmark"):
         if args.mode != "benchmark" and (not args.strategy_identity or not args.activation_identity):
             raise ValueError("data mode requires strategy and activation identities")
-        trade_bridge = open_trade_bridge(args, session)
     benchmark_state = prepare_benchmark(args) if args.mode == "benchmark" else None
     write_frame(sys.stdout.buffer, HOST_HEARTBEAT, session, 2, struct.pack("<QQ", 0, 0))
     if args.mode == "hang":
         while True:
             time.sleep(60)
     control_sequence = [3]
+    zig_sequence = [2]
     try:
         if args.mode == "trade":
-            trade_once(args, session, *trade_bridge)
+            await_direct_activation(args, session, zig_sequence)
+            trade_once(args, session, zig_sequence, control_sequence)
         elif args.mode in ("recovery", "strategy-fault"):
             fault_strategy = (
                 int(args.fault_strategy_identity, 0)
@@ -590,9 +527,9 @@ def main():
             )
             if args.mode == "strategy-fault" and not fault_strategy:
                 raise ValueError("strategy-fault mode requires fault strategy identity")
-            recovery_once(args, session, *trade_bridge, control_sequence, fault_strategy)
+            recovery_once(args, session, zig_sequence, control_sequence, fault_strategy)
         elif args.mode == "benchmark":
-            benchmark_once(args, session, *trade_bridge, benchmark_state)
+            benchmark_once(args, session, zig_sequence, control_sequence, benchmark_state)
     except RecoveryNeeded as failure:
         payload = struct.pack(
             "<HHIQQ",
@@ -612,8 +549,7 @@ def main():
         return 24
 
     message_type, received_session, sequence, _ = read_frame(sys.stdin.buffer)
-    expected_shutdown_sequence = 4 if args.mode in ("recovery", "strategy-fault") else 2
-    if message_type != SHUTDOWN or received_session != session or sequence != expected_shutdown_sequence:
+    if message_type != SHUTDOWN or received_session != session or sequence != zig_sequence[0]:
         raise ValueError("expected Shutdown v1")
     write_frame(sys.stdout.buffer, SHUTDOWN_ACK, session, control_sequence[0])
     return 0

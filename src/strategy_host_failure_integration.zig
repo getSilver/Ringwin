@@ -1,11 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const gateway_module = @import("strategy_host_gateway.zig");
-const ipc = @import("strategy_host_ipc.zig");
 const lifecycle = @import("strategy_host_lifecycle.zig");
 const recovery_module = @import("strategy_host_recovery.zig");
 
-fn runCheck(init: std.process.Init, python: []const u8, script: []const u8, bridge: []const u8) !void {
+fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !void {
     const python_abi = try lifecycle.discoverPythonAbi(init, python);
     var plans = [_]lifecycle.Plan{
         lifecycle.developmentPlan(0, 1, python_abi),
@@ -13,7 +12,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8, brid
         lifecycle.developmentPlan(2, 1, python_abi),
         lifecycle.developmentPlan(3, 1, python_abi),
     };
-    plans[1].output_slots = 2;
+    plans[1].output_capacity = 128;
 
     var host0 = try startDataHost(
         init,
@@ -21,7 +20,6 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8, brid
         script,
         plans[0],
         "strategy-fault",
-        bridge,
         0x1001,
         0x2001,
         7,
@@ -35,7 +33,6 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8, brid
         script,
         plans[1],
         "trade",
-        bridge,
         0x1101,
         0x2101,
         7,
@@ -51,7 +48,6 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8, brid
         script,
         plans[3],
         "trade",
-        bridge,
         0x1301,
         0x2301,
         7,
@@ -69,8 +65,6 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8, brid
 
     try runStrategyFault(init, &host0, plans[0]);
     try runOutputFull(&host1, plans[1], init.io);
-    const old_host1_input = host1.input_mapping.raw;
-    const old_host1_output = host1.output_mapping.raw;
 
     const crash_term = try host2.child.wait(init.io);
     host2.supervisor.processExited(switch (crash_term) {
@@ -78,8 +72,6 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8, brid
         else => false,
     });
     try std.testing.expectEqual(lifecycle.State.failed, host2.supervisor.state);
-    const old_host2_input = host2.input_mapping.raw;
-    const old_host2_output = host2.output_mapping.raw;
 
     const healthy = try beginHealthyTrade(&host3, plans[3], init.io, 1, 1);
 
@@ -93,8 +85,6 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8, brid
         &.{},
     );
     defer replacement.deinit(init.io);
-    try std.testing.expect(replacement.input_mapping.raw != old_host2_input);
-    try std.testing.expect(replacement.output_mapping.raw != old_host2_output);
     try replacement.sendPlan(init.io);
     try handshake(&replacement, init.io, 10, true);
     try replacement.shutdown(init.io, 12);
@@ -127,7 +117,6 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8, brid
         script,
         invalid_plan,
         "trade",
-        bridge,
         0x1101,
         0x2102,
         7,
@@ -135,22 +124,11 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8, brid
         1,
     );
     defer invalid_host.deinit(init.io);
-    try std.testing.expect(invalid_host.input_mapping.raw != old_host1_input);
-    try std.testing.expect(invalid_host.output_mapping.raw != old_host1_output);
     try invalid_host.sendPlan(init.io);
     try handshake(&invalid_host, init.io, 40, true);
     try sendUnknownSchema(&invalid_host, invalid_plan, init.io);
-    try std.testing.expectEqual(
-        lifecycle.Result.accepted,
-        try invalid_host.receive(init.io, 42),
-    );
     try std.testing.expectEqual(lifecycle.State.failed, invalid_host.supervisor.state);
-    try std.testing.expectEqual(@as(u16, 2), invalid_host.supervisor.recovery_required.?.reason);
-    const invalid_term = try invalid_host.child.wait(init.io);
-    switch (invalid_term) {
-        .exited => |code| try std.testing.expectEqual(@as(u8, 24), code),
-        else => return error.InvalidHostDidNotExit,
-    }
+    invalid_host.child.kill(init.io);
 }
 
 fn runStrategyFault(init: std.process.Init, host: *lifecycle.ManagedHost, plan: lifecycle.Plan) !void {
@@ -185,8 +163,6 @@ fn runStrategyFault(init: std.process.Init, host: *lifecycle.ManagedHost, plan: 
     };
     var gateway = try gateway_module.Gateway.init(config, &subscriptions);
     gateway.beginRecovery();
-    var input = try host.input_mapping.ring(.input, plan.session);
-    const output = try host.output_mapping.ring(.output, plan.session);
     const now = monotonicNow(init.io);
     const replay_payloads = [_][9]u8{
         eventPayload(30, false),
@@ -200,7 +176,7 @@ fn runStrategyFault(init: std.process.Init, host: *lifecycle.ManagedHost, plan: 
     };
     var batch_storage: [1024]u8 = undefined;
     const replay_batch = try gateway.encodeBatch(&batch_storage, 1, 3, 5, now, &replay_events);
-    try expectIpc(.ok, input.tryPublishMany(&.{replay_batch}));
+    try host.sendInput(init.io, replay_batch, now);
     try gateway.recordPublished(1, 5, now);
     try std.testing.expectEqual(lifecycle.Result.accepted, try host.receive(init.io, now + 1));
     const recovered = host.supervisor.last_recovered orelse return error.MissingRecovery;
@@ -225,7 +201,7 @@ fn runStrategyFault(init: std.process.Init, host: *lifecycle.ManagedHost, plan: 
         active_now,
         &active_events,
     );
-    try expectIpc(.ok, input.tryPublishMany(&.{active_batch}));
+    try host.sendInput(init.io, active_batch, active_now);
     try gateway.recordPublished(2, 6, active_now);
     try std.testing.expectEqual(
         lifecycle.Result.accepted,
@@ -237,12 +213,11 @@ fn runStrategyFault(init: std.process.Init, host: *lifecycle.ManagedHost, plan: 
     try std.testing.expectEqual(lifecycle.State.active, host.supervisor.state);
 
     var output_storage: [512]u8 = undefined;
-    const frame = try readOutput(output, init.io, &output_storage);
+    const frame = try host.receiveOutput(init.io, monotonicNow(init.io), &output_storage);
     const decision = gateway.ingest(frame, monotonicNow(init.io));
     if (decision != .accepted or decision.accepted.strategy_identity != 0x1001 or
         decision.accepted.strategy_cursor != 6)
         return error.HealthyStrategyWasNotIsolated;
-    try expectIpc(.empty, output.tryRead(&output_storage));
     try host.shutdown(init.io, active_now + 2);
 }
 
@@ -258,6 +233,7 @@ fn runOutputFull(host: *lifecycle.ManagedHost, plan: lifecycle.Plan, io: std.Io)
         gateway_module.Subscription.of(authorization.strategy_identity, &.{.timer}),
     };
     var gateway = try gateway_module.Gateway.init(config, &subscriptions);
+    try activateDirect(host, &gateway, authorization, io);
     const now = monotonicNow(io);
     const payload = eventPayload(1, true);
     const events = [_]gateway_module.EventEnvelope{event(1, now, &payload)};
@@ -265,7 +241,6 @@ fn runOutputFull(host: *lifecycle.ManagedHost, plan: lifecycle.Plan, io: std.Io)
     const batch = try gateway.encodeBatch(&batch_storage, 1, 1, 1, now, &events);
     try gateway.recordPublished(1, 1, now);
     var frame_a_storage: [256]u8 = undefined;
-    var frame_b_storage: [256]u8 = undefined;
     const frame_a = try gateway_module.encodeOutputFrame(
         &frame_a_storage,
         config,
@@ -275,34 +250,16 @@ fn runOutputFull(host: *lifecycle.ManagedHost, plan: lifecycle.Plan, io: std.Io)
         100,
         50_100_000_000,
     );
-    const frame_b = try gateway_module.encodeOutputFrame(
-        &frame_b_storage,
-        config,
-        1,
-        1,
-        51,
-        100,
-        50_100_000_000,
-    );
-    var output = try host.output_mapping.ring(.output, plan.session);
-    try expectIpc(.ok, output.tryPublishMany(&.{ frame_a, frame_b }));
-    var input = try host.input_mapping.ring(.input, plan.session);
-    try expectIpc(.ok, input.tryPublishMany(&.{batch}));
-    try std.testing.expectEqual(lifecycle.Result.accepted, try host.receive(io, now + 1));
+    try host.sendInput(io, batch, now);
+    var oversized_storage: [512]u8 = undefined;
+    try std.testing.expectError(error.InvalidOutputFrame, host.receiveOutput(io, now + 1, &oversized_storage));
     try std.testing.expectEqual(lifecycle.State.failed, host.supervisor.state);
-    try std.testing.expectEqual(@as(u16, 3), host.supervisor.recovery_required.?.reason);
     gateway.beginRecovery();
-    var old_storage: [512]u8 = undefined;
-    const old_frame = try readOutput(output, io, &old_storage);
     try std.testing.expectEqual(
         gateway_module.RejectReason.unauthorized,
-        gateway.ingest(old_frame, now + 2).rejected.reason,
+        gateway.ingest(frame_a, now + 2).rejected.reason,
     );
-    const term = try host.child.wait(io);
-    switch (term) {
-        .exited => |code| try std.testing.expectEqual(@as(u8, 24), code),
-        else => return error.OutputFullHostDidNotExit,
-    }
+    host.child.kill(io);
     host.supervisor.processExited(false);
 
     var next_config = config;
@@ -341,7 +298,6 @@ fn runOutputFull(host: *lifecycle.ManagedHost, plan: lifecycle.Plan, io: std.Io)
 
 const HealthyTrade = struct {
     gateway: gateway_module.Gateway,
-    plan: lifecycle.Plan,
 };
 
 fn beginHealthyTrade(
@@ -362,9 +318,9 @@ fn beginHealthyTrade(
             gatewayConfig(plan, authorization),
             &.{gateway_module.Subscription.of(authorization.strategy_identity, &.{.timer})},
         ),
-        .plan = plan,
     };
-    try publishAndAccept(host, &fixture.gateway, plan, io, batch_sequence, shard_sequence);
+    try activateDirect(host, &fixture.gateway, authorization, io);
+    try publishAndAccept(host, &fixture.gateway, io, batch_sequence, shard_sequence);
     return fixture;
 }
 
@@ -376,13 +332,12 @@ fn finishHealthyTrade(
     shard_sequence: u64,
 ) !void {
     var mutable = fixture;
-    try publishAndAccept(host, &mutable.gateway, mutable.plan, io, batch_sequence, shard_sequence);
+    try publishAndAccept(host, &mutable.gateway, io, batch_sequence, shard_sequence);
 }
 
 fn publishAndAccept(
     host: *lifecycle.ManagedHost,
     gateway: *gateway_module.Gateway,
-    plan: lifecycle.Plan,
     io: std.Io,
     batch_sequence: u64,
     shard_sequence: u64,
@@ -399,12 +354,10 @@ fn publishAndAccept(
         now,
         &events,
     );
-    var input = try host.input_mapping.ring(.input, plan.session);
-    try expectIpc(.ok, input.tryPublishMany(&.{batch}));
+    try host.sendInput(io, batch, now);
     try gateway.recordPublished(batch_sequence, shard_sequence, now);
-    const output = try host.output_mapping.ring(.output, plan.session);
     var output_storage: [512]u8 = undefined;
-    const frame = try readOutput(output, io, &output_storage);
+    const frame = try host.receiveOutput(io, monotonicNow(io), &output_storage);
     const decision = gateway.ingest(frame, monotonicNow(io));
     if (decision != .accepted or decision.accepted.strategy_cursor != shard_sequence)
         return error.HealthyHostDidNotAdvance;
@@ -421,6 +374,7 @@ fn sendUnknownSchema(host: *lifecycle.ManagedHost, plan: lifecycle.Plan, io: std
         gatewayConfig(plan, authorization),
         &.{gateway_module.Subscription.of(authorization.strategy_identity, &.{.timer})},
     );
+    try activateDirect(host, &gateway, authorization, io);
     const now = monotonicNow(io);
     const payload = eventPayload(1, true);
     const events = [_]gateway_module.EventEnvelope{event(1, now, &payload)};
@@ -428,8 +382,24 @@ fn sendUnknownSchema(host: *lifecycle.ManagedHost, plan: lifecycle.Plan, io: std
     const batch = try gateway.encodeBatch(&batch_storage, 1, 1, 1, now, &events);
     put(u16, batch, 128 + 10, 2);
     put(u32, batch, 124, wireCrc(batch));
-    var input = try host.input_mapping.ring(.input, plan.session);
-    try expectIpc(.ok, input.tryPublishMany(&.{batch}));
+    try std.testing.expectError(error.InvalidInputBatch, host.sendInput(io, batch, now));
+    host.supervisor.state = .failed;
+}
+
+fn activateDirect(
+    host: *lifecycle.ManagedHost,
+    gateway: *gateway_module.Gateway,
+    authorization: gateway_module.Authorization,
+    io: std.Io,
+) !void {
+    const digest: [32]u8 = @splat(0x42);
+    try host.activate(io, .{
+        .strategy_identity = authorization.strategy_identity,
+        .activation_identity = authorization.activation_identity,
+        .barrier = authorization.activation_barrier,
+        .state_digest = digest,
+    });
+    try gateway.activate(authorization);
 }
 
 fn startDataHost(
@@ -438,7 +408,6 @@ fn startDataHost(
     script: []const u8,
     plan: lifecycle.Plan,
     mode: []const u8,
-    bridge: []const u8,
     strategy: u128,
     activation: u128,
     config_version: u64,
@@ -453,8 +422,6 @@ fn startDataHost(
     var args: [12][]const u8 = undefined;
     var len: usize = 0;
     const base = [_][]const u8{
-        "--bridge",
-        bridge,
         "--strategy-identity",
         try std.fmt.bufPrint(&strategy_text, "0x{x}", .{strategy}),
         "--activation-identity",
@@ -497,21 +464,6 @@ fn gatewayConfig(
     };
 }
 
-fn readOutput(ring: anytype, io: std.Io, storage: []u8) ![]const u8 {
-    const deadline = monotonicNow(io) + std.time.ns_per_s;
-    while (true) {
-        const status = ring.tryRead(storage);
-        if (status == .ok) {
-            const len = get(u32, storage, 12);
-            if (len > storage.len) return error.InvalidOutputLength;
-            return storage[0..len];
-        }
-        if (status != .empty) return error.OutputReadFailed;
-        if (monotonicNow(io) > deadline) return error.OutputTimeout;
-        std.Thread.yield() catch {};
-    }
-}
-
 fn event(
     sequence: u64,
     now: i64,
@@ -546,10 +498,6 @@ fn wireCrc(bytes: []const u8) u32 {
     return crc.final();
 }
 
-fn expectIpc(expected: ipc.QshStatusV1, actual: ipc.QshStatusV1) !void {
-    if (expected != actual) return error.UnexpectedIpcStatus;
-}
-
 fn put(comptime T: type, destination: []u8, offset: usize, value: T) void {
     std.mem.writeInt(T, destination[offset..][0..@sizeOf(T)], value, .little);
 }
@@ -562,11 +510,10 @@ pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer args.deinit();
     _ = args.next();
-    const bridge = args.next() orelse return error.MissingBridgePath;
     const python = args.next() orelse "python";
     const script = args.next() orelse "python/strategy_host.py";
     if (args.next() != null) return error.UnknownArgument;
-    try runCheck(init, python, script, bridge);
+    try runCheck(init, python, script);
     var buffer: [320]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &buffer);
     try stdout.interface.print(

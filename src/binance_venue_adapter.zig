@@ -5,7 +5,6 @@
 
 const std = @import("std");
 const canonical = @import("canonical_event.zig");
-const execution = @import("execution_gateway.zig");
 const venue = @import("venue_adapter.zig");
 const contract = @import("venue_adapter_contract.zig");
 const raw = @import("binance_order_raw.zig");
@@ -538,16 +537,13 @@ test "Binance canonical commands authenticate, raw-commit, and dispatch independ
     var implementation = BinanceVenueAdapter.init(clock.interface(), testProfile(), auth.interface(), sink.interface(), transport.interface());
     const adapter = implementation.adapter();
     try startTest(adapter);
-    var gateway: execution.Gateway = .{};
-    try gateway.add(.{ .account = 2, .adapter = adapter, .capability = .{ .version = 7, .rules_version = 8, .config_version = 9, .session = 6 } });
     var batch: canonical.OrderCommandBatch = .{};
     try batch.append(try testCommand(1));
     var second = try testCommand(2);
     second.operation = .cancel;
     second.venue_order = try canonical.VenueOrderRef.init(21, "order-2");
     try batch.append(second);
-    try std.testing.expectEqual(venue.SendResult.accepted, try gateway.sendRequest(.{ .order_batch = batch }));
-    try std.testing.expectEqual(@as(u64, 1), gateway.send_attempt_count);
+    try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .order_batch = batch }));
     const output = (try adapter.tryDrain()).?;
     try std.testing.expectEqual(@as(u8, 2), output.len);
     try std.testing.expectEqual(canonical.DispatchState.submitted, output.events[0].event.order_dispatch_result.state);

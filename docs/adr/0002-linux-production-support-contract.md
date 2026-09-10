@@ -19,6 +19,7 @@ date: 2026-09-06
 - Gate.io 与 Bitget 为显式 disabled 行，不属于首个生产范围。
 - journal/state schema 一次性从 7 切到 8，SchemaRegistryId 为 6。旧 schema 只被拒绝，不提供
   双读、双写或迁移层。
+  该 schema 冻结已由 [ADR 0006](0006-authoritative-safety-state-schema-9.md) 的安全状态扩展取代。
 - 首个生产默认优化模式是 ReleaseSafe。io_uring、epoll、libcurl、专用日志线程和批量同步不是
   架构前置条件，只有目标 Linux 测量证明必要时才选择实现。
 - `Journal` 仍保留为稳定 record codec；`src/durable_store.zig` 已把它接入 Linux 文件

@@ -46,6 +46,17 @@ $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $buildRoot = Join-Path $workspace '.scratch\build'
 $curlBuild = Join-Path $buildRoot 'libcurl-8.21.0-windows-x86_64-schannel'
 $curlSource = Join-Path $buildRoot 'bootstrap\curl-source'
+$sourceRevision = (& git -C $workspace rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $sourceRevision) { throw 'Source revision is unavailable' }
+
+function Assert-SourceAbsent {
+    param([string]$Path, [string]$Pattern, [string]$Label)
+    $matches = @(& rg -n -- $Pattern (Join-Path $workspace $Path) 2>$null)
+    if ($LASTEXITCODE -eq 0 -and $matches.Count -ne 0) {
+        throw "Forbidden source remains ($Label): $($matches -join '; ')"
+    }
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1) { throw "Source scan failed: $Label" }
+}
 
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     throw 'Core wave acceptance must run on Windows'
@@ -59,6 +70,16 @@ Write-Output '== phase=format'
 $zigSources = @(Get-ChildItem (Join-Path $workspace 'src') -File -Filter '*.zig' | ForEach-Object FullName)
 Invoke-Zig fmt --check $zigSources
 if ($LASTEXITCODE -ne 0) { throw 'Zig format check failed' }
+
+Write-Output '== phase=source_contract'
+if (Test-Path -LiteralPath (Join-Path $workspace 'src\okx_spot_projection.zig')) {
+    throw 'Competing OKX economic projection still exists'
+}
+Assert-SourceAbsent 'src\trading_shard.zig' '^\s*(order_state|filled_quantity|order_quantity|open_order_reservation_micros|risk_lease_remaining_micros)\s*:' 'legacy TradingShard authority'
+Assert-SourceAbsent 'src\execution_gateway.zig' '^\s*pub fn send\s*\(' 'raw public Gateway send'
+Assert-SourceAbsent 'src\okx_demo_live_acceptance.zig' 'adapter\.trySend.*order_(command|batch)' 'Demo order send bypass'
+Assert-SourceAbsent 'python\strategy_host.py' 'ctypes|input-mapping|output-mapping|qsh_' 'Python mapping or cursor capability'
+Assert-SourceAbsent 'src\strategy_host_lifecycle.zig' 'OwnedMapping|input_mapping|output_mapping' 'Host mapping capability transfer'
 
 Write-Output '== phase=core_tests mode=Debug'
 $debugTests = Invoke-Captured @('test', (Join-Path $workspace 'src\main.zig'), '-ODebug')
@@ -140,7 +161,7 @@ $stableSchemaMatch = [regex]::Match($fourText, 'journal_schema=(\d+), state_sche
 if (-not $stableSchemaMatch.Success) { throw 'Stable journal/state schema evidence is missing' }
 $JournalSchema = [int]$stableSchemaMatch.Groups[1].Value
 $StateSchema = [int]$stableSchemaMatch.Groups[2].Value
-if ($JournalSchema -ne 8 -or $StateSchema -ne 8) { throw "Unexpected production journal/state schema: $JournalSchema/$StateSchema" }
+if ($JournalSchema -ne 9 -or $StateSchema -ne 9) { throw "Unexpected production journal/state schema: $JournalSchema/$StateSchema" }
 $debugMatch = [regex]::Match($debugText, 'All (\d+) tests passed')
 $releaseMatch = [regex]::Match($releaseText, 'All (\d+) tests passed')
 $barrierMatch = [regex]::Match($fourText, 'coordinator_barrier=(\d+), coordinator_digest=([0-9a-f]+)')
@@ -178,10 +199,16 @@ if (-not $debugMatch.Success -or -not $releaseMatch.Success -or -not $barrierMat
     -not $sharedMatch.Success -or -not $gatewayMatch.Success -or -not $ownershipMatch.Success) {
     throw 'Acceptance child output did not contain complete machine-readable evidence'
 }
+if ($debugMatch.Groups[1].Value -ne $releaseMatch.Groups[1].Value) {
+    throw 'Debug and ReleaseSafe did not run the same test matrix'
+}
 $pythonPassed = [regex]::IsMatch(($pythonEvidence -join "`n"), 'strategy_host_product_acceptance=passed')
 if (-not $pythonPassed) { throw 'Python machine-readable acceptance evidence is missing' }
 $evidence = [ordered]@{
     acceptance = 'passed'
+    report_schema = 3
+    source_revision = $sourceRevision
+    zig = $zigVersion
     schema = $AcceptanceSchema
     journal_schema = $JournalSchema
     state_schema = $StateSchema
@@ -194,6 +221,16 @@ $evidence = [ordered]@{
     shard_digests = $shardDigests
     shared_summary = $sharedMatch.Groups[1].Value
     gateway_adapter_submissions = [int]$gatewayMatch.Groups[1].Value
+    safety_assertions = @(
+        'checked_arithmetic_no_commit'
+        'canonical_reconciliation_live_replay'
+        'intent_conflict_and_ccc'
+        'authoritative_reduce_only_and_fencing'
+        'host_activation_before_intent'
+        'suspense_allocation_recovery'
+        'tombstone_capacity_recovery_only'
+        'legacy_authority_absent'
+    )
     owned_command_count = [int]$ownershipMatch.Groups[1].Value
     replay_send_capability = $ownershipMatch.Groups[2].Value
     single_shard_output = @($singleText | Where-Object { $_ -match '(happy_path:|market-gap-v1:|risk-rejection-v1:|unknown-reconciliation-v1:|duplicate-report-v1:)' })

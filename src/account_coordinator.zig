@@ -2,7 +2,7 @@ const std = @import("std");
 const trading = @import("trading_shard.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const snapshot_magic: u64 = 0x54434341574e4952;
-const coordinator_snapshot_version: u16 = 2;
+const coordinator_snapshot_version: u16 = 3;
 const account_margin_gate_identity: u128 = 0x414343544d415247;
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
@@ -103,6 +103,12 @@ pub const AccountFact = struct {
 /// One target assignment; the target shard still applies the canonical fact.
 pub const Delivery = struct { shard_id: ShardId, fact: AccountFact };
 
+pub const ForcedExecutionAllocation = struct {
+    identity: u128,
+    forced_execution_identity: u128,
+    owner: ShardId,
+};
+
 /// Venue account-margin evidence used only for reconciliation.
 pub const MarginObservation = struct {
     identity: u128,
@@ -132,6 +138,7 @@ pub const CoordinationEvent = union(enum) {
     margin_observation: MarginObservation,
     resolve_margin_gate: u128,
     tighten_leases: struct { valid_through_barrier: u64, requested_limits: [max_shards]i64 },
+    forced_execution_allocation: ForcedExecutionAllocation,
 };
 
 /// Append-only, checksummed durable tail for inputs owned by AccountCoordinator.
@@ -259,14 +266,8 @@ pub fn shardSummaryFromShard(
         else => open_orders += 1,
     };
     const economics_summary = shard.economicSummary();
-    const portfolio_distance = if (shard.portfolio_liquidation_distance_ticks == 0)
-        std.math.maxInt(i64)
-    else
-        shard.portfolio_liquidation_distance_ticks;
-    const exchange_distance = if (shard.exchange_liquidation_distance_ticks == 0)
-        std.math.maxInt(i64)
-    else
-        shard.exchange_liquidation_distance_ticks;
+    const portfolio_distance = shard.portfolio_liquidation_distance_ticks;
+    const exchange_distance = shard.exchange_liquidation_distance_ticks;
     return .{
         .shard_id = shard_id,
         .decision_domain = decision_domain,
@@ -421,6 +422,9 @@ pub const AccountCoordinator = struct {
     gate_deliveries: [max_shards]GateDelivery = undefined,
     recovery_only: bool = false,
     recovery_margin_identity: u128 = 0,
+    suspense_forced_execution: ?AccountFact = null,
+    reconciliation_break_identity: u128 = 0,
+    last_forced_execution_allocation: ?ForcedExecutionAllocation = null,
 
     /// Creates one coordinator for exactly one ExchangeAccount.
     pub fn init(exchange_account: u128, account_ceiling: i64, global_ceiling: i64) AccountCoordinator {
@@ -477,6 +481,11 @@ pub const AccountCoordinator = struct {
         for (self.leases[0..self.lease_count]) |lease| digestStruct(&hasher, RiskLease, lease);
         digestInt(&hasher, i64, self.account_netting_benefit_micros);
         digestOptionalAccountFact(&hasher, self.last_account_fact);
+        digestOptionalAccountFact(&hasher, self.suspense_forced_execution);
+        digestInt(&hasher, u128, self.reconciliation_break_identity);
+        hasher.update(&.{@intFromBool(self.last_forced_execution_allocation != null)});
+        if (self.last_forced_execution_allocation) |allocation|
+            digestStruct(&hasher, ForcedExecutionAllocation, allocation);
         digestOptionalMarginObservation(&hasher, self.last_margin_observation);
         digestStruct(&hasher, AccountGate, self.margin_gate);
         digestInt(&hasher, u8, @intFromEnum(self.margin_reconciliation_state));
@@ -588,12 +597,20 @@ pub const AccountCoordinator = struct {
         self.last_account_fact = fact;
         const count: usize = switch (fact.payload) {
             .account_snapshot => max_shards,
-            .forced_execution => 1,
+            .forced_execution => |execution| if (execution.owner == null) 0 else 1,
         };
         switch (fact.payload) {
-            .forced_execution => {
-                // Unowned economics enter exactly one deterministic SuspenseAccount projection.
-                self.deliveries[0] = .{ .shard_id = fact.payload.forced_execution.owner orelse .shard_0, .fact = fact };
+            .forced_execution => |execution| {
+                if (execution.owner) |owner| {
+                    self.deliveries[0] = .{ .shard_id = owner, .fact = fact };
+                } else {
+                    if (self.suspense_forced_execution != null) return error.SuspenseAccountCapacityExceeded;
+                    self.suspense_forced_execution = fact;
+                    self.reconciliation_break_identity = fact.identity;
+                    self.margin_gate = .{ .identity = fact.identity, .open = false, .latched = true };
+                    self.recovery_only = true;
+                    for (self.leases[0..self.lease_count]) |*lease| lease.used_micros = lease.limit_micros;
+                }
             },
             .account_snapshot => {
                 for (self.deliveries[0..count], 0..) |*delivery, index|
@@ -601,6 +618,27 @@ pub const AccountCoordinator = struct {
             },
         }
         return self.deliveries[0..count];
+    }
+
+    pub fn allocateForcedExecution(self: *AccountCoordinator, allocation: ForcedExecutionAllocation) !Delivery {
+        if (allocation.identity == 0 or allocation.forced_execution_identity == 0) return error.InvalidForcedExecutionAllocation;
+        if (self.last_forced_execution_allocation) |known| {
+            if (known.identity == allocation.identity) {
+                if (!std.meta.eql(known, allocation)) return error.ForcedExecutionAllocationConflict;
+                var known_fact = self.last_account_fact orelse return error.UnknownForcedExecution;
+                if (known_fact.identity != allocation.forced_execution_identity or known_fact.payload != .forced_execution)
+                    return error.UnknownForcedExecution;
+                known_fact.payload.forced_execution.owner = allocation.owner;
+                return .{ .shard_id = allocation.owner, .fact = known_fact };
+            }
+        }
+        var fact = self.suspense_forced_execution orelse return error.UnknownForcedExecution;
+        if (fact.identity != allocation.forced_execution_identity) return error.UnknownForcedExecution;
+        fact.payload.forced_execution.owner = allocation.owner;
+        self.suspense_forced_execution = null;
+        self.reconciliation_break_identity = 0;
+        self.last_forced_execution_allocation = allocation;
+        return .{ .shard_id = allocation.owner, .fact = fact };
     }
 
     /// Reconciles gross portfolio state with Venue net margin without allocating the difference.
@@ -773,6 +811,7 @@ pub const AccountCoordinator = struct {
             .margin_observation => |observation| _ = try self.reconcileMargin(observation),
             .resolve_margin_gate => |identity| _ = try self.resolveMarginGate(identity),
             .tighten_leases => |tightening| _ = try self.tightenLeases(tightening.valid_through_barrier, tightening.requested_limits),
+            .forced_execution_allocation => |allocation| _ = try self.allocateForcedExecution(allocation),
         }
     }
 
@@ -812,6 +851,11 @@ pub const AccountCoordinator = struct {
         try writer.writeInt(i64, self.account_netting_benefit_micros, .little);
         try writer.writeByte(@intFromBool(self.recovery_only));
         try writeOptionalAccountFact(&writer, self.last_account_fact);
+        try writeOptionalAccountFact(&writer, self.suspense_forced_execution);
+        try writer.writeInt(u128, self.reconciliation_break_identity, .little);
+        try writer.writeByte(@intFromBool(self.last_forced_execution_allocation != null));
+        if (self.last_forced_execution_allocation) |allocation|
+            try writePlainStruct(&writer, ForcedExecutionAllocation, allocation);
         try writeOptionalMarginObservation(&writer, self.last_margin_observation);
         try writer.writeInt(u128, self.margin_gate.identity, .little);
         try writer.writeByte(@intFromBool(self.margin_gate.open));
@@ -860,6 +904,12 @@ pub const AccountCoordinator = struct {
         result.account_netting_benefit_micros = try reader.takeInt(i64, .little);
         result.recovery_only = try readBool(&reader);
         result.last_account_fact = try readOptionalAccountFact(&reader);
+        result.suspense_forced_execution = try readOptionalAccountFact(&reader);
+        result.reconciliation_break_identity = try reader.takeInt(u128, .little);
+        result.last_forced_execution_allocation = if (try readBool(&reader))
+            try readPlainStruct(&reader, ForcedExecutionAllocation)
+        else
+            null;
         result.last_margin_observation = try readOptionalMarginObservation(&reader);
         result.margin_gate = .{
             .identity = try reader.takeInt(u128, .little),
@@ -888,6 +938,7 @@ fn coordinationEventType(event: CoordinationEvent) u16 {
         .margin_observation => 4,
         .resolve_margin_gate => 5,
         .tighten_leases => 6,
+        .forced_execution_allocation => 7,
     };
 }
 
@@ -976,6 +1027,7 @@ fn encodeCoordinationEvent(destination: []u8, event: CoordinationEvent) ![]const
             try writer.writeInt(u64, tightening.valid_through_barrier, .little);
             for (tightening.requested_limits) |limit| try writer.writeInt(i64, limit, .little);
         },
+        .forced_execution_allocation => |allocation| try writePlainStruct(&writer, ForcedExecutionAllocation, allocation),
     }
     return writer.buffered();
 }
@@ -1002,6 +1054,7 @@ fn decodeCoordinationEvent(record: trading.journal.Record) !CoordinationEvent {
             for (&requested_limits) |*limit| limit.* = try reader.takeInt(i64, .little);
             break :blk .{ .tighten_leases = .{ .valid_through_barrier = valid_through_barrier, .requested_limits = requested_limits } };
         },
+        7 => .{ .forced_execution_allocation = try readPlainStruct(&reader, ForcedExecutionAllocation) },
         else => return error.InvalidCoordinationTail,
     };
     if (reader.seek != record.payload.len) return error.InvalidCoordinationTail;
@@ -1330,7 +1383,7 @@ test "margin reconciliation preserves netting benefit but latches unexplained di
     try std.testing.expect(!resolved.latched);
 }
 
-test "unowned economics route once and account gates enter the stable shard seam" {
+test "unowned economics stay in suspense until an immutable allocation" {
     var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
     const deliveries = try coordinator.acceptAccountFact(.{
         .identity = 33,
@@ -1339,8 +1392,23 @@ test "unowned economics route once and account gates enter the stable shard seam
         .barrier = 1,
         .payload = .{ .forced_execution = .{ .owner = null, .quantity = -1, .price_micros = 100, .fee_micros = 1 } },
     });
-    try std.testing.expectEqual(@as(usize, 1), deliveries.len);
-    try std.testing.expectEqual(ShardId.shard_0, deliveries[0].shard_id);
+    try std.testing.expectEqual(@as(usize, 0), deliveries.len);
+    try std.testing.expect(coordinator.suspense_forced_execution != null);
+    try std.testing.expect(coordinator.margin_gate.latched);
+
+    var snapshot_storage: [4096]u8 = undefined;
+    const snapshot_bytes = try coordinator.snapshot(&snapshot_storage);
+    var recovered = try AccountCoordinator.restore(snapshot_bytes);
+    try std.testing.expect(recovered.suspense_forced_execution != null);
+    try std.testing.expectEqual(@as(u128, 33), recovered.reconciliation_break_identity);
+
+    const allocation: ForcedExecutionAllocation = .{ .identity = 34, .forced_execution_identity = 33, .owner = .shard_0 };
+    const allocated = try coordinator.allocateForcedExecution(allocation);
+    try std.testing.expectEqual(ShardId.shard_0, allocated.shard_id);
+    const recovered_allocation = try recovered.allocateForcedExecution(allocation);
+    try std.testing.expectEqual(ShardId.shard_0, recovered_allocation.shard_id);
+    try std.testing.expectEqualSlices(u8, &coordinator.digest(), &recovered.digest());
+    try std.testing.expectEqual(ShardId.shard_0, (try recovered.allocateForcedExecution(allocation)).shard_id);
 
     var shard: trading.TradingShard = .{};
     shard.operational_state = trading.operational.State.init(100);
@@ -1357,8 +1425,7 @@ test "unowned economics route once and account gates enter the stable shard seam
         .version = 1,
         .instrument = 3,
     } } });
-    try applyAccountFactStable(deliveries[0], .shard_0, &shard, &stable_journal);
-    try std.testing.expect(shard.economicSummary().reconciliation_break);
+    try applyAccountFactStable(allocated, .shard_0, &shard, &stable_journal);
     const gate_delivery: GateDelivery = .{ .shard_id = .shard_0, .gate = .{ .identity = 44, .open = false, .latched = true } };
     try applyAccountGateStable(gate_delivery, .shard_0, &shard, &stable_journal);
     try std.testing.expect(!shard.operational_state.effectiveTradingAuthority());
@@ -1446,7 +1513,7 @@ test "four shard coordinator snapshot restores deterministic authority" {
 
 test "account recovery restores four matching shard tails under fresh evidence fence" {
     var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
-    var shard_snapshots_storage: [max_shards][32 * 1024]u8 = undefined;
+    var shard_snapshots_storage: [max_shards][64 * 1024]u8 = undefined;
     var shard_snapshots: [max_shards][]const u8 = undefined;
     var shard_tails: [max_shards][]const u8 = undefined;
     var tail_journals: [max_shards]trading.journal.Journal = undefined;

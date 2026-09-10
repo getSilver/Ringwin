@@ -370,6 +370,12 @@ pub const ReconciliationResult = struct {
     identity: u128,
     complete: bool,
     status: ReconciliationStatus = .unresolved,
+    order: OrderIdentity = 0,
+    revision: u32 = 0,
+    cumulative_quantity: ?InstrumentQuantity = null,
+    remaining_quantity: ?InstrumentQuantity = null,
+    terminal_status: ?ExecutionReportStatus = null,
+    rules_version: u64 = 0,
 };
 
 pub const ExecutionReport = struct {

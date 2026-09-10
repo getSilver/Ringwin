@@ -107,6 +107,7 @@ pub const OwnedMapping = struct {
             .lifecycle = std.atomic.Value(u32).init(0),
             .reserved1 = @splat(0),
         };
+        try sealDimensions(owned.raw);
         return owned;
     }
 
@@ -357,7 +358,7 @@ fn validateBatch(
     );
 }
 
-fn validateBatchAt(
+pub fn validateBatchAt(
     bytes: []const u8,
     session: Session,
     expected_batch_sequence: u64,
@@ -397,6 +398,8 @@ fn validateBatchAt(
         if (record_len < event_header_len or record_len % 8 != 0 or
             record_len > bytes.len - offset or
             payload_len > record_len - event_header_len or
+            get(u16, bytes, offset + 8) < 1 or get(u16, bytes, offset + 8) > 6 or
+            get(u16, bytes, offset + 10) != 1 or
             get(u32, bytes, offset + 12) & ~@as(u32, 0x1f) != 0 or
             get(u64, bytes, offset + 56) != 0 or
             !allZero(bytes[offset + event_header_len + payload_len .. offset + record_len]))
@@ -414,7 +417,7 @@ fn validateBatchAt(
     return .{ .status = .ok, .last_shard_sequence = last };
 }
 
-fn validateOutput(bytes: []const u8, session: Session, last_input_batch: u64) QshStatusV1 {
+pub fn validateOutput(bytes: []const u8, session: Session, last_input_batch: u64) QshStatusV1 {
     if (bytes.len < output_header_len or bytes.len > max_output_len or
         !std.mem.eql(u8, bytes[0..4], &output_magic) or
         get(u16, bytes, 4) != 1 or get(u16, bytes, 6) != output_header_len or
@@ -625,92 +628,6 @@ fn localChecks() !void {
     try std.testing.expect(old_host == null);
 }
 
-fn childCheck(io: std.Io, input_raw: usize, output_raw: usize, session: Session) !void {
-    // Keep process startup slower than the production stale boundary so this check proves
-    // that batch age starts after Host readiness, not before a cold child launch.
-    try std.Io.Clock.Duration.sleep(
-        .{ .clock = .awake, .raw = .fromNanoseconds(75 * std.time.ns_per_ms) },
-        io,
-    );
-    var host: ?*QshHandle = null;
-    try expectStatus(.ok, qsh_open_v1(
-        input_raw,
-        output_raw,
-        session.fencing,
-        session.shard,
-        session.generation,
-        &host,
-    ));
-    defer qsh_close_v1(host);
-    try std.Io.File.stdout().writeStreamingAll(io, "R");
-    var batch: [512]u8 = undefined;
-    var len: u32 = 0;
-    while (true) {
-        const status = qsh_read_input_v1(host, &batch, batch.len, &len);
-        if (status == .ok) break;
-        if (status != .empty) return expectStatus(.ok, status);
-        std.Thread.yield() catch {};
-    }
-    var output_storage: [256]u8 = undefined;
-    const output = makeOutput(&output_storage, session, 1, batch[136]);
-    const descriptors = [_]QshBufferV1{.{
-        .data = output.ptr,
-        .len = @intCast(output.len),
-        .reserved = 0,
-    }};
-    try expectStatus(.ok, qsh_publish_many_v1(host, &descriptors, 1));
-}
-
-fn crossProcessCheck(init: std.process.Init, executable: []const u8) !void {
-    const session: Session = .{ .fencing = 91, .shard = 3, .generation = 12 };
-    var input_mapping = try OwnedMapping.create(.input, session, 2, 512);
-    defer input_mapping.deinit();
-    var output_mapping = try OwnedMapping.create(.output, session, 2, 512);
-    defer output_mapping.deinit();
-    var input_owner = try input_mapping.ring(.input, session);
-    var output_owner = try output_mapping.ring(.output, session);
-    var batch_storage: [256]u8 = undefined;
-
-    var raw_input_text: [32]u8 = undefined;
-    var raw_output_text: [32]u8 = undefined;
-    var fencing_text: [32]u8 = undefined;
-    var shard_text: [16]u8 = undefined;
-    var generation_text: [32]u8 = undefined;
-    const argv = [_][]const u8{
-        executable,
-        "--child",
-        try std.fmt.bufPrint(&raw_input_text, "{d}", .{input_mapping.raw}),
-        try std.fmt.bufPrint(&raw_output_text, "{d}", .{output_mapping.raw}),
-        try std.fmt.bufPrint(&fencing_text, "{d}", .{session.fencing}),
-        try std.fmt.bufPrint(&shard_text, "{d}", .{session.shard}),
-        try std.fmt.bufPrint(&generation_text, "{d}", .{session.generation}),
-    };
-    var child = try std.process.spawn(init.io, .{
-        .argv = &argv,
-        .stdin = .ignore,
-        .stdout = .pipe,
-        .stderr = .inherit,
-        .create_no_window = true,
-    });
-    var ready: [1]u8 = undefined;
-    var ready_len: usize = 0;
-    while (ready_len != ready.len) {
-        const buffers = [_][]u8{ready[ready_len..]};
-        ready_len += try child.stdout.?.readStreaming(init.io, &buffers);
-    }
-    if (ready[0] != 'R') return error.ChildNotReady;
-    const batch = makeBatch(&batch_storage, session, 1, 1, try monotonicNowNs());
-    try expectStatus(.ok, input_owner.tryPublishMany(&.{batch}));
-    const term = try child.wait(init.io);
-    switch (term) {
-        .exited => |code| if (code != 0) return error.ChildFailed,
-        else => return error.ChildFailed,
-    }
-    var output: [512]u8 = undefined;
-    try expectStatus(.ok, output_owner.tryRead(&output));
-    try std.testing.expectEqual(@as(u8, 1), output[128]);
-}
-
 fn expectStatus(expected: QshStatusV1, actual: QshStatusV1) !void {
     if (expected != actual) {
         std.debug.print("expected status {s}, got {s}\n", .{ @tagName(expected), @tagName(actual) });
@@ -721,25 +638,13 @@ fn expectStatus(expected: QshStatusV1, actual: QshStatusV1) !void {
 pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer args.deinit();
-    const executable = args.next() orelse return error.MissingExecutable;
-    if (args.next()) |argument| {
-        if (!std.mem.eql(u8, argument, "--child")) return error.UnknownArgument;
-        const input_raw = try std.fmt.parseInt(usize, args.next() orelse return error.MissingArgument, 10);
-        const output_raw = try std.fmt.parseInt(usize, args.next() orelse return error.MissingArgument, 10);
-        const session: Session = .{
-            .fencing = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10),
-            .shard = try std.fmt.parseInt(u32, args.next() orelse return error.MissingArgument, 10),
-            .generation = try std.fmt.parseInt(u64, args.next() orelse return error.MissingArgument, 10),
-        };
-        if (args.next() != null) return error.UnknownArgument;
-        return childCheck(init.io, input_raw, output_raw, session);
-    }
+    _ = args.next() orelse return error.MissingExecutable;
+    if (args.next() != null) return error.UnknownArgument;
     try localChecks();
-    try crossProcessCheck(init, executable);
     var buffer: [256]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &buffer);
     try stdout.interface.print(
-        "strategy_host_ipc: zig={s}, mode={s}, self_check=ok, cross_process=ok\n",
+        "strategy_host_ipc: zig={s}, mode={s}, self_check=ok, python_mapping_capability=none\n",
         .{ builtin.zig_version_string, @tagName(builtin.mode) },
     );
     try stdout.interface.flush();
@@ -832,7 +737,7 @@ fn createAnonymous(len: usize) !OwnedMapping {
             break :blk .{ .raw = @intFromPtr(handle_value), .bytes = bytes };
         },
         .linux => blk: {
-            const fd = try std.posix.memfd_create("qsh-ring", 0);
+            const fd = try std.posix.memfd_create("qsh-ring", std.os.linux.MFD.ALLOW_SEALING);
             errdefer _ = std.os.linux.close(fd);
             if (std.posix.errno(std.os.linux.ftruncate(fd, @intCast(len))) != .SUCCESS)
                 return error.MappingCreateFailed;
@@ -848,6 +753,18 @@ fn createAnonymous(len: usize) !OwnedMapping {
         },
         else => @compileError("StrategyHost IPC supports Linux and Windows only"),
     };
+}
+
+/// Freeze the backing-object extent before it can be handed to another
+/// process.  Ring contents and the Zig-owned cursors remain writable, but a
+/// child cannot invalidate either mapping with ftruncate or alter the seals.
+fn sealDimensions(raw: usize) !void {
+    if (builtin.os.tag != .linux) return;
+    const linux = std.os.linux;
+    const fd: std.posix.fd_t = @intCast(raw);
+    const seals = linux.F.SEAL_SHRINK | linux.F.SEAL_GROW | linux.F.SEAL_SEAL;
+    if (std.posix.errno(linux.fcntl(fd, linux.F.ADD_SEALS, seals)) != .SUCCESS)
+        return error.MappingSealFailed;
 }
 
 fn destroyAnonymous(raw: usize, bytes: MappedBytes) void {

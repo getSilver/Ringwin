@@ -140,8 +140,8 @@ pub fn assess(rules: Rules, limits: Limits, state: State, request: Request) !Ass
         0;
     const portfolio_buffer = try std.math.sub(i128, try std.math.sub(i128, state.portfolio_cash.atoms, total), portfolio_maintenance);
     const exchange_buffer = try std.math.sub(i128, try std.math.sub(i128, state.exchange_cash.atoms, total), exchange_maintenance);
-    const portfolio_after_notional = try notionalAtoms(abs128(portfolio_after), state.mark_price.ticks, rules.quantity_denominator);
-    const exchange_after_notional = try notionalAtoms(abs128(exchange_after), state.mark_price.ticks, rules.quantity_denominator);
+    const portfolio_after_notional = try notionalAtoms(try abs128(portfolio_after), state.mark_price.ticks, rules.quantity_denominator);
+    const exchange_after_notional = try notionalAtoms(try abs128(exchange_after), state.mark_price.ticks, rules.quantity_denominator);
     const portfolio_buffer_bps = try bufferBps(portfolio_buffer, portfolio_after_notional);
     const exchange_buffer_bps = try bufferBps(exchange_buffer, exchange_after_notional);
     const portfolio_distance = try liquidationDistanceTicks(portfolio_buffer, portfolio_after, rules.quantity_denominator, rules.price_tick_value.atoms);
@@ -176,7 +176,7 @@ fn opens(rules: Rules, buffer: i128, buffer_bps: i64, distance_ticks: i64) bool 
 }
 
 fn maintenanceWithCloseFee(rules: Rules, quantity: i128, price_ticks: i128) !i128 {
-    const notional = try notionalAtoms(abs128(quantity), price_ticks, rules.quantity_denominator);
+    const notional = try notionalAtoms(try abs128(quantity), price_ticks, rules.quantity_denominator);
     return std.math.add(i128, try rateAtoms(notional, rules.internal_maintenance_margin_ppm), try rateAtoms(notional, rules.fee_ppm));
 }
 
@@ -192,12 +192,12 @@ fn marginGate(rules: Rules, buffer: i128, buffer_bps: i64, distance_ticks: i64) 
 
 fn bufferBps(buffer: i128, notional: i128) !i64 {
     if (notional == 0) return std.math.maxInt(i64);
-    return std.math.cast(i64, @divFloor(@as(i128, buffer) * 10_000, notional)) orelse error.Overflow;
+    return std.math.cast(i64, @divFloor(try std.math.mul(i128, buffer, 10_000), notional)) orelse error.Overflow;
 }
 
 fn liquidationDistanceTicks(buffer: i128, quantity: i128, denominator: i64, tick_atoms: i128) !i64 {
     if (quantity == 0) return std.math.maxInt(i64);
-    const per_tick_loss = try ceilPositive(abs128(quantity) * tick_atoms, denominator);
+    const per_tick_loss = try ceilPositive(try std.math.mul(i128, try abs128(quantity), tick_atoms), denominator);
     if (buffer <= 0) return 0;
     return std.math.cast(i64, @divFloor(@as(i128, buffer), per_tick_loss)) orelse error.Overflow;
 }
@@ -213,24 +213,25 @@ fn checkLimits(limits: Limits, required: i128) !void {
 fn reducesWithoutCrossing(before: i128, after: i128) bool {
     if (before == 0) return false;
     if ((before > 0 and after < 0) or (before < 0 and after > 0)) return false;
-    return abs128(after) < abs128(before);
+    return if (before > 0) after < before else after > before;
 }
 
-fn abs128(value: i128) i128 {
+fn abs128(value: i128) !i128 {
+    if (value == std.math.minInt(i128)) return error.Overflow;
     return if (value < 0) -value else value;
 }
 
 fn notionalAtoms(quantity: i128, price_ticks: i128, denominator: i64) !i128 {
-    return ceilPositive(quantity * price_ticks, denominator);
+    return ceilPositive(try std.math.mul(i128, quantity, price_ticks), denominator);
 }
 
 fn rateAtoms(notional: i128, ppm: i64) !i128 {
-    return ceilPositive(notional * ppm, ppm_scale);
+    return ceilPositive(try std.math.mul(i128, notional, ppm), ppm_scale);
 }
 
 fn ceilPositive(numerator: i128, denominator: i128) !i128 {
     if (numerator < 0 or denominator <= 0) return error.InvalidRiskInput;
-    return @divFloor(numerator + denominator - 1, denominator);
+    return @divFloor(try std.math.add(i128, numerator, try std.math.sub(i128, denominator, 1)), denominator);
 }
 
 const test_asset: canonical.AssetIdentity = 1;
@@ -316,4 +317,22 @@ test "opening gate rejects sufficient cash with insufficient liquidation distanc
     rules.opening_liquidation_distance_ticks = 20_000;
     const state: State = .{ .portfolio_cash = amount(2_000_000), .exchange_cash = amount(2_000_000), .portfolio_position = testQuantity(10), .exchange_position = testQuantity(10), .active_order_reservations = amount(0), .replaced_order_reservation = amount(0), .mark_price = price(50_000_000) };
     try std.testing.expectError(error.PortfolioOpeningGateClosed, assess(rules, fixtureLimits(), state, .{ .product = .isolated_linear_usdt, .side = .buy, .quantity = testQuantity(1), .risk_price = price(50_000_000) }));
+}
+
+test "extreme risk arithmetic fails closed" {
+    var limits = fixtureLimits();
+    limits.strategy.atoms = std.math.maxInt(i128);
+    limits.portfolio.atoms = std.math.maxInt(i128);
+    limits.decision_domain.atoms = std.math.maxInt(i128);
+    limits.exchange_account.atoms = std.math.maxInt(i128);
+    limits.global.atoms = std.math.maxInt(i128);
+    var state = fixtureState();
+    state.portfolio_cash.atoms = std.math.maxInt(i128);
+    state.exchange_cash.atoms = std.math.maxInt(i128);
+    try std.testing.expectError(error.Overflow, assess(fixtureRules(), limits, state, .{
+        .product = .spot,
+        .side = .buy,
+        .quantity = testQuantity(std.math.maxInt(i128)),
+        .risk_price = price(std.math.maxInt(i128)),
+    }));
 }

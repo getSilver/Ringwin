@@ -17,15 +17,25 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-pub const expected_happy_digest = "f6f4cee7fd9ca7039e106c708da3b9ddee6cb38092494e9e2a26a917a54d7dcf";
+pub const expected_happy_digest = "a06714c7a5c11674b6ffea90e7c0cfad7d2114f08db4a3b2f75153f265ec08fa";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "80154f2b6bdb3d223a9227a7d9a119c07bbf7ead2bce0fff1c8c6274eb49d2d6",
-    "bc4cad9b79cf8173d578214219773bd80ffbc6b965830e010b7fb9217c55f760",
-    "4a8f21e88b16074ecea8f26ec4621cec44463108b9a7fb8f1c31b476e2062298",
+    "af790682b30995379b8259a7110a447148a053ee9e8ee23de515b0e89983ea31",
+    "94133c15f63dc99dc957ab38bc2ce04f1e6c0aa3b33febcfd3aa738284728b65",
+    "d3ade6179a9a93d3d40602028e814f0261d4daa1134888bc1491294cd9fba66f",
     expected_happy_digest,
 };
 pub const order_limit_price: i64 = 50_100_000_000;
+
+pub fn timer(quantity_value: i64) engine.TimerRequest {
+    return .{
+        .side = .buy,
+        .time_in_force = .good_til_canceled,
+        .portfolio_reduce_only = false,
+        .quantity = quantity_value,
+        .limit_price_micros = order_limit_price,
+    };
+}
 pub const settlement_asset: canonical.AssetIdentity = 1;
 pub const swap_instrument: engine.oms.Instrument = 3;
 pub const spot_instrument: engine.oms.Instrument = 4;
@@ -242,6 +252,14 @@ pub fn startScenarioAuthorized(authorization: host_gateway.Authorization, reserv
     var run: LiveRun = .{ .shard = .{}, .decision_journal = journal.Journal.init() };
     const genesis = genesisEvents(authorization, reservation_model);
     for (genesis) |event| if (try apply(&run, event) != null) return error.UnexpectedCommand;
+    const host_digest = run.shard.canonicalStateDigest();
+    if (try apply(&run, atGroup(11, .{ .identity = 3, .payload = .{ .host_activated = .{
+        .strategy_identity = authorization.strategy_identity,
+        .config_version = authorization.config_version,
+        .activation_identity = authorization.activation_identity,
+        .activation_barrier = authorization.activation_barrier,
+        .state_digest = host_digest,
+    } } })) != null) return error.UnexpectedCommand;
     return run;
 }
 
@@ -312,11 +330,11 @@ pub fn assertReplayEquivalent(run: LiveRun) ![32]u8 {
 
 pub fn happyVenueFacts(command: engine.OrderCommand) ![6]engine.CanonicalEvent {
     if (command.command_id != 1 or command.order_id != 1 or
-        command.quantity.lots != happy_order_quantity or
+        command.quantity != happy_order_quantity or
         command.limit_price.ticks != 50_100_000_000 or
         command.reservation.atoms != 11_397_750)
         return error.InvalidOrderCommand;
-    const client = try canonical.ClientOrderId.init(command.client_id);
+    const client = command.client_order_id;
     const venue_order = try canonical.VenueOrderRef.init(1, "fixture-order-1");
     const first_trade = try canonical.VenueTradeRef.init(1, "fixture-trade-1");
     const second_trade = try canonical.VenueTradeRef.init(1, "fixture-trade-2");
@@ -379,6 +397,10 @@ pub fn happyVenueFacts(command: engine.OrderCommand) ![6]engine.CanonicalEvent {
 
 fn assertPartialState(shard: engine.TradingShard) !void {
     const economic = shard.economicSummary();
+    const order = shard.oms.orderById(1) orelse return error.PartialEconomicProjectionMismatch;
+    const report_applied = order.state == .partially_filled;
+    const expected_reservation: i64 = if (report_applied) 6_838_650 else 11_397_750;
+    const expected_remaining: i64 = if (report_applied) 9_988_770_150 else 9_984_211_050;
     if (economic.portfolio.swap.quantity != 40 or
         economic.portfolio.swap.open_cost_micros != 199_600_000 or
         economic.exchange.swap.quantity != 40 or
@@ -386,15 +408,20 @@ fn assertPartialState(shard: engine.TradingShard) !void {
         economic.portfolio.fee_micros != 149_700 or
         economic.portfolio.usdt_balance_micros != 19_999_850_300 or
         economic.exchange.usdt_balance_micros != 24_999_850_300 or
-        shard.position_margin_requirement_micros != 4_400_000 or
-        shard.open_order_reservation_micros != 6_838_650 or
-        shard.risk_lease_remaining_micros != 9_988_761_350)
+        shard.economic_projection.portfolio.margin_micros != 4_391_200 or
+        // The fill ledger is not allowed to guess OMS remaining quantity:
+        // reservation changes only once the authoritative report is applied.
+        shard.layered_risk_reserved_micros != expected_reservation or
+        try shard.riskLeaseRemainingMicros() != expected_remaining)
+    {
+        std.debug.print("partial state: position_margin={d} reservation={d} remaining={d}\n", .{ shard.economic_projection.portfolio.margin_micros, shard.layered_risk_reserved_micros, try shard.riskLeaseRemainingMicros() });
         return error.PartialEconomicProjectionMismatch;
+    }
 }
 
 pub fn runHappyPath() !LiveRun {
     var run = try healthyRun();
-    const command = (try apply(&run, atGroup(15, .{ .identity = 1, .payload = .{ .timer = .{ .quantity = happy_order_quantity } } }))) orelse return error.MissingOrderCommand;
+    const command = (try apply(&run, atGroup(15, .{ .identity = 1, .payload = .{ .timer = timer(happy_order_quantity) } }))) orelse return error.MissingOrderCommand;
     const facts = try happyVenueFacts(command);
     for (facts, 0..) |event, index| {
         if (try apply(&run, event) != null) return error.UnexpectedCommand;
@@ -408,7 +435,7 @@ pub fn runHappyPath() !LiveRun {
 pub fn runMarketGap() !LiveRun {
     var run = try healthyRun();
     if (try apply(&run, deltaAt(15, 102, 103, 49_860_000_000)) != null) return error.UnexpectedCommand;
-    if (try apply(&run, atGroup(16, .{ .identity = 1, .payload = .{ .timer = .{ .quantity = happy_order_quantity } } })) != null)
+    if (try apply(&run, atGroup(16, .{ .identity = 1, .payload = .{ .timer = timer(happy_order_quantity) } })) != null)
         return error.CommandEscapedMarketGap;
     if (try apply(&run, snapshotAt(17, 200)) != null) return error.UnexpectedCommand;
     if (try apply(&run, deltaAt(18, 200, 201, 49_850_000_000)) != null) return error.UnexpectedCommand;
@@ -417,17 +444,26 @@ pub fn runMarketGap() !LiveRun {
 
 pub fn runRiskRejection() !LiveRun {
     var run = try healthyRun();
-    if (try apply(&run, atGroup(15, .{ .identity = 1, .payload = .{ .timer = .{ .quantity = 100_001 } } })) != null)
+    if (try apply(&run, atGroup(15, .{ .identity = 1, .payload = .{ .timer = timer(100_001) } })) != null)
         return error.CommandEscapedRiskRejection;
     return finish(&run);
 }
 
 pub fn runUnknownReconciliation() !LiveRun {
     var run = try healthyRun();
-    const command = (try apply(&run, atGroup(15, .{ .identity = 1, .payload = .{ .timer = .{ .quantity = happy_order_quantity } } }))) orelse return error.MissingOrderCommand;
+    const command = (try apply(&run, atGroup(15, .{ .identity = 1, .payload = .{ .timer = timer(happy_order_quantity) } }))) orelse return error.MissingOrderCommand;
     const facts = try happyVenueFacts(command);
     if (try apply(&run, canonicalAt(16, 102, .{ .order_dispatch_result = .{ .command = command.command_id, .state = .unknown } })) != null) return error.UnexpectedCommand;
-    if (try apply(&run, canonicalAt(17, 103, .{ .order_reconciliation_result = .{ .identity = 1, .complete = true, .status = .found_live } })) != null) return error.UnexpectedCommand;
+    if (try apply(&run, canonicalAt(17, 103, .{ .order_reconciliation_result = .{
+        .identity = 1,
+        .complete = true,
+        .status = .found_live,
+        .order = command.order_id,
+        .revision = 1,
+        .cumulative_quantity = .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = 0 },
+        .remaining_quantity = .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = command.quantity },
+        .rules_version = command.limit_price.rules_version,
+    } })) != null) return error.UnexpectedCommand;
     var accepted = facts[1];
     accepted.venue.envelope.identity.sequence = 104;
     accepted.venue.envelope.source_sequence = 104;
@@ -438,7 +474,7 @@ pub fn runUnknownReconciliation() !LiveRun {
 
 pub fn runDuplicateReport() !LiveRun {
     var run = try healthyRun();
-    const command = (try apply(&run, atGroup(15, .{ .identity = 1, .payload = .{ .timer = .{ .quantity = happy_order_quantity } } }))) orelse return error.MissingOrderCommand;
+    const command = (try apply(&run, atGroup(15, .{ .identity = 1, .payload = .{ .timer = timer(happy_order_quantity) } }))) orelse return error.MissingOrderCommand;
     const facts = try happyVenueFacts(command);
     for (facts[0..4]) |event| if (try apply(&run, event) != null) return error.UnexpectedCommand;
     try assertPartialState(run.shard);
@@ -494,7 +530,8 @@ pub fn main(init: std.process.Init) !void {
     for (happy.shard.trace.events[0..happy.shard.trace.len]) |event|
         try out.print("{d:0>2} {s} id={d}\n", .{ event.sequence, @tagName(event.kind), event.identity });
     const economic = happy.shard.economicSummary();
-    try out.print("happy_path: events={d}, order={s}, qty={d}, open_cost={d}, fees={d}, upl={d}, risk_remaining={d}, ledger=closed, economic_projections=complete\ndigest={s}\n", .{ happy.shard.trace.len, @tagName(happy.shard.order_state), happy.shard.filled_quantity, economic.portfolio.swap.open_cost_micros, economic.portfolio.fee_micros, economic.portfolio.unrealized_pnl_micros, happy.shard.risk_lease_remaining_micros, &digest_hex });
+    const final_order = happy.shard.oms.orderById(1) orelse return error.MissingOrder;
+    try out.print("happy_path: events={d}, order={s}, qty={d}, open_cost={d}, fees={d}, upl={d}, risk_remaining={d}, ledger=closed, economic_projections=complete\ndigest={s}\n", .{ happy.shard.trace.len, @tagName(final_order.state), final_order.cumulative_quantity, economic.portfolio.swap.open_cost_micros, economic.portfolio.fee_micros, economic.portfolio.unrealized_pnl_micros, try happy.shard.riskLeaseRemainingMicros(), &digest_hex });
     try out.print("journal_records={d}, journal_bytes={d}, replay=equivalent, recovery_checks=ok\n", .{ happy.decision_journal.records, happy.decision_journal.len });
     const scenarios = [_]struct { name: []const u8, run: *const LiveRun }{
         .{ .name = "market-gap-v1", .run = &market_gap },          .{ .name = "risk-rejection-v1", .run = &risk_rejection },
@@ -570,22 +607,23 @@ pub const TradingShardHostIngress = struct {
             .side = intent.side,
             .time_in_force = intent.time_in_force,
             .portfolio_reduce_only = intent.portfolio_reduce_only,
-            .quantity = command.quantity,
+            .quantity = .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = command.quantity },
             .limit_price = command.limit_price,
             .reservation = command.reservation,
         };
     }
 
     pub fn summary(self: TradingShardHostIngress) HostIngressSummary {
+        const order = self.run.shard.oms.orderById(1);
         var result: HostIngressSummary = .{
             .order_intents = 0,
             .risk_accepts = 0,
             .order_commands = 0,
             .host_rejections = 0,
             .journal_records = self.run.decision_journal.records,
-            .order_quantity = self.run.shard.order_quantity,
-            .order_limit_price_micros = self.run.shard.order_limit_price_micros,
-            .reservation_micros = self.run.shard.open_order_reservation_micros,
+            .order_quantity = if (order) |value| value.quantity else 0,
+            .order_limit_price_micros = if (order) |value| std.math.cast(i64, value.limit_price.ticks) orelse 0 else 0,
+            .reservation_micros = self.run.shard.layered_risk_reserved_micros,
         };
         for (self.run.shard.trace.events[0..self.run.shard.trace.len]) |event| switch (event.kind) {
             .order_intent => result.order_intents += 1,
@@ -598,7 +636,9 @@ pub const TradingShardHostIngress = struct {
     }
 
     pub fn applyDispatchResult(self: *TradingShardHostIngress, identity: u64, status: canonical.DispatchState) !void {
-        if ((try apply(&self.run, canonicalAt(16, identity, .{ .order_dispatch_result = .{ .command = self.run.shard.order_command_id, .state = status } }))) != null)
+        if (self.run.shard.oms.command_history_count == 0) return error.MissingOrderCommand;
+        const command_id = self.run.shard.oms.command_history[self.run.shard.oms.command_history_count - 1].command_id;
+        if ((try apply(&self.run, canonicalAt(16, identity, .{ .order_dispatch_result = .{ .command = command_id, .state = status } }))) != null)
             return error.DispatchProducedCommand;
     }
 
@@ -633,6 +673,7 @@ test "qualified SPOT IOC intent crosses Gateway and cash risk before OrderComman
     };
     var gateway = try host_gateway.Gateway.init(config, &subscriptions);
     try gateway.recordPublished(1, 14, 100);
+    try gateway.activate(config.authorization);
     var frame_storage: [256]u8 = undefined;
     const frame = try host_gateway.encodeOutputOrderFrame(&frame_storage, config, 1, 14, 7, .{
         .time_in_force = .immediate_or_cancel,
@@ -673,20 +714,20 @@ test "fixed trajectories retain their sealed barriers and recovery digests" {
 
 test "authoritative snapshot round trips at an exact shard barrier" {
     const run = try runHappyPath();
-    var storage: [32 * 1024]u8 = undefined;
+    var storage: [64 * 1024]u8 = undefined;
     const encoded = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &storage);
     const restored = try engine.TradingShard.restoreSnapshot(encoded);
     try std.testing.expectEqual(run.decision_journal.last_sequence, restored.barrier);
     try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
 
-    var duplicate_storage: [32 * 1024]u8 = undefined;
+    var duplicate_storage: [64 * 1024]u8 = undefined;
     const duplicate = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &duplicate_storage);
     try std.testing.expectEqualSlices(u8, encoded, duplicate);
     const independent = try runHappyPath();
-    var independent_storage: [32 * 1024]u8 = undefined;
+    var independent_storage: [64 * 1024]u8 = undefined;
     const independent_encoded = try independent.shard.snapshot(&independent.decision_journal, independent.decision_journal.last_sequence, &independent_storage);
     try std.testing.expectEqualSlices(u8, encoded, independent_encoded);
-    var damaged_storage: [32 * 1024]u8 = undefined;
+    var damaged_storage: [64 * 1024]u8 = undefined;
     @memcpy(damaged_storage[0..encoded.len], encoded);
     damaged_storage[encoded.len - 1] ^= 1;
     try std.testing.expectError(error.InvalidSnapshotPayload, engine.TradingShard.restoreSnapshot(damaged_storage[0..encoded.len]));
@@ -696,7 +737,7 @@ test "authoritative snapshot round trips at an exact shard barrier" {
 test "snapshot restore replays only the stable journal tail without send capability" {
     var prefix = try healthyScenarioAuthorized(defaultAuthorization(), .leveraged);
     try prefix.decision_journal.seal();
-    var snapshot_storage: [32 * 1024]u8 = undefined;
+    var snapshot_storage: [64 * 1024]u8 = undefined;
     const encoded = try prefix.shard.snapshot(&prefix.decision_journal, prefix.decision_journal.last_sequence, &snapshot_storage);
     var live = prefix.shard;
     var tail = journal.Journal.initAt(prefix.decision_journal.last_sequence + 1);

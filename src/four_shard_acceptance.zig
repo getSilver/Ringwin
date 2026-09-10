@@ -23,7 +23,7 @@ const place_fee_micros: i64 = 400_000;
 const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
 pub const acceptance_schema_version: u16 = production_contract.acceptance_schema_version;
-const expected_shared_summary_v2 = "841e5425827f7d12ba771fd2de14303bfb4923b22a4cc6615cd7d348b8332dfe";
+const expected_shared_summary_v2 = "cc8f76e2e3f0980bda1ef674a691780fad3a6bd253e1e895e3d79efda8526946";
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
     return trading.applyStable(shard, stable_journal, .{ .core = input });
@@ -259,6 +259,14 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         journal.* = trading.journal.Journal.init();
         const events = genesisEvents(index);
         for (events) |event| _ = try applyCoreStable(shard, journal, event);
+        const host_digest = shard.canonicalStateDigest();
+        _ = try applyCoreStable(shard, journal, .{ .identity = 3, .payload = .{ .host_activated = .{
+            .strategy_identity = index + 1,
+            .config_version = 1,
+            .activation_identity = index + 1,
+            .activation_barrier = 0,
+            .state_digest = host_digest,
+        } } });
         try std.testing.expect(shard.genesisReady());
         try std.testing.expect(shard.operational_state.effectiveTradingAuthority());
     }
@@ -459,8 +467,8 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
             .fee_micros = 1,
         } },
     });
-    try std.testing.expect(world.shards[0].economicSummary().suspense_usdt_micros != 0);
-    try std.testing.expect(world.shards[0].economicSummary().reconciliation_break);
+    try std.testing.expect(world.coordinator.suspense_forced_execution != null);
+    try std.testing.expect(world.coordinator.margin_gate.latched);
     try std.testing.expectEqualSlices(u8, &pre_fault_digests[2], &world.shards[2].canonicalStateDigest());
 
     for (0..max_shards) |index| try world.publishDerivedSummary(index);

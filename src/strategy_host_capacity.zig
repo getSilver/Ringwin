@@ -1,6 +1,5 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const ipc = @import("strategy_host_ipc.zig");
 const lifecycle = @import("strategy_host_lifecycle.zig");
 
 const host_count = 4;
@@ -73,7 +72,6 @@ const Result = struct {
 
 fn runScenario(
     init: std.process.Init,
-    bridge: []const u8,
     python: []const u8,
     script: []const u8,
     scenario: Scenario,
@@ -93,8 +91,6 @@ fn runScenario(
         plan.input_capacity = 1024;
         const scenario_name = if (scenario == .crash) "normal" else @tagName(scenario);
         const common = [_][]const u8{
-            "--bridge",
-            bridge,
             "--benchmark-strategies",
             strategy_count,
             "--benchmark-batches",
@@ -152,42 +148,20 @@ fn runScenario(
                 batch_index,
                 published_at[index],
             );
-            var input = try host.*.?.input_mapping.ring(.input, plan.session);
-            const status = input.tryPublishMany(&.{batch});
-            if (status == .full) result.input_full += 1;
-            try expectIpc(.ok, status);
+            try host.*.?.sendInput(init.io, batch, published_at[index]);
         }
 
         var remaining: usize = if (scenario == .crash) host_count - 1 else host_count;
         const deadline = monotonicNow(init.io) + 5 * std.time.ns_per_s;
         while (remaining != 0) {
-            for (&hosts, &plans, 0..) |*host, *plan, index| {
+            for (&hosts, 0..) |*host, index| {
                 if (!pending[index]) continue;
-                if (host.*.?.input_mapping.failureStatus()) |status| {
-                    if (status == .stale) {
-                        result.stale += 1;
-                        std.debug.print(
-                            "stale_input scenario={s} host={d} batch={d} observed_age_us={d}\n",
-                            .{ @tagName(scenario), index, batch_index, @divTrunc(monotonicNow(init.io) - published_at[index], std.time.ns_per_us) },
-                        );
-                        return error.HostInputStale;
-                    }
-                    result.rejected += 1;
-                    return error.HostInputRejected;
-                }
-                var output = try host.*.?.output_mapping.ring(.output, plan.session);
-                const status = output.tryRead(&output_storage[index]);
-                if (status == .empty) continue;
-                if (status != .ok) {
-                    result.rejected += 1;
-                    return error.OutputRejected;
-                }
+                const frame = try host.*.?.receiveOutput(init.io, monotonicNow(init.io), &output_storage[index]);
                 const received = monotonicNow(init.io);
-                const frame_len = get(u32, &output_storage[index], 12);
-                if (frame_len < 148 or frame_len > output_storage[index].len)
+                if (frame.len < 148)
                     return error.InvalidBenchmarkFrame;
-                const callbacks = get(u32, &output_storage[index], 128);
-                const intents = get(u32, &output_storage[index], 136);
+                const callbacks = get(u32, frame, 128);
+                const intents = get(u32, frame, 136);
                 const latency: u64 = @intCast(received - published_at[index]);
                 result.all.record(latency, callbacks);
                 if (index != 0 or scenario == .normal) result.healthy.record(latency, callbacks);
@@ -295,10 +269,6 @@ fn get(comptime T: type, source: []const u8, offset: usize) T {
     return std.mem.readInt(T, source[offset..][0..@sizeOf(T)], .little);
 }
 
-fn expectIpc(expected: ipc.QshStatusV1, actual: ipc.QshStatusV1) !void {
-    if (expected != actual) return error.UnexpectedIpcStatus;
-}
-
 fn expectLifecycle(expected: lifecycle.Result, actual: lifecycle.Result) !void {
     if (expected != actual) return error.UnexpectedLifecycleResult;
 }
@@ -307,7 +277,6 @@ pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer args.deinit();
     _ = args.next();
-    const bridge = args.next() orelse return error.MissingBridgePath;
     const python = args.next() orelse "python";
     const script = args.next() orelse "python/strategy_host.py";
     const selected_scenario = if (args.next()) |name|
@@ -335,7 +304,7 @@ pub fn main(init: std.process.Init) !void {
             batch_total,
         });
         try stdout.interface.flush();
-        const result = try runScenario(init, bridge, python, script, scenario, batch_total);
+        const result = try runScenario(init, python, script, scenario, batch_total);
         try printResult(&stdout.interface, scenario, result);
         try stdout.interface.flush();
     }

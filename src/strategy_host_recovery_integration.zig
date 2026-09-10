@@ -1,11 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const gateway_module = @import("strategy_host_gateway.zig");
-const ipc = @import("strategy_host_ipc.zig");
 const lifecycle = @import("strategy_host_lifecycle.zig");
 const recovery_module = @import("strategy_host_recovery.zig");
 
-fn runCheck(init: std.process.Init, python: []const u8, script: []const u8, bridge: []const u8) !void {
+fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !void {
     const python_abi = try lifecycle.discoverPythonAbi(init, python);
     const plan = lifecycle.developmentPlan(0, 41, python_abi);
     const authorization: gateway_module.Authorization = .{
@@ -40,8 +39,6 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8, brid
     var activation_text: [48]u8 = undefined;
     var config_text: [24]u8 = undefined;
     const extra_args = [_][]const u8{
-        "--bridge",
-        bridge,
         "--strategy-identity",
         try std.fmt.bufPrint(&strategy_text, "0x{x}", .{authorization.strategy_identity}),
         "--activation-identity",
@@ -90,8 +87,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8, brid
         published_ns,
         &replay_events,
     );
-    var input_owner = try host.input_mapping.ring(.input, plan.session);
-    try expectIpc(.ok, input_owner.tryPublishMany(&.{replay_batch}));
+    try host.sendInput(init.io, replay_batch, published_ns);
     try gateway.recordPublished(1, 5, published_ns);
 
     try expectLifecycle(.accepted, try host.receive(init.io, published_ns + 1));
@@ -115,9 +111,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8, brid
         !std.mem.eql(u8, &recovered.state_digest, &expected.state_digest))
         return error.RecoveryEvidenceMismatch;
 
-    var output_owner = try host.output_mapping.ring(.output, plan.session);
     var output_storage: [512]u8 = undefined;
-    try expectIpc(.empty, output_owner.tryRead(&output_storage));
     var forbidden_storage: [256]u8 = undefined;
     const forbidden = try gateway_module.encodeOutputFrame(
         &forbidden_storage,
@@ -160,21 +154,12 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8, brid
         active_ns,
         &active_events,
     );
-    try expectIpc(.ok, input_owner.tryPublishMany(&.{active_batch}));
+    try host.sendInput(init.io, active_batch, active_ns);
     try gateway.recordPublished(2, 6, active_ns);
 
-    const deadline = active_ns + std.time.ns_per_s;
-    while (true) {
-        const status = output_owner.tryRead(&output_storage);
-        if (status == .ok) break;
-        if (status != .empty) return error.OutputReadFailed;
-        if (@as(i64, @intCast(std.Io.Clock.awake.now(init.io).nanoseconds)) > deadline)
-            return error.OutputTimeout;
-        std.Thread.yield() catch {};
-    }
-    const output_len = get(u32, &output_storage, 12);
+    const output = try host.receiveOutput(init.io, @intCast(std.Io.Clock.awake.now(init.io).nanoseconds), &output_storage);
     const decision = gateway.ingest(
-        output_storage[0..output_len],
+        output,
         @intCast(std.Io.Clock.awake.now(init.io).nanoseconds),
     );
     if (decision != .accepted) return error.RecoveredIntentRejected;
@@ -216,10 +201,6 @@ fn expectLifecycle(expected: lifecycle.Result, actual: lifecycle.Result) !void {
     if (expected != actual) return error.UnexpectedLifecycleResult;
 }
 
-fn expectIpc(expected: ipc.QshStatusV1, actual: ipc.QshStatusV1) !void {
-    if (expected != actual) return error.UnexpectedIpcStatus;
-}
-
 fn get(comptime T: type, source: []const u8, offset: usize) T {
     return std.mem.readInt(T, source[offset..][0..@sizeOf(T)], .little);
 }
@@ -228,11 +209,10 @@ pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer args.deinit();
     _ = args.next();
-    const bridge = args.next() orelse return error.MissingBridgePath;
     const python = args.next() orelse "python";
     const script = args.next() orelse "python/strategy_host.py";
     if (args.next() != null) return error.UnknownArgument;
-    try runCheck(init, python, script, bridge);
+    try runCheck(init, python, script);
     var buffer: [256]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &buffer);
     try stdout.interface.print(

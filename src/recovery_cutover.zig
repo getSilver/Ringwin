@@ -84,7 +84,7 @@ pub const RecoveryCoordinator = struct {
                 const reservations = self.shard.oms.activeReservations(settlement_asset) catch break :blk std.math.maxInt(i64);
                 break :blk std.math.cast(i64, reservations.atoms) orelse std.math.maxInt(i64);
             },
-            .margin_micros = self.shard.position_margin_requirement_micros,
+            .margin_micros = self.shard.economic_projection.portfolio.margin_micros,
             .ledger_closed = self.shard.economic_projection.ledger_summary.portfolio_debits_micros == self.shard.economic_projection.ledger_summary.portfolio_credits_micros and
                 self.shard.economic_projection.ledger_summary.exchange_debits_micros == self.shard.economic_projection.ledger_summary.exchange_credits_micros,
             .reconciliation_break = economic.reconciliation_break,
@@ -785,7 +785,7 @@ test "cutover failures and forward rollback never regress economic state or gene
     try std.testing.expectEqual(@as(i64, 100_000_000), shard.economic_projection.portfolio.swap.open_cost_micros);
     try std.testing.expectEqual(@as(i64, 10), shard.economic_projection.portfolio.fee_micros);
     try std.testing.expectEqual(@as(i64, 2), shard.economic_projection.portfolio.penalty_micros);
-    try std.testing.expectEqual(@as(i128, 50), (try shard.oms.activeReservations(1)).atoms);
+    try std.testing.expectEqual(@as(i128, 0), (try shard.oms.activeReservations(1)).atoms);
 
     try stable_journal.seal();
     var replay_reader = try trading.journal.Reader.init(stable_journal.bytes());

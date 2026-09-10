@@ -123,7 +123,7 @@ const SeenIntent = struct {
 pub const Gateway = struct {
     config: Config,
     subscription_mask: u64,
-    trading_enabled: bool = true,
+    trading_enabled: bool = false,
     published: [max_events]PublishedBatch = undefined,
     published_count: usize = 0,
     seen: [max_seen_intents]SeenIntent = undefined,
@@ -159,6 +159,9 @@ pub const Gateway = struct {
     pub fn activate(self: *Gateway, authorization: Authorization) !void {
         if (authorization.strategy_identity == 0 or authorization.activation_identity == 0)
             return error.InvalidAuthorization;
+        if (authorization.activation_barrier != 0 and
+            (self.published_count == 0 or self.published[self.published_count - 1].last_shard_sequence < authorization.activation_barrier))
+            return error.ActivationBarrierNotApplied;
         self.config.authorization = authorization;
         self.trading_enabled = true;
     }
@@ -481,6 +484,8 @@ test "subscription merge and intent rejection contract" {
     try gateway.recordPublished(1, 12, 100);
     var frame_storage: [256]u8 = undefined;
     const frame = try encodeOutputFrame(&frame_storage, config, 1, 12, 1, 100, 50_100_000_000);
+    try std.testing.expectEqual(RejectReason.unauthorized, gateway.ingest(frame, 101).rejected.reason);
+    try gateway.activate(config.authorization);
     try std.testing.expect(gateway.ingest(frame, 101) == .accepted);
     const duplicate = gateway.ingest(frame, 102);
     try std.testing.expectEqual(RejectReason.duplicate_identity, duplicate.rejected.reason);
