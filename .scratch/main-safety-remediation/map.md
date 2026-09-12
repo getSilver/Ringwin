@@ -30,8 +30,9 @@ OrderIntent、Order、RiskReservation、账户危险事实、StrategyHost 授权
 - 默认 ReleaseSafe；checked arithmetic 是领域合同，不能依赖构建模式替代输入验证。
 - 每次只认领并完成一张 Frontier issue；保留用户无关工作树修改。
 - 本地图不授权 Demo/Testnet/生产写入，也不默认同步 GitHub Issues。
-- DurableStore、Linux role、Web 控制面、真实 NodeFence 和在线 Venue 资格继续由既有
-  [Linux 生产资格收口](../production-readiness/map.md)跟踪，不在本图复制。
+- DurableStore 自身实现、Linux role、Web 控制面、真实 NodeFence 和在线 Venue 资格继续由既有
+  [Linux 生产资格收口](../production-readiness/map.md)跟踪，不在本图复制；06/07 可复用现有
+  DurableStore seam，在业务发送前持久提交 dispatch 事实，不扩展其存储实现或线上资格。
 
 ## Route
 
@@ -50,10 +51,11 @@ OrderIntent、Order、RiskReservation、账户危险事实、StrategyHost 授权
 
 ## Frontier
 
-- [06 扩展完整的 OMS DispatchProof](issues/06-expand-complete-oms-dispatch-proof.md)；最终 Spec 复核发现 proof 仍由调用方重建。07 的崩溃安全发送还需要决定是否纳入本图原本排除的 DurableStore。
+- [06 扩展完整的 OMS DispatchProof](issues/06-expand-complete-oms-dispatch-proof.md)；最终 Spec 复核发现 proof 仍由调用方重建。07 在 06 完成后复用现有 DurableStore seam 收口预发送持久提交。
 
 ## Decisions so far
 
+- 2026-09-12：用户允许把复用现有 DurableStore seam 的预发送持久提交纳入 06/07；不另建存储系统，不迁入 Linux role、外部 NodeFence、Venue 协议或在线/生产资格。
 - 2026-09-12：最终 Spec 复核撤销“本波已完成”结论。06/07/09/11/12 保持待收口；离线测试通过不证明 OMS 原生 proof、持久 pre-send 事实或墓碑归档资格。
 - 2026-09-11：最终两轴审查补齐 Gateway 自有权威事实与 dispatch 幂等、墓碑精确审计证据、Suspense 容量原子拒绝及 hostile-child capability 验收。
 - 2026-09-10：曾按 schema 9 标记 01–12 完成；2026-09-12 最终复核撤销该结论。Python StrategyHost 已改为 Zig supervisor 校验的管道复制，

@@ -29,4 +29,4 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 
 ## Answer
 
-部分完成：Gateway 持有并重读最新观察及同进程 dispatch 身份，旧 barrier 失败关闭。但 Demo 仍可自造观察/proof，accepted dispatch 没有预发送持久事实，崩溃窗口可能重发。需先完成 06，并决定是否把 DurableStore 接入本图。
+部分完成：Gateway 持有并重读最新观察及同进程 dispatch 身份，旧 barrier 失败关闭。但 Demo 仍可自造观察/proof，accepted dispatch 没有预发送持久事实，崩溃窗口可能重发。用户已允许复用现有 DurableStore seam 做预发送持久提交；须先完成 06，再实施此项，不扩展 DurableStore 自身或线上资格。
