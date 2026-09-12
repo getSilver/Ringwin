@@ -8,11 +8,12 @@
 
 ## 2026-09-10 离线修复结果
 
-本审查列出的 H1、H2、M1、M3、M5 和 15 项核心业务逻辑缺口已由上述本地修复图收口。新的验收合同固定为
+本审查列出的 H1、H2、M1、M3、M5 和多数核心业务逻辑缺口已有离线修复；2026-09-12 最终 Spec 复核发现
+OMS 原生 DispatchProof、崩溃前持久发送事实及墓碑归档资格仍未收口，以上本地图已恢复 `active`，不得宣称本波完成。新的验收合同固定为
 report schema 3、journal/state schema 9，并以同一输入矩阵运行 Debug 与 ReleaseSafe；源码 revision、精确 Zig、
 测试数、barrier、digest、Gateway 发送计数和失败关闭断言由 `tools/verify-core-wave.ps1` 从子验收输出推导。
 
-StrategyHost 产品链不再向 Python 传递共享内存、fd、mapping handle、指针或原子游标；Zig supervisor 在控制管道
+StrategyHost 产品链不再向 Python 传递共享内存、fd、mapping handle、指针或原子游标；Zig supervisor 在有界 framed bridge
 两端校验并复制 input/output bytes。独立 ring 实现仍保留为 Zig 内部有界设施，Linux backing object 固定尺寸并
 sealed，但它不再是 Python 的能力。
 

@@ -4,12 +4,14 @@ import argparse
 import gc
 import hashlib
 import json
+import os
 import struct
 import sys
 import time
 
 MAGIC = b"QSHC"
 HEADER_LEN = 64
+MAX_BRIDGE_PAYLOAD = 8 * 1024 * 1024 + 192 + 8
 PROTOCOL = 1
 SCHEMA_REGISTRY = 0x0102030405060708090A0B0C0D0E0F10
 HOST_BUILD = 0x1112131415161718191A1B1C1D1E1F20
@@ -60,11 +62,11 @@ def read_exact(stream, size):
 
 def read_frame(stream):
     frame_len = struct.unpack("<I", read_exact(stream, 4))[0]
-    if frame_len < HEADER_LEN or frame_len > HEADER_LEN + 65_536:
-        raise ValueError("invalid control frame length")
+    if frame_len < HEADER_LEN or frame_len > HEADER_LEN + MAX_BRIDGE_PAYLOAD:
+        raise ValueError("invalid bridge frame length")
     frame = read_exact(stream, frame_len)
     if frame[:4] != MAGIC:
-        raise ValueError("invalid control magic")
+        raise ValueError("invalid bridge magic")
     version, header_len, _, schema_version = struct.unpack_from("<HHHH", frame, 4)
     flags, total_len, payload_len = struct.unpack_from("<III", frame, 12)
     if (
@@ -78,7 +80,7 @@ def read_frame(stream):
         or crc32c(frame[HEADER_LEN:]) != struct.unpack_from("<I", frame, 56)[0]
         or crc32c(frame[:60]) != struct.unpack_from("<I", frame, 60)[0]
     ):
-        raise ValueError("invalid control frame")
+        raise ValueError("invalid bridge frame")
     session = (
         struct.unpack_from("<Q", frame, 24)[0],
         struct.unpack_from("<I", frame, 32)[0],
@@ -374,103 +376,113 @@ def apply_replay_batch(batch, metadata, state, allow_output):
 
 
 def recovery_once(args, session, zig_sequence, control_sequence, fault_strategy):
-    try:
-        message_type, received_session, sequence, payload = read_frame(sys.stdin.buffer)
-        if message_type != BEGIN_RECOVERY or received_session != session or sequence != zig_sequence[0] or len(payload) < 200:
-            raise ValueError("expected BeginRecovery v1")
-        zig_sequence[0] += 1
-        barrier = struct.unpack_from("<Q", payload)[0]
-        metadata, state = decode_checkpoint(payload[8:])
-        if (
-            metadata["schema_registry"] != SCHEMA_REGISTRY
-            or metadata["strategy"] != int(args.strategy_identity, 0)
-            or metadata["config_version"] != args.config_version
-        ):
-            raise ValueError("checkpoint identity mismatch")
-        while metadata["cursor"] < barrier:
-            if apply_replay_batch(read_input(session, zig_sequence), metadata, state, False):
-                raise AssertionError("recovery emitted intent")
-        if metadata["cursor"] != barrier:
-            raise ValueError("recovery crossed barrier")
-        digest = state_digest(metadata, state)
-        recovered = bytearray(96)
-        recovered[0:16] = metadata["strategy"].to_bytes(16, "little")
-        struct.pack_into("<Q", recovered, 16, metadata["config_version"])
-        recovered[24:40] = metadata["state_schema"].to_bytes(16, "little")
-        struct.pack_into(
-            "<I4xQQ",
-            recovered,
-            40,
-            metadata["state_schema_version"],
-            metadata["cursor"],
-            metadata["next_intent"],
-        )
-        recovered[64:96] = digest
-        write_frame(sys.stdout.buffer, STRATEGY_RECOVERED, session, control_sequence[0], recovered)
-        control_sequence[0] += 1
+    message_type, received_session, sequence, payload = read_frame(sys.stdin.buffer)
+    if message_type != BEGIN_RECOVERY or received_session != session or sequence != zig_sequence[0] or len(payload) < 200:
+        raise ValueError("expected BeginRecovery v1")
+    zig_sequence[0] += 1
+    barrier = struct.unpack_from("<Q", payload)[0]
+    metadata, state = decode_checkpoint(payload[8:])
+    if (
+        metadata["schema_registry"] != SCHEMA_REGISTRY
+        or metadata["strategy"] != int(args.strategy_identity, 0)
+        or metadata["config_version"] != args.config_version
+    ):
+        raise ValueError("checkpoint identity mismatch")
+    while metadata["cursor"] < barrier:
+        if apply_replay_batch(read_input(session, zig_sequence), metadata, state, False):
+            raise AssertionError("recovery emitted intent")
+    if metadata["cursor"] != barrier:
+        raise ValueError("recovery crossed barrier")
+    digest = state_digest(metadata, state)
+    recovered = bytearray(96)
+    recovered[0:16] = metadata["strategy"].to_bytes(16, "little")
+    struct.pack_into("<Q", recovered, 16, metadata["config_version"])
+    recovered[24:40] = metadata["state_schema"].to_bytes(16, "little")
+    struct.pack_into(
+        "<I4xQQ",
+        recovered,
+        40,
+        metadata["state_schema_version"],
+        metadata["cursor"],
+        metadata["next_intent"],
+    )
+    recovered[64:96] = digest
+    write_frame(sys.stdout.buffer, STRATEGY_RECOVERED, session, control_sequence[0], recovered)
+    control_sequence[0] += 1
 
-        message_type, received_session, sequence, activation = read_frame(sys.stdin.buffer)
-        if message_type != ACTIVATE_STRATEGY or received_session != session or sequence != zig_sequence[0] or len(activation) != 72:
-            raise ValueError("expected ActivateStrategy v1")
-        zig_sequence[0] += 1
-        strategy = int.from_bytes(activation[0:16], "little")
-        activation_identity = int.from_bytes(activation[16:32], "little")
-        activation_barrier = struct.unpack_from("<Q", activation, 32)[0]
-        if (
-            strategy != metadata["strategy"]
-            or activation_identity != int(args.activation_identity, 0)
-            or activation_barrier < metadata["cursor"]
-            or activation[40:72] != digest
-        ):
-            raise ValueError("invalid activation")
-        while metadata["cursor"] < activation_barrier:
-            if apply_replay_batch(read_input(session, zig_sequence), metadata, state, False):
-                raise AssertionError("catch-up emitted intent")
-        while True:
-            batch = read_input(session, zig_sequence)
-            if fault_strategy:
-                diagnostic = b"fixture callback exception"
-                fault = bytearray(40 + len(diagnostic))
-                fault[0:16] = fault_strategy.to_bytes(16, "little")
-                struct.pack_into(
-                    "<HHIQIHH",
-                    fault,
-                    16,
-                    1,
-                    1,
-                    0,
-                    metadata["cursor"],
-                    0,
-                    len(diagnostic),
-                    0,
-                )
-                fault[40:] = diagnostic
-                write_frame(
-                    sys.stdout.buffer,
-                    STRATEGY_FAULTED,
-                    session,
-                    control_sequence[0],
-                    fault,
-                )
-                control_sequence[0] += 1
-            sequences = apply_replay_batch(batch, metadata, state, True)
-            if sequences:
-                try:
-                    publish_intent(session, control_sequence, output_frame(batch, args, session, sequences[0]))
-                except RecoveryNeeded as failure:
-                    failure.last_batch = struct.unpack_from("<Q", batch, 72)[0]
-                    failure.last_cursor = metadata["cursor"]
-                    raise
-                break
-    finally:
-        pass
+    message_type, received_session, sequence, activation = read_frame(sys.stdin.buffer)
+    if message_type != ACTIVATE_STRATEGY or received_session != session or sequence != zig_sequence[0] or len(activation) != 72:
+        raise ValueError("expected ActivateStrategy v1")
+    zig_sequence[0] += 1
+    strategy = int.from_bytes(activation[0:16], "little")
+    activation_identity = int.from_bytes(activation[16:32], "little")
+    activation_barrier = struct.unpack_from("<Q", activation, 32)[0]
+    if (
+        strategy != metadata["strategy"]
+        or activation_identity != int(args.activation_identity, 0)
+        or activation_barrier < metadata["cursor"]
+        or activation[40:72] != digest
+    ):
+        raise ValueError("invalid activation")
+    while metadata["cursor"] < activation_barrier:
+        if apply_replay_batch(read_input(session, zig_sequence), metadata, state, False):
+            raise AssertionError("catch-up emitted intent")
+    while True:
+        batch = read_input(session, zig_sequence)
+        if fault_strategy:
+            diagnostic = b"fixture callback exception"
+            fault = bytearray(40 + len(diagnostic))
+            fault[0:16] = fault_strategy.to_bytes(16, "little")
+            struct.pack_into(
+                "<HHIQIHH",
+                fault,
+                16,
+                1,
+                1,
+                0,
+                metadata["cursor"],
+                0,
+                len(diagnostic),
+                0,
+            )
+            fault[40:] = diagnostic
+            write_frame(
+                sys.stdout.buffer,
+                STRATEGY_FAULTED,
+                session,
+                control_sequence[0],
+                fault,
+            )
+            control_sequence[0] += 1
+        sequences = apply_replay_batch(batch, metadata, state, True)
+        if sequences:
+            try:
+                publish_intent(session, control_sequence, output_frame(batch, args, session, sequences[0]))
+            except RecoveryNeeded as failure:
+                failure.last_batch = struct.unpack_from("<Q", batch, 72)[0]
+                failure.last_cursor = metadata["cursor"]
+                raise
+            break
+
+
+def assert_no_backing_capability():
+    if sys.argv[1:] != ["--mode", "hostile-capability"]:
+        raise AssertionError("unexpected child capability argument")
+    if sys.platform.startswith("linux"):
+        for entry in os.scandir("/proc/self/fd"):
+            try:
+                target = os.readlink(entry.path)
+            except OSError:
+                continue
+            if "qsh-ring" in target:
+                raise AssertionError("strategy child inherited ring backing")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=("normal", "crash", "hang", "trade", "recovery", "strategy-fault", "benchmark"),
+        choices=("normal", "crash", "hang", "hostile-capability", "trade", "recovery", "strategy-fault", "benchmark"),
         default="normal",
     )
     parser.add_argument("--strategy-identity")
@@ -493,6 +505,8 @@ def main():
     )
     parser.add_argument("--benchmark-perturbed", action="store_true")
     args = parser.parse_args()
+    if args.mode == "hostile-capability":
+        assert_no_backing_capability()
     if args.trade_batches <= 0:
         raise ValueError("trade batches must be positive")
     if args.benchmark_strategies <= 0 or args.benchmark_batches <= 0:

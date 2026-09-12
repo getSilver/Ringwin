@@ -602,6 +602,16 @@ fn dispatch(adapter: venue.VenueAdapter, legacy: live.AuthorizedCommand) !canoni
         .supports_post_only = true,
         .supports_market_protection = true,
     } });
+    try gateway.observeAuthority(.{
+        .account = demo_account,
+        .effective_trading_authority = true,
+        .reservation_identity = command_value.reservation_identity,
+        .reservation = reservation,
+        .primary_lease_expires_at_monotonic_ns = request.dispatch_deadline_monotonic_ns,
+        .fencing_token = request.adapter_session,
+        .exchange_position = .{ .instrument = request.instrument, .rules_version = request.rules_version, .lots = 0 },
+        .authority_barrier = 1,
+    });
     if (try gateway.sendProof(.{
         .context = .{
             .account = demo_account,
@@ -612,14 +622,8 @@ fn dispatch(adapter: venue.VenueAdapter, legacy: live.AuthorizedCommand) !canoni
             .dispatch_deadline_monotonic_ns = request.dispatch_deadline_monotonic_ns,
         },
         .command = command_value,
-        .effective_trading_authority = true,
-        .reservation = reservation,
-        .primary_lease_expires_at_monotonic_ns = request.dispatch_deadline_monotonic_ns,
         .fencing_token = request.adapter_session,
-        .current_fencing_token = request.adapter_session,
-        .exchange_position = .{ .instrument = request.instrument, .rules_version = request.rules_version, .lots = 0 },
         .authority_barrier = 1,
-        .current_barrier = 1,
         .now_monotonic_ns = 0,
     }) != .accepted)
         return error.AdapterRejectedCommand;

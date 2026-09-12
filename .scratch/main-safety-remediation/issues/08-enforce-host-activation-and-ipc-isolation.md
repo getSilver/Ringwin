@@ -12,7 +12,7 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 
 ## What to build
 
-把 HostActivated 作为 TradingShard 的不可变授权事实持久化并投影到 StrategyHostGateway。新会话默认无交易权限；Python 只通过 Zig supervisor 校验的控制管道收发自有 bytes，原始映射能力不进入子进程。Zig 内部 ring 仍保持有界和 sealed，但不再承担 Python 数据面。
+把 HostActivated 作为 TradingShard 的不可变授权事实持久化并投影到 StrategyHostGateway。新会话默认无交易权限；Python 只通过 Zig supervisor 校验的 StrategyHostFramedBridge 收发自有 bytes，原始映射能力不进入子进程。Zig 内部 ring 仍保持有界和 sealed，但不再承担 Python 数据面。
 
 ## Acceptance criteria
 
@@ -21,8 +21,12 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 - [x] Linux 内部 backing object 禁止 grow/shrink/seal 变更；子进程不获得 input/output backing capability，因而不能反向写 engine input。
 - [x] Python 数据面不再传递 fd 或 mapping handle，argv 中不存在可预测 descriptor 数字，也没有多余 mapping descriptor 需要继承。
 - [x] Python 不直接获得共享内存指针或原子游标，所有 input/output envelope、容量、session、sequence 和 cursor 校验由 Zig supervisor 独占。
-- [x] 恶意写 input、重新 mmap、ftruncate、旧 session、旧 activation 和冲突 frame 的故障测试不会阻塞或修改 TradingShard 权威状态。
+- [x] hostile child 只收到约定 pipe/argv，Linux 运行时还会检查 `/proc/self/fd` 不含 `qsh-ring`；握手后 intent/confirmation 权限仍关闭。旧 session、旧 activation 和冲突 frame 继续 fail closed。当前 Windows 波次不宣称已运行 Linux `mmap`/`ftruncate`，Linux runtime 保持 `not_run`。
 
 ## Out of scope
 
 - 把 Python StrategyPrivateState、解释器对象或业务交易逻辑迁入 Zig。
+
+## Answer
+
+HostActivated 已成为可重放分片事实；Python 仅通过 Zig 校验的有界 pipe 帧收发自有 bytes，不获得共享内存或游标能力。hostile-child acceptance 证明启动参数无 backing capability 且未激活权威权限，见 ADR 0007。

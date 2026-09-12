@@ -25,3 +25,7 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 ## Out of scope
 
 - 仅为缩短文件行数而机械拆分 TradingShard，或新增一层只转发调用的抽象。
+
+## Answer
+
+legacy 订单/风险标量和未使用的竞争经济投影已删除；保留的 Canonical/Core/Host IPC 边界没有新增转发抽象。

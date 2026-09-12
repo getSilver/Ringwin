@@ -25,3 +25,7 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 ## Out of scope
 
 - 改写各 Venue 的网络查询覆盖；真实查询资格仍由各 Venue production-readiness issue 验证。
+
+## Answer
+
+Canonical reconciliation 已映射为 OMS 的 FoundLive、FoundTerminal、ConfirmedAbsent 与 Unresolved 互斥语义；重复与冲突的 live/replay 轨迹已验证。

@@ -25,3 +25,7 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 ## Out of scope
 
 - Venue 提供的组合 cancel-replace 或自动 amend-failure 撤单能力。
+
+## Answer
+
+OMS 已持久化完整意图身份与 predecessor 证据，并在替代单创建前重验 CCC 条件；重复输入与恢复后重放均保持幂等。

@@ -25,3 +25,7 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 ## Out of scope
 
 - 自动猜测强制成交归属或使用账户净仓比例替代权威贡献事实。
+
+## Answer
+
+零 liquidation distance、缺失事实和未归属强制成交均保留危险语义；SuspenseAccount 容量拒绝不改变摘要，不可变 ForcedExecutionAllocation 保持经济守恒。

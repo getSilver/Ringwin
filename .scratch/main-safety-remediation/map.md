@@ -1,6 +1,6 @@
 # 收口当前 main 安全与权威状态缺口
 
-Status: complete
+Status: active
 
 ## Destination
 
@@ -50,16 +50,18 @@ OrderIntent、Order、RiskReservation、账户危险事实、StrategyHost 授权
 
 ## Frontier
 
-- 无（本波已完成）。
+- [06 扩展完整的 OMS DispatchProof](issues/06-expand-complete-oms-dispatch-proof.md)；最终 Spec 复核发现 proof 仍由调用方重建。07 的崩溃安全发送还需要决定是否纳入本图原本排除的 DurableStore。
 
 ## Decisions so far
 
-- 2026-09-10：01–12 已按 schema 9 完成；Python StrategyHost 改为 Zig supervisor 校验的管道复制，
+- 2026-09-12：最终 Spec 复核撤销“本波已完成”结论。06/07/09/11/12 保持待收口；离线测试通过不证明 OMS 原生 proof、持久 pre-send 事实或墓碑归档资格。
+- 2026-09-11：最终两轴审查补齐 Gateway 自有权威事实与 dispatch 幂等、墓碑精确审计证据、Suspense 容量原子拒绝及 hostile-child capability 验收。
+- 2026-09-10：曾按 schema 9 标记 01–12 完成；2026-09-12 最终复核撤销该结论。Python StrategyHost 已改为 Zig supervisor 校验的管道复制，
   不再获得任何 shared-memory/fd/mapping/cursor 能力；离线验收不升级 Linux/Venue/生产资金资格。
 - 2026-09-09：按当前源码重新核验审查结论；15 项业务逻辑缺口仍存在，安全问题按实际利用边界修订。
 - 2026-09-09：用户批准以 12 张 tracer-bullet issue 收口核心安全缺口，并定向补强既有生产资格票。
 - H2 按 ReleaseSafe 下的 trap/拒绝服务风险处理，同时禁止未来 ReleaseFast 静默回绕；不沿用“当前必然少占保证金”的过强结论。
-- HostActivated 修复覆盖直接 trade 与 recovery 两条路径；SCM_RIGHTS 不是安全边界，权限必须由只读 fd/mapping、seal 和 Zig bridge 共同强制。
+- HostActivated 修复覆盖直接 trade 与 recovery 两条路径；Python 不获得 shared-memory capability，权限由 Zig 校验的有界 pipe bridge 强制。
 - `production_candidate` 保留为目标范围；required capability 与 verified evidence 在生产资格票中分开。
 - 竞争状态使用 expand-contract：先扩展 OMS 权威形态，再迁移调用方，最后删除 legacy 形态。
 

@@ -181,8 +181,11 @@ foreach ($match in $shardMatches) {
 $singleDigestMatches = [regex]::Matches($singleText, 'digest=([0-9a-f]{64})')
 if ($singleDigestMatches.Count -ne 5) { throw 'Single-shard trajectory digest evidence is incomplete' }
 $singleDigests = @($singleDigestMatches | ForEach-Object { $_.Groups[1].Value })
-$pythonScenarioMatches = [regex]::Matches(($pythonEvidence -join "`n"), 'scenario=(\w+) samples=(\d+)')
+$pythonText = $pythonEvidence -join "`n"
+$pythonScenarioMatches = [regex]::Matches($pythonText, 'scenario=(\w+) samples=(\d+)')
 if ($pythonScenarioMatches.Count -ne 5) { throw 'Python capacity scenario evidence is incomplete' }
+$pythonHostile = [regex]::Match($pythonText, 'hostile_capability=(absent), hostile_authority=(unchanged)')
+if (-not $pythonHostile.Success) { throw 'Python hostile-child capability evidence is missing' }
 $requiredVenueMarkers = [ordered]@{
     SimulatedVenue = 'simulated_venue\.'
     OKX = 'okx_venue_adapter\.'
@@ -202,7 +205,7 @@ if (-not $debugMatch.Success -or -not $releaseMatch.Success -or -not $barrierMat
 if ($debugMatch.Groups[1].Value -ne $releaseMatch.Groups[1].Value) {
     throw 'Debug and ReleaseSafe did not run the same test matrix'
 }
-$pythonPassed = [regex]::IsMatch(($pythonEvidence -join "`n"), 'strategy_host_product_acceptance=passed')
+$pythonPassed = [regex]::IsMatch($pythonText, 'strategy_host_product_acceptance=passed')
 if (-not $pythonPassed) { throw 'Python machine-readable acceptance evidence is missing' }
 $evidence = [ordered]@{
     acceptance = 'passed'
@@ -227,6 +230,7 @@ $evidence = [ordered]@{
         'intent_conflict_and_ccc'
         'authoritative_reduce_only_and_fencing'
         'host_activation_before_intent'
+        'hostile_child_has_no_backing_capability'
         'suspense_allocation_recovery'
         'tombstone_capacity_recovery_only'
         'legacy_authority_absent'
@@ -237,6 +241,8 @@ $evidence = [ordered]@{
     single_shard_digests = $singleDigests
     offline_venue_contracts = $offlineVenueContracts
     python_scenarios = @($pythonScenarioMatches | ForEach-Object { $_.Groups[1].Value })
+    python_hostile_capability = $pythonHostile.Groups[1].Value
+    python_hostile_authority = $pythonHostile.Groups[2].Value
     python = 'passed'
     linux = 'compile_only'
     okx_demo_qualification = if ($DemoLive) { 'demo_qualified' } else { 'not_run' }

@@ -164,6 +164,8 @@ pub const Tombstone = struct {
     group_first_sequence: u64,
     last_report_id: u64,
     last_reconciliation_id: u64,
+    last_report: ?ExecutionReport,
+    last_reconciliation: ?ReconciliationResult,
     intent_sequence: u64,
     client_order_id: canonical.ClientOrderId,
     fact_digest: [32]u8,
@@ -273,6 +275,12 @@ pub const Oms = struct {
 
     pub fn orderById(self: *const Oms, id: u64) ?Order {
         for (self.orders[0..self.order_count]) |order| if (order.id == id) return order;
+        return null;
+    }
+
+    pub fn instrumentForOrder(self: *const Oms, id: u64) ?Instrument {
+        if (self.orderById(id)) |order| return order.instrument;
+        if (self.tombstoneById(id)) |tombstone| return tombstone.instrument;
         return null;
     }
 
@@ -425,7 +433,13 @@ pub const Oms = struct {
     fn applyReportInPlace(self: *Oms, report: ExecutionReport) !void {
         for (self.report_history[0..self.report_history_count]) |known| {
             if (known.order_id == report.order_id and known.report_id == report.report_id) {
-                if (!std.meta.eql(known, report)) return error.ConflictingReportIdentity;
+                if (!std.meta.eql(known, report)) {
+                    if (self.tombstoneById(report.order_id) != null) {
+                        self.recovery_only = true;
+                        return error.TombstoneFactConflict;
+                    }
+                    return error.ConflictingReportIdentity;
+                }
                 return;
             }
         }
@@ -435,7 +449,7 @@ pub const Oms = struct {
         }
         const order = self.mutableOrder(report.order_id) catch {
             if (self.tombstoneById(report.order_id)) |tombstone| {
-                if (report.report_id <= tombstone.last_report_id and report.cumulative_quantity == tombstone.cumulative_quantity) return;
+                if (tombstone.last_report) |known| if (std.meta.eql(known, report)) return;
                 self.recovery_only = true;
                 return error.TombstoneFactConflict;
             }
@@ -456,12 +470,13 @@ pub const Oms = struct {
             return;
         }
         if (order.state == .filled or order.state == .canceled or order.state == .rejected) {
-            rememberReport(order, report);
-            return;
+            self.recovery_only = true;
+            return error.TerminalFactConflict;
         }
         const reported_quantity = std.math.add(i64, report.cumulative_quantity, report.remaining_quantity) catch return error.Overflow;
         if (report.cumulative_quantity < order.cumulative_quantity or report.remaining_quantity < 0 or
-            reported_quantity > order.quantity)
+            reported_quantity > order.quantity or
+            (report.status == .filled and (report.cumulative_quantity != order.quantity or report.remaining_quantity != 0)))
             return error.InvalidExecutionReport;
         if (report.status == .amended and report.revision != order.revision) return error.StaleOrderRevision;
         if (report.status == .rejected and order.state == .pending_amend) {
@@ -511,13 +526,19 @@ pub const Oms = struct {
     fn applyReconciliationInPlace(self: *Oms, result: ReconciliationResult) !void {
         for (self.reconciliation_history[0..self.reconciliation_history_count]) |known| {
             if (known.order_id == result.order_id and known.reconciliation_id == result.reconciliation_id) {
-                if (!std.meta.eql(known, result)) return error.ConflictingReconciliationIdentity;
+                if (!std.meta.eql(known, result)) {
+                    if (self.tombstoneById(result.order_id) != null) {
+                        self.recovery_only = true;
+                        return error.TombstoneFactConflict;
+                    }
+                    return error.ConflictingReconciliationIdentity;
+                }
                 return;
             }
         }
         const order = self.mutableOrder(result.order_id) catch {
             if (self.tombstoneById(result.order_id)) |tombstone| {
-                if (result.reconciliation_id <= tombstone.last_reconciliation_id and result.cumulative_quantity == tombstone.cumulative_quantity) return;
+                if (tombstone.last_reconciliation) |known| if (std.meta.eql(known, result)) return;
                 self.recovery_only = true;
                 return error.TombstoneFactConflict;
             }
@@ -529,10 +550,16 @@ pub const Oms = struct {
         };
         const reconciled_quantity = std.math.add(i64, result.cumulative_quantity, result.remaining_quantity) catch return error.Overflow;
         if (result.cumulative_quantity < 0 or result.remaining_quantity < 0) return error.InvalidReconciliationResult;
+        if (reconciled_quantity > order.quantity) return error.ConflictingReconciliationEvidence;
         switch (result.status) {
             .unresolved => if (result.terminal_state != null) return error.ConflictingReconciliationEvidence,
             .found_live => if (result.terminal_state != null or reconciled_quantity != order.quantity) return error.ConflictingReconciliationEvidence,
-            .found_terminal => if (result.terminal_state == null) return error.IncompleteReconciliationEvidence,
+            .found_terminal => {
+                if (result.terminal_state == null) return error.IncompleteReconciliationEvidence;
+                if (result.terminal_state.? == .filled and
+                    (result.cumulative_quantity != order.quantity or result.remaining_quantity != 0))
+                    return error.ConflictingReconciliationEvidence;
+            },
             .confirmed_absent => if (result.terminal_state != null or result.cumulative_quantity != 0 or result.remaining_quantity != order.quantity) return error.ConflictingReconciliationEvidence,
         }
         if (self.reconciliation_history_count == max_fact_history) {
@@ -548,6 +575,22 @@ pub const Oms = struct {
                 result.remaining_quantity != order.last_reconciliation_remaining_quantity)
                 return error.ConflictingReconciliationIdentity;
             return;
+        }
+        if (order.state == .filled or order.state == .canceled or order.state == .rejected) {
+            const expected: TerminalState = switch (order.state) {
+                .filled => .filled,
+                .canceled => .canceled,
+                .rejected => .rejected,
+                else => unreachable,
+            };
+            if (result.status != .found_terminal or result.terminal_state.? != expected or
+                result.cumulative_quantity != order.cumulative_quantity or
+                result.remaining_quantity != order.quantity - order.cumulative_quantity or
+                order.last_reconciliation_id != 0)
+            {
+                self.recovery_only = true;
+                return error.TerminalFactConflict;
+            }
         }
         order.last_reconciliation_id = result.reconciliation_id;
         order.last_reconciliation_status = result.status;
@@ -588,6 +631,7 @@ pub const Oms = struct {
         if (order.state != .canceled) return null;
         return .{
             .intent_sequence = sequence,
+            .strategy_instance = order.strategy_instance,
             .operation = .place,
             .instrument = replacement.instrument,
             .side = replacement.side,
@@ -714,6 +758,8 @@ pub const Oms = struct {
                 .filled, .canceled, .rejected => {},
                 else => continue,
             }
+            const last_report = try self.lastReportEvidence(order);
+            const last_reconciliation = try self.lastReconciliationEvidence(order);
             self.tombstones[self.tombstone_count] = .{
                 .order_id = order.id,
                 .strategy_instance = order.strategy_instance,
@@ -726,9 +772,11 @@ pub const Oms = struct {
                 .group_first_sequence = order.group_first_sequence,
                 .last_report_id = order.last_report_id,
                 .last_reconciliation_id = order.last_reconciliation_id,
+                .last_report = last_report,
+                .last_reconciliation = last_reconciliation,
                 .intent_sequence = order.group_first_sequence,
                 .client_order_id = order.client_order_id,
-                .fact_digest = orderFactDigest(order),
+                .fact_digest = orderFactDigest(order, last_report, last_reconciliation),
             };
             self.tombstone_count += 1;
             var move = index;
@@ -737,6 +785,28 @@ pub const Oms = struct {
             return;
         }
         return error.OrderCapacityExceeded;
+    }
+
+    fn lastReportEvidence(self: *const Oms, order: Order) !?ExecutionReport {
+        if (order.last_report_id == 0) return null;
+        for (self.report_history[0..self.report_history_count]) |known|
+            if (known.order_id == order.id and known.report_id == order.last_report_id and
+                known.revision == order.last_report_revision and known.status == order.last_report_status and
+                known.cumulative_quantity == order.last_report_cumulative_quantity and
+                known.remaining_quantity == order.last_report_remaining_quantity)
+                return known;
+        return error.MissingTerminalAuditEvidence;
+    }
+
+    fn lastReconciliationEvidence(self: *const Oms, order: Order) !?ReconciliationResult {
+        if (order.last_reconciliation_id == 0) return null;
+        for (self.reconciliation_history[0..self.reconciliation_history_count]) |known|
+            if (known.order_id == order.id and known.reconciliation_id == order.last_reconciliation_id and
+                known.status == order.last_reconciliation_status and known.revision == order.last_reconciliation_revision and
+                known.cumulative_quantity == order.last_reconciliation_cumulative_quantity and
+                known.remaining_quantity == order.last_reconciliation_remaining_quantity)
+                return known;
+        return error.MissingTerminalAuditEvidence;
     }
 
     fn findCommand(self: *const Oms, id: u64) ?Command {
@@ -792,7 +862,7 @@ fn intentFingerprint(intent: Intent) u64 {
     return hash.final();
 }
 
-fn orderFactDigest(order: Order) [32]u8 {
+fn orderFactDigest(order: Order, last_report: ?ExecutionReport, last_reconciliation: ?ReconciliationResult) [32]u8 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update(std.mem.asBytes(&order.id));
     hash.update(std.mem.asBytes(&order.revision));
@@ -801,6 +871,26 @@ fn orderFactDigest(order: Order) [32]u8 {
     hash.update(std.mem.asBytes(&order.cumulative_quantity));
     hash.update(std.mem.asBytes(&order.last_report_id));
     hash.update(std.mem.asBytes(&order.last_reconciliation_id));
+    hash.update(&.{@intFromBool(last_report != null)});
+    if (last_report) |report| {
+        hash.update(std.mem.asBytes(&report.report_id));
+        hash.update(std.mem.asBytes(&report.order_id));
+        hash.update(std.mem.asBytes(&report.revision));
+        hash.update(&.{@intFromEnum(report.status)});
+        hash.update(std.mem.asBytes(&report.cumulative_quantity));
+        hash.update(std.mem.asBytes(&report.remaining_quantity));
+    }
+    hash.update(&.{@intFromBool(last_reconciliation != null)});
+    if (last_reconciliation) |result| {
+        hash.update(std.mem.asBytes(&result.reconciliation_id));
+        hash.update(std.mem.asBytes(&result.order_id));
+        hash.update(&.{@intFromEnum(result.status)});
+        hash.update(std.mem.asBytes(&result.revision));
+        hash.update(std.mem.asBytes(&result.cumulative_quantity));
+        hash.update(std.mem.asBytes(&result.remaining_quantity));
+        hash.update(&.{@intFromBool(result.terminal_state != null)});
+        hash.update(&.{if (result.terminal_state) |terminal| @intFromEnum(terminal) else 0});
+    }
     var result: [32]u8 = undefined;
     hash.final(&result);
     return result;
@@ -897,6 +987,18 @@ test "FoundTerminal requires an explicit terminal category" {
     try std.testing.expectError(error.IncompleteReconciliationEvidence, state.applyReconciliation(.{ .reconciliation_id = 1, .order_id = 1, .status = .found_terminal, .revision = 1, .cumulative_quantity = 2, .remaining_quantity = 0 }));
 }
 
+test "hot terminal facts reject semantic changes and invalid filled quantities" {
+    var state = Oms{};
+    var group: IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
+    group.members[0] = .{ .intent_sequence = 1, .operation = .place, .instrument = 1, .quantity = 2, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 6 } };
+    try state.applyGroup(group);
+    try std.testing.expectError(error.InvalidExecutionReport, state.applyReport(.{ .report_id = 1, .order_id = 1, .revision = 1, .status = .filled, .cumulative_quantity = 1, .remaining_quantity = 1 }));
+    try state.applyReport(.{ .report_id = 1, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    try state.applyReport(.{ .report_id = 1, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    try std.testing.expectError(error.TerminalFactConflict, state.applyReport(.{ .report_id = 2, .order_id = 1, .revision = 1, .status = .filled, .cumulative_quantity = 2, .remaining_quantity = 0 }));
+    try std.testing.expect(state.recovery_only);
+}
+
 test "OrderIntentIdentity is idempotent and conflicts fail closed" {
     var state = Oms{};
     var group: IntentGroup = .{ .first_intent_sequence = 7, .count = 1 };
@@ -924,6 +1026,7 @@ test "terminal orders compact to replayable tombstones without overwriting activ
         dispatch.items[0] = .{ .command_id = state.emitted()[0].command_id, .state = .submitted };
         try state.applyDispatch(dispatch);
         try state.applyReport(.{ .report_id = sequence, .order_id = order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
+        if (order_id == 1) try state.applyReconciliation(.{ .reconciliation_id = 100, .order_id = 1, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .canceled });
     }
     try std.testing.expectEqual(@as(u8, max_orders), state.order_count);
     try std.testing.expectEqual(@as(u8, 1), state.tombstone_count);
@@ -932,6 +1035,11 @@ test "terminal orders compact to replayable tombstones without overwriting activ
     try std.testing.expectEqual(@as(u64, 1), state.tombstones[0].intent_sequence);
     try std.testing.expectEqualStrings("RWN-1", state.tombstones[0].client_order_id.slice());
     try std.testing.expect(!std.mem.eql(u8, &state.tombstones[0].fact_digest, &@as([32]u8, @splat(0))));
+    try state.applyReport(.{ .report_id = 1, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    try state.applyReconciliation(.{ .reconciliation_id = 100, .order_id = 1, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .canceled });
+    try std.testing.expectError(error.TombstoneFactConflict, state.applyReconciliation(.{ .reconciliation_id = 100, .order_id = 1, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .filled }));
+    try std.testing.expectError(error.TombstoneFactConflict, state.applyReport(.{ .report_id = 0, .order_id = 1, .revision = 2, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 }));
+    try std.testing.expectError(error.TombstoneFactConflict, state.applyReconciliation(.{ .reconciliation_id = 0, .order_id = 1, .status = .found_terminal, .revision = 99, .cumulative_quantity = 0, .remaining_quantity = 0, .terminal_state = .filled }));
     try std.testing.expectError(error.TombstoneFactConflict, state.applyReport(.{ .report_id = 99, .order_id = 1, .revision = 1, .status = .filled, .cumulative_quantity = 2, .remaining_quantity = 0 }));
     try std.testing.expect(state.recovery_only);
 }

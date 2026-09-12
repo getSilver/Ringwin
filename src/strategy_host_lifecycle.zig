@@ -4,19 +4,19 @@ const ipc = @import("strategy_host_ipc.zig");
 
 const Crc32c = std.hash.crc.Crc32Iscsi;
 const Sha256 = std.crypto.hash.sha2.Sha256;
-const control_header_len: usize = 64;
-const max_control_payload: usize = 1_048_576;
+const bridge_header_len: usize = 64;
+const max_bridge_payload: usize = 1_048_576;
 const max_checkpoint_payload: usize = 8 * 1024 * 1024 + 192 + 8;
 const plan_len: usize = 176;
 const hello_len: usize = 160;
-const control_magic = "QSHC".*;
+const bridge_magic = "QSHC".*;
 const protocol_version: u16 = 1;
 const schema_registry_id: u128 = 0x0102030405060708090a0b0c0d0e0f10;
 const host_build_identity: u128 = 0x1112131415161718191a1b1c1d1e1f20;
 const strategy_manifest: [32]u8 = @splat(0x31);
 const checkpoint_manifest: [32]u8 = @splat(0x42);
 
-const MessageType = enum(u16) {
+const FrameType = enum(u16) {
     session_plan = 1,
     begin_recovery = 2,
     activate_strategy = 3,
@@ -135,7 +135,7 @@ pub const HostSupervisor = struct {
     }
 
     pub fn acceptHostFrame(self: *HostSupervisor, frame: []const u8, now_ns: i64) Result {
-        const decoded = decodeControl(frame) catch {
+        const decoded = decodeBridgeFrame(frame) catch {
             self.state = .failed;
             return .protocol_error;
         };
@@ -250,13 +250,13 @@ pub const HostSupervisor = struct {
         if (self.state != .ready_for_recovery or checkpoint.len == 0 or
             checkpoint.len + 8 > max_checkpoint_payload)
             return error.InvalidState;
-        const total_len = control_header_len + 8 + checkpoint.len;
-        if (destination.len < total_len) return error.ControlFrameTooLarge;
+        const total_len = bridge_header_len + 8 + checkpoint.len;
+        if (destination.len < total_len) return error.BridgeFrameTooLarge;
         const frame = destination[0..total_len];
-        @memset(frame[0..control_header_len], 0);
-        put(u64, frame, control_header_len, barrier);
-        @memcpy(frame[control_header_len + 8 ..], checkpoint);
-        encodeControlHeader(
+        @memset(frame[0..bridge_header_len], 0);
+        put(u64, frame, bridge_header_len, barrier);
+        @memcpy(frame[bridge_header_len + 8 ..], checkpoint);
+        encodeBridgeHeader(
             frame,
             .begin_recovery,
             self.plan.session,
@@ -404,8 +404,8 @@ pub const HostSupervisor = struct {
     }
 };
 
-const DecodedControl = struct {
-    message_type: MessageType,
+const DecodedBridgeFrame = struct {
+    message_type: FrameType,
     session: ipc.Session,
     sequence: u64,
     payload: []const u8,
@@ -451,30 +451,30 @@ fn encodeHello(plan: Plan, actual: Compatibility, destination: *[hello_len]u8) v
 
 fn encodeControl(
     destination: []u8,
-    message_type: MessageType,
+    message_type: FrameType,
     session: ipc.Session,
     sequence: u64,
     payload: []const u8,
 ) ![]u8 {
-    const total_len = control_header_len + payload.len;
-    if (payload.len > max_control_payload or destination.len < total_len) return error.ControlFrameTooLarge;
+    const total_len = bridge_header_len + payload.len;
+    if (payload.len > max_bridge_payload or destination.len < total_len) return error.BridgeFrameTooLarge;
     const frame = destination[0..total_len];
-    @memset(frame[0..control_header_len], 0);
-    @memcpy(frame[control_header_len..], payload);
-    encodeControlHeader(frame, message_type, session, sequence, payload.len);
+    @memset(frame[0..bridge_header_len], 0);
+    @memcpy(frame[bridge_header_len..], payload);
+    encodeBridgeHeader(frame, message_type, session, sequence, payload.len);
     return frame;
 }
 
-fn encodeControlHeader(
+fn encodeBridgeHeader(
     frame: []u8,
-    message_type: MessageType,
+    message_type: FrameType,
     session: ipc.Session,
     sequence: u64,
     payload_len: usize,
 ) void {
-    @memcpy(frame[0..4], &control_magic);
+    @memcpy(frame[0..4], &bridge_magic);
     put(u16, frame, 4, protocol_version);
-    put(u16, frame, 6, control_header_len);
+    put(u16, frame, 6, bridge_header_len);
     put(u16, frame, 8, @intFromEnum(message_type));
     put(u16, frame, 10, 1);
     put(u32, frame, 16, @intCast(frame.len));
@@ -483,22 +483,22 @@ fn encodeControlHeader(
     put(u32, frame, 32, session.shard);
     put(u64, frame, 40, session.generation);
     put(u64, frame, 48, sequence);
-    put(u32, frame, 56, Crc32c.hash(frame[control_header_len..]));
+    put(u32, frame, 56, Crc32c.hash(frame[bridge_header_len..]));
     put(u32, frame, 60, Crc32c.hash(frame[0..60]));
 }
 
-fn decodeControl(frame: []const u8) !DecodedControl {
-    if (frame.len < control_header_len or frame.len > control_header_len + max_control_payload or
-        !std.mem.eql(u8, frame[0..4], &control_magic) or
-        get(u16, frame, 4) != protocol_version or get(u16, frame, 6) != control_header_len or
+fn decodeBridgeFrame(frame: []const u8) !DecodedBridgeFrame {
+    if (frame.len < bridge_header_len or frame.len > bridge_header_len + max_bridge_payload or
+        !std.mem.eql(u8, frame[0..4], &bridge_magic) or
+        get(u16, frame, 4) != protocol_version or get(u16, frame, 6) != bridge_header_len or
         get(u16, frame, 10) != 1 or get(u32, frame, 12) != 0 or
-        get(u32, frame, 16) != frame.len or get(u32, frame, 20) != frame.len - control_header_len or
+        get(u32, frame, 16) != frame.len or get(u32, frame, 20) != frame.len - bridge_header_len or
         get(u32, frame, 36) != 0 or Crc32c.hash(frame[0..60]) != get(u32, frame, 60) or
         Crc32c.hash(frame[64..]) != get(u32, frame, 56))
-        return error.InvalidControlFrame;
+        return error.InvalidBridgeFrame;
     return .{
-        .message_type = std.enums.fromInt(MessageType, get(u16, frame, 8)) orelse
-            return error.InvalidControlFrame,
+        .message_type = std.enums.fromInt(FrameType, get(u16, frame, 8)) orelse
+            return error.InvalidBridgeFrame,
         .session = .{
             .fencing = get(u64, frame, 24),
             .shard = get(u32, frame, 32),
@@ -546,14 +546,14 @@ pub const ManagedHost = struct {
     }
 
     pub fn sendPlan(self: *ManagedHost, io: std.Io) !void {
-        var frame_storage: [4 + control_header_len + plan_len]u8 = undefined;
+        var frame_storage: [4 + bridge_header_len + plan_len]u8 = undefined;
         const frame = try self.supervisor.encodePlanFrame(frame_storage[4..]);
         put(u32, &frame_storage, 0, @intCast(frame.len));
         try self.child.stdin.?.writeStreamingAll(io, frame_storage[0 .. 4 + frame.len]);
     }
 
     pub fn receive(self: *ManagedHost, io: std.Io, now_ns: i64) !Result {
-        var frame_storage: [control_header_len + max_control_payload]u8 = undefined;
+        var frame_storage: [bridge_header_len + max_bridge_payload]u8 = undefined;
         const frame = try readPipeFrame(self.child.stdout.?, io, &frame_storage);
         return self.supervisor.acceptHostFrame(frame, now_ns);
     }
@@ -577,7 +577,7 @@ pub const ManagedHost = struct {
 
     pub fn receiveOutput(self: *ManagedHost, io: std.Io, now_ns: i64, storage: []u8) ![]const u8 {
         const frame = try readPipeFrame(self.child.stdout.?, io, storage);
-        const decoded = decodeControl(frame) catch {
+        const decoded = decodeBridgeFrame(frame) catch {
             self.supervisor.state = .failed;
             return error.InvalidOutputFrame;
         };
@@ -615,14 +615,14 @@ pub const ManagedHost = struct {
         io: std.Io,
         activation: Activation,
     ) !void {
-        var frame_storage: [control_header_len + 72]u8 = undefined;
+        var frame_storage: [bridge_header_len + 72]u8 = undefined;
         const frame = try self.supervisor.encodeActivateFrame(&frame_storage, activation);
         try writePipeFrame(self.child.stdin.?, io, frame);
     }
 
     pub fn shutdown(self: *ManagedHost, io: std.Io, now_ns: i64) !void {
         try self.supervisor.beginShutdown(now_ns);
-        var frame_storage: [4 + control_header_len + 16]u8 = undefined;
+        var frame_storage: [4 + bridge_header_len + 16]u8 = undefined;
         const frame = try self.supervisor.encodeShutdownFrame(frame_storage[4..]);
         put(u32, &frame_storage, 0, @intCast(frame.len));
         try self.child.stdin.?.writeStreamingAll(io, frame_storage[0 .. 4 + frame.len]);
@@ -641,15 +641,15 @@ pub const ManagedHost = struct {
     }
 };
 
-fn writePipeParts(file: std.Io.File, io: std.Io, message_type: MessageType, session: ipc.Session, sequence: u64, payload: []const u8) !void {
-    if (payload.len > max_control_payload) return error.ControlFrameTooLarge;
-    var header: [control_header_len]u8 = @splat(0);
-    encodeControlHeader(&header, message_type, session, sequence, payload.len);
-    put(u32, &header, 16, @intCast(control_header_len + payload.len));
+fn writePipeParts(file: std.Io.File, io: std.Io, message_type: FrameType, session: ipc.Session, sequence: u64, payload: []const u8) !void {
+    if (payload.len > max_bridge_payload) return error.BridgeFrameTooLarge;
+    var header: [bridge_header_len]u8 = @splat(0);
+    encodeBridgeHeader(&header, message_type, session, sequence, payload.len);
+    put(u32, &header, 16, @intCast(bridge_header_len + payload.len));
     put(u32, &header, 56, Crc32c.hash(payload));
     put(u32, &header, 60, Crc32c.hash(header[0..60]));
     var prefix: [4]u8 = undefined;
-    put(u32, &prefix, 0, @intCast(control_header_len + payload.len));
+    put(u32, &prefix, 0, @intCast(bridge_header_len + payload.len));
     try file.writeStreamingAll(io, &prefix);
     try file.writeStreamingAll(io, &header);
     try file.writeStreamingAll(io, payload);
@@ -666,7 +666,7 @@ fn readPipeFrame(file: std.Io.File, io: std.Io, storage: []u8) ![]u8 {
     var prefix: [4]u8 = undefined;
     try readExact(file, io, &prefix);
     const len = get(u32, &prefix, 0);
-    if (len < control_header_len or len > storage.len) return error.InvalidControlFrame;
+    if (len < bridge_header_len or len > storage.len) return error.InvalidBridgeFrame;
     try readExact(file, io, storage[0..len]);
     return storage[0..len];
 }
@@ -675,7 +675,9 @@ fn readExact(file: std.Io.File, io: std.Io, destination: []u8) !void {
     var offset: usize = 0;
     while (offset < destination.len) {
         const buffers = [_][]u8{destination[offset..]};
-        offset += try file.readStreaming(io, &buffers);
+        const read = try file.readStreaming(io, &buffers);
+        if (read == 0) return error.EndOfStream;
+        offset += read;
     }
 }
 
@@ -719,7 +721,7 @@ fn pureChecks(python_abi: u32) !void {
         var supervisor = try HostSupervisor.init(plan, 0);
         var hello_payload: [hello_len]u8 = undefined;
         encodeHello(plan, actual, &hello_payload);
-        var frame_storage: [control_header_len + hello_len]u8 = undefined;
+        var frame_storage: [bridge_header_len + hello_len]u8 = undefined;
         const frame = try encodeControl(&frame_storage, .host_hello, plan.session, 1, &hello_payload);
         try expectResult(.incompatible, supervisor.acceptHostFrame(frame, 1));
         try std.testing.expectEqual(State.failed, supervisor.state);
@@ -733,7 +735,7 @@ fn pureChecks(python_abi: u32) !void {
     var supervisor = try HostSupervisor.init(plan, 0);
     var hello_payload: [hello_len]u8 = undefined;
     encodeHello(plan, plan.compatibility, &hello_payload);
-    var frame_storage: [control_header_len + hello_len]u8 = undefined;
+    var frame_storage: [bridge_header_len + hello_len]u8 = undefined;
     var frame = try encodeControl(&frame_storage, .host_hello, plan.session, 1, &hello_payload);
     try expectResult(.accepted, supervisor.acceptHostFrame(frame, 10));
     try std.testing.expectEqual(State.ready_for_recovery, supervisor.state);
@@ -743,7 +745,7 @@ fn pureChecks(python_abi: u32) !void {
         .generation = 0,
     }));
 
-    var old_frame_storage: [control_header_len + 16]u8 = undefined;
+    var old_frame_storage: [bridge_header_len + 16]u8 = undefined;
     var heartbeat_payload: [16]u8 = @splat(0);
     frame = try encodeControl(&old_frame_storage, .host_heartbeat, .{
         .fencing = plan.session.fencing,
@@ -793,6 +795,23 @@ fn integrationChecks(init: std.process.Init, python: []const u8, script: []const
     }
     for (&hosts) |*host| try host.*.?.shutdown(init.io, 3);
 
+    var hostile = try ManagedHost.start(
+        init,
+        python,
+        script,
+        developmentPlan(3, 2, python_abi),
+        "hostile-capability",
+        &.{},
+    );
+    defer hostile.deinit(init.io);
+    try hostile.sendPlan(init.io);
+    try expectResult(.accepted, try hostile.receive(init.io, 4));
+    try expectResult(.accepted, try hostile.receive(init.io, 5));
+    try std.testing.expectEqual(State.ready_for_recovery, hostile.supervisor.state);
+    inline for (.{ EvidenceKind.intent, EvidenceKind.confirmation }) |kind|
+        try std.testing.expect(!hostile.supervisor.validatesEnvelope(kind, hostile.supervisor.plan.session));
+    try hostile.shutdown(init.io, 6);
+
     var old_session: ipc.Session = undefined;
     {
         var crashed = try ManagedHost.start(
@@ -828,7 +847,7 @@ fn integrationChecks(init: std.process.Init, python: []const u8, script: []const
     try expectResult(.accepted, try rebuilt.receive(init.io, 11));
     try expectResult(.accepted, try rebuilt.receive(init.io, 12));
     var old_heartbeat_payload: [16]u8 = @splat(0);
-    var old_frame_storage: [control_header_len + 16]u8 = undefined;
+    var old_frame_storage: [bridge_header_len + 16]u8 = undefined;
     const old_frame = try encodeControl(
         &old_frame_storage,
         .host_heartbeat,
@@ -907,7 +926,7 @@ pub fn main(init: std.process.Init) !void {
     var buffer: [256]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &buffer);
     try stdout.interface.print(
-        "strategy_host_lifecycle: zig={s}, python_abi=0x{x}, hosts=4, handshake=ok, stop=ok, crash_rebuild=ok, hang_rebuild=ok, stale_session=blocked\n",
+        "strategy_host_lifecycle: zig={s}, python_abi=0x{x}, hosts=4, handshake=ok, hostile_capability=absent, hostile_authority=unchanged, stop=ok, crash_rebuild=ok, hang_rebuild=ok, stale_session=blocked\n",
         .{ builtin.zig_version_string, python_abi },
     );
     try stdout.interface.flush();

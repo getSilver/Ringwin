@@ -20,16 +20,16 @@ _Avoid_: HostSessionIdentity, process id, strategy name
 承载同一 DecisionDomain 内一组 Python 中低频 StrategyInstance 的隔离运行归属；其故障不得阻塞交易核心或其他 StrategyHost。
 _Avoid_: Python worker, strategy thread
 
-**StrategyHostAtomicBridge**:
-由 Zig 实现并以最小 C ABI 暴露给 Python 的 IPC 桥；它独占共享内存游标的 acquire/release 原子操作，在共享槽位与 Python 自有 `bytes` 之间执行每方向一次有界复制，并以一次 producer cursor 发布原子提交单回调的有界多 frame 输出。Python 不得直接获得共享内存指针或原子游标。
-_Avoid_: Python atomic cursor, zero-copy strategy view, shared-memory pointer API
+**StrategyHostFramedBridge**:
+由 Zig HostSupervisor 拥有、经匿名单向 pipe 与 Python 交换有界版本化帧的 IPC 桥；Zig 在发送 input batch 前及接收 strategy output 后校验完整帧、会话、序列、容量与 cursor，Python 只获得自有 `bytes`。Python 不得获得共享内存句柄、指针、映射大小或原子游标。
+_Avoid_: StrategyHostAtomicBridge, Python atomic cursor, zero-copy strategy view, shared-memory capability
 
 **HostSupervisor**:
-位于活动 Zig TradingEngine 内、由对应 TradingShard 拥有的 StrategyHost 生命周期管理器；它创建会话与共享内存，启动、监测、失效、终止并重建唯一对应的 Python Host，但不授予 Python 任何权威交易状态所有权。
+位于活动 Zig TradingEngine 内、由对应 TradingShard 拥有的 StrategyHost 生命周期管理器；它创建会话与 StrategyHostFramedBridge，启动、监测、失效、终止并重建唯一对应的 Python Host，但不授予 Python 任何权威交易状态所有权。
 _Avoid_: OS service manager, Python parent process, strategy supervisor
 
 **StrategyHostControlChannel**:
-HostSupervisor 创建并继承给唯一 StrategyHost 的两条匿名单向 pipe；它只传送有界、版本化的生命周期/恢复控制帧和 checkpoint bytes，不承载市场事件、OrderIntent 或任何权威交易命令。
+StrategyHostFramedBridge 中生命周期、恢复与 checkpoint 帧的逻辑子协议；input batch 与 strategy output 可复用相同物理 pipe 和外层 framing，但不属于控制语义。任何帧都不得承载权威交易命令；strategy output 必须经 Zig 校验并由 TradingShard 转换为候选 OrderIntent。
 _Avoid_: Command bus, intent ring, arbitrary RPC
 
 **StrategyStateDigest**:

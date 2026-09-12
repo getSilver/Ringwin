@@ -24,27 +24,61 @@ pub const OmsDispatchContext = struct {
     adapter_session: canonical.AdapterSessionIdentity,
     dispatch_deadline_monotonic_ns: u64,
 };
-pub const DispatchProof = struct {
-    context: OmsDispatchContext,
-    command: oms.Command,
+pub const AuthorityFacts = struct {
+    account: canonical.ExchangeAccountIdentity,
     effective_trading_authority: bool,
+    reservation_identity: u64,
     reservation: canonical.AssetAmount,
     primary_lease_expires_at_monotonic_ns: u64,
     fencing_token: u64,
-    current_fencing_token: u64,
     exchange_position: canonical.InstrumentQuantity,
     authority_barrier: u64,
-    current_barrier: u64,
+};
+pub const DispatchProof = struct {
+    context: OmsDispatchContext,
+    command: oms.Command,
+    fencing_token: u64,
+    authority_barrier: u64,
     now_monotonic_ns: u64,
 };
 pub const max_routes = 4;
 pub const max_adapter_batches_per_turn: u8 = 1;
+const max_authority_records = max_routes * oms.max_commands;
+const AccountAuthority = struct {
+    effective_trading_authority: bool = false,
+    primary_lease_expires_at_monotonic_ns: u64 = 0,
+    fencing_token: u64 = 0,
+    authority_barrier: u64 = 0,
+};
+const ReservationFact = struct {
+    account: canonical.ExchangeAccountIdentity,
+    identity: u64,
+    amount: canonical.AssetAmount,
+    barrier: u64,
+};
+const ExchangePositionFact = struct {
+    account: canonical.ExchangeAccountIdentity,
+    quantity: canonical.InstrumentQuantity,
+    barrier: u64,
+};
+const AcceptedDispatch = struct {
+    account: canonical.ExchangeAccountIdentity,
+    command_id: u64,
+    proof: DispatchProof,
+};
 pub const Gateway = struct {
     routes: [max_routes]Route = undefined,
     count: u8 = 0,
     instrument_gates: [max_routes]InstrumentOpeningGate = undefined,
     instrument_gate_count: u8 = 0,
     instrument_gate_capacity_exhausted: bool = false,
+    account_authority: [max_routes]AccountAuthority = @splat(.{}),
+    reservations: [max_authority_records]ReservationFact = undefined,
+    reservation_count: u8 = 0,
+    exchange_positions: [max_authority_records]ExchangePositionFact = undefined,
+    exchange_position_count: u8 = 0,
+    accepted_dispatches: [max_authority_records]AcceptedDispatch = undefined,
+    accepted_dispatch_count: u8 = 0,
     send_attempt_count: u64 = 0,
     pub fn add(self: *Gateway, route: Route) !void {
         for (self.routes[0..self.count]) |existing|
@@ -52,6 +86,78 @@ pub const Gateway = struct {
         if (self.count == self.routes.len) return error.RouteCapacity;
         self.routes[self.count] = route;
         self.count += 1;
+    }
+
+    /// Replaces the latest account authority and upserts the command-scoped
+    /// reservation and instrument position that the Gateway will re-read at send.
+    pub fn observeAuthority(self: *Gateway, facts: AuthorityFacts) !void {
+        const route_index = self.routeIndex(facts.account) orelse return error.UnknownAccount;
+        if (facts.reservation_identity == 0 or facts.fencing_token == 0 or facts.authority_barrier == 0 or
+            facts.exchange_position.instrument == 0 or facts.exchange_position.rules_version == 0)
+            return error.InvalidAuthorityFacts;
+        const current = self.account_authority[route_index];
+        const next_authority: AccountAuthority = .{
+            .effective_trading_authority = facts.effective_trading_authority,
+            .primary_lease_expires_at_monotonic_ns = facts.primary_lease_expires_at_monotonic_ns,
+            .fencing_token = facts.fencing_token,
+            .authority_barrier = facts.authority_barrier,
+        };
+        if (facts.authority_barrier < current.authority_barrier or facts.fencing_token < current.fencing_token)
+            return error.StaleAuthorityFacts;
+        if (facts.authority_barrier == current.authority_barrier and current.authority_barrier != 0 and
+            !std.meta.eql(current, next_authority))
+            return error.ConflictingAuthorityFacts;
+
+        const reservation_index = self.reservationIndex(facts.account, facts.reservation_identity);
+        const position_index = self.exchangePositionIndex(facts.account, facts.exchange_position.instrument);
+        if (reservation_index == null and self.reservation_count == self.reservations.len)
+            return error.AuthorityCapacity;
+        if (position_index == null and self.exchange_position_count == self.exchange_positions.len)
+            return error.AuthorityCapacity;
+        if (reservation_index) |index| {
+            const known = self.reservations[index];
+            if (facts.authority_barrier < known.barrier or
+                (facts.authority_barrier == known.barrier and !std.meta.eql(known.amount, facts.reservation)))
+                return error.ConflictingAuthorityFacts;
+        }
+        if (position_index) |index| {
+            const known = self.exchange_positions[index];
+            if (facts.authority_barrier < known.barrier or
+                (facts.authority_barrier == known.barrier and !std.meta.eql(known.quantity, facts.exchange_position)))
+                return error.ConflictingAuthorityFacts;
+        }
+
+        self.account_authority[route_index] = next_authority;
+        if (reservation_index) |index| {
+            self.reservations[index].amount = facts.reservation;
+            self.reservations[index].barrier = facts.authority_barrier;
+        } else {
+            self.reservations[self.reservation_count] = .{ .account = facts.account, .identity = facts.reservation_identity, .amount = facts.reservation, .barrier = facts.authority_barrier };
+            self.reservation_count += 1;
+        }
+        if (position_index) |index| {
+            self.exchange_positions[index].quantity = facts.exchange_position;
+            self.exchange_positions[index].barrier = facts.authority_barrier;
+        } else {
+            self.exchange_positions[self.exchange_position_count] = .{ .account = facts.account, .quantity = facts.exchange_position, .barrier = facts.authority_barrier };
+            self.exchange_position_count += 1;
+        }
+    }
+
+    /// Rehydrates a durable accepted dispatch during recovery. Replaying its
+    /// proof returns the accepted result without crossing the adapter again.
+    pub fn restoreAcceptedDispatch(self: *Gateway, proof: DispatchProof) !void {
+        const account = proof.context.account;
+        const command_id = proof.command.command_id;
+        if (self.routeIndex(account) == null) return error.UnknownAccount;
+        if (command_id == 0) return error.InvalidDispatchIdentity;
+        if (self.acceptedDispatchIndex(account, command_id)) |index| {
+            if (!std.meta.eql(self.accepted_dispatches[index].proof, proof)) return error.DispatchIdentityConflict;
+            return;
+        }
+        if (self.accepted_dispatch_count == self.accepted_dispatches.len) return error.DispatchCapacity;
+        self.accepted_dispatches[self.accepted_dispatch_count] = .{ .account = account, .command_id = command_id, .proof = proof };
+        self.accepted_dispatch_count += 1;
     }
     fn sendUnprovedForContractTest(self: *Gateway, request: canonical.OrderCommand) !venue.SendResult {
         const route = self.routeFor(request.exchange_account) orelse return error.UnknownAccount;
@@ -100,21 +206,39 @@ pub const Gateway = struct {
     /// rechecked immediately before the VenueAdapter external effect.
     pub fn sendProof(self: *Gateway, proof: DispatchProof) !venue.SendResult {
         const command_value = proof.command;
+        if (self.acceptedDispatchIndex(proof.context.account, command_value.command_id)) |index| {
+            if (!std.meta.eql(self.accepted_dispatches[index].proof, proof)) return error.NotSent;
+            return .accepted;
+        }
+        if (self.accepted_dispatch_count == self.accepted_dispatches.len) return error.NotSent;
+        const route_index = self.routeIndex(proof.context.account) orelse return error.NotSent;
+        const authority = self.account_authority[route_index];
+        const reservation_index = self.reservationIndex(proof.context.account, command_value.reservation_identity) orelse return error.NotSent;
+        const position_index = self.exchangePositionIndex(proof.context.account, command_value.instrument) orelse return error.NotSent;
+        const reservation = self.reservations[reservation_index].amount;
+        const exchange_position = self.exchange_positions[position_index].quantity;
         if (command_value.intent_sequence == 0 or command_value.risk_decision_identity == 0 or command_value.reservation_identity == 0 or
             command_value.order_id == 0 or command_value.revision == 0 or command_value.client_order_id.len == 0 or
-            proof.authority_barrier == 0 or proof.authority_barrier != proof.current_barrier or
-            proof.fencing_token == 0 or proof.fencing_token != proof.current_fencing_token or
+            proof.authority_barrier == 0 or proof.authority_barrier != authority.authority_barrier or
+            self.reservations[reservation_index].barrier != authority.authority_barrier or
+            self.exchange_positions[position_index].barrier != authority.authority_barrier or
+            proof.fencing_token == 0 or proof.fencing_token != authority.fencing_token or
             proof.now_monotonic_ns > proof.context.dispatch_deadline_monotonic_ns or
-            proof.now_monotonic_ns > proof.primary_lease_expires_at_monotonic_ns or
-            proof.exchange_position.instrument != command_value.instrument or
-            proof.exchange_position.rules_version != command_value.limit_price.rules_version)
+            proof.now_monotonic_ns > authority.primary_lease_expires_at_monotonic_ns or
+            exchange_position.instrument != command_value.instrument or
+            exchange_position.rules_version != command_value.limit_price.rules_version)
             return error.NotSent;
-        const reducing = genuinelyReduces(proof.exchange_position.lots, command_value.side, command_value.quantity);
-        if (!proof.effective_trading_authority and !reducing) return error.NotSent;
+        const reducing = genuinelyReduces(exchange_position.lots, command_value.side, command_value.quantity);
+        if (!authority.effective_trading_authority and !reducing) return error.NotSent;
         if (command_value.operation != .cancel and
-            (proof.reservation.asset != command_value.reservation.asset or proof.reservation.atoms != command_value.reservation.atoms or proof.reservation.atoms <= 0))
+            (reservation.asset != command_value.reservation.asset or reservation.atoms != command_value.reservation.atoms or reservation.atoms <= 0))
             return error.NotSent;
-        return self.sendOms(proof.context, command_value) catch return error.NotSent;
+        const result = self.sendOms(proof.context, command_value) catch return error.NotSent;
+        if (result == .accepted) {
+            self.accepted_dispatches[self.accepted_dispatch_count] = .{ .account = proof.context.account, .command_id = command_value.command_id, .proof = proof };
+            self.accepted_dispatch_count += 1;
+        }
+        return result;
     }
 
     /// Sends a non-order request through the same account-owned route.  Only
@@ -137,6 +261,30 @@ pub const Gateway = struct {
     fn routeFor(self: *Gateway, account: canonical.ExchangeAccountIdentity) ?*Route {
         for (self.routes[0..self.count]) |*route_value|
             if (route_value.account == account) return route_value;
+        return null;
+    }
+
+    fn routeIndex(self: *const Gateway, account: canonical.ExchangeAccountIdentity) ?usize {
+        for (self.routes[0..self.count], 0..) |route, index|
+            if (route.account == account) return index;
+        return null;
+    }
+
+    fn reservationIndex(self: *const Gateway, account: canonical.ExchangeAccountIdentity, identity: u64) ?usize {
+        for (self.reservations[0..self.reservation_count], 0..) |fact, index|
+            if (fact.account == account and fact.identity == identity) return index;
+        return null;
+    }
+
+    fn exchangePositionIndex(self: *const Gateway, account: canonical.ExchangeAccountIdentity, instrument: canonical.InstrumentIdentity) ?usize {
+        for (self.exchange_positions[0..self.exchange_position_count], 0..) |fact, index|
+            if (fact.account == account and fact.quantity.instrument == instrument) return index;
+        return null;
+    }
+
+    fn acceptedDispatchIndex(self: *const Gateway, account: canonical.ExchangeAccountIdentity, command_id: u64) ?usize {
+        for (self.accepted_dispatches[0..self.accepted_dispatch_count], 0..) |dispatch, index|
+            if (dispatch.account == account and dispatch.command_id == command_id) return index;
         return null;
     }
 
@@ -311,26 +459,62 @@ test "DispatchProof rechecks authority reservation lease fencing and true reduce
     var gateway = Gateway{};
     try gateway.add(.{ .account = 1, .adapter = adapter_fixture.adapter(), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
     const command_value: oms.Command = .{ .command_id = 1, .order_id = 1, .strategy_instance = 1, .revision = 1, .operation = .place, .instrument = 10, .side = .sell, .portfolio_reduce_only = true, .venue_reduce_only = true, .quantity = 2, .limit_price = .{ .instrument = 10, .rules_version = 1, .ticks = 100 }, .reservation = .{ .asset = 1, .atoms = 20 }, .client_order_id = try canonical.ClientOrderId.init("RWN-1"), .intent_sequence = 1, .risk_decision_identity = 1, .reservation_identity = 1 };
-    var proof: DispatchProof = .{
-        .context = .{ .account = 1, .capability_version = 1, .rules_version = 1, .config_version = 1, .adapter_session = 1, .dispatch_deadline_monotonic_ns = 10 },
-        .command = command_value,
+    try gateway.observeAuthority(.{
+        .account = 1,
         .effective_trading_authority = false,
+        .reservation_identity = command_value.reservation_identity,
         .reservation = command_value.reservation,
         .primary_lease_expires_at_monotonic_ns = 10,
         .fencing_token = 7,
-        .current_fencing_token = 7,
         .exchange_position = .{ .instrument = 10, .rules_version = 1, .lots = 3 },
         .authority_barrier = 5,
-        .current_barrier = 5,
+    });
+    const proof: DispatchProof = .{
+        .context = .{ .account = 1, .capability_version = 1, .rules_version = 1, .config_version = 1, .adapter_session = 1, .dispatch_deadline_monotonic_ns = 10 },
+        .command = command_value,
+        .fencing_token = 7,
+        .authority_barrier = 5,
         .now_monotonic_ns = 9,
     };
     try std.testing.expectEqual(venue.SendResult.accepted, try gateway.sendProof(proof));
-    proof.exchange_position.lots = -3;
-    try std.testing.expectError(error.NotSent, gateway.sendProof(proof));
-    proof.exchange_position.lots = 3;
-    proof.current_fencing_token = 8;
-    try std.testing.expectError(error.NotSent, gateway.sendProof(proof));
+    try std.testing.expectEqual(venue.SendResult.accepted, try gateway.sendProof(proof));
+    var conflicting = proof;
+    conflicting.command.quantity = 1;
+    try std.testing.expectError(error.NotSent, gateway.sendProof(conflicting));
     try std.testing.expectEqual(@as(u8, 1), adapter_fixture.sent);
+
+    var recovered_fixture = Fixture{ .pending = null };
+    var recovered = Gateway{};
+    try recovered.add(.{ .account = 1, .adapter = recovered_fixture.adapter(), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+    try recovered.restoreAcceptedDispatch(proof);
+    try std.testing.expectEqual(venue.SendResult.accepted, try recovered.sendProof(proof));
+    try std.testing.expectError(error.NotSent, recovered.sendProof(conflicting));
+    try std.testing.expectEqual(@as(u8, 0), recovered_fixture.sent);
+}
+
+test "Gateway reads current authority facts instead of caller proof fields" {
+    var adapter_fixture = Fixture{ .pending = null };
+    var gateway = Gateway{};
+    try gateway.add(.{ .account = 1, .adapter = adapter_fixture.adapter(), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+    const command_value: oms.Command = .{ .command_id = 2, .order_id = 2, .strategy_instance = 1, .revision = 1, .operation = .place, .instrument = 10, .side = .sell, .portfolio_reduce_only = true, .venue_reduce_only = true, .quantity = 2, .limit_price = .{ .instrument = 10, .rules_version = 1, .ticks = 100 }, .reservation = .{ .asset = 1, .atoms = 20 }, .client_order_id = try canonical.ClientOrderId.init("RWN-2"), .intent_sequence = 2, .risk_decision_identity = 2, .reservation_identity = 2 };
+    const proof: DispatchProof = .{
+        .context = .{ .account = 1, .capability_version = 1, .rules_version = 1, .config_version = 1, .adapter_session = 1, .dispatch_deadline_monotonic_ns = 10 },
+        .command = command_value,
+        .fencing_token = 7,
+        .authority_barrier = 5,
+        .now_monotonic_ns = 9,
+    };
+    try gateway.observeAuthority(.{ .account = 1, .effective_trading_authority = false, .reservation_identity = 2, .reservation = command_value.reservation, .primary_lease_expires_at_monotonic_ns = 10, .fencing_token = 7, .exchange_position = .{ .instrument = 10, .rules_version = 1, .lots = -3 }, .authority_barrier = 5 });
+    try std.testing.expectError(error.ConflictingAuthorityFacts, gateway.observeAuthority(.{ .account = 1, .effective_trading_authority = false, .reservation_identity = 2, .reservation = command_value.reservation, .primary_lease_expires_at_monotonic_ns = 10, .fencing_token = 7, .exchange_position = .{ .instrument = 10, .rules_version = 1, .lots = 3 }, .authority_barrier = 5 }));
+    try std.testing.expectError(error.NotSent, gateway.sendProof(proof));
+    try gateway.observeAuthority(.{ .account = 1, .effective_trading_authority = false, .reservation_identity = 2, .reservation = command_value.reservation, .primary_lease_expires_at_monotonic_ns = 10, .fencing_token = 8, .exchange_position = .{ .instrument = 10, .rules_version = 1, .lots = 3 }, .authority_barrier = 6 });
+    try std.testing.expectError(error.NotSent, gateway.sendProof(proof));
+    try gateway.observeAuthority(.{ .account = 1, .effective_trading_authority = false, .reservation_identity = 3, .reservation = command_value.reservation, .primary_lease_expires_at_monotonic_ns = 10, .fencing_token = 8, .exchange_position = .{ .instrument = 10, .rules_version = 1, .lots = 3 }, .authority_barrier = 7 });
+    var stale_reservation = proof;
+    stale_reservation.fencing_token = 8;
+    stale_reservation.authority_barrier = 7;
+    try std.testing.expectError(error.NotSent, gateway.sendProof(stale_reservation));
+    try std.testing.expectEqual(@as(u8, 0), adapter_fixture.sent);
 }
 test "Gateway route and batch admission fail atomically" {
     var adapter_fixture = Fixture{ .pending = null };

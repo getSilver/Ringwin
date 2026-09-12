@@ -254,7 +254,7 @@ pub const TradingShard = struct {
             // Projection invalidation is authoritative even when the public
             // apply call reports the rejected observation. This is the only
             // exception to the ordinary candidate-commit-on-success rule.
-            if (err == error.TombstoneFactConflict or err == error.ArchivedFactOutsideRetention) {
+            if (err == error.TombstoneFactConflict or err == error.ArchivedFactOutsideRetention or err == error.TerminalFactConflict) {
                 candidate.oms.recovery_only = true;
                 if (candidate.operational_state.initialized) try candidate.applyOperationalGate(.{
                     .gate_identity = event.envelope.identity.sequence,
@@ -301,7 +301,7 @@ pub const TradingShard = struct {
         const before = candidate.trace.len;
         candidate.oms.begin();
         const command = candidate.handle(event) catch |err| {
-            if (err == error.TombstoneFactConflict or err == error.ArchivedFactOutsideRetention) {
+            if (err == error.TombstoneFactConflict or err == error.ArchivedFactOutsideRetention or err == error.TerminalFactConflict) {
                 candidate.oms.recovery_only = true;
                 if (candidate.operational_state.initialized) try candidate.applyOperationalGate(.{
                     .gate_identity = event.identity,
@@ -648,6 +648,7 @@ pub const TradingShard = struct {
             error.InsufficientSpotAsset,
             error.PortfolioReduceOnlyViolation,
             error.MarginSafetyGateClosed,
+            error.StrategyCutoverFenced,
             => {
                 try self.oms.discardReplacement(order_id);
                 return;
@@ -1058,12 +1059,12 @@ pub const TradingShard = struct {
                 if ((result.status == .unresolved) == result.complete) return error.ConflictingReconciliationEvidence;
                 if (result.order != 0) {
                     const order_id = std.math.cast(u64, result.order) orelse return error.IdentityOutOfRange;
-                    const order = self.oms.orderById(order_id) orelse return error.UnknownOrder;
-                    const rules = self.instrumentEntry(order.instrument) orelse return error.UnknownOmsInstrument;
+                    const instrument = self.oms.instrumentForOrder(order_id) orelse return error.UnknownOrder;
+                    const rules = self.instrumentEntry(instrument) orelse return error.UnknownOmsInstrument;
                     if (result.rules_version != rules.rules.version) return error.StaleInstrumentRules;
                     const cumulative = result.cumulative_quantity orelse return error.IncompleteReconciliationEvidence;
                     const remaining = result.remaining_quantity orelse return error.IncompleteReconciliationEvidence;
-                    if (cumulative.instrument != order.instrument or remaining.instrument != order.instrument or
+                    if (cumulative.instrument != instrument or remaining.instrument != instrument or
                         cumulative.rules_version != rules.rules.version or remaining.rules_version != rules.rules.version)
                         return error.CanonicalScopeMismatch;
                     try self.oms.applyReconciliation(.{
@@ -1186,8 +1187,8 @@ pub const TradingShard = struct {
             return error.CanonicalScopeMismatch;
         const order_id = std.math.cast(u64, report.order) orelse return error.IdentityOutOfRange;
         const report_id = std.math.cast(u64, report.identity) orelse return error.IdentityOutOfRange;
-        const order = self.oms.orderById(order_id) orelse return error.UnknownOrder;
-        if (order.instrument != report.instrument) return error.CanonicalScopeMismatch;
+        const instrument = self.oms.instrumentForOrder(order_id) orelse return error.UnknownOrder;
+        if (instrument != report.instrument) return error.CanonicalScopeMismatch;
         const rules = self.instrumentEntry(report.instrument) orelse return error.UnknownOmsInstrument;
         if (report.cumulative_quantity.rules_version != rules.rules.version or
             report.remaining_quantity.rules_version != rules.rules.version)

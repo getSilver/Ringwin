@@ -22,6 +22,7 @@ def main():
         else "strategy_host_capacity-current"
     )
     checks = [
+        [sys.executable, "python/test_strategy_host_bridge.py"],
         [zig, "fmt", "--check", *map(str, sorted((ROOT / "src").glob("strategy_host_*.zig")))],
         [zig, "test", "src/strategy_host_ipc.zig", "-O", "ReleaseSafe"],
         [zig, "test", "src/strategy_host_lifecycle.zig", "-O", "ReleaseSafe"],

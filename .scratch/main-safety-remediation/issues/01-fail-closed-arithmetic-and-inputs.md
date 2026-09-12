@@ -25,3 +25,7 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 ## Out of scope
 
 - 浮点计算、任意精度数学库或为极端但无业务意义的数值扩大 wire schema。
+
+## Answer
+
+已在风险、OMS 与分片权威入口统一使用 checked arithmetic 和显式缺失值拒绝；Debug/ReleaseSafe 极值及拒绝无副作用轨迹已通过。

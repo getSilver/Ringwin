@@ -594,17 +594,17 @@ pub const AccountCoordinator = struct {
         } else if (fact.barrier != 1) {
             return error.AccountFactBarrierGap;
         }
-        self.last_account_fact = fact;
         const count: usize = switch (fact.payload) {
             .account_snapshot => max_shards,
             .forced_execution => |execution| if (execution.owner == null) 0 else 1,
         };
+        if (count == 0 and self.suspense_forced_execution != null) return error.SuspenseAccountCapacityExceeded;
+        self.last_account_fact = fact;
         switch (fact.payload) {
             .forced_execution => |execution| {
                 if (execution.owner) |owner| {
                     self.deliveries[0] = .{ .shard_id = owner, .fact = fact };
                 } else {
-                    if (self.suspense_forced_execution != null) return error.SuspenseAccountCapacityExceeded;
                     self.suspense_forced_execution = fact;
                     self.reconciliation_break_identity = fact.identity;
                     self.margin_gate = .{ .identity = fact.identity, .open = false, .latched = true };
@@ -1395,6 +1395,15 @@ test "unowned economics stay in suspense until an immutable allocation" {
     try std.testing.expectEqual(@as(usize, 0), deliveries.len);
     try std.testing.expect(coordinator.suspense_forced_execution != null);
     try std.testing.expect(coordinator.margin_gate.latched);
+    const before_capacity_reject = coordinator.digest();
+    try std.testing.expectError(error.SuspenseAccountCapacityExceeded, coordinator.acceptAccountFact(.{
+        .identity = 34,
+        .exchange_account = 900,
+        .version = 1,
+        .barrier = 2,
+        .payload = .{ .forced_execution = .{ .owner = null, .quantity = -2, .price_micros = 100, .fee_micros = 1 } },
+    }));
+    try std.testing.expectEqualSlices(u8, &before_capacity_reject, &coordinator.digest());
 
     var snapshot_storage: [4096]u8 = undefined;
     const snapshot_bytes = try coordinator.snapshot(&snapshot_storage);

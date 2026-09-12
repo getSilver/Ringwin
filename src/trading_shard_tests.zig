@@ -1040,6 +1040,16 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1 });
     var gateway: execution_gateway.Gateway = .{};
     try gateway.add(.{ .account = 2, .adapter = adapter, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+    try gateway.observeAuthority(.{
+        .account = 2,
+        .effective_trading_authority = true,
+        .reservation_identity = placed.oms_commands[0].reservation_identity,
+        .reservation = placed.oms_commands[0].reservation,
+        .primary_lease_expires_at_monotonic_ns = 1,
+        .fencing_token = 1,
+        .exchange_position = .{ .instrument = swap_instrument, .rules_version = 1, .lots = 0 },
+        .authority_barrier = 1,
+    });
     try std.testing.expectEqual(.accepted, try gateway.sendProof(.{
         .context = .{
             .account = 2,
@@ -1050,14 +1060,8 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
             .dispatch_deadline_monotonic_ns = 1,
         },
         .command = placed.oms_commands[0],
-        .effective_trading_authority = true,
-        .reservation = placed.oms_commands[0].reservation,
-        .primary_lease_expires_at_monotonic_ns = 1,
         .fencing_token = 1,
-        .current_fencing_token = 1,
-        .exchange_position = .{ .instrument = swap_instrument, .rules_version = 1, .lots = 0 },
         .authority_barrier = 1,
-        .current_barrier = 1,
         .now_monotonic_ns = 1,
     }));
     try std.testing.expectEqual(@as(u64, 1), gateway.send_attempt_count);
@@ -1105,7 +1109,7 @@ test "CancelConfirmCreate never overlaps and records predecessor" {
     try std.testing.expectEqual(oms_module.Operation.place, replacement.oms_commands[0].operation);
     try std.testing.expect(!run.shard.oms.orders[0].reservation_active);
     try std.testing.expect(run.shard.oms.orders[1].reservation_active);
-    _ = try run.shard.apply(atGroup(19, .{ .identity = 3, .payload = .{ .oms_execution_report = .{ .report_id = 3, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 25, .remaining_quantity = 75 } } }));
+    try std.testing.expectError(error.TerminalFactConflict, run.shard.apply(atGroup(19, .{ .identity = 3, .payload = .{ .oms_execution_report = .{ .report_id = 3, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 25, .remaining_quantity = 75 } } })));
     try std.testing.expectEqual(oms_module.OrderState.canceled, run.shard.oms.orders[0].state);
     try std.testing.expectError(error.ConflictingReportIdentity, run.shard.apply(atGroup(20, .{ .identity = 2, .payload = .{ .oms_execution_report = .{ .report_id = 2, .order_id = 1, .revision = 1, .status = .filled, .cumulative_quantity = 100, .remaining_quantity = 0 } } })));
 }
@@ -1255,10 +1259,9 @@ test "authoritative reconciliation cannot regress a terminal order" {
     _ = try run.shard.apply(atGroup(12, .{ .identity = 60, .payload = .{ .oms_intent_group = group } }));
     _ = try run.shard.apply(atGroup(13, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 10 } } }));
     try std.testing.expectEqual(oms_module.OrderState.canceled, run.shard.oms.orders[0].state);
-    _ = try run.shard.apply(atGroup(14, .{ .identity = 1, .payload = .{ .oms_reconciliation_result = .{ .reconciliation_id = 1, .order_id = 1, .status = .found_live, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 10 } } }));
+    try std.testing.expectError(error.TerminalFactConflict, run.shard.apply(atGroup(14, .{ .identity = 1, .payload = .{ .oms_reconciliation_result = .{ .reconciliation_id = 1, .order_id = 1, .status = .found_live, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 10 } } })));
     try std.testing.expectEqual(oms_module.OrderState.canceled, run.shard.oms.orders[0].state);
-    _ = try run.shard.apply(atGroup(15, .{ .identity = 2, .payload = .{ .oms_execution_report = .{ .report_id = 2, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 10 } } }));
-    try std.testing.expectError(error.ConflictingReportIdentity, run.shard.apply(atGroup(16, .{ .identity = 2, .payload = .{ .oms_execution_report = .{ .report_id = 2, .order_id = 1, .revision = 1, .status = .filled, .cumulative_quantity = 10, .remaining_quantity = 0 } } })));
+    try std.testing.expectError(error.TerminalFactConflict, run.shard.apply(atGroup(15, .{ .identity = 2, .payload = .{ .oms_execution_report = .{ .report_id = 2, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 10 } } })));
 }
 
 test "CancelConfirmCreate re-risks replacement against latest facts" {
@@ -1284,6 +1287,22 @@ test "CancelConfirmCreate re-risks replacement against latest facts" {
     try std.testing.expectEqual(oms_module.OrderState.canceled, run.shard.oms.orders[0].state);
     try std.testing.expectEqual(@as(u8, 1), run.shard.oms.order_count);
     try std.testing.expectEqual(@as(usize, 0), result.oms_commands.len);
+}
+
+test "CancelConfirmCreate cannot recreate a fenced strategy" {
+    var run = try startScenario();
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
+    var place: oms_module.IntentGroup = .{ .first_intent_sequence = 80, .count = 1 };
+    place.members[0] = .{ .intent_sequence = 80, .strategy_instance = 1, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
+    _ = try run.shard.apply(atGroup(12, .{ .identity = 80, .payload = .{ .oms_intent_group = place } }));
+    _ = try run.shard.apply(atGroup(13, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
+    var replace: oms_module.IntentGroup = .{ .first_intent_sequence = 81, .count = 1 };
+    replace.members[0] = .{ .intent_sequence = 81, .strategy_instance = 1, .operation = .amend, .instrument = spot_instrument, .target_order_id = 1, .expected_revision = 1, .quantity = 80, .limit_price = fixtureOmsPrice(spot_instrument, 49_000_000), .native_amend = false, .allow_cancel_confirm_create = true };
+    _ = try run.shard.apply(atGroup(14, .{ .identity = 81, .payload = .{ .oms_intent_group = replace } }));
+    _ = try run.shard.apply(atGroup(15, .{ .identity = 82, .payload = .{ .strategy_cutover_fence = .{ .strategy_instance = 1 } } }));
+    _ = try run.shard.apply(atGroup(16, .{ .identity = 2, .payload = .{ .oms_execution_report = .{ .report_id = 2, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
+    try std.testing.expectEqual(@as(u8, 1), run.shard.oms.order_count);
+    try std.testing.expect(run.shard.oms.orders[0].replacement == null);
 }
 
 test "forced position divergence blocks new qualification" {

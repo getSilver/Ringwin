@@ -25,3 +25,7 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 ## Out of scope
 
 - 跨 VirtualPortfolio 净额抵消或把 AccountNettingBenefit 转为购买力。
+
+## Answer
+
+RiskReservation 已由 OMS 权威剩余数量按状态保守维护，部分成交、amend、cancel、Unknown 与恢复路径共享同一投影。
