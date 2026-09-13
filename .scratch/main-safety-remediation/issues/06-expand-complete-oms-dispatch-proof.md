@@ -28,4 +28,4 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 
 ## Answer
 
-部分完成：OMS Command 已携带订单语义和部分身份，但最终 Spec 复核确认 DispatchProof 仍由调用方构造、部分身份被别名化，不能作为完整权威发送证明。
+进行中：OMS Command 现保留同一 IntentGroup 各成员实际的 IntentSequence（测试覆盖双成员组）；但 RiskDecision/RiskReservation 身份仍是组首序号别名，系统取消与替换命令仍需独立来源身份，DispatchProof 仍由调用方构造。TradingShard 当前只有 fencing token，缺少带 barrier 的 lease 截止与 capability 授权事实；未形成完整权威发送证明，不能关闭本票或解锁 07。

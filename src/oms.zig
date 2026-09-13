@@ -229,7 +229,7 @@ pub const Oms = struct {
                 (increasing_only and order.portfolio_reduce_only and order.venue_reduce_only))
                 continue;
             order.state = .pending_cancel;
-            try self.emit(order.*, .cancel);
+            try self.emit(order.*, .cancel, order.group_first_sequence);
         }
     }
 
@@ -241,7 +241,7 @@ pub const Oms = struct {
                 order.state == .canceled or order.state == .rejected or order.state == .pending_cancel)
                 continue;
             order.state = .pending_cancel;
-            try self.emit(order.*, .cancel);
+            try self.emit(order.*, .cancel, order.group_first_sequence);
         }
     }
 
@@ -355,7 +355,7 @@ pub const Oms = struct {
                 order.order_type = intent.order_type;
                 order.time_in_force = intent.time_in_force;
                 order.market_protection_price = intent.market_protection_price;
-                try self.emit(order.*, .place);
+                try self.emit(order.*, .place, intent.intent_sequence);
             },
             .amend => {
                 const order = try self.mutableOrder(intent.target_order_id);
@@ -372,20 +372,20 @@ pub const Oms = struct {
                     order.pending_reservation = intent.reservation;
                     if (order.reservation.asset != intent.reservation.asset) return error.MixedReservationAssets;
                     if (intent.reservation.atoms > order.reservation.atoms) order.reservation = intent.reservation;
-                    try self.emit(order.*, .amend);
+                    try self.emit(order.*, .amend, intent.intent_sequence);
                 } else {
                     if (!intent.allow_cancel_confirm_create) return error.CancelConfirmCreateNotAuthorized;
                     order.state = .pending_cancel;
                     if (intent.reservation.atoms <= 0) return error.InvalidOrderSpec;
                     order.replacement = .{ .instrument = order.instrument, .side = intent.side, .portfolio_reduce_only = intent.portfolio_reduce_only, .venue_reduce_only = intent.venue_reduce_only, .quantity = intent.quantity, .limit_price = intent.limit_price, .reservation = intent.reservation, .order_type = intent.order_type, .time_in_force = intent.time_in_force, .market_protection_price = intent.market_protection_price, .client_order_id = intent.client_order_id };
-                    try self.emit(order.*, .cancel);
+                    try self.emit(order.*, .cancel, intent.intent_sequence);
                 }
             },
             .cancel => {
                 const order = try self.mutableOrder(intent.target_order_id);
                 try validateTarget(order, intent);
                 order.state = .pending_cancel;
-                try self.emit(order.*, .cancel);
+                try self.emit(order.*, .cancel, intent.intent_sequence);
             },
         }
     }
@@ -677,12 +677,12 @@ pub const Oms = struct {
         return &self.orders[index];
     }
 
-    fn emit(self: *Oms, order: Order, operation: Operation) !void {
+    fn emit(self: *Oms, order: Order, operation: Operation, intent_sequence: u64) !void {
         if (self.command_count == max_commands or self.command_history_count == max_command_history) {
             self.recovery_only = true;
             return error.CommandCapacityExceeded;
         }
-        const command_value: Command = .{ .command_id = self.next_command_id, .order_id = order.id, .strategy_instance = order.strategy_instance, .revision = order.revision, .operation = operation, .instrument = order.instrument, .side = order.side, .portfolio_reduce_only = order.portfolio_reduce_only, .venue_reduce_only = order.venue_reduce_only, .quantity = try std.math.sub(i64, order.quantity, order.cumulative_quantity), .limit_price = order.limit_price, .predecessor_order_id = order.predecessor_order_id, .reservation = order.reservation, .order_type = order.order_type, .time_in_force = order.time_in_force, .market_protection_price = order.market_protection_price, .client_order_id = order.client_order_id, .intent_sequence = order.group_first_sequence, .risk_decision_identity = order.group_first_sequence, .reservation_identity = order.group_first_sequence };
+        const command_value: Command = .{ .command_id = self.next_command_id, .order_id = order.id, .strategy_instance = order.strategy_instance, .revision = order.revision, .operation = operation, .instrument = order.instrument, .side = order.side, .portfolio_reduce_only = order.portfolio_reduce_only, .venue_reduce_only = order.venue_reduce_only, .quantity = try std.math.sub(i64, order.quantity, order.cumulative_quantity), .limit_price = order.limit_price, .predecessor_order_id = order.predecessor_order_id, .reservation = order.reservation, .order_type = order.order_type, .time_in_force = order.time_in_force, .market_protection_price = order.market_protection_price, .client_order_id = order.client_order_id, .intent_sequence = intent_sequence, .risk_decision_identity = order.group_first_sequence, .reservation_identity = order.group_first_sequence };
         self.commands[self.command_count] = command_value;
         self.command_count += 1;
         self.command_history[self.command_history_count] = command_value;
@@ -697,7 +697,7 @@ pub const Oms = struct {
         next.order_type = replacement.order_type;
         next.time_in_force = replacement.time_in_force;
         next.market_protection_price = replacement.market_protection_price;
-        try self.emit(next.*, .place);
+        try self.emit(next.*, .place, predecessor.group_first_sequence);
     }
 
     fn rejectCommand(_: *Oms, order: *Order, operation: Operation) void {
@@ -723,7 +723,7 @@ pub const Oms = struct {
                 .pending_submit, .pending_amend => {
                     if (order.dispatch_submitted) {
                         order.state = .pending_cancel;
-                        try self.emit(order.*, .cancel);
+                        try self.emit(order.*, .cancel, order.group_first_sequence);
                     } else {
                         order.state = .rejected;
                         order.reservation_active = false;
@@ -731,7 +731,7 @@ pub const Oms = struct {
                 },
                 .live, .partially_filled => {
                     order.state = .pending_cancel;
-                    try self.emit(order.*, .cancel);
+                    try self.emit(order.*, .cancel, order.group_first_sequence);
                 },
                 else => {},
             };
@@ -908,6 +908,16 @@ test "unknown order rejects a later place without changing identity" {
     second.members[0] = .{ .intent_sequence = 2, .operation = .place, .instrument = 2, .quantity = 1, .limit_price = .{ .instrument = 2, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 4 } };
     try std.testing.expectError(error.UncertainOrderBlocksSend, state.applyGroup(second));
     try std.testing.expectEqual(@as(u8, 1), state.order_count);
+}
+
+test "OMS commands retain each member intent identity" {
+    var state: Oms = .{};
+    var group: IntentGroup = .{ .first_intent_sequence = 7, .count = 2 };
+    group.members[0] = .{ .intent_sequence = 7, .operation = .place, .instrument = 1, .quantity = 1, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 3 } };
+    group.members[1] = .{ .intent_sequence = 8, .operation = .place, .instrument = 2, .quantity = 1, .limit_price = .{ .instrument = 2, .rules_version = 1, .ticks = 4 }, .reservation = .{ .asset = 1, .atoms = 4 } };
+    try state.applyGroup(group);
+    try std.testing.expectEqual(@as(u64, 7), state.emitted()[0].intent_sequence);
+    try std.testing.expectEqual(@as(u64, 8), state.emitted()[1].intent_sequence);
 }
 
 test "pending cancel outbox is reconstructed after replay" {
