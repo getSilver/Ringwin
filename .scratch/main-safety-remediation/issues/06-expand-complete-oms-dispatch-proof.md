@@ -14,6 +14,8 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 
 扩展 OMS 的权威命令形态，使 place、amend、cancel 都携带最终 OrderSpec、OrderIntent/RiskDecision/RiskReservation 身份、TradingAuthorization、PrimaryLease/FencingToken、CapabilityProfile、配置版本和 DispatchDeadline。旧形态暂时并存，以便后续调用方分批迁移。
 
+各事实仍由其原所有者演进；OMS 只记录已生效身份、版本和 barrier 的不可变引用，不能把重放的过期 lease 当作新的发送许可。07 的 Gateway 在发送当刻复核最新值。
+
 ## Acceptance criteria
 
 - [x] 最终 OrderSpec 完整包含 side、quantity、Market/Limit/PostOnly/IOC/FOK、TIF、价格保护、两种 ReduceOnly 和规范化/降级结果。
@@ -28,4 +30,4 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 
 ## Answer
 
-进行中：OMS Command 现保留同一 IntentGroup 各成员实际的 IntentSequence（测试覆盖双成员组）；但 RiskDecision/RiskReservation 身份仍是组首序号别名，系统取消与替换命令仍需独立来源身份，DispatchProof 仍由调用方构造。TradingShard 当前只有 fencing token，缺少带 barrier 的 lease 截止与 capability 授权事实；未形成完整权威发送证明，不能关闭本票或解锁 07。
+进行中：OMS Command 保留同一 IntentGroup 各成员实际的 IntentSequence；RiskDecision/RiskReservation 已改为两条实际分片事实的不同序号，未准入的旧 OMS 命令持有零引用。place、amend、cancel、重评估 replacement 的新命令引用对应风险事实，系统取消继承原订单来源；快照恢复校验引用，命令历史纳入 schema 10 状态摘要，Debug/ReleaseSafe 227/227。仍缺 TradingAuthorization、PrimaryLease、CapabilityProfile、规则/配置和 deadline 的 OMS 原生版本/barrier 绑定；Gateway proof 仍由调用方构造，不能关闭本票或解锁 07。

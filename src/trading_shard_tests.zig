@@ -980,6 +980,11 @@ test "SPOT and linear instruments close economics and replay independently" {
     try prefix.decision_journal.seal();
     var snapshot_storage: [64 * 1024]u8 = undefined;
     const snapshot = try prefix.shard.snapshot(&prefix.decision_journal, prefix.decision_journal.last_sequence, &snapshot_storage);
+    var forged = prefix.shard;
+    forged.oms.command_history[0].risk_decision_identity = forged.oms.command_history[0].reservation_identity;
+    var forged_storage: [64 * 1024]u8 = undefined;
+    const forged_snapshot = try forged.snapshot(&prefix.decision_journal, prefix.decision_journal.last_sequence, &forged_storage);
+    try std.testing.expectError(error.InvalidSnapshotState, TradingShard.restoreSnapshot(forged_snapshot));
     const tail_events = [_]CanonicalEvent{
         atGroup(13, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .partially_filled, .cumulative_quantity = 40, .remaining_quantity = 60 } } }),
         atGroup(14, .{ .identity = 1, .payload = .{ .economic_fill = .{ .fill_id = 1, .order_id = 1, .quantity = 40, .price_micros = 30_000_000 } } }),
@@ -1034,6 +1039,10 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     const place = atGroup(12, .{ .identity = 220, .payload = .{ .oms_intent_group = group } });
     const placed = try live.shard.apply(place);
     try std.testing.expectEqual(@as(usize, 1), placed.oms_commands.len);
+    const proved = placed.oms_commands[0];
+    try std.testing.expect(proved.risk_decision_identity != proved.reservation_identity);
+    try std.testing.expectEqual(shard_event.EventKind.risk_accepted, live.shard.trace.events[proved.risk_decision_identity - 1].kind);
+    try std.testing.expectEqual(shard_event.EventKind.risk_reservation_created, live.shard.trace.events[proved.reservation_identity - 1].kind);
 
     var implementation: simulated_venue.SimulatedVenue = .{};
     const adapter = implementation.adapter();

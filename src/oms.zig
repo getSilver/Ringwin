@@ -72,6 +72,10 @@ pub const DispatchBatch = struct {
     count: u8,
 };
 
+/// Stable trace sequences of the accepted RiskDecision and established
+/// RiskReservation facts. An unqualified legacy outbox has zero references.
+pub const RiskFactRefs = struct { decision: u64 = 0, reservation: u64 = 0 };
+
 pub const ExecutionReport = struct {
     report_id: u64,
     order_id: u64,
@@ -229,7 +233,8 @@ pub const Oms = struct {
                 (increasing_only and order.portfolio_reduce_only and order.venue_reduce_only))
                 continue;
             order.state = .pending_cancel;
-            try self.emit(order.*, .cancel, order.group_first_sequence);
+            const origin = self.originForOrder(order.id);
+            try self.emit(order.*, .cancel, origin.intent_sequence, origin.refs);
         }
     }
 
@@ -241,7 +246,8 @@ pub const Oms = struct {
                 order.state == .canceled or order.state == .rejected or order.state == .pending_cancel)
                 continue;
             order.state = .pending_cancel;
-            try self.emit(order.*, .cancel, order.group_first_sequence);
+            const origin = self.originForOrder(order.id);
+            try self.emit(order.*, .cancel, origin.intent_sequence, origin.refs);
         }
     }
 
@@ -301,8 +307,19 @@ pub const Oms = struct {
     }
 
     pub fn applyGroup(self: *Oms, group: IntentGroup) !void {
+        return self.applyGroupWithRefs(group, &.{});
+    }
+
+    pub fn applyQualifiedGroup(self: *Oms, group: IntentGroup, refs: []const RiskFactRefs) !void {
+        if (refs.len != group.count) return error.InvalidRiskFactRefs;
+        for (refs) |ref| if (ref.decision == 0 or ref.reservation == 0 or ref.decision == ref.reservation)
+            return error.InvalidRiskFactRefs;
+        return self.applyGroupWithRefs(group, refs);
+    }
+
+    fn applyGroupWithRefs(self: *Oms, group: IntentGroup, refs: []const RiskFactRefs) !void {
         var candidate = self.*;
-        candidate.applyGroupInPlace(group) catch |err| {
+        candidate.applyGroupInPlace(group, refs) catch |err| {
             // Capacity exhaustion is an authoritative safety transition even
             // though the rejected intent group itself is not committed.
             if (candidate.recovery_only) self.recovery_only = true;
@@ -311,7 +328,7 @@ pub const Oms = struct {
         self.* = candidate;
     }
 
-    fn applyGroupInPlace(self: *Oms, group: IntentGroup) !void {
+    fn applyGroupInPlace(self: *Oms, group: IntentGroup, refs: []const RiskFactRefs) !void {
         if (group.count == 0 or group.count > max_group_members) return error.InvalidIntentGroup;
         var duplicate_count: u8 = 0;
         for (group.members[0..group.count], 0..) |intent, index| {
@@ -337,8 +354,8 @@ pub const Oms = struct {
                 .cancel => {},
             };
         }
-        for (group.members[0..group.count]) |intent| {
-            self.applyIntent(intent, group.first_intent_sequence, group.policy) catch |err| {
+        for (group.members[0..group.count], 0..) |intent, index| {
+            self.applyIntent(intent, group.first_intent_sequence, group.policy, if (refs.len == 0) .{} else refs[index]) catch |err| {
                 if (group.policy == .cancel_remaining) try self.cancelGroup(group.first_intent_sequence);
                 return err;
             };
@@ -347,7 +364,7 @@ pub const Oms = struct {
         }
     }
 
-    fn applyIntent(self: *Oms, intent: Intent, group: u64, policy: PartialExecutionPolicy) !void {
+    fn applyIntent(self: *Oms, intent: Intent, group: u64, policy: PartialExecutionPolicy, refs: RiskFactRefs) !void {
         switch (intent.operation) {
             .place => {
                 if (intent.quantity <= 0 or intent.limit_price.ticks <= 0 or intent.reservation.atoms <= 0 or intent.limit_price.instrument != intent.instrument) return error.InvalidOrderSpec;
@@ -355,7 +372,7 @@ pub const Oms = struct {
                 order.order_type = intent.order_type;
                 order.time_in_force = intent.time_in_force;
                 order.market_protection_price = intent.market_protection_price;
-                try self.emit(order.*, .place, intent.intent_sequence);
+                try self.emit(order.*, .place, intent.intent_sequence, refs);
             },
             .amend => {
                 const order = try self.mutableOrder(intent.target_order_id);
@@ -372,20 +389,20 @@ pub const Oms = struct {
                     order.pending_reservation = intent.reservation;
                     if (order.reservation.asset != intent.reservation.asset) return error.MixedReservationAssets;
                     if (intent.reservation.atoms > order.reservation.atoms) order.reservation = intent.reservation;
-                    try self.emit(order.*, .amend, intent.intent_sequence);
+                    try self.emit(order.*, .amend, intent.intent_sequence, refs);
                 } else {
                     if (!intent.allow_cancel_confirm_create) return error.CancelConfirmCreateNotAuthorized;
                     order.state = .pending_cancel;
                     if (intent.reservation.atoms <= 0) return error.InvalidOrderSpec;
                     order.replacement = .{ .instrument = order.instrument, .side = intent.side, .portfolio_reduce_only = intent.portfolio_reduce_only, .venue_reduce_only = intent.venue_reduce_only, .quantity = intent.quantity, .limit_price = intent.limit_price, .reservation = intent.reservation, .order_type = intent.order_type, .time_in_force = intent.time_in_force, .market_protection_price = intent.market_protection_price, .client_order_id = intent.client_order_id };
-                    try self.emit(order.*, .cancel, intent.intent_sequence);
+                    try self.emit(order.*, .cancel, intent.intent_sequence, refs);
                 }
             },
             .cancel => {
                 const order = try self.mutableOrder(intent.target_order_id);
                 try validateTarget(order, intent);
                 order.state = .pending_cancel;
-                try self.emit(order.*, .cancel, intent.intent_sequence);
+                try self.emit(order.*, .cancel, intent.intent_sequence, refs);
             },
         }
     }
@@ -644,14 +661,14 @@ pub const Oms = struct {
         };
     }
 
-    pub fn confirmReplacement(self: *Oms, order_id: u64, reservation: Reservation, portfolio_reduce_only: bool, venue_reduce_only: bool) !void {
+    pub fn confirmReplacement(self: *Oms, order_id: u64, reservation: Reservation, portfolio_reduce_only: bool, venue_reduce_only: bool, intent_sequence: u64, refs: RiskFactRefs) !void {
         const predecessor = try self.mutableOrder(order_id);
         if (predecessor.state != .canceled or predecessor.replacement == null) return error.ReplacementNotReady;
         if (self.blocksNewSend()) return error.UncertainOrderBlocksSend;
         predecessor.replacement.?.reservation = reservation;
         predecessor.replacement.?.portfolio_reduce_only = portfolio_reduce_only;
         predecessor.replacement.?.venue_reduce_only = venue_reduce_only;
-        try self.createReplacement(predecessor);
+        try self.createReplacement(predecessor, intent_sequence, refs);
     }
 
     pub fn discardReplacement(self: *Oms, order_id: u64) !void {
@@ -677,12 +694,12 @@ pub const Oms = struct {
         return &self.orders[index];
     }
 
-    fn emit(self: *Oms, order: Order, operation: Operation, intent_sequence: u64) !void {
+    fn emit(self: *Oms, order: Order, operation: Operation, intent_sequence: u64, refs: RiskFactRefs) !void {
         if (self.command_count == max_commands or self.command_history_count == max_command_history) {
             self.recovery_only = true;
             return error.CommandCapacityExceeded;
         }
-        const command_value: Command = .{ .command_id = self.next_command_id, .order_id = order.id, .strategy_instance = order.strategy_instance, .revision = order.revision, .operation = operation, .instrument = order.instrument, .side = order.side, .portfolio_reduce_only = order.portfolio_reduce_only, .venue_reduce_only = order.venue_reduce_only, .quantity = try std.math.sub(i64, order.quantity, order.cumulative_quantity), .limit_price = order.limit_price, .predecessor_order_id = order.predecessor_order_id, .reservation = order.reservation, .order_type = order.order_type, .time_in_force = order.time_in_force, .market_protection_price = order.market_protection_price, .client_order_id = order.client_order_id, .intent_sequence = intent_sequence, .risk_decision_identity = order.group_first_sequence, .reservation_identity = order.group_first_sequence };
+        const command_value: Command = .{ .command_id = self.next_command_id, .order_id = order.id, .strategy_instance = order.strategy_instance, .revision = order.revision, .operation = operation, .instrument = order.instrument, .side = order.side, .portfolio_reduce_only = order.portfolio_reduce_only, .venue_reduce_only = order.venue_reduce_only, .quantity = try std.math.sub(i64, order.quantity, order.cumulative_quantity), .limit_price = order.limit_price, .predecessor_order_id = order.predecessor_order_id, .reservation = order.reservation, .order_type = order.order_type, .time_in_force = order.time_in_force, .market_protection_price = order.market_protection_price, .client_order_id = order.client_order_id, .intent_sequence = intent_sequence, .risk_decision_identity = refs.decision, .reservation_identity = refs.reservation };
         self.commands[self.command_count] = command_value;
         self.command_count += 1;
         self.command_history[self.command_history_count] = command_value;
@@ -690,14 +707,14 @@ pub const Oms = struct {
         self.next_command_id = try std.math.add(u64, self.next_command_id, 1);
     }
 
-    fn createReplacement(self: *Oms, predecessor: *Order) !void {
+    fn createReplacement(self: *Oms, predecessor: *Order, intent_sequence: u64, refs: RiskFactRefs) !void {
         const replacement = predecessor.replacement.?;
         predecessor.replacement = null;
         const next = try self.createOrder(predecessor.strategy_instance, replacement.instrument, replacement.side, replacement.portfolio_reduce_only, replacement.venue_reduce_only, replacement.quantity, replacement.limit_price, replacement.reservation, replacement.client_order_id, predecessor.id, predecessor.group_first_sequence, predecessor.group_policy);
         next.order_type = replacement.order_type;
         next.time_in_force = replacement.time_in_force;
         next.market_protection_price = replacement.market_protection_price;
-        try self.emit(next.*, .place, predecessor.group_first_sequence);
+        try self.emit(next.*, .place, intent_sequence, refs);
     }
 
     fn rejectCommand(_: *Oms, order: *Order, operation: Operation) void {
@@ -723,7 +740,8 @@ pub const Oms = struct {
                 .pending_submit, .pending_amend => {
                     if (order.dispatch_submitted) {
                         order.state = .pending_cancel;
-                        try self.emit(order.*, .cancel, order.group_first_sequence);
+                        const origin = self.originForOrder(order.id);
+                        try self.emit(order.*, .cancel, origin.intent_sequence, origin.refs);
                     } else {
                         order.state = .rejected;
                         order.reservation_active = false;
@@ -731,7 +749,8 @@ pub const Oms = struct {
                 },
                 .live, .partially_filled => {
                     order.state = .pending_cancel;
-                    try self.emit(order.*, .cancel, order.group_first_sequence);
+                    const origin = self.originForOrder(order.id);
+                    try self.emit(order.*, .cancel, origin.intent_sequence, origin.refs);
                 },
                 else => {},
             };
@@ -812,6 +831,19 @@ pub const Oms = struct {
     fn findCommand(self: *const Oms, id: u64) ?Command {
         for (self.command_history[0..self.command_history_count]) |command_value| if (command_value.command_id == id) return command_value;
         return null;
+    }
+
+    fn originForOrder(self: *const Oms, order_id: u64) struct { intent_sequence: u64, refs: RiskFactRefs } {
+        var index = self.command_history_count;
+        while (index != 0) {
+            index -= 1;
+            const command_value = self.command_history[index];
+            if (command_value.order_id == order_id) return .{
+                .intent_sequence = command_value.intent_sequence,
+                .refs = .{ .decision = command_value.risk_decision_identity, .reservation = command_value.reservation_identity },
+            };
+        }
+        return .{ .intent_sequence = 0, .refs = .{} };
     }
 };
 
@@ -918,6 +950,23 @@ test "OMS commands retain each member intent identity" {
     try state.applyGroup(group);
     try std.testing.expectEqual(@as(u64, 7), state.emitted()[0].intent_sequence);
     try std.testing.expectEqual(@as(u64, 8), state.emitted()[1].intent_sequence);
+}
+
+test "OMS commands bind distinct risk and reservation fact barriers" {
+    var state: Oms = .{};
+    var group: IntentGroup = .{ .first_intent_sequence = 7, .count = 2 };
+    group.members[0] = .{ .intent_sequence = 7, .operation = .place, .instrument = 1, .quantity = 1, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 3 } };
+    group.members[1] = .{ .intent_sequence = 8, .operation = .place, .instrument = 2, .quantity = 1, .limit_price = .{ .instrument = 2, .rules_version = 1, .ticks = 4 }, .reservation = .{ .asset = 1, .atoms = 4 } };
+    try state.applyQualifiedGroup(group, &.{ .{ .decision = 3, .reservation = 4 }, .{ .decision = 5, .reservation = 6 } });
+    try std.testing.expectEqual(@as(u64, 3), state.emitted()[0].risk_decision_identity);
+    try std.testing.expectEqual(@as(u64, 4), state.emitted()[0].reservation_identity);
+    try std.testing.expectEqual(@as(u64, 5), state.emitted()[1].risk_decision_identity);
+    try std.testing.expectEqual(@as(u64, 6), state.emitted()[1].reservation_identity);
+
+    var legacy: Oms = .{};
+    try legacy.applyGroup(group);
+    try std.testing.expectEqual(@as(u64, 0), legacy.emitted()[0].risk_decision_identity);
+    try std.testing.expectEqual(@as(u64, 0), legacy.emitted()[0].reservation_identity);
 }
 
 test "pending cancel outbox is reconstructed after replay" {

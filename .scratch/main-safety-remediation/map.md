@@ -55,6 +55,7 @@ OrderIntent、Order、RiskReservation、账户危险事实、StrategyHost 授权
 
 ## Decisions so far
 
+- 2026-09-13：06 不新增包揽 lease/capability/risk 的通用授权事实；OMS 命令记录各权威事实的真实身份、版本和 barrier，缺失事实优先扩展原事实来源。Gateway 在 07 发送当刻重读最新授权；重放旧 lease 只供审计/对账，不恢复发送权。
 - 2026-09-12：用户允许把复用现有 DurableStore seam 的预发送持久提交纳入 06/07；不另建存储系统，不迁入 Linux role、外部 NodeFence、Venue 协议或在线/生产资格。
 - 2026-09-12：最终 Spec 复核撤销“本波已完成”结论。06/07/09/11/12 保持待收口；离线测试通过不证明 OMS 原生 proof、持久 pre-send 事实或墓碑归档资格。
 - 2026-09-11：最终两轴审查补齐 Gateway 自有权威事实与 dispatch 幂等、墓碑精确审计证据、Suspense 容量原子拒绝及 hostile-child capability 验收。
