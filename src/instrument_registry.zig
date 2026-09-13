@@ -14,6 +14,9 @@ pub const Entry = struct {
     rules: shard_event.InstrumentRules,
     margin: shard_event.MarginRules,
     margin_configured: bool = false,
+    rules_barrier: u64 = 0,
+    capability: ?shard_event.CapabilityProfileActivation = null,
+    capability_barrier: u64 = 0,
 };
 
 pub const Registry = struct {
@@ -81,6 +84,10 @@ pub const Registry = struct {
                 entry.rules.instrument_identity != entry.instrument or
                 entry.rules.quantity_denominator <= 0 or
                 entry.rules.product != entry.product or
+                (entry.capability != null and (entry.capability.?.instrument != entry.instrument or
+                    entry.capability.?.venue != entry.venue or entry.capability.?.product != entry.rules.product or
+                    entry.capability.?.rules_version != entry.rules.version or entry.capability_barrier == 0)) or
+                (entry.capability == null and entry.capability_barrier != 0) or
                 (entry.margin_configured and
                     (entry.margin.instrument != 0 and entry.margin.instrument != entry.instrument or
                         !validMargin(entry.margin))))

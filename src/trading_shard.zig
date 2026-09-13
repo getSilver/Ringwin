@@ -202,6 +202,7 @@ pub const TradingShard = struct {
     portfolio_identity: u128 = 0,
     strategy_identity: u128 = 0,
     strategy_config_version: u64 = 0,
+    authority_control_barrier: u64 = 0,
     strategy_activation_identity: u128 = 0,
     host_activation_identity: u128 = 0,
     host_activation_barrier: u64 = 0,
@@ -288,6 +289,7 @@ pub const TradingShard = struct {
             }
             return err;
         };
+        try candidate.bindFreshCancellations(event.envelope.times.monotonic_ns orelse 0);
         self.* = candidate;
         return .{
             .facts = self.trace.events[before..self.trace.len],
@@ -315,6 +317,7 @@ pub const TradingShard = struct {
             }
             return err;
         };
+        try candidate.bindFreshCancellations(if (event.time_presence.monotonic) event.monotonic_time else 0);
         self.* = candidate;
         return .{
             .facts = self.trace.events[before..self.trace.len],
@@ -633,7 +636,7 @@ pub const TradingShard = struct {
         return self.instrumentEntry(identity);
     }
 
-    fn confirmPendingReplacement(self: *TradingShard, order_id: u64, sequence: u64) !void {
+    fn confirmPendingReplacement(self: *TradingShard, order_id: u64, sequence: u64, now_monotonic_ns: u64) !void {
         const replacement = (try self.oms.replacementIntent(order_id, sequence)) orelse return;
         var group: oms_module.IntentGroup = .{ .first_intent_sequence = replacement.intent_sequence, .count = 1 };
         group.members[0] = replacement;
@@ -662,6 +665,7 @@ pub const TradingShard = struct {
         try self.oms.confirmReplacement(order_id, intent.reservation, intent.portfolio_reduce_only, intent.venue_reduce_only, intent.intent_sequence, .{
             .decision = decision_barrier,
             .reservation = @intCast(self.trace.len),
+            .authority = try self.dispatchAuthorityRefs(intent.instrument, now_monotonic_ns, decision_barrier),
         });
     }
 
@@ -820,7 +824,57 @@ pub const TradingShard = struct {
         return self.economic_projection.applyChanged(event);
     }
 
-    fn submitOrderIntent(self: *TradingShard, intent: host_gateway.OrderIntent) !?OrderCommand {
+    fn latestFact(self: *const TradingShard, kind: EventKind) ?Fact {
+        var index = self.trace.len;
+        while (index > 0) {
+            index -= 1;
+            const fact = self.trace.events[index];
+            if (fact.kind == kind) return fact;
+        }
+        return null;
+    }
+
+    fn dispatchAuthorityRefs(self: *const TradingShard, instrument: canonical.InstrumentIdentity, now_monotonic_ns: u64, deadline_barrier: u64) !oms_module.DispatchAuthorityRefs {
+        var refs: oms_module.DispatchAuthorityRefs = .{
+            .exchange_account = self.exchange_account_identity,
+            .virtual_portfolio = self.portfolio_identity,
+            .deadline_barrier = deadline_barrier,
+        };
+        if (self.authority_control_barrier != 0 and self.operational_state.command_count != 0) {
+            const command = self.operational_state.command_history[self.operational_state.command_count - 1].command;
+            refs.trading_authorization = .{ .identity = command.command_identity, .version = std.math.add(u64, command.expected_version, 1) catch 0, .barrier = self.authority_control_barrier };
+        }
+        if (self.latestFact(.primary_lease_granted)) |fact|
+            refs.primary_lease = .{ .identity = self.fencing_token, .version = self.fencing_token, .barrier = fact.sequence };
+        if (self.latestFact(.risk_lease_granted)) |fact|
+            refs.risk_lease = .{ .identity = self.risk_lease_identity, .version = self.risk_lease_version, .barrier = fact.sequence };
+        if (self.latestFact(.strategy_activated)) |fact|
+            refs.config = .{ .identity = self.strategy_activation_identity, .version = self.strategy_config_version, .barrier = fact.sequence };
+        if (self.instrument_registry.get(instrument)) |entry| {
+            if (entry.rules_barrier != 0) {
+                const fact = self.trace.events[entry.rules_barrier - 1];
+                refs.instrument_rules = .{ .identity = fact.identity, .version = entry.rules.version, .barrier = entry.rules_barrier };
+            }
+            if (entry.capability) |profile| {
+                const fact = self.trace.events[entry.capability_barrier - 1];
+                refs.capability = .{ .identity = fact.identity, .version = profile.version, .barrier = entry.capability_barrier };
+                refs.adapter_session = profile.adapter_session;
+                if (now_monotonic_ns != 0)
+                    refs.dispatch_deadline_monotonic_ns = std.math.add(u64, now_monotonic_ns, profile.max_dispatch_age_ns) catch 0;
+            }
+        }
+        return refs;
+    }
+
+    fn bindFreshCancellations(self: *TradingShard, now_monotonic_ns: u64) !void {
+        for (self.oms.emitted()) |command| {
+            if (command.operation != .cancel) continue;
+            const authority = try self.dispatchAuthorityRefs(command.instrument, now_monotonic_ns, @intCast(self.trace.len));
+            try self.oms.bindCancellationAuthority(command.command_id, authority);
+        }
+    }
+
+    fn submitOrderIntent(self: *TradingShard, intent: host_gateway.OrderIntent, now_monotonic_ns: u64) !?OrderCommand {
         if (intent.order_type != .limit or
             (intent.time_in_force != .good_til_canceled and intent.time_in_force != .immediate_or_cancel) or
             intent.quantity <= 0 or intent.limit_price_micros <= 0)
@@ -909,7 +963,7 @@ pub const TradingShard = struct {
         try self.trace.append(.risk_accepted, intent.intent_sequence);
         const decision_barrier: u64 = @intCast(self.trace.len);
         try self.trace.append(.risk_reservation_created, intent.intent_sequence);
-        const refs = [_]oms_module.RiskFactRefs{.{ .decision = decision_barrier, .reservation = @intCast(self.trace.len) }};
+        const refs = [_]oms_module.RiskFactRefs{.{ .decision = decision_barrier, .reservation = @intCast(self.trace.len), .authority = try self.dispatchAuthorityRefs(intent.instrument_identity, now_monotonic_ns, decision_barrier) }};
         try self.oms.applyQualifiedGroup(qualified, &refs);
         try self.refreshLayeredReservations();
         const oms_command = self.oms.emitted()[0];
@@ -1316,6 +1370,7 @@ pub const TradingShard = struct {
                     try self.assertClosures();
                 }
                 try self.trace.append(.control_command_applied, input.identity);
+                self.authority_control_barrier = @intCast(self.trace.len);
             },
             .recovery_completed => {
                 try self.operational_state.recoveryCompleted();
@@ -1416,7 +1471,30 @@ pub const TradingShard = struct {
                     self.quantity_denominator = normalized.quantity_denominator;
                     self.reservation_model = normalized.reservation_model;
                 }
-                if (added) try self.trace.append(.instrument_rules_activated, input.identity);
+                if (added) {
+                    try self.trace.append(.instrument_rules_activated, input.identity);
+                    self.instrument_registry.getPtr(normalized.instrument_identity).?.rules_barrier = @intCast(self.trace.len);
+                }
+            },
+            .capability_profile_activation => |profile| {
+                const entry = self.instrument_registry.getPtr(profile.instrument) orelse return error.UnknownInstrument;
+                if (input.identity == 0 or profile.exchange_account != self.exchange_account_identity or
+                    profile.venue != entry.venue or profile.product != entry.rules.product or
+                    profile.rules_version != entry.rules.version or
+                    profile.config_version != self.strategy_config_version or
+                    profile.version == 0 or profile.adapter_session == 0 or
+                    profile.max_dispatch_age_ns == 0 or !profile.supports_place)
+                    return error.InvalidCapabilityProfile;
+                if (entry.capability) |known| {
+                    if (profile.version < known.version) return error.StaleCapabilityProfile;
+                    if (profile.version == known.version) {
+                        if (!std.meta.eql(profile, known)) return error.CapabilityProfileConflict;
+                        return null;
+                    }
+                }
+                entry.capability = profile;
+                try self.trace.append(.capability_profile_activated, input.identity);
+                entry.capability_barrier = @intCast(self.trace.len);
             },
             .margin_rules_activated => |rules| {
                 const instrument_id = if (rules.instrument != 0) rules.instrument else self.instrument_identity;
@@ -1660,14 +1738,14 @@ pub const TradingShard = struct {
                     .portfolio_reduce_only = request.portfolio_reduce_only,
                     .quantity = request.quantity,
                     .limit_price_micros = request.limit_price_micros,
-                });
+                }, if (input.time_presence.monotonic) input.monotonic_time else 0);
             },
             .external_order_intent => |intent| {
                 if (!self.strategy_active or intent.strategy_cursor <= self.strategy_cursor)
                     return error.InvalidStrategyCursor;
                 self.strategy_cursor = intent.strategy_cursor;
                 self.strategy_decision_count = try std.math.add(u64, self.strategy_decision_count, 1);
-                return self.submitOrderIntent(intent);
+                return self.submitOrderIntent(intent, if (input.time_presence.monotonic) input.monotonic_time else 0);
             },
             .strategy_intent_rejected => |rejection| {
                 try self.trace.append(.strategy_intent_rejected, rejection.intent_sequence);
@@ -1691,6 +1769,7 @@ pub const TradingShard = struct {
                     refs[index].decision = @intCast(candidate.trace.len);
                     try candidate.trace.append(.risk_reservation_created, intent.intent_sequence);
                     refs[index].reservation = @intCast(candidate.trace.len);
+                    refs[index].authority = try candidate.dispatchAuthorityRefs(intent.instrument, if (input.time_presence.monotonic) input.monotonic_time else 0, refs[index].decision);
                 }
                 try candidate.oms.applyQualifiedGroup(qualified, refs[0..qualified.count]);
                 try candidate.refreshLayeredReservations();
@@ -1706,7 +1785,7 @@ pub const TradingShard = struct {
             },
             .oms_execution_report => |report| {
                 try self.oms.applyReport(report);
-                try self.confirmPendingReplacement(report.order_id, report.report_id);
+                try self.confirmPendingReplacement(report.order_id, report.report_id, if (input.time_presence.monotonic) input.monotonic_time else 0);
                 try self.refreshLayeredReservations();
                 try self.trace.append(.oms_execution_report, report.report_id);
             },
@@ -1719,7 +1798,7 @@ pub const TradingShard = struct {
                     .reason = .reconciliation_break,
                     .open = false,
                 });
-                try self.confirmPendingReplacement(result.order_id, result.reconciliation_id);
+                try self.confirmPendingReplacement(result.order_id, result.reconciliation_id, if (input.time_presence.monotonic) input.monotonic_time else 0);
                 try self.refreshLayeredReservations();
                 try self.trace.append(.oms_reconciliation_result, result.reconciliation_id);
             },
@@ -1879,6 +1958,21 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         shard.fenced_strategy_count > shard.fenced_strategy_instances.len)
         return error.InvalidSnapshotState;
     try shard.instrument_registry.validate();
+    if (shard.authority_control_barrier != 0 and
+        (shard.authority_control_barrier > shard.trace.len or
+            shard.trace.events[shard.authority_control_barrier - 1].kind != .control_command_applied))
+        return error.InvalidSnapshotState;
+    for (shard.instrument_registry.entries[0..shard.instrument_registry.count]) |entry| {
+        if (entry.rules_barrier == 0 or entry.rules_barrier > shard.trace.len or
+            shard.trace.events[entry.rules_barrier - 1].kind != .instrument_rules_activated)
+            return error.InvalidSnapshotState;
+        if (entry.capability) |profile| {
+            if (entry.capability_barrier == 0 or entry.capability_barrier > shard.trace.len or
+                shard.trace.events[entry.capability_barrier - 1].kind != .capability_profile_activated or
+                profile.exchange_account != shard.exchange_account_identity)
+                return error.InvalidSnapshotState;
+        }
+    }
     for (shard.oms.orders[0..shard.oms.order_count], 0..) |order, index| {
         if (order.id == 0) return error.InvalidSnapshotState;
         for (shard.oms.orders[0..index]) |previous|
@@ -1894,6 +1988,35 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         const reservation_fact = shard.trace.events[reservation - 1];
         if (decision_fact.kind != .risk_accepted or reservation_fact.kind != .risk_reservation_created or
             decision_fact.identity != command.intent_sequence or reservation_fact.identity != command.intent_sequence)
+            return error.InvalidSnapshotState;
+        const refs = command.authority;
+        const typed_refs = .{
+            .{ refs.trading_authorization, EventKind.control_command_applied },
+            .{ refs.primary_lease, EventKind.primary_lease_granted },
+            .{ refs.risk_lease, EventKind.risk_lease_granted },
+            .{ refs.capability, EventKind.capability_profile_activated },
+            .{ refs.instrument_rules, EventKind.instrument_rules_activated },
+            .{ refs.config, EventKind.strategy_activated },
+        };
+        inline for (typed_refs) |pair| {
+            const ref = pair[0];
+            const kind = pair[1];
+            if (ref.barrier == 0) {
+                if (ref.identity != 0 or ref.version != 0) return error.InvalidSnapshotState;
+            } else if (ref.barrier > shard.trace.len or shard.trace.events[ref.barrier - 1].kind != kind or
+                ref.identity == 0 or ref.version == 0)
+                return error.InvalidSnapshotState;
+        }
+        if (refs.capability.barrier != 0 and shard.trace.events[refs.capability.barrier - 1].identity != refs.capability.identity)
+            return error.InvalidSnapshotState;
+        if (refs.instrument_rules.barrier != 0 and shard.trace.events[refs.instrument_rules.barrier - 1].identity != refs.instrument_rules.identity)
+            return error.InvalidSnapshotState;
+        if (refs.dispatch_deadline_monotonic_ns != 0 and
+            (refs.deadline_barrier == 0 or refs.deadline_barrier > shard.trace.len))
+            return error.InvalidSnapshotState;
+        if (refs.exchange_account != 0 and refs.exchange_account != shard.exchange_account_identity)
+            return error.InvalidSnapshotState;
+        if (refs.virtual_portfolio != 0 and refs.virtual_portfolio != shard.portfolio_identity)
             return error.InvalidSnapshotState;
     }
     for (shard.economic_projection.ledger[0..shard.economic_projection.ledger_count]) |transaction|
@@ -2066,6 +2189,17 @@ fn digestOmsCommand(hasher: *Sha256, command: oms_module.Command) void {
     digestInt(hasher, u64, command.intent_sequence);
     digestInt(hasher, u64, command.risk_decision_identity);
     digestInt(hasher, u64, command.reservation_identity);
+    const refs = command.authority;
+    digestInt(hasher, u128, refs.exchange_account);
+    digestInt(hasher, u128, refs.virtual_portfolio);
+    inline for (.{ refs.trading_authorization, refs.primary_lease, refs.risk_lease, refs.capability, refs.instrument_rules, refs.config }) |ref| {
+        digestInt(hasher, u128, ref.identity);
+        digestInt(hasher, u64, ref.version);
+        digestInt(hasher, u64, ref.barrier);
+    }
+    digestInt(hasher, u128, refs.adapter_session);
+    digestInt(hasher, u64, refs.dispatch_deadline_monotonic_ns);
+    digestInt(hasher, u64, refs.deadline_barrier);
 }
 
 pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
@@ -2075,7 +2209,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     const spot_portfolio_position = shard.spotPortfolioPosition();
     const spot_exchange_position = shard.spotExchangePosition();
     const ledger = shard.economic_projection.ledger_summary;
-    hasher.update("StateDigestV4\x00");
+    hasher.update("StateDigestV5\x00");
     digestInt(&hasher, u16, schema_version);
     digestInt(&hasher, u8, shard.instrument_registry.count);
     for (shard.instrument_registry.entries[0..shard.instrument_registry.count]) |entry| {
@@ -2087,6 +2221,24 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, u8, @intFromEnum(entry.rules.reservation_model));
         digestInt(&hasher, u8, @intFromEnum(entry.rules.product));
         digestInt(&hasher, u64, entry.rules.settlement_asset);
+        digestInt(&hasher, u64, entry.rules_barrier);
+        digestInt(&hasher, u64, entry.capability_barrier);
+        digestBool(&hasher, entry.capability != null);
+        if (entry.capability) |capability| {
+            digestInt(&hasher, u128, capability.exchange_account);
+            digestInt(&hasher, u128, capability.instrument);
+            digestInt(&hasher, u64, capability.venue);
+            digestInt(&hasher, u8, @intFromEnum(capability.environment));
+            digestInt(&hasher, u8, @intFromEnum(capability.product));
+            digestInt(&hasher, u64, capability.version);
+            digestInt(&hasher, u64, capability.rules_version);
+            digestInt(&hasher, u64, capability.config_version);
+            digestInt(&hasher, u128, capability.adapter_session);
+            digestInt(&hasher, u64, capability.max_dispatch_age_ns);
+            digestBool(&hasher, capability.supports_place);
+            digestBool(&hasher, capability.supports_post_only);
+            digestBool(&hasher, capability.supports_market_protection);
+        }
         digestBool(&hasher, entry.margin_configured);
         digestInt(&hasher, u32, entry.margin.version);
         digestInt(&hasher, i64, entry.margin.price_tick_micros);
@@ -2116,6 +2268,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     digestBool(&hasher, shard.strategy_active);
     digestInt(&hasher, u128, shard.strategy_identity);
     digestInt(&hasher, u64, shard.strategy_config_version);
+    digestInt(&hasher, u64, shard.authority_control_barrier);
     digestInt(&hasher, u128, shard.strategy_activation_identity);
     digestInt(&hasher, u128, shard.host_activation_identity);
     digestInt(&hasher, u64, shard.host_activation_barrier);

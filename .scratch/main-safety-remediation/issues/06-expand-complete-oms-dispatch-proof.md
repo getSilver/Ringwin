@@ -1,7 +1,7 @@
 # 06: 扩展完整的 OMS DispatchProof
 
 Type: task
-Status: in-progress
+Status: closed
 Assignee: Codex
 Blocked by: [01 使极值算术与缺失输入失败关闭](01-fail-closed-arithmetic-and-inputs.md), [04 按权威剩余数量维护 RiskReservation](04-rebalance-reservation-from-authoritative-remaining.md)
 Parent: [收口当前 main 安全与权威状态缺口](../map.md)
@@ -19,9 +19,9 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 ## Acceptance criteria
 
 - [x] 最终 OrderSpec 完整包含 side、quantity、Market/Limit/PostOnly/IOC/FOK、TIF、价格保护、两种 ReduceOnly 和规范化/降级结果。
-- [ ] 命令引用产生它的 OrderIntent、RiskDecision、RiskReservation、Order/revision 和 predecessor，不允许调用方重建或补默认值。
-- [ ] TradingAuthorization、PrimaryLease、FencingToken、CapabilityProfile、InstrumentRules、配置版本和 DispatchDeadline 都绑定明确 barrier。
-- [ ] 编码、日志、快照和摘要覆盖新增字段；未知版本失败关闭，replay 只重建事实而不获得发送能力。
+- [x] 命令引用产生它的 OrderIntent、RiskDecision、RiskReservation、Order/revision 和 predecessor，不允许调用方重建或补默认值。
+- [x] TradingAuthorization、PrimaryLease、FencingToken、CapabilityProfile、InstrumentRules、配置版本和 DispatchDeadline 都绑定明确 barrier。
+- [x] 编码、日志、快照和摘要覆盖新增字段；未知版本失败关闭，replay 只重建事实而不获得发送能力。
 - [x] expand 阶段保持旧调用方可编译，但任何旧形态不得取得新的生产发送资格。
 
 ## Out of scope
@@ -30,4 +30,4 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 
 ## Answer
 
-进行中：OMS Command 保留同一 IntentGroup 各成员实际的 IntentSequence；RiskDecision/RiskReservation 已改为两条实际分片事实的不同序号，未准入的旧 OMS 命令持有零引用。place、amend、cancel、重评估 replacement 的新命令引用对应风险事实，系统取消继承原订单来源；快照恢复校验引用，命令历史纳入 schema 10 状态摘要，Debug/ReleaseSafe 227/227。仍缺 TradingAuthorization、PrimaryLease、CapabilityProfile、规则/配置和 deadline 的 OMS 原生版本/barrier 绑定；Gateway proof 仍由调用方构造，不能关闭本票或解锁 07。
+OMS Command 保存按 ExchangeAccount/VirtualPortfolio 作用域解释的 OrderIntent、Order/revision/predecessor、真实 RiskDecision/RiskReservation 序号，以及各所有者事实的身份、版本、barrier。新增独立的 CapabilityProfileActivation 事实，绑定 Venue、产品、环境、账户、InstrumentRules、配置及 AdapterSession；DispatchDeadline 由带单调时间的输入和该 profile 的最大派发年龄确定。缺失事实或时间留下不完整引用，不能被视为完整 proof。系统取消在取消事件提交前重新绑定当前控制事实和 deadline，不沿用原 place 的过期 deadline；原命令引用保持不可变。schema 11 的稳定编码、快照校验和状态摘要覆盖这些事实；定向 replay/快照及 Debug/ReleaseSafe 228/228 通过。Gateway 当前仍有调用方构造的上下文，发送时与 DurableStore 的强制复核属于 07，离线完成不代表线上资格。

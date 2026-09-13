@@ -51,7 +51,7 @@ OrderIntent、Order、RiskReservation、账户危险事实、StrategyHost 授权
 
 ## Frontier
 
-- [06 扩展完整的 OMS DispatchProof](issues/06-expand-complete-oms-dispatch-proof.md)；最终 Spec 复核发现 proof 仍由调用方重建。07 在 06 完成后复用现有 DurableStore seam 收口预发送持久提交。
+- [07 以唯一 Gateway 强制真实 ReduceOnly 与 fencing](issues/07-enforce-authoritative-gateway-send.md)；06 已扩展 OMS 原生事实引用，07 迁移 Gateway 消费并复用现有 DurableStore seam 收口预发送持久提交。
 
 ## Decisions so far
 

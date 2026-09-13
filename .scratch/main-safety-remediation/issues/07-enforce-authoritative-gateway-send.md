@@ -1,7 +1,7 @@
 # 07: 以唯一 Gateway 强制真实 ReduceOnly 与 fencing
 
 Type: task
-Status: blocked
+Status: in-progress
 Assignee: Codex
 Blocked by: [05 保留强平与未归属经济事实的危险语义](05-preserve-dangerous-account-facts.md), [06 扩展完整的 OMS DispatchProof](06-expand-complete-oms-dispatch-proof.md)
 Parent: [收口当前 main 安全与权威状态缺口](../map.md)

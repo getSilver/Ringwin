@@ -7,10 +7,10 @@ const std = @import("std");
 const canonical = @import("canonical_event.zig");
 
 pub const contract_version: u16 = 1;
-pub const acceptance_schema_version: u16 = 3;
-pub const journal_schema_version: u16 = 10;
-pub const state_schema_version: u32 = 10;
-pub const schema_registry_identity: u64 = 8;
+pub const acceptance_schema_version: u16 = 4;
+pub const journal_schema_version: u16 = 11;
+pub const state_schema_version: u32 = 11;
+pub const schema_registry_identity: u64 = 9;
 pub const previous_journal_schema_version: u16 = journal_schema_version - 1;
 pub const previous_state_schema_version: u32 = state_schema_version - 1;
 pub const production_optimize = std.builtin.OptimizeMode.ReleaseSafe;
@@ -122,10 +122,10 @@ pub fn supportsCapability(entry: SupportMatrixEntry, capability: OrderCapability
 }
 
 test "production contract freezes Linux scope and schema" {
-    try std.testing.expectEqual(@as(u16, 10), journal_schema_version);
-    try std.testing.expectEqual(@as(u32, 10), state_schema_version);
-    try std.testing.expectEqual(@as(u16, 9), previous_journal_schema_version);
-    try std.testing.expectEqual(@as(u32, 9), previous_state_schema_version);
+    try std.testing.expectEqual(@as(u16, 11), journal_schema_version);
+    try std.testing.expectEqual(@as(u32, 11), state_schema_version);
+    try std.testing.expectEqual(@as(u16, 10), previous_journal_schema_version);
+    try std.testing.expectEqual(@as(u32, 10), previous_state_schema_version);
     try std.testing.expectEqual(@as(usize, 14), support_matrix.len);
     try std.testing.expectEqual(std.builtin.OptimizeMode.ReleaseSafe, production_optimize);
     try std.testing.expectEqual(ProductionPlatform.linux, production_platform);

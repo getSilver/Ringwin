@@ -74,7 +74,37 @@ pub const DispatchBatch = struct {
 
 /// Stable trace sequences of the accepted RiskDecision and established
 /// RiskReservation facts. An unqualified legacy outbox has zero references.
-pub const RiskFactRefs = struct { decision: u64 = 0, reservation: u64 = 0 };
+pub const FactRef = struct { identity: u128 = 0, version: u64 = 0, barrier: u64 = 0 };
+/// References to source-owned facts, not a replayable authorization grant.
+pub const DispatchAuthorityRefs = struct {
+    exchange_account: canonical.ExchangeAccountIdentity = 0,
+    virtual_portfolio: u128 = 0,
+    trading_authorization: FactRef = .{},
+    primary_lease: FactRef = .{},
+    risk_lease: FactRef = .{},
+    capability: FactRef = .{},
+    instrument_rules: FactRef = .{},
+    config: FactRef = .{},
+    adapter_session: canonical.AdapterSessionIdentity = 0,
+    dispatch_deadline_monotonic_ns: u64 = 0,
+    deadline_barrier: u64 = 0,
+
+    pub fn complete(self: @This()) bool {
+        return self.exchange_account != 0 and self.virtual_portfolio != 0 and
+            self.trading_authorization.identity != 0 and self.trading_authorization.version != 0 and self.trading_authorization.barrier != 0 and
+            self.primary_lease.identity != 0 and self.primary_lease.version != 0 and self.primary_lease.barrier != 0 and
+            self.risk_lease.identity != 0 and self.risk_lease.version != 0 and self.risk_lease.barrier != 0 and
+            self.capability.identity != 0 and self.capability.version != 0 and self.capability.barrier != 0 and
+            self.instrument_rules.identity != 0 and self.instrument_rules.version != 0 and self.instrument_rules.barrier != 0 and
+            self.config.identity != 0 and self.config.version != 0 and self.config.barrier != 0 and
+            self.adapter_session != 0 and self.dispatch_deadline_monotonic_ns != 0 and self.deadline_barrier != 0;
+    }
+};
+pub const RiskFactRefs = struct {
+    decision: u64 = 0,
+    reservation: u64 = 0,
+    authority: DispatchAuthorityRefs = .{},
+};
 
 pub const ExecutionReport = struct {
     report_id: u64,
@@ -116,6 +146,7 @@ pub const Command = struct {
     intent_sequence: u64 = 0,
     risk_decision_identity: u64 = 0,
     reservation_identity: u64 = 0,
+    authority: DispatchAuthorityRefs = .{},
 };
 
 pub const Order = struct {
@@ -699,12 +730,29 @@ pub const Oms = struct {
             self.recovery_only = true;
             return error.CommandCapacityExceeded;
         }
-        const command_value: Command = .{ .command_id = self.next_command_id, .order_id = order.id, .strategy_instance = order.strategy_instance, .revision = order.revision, .operation = operation, .instrument = order.instrument, .side = order.side, .portfolio_reduce_only = order.portfolio_reduce_only, .venue_reduce_only = order.venue_reduce_only, .quantity = try std.math.sub(i64, order.quantity, order.cumulative_quantity), .limit_price = order.limit_price, .predecessor_order_id = order.predecessor_order_id, .reservation = order.reservation, .order_type = order.order_type, .time_in_force = order.time_in_force, .market_protection_price = order.market_protection_price, .client_order_id = order.client_order_id, .intent_sequence = intent_sequence, .risk_decision_identity = refs.decision, .reservation_identity = refs.reservation };
+        const command_value: Command = .{ .command_id = self.next_command_id, .order_id = order.id, .strategy_instance = order.strategy_instance, .revision = order.revision, .operation = operation, .instrument = order.instrument, .side = order.side, .portfolio_reduce_only = order.portfolio_reduce_only, .venue_reduce_only = order.venue_reduce_only, .quantity = try std.math.sub(i64, order.quantity, order.cumulative_quantity), .limit_price = order.limit_price, .predecessor_order_id = order.predecessor_order_id, .reservation = order.reservation, .order_type = order.order_type, .time_in_force = order.time_in_force, .market_protection_price = order.market_protection_price, .client_order_id = order.client_order_id, .intent_sequence = intent_sequence, .risk_decision_identity = refs.decision, .reservation_identity = refs.reservation, .authority = refs.authority };
         self.commands[self.command_count] = command_value;
         self.command_count += 1;
         self.command_history[self.command_history_count] = command_value;
         self.command_history_count += 1;
         self.next_command_id = try std.math.add(u64, self.next_command_id, 1);
+    }
+
+    /// Finalize a newly emitted safety cancellation before the shard commits it.
+    pub fn bindCancellationAuthority(self: *Oms, command_id: u64, authority: DispatchAuthorityRefs) !void {
+        for (self.commands[0..self.command_count]) |*command| {
+            if (command.command_id != command_id) continue;
+            if (command.operation != .cancel) return error.NotCancellation;
+            command.authority = authority;
+            for (self.command_history[0..self.command_history_count]) |*historical| {
+                if (historical.command_id == command_id) {
+                    historical.authority = authority;
+                    return;
+                }
+            }
+            return error.MissingCommandHistory;
+        }
+        return error.UnknownCommand;
     }
 
     fn createReplacement(self: *Oms, predecessor: *Order, intent_sequence: u64, refs: RiskFactRefs) !void {
@@ -840,7 +888,7 @@ pub const Oms = struct {
             const command_value = self.command_history[index];
             if (command_value.order_id == order_id) return .{
                 .intent_sequence = command_value.intent_sequence,
-                .refs = .{ .decision = command_value.risk_decision_identity, .reservation = command_value.reservation_identity },
+                .refs = .{ .decision = command_value.risk_decision_identity, .reservation = command_value.reservation_identity, .authority = command_value.authority },
             };
         }
         return .{ .intent_sequence = 0, .refs = .{} };

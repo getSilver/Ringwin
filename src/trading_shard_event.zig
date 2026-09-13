@@ -78,6 +78,7 @@ pub const EventKind = enum(u16) {
     order_amended,
     canonical_account_invalidated,
     canonical_market_invalidated,
+    capability_profile_activated,
 };
 
 pub const Fact = struct {
@@ -195,6 +196,7 @@ pub const PayloadTag = enum(u16) {
     lease_gate_change,
     version_activation,
     strategy_cutover_fence,
+    capability_profile_activation,
 };
 
 pub const ReservationModel = enum(u8) { leveraged, cash };
@@ -282,6 +284,25 @@ pub const VersionActivationEvent = struct {
     canonical_state_digest: [32]u8,
 };
 
+/// A scoped, versioned capability fact supplied by the qualification owner.
+/// This is not a trading authorization or a replayable send permit.
+pub const CapabilityProfileActivation = struct {
+    pub const Environment = enum(u8) { simulation, demo, testnet, production };
+    exchange_account: canonical.ExchangeAccountIdentity,
+    instrument: canonical.InstrumentIdentity,
+    venue: canonical.VenueIdentity,
+    environment: Environment,
+    product: Product,
+    version: u64,
+    rules_version: u64,
+    config_version: u64,
+    adapter_session: canonical.AdapterSessionIdentity,
+    max_dispatch_age_ns: u64,
+    supports_place: bool,
+    supports_post_only: bool,
+    supports_market_protection: bool,
+};
+
 pub const CorePayload = union(PayloadTag) {
     instrument_rules_activated: InstrumentRules,
     margin_rules_activated: MarginRules,
@@ -315,6 +336,7 @@ pub const CorePayload = union(PayloadTag) {
     lease_gate_change: operational.SafetyGateChange,
     version_activation: VersionActivationEvent,
     strategy_cutover_fence: StrategyCutoverFence,
+    capability_profile_activation: CapabilityProfileActivation,
 };
 
 /// Typed core-originated event carried by the authoritative CanonicalEvent.
@@ -583,6 +605,21 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u8, @intFromEnum(value.transition));
             try encoded.put(u64, value.barrier);
             for (value.canonical_state_digest) |byte| try encoded.put(u8, byte);
+        },
+        .capability_profile_activation => |value| {
+            try encoded.put(u128, value.exchange_account);
+            try encoded.put(u128, value.instrument);
+            try encoded.put(u64, value.venue);
+            try encoded.put(u8, @intFromEnum(value.environment));
+            try encoded.put(u8, @intFromEnum(value.product));
+            try encoded.put(u64, value.version);
+            try encoded.put(u64, value.rules_version);
+            try encoded.put(u64, value.config_version);
+            try encoded.put(u128, value.adapter_session);
+            try encoded.put(u64, value.max_dispatch_age_ns);
+            try encoded.put(u8, @intFromBool(value.supports_place));
+            try encoded.put(u8, @intFromBool(value.supports_post_only));
+            try encoded.put(u8, @intFromBool(value.supports_market_protection));
         },
         else => {},
     }
@@ -917,6 +954,21 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             for (&value.canonical_state_digest) |*byte| byte.* = try readInputValue(u8, record.payload, &offset);
             break :blk .{ .version_activation = value };
         },
+        .capability_profile_activation => .{ .capability_profile_activation = .{
+            .exchange_account = try readInputValue(u128, record.payload, &offset),
+            .instrument = try readInputValue(u128, record.payload, &offset),
+            .venue = try readInputValue(u64, record.payload, &offset),
+            .environment = std.enums.fromInt(CapabilityProfileActivation.Environment, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownEnvironment,
+            .product = std.enums.fromInt(Product, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownProduct,
+            .version = try readInputValue(u64, record.payload, &offset),
+            .rules_version = try readInputValue(u64, record.payload, &offset),
+            .config_version = try readInputValue(u64, record.payload, &offset),
+            .adapter_session = try readInputValue(u128, record.payload, &offset),
+            .max_dispatch_age_ns = try readInputValue(u64, record.payload, &offset),
+            .supports_place = try readInputBool(record.payload, &offset),
+            .supports_post_only = try readInputBool(record.payload, &offset),
+            .supports_market_protection = try readInputBool(record.payload, &offset),
+        } },
     };
     if (offset != record.payload.len) return error.TrailingInputPayload;
     return .{

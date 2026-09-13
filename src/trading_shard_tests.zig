@@ -40,6 +40,66 @@ const assertReplayEquivalentConfigured = fixture.assertReplayEquivalentConfigure
 const applyHealthyPrelude = fixture.applyHealthyPrelude;
 const atGroup = fixture.atGroup;
 
+test "OMS command binds scoped capability and source-owned authority barriers" {
+    var run = try startScenario();
+    try applyHealthyPrelude(&run);
+    const profile: shard_event.CapabilityProfileActivation = .{
+        .exchange_account = 2,
+        .instrument = swap_instrument,
+        .venue = 1,
+        .environment = .simulation,
+        .product = .isolated_linear_usdt,
+        .version = 4,
+        .rules_version = 1,
+        .config_version = 1,
+        .adapter_session = 9,
+        .max_dispatch_age_ns = std.time.ns_per_s,
+        .supports_place = true,
+        .supports_post_only = true,
+        .supports_market_protection = true,
+    };
+    var wrong_account = profile;
+    wrong_account.exchange_account = 999;
+    try std.testing.expectError(error.InvalidCapabilityProfile, applyLive(&run.shard, &run.decision_journal, atGroup(14, .{ .identity = 50, .payload = .{ .capability_profile_activation = wrong_account } })));
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(14, .{ .identity = 51, .payload = .{ .capability_profile_activation = profile } }));
+    const command = (try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{ .identity = 52, .payload = .{ .timer = fixture.timer(happy_order_quantity) } }))) orelse return error.MissingOrderCommand;
+    try std.testing.expect(command.authority.complete());
+    try std.testing.expectEqual(@as(u128, 2), command.authority.exchange_account);
+    try std.testing.expectEqual(@as(u128, 1), command.authority.virtual_portfolio);
+    try std.testing.expectEqual(@as(u128, 2), command.authority.trading_authorization.identity);
+    try std.testing.expectEqual(@as(u128, 1), command.authority.primary_lease.identity);
+    try std.testing.expectEqual(@as(u64, 4), command.authority.capability.version);
+    try std.testing.expectEqual(@as(u64, 9), command.authority.adapter_session);
+    try std.testing.expectEqual(command.risk_decision_identity, command.authority.deadline_barrier);
+    var dispatch: oms_module.DispatchBatch = .{ .count = 1 };
+    dispatch.items[0] = .{ .command_id = command.command_id, .state = .submitted };
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(16, .{ .identity = 53, .payload = .{ .oms_dispatch_batch = dispatch } }));
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(17, .{ .identity = 54, .payload = .{ .control_command = .{
+        .command_identity = 54,
+        .content_hash = 54,
+        .target_identity = 1,
+        .expected_version = 3,
+        .expires_at = std.math.maxInt(u64),
+        .kind = .trading_pause,
+    } } }));
+    const cancellations = run.shard.oms.emitted();
+    try std.testing.expectEqual(@as(usize, 1), cancellations.len);
+    try std.testing.expectEqual(oms_module.Operation.cancel, cancellations[0].operation);
+    try std.testing.expect(cancellations[0].authority.complete());
+    try std.testing.expectEqual(@as(u128, 54), cancellations[0].authority.trading_authorization.identity);
+    try std.testing.expect(cancellations[0].authority.dispatch_deadline_monotonic_ns > command.authority.dispatch_deadline_monotonic_ns);
+    var newer_profile = profile;
+    newer_profile.version = 5;
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(18, .{ .identity = 55, .payload = .{ .capability_profile_activation = newer_profile } }));
+    try std.testing.expectEqual(@as(u64, 4), run.shard.oms.command_history[0].authority.capability.version);
+    try run.decision_journal.seal();
+    _ = try assertReplayEquivalent(run);
+    var snapshot_storage: [256 * 1024]u8 = undefined;
+    const snapshot = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &snapshot_storage);
+    const restored = try TradingShard.restoreSnapshot(snapshot);
+    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+}
+
 fn applyGenesisReplay(replay: *ReplayTradingShard) !void {
     for (genesis) |event| _ = try replay.apply(event);
     const digest = replay.canonicalStateDigest();
