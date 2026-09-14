@@ -400,6 +400,8 @@ pub const Gateway = struct {
         const route_index = self.routeIndex(refs.exchange_account) orelse return error.NotSent;
         const route = &self.routes[route_index];
         const instrument = shard.registryInstrument(oms_command.instrument) orelse return error.NotSent;
+        if (route.environment == .demo and instrument.product == .spot and instrument.rules.base_asset == 0)
+            return error.NotSent;
         const profile = instrument.capability orelse return error.NotSent;
         if (route.venue_identity == 0 or route.venue_identity != profile.venue or
             route.environment != profile.environment or route.capability.version != profile.version or
@@ -419,6 +421,11 @@ pub const Gateway = struct {
         const source_position = shard.currentNetExchangePosition(oms_command.instrument) orelse return error.NotSent;
         if (!std.meta.eql(self.exchange_positions[observed_position_index].quantity, source_position))
             return error.NotSent;
+        const increases_risk = oms_command.operation != .cancel and
+            !genuinelyReduces(source_position.lots, oms_command.side, oms_command.quantity);
+        if (increases_risk and (shard.risk_lease_micros <= 0 or
+            shard.risk_lease_valid_through_barrier < shard.trace.len))
+            return error.NotSent;
         const token = std.math.cast(u64, refs.primary_lease.identity) orelse return error.NotSent;
         if (token == 0 or token != authority.fencing_token or authority.authority_barrier == 0 or
             now_monotonic_ns > refs.dispatch_deadline_monotonic_ns or
@@ -428,8 +435,7 @@ pub const Gateway = struct {
         if (route.lease_guard) |guard| {
             if (guard.lease.key.exchange_account != refs.exchange_account) return error.NotSent;
             if (!guard.lease.valid(now_monotonic_ns)) return error.NotSent;
-            guard.check(now_monotonic_ns, token, oms_command.operation != .cancel and
-                !genuinelyReduces(source_position.lots, oms_command.side, oms_command.quantity)) catch return error.NotSent;
+            guard.check(now_monotonic_ns, token, increases_risk) catch return error.NotSent;
         }
         const proof: DispatchProof = .{
             .context = .{

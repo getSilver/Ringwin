@@ -41,7 +41,8 @@ pub const Registry = struct {
         if (entry.instrument == 0 or entry.rules.version == 0 or
             entry.rules.instrument_identity != entry.instrument or
             entry.rules.quantity_denominator <= 0 or
-            entry.rules.product != entry.product)
+            entry.rules.product != entry.product or
+            (entry.product == .spot and entry.rules.base_asset != 0 and entry.rules.base_asset == entry.rules.settlement_asset))
             return error.InvalidInstrumentConfiguration;
         if (self.getPtr(entry.instrument)) |known| {
             // Margin is activated by a separate canonical fact. Registration
@@ -84,6 +85,7 @@ pub const Registry = struct {
                 entry.rules.instrument_identity != entry.instrument or
                 entry.rules.quantity_denominator <= 0 or
                 entry.rules.product != entry.product or
+                (entry.product == .spot and entry.rules.base_asset != 0 and entry.rules.base_asset == entry.rules.settlement_asset) or
                 (entry.capability != null and (entry.capability.?.instrument != entry.instrument or
                     entry.capability.?.venue != entry.venue or entry.capability.?.product != entry.rules.product or
                     entry.capability.?.rules_version != entry.rules.version or entry.capability_barrier == 0)) or
@@ -125,6 +127,9 @@ test "instrument registry is bounded, explicit, and idempotent" {
         .product = .spot,
     };
     const entry: Entry = .{ .instrument = 10, .venue = 2, .product = .spot, .rules = rules, .margin = .{ .version = 1 } };
+    var invalid_base = entry;
+    invalid_base.rules.base_asset = invalid_base.rules.settlement_asset;
+    try std.testing.expectError(error.InvalidInstrumentConfiguration, registry.register(invalid_base));
     try std.testing.expect(try registry.register(entry));
     try std.testing.expect(!(try registry.register(entry)));
     var conflict = entry;

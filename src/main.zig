@@ -32,6 +32,7 @@ const production_runtime = @import("production_runtime.zig");
 const telemetry_qualification = @import("telemetry_qualification.zig");
 const failover = @import("failover.zig");
 const durable_store = @import("durable_store.zig");
+const demo_authority = @import("demo_authority.zig");
 const credential_store = @import("credential_store.zig");
 
 pub fn main(init: std.process.Init) !void {
@@ -144,5 +145,6 @@ test {
     _ = telemetry_qualification;
     _ = failover;
     _ = durable_store;
+    _ = demo_authority;
     _ = credential_store;
 }

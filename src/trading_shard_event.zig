@@ -212,6 +212,7 @@ pub const InstrumentRules = struct {
     product: Product = .isolated_linear_usdt,
     venue: canonical.VenueIdentity = 0,
     settlement_asset: canonical.AssetIdentity = 1,
+    base_asset: canonical.AssetIdentity = 0,
 };
 
 pub const MarginRules = struct {
@@ -387,6 +388,7 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u8, @intFromEnum(value.product));
             try encoded.put(u64, value.venue);
             try encoded.put(u64, value.settlement_asset);
+            try encoded.put(u64, value.base_asset);
         },
         .margin_rules_activated => |value| {
             try encoded.put(u32, value.version);
@@ -670,6 +672,7 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             ) orelse return error.UnknownProduct,
             .venue = try readInputValue(u64, record.payload, &offset),
             .settlement_asset = try readInputValue(u64, record.payload, &offset),
+            .base_asset = try readInputValue(u64, record.payload, &offset),
         } },
         .margin_rules_activated => .{ .margin_rules_activated = .{
             .version = try readInputValue(u32, record.payload, &offset),

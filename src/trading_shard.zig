@@ -879,6 +879,17 @@ pub const TradingShard = struct {
             return null;
         const entry = self.instrument_registry.get(instrument) orelse return null;
         var result: canonical.InstrumentQuantity = .{ .instrument = instrument, .rules_version = entry.rules.version, .lots = 0 };
+        if (entry.product == .spot and entry.rules.base_asset != 0) {
+            var found_balance = false;
+            for (self.canonical_account.balances[0..self.canonical_account.balance_count]) |balance| {
+                if (balance.asset != entry.rules.base_asset) continue;
+                if (found_balance or balance.total.asset != entry.rules.base_asset or balance.total.atoms < 0)
+                    return null;
+                result.lots = balance.total.atoms;
+                found_balance = true;
+            }
+            return result;
+        }
         var found = false;
         for (self.canonical_account.positions[0..self.canonical_account.position_count]) |position| {
             if (position.instrument != instrument) continue;
@@ -2246,6 +2257,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, u8, @intFromEnum(entry.rules.reservation_model));
         digestInt(&hasher, u8, @intFromEnum(entry.rules.product));
         digestInt(&hasher, u64, entry.rules.settlement_asset);
+        digestInt(&hasher, u64, entry.rules.base_asset);
         digestInt(&hasher, u64, entry.rules_barrier);
         digestInt(&hasher, u64, entry.capability_barrier);
         digestBool(&hasher, entry.capability != null);

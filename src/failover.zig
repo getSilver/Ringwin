@@ -238,6 +238,7 @@ const FencingAuthority = struct {
     }
 
     pub fn accepts(self: *FencingAuthority, key: DomainKey, node: u64, token: u64) bool {
+        if (!self.available or !self.durable) return false;
         const record = self.find(key) orelse return false;
         return token != 0 and record.current_token == token and record.owner_node == node;
     }
@@ -383,6 +384,7 @@ pub const GatewayLeaseGuard = struct {
     /// Every send checks the current token. Increasing risk additionally
     /// requires a live monotonic lease; expiry leaves cancel/reduce recovery.
     pub fn check(self: *GatewayLeaseGuard, now_ns: u64, token: u64, increases_risk: bool) !void {
+        if (!self.authority.available or !self.authority.durable) return error.FencingAuthorityUnavailable;
         if (!self.authority.accepts(self.lease.key, self.lease.node, token) or token != self.lease.token)
             return error.StaleFencingToken;
         if (increases_risk and self.recovery_only) return error.RecoveryOnly;
@@ -567,6 +569,11 @@ fn isAutomaticCause(cause: FailoverCause) bool {
 
 fn memoryAuthorityForTesting() FencingAuthority {
     return .{ .durable = true };
+}
+
+pub fn authorityForTesting() FencingAuthority {
+    if (!builtin.is_test) @compileError("test-only fencing authority");
+    return memoryAuthorityForTesting();
 }
 
 pub const FailoverReport = struct {
@@ -846,7 +853,7 @@ test "lease renewal failure enters recovery only and gateway checks clock" {
     try guard.check(100, lease.token, true);
     authority.available = false;
     try std.testing.expectError(error.FencingAuthorityUnavailable, guard.renew(100));
-    try std.testing.expectError(error.RecoveryOnly, guard.check(100, lease.token, true));
+    try std.testing.expectError(error.FencingAuthorityUnavailable, guard.check(100, lease.token, true));
     try std.testing.expect(guard.recovery_only);
 }
 

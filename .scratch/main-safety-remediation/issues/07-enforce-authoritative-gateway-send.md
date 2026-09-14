@@ -41,3 +41,7 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 尚未满足全部验收：显式 Demo 验收程序的 `fixedStrategyBuy` 使用 `TradingShardHostIngress.initHealthySpotFixtureFor` 生成模拟 OMS 事实，真实私有账户事实只进入独立 `DemoProjection`，而 `dispatch` 仍调用已失败关闭的旧 proof 入口。不能把 fixture shard 伪装成实时权威来源。2026-09-14 用户已把 Demo 专属的实时 TradingShard 事实接入、持久决策/dispatch 流初始化和有效 PrimaryLease 来源纳入本票；实现与离线故障验收仍待完成，外部 NodeFence、通用 Linux role、存储适配器自身及线上资格仍排除。当前证据仅为 Windows 离线测试。
 
 同日平台选择：不要求修通现有 Windows Demo 程序；Linux 显式 Demo 路径可复用既有 `LinuxFileAdapter` 与 `LinuxFencingStore`。这只确定实现平台，不表示目标 Linux 文件系统、租约外部协调或 Venue 在线资格已通过。
+
+当前增量：`demo_authority.Owner` 已复用 DurableStore seam 对 Core/Canonical 事实组先提交再发布、显式封存初始化快照、仅恢复完整已提交尾部，并在拒绝或 I/O 故障后失败关闭；账户适配器批次可以进入这一权威日志。版本化 Demo 本地配置可在完整私有账户快照与有效租约 guard 下初始化 Core 事实，不从配置伪造账户余额或 lease token。InstrumentRules 的可选 `base_asset` 使 Demo 现货的 ExchangePosition 从完整账户余额得出，缺映射时 Gateway 拒发；Gateway 增加 RiskLease 有效 barrier 复核，持久 schema 升至 13。Debug/ReleaseSafe 离线全套各 230/230。以上尚未接通 Linux Demo 运行入口，也不满足本票剩余的真实租约、买入/清理及恢复故障验收。
+
+用户同时允许显式、版本化的 Demo 专属本地运营配置作为规则、策略激活和风险额度 Core 事实来源；不得以此代替真实私有账户事实、持久租约或 Gateway 发送复核。

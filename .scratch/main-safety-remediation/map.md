@@ -57,6 +57,7 @@ OrderIntent、Order、RiskReservation、账户危险事实、StrategyHost 授权
 
 ## Decisions so far
 
+- 2026-09-14：用户允许 07 使用显式、版本化的 Demo 专属本地运营配置提供规则、策略激活与风险额度 Core 事实；实际账户状态仍由私有 Canonical 事实提供，配置不得直接生成可发送 proof。
 - 2026-09-14：用户确认显式 Demo 可发送路径不必支持现有 Windows 程序；07 以可复用现有持久存储和租约适配器的 Linux 路径收口，Windows 旧验收程序不作为 07 通过证据。
 - 2026-09-14：用户同意在本图 07 实现恢复 Unknown 结案和显式 Demo 真实来源链，并将 Demo 专属实时 TradingShard、持久决策日志初始化及有效租约来源纳入；仍不授权任何 Demo/Testnet/生产写入，也不把 Linux/外部 NodeFence/在线资格视为已通过。
 - 2026-09-13：06 不新增包揽 lease/capability/risk 的通用授权事实；OMS 命令记录各权威事实的真实身份、版本和 barrier，缺失事实优先扩展原事实来源。Gateway 在 07 发送当刻重读最新授权；重放旧 lease 只供审计/对账，不恢复发送权。

@@ -1178,6 +1178,10 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     const durable_store = durable_memory.interface();
     const stream: @import("durable_store.zig").StreamIdentity = .{ .domain = .control, .id = 77 };
     try gateway.bootstrapDurableDispatch(durable_store, undefined, stream);
+    const lease_barrier = live.shard.risk_lease_valid_through_barrier;
+    live.shard.risk_lease_valid_through_barrier = live.shard.trace.len - 1;
+    try std.testing.expectError(error.NotSent, gateway.sendFromShard(&live.shard, proved.command_id, 2 * std.time.ns_per_s));
+    live.shard.risk_lease_valid_through_barrier = lease_barrier;
     try std.testing.expectError(error.NotSent, gateway.sendFromShard(&live.shard, proved.command_id, 3 * std.time.ns_per_s));
     try std.testing.expectEqual(@as(u64, 1), (try durable_store.recover(undefined, stream)).committed_barrier);
     try std.testing.expectEqual(.accepted, try gateway.sendFromShard(&live.shard, proved.command_id, 2 * std.time.ns_per_s));
