@@ -12,7 +12,7 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 
 ## What to build
 
-让 Gateway 只接受完整 OMS DispatchProof，并在真正调用 VenueAdapter 前复核最新带 barrier 的 ExchangePosition、TradingAuthorization、RiskReservation、PrimaryLease、FencingToken、deadline 与 capability。取消原始 OrderCommand 的业务发送入口和 Demo 绕路。
+让 Gateway 只接受完整 OMS DispatchProof，并在真正调用 VenueAdapter 前复核最新带 barrier 的 ExchangePosition、TradingAuthorization、RiskReservation、PrimaryLease、FencingToken、deadline 与 capability。取消原始 OrderCommand 的业务发送入口和 Demo 绕路。显式 Demo 路径也必须由实时 TradingShard 产生命令，复用 DurableStore seam 初始化和恢复决策/dispatch 流，并从有效的持久租约权威取得 PrimaryLease；不能用 fixture、调用方构造的 proof 或进程内自增 token 代替。
 
 ## Acceptance criteria
 
@@ -22,10 +22,14 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 - [x] 旧 token、过期 lease、过期 deadline、stale barrier、缺 reservation、post-only/保护能力缺失均产生 NotSent，不进入 adapter。
 - [ ] Gateway 崩溃前后的 Submitted/Unknown、重复 dispatch 和恢复对账保持幂等；replay 类型上不拥有 Gateway。
 - [ ] SimulatedVenue 与显式 Demo 路径也通过同一发送边界，且测试证明没有旁路 send。
+- [ ] Demo 私有 Canonical 账户/订单/成交事实进入同一个 TradingShard 权威决策日志，并在持久提交后才可供 Gateway 读取；缺失、拒绝、容量耗尽或恢复不确定时失败关闭，不以 `DemoProjection` 或健康 fixture 冒充权威状态。
+- [ ] Demo 决策流与 Gateway dispatch 流使用明确的流身份初始化及恢复；启动时不能从“文件不存在”推断新身份，旧已提交 dispatch 恢复为 Unknown，结案后也不能重发。
+- [ ] Demo 的 PrimaryLease/FencingToken 来自有效、持久且可复核的租约权威；过期、失联、代次不匹配或未配置租约时任何订单都 NotSent。买入、正常清仓和紧急清理使用同一个 `sendFromShard` 边界。
+- [ ] 以离线注入事实、重启/故障和 spy adapter 验证上述 Demo 链路；不执行 Demo/Testnet/生产写入，亦不把离线通过记为线上资格。
 
 ## Out of scope
 
-- 把 NodeFence 的外部实现或 Venue 网络协议放入 Gateway 核心逻辑。
+- DurableStore 文件适配器自身实现、通用 Linux role、外部 NodeFence、Venue 网络协议、Web 控制面及在线资格；本票只复用既有 seam 和可用的持久租约权威。
 
 ## Answer
 
@@ -33,4 +37,4 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 
 恢复 Unknown 已增加 OMS 权威对账结案记录：仅在同一订单的最新对账为 FoundLive、FoundTerminal 或 ConfirmedAbsent 且状态一致时持久提交；重启后恢复结案身份，旧 dispatch 永不重发。容量仍有界，耗尽时失败关闭，不声称无限期运行或 Linux 磁盘资格。
 
-尚未满足全部验收：显式 Demo 验收程序的 `fixedStrategyBuy` 使用 `TradingShardHostIngress.initHealthySpotFixtureFor` 生成模拟 OMS 事实，真实私有账户事实只进入独立 `DemoProjection`，而 `dispatch` 仍调用已失败关闭的旧 proof 入口。不能把 fixture shard 伪装成实时权威来源。要使 Demo 真正可发送，必须先有真实 TradingShard 决策日志、私有事实接入、有效 PrimaryLease 与 DurableStore 恢复元数据；本图排除了相关外部 NodeFence、Linux role 和存储实现，故不以伪造事实或线上写入填补。当前证据仅为 Windows 离线测试。
+尚未满足全部验收：显式 Demo 验收程序的 `fixedStrategyBuy` 使用 `TradingShardHostIngress.initHealthySpotFixtureFor` 生成模拟 OMS 事实，真实私有账户事实只进入独立 `DemoProjection`，而 `dispatch` 仍调用已失败关闭的旧 proof 入口。不能把 fixture shard 伪装成实时权威来源。2026-09-14 用户已把 Demo 专属的实时 TradingShard 事实接入、持久决策/dispatch 流初始化和有效 PrimaryLease 来源纳入本票；实现与离线故障验收仍待完成，外部 NodeFence、通用 Linux role、存储适配器自身及线上资格仍排除。当前证据仅为 Windows 离线测试。
