@@ -9,6 +9,7 @@ const snapshot_codec = @import("snapshot_codec.zig");
 const production_contract = @import("production_contract.zig");
 const failover = @import("failover.zig");
 const dispatch_record_type: u16 = 0x4701;
+const resolution_record_type: u16 = 0x4702;
 const dispatch_snapshot = "GatewayDispatchV1";
 
 pub const CapabilityProfile = struct {
@@ -85,7 +86,18 @@ const AcceptedDispatch = struct {
     command_id: u64,
     proof: DispatchProof,
 };
-const UncertainDispatch = struct { account: canonical.ExchangeAccountIdentity, command_id: u64 };
+const UncertainDispatch = struct {
+    account: canonical.ExchangeAccountIdentity,
+    command_id: u64,
+    reconciliation_id: u64 = 0,
+    reconciliation_status: ?oms.ReconciliationStatus = null,
+};
+const DispatchResolution = struct {
+    account: canonical.ExchangeAccountIdentity,
+    command_id: u64,
+    reconciliation_id: u64,
+    status: oms.ReconciliationStatus,
+};
 const DurableDispatch = struct {
     store: durable.Store,
     io: std.Io,
@@ -153,12 +165,28 @@ pub const Gateway = struct {
                     if (record.sequence != (std.math.add(u64, last_committed_sequence, 1) catch return error.DurableDispatchUnavailable))
                         return error.DurableDispatchUnavailable;
                     last_committed_sequence = record.sequence;
-                    if (record.type_id != dispatch_record_type or record.schema_version != production_contract.journal_schema_version or record.flags != 0)
+                    if (record.schema_version != production_contract.journal_schema_version or record.flags != 0)
                         return error.DurableDispatchUnavailable;
-                    const proof = snapshot_codec.decodeBare(record.payload, DispatchProof) catch return error.DurableDispatchUnavailable;
-                    if (proof.command.command_id == 0 or proof.context.account == 0 or !proof.command.authority.complete())
-                        return error.DurableDispatchUnavailable;
-                    try self.markUncertain(proof.context.account, proof.command.command_id);
+                    switch (record.type_id) {
+                        dispatch_record_type => {
+                            const proof = snapshot_codec.decodeBare(record.payload, DispatchProof) catch return error.DurableDispatchUnavailable;
+                            if (proof.command.command_id == 0 or proof.context.account == 0 or !proof.command.authority.complete() or
+                                self.uncertainIndex(proof.context.account, proof.command.command_id) != null)
+                                return error.DurableDispatchUnavailable;
+                            self.markUncertain(proof.context.account, proof.command.command_id) catch return error.DurableDispatchUnavailable;
+                        },
+                        resolution_record_type => {
+                            const resolution = snapshot_codec.decodeBare(record.payload, DispatchResolution) catch return error.DurableDispatchUnavailable;
+                            if (resolution.reconciliation_id == 0 or resolution.status == .unresolved)
+                                return error.DurableDispatchUnavailable;
+                            const index = self.uncertainIndex(resolution.account, resolution.command_id) orelse return error.DurableDispatchUnavailable;
+                            if (self.uncertain_dispatches[index].reconciliation_id != 0)
+                                return error.DurableDispatchUnavailable;
+                            self.uncertain_dispatches[index].reconciliation_id = resolution.reconciliation_id;
+                            self.uncertain_dispatches[index].reconciliation_status = resolution.status;
+                        },
+                        else => return error.DurableDispatchUnavailable,
+                    }
                 },
             };
         }
@@ -167,11 +195,81 @@ pub const Gateway = struct {
     }
 
     fn markUncertain(self: *Gateway, account: canonical.ExchangeAccountIdentity, command_id: u64) !void {
-        for (self.uncertain_dispatches[0..self.uncertain_dispatch_count]) |known|
-            if (known.account == account and known.command_id == command_id) return;
+        if (self.uncertainIndex(account, command_id) != null) return;
         if (self.uncertain_dispatch_count == self.uncertain_dispatches.len) return error.DispatchCapacity;
         self.uncertain_dispatches[self.uncertain_dispatch_count] = .{ .account = account, .command_id = command_id };
         self.uncertain_dispatch_count += 1;
+    }
+
+    fn uncertainIndex(self: *const Gateway, account: canonical.ExchangeAccountIdentity, command_id: u64) ?usize {
+        for (self.uncertain_dispatches[0..self.uncertain_dispatch_count], 0..) |known, index|
+            if (known.account == account and known.command_id == command_id) return index;
+        return null;
+    }
+
+    /// Only an OMS-applied authoritative reconciliation can close a recovered
+    /// Unknown. The durable identity remains a tombstone: it can never resend.
+    pub fn reconcileRecoveredDispatch(self: *Gateway, shard: *const trading.TradingShard, command_id: u64) !void {
+        const committed = self.durable_dispatch orelse return error.DurableDispatchUnavailable;
+        if (committed.store.safetyGate() != .open or shard.exchange_account_identity == 0)
+            return error.DurableDispatchUnavailable;
+        const index = self.uncertainIndex(shard.exchange_account_identity, command_id) orelse return error.UnknownDispatch;
+        var command_value: ?oms.Command = null;
+        for (shard.oms.command_history[0..shard.oms.command_history_count]) |known|
+            if (known.command_id == command_id) {
+                command_value = known;
+                break;
+            };
+        const oms_command = command_value orelse return error.UnknownDispatch;
+        if (oms_command.authority.exchange_account != shard.exchange_account_identity or
+            oms_command.authority.virtual_portfolio != shard.portfolio_identity)
+            return error.UnknownDispatch;
+        const order = shard.oms.orderById(oms_command.order_id) orelse return error.UnreconciledDispatch;
+        if (order.last_reconciliation_id == 0 or order.last_reconciliation_status == .unresolved or
+            order.last_reconciliation_revision < oms_command.revision or
+            switch (order.last_reconciliation_status) {
+                .found_live => order.state != .live and order.state != .partially_filled,
+                .found_terminal, .confirmed_absent => order.state != .filled and order.state != .canceled and order.state != .rejected,
+                .unresolved => true,
+            }) return error.UnreconciledDispatch;
+        if (self.uncertain_dispatches[index].reconciliation_id != 0) {
+            if (self.uncertain_dispatches[index].reconciliation_id == order.last_reconciliation_id and
+                self.uncertain_dispatches[index].reconciliation_status == order.last_reconciliation_status) return;
+            return error.ConflictingDispatchResolution;
+        }
+        const resolution: DispatchResolution = .{
+            .account = shard.exchange_account_identity,
+            .command_id = command_id,
+            .reconciliation_id = order.last_reconciliation_id,
+            .status = order.last_reconciliation_status,
+        };
+        var payload_buffer: [trading.journal.max_payload_size]u8 = undefined;
+        const payload = snapshot_codec.encodeBare(&payload_buffer, resolution) catch return error.DurableDispatchUnavailable;
+        committed.store.append(committed.io, .{ .stream = committed.stream, .record = .{
+            .type_id = resolution_record_type,
+            .schema_version = production_contract.journal_schema_version,
+            .flags = 0,
+            .sequence = committed.next_sequence,
+            .source_time = 0,
+            .receive_time = 0,
+            .monotonic_time = 0,
+            .wall_time = 0,
+            .time_presence = .{},
+            .payload = payload,
+        } }) catch {
+            self.latchAccount(shard.exchange_account_identity);
+            return error.DurableDispatchUnavailable;
+        };
+        committed.store.commit(committed.io, committed.stream, committed.next_sequence) catch {
+            self.latchAccount(shard.exchange_account_identity);
+            return error.DurableDispatchUnavailable;
+        };
+        self.durable_dispatch.?.next_sequence = std.math.add(u64, committed.next_sequence, 1) catch {
+            self.latchAccount(shard.exchange_account_identity);
+            return error.DurableDispatchUnavailable;
+        };
+        self.uncertain_dispatches[index].reconciliation_id = resolution.reconciliation_id;
+        self.uncertain_dispatches[index].reconciliation_status = resolution.status;
     }
     pub fn add(self: *Gateway, route: Route) !void {
         for (self.routes[0..self.count]) |existing|

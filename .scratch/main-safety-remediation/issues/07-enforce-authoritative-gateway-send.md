@@ -31,4 +31,6 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 
 进行中：06 已封闭 OMS 来源事实引用；07 的新公开入口从实际 TradingShard outbox 取命令，复核最新来源引用、账户净仓位、route capability 与 lease，在 adapter 前将 dispatch 身份提交到 DurableStore。提交失败不发送；恢复后的已提交身份仅视为 Unknown，不自动重发。旧 caller-built proof 公开入口失败关闭，SimulatedVenue 离线验证通过。
 
-尚未满足全部验收：Demo 仍调用旧入口，因此当前 Demo 订单发送失败关闭，不能宣称该路径已迁至新入口；恢复 Unknown 的权威对账及持久身份容量/轮转也未闭环。当前证据仅为 Windows 离线测试，不含 Demo/Testnet/生产写入或 Linux 持久化资格。
+恢复 Unknown 已增加 OMS 权威对账结案记录：仅在同一订单的最新对账为 FoundLive、FoundTerminal 或 ConfirmedAbsent 且状态一致时持久提交；重启后恢复结案身份，旧 dispatch 永不重发。容量仍有界，耗尽时失败关闭，不声称无限期运行或 Linux 磁盘资格。
+
+尚未满足全部验收：显式 Demo 验收程序的 `fixedStrategyBuy` 使用 `TradingShardHostIngress.initHealthySpotFixtureFor` 生成模拟 OMS 事实，真实私有账户事实只进入独立 `DemoProjection`，而 `dispatch` 仍调用已失败关闭的旧 proof 入口。不能把 fixture shard 伪装成实时权威来源。要使 Demo 真正可发送，必须先有真实 TradingShard 决策日志、私有事实接入、有效 PrimaryLease 与 DurableStore 恢复元数据；本图排除了相关外部 NodeFence、Linux role 和存储实现，故不以伪造事实或线上写入填补。当前证据仅为 Windows 离线测试。

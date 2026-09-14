@@ -1187,6 +1187,7 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     try recovered_gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
     try recovered_gateway.attachRecoveredDurableDispatch(durable_store, undefined, stream);
     try std.testing.expectError(error.NotSent, recovered_gateway.sendFromShard(&live.shard, proved.command_id, 2 * std.time.ns_per_s));
+    try std.testing.expectError(error.UnreconciledDispatch, recovered_gateway.reconcileRecoveredDispatch(&live.shard, proved.command_id));
     try std.testing.expectEqual(@as(u64, 0), recovered_gateway.send_attempt_count);
     var output: [execution_gateway.max_routes]canonical.AdapterOutputBatch = undefined;
     try std.testing.expectEqual(@as(u8, 1), try gateway.drainFair(&output));
@@ -1195,6 +1196,25 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     try std.testing.expectError(error.NotSent, gateway.sendFromShard(&live.shard, proved.command_id, 2 * std.time.ns_per_s));
     try std.testing.expectEqual(@as(u64, 1), gateway.send_attempt_count);
     try std.testing.expectEqual(@as(i64, 10), live.shard.economicSummary().portfolio.swap.quantity);
+    const reconciliation = atGroup(20, .{ .identity = 300, .payload = .{ .oms_reconciliation_result = .{
+        .reconciliation_id = 300,
+        .order_id = proved.order_id,
+        .status = .found_terminal,
+        .revision = proved.revision,
+        .cumulative_quantity = 10,
+        .remaining_quantity = 0,
+        .terminal_state = .filled,
+    } } });
+    _ = try live.shard.apply(reconciliation);
+    try recovered_gateway.reconcileRecoveredDispatch(&live.shard, proved.command_id);
+    try recovered_gateway.reconcileRecoveredDispatch(&live.shard, proved.command_id);
+    try std.testing.expectEqual(@as(u64, 3), (try durable_store.recover(undefined, stream)).committed_barrier);
+    var recovered_again: execution_gateway.Gateway = .{};
+    try recovered_again.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+    try recovered_again.attachRecoveredDurableDispatch(durable_store, undefined, stream);
+    try recovered_again.reconcileRecoveredDispatch(&live.shard, proved.command_id);
+    try std.testing.expectError(error.NotSent, recovered_again.sendFromShard(&live.shard, proved.command_id, 2 * std.time.ns_per_s));
+    try std.testing.expectEqual(@as(u64, 0), recovered_again.send_attempt_count);
 
     var replayed: ReplayTradingShard = .{};
     try applyGenesisReplay(&replayed);
@@ -1202,6 +1222,7 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     _ = try replayed.apply(account_bootstrap);
     _ = try replayed.apply(place);
     for (output[0].slice()) |event| _ = try replayed.apply(.{ .venue = event });
+    _ = try replayed.apply(reconciliation);
     try std.testing.expectEqualSlices(u8, &live.shard.canonicalStateDigest(), &replayed.canonicalStateDigest());
     comptime std.debug.assert(!@hasField(ReplayTradingShard, "gateway"));
 }
