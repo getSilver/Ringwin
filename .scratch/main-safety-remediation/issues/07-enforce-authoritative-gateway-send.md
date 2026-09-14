@@ -29,4 +29,6 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 
 ## Answer
 
-部分完成：Gateway 持有并重读最新观察及同进程 dispatch 身份，旧 barrier 失败关闭。但 Demo 仍可自造观察/proof，accepted dispatch 没有预发送持久事实，崩溃窗口可能重发。用户已允许复用现有 DurableStore seam 做预发送持久提交；须先完成 06，再实施此项，不扩展 DurableStore 自身或线上资格。
+进行中：06 已封闭 OMS 来源事实引用；07 的新公开入口从实际 TradingShard outbox 取命令，复核最新来源引用、账户净仓位、route capability 与 lease，在 adapter 前将 dispatch 身份提交到 DurableStore。提交失败不发送；恢复后的已提交身份仅视为 Unknown，不自动重发。旧 caller-built proof 公开入口失败关闭，SimulatedVenue 离线验证通过。
+
+尚未满足全部验收：Demo 仍调用旧入口，因此当前 Demo 订单发送失败关闭，不能宣称该路径已迁至新入口；恢复 Unknown 的权威对账及持久身份容量/轮转也未闭环。当前证据仅为 Windows 离线测试，不含 Demo/Testnet/生产写入或 Linux 持久化资格。

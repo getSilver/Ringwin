@@ -866,6 +866,31 @@ pub const TradingShard = struct {
         return refs;
     }
 
+    /// Current source-owned versions for Gateway recheck; no deadline or send
+    /// permission is reconstructed from a replayed shard.
+    pub fn currentDispatchAuthorityRefs(self: *const TradingShard, instrument: canonical.InstrumentIdentity) !oms_module.DispatchAuthorityRefs {
+        return self.dispatchAuthorityRefs(instrument, 0, 0);
+    }
+
+    /// Only a complete, healthy account observation can prove current net
+    /// ExchangePosition; an absent row in that complete snapshot means flat.
+    pub fn currentNetExchangePosition(self: *const TradingShard, instrument: canonical.InstrumentIdentity) ?canonical.InstrumentQuantity {
+        if (!self.canonical_account.valid or self.canonical_account.exchange_account != self.exchange_account_identity)
+            return null;
+        const entry = self.instrument_registry.get(instrument) orelse return null;
+        var result: canonical.InstrumentQuantity = .{ .instrument = instrument, .rules_version = entry.rules.version, .lots = 0 };
+        var found = false;
+        for (self.canonical_account.positions[0..self.canonical_account.position_count]) |position| {
+            if (position.instrument != instrument) continue;
+            if (found or position.side != .net or position.quantity.instrument != instrument or
+                position.quantity.rules_version != entry.rules.version)
+                return null;
+            result = position.quantity;
+            found = true;
+        }
+        return result;
+    }
+
     fn bindFreshCancellations(self: *TradingShard, now_monotonic_ns: u64) !void {
         for (self.oms.emitted()) |command| {
             if (command.operation != .cancel) continue;
@@ -1483,7 +1508,7 @@ pub const TradingShard = struct {
                     profile.rules_version != entry.rules.version or
                     profile.config_version != self.strategy_config_version or
                     profile.version == 0 or profile.adapter_session == 0 or
-                    profile.max_dispatch_age_ns == 0 or !profile.supports_place)
+                    profile.max_dispatch_age_ns == 0 or !profile.supports_place or !profile.supports_cancel)
                     return error.InvalidCapabilityProfile;
                 if (entry.capability) |known| {
                     if (profile.version < known.version) return error.StaleCapabilityProfile;
@@ -2236,6 +2261,9 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
             digestInt(&hasher, u128, capability.adapter_session);
             digestInt(&hasher, u64, capability.max_dispatch_age_ns);
             digestBool(&hasher, capability.supports_place);
+            digestBool(&hasher, capability.supports_cancel);
+            digestBool(&hasher, capability.supports_native_amend);
+            digestBool(&hasher, capability.supports_venue_reduce_only);
             digestBool(&hasher, capability.supports_post_only);
             digestBool(&hasher, capability.supports_market_protection);
         }

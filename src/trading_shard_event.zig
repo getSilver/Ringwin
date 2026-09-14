@@ -299,6 +299,9 @@ pub const CapabilityProfileActivation = struct {
     adapter_session: canonical.AdapterSessionIdentity,
     max_dispatch_age_ns: u64,
     supports_place: bool,
+    supports_cancel: bool,
+    supports_native_amend: bool,
+    supports_venue_reduce_only: bool,
     supports_post_only: bool,
     supports_market_protection: bool,
 };
@@ -618,6 +621,9 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u128, value.adapter_session);
             try encoded.put(u64, value.max_dispatch_age_ns);
             try encoded.put(u8, @intFromBool(value.supports_place));
+            try encoded.put(u8, @intFromBool(value.supports_cancel));
+            try encoded.put(u8, @intFromBool(value.supports_native_amend));
+            try encoded.put(u8, @intFromBool(value.supports_venue_reduce_only));
             try encoded.put(u8, @intFromBool(value.supports_post_only));
             try encoded.put(u8, @intFromBool(value.supports_market_protection));
         },
@@ -966,6 +972,9 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             .adapter_session = try readInputValue(u128, record.payload, &offset),
             .max_dispatch_age_ns = try readInputValue(u64, record.payload, &offset),
             .supports_place = try readInputBool(record.payload, &offset),
+            .supports_cancel = try readInputBool(record.payload, &offset),
+            .supports_native_amend = try readInputBool(record.payload, &offset),
+            .supports_venue_reduce_only = try readInputBool(record.payload, &offset),
             .supports_post_only = try readInputBool(record.payload, &offset),
             .supports_market_protection = try readInputBool(record.payload, &offset),
         } },

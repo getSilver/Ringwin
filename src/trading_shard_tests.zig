@@ -55,6 +55,9 @@ test "OMS command binds scoped capability and source-owned authority barriers" {
         .adapter_session = 9,
         .max_dispatch_age_ns = std.time.ns_per_s,
         .supports_place = true,
+        .supports_cancel = true,
+        .supports_native_amend = false,
+        .supports_venue_reduce_only = false,
         .supports_post_only = true,
         .supports_market_protection = true,
     };
@@ -1094,6 +1097,39 @@ test "SPOT and linear instruments close economics and replay independently" {
 
 test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     var live = try startScenario();
+    const capability = atGroup(12, .{ .identity = 219, .payload = .{ .capability_profile_activation = .{
+        .exchange_account = 2,
+        .instrument = swap_instrument,
+        .venue = 1,
+        .environment = .simulation,
+        .product = .isolated_linear_usdt,
+        .version = 1,
+        .rules_version = 1,
+        .config_version = 1,
+        .adapter_session = 1,
+        .max_dispatch_age_ns = std.time.ns_per_s,
+        .supports_place = true,
+        .supports_cancel = true,
+        .supports_native_amend = false,
+        .supports_venue_reduce_only = false,
+        .supports_post_only = false,
+        .supports_market_protection = false,
+    } } });
+    _ = try live.shard.apply(capability);
+    var account_bootstrap = fixture.canonicalAt(12, 1, .{ .account_bootstrap_snapshot = .{
+        .identity = 1,
+        .exchange_account = 2,
+        .scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true },
+        .source_stream = 2,
+        .source_sequence = 1,
+        .balance_count = 0,
+        .position_count = 0,
+        .margin_count = 0,
+    } });
+    account_bootstrap.venue.envelope.identity.stream = 2;
+    account_bootstrap.venue.envelope.source_stream = 2;
+    account_bootstrap.venue.envelope.raw_evidence.stream = 2;
+    _ = try live.shard.apply(account_bootstrap);
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 220, .count = 1 };
     group.members[0] = .{ .intent_sequence = 220, .operation = .place, .instrument = swap_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
     const place = atGroup(12, .{ .identity = 220, .payload = .{ .oms_intent_group = group } });
@@ -1108,32 +1144,50 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     const adapter = implementation.adapter();
     try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1 });
     var gateway: execution_gateway.Gateway = .{};
-    try gateway.add(.{ .account = 2, .adapter = adapter, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
-    try gateway.observeAuthority(.{
+    try gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+    const current_authority: execution_gateway.AuthorityFacts = .{
         .account = 2,
         .effective_trading_authority = true,
         .reservation_identity = placed.oms_commands[0].reservation_identity,
         .reservation = placed.oms_commands[0].reservation,
-        .primary_lease_expires_at_monotonic_ns = 1,
+        .primary_lease_expires_at_monotonic_ns = 3 * std.time.ns_per_s,
         .fencing_token = 1,
         .exchange_position = .{ .instrument = swap_instrument, .rules_version = 1, .lots = 0 },
         .authority_barrier = 1,
-    });
-    try std.testing.expectEqual(.accepted, try gateway.sendProof(.{
-        .context = .{
-            .account = 2,
-            .capability_version = 1,
-            .rules_version = 1,
-            .config_version = 1,
-            .adapter_session = 1,
-            .dispatch_deadline_monotonic_ns = 1,
-        },
-        .command = placed.oms_commands[0],
-        .fencing_token = 1,
-        .authority_barrier = 1,
-        .now_monotonic_ns = 1,
-    }));
+    };
+    try gateway.observeAuthority(current_authority);
+    const fault_memory = try std.testing.allocator.create(@import("durable_store.zig").MemoryAdapter);
+    defer std.testing.allocator.destroy(fault_memory);
+    fault_memory.* = .init();
+    var fault_gateway: execution_gateway.Gateway = .{};
+    try fault_gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+    var wrong_position = current_authority;
+    wrong_position.exchange_position.lots = 1;
+    try fault_gateway.observeAuthority(wrong_position);
+    try fault_gateway.bootstrapDurableDispatch(fault_memory.interface(), undefined, .{ .domain = .control, .id = 78 });
+    try std.testing.expectError(error.NotSent, fault_gateway.sendFromShard(&live.shard, proved.command_id, 2 * std.time.ns_per_s));
+    var corrected_position = current_authority;
+    corrected_position.authority_barrier = 2;
+    try fault_gateway.observeAuthority(corrected_position);
+    fault_memory.injectFault(.eio);
+    try std.testing.expectError(error.NotSent, fault_gateway.sendFromShard(&live.shard, proved.command_id, 2 * std.time.ns_per_s));
+    try std.testing.expectEqual(@as(u64, 0), fault_gateway.send_attempt_count);
+    const durable_memory = try std.testing.allocator.create(@import("durable_store.zig").MemoryAdapter);
+    defer std.testing.allocator.destroy(durable_memory);
+    durable_memory.* = .init();
+    const durable_store = durable_memory.interface();
+    const stream: @import("durable_store.zig").StreamIdentity = .{ .domain = .control, .id = 77 };
+    try gateway.bootstrapDurableDispatch(durable_store, undefined, stream);
+    try std.testing.expectError(error.NotSent, gateway.sendFromShard(&live.shard, proved.command_id, 3 * std.time.ns_per_s));
+    try std.testing.expectEqual(@as(u64, 1), (try durable_store.recover(undefined, stream)).committed_barrier);
+    try std.testing.expectEqual(.accepted, try gateway.sendFromShard(&live.shard, proved.command_id, 2 * std.time.ns_per_s));
+    try std.testing.expectEqual(@as(u64, 2), (try durable_store.recover(undefined, stream)).committed_barrier);
     try std.testing.expectEqual(@as(u64, 1), gateway.send_attempt_count);
+    var recovered_gateway: execution_gateway.Gateway = .{};
+    try recovered_gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+    try recovered_gateway.attachRecoveredDurableDispatch(durable_store, undefined, stream);
+    try std.testing.expectError(error.NotSent, recovered_gateway.sendFromShard(&live.shard, proved.command_id, 2 * std.time.ns_per_s));
+    try std.testing.expectEqual(@as(u64, 0), recovered_gateway.send_attempt_count);
     var output: [execution_gateway.max_routes]canonical.AdapterOutputBatch = undefined;
     try std.testing.expectEqual(@as(u8, 1), try gateway.drainFair(&output));
     for (output[0].slice()) |event| _ = try live.shard.apply(.{ .venue = event });
@@ -1142,6 +1196,8 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
 
     var replayed: ReplayTradingShard = .{};
     try applyGenesisReplay(&replayed);
+    _ = try replayed.apply(capability);
+    _ = try replayed.apply(account_bootstrap);
     _ = try replayed.apply(place);
     for (output[0].slice()) |event| _ = try replayed.apply(.{ .venue = event });
     try std.testing.expectEqualSlices(u8, &live.shard.canonicalStateDigest(), &replayed.canonicalStateDigest());

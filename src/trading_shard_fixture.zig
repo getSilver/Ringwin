@@ -17,12 +17,12 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-pub const expected_happy_digest = "6adece97c2c98f92d5b6ce2183ef51aeca4d7348a27b8215429d5edbc4dc0ac5";
+pub const expected_happy_digest = "af58a4b66467dda3f630aa399b38dc0212f28426ba00203eaa6e41227ca8ac1e";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "de3f0f93b86a8cf2ec0b8022a67ead211fb919083883aa664f4bf2b7a2efdcb7",
-    "f26a1dc9f288c928d4119dd8e7630c021501f873eb2001e73c479e30870e5c22",
-    "6433f7f1eff9b3313ae51f7eca610a544d8c49a2ea80d6221a995011c3636ad6",
+    "1ffd3a841169b6fab88424811091b2ed3f4612c50c0f0a8be0091ce7a2943a19",
+    "1d6210fa0d9be53d974f850514bf14a183fbf20f6c2315bb2d5fa25d232cf6e6",
+    "ecc3cf60ae221af262c2bcc0cd5e8e080b4f510aab41bc7010a10280338ec8f9",
     expected_happy_digest,
 };
 pub const order_limit_price: i64 = 50_100_000_000;

@@ -2,6 +2,14 @@ const canonical = @import("canonical_event.zig");
 const oms = @import("oms.zig");
 const venue = @import("venue_adapter.zig");
 const std = @import("std");
+const trading = @import("trading_shard.zig");
+const shard_event = @import("trading_shard_event.zig");
+const durable = @import("durable_store.zig");
+const snapshot_codec = @import("snapshot_codec.zig");
+const production_contract = @import("production_contract.zig");
+const failover = @import("failover.zig");
+const dispatch_record_type: u16 = 0x4701;
+const dispatch_snapshot = "GatewayDispatchV1";
 
 pub const CapabilityProfile = struct {
     version: u64,
@@ -9,12 +17,23 @@ pub const CapabilityProfile = struct {
     config_version: u64,
     session: canonical.AdapterSessionIdentity,
     supports_place: bool = true,
+    supports_cancel: bool = true,
+    supports_native_amend: bool = false,
+    supports_venue_reduce_only: bool = false,
     supports_post_only: bool = false,
     supports_market_protection: bool = false,
 };
 pub const LatchedSafetyGate = enum { open, latched };
 pub const OpeningGate = enum { open, blocked };
-pub const Route = struct { account: canonical.ExchangeAccountIdentity, adapter: venue.VenueAdapter, capability: CapabilityProfile, safety_gate: LatchedSafetyGate = .open };
+pub const Route = struct {
+    account: canonical.ExchangeAccountIdentity,
+    adapter: venue.VenueAdapter,
+    capability: CapabilityProfile,
+    venue_identity: canonical.VenueIdentity = 0,
+    environment: shard_event.CapabilityProfileActivation.Environment = .simulation,
+    lease_guard: ?*failover.GatewayLeaseGuard = null,
+    safety_gate: LatchedSafetyGate = .open,
+};
 pub const InstrumentOpeningGate = struct { instrument: canonical.InstrumentIdentity, state: OpeningGate = .open };
 pub const OmsDispatchContext = struct {
     account: canonical.ExchangeAccountIdentity,
@@ -66,6 +85,13 @@ const AcceptedDispatch = struct {
     command_id: u64,
     proof: DispatchProof,
 };
+const UncertainDispatch = struct { account: canonical.ExchangeAccountIdentity, command_id: u64 };
+const DurableDispatch = struct {
+    store: durable.Store,
+    io: std.Io,
+    stream: durable.StreamIdentity,
+    next_sequence: u64,
+};
 pub const Gateway = struct {
     routes: [max_routes]Route = undefined,
     count: u8 = 0,
@@ -79,7 +105,74 @@ pub const Gateway = struct {
     exchange_position_count: u8 = 0,
     accepted_dispatches: [max_authority_records]AcceptedDispatch = undefined,
     accepted_dispatch_count: u8 = 0,
+    uncertain_dispatches: [max_authority_records]UncertainDispatch = undefined,
+    uncertain_dispatch_count: u8 = 0,
+    durable_dispatch: ?DurableDispatch = null,
     send_attempt_count: u64 = 0,
+
+    /// Explicit virgin-stream bootstrap. Production callers must establish
+    /// stream identity from operator-owned durable metadata, not a missing file.
+    pub fn bootstrapDurableDispatch(self: *Gateway, store: durable.Store, io: std.Io, stream: durable.StreamIdentity) !void {
+        if (self.durable_dispatch != null or stream.domain != .control or stream.id == 0 or store.safetyGate() != .open)
+            return error.DurableDispatchUnavailable;
+        store.append(io, .{ .stream = stream, .record = .{
+            .type_id = dispatch_record_type,
+            .schema_version = production_contract.journal_schema_version,
+            .flags = 0,
+            .sequence = 1,
+            .source_time = 0,
+            .receive_time = 0,
+            .monotonic_time = 0,
+            .wall_time = 0,
+            .time_presence = .{},
+            .payload = &.{},
+        } }) catch return error.DurableDispatchUnavailable;
+        store.commit(io, stream, 1) catch return error.DurableDispatchUnavailable;
+        store.seal(io, stream) catch return error.DurableDispatchUnavailable;
+        store.publishSnapshot(io, stream, 1, dispatch_snapshot) catch return error.DurableDispatchUnavailable;
+        store.rotate(io, stream) catch return error.DurableDispatchUnavailable;
+        self.durable_dispatch = .{ .store = store, .io = io, .stream = stream, .next_sequence = 2 };
+    }
+
+    /// Recovery reconstructs only Unknown dispatch identities. It never
+    /// replays an adapter send or upgrades a committed attempt to Submitted.
+    pub fn attachRecoveredDurableDispatch(self: *Gateway, store: durable.Store, io: std.Io, stream: durable.StreamIdentity) !void {
+        if (self.durable_dispatch != null or stream.domain != .control or stream.id == 0 or store.safetyGate() != .open)
+            return error.DurableDispatchUnavailable;
+        const recovered = store.recover(io, stream) catch return error.DurableDispatchUnavailable;
+        if (recovered.status != .ready or recovered.gate != .open or
+            !std.mem.eql(u8, recovered.snapshot, dispatch_snapshot) or recovered.committed_barrier == 0)
+            return error.DurableDispatchUnavailable;
+        var last_committed_sequence: u64 = 1; // The sealed bootstrap snapshot covers sequence 1.
+        if (recovered.tail.len != 0) {
+            var reader = try trading.journal.Reader.init(recovered.tail);
+            while (true) switch (try reader.next()) {
+                .end => break,
+                .record => |record| {
+                    if (record.sequence > recovered.committed_barrier) continue;
+                    if (record.sequence != (std.math.add(u64, last_committed_sequence, 1) catch return error.DurableDispatchUnavailable))
+                        return error.DurableDispatchUnavailable;
+                    last_committed_sequence = record.sequence;
+                    if (record.type_id != dispatch_record_type or record.schema_version != production_contract.journal_schema_version or record.flags != 0)
+                        return error.DurableDispatchUnavailable;
+                    const proof = snapshot_codec.decodeBare(record.payload, DispatchProof) catch return error.DurableDispatchUnavailable;
+                    if (proof.command.command_id == 0 or proof.context.account == 0 or !proof.command.authority.complete())
+                        return error.DurableDispatchUnavailable;
+                    try self.markUncertain(proof.context.account, proof.command.command_id);
+                },
+            };
+        }
+        if (last_committed_sequence != recovered.committed_barrier) return error.DurableDispatchUnavailable;
+        self.durable_dispatch = .{ .store = store, .io = io, .stream = stream, .next_sequence = std.math.add(u64, recovered.last_sequence, 1) catch return error.DurableDispatchUnavailable };
+    }
+
+    fn markUncertain(self: *Gateway, account: canonical.ExchangeAccountIdentity, command_id: u64) !void {
+        for (self.uncertain_dispatches[0..self.uncertain_dispatch_count]) |known|
+            if (known.account == account and known.command_id == command_id) return;
+        if (self.uncertain_dispatch_count == self.uncertain_dispatches.len) return error.DispatchCapacity;
+        self.uncertain_dispatches[self.uncertain_dispatch_count] = .{ .account = account, .command_id = command_id };
+        self.uncertain_dispatch_count += 1;
+    }
     pub fn add(self: *Gateway, route: Route) !void {
         for (self.routes[0..self.count]) |existing|
             if (existing.account == route.account) return error.DuplicateAccountRoute;
@@ -146,7 +239,7 @@ pub const Gateway = struct {
 
     /// Rehydrates a durable accepted dispatch during recovery. Replaying its
     /// proof returns the accepted result without crossing the adapter again.
-    pub fn restoreAcceptedDispatch(self: *Gateway, proof: DispatchProof) !void {
+    fn restoreAcceptedDispatch(self: *Gateway, proof: DispatchProof) !void {
         const account = proof.context.account;
         const command_id = proof.command.command_id;
         if (self.routeIndex(account) == null) return error.UnknownAccount;
@@ -158,6 +251,134 @@ pub const Gateway = struct {
         if (self.accepted_dispatch_count == self.accepted_dispatches.len) return error.DispatchCapacity;
         self.accepted_dispatches[self.accepted_dispatch_count] = .{ .account = account, .command_id = command_id, .proof = proof };
         self.accepted_dispatch_count += 1;
+    }
+
+    /// The public order path takes an actual shard outbox identity. The caller
+    /// cannot supply missing capability, rules, config, lease or deadline data.
+    pub fn sendFromShard(self: *Gateway, shard: *const trading.TradingShard, command_id: u64, now_monotonic_ns: u64) !venue.SendResult {
+        const committed = self.durable_dispatch orelse return error.NotSent;
+        if (committed.store.safetyGate() != .open or now_monotonic_ns == 0 or
+            self.uncertain_dispatch_count == self.uncertain_dispatches.len)
+            return error.NotSent;
+        var command_value: ?oms.Command = null;
+        for (shard.oms.command_history[0..shard.oms.command_history_count]) |known| {
+            if (known.command_id == command_id) {
+                command_value = known;
+                break;
+            }
+        }
+        const oms_command = command_value orelse return error.NotSent;
+        const refs = oms_command.authority;
+        if (!refs.complete() or refs.exchange_account != shard.exchange_account_identity or
+            refs.virtual_portfolio != shard.portfolio_identity or refs.deadline_barrier > shard.trace.len or
+            oms_command.risk_decision_identity == 0 or oms_command.reservation_identity == 0 or
+            oms_command.risk_decision_identity >= oms_command.reservation_identity or oms_command.reservation_identity > shard.trace.len)
+            return error.NotSent;
+        const decision = shard.trace.events[oms_command.risk_decision_identity - 1];
+        const reservation_fact = shard.trace.events[oms_command.reservation_identity - 1];
+        if (decision.kind != .risk_accepted or reservation_fact.kind != .risk_reservation_created or
+            decision.identity != oms_command.intent_sequence or reservation_fact.identity != oms_command.intent_sequence)
+            return error.NotSent;
+        const order = shard.oms.orderById(oms_command.order_id) orelse return error.NotSent;
+        if (order.revision != oms_command.revision or order.instrument != oms_command.instrument or
+            order.predecessor_order_id != oms_command.predecessor_order_id or
+            (oms_command.operation != .cancel and (!order.reservation_active or
+                !std.meta.eql(order.reservation, oms_command.reservation))))
+            return error.NotSent;
+        const latest = shard.currentDispatchAuthorityRefs(oms_command.instrument) catch return error.NotSent;
+        if (!std.meta.eql(refs.trading_authorization, latest.trading_authorization) or
+            !std.meta.eql(refs.primary_lease, latest.primary_lease) or
+            !std.meta.eql(refs.risk_lease, latest.risk_lease) or
+            !std.meta.eql(refs.capability, latest.capability) or
+            !std.meta.eql(refs.instrument_rules, latest.instrument_rules) or
+            !std.meta.eql(refs.config, latest.config) or
+            refs.adapter_session != latest.adapter_session)
+            return error.NotSent;
+        const route_index = self.routeIndex(refs.exchange_account) orelse return error.NotSent;
+        const route = &self.routes[route_index];
+        const instrument = shard.registryInstrument(oms_command.instrument) orelse return error.NotSent;
+        const profile = instrument.capability orelse return error.NotSent;
+        if (route.venue_identity == 0 or route.venue_identity != profile.venue or
+            route.environment != profile.environment or route.capability.version != profile.version or
+            route.capability.rules_version != profile.rules_version or
+            route.capability.config_version != profile.config_version or route.capability.session != profile.adapter_session or
+            route.capability.supports_place != profile.supports_place or
+            route.capability.supports_cancel != profile.supports_cancel or
+            route.capability.supports_native_amend != profile.supports_native_amend or
+            route.capability.supports_venue_reduce_only != profile.supports_venue_reduce_only or
+            route.capability.supports_post_only != profile.supports_post_only or
+            route.capability.supports_market_protection != profile.supports_market_protection)
+            return error.NotSent;
+        const authority = self.account_authority[route_index];
+        if (authority.effective_trading_authority != shard.operational_state.effectiveTradingAuthority())
+            return error.NotSent;
+        const observed_position_index = self.exchangePositionIndex(refs.exchange_account, oms_command.instrument) orelse return error.NotSent;
+        const source_position = shard.currentNetExchangePosition(oms_command.instrument) orelse return error.NotSent;
+        if (!std.meta.eql(self.exchange_positions[observed_position_index].quantity, source_position))
+            return error.NotSent;
+        const token = std.math.cast(u64, refs.primary_lease.identity) orelse return error.NotSent;
+        if (token == 0 or token != authority.fencing_token or authority.authority_barrier == 0 or
+            now_monotonic_ns > refs.dispatch_deadline_monotonic_ns or
+            now_monotonic_ns > authority.primary_lease_expires_at_monotonic_ns)
+            return error.NotSent;
+        if (route.environment != .simulation and route.lease_guard == null) return error.NotSent;
+        if (route.lease_guard) |guard| {
+            if (guard.lease.key.exchange_account != refs.exchange_account) return error.NotSent;
+            if (!guard.lease.valid(now_monotonic_ns)) return error.NotSent;
+            guard.check(now_monotonic_ns, token, oms_command.operation != .cancel and
+                !genuinelyReduces(source_position.lots, oms_command.side, oms_command.quantity)) catch return error.NotSent;
+        }
+        const proof: DispatchProof = .{
+            .context = .{
+                .account = refs.exchange_account,
+                .capability_version = refs.capability.version,
+                .rules_version = refs.instrument_rules.version,
+                .config_version = refs.config.version,
+                .adapter_session = refs.adapter_session,
+                .dispatch_deadline_monotonic_ns = refs.dispatch_deadline_monotonic_ns,
+            },
+            .command = oms_command,
+            .fencing_token = token,
+            .authority_barrier = authority.authority_barrier,
+            .now_monotonic_ns = now_monotonic_ns,
+        };
+        if (self.acceptedDispatchIndex(refs.exchange_account, command_id) != null) return self.sendProofInternal(proof);
+        for (self.uncertain_dispatches[0..self.uncertain_dispatch_count]) |uncertain|
+            if (uncertain.account == refs.exchange_account and uncertain.command_id == command_id) return error.NotSent;
+        var payload_buffer: [trading.journal.max_payload_size]u8 = undefined;
+        const payload = snapshot_codec.encodeBare(&payload_buffer, proof) catch return error.NotSent;
+        // ponytail: one bounded dispatch tail; JournalFull fails closed. Add
+        // snapshot/rotation only when measured dispatch volume needs it.
+        committed.store.append(committed.io, .{ .stream = committed.stream, .record = .{
+            .type_id = dispatch_record_type,
+            .schema_version = production_contract.journal_schema_version,
+            .flags = 0,
+            .sequence = committed.next_sequence,
+            .source_time = 0,
+            .receive_time = 0,
+            .monotonic_time = now_monotonic_ns,
+            .wall_time = 0,
+            .time_presence = .{ .monotonic = true },
+            .payload = payload,
+        } }) catch {
+            self.latchAccount(refs.exchange_account);
+            return error.NotSent;
+        };
+        committed.store.commit(committed.io, committed.stream, committed.next_sequence) catch {
+            self.latchAccount(refs.exchange_account);
+            try self.markUncertain(refs.exchange_account, command_id);
+            return error.NotSent;
+        };
+        self.durable_dispatch.?.next_sequence = std.math.add(u64, committed.next_sequence, 1) catch {
+            self.latchAccount(refs.exchange_account);
+            return error.NotSent;
+        };
+        const result = self.sendProofInternal(proof) catch {
+            try self.markUncertain(refs.exchange_account, command_id);
+            return error.NotSent;
+        };
+        if (result != .accepted) try self.markUncertain(refs.exchange_account, command_id);
+        return result;
     }
     fn sendUnprovedForContractTest(self: *Gateway, request: canonical.OrderCommand) !venue.SendResult {
         const route = self.routeFor(request.exchange_account) orelse return error.UnknownAccount;
@@ -204,8 +425,17 @@ pub const Gateway = struct {
 
     /// The sole business-order boundary. Every mutable authority dependency is
     /// rechecked immediately before the VenueAdapter external effect.
-    pub fn sendProof(self: *Gateway, proof: DispatchProof) !venue.SendResult {
+    /// Legacy caller-built proofs remain representable during expand but can
+    /// never cross the public business-order send boundary.
+    pub fn sendProof(_: *Gateway, _: DispatchProof) !venue.SendResult {
+        return error.OrderProofRequired;
+    }
+
+    fn sendProofInternal(self: *Gateway, proof: DispatchProof) !venue.SendResult {
         const command_value = proof.command;
+        for (self.uncertain_dispatches[0..self.uncertain_dispatch_count]) |uncertain|
+            if (uncertain.account == proof.context.account and uncertain.command_id == command_value.command_id)
+                return error.NotSent;
         if (self.acceptedDispatchIndex(proof.context.account, command_value.command_id)) |index| {
             if (!std.meta.eql(self.accepted_dispatches[index].proof, proof)) return error.NotSent;
             return .accepted;
@@ -217,6 +447,14 @@ pub const Gateway = struct {
         const position_index = self.exchangePositionIndex(proof.context.account, command_value.instrument) orelse return error.NotSent;
         const reservation = self.reservations[reservation_index].amount;
         const exchange_position = self.exchange_positions[position_index].quantity;
+        const route = &self.routes[route_index];
+        if (route.environment != .simulation and route.lease_guard == null) return error.NotSent;
+        if (route.lease_guard) |guard| {
+            if (guard.lease.key.exchange_account != proof.context.account or !guard.lease.valid(proof.now_monotonic_ns))
+                return error.NotSent;
+            guard.check(proof.now_monotonic_ns, proof.fencing_token, command_value.operation != .cancel and
+                !genuinelyReduces(exchange_position.lots, command_value.side, command_value.quantity)) catch return error.NotSent;
+        }
         if (command_value.intent_sequence == 0 or command_value.risk_decision_identity == 0 or command_value.reservation_identity == 0 or
             command_value.order_id == 0 or command_value.revision == 0 or command_value.client_order_id.len == 0 or
             proof.authority_barrier == 0 or proof.authority_barrier != authority.authority_barrier or
@@ -229,7 +467,10 @@ pub const Gateway = struct {
             exchange_position.rules_version != command_value.limit_price.rules_version)
             return error.NotSent;
         const reducing = genuinelyReduces(exchange_position.lots, command_value.side, command_value.quantity);
-        if (!authority.effective_trading_authority and !reducing) return error.NotSent;
+        if (command_value.operation != .cancel and
+            ((!authority.effective_trading_authority or self.routes[route_index].safety_gate == .latched or self.instrumentGapped(command_value.instrument) or
+                command_value.portfolio_reduce_only or command_value.venue_reduce_only) and !reducing))
+            return error.NotSent;
         if (command_value.operation != .cancel and
             (reservation.asset != command_value.reservation.asset or reservation.atoms != command_value.reservation.atoms or reservation.atoms <= 0))
             return error.NotSent;
@@ -295,6 +536,9 @@ pub const Gateway = struct {
             return error.Rejected;
         if (request.operation != .cancel and !route.capability.supports_place)
             return error.Rejected;
+        if (request.operation == .cancel and !route.capability.supports_cancel) return error.Rejected;
+        if (request.operation == .amend and !route.capability.supports_native_amend) return error.Rejected;
+        if (request.venue_reduce_only and !route.capability.supports_venue_reduce_only) return error.Rejected;
         if (request.order_type == .post_only and !route.capability.supports_post_only) return error.Rejected;
         if (request.market_protection_price != null and !route.capability.supports_market_protection) return error.Rejected;
         if (route.capability.version != request.capability_version or
@@ -457,7 +701,7 @@ test "gateway drains each fixed route once" {
 test "DispatchProof rechecks authority reservation lease fencing and true reduce-only" {
     var adapter_fixture = Fixture{ .pending = null };
     var gateway = Gateway{};
-    try gateway.add(.{ .account = 1, .adapter = adapter_fixture.adapter(), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+    try gateway.add(.{ .account = 1, .adapter = adapter_fixture.adapter(), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1, .supports_venue_reduce_only = true } });
     const command_value: oms.Command = .{ .command_id = 1, .order_id = 1, .strategy_instance = 1, .revision = 1, .operation = .place, .instrument = 10, .side = .sell, .portfolio_reduce_only = true, .venue_reduce_only = true, .quantity = 2, .limit_price = .{ .instrument = 10, .rules_version = 1, .ticks = 100 }, .reservation = .{ .asset = 1, .atoms = 20 }, .client_order_id = try canonical.ClientOrderId.init("RWN-1"), .intent_sequence = 1, .risk_decision_identity = 1, .reservation_identity = 1 };
     try gateway.observeAuthority(.{
         .account = 1,
@@ -476,19 +720,24 @@ test "DispatchProof rechecks authority reservation lease fencing and true reduce
         .authority_barrier = 5,
         .now_monotonic_ns = 9,
     };
-    try std.testing.expectEqual(venue.SendResult.accepted, try gateway.sendProof(proof));
-    try std.testing.expectEqual(venue.SendResult.accepted, try gateway.sendProof(proof));
+    try std.testing.expectError(error.OrderProofRequired, gateway.sendProof(proof));
+    gateway.routes[0].environment = .demo;
+    try std.testing.expectError(error.NotSent, gateway.sendProofInternal(proof));
+    try std.testing.expectEqual(@as(u8, 0), adapter_fixture.sent);
+    gateway.routes[0].environment = .simulation;
+    try std.testing.expectEqual(venue.SendResult.accepted, try gateway.sendProofInternal(proof));
+    try std.testing.expectEqual(venue.SendResult.accepted, try gateway.sendProofInternal(proof));
     var conflicting = proof;
     conflicting.command.quantity = 1;
-    try std.testing.expectError(error.NotSent, gateway.sendProof(conflicting));
+    try std.testing.expectError(error.NotSent, gateway.sendProofInternal(conflicting));
     try std.testing.expectEqual(@as(u8, 1), adapter_fixture.sent);
 
     var recovered_fixture = Fixture{ .pending = null };
     var recovered = Gateway{};
-    try recovered.add(.{ .account = 1, .adapter = recovered_fixture.adapter(), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+    try recovered.add(.{ .account = 1, .adapter = recovered_fixture.adapter(), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1, .supports_venue_reduce_only = true } });
     try recovered.restoreAcceptedDispatch(proof);
-    try std.testing.expectEqual(venue.SendResult.accepted, try recovered.sendProof(proof));
-    try std.testing.expectError(error.NotSent, recovered.sendProof(conflicting));
+    try std.testing.expectEqual(venue.SendResult.accepted, try recovered.sendProofInternal(proof));
+    try std.testing.expectError(error.NotSent, recovered.sendProofInternal(conflicting));
     try std.testing.expectEqual(@as(u8, 0), recovered_fixture.sent);
 }
 
@@ -506,14 +755,14 @@ test "Gateway reads current authority facts instead of caller proof fields" {
     };
     try gateway.observeAuthority(.{ .account = 1, .effective_trading_authority = false, .reservation_identity = 2, .reservation = command_value.reservation, .primary_lease_expires_at_monotonic_ns = 10, .fencing_token = 7, .exchange_position = .{ .instrument = 10, .rules_version = 1, .lots = -3 }, .authority_barrier = 5 });
     try std.testing.expectError(error.ConflictingAuthorityFacts, gateway.observeAuthority(.{ .account = 1, .effective_trading_authority = false, .reservation_identity = 2, .reservation = command_value.reservation, .primary_lease_expires_at_monotonic_ns = 10, .fencing_token = 7, .exchange_position = .{ .instrument = 10, .rules_version = 1, .lots = 3 }, .authority_barrier = 5 }));
-    try std.testing.expectError(error.NotSent, gateway.sendProof(proof));
+    try std.testing.expectError(error.NotSent, gateway.sendProofInternal(proof));
     try gateway.observeAuthority(.{ .account = 1, .effective_trading_authority = false, .reservation_identity = 2, .reservation = command_value.reservation, .primary_lease_expires_at_monotonic_ns = 10, .fencing_token = 8, .exchange_position = .{ .instrument = 10, .rules_version = 1, .lots = 3 }, .authority_barrier = 6 });
-    try std.testing.expectError(error.NotSent, gateway.sendProof(proof));
+    try std.testing.expectError(error.NotSent, gateway.sendProofInternal(proof));
     try gateway.observeAuthority(.{ .account = 1, .effective_trading_authority = false, .reservation_identity = 3, .reservation = command_value.reservation, .primary_lease_expires_at_monotonic_ns = 10, .fencing_token = 8, .exchange_position = .{ .instrument = 10, .rules_version = 1, .lots = 3 }, .authority_barrier = 7 });
     var stale_reservation = proof;
     stale_reservation.fencing_token = 8;
     stale_reservation.authority_barrier = 7;
-    try std.testing.expectError(error.NotSent, gateway.sendProof(stale_reservation));
+    try std.testing.expectError(error.NotSent, gateway.sendProofInternal(stale_reservation));
     try std.testing.expectEqual(@as(u8, 0), adapter_fixture.sent);
 }
 test "Gateway route and batch admission fail atomically" {
