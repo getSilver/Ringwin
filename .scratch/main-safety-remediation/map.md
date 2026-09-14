@@ -33,7 +33,8 @@ OrderIntent、Order、RiskReservation、账户危险事实、StrategyHost 授权
 - DurableStore 自身实现、通用 Linux role、Web 控制面、真实 NodeFence 和在线 Venue 资格继续由既有
   [Linux 生产资格收口](../production-readiness/map.md)跟踪，不在本图复制。06/07 可复用现有
   DurableStore seam；07 另含显式 Demo 路径所需的实时 TradingShard 事实接入、持久决策/dispatch
-  流初始化与有效 PrimaryLease 来源，但不扩展存储实现、外部 NodeFence 或线上资格。
+  流初始化与有效 PrimaryLease 来源；该路径可采用现有 Linux 适配器，不要求改造现有 Windows
+  验收程序，也不扩展存储实现、外部 NodeFence 或线上资格。
 
 ## Route
 
@@ -56,6 +57,7 @@ OrderIntent、Order、RiskReservation、账户危险事实、StrategyHost 授权
 
 ## Decisions so far
 
+- 2026-09-14：用户确认显式 Demo 可发送路径不必支持现有 Windows 程序；07 以可复用现有持久存储和租约适配器的 Linux 路径收口，Windows 旧验收程序不作为 07 通过证据。
 - 2026-09-14：用户同意在本图 07 实现恢复 Unknown 结案和显式 Demo 真实来源链，并将 Demo 专属实时 TradingShard、持久决策日志初始化及有效租约来源纳入；仍不授权任何 Demo/Testnet/生产写入，也不把 Linux/外部 NodeFence/在线资格视为已通过。
 - 2026-09-13：06 不新增包揽 lease/capability/risk 的通用授权事实；OMS 命令记录各权威事实的真实身份、版本和 barrier，缺失事实优先扩展原事实来源。Gateway 在 07 发送当刻重读最新授权；重放旧 lease 只供审计/对账，不恢复发送权。
 - 2026-09-12：用户允许把复用现有 DurableStore seam 的预发送持久提交纳入 06/07；不另建存储系统，不迁入 Linux role、外部 NodeFence、Venue 协议或在线/生产资格。
@@ -73,7 +75,6 @@ OrderIntent、Order、RiskReservation、账户危险事实、StrategyHost 授权
 ## Not yet specified
 
 - 终态墓碑的生产保留窗口与容量上限；本波先用确定性压力验收给出最低安全边界。
-- 显式 Demo 可发送路径是否须覆盖现有 Windows 验收程序；现有持久文件和租约适配器仅支持 Linux。在平台范围确认前，不以进程内存实现冒充持久来源。
 - 目标 Linux 的独立 fencing authority、文件系统、节点和 Venue 账户；继续由 production-readiness tracker 冻结。
 
 ## Out of scope

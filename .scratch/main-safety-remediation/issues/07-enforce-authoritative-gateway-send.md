@@ -26,6 +26,7 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 - [ ] Demo 决策流与 Gateway dispatch 流使用明确的流身份初始化及恢复；启动时不能从“文件不存在”推断新身份，旧已提交 dispatch 恢复为 Unknown，结案后也不能重发。
 - [ ] Demo 的 PrimaryLease/FencingToken 来自有效、持久且可复核的租约权威；过期、失联、代次不匹配或未配置租约时任何订单都 NotSent。买入、正常清仓和紧急清理使用同一个 `sendFromShard` 边界。
 - [ ] 以离线注入事实、重启/故障和 spy adapter 验证上述 Demo 链路；不执行 Demo/Testnet/生产写入，亦不把离线通过记为线上资格。
+- [ ] 显式 Demo 可发送路径以现有 Linux 持久存储/租约适配器实现；现有 Windows 验收程序不是通过条件，也不得将其 fixture 结果计入本票证据。
 
 ## Out of scope
 
@@ -38,3 +39,5 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 恢复 Unknown 已增加 OMS 权威对账结案记录：仅在同一订单的最新对账为 FoundLive、FoundTerminal 或 ConfirmedAbsent 且状态一致时持久提交；重启后恢复结案身份，旧 dispatch 永不重发。容量仍有界，耗尽时失败关闭，不声称无限期运行或 Linux 磁盘资格。
 
 尚未满足全部验收：显式 Demo 验收程序的 `fixedStrategyBuy` 使用 `TradingShardHostIngress.initHealthySpotFixtureFor` 生成模拟 OMS 事实，真实私有账户事实只进入独立 `DemoProjection`，而 `dispatch` 仍调用已失败关闭的旧 proof 入口。不能把 fixture shard 伪装成实时权威来源。2026-09-14 用户已把 Demo 专属的实时 TradingShard 事实接入、持久决策/dispatch 流初始化和有效 PrimaryLease 来源纳入本票；实现与离线故障验收仍待完成，外部 NodeFence、通用 Linux role、存储适配器自身及线上资格仍排除。当前证据仅为 Windows 离线测试。
+
+同日平台选择：不要求修通现有 Windows Demo 程序；Linux 显式 Demo 路径可复用既有 `LinuxFileAdapter` 与 `LinuxFencingStore`。这只确定实现平台，不表示目标 Linux 文件系统、租约外部协调或 Venue 在线资格已通过。
