@@ -282,6 +282,11 @@ pub const Gateway = struct {
         const order = shard.oms.orderById(oms_command.order_id) orelse return error.NotSent;
         if (order.revision != oms_command.revision or order.instrument != oms_command.instrument or
             order.predecessor_order_id != oms_command.predecessor_order_id or
+            order.state != switch (oms_command.operation) {
+                .place => oms.OrderState.pending_submit,
+                .amend => oms.OrderState.pending_amend,
+                .cancel => oms.OrderState.pending_cancel,
+            } or
             (oms_command.operation != .cancel and (!order.reservation_active or
                 !std.meta.eql(order.reservation, oms_command.reservation))))
             return error.NotSent;

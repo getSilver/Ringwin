@@ -1192,6 +1192,8 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     try std.testing.expectEqual(@as(u8, 1), try gateway.drainFair(&output));
     for (output[0].slice()) |event| _ = try live.shard.apply(.{ .venue = event });
     try std.testing.expectEqual(oms_module.OrderState.filled, live.shard.oms.orders[0].state);
+    try std.testing.expectError(error.NotSent, gateway.sendFromShard(&live.shard, proved.command_id, 2 * std.time.ns_per_s));
+    try std.testing.expectEqual(@as(u64, 1), gateway.send_attempt_count);
     try std.testing.expectEqual(@as(i64, 10), live.shard.economicSummary().portfolio.swap.quantity);
 
     var replayed: ReplayTradingShard = .{};
