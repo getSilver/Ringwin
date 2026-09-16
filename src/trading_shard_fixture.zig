@@ -17,7 +17,7 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-pub const expected_happy_digest = "72a84831e97f6f72d1f62090355385b676d0d26b6a2b9f52d78b0760e60afb2d";
+pub const expected_happy_digest = "246577440e35c73eb44c4a3a2d283dd8d48a7b8c02bb2d4b38d4378204c60bf6";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
     "27edd23d88919b8567f31315880302885e908fe39bb5d32a2eaffee8de5acc1b",

@@ -1,7 +1,7 @@
 # 07: 以唯一 Gateway 强制真实 ReduceOnly 与 fencing
 
 Type: task
-Status: in-progress
+Status: closed
 Assignee: Codex
 Blocked by: [05 保留强平与未归属经济事实的危险语义](05-preserve-dangerous-account-facts.md), [06 扩展完整的 OMS DispatchProof](06-expand-complete-oms-dispatch-proof.md)
 Parent: [收口当前 main 安全与权威状态缺口](../map.md)
@@ -18,15 +18,15 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 
 - [x] place/amend/cancel 的业务外部效果只能通过唯一 Gateway；直接 adapter 调用只保留在 adapter 契约测试和非订单对账 seam。
 - [x] latched/RecoveryOnly 状态只放行经当前 ExchangePosition、方向和数量证明真实降低账户净敞口且不穿零的订单；两个 ReduceOnly 布尔值不能单独授权。
-- [ ] 每次发送都核对 EffectiveTradingAuthority、有效 RiskReservation、当前 PrimaryLease/FencingToken、CapabilityProfile/规则/配置版本和 DispatchDeadline。
+- [x] 每次发送都核对 EffectiveTradingAuthority、有效 RiskReservation、当前 PrimaryLease/FencingToken、CapabilityProfile/规则/配置版本和 DispatchDeadline。
 - [x] 旧 token、过期 lease、过期 deadline、stale barrier、缺 reservation、post-only/保护能力缺失均产生 NotSent，不进入 adapter。
-- [ ] Gateway 崩溃前后的 Submitted/Unknown、重复 dispatch 和恢复对账保持幂等；replay 类型上不拥有 Gateway。
-- [ ] SimulatedVenue 与显式 Demo 路径也通过同一发送边界，且测试证明没有旁路 send。
-- [ ] Demo 私有 Canonical 账户/订单/成交事实进入同一个 TradingShard 权威决策日志，并在持久提交后才可供 Gateway 读取；缺失、拒绝、容量耗尽或恢复不确定时失败关闭，不以 `DemoProjection` 或健康 fixture 冒充权威状态。
-- [ ] Demo 决策流与 Gateway dispatch 流使用明确的流身份初始化及恢复；启动时不能从“文件不存在”推断新身份，旧已提交 dispatch 恢复为 Unknown，结案后也不能重发。
-- [ ] Demo 的 PrimaryLease/FencingToken 来自有效、持久且可复核的租约权威；过期、失联、代次不匹配或未配置租约时任何订单都 NotSent。买入、正常清仓和紧急清理使用同一个 `sendFromShard` 边界。
-- [ ] 以离线注入事实、重启/故障和 spy adapter 验证上述 Demo 链路；不执行 Demo/Testnet/生产写入，亦不把离线通过记为线上资格。
-- [ ] 显式 Demo 可发送路径以现有 Linux 持久存储/租约适配器实现；现有 Windows 验收程序不是通过条件，也不得将其 fixture 结果计入本票证据。
+- [x] Gateway 崩溃前后的 Submitted/Unknown、重复 dispatch 和恢复对账保持幂等；replay 类型上不拥有 Gateway。
+- [x] SimulatedVenue 与显式 Demo 路径也通过同一发送边界，且测试证明没有旁路 send。
+- [x] Demo 私有 Canonical 账户/订单/成交事实进入同一个 TradingShard 权威决策日志，并在持久提交后才可供 Gateway 读取；缺失、拒绝、容量耗尽或恢复不确定时失败关闭，不以 `DemoProjection` 或健康 fixture 冒充权威状态。
+- [x] Demo 决策流与 Gateway dispatch 流使用明确的流身份初始化及恢复；启动时不能从“文件不存在”推断新身份，旧已提交 dispatch 恢复为 Unknown，结案后也不能重发。
+- [x] Demo 的 PrimaryLease/FencingToken 来自有效、持久且可复核的租约权威；过期、失联、代次不匹配或未配置租约时任何订单都 NotSent。买入、正常清仓和紧急清理使用同一个 `sendFromShard` 边界。
+- [x] 以离线注入事实、重启/故障和 spy adapter 验证上述 Demo 链路；不执行 Demo/Testnet/生产写入，亦不把离线通过记为线上资格。
+- [x] 显式 Demo 可发送路径以现有 Linux 持久存储/租约适配器实现；现有 Windows 验收程序不是通过条件，也不得将其 fixture 结果计入本票证据。
 
 ## Out of scope
 
@@ -34,14 +34,8 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 
 ## Answer
 
-进行中：06 已封闭 OMS 来源事实引用；07 的新公开入口从实际 TradingShard outbox 取命令，复核最新来源引用、账户净仓位、route capability 与 lease，在 adapter 前将 dispatch 身份提交到 DurableStore。提交失败不发送；恢复后的已提交身份仅视为 Unknown，不自动重发。旧 caller-built proof 公开入口失败关闭，SimulatedVenue 离线验证通过。
+已完成：唯一 Gateway 从实际 TradingShard outbox 读取命令并在发送当刻重读授权、风险 reservation/lease、规则、配置、capability、账户净仓、持久 PrimaryLease/FencingToken 与 deadline；dispatch 在 adapter 前持久提交，恢复为 Unknown 后只按 OMS 权威对账结案且永不重发。
 
-恢复 Unknown 已增加 OMS 权威对账结案记录：仅在同一订单的最新对账为 FoundLive、FoundTerminal 或 ConfirmedAbsent 且状态一致时持久提交；重启后恢复结案身份，旧 dispatch 永不重发。容量仍有界，耗尽时失败关闭，不声称无限期运行或 Linux 磁盘资格。
+Linux 显式 Demo 路径使用版本化本地运营配置提供规则、策略激活和风险额度 Core 事实；真实余额、订单、成交、市场和租约事实仍来自 Canonical ingress、LinuxFileAdapter 与 LinuxFencingStore。启动必须显式选择 `virgin` 或 `recover` 及两个流身份，不能以文件缺失推断新历史。买入、正常清仓和已发送后故障清理均经 `Owner.send -> Gateway.sendFromShard`；不支持 Venue 原生 reduce-only 的 Spot 路由仍由 Gateway 以当前账户净仓证明真实减仓。
 
-尚未满足全部验收：显式 Demo 验收程序的 `fixedStrategyBuy` 使用 `TradingShardHostIngress.initHealthySpotFixtureFor` 生成模拟 OMS 事实，真实私有账户事实只进入独立 `DemoProjection`，而 `dispatch` 仍调用已失败关闭的旧 proof 入口。不能把 fixture shard 伪装成实时权威来源。2026-09-14 用户已把 Demo 专属的实时 TradingShard 事实接入、持久决策/dispatch 流初始化和有效 PrimaryLease 来源纳入本票；实现与离线故障验收仍待完成，外部 NodeFence、通用 Linux role、存储适配器自身及线上资格仍排除。当前证据仅为 Windows 离线测试。
-
-同日平台选择：不要求修通现有 Windows Demo 程序；Linux 显式 Demo 路径可复用既有 `LinuxFileAdapter` 与 `LinuxFencingStore`。这只确定实现平台，不表示目标 Linux 文件系统、租约外部协调或 Venue 在线资格已通过。
-
-当前增量：`demo_authority.Owner` 已复用 DurableStore seam 对 Core/Canonical 事实组先提交再发布、显式封存初始化快照、仅恢复完整已提交尾部，并在拒绝或 I/O 故障后失败关闭；账户适配器批次可以进入这一权威日志。版本化 Demo 本地配置可在完整私有账户快照与有效租约 guard 下初始化 Core 事实，不从配置伪造账户余额或 lease token。InstrumentRules 的可选 `base_asset` 使 Demo 现货的 ExchangePosition 从完整账户余额得出，缺映射时 Gateway 拒发；Gateway 增加 RiskLease 有效 barrier 复核，持久 schema 升至 13。Debug/ReleaseSafe 离线全套各 230/230。以上尚未接通 Linux Demo 运行入口，也不满足本票剩余的真实租约、买入/清理及恢复故障验收。
-
-用户同时允许显式、版本化的 Demo 专属本地运营配置作为规则、策略激活和风险额度 Core 事实来源；不得以此代替真实私有账户事实、持久租约或 Gateway 发送复核。
+离线 spy 覆盖提交后发送、重启不重发、私有事实恢复、基础资产手续费净仓及 post-send 故障后的 reduce-only 清理；Debug/ReleaseSafe 全套各 232/232。Linux ReleaseSafe 可执行文件已真实链接，WSL 单所有者 fencing 测试 1/1，通过无配置/无凭证失败关闭探针。未加载真实凭证、未执行 Demo/Testnet/生产写入；外部 NodeFence、CredentialStore execution admission、目标 Linux/Venue 在线资格和生产资格仍不属于本票结论。

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('PrepareOnly', 'DemoLive')]
+    [ValidateSet('PrepareOnly', 'DemoLive', 'CleanupOnly')]
     [string]$Mode = 'PrepareOnly',
     [switch]$SystemOwnerAuthorized,
     [string]$Distro = 'Ubuntu',
@@ -8,14 +8,16 @@ param(
     [string]$CurlBuildRoot = (Join-Path $PSScriptRoot '..\.scratch\build\curl-linux-openssl-3'),
     [string]$OpenSSLRoot = (Join-Path $PSScriptRoot '..\.scratch\build\linux-deps\openssl3\root\usr'),
     [string]$Output = (Join-Path $PSScriptRoot '..\.scratch\build\okx-demo-live-acceptance-linux'),
+    [string]$PolicyFile = (Join-Path $PSScriptRoot '..\.scratch\okx-demo-policy.json'),
+    [string]$StateDirectory = (Join-Path $PSScriptRoot '..\.scratch\okx-demo-authority'),
     [string]$Proxy
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if ($Mode -eq 'DemoLive' -and -not $SystemOwnerAuthorized) {
-    throw 'DemoLive requires the current SystemOwner authorization switch'
+if ($Mode -ne 'PrepareOnly' -and -not $SystemOwnerAuthorized) {
+    throw "$Mode requires the current SystemOwner authorization switch"
 }
 
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -23,10 +25,15 @@ $envPath = [IO.Path]::GetFullPath($EnvFile)
 $curlRoot = [IO.Path]::GetFullPath($CurlBuildRoot)
 $opensslRoot = [IO.Path]::GetFullPath($OpenSSLRoot)
 $outputPath = [IO.Path]::GetFullPath($Output)
-foreach ($path in @($envPath, $curlRoot, $opensslRoot, $outputPath)) {
+$policyPath = [IO.Path]::GetFullPath($PolicyFile)
+$statePath = [IO.Path]::GetFullPath($StateDirectory)
+foreach ($path in @($envPath, $curlRoot, $opensslRoot, $outputPath, $policyPath, $statePath)) {
     if (-not $path.StartsWith($workspace, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Path must remain inside the workspace: $path"
     }
+}
+if ($Mode -ne 'PrepareOnly' -and -not (Test-Path -LiteralPath $policyPath -PathType Leaf)) {
+    throw "Versioned Demo policy is missing: $policyPath"
 }
 
 $zig = (Get-Command zig -ErrorAction Stop).Source
@@ -60,8 +67,14 @@ function ConvertTo-WslPath([string]$path) {
 
 $envPathPosix = ConvertTo-WslPath $envPath
 $outputPosix = ConvertTo-WslPath $outputPath
+$policyPosix = ConvertTo-WslPath $policyPath
+$statePosix = ConvertTo-WslPath $statePath
 $opensslLibPosix = ConvertTo-WslPath (Join-Path $opensslRoot 'lib\x86_64-linux-gnu')
-$invocation = if ($Mode -eq 'DemoLive') { "$outputPosix --demo-live" } else { "$outputPosix --prepare-only" }
+$invocation = switch ($Mode) {
+    'DemoLive' { "$outputPosix --demo-live" }
+    'CleanupOnly' { "$outputPosix --cleanup-only" }
+    default { "$outputPosix --prepare-only" }
+}
 $proxyLine = if ([string]::IsNullOrWhiteSpace($Proxy)) { '' } else {
     "export HTTPS_PROXY=$(ConvertTo-ShellLiteral $Proxy)`nexport HTTP_PROXY=$(ConvertTo-ShellLiteral $Proxy)"
 }
@@ -74,6 +87,8 @@ export RINGWIN_OKX_SECRET=`$(grep ^OKX_DEMO_SECRET_KEY= `$ENV_FILE | cut -d= -f2
 export RINGWIN_OKX_PASSPHRASE=`$(grep ^OKX_DEMO_PASSPHRASE= `$ENV_FILE | cut -d= -f2-)
 export RINGWIN_OKX_REST_BASE_URL=`$(grep ^OKX_DEMO_REST_BASE_URL= `$ENV_FILE | cut -d= -f2-)
 export RINGWIN_OKX_ENTITY=`$(grep ^OKX_ENTITY= `$ENV_FILE | cut -d= -f2-)
+export RINGWIN_DEMO_POLICY_PATH=$policyPosix
+export RINGWIN_DEMO_STATE_DIR=$statePosix
 export LD_LIBRARY_PATH=$opensslLibPosix
 $invocation
 "@ -replace "`r`n", "`n"
@@ -83,5 +98,5 @@ $linuxScriptPath = Join-Path $workspace '.scratch\build\okx-linux-acceptance.sh'
 wsl.exe -d $Distro -- /bin/sh (ConvertTo-WslPath $linuxScriptPath)
 if ($LASTEXITCODE -ne 0) { throw "Linux OKX acceptance failed in WSL distro $Distro" }
 
-$qualification = if ($Mode -eq 'DemoLive') { 'demo_qualified' } else { 'observation_only' }
-Write-Output "okx_linux_acceptance=passed mode=$($Mode.ToLowerInvariant()) writes=$([int]($Mode -eq 'DemoLive')) qualification=$qualification production_qualification=false"
+$qualification = if ($Mode -eq 'PrepareOnly') { 'observation_only' } else { 'demo_qualified' }
+Write-Output "okx_linux_acceptance=passed mode=$($Mode.ToLowerInvariant()) writes=$([int]($Mode -ne 'PrepareOnly')) qualification=$qualification production_qualification=false"

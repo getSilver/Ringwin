@@ -14,7 +14,9 @@ const failover = @import("failover.zig");
 /// Explicit local Demo policy. It supplies authorization limits, never an
 /// account balance, lease token, Venue fact, or send proof.
 pub const Policy = struct {
+    pub const Startup = enum { virgin, recover };
     schema: u16,
+    startup: Startup,
     exchange_account: u128,
     portfolio_identity: u128,
     strategy_identity: u128,
@@ -278,8 +280,28 @@ pub const Owner = struct {
         return &self.shard;
     }
 
-    pub fn send(self: *const Owner, gateway: *execution.Gateway, command_id: u64, now_monotonic_ns: u64) !venue.SendResult {
-        return gateway.sendFromShard(try self.source(), command_id, now_monotonic_ns);
+    pub fn send(self: *const Owner, gateway: *execution.Gateway, guard: *failover.GatewayLeaseGuard, command_id: u64, now_monotonic_ns: u64) !venue.SendResult {
+        const shard = try self.source();
+        var command: ?trading.OrderCommand = null;
+        for (shard.oms.command_history[0..shard.oms.command_history_count]) |known| {
+            if (known.command_id == command_id) {
+                command = known;
+                break;
+            }
+        }
+        const current = command orelse return error.NotSent;
+        const position = shard.currentNetExchangePosition(current.instrument) orelse return error.NotSent;
+        try gateway.observeAuthority(.{
+            .account = shard.exchange_account_identity,
+            .effective_trading_authority = shard.operational_state.effectiveTradingAuthority(),
+            .reservation_identity = current.reservation_identity,
+            .reservation = current.reservation,
+            .primary_lease_expires_at_monotonic_ns = guard.lease.expires_at_ns,
+            .fencing_token = guard.lease.token,
+            .exchange_position = position,
+            .authority_barrier = shard.trace.len,
+        });
+        return gateway.sendFromShard(shard, command_id, now_monotonic_ns);
     }
 };
 
@@ -295,7 +317,8 @@ test "Demo owner commits before publication and recovers only a complete barrier
     var owner = try Owner.bootstrap(memory.interface(), undefined, stream);
     try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
     var gateway: execution.Gateway = .{};
-    try std.testing.expectError(error.DecisionLogUnavailable, owner.send(&gateway, 1, 1));
+    var dummy_guard: failover.GatewayLeaseGuard = undefined;
+    try std.testing.expectError(error.DecisionLogUnavailable, owner.send(&gateway, &dummy_guard, 1, 1));
     var spot_rules = genesis[0];
     spot_rules.core.payload.instrument_rules_activated.base_asset = 0x425443;
     _ = try owner.apply(spot_rules);
@@ -342,16 +365,16 @@ test "Demo owner commits before publication and recovers only a complete barrier
     } });
     invalid.venue.envelope.schema_version = 99;
     try std.testing.expectError(error.UnsupportedSchema, restored.apply(invalid));
-    try std.testing.expectError(error.DecisionLogUnavailable, restored.send(&gateway, 1, 1));
+    try std.testing.expectError(error.DecisionLogUnavailable, restored.send(&gateway, &dummy_guard, 1, 1));
     memory.injectFault(.eio);
     try std.testing.expectError(error.DecisionLogUnavailable, owner.apply(genesis[2]));
     try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
 }
 
-test "versioned Demo policy derives bootstrap cash from committed private account facts" {
+test "Demo policy drives buy and fault cleanup through one durable Gateway" {
     const fixture = @import("trading_shard_fixture.zig");
     var parsed = try Policy.parse(std.testing.allocator,
-        \\{"schema":1,"exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_micros":20000000,"risk_limit_micros":10000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
+        \\{"schema":1,"startup":"virgin","exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_micros":20000000,"risk_limit_micros":10000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
     );
     defer parsed.deinit();
     const memory = try std.testing.allocator.create(durable.MemoryAdapter);
@@ -390,8 +413,173 @@ test "versioned Demo policy derives bootstrap cash from committed private accoun
     try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
     authority.available = true;
     try parsed.value.initialize(&owner, 50_000_000, &guard, 1, 1);
+    _ = try owner.apply(fixture.canonicalAt(18, 2, .{ .instrument_definition_observed = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1 } }));
+    var book = fixture.snapshotAt(19, 3);
+    book.venue.event.l2_book_snapshot.instrument = okx.btc_usdt_spot;
+    book.venue.event.l2_book_snapshot.best_bid.instrument = okx.btc_usdt_spot;
+    book.venue.event.l2_book_snapshot.best_ask.instrument = okx.btc_usdt_spot;
+    book.venue.event.l2_book_snapshot.best_bid_quantity.?.instrument = okx.btc_usdt_spot;
+    book.venue.event.l2_book_snapshot.best_ask_quantity.?.instrument = okx.btc_usdt_spot;
+    book.venue.event.l2_book_snapshot.next_ask.?.instrument = okx.btc_usdt_spot;
+    book.venue.event.l2_book_snapshot.next_ask_quantity.?.instrument = okx.btc_usdt_spot;
+    _ = try owner.apply(book);
     try std.testing.expect((try owner.source()).operational_state.effectiveTradingAuthority());
     try std.testing.expectEqual(@as(i64, 10_000_000), (try owner.source()).risk_lease_micros);
     const recovered = try Owner.recover(memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &(try owner.source()).canonicalStateDigest(), &(try recovered.source()).canonicalStateDigest());
+
+    const Spy = struct {
+        sends: u64 = 0,
+        fn adapter(self: *@This()) venue.VenueAdapter {
+            return .{ .ptr = self, .vtable = &.{ .start = start, .try_send = send, .try_drain = drain, .stop = stop } };
+        }
+        fn start(_: *anyopaque, config: venue.VenueConfig) venue.StartError!void {
+            if (config.environment != .demo) return error.InvalidConfig;
+        }
+        fn send(ptr: *anyopaque, request: canonical.AdapterRequest) venue.SendError!venue.SendResult {
+            switch (request) {
+                .order_command => {},
+                else => return error.InvalidRequest,
+            }
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.sends += 1;
+            return .accepted;
+        }
+        fn drain(_: *anyopaque) venue.DrainError!?canonical.AdapterOutputBatch {
+            return null;
+        }
+        fn stop(_: *anyopaque, _: venue.DrainDeadline) venue.StopError!void {}
+    };
+    var spy: Spy = .{};
+    const adapter = spy.adapter();
+    try adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1 });
+    var gateway: execution.Gateway = .{};
+    try gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .environment = .demo, .lease_guard = &guard, .capability = .{
+        .version = 1,
+        .rules_version = 1,
+        .config_version = 1,
+        .session = 1,
+        .supports_post_only = true,
+        .supports_market_protection = true,
+    } });
+    try gateway.bootstrapDurableDispatch(memory.interface(), undefined, .{ .domain = .control, .id = 92 });
+    const sequence = owner.shard.trace.len + 1;
+    const intent: @import("strategy_host_gateway.zig").OrderIntent = .{
+        .strategy_identity = 40,
+        .intent_sequence = sequence,
+        .strategy_cursor = owner.shard.trace.len,
+        .config_version = 1,
+        .activation_identity = 50,
+        .portfolio_identity = 1,
+        .exchange_account_identity = 2,
+        .instrument_identity = okx.btc_usdt_spot,
+        .side = .buy,
+        .order_type = .limit,
+        .time_in_force = .immediate_or_cancel,
+        .portfolio_reduce_only = false,
+        .quantity = 20_000,
+        .limit_price_micros = 50_000_000,
+    };
+    const maybe_command = try owner.apply(.{ .core = .{ .identity = sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = intent } } });
+    try std.testing.expectEqual(@import("trading_shard_event.zig").RejectReason.none, owner.shard.last_reject_reason);
+    const command = maybe_command orelse return error.MissingDemoCommand;
+    try std.testing.expectEqual(venue.SendResult.accepted, try owner.send(&gateway, &guard, command.command_id, 2));
+    try std.testing.expectEqual(@as(u64, 1), spy.sends);
+    // The spy deliberately emits no dispatch result: model a failure after the
+    // external buy effect, then recover authoritative facts before cleanup.
+    var restored_gateway: execution.Gateway = .{};
+    try restored_gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .environment = .demo, .lease_guard = &guard, .capability = .{
+        .version = 1,
+        .rules_version = 1,
+        .config_version = 1,
+        .session = 1,
+        .supports_post_only = true,
+        .supports_market_protection = true,
+    } });
+    try restored_gateway.attachRecoveredDurableDispatch(memory.interface(), undefined, .{ .domain = .control, .id = 92 });
+    try std.testing.expectError(error.NotSent, owner.send(&restored_gateway, &guard, command.command_id, 2));
+    try std.testing.expectEqual(@as(u64, 1), spy.sends);
+    const venue_order = try canonical.VenueOrderRef.init(1, "demo-order");
+    const fill_quantity: canonical.InstrumentQuantity = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .lots = 20_000 };
+    const fill_price: canonical.InstrumentPrice = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .ticks = 50_000_000 };
+    _ = try owner.apply(fixture.canonicalAt(20, 4, .{ .order_dispatch_result = .{ .command = command.command_id, .state = .submitted } }));
+    _ = try owner.apply(fixture.canonicalAt(21, 5, .{ .execution_report = .{
+        .identity = 5,
+        .order = command.order_id,
+        .client_order_id = command.client_order_id,
+        .venue_order = venue_order,
+        .instrument = okx.btc_usdt_spot,
+        .exchange_account = 2,
+        .revision = 1,
+        .status = .accepted,
+        .cumulative_quantity = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .lots = 0 },
+        .remaining_quantity = fill_quantity,
+    } }));
+    _ = try owner.apply(fixture.canonicalAt(22, 6, .{ .fill = .{
+        .identity = 6,
+        .order = command.order_id,
+        .client_order_id = command.client_order_id,
+        .venue_order = venue_order,
+        .venue_trade = try canonical.VenueTradeRef.init(1, "demo-fill"),
+        .instrument = okx.btc_usdt_spot,
+        .exchange_account = 2,
+        .side = .buy,
+        .quantity = fill_quantity,
+        .price = fill_price,
+        .fee = .{ .asset = okx.btc, .atoms = 1 },
+        .liquidity = .taker,
+    } }));
+    try std.testing.expectEqual(@as(i64, 19_999), owner.shard.economicSummary().portfolio.spot.quantity);
+
+    _ = try owner.apply(fixture.canonicalAt(23, 7, .{ .execution_report = .{
+        .identity = 7,
+        .order = command.order_id,
+        .client_order_id = command.client_order_id,
+        .venue_order = venue_order,
+        .instrument = okx.btc_usdt_spot,
+        .exchange_account = 2,
+        .revision = 2,
+        .status = .filled,
+        .cumulative_quantity = fill_quantity,
+        .remaining_quantity = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .lots = 0 },
+    } }));
+    _ = try owner.apply(fixture.canonicalAt(24, 8, .{ .account_observed = .{
+        .identity = 8,
+        .exchange_account = 2,
+        .bootstrap = 1,
+        .source_stream = 1,
+        .source_sequence = 2,
+        .value = .{ .balance = .{ .asset = okx.btc, .value = .{
+            .asset = okx.btc,
+            .total = .{ .asset = okx.btc, .atoms = 19_999 },
+            .available = .{ .asset = okx.btc, .atoms = 19_999 },
+            .held = .{ .asset = okx.btc, .atoms = 0 },
+        } } },
+    } }));
+    const cleanup_sequence = owner.shard.trace.len + 1;
+    const cleanup_intent: @import("strategy_host_gateway.zig").OrderIntent = .{
+        .strategy_identity = 40,
+        .intent_sequence = cleanup_sequence,
+        .strategy_cursor = owner.shard.trace.len,
+        .config_version = 1,
+        .activation_identity = 50,
+        .portfolio_identity = 1,
+        .exchange_account_identity = 2,
+        .instrument_identity = okx.btc_usdt_spot,
+        .side = .sell,
+        .order_type = .limit,
+        .time_in_force = .immediate_or_cancel,
+        .portfolio_reduce_only = true,
+        .quantity = 19_999,
+        .limit_price_micros = 50_000_000,
+    };
+    const cleanup = (try owner.apply(.{ .core = .{
+        .identity = cleanup_sequence,
+        .monotonic_time = 3,
+        .time_presence = .{ .monotonic = true },
+        .payload = .{ .external_order_intent = cleanup_intent },
+    } })) orelse return error.MissingDemoCommand;
+    try std.testing.expectEqual(venue.SendResult.accepted, try owner.send(&gateway, &guard, cleanup.command_id, 3));
+    try std.testing.expect(cleanup.portfolio_reduce_only);
+    try std.testing.expectEqual(@as(u64, 2), spy.sends);
 }

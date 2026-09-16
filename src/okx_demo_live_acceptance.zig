@@ -2,18 +2,22 @@
 //! This executable is intentionally separate from replay-capable product code.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const account_projection = @import("account_projection.zig");
 const canonical = @import("canonical_event.zig");
-const fixture = @import("trading_shard_fixture.zig");
 const auth = @import("okx_rest_auth.zig");
 const curl = @import("okx_curl_transport.zig");
 const live = @import("okx_live_chain.zig");
 const market = @import("okx_public_market.zig");
+const okx_market_feed = @import("okx_market_feed.zig");
 const order = @import("okx_order_entry.zig");
 const private = @import("okx_private_reconciliation.zig");
 const okx_adapter = @import("okx_venue_adapter.zig");
 const lifecycle = @import("simulated_lifecycle_projection.zig");
 const execution = @import("execution_gateway.zig");
+const demo_authority = @import("demo_authority.zig");
+const durable = @import("durable_store.zig");
+const failover = @import("failover.zig");
 const oms = @import("oms.zig");
 const strategy = @import("strategy_host_gateway.zig");
 const venue = @import("venue_adapter.zig");
@@ -44,6 +48,12 @@ const rest_endpoints = [_]RestEndpoint{
 
 pub fn main(init: std.process.Init) !void {
     const mode = try runMode(init);
+    if (mode == .prepare_only) return runPrepareOnly(init);
+    if (builtin.os.tag != .linux) return error.LinuxDemoRequired;
+    return runLinuxAuthoritative(init, mode);
+}
+
+fn runPrepareOnly(init: std.process.Init) !void {
     const key = init.environ_map.get("RINGWIN_OKX_KEY") orelse return error.MissingCredential;
     const secret = init.environ_map.get("RINGWIN_OKX_SECRET") orelse return error.MissingCredential;
     const passphrase = init.environ_map.get("RINGWIN_OKX_PASSPHRASE") orelse return error.MissingCredential;
@@ -75,84 +85,299 @@ pub fn main(init: std.process.Init) !void {
     try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4 });
     var projection: DemoProjection = .{};
 
-    try establishReady(init, &owner, &implementation, &reconciler);
+    try establishReady(init, &owner, &implementation, &reconciler, null);
     try projection.drain(adapter);
     try progress(init.io, "bootstrap");
     const baseline_btc_atoms = projection.btcBalance() orelse return error.MissingBaselineBtc;
     try progress(init.io, "baseline");
 
-    if (mode == .cleanup_only) {
-        try cleanupResidual(init, &owner, &raw);
-        return;
-    }
     if (baseline_btc_atoms != 0) return error.NonzeroBaselineBtc;
 
     const prices = try ticker(init, &owner);
     const limits = try priceLimits(init, &owner);
     const buy_price_tenths = try protectedBuyPrice(prices, limits);
     try requireNotional(buy_quantity_atoms, buy_price_tenths);
-    const run_identity = try currentUnixSeconds(init.io);
-    var strategy_buy = try fixedStrategyBuy(init, run_identity, buy_price_tenths);
-    try progress(init.io, "strategy_order_command");
-    if (mode == .prepare_only) return;
-    const buy_client = strategy_buy.command.command.client_order_id;
-    const sell_client = order.clientOrderId((@as(u128, run_identity) << 32) | 2);
+    try progress(init.io, "observation_only");
+}
 
+fn readDemoPolicy(init: std.process.Init) !std.json.Parsed(demo_authority.Policy) {
+    const path = init.environ_map.get("RINGWIN_DEMO_POLICY_PATH") orelse return error.MissingDemoPolicy;
+    var file = try std.Io.Dir.openFileAbsolute(init.io, path, .{});
+    defer file.close(init.io);
+    var bytes: [4096]u8 = undefined;
+    var length: usize = 0;
+    while (length < bytes.len) {
+        const amount = file.readStreaming(init.io, &.{bytes[length..]}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (amount == 0) break;
+        length += amount;
+    }
+    if (length == bytes.len) return error.DemoPolicyTooLarge;
+    return demo_authority.Policy.parse(init.gpa, bytes[0..length]);
+}
+
+/// Linux-only explicit Demo path. A policy selects virgin or recovery; no
+/// missing-file inference, fixture shard, or caller-built send proof is used.
+fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
+    if (builtin.os.tag != .linux) return error.LinuxDemoRequired;
+    var parsed = try readDemoPolicy(init);
+    defer parsed.deinit();
+    const policy = parsed.value;
+    if (policy.exchange_account != demo_account or policy.portfolio_identity != 1 or policy.config_version != 1)
+        return error.UnsupportedDemoPolicy;
+    if ((mode == .demo_live) != (policy.startup == .virgin)) return error.DemoModePolicyMismatch;
+    const state_dir = init.environ_map.get("RINGWIN_DEMO_STATE_DIR") orelse return error.MissingDemoStateDirectory;
+    if (!std.fs.path.isAbsolute(state_dir)) return error.InvalidDemoStateDirectory;
+    const lease_dir = try std.fs.path.join(init.gpa, &.{ state_dir, "lease" });
+    defer init.gpa.free(lease_dir);
+    var lease_store = try failover.LinuxFencingStore.open(init.io, lease_dir);
+    defer lease_store.close();
+    var authority = try lease_store.load();
+    const file_store = try init.gpa.create(durable.LinuxFileAdapter);
+    defer init.gpa.destroy(file_store);
+    file_store.* = try durable.LinuxFileAdapter.open(init.io, state_dir);
+    defer file_store.close(init.io);
+    const decision_stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = policy.decision_stream_id };
+    const dispatch_stream: durable.StreamIdentity = .{ .domain = .control, .id = policy.dispatch_stream_id };
+    const decision_owner = try init.gpa.create(demo_authority.Owner);
+    defer init.gpa.destroy(decision_owner);
+    decision_owner.* = switch (policy.startup) {
+        .virgin => try demo_authority.Owner.bootstrap(file_store.interface(), init.io, decision_stream),
+        .recover => try demo_authority.Owner.recover(file_store.interface(), init.io, decision_stream),
+    };
+    if (policy.startup == .recover and
+        (decision_owner.shard.exchange_account_identity != policy.exchange_account or
+            decision_owner.shard.portfolio_identity != policy.portfolio_identity or
+            decision_owner.shard.strategy_identity != policy.strategy_identity or
+            decision_owner.shard.strategy_activation_identity != policy.activation_identity or
+            decision_owner.shard.strategy_config_version != policy.config_version))
+        return error.RecoveredDemoPolicyMismatch;
+    const gateway = try init.gpa.create(execution.Gateway);
+    defer init.gpa.destroy(gateway);
+    gateway.* = .{};
+    switch (policy.startup) {
+        .virgin => try gateway.bootstrapDurableDispatch(file_store.interface(), init.io, dispatch_stream),
+        .recover => try gateway.attachRecoveredDurableDispatch(file_store.interface(), init.io, dispatch_stream),
+    }
+    const key = init.environ_map.get("RINGWIN_OKX_KEY") orelse return error.MissingCredential;
+    const secret = init.environ_map.get("RINGWIN_OKX_SECRET") orelse return error.MissingCredential;
+    const passphrase = init.environ_map.get("RINGWIN_OKX_PASSPHRASE") orelse return error.MissingCredential;
+    const base_url = init.environ_map.get("RINGWIN_OKX_REST_BASE_URL") orelse return error.MissingEndpointProfile;
+    const entity = init.environ_map.get("RINGWIN_OKX_ENTITY") orelse return error.MissingEndpointProfile;
+    const endpoint = try curl.demoEndpointProfile(base_url, entity);
+    var runtime = try curl.Runtime.init();
+    defer runtime.deinit();
+    const transport = try init.gpa.create(curl.TransportOwner);
+    defer init.gpa.destroy(transport);
+    transport.* = try curl.TransportOwner.initWithEndpoint(try auth.Credentials.init(key, secret, passphrase), null, source_session, endpoint);
+    defer transport.deinit();
+    var raw: RawSink = .{};
+    const reconciler = try init.gpa.create(private.Reconciler);
+    defer init.gpa.destroy(reconciler);
+    reconciler.* = .{};
+    var chain: live.Chain = .{ .mode = .demo_live, .qualification = qualified(), .raw_sink = raw.interface(), .transport = transport.transport() };
+    var adapter_clock: AdapterClock = .{};
+    const implementation = try init.gpa.create(okx_adapter.OkxVenueAdapter);
+    defer init.gpa.destroy(implementation);
+    implementation.* = okx_adapter.OkxVenueAdapter.init(init.gpa, &chain, adapter_clock.interface(), demoProfile(), demoRules());
+    implementation.attachPrivateReconciler(reconciler);
+    const adapter = implementation.adapter();
+    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4 });
+    const projection = try init.gpa.create(DemoProjection);
+    defer init.gpa.destroy(projection);
+    projection.* = .{};
+    try establishReady(init, transport, implementation, reconciler, decision_owner);
+    try drainDemo(adapter, decision_owner, projection);
+    try requireNoPendingDemoOrders(init, transport);
+    if (policy.startup == .recover) {
+        for (gateway.uncertain_dispatches[0..gateway.uncertain_dispatch_count]) |item| {
+            if (item.reconciliation_id == 0) try gateway.reconcileRecoveredDispatch(try decision_owner.source(), item.command_id);
+        }
+    }
+    if (mode == .demo_live and projection.btcBalance() != 0) return error.NonzeroBaselineBtc;
+    const first_prices = try ticker(init, transport);
+    const first_limits = try priceLimits(init, transport);
+    const first_price = if (mode == .demo_live)
+        try protectedBuyPrice(first_prices, first_limits)
+    else
+        try protectedSellPrice(first_prices, first_limits);
+    var lease: failover.PrimaryLease = undefined;
+    var have_lease = false;
+    defer if (have_lease) authority.revoke(&lease) catch {};
+    if (policy.startup == .virgin) {
+        if (mode != .demo_live) return error.CleanupRequiresRecoveredDemo;
+        const now = (try clock(init.io)).times.monotonic_time_ns;
+        lease = try authority.acquire(.{ .exchange_account = policy.exchange_account, .decision_domain = policy.decision_domain }, policy.node_identity, now);
+        have_lease = true;
+        var bootstrap_guard: failover.GatewayLeaseGuard = .{ .authority = &authority, .lease = &lease };
+        const mark = std.math.cast(i64, first_price * 100_000) orelse return error.InvalidTicker;
+        try policy.initialize(decision_owner, mark, &bootstrap_guard, now, source_session);
+    }
+    try establishPublicMarket(init, key, secret, passphrase, endpoint, &raw, decision_owner);
+    var guard: failover.GatewayLeaseGuard = .{ .authority = &authority, .lease = &lease };
+    try gateway.add(.{ .account = demo_account, .adapter = adapter, .venue_identity = demo_venue, .environment = .demo, .lease_guard = &guard, .capability = .{
+        .version = 1,
+        .rules_version = 1,
+        .config_version = 1,
+        .session = source_session,
+        .supports_post_only = true,
+        .supports_market_protection = true,
+    } });
     var cleanup_needed = false;
-    defer if (cleanup_needed) emergencyCleanup(init, &owner, adapter, sell_client) catch {};
-
-    try refresh(&owner, init.io);
-    const buy_attempt = try dispatch(adapter, strategy_buy.command);
-    const buy_dispatch = switch (buy_attempt.event) {
-        .order_dispatch_result => |value| value,
-        else => return error.MissingDispatchResult,
-    };
-    try strategy_buy.ingress.applyDispatchResult(
-        buy_attempt.envelope.identity.sequence,
-        switch (buy_dispatch.state) {
-            .submitted => .submitted,
-            .unknown => .unknown,
-            .not_sent => return error.BuyNotSent,
-        },
-    );
-    try requireVenueAccepted(init.io, buy_dispatch, error.BuyNotSent, error.BuyRejected);
-    cleanup_needed = true;
-    const buy_result = try waitForOrder(init, &owner, &implementation, &projection, buy_client.slice());
-    if (!buy_result.terminal or projection.positionLots() < min_quantity_atoms)
-        return error.BuyDidNotFillMinimum;
-
-    const cleanup_atoms: i64 = @intCast(projection.positionLots());
-    const fresh_prices = try ticker(init, &owner);
-    const fresh_limits = try priceLimits(init, &owner);
-    const sell_price_tenths = try protectedSellPrice(fresh_prices, fresh_limits);
-    try refresh(&owner, init.io);
-    const sell = authorizedPlace(2, 2, sell_client, .sell, .market, cleanup_atoms, sell_price_tenths);
-    const sell_attempt = try dispatch(adapter, sell);
-    const sell_result_dispatch = switch (sell_attempt.event) {
-        .order_dispatch_result => |value| value,
-        else => return error.MissingDispatchResult,
-    };
-    try requireVenueAccepted(init.io, sell_result_dispatch, error.CleanupNotSent, error.CleanupRejected);
-    // A possibly-sent cleanup is never replayed by the emergency path.
+    defer if (cleanup_needed) emergencyAuthoritativeCleanup(init, policy, transport, implementation, adapter, decision_owner, projection, gateway, &guard, &authority, &lease, &have_lease) catch {};
+    if (mode == .demo_live) {
+        if (try currentNetBtc(decision_owner) != 0) return error.NonzeroBaselineBtc;
+        const command = try emitDemoIntent(init, policy, decision_owner, &authority, &lease, &have_lease, .buy, false, buy_quantity_atoms, first_price);
+        cleanup_needed = true;
+        try sendDemoCommand(init, decision_owner, gateway, &guard, adapter, projection, command.command_id);
+        const buy_result = try waitForOrder(init, transport, implementation, projection, decision_owner, command.client_order_id.slice());
+        if (!buy_result.terminal or !buy_result.saw_balance or try currentNetBtc(decision_owner) < min_quantity_atoms)
+            return error.BuyDidNotFillMinimum;
+    }
+    const cleanup_atoms = try currentNetBtc(decision_owner);
+    if (cleanup_atoms < min_quantity_atoms) return error.NoCleanableBtc;
+    const cleanup_prices = try ticker(init, transport);
+    const cleanup_limits = try priceLimits(init, transport);
+    const sell_price = try protectedSellPrice(cleanup_prices, cleanup_limits);
+    const cleanup = try emitDemoIntent(init, policy, decision_owner, &authority, &lease, &have_lease, .sell, true, cleanup_atoms, sell_price);
+    try sendDemoCommand(init, decision_owner, gateway, &guard, adapter, projection, cleanup.command_id);
+    const cleaned = try waitForOrder(init, transport, implementation, projection, decision_owner, cleanup.client_order_id.slice());
+    if (!cleaned.terminal or !cleaned.saw_balance or try currentNetBtc(decision_owner) != 0 or projection.has_unknown)
+        return error.CleanupUnconfirmed;
     cleanup_needed = false;
-    const sell_result = try waitForOrder(init, &owner, &implementation, &projection, sell_client.slice());
-    if (!sell_result.terminal or !sell_result.saw_balance) return error.CleanupUnconfirmed;
-    if (projection.positionLots() != 0)
-        return error.CleanupIncomplete;
-    if (projection.has_unknown) return error.FinalUnknown;
-    const replay_digest = try projection.verifyReplay();
-    const private_facts = std.math.cast(u32, raw.count) orelse return error.TooManyPrivateFacts;
-    if (private_facts == 0 or projection.record_count == 0) return error.IncompleteDemoEvidence;
-    const live_digest = projection.digest();
-    if (!std.mem.eql(u8, &live_digest, &replay_digest)) return error.ReplayDigestMismatch;
-    const digest_text = std.fmt.bytesToHex(projection.digest(), .lower);
-    var out_buffer: [512]u8 = undefined;
-    var out = std.Io.File.stdout().writer(init.io, &out_buffer);
-    try out.interface.print(
-        "environment=demo qualification=demo_qualified strategy=fixed-btc-usdt-ioc orders=2 cleanup=closed position_atoms=0 raw_ingress={d} canonical_records={d} replay_digest={s}\n",
-        .{ raw.count, projection.record_count, &digest_text },
-    );
-    try out.interface.flush();
+    try progress(init.io, "authoritative_demo_cleanup");
+}
+
+fn establishPublicMarket(init: std.process.Init, key: []const u8, secret: []const u8, passphrase: []const u8, endpoint: curl.DemoEndpointProfile, raw: *RawSink, owner: *demo_authority.Owner) !void {
+    var public_endpoint = endpoint;
+    public_endpoint.private_ws_url = "wss://wspap.okx.com:8443/ws/v5/public";
+    const transport = try init.gpa.create(curl.TransportOwner);
+    defer init.gpa.destroy(transport);
+    transport.* = try curl.TransportOwner.initWithEndpoint(try auth.Credentials.init(key, secret, passphrase), null, source_session + 1, public_endpoint);
+    defer transport.deinit();
+    const feed = try init.gpa.create(okx_market_feed.OkxMarketFeed);
+    defer init.gpa.destroy(feed);
+    feed.* = okx_market_feed.OkxMarketFeed.init(raw.interface());
+    const adapter = feed.adapter();
+    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .subscription_set = 2, .config_version = 1, .session = source_session + 1, .output_capacity = market.max_events_per_ingress });
+    try transport.wsConnect();
+    const message_buffer = try init.gpa.alloc(u8, market.max_raw_frame_bytes);
+    defer init.gpa.free(message_buffer);
+    try transport.wsSend("{\"op\":\"subscribe\",\"args\":[{\"channel\":\"instruments\",\"instType\":\"SPOT\",\"instId\":\"BTC-USDT\"}]}");
+    for (0..8) |_| {
+        const message = transport.wsReceive(message_buffer, 5_000) catch |err| switch (err) {
+            error.WebSocketTimeout => continue,
+            else => return err,
+        };
+        if (std.mem.indexOf(u8, message, "\"event\":\"subscribe\"") != null) continue;
+        try feed.ingest(init.gpa, (try clock(init.io)).times, message);
+        if (try adapter.tryDrain()) |batch| try owner.applyAdapterBatch(batch);
+        if (owner.shard.canonical_market.get(okx_adapter.btc_usdt_spot) != null) break;
+    } else return error.PublicInstrumentNotReady;
+    try transport.wsSend("{\"op\":\"subscribe\",\"args\":[{\"channel\":\"books\",\"instId\":\"BTC-USDT\"},{\"channel\":\"index-tickers\",\"instId\":\"BTC-USDT\"}]}");
+    for (0..24) |_| {
+        const message = transport.wsReceive(message_buffer, 5_000) catch |err| switch (err) {
+            error.WebSocketTimeout => continue,
+            else => return err,
+        };
+        if (std.mem.indexOf(u8, message, "\"event\":\"subscribe\"") != null) continue;
+        try feed.ingest(init.gpa, (try clock(init.io)).times, message);
+        if (try adapter.tryDrain()) |batch| try owner.applyAdapterBatch(batch);
+        const entry = owner.shard.canonical_market.get(okx_adapter.btc_usdt_spot);
+        if (feed.decoder.isPublicMarketReady(.btc_usdt_spot) and entry != null and entry.?.index != null) return;
+    }
+    return error.PublicMarketNotReady;
+}
+
+fn emergencyAuthoritativeCleanup(init: std.process.Init, policy: demo_authority.Policy, transport: *curl.TransportOwner, implementation: *okx_adapter.OkxVenueAdapter, adapter: venue.VenueAdapter, owner: *demo_authority.Owner, projection: *DemoProjection, gateway: *execution.Gateway, guard: *failover.GatewayLeaseGuard, authority: anytype, lease: *failover.PrimaryLease, have_lease: *bool) !void {
+    for (0..2) |_| {
+        for (rest_endpoints) |endpoint| try ingestRestEndpoint(init, transport, implementation, endpoint);
+    }
+    try drainDemo(adapter, owner, projection);
+    if (!owner.shard.oms.openOrdersClosed() or projection.has_unknown) return error.EmergencyStateUncertain;
+    const atoms = try currentNetBtc(owner);
+    if (atoms < min_quantity_atoms) return;
+    const prices = try ticker(init, transport);
+    const limits = try priceLimits(init, transport);
+    const price = try protectedSellPrice(prices, limits);
+    const command = try emitDemoIntent(init, policy, owner, authority, lease, have_lease, .sell, true, atoms, price);
+    try sendDemoCommand(init, owner, gateway, guard, adapter, projection, command.command_id);
+}
+
+fn currentNetBtc(owner: *const demo_authority.Owner) !i64 {
+    const quantity = (try owner.source()).currentNetExchangePosition(okx_adapter.btc_usdt_spot) orelse return error.MissingDemoPosition;
+    return std.math.cast(i64, quantity.lots) orelse return error.InvalidDemoPosition;
+}
+
+fn requireNoPendingDemoOrders(init: std.process.Init, transport: *curl.TransportOwner) !void {
+    try refresh(transport, init.io);
+    const response = transport.request(.get, "/api/v5/trade/orders-pending?limit=20", "");
+    if (response.outcome != .response or try restRowCount(init.gpa, response.response.?) != 0)
+        return error.DemoPendingOrders;
+}
+
+fn drainDemo(adapter: venue.VenueAdapter, owner: *demo_authority.Owner, projection: *DemoProjection) !void {
+    while (try adapter.tryDrain()) |batch| {
+        try owner.applyAdapterBatch(batch);
+        try projection.applyBatch(batch);
+    }
+}
+
+fn emitDemoIntent(init: std.process.Init, policy: demo_authority.Policy, owner: *demo_authority.Owner, authority: anytype, lease: *failover.PrimaryLease, have_lease: *bool, side: strategy.Side, reduce_only: bool, quantity: i64, price_tenths: i128) !oms.Command {
+    const now = (try clock(init.io)).times.monotonic_time_ns;
+    if (have_lease.* and !lease.valid(now)) {
+        try authority.revoke(lease);
+        have_lease.* = false;
+    }
+    if (!have_lease.*) {
+        lease.* = try authority.acquire(.{ .exchange_account = policy.exchange_account, .decision_domain = policy.decision_domain }, policy.node_identity, now);
+        have_lease.* = true;
+        const identity = owner.shard.trace.len + 1;
+        _ = try owner.apply(.{ .core = .{ .identity = identity, .payload = .{ .primary_lease_granted = .{ .fencing_token = lease.token } } } });
+    }
+    const cursor = owner.shard.trace.len;
+    const authz: strategy.Authorization = .{ .strategy_identity = policy.strategy_identity, .config_version = policy.config_version, .activation_identity = policy.activation_identity, .activation_barrier = owner.shard.host_activation_barrier };
+    const config: strategy.Config = .{ .schema_registry = 1, .decision_domain = policy.decision_domain, .session = .{ .fencing = lease.token, .shard = 0, .generation = 1 }, .authorization = authz };
+    const subscriptions = [_]strategy.Subscription{strategy.Subscription.of(policy.strategy_identity, &.{ .mark_price, .l2_delta })};
+    var host = try strategy.Gateway.init(config, &subscriptions);
+    const now_i64 = std.math.cast(i64, now) orelse return error.ClockOutOfRange;
+    try host.recordPublished(1, cursor, now_i64);
+    try host.activate(authz);
+    const intent_sequence = cursor + 1;
+    var frame_buffer: [256]u8 = undefined;
+    const frame = try strategy.encodeOutputOrderFrame(&frame_buffer, config, 1, cursor, intent_sequence, .{
+        .instrument_identity = okx_adapter.btc_usdt_spot,
+        .side = side,
+        .time_in_force = .immediate_or_cancel,
+        .portfolio_reduce_only = reduce_only,
+        .quantity = quantity,
+        .limit_price_micros = std.math.cast(i64, price_tenths * 100_000) orelse return error.InvalidTicker,
+    });
+    const intent = switch (host.ingest(frame, now_i64)) {
+        .accepted => |value| value,
+        .rejected => return error.DemoStrategyRejected,
+    };
+    return (try owner.apply(.{ .core = .{ .identity = intent_sequence, .monotonic_time = now, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = intent } } })) orelse error.DemoRiskRejected;
+}
+
+fn sendDemoCommand(init: std.process.Init, owner: *demo_authority.Owner, gateway: *execution.Gateway, guard: *failover.GatewayLeaseGuard, adapter: venue.VenueAdapter, projection: *DemoProjection, command_id: u64) !void {
+    const now = (try clock(init.io)).times.monotonic_time_ns;
+    if (try owner.send(gateway, guard, command_id, now) != .accepted) return error.DemoNotSent;
+    var found = false;
+    while (try adapter.tryDrain()) |batch| {
+        for (batch.slice()) |record| switch (record.event) {
+            .order_dispatch_result => |result| if (result.command == command_id) {
+                try requireVenueAccepted(init.io, result, error.DemoNotSent, error.DemoRejected);
+                found = true;
+            },
+            else => {},
+        };
+        try owner.applyAdapterBatch(batch);
+        try projection.applyBatch(batch);
+    }
+    if (!found) return error.MissingDispatchResult;
 }
 
 const WaitResult = struct { terminal: bool = false, saw_balance: bool = false };
@@ -248,7 +473,7 @@ test "Demo acceptance replays canonical Adapter output and rejects Unknown" {
     };
     var projection: DemoProjection = .{};
     try projection.apply(.{ .envelope = envelope, .event = .{ .order_dispatch_result = .{ .command = 1, .state = .submitted } } }, true);
-    try projection.verifyReplay();
+    _ = try projection.verifyReplay();
     var unknown = envelope;
     unknown.identity.sequence = 2;
     unknown.source_fact_identity = 2;
@@ -262,6 +487,7 @@ fn waitForOrder(
     owner: *curl.TransportOwner,
     implementation: *okx_adapter.OkxVenueAdapter,
     projection: *DemoProjection,
+    decision_owner: ?*demo_authority.Owner,
     client_order_id: []const u8,
 ) !WaitResult {
     const message_buffer = try init.gpa.alloc(u8, market.max_raw_frame_bytes);
@@ -286,6 +512,7 @@ fn waitForOrder(
                 .account_bootstrap_snapshot, .account_observed => result.saw_balance = true,
                 else => {},
             };
+            if (decision_owner) |source| try source.applyAdapterBatch(output);
             try projection.applyBatch(output);
         }
         if (result.terminal and result.saw_balance and !projection.has_unknown) return result;
@@ -293,7 +520,7 @@ fn waitForOrder(
     return result;
 }
 
-fn establishReady(init: std.process.Init, owner: *curl.TransportOwner, implementation: *okx_adapter.OkxVenueAdapter, reconciler: *private.Reconciler) !void {
+fn establishReady(init: std.process.Init, owner: *curl.TransportOwner, implementation: *okx_adapter.OkxVenueAdapter, reconciler: *private.Reconciler, decision_owner: ?*demo_authority.Owner) !void {
     try implementation.beginPrivateSession();
     try owner.wsConnect();
     var stamp = try clock(init.io);
@@ -323,7 +550,7 @@ fn establishReady(init: std.process.Init, owner: *curl.TransportOwner, implement
     const adapter = implementation.adapter();
     if (try adapter.trySend(.{ .account_reconciliation = .{ .identity = 1, .exchange_account = demo_account, .expected_session = source_session } }) != .accepted)
         return error.AdapterRejectedReconciliation;
-    _ = try adapter.tryDrain();
+    if (try adapter.tryDrain()) |output| if (decision_owner) |source| try source.applyAdapterBatch(output);
     for (0..2) |_| {
         for (rest_endpoints) |endpoint|
             try ingestRestEndpoint(init, owner, implementation, endpoint);
@@ -465,239 +692,9 @@ fn priceTenths(value: std.json.Value, round_up: bool) !i128 {
     return if (round_up) ceilDiv(decimal.coefficient, divisor) else @divFloor(decimal.coefficient, divisor);
 }
 
-const StrategyBuy = struct {
-    command: live.AuthorizedCommand,
-    ingress: fixture.TradingShardHostIngress,
-};
-
-fn fixedStrategyBuy(init: std.process.Init, intent_sequence: u64, price_tenths: i128) !StrategyBuy {
-    const strategy_identity: u128 = 0x4f4b585f44454d4f5f4254435f494f43;
-    const authorization: strategy.Authorization = .{
-        .strategy_identity = strategy_identity,
-        .config_version = 1,
-        .activation_identity = 1,
-        .activation_barrier = 10,
-    };
-    const config: strategy.Config = .{
-        .schema_registry = 1,
-        .decision_domain = 1,
-        .session = .{ .fencing = 1, .shard = 0, .generation = 1 },
-        .authorization = authorization,
-    };
-    const subscriptions = [_]strategy.Subscription{
-        strategy.Subscription.of(strategy_identity, &.{ .mark_price, .l2_delta }),
-    };
-    var gateway = try strategy.Gateway.init(config, &subscriptions);
-    const now_ns = std.math.cast(i64, std.Io.Clock.awake.now(init.io).nanoseconds) orelse
-        return error.ClockOutOfRange;
-    try gateway.recordPublished(1, 14, now_ns);
-    var frame_storage: [256]u8 = undefined;
-    const frame = try strategy.encodeOutputOrderFrame(&frame_storage, config, 1, 14, intent_sequence, .{
-        .instrument_identity = 3,
-        .side = .buy,
-        .time_in_force = .immediate_or_cancel,
-        .quantity = buy_quantity_atoms,
-        .limit_price_micros = std.math.cast(i64, price_tenths * 100_000) orelse return error.InvalidTicker,
-    });
-    const decision = gateway.ingest(frame, now_ns);
-    if (decision != .accepted) return error.FixedStrategyRejected;
-    var ingress = try fixture.TradingShardHostIngress.initHealthySpotFixtureFor(authorization);
-    const host_order = (try ingress.applyDecisionCommand(decision)) orelse return error.RiskRejected;
-    if (host_order.instrument_identity != 3 or host_order.side != .buy or
-        host_order.time_in_force != .immediate_or_cancel or host_order.portfolio_reduce_only or
-        host_order.quantity.lots != buy_quantity_atoms or host_order.limit_price.ticks <= 0 or
-        host_order.reservation.atoms <= 0)
-        return error.InvalidQualifiedCommand;
-    try ingress.verifyReplay();
-    const order_identity = strategy_identity ^ @as(u128, intent_sequence);
-    return .{
-        .command = authorizedPlace(
-            host_order.command_id,
-            host_order.order_id,
-            order.clientOrderId(order_identity),
-            .buy,
-            .limit_ioc,
-            @intCast(host_order.quantity.lots),
-            @divExact(host_order.limit_price.ticks, 100_000),
-        ),
-        .ingress = ingress,
-    };
-}
-
-fn authorizedPlace(
-    command_id: u64,
-    order_id: u64,
-    client_id: order.ClientOrderId,
-    side: order.Side,
-    kind: order.OrderKind,
-    quantity_atoms: i64,
-    price_tenths: i128,
-) live.AuthorizedCommand {
-    const protected_notional = @divFloor(@as(i128, quantity_atoms) * price_tenths, 1_000);
-    return .{
-        .reserved_notional_usdt_micros = std.math.cast(u64, protected_notional) orelse std.math.maxInt(u64),
-        .command = .{
-            .command_id = command_id,
-            .order_id = order_id,
-            .order_revision = 1,
-            .shard_sequence = command_id,
-            .instrument = .btc_usdt_spot,
-            .client_order_id = client_id,
-            .venue_order_id = null,
-            .capability_version = 1,
-            .rules_version = 1,
-            .config_version = 1,
-            .gateway_session = source_session,
-            .dispatch_deadline_monotonic_ns = std.math.maxInt(u64),
-            .risk_reservation_id = command_id,
-            .payload = .{ .place = .{
-                .side = side,
-                .kind = kind,
-                .quantity = .{ .coefficient = quantity_atoms, .scale = 8 },
-                .limit_price = if (kind == .market) null else .{ .coefficient = price_tenths, .scale = 1 },
-                .market_protection_price = if (kind == .market) .{ .coefficient = price_tenths, .scale = 1 } else null,
-                .portfolio_reduce_only = side == .sell,
-                .venue_reduce_only = false,
-            } },
-        },
-    };
-}
-
 fn requireNotional(quantity_atoms: i64, price_tenths: i128) !void {
     const micros = @divFloor(@as(i128, quantity_atoms) * price_tenths, 1_000);
     if (micros <= 0 or micros > live.max_notional_usdt_micros) return error.NotionalLimitExceeded;
-}
-
-fn dispatch(adapter: venue.VenueAdapter, legacy: live.AuthorizedCommand) !canonical.EventRecord {
-    const request = try canonicalCommand(legacy);
-    const price = request.limit_price orelse request.market_protection_price orelse return error.UnsupportedDemoCommand;
-    const reservation = canonical.AssetAmount{ .asset = 1, .atoms = legacy.reserved_notional_usdt_micros };
-    const command_value: oms.Command = .{
-        .command_id = legacy.command.command_id,
-        .order_id = legacy.command.order_id,
-        .strategy_instance = 1,
-        .revision = legacy.command.order_revision,
-        .operation = .place,
-        .instrument = request.instrument,
-        .side = if (request.side == .buy) .buy else .sell,
-        .portfolio_reduce_only = request.portfolio_reduce_only,
-        .venue_reduce_only = request.venue_reduce_only,
-        .quantity = request.quantity.?.lots,
-        .limit_price = price,
-        .reservation = reservation,
-        .order_type = request.order_type,
-        .time_in_force = request.time_in_force,
-        .market_protection_price = request.market_protection_price,
-        .client_order_id = request.client_order_id,
-        .intent_sequence = legacy.command.shard_sequence,
-        .risk_decision_identity = legacy.command.risk_reservation_id,
-        .reservation_identity = legacy.command.risk_reservation_id,
-    };
-    var gateway: execution.Gateway = .{};
-    try gateway.add(.{ .account = demo_account, .adapter = adapter, .capability = .{
-        .version = request.capability_version,
-        .rules_version = request.rules_version,
-        .config_version = request.config_version,
-        .session = request.adapter_session,
-        .supports_post_only = true,
-        .supports_market_protection = true,
-    } });
-    try gateway.observeAuthority(.{
-        .account = demo_account,
-        .effective_trading_authority = true,
-        .reservation_identity = command_value.reservation_identity,
-        .reservation = reservation,
-        .primary_lease_expires_at_monotonic_ns = request.dispatch_deadline_monotonic_ns,
-        .fencing_token = request.adapter_session,
-        .exchange_position = .{ .instrument = request.instrument, .rules_version = request.rules_version, .lots = 0 },
-        .authority_barrier = 1,
-    });
-    if (try gateway.sendProof(.{
-        .context = .{
-            .account = demo_account,
-            .capability_version = request.capability_version,
-            .rules_version = request.rules_version,
-            .config_version = request.config_version,
-            .adapter_session = request.adapter_session,
-            .dispatch_deadline_monotonic_ns = request.dispatch_deadline_monotonic_ns,
-        },
-        .command = command_value,
-        .fencing_token = request.adapter_session,
-        .authority_barrier = 1,
-        .now_monotonic_ns = 0,
-    }) != .accepted)
-        return error.AdapterRejectedCommand;
-    const batch = (try adapter.tryDrain()) orelse return error.MissingDispatchResult;
-    for (batch.slice()) |event_record| switch (event_record.event) {
-        .order_dispatch_result => |result| if (result.command == legacy.command.command_id)
-            return event_record,
-        else => {},
-    };
-    return error.MissingDispatchResult;
-}
-
-fn canonicalCommand(authorized: live.AuthorizedCommand) !canonical.OrderCommand {
-    const command = authorized.command;
-    const place = switch (command.payload) {
-        .place => |value| value,
-        else => return error.UnsupportedDemoCommand,
-    };
-    const instrument: canonical.InstrumentIdentity = switch (command.instrument) {
-        .btc_usdt_spot => okx_adapter.btc_usdt_spot,
-        .btc_usdt_swap => okx_adapter.btc_usdt_swap,
-    };
-    const quantity = canonical.InstrumentQuantity{
-        .instrument = instrument,
-        .rules_version = command.rules_version,
-        .lots = try canonicalDecimal(place.quantity).exactAtoms(8),
-    };
-    const price = if (place.limit_price) |value| canonical.InstrumentPrice{
-        .instrument = instrument,
-        .rules_version = command.rules_version,
-        .ticks = try canonicalDecimal(value).exactAtoms(1),
-    } else null;
-    const protection = if (place.market_protection_price) |value| canonical.InstrumentPrice{
-        .instrument = instrument,
-        .rules_version = command.rules_version,
-        .ticks = try canonicalDecimal(value).exactAtoms(1),
-    } else null;
-    return .{
-        .identity = command.command_id,
-        .exchange_account = demo_account,
-        .instrument = instrument,
-        .client_order_id = try canonical.ClientOrderId.init(command.client_order_id.slice()),
-        .capability_version = command.capability_version,
-        .rules_version = command.rules_version,
-        .config_version = command.config_version,
-        .adapter_session = command.gateway_session,
-        .dispatch_deadline_monotonic_ns = command.dispatch_deadline_monotonic_ns,
-        .side = switch (place.side) {
-            .buy => .buy,
-            .sell => .sell,
-        },
-        .order_type = switch (place.kind) {
-            .limit_gtc => .limit,
-            .market => .market,
-            .limit_ioc => .ioc,
-            .limit_fok => .fok,
-            .post_only => .post_only,
-        },
-        .time_in_force = switch (place.kind) {
-            .limit_gtc => .good_til_canceled,
-            .market, .limit_ioc => .immediate_or_cancel,
-            .limit_fok => .fill_or_kill,
-            .post_only => .post_only,
-        },
-        .portfolio_reduce_only = place.portfolio_reduce_only,
-        .venue_reduce_only = place.venue_reduce_only,
-        .quantity = quantity,
-        .limit_price = price,
-        .market_protection_price = protection,
-    };
-}
-
-fn canonicalDecimal(value: order.Decimal) canonical.Decimal {
-    return .{ .coefficient = value.coefficient, .scale = value.scale };
 }
 
 fn requireVenueAccepted(io: std.Io, item: canonical.OrderDispatchResult, not_sent: anyerror, rejected: anyerror) !void {
@@ -714,125 +711,6 @@ fn diagnostic(io: std.Io, name: []const u8, value: []const u8) !void {
     var out = std.Io.File.stderr().writer(io, &buffer);
     try out.interface.print("{s}={s}\n", .{ name, value });
     try out.interface.flush();
-}
-
-fn emergencyCleanup(init: std.process.Init, owner: *curl.TransportOwner, adapter: venue.VenueAdapter, client_id: order.ClientOrderId) !void {
-    const balance_atoms = try availableBtcAtoms(init, owner);
-    if (balance_atoms < min_quantity_atoms) return;
-    const prices = try ticker(init, owner);
-    const limits = try priceLimits(init, owner);
-    const sell_price_tenths = try protectedSellPrice(prices, limits);
-    try refresh(owner, init.io);
-    const cleanup = authorizedPlace(99, 99, client_id, .sell, .market, balance_atoms, sell_price_tenths);
-    const attempt = try dispatch(adapter, cleanup);
-    const result = switch (attempt.event) {
-        .order_dispatch_result => |value| value,
-        else => return error.MissingDispatchResult,
-    };
-    try requireVenueAccepted(init.io, result, error.CleanupNotSent, error.CleanupRejected);
-}
-
-fn cleanupResidual(init: std.process.Init, owner: *curl.TransportOwner, raw: *RawSink) !void {
-    var balance_atoms = try availableBtcAtoms(init, owner);
-    if (balance_atoms < min_quantity_atoms) return error.NoCleanableBtc;
-    if (balance_atoms < buy_quantity_atoms) {
-        try topUpDemoCleanupBalance(init, owner);
-        balance_atoms = try availableBtcAtoms(init, owner);
-        if (balance_atoms < buy_quantity_atoms) return error.CleanupTopUpMissing;
-    }
-    const prices = try ticker(init, owner);
-    const limits = try priceLimits(init, owner);
-    const sell_price_tenths = try protectedSellPrice(prices, limits);
-    const run_identity = try currentUnixSeconds(init.io);
-    const client_id = order.clientOrderId((@as(u128, run_identity) << 32) | 3);
-    var chain: live.Chain = .{
-        .mode = .demo_live,
-        .qualification = qualified(),
-        .raw_sink = raw.interface(),
-        .transport = owner.transport(),
-    };
-    var adapter_clock: AdapterClock = .{};
-    var implementation = okx_adapter.OkxVenueAdapter.init(init.gpa, &chain, adapter_clock.interface(), demoProfile(), demoRules());
-    const adapter = implementation.adapter();
-    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4 });
-    try refresh(owner, init.io);
-    const cleanup = authorizedPlace(99, 99, client_id, .sell, .market, balance_atoms, sell_price_tenths);
-    const attempt = try dispatch(adapter, cleanup);
-    const result = switch (attempt.event) {
-        .order_dispatch_result => |value| value,
-        else => return error.MissingDispatchResult,
-    };
-    try requireVenueAccepted(init.io, result, error.CleanupNotSent, error.CleanupRejected);
-    for (0..6) |_| if (try availableBtcAtoms(init, owner) == 0) {
-        try progress(init.io, "residual_cleanup");
-        return;
-    };
-    return error.CleanupBalanceNotZero;
-}
-
-fn topUpDemoCleanupBalance(init: std.process.Init, owner: *curl.TransportOwner) !void {
-    try refresh(owner, init.io);
-    const response = owner.request(
-        .post,
-        "/api/v5/account/demo-adjust-balance",
-        "{\"type\":\"increase\",\"adjustments\":[{\"ccy\":\"BTC\",\"amt\":\"0.0001\"}]}",
-    );
-    if (response.outcome != .response) return error.CleanupTopUpUncertain;
-    const parsed = try std.json.parseFromSlice(std.json.Value, init.gpa, response.response.?, .{});
-    defer parsed.deinit();
-    const root = switch (parsed.value) {
-        .object => |value| value,
-        else => return error.CleanupTopUpRejected,
-    };
-    const code = switch (root.get("code") orelse return error.CleanupTopUpRejected) {
-        .string => |value| value,
-        else => return error.CleanupTopUpRejected,
-    };
-    if (!std.mem.eql(u8, code, "0")) return error.CleanupTopUpRejected;
-    try progress(init.io, "demo_cleanup_top_up");
-}
-
-fn availableBtcAtoms(init: std.process.Init, owner: *curl.TransportOwner) !i64 {
-    try refresh(owner, init.io);
-    const response = owner.request(.get, "/api/v5/account/balance?ccy=BTC", "");
-    if (response.outcome != .response) return error.BalanceUnavailable;
-    const parsed = try std.json.parseFromSlice(std.json.Value, init.gpa, response.response.?, .{});
-    defer parsed.deinit();
-    const root = switch (parsed.value) {
-        .object => |value| value,
-        else => return error.InvalidBalance,
-    };
-    const data = switch (root.get("data") orelse return error.InvalidBalance) {
-        .array => |value| value,
-        else => return error.InvalidBalance,
-    };
-    if (data.items.len != 1) return 0;
-    const account = switch (data.items[0]) {
-        .object => |value| value,
-        else => return error.InvalidBalance,
-    };
-    const details = switch (account.get("details") orelse return error.InvalidBalance) {
-        .array => |value| value,
-        else => return error.InvalidBalance,
-    };
-    for (details.items) |item| {
-        const detail = switch (item) {
-            .object => |value| value,
-            else => continue,
-        };
-        const ccy = switch (detail.get("ccy") orelse continue) {
-            .string => |value| value,
-            else => continue,
-        };
-        if (!std.mem.eql(u8, ccy, "BTC")) continue;
-        const available = switch (detail.get("availBal") orelse continue) {
-            .string => |value| value,
-            else => continue,
-        };
-        const decimal = try order.Decimal.parse(available);
-        return std.math.cast(i64, try scaleAtoms(decimal)) orelse return error.InvalidBalance;
-    }
-    return 0;
 }
 
 const Clock = struct {
@@ -885,12 +763,6 @@ fn clock(io: std.Io) !Clock {
 fn refresh(owner: *curl.TransportOwner, io: std.Io) !void {
     const stamp = try clock(io);
     try owner.prepare(stamp.timestampSlice(), stamp.times);
-}
-
-fn currentUnixSeconds(io: std.Io) !u64 {
-    const ns = std.Io.Clock.real.now(io).nanoseconds;
-    if (ns <= 0) return error.ClockUnavailable;
-    return @intCast(@divFloor(ns, std.time.ns_per_s));
 }
 
 const RunMode = enum { prepare_only, demo_live, cleanup_only };
@@ -974,13 +846,6 @@ fn pow10(exponent: u8) !i128 {
     var value: i128 = 1;
     for (0..exponent) |_| value = try std.math.mul(i128, value, 10);
     return value;
-}
-
-fn scaleAtoms(decimal: order.Decimal) !i128 {
-    if (decimal.scale <= 8) return decimal.coefficient * try pow10(8 - decimal.scale);
-    const divisor = try pow10(decimal.scale - 8);
-    if (@mod(decimal.coefficient, divisor) != 0) return error.InexactBalance;
-    return @divTrunc(decimal.coefficient, divisor);
 }
 
 fn ceilDiv(value: i128, divisor: i128) i128 {

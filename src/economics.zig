@@ -64,6 +64,8 @@ pub const Fill = struct {
     quantity_denominator: i64,
     fee: canonical.AssetAmount = .{ .asset = 0, .atoms = 0 },
     rebate: canonical.AssetAmount = .{ .asset = 0, .atoms = 0 },
+    base_fee_quantity: i64 = 0,
+    base_rebate_quantity: i64 = 0,
     portfolio_margin_ppm: i64 = 0,
     exchange_margin_ppm: i64 = 0,
     product: canonical.Product,
@@ -216,7 +218,9 @@ pub const Projection = struct {
             fill.quantity.rules_version != fill.price.rules_version or fill.quantity_denominator <= 0 or
             (fill.fee.atoms != 0 and fill.fee.asset != self.settlement_asset) or
             (fill.rebate.atoms != 0 and fill.rebate.asset != self.settlement_asset) or
-            fill.fee.atoms < 0 or fill.rebate.atoms < 0)
+            fill.fee.atoms < 0 or fill.rebate.atoms < 0 or fill.base_fee_quantity < 0 or
+            fill.base_rebate_quantity < 0 or
+            (fill.product != .spot and (fill.base_fee_quantity != 0 or fill.base_rebate_quantity != 0)))
             return error.InvalidEconomicFact;
         if (self.denominator(fill.product) != 0 and self.denominator(fill.product) != fill.quantity_denominator)
             return error.InconsistentQuantityDenominator;
@@ -234,6 +238,14 @@ pub const Projection = struct {
         const position_delta: i64 = if (fill.side == .buy) std.math.cast(i64, fill.quantity.lots) orelse return error.Overflow else -(std.math.cast(i64, fill.quantity.lots) orelse return error.Overflow);
         try self.appendPositionLedger(fill.identity, kind, .portfolio, fill.product, position_delta);
         try self.appendPositionLedger(fill.identity, kind, .exchange, fill.product, position_delta);
+        if (fill.base_fee_quantity != 0) {
+            try self.appendSpotChargeLedger(fill.identity, kind, .portfolio, .fee_expense, -fill.base_fee_quantity);
+            try self.appendSpotChargeLedger(fill.identity, kind, .exchange, .fee_expense, -fill.base_fee_quantity);
+        }
+        if (fill.base_rebate_quantity != 0) {
+            try self.appendSpotChargeLedger(fill.identity, kind, .portfolio, .rebate_income, fill.base_rebate_quantity);
+            try self.appendSpotChargeLedger(fill.identity, kind, .exchange, .rebate_income, fill.base_rebate_quantity);
+        }
         try self.appendLedger(fill.identity, kind, .portfolio, .trade, portfolio_movement);
         try self.appendLedger(fill.identity, kind, .exchange, .trade, exchange_movement);
         if (fill.fee.atoms > 0) {
@@ -455,6 +467,18 @@ pub const Projection = struct {
         self.ledger_count += 1;
     }
 
+    fn appendSpotChargeLedger(self: *Projection, identity: u64, kind: FactKind, layer: LedgerLayer, account: LedgerAccount, quantity_delta: i64) !void {
+        if (self.ledger_count == max_ledger_transactions) return error.LedgerCapacityExceeded;
+        self.ledger[self.ledger_count] = .{
+            .source_identity = identity,
+            .kind = kind,
+            .layer = layer,
+            .posting_count = 2,
+            .postings = .{ .{ .account = .spot_asset, .unit = .spot_quantity, .amount = quantity_delta }, .{ .account = account, .unit = .spot_quantity, .amount = try std.math.sub(i64, 0, quantity_delta) }, undefined, undefined },
+        };
+        self.ledger_count += 1;
+    }
+
     fn openBreak(self: *Projection, identity: u64) !void {
         for (self.reconciliation_break_identities[0..self.reconciliation_break_count]) |known| if (known == identity) return;
         if (self.reconciliation_break_count == max_facts) return error.ReconciliationBreakCapacityExceeded;
@@ -510,9 +534,15 @@ fn applyFillToLayer(layer: *Layer, fill: Fill) !i64 {
     layer.rebate_micros = try std.math.add(i64, layer.rebate_micros, rebate);
     if (fill.product == .spot) {
         const direction: i64 = if (fill.side == .buy) 1 else -1;
-        const next_asset = try std.math.add(i64, layer.spot_asset_quantity, try std.math.mul(i64, direction, quantity));
+        const traded_delta = try std.math.mul(i64, direction, quantity);
+        const next_asset = try std.math.add(i64, layer.spot_asset_quantity, try std.math.add(i64, traded_delta, try std.math.sub(i64, fill.base_rebate_quantity, fill.base_fee_quantity)));
         if (next_asset < 0) return error.InsufficientSpotAsset;
-        const realized = try updatePosition(&layer.spot, direction, quantity, notional);
+        const position_quantity = if (fill.side == .buy)
+            try std.math.add(i64, quantity, try std.math.sub(i64, fill.base_rebate_quantity, fill.base_fee_quantity))
+        else
+            try std.math.add(i64, quantity, try std.math.sub(i64, fill.base_fee_quantity, fill.base_rebate_quantity));
+        if (position_quantity <= 0) return error.InvalidEconomicFact;
+        const realized = try updatePosition(&layer.spot, direction, position_quantity, notional);
         layer.spot_asset_quantity = next_asset;
         const trade_cash_delta = if (fill.side == .buy) -notional else notional;
         layer.usdt_balance_micros = try std.math.add(i64, layer.usdt_balance_micros, try std.math.sub(i64, trade_cash_delta, net_fee));
@@ -570,6 +600,8 @@ fn fingerprintFill(fill: Fill) u64 {
     hash.update(std.mem.asBytes(&fill.fee.atoms));
     hash.update(std.mem.asBytes(&fill.rebate.asset));
     hash.update(std.mem.asBytes(&fill.rebate.atoms));
+    hash.update(std.mem.asBytes(&fill.base_fee_quantity));
+    hash.update(std.mem.asBytes(&fill.base_rebate_quantity));
     hash.update(std.mem.asBytes(&fill.portfolio_margin_ppm));
     hash.update(std.mem.asBytes(&fill.exchange_margin_ppm));
     hash.update(&.{@intFromEnum(fill.product)});
@@ -638,6 +670,26 @@ test "partial fills close two layers with average cost fees rebates margin and v
     try std.testing.expectEqual(@as(i64, 9), projection.portfolio.fee_micros);
     try std.testing.expectEqual(@as(i64, 1), projection.portfolio.rebate_micros);
     try std.testing.expectEqual(@as(u8, 16), projection.ledger_count);
+    try projection.assertClosed();
+}
+
+test "spot base-asset fee reduces acquired quantity without inventing cash fee" {
+    var projection: Projection = .{};
+    projection.portfolio.usdt_balance_micros = 10_000;
+    projection.exchange.usdt_balance_micros = 10_000;
+    try projection.apply(.{ .fill = .{
+        .identity = 1,
+        .side = .buy,
+        .quantity = fixtureQuantity(10),
+        .price = fixturePrice(100),
+        .quantity_denominator = 1,
+        .base_fee_quantity = 1,
+        .product = .spot,
+    } });
+    try std.testing.expectEqual(@as(i64, 9), projection.portfolio.spot_asset_quantity);
+    try std.testing.expectEqual(@as(i64, 9), projection.portfolio.spot.quantity);
+    try std.testing.expectEqual(@as(i64, 9_000), projection.portfolio.usdt_balance_micros);
+    try std.testing.expectEqual(@as(i64, 0), projection.portfolio.fee_micros);
     try projection.assertClosed();
 }
 

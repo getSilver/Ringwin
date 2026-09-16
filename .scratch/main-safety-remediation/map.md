@@ -53,7 +53,7 @@ OrderIntent、Order、RiskReservation、账户危险事实、StrategyHost 授权
 
 ## Frontier
 
-- [07 以唯一 Gateway 强制真实 ReduceOnly 与 fencing](issues/07-enforce-authoritative-gateway-send.md)；06 已扩展 OMS 原生事实引用，07 迁移 Gateway 消费并复用现有 DurableStore seam 收口预发送持久提交。
+- 07 已关闭；下一张未完成的依赖前沿为 [09 把 legacy 订单与策略调用方迁入权威 OMS](issues/09-migrate-legacy-order-and-strategy-paths.md)。11 的既有并行工作保持原状态，本票未修改。
 
 ## Decisions so far
 

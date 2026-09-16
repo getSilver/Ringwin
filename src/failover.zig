@@ -262,6 +262,7 @@ fn authorityChecksum(bytes: []const u8) u32 {
 pub const LinuxFencingStore = struct {
     io: std.Io,
     dir: std.Io.Dir,
+    owner_file: std.Io.File,
 
     pub fn open(io: std.Io, absolute_path: []const u8) !LinuxFencingStore {
         if (builtin.os.tag != .linux) return error.LinuxFencingStoreRequired;
@@ -273,10 +274,25 @@ pub const LinuxFencingStore = struct {
         const dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{ .iterate = true });
         errdefer dir.close(io);
         try dir.setPermissions(io, private_dir_permissions);
-        return .{ .io = io, .dir = dir };
+        // A stale owner marker is deliberately not stolen after a crash.
+        // Operator fencing/recovery must resolve it before another Demo owner.
+        var owner_file = try dir.createFile(io, "owner.lock", .{
+            .exclusive = true,
+            .permissions = std.Io.File.Permissions.fromMode(0o600),
+        });
+        errdefer {
+            owner_file.close(io);
+            dir.deleteFile(io, "owner.lock") catch {};
+        }
+        try owner_file.sync(io);
+        try syncAuthorityDirectory(dir);
+        return .{ .io = io, .dir = dir, .owner_file = owner_file };
     }
 
     pub fn close(self: *LinuxFencingStore) void {
+        self.owner_file.close(self.io);
+        self.dir.deleteFile(self.io, "owner.lock") catch {};
+        syncAuthorityDirectory(self.dir) catch {};
         self.dir.close(self.io);
     }
 
@@ -328,13 +344,17 @@ pub const LinuxFencingStore = struct {
             try file.sync(self.io);
         }
         try self.dir.rename("authority.tmp", self.dir, "authority.bin", self.io);
-        if (builtin.os.tag == .linux) switch (std.os.linux.errno(std.os.linux.fsync(self.dir.handle))) {
-            .SUCCESS => {},
-            .INVAL, .BADF, .OPNOTSUPP => std.posix.sync(),
-            else => return error.FencingDirectorySyncFailed,
-        };
+        try syncAuthorityDirectory(self.dir);
     }
 };
+
+fn syncAuthorityDirectory(dir: std.Io.Dir) !void {
+    if (builtin.os.tag == .linux) switch (std.os.linux.errno(std.os.linux.fsync(dir.handle))) {
+        .SUCCESS => {},
+        .INVAL, .BADF, .OPNOTSUPP => std.posix.sync(),
+        else => return error.FencingDirectorySyncFailed,
+    };
+}
 
 pub const NodeFence = struct {
     available: bool = true,
@@ -855,6 +875,21 @@ test "lease renewal failure enters recovery only and gateway checks clock" {
     try std.testing.expectError(error.FencingAuthorityUnavailable, guard.renew(100));
     try std.testing.expectError(error.FencingAuthorityUnavailable, guard.check(100, lease.token, true));
     try std.testing.expect(guard.recovery_only);
+}
+
+test "Linux fencing directory admits only one local owner" {
+    if (builtin.os.tag != .linux) return;
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var path_buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "/tmp/ringwin-fencing-lock-test-{d}-{d}", .{ std.os.linux.getpid(), std.Io.Clock.real.now(io).nanoseconds });
+    defer std.Io.Dir.cwd().deleteTree(io, path) catch {};
+    var first = try LinuxFencingStore.open(io, path);
+    try std.testing.expectError(error.PathAlreadyExists, LinuxFencingStore.open(io, path));
+    first.close();
+    var second = try LinuxFencingStore.open(io, path);
+    second.close();
 }
 
 test "standby observation credential and lag fail closed" {

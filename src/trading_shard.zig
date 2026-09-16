@@ -587,7 +587,8 @@ pub const TradingShard = struct {
             });
             intent.reservation = assessment.order_reservation;
             intent.portfolio_reduce_only = assessment.portfolio_reduce_only;
-            intent.venue_reduce_only = assessment.venue_reduce_only;
+            intent.venue_reduce_only = assessment.venue_reduce_only and
+                (if (instrument_config.capability) |capability| capability.supports_venue_reduce_only else true);
             active = assessment.total_reserved;
             self.layered_risk_reserved_micros = std.math.cast(i64, active.atoms) orelse return error.Overflow;
             self.portfolio_margin_buffer_micros = std.math.cast(i64, assessment.portfolio_margin_buffer.atoms) orelse return error.Overflow;
@@ -1344,6 +1345,27 @@ pub const TradingShard = struct {
         const price = std.math.cast(i64, fill.price.ticks) orelse return error.PriceOutOfRange;
         const fee = fill.fee orelse return error.MissingFillFee;
         const rebate = fill.rebate orelse canonical.AssetAmount{ .asset = self.economic_projection.settlement_asset, .atoms = 0 };
+        if (fee.atoms < 0 or rebate.atoms < 0) return error.InvalidEconomicFact;
+        var settlement_fee = canonical.AssetAmount{ .asset = self.economic_projection.settlement_asset, .atoms = 0 };
+        var settlement_rebate = canonical.AssetAmount{ .asset = self.economic_projection.settlement_asset, .atoms = 0 };
+        var base_fee_quantity: i64 = 0;
+        var base_rebate_quantity: i64 = 0;
+        if (fee.atoms != 0) {
+            if (fee.asset == self.economic_projection.settlement_asset)
+                settlement_fee = fee
+            else if (instrument_config.product == .spot and fee.asset == instrument_config.rules.base_asset)
+                base_fee_quantity = std.math.cast(i64, fee.atoms) orelse return error.Overflow
+            else
+                return error.InvalidEconomicFact;
+        }
+        if (rebate.atoms != 0) {
+            if (rebate.asset == self.economic_projection.settlement_asset)
+                settlement_rebate = rebate
+            else if (instrument_config.product == .spot and rebate.asset == instrument_config.rules.base_asset)
+                base_rebate_quantity = std.math.cast(i64, rebate.atoms) orelse return error.Overflow
+            else
+                return error.InvalidEconomicFact;
+        }
         const economic_instrument = fill.instrument;
         _ = try self.applyEconomicProjection(.{ .fill = .{
             .identity = fill_id,
@@ -1354,8 +1376,10 @@ pub const TradingShard = struct {
             .quantity = .{ .instrument = economic_instrument, .rules_version = fill.quantity.rules_version, .lots = fill.quantity.lots },
             .price = .{ .instrument = economic_instrument, .rules_version = fill.price.rules_version, .ticks = fill.price.ticks },
             .quantity_denominator = instrument_config.rules.quantity_denominator,
-            .fee = fee,
-            .rebate = rebate,
+            .fee = settlement_fee,
+            .rebate = settlement_rebate,
+            .base_fee_quantity = base_fee_quantity,
+            .base_rebate_quantity = base_rebate_quantity,
             .portfolio_margin_ppm = if (instrument_config.margin_configured) instrument_config.margin.internal_initial_margin_ppm else self.internal_initial_margin_ppm,
             .exchange_margin_ppm = if (instrument_config.margin_configured) instrument_config.margin.venue_initial_margin_ppm else self.venue_initial_margin_ppm,
             .product = instrument_config.product,
@@ -1678,7 +1702,8 @@ pub const TradingShard = struct {
                 try self.trace.append(.host_activated, input.identity);
             },
             .primary_lease_granted => |lease| {
-                if (!self.strategy_active or lease.fencing_token == 0 or self.fencing_token != 0)
+                if (!self.strategy_active or lease.fencing_token == 0 or
+                    (self.fencing_token != 0 and lease.fencing_token <= self.fencing_token))
                     return error.InvalidPrimaryLease;
                 self.fencing_token = lease.fencing_token;
                 if (self.operational_state.initialized) try self.applyOperationalGate(.{

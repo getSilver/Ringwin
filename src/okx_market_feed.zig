@@ -14,11 +14,14 @@ pub const btc_usdt_swap: canonical.InstrumentIdentity = 0x4f4b58_00000002;
 const State = enum { idle, running, stopped };
 const Rules = struct {
     tick_size: okx.Decimal,
+    lot_size: okx.Decimal,
     version: u64,
 };
 const BookTop = struct {
     bid: canonical.InstrumentPrice,
+    bid_quantity: canonical.InstrumentQuantity,
     ask: canonical.InstrumentPrice,
+    ask_quantity: canonical.InstrumentQuantity,
     ready: bool = false,
 };
 
@@ -126,7 +129,7 @@ pub const OkxMarketFeed = struct {
             .instrument_definition_observed => |definition| {
                 const index = @intFromEnum(definition.instrument);
                 const version = (self.config orelse return error.NotStarted).config_version;
-                self.rules[index] = .{ .tick_size = definition.tick_size, .version = version };
+                self.rules[index] = .{ .tick_size = definition.tick_size, .lot_size = definition.lot_size, .version = version };
                 self.books[index].ready = false;
                 try self.append(output, event.envelope, instrumentIdentity(definition.instrument), event.envelope.raw_evidence.stream_sequence, null, .{
                     .instrument_definition_observed = .{ .instrument = instrumentIdentity(definition.instrument), .rules_version = version },
@@ -143,10 +146,12 @@ pub const OkxMarketFeed = struct {
                 }
                 const bid = try price(snapshot.instrument, rules, snapshot.bids.slice()[0].price);
                 const ask = try price(snapshot.instrument, rules, snapshot.asks.slice()[0].price);
+                const bid_quantity = try quantity(snapshot.instrument, rules, snapshot.bids.slice()[0].quantity);
+                const ask_quantity = try quantity(snapshot.instrument, rules, snapshot.asks.slice()[0].quantity);
                 const sequence = try sourceSequence(snapshot.source_sequence);
-                self.books[index] = .{ .bid = bid, .ask = ask, .ready = true };
+                self.books[index] = .{ .bid = bid, .bid_quantity = bid_quantity, .ask = ask, .ask_quantity = ask_quantity, .ready = true };
                 try self.append(output, event.envelope, instrumentIdentity(snapshot.instrument), sequence, null, .{
-                    .l2_book_snapshot = .{ .instrument = instrumentIdentity(snapshot.instrument), .sequence = sequence, .best_bid = bid, .best_ask = ask },
+                    .l2_book_snapshot = .{ .instrument = instrumentIdentity(snapshot.instrument), .sequence = sequence, .best_bid = bid, .best_ask = ask, .best_bid_quantity = bid_quantity, .best_ask_quantity = ask_quantity },
                 });
             },
             .l2_book_delta => |delta| try self.translateDelta(output, event.envelope, delta),
@@ -181,14 +186,14 @@ pub const OkxMarketFeed = struct {
         var book = &self.books[index];
         const sequence = try sourceSequence(delta.source_sequence);
         const previous = try sourceSequence(delta.previous_source_sequence);
-        if (!book.ready or !try applyBid(&book.bid, delta.bids.slice(), delta.instrument, rules) or !try applyAsk(&book.ask, delta.asks.slice(), delta.instrument, rules)) {
+        if (!book.ready or !try applyBid(&book.bid, &book.bid_quantity, delta.bids.slice(), delta.instrument, rules) or !try applyAsk(&book.ask, &book.ask_quantity, delta.asks.slice(), delta.instrument, rules)) {
             book.ready = false;
             return self.append(output, envelope, instrumentIdentity(delta.instrument), sequence, previous, .{
                 .market_data_health_changed = .{ .instrument = instrumentIdentity(delta.instrument), .health = .gap },
             });
         }
         try self.append(output, envelope, instrumentIdentity(delta.instrument), sequence, previous, .{
-            .l2_book_delta = .{ .instrument = instrumentIdentity(delta.instrument), .previous_sequence = previous, .sequence = sequence, .best_bid = book.bid, .best_ask = book.ask },
+            .l2_book_delta = .{ .instrument = instrumentIdentity(delta.instrument), .previous_sequence = previous, .sequence = sequence, .best_bid = book.bid, .best_ask = book.ask, .best_bid_quantity = book.bid_quantity, .best_ask_quantity = book.ask_quantity },
         });
     }
 
@@ -229,6 +234,11 @@ fn price(instrument: okx.Instrument, rules: Rules, value: okx.Decimal) !canonica
     return canonical.InstrumentPrice.fromDecimal(instrumentIdentity(instrument), rules.version, canonicalDecimal(value), rules.tick_size.scale, tick_atoms);
 }
 
+fn quantity(instrument: okx.Instrument, rules: Rules, value: okx.Decimal) !canonical.InstrumentQuantity {
+    const lot_atoms = try canonicalDecimal(rules.lot_size).exactAtoms(rules.lot_size.scale);
+    return canonical.InstrumentQuantity.fromDecimal(instrumentIdentity(instrument), rules.version, canonicalDecimal(value), rules.lot_size.scale, lot_atoms);
+}
+
 fn sourceSequence(value: i64) !u64 {
     if (value < 0) return error.InvalidSourceSequence;
     return @intCast(value);
@@ -242,21 +252,27 @@ fn health(value: okx.MarketDataHealth) canonical.MarketDataHealth {
     };
 }
 
-fn applyBid(current: *canonical.InstrumentPrice, updates: []const okx.BookLevel, instrument: okx.Instrument, rules: Rules) !bool {
+fn applyBid(current: *canonical.InstrumentPrice, current_quantity: *canonical.InstrumentQuantity, updates: []const okx.BookLevel, instrument: okx.Instrument, rules: Rules) !bool {
     if (updates.len == 0) return true;
     const update = updates[0];
     const next = try price(instrument, rules, update.price);
     if (update.quantity.coefficient == 0) return next.ticks != current.ticks;
-    if (next.ticks >= current.ticks) current.* = next;
+    if (next.ticks >= current.ticks) {
+        current.* = next;
+        current_quantity.* = try quantity(instrument, rules, update.quantity);
+    }
     return true;
 }
 
-fn applyAsk(current: *canonical.InstrumentPrice, updates: []const okx.BookLevel, instrument: okx.Instrument, rules: Rules) !bool {
+fn applyAsk(current: *canonical.InstrumentPrice, current_quantity: *canonical.InstrumentQuantity, updates: []const okx.BookLevel, instrument: okx.Instrument, rules: Rules) !bool {
     if (updates.len == 0) return true;
     const update = updates[0];
     const next = try price(instrument, rules, update.price);
     if (update.quantity.coefficient == 0) return next.ticks != current.ticks;
-    if (next.ticks <= current.ticks) current.* = next;
+    if (next.ticks <= current.ticks) {
+        current.* = next;
+        current_quantity.* = try quantity(instrument, rules, update.quantity);
+    }
     return true;
 }
 
@@ -303,6 +319,8 @@ test "OKX official public fixtures cross the market seam as shared facts" {
     const snapshot = (try adapter.tryDrain()).?;
     try std.testing.expectEqual(@as(u8, 2), snapshot.len);
     try std.testing.expectEqual(@as(i128, 500999), snapshot.events[0].event.l2_book_snapshot.best_bid.ticks);
+    try std.testing.expectEqual(@as(i128, 150), snapshot.events[0].event.l2_book_snapshot.best_bid_quantity.?.lots);
+    try std.testing.expectEqual(@as(i128, 200), snapshot.events[0].event.l2_book_snapshot.best_ask_quantity.?.lots);
     try std.testing.expectEqual(canonical.MarketDataHealth.healthy, snapshot.events[1].event.market_data_health_changed.health);
 
     try feed.ingest(std.testing.allocator, test_times,

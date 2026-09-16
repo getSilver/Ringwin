@@ -390,6 +390,16 @@ pub const OkxVenueAdapter = struct {
         const venue_order = try venueOrderRef(binding.venue, @intFromEnum(fill.venue_order_id));
         const venue_trade = try venueTradeRef(binding.venue, @intFromEnum(fill.venue_trade_id));
         const fee_asset = try assetIdentity(fill.fee_asset.slice());
+        const signed_fee = try assetAmount(fee_asset, fill.fee);
+        const explicit_rebate = if (fill.rebate) |value|
+            try assetAmount(try assetIdentity((fill.rebate_asset orelse return error.MissingRebateAsset).slice()), value)
+        else
+            null;
+        if (explicit_rebate != null and explicit_rebate.?.atoms <= 0) return error.InvalidFee;
+        const normalized_fee: canonical.AssetAmount = if (signed_fee.atoms < 0) .{
+            .asset = signed_fee.asset,
+            .atoms = std.math.sub(i128, 0, signed_fee.atoms) catch return error.InvalidFee,
+        } else .{ .asset = signed_fee.asset, .atoms = 0 };
         try self.appendPrivate(output, envelope, .account, rules.identity, null, digestIdentity(envelope.source_fact_identity), .{ .fill = .{
             .identity = digestIdentity(envelope.source_fact_identity),
             .order = link.order,
@@ -404,8 +414,8 @@ pub const OkxVenueAdapter = struct {
             },
             .quantity = try self.privateQuantity(rules.identity, rules.rules, fill.quantity),
             .price = try self.privatePrice(rules.identity, rules.rules, fill.price),
-            .fee = try assetAmount(fee_asset, fill.fee),
-            .rebate = if (fill.rebate) |value| try assetAmount(try assetIdentity((fill.rebate_asset orelse return error.MissingRebateAsset).slice()), value) else null,
+            .fee = normalized_fee,
+            .rebate = explicit_rebate orelse if (signed_fee.atoms > 0) signed_fee else null,
             .realized_pnl = if (fill.realized_pnl) |value| try assetAmount(usdt, value) else null,
             .liquidity = switch (fill.liquidity orelse return error.MissingLiquidity) {
                 .maker => .maker,
@@ -1129,7 +1139,7 @@ test "OKX adapter releases buffered private bootstrap only after stable REST sco
     try adapter.stop(.{ .monotonic_ns = 1 });
 }
 
-test "OKX private facts map losslessly to canonical execution fill and account facts" {
+test "OKX private facts normalize fee signs into canonical execution fill and account facts" {
     var raw = TestRawSink{};
     var transport = TestTransport{};
     var chain: live.Chain = .{ .mode = .demo_live, .qualification = qualification(), .raw_sink = raw.interface(), .transport = transport.interface() };
@@ -1187,6 +1197,7 @@ test "OKX private facts map losslessly to canonical execution fill and account f
     try std.testing.expect(output.events[0].event.execution_report.margin_mode_isolated.?);
     try std.testing.expectEqual(@as(i128, 3), output.events[0].event.execution_report.leverage.?.coefficient);
     try std.testing.expectEqual(btc, output.events[1].event.fill.fee.?.asset);
+    try std.testing.expectEqual(@as(i128, 1), output.events[1].event.fill.fee.?.atoms);
     try std.testing.expectEqual(usdt, output.events[1].event.fill.rebate.?.asset);
 
     var balance: private.ExchangeBalanceSnapshot = .{ .scope = .full_rest, .venue_update_time_utc_ns = 1 };
