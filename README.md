@@ -278,6 +278,45 @@ Please do not open public issues for suspected vulnerabilities.
 
 See [`SECURITY.md`](SECURITY.md) for responsible disclosure instructions.
 
+## Control Plane and Operator UI
+
+On top of the trading core, this repository now includes a runnable minimal
+control plane with a local web operator UI (pure Python standard library plus
+a Zig demo node, bound to 127.0.0.1 only):
+
+- **Signed command channel**: the control plane issues HMAC-SHA256 envelopes
+  (version + content hash + expiry + idempotent identity); the Zig host pulls
+  them over localhost TCP and routes them into each shard's authoritative
+  journal. A drop directory plus an emergency KillSwitch console provide an
+  outage bypass.
+- **Read-only projection**: shard journals are rebuilt through the core's own
+  SemanticReplay path; structural corruption or unknown schemas degrade
+  explicitly instead of ever serving stale state.
+- **OwnerSession authentication**: scrypt passphrase + RFC 6238 TOTP + a
+  single active expiring session. High-risk commands (EnableTrading / DeRisk /
+  StopKeepPositions / ResolveLatch / KillSwitch) require a one-time
+  RiskWarning confirmation and are written to OperatorRecords.
+
+Fail-stop wave acceptance:
+
+```powershell
+tools\verify-control-plane-wave.ps1
+```
+
+It covers authentication rate limiting, CSRF/RiskWarning fences, command
+idempotency, directed delivery across four shards, UI projection consistency,
+control-plane loss degradation (node survives, kill latch never auto-clears),
+and field-exact replay equivalence from the on-disk journals:
+
+```text
+control_plane_wave_acceptance=passed
+```
+
+This wave does not prove production deployment readiness: TLS/reverse proxy,
+CredentialStore passphrase unlock integration, asymmetric signature upgrade,
+and Linux production runtime remain separate waves. Decision trail:
+[control plane Wayfinder map](.scratch/control-plane-and-operator-ui/map.md).
+
 ## Contributing
 
 Contributions, bug reports, documentation improvements, testing, and design discussions are welcome.

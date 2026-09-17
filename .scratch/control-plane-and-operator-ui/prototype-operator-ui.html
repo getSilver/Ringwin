@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<!--
+  PROTOTYPE (throwaway) — Ringwin 控制面操作界面信息架构原型 v2
+  决议: 采用 B 分页工作台为骨架; 操作台并入事实流; 新增 风险与保证金 / 盈亏 视图。
+  页面: 总览 | 持仓挂单 | 风险与保证金 | 盈亏 | 操作台(+事实流) | 命令历史
+  全部假数据, 无后端。双击本文件即可打开 (file:// 可用)。
+-->
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Ringwin 控制面原型 v2</title>
+<style>
+  :root { --bg:#0f1419; --panel:#1a212b; --line:#2a3442; --fg:#d8dee6; --dim:#7d8894;
+          --ok:#3fb96f; --warn:#e0a63a; --bad:#e05555; --accent:#4a9eda; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.5 "Cascadia Code",Consolas,"Microsoft YaHei",monospace; }
+  h2 { font-size:15px; margin:0 0 10px; color:var(--dim); letter-spacing:1px; }
+  h3 { font-size:13px; margin:14px 0 8px; color:var(--dim); }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px; margin-bottom:12px; }
+  .grid .panel { margin-bottom:0; }
+  .grid { row-gap:16px; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:99px; font-size:12px; font-weight:bold; }
+  .ok   { background:#153826; color:var(--ok); }
+  .warn { background:#3a2f14; color:var(--warn); }
+  .bad  { background:#3a1515; color:var(--bad); }
+  .dim  { color:var(--dim); }
+  .pos { color:var(--ok); } .neg { color:var(--bad); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td,th { text-align:left; padding:4px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:normal; }
+  button { background:#223042; color:var(--fg); border:1px solid #35485e;
+           border-radius:6px; padding:7px 12px; cursor:pointer; font:inherit; }
+  button:hover { background:#2c3f56; }
+  button.danger { background:#3a1515; border-color:#6e2828; color:#ff9c9c; }
+  button.primary { background:#173a57; border-color:#2b5f8a; color:#9cd0ff; }
+</style>
+</head>
+<body>
+<div style="display:flex;min-height:100vh">
+  <div style="width:210px;background:var(--panel);border-right:1px solid var(--line);padding:16px;position:sticky;top:0;height:100vh">
+    <h2 style="color:var(--accent)">RINGWIN 控制面</h2>
+    <div id="nav"></div>
+    <p class="dim" style="font-size:11px;margin-top:24px">PROTOTYPE · 假数据<br>会话: SystemOwner ✓</p>
+  </div>
+  <div style="flex:1;padding:20px" id="main"></div>
+</div>
+
+<div id="overlay" style="position:fixed;inset:0;background:rgba(0,0,0,.65);display:none;align-items:center;justify-content:center;z-index:40"></div>
+
+<script>
+// ---------- 假数据 (形状对齐 ShardView JSON + 保证金/PnL 投影) ----------
+const SHARDS = [
+  { target_identity:"1", mode:"trading", trading_authorized:false, effective_authority:false,
+    may_reduce_only:true, unresolved_latches:1, open_orders:2,
+    portfolio_position_quantity:1200, exchange_position_quantity:1200,
+    reconciliation_break:false, last_sequence:15, status:"truncated_tail",
+    gates:[ {identity:"9001",kind:"self_recovering",reason:"primary_lease",open:true},
+            {identity:"9002",kind:"self_recovering",reason:"risk_lease",open:true},
+            {identity:"9010",kind:"latched",reason:"operator_kill",open:false} ],
+    margin:{ instrument:"BTC-USDT-SWAP", model:"IsolatedLinearUsdtV1",
+             mark_price:"50,010.0", margin_equity:"12,480.5",
+             initial_margin:"6,250.0", maintenance_margin:"2,150.0",
+             margin_buffer:"10,330.5", fee_buffer:"180.0",
+             liq_distance_ticks:4120, liq_distance_bps:822,
+             gate:{opening:"pass", warning:"pass", kill:"pass"},
+             risk_lease_remaining:"988.0万", venue_net_margin:"6,300.0",
+             netting_benefit:"50.0" },
+    pnl:{ unrealized:"+1,800.00", realized_today:"-37.51", open_cost:"500,200.0",
+          nav:"12,480.5", fees_today:"-375.15", rebate_today:"+2.10", funding_today:"+12.00" } },
+  { target_identity:"2", mode:"trading", trading_authorized:true, effective_authority:true,
+    may_reduce_only:false, unresolved_latches:0, open_orders:0,
+    portfolio_position_quantity:-300, exchange_position_quantity:-300,
+    reconciliation_break:false, last_sequence:14, status:"complete",
+    gates:[ {identity:"9003",kind:"self_recovering",reason:"primary_lease",open:true},
+            {identity:"9004",kind:"self_recovering",reason:"risk_lease",open:true} ],
+    margin:{ instrument:"BTC-USDT-SWAP", model:"IsolatedLinearUsdtV1",
+             mark_price:"50,010.0", margin_equity:"8,110.0",
+             initial_margin:"1,562.5", maintenance_margin:"540.0",
+             margin_buffer:"7,560.0", fee_buffer:"60.0",
+             liq_distance_ticks:15330, liq_distance_bps:3065,
+             gate:{opening:"pass", warning:"pass", kill:"pass"},
+             risk_lease_remaining:"995.2万", venue_net_margin:"1,570.0",
+             netting_benefit:"50.0" },
+    pnl:{ unrealized:"-450.00", realized_today:"+128.20", open_cost:"150,030.0",
+          nav:"8,110.0", fees_today:"-96.40", rebate_today:"+0.55", funding_today:"-3.20" } },
+];
+let ORDERS = [
+  { shard:1, instrument:"BTC-USDT-SWAP", side:"sell", qty:"-100", price:"50,120.0", state:"live",           id:"ord-7" },
+  { shard:1, instrument:"BTC-USDT-SPOT", side:"buy",  qty:"0.05", price:"49,980.0", state:"pending_cancel", id:"ord-9" },
+];
+let FEED = [
+  { t:"10:02:11", kind:"control_command_applied", text:"shard-1 应用 kill_switch (latch 77)" },
+  { t:"10:01:58", kind:"safety_gate_changed",     text:"shard-1 operator_kill 锁存, 撤销全部挂单" },
+  { t:"09:58:30", kind:"risk_accepted",           text:"shard-2 OrderIntent#41 通过风控" },
+  { t:"09:57:02", kind:"fill",                    text:"shard-2 成交 -300 @ 50,010.0" },
+];
+let RECORDS = [
+  { recorded_at:"10:02:11", operator:"SystemOwner", kind:"kill_switch", target:"1", warning:"紧急控制台 cmd-77" },
+];
+
+// ---------- 共享渲染 ----------
+function modePill(s) {
+  if (!s.effective_authority && s.unresolved_latches > 0)
+    return '<span class="pill bad">KILL/锁存 '+s.unresolved_latches+'</span>';
+  if (s.mode === "draining") return '<span class="pill warn">DRAINING</span>';
+  return s.effective_authority ? '<span class="pill ok">TRADING ✓授权</span>'
+                               : '<span class="pill warn">'+s.mode.toUpperCase()+'·无授权</span>';
+}
+function shardCard(s) {
+  const m = s.margin;
+  return `<div class="panel"><b>shard-${s.target_identity}</b> ${modePill(s)}
+    &nbsp;<span class="dim">seq ${s.last_sequence}</span>
+    <div style="margin-top:8px;display:flex;gap:18px;flex-wrap:wrap">
+      <span>挂单 <b>${s.open_orders}</b></span>
+      <span>仓位 <b>${s.portfolio_position_quantity}</b></span>
+      <span>缓冲 <b>${m.margin_buffer}</b></span>
+      <span>清算距离 <b>${m.liq_distance_bps} bps</b></span>
+      <span>盈亏 <b class="${s.pnl.unrealized.startsWith('-')?'neg':'pos'}">${s.pnl.unrealized}</b></span>
+      ${s.reconciliation_break?'<span class="pill bad">对账 BREAK</span>':''}
+      ${s.may_reduce_only?'<span class="pill warn">仅减仓</span>':''}
+    </div>
+    <p class="dim" style="font-size:12px;margin:6px 0 0">详情见 风险与保证金 / 盈亏 / 持仓挂单 分页</p></div>`;
+}
+function gateRows(s) {
+  return s.gates.map(g =>
+    `<tr><td>${g.reason}</td><td>${g.kind}</td>`+
+    `<td>${g.open?'<span class="pill ok">开</span>':'<span class="pill bad">闭</span>'}</td></tr>`).join("");
+}
+
+// ---------- RiskWarning 完整确认流 ----------
+const CONSEQUENCE = {
+  enable_trading:   "授权该分片进入 Trading，允许策略提交新增风险订单。",
+  de_risk:          "以 Reduce-only 订单将目标敞口降至目标值；完成对账前保持 Draining。",
+  kill_switch:      "立即禁止新增风险并撤销全部挂单；不自动平仓，需人工解除。",
+  resolve_latch:    "解除一个已锁存的安全栅栏；解除后仍需显式 EnableTrading。",
+};
+let nextWarningId = 5001;
+function openRiskWarning(kind, target) {
+  const s = SHARDS.find(x=>x.target_identity===String(target));
+  const wid = nextWarningId++;
+  document.getElementById("overlay").style.display = "flex";
+  document.getElementById("overlay").innerHTML = `
+    <div class="panel" style="width:500px;border:1px solid var(--bad)">
+      <h2 style="color:var(--bad)">⚠ 高风险操作 — RiskWarning</h2>
+      <p><b>对象:</b> shard-${target} &nbsp; <b>操作:</b> ${kind} &nbsp; <b>警示编号:</b> RW-${wid}</p>
+      <p><b>当前状态:</b> ${modePill(s)} 未决挂单 ${s.open_orders} · 仓位 ${s.portfolio_position_quantity} · 缓冲 ${s.margin.margin_buffer}</p>
+      <p><b>后果:</b> ${CONSEQUENCE[kind]}</p>
+      <pre style="background:#0d1117;padding:10px;border-radius:6px;font-size:12px">影响范围: DecisionDomain(target=${target}) 的全部策略
+操作写入 OperatorRecord 并进入分片权威日志, 可完整重放。</pre>
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+        <button onclick="closeOverlay()">取消</button>
+        <button class="danger" onclick="confirmRisk('${kind}','${target}',${wid})">我已理解, 确认执行</button>
+      </div></div>`;
+}
+function closeOverlay(){ document.getElementById("overlay").style.display="none"; }
+function confirmRisk(kind, target, wid){
+  closeOverlay();
+  RECORDS.unshift({recorded_at:now(), operator:"SystemOwner", kind, target:String(target), warning:"RW-"+wid});
+  FEED.unshift({t:now(), kind:"operator_action", text:`shard-${target} 已确认 ${kind} (RW-${wid}), ControlCommand 已签名入队`});
+  render();
+}
+function quickCommand(kind, target){
+  RECORDS.unshift({recorded_at:now(), operator:"SystemOwner", kind, target:String(target), warning:"—"});
+  FEED.unshift({t:now(), kind:"operator_action", text:`shard-${target} 直接执行 ${kind}`});
+  render();
+}
+function now(){ return new Date().toTimeString().slice(0,8); }
+
+// ---------- 页面 ----------
+const PAGES = ["总览","持仓挂单","风险与保证金","盈亏","操作台","命令历史"];
+let currentPage = 0;
+
+function drawNav(){
+  document.getElementById("nav").innerHTML = PAGES.map((n,i)=>
+    `<div onclick="go(${i})" style="padding:9px 10px;border-radius:6px;cursor:pointer;margin-bottom:4px;
+      background:${i===currentPage?'#223042':'transparent'}">${n}</div>`).join("");
+}
+function go(i){ currentPage = i; render(); }
+
+function pageOverview(){
+  return `<h2>总览</h2>
+    <div class="grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:12px">
+      ${SHARDS.map(shardCard).join("")}
+    </div>
+    <div class="panel"><h2>SafetyGates</h2>
+    ${SHARDS.map(s=>`<h3>shard-${s.target_identity}</h3><table>
+      <tr><th>原因</th><th>类型</th><th>状态</th></tr>${gateRows(s)}</table>`).join("")}</div>`;
+}
+function pageOrders(){
+  return `<h2>持仓挂单</h2><div class="panel"><table>
+    <tr><th>分片</th><th>品种</th><th>方向</th><th>数量</th><th>价格</th><th>状态</th></tr>
+    ${ORDERS.map(o=>`<tr><td>${o.shard}</td><td>${o.instrument}</td><td>${o.side}</td><td>${o.qty}</td><td>${o.price}</td><td>${o.state}</td></tr>`).join("")}
+  </table></div>`;
+}
+function pageMargin(){
+  return `<h2>风险与保证金</h2>` + SHARDS.map(s=>{
+    const m = s.margin;
+    const tier = g => g==="pass" ? '<span class="pill ok">通过</span>' : (g==="warn" ? '<span class="pill warn">预警</span>' : '<span class="pill bad">触发</span>');
+    return `<div class="panel"><b>shard-${s.target_identity}</b> <span class="dim">${m.instrument} · ${m.model}</span> ${modePill(s)}
+      <table style="margin-top:8px">
+        <tr><th>标记价格</th><td>${m.mark_price}</td><th>风险租约余额</th><td>${m.risk_lease_remaining}</td></tr>
+        <tr><th>组合保证金权益</th><td>${m.margin_equity}</td><th>Venue 净保证金</th><td>${m.venue_net_margin}</td></tr>
+        <tr><th>初始保证金</th><td>${m.initial_margin}</td><th>账户净额收益</th><td>${m.netting_benefit}</td></tr>
+        <tr><th>维持保证金</th><td>${m.maintenance_margin}</td><th>费用缓冲</th><td>${m.fee_buffer}</td></tr>
+        <tr><th><b>保证金缓冲</b></th><td><b>${m.margin_buffer}</b></td><th>清算距离</th><td><b>${m.liq_distance_ticks}</b> ticks / <b>${m.liq_distance_bps}</b> bps</td></tr>
+      </table>
+      <h3>MarginSafetyGates</h3>
+      <table><tr><th>OpeningGate</th><th>WarningGate</th><th>KillGate</th></tr>
+        <tr><td>${tier(m.gate.opening)}</td><td>${tier(m.gate.warning)}</td><td>${tier(m.gate.kill)}</td></tr></table>
+      </div>`;
+  }).join("");
+}
+function pagePnl(){
+  const total_unrealized = "+1,350.00", total_realized = "+90.69";
+  return `<h2>盈亏</h2>` + SHARDS.map(s=>{
+    const p = s.pnl;
+    return `<div class="panel"><b>shard-${s.target_identity}</b> <span class="dim">净值 ${p.nav}</span> ${modePill(s)}
+      <table style="margin-top:8px">
+        <tr><th>未实现盈亏</th><td class="${p.unrealized.startsWith('-')?'neg':'pos'}">${p.unrealized}</td>
+            <th>今日已实现</th><td class="${p.realized_today.startsWith('-')?'neg':'pos'}">${p.realized_today}</td></tr>
+        <tr><th>OpenCost</th><td>${p.open_cost}</td><th>净值 (NAV)</th><td>${p.nav}</td></tr>
+        <tr><th>今日手续费</th><td class="neg">${p.fees_today}</td><th>今日返佣</th><td class="pos">${p.rebate_today}</td></tr>
+        <tr><th>今日资金费</th><td class="${p.funding_today.startsWith('-')?'neg':'pos'}">${p.funding_today}</td><th></th><td></td></tr>
+      </table></div>`;
+  }).join("") +
+  `<div class="panel"><b>合计 (ReportingAsset: USDT)</b>
+    <table><tr><th>未实现</th><td class="pos">${total_unrealized}</td>
+    <th>今日已实现</th><td class="pos">${total_realized}</td></tr></table>
+    <p class="dim" style="font-size:12px;margin-bottom:0">合计仅为展示汇总, 不构成跨分片经济事实。</p></div>`;
+}
+function pageOps(){
+  return `<h2>操作台</h2>` +
+    SHARDS.map(s=>`<div class="panel"><b>shard-${s.target_identity}</b> ${modePill(s)}
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button class="primary" onclick="openRiskWarning('enable_trading',${s.target_identity})">EnableTrading*</button>
+        <button onclick="quickCommand('trading_pause',${s.target_identity})">Pause</button>
+        <button onclick="quickCommand('cancel_open_orders',${s.target_identity})">CancelOpenOrders</button>
+        <button class="primary" onclick="openRiskWarning('de_risk',${s.target_identity})">DeRisk→0*</button>
+        <button class="danger" onclick="openRiskWarning('resolve_latch',${s.target_identity})">ResolveLatch*</button>
+        <button class="danger" onclick="openRiskWarning('kill_switch',${s.target_identity})">KillSwitch*</button>
+      </div></div>`).join("") +
+    `<p class="dim">* = 需要 RiskWarning 确认</p>
+     <div class="panel"><h2>事实流 (最新在前)</h2><table>
+       ${FEED.map(f=>`<tr><td class="dim" style="white-space:nowrap">${f.t}</td>
+         <td><span class="pill">${f.kind}</span></td><td>${f.text}</td></tr>`).join("")}
+     </table></div>`;
+}
+function pageRecords(){
+  return `<h2>命令历史</h2><div class="panel"><table>
+    <tr><th>时间</th><th>操作者</th><th>命令</th><th>目标</th><th>警示</th></tr>
+    ${RECORDS.map(r=>`<tr><td>${r.recorded_at}</td><td>${r.operator}</td><td>${r.kind}</td><td>@${r.target}</td><td>${r.warning}</td></tr>`).join("")}
+  </table></div>`;
+}
+
+const RENDERERS = [pageOverview, pageOrders, pageMargin, pagePnl, pageOps, pageRecords];
+function render(){
+  drawNav();
+  document.getElementById("main").innerHTML = RENDERERS[currentPage]();
+}
+render();
+</script>
+</body>
+</html>

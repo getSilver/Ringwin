@@ -1,0 +1,4 @@
+control_plane_node serving targets 1..4 poll=300ms
+poll accepted=1 duplicate=0 expired=0 rejected=0
+poll accepted=1 duplicate=0 expired=0 rejected=0
+poll accepted=1 duplicate=0 expired=0 rejected=0

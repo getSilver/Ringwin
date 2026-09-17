@@ -9,7 +9,7 @@ const risk_module = risk;
 pub const economics = @import("economics.zig");
 const economics_module = economics;
 pub const operational = @import("operational.zig");
-const host_gateway = @import("strategy_host_gateway.zig");
+pub const host_gateway = @import("strategy_host_gateway.zig");
 const venue_adapter = @import("venue_adapter.zig");
 const okx_public_market = @import("okx_public_market.zig");
 const okx_private_reconciliation = @import("okx_private_reconciliation.zig");
@@ -2760,6 +2760,21 @@ fn startScenarioAuthorized(
         .shard = .{},
         .decision_journal = journal.Journal.init(),
     };
+    try applyCanonicalGenesis(&run.shard, &run.decision_journal, authorization, reservation_model, 1);
+    return run;
+}
+
+/// Applies the canonical genesis chain through the authoritative seam; shared
+/// by test scenarios and read-only projection fixtures so no second builder
+/// can drift from the core. `target_identity` rewrites the genesis lifecycle
+/// commands so multi-shard fixtures get distinct operational targets.
+pub fn applyCanonicalGenesis(
+    shard: *TradingShard,
+    decision_journal: *journal.Journal,
+    authorization: host_gateway.Authorization,
+    reservation_model: ReservationModel,
+    target_identity: u128,
+) !void {
     var configured_genesis = genesis;
     configured_genesis[0].payload.instrument_rules_activated.quantity_denominator = switch (reservation_model) {
         .leveraged => contract_denominator,
@@ -2771,11 +2786,12 @@ fn startScenarioAuthorized(
         .config_version = authorization.config_version,
         .activation_identity = authorization.activation_identity,
     };
+    configured_genesis[11].payload.control_command.target_identity = target_identity;
+    configured_genesis[13].payload.control_command.target_identity = target_identity;
     for (configured_genesis) |event| {
-        if (try applyLive(&run.shard, &run.decision_journal, event) != null)
+        if (try applyStable(shard, decision_journal, event) != null)
             return error.UnexpectedCommand;
     }
-    return run;
 }
 
 fn startScenario() !LiveRun {
@@ -4099,6 +4115,16 @@ const ReplayResult = struct {
     status: journal.ScanStatus,
 };
 
+/// Canonical fixture contract denominator, exported for projection consumers.
+pub fn contractDenominator() i64 {
+    return contract_denominator;
+}
+
+/// Semantic replay entry for read-only projections; it shares the exact
+/// recovery replay path and fails closed on unknown schema or corruption.
+pub fn replayForProjection(bytes: []const u8, quantity_denominator: i64, reservation_model: ReservationModel) !ReplayResult {
+    return replayConfigured(bytes, quantity_denominator, reservation_model);
+}
 fn validateReplayRecord(
     record: journal.Record,
     expected: Fact,

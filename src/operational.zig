@@ -16,6 +16,8 @@ pub const CommandKind = enum(u8) {
     stop_keep_positions,
     de_risk,
     resolve_latch,
+    /// Appended by the control-plane wave; explicit operator KillSwitch.
+    kill_switch,
 };
 /// Recovery semantics for one safety gate.
 pub const GateKind = enum(u8) { self_recovering, latched, warning };
@@ -31,6 +33,8 @@ pub const GateReason = enum(u8) {
     uncertain_order,
     identity,
     observability,
+    /// Appended by the control-plane wave; explicit operator KillSwitch.
+    operator_kill,
 };
 
 /// Signed, versioned request accepted at the TradingShard event seam.
@@ -187,6 +191,16 @@ pub const State = struct {
                 self.trading_authorized = false;
                 if (self.mode != .draining and self.mode != .stopped) self.mode = .ready;
             },
+            .kill_switch => {
+                // Operator KillSwitch: forbid all new risk and cancel open
+                // orders; it never flattens and only `resolve_latch` with the
+                // referenced identity may clear the latch afterwards.
+                if (command.referenced_latch_identity == 0)
+                    return error.InvalidControlCommand;
+                try self.latch(command.referenced_latch_identity, .operator_kill);
+                self.trading_authorized = false;
+                action.cancel_open_orders = true;
+            },
         }
         self.command_history[self.command_count] = .{ .command = command };
         self.command_count += 1;
@@ -330,6 +344,33 @@ test "control authorization and latched recovery remain orthogonal" {
     _ = try state.applyCommand(.{ .command_identity = 3, .content_hash = 3, .target_identity = 7, .expected_version = 3, .expires_at = 10, .kind = .resolve_latch, .referenced_latch_identity = 9 }, 1);
     try std.testing.expectEqual(OperationalMode.ready, state.mode);
     try std.testing.expect(!state.trading_authorized);
+}
+
+test "operator kill switch latches, cancels, and only resolve restores readiness" {
+    var state = State.init(7);
+    _ = try state.applyCommand(.{ .command_identity = 1, .content_hash = 1, .target_identity = 7, .expected_version = 0, .expires_at = 10, .kind = .start_recovery }, 1);
+    try state.recoveryCompleted();
+    _ = try state.applyCommand(.{ .command_identity = 2, .content_hash = 2, .target_identity = 7, .expected_version = 2, .expires_at = 10, .kind = .enable_trading }, 1);
+    try std.testing.expect(state.effectiveTradingAuthority());
+
+    try std.testing.expectError(error.InvalidControlCommand, state.applyCommand(.{ .command_identity = 4, .content_hash = 4, .target_identity = 7, .expected_version = 3, .expires_at = 10, .kind = .kill_switch }, 1));
+
+    const action = try state.applyCommand(.{ .command_identity = 3, .content_hash = 3, .target_identity = 7, .expected_version = 3, .expires_at = 10, .kind = .kill_switch, .referenced_latch_identity = 99 }, 1);
+    try std.testing.expect(action.cancel_open_orders);
+    try std.testing.expect(!state.trading_authorized);
+    try std.testing.expect(!state.effectiveTradingAuthority());
+    try std.testing.expect(state.mayReduceOnly());
+    // Duplicate delivery is idempotent and consumes no version.
+    const before = state.version;
+    _ = try state.applyCommand(.{ .command_identity = 3, .content_hash = 3, .target_identity = 7, .expected_version = 3, .expires_at = 10, .kind = .kill_switch, .referenced_latch_identity = 99 }, 1);
+    try std.testing.expectEqual(state.version, before);
+    try std.testing.expect(!state.effectiveTradingAuthority());
+
+    // Enable while the kill latch is unresolved stays closed.
+    try std.testing.expectError(error.TradingSafetyGateClosed, state.applyCommand(.{ .command_identity = 5, .content_hash = 5, .target_identity = 7, .expected_version = state.version, .expires_at = 10, .kind = .enable_trading }, 1));
+    _ = try state.applyCommand(.{ .command_identity = 6, .content_hash = 6, .target_identity = 7, .expected_version = state.version, .expires_at = 10, .kind = .resolve_latch, .referenced_latch_identity = 99 }, 1);
+    try std.testing.expectEqual(OperationalMode.ready, state.mode);
+    try std.testing.expect(state.effectiveTradingAuthority() == false);
 }
 /// Durable warning presented before a high-risk operation.
 pub const RiskWarning = struct { warning_identity: u128, target_identity: u128 };

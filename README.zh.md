@@ -355,3 +355,34 @@ Gateway、TradingShard 现金风控、OrderCommand、OKX 回报、经济投影�
 下一能力波次转入[交易核心系统闭环](.scratch/trading-core-system-closure/map.md)：补齐核心拥有的
 多品种 OMS、风险与账务、操作安全栅栏、持久恢复、分片/账户协调及同核整波验收。OKX 仅作为
 既有真实 Venue 证据；Linux 五核生产性能、生产账户、密钥托管和部署资格仍是独立波次。
+
+## 控制面与管理操作界面
+
+在交易核心闭环之上，本仓库新增了一个可运行的最小控制面与本地 Web 操作界面
+（纯 Python 标准库 + Zig 演示节点，仅绑 127.0.0.1）：
+
+- **签名命令通道**：控制面签发 HMAC-SHA256 信封（版本+内容哈希+过期+幂等身份），
+  Zig 宿主经 localhost TCP 拉取并按 target 路由进各分片权威日志；另有投递目录 +
+  紧急 KillSwitch 控制台作为失联旁路。
+- **只读投影**：分片稳定日志经核心同一条 SemanticReplay 路径重建只读视图，
+  结构损坏/未知 schema 一律显式降级，绝不服务陈旧状态。
+- **OwnerSession 认证**：scrypt 口令 + RFC 6238 TOTP + 单一活动限时会话；
+  高风险命令（EnableTrading/DeRisk/StopKeepPositions/ResolveLatch/KillSwitch）
+  必须持一次性 RiskWarning 确认，操作写入 OperatorRecord。
+
+整波失败即停验收：
+
+```powershell
+tools\verify-control-plane-wave.ps1
+```
+
+它覆盖认证限速、CSRF/RiskWarning 栅栏、命令幂等、四分片定向投递、UI 投影一致、
+控制面失联降级（节点存活、Kill 不自动解除）与磁盘日志重放逐字段等价，成功输出：
+
+```text
+control_plane_wave_acceptance=passed
+```
+
+该波次不证明生产部署资格：TLS/反代、CredentialStore 口令解锁集成、非对称签名
+升级、Linux 生产运行时仍是独立波次。决策路线见
+[控制面与管理操作界面 Wayfinder 地图](.scratch/control-plane-and-operator-ui/map.md)。

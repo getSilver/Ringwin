@@ -68,6 +68,10 @@ Status: open
 
 暂无；第 01 票已冻结本波 interface、所有权、验收矩阵和排除项。
 
+> 2026-08-23 跨波次知会：[控制面与管理操作界面](../control-plane-and-operator-ui/map.md)
+> 第 01 票决议将向后兼容新增 `operational.CommandKind.kill_switch`（控制面显式签发
+> KillSwitch）；不改变既有七种命令与 GateReason 审计语义。
+
 ## Out of scope
 
 - 新 Venue Adapter 或扩展 OKX 协议/Instrument 范围。

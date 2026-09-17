@@ -822,6 +822,10 @@ _Avoid_: fencing token, process shutdown
 控制面对明确目标签发的不可变状态变更命令，具有唯一身份、内容哈希、版本前置条件、有效期限及软件签名；重复命令不得重复生效。
 _Avoid_: RPC call, mutable config request
 
+**ControlPlane**:
+面向 SystemOwner 的唯一人工操作入口：它签发经过认证的 ControlCommand、维护 OwnerSession 与 RiskWarning 确认流，并从权威日志重建只读投影；它不拥有任何权威交易状态，投影过期或日志缺口时必须显式降级，失联时交易面在既有授权与安全栅栏有效期内继续。
+_Avoid_: Admin dashboard, trading backend, config file editor
+
 **SecurityAdmission**:
 执行网关获得交易权限前必须通过的身份、Artifact、凭证权限、账户配置、状态对账及节点隔离检查集合；失败时只允许降低风险。
 _Avoid_: Health check, operator approval
