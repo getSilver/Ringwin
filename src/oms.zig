@@ -166,8 +166,11 @@ pub const Order = struct {
     predecessor_order_id: u64 = 0,
     reservation: Reservation,
     confirmed_reservation: Reservation,
+    confirmed_quantity: i64,
     reservation_basis_quantity: i64,
     pending_reservation: ?Reservation = null,
+    pending_basis_quantity: i64 = 0,
+    pending_previous_spec: ?struct { limit_price: Price, order_type: canonical.OrderType, time_in_force: canonical.TimeInForce, market_protection_price: ?Price } = null,
     order_type: canonical.OrderType = .limit,
     time_in_force: canonical.TimeInForce = .good_til_canceled,
     market_protection_price: ?Price = null,
@@ -419,14 +422,16 @@ pub const Oms = struct {
                 if (intent.native_amend) {
                     order.revision = try std.math.add(u32, order.revision, 1);
                     order.state = .pending_amend;
+                    order.pending_previous_spec = .{ .limit_price = order.limit_price, .order_type = order.order_type, .time_in_force = order.time_in_force, .market_protection_price = order.market_protection_price };
                     order.quantity = try std.math.add(i64, order.cumulative_quantity, intent.quantity);
                     order.limit_price = intent.limit_price;
                     order.order_type = intent.order_type;
                     order.time_in_force = intent.time_in_force;
                     order.market_protection_price = intent.market_protection_price;
                     order.pending_reservation = intent.reservation;
+                    order.pending_basis_quantity = intent.quantity;
                     if (order.reservation.asset != intent.reservation.asset) return error.MixedReservationAssets;
-                    if (intent.reservation.atoms > order.reservation.atoms) order.reservation = intent.reservation;
+                    try rebalanceReservation(order, order.confirmed_quantity - order.cumulative_quantity);
                     try self.emit(order.*, .amend, intent.intent_sequence, refs);
                 } else {
                     if (!intent.allow_cancel_confirm_create) return error.CancelConfirmCreateNotAuthorized;
@@ -464,12 +469,12 @@ pub const Oms = struct {
                 .submitted => {
                     order.dispatch_submitted = true;
                     if (item.definite_reject) {
-                        self.rejectCommand(order, command_value.operation);
+                        try self.rejectCommand(order, command_value.operation);
                         if (order.group_policy == .cancel_remaining) try self.cancelGroup(order.group_first_sequence);
                     }
                 },
                 .not_sent => {
-                    self.rejectCommand(order, command_value.operation);
+                    try self.rejectCommand(order, command_value.operation);
                     if (order.group_policy == .cancel_remaining) try self.cancelGroup(order.group_first_sequence);
                 },
             }
@@ -542,27 +547,40 @@ pub const Oms = struct {
             return error.TerminalFactConflict;
         }
         const reported_quantity = std.math.add(i64, report.cumulative_quantity, report.remaining_quantity) catch return error.Overflow;
+        const pending_amend = order.pending_reservation != null;
+        if (pending_amend and report.revision > order.revision) return error.StaleOrderRevision;
+        const old_revision_report = pending_amend and report.revision < order.revision;
+        const pending_max_total = if (pending_amend) std.math.add(i64, order.cumulative_quantity, order.pending_basis_quantity) catch return error.Overflow else 0;
         if (report.cumulative_quantity < order.cumulative_quantity or report.remaining_quantity < 0 or
-            reported_quantity > order.quantity or
-            (report.status == .filled and (report.cumulative_quantity != order.quantity or report.remaining_quantity != 0)))
+            (old_revision_report and reported_quantity > order.confirmed_quantity) or
+            (!pending_amend and reported_quantity > order.quantity) or
+            (pending_amend and !old_revision_report and report.status != .rejected and
+                (reported_quantity < order.quantity or reported_quantity > pending_max_total or report.remaining_quantity > order.pending_basis_quantity)) or
+            (report.status == .filled and (report.remaining_quantity != 0 or
+                (old_revision_report and report.cumulative_quantity != order.confirmed_quantity) or
+                (!pending_amend and report.cumulative_quantity != order.quantity))))
             return error.InvalidExecutionReport;
         if (report.status == .amended and report.revision != order.revision) return error.StaleOrderRevision;
-        if (report.status == .rejected and order.state == .pending_amend) {
+        if (report.status == .amended and report.remaining_quantity == 0) return error.InvalidExecutionReport;
+        if (report.status == .rejected and pending_amend and !old_revision_report) {
+            if (reported_quantity > order.confirmed_quantity) return error.InvalidExecutionReport;
             rememberReport(order, report);
-            self.rejectCommand(order, .amend);
+            order.cumulative_quantity = report.cumulative_quantity;
+            try self.rejectCommand(order, .amend);
             return;
         }
         if (report.status == .rejected and order.state == .pending_cancel) {
             rememberReport(order, report);
-            self.rejectCommand(order, .cancel);
+            try self.rejectCommand(order, .cancel);
             return;
         }
         rememberReport(order, report);
+        const amend_unknown = pending_amend and order.state == .unknown;
         order.cumulative_quantity = report.cumulative_quantity;
         const cancel_unsettled = self.cancelUnsettled(order.*);
         order.state = switch (report.status) {
-            .accepted => if (cancel_unsettled) .pending_cancel else .live,
-            .partially_filled => if (cancel_unsettled) .pending_cancel else .partially_filled,
+            .accepted => if (cancel_unsettled) .pending_cancel else if (amend_unknown) .unknown else if (pending_amend) .pending_amend else .live,
+            .partially_filled => if (cancel_unsettled) .pending_cancel else if (amend_unknown) .unknown else if (pending_amend) .pending_amend else .partially_filled,
             .filled => .filled,
             .canceled => .canceled,
             .rejected => .rejected,
@@ -571,14 +589,24 @@ pub const Oms = struct {
         if (report.status == .filled or report.status == .canceled or report.status == .rejected) {
             order.reservation_active = false;
             order.reservation.atoms = 0;
-        } else {
-            try rebalanceReservation(order, report.remaining_quantity);
+            order.pending_reservation = null;
+            order.pending_basis_quantity = 0;
+            order.pending_previous_spec = null;
+        } else if (report.status != .amended) {
+            try rebalanceReservation(order, if (pending_amend) @max(0, order.confirmed_quantity - report.cumulative_quantity) else report.remaining_quantity);
         }
         if (report.status == .amended) {
-            order.confirmed_reservation = order.pending_reservation orelse order.confirmed_reservation;
-            order.reservation = order.confirmed_reservation;
+            if (order.pending_reservation) |pending| {
+                order.confirmed_reservation = pending;
+                order.confirmed_reservation.atoms = try scaledReservation(pending.atoms, report.remaining_quantity, order.pending_basis_quantity);
+            }
+            order.confirmed_quantity = reported_quantity;
+            order.quantity = reported_quantity;
             order.reservation_basis_quantity = report.remaining_quantity;
             order.pending_reservation = null;
+            order.pending_basis_quantity = 0;
+            order.pending_previous_spec = null;
+            try rebalanceReservation(order, report.remaining_quantity);
         }
         if (report.status == .filled) order.replacement = null;
     }
@@ -634,14 +662,25 @@ pub const Oms = struct {
         };
         const reconciled_quantity = std.math.add(i64, result.cumulative_quantity, result.remaining_quantity) catch return error.Overflow;
         if (result.cumulative_quantity < 0 or result.remaining_quantity < 0) return error.InvalidReconciliationResult;
-        if (reconciled_quantity > order.quantity) return error.ConflictingReconciliationEvidence;
+        if (result.status != .unresolved and result.cumulative_quantity < order.cumulative_quantity) return error.ConflictingReconciliationEvidence;
+        const pending_amend = order.pending_reservation != null;
+        if (pending_amend and result.revision > order.revision) return error.StaleOrderRevision;
+        const old_revision = pending_amend and result.revision < order.revision;
+        const pending_max_total = if (pending_amend) std.math.add(i64, order.cumulative_quantity, order.pending_basis_quantity) catch return error.Overflow else 0;
+        if ((old_revision and reconciled_quantity > order.confirmed_quantity) or
+            (!pending_amend and reconciled_quantity > order.quantity) or
+            (pending_amend and !old_revision and
+                (reconciled_quantity < order.quantity or reconciled_quantity > pending_max_total or result.remaining_quantity > order.pending_basis_quantity)))
+            return error.ConflictingReconciliationEvidence;
         switch (result.status) {
             .unresolved => if (result.terminal_state != null) return error.ConflictingReconciliationEvidence,
-            .found_live => if (result.terminal_state != null or reconciled_quantity != order.quantity) return error.ConflictingReconciliationEvidence,
+            .found_live => if (result.terminal_state != null or result.remaining_quantity == 0 or
+                (old_revision and reconciled_quantity != order.confirmed_quantity) or
+                (!pending_amend and reconciled_quantity != order.quantity)) return error.ConflictingReconciliationEvidence,
             .found_terminal => {
                 if (result.terminal_state == null) return error.IncompleteReconciliationEvidence;
                 if (result.terminal_state.? == .filled and
-                    (result.cumulative_quantity != order.quantity or result.remaining_quantity != 0))
+                    (result.cumulative_quantity != (if (old_revision) order.confirmed_quantity else order.quantity) or result.remaining_quantity != 0))
                     return error.ConflictingReconciliationEvidence;
             },
             .confirmed_absent => {
@@ -694,10 +733,21 @@ pub const Oms = struct {
             .unresolved => order.state = .unknown,
             .found_live => {
                 const cancel_unsettled = self.cancelUnsettled(order.*);
-                order.revision = result.revision;
+                const amend_unknown = pending_amend and old_revision and order.state == .unknown;
+                if (!old_revision) order.revision = result.revision;
                 order.cumulative_quantity = result.cumulative_quantity;
-                order.quantity = try std.math.add(i64, result.cumulative_quantity, result.remaining_quantity);
-                order.state = if (cancel_unsettled) .pending_cancel else if (result.cumulative_quantity == 0) .live else .partially_filled;
+                if (!old_revision) order.quantity = try std.math.add(i64, result.cumulative_quantity, result.remaining_quantity);
+                if (!pending_amend) order.confirmed_quantity = order.quantity;
+                if (pending_amend and !old_revision) {
+                    order.confirmed_reservation = order.pending_reservation.?;
+                    order.confirmed_reservation.atoms = try scaledReservation(order.confirmed_reservation.atoms, result.remaining_quantity, order.pending_basis_quantity);
+                    order.confirmed_quantity = order.quantity;
+                    order.reservation_basis_quantity = result.remaining_quantity;
+                    order.pending_reservation = null;
+                    order.pending_basis_quantity = 0;
+                    order.pending_previous_spec = null;
+                }
+                order.state = if (cancel_unsettled) .pending_cancel else if (amend_unknown) .unknown else if (order.pending_reservation != null) .pending_amend else if (result.cumulative_quantity == 0) .live else .partially_filled;
                 try rebalanceReservation(order, result.remaining_quantity);
             },
             .found_terminal => {
@@ -709,6 +759,9 @@ pub const Oms = struct {
                 };
                 order.reservation_active = false;
                 order.reservation.atoms = 0;
+                order.pending_reservation = null;
+                order.pending_basis_quantity = 0;
+                order.pending_previous_spec = null;
                 try commitArchiveQualification(self, order);
             },
             .confirmed_absent => {
@@ -778,7 +831,7 @@ pub const Oms = struct {
             var storage: [64]u8 = undefined;
             client_order_id = try canonical.ClientOrderId.init(try std.fmt.bufPrint(&storage, "RWN-{d}", .{self.next_order_id}));
         }
-        self.orders[index] = .{ .id = self.next_order_id, .strategy_instance = strategy_instance, .instrument = instrument, .side = side, .portfolio_reduce_only = portfolio_reduce_only, .venue_reduce_only = venue_reduce_only, .quantity = quantity, .limit_price = price, .reservation = reservation, .confirmed_reservation = reservation, .reservation_basis_quantity = quantity, .predecessor_order_id = predecessor, .group_first_sequence = group, .group_policy = policy, .client_order_id = client_order_id };
+        self.orders[index] = .{ .id = self.next_order_id, .strategy_instance = strategy_instance, .instrument = instrument, .side = side, .portfolio_reduce_only = portfolio_reduce_only, .venue_reduce_only = venue_reduce_only, .quantity = quantity, .limit_price = price, .reservation = reservation, .confirmed_reservation = reservation, .confirmed_quantity = quantity, .reservation_basis_quantity = quantity, .predecessor_order_id = predecessor, .group_first_sequence = group, .group_policy = policy, .client_order_id = client_order_id };
         self.next_order_id = try std.math.add(u64, self.next_order_id, 1);
         return &self.orders[index];
     }
@@ -823,16 +876,27 @@ pub const Oms = struct {
         try self.emit(next.*, .place, intent_sequence, refs);
     }
 
-    fn rejectCommand(_: *Oms, order: *Order, operation: Operation) void {
+    fn rejectCommand(_: *Oms, order: *Order, operation: Operation) !void {
         switch (operation) {
             .place => {
                 order.state = .rejected;
                 order.reservation_active = false;
             },
             .amend => {
+                if (order.pending_reservation == null) return;
                 order.state = if (order.cumulative_quantity == 0) .live else .partially_filled;
-                order.reservation = order.confirmed_reservation;
+                order.quantity = order.confirmed_quantity;
+                order.revision -= 1;
+                if (order.pending_previous_spec) |previous| {
+                    order.limit_price = previous.limit_price;
+                    order.order_type = previous.order_type;
+                    order.time_in_force = previous.time_in_force;
+                    order.market_protection_price = previous.market_protection_price;
+                }
                 order.pending_reservation = null;
+                order.pending_basis_quantity = 0;
+                order.pending_previous_spec = null;
+                try rebalanceReservation(order, @max(0, order.confirmed_quantity - order.cumulative_quantity));
             },
             .cancel => order.state = if (order.cumulative_quantity == 0) .live else .partially_filled,
         }
@@ -998,12 +1062,19 @@ fn validateTarget(order: *const Order, intent: Intent) !void {
 fn rebalanceReservation(order: *Order, remaining_quantity: i64) !void {
     if (remaining_quantity < 0 or order.reservation_basis_quantity <= 0 or order.confirmed_reservation.atoms < 0)
         return error.InvalidReservationBasis;
-    if (remaining_quantity == 0) {
-        order.reservation.atoms = 0;
-        return;
+    const old = try scaledReservation(order.confirmed_reservation.atoms, remaining_quantity, order.reservation_basis_quantity);
+    var required = old;
+    if (order.pending_reservation) |pending| {
+        if (pending.atoms < 0 or order.pending_basis_quantity <= 0) return error.InvalidReservationBasis;
+        required = @max(old, pending.atoms);
     }
-    const numerator = try std.math.mul(i128, order.confirmed_reservation.atoms, remaining_quantity);
-    order.reservation.atoms = @divFloor(try std.math.add(i128, numerator, order.reservation_basis_quantity - 1), order.reservation_basis_quantity);
+    order.reservation.atoms = required;
+}
+
+fn scaledReservation(atoms: i128, remaining: i64, basis: i64) !i128 {
+    if (atoms < 0 or remaining < 0 or basis <= 0) return error.InvalidReservationBasis;
+    const numerator = try std.math.mul(i128, atoms, remaining);
+    return @divFloor(try std.math.add(i128, numerator, basis - 1), basis);
 }
 
 fn intentFingerprint(intent: Intent, group_count: u8) [16]u8 {
@@ -1166,6 +1237,54 @@ test "OMS rejects overflowing authoritative quantities" {
         .cumulative_quantity = std.math.maxInt(i64),
         .remaining_quantity = 1,
     }));
+}
+
+test "pending amend keeps old and new remaining exposure through fills and rejection" {
+    var state: Oms = .{};
+    const placed = try placeSubmitted(&state, 1, 10);
+    try state.applyReport(.{ .report_id = 1, .order_id = placed.order_id, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 10 });
+    state.begin();
+    var group: IntentGroup = .{ .first_intent_sequence = 2, .count = 1 };
+    group.members[0] = .{ .intent_sequence = 2, .strategy_instance = 1, .operation = .amend, .instrument = 1, .target_order_id = placed.order_id, .expected_revision = 1, .quantity = 20, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 2 }, .reservation = .{ .asset = 1, .atoms = 20 } };
+    try state.applyGroup(group);
+    try std.testing.expectEqual(@as(i128, 20), (try state.activeReservations(1)).atoms);
+    try state.applyReport(.{ .report_id = 2, .order_id = placed.order_id, .revision = 1, .status = .partially_filled, .cumulative_quantity = 2, .remaining_quantity = 8 });
+    try std.testing.expectEqual(OrderState.pending_amend, state.orderById(placed.order_id).?.state);
+    try std.testing.expectEqual(@as(i128, 20), (try state.activeReservations(1)).atoms);
+    try state.applyReport(.{ .report_id = 3, .order_id = placed.order_id, .revision = 2, .status = .rejected, .cumulative_quantity = 2, .remaining_quantity = 8 });
+    try std.testing.expectEqual(OrderState.partially_filled, state.orderById(placed.order_id).?.state);
+    try std.testing.expectEqual(@as(i64, 10), state.orderById(placed.order_id).?.quantity);
+    try std.testing.expectEqual(@as(u32, 1), state.orderById(placed.order_id).?.revision);
+    try std.testing.expectEqual(@as(i128, 1), state.orderById(placed.order_id).?.limit_price.ticks);
+    try std.testing.expectEqual(@as(i128, 8), (try state.activeReservations(1)).atoms);
+}
+
+test "pending amend confirmation, Unknown and replay keep conservative reservations" {
+    var state: Oms = .{};
+    const placed = try placeSubmitted(&state, 1, 10);
+    try state.applyReport(.{ .report_id = 1, .order_id = placed.order_id, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 10 });
+    state.begin();
+    var group: IntentGroup = .{ .first_intent_sequence = 2, .count = 1 };
+    group.members[0] = .{ .intent_sequence = 2, .strategy_instance = 1, .operation = .amend, .instrument = 1, .target_order_id = placed.order_id, .expected_revision = 1, .quantity = 20, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 2 }, .reservation = .{ .asset = 1, .atoms = 20 } };
+    try state.applyGroup(group);
+    var dispatch: DispatchBatch = .{ .count = 1 };
+    dispatch.items[0] = .{ .command_id = state.emitted()[0].command_id, .state = .unknown };
+    try state.applyDispatch(dispatch);
+    try state.applyReport(.{ .report_id = 2, .order_id = placed.order_id, .revision = 1, .status = .partially_filled, .cumulative_quantity = 2, .remaining_quantity = 8 });
+    try std.testing.expectEqual(OrderState.unknown, state.orderById(placed.order_id).?.state);
+    try std.testing.expect(state.blocksNewSend());
+    try std.testing.expectEqual(@as(i128, 20), (try state.activeReservations(1)).atoms);
+    try std.testing.expectError(error.ConflictingReconciliationEvidence, state.applyReconciliation(.{ .reconciliation_id = 1, .order_id = placed.order_id, .status = .found_live, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 10 }));
+    try std.testing.expectError(error.ConflictingReconciliationEvidence, state.applyReconciliation(.{ .reconciliation_id = 2, .order_id = placed.order_id, .status = .found_live, .revision = 2, .cumulative_quantity = 2, .remaining_quantity = 1 }));
+    try std.testing.expectError(error.InvalidExecutionReport, state.applyReport(.{ .report_id = 3, .order_id = placed.order_id, .revision = 2, .status = .filled, .cumulative_quantity = 3, .remaining_quantity = 0 }));
+    try std.testing.expectEqual(@as(i128, 20), (try state.activeReservations(1)).atoms);
+    const snapshot = state;
+    try state.applyReport(.{ .report_id = 3, .order_id = placed.order_id, .revision = 2, .status = .amended, .cumulative_quantity = 2, .remaining_quantity = 18 });
+    try std.testing.expectEqual(@as(i128, 18), (try state.activeReservations(1)).atoms);
+    try std.testing.expectEqual(@as(i64, 20), state.orderById(placed.order_id).?.quantity);
+    var recovered = snapshot;
+    try recovered.applyReport(.{ .report_id = 3, .order_id = placed.order_id, .revision = 2, .status = .amended, .cumulative_quantity = 2, .remaining_quantity = 18 });
+    try std.testing.expectEqual(state.orderById(placed.order_id).?.reservation.atoms, recovered.orderById(placed.order_id).?.reservation.atoms);
 }
 
 test "ConfirmedAbsent cannot become a fill and releases reservation" {

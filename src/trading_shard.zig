@@ -2589,6 +2589,24 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestBool(&hasher, order.pending_reservation != null);
         digestInt(&hasher, u64, pending_reservation.asset);
         digestInt(&hasher, i128, pending_reservation.atoms);
+        if (order.pending_reservation) |_| {
+            digestInt(&hasher, i64, order.confirmed_quantity);
+            digestInt(&hasher, i64, order.pending_basis_quantity);
+            digestBool(&hasher, order.pending_previous_spec != null);
+            if (order.pending_previous_spec) |previous| {
+                digestInt(&hasher, u128, previous.limit_price.instrument);
+                digestInt(&hasher, u64, previous.limit_price.rules_version);
+                digestInt(&hasher, i128, previous.limit_price.ticks);
+                digestInt(&hasher, u8, @intFromEnum(previous.order_type));
+                digestInt(&hasher, u8, @intFromEnum(previous.time_in_force));
+                digestBool(&hasher, previous.market_protection_price != null);
+                if (previous.market_protection_price) |price| {
+                    digestInt(&hasher, u128, price.instrument);
+                    digestInt(&hasher, u64, price.rules_version);
+                    digestInt(&hasher, i128, price.ticks);
+                }
+            }
+        }
         digestBool(&hasher, order.reservation_active);
         digestBool(&hasher, order.dispatch_submitted);
         digestInt(&hasher, u64, order.group_first_sequence);
@@ -2818,6 +2836,27 @@ fn semanticStateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, i128, order.reservation.atoms);
         digestInt(&hasher, u64, order.confirmed_reservation.asset);
         digestInt(&hasher, i128, order.confirmed_reservation.atoms);
+        if (order.pending_reservation) |pending| {
+            digestInt(&hasher, i64, order.confirmed_quantity);
+            digestInt(&hasher, i64, order.reservation_basis_quantity);
+            digestInt(&hasher, u64, pending.asset);
+            digestInt(&hasher, i128, pending.atoms);
+            digestInt(&hasher, i64, order.pending_basis_quantity);
+            digestBool(&hasher, order.pending_previous_spec != null);
+            if (order.pending_previous_spec) |previous| {
+                digestInt(&hasher, u128, previous.limit_price.instrument);
+                digestInt(&hasher, u64, previous.limit_price.rules_version);
+                digestInt(&hasher, i128, previous.limit_price.ticks);
+                digestInt(&hasher, u8, @intFromEnum(previous.order_type));
+                digestInt(&hasher, u8, @intFromEnum(previous.time_in_force));
+                digestBool(&hasher, previous.market_protection_price != null);
+                if (previous.market_protection_price) |price| {
+                    digestInt(&hasher, u128, price.instrument);
+                    digestInt(&hasher, u64, price.rules_version);
+                    digestInt(&hasher, i128, price.ticks);
+                }
+            }
+        }
         digestBool(&hasher, order.reservation_active);
         digestBool(&hasher, order.dispatch_submitted);
         digestInt(&hasher, u64, order.last_report_id);

@@ -3,7 +3,7 @@
 Type: task
 Status: resolved
 Assignee: Codex
-Blocked by: [02 让 Canonical Venue 对账推进 OMS](02-apply-canonical-reconciliation-to-oms.md), [03 闭合 OMS 意图幂等与 CancelConfirmCreate 阻断](03-enforce-oms-intent-idempotency.md)
+Blocked by: None (03 resolved)
 Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 
 ## Question
@@ -29,3 +29,11 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 ## Answer
 
 RiskReservation 已由 OMS 权威剩余数量按状态保守维护，部分成交、amend、cancel、Unknown 与恢复路径共享同一投影。
+
+## 2026-09-23 复核与重开
+
+旧 Answer 仅为历史记录。[修复计划 R04-A](../review-repair-plan-2026-09-23.md#04pendingamend-期间的占用)要求补证：PendingAmend 期间部分成交不抹掉修改请求，也不把新单最坏占用提前释放；amend 拒绝只撤销修改请求，原 live Order 和 reservation 仍在。验证成交→确认/拒绝/Unknown 与重启的 live/replay。
+
+## 2026-09-24 修复与复验
+
+`src/oms.zig` 在 PendingAmend 中保留旧单已确认数量、规格及新目标剩余占用；旧 revision 成交只重算旧单剩余量，待决占用取旧/新上界。Unknown amend 收到旧成交或旧 revision 对账仍阻断新发送；拒绝恢复旧单 revision、规格及剩余占用；新 revision 的权威确认才切换。异常数量和累计成交回退稳定拒绝。`src/trading_shard.zig` 的完整及语义摘要覆盖待决恢复状态。OMS 与 TradingShard 公共入口回归覆盖多订单、成交→确认/拒绝、Unknown、异常对账、状态拷贝与事件重放摘要一致。Debug 使用 Windows 64 MiB 测试栈；ReleaseSafe 使用默认测试栈，均为 275/275。仅离线证据，Linux/Venue/生产资格不变。

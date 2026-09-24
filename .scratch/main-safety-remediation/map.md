@@ -55,10 +55,11 @@ OrderIntent、Order、RiskReservation、账户危险事实、StrategyHost 授权
 
 ## Frontier
 
-- 本轮可认领：[04 权威剩余数量与占用](issues/04-rebalance-reservation-from-authoritative-remaining.md)、[05 强制成交经济事实](issues/05-preserve-dangerous-account-facts.md)、[08 Host 激活](issues/08-enforce-host-activation-and-ipc-isolation.md)。一次只认领并完成一张；其余受阻票按 Route 推进。01–03 已离线收口；10 因依赖 09 重开而等待重新回归。12 最后重建验收。Linux/Venue/生产资金资格仍为 not_run。
+- 本轮可认领：[05 强制成交经济事实](issues/05-preserve-dangerous-account-facts.md)、[08 Host 激活](issues/08-enforce-host-activation-and-ipc-isolation.md)。一次只认领并完成一张；其余受阻票按 Route 推进。01–04 已离线收口；10 因依赖 09 重开而等待重新回归。12 最后重建验收。Linux/Venue/生产资金资格仍为 not_run。
 
 ## Decisions so far
 
+- 2026-09-24：04 按 R04-A 收口 PendingAmend 的旧/新剩余占用、Unknown 阻断、拒绝回退和迟到对账。OMS/TradingShard 公共入口与事件重放回归通过；Debug 需 Windows 64 MiB 测试栈，ReleaseSafe 使用默认栈，均 275/275。仅离线证据。
 - 2026-09-24：提交前复核将 02 的 ConfirmedAbsent 绑定到原 place 命令的 adapter session，将 03 的意图内容摘要扩至 128 位；候选提交的 Debug/ReleaseSafe 各 269/269，journal/state schema 16/19。现有 Venue 仍不产生正向缺席证明，真实查询与资金资格保持待验。
 - 2026-09-24：03 按 R03-A/B/C 收口。OMS 按原始 group 身份在风控前去重；同身份冲突写入可重放 trace；部分成交或 FoundLive 不清除待决取消阻断，CCC 重查全局阻断、目标屏障与授权。Debug/ReleaseSafe 273/273，journal/state schema 16/18；仅为离线证据。
 - 2026-09-24：02 按 R02-A/R02-B 收口。通用证据范围与缺席覆盖在 Canonical，OKX 原始私有事实的翻译留在 OKX Adapter；证据不足的 Venue 输出 Unresolved。Canonical report/reconciliation 共用 OMS/CCC 转换，OKX 私有 WS 到 Owner 持久恢复及缺席证据失败关闭轨迹通过 Debug/ReleaseSafe 271/271。真实 Venue 缺席查询覆盖仍属生产资格票，不从离线结果推定。

@@ -1194,12 +1194,18 @@ test "bounded multi instrument OMS closes lifecycle and partial policy" {
     try std.testing.expectEqual(placed.oms_commands[0].reservation.atoms, run.shard.oms.orders[0].reservation.atoms);
     const duplicate_amend = try run.shard.apply(atGroup(17, .{ .identity = 13, .payload = .{ .oms_intent_group = amend } }));
     try std.testing.expectEqual(@as(usize, 0), duplicate_amend.oms_commands.len);
+    _ = try run.shard.apply(atGroup(18, .{ .identity = 3, .payload = .{ .oms_execution_report = .{ .report_id = 3, .order_id = 1, .revision = 1, .status = .partially_filled, .cumulative_quantity = 20, .remaining_quantity = 80 } } }));
+    try std.testing.expectEqual(oms_module.OrderState.pending_amend, run.shard.oms.orders[0].state);
+    _ = try run.shard.apply(atGroup(19, .{ .identity = 4, .payload = .{ .oms_execution_report = .{ .report_id = 4, .order_id = 1, .revision = 2, .status = .rejected, .cumulative_quantity = 20, .remaining_quantity = 80 } } }));
+    try std.testing.expectEqual(oms_module.OrderState.partially_filled, run.shard.oms.orders[0].state);
+    try std.testing.expectEqual(@as(i64, 100), run.shard.oms.orders[0].quantity);
+    try std.testing.expectEqual(@as(i128, 41), run.shard.oms.orders[0].reservation.atoms);
 
     var cancel: oms_module.IntentGroup = .{ .first_intent_sequence = 13, .count = 1 };
     cancel.members[0] = .{ .intent_sequence = 13, .operation = .cancel, .instrument = swap_instrument, .target_order_id = 2, .expected_revision = 1 };
-    const canceled = try run.shard.apply(atGroup(18, .{ .identity = 13, .payload = .{ .oms_intent_group = cancel } }));
+    const canceled = try run.shard.apply(atGroup(20, .{ .identity = 13, .payload = .{ .oms_intent_group = cancel } }));
     try std.testing.expectEqual(oms_module.Operation.cancel, canceled.oms_commands[0].operation);
-    _ = try run.shard.apply(atGroup(19, .{ .identity = 2, .payload = .{ .oms_execution_report = .{
+    _ = try run.shard.apply(atGroup(21, .{ .identity = 2, .payload = .{ .oms_execution_report = .{
         .report_id = 2,
         .order_id = 2,
         .revision = 1,
@@ -1216,8 +1222,10 @@ test "bounded multi instrument OMS closes lifecycle and partial policy" {
     _ = try replayed.apply(atGroup(14, .{ .identity = 1, .payload = .{ .oms_reconciliation_result = .{ .reconciliation_id = 1, .order_id = 2, .status = .found_live, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 20 } } }));
     _ = try replayed.apply(atGroup(15, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
     _ = try replayed.apply(atGroup(16, .{ .identity = 12, .payload = .{ .oms_intent_group = amend } }));
-    _ = try replayed.apply(atGroup(18, .{ .identity = 13, .payload = .{ .oms_intent_group = cancel } }));
-    _ = try replayed.apply(atGroup(19, .{ .identity = 2, .payload = .{ .oms_execution_report = .{ .report_id = 2, .order_id = 2, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 20 } } }));
+    _ = try replayed.apply(atGroup(18, .{ .identity = 3, .payload = .{ .oms_execution_report = .{ .report_id = 3, .order_id = 1, .revision = 1, .status = .partially_filled, .cumulative_quantity = 20, .remaining_quantity = 80 } } }));
+    _ = try replayed.apply(atGroup(19, .{ .identity = 4, .payload = .{ .oms_execution_report = .{ .report_id = 4, .order_id = 1, .revision = 2, .status = .rejected, .cumulative_quantity = 20, .remaining_quantity = 80 } } }));
+    _ = try replayed.apply(atGroup(20, .{ .identity = 13, .payload = .{ .oms_intent_group = cancel } }));
+    _ = try replayed.apply(atGroup(21, .{ .identity = 2, .payload = .{ .oms_execution_report = .{ .report_id = 2, .order_id = 2, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 20 } } }));
     try std.testing.expectEqualSlices(u8, &digest, &replayed.canonicalStateDigest());
 }
 
