@@ -79,12 +79,14 @@ pub const FundingSettlement = struct {
 
 pub const VenueForcedExecution = struct {
     identity: u64,
+    source_identity: u128 = 0,
     side: Side,
     quantity: canonical.InstrumentQuantity,
     price: canonical.InstrumentPrice,
     quantity_denominator: i64,
     fee: canonical.AssetAmount = .{ .asset = 0, .atoms = 0 },
     penalty: canonical.AssetAmount = .{ .asset = 0, .atoms = 0 },
+    expected_realized_pnl_micros: ?i64 = null,
     portfolio_margin_ppm: i64 = 0,
     exchange_margin_ppm: i64 = 0,
     product: canonical.Product,
@@ -408,6 +410,10 @@ pub const Projection = struct {
             var exchange = self.exchange;
             const portfolio_movement = try applyFillToLayer(&portfolio, fill);
             const exchange_movement = try applyFillToLayer(&exchange, fill);
+            if (forced.expected_realized_pnl_micros) |expected| {
+                if (try std.math.sub(i64, portfolio.realized_pnl_micros, self.portfolio.realized_pnl_micros) != expected)
+                    return error.ForcedExecutionPnlMismatch;
+            }
             portfolio.margin_micros = try rateMicros(portfolio.swap.open_cost_micros, fill.portfolio_margin_ppm);
             exchange.margin_micros = try rateMicros(exchange.swap.open_cost_micros, fill.exchange_margin_ppm);
             const position_delta: i64 = if (forced.side == .buy) quantity else -quantity;
@@ -433,6 +439,7 @@ pub const Projection = struct {
             return;
         }
         if (self.seen_count == max_facts) return error.EconomicFactCapacityExceeded;
+        if (forced.expected_realized_pnl_micros != null) return error.ForcedExecutionOwnerMismatch;
         self.seen[self.seen_count] = .{ .identity = forced.identity, .kind = .forced_execution, .fingerprint = fingerprint };
         self.seen_count += 1;
         var exchange = self.exchange;
@@ -724,6 +731,7 @@ fn fingerprintFill(fill: Fill) u64 {
 fn fingerprintForced(forced: VenueForcedExecution) u64 {
     var hash = std.hash.Wyhash.init(0);
     hash.update(std.mem.asBytes(&forced.identity));
+    hash.update(std.mem.asBytes(&forced.source_identity));
     hash.update(&.{@intFromEnum(forced.side)});
     hash.update(std.mem.asBytes(&forced.quantity.instrument));
     hash.update(std.mem.asBytes(&forced.quantity.rules_version));
@@ -734,6 +742,8 @@ fn fingerprintForced(forced: VenueForcedExecution) u64 {
     hash.update(std.mem.asBytes(&forced.fee.atoms));
     hash.update(std.mem.asBytes(&forced.penalty.asset));
     hash.update(std.mem.asBytes(&forced.penalty.atoms));
+    hash.update(&.{@intFromBool(forced.expected_realized_pnl_micros != null)});
+    if (forced.expected_realized_pnl_micros) |pnl| hash.update(std.mem.asBytes(&pnl));
     hash.update(std.mem.asBytes(&forced.portfolio_margin_ppm));
     hash.update(std.mem.asBytes(&forced.exchange_margin_ppm));
     hash.update(&.{@intFromEnum(forced.product)});
@@ -847,12 +857,13 @@ test "duplicate attributed forced execution cannot charge penalty twice" {
     projection.portfolio.usdt_balance_micros = 1_000;
     projection.exchange.usdt_balance_micros = 1_000;
     try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = fixtureQuantity(10), .price = fixturePrice(100), .quantity_denominator = 1, .product = .isolated_linear_usdt } });
-    const forced: Event = .{ .venue_forced_execution = .{ .identity = 2, .side = .sell, .quantity = fixtureQuantity(2), .price = fixturePrice(90), .quantity_denominator = 1, .fee = fixtureAmount(3), .penalty = fixtureAmount(5), .product = .isolated_linear_usdt } };
+    const forced: Event = .{ .venue_forced_execution = .{ .identity = 2, .source_identity = 7, .side = .sell, .quantity = fixtureQuantity(2), .price = fixturePrice(90), .quantity_denominator = 1, .fee = fixtureAmount(3), .penalty = fixtureAmount(5), .product = .isolated_linear_usdt } };
     try projection.apply(forced);
     const after = projection;
     try projection.apply(forced);
     try std.testing.expectEqualDeep(after, projection);
     try std.testing.expectError(error.ConflictingEconomicIdentity, projection.apply(.{ .venue_forced_execution = .{ .identity = 2, .side = .sell, .quantity = fixtureQuantity(2), .price = fixturePrice(90), .quantity_denominator = 1, .fee = fixtureAmount(3), .penalty = fixtureAmount(6), .product = .isolated_linear_usdt } }));
+    try std.testing.expectError(error.ConflictingEconomicIdentity, projection.apply(.{ .venue_forced_execution = .{ .identity = 2, .source_identity = 8, .side = .sell, .quantity = fixtureQuantity(2), .price = fixturePrice(90), .quantity_denominator = 1, .fee = fixtureAmount(3), .penalty = fixtureAmount(5), .product = .isolated_linear_usdt } }));
 }
 
 test "negative forced penalty is rejected without changing projection" {
@@ -862,6 +873,22 @@ test "negative forced penalty is rejected without changing projection" {
     const before = projection;
     try std.testing.expectError(error.InvalidEconomicFact, projection.apply(.{ .venue_forced_execution = .{ .identity = 1, .side = .sell, .quantity = fixtureQuantity(1), .price = fixturePrice(100), .quantity_denominator = 1, .penalty = fixtureAmount(-1), .product = .isolated_linear_usdt } }));
     try std.testing.expectEqualDeep(before, projection);
+}
+
+test "allocated forced PnL must match the closed portfolio position" {
+    var projection: Projection = .{};
+    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = fixtureQuantity(1), .price = fixturePrice(100), .quantity_denominator = 1, .product = .isolated_linear_usdt } });
+    const before = projection.digest();
+    try std.testing.expectError(error.ForcedExecutionPnlMismatch, projection.apply(.{ .venue_forced_execution = .{
+        .identity = 2,
+        .side = .sell,
+        .quantity = fixtureQuantity(1),
+        .price = fixturePrice(100),
+        .quantity_denominator = 1,
+        .expected_realized_pnl_micros = 1,
+        .product = .isolated_linear_usdt,
+    } }));
+    try std.testing.expectEqualSlices(u8, &before, &projection.digest());
 }
 
 test "valuation respects the contract quantity denominator" {

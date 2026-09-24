@@ -2046,12 +2046,14 @@ pub const TradingShard = struct {
                 const instrument_config = self.singleProductEntry(.isolated_linear_usdt) orelse return error.UnknownOmsInstrument;
                 const changed = try self.applyEconomicProjection(.{ .venue_forced_execution = .{
                     .identity = forced.execution_id,
+                    .source_identity = forced.source_identity,
                     .side = if (forced.side == .buy) .buy else .sell,
                     .quantity = .{ .instrument = instrument_config.instrument, .rules_version = instrument_config.rules.version, .lots = forced.quantity },
                     .price = .{ .instrument = instrument_config.instrument, .rules_version = instrument_config.rules.version, .ticks = forced.price_micros },
                     .quantity_denominator = instrument_config.rules.quantity_denominator,
                     .fee = .{ .asset = self.economic_projection.settlement_asset, .atoms = forced.fee_micros },
                     .penalty = .{ .asset = self.economic_projection.settlement_asset, .atoms = forced.penalty_micros },
+                    .expected_realized_pnl_micros = forced.expected_realized_pnl_micros,
                     .portfolio_margin_ppm = instrument_config.margin.internal_initial_margin_ppm,
                     .exchange_margin_ppm = instrument_config.margin.venue_initial_margin_ppm,
                     .product = instrument_config.product,
@@ -2362,6 +2364,7 @@ pub fn applyStable(
         if (input == .core and input.core.payload == .oms_intent_group and
             (shard.oms.groupIdentityStatus(input.core.payload.oms_intent_group) catch .fresh) == .duplicate)
             return null;
+        if (input == .core and input.core.payload == .venue_forced_execution) return null;
         return error.InputProducedNoFact;
     }
     appendStableFactGroup(decision_journal, input, result.facts) catch |err| {

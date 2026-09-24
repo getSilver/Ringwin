@@ -141,11 +141,13 @@ pub const EconomicFill = struct {
 pub const FundingSettlement = struct { settlement_id: u64, amount_micros: i64 };
 pub const VenueForcedExecution = struct {
     execution_id: u64,
+    source_identity: u128 = 0,
     side: oms_module.Side,
     quantity: i64,
     price_micros: i64,
     fee_micros: i64 = 0,
     penalty_micros: i64 = 0,
+    expected_realized_pnl_micros: ?i64 = null,
 };
 pub const EconomicAccountSnapshot = struct {
     snapshot_id: u64,
@@ -544,11 +546,14 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
         },
         .venue_forced_execution => |value| {
             try encoded.put(u64, value.execution_id);
+            try encoded.put(u128, value.source_identity);
             try encoded.put(u8, @intFromEnum(value.side));
             try encoded.put(i64, value.quantity);
             try encoded.put(i64, value.price_micros);
             try encoded.put(i64, value.fee_micros);
             try encoded.put(i64, value.penalty_micros);
+            try encoded.put(u8, @intFromBool(value.expected_realized_pnl_micros != null));
+            if (value.expected_realized_pnl_micros) |pnl| try encoded.put(i64, pnl);
         },
         .economic_account_snapshot => |value| {
             try encoded.put(u64, value.snapshot_id);
@@ -888,11 +893,17 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
         } },
         .venue_forced_execution => .{ .venue_forced_execution = .{
             .execution_id = try readInputValue(u64, record.payload, &offset),
+            .source_identity = try readInputValue(u128, record.payload, &offset),
             .side = std.enums.fromInt(oms_module.Side, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOmsSide,
             .quantity = try readInputValue(i64, record.payload, &offset),
             .price_micros = try readInputValue(i64, record.payload, &offset),
             .fee_micros = try readInputValue(i64, record.payload, &offset),
             .penalty_micros = try readInputValue(i64, record.payload, &offset),
+            .expected_realized_pnl_micros = switch (try readInputValue(u8, record.payload, &offset)) {
+                0 => null,
+                1 => try readInputValue(i64, record.payload, &offset),
+                else => return error.InvalidForcedExecutionPnlEvidence,
+            },
         } },
         .economic_account_snapshot => .{ .economic_account_snapshot = .{
             .snapshot_id = try readInputValue(u64, record.payload, &offset),

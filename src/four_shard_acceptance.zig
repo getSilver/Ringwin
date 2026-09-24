@@ -23,7 +23,7 @@ const place_fee_micros: i64 = 400_000;
 const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
 pub const acceptance_schema_version: u16 = production_contract.acceptance_schema_version;
-const expected_shared_summary_v7 = "3bdb6b4788d778c4668e9283b240c23db9de9c91939df0c4bad03219b5996c02";
+const expected_shared_summary_v8 = "82304a189514fc068ba1e3d5abcdc60cfb864a00da74b83a2dbf4f5f6fc6ac9f";
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
     return trading.applyStable(shard, stable_journal, .{ .core = input });
@@ -34,6 +34,8 @@ const OpLog = struct {
         publish: struct { identity: u128, summary: coordination.ShardSummary },
         allocate: struct { version: u64, valid_through: u64 },
         fact: coordination.AccountFact,
+        forced_allocation: coordination.ForcedExecutionAllocation,
+        forced_ack: struct { allocation_identity: u128, slice_index: u8 },
         reconcile: coordination.MarginObservation,
     };
     entries: [64]Entry = undefined,
@@ -51,6 +53,7 @@ const World = struct {
     journals: [max_shards]trading.journal.Journal,
     commands: [max_shards]trading.oms.Command = undefined,
     coordinator: coordination.AccountCoordinator,
+    coordination_journal: coordination.CoordinationJournal = coordination.CoordinationJournal.initAt(1),
     ownership: coordination.GatewayOwnership = .{},
     ops: OpLog = .{},
     summary_sequences: [max_shards]u64 = @splat(0),
@@ -130,6 +133,15 @@ const World = struct {
                 &self.journals[@intFromEnum(delivery.shard_id)],
             );
     }
+
+    fn allocateForced(self: *World, allocation_fact: coordination.ForcedExecutionAllocation) !void {
+        const deliveries = try self.coordinator.commitForcedAllocation(&self.coordination_journal, allocation_fact);
+        try self.ops.record(.{ .forced_allocation = allocation_fact });
+        for (deliveries) |delivery| {
+            try coordination.applyForcedDeliveryStable(&self.coordinator, &self.coordination_journal, delivery, delivery.shard_id, &self.shards[@intFromEnum(delivery.shard_id)], &self.journals[@intFromEnum(delivery.shard_id)]);
+            try self.ops.record(.{ .forced_ack = .{ .allocation_identity = delivery.allocation_identity, .slice_index = delivery.slice_index } });
+        }
+    }
 };
 
 var shard_snapshot_storage: [max_shards][256 * 1024]u8 = undefined;
@@ -187,10 +199,19 @@ fn replayShardFromJournal(bytes: []const u8) !trading.TradingShard {
 
 fn replayCoordination(live: *const World) !coordination.AccountCoordinator {
     var coordinator = coordination.AccountCoordinator.init(exchange_account, ceiling_micros, ceiling_micros);
+    var ack_journal = coordination.CoordinationJournal.initAt(1);
     for (live.ops.entries[0..live.ops.len]) |entry| switch (entry) {
         .publish => |p| _ = try coordinator.publishSummary(p.identity, p.summary),
         .allocate => |a| _ = try coordinator.allocateLeases(a.version, a.valid_through),
         .fact => |fact| _ = try coordinator.acceptAccountFact(fact),
+        .forced_allocation => |allocation_fact| _ = try coordinator.allocateForcedExecution(allocation_fact),
+        .forced_ack => |ack| {
+            for (try coordinator.pendingForcedDeliveries()) |delivery| {
+                if (delivery.allocation_identity != ack.allocation_identity or delivery.slice_index != ack.slice_index) continue;
+                try coordinator.ackForcedDeliveryFromShard(&ack_journal, delivery, &live.shards[@intFromEnum(delivery.shard_id)]);
+                break;
+            }
+        },
         .reconcile => |observation| _ = try coordinator.reconcileMargin(observation),
     };
     return coordinator;
@@ -453,6 +474,13 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
             .fee_micros = 1,
         } },
     });
+    var forced_allocation: coordination.ForcedExecutionAllocation = .{
+        .identity = world.nextId(),
+        .forced_execution_identity = world.coordinator.forced_execution_source.?.identity,
+        .count = 1,
+    };
+    forced_allocation.slices[0] = .{ .owner = .shard_1, .quantity = -2, .position_delta = -2, .fee_micros = 1 };
+    try world.allocateForced(forced_allocation);
     try std.testing.expect(!world.shards[1].operational_state.effectiveTradingAuthority());
     try std.testing.expectEqualSlices(u8, &pre_fault_digests[0], &world.shards[0].canonicalStateDigest());
     try std.testing.expectEqualSlices(u8, &pre_fault_digests[2], &world.shards[2].canonicalStateDigest());
@@ -628,20 +656,20 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         try std.testing.expect(!path_b.shards[index].operational_state.effectiveTradingAuthority());
         try std.testing.expectEqual(world.shards[index].oms.order_count, path_b.shards[index].oms.order_count);
     }
-    try std.testing.expectError(error.FreshMarginObservationRequired, path_b.completeCoordinatorRecovery());
+    try std.testing.expectError(error.ForcedExecutionReconciliationBreak, path_b.completeCoordinatorRecovery());
     var recovery_observation = try world.projectedObservation(9001);
     recovery_observation.barrier = path_b.coordinator.barrier;
     const latched_recovery = try path_b.coordinator.reconcileMargin(recovery_observation);
     try std.testing.expect(latched_recovery.latched);
-    try std.testing.expectError(error.MarginReconciliationRequired, path_b.completeCoordinatorRecovery());
+    try std.testing.expectError(error.ForcedExecutionReconciliationBreak, path_b.completeCoordinatorRecovery());
 
     const path_success = try allocator.create(coordination.AccountRecovery);
     defer allocator.destroy(path_success);
     path_success.* = try coordination.AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
     _ = try path_success.coordinator.reconcileMargin(recovery_observation);
-    _ = try path_success.coordinator.resolveMarginGate(recovery_observation.identity);
-    try path_success.completeCoordinatorRecovery();
-    try std.testing.expect(!path_success.coordinator.recovery_only);
+    try std.testing.expectError(error.ForcedExecutionReconciliationBreak, path_success.coordinator.resolveMarginGate(recovery_observation.identity));
+    try std.testing.expectError(error.ForcedExecutionReconciliationBreak, path_success.completeCoordinatorRecovery());
+    try std.testing.expect(path_success.coordinator.recovery_only);
     try std.testing.expectEqual(try world.coordinator.grossPortfolioMargin(), try path_success.coordinator.grossPortfolioMargin());
     try std.testing.expectEqual(
         @max((try path_success.coordinator.grossPortfolioMargin()) - recovery_observation.venue_net_margin_micros, 0),
@@ -660,9 +688,9 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     _ = try path_c.coordinator.reconcileMargin(mid_crash_observation);
     path_c.* = try coordination.AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
     try std.testing.expectEqualSlices(u8, &world.coordinator.digest(), &path_c.coordinator.digest());
-    try std.testing.expectError(error.FreshMarginObservationRequired, path_c.completeCoordinatorRecovery());
+    try std.testing.expectError(error.ForcedExecutionReconciliationBreak, path_c.completeCoordinatorRecovery());
     _ = try path_c.coordinator.reconcileMargin(mid_crash_observation);
-    try std.testing.expectError(error.MarginReconciliationRequired, path_c.completeCoordinatorRecovery());
+    try std.testing.expectError(error.ForcedExecutionReconciliationBreak, path_c.completeCoordinatorRecovery());
     try std.testing.expectEqualSlices(u8, &path_b.coordinator.digest(), &path_c.coordinator.digest());
 
     var evidence_coordinator = replayed_coordinator;
@@ -697,8 +725,8 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     try std.testing.expectEqualSlices(u8, &shared_a, &shared_b);
     try std.testing.expectEqualSlices(u8, &shared_b, &shared_c);
     const shared_hex = std.fmt.bytesToHex(shared_a, .lower);
-    if (!std.mem.eql(u8, expected_shared_summary_v7, &shared_hex)) {
-        std.debug.print("four-shard evidence mismatch: expected {s}, actual {s}\n", .{ expected_shared_summary_v7, &shared_hex });
+    if (!std.mem.eql(u8, expected_shared_summary_v8, &shared_hex)) {
+        std.debug.print("four-shard evidence mismatch: expected {s}, actual {s}\n", .{ expected_shared_summary_v8, &shared_hex });
         return error.FourShardEvidenceDrift;
     }
     try std.testing.expectEqual(@as(u8, max_shards), world.ownership.count);

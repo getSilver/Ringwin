@@ -2,7 +2,7 @@ const std = @import("std");
 const trading = @import("trading_shard.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const snapshot_magic: u64 = 0x54434341574e4952;
-const coordinator_snapshot_version: u16 = 3;
+const coordinator_snapshot_version: u16 = 5;
 const account_margin_gate_identity: u128 = 0x414343544d415247;
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
@@ -10,6 +10,7 @@ fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journa
 }
 
 pub const max_shards = 4;
+const max_completed_forced_allocations = 32;
 
 /// Account-level margin mode; IsolatedLinearUsdtV1 stays the only supported model.
 pub const AccountMarginMode = enum(u8) { isolated, cross };
@@ -88,7 +89,7 @@ pub const RiskLease = struct {
 /// Account-wide observations normalized once before deterministic fan-out.
 pub const AccountFactPayload = union(enum) {
     account_snapshot: struct { cash_micros: i64, spot_quantity: i64 = 0, swap_quantity: i64, margin_micros: i64 },
-    forced_execution: struct { owner: ?ShardId, quantity: i64, price_micros: i64, fee_micros: i64 },
+    forced_execution: struct { owner: ?ShardId, quantity: i64, price_micros: i64, realized_pnl_micros: i64 = 0, fee_micros: i64, penalty_micros: i64 = 0 },
 };
 
 /// Account-wide observations normalized once before deterministic fan-out.
@@ -101,13 +102,30 @@ pub const AccountFact = struct {
 };
 
 /// One target assignment; the target shard still applies the canonical fact.
-pub const Delivery = struct { shard_id: ShardId, fact: AccountFact };
+pub const Delivery = struct { shard_id: ShardId, fact: AccountFact, allocation_identity: u128 = 0, slice_index: u8 = 0, source_identity: u128 = 0 };
+
+pub const ForcedExecutionSlice = struct {
+    owner: ShardId = .shard_0,
+    quantity: i64 = 0,
+    position_delta: i64 = 0,
+    realized_pnl_micros: i64 = 0,
+    fee_micros: i64 = 0,
+    penalty_micros: i64 = 0,
+};
 
 pub const ForcedExecutionAllocation = struct {
     identity: u128,
     forced_execution_identity: u128,
-    owner: ShardId,
+    slices: [max_shards]ForcedExecutionSlice = @splat(.{}),
+    count: u8,
 };
+
+const ForcedAllocationRecord = struct {
+    allocation: ForcedExecutionAllocation,
+    delivered_mask: u8 = 0,
+};
+
+pub const ForcedSuspense = struct { quantity: i64, position_delta: i64, realized_pnl_micros: i64, fee_micros: i64, penalty_micros: i64 };
 
 /// Venue account-margin evidence used only for reconciliation.
 pub const MarginObservation = struct {
@@ -139,6 +157,7 @@ pub const CoordinationEvent = union(enum) {
     resolve_margin_gate: u128,
     tighten_leases: struct { valid_through_barrier: u64, requested_limits: [max_shards]i64 },
     forced_execution_allocation: ForcedExecutionAllocation,
+    forced_delivery_ack: struct { allocation_identity: u128, slice_index: u8 },
 };
 
 /// Append-only, checksummed durable tail for inputs owned by AccountCoordinator.
@@ -156,7 +175,7 @@ pub const CoordinationJournal = struct {
         const encoded = try encodeCoordinationEvent(&storage, event);
         try self.stable.append(.{
             .type_id = coordinationEventType(event),
-            .schema_version = 1,
+            .schema_version = 2,
             .flags = trading.journal.input_flag,
             .sequence = try std.math.add(u64, self.stable.last_sequence, 1),
             .source_time = 0,
@@ -182,6 +201,8 @@ pub const CoordinationJournal = struct {
 /// Converts one routed account fact into the target shard's stable event seam.
 pub fn accountFactEvent(delivery: Delivery) !trading.CoreEvent {
     const identity = std.math.cast(u64, delivery.fact.identity) orelse return error.IdentityOutOfRange;
+    if (delivery.fact.payload == .forced_execution and
+        (delivery.allocation_identity == 0 or delivery.source_identity == 0)) return error.UnallocatedForcedExecution;
     return .{
         .identity = identity,
         .payload = switch (delivery.fact.payload) {
@@ -194,6 +215,7 @@ pub fn accountFactEvent(delivery: Delivery) !trading.CoreEvent {
             } },
             .forced_execution => |execution| .{ .venue_forced_execution = .{
                 .execution_id = identity,
+                .source_identity = delivery.source_identity,
                 .side = if (execution.quantity < 0) .sell else .buy,
                 .quantity = if (execution.quantity == std.math.minInt(i64))
                     return error.InvalidAccountFact
@@ -201,6 +223,8 @@ pub fn accountFactEvent(delivery: Delivery) !trading.CoreEvent {
                     @intCast(@abs(execution.quantity)),
                 .price_micros = execution.price_micros,
                 .fee_micros = execution.fee_micros,
+                .penalty_micros = execution.penalty_micros,
+                .expected_realized_pnl_micros = execution.realized_pnl_micros,
             } },
         },
     };
@@ -237,7 +261,58 @@ pub fn accountGateEvent(delivery: GateDelivery, target_identity: u128) !trading.
 /// Durably applies one routed account fact through the shard's transactional seam.
 pub fn applyAccountFactStable(delivery: Delivery, target_shard_id: ShardId, shard: *trading.TradingShard, stable_journal: *trading.journal.Journal) !void {
     if (delivery.shard_id != target_shard_id) return error.CrossShardDelivery;
+    if (delivery.fact.payload == .forced_execution) return error.ForcedAllocationRequired;
     _ = try applyCoreStable(shard, stable_journal, try accountFactEvent(delivery));
+}
+
+/// The shard commit precedes the coordinator ack; retry after a crash uses the same slice identity.
+pub fn applyForcedDeliveryStable(coordinator: *AccountCoordinator, coordination_journal: *CoordinationJournal, delivery: Delivery, target_shard_id: ShardId, shard: *trading.TradingShard, stable_journal: *trading.journal.Journal) !void {
+    var known = false;
+    for (try coordinator.pendingForcedDeliveries()) |pending| {
+        if (std.meta.eql(pending, delivery)) known = true;
+    }
+    if (!known) return error.UnknownForcedDelivery;
+    var candidate = coordinator.*;
+    try candidate.markForcedDelivered(delivery.allocation_identity, delivery.slice_index);
+    if (delivery.shard_id != target_shard_id) return error.CrossShardDelivery;
+    _ = try applyCoreStable(shard, stable_journal, try accountFactEvent(delivery));
+    try coordination_journal.append(.{ .forced_delivery_ack = .{ .allocation_identity = delivery.allocation_identity, .slice_index = delivery.slice_index } });
+    coordinator.* = candidate;
+}
+
+fn shardHasAppliedForced(delivery: Delivery, shard: *const trading.TradingShard) !bool {
+    var candidate = shard.*;
+    const before = candidate.trace.len;
+    _ = try candidate.apply(.{ .core = try accountFactEvent(delivery) });
+    return candidate.trace.len == before;
+}
+
+fn forcedTailExplainsSummaryChange(coordinator: *AccountCoordinator, shard_id: ShardId, snapshot: []const u8, tail: []const u8, summary: ShardSummary) !bool {
+    var before = (try trading.TradingShard.restoreSnapshot(snapshot)).shard;
+    before.operational_state.trading_authorized = false;
+    before.operational_state.mode = .recovering;
+    const baseline = try shardSummaryFromShard(&before, shard_id, summary.shard_sequence, summary.decision_domain);
+    if (!std.meta.eql(baseline, summary)) return false;
+    var reader = try trading.journal.Reader.init(tail);
+    var forced_count: usize = 0;
+    while (true) switch (try reader.next()) {
+        .record => |record| {
+            if (record.flags != trading.journal.input_flag) continue;
+            const input = try trading.decodeStableInput(record);
+            if (input != .core or input.core.payload != .venue_forced_execution) return false;
+            var matched = false;
+            for (try coordinator.forcedDeliveries(true)) |delivery| {
+                if (delivery.shard_id != shard_id) continue;
+                if (std.meta.eql(input.core, try accountFactEvent(delivery))) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) return false;
+            forced_count += 1;
+        },
+        .end => |status| return status == .clean and forced_count > 0,
+    };
 }
 
 /// Durably applies one account restriction through the shard's transactional seam.
@@ -424,7 +499,13 @@ pub const AccountCoordinator = struct {
     recovery_margin_identity: u128 = 0,
     suspense_forced_execution: ?AccountFact = null,
     reconciliation_break_identity: u128 = 0,
-    last_forced_execution_allocation: ?ForcedExecutionAllocation = null,
+    forced_execution_source: ?AccountFact = null,
+    forced_source_positions: [max_shards]i64 = @splat(0),
+    forced_allocations: [max_shards]ForcedAllocationRecord = undefined,
+    forced_allocation_count: u8 = 0,
+    completed_forced_allocations: [max_completed_forced_allocations]ForcedExecutionAllocation = undefined,
+    completed_forced_allocation_count: u8 = 0,
+    forced_deliveries: [max_shards * max_shards]Delivery = undefined,
 
     /// Creates one coordinator for exactly one ExchangeAccount.
     pub fn init(exchange_account: u128, account_ceiling: i64, global_ceiling: i64) AccountCoordinator {
@@ -483,9 +564,23 @@ pub const AccountCoordinator = struct {
         digestOptionalAccountFact(&hasher, self.last_account_fact);
         digestOptionalAccountFact(&hasher, self.suspense_forced_execution);
         digestInt(&hasher, u128, self.reconciliation_break_identity);
-        hasher.update(&.{@intFromBool(self.last_forced_execution_allocation != null)});
-        if (self.last_forced_execution_allocation) |allocation|
-            digestStruct(&hasher, ForcedExecutionAllocation, allocation);
+        digestOptionalAccountFact(&hasher, self.forced_execution_source);
+        for (self.forced_source_positions) |position| digestInt(&hasher, i64, position);
+        digestInt(&hasher, u8, self.forced_allocation_count);
+        for (self.forced_allocations[0..self.forced_allocation_count]) |record| {
+            digestInt(&hasher, u128, record.allocation.identity);
+            digestInt(&hasher, u128, record.allocation.forced_execution_identity);
+            digestInt(&hasher, u8, record.allocation.count);
+            for (record.allocation.slices[0..record.allocation.count]) |slice| digestStruct(&hasher, ForcedExecutionSlice, slice);
+            digestInt(&hasher, u8, record.delivered_mask);
+        }
+        digestInt(&hasher, u8, self.completed_forced_allocation_count);
+        for (self.completed_forced_allocations[0..self.completed_forced_allocation_count]) |allocation| {
+            digestInt(&hasher, u128, allocation.identity);
+            digestInt(&hasher, u128, allocation.forced_execution_identity);
+            digestInt(&hasher, u8, allocation.count);
+            for (allocation.slices[0..allocation.count]) |slice| digestStruct(&hasher, ForcedExecutionSlice, slice);
+        }
         digestOptionalMarginObservation(&hasher, self.last_margin_observation);
         digestStruct(&hasher, AccountGate, self.margin_gate);
         digestInt(&hasher, u8, @intFromEnum(self.margin_reconciliation_state));
@@ -594,23 +689,36 @@ pub const AccountCoordinator = struct {
         } else if (fact.barrier != 1) {
             return error.AccountFactBarrierGap;
         }
+        if (fact.payload == .forced_execution) {
+            const forced = fact.payload.forced_execution;
+            if (forced.quantity == 0 or forced.quantity == std.math.minInt(i64) or
+                forced.price_micros <= 0 or forced.fee_micros < 0 or forced.penalty_micros < 0)
+                return error.InvalidAccountFact;
+            if (@as(usize, self.completed_forced_allocation_count) + self.forced_allocation_count > max_completed_forced_allocations)
+                return error.ForcedExecutionHistoryCapacityExceeded;
+        }
         const count: usize = switch (fact.payload) {
             .account_snapshot => max_shards,
-            .forced_execution => |execution| if (execution.owner == null) 0 else 1,
+            .forced_execution => 0,
         };
         if (count == 0 and self.suspense_forced_execution != null) return error.SuspenseAccountCapacityExceeded;
         self.last_account_fact = fact;
         switch (fact.payload) {
-            .forced_execution => |execution| {
-                if (execution.owner) |owner| {
-                    self.deliveries[0] = .{ .shard_id = owner, .fact = fact };
-                } else {
-                    self.suspense_forced_execution = fact;
-                    self.reconciliation_break_identity = fact.identity;
-                    self.margin_gate = .{ .identity = fact.identity, .open = false, .latched = true };
-                    self.recovery_only = true;
-                    for (self.leases[0..self.lease_count]) |*lease| lease.used_micros = lease.limit_micros;
+            .forced_execution => {
+                // ponytail: bounded identity history; add explicit archive retention if 32 completed allocations are insufficient.
+                for (self.forced_allocations[0..self.forced_allocation_count]) |record| {
+                    self.completed_forced_allocations[self.completed_forced_allocation_count] = record.allocation;
+                    self.completed_forced_allocation_count += 1;
                 }
+                self.forced_allocation_count = 0;
+                self.forced_execution_source = fact;
+                for (self.summaries, 0..) |summary, index|
+                    self.forced_source_positions[index] = if (summary.present) summary.value.swap_quantity else 0;
+                self.suspense_forced_execution = fact;
+                self.reconciliation_break_identity = fact.identity;
+                self.margin_gate = .{ .identity = fact.identity, .open = false, .latched = true };
+                self.recovery_only = true;
+                for (self.leases[0..self.lease_count]) |*lease| lease.used_micros = lease.limit_micros;
             },
             .account_snapshot => {
                 for (self.deliveries[0..count], 0..) |*delivery, index|
@@ -620,25 +728,183 @@ pub const AccountCoordinator = struct {
         return self.deliveries[0..count];
     }
 
-    pub fn allocateForcedExecution(self: *AccountCoordinator, allocation: ForcedExecutionAllocation) !Delivery {
-        if (allocation.identity == 0 or allocation.forced_execution_identity == 0) return error.InvalidForcedExecutionAllocation;
-        if (self.last_forced_execution_allocation) |known| {
-            if (known.identity == allocation.identity) {
-                if (!std.meta.eql(known, allocation)) return error.ForcedExecutionAllocationConflict;
-                var known_fact = self.last_account_fact orelse return error.UnknownForcedExecution;
-                if (known_fact.identity != allocation.forced_execution_identity or known_fact.payload != .forced_execution)
-                    return error.UnknownForcedExecution;
-                known_fact.payload.forced_execution.owner = allocation.owner;
-                return .{ .shard_id = allocation.owner, .fact = known_fact };
+    pub fn allocateForcedExecution(self: *AccountCoordinator, allocation: ForcedExecutionAllocation) ![]const Delivery {
+        var normalized = allocation;
+        if (normalized.count <= max_shards) {
+            for (normalized.slices[normalized.count..]) |*slice| slice.* = .{};
+        }
+        for (self.completed_forced_allocations[0..self.completed_forced_allocation_count]) |known| {
+            if (known.identity != normalized.identity) continue;
+            if (!std.meta.eql(known, normalized)) return error.ForcedExecutionAllocationConflict;
+            return self.forced_deliveries[0..0];
+        }
+        const source = self.forced_execution_source orelse return error.UnknownForcedExecution;
+        if (allocation.identity == 0 or allocation.forced_execution_identity != source.identity or
+            allocation.count == 0 or allocation.count > max_shards or
+            std.math.cast(u64, allocation.identity) == null or
+            allocation.identity > (std.math.maxInt(u64) - max_shards) / max_shards)
+            return error.InvalidForcedExecutionAllocation;
+        for (self.forced_allocations[0..self.forced_allocation_count]) |known| {
+            if (known.allocation.identity == normalized.identity) {
+                if (!std.meta.eql(known.allocation, normalized)) return error.ForcedExecutionAllocationConflict;
+                return self.pendingForcedDeliveries();
             }
         }
-        var fact = self.suspense_forced_execution orelse return error.UnknownForcedExecution;
-        if (fact.identity != allocation.forced_execution_identity) return error.UnknownForcedExecution;
-        fact.payload.forced_execution.owner = allocation.owner;
-        self.suspense_forced_execution = null;
-        self.reconciliation_break_identity = 0;
-        self.last_forced_execution_allocation = allocation;
-        return .{ .shard_id = allocation.owner, .fact = fact };
+        if (self.forced_allocation_count == max_shards) return error.ForcedExecutionAllocationCapacityExceeded;
+        var quantity: i128 = 0;
+        var pnl: i128 = 0;
+        var fee: i128 = 0;
+        var penalty: i128 = 0;
+        var owner_quantity: [max_shards]i128 = @splat(0);
+        for (self.forced_allocations[0..self.forced_allocation_count]) |known| {
+            for (known.allocation.slices[0..known.allocation.count]) |slice| {
+                quantity += slice.quantity;
+                pnl += slice.realized_pnl_micros;
+                fee += slice.fee_micros;
+                penalty += slice.penalty_micros;
+                owner_quantity[@intFromEnum(slice.owner)] += slice.quantity;
+            }
+        }
+        for (normalized.slices[0..normalized.count]) |slice| {
+            if (slice.quantity == 0 or slice.quantity == std.math.minInt(i64) or
+                slice.position_delta != slice.quantity or slice.fee_micros < 0 or slice.penalty_micros < 0)
+                return error.InvalidForcedExecutionAllocation;
+            const index = @intFromEnum(slice.owner);
+            const position = self.forced_source_positions[index];
+            if (position == 0 or (position > 0) == (slice.quantity > 0)) return error.ForcedExecutionOwnerMismatch;
+            owner_quantity[index] += slice.quantity;
+            if (@abs(owner_quantity[index]) > @abs(@as(i128, position))) return error.ForcedExecutionOwnerMismatch;
+            quantity += slice.quantity;
+            pnl += slice.realized_pnl_micros;
+            fee += slice.fee_micros;
+            penalty += slice.penalty_micros;
+        }
+        const execution = source.payload.forced_execution;
+        if (fee > execution.fee_micros or penalty > execution.penalty_micros or
+            std.math.cast(i64, @as(i128, execution.quantity) - quantity) == null or
+            std.math.cast(i64, @as(i128, execution.realized_pnl_micros) - pnl) == null)
+            return error.ForcedExecutionAllocationNotConserved;
+        self.forced_allocations[self.forced_allocation_count] = .{ .allocation = normalized };
+        self.forced_allocation_count += 1;
+        return self.pendingForcedDeliveries();
+    }
+
+    pub fn commitForcedAllocation(self: *AccountCoordinator, journal: *CoordinationJournal, allocation: ForcedExecutionAllocation) ![]const Delivery {
+        var normalized = allocation;
+        if (normalized.count <= max_shards) {
+            for (normalized.slices[normalized.count..]) |*slice| slice.* = .{};
+        }
+        for (self.completed_forced_allocations[0..self.completed_forced_allocation_count]) |known| {
+            if (known.identity != normalized.identity) continue;
+            if (!std.meta.eql(known, normalized)) return error.ForcedExecutionAllocationConflict;
+            return self.forced_deliveries[0..0];
+        }
+        var candidate = self.*;
+        _ = try candidate.allocateForcedExecution(allocation);
+        if (candidate.forced_allocation_count == self.forced_allocation_count) return self.pendingForcedDeliveries();
+        try journal.append(.{ .forced_execution_allocation = allocation });
+        self.* = candidate;
+        return self.pendingForcedDeliveries();
+    }
+
+    pub fn pendingForcedDeliveries(self: *AccountCoordinator) ![]const Delivery {
+        return self.forcedDeliveries(false);
+    }
+
+    fn forcedDeliveries(self: *AccountCoordinator, include_delivered: bool) ![]const Delivery {
+        const source = self.forced_execution_source orelse return self.forced_deliveries[0..0];
+        var count: usize = 0;
+        for (self.forced_allocations[0..self.forced_allocation_count]) |record| {
+            for (record.allocation.slices[0..record.allocation.count], 0..) |slice, index| {
+                if (!include_delivered and record.delivered_mask & (@as(u8, 1) << @intCast(index)) != 0) continue;
+                var fact = source;
+                fact.identity = try std.math.add(u64, try std.math.mul(u64, @intCast(record.allocation.identity), max_shards), @intCast(index + 1));
+                fact.payload.forced_execution = .{
+                    .owner = slice.owner,
+                    .quantity = slice.quantity,
+                    .price_micros = source.payload.forced_execution.price_micros,
+                    .realized_pnl_micros = slice.realized_pnl_micros,
+                    .fee_micros = slice.fee_micros,
+                    .penalty_micros = slice.penalty_micros,
+                };
+                self.forced_deliveries[count] = .{ .shard_id = slice.owner, .fact = fact, .allocation_identity = record.allocation.identity, .slice_index = @intCast(index), .source_identity = source.identity };
+                count += 1;
+            }
+        }
+        return self.forced_deliveries[0..count];
+    }
+
+    pub fn forcedSuspenseRemaining(self: *const AccountCoordinator) !?ForcedSuspense {
+        const source = self.suspense_forced_execution orelse return null;
+        const forced = source.payload.forced_execution;
+        var quantity: i128 = forced.quantity;
+        var position_delta: i128 = forced.quantity;
+        var pnl: i128 = forced.realized_pnl_micros;
+        var fee: i128 = forced.fee_micros;
+        var penalty: i128 = forced.penalty_micros;
+        for (self.forced_allocations[0..self.forced_allocation_count]) |record| {
+            for (record.allocation.slices[0..record.allocation.count]) |slice| {
+                quantity -= slice.quantity;
+                position_delta -= slice.position_delta;
+                pnl -= slice.realized_pnl_micros;
+                fee -= slice.fee_micros;
+                penalty -= slice.penalty_micros;
+            }
+        }
+        return .{
+            .quantity = std.math.cast(i64, quantity) orelse return error.ForcedSuspenseOutOfRange,
+            .position_delta = std.math.cast(i64, position_delta) orelse return error.ForcedSuspenseOutOfRange,
+            .realized_pnl_micros = std.math.cast(i64, pnl) orelse return error.ForcedSuspenseOutOfRange,
+            .fee_micros = std.math.cast(i64, fee) orelse return error.ForcedSuspenseOutOfRange,
+            .penalty_micros = std.math.cast(i64, penalty) orelse return error.ForcedSuspenseOutOfRange,
+        };
+    }
+
+    pub fn ackForcedDeliveryFromShard(self: *AccountCoordinator, journal: *CoordinationJournal, delivery: Delivery, shard: *const trading.TradingShard) !void {
+        var known = false;
+        for (try self.pendingForcedDeliveries()) |pending| {
+            if (std.meta.eql(pending, delivery)) known = true;
+        }
+        if (!known or !try shardHasAppliedForced(delivery, shard)) return error.ForcedDeliveryNotCommitted;
+        var candidate = self.*;
+        try candidate.markForcedDelivered(delivery.allocation_identity, delivery.slice_index);
+        try journal.append(.{ .forced_delivery_ack = .{ .allocation_identity = delivery.allocation_identity, .slice_index = delivery.slice_index } });
+        self.* = candidate;
+    }
+
+    fn markForcedDelivered(self: *AccountCoordinator, allocation_identity: u128, slice_index: u8) !void {
+        for (self.forced_allocations[0..self.forced_allocation_count]) |*record| {
+            if (record.allocation.identity != allocation_identity) continue;
+            if (slice_index >= record.allocation.count) return error.UnknownForcedDelivery;
+            record.delivered_mask |= @as(u8, 1) << @intCast(slice_index);
+            self.closeForcedBreakIfComplete();
+            return;
+        }
+        return error.UnknownForcedDelivery;
+    }
+
+    fn closeForcedBreakIfComplete(self: *AccountCoordinator) void {
+        const source = self.forced_execution_source orelse return;
+        var quantity: i128 = 0;
+        var pnl: i128 = 0;
+        var fee: i128 = 0;
+        var penalty: i128 = 0;
+        for (self.forced_allocations[0..self.forced_allocation_count]) |record| {
+            if (record.delivered_mask != (@as(u8, 1) << @intCast(record.allocation.count)) - 1) return;
+            for (record.allocation.slices[0..record.allocation.count]) |slice| {
+                quantity += slice.quantity;
+                pnl += slice.realized_pnl_micros;
+                fee += slice.fee_micros;
+                penalty += slice.penalty_micros;
+            }
+        }
+        const execution = source.payload.forced_execution;
+        if (quantity == execution.quantity and pnl == execution.realized_pnl_micros and
+            fee == execution.fee_micros and penalty == execution.penalty_micros)
+        {
+            self.suspense_forced_execution = null;
+            self.reconciliation_break_identity = 0;
+        }
     }
 
     /// Reconciles gross portfolio state with Venue net margin without allocating the difference.
@@ -673,6 +939,7 @@ pub const AccountCoordinator = struct {
 
     /// Clears the account margin latch only after healthy evidence and explicit resolution.
     pub fn resolveMarginGate(self: *AccountCoordinator, observation_identity: u128) !AccountGate {
+        if (self.suspense_forced_execution != null) return error.ForcedExecutionReconciliationBreak;
         const observation = self.last_margin_observation orelse return error.MarginObservationRequired;
         if (observation.identity != observation_identity) return error.MarginObservationIdentityConflict;
         const projected = try self.projectAccounts();
@@ -789,6 +1056,7 @@ pub const AccountCoordinator = struct {
     /// Leaves RecoveryOnly only after current leases and account reconciliation are healthy.
     pub fn completeRecovery(self: *AccountCoordinator) !void {
         if (!self.recovery_only) return error.CoordinatorNotRecovering;
+        if (self.suspense_forced_execution != null) return error.ForcedExecutionReconciliationBreak;
         if (self.recovery_margin_identity == 0) return error.FreshMarginObservationRequired;
         if (!self.margin_gate.open or self.margin_gate.latched) return error.MarginReconciliationRequired;
         if (self.lease_count != max_shards) return error.IncompleteRiskLeases;
@@ -812,6 +1080,7 @@ pub const AccountCoordinator = struct {
             .resolve_margin_gate => |identity| _ = try self.resolveMarginGate(identity),
             .tighten_leases => |tightening| _ = try self.tightenLeases(tightening.valid_through_barrier, tightening.requested_limits),
             .forced_execution_allocation => |allocation| _ = try self.allocateForcedExecution(allocation),
+            .forced_delivery_ack => |ack| try self.markForcedDelivered(ack.allocation_identity, ack.slice_index),
         }
     }
 
@@ -853,9 +1122,16 @@ pub const AccountCoordinator = struct {
         try writeOptionalAccountFact(&writer, self.last_account_fact);
         try writeOptionalAccountFact(&writer, self.suspense_forced_execution);
         try writer.writeInt(u128, self.reconciliation_break_identity, .little);
-        try writer.writeByte(@intFromBool(self.last_forced_execution_allocation != null));
-        if (self.last_forced_execution_allocation) |allocation|
-            try writePlainStruct(&writer, ForcedExecutionAllocation, allocation);
+        try writeOptionalAccountFact(&writer, self.forced_execution_source);
+        for (self.forced_source_positions) |position| try writer.writeInt(i64, position, .little);
+        try writer.writeByte(self.forced_allocation_count);
+        for (self.forced_allocations[0..self.forced_allocation_count]) |record| {
+            try writeForcedAllocation(&writer, record.allocation);
+            try writer.writeByte(record.delivered_mask);
+        }
+        try writer.writeByte(self.completed_forced_allocation_count);
+        for (self.completed_forced_allocations[0..self.completed_forced_allocation_count]) |allocation|
+            try writeForcedAllocation(&writer, allocation);
         try writeOptionalMarginObservation(&writer, self.last_margin_observation);
         try writer.writeInt(u128, self.margin_gate.identity, .little);
         try writer.writeByte(@intFromBool(self.margin_gate.open));
@@ -906,10 +1182,19 @@ pub const AccountCoordinator = struct {
         result.last_account_fact = try readOptionalAccountFact(&reader);
         result.suspense_forced_execution = try readOptionalAccountFact(&reader);
         result.reconciliation_break_identity = try reader.takeInt(u128, .little);
-        result.last_forced_execution_allocation = if (try readBool(&reader))
-            try readPlainStruct(&reader, ForcedExecutionAllocation)
-        else
-            null;
+        result.forced_execution_source = try readOptionalAccountFact(&reader);
+        for (&result.forced_source_positions) |*position| position.* = try reader.takeInt(i64, .little);
+        result.forced_allocation_count = try reader.takeByte();
+        if (result.forced_allocation_count > max_shards) return error.InvalidCoordinatorSnapshot;
+        for (result.forced_allocations[0..result.forced_allocation_count]) |*record| {
+            record.allocation = try readForcedAllocation(&reader);
+            record.delivered_mask = try reader.takeByte();
+            if (record.delivered_mask >> @intCast(record.allocation.count) != 0) return error.InvalidCoordinatorSnapshot;
+        }
+        result.completed_forced_allocation_count = try reader.takeByte();
+        if (result.completed_forced_allocation_count > max_completed_forced_allocations) return error.InvalidCoordinatorSnapshot;
+        for (result.completed_forced_allocations[0..result.completed_forced_allocation_count]) |*allocation|
+            allocation.* = try readForcedAllocation(&reader);
         result.last_margin_observation = try readOptionalMarginObservation(&reader);
         result.margin_gate = .{
             .identity = try reader.takeInt(u128, .little),
@@ -939,6 +1224,7 @@ fn coordinationEventType(event: CoordinationEvent) u16 {
         .resolve_margin_gate => 5,
         .tighten_leases => 6,
         .forced_execution_allocation => 7,
+        .forced_delivery_ack => 8,
     };
 }
 
@@ -970,6 +1256,24 @@ fn readPlainStruct(reader: *std.Io.Reader, comptime T: type) !T {
     return value;
 }
 
+fn writeForcedAllocation(writer: *std.Io.Writer, allocation: ForcedExecutionAllocation) !void {
+    try writer.writeInt(u128, allocation.identity, .little);
+    try writer.writeInt(u128, allocation.forced_execution_identity, .little);
+    try writer.writeByte(allocation.count);
+    for (allocation.slices[0..allocation.count]) |slice| try writePlainStruct(writer, ForcedExecutionSlice, slice);
+}
+
+fn readForcedAllocation(reader: *std.Io.Reader) !ForcedExecutionAllocation {
+    var allocation: ForcedExecutionAllocation = .{
+        .identity = try reader.takeInt(u128, .little),
+        .forced_execution_identity = try reader.takeInt(u128, .little),
+        .count = try reader.takeByte(),
+    };
+    if (allocation.count == 0 or allocation.count > max_shards) return error.InvalidCoordinationTail;
+    for (allocation.slices[0..allocation.count]) |*slice| slice.* = try readPlainStruct(reader, ForcedExecutionSlice);
+    return allocation;
+}
+
 fn writeAccountFact(writer: *std.Io.Writer, fact: AccountFact) !void {
     try writer.writeInt(u128, fact.identity, .little);
     try writer.writeInt(u128, fact.exchange_account, .little);
@@ -986,7 +1290,9 @@ fn writeAccountFact(writer: *std.Io.Writer, fact: AccountFact) !void {
             if (execution.owner) |owner| try writeScalar(writer, ShardId, owner);
             try writer.writeInt(i64, execution.quantity, .little);
             try writer.writeInt(i64, execution.price_micros, .little);
+            try writer.writeInt(i64, execution.realized_pnl_micros, .little);
             try writer.writeInt(i64, execution.fee_micros, .little);
+            try writer.writeInt(i64, execution.penalty_micros, .little);
         },
     }
 }
@@ -1002,7 +1308,9 @@ fn readAccountFact(reader: *std.Io.Reader) !AccountFact {
             .owner = if (try readBool(reader)) try readScalar(reader, ShardId) else null,
             .quantity = try reader.takeInt(i64, .little),
             .price_micros = try reader.takeInt(i64, .little),
+            .realized_pnl_micros = try reader.takeInt(i64, .little),
             .fee_micros = try reader.takeInt(i64, .little),
+            .penalty_micros = try reader.takeInt(i64, .little),
         } },
         else => return error.InvalidCoordinationTail,
     };
@@ -1027,13 +1335,17 @@ fn encodeCoordinationEvent(destination: []u8, event: CoordinationEvent) ![]const
             try writer.writeInt(u64, tightening.valid_through_barrier, .little);
             for (tightening.requested_limits) |limit| try writer.writeInt(i64, limit, .little);
         },
-        .forced_execution_allocation => |allocation| try writePlainStruct(&writer, ForcedExecutionAllocation, allocation),
+        .forced_execution_allocation => |allocation| try writeForcedAllocation(&writer, allocation),
+        .forced_delivery_ack => |ack| {
+            try writer.writeInt(u128, ack.allocation_identity, .little);
+            try writer.writeByte(ack.slice_index);
+        },
     }
     return writer.buffered();
 }
 
 fn decodeCoordinationEvent(record: trading.journal.Record) !CoordinationEvent {
-    if (record.schema_version != 1 or record.flags != trading.journal.input_flag)
+    if (record.schema_version != 2 or record.flags != trading.journal.input_flag)
         return error.InvalidCoordinationTail;
     var reader: std.Io.Reader = .fixed(record.payload);
     const event: CoordinationEvent = switch (record.type_id) {
@@ -1054,7 +1366,8 @@ fn decodeCoordinationEvent(record: trading.journal.Record) !CoordinationEvent {
             for (&requested_limits) |*limit| limit.* = try reader.takeInt(i64, .little);
             break :blk .{ .tighten_leases = .{ .valid_through_barrier = valid_through_barrier, .requested_limits = requested_limits } };
         },
-        7 => .{ .forced_execution_allocation = try readPlainStruct(&reader, ForcedExecutionAllocation) },
+        7 => .{ .forced_execution_allocation = try readForcedAllocation(&reader) },
+        8 => .{ .forced_delivery_ack = .{ .allocation_identity = try reader.takeInt(u128, .little), .slice_index = try reader.takeByte() } },
         else => return error.InvalidCoordinationTail,
     };
     if (reader.seek != record.payload.len) return error.InvalidCoordinationTail;
@@ -1077,6 +1390,7 @@ pub const AccountRecovery = struct {
     coordinator: AccountCoordinator,
     shards: [max_shards]trading.TradingShard,
     shard_barriers: [max_shards]u64,
+    summary_refresh_mask: u8 = 0,
 
     /// Restores all five authoritative snapshots before any Venue reconciliation.
     pub fn begin(
@@ -1116,14 +1430,38 @@ pub const AccountRecovery = struct {
                 summary.value.shard_sequence,
                 summary.value.decision_domain,
             );
-            if (!std.meta.eql(derived, summary.value))
-                return error.AccountRecoveryBarrierMismatch;
+            if (!std.meta.eql(derived, summary.value)) {
+                if (!try forcedTailExplainsSummaryChange(&result.coordinator, @enumFromInt(index), shard_snapshots[index], shard_tails[index], summary.value))
+                    return error.AccountRecoveryBarrierMismatch;
+                result.summary_refresh_mask |= @as(u8, 1) << @intCast(index);
+            }
+        }
+        for (try result.coordinator.forcedDeliveries(true)) |delivery| {
+            for (result.coordinator.forced_allocations[0..result.coordinator.forced_allocation_count]) |record| {
+                if (record.allocation.identity != delivery.allocation_identity) continue;
+                if (record.delivered_mask & (@as(u8, 1) << @intCast(delivery.slice_index)) == 0) break;
+                if (!try shardHasAppliedForced(delivery, &result.shards[@intFromEnum(delivery.shard_id)]))
+                    return error.ForcedDeliveryAckWithoutShardCommit;
+                break;
+            }
         }
         return result;
     }
 
     /// Releases only the coordinator fence; each shard still requires Venue recovery and enable.
     pub fn completeCoordinatorRecovery(self: *AccountRecovery) !void {
+        for (0..max_shards) |index| {
+            if (self.summary_refresh_mask & (@as(u8, 1) << @intCast(index)) == 0) continue;
+            const summary = self.coordinator.summaries[index];
+            if (!summary.present) return error.AccountRecoveryBarrierMismatch;
+            const derived = try shardSummaryFromShard(
+                &self.shards[index],
+                @enumFromInt(index),
+                summary.value.shard_sequence,
+                summary.value.decision_domain,
+            );
+            if (!std.meta.eql(derived, summary.value)) return error.FreshShardSummaryRequired;
+        }
         try self.coordinator.completeRecovery();
         for (self.shards) |shard| if (shard.operational_state.mode != .recovering)
             return error.ShardRecoveryFenceLost;
@@ -1175,7 +1513,9 @@ fn digestOptionalAccountFact(hasher: *Sha256, fact: ?AccountFact) void {
             if (execution.owner) |owner| digestInt(hasher, u8, @intFromEnum(owner));
             digestInt(hasher, i64, execution.quantity);
             digestInt(hasher, i64, execution.price_micros);
+            digestInt(hasher, i64, execution.realized_pnl_micros);
             digestInt(hasher, i64, execution.fee_micros);
+            digestInt(hasher, i64, execution.penalty_micros);
         },
     }
 }
@@ -1206,7 +1546,9 @@ fn writeOptionalAccountFact(writer: *std.Io.Writer, fact: ?AccountFact) !void {
             if (execution.owner) |owner| try writer.writeByte(@intFromEnum(owner));
             try writer.writeInt(i64, execution.quantity, .little);
             try writer.writeInt(i64, execution.price_micros, .little);
+            try writer.writeInt(i64, execution.realized_pnl_micros, .little);
             try writer.writeInt(i64, execution.fee_micros, .little);
+            try writer.writeInt(i64, execution.penalty_micros, .little);
         },
     }
 }
@@ -1231,7 +1573,9 @@ fn readOptionalAccountFact(reader: *std.Io.Reader) !?AccountFact {
                 null,
             .quantity = try reader.takeInt(i64, .little),
             .price_micros = try reader.takeInt(i64, .little),
+            .realized_pnl_micros = try reader.takeInt(i64, .little),
             .fee_micros = try reader.takeInt(i64, .little),
+            .penalty_micros = try reader.takeInt(i64, .little),
         } },
         else => return error.InvalidCoordinatorSnapshot,
     };
@@ -1381,10 +1725,18 @@ test "margin reconciliation preserves netting benefit but latches unexplained di
     const resolved = try coordinator.resolveMarginGate(22);
     try std.testing.expect(resolved.open);
     try std.testing.expect(!resolved.latched);
+    _ = try coordinator.acceptAccountFact(.{ .identity = 30, .exchange_account = 900, .version = 1, .barrier = 1, .payload = .{ .forced_execution = .{ .owner = null, .quantity = -1, .price_micros = 100, .fee_micros = 0 } } });
+    const held = try coordinator.reconcileMargin(.{ .identity = 23, .barrier = 8, .venue_net_margin_micros = 250, .venue_swap_margin_micros = 250, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 });
+    try std.testing.expect(held.latched);
+    try std.testing.expectError(error.ForcedExecutionReconciliationBreak, coordinator.resolveMarginGate(23));
+    try std.testing.expectError(error.ForcedExecutionReconciliationBreak, coordinator.completeRecovery());
 }
 
 test "unowned economics stay in suspense until an immutable allocation" {
     var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    var summary = ShardSummary.fixture(.shard_0, 1, 100);
+    summary.swap_quantity = 1;
+    _ = try coordinator.publishSummary(1, summary);
     const deliveries = try coordinator.acceptAccountFact(.{
         .identity = 33,
         .exchange_account = 900,
@@ -1411,13 +1763,14 @@ test "unowned economics stay in suspense until an immutable allocation" {
     try std.testing.expect(recovered.suspense_forced_execution != null);
     try std.testing.expectEqual(@as(u128, 33), recovered.reconciliation_break_identity);
 
-    const allocation: ForcedExecutionAllocation = .{ .identity = 34, .forced_execution_identity = 33, .owner = .shard_0 };
+    var allocation: ForcedExecutionAllocation = .{ .identity = 34, .forced_execution_identity = 33, .count = 1 };
+    allocation.slices[0] = .{ .owner = .shard_0, .quantity = -1, .position_delta = -1, .fee_micros = 1 };
     const allocated = try coordinator.allocateForcedExecution(allocation);
-    try std.testing.expectEqual(ShardId.shard_0, allocated.shard_id);
+    try std.testing.expectEqual(ShardId.shard_0, allocated[0].shard_id);
     const recovered_allocation = try recovered.allocateForcedExecution(allocation);
-    try std.testing.expectEqual(ShardId.shard_0, recovered_allocation.shard_id);
+    try std.testing.expectEqual(ShardId.shard_0, recovered_allocation[0].shard_id);
     try std.testing.expectEqualSlices(u8, &coordinator.digest(), &recovered.digest());
-    try std.testing.expectEqual(ShardId.shard_0, (try recovered.allocateForcedExecution(allocation)).shard_id);
+    try std.testing.expectEqual(ShardId.shard_0, (try recovered.allocateForcedExecution(allocation))[0].shard_id);
 
     var shard: trading.TradingShard = .{};
     shard.operational_state = trading.operational.State.init(100);
@@ -1434,11 +1787,162 @@ test "unowned economics stay in suspense until an immutable allocation" {
         .version = 1,
         .instrument = 3,
     } } });
-    try applyAccountFactStable(allocated, .shard_0, &shard, &stable_journal);
+    try std.testing.expectEqual(@as(u128, 33), allocated[0].source_identity);
     const gate_delivery: GateDelivery = .{ .shard_id = .shard_0, .gate = .{ .identity = 44, .open = false, .latched = true } };
     try applyAccountGateStable(gate_delivery, .shard_0, &shard, &stable_journal);
     try std.testing.expect(!shard.operational_state.effectiveTradingAuthority());
     try std.testing.expect(shard.operational_state.latch_count > 0);
+}
+
+test "caller owner cannot directly route forced execution" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    const deliveries = try coordinator.acceptAccountFact(.{
+        .identity = 50,
+        .exchange_account = 900,
+        .version = 1,
+        .barrier = 1,
+        .payload = .{ .forced_execution = .{ .owner = .shard_0, .quantity = -1, .price_micros = 100, .fee_micros = 1 } },
+    });
+    try std.testing.expectEqual(@as(usize, 0), deliveries.len);
+    try std.testing.expectEqual(@as(u128, 50), coordinator.suspense_forced_execution.?.identity);
+    try std.testing.expect(coordinator.margin_gate.latched);
+    var forged: Delivery = .{ .shard_id = .shard_0, .fact = coordinator.suspense_forced_execution.?, .allocation_identity = 1, .source_identity = 50 };
+    var shard: trading.TradingShard = .{};
+    var journal = trading.journal.Journal.init();
+    try std.testing.expectError(error.ForcedAllocationRequired, applyAccountFactStable(forged, .shard_0, &shard, &journal));
+    forged.allocation_identity = 0;
+    try std.testing.expectError(error.UnallocatedForcedExecution, accountFactEvent(forged));
+}
+
+test "completed forced allocation survives the next source and snapshot" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    var summary = ShardSummary.fixture(.shard_0, 1, 100);
+    summary.swap_quantity = 1;
+    _ = try coordinator.publishSummary(1, summary);
+    _ = try coordinator.acceptAccountFact(.{ .identity = 80, .exchange_account = 900, .version = 1, .barrier = 1, .payload = .{ .forced_execution = .{ .owner = null, .quantity = -1, .price_micros = 100, .fee_micros = 0 } } });
+    var old: ForcedExecutionAllocation = .{ .identity = 81, .forced_execution_identity = 80, .count = 1 };
+    old.slices[0] = .{ .owner = .shard_0, .quantity = -1, .position_delta = -1 };
+    _ = try coordinator.allocateForcedExecution(old);
+    try coordinator.markForcedDelivered(81, 0);
+    _ = try coordinator.acceptAccountFact(.{ .identity = 82, .exchange_account = 900, .version = 2, .barrier = 2, .payload = .{ .forced_execution = .{ .owner = null, .quantity = -1, .price_micros = 100, .fee_micros = 0 } } });
+    try std.testing.expectEqual(@as(usize, 0), (try coordinator.allocateForcedExecution(old)).len);
+    var storage: [16384]u8 = undefined;
+    var restored = try AccountCoordinator.restore(try coordinator.snapshot(&storage));
+    try std.testing.expectEqual(@as(usize, 0), (try restored.allocateForcedExecution(old)).len);
+    try std.testing.expectEqualSlices(u8, &coordinator.digest(), &restored.digest());
+}
+
+test "multi-owner forced allocation survives newer account facts and delivery replay" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    var long = ShardSummary.fixture(.shard_0, 1, 100);
+    long.swap_quantity = 3;
+    var short = ShardSummary.fixture(.shard_1, 1, 100);
+    short.swap_quantity = -1;
+    _ = try coordinator.publishSummary(1, long);
+    _ = try coordinator.publishSummary(2, short);
+    const source: AccountFact = .{ .identity = 33, .exchange_account = 900, .version = 1, .barrier = 1, .payload = .{ .forced_execution = .{ .owner = .shard_0, .quantity = -2, .price_micros = 100, .realized_pnl_micros = 5, .fee_micros = 3, .penalty_micros = 2 } } };
+    try std.testing.expectEqual(@as(usize, 0), (try coordinator.acceptAccountFact(source)).len);
+    var snapshot_storage: [4096]u8 = undefined;
+    const snapshot_bytes = try coordinator.snapshot(&snapshot_storage);
+    var tail = CoordinationJournal.initAt(1);
+    var allocation: ForcedExecutionAllocation = .{ .identity = 34, .forced_execution_identity = 33, .count = 2 };
+    allocation.slices[0] = .{ .owner = .shard_0, .quantity = -3, .position_delta = -3, .realized_pnl_micros = 10, .fee_micros = 2, .penalty_micros = 1 };
+    allocation.slices[1] = .{ .owner = .shard_1, .quantity = 1, .position_delta = 1, .realized_pnl_micros = -5, .fee_micros = 1, .penalty_micros = 1 };
+    var over_fee = allocation;
+    over_fee.identity = 35;
+    over_fee.slices[1].fee_micros = 2;
+    try std.testing.expectError(error.ForcedExecutionAllocationNotConserved, coordinator.allocateForcedExecution(over_fee));
+    try std.testing.expectEqual(@as(usize, 2), (try coordinator.commitForcedAllocation(&tail, allocation)).len);
+    const newer: AccountFact = .{ .identity = 40, .exchange_account = 900, .version = 2, .barrier = 2, .payload = .{ .account_snapshot = .{ .cash_micros = 1_000, .swap_quantity = -2, .margin_micros = 0 } } };
+    try tail.append(.{ .account_fact = newer });
+    _ = try coordinator.acceptAccountFact(newer);
+    try std.testing.expectEqual(@as(u128, 33), (try coordinator.pendingForcedDeliveries())[0].source_identity);
+    try tail.append(.{ .forced_delivery_ack = .{ .allocation_identity = 34, .slice_index = 0 } });
+    try coordinator.markForcedDelivered(34, 0);
+    try std.testing.expectEqual(@as(usize, 1), (try coordinator.pendingForcedDeliveries()).len);
+    try tail.seal();
+    var recovered = try AccountCoordinator.restore(snapshot_bytes);
+    try replayCoordinationTail(&recovered, tail.bytes());
+    try std.testing.expectEqualSlices(u8, &coordinator.digest(), &recovered.digest());
+    const pending = try recovered.pendingForcedDeliveries();
+    try std.testing.expectEqual(@as(usize, 1), pending.len);
+    try std.testing.expectEqual(ShardId.shard_1, pending[0].shard_id);
+    try recovered.markForcedDelivered(34, 1);
+    try std.testing.expect(recovered.suspense_forced_execution == null);
+    try std.testing.expectEqual(@as(u128, 0), recovered.reconciliation_break_identity);
+}
+
+test "partial forced attribution retains exact suspense until remaining slices are delivered" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    var summary = ShardSummary.fixture(.shard_0, 1, 100);
+    summary.swap_quantity = 3;
+    _ = try coordinator.publishSummary(1, summary);
+    _ = try coordinator.acceptAccountFact(.{ .identity = 60, .exchange_account = 900, .version = 1, .barrier = 1, .payload = .{ .forced_execution = .{ .owner = null, .quantity = -3, .price_micros = 100, .realized_pnl_micros = 5, .fee_micros = 3, .penalty_micros = 2 } } });
+    var first: ForcedExecutionAllocation = .{ .identity = 61, .forced_execution_identity = 60, .count = 1 };
+    first.slices[0] = .{ .owner = .shard_0, .quantity = -1, .position_delta = -1, .realized_pnl_micros = 2, .fee_micros = 1, .penalty_micros = 1 };
+    _ = try coordinator.allocateForcedExecution(first);
+    const residual = (try coordinator.forcedSuspenseRemaining()).?;
+    try std.testing.expectEqual(@as(i64, -2), residual.quantity);
+    try std.testing.expectEqual(@as(i64, -2), residual.position_delta);
+    try std.testing.expectEqual(@as(i64, 3), residual.realized_pnl_micros);
+    try std.testing.expectEqual(@as(i64, 2), residual.fee_micros);
+    try std.testing.expectEqual(@as(i64, 1), residual.penalty_micros);
+    var second: ForcedExecutionAllocation = .{ .identity = 62, .forced_execution_identity = 60, .count = 1 };
+    second.slices[0] = .{ .owner = .shard_0, .quantity = -2, .position_delta = -2, .realized_pnl_micros = 3, .fee_micros = 2, .penalty_micros = 1 };
+    _ = try coordinator.allocateForcedExecution(second);
+    try std.testing.expectEqual(@as(i64, 0), (try coordinator.forcedSuspenseRemaining()).?.quantity);
+    try std.testing.expect(coordinator.suspense_forced_execution != null);
+    try coordinator.markForcedDelivered(61, 0);
+    try std.testing.expect(coordinator.suspense_forced_execution != null);
+    try coordinator.markForcedDelivered(62, 0);
+    try std.testing.expect((try coordinator.forcedSuspenseRemaining()) == null);
+}
+
+test "opposing positions can be attributed in separate forced allocations" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    var long = ShardSummary.fixture(.shard_0, 1, 100);
+    long.swap_quantity = 3;
+    var short = ShardSummary.fixture(.shard_1, 1, 101);
+    short.swap_quantity = -1;
+    _ = try coordinator.publishSummary(1, long);
+    _ = try coordinator.publishSummary(2, short);
+    _ = try coordinator.acceptAccountFact(.{ .identity = 70, .exchange_account = 900, .version = 1, .barrier = 1, .payload = .{ .forced_execution = .{ .owner = null, .quantity = -2, .price_micros = 100, .realized_pnl_micros = 0, .fee_micros = 0, .penalty_micros = 0 } } });
+    var first: ForcedExecutionAllocation = .{ .identity = 71, .forced_execution_identity = 70, .count = 1 };
+    first.slices[0] = .{ .owner = .shard_1, .quantity = 1, .position_delta = 1, .realized_pnl_micros = -10, .fee_micros = 0, .penalty_micros = 0 };
+    _ = try coordinator.allocateForcedExecution(first);
+    try std.testing.expectEqual(@as(i64, -3), (try coordinator.forcedSuspenseRemaining()).?.quantity);
+    var second: ForcedExecutionAllocation = .{ .identity = 72, .forced_execution_identity = 70, .count = 1 };
+    second.slices[0] = .{ .owner = .shard_0, .quantity = -3, .position_delta = -3, .realized_pnl_micros = 10, .fee_micros = 0, .penalty_micros = 0 };
+    _ = try coordinator.allocateForcedExecution(second);
+    try coordinator.markForcedDelivered(71, 0);
+    try coordinator.markForcedDelivered(72, 0);
+    try std.testing.expect((try coordinator.forcedSuspenseRemaining()) == null);
+}
+
+test "forced delivery retry after shard commit does not charge penalty twice" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    var summary = ShardSummary.fixture(.shard_0, 1, 100);
+    summary.swap_quantity = 1;
+    _ = try coordinator.publishSummary(1, summary);
+    _ = try coordinator.acceptAccountFact(.{ .identity = 50, .exchange_account = 900, .version = 1, .barrier = 1, .payload = .{ .forced_execution = .{ .owner = null, .quantity = -1, .price_micros = 100, .fee_micros = 0, .penalty_micros = 2 } } });
+    var allocation: ForcedExecutionAllocation = .{ .identity = 51, .forced_execution_identity = 50, .count = 1 };
+    allocation.slices[0] = .{ .owner = .shard_0, .quantity = -1, .position_delta = -1, .penalty_micros = 2 };
+    var coordination_journal = CoordinationJournal.initAt(1);
+    const delivery = (try coordinator.commitForcedAllocation(&coordination_journal, allocation))[0];
+    var shard: trading.TradingShard = .{};
+    var stable_journal = trading.journal.Journal.init();
+    _ = try applyCoreStable(&shard, &stable_journal, .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 3, .quantity_denominator = 1, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = 1 } } });
+    _ = try applyCoreStable(&shard, &stable_journal, .{ .identity = 2, .payload = .{ .margin_rules_activated = .{ .version = 1, .instrument = 3 } } });
+    try shard.economic_projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = .{ .instrument = 3, .rules_version = 1, .lots = 1 }, .price = .{ .instrument = 3, .rules_version = 1, .ticks = 100 }, .quantity_denominator = 1, .product = .isolated_linear_usdt } });
+    try std.testing.expectError(error.ForcedDeliveryNotCommitted, coordinator.ackForcedDeliveryFromShard(&coordination_journal, delivery, &shard));
+    _ = try applyCoreStable(&shard, &stable_journal, try accountFactEvent(delivery));
+    const after_first = shard.economic_projection.digest();
+    try std.testing.expectEqual(@as(i64, 2), shard.economic_projection.portfolio.penalty_micros);
+    try std.testing.expectEqual(@as(usize, 1), (try coordinator.pendingForcedDeliveries()).len);
+    try applyForcedDeliveryStable(&coordinator, &coordination_journal, delivery, .shard_0, &shard, &stable_journal);
+    try std.testing.expectEqualSlices(u8, &after_first, &shard.economic_projection.digest());
+    try std.testing.expectEqual(@as(usize, 0), (try coordinator.pendingForcedDeliveries()).len);
+    try std.testing.expect(coordinator.suspense_forced_execution == null);
 }
 
 test "shared gateway routes itemized outcomes to the unique owning shard" {
@@ -1585,6 +2089,80 @@ test "account recovery restores four matching shard tails under fresh evidence f
     expected.recovery_only = true;
     try std.testing.expectEqualSlices(u8, &expected.digest(), &recovered.coordinator.digest());
     for (recovered.shards) |shard| try std.testing.expectEqual(trading.operational.OperationalMode.recovering, shard.operational_state.mode);
+    try std.testing.expectError(error.FreshMarginObservationRequired, recovered.completeCoordinatorRecovery());
+}
+
+test "account recovery retains a forced shard commit awaiting coordinator ack" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    var snapshot_storage: [max_shards][64 * 1024]u8 = undefined;
+    var shard_snapshots: [max_shards][]const u8 = undefined;
+    var shard_tails: [max_shards][]const u8 = undefined;
+    var tails: [max_shards]trading.journal.Journal = undefined;
+    for (0..max_shards) |index| {
+        var shard: trading.TradingShard = .{};
+        var journal = trading.journal.Journal.init();
+        _ = try applyCoreStable(&shard, &journal, .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 1, .quantity_denominator = 1, .reservation_model = .leveraged } } });
+        _ = try applyCoreStable(&shard, &journal, .{ .identity = 2, .payload = .{ .margin_rules_activated = .{ .version = 1 } } });
+        _ = try applyCoreStable(&shard, &journal, .{ .identity = 3, .payload = .{ .account_configuration = .{ .exchange_account_identity = 900 } } });
+        _ = try applyCoreStable(&shard, &journal, .{ .identity = 4, .payload = .{ .exchange_balance = .{ .cash_micros = 10_000 } } });
+        _ = try applyCoreStable(&shard, &journal, .{ .identity = 5, .payload = .exchange_positions });
+        _ = try applyCoreStable(&shard, &journal, .{ .identity = 6, .payload = .{ .opening_balance = .{ .cash_micros = 10_000 } } });
+        _ = try applyCoreStable(&shard, &journal, .{ .identity = 7, .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = index + 11 } } });
+        if (index == 0) try shard.economic_projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 1 }, .price = .{ .instrument = 1, .rules_version = 1, .ticks = 100 }, .quantity_denominator = 1, .product = .isolated_linear_usdt } });
+        try journal.seal();
+        shard_snapshots[index] = try shard.snapshot(&journal, 7, &snapshot_storage[index]);
+        _ = try coordinator.publishSummary(index + 1, try shardSummaryFromShard(&shard, @enumFromInt(index), 1, @intCast(index + 1)));
+        tails[index] = trading.journal.Journal.initAt(8);
+    }
+    var coordinator_storage: [16384]u8 = undefined;
+    const coordinator_snapshot = try coordinator.snapshot(&coordinator_storage);
+    var coordinator_tail = CoordinationJournal.initAt(1);
+    const source: AccountFact = .{ .identity = 90, .exchange_account = 900, .version = 1, .barrier = 1, .payload = .{ .forced_execution = .{ .owner = null, .quantity = -1, .price_micros = 100, .fee_micros = 0 } } };
+    try coordinator_tail.append(.{ .account_fact = source });
+    _ = try coordinator.acceptAccountFact(source);
+    var allocation: ForcedExecutionAllocation = .{ .identity = 91, .forced_execution_identity = 90, .count = 1 };
+    allocation.slices[0] = .{ .owner = .shard_0, .quantity = -1, .position_delta = -1 };
+    const delivery = (try coordinator.commitForcedAllocation(&coordinator_tail, allocation))[0];
+    var committed_shard = (try trading.TradingShard.restoreSnapshot(shard_snapshots[0])).shard;
+    _ = try applyCoreStable(&committed_shard, &tails[0], try accountFactEvent(delivery));
+    for (0..max_shards) |index| {
+        try tails[index].seal();
+        shard_tails[index] = tails[index].bytes();
+    }
+    try coordinator_tail.seal();
+    var recovered = try AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
+    try std.testing.expectEqual(@as(u8, 1), recovered.summary_refresh_mask);
+    try std.testing.expectEqual(@as(usize, 1), (try recovered.coordinator.pendingForcedDeliveries()).len);
+    var drift_tail = trading.journal.Journal.initAt(8);
+    var drift_shard = (try trading.TradingShard.restoreSnapshot(shard_snapshots[0])).shard;
+    _ = try applyCoreStable(&drift_shard, &drift_tail, try accountFactEvent(delivery));
+    _ = try applyCoreStable(&drift_shard, &drift_tail, .{ .identity = 92, .payload = .{ .funding_settlement = .{ .settlement_id = 92, .amount_micros = 1 } } });
+    try drift_tail.seal();
+    var drift_tails = shard_tails;
+    drift_tails[0] = drift_tail.bytes();
+    try std.testing.expectError(error.AccountRecoveryBarrierMismatch, AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, drift_tails));
+    var ack_tail = CoordinationJournal.initAt(1);
+    try ack_tail.append(.{ .account_fact = source });
+    try ack_tail.append(.{ .forced_execution_allocation = allocation });
+    try ack_tail.append(.{ .forced_delivery_ack = .{ .allocation_identity = 91, .slice_index = 0 } });
+    try ack_tail.seal();
+    const after_ack = try AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, ack_tail.bytes(), shard_snapshots, shard_tails);
+    try std.testing.expectEqual(@as(u8, 1), after_ack.summary_refresh_mask);
+    try std.testing.expect(after_ack.coordinator.suspense_forced_execution == null);
+    var empty_tails: [max_shards][]const u8 = undefined;
+    var empty_journals: [max_shards]trading.journal.Journal = undefined;
+    for (0..max_shards) |index| {
+        empty_journals[index] = trading.journal.Journal.initAt(8);
+        try empty_journals[index].seal();
+        empty_tails[index] = empty_journals[index].bytes();
+    }
+    try std.testing.expectError(error.ForcedDeliveryAckWithoutShardCommit, AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, ack_tail.bytes(), shard_snapshots, empty_tails));
+    var recovery_ack_journal = CoordinationJournal.initAt(3);
+    try recovered.coordinator.ackForcedDeliveryFromShard(&recovery_ack_journal, delivery, &recovered.shards[0]);
+    try std.testing.expectEqual(@as(u64, 1), recovery_ack_journal.stable.records);
+    try std.testing.expectError(error.FreshShardSummaryRequired, recovered.completeCoordinatorRecovery());
+    const refreshed = try shardSummaryFromShard(&recovered.shards[0], .shard_0, 2, 1);
+    _ = try recovered.coordinator.publishSummary(10, refreshed);
     try std.testing.expectError(error.FreshMarginObservationRequired, recovered.completeCoordinatorRecovery());
 }
 
