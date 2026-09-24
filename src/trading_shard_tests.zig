@@ -8,6 +8,7 @@ const oms_module = engine.oms;
 const operational = engine.operational;
 const simulated_venue = @import("simulated_venue.zig");
 const host_gateway = @import("strategy_host_gateway.zig");
+const host_lifecycle = @import("strategy_host_lifecycle.zig");
 const production_contract = @import("production_contract.zig");
 
 const TradingShard = engine.TradingShard;
@@ -110,6 +111,7 @@ fn applyGenesisReplay(replay: *ReplayTradingShard) !void {
         .strategy_identity = 1,
         .config_version = 1,
         .activation_identity = 1,
+        .session = .{ .fencing = 1, .shard = 0, .generation = 1 },
         .activation_barrier = 0,
         .state_digest = digest,
     } } }));
@@ -284,6 +286,227 @@ test "native and Python intents cross the same authority and risk seam" {
     })));
 }
 
+test "host fault revokes the old activation before a replacement can trade" {
+    var run = try startScenario();
+    const config: host_gateway.Config = .{
+        .schema_registry = 1,
+        .decision_domain = 1,
+        .session = .{ .fencing = 1, .shard = 0, .generation = 1 },
+        .authorization = .{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 },
+    };
+    const subscriptions = [_]host_gateway.Subscription{host_gateway.Subscription.of(1, &.{.mark_price})};
+    var gateway = try host_gateway.Gateway.init(config, &subscriptions);
+    const old_proof = try run.shard.appliedHostActivation(&run.decision_journal);
+    try std.testing.expectError(error.ActivationBarrierNotApplied, gateway.activate(&run.shard, &run.decision_journal));
+    try gateway.recordPublished(1, old_proof.fact_sequence, 100);
+    try gateway.activate(&run.shard, &run.decision_journal);
+    try std.testing.expect(gateway.trading_enabled);
+    const premature_intent = atGroup(12, .{ .identity = 79, .payload = .{ .external_order_intent = .{
+        .strategy_identity = 1,
+        .intent_sequence = 1,
+        .strategy_cursor = old_proof.fact_sequence,
+        .config_version = 1,
+        .activation_identity = 1,
+        .portfolio_identity = 1,
+        .exchange_account_identity = 2,
+        .instrument_identity = swap_instrument,
+        .side = .buy,
+        .order_type = .limit,
+        .time_in_force = .good_til_canceled,
+        .portfolio_reduce_only = false,
+        .quantity = 1,
+        .limit_price_micros = order_limit_price,
+    } } });
+    try std.testing.expectError(error.HostNotActivated, run.shard.apply(premature_intent));
+    var premature_frame_storage: [256]u8 = undefined;
+    const premature_frame = try host_gateway.encodeOutputFrame(&premature_frame_storage, config, 1, old_proof.fact_sequence, 1, 100, order_limit_price);
+    try std.testing.expectEqual(host_gateway.RejectReason.invalid_cursor, gateway.ingest(premature_frame, 101).rejected.reason);
+    const old_identity = run.shard.host_activation_identity;
+    const old_cursor: u64 = @intCast(run.shard.trace.len + 1);
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(12, .{ .identity = 80, .payload = .{ .host_activation_revoked = .{
+        .strategy_identity = 1,
+        .activation_identity = old_identity,
+        .reason = .fault,
+    } } }));
+    gateway.beginRecovery();
+    try std.testing.expectError(error.HostNotActivated, gateway.activate(&run.shard, &run.decision_journal));
+    try std.testing.expectError(error.HostNotActivated, run.shard.appliedHostActivation(&run.decision_journal));
+    try std.testing.expectEqual(@as(u128, 0), run.shard.host_activation_identity);
+    try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
+    try std.testing.expectError(error.InvalidHostActivation, run.shard.apply(atGroup(13, .{ .identity = 81, .payload = .{ .host_activated = .{
+        .strategy_identity = 1,
+        .config_version = 1,
+        .activation_identity = 2,
+        .session = .{ .fencing = 0, .shard = 0, .generation = 0 },
+        .activation_barrier = 0,
+        .state_digest = run.shard.canonicalStateDigest(),
+    } } })));
+    try std.testing.expectError(error.HostNotActivated, run.shard.apply(atGroup(13, .{ .identity = 81, .payload = .{ .external_order_intent = .{
+        .strategy_identity = 1,
+        .intent_sequence = 1,
+        .strategy_cursor = old_cursor + 1,
+        .config_version = 1,
+        .activation_identity = old_identity,
+        .portfolio_identity = 1,
+        .exchange_account_identity = 2,
+        .instrument_identity = swap_instrument,
+        .side = .buy,
+        .order_type = .limit,
+        .time_in_force = .good_til_canceled,
+        .portfolio_reduce_only = false,
+        .quantity = 1,
+        .limit_price_micros = order_limit_price,
+    } } })));
+    const digest = run.shard.canonicalStateDigest();
+    try std.testing.expectError(error.StaleHostActivation, run.shard.apply(atGroup(14, .{ .identity = 82, .payload = .{ .host_activated = .{
+        .strategy_identity = 1,
+        .config_version = 1,
+        .activation_identity = old_identity,
+        .session = config.session,
+        .activation_barrier = 0,
+        .state_digest = digest,
+    } } })));
+    const new_barrier: u64 = @intCast(run.shard.trace.len);
+    var next_config = config;
+    next_config.session.generation += 1;
+    next_config.authorization.activation_identity = 2;
+    next_config.authorization.activation_barrier = new_barrier;
+    try gateway.beginSession(next_config, &run.shard, &run.decision_journal);
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{ .identity = 83, .payload = .{ .host_activated = .{
+        .strategy_identity = 1,
+        .config_version = 1,
+        .activation_identity = 2,
+        .session = next_config.session,
+        .activation_barrier = new_barrier,
+        .state_digest = digest,
+    } } }));
+    try std.testing.expectEqual(@as(u128, 2), run.shard.host_activation_identity);
+    const new_proof = try run.shard.appliedHostActivation(&run.decision_journal);
+    try std.testing.expectError(error.ActivationBarrierNotApplied, gateway.activate(&run.shard, &run.decision_journal));
+    try gateway.recordPublished(1, new_proof.fact_sequence, 101);
+    try gateway.activate(&run.shard, &run.decision_journal);
+    try std.testing.expect(gateway.trading_enabled);
+    var frame_storage: [256]u8 = undefined;
+    const old_frame = try host_gateway.encodeOutputFrame(&frame_storage, config, 1, old_proof.fact_sequence, 1, 100, order_limit_price);
+    try std.testing.expectEqual(host_gateway.RejectReason.old_session, gateway.ingest(old_frame, 102).rejected.reason);
+    try applyHealthyPrelude(&run);
+    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(16, .{ .identity = 84, .payload = .{ .external_order_intent = .{
+        .strategy_identity = 1,
+        .intent_sequence = 1,
+        .strategy_cursor = @intCast(run.shard.trace.len + 1),
+        .config_version = 1,
+        .activation_identity = 2,
+        .portfolio_identity = 1,
+        .exchange_account_identity = 2,
+        .instrument_identity = swap_instrument,
+        .side = .buy,
+        .order_type = .limit,
+        .time_in_force = .good_til_canceled,
+        .portfolio_reduce_only = false,
+        .quantity = happy_order_quantity,
+        .limit_price_micros = order_limit_price,
+    } } }))) != null);
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(17, .{ .identity = 85, .payload = .{ .control_command = .{
+        .command_identity = 85,
+        .content_hash = 85,
+        .target_identity = 1,
+        .expected_version = 3,
+        .expires_at = std.math.maxInt(u64),
+        .kind = .trading_pause,
+    } } }));
+    const paused_frame = try host_gateway.encodeOutputFrame(&frame_storage, next_config, 1, new_proof.fact_sequence, 2, 100, order_limit_price);
+    try std.testing.expectEqual(host_gateway.RejectReason.unauthorized, gateway.ingest(paused_frame, 102).rejected.reason);
+    try std.testing.expect(!gateway.trading_enabled);
+    try run.decision_journal.seal();
+    _ = try assertReplayEquivalent(run);
+}
+
+test "new HostSession revokes the old direct-trade identity" {
+    var run = try startScenario();
+    const config: host_gateway.Config = .{
+        .schema_registry = 1,
+        .decision_domain = 1,
+        .session = .{ .fencing = 1, .shard = 0, .generation = 1 },
+        .authorization = .{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 },
+    };
+    const subscriptions = [_]host_gateway.Subscription{host_gateway.Subscription.of(1, &.{.mark_price})};
+    var gateway = try host_gateway.Gateway.init(config, &subscriptions);
+    try gateway.recordPublished(1, @intCast(run.shard.trace.len + 1), 100);
+    try gateway.activate(&run.shard, &run.decision_journal);
+    var next = config;
+    next.session.generation += 1;
+    next.authorization.activation_identity = 2;
+    gateway.beginRecovery();
+    try gateway.beginSession(next, &run.shard, &run.decision_journal);
+    try std.testing.expectEqual(@as(u128, 0), run.shard.host_activation_identity);
+    try std.testing.expectError(error.HostNotActivated, run.shard.apply(atGroup(12, .{ .identity = 90, .payload = .{ .timer = fixture.timer(1) } })));
+    try run.decision_journal.seal();
+    _ = try assertReplayEquivalent(run);
+}
+
+test "fresh Gateway revokes a replayed old Host activation before restart" {
+    var original = try startScenario();
+    try original.decision_journal.seal();
+    var snapshot_storage: [64 * 1024]u8 = undefined;
+    const snapshot = try original.shard.snapshot(&original.decision_journal, original.decision_journal.last_sequence, &snapshot_storage);
+    const restored = try TradingShard.restoreSnapshot(snapshot);
+    var recovered = restored.shard;
+    var tail = engine.journal.Journal.initAt(restored.barrier + 1);
+    const stale_config: host_gateway.Config = .{
+        .schema_registry = 1,
+        .decision_domain = 1,
+        .session = .{ .fencing = 1, .shard = 0, .generation = 2 },
+        .authorization = .{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 },
+    };
+    const subscriptions = [_]host_gateway.Subscription{host_gateway.Subscription.of(1, &.{.mark_price})};
+    var stale_gateway = try host_gateway.Gateway.init(stale_config, &subscriptions);
+    try stale_gateway.recordPublished(1, @intCast(recovered.trace.len + 1), 100);
+    try std.testing.expectError(error.InvalidAuthorization, stale_gateway.activate(&recovered, &tail));
+    const config: host_gateway.Config = .{
+        .schema_registry = 1,
+        .decision_domain = 1,
+        .session = .{ .fencing = 1, .shard = 0, .generation = 1 },
+        .authorization = .{ .strategy_identity = 1, .config_version = 1, .activation_identity = 999, .activation_barrier = 0 },
+    };
+    var fresh_gateway = try host_gateway.Gateway.init(config, &subscriptions);
+    var next = config;
+    next.session.generation += 1;
+    next.authorization.activation_identity = 2;
+    try fresh_gateway.beginSession(next, &recovered, &tail);
+    try std.testing.expectEqual(@as(u128, 0), recovered.host_activation_identity);
+    try std.testing.expectError(error.HostNotActivated, recovered.apply(atGroup(12, .{ .identity = 91, .payload = .{ .timer = fixture.timer(1) } })));
+    try tail.seal();
+    const replayed = try TradingShard.restore(snapshot, tail.bytes());
+    try std.testing.expectEqualSlices(u8, &recovered.canonicalStateDigest(), &replayed.shard.canonicalStateDigest());
+}
+
+test "active Host exit and timeout journal revocation blocks direct trade" {
+    inline for (.{ false, true }) |timeout| {
+        var run = try startScenario();
+        const config: host_gateway.Config = .{
+            .schema_registry = 1,
+            .decision_domain = 1,
+            .session = .{ .fencing = 1, .shard = 0, .generation = 1 },
+            .authorization = .{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 },
+        };
+        const subscriptions = [_]host_gateway.Subscription{host_gateway.Subscription.of(1, &.{.mark_price})};
+        var gateway = try host_gateway.Gateway.init(config, &subscriptions);
+        try gateway.recordPublished(1, @intCast(run.shard.trace.len + 1), 100);
+        try gateway.activate(&run.shard, &run.decision_journal);
+        var supervisor = try host_lifecycle.HostSupervisor.init(host_lifecycle.developmentPlan(0, 1, 0x0003_0900), 0);
+        supervisor.state = .active;
+        if (timeout) {
+            try std.testing.expectEqual(host_lifecycle.Result.timed_out, supervisor.poll(supervisor.plan.hang_timeout_ns + 1));
+        } else {
+            supervisor.processExited(false);
+        }
+        try std.testing.expect(try host_lifecycle.revokeHostAuthority(&supervisor, &gateway, &run.shard, &run.decision_journal, 92, .fault));
+        try std.testing.expectError(error.HostNotActivated, run.shard.apply(atGroup(12, .{ .identity = 93, .payload = .{ .timer = fixture.timer(1) } })));
+        try run.decision_journal.seal();
+        _ = try assertReplayEquivalent(run);
+    }
+}
+
 test "control commands authorize pause cancel and replay lifecycle deterministically" {
     var run = try startScenario();
     try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
@@ -316,7 +539,8 @@ test "control commands authorize pause cancel and replay lifecycle deterministic
         .kind = .trading_pause,
     } } }));
     try std.testing.expectEqual(operational.OperationalMode.draining, run.shard.operational_state.mode);
-    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(13, .{ .identity = 1, .payload = .{ .timer = fixture.timer(1) } }))) == null);
+    try std.testing.expectEqual(@as(u128, 0), run.shard.host_activation_identity);
+    try std.testing.expectError(error.HostNotActivated, applyLive(&run.shard, &run.decision_journal, atGroup(13, .{ .identity = 1, .payload = .{ .timer = fixture.timer(1) } })));
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(14, .{ .identity = 3, .payload = .{ .lifecycle_progress = .{
         .operation_identity = 3,
         .target_identity = 1,

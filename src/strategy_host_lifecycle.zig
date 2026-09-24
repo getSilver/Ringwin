@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const ipc = @import("strategy_host_ipc.zig");
+const trading = @import("trading_shard.zig");
+const gateway_module = @import("strategy_host_gateway.zig");
 
 const Crc32c = std.hash.crc.Crc32Iscsi;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -403,6 +405,34 @@ pub const HostSupervisor = struct {
         return .accepted;
     }
 };
+
+/// The owner calls this after a Host-wide failure or a matching strategy fault.
+/// Local output closes first; a failed journal commit leaves recovery closed.
+pub fn revokeHostAuthority(
+    supervisor: *const HostSupervisor,
+    gateway: *gateway_module.Gateway,
+    shard: *trading.TradingShard,
+    stable_journal: *trading.journal.Journal,
+    fact_identity: u64,
+    reason: @import("trading_shard_event.zig").HostRevocationReason,
+) !bool {
+    if (reason == .fault and supervisor.state != .failed and
+        (supervisor.last_fault == null or supervisor.last_fault.?.strategy_identity != shard.strategy_identity))
+        return false;
+    gateway.beginRecovery();
+    if (shard.host_activation_identity == 0) return false;
+    if (shard.strategy_identity != gateway.config.authorization.strategy_identity)
+        return error.HostAuthorityMismatch;
+    _ = try trading.applyStable(shard, stable_journal, .{ .core = .{
+        .identity = fact_identity,
+        .payload = .{ .host_activation_revoked = .{
+            .strategy_identity = shard.strategy_identity,
+            .activation_identity = shard.host_activation_identity,
+            .reason = reason,
+        } },
+    } });
+    return true;
+}
 
 const DecodedBridgeFrame = struct {
     message_type: FrameType,

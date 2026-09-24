@@ -23,7 +23,7 @@ const place_fee_micros: i64 = 400_000;
 const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
 pub const acceptance_schema_version: u16 = production_contract.acceptance_schema_version;
-const expected_shared_summary_v8 = "82304a189514fc068ba1e3d5abcdc60cfb864a00da74b83a2dbf4f5f6fc6ac9f";
+const expected_shared_summary_v9 = "f31b03ad1de45226cf894a6eb5d57631fe51f1fb96b7b6410b9ef10ba065037f";
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
     return trading.applyStable(shard, stable_journal, .{ .core = input });
@@ -288,6 +288,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
             .strategy_identity = index + 1,
             .config_version = 1,
             .activation_identity = index + 1,
+            .session = .{ .fencing = 1, .shard = @intCast(index), .generation = 1 },
             .activation_barrier = 0,
             .state_digest = host_digest,
         } } });
@@ -725,8 +726,8 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     try std.testing.expectEqualSlices(u8, &shared_a, &shared_b);
     try std.testing.expectEqualSlices(u8, &shared_b, &shared_c);
     const shared_hex = std.fmt.bytesToHex(shared_a, .lower);
-    if (!std.mem.eql(u8, expected_shared_summary_v8, &shared_hex)) {
-        std.debug.print("four-shard evidence mismatch: expected {s}, actual {s}\n", .{ expected_shared_summary_v8, &shared_hex });
+    if (!std.mem.eql(u8, expected_shared_summary_v9, &shared_hex)) {
+        std.debug.print("four-shard evidence mismatch: expected {s}, actual {s}\n", .{ expected_shared_summary_v9, &shared_hex });
         return error.FourShardEvidenceDrift;
     }
     try std.testing.expectEqual(@as(u8, max_shards), world.ownership.count);

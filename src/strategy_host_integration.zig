@@ -44,7 +44,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
     try expectLifecycle(.accepted, try host.receive(init.io, 1));
     try expectLifecycle(.accepted, try host.receive(init.io, 2));
 
-    var ingress = try fixture.TradingShardHostIngress.initHealthyFixtureFor(authorization);
+    var ingress = try fixture.TradingShardHostIngress.initHealthyFixtureForSession(authorization, plan.session);
     const activation_digest = ingress.run.shard.canonicalStateDigest();
     try host.activate(init.io, .{
         .strategy_identity = authorization.strategy_identity,
@@ -58,23 +58,25 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
         gateway_module.Subscription.of(0x1002, &.{.l2_delta}),
     };
     var gateway = try gateway_module.Gateway.init(config, &subscriptions);
+    const first_sequence: u64 = @intCast(ingress.run.shard.trace.len + 1);
+    const last_sequence = first_sequence + 3;
     const mark_payload = [_]u8{1};
     const fill_payload = [_]u8{2};
     const account_payload = [_]u8{3};
     const l2_payload = [_]u8{4};
     const published_ns: i64 = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
     const events = [_]gateway_module.EventEnvelope{
-        event(.mark_price, 11, published_ns, &mark_payload),
-        event(.fill, 12, published_ns, &fill_payload),
-        event(.account, 13, published_ns, &account_payload),
-        event(.l2_delta, 14, published_ns, &l2_payload),
+        event(.mark_price, first_sequence, published_ns, &mark_payload),
+        event(.fill, first_sequence + 1, published_ns, &fill_payload),
+        event(.account, first_sequence + 2, published_ns, &account_payload),
+        event(.l2_delta, last_sequence, published_ns, &l2_payload),
     };
     var batch_storage: [1024]u8 = undefined;
-    const batch = try gateway.encodeBatch(&batch_storage, 1, 11, 14, published_ns, &events);
+    const batch = try gateway.encodeBatch(&batch_storage, 1, first_sequence, last_sequence, published_ns, &events);
     try std.testing.expectEqual(@as(u32, 2), try gateway_module.eventCount(batch));
     try host.sendInput(init.io, batch, published_ns);
-    try gateway.recordPublished(1, 14, published_ns);
-    try gateway.activate(authorization);
+    try gateway.recordPublished(1, last_sequence, published_ns);
+    try gateway.activate(&ingress.run.shard, &ingress.run.decision_journal);
 
     var output_storage: [512]u8 = undefined;
     const frame = try host.receiveOutput(init.io, @intCast(std.Io.Clock.awake.now(init.io).nanoseconds), &output_storage);
@@ -92,7 +94,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
         &variant_storage,
         config,
         1,
-        14,
+        last_sequence,
         1,
         101,
         50_100_000_000,
@@ -105,7 +107,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
         &variant_storage,
         old_config,
         1,
-        14,
+        last_sequence,
         2,
         100,
         50_100_000_000,
@@ -116,7 +118,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
         &variant_storage,
         config,
         1,
-        13,
+        last_sequence - 1,
         3,
         100,
         50_100_000_000,
@@ -129,7 +131,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
         &variant_storage,
         unknown_schema,
         1,
-        14,
+        last_sequence,
         4,
         100,
         50_100_000_000,
@@ -142,7 +144,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
         &variant_storage,
         unauthorized,
         1,
-        14,
+        last_sequence,
         5,
         100,
         50_100_000_000,
@@ -153,14 +155,14 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
         &variant_storage,
         config,
         1,
-        14,
+        last_sequence,
         6,
         100,
         50_100_000_000,
     );
     try applyRejected(&ingress, gateway.ingest(variant, published_ns + 100_000_001), .stale);
 
-    const summary = ingress.summary();
+    const summary = try ingress.summary();
     try std.testing.expectEqual(@as(usize, 1), summary.order_intents);
     try std.testing.expectEqual(@as(usize, 1), summary.risk_accepts);
     try std.testing.expectEqual(@as(usize, 1), summary.order_commands);

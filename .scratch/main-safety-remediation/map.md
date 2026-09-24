@@ -55,10 +55,11 @@ OrderIntent、Order、RiskReservation、账户危险事实、StrategyHost 授权
 
 ## Frontier
 
-- 本轮可认领：[08 Host 激活](issues/08-enforce-host-activation-and-ipc-isolation.md)。一次只认领并完成一张；其余受阻票按 Route 推进。01–05 已离线收口；10 因依赖 09 重开而等待重新回归。12 最后重建验收。Linux/Venue/生产资金资格仍为 not_run。
+- 本轮可认领：[06 OMS DispatchProof](issues/06-expand-complete-oms-dispatch-proof.md)。一次只认领并完成一张；其余受阻票按 Route 推进。01–05、08 已离线收口；10 因依赖 09 重开而等待重新回归。12 最后重建验收。Linux/Venue/生产资金资格仍为 not_run。
 
 ## Decisions so far
 
+- 2026-09-24：08 按 R08-A 收口。HostActivated 绑定非零 session 与可回放激活事实；故障、控制暂停与新会话撤权旧身份，Gateway 从分片 journal 事实开权并守住 barrier、cursor 和批次连续性。Debug/ReleaseSafe 各 288/288，StrategyHost 14 步离线验证通过；journal/state schema 18/21。Linux 目标与 Venue/生产资格保持 `not_run`。
 - 2026-09-24：05 按 R05-A/B 收口。强平来源统一进 Suspense，权威多切片守恒数量、PnL、费用、罚金与仓位；源与已完成分配可重放，分片提交/确认崩溃窗口须刷新摘要且拒绝夹带漂移。Debug/ReleaseSafe 各 283/283，协调器 snapshot/tail schema 5/2，分片 journal/state schema 17/20；仅离线证据，目标 DurableStore 同步与 Linux/Venue 资格待验。
 - 2026-09-24：04 按 R04-A 收口 PendingAmend 的旧/新剩余占用、Unknown 阻断、拒绝回退和迟到对账。OMS/TradingShard 公共入口与事件重放回归通过；Debug 需 Windows 64 MiB 测试栈，ReleaseSafe 使用默认栈，均 275/275。仅离线证据。
 - 2026-09-24：提交前复核将 02 的 ConfirmedAbsent 绑定到原 place 命令的 adapter session，将 03 的意图内容摘要扩至 128 位；候选提交的 Debug/ReleaseSafe 各 269/269，journal/state schema 16/19。现有 Venue 仍不产生正向缺席证明，真实查询与资金资格保持待验。

@@ -58,6 +58,7 @@ _Avoid_: Process started, Host ready flag, first intent
 
 **StrategyActivationIdentity**:
 某个 StrategyInstance 一次 HostActivated 权威事实的 128 位身份；每次撤权后立即失效，即使 HostSessionIdentity 未变化，重新激活也必须获得新身份并由所有输出 frame 携带。
+TradingShard 为同一策略的再次激活分配前一身份加一的身份；调用方不得自行选择或复用旧身份。
 _Avoid_: HostSessionIdentity, StrategyInstanceIdentity, boolean active flag
 
 **StrategyCursor**:

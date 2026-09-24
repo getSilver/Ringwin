@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const gateway_module = @import("strategy_host_gateway.zig");
 const lifecycle = @import("strategy_host_lifecycle.zig");
 const recovery_module = @import("strategy_host_recovery.zig");
+const fixture = @import("trading_shard_fixture.zig");
 
 fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !void {
     const python_abi = try lifecycle.discoverPythonAbi(init, python);
@@ -132,7 +133,8 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
         authorization.activation_barrier,
         expected.state_digest,
     );
-    try gateway.activate(authorization);
+    var authority = try fixture.gatewayActivationFixtureForSession(authorization, plan.session);
+    try gateway.activate(&authority.shard, &authority.decision_journal);
     try host.activate(init.io, .{
         .strategy_identity = authorization.strategy_identity,
         .activation_identity = authorization.activation_identity,

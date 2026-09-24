@@ -22,6 +22,7 @@ pub const EventKind = enum(u16) {
     portfolio_transfer,
     strategy_activated,
     host_activated,
+    host_activation_revoked,
     primary_lease_granted,
     risk_lease_granted,
     mark_price,
@@ -177,6 +178,7 @@ pub const PayloadTag = enum(u16) {
     portfolio_transfer,
     strategy_activated,
     host_activated,
+    host_activation_revoked,
     primary_lease_granted,
     risk_lease_granted,
     mark_price,
@@ -252,8 +254,15 @@ pub const HostActivated = struct {
     strategy_identity: u128,
     config_version: u64,
     activation_identity: u128,
+    session: @import("strategy_host_ipc.zig").Session,
     activation_barrier: u64,
     state_digest: [32]u8,
+};
+pub const HostRevocationReason = enum(u8) { fault, control, session_replaced };
+pub const HostActivationRevoked = struct {
+    strategy_identity: u128,
+    activation_identity: u128,
+    reason: HostRevocationReason,
 };
 pub const PrimaryLease = struct { fencing_token: u64 };
 pub const MarkPrice = struct { instrument: canonical.InstrumentIdentity, price_micros: i64 };
@@ -321,6 +330,7 @@ pub const CorePayload = union(PayloadTag) {
     portfolio_transfer: PortfolioTransfer,
     strategy_activated: StrategyActivation,
     host_activated: HostActivated,
+    host_activation_revoked: HostActivationRevoked,
     primary_lease_granted: PrimaryLease,
     risk_lease_granted: RiskLease,
     mark_price: MarkPrice,
@@ -424,8 +434,16 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u128, value.strategy_identity);
             try encoded.put(u64, value.config_version);
             try encoded.put(u128, value.activation_identity);
+            try encoded.put(u64, value.session.fencing);
+            try encoded.put(u32, value.session.shard);
+            try encoded.put(u64, value.session.generation);
             try encoded.put(u64, value.activation_barrier);
             for (value.state_digest) |byte| try encoded.put(u8, byte);
+        },
+        .host_activation_revoked => |value| {
+            try encoded.put(u128, value.strategy_identity);
+            try encoded.put(u128, value.activation_identity);
+            try encoded.put(u8, @intFromEnum(value.reason));
         },
         .primary_lease_granted => |value| try encoded.put(u64, value.fencing_token),
         .risk_lease_granted => |value| {
@@ -723,12 +741,22 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             .strategy_identity = try readInputValue(u128, record.payload, &offset),
             .config_version = try readInputValue(u64, record.payload, &offset),
             .activation_identity = try readInputValue(u128, record.payload, &offset),
+            .session = .{
+                .fencing = try readInputValue(u64, record.payload, &offset),
+                .shard = try readInputValue(u32, record.payload, &offset),
+                .generation = try readInputValue(u64, record.payload, &offset),
+            },
             .activation_barrier = try readInputValue(u64, record.payload, &offset),
             .state_digest = blk: {
                 var digest: [32]u8 = undefined;
                 for (&digest) |*byte| byte.* = try readInputValue(u8, record.payload, &offset);
                 break :blk digest;
             },
+        } },
+        .host_activation_revoked => .{ .host_activation_revoked = .{
+            .strategy_identity = try readInputValue(u128, record.payload, &offset),
+            .activation_identity = try readInputValue(u128, record.payload, &offset),
+            .reason = std.enums.fromInt(HostRevocationReason, try readInputValue(u8, record.payload, &offset)) orelse return error.InvalidHostRevocationReason,
         } },
         .primary_lease_granted => .{ .primary_lease_granted = .{
             .fencing_token = try readInputValue(u64, record.payload, &offset),

@@ -17,12 +17,12 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-pub const expected_happy_digest = "3c5b6fdd852195b06a100fc567b691fc47b4825a5451b984125955522bd83a4f";
+pub const expected_happy_digest = "fea66717243ed3792a2bc84f8c83d8249fa68bf4bd3132fb5456224005b10500";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "97da7c97293cda6669ff3a7989d0d886d50ad73aaa9830fe7223a13f25a2ca38",
-    "5896d53efecd0a12c43e0a3c3b4482443155aebe4b6597a14a4ab1647083aa41",
-    "e026844f9ae94ad30838f3f39da7c87965c04593ab28a195e3181e9683b97808",
+    "1fc2ba3dde381ecf3ad5830ab69aa99e214fe0b9893fa8a30e9a1ada70a269c0",
+    "e3b1f23a9a1ab873f6ae517c9ace78a5e7889d97e4a418243d86ab78318ba9ce",
+    "3df5cc47418f7eda6d7f0d8d69ac43b740b1c37cd3688bd14995e5bdb0e69559",
     expected_happy_digest,
 };
 pub const order_limit_price: i64 = 50_100_000_000;
@@ -272,6 +272,10 @@ pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_mode
 }
 
 pub fn startScenarioAuthorized(authorization: host_gateway.Authorization, reservation_model: engine.ReservationModel) !LiveRun {
+    return startScenarioAuthorizedForSession(authorization, reservation_model, .{ .fencing = 1, .shard = 0, .generation = 1 });
+}
+
+pub fn startScenarioAuthorizedForSession(authorization: host_gateway.Authorization, reservation_model: engine.ReservationModel, session: @import("strategy_host_ipc.zig").Session) !LiveRun {
     var run: LiveRun = .{ .shard = .{}, .decision_journal = journal.Journal.init() };
     const genesis = genesisEvents(authorization, reservation_model);
     for (genesis) |event| if (try apply(&run, event) != null) return error.UnexpectedCommand;
@@ -280,6 +284,7 @@ pub fn startScenarioAuthorized(authorization: host_gateway.Authorization, reserv
         .strategy_identity = authorization.strategy_identity,
         .config_version = authorization.config_version,
         .activation_identity = authorization.activation_identity,
+        .session = session,
         .activation_barrier = authorization.activation_barrier,
         .state_digest = host_digest,
     } } })) != null) return error.UnexpectedCommand;
@@ -288,6 +293,34 @@ pub fn startScenarioAuthorized(authorization: host_gateway.Authorization, reserv
 
 pub fn startScenario() !LiveRun {
     return startScenarioAuthorized(defaultAuthorization(), .leveraged);
+}
+
+/// A one-fact HostActivated tail for isolated Gateway/pipe integration checks.
+/// Full genesis and replay acceptance use startScenarioAuthorized above.
+pub fn gatewayActivationFixture(authorization: host_gateway.Authorization) !LiveRun {
+    return gatewayActivationFixtureForSession(authorization, .{ .fencing = 1, .shard = 0, .generation = 1 });
+}
+
+pub fn gatewayActivationFixtureForSession(authorization: host_gateway.Authorization, session: @import("strategy_host_ipc.zig").Session) !LiveRun {
+    var run: LiveRun = .{
+        .shard = .{
+            .strategy_active = true,
+            .strategy_identity = authorization.strategy_identity,
+            .strategy_config_version = authorization.config_version,
+            .strategy_activation_identity = authorization.activation_identity,
+        },
+        .decision_journal = journal.Journal.init(),
+    };
+    const digest = run.shard.canonicalStateDigest();
+    _ = try apply(&run, atGroup(1, .{ .identity = 1, .payload = .{ .host_activated = .{
+        .strategy_identity = authorization.strategy_identity,
+        .config_version = authorization.config_version,
+        .activation_identity = authorization.activation_identity,
+        .session = session,
+        .activation_barrier = authorization.activation_barrier,
+        .state_digest = digest,
+    } } }));
+    return run;
 }
 
 pub fn applyHealthyPrelude(run: *LiveRun) !void {
@@ -318,6 +351,12 @@ fn healthyRun() !LiveRun {
 
 fn healthyScenarioAuthorized(authorization: host_gateway.Authorization, reservation_model: engine.ReservationModel) !LiveRun {
     var run = try startScenarioAuthorized(authorization, reservation_model);
+    try applyHealthyPrelude(&run);
+    return run;
+}
+
+fn healthyScenarioAuthorizedForSession(authorization: host_gateway.Authorization, reservation_model: engine.ReservationModel, session: @import("strategy_host_ipc.zig").Session) !LiveRun {
+    var run = try startScenarioAuthorizedForSession(authorization, reservation_model, session);
     try applyHealthyPrelude(&run);
     return run;
 }
@@ -599,6 +638,10 @@ pub const TradingShardHostIngress = struct {
         return .{ .run = try healthyScenarioAuthorized(authorization, .leveraged) };
     }
 
+    pub fn initHealthyFixtureForSession(authorization: host_gateway.Authorization, session: @import("strategy_host_ipc.zig").Session) !TradingShardHostIngress {
+        return .{ .run = try healthyScenarioAuthorizedForSession(authorization, .leveraged, session) };
+    }
+
     pub fn initHealthySpotFixtureFor(authorization: host_gateway.Authorization) !TradingShardHostIngress {
         return .{ .run = try healthyScenarioAuthorized(authorization, .cash) };
     }
@@ -694,18 +737,19 @@ test "qualified SPOT IOC intent crosses Gateway and cash risk before OrderComman
     const subscriptions = [_]host_gateway.Subscription{
         host_gateway.Subscription.of(authorization.strategy_identity, &.{.mark_price}),
     };
+    var ingress = try TradingShardHostIngress.initHealthySpotFixtureFor(authorization);
+    const cursor: u64 = @intCast(ingress.run.shard.trace.len + 1);
     var gateway = try host_gateway.Gateway.init(config, &subscriptions);
-    try gateway.recordPublished(1, 14, 100);
-    try gateway.activate(config.authorization);
+    try gateway.recordPublished(1, cursor, 100);
+    try gateway.activate(&ingress.run.shard, &ingress.run.decision_journal);
     var frame_storage: [256]u8 = undefined;
-    const frame = try host_gateway.encodeOutputOrderFrame(&frame_storage, config, 1, 14, 7, .{
+    const frame = try host_gateway.encodeOutputOrderFrame(&frame_storage, config, 1, cursor, 7, .{
         .time_in_force = .immediate_or_cancel,
         .quantity = 5_000,
         .limit_price_micros = 63_500_000_000,
     });
     const decision = gateway.ingest(frame, 100);
     try std.testing.expect(decision == .accepted);
-    var ingress = try TradingShardHostIngress.initHealthySpotFixtureFor(authorization);
     const command = (try ingress.applyDecisionCommand(decision)).?;
     try std.testing.expectEqual(host_gateway.TimeInForce.immediate_or_cancel, command.time_in_force);
     try std.testing.expectEqual(@as(i128, 5_000), command.quantity.lots);

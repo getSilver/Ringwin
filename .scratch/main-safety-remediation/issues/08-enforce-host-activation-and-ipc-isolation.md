@@ -30,3 +30,11 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 ## Answer
 
 HostActivated 已成为可重放分片事实；Python 仅通过 Zig 校验的有界 pipe 帧收发自有 bytes，不获得共享内存或游标能力。hostile-child acceptance 证明启动参数无 backing capability 且未激活权威权限，见 ADR 0007。
+
+## 2026-09-23 复核与重开
+
+旧 Answer 仅为历史记录。[修复计划 R08-A](../review-repair-plan-2026-09-23.md#08host-激活生命周期)要求故障、控制撤销与重启提交可重放的激活撤销，旧 StrategyActivationIdentity 即刻失效；追平后以新身份重新激活。TradingAuthorization 仍由独立事实判断。
+
+## 2026-09-24 修复与离线验收
+
+HostActivated 事实绑定非零 HostSession、激活身份、barrier 和状态摘要；Gateway 只从已应用且 journal 连续的分片事实开权，新会话必须撤销旧事实，同一会话不得重置批次序号。故障、控制暂停、退出和超时撤权可重放；旧身份立即拒绝，追平并以递增新身份激活后才恢复，TradingAuthorization 仍独立。direct trade、Gateway、snapshot/tail 与 StrategyHost 进程集成回归覆盖上述路径。Debug/ReleaseSafe 各 288/288；StrategyHost 14 步离线验证通过；journal/state schema 18/21。本票仅关闭离线安全缺口，Linux 目标运行和 Venue/生产资格仍为 `not_run`。

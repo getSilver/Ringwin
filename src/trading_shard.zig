@@ -59,6 +59,7 @@ pub const VirtualPortfolioActivation = shard_event.VirtualPortfolioActivation;
 pub const PortfolioTransfer = shard_event.PortfolioTransfer;
 pub const StrategyActivation = shard_event.StrategyActivation;
 pub const HostActivated = shard_event.HostActivated;
+pub const HostActivationRevoked = shard_event.HostActivationRevoked;
 pub const PrimaryLease = shard_event.PrimaryLease;
 pub const RiskLease = shard_event.RiskLease;
 pub const StrategyCutoverFence = shard_event.StrategyCutoverFence;
@@ -218,7 +219,10 @@ pub const TradingShard = struct {
     strategy_activation_identity: u128 = 0,
     host_activation_identity: u128 = 0,
     host_activation_barrier: u64 = 0,
+    host_activation_session: @import("strategy_host_ipc.zig").Session = .{ .fencing = 0, .shard = 0, .generation = 0 },
+    host_activation_fact_sequence: u64 = 0,
     host_activation_state_digest: [32]u8 = @splat(0),
+    host_activation_seen: bool = false,
     exchange_balance_observed: bool = false,
     exchange_positions_observed: bool = false,
     opening_balance_observed: bool = false,
@@ -338,6 +342,29 @@ pub const TradingShard = struct {
 
     pub fn canonicalStateDigest(self: TradingShard) [Sha256.digest_length]u8 {
         return stateDigest(self);
+    }
+
+    pub fn appliedHostActivation(self: *const TradingShard, stable_journal: *const journal.Journal) !host_gateway.AppliedActivation {
+        if (self.host_activation_identity == 0 or self.host_activation_fact_sequence == 0 or
+            stable_journal.last_sequence != self.trace.len or
+            stable_journal.last_sequence < self.host_activation_fact_sequence)
+            return error.HostNotActivated;
+        return .{
+            .authorization = .{
+                .strategy_identity = self.strategy_identity,
+                .config_version = self.strategy_config_version,
+                .activation_identity = self.host_activation_identity,
+                .activation_barrier = self.host_activation_barrier,
+            },
+            .session = self.host_activation_session,
+            .fact_sequence = self.host_activation_fact_sequence,
+            .state_digest = self.host_activation_state_digest,
+        };
+    }
+
+    pub fn nextHostActivationIdentity(self: *const TradingShard) !u128 {
+        if (!self.host_activation_seen or self.host_activation_identity != 0) return error.HostNotRevoked;
+        return std.math.add(u128, self.strategy_activation_identity, 1);
     }
 
     /// A permutation-only business-state comparison. CanonicalStateDigest
@@ -981,7 +1008,8 @@ pub const TradingShard = struct {
         group.members[0].limit_price.ticks = try priceTicks(intent.limit_price_micros, instrument_config.margin.price_tick_micros);
         if (cursor_floor) |floor| if (intent.strategy_cursor <= floor) return error.InvalidStrategyCursor;
         if (self.host_activation_identity != intent.activation_identity or
-            intent.strategy_cursor <= self.host_activation_barrier)
+            intent.strategy_cursor <= self.host_activation_barrier or
+            intent.strategy_cursor <= self.host_activation_fact_sequence)
             return error.HostNotActivated;
         if (!self.operational_state.effectiveTradingAuthority()) {
             self.last_reject_reason = .authorization_closed;
@@ -1530,6 +1558,16 @@ pub const TradingShard = struct {
         try self.trace.append(.risk_reservation_rebalanced, fact_identity);
     }
 
+    fn revokeHostActivation(self: *TradingShard, identity: u128, fact_identity: u64) !void {
+        std.debug.assert(self.host_activation_identity == identity);
+        self.host_activation_identity = 0;
+        self.host_activation_barrier = 0;
+        self.host_activation_session = .{ .fencing = 0, .shard = 0, .generation = 0 };
+        self.host_activation_fact_sequence = 0;
+        self.host_activation_state_digest = @splat(0);
+        try self.trace.append(.host_activation_revoked, fact_identity);
+    }
+
     fn handle(self: *TradingShard, input: CoreEvent) !?OrderCommand {
         switch (input.payload) {
             .control_command => |command| {
@@ -1560,6 +1598,8 @@ pub const TradingShard = struct {
                 }
                 if (action.cancel_open_orders)
                     try self.oms.cancelOpenOrders(action.cancel_increasing_only);
+                if (!self.operational_state.trading_authorized and self.host_activation_identity != 0)
+                    try self.revokeHostActivation(self.host_activation_identity, input.identity);
                 if (keep_positions) {
                     if (action.cancel_increasing_only or
                         self.operational_state.mode != .stopped or
@@ -1821,24 +1861,41 @@ pub const TradingShard = struct {
                 try self.trace.append(.strategy_activated, input.identity);
             },
             .host_activated => |activation| {
+                if (activation.strategy_identity != self.strategy_identity or
+                    activation.config_version != self.strategy_config_version)
+                    return error.InvalidHostActivation;
                 if (self.host_activation_identity != 0) {
                     if (self.host_activation_identity != activation.activation_identity or
+                        !std.meta.eql(self.host_activation_session, activation.session) or
                         self.host_activation_barrier != activation.activation_barrier or
                         !std.mem.eql(u8, &self.host_activation_state_digest, &activation.state_digest))
                         return error.HostActivationConflict;
                     return null;
                 }
                 if (!self.strategy_active or
-                    activation.strategy_identity != self.strategy_identity or
-                    activation.config_version != self.strategy_config_version or
-                    activation.activation_identity != self.strategy_activation_identity or
+                    activation.activation_identity == 0 or
+                    activation.session.generation == 0 or
+                    (!self.host_activation_seen and activation.activation_identity != self.strategy_activation_identity) or
                     activation.activation_barrier == std.math.maxInt(u64) or
                     !std.mem.eql(u8, &activation.state_digest, &self.canonicalStateDigest()))
                     return error.InvalidHostActivation;
+                if (self.host_activation_seen and activation.activation_identity != (self.nextHostActivationIdentity() catch return error.StaleHostActivation))
+                    return error.StaleHostActivation;
+                self.host_activation_seen = true;
+                self.strategy_activation_identity = activation.activation_identity;
                 self.host_activation_identity = activation.activation_identity;
                 self.host_activation_barrier = activation.activation_barrier;
+                self.host_activation_session = activation.session;
                 self.host_activation_state_digest = activation.state_digest;
                 try self.trace.append(.host_activated, input.identity);
+                self.host_activation_fact_sequence = @intCast(self.trace.len);
+            },
+            .host_activation_revoked => |revocation| {
+                if (revocation.strategy_identity != self.strategy_identity or
+                    revocation.activation_identity == 0 or
+                    revocation.activation_identity != self.host_activation_identity)
+                    return error.InvalidHostRevocation;
+                try self.revokeHostActivation(revocation.activation_identity, input.identity);
             },
             .primary_lease_granted => |lease| {
                 if (!self.strategy_active or lease.fencing_token == 0 or
@@ -2502,7 +2559,12 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     digestInt(&hasher, u128, shard.strategy_activation_identity);
     digestInt(&hasher, u128, shard.host_activation_identity);
     digestInt(&hasher, u64, shard.host_activation_barrier);
+    digestInt(&hasher, u64, shard.host_activation_session.fencing);
+    digestInt(&hasher, u32, shard.host_activation_session.shard);
+    digestInt(&hasher, u64, shard.host_activation_session.generation);
+    digestInt(&hasher, u64, shard.host_activation_fact_sequence);
     hasher.update(&shard.host_activation_state_digest);
+    digestBool(&hasher, shard.host_activation_seen);
     digestBool(&hasher, shard.operational_state.initialized);
     digestInt(&hasher, u128, shard.operational_state.target_identity);
     digestInt(&hasher, u64, shard.operational_state.version);

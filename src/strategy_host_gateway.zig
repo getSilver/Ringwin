@@ -1,5 +1,7 @@
 const std = @import("std");
 const ipc = @import("strategy_host_ipc.zig");
+const trading = @import("trading_shard.zig");
+const journal = @import("journal.zig");
 
 const Crc32c = std.hash.crc.Crc32Iscsi;
 const batch_header_len: usize = 128;
@@ -47,6 +49,12 @@ pub const Authorization = struct {
     config_version: u64,
     activation_identity: u128,
     activation_barrier: u64,
+};
+pub const AppliedActivation = struct {
+    authorization: Authorization,
+    session: ipc.Session,
+    fact_sequence: u64,
+    state_digest: [32]u8,
 };
 
 pub const Config = struct {
@@ -124,6 +132,10 @@ pub const Gateway = struct {
     config: Config,
     subscription_mask: u64,
     trading_enabled: bool = false,
+    activation_floor: u128 = 0,
+    authority_shard: ?*trading.TradingShard = null,
+    authority_journal: ?*journal.Journal = null,
+    activation_sequence: u64 = 0,
     published: [max_events]PublishedBatch = undefined,
     published_count: usize = 0,
     seen: [max_seen_intents]SeenIntent = undefined,
@@ -140,29 +152,70 @@ pub const Gateway = struct {
     }
 
     pub fn beginRecovery(self: *Gateway) void {
+        if (self.trading_enabled)
+            self.activation_floor = @max(self.activation_floor, self.config.authorization.activation_identity);
         self.trading_enabled = false;
+        self.activation_sequence = 0;
     }
 
-    pub fn beginSession(self: *Gateway, config: Config) !void {
+    pub fn beginSession(self: *Gateway, config: Config, shard: *trading.TradingShard, stable_journal: *journal.Journal) !void {
         if (config.authorization.strategy_identity !=
             self.config.authorization.strategy_identity or
             config.authorization.config_version != self.config.authorization.config_version or
-            (config.session.fencing == self.config.session.fencing and
-                config.session.shard == self.config.session.shard and
-                config.session.generation == self.config.session.generation))
+            config.authorization.activation_identity == 0 or
+            config.session.generation == 0 or
+            std.meta.eql(config.session, self.config.session))
             return error.InvalidSessionTransition;
+        if (self.trading_enabled)
+            self.activation_floor = @max(self.activation_floor, self.config.authorization.activation_identity);
+        self.trading_enabled = false;
+        if (stable_journal.last_sequence != shard.trace.len or
+            shard.strategy_identity != self.config.authorization.strategy_identity)
+            return error.UnstableHostAuthority;
+        if (shard.host_activation_identity != 0 and
+            config.authorization.activation_identity == shard.host_activation_identity)
+            return error.StaleHostActivation;
+        if (shard.host_activation_identity != 0) {
+            self.activation_floor = @max(self.activation_floor, shard.host_activation_identity);
+            const fact_identity = try std.math.add(u64, stable_journal.last_sequence, 1);
+            _ = try trading.applyStable(shard, stable_journal, .{ .core = .{
+                .identity = fact_identity,
+                .payload = .{ .host_activation_revoked = .{
+                    .strategy_identity = shard.strategy_identity,
+                    .activation_identity = shard.host_activation_identity,
+                    .reason = .session_replaced,
+                } },
+            } });
+        }
         self.config = config;
         self.published_count = 0;
-        self.trading_enabled = false;
+        self.authority_shard = null;
+        self.authority_journal = null;
+        self.activation_sequence = 0;
     }
 
-    pub fn activate(self: *Gateway, authorization: Authorization) !void {
-        if (authorization.strategy_identity == 0 or authorization.activation_identity == 0)
+    pub fn activate(self: *Gateway, shard: *trading.TradingShard, stable_journal: *journal.Journal) !void {
+        const applied = try shard.appliedHostActivation(stable_journal);
+        const authorization = applied.authorization;
+        if (authorization.strategy_identity == 0 or authorization.activation_identity == 0 or
+            applied.session.generation == 0 or self.config.session.generation == 0 or
+            authorization.activation_identity <= self.activation_floor)
             return error.InvalidAuthorization;
-        if (authorization.activation_barrier != 0 and
-            (self.published_count == 0 or self.published[self.published_count - 1].last_shard_sequence < authorization.activation_barrier))
+        if (authorization.strategy_identity != self.config.authorization.strategy_identity or
+            authorization.config_version != self.config.authorization.config_version or
+            authorization.activation_identity != self.config.authorization.activation_identity or
+            authorization.activation_barrier != self.config.authorization.activation_barrier or
+            !std.meta.eql(applied.session, self.config.session) or
+            applied.fact_sequence == 0 or std.mem.allEqual(u8, &applied.state_digest, 0))
+            return error.InvalidAuthorization;
+        if (self.published_count == 0 or
+            self.published[self.published_count - 1].last_shard_sequence < applied.fact_sequence or
+            self.published[self.published_count - 1].last_shard_sequence < authorization.activation_barrier)
             return error.ActivationBarrierNotApplied;
         self.config.authorization = authorization;
+        self.authority_shard = shard;
+        self.authority_journal = stable_journal;
+        self.activation_sequence = applied.fact_sequence;
         self.trading_enabled = true;
     }
 
@@ -257,6 +310,11 @@ pub const Gateway = struct {
     }
 
     pub fn ingest(self: *Gateway, frame: []const u8, now_ns: i64) Decision {
+        if (self.trading_enabled and (self.authority_shard == null or self.authority_journal == null or
+            self.authority_shard.?.host_activation_identity != self.config.authorization.activation_identity or
+            self.authority_shard.?.host_activation_fact_sequence != self.activation_sequence or
+            self.authority_journal.?.last_sequence != self.authority_shard.?.trace.len))
+            self.beginRecovery();
         const identity = if (frame.len >= output_header_len)
             get(u128, frame, 64)
         else
@@ -310,6 +368,10 @@ pub const Gateway = struct {
             get(u16, frame, 96) != 1 or get(u16, frame, 98) != 1)
             return error.UnknownSchema;
         if (!self.trading_enabled or
+            self.authority_shard == null or self.authority_journal == null or
+            self.authority_shard.?.host_activation_identity != self.config.authorization.activation_identity or
+            self.authority_shard.?.host_activation_fact_sequence != self.activation_sequence or
+            self.authority_journal.?.last_sequence != self.authority_shard.?.trace.len or
             get(u128, frame, 64) != self.config.authorization.strategy_identity or
             get(u64, frame, 88) != self.config.authorization.config_version or
             get(u128, frame, 108) != self.config.authorization.activation_identity)
@@ -321,7 +383,8 @@ pub const Gateway = struct {
         } else return error.InvalidCursor;
         const cursor = get(u64, frame, 80);
         if (cursor != batch.last_shard_sequence or
-            cursor <= self.config.authorization.activation_barrier)
+            cursor <= self.config.authorization.activation_barrier or
+            cursor <= self.activation_sequence)
             return error.InvalidCursor;
         if (now_ns < batch.published_monotonic_ns or
             now_ns - batch.published_monotonic_ns > stale_intent_ns)
@@ -456,6 +519,7 @@ fn get(comptime T: type, source: []const u8, offset: usize) T {
 }
 
 test "subscription merge and intent rejection contract" {
+    const fixture = @import("trading_shard_fixture.zig");
     const config: Config = .{
         .schema_registry = 10,
         .decision_domain = 20,
@@ -472,6 +536,7 @@ test "subscription merge and intent rejection contract" {
         Subscription.of(41, &.{.l2_delta}),
     };
     var gateway = try Gateway.init(config, &subscriptions);
+    var authority = try fixture.gatewayActivationFixtureForSession(config.authorization, config.session);
     const payload = [_]u8{1};
     const events = [_]EventEnvelope{
         .{ .event_type = .mark_price, .shard_sequence = 10, .source_time_ns = 1, .receive_time_ns = 2, .monotonic_time_ns = 3, .wall_time_utc_ns = 4, .payload = &payload },
@@ -485,7 +550,7 @@ test "subscription merge and intent rejection contract" {
     var frame_storage: [256]u8 = undefined;
     const frame = try encodeOutputFrame(&frame_storage, config, 1, 12, 1, 100, 50_100_000_000);
     try std.testing.expectEqual(RejectReason.unauthorized, gateway.ingest(frame, 101).rejected.reason);
-    try gateway.activate(config.authorization);
+    try gateway.activate(&authority.shard, &authority.decision_journal);
     try std.testing.expect(gateway.ingest(frame, 101) == .accepted);
     const duplicate = gateway.ingest(frame, 102);
     try std.testing.expectEqual(RejectReason.duplicate_identity, duplicate.rejected.reason);
@@ -505,10 +570,11 @@ test "subscription merge and intent rejection contract" {
     try std.testing.expectEqual(@as(u32, 0), try eventCount(empty_batch));
 
     var next_config = config;
-    next_config.session.generation += 1;
     next_config.authorization.activation_identity += 1;
+    try std.testing.expectError(error.InvalidSessionTransition, gateway.beginSession(next_config, &authority.shard, &authority.decision_journal));
+    next_config.session.generation += 1;
     next_config.authorization.activation_barrier = 12;
-    try gateway.beginSession(next_config);
+    try gateway.beginSession(next_config, &authority.shard, &authority.decision_journal);
     try std.testing.expectEqual(
         RejectReason.old_session,
         gateway.ingest(frame, 104).rejected.reason,
@@ -525,7 +591,8 @@ test "subscription merge and intent rejection contract" {
         &next_events,
     );
     try gateway.recordPublished(1, 13, 105);
-    try gateway.activate(next_config.authorization);
+    var next_authority = try fixture.gatewayActivationFixtureForSession(next_config.authorization, next_config.session);
+    try gateway.activate(&next_authority.shard, &next_authority.decision_journal);
     const retried = try encodeOutputFrame(
         &frame_storage,
         next_config,

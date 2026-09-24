@@ -149,6 +149,7 @@ pub const Policy = struct {
             .strategy_identity = self.strategy_identity,
             .config_version = self.config_version,
             .activation_identity = self.activation_identity,
+            .session = .{ .fencing = guard.lease.token, .shard = 0, .generation = 1 },
             .activation_barrier = owner.shard.trace.len,
             .state_digest = digest,
         } });
