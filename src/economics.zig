@@ -58,6 +58,7 @@ pub const LedgerSummary = struct {
 
 pub const Fill = struct {
     identity: u64,
+    order_id: u64 = 0,
     side: Side,
     quantity: canonical.InstrumentQuantity,
     price: canonical.InstrumentPrice,
@@ -117,6 +118,13 @@ const SeenFact = struct {
     fingerprint: u64,
 };
 
+pub const CanonicalFactEvidence = struct {
+    identity: u64,
+    order_id: u64,
+    quantity: i64,
+    digest: [Sha256.digest_length]u8,
+};
+
 pub const Projection = struct {
     settlement_asset: canonical.AssetIdentity = settlement_asset,
     portfolio: Layer = .{},
@@ -129,6 +137,8 @@ pub const Projection = struct {
     reconciliation_break_count: u8 = 0,
     seen: [max_facts]SeenFact = undefined,
     seen_count: u8 = 0,
+    canonical_fill_evidence: [max_facts]CanonicalFactEvidence = undefined,
+    canonical_fill_evidence_count: u8 = 0,
     ledger: [max_ledger_transactions]LedgerTransaction = undefined,
     ledger_count: u8 = 0,
     ledger_summary: LedgerSummary = .{},
@@ -150,6 +160,55 @@ pub const Projection = struct {
         return !std.mem.eql(u8, &before, &self.digest());
     }
 
+    pub const CanonicalFillIdentity = enum { unknown, duplicate };
+
+    /// Canonical fill identity lives in this projection. TradingShard must not
+    /// keep a second last-fill scalar, and duplicate identity is independent of
+    /// later OMS remaining quantity.
+    pub fn lookupCanonicalFill(
+        self: *const Projection,
+        identity: u64,
+        payload_digest: [Sha256.digest_length]u8,
+    ) !CanonicalFillIdentity {
+        for (self.canonical_fill_evidence[0..self.canonical_fill_evidence_count]) |known| {
+            if (known.identity != identity) continue;
+            if (!std.mem.eql(u8, &known.digest, &payload_digest)) return error.ConflictingEconomicIdentity;
+            return .duplicate;
+        }
+        return .unknown;
+    }
+
+    pub fn appliedCanonicalFillQuantity(self: *const Projection, order_id: u64) !i64 {
+        var total: i64 = 0;
+        for (self.canonical_fill_evidence[0..self.canonical_fill_evidence_count]) |known| {
+            if (known.order_id == order_id)
+                total = try std.math.add(i64, total, known.quantity);
+        }
+        return total;
+    }
+
+    pub fn applyCanonicalFill(self: *Projection, fill: Fill, payload_digest: [Sha256.digest_length]u8) !bool {
+        switch (try self.lookupCanonicalFill(fill.identity, payload_digest)) {
+            .duplicate => return false,
+            .unknown => {},
+        }
+        var candidate = self.*;
+        if (candidate.canonical_fill_evidence_count == candidate.canonical_fill_evidence.len)
+            return error.EconomicFactCapacityExceeded;
+        const changed = try candidate.applyChanged(.{ .fill = fill });
+        const quantity = std.math.cast(i64, fill.quantity.lots) orelse return error.Overflow;
+        if (fill.order_id == 0 or quantity <= 0) return error.InvalidEconomicFact;
+        candidate.canonical_fill_evidence[candidate.canonical_fill_evidence_count] = .{
+            .identity = fill.identity,
+            .order_id = fill.order_id,
+            .quantity = quantity,
+            .digest = payload_digest,
+        };
+        candidate.canonical_fill_evidence_count += 1;
+        self.* = candidate;
+        return changed;
+    }
+
     pub fn digest(self: *const Projection) [Sha256.digest_length]u8 {
         var hasher = Sha256.init(.{});
         hashInt(&hasher, canonical.AssetIdentity, self.settlement_asset);
@@ -166,6 +225,13 @@ pub const Projection = struct {
             hashInt(&hasher, u64, seen.identity);
             hashInt(&hasher, u8, @intFromEnum(seen.kind));
             hashInt(&hasher, u64, seen.fingerprint);
+        }
+        hashInt(&hasher, u8, self.canonical_fill_evidence_count);
+        for (self.canonical_fill_evidence[0..self.canonical_fill_evidence_count]) |known| {
+            hashInt(&hasher, u64, known.identity);
+            hashInt(&hasher, u64, known.order_id);
+            hashInt(&hasher, i64, known.quantity);
+            hasher.update(&known.digest);
         }
         hashInt(&hasher, u8, self.ledger_count);
         for (self.ledger[0..self.ledger_count]) |transaction| {
@@ -186,6 +252,20 @@ pub const Projection = struct {
         var result: [Sha256.digest_length]u8 = undefined;
         hasher.final(&result);
         return result;
+    }
+
+    /// Compares the business result of independently identified facts. It is
+    /// deliberately not a snapshot or audit digest: arrival order stays in
+    /// `digest` and in TradingShard's CanonicalStateDigest.
+    pub fn semanticDigest(self: *const Projection) [Sha256.digest_length]u8 {
+        return self.normalizedForSemanticDigest().digest();
+    }
+
+    pub fn normalizedForSemanticDigest(self: *const Projection) Projection {
+        var normalized = self.*;
+        sortCanonicalEvidence(normalized.canonical_fill_evidence[0..normalized.canonical_fill_evidence_count]);
+        sortLedger(normalized.ledger[0..normalized.ledger_count]);
+        return normalized;
     }
 
     fn applyEvent(self: *Projection, event: Event) !void {
@@ -489,6 +569,39 @@ pub const Projection = struct {
     }
 };
 
+fn sortCanonicalEvidence(values: []CanonicalFactEvidence) void {
+    var index: usize = 1;
+    while (index < values.len) : (index += 1) {
+        var cursor = index;
+        while (cursor > 0 and values[cursor].identity < values[cursor - 1].identity) : (cursor -= 1)
+            std.mem.swap(CanonicalFactEvidence, &values[cursor], &values[cursor - 1]);
+    }
+}
+
+fn ledgerLessThan(left: LedgerTransaction, right: LedgerTransaction) bool {
+    if (left.source_identity != right.source_identity) return left.source_identity < right.source_identity;
+    if (left.kind != right.kind) return @intFromEnum(left.kind) < @intFromEnum(right.kind);
+    if (left.layer != right.layer) return @intFromEnum(left.layer) < @intFromEnum(right.layer);
+    var index: usize = 0;
+    while (index < left.posting_count) : (index += 1) {
+        const a = left.postings[index];
+        const b = right.postings[index];
+        if (a.account != b.account) return @intFromEnum(a.account) < @intFromEnum(b.account);
+        if (a.unit != b.unit) return @intFromEnum(a.unit) < @intFromEnum(b.unit);
+        if (a.amount != b.amount) return a.amount < b.amount;
+    }
+    return left.posting_count < right.posting_count;
+}
+
+fn sortLedger(values: []LedgerTransaction) void {
+    var index: usize = 1;
+    while (index < values.len) : (index += 1) {
+        var cursor = index;
+        while (cursor > 0 and ledgerLessThan(values[cursor], values[cursor - 1])) : (cursor -= 1)
+            std.mem.swap(LedgerTransaction, &values[cursor], &values[cursor - 1]);
+    }
+}
+
 fn hashLayer(hasher: *Sha256, layer: Layer) void {
     hashInt(hasher, i64, layer.usdt_balance_micros);
     hashInt(hasher, i64, layer.spot_asset_quantity);
@@ -778,4 +891,28 @@ test "ledger postings reproduce signed fee rebate and funding cash movements" {
     try std.testing.expectEqualDeep(LedgerPosting{ .account = .cash, .unit = .settlement_atoms, .amount = 7 }, projection.ledger[6].postings[0]);
     try std.testing.expectEqualDeep(LedgerPosting{ .account = .funding_pnl, .unit = .settlement_atoms, .amount = -7 }, projection.ledger[6].postings[1]);
     try projection.assertClosed();
+}
+
+test "canonical fill evidence is idempotent and rejects a conflicting payload" {
+    var projection: Projection = .{};
+    projection.portfolio.usdt_balance_micros = 1_000;
+    projection.exchange.usdt_balance_micros = 1_000;
+    const fill: Fill = .{
+        .identity = 7,
+        .order_id = 1,
+        .side = .buy,
+        .quantity = fixtureQuantity(1),
+        .price = fixturePrice(100),
+        .quantity_denominator = 1,
+        .product = .isolated_linear_usdt,
+    };
+    const digest_a: [Sha256.digest_length]u8 = @splat(1);
+    const digest_b: [Sha256.digest_length]u8 = @splat(2);
+    try std.testing.expect(try projection.applyCanonicalFill(fill, digest_a));
+    try std.testing.expectEqual(Projection.CanonicalFillIdentity.duplicate, try projection.lookupCanonicalFill(7, digest_a));
+    try std.testing.expect(!(try projection.applyCanonicalFill(fill, digest_a)));
+    try std.testing.expectEqual(@as(i64, 1), projection.portfolio.swap.quantity);
+    try std.testing.expectError(error.ConflictingEconomicIdentity, projection.lookupCanonicalFill(7, digest_b));
+    try std.testing.expectError(error.ConflictingEconomicIdentity, projection.applyCanonicalFill(fill, digest_b));
+    try std.testing.expectEqual(@as(i64, 1), projection.portfolio.swap.quantity);
 }

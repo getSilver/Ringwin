@@ -70,6 +70,10 @@ pub const Times = struct {
 
 pub const RawIngressRecord = struct {
     source_session: u64,
+    /// Adapter-private ingress route. Zero is reserved for callers that do
+    /// not support durable reparsing; private reconciliation records its
+    /// REST endpoint or the WebSocket sentinel before decoding.
+    origin: u16 = 0,
     receive_time_utc_ns: u64,
     monotonic_time_ns: u64,
     wall_time_utc_ns: u64,
@@ -500,8 +504,8 @@ pub const Decoder = struct {
         batch: *IngressBatch,
     ) !void {
         const source_ms = try requiredMillis(datum, "ts");
-        const sequence = try integerStringField(datum, "seqId");
-        const previous = try integerStringField(datum, "prevSeqId");
+        const sequence = try integerField(datum, "seqId");
+        const previous = try integerField(datum, "prevSeqId");
         const bids = try parseBookSide(datum, "bids");
         const asks = try parseBookSide(datum, "asks");
         const identity = sourceIdentity("book", instrument, @bitCast(sequence));
@@ -828,9 +832,12 @@ fn parseUpcomingChanges(object: std.json.ObjectMap) !UpcomingChanges {
     return changes;
 }
 
-fn integerStringField(object: std.json.ObjectMap, name: []const u8) !i64 {
-    return std.fmt.parseInt(i64, try stringField(object, name), 10) catch
-        return error.InvalidField;
+fn integerField(object: std.json.ObjectMap, name: []const u8) !i64 {
+    return switch (try objectField(object, name)) {
+        .integer => |value| value,
+        .string => |value| std.fmt.parseInt(i64, value, 10) catch return error.InvalidField,
+        else => error.InvalidField,
+    };
 }
 
 fn requiredMillis(object: std.json.ObjectMap, name: []const u8) !u64 {
@@ -1230,7 +1237,7 @@ test "book duplicates are idempotent and gaps require a fresh snapshot" {
     var decoder: Decoder = .{};
     var sink: TestRawSink = .{};
     const snapshot_frame =
-        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["50100.1","2.0","0","3"]],"bids":[["50099.9","1.5","0","2"]],"ts":"1800000000000","seqId":"100","prevSeqId":"-1","checksum":0}]}
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["50100.1","2.0","0","3"]],"bids":[["50099.9","1.5","0","2"]],"ts":"1800000000000","seqId":100,"prevSeqId":-1,"checksum":0}]}
     ;
     const snapshot = try ingestTest(&decoder, &sink, snapshot_frame);
     try std.testing.expectEqual(@as(u8, 2), snapshot.event_count);

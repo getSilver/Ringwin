@@ -8,7 +8,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 pub const btc_usdt_spot: canonical.InstrumentIdentity = 0x424e_00000001;
 pub const btc_usdt_linear: canonical.InstrumentIdentity = 0x424e_00000002;
 pub const btc: canonical.AssetIdentity = 0x425443;
-pub const usdt: canonical.AssetIdentity = 0x55534454;
+pub const usdt: canonical.AssetIdentity = 1;
 pub const InstrumentRules = struct { identity: canonical.InstrumentIdentity, rules_version: u64, tick_size: canonical.Decimal, lot_size: canonical.Decimal };
 pub const Rules = struct { spot: InstrumentRules, linear: InstrumentRules };
 pub const Binding = struct { venue: canonical.VenueIdentity, account: canonical.ExchangeAccountIdentity, session: canonical.AdapterSessionIdentity };
@@ -358,7 +358,7 @@ pub const Reconciler = struct {
         const sequence = self.next_event_sequence;
         self.next_event_sequence = try std.math.add(u64, sequence, 1);
         const stream = privateStream(binding.session);
-        return .{ .envelope = .{ .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = 1, .identity = .{ .stream = stream, .sequence = sequence }, .source_fact_identity = identity, .scope = scope, .venue = binding.venue, .exchange_account = binding.account, .instrument = instrument, .asset = asset, .source_stream = sourceStream(binding.session, self.active_source), .source_sequence = self.active_source_sequence, .adapter_session = binding.session, .times = .{ .source_utc_ns = source_time, .receive_utc_ns = times.receive_time_utc_ns, .monotonic_ns = times.monotonic_time_ns, .audit_utc_ns = times.wall_time_utc_ns }, .raw_evidence = .{ .stream = rawStream(binding.session), .sequence = evidence.stream_sequence, .digest = evidence.sha256 } }, .event = event };
+        return .{ .envelope = .{ .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = canonical.schema_version, .identity = .{ .stream = stream, .sequence = sequence }, .source_fact_identity = identity, .scope = scope, .venue = binding.venue, .exchange_account = binding.account, .instrument = instrument, .asset = asset, .source_stream = sourceStream(binding.session, self.active_source), .source_sequence = self.active_source_sequence, .adapter_session = binding.session, .times = .{ .source_utc_ns = source_time, .receive_utc_ns = times.receive_time_utc_ns, .monotonic_ns = times.monotonic_time_ns, .audit_utc_ns = times.wall_time_utc_ns }, .raw_evidence = .{ .stream = rawStream(binding.session), .sequence = evidence.stream_sequence, .digest = evidence.sha256 } }, .event = event };
     }
     fn appendReady(self: *Reconciler, event: canonical.EventRecord) !void {
         if (self.ready_count == self.ready.len) return error.PrivateOutputFull;

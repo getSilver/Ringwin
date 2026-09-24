@@ -16,7 +16,9 @@ const contract = @import("venue_adapter_contract.zig");
 pub const btc_usdt_spot: canonical.InstrumentIdentity = 0x4f4b58_00000001;
 pub const btc_usdt_swap: canonical.InstrumentIdentity = 0x4f4b58_00000002;
 pub const btc: canonical.AssetIdentity = 0x425443;
-pub const usdt: canonical.AssetIdentity = 0x55534454;
+/// The core's single settlement-asset identity; venue spellings are normalized
+/// before they cross the adapter boundary.
+pub const usdt: canonical.AssetIdentity = 1;
 
 pub const Clock = struct {
     ptr: *anyopaque,
@@ -56,14 +58,18 @@ const OrderLink = struct {
     order: canonical.OrderIdentity,
     client_order_id: canonical.ClientOrderId,
     portfolio_reduce_only: bool,
+    quantity: canonical.InstrumentQuantity,
+    revision: u32,
 };
 
 const PendingOrderReconciliation = struct {
     identity: u128,
     order: canonical.OrderIdentity,
     venue_order: ?canonical.VenueOrderRef,
-    confirmed_absent_allowed: bool,
     result: canonical.ReconciliationStatus = .unresolved,
+    cumulative: ?canonical.InstrumentQuantity = null,
+    terminal_status: ?canonical.ExecutionReportStatus = null,
+    evidence: ?canonical.ReconciliationEvidence = null,
 };
 
 const Bootstrap = struct {
@@ -82,6 +88,9 @@ pub const OkxVenueAdapter = struct {
     binding: ?Binding = null,
     scheduler: ?order.Scheduler = null,
     pending_output: ?canonical.AdapterOutputBatch = null,
+    pending_private: [private.max_ws_events]private.PrivateEvent = undefined,
+    pending_private_count: u8 = 0,
+    private_failed: bool = false,
     pending: [pending_capacity]Pending = undefined,
     pending_count: u8 = 0,
     next_legacy_id: u64 = 1,
@@ -99,6 +108,15 @@ pub const OkxVenueAdapter = struct {
 
     pub fn init(allocator: std.mem.Allocator, chain: *live.Chain, clock: Clock, capability_profile: order.CapabilityProfile, instrument_rules: Rules) OkxVenueAdapter {
         return .{ .allocator = allocator, .chain = chain, .clock = clock, .profile = capability_profile, .rules = instrument_rules };
+    }
+
+    pub fn resumeAfter(self: *OkxVenueAdapter, last_sequence: u64) !void {
+        if (self.state != .idle or self.binding != null) return error.InvalidState;
+        self.next_event_sequence = try std.math.add(u64, last_sequence, 1);
+    }
+
+    pub fn rememberRecoveredOrder(self: *OkxVenueAdapter, order_identity: canonical.OrderIdentity, client_order_id: canonical.ClientOrderId, portfolio_reduce_only: bool, quantity: canonical.InstrumentQuantity, revision: u32) !void {
+        try self.rememberLink(.{ .order = order_identity, .client_order_id = client_order_id, .portfolio_reduce_only = portfolio_reduce_only, .quantity = quantity, .revision = revision });
     }
 
     /// The owning private transport feeds this reconciler. Keeping that I/O
@@ -125,17 +143,72 @@ pub const OkxVenueAdapter = struct {
     }
 
     /// Commits ACKs and private WebSocket frames before subscription, snapshot,
-    /// buffering, and idempotency checks.
+    /// buffering, and idempotency checks. Ready events become adapter-owned
+    /// pending output, so Venue-private facts never escape this seam.
     pub fn ingestPrivateWs(self: *OkxVenueAdapter, times: private.Times, raw: []const u8) !private.IngressBatch {
         try self.requireRunning();
-        if (self.pending_output != null) return error.OutputPending;
+        if (self.pending_output != null or private.max_ws_events - self.pending_private_count < private.max_events_per_ingress)
+            return error.OutputPending;
         const binding = self.binding orelse return error.InvalidBinding;
         const reconciler = self.reconciler orelse return error.MissingPrivateReconciler;
-        return reconciler.ingestWsMessage(self.allocator, self.chain.raw_sink, @intCast(binding.session), times, raw);
+        var batch = try reconciler.ingestWsMessage(self.allocator, self.chain.raw_sink, @intCast(binding.session), times, raw);
+        if (batch.rejection == null) {
+            try self.queueReadyPrivate(batch.eventSlice());
+            batch.event_count = 0;
+        }
+        return batch;
+    }
+
+    /// Reparse one already-durable private WebSocket frame. Recovery passes
+    /// the original evidence so this path cannot manufacture or re-persist
+    /// RawIngress records.
+    pub fn replayPrivateWs(self: *OkxVenueAdapter, times: private.Times, evidence: private.RawEvidenceRef, raw: []const u8) !private.IngressBatch {
+        try self.requireReplayCapacity();
+        const binding = self.binding orelse return error.InvalidBinding;
+        const reconciler = self.reconciler orelse return error.MissingPrivateReconciler;
+        var batch = try reconciler.replayWsMessage(self.allocator, @intCast(binding.session), times, evidence, raw);
+        if (batch.rejection == null) {
+            try self.queueReadyPrivate(batch.eventSlice());
+            batch.event_count = 0;
+        }
+        return batch;
+    }
+
+    /// Reparse one already-durable private REST page through the same
+    /// reconciliation state machine, without another RawIngress append.
+    pub fn replayPrivateRest(self: *OkxVenueAdapter, times: private.Times, source: private.IngressSource, evidence: private.RawEvidenceRef, raw: []const u8) !private.IngressBatch {
+        if (source.isWebSocket()) return error.InvalidReplayRoute;
+        try self.requireReplayCapacity();
+        const binding = self.binding orelse return error.InvalidBinding;
+        const reconciler = self.reconciler orelse return error.MissingPrivateReconciler;
+        var batch = try reconciler.replayRest(self.allocator, @intCast(binding.session), times, source, .{ .final = true }, evidence, raw);
+        if (batch.rejection == null) {
+            try self.queueReadyPrivate(batch.eventSlice());
+            batch.event_count = 0;
+        }
+        return batch;
     }
 
     pub fn adapter(self: *OkxVenueAdapter) venue.VenueAdapter {
-        return .{ .ptr = self, .vtable = &.{ .start = start, .try_send = send, .try_drain = drain, .stop = stop } };
+        return .{ .ptr = self, .vtable = &.{ .start = start, .try_send = send, .try_drain = drain, .stop = stop, .prepare_client_order_id = prepareClientOrderId } };
+    }
+
+    fn prepareClientOrderId(_: *anyopaque, namespace: [16]u8, account: canonical.ExchangeAccountIdentity, order_id: u64, _: canonical.ClientOrderId) !canonical.ClientOrderId {
+        if (account == 0 or order_id == 0) return error.InvalidOrderIdentity;
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hash.update("Ringwin OKX clOrdId v1");
+        hash.update(&namespace);
+        var identity: [64]u8 = undefined;
+        hash.update(try std.fmt.bufPrint(&identity, "{x}:{x}", .{ account, order_id }));
+        var digest: [32]u8 = undefined;
+        hash.final(&digest);
+        var prefix: [14]u8 = undefined;
+        @memcpy(&prefix, digest[0..14]);
+        const hex = std.fmt.bytesToHex(prefix, .upper);
+        var text: [32]u8 = undefined;
+        @memcpy(text[0..4], "RWN1");
+        @memcpy(text[4..], &hex);
+        return canonical.ClientOrderId.init(&text);
     }
 
     fn requireRunning(self: *const OkxVenueAdapter) !void {
@@ -144,6 +217,12 @@ pub const OkxVenueAdapter = struct {
             .stopped => error.Stopped,
             .running => {},
         };
+    }
+
+    fn requireReplayCapacity(self: *const OkxVenueAdapter) !void {
+        try self.requireRunning();
+        if (self.pending_output != null or private.max_ws_events - self.pending_private_count < private.max_events_per_ingress)
+            return error.OutputPending;
     }
 
     fn start(ptr: *anyopaque, config: venue.VenueConfig) venue.StartError!void {
@@ -163,7 +242,7 @@ pub const OkxVenueAdapter = struct {
         const self: *OkxVenueAdapter = @ptrCast(@alignCast(ptr));
         if (self.state == .idle) return error.NotStarted;
         if (self.state == .stopped) return .stopped;
-        if (self.pending_output != null) return .backpressure;
+        if (self.private_failed or self.pending_output != null) return .backpressure;
         switch (request) {
             .order_command => |command| try self.enqueue(command),
             .order_batch => |commands| {
@@ -190,7 +269,9 @@ pub const OkxVenueAdapter = struct {
     fn stop(ptr: *anyopaque, _: venue.DrainDeadline) venue.StopError!void {
         const self: *OkxVenueAdapter = @ptrCast(@alignCast(ptr));
         if (self.state == .idle) return error.NotStarted;
-        if (self.pending_output != null or self.pending_count != 0) return error.OutputPending;
+        if (self.pending_output != null or self.pending_private_count != 0 or self.pending_count != 0 or
+            self.pending_order_reconciliation_count != 0 or self.pending_account_reconciliation != null)
+            return error.OutputPending;
         self.state = .stopped;
     }
 
@@ -204,7 +285,6 @@ pub const OkxVenueAdapter = struct {
             .identity = request.identity,
             .order = request.order,
             .venue_order = request.venue_order,
-            .confirmed_absent_allowed = request.visibility_delay_elapsed and request.prior_session_inactive,
         };
         self.pending_order_reconciliation_count += 1;
         self.appendControl(.{ .reconciliation_started = request.identity }, request.identity);
@@ -230,7 +310,7 @@ pub const OkxVenueAdapter = struct {
         self.next_event_sequence +%= 1;
         output.append(.{ .envelope = .{
             .event_type = @intFromEnum(canonical.eventType(event)),
-            .schema_version = 1,
+            .schema_version = canonical.schema_version,
             .identity = .{ .stream = binding.session, .sequence = sequence },
             .source_fact_identity = source_fact_identity,
             .scope = .account,
@@ -248,13 +328,26 @@ pub const OkxVenueAdapter = struct {
     fn pumpPrivate(self: *OkxVenueAdapter) void {
         if (self.state != .running or self.pending_output != null) return;
         const reconciler = self.reconciler orelse return;
+        var output: canonical.AdapterOutputBatch = .{};
+        while (self.pending_private_count != 0 and output.events.len - output.len >= 8) {
+            const event = self.pending_private[0];
+            self.translatePrivate(&output, event) catch {
+                self.private_failed = true;
+                self.finishPrivateFailure(&output);
+                break;
+            };
+            _ = self.takeReadyPrivate();
+        }
+        if (output.len != 0) {
+            self.pending_output = output;
+            return;
+        }
         _ = reconciler.tryComplete() catch {
             self.finishReconciliation(false);
             return;
         };
         if (!reconciler.readiness().reconciliation_ready) return;
 
-        var output: canonical.AdapterOutputBatch = .{};
         while (output.len < canonical.max_events_per_adapter_batch) {
             const event = reconciler.drainReconciled() orelse {
                 self.finishPrivateBatch(&output);
@@ -268,14 +361,42 @@ pub const OkxVenueAdapter = struct {
         if (output.len != 0) self.pending_output = output;
     }
 
+    fn queueReadyPrivate(self: *OkxVenueAdapter, events: []const private.PrivateEvent) !void {
+        if (self.pending_private.len - self.pending_private_count < events.len) return error.OutputPending;
+        @memcpy(self.pending_private[self.pending_private_count..][0..events.len], events);
+        self.pending_private_count += @intCast(events.len);
+    }
+
+    fn takeReadyPrivate(self: *OkxVenueAdapter) private.PrivateEvent {
+        const event = self.pending_private[0];
+        self.pending_private_count -= 1;
+        std.mem.copyForwards(private.PrivateEvent, self.pending_private[0..self.pending_private_count], self.pending_private[1 .. self.pending_private_count + 1]);
+        return event;
+    }
+
     fn finishPrivateBatch(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch) void {
+        const required = self.pending_order_reconciliation_count + @intFromBool(self.pending_account_reconciliation != null);
+        if (required > output.events.len - output.len) return;
         if (self.pending_account_reconciliation) |identity| {
             self.appendPrivateResult(output, .account_reconciliation_result, identity, .{ .identity = identity, .complete = self.active_bootstrap != null, .status = if (self.active_bootstrap == null) .unresolved else .found_terminal });
             self.pending_account_reconciliation = null;
         }
         for (self.pending_order_reconciliations[0..self.pending_order_reconciliation_count]) |*request| {
-            if (request.result == .unresolved and request.confirmed_absent_allowed) request.result = .confirmed_absent;
-            self.appendPrivateResult(output, .order_reconciliation_result, request.identity, .{ .identity = request.identity, .complete = request.result != .unresolved, .status = request.result });
+            const link = self.findOrder(request.order);
+            self.appendPrivateResult(output, .order_reconciliation_result, request.identity, if (request.result != .unresolved and link != null and request.cumulative != null and request.evidence != null and
+                request.cumulative.?.instrument == link.?.quantity.instrument and request.cumulative.?.rules_version == link.?.quantity.rules_version and
+                request.cumulative.?.lots >= 0 and request.cumulative.?.lots <= link.?.quantity.lots) .{
+                .identity = request.identity,
+                .complete = true,
+                .status = request.result,
+                .order = request.order,
+                .revision = link.?.revision,
+                .cumulative_quantity = request.cumulative,
+                .remaining_quantity = .{ .instrument = link.?.quantity.instrument, .rules_version = link.?.quantity.rules_version, .lots = link.?.quantity.lots - request.cumulative.?.lots },
+                .terminal_status = request.terminal_status,
+                .rules_version = link.?.quantity.rules_version,
+                .evidence = request.evidence,
+            } else .{ .identity = request.identity, .complete = false, .status = .unresolved });
         }
         self.pending_order_reconciliation_count = 0;
     }
@@ -292,6 +413,8 @@ pub const OkxVenueAdapter = struct {
     }
 
     fn appendUnresolvedResults(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, account_complete: bool) void {
+        const required = self.pending_order_reconciliation_count + @intFromBool(self.pending_account_reconciliation != null);
+        if (required > output.events.len - output.len) return;
         if (self.pending_account_reconciliation) |identity| {
             self.appendPrivateResult(output, .account_reconciliation_result, identity, .{ .identity = identity, .complete = account_complete, .status = .unresolved });
             self.pending_account_reconciliation = null;
@@ -303,7 +426,11 @@ pub const OkxVenueAdapter = struct {
 
     fn appendPrivateResult(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, comptime tag: std.meta.Tag(canonical.Payload), source_fact_identity: u128, result: canonical.ReconciliationResult) void {
         const event: canonical.Payload = @unionInit(canonical.Payload, @tagName(tag), result);
+        const previous_len = output.len;
         self.appendPrivate(output, null, .account, null, null, source_fact_identity, event) catch {};
+        if (output.len != previous_len) if (result.evidence) |evidence| {
+            output.events[previous_len].envelope.times.receive_utc_ns = evidence.observed_at_utc_ns;
+        };
     }
 
     fn translatePrivate(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, event: private.PrivateEvent) !void {
@@ -334,7 +461,6 @@ pub const OkxVenueAdapter = struct {
         const cumulative = try self.privateQuantity(rules.identity, rules.rules, report.cumulative_filled_quantity);
         if (cumulative.lots > quantity.lots) return error.InvalidReportQuantity;
         const venue_order = try venueOrderRef((self.binding orelse return error.InvalidBinding).venue, @intFromEnum(report.venue_order_id));
-        self.observeOrder(report.venue_order_id, link.order, report.status);
         try self.appendPrivate(output, envelope, .account, rules.identity, null, digestIdentity(envelope.source_fact_identity), .{ .execution_report = .{
             .identity = digestIdentity(envelope.source_fact_identity),
             .order = link.order,
@@ -380,6 +506,7 @@ pub const OkxVenueAdapter = struct {
             .venue_create_time_utc_ns = report.venue_create_time_utc_ns,
             .venue_update_time_utc_ns = report.venue_update_time_utc_ns,
         } });
+        self.observeOrder(report.venue_order_id, link.order, report.status, cumulative, envelope);
     }
 
     fn translateFill(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, envelope: private.EventEnvelope, fill: private.Fill) !void {
@@ -597,11 +724,9 @@ pub const OkxVenueAdapter = struct {
             commands[index] = .{ .command = legacy, .reserved_notional_usdt_micros = pending.notional_usdt_micros };
         }
         const attempt = self.chain.dispatch(self.allocator, commands[0..batch.count]) catch |err| {
-            const state: canonical.DispatchState = switch (err) {
-                error.SideEffectsDisabled, error.DemoNotQualified, error.NotionalLimitExceeded, error.InstrumentNotAllowed => .not_sent,
-                else => .unknown,
-            };
-            const reason: ?canonical.CanonicalRejectReason = if (state == .not_sent) .venue_unavailable else null;
+            std.debug.print("[DEBUG-okx-adapter] dispatch_error={s}\n", .{@errorName(err)});
+            const reason = dispatchErrorReason(err);
+            const state: canonical.DispatchState = if (reason == null) .unknown else .not_sent;
             for (batch.slice()) |legacy| if (self.takePending(legacy.command_id)) |pending|
                 self.appendResult(pending.command, state, reason, null);
             return;
@@ -713,19 +838,19 @@ pub const OkxVenueAdapter = struct {
     }
 
     fn rememberOrder(self: *OkxVenueAdapter, command: canonical.OrderCommand) !void {
+        const quantity = command.quantity orelse return error.InvalidOrderLink;
+        try self.rememberLink(.{ .order = command.identity, .client_order_id = command.client_order_id, .portfolio_reduce_only = command.portfolio_reduce_only, .quantity = quantity, .revision = command.revision });
+    }
+
+    fn rememberLink(self: *OkxVenueAdapter, incoming: OrderLink) !void {
         for (self.order_links[0..self.order_link_count]) |*link| {
-            if (link.order != command.identity) continue;
-            if (!std.meta.eql(link.client_order_id, command.client_order_id) or
-                link.portfolio_reduce_only != command.portfolio_reduce_only)
+            if (link.order != incoming.order) continue;
+            if (!std.meta.eql(link.*, incoming))
                 return error.ConflictingOrderIdentity;
             return;
         }
         if (self.order_link_count == self.order_links.len) return error.Full;
-        self.order_links[self.order_link_count] = .{
-            .order = command.identity,
-            .client_order_id = command.client_order_id,
-            .portfolio_reduce_only = command.portfolio_reduce_only,
-        };
+        self.order_links[self.order_link_count] = incoming;
         self.order_link_count += 1;
     }
 
@@ -750,20 +875,37 @@ pub const OkxVenueAdapter = struct {
         return null;
     }
 
+    fn findOrder(self: *const OkxVenueAdapter, identity: canonical.OrderIdentity) ?OrderLink {
+        for (self.order_links[0..self.order_link_count]) |link| if (link.order == identity) return link;
+        return null;
+    }
+
     fn hasOrder(self: *const OkxVenueAdapter, identity: canonical.OrderIdentity) bool {
         for (self.order_links[0..self.order_link_count]) |link| if (link.order == identity) return true;
         return false;
     }
 
-    fn observeOrder(self: *OkxVenueAdapter, venue_order: private.VenueOrderId, order_identity: canonical.OrderIdentity, status: private.ExecutionStatus) void {
+    fn observeOrder(self: *OkxVenueAdapter, venue_order: private.VenueOrderId, order_identity: canonical.OrderIdentity, status: private.ExecutionStatus, cumulative: canonical.InstrumentQuantity, envelope: private.EventEnvelope) void {
         const binding = self.binding orelse return;
+        const link = self.findOrder(order_identity) orelse return;
         var digits: [64]u8 = undefined;
         const reference = canonical.VenueOrderRef.init(binding.venue, std.fmt.bufPrint(&digits, "{d}", .{@intFromEnum(venue_order)}) catch return) catch return;
         for (self.pending_order_reconciliations[0..self.pending_order_reconciliation_count]) |*request| {
-            if (request.order != order_identity and (request.venue_order == null or !std.meta.eql(request.venue_order.?, reference))) continue;
+            if (request.order != order_identity or (request.venue_order != null and !std.meta.eql(request.venue_order.?, reference))) continue;
             request.result = switch (status) {
                 .live, .partially_filled => .found_live,
                 .filled, .canceled => .found_terminal,
+            };
+            request.cumulative = cumulative;
+            request.terminal_status = switch (status) {
+                .filled => .filled,
+                .canceled => .canceled,
+                else => null,
+            };
+            request.evidence = .{
+                .scope = .{ .exchange_account = binding.account, .instrument = link.quantity.instrument, .order = request.order, .revision = link.revision, .from_utc_ns = envelope.receive_time_utc_ns, .through_utc_ns = envelope.receive_time_utc_ns },
+                .observed_at_utc_ns = envelope.receive_time_utc_ns,
+                .source = .{ .stream = binding.session, .sequence = envelope.raw_evidence.stream_sequence, .digest = envelope.raw_evidence.sha256 },
             };
         }
     }
@@ -774,7 +916,7 @@ pub const OkxVenueAdapter = struct {
         self.next_event_sequence = try std.math.add(u64, self.next_event_sequence, 1);
         const private_envelope = envelope orelse return output.append(.{ .envelope = .{
             .event_type = @intFromEnum(canonical.eventType(event)),
-            .schema_version = 1,
+            .schema_version = canonical.schema_version,
             .identity = .{ .stream = binding.session, .sequence = sequence },
             .source_fact_identity = source_fact_identity,
             .scope = scope,
@@ -790,7 +932,7 @@ pub const OkxVenueAdapter = struct {
         }, .event = event });
         try output.append(.{ .envelope = .{
             .event_type = @intFromEnum(canonical.eventType(event)),
-            .schema_version = 1,
+            .schema_version = canonical.schema_version,
             .identity = .{ .stream = binding.session, .sequence = sequence },
             .source_fact_identity = source_fact_identity,
             .scope = scope,
@@ -819,7 +961,7 @@ pub const OkxVenueAdapter = struct {
         self.next_event_sequence +%= 1;
         output.append(.{ .envelope = .{
             .event_type = 1,
-            .schema_version = 1,
+            .schema_version = canonical.schema_version,
             .identity = .{ .stream = binding.session, .sequence = sequence },
             .source_fact_identity = command.identity,
             .scope = .account,
@@ -838,13 +980,7 @@ pub const OkxVenueAdapter = struct {
 
 fn validatePlace(command: canonical.OrderCommand, instrument_rules: InstrumentRules) !void {
     try validateQuantity(command.quantity orelse return error.UnsupportedValue, instrument_rules);
-    const expected_tif: canonical.TimeInForce = switch (command.order_type) {
-        .limit => .good_til_canceled,
-        .market, .ioc => .immediate_or_cancel,
-        .fok => .fill_or_kill,
-        .post_only => .post_only,
-    };
-    if (command.time_in_force != expected_tif) return error.UnsupportedValue;
+    _ = try orderKind(command);
     switch (command.order_type) {
         .market => {
             if (command.limit_price != null) return error.UnsupportedValue;
@@ -859,16 +995,25 @@ fn validatePlace(command: canonical.OrderCommand, instrument_rules: InstrumentRu
 
 fn orderKind(command: canonical.OrderCommand) !order.OrderKind {
     return switch (command.order_type) {
-        .limit => .limit_gtc,
-        .market => .market,
-        .ioc => .limit_ioc,
-        .fok => .limit_fok,
-        .post_only => .post_only,
+        .limit => switch (command.time_in_force) {
+            .good_til_canceled => .limit_gtc,
+            .immediate_or_cancel => .limit_ioc,
+            .fill_or_kill => .limit_fok,
+            .post_only => return error.UnsupportedValue,
+        },
+        .market => if (command.time_in_force == .immediate_or_cancel) .market else error.UnsupportedValue,
+        .ioc => if (command.time_in_force == .immediate_or_cancel) .limit_ioc else error.UnsupportedValue,
+        .fok => if (command.time_in_force == .fill_or_kill) .limit_fok else error.UnsupportedValue,
+        .post_only => if (command.time_in_force == .post_only) .post_only else error.UnsupportedValue,
     };
 }
 
 fn digestIdentity(digest: [32]u8) u128 {
-    return std.mem.readInt(u128, digest[0..16], .little);
+    return std.mem.readInt(u64, digest[0..8], .little);
+}
+
+test "OKX canonical economic identities fit the legacy authoritative seam" {
+    try std.testing.expect(digestIdentity(@splat(0xff)) <= std.math.maxInt(u64));
 }
 
 fn decimal(value: private.Decimal) canonical.Decimal {
@@ -900,31 +1045,48 @@ fn assetAmount(asset: canonical.AssetIdentity, value: private.Decimal) !canonica
     return canonical.AssetAmount.fromDecimal(asset, decimal(value), try assetScale(asset));
 }
 
+fn accountAssetAmount(asset: canonical.AssetIdentity, value: private.Decimal, round_up: bool) !canonical.AssetAmount {
+    const scale = try assetScale(asset);
+    const parsed = decimal(value);
+    const atoms = parsed.exactAtoms(scale) catch |err| switch (err) {
+        error.InexactDecimal => blk: {
+            var divisor: i128 = 1;
+            var index: u8 = 0;
+            while (index < parsed.scale - scale) : (index += 1)
+                divisor = std.math.mul(i128, divisor, 10) catch return error.DecimalOverflow;
+            const floor = @divFloor(parsed.coefficient, divisor);
+            break :blk if (round_up and @rem(parsed.coefficient, divisor) != 0) floor + 1 else floor;
+        },
+        else => return err,
+    };
+    return .{ .asset = asset, .atoms = atoms };
+}
+
 fn balanceFor(value: private.Balance) !canonical.AccountBalance {
     const asset = try assetIdentity(value.asset.slice());
-    const total = try assetAmount(asset, value.equity orelse return error.MissingBalanceTotal);
-    const available = try assetAmount(asset, value.available_balance orelse return error.MissingBalanceAvailable);
-    const held = try assetAmount(asset, value.frozen_balance orelse return error.MissingBalanceHeld);
+    const total = try accountAssetAmount(asset, value.equity orelse return error.MissingBalanceTotal, false);
+    const available = try accountAssetAmount(asset, value.available_balance orelse return error.MissingBalanceAvailable, false);
+    const held = try accountAssetAmount(asset, value.frozen_balance orelse return error.MissingBalanceHeld, true);
     return .{
         .asset = asset,
         .total = total,
         .available = available,
         .held = held,
-        .liability = if (value.liability) |amount| try assetAmount(asset, amount) else null,
-        .cash_balance = if (value.cash_balance) |amount| try assetAmount(asset, amount) else null,
-        .isolated_liability = if (value.isolated_liability) |amount| try assetAmount(asset, amount) else null,
-        .cross_liability = if (value.cross_liability) |amount| try assetAmount(asset, amount) else null,
+        .liability = if (value.liability) |amount| try accountAssetAmount(asset, amount, true) else null,
+        .cash_balance = if (value.cash_balance) |amount| try accountAssetAmount(asset, amount, false) else null,
+        .isolated_liability = if (value.isolated_liability) |amount| try accountAssetAmount(asset, amount, true) else null,
+        .cross_liability = if (value.cross_liability) |amount| try accountAssetAmount(asset, amount, true) else null,
     };
 }
 
 fn marginFor(value: private.ExchangeMarginSnapshot) !canonical.AccountMargin {
-    const amount = try assetAmount(usdt, value.total_equity_usd orelse return error.MissingMarginEquity);
+    const amount = try accountAssetAmount(usdt, value.total_equity_usd orelse return error.MissingMarginEquity, false);
     return .{
         .amount = amount,
-        .adjusted_equity = if (value.adjusted_equity_usd) |amount_value| try assetAmount(usdt, amount_value) else null,
-        .initial_margin = if (value.initial_margin_usd) |amount_value| try assetAmount(usdt, amount_value) else null,
-        .maintenance_margin = if (value.maintenance_margin_usd) |amount_value| try assetAmount(usdt, amount_value) else null,
-        .isolated_equity = if (value.isolated_equity_usd) |amount_value| try assetAmount(usdt, amount_value) else null,
+        .adjusted_equity = if (value.adjusted_equity_usd) |amount_value| try accountAssetAmount(usdt, amount_value, false) else null,
+        .initial_margin = if (value.initial_margin_usd) |amount_value| try accountAssetAmount(usdt, amount_value, true) else null,
+        .maintenance_margin = if (value.maintenance_margin_usd) |amount_value| try accountAssetAmount(usdt, amount_value, true) else null,
+        .isolated_equity = if (value.isolated_equity_usd) |amount_value| try accountAssetAmount(usdt, amount_value, false) else null,
         .margin_ratio = if (value.margin_ratio) |ratio| decimal(ratio) else null,
     };
 }
@@ -983,6 +1145,16 @@ fn translateError(err: anyerror) canonical.CanonicalRejectReason {
         error.StaleVersion => .stale_version,
         error.InvalidVenueOrder, error.InvalidCharacter, error.Overflow => .unsupported_value,
         else => .unsupported_value,
+    };
+}
+
+fn dispatchErrorReason(err: anyerror) ?canonical.CanonicalRejectReason {
+    return switch (err) {
+        error.SideEffectsDisabled => .capability_unsupported,
+        error.DemoNotQualified => .venue_unavailable,
+        error.NotionalLimitExceeded => .unsupported_value,
+        error.InstrumentNotAllowed => .unsupported_instrument,
+        else => null,
     };
 }
 
@@ -1139,6 +1311,79 @@ test "OKX adapter releases buffered private bootstrap only after stable REST sco
     try adapter.stop(.{ .monotonic_ns = 1 });
 }
 
+test "OKX adapter releases ready private WS facts through the canonical seam" {
+    var raw = TestRawSink{};
+    var transport = TestTransport{};
+    var chain: live.Chain = .{ .mode = .demo_live, .qualification = qualification(), .raw_sink = raw.interface(), .transport = transport.interface() };
+    var clock = TestClock{};
+    var reconciler: private.Reconciler = .{};
+    var implementation = OkxVenueAdapter.init(std.testing.allocator, &chain, clock.interface(), testProfile(), testRules());
+    implementation.attachPrivateReconciler(&reconciler);
+    const adapter = implementation.adapter();
+    try startTest(adapter);
+    try implementation.beginPrivateSession();
+    const subscriptions = [_][]const u8{
+        \\{"event":"subscribe","arg":{"channel":"orders","instType":"ANY"}}
+        ,
+        \\{"event":"subscribe","arg":{"channel":"account"}}
+        ,
+        \\{"event":"subscribe","arg":{"channel":"positions","instType":"ANY"}}
+        ,
+        \\{"arg":{"channel":"account"},"eventType":"snapshot","curPage":1,"lastPage":true,"data":[{"uTime":"1800000000000","totalEq":"25","adjEq":"25","imr":"0","mmr":"0","mgnRatio":"","isoEq":"25","details":[{"ccy":"USDT","cashBal":"25","availBal":"25","eq":"25","frozenBal":"0","liab":"0","isoLiab":"0","crossLiab":"0"}]}]}
+        ,
+        \\{"arg":{"channel":"positions"},"eventType":"snapshot","curPage":1,"lastPage":true,"data":[]}
+    };
+    for (subscriptions) |frame| try std.testing.expect((try implementation.ingestPrivateWs(private_test_times, frame)).rejection == null);
+    try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .account_reconciliation = .{ .identity = 99, .exchange_account = 2, .expected_session = 6 } }));
+    _ = (try adapter.tryDrain()).?;
+    try ingestOkxBootstrapRound(&implementation);
+    _ = try adapter.tryDrain();
+    try ingestOkxBootstrapRound(&implementation);
+    _ = (try adapter.tryDrain()).?;
+    try std.testing.expect(reconciler.readiness().reconciliation_ready);
+
+    var command = try testCommand(16);
+    command.client_order_id = try canonical.ClientOrderId.init("RWN16");
+    try implementation.rememberOrder(command);
+    try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .order_reconciliation = .{ .identity = 123, .exchange_account = 2, .order = 16 } }));
+    _ = (try adapter.tryDrain()).?; // ReconciliationStarted; the private report arrives afterward.
+    const venue_client_order_id = command.client_order_id;
+    var order_frame: [768]u8 = undefined;
+    const filled_order = try std.fmt.bufPrint(&order_frame,
+        \\{{"arg":{{"channel":"orders"}},"data":[{{"instId":"BTC-USDT","ordId":"1001","clOrdId":"{s}","side":"buy","ordType":"limit","state":"filled","tdMode":"cash","posSide":"net","reduceOnly":"false","sz":"0.0001","px":"50000","accFillSz":"0.0001","avgPx":"50000","uTime":"1800000000100","tradeId":"2001","fillSz":"0.0001","fillPx":"50000","fillFee":"-0.000001","fillFeeCcy":"USDT","fillTime":"1800000000100","execType":"T"}}]}}
+    , .{venue_client_order_id.slice()});
+    const order_batch = try implementation.ingestPrivateWs(private_test_times, filled_order);
+    try std.testing.expectEqual(@as(u8, 0), order_batch.event_count);
+    const account_batch = try implementation.ingestPrivateWs(private_test_times,
+        \\{"arg":{"channel":"account"},"eventType":"snapshot","curPage":1,"lastPage":true,"data":[{"uTime":"1800000000101","totalEq":"20","adjEq":"20","imr":"0","mmr":"0","mgnRatio":"","isoEq":"20","details":[{"ccy":"USDT","cashBal":"20","availBal":"20","eq":"20","frozenBal":"0","liab":"0","isoLiab":"0","crossLiab":"0"}]}]}
+    );
+    try std.testing.expectEqual(@as(u8, 0), account_batch.event_count);
+    try std.testing.expectError(error.OutputPending, adapter.stop(.{ .monotonic_ns = 1 }));
+    const output = (try adapter.tryDrain()).?;
+    var saw_report = false;
+    var saw_fill = false;
+    var saw_account = false;
+    for (output.slice()) |record| switch (record.event) {
+        .execution_report => saw_report = true,
+        .fill => saw_fill = true,
+        .account_observed => saw_account = true,
+        else => {},
+    };
+    try std.testing.expect(saw_report);
+    try std.testing.expect(saw_fill);
+    try std.testing.expect(saw_account);
+    const reconciled = (try adapter.tryDrain()) orelse return error.MissingOrderReconciliation;
+    var found = false;
+    for (reconciled.slice()) |record| if (record.event == .order_reconciliation_result) {
+        const result = record.event.order_reconciliation_result;
+        try std.testing.expectEqual(canonical.ReconciliationStatus.found_terminal, result.status);
+        try std.testing.expectEqual(@as(canonical.OrderIdentity, 16), result.evidence.?.scope.order);
+        try std.testing.expect(!std.mem.eql(u8, &result.evidence.?.source.digest, &@as([32]u8, @splat(0))));
+        found = true;
+    };
+    try std.testing.expect(found);
+}
+
 test "OKX private facts normalize fee signs into canonical execution fill and account facts" {
     var raw = TestRawSink{};
     var transport = TestTransport{};
@@ -1150,11 +1395,12 @@ test "OKX private facts normalize fee signs into canonical execution fill and ac
     var command = try testCommand(16);
     command.client_order_id = try canonical.ClientOrderId.init("RWN-16");
     try implementation.rememberOrder(command);
+    const venue_client_order_id = command.client_order_id;
 
     var output: canonical.AdapterOutputBatch = .{};
     try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(1, 1), .payload = .{ .execution_report = .{
         .venue_order_id = @enumFromInt(1001),
-        .client_order_id = try private.ClientOrderId.init("RWN-16"),
+        .client_order_id = try private.ClientOrderId.init(venue_client_order_id.slice()),
         .instrument = .btc_usdt_spot,
         .side = .buy,
         .order_type = .limit,
@@ -1176,7 +1422,7 @@ test "OKX private facts normalize fee signs into canonical execution fill and ac
         .venue_trade_id = @enumFromInt(2001),
         .venue_bill_id = @enumFromInt(3001),
         .venue_order_id = @enumFromInt(1001),
-        .client_order_id = try private.ClientOrderId.init("RWN-16"),
+        .client_order_id = try private.ClientOrderId.init(venue_client_order_id.slice()),
         .instrument = .btc_usdt_spot,
         .side = .buy,
         .quantity = try private.Decimal.parse("0.0001"),
@@ -1191,6 +1437,7 @@ test "OKX private facts normalize fee signs into canonical execution fill and ac
         .owned_by_ringwin = true,
     } } });
     try std.testing.expectEqual(@as(u8, 2), output.len);
+    try std.testing.expectEqualStrings("RWN-16", output.events[0].event.execution_report.client_order_id.slice());
     try std.testing.expectEqual(canonical.ExecutionReportStatus.partially_filled, output.events[0].event.execution_report.status);
     try std.testing.expectEqual(@as(i128, 1), output.events[0].event.execution_report.cumulative_quantity.lots);
     try std.testing.expect(output.events[0].event.execution_report.venue_reduce_only.?);
@@ -1225,6 +1472,34 @@ test "OKX private facts normalize fee signs into canonical execution fill and ac
     try adapter.stop(.{ .monotonic_ns = 1 });
 }
 
+test "OKX account amounts conservatively quantize sub-micro values" {
+    try std.testing.expectEqual(@as(i128, 25_123_456), (try accountAssetAmount(usdt, try private.Decimal.parse("25.123456789"), false)).atoms);
+    try std.testing.expectEqual(@as(i128, 25_123_457), (try accountAssetAmount(usdt, try private.Decimal.parse("25.123456789"), true)).atoms);
+    try std.testing.expectEqual(@as(i128, -25_123_457), (try accountAssetAmount(usdt, try private.Decimal.parse("-25.123456789"), false)).atoms);
+    try std.testing.expectEqual(@as(i128, -25_123_456), (try accountAssetAmount(usdt, try private.Decimal.parse("-25.123456789"), true)).atoms);
+}
+
+test "OKX adapter preserves fail-closed dispatch rejection causes" {
+    try std.testing.expectEqual(canonical.CanonicalRejectReason.capability_unsupported, dispatchErrorReason(error.SideEffectsDisabled).?);
+    try std.testing.expectEqual(canonical.CanonicalRejectReason.venue_unavailable, dispatchErrorReason(error.DemoNotQualified).?);
+    try std.testing.expectEqual(canonical.CanonicalRejectReason.unsupported_value, dispatchErrorReason(error.NotionalLimitExceeded).?);
+    try std.testing.expectEqual(canonical.CanonicalRejectReason.unsupported_instrument, dispatchErrorReason(error.InstrumentNotAllowed).?);
+    try std.testing.expect(dispatchErrorReason(error.WebSocketTransport) == null);
+}
+
+test "OKX adapter resumes canonical event sequence before start" {
+    var raw = TestRawSink{};
+    var transport = TestTransport{};
+    var chain: live.Chain = .{ .mode = .demo_live, .qualification = qualification(), .raw_sink = raw.interface(), .transport = transport.interface() };
+    var clock = TestClock{};
+    var implementation = OkxVenueAdapter.init(std.testing.allocator, &chain, clock.interface(), testProfile(), testRules());
+    try implementation.resumeAfter(41);
+    try std.testing.expectEqual(@as(u64, 42), implementation.next_event_sequence);
+    const adapter = implementation.adapter();
+    try startTest(adapter);
+    try std.testing.expectError(error.InvalidState, implementation.resumeAfter(42));
+}
+
 test "OKX reconciliation result states are deterministic and bounded" {
     var raw = TestRawSink{};
     var transport = TestTransport{};
@@ -1237,18 +1512,18 @@ test "OKX reconciliation result states are deterministic and bounded" {
     try startTest(adapter);
     try implementation.rememberOrder(try testCommand(16));
 
-    const requests = [_]canonical.ReconciliationStatus{ .found_live, .found_terminal, .confirmed_absent };
+    const requests = [_]canonical.ReconciliationStatus{ .found_live, .found_terminal };
     for (requests, 0..) |expected, index| {
         const identity: u128 = index + 1;
-        try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .order_reconciliation = .{ .identity = identity, .exchange_account = 2, .order = 16, .venue_order = try canonical.VenueOrderRef.init(1, "1001"), .visibility_delay_elapsed = expected == .confirmed_absent, .prior_session_inactive = expected == .confirmed_absent } }));
+        try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .order_reconciliation = .{ .identity = identity, .exchange_account = 2, .order = 16, .venue_order = try canonical.VenueOrderRef.init(1, "1001") } }));
         _ = (try adapter.tryDrain()).?;
-        if (expected != .confirmed_absent)
-            implementation.observeOrder(@enumFromInt(1001), 16, if (expected == .found_live) .live else .filled);
+        implementation.observeOrder(@enumFromInt(1001), 16, if (expected == .found_live) .live else .filled, .{ .instrument = btc_usdt_spot, .rules_version = 8, .lots = if (expected == .found_live) 0 else 1 }, privateEnvelope(@intCast(index + 1), 1));
         var output: canonical.AdapterOutputBatch = .{};
         implementation.finishPrivateBatch(&output);
         try std.testing.expectEqual(@as(u8, 1), output.len);
         try std.testing.expectEqual(expected, output.events[0].event.order_reconciliation_result.status);
         try std.testing.expect(output.events[0].event.order_reconciliation_result.complete);
+        try std.testing.expectEqual(@as(i128, if (expected == .found_live) 0 else 1), output.events[0].event.order_reconciliation_result.cumulative_quantity.?.lots);
     }
 
     try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .order_reconciliation = .{ .identity = 40, .exchange_account = 2, .order = 16, .venue_order = try canonical.VenueOrderRef.init(1, "1001") } }));
@@ -1265,6 +1540,21 @@ test "OKX reconciliation result states are deterministic and bounded" {
     try std.testing.expectEqual(canonical.ReconciliationStatus.unresolved, unresolved.events[0].event.order_reconciliation_result.status);
     try std.testing.expect(!unresolved.events[0].event.order_reconciliation_result.complete);
     try adapter.stop(.{ .monotonic_ns = 1 });
+}
+
+test "OKX client order ID is stable per durable namespace account and order" {
+    var marker: u8 = 0;
+    const namespace: [16]u8 = @splat(7);
+    const requested = try canonical.ClientOrderId.init("RWN-1");
+    const first = try OkxVenueAdapter.prepareClientOrderId(&marker, namespace, 2, 1, requested);
+    try std.testing.expectEqual(@as(usize, 32), first.slice().len);
+    try std.testing.expect(std.mem.startsWith(u8, first.slice(), "RWN1"));
+    try std.testing.expect(std.meta.eql(first, try OkxVenueAdapter.prepareClientOrderId(&marker, namespace, 2, 1, requested)));
+    var next_namespace = namespace;
+    next_namespace[0] = 8;
+    try std.testing.expect(!std.meta.eql(first, try OkxVenueAdapter.prepareClientOrderId(&marker, next_namespace, 2, 1, requested)));
+    try std.testing.expect(!std.meta.eql(first, try OkxVenueAdapter.prepareClientOrderId(&marker, namespace, 3, 1, requested)));
+    try std.testing.expect(!std.meta.eql(first, try OkxVenueAdapter.prepareClientOrderId(&marker, namespace, 2, 2, requested)));
 }
 
 test "OKX venue adapter translates canonical commands and itemizes a batch" {
@@ -1318,6 +1608,11 @@ test "OKX adapter preserves canonical order semantics at the execution seam" {
 
     market_command.time_in_force = .good_til_canceled;
     try std.testing.expectError(error.UnsupportedValue, implementation.translate(market_command, 2));
+
+    var limit_ioc = try testCommand(3);
+    limit_ioc.time_in_force = .immediate_or_cancel;
+    const translated_ioc = try implementation.translate(limit_ioc, 3);
+    try std.testing.expectEqual(order.OrderKind.limit_ioc, translated_ioc.command.payload.place.kind);
 }
 
 test "OKX venue adapter preserves not-sent and unknown without retrying transport" {

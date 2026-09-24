@@ -7,10 +7,10 @@ const std = @import("std");
 const canonical = @import("canonical_event.zig");
 
 pub const contract_version: u16 = 1;
-pub const acceptance_schema_version: u16 = 5;
-pub const journal_schema_version: u16 = 13;
-pub const state_schema_version: u32 = 13;
-pub const schema_registry_identity: u64 = 10;
+pub const acceptance_schema_version: u16 = 7;
+pub const journal_schema_version: u16 = 16;
+pub const state_schema_version: u32 = 19;
+pub const schema_registry_identity: u64 = 13;
 pub const previous_journal_schema_version: u16 = journal_schema_version - 1;
 pub const previous_state_schema_version: u32 = state_schema_version - 1;
 pub const production_optimize = std.builtin.OptimizeMode.ReleaseSafe;
@@ -39,8 +39,29 @@ pub const SupportMatrixEntry = struct {
     exchange_account: ExchangeAccountScope,
     product: canonical.Product,
     instrument: Instrument,
+    /// Target capabilities the adapter must be able to encode. Presence here is
+    /// not live evidence.
     capabilities: []const OrderCapability,
+    /// Capabilities proven by a real transport/Testnet/Demo run. Empty means
+    /// `not_run`.
+    verified_capabilities: []const OrderCapability = &.{},
+    qualification: Qualification = .not_run,
     status: MatrixStatus,
+};
+
+pub const VerificationRuntime = enum { windows };
+pub const windows_verification_runtime = VerificationRuntime.windows;
+pub const VerificationRole = enum { engine, market_feed, execution_gateway, telemetry, control_fence };
+pub const VerificationVenue = enum { simulated };
+
+pub const WindowsChainEvidence = struct {
+    windows_process_chain_verified: bool = false,
+    production_qualification: bool = false,
+    venue: VerificationVenue = .simulated,
+    adapter: enum { windows_file } = .windows_file,
+    protection: enum { windows_virtual_lock } = .windows_virtual_lock,
+    power_loss_qualified: bool = false,
+    linux_admission_equivalent: bool = false,
 };
 
 const spot_capabilities = [_]OrderCapability{ .limit_place, .cancel, .native_amend, .bounded_batch };
@@ -121,11 +142,31 @@ pub fn supportsCapability(entry: SupportMatrixEntry, capability: OrderCapability
     return false;
 }
 
+pub fn verifiedCapability(entry: SupportMatrixEntry, capability: OrderCapability) bool {
+    for (entry.verified_capabilities) |available| if (available == capability) return true;
+    return false;
+}
+
+/// Windows verification evidence never satisfies production authority, even
+/// when the Windows process chain itself passed.
+pub fn windowsChainPermitsProduction(evidence: WindowsChainEvidence) bool {
+    _ = evidence;
+    return false;
+}
+
+pub fn isWindowsProcessChainVerified(evidence: WindowsChainEvidence) bool {
+    return evidence.windows_process_chain_verified and
+        !evidence.production_qualification and
+        evidence.venue == .simulated and
+        !evidence.power_loss_qualified and
+        !evidence.linux_admission_equivalent;
+}
+
 test "production contract freezes Linux scope and schema" {
-    try std.testing.expectEqual(@as(u16, 13), journal_schema_version);
-    try std.testing.expectEqual(@as(u32, 13), state_schema_version);
-    try std.testing.expectEqual(@as(u16, 12), previous_journal_schema_version);
-    try std.testing.expectEqual(@as(u32, 12), previous_state_schema_version);
+    try std.testing.expectEqual(@as(u16, 16), journal_schema_version);
+    try std.testing.expectEqual(@as(u32, 19), state_schema_version);
+    try std.testing.expectEqual(@as(u16, 15), previous_journal_schema_version);
+    try std.testing.expectEqual(@as(u32, 18), previous_state_schema_version);
     try std.testing.expectEqual(@as(usize, 14), support_matrix.len);
     try std.testing.expectEqual(std.builtin.OptimizeMode.ReleaseSafe, production_optimize);
     try std.testing.expectEqual(ProductionPlatform.linux, production_platform);
@@ -182,4 +223,29 @@ test "Gate.io and Bitget are explicit disabled rows" {
         .endpoint_environment = .production,
         .credential_environment = .production,
     }));
+}
+
+test "Windows verification success cannot permit production" {
+    const evidence: WindowsChainEvidence = .{
+        .windows_process_chain_verified = true,
+        .production_qualification = false,
+        .venue = .simulated,
+    };
+    try std.testing.expect(isWindowsProcessChainVerified(evidence));
+    try std.testing.expect(!windowsChainPermitsProduction(evidence));
+    try std.testing.expectEqual(VerificationRuntime.windows, windows_verification_runtime);
+    try std.testing.expectEqual(ProductionPlatform.linux, production_platform);
+}
+
+test "required capabilities are not verified evidence" {
+    for (support_matrix) |entry| {
+        try std.testing.expectEqual(@as(usize, 0), entry.verified_capabilities.len);
+        try std.testing.expectEqual(Qualification.not_run, entry.qualification);
+        try std.testing.expect(!verifiedCapability(entry, .native_amend));
+        try std.testing.expect(!verifiedCapability(entry, .native_post_only));
+        try std.testing.expect(!verifiedCapability(entry, .bounded_batch));
+    }
+    try std.testing.expect(supportsCapability(support_matrix[2], .native_amend));
+    try std.testing.expectEqual(Venue.binance, support_matrix[2].venue);
+    try std.testing.expectEqual(Venue.bybit, support_matrix[4].venue);
 }

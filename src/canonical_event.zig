@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const schema_version: u16 = 1;
+pub const schema_version: u16 = 2;
 
 pub const VenueIdentity = u64;
 pub const Product = enum(u8) { spot, isolated_linear_usdt };
@@ -251,8 +251,6 @@ pub const OrderReconciliationRequest = struct {
     exchange_account: ExchangeAccountIdentity,
     order: OrderIdentity,
     venue_order: ?VenueOrderRef = null,
-    visibility_delay_elapsed: bool = false,
-    prior_session_inactive: bool = false,
 };
 
 pub const AccountReconciliationRequest = struct {
@@ -366,6 +364,29 @@ pub const AccountObservation = struct {
 };
 
 pub const ReconciliationStatus = enum(u8) { found_live, found_terminal, confirmed_absent, unresolved };
+pub const OrderQueryScope = struct {
+    exchange_account: ExchangeAccountIdentity,
+    instrument: InstrumentIdentity,
+    order: OrderIdentity,
+    revision: u32,
+    from_utc_ns: u64,
+    through_utc_ns: u64,
+};
+pub const AbsenceCoverage = struct {
+    prior_session: AdapterSessionIdentity,
+    prior_session_inactive: bool,
+    visibility_deadline_utc_ns: u64,
+    order_history_complete: bool,
+    terminal_history_complete: bool,
+    fills_complete: bool,
+    economics_complete: bool,
+};
+pub const ReconciliationEvidence = struct {
+    scope: OrderQueryScope,
+    observed_at_utc_ns: u64,
+    source: RawEvidenceRef,
+    absence: ?AbsenceCoverage = null,
+};
 pub const ReconciliationResult = struct {
     identity: u128,
     complete: bool,
@@ -376,6 +397,7 @@ pub const ReconciliationResult = struct {
     remaining_quantity: ?InstrumentQuantity = null,
     terminal_status: ?ExecutionReportStatus = null,
     rules_version: u64 = 0,
+    evidence: ?ReconciliationEvidence = null,
 };
 
 pub const ExecutionReport = struct {

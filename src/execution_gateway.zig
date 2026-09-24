@@ -10,7 +10,9 @@ const production_contract = @import("production_contract.zig");
 const failover = @import("failover.zig");
 const dispatch_record_type: u16 = 0x4701;
 const resolution_record_type: u16 = 0x4702;
-const dispatch_snapshot = "GatewayDispatchV1";
+const dispatch_snapshot = "GatewayDispatchV2";
+const namespace_size = 16;
+const snapshot_size = dispatch_snapshot.len + namespace_size;
 
 pub const CapabilityProfile = struct {
     version: u64,
@@ -89,6 +91,7 @@ const AcceptedDispatch = struct {
 const UncertainDispatch = struct {
     account: canonical.ExchangeAccountIdentity,
     command_id: u64,
+    client_order_id: canonical.ClientOrderId,
     reconciliation_id: u64 = 0,
     reconciliation_status: ?oms.ReconciliationStatus = null,
 };
@@ -102,6 +105,7 @@ const DurableDispatch = struct {
     store: durable.Store,
     io: std.Io,
     stream: durable.StreamIdentity,
+    namespace: [namespace_size]u8,
     next_sequence: u64,
 };
 pub const Gateway = struct {
@@ -127,6 +131,11 @@ pub const Gateway = struct {
     pub fn bootstrapDurableDispatch(self: *Gateway, store: durable.Store, io: std.Io, stream: durable.StreamIdentity) !void {
         if (self.durable_dispatch != null or stream.domain != .control or stream.id == 0 or store.safetyGate() != .open)
             return error.DurableDispatchUnavailable;
+        var namespace: [namespace_size]u8 = undefined;
+        std.Io.randomSecure(std.Io.Threaded.global_single_threaded.io(), &namespace) catch return error.DurableDispatchUnavailable;
+        var snapshot: [snapshot_size]u8 = undefined;
+        @memcpy(snapshot[0..dispatch_snapshot.len], dispatch_snapshot);
+        @memcpy(snapshot[dispatch_snapshot.len..], &namespace);
         store.append(io, .{ .stream = stream, .record = .{
             .type_id = dispatch_record_type,
             .schema_version = production_contract.journal_schema_version,
@@ -141,9 +150,9 @@ pub const Gateway = struct {
         } }) catch return error.DurableDispatchUnavailable;
         store.commit(io, stream, 1) catch return error.DurableDispatchUnavailable;
         store.seal(io, stream) catch return error.DurableDispatchUnavailable;
-        store.publishSnapshot(io, stream, 1, dispatch_snapshot) catch return error.DurableDispatchUnavailable;
+        store.publishSnapshot(io, stream, 1, &snapshot) catch return error.DurableDispatchUnavailable;
         store.rotate(io, stream) catch return error.DurableDispatchUnavailable;
-        self.durable_dispatch = .{ .store = store, .io = io, .stream = stream, .next_sequence = 2 };
+        self.durable_dispatch = .{ .store = store, .io = io, .stream = stream, .namespace = namespace, .next_sequence = 2 };
     }
 
     /// Recovery reconstructs only Unknown dispatch identities. It never
@@ -153,8 +162,11 @@ pub const Gateway = struct {
             return error.DurableDispatchUnavailable;
         const recovered = store.recover(io, stream) catch return error.DurableDispatchUnavailable;
         if (recovered.status != .ready or recovered.gate != .open or
-            !std.mem.eql(u8, recovered.snapshot, dispatch_snapshot) or recovered.committed_barrier == 0)
+            recovered.snapshot.len != snapshot_size or
+            !std.mem.eql(u8, recovered.snapshot[0..dispatch_snapshot.len], dispatch_snapshot) or recovered.committed_barrier == 0)
             return error.DurableDispatchUnavailable;
+        var namespace: [namespace_size]u8 = undefined;
+        @memcpy(&namespace, recovered.snapshot[dispatch_snapshot.len..]);
         var last_committed_sequence: u64 = 1; // The sealed bootstrap snapshot covers sequence 1.
         if (recovered.tail.len != 0) {
             var reader = try trading.journal.Reader.init(recovered.tail);
@@ -170,10 +182,10 @@ pub const Gateway = struct {
                     switch (record.type_id) {
                         dispatch_record_type => {
                             const proof = snapshot_codec.decodeBare(record.payload, DispatchProof) catch return error.DurableDispatchUnavailable;
-                            if (proof.command.command_id == 0 or proof.context.account == 0 or !proof.command.authority.complete() or
+                            if (proof.command.command_id == 0 or proof.context.account == 0 or proof.command.client_order_id.len == 0 or !proof.command.authority.complete() or
                                 self.uncertainIndex(proof.context.account, proof.command.command_id) != null)
                                 return error.DurableDispatchUnavailable;
-                            self.markUncertain(proof.context.account, proof.command.command_id) catch return error.DurableDispatchUnavailable;
+                            self.markUncertain(proof.context.account, proof.command.command_id, proof.command.client_order_id) catch return error.DurableDispatchUnavailable;
                         },
                         resolution_record_type => {
                             const resolution = snapshot_codec.decodeBare(record.payload, DispatchResolution) catch return error.DurableDispatchUnavailable;
@@ -191,13 +203,13 @@ pub const Gateway = struct {
             };
         }
         if (last_committed_sequence != recovered.committed_barrier) return error.DurableDispatchUnavailable;
-        self.durable_dispatch = .{ .store = store, .io = io, .stream = stream, .next_sequence = std.math.add(u64, recovered.last_sequence, 1) catch return error.DurableDispatchUnavailable };
+        self.durable_dispatch = .{ .store = store, .io = io, .stream = stream, .namespace = namespace, .next_sequence = std.math.add(u64, recovered.last_sequence, 1) catch return error.DurableDispatchUnavailable };
     }
 
-    fn markUncertain(self: *Gateway, account: canonical.ExchangeAccountIdentity, command_id: u64) !void {
+    fn markUncertain(self: *Gateway, account: canonical.ExchangeAccountIdentity, command_id: u64, client_order_id: canonical.ClientOrderId) !void {
         if (self.uncertainIndex(account, command_id) != null) return;
         if (self.uncertain_dispatch_count == self.uncertain_dispatches.len) return error.DispatchCapacity;
-        self.uncertain_dispatches[self.uncertain_dispatch_count] = .{ .account = account, .command_id = command_id };
+        self.uncertain_dispatches[self.uncertain_dispatch_count] = .{ .account = account, .command_id = command_id, .client_order_id = client_order_id };
         self.uncertain_dispatch_count += 1;
     }
 
@@ -437,7 +449,7 @@ pub const Gateway = struct {
             if (!guard.lease.valid(now_monotonic_ns)) return error.NotSent;
             guard.check(now_monotonic_ns, token, increases_risk) catch return error.NotSent;
         }
-        const proof: DispatchProof = .{
+        var proof: DispatchProof = .{
             .context = .{
                 .account = refs.exchange_account,
                 .capability_version = refs.capability.version,
@@ -451,6 +463,13 @@ pub const Gateway = struct {
             .authority_barrier = authority.authority_barrier,
             .now_monotonic_ns = now_monotonic_ns,
         };
+        proof.command.client_order_id = route.adapter.prepareClientOrderId(
+            committed.namespace,
+            refs.exchange_account,
+            oms_command.order_id,
+            oms_command.client_order_id,
+        ) catch return error.NotSent;
+        if (proof.command.client_order_id.len == 0) return error.NotSent;
         if (self.acceptedDispatchIndex(refs.exchange_account, command_id) != null) return self.sendProofInternal(proof);
         for (self.uncertain_dispatches[0..self.uncertain_dispatch_count]) |uncertain|
             if (uncertain.account == refs.exchange_account and uncertain.command_id == command_id) return error.NotSent;
@@ -475,7 +494,7 @@ pub const Gateway = struct {
         };
         committed.store.commit(committed.io, committed.stream, committed.next_sequence) catch {
             self.latchAccount(refs.exchange_account);
-            try self.markUncertain(refs.exchange_account, command_id);
+            try self.markUncertain(refs.exchange_account, command_id, proof.command.client_order_id);
             return error.NotSent;
         };
         self.durable_dispatch.?.next_sequence = std.math.add(u64, committed.next_sequence, 1) catch {
@@ -483,10 +502,10 @@ pub const Gateway = struct {
             return error.NotSent;
         };
         const result = self.sendProofInternal(proof) catch {
-            try self.markUncertain(refs.exchange_account, command_id);
+            try self.markUncertain(refs.exchange_account, command_id, proof.command.client_order_id);
             return error.NotSent;
         };
-        if (result != .accepted) try self.markUncertain(refs.exchange_account, command_id);
+        if (result != .accepted) try self.markUncertain(refs.exchange_account, command_id, proof.command.client_order_id);
         return result;
     }
     fn sendUnprovedForContractTest(self: *Gateway, request: canonical.OrderCommand) !venue.SendResult {
@@ -893,6 +912,22 @@ test "Gateway route and batch admission fail atomically" {
     try std.testing.expectEqual(@as(u64, 0), gateway.send_attempt_count);
     try std.testing.expectEqual(@as(u8, 0), adapter_fixture.sent);
 }
+test "dispatch namespace survives recovery and changes for a new stream" {
+    const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(memory);
+    memory.* = .init();
+    const store = memory.interface();
+    var first: Gateway = .{};
+    const first_stream: durable.StreamIdentity = .{ .domain = .control, .id = 91 };
+    try first.bootstrapDurableDispatch(store, undefined, first_stream);
+    var recovered: Gateway = .{};
+    try recovered.attachRecoveredDurableDispatch(store, undefined, first_stream);
+    try std.testing.expectEqualSlices(u8, &first.durable_dispatch.?.namespace, &recovered.durable_dispatch.?.namespace);
+    var second: Gateway = .{};
+    try second.bootstrapDurableDispatch(store, undefined, .{ .domain = .control, .id = 92 });
+    try std.testing.expect(!std.mem.eql(u8, &first.durable_dispatch.?.namespace, &second.durable_dispatch.?.namespace));
+}
+
 test "Gateway scopes uncertainty and market health to the affected route" {
     var first = Fixture{ .pending = null };
     var second = Fixture{ .pending = null };
@@ -904,7 +939,7 @@ test "Gateway scopes uncertainty and market health to the affected route" {
     var unknown: canonical.AdapterOutputBatch = .{};
     try unknown.append(.{ .envelope = .{
         .event_type = @intFromEnum(canonical.EventType.order_dispatch_result),
-        .schema_version = 1,
+        .schema_version = canonical.schema_version,
         .identity = .{ .stream = 1, .sequence = 1 },
         .source_fact_identity = 1,
         .scope = .account,
@@ -923,7 +958,7 @@ test "Gateway scopes uncertainty and market health to the affected route" {
     var gap: canonical.AdapterOutputBatch = .{};
     try gap.append(.{ .envelope = .{
         .event_type = @intFromEnum(canonical.EventType.market_data_health_changed),
-        .schema_version = 1,
+        .schema_version = canonical.schema_version,
         .identity = .{ .stream = 2, .sequence = 1 },
         .source_fact_identity = 2,
         .scope = .instrument,

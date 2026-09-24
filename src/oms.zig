@@ -113,6 +113,7 @@ pub const ExecutionReport = struct {
     status: ReportStatus,
     cumulative_quantity: i64,
     remaining_quantity: i64,
+    canonical_digest: [32]u8 = @splat(0),
 };
 
 pub const ReconciliationResult = struct {
@@ -123,6 +124,7 @@ pub const ReconciliationResult = struct {
     cumulative_quantity: i64,
     remaining_quantity: i64,
     terminal_state: ?TerminalState = null,
+    canonical_digest: [32]u8 = @splat(0),
 };
 
 pub const Command = struct {
@@ -185,6 +187,8 @@ pub const Order = struct {
     last_reconciliation_revision: u32 = 0,
     last_reconciliation_cumulative_quantity: i64 = 0,
     last_reconciliation_remaining_quantity: i64 = 0,
+    archive_window_closed: bool = false,
+    archive_audit_digest: [32]u8 = @splat(0),
 };
 
 pub const Tombstone = struct {
@@ -206,8 +210,8 @@ pub const Tombstone = struct {
     fact_digest: [32]u8,
 };
 
-const Replacement = struct { instrument: Instrument, side: Side, portfolio_reduce_only: bool, venue_reduce_only: bool, quantity: i64, limit_price: Price, reservation: Reservation, order_type: canonical.OrderType, time_in_force: canonical.TimeInForce, market_protection_price: ?Price, client_order_id: canonical.ClientOrderId };
-pub const SeenIntent = struct { strategy_instance: u128, intent_sequence: u64, group: u64, policy: PartialExecutionPolicy, fingerprint: u64 };
+const Replacement = struct { instrument: Instrument, side: Side, portfolio_reduce_only: bool, venue_reduce_only: bool, quantity: i64, limit_price: Price, reservation: Reservation, order_type: canonical.OrderType, time_in_force: canonical.TimeInForce, market_protection_price: ?Price, client_order_id: canonical.ClientOrderId, expected_revision: u32, expected_cumulative_quantity: i64 };
+pub const SeenIntent = struct { strategy_instance: u128, intent_sequence: u64, group: u64, policy: PartialExecutionPolicy, fingerprint: [16]u8 };
 
 pub const Oms = struct {
     orders: [max_orders]Order = undefined,
@@ -259,7 +263,7 @@ pub const Oms = struct {
     /// Emits at most one cancel for every non-terminal order in scope.
     pub fn cancelOpenOrders(self: *Oms, increasing_only: bool) !void {
         for (self.orders[0..self.order_count]) |*order| {
-            if (order.state == .filled or order.state == .canceled or order.state == .rejected or
+            if (order.state == .filled or order.state == .canceled or order.state == .rejected or order.state == .unknown or
                 order.state == .pending_cancel or
                 (increasing_only and order.portfolio_reduce_only and order.venue_reduce_only))
                 continue;
@@ -273,7 +277,7 @@ pub const Oms = struct {
     pub fn cancelStrategyOrders(self: *Oms, strategy_instance: u128) !void {
         if (strategy_instance == 0) return error.InvalidStrategyInstance;
         for (self.orders[0..self.order_count]) |*order| {
-            if (order.strategy_instance != strategy_instance or order.state == .filled or
+            if (order.strategy_instance != strategy_instance or order.state == .unknown or order.state == .filled or
                 order.state == .canceled or order.state == .rejected or order.state == .pending_cancel)
                 continue;
             order.state = .pending_cancel;
@@ -321,36 +325,46 @@ pub const Oms = struct {
         return null;
     }
 
-    pub fn groupKnown(self: *const Oms, group: IntentGroup) bool {
-        if (group.count == 0 or group.count > max_group_members) return false;
+    pub const GroupIdentityStatus = enum { fresh, duplicate, conflict };
+
+    pub fn groupIdentityStatus(self: *const Oms, group: IntentGroup) !GroupIdentityStatus {
+        if (group.count == 0 or group.count > max_group_members) return error.InvalidIntentGroup;
         var known_count: u8 = 0;
-        for (group.members[0..group.count]) |intent| {
+        for (group.members[0..group.count], 0..) |intent, index| {
+            if (intent.intent_sequence != try std.math.add(u64, group.first_intent_sequence, index) or
+                intent.strategy_instance != group.members[0].strategy_instance)
+                return error.NonConsecutiveIntentGroup;
             for (self.intent_history[0..self.intent_history_count]) |known| {
-                if (known.strategy_instance == intent.strategy_instance and known.intent_sequence == intent.intent_sequence and
-                    known.group == group.first_intent_sequence and known.policy == group.policy and known.fingerprint == intentFingerprint(intent))
-                {
-                    known_count += 1;
-                    break;
-                }
+                if (known.strategy_instance != intent.strategy_instance or known.intent_sequence != intent.intent_sequence) continue;
+                if (known.group != group.first_intent_sequence or known.policy != group.policy or
+                    !std.mem.eql(u8, &known.fingerprint, &intentFingerprint(intent, group.count))) return .conflict;
+                known_count += 1;
+                break;
             }
         }
-        return known_count == group.count;
+        if (known_count == group.count) return .duplicate;
+        return if (known_count == 0) .fresh else .conflict;
     }
 
     pub fn applyGroup(self: *Oms, group: IntentGroup) !void {
-        return self.applyGroupWithRefs(group, &.{});
+        return self.applyGroupWithRefs(group, group, &.{});
     }
 
-    pub fn applyQualifiedGroup(self: *Oms, group: IntentGroup, refs: []const RiskFactRefs) !void {
+    pub fn applyQualifiedGroup(self: *Oms, group: IntentGroup, original: IntentGroup, refs: []const RiskFactRefs) !void {
+        switch (try self.groupIdentityStatus(original)) {
+            .duplicate => return,
+            .conflict => return error.ConflictingIntentIdentity,
+            .fresh => {},
+        }
         if (refs.len != group.count) return error.InvalidRiskFactRefs;
         for (refs) |ref| if (ref.decision == 0 or ref.reservation == 0 or ref.decision == ref.reservation)
             return error.InvalidRiskFactRefs;
-        return self.applyGroupWithRefs(group, refs);
+        return self.applyGroupWithRefs(group, original, refs);
     }
 
-    fn applyGroupWithRefs(self: *Oms, group: IntentGroup, refs: []const RiskFactRefs) !void {
+    fn applyGroupWithRefs(self: *Oms, group: IntentGroup, original: IntentGroup, refs: []const RiskFactRefs) !void {
         var candidate = self.*;
-        candidate.applyGroupInPlace(group, refs) catch |err| {
+        candidate.applyGroupInPlace(group, original, refs) catch |err| {
             // Capacity exhaustion is an authoritative safety transition even
             // though the rejected intent group itself is not committed.
             if (candidate.recovery_only) self.recovery_only = true;
@@ -359,22 +373,15 @@ pub const Oms = struct {
         self.* = candidate;
     }
 
-    fn applyGroupInPlace(self: *Oms, group: IntentGroup, refs: []const RiskFactRefs) !void {
+    fn applyGroupInPlace(self: *Oms, group: IntentGroup, original: IntentGroup, refs: []const RiskFactRefs) !void {
         if (group.count == 0 or group.count > max_group_members) return error.InvalidIntentGroup;
-        var duplicate_count: u8 = 0;
-        for (group.members[0..group.count], 0..) |intent, index| {
-            if (intent.intent_sequence != try std.math.add(u64, group.first_intent_sequence, index))
-                return error.NonConsecutiveIntentGroup;
-            for (self.intent_history[0..self.intent_history_count]) |known| {
-                if (known.strategy_instance != intent.strategy_instance or known.intent_sequence != intent.intent_sequence) continue;
-                if (known.fingerprint != intentFingerprint(intent) or known.group != group.first_intent_sequence or known.policy != group.policy)
-                    return error.ConflictingIntentIdentity;
-                duplicate_count += 1;
-                break;
-            }
+        if (group.count != original.count or group.first_intent_sequence != original.first_intent_sequence or group.policy != original.policy)
+            return error.InvalidIntentGroup;
+        switch (try self.groupIdentityStatus(original)) {
+            .duplicate => return,
+            .conflict => return error.ConflictingIntentIdentity,
+            .fresh => {},
         }
-        if (duplicate_count == group.count) return;
-        if (duplicate_count != 0) return error.PartialDuplicateIntentGroup;
         if (self.intent_history_count + group.count > max_intent_history) {
             self.recovery_only = true;
             return error.IdentitySetFull;
@@ -390,7 +397,7 @@ pub const Oms = struct {
                 if (group.policy == .cancel_remaining) try self.cancelGroup(group.first_intent_sequence);
                 return err;
             };
-            self.intent_history[self.intent_history_count] = .{ .strategy_instance = intent.strategy_instance, .intent_sequence = intent.intent_sequence, .group = group.first_intent_sequence, .policy = group.policy, .fingerprint = intentFingerprint(intent) };
+            self.intent_history[self.intent_history_count] = .{ .strategy_instance = intent.strategy_instance, .intent_sequence = intent.intent_sequence, .group = group.first_intent_sequence, .policy = group.policy, .fingerprint = intentFingerprint(original.members[index], original.count) };
             self.intent_history_count += 1;
         }
     }
@@ -425,7 +432,7 @@ pub const Oms = struct {
                     if (!intent.allow_cancel_confirm_create) return error.CancelConfirmCreateNotAuthorized;
                     order.state = .pending_cancel;
                     if (intent.reservation.atoms <= 0) return error.InvalidOrderSpec;
-                    order.replacement = .{ .instrument = order.instrument, .side = intent.side, .portfolio_reduce_only = intent.portfolio_reduce_only, .venue_reduce_only = intent.venue_reduce_only, .quantity = intent.quantity, .limit_price = intent.limit_price, .reservation = intent.reservation, .order_type = intent.order_type, .time_in_force = intent.time_in_force, .market_protection_price = intent.market_protection_price, .client_order_id = intent.client_order_id };
+                    order.replacement = .{ .instrument = order.instrument, .side = intent.side, .portfolio_reduce_only = intent.portfolio_reduce_only, .venue_reduce_only = intent.venue_reduce_only, .quantity = intent.quantity, .limit_price = intent.limit_price, .reservation = intent.reservation, .order_type = intent.order_type, .time_in_force = intent.time_in_force, .market_protection_price = intent.market_protection_price, .client_order_id = intent.client_order_id, .expected_revision = intent.expected_revision, .expected_cumulative_quantity = intent.expected_cumulative_quantity };
                     try self.emit(order.*, .cancel, intent.intent_sequence, refs);
                 }
             },
@@ -467,6 +474,19 @@ pub const Oms = struct {
                 },
             }
         }
+    }
+
+    pub const ReportIdentity = enum { unknown, duplicate };
+
+    /// Canonical and core reports share this identity seam. TradingShard must
+    /// not keep a second last-report scalar.
+    pub fn lookupReport(self: *const Oms, report: ExecutionReport) !ReportIdentity {
+        for (self.report_history[0..self.report_history_count]) |known| {
+            if (known.order_id != report.order_id or known.report_id != report.report_id) continue;
+            if (!std.meta.eql(known, report)) return error.ConflictingReportIdentity;
+            return .duplicate;
+        }
+        return .unknown;
     }
 
     pub fn applyReport(self: *Oms, report: ExecutionReport) !void {
@@ -539,13 +559,14 @@ pub const Oms = struct {
         }
         rememberReport(order, report);
         order.cumulative_quantity = report.cumulative_quantity;
+        const cancel_unsettled = self.cancelUnsettled(order.*);
         order.state = switch (report.status) {
-            .accepted => .live,
-            .partially_filled => .partially_filled,
+            .accepted => if (cancel_unsettled) .pending_cancel else .live,
+            .partially_filled => if (cancel_unsettled) .pending_cancel else .partially_filled,
             .filled => .filled,
             .canceled => .canceled,
             .rejected => .rejected,
-            .amended => .live,
+            .amended => if (cancel_unsettled) .pending_cancel else .live,
         };
         if (report.status == .filled or report.status == .canceled or report.status == .rejected) {
             order.reservation_active = false;
@@ -569,6 +590,21 @@ pub const Oms = struct {
             return err;
         };
         self.* = candidate;
+    }
+
+    pub fn canConfirmAbsent(self: *const Oms, order_id: u64, revision: u32) bool {
+        const order = self.orderById(order_id) orelse return false;
+        const command_value = self.findCommandForOrder(order_id) orelse return false;
+        for (self.reconciliation_history[0..self.reconciliation_history_count]) |known|
+            if (known.order_id == order_id and known.status != .unresolved) return false;
+        return order.state == .unknown and order.dispatch_submitted and order.last_report_id == 0 and
+            order.cumulative_quantity == 0 and order.revision == revision and
+            command_value.operation == .place and command_value.revision == revision;
+    }
+
+    pub fn canConfirmAbsentFromSession(self: *const Oms, order_id: u64, revision: u32, prior_session: canonical.AdapterSessionIdentity) bool {
+        if (!self.canConfirmAbsent(order_id, revision) or prior_session == 0) return false;
+        return self.findCommandForOrder(order_id).?.authority.adapter_session == prior_session;
     }
 
     fn applyReconciliationInPlace(self: *Oms, result: ReconciliationResult) !void {
@@ -608,7 +644,11 @@ pub const Oms = struct {
                     (result.cumulative_quantity != order.quantity or result.remaining_quantity != 0))
                     return error.ConflictingReconciliationEvidence;
             },
-            .confirmed_absent => if (result.terminal_state != null or result.cumulative_quantity != 0 or result.remaining_quantity != order.quantity) return error.ConflictingReconciliationEvidence,
+            .confirmed_absent => {
+                if (result.terminal_state != null or result.cumulative_quantity != 0 or result.remaining_quantity != order.quantity or
+                    !self.canConfirmAbsent(result.order_id, result.revision))
+                    return error.ConflictingReconciliationEvidence;
+            },
         }
         if (self.reconciliation_history_count == max_fact_history) {
             self.recovery_only = true;
@@ -645,14 +685,19 @@ pub const Oms = struct {
         order.last_reconciliation_revision = result.revision;
         order.last_reconciliation_cumulative_quantity = result.cumulative_quantity;
         order.last_reconciliation_remaining_quantity = result.remaining_quantity;
-        if (order.state == .filled or order.state == .canceled or order.state == .rejected) return;
+        if (order.state == .filled or order.state == .canceled or order.state == .rejected) {
+            if (result.status == .found_terminal or result.status == .confirmed_absent)
+                try commitArchiveQualification(self, order);
+            return;
+        }
         switch (result.status) {
             .unresolved => order.state = .unknown,
             .found_live => {
+                const cancel_unsettled = self.cancelUnsettled(order.*);
                 order.revision = result.revision;
                 order.cumulative_quantity = result.cumulative_quantity;
                 order.quantity = try std.math.add(i64, result.cumulative_quantity, result.remaining_quantity);
-                order.state = if (result.cumulative_quantity == 0) .live else .partially_filled;
+                order.state = if (cancel_unsettled) .pending_cancel else if (result.cumulative_quantity == 0) .live else .partially_filled;
                 try rebalanceReservation(order, result.remaining_quantity);
             },
             .found_terminal => {
@@ -664,19 +709,23 @@ pub const Oms = struct {
                 };
                 order.reservation_active = false;
                 order.reservation.atoms = 0;
+                try commitArchiveQualification(self, order);
             },
             .confirmed_absent => {
                 order.state = .canceled;
                 order.reservation_active = false;
                 order.reservation.atoms = 0;
+                try commitArchiveQualification(self, order);
             },
         }
     }
 
     pub fn replacementIntent(self: *const Oms, order_id: u64, sequence: u64) !?Intent {
-        const order = self.orderById(order_id) orelse return error.UnknownOrder;
+        const order = self.orderById(order_id) orelse return null;
         const replacement = order.replacement orelse return null;
         if (order.state != .canceled) return null;
+        if (order.revision != replacement.expected_revision or order.cumulative_quantity != replacement.expected_cumulative_quantity)
+            return error.StaleReplacementEvidence;
         return .{
             .intent_sequence = sequence,
             .strategy_instance = order.strategy_instance,
@@ -693,9 +742,18 @@ pub const Oms = struct {
     }
 
     pub fn confirmReplacement(self: *Oms, order_id: u64, reservation: Reservation, portfolio_reduce_only: bool, venue_reduce_only: bool, intent_sequence: u64, refs: RiskFactRefs) !void {
+        var candidate = self.*;
+        try candidate.confirmReplacementInPlace(order_id, reservation, portfolio_reduce_only, venue_reduce_only, intent_sequence, refs);
+        self.* = candidate;
+    }
+
+    fn confirmReplacementInPlace(self: *Oms, order_id: u64, reservation: Reservation, portfolio_reduce_only: bool, venue_reduce_only: bool, intent_sequence: u64, refs: RiskFactRefs) !void {
         const predecessor = try self.mutableOrder(order_id);
         if (predecessor.state != .canceled or predecessor.replacement == null) return error.ReplacementNotReady;
         if (self.blocksNewSend()) return error.UncertainOrderBlocksSend;
+        if (predecessor.revision != predecessor.replacement.?.expected_revision or
+            predecessor.cumulative_quantity != predecessor.replacement.?.expected_cumulative_quantity)
+            return error.StaleReplacementEvidence;
         predecessor.replacement.?.reservation = reservation;
         predecessor.replacement.?.portfolio_reduce_only = portfolio_reduce_only;
         predecessor.replacement.?.venue_reduce_only = venue_reduce_only;
@@ -820,13 +878,14 @@ pub const Oms = struct {
         var index: usize = 0;
         while (index < self.order_count) : (index += 1) {
             const order = self.orders[index];
-            if (order.reservation_active or order.replacement != null) continue;
-            switch (order.state) {
-                .filled, .canceled, .rejected => {},
-                else => continue,
-            }
+            if (!self.isArchiveEligible(order)) continue;
             const last_report = try self.lastReportEvidence(order);
             const last_reconciliation = try self.lastReconciliationEvidence(order);
+            const digest = orderFactDigest(order, last_report, last_reconciliation);
+            if (!std.mem.eql(u8, &digest, &order.archive_audit_digest)) {
+                self.recovery_only = true;
+                return error.ArchiveAuditDigestMismatch;
+            }
             self.tombstones[self.tombstone_count] = .{
                 .order_id = order.id,
                 .strategy_instance = order.strategy_instance,
@@ -854,6 +913,21 @@ pub const Oms = struct {
         return error.OrderCapacityExceeded;
     }
 
+    fn isArchiveEligible(self: *const Oms, order: Order) bool {
+        switch (order.state) {
+            .filled, .canceled, .rejected => {},
+            else => return false,
+        }
+        if (order.reservation_active or order.replacement != null or !order.archive_window_closed)
+            return false;
+        if (std.mem.eql(u8, &order.archive_audit_digest, &@as([32]u8, @splat(0))))
+            return false;
+        for (self.orders[0..self.order_count]) |other| {
+            if (other.id != order.id and other.predecessor_order_id == order.id) return false;
+        }
+        return true;
+    }
+
     fn lastReportEvidence(self: *const Oms, order: Order) !?ExecutionReport {
         if (order.last_report_id == 0) return null;
         for (self.report_history[0..self.report_history_count]) |known|
@@ -879,6 +953,23 @@ pub const Oms = struct {
     fn findCommand(self: *const Oms, id: u64) ?Command {
         for (self.command_history[0..self.command_history_count]) |command_value| if (command_value.command_id == id) return command_value;
         return null;
+    }
+
+    fn findCommandForOrder(self: *const Oms, order_id: u64) ?Command {
+        var index = self.command_history_count;
+        while (index != 0) {
+            index -= 1;
+            const command_value = self.command_history[index];
+            if (command_value.order_id == order_id) return command_value;
+        }
+        return null;
+    }
+
+    fn cancelUnsettled(self: *const Oms, order: Order) bool {
+        if (order.state == .pending_cancel) return true;
+        if (order.state != .unknown) return false;
+        const command_value = self.findCommandForOrder(order.id) orelse return false;
+        return command_value.operation == .cancel;
     }
 
     fn originForOrder(self: *const Oms, order_id: u64) struct { intent_sequence: u64, refs: RiskFactRefs } {
@@ -915,8 +1006,9 @@ fn rebalanceReservation(order: *Order, remaining_quantity: i64) !void {
     order.reservation.atoms = @divFloor(try std.math.add(i128, numerator, order.reservation_basis_quantity - 1), order.reservation_basis_quantity);
 }
 
-fn intentFingerprint(intent: Intent) u64 {
-    var hash = std.hash.Wyhash.init(0);
+fn intentFingerprint(intent: Intent, group_count: u8) [16]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update(&.{group_count});
     hash.update(std.mem.asBytes(&intent.intent_sequence));
     hash.update(std.mem.asBytes(&intent.strategy_instance));
     hash.update(&.{@intFromEnum(intent.operation)});
@@ -939,7 +1031,9 @@ fn intentFingerprint(intent: Intent) u64 {
         hash.update(std.mem.asBytes(&price.ticks));
     }
     hash.update(intent.client_order_id.slice());
-    return hash.final();
+    var digest: [32]u8 = undefined;
+    hash.final(&digest);
+    return digest[0..16].*;
 }
 
 fn orderFactDigest(order: Order, last_report: ?ExecutionReport, last_reconciliation: ?ReconciliationResult) [32]u8 {
@@ -970,6 +1064,7 @@ fn orderFactDigest(order: Order, last_report: ?ExecutionReport, last_reconciliat
         hash.update(std.mem.asBytes(&result.remaining_quantity));
         hash.update(&.{@intFromBool(result.terminal_state != null)});
         hash.update(&.{if (result.terminal_state) |terminal| @intFromEnum(terminal) else 0});
+        hash.update(&result.canonical_digest);
     }
     var result: [32]u8 = undefined;
     hash.final(&result);
@@ -1005,7 +1100,7 @@ test "OMS commands bind distinct risk and reservation fact barriers" {
     var group: IntentGroup = .{ .first_intent_sequence = 7, .count = 2 };
     group.members[0] = .{ .intent_sequence = 7, .operation = .place, .instrument = 1, .quantity = 1, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 3 } };
     group.members[1] = .{ .intent_sequence = 8, .operation = .place, .instrument = 2, .quantity = 1, .limit_price = .{ .instrument = 2, .rules_version = 1, .ticks = 4 }, .reservation = .{ .asset = 1, .atoms = 4 } };
-    try state.applyQualifiedGroup(group, &.{ .{ .decision = 3, .reservation = 4 }, .{ .decision = 5, .reservation = 6 } });
+    try state.applyQualifiedGroup(group, group, &.{ .{ .decision = 3, .reservation = 4 }, .{ .decision = 5, .reservation = 6 } });
     try std.testing.expectEqual(@as(u64, 3), state.emitted()[0].risk_decision_identity);
     try std.testing.expectEqual(@as(u64, 4), state.emitted()[0].reservation_identity);
     try std.testing.expectEqual(@as(u64, 5), state.emitted()[1].risk_decision_identity);
@@ -1086,12 +1181,47 @@ test "ConfirmedAbsent cannot become a fill and releases reservation" {
     try std.testing.expect(!state.orders[0].reservation_active);
 }
 
+test "an earlier live reconciliation forbids later absence for the same place" {
+    var state = Oms{};
+    var group: IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
+    group.members[0] = .{ .intent_sequence = 1, .operation = .place, .instrument = 1, .quantity = 2, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 6 } };
+    try state.applyGroup(group);
+    var dispatch: DispatchBatch = .{ .count = 1 };
+    dispatch.items[0] = .{ .command_id = 1, .state = .unknown };
+    try state.applyDispatch(dispatch);
+    try state.applyReconciliation(.{ .reconciliation_id = 1, .order_id = 1, .status = .found_live, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    try state.applyDispatch(dispatch);
+    try std.testing.expectError(error.ConflictingReconciliationEvidence, state.applyReconciliation(.{ .reconciliation_id = 2, .order_id = 1, .status = .confirmed_absent, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2 }));
+    try std.testing.expect(state.orders[0].reservation_active);
+}
+
 test "FoundTerminal requires an explicit terminal category" {
     var state = Oms{};
     var group: IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
     group.members[0] = .{ .intent_sequence = 1, .operation = .place, .instrument = 1, .quantity = 2, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 6 } };
     try state.applyGroup(group);
     try std.testing.expectError(error.IncompleteReconciliationEvidence, state.applyReconciliation(.{ .reconciliation_id = 1, .order_id = 1, .status = .found_terminal, .revision = 1, .cumulative_quantity = 2, .remaining_quantity = 0 }));
+}
+
+test "canonical report digest is part of report identity" {
+    var state = Oms{};
+    var group: IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
+    group.members[0] = .{ .intent_sequence = 1, .operation = .place, .instrument = 1, .quantity = 2, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 6 } };
+    try state.applyGroup(group);
+    var report: ExecutionReport = .{
+        .report_id = 1,
+        .order_id = 1,
+        .revision = 1,
+        .status = .canceled,
+        .cumulative_quantity = 0,
+        .remaining_quantity = 2,
+        .canonical_digest = @splat(1),
+    };
+    try state.applyReport(report);
+    try std.testing.expectEqual(Oms.ReportIdentity.duplicate, try state.lookupReport(report));
+    report.canonical_digest = @splat(2);
+    try std.testing.expectError(error.ConflictingReportIdentity, state.lookupReport(report));
+    try std.testing.expectError(error.ConflictingReportIdentity, state.applyReport(report));
 }
 
 test "hot terminal facts reject semantic changes and invalid filled quantities" {
@@ -1107,6 +1237,7 @@ test "hot terminal facts reject semantic changes and invalid filled quantities" 
 }
 
 test "OrderIntentIdentity is idempotent and conflicts fail closed" {
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(@FieldType(SeenIntent, "fingerprint")));
     var state = Oms{};
     var group: IntentGroup = .{ .first_intent_sequence = 7, .count = 1 };
     group.members[0] = .{ .intent_sequence = 7, .strategy_instance = 9, .operation = .place, .instrument = 1, .quantity = 2, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 6 } };
@@ -1138,6 +1269,7 @@ test "terminal orders compact to replayable tombstones without overwriting activ
     try std.testing.expectEqual(@as(u8, max_orders), state.order_count);
     try std.testing.expectEqual(@as(u8, 1), state.tombstone_count);
     try std.testing.expect(state.orderById(1) == null);
+    try std.testing.expect(state.orderById(2) != null);
     try std.testing.expect(!state.recovery_only);
     try std.testing.expectEqual(@as(u64, 1), state.tombstones[0].intent_sequence);
     try std.testing.expectEqualStrings("RWN-1", state.tombstones[0].client_order_id.slice());
@@ -1154,16 +1286,31 @@ test "terminal orders compact to replayable tombstones without overwriting activ
 test "tombstone capacity exhaustion enters RecoveryOnly without evicting active evidence" {
     var state = Oms{};
     var sequence: u64 = 1;
+    while (sequence <= max_orders) : (sequence += 1) {
+        const placed = try placeSubmitted(&state, sequence, 1);
+        try state.applyReport(.{ .report_id = sequence, .order_id = placed.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 1 });
+        try state.applyReconciliation(.{
+            .reconciliation_id = 100 + sequence,
+            .order_id = placed.order_id,
+            .status = .found_terminal,
+            .revision = 1,
+            .cumulative_quantity = 0,
+            .remaining_quantity = 1,
+            .terminal_state = .canceled,
+        });
+    }
     while (sequence <= max_orders + max_tombstones) : (sequence += 1) {
-        state.begin();
-        var group: IntentGroup = .{ .first_intent_sequence = sequence, .count = 1 };
-        group.members[0] = .{ .intent_sequence = sequence, .strategy_instance = 1, .operation = .place, .instrument = 1, .quantity = 1, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 1 }, .reservation = .{ .asset = 1, .atoms = 1 } };
-        try state.applyGroup(group);
-        const command_value = state.emitted()[0];
-        var dispatch: DispatchBatch = .{ .count = 1 };
-        dispatch.items[0] = .{ .command_id = command_value.command_id, .state = .submitted };
-        try state.applyDispatch(dispatch);
-        try state.applyReport(.{ .report_id = sequence, .order_id = command_value.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 1 });
+        const placed = try placeSubmitted(&state, sequence, 1);
+        try state.applyReport(.{ .report_id = sequence, .order_id = placed.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 1 });
+        try state.applyReconciliation(.{
+            .reconciliation_id = 100 + sequence,
+            .order_id = placed.order_id,
+            .status = .found_terminal,
+            .revision = 1,
+            .cumulative_quantity = 0,
+            .remaining_quantity = 1,
+            .terminal_state = .canceled,
+        });
     }
     state.begin();
     var overflow: IntentGroup = .{ .first_intent_sequence = sequence, .count = 1 };
@@ -1172,6 +1319,167 @@ test "tombstone capacity exhaustion enters RecoveryOnly without evicting active 
     try std.testing.expect(state.recovery_only);
     try std.testing.expectEqual(@as(u8, max_orders), state.order_count);
     try std.testing.expectEqual(@as(u8, max_tombstones), state.tombstone_count);
+}
+
+test "canceled orders without archive window stay hot under capacity pressure" {
+    var state = Oms{};
+    var sequence: u64 = 1;
+    while (sequence <= max_orders) : (sequence += 1) {
+        const placed = try placeSubmitted(&state, sequence, 2);
+        try state.applyReport(.{ .report_id = sequence, .order_id = placed.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
+        try std.testing.expect(!state.orderById(placed.order_id).?.archive_window_closed);
+    }
+    try std.testing.expectError(error.OrderCapacityExceeded, placeSubmitted(&state, sequence, 2));
+    try std.testing.expect(state.recovery_only);
+    try std.testing.expectEqual(@as(u8, max_orders), state.order_count);
+    try std.testing.expectEqual(@as(u8, 0), state.tombstone_count);
+}
+
+test "live unknown and pending_cancel orders never compact" {
+    var live = Oms{};
+    var sequence: u64 = 1;
+    while (sequence <= max_orders) : (sequence += 1) {
+        _ = try placeSubmitted(&live, sequence, 2);
+    }
+    try std.testing.expectError(error.OrderCapacityExceeded, placeSubmitted(&live, sequence, 2));
+    try std.testing.expect(live.recovery_only);
+    try std.testing.expectEqual(@as(u8, 0), live.tombstone_count);
+    for (live.orders[0..live.order_count]) |order| try std.testing.expectEqual(OrderState.pending_submit, order.state);
+
+    var unknown = Oms{};
+    const unknown_placed = try placeSubmitted(&unknown, 1, 2);
+    var unknown_dispatch: DispatchBatch = .{ .count = 1 };
+    unknown_dispatch.items[0] = .{ .command_id = unknown_placed.command_id, .state = .unknown };
+    try unknown.applyDispatch(unknown_dispatch);
+    try std.testing.expectError(error.UncertainOrderBlocksSend, placeSubmitted(&unknown, 2, 2));
+    try std.testing.expectEqual(OrderState.unknown, unknown.orderById(unknown_placed.order_id).?.state);
+    try std.testing.expectEqual(@as(u8, 1), unknown.order_count);
+    try std.testing.expectEqual(@as(u8, 0), unknown.tombstone_count);
+
+    var pending = Oms{};
+    const pending_placed = try placeSubmitted(&pending, 1, 2);
+    try pending.applyReport(.{ .report_id = 1, .order_id = pending_placed.order_id, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    pending.begin();
+    var cancel: IntentGroup = .{ .first_intent_sequence = 90, .count = 1 };
+    cancel.members[0] = .{
+        .intent_sequence = 90,
+        .strategy_instance = 1,
+        .operation = .cancel,
+        .instrument = 1,
+        .target_order_id = pending_placed.order_id,
+        .expected_revision = 1,
+    };
+    try pending.applyGroup(cancel);
+    try std.testing.expectEqual(OrderState.pending_cancel, pending.orderById(pending_placed.order_id).?.state);
+    try std.testing.expectError(error.UncertainOrderBlocksSend, placeSubmitted(&pending, 2, 2));
+    try std.testing.expectEqual(OrderState.pending_cancel, pending.orderById(pending_placed.order_id).?.state);
+    try std.testing.expectEqual(@as(u8, 1), pending.order_count);
+    try std.testing.expectEqual(@as(u8, 0), pending.tombstone_count);
+}
+
+test "ccc predecessor stays hot while successor is live" {
+    var state = Oms{};
+    const placed = try placeSubmitted(&state, 1, 2);
+    try state.applyReport(.{ .report_id = 1, .order_id = placed.order_id, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    state.begin();
+    var replace: IntentGroup = .{ .first_intent_sequence = 2, .count = 1 };
+    replace.members[0] = .{
+        .intent_sequence = 2,
+        .strategy_instance = 1,
+        .operation = .amend,
+        .instrument = 1,
+        .target_order_id = placed.order_id,
+        .expected_revision = 1,
+        .quantity = 2,
+        .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 4 },
+        .native_amend = false,
+        .allow_cancel_confirm_create = true,
+        .reservation = .{ .asset = 1, .atoms = 6 },
+    };
+    try state.applyGroup(replace);
+    try state.applyReport(.{ .report_id = 2, .order_id = placed.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    try state.applyReconciliation(.{
+        .reconciliation_id = 10,
+        .order_id = placed.order_id,
+        .status = .found_terminal,
+        .revision = 1,
+        .cumulative_quantity = 0,
+        .remaining_quantity = 2,
+        .terminal_state = .canceled,
+    });
+    try std.testing.expect(state.orderById(placed.order_id).?.archive_window_closed);
+    try std.testing.expect(state.orderById(placed.order_id).?.replacement != null);
+    try state.confirmReplacement(placed.order_id, .{ .asset = 1, .atoms = 6 }, false, false, 2, .{});
+    const successor = state.orderById(2) orelse return error.MissingReplacement;
+    try std.testing.expectEqual(placed.order_id, successor.predecessor_order_id);
+    var sequence: u64 = 3;
+    while (sequence <= max_orders) : (sequence += 1) _ = try placeSubmitted(&state, sequence, 2);
+    try std.testing.expectError(error.OrderCapacityExceeded, placeSubmitted(&state, sequence, 2));
+    try std.testing.expect(state.orderById(placed.order_id) != null);
+    try std.testing.expectEqual(@as(u8, 0), state.tombstone_count);
+}
+
+test "compact refuses a mutated audit digest after the archive window closes" {
+    var state = Oms{};
+    var sequence: u64 = 1;
+    while (sequence <= max_orders) : (sequence += 1) {
+        const placed = try placeSubmitted(&state, sequence, 2);
+        try state.applyReport(.{ .report_id = sequence, .order_id = placed.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
+        try state.applyReconciliation(.{
+            .reconciliation_id = 200 + sequence,
+            .order_id = placed.order_id,
+            .status = .found_terminal,
+            .revision = 1,
+            .cumulative_quantity = 0,
+            .remaining_quantity = 2,
+            .terminal_state = .canceled,
+        });
+    }
+    state.orders[0].quantity = 99;
+    try std.testing.expectError(error.ArchiveAuditDigestMismatch, placeSubmitted(&state, sequence, 2));
+    try std.testing.expect(state.recovery_only);
+    try std.testing.expectEqual(@as(u8, max_orders), state.order_count);
+    try std.testing.expectEqual(@as(u8, 0), state.tombstone_count);
+}
+
+fn placeSubmitted(state: *Oms, sequence: u64, quantity: i64) !struct { order_id: u64, command_id: u64 } {
+    state.begin();
+    var group: IntentGroup = .{ .first_intent_sequence = sequence, .count = 1 };
+    group.members[0] = .{
+        .intent_sequence = sequence,
+        .strategy_instance = 1,
+        .operation = .place,
+        .instrument = 1,
+        .quantity = quantity,
+        .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 1 },
+        .reservation = .{ .asset = 1, .atoms = quantity },
+    };
+    try state.applyGroup(group);
+    const command_value = state.emitted()[0];
+    var dispatch: DispatchBatch = .{ .count = 1 };
+    dispatch.items[0] = .{ .command_id = command_value.command_id, .state = .submitted };
+    try state.applyDispatch(dispatch);
+    return .{ .order_id = command_value.order_id, .command_id = command_value.command_id };
+}
+
+fn commitArchiveQualification(self: *Oms, order: *Order) !void {
+    switch (order.state) {
+        .filled, .canceled, .rejected => {},
+        else => return,
+    }
+    if (order.reservation_active) return;
+    const last_report = try self.lastReportEvidence(order.*);
+    const last_reconciliation = try self.lastReconciliationEvidence(order.*) orelse return;
+    const digest = orderFactDigest(order.*, last_report, last_reconciliation);
+    if (order.archive_window_closed) {
+        if (!std.mem.eql(u8, &order.archive_audit_digest, &digest)) {
+            self.recovery_only = true;
+            return error.ArchiveAuditDigestMismatch;
+        }
+        return;
+    }
+    order.archive_audit_digest = digest;
+    order.archive_window_closed = true;
 }
 
 fn rememberReport(order: *Order, report: ExecutionReport) void {

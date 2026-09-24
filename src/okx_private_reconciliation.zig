@@ -201,7 +201,7 @@ pub const IngressSource = enum(u8) {
     rest_fills_history_spot,
     rest_fills_history_swap,
 
-    fn isWebSocket(self: IngressSource) bool {
+    pub fn isWebSocket(self: IngressSource) bool {
         return switch (self) {
             .ws_orders, .ws_account, .ws_positions => true,
             else => false,
@@ -335,7 +335,15 @@ pub const Reconciler = struct {
     }
 
     pub fn beginReconciliation(self: *Reconciler, raw_watermark: u64) !void {
-        if (self.stage != .buffering) return error.PrivateStreamNotReady;
+        if (self.stage != .buffering and self.stage != .ready) return error.PrivateStreamNotReady;
+        if (self.stage == .ready) {
+            self.rest = @splat(.{});
+            self.stability_round = 1;
+            self.bootstrap_event_count = 0;
+            self.ws_event_count = 0;
+            self.drain_bootstrap_index = 0;
+            self.drain_ws_index = 0;
+        }
         self.bootstrap_watermark = raw_watermark;
         self.stage = .reconciling;
     }
@@ -431,7 +439,7 @@ pub const Reconciler = struct {
         page: ?Page,
         raw: []const u8,
     ) (RawSinkError || error{ OutOfMemory, FrameTooLarge })!IngressBatch {
-        var batch = try self.commitRaw(raw_sink, source_session, times, raw);
+        var batch = try self.commitRaw(raw_sink, source_session, times, raw, source);
         return self.ingestCommitted(gpa, source_session, times, source, page, raw, &batch);
     }
 
@@ -443,38 +451,81 @@ pub const Reconciler = struct {
         times: Times,
         raw: []const u8,
     ) (RawSinkError || error{ OutOfMemory, FrameTooLarge })!IngressBatch {
-        var batch = try self.commitRaw(raw_sink, source_session, times, raw);
+        var batch = try self.commitRaw(raw_sink, source_session, times, raw, null);
+        return self.ingestWsCommitted(gpa, source_session, times, raw, &batch);
+    }
+
+    /// Replays a previously committed WebSocket frame without writing a
+    /// second RawIngress record. The caller must supply evidence read from the
+    /// durable raw stream, never a synthesized reference.
+    pub fn replayWsMessage(
+        self: *Reconciler,
+        gpa: std.mem.Allocator,
+        source_session: u64,
+        times: Times,
+        evidence: RawEvidenceRef,
+        raw: []const u8,
+    ) error{OutOfMemory}!IngressBatch {
+        var batch: IngressBatch = .{ .raw_evidence = evidence };
+        return self.ingestWsCommitted(gpa, source_session, times, raw, &batch);
+    }
+
+    /// Replays a previously committed REST frame with its original endpoint
+    /// route and raw evidence. Pagination state remains subject to the same
+    /// reconciliation checks as live ingestion.
+    pub fn replayRest(
+        self: *Reconciler,
+        gpa: std.mem.Allocator,
+        source_session: u64,
+        times: Times,
+        source: IngressSource,
+        page: Page,
+        evidence: RawEvidenceRef,
+        raw: []const u8,
+    ) error{OutOfMemory}!IngressBatch {
+        var batch: IngressBatch = .{ .raw_evidence = evidence };
+        return self.ingestCommitted(gpa, source_session, times, source, page, raw, &batch);
+    }
+
+    fn ingestWsCommitted(
+        self: *Reconciler,
+        gpa: std.mem.Allocator,
+        source_session: u64,
+        times: Times,
+        raw: []const u8,
+        batch: *IngressBatch,
+    ) error{OutOfMemory}!IngressBatch {
         if (source_session != self.session or self.stage == .offline) {
             batch.rejection = .stale_session;
-            return batch;
+            return batch.*;
         }
         if (self.stage == .failed) {
             batch.rejection = .conflicting_fact;
-            return batch;
+            return batch.*;
         }
         const parsed = std.json.parseFromSlice(std.json.Value, gpa, raw, .{}) catch
-            return self.reject(&batch, .malformed_json);
+            return self.reject(batch, .malformed_json);
         defer parsed.deinit();
-        const object = asObject(parsed.value) catch return self.reject(&batch, .malformed_envelope);
-        if (optionalStringField(object, "event") catch return self.reject(&batch, .invalid_field)) |event| {
-            if (optionalStringField(object, "code") catch return self.reject(&batch, .invalid_field)) |code|
-                if (!std.mem.eql(u8, code, "0")) return self.reject(&batch, .venue_error);
-            if (std.mem.eql(u8, event, "login")) return batch;
-            if (std.mem.eql(u8, event, "error")) return self.reject(&batch, .venue_error);
+        const object = asObject(parsed.value) catch return self.reject(batch, .malformed_envelope);
+        if (optionalStringField(object, "event") catch return self.reject(batch, .invalid_field)) |event| {
+            if (optionalStringField(object, "code") catch return self.reject(batch, .invalid_field)) |code|
+                if (!std.mem.eql(u8, code, "0")) return self.reject(batch, .venue_error);
+            if (std.mem.eql(u8, event, "login")) return batch.*;
+            if (std.mem.eql(u8, event, "error")) return self.reject(batch, .venue_error);
             if (std.mem.eql(u8, event, "subscribe")) {
-                const channel = wsChannel(object) catch return self.reject(&batch, .malformed_envelope);
-                self.subscriptionAcknowledged(channel) catch return self.reject(&batch, .invalid_field);
-                return batch;
+                const channel = wsChannel(object) catch return self.reject(batch, .malformed_envelope);
+                self.subscriptionAcknowledged(channel) catch return self.reject(batch, .invalid_field);
+                return batch.*;
             }
-            return batch;
+            return batch.*;
         }
-        const channel = wsChannel(object) catch return self.reject(&batch, .source_mismatch);
+        const channel = wsChannel(object) catch return self.reject(batch, .source_mismatch);
         const source: IngressSource = switch (channel) {
             .orders => .ws_orders,
             .account => .ws_account,
             .positions => .ws_positions,
         };
-        return self.ingestParsed(parsed.value, times, source, &batch);
+        return self.ingestParsed(parsed.value, times, source, batch);
     }
 
     fn commitRaw(
@@ -483,6 +534,7 @@ pub const Reconciler = struct {
         source_session: u64,
         times: Times,
         raw: []const u8,
+        source: ?IngressSource,
     ) (RawSinkError || error{FrameTooLarge})!IngressBatch {
         if (raw.len > market.max_raw_frame_bytes or raw.len > std.math.maxInt(u32))
             return error.FrameTooLarge;
@@ -490,6 +542,7 @@ pub const Reconciler = struct {
         Sha256.hash(raw, &raw_hash, .{});
         const evidence = try raw_sink.append(.{
             .source_session = source_session,
+            .origin = if (source) |value| @intFromEnum(value) + 1 else 0,
             .receive_time_utc_ns = times.receive_time_utc_ns,
             .monotonic_time_ns = times.monotonic_time_ns,
             .wall_time_utc_ns = times.wall_time_utc_ns,
@@ -801,7 +854,8 @@ pub const Reconciler = struct {
             _ = try self.remember(fillBillIdentity(fill.instrument, fill.venue_trade_id), hashBillId(bill_id));
             _ = try self.remember(billIdentity(bill_id), identity);
         }
-        if (!try self.remember(identity, hashFill(&fill))) {
+        const duplicate = try self.remember(identity, hashFill(&fill));
+        if (!duplicate) {
             try batch.append(makeEvent(
                 times,
                 fill.venue_fill_time_utc_ns,
@@ -809,7 +863,32 @@ pub const Reconciler = struct {
                 identity,
                 .{ .fill = fill },
             ));
+        } else if (fill.venue_bill_id != null and self.stage == .reconciling) {
+            // REST fills carry the durable bill identity.  While the
+            // reconciliation barrier still owns both sources, retain that
+            // provenance even if the matching WS fill arrived first; once
+            // ready, canonical facts have already crossed the Owner seam.
+            try self.replaceBufferedWsFill(identity, fill, times, evidence);
         }
+    }
+
+    fn replaceBufferedWsFill(
+        self: *Reconciler,
+        identity: [Sha256.digest_length]u8,
+        fill: Fill,
+        times: Times,
+        evidence: RawEvidenceRef,
+    ) !void {
+        for (self.ws_events[0..self.ws_event_count]) |*event| switch (event.payload) {
+            .fill => |existing| if (std.mem.eql(u8, &fillIdentity(existing.instrument, existing.venue_trade_id), &identity)) {
+                event.* = makeEvent(times, fill.venue_fill_time_utc_ns, evidence, identity, .{ .fill = fill });
+                return;
+            },
+            else => {},
+        };
+        // A repeated REST fill is already buffered in bootstrap_events, not
+        // ws_events. Only an actual WS match needs provenance replacement.
+        return;
     }
 
     fn decodeBalance(
@@ -1655,7 +1734,7 @@ const rest_fixtures = [_][]const u8{
     ,
     \\{"code":"0","data":[]}
     ,
-    \\{"code":"0","data":[]}
+    \\{"code":"0","data":[{"instId":"BTC-USDT","tradeId":"2001","billId":"3001","ordId":"1001","clOrdId":"RWNTEST1","side":"buy","fillSz":"0.00005","fillPx":"63500","fee":"-0.00000005","feeCcy":"BTC","fillPnl":"0","execType":"T","fillTime":"1800000000100"}]}
     ,
     \\{"code":"0","data":[]}
 };
@@ -1678,7 +1757,7 @@ test "raw evidence precedes private decode failure" {
     try std.testing.expect(!reconciler.readiness().reconciliation_ready);
 }
 
-test "private snapshots and two stable REST reads open then disconnect revokes barrier" {
+test "nonempty REST fills are idempotent across stable reads" {
     var reconciler: Reconciler = .{};
     var sink: TestRawSink = .{};
     try establishPrivateStream(&reconciler, &sink);
@@ -1700,6 +1779,24 @@ test "private snapshots and two stable REST reads open then disconnect revokes b
     reconciler.disconnect();
     try std.testing.expect(!reconciler.readiness().private_stream_ready);
     try std.testing.expect(!reconciler.readiness().reconciliation_ready);
+}
+
+test "ready private stream accepts an explicit account refresh" {
+    var reconciler: Reconciler = .{};
+    var sink: TestRawSink = .{};
+    try establishPrivateStream(&reconciler, &sink);
+    try reconciler.beginReconciliation(sink.append_count);
+    try ingestRestRound(&reconciler, &sink);
+    _ = try reconciler.tryComplete();
+    try ingestRestRound(&reconciler, &sink);
+    _ = (try reconciler.tryComplete()).?;
+    while (reconciler.drainReconciled() != null) {}
+
+    try reconciler.beginReconciliation(sink.append_count);
+    try ingestRestRound(&reconciler, &sink);
+    _ = try reconciler.tryComplete();
+    try ingestRestRound(&reconciler, &sink);
+    _ = (try reconciler.tryComplete()).?;
 }
 
 test "Unknown requires stable rebootstrap and an explicit reconciliation result" {
@@ -1847,4 +1944,46 @@ test "REST bill identity enriches an otherwise identical WS fill" {
     var rest_batch: IngressBatch = .{ .raw_evidence = .{ .stream_sequence = 2, .sha256 = @splat(2) } };
     try reconciler.appendFill(rest_fill, test_times, rest_batch.raw_evidence, &rest_batch);
     try std.testing.expectEqual(@as(u8, 0), rest_batch.event_count);
+}
+
+test "reconciliation retains REST bill provenance for an earlier matching WS fill" {
+    var reconciler: Reconciler = .{ .stage = .reconciling };
+    const fill: Fill = .{
+        .venue_trade_id = @enumFromInt(2001),
+        .venue_bill_id = null,
+        .venue_order_id = @enumFromInt(1001),
+        .client_order_id = try ClientOrderId.init("RWNTEST1"),
+        .instrument = .btc_usdt_spot,
+        .side = .buy,
+        .quantity = try Decimal.parse("0.00005"),
+        .price = try Decimal.parse("63500"),
+        .fee = try Decimal.parse("-0.00000005"),
+        .fee_asset = try AssetCode.init("BTC"),
+        .realized_pnl = try Decimal.parse("0"),
+        .liquidity = .taker,
+        .venue_fill_time_utc_ns = 1_800_000_000_100_000_000,
+        .owned_by_ringwin = true,
+    };
+    var ws_batch: IngressBatch = .{ .raw_evidence = .{ .stream_sequence = 1, .sha256 = @splat(1) } };
+    try reconciler.appendFill(fill, test_times, ws_batch.raw_evidence, &ws_batch);
+    reconciler.ws_events[0] = ws_batch.events[0];
+    reconciler.ws_event_count = 1;
+
+    var rest_fill = fill;
+    rest_fill.venue_bill_id = @enumFromInt(3001);
+    var rest_batch: IngressBatch = .{ .raw_evidence = .{ .stream_sequence = 2, .sha256 = @splat(2) } };
+    try reconciler.appendFill(rest_fill, test_times, rest_batch.raw_evidence, &rest_batch);
+    try std.testing.expectEqual(@as(u8, 0), rest_batch.event_count);
+    try std.testing.expectEqual(@as(u64, 2), reconciler.ws_events[0].envelope.raw_evidence.stream_sequence);
+    try std.testing.expectEqual(@as(?VenueBillId, @enumFromInt(3001)), reconciler.ws_events[0].payload.fill.venue_bill_id);
+
+    var rest_first: Reconciler = .{ .stage = .reconciling };
+    var first_rest_batch: IngressBatch = .{ .raw_evidence = .{ .stream_sequence = 2, .sha256 = @splat(2) } };
+    try rest_first.appendFill(rest_fill, test_times, first_rest_batch.raw_evidence, &first_rest_batch);
+    rest_first.bootstrap_events[0] = first_rest_batch.events[0];
+    rest_first.bootstrap_event_count = 1;
+    var later_ws_batch: IngressBatch = .{ .raw_evidence = .{ .stream_sequence = 1, .sha256 = @splat(1) } };
+    try rest_first.appendFill(fill, test_times, later_ws_batch.raw_evidence, &later_ws_batch);
+    try std.testing.expectEqual(@as(u8, 0), later_ws_batch.event_count);
+    try std.testing.expect(std.meta.eql(reconciler.ws_events[0], rest_first.bootstrap_events[0]));
 }

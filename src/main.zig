@@ -34,6 +34,8 @@ const failover = @import("failover.zig");
 const durable_store = @import("durable_store.zig");
 const demo_authority = @import("demo_authority.zig");
 const credential_store = @import("credential_store.zig");
+const venue_fill_recovery_acceptance = @import("venue_fill_recovery_acceptance.zig");
+const raw_ingress = @import("raw_ingress.zig");
 
 pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
@@ -147,4 +149,6 @@ test {
     _ = durable_store;
     _ = demo_authority;
     _ = credential_store;
+    _ = venue_fill_recovery_acceptance;
+    _ = raw_ingress;
 }

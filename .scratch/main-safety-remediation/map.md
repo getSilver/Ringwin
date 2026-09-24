@@ -38,25 +38,35 @@ OrderIntent、Order、RiskReservation、账户危险事实、StrategyHost 授权
 
 ## Route
 
+2026-09-23 复核后的逐项缺口、修复顺序和重新验收条件见[01–11 源码复核修复计划](review-repair-plan-2026-09-23.md)。下列旧编号继续作为本地票据身份；已通过的旧验收不能代替本轮验证。
+
 1. [使极值算术与缺失输入失败关闭](issues/01-fail-closed-arithmetic-and-inputs.md)
 2. [让 Canonical Venue 对账推进 OMS](issues/02-apply-canonical-reconciliation-to-oms.md)
-3. [闭合 OMS 意图幂等与 CancelConfirmCreate 阻断](issues/03-enforce-oms-intent-idempotency.md) — blocked by 02
-4. [按权威剩余数量维护 RiskReservation](issues/04-rebalance-reservation-from-authoritative-remaining.md) — blocked by 02, 03
+3. [闭合 OMS 意图幂等与 CancelConfirmCreate 阻断](issues/03-enforce-oms-intent-idempotency.md)
+4. [按权威剩余数量维护 RiskReservation](issues/04-rebalance-reservation-from-authoritative-remaining.md)
 5. [保留强平与未归属经济事实的危险语义](issues/05-preserve-dangerous-account-facts.md)
-6. [扩展完整的 OMS DispatchProof](issues/06-expand-complete-oms-dispatch-proof.md) — blocked by 01, 04
-7. [以唯一 Gateway 强制真实 ReduceOnly 与 fencing](issues/07-enforce-authoritative-gateway-send.md) — blocked by 05, 06
+6. [扩展完整的 OMS DispatchProof](issues/06-expand-complete-oms-dispatch-proof.md) — blocked by 01, 04, 08
+7. [以唯一 Gateway 强制真实 ReduceOnly 与 fencing](issues/07-enforce-authoritative-gateway-send.md) — blocked by 05, 06, 08, 09, 11
 8. [以 HostActivated 和只读 IPC 强制策略隔离](issues/08-enforce-host-activation-and-ipc-isolation.md)
-9. [把 legacy 订单与策略调用方迁入权威 OMS](issues/09-migrate-legacy-order-and-strategy-paths.md) — blocked by 03, 04, 06, 08
+9. [把 legacy 订单与策略调用方迁入权威 OMS](issues/09-migrate-legacy-order-and-strategy-paths.md) — blocked by 04, 06, 08
 10. [删除竞争订单状态与废弃经济投影](issues/10-contract-legacy-state-and-projection.md) — blocked by 09
-11. [实现可重放的订单容量与终态墓碑](issues/11-manage-order-capacity-with-tombstones.md) — blocked by 03, 04, 10
+11. [实现可重放的订单容量与终态墓碑](issues/11-manage-order-capacity-with-tombstones.md) — blocked by 04, 09, 10
 12. [重建 main 安全与权威状态验收基线](issues/12-rebuild-safety-acceptance.md) — blocked by 01–11
 
 ## Frontier
 
-- 07 已关闭；下一张未完成的依赖前沿为 [09 把 legacy 订单与策略调用方迁入权威 OMS](issues/09-migrate-legacy-order-and-strategy-paths.md)。11 的既有并行工作保持原状态，本票未修改。
+- 本轮可认领：[04 权威剩余数量与占用](issues/04-rebalance-reservation-from-authoritative-remaining.md)、[05 强制成交经济事实](issues/05-preserve-dangerous-account-facts.md)、[08 Host 激活](issues/08-enforce-host-activation-and-ipc-isolation.md)。一次只认领并完成一张；其余受阻票按 Route 推进。01–03 已离线收口；10 因依赖 09 重开而等待重新回归。12 最后重建验收。Linux/Venue/生产资金资格仍为 not_run。
 
 ## Decisions so far
 
+- 2026-09-24：提交前复核将 02 的 ConfirmedAbsent 绑定到原 place 命令的 adapter session，将 03 的意图内容摘要扩至 128 位；候选提交的 Debug/ReleaseSafe 各 269/269，journal/state schema 16/19。现有 Venue 仍不产生正向缺席证明，真实查询与资金资格保持待验。
+- 2026-09-24：03 按 R03-A/B/C 收口。OMS 按原始 group 身份在风控前去重；同身份冲突写入可重放 trace；部分成交或 FoundLive 不清除待决取消阻断，CCC 重查全局阻断、目标屏障与授权。Debug/ReleaseSafe 273/273，journal/state schema 16/18；仅为离线证据。
+- 2026-09-24：02 按 R02-A/R02-B 收口。通用证据范围与缺席覆盖在 Canonical，OKX 原始私有事实的翻译留在 OKX Adapter；证据不足的 Venue 输出 Unresolved。Canonical report/reconciliation 共用 OMS/CCC 转换，OKX 私有 WS 到 Owner 持久恢复及缺席证据失败关闭轨迹通过 Debug/ReleaseSafe 271/271。真实 Venue 缺席查询覆盖仍属生产资格票，不从离线结果推定。
+- 2026-09-23：01–11 源码复核发现 02–09、11 尚有未满足的验收条件，12 的封存陈述与当前源码不符；撤回整图已关闭结论，按[修复计划](review-repair-plan-2026-09-23.md)重开并逐票验证。01、10 无本轮确认的新缺陷；10 待 09 后重新回归。
+- 2026-09-23：VenueAdapter 负责私有查询证据到通用 Canonical 对账的验证；Host 故障/重启撤销旧激活；Demo 对非零债务、保证金和额外敞口失败关闭；旧 owner 接管需外部可核验 fencing；订单只接受 exact-only；开发阶段不兼容旧持久流，旧 schema 不自动恢复发送，也不自动删除旧数据。本计划不授权 Venue 写入。
+- 2026-09-17：12 以 `tools/verify-core-wave.ps1` 重封存离线验收。Debug/ReleaseSafe 239/239；journal/state schema 14/15；CCC、墓碑归档、持久 dispatch 与 replay 无发送均有机器可读 live/replay 证据。不升级 Linux/Venue/生产资格。
+- 2026-09-17：11 以 FoundTerminal/ConfirmedAbsent 作为迟到事实窗口关闭，并在热 Order 上提交 archive audit digest。compact 不得淘汰 Unknown、PendingCancel、未闭合 reservation、CCC replacement 或仍被热表 predecessor 引用的订单；无窗口终态单在容量压力下保持热表并 RecoveryOnly。本波最低安全边界不定义生产保留天数。
+- 2026-09-17：09 删除 Canonical report/fill 的 shard 镜像标量。报告身份进入 OMS，成交身份进入经济投影；风险查询与协调摘要从 OMS reservation owner 派生，不再保存 `layered_risk_reserved_micros`。
 - 2026-09-14：用户允许 07 使用显式、版本化的 Demo 专属本地运营配置提供规则、策略激活与风险额度 Core 事实；实际账户状态仍由私有 Canonical 事实提供，配置不得直接生成可发送 proof。
 - 2026-09-14：用户确认显式 Demo 可发送路径不必支持现有 Windows 程序；07 以可复用现有持久存储和租约适配器的 Linux 路径收口，Windows 旧验收程序不作为 07 通过证据。
 - 2026-09-14：用户同意在本图 07 实现恢复 Unknown 结案和显式 Demo 真实来源链，并将 Demo 专属实时 TradingShard、持久决策日志初始化及有效租约来源纳入；仍不授权任何 Demo/Testnet/生产写入，也不把 Linux/外部 NodeFence/在线资格视为已通过。

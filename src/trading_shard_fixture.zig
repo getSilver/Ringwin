@@ -17,12 +17,12 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-pub const expected_happy_digest = "246577440e35c73eb44c4a3a2d283dd8d48a7b8c02bb2d4b38d4378204c60bf6";
+pub const expected_happy_digest = "585c279c0e8c75d76e4102986b4ae314f10ddab592e38ca3bcbf94ac8ed3f68f";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "27edd23d88919b8567f31315880302885e908fe39bb5d32a2eaffee8de5acc1b",
-    "ef80fa33748e1e3bd8f50c1ffdc004cc49ac4c26e254bd653b26d21da6492799",
-    "2b57c0276cd9e1a936397a5b7c71314af598f710538df5243195b99bea3022d2",
+    "693dddeabf2f3f9f4bafb58e02161a5bc6f7d70992225431598b8f4ca36a80b7",
+    "450e7ce3b677c21b6e3d4f8608facd72efb1d73cc13fc42faf2dd971e072a83c",
+    "eafb2a41e72c75e043ffb9a297a977de028049d519e3d17c4dc08cf6326bbac5",
     expected_happy_digest,
 };
 pub const order_limit_price: i64 = 50_100_000_000;
@@ -76,7 +76,7 @@ pub fn canonicalAt(group_index: u64, source_sequence: u64, event: canonical.Payl
     const source_time = fixture_utc_base + group_index * 10 * std.time.ns_per_ms;
     return .{ .venue = .{ .envelope = .{
         .event_type = @intFromEnum(canonical.eventType(event)),
-        .schema_version = 1,
+        .schema_version = canonical.schema_version,
         .identity = .{ .stream = 1, .sequence = source_sequence },
         .source_fact_identity = source_sequence,
         .scope = .account,
@@ -93,6 +93,29 @@ pub fn canonicalAt(group_index: u64, source_sequence: u64, event: canonical.Payl
         },
         .raw_evidence = .{ .stream = 1, .sequence = source_sequence, .digest = @splat(0) },
     }, .event = event } };
+}
+
+pub fn reconciliationEvidence(group_index: u64, source_sequence: u64, order: canonical.OrderIdentity, instrument: canonical.InstrumentIdentity, revision: u32) canonical.ReconciliationEvidence {
+    const observed = fixture_utc_base + group_index * 10 * std.time.ns_per_ms + std.time.ns_per_ms;
+    return .{
+        .scope = .{ .exchange_account = 2, .instrument = instrument, .order = order, .revision = revision, .from_utc_ns = observed, .through_utc_ns = observed },
+        .observed_at_utc_ns = observed,
+        .source = .{ .stream = 1, .sequence = source_sequence, .digest = @splat(1) },
+    };
+}
+
+pub fn completeAbsenceEvidence(group_index: u64, source_sequence: u64, order: canonical.OrderIdentity, instrument: canonical.InstrumentIdentity, revision: u32) canonical.ReconciliationEvidence {
+    var evidence = reconciliationEvidence(group_index, source_sequence, order, instrument, revision);
+    evidence.absence = .{
+        .prior_session = 9,
+        .prior_session_inactive = true,
+        .visibility_deadline_utc_ns = evidence.observed_at_utc_ns,
+        .order_history_complete = true,
+        .terminal_history_complete = true,
+        .fills_complete = true,
+        .economics_complete = true,
+    };
+    return evidence;
 }
 
 fn quantity(lots: i128) canonical.InstrumentQuantity {
@@ -411,10 +434,10 @@ fn assertPartialState(shard: engine.TradingShard) !void {
         shard.economic_projection.portfolio.margin_micros != 4_391_200 or
         // The fill ledger is not allowed to guess OMS remaining quantity:
         // reservation changes only once the authoritative report is applied.
-        shard.layered_risk_reserved_micros != expected_reservation or
+        try shard.activeReservationMicros() != expected_reservation or
         try shard.riskLeaseRemainingMicros() != expected_remaining)
     {
-        std.debug.print("partial state: position_margin={d} reservation={d} remaining={d}\n", .{ shard.economic_projection.portfolio.margin_micros, shard.layered_risk_reserved_micros, try shard.riskLeaseRemainingMicros() });
+        std.debug.print("partial state: position_margin={d} reservation={d} remaining={d}\n", .{ shard.economic_projection.portfolio.margin_micros, try shard.activeReservationMicros(), try shard.riskLeaseRemainingMicros() });
         return error.PartialEconomicProjectionMismatch;
     }
 }
@@ -463,6 +486,7 @@ pub fn runUnknownReconciliation() !LiveRun {
         .cumulative_quantity = .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = 0 },
         .remaining_quantity = .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = command.quantity },
         .rules_version = command.limit_price.rules_version,
+        .evidence = reconciliationEvidence(17, 103, command.order_id, command.instrument, 1),
     } })) != null) return error.UnexpectedCommand;
     var accepted = facts[1];
     accepted.venue.envelope.identity.sequence = 104;
@@ -485,7 +509,6 @@ pub fn runDuplicateReport() !LiveRun {
     if (!std.mem.eql(u8, &before_duplicate_fill, &run.shard.canonicalStateDigest()))
         return error.DuplicateFillChangedState;
     try assertPartialState(run.shard);
-    if (run.shard.economic_projection.ledger_summary.transaction_count != 2) return error.DuplicateCreatedLedgerTransaction;
     if (try apply(&run, facts[4]) != null) return error.UnexpectedCommand;
     if (try apply(&run, facts[5]) != null) return error.UnexpectedCommand;
     if (try apply(&run, atGroup(20, .{ .identity = 2, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_200_000_000 } } })) != null)
@@ -613,7 +636,7 @@ pub const TradingShardHostIngress = struct {
         };
     }
 
-    pub fn summary(self: TradingShardHostIngress) HostIngressSummary {
+    pub fn summary(self: TradingShardHostIngress) !HostIngressSummary {
         const order = self.run.shard.oms.orderById(1);
         var result: HostIngressSummary = .{
             .order_intents = 0,
@@ -623,7 +646,7 @@ pub const TradingShardHostIngress = struct {
             .journal_records = self.run.decision_journal.records,
             .order_quantity = if (order) |value| value.quantity else 0,
             .order_limit_price_micros = if (order) |value| std.math.cast(i64, value.limit_price.ticks) orelse 0 else 0,
-            .reservation_micros = self.run.shard.layered_risk_reserved_micros,
+            .reservation_micros = try self.run.shard.activeReservationMicros(),
         };
         for (self.run.shard.trace.events[0..self.run.shard.trace.len]) |event| switch (event.kind) {
             .order_intent => result.order_intents += 1,

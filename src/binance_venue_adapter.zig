@@ -36,12 +36,18 @@ pub const CapabilityProfile = struct {
     spot: InstrumentRules,
     linear: InstrumentRules,
     batch_max: u8 = canonical.max_order_commands_per_batch,
+    /// Required/target encoding capability. Not live Testnet evidence.
     native_amend: bool = true,
     native_post_only: bool = true,
     venue_reduce_only_linear: bool = true,
+    verified_native_amend: bool = false,
+    verified_native_post_only: bool = false,
+    verified_bounded_batch: bool = false,
+    verified_venue_reduce_only_linear: bool = false,
     requests_per_window: u8 = 4,
     window_ns: u64 = std.time.ns_per_s,
     testnet_admission: TestnetAdmission = .{},
+    qualification: @import("production_contract.zig").Qualification = .not_run,
 };
 
 pub const Authenticator = struct {
@@ -52,7 +58,8 @@ pub const Authenticator = struct {
     }
 };
 pub const TransportOutcome = enum { proven_before_send, response, write_or_response_uncertain };
-pub const SignedRequest = struct { path: []const u8, body: []const u8, timestamp_ns: u64, signature: [32]u8 };
+pub const HttpMethod = enum { post, delete, put };
+pub const SignedRequest = struct { method: HttpMethod, path: []const u8, body: []const u8, timestamp_ns: u64, signature: [32]u8 };
 pub const TransportResult = struct { outcome: TransportOutcome, response: ?[]const u8 = null, source_session: u64, times: raw.Times };
 pub const Transport = struct {
     ptr: *anyopaque,
@@ -67,7 +74,9 @@ const Binding = struct { venue: canonical.VenueIdentity, account: canonical.Exch
 const Rate = struct { window_start: u64 = 0, count: u8 = 0 };
 const max_unknown_orders = 32;
 const Encoded = struct {
+    method: HttpMethod,
     path: []const u8,
+    timestamp_ns: u64,
     bytes: [512]u8 = undefined,
     len: usize,
     fn body(self: *const Encoded) []const u8 {
@@ -282,12 +291,11 @@ pub const BinanceVenueAdapter = struct {
             self.append(output, command, .not_sent, .unsupported_value, null);
             return;
         };
-        const timestamp = self.clock.now();
-        const signature = self.auth.sign(timestamp, encoded.body()) catch {
+        const signature = self.auth.sign(encoded.timestamp_ns, encoded.body()) catch {
             self.append(output, command, .not_sent, .venue_unavailable, null);
             return;
         };
-        const response = self.transport.submit(.{ .path = encoded.path, .body = encoded.body(), .timestamp_ns = timestamp, .signature = signature });
+        const response = self.transport.submit(.{ .method = encoded.method, .path = encoded.path, .body = encoded.body(), .timestamp_ns = encoded.timestamp_ns, .signature = signature });
         const evidence = self.commitResponse(response) catch {
             self.append(output, command, .unknown, null, null);
             self.markUnknown(command.identity);
@@ -302,10 +310,8 @@ pub const BinanceVenueAdapter = struct {
         if (request.exchange_account != binding.account) return error.InvalidRequest;
         var output: canonical.AdapterOutputBatch = .{};
         self.appendEvent(&output, request.identity, .{ .reconciliation_started = request.identity });
-        const confirmed_absent_allowed = request.visibility_delay_elapsed and request.prior_session_inactive;
-        const status = if (self.private_reconciler) |reconciler| reconciler.resolveOrder(request.order, confirmed_absent_allowed) else canonical.ReconciliationStatus.unresolved;
-        if (status != .unresolved) self.clearUnknown(request.order);
-        self.appendEvent(&output, request.identity, .{ .order_reconciliation_result = .{ .identity = request.identity, .complete = status != .unresolved, .status = status } });
+        // A private status alone does not bind quantity, scope, and raw evidence.
+        self.appendEvent(&output, request.identity, .{ .order_reconciliation_result = .{ .identity = request.identity, .complete = false, .status = .unresolved } });
         self.pending = output;
         return .accepted;
     }
@@ -354,12 +360,20 @@ pub const BinanceVenueAdapter = struct {
     }
     fn encode(self: *const BinanceVenueAdapter, command: canonical.OrderCommand) !Encoded {
         const instrument_rules = self.rules(command.instrument) orelse return error.UnsupportedInstrument;
-        var result: Encoded = .{ .path = if (command.instrument == btc_usdt_linear) "/fapi/v1/order" else "/api/v3/order", .len = 0 };
-        const symbol = "BTCUSDT";
-        const operation = switch (command.operation) {
-            .place => "place",
-            .amend => "amend",
-            .cancel => "cancel",
+        const linear = command.instrument == btc_usdt_linear;
+        const timestamp_ns = self.clock.now();
+        var result: Encoded = .{
+            .method = switch (command.operation) {
+                .place => .post,
+                .cancel => .delete,
+                .amend => if (linear) .put else .post,
+            },
+            .path = switch (command.operation) {
+                .place, .cancel => if (linear) "/fapi/v1/order" else "/api/v3/order",
+                .amend => if (linear) "/fapi/v1/order" else "/api/v3/order/cancelReplace",
+            },
+            .timestamp_ns = timestamp_ns,
+            .len = 0,
         };
         var quantity_buffer: [64]u8 = undefined;
         const quantity = if (command.quantity) |value| try decimalText(&quantity_buffer, value.lots, instrument_rules.lot_size) else "";
@@ -372,7 +386,7 @@ pub const BinanceVenueAdapter = struct {
         const kind = switch (command.order_type) {
             .market => "MARKET",
             .limit => "LIMIT",
-            .post_only => "LIMIT_MAKER",
+            .post_only => if (linear) "LIMIT" else "LIMIT_MAKER",
             .fok => "LIMIT",
             .ioc => "LIMIT",
         };
@@ -382,8 +396,33 @@ pub const BinanceVenueAdapter = struct {
             .fill_or_kill => "FOK",
             .post_only => "GTX",
         };
-        const text = try std.fmt.bufPrint(&result.bytes, "{{\"symbol\":\"{s}\",\"clientOrderId\":\"{s}\",\"operation\":\"{s}\",\"side\":\"{s}\",\"type\":\"{s}\",\"timeInForce\":\"{s}\",\"quantity\":\"{s}\",\"price\":\"{s}\",\"reduceOnly\":{}}}", .{ symbol, command.client_order_id.slice(), operation, side, kind, tif, quantity, price, command.venue_reduce_only });
-        result.len = text.len;
+        var timestamp_text: [32]u8 = undefined;
+        const timestamp = try std.fmt.bufPrint(&timestamp_text, "{d}", .{timestamp_ns});
+        try appendForm(&result, "symbol", "BTCUSDT");
+        switch (command.operation) {
+            .place => {
+                try appendForm(&result, "side", side);
+                try appendForm(&result, "type", kind);
+                if (!(command.order_type == .post_only and !linear)) try appendForm(&result, "timeInForce", tif);
+                try appendForm(&result, "quantity", quantity);
+                try appendForm(&result, "price", price);
+                try appendForm(&result, "newClientOrderId", command.client_order_id.slice());
+                if (linear and command.venue_reduce_only) try appendForm(&result, "reduceOnly", "true");
+            },
+            .cancel => {
+                try appendForm(&result, "origClientOrderId", command.client_order_id.slice());
+            },
+            .amend => {
+                if (!linear) try appendForm(&result, "cancelReplaceMode", "STOP_ON_FAILURE");
+                try appendForm(&result, "side", side);
+                if (!linear) try appendForm(&result, "type", kind);
+                try appendForm(&result, "quantity", quantity);
+                try appendForm(&result, "price", price);
+                try appendForm(&result, "origClientOrderId", command.client_order_id.slice());
+                if (!linear) try appendForm(&result, "newClientOrderId", command.client_order_id.slice());
+            },
+        }
+        try appendForm(&result, "timestamp", timestamp);
         return result;
     }
     fn rules(self: *const BinanceVenueAdapter, identity: canonical.InstrumentIdentity) ?InstrumentRules {
@@ -401,15 +440,30 @@ pub const BinanceVenueAdapter = struct {
         const binding = self.binding orelse return;
         const sequence = self.next_event_sequence;
         self.next_event_sequence +%= 1;
-        output.append(.{ .envelope = .{ .event_type = @intFromEnum(canonical.EventType.order_dispatch_result), .schema_version = 1, .identity = .{ .stream = binding.session, .sequence = sequence }, .source_fact_identity = command.identity, .scope = .account, .venue = binding.venue, .exchange_account = binding.account, .instrument = command.instrument, .source_stream = binding.session, .source_sequence = sequence, .adapter_session = binding.session, .times = .{ .monotonic_ns = self.clock.now() }, .raw_evidence = if (evidence) |value| .{ .stream = binding.session, .sequence = value.stream_sequence, .digest = value.sha256 } else .{ .stream = binding.session, .sequence = sequence, .digest = @splat(0) } }, .event = .{ .order_dispatch_result = .{ .command = command.identity, .state = state, .reason = reason } } }) catch return;
+        output.append(.{ .envelope = .{ .event_type = @intFromEnum(canonical.EventType.order_dispatch_result), .schema_version = canonical.schema_version, .identity = .{ .stream = binding.session, .sequence = sequence }, .source_fact_identity = command.identity, .scope = .account, .venue = binding.venue, .exchange_account = binding.account, .instrument = command.instrument, .source_stream = binding.session, .source_sequence = sequence, .adapter_session = binding.session, .times = .{ .monotonic_ns = self.clock.now() }, .raw_evidence = if (evidence) |value| .{ .stream = binding.session, .sequence = value.stream_sequence, .digest = value.sha256 } else .{ .stream = binding.session, .sequence = sequence, .digest = @splat(0) } }, .event = .{ .order_dispatch_result = .{ .command = command.identity, .state = state, .reason = reason } } }) catch return;
     }
     fn appendEvent(self: *BinanceVenueAdapter, output: *canonical.AdapterOutputBatch, source_fact_identity: u128, event: canonical.Payload) void {
         const binding = self.binding orelse return;
         const sequence = self.next_event_sequence;
         self.next_event_sequence +%= 1;
-        output.append(.{ .envelope = .{ .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = 1, .identity = .{ .stream = binding.session, .sequence = sequence }, .source_fact_identity = source_fact_identity, .scope = .account, .venue = binding.venue, .exchange_account = binding.account, .source_stream = binding.session, .source_sequence = sequence, .adapter_session = binding.session, .times = .{ .monotonic_ns = self.clock.now() }, .raw_evidence = .{ .stream = binding.session, .sequence = sequence, .digest = @splat(0) } }, .event = event }) catch return;
+        output.append(.{ .envelope = .{ .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = canonical.schema_version, .identity = .{ .stream = binding.session, .sequence = sequence }, .source_fact_identity = source_fact_identity, .scope = .account, .venue = binding.venue, .exchange_account = binding.account, .source_stream = binding.session, .source_sequence = sequence, .adapter_session = binding.session, .times = .{ .monotonic_ns = self.clock.now() }, .raw_evidence = .{ .stream = binding.session, .sequence = sequence, .digest = @splat(0) } }, .event = event }) catch return;
     }
 };
+
+fn appendForm(encoded: *Encoded, key: []const u8, value: []const u8) !void {
+    if (value.len == 0) return;
+    if (encoded.len + key.len + value.len + 2 > encoded.bytes.len) return error.RequestTooLarge;
+    if (encoded.len != 0) {
+        encoded.bytes[encoded.len] = '&';
+        encoded.len += 1;
+    }
+    @memcpy(encoded.bytes[encoded.len..][0..key.len], key);
+    encoded.len += key.len;
+    encoded.bytes[encoded.len] = '=';
+    encoded.len += 1;
+    @memcpy(encoded.bytes[encoded.len..][0..value.len], value);
+    encoded.len += value.len;
+}
 
 fn decimalText(buffer: *[64]u8, units: i128, increment: canonical.Decimal) ![]const u8 {
     const value = try std.math.mul(i128, units, increment.coefficient);
@@ -507,8 +561,9 @@ const TestTransport = struct {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         self.calls += 1;
         std.debug.assert(request.signature[0] == 1 and request.body.len > 0);
-        if (std.mem.indexOf(u8, request.body, "\"operation\":\"place\"") != null)
-            std.debug.assert(std.mem.indexOf(u8, request.body, "\"quantity\":\"0.0001\"") != null);
+        std.debug.assert(std.mem.indexOf(u8, request.body, "operation") == null);
+        if (request.method == .post and std.mem.eql(u8, request.path, "/api/v3/order"))
+            std.debug.assert(std.mem.indexOf(u8, request.body, "quantity=0.0001") != null);
         return .{ .outcome = self.outcome, .response = self.response, .source_session = 6, .times = .{ .receive_time_utc_ns = 2, .monotonic_time_ns = 3, .wall_time_utc_ns = 4 } };
     }
 };
@@ -690,6 +745,58 @@ test "Binance validates TIF, post-only, reduce-only, amend, and deadline before 
     try std.testing.expectEqual(canonical.CanonicalRejectReason.deadline_expired, (try adapter.tryDrain()).?.events[0].event.order_dispatch_result.reason.?);
     try std.testing.expectEqual(@as(u64, 0), transport.calls);
 }
+test "Binance required capabilities stay unverified without Testnet evidence" {
+    const profile = testProfile();
+    try std.testing.expect(profile.native_amend and profile.native_post_only);
+    try std.testing.expect(!profile.verified_native_amend);
+    try std.testing.expect(!profile.verified_native_post_only);
+    try std.testing.expect(!profile.verified_bounded_batch);
+    try std.testing.expectEqual(@import("production_contract.zig").Qualification.not_run, profile.qualification);
+}
+
+test "Binance spot and linear encode official methods and paths without operation" {
+    var clock = TestClock{};
+    var auth = TestAuth{};
+    var sink = TestRaw{};
+    var transport = TestTransport{};
+    var implementation = BinanceVenueAdapter.init(clock.interface(), testProfile(), auth.interface(), sink.interface(), transport.interface());
+    const spot_place = try implementation.encode(try testCommand(1));
+    try std.testing.expectEqual(HttpMethod.post, spot_place.method);
+    try std.testing.expectEqualStrings("/api/v3/order", spot_place.path);
+    try std.testing.expect(std.mem.indexOf(u8, spot_place.body(), "operation") == null);
+    try std.testing.expect(std.mem.indexOf(u8, spot_place.body(), "symbol=BTCUSDT") != null);
+    try std.testing.expect(std.mem.indexOf(u8, spot_place.body(), "newClientOrderId=") != null);
+
+    var spot_cancel = try testCommand(2);
+    spot_cancel.operation = .cancel;
+    const encoded_cancel = try implementation.encode(spot_cancel);
+    try std.testing.expectEqual(HttpMethod.delete, encoded_cancel.method);
+    try std.testing.expectEqualStrings("/api/v3/order", encoded_cancel.path);
+    try std.testing.expect(std.mem.indexOf(u8, encoded_cancel.body(), "origClientOrderId=") != null);
+
+    var spot_amend = try testCommand(3);
+    spot_amend.operation = .amend;
+    const encoded_amend = try implementation.encode(spot_amend);
+    try std.testing.expectEqual(HttpMethod.post, encoded_amend.method);
+    try std.testing.expectEqualStrings("/api/v3/order/cancelReplace", encoded_amend.path);
+    try std.testing.expect(std.mem.indexOf(u8, encoded_amend.body(), "cancelReplaceMode=STOP_ON_FAILURE") != null);
+
+    var linear_place = try testCommand(4);
+    linear_place.instrument = btc_usdt_linear;
+    linear_place.quantity = .{ .instrument = btc_usdt_linear, .rules_version = 8, .lots = 1 };
+    linear_place.limit_price = .{ .instrument = btc_usdt_linear, .rules_version = 8, .ticks = 500_000 };
+    const encoded_linear = try implementation.encode(linear_place);
+    try std.testing.expectEqual(HttpMethod.post, encoded_linear.method);
+    try std.testing.expectEqualStrings("/fapi/v1/order", encoded_linear.path);
+
+    var linear_amend = linear_place;
+    linear_amend.operation = .amend;
+    const encoded_linear_amend = try implementation.encode(linear_amend);
+    try std.testing.expectEqual(HttpMethod.put, encoded_linear_amend.method);
+    try std.testing.expectEqualStrings("/fapi/v1/order", encoded_linear_amend.path);
+    try std.testing.expect(std.mem.indexOf(u8, encoded_linear_amend.body(), "operation") == null);
+}
+
 test "Binance implementation exercises the shared VenueAdapter contract" {
     var clock = TestClock{};
     var auth = TestAuth{};
@@ -724,7 +831,35 @@ test "Binance private bootstrap drains through the shared VenueAdapter seam" {
     try std.testing.expectEqual(@as(u8, 2), resolved.len);
     try std.testing.expect(output.events[0].envelope.identity.stream != resolved.events[0].envelope.identity.stream);
     try std.testing.expectEqual(canonical.ReconciliationStatus.unresolved, resolved.events[1].event.order_reconciliation_result.status);
-    _ = try adapter.trySend(.{ .order_reconciliation = .{ .identity = 100, .exchange_account = 2, .order = 9, .visibility_delay_elapsed = true, .prior_session_inactive = true } });
+    _ = try adapter.trySend(.{ .order_reconciliation = .{ .identity = 100, .exchange_account = 2, .order = 9 } });
     const absent = (try adapter.tryDrain()).?;
-    try std.testing.expectEqual(canonical.ReconciliationStatus.confirmed_absent, absent.events[1].event.order_reconciliation_result.status);
+    try std.testing.expectEqual(canonical.ReconciliationStatus.unresolved, absent.events[1].event.order_reconciliation_result.status);
+}
+
+test "Binance private partial fills cross the shared recovery contract" {
+    var clock = TestClock{};
+    var auth = TestAuth{};
+    var sink = TestRaw{};
+    var transport = TestTransport{};
+    const profile = testProfile();
+    var reconciler = private.Reconciler.init(sink.interface(), privateRules(profile));
+    var implementation = BinanceVenueAdapter.init(clock.interface(), profile, auth.interface(), sink.interface(), transport.interface());
+    implementation.attachPrivateReconciler(&reconciler);
+    const adapter = implementation.adapter();
+    try startTest(adapter);
+    try implementation.beginPrivateReconciliation();
+    try reconciler.registerOrder(1, try canonical.ClientOrderId.init("RWN-1"), false);
+    const times = raw.Times{ .receive_time_utc_ns = 1, .monotonic_time_ns = 2, .wall_time_utc_ns = 3 };
+    const first = "{\"e\":\"executionReport\",\"E\":\"1\",\"s\":\"BTCUSDT\",\"c\":\"RWN-1\",\"S\":\"BUY\",\"o\":\"LIMIT\",\"f\":\"GTC\",\"q\":\"0.0100\",\"p\":\"50000.0\",\"X\":\"PARTIALLY_FILLED\",\"i\":\"42\",\"l\":\"0.0040\",\"z\":\"0.0040\",\"L\":\"50000.0\",\"n\":\"-0.000001\",\"N\":\"BTC\",\"T\":\"2\",\"t\":\"77\",\"m\":true}";
+    const second = "{\"e\":\"executionReport\",\"E\":\"2\",\"s\":\"BTCUSDT\",\"c\":\"RWN-1\",\"S\":\"BUY\",\"o\":\"LIMIT\",\"f\":\"GTC\",\"q\":\"0.0100\",\"p\":\"50000.0\",\"X\":\"FILLED\",\"i\":\"42\",\"l\":\"0.0060\",\"z\":\"0.0100\",\"L\":\"50000.0\",\"n\":\"-0.000001\",\"N\":\"BTC\",\"T\":\"3\",\"t\":\"78\",\"m\":true}";
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, first);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, second);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, second);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_spot_account, .{ .final = true }, times, "{\"balances\":[]}");
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_orders, .{ .final = true }, times, "[]");
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_fills, .{ .final = true }, times, "[]");
+    const output = (try adapter.tryDrain()).?;
+    try contract.exerciseFillRecovery(output.slice(), .{ .venue = 21, .exchange_account = 2, .adapter_session = 6 });
+    try std.testing.expect((try adapter.tryDrain()) == null);
+    try std.testing.expectError(error.InvalidRequest, adapter.trySend(.{ .order_reconciliation = .{ .identity = 99, .exchange_account = 3, .order = 1 } }));
 }

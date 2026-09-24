@@ -31,9 +31,14 @@ pub const CapabilityProfile = struct {
     native_amend: bool = true,
     native_post_only: bool = true,
     venue_reduce_only_linear: bool = true,
+    verified_native_amend: bool = false,
+    verified_native_post_only: bool = false,
+    verified_bounded_batch: bool = false,
+    verified_venue_reduce_only_linear: bool = false,
     can_read: bool = true,
     can_trade: bool = true,
     testnet_admission: TestnetAdmission = .{},
+    qualification: @import("production_contract.zig").Qualification = .not_run,
     requests_per_window: u8 = 4,
     window_ns: u64 = std.time.ns_per_s,
 };
@@ -274,10 +279,8 @@ pub const BybitVenueAdapter = struct {
         if (request.exchange_account != binding.account) return error.InvalidRequest;
         var output: canonical.AdapterOutputBatch = .{};
         self.appendEvent(&output, request.identity, .{ .reconciliation_started = request.identity });
-        const confirmed_absent_allowed = request.visibility_delay_elapsed and request.prior_session_inactive;
-        const status = if (self.reconciler) |value| value.resolveOrder(request.order, confirmed_absent_allowed) else .unresolved;
-        if (status != .unresolved) self.clearUnknown(request.order);
-        self.appendEvent(&output, request.identity, .{ .order_reconciliation_result = .{ .identity = request.identity, .complete = status != .unresolved, .status = status } });
+        // A private status alone does not bind quantity, scope, and raw evidence.
+        self.appendEvent(&output, request.identity, .{ .order_reconciliation_result = .{ .identity = request.identity, .complete = false, .status = .unresolved } });
         self.pending = output;
         return .accepted;
     }
@@ -371,7 +374,7 @@ pub const BybitVenueAdapter = struct {
         const binding = self.binding orelse return;
         const sequence = self.next_sequence;
         self.next_sequence +%= 1;
-        output.append(.{ .envelope = .{ .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = 1, .identity = .{ .stream = binding.session, .sequence = sequence }, .source_fact_identity = source, .scope = .account, .venue = binding.venue, .exchange_account = binding.account, .instrument = instrument, .source_stream = binding.session, .source_sequence = sequence, .adapter_session = binding.session, .times = .{ .monotonic_ns = self.clock.now() }, .raw_evidence = if (evidence) |value| .{ .stream = binding.session, .sequence = value.stream_sequence, .digest = value.sha256 } else .{ .stream = binding.session, .sequence = sequence, .digest = @splat(0) } }, .event = event }) catch return;
+        output.append(.{ .envelope = .{ .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = canonical.schema_version, .identity = .{ .stream = binding.session, .sequence = sequence }, .source_fact_identity = source, .scope = .account, .venue = binding.venue, .exchange_account = binding.account, .instrument = instrument, .source_stream = binding.session, .source_sequence = sequence, .adapter_session = binding.session, .times = .{ .monotonic_ns = self.clock.now() }, .raw_evidence = if (evidence) |value| .{ .stream = binding.session, .sequence = value.stream_sequence, .digest = value.sha256 } else .{ .stream = binding.session, .sequence = sequence, .digest = @splat(0) } }, .event = event }) catch return;
     }
 };
 
@@ -571,8 +574,8 @@ test "Bybit ConfirmedAbsent requires delay and inactive prior session" {
     _ = try adapter.adapter().tryDrain();
     _ = try adapter.adapter().trySend(.{ .order_reconciliation = .{ .identity = 20, .exchange_account = 2, .order = 7 } });
     try std.testing.expectEqual(canonical.ReconciliationStatus.unresolved, (try adapter.adapter().tryDrain()).?.slice()[1].event.order_reconciliation_result.status);
-    _ = try adapter.adapter().trySend(.{ .order_reconciliation = .{ .identity = 21, .exchange_account = 2, .order = 7, .visibility_delay_elapsed = true, .prior_session_inactive = true } });
-    try std.testing.expectEqual(canonical.ReconciliationStatus.confirmed_absent, (try adapter.adapter().tryDrain()).?.slice()[1].event.order_reconciliation_result.status);
+    _ = try adapter.adapter().trySend(.{ .order_reconciliation = .{ .identity = 21, .exchange_account = 2, .order = 7 } });
+    try std.testing.expectEqual(canonical.ReconciliationStatus.unresolved, (try adapter.adapter().tryDrain()).?.slice()[1].event.order_reconciliation_result.status);
 }
 test "Bybit Testnet sends require explicit no-withdraw admission and bounded notional" {
     var clock = TestClock{};
@@ -607,7 +610,7 @@ test "Bybit unknown dispatch remains closed until private reconciliation resolve
     _ = try adapter.ingestPrivate(std.testing.allocator, .rest_orders, .{ .final = true }, .{ .receive_time_utc_ns = 1, .monotonic_time_ns = 2, .wall_time_utc_ns = 3 }, "{\"result\":{\"list\":[{\"category\":\"spot\",\"symbol\":\"BTCUSDT\",\"orderId\":\"42\",\"orderLinkId\":\"RWN-7\",\"side\":\"Buy\",\"orderType\":\"Limit\",\"timeInForce\":\"GTC\",\"orderStatus\":\"Filled\",\"qty\":\"0.0001\",\"cumExecQty\":\"0.0001\",\"price\":\"50000.0\",\"avgPrice\":\"50000.0\",\"updatedTime\":\"2\",\"reduceOnly\":false}]}}");
     try std.testing.expectEqual(venue.SendResult.accepted, try adapter.adapter().trySend(.{ .order_reconciliation = .{ .identity = 11, .exchange_account = 2, .order = 7 } }));
     const result = (try adapter.adapter().tryDrain()).?;
-    try std.testing.expectEqual(canonical.ReconciliationStatus.found_terminal, result.slice()[1].event.order_reconciliation_result.status);
+    try std.testing.expectEqual(canonical.ReconciliationStatus.unresolved, result.slice()[1].event.order_reconciliation_result.status);
 }
 test "Bybit adapter has the common VenueAdapter lifecycle" {
     var clock = TestClock{};
@@ -616,4 +619,61 @@ test "Bybit adapter has the common VenueAdapter lifecycle" {
     var transport = TestTransport{};
     var adapter = testAdapter(&clock, &auth, &raw, &transport);
     try contract.exerciseWith(adapter.adapter(), .{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 }, .{ .order_command = try testCommand() });
+}
+
+test "Bybit private partial fills cross the shared recovery contract" {
+    var clock = TestClock{};
+    var auth = TestAuth{};
+    var raw = TestRaw{};
+    var transport = TestTransport{};
+    var reconciler = private.Reconciler.init(raw.sink(), .{ .spot = .{ .identity = private.btc_usdt_spot, .rules_version = 1, .tick_size = .{ .coefficient = 1, .scale = 1 }, .lot_size = .{ .coefficient = 1, .scale = 4 } }, .linear = .{ .identity = private.btc_usdt_linear, .rules_version = 1, .tick_size = .{ .coefficient = 1, .scale = 1 }, .lot_size = .{ .coefficient = 1, .scale = 4 } } });
+    var implementation = testAdapter(&clock, &auth, &raw, &transport);
+    implementation.attachPrivateReconciler(&reconciler);
+    const adapter = implementation.adapter();
+    try adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 8 });
+    try implementation.beginPrivateReconciliation();
+    try reconciler.registerOrder(7, try canonical.ClientOrderId.init("RWN-7"), false);
+    const times = private.Times{ .receive_time_utc_ns = 1, .monotonic_time_ns = 2, .wall_time_utc_ns = 3 };
+    const partial_order = "{\"topic\":\"order\",\"data\":[{\"category\":\"spot\",\"symbol\":\"BTCUSDT\",\"orderId\":\"42\",\"orderLinkId\":\"RWN-7\",\"side\":\"Buy\",\"orderType\":\"Limit\",\"timeInForce\":\"GTC\",\"orderStatus\":\"PartiallyFilled\",\"qty\":\"0.0100\",\"cumExecQty\":\"0.0040\",\"price\":\"50000.0\",\"avgPrice\":\"50000.0\",\"updatedTime\":\"2\",\"reduceOnly\":false}]}";
+    const first_execution = "{\"topic\":\"execution\",\"data\":[{\"category\":\"spot\",\"symbol\":\"BTCUSDT\",\"orderId\":\"42\",\"orderLinkId\":\"RWN-7\",\"execId\":\"77\",\"side\":\"Buy\",\"execQty\":\"0.0040\",\"execPrice\":\"50000.0\",\"execFee\":\"0.000001\",\"feeCurrency\":\"USDT\",\"execPnl\":\"0\",\"execTime\":\"2\",\"isMaker\":true}]}";
+    const filled_order = "{\"topic\":\"order\",\"data\":[{\"category\":\"spot\",\"symbol\":\"BTCUSDT\",\"orderId\":\"42\",\"orderLinkId\":\"RWN-7\",\"side\":\"Buy\",\"orderType\":\"Limit\",\"timeInForce\":\"GTC\",\"orderStatus\":\"Filled\",\"qty\":\"0.0100\",\"cumExecQty\":\"0.0100\",\"price\":\"50000.0\",\"avgPrice\":\"50000.0\",\"updatedTime\":\"3\",\"reduceOnly\":false}]}";
+    const second_execution = "{\"topic\":\"execution\",\"data\":[{\"category\":\"spot\",\"symbol\":\"BTCUSDT\",\"orderId\":\"42\",\"orderLinkId\":\"RWN-7\",\"execId\":\"78\",\"side\":\"Buy\",\"execQty\":\"0.0060\",\"execPrice\":\"50000.0\",\"execFee\":\"0.000001\",\"feeCurrency\":\"USDT\",\"execPnl\":\"0\",\"execTime\":\"3\",\"isMaker\":true}]}";
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, partial_order);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, first_execution);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, filled_order);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, second_execution);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, second_execution);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_wallet, .{ .final = true }, times, "{\"result\":{\"list\":[{\"coin\":[]}]}}");
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_positions, .{ .final = true }, times, "{\"result\":{\"list\":[]}}");
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_orders, .{ .final = true }, times, "{\"result\":{\"list\":[]}}");
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_executions, .{ .final = true }, times, "{\"result\":{\"list\":[]}}");
+    const output = (try adapter.tryDrain()).?;
+    try contract.exerciseFillRecovery(output.slice(), .{ .venue = 1, .exchange_account = 2, .adapter_session = 3 });
+    try std.testing.expect((try adapter.tryDrain()) == null);
+    try std.testing.expectError(error.InvalidRequest, adapter.trySend(.{ .order_reconciliation = .{ .identity = 99, .exchange_account = 3, .order = 7 } }));
+}
+
+test "Bybit required capabilities stay unverified without Testnet evidence" {
+    const profile = testProfile();
+    try std.testing.expect(profile.native_amend and profile.native_post_only);
+    try std.testing.expect(!profile.verified_native_amend);
+    try std.testing.expect(!profile.verified_native_post_only);
+    try std.testing.expect(!profile.verified_bounded_batch);
+    try std.testing.expectEqual(@import("production_contract.zig").Qualification.not_run, profile.qualification);
+}
+
+test "Bybit place amend cancel use official v5 paths" {
+    var clock = TestClock{};
+    var auth = TestAuth{};
+    var raw = TestRaw{};
+    var transport = TestTransport{};
+    var adapter = testAdapter(&clock, &auth, &raw, &transport);
+    const place = try adapter.encode(try testCommand());
+    try std.testing.expectEqualStrings("/v5/order/create", place.path);
+    var amend = try testCommand();
+    amend.operation = .amend;
+    try std.testing.expectEqualStrings("/v5/order/amend", (try adapter.encode(amend)).path);
+    var cancel = try testCommand();
+    cancel.operation = .cancel;
+    try std.testing.expectEqualStrings("/v5/order/cancel", (try adapter.encode(cancel)).path);
 }

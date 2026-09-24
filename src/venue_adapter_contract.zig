@@ -27,6 +27,51 @@ pub fn exerciseWith(adapter: venue.VenueAdapter, config: venue.VenueConfig, adap
     try std.testing.expectEqual(venue.SendResult.stopped, try adapter.trySend(adapter_request));
 }
 
+pub const FillRecoveryFixture = struct {
+    venue: canonical.VenueIdentity,
+    exchange_account: canonical.ExchangeAccountIdentity,
+    adapter_session: canonical.AdapterSessionIdentity,
+};
+
+/// Checks only canonical records emitted at the public adapter seam.  The
+/// TradingShard owns duplicate/conflict application; this contract proves that
+/// every adapter supplies it with a scoped report/Fill trajectory.
+pub fn exerciseFillRecovery(records: []const canonical.EventRecord, fixture: FillRecoveryFixture) !void {
+    var applied_quantity: i128 = 0;
+    var original_quantity: ?i128 = null;
+    var reports: usize = 0;
+    var fills: usize = 0;
+    for (records) |record| {
+        try std.testing.expectEqual(@intFromEnum(canonical.eventType(record.event)), record.envelope.event_type);
+        try std.testing.expectEqual(fixture.venue, record.envelope.venue);
+        try std.testing.expectEqual(fixture.exchange_account, record.envelope.exchange_account);
+        try std.testing.expectEqual(fixture.adapter_session, record.envelope.adapter_session);
+        switch (record.event) {
+            .execution_report => |report| {
+                reports += 1;
+                try std.testing.expectEqual(fixture.exchange_account, report.exchange_account);
+                try std.testing.expect(report.cumulative_quantity.lots >= 0);
+                try std.testing.expect(report.remaining_quantity.lots >= 0);
+                if (report.original_quantity) |quantity| {
+                    try std.testing.expect(quantity.lots >= report.cumulative_quantity.lots);
+                    original_quantity = quantity.lots;
+                }
+            },
+            .fill => |fill| {
+                fills += 1;
+                try std.testing.expectEqual(fixture.exchange_account, fill.exchange_account);
+                try std.testing.expect(fill.quantity.lots > 0 and fill.price.ticks > 0);
+                if (fill.fee) |fee| try std.testing.expect(fee.atoms >= 0);
+                if (fill.rebate) |rebate| try std.testing.expect(rebate.atoms >= 0);
+                applied_quantity = try std.math.add(i128, applied_quantity, fill.quantity.lots);
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(reports != 0 and fills != 0);
+    try std.testing.expectEqual(original_quantity orelse return error.MissingOriginalQuantity, applied_quantity);
+}
+
 const FixtureVenue = struct {
     running: bool = false,
     stopped: bool = false,
@@ -83,7 +128,7 @@ const FixtureVenue = struct {
 fn fixtureEnvelope(identity: u128) canonical.EventEnvelope {
     return .{
         .event_type = 1,
-        .schema_version = 1,
+        .schema_version = canonical.schema_version,
         .identity = .{ .stream = 1, .sequence = @intCast(identity) },
         .source_fact_identity = identity,
         .scope = .account,

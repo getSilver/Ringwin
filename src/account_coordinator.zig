@@ -276,7 +276,7 @@ pub fn shardSummaryFromShard(
         .shard_sequence = shard_sequence,
         .rules_version = rules_version,
         .lease_version = shard.risk_lease_version,
-        .reservation_micros = shard.layered_risk_reserved_micros,
+        .reservation_micros = try shard.activeReservationMicros(),
         .spot_quantity = economics_summary.portfolio.spot.quantity,
         .swap_quantity = economics_summary.portfolio.swap.quantity,
         .cash_micros = economics_summary.portfolio.usdt_balance_micros,
@@ -1639,7 +1639,16 @@ test "shard summaries derive from authoritative state and coordinate four real s
         try std.testing.expectEqual(@as(i64, 1_000), lease.limit_micros);
     }
 
-    shards[3].layered_risk_reserved_micros = 500;
+    var reservation_group: trading.oms.IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
+    reservation_group.members[0] = .{
+        .intent_sequence = 1,
+        .operation = .place,
+        .instrument = 1,
+        .quantity = 1,
+        .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 1 },
+        .reservation = .{ .asset = 1, .atoms = 500 },
+    };
+    try shards[3].oms.applyGroup(reservation_group);
     shards[3].last_risk_tier = 2;
     const advanced = try shardSummaryFromShard(&shards[3], .shard_3, 2, 4);
     try std.testing.expectEqual(@as(i64, 500), advanced.reservation_micros);

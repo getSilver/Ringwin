@@ -672,9 +672,10 @@ test "cutover activation is a stable canonical fact before authority switches" {
 test "strategy cutover persists a scoped fence and leaves unrelated orders live" {
     var shard: trading.TradingShard = .{};
     var journal = trading.journal.Journal.init();
-    var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 1, .count = 2 };
+    var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
     group.members[0] = .{ .intent_sequence = 1, .strategy_instance = 11, .operation = .place, .instrument = spot_instrument, .quantity = 1, .limit_price = .{ .instrument = spot_instrument, .rules_version = 1, .ticks = 2 }, .reservation = .{ .asset = settlement_asset, .atoms = 2 } };
-    group.members[1] = .{ .intent_sequence = 2, .strategy_instance = 12, .operation = .place, .instrument = spot_instrument, .quantity = 1, .limit_price = .{ .instrument = spot_instrument, .rules_version = 1, .ticks = 2 }, .reservation = .{ .asset = settlement_asset, .atoms = 2 } };
+    try shard.oms.applyGroup(group);
+    group.members[0] = .{ .intent_sequence = 1, .strategy_instance = 12, .operation = .place, .instrument = spot_instrument, .quantity = 1, .limit_price = .{ .instrument = spot_instrument, .rules_version = 1, .ticks = 2 }, .reservation = .{ .asset = settlement_asset, .atoms = 2 } };
     try shard.oms.applyGroup(group);
     var cutover: Cutover = .{ .active_strategy_instance = 11 };
     try cutover.prepare(.{ .release = 1, .strategy_instance = 21, .strategy_definition = 1, .parameter_version = 1, .state_schema_version = 1, .transition = .keep, .structure_valid = true, .economic_digest_valid = true, .strategy_invariants_valid = true });

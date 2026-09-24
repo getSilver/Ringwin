@@ -33,7 +33,14 @@ pub const VenueAdapter = struct {
         try_send: *const fn (*anyopaque, canonical.AdapterRequest) SendError!SendResult,
         try_drain: *const fn (*anyopaque) DrainError!?canonical.AdapterOutputBatch,
         stop: *const fn (*anyopaque, DrainDeadline) StopError!void,
+        /// Pure encoding only: Gateway persists the returned ID before any send.
+        prepare_client_order_id: ?*const fn (*anyopaque, [16]u8, canonical.ExchangeAccountIdentity, u64, canonical.ClientOrderId) anyerror!canonical.ClientOrderId = null,
     };
+
+    pub fn prepareClientOrderId(self: VenueAdapter, namespace: [16]u8, account: canonical.ExchangeAccountIdentity, order_id: u64, requested: canonical.ClientOrderId) !canonical.ClientOrderId {
+        const prepare = self.vtable.prepare_client_order_id orelse return requested;
+        return prepare(self.ptr, namespace, account, order_id, requested);
+    }
 
     pub fn start(self: VenueAdapter, config: VenueConfig) StartError!void {
         return self.vtable.start(self.ptr, config);

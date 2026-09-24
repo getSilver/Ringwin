@@ -79,6 +79,7 @@ pub const EventKind = enum(u16) {
     canonical_account_invalidated,
     canonical_market_invalidated,
     capability_profile_activated,
+    oms_intent_conflict,
 };
 
 pub const Fact = struct {

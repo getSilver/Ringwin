@@ -7,7 +7,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 pub const btc_usdt_spot: canonical.InstrumentIdentity = 0x4259_00000001;
 pub const btc_usdt_linear: canonical.InstrumentIdentity = 0x4259_00000002;
 pub const btc: canonical.AssetIdentity = 0x425443;
-pub const usdt: canonical.AssetIdentity = 0x55534454;
+pub const usdt: canonical.AssetIdentity = 1;
 
 pub const Times = struct { receive_time_utc_ns: u64, monotonic_time_ns: u64, wall_time_utc_ns: u64 };
 pub const RawIngressRecord = struct { source_session: u64, receive_time_utc_ns: u64, monotonic_time_ns: u64, wall_time_utc_ns: u64, byte_len: u32, sha256: [32]u8 };
@@ -301,7 +301,7 @@ pub const Reconciler = struct {
         const sequence = self.next_sequence;
         self.next_sequence = try std.math.add(u64, sequence, 1);
         const stream = privateStream(binding.session);
-        return .{ .envelope = .{ .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = 1, .identity = .{ .stream = stream, .sequence = sequence }, .source_fact_identity = source_id, .scope = scope, .venue = binding.venue, .exchange_account = binding.account, .instrument = instrument, .asset = asset_id, .source_stream = sourceStream(binding.session, self.active_source), .source_sequence = self.active_source_sequence, .adapter_session = binding.session, .times = .{ .source_utc_ns = source_time, .receive_utc_ns = times.receive_time_utc_ns, .monotonic_ns = times.monotonic_time_ns, .audit_utc_ns = times.wall_time_utc_ns }, .raw_evidence = .{ .stream = rawStream(binding.session), .sequence = evidence.stream_sequence, .digest = evidence.sha256 } }, .event = event };
+        return .{ .envelope = .{ .event_type = @intFromEnum(canonical.eventType(event)), .schema_version = canonical.schema_version, .identity = .{ .stream = stream, .sequence = sequence }, .source_fact_identity = source_id, .scope = scope, .venue = binding.venue, .exchange_account = binding.account, .instrument = instrument, .asset = asset_id, .source_stream = sourceStream(binding.session, self.active_source), .source_sequence = self.active_source_sequence, .adapter_session = binding.session, .times = .{ .source_utc_ns = source_time, .receive_utc_ns = times.receive_time_utc_ns, .monotonic_ns = times.monotonic_time_ns, .audit_utc_ns = times.wall_time_utc_ns }, .raw_evidence = .{ .stream = rawStream(binding.session), .sequence = evidence.stream_sequence, .digest = evidence.sha256 } }, .event = event };
     }
     fn appendReady(self: *Reconciler, event: canonical.EventRecord) !void {
         if (self.ready_count == self.ready.len) return error.PrivateOutputFull;
@@ -562,6 +562,40 @@ test "Bybit separates deduplicated reports and fills from economic facts" {
     try std.testing.expect(count >= 3);
     try std.testing.expectEqual(@as(usize, 1), reports);
     try std.testing.expectEqual(@as(usize, 1), fills);
+}
+
+test "Bybit committed private ingress replays to identical canonical facts" {
+    var live_raw = TestRaw{};
+    var replay_raw = TestRaw{};
+    var live = Reconciler.init(live_raw.sink(), testRules());
+    var replay = Reconciler.init(replay_raw.sink(), testRules());
+    try startTest(&live);
+    try startTest(&replay);
+    const frames = [_][]const u8{
+        "{\"topic\":\"order\",\"data\":[{\"category\":\"spot\",\"symbol\":\"BTCUSDT\",\"orderId\":\"42\",\"orderLinkId\":\"RWN-9\",\"side\":\"Buy\",\"orderType\":\"Limit\",\"timeInForce\":\"GTC\",\"orderStatus\":\"Filled\",\"qty\":\"0.0100\",\"cumExecQty\":\"0.0100\",\"price\":\"50000.0\",\"avgPrice\":\"50000.0\",\"updatedTime\":\"2\",\"reduceOnly\":false}]}",
+        "{\"topic\":\"execution\",\"data\":[{\"category\":\"spot\",\"symbol\":\"BTCUSDT\",\"orderId\":\"42\",\"orderLinkId\":\"RWN-9\",\"execId\":\"77\",\"side\":\"Buy\",\"execQty\":\"0.0100\",\"execPrice\":\"50000.0\",\"execFee\":\"0.000001\",\"feeCurrency\":\"USDT\",\"execPnl\":\"0\",\"execTime\":\"2\",\"isMaker\":true}]}",
+        "{\"result\":{\"list\":[{\"coin\":[]}]}}",
+        "{\"result\":{\"list\":[]}}",
+        "{\"result\":{\"list\":[]}}",
+        "{\"result\":{\"list\":[]}}",
+    };
+    for (frames, 0..) |bytes, index| {
+        const source: Source = switch (index) {
+            0, 1 => .ws,
+            2 => .rest_wallet,
+            3 => .rest_positions,
+            4 => .rest_orders,
+            else => .rest_executions,
+        };
+        const page: ?Page = if (source == .ws) null else .{ .final = true };
+        _ = try live.ingest(std.testing.allocator, source, page, test_times, bytes);
+        _ = try replay.ingest(std.testing.allocator, source, page, test_times, bytes);
+    }
+    const left = live.drain().?;
+    const right = replay.drain().?;
+    try std.testing.expectEqual(left.len, right.len);
+    for (left.slice(), right.slice()) |live_event, replay_event|
+        try std.testing.expect(std.meta.eql(live_event, replay_event));
 }
 
 test "Bybit derives position mode from positionIdx" {

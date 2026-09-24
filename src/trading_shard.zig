@@ -124,6 +124,12 @@ fn notionalMicrosScaled(quantity: i64, price_micros: i64, quantity_denominator: 
     return ceilDivPositive(try std.math.mul(i128, quantity, price_micros), quantity_denominator);
 }
 
+fn priceTicks(price_micros: i64, tick_micros: i64) !i128 {
+    if (price_micros <= 0 or tick_micros <= 0 or @mod(price_micros, tick_micros) != 0)
+        return error.InvalidPriceTick;
+    return @divExact(price_micros, tick_micros);
+}
+
 fn riskTier(notional_micros: i64) !u8 {
     if (notional_micros <= 500_000 * money_scale) return 1;
     if (notional_micros <= 1_000_000 * money_scale) return 2;
@@ -131,13 +137,20 @@ fn riskTier(notional_micros: i64) !u8 {
     return error.RiskLimitExceeded;
 }
 
-const FillProjection = struct { fill_id: u64, order_id: u64 = 0, quantity: i64, price_micros: i64 };
 const CanonicalIngressCursor = struct {
     identity: canonical.EventIdentity,
     event_type: canonical.EventType,
     raw_digest: [Sha256.digest_length]u8,
     payload_digest: [Sha256.digest_length]u8,
 };
+
+fn canonicalPayloadDigest(event: canonical.Payload) ![Sha256.digest_length]u8 {
+    var payload_bytes: [canonical_event_codec.max_encoded_len]u8 = undefined;
+    const payload = try canonical_event_codec.encodePayload(&payload_bytes, event);
+    var digest: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(payload, &digest, .{});
+    return digest;
+}
 const max_canonical_ingress_streams = 16;
 
 pub const TradingShard = struct {
@@ -186,7 +199,6 @@ pub const TradingShard = struct {
     kill_buffer_bps: i64 = 0,
     warning_liquidation_distance_ticks: i64 = 0,
     kill_liquidation_distance_ticks: i64 = 0,
-    layered_risk_reserved_micros: i64 = 0,
     portfolio_margin_buffer_micros: i64 = 0,
     exchange_margin_buffer_micros: i64 = 0,
     portfolio_buffer_bps: i64 = 0,
@@ -221,8 +233,6 @@ pub const TradingShard = struct {
     fenced_strategy_count: u8 = 0,
     canonical_market: market_projection.Projection = .{},
     canonical_account: account_projection.AccountProjection = .{},
-    last_canonical_report: ?canonical.ExecutionReport = null,
-    last_canonical_fill: ?canonical.Fill = null,
     last_funding_rate: ?canonical.FundingRatePublished = null,
     last_venue_configuration: ?canonical.VenueAccountConfigurationSnapshot = null,
     canonical_ingress_count: u64 = 0,
@@ -330,6 +340,12 @@ pub const TradingShard = struct {
         return stateDigest(self);
     }
 
+    /// A permutation-only business-state comparison. CanonicalStateDigest
+    /// remains the ordered Trace/snapshot integrity digest.
+    pub fn semanticAuthorityDigest(self: TradingShard) [Sha256.digest_length]u8 {
+        return semanticStateDigest(self);
+    }
+
     /// Reports whether one strategy is durably fenced from new risk intent.
     pub fn strategyFenced(self: *const TradingShard, strategy_instance: u128) bool {
         for (self.fenced_strategy_instances[0..self.fenced_strategy_count]) |identity|
@@ -408,8 +424,13 @@ pub const TradingShard = struct {
         return std.math.sub(
             i64,
             self.risk_lease_micros,
-            try std.math.add(i64, self.economic_projection.portfolio.margin_micros, self.layered_risk_reserved_micros),
+            try std.math.add(i64, self.economic_projection.portfolio.margin_micros, try self.activeReservationMicros()),
         );
+    }
+
+    pub fn activeReservationMicros(self: *const TradingShard) !i64 {
+        const reservation = try self.oms.activeReservations(settlement_asset);
+        return std.math.cast(i64, reservation.atoms) orelse error.Overflow;
     }
 
     pub const IntegritySnapshot = struct {
@@ -430,6 +451,18 @@ pub const TradingShard = struct {
             .effective_trading_authority = self.operational_state.effectiveTradingAuthority(),
             .canonical_state_digest = self.canonicalStateDigest(),
         };
+    }
+
+    /// Account reconciliation is single-flight at the VenueAdapter seam, so
+    /// the latest durable control/result trace pair is its recovery status.
+    pub fn accountReconciliationPending(self: *const TradingShard) bool {
+        var pending = false;
+        for (self.trace.events[0..self.trace.len]) |fact| switch (fact.kind) {
+            .canonical_account_reconciliation_started => pending = true,
+            .canonical_account_reconciliation => pending = false,
+            else => {},
+        };
+        return pending;
     }
 
     pub fn genesisReady(self: *const TradingShard) bool {
@@ -518,7 +551,12 @@ pub const TradingShard = struct {
         };
     }
 
-    fn qualifyOmsGroup(self: *TradingShard, group: oms_module.IntentGroup) !oms_module.IntentGroup {
+    const QualifiedIntentGroup = struct {
+        group: oms_module.IntentGroup,
+        reservation_micros: i64,
+    };
+
+    fn qualifyOmsGroup(self: *TradingShard, group: oms_module.IntentGroup) !QualifiedIntentGroup {
         var qualified = group;
         var active = try self.oms.activeReservations(settlement_asset);
         for (qualified.members[0..qualified.count]) |*intent| {
@@ -590,7 +628,6 @@ pub const TradingShard = struct {
             intent.venue_reduce_only = assessment.venue_reduce_only and
                 (if (instrument_config.capability) |capability| capability.supports_venue_reduce_only else true);
             active = assessment.total_reserved;
-            self.layered_risk_reserved_micros = std.math.cast(i64, active.atoms) orelse return error.Overflow;
             self.portfolio_margin_buffer_micros = std.math.cast(i64, assessment.portfolio_margin_buffer.atoms) orelse return error.Overflow;
             self.exchange_margin_buffer_micros = std.math.cast(i64, assessment.exchange_margin_buffer.atoms) orelse return error.Overflow;
             self.portfolio_buffer_bps = assessment.portfolio_buffer_bps;
@@ -614,7 +651,10 @@ pub const TradingShard = struct {
             });
             if (!reduces_only and strict_gate != .healthy) return error.MarginSafetyGateClosed;
         }
-        return qualified;
+        return .{
+            .group = qualified,
+            .reservation_micros = std.math.cast(i64, active.atoms) orelse return error.Overflow,
+        };
     }
 
     fn instrumentEntry(self: *const TradingShard, instrument_id: canonical.InstrumentIdentity) ?instrument_registry.Entry {
@@ -637,11 +677,19 @@ pub const TradingShard = struct {
         return self.instrumentEntry(identity);
     }
 
-    fn confirmPendingReplacement(self: *TradingShard, order_id: u64, sequence: u64, now_monotonic_ns: u64) !void {
-        const replacement = (try self.oms.replacementIntent(order_id, sequence)) orelse return;
+    fn confirmPendingReplacement(self: *TradingShard, order_id: u64, sequence: u64, now_monotonic_ns: u64) !?i64 {
+        const replacement = (self.oms.replacementIntent(order_id, sequence) catch {
+            try self.oms.discardReplacement(order_id);
+            return null;
+        }) orelse return null;
+        if (self.oms.blocksNewSend()) {
+            try self.oms.discardReplacement(order_id);
+            return null;
+        }
+        var candidate = self.*;
         var group: oms_module.IntentGroup = .{ .first_intent_sequence = replacement.intent_sequence, .count = 1 };
         group.members[0] = replacement;
-        const qualified = self.qualifyOmsGroup(group) catch |err| switch (err) {
+        const qualified = candidate.qualifyOmsGroup(group) catch |err| switch (err) {
             error.StrategyLimitExceeded,
             error.VirtualPortfolioLimitExceeded,
             error.DecisionDomainLimitExceeded,
@@ -655,27 +703,26 @@ pub const TradingShard = struct {
             error.StrategyCutoverFenced,
             => {
                 try self.oms.discardReplacement(order_id);
-                return;
+                return null;
             },
             else => return err,
         };
-        const intent = qualified.members[0];
-        try self.trace.append(.risk_accepted, intent.intent_sequence);
-        const decision_barrier: u64 = @intCast(self.trace.len);
-        try self.trace.append(.risk_reservation_created, intent.intent_sequence);
-        try self.oms.confirmReplacement(order_id, intent.reservation, intent.portfolio_reduce_only, intent.venue_reduce_only, intent.intent_sequence, .{
+        const intent = qualified.group.members[0];
+        try candidate.trace.append(.risk_accepted, intent.intent_sequence);
+        const decision_barrier: u64 = @intCast(candidate.trace.len);
+        try candidate.trace.append(.risk_reservation_created, intent.intent_sequence);
+        try candidate.oms.confirmReplacement(order_id, intent.reservation, intent.portfolio_reduce_only, intent.venue_reduce_only, intent.intent_sequence, .{
             .decision = decision_barrier,
-            .reservation = @intCast(self.trace.len),
-            .authority = try self.dispatchAuthorityRefs(intent.instrument, now_monotonic_ns, decision_barrier),
+            .reservation = @intCast(candidate.trace.len),
+            .authority = try candidate.dispatchAuthorityRefs(intent.instrument, now_monotonic_ns, decision_barrier),
         });
+        self.* = candidate;
+        return qualified.reservation_micros;
     }
 
-    fn refreshLayeredReservations(self: *TradingShard) !void {
-        const previous = self.layered_risk_reserved_micros;
-        const current = try self.oms.activeReservations(settlement_asset);
-        const current_atoms = std.math.cast(i64, current.atoms) orelse return error.Overflow;
+    fn adjustMarginBuffersForReservationChange(self: *TradingShard, previous: i64) !void {
+        const current_atoms = try self.activeReservationMicros();
         const change = try std.math.sub(i64, current_atoms, previous);
-        self.layered_risk_reserved_micros = current_atoms;
         self.portfolio_margin_buffer_micros = try std.math.sub(i64, self.portfolio_margin_buffer_micros, change);
         self.exchange_margin_buffer_micros = try std.math.sub(i64, self.exchange_margin_buffer_micros, change);
     }
@@ -771,7 +818,7 @@ pub const TradingShard = struct {
         const used = try std.math.add(
             i64,
             self.economic_projection.portfolio.margin_micros,
-            self.layered_risk_reserved_micros,
+            try self.activeReservationMicros(),
         );
         const remaining = try std.math.sub(i64, self.risk_lease_micros, used);
         if (fail_if_exceeded and remaining < 0) return error.RiskLeaseExceeded;
@@ -798,27 +845,10 @@ pub const TradingShard = struct {
             return error.LedgerPostingsDoNotClose;
         if (try std.math.add(i64, try self.riskLeaseRemainingMicros(), try std.math.add(
             i64,
-            self.layered_risk_reserved_micros,
+            try self.activeReservationMicros(),
             self.economic_projection.portfolio.margin_micros,
         )) != self.risk_lease_micros)
             return error.RiskLeaseDoesNotClose;
-    }
-
-    fn applyFill(self: *TradingShard, fill: FillProjection) !void {
-        if (fill.order_id == 0) return error.UnknownOrder;
-        const order_id = fill.order_id;
-        const order = self.oms.orderById(order_id) orelse return error.UnknownOrder;
-        const next_filled = try std.math.add(i64, order.cumulative_quantity, fill.quantity);
-        if (fill.quantity <= 0 or fill.price_micros <= 0 or
-            next_filled > order.quantity)
-            return error.InvalidFill;
-
-        // Canonical execution reports normally advance OMS cumulative
-        // quantity first. Legacy economic_fill callers have no report, so
-        // retain the compatibility scalar only for the legacy active order.
-        self.economic_projection.ledger_summary.transaction_count = try std.math.add(u64, self.economic_projection.ledger_summary.transaction_count, 1);
-        try self.recalculateRisk(false);
-        try self.assertClosures();
     }
 
     fn applyEconomicProjection(self: *TradingShard, event: economics.Event) !bool {
@@ -911,12 +941,45 @@ pub const TradingShard = struct {
         }
     }
 
-    fn submitOrderIntent(self: *TradingShard, intent: host_gateway.OrderIntent, now_monotonic_ns: u64) !?OrderCommand {
+    fn submitOrderIntent(self: *TradingShard, intent: host_gateway.OrderIntent, now_monotonic_ns: u64, cursor_floor: ?u64) !?OrderCommand {
         if (intent.order_type != .limit or
             (intent.time_in_force != .good_til_canceled and intent.time_in_force != .immediate_or_cancel) or
             intent.quantity <= 0 or intent.limit_price_micros <= 0)
             return error.InvalidOrderIntent;
         if (!self.genesisReady()) return error.GenesisIncomplete;
+        const instrument_config = self.instrumentEntry(intent.instrument_identity) orelse return error.UnknownOmsInstrument;
+        var group: oms_module.IntentGroup = .{ .first_intent_sequence = intent.intent_sequence, .count = 1 };
+        group.members[0] = .{
+            .intent_sequence = intent.intent_sequence,
+            .strategy_instance = intent.strategy_identity,
+            .operation = .place,
+            .instrument = intent.instrument_identity,
+            .side = if (intent.side == .buy) .buy else .sell,
+            .portfolio_reduce_only = intent.portfolio_reduce_only,
+            .quantity = intent.quantity,
+            .limit_price = .{
+                .instrument = intent.instrument_identity,
+                .rules_version = 0,
+                .ticks = intent.limit_price_micros,
+            },
+            .order_type = .limit,
+            .time_in_force = switch (intent.time_in_force) {
+                .good_til_canceled => .good_til_canceled,
+                .immediate_or_cancel => .immediate_or_cancel,
+            },
+        };
+        const original_group = group;
+        switch (try self.oms.groupIdentityStatus(original_group)) {
+            .duplicate => return null,
+            .conflict => {
+                try self.trace.append(.oms_intent_conflict, intent.intent_sequence);
+                return null;
+            },
+            .fresh => {},
+        }
+        group.members[0].limit_price.rules_version = instrument_config.rules.version;
+        group.members[0].limit_price.ticks = try priceTicks(intent.limit_price_micros, instrument_config.margin.price_tick_micros);
+        if (cursor_floor) |floor| if (intent.strategy_cursor <= floor) return error.InvalidStrategyCursor;
         if (self.host_activation_identity != intent.activation_identity or
             intent.strategy_cursor <= self.host_activation_barrier)
             return error.HostNotActivated;
@@ -938,8 +1001,6 @@ pub const TradingShard = struct {
         };
         try self.trace.append(.order_intent, intent.intent_sequence);
 
-        const instrument_config = self.instrumentEntry(intent.instrument_identity) orelse
-            return error.UnknownOmsInstrument;
         const requested_notional = try notionalMicrosScaled(
             intent.quantity,
             intent.limit_price_micros,
@@ -951,22 +1012,6 @@ pub const TradingShard = struct {
             try self.trace.append(.risk_rejected_market_data, intent.intent_sequence);
             return null;
         }
-        var group: oms_module.IntentGroup = .{ .first_intent_sequence = intent.intent_sequence, .count = 1 };
-        group.members[0] = .{
-            .intent_sequence = intent.intent_sequence,
-            .strategy_instance = intent.strategy_identity,
-            .operation = .place,
-            .instrument = intent.instrument_identity,
-            .side = if (intent.side == .buy) .buy else .sell,
-            .portfolio_reduce_only = intent.portfolio_reduce_only,
-            .quantity = intent.quantity,
-            .limit_price = .{ .instrument = intent.instrument_identity, .rules_version = instrument_config.rules.version, .ticks = intent.limit_price_micros },
-            .order_type = .limit,
-            .time_in_force = switch (intent.time_in_force) {
-                .good_til_canceled => .good_til_canceled,
-                .immediate_or_cancel => .immediate_or_cancel,
-            },
-        };
         const qualified = self.qualifyOmsGroup(group) catch |err| switch (err) {
             error.StrategyLimitExceeded,
             error.VirtualPortfolioLimitExceeded,
@@ -995,14 +1040,14 @@ pub const TradingShard = struct {
             },
             else => return err,
         };
-        self.last_risk_required_micros = std.math.cast(i64, qualified.members[0].reservation.atoms) orelse return error.Overflow;
+        self.last_risk_required_micros = std.math.cast(i64, qualified.group.members[0].reservation.atoms) orelse return error.Overflow;
         self.last_reject_reason = .none;
         try self.trace.append(.risk_accepted, intent.intent_sequence);
         const decision_barrier: u64 = @intCast(self.trace.len);
         try self.trace.append(.risk_reservation_created, intent.intent_sequence);
         const refs = [_]oms_module.RiskFactRefs{.{ .decision = decision_barrier, .reservation = @intCast(self.trace.len), .authority = try self.dispatchAuthorityRefs(intent.instrument_identity, now_monotonic_ns, decision_barrier) }};
-        try self.oms.applyQualifiedGroup(qualified, &refs);
-        try self.refreshLayeredReservations();
+        try self.oms.applyQualifiedGroup(qualified.group, original_group, &refs);
+        try self.adjustMarginBuffersForReservationChange(qualified.reservation_micros);
         const oms_command = self.oms.emitted()[0];
         self.oms.command_count = 0; // Compatibility output below is the single sendable command.
         try self.recalculateRisk(true);
@@ -1040,7 +1085,7 @@ pub const TradingShard = struct {
                     },
                 }
             },
-            .execution_report => |report| try self.applyCanonicalReport(report, fact_identity),
+            .execution_report => |report| try self.applyCanonicalReport(report, fact_identity, record.envelope.times.monotonic_ns orelse 0),
             .fill => |fill| try self.applyCanonicalFill(fill, fact_identity),
             .reconciliation_started => try self.trace.append(.canonical_reconciliation_started, fact_identity),
             .account_reconciliation_started => try self.trace.append(.canonical_account_reconciliation_started, fact_identity),
@@ -1155,39 +1200,98 @@ pub const TradingShard = struct {
                 try self.trace.append(.canonical_venue_configuration, fact_identity);
             },
             .order_reconciliation_result => |result| {
-                if ((result.status == .unresolved) == result.complete) return error.ConflictingReconciliationEvidence;
-                if (result.order != 0) {
-                    const order_id = std.math.cast(u64, result.order) orelse return error.IdentityOutOfRange;
-                    const instrument = self.oms.instrumentForOrder(order_id) orelse return error.UnknownOrder;
+                var status = result.status;
+                if ((status == .unresolved) == result.complete) status = .unresolved;
+                if (status != .unresolved and !reconciliationEvidenceValid(result, record.envelope)) status = .unresolved;
+                if (result.order != 0) process_order: {
+                    const previous_reservation = try self.activeReservationMicros();
+                    const order_id = std.math.cast(u64, result.order) orelse {
+                        status = .unresolved;
+                        break :process_order;
+                    };
+                    if (result.evidence) |evidence| if (evidence.scope.order != result.order) {
+                        status = .unresolved;
+                        break :process_order;
+                    };
+                    const instrument = self.oms.instrumentForOrder(order_id) orelse {
+                        status = .unresolved;
+                        break :process_order;
+                    };
+                    if (result.evidence) |evidence| if (evidence.scope.instrument != instrument) {
+                        status = .unresolved;
+                        break :process_order;
+                    };
                     const rules = self.instrumentEntry(instrument) orelse return error.UnknownOmsInstrument;
-                    if (result.rules_version != rules.rules.version) return error.StaleInstrumentRules;
-                    const cumulative = result.cumulative_quantity orelse return error.IncompleteReconciliationEvidence;
-                    const remaining = result.remaining_quantity orelse return error.IncompleteReconciliationEvidence;
-                    if (cumulative.instrument != instrument or remaining.instrument != instrument or
-                        cumulative.rules_version != rules.rules.version or remaining.rules_version != rules.rules.version)
-                        return error.CanonicalScopeMismatch;
+                    const order = self.oms.orderById(order_id) orelse {
+                        status = .unresolved;
+                        break :process_order;
+                    };
+                    var revision = order.revision;
+                    var cumulative_lots = order.cumulative_quantity;
+                    var remaining_lots = try std.math.sub(i64, order.quantity, order.cumulative_quantity);
+                    if (status != .unresolved) {
+                        if (result.rules_version != rules.rules.version or result.cumulative_quantity == null or result.remaining_quantity == null) {
+                            status = .unresolved;
+                        } else {
+                            const cumulative = result.cumulative_quantity.?;
+                            const remaining = result.remaining_quantity.?;
+                            if (cumulative.instrument != instrument or remaining.instrument != instrument or
+                                cumulative.rules_version != rules.rules.version or remaining.rules_version != rules.rules.version or
+                                std.math.cast(i64, cumulative.lots) == null or std.math.cast(i64, remaining.lots) == null)
+                                status = .unresolved
+                            else {
+                                revision = result.revision;
+                                cumulative_lots = @intCast(cumulative.lots);
+                                remaining_lots = @intCast(remaining.lots);
+                            }
+                        }
+                    }
+                    if (status == .found_terminal and (result.terminal_status == null or switch (result.terminal_status.?) {
+                        .filled, .canceled, .rejected => false,
+                        else => true,
+                    })) status = .unresolved;
+                    if (status != .found_terminal and result.terminal_status != null) status = .unresolved;
+                    if (status == .found_terminal and result.terminal_status.? == .filled and
+                        (cumulative_lots != order.quantity or remaining_lots != 0)) status = .unresolved;
+                    if (status != .unresolved) {
+                        const total = std.math.add(i64, cumulative_lots, remaining_lots) catch -1;
+                        if (cumulative_lots < 0 or remaining_lots < 0 or total < 0 or total > order.quantity or
+                            (status == .found_live and total != order.quantity) or
+                            (status == .confirmed_absent and (cumulative_lots != 0 or remaining_lots != order.quantity)))
+                            status = .unresolved;
+                    }
+                    if (status == .confirmed_absent and (!self.oms.canConfirmAbsentFromSession(order_id, result.revision, result.evidence.?.absence.?.prior_session) or
+                        (try self.economic_projection.appliedCanonicalFillQuantity(order_id)) != 0))
+                        status = .unresolved;
+                    if (status == .unresolved) {
+                        revision = order.revision;
+                        cumulative_lots = order.cumulative_quantity;
+                        remaining_lots = try std.math.sub(i64, order.quantity, order.cumulative_quantity);
+                    }
                     try self.oms.applyReconciliation(.{
                         .reconciliation_id = std.math.cast(u64, result.identity) orelse return error.IdentityOutOfRange,
                         .order_id = order_id,
-                        .status = switch (result.status) {
+                        .status = switch (status) {
                             .found_live => .found_live,
                             .found_terminal => .found_terminal,
                             .confirmed_absent => .confirmed_absent,
                             .unresolved => .unresolved,
                         },
-                        .revision = result.revision,
-                        .cumulative_quantity = std.math.cast(i64, cumulative.lots) orelse return error.QuantityOutOfRange,
-                        .remaining_quantity = std.math.cast(i64, remaining.lots) orelse return error.QuantityOutOfRange,
-                        .terminal_state = if (result.terminal_status) |terminal| switch (terminal) {
+                        .revision = revision,
+                        .cumulative_quantity = cumulative_lots,
+                        .remaining_quantity = remaining_lots,
+                        .terminal_state = if (status == .found_terminal) if (result.terminal_status) |terminal| switch (terminal) {
                             .filled => .filled,
                             .canceled => .canceled,
                             .rejected => .rejected,
-                            else => return error.InvalidTerminalReconciliation,
-                        } else null,
+                            else => unreachable,
+                        } else null else null,
+                        .canonical_digest = try canonicalPayloadDigest(record.event),
                     });
-                    try self.refreshLayeredReservations();
-                } else if (result.status != .unresolved) return error.IncompleteReconciliationEvidence;
-                if (result.status == .unresolved and self.operational_state.initialized) try self.applyOperationalGate(.{
+                    const reflected_reservation = (try self.confirmPendingReplacement(order_id, std.math.cast(u64, result.identity) orelse return error.IdentityOutOfRange, record.envelope.times.monotonic_ns orelse 0)) orelse previous_reservation;
+                    try self.adjustMarginBuffersForReservationChange(reflected_reservation);
+                } else status = .unresolved;
+                if (status == .unresolved and self.operational_state.initialized) try self.applyOperationalGate(.{
                     .gate_identity = result.identity,
                     .target_identity = self.operational_state.target_identity,
                     .kind = .latched,
@@ -1212,30 +1316,10 @@ pub const TradingShard = struct {
 
     fn rememberCanonicalIngress(self: *TradingShard, record: canonical.EventRecord) !bool {
         const event_type = canonical.eventType(record.event);
-        var payload_bytes: [canonical_event_codec.max_encoded_len]u8 = undefined;
-        const payload = try canonical_event_codec.encodePayload(&payload_bytes, record.event);
-        var payload_digest: [Sha256.digest_length]u8 = undefined;
-        Sha256.hash(payload, &payload_digest, .{});
-        switch (record.event) {
-            .execution_report => |report| if (self.last_canonical_report) |known| {
-                if (known.identity == report.identity) {
-                    if (!std.meta.eql(known, report)) return error.ConflictingReportIdentity;
-                    return true;
-                }
-            },
-            .fill => |fill| if (self.last_canonical_fill) |known| {
-                if (known.identity == fill.identity) {
-                    if (!std.meta.eql(known, fill)) return error.ConflictingFillIdentity;
-                    return true;
-                }
-            },
-            else => {},
-        }
+        const payload_digest = try canonicalPayloadDigest(record.event);
         var cursor_index: ?usize = null;
         for (self.canonical_ingress_cursors[0..self.canonical_ingress_cursor_count], 0..) |known, index| {
             if (known.identity.stream != record.envelope.identity.stream) continue;
-            if (record.envelope.identity.sequence < known.identity.sequence)
-                return error.StaleCanonicalIdentity;
             if (record.envelope.identity.sequence == known.identity.sequence) {
                 if (known.event_type != event_type or
                     !std.mem.eql(u8, &known.raw_digest, &record.envelope.raw_evidence.digest) or
@@ -1246,6 +1330,10 @@ pub const TradingShard = struct {
             cursor_index = index;
             break;
         }
+        if (try self.semanticDuplicate(record.event)) return true;
+        if (cursor_index) |index|
+            if (record.envelope.identity.sequence < self.canonical_ingress_cursors[index].identity.sequence)
+                return error.StaleCanonicalIdentity;
         const target_index = cursor_index orelse blk: {
             if (self.canonical_ingress_cursor_count == self.canonical_ingress_cursors.len)
                 return error.CanonicalStreamSetFull;
@@ -1281,7 +1369,46 @@ pub const TradingShard = struct {
         return false;
     }
 
-    fn applyCanonicalReport(self: *TradingShard, report: canonical.ExecutionReport, fact_identity: u64) !void {
+    fn semanticDuplicate(self: *const TradingShard, event: canonical.Payload) !bool {
+        return switch (event) {
+            .execution_report => |report| blk: {
+                const oms_report = self.omsReportFromCanonical(report) catch break :blk false;
+                const known = self.oms.lookupReport(oms_report) catch |err| switch (err) {
+                    error.ConflictingReportIdentity => return err,
+                };
+                break :blk known == .duplicate;
+            },
+            .fill => |fill| blk: {
+                const fill_id = std.math.cast(u64, fill.identity) orelse return error.IdentityOutOfRange;
+                const known = self.economic_projection.lookupCanonicalFill(fill_id, try canonicalPayloadDigest(.{ .fill = fill })) catch |err| switch (err) {
+                    error.ConflictingEconomicIdentity => return error.ConflictingFillIdentity,
+                };
+                break :blk known == .duplicate;
+            },
+            else => false,
+        };
+    }
+
+    fn reconciliationEvidenceValid(result: canonical.ReconciliationResult, envelope: canonical.EventEnvelope) bool {
+        const evidence = result.evidence orelse return false;
+        const scope = evidence.scope;
+        if (result.identity == 0 or scope.exchange_account == 0 or scope.exchange_account != envelope.exchange_account or
+            scope.instrument == 0 or scope.order == 0 or scope.order != result.order or scope.revision == 0 or
+            scope.revision != result.revision or scope.from_utc_ns == 0 or scope.from_utc_ns > scope.through_utc_ns or
+            evidence.observed_at_utc_ns < scope.through_utc_ns or
+            evidence.observed_at_utc_ns > (envelope.times.receive_utc_ns orelse return false) or
+            evidence.source.stream == 0 or evidence.source.sequence == 0 or
+            std.mem.eql(u8, &evidence.source.digest, &@as([32]u8, @splat(0)))) return false;
+        if (result.status != .confirmed_absent) return evidence.absence == null;
+        const absent = evidence.absence orelse return false;
+        return absent.prior_session != 0 and absent.prior_session != (envelope.adapter_session orelse return false) and
+            absent.prior_session_inactive and absent.visibility_deadline_utc_ns != 0 and
+            scope.from_utc_ns <= absent.visibility_deadline_utc_ns and
+            absent.visibility_deadline_utc_ns <= scope.through_utc_ns and
+            absent.order_history_complete and absent.terminal_history_complete and absent.fills_complete and absent.economics_complete;
+    }
+
+    fn omsReportFromCanonical(self: *const TradingShard, report: canonical.ExecutionReport) !oms_module.ExecutionReport {
         if (report.exchange_account != self.exchange_account_identity)
             return error.CanonicalScopeMismatch;
         const order_id = std.math.cast(u64, report.order) orelse return error.IdentityOutOfRange;
@@ -1292,13 +1419,7 @@ pub const TradingShard = struct {
         if (report.cumulative_quantity.rules_version != rules.rules.version or
             report.remaining_quantity.rules_version != rules.rules.version)
             return error.StaleInstrumentRules;
-        if (self.last_canonical_report) |known| if (known.identity == report.identity) {
-            if (!std.meta.eql(known, report)) return error.ConflictingReportIdentity;
-            return;
-        };
-        const cumulative = std.math.cast(i64, report.cumulative_quantity.lots) orelse return error.QuantityOutOfRange;
-        const remaining = std.math.cast(i64, report.remaining_quantity.lots) orelse return error.QuantityOutOfRange;
-        try self.oms.applyReport(.{
+        return .{
             .report_id = report_id,
             .order_id = order_id,
             .revision = report.revision,
@@ -1310,12 +1431,23 @@ pub const TradingShard = struct {
                 .rejected => .rejected,
                 .amended => .amended,
             },
-            .cumulative_quantity = cumulative,
-            .remaining_quantity = remaining,
-        });
-        try self.refreshLayeredReservations();
+            .cumulative_quantity = std.math.cast(i64, report.cumulative_quantity.lots) orelse return error.QuantityOutOfRange,
+            .remaining_quantity = std.math.cast(i64, report.remaining_quantity.lots) orelse return error.QuantityOutOfRange,
+            .canonical_digest = try canonicalPayloadDigest(.{ .execution_report = report }),
+        };
+    }
+
+    fn applyCanonicalReport(self: *TradingShard, report: canonical.ExecutionReport, fact_identity: u64, now_monotonic_ns: u64) !void {
+        const oms_report = try self.omsReportFromCanonical(report);
+        switch (try self.oms.lookupReport(oms_report)) {
+            .duplicate => return,
+            .unknown => {},
+        }
+        const previous_reservation = try self.activeReservationMicros();
+        try self.oms.applyReport(oms_report);
+        const reflected_reservation = (try self.confirmPendingReplacement(oms_report.order_id, oms_report.report_id, now_monotonic_ns)) orelse previous_reservation;
+        try self.adjustMarginBuffersForReservationChange(reflected_reservation);
         try self.recalculateRisk(false);
-        self.last_canonical_report = report;
         try self.trace.append(switch (report.status) {
             .accepted => .order_accepted,
             .partially_filled => .order_partially_filled,
@@ -1329,20 +1461,25 @@ pub const TradingShard = struct {
     fn applyCanonicalFill(self: *TradingShard, fill: canonical.Fill, fact_identity: u64) !void {
         if (fill.exchange_account != self.exchange_account_identity)
             return error.CanonicalScopeMismatch;
-        const order_id = std.math.cast(u64, fill.order) orelse return error.IdentityOutOfRange;
         const fill_id = std.math.cast(u64, fill.identity) orelse return error.IdentityOutOfRange;
+        const payload_digest = try canonicalPayloadDigest(.{ .fill = fill });
+        switch (try self.economic_projection.lookupCanonicalFill(fill_id, payload_digest)) {
+            .duplicate => return,
+            .unknown => {},
+        }
+        const order_id = std.math.cast(u64, fill.order) orelse return error.IdentityOutOfRange;
         const order = self.oms.orderById(order_id) orelse return error.UnknownOrder;
+        if (order.last_reconciliation_status == .confirmed_absent) return error.TerminalFactConflict;
         if (order.instrument != fill.instrument) return error.CanonicalScopeMismatch;
         const instrument_config = self.instrumentEntry(fill.instrument) orelse return error.UnknownOmsInstrument;
         if (fill.quantity.rules_version != instrument_config.rules.version or
             fill.price.rules_version != instrument_config.rules.version)
             return error.StaleInstrumentRules;
-        if (self.last_canonical_fill) |known| if (known.identity == fill.identity) {
-            if (!std.meta.eql(known, fill)) return error.ConflictingFillIdentity;
-            return;
-        };
         const quantity = std.math.cast(i64, fill.quantity.lots) orelse return error.QuantityOutOfRange;
         const price = std.math.cast(i64, fill.price.ticks) orelse return error.PriceOutOfRange;
+        const applied_quantity = try self.economic_projection.appliedCanonicalFillQuantity(order_id);
+        const next_filled = try std.math.add(i64, applied_quantity, quantity);
+        if (quantity <= 0 or price <= 0 or next_filled > order.quantity) return error.InvalidFill;
         const fee = fill.fee orelse return error.MissingFillFee;
         const rebate = fill.rebate orelse canonical.AssetAmount{ .asset = self.economic_projection.settlement_asset, .atoms = 0 };
         if (fee.atoms < 0 or rebate.atoms < 0) return error.InvalidEconomicFact;
@@ -1367,8 +1504,9 @@ pub const TradingShard = struct {
                 return error.InvalidEconomicFact;
         }
         const economic_instrument = fill.instrument;
-        _ = try self.applyEconomicProjection(.{ .fill = .{
+        const changed = try self.economic_projection.applyCanonicalFill(.{
             .identity = fill_id,
+            .order_id = order_id,
             .side = switch (fill.side) {
                 .buy => .buy,
                 .sell => .sell,
@@ -1383,9 +1521,10 @@ pub const TradingShard = struct {
             .portfolio_margin_ppm = if (instrument_config.margin_configured) instrument_config.margin.internal_initial_margin_ppm else self.internal_initial_margin_ppm,
             .exchange_margin_ppm = if (instrument_config.margin_configured) instrument_config.margin.venue_initial_margin_ppm else self.venue_initial_margin_ppm,
             .product = instrument_config.product,
-        } });
-        self.last_canonical_fill = fill;
-        try self.applyFill(.{ .fill_id = fill_id, .order_id = order_id, .quantity = quantity, .price_micros = price });
+        }, payload_digest);
+        if (!changed) return;
+        try self.recalculateRisk(false);
+        try self.assertClosures();
         try self.trace.append(.fill, fact_identity);
         try self.trace.append(.fee_ledger_transaction, fact_identity);
         try self.trace.append(.risk_reservation_rebalanced, fact_identity);
@@ -1799,20 +1938,32 @@ pub const TradingShard = struct {
                     .portfolio_reduce_only = request.portfolio_reduce_only,
                     .quantity = request.quantity,
                     .limit_price_micros = request.limit_price_micros,
-                }, if (input.time_presence.monotonic) input.monotonic_time else 0);
+                }, if (input.time_presence.monotonic) input.monotonic_time else 0, null);
             },
             .external_order_intent => |intent| {
-                if (!self.strategy_active or intent.strategy_cursor <= self.strategy_cursor)
-                    return error.InvalidStrategyCursor;
-                self.strategy_cursor = intent.strategy_cursor;
-                self.strategy_decision_count = try std.math.add(u64, self.strategy_decision_count, 1);
-                return self.submitOrderIntent(intent, if (input.time_presence.monotonic) input.monotonic_time else 0);
+                if (!self.strategy_active) return error.InvalidStrategyCursor;
+                const previous_cursor = self.strategy_cursor;
+                const trace_before = self.trace.len;
+                const outcome = try self.submitOrderIntent(intent, if (input.time_presence.monotonic) input.monotonic_time else 0, previous_cursor);
+                if (self.trace.len != trace_before and intent.strategy_cursor > previous_cursor) {
+                    self.strategy_cursor = intent.strategy_cursor;
+                    self.strategy_decision_count = try std.math.add(u64, self.strategy_decision_count, 1);
+                }
+                return outcome;
             },
             .strategy_intent_rejected => |rejection| {
                 try self.trace.append(.strategy_intent_rejected, rejection.intent_sequence);
             },
             .oms_intent_group => |group| {
                 if (!self.genesisReady()) return error.GenesisIncomplete;
+                switch (try self.oms.groupIdentityStatus(group)) {
+                    .duplicate => return null,
+                    .conflict => {
+                        try self.trace.append(.oms_intent_conflict, group.first_intent_sequence);
+                        return null;
+                    },
+                    .fresh => {},
+                }
                 var candidate = self.*;
                 const qualified = candidate.qualifyOmsGroup(group) catch |err| switch (err) {
                     error.MarginSafetyGateClosed => {
@@ -1822,35 +1973,37 @@ pub const TradingShard = struct {
                     },
                     else => return err,
                 };
-                const duplicate = candidate.oms.groupKnown(qualified);
-                if (duplicate) return null;
                 var refs: [oms_module.max_group_members]oms_module.RiskFactRefs = undefined;
-                for (qualified.members[0..qualified.count], 0..) |intent, index| {
+                for (qualified.group.members[0..qualified.group.count], 0..) |intent, index| {
                     try candidate.trace.append(.risk_accepted, intent.intent_sequence);
                     refs[index].decision = @intCast(candidate.trace.len);
                     try candidate.trace.append(.risk_reservation_created, intent.intent_sequence);
                     refs[index].reservation = @intCast(candidate.trace.len);
                     refs[index].authority = try candidate.dispatchAuthorityRefs(intent.instrument, if (input.time_presence.monotonic) input.monotonic_time else 0, refs[index].decision);
                 }
-                try candidate.oms.applyQualifiedGroup(qualified, refs[0..qualified.count]);
-                try candidate.refreshLayeredReservations();
+                try candidate.oms.applyQualifiedGroup(qualified.group, group, refs[0..qualified.group.count]);
+                try candidate.adjustMarginBuffersForReservationChange(qualified.reservation_micros);
                 try candidate.trace.append(.oms_intent_group, group.first_intent_sequence);
                 self.* = candidate;
             },
             .oms_dispatch_batch => |batch| {
                 var candidate = self.*;
+                const previous_reservation = try candidate.activeReservationMicros();
                 try candidate.oms.applyDispatch(batch);
-                try candidate.refreshLayeredReservations();
+                try candidate.adjustMarginBuffersForReservationChange(previous_reservation);
                 try candidate.trace.append(.oms_dispatch_batch, input.identity);
                 self.* = candidate;
             },
             .oms_execution_report => |report| {
+                const previous_reservation = try self.activeReservationMicros();
                 try self.oms.applyReport(report);
-                try self.confirmPendingReplacement(report.order_id, report.report_id, if (input.time_presence.monotonic) input.monotonic_time else 0);
-                try self.refreshLayeredReservations();
+                const reflected_reservation = (try self.confirmPendingReplacement(report.order_id, report.report_id, if (input.time_presence.monotonic) input.monotonic_time else 0)) orelse previous_reservation;
+                try self.adjustMarginBuffersForReservationChange(reflected_reservation);
                 try self.trace.append(.oms_execution_report, report.report_id);
             },
             .oms_reconciliation_result => |result| {
+                if (result.status == .confirmed_absent) return error.IncompleteReconciliationEvidence;
+                const previous_reservation = try self.activeReservationMicros();
                 try self.oms.applyReconciliation(result);
                 if (result.status == .unresolved and self.operational_state.initialized) try self.applyOperationalGate(.{
                     .gate_identity = result.reconciliation_id,
@@ -1859,12 +2012,13 @@ pub const TradingShard = struct {
                     .reason = .reconciliation_break,
                     .open = false,
                 });
-                try self.confirmPendingReplacement(result.order_id, result.reconciliation_id, if (input.time_presence.monotonic) input.monotonic_time else 0);
-                try self.refreshLayeredReservations();
+                const reflected_reservation = (try self.confirmPendingReplacement(result.order_id, result.reconciliation_id, if (input.time_presence.monotonic) input.monotonic_time else 0)) orelse previous_reservation;
+                try self.adjustMarginBuffersForReservationChange(reflected_reservation);
                 try self.trace.append(.oms_reconciliation_result, result.reconciliation_id);
             },
             .economic_fill => |fill| {
                 const order = self.oms.orderById(fill.order_id) orelse return error.UnknownOrder;
+                if (order.last_reconciliation_status == .confirmed_absent) return error.TerminalFactConflict;
                 const instrument = order.instrument;
                 const instrument_config = self.instrumentEntry(instrument) orelse return error.UnknownOmsInstrument;
                 const changed = try self.applyEconomicProjection(.{ .fill = .{
@@ -1963,6 +2117,7 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
     zeroUnused(operational.Latch, shard.operational_state.latches[shard.operational_state.latch_count..]);
     zeroUnused(u64, shard.economic_projection.reconciliation_break_identities[shard.economic_projection.reconciliation_break_count..]);
     zeroUnused(@TypeOf(shard.economic_projection.seen[0]), shard.economic_projection.seen[shard.economic_projection.seen_count..]);
+    zeroUnused(economics_module.CanonicalFactEvidence, shard.economic_projection.canonical_fill_evidence[shard.economic_projection.canonical_fill_evidence_count..]);
     for (shard.economic_projection.ledger[0..shard.economic_projection.ledger_count]) |*transaction|
         zeroUnused(economics_module.LedgerPosting, transaction.postings[transaction.posting_count..]);
     zeroUnused(economics_module.LedgerTransaction, shard.economic_projection.ledger[shard.economic_projection.ledger_count..]);
@@ -2006,6 +2161,7 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         shard.oms.intent_history_count > shard.oms.intent_history.len or
         shard.oms.tombstone_count > shard.oms.tombstones.len or
         shard.economic_projection.seen_count > shard.economic_projection.seen.len or
+        shard.economic_projection.canonical_fill_evidence_count > shard.economic_projection.canonical_fill_evidence.len or
         shard.economic_projection.ledger_count > shard.economic_projection.ledger.len or
         shard.economic_projection.reconciliation_break_count > shard.economic_projection.reconciliation_break_identities.len or
         shard.operational_state.command_count > operational.max_commands or
@@ -2201,7 +2357,13 @@ pub fn applyStable(
         }
         return err;
     };
-    if (result.facts.len == 0) return error.InputProducedNoFact;
+    if (result.facts.len == 0) {
+        if (input == .core and input.core.payload == .external_order_intent) return null;
+        if (input == .core and input.core.payload == .oms_intent_group and
+            (shard.oms.groupIdentityStatus(input.core.payload.oms_intent_group) catch .fresh) == .duplicate)
+            return null;
+        return error.InputProducedNoFact;
+    }
     appendStableFactGroup(decision_journal, input, result.facts) catch |err| {
         decision_journal.restore(checkpoint);
         return err;
@@ -2432,6 +2594,30 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, u64, order.group_first_sequence);
         digestInt(&hasher, u8, @intFromEnum(order.group_policy));
         digestBool(&hasher, order.replacement != null);
+        if (order.replacement) |replacement| {
+            digestInt(&hasher, u128, replacement.instrument);
+            digestInt(&hasher, u8, @intFromEnum(replacement.side));
+            digestBool(&hasher, replacement.portfolio_reduce_only);
+            digestBool(&hasher, replacement.venue_reduce_only);
+            digestInt(&hasher, i64, replacement.quantity);
+            digestInt(&hasher, u128, replacement.limit_price.instrument);
+            digestInt(&hasher, u64, replacement.limit_price.rules_version);
+            digestInt(&hasher, i128, replacement.limit_price.ticks);
+            digestInt(&hasher, u64, replacement.reservation.asset);
+            digestInt(&hasher, i128, replacement.reservation.atoms);
+            digestInt(&hasher, u8, @intFromEnum(replacement.order_type));
+            digestInt(&hasher, u8, @intFromEnum(replacement.time_in_force));
+            digestBool(&hasher, replacement.market_protection_price != null);
+            if (replacement.market_protection_price) |price| {
+                digestInt(&hasher, u128, price.instrument);
+                digestInt(&hasher, u64, price.rules_version);
+                digestInt(&hasher, i128, price.ticks);
+            }
+            digestInt(&hasher, u8, replacement.client_order_id.len);
+            hasher.update(replacement.client_order_id.slice());
+            digestInt(&hasher, u32, replacement.expected_revision);
+            digestInt(&hasher, i64, replacement.expected_cumulative_quantity);
+        }
         digestInt(&hasher, u64, order.last_report_id);
         digestInt(&hasher, u32, order.last_report_revision);
         digestInt(&hasher, u8, @intFromEnum(order.last_report_status));
@@ -2442,6 +2628,8 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, u32, order.last_reconciliation_revision);
         digestInt(&hasher, i64, order.last_reconciliation_cumulative_quantity);
         digestInt(&hasher, i64, order.last_reconciliation_remaining_quantity);
+        digestBool(&hasher, order.archive_window_closed);
+        hasher.update(&order.archive_audit_digest);
     }
     digestInt(&hasher, u64, shard.oms.next_order_id);
     digestInt(&hasher, u64, shard.oms.next_command_id);
@@ -2456,6 +2644,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, u8, @intFromEnum(report.status));
         digestInt(&hasher, i64, report.cumulative_quantity);
         digestInt(&hasher, i64, report.remaining_quantity);
+        hasher.update(&report.canonical_digest);
     }
     digestInt(&hasher, u8, shard.oms.reconciliation_history_count);
     for (shard.oms.reconciliation_history[0..shard.oms.reconciliation_history_count]) |result| {
@@ -2467,6 +2656,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, i64, result.remaining_quantity);
         digestBool(&hasher, result.terminal_state != null);
         digestInt(&hasher, u8, if (result.terminal_state) |terminal| @intFromEnum(terminal) else 0);
+        hasher.update(&result.canonical_digest);
     }
     digestInt(&hasher, u8, shard.oms.intent_history_count);
     for (shard.oms.intent_history[0..shard.oms.intent_history_count]) |known| {
@@ -2474,7 +2664,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, u8, @intFromEnum(known.policy));
         digestInt(&hasher, u64, known.intent_sequence);
         digestInt(&hasher, u128, known.strategy_instance);
-        digestInt(&hasher, u64, known.fingerprint);
+        hasher.update(&known.fingerprint);
     }
     digestInt(&hasher, u8, shard.oms.tombstone_count);
     for (shard.oms.tombstones[0..shard.oms.tombstone_count]) |tombstone| {
@@ -2559,7 +2749,6 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     digestInt(&hasher, i64, shard.kill_buffer_bps);
     digestInt(&hasher, i64, shard.warning_liquidation_distance_ticks);
     digestInt(&hasher, i64, shard.kill_liquidation_distance_ticks);
-    digestInt(&hasher, i64, shard.layered_risk_reserved_micros);
     digestInt(&hasher, i64, shard.portfolio_margin_buffer_micros);
     digestInt(&hasher, i64, shard.exchange_margin_buffer_micros);
     digestInt(&hasher, i64, shard.portfolio_buffer_bps);
@@ -2613,6 +2802,34 @@ fn digestCanonicalProjections(hasher: *Sha256, shard: TradingShard) void {
 fn digestEconomicProjection(hasher: *Sha256, projection: economics_module.Projection) void {
     const economic_digest = projection.digest();
     hasher.update(&economic_digest);
+}
+
+fn semanticStateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
+    var hasher = Sha256.init(.{});
+    hasher.update("SemanticAuthorityDigestV1\x00");
+    digestInt(&hasher, u8, shard.oms.order_count);
+    for (shard.oms.orders[0..shard.oms.order_count]) |order| {
+        digestInt(&hasher, u64, order.id);
+        digestInt(&hasher, u32, order.revision);
+        digestInt(&hasher, u8, @intFromEnum(order.state));
+        digestInt(&hasher, i64, order.quantity);
+        digestInt(&hasher, i64, order.cumulative_quantity);
+        digestInt(&hasher, u64, order.reservation.asset);
+        digestInt(&hasher, i128, order.reservation.atoms);
+        digestInt(&hasher, u64, order.confirmed_reservation.asset);
+        digestInt(&hasher, i128, order.confirmed_reservation.atoms);
+        digestBool(&hasher, order.reservation_active);
+        digestBool(&hasher, order.dispatch_submitted);
+        digestInt(&hasher, u64, order.last_report_id);
+        digestInt(&hasher, u64, order.last_reconciliation_id);
+    }
+    const economics_digest = shard.economic_projection.semanticDigest();
+    hasher.update(&economics_digest);
+    digestBool(&hasher, shard.canonical_account.valid);
+    digestBool(&hasher, shard.canonical_account.failure != null);
+    digestInt(&hasher, i64, shard.portfolioCash());
+    digestInt(&hasher, i64, shard.exchangeCash());
+    return hasher.finalResult();
 }
 
 const ReplayResult = struct {

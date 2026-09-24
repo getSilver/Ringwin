@@ -55,9 +55,10 @@ pub const Policy = struct {
             return error.InvalidDemoBootstrap;
         guard.check(now_ns, guard.lease.token, true) catch return error.InvalidDemoLease;
         const account = &owner.shard.canonical_account;
-        if (!account.valid or account.exchange_account != self.exchange_account or
-            account.position_count != 0 or account.margin_count != 0)
+        if (!account.valid or account.exchange_account != self.exchange_account)
             return error.InvalidDemoAccount;
+        for (account.positions[0..account.position_count]) |position|
+            if (position.quantity.lots != 0) return error.NonzeroDemoBaseline;
         var usdt_total: ?i64 = null;
         var usdt_available: ?i64 = null;
         for (account.balances[0..account.balance_count]) |balance| {
@@ -389,8 +390,8 @@ test "Demo policy drives buy and fault cleanup through one durable Gateway" {
         .source_stream = 1,
         .source_sequence = 1,
         .balance_count = 2,
-        .position_count = 0,
-        .margin_count = 0,
+        .position_count = 1,
+        .margin_count = 1,
     } });
     snapshot.venue.event.account_bootstrap_snapshot.balances[0] = .{
         .asset = okx.usdt,
@@ -403,6 +404,14 @@ test "Demo policy drives buy and fault cleanup through one durable Gateway" {
         .total = .{ .asset = okx.btc, .atoms = 0 },
         .available = .{ .asset = okx.btc, .atoms = 0 },
         .held = .{ .asset = okx.btc, .atoms = 0 },
+    };
+    snapshot.venue.event.account_bootstrap_snapshot.margins[0] = .{
+        .amount = .{ .asset = okx.usdt, .atoms = 25_000_000 },
+    };
+    snapshot.venue.event.account_bootstrap_snapshot.positions[0] = .{
+        .instrument = okx.btc_usdt_spot,
+        .side = .net,
+        .quantity = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .lots = 0 },
     };
     _ = try owner.apply(snapshot);
     var authority = failover.authorityForTesting();
@@ -483,6 +492,7 @@ test "Demo policy drives buy and fault cleanup through one durable Gateway" {
     const maybe_command = try owner.apply(.{ .core = .{ .identity = sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = intent } } });
     try std.testing.expectEqual(@import("trading_shard_event.zig").RejectReason.none, owner.shard.last_reject_reason);
     const command = maybe_command orelse return error.MissingDemoCommand;
+    try std.testing.expectEqual(@as(i128, 500), command.limit_price.ticks);
     try std.testing.expectEqual(venue.SendResult.accepted, try owner.send(&gateway, &guard, command.command_id, 2));
     try std.testing.expectEqual(@as(u64, 1), spy.sends);
     // The spy deliberately emits no dispatch result: model a failure after the
