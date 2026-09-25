@@ -131,6 +131,13 @@ fn priceTicks(price_micros: i64, tick_micros: i64) !i128 {
     return @divExact(price_micros, tick_micros);
 }
 
+fn changesTradingAuthorization(kind: operational.CommandKind) bool {
+    return switch (kind) {
+        .enable_trading, .trading_pause, .stop_keep_positions, .de_risk, .resolve_latch => true,
+        .start_recovery, .cancel_open_orders => false,
+    };
+}
+
 fn riskTier(notional_micros: i64) !u8 {
     if (notional_micros <= 500_000 * money_scale) return 1;
     if (notional_micros <= 1_000_000 * money_scale) return 2;
@@ -583,6 +590,27 @@ pub const TradingShard = struct {
         reservation_micros: i64,
     };
 
+    fn validateExactOmsSpec(intent: oms_module.Intent, entry: instrument_registry.Entry) !void {
+        if (intent.quantity <= 0 or intent.limit_price.instrument != intent.instrument or
+            intent.limit_price.rules_version != entry.rules.version or intent.limit_price.ticks <= 0)
+            return error.UnsupportedOrderSpec;
+        if (intent.market_protection_price) |price| {
+            if (price.instrument != intent.instrument or price.rules_version != entry.rules.version or price.ticks <= 0)
+                return error.UnsupportedOrderSpec;
+        }
+        if (!oms_module.exactOrderSpec(intent.order_type, intent.time_in_force, intent.market_protection_price != null)) return error.UnsupportedOrderSpec;
+        if (intent.operation == .amend and intent.native_amend and
+            !(if (entry.capability) |capability| capability.supports_native_amend else false))
+            return error.UnsupportedOrderSpec;
+        if (intent.order_type == .post_only or intent.venue_reduce_only or intent.market_protection_price != null) {
+            const capability = entry.capability orelse return error.UnsupportedOrderSpec;
+            if ((intent.order_type == .post_only and !capability.supports_post_only) or
+                (intent.venue_reduce_only and !capability.supports_venue_reduce_only) or
+                (intent.market_protection_price != null and !capability.supports_market_protection))
+                return error.UnsupportedOrderSpec;
+        }
+    }
+
     fn qualifyOmsGroup(self: *TradingShard, group: oms_module.IntentGroup) !QualifiedIntentGroup {
         var qualified = group;
         var active = try self.oms.activeReservations(settlement_asset);
@@ -598,6 +626,7 @@ pub const TradingShard = struct {
             }
             const instrument_config = self.instrumentEntry(intent.instrument) orelse return error.UnknownOmsInstrument;
             if (!instrument_config.margin_configured) return error.InstrumentRulesInactive;
+            try validateExactOmsSpec(intent.*, instrument_config);
             const portfolio_position_quantity = if (instrument_config.product == .spot)
                 self.spotPortfolioPosition().quantity
             else
@@ -652,8 +681,9 @@ pub const TradingShard = struct {
             });
             intent.reservation = assessment.order_reservation;
             intent.portfolio_reduce_only = assessment.portfolio_reduce_only;
+            if (intent.venue_reduce_only and !assessment.venue_reduce_only) return error.UnsupportedOrderSpec;
             intent.venue_reduce_only = assessment.venue_reduce_only and
-                (if (instrument_config.capability) |capability| capability.supports_venue_reduce_only else true);
+                (if (instrument_config.capability) |capability| capability.supports_venue_reduce_only else false);
             active = assessment.total_reserved;
             self.portfolio_margin_buffer_micros = std.math.cast(i64, assessment.portfolio_margin_buffer.atoms) orelse return error.Overflow;
             self.exchange_margin_buffer_micros = std.math.cast(i64, assessment.exchange_margin_buffer.atoms) orelse return error.Overflow;
@@ -892,14 +922,28 @@ pub const TradingShard = struct {
         return null;
     }
 
+    fn controlCommandAtBarrier(self: *const TradingShard, barrier: u64) ?operational.ControlCommand {
+        if (barrier == 0 or barrier > self.trace.len) return null;
+        var command_index: usize = 0;
+        for (self.trace.events[0..barrier], 0..) |fact, index| {
+            if (fact.kind != .control_command_applied) continue;
+            if (command_index >= self.operational_state.command_count) return null;
+            const command = self.operational_state.command_history[command_index].command;
+            if (index + 1 == barrier) return command;
+            command_index += 1;
+        }
+        return null;
+    }
+
     fn dispatchAuthorityRefs(self: *const TradingShard, instrument: canonical.InstrumentIdentity, now_monotonic_ns: u64, deadline_barrier: u64) !oms_module.DispatchAuthorityRefs {
         var refs: oms_module.DispatchAuthorityRefs = .{
             .exchange_account = self.exchange_account_identity,
             .virtual_portfolio = self.portfolio_identity,
             .deadline_barrier = deadline_barrier,
         };
-        if (self.authority_control_barrier != 0 and self.operational_state.command_count != 0) {
-            const command = self.operational_state.command_history[self.operational_state.command_count - 1].command;
+        if (self.authority_control_barrier != 0) {
+            const command = self.controlCommandAtBarrier(self.authority_control_barrier) orelse return error.InvalidControlAuthority;
+            if (!changesTradingAuthorization(command.kind)) return error.InvalidControlAuthority;
             refs.trading_authorization = .{ .identity = command.command_identity, .version = std.math.add(u64, command.expected_version, 1) catch 0, .barrier = self.authority_control_barrier };
         }
         if (self.latestFact(.primary_lease_granted)) |fact|
@@ -969,10 +1013,6 @@ pub const TradingShard = struct {
     }
 
     fn submitOrderIntent(self: *TradingShard, intent: host_gateway.OrderIntent, now_monotonic_ns: u64, cursor_floor: ?u64) !?OrderCommand {
-        if (intent.order_type != .limit or
-            (intent.time_in_force != .good_til_canceled and intent.time_in_force != .immediate_or_cancel) or
-            intent.quantity <= 0 or intent.limit_price_micros <= 0)
-            return error.InvalidOrderIntent;
         if (!self.genesisReady()) return error.GenesisIncomplete;
         const instrument_config = self.instrumentEntry(intent.instrument_identity) orelse return error.UnknownOmsInstrument;
         var group: oms_module.IntentGroup = .{ .first_intent_sequence = intent.intent_sequence, .count = 1 };
@@ -1005,7 +1045,6 @@ pub const TradingShard = struct {
             .fresh => {},
         }
         group.members[0].limit_price.rules_version = instrument_config.rules.version;
-        group.members[0].limit_price.ticks = try priceTicks(intent.limit_price_micros, instrument_config.margin.price_tick_micros);
         if (cursor_floor) |floor| if (intent.strategy_cursor <= floor) return error.InvalidStrategyCursor;
         if (self.host_activation_identity != intent.activation_identity or
             intent.strategy_cursor <= self.host_activation_barrier or
@@ -1023,9 +1062,22 @@ pub const TradingShard = struct {
             intent.exchange_account_identity != self.exchange_account_identity or
             self.instrumentEntry(intent.instrument_identity) == null)
             return error.IntentAuthorityMismatch;
+        if (intent.order_type != .limit or
+            (intent.time_in_force != .good_til_canceled and intent.time_in_force != .immediate_or_cancel) or
+            intent.quantity <= 0 or intent.limit_price_micros <= 0)
+        {
+            self.last_reject_reason = .unsupported_order_spec;
+            try self.trace.append(.strategy_intent_rejected, intent.intent_sequence);
+            return null;
+        }
         for (self.oms.orders[0..self.oms.order_count]) |order| if (order.instrument == intent.instrument_identity) switch (order.state) {
             .pending_submit, .unknown, .live, .partially_filled, .pending_amend, .pending_cancel => return error.IntentArrivedWithOpenOrder,
             else => {},
+        };
+        group.members[0].limit_price.ticks = priceTicks(intent.limit_price_micros, instrument_config.margin.price_tick_micros) catch {
+            self.last_reject_reason = .unsupported_order_spec;
+            try self.trace.append(.strategy_intent_rejected, intent.intent_sequence);
+            return null;
         };
         try self.trace.append(.order_intent, intent.intent_sequence);
 
@@ -1050,6 +1102,7 @@ pub const TradingShard = struct {
             error.ExchangeOpeningGateClosed,
             error.InsufficientSpotAsset,
             error.PortfolioReduceOnlyViolation,
+            error.UnsupportedOrderSpec,
             => {
                 self.last_reject_reason = switch (err) {
                     error.StrategyLimitExceeded => .strategy_limit_exceeded,
@@ -1061,9 +1114,10 @@ pub const TradingShard = struct {
                     error.ExchangeOpeningGateClosed => .exchange_opening_gate_closed,
                     error.InsufficientSpotAsset => .insufficient_spot_asset,
                     error.PortfolioReduceOnlyViolation => .portfolio_reduce_only_violation,
+                    error.UnsupportedOrderSpec => .unsupported_order_spec,
                     else => unreachable,
                 };
-                try self.trace.append(.risk_rejected_lease, intent.intent_sequence);
+                try self.trace.append(if (err == error.UnsupportedOrderSpec) .strategy_intent_rejected else .risk_rejected_lease, intent.intent_sequence);
                 return null;
             },
             else => return err,
@@ -1609,7 +1663,8 @@ pub const TradingShard = struct {
                     try self.assertClosures();
                 }
                 try self.trace.append(.control_command_applied, input.identity);
-                self.authority_control_barrier = @intCast(self.trace.len);
+                if (changesTradingAuthorization(command.kind))
+                    self.authority_control_barrier = @intCast(self.trace.len);
             },
             .recovery_completed => {
                 try self.operational_state.recoveryCompleted();
@@ -2028,6 +2083,11 @@ pub const TradingShard = struct {
                         self.* = candidate;
                         return null;
                     },
+                    error.UnsupportedOrderSpec => {
+                        self.last_reject_reason = .unsupported_order_spec;
+                        try self.trace.append(.strategy_intent_rejected, group.first_intent_sequence);
+                        return null;
+                    },
                     else => return err,
                 };
                 var refs: [oms_module.max_group_members]oms_module.RiskFactRefs = undefined;
@@ -2234,10 +2294,10 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         shard.fenced_strategy_count > shard.fenced_strategy_instances.len)
         return error.InvalidSnapshotState;
     try shard.instrument_registry.validate();
-    if (shard.authority_control_barrier != 0 and
-        (shard.authority_control_barrier > shard.trace.len or
-            shard.trace.events[shard.authority_control_barrier - 1].kind != .control_command_applied))
-        return error.InvalidSnapshotState;
+    if (shard.authority_control_barrier != 0) {
+        const command = shard.controlCommandAtBarrier(shard.authority_control_barrier) orelse return error.InvalidSnapshotState;
+        if (!changesTradingAuthorization(command.kind)) return error.InvalidSnapshotState;
+    }
     for (shard.instrument_registry.entries[0..shard.instrument_registry.count]) |entry| {
         if (entry.rules_barrier == 0 or entry.rules_barrier > shard.trace.len or
             shard.trace.events[entry.rules_barrier - 1].kind != .instrument_rules_activated)
@@ -2281,6 +2341,13 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
                 if (ref.identity != 0 or ref.version != 0) return error.InvalidSnapshotState;
             } else if (ref.barrier > shard.trace.len or shard.trace.events[ref.barrier - 1].kind != kind or
                 ref.identity == 0 or ref.version == 0)
+                return error.InvalidSnapshotState;
+        }
+        if (refs.trading_authorization.barrier != 0) {
+            const control = shard.controlCommandAtBarrier(refs.trading_authorization.barrier) orelse return error.InvalidSnapshotState;
+            if (!changesTradingAuthorization(control.kind) or
+                refs.trading_authorization.identity != control.command_identity or
+                refs.trading_authorization.version != (std.math.add(u64, control.expected_version, 1) catch return error.InvalidSnapshotState))
                 return error.InvalidSnapshotState;
         }
         if (refs.capability.barrier != 0 and shard.trace.events[refs.capability.barrier - 1].identity != refs.capability.identity)

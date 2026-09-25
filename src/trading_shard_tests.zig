@@ -104,6 +104,150 @@ test "OMS command binds scoped capability and source-owned authority barriers" {
     try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
 }
 
+test "CancelOpenOrders preserves the actual TradingAuthorization grant" {
+    var run = try startScenario();
+    const granted = try run.shard.currentDispatchAuthorityRefs(swap_instrument);
+    try std.testing.expectEqual(@as(u128, 2), granted.trading_authorization.identity);
+    _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(4, 3, .cancel_open_orders));
+    const after_cancel = try run.shard.currentDispatchAuthorityRefs(swap_instrument);
+    try std.testing.expectEqualDeep(granted.trading_authorization, after_cancel.trading_authorization);
+    try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
+    _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(5, 4, .trading_pause));
+    const after_pause = try run.shard.currentDispatchAuthorityRefs(swap_instrument);
+    try std.testing.expectEqual(@as(u128, 5), after_pause.trading_authorization.identity);
+    try std.testing.expect(after_pause.trading_authorization.barrier > granted.trading_authorization.barrier);
+    try std.testing.expect(!run.shard.operational_state.effectiveTradingAuthority());
+    try run.decision_journal.seal();
+    _ = try assertReplayEquivalent(run);
+}
+
+test "unsupported OMS order semantics reject as replayable exact-only facts" {
+    var run = try startScenario();
+    try applyHealthyPrelude(&run);
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{ .identity = 70, .payload = .{ .capability_profile_activation = .{
+        .exchange_account = 2,
+        .instrument = swap_instrument,
+        .venue = 1,
+        .environment = .simulation,
+        .product = .isolated_linear_usdt,
+        .version = 1,
+        .rules_version = 1,
+        .config_version = 1,
+        .adapter_session = 1,
+        .max_dispatch_age_ns = std.time.ns_per_s,
+        .supports_place = true,
+        .supports_cancel = true,
+        .supports_native_amend = false,
+        .supports_venue_reduce_only = false,
+        .supports_post_only = false,
+        .supports_market_protection = false,
+    } } }));
+    var group: oms_module.IntentGroup = .{ .first_intent_sequence = 90, .count = 1 };
+    group.members[0] = .{
+        .intent_sequence = 90,
+        .strategy_instance = 1,
+        .operation = .place,
+        .instrument = swap_instrument,
+        .side = .buy,
+        .quantity = 100,
+        .limit_price = fixtureOmsPrice(swap_instrument, 501_000),
+    };
+    const Case = enum { post_only, venue_reduce_only, price_protection, market_unprotected, market_fok, wrong_rules };
+    for ([_]Case{ .post_only, .venue_reduce_only, .price_protection, .market_unprotected, .market_fok, .wrong_rules }, 0..) |case, index| {
+        group.first_intent_sequence = 90 + index;
+        group.members[0].intent_sequence = group.first_intent_sequence;
+        group.members[0].order_type = .limit;
+        group.members[0].time_in_force = .good_til_canceled;
+        group.members[0].venue_reduce_only = false;
+        group.members[0].market_protection_price = null;
+        group.members[0].limit_price.rules_version = 1;
+        switch (case) {
+            .post_only => {
+                group.members[0].order_type = .post_only;
+                group.members[0].time_in_force = .post_only;
+            },
+            .venue_reduce_only => group.members[0].venue_reduce_only = true,
+            .price_protection => group.members[0].market_protection_price = fixtureOmsPrice(swap_instrument, 502_000),
+            .market_unprotected => {
+                group.members[0].order_type = .market;
+                group.members[0].time_in_force = .immediate_or_cancel;
+            },
+            .market_fok => {
+                group.members[0].order_type = .market;
+                group.members[0].time_in_force = .fill_or_kill;
+                group.members[0].market_protection_price = fixtureOmsPrice(swap_instrument, 502_000);
+            },
+            .wrong_rules => group.members[0].limit_price.rules_version = 99,
+        }
+        const before = run.shard.trace.len;
+        try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(16 + index, .{ .identity = 90 + index, .payload = .{ .oms_intent_group = group } }))) == null);
+        try std.testing.expectEqual(@as(usize, 0), run.shard.oms.order_count);
+        try std.testing.expectEqual(shard_event.RejectReason.unsupported_order_spec, run.shard.last_reject_reason);
+        try std.testing.expectEqual(before + 1, run.shard.trace.len);
+        try std.testing.expectEqual(engine.EventKind.strategy_intent_rejected, run.shard.trace.events[before].kind);
+    }
+    var supported = run.shard.instrument_registry.get(swap_instrument).?.capability.?;
+    supported.version = 2;
+    supported.supports_post_only = true;
+    supported.supports_market_protection = true;
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(23, .{ .identity = 100, .payload = .{ .capability_profile_activation = supported } }));
+    group.first_intent_sequence = 100;
+    group.members[0].intent_sequence = 100;
+    group.members[0].order_type = .post_only;
+    group.members[0].time_in_force = .post_only;
+    group.members[0].venue_reduce_only = false;
+    group.members[0].limit_price.rules_version = 1;
+    group.members[0].market_protection_price = null;
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(24, .{ .identity = 101, .payload = .{ .oms_intent_group = group } }));
+    const exact = run.shard.oms.emitted()[0];
+    try std.testing.expectEqual(canonical.OrderType.post_only, exact.order_type);
+    try std.testing.expectEqual(canonical.TimeInForce.post_only, exact.time_in_force);
+    try std.testing.expectEqualDeep(group.members[0].market_protection_price, exact.market_protection_price);
+    try std.testing.expect(!exact.venue_reduce_only);
+    try std.testing.expect(exact.authority.complete());
+    var amend = group;
+    amend.first_intent_sequence = 101;
+    amend.members[0].intent_sequence = 101;
+    amend.members[0].operation = .amend;
+    amend.members[0].target_order_id = exact.order_id;
+    amend.members[0].expected_revision = exact.revision;
+    amend.members[0].native_amend = true;
+    const before_amend = run.shard.trace.len;
+    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(25, .{ .identity = 102, .payload = .{ .oms_intent_group = amend } }))) == null);
+    try std.testing.expectEqual(before_amend + 1, run.shard.trace.len);
+    try std.testing.expectEqual(shard_event.RejectReason.unsupported_order_spec, run.shard.last_reject_reason);
+    try std.testing.expectEqual(@as(u8, 1), run.shard.oms.order_count);
+    try run.decision_journal.seal();
+    _ = try assertReplayEquivalent(run);
+}
+
+test "inexact direct price keeps a stable reject without an OMS command" {
+    var run: LiveRun = .{ .shard = .{}, .decision_journal = engine.journal.Journal.init() };
+    var setup = genesis;
+    setup[1].core.payload.margin_rules_activated.price_tick_micros = 100_000;
+    for (setup) |event| _ = try applyLive(&run.shard, &run.decision_journal, event);
+    const digest = run.shard.canonicalStateDigest();
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(11, .{ .identity = 3, .payload = .{ .host_activated = .{
+        .strategy_identity = 1,
+        .config_version = 1,
+        .activation_identity = 1,
+        .session = .{ .fencing = 1, .shard = 0, .generation = 1 },
+        .activation_barrier = 0,
+        .state_digest = digest,
+    } } }));
+    try applyHealthyPrelude(&run);
+    var request = fixture.timer(1);
+    request.limit_price_micros = order_limit_price + 1;
+    const before = run.shard.trace.len;
+    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{ .identity = 102, .payload = .{ .timer = request } }))) == null);
+    try std.testing.expectEqual(before + 2, run.shard.trace.len);
+    try std.testing.expectEqual(engine.EventKind.strategy_intent_rejected, run.shard.trace.events[before + 1].kind);
+    try std.testing.expectEqual(shard_event.RejectReason.unsupported_order_spec, run.shard.last_reject_reason);
+    try std.testing.expectEqual(@as(usize, 0), run.shard.oms.order_count);
+    try run.decision_journal.seal();
+    _ = try assertReplayEquivalent(run);
+}
+
 fn applyGenesisReplay(replay: *ReplayTradingShard) !void {
     for (genesis) |event| _ = try replay.apply(event);
     const digest = replay.canonicalStateDigest();
@@ -1379,6 +1523,25 @@ test "canonical not-sent is terminal without entering the legacy shard schema" {
 
 test "bounded multi instrument OMS closes lifecycle and partial policy" {
     var run = try startScenario();
+    const native_amend_capability = atGroup(10, .{ .identity = 100, .payload = .{ .capability_profile_activation = .{
+        .exchange_account = 2,
+        .instrument = spot_instrument,
+        .venue = 1,
+        .environment = .simulation,
+        .product = .spot,
+        .version = 1,
+        .rules_version = 1,
+        .config_version = 1,
+        .adapter_session = 1,
+        .max_dispatch_age_ns = std.time.ns_per_s,
+        .supports_place = true,
+        .supports_cancel = true,
+        .supports_native_amend = true,
+        .supports_venue_reduce_only = false,
+        .supports_post_only = false,
+        .supports_market_protection = false,
+    } } });
+    _ = try run.shard.apply(native_amend_capability);
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 10, .policy = .independent, .count = 2 };
     group.members[0] = .{ .intent_sequence = 10, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000), .reservation = fixtureReservation(5_000_000) };
@@ -1440,6 +1603,7 @@ test "bounded multi instrument OMS closes lifecycle and partial policy" {
     const digest = run.shard.canonicalStateDigest();
     var replayed: ReplayTradingShard = .{};
     try applyGenesisReplay(&replayed);
+    _ = try replayed.apply(native_amend_capability);
     _ = try replayed.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
     _ = try replayed.apply(atGroup(12, .{ .identity = 10, .payload = .{ .oms_intent_group = group } }));
     _ = try replayed.apply(atGroup(13, .{ .identity = 1, .payload = .{ .oms_dispatch_batch = dispatch } }));
@@ -1612,6 +1776,11 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     const durable_store = durable_memory.interface();
     const stream: @import("durable_store.zig").StreamIdentity = .{ .domain = .control, .id = 77 };
     try gateway.bootstrapDurableDispatch(durable_store, undefined, stream);
+    var paused = live.shard;
+    _ = try paused.apply(lifecycleCommand(4, 3, .trading_pause));
+    try std.testing.expect(!std.meta.eql(proved.authority.trading_authorization, (try paused.currentDispatchAuthorityRefs(swap_instrument)).trading_authorization));
+    try std.testing.expectError(error.NotSent, gateway.sendFromShard(&paused, proved.command_id, 2 * std.time.ns_per_s));
+    try std.testing.expectEqual(@as(u64, 0), gateway.send_attempt_count);
     const lease_barrier = live.shard.risk_lease_valid_through_barrier;
     live.shard.risk_lease_valid_through_barrier = live.shard.trace.len - 1;
     try std.testing.expectError(error.NotSent, gateway.sendFromShard(&live.shard, proved.command_id, 2 * std.time.ns_per_s));
@@ -2292,6 +2461,29 @@ test "multiple SPOT and SWAP orders independently close place amend and cancel" 
     place.members[3] = .{ .intent_sequence = 83, .operation = .place, .instrument = swap_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
     _ = try run.shard.apply(atGroup(12, .{ .identity = 80, .payload = .{ .oms_intent_group = place } }));
     for ([_]u64{ 1, 2, 3, 4 }, 0..) |order_id, index| _ = try run.shard.apply(atGroup(13 + index, .{ .identity = 1 + index, .payload = .{ .oms_execution_report = .{ .report_id = 1 + index, .order_id = order_id, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 10 } } }));
+
+    var amend_capability: shard_event.CapabilityProfileActivation = .{
+        .exchange_account = 2,
+        .instrument = spot_instrument,
+        .venue = 1,
+        .environment = .simulation,
+        .product = .spot,
+        .version = 1,
+        .rules_version = 1,
+        .config_version = 1,
+        .adapter_session = 1,
+        .max_dispatch_age_ns = std.time.ns_per_s,
+        .supports_place = true,
+        .supports_cancel = true,
+        .supports_native_amend = true,
+        .supports_venue_reduce_only = false,
+        .supports_post_only = false,
+        .supports_market_protection = false,
+    };
+    _ = try run.shard.apply(atGroup(16, .{ .identity = 100, .payload = .{ .capability_profile_activation = amend_capability } }));
+    amend_capability.instrument = swap_instrument;
+    amend_capability.product = .isolated_linear_usdt;
+    _ = try run.shard.apply(atGroup(16, .{ .identity = 101, .payload = .{ .capability_profile_activation = amend_capability } }));
 
     var amend: oms_module.IntentGroup = .{ .first_intent_sequence = 84, .count = 4 };
     amend.members[0] = .{ .intent_sequence = 84, .operation = .amend, .instrument = spot_instrument, .target_order_id = 1, .expected_revision = 1, .quantity = 8, .limit_price = fixtureOmsPrice(spot_instrument, 49_000_000) };

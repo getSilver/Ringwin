@@ -120,6 +120,7 @@ pub const RejectReason = enum(u8) {
     exchange_opening_gate_closed,
     insufficient_spot_asset,
     portfolio_reduce_only_violation,
+    unsupported_order_spec,
 };
 
 pub const TimerRequest = struct {

@@ -29,6 +29,20 @@ pub const OrderState = enum(u8) {
     rejected,
 };
 pub const ReportStatus = enum(u8) { accepted, partially_filled, filled, canceled, rejected, amended };
+
+pub fn exactOrderTiming(order_type: canonical.OrderType, time_in_force: canonical.TimeInForce) bool {
+    return switch (order_type) {
+        .post_only => time_in_force == .post_only,
+        .ioc => time_in_force == .immediate_or_cancel,
+        .fok => time_in_force == .fill_or_kill,
+        .market => time_in_force == .immediate_or_cancel,
+        .limit => time_in_force != .post_only,
+    };
+}
+
+pub fn exactOrderSpec(order_type: canonical.OrderType, time_in_force: canonical.TimeInForce, has_market_protection: bool) bool {
+    return exactOrderTiming(order_type, time_in_force) and (has_market_protection == (order_type == .market));
+}
 pub const ReconciliationStatus = enum(u8) { found_live, found_terminal, confirmed_absent, unresolved };
 pub const TerminalState = enum(u8) { filled, canceled, rejected };
 
@@ -408,6 +422,7 @@ pub const Oms = struct {
     fn applyIntent(self: *Oms, intent: Intent, group: u64, policy: PartialExecutionPolicy, refs: RiskFactRefs) !void {
         switch (intent.operation) {
             .place => {
+                if (!exactOrderSpec(intent.order_type, intent.time_in_force, intent.market_protection_price != null)) return error.InvalidOrderSpec;
                 if (intent.quantity <= 0 or intent.limit_price.ticks <= 0 or intent.reservation.atoms <= 0 or intent.limit_price.instrument != intent.instrument) return error.InvalidOrderSpec;
                 const order = try self.createOrder(intent.strategy_instance, intent.instrument, intent.side, intent.portfolio_reduce_only, intent.venue_reduce_only, intent.quantity, intent.limit_price, intent.reservation, intent.client_order_id, 0, group, policy);
                 order.order_type = intent.order_type;
@@ -416,6 +431,7 @@ pub const Oms = struct {
                 try self.emit(order.*, .place, intent.intent_sequence, refs);
             },
             .amend => {
+                if (!exactOrderSpec(intent.order_type, intent.time_in_force, intent.market_protection_price != null)) return error.InvalidOrderSpec;
                 const order = try self.mutableOrder(intent.target_order_id);
                 try validateTarget(order, intent);
                 if (intent.quantity <= 0 or intent.limit_price.ticks <= 0 or intent.limit_price.instrument != intent.instrument) return error.InvalidOrderSpec;
@@ -1181,6 +1197,47 @@ test "OMS commands bind distinct risk and reservation fact barriers" {
     try legacy.applyGroup(group);
     try std.testing.expectEqual(@as(u64, 0), legacy.emitted()[0].risk_decision_identity);
     try std.testing.expectEqual(@as(u64, 0), legacy.emitted()[0].reservation_identity);
+}
+
+test "OMS command keeps each exact order type and safety field" {
+    const cases = [_]struct { order_type: canonical.OrderType, tif: canonical.TimeInForce }{
+        .{ .order_type = .market, .tif = .immediate_or_cancel },
+        .{ .order_type = .limit, .tif = .good_til_canceled },
+        .{ .order_type = .post_only, .tif = .post_only },
+        .{ .order_type = .ioc, .tif = .immediate_or_cancel },
+        .{ .order_type = .fok, .tif = .fill_or_kill },
+    };
+    for (cases) |case| {
+        var state: Oms = .{};
+        var group: IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
+        group.members[0] = .{
+            .intent_sequence = 1,
+            .operation = .place,
+            .instrument = 1,
+            .side = .sell,
+            .portfolio_reduce_only = true,
+            .venue_reduce_only = true,
+            .quantity = 3,
+            .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 50 },
+            .reservation = .{ .asset = 1, .atoms = 150 },
+            .order_type = case.order_type,
+            .time_in_force = case.tif,
+            .market_protection_price = if (case.order_type == .market) .{ .instrument = 1, .rules_version = 1, .ticks = 49 } else null,
+        };
+        try state.applyGroup(group);
+        const command = state.emitted()[0];
+        try std.testing.expectEqual(Side.sell, command.side);
+        try std.testing.expectEqual(@as(i64, 3), command.quantity);
+        try std.testing.expect(command.portfolio_reduce_only and command.venue_reduce_only);
+        try std.testing.expectEqual(case.order_type, command.order_type);
+        try std.testing.expectEqual(case.tif, command.time_in_force);
+        try std.testing.expectEqualDeep(group.members[0].market_protection_price, command.market_protection_price);
+    }
+    try std.testing.expect(!exactOrderTiming(.post_only, .good_til_canceled));
+    try std.testing.expect(!exactOrderTiming(.limit, .post_only));
+    try std.testing.expect(!exactOrderTiming(.market, .fill_or_kill));
+    try std.testing.expect(!exactOrderSpec(.market, .immediate_or_cancel, false));
+    try std.testing.expect(!exactOrderSpec(.limit, .good_til_canceled, true));
 }
 
 test "pending cancel outbox is reconstructed after replay" {

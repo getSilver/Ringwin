@@ -658,6 +658,8 @@ pub const Gateway = struct {
     }
 
     fn validateOrder(self: *const Gateway, route: *const Route, request: canonical.OrderCommand) !void {
+        if (request.operation != .cancel and !oms.exactOrderSpec(request.order_type, request.time_in_force, request.market_protection_price != null))
+            return error.Rejected;
         const increasing = request.operation != .cancel and
             !(request.portfolio_reduce_only or request.venue_reduce_only);
         if (increasing and (route.safety_gate == .latched or self.instrumentGapped(request.instrument)))
@@ -667,7 +669,7 @@ pub const Gateway = struct {
         if (request.operation == .cancel and !route.capability.supports_cancel) return error.Rejected;
         if (request.operation == .amend and !route.capability.supports_native_amend) return error.Rejected;
         if (request.venue_reduce_only and !route.capability.supports_venue_reduce_only) return error.Rejected;
-        if (request.order_type == .post_only and !route.capability.supports_post_only) return error.Rejected;
+        if ((request.order_type == .post_only or request.time_in_force == .post_only) and !route.capability.supports_post_only) return error.Rejected;
         if (request.market_protection_price != null and !route.capability.supports_market_protection) return error.Rejected;
         if (route.capability.version != request.capability_version or
             route.capability.rules_version != request.rules_version or
