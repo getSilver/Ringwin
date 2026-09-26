@@ -50,15 +50,16 @@ OrderIntent、Order、RiskReservation、账户危险事实、StrategyHost 授权
 8. [以 HostActivated 和只读 IPC 强制策略隔离](issues/08-enforce-host-activation-and-ipc-isolation.md)
 9. [把 legacy 订单与策略调用方迁入权威 OMS](issues/09-migrate-legacy-order-and-strategy-paths.md)
 10. [删除竞争订单状态与废弃经济投影](issues/10-contract-legacy-state-and-projection.md)
-11. [实现可重放的订单容量与终态墓碑](issues/11-manage-order-capacity-with-tombstones.md) — blocked by 10
+11. [实现可重放的订单容量与终态墓碑](issues/11-manage-order-capacity-with-tombstones.md)
 12. [重建 main 安全与权威状态验收基线](issues/12-rebuild-safety-acceptance.md) — blocked by 01–11
 
 ## Frontier
 
-- 下一张可认领：[10 删除竞争订单状态与废弃经济投影](issues/10-contract-legacy-state-and-projection.md)。一次只认领并完成一张；其余受阻票按 Route 推进。01–06、08、09 已离线收口；10 需按复核计划重新回归。12 最后重建验收。Linux/Venue/生产资金资格仍为 not_run。
+- 下一张可认领：[11 实现可重放的订单容量与终态墓碑](issues/11-manage-order-capacity-with-tombstones.md)。一次只认领并完成一张；其余受阻票按 Route 推进。01–06、08–10 已离线收口；12 最后重建验收。Linux/Venue/生产资金资格仍为 not_run。
 
 ## Decisions so far
 
+- 2026-09-26：10 在 09 完成后按修复计划重新验收，未发现旧订单/风险/经济权威或业务 raw send 回流；保留的模拟生命周期投影只用于当前 Demo 验收摘要，不参与交易准入或发送。核心与 Demo 文件格式检查通过，当前工作树 Debug（Windows 64 MiB 栈）/ReleaseSafe 各 294/294；完整源码身份待 12 票封存，Linux/Venue/生产资金资格保持 `not_run`。
 - 2026-09-26：09 按 R09-A 收口。真实 Host、timer 与 OMS group 入口把未激活、身份冲突、open Order、能力、市场及风险拒绝写为有原因的稳定事实；拒绝占用 OMS 意图身份，Python 请求身份元数据进入原始指纹。首记录拒绝原因经 journal/replay 校验，身份容量耗尽有持久 RecoveryOnly 事实。Debug（Windows 64 MiB 栈）/ReleaseSafe 各 294/294，journal/state/acceptance/registry schema 20/23/11/17；仅离线证据。
 - 2026-09-25：06 按 R06-A/B 收口。TradingAuthorization 引用真实授权变化事实；CancelOpenOrders 不覆盖授权。OMS/分片/Gateway 只接受可原样表达的订单语义，不支持的能力、改单、价格保护和规则版本留下可回放拒绝事实；暂停后旧 proof 无发送。Debug/ReleaseSafe 各 292/292，journal/state/acceptance/registry schema 19/22/10/16；仅离线证据。
 - 2026-09-24：08 按 R08-A 收口。HostActivated 绑定非零 session 与可回放激活事实；故障、控制暂停与新会话撤权旧身份，Gateway 从分片 journal 事实开权并守住 barrier、cursor 和批次连续性。Debug/ReleaseSafe 各 288/288，StrategyHost 14 步离线验证通过；journal/state schema 18/21。Linux 目标与 Venue/生产资格保持 `not_run`。
