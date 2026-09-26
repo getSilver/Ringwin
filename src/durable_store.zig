@@ -12,7 +12,7 @@ const Crc32c = std.hash.crc.Crc32Iscsi;
 
 pub const max_streams = 8;
 pub const max_segment_bytes = 16 * 1024;
-pub const max_snapshot_bytes = 48 * 1024;
+pub const max_snapshot_bytes = 64 * 1024;
 pub const max_manifest_entries = 32;
 
 const manifest_magic: u32 = 0x544e414d; // MANT

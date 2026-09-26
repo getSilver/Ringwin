@@ -1,9 +1,9 @@
 # 09: 把 legacy 订单与策略调用方迁入权威 OMS
 
 Type: task
-Status: blocked
+Status: resolved
 Assignee: Codex
-Blocked by: [03 闭合 OMS 意图幂等与 CancelConfirmCreate 阻断](03-enforce-oms-intent-idempotency.md), [04 按权威剩余数量维护 RiskReservation](04-rebalance-reservation-from-authoritative-remaining.md), [06 扩展完整的 OMS DispatchProof](06-expand-complete-oms-dispatch-proof.md), [08 以 HostActivated 和只读 IPC 强制策略隔离](08-enforce-host-activation-and-ipc-isolation.md)
+Blocked by: None (04、06、08 已收口)
 Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 
 ## Question
@@ -19,7 +19,7 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 - [x] 原生 timer 不再硬编码固定买单、IntentSequence 或 ClientOrderId；真实策略身份从持久 StrategyPrivateState 推进。
 - [x] Python Host 能表达并通过同一 seam 处理 buy、sell、PortfolioReduceOnly 和生命周期 DeRisk 所需的合法意图。
 - [x] 未授权、市场 gap、五层限额、opening gate、身份冲突和能力缺失产生各自准确且稳定的 CanonicalRejectReason。
-- [ ] Canonical execution/fill/reconciliation 不再双写 legacy 标量；所有查询、协调与摘要从 OMS/风险/经济深模块取得。
+- [x] Canonical execution/fill/reconciliation 不再双写 legacy 标量；所有查询、协调与摘要从 OMS/风险/经济深模块取得。
 - [x] snapshot、restore、semantic replay、fixture 和 acceptance 全部迁到新权威形态，迁移批次之间持续通过目标测试。
 
 ## Out of scope
@@ -28,4 +28,12 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 
 ## Answer
 
-核心 timer、Python Host、Canonical Venue、snapshot 与 replay 已迁入 OMS/风险/经济路径；显式 Demo 仍从 legacy AuthorizedCommand 重建命令和 proof，待 06/07 后收口。
+Canonical report/fill/reconciliation 不再镜像 `last_canonical_report`、`last_canonical_fill` 或 `layered_risk_reserved_micros`。报告身份与 `canonical_digest` 由 OMS `report_history` 拥有；成交身份由经济投影 `canonical_fill_evidence` 拥有，且在核对 OMS 剩余数量之前判定重复/冲突。风险剩余、协调摘要和 Host ingress 摘要从 `oms.activeReservations` 与经济投影派生。snapshot/replay schema 14。Debug `zig build test` 234/234。
+
+## 2026-09-23 复核与重开
+
+旧 Answer 仅为历史记录。[修复计划 R09-A](../review-repair-plan-2026-09-23.md#09稳定拒绝事实)要求通过真实 `submitOrderIntent`/`applyStable` 入口生成身份冲突、能力缺失、未激活及已有 open Order 等稳定拒绝事实，并与既有市场/risk 拒绝区分；不能只抛错、也不能产生订单或发送。
+
+## 2026-09-26 R09-A 收口
+
+`submitOrderIntent` 与直接 OMS group 在普通资格拒绝时写入携带具体原因的稳定事实，并在 OMS 身份历史占用原始意图；Python 请求的 cursor、配置、激活和账户身份纳入原始指纹。相同内容重试无操作，修改身份字段产生冲突事实，均不产生订单或发送。单条拒绝的原因写入 journal 首记录并经 replay 校验；身份容量耗尽以可重放事实进入 RecoveryOnly。快照容量随权威 trace 扩展到 64 KiB，固定轨迹与四分片摘要重封存。Debug 使用 Windows 64 MiB 测试栈，ReleaseSafe 使用默认栈；两者各 294/294，仅为离线证据。Linux、Venue 与生产资金资格保持 `not_run`。

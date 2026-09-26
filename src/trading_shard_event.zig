@@ -85,12 +85,13 @@ pub const EventKind = enum(u16) {
 
 pub const Fact = struct {
     sequence: u64,
-    kind: EventKind,
     identity: u64,
+    kind: EventKind,
+    reject_reason: RejectReason = .none,
 };
 
 pub const Trace = struct {
-    events: [64]Fact = undefined,
+    events: [68]Fact = undefined,
     len: usize = 0,
 
     pub fn append(self: *Trace, kind: EventKind, identity: u64) !void {
@@ -101,6 +102,11 @@ pub const Trace = struct {
             .identity = identity,
         };
         self.len += 1;
+    }
+
+    pub fn appendRejection(self: *Trace, kind: EventKind, identity: u64, reason: RejectReason) !void {
+        try self.append(kind, identity);
+        self.events[self.len - 1].reject_reason = reason;
     }
 };
 
@@ -121,6 +127,14 @@ pub const RejectReason = enum(u8) {
     insufficient_spot_asset,
     portfolio_reduce_only_violation,
     unsupported_order_spec,
+    host_not_activated,
+    identity_mismatch,
+    intent_identity_conflict,
+    open_order,
+    capability_unsupported,
+    invalid_cursor,
+    margin_safety_gate_closed,
+    identity_capacity_exhausted,
 };
 
 pub const TimerRequest = struct {

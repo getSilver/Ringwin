@@ -363,6 +363,22 @@ pub const Oms = struct {
         return if (known_count == 0) .fresh else .conflict;
     }
 
+    pub fn rememberRejectedGroup(self: *Oms, group: IntentGroup) !void {
+        switch (try self.groupIdentityStatus(group)) {
+            .duplicate => return,
+            .conflict => return error.ConflictingIntentIdentity,
+            .fresh => {},
+        }
+        if (self.intent_history_count + group.count > max_intent_history) {
+            self.recovery_only = true;
+            return error.IdentitySetFull;
+        }
+        for (group.members[0..group.count]) |intent| {
+            self.intent_history[self.intent_history_count] = .{ .strategy_instance = intent.strategy_instance, .intent_sequence = intent.intent_sequence, .group = group.first_intent_sequence, .policy = group.policy, .fingerprint = intentFingerprint(intent, group.count) };
+            self.intent_history_count += 1;
+        }
+    }
+
     pub fn applyGroup(self: *Oms, group: IntentGroup) !void {
         return self.applyGroupWithRefs(group, group, &.{});
     }

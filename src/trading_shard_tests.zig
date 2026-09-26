@@ -182,7 +182,7 @@ test "unsupported OMS order semantics reject as replayable exact-only facts" {
         const before = run.shard.trace.len;
         try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(16 + index, .{ .identity = 90 + index, .payload = .{ .oms_intent_group = group } }))) == null);
         try std.testing.expectEqual(@as(usize, 0), run.shard.oms.order_count);
-        try std.testing.expectEqual(shard_event.RejectReason.unsupported_order_spec, run.shard.last_reject_reason);
+        try std.testing.expectEqual(if (case == .post_only or case == .venue_reduce_only) shard_event.RejectReason.capability_unsupported else .unsupported_order_spec, run.shard.last_reject_reason);
         try std.testing.expectEqual(before + 1, run.shard.trace.len);
         try std.testing.expectEqual(engine.EventKind.strategy_intent_rejected, run.shard.trace.events[before].kind);
     }
@@ -215,10 +215,24 @@ test "unsupported OMS order semantics reject as replayable exact-only facts" {
     const before_amend = run.shard.trace.len;
     try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(25, .{ .identity = 102, .payload = .{ .oms_intent_group = amend } }))) == null);
     try std.testing.expectEqual(before_amend + 1, run.shard.trace.len);
-    try std.testing.expectEqual(shard_event.RejectReason.unsupported_order_spec, run.shard.last_reject_reason);
+    try std.testing.expectEqual(shard_event.RejectReason.capability_unsupported, run.shard.last_reject_reason);
     try std.testing.expectEqual(@as(u8, 1), run.shard.oms.order_count);
     try run.decision_journal.seal();
     _ = try assertReplayEquivalent(run);
+    var reader = try engine.journal.Reader.init(run.decision_journal.bytes());
+    var forged = engine.journal.Journal.init();
+    while (true) {
+        switch (try reader.next()) {
+            .end => break,
+            .record => |record| {
+                var changed = record;
+                if (record.sequence == run.shard.trace.len) changed.flags ^= 1 << 8;
+                try forged.append(changed);
+            },
+        }
+    }
+    try forged.seal();
+    try std.testing.expectError(error.ReplayFactMismatch, engine.replayDigest(forged.bytes(), run.shard.quantity_denominator, run.shard.reservation_model));
 }
 
 test "inexact direct price keeps a stable reject without an OMS command" {
@@ -244,6 +258,59 @@ test "inexact direct price keeps a stable reject without an OMS command" {
     try std.testing.expectEqual(engine.EventKind.strategy_intent_rejected, run.shard.trace.events[before + 1].kind);
     try std.testing.expectEqual(shard_event.RejectReason.unsupported_order_spec, run.shard.last_reject_reason);
     try std.testing.expectEqual(@as(usize, 0), run.shard.oms.order_count);
+    try run.decision_journal.seal();
+    _ = try assertReplayEquivalent(run);
+}
+
+test "market gap rejects a native intent with a replayable reason" {
+    var run = try startScenario();
+    const before = run.shard.trace.len;
+    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(12, .{ .identity = 103, .payload = .{ .timer = fixture.timer(1) } }))) == null);
+    try std.testing.expectEqual(shard_event.RejectReason.market_data_gap, run.shard.last_reject_reason);
+    try std.testing.expectEqual(shard_event.RejectReason.market_data_gap, run.shard.trace.events[run.shard.trace.len - 1].reject_reason);
+    try std.testing.expect(run.shard.trace.len > before);
+    try std.testing.expectEqual(@as(u8, 0), run.shard.oms.order_count);
+    try applyHealthyPrelude(&run);
+    const before_retry = run.shard.trace.len;
+    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{ .identity = 106, .payload = .{ .external_order_intent = .{
+        .strategy_identity = 1,
+        .intent_sequence = 1,
+        .strategy_cursor = run.shard.trace.len + 1,
+        .config_version = 1,
+        .activation_identity = 1,
+        .portfolio_identity = 1,
+        .exchange_account_identity = 2,
+        .instrument_identity = swap_instrument,
+        .side = .buy,
+        .order_type = .limit,
+        .time_in_force = .good_til_canceled,
+        .portfolio_reduce_only = false,
+        .quantity = 1,
+        .limit_price_micros = order_limit_price,
+    } } }))) == null);
+    try std.testing.expectEqual(before_retry + 1, run.shard.trace.len);
+    try std.testing.expectEqual(shard_event.RejectReason.intent_identity_conflict, run.shard.last_reject_reason);
+    try std.testing.expectEqual(@as(u8, 0), run.shard.oms.order_count);
+    try run.decision_journal.seal();
+    _ = try assertReplayEquivalent(run);
+}
+
+test "risk lease limit rejects a native intent with a replayable reason" {
+    var run = try startScenario();
+    try applyHealthyPrelude(&run);
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{ .identity = 104, .payload = .{ .risk_lease_granted = .{
+        .lease_identity = 104,
+        .version = 2,
+        .amount_micros = 1_000,
+        .strategy_limit_micros = 50,
+        .portfolio_limit_micros = 1_000,
+        .exchange_account_limit_micros = 1_000,
+        .global_limit_micros = 1_000,
+    } } }));
+    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(16, .{ .identity = 105, .payload = .{ .timer = fixture.timer(happy_order_quantity) } }))) == null);
+    try std.testing.expectEqual(shard_event.RejectReason.strategy_limit_exceeded, run.shard.last_reject_reason);
+    try std.testing.expectEqual(shard_event.RejectReason.strategy_limit_exceeded, run.shard.trace.events[run.shard.trace.len - 1].reject_reason);
+    try std.testing.expectEqual(@as(u8, 0), run.shard.oms.order_count);
     try run.decision_journal.seal();
     _ = try assertReplayEquivalent(run);
 }
@@ -393,7 +460,7 @@ test "native and Python intents cross the same authority and risk seam" {
             .limit_price_micros = order_limit_price,
         } },
     });
-    const python_command = (try python.shard.apply(python_input)).order_command.?;
+    const python_command = (try applyLive(&python.shard, &python.decision_journal, python_input)).?;
     const before_duplicate = python.shard.canonicalStateDigest();
     const duplicate_python = try python.shard.apply(python_input);
     try std.testing.expectEqual(@as(usize, 0), duplicate_python.oms_commands.len);
@@ -401,21 +468,34 @@ test "native and Python intents cross the same authority and risk seam" {
     var retried_python = python_input;
     retried_python.core.identity = 2;
     retried_python.core.payload.external_order_intent.strategy_cursor += 1;
-    _ = try python.shard.apply(retried_python);
-    try std.testing.expectEqualSlices(u8, &before_duplicate, &python.shard.canonicalStateDigest());
+    try std.testing.expect((try applyLive(&python.shard, &python.decision_journal, retried_python)) == null);
+    try std.testing.expectEqual(shard_event.RejectReason.intent_identity_conflict, python.shard.last_reject_reason);
     try std.testing.expectEqual(native_command.quantity, python_command.quantity);
     try std.testing.expectEqual(native_command.limit_price, python_command.limit_price);
     try std.testing.expectEqual(native_command.reservation, python_command.reservation);
 
+    var blocked_by_order = python_input;
+    blocked_by_order.core.identity = 3;
+    blocked_by_order.core.payload.external_order_intent.intent_sequence = 2;
+    blocked_by_order.core.payload.external_order_intent.strategy_cursor = python.shard.trace.len + 1;
+    const before_open_order = python.shard.trace.len;
+    try std.testing.expect((try applyLive(&python.shard, &python.decision_journal, blocked_by_order)) == null);
+    try std.testing.expectEqual(shard_event.RejectReason.open_order, python.shard.trace.events[before_open_order].reject_reason);
+    try std.testing.expectEqual(@as(u8, 1), python.shard.oms.order_count);
+    try std.testing.expectEqual(@as(u64, 0), python.shard.dispatch_attempt_count);
+    try python.decision_journal.seal();
+    _ = try assertReplayEquivalent(python);
+
     var unauthorized = try startScenarioAuthorized(authorization, .leveraged);
     try applyHealthyPrelude(&unauthorized);
-    try std.testing.expectError(error.IntentAuthorityMismatch, unauthorized.shard.apply(atGroup(15, .{
+    const reject_before = unauthorized.shard.trace.len;
+    const wrong_config = atGroup(15, .{
         .identity = 1,
         .payload = .{ .external_order_intent = .{
-            .strategy_identity = 41,
+            .strategy_identity = authorization.strategy_identity,
             .intent_sequence = 1,
             .strategy_cursor = unauthorized.shard.trace.len + 1,
-            .config_version = authorization.config_version,
+            .config_version = authorization.config_version + 1,
             .activation_identity = authorization.activation_identity,
             .portfolio_identity = 1,
             .exchange_account_identity = 2,
@@ -427,7 +507,25 @@ test "native and Python intents cross the same authority and risk seam" {
             .quantity = happy_order_quantity,
             .limit_price_micros = order_limit_price,
         } },
-    })));
+    });
+    try std.testing.expect((try applyLive(&unauthorized.shard, &unauthorized.decision_journal, wrong_config)) == null);
+    try std.testing.expectEqual(reject_before + 1, unauthorized.shard.trace.len);
+    try std.testing.expectEqual(engine.EventKind.strategy_intent_rejected, unauthorized.shard.trace.events[reject_before].kind);
+    try std.testing.expectEqual(shard_event.RejectReason.identity_mismatch, unauthorized.shard.last_reject_reason);
+    try std.testing.expectEqual(shard_event.RejectReason.identity_mismatch, unauthorized.shard.trace.events[reject_before].reject_reason);
+    try std.testing.expectEqual(@as(usize, 0), unauthorized.shard.oms.order_count);
+    var corrected = wrong_config;
+    corrected.core.identity = 2;
+    corrected.core.payload.external_order_intent.config_version = authorization.config_version;
+    try std.testing.expect((try applyLive(&unauthorized.shard, &unauthorized.decision_journal, corrected)) == null);
+    try std.testing.expectEqual(shard_event.RejectReason.intent_identity_conflict, unauthorized.shard.last_reject_reason);
+    try std.testing.expectEqual(@as(u8, 0), unauthorized.shard.oms.order_count);
+    try unauthorized.decision_journal.seal();
+    _ = try assertReplayEquivalent(unauthorized);
+    var rejected_snapshot_storage: [256 * 1024]u8 = undefined;
+    const rejected_snapshot = try unauthorized.shard.snapshot(&unauthorized.decision_journal, unauthorized.decision_journal.last_sequence, &rejected_snapshot_storage);
+    const restored_rejection = try TradingShard.restoreSnapshot(rejected_snapshot);
+    try std.testing.expectEqual(shard_event.RejectReason.identity_mismatch, restored_rejection.shard.trace.events[reject_before].reject_reason);
 }
 
 test "host fault revokes the old activation before a replacement can trade" {
@@ -461,7 +559,8 @@ test "host fault revokes the old activation before a replacement can trade" {
         .quantity = 1,
         .limit_price_micros = order_limit_price,
     } } });
-    try std.testing.expectError(error.HostNotActivated, run.shard.apply(premature_intent));
+    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, premature_intent)) == null);
+    try std.testing.expectEqual(shard_event.RejectReason.host_not_activated, run.shard.last_reject_reason);
     var premature_frame_storage: [256]u8 = undefined;
     const premature_frame = try host_gateway.encodeOutputFrame(&premature_frame_storage, config, 1, old_proof.fact_sequence, 1, 100, order_limit_price);
     try std.testing.expectEqual(host_gateway.RejectReason.invalid_cursor, gateway.ingest(premature_frame, 101).rejected.reason);
@@ -485,9 +584,9 @@ test "host fault revokes the old activation before a replacement can trade" {
         .activation_barrier = 0,
         .state_digest = run.shard.canonicalStateDigest(),
     } } })));
-    try std.testing.expectError(error.HostNotActivated, run.shard.apply(atGroup(13, .{ .identity = 81, .payload = .{ .external_order_intent = .{
+    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(13, .{ .identity = 81, .payload = .{ .external_order_intent = .{
         .strategy_identity = 1,
-        .intent_sequence = 1,
+        .intent_sequence = 2,
         .strategy_cursor = old_cursor + 1,
         .config_version = 1,
         .activation_identity = old_identity,
@@ -500,7 +599,8 @@ test "host fault revokes the old activation before a replacement can trade" {
         .portfolio_reduce_only = false,
         .quantity = 1,
         .limit_price_micros = order_limit_price,
-    } } })));
+    } } }))) == null);
+    try std.testing.expectEqual(shard_event.RejectReason.host_not_activated, run.shard.last_reject_reason);
     const digest = run.shard.canonicalStateDigest();
     try std.testing.expectError(error.StaleHostActivation, run.shard.apply(atGroup(14, .{ .identity = 82, .payload = .{ .host_activated = .{
         .strategy_identity = 1,
@@ -536,7 +636,7 @@ test "host fault revokes the old activation before a replacement can trade" {
     try applyHealthyPrelude(&run);
     try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(16, .{ .identity = 84, .payload = .{ .external_order_intent = .{
         .strategy_identity = 1,
-        .intent_sequence = 1,
+        .intent_sequence = 3,
         .strategy_cursor = @intCast(run.shard.trace.len + 1),
         .config_version = 1,
         .activation_identity = 2,
@@ -583,7 +683,8 @@ test "new HostSession revokes the old direct-trade identity" {
     gateway.beginRecovery();
     try gateway.beginSession(next, &run.shard, &run.decision_journal);
     try std.testing.expectEqual(@as(u128, 0), run.shard.host_activation_identity);
-    try std.testing.expectError(error.HostNotActivated, run.shard.apply(atGroup(12, .{ .identity = 90, .payload = .{ .timer = fixture.timer(1) } })));
+    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(12, .{ .identity = 90, .payload = .{ .timer = fixture.timer(1) } }))) == null);
+    try std.testing.expectEqual(shard_event.RejectReason.host_not_activated, run.shard.last_reject_reason);
     try run.decision_journal.seal();
     _ = try assertReplayEquivalent(run);
 }
@@ -618,7 +719,8 @@ test "fresh Gateway revokes a replayed old Host activation before restart" {
     next.authorization.activation_identity = 2;
     try fresh_gateway.beginSession(next, &recovered, &tail);
     try std.testing.expectEqual(@as(u128, 0), recovered.host_activation_identity);
-    try std.testing.expectError(error.HostNotActivated, recovered.apply(atGroup(12, .{ .identity = 91, .payload = .{ .timer = fixture.timer(1) } })));
+    try std.testing.expect((try applyLive(&recovered, &tail, atGroup(12, .{ .identity = 91, .payload = .{ .timer = fixture.timer(1) } }))) == null);
+    try std.testing.expectEqual(shard_event.RejectReason.host_not_activated, recovered.last_reject_reason);
     try tail.seal();
     const replayed = try TradingShard.restore(snapshot, tail.bytes());
     try std.testing.expectEqualSlices(u8, &recovered.canonicalStateDigest(), &replayed.shard.canonicalStateDigest());
@@ -645,7 +747,8 @@ test "active Host exit and timeout journal revocation blocks direct trade" {
             supervisor.processExited(false);
         }
         try std.testing.expect(try host_lifecycle.revokeHostAuthority(&supervisor, &gateway, &run.shard, &run.decision_journal, 92, .fault));
-        try std.testing.expectError(error.HostNotActivated, run.shard.apply(atGroup(12, .{ .identity = 93, .payload = .{ .timer = fixture.timer(1) } })));
+        try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(12, .{ .identity = 93, .payload = .{ .timer = fixture.timer(1) } }))) == null);
+        try std.testing.expectEqual(shard_event.RejectReason.host_not_activated, run.shard.last_reject_reason);
         try run.decision_journal.seal();
         _ = try assertReplayEquivalent(run);
     }
@@ -684,7 +787,8 @@ test "control commands authorize pause cancel and replay lifecycle deterministic
     } } }));
     try std.testing.expectEqual(operational.OperationalMode.draining, run.shard.operational_state.mode);
     try std.testing.expectEqual(@as(u128, 0), run.shard.host_activation_identity);
-    try std.testing.expectError(error.HostNotActivated, applyLive(&run.shard, &run.decision_journal, atGroup(13, .{ .identity = 1, .payload = .{ .timer = fixture.timer(1) } })));
+    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(13, .{ .identity = 1, .payload = .{ .timer = fixture.timer(1) } }))) == null);
+    try std.testing.expectEqual(shard_event.RejectReason.host_not_activated, run.shard.last_reject_reason);
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(14, .{ .identity = 3, .payload = .{ .lifecycle_progress = .{
         .operation_identity = 3,
         .target_identity = 1,
@@ -786,7 +890,7 @@ test "de risk locks target and flatten requires warning" {
     group.members[0].side = .buy;
     group.first_intent_sequence = 101;
     group.members[0].intent_sequence = 101;
-    try std.testing.expectError(error.DeRiskTargetViolation, run.shard.apply(atGroup(14, .{ .identity = 101, .payload = .{ .oms_intent_group = group } })));
+    try std.testing.expectEqual(shard_event.RejectReason.authorization_closed, (try run.shard.apply(atGroup(14, .{ .identity = 101, .payload = .{ .oms_intent_group = group } }))).facts[0].reject_reason);
 }
 
 fn placeIntentGroup(
@@ -882,10 +986,12 @@ test "keep positions stops through shard seam preserving economics" {
 
     var buy_group: oms_module.IntentGroup = .{ .first_intent_sequence = 110, .count = 1 };
     buy_group.members[0] = .{ .intent_sequence = 110, .operation = .place, .instrument = swap_instrument, .side = .buy, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, order_limit_price) };
-    try std.testing.expectError(error.TradingNotAuthorized, run.shard.apply(atGroup(18, .{ .identity = 110, .payload = .{ .oms_intent_group = buy_group } })));
+    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(18, .{ .identity = 110, .payload = .{ .oms_intent_group = buy_group } }))) == null);
+    try std.testing.expectEqual(shard_event.RejectReason.authorization_closed, run.shard.last_reject_reason);
     var reduce_group: oms_module.IntentGroup = .{ .first_intent_sequence = 111, .count = 1 };
     reduce_group.members[0] = .{ .intent_sequence = 111, .operation = .place, .instrument = swap_instrument, .side = .sell, .portfolio_reduce_only = true, .quantity = 40, .limit_price = fixtureOmsPrice(swap_instrument, order_limit_price) };
-    try std.testing.expectError(error.TradingNotAuthorized, run.shard.apply(atGroup(19, .{ .identity = 111, .payload = .{ .oms_intent_group = reduce_group } })));
+    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(19, .{ .identity = 111, .payload = .{ .oms_intent_group = reduce_group } }))) == null);
+    try std.testing.expectEqual(shard_event.RejectReason.authorization_closed, run.shard.last_reject_reason);
     try std.testing.expectError(error.TradingSafetyGateClosed, run.shard.apply(lifecycleCommand(41, 4, .enable_trading)));
 
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(20, .{ .identity = 120, .payload = .{ .safety_gate_change = .{
@@ -982,7 +1088,8 @@ test "full lifecycle trajectories authorize only prescribed risk cancel and redu
     try expectKeepPositionsStopped(&run, preserved);
     var stop_buy_group: oms_module.IntentGroup = .{ .first_intent_sequence = 103, .count = 1 };
     stop_buy_group.members[0] = .{ .intent_sequence = 103, .operation = .place, .instrument = swap_instrument, .side = .buy, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, order_limit_price) };
-    try std.testing.expectError(error.TradingNotAuthorized, run.shard.apply(atGroup(23, .{ .identity = 108, .payload = .{ .oms_intent_group = stop_buy_group } })));
+    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(23, .{ .identity = 108, .payload = .{ .oms_intent_group = stop_buy_group } }))) == null);
+    try std.testing.expectEqual(shard_event.RejectReason.authorization_closed, run.shard.last_reject_reason);
     const duplicate_stop = try run.shard.apply(lifecycleCommand(6, 7, .stop_keep_positions));
     try std.testing.expectEqual(@as(usize, 0), duplicate_stop.facts.len);
     try std.testing.expectEqual(@as(usize, 0), run.shard.oms.emitted().len);
@@ -1005,7 +1112,8 @@ test "full lifecycle trajectories authorize only prescribed risk cancel and redu
     try std.testing.expectEqual(operational.OperationalMode.draining, run.shard.operational_state.mode);
     var increase_group: oms_module.IntentGroup = .{ .first_intent_sequence = 104, .count = 1 };
     increase_group.members[0] = .{ .intent_sequence = 104, .operation = .place, .instrument = swap_instrument, .side = .buy, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, order_limit_price) };
-    try std.testing.expectError(error.DeRiskTargetViolation, run.shard.apply(atGroup(25, .{ .identity = 110, .payload = .{ .oms_intent_group = increase_group } })));
+    try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(25, .{ .identity = 110, .payload = .{ .oms_intent_group = increase_group } }))) == null);
+    try std.testing.expectEqual(shard_event.RejectReason.authorization_closed, run.shard.last_reject_reason);
     const derisk_sell = try placeIntentGroup(&run, 26, 105, 105, .sell, 60);
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(27, .{ .identity = 112, .payload = .{ .economic_fill = .{
         .fill_id = 112,
@@ -1999,7 +2107,7 @@ test "layered risk retains unknown reservations until authoritative terminal evi
         .exchange_account_limit_micros = 1_000,
         .global_limit_micros = 1_000,
     } } }));
-    try std.testing.expectError(error.StrategyLimitExceeded, limited.shard.apply(atGroup(12, .{ .identity = 40, .payload = .{ .oms_intent_group = group } })));
+    try std.testing.expectEqual(shard_event.RejectReason.strategy_limit_exceeded, (try limited.shard.apply(atGroup(12, .{ .identity = 40, .payload = .{ .oms_intent_group = group } }))).facts[0].reject_reason);
     try std.testing.expectEqual(@as(u8, 0), limited.shard.oms.order_count);
 }
 
@@ -2162,7 +2270,7 @@ test "forced position divergence blocks new qualification" {
     } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 75, .count = 1 };
     group.members[0] = .{ .intent_sequence = 75, .operation = .place, .instrument = swap_instrument, .side = .sell, .quantity = 8, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
-    try std.testing.expectError(error.TradingNotAuthorized, run.shard.apply(atGroup(12, .{ .identity = 75, .payload = .{ .oms_intent_group = group } })));
+    try std.testing.expectEqual(shard_event.RejectReason.authorization_closed, (try run.shard.apply(atGroup(12, .{ .identity = 75, .payload = .{ .oms_intent_group = group } }))).facts[0].reject_reason);
     try std.testing.expectEqual(@as(i64, 10), run.shard.economicSummary().portfolio.swap.quantity);
     try std.testing.expectEqual(@as(i64, -5), run.shard.economicSummary().exchange.swap.quantity);
 }
@@ -2172,7 +2280,7 @@ test "SPOT asset risk is isolated from SWAP positions" {
     try establishSwapPosition(&run.shard, 700, 10);
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 79, .count = 1 };
     group.members[0] = .{ .intent_sequence = 79, .operation = .place, .instrument = spot_instrument, .side = .sell, .quantity = 1, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
-    try std.testing.expectError(error.InsufficientSpotAsset, run.shard.apply(atGroup(12, .{ .identity = 79, .payload = .{ .oms_intent_group = group } })));
+    try std.testing.expectEqual(shard_event.RejectReason.insufficient_spot_asset, (try run.shard.apply(atGroup(12, .{ .identity = 79, .payload = .{ .oms_intent_group = group } }))).facts[0].reject_reason);
 }
 
 test "economic fills derive ownership from OMS and close Portfolio Exchange ledgers" {

@@ -601,13 +601,13 @@ pub const TradingShard = struct {
         if (!oms_module.exactOrderSpec(intent.order_type, intent.time_in_force, intent.market_protection_price != null)) return error.UnsupportedOrderSpec;
         if (intent.operation == .amend and intent.native_amend and
             !(if (entry.capability) |capability| capability.supports_native_amend else false))
-            return error.UnsupportedOrderSpec;
+            return error.CapabilityUnsupported;
         if (intent.order_type == .post_only or intent.venue_reduce_only or intent.market_protection_price != null) {
-            const capability = entry.capability orelse return error.UnsupportedOrderSpec;
+            const capability = entry.capability orelse return error.CapabilityUnsupported;
             if ((intent.order_type == .post_only and !capability.supports_post_only) or
                 (intent.venue_reduce_only and !capability.supports_venue_reduce_only) or
                 (intent.market_protection_price != null and !capability.supports_market_protection))
-                return error.UnsupportedOrderSpec;
+                return error.CapabilityUnsupported;
         }
     }
 
@@ -1012,9 +1012,41 @@ pub const TradingShard = struct {
         }
     }
 
+    fn rejectIntent(self: *TradingShard, kind: EventKind, sequence: u64, reason: RejectReason) !void {
+        self.last_reject_reason = reason;
+        try self.trace.appendRejection(kind, sequence, reason);
+    }
+
+    fn rejectSubmittedIntent(self: *TradingShard, group: oms_module.IntentGroup, kind: EventKind, reason: RejectReason) !void {
+        self.oms.rememberRejectedGroup(group) catch |err| switch (err) {
+            error.IdentitySetFull => {
+                try self.rejectIntent(.strategy_intent_rejected, group.first_intent_sequence, .identity_capacity_exhausted);
+                return;
+            },
+            else => return err,
+        };
+        try self.rejectIntent(kind, group.first_intent_sequence, reason);
+    }
+
+    fn hostIntentIdentityToken(intent: host_gateway.OrderIntent) canonical.ClientOrderId {
+        var hash = Sha256.init(.{});
+        var u64_bytes: [8]u8 = undefined;
+        var u128_bytes: [16]u8 = undefined;
+        std.mem.writeInt(u64, &u64_bytes, intent.strategy_cursor, .little);
+        hash.update(&u64_bytes);
+        std.mem.writeInt(u64, &u64_bytes, intent.config_version, .little);
+        hash.update(&u64_bytes);
+        for ([_]u128{ intent.activation_identity, intent.portfolio_identity, intent.exchange_account_identity }) |identity| {
+            std.mem.writeInt(u128, &u128_bytes, identity, .little);
+            hash.update(&u128_bytes);
+        }
+        var digest: [Sha256.digest_length]u8 = undefined;
+        hash.final(&digest);
+        return canonical.ClientOrderId.init(digest[0..16]) catch unreachable;
+    }
+
     fn submitOrderIntent(self: *TradingShard, intent: host_gateway.OrderIntent, now_monotonic_ns: u64, cursor_floor: ?u64) !?OrderCommand {
         if (!self.genesisReady()) return error.GenesisIncomplete;
-        const instrument_config = self.instrumentEntry(intent.instrument_identity) orelse return error.UnknownOmsInstrument;
         var group: oms_module.IntentGroup = .{ .first_intent_sequence = intent.intent_sequence, .count = 1 };
         group.members[0] = .{
             .intent_sequence = intent.intent_sequence,
@@ -1035,24 +1067,33 @@ pub const TradingShard = struct {
                 .immediate_or_cancel => .immediate_or_cancel,
             },
         };
-        const original_group = group;
+        var original_group = group;
+        original_group.members[0].client_order_id = hostIntentIdentityToken(intent);
         switch (try self.oms.groupIdentityStatus(original_group)) {
             .duplicate => return null,
             .conflict => {
-                try self.trace.append(.oms_intent_conflict, intent.intent_sequence);
+                try self.rejectIntent(.oms_intent_conflict, intent.intent_sequence, .intent_identity_conflict);
                 return null;
             },
             .fresh => {},
         }
-        group.members[0].limit_price.rules_version = instrument_config.rules.version;
-        if (cursor_floor) |floor| if (intent.strategy_cursor <= floor) return error.InvalidStrategyCursor;
-        if (self.host_activation_identity != intent.activation_identity or
+        if (cursor_floor) |floor| if (intent.strategy_cursor <= floor) {
+            try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, .invalid_cursor);
+            return null;
+        };
+        if (!self.strategy_active or self.host_activation_identity == 0 or
             intent.strategy_cursor <= self.host_activation_barrier or
             intent.strategy_cursor <= self.host_activation_fact_sequence)
-            return error.HostNotActivated;
+        {
+            try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, .host_not_activated);
+            return null;
+        }
+        if (self.host_activation_identity != intent.activation_identity) {
+            try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, .identity_mismatch);
+            return null;
+        }
         if (!self.operational_state.effectiveTradingAuthority()) {
-            self.last_reject_reason = .authorization_closed;
-            try self.trace.append(.strategy_intent_rejected, intent.intent_sequence);
+            try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, .authorization_closed);
             return null;
         }
         if (intent.strategy_identity != self.strategy_identity or
@@ -1061,22 +1102,28 @@ pub const TradingShard = struct {
             intent.portfolio_identity != self.portfolio_identity or
             intent.exchange_account_identity != self.exchange_account_identity or
             self.instrumentEntry(intent.instrument_identity) == null)
-            return error.IntentAuthorityMismatch;
+        {
+            try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, .identity_mismatch);
+            return null;
+        }
+        const instrument_config = self.instrumentEntry(intent.instrument_identity).?;
+        group.members[0].limit_price.rules_version = instrument_config.rules.version;
         if (intent.order_type != .limit or
             (intent.time_in_force != .good_til_canceled and intent.time_in_force != .immediate_or_cancel) or
             intent.quantity <= 0 or intent.limit_price_micros <= 0)
         {
-            self.last_reject_reason = .unsupported_order_spec;
-            try self.trace.append(.strategy_intent_rejected, intent.intent_sequence);
+            try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, .unsupported_order_spec);
             return null;
         }
         for (self.oms.orders[0..self.oms.order_count]) |order| if (order.instrument == intent.instrument_identity) switch (order.state) {
-            .pending_submit, .unknown, .live, .partially_filled, .pending_amend, .pending_cancel => return error.IntentArrivedWithOpenOrder,
+            .pending_submit, .unknown, .live, .partially_filled, .pending_amend, .pending_cancel => {
+                try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, .open_order);
+                return null;
+            },
             else => {},
         };
         group.members[0].limit_price.ticks = priceTicks(intent.limit_price_micros, instrument_config.margin.price_tick_micros) catch {
-            self.last_reject_reason = .unsupported_order_spec;
-            try self.trace.append(.strategy_intent_rejected, intent.intent_sequence);
+            try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, .unsupported_order_spec);
             return null;
         };
         try self.trace.append(.order_intent, intent.intent_sequence);
@@ -1088,8 +1135,7 @@ pub const TradingShard = struct {
         );
         self.last_risk_tier = try riskTier(requested_notional);
         if (self.market_health != .healthy) {
-            self.last_reject_reason = .market_data_gap;
-            try self.trace.append(.risk_rejected_market_data, intent.intent_sequence);
+            try self.rejectSubmittedIntent(original_group, .risk_rejected_market_data, .market_data_gap);
             return null;
         }
         const qualified = self.qualifyOmsGroup(group) catch |err| switch (err) {
@@ -1103,8 +1149,13 @@ pub const TradingShard = struct {
             error.InsufficientSpotAsset,
             error.PortfolioReduceOnlyViolation,
             error.UnsupportedOrderSpec,
+            error.CapabilityUnsupported,
+            error.MarginSafetyGateClosed,
+            error.TradingNotAuthorized,
+            error.DeRiskTargetViolation,
+            error.StrategyCutoverFenced,
             => {
-                self.last_reject_reason = switch (err) {
+                const reason: RejectReason = switch (err) {
                     error.StrategyLimitExceeded => .strategy_limit_exceeded,
                     error.VirtualPortfolioLimitExceeded => .portfolio_limit_exceeded,
                     error.DecisionDomainLimitExceeded => .decision_domain_limit_exceeded,
@@ -1115,9 +1166,14 @@ pub const TradingShard = struct {
                     error.InsufficientSpotAsset => .insufficient_spot_asset,
                     error.PortfolioReduceOnlyViolation => .portfolio_reduce_only_violation,
                     error.UnsupportedOrderSpec => .unsupported_order_spec,
+                    error.CapabilityUnsupported => .capability_unsupported,
+                    error.MarginSafetyGateClosed => .margin_safety_gate_closed,
+                    error.TradingNotAuthorized, error.DeRiskTargetViolation, error.StrategyCutoverFenced => .authorization_closed,
                     else => unreachable,
                 };
-                try self.trace.append(if (err == error.UnsupportedOrderSpec) .strategy_intent_rejected else .risk_rejected_lease, intent.intent_sequence);
+                try self.rejectSubmittedIntent(original_group, if (err == error.UnsupportedOrderSpec or err == error.CapabilityUnsupported or
+                    err == error.TradingNotAuthorized or err == error.DeRiskTargetViolation or err == error.StrategyCutoverFenced or
+                    err == error.MarginSafetyGateClosed) .strategy_intent_rejected else .risk_rejected_lease, reason);
                 return null;
             },
             else => return err,
@@ -2053,7 +2109,6 @@ pub const TradingShard = struct {
                 }, if (input.time_presence.monotonic) input.monotonic_time else 0, null);
             },
             .external_order_intent => |intent| {
-                if (!self.strategy_active) return error.InvalidStrategyCursor;
                 const previous_cursor = self.strategy_cursor;
                 const trace_before = self.trace.len;
                 const outcome = try self.submitOrderIntent(intent, if (input.time_presence.monotonic) input.monotonic_time else 0, previous_cursor);
@@ -2071,7 +2126,7 @@ pub const TradingShard = struct {
                 switch (try self.oms.groupIdentityStatus(group)) {
                     .duplicate => return null,
                     .conflict => {
-                        try self.trace.append(.oms_intent_conflict, group.first_intent_sequence);
+                        try self.rejectIntent(.oms_intent_conflict, group.first_intent_sequence, .intent_identity_conflict);
                         return null;
                     },
                     .fresh => {},
@@ -2079,13 +2134,41 @@ pub const TradingShard = struct {
                 var candidate = self.*;
                 const qualified = candidate.qualifyOmsGroup(group) catch |err| switch (err) {
                     error.MarginSafetyGateClosed => {
-                        try candidate.trace.append(.strategy_intent_rejected, group.first_intent_sequence);
+                        try candidate.rejectSubmittedIntent(group, .strategy_intent_rejected, .margin_safety_gate_closed);
                         self.* = candidate;
                         return null;
                     },
-                    error.UnsupportedOrderSpec => {
-                        self.last_reject_reason = .unsupported_order_spec;
-                        try self.trace.append(.strategy_intent_rejected, group.first_intent_sequence);
+                    error.UnsupportedOrderSpec, error.CapabilityUnsupported => {
+                        try self.rejectSubmittedIntent(group, .strategy_intent_rejected, if (err == error.CapabilityUnsupported) .capability_unsupported else .unsupported_order_spec);
+                        return null;
+                    },
+                    error.StrategyLimitExceeded,
+                    error.VirtualPortfolioLimitExceeded,
+                    error.DecisionDomainLimitExceeded,
+                    error.ExchangeAccountLimitExceeded,
+                    error.GlobalLimitExceeded,
+                    error.PortfolioOpeningGateClosed,
+                    error.ExchangeOpeningGateClosed,
+                    error.InsufficientSpotAsset,
+                    error.PortfolioReduceOnlyViolation,
+                    error.TradingNotAuthorized,
+                    error.DeRiskTargetViolation,
+                    error.StrategyCutoverFenced,
+                    => {
+                        const reason: RejectReason = switch (err) {
+                            error.StrategyLimitExceeded => .strategy_limit_exceeded,
+                            error.VirtualPortfolioLimitExceeded => .portfolio_limit_exceeded,
+                            error.DecisionDomainLimitExceeded => .decision_domain_limit_exceeded,
+                            error.ExchangeAccountLimitExceeded => .exchange_account_limit_exceeded,
+                            error.GlobalLimitExceeded => .global_limit_exceeded,
+                            error.PortfolioOpeningGateClosed => .portfolio_opening_gate_closed,
+                            error.ExchangeOpeningGateClosed => .exchange_opening_gate_closed,
+                            error.InsufficientSpotAsset => .insufficient_spot_asset,
+                            error.PortfolioReduceOnlyViolation => .portfolio_reduce_only_violation,
+                            error.TradingNotAuthorized, error.DeRiskTargetViolation, error.StrategyCutoverFenced => .authorization_closed,
+                            else => unreachable,
+                        };
+                        try self.rejectSubmittedIntent(group, if (reason == .authorization_closed) .strategy_intent_rejected else .risk_rejected_lease, reason);
                         return null;
                     },
                     else => return err,
@@ -2439,19 +2522,20 @@ fn appendStableFactGroup(
     const encoded_input = try encodeStableInput(&storage, input);
     const times = stableTimes(input);
     for (facts, 0..) |event, index| {
-        var identity_bytes: [@sizeOf(u64)]u8 = undefined;
-        std.mem.writeInt(u64, &identity_bytes, event.identity, .little);
+        var fact_bytes: [@sizeOf(u64) + 1]u8 = undefined;
+        std.mem.writeInt(u64, fact_bytes[0..@sizeOf(u64)], event.identity, .little);
+        fact_bytes[@sizeOf(u64)] = @intFromEnum(event.reject_reason);
         try decision_journal.append(.{
             .type_id = @intFromEnum(event.kind),
             .schema_version = schema_version,
-            .flags = if (index == 0) journal.input_flag else 0,
+            .flags = if (index == 0) journal.input_flag | (@as(u32, @intFromEnum(event.reject_reason)) << 8) else 0,
             .sequence = event.sequence,
             .source_time = times.source,
             .receive_time = times.receive,
             .monotonic_time = times.monotonic,
             .wall_time = times.wall,
             .time_presence = times.presence,
-            .payload = if (index == 0) encoded_input else &identity_bytes,
+            .payload = if (index == 0) encoded_input else &fact_bytes,
         });
     }
 }
@@ -2842,6 +2926,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, u64, event.sequence);
         digestInt(&hasher, u16, @intFromEnum(event.kind));
         digestInt(&hasher, u64, event.identity);
+        digestInt(&hasher, u8, @intFromEnum(event.reject_reason));
     }
 
     digestBool(&hasher, shard.expected_source_sequence != null);
@@ -3020,10 +3105,13 @@ fn validateReplayRecord(
     is_input: bool,
 ) !void {
     if (record.schema_version != schema_version) return error.UnsupportedSchema;
+    if (!is_input and (record.flags != 0 or record.payload.len != @sizeOf(u64) + 1))
+        return error.InvalidDerivedFactRecord;
     const kind = std.enums.fromInt(EventKind, record.type_id) orelse
         return error.UnknownEventType;
     if (record.sequence != expected.sequence or kind != expected.kind or
-        (!is_input and try eventIdentity(record.payload) != expected.identity))
+        (!is_input and (try eventIdentity(record.payload) != expected.identity or
+            record.payload[@sizeOf(u64)] != @intFromEnum(expected.reject_reason))))
         return error.ReplayFactMismatch;
     const times = stableTimes(input);
     if (record.source_time != times.source or
@@ -3033,9 +3121,7 @@ fn validateReplayRecord(
         @as(u8, @bitCast(record.time_presence)) != @as(u8, @bitCast(times.presence)))
         return error.ReplayTimeMismatch;
     if (is_input) {
-        if (record.flags != journal.input_flag) return error.InputFlagMissing;
-    } else if (record.flags != 0 or record.payload.len != @sizeOf(u64)) {
-        return error.InvalidDerivedFactRecord;
+        if (record.flags != journal.input_flag | (@as(u32, @intFromEnum(expected.reject_reason)) << 8)) return error.ReplayFactMismatch;
     }
 }
 
@@ -3078,7 +3164,7 @@ fn replayReader(reader: *journal.Reader, initial: TradingShard) !ReplayResult {
             .end => |status| return .{ .shard = shard, .status = status },
             .record => |record| record,
         };
-        if (first_record.flags != journal.input_flag) return error.OrphanDerivedFact;
+        if (first_record.flags & 0xff != journal.input_flag) return error.OrphanDerivedFact;
         var candidate = shard;
         const input = try decodeStableInput(first_record);
         const before = candidate.trace.len;
