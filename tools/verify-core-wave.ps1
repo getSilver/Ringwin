@@ -5,7 +5,7 @@ param(
     [int]$Parallel = 4
 )
 
-# Single fail-fast acceptance entry for the trading core wave (map 09).
+# Single fail-fast acceptance entry for the trading core wave (map 12).
 # Composes: offline success/fault/restart trajectories, SimulatedVenue,
 # four-shard coordination, Python StrategyHost seam, and - only when
 # explicitly enabled via -DemoLive - existing OKX Demo facts.
@@ -34,9 +34,10 @@ function Invoke-Captured {
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
-    $captured | ForEach-Object { $_ | Out-Host }
+    $text = @($captured | ForEach-Object { "$_" })
+    $text | ForEach-Object { $_ | Out-Host }
     if ($LASTEXITCODE -ne 0) { throw "Command failed: zig $($ZigArguments -join ' ')" }
-    return $captured
+    return $text
 }
 
 if (-not $EnvFile) { $EnvFile = Join-Path $PSScriptRoot '..\.env.local' }
@@ -49,13 +50,35 @@ $curlSource = Join-Path $buildRoot 'bootstrap\curl-source'
 $sourceRevision = (& git -C $workspace rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or -not $sourceRevision) { throw 'Source revision is unavailable' }
 
+function Get-SourceSnapshot {
+    # Hash tracked and untracked code, tests, build inputs, and this verifier.
+    # Docs and tracker reports are excluded so recording the digest cannot
+    # change the source identity it records.
+    $paths = @(& git -C $workspace ls-files --cached --others --exclude-standard -- src python tools build.zig build.zig.zon)
+    if ($LASTEXITCODE -ne 0 -or $paths.Count -eq 0) { throw 'Source file list is unavailable' }
+    $manifest = foreach ($path in ($paths | Sort-Object -CaseSensitive -Unique)) {
+        $file = Join-Path $workspace $path
+        $digest = if (Test-Path -LiteralPath $file -PathType Leaf) {
+            (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+        } else { 'missing' }
+        "$path`t$digest"
+    }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($manifest -join "`n"))
+    return [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+}
+
+$sourceTreeSha256 = Get-SourceSnapshot
+$sourceDirty = @(& git -C $workspace status --porcelain --untracked-files=all).Count -ne 0
+if ($LASTEXITCODE -ne 0) { throw 'Source worktree status is unavailable' }
+
 function Assert-SourceAbsent {
     param([string]$Path, [string]$Pattern, [string]$Label)
-    $matches = @(& rg -n -- $Pattern (Join-Path $workspace $Path) 2>$null)
-    if ($LASTEXITCODE -eq 0 -and $matches.Count -ne 0) {
-        throw "Forbidden source remains ($Label): $($matches -join '; ')"
+    $sourcePath = Join-Path $workspace $Path
+    if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) { throw "Source file is missing: $Path" }
+    $matches = @(Select-String -LiteralPath $sourcePath -Pattern $Pattern -ErrorAction Stop)
+    if ($matches.Count -ne 0) {
+        throw "Forbidden source remains ($Label): $($matches.Line -join '; ')"
     }
-    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1) { throw "Source scan failed: $Label" }
 }
 
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
@@ -75,17 +98,18 @@ Write-Output '== phase=source_contract'
 if (Test-Path -LiteralPath (Join-Path $workspace 'src\okx_spot_projection.zig')) {
     throw 'Competing OKX economic projection still exists'
 }
-Assert-SourceAbsent 'src\trading_shard.zig' '^\s*(order_state|filled_quantity|order_quantity|open_order_reservation_micros|risk_lease_remaining_micros)\s*:' 'legacy TradingShard authority'
+Assert-SourceAbsent 'src\trading_shard.zig' '^\s*(order_state|filled_quantity|order_quantity|open_order_reservation_micros|risk_lease_remaining_micros|layered_risk_reserved_micros|last_canonical_report|last_canonical_fill)\s*:' 'legacy TradingShard authority'
+Assert-SourceAbsent 'src\trading_shard.zig' 'intent_sequence\s*=\s*1\b|RWN-00000001-01-000000000001' 'fixed timer identity'
 Assert-SourceAbsent 'src\execution_gateway.zig' '^\s*pub fn send\s*\(' 'raw public Gateway send'
 Assert-SourceAbsent 'src\okx_demo_live_acceptance.zig' 'adapter\.trySend.*order_(command|batch)' 'Demo order send bypass'
 Assert-SourceAbsent 'python\strategy_host.py' 'ctypes|input-mapping|output-mapping|qsh_' 'Python mapping or cursor capability'
 Assert-SourceAbsent 'src\strategy_host_lifecycle.zig' 'OwnedMapping|input_mapping|output_mapping' 'Host mapping capability transfer'
 
 Write-Output '== phase=core_tests mode=Debug'
-$debugTests = Invoke-Captured @('test', (Join-Path $workspace 'src\main.zig'), '-ODebug')
+$debugTests = Invoke-Captured @('test', (Join-Path $workspace 'src\main.zig'), '-ODebug', '--stack', '67108864')
 
 Write-Output '== phase=core_tests mode=ReleaseSafe'
-$releaseTests = Invoke-Captured @('test', (Join-Path $workspace 'src\main.zig'), '-OReleaseSafe')
+$releaseTests = Invoke-Captured @('test', (Join-Path $workspace 'src\main.zig'), '-OReleaseSafe', '--stack', '67108864')
 
 Write-Output '== phase=single_shard_wave'
 # Deterministic fixture: happy path plus market-gap / risk-rejection /
@@ -161,7 +185,9 @@ $stableSchemaMatch = [regex]::Match($fourText, 'journal_schema=(\d+), state_sche
 if (-not $stableSchemaMatch.Success) { throw 'Stable journal/state schema evidence is missing' }
 $JournalSchema = [int]$stableSchemaMatch.Groups[1].Value
 $StateSchema = [int]$stableSchemaMatch.Groups[2].Value
-if ($JournalSchema -ne 9 -or $StateSchema -ne 9) { throw "Unexpected production journal/state schema: $JournalSchema/$StateSchema" }
+if ($AcceptanceSchema -ne 13 -or $JournalSchema -ne 22 -or $StateSchema -ne 25) {
+    throw "Unexpected acceptance/journal/state schema: $AcceptanceSchema/$JournalSchema/$StateSchema"
+}
 $debugMatch = [regex]::Match($debugText, 'All (\d+) tests passed')
 $releaseMatch = [regex]::Match($releaseText, 'All (\d+) tests passed')
 $barrierMatch = [regex]::Match($fourText, 'coordinator_barrier=(\d+), coordinator_digest=([0-9a-f]+)')
@@ -205,12 +231,80 @@ if (-not $debugMatch.Success -or -not $releaseMatch.Success -or -not $barrierMat
 if ($debugMatch.Groups[1].Value -ne $releaseMatch.Groups[1].Value) {
     throw 'Debug and ReleaseSafe did not run the same test matrix'
 }
+$debugNames = @([regex]::Matches($debugText, '(?m)^\d+/\d+ (.+?)\.\.\.') | ForEach-Object { $_.Groups[1].Value })
+$releaseNames = @([regex]::Matches($releaseText, '(?m)^\d+/\d+ (.+?)\.\.\.') | ForEach-Object { $_.Groups[1].Value })
+if ($debugNames.Count -ne [int]$debugMatch.Groups[1].Value -or
+    $releaseNames.Count -ne [int]$releaseMatch.Groups[1].Value -or
+    ($debugNames -join "`n") -cne ($releaseNames -join "`n")) {
+    throw 'Debug and ReleaseSafe test names differ'
+}
 $pythonPassed = [regex]::IsMatch($pythonText, 'strategy_host_product_acceptance=passed')
 if (-not $pythonPassed) { throw 'Python machine-readable acceptance evidence is missing' }
+$debugSafety = $debugText
+if ($singleText -notmatch 'unknown-reconciliation-v1:.*replay=equivalent') { throw 'Canonical reconciliation live/replay evidence is missing' }
+if ($singleText -notmatch 'duplicate-report-v1:.*replay=equivalent') { throw 'Partial fill live/replay evidence is missing' }
+if ($singleText -notmatch 'happy_path:') { throw 'Happy-path evidence is missing' }
+if ($debugSafety -notmatch 'core_safety_invariants:.*ccc=pass') { throw 'CCC live/replay evidence is missing' }
+if ($debugSafety -notmatch 'core_safety_invariants:.*intent_conflict=pass') { throw 'Intent conflict live/replay evidence is missing' }
+if ($debugSafety -notmatch 'core_safety_invariants:.*suspense=pass') { throw 'Suspense live/replay evidence is missing' }
+if ($debugSafety -notmatch 'core_safety_invariants:.*tombstone_archive=pass') { throw 'Tombstone archive restore evidence is missing' }
+if ($debugSafety -notmatch 'core_safety_invariants:.*host_activated=pass') { throw 'HostActivated live evidence is missing' }
+if ($debugSafety -notmatch 'core_safety_invariants:.*dispatch_persist=pass') { throw 'Durable dispatch persist evidence is missing' }
+if ($debugSafety -notmatch 'core_safety_invariants:.*replay_no_send=pass') { throw 'Replay no-send evidence is missing' }
+if ($debugSafety -notmatch 'core_safety_invariants:.*reduce_only_fencing=pass') { throw 'Reduce-only and fencing send evidence is missing' }
+if ($releaseText -notmatch 'core_safety_invariants:.*tombstone_archive=pass') { throw 'ReleaseSafe tombstone archive evidence is missing' }
+if ($releaseText -notmatch 'core_safety_invariants:.*dispatch_persist=pass') { throw 'ReleaseSafe durable dispatch evidence is missing' }
+if ($releaseText -notmatch 'core_safety_invariants:.*replay_no_send=pass.*reduce_only_fencing=pass') { throw 'ReleaseSafe Gateway safety evidence is missing' }
+
+$reviewChecks = [ordered]@{
+    H1 = 'bounded rings and frozen bridge fail closed'
+    H2 = 'extreme risk arithmetic fails closed'
+    M1 = 'host fault revokes the old activation before a replacement can trade'
+    M3 = 'fencing tokens are strictly increasing and stale sends fail'
+    M5 = 'Gateway reads current authority facts instead of caller proof fields'
+    B01 = 'ConfirmedAbsent cannot become a fill and releases reservation'
+    B02 = 'canonical terminal reconciliation confirms a CCC replacement'
+    B03 = 'DispatchProof rechecks authority reservation lease fencing and true reduce-only'
+    B04 = 'pending amend keeps old and new remaining exposure through fills and rejection'
+    B05 = 'layered risk retains unknown reservations until authoritative terminal evidence'
+    B06 = 'margin safety gate takes the strictest amount bps and liquidation distance'
+    B07 = 'unowned economics stay in suspense until an immutable allocation'
+    B08 = 'configurable Genesis fails closed until authority is complete'
+    B09 = 'shared canonical adapter facts enter the TradingShard state seam'
+    B10 = 'shared canonical adapter facts enter the TradingShard state seam'
+    B11 = 'risk lease limit rejects a native intent with a replayable reason'
+    B12 = 'partial fill keeps another PendingCancel blocking CCC'
+    B13 = 'native and Python intents cross the same authority and risk seam'
+    B14 = 'OMS group identity is checked before new risk and conflict survives replay'
+    B15 = 'full lifecycle trajectories authorize only prescribed risk cancel and reduce behavior'
+    R07 = 'recovered dispatch needs an order reconciliation newer than its send'
+    R07Schema = 'dispatch namespace survives recovery and changes for a new stream'
+    OldSchema = 'stable CanonicalEvent decoder rejects malformed envelopes without state change'
+    R11 = 'compacted second group member keeps its own intent identity'
+}
+foreach ($check in $reviewChecks.GetEnumerator()) {
+    $marker = [regex]::Escape($check.Value)
+    if (-not [regex]::IsMatch($debugText, $marker) -or -not [regex]::IsMatch($releaseText, $marker)) {
+        throw "Review check $($check.Key) is missing from Debug or ReleaseSafe: $($check.Value)"
+    }
+}
+$rejectionMarkers = @(
+    'core_input_rejection: product_model=IncompatibleProductReservationModel',
+    'core_input_rejection: l2=IncompleteL2Book fill_fee=MissingFillFee'
+)
+foreach ($marker in $rejectionMarkers) {
+    if (-not $debugText.Contains($marker) -or -not $releaseText.Contains($marker)) {
+        throw "Core rejection evidence is missing from Debug or ReleaseSafe: $marker"
+    }
+}
+if ((Get-SourceSnapshot) -ne $sourceTreeSha256) { throw 'Source changed during acceptance' }
 $evidence = [ordered]@{
     acceptance = 'passed'
-    report_schema = 3
+    report_schema = 4
     source_revision = $sourceRevision
+    source_tree_sha256 = $sourceTreeSha256
+    source_scope = @('src', 'python', 'tools', 'build.zig', 'build.zig.zon')
+    source_dirty = $sourceDirty
     zig = $zigVersion
     schema = $AcceptanceSchema
     journal_schema = $JournalSchema
@@ -235,6 +329,8 @@ $evidence = [ordered]@{
         'tombstone_capacity_recovery_only'
         'legacy_authority_absent'
     )
+    review_checks = @($reviewChecks.Keys)
+    rejection_facts = $rejectionMarkers
     owned_command_count = [int]$ownershipMatch.Groups[1].Value
     replay_send_capability = $ownershipMatch.Groups[2].Value
     single_shard_output = @($singleText | Where-Object { $_ -match '(happy_path:|market-gap-v1:|risk-rejection-v1:|unknown-reconciliation-v1:|duplicate-report-v1:)' })

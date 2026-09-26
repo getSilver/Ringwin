@@ -2,6 +2,8 @@
 
 Status: active
 
+2026-09-27：`main-safety-remediation` 12 已为源码树 SHA-256 `6bb27f1caff605f7db98e0b7ad3d0358b37a568d7e3fe1e31f7513924f72b2e5` 完成离线验收；11 的 ReleaseArtifact 与该实际被测源码身份精确匹配仍待证明。02–10 的目标 Linux、Venue、独立 NodeFence 和资金资格状态不因离线验收而改变。
+
 ## Destination
 
 把当前已经通过离线完整性验收的 RingWin 收口为首个可声明 `ProductionQualified` 的 Linux

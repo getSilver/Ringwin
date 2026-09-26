@@ -1,6 +1,6 @@
 # 收口当前 main 安全与权威状态缺口
 
-Status: active
+Status: closed
 
 ## Destination
 
@@ -51,14 +51,15 @@ OrderIntent、Order、RiskReservation、账户危险事实、StrategyHost 授权
 9. [把 legacy 订单与策略调用方迁入权威 OMS](issues/09-migrate-legacy-order-and-strategy-paths.md)
 10. [删除竞争订单状态与废弃经济投影](issues/10-contract-legacy-state-and-projection.md)
 11. [实现可重放的订单容量与终态墓碑](issues/11-manage-order-capacity-with-tombstones.md)
-12. [重建 main 安全与权威状态验收基线](issues/12-rebuild-safety-acceptance.md) — blocked by 01–11
+12. [重建 main 安全与权威状态验收基线](issues/12-rebuild-safety-acceptance.md) — resolved offline
 
 ## Frontier
 
-- 下一张可认领：[12 重建 main 安全与权威状态验收基线](issues/12-rebuild-safety-acceptance.md)。01–11 已逐票离线收口，12 最后重建验收。Linux/Venue/生产资金资格仍为 not_run。
+- 01–12 的离线修复与验收已完成；生产接线、真实 NodeFence、Venue 和资金资格继续由 [production-readiness](../production-readiness/map.md) 跟踪，不能从本图的 `closed` 推定为通过。
 
 ## Decisions so far
 
+- 2026-09-27：12 重新封存当前脏工作树的源码树 SHA-256 `6bb27f1caff605f7db98e0b7ad3d0358b37a568d7e3fe1e31f7513924f72b2e5`，基准 HEAD `b4aead4`；[机器报告](evidence-2026-09-27.json) schema 4，acceptance/journal/state schema 13/22/25。Debug/ReleaseSafe 各 297/297，四 shard/单 shard digest、Gateway 5 次 adapter submission 与 replay 零发送、Python Host、Linux 交叉编译通过。工作树仍脏且含未跟踪源码；本图关闭只表示该源码身份的离线安全基线通过，不是 clean revision 或生产资格。目标 Linux/Venue/真实资金状态不变。
 - 2026-09-27：07 按 R07-A–F 收口。Unknown 必须取得发送后新鲜订单级对账；重复 Canonical 输入保留 Owner；Demo 对债务/保证金/额外敞口失败关闭；旧 owner 经外部隔离读回、持久撤销和内核锁串行接管；dispatch V3 拒绝旧 schema。Debug/ReleaseSafe 各 297/297，Linux WSL fencing 10/10，均属离线证据。12 待重新封存全波，不升级线上资格。
 - 2026-09-26：11 按 R11-A 收口。OMS 热单保存每单自身意图序号，墓碑不再把多成员或 CCC successor 的意图身份误写为组首；归档摘要覆盖该身份与关键来源。压缩后的重复/冲突意图、迟到报告、predecessor 和摘要篡改回归通过；现有容量、Gateway gate、registry 与 snapshot/tail 恢复测试继续通过。Debug（Windows 64 MiB 栈）/ReleaseSafe 各 295/295，acceptance/journal/state/registry schema 12/21/24/18；仅离线证据，完整封存留 12 票。
 - 2026-09-26：10 在 09 完成后按修复计划重新验收，未发现旧订单/风险/经济权威或业务 raw send 回流；保留的模拟生命周期投影只用于当前 Demo 验收摘要，不参与交易准入或发送。核心与 Demo 文件格式检查通过，当前工作树 Debug（Windows 64 MiB 栈）/ReleaseSafe 各 294/294；完整源码身份待 12 票封存，Linux/Venue/生产资金资格保持 `not_run`。

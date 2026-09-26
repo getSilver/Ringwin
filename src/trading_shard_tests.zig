@@ -400,6 +400,13 @@ test "stable CanonicalEvent decoder rejects malformed envelopes without state ch
 }
 
 test "configurable Genesis fails closed until authority is complete" {
+    var mismatched: TradingShard = .{};
+    var cash_as_linear = fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 1 }, .cash)[0];
+    cash_as_linear.core.payload.instrument_rules_activated.product = .isolated_linear_usdt;
+    const before_mismatch = mismatched.canonicalStateDigest();
+    try std.testing.expectError(error.IncompatibleProductReservationModel, mismatched.apply(cash_as_linear));
+    try std.testing.expectEqualSlices(u8, &before_mismatch, &mismatched.canonicalStateDigest());
+    std.debug.print("core_input_rejection: product_model=IncompatibleProductReservationModel\n", .{});
     var incomplete: TradingShard = .{};
     try std.testing.expectError(error.GenesisIncomplete, incomplete.apply(atGroup(1, .{
         .identity = 1,
@@ -1287,6 +1294,16 @@ test "shared canonical adapter facts enter the TradingShard state seam" {
     try std.testing.expectEqualSlices(u8, &accepted_digest, &run.shard.canonicalStateDigest());
     try std.testing.expectError(error.ConflictingReportIdentity, run.shard.apply(Fixture.record(3, .{ .execution_report = conflicting_report })));
     try std.testing.expectEqualSlices(u8, &accepted_digest, &run.shard.canonicalStateDigest());
+    var incomplete_book = Fixture.record(21, .{ .l2_book_snapshot = .{
+        .instrument = instrument,
+        .sequence = 21,
+        .best_bid = price,
+        .best_ask = price,
+    } });
+    incomplete_book.venue.envelope.scope = .instrument;
+    incomplete_book.venue.envelope.instrument = instrument;
+    try std.testing.expectError(error.IncompleteL2Book, run.shard.apply(incomplete_book));
+    try std.testing.expectEqualSlices(u8, &accepted_digest, &run.shard.canonicalStateDigest());
     var unsupported_schema = Fixture.record(20, .{ .reconciliation_started = 20 });
     unsupported_schema.venue.envelope.schema_version = canonical.schema_version + 1;
     try std.testing.expectError(error.UnsupportedSchema, run.shard.apply(unsupported_schema));
@@ -1308,6 +1325,11 @@ test "shared canonical adapter facts enter the TradingShard state seam" {
         .liquidity = .maker,
         .venue_fill_time_utc_ns = 100,
     };
+    var missing_fee = canonical_fill;
+    missing_fee.fee = null;
+    try std.testing.expectError(error.MissingFillFee, run.shard.apply(Fixture.record(22, .{ .fill = missing_fee })));
+    try std.testing.expectEqualSlices(u8, &accepted_digest, &run.shard.canonicalStateDigest());
+    std.debug.print("core_input_rejection: l2=IncompleteL2Book fill_fee=MissingFillFee\n", .{});
     var overfill = run.shard;
     var partial_fill = canonical_fill;
     partial_fill.identity = 4;

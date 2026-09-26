@@ -1,10 +1,22 @@
 # RingWin `main` 代码审查
 
+## 2026-09-27 当前离线基线
+
+[安全修复地图](../.scratch/main-safety-remediation/map.md) 01–12 已按 2026-09-23 复核计划逐票收口。最终[机器报告](../.scratch/main-safety-remediation/evidence-2026-09-27.json)绑定基准 HEAD `b4aead4` 与脏工作树源码树 SHA-256 `6bb27f1caff605f7db98e0b7ad3d0358b37a568d7e3fe1e31f7513924f72b2e5`；报告 schema 4，acceptance/journal/state schema `13/22/25`，Zig `0.17.0-dev.315+5b647b792`，Debug/ReleaseSafe 各 `297/297`。四 shard、单 shard、Gateway 发送/不重发、Python Host 与 Linux 交叉编译的离线证据均通过；Linux 仅 `compile_only`，OKX Demo、Binance/Bybit Testnet 和生产资格仍 `not_run`/`false`。
+
+下文的 2026-09-09 原始发现、2026-09-10/17 旧封存与旧源码计数均为历史记录。M2/M4/M6/M7 的目标接线与资格继续分别由[生产进程链](../.scratch/production-readiness/issues/02-run-linux-production-process-chain.md)、[Web 生命周期](../.scratch/production-readiness/issues/08-operate-and-deploy-signed-release.md)、[NodeFence](../.scratch/production-readiness/issues/10-fail-over-with-lease-and-node-fence.md)、[凭证准入](../.scratch/production-readiness/issues/04-unlock-credential-and-pass-security-admission.md)和[OKX Linux 在线链](../.scratch/production-readiness/issues/05-qualify-okx-linux-online-chain.md)跟踪。目标 ReleaseArtifact 仍须与本次被测源码身份精确匹配，不能凭离线报告升级 ProductionQualified。
+
 范围：本机 `D:\github\Ringwin` 当前 `main`（复核基线 `af9634084e6e869803d6cde3610a768c73b43ced`；`src/` 无未提交修改）
 
 验证：`zig build test --summary all` 通过，214/214；该结果只证明现有回归通过，不覆盖本文指出的全部生产安全不变量。
 
-修复跟踪：[收口当前 main 安全与权威状态缺口](../.scratch/main-safety-remediation/map.md)。
+修复跟踪：[收口当前 main 安全与权威状态缺口](../.scratch/main-safety-remediation/map.md)。该图 01–12 已于 2026-09-27 重新封存；下列 2026-09-10 正文保留历史审查，不代表封存后的源码现状。
+
+## 2026-09-17 离线核心基线封存
+
+`tools/verify-core-wave.ps1` 以同一输入矩阵通过 Debug 与 ReleaseSafe **239/239**。验收合同为 report schema 3、acceptance schema 7、journal schema 14、state schema 15。Gateway adapter submissions=5，replay_send_capability=false，Linux=`compile_only`。OKX Demo / Binance Testnet / Bybit Testnet / ProductionQualified 继续 `not_run`/`false`。
+
+本封存只恢复离线核心可信基线。M2/M4/M6/M7 与 Linux 在线 Venue、真实资金资格仍由 production-readiness tracker 跟踪。
 
 ## 2026-09-10 离线修复结果
 
