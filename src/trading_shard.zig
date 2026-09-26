@@ -2825,6 +2825,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         }
         digestBool(&hasher, order.reservation_active);
         digestBool(&hasher, order.dispatch_submitted);
+        digestInt(&hasher, u64, order.intent_sequence);
         digestInt(&hasher, u64, order.group_first_sequence);
         digestInt(&hasher, u8, @intFromEnum(order.group_policy));
         digestBool(&hasher, order.replacement != null);

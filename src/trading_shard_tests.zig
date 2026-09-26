@@ -2656,11 +2656,13 @@ test "core safety invariants replay CCC intent conflict suspense and archive win
     try std.testing.expectEqual(@as(u8, 1), archive.shard.oms.tombstone_count);
     try std.testing.expect(archive.shard.oms.orderById(1) == null);
     const archived = archive.shard.oms.tombstones[0];
+    try std.testing.expectEqual(@as(u64, 501), archived.intent_sequence);
     try std.testing.expect(!std.mem.eql(u8, &archived.fact_digest, &@as([32]u8, @splat(0))));
     try archive.decision_journal.seal();
     var snapshot_storage: [256 * 1024]u8 = undefined;
     const snapshot = try archive.shard.snapshot(&archive.decision_journal, archive.decision_journal.last_sequence, &snapshot_storage);
     var restored = try TradingShard.restoreSnapshot(snapshot);
+    try std.testing.expectEqual(archived.intent_sequence, restored.shard.oms.tombstones[0].intent_sequence);
     try std.testing.expectEqualSlices(u8, &archive.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
     const before_late = restored.shard.canonicalStateDigest();
     try restored.shard.oms.applyReport(.{ .report_id = 701, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 1 });
