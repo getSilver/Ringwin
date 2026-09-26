@@ -1448,7 +1448,7 @@ test "OKX private facts normalize fee signs into canonical execution fill and ac
     try std.testing.expectEqual(usdt, output.events[1].event.fill.rebate.?.asset);
 
     var balance: private.ExchangeBalanceSnapshot = .{ .scope = .full_rest, .venue_update_time_utc_ns = 1 };
-    balance.balances[0] = .{ .asset = try private.AssetCode.init("USDT"), .cash_balance = try private.Decimal.parse("25"), .available_balance = try private.Decimal.parse("24"), .equity = try private.Decimal.parse("25"), .frozen_balance = try private.Decimal.parse("1"), .liability = try private.Decimal.parse("0"), .isolated_liability = try private.Decimal.parse("0"), .cross_liability = try private.Decimal.parse("0") };
+    balance.balances[0] = .{ .asset = try private.AssetCode.init("USDT"), .cash_balance = try private.Decimal.parse("25"), .available_balance = try private.Decimal.parse("24"), .equity = try private.Decimal.parse("25"), .frozen_balance = try private.Decimal.parse("1"), .liability = try private.Decimal.parse("0.1"), .isolated_liability = try private.Decimal.parse("0.2"), .cross_liability = try private.Decimal.parse("0.3") };
     balance.balance_count = 1;
     var positions: private.ExchangePositionSnapshot = undefined;
     positions.scope = .full_rest;
@@ -1460,6 +1460,12 @@ test "OKX private facts normalize fee signs into canonical execution fill and ac
     try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(5, 5), .payload = .{ .exchange_margin_snapshot = margin } });
     try std.testing.expectEqual(@as(u8, 1), output.events[2].event.account_bootstrap_snapshot.balance_count);
     try std.testing.expectEqual(@as(i128, 25_000_000), output.events[2].event.account_bootstrap_snapshot.balances[0].total.atoms);
+    try std.testing.expectEqual(@as(i128, 100_000), output.events[2].event.account_bootstrap_snapshot.balances[0].liability.?.atoms);
+    try std.testing.expectEqual(@as(i128, 200_000), output.events[2].event.account_bootstrap_snapshot.balances[0].isolated_liability.?.atoms);
+    try std.testing.expectEqual(@as(i128, 300_000), output.events[2].event.account_bootstrap_snapshot.balances[0].cross_liability.?.atoms);
+    try std.testing.expectEqual(@as(i128, 1_000_000), output.events[2].event.account_bootstrap_snapshot.margins[0].initial_margin.?.atoms);
+    try std.testing.expectEqual(@as(i128, 500_000), output.events[2].event.account_bootstrap_snapshot.margins[0].maintenance_margin.?.atoms);
+    try std.testing.expectEqual(@as(i128, 25_000_000), output.events[2].event.account_bootstrap_snapshot.margins[0].isolated_equity.?.atoms);
     var observed_positions: private.ExchangePositionSnapshot = undefined;
     observed_positions.scope = .ws_reported;
     observed_positions.position_count = 1;

@@ -232,6 +232,23 @@ const FencingAuthority = struct {
         lease.revoked = true;
     }
 
+    fn releaseFencedOwner(self: *FencingAuthority, key: DomainKey, old_node: u64, new_node: u64, fence: *const NodeFence) !void {
+        if (!fence.verified or fence.generation == 0 or !fence.blocks(old_node) or
+            fence.active_node != new_node or old_node == new_node)
+            return error.NodeFenceReadbackMismatch;
+        const record = self.find(key) orelse return error.StaleFencingToken;
+        if (record.current_token == 0 and record.owner_node == 0) return;
+        if (record.current_token == 0 or record.owner_node != old_node) return error.StaleFencingToken;
+        const previous = record.*;
+        record.current_token = 0;
+        record.owner_node = 0;
+        record.durable_barrier = std.math.add(u64, record.durable_barrier, 1) catch return error.DurableBarrierExhausted;
+        self.persist() catch |err| {
+            record.* = previous;
+            return err;
+        };
+    }
+
     pub fn currentToken(self: *FencingAuthority, key: DomainKey) ?u64 {
         const record = self.find(key) orelse return null;
         return if (record.current_token == 0) null else record.current_token;
@@ -263,6 +280,7 @@ pub const LinuxFencingStore = struct {
     io: std.Io,
     dir: std.Io.Dir,
     owner_file: std.Io.File,
+    marker_nonce: [16]u8,
 
     pub fn open(io: std.Io, absolute_path: []const u8) !LinuxFencingStore {
         if (builtin.os.tag != .linux) return error.LinuxFencingStoreRequired;
@@ -274,6 +292,8 @@ pub const LinuxFencingStore = struct {
         const dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{ .iterate = true });
         errdefer dir.close(io);
         try dir.setPermissions(io, private_dir_permissions);
+        const transition = try lockOwnerTransition(io, dir);
+        defer unlockOwnerTransition(io, transition);
         // A stale owner marker is deliberately not stolen after a crash.
         // Operator fencing/recovery must resolve it before another Demo owner.
         var owner_file = try dir.createFile(io, "owner.lock", .{
@@ -284,16 +304,83 @@ pub const LinuxFencingStore = struct {
             owner_file.close(io);
             dir.deleteFile(io, "owner.lock") catch {};
         }
+        var marker_nonce: [16]u8 = undefined;
+        try std.Io.randomSecure(std.Io.Threaded.global_single_threaded.io(), &marker_nonce);
+        try owner_file.writeStreamingAll(io, &marker_nonce);
         try owner_file.sync(io);
         try syncAuthorityDirectory(dir);
-        return .{ .io = io, .dir = dir, .owner_file = owner_file };
+        return .{ .io = io, .dir = dir, .owner_file = owner_file, .marker_nonce = marker_nonce };
     }
 
     pub fn close(self: *LinuxFencingStore) void {
         self.owner_file.close(self.io);
-        self.dir.deleteFile(self.io, "owner.lock") catch {};
-        syncAuthorityDirectory(self.dir) catch {};
+        const transition = lockOwnerTransition(self.io, self.dir) catch {
+            self.dir.close(self.io);
+            return; // keep the marker if the transition cannot be serialized
+        };
+        if (self.readMarker() catch null) |current| if (std.mem.eql(u8, &current, &self.marker_nonce)) {
+            self.dir.deleteFile(self.io, "owner.lock") catch {};
+            syncAuthorityDirectory(self.dir) catch {};
+        };
+        unlockOwnerTransition(self.io, transition);
         self.dir.close(self.io);
+    }
+
+    fn lockOwnerTransition(io: std.Io, dir: std.Io.Dir) !std.Io.File {
+        const file = try dir.createFile(io, "recovery.lock", .{ .permissions = std.Io.File.Permissions.fromMode(0o600) });
+        errdefer file.close(io);
+        try file.lock(io, .exclusive);
+        return file;
+    }
+
+    fn unlockOwnerTransition(io: std.Io, file: std.Io.File) void {
+        file.unlock(io);
+        file.close(io);
+    }
+
+    fn readMarker(self: *LinuxFencingStore) !?[16]u8 {
+        var file = self.dir.openFile(self.io, "owner.lock", .{}) catch return null;
+        defer file.close(self.io);
+        var nonce: [16]u8 = undefined;
+        var length: usize = 0;
+        while (length < nonce.len) {
+            const amount = file.readStreaming(self.io, &.{nonce[length..]}) catch |err| switch (err) {
+                error.EndOfStream => return null,
+                else => return err,
+            };
+            if (amount == 0) return null;
+            length += amount;
+        }
+        var extra: [1]u8 = undefined;
+        const extra_len = file.readStreaming(self.io, &.{&extra}) catch |err| switch (err) {
+            error.EndOfStream => 0,
+            else => return err,
+        };
+        if (extra_len != 0) return null;
+        return nonce;
+    }
+
+    /// Operator recovery is allowed only after an external fence has been
+    /// established and read back. This hook accepts injected evidence for
+    /// offline tests; target NodeFence qualification is separate.
+    pub fn recoverFencedOwner(io: std.Io, absolute_path: []const u8, key: DomainKey, old_node: u64, new_node: u64, fence: *const NodeFence) !void {
+        if (builtin.os.tag != .linux) return error.LinuxFencingStoreRequired;
+        if (!fence.verified or fence.generation == 0 or !fence.blocks(old_node) or fence.active_node != new_node)
+            return error.NodeFenceReadbackMismatch;
+        const dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{});
+        defer dir.close(io);
+        const transition = try lockOwnerTransition(io, dir);
+        defer unlockOwnerTransition(io, transition);
+        var owner_file = try dir.openFile(io, "owner.lock", .{});
+        defer owner_file.close(io);
+        var store: LinuxFencingStore = .{ .io = io, .dir = dir, .owner_file = owner_file, .marker_nonce = undefined };
+        const old_nonce = (try store.readMarker()) orelse return error.InvalidOwnerMarker;
+        var authority = try store.load();
+        try authority.releaseFencedOwner(key, old_node, new_node, fence);
+        const current_nonce = (try store.readMarker()) orelse return error.InvalidOwnerMarker;
+        if (!std.mem.eql(u8, &old_nonce, &current_nonce)) return error.OwnerMarkerChanged;
+        try dir.deleteFile(io, "owner.lock");
+        try syncAuthorityDirectory(dir);
     }
 
     pub fn load(self: *LinuxFencingStore) !FencingAuthority {
@@ -877,6 +964,27 @@ test "lease renewal failure enters recovery only and gateway checks clock" {
     try std.testing.expect(guard.recovery_only);
 }
 
+test "operator recovery requires fence readback before revoking the old owner" {
+    const key: DomainKey = .{ .exchange_account = 900, .decision_domain = 1 };
+    var authority = memoryAuthorityForTesting();
+    var old_lease = try authority.acquire(key, 1, 1);
+    var stale_process_authority = authority;
+    var stale_guard: GatewayLeaseGuard = .{ .authority = &stale_process_authority, .lease = &old_lease };
+    var fence: NodeFence = .{};
+    try fence.bootstrap(1);
+    try fence.establish(1, 2);
+    try std.testing.expectError(error.NodeFenceReadbackMismatch, authority.releaseFencedOwner(key, 1, 2, &fence));
+    try std.testing.expectEqual(old_lease.token, authority.currentToken(key).?);
+    try fence.readBack(1, 2);
+    try authority.releaseFencedOwner(key, 1, 2, &fence);
+    try std.testing.expect(authority.currentToken(key) == null);
+    const new_lease = try authority.acquire(key, 2, lease_duration_ns + 2);
+    try std.testing.expect(new_lease.token > old_lease.token);
+    try std.testing.expectError(error.StaleFencingToken, authority.releaseFencedOwner(key, 1, 2, &fence));
+    stale_process_authority.available = false; // external isolation, not checkpoint replay
+    try std.testing.expectError(error.FencingAuthorityUnavailable, stale_guard.check(2, old_lease.token, true));
+}
+
 test "Linux fencing directory admits only one local owner" {
     if (builtin.os.tag != .linux) return;
     var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
@@ -886,10 +994,36 @@ test "Linux fencing directory admits only one local owner" {
     const path = try std.fmt.bufPrint(&path_buffer, "/tmp/ringwin-fencing-lock-test-{d}-{d}", .{ std.os.linux.getpid(), std.Io.Clock.real.now(io).nanoseconds });
     defer std.Io.Dir.cwd().deleteTree(io, path) catch {};
     var first = try LinuxFencingStore.open(io, path);
+    const key: DomainKey = .{ .exchange_account = 900, .decision_domain = 1 };
+    var old_authority = try first.load();
+    var old_lease = try old_authority.acquire(key, 1, 1);
+    var old_guard: GatewayLeaseGuard = .{ .authority = &old_authority, .lease = &old_lease };
     try std.testing.expectError(error.PathAlreadyExists, LinuxFencingStore.open(io, path));
-    first.close();
+    const transition = try LinuxFencingStore.lockOwnerTransition(io, first.dir);
+    const contender = try first.dir.createFile(io, "recovery.lock", .{});
+    try std.testing.expect(!(try contender.tryLock(io, .exclusive)));
+    LinuxFencingStore.unlockOwnerTransition(io, transition);
+    try std.testing.expect(try contender.tryLock(io, .exclusive));
+    contender.unlock(io);
+    contender.close(io);
+    var fence: NodeFence = .{};
+    try fence.bootstrap(1);
+    try fence.establish(1, 2);
+    try std.testing.expectError(error.NodeFenceReadbackMismatch, LinuxFencingStore.recoverFencedOwner(io, path, key, 1, 2, &fence));
+    try std.testing.expectError(error.PathAlreadyExists, LinuxFencingStore.open(io, path));
+    try fence.readBack(1, 2);
+    old_authority.available = false; // injected external isolation of the old node
+    try LinuxFencingStore.recoverFencedOwner(io, path, key, 1, 2, &fence);
     var second = try LinuxFencingStore.open(io, path);
+    var new_authority = try second.load();
+    const new_lease = try new_authority.acquire(key, 2, lease_duration_ns + 2);
+    try std.testing.expectEqual(@as(u64, 2), new_lease.token);
+    try std.testing.expectError(error.FencingAuthorityUnavailable, old_guard.check(2, old_lease.token, true));
+    first.close(); // a delayed old close cannot remove the new owner's marker
+    try std.testing.expectError(error.PathAlreadyExists, LinuxFencingStore.open(io, path));
     second.close();
+    var third = try LinuxFencingStore.open(io, path);
+    third.close();
 }
 
 test "standby observation credential and lag fail closed" {

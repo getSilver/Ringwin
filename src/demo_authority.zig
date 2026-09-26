@@ -57,17 +57,14 @@ pub const Policy = struct {
         const account = &owner.shard.canonical_account;
         if (!account.valid or account.exchange_account != self.exchange_account)
             return error.InvalidDemoAccount;
-        for (account.positions[0..account.position_count]) |position|
-            if (position.quantity.lots != 0) return error.NonzeroDemoBaseline;
+        try requireSafeDemoExposure(account, false);
         var usdt_total: ?i64 = null;
         var usdt_available: ?i64 = null;
         for (account.balances[0..account.balance_count]) |balance| {
-            if (balance.asset == okx.btc and balance.total.atoms != 0) return error.NonzeroDemoBaseline;
             if (balance.asset != okx.usdt) continue;
             if (usdt_total != null or balance.total.asset != okx.usdt or balance.available.asset != okx.usdt or
                 balance.total.atoms <= 0 or balance.available.atoms < self.portfolio_allocation_micros or
-                balance.available.atoms > balance.total.atoms or
-                (balance.liability != null and balance.liability.?.atoms != 0))
+                balance.available.atoms > balance.total.atoms)
                 return error.InvalidDemoAccount;
             usdt_total = std.math.cast(i64, balance.total.atoms) orelse return error.InvalidDemoAccount;
             usdt_available = std.math.cast(i64, balance.available.atoms) orelse return error.InvalidDemoAccount;
@@ -214,8 +211,9 @@ pub const Owner = struct {
             break :blk null;
         };
         if (candidate_journal.last_sequence == before) {
+            if (rejected == null) return null;
             self.closed = true;
-            return rejected orelse error.InputProducedNoFact;
+            return rejected.?;
         }
         var reader = journal.Reader.init(candidate_journal.bytes()) catch {
             self.closed = true;
@@ -292,6 +290,7 @@ pub const Owner = struct {
             }
         }
         const current = command orelse return error.NotSent;
+        requireSafeDemoExposure(&shard.canonical_account, current.side == .sell) catch return error.NotSent;
         const position = shard.currentNetExchangePosition(current.instrument) orelse return error.NotSent;
         try gateway.observeAuthority(.{
             .account = shard.exchange_account_identity,
@@ -306,6 +305,49 @@ pub const Owner = struct {
         return gateway.sendFromShard(shard, command_id, now_monotonic_ns);
     }
 };
+
+fn requireSafeDemoExposure(account: *const @import("account_projection.zig").AccountProjection, allow_btc: bool) !void {
+    if (!account.valid or account.margin_count != 1) return error.InvalidDemoAccount;
+    var saw_btc = false;
+    var saw_usdt = false;
+    for (account.positions[0..account.position_count]) |position|
+        if (position.quantity.lots != 0) return error.NonzeroDemoBaseline;
+    for (account.balances[0..account.balance_count]) |balance| {
+        if (balance.asset == okx.btc) {
+            if (saw_btc) return error.InvalidDemoAccount;
+            saw_btc = true;
+        } else if (balance.asset == okx.usdt) {
+            if (saw_usdt) return error.InvalidDemoAccount;
+            saw_usdt = true;
+        }
+        if (balance.total.asset != balance.asset or balance.available.asset != balance.asset or balance.held.asset != balance.asset or
+            balance.total.atoms < 0 or balance.available.atoms < 0 or balance.held.atoms < 0 or
+            balance.available.atoms > balance.total.atoms)
+            return error.InvalidDemoAccount;
+        if (balance.held.atoms != 0) return error.NonzeroDemoBaseline;
+        if (balance.liability == null or balance.isolated_liability == null or balance.cross_liability == null)
+            return error.InvalidDemoAccount;
+        for ([_]?canonical.AssetAmount{ balance.liability, balance.isolated_liability, balance.cross_liability }) |debt|
+            if (debt) |amount| {
+                if (amount.asset != balance.asset) return error.InvalidDemoAccount;
+                if (amount.atoms != 0) return error.NonzeroDemoBaseline;
+            };
+        if (balance.asset == okx.btc) {
+            if (!allow_btc and balance.total.atoms != 0) return error.NonzeroDemoBaseline;
+        } else if (balance.asset != okx.usdt and
+            (balance.total.atoms != 0 or balance.available.atoms != 0 or balance.held.atoms != 0)) return error.NonzeroDemoBaseline;
+    }
+    for (account.margins[0..account.margin_count]) |margin| {
+        if (margin.amount.asset != okx.usdt or margin.initial_margin == null or
+            margin.maintenance_margin == null or margin.isolated_equity == null)
+            return error.InvalidDemoAccount;
+        if (margin.instrument != null or margin.initial_margin.?.atoms != 0 or
+            margin.maintenance_margin.?.atoms != 0 or margin.isolated_equity.?.atoms != 0)
+            return error.NonzeroDemoBaseline;
+    }
+    // OKX full balance snapshots list nonzero assets only; absent BTC is zero.
+    if (!saw_usdt) return error.InvalidDemoAccount;
+}
 
 test "Demo owner commits before publication and recovers only a complete barrier" {
     const fixture = @import("trading_shard_fixture.zig");
@@ -399,15 +441,24 @@ test "Demo policy drives buy and fault cleanup through one durable Gateway" {
         .total = .{ .asset = okx.usdt, .atoms = 25_000_000 },
         .available = .{ .asset = okx.usdt, .atoms = 25_000_000 },
         .held = .{ .asset = okx.usdt, .atoms = 0 },
+        .liability = .{ .asset = okx.usdt, .atoms = 0 },
+        .isolated_liability = .{ .asset = okx.usdt, .atoms = 0 },
+        .cross_liability = .{ .asset = okx.usdt, .atoms = 0 },
     };
     snapshot.venue.event.account_bootstrap_snapshot.balances[1] = .{
         .asset = okx.btc,
         .total = .{ .asset = okx.btc, .atoms = 0 },
         .available = .{ .asset = okx.btc, .atoms = 0 },
         .held = .{ .asset = okx.btc, .atoms = 0 },
+        .liability = .{ .asset = okx.btc, .atoms = 0 },
+        .isolated_liability = .{ .asset = okx.btc, .atoms = 0 },
+        .cross_liability = .{ .asset = okx.btc, .atoms = 0 },
     };
     snapshot.venue.event.account_bootstrap_snapshot.margins[0] = .{
         .amount = .{ .asset = okx.usdt, .atoms = 25_000_000 },
+        .initial_margin = .{ .asset = okx.usdt, .atoms = 0 },
+        .maintenance_margin = .{ .asset = okx.usdt, .atoms = 0 },
+        .isolated_equity = .{ .asset = okx.usdt, .atoms = 0 },
     };
     snapshot.venue.event.account_bootstrap_snapshot.positions[0] = .{
         .instrument = okx.btc_usdt_spot,
@@ -415,6 +466,36 @@ test "Demo policy drives buy and fault cleanup through one durable Gateway" {
         .quantity = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .lots = 0 },
     };
     _ = try owner.apply(snapshot);
+    const clean_account = owner.shard.canonical_account;
+    try requireSafeDemoExposure(&clean_account, false);
+    var missing_btc = clean_account;
+    missing_btc.balance_count = 1;
+    try requireSafeDemoExposure(&missing_btc, false);
+    var btc_debt = clean_account;
+    btc_debt.balances[1].liability.?.atoms = 1;
+    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&btc_debt, false));
+    var usdt_cross_debt = clean_account;
+    usdt_cross_debt.balances[0].cross_liability.?.atoms = 1;
+    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&usdt_cross_debt, false));
+    var usdt_isolated_debt = clean_account;
+    usdt_isolated_debt.balances[0].isolated_liability.?.atoms = 1;
+    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&usdt_isolated_debt, false));
+    var borrowed_without_field = clean_account;
+    borrowed_without_field.balances[1].liability = null;
+    try std.testing.expectError(error.InvalidDemoAccount, requireSafeDemoExposure(&borrowed_without_field, false));
+    var margin_used = clean_account;
+    margin_used.margins[0].initial_margin.?.atoms = 1;
+    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&margin_used, false));
+    margin_used = clean_account;
+    margin_used.margins[0].maintenance_margin.?.atoms = 1;
+    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&margin_used, false));
+    margin_used = clean_account;
+    margin_used.margins[0].isolated_equity.?.atoms = 1;
+    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&margin_used, false));
+    var extra_asset = clean_account;
+    extra_asset.balances[2] = .{ .asset = 99, .total = .{ .asset = 99, .atoms = 1 }, .available = .{ .asset = 99, .atoms = 1 }, .held = .{ .asset = 99, .atoms = 0 }, .liability = .{ .asset = 99, .atoms = 0 }, .isolated_liability = .{ .asset = 99, .atoms = 0 }, .cross_liability = .{ .asset = 99, .atoms = 0 } };
+    extra_asset.balance_count = 3;
+    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&extra_asset, false));
     var authority = failover.authorityForTesting();
     var lease = try authority.acquire(.{ .exchange_account = 2, .decision_domain = 1 }, 1, 1);
     var guard: failover.GatewayLeaseGuard = .{ .authority = &authority, .lease = &lease };
@@ -514,7 +595,7 @@ test "Demo policy drives buy and fault cleanup through one durable Gateway" {
     const fill_quantity: canonical.InstrumentQuantity = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .lots = 20_000 };
     const fill_price: canonical.InstrumentPrice = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .ticks = 50_000_000 };
     _ = try owner.apply(fixture.canonicalAt(20, 4, .{ .order_dispatch_result = .{ .command = command.command_id, .state = .submitted } }));
-    _ = try owner.apply(fixture.canonicalAt(21, 5, .{ .execution_report = .{
+    const accepted_report = fixture.canonicalAt(21, 5, .{ .execution_report = .{
         .identity = 5,
         .order = command.order_id,
         .client_order_id = command.client_order_id,
@@ -525,8 +606,9 @@ test "Demo policy drives buy and fault cleanup through one durable Gateway" {
         .status = .accepted,
         .cumulative_quantity = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .lots = 0 },
         .remaining_quantity = fill_quantity,
-    } }));
-    _ = try owner.apply(fixture.canonicalAt(22, 6, .{ .fill = .{
+    } });
+    _ = try owner.apply(accepted_report);
+    const accepted_fill = fixture.canonicalAt(22, 6, .{ .fill = .{
         .identity = 6,
         .order = command.order_id,
         .client_order_id = command.client_order_id,
@@ -539,7 +621,19 @@ test "Demo policy drives buy and fault cleanup through one durable Gateway" {
         .price = fill_price,
         .fee = .{ .asset = okx.btc, .atoms = 1 },
         .liquidity = .taker,
-    } }));
+    } });
+    _ = try owner.apply(accepted_fill);
+    const duplicate_barrier = owner.shard.trace.len;
+    _ = try owner.apply(accepted_report);
+    _ = try owner.apply(accepted_fill);
+    try std.testing.expectEqual(duplicate_barrier, owner.shard.trace.len);
+    try std.testing.expectEqual(duplicate_barrier, (try memory.interface().recover(undefined, stream)).committed_barrier);
+    try std.testing.expect(!owner.closed);
+    var conflict_owner = owner;
+    var conflicting_report = accepted_report;
+    conflicting_report.venue.event.execution_report.status = .filled;
+    try std.testing.expectError(error.ConflictingReportIdentity, conflict_owner.apply(conflicting_report));
+    try std.testing.expect(conflict_owner.closed);
     try std.testing.expectEqual(@as(i64, 19_999), owner.shard.economicSummary().portfolio.spot.quantity);
 
     _ = try owner.apply(fixture.canonicalAt(23, 7, .{ .execution_report = .{
@@ -565,6 +659,9 @@ test "Demo policy drives buy and fault cleanup through one durable Gateway" {
             .total = .{ .asset = okx.btc, .atoms = 19_999 },
             .available = .{ .asset = okx.btc, .atoms = 19_999 },
             .held = .{ .asset = okx.btc, .atoms = 0 },
+            .liability = .{ .asset = okx.btc, .atoms = 0 },
+            .isolated_liability = .{ .asset = okx.btc, .atoms = 0 },
+            .cross_liability = .{ .asset = okx.btc, .atoms = 0 },
         } } },
     } }));
     const cleanup_sequence = owner.shard.trace.len + 1;

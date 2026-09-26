@@ -1,9 +1,9 @@
 # 07: 以唯一 Gateway 强制真实 ReduceOnly 与 fencing
 
 Type: task
-Status: closed
+Status: resolved
 Assignee: Codex
-Blocked by: [05 保留强平与未归属经济事实的危险语义](05-preserve-dangerous-account-facts.md), [06 扩展完整的 OMS DispatchProof](06-expand-complete-oms-dispatch-proof.md)
+Blocked by: [05 保留强平与未归属经济事实的危险语义](05-preserve-dangerous-account-facts.md), [06 扩展完整的 OMS DispatchProof](06-expand-complete-oms-dispatch-proof.md), [08 以 HostActivated 和只读 IPC 强制策略隔离](08-enforce-host-activation-and-ipc-isolation.md), [09 把 legacy 订单与策略调用方迁入权威 OMS](09-migrate-legacy-order-and-strategy-paths.md), [11 实现可重放的订单容量与终态墓碑](11-manage-order-capacity-with-tombstones.md)
 Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 
 ## Question
@@ -39,3 +39,24 @@ Parent: [收口当前 main 安全与权威状态缺口](../map.md)
 Linux 显式 Demo 路径使用版本化本地运营配置提供规则、策略激活和风险额度 Core 事实；真实余额、订单、成交、市场和租约事实仍来自 Canonical ingress、LinuxFileAdapter 与 LinuxFencingStore。启动必须显式选择 `virgin` 或 `recover` 及两个流身份，不能以文件缺失推断新历史。买入、正常清仓和已发送后故障清理均经 `Owner.send -> Gateway.sendFromShard`；不支持 Venue 原生 reduce-only 的 Spot 路由仍由 Gateway 以当前账户净仓证明真实减仓。
 
 离线 spy 覆盖提交后发送、重启不重发、私有事实恢复、基础资产手续费净仓及 post-send 故障后的 reduce-only 清理；Debug/ReleaseSafe 全套各 232/232。Linux ReleaseSafe 可执行文件已真实链接，WSL 单所有者 fencing 测试 1/1，通过无配置/无凭证失败关闭探针。未加载真实凭证、未执行 Demo/Testnet/生产写入；外部 NodeFence、CredentialStore execution admission、目标 Linux/Venue 在线资格和生产资格仍不属于本票结论。
+
+## 2026-09-23 复核与重开
+
+旧 Answer 和 232/232 仅为历史记录。本轮 [修复计划 R07-A–F](../review-repair-plan-2026-09-23.md#07唯一-gateway-与-linux-demo-恢复)要求逐项验证：
+
+- [x] 对每个 Unknown dispatch 取得新鲜订单级权威对账；缺失时不结案、不重发。起点 `0d71e8e` 的账户对账不能代替订单对账。
+- [x] Demo 不自报旧会话失效或可见性等待；未满足 02 的源端证据时保持 Unknown 和 reservation。
+- [x] 合法重复 Canonical report/fill 为 no-op，不永久关闭 Owner；冲突、容量或持久故障仍失败关闭。
+- [x] 旧 `owner.lock`/lease 接管有外部可核验隔离或 fencing 协议；不得仅凭时钟过期自动接管。离线注入不等于真实 NodeFence 资格。
+- [x] BTC/USDT 债务、保证金及额外敞口非零时显式 Demo 路径拒绝发送；用实际私有账户字段构造正反例。
+- [x] 旧/未知 schema 及流身份不匹配拒绝恢复发送；只显式初始化新流，不自动清理旧数据或重发已提交 dispatch。
+
+## 2026-09-27 修复证据
+
+- R07-A：`ExecutionGateway.sendFromShard` 把发送前订单 reconciliation ID 写入持久 DispatchProof；恢复结案要求同一订单更大的 ID，旧账户或订单证据不能解开 Unknown。Demo recover 对每个持久 Unknown 从命令历史发起订单查询，缺项停止，永不自动重发。
+- R07-B：当前 adapter 和 Demo 路径均不生成调用方自报的会话失效/等待证明位；源端无法确认缺席时维持 unresolved。沿用 02 的 Canonical 对账回归。
+- R07-C：`TradingShard.applyStable` 对已验证重复 Canonical 输入返回 no-op；`Owner.apply` 零增量时仅放行此 no-op。重复 report/fill 不增加 barrier，冲突与持久故障仍关闭 Owner。
+- R07-D：操作员先取得外部 NodeFence 隔离与读回，再调用 `LinuxFencingStore.recoverFencedOwner`；进程自动释放的独占文件锁串行化 open/close/recover，旧 token 持久撤销后才删除旧 marker，新 owner 取得递增 token。恢复中再次崩溃可在重新核验外部隔离后重试。WSL 注入测试覆盖锁争用、旧/新 owner 和迟到 close；真实目标 NodeFence 资格另由 production-readiness 跟踪。
+- R07-E：Demo 初始化和每次发送都检查完整 Canonical 账户投影、BTC/USDT 及其他出现资产的债务、持仓、占用保证金和额外敞口。OKX 完整余额快照只列非零资产，缺席 BTC 按零处理；任何出现资产的债务字段缺失则拒绝。私有字段到 Canonical 的映射与危险/安全样本都有离线回归。
+- R07-F：dispatch V3 快照包含 journal schema 与 namespace；决策/dispatch 恢复必须匹配显式 stream 和当前 schema。旧格式、错误身份拒绝恢复；固定轨迹摘要随 schema 13/22/25 重新计算。
+- 离线验证：`zig test src/main.zig -O Debug --stack 67108864` 297/297；`zig test src/main.zig -O ReleaseSafe --stack 67108864` 297/297；Linux WSL `zig test src/failover.zig -target x86_64-linux-gnu ...` 10/10；`zig fmt --check` 与 `git diff --check` 通过。未执行任何 Venue 写入，以上不构成线上或生产资格。

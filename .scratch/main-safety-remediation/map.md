@@ -55,10 +55,11 @@ OrderIntent、Order、RiskReservation、账户危险事实、StrategyHost 授权
 
 ## Frontier
 
-- 下一张可认领：[07 以唯一 Gateway 强制真实 ReduceOnly 与 fencing](issues/07-enforce-authoritative-gateway-send.md)。一次只认领并完成一张；01–06、08–11 已离线收口，12 最后重建验收。Linux/Venue/生产资金资格仍为 not_run。
+- 下一张可认领：[12 重建 main 安全与权威状态验收基线](issues/12-rebuild-safety-acceptance.md)。01–11 已逐票离线收口，12 最后重建验收。Linux/Venue/生产资金资格仍为 not_run。
 
 ## Decisions so far
 
+- 2026-09-27：07 按 R07-A–F 收口。Unknown 必须取得发送后新鲜订单级对账；重复 Canonical 输入保留 Owner；Demo 对债务/保证金/额外敞口失败关闭；旧 owner 经外部隔离读回、持久撤销和内核锁串行接管；dispatch V3 拒绝旧 schema。Debug/ReleaseSafe 各 297/297，Linux WSL fencing 10/10，均属离线证据。12 待重新封存全波，不升级线上资格。
 - 2026-09-26：11 按 R11-A 收口。OMS 热单保存每单自身意图序号，墓碑不再把多成员或 CCC successor 的意图身份误写为组首；归档摘要覆盖该身份与关键来源。压缩后的重复/冲突意图、迟到报告、predecessor 和摘要篡改回归通过；现有容量、Gateway gate、registry 与 snapshot/tail 恢复测试继续通过。Debug（Windows 64 MiB 栈）/ReleaseSafe 各 295/295，acceptance/journal/state/registry schema 12/21/24/18；仅离线证据，完整封存留 12 票。
 - 2026-09-26：10 在 09 完成后按修复计划重新验收，未发现旧订单/风险/经济权威或业务 raw send 回流；保留的模拟生命周期投影只用于当前 Demo 验收摘要，不参与交易准入或发送。核心与 Demo 文件格式检查通过，当前工作树 Debug（Windows 64 MiB 栈）/ReleaseSafe 各 294/294；完整源码身份待 12 票封存，Linux/Venue/生产资金资格保持 `not_run`。
 - 2026-09-26：09 按 R09-A 收口。真实 Host、timer 与 OMS group 入口把未激活、身份冲突、open Order、能力、市场及风险拒绝写为有原因的稳定事实；拒绝占用 OMS 意图身份，Python 请求身份元数据进入原始指纹。首记录拒绝原因经 journal/replay 校验，身份容量耗尽有持久 RecoveryOnly 事实。Debug（Windows 64 MiB 栈）/ReleaseSafe 各 294/294，journal/state/acceptance/registry schema 20/23/11/17；仅离线证据。

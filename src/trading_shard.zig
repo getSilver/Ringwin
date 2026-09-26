@@ -2568,6 +2568,9 @@ pub fn applyStable(
         return err;
     };
     if (result.facts.len == 0) {
+        // handleCanonical returns without a fact only for a verified ingress
+        // duplicate; replay never needs to append the same source fact twice.
+        if (input == .venue) return null;
         if (input == .core and input.core.payload == .external_order_intent) return null;
         if (input == .core and input.core.payload == .oms_intent_group and
             (shard.oms.groupIdentityStatus(input.core.payload.oms_intent_group) catch .fresh) == .duplicate)

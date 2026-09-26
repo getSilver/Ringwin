@@ -10,9 +10,9 @@ const production_contract = @import("production_contract.zig");
 const failover = @import("failover.zig");
 const dispatch_record_type: u16 = 0x4701;
 const resolution_record_type: u16 = 0x4702;
-const dispatch_snapshot = "GatewayDispatchV2";
+const dispatch_snapshot = "GatewayDispatchV3";
 const namespace_size = 16;
-const snapshot_size = dispatch_snapshot.len + namespace_size;
+const snapshot_size = dispatch_snapshot.len + @sizeOf(u16) + namespace_size;
 
 pub const CapabilityProfile = struct {
     version: u64,
@@ -62,6 +62,7 @@ pub const DispatchProof = struct {
     fencing_token: u64,
     authority_barrier: u64,
     now_monotonic_ns: u64,
+    prior_reconciliation_id: u64 = 0,
 };
 pub const max_routes = 4;
 pub const max_adapter_batches_per_turn: u8 = 1;
@@ -92,6 +93,7 @@ const UncertainDispatch = struct {
     account: canonical.ExchangeAccountIdentity,
     command_id: u64,
     client_order_id: canonical.ClientOrderId,
+    prior_reconciliation_id: u64 = 0,
     reconciliation_id: u64 = 0,
     reconciliation_status: ?oms.ReconciliationStatus = null,
 };
@@ -135,7 +137,8 @@ pub const Gateway = struct {
         std.Io.randomSecure(std.Io.Threaded.global_single_threaded.io(), &namespace) catch return error.DurableDispatchUnavailable;
         var snapshot: [snapshot_size]u8 = undefined;
         @memcpy(snapshot[0..dispatch_snapshot.len], dispatch_snapshot);
-        @memcpy(snapshot[dispatch_snapshot.len..], &namespace);
+        std.mem.writeInt(u16, snapshot[dispatch_snapshot.len..][0..2], production_contract.journal_schema_version, .little);
+        @memcpy(snapshot[dispatch_snapshot.len + 2 ..], &namespace);
         store.append(io, .{ .stream = stream, .record = .{
             .type_id = dispatch_record_type,
             .schema_version = production_contract.journal_schema_version,
@@ -163,10 +166,12 @@ pub const Gateway = struct {
         const recovered = store.recover(io, stream) catch return error.DurableDispatchUnavailable;
         if (recovered.status != .ready or recovered.gate != .open or
             recovered.snapshot.len != snapshot_size or
-            !std.mem.eql(u8, recovered.snapshot[0..dispatch_snapshot.len], dispatch_snapshot) or recovered.committed_barrier == 0)
+            !std.mem.eql(u8, recovered.snapshot[0..dispatch_snapshot.len], dispatch_snapshot) or
+            std.mem.readInt(u16, recovered.snapshot[dispatch_snapshot.len..][0..2], .little) != production_contract.journal_schema_version or
+            recovered.committed_barrier == 0)
             return error.DurableDispatchUnavailable;
         var namespace: [namespace_size]u8 = undefined;
-        @memcpy(&namespace, recovered.snapshot[dispatch_snapshot.len..]);
+        @memcpy(&namespace, recovered.snapshot[dispatch_snapshot.len + 2 ..]);
         var last_committed_sequence: u64 = 1; // The sealed bootstrap snapshot covers sequence 1.
         if (recovered.tail.len != 0) {
             var reader = try trading.journal.Reader.init(recovered.tail);
@@ -185,7 +190,7 @@ pub const Gateway = struct {
                             if (proof.command.command_id == 0 or proof.context.account == 0 or proof.command.client_order_id.len == 0 or !proof.command.authority.complete() or
                                 self.uncertainIndex(proof.context.account, proof.command.command_id) != null)
                                 return error.DurableDispatchUnavailable;
-                            self.markUncertain(proof.context.account, proof.command.command_id, proof.command.client_order_id) catch return error.DurableDispatchUnavailable;
+                            self.markUncertain(proof.context.account, proof.command.command_id, proof.command.client_order_id, proof.prior_reconciliation_id) catch return error.DurableDispatchUnavailable;
                         },
                         resolution_record_type => {
                             const resolution = snapshot_codec.decodeBare(record.payload, DispatchResolution) catch return error.DurableDispatchUnavailable;
@@ -206,10 +211,10 @@ pub const Gateway = struct {
         self.durable_dispatch = .{ .store = store, .io = io, .stream = stream, .namespace = namespace, .next_sequence = std.math.add(u64, recovered.last_sequence, 1) catch return error.DurableDispatchUnavailable };
     }
 
-    fn markUncertain(self: *Gateway, account: canonical.ExchangeAccountIdentity, command_id: u64, client_order_id: canonical.ClientOrderId) !void {
+    fn markUncertain(self: *Gateway, account: canonical.ExchangeAccountIdentity, command_id: u64, client_order_id: canonical.ClientOrderId, prior_reconciliation_id: u64) !void {
         if (self.uncertainIndex(account, command_id) != null) return;
         if (self.uncertain_dispatch_count == self.uncertain_dispatches.len) return error.DispatchCapacity;
-        self.uncertain_dispatches[self.uncertain_dispatch_count] = .{ .account = account, .command_id = command_id, .client_order_id = client_order_id };
+        self.uncertain_dispatches[self.uncertain_dispatch_count] = .{ .account = account, .command_id = command_id, .client_order_id = client_order_id, .prior_reconciliation_id = prior_reconciliation_id };
         self.uncertain_dispatch_count += 1;
     }
 
@@ -237,7 +242,8 @@ pub const Gateway = struct {
             oms_command.authority.virtual_portfolio != shard.portfolio_identity)
             return error.UnknownDispatch;
         const order = shard.oms.orderById(oms_command.order_id) orelse return error.UnreconciledDispatch;
-        if (order.last_reconciliation_id == 0 or order.last_reconciliation_status == .unresolved or
+        if (order.last_reconciliation_id <= self.uncertain_dispatches[index].prior_reconciliation_id or
+            order.last_reconciliation_status == .unresolved or
             order.last_reconciliation_revision < oms_command.revision or
             switch (order.last_reconciliation_status) {
                 .found_live => order.state != .live and order.state != .partially_filled,
@@ -462,6 +468,7 @@ pub const Gateway = struct {
             .fencing_token = token,
             .authority_barrier = authority.authority_barrier,
             .now_monotonic_ns = now_monotonic_ns,
+            .prior_reconciliation_id = order.last_reconciliation_id,
         };
         proof.command.client_order_id = route.adapter.prepareClientOrderId(
             committed.namespace,
@@ -494,7 +501,7 @@ pub const Gateway = struct {
         };
         committed.store.commit(committed.io, committed.stream, committed.next_sequence) catch {
             self.latchAccount(refs.exchange_account);
-            try self.markUncertain(refs.exchange_account, command_id, proof.command.client_order_id);
+            try self.markUncertain(refs.exchange_account, command_id, proof.command.client_order_id, proof.prior_reconciliation_id);
             return error.NotSent;
         };
         self.durable_dispatch.?.next_sequence = std.math.add(u64, committed.next_sequence, 1) catch {
@@ -502,10 +509,10 @@ pub const Gateway = struct {
             return error.NotSent;
         };
         const result = self.sendProofInternal(proof) catch {
-            try self.markUncertain(refs.exchange_account, command_id, proof.command.client_order_id);
+            try self.markUncertain(refs.exchange_account, command_id, proof.command.client_order_id, proof.prior_reconciliation_id);
             return error.NotSent;
         };
-        if (result != .accepted) try self.markUncertain(refs.exchange_account, command_id, proof.command.client_order_id);
+        if (result != .accepted) try self.markUncertain(refs.exchange_account, command_id, proof.command.client_order_id, proof.prior_reconciliation_id);
         return result;
     }
     fn sendUnprovedForContractTest(self: *Gateway, request: canonical.OrderCommand) !venue.SendResult {
@@ -925,9 +932,47 @@ test "dispatch namespace survives recovery and changes for a new stream" {
     var recovered: Gateway = .{};
     try recovered.attachRecoveredDurableDispatch(store, undefined, first_stream);
     try std.testing.expectEqualSlices(u8, &first.durable_dispatch.?.namespace, &recovered.durable_dispatch.?.namespace);
+    var wrong_stream: Gateway = .{};
+    try std.testing.expectError(error.DurableDispatchUnavailable, wrong_stream.attachRecoveredDurableDispatch(store, undefined, .{ .domain = .control, .id = 93 }));
+    memory.snapshots[0][dispatch_snapshot.len] ^= 1;
+    var wrong_schema: Gateway = .{};
+    try std.testing.expectError(error.DurableDispatchUnavailable, wrong_schema.attachRecoveredDurableDispatch(store, undefined, first_stream));
+    memory.snapshots[0][dispatch_snapshot.len] ^= 1;
     var second: Gateway = .{};
     try second.bootstrapDurableDispatch(store, undefined, .{ .domain = .control, .id = 92 });
     try std.testing.expect(!std.mem.eql(u8, &first.durable_dispatch.?.namespace, &second.durable_dispatch.?.namespace));
+}
+
+test "recovered dispatch needs an order reconciliation newer than its send" {
+    const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(memory);
+    memory.* = .init();
+    var gateway: Gateway = .{};
+    try gateway.bootstrapDurableDispatch(memory.interface(), undefined, .{ .domain = .control, .id = 94 });
+    var shard: trading.TradingShard = .{};
+    shard.exchange_account_identity = 1;
+    shard.portfolio_identity = 2;
+    var group: oms.IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
+    group.members[0] = .{ .intent_sequence = 1, .operation = .place, .instrument = 10, .quantity = 2, .limit_price = .{ .instrument = 10, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 6 } };
+    try shard.oms.applyGroup(group);
+    const command_value = shard.oms.emitted()[0];
+    shard.oms.command_history[0].authority.exchange_account = 1;
+    shard.oms.command_history[0].authority.virtual_portfolio = 2;
+    var dispatch: oms.DispatchBatch = .{ .count = 1 };
+    dispatch.items[0] = .{ .command_id = command_value.command_id, .state = .submitted };
+    try shard.oms.applyDispatch(dispatch);
+    try shard.oms.applyReport(.{ .report_id = 1, .order_id = command_value.order_id, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    const first: oms.ReconciliationResult = .{ .reconciliation_id = 10, .order_id = command_value.order_id, .status = .found_live, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2 };
+    try shard.oms.applyReconciliation(first);
+    gateway.uncertain_dispatches[0] = .{ .account = 1, .command_id = command_value.command_id, .client_order_id = command_value.client_order_id, .prior_reconciliation_id = first.reconciliation_id };
+    gateway.uncertain_dispatch_count = 1;
+    try std.testing.expectError(error.UnreconciledDispatch, gateway.reconcileRecoveredDispatch(&shard, command_value.command_id));
+    var fresh = first;
+    fresh.reconciliation_id = 11;
+    try shard.oms.applyReconciliation(fresh);
+    try gateway.reconcileRecoveredDispatch(&shard, command_value.command_id);
+    try std.testing.expectEqual(fresh.reconciliation_id, gateway.uncertain_dispatches[0].reconciliation_id);
+    try gateway.reconcileRecoveredDispatch(&shard, command_value.command_id);
 }
 
 test "Gateway scopes uncertainty and market health to the affected route" {
