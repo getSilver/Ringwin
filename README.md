@@ -197,6 +197,9 @@ blocked or failed. Real Demo orders require fresh bounded SystemOwner
 authorization before `zig build windows-okx-live
 -Dwindows-demo-live-authorized=true`. Windows evidence never grants Linux
 production or Binance/Bybit Testnet qualification.
+The historical `windows-chain` aggregate remains blocked, while its separate
+`windows_okx_offline=passed` line is emitted after the OKX fake-transport
+five-process path and disk replay succeed.
 
 Run the full offline core wave:
 

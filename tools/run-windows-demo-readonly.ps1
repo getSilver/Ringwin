@@ -52,9 +52,14 @@ try {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        & (Join-Path $PSScriptRoot '..\zig-out\bin\ringwin-windows-demo.exe') $mode 2>&1 | ForEach-Object { "$_" | Write-Output }
+        $chainLines = @(& (Join-Path $PSScriptRoot '..\zig-out\bin\ringwin-windows-demo.exe') $mode 2>&1 | ForEach-Object { "$_" })
     } finally { $ErrorActionPreference = $previousErrorActionPreference }
-    if ($LASTEXITCODE -ne 0) { throw "Windows Demo chain failed in $mode" }
+    $chainExit = $LASTEXITCODE
+    $chainLines | Write-Output
+    if ($chainExit -ne 0) {
+        $reason = @($chainLines | Where-Object { $_ -match '^error: [A-Za-z][A-Za-z0-9_]*$' } | Select-Object -Last 1)
+        throw "Windows Demo chain failed in $mode`: $reason"
+    }
 } catch {
     $chainFailure = $_
 } finally {

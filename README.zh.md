@@ -18,6 +18,8 @@ Windows OKX 验证分为 `zig build windows-okx-offline` 和
 写入绑定源码的 JSON 报告。只有当次 SystemOwner 明确限定授权后，才能运行
 `zig build windows-okx-live -Dwindows-demo-live-authorized=true`；证据不完整时保持
 blocked/failed，Windows 结果不授予 Linux 生产或 Binance/Bybit Testnet 资格。
+历史 `windows-chain` 综合行保持 blocked；真实 OKX 假 transport 五进程链及磁盘重放通过后，
+另行输出 `windows_okx_offline=passed`。
 
 ## 统一构建入口
 

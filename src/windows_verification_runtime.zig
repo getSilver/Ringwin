@@ -2420,6 +2420,22 @@ fn runDemoChain(init: std.process.Init, executable: []const u8, live: bool) !voi
         if (decision.shard.economicSummary().portfolio.spot.quantity != 0 or !decision.shard.oms.openOrdersClosed())
             return error.DemoDiskRecoveryMismatch;
         try demo_authority.requireZeroDemoExposure(&decision.shard.canonical_account);
+        if (decision.shard.oms.order_count != 2 or decision.shard.economic_projection.canonical_fill_evidence_count < 2)
+            return error.DemoEconomicEvidenceIncomplete;
+        for (decision.shard.oms.orders[0..decision.shard.oms.order_count]) |order| {
+            if (order.state != .filled or order.cumulative_quantity <= 0) return error.DemoEconomicEvidenceIncomplete;
+            try stdout.interface.print("windows_demo_order local_id={d} client_id={s} state=filled quantity={d}\n", .{
+                order.id, order.client_order_id.slice(), order.cumulative_quantity,
+            });
+        }
+        for (decision.shard.economic_projection.canonical_fill_evidence[0..decision.shard.economic_projection.canonical_fill_evidence_count]) |fill| {
+            try stdout.interface.print("windows_demo_fill identity={d} local_order_id={d} quantity={d}\n", .{ fill.identity, fill.order_id, fill.quantity });
+        }
+        const digest = std.fmt.bytesToHex(decision.shard.canonicalStateDigest(), .lower);
+        try stdout.interface.print("windows_demo_economics fee_micros={d} replay_digest={s} strategy_identity={d} config_version={d}\n", .{
+            decision.shard.economicSummary().portfolio.fee_micros, &digest,
+            decision.shard.strategy_identity,                      decision.shard.strategy_config_version,
+        });
         try stdout.interface.writeAll("windows_demo_live=passed rest=ok private_ws=ok public_ws=ok roles=5 terminal=ok zero_exposure=ok production_qualification=false\n");
     } else try stdout.interface.writeAll("windows_demo_readonly=passed rest=ok private_ws=ok public_ws=ok roles=5 order_writes=0 production_qualification=false\n");
     try stdout.interface.flush();
@@ -2738,6 +2754,7 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
         return error.DecisionDiskRecoveryMismatch;
     const recovered_okx = try demo_authority.Owner.recover(recovered_store.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
     if (recovered_okx.shard.oms.orders[0].state != .filled or
+        recovered_okx.shard.oms.orders[0].instrument != okx_venue.btc_usdt_spot or
         recovered_okx.shard.economicSummary().portfolio.spot.quantity != 20_000 or
         !std.mem.eql(u8, &settled_digest, &recovered_okx.shard.canonicalStateDigest()))
         return error.OkxDiskRecoveryMismatch;
@@ -2818,6 +2835,11 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
 
     var output_buffer: [512]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &output_buffer);
+    const okx_digest = std.fmt.bytesToHex(settled_digest, .lower);
+    try output.interface.print(
+        "windows_okx_offline=passed venue=okx product=BTC-USDT-spot strategy_identity={d} config_version={d} roles=5 ipc=named_pipe market_raw_frames={d} private_raw_barrier={d} spot_atoms={d} replay_digest={s} replay_send_capability=false role_ownership=passed durable_recovery=passed\n",
+        .{ recovered_okx.shard.strategy_identity, recovered_okx.shard.strategy_config_version, market_replay.count, private_raw.committed_barrier, recovered_okx.shard.economicSummary().portfolio.spot.quantity, &okx_digest },
+    );
     try output.interface.print(
         "windows_process_chain_verified=blocked historical_simulated_chain=passed historical_disk_recovery=passed historical_snapshot_transfer=passed okx_market_role=offline_passed okx_private_bootstrap=offline_passed okx_host_gateway_private=offline_passed windows_fencing_store=passed offline=blocked read_only=not_run demo_live=not_run production_qualification=false revision=not_recorded environment=none venue=simulated account_scope=none product=none strategy=none configuration=none roles=5 generation={d} ipc=named_pipe bounded_queue={d} power_loss_qualified=false linux_admission_equivalent=false\n",
         .{ generation, max_control_queue },

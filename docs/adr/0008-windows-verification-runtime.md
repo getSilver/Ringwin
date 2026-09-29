@@ -37,7 +37,7 @@ Windows 是 `ProductionProcessChain` 的验证运行时，不是 ProductionPlatf
   离线与只读结果不证明真实成交，未执行和失败不能写成通过。
 - `zig build windows-okx-offline`、`windows-okx-readonly` 与显式授权的 `windows-okx-live`
   分开运行；机器报告记录当前 revision、源码树 SHA-256 与 acceptance/journal/state schema，
-  跨模式合并必须匹配同一源码快照和账户指纹。历史 Demo 成交保留为来源证据；源码变更后须复测，
+  跨模式合并必须匹配同一源码快照；在线只读与真实下单必须匹配账户指纹。历史 Demo 成交保留为来源证据；源码变更后须复测，
   不可从历史 JSON 或手写布尔值授予新版本资格。
 - 仓库根目录被忽略的 `.env.local` 只为限定 Demo 子进程提供凭证输入。真实下单、再次尝试或清理
   仍需当次 SystemOwner 明确限定账户、产品、数量或名义与截止时间的授权；凭证存在不授予交易权限。
