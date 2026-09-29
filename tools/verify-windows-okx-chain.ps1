@@ -162,7 +162,7 @@ try {
                 $readonly.state_schema -ne $report.state_schema -or
                 $readonly.schema_registry -ne $report.schema_registry) { throw 'Current-source read-only evidence missing' }
             $report.read_only = 'passed'
-            $lines = Invoke-Checked (Join-Path $PSScriptRoot 'run-windows-demo-readonly.ps1') @('-DemoLive', '-SystemOwnerAuthorized')
+            $lines = Invoke-Checked -command (Join-Path $PSScriptRoot 'run-windows-demo-readonly.ps1') -arguments @('-DemoLive', '-SystemOwnerAuthorized')
             if (-not ($lines -match 'windows_demo_live=passed rest=ok private_ws=ok public_ws=ok roles=5 terminal=ok zero_exposure=ok production_qualification=false') -or
                 -not ($lines -match 'windows_demo_postflight: pending_orders=0 pending_algo_orders=0 open_positions=0 liabilities=0 funded_currencies=USDT')) { throw 'Demo terminal or zero-exposure evidence missing' }
             foreach ($line in $lines) {
