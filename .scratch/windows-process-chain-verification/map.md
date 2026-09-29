@@ -75,8 +75,9 @@ SystemOwner 明确授权，才执行有界 Demo 写入与清理。结果只适�
 
 - 2026-09-30：06 增加离线、只读和另行授权 Demo 写入的独立 `zig build` 入口与源码树
   SHA-256 机器报告。真实 OKX 离线五进程链的恢复与 digest 已单独输出；历史综合
-  `windows-chain` 行仍自报 blocked。2026-09-29 成交结果是历史来源；最终源码仍需
-  同版本只读、获授权在线成交及零敞口报告才能封存。06 保持 in-progress，
+  `windows-chain` 行仍自报 blocked。当前源码的只读五进程报告已通过、零订单写入。
+  2026-09-29 成交结果是历史来源；最终源码仍需当次获授权在线成交及零敞口报告才能封存。
+  06 保持 in-progress，
   `WindowsProcessChainVerified` 保持 blocked。
 
 - 2026-09-29：[05 Demo 买卖闭环证据](evidence-2026-09-29-demo-round-trip.json)记录同链

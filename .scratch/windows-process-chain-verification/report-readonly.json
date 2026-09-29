@@ -1,8 +1,8 @@
-﻿{
+{
     "schema":  1,
-    "observed_at_utc":  "2026-09-29T16:54:00Z",
-    "revision":  "16c05fd7377385efe23d517a4b54f5b7c35aed66",
-    "source_tree_sha256":  "70a7259936d323af15853643f52fa1468f85015a07323c82e5bc54f8e87fd7a2",
+    "observed_at_utc":  "2026-09-29T17:01:00Z",
+    "revision":  "b4346368c8b85960fce1f67700bc36907964f859",
+    "source_tree_sha256":  "3c883958f92d15c571277982901f1fc4c02feb254a22ff5db020db81a74ef928",
     "acceptance_schema":  13,
     "journal_schema":  22,
     "state_schema":  25,
@@ -19,17 +19,17 @@
     "observed_config_version":  1,
     "account_uid_sha256":  "e52bb9f5cda58fc03db5ba5b93de42450d7d69030d618c8dd8aae4adc5b70952",
     "requested_roles":  5,
-    "observed_roles":  null,
+    "observed_roles":  5,
     "requested_ipc":  "windows_named_pipe",
     "mode":  "readonly",
     "windows_durable_adapter":  "passed",
     "windows_credential_adapter":  "passed",
     "offline":  "passed",
     "offline_adapter_tests":  "passed",
-    "replay_digest":  "207761e998f93d0492fd25379d65ed6c296f0ed18e4f5803689576bdfe55d54f",
+    "replay_digest":  "1d6e543c50ad45231266f5d757b99e561aae5839cf0685cf308e611d5a8552cf",
     "market_raw_frames":  3,
     "private_raw_barrier":  27,
-    "read_only":  "failed",
+    "read_only":  "passed",
     "demo_live":  "not_run",
     "role_ownership":  "passed",
     "durable_recovery":  "passed",
@@ -47,7 +47,6 @@
     "live_replay_digest":  null,
     "historical_demo_evidence":  "evidence-2026-09-29-demo-round-trip.json",
     "proof_gap":  "Current-source offline, read-only, or authorized live economic evidence is incomplete.",
-    "windows_process_chain_verified":  "failed",
-    "production_qualification":  false,
-    "failure":  "Windows Demo chain failed in --windows-demo-readonly: error: PrivateBootstrapFailed\n"
+    "windows_process_chain_verified":  "blocked",
+    "production_qualification":  false
 }

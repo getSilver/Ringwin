@@ -57,9 +57,10 @@ role 所有权、恢复、净量和摘要。旧 `windows-chain` 的综合历史�
 后续只读重试的执行 role 在 REST 历史补事实阶段遇 OKX transport 超时，按
 `PrivateRequestUncertain` 失败关闭，controller 随后收到 `PrivateBootstrapFailed`；
 未发单，不能把独立运行曾经通过的结果抄入本次报告。
-最终源码 `16c05fd7` 的[离线机器报告](../report-offline.json)记录 offline、role 所有权、
-恢复及两项 Windows adapter 均 passed；[只读机器报告](../report-readonly.json)记录
-`PrivateBootstrapFailed` 和整体 failed。两个报告均绑定同一源码树 SHA-256，
-`demo_live=not_run`，`production_qualification=false`。
+源码 `b4346368` 的[离线机器报告](../report-offline.json)记录 offline、role 所有权、
+恢复及两项 Windows adapter 均 passed；重试后的[只读机器报告](../report-readonly.json)
+记录 REST、公共与私有 WS、五 role 及 `order_writes=0` 均 passed。两个报告绑定
+相同源码树 SHA-256；先前超时失败保留在本票记录中。`demo_live=not_run`，
+`windows_process_chain_verified=blocked`，`production_qualification=false`。
 新增 live 成功路径的本地订单身份、已应用 canonical Fill、聚合费用和恢复摘要输出；
 该路径尚未获本轮下单授权，未执行在线写入。
