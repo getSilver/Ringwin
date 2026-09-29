@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "observed_at_utc": "2026-09-27 04:42:34 UTC",
+  "base_git_revision": "eeee984f2913bfedd54e6ac19609acf490d35bdf",
+  "worktree_clean": false,
+  "zig": "0.17.0-dev.315+5b647b792",
+  "environment": "okx_demo",
+  "account_identity": "not_recorded",
+  "product_scope": ["BTC-USDT", "BTC-USDT-SWAP"],
+  "strategy_scope": "not_exercised",
+  "configuration_scope": "not_frozen_for_business_chain",
+  "source_sha256": {
+    "src/windows_verification_runtime.zig": "47dbcb26cefbca77f89ec78baf45d898ee34ff6909ab60235cdd0501f60b197f",
+    "src/production_contract.zig": "22f6ac0d5f0c31b2ce1f94f63134949a88e6e6dc63fcbd8432867cfe209b2cd5",
+    "src/demo_authority.zig": "bde5ea4890f61f3c521d0d2197b69727c6981230db28f713cb52aba79bcce0cb",
+    "src/execution_gateway.zig": "fa44c6d3130aa0db400eeb63b68dc1270ff033d5dd6ee3edbc990adcc8343f97",
+    "src/okx_venue_adapter.zig": "31fbc6c894b114dc89e33198ad15b60cfc40e7fa6414752f1505c6df0a960113",
+    "src/okx_market_feed.zig": "ba8214d47afd29b80557715ad39dda0613f451e7381692b5bc5586c06e6bfd9b",
+    "src/okx_demo_live_acceptance.zig": "e3c133b52a5cc722e2afd0e6b40ea90756970905f8225e6f48d8862805349f19",
+    "tools/okx-demo-preflight.ps1": "e8ee2688995ef282c6a46964990e185594ced7169b5c50ebe8a40e18ba444cd5",
+    "tools/okx-demo-public-ws-preflight.ps1": "c5982bd5e384a4df6bc8d385cb8e1b8055a9203286f600d615d7068460638a89"
+  },
+  "commands": {
+    "venue_adapter": "zig test src/okx_venue_adapter.zig",
+    "market_feed": "zig test src/okx_market_feed.zig",
+    "durable_owner": "zig test src/demo_authority.zig",
+    "historical_chain": "zig build windows-chain",
+    "windows_durable": "zig build windows-durable",
+    "windows_credential": "zig build windows-credential",
+    "public_ws": "powershell.exe -NoProfile -File tools/okx-demo-public-ws-preflight.ps1",
+    "private_ws_and_rest": "powershell.exe -NoProfile -File tools/run-okx-demo-live-acceptance.ps1 -PrepareOnly -EnvFile ./.env.local"
+  },
+  "offline": {
+    "okx_venue_adapter": "passed_60_of_60",
+    "okx_market_feed": "passed_15_of_15",
+    "durable_owner": "passed_139_of_139",
+    "windows_durable_adapter": "passed",
+    "windows_credential_read_only_adapter": "passed",
+    "windows_chain": "historical_simulated_passed_only",
+    "okx_business_chain": "blocked"
+  },
+  "read_only": {
+    "rest_account_rules_balance_positions_orders": "passed",
+    "public_ws_tickers_btc_usdt": "passed",
+    "private_ws_login_subscriptions_bootstrap": "passed",
+    "baseline": { "pending_orders": 0, "pending_algo_orders": 0, "open_positions": 0, "liabilities": 0, "funded_currencies": ["USDT"] },
+    "account_scope_bound_to_process_chain": "blocked",
+    "order_writes": 0
+  },
+  "demo_live": "not_run_no_current_system_owner_authorization",
+  "role_ownership": "blocked_engine_still_owns_simulated_gateway",
+  "private_facts_through_decision_owner": "blocked_not_run_in_process_chain",
+  "disk_recovery_of_okx_business_chain": "blocked_not_run",
+  "windows_process_chain_verified": "blocked",
+  "production_qualification": false
+}

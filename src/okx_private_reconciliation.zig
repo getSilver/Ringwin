@@ -328,6 +328,7 @@ pub const Reconciler = struct {
     }
 
     pub fn subscriptionAcknowledged(self: *Reconciler, channel: PrivateChannel) !void {
+        if ((self.stage == .ready or self.stage == .reconciling) and self.subscriptions[@intFromEnum(channel)]) return;
         if (self.stage != .subscribing and self.stage != .buffering)
             return error.InvalidStage;
         self.subscriptions[@intFromEnum(channel)] = true;
@@ -916,9 +917,9 @@ pub const Reconciler = struct {
                 .available_balance = try optionalDecimalField(detail, "availBal"),
                 .equity = try optionalDecimalField(detail, "eq"),
                 .frozen_balance = try optionalDecimalField(detail, "frozenBal"),
-                .liability = try optionalDecimalField(detail, "liab"),
-                .isolated_liability = try optionalDecimalField(detail, "isoLiab"),
-                .cross_liability = try optionalDecimalField(detail, "crossLiab"),
+                .liability = try presentDecimalOrZero(detail, "liab"),
+                .isolated_liability = try presentDecimalOrZero(detail, "isoLiab"),
+                .cross_liability = try presentDecimalOrZero(detail, "crossLiab"),
             };
             snapshot.balance_count += 1;
         }
@@ -934,8 +935,8 @@ pub const Reconciler = struct {
             .venue_update_time_utc_ns = update_time,
             .total_equity_usd = try optionalDecimalField(row, "totalEq"),
             .adjusted_equity_usd = try optionalDecimalField(row, "adjEq"),
-            .initial_margin_usd = try optionalDecimalField(row, "imr"),
-            .maintenance_margin_usd = try optionalDecimalField(row, "mmr"),
+            .initial_margin_usd = try presentDecimalOrZero(row, "imr"),
+            .maintenance_margin_usd = try presentDecimalOrZero(row, "mmr"),
             .margin_ratio = try optionalDecimalField(row, "mgnRatio"),
             .isolated_equity_usd = try optionalDecimalField(row, "isoEq"),
         };
@@ -982,7 +983,7 @@ pub const Reconciler = struct {
             snapshot.position_count += 1;
         }
         const identity = scopedTimeIdentity("positions", snapshot.scope, latest_time);
-        if (!try self.remember(identity, hashPositions(&snapshot)))
+        if (!try self.remember(identity, hashPositions(&snapshot)) or is_rest)
             try batch.append(makeEvent(times, if (latest_time == 0) null else latest_time, evidence, identity, .{
                 .exchange_position_snapshot = snapshot,
             }));
@@ -1252,6 +1253,25 @@ fn decimalField(object: std.json.ObjectMap, name: []const u8) !Decimal {
 fn optionalDecimalField(object: std.json.ObjectMap, name: []const u8) !?Decimal {
     const text = try optionalStringField(object, name) orelse return null;
     return @as(?Decimal, try Decimal.parse(text));
+}
+
+fn presentDecimalOrZero(object: std.json.ObjectMap, name: []const u8) !?Decimal {
+    const value = object.get(name) orelse return null;
+    const text = switch (value) {
+        .string => |str| str,
+        else => return error.InvalidField,
+    };
+    return if (text.len == 0) .{ .coefficient = 0, .scale = 0 } else try Decimal.parse(text);
+}
+
+test "explicit blank liability is zero while a missing field stays unknown" {
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, "{\"liab\":\"\",\"imr\":\"0\"}", .{});
+    defer parsed.deinit();
+    const object = parsed.value.object;
+    const liability = (try presentDecimalOrZero(object, "liab")).?;
+    try std.testing.expectEqual(@as(i128, 0), liability.coefficient);
+    try std.testing.expect((try presentDecimalOrZero(object, "isoLiab")) == null);
+    try std.testing.expectEqual(@as(i128, 0), (try presentDecimalOrZero(object, "imr")).?.coefficient);
 }
 
 fn decimalOrZero(object: std.json.ObjectMap, name: []const u8) !Decimal {
@@ -1848,6 +1868,31 @@ test "REST pagination requires the exact descending endpoint cursor" {
         \\{"code":"0","data":[]}
     );
     try std.testing.expectEqual(RejectReason.invalid_page_cursor, skipped.rejection.?);
+}
+
+test "repeated empty REST positions still release each account bootstrap" {
+    var reconciler: Reconciler = .{};
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, "[]", .{});
+    defer parsed.deinit();
+    const times: Times = .{ .receive_time_utc_ns = 1, .monotonic_time_ns = 1, .wall_time_utc_ns = 1 };
+    const evidence: RawEvidenceRef = .{ .stream_sequence = 1, .sha256 = @splat(1) };
+    var first: IngressBatch = .{ .raw_evidence = evidence };
+    try reconciler.decodePositions(parsed.value.array, true, times, evidence, &first);
+    var second: IngressBatch = .{ .raw_evidence = evidence };
+    try reconciler.decodePositions(parsed.value.array, true, times, evidence, &second);
+    try std.testing.expectEqual(@as(u8, 1), first.event_count);
+    try std.testing.expectEqual(@as(u8, 1), second.event_count);
+}
+
+test "reconnected orders subscription ack is accepted after REST recovery" {
+    var reconciler: Reconciler = .{ .stage = .ready, .subscriptions = .{ true, true, true } };
+    try reconciler.subscriptionAcknowledged(.orders);
+    try std.testing.expectEqual(Stage.ready, reconciler.stage);
+    try reconciler.beginReconciliation(1);
+    try reconciler.subscriptionAcknowledged(.orders);
+    try std.testing.expectEqual(Stage.reconciling, reconciler.stage);
+    reconciler.subscriptions[@intFromEnum(PrivateChannel.account)] = false;
+    try std.testing.expectError(error.InvalidStage, reconciler.subscriptionAcknowledged(.account));
 }
 
 test "REST balance stability ignores observation uTime but not economic values" {

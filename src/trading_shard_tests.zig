@@ -262,6 +262,16 @@ test "inexact direct price keeps a stable reject without an OMS command" {
     _ = try assertReplayEquivalent(run);
 }
 
+test "core mark micros become canonical ticks at the active venue tick" {
+    var run: LiveRun = .{ .shard = .{}, .decision_journal = engine.journal.Journal.init() };
+    var setup = genesis;
+    setup[1].core.payload.margin_rules_activated.price_tick_micros = 100_000;
+    for (setup) |event| _ = try applyLive(&run.shard, &run.decision_journal, event);
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000 } } }));
+    try std.testing.expectEqual(@as(i128, 500), run.shard.canonical_market.get(swap_instrument).?.mark.?.ticks);
+    try std.testing.expectEqual(@as(i64, 50_000_000), run.shard.mark_price_micros);
+}
+
 test "market gap rejects a native intent with a replayable reason" {
     var run = try startScenario();
     const before = run.shard.trace.len;

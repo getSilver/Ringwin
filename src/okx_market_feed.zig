@@ -48,6 +48,18 @@ pub const OkxMarketFeed = struct {
         try self.requireRunning();
         if (self.pending != null) return error.OutputPending;
         const ingress = try self.decoder.ingest(allocator, self.raw_sink, try self.sourceSession(), times, raw);
+        try self.stage(ingress);
+    }
+
+    pub fn replay(self: *OkxMarketFeed, allocator: std.mem.Allocator, source_session: u64, times: okx.Times, evidence: okx.RawEvidenceRef, raw: []const u8) !void {
+        try self.requireRunning();
+        if (self.pending != null) return error.OutputPending;
+        if (source_session != try self.sourceSession()) return error.SourceSessionMismatch;
+        const ingress = try self.decoder.replay(allocator, times, evidence, raw);
+        try self.stage(ingress);
+    }
+
+    fn stage(self: *OkxMarketFeed, ingress: okx.IngressBatch) !void {
         var output: canonical.AdapterOutputBatch = .{};
         for (ingress.eventSlice()) |event|
             try self.translate(&output, event);
@@ -202,7 +214,7 @@ pub const OkxMarketFeed = struct {
         self.next_event_sequence = std.math.add(u64, self.next_event_sequence, 1) catch return error.EventSequenceOverflow;
         try output.append(.{ .envelope = .{
             .event_type = @intFromEnum(canonical.eventType(event)),
-            .schema_version = 1,
+            .schema_version = canonical.schema_version,
             .identity = .{ .stream = config.session, .sequence = self.next_event_sequence },
             .source_fact_identity = std.mem.readInt(u128, envelope.source_fact_identity[0..16], .little),
             .scope = .instrument,

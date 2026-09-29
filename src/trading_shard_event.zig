@@ -91,7 +91,8 @@ pub const Fact = struct {
 };
 
 pub const Trace = struct {
-    events: [68]Fact = undefined,
+    // ponytail: bounded for this Demo round trip; checkpoint and rotate before longer runs.
+    events: [256]Fact = undefined,
     len: usize = 0,
 
     pub fn append(self: *Trace, kind: EventKind, identity: u64) !void {

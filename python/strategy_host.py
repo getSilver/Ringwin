@@ -118,7 +118,7 @@ def hello_payload(plan_payload):
     return session, bytes(payload)
 
 
-def output_frame(batch, args, session, intent_sequence=None):
+def output_frame(batch, args, session, intent_sequence=None, limit_price=None):
     source_batch = struct.unpack_from("<Q", batch, 72)[0]
     strategy_cursor = struct.unpack_from("<Q", batch, 88)[0]
     schema_registry = int.from_bytes(batch[16:32], "little")
@@ -149,8 +149,8 @@ def output_frame(batch, args, session, intent_sequence=None):
     struct.pack_into("<Q", frame, 136, args.intent_sequence if intent_sequence is None else intent_sequence)
     frame[144:160] = (1).to_bytes(16, "little")
     frame[160:176] = (2).to_bytes(16, "little")
-    frame[176:192] = (3).to_bytes(16, "little")
-    struct.pack_into("<qq", frame, 192, args.quantity, args.limit_price)
+    frame[176:192] = args.instrument_identity.to_bytes(16, "little")
+    struct.pack_into("<qq", frame, 192, args.quantity, args.limit_price if limit_price is None else limit_price)
     struct.pack_into("<I", frame, 124, crc32c(frame[:124] + frame[128:]))
     return bytes(frame)
 
@@ -199,7 +199,14 @@ def trade_once(args, session, zig_sequence, host_sequence):
     for index in range(args.trade_batches):
         batch = read_input(session, zig_sequence)
         validate_batch_schema(batch)
-        publish_intent(session, host_sequence, output_frame(batch, args, session, args.intent_sequence + index))
+        price = None
+        if args.price_from_input:
+            if len(batch) != 200 or struct.unpack_from("<I", batch, 128)[0] != 72 or struct.unpack_from("<I", batch, 132)[0] != 8:
+                raise RecoveryNeeded(2)
+            price = struct.unpack_from("<q", batch, 192)[0]
+            if price <= 0:
+                raise RecoveryNeeded(2)
+        publish_intent(session, host_sequence, output_frame(batch, args, session, args.intent_sequence + index, price))
 
 
 def await_direct_activation(args, session, zig_sequence):
@@ -493,6 +500,8 @@ def main():
     parser.add_argument("--trade-batches", type=int, default=1)
     parser.add_argument("--quantity", type=int, default=100)
     parser.add_argument("--limit-price", type=int, default=50_100_000_000)
+    parser.add_argument("--price-from-input", action="store_true")
+    parser.add_argument("--instrument-identity", type=int, default=3)
     parser.add_argument("--side", choices=("buy", "sell"), default="buy")
     parser.add_argument("--time-in-force", choices=("gtc", "ioc"), default="gtc")
     parser.add_argument("--portfolio-reduce-only", action="store_true")

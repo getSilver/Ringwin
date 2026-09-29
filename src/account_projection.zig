@@ -57,9 +57,12 @@ pub const AccountProjection = struct {
             if (stream != observation.source_stream or observation.source_sequence != self.last_sequence + 1)
                 return self.invalidate(.sequence_gap, error.SourceSequenceGap);
         } else self.source_stream = observation.source_stream;
-        if (self.seen_count == self.seen.len) return self.invalidate(.capacity_exhausted, error.ObservationCapacityExceeded);
-        self.seen[self.seen_count] = observation;
-        self.seen_count += 1;
+        // Keep recent identities for duplicate detection; source sequence still
+        // rejects an older observation after its identity leaves this window.
+        if (self.seen_count == self.seen.len) {
+            std.mem.copyForwards(canonical.AccountObservation, self.seen[0 .. self.seen.len - 1], self.seen[1..]);
+        } else self.seen_count += 1;
+        self.seen[self.seen_count - 1] = observation;
         self.last_sequence = observation.source_sequence;
         switch (observation.value) {
             .balance => |value| try self.applyBalance(value),
@@ -164,4 +167,22 @@ test "partial snapshots and conflicting or regressing observations invalidate on
     old.source_sequence = 0;
     try std.testing.expectError(error.SourceSequenceGap, regressing.apply(.{ .account_observed = old }));
     try std.testing.expect(!regressing.valid);
+}
+
+test "account observations retain a bounded duplicate window without exhausting the projection" {
+    var projection = AccountProjection{};
+    try projection.apply(.{ .account_bootstrap_snapshot = .{ .identity = 1, .exchange_account = 2, .scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true }, .source_stream = 4, .source_sequence = 0, .balance_count = 0, .position_count = 0, .margin_count = 0 } });
+    var observation: canonical.AccountObservation = .{ .identity = 100, .exchange_account = 2, .bootstrap = 1, .source_stream = 4, .source_sequence = 1, .value = .{ .margin = .{ .value = .{ .amount = .{ .asset = 5, .atoms = 1 } } } } };
+    for (0..canonical.max_account_facts + 1) |index| {
+        observation.identity = 100 + index;
+        observation.source_sequence = 1 + index;
+        observation.value.margin.value.amount.atoms = 1 + @as(i128, @intCast(index));
+        try projection.apply(.{ .account_observed = observation });
+    }
+    try std.testing.expect(projection.valid);
+    try std.testing.expectEqual(@as(u8, canonical.max_account_facts), projection.seen_count);
+    try projection.apply(.{ .account_observed = observation });
+    observation.identity = 100;
+    observation.source_sequence = 1;
+    try std.testing.expectError(error.SourceSequenceGap, projection.apply(.{ .account_observed = observation }));
 }

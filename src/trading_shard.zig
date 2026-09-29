@@ -1294,7 +1294,7 @@ pub const TradingShard = struct {
                 try self.canonical_market.apply(record.event);
                 if (price.kind == .mark) {
                     const instrument = self.instrument_registry.get(price.instrument) orelse return error.UnknownInstrument;
-                    const mark_price = std.math.cast(i64, price.price.ticks) orelse return error.PriceOutOfRange;
+                    const mark_price = std.math.cast(i64, try std.math.mul(i128, price.price.ticks, instrument.margin.price_tick_micros)) orelse return error.PriceOutOfRange;
                     if (price.instrument == self.instrument_identity) self.mark_price_micros = mark_price;
                     _ = try self.applyEconomicProjection(.{ .mark_price = .{
                         .product = instrument.product,
@@ -2065,10 +2065,11 @@ pub const TradingShard = struct {
             .mark_price => |price| {
                 if (price.price_micros <= 0) return error.InvalidMarkPrice;
                 const instrument = self.instrument_registry.get(price.instrument) orelse return error.UnknownInstrument;
+                const mark_ticks = try priceTicks(price.price_micros, instrument.margin.price_tick_micros);
                 try self.canonical_market.apply(.{ .reference_price = .{
                     .instrument = price.instrument,
                     .kind = .mark,
-                    .price = .{ .instrument = price.instrument, .rules_version = instrument.rules.version, .ticks = price.price_micros },
+                    .price = .{ .instrument = price.instrument, .rules_version = instrument.rules.version, .ticks = mark_ticks },
                 } });
                 if (price.instrument == self.instrument_identity) self.mark_price_micros = price.price_micros;
                 _ = try self.applyEconomicProjection(.{ .mark_price = .{

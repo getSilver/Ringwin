@@ -363,6 +363,18 @@ _Avoid_: Independent binary, Windows service, public API server
 五个 ProductionRole 通过固定容量 Unix-domain control seam 共同形成的生命周期边界；它负责启动、恢复、交易授权、排空和失败关闭，但不拥有 TradingShard 经济状态或 SecretMaterial。
 _Avoid_: Service mesh, process-local authority, credential store
 
+**WindowsVerificationRuntime**:
+Windows 上用于证明 ProductionProcessChain 已整合为可运行所有者闭环的验证运行时；它不是 ProductionPlatform，也不能使 `permitsProduction()` 为 true。
+_Avoid_: ProductionPlatform, Windows production compatibility layer, ProductionRole
+
+**VerificationRole**:
+由同一二进制以 `--verify-role` 启动的 Windows 验证进程角色；首版角色名称可与 ProductionRole 对应，但不是 ProductionRole，也不得使用 Linux `--production-role`。
+_Avoid_: ProductionRole, Windows service, public API server
+
+**WindowsProcessChainVerified**:
+五个 VerificationRole 在 Windows 上以 OKX VenueAdapter 与 OKX MarketFeedAdapter 经 Named Pipe、controller 用户 SID 与精确进程 PID 校验、磁盘单调 generation，以及真实 TradingShard、HostSupervisor、独立 Gateway、DurableStore 所有者闭合的限定 Demo 业务证据；离线、在线只读和当次授权真实成交、持久化恢复及最终对账须分别通过，并绑定源码、账户、产品、策略和配置。历史 SimulatedVenue 进程结果不能满足此谓词；它不能升级 Demo/Testnet 行，也不能成为 `production_qualified`。
+_Avoid_: ProductionQualified, production_qualification, ProductionProcessChain
+
 **CredentialStore**:
 按 CredentialKind 分离保存 observation 与 execution 加密凭证的 Linux 人工解锁 seam；它认证固定
 metadata、执行 Argon2id/XChaCha20-Poly1305、持久化单向生命周期，并在失败时关闭准入。

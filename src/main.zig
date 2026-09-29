@@ -34,6 +34,7 @@ const failover = @import("failover.zig");
 const durable_store = @import("durable_store.zig");
 const demo_authority = @import("demo_authority.zig");
 const credential_store = @import("credential_store.zig");
+const windows_verification_runtime = @import("windows_verification_runtime.zig");
 const venue_fill_recovery_acceptance = @import("venue_fill_recovery_acceptance.zig");
 const raw_ingress = @import("raw_ingress.zig");
 
@@ -51,9 +52,45 @@ pub fn main(init: std.process.Init) !void {
             if (args.next() != null) return error.UnknownArgument;
             return production_runtime.runRole(init, role, socket, generation);
         }
+        if (std.mem.eql(u8, argument, "--verify-role")) {
+            const role = try windows_verification_runtime.parseRole(args.next() orelse return error.MissingRole);
+            if (!std.mem.eql(u8, args.next() orelse return error.MissingPipeFlag, "--pipe")) return error.MissingPipeFlag;
+            const pipe = args.next() orelse return error.MissingPipe;
+            if (!std.mem.eql(u8, args.next() orelse return error.MissingGenerationFlag, "--generation")) return error.MissingGenerationFlag;
+            const generation = try std.fmt.parseInt(u64, args.next() orelse return error.MissingGeneration, 10);
+            if (!std.mem.eql(u8, args.next() orelse return error.MissingGenerationFileFlag, "--generation-file")) return error.MissingGenerationFileFlag;
+            const generation_file = args.next() orelse return error.MissingGenerationFile;
+            if (!std.mem.eql(u8, args.next() orelse return error.MissingControllerPidFlag, "--controller-pid")) return error.MissingControllerPidFlag;
+            const controller_pid = try std.fmt.parseInt(u32, args.next() orelse return error.MissingControllerPid, 10);
+            var store_dir: []const u8 = "";
+            var credential_dir: []const u8 = "";
+            var demo_transport = false;
+            while (args.next()) |flag| {
+                if (std.mem.eql(u8, flag, "--store-dir")) {
+                    store_dir = args.next() orelse return error.MissingStoreDir;
+                } else if (std.mem.eql(u8, flag, "--credential-dir")) {
+                    credential_dir = args.next() orelse return error.MissingCredentialDir;
+                } else if (std.mem.eql(u8, flag, "--demo-transport")) {
+                    demo_transport = true;
+                } else return error.UnknownArgument;
+            }
+            return windows_verification_runtime.runRole(init, role, pipe, generation, generation_file, controller_pid, store_dir, credential_dir, demo_transport);
+        }
         if (std.mem.eql(u8, argument, "--production-chain-test")) {
             if (args.next() != null) return error.UnknownArgument;
             return production_runtime.runIntegration(init, executable);
+        }
+        if (std.mem.eql(u8, argument, "--windows-chain-test")) {
+            if (args.next() != null) return error.UnknownArgument;
+            return windows_verification_runtime.runIntegration(init, executable);
+        }
+        if (std.mem.eql(u8, argument, "--windows-demo-readonly")) {
+            if (args.next() != null) return error.UnknownArgument;
+            return windows_verification_runtime.runDemoReadOnly(init, executable);
+        }
+        if (std.mem.eql(u8, argument, "--windows-demo-live")) {
+            if (args.next() != null) return error.UnknownArgument;
+            return windows_verification_runtime.runDemoLive(init, executable);
         }
         if (std.mem.eql(u8, argument, "--qualification-smoke")) {
             const report_path = args.next() orelse "qualification-report.json";
@@ -72,6 +109,14 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, argument, "--credential-store-test")) {
             if (args.next() != null) return error.UnknownArgument;
             return credential_store.runLinuxAcceptance(init);
+        }
+        if (std.mem.eql(u8, argument, "--windows-durable-store-test")) {
+            if (args.next() != null) return error.UnknownArgument;
+            return durable_store.runWindowsAcceptance(init);
+        }
+        if (std.mem.eql(u8, argument, "--windows-credential-store-test")) {
+            if (args.next() != null) return error.UnknownArgument;
+            return credential_store.runWindowsAcceptance(init);
         }
         if (std.mem.eql(u8, argument, "--four-shard-acceptance"))
             return runFourShardAcceptanceEntry(init);
@@ -149,6 +194,7 @@ test {
     _ = durable_store;
     _ = demo_authority;
     _ = credential_store;
+    _ = windows_verification_runtime;
     _ = venue_fill_recovery_acceptance;
     _ = raw_ingress;
 }

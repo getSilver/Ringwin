@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "observed_at_utc": "2026-09-29 09:20:32 UTC",
+  "base_git_revision": "eeee984f2913bfedd54e6ac19609acf490d35bdf",
+  "worktree_clean": false,
+  "zig": "0.17.0-dev.315+5b647b792",
+  "environment": "okx_demo",
+  "venue": "okx",
+  "account_uid_sha256": "e52bb9f5cda58fc03db5ba5b93de42450d7d69030d618c8dd8aae4adc5b70952",
+  "product": "BTC-USDT spot",
+  "strategy": "windows_verification_python_host",
+  "roles": 5,
+  "ipc": "windows_named_pipe",
+  "scope": "bounded_demo_one_buy_one_sell_25_usdt_per_order_30_minute_write_deadline",
+  "live_command": "tools/run-windows-demo-readonly.ps1 -DemoLive -SystemOwnerAuthorized",
+  "tested_binary_sha256": "cbb84c5979d6080f137c75141b6119285c1ac98cda52a7914bebc90487d40df6",
+  "live_result": "windows_demo_live=passed rest=ok private_ws=ok public_ws=ok roles=5 terminal=ok zero_exposure=ok production_qualification=false",
+  "buy": {
+    "order_id": "3965154311785299968",
+    "client_order_id": "RWN1E9B1E01C0CD879C2FA7814F0281C",
+    "state": "filled",
+    "quantity_btc": "0.00005",
+    "fee": "-0.00000005 BTC"
+  },
+  "sell": {
+    "order_id": "3965155877300879360",
+    "client_order_id": "RWN13474E154CD71014D9DF2AAE78C74",
+    "state": "filled",
+    "quantity_btc": "0.00004995",
+    "fee": "-0.004197443355 USDT"
+  },
+  "final_rest_preflight": {
+    "qualified": true,
+    "pending_orders": 0,
+    "pending_algo_orders": 0,
+    "open_positions": 0,
+    "liabilities": 0,
+    "funded_currencies": ["USDT"]
+  },
+  "verification": {
+    "private_ws_and_rest": "adapter_owned_reconciliation_and_canonical_report_fill_applied",
+    "engine_disk_recovery": "decision_owner_reopened_zero_spot_and_closed_oms",
+    "offline_main_test": "319_of_319_passed_with_64m_stack",
+    "historical_windows_chain_build": "passed_but_reports_blocked_simulated_history",
+    "zig_fmt_check": "passed",
+    "git_diff_check": "passed"
+  },
+  "source_sha256_after_diagnostic_cleanup": {
+    "build.zig": "dda547e13a3bdf66f8c404e9a5d1e6c5e22ddfac539a7c710b570605adc2ec6d",
+    "src/main.zig": "0dedce0fca79ea91f8deca2d1cf89e4714580b82adc21536ca1825dc3448605d",
+    "src/windows_verification_runtime.zig": "3e65e13ddeef5e47512014460abd5788a0b4d3f27f0df6d7478afa13d1458e40",
+    "src/okx_demo_live_acceptance.zig": "6fb94995fbf4ef4843850a7790ad6f548b8eec91c1a587e25cf5b84084644749",
+    "src/okx_venue_adapter.zig": "63697d9eec15772ce4146310116bbd35bd8a79b174b47de400ed129712d0af00",
+    "src/okx_private_reconciliation.zig": "c7b7e3af4f919405fd31ac8f95889d08cfaa35ece3b17fda7be580aa1f77f01d",
+    "src/raw_ingress.zig": "c003611fe846dbcd4c44330296213ae0238b115bdc6cf6bc13679fb25ad070fd",
+    "src/durable_store.zig": "278078f34aa38bf98691f9c7f152e590a728b4a4494e810bb88bc800de57c52a",
+    "src/trading_shard_event.zig": "94d48d4f7bd7863fa644ac22cd6b2b13f8625b70cf7b6ccf2bde51ff71505fe0"
+  },
+  "source_binding_limit": "Live binary was built before removal of diagnostic prints from the runtime and adapter; functional code was unchanged, but exact source hash differs. Ticket 06 must seal an exact final revision and rerun its required evidence.",
+  "windows_process_chain_verified": "blocked_pending_ticket_06_evidence_seal",
+  "production_qualification": false,
+  "post_review_rerun": {
+    "result": "windows_demo_live=passed rest=ok private_ws=ok public_ws=ok roles=5 terminal=ok zero_exposure=ok production_qualification=false",
+    "postflight": "pending_orders=0 pending_algo_orders=0 open_positions=0 liabilities=0 funded_currencies=USDT",
+    "read_only": "windows_demo_readonly=passed rest=ok private_ws=ok public_ws=ok roles=5 order_writes=0 production_qualification=false",
+    "tested_binary_sha256": "391cbaf9265ffbd93dd5a6b05f16215165e4dc36439bbb1626975d2933b3f855",
+    "tested_source_sha256": {
+      "src/main.zig": "514f922994fa0bae1c46aa1117a66487c4fff6d1c3e2b851b4eab096f587146b",
+      "src/windows_verification_runtime.zig": "3f91ec93ebbc21846658adf79d1599573e0d5fac02bc83dbea7bc6c0669721f6"
+    },
+    "offline_tests": "321/321 passed",
+    "controller_identity": "user_sid_and_exact_process_pid",
+    "generation": "disk_monotonic_atomic_replace_and_corruption_rejection",
+    "engine_ready": "owner_ready_before_host_then_ready_after_handshake_and_activation",
+    "telemetry": "generation_checked_liveness_probe_before_each_demo_send",
+    "order_ids": "not_extracted_in_rerun_output",
+    "source_binding_limit": "The tested runtime source hash precedes generation-file corruption, error-close, and role-log corrections. Current runtime SHA-256 is 81eb02d03d7fd9ec0338ba80efd2b54ffa6ab73a909e278fb2d8fc625bd2acd0. No committed revision or unified ticket 06 machine report yet."
+  }
+}

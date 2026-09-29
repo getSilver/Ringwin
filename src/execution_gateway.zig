@@ -664,6 +664,11 @@ pub const Gateway = struct {
         return null;
     }
 
+    pub fn acceptedClientOrderId(self: *const Gateway, account: canonical.ExchangeAccountIdentity, command_id: u64) ?canonical.ClientOrderId {
+        const index = self.acceptedDispatchIndex(account, command_id) orelse return null;
+        return self.accepted_dispatches[index].proof.command.client_order_id;
+    }
+
     fn validateOrder(self: *const Gateway, route: *const Route, request: canonical.OrderCommand) !void {
         if (request.operation != .cancel and !oms.exactOrderSpec(request.order_type, request.time_in_force, request.market_protection_price != null))
             return error.Rejected;

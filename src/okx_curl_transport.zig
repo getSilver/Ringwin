@@ -3,6 +3,7 @@
 //! bootstrapped into the ignored build area by tools/bootstrap-libcurl.ps1.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const auth = @import("okx_rest_auth.zig");
 const live = @import("okx_live_chain.zig");
 const market = @import("okx_public_market.zig");
@@ -21,9 +22,58 @@ pub fn demoEndpointProfile(rest_base_url: []const u8, entity: []const u8) !DemoE
     if (!std.mem.eql(u8, rest_base_url, "https://openapi.okx.com")) return error.UnsupportedDemoRestEndpoint;
     return .{
         .rest_base_url = rest_base_url,
-        .private_ws_url = "wss://wspap.okx.com:8443/ws/v5/private",
+        .private_ws_url = demoPrivateWsUrl(),
     };
 }
+
+pub fn withDemoPrivateWs(endpoint: DemoEndpointProfile, url: []const u8) !DemoEndpointProfile {
+    if (!std.mem.eql(u8, url, "wss://wspap.okx.com:8443/ws/v5/private") and
+        !std.mem.eql(u8, url, "wss://wspap.okx.com/ws/v5/private"))
+        return error.UnsupportedDemoWsEndpoint;
+    var next = endpoint;
+    next.private_ws_url = url;
+    return next;
+}
+
+/// Official Demo WSS is :8443. Windows business verification uses 443 because
+/// that is the same Demo host/path and 8443 TLS is reset on this network.
+pub fn demoPrivateWsUrl() []const u8 {
+    return if (builtin.os.tag == .windows)
+        "wss://wspap.okx.com/ws/v5/private"
+    else
+        "wss://wspap.okx.com:8443/ws/v5/private";
+}
+
+pub fn demoPublicWsUrl() [:0]const u8 {
+    return "wss://wspap.okx.com/ws/v5/public";
+}
+
+pub const PublicWs = struct {
+    session: *anyopaque,
+
+    pub fn connect(proxy: ?[:0]const u8) !PublicWs {
+        const session = ringwin_ws_create(demoPublicWsUrl(), if (proxy) |value| value.ptr else null) orelse
+            return error.WebSocketInitFailed;
+        errdefer ringwin_ws_destroy(session);
+        try wsResult(ringwin_ws_connect(session));
+        return .{ .session = session };
+    }
+
+    pub fn send(self: PublicWs, message: []const u8) !void {
+        if (message.len == 0 or message.len > market.max_raw_frame_bytes) return error.InvalidMessage;
+        try wsResult(ringwin_ws_send_text(self.session, message.ptr, message.len));
+    }
+
+    pub fn receive(self: PublicWs, destination: []u8, timeout_ms: u31) ![]u8 {
+        var length: usize = 0;
+        try wsResult(ringwin_ws_recv_message(self.session, destination.ptr, destination.len, &length, @intCast(timeout_ms)));
+        return destination[0..length];
+    }
+
+    pub fn close(self: PublicWs) void {
+        ringwin_ws_destroy(self.session);
+    }
+};
 
 extern fn ringwin_curl_global_init() c_int;
 extern fn ringwin_curl_global_cleanup() void;
@@ -182,6 +232,8 @@ pub const TransportOwner = struct {
             self.proxy,
             &self.response,
         ) catch return self.beforeSend();
+        if (response.outcome != .response)
+            std.debug.print("okx_transport_failure outcome={s} curl_code={d} http_status={d}\n", .{ @tagName(response.outcome), response.curl_code, response.http_status });
         return .{
             .outcome = switch (response.outcome) {
                 .proven_before_send => .proven_before_send,

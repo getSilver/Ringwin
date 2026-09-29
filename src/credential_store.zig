@@ -125,16 +125,32 @@ const PasswordSource = struct {
 fn readPassword(io: std.Io, file: std.Io.File, kind: InputKind, destination: []u8) !PasswordSource {
     if (kind == .test_only) return error.TestPasswordSourceNotAllowed;
     if (kind == .tty and !(try file.isTty(io))) return error.NotATty;
+    var console_mode: u32 = 0;
+    var echo_disabled = false;
+    if (kind == .tty and builtin.os.tag == .windows) {
+        if (windows_api.GetConsoleMode(file.handle, &console_mode) == 0) return error.NotATty;
+        const ENABLE_ECHO_INPUT: u32 = 0x0004;
+        if (windows_api.SetConsoleMode(file.handle, console_mode & ~ENABLE_ECHO_INPUT) == 0) return error.ConsoleEchoFailed;
+        echo_disabled = true;
+    }
+    defer restoreConsoleMode(file, console_mode, echo_disabled);
     if (kind == .restricted_fd) {
-        if (builtin.os.tag != .linux) return error.LinuxCredentialInputRequired;
-        var descriptor_path: [64]u8 = undefined;
-        const path = try std.fmt.bufPrint(&descriptor_path, "/proc/self/fd/{d}", .{file.handle});
-        var target_buffer: [256]u8 = undefined;
-        const target_len = std.Io.Dir.cwd().readLink(io, path, &target_buffer) catch
-            return error.RestrictedStreamInspectionFailed;
-        const target = target_buffer[0..target_len];
-        if (!std.mem.startsWith(u8, target, "pipe:[") and !std.mem.startsWith(u8, target, "socket:["))
-            return error.RestrictedStreamRequired;
+        switch (builtin.os.tag) {
+            .linux => {
+                var descriptor_path: [64]u8 = undefined;
+                const path = try std.fmt.bufPrint(&descriptor_path, "/proc/self/fd/{d}", .{file.handle});
+                var target_buffer: [256]u8 = undefined;
+                const target_len = std.Io.Dir.cwd().readLink(io, path, &target_buffer) catch
+                    return error.RestrictedStreamInspectionFailed;
+                const target = target_buffer[0..target_len];
+                if (!std.mem.startsWith(u8, target, "pipe:[") and !std.mem.startsWith(u8, target, "socket:["))
+                    return error.RestrictedStreamRequired;
+            },
+            .windows => {
+                if (windows_api.GetFileType(file.handle) != FILE_TYPE_PIPE) return error.RestrictedStreamRequired;
+            },
+            else => return error.LinuxCredentialInputRequired,
+        }
     }
     var length: usize = 0;
     while (length < destination.len) {
@@ -149,6 +165,12 @@ fn readPassword(io: std.Io, file: std.Io.File, kind: InputKind, destination: []u
     while (length > 0 and (destination[length - 1] == '\n' or destination[length - 1] == '\r')) : (length -= 1) {}
     if (length == 0) return error.InvalidPasswordSource;
     return .{ .kind = kind, .bytes = destination[0..length] };
+}
+
+fn restoreConsoleMode(file: std.Io.File, console_mode: u32, echo_disabled: bool) void {
+    if (comptime builtin.os.tag == .windows) {
+        if (echo_disabled) _ = windows_api.SetConsoleMode(file.handle, console_mode);
+    }
 }
 
 pub const RuntimeContext = struct {
@@ -226,6 +248,10 @@ pub const SecuritySelfCheck = struct {
     pub fn passes(self: SecuritySelfCheck) bool {
         return self.lock_memory and self.dont_dump and self.zeroize and self.gateway_owner;
     }
+
+    pub fn passesWindowsVerification(self: SecuritySelfCheck) bool {
+        return self.lock_memory and self.zeroize and self.gateway_owner;
+    }
 };
 
 pub const CredentialStore = struct {
@@ -234,7 +260,7 @@ pub const CredentialStore = struct {
     admission_gate: bool = true,
 
     pub fn open(io: std.Io, allocator: Allocator, absolute_path: []const u8) !CredentialStore {
-        if (builtin.os.tag != .linux) return error.LinuxCredentialStoreRequired;
+        if (builtin.os.tag != .linux and builtin.os.tag != .windows) return error.UnsupportedCredentialStorePlatform;
         std.Io.Dir.createDirAbsolute(io, absolute_path, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
@@ -298,7 +324,7 @@ pub const CredentialStore = struct {
 
     fn admitObservationWithPassword(self: *CredentialStore, io: std.Io, password: PasswordSource, expected: Metadata, runtime: RuntimeContext, now_unix: u64, protection: ProtectionMode, self_check: SecuritySelfCheck) !Admission {
         if (protection == .test_bypass and !builtin.is_test) return error.TestProtectionModeNotAllowed;
-        if (!self.admission_gate or !self_check.passes()) return error.SecurityGateClosed;
+        if (!self.admission_gate or !selfCheckPasses(self_check)) return error.SecurityGateClosed;
         if (expected.kind != .observation or expected.state != .active) return error.ObservationCredentialRequired;
         if (!expected.can_read or expected.can_trade or expected.can_withdraw) return error.ReadOnlyPolicyViolation;
         if (expected.environment != .production or expected.endpoint_environment != .production) return error.EnvironmentMismatch;
@@ -306,7 +332,7 @@ pub const CredentialStore = struct {
         var lease = try self.unlock(io, .observation, password, expected, protection, true);
         defer lease.deinit();
         if (!matchesRuntime(lease.metadataView(), runtime)) return error.RuntimeContextMismatch;
-        if (!lease.report().accepted()) return error.SecurityGateClosed;
+        if (!protectionAccepted(lease.report())) return error.SecurityGateClosed;
         return .{ .state = .ready, .kind = .observation, .credential_id = expected.credential_id, .credential_id_len = expected.credential_id_len };
     }
 
@@ -396,24 +422,34 @@ const Secret = struct {
         errdefer {
             if (access_protected) std.process.protectMemory(storage, .{ .read = true, .write = true }) catch {};
             std.crypto.secureZero(u8, storage);
-            if (locked) std.process.unlockMemory(storage) catch {};
+            if (locked) unlockNative(storage);
             allocator.free(storage);
         }
         @memset(storage, 0);
         @memcpy(storage[0..@sizeOf(SecretMaterial)], std.mem.asBytes(&owned_material));
         var protection_report = ProtectionReport{ .locked = mode == .test_bypass, .dont_dump = mode == .test_bypass, .access_protected = false, .wipe_on_release = true };
         if (mode == .native) {
-            if (builtin.os.tag != .linux) return error.LinuxProtectedMemoryRequired;
-            std.process.lockMemory(storage, .{}) catch return error.MemoryLockFailed;
-            locked = true;
-            std.posix.madvise(storage.ptr, storage.len, std.os.linux.MADV.DONTDUMP) catch return error.DontDumpFailed;
-            protection_report.locked = true;
-            protection_report.dont_dump = true;
+            switch (builtin.os.tag) {
+                .linux => {
+                    std.process.lockMemory(storage, .{}) catch return error.MemoryLockFailed;
+                    locked = true;
+                    std.posix.madvise(storage.ptr, storage.len, std.os.linux.MADV.DONTDUMP) catch return error.DontDumpFailed;
+                    protection_report.locked = true;
+                    protection_report.dont_dump = true;
+                },
+                .windows => {
+                    if (windows_api.VirtualLock(storage.ptr, storage.len) == 0) return error.MemoryLockFailed;
+                    locked = true;
+                    protection_report.locked = true;
+                    protection_report.dont_dump = false;
+                },
+                else => return error.UnsupportedProtectedMemory,
+            }
         }
         std.process.protectMemory(storage, .{ .read = true }) catch return error.MemoryProtectionFailed;
         access_protected = true;
         protection_report.access_protected = true;
-        if (!protection_report.accepted()) return error.SecurityGateClosed;
+        if (!protectionAccepted(protection_report)) return error.SecurityGateClosed;
         return .{ .allocator = allocator, .storage = storage, .protection_report = protection_report };
     }
 
@@ -433,7 +469,7 @@ const Secret = struct {
         std.process.protectMemory(self.storage, .{ .read = true, .write = true }) catch |err|
             std.debug.panic("credential memory protection restore failed: {s}", .{@errorName(err)});
         std.crypto.secureZero(u8, self.storage);
-        if (self.protection_report.locked and builtin.os.tag == .linux) std.process.unlockMemory(self.storage) catch {};
+        if (self.protection_report.locked) unlockNative(self.storage);
         self.allocator.free(self.storage);
         self.protection_report.wipe_on_release = true;
     }
@@ -611,6 +647,63 @@ fn syncDirectory(dir: std.Io.Dir) !void {
         .INVAL, .BADF, .OPNOTSUPP => std.posix.sync(),
         else => return error.DirectorySyncFailed,
     };
+    if (builtin.os.tag == .windows) {
+        // NT directory handles reject FlushFileBuffers (INVALID_HANDLE /
+        // INVALID_PARAMETER / NOT_SUPPORTED). Files in writeAtomic already
+        // called File.sync, which is FlushFileBuffers.
+        _ = windows_flush(dir.handle);
+    }
+}
+
+fn selfCheckPasses(check: SecuritySelfCheck) bool {
+    return if (builtin.os.tag == .windows) check.passesWindowsVerification() else check.passes();
+}
+
+fn protectionAccepted(report: ProtectionReport) bool {
+    if (builtin.os.tag == .windows) return report.locked and report.access_protected and report.wipe_on_release;
+    return report.accepted();
+}
+
+fn testStorePath(comptime name: []const u8) []const u8 {
+    return if (builtin.os.tag == .windows) "C:\\Windows\\Temp\\" ++ name else "/tmp/" ++ name;
+}
+
+fn unlockNative(storage: []align(std.heap.page_size_min) u8) void {
+    switch (builtin.os.tag) {
+        .linux => std.process.unlockMemory(storage) catch {},
+        .windows => _ = windows_api.VirtualUnlock(storage.ptr, storage.len),
+        else => {},
+    }
+}
+
+const FILE_TYPE_PIPE: u32 = 3;
+const windows_api = if (builtin.os.tag == .windows) struct {
+    extern "kernel32" fn GetFileType(handle: std.os.windows.HANDLE) callconv(.winapi) u32;
+    extern "kernel32" fn GetConsoleMode(handle: std.os.windows.HANDLE, mode: *u32) callconv(.winapi) i32;
+    extern "kernel32" fn SetConsoleMode(handle: std.os.windows.HANDLE, mode: u32) callconv(.winapi) i32;
+    extern "kernel32" fn VirtualLock(address: *const anyopaque, size: usize) callconv(.winapi) i32;
+    extern "kernel32" fn VirtualUnlock(address: *const anyopaque, size: usize) callconv(.winapi) i32;
+    extern "kernel32" fn CreatePipe(
+        read_pipe: *std.os.windows.HANDLE,
+        write_pipe: *std.os.windows.HANDLE,
+        attributes: ?*anyopaque,
+        size: u32,
+    ) callconv(.winapi) i32;
+    extern "kernel32" fn WriteFile(
+        handle: std.os.windows.HANDLE,
+        buffer: [*]const u8,
+        length: u32,
+        written: *u32,
+        overlapped: ?*anyopaque,
+    ) callconv(.winapi) i32;
+    extern "kernel32" fn FlushFileBuffers(handle: std.os.windows.HANDLE) callconv(.winapi) i32;
+    extern "kernel32" fn GetLastError() callconv(.winapi) u32;
+    extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) u32;
+} else struct {};
+
+fn windows_flush(handle: std.os.windows.HANDLE) i32 {
+    if (builtin.os.tag != .windows) return 1;
+    return windows_api.FlushFileBuffers(handle);
 }
 
 pub const AcceptanceEvidence = struct {
@@ -688,11 +781,71 @@ pub fn runLinuxAcceptance(init: std.process.Init) !void {
     try stdout.interface.flush();
 }
 
+pub fn runWindowsAcceptance(init: std.process.Init) !void {
+    if (builtin.os.tag != .windows) return error.WindowsCredentialStoreRequired;
+    var path: [260]u8 = undefined;
+    const absolute_path = try std.fmt.bufPrint(&path, "C:\\Windows\\Temp\\ringwin-credential-store-{d}", .{windows_api.GetCurrentProcessId()});
+    std.Io.Dir.createDirAbsolute(init.io, absolute_path, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    defer std.Io.Dir.cwd().deleteTree(init.io, absolute_path) catch {};
+    var store = try CredentialStore.open(init.io, init.gpa, absolute_path);
+    defer store.close(init.io);
+    var metadata = try Metadata.init(.observation, 42, .production, 4_000_000_000, "obs-win-42", "windows-node-1", "198.51.100.42");
+    var material = try SecretMaterial.init("observation-key", "observation-secret", "observation-pass");
+    var created_regular_file = try store.dir.createFile(init.io, "password.txt", .{ .truncate = true });
+    created_regular_file.close(init.io);
+    var regular_file = try store.dir.openFile(init.io, "password.txt", .{});
+    defer regular_file.close(init.io);
+    var rejected_material = try SecretMaterial.init("rejected-key", "rejected-secret", "rejected-pass");
+    var rejected_password: [max_password]u8 = undefined;
+    @memset(&rejected_password, 0xa5);
+    var restricted_rejected = false;
+    store.stage(init.io, metadata, &rejected_material, regular_file, .restricted_fd, &rejected_password) catch |err| switch (err) {
+        error.RestrictedStreamRequired => restricted_rejected = true,
+        else => return err,
+    };
+    if (!restricted_rejected) return error.RegularPasswordFileAccepted;
+    var read_handle: std.os.windows.HANDLE = undefined;
+    var write_handle: std.os.windows.HANDLE = undefined;
+    if (windows_api.CreatePipe(&read_handle, &write_handle, null, 0) == 0) return error.PasswordPipeFailed;
+    var read_file: std.Io.File = .{ .handle = read_handle, .flags = .{ .nonblocking = false } };
+    defer read_file.close(init.io);
+    const fixture_password = "fixture-password\n";
+    var written: u32 = 0;
+    if (windows_api.WriteFile(write_handle, fixture_password.ptr, @intCast(fixture_password.len), &written, null) == 0)
+        return error.PasswordPipeFailed;
+    std.os.windows.CloseHandle(write_handle);
+    var password_bytes: [max_password]u8 = undefined;
+    defer std.crypto.secureZero(u8, &password_bytes);
+    const password = try readPassword(init.io, read_file, .restricted_fd, &password_bytes);
+    try store.stageWithPassword(init.io, metadata, &material, password);
+    try store.activateWithPassword(init.io, .observation, password, metadata);
+    metadata.state = .active;
+    metadata.generation += 1;
+    const runtime = RuntimeContext{ .account = 42, .environment = .production, .endpoint_environment = .production, .node_id = "windows-node-1", .egress_ip = "198.51.100.42" };
+    const admission = try store.admitObservationWithPassword(init.io, password, metadata, runtime, 1_700_000_000, .native, .{ .dont_dump = false });
+    if (!admission.isReady() or admission.send_capability or admission.trading_enabled) return error.SecurityGateClosed;
+    try store.revokeWithPassword(init.io, .observation, password, metadata);
+    const revoked = store.admitObservationWithPassword(init.io, password, metadata, runtime, 1_700_000_000, .native, .{ .dont_dump = false });
+    if (revoked != error.CredentialRevoked) return error.RevocationNotPersistent;
+    if (store.admitExecution()) |_| return error.ExecutionAdmissionOutOfScope else |err| if (err != error.ExecutionAdmissionOutOfScope) return err;
+    var output: [2048]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(init.io, &output);
+    try stdout.interface.print(
+        "credential_admission: state={s}, mode=read_only, send_capability=false, trading_enabled=false, protection=windows_virtual_lock, linux_admission_equivalent=false\n",
+        .{@tagName(admission.state)},
+    );
+    try stdout.interface.flush();
+}
+
 test "credential metadata and secret payload are authenticated" {
-    if (builtin.os.tag != .linux) return;
-    var store = try CredentialStore.open(std.testing.io, std.testing.allocator, "/tmp/ringwin-credential-store-test");
+    if (builtin.os.tag != .linux and builtin.os.tag != .windows) return;
+    const path = testStorePath("ringwin-credential-store-test");
+    var store = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
     defer store.close(std.testing.io);
-    defer std.Io.Dir.cwd().deleteTree(std.testing.io, "/tmp/ringwin-credential-store-test") catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
     const metadata = try Metadata.init(.observation, 7, .production, 4_000_000_000, "obs", "node", "203.0.113.7");
     var material = try SecretMaterial.init("key", "secret", "pass");
     const password = PasswordSource.testOnly("password");
@@ -713,10 +866,11 @@ test "credential metadata and secret payload are authenticated" {
 }
 
 test "policy, lifecycle, and security failures close admission" {
-    if (builtin.os.tag != .linux) return;
-    var store = try CredentialStore.open(std.testing.io, std.testing.allocator, "/tmp/ringwin-credential-store-policy-test");
+    if (builtin.os.tag != .linux and builtin.os.tag != .windows) return;
+    const path = testStorePath("ringwin-credential-store-policy-test");
+    var store = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
     defer store.close(std.testing.io);
-    defer std.Io.Dir.cwd().deleteTree(std.testing.io, "/tmp/ringwin-credential-store-policy-test") catch {};
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
     var metadata = try Metadata.init(.observation, 8, .production, 4_000_000_000, "obs", "node", "203.0.113.8");
     var material = try SecretMaterial.init("key", "secret", "pass");
     const password = PasswordSource.testOnly("password");
@@ -725,7 +879,7 @@ test "policy, lifecycle, and security failures close admission" {
     metadata.state = .active;
     metadata.generation += 1;
     var check = SecuritySelfCheck{};
-    check.dont_dump = false;
+    check.lock_memory = false;
     const runtime = RuntimeContext{ .account = 8, .environment = .production, .endpoint_environment = .production, .node_id = "node", .egress_ip = "203.0.113.8" };
     try std.testing.expectError(error.SecurityGateClosed, store.admitObservationWithPassword(std.testing.io, password, metadata, runtime, 1, .test_bypass, check));
     try std.testing.expect(!allowsReadOnly(.order_write));
@@ -736,7 +890,7 @@ test "policy, lifecycle, and security failures close admission" {
 }
 
 test "Secret exposes only read-only material and reports page protection" {
-    if (builtin.os.tag != .linux) return;
+    if (builtin.os.tag != .linux and builtin.os.tag != .windows) return;
     var material = try SecretMaterial.init("key", "secret", "pass");
     defer material.clear();
     var secret = try Secret.init(std.testing.allocator, material, .test_bypass);

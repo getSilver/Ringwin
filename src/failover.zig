@@ -102,7 +102,7 @@ pub const PrimaryLease = struct {
     }
 };
 
-const FencingAuthority = struct {
+pub const FencingAuthority = struct {
     records: [max_domains]AuthorityRecord = undefined,
     count: usize = 0,
     available: bool = true,
@@ -282,23 +282,44 @@ pub const LinuxFencingStore = struct {
     owner_file: std.Io.File,
     marker_nonce: [16]u8,
 
+    fn dirPermissions() std.Io.File.Permissions {
+        if (comptime builtin.os.tag == .windows) return .default_dir;
+        return std.Io.File.Permissions.fromMode(0o700);
+    }
+
+    fn filePermissions() std.Io.File.Permissions {
+        if (comptime builtin.os.tag == .windows) return .default_file;
+        return std.Io.File.Permissions.fromMode(0o600);
+    }
+
     pub fn open(io: std.Io, absolute_path: []const u8) !LinuxFencingStore {
         if (builtin.os.tag != .linux) return error.LinuxFencingStoreRequired;
-        const private_dir_permissions = std.Io.File.Permissions.fromMode(0o700);
-        std.Io.Dir.createDirAbsolute(io, absolute_path, private_dir_permissions) catch |err| switch (err) {
+        return openPath(io, absolute_path);
+    }
+
+    /// Functional Windows verification only; directory power-loss durability
+    /// and production NodeFence qualification are outside this runtime.
+    pub fn openWindowsVerification(io: std.Io, absolute_path: []const u8) !LinuxFencingStore {
+        if (builtin.os.tag != .windows) return error.WindowsFencingStoreRequired;
+        return openPath(io, absolute_path);
+    }
+
+    fn openPath(io: std.Io, absolute_path: []const u8) !LinuxFencingStore {
+        const private_dir_permissions = dirPermissions();
+        std.Io.Dir.createDirAbsolute(io, absolute_path, if (builtin.os.tag == .windows) .default_dir else private_dir_permissions) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
         const dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{ .iterate = true });
         errdefer dir.close(io);
-        try dir.setPermissions(io, private_dir_permissions);
+        if (builtin.os.tag == .linux) try dir.setPermissions(io, private_dir_permissions);
         const transition = try lockOwnerTransition(io, dir);
         defer unlockOwnerTransition(io, transition);
         // A stale owner marker is deliberately not stolen after a crash.
         // Operator fencing/recovery must resolve it before another Demo owner.
         var owner_file = try dir.createFile(io, "owner.lock", .{
             .exclusive = true,
-            .permissions = std.Io.File.Permissions.fromMode(0o600),
+            .permissions = filePermissions(),
         });
         errdefer {
             owner_file.close(io);
@@ -327,7 +348,7 @@ pub const LinuxFencingStore = struct {
     }
 
     fn lockOwnerTransition(io: std.Io, dir: std.Io.Dir) !std.Io.File {
-        const file = try dir.createFile(io, "recovery.lock", .{ .permissions = std.Io.File.Permissions.fromMode(0o600) });
+        const file = try dir.createFile(io, "recovery.lock", .{ .permissions = filePermissions() });
         errdefer file.close(io);
         try file.lock(io, .exclusive);
         return file;
@@ -424,7 +445,7 @@ pub const LinuxFencingStore = struct {
         {
             var file = try self.dir.createFile(self.io, "authority.tmp", .{
                 .truncate = true,
-                .permissions = std.Io.File.Permissions.fromMode(0o600),
+                .permissions = filePermissions(),
             });
             defer file.close(self.io);
             try file.writeStreamingAll(self.io, bytes);
@@ -434,6 +455,64 @@ pub const LinuxFencingStore = struct {
         try syncAuthorityDirectory(self.dir);
     }
 };
+
+pub const WindowsFencingStore = LinuxFencingStore;
+
+/// Readers use the control-fence owner's durable checkpoint. They never open
+/// the exclusive owner marker or acquire a second authority for the domain.
+pub fn readWindowsFencingCheckpoint(io: std.Io, absolute_path: []const u8) !FencingAuthority {
+    if (builtin.os.tag != .windows) return error.WindowsFencingStoreRequired;
+    var dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{});
+    defer dir.close(io);
+    var owner = try dir.openFile(io, "owner.lock", .{});
+    owner.close(io);
+    var encoded: [authority_file_max]u8 = undefined;
+    var file = try dir.openFile(io, "authority.bin", .{});
+    defer file.close(io);
+    var length: usize = 0;
+    while (length < encoded.len) {
+        const amount = file.readStreaming(io, &.{encoded[length..]}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (amount == 0) break;
+        length += amount;
+    }
+    if (length == encoded.len) {
+        var extra: [1]u8 = undefined;
+        if ((file.readStreaming(io, &.{&extra}) catch 0) != 0) return error.InvalidFencingCheckpoint;
+    }
+    return FencingAuthority.decode(encoded[0..length]);
+}
+
+pub fn runWindowsFencingVerification(io: std.Io, absolute_path: []const u8) !void {
+    if (builtin.os.tag != .windows) return error.WindowsFencingStoreRequired;
+    const key: DomainKey = .{ .exchange_account = 2, .decision_domain = 1 };
+    var old_token: u64 = 0;
+    {
+        var first = try WindowsFencingStore.openWindowsVerification(io, absolute_path);
+        defer first.close();
+        var authority = try first.load();
+        var lease = try authority.acquire(key, 1, 1);
+        var guard: GatewayLeaseGuard = .{ .authority = &authority, .lease = &lease };
+        try guard.check(2, lease.token, true);
+        if (WindowsFencingStore.openWindowsVerification(io, absolute_path)) |other| {
+            var duplicate = other;
+            duplicate.close();
+            return error.ConcurrentFencingOwnerAccepted;
+        } else |_| {}
+        old_token = lease.token;
+        try authority.revoke(&lease);
+        if (guard.check(2, old_token, true)) |_| return error.RevokedFencingTokenAccepted else |_| {}
+    }
+
+    var second = try WindowsFencingStore.openWindowsVerification(io, absolute_path);
+    defer second.close();
+    var recovered = try second.load();
+    var next = try recovered.acquire(key, 1, 3);
+    if (next.token <= old_token) return error.FencingTokenDidNotAdvance;
+    try recovered.revoke(&next);
+}
 
 fn syncAuthorityDirectory(dir: std.Io.Dir) !void {
     if (builtin.os.tag == .linux) switch (std.os.linux.errno(std.os.linux.fsync(dir.handle))) {
@@ -480,6 +559,7 @@ pub const GatewayLeaseGuard = struct {
     authority: *FencingAuthority,
     lease: *PrimaryLease,
     recovery_only: bool = false,
+    windows_checkpoint: ?struct { io: std.Io, path: []const u8 } = null,
 
     pub fn renew(self: *GatewayLeaseGuard, now_ns: u64) !void {
         self.authority.renew(self.lease, now_ns) catch |err| {
@@ -491,8 +571,12 @@ pub const GatewayLeaseGuard = struct {
     /// Every send checks the current token. Increasing risk additionally
     /// requires a live monotonic lease; expiry leaves cancel/reduce recovery.
     pub fn check(self: *GatewayLeaseGuard, now_ns: u64, token: u64, increases_risk: bool) !void {
-        if (!self.authority.available or !self.authority.durable) return error.FencingAuthorityUnavailable;
-        if (!self.authority.accepts(self.lease.key, self.lease.node, token) or token != self.lease.token)
+        var current = if (self.windows_checkpoint) |checkpoint|
+            try readWindowsFencingCheckpoint(checkpoint.io, checkpoint.path)
+        else
+            self.authority.*;
+        if (!current.available or !current.durable) return error.FencingAuthorityUnavailable;
+        if (!current.accepts(self.lease.key, self.lease.node, token) or token != self.lease.token)
             return error.StaleFencingToken;
         if (increases_risk and self.recovery_only) return error.RecoveryOnly;
         if (increases_risk and !self.lease.valid(now_ns)) {

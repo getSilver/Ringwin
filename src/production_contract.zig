@@ -52,12 +52,23 @@ pub const SupportMatrixEntry = struct {
 pub const VerificationRuntime = enum { windows };
 pub const windows_verification_runtime = VerificationRuntime.windows;
 pub const VerificationRole = enum { engine, market_feed, execution_gateway, telemetry, control_fence };
-pub const VerificationVenue = enum { simulated };
+pub const VerificationResult = enum { not_run, blocked, failed, passed };
 
 pub const WindowsChainEvidence = struct {
-    windows_process_chain_verified: bool = false,
+    revision: []const u8 = "",
+    environment: Environment = .demo,
+    venue: Venue = .okx,
+    account_scope: []const u8 = "",
+    product: ?canonical.Product = null,
+    strategy: []const u8 = "",
+    configuration: []const u8 = "",
+    offline: VerificationResult = .not_run,
+    read_only: VerificationResult = .not_run,
+    demo_live: VerificationResult = .not_run,
+    role_ownership: VerificationResult = .not_run,
+    durable_recovery: VerificationResult = .not_run,
+    final_reconciliation: VerificationResult = .not_run,
     production_qualification: bool = false,
-    venue: VerificationVenue = .simulated,
     adapter: enum { windows_file } = .windows_file,
     protection: enum { windows_virtual_lock } = .windows_virtual_lock,
     power_loss_qualified: bool = false,
@@ -155,9 +166,13 @@ pub fn windowsChainPermitsProduction(evidence: WindowsChainEvidence) bool {
 }
 
 pub fn isWindowsProcessChainVerified(evidence: WindowsChainEvidence) bool {
-    return evidence.windows_process_chain_verified and
-        !evidence.production_qualification and
-        evidence.venue == .simulated and
+    return !evidence.production_qualification and
+        evidence.environment == .demo and evidence.venue == .okx and
+        evidence.revision.len != 0 and evidence.account_scope.len != 0 and
+        evidence.product != null and evidence.strategy.len != 0 and evidence.configuration.len != 0 and
+        evidence.offline == .passed and evidence.read_only == .passed and evidence.demo_live == .passed and
+        evidence.role_ownership == .passed and evidence.durable_recovery == .passed and
+        evidence.final_reconciliation == .passed and
         !evidence.power_loss_qualified and
         !evidence.linux_admission_equivalent;
 }
@@ -227,12 +242,26 @@ test "Gate.io and Bitget are explicit disabled rows" {
 
 test "Windows verification success cannot permit production" {
     const evidence: WindowsChainEvidence = .{
-        .windows_process_chain_verified = true,
-        .production_qualification = false,
-        .venue = .simulated,
+        .revision = "test-revision",
+        .account_scope = "test-account",
+        .product = .spot,
+        .strategy = "test-strategy",
+        .configuration = "test-config",
+        .offline = .passed,
+        .read_only = .passed,
+        .demo_live = .passed,
+        .role_ownership = .passed,
+        .durable_recovery = .passed,
+        .final_reconciliation = .passed,
     };
     try std.testing.expect(isWindowsProcessChainVerified(evidence));
     try std.testing.expect(!windowsChainPermitsProduction(evidence));
+    var incomplete = evidence;
+    incomplete.demo_live = .not_run;
+    try std.testing.expect(!isWindowsProcessChainVerified(incomplete));
+    incomplete = evidence;
+    incomplete.role_ownership = .failed;
+    try std.testing.expect(!isWindowsProcessChainVerified(incomplete));
     try std.testing.expectEqual(VerificationRuntime.windows, windows_verification_runtime);
     try std.testing.expectEqual(ProductionPlatform.linux, production_platform);
 }

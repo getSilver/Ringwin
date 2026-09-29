@@ -10,6 +10,7 @@ const order = @import("okx_order_entry.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub const max_notional_usdt_micros: u64 = 25_000_000;
+pub const transport_response_origin: u16 = 0x100;
 
 pub const RunMode = enum { replay, demo_dry_run, demo_live };
 
@@ -83,6 +84,7 @@ pub const Chain = struct {
             Sha256.hash(bytes, &digest, .{});
             evidence = try self.raw_sink.append(.{
                 .source_session = response.source_session,
+                .origin = transport_response_origin,
                 .receive_time_utc_ns = response.times.receive_time_utc_ns,
                 .monotonic_time_ns = response.times.monotonic_time_ns,
                 .wall_time_utc_ns = response.times.wall_time_utc_ns,
@@ -161,6 +163,7 @@ const TestTransport = struct {
 
 const TestRawSink = struct {
     calls: u32 = 0,
+    last_origin: u16 = 0,
 
     fn interface(self: *TestRawSink) market.RawSink {
         return .{ .ptr = self, .append_fn = append };
@@ -169,6 +172,7 @@ const TestRawSink = struct {
     fn append(ptr: *anyopaque, record: market.RawIngressRecord, bytes: []const u8) market.RawSinkError!u64 {
         const self: *TestRawSink = @ptrCast(@alignCast(ptr));
         self.calls += 1;
+        self.last_origin = record.origin;
         std.debug.assert(record.byte_len == bytes.len);
         return self.calls;
     }
@@ -251,6 +255,7 @@ test "qualified Demo response is raw-committed before dispatch classification" {
     const result = try chain.dispatch(std.testing.allocator, &commands);
     try std.testing.expectEqual(@as(u32, 1), transport.calls);
     try std.testing.expectEqual(@as(u32, 1), raw.calls);
+    try std.testing.expectEqual(transport_response_origin, raw.last_origin);
     try std.testing.expect(result.raw_evidence != null);
     try std.testing.expectEqual(order.DispatchState.submitted, result.dispatch.items[0].state);
 }

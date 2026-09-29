@@ -14,6 +14,7 @@ pub const max_payload_size = max_payload_len;
 pub const input_flag: u32 = 1;
 pub const segment_header_size = segment_header_len;
 pub const record_header_size = record_header_len;
+pub const footer_size = footer_len;
 
 pub const Record = struct {
     type_id: u16,
@@ -52,7 +53,9 @@ fn get(comptime T: type, source: []const u8, offset: usize) T {
 }
 
 pub const Journal = struct {
-    storage: [16 * 1024]u8 = undefined,
+    // ponytail: one bounded segment covers the Demo round trip; rotate with a
+    // durable snapshot before admitting sustained live traffic.
+    storage: [192 * 1024]u8 = undefined,
     len: usize = segment_header_len,
     records: u64 = 0,
     last_sequence: u64 = 0,

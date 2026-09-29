@@ -11,7 +11,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 const Crc32c = std.hash.crc.Crc32Iscsi;
 
 pub const max_streams = 8;
-pub const max_segment_bytes = 16 * 1024;
+pub const max_segment_bytes = 192 * 1024;
 pub const max_snapshot_bytes = 64 * 1024;
 pub const max_manifest_entries = 32;
 
@@ -71,6 +71,8 @@ pub const Fault = enum {
     corruption,
 };
 
+pub const FaultPoint = enum { any, append, commit, seal, publish };
+
 pub const Recovery = struct {
     status: RecoveryStatus,
     snapshot: []const u8,
@@ -94,6 +96,7 @@ pub const Store = struct {
         publish: *const fn (*anyopaque, std.Io, StreamIdentity, u64, []const u8) anyerror!void,
         recover: *const fn (*anyopaque, std.Io, StreamIdentity) anyerror!Recovery,
         gate: *const fn (*anyopaque) GateState,
+        replay_segments: ?*const fn (*anyopaque, std.Io, StreamIdentity, SegmentConsumer) anyerror!void = null,
     };
 
     pub fn append(self: Store, io: std.Io, request: Append) !void {
@@ -122,6 +125,24 @@ pub const Store = struct {
 
     pub fn safetyGate(self: Store) GateState {
         return self.vtable.gate(self.context);
+    }
+
+    pub fn supportsSegmentReplay(self: Store) bool {
+        return self.vtable.replay_segments != null;
+    }
+
+    pub fn replaySegments(self: Store, io: std.Io, stream: StreamIdentity, consumer: SegmentConsumer) !void {
+        const replay = self.vtable.replay_segments orelse return error.SegmentReplayUnavailable;
+        return replay(self.context, io, stream, consumer);
+    }
+};
+
+pub const SegmentConsumer = struct {
+    ptr: *anyopaque,
+    consume_fn: *const fn (*anyopaque, []const u8) anyerror!void,
+
+    pub fn consume(self: SegmentConsumer, bytes: []const u8) !void {
+        return self.consume_fn(self.ptr, bytes);
     }
 };
 
@@ -232,6 +253,7 @@ pub const MemoryAdapter = struct {
     snapshot_barriers: [max_streams]u64 = @splat(0),
     manifest: [max_manifest_entries]ManifestEntry = @splat(.{}),
     fault: Fault = .none,
+    fault_point: FaultPoint = .any,
     gate: GateState = .open,
 
     pub fn init() MemoryAdapter {
@@ -244,9 +266,17 @@ pub const MemoryAdapter = struct {
 
     pub fn injectFault(self: *MemoryAdapter, fault: Fault) void {
         self.fault = fault;
+        self.fault_point = .any;
     }
 
-    fn fail(self: *MemoryAdapter, fault: Fault) !void {
+    pub fn injectFaultAt(self: *MemoryAdapter, fault: Fault, point: FaultPoint) void {
+        self.fault = fault;
+        self.fault_point = point;
+    }
+
+    fn fail(self: *MemoryAdapter, point: FaultPoint) !void {
+        if (self.fault_point != .any and self.fault_point != point) return;
+        const fault = self.fault;
         faultError(fault) catch |err| {
             self.gate = .closed;
             return err;
@@ -255,7 +285,7 @@ pub const MemoryAdapter = struct {
 
     fn appendImpl(context: *anyopaque, _: std.Io, request: Append) anyerror!void {
         const self: *MemoryAdapter = @ptrCast(@alignCast(context));
-        try self.fail(self.fault);
+        try self.fail(.append);
         if (request.record.schema_version != production_contract.journal_schema_version) {
             self.gate = .closed;
             return error.UnsupportedJournalSchema;
@@ -276,7 +306,7 @@ pub const MemoryAdapter = struct {
 
     fn commitImpl(context: *anyopaque, _: std.Io, identity: StreamIdentity, barrier: u64) anyerror!void {
         const self: *MemoryAdapter = @ptrCast(@alignCast(context));
-        try self.fail(self.fault);
+        try self.fail(.commit);
         const stream = try findStream(&self.streams, identity, false);
         if (barrier == 0 or barrier > stream.journal.last_sequence) {
             self.gate = .closed;
@@ -289,7 +319,7 @@ pub const MemoryAdapter = struct {
 
     fn sealImpl(context: *anyopaque, _: std.Io, identity: StreamIdentity) anyerror!void {
         const self: *MemoryAdapter = @ptrCast(@alignCast(context));
-        try self.fail(self.fault);
+        try self.fail(.seal);
         const stream = try findStream(&self.streams, identity, false);
         stream.journal.seal() catch |err| {
             self.gate = .closed;
@@ -318,7 +348,7 @@ pub const MemoryAdapter = struct {
 
     fn publishImpl(context: *anyopaque, _: std.Io, identity: StreamIdentity, barrier: u64, bytes: []const u8) anyerror!void {
         const self: *MemoryAdapter = @ptrCast(@alignCast(context));
-        try self.fail(self.fault);
+        try self.fail(.publish);
         if (bytes.len > max_snapshot_bytes) {
             self.gate = .closed;
             return error.SnapshotTooLarge;
@@ -388,6 +418,24 @@ pub const LinuxFileAdapter = struct {
 
     pub fn open(io: std.Io, absolute_path: []const u8) !LinuxFileAdapter {
         if (builtin.os.tag != .linux) return error.LinuxStoreRequired;
+        return openPath(io, absolute_path);
+    }
+
+    pub fn openWindowsVerification(io: std.Io, absolute_path: []const u8) !LinuxFileAdapter {
+        if (builtin.os.tag != .windows) return error.WindowsVerificationStoreRequired;
+        return openPath(io, absolute_path);
+    }
+
+    pub fn initWindowsVerification(self: *LinuxFileAdapter, io: std.Io, absolute_path: []const u8) !void {
+        if (builtin.os.tag != .windows) return error.WindowsVerificationStoreRequired;
+        std.Io.Dir.createDirAbsolute(io, absolute_path, .default_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+        self.dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{});
+    }
+
+    fn openPath(io: std.Io, absolute_path: []const u8) !LinuxFileAdapter {
         std.Io.Dir.createDirAbsolute(io, absolute_path, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
@@ -632,7 +680,48 @@ pub const LinuxFileAdapter = struct {
         return @as(*LinuxFileAdapter, @ptrCast(@alignCast(context))).gate;
     }
 
-    const file_vtable: Store.VTable = .{ .append = appendImpl, .commit = commitImpl, .seal = sealImpl, .rotate = rotateImpl, .publish = publishImpl, .recover = recoverImpl, .gate = gateImpl };
+    fn replaySegmentsImpl(context: *anyopaque, io: std.Io, identity: StreamIdentity, consumer: SegmentConsumer) anyerror!void {
+        const self: *LinuxFileAdapter = @ptrCast(@alignCast(context));
+        if (self.gate != .open) return error.DurableStoreClosed;
+        _ = self.loadStream(io, identity, false) catch |err| {
+            self.gate = .closed;
+            return err;
+        };
+        var latest: ?u32 = null;
+        for (self.manifest) |entry| if (entry.used and sameStream(entry.identity, identity)) {
+            latest = @max(latest orelse 0, entry.segment_index);
+        };
+        const last = latest orelse return error.StreamNotFound;
+        var index: u32 = 0;
+        while (index <= last) : (index += 1) {
+            var selected: ?ManifestEntry = null;
+            for (self.manifest) |entry| if (entry.used and sameStream(entry.identity, identity) and entry.segment_index == index) {
+                selected = entry;
+                break;
+            };
+            const entry = selected orelse {
+                self.gate = .closed;
+                return error.ManifestConflict;
+            };
+            if (entry.last_sequence != entry.committed_barrier) {
+                self.gate = .closed;
+                return error.UncommittedReplaySegment;
+            }
+            const name = try segmentName(identity, index);
+            var bytes: [max_segment_bytes]u8 = undefined;
+            const length = readInto(self.dir, io, name.slice(), &bytes) catch |err| {
+                self.gate = .closed;
+                return err;
+            };
+            if (length < entry.byte_len or !std.mem.eql(u8, &entry.digest, &digest(bytes[0..entry.byte_len]))) {
+                self.gate = .closed;
+                return error.ManifestConflict;
+            }
+            try consumer.consume(bytes[0..entry.byte_len]);
+        }
+    }
+
+    const file_vtable: Store.VTable = .{ .append = appendImpl, .commit = commitImpl, .seal = sealImpl, .rotate = rotateImpl, .publish = publishImpl, .recover = recoverImpl, .gate = gateImpl, .replay_segments = replaySegmentsImpl };
 
     fn persistSegment(self: *LinuxFileAdapter, io: std.Io, stream: *Stream, sync: bool) !void {
         const identity = stream.identity;
@@ -775,6 +864,27 @@ fn syncDirectory(dir: std.Io.Dir) !void {
         .INVAL, .BADF, .OPNOTSUPP => std.posix.sync(),
         else => return error.DirectorySyncFailed,
     };
+    if (builtin.os.tag == .windows) {
+        _ = windows_flush(dir.handle);
+    }
+}
+
+pub const WindowsFileAdapter = LinuxFileAdapter;
+
+const windows_nt = if (builtin.os.tag == .windows) struct {
+    extern "kernel32" fn FlushFileBuffers(handle: std.os.windows.HANDLE) callconv(.winapi) i32;
+    extern "kernel32" fn GetLastError() callconv(.winapi) u32;
+    extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) u32;
+} else struct {};
+
+fn windows_flush(handle: std.os.windows.HANDLE) i32 {
+    if (builtin.os.tag != .windows) return 1;
+    return windows_nt.FlushFileBuffers(handle);
+}
+
+fn windows_last_error() u32 {
+    if (builtin.os.tag != .windows) return 0;
+    return windows_nt.GetLastError();
 }
 
 pub fn runLinuxAcceptance(init: std.process.Init) !void {
@@ -832,6 +942,71 @@ pub fn runLinuxAcceptance(init: std.process.Init) !void {
 
 fn cleanupStoreDir(io: std.Io, path: []const u8) void {
     std.Io.Dir.cwd().deleteTree(io, path) catch {};
+}
+
+fn exerciseFileStore(init: std.process.Init, store: Store) !void {
+    const streams = [_]StreamIdentity{
+        .{ .domain = .raw_ingress, .id = 1 },
+        .{ .domain = .decision_log, .id = 2 },
+        .{ .domain = .control, .id = 3 },
+    };
+    var payloads = [_][1]u8{ .{1}, .{2}, .{3} };
+    for (streams, 0..) |stream, index| {
+        try store.append(init.io, .{ .stream = stream, .record = .{ .type_id = @intCast(index + 1), .schema_version = production_contract.journal_schema_version, .flags = 0, .sequence = 1, .source_time = 0, .receive_time = 0, .monotonic_time = 0, .wall_time = 0, .time_presence = .{}, .payload = &payloads[index] } });
+        try store.commit(init.io, stream, 1);
+        try store.seal(init.io, stream);
+        var snapshot: [64]u8 = undefined;
+        @memset(&snapshot, @as(u8, @intCast(index + 7)));
+        try store.publishSnapshot(init.io, stream, 1, &snapshot);
+        try store.rotate(init.io, stream);
+        try store.append(init.io, .{ .stream = stream, .record = .{ .type_id = @intCast(index + 1), .schema_version = production_contract.journal_schema_version, .flags = 0, .sequence = 2, .source_time = 0, .receive_time = 0, .monotonic_time = 0, .wall_time = 0, .time_presence = .{}, .payload = &payloads[index] } });
+        try store.commit(init.io, stream, 2);
+        try store.seal(init.io, stream);
+    }
+}
+
+fn recoverFileStore(init: std.process.Init, store: Store) !void {
+    const streams = [_]StreamIdentity{
+        .{ .domain = .raw_ingress, .id = 1 },
+        .{ .domain = .decision_log, .id = 2 },
+        .{ .domain = .control, .id = 3 },
+    };
+    for (streams) |stream| {
+        const recovered = try store.recover(init.io, stream);
+        if (recovered.status != .ready or recovered.committed_barrier != 2 or recovered.last_sequence != 2 or recovered.snapshot.len != 64 or recovered.tail.len == 0) {
+            return error.DurableRecoveryMismatch;
+        }
+    }
+    var memory = MemoryAdapter.init();
+    const memory_store = memory.interface();
+    memory.injectFault(.short_write);
+    if (memory_store.commit(init.io, streams[0], 1)) |_| return error.FaultInjectionNotObserved else |err| if (err != error.InjectedShortWrite) return err;
+}
+
+pub fn runWindowsAcceptance(init: std.process.Init) !void {
+    if (builtin.os.tag != .windows) return error.WindowsVerificationStoreRequired;
+    var path_buffer: [260]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "C:\\Windows\\Temp\\ringwin-durable-store-{d}", .{windows_nt.GetCurrentProcessId()});
+    cleanupStoreDir(init.io, path);
+    try std.Io.Dir.createDirAbsolute(init.io, path, .default_dir);
+    defer cleanupStoreDir(init.io, path);
+    {
+        var file_store = try WindowsFileAdapter.openWindowsVerification(init.io, path);
+        defer file_store.close(init.io);
+        try exerciseFileStore(init, file_store.interface());
+    }
+    {
+        var file_store = try WindowsFileAdapter.openWindowsVerification(init.io, path);
+        defer file_store.close(init.io);
+        try recoverFileStore(init, file_store.interface());
+    }
+    var stdout_buffer: [512]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+    try stdout.interface.print(
+        "durable_store_acceptance: adapter=windows_file, streams=3, recovery=ready, committed_barriers=6, rotations=3, snapshot=atomic, manifest=verified, faults=memory, power_loss_qualified=false\n",
+        .{},
+    );
+    try stdout.interface.flush();
 }
 
 test "memory and file stores preserve sealed barrier and reject unsafe recovery" {

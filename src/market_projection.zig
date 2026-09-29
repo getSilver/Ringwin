@@ -43,7 +43,7 @@ pub const InstrumentProjection = struct {
             if (delta.previous_sequence == previous.sequence - 1 and std.meta.eql(delta.best_bid, previous.best_bid) and std.meta.eql(delta.best_ask, previous.best_ask)) return;
             return self.gap(.conflicting_delta, error.ConflictingBookDelta);
         }
-        if (delta.previous_sequence != previous.sequence or delta.sequence != previous.sequence + 1)
+        if (delta.previous_sequence != previous.sequence)
             return self.gap(.sequence_gap, error.BookSequenceGap);
         self.last_book = .{
             .instrument = delta.instrument,
@@ -191,4 +191,21 @@ test "definition barrier and L2 continuity are isolated by Instrument" {
     const before_capacity = projection;
     try std.testing.expectError(error.MarketInstrumentCapacityExceeded, projection.apply(.{ .instrument_definition_observed = .{ .instrument = 50, .rules_version = 1 } }));
     try std.testing.expectEqualDeep(before_capacity, projection);
+}
+
+test "book continuity follows the venue predecessor across non-unit sequences" {
+    var projection = Projection{};
+    const definition: canonical.InstrumentDefinitionObserved = .{ .instrument = 10, .rules_version = 3 };
+    try projection.apply(.{ .instrument_definition_observed = definition });
+    try projection.activateRules(definition.instrument, definition.rules_version);
+    const snapshot: canonical.L2BookSnapshot = .{ .instrument = 10, .sequence = 100, .best_bid = .{ .instrument = 10, .rules_version = 3, .ticks = 100 }, .best_ask = .{ .instrument = 10, .rules_version = 3, .ticks = 101 } };
+    try projection.apply(.{ .l2_book_snapshot = snapshot });
+    const delta: canonical.L2BookDelta = .{ .instrument = 10, .previous_sequence = 100, .sequence = 105, .best_bid = snapshot.best_bid, .best_ask = snapshot.best_ask };
+    try projection.apply(.{ .l2_book_delta = delta });
+    try std.testing.expectEqual(@as(canonical.VenueSourceSequence, 105), projection.get(10).?.last_book.?.sequence);
+    var reset = delta;
+    reset.previous_sequence = 105;
+    reset.sequence = 3;
+    try projection.apply(.{ .l2_book_delta = reset });
+    try std.testing.expectEqual(@as(canonical.VenueSourceSequence, 3), projection.get(10).?.last_book.?.sequence);
 }

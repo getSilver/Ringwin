@@ -340,6 +340,21 @@ pub const Decoder = struct {
             .sha256 = raw_hash,
         }, raw);
 
+        return self.decodeCommitted(gpa, times, raw, raw_evidence);
+    }
+
+    /// Reparse bytes already recovered from durable RawIngress. Recovery has
+    /// no sink and cannot append the same frame a second time.
+    pub fn replay(self: *Decoder, gpa: std.mem.Allocator, times: Times, raw_evidence: RawEvidenceRef, raw: []const u8) error{ FrameTooLarge, RawEvidenceMismatch }!IngressBatch {
+        if (raw.len > max_raw_frame_bytes or raw.len > std.math.maxInt(u32)) return error.FrameTooLarge;
+        if (raw_evidence.stream_sequence == 0) return error.RawEvidenceMismatch;
+        var digest: [Sha256.digest_length]u8 = undefined;
+        Sha256.hash(raw, &digest, .{});
+        if (!std.mem.eql(u8, &digest, &raw_evidence.sha256)) return error.RawEvidenceMismatch;
+        return self.decodeCommitted(gpa, times, raw, raw_evidence);
+    }
+
+    fn decodeCommitted(self: *Decoder, gpa: std.mem.Allocator, times: Times, raw: []const u8, raw_evidence: RawEvidenceRef) IngressBatch {
         var batch: IngressBatch = .{ .raw_evidence = raw_evidence };
         const parsed = std.json.parseFromSlice(std.json.Value, gpa, raw, .{}) catch {
             batch.rejection = .malformed_json;
@@ -375,10 +390,13 @@ pub const Decoder = struct {
         if (data.items.len != 1) return error.InvalidField;
         const datum = try asObject(data.items[0]);
 
-        if (std.mem.eql(u8, channel, "books")) {
+        if (std.mem.eql(u8, channel, "books") or std.mem.eql(u8, channel, "books5")) {
             const instrument = try parseInstrument(try stringField(arg_object, "instId"));
-            const action = try stringField(root_object, "action");
-            return self.decodeBook(instrument, action, datum, times, raw_evidence, batch) catch |err| {
+            const compact_snapshot = std.mem.eql(u8, channel, "books5");
+            if (compact_snapshot and root_object.get("action") != null and
+                !std.mem.eql(u8, try stringField(root_object, "action"), "snapshot")) return error.InvalidField;
+            const action = if (compact_snapshot) "snapshot" else try stringField(root_object, "action");
+            return self.decodeBook(instrument, action, datum, times, raw_evidence, batch, compact_snapshot) catch |err| {
                 if (err == error.TooManyEvents) return err;
                 const state = self.bookState(instrument);
                 const last = state.last_sequence;
@@ -502,12 +520,14 @@ pub const Decoder = struct {
         times: Times,
         raw_evidence: RawEvidenceRef,
         batch: *IngressBatch,
+        compact_snapshot: bool,
     ) !void {
         const source_ms = try requiredMillis(datum, "ts");
         const sequence = try integerField(datum, "seqId");
-        const previous = try integerField(datum, "prevSeqId");
+        const previous = if (compact_snapshot) @as(i64, -1) else try integerField(datum, "prevSeqId");
         const bids = try parseBookSide(datum, "bids");
         const asks = try parseBookSide(datum, "asks");
+        if (compact_snapshot and (bids.len > 5 or asks.len > 5)) return error.InvalidField;
         const identity = sourceIdentity("book", instrument, @bitCast(sequence));
         const content_hash = hashBook(action, previous, sequence, &bids, &asks);
         const state = self.bookState(instrument);
@@ -1146,6 +1166,18 @@ const test_times: Times = .{
 
 fn ingestTest(decoder: *Decoder, sink: *TestRawSink, raw: []const u8) !IngressBatch {
     return decoder.ingest(std.testing.allocator, sink.sink(), 7, test_times, raw);
+}
+
+test "books5 snapshot reaches the existing book authority without prevSeqId" {
+    var decoder: Decoder = .{};
+    var sink: TestRawSink = .{};
+    const batch = try ingestTest(&decoder, &sink,
+        \\{"arg":{"channel":"books5","instId":"BTC-USDT"},"data":[{"asks":[["50100","2","0","3"]],"bids":[["50099","1","0","2"]],"ts":"1800000000000","seqId":10}]}
+    );
+    try std.testing.expect(batch.rejection == null);
+    try std.testing.expectEqual(@as(u8, 2), batch.event_count);
+    try std.testing.expect(decoder.isBookHealthy(.btc_usdt_spot));
+    try std.testing.expectEqual(@as(u64, 1), sink.append_count);
 }
 
 test "raw evidence is committed before malformed input is rejected" {

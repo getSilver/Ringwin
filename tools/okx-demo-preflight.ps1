@@ -1,10 +1,13 @@
 [CmdletBinding()]
 param(
-    [string]$EnvFile = (Join-Path $PSScriptRoot '..\.env.local')
+    [string]$EnvFile
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($EnvFile)) {
+    $EnvFile = Join-Path $PSScriptRoot '..\.env.local'
+}
 $MaxNotionalUsdt = 25
 $AllowedInstruments = @('BTC-USDT', 'BTC-USDT-SWAP')
 
@@ -105,6 +108,14 @@ function Invoke-OkxGet([string]$RequestPath) {
 $configResponse = Invoke-OkxGet '/api/v5/account/config'
 if (@($configResponse.data).Count -ne 1) { throw 'Expected one account/config row' }
 $config = $configResponse.data[0]
+$accountUid = [string]$config.uid
+if ([string]::IsNullOrWhiteSpace($accountUid)) { throw 'Account UID missing from account/config' }
+$sha = [Security.Cryptography.SHA256]::Create()
+try {
+    $accountUidHash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($accountUid))).Replace('-', '').ToLowerInvariant()
+} finally {
+    $sha.Dispose()
+}
 $permissions = @([string]$config.perm -split ',' | ForEach-Object { $_.Trim().ToLowerInvariant() })
 if ('trade' -notin $permissions -or ('read_only' -notin $permissions -and 'read' -notin $permissions)) {
     throw 'Demo API key must have Read and Trade permissions'
@@ -138,16 +149,19 @@ $algoOrders = @(@('conditional', 'oco', 'trigger', 'move_order_stop', 'iceberg',
 if ($algoOrders.Count -ne 0) { throw "Preflight requires zero pending algo orders; found $($algoOrders.Count)" }
 
 $balanceRows = @( (Invoke-OkxGet '/api/v5/account/balance').data )
-$liabilities = @($balanceRows | ForEach-Object { @($_.details) } | Where-Object {
+$targetBalanceRows = @( (Invoke-OkxGet '/api/v5/account/balance?ccy=BTC,USDT').data )
+$balanceDetails = @($balanceRows + $targetBalanceRows | ForEach-Object { @($_.details) })
+$liabilities = @($balanceDetails | Where-Object {
     -not (Test-Zero $_.liab) -or -not (Test-Zero $_.isoLiab) -or -not (Test-Zero $_.crossLiab)
 })
 if ($liabilities.Count -ne 0) { throw "Preflight requires zero liabilities; found $($liabilities.Count)" }
 
-$nonZeroCurrencies = @($balanceRows | ForEach-Object { @($_.details) } | Where-Object { -not (Test-Zero $_.eq) } | ForEach-Object { [string]$_.ccy } | Sort-Object -Unique)
+$nonZeroCurrencies = @($balanceDetails | Where-Object { -not (Test-Zero $_.eq) } | ForEach-Object { [string]$_.ccy } | Sort-Object -Unique)
 [ordered]@{
     qualified = $true
     environment = 'demo'
     entity = $entity
+    account_uid_sha256 = $accountUidHash
     rest_host = $baseUri.Host
     simulated_header = 1
     clock_offset_ms = $clockOffsetMs

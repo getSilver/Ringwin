@@ -138,7 +138,7 @@ fn replayCommittedOkx(implementation: *okx.OkxVenueAdapter, raw_store: durable.S
                 try self.drain();
             }
             const source: private.IngressSource = @enumFromInt(record.origin - 1);
-            try std.testing.expect((try self.implementation.replayPrivateRest(times, source, evidence, bytes)).rejection == null);
+            try std.testing.expect((try self.implementation.replayPrivateRest(times, source, .{ .final = true }, evidence, bytes)).rejection == null);
             try self.drain();
         }
     };
@@ -190,7 +190,7 @@ fn replayCommittedFillTail(implementation: *okx.OkxVenueAdapter, raw_store: dura
                 try self.drain(sequence);
             }
             const source: private.IngressSource = @enumFromInt(record.origin - 1);
-            try std.testing.expect((try self.implementation.replayPrivateRest(times, source, evidence, bytes)).rejection == null);
+            try std.testing.expect((try self.implementation.replayPrivateRest(times, source, .{ .final = true }, evidence, bytes)).rejection == null);
             try self.drain(sequence);
         }
     };

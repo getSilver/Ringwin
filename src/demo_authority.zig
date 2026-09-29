@@ -46,6 +46,14 @@ pub const Policy = struct {
     /// Virgin startup derives cash only from a complete private account
     /// snapshot; existing BTC/derivative exposure requires recovery instead.
     pub fn initialize(self: Policy, owner: *Owner, mark_price_micros: i64, guard: *failover.GatewayLeaseGuard, now_ns: u64, adapter_session: u64) !void {
+        try self.initializePendingHost(owner, mark_price_micros, guard, now_ns, adapter_session);
+        const barrier = owner.shard.trace.len;
+        try self.activateHost(owner, .{ .fencing = guard.lease.token, .shard = 0, .generation = 1 }, barrier, owner.shard.canonicalStateDigest());
+    }
+
+    /// The process-chain variant waits for a real ManagedHost recovery and
+    /// activation handshake before sealing the decision owner as ready.
+    pub fn initializePendingHost(self: Policy, owner: *Owner, mark_price_micros: i64, guard: *failover.GatewayLeaseGuard, now_ns: u64, adapter_session: u64) !void {
         if (owner.ready or owner.closed or owner.shard.trace.len == 0 or
             owner.stream.id != self.decision_stream_id or mark_price_micros <= 0 or
             now_ns == 0 or adapter_session == 0 or
@@ -98,7 +106,7 @@ pub const Policy = struct {
             .activation_identity = self.activation_identity,
         } });
         try core(owner, 10, .{ .primary_lease_granted = .{ .fencing_token = guard.lease.token } });
-        const risk_valid_through = std.math.add(u64, owner.shard.trace.len, 32) catch return error.InvalidDemoBootstrap;
+        const risk_valid_through = std.math.add(u64, owner.shard.trace.len, 128) catch return error.InvalidDemoBootstrap;
         try core(owner, 11, .{ .risk_lease_granted = .{
             .lease_identity = 11,
             .version = 1,
@@ -133,7 +141,7 @@ pub const Policy = struct {
             .rules_version = 1,
             .config_version = self.config_version,
             .adapter_session = adapter_session,
-            .max_dispatch_age_ns = std.time.ns_per_s,
+            .max_dispatch_age_ns = 15 * std.time.ns_per_s,
             .supports_place = true,
             .supports_cancel = true,
             .supports_native_amend = false,
@@ -141,13 +149,28 @@ pub const Policy = struct {
             .supports_post_only = true,
             .supports_market_protection = true,
         } });
-        const digest = owner.shard.canonicalStateDigest();
+    }
+
+    pub fn activateHost(self: Policy, owner: *Owner, session: @import("strategy_host_ipc.zig").Session, barrier: u64, digest: [32]u8) !void {
+        if (owner.ready or owner.closed or barrier == 0 or barrier != owner.shard.trace.len or
+            !std.mem.eql(u8, &digest, &owner.shard.canonicalStateDigest()) or
+            owner.shard.strategy_identity != self.strategy_identity or
+            owner.shard.strategy_config_version != self.config_version or
+            owner.shard.strategy_activation_identity != self.activation_identity or
+            session.fencing == 0 or session.fencing != owner.shard.fencing_token or session.generation == 0)
+            return error.InvalidHostActivation;
+        const core = struct {
+            fn put(target: *Owner, identity: u64, payload: trading.CorePayload) !void {
+                if (try target.apply(.{ .core = .{ .identity = identity, .payload = payload } }) != null)
+                    return error.UnexpectedDemoOrder;
+            }
+        }.put;
         try core(owner, 17, .{ .host_activated = .{
             .strategy_identity = self.strategy_identity,
             .config_version = self.config_version,
             .activation_identity = self.activation_identity,
-            .session = .{ .fencing = guard.lease.token, .shard = 0, .generation = 1 },
-            .activation_barrier = owner.shard.trace.len,
+            .session = session,
+            .activation_barrier = barrier,
             .state_digest = digest,
         } });
         try owner.sealBootstrap();
@@ -280,31 +303,63 @@ pub const Owner = struct {
         return &self.shard;
     }
 
+    /// A read-only, schema-checked copy for the execution role. The source
+    /// remains the committed decision owner; this copy grants no send ability.
+    pub fn committedSnapshot(self: *const Owner, destination: []u8) ![]const u8 {
+        const shard = try self.source();
+        var sealed = self.decision_journal;
+        try sealed.seal();
+        return shard.snapshot(&sealed, shard.trace.len, destination);
+    }
+
     pub fn send(self: *const Owner, gateway: *execution.Gateway, guard: *failover.GatewayLeaseGuard, command_id: u64, now_monotonic_ns: u64) !venue.SendResult {
         const shard = try self.source();
-        var command: ?trading.OrderCommand = null;
-        for (shard.oms.command_history[0..shard.oms.command_history_count]) |known| {
-            if (known.command_id == command_id) {
-                command = known;
-                break;
-            }
-        }
-        const current = command orelse return error.NotSent;
-        requireSafeDemoExposure(&shard.canonical_account, current.side == .sell) catch return error.NotSent;
-        const position = shard.currentNetExchangePosition(current.instrument) orelse return error.NotSent;
-        try gateway.observeAuthority(.{
-            .account = shard.exchange_account_identity,
-            .effective_trading_authority = shard.operational_state.effectiveTradingAuthority(),
-            .reservation_identity = current.reservation_identity,
-            .reservation = current.reservation,
-            .primary_lease_expires_at_monotonic_ns = guard.lease.expires_at_ns,
-            .fencing_token = guard.lease.token,
-            .exchange_position = position,
-            .authority_barrier = shard.trace.len,
-        });
-        return gateway.sendFromShard(shard, command_id, now_monotonic_ns);
+        return sendFromShard(shard, gateway, guard, command_id, now_monotonic_ns);
     }
 };
+
+/// The execution process accepts only a sealed decision snapshot whose barrier
+/// and digest were supplied by the decision owner on the authenticated channel.
+/// The lease guard and durable dispatch store still belong to the execution process.
+pub fn sendFromCommittedSnapshot(
+    bytes: []const u8,
+    expected_barrier: u64,
+    expected_digest: [32]u8,
+    gateway: *execution.Gateway,
+    guard: *failover.GatewayLeaseGuard,
+    command_id: u64,
+    now_monotonic_ns: u64,
+) !venue.SendResult {
+    const restored = try trading.TradingShard.restoreSnapshot(bytes);
+    if (restored.barrier != expected_barrier or
+        !std.mem.eql(u8, &restored.shard.canonicalStateDigest(), &expected_digest))
+        return error.DecisionSnapshotMismatch;
+    return sendFromShard(&restored.shard, gateway, guard, command_id, now_monotonic_ns);
+}
+
+fn sendFromShard(shard: *const trading.TradingShard, gateway: *execution.Gateway, guard: *failover.GatewayLeaseGuard, command_id: u64, now_monotonic_ns: u64) !venue.SendResult {
+    var command: ?trading.OrderCommand = null;
+    for (shard.oms.command_history[0..shard.oms.command_history_count]) |known| {
+        if (known.command_id == command_id) {
+            command = known;
+            break;
+        }
+    }
+    const current = command orelse return error.NotSent;
+    requireSafeDemoExposure(&shard.canonical_account, current.side == .sell) catch return error.NotSent;
+    const position = shard.currentNetExchangePosition(current.instrument) orelse return error.NotSent;
+    try gateway.observeAuthority(.{
+        .account = shard.exchange_account_identity,
+        .effective_trading_authority = shard.operational_state.effectiveTradingAuthority(),
+        .reservation_identity = current.reservation_identity,
+        .reservation = current.reservation,
+        .primary_lease_expires_at_monotonic_ns = guard.lease.expires_at_ns,
+        .fencing_token = guard.lease.token,
+        .exchange_position = position,
+        .authority_barrier = shard.trace.len,
+    });
+    return gateway.sendFromShard(shard, command_id, now_monotonic_ns);
+}
 
 fn requireSafeDemoExposure(account: *const @import("account_projection.zig").AccountProjection, allow_btc: bool) !void {
     if (!account.valid or account.margin_count != 1) return error.InvalidDemoAccount;
@@ -347,6 +402,10 @@ fn requireSafeDemoExposure(account: *const @import("account_projection.zig").Acc
     }
     // OKX full balance snapshots list nonzero assets only; absent BTC is zero.
     if (!saw_usdt) return error.InvalidDemoAccount;
+}
+
+pub fn requireZeroDemoExposure(account: *const @import("account_projection.zig").AccountProjection) !void {
+    return requireSafeDemoExposure(account, false);
 }
 
 test "Demo owner commits before publication and recovers only a complete barrier" {
@@ -393,8 +452,24 @@ test "Demo owner commits before publication and recovers only a complete barrier
     var adapter_output: canonical.AdapterOutputBatch = .{};
     try adapter_output.append(account_snapshot.venue);
     try owner.applyAdapterBatch(adapter_output);
+    for (0..canonical.max_account_facts + 1) |index| {
+        const sequence: u64 = @intCast(index + 2);
+        _ = try owner.apply(fixture.canonicalAt(3 + sequence, sequence, .{ .account_observed = .{
+            .identity = 100 + index,
+            .exchange_account = 2,
+            .bootstrap = 1,
+            .source_stream = 1,
+            .source_sequence = sequence,
+            .value = .{ .margin = .{ .value = .{ .amount = .{ .asset = 0x55534454, .atoms = 100 } } } },
+        } }));
+    }
     restored = try Owner.recover(memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &(try restored.source()).canonicalStateDigest());
+    var snapshot_storage: [durable.max_snapshot_bytes]u8 = undefined;
+    const snapshot = try owner.committedSnapshot(&snapshot_storage);
+    const snapshot_copy = try trading.TradingShard.restoreSnapshot(snapshot);
+    try std.testing.expectEqual(owner.shard.trace.len, snapshot_copy.barrier);
+    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &snapshot_copy.shard.canonicalStateDigest());
     try std.testing.expect((try restored.source()).canonical_account.valid);
     try std.testing.expectEqual(@as(i128, 123), (try restored.source()).currentNetExchangePosition(3).?.lots);
     var invalid = fixture.canonicalAt(3, 2, .{ .account_bootstrap_snapshot = .{
@@ -413,6 +488,38 @@ test "Demo owner commits before publication and recovers only a complete barrier
     memory.injectFault(.eio);
     try std.testing.expectError(error.DecisionLogUnavailable, owner.apply(genesis[2]));
     try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
+    try std.testing.expectError(error.DecisionLogUnavailable, owner.committedSnapshot(&snapshot_storage));
+}
+
+test "Demo owner closes persistence faults at their last proven barrier" {
+    const fixture = @import("trading_shard_fixture.zig");
+    const host = @import("strategy_host_gateway.zig");
+    const authorization: host.Authorization = .{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 1 };
+    const genesis = fixture.genesisEvents(authorization, .cash);
+    const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 93 };
+    const Case = struct { point: durable.FaultPoint, seal: bool, expected_last: u64, expected_barrier: u64 };
+    const cases = [_]Case{
+        .{ .point = .append, .seal = false, .expected_last = 0, .expected_barrier = 0 },
+        .{ .point = .commit, .seal = false, .expected_last = 1, .expected_barrier = 0 },
+        .{ .point = .publish, .seal = true, .expected_last = 1, .expected_barrier = 1 },
+    };
+    for (cases) |case| {
+        var memory = durable.MemoryAdapter.init();
+        var owner = try Owner.bootstrap(memory.interface(), undefined, stream);
+        if (case.seal) {
+            _ = try owner.apply(genesis[0]);
+            memory.injectFaultAt(.eio, case.point);
+            try std.testing.expectError(error.DecisionLogUnavailable, owner.sealBootstrap());
+        } else {
+            memory.injectFaultAt(.eio, case.point);
+            try std.testing.expectError(error.DecisionLogUnavailable, owner.apply(genesis[0]));
+        }
+        const recovered = try memory.interface().recover(undefined, stream);
+        try std.testing.expectEqual(durable.GateState.closed, memory.interface().safetyGate());
+        try std.testing.expectEqual(case.expected_last, recovered.last_sequence);
+        try std.testing.expectEqual(case.expected_barrier, recovered.committed_barrier);
+        try std.testing.expectError(error.DecisionLogUnavailable, Owner.recover(memory.interface(), undefined, stream));
+    }
 }
 
 test "Demo policy drives buy and fault cleanup through one durable Gateway" {
@@ -503,7 +610,16 @@ test "Demo policy drives buy and fault cleanup through one durable Gateway" {
     try std.testing.expectError(error.InvalidDemoLease, parsed.value.initialize(&owner, 50_000_000, &guard, 1, 1));
     try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
     authority.available = true;
-    try parsed.value.initialize(&owner, 50_000_000, &guard, 1, 1);
+    try parsed.value.initializePendingHost(&owner, 50_000_000, &guard, 1, 1);
+    try std.testing.expect(owner.shard.risk_lease_valid_through_barrier >= owner.shard.trace.len + 100);
+    try std.testing.expectEqual(@as(u64, 15 * std.time.ns_per_s), owner.shard.registryInstrument(okx.btc_usdt_spot).?.capability.?.max_dispatch_age_ns);
+    try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
+    const activation_barrier = owner.shard.trace.len;
+    const activation_digest = owner.shard.canonicalStateDigest();
+    const host_session: @import("strategy_host_ipc.zig").Session = .{ .fencing = lease.token, .shard = 0, .generation = 1 };
+    try std.testing.expectError(error.InvalidHostActivation, parsed.value.activateHost(&owner, host_session, activation_barrier + 1, activation_digest));
+    try std.testing.expectError(error.InvalidHostActivation, parsed.value.activateHost(&owner, .{ .fencing = lease.token, .shard = 0, .generation = 0 }, activation_barrier, activation_digest));
+    try parsed.value.activateHost(&owner, host_session, activation_barrier, activation_digest);
     _ = try owner.apply(fixture.canonicalAt(18, 2, .{ .instrument_definition_observed = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1 } }));
     var book = fixture.snapshotAt(19, 3);
     book.venue.event.l2_book_snapshot.instrument = okx.btc_usdt_spot;
@@ -575,7 +691,15 @@ test "Demo policy drives buy and fault cleanup through one durable Gateway" {
     try std.testing.expectEqual(@import("trading_shard_event.zig").RejectReason.none, owner.shard.last_reject_reason);
     const command = maybe_command orelse return error.MissingDemoCommand;
     try std.testing.expectEqual(@as(i128, 500), command.limit_price.ticks);
-    try std.testing.expectEqual(venue.SendResult.accepted, try owner.send(&gateway, &guard, command.command_id, 2));
+    var snapshot_storage: [durable.max_snapshot_bytes]u8 = undefined;
+    const committed = try owner.committedSnapshot(&snapshot_storage);
+    const digest = owner.shard.canonicalStateDigest();
+    var wrong_digest = digest;
+    wrong_digest[0] ^= 1;
+    try std.testing.expectError(error.DecisionSnapshotMismatch, sendFromCommittedSnapshot(committed, owner.shard.trace.len, wrong_digest, &gateway, &guard, command.command_id, 2));
+    try std.testing.expectError(error.DecisionSnapshotMismatch, sendFromCommittedSnapshot(committed, owner.shard.trace.len + 1, digest, &gateway, &guard, command.command_id, 2));
+    try std.testing.expectEqual(@as(u64, 0), spy.sends);
+    try std.testing.expectEqual(venue.SendResult.accepted, try sendFromCommittedSnapshot(committed, owner.shard.trace.len, digest, &gateway, &guard, command.command_id, 2));
     try std.testing.expectEqual(@as(u64, 1), spy.sends);
     // The spy deliberately emits no dispatch result: model a failure after the
     // external buy effect, then recover authoritative facts before cleanup.

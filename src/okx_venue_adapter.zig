@@ -176,12 +176,12 @@ pub const OkxVenueAdapter = struct {
 
     /// Reparse one already-durable private REST page through the same
     /// reconciliation state machine, without another RawIngress append.
-    pub fn replayPrivateRest(self: *OkxVenueAdapter, times: private.Times, source: private.IngressSource, evidence: private.RawEvidenceRef, raw: []const u8) !private.IngressBatch {
+    pub fn replayPrivateRest(self: *OkxVenueAdapter, times: private.Times, source: private.IngressSource, page: private.Page, evidence: private.RawEvidenceRef, raw: []const u8) !private.IngressBatch {
         if (source.isWebSocket()) return error.InvalidReplayRoute;
         try self.requireReplayCapacity();
         const binding = self.binding orelse return error.InvalidBinding;
         const reconciler = self.reconciler orelse return error.MissingPrivateReconciler;
-        var batch = try reconciler.replayRest(self.allocator, @intCast(binding.session), times, source, .{ .final = true }, evidence, raw);
+        var batch = try reconciler.replayRest(self.allocator, @intCast(binding.session), times, source, page, evidence, raw);
         if (batch.rejection == null) {
             try self.queueReadyPrivate(batch.eventSlice());
             batch.event_count = 0;
@@ -331,7 +331,8 @@ pub const OkxVenueAdapter = struct {
         var output: canonical.AdapterOutputBatch = .{};
         while (self.pending_private_count != 0 and output.events.len - output.len >= 8) {
             const event = self.pending_private[0];
-            self.translatePrivate(&output, event) catch {
+            self.translatePrivate(&output, event, false) catch |err| {
+                std.debug.print("okx_private_translate_failed={s}\n", .{@errorName(err)});
                 self.private_failed = true;
                 self.finishPrivateFailure(&output);
                 break;
@@ -353,7 +354,9 @@ pub const OkxVenueAdapter = struct {
                 self.finishPrivateBatch(&output);
                 break;
             };
-            self.translatePrivate(&output, event) catch {
+            self.translatePrivate(&output, event, true) catch |err| {
+                std.debug.print("okx_private_reconciled_translate_failed={s}\n", .{@errorName(err)});
+                self.private_failed = true;
                 self.finishPrivateFailure(&output);
                 break;
             };
@@ -433,10 +436,10 @@ pub const OkxVenueAdapter = struct {
         };
     }
 
-    fn translatePrivate(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, event: private.PrivateEvent) !void {
+    fn translatePrivate(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, event: private.PrivateEvent, historical: bool) !void {
         switch (event.payload) {
-            .execution_report => |report| try self.translateReport(output, event.envelope, report),
-            .fill => |fill| try self.translateFill(output, event.envelope, fill),
+            .execution_report => |report| try self.translateReport(output, event.envelope, report, historical),
+            .fill => |fill| try self.translateFill(output, event.envelope, fill, historical),
             .exchange_balance_snapshot => |snapshot| if (snapshot.scope == .full_rest) {
                 self.bootstrap.balance = event;
                 try self.emitBootstrap(output);
@@ -453,9 +456,12 @@ pub const OkxVenueAdapter = struct {
         }
     }
 
-    fn translateReport(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, envelope: private.EventEnvelope, report: private.ExecutionReport) !void {
+    fn translateReport(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, envelope: private.EventEnvelope, report: private.ExecutionReport, historical: bool) !void {
         if (!report.owned_by_ringwin) return;
-        const link = self.findOrderByClient(report.client_order_id.slice()) orelse return error.UnmappedOrder;
+        const link = self.findOrderByClient(report.client_order_id.slice()) orelse {
+            if (historical and (report.status == .filled or report.status == .canceled)) return;
+            return error.UnmappedOrder;
+        };
         const rules = self.mapPrivateInstrument(report.instrument) orelse return error.UnsupportedInstrument;
         const quantity = try self.privateQuantity(rules.identity, rules.rules, report.quantity);
         const cumulative = try self.privateQuantity(rules.identity, rules.rules, report.cumulative_filled_quantity);
@@ -509,9 +515,12 @@ pub const OkxVenueAdapter = struct {
         self.observeOrder(report.venue_order_id, link.order, report.status, cumulative, envelope);
     }
 
-    fn translateFill(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, envelope: private.EventEnvelope, fill: private.Fill) !void {
+    fn translateFill(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, envelope: private.EventEnvelope, fill: private.Fill, historical: bool) !void {
         if (!fill.owned_by_ringwin) return;
-        const link = self.findOrderByClient(fill.client_order_id.slice()) orelse return error.UnmappedOrder;
+        const link = self.findOrderByClient(fill.client_order_id.slice()) orelse {
+            if (historical) return;
+            return error.UnmappedOrder;
+        };
         const rules = self.mapPrivateInstrument(fill.instrument) orelse return error.UnsupportedInstrument;
         const binding = self.binding orelse return error.InvalidBinding;
         const venue_order = try venueOrderRef(binding.venue, @intFromEnum(fill.venue_order_id));
@@ -692,6 +701,7 @@ pub const OkxVenueAdapter = struct {
             return;
         };
         const translated = self.translate(command, legacy_id) catch |err| {
+            std.debug.print("okx_translate_order_failed={s}\n", .{@errorName(err)});
             self.appendResult(command, .not_sent, translateError(err), null);
             return;
         };
@@ -1042,7 +1052,12 @@ fn assetScale(asset: canonical.AssetIdentity) !u8 {
 }
 
 fn assetAmount(asset: canonical.AssetIdentity, value: private.Decimal) !canonical.AssetAmount {
-    return canonical.AssetAmount.fromDecimal(asset, decimal(value), try assetScale(asset));
+    return accountAssetAmount(asset, value, false);
+}
+
+test "OKX USDT sell fee keeps sub-micro cost conservatively" {
+    const fee = try assetAmount(usdt, try private.Decimal.parse("-0.004198632165"));
+    try std.testing.expectEqual(@as(i128, -4_199), fee.atoms);
 }
 
 fn accountAssetAmount(asset: canonical.AssetIdentity, value: private.Decimal, round_up: bool) !canonical.AssetAmount {
@@ -1115,9 +1130,23 @@ fn decimalFor(units: i128, increment: canonical.Decimal) !order.Decimal {
 
 fn notionalMicros(quantity: order.Decimal, price: order.Decimal) !u64 {
     const product = canonical.Decimal{ .coefficient = try std.math.mul(i128, quantity.coefficient, price.coefficient), .scale = try std.math.add(u8, quantity.scale, price.scale) };
-    const micros = try product.exactAtoms(6);
-    if (micros <= 0) return error.InvalidNotional;
+    if (product.coefficient <= 0) return error.InvalidNotional;
+    const micros = product.exactAtoms(6) catch |err| switch (err) {
+        error.InexactDecimal => blk: {
+            var divisor: i128 = 1;
+            for (0..product.scale - 6) |_| divisor = try std.math.mul(i128, divisor, 10);
+            break :blk @divTrunc(product.coefficient, divisor) + @intFromBool(@rem(product.coefficient, divisor) != 0);
+        },
+        else => return err,
+    };
     return std.math.cast(u64, micros) orelse error.InvalidNotional;
+}
+
+test "OKX fee-reduced spot sell rounds dispatch notional up for the Demo cap" {
+    try std.testing.expectEqual(@as(u64, 4_194_622), try notionalMicros(
+        .{ .coefficient = 4_995, .scale = 8 },
+        .{ .coefficient = 839_764, .scale = 1 },
+    ));
 }
 
 fn dispatchState(value: order.DispatchState) canonical.DispatchState {
@@ -1382,6 +1411,14 @@ test "OKX adapter releases ready private WS facts through the canonical seam" {
         found = true;
     };
     try std.testing.expect(found);
+    try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .account_reconciliation = .{ .identity = 100, .exchange_account = 2, .expected_session = 6 } }));
+    _ = (try adapter.tryDrain()).?;
+    try ingestOkxBootstrapRound(&implementation);
+    while (try adapter.tryDrain()) |_| {}
+    try ingestOkxBootstrapRound(&implementation);
+    while (try adapter.tryDrain()) |_| {}
+    try std.testing.expect(reconciler.readiness().reconciliation_ready);
+    try std.testing.expect(implementation.pending_account_reconciliation == null);
 }
 
 test "OKX private facts normalize fee signs into canonical execution fill and account facts" {
@@ -1417,7 +1454,7 @@ test "OKX private facts normalize fee signs into canonical execution fill and ac
         .last_trade_id = @enumFromInt(2001),
         .venue_update_time_utc_ns = 1,
         .owned_by_ringwin = true,
-    } } });
+    } } }, false);
     try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(2, 2), .payload = .{ .fill = .{
         .venue_trade_id = @enumFromInt(2001),
         .venue_bill_id = @enumFromInt(3001),
@@ -1435,7 +1472,7 @@ test "OKX private facts normalize fee signs into canonical execution fill and ac
         .liquidity = .maker,
         .venue_fill_time_utc_ns = 1,
         .owned_by_ringwin = true,
-    } } });
+    } } }, false);
     try std.testing.expectEqual(@as(u8, 2), output.len);
     try std.testing.expectEqualStrings("RWN-16", output.events[0].event.execution_report.client_order_id.slice());
     try std.testing.expectEqual(canonical.ExecutionReportStatus.partially_filled, output.events[0].event.execution_report.status);
@@ -1455,9 +1492,9 @@ test "OKX private facts normalize fee signs into canonical execution fill and ac
     positions.position_count = 0;
     positions.includes_zero_positions = true;
     const margin: private.ExchangeMarginSnapshot = .{ .scope = .full_rest, .venue_update_time_utc_ns = 1, .total_equity_usd = try private.Decimal.parse("25"), .adjusted_equity_usd = try private.Decimal.parse("25"), .initial_margin_usd = try private.Decimal.parse("1"), .maintenance_margin_usd = try private.Decimal.parse("0.5"), .margin_ratio = try private.Decimal.parse("0.1"), .isolated_equity_usd = try private.Decimal.parse("25") };
-    try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(3, 3), .payload = .{ .exchange_balance_snapshot = balance } });
-    try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(4, 4), .payload = .{ .exchange_position_snapshot = positions } });
-    try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(5, 5), .payload = .{ .exchange_margin_snapshot = margin } });
+    try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(3, 3), .payload = .{ .exchange_balance_snapshot = balance } }, false);
+    try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(4, 4), .payload = .{ .exchange_position_snapshot = positions } }, false);
+    try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(5, 5), .payload = .{ .exchange_margin_snapshot = margin } }, false);
     try std.testing.expectEqual(@as(u8, 1), output.events[2].event.account_bootstrap_snapshot.balance_count);
     try std.testing.expectEqual(@as(i128, 25_000_000), output.events[2].event.account_bootstrap_snapshot.balances[0].total.atoms);
     try std.testing.expectEqual(@as(i128, 100_000), output.events[2].event.account_bootstrap_snapshot.balances[0].liability.?.atoms);
@@ -1471,7 +1508,7 @@ test "OKX private facts normalize fee signs into canonical execution fill and ac
     observed_positions.position_count = 1;
     observed_positions.includes_zero_positions = true;
     observed_positions.positions[0] = .{ .venue_position_id = @enumFromInt(1), .instrument = .btc_usdt_swap, .margin_mode = .isolated, .position_side = .net, .quantity = try private.Decimal.parse("1"), .average_price = try private.Decimal.parse("50000"), .mark_price = try private.Decimal.parse("50001"), .liquidation_price = try private.Decimal.parse("40000"), .margin = try private.Decimal.parse("2"), .leverage = try private.Decimal.parse("3"), .unrealized_pnl = try private.Decimal.parse("1"), .venue_update_time_utc_ns = 1 };
-    try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(6, 6), .payload = .{ .exchange_position_snapshot = observed_positions } });
+    try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(6, 6), .payload = .{ .exchange_position_snapshot = observed_positions } }, false);
     const observed = output.events[3].event.account_observed.value.position;
     try std.testing.expectEqual(@as(i128, 500_010), observed.value.mark_price.?.ticks);
     try std.testing.expectEqual(@as(i128, 2_000_000), observed.value.margin.?.atoms);

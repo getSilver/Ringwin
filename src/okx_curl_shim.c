@@ -94,6 +94,9 @@ int ringwin_curl_request(const char *url, const char *method,
      curl_easy_setopt(easy, CURLOPT_WRITEDATA, &response) != CURLE_OK ||
      curl_easy_setopt(easy, CURLOPT_CONNECTTIMEOUT_MS, 5000L) != CURLE_OK ||
      curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, 10000L) != CURLE_OK ||
+#ifdef __linux__
+     curl_easy_setopt(easy, CURLOPT_CAINFO, "/etc/ssl/certs/ca-certificates.crt") != CURLE_OK ||
+#endif
      curl_easy_setopt(easy, CURLOPT_NOSIGNAL, 1L) != CURLE_OK) {
     curl_slist_free_all(list);
     curl_easy_cleanup(easy);
@@ -126,10 +129,13 @@ void *ringwin_ws_create(const char *url, const char *proxy) {
      curl_easy_setopt(ws->easy, CURLOPT_URL, url) != CURLE_OK ||
      curl_easy_setopt(ws->easy, CURLOPT_PROTOCOLS_STR, "wss") != CURLE_OK ||
      curl_easy_setopt(ws->easy, CURLOPT_CONNECT_ONLY, 2L) != CURLE_OK ||
-     curl_easy_setopt(ws->easy, CURLOPT_CONNECTTIMEOUT_MS, 10000L) != CURLE_OK ||
+     curl_easy_setopt(ws->easy, CURLOPT_CONNECTTIMEOUT_MS, 30000L) != CURLE_OK ||
      curl_easy_setopt(ws->easy, CURLOPT_SSL_VERIFYPEER, 1L) != CURLE_OK ||
      curl_easy_setopt(ws->easy, CURLOPT_SSL_VERIFYHOST, 2L) != CURLE_OK ||
      (proxy && curl_easy_setopt(ws->easy, CURLOPT_PROXY, proxy) != CURLE_OK) ||
+#ifdef __linux__
+     curl_easy_setopt(ws->easy, CURLOPT_CAINFO, "/etc/ssl/certs/ca-certificates.crt") != CURLE_OK ||
+#endif
      curl_multi_add_handle(ws->multi, ws->easy) != CURLM_OK) {
     if(ws->multi) curl_multi_cleanup(ws->multi);
     if(ws->easy) curl_easy_cleanup(ws->easy);

@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "observed_at_utc": "2026-09-27 06:22:47 UTC",
+  "base_git_revision": "eeee984f2913bfedd54e6ac19609acf490d35bdf",
+  "worktree_clean": false,
+  "zig": "0.17.0-dev.315+5b647b792",
+  "environment": "offline_windows_okx_fixture",
+  "account_identity": "sha256:e52bb9f5cda58fc03db5ba5b93de42450d7d69030d618c8dd8aae4adc5b70952",
+  "product_scope": [
+    "BTC-USDT spot"
+  ],
+  "source_sha256": {
+    "src/okx_demo_live_acceptance.zig": "384e62f449949573c2f94d883f09f0eaf0e716f55f5277adc99fe4bbdb7cd537",
+    "src/demo_authority.zig": "08e30286d0170e0882cb2f4e31edaf84b78a2208cdd2307d8fcaa227757e4cb0",
+    "src/execution_gateway.zig": "2432e1ddeaea445c1bdaa169f84b176f12758619720a6ca56afc442666f88296",
+    "src/failover.zig": "3873c855aa061aef113b2deb6ed0a608f093112bde4196d9627812f56e498000",
+    "src/windows_verification_runtime.zig": "a17af1a669a5f340feb50a41e8dc7cd40b4cfeb72f61f2bc164aada50354cfe5",
+    "src/raw_ingress.zig": "9d43fcde8be58b52af9ae90254dbc95b0ad601130cfa45c67d357bf8ad08fb8e",
+    "src/okx_venue_adapter.zig": "31fbc6c894b114dc89e33198ad15b60cfc40e7fa6414752f1505c6df0a960113",
+    "src/okx_market_feed.zig": "ba8214d47afd29b80557715ad39dda0613f451e7381692b5bc5586c06e6bfd9b",
+    "tools/okx-demo-preflight.ps1": "6afd56d8ba3ce7e92a4a477ae2b6a6b11d8bf27f34d98582f2d702f515bea728"
+  },
+  "tests": {
+    "okx_owner_windows_disk": "passed_1_of_1",
+    "okx_demo_live_acceptance": "passed_156_of_156",
+    "demo_authority": "passed_139_of_139",
+    "failover": "passed_10_of_10",
+    "main_with_64m_stack": "passed_297_of_297",
+    "main_default_stack": "failed_stack_overflow_at_82_of_297",
+    "historical_windows_chain": "passed_historical_simulated_only",
+    "zig_fmt_check": "passed",
+    "git_diff_check": "passed"
+  },
+  "recovered_evidence": {
+    "raw_ingress": "committed_frames_reopened_and_replayed_with_digest",
+    "dispatch_stream": "committed_barrier_at_least_2",
+    "owner": "reopened_filled_spot_20000_atoms_digest_equal",
+    "transport": "fake_only",
+    "private_translation": "OkxVenueAdapter_ingestPrivateWs_tryDrain_applyAdapterBatch",
+    "snapshot_send": "committed_owner_snapshot_barrier_digest_checked_before_fake_transport_write"
+  },
+  "read_only_preflight": "passed_current_public_ws_private_ws_rest_bootstrap_baseline_order_writes_0_uid_hashed_not_bound_to_process_chain",
+  "cross_process_okx_business": "blocked_engine_still_simulated_gateway",
+  "live_demo_order": "not_run_no_current_bounded_system_owner_authorization",
+  "final_zero_exposure": "not_run",
+  "windows_process_chain_verified": "blocked",
+  "production_qualification": false,
+  "demo_write_authorization": "user_authorized_current_demo_account_required_05_operations; execution_not_started; self_limit_btc_usdt_25_usdt_per_order"
+}
