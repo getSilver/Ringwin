@@ -1,12 +1,13 @@
 [CmdletBinding()]
 param(
-    [string]$EnvFile = (Join-Path $PSScriptRoot '..\.env.local'),
+    [string]$EnvFile = '',
     [switch]$DemoLive,
     [switch]$SystemOwnerAuthorized
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$EnvFile = if ($EnvFile) { $EnvFile } else { Join-Path $PSScriptRoot '..\.env.local' }
 if ($DemoLive -and -not $SystemOwnerAuthorized) { throw 'Demo live requires explicit SystemOwner authorization' }
 $preflight = & (Join-Path $PSScriptRoot 'okx-demo-preflight.ps1') -EnvFile $EnvFile | ConvertFrom-Json
 if (-not $preflight.qualified -or $preflight.environment -ne 'demo' -or
@@ -48,7 +49,11 @@ try {
         $env:HTTPS_PROXY = [Net.WebRequest]::DefaultWebProxy.GetProxy($uri).AbsoluteUri
     }
     $mode = if ($DemoLive) { '--windows-demo-live' } else { '--windows-demo-readonly' }
-    & (Join-Path $PSScriptRoot '..\zig-out\bin\ringwin-windows-demo.exe') $mode
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & (Join-Path $PSScriptRoot '..\zig-out\bin\ringwin-windows-demo.exe') $mode 2>&1 | ForEach-Object { "$_" | Write-Output }
+    } finally { $ErrorActionPreference = $previousErrorActionPreference }
     if ($LASTEXITCODE -ne 0) { throw "Windows Demo chain failed in $mode" }
 } catch {
     $chainFailure = $_

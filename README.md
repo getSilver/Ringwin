@@ -190,6 +190,14 @@ zig build test
 zig build run -- --offline-fixture
 ```
 
+Windows OKX verification is split into `zig build windows-okx-offline` and
+`zig build windows-okx-readonly`. Each writes a source-bound JSON report under
+`.scratch/windows-process-chain-verification/`; incomplete evidence stays
+blocked or failed. Real Demo orders require fresh bounded SystemOwner
+authorization before `zig build windows-okx-live
+-Dwindows-demo-live-authorized=true`. Windows evidence never grants Linux
+production or Binance/Bybit Testnet qualification.
+
 Run the full offline core wave:
 
 ```powershell

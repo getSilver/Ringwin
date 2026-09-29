@@ -13,6 +13,12 @@
 
 默认路径不连接真实 Venue；独立入口只使用本机 Demo Key 连接 OKX 模拟交易。项目不接入生产账户，也不证明策略盈利。三家 Venue 的离线 canonical/adapter 契约已接入；真实 Testnet/生产资格仍是独立阶段。
 
+Windows OKX 验证分为 `zig build windows-okx-offline` 和
+`zig build windows-okx-readonly`，分别在 `.scratch/windows-process-chain-verification/`
+写入绑定源码的 JSON 报告。只有当次 SystemOwner 明确限定授权后，才能运行
+`zig build windows-okx-live -Dwindows-demo-live-authorized=true`；证据不完整时保持
+blocked/failed，Windows 结果不授予 Linux 生产或 Binance/Bybit Testnet 资格。
+
 ## 统一构建入口
 
 仓库统一通过 `build.zig` 执行；每个入口都会先精确验证 Zig

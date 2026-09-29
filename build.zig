@@ -61,6 +61,24 @@ pub fn build(b: *std.Build) void {
     const windows_chain_step = b.step("windows-chain", "Run the Windows verification process chain");
     windows_chain_step.dependOn(&windows_chain.step);
 
+    const windows_okx_offline = b.addSystemCommand(&.{ "powershell.exe", "-NoProfile", "-File", "tools\\verify-windows-okx-chain.ps1", "-Mode", "Offline" });
+    const windows_okx_offline_step = b.step("windows-okx-offline", "Run fail-fast Windows OKX offline acceptance and write a scoped report");
+    windows_okx_offline_step.dependOn(&windows_okx_offline.step);
+
+    const windows_okx_readonly = b.addSystemCommand(&.{ "powershell.exe", "-NoProfile", "-File", "tools\\verify-windows-okx-chain.ps1", "-Mode", "ReadOnly" });
+    const windows_okx_readonly_step = b.step("windows-okx-readonly", "Run Windows OKX Demo read-only acceptance and write a scoped report");
+    windows_okx_readonly_step.dependOn(&windows_okx_readonly.step);
+
+    const windows_live_authorized = b.option(bool, "windows-demo-live-authorized", "Confirm fresh, bounded SystemOwner authorization for Windows OKX Demo orders") orelse false;
+    const windows_okx_live_step = b.step("windows-okx-live", "Run separately authorized Windows OKX Demo order acceptance");
+    if (windows_live_authorized) {
+        const windows_okx_live = b.addSystemCommand(&.{ "powershell.exe", "-NoProfile", "-File", "tools\\verify-windows-okx-chain.ps1", "-Mode", "DemoLive", "-SystemOwnerAuthorized" });
+        windows_okx_live_step.dependOn(&windows_okx_live.step);
+    } else {
+        const refuse_live = b.addSystemCommand(&.{ "powershell.exe", "-NoProfile", "-Command", "throw 'Windows Demo live requires fresh bounded SystemOwner authorization and -Dwindows-demo-live-authorized=true'" });
+        windows_okx_live_step.dependOn(&refuse_live.step);
+    }
+
     const windows_demo = b.addExecutable(.{
         .name = "ringwin-windows-demo",
         .root_module = b.createModule(.{

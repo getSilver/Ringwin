@@ -73,6 +73,11 @@ SystemOwner 明确授权，才执行有界 Demo 写入与清理。结果只适�
 
 ## Decisions so far
 
+- 2026-09-30：06 增加离线、只读和另行授权 Demo 写入的独立 `zig build` 入口与源码树
+  SHA-256 机器报告。2026-09-29 成交结果是历史来源；最终源码仍需同版本在线成交及
+  零敞口报告才能封存。06 保持 in-progress，`WindowsProcessChainVerified` 保持 blocked。
+  当前 live 汇总尚未暴露可供机器报告绑定的订单 ID、Fill 与费用。
+
 - 2026-09-29：[05 Demo 买卖闭环证据](evidence-2026-09-29-demo-round-trip.json)记录同链
   BTC-USDT 买单 `3965154311785299968`、卖单 `3965155877300879360` 均真实
   `filled`；私有 report、Fill、费用与账户事实进入 engine，磁盘重开恢复与独立 REST

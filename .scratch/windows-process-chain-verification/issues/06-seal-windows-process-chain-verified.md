@@ -37,3 +37,17 @@ Windows DurableStore/CredentialStore 适配器结果、离线 OKX 业务结果�
 
 旧票曾按 SimulatedVenue 范围封存 `247/247` 和 schema 7/14/15；
 这些数字已与当前源码不符，不能用于新 OKX 业务结论。
+
+## Progress
+
+2026-09-30：新增 `zig build windows-okx-offline`、`windows-okx-readonly` 与显式授权的
+`windows-okx-live` 分离入口；PowerShell 报告从运行结果和当前源码生成 revision、源码树
+SHA-256、schema、模式及脱敏账户范围，并在跨模式合并时核对源码和账户。历史 2026-09-29
+成交证据保留为历史来源，不能自动升级当前源码。当前没有新的有界 Demo 写入授权；最终源码
+尚无匹配的在线真实成交报告，本票继续 in-progress，资格保持 blocked。
+当前五进程 live 输出只有汇总成功行，尚未向机器报告提供本次订单 ID、经济 Fill 和费用；
+报告因此即使读到汇总成功也不授予 `windows_process_chain_verified=passed`。
+本次离线适配器与主测试通过，但历史 `windows-chain` 自报 `offline=blocked`，机器报告
+因此将完整 OKX offline、role 所有权和恢复继续标为 blocked。独立只读链曾成功输出
+`order_writes=0`；随后报告入口的只读预检收到 OKX `50102 Timestamp request expired`，
+`report-readonly.json` 记录 failed，不能据此前一次独立运行填写本次 read_only=passed。
