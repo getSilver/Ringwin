@@ -1,6 +1,9 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)] [switch]$SystemOwnerAuthorized,
+    [switch]$InspectOnly,
+    [switch]$MarketCleanup,
+    [decimal]$ObservedExchangeFloor = 0,
     [string]$EnvFile = (Join-Path $PSScriptRoot '..\.env.local'),
     [string]$ExpectedUidSha256 = 'e52bb9f5cda58fc03db5ba5b93de42450d7d69030d618c8dd8aae4adc5b70952'
 )
@@ -8,6 +11,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if (-not $SystemOwnerAuthorized) { throw 'Demo cleanup requires SystemOwner authorization' }
+if ($MarketCleanup -and $ObservedExchangeFloor -gt 0) { throw 'Market cleanup cannot use a limit price floor' }
 $preflight = & (Join-Path $PSScriptRoot 'okx-demo-preflight.ps1') -EnvFile $EnvFile | ConvertFrom-Json
 if (-not $preflight.qualified -or $preflight.account_uid_sha256 -ne $ExpectedUidSha256 -or $preflight.pending_orders -ne 0 -or $preflight.open_positions -ne 0 -or $preflight.liabilities -ne 0) { throw 'Demo cleanup preflight rejected' }
 
@@ -27,7 +31,10 @@ function Invoke-Private([string]$Method, [string]$Path, [string]$Body = '') {
     try { $signature = [Convert]::ToBase64String($hmac.ComputeHash([Text.Encoding]::UTF8.GetBytes($payload))) } finally { $hmac.Dispose() }
     $headers = @{ 'OK-ACCESS-KEY'=[string]$values.OKX_DEMO_API_KEY; 'OK-ACCESS-SIGN'=$signature; 'OK-ACCESS-TIMESTAMP'=$timestamp; 'OK-ACCESS-PASSPHRASE'=[string]$values.OKX_DEMO_PASSPHRASE; 'x-simulated-trading'='1'; 'Content-Type'='application/json' }
     try { $response = Invoke-RestMethod -Method $Method -Uri ($base + $Path) -Headers $headers -Body $(if ($Body) { $Body } else { $null }) } finally { $headers.Clear() }
-    if ([string]$response.code -ne '0') { throw "OKX request rejected: $Path code=$($response.code)" }
+    if ([string]$response.code -ne '0') {
+        $row = @($response.data)[0]
+        throw "OKX request rejected: $Path code=$($response.code) sCode=$($row.sCode) sMsg=$($row.sMsg)"
+    }
     return $response
 }
 
@@ -48,10 +55,24 @@ try {
     $tick = [decimal]::Parse([string]$rules.tickSz, $culture)
     $lower = [decimal]::Parse([string]$limits.sellLmt, $culture)
     $price = [Math]::Floor(($bid * [decimal]0.999) / $tick) * $tick
-    if ($price -lt $lower -or $price -le 0 -or $price * $size -gt 25) { throw "Protected sell violates price or notional boundary: bid=$bid lower=$lower price=$price notional=$($price * $size)" }
+    if ($ObservedExchangeFloor -gt 0) {
+        $floor = [Math]::Ceiling($ObservedExchangeFloor / $tick) * $tick
+        if ($floor -gt $bid) { throw "Exchange sell floor exceeds current bid: floor=$floor bid=$bid" }
+        if ($price -lt $floor) { $price = $floor }
+    }
+    if ($InspectOnly) {
+        [ordered]@{ size=$size.ToString($culture); bid=$bid.ToString($culture); lower=$lower.ToString($culture); price=$price.ToString($culture); notional=($price * $size).ToString($culture) } | ConvertTo-Json -Compress
+        return
+    }
+    if ($bid -le 0 -or $bid * $size -gt 25 -or (-not $MarketCleanup -and ($price -lt $lower -or $price -le 0 -or $price * $size -gt 25))) { throw "Protected sell violates price or notional boundary: bid=$bid lower=$lower price=$price notional=$($price * $size)" }
     $clientId = 'RWRC' + [DateTimeOffset]::UtcNow.ToString('yyyyMMddHHmmssfff', $culture)
-    $body = [ordered]@{ instId='BTC-USDT'; tdMode='cash'; clOrdId=$clientId; side='sell'; ordType='ioc'; sz=$size.ToString($culture); px=$price.ToString($culture); pxAmendType='0' } | ConvertTo-Json -Compress
-    $result = Invoke-Private 'POST' '/api/v5/trade/order' $body
+    $body = if ($MarketCleanup) {
+        [ordered]@{ instId='BTC-USDT'; tdMode='cash'; clOrdId=$clientId; side='sell'; ordType='market'; tgtCcy='base_ccy'; banAmend='true'; sz=$size.ToString($culture) } | ConvertTo-Json -Compress
+    } else {
+        [ordered]@{ instId='BTC-USDT'; tdMode='cash'; clOrdId=$clientId; side='sell'; ordType='ioc'; sz=$size.ToString($culture); px=$price.ToString($culture); pxAmendType='0' } | ConvertTo-Json -Compress
+    }
+    try { $result = Invoke-Private 'POST' '/api/v5/trade/order' $body }
+    catch { throw "Demo cleanup dispatch uncertain: client_id=$clientId; $($_.Exception.Message)" }
     $row = @($result.data)[0]
     if ([string]$row.sCode -ne '0' -or [string]::IsNullOrWhiteSpace([string]$row.ordId)) { throw "Demo cleanup rejected sCode=$($row.sCode) client_id=$clientId" }
     $filled = $false
@@ -65,5 +86,5 @@ try {
     $after = & (Join-Path $PSScriptRoot 'okx-demo-preflight.ps1') -EnvFile $EnvFile | ConvertFrom-Json
     if ($after.account_uid_sha256 -ne $ExpectedUidSha256 -or $after.pending_orders -ne 0 -or $after.open_positions -ne 0 -or $after.liabilities -ne 0 -or
         @($after.funded_currencies | Where-Object { $_ -ne 'USDT' }).Count -ne 0) { throw "Demo cleanup zero exposure unconfirmed: order_id=$($row.ordId)" }
-    [ordered]@{ completed=$true; client_id=$clientId; order_id=[string]$row.ordId; size=$size.ToString($culture); price=$price.ToString($culture); terminal='filled'; zero_exposure=$true } | ConvertTo-Json -Compress
+    [ordered]@{ completed=$true; client_id=$clientId; order_id=[string]$row.ordId; size=$size.ToString($culture); price=$(if ($MarketCleanup) { [string]$order.avgPx } else { $price.ToString($culture) }); terminal='filled'; zero_exposure=$true } | ConvertTo-Json -Compress
 } finally { $values.Clear(); $body=$null }

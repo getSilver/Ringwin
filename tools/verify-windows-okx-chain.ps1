@@ -162,6 +162,7 @@ try {
                 $readonly.state_schema -ne $report.state_schema -or
                 $readonly.schema_registry -ne $report.schema_registry) { throw 'Current-source read-only evidence missing' }
             $report.read_only = 'passed'
+            $report.order_writes = $null
             $previous = $ErrorActionPreference
             try {
                 $ErrorActionPreference = 'Continue'

@@ -71,6 +71,7 @@ if ($DemoLive) {
     $after = & (Join-Path $PSScriptRoot 'okx-demo-preflight.ps1') -EnvFile $EnvFile | ConvertFrom-Json
     Write-Output ("windows_demo_postflight: pending_orders={0} pending_algo_orders={1} open_positions={2} liabilities={3} funded_currencies={4}" -f
         $after.pending_orders, $after.pending_algo_orders, $after.open_positions, $after.liabilities, (@($after.funded_currencies) -join ','))
+    if ($chainFailure) { throw $chainFailure }
     if (-not $after.qualified -or $after.account_uid_sha256 -ne $preflight.account_uid_sha256 -or
         $after.pending_orders -ne 0 -or $after.pending_algo_orders -ne 0 -or
         $after.open_positions -ne 0 -or $after.liabilities -ne 0 -or
