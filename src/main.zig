@@ -92,6 +92,12 @@ pub fn main(init: std.process.Init) !void {
             if (args.next() != null) return error.UnknownArgument;
             return windows_verification_runtime.runDemoLive(init, executable);
         }
+        if (std.mem.eql(u8, argument, "--windows-demo-evidence")) {
+            const engine_dir = args.next() orelse return error.MissingStoreDir;
+            const execution_dir = args.next() orelse return error.MissingStoreDir;
+            if (args.next() != null) return error.UnknownArgument;
+            return windows_verification_runtime.exportDemoEvidence(init, engine_dir, execution_dir);
+        }
         if (std.mem.eql(u8, argument, "--qualification-smoke")) {
             const report_path = args.next() orelse "qualification-report.json";
             if (args.next() != null) return error.UnknownArgument;

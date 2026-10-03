@@ -96,6 +96,7 @@ const UncertainDispatch = struct {
     prior_reconciliation_id: u64 = 0,
     reconciliation_id: u64 = 0,
     reconciliation_status: ?oms.ReconciliationStatus = null,
+    recovered_proof: ?DispatchProof = null,
 };
 const DispatchResolution = struct {
     account: canonical.ExchangeAccountIdentity,
@@ -191,6 +192,7 @@ pub const Gateway = struct {
                                 self.uncertainIndex(proof.context.account, proof.command.command_id) != null)
                                 return error.DurableDispatchUnavailable;
                             self.markUncertain(proof.context.account, proof.command.command_id, proof.command.client_order_id, proof.prior_reconciliation_id) catch return error.DurableDispatchUnavailable;
+                            self.uncertain_dispatches[self.uncertain_dispatch_count - 1].recovered_proof = proof;
                         },
                         resolution_record_type => {
                             const resolution = snapshot_codec.decodeBare(record.payload, DispatchResolution) catch return error.DurableDispatchUnavailable;

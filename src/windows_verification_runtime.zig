@@ -2419,28 +2419,70 @@ fn runDemoChain(init: std.process.Init, executable: []const u8, live: bool) !voi
     var stdout_buf: [160]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &stdout_buf);
     if (live) {
-        if (decision.shard.economicSummary().portfolio.spot.quantity != 0 or !decision.shard.oms.openOrdersClosed())
-            return error.DemoDiskRecoveryMismatch;
-        try demo_authority.requireZeroDemoExposure(&decision.shard.canonical_account);
-        if (decision.shard.oms.order_count != 2 or decision.shard.economic_projection.canonical_fill_evidence_count < 2)
-            return error.DemoEconomicEvidenceIncomplete;
-        for (decision.shard.oms.orders[0..decision.shard.oms.order_count]) |order| {
-            if (order.state != .filled or order.cumulative_quantity <= 0) return error.DemoEconomicEvidenceIncomplete;
-            try stdout.interface.print("windows_demo_order local_id={d} client_id={s} state=filled quantity={d}\n", .{
-                order.id, order.client_order_id.slice(), order.cumulative_quantity,
-            });
-        }
-        for (decision.shard.economic_projection.canonical_fill_evidence[0..decision.shard.economic_projection.canonical_fill_evidence_count]) |fill| {
-            try stdout.interface.print("windows_demo_fill identity={d} local_order_id={d} quantity={d}\n", .{ fill.identity, fill.order_id, fill.quantity });
-        }
-        const digest = std.fmt.bytesToHex(decision.shard.canonicalStateDigest(), .lower);
-        try stdout.interface.print("windows_demo_economics fee_micros={d} replay_digest={s} strategy_identity={d} config_version={d}\n", .{
-            decision.shard.economicSummary().portfolio.fee_micros, &digest,
-            decision.shard.strategy_identity,                      decision.shard.strategy_config_version,
-        });
+        try writeDemoEconomics(init, &decision, execution_dir, &stdout.interface);
         try stdout.interface.writeAll("windows_demo_live=passed rest=ok private_ws=ok public_ws=ok roles=5 terminal=ok zero_exposure=ok production_qualification=false\n");
     } else try stdout.interface.writeAll("windows_demo_readonly=passed rest=ok private_ws=ok public_ws=ok roles=5 order_writes=0 production_qualification=false\n");
     try stdout.interface.flush();
+}
+
+fn writeDemoEconomics(init: std.process.Init, decision: *const demo_authority.Owner, execution_dir: []const u8, output: *std.Io.Writer) !void {
+    if (decision.shard.economicSummary().portfolio.spot.quantity != 0 or !decision.shard.oms.openOrdersClosed())
+        return error.DemoDiskRecoveryMismatch;
+    try demo_authority.requireZeroDemoExposure(&decision.shard.canonical_account);
+    if (decision.shard.oms.order_count != 2 or decision.shard.economic_projection.canonical_fill_evidence_count < 2)
+        return error.DemoEconomicEvidenceIncomplete;
+    const dispatch_store = try init.gpa.create(durable_store.WindowsFileAdapter);
+    defer init.gpa.destroy(dispatch_store);
+    dispatch_store.* = .{ .dir = try std.Io.Dir.openDirAbsolute(init.io, execution_dir, .{}) };
+    defer dispatch_store.close(init.io);
+    var gateway: execution_gateway.Gateway = .{};
+    try gateway.attachRecoveredDurableDispatch(dispatch_store.interface(), init.io, .{ .domain = .control, .id = 92 });
+    for (decision.shard.oms.orders[0..decision.shard.oms.order_count]) |order| {
+        if (order.state != .filled or order.cumulative_quantity <= 0) return error.DemoEconomicEvidenceIncomplete;
+        var wire_id: ?canonical.ClientOrderId = null;
+        for (decision.shard.oms.command_history[0..decision.shard.oms.command_history_count]) |command| {
+            if (command.order_id != order.id or command.operation != .place) continue;
+            for (gateway.uncertain_dispatches[0..gateway.uncertain_dispatch_count]) |dispatch| {
+                if (dispatch.account != decision.shard.exchange_account_identity or dispatch.command_id != command.command_id) continue;
+                const proof = dispatch.recovered_proof orelse return error.MissingDispatchIdentity;
+                if (!demoDispatchCommandMatches(command, proof.command) or wire_id != null) return error.DemoDispatchIdentityMismatch;
+                wire_id = dispatch.client_order_id;
+            }
+        }
+        const client_id = wire_id orelse return error.MissingDispatchIdentity;
+        try output.print("windows_demo_order local_id={d} client_id={s} state=filled quantity={d}\n", .{
+            order.id, client_id.slice(), order.cumulative_quantity,
+        });
+    }
+    for (decision.shard.economic_projection.canonical_fill_evidence[0..decision.shard.economic_projection.canonical_fill_evidence_count]) |fill| {
+        try output.print("windows_demo_fill identity={d} local_order_id={d} quantity={d}\n", .{ fill.identity, fill.order_id, fill.quantity });
+    }
+    const digest = std.fmt.bytesToHex(decision.shard.canonicalStateDigest(), .lower);
+    try output.print("windows_demo_economics fee_micros={d} replay_digest={s} strategy_identity={d} config_version={d}\n", .{
+        decision.shard.economicSummary().portfolio.fee_micros, &digest,
+        decision.shard.strategy_identity,                      decision.shard.strategy_config_version,
+    });
+}
+
+fn demoDispatchCommandMatches(command: @import("oms.zig").Command, dispatched: @import("oms.zig").Command) bool {
+    var expected = command;
+    expected.client_order_id = dispatched.client_order_id;
+    return std.meta.eql(expected, dispatched);
+}
+
+/// Read-only evidence collection. No transport, credentials, route or send capability is installed.
+pub fn exportDemoEvidence(init: std.process.Init, engine_dir: []const u8, execution_dir: []const u8) !void {
+    if (!std.fs.path.isAbsolute(engine_dir) or !std.fs.path.isAbsolute(execution_dir)) return error.InvalidDemoStateDirectory;
+    const store = try init.gpa.create(durable_store.WindowsFileAdapter);
+    defer init.gpa.destroy(store);
+    store.* = .{ .dir = try std.Io.Dir.openDirAbsolute(init.io, engine_dir, .{}) };
+    defer store.close(init.io);
+    const decision = try demo_authority.Owner.recover(store.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
+    var buffer: [512]u8 = undefined;
+    var output = std.Io.File.stdout().writer(init.io, &buffer);
+    try writeDemoEconomics(init, &decision, execution_dir, &output.interface);
+    try output.interface.writeAll("windows_demo_recovered=passed replay_send_capability=false\n");
+    try output.interface.flush();
 }
 
 fn requestDemoQuote(execution_pipe: Pipe, side: host_gateway.Side, quantity: i64) ![8]u8 {
@@ -3133,4 +3175,16 @@ test "Windows chain evidence cannot permit production" {
     const evidence: production_contract.WindowsChainEvidence = .{ .production_qualification = true };
     try std.testing.expect(!production_contract.isWindowsProcessChainVerified(evidence));
     try std.testing.expect(!production_contract.windowsChainPermitsProduction(evidence));
+}
+
+test "Demo evidence rejects a different dispatch command with reused local IDs" {
+    const command = std.mem.zeroes(@import("oms.zig").Command);
+    var dispatched = command;
+    dispatched.client_order_id = try canonical.ClientOrderId.init("RWN1027F27706D3738DCA7358D88F36F");
+    try std.testing.expect(demoDispatchCommandMatches(command, dispatched));
+    dispatched.quantity += 1;
+    try std.testing.expect(!demoDispatchCommandMatches(command, dispatched));
+    dispatched = command;
+    dispatched.authority.dispatch_deadline_monotonic_ns += 1;
+    try std.testing.expect(!demoDispatchCommandMatches(command, dispatched));
 }
