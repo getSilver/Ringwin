@@ -57,7 +57,7 @@ try {
     $chainExit = $LASTEXITCODE
     $chainLines | Write-Output
     if ($chainExit -ne 0) {
-        $reason = @($chainLines | Where-Object { $_ -match '^error: [A-Za-z][A-Za-z0-9_]*$' } | Select-Object -Last 1)
+        $reason = @($chainLines | Where-Object { $_ -match '^error: [A-Za-z][A-Za-z0-9_]*$|^windows_demo_\w+_failed=|^okx_transport_failure ' }) -join '; '
         throw "Windows Demo chain failed in $mode`: $reason"
     }
 } catch {

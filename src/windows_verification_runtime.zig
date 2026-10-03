@@ -142,6 +142,7 @@ pub fn runRole(
     };
     if (role == .market_feed and store_dir.len != 0) {
         market_state = MarketOwners.start(init, store_dir, demo_transport) catch |err| {
+            std.debug.print("windows_demo_market_start_failed={s}\n", .{@errorName(err)});
             writeStatus(client, .failed) catch {};
             return err;
         };
@@ -296,6 +297,7 @@ pub fn runRole(
                 if (role != .execution_gateway or draining) return error.InvalidRoleTransition;
                 const owners = execution_state orelse return error.ExecutionOwnerMissing;
                 owners.bootstrapPrivate(init, client, generation) catch |err| {
+                    std.debug.print("windows_demo_private_bootstrap_failed={s}\n", .{@errorName(err)});
                     writeStatus(client, .failed) catch {};
                     return err;
                 };
