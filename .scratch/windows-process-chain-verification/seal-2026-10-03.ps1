@@ -32,11 +32,17 @@ foreach ($mode in @('offline','readonly')) {
 }
 $catalog = Get-Content (Join-Path $PSScriptRoot 'durable-files-2026-10-03.json') -Raw | ConvertFrom-Json
 function Assert-DurableFiles {
+    $actual = @(Get-ChildItem -LiteralPath (Join-Path $run 'engine'),(Join-Path $run 'execution') -File -Recurse | ForEach-Object { $_.FullName.Substring($run.Length+1).Replace('\','/') } | Sort-Object -CaseSensitive)
+    $expected = @($catalog.path | Sort-Object -CaseSensitive)
+    if (($actual -join "`n") -cne ($expected -join "`n")) { throw 'Durable evidence file set changed' }
     foreach ($file in $catalog) {
         if ((Get-FileHash -LiteralPath (Join-Path $run $file.path)).Hash.ToLowerInvariant() -ne $file.sha256) { throw "Durable evidence changed: $($file.path)" }
     }
 }
 Assert-DurableFiles
+Push-Location $root
+try { & zig build windows-demo-bin; if ($LASTEXITCODE -ne 0) { throw 'Collector build failed' } }
+finally { Pop-Location }
 $binary = Join-Path $root 'zig-out/bin/ringwin-windows-demo.exe'
 $lines = @(& $binary --windows-demo-evidence (Join-Path $run 'engine') (Join-Path $run 'execution'))
 if ($LASTEXITCODE -ne 0 -or 'windows_demo_recovered=passed replay_send_capability=false' -notin $lines) { throw 'Recovery failed' }
@@ -84,6 +90,7 @@ foreach ($order in $venueOrders) {
     if ([long]$order.created_at_unix_ms -lt 1790993663000 -or [long]$order.updated_at_unix_ms -ge 1790995463000) { throw 'Order outside authorized 30-minute window' }
 }
 if ((Get-CollectorSourceIdentity) -ne $collectorSource) { throw 'Collector source changed during collection' }
+$unresolved = @($venueOrders | Where-Object { $_.state -ne 'filled' }).Count
 $report.live_order_ids = $sealedOrders
 $report.order_writes = $sealedOrders.Count
 $report.observed_roles = $report.requested_roles
@@ -93,7 +100,7 @@ $report.windows_process_chain_verified = 'passed'
 $report.proof_gap = $null
 $report.PSObject.Properties.Remove('failure')
 $report | Add-Member -NotePropertyName collection -NotePropertyValue ([ordered]@{
-    method='retrospective_durable_recovery_and_authoritative_get'; observed_at_utc=[DateTime]::UtcNow.ToString('o'); revision=(& git -C $root rev-parse HEAD).Trim(); source_tree_sha256=$collectorSource; seal_script_sha256=(Get-FileHash $PSCommandPath).Hash.ToLowerInvariant(); binary_sha256=(Get-FileHash $binary).Hash.ToLowerInvariant(); original_failed_report='report-demolive-2026-10-03-parser-failed.json'; original_failed_report_sha256=(Get-FileHash $originalPath).Hash.ToLowerInvariant(); durable_file_catalog='durable-files-2026-10-03.json'; durable_file_catalog_sha256=(Get-FileHash (Join-Path $PSScriptRoot 'durable-files-2026-10-03.json')).Hash.ToLowerInvariant(); replay_send_capability=$false; order_writes=0; qualification_scope='Original execution revision/source_tree_sha256 only; collector changes are not online-qualified'; terminal_run_evidence='Original collector reached Live economic evidence missing only after successful five-role live and zero-exposure postflight checks'; authorized_start_utc='2026-10-03T02:14:23Z'; authorized_deadline_utc='2026-10-03T02:44:23Z'; authoritative_orders=$venueOrders; account_postflight=$baseline
+    method='retrospective_durable_recovery_and_authoritative_get'; observed_at_utc=[DateTime]::UtcNow.ToString('o'); revision=(& git -C $root rev-parse HEAD).Trim(); source_tree_sha256=$collectorSource; seal_script_sha256=(Get-FileHash $PSCommandPath).Hash.ToLowerInvariant(); build_command='zig build windows-demo-bin'; binary_sha256=(Get-FileHash $binary).Hash.ToLowerInvariant(); original_failed_report='report-demolive-2026-10-03-parser-failed.json'; original_failed_report_sha256=(Get-FileHash $originalPath).Hash.ToLowerInvariant(); durable_file_catalog='durable-files-2026-10-03.json'; durable_file_catalog_sha256=(Get-FileHash (Join-Path $PSScriptRoot 'durable-files-2026-10-03.json')).Hash.ToLowerInvariant(); replay_send_capability=$false; order_writes=0; unresolved_dispatches=$unresolved; qualification_scope='Original execution revision/source_tree_sha256 only; collector changes are not online-qualified'; terminal_run_evidence='Original collector reached Live economic evidence missing only after successful five-role live and zero-exposure postflight checks'; authorized_start_utc='2026-10-03T02:14:23Z'; authorized_deadline_utc='2026-10-03T02:44:23Z'; authoritative_orders=$venueOrders; account_postflight=$baseline
 })
 ($report | ConvertTo-Json -Depth 10) | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'report-demolive-2026-10-03-recovered.json') -Encoding utf8
 Write-Output "windows_process_chain_verified=$($report.windows_process_chain_verified) execution_revision=$($report.revision) production_qualification=false"
