@@ -2437,6 +2437,7 @@ fn writeDemoEconomics(init: std.process.Init, decision: *const demo_authority.Ow
     defer dispatch_store.close(init.io);
     var gateway: execution_gateway.Gateway = .{};
     try gateway.attachRecoveredDurableDispatch(dispatch_store.interface(), init.io, .{ .domain = .control, .id = 92 });
+    if (gateway.uncertain_dispatch_count != decision.shard.oms.order_count) return error.DemoDispatchIdentityMismatch;
     for (decision.shard.oms.orders[0..decision.shard.oms.order_count]) |order| {
         if (order.state != .filled or order.cumulative_quantity <= 0) return error.DemoEconomicEvidenceIncomplete;
         var wire_id: ?canonical.ClientOrderId = null;
@@ -2481,7 +2482,7 @@ pub fn exportDemoEvidence(init: std.process.Init, engine_dir: []const u8, execut
     var buffer: [512]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &buffer);
     try writeDemoEconomics(init, &decision, execution_dir, &output.interface);
-    try output.interface.writeAll("windows_demo_recovered=passed replay_send_capability=false\n");
+    try output.interface.print("windows_demo_recovered=passed replay_send_capability=false durable_dispatches={d}\n", .{decision.shard.oms.order_count});
     try output.interface.flush();
 }
 

@@ -45,7 +45,9 @@ try { & zig build windows-demo-bin; if ($LASTEXITCODE -ne 0) { throw 'Collector 
 finally { Pop-Location }
 $binary = Join-Path $root 'zig-out/bin/ringwin-windows-demo.exe'
 $lines = @(& $binary --windows-demo-evidence (Join-Path $run 'engine') (Join-Path $run 'execution'))
-if ($LASTEXITCODE -ne 0 -or 'windows_demo_recovered=passed replay_send_capability=false' -notin $lines) { throw 'Recovery failed' }
+if ($LASTEXITCODE -ne 0) { throw 'Recovery failed' }
+$recovered = @($lines | Where-Object { $_ -match '^windows_demo_recovered=passed replay_send_capability=false durable_dispatches=2$' })
+if ($recovered.Count -ne 1) { throw 'Complete durable dispatch set missing' }
 Assert-DurableFiles
 $sealedOrders = @()
 $fills = @()
@@ -91,6 +93,8 @@ foreach ($order in $venueOrders) {
 }
 if ((Get-CollectorSourceIdentity) -ne $collectorSource) { throw 'Collector source changed during collection' }
 $unresolved = @($venueOrders | Where-Object { $_.state -ne 'filled' }).Count
+# Recovery requires exactly two dispatch proofs, each fully matched to one engine
+# command; the two exact wire-ID GETs above authoritatively resolve that entire set.
 $report.live_order_ids = $sealedOrders
 $report.order_writes = $sealedOrders.Count
 $report.observed_roles = $report.requested_roles
