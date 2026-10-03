@@ -73,6 +73,17 @@ SystemOwner 明确授权，才执行有界 Demo 写入与清理。结果只适�
 
 ## Decisions so far
 
+- 2026-10-03：封存代码提交 `c18aad56` 对应的离线与只读报告；两者源码树身份相同，
+  offline/read_only 均 passed、只读零写入。只读首次 `PrivateBootstrapFailed` 的失败
+  保留在 06 进度记录。当前源码尚无通过的获授权同链买卖闭环，06 继续 in-progress。
+
+- 2026-09-30：06 当次有界 Demo 写验收中，五进程买单成交，但最终权威预检未确认零敞口，
+  [live 报告](report-demolive.json)失败。另获一次市价清理授权后，OKX 对提交请求返回
+  `50004` 超时；未重发，只读订单历史确认该清理单全量成交，独立预检确认只剩 USDT，
+  无挂单、仓位或负债。[证据](evidence-2026-09-29-06-live-failure-cleanup.json)保留两笔
+  订单身份。清理经直接 REST，未证明同链卖出；06 仍 in-progress，
+  `windows_process_chain_verified=failed`、生产资格 false。再次写入需新授权。
+
 - 2026-09-30：06 增加离线、只读和另行授权 Demo 写入的独立 `zig build` 入口与源码树
   SHA-256 机器报告。真实 OKX 离线五进程链的恢复与 digest 已单独输出；历史综合
   `windows-chain` 行仍自报 blocked。当前源码的只读五进程报告已通过、零订单写入。

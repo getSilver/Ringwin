@@ -1,0 +1,38 @@
+{
+  "environment": "demo",
+  "account_uid_sha256": "e52bb9f5cda58fc03db5ba5b93de42450d7d69030d618c8dd8aae4adc5b70952",
+  "instrument": "BTC-USDT",
+  "live_report": "report-demolive.json",
+  "live_report_result": "failed",
+  "live_failure": "Post-trade authoritative OKX Demo preflight did not confirm zero exposure",
+  "live_source_revision": "41d7ec3974abc212ad2d839211bb6866503eb31b",
+  "live_source_tree_sha256": "e944a82753661b0d1d120c0d9f61160463ab4fbe6e94794128e70eb2f0ebe441",
+  "postrun_exchange_history": {
+    "five_role_buy": {
+      "client_id": "RWN1426F99916DF74ADECEA083A6A518",
+      "order_id": "3966137642400235520",
+      "state": "filled",
+      "size_btc": "0.00005",
+      "average_price_usdt": "83915.4"
+    },
+    "direct_rest_cleanup": {
+      "client_id": "RWRC20260929173215053",
+      "order_id": "3966158514162909184",
+      "state": "filled",
+      "size_btc": "0.00004995",
+      "average_price_usdt": "83713.8",
+      "request_response": "OKX 50004 timeout; terminal state established by subsequent read-only order history"
+    }
+  },
+  "final_readonly_preflight": {
+    "confirmed_by_utc": "2026-09-29T17:34:27Z",
+    "pending_orders": 0,
+    "pending_algo_orders": 0,
+    "open_positions": 0,
+    "liabilities": 0,
+    "funded_currencies": ["USDT"]
+  },
+  "five_role_sell_proven": false,
+  "windows_process_chain_verified": "failed",
+  "production_qualification": false
+}

@@ -64,3 +64,27 @@ role 所有权、恢复、净量和摘要。旧 `windows-chain` 的综合历史�
 `windows_process_chain_verified=blocked`，`production_qualification=false`。
 新增 live 成功路径的本地订单身份、已应用 canonical Fill、聚合费用和恢复摘要输出；
 该路径尚未获本轮下单授权，未执行在线写入。
+
+2026-09-30：当次 SystemOwner 授权 UID SHA-256 为
+`e52bb9f5cda58fc03db5ba5b93de42450d7d69030d618c8dd8aae4adc5b70952`
+的 OKX Demo BTC-USDT spot，单笔至多 25 USDT、30 分钟内同链买卖及受限清理。
+当前源码五进程写验收的买单 `3966137642400235520` 已在 OKX 成交
+`0.00005 BTC`，但运行器最终权威预检没有确认零敞口；
+[live 报告](../report-demolive.json)记录 `failed`，其异常退出时订单写入数未知，
+不能把报告未捕获的订单身份误记为零写入或完整同链买卖。
+当次受限 IOC 清理遇 OKX 卖价下限高于买一；用户另行授权一次 Demo 市价清理。
+该请求收到 OKX `50004` 超时，未重发；随后只读订单历史按 client ID 确认
+`3966158514162909184` 全量成交 `0.00004995 BTC`。独立预检确认仅有 USDT，
+无挂单、条件单、仓位、负债或 BTC。详见[失败与清理证据](../evidence-2026-09-29-06-live-failure-cleanup.json)。
+直接 REST 清理不满足同链卖出条件，`windows_process_chain_verified=failed`、
+`production_qualification=false`，06 继续 in-progress；再次 Demo 写验收须重新授权。
+运行器原先在链异常后先抛出零敞口预检错误，遮蔽了链内原始错误；现调整为完成只读
+postflight 后优先传出链异常。本次原始错误未留存，不能据卖价区间推断具体链内错误。
+
+2026-10-03 续收口：脚本修复已提交为 `c18aad56`。2026-09-30 基于该 revision
+重新生成的离线报告 passed；只读首次运行遇 `PrivateBootstrapFailed`，无写入重试后
+passed。两份最终报告绑定相同源码树 SHA-256
+`c6905247aee03356a182b760dd1b4ef54390de961a584c27297d2baf18e4d687`，
+只读报告 `order_writes=0`。报告保留运行时 revision 和源码树身份；报告封存提交本身
+不冒充新的验收运行。仍缺该源码的获授权同链真实买卖、经济明细与最终对账闭环，
+本票继续 in-progress。

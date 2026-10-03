@@ -1,0 +1,53 @@
+{
+    "schema":  1,
+    "observed_at_utc":  "2026-09-29T17:20:01Z",
+    "revision":  "41d7ec3974abc212ad2d839211bb6866503eb31b",
+    "source_tree_sha256":  "e944a82753661b0d1d120c0d9f61160463ab4fbe6e94794128e70eb2f0ebe441",
+    "acceptance_schema":  13,
+    "journal_schema":  22,
+    "state_schema":  25,
+    "schema_registry":  19,
+    "environment":  "demo",
+    "venue":  "okx",
+    "requested_product":  "BTC-USDT spot",
+    "observed_product":  "BTC-USDT spot",
+    "requested_strategy":  "windows_verification_python_host",
+    "requested_strategy_identity":  40,
+    "observed_strategy_identity":  40,
+    "configuration_source":  "src/windows_verification_runtime.zig and demo_authority.Policy",
+    "requested_config_version":  1,
+    "observed_config_version":  1,
+    "account_uid_sha256":  "e52bb9f5cda58fc03db5ba5b93de42450d7d69030d618c8dd8aae4adc5b70952",
+    "requested_roles":  5,
+    "observed_roles":  null,
+    "requested_ipc":  "windows_named_pipe",
+    "mode":  "demolive",
+    "windows_durable_adapter":  "passed",
+    "windows_credential_adapter":  "passed",
+    "offline":  "passed",
+    "offline_adapter_tests":  "passed",
+    "replay_digest":  "7dc00bb4a75f788eaba1045b40e61ba3369cf68931c1746d81be707d744c1bd3",
+    "market_raw_frames":  3,
+    "private_raw_barrier":  27,
+    "read_only":  "passed",
+    "demo_live":  "failed",
+    "role_ownership":  "passed",
+    "durable_recovery":  "passed",
+    "final_reconciliation":  "not_run",
+    "order_writes":  null,
+    "live_order_ids":  [
+
+                       ],
+    "live_fills":  [
+
+                   ],
+    "live_fees":  [
+
+                  ],
+    "live_replay_digest":  null,
+    "historical_demo_evidence":  "evidence-2026-09-29-demo-round-trip.json",
+    "proof_gap":  "Current-source offline, read-only, or authorized live economic evidence is incomplete.",
+    "windows_process_chain_verified":  "failed",
+    "production_qualification":  false,
+    "failure":  "Post-trade authoritative OKX Demo preflight did not confirm zero exposure"
+}
