@@ -1,6 +1,6 @@
 # Windows OKX 业务进程链验证
 
-Status: active
+Status: closed
 
 ## Destination
 
@@ -65,13 +65,22 @@ SystemOwner 明确授权，才执行有界 Demo 写入与清理。结果只适�
 2. [Windows DurableStore 验证适配器](issues/03-add-windows-durable-store-adapter.md) — resolved；05 复用其 seam。
 3. [Windows CredentialStore 只读适配器](issues/04-add-windows-credential-store-adapter.md) — resolved；不代替 Demo 执行凭证。
 4. [接通 Windows OKX 业务进程链](issues/05-wire-windows-verification-process-chain.md) — resolved；五进程 Demo 买卖及零敞口闭环通过。
-5. [封存 Windows OKX 业务证据与文档](issues/06-seal-windows-process-chain-verified.md) — in-progress；需绑定最终源码并输出资格报告。
+5. [封存 Windows OKX 业务证据与文档](issues/06-seal-windows-process-chain-verified.md) — resolved；封存 `9939110d` 的三模式匹配执行证据及独立采集器来源。
 
 ## Frontier
 
-- [06 封存 Windows OKX 业务证据与文档](issues/06-seal-windows-process-chain-verified.md)。
+- 无；本波限定执行范围已封存。后续源码变更须按新身份复测。
 
 ## Decisions so far
+
+- 2026-10-03：06 resolved，本图 closed。[补充资格报告](report-demolive-2026-10-03-recovered.json)
+  绑定执行 `9939110d` / `35e7e235161231d9260c500fb0879086e2d563a1135e9fa2ad78fd744b118521`，
+  [离线](report-offline-2026-10-03-9939110d.json)和[只读](report-readonly-2026-10-03-9939110d.json)
+  同一执行身份通过；获授权同链买卖真实 filled，存储重开、Fill/费用与权威 GET 对账闭合，
+  无未决 Unknown、挂单、条件单、负债、仓位或 BTC。原[解析失败报告](report-demolive-2026-10-03-parser-failed.json)
+  保留 failed。补证采集器独立记录 revision/源码树/脚本/二进制哈希，采集零写入；
+  `windows_process_chain_verified=passed` 只属于上述执行版本，生产资格 false。
+  修复后采集器的主测试、Windows adapter 和 OKX 离线五进程回归通过；其新源码不继承在线资格。
 
 - 2026-10-03：封存代码提交 `c18aad56` 对应的离线与只读报告；两者源码树身份相同，
   offline/read_only 均 passed、只读零写入。只读首次 `PrivateBootstrapFailed` 的失败

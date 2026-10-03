@@ -1,0 +1,151 @@
+{
+    "schema":  1,
+    "observed_at_utc":  "2026-10-03T02:14:25Z",
+    "revision":  "9939110dddbaab0e97c8cfb461f9e35a537d12dd",
+    "source_tree_sha256":  "35e7e235161231d9260c500fb0879086e2d563a1135e9fa2ad78fd744b118521",
+    "acceptance_schema":  13,
+    "journal_schema":  22,
+    "state_schema":  25,
+    "schema_registry":  19,
+    "environment":  "demo",
+    "venue":  "okx",
+    "requested_product":  "BTC-USDT spot",
+    "observed_product":  "BTC-USDT spot",
+    "requested_strategy":  "windows_verification_python_host",
+    "requested_strategy_identity":  40,
+    "observed_strategy_identity":  40,
+    "configuration_source":  "src/windows_verification_runtime.zig and demo_authority.Policy",
+    "requested_config_version":  1,
+    "observed_config_version":  1,
+    "account_uid_sha256":  "e52bb9f5cda58fc03db5ba5b93de42450d7d69030d618c8dd8aae4adc5b70952",
+    "requested_roles":  5,
+    "observed_roles":  5,
+    "requested_ipc":  "windows_named_pipe",
+    "mode":  "demolive",
+    "windows_durable_adapter":  "passed",
+    "windows_credential_adapter":  "passed",
+    "offline":  "passed",
+    "offline_adapter_tests":  "passed",
+    "replay_digest":  "fa3549159c08e361b6497bf9d417e419e3b4096e2b1557e7fd2065d8b550b7d9",
+    "market_raw_frames":  3,
+    "private_raw_barrier":  27,
+    "read_only":  "passed",
+    "demo_live":  "passed",
+    "role_ownership":  "passed",
+    "durable_recovery":  "passed",
+    "final_reconciliation":  "passed",
+    "order_writes":  2,
+    "live_order_ids":  [
+                           {
+                               "local_id":  "1",
+                               "client_id":  "RWN1027F27706D3738DCA7358D88F36F",
+                               "state":  "filled",
+                               "quantity":  "5000"
+                           },
+                           {
+                               "local_id":  "2",
+                               "client_id":  "RWN1EFF8F0F21B2B90C38E0F487584D3",
+                               "state":  "filled",
+                               "quantity":  "4995"
+                           }
+                       ],
+    "live_fills":  [
+                       {
+                           "identity":  "2820192457892691214",
+                           "local_order_id":  "1",
+                           "quantity":  "5000"
+                       },
+                       {
+                           "identity":  "1897236339906813724",
+                           "local_order_id":  "2",
+                           "quantity":  "4995"
+                       }
+                   ],
+    "live_fees":  [
+                      {
+                          "scope":  "portfolio_total",
+                          "fee_micros":  "4238"
+                      }
+                  ],
+    "live_replay_digest":  "ba7215b4a967ed867506c1c6bd4662cee02dd2b5fe146bfa22182480e31b36b0",
+    "historical_demo_evidence":  "evidence-2026-09-29-demo-round-trip.json",
+    "proof_gap":  null,
+    "windows_process_chain_verified":  "passed",
+    "production_qualification":  false,
+    "collection":  {
+                       "method":  "retrospective_durable_recovery_and_authoritative_get",
+                       "observed_at_utc":  "2026-10-03T03:04:18.7142541Z",
+                       "revision":  "560bb5641e12b0e5b82d4a28c64a1de63a680aa0",
+                       "source_tree_sha256":  "d0dc9c5d21231c72580f285e587aa314f9c8dae21f41922fa6f1a73372ef8533",
+                       "seal_script_sha256":  "35bbc5847e96deabfeccb0a40aba2c4fa91a501050277e939b942a0fafaae185",
+                       "build_command":  "zig build windows-demo-bin",
+                       "binary_sha256":  "70093e2df1ebed7116ca234aacdd5bc653913437b2b1954823c6342ad05165ee",
+                       "original_failed_report":  "report-demolive-2026-10-03-parser-failed.json",
+                       "original_failed_report_sha256":  "1c5257e3074291eb702204aa8e7daebbf427ed20e7d706d3040844bf1615ad42",
+                       "durable_file_catalog":  "durable-files-2026-10-03.json",
+                       "durable_file_catalog_sha256":  "4e13aba16fb425cd0aeefb7c65bc9e90984b6d19f7ba2d25826a87e23c7b0ee7",
+                       "replay_send_capability":  false,
+                       "order_writes":  0,
+                       "unresolved_dispatches":  0,
+                       "qualification_scope":  "Original execution revision/source_tree_sha256 only; collector changes are not online-qualified",
+                       "terminal_run_evidence":  "Original collector reached Live economic evidence missing only after successful five-role live and zero-exposure postflight checks",
+                       "authorized_start_utc":  "2026-10-03T02:14:23Z",
+                       "authorized_deadline_utc":  "2026-10-03T02:44:23Z",
+                       "authoritative_orders":  [
+                                                    {
+                                                        "local_id":  "1",
+                                                        "client_id":  "RWN1027F27706D3738DCA7358D88F36F",
+                                                        "order_id":  "3975910689957101568",
+                                                        "side":  "buy",
+                                                        "state":  "filled",
+                                                        "filled_btc":  "0.00005",
+                                                        "average_price_usdt":  "84982.4",
+                                                        "fee":  "-0.00000005",
+                                                        "fee_currency":  "BTC",
+                                                        "created_at_unix_ms":  "1790993772166",
+                                                        "updated_at_unix_ms":  "1790993772166"
+                                                    },
+                                                    {
+                                                        "local_id":  "2",
+                                                        "client_id":  "RWN1EFF8F0F21B2B90C38E0F487584D3",
+                                                        "order_id":  "3975912176049340416",
+                                                        "side":  "sell",
+                                                        "state":  "filled",
+                                                        "filled_btc":  "0.00004995",
+                                                        "average_price_usdt":  "84829.6",
+                                                        "fee":  "-0.00423723852",
+                                                        "fee_currency":  "USDT",
+                                                        "created_at_unix_ms":  "1790993816455",
+                                                        "updated_at_unix_ms":  "1790993816455"
+                                                    }
+                                                ],
+                       "account_postflight":  {
+                                                  "qualified":  true,
+                                                  "environment":  "demo",
+                                                  "entity":  "global",
+                                                  "account_uid_sha256":  "e52bb9f5cda58fc03db5ba5b93de42450d7d69030d618c8dd8aae4adc5b70952",
+                                                  "rest_host":  "openapi.okx.com",
+                                                  "simulated_header":  1,
+                                                  "clock_offset_ms":  -3626,
+                                                  "permissions":  [
+                                                                      "read_only",
+                                                                      "trade"
+                                                                  ],
+                                                  "account_mode":  "2",
+                                                  "position_mode":  "net_mode",
+                                                  "contract_isolated_mode":  "automatic",
+                                                  "allowed_instruments":  [
+                                                                              "BTC-USDT",
+                                                                              "BTC-USDT-SWAP"
+                                                                          ],
+                                                  "max_order_notional_usdt":  25,
+                                                  "open_positions":  0,
+                                                  "pending_orders":  0,
+                                                  "pending_algo_orders":  0,
+                                                  "liabilities":  0,
+                                                  "funded_currencies":  [
+                                                                            "USDT"
+                                                                        ]
+                                              }
+                   }
+}

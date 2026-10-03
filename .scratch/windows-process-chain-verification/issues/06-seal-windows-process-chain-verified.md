@@ -1,7 +1,7 @@
 # 封存 Windows OKX 业务证据与文档
 
 Type: task
-Status: in-progress
+Status: resolved
 Assignee:
 Blocked by:
 Parent: [Windows OKX 业务进程链验证](../map.md)
@@ -22,18 +22,54 @@ Windows DurableStore/CredentialStore 适配器结果、离线 OKX 业务结果�
 
 ## Acceptance criteria
 
-- [ ] `zig build` 有可重复且失败即停的 Windows OKX 离线业务入口；真实 Demo 写入口
+- [x] `zig build` 有可重复且失败即停的 Windows OKX 离线业务入口；真实 Demo 写入口
       与只读入口明确分离，默认不执行在线写入。
-- [ ] 只有 05 全部验收及真实 Demo 终态闭合后，才输出
+- [x] 只有 05 全部验收及真实 Demo 终态闭合后，才输出
       `windows_process_chain_verified=passed`、`venue=okx`、`environment=demo`
       与 `production_qualification=false`；否则为 failed、blocked 或 not_run。
-- [ ] 报告包含实际源码/schema、账户/产品/策略/配置范围、身份与恢复/账本证据；
+- [x] 报告包含实际源码/schema、账户/产品/策略/配置范围、身份与恢复/账本证据；
       不使用硬编码的历史测试数、模拟数据或手写布尔值自授资格。
-- [ ] README.md、README.zh.md、ADR 0008、CONTEXT、生产地图引用与当前结论一致；
+- [x] README.md、README.zh.md、ADR 0008、CONTEXT、生产地图引用与当前结论一致；
       不把 Windows Demo 结果写成 Linux 02–11、Binance/Bybit Testnet 或生产合格。
-- [ ] 全部条件实证完成后才将本图和本票标为 resolved/closed；未获在线写授权时保持开放。
+- [x] 全部条件实证完成后才将本图和本票标为 resolved/closed；未获在线写授权时保持开放。
 
-## Historical evidence
+## Answer / sealed execution
+
+2026-10-03：用户当次授权的 OKX Demo BTC-USDT spot 同链买卖完成。执行 revision
+`9939110dddbaab0e97c8cfb461f9e35a537d12dd`，源码树 SHA-256
+`35e7e235161231d9260c500fb0879086e2d563a1135e9fa2ad78fd744b118521`；
+acceptance/journal/state/registry 为 13/22/25/19。资格只属于此执行源码快照，
+只读采集器作为独立来源；后续源码修改不继承在线资格，详见 ADR 0008。
+
+- [同源离线报告](../report-offline-2026-10-03-9939110d.json)：主测试、OKX Adapter、
+  Windows DurableStore/CredentialStore、真实 OKX 假 transport 五进程、磁盘恢复 passed。
+- [同源只读报告](../report-readonly-2026-10-03-9939110d.json)：REST、公共/私有 WS、
+  五 role passed，账户指纹匹配，`order_writes=0`。
+- [补充资格报告](../report-demolive-2026-10-03-recovered.json)：买单
+  `3975910689957101568` filled `0.00005 BTC`；BTC 费用 `0.00000005`，
+  卖单 `3975912176049340416` filled 净量 `0.00004995 BTC`，每笔小于 25 USDT，
+  两单均在获授权 30 分钟窗口内。卖单 USDT 费用 `0.00423723852`，核心向上取整为
+  `4238` micros；canonical Fill 数量与订单终态分别一致，恢复摘要为
+  `ba7215b4a967ed867506c1c6bd4662cee02dd2b5fe146bfa22182480e31b36b0`。
+  全部 durable dispatch 恰为两条，分别与完整 OMS 命令匹配；权威 GET 按真实 wire
+  client ID 核对两单终态，核销整个发送集合，无未决 Unknown；独立账户预检确认
+  无挂单、条件单、负债、仓位或 BTC，仅 USDT。
+- 原[解析失败报告](../report-demolive-2026-10-03-parser-failed.json)保留 failed。
+  根因是输出将 OMS 的不透明 intent token 误当 wire `clOrdId`，正则未采集订单。
+  执行当时已通过同链终态和 postflight，补证恢复同次 engine/execution 副本并按完整
+  DispatchProof 命令匹配真实 wire 身份；[文件哈希目录](../durable-files-2026-10-03.json)
+  在恢复前后核对文件集合及每项哈希不变。原临时存储与副本保持本地、不入 git。
+- [封存脚本](../seal-2026-10-03.ps1)可重跑本次只读采集：先构建采集器，记录独立
+  revision、源码树/脚本/二进制哈希，再无 transport/route 恢复及 GET；不产生新单。
+  修复代码含跨运行命令不匹配回归，完整 `zig build windows-okx-offline` passed。
+  两轴 code-review 的身份边界和来源问题已修复。
+
+结论：本票 resolved，本图 closed；`windows_process_chain_verified=passed`、
+`venue=okx`、`environment=demo`、`production_qualification=false`。
+README 中英文、CONTEXT、ADR 和生产地图明确同一限定范围；Linux 02–11、
+Binance/Bybit Testnet 与生产资格不由此结果授予。
+
+## Earlier evidence
 
 旧票曾按 SimulatedVenue 范围封存 `247/247` 和 schema 7/14/15；
 这些数字已与当前源码不符，不能用于新 OKX 业务结论。

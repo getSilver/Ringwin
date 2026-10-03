@@ -1,0 +1,52 @@
+{
+    "schema":  1,
+    "observed_at_utc":  "2026-10-03T02:10:13Z",
+    "revision":  "9939110dddbaab0e97c8cfb461f9e35a537d12dd",
+    "source_tree_sha256":  "35e7e235161231d9260c500fb0879086e2d563a1135e9fa2ad78fd744b118521",
+    "acceptance_schema":  13,
+    "journal_schema":  22,
+    "state_schema":  25,
+    "schema_registry":  19,
+    "environment":  "demo",
+    "venue":  "okx",
+    "requested_product":  "BTC-USDT spot",
+    "observed_product":  "BTC-USDT spot",
+    "requested_strategy":  "windows_verification_python_host",
+    "requested_strategy_identity":  40,
+    "observed_strategy_identity":  40,
+    "configuration_source":  "src/windows_verification_runtime.zig and demo_authority.Policy",
+    "requested_config_version":  1,
+    "observed_config_version":  1,
+    "account_uid_sha256":  null,
+    "requested_roles":  5,
+    "observed_roles":  5,
+    "requested_ipc":  "windows_named_pipe",
+    "mode":  "offline",
+    "windows_durable_adapter":  "passed",
+    "windows_credential_adapter":  "passed",
+    "offline":  "passed",
+    "offline_adapter_tests":  "passed",
+    "replay_digest":  "fa3549159c08e361b6497bf9d417e419e3b4096e2b1557e7fd2065d8b550b7d9",
+    "market_raw_frames":  3,
+    "private_raw_barrier":  27,
+    "read_only":  "not_run",
+    "demo_live":  "not_run",
+    "role_ownership":  "passed",
+    "durable_recovery":  "passed",
+    "final_reconciliation":  "not_run",
+    "order_writes":  0,
+    "live_order_ids":  [
+
+                       ],
+    "live_fills":  [
+
+                   ],
+    "live_fees":  [
+
+                  ],
+    "live_replay_digest":  null,
+    "historical_demo_evidence":  "evidence-2026-09-29-demo-round-trip.json",
+    "proof_gap":  "Current-source offline, read-only, or authorized live economic evidence is incomplete.",
+    "windows_process_chain_verified":  "blocked",
+    "production_qualification":  false
+}

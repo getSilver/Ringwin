@@ -21,6 +21,11 @@ blocked/failed，Windows 结果不授予 Linux 生产或 Binance/Bybit Testnet �
 历史 `windows-chain` 综合行保持 blocked；真实 OKX 假 transport 五进程链及磁盘重放通过后，
 另行输出 `windows_okx_offline=passed`。
 
+[06 封存证据](.scratch/windows-process-chain-verification/report-demolive-2026-10-03-recovered.json)
+限定执行版本 `9939110d` 的获授权 OKX Demo BTC-USDT spot 同链买卖。
+原报告解析失败保留，缺失的 wire 订单身份由同次存储恢复和权威只读查询补齐；
+采集器身份单独记录。后续运行时修改不继承该在线资格，生产资格仍为 false。
+
 ## 统一构建入口
 
 仓库统一通过 `build.zig` 执行；每个入口都会先精确验证 Zig

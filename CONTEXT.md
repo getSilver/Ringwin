@@ -374,6 +374,7 @@ _Avoid_: ProductionRole, Windows service, public API server
 **WindowsProcessChainVerified**:
 五个 VerificationRole 在 Windows 上以 OKX VenueAdapter 与 OKX MarketFeedAdapter 经 Named Pipe、controller 用户 SID 与精确进程 PID 校验、磁盘单调 generation，以及真实 TradingShard、HostSupervisor、独立 Gateway、DurableStore 所有者闭合的限定 Demo 业务证据；离线、在线只读和当次授权真实成交、持久化恢复及最终对账须分别通过，并绑定源码、账户、产品、策略和配置。历史 SimulatedVenue 进程结果不能满足此谓词；它不能升级 Demo/Testnet 行，也不能成为 `production_qualified`。
 机器报告须逐模式核对相同源码树 SHA-256 与 Demo 账户指纹；历史成交证据不能自动授予后续源码版本资格。
+资格属于被测执行源码快照；只读采集器补证具有独立来源身份，不会授予采集器或后续运行时版本在线资格。
 _Avoid_: ProductionQualified, production_qualification, ProductionProcessChain
 
 **CredentialStore**:

@@ -201,6 +201,13 @@ The historical `windows-chain` aggregate remains blocked, while its separate
 `windows_okx_offline=passed` line is emitted after the OKX fake-transport
 five-process path and disk replay succeed.
 
+[Ticket 06 sealed evidence](.scratch/windows-process-chain-verification/report-demolive-2026-10-03-recovered.json)
+qualifies execution revision `9939110d` for the authorized OKX Demo BTC-USDT spot
+round trip. The original parser failure is preserved; durable recovery and
+authoritative read-only queries supply the missing wire order IDs. Collector
+identity is recorded separately. Later runtime changes do not inherit this online
+qualification; `production_qualification=false`.
+
 Run the full offline core wave:
 
 ```powershell

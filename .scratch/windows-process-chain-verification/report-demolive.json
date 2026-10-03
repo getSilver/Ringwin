@@ -1,8 +1,8 @@
 {
     "schema":  1,
-    "observed_at_utc":  "2026-09-29T17:20:01Z",
-    "revision":  "41d7ec3974abc212ad2d839211bb6866503eb31b",
-    "source_tree_sha256":  "e944a82753661b0d1d120c0d9f61160463ab4fbe6e94794128e70eb2f0ebe441",
+    "observed_at_utc":  "2026-10-03T02:14:25Z",
+    "revision":  "9939110dddbaab0e97c8cfb461f9e35a537d12dd",
+    "source_tree_sha256":  "35e7e235161231d9260c500fb0879086e2d563a1135e9fa2ad78fd744b118521",
     "acceptance_schema":  13,
     "journal_schema":  22,
     "state_schema":  25,
@@ -26,7 +26,7 @@
     "windows_credential_adapter":  "passed",
     "offline":  "passed",
     "offline_adapter_tests":  "passed",
-    "replay_digest":  "7dc00bb4a75f788eaba1045b40e61ba3369cf68931c1746d81be707d744c1bd3",
+    "replay_digest":  "fa3549159c08e361b6497bf9d417e419e3b4096e2b1557e7fd2065d8b550b7d9",
     "market_raw_frames":  3,
     "private_raw_barrier":  27,
     "read_only":  "passed",
@@ -39,15 +39,27 @@
 
                        ],
     "live_fills":  [
-
+                       {
+                           "identity":  "2820192457892691214",
+                           "local_order_id":  "1",
+                           "quantity":  "5000"
+                       },
+                       {
+                           "identity":  "1897236339906813724",
+                           "local_order_id":  "2",
+                           "quantity":  "4995"
+                       }
                    ],
     "live_fees":  [
-
+                      {
+                          "scope":  "portfolio_total",
+                          "fee_micros":  "4238"
+                      }
                   ],
-    "live_replay_digest":  null,
+    "live_replay_digest":  "ba7215b4a967ed867506c1c6bd4662cee02dd2b5fe146bfa22182480e31b36b0",
     "historical_demo_evidence":  "evidence-2026-09-29-demo-round-trip.json",
     "proof_gap":  "Current-source offline, read-only, or authorized live economic evidence is incomplete.",
     "windows_process_chain_verified":  "failed",
     "production_qualification":  false,
-    "failure":  "Post-trade authoritative OKX Demo preflight did not confirm zero exposure"
+    "failure":  "Live economic evidence missing"
 }

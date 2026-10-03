@@ -101,6 +101,9 @@ Status: active
 
 ## Out of scope
 
+- Windows 票 06 已[封存 `9939110d` 的限定 OKX Demo 证据](../windows-process-chain-verification/report-demolive-2026-10-03-recovered.json)；
+  只读采集器来源单独记录。该结论不授予 Linux、本图 02–11 或生产资格。
+
 - 当前 Windows 开发数据、PowerShell live 脚本或旧 schema 的生产兼容。
 - 未冻结 Venue、币本位、双向持仓、组合保证金、期权、算法单、跨 Venue 净仓或 Smart Order Routing。
 - Kubernetes、服务网格、动态插件、通用 REST/WS/auth 框架、第二套控制 UI、独立控制面 CLI 和

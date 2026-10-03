@@ -1,0 +1,66 @@
+[
+  {
+    "path": "engine/manifest.bin",
+    "sha256": "af26bde58ae9085462146df20369b12f34fcdd8ca519dcbd24801a85539a9926"
+  },
+  {
+    "path": "engine/segment-1-78-0.log",
+    "sha256": "26ea020be0bc8c4469c815e34efeaa3dc3a3dc03e6b9a9248300286816dfca87"
+  },
+  {
+    "path": "engine/segment-1-78-1.log",
+    "sha256": "ba174a231b43dd47e68e87c48d9e99bc4752d74ad4dd82dff1ac35d7ef935fa4"
+  },
+  {
+    "path": "engine/segment-1-91-0.log",
+    "sha256": "392c9e6d00889da01c2313ef95b4c4bedab8a5e1954b0060fc342ba54b5693cf"
+  },
+  {
+    "path": "engine/segment-1-91-1.log",
+    "sha256": "053a160306f8900ee12ce03d2d540a0101de0e659ff556ce7e2e119a89bc0c49"
+  },
+  {
+    "path": "engine/snapshot-1-78.bin",
+    "sha256": "886e601dcb2c22864cab486fd71cd75cae723ca302b5f4932348160b8ae76d37"
+  },
+  {
+    "path": "engine/snapshot-1-91.bin",
+    "sha256": "e3496b416ddf74710fa4cb4b2d3afae8c429bf73558313cf7221be9f445cb8e7"
+  },
+  {
+    "path": "execution/manifest.bin",
+    "sha256": "aabea56cffc2729474addb0a2f7849cd226f31503d1b08a2c9026a974ff5aa30"
+  },
+  {
+    "path": "execution/segment-0-93-0.log",
+    "sha256": "66c58fa6b809713d353a3b721ef23df60de8f2cfc610a9e40a2d830ef91ca1ce"
+  },
+  {
+    "path": "execution/segment-0-93-1.log",
+    "sha256": "bf3c5e3b5bba6a728b47db03d8990085e4ab05953722597dd11b9d9a4d790019"
+  },
+  {
+    "path": "execution/segment-0-93-2.log",
+    "sha256": "3dcba52dbbc9c95e7a78fb751a4b4d84e36d3c80e842635b641f2467f4773bf2"
+  },
+  {
+    "path": "execution/segment-0-93-3.log",
+    "sha256": "d3b858cea0643eed34992fe9529011331c77abff3750d2a7e04f7bef00642d33"
+  },
+  {
+    "path": "execution/segment-2-92-0.log",
+    "sha256": "baa9ecbe185b2837a45c76dd1cf63e0d251ad27cdfb80db186018a53e80fa498"
+  },
+  {
+    "path": "execution/segment-2-92-1.log",
+    "sha256": "9a932df2e7711c80167981d9530cf08510f53a160fa5ed58f7f86f28ab29f357"
+  },
+  {
+    "path": "execution/snapshot-0-93.bin",
+    "sha256": "bda2810a7cad2b46987d970eaf5eb4012f3b71d5830e5972957304f386dfc823"
+  },
+  {
+    "path": "execution/snapshot-2-92.bin",
+    "sha256": "95c37d628eeb3fe6056fb4f7fb63091cbb49b9bea9b0370c752d8a0e386b590b"
+  }
+]
