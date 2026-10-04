@@ -563,7 +563,10 @@ fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canoni
     , .{ command.client_order_id.slice(), amount, asset, "0.02" }) else
         \\{"arg":{"channel":"account"},"eventType":"update","curPage":1,"lastPage":true,"data":[{"uTime":"1800000000001","totalEq":"25","adjEq":"25","imr":"0","mmr":"0","mgnRatio":"","isoEq":"0","details":[{"ccy":"USDT","cashBal":"25.123456789","eq":"25.123456789","availBal":"25","frozenBal":"0","liab":"0","isoLiab":"0","crossLiab":"0"}]}]}
     ;
-    const ingress = if (rest) try implementation.ingestPrivateRest(private_times, .rest_fills_history_spot, .{ .final = true }, input) else try implementation.ingestPrivateWs(private_times, input);
+    const account_input =
+        \\{"arg":{"channel":"account"},"eventType":"update","curPage":1,"lastPage":true,"data":[{"uTime":"1800000000001","totalEq":"25","adjEq":"25","imr":"0","mmr":"0","mgnRatio":"","isoEq":"0","details":[{"ccy":"USDT","cashBal":"25","eq":"25","availBal":"25","frozenBal":"0","liab":"0","isoLiab":"0","crossLiab":"0"}]}]}
+    ;
+    const ingress = if (rest) try implementation.ingestPrivateRest(private_times, .rest_fills_history_spot, .{ .final = true }, input) else try implementation.ingestPrivateWs(private_times, if (core_reject and fee == null) account_input else input);
     try std.testing.expectEqual(rejection, ingress.rejection);
     var output = (try adapter.tryDrain()) orelse return error.MissingEconomicFault;
     if (persist_fault) |point| {
@@ -600,10 +603,22 @@ fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canoni
         fault = record;
     };
     if (core_reject) {
-        try std.testing.expect(output.events[1].event == .fill);
-        try std.testing.expect(output.events[1].event.fill.rebate == null);
-        output.events[1].event.fill.fee.?.atoms = std.math.maxInt(i128);
-        try std.testing.expectError(error.Overflow, owner.applyAdapterBatch(output));
+        if (fee == null) {
+            try std.testing.expect(output.events[0].event == .account_observed);
+            const digest_before = owner.shard.canonicalStateDigest();
+            var foreign = output.events[0];
+            foreign.envelope.exchange_account = 3;
+            foreign.event.account_observed.exchange_account = 3;
+            try std.testing.expectError(error.CanonicalScopeMismatch, owner.shard.apply(.{ .venue = foreign }));
+            try std.testing.expectEqualSlices(u8, &digest_before, &owner.shard.canonicalStateDigest());
+            output.events[0].event.account_observed.source_sequence += 5;
+            try std.testing.expectError(error.SourceSequenceGap, owner.applyAdapterBatch(output));
+        } else {
+            try std.testing.expect(output.events[1].event == .fill);
+            try std.testing.expect(output.events[1].event.fill.rebate == null);
+            output.events[1].event.fill.fee.?.atoms = std.math.maxInt(i128);
+            try std.testing.expectError(error.Overflow, owner.applyAdapterBatch(output));
+        }
         try std.testing.expectEqual(expected, owner.shard.economic_fault_reason);
         try std.testing.expect(!owner.closed);
         for (owner.shard.oms.emitted()) |cancel| try std.testing.expect(cancel.authority.complete());
@@ -657,7 +672,7 @@ fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canoni
         try std.testing.expectEqual(@as(u64, 1), chain.next_attempt_id);
         try std.testing.expect(recovered.shard.oms.recovery_only);
     }
-    if (fee == null) {
+    if (fee == null and !core_reject) {
         var gateway: @import("execution_gateway.zig").Gateway = .{};
         try gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .environment = .demo, .lease_guard = &guard, .capability = .{
             .version = 1,
@@ -685,8 +700,9 @@ fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canoni
             .exchange_position = owner.shard.currentNetExchangePosition(cancel.instrument).?,
             .authority_barrier = owner.shard.trace.len,
         });
-        try std.testing.expectError(error.NotSent, gateway.sendFromShard(&owner.shard, command.command_id, 2));
-        try std.testing.expectEqual(venue.SendResult.accepted, try gateway.sendFromShard(&owner.shard, cancel.command_id, 2));
+        try std.testing.expectError(error.NotSent, gateway.sendFromShard(&recovered.shard, command.command_id, 2));
+        const cancellation_snapshot = try recovered.committedSnapshot(&snapshot_buffer);
+        try std.testing.expectEqual(venue.SendResult.accepted, try demo.sendFromCommittedSnapshot(cancellation_snapshot, recovered.shard.trace.len, recovered.shard.canonicalStateDigest(), &gateway, &guard, cancel.command_id, 2));
         try std.testing.expectEqual(@as(u64, 2), chain.next_attempt_id);
     }
 }
@@ -717,6 +733,7 @@ test "OKX ready economic faults distinguish micro fees rebates assets and decode
 
 test "core rejected canonical economic amount persists without partial accounting or send authority" {
     try checkReadyEconomicFault("-0.01", "USDT", .overflow, null, true, null, false);
+    try checkReadyEconomicFault(null, "USDT", .invalid_economic_fact, null, true, null, false);
 }
 
 test "OKX economic fault append and commit failures retain raw facts and close sending" {

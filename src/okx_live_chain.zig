@@ -77,6 +77,9 @@ pub const Chain = struct {
         self.next_attempt_id = try std.math.add(u64, attempt_base, commands.len);
 
         const response = self.transport.submit(request.path(), request.bytes());
+        // Transport may already have executed the command. Losing its evidence
+        // or classification must retain Unknown until authoritative recovery.
+        errdefer self.uncertain_outstanding = true;
         var evidence: ?market.RawEvidenceRef = null;
         if (response.response) |bytes| {
             if (bytes.len > market.max_raw_frame_bytes) return error.ResponseTooLarge;
@@ -164,6 +167,7 @@ const TestTransport = struct {
 const TestRawSink = struct {
     calls: u32 = 0,
     last_origin: u16 = 0,
+    unavailable: bool = false,
 
     fn interface(self: *TestRawSink) market.RawSink {
         return .{ .ptr = self, .append_fn = append };
@@ -173,6 +177,7 @@ const TestRawSink = struct {
         const self: *TestRawSink = @ptrCast(@alignCast(ptr));
         self.calls += 1;
         self.last_origin = record.origin;
+        if (self.unavailable) return error.Unavailable;
         std.debug.assert(record.byte_len == bytes.len);
         return self.calls;
     }
@@ -296,6 +301,23 @@ test "unknown dispatch latches and blocks the next send without a caller flag fl
     const first = try chain.dispatch(std.testing.allocator, &commands);
     try std.testing.expectEqual(order.DispatchState.unknown, first.dispatch.items[0].state);
     try std.testing.expectEqual(@as(u32, 1), transport.calls);
+    try std.testing.expectError(error.UncertainOrderBlocksSend, chain.dispatch(std.testing.allocator, &commands));
+    try std.testing.expectEqual(@as(u32, 1), transport.calls);
+}
+
+test "response persistence failure closes subsequent transport admission" {
+    var raw: TestRawSink = .{ .unavailable = true };
+    var transport: TestTransport = .{};
+    var chain: Chain = .{
+        .mode = .demo_live,
+        .qualification = qualified(),
+        .raw_sink = raw.interface(),
+        .transport = transport.interface(),
+    };
+    const commands = [_]AuthorizedCommand{command()};
+    try std.testing.expectError(error.Unavailable, chain.dispatch(std.testing.allocator, &commands));
+    try std.testing.expectEqual(@as(u32, 1), transport.calls);
+    raw.unavailable = false;
     try std.testing.expectError(error.UncertainOrderBlocksSend, chain.dispatch(std.testing.allocator, &commands));
     try std.testing.expectEqual(@as(u32, 1), transport.calls);
 }

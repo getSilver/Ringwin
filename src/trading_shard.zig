@@ -162,6 +162,10 @@ fn canonicalPayloadDigest(event: canonical.Payload) ![Sha256.digest_length]u8 {
 const max_canonical_ingress_streams = 16;
 
 pub const TradingShard = struct {
+    /// Restart admission is separate from deterministic economic state: Owner
+    /// re-arms it on every recovery. Snapshot encoding preserves the fence;
+    /// canonical/semantic digests deliberately describe committed facts only.
+    recovery_admission_pending: bool = false,
     trace: Trace = .{},
     instrument_rules_version: u32 = 0,
     margin_rules_version: u32 = 0,
@@ -260,6 +264,17 @@ pub const TradingShard = struct {
     /// The sole public core ingress seam. Both typed core events and canonical
     /// Venue records enter through this tagged event and commit transactionally.
     pub fn apply(self: *TradingShard, input: CanonicalEvent) !ApplyResult {
+        // Process admission cannot emit durable rejection facts: restart
+        // replay reconstructs committed facts independently of this fence.
+        if (self.recovery_admission_pending and input == .core) switch (input.core.payload) {
+            .timer, .external_order_intent => return error.RecoveryAdmissionPending,
+            .oms_intent_group => |group| {
+                if (group.count == 0 or group.count > group.members.len) return error.InvalidIntentGroup;
+                for (group.members[0..group.count]) |intent|
+                    if (intent.operation != .cancel) return error.RecoveryAdmissionPending;
+            },
+            else => {},
+        };
         return switch (input) {
             .core => |event| self.applyCore(event),
             .venue => |event| self.applyVenue(event),
@@ -301,14 +316,8 @@ pub const TradingShard = struct {
                 try candidate.bindFreshCancellations(event.envelope.times.monotonic_ns orelse 0);
                 self.* = candidate;
             } else if (candidate.canonical_account.failure != account_failure_before) {
-                if (candidate.operational_state.initialized) try candidate.applyOperationalGate(.{
-                    .gate_identity = account_data_gate_identity,
-                    .target_identity = candidate.operational_state.target_identity,
-                    .kind = .latched,
-                    .reason = .reconciliation_break,
-                    .open = false,
-                });
-                try candidate.trace.append(.canonical_account_invalidated, event.envelope.identity.sequence);
+                try candidate.latchEconomicFault(event, .invalid_economic_fact);
+                try candidate.bindFreshCancellations(event.envelope.times.monotonic_ns orelse 0);
                 self.* = candidate;
             } else if (candidate.canonical_market.failure_generation != market_failure_generation_before) {
                 if (candidate.operational_state.initialized) try candidate.applyOperationalGate(.{
@@ -1343,11 +1352,17 @@ pub const TradingShard = struct {
                     });
                 try self.trace.append(if (health.health == .healthy) .market_healthy else .market_gap, fact_identity);
             },
-            .account_bootstrap_snapshot => {
+            .account_bootstrap_snapshot => |bootstrap_snapshot| {
+                if (record.envelope.scope != .account or bootstrap_snapshot.exchange_account != record.envelope.exchange_account or
+                    (self.exchange_account_identity != 0 and bootstrap_snapshot.exchange_account != self.exchange_account_identity))
+                    return error.CanonicalScopeMismatch;
                 try self.canonical_account.apply(record.event);
                 try self.trace.append(.canonical_account_bootstrap, fact_identity);
             },
-            .account_observed => {
+            .account_observed => |observation| {
+                if (observation.exchange_account != record.envelope.exchange_account or
+                    (self.exchange_account_identity != 0 and observation.exchange_account != self.exchange_account_identity))
+                    return error.CanonicalScopeMismatch;
                 try self.canonical_account.apply(record.event);
                 try self.trace.append(.canonical_account_observed, fact_identity);
             },

@@ -10,6 +10,7 @@ else
 const curl = if (live_transport_enabled) @import("okx_curl_transport.zig") else struct {};
 const okx_auth = if (live_transport_enabled) @import("okx_rest_auth.zig") else struct {};
 const canonical = @import("canonical_event.zig");
+const canonical_codec = @import("canonical_event_codec.zig");
 const credential_store = @import("credential_store.zig");
 const demo_authority = @import("demo_authority.zig");
 const durable_store = @import("durable_store.zig");
@@ -22,6 +23,7 @@ const okx_demo = @import("okx_demo_live_acceptance.zig");
 const okx_live = @import("okx_live_chain.zig");
 const market_feed = @import("okx_market_feed.zig");
 const okx_private = @import("okx_private_reconciliation.zig");
+const private_recovery = @import("okx_private_recovery.zig");
 const okx_venue = @import("okx_venue_adapter.zig");
 const production_contract = @import("production_contract.zig");
 const raw_ingress = @import("raw_ingress.zig");
@@ -30,11 +32,53 @@ const snapshot_codec = @import("snapshot_codec.zig");
 const strategy_host_lifecycle = @import("strategy_host_lifecycle.zig");
 const trading_shard = @import("trading_shard.zig");
 
+const PrivateReplayFrame = struct {
+    sequence: u64,
+    record: @import("okx_public_market.zig").RawIngressRecord,
+};
+
+/// The engine owns the raw walker and canonical commit. The controller only
+/// routes generation-checked bytes to the execution-owned private decoder.
+const RemotePrivateSweep = struct {
+    owner: *demo_authority.Owner,
+    index: *private_recovery.CommittedInputs,
+    pipe: Pipe,
+    generation: u64,
+    last_sequence: u64,
+
+    fn consume(ptr: *anyopaque, sequence: u64, record: @import("okx_public_market.zig").RawIngressRecord, bytes: []const u8) !void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        var metadata: [128]u8 = undefined;
+        try writeStatus(self.pipe, .private_replay);
+        try writePayloadFrame(self.pipe, self.generation, try snapshot_codec.encodeBare(&metadata, PrivateReplayFrame{ .sequence = sequence, .record = record }));
+        try writePayloadFrame(self.pipe, self.generation, bytes);
+        while (true) switch (try readStatus(self.pipe)) {
+            .private_ready => {
+                if (sequence == self.last_sequence) try self.index.verifySweep();
+                return;
+            },
+            .private_output => {
+                var count: [1]u8 = undefined;
+                try readExact(self.pipe, &count);
+                if (count[0] == 0 or count[0] > canonical.max_events_per_adapter_batch) return error.InvalidPrivateBatch;
+                var batch: canonical.AdapterOutputBatch = .{};
+                for (0..count[0]) |_| {
+                    var encoded: [4096]u8 = undefined;
+                    try batch.append(try canonical_codec.decode(try readPayloadFrame(self.pipe, self.generation, &encoded)));
+                }
+                try self.index.applyBatch(self.owner, batch);
+                try writeStatus(self.pipe, .private_applied);
+            },
+            else => return error.PrivateRecoveryProtocolMismatch,
+        };
+    }
+};
+
 pub const max_control_queue = 8;
 pub const max_frame_bytes = 1;
 pub const Role = production_contract.VerificationRole;
-pub const Command = enum(u8) { enable_risk = 'A', export_snapshot = 'E', load_snapshot = 'L', ingest_market = 'I', produce_market = 'M', poll_market = 'm', bootstrap_private = 'B', private_ws = 'P', poll_private = 'p', ingest_private = 'V', verify_private = 'Q', refresh_private = 'r', seal_private = 's', export_fence = 'F', install_fence = 'f', quote_okx = 'q', prepare_okx = 'K', activate_okx = 'C', produce_okx_intent = 'J', cleanup_okx = 'c', inspect_okx = 'i', export_okx_snapshot = 'N', send_okx = 'O', verify_okx = 'Z', probe = 'h', drain = 'D', stop = 'S' };
-pub const Status = enum(u8) { hello = 'H', owner_ready = 'o', ready = 'R', risk_enabled = 'A', snapshot_ready = 'E', snapshot_accepted = 'L', market_output = 'M', market_applied = 'I', market_ready = 'n', private_output = 'P', private_ready = 'B', private_applied = 'V', fence_ready = 'f', okx_quote = 'q', okx_prepared = 'K', okx_activated = 'C', okx_command = 'J', okx_state = 'i', okx_send_ready = 'y', okx_sent = 'O', okx_verified = 'Z', healthy = 'h', draining = 'G', stopped = 'T', forced_stop = 'F', failed = 'X' };
+pub const Command = enum(u8) { recover_private = 'U', replay_private_frame = 'u', enable_risk = 'A', export_snapshot = 'E', load_snapshot = 'L', ingest_market = 'I', produce_market = 'M', poll_market = 'm', bootstrap_private = 'B', private_ws = 'P', poll_private = 'p', ingest_private = 'V', verify_private = 'Q', refresh_private = 'r', seal_private = 's', export_fence = 'F', install_fence = 'f', quote_okx = 'q', prepare_okx = 'K', activate_okx = 'C', produce_okx_intent = 'J', cleanup_okx = 'c', inspect_okx = 'i', export_okx_snapshot = 'N', send_okx = 'O', verify_okx = 'Z', probe = 'h', drain = 'D', stop = 'S' };
+pub const Status = enum(u8) { private_replay = 'U', hello = 'H', owner_ready = 'o', ready = 'R', risk_enabled = 'A', snapshot_ready = 'E', snapshot_accepted = 'L', market_output = 'M', market_applied = 'I', market_ready = 'n', private_output = 'P', private_ready = 'B', private_applied = 'V', fence_ready = 'f', okx_quote = 'q', okx_prepared = 'K', okx_activated = 'C', okx_command = 'J', okx_state = 'i', okx_send_ready = 'y', okx_sent = 'O', okx_verified = 'Z', healthy = 'h', draining = 'G', stopped = 'T', forced_stop = 'F', failed = 'X' };
 
 pub const BoundedQueue = struct {
     values: [max_control_queue]Command = undefined,
@@ -132,7 +176,10 @@ pub fn runRole(
     var okx_cleanup_command_id: u64 = 0;
     if (engine_state) |state| {
         const owner = try init.gpa.create(demo_authority.Owner);
-        owner.* = try demo_authority.Owner.bootstrap(state.store.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
+        owner.* = if (state.recovered_history)
+            try demo_authority.Owner.recover(state.store.interface(), init.io, .{ .domain = .decision_log, .id = 91 })
+        else
+            try demo_authority.Owner.bootstrap(state.store.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
         okx_owner = owner;
     }
     var market_state: ?*MarketOwners = null;
@@ -196,6 +243,51 @@ pub fn runRole(
             return error.GenerationMismatch;
         }
         switch (command) {
+            .recover_private => {
+                if (draining) return error.InvalidRoleTransition;
+                if (role == .engine) {
+                    const owner = okx_owner orelse return error.EngineOwnersMissing;
+                    var path_buffer: [512]u8 = undefined;
+                    const path = try readPayloadFrame(client, generation, &path_buffer);
+                    if (!std.fs.path.isAbsolute(path)) return error.InvalidDemoStateDirectory;
+                    if (!owner.ready) {
+                        try writeStatus(client, .private_ready);
+                        continue;
+                    }
+                    const raw_store = try init.gpa.create(durable_store.WindowsFileAdapter);
+                    defer init.gpa.destroy(raw_store);
+                    raw_store.* = .{ .dir = try std.Io.Dir.openDirAbsolute(init.io, path, .{}) };
+                    defer raw_store.close(init.io);
+                    const raw_stream: durable_store.StreamIdentity = .{ .domain = .raw_ingress, .id = 93 };
+                    try owner.bindRecoveryIngress(raw_store.interface(), raw_stream);
+                    var index = try private_recovery.CommittedInputs.init(owner.store, init.io, owner.stream);
+                    var storage: [durable_store.max_snapshot_bytes]u8 = undefined;
+                    const snapshot = try owner.committedSnapshot(&storage);
+                    try writeStatus(client, .snapshot_ready);
+                    try writeSnapshotFrame(client, generation, .{ .bytes = snapshot, .barrier = owner.shard.trace.len, .digest = owner.shard.canonicalStateDigest() });
+                    try expectStatus(client, .private_ready);
+                    const raw_state = try raw_store.interface().recover(init.io, raw_stream);
+                    var replay: RemotePrivateSweep = .{ .owner = owner, .index = &index, .pipe = client, .generation = generation, .last_sequence = raw_state.committed_barrier };
+                    try owner.replayCommittedIngress(raw_stream, .{ .ptr = &replay, .consume_fn = RemotePrivateSweep.consume });
+                    try writeStatus(client, .private_ready);
+                } else if (role == .execution_gateway) {
+                    const owners = execution_state orelse return error.ExecutionOwnerMissing;
+                    var storage: [durable_store.max_snapshot_bytes]u8 = undefined;
+                    const snapshot = try readSnapshotFrame(client, generation, &storage);
+                    try owners.preparePrivateRecovery(init, snapshot);
+                    try writeStatus(client, .private_ready);
+                } else return error.InvalidRoleTransition;
+            },
+            .replay_private_frame => {
+                if (role != .execution_gateway or draining) return error.InvalidRoleTransition;
+                const owners = execution_state orelse return error.ExecutionOwnerMissing;
+                var metadata_buffer: [128]u8 = undefined;
+                const metadata = try snapshot_codec.decodeBare(try readPayloadFrame(client, generation, &metadata_buffer), PrivateReplayFrame);
+                var bytes_buffer: [raw_ingress.max_frame_bytes]u8 = undefined;
+                const bytes = try readPayloadFrame(client, generation, &bytes_buffer);
+                try owners.replayPrivateFrame(client, generation, metadata, bytes);
+                try writeStatus(client, .private_ready);
+            },
             .probe => {
                 if (role != .telemetry or draining) return error.InvalidRoleTransition;
                 try writeStatus(client, .healthy);
@@ -264,7 +356,7 @@ pub fn runRole(
                 try writeAll(client, &[_]u8{batch.len});
                 for (batch.slice()) |event| {
                     var encoded: [4096]u8 = undefined;
-                    try writePayloadFrame(client, generation, try snapshot_codec.encodeBare(&encoded, event));
+                    try writePayloadFrame(client, generation, try canonical_codec.encode(&encoded, event));
                 }
             },
             .poll_market => {
@@ -282,7 +374,7 @@ pub fn runRole(
                 for (0..count[0]) |_| {
                     var encoded: [4096]u8 = undefined;
                     const frame = try readPayloadFrame(client, generation, &encoded);
-                    try batch.append(try snapshot_codec.decodeBare(frame, canonical.EventRecord));
+                    try batch.append(try canonical_codec.decode(frame));
                 }
                 const demo_owner = okx_owner orelse return error.EngineOwnersMissing;
                 demo_owner.applyAdapterBatch(batch) catch |err| {
@@ -350,7 +442,7 @@ pub fn runRole(
                 for (0..count[0]) |_| {
                     var encoded: [4096]u8 = undefined;
                     const frame = try readPayloadFrame(client, generation, &encoded);
-                    try batch.append(try snapshot_codec.decodeBare(frame, canonical.EventRecord));
+                    try batch.append(try canonical_codec.decode(frame));
                 }
                 owner.applyAdapterBatch(batch) catch |err| {
                     std.debug.print("windows_demo_private_apply_failed={s}\n", .{@errorName(err)});
@@ -421,6 +513,7 @@ pub fn runRole(
             .prepare_okx => {
                 if (role != .engine or draining or okx_fence == null) return error.InvalidRoleTransition;
                 const owner = okx_owner orelse return error.EngineOwnersMissing;
+                if (owner.ready) return error.RecoveredDemoRequiresActivation;
                 if (!owner.shard.canonical_account.valid) return error.PrivateAccountNotReady;
                 var policy = try demo_authority.Policy.parse(init.gpa, offline_okx_policy);
                 defer policy.deinit();
@@ -581,8 +674,9 @@ pub fn runRole(
                 try writeAll(client, &encoded);
             },
             .export_okx_snapshot => {
-                if (role != .engine or okx_command_id == 0 or draining) return error.InvalidRoleTransition;
+                if (role != .engine or draining) return error.InvalidRoleTransition;
                 const owner = okx_owner orelse return error.EngineOwnersMissing;
+                if (!owner.ready) return error.InvalidRoleTransition;
                 var storage: [durable_store.max_snapshot_bytes]u8 = undefined;
                 const bytes = try owner.committedSnapshot(&storage);
                 try writeStatus(client, .snapshot_ready);
@@ -710,6 +804,7 @@ const EngineOwners = struct {
     premature_host_intent: host_gateway.OrderIntent,
     fill_count: u64 = 0,
     replay_send_capability: bool = true,
+    recovered_history: bool = false,
 
     fn start(init: std.process.Init, store_dir: []const u8, credential_dir: []const u8, generation: u64) !*EngineOwners {
         if (store_dir.len == 0 or credential_dir.len == 0) return error.EnginePathsRequired;
@@ -736,6 +831,23 @@ const EngineOwners = struct {
         self.credentials = try credential_store.CredentialStore.open(init.io, init.gpa, credential_dir);
         errdefer self.credentials.close(init.io);
         try admitObservation(init, &self.credentials);
+
+        self.recovered_history = blk: {
+            var manifest = self.store.dir.openFile(init.io, "manifest.bin", .{}) catch |err| switch (err) {
+                error.FileNotFound => break :blk false,
+                else => return err,
+            };
+            manifest.close(init.io);
+            break :blk true;
+        };
+        if (self.recovered_history) {
+            self.shard_run = try demo_authority.Owner.recover(self.store.interface(), init.io, .{ .domain = .decision_log, .id = 78 });
+            self.venue = .{};
+            self.gateway = .{};
+            self.fill_count = 0;
+            self.replay_send_capability = false;
+            return self;
+        }
 
         self.shard_run = try demo_authority.Owner.bootstrap(self.store.interface(), init.io, .{ .domain = .decision_log, .id = 78 });
         const genesis = fixture.genesisEvents(.{
@@ -1105,7 +1217,7 @@ const MarketOwners = struct {
             try writeAll(pipe, &[_]u8{batch.len});
             for (batch.slice()) |event| {
                 var encoded: [4096]u8 = undefined;
-                try writePayloadFrame(pipe, generation, try snapshot_codec.encodeBare(&encoded, event));
+                try writePayloadFrame(pipe, generation, try canonical_codec.encode(&encoded, event));
             }
         }
     }
@@ -1171,6 +1283,12 @@ const ExecutionOwners = struct {
     guard: failover.GatewayLeaseGuard,
     fence_path: ?[]u8 = null,
     reconciliation_id: u128 = 1,
+    recovering: bool = false,
+    replay_sequence: u64 = 1,
+    replay_reconciliation_started: bool = false,
+    replay_previous_source: ?okx_private.IngressSource = null,
+    replay_after: ?u64 = null,
+    replay_economic_fault: bool = false,
 
     const OfflineTransport = struct {
         writes: u8 = 0,
@@ -1220,6 +1338,12 @@ const ExecutionOwners = struct {
             break :blk true;
         };
         const raw_stream: durable_store.StreamIdentity = .{ .domain = .raw_ingress, .id = 93 };
+        self.recovering = has_history;
+        self.replay_sequence = 1;
+        self.replay_reconciliation_started = false;
+        self.replay_previous_source = null;
+        self.replay_after = null;
+        self.replay_economic_fault = false;
         self.raw = if (has_history)
             try raw_ingress.DurableSink.recover(self.store.interface(), init.io, raw_stream)
         else
@@ -1263,63 +1387,9 @@ const ExecutionOwners = struct {
         self.reconciler = .{};
         self.venue = okx_venue.OkxVenueAdapter.init(init.gpa, &self.chain, self.clock.interface(), okx_demo.demoProfile(), okx_demo.demoRules());
         self.venue.attachPrivateReconciler(&self.reconciler);
-        try self.venue.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4 });
-        try self.venue.beginPrivateSession();
-        if (has_history) {
-            const Replay = struct {
-                venue: *okx_venue.OkxVenueAdapter,
-                reconciliation_started: bool = false,
-                previous_source: ?okx_private.IngressSource = null,
-                after: ?u64 = null,
-                fn consume(ptr: *anyopaque, sequence: u64, record: @import("okx_public_market.zig").RawIngressRecord, bytes: []const u8) !void {
-                    const self_replay: *@This() = @ptrCast(@alignCast(ptr));
-                    if (record.source_session != 1) return error.PrivateReplaySessionMismatch;
-                    if (record.origin == okx_live.transport_response_origin) return;
-                    const evidence: okx_private.RawEvidenceRef = .{ .stream_sequence = sequence, .sha256 = record.sha256 };
-                    const times: okx_private.Times = .{
-                        .receive_time_utc_ns = record.receive_time_utc_ns,
-                        .monotonic_time_ns = record.monotonic_time_ns,
-                        .wall_time_utc_ns = record.wall_time_utc_ns,
-                    };
-                    const ingress = if (record.origin == 0)
-                        try self_replay.venue.replayPrivateWs(times, evidence, bytes)
-                    else blk: {
-                        const source = std.enums.fromInt(okx_private.IngressSource, record.origin - 1) orelse return error.InvalidPrivateReplaySource;
-                        if (source.isWebSocket()) return error.InvalidPrivateReplaySource;
-                        if (!self_replay.reconciliation_started or
-                            (source == .rest_account_config and self_replay.venue.reconciler.?.readiness().reconciliation_ready))
-                        {
-                            if (try self_replay.venue.adapter().trySend(.{ .account_reconciliation = .{ .identity = 1, .exchange_account = 2, .expected_session = 1 } }) != .accepted)
-                                return error.PrivateReplayReconciliationRejected;
-                            self_replay.reconciliation_started = true;
-                            while (try self_replay.venue.adapter().tryDrain()) |_| {}
-                        }
-                        if (self_replay.previous_source != source) self_replay.after = null;
-                        const endpoint = for (okx_demo.rest_endpoints) |candidate| {
-                            if (candidate.source == source) break candidate;
-                        } else return error.InvalidPrivateReplaySource;
-                        const parsed = try std.json.parseFromSlice(std.json.Value, self_replay.venue.allocator, bytes, .{});
-                        defer parsed.deinit();
-                        const rows = parsed.value.object.get("data") orelse return error.InvalidRestPage;
-                        if (rows != .array) return error.InvalidRestPage;
-                        const final = endpoint.cursor == .none or rows.array.items.len < endpoint.page_size;
-                        const batch = try self_replay.venue.replayPrivateRest(times, source, .{
-                            .requested_after = self_replay.after,
-                            .final = final,
-                        }, evidence, bytes);
-                        self_replay.previous_source = source;
-                        self_replay.after = if (final) null else batch.oldest_cursor orelse return error.MissingRestPageCursor;
-                        break :blk batch;
-                    };
-                    if (ingress.rejection) |reason| {
-                        std.debug.print("private_replay_reject seq={d} origin={d} reason={s}\n", .{ sequence, record.origin, @tagName(reason) });
-                        return error.PrivateReplayRejected;
-                    }
-                    while (try self_replay.venue.adapter().tryDrain()) |_| {}
-                }
-            };
-            var replay: Replay = .{ .venue = &self.venue };
-            try raw_ingress.replayCommitted(self.store.interface(), init.io, raw_stream, .{ .ptr = &replay, .consume_fn = Replay.consume });
+        if (!has_history) {
+            try self.venue.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4 });
+            try self.venue.beginPrivateSession();
         }
         self.authority = .{};
         self.lease = .{ .key = .{ .exchange_account = 2, .decision_domain = 1 }, .node = 0, .token = 0, .issued_at_ns = 0, .expires_at_ns = 0 };
@@ -1346,6 +1416,90 @@ const ExecutionOwners = struct {
         self.store.close(init.io);
     }
 
+    fn preparePrivateRecovery(self: *ExecutionOwners, init: std.process.Init, snapshot: SnapshotFrame) !void {
+        _ = init;
+        if (!self.recovering or self.venue.state != .idle) return error.InvalidRoleTransition;
+        const restored = try trading_shard.TradingShard.restoreSnapshot(snapshot.bytes);
+        if (!restored.shard.recovery_admission_pending or restored.barrier != snapshot.barrier or
+            !std.mem.eql(u8, &restored.shard.canonicalStateDigest(), &snapshot.digest))
+            return error.DecisionSnapshotMismatch;
+        var floor: u64 = 0;
+        for (restored.shard.canonical_ingress_cursors[0..restored.shard.canonical_ingress_cursor_count]) |cursor|
+            if (cursor.identity.stream == 1) {
+                floor = cursor.identity.sequence;
+                break;
+            };
+        self.chain.mode = .replay;
+        self.replay_economic_fault = restored.shard.economic_fault_count != 0;
+        try self.venue.resumeAfter(floor);
+        for (restored.shard.oms.orders[0..restored.shard.oms.order_count]) |owned| {
+            var wire_id: ?canonical.ClientOrderId = null;
+            for (self.gateway.uncertain_dispatches[0..self.gateway.uncertain_dispatch_count]) |dispatch| {
+                const proof = dispatch.recovered_proof orelse return error.MissingDispatchIdentity;
+                if (proof.command.order_id != owned.id or proof.command.operation != .place) continue;
+                const known_command = for (restored.shard.oms.command_history[0..restored.shard.oms.command_history_count]) |command| {
+                    if (command.command_id == dispatch.command_id and command.order_id == owned.id) break true;
+                } else false;
+                if (!known_command or (wire_id != null and !std.meta.eql(wire_id.?, proof.command.client_order_id)))
+                    return error.MissingRecoveredCommand;
+                wire_id = proof.command.client_order_id;
+            }
+            if (wire_id == null and owned.dispatch_submitted) return error.MissingDispatchIdentity;
+            try self.venue.rememberRecoveredOrder(owned.id, wire_id orelse owned.client_order_id, owned.portfolio_reduce_only, .{ .instrument = owned.instrument, .rules_version = owned.limit_price.rules_version, .lots = owned.quantity }, owned.revision);
+        }
+        try self.venue.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4 });
+        try self.venue.beginPrivateSession();
+    }
+
+    fn replayPrivateFrame(self: *ExecutionOwners, pipe: Pipe, generation: u64, metadata: PrivateReplayFrame, bytes: []const u8) !void {
+        if (!self.recovering or metadata.sequence != self.replay_sequence or metadata.sequence >= self.raw.next_sequence or
+            metadata.record.source_session != 1 or metadata.record.byte_len != bytes.len)
+            return error.InvalidPrivateReplaySource;
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        if (!std.mem.eql(u8, &digest, &metadata.record.sha256)) return error.RawEvidenceMismatch;
+        const record = metadata.record;
+        const times: okx_private.Times = .{ .receive_time_utc_ns = record.receive_time_utc_ns, .monotonic_time_ns = record.monotonic_time_ns, .wall_time_utc_ns = record.wall_time_utc_ns };
+        const evidence: okx_private.RawEvidenceRef = .{ .stream_sequence = metadata.sequence, .sha256 = record.sha256 };
+        if (record.origin == 0) {
+            _ = try self.venue.replayPrivateWs(times, evidence, bytes);
+        } else if (record.origin != okx_live.transport_response_origin) {
+            const source = std.enums.fromInt(okx_private.IngressSource, record.origin - 1) orelse return error.InvalidPrivateReplaySource;
+            if (source.isWebSocket()) return error.InvalidPrivateReplaySource;
+            if (!self.replay_reconciliation_started or (source == .rest_account_config and self.reconciler.readiness().reconciliation_ready)) {
+                if (try self.venue.adapter().trySend(.{ .account_reconciliation = .{ .identity = 1, .exchange_account = 2, .expected_session = 1 } }) != .accepted)
+                    return error.PrivateReplayReconciliationRejected;
+                self.replay_reconciliation_started = true;
+                try self.drainPrivate(pipe, generation);
+            }
+            if (self.replay_previous_source != source) self.replay_after = null;
+            const endpoint = for (okx_demo.rest_endpoints) |candidate| {
+                if (candidate.source == source) break candidate;
+            } else return error.InvalidPrivateReplaySource;
+            const parsed = std.json.parseFromSlice(std.json.Value, self.venue.allocator, bytes, .{}) catch null;
+            defer if (parsed) |value| value.deinit();
+            const rows = if (parsed) |value| blk: {
+                if (value.value != .object) break :blk 0;
+                const data = value.value.object.get("data") orelse break :blk 0;
+                break :blk if (data == .array) data.array.items.len else 0;
+            } else 0;
+            const final = endpoint.cursor == .none or rows < endpoint.page_size;
+            const batch = try self.venue.replayPrivateRest(times, source, .{ .requested_after = self.replay_after, .final = final }, evidence, bytes);
+            self.replay_previous_source = source;
+            self.replay_after = if (final or batch.rejection != null) null else batch.oldest_cursor orelse {
+                try self.drainPrivate(pipe, generation);
+                return error.MissingRestPageCursor;
+            };
+        }
+        try self.drainPrivate(pipe, generation);
+        self.replay_sequence = try std.math.add(u64, self.replay_sequence, 1);
+        if (self.replay_sequence == self.raw.next_sequence) {
+            if (!self.reconciler.readiness().reconciliation_ready and !self.replay_economic_fault) return error.PrivateRecoveryIncomplete;
+            self.recovering = false;
+            self.chain.mode = .demo_live;
+        }
+    }
+
     fn installFence(self: *ExecutionOwners, init: std.process.Init, path: []const u8, lease: failover.PrimaryLease) !void {
         if (lease.token == 0 or lease.key.exchange_account != 2 or lease.key.decision_domain != 1)
             return error.InvalidDemoLease;
@@ -1367,8 +1521,8 @@ const ExecutionOwners = struct {
     fn ingestPrivate(self: *ExecutionOwners, pipe: Pipe, generation: u64, raw: []const u8) !void {
         const times: okx_private.Times = .{ .receive_time_utc_ns = 1_800_000_000_000_000_001, .monotonic_time_ns = 10_000_001, .wall_time_utc_ns = 1_800_000_000_000_000_002 };
         const ingress = try self.venue.ingestPrivateWs(times, raw);
-        if (ingress.rejection != null or ingress.event_count != 0) return error.PrivateIngressRejected;
         try self.drainPrivate(pipe, generation);
+        if (ingress.rejection != null or ingress.event_count != 0) return error.PrivateIngressRejected;
     }
 
     fn drainPrivate(self: *ExecutionOwners, pipe: Pipe, generation: u64) !void {
@@ -1377,16 +1531,21 @@ const ExecutionOwners = struct {
         }
     }
 
-    fn writeBatch(_: *ExecutionOwners, pipe: Pipe, generation: u64, batch: canonical.AdapterOutputBatch) !void {
+    fn writeBatch(self: *ExecutionOwners, pipe: Pipe, generation: u64, batch: canonical.AdapterOutputBatch) !void {
         try writeStatus(pipe, .private_output);
         try writeAll(pipe, &[_]u8{batch.len});
         for (batch.slice()) |event| {
             var encoded: [4096]u8 = undefined;
-            try writePayloadFrame(pipe, generation, try snapshot_codec.encodeBare(&encoded, event));
+            try writePayloadFrame(pipe, generation, try canonical_codec.encode(&encoded, event));
         }
+        try expectStatus(pipe, .private_applied);
+        if (self.recovering) for (batch.slice()) |event| {
+            if (event.event == .economic_fault) self.replay_economic_fault = true;
+        };
     }
 
     fn bootstrapPrivate(self: *ExecutionOwners, init: std.process.Init, pipe: Pipe, generation: u64) !void {
+        if (self.recovering) return error.PrivateRecoveryPending;
         if (self.live_mode) {
             if (comptime live_transport_enabled) return self.bootstrapLivePrivate(init, pipe, generation);
             return error.DemoTransportBuildRequired;
@@ -1431,8 +1590,8 @@ const ExecutionOwners = struct {
         for (0..2) |_| {
             for (sources, rest_frames) |source, frame| {
                 const ingress = try self.venue.ingestPrivateRest(times, source, .{ .final = true }, frame);
-                if (ingress.rejection != null) return error.PrivateIngressRejected;
                 try self.drainPrivate(pipe, generation);
+                if (ingress.rejection != null) return error.PrivateIngressRejected;
             }
             _ = try self.reconciler.tryComplete();
         }
@@ -1491,7 +1650,10 @@ const ExecutionOwners = struct {
             for (0..2) |_| {
                 for (okx_demo.rest_endpoints) |endpoint| {
                     std.debug.print("windows_demo_private: rest={s}\n", .{@tagName(endpoint.source)});
-                    try okx_demo.ingestRestEndpoint(init, owner, &self.venue, endpoint);
+                    okx_demo.ingestRestEndpoint(init, owner, &self.venue, endpoint) catch |err| {
+                        try self.drainPrivate(pipe, generation);
+                        return err;
+                    };
                     try self.drainPrivate(pipe, generation);
                 }
                 _ = try self.reconciler.tryComplete();
@@ -1540,7 +1702,10 @@ const ExecutionOwners = struct {
             for (0..2) |_| {
                 for (okx_demo.rest_endpoints) |endpoint| {
                     std.debug.print("windows_demo_refresh: rest={s}\n", .{@tagName(endpoint.source)});
-                    try okx_demo.ingestRestEndpoint(init, owner, &self.venue, endpoint);
+                    okx_demo.ingestRestEndpoint(init, owner, &self.venue, endpoint) catch |err| {
+                        try self.drainPrivate(pipe, generation);
+                        return err;
+                    };
                     try self.drainPrivate(pipe, generation);
                 }
                 _ = try self.reconciler.tryComplete();
@@ -1578,8 +1743,8 @@ const ExecutionOwners = struct {
         if (comptime live_transport_enabled) {
             const times = (try okx_demo.clock(io)).times;
             const ingress = try self.venue.ingestPrivateWs(times, raw);
-            if (ingress.rejection != null or ingress.event_count != 0) return error.PrivateIngressRejected;
             try self.drainPrivate(pipe, generation);
+            if (ingress.rejection != null or ingress.event_count != 0) return error.PrivateIngressRejected;
         } else return error.DemoTransportBuildRequired;
     }
 };
@@ -2361,8 +2526,10 @@ fn runDemoChain(init: std.process.Init, executable: []const u8, live: bool) !voi
         try writeLease(connections[index], lease);
         try expectStatus(connections[index], .fence_ready);
     }
-    try sendCommand(connections[1], .bootstrap_private);
-    try routePrivateOutput(connections[1], connections[0], generation);
+    if (!try recoverPrivateStartup(connections[1], connections[0], generation, execution_dir)) {
+        try sendCommand(connections[1], .bootstrap_private);
+        try routePrivateOutput(connections[1], connections[0], generation);
+    }
     std.debug.print("windows_demo_chain: private_bootstrap=ready\n", .{});
     try sendCommand(connections[0], .verify_private);
     try expectStatus(connections[0], .private_ready);
@@ -2409,6 +2576,7 @@ fn runDemoChain(init: std.process.Init, executable: []const u8, live: bool) !voi
         const term = try child.wait(init.io);
         if (term != .exited or term.exited != 0) return error.RoleExitedUnexpectedly;
     }
+    for (connections) |pipe| pipe.close();
     started = 0;
     const recovered = try init.gpa.create(durable_store.WindowsFileAdapter);
     defer init.gpa.destroy(recovered);
@@ -2692,8 +2860,10 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
         try expectStatus(connections[index], .fence_ready);
     }
 
-    try sendCommand(connections[2], .bootstrap_private);
-    try routePrivateOutput(connections[2], connections[0], generation);
+    if (!try recoverPrivateStartup(connections[2], connections[0], generation, execution_dir)) {
+        try sendCommand(connections[2], .bootstrap_private);
+        try routePrivateOutput(connections[2], connections[0], generation);
+    }
     try sendCommand(connections[0], .verify_private);
     try expectStatus(connections[0], .private_ready);
     try sendCommand(connections[0], .prepare_okx);
@@ -2834,6 +3004,7 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
 
     generation = try incrementGeneration(init.io, generation_file);
     if (generation != 2) return error.GenerationNotMonotonic;
+    try verifyPrivateProcessRestart(init, executable, pipe_names[0], pipe_names[2], generation, generation_file, store_dir, execution_dir, credential_dir, password, settled_digest, private_raw.committed_barrier);
     var forced = try spawnRole(init, executable, .control_fence, pipe_names[0], generation, generation_file, fence_dir, credential_dir);
     var forced_pipe = try connectPipe(init.io, pipe_names[0]);
     defer forced_pipe.close();
@@ -2892,18 +3063,95 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
     try output.interface.flush();
 }
 
+fn verifyPrivateProcessRestart(init: std.process.Init, executable: []const u8, engine_name: []const u8, execution_name: []const u8, generation: u64, generation_file: []const u8, store_dir: []const u8, execution_dir: []const u8, credential_dir: []const u8, password: []const u8, settled_digest: [32]u8, raw_barrier: u64) !void {
+    var engine = try spawnRole(init, executable, .engine, engine_name, generation, generation_file, store_dir, credential_dir);
+    defer engine.kill(init.io);
+    const password_pipe = engine.stdin orelse return error.PasswordPipeFailed;
+    try password_pipe.writeStreamingAll(init.io, password);
+    password_pipe.close(init.io);
+    engine.stdin = null;
+    const engine_pipe = try connectPipe(init.io, engine_name);
+    defer engine_pipe.close();
+    try expectStatus(engine_pipe, .hello);
+    try expectStatus(engine_pipe, .owner_ready);
+    var execution = try spawnRole(init, executable, .execution_gateway, execution_name, generation, generation_file, execution_dir, credential_dir);
+    defer execution.kill(init.io);
+    const execution_pipe = try connectPipe(init.io, execution_name);
+    defer execution_pipe.close();
+    try expectStatus(execution_pipe, .hello);
+    try expectStatus(execution_pipe, .ready);
+
+    if (!try recoverPrivateStartup(execution_pipe, engine_pipe, generation, execution_dir))
+        return error.PrivateProcessRecoveryMissing;
+    try sendCommand(engine_pipe, .export_okx_snapshot);
+    try expectStatus(engine_pipe, .snapshot_ready);
+    var storage: [durable_store.max_snapshot_bytes]u8 = undefined;
+    const snapshot = try readSnapshotFrame(engine_pipe, generation, &storage);
+    const restored = (try trading_shard.TradingShard.restoreSnapshot(snapshot.bytes)).shard;
+    if (restored.recovery_admission_pending or restored.economic_fault_count != 0 or
+        restored.oms.orders[0].state != .filled or restored.economicSummary().portfolio.spot.quantity != 20_000 or
+        !std.mem.eql(u8, &settled_digest, &restored.canonicalStateDigest()))
+        return error.PrivateProcessRecoveryMismatch;
+
+    // A decoder rejection must reach the engine commit before the execution
+    // role reports failure. Raw evidence alone cannot close engine admission.
+    try sendCommand(execution_pipe, .private_ws);
+    try writePayloadFrame(execution_pipe, generation,
+        \\{"arg":{"channel":"account"},"eventType":"snapshot","curPage":1,"lastPage":true,"data":[{"uTime":"1800000000102","totalEq":"25","adjEq":"25","imr":"0","mmr":"0","mgnRatio":"","isoEq":"0","details":[{"ccy":"USDT","cashBal":"bad","availBal":"14.979979","eq":"14.979979","frozenBal":"0","liab":"0","isoLiab":"0","crossLiab":"0"}]}]}
+    );
+    routePrivateOutput(execution_pipe, engine_pipe, generation) catch |err| switch (err) {
+        error.PipeReadFailed => {},
+        else => return err,
+    };
+    const execution_term = try execution.wait(init.io);
+    if (execution_term != .exited or execution_term.exited == 0) return error.PrivateRejectionNotClosed;
+    try sendCommand(engine_pipe, .export_okx_snapshot);
+    try expectStatus(engine_pipe, .snapshot_ready);
+    const fault_snapshot = try readSnapshotFrame(engine_pipe, generation, &storage);
+    const fault_state = (try trading_shard.TradingShard.restoreSnapshot(fault_snapshot.bytes)).shard;
+    if (fault_state.economic_fault_count != 1 or fault_state.economic_fault_reason != .malformed_amount or
+        !fault_state.oms.recovery_only or fault_state.economicSummary().portfolio.spot.quantity != 20_000 or
+        !std.meta.eql(restored.economicSummary(), fault_state.economicSummary()))
+        return error.PrivateRejectionNotCommitted;
+
+    for ([_]Pipe{engine_pipe}) |pipe| {
+        try sendCommand(pipe, .drain);
+        try expectStatus(pipe, .draining);
+        try sendCommand(pipe, .stop);
+        try expectStatus(pipe, .stopped);
+    }
+    for ([_]*std.process.Child{&engine}) |child| {
+        const term = try child.wait(init.io);
+        if (term != .exited or term.exited != 0) return error.RoleExitedUnexpectedly;
+    }
+    const raw_store = try init.gpa.create(durable_store.WindowsFileAdapter);
+    defer init.gpa.destroy(raw_store);
+    raw_store.* = try durable_store.WindowsFileAdapter.openWindowsVerification(init.io, execution_dir);
+    defer raw_store.close(init.io);
+    const after = try raw_store.interface().recover(init.io, .{ .domain = .raw_ingress, .id = 93 });
+    if (after.committed_barrier != raw_barrier + 1 or after.last_sequence != raw_barrier + 1)
+        return error.PrivateReplayAppendedTransport;
+}
+
 fn routePrivateOutput(execution_pipe: Pipe, engine_pipe: Pipe, generation: u64) !void {
     return routePrivateOutputUntil(execution_pipe, engine_pipe, generation, .private_ready);
 }
 
 fn routePrivateOutputUntil(execution_pipe: Pipe, engine_pipe: Pipe, generation: u64, final: Status) !void {
+    return routePrivateOutputs(execution_pipe, engine_pipe, generation, final, false);
+}
+
+fn routePrivateOutputs(execution_pipe: Pipe, engine_pipe: Pipe, generation: u64, final: Status, replay: bool) !void {
     while (true) switch (try readStatus(execution_pipe)) {
-        .private_ready, .okx_sent => |status| if (status == final) return else return error.PrivateBootstrapFailed,
+        .private_ready, .okx_sent => |status| if (status == final) {
+            if (replay) try writeStatus(engine_pipe, .private_ready);
+            return;
+        } else return error.PrivateBootstrapFailed,
         .private_output => {
             var count: [1]u8 = undefined;
             try readExact(execution_pipe, &count);
             if (count[0] == 0 or count[0] > canonical.max_events_per_adapter_batch) return error.InvalidPrivateBatch;
-            try sendCommand(engine_pipe, .ingest_private);
+            if (replay) try writeStatus(engine_pipe, .private_output) else try sendCommand(engine_pipe, .ingest_private);
             try writeAll(engine_pipe, &count);
             for (0..count[0]) |_| {
                 var encoded: [4096]u8 = undefined;
@@ -2911,8 +3159,37 @@ fn routePrivateOutputUntil(execution_pipe: Pipe, engine_pipe: Pipe, generation: 
                 try writePayloadFrame(engine_pipe, generation, event);
             }
             try expectStatus(engine_pipe, .private_applied);
+            try writeStatus(execution_pipe, .private_applied);
         },
         else => return error.PrivateBootstrapFailed,
+    };
+}
+
+fn recoverPrivateStartup(execution_pipe: Pipe, engine_pipe: Pipe, generation: u64, execution_dir: []const u8) !bool {
+    try sendCommand(engine_pipe, .recover_private);
+    try writePayloadFrame(engine_pipe, generation, execution_dir);
+    const status = try readStatus(engine_pipe);
+    if (status == .private_ready) return false;
+    if (status != .snapshot_ready) return error.PrivateRecoveryProtocolMismatch;
+    var storage: [durable_store.max_snapshot_bytes]u8 = undefined;
+    const snapshot = try readSnapshotFrame(engine_pipe, generation, &storage);
+    try sendCommand(execution_pipe, .recover_private);
+    try writeSnapshotFrame(execution_pipe, generation, snapshot);
+    try expectStatus(execution_pipe, .private_ready);
+    try writeStatus(engine_pipe, .private_ready);
+    while (true) switch (try readStatus(engine_pipe)) {
+        .private_ready => return true,
+        .private_replay => {
+            var metadata: [128]u8 = undefined;
+            const encoded = try readPayloadFrame(engine_pipe, generation, &metadata);
+            var raw: [raw_ingress.max_frame_bytes]u8 = undefined;
+            const bytes = try readPayloadFrame(engine_pipe, generation, &raw);
+            try sendCommand(execution_pipe, .replay_private_frame);
+            try writePayloadFrame(execution_pipe, generation, encoded);
+            try writePayloadFrame(execution_pipe, generation, bytes);
+            try routePrivateOutputs(execution_pipe, engine_pipe, generation, .private_ready, true);
+        },
+        else => return error.PrivateRecoveryProtocolMismatch,
     };
 }
 

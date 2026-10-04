@@ -15,6 +15,7 @@ const order = @import("okx_order_entry.zig");
 const private = @import("okx_private_reconciliation.zig");
 const host = @import("strategy_host_gateway.zig");
 const raw_ingress = @import("raw_ingress.zig");
+const recovery = @import("okx_private_recovery.zig");
 
 const private_times: private.Times = .{
     .receive_time_utc_ns = 1_800_000_000_000_000_001,
@@ -114,13 +115,15 @@ fn failCommit(context: *anyopaque, io: std.Io, stream: durable.StreamIdentity, b
     try adapter.interface().commit(io, stream, barrier);
 }
 
-fn checkFileRecovery(io: std.Io, path: []const u8, point: durable.FaultPoint) !void {
+fn checkFileRecovery(io: std.Io, path: []const u8, point: ?durable.FaultPoint, committed_prefix: u2) !void {
     const allocator = std.heap.page_allocator;
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const raw_stream: durable.StreamIdentity = .{ .domain = .raw_ingress, .id = 1 };
     const file_store = try allocator.create(durable.WindowsFileAdapter);
     defer allocator.destroy(file_store);
-    file_store.* = try durable.WindowsFileAdapter.openWindowsVerification(io, path);
+    @memset(std.mem.asBytes(file_store), 0);
+
+    try file_store.initWindowsVerification(io, path);
     var file_open = true;
     defer if (file_open) file_store.close(io);
     const store = file_store.interface();
@@ -179,46 +182,68 @@ fn checkFileRecovery(io: std.Io, path: []const u8, point: durable.FaultPoint) !v
     const intent: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = intent_sequence, .strategy_cursor = owner.shard.trace.len, .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 20_000, .limit_price_micros = 50_000_000 };
     const command = (try owner.apply(.{ .core = .{ .identity = intent_sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = intent } } })) orelse return error.MissingDemoCommand;
     try implementation.rememberRecoveredOrder(command.order_id, command.client_order_id, command.portfolio_reduce_only, .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = command.quantity }, command.revision);
-    _ = try owner.apply(fixtureOnSecondaryStream(20, 4, .{ .order_dispatch_result = .{ .command = command.command_id, .state = .unknown } }));
+    if (point != null) _ = try owner.apply(fixtureOnSecondaryStream(20, 4, .{ .order_dispatch_result = .{ .command = command.command_id, .state = .unknown } }));
     const economic_before = owner.shard.economicSummary();
     const pending_before = owner.shard.oms.orderById(command.order_id).?;
     var frame: [2048]u8 = undefined;
     const input = try std.fmt.bufPrint(&frame,
-        \\{{"arg":{{"channel":"orders"}},"data":[{{"instId":"BTC-USDT","ordId":"1001","clOrdId":"{s}","side":"buy","ordType":"limit","state":"partially_filled","tdMode":"cash","posSide":"net","reduceOnly":"false","sz":"0.0002","px":"50000","accFillSz":"0.0001","avgPx":"50000","uTime":"1800000000100","tradeId":"2001","fillSz":"0.0001","fillPx":"50000","fillFee":"-0.0000001","fillFeeCcy":"USDT","fillTime":"1800000000100","execType":"M"}}]}}
-    , .{command.client_order_id.slice()});
+        \\{{"arg":{{"channel":"orders"}},"data":[{{"instId":"BTC-USDT","ordId":"1001","clOrdId":"{s}","side":"buy","ordType":"limit","state":"{s}","tdMode":"cash","posSide":"net","reduceOnly":"false","sz":"0.0002","px":"{s}","accFillSz":"{s}","avgPx":"{s}","uTime":"1800000000100","tradeId":"2001","fillSz":"{s}","fillPx":"{s}","fillFee":"{s}","fillFeeCcy":"USDT","fillTime":"1800000000100","execType":"M"}}]}}
+    , .{ command.client_order_id.slice(), if (point == null) "filled" else "partially_filled", if (point == null) "50" else "50000", if (point == null) "0.0002" else "0.0001", if (point == null) "50" else "50000", if (point == null) "0.0002" else "0.0001", if (point == null) "50" else "50000", if (point == null) "-0.01" else "-0.0000001" });
     const ingress = try implementation.ingestPrivateWs(private_times, input);
     try std.testing.expect(ingress.rejection == null);
     const output = (try adapter.tryDrain()) orelse return error.MissingEconomicFault;
-    try std.testing.expectEqual(@as(usize, 1), output.slice().len);
-    try std.testing.expectEqual(canonical.EconomicFaultReason.inexact_amount, output.events[0].event.economic_fault.reason);
+    if (point == null) {
+        try std.testing.expectEqual(@as(usize, 2), output.slice().len);
+        try std.testing.expectEqual(@as(i128, 10_000), output.events[1].event.fill.fee.?.atoms);
+    } else {
+        try std.testing.expectEqual(@as(usize, 1), output.slice().len);
+        try std.testing.expectEqual(canonical.EconomicFaultReason.inexact_amount, output.events[0].event.economic_fault.reason);
+    }
+    for (output.slice()[0..committed_prefix]) |record| _ = try owner.apply(.{ .venue = record });
+    const economic_prefix = owner.shard.economicSummary();
     const raw_before = try store.recover(io, raw_stream);
     try std.testing.expectEqual(ingress.raw_evidence.stream_sequence, raw_before.committed_barrier);
     const owner_digest = owner.shard.canonicalStateDigest();
     var fault_vtable = store.vtable.*;
-    if (point == .append) {
-        file_store.injectFault(.eio);
-    } else {
-        fault_vtable.commit = failCommit;
-        owner.store = .{ .context = file_store, .vtable = &fault_vtable };
+    if (point != null) {
+        if (point == .append) {
+            file_store.injectFault(.eio);
+        } else {
+            fault_vtable.commit = failCommit;
+            owner.store = .{ .context = file_store, .vtable = &fault_vtable };
+        }
+        try std.testing.expectError(error.DecisionLogUnavailable, owner.applyAdapterBatch(output));
+        try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
     }
-    try std.testing.expectError(error.DecisionLogUnavailable, owner.applyAdapterBatch(output));
-    try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
-    try std.testing.expectEqualDeep(economic_before, owner.shard.economicSummary());
+    try std.testing.expectEqualDeep(economic_prefix, owner.shard.economicSummary());
     try std.testing.expectEqual(@as(u64, 1), chain.next_attempt_id);
     file_store.close(io);
     file_open = false;
 
     const reopened = try allocator.create(durable.WindowsFileAdapter);
     defer allocator.destroy(reopened);
-    reopened.* = try durable.WindowsFileAdapter.openWindowsVerification(io, path);
+    @memset(std.mem.asBytes(reopened), 0);
+
+    try reopened.initWindowsVerification(io, path);
     var reopened_open = true;
     defer if (reopened_open) reopened.close(io);
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
-    if (point == .append) {
-        recovered.* = try demo.Owner.recover(reopened.interface(), io, stream);
+    if (point != .commit) {
+        recovered.* = try demo.Owner.recoverWithIngress(reopened.interface(), io, stream, raw_stream);
         try std.testing.expectEqualSlices(u8, &owner_digest, &recovered.shard.canonicalStateDigest());
-        try std.testing.expectEqualDeep(economic_before, recovered.shard.economicSummary());
+        try std.testing.expectEqualDeep(economic_prefix, recovered.shard.economicSummary());
+        try std.testing.expectEqual(@as(i64, if (committed_prefix == 2) 20_000 else 0), try recovered.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
+        // Recovery of a healthy decision prefix grants no dispatch authority
+        // while its committed private ingress still contains an unapplied fault.
+        var gateway: @import("execution_gateway.zig").Gateway = .{};
+        try std.testing.expectError(error.DecisionLogUnavailable, recovered.send(&gateway, &guard, command.command_id, 1));
+        try std.testing.expect((try recovered.source()).recovery_admission_pending);
+        var snapshot_buffer: [durable.max_snapshot_bytes]u8 = undefined;
+        const pending_snapshot = try recovered.committedSnapshot(&snapshot_buffer);
+        const pending_copy = try @import("trading_shard.zig").TradingShard.restoreSnapshot(pending_snapshot);
+        try std.testing.expect(pending_copy.shard.recovery_admission_pending);
+        try std.testing.expectEqual(@as(usize, 0), transport.sends);
     } else {
         try std.testing.expectError(error.DecisionLogUnavailable, demo.Owner.recover(reopened.interface(), io, stream));
         const uncommitted = try reopened.interface().recover(io, stream);
@@ -228,6 +253,8 @@ fn checkFileRecovery(io: std.Io, path: []const u8, point: durable.FaultPoint) !v
     var replay_chain: live.Chain = .{ .mode = .replay, .qualification = qualification(), .raw_sink = replay_raw.interface(), .transport = transport.interface() };
     var replay_reconciler: private.Reconciler = .{};
     var replay_adapter = okx.OkxVenueAdapter.init(allocator, &replay_chain, clock.interface(), profile(), rules());
+    var committed = if (point == null) try recovery.CommittedInputs.init(reopened.interface(), io, stream) else recovery.CommittedInputs{};
+    if (point == null) try replay_adapter.resumeAfter(committed.sequenceFor(1));
     replay_adapter.attachPrivateReconciler(&replay_reconciler);
     const replay_venue = replay_adapter.adapter();
     try replay_venue.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4 });
@@ -239,8 +266,9 @@ fn checkFileRecovery(io: std.Io, path: []const u8, point: durable.FaultPoint) !v
         pending_sequence: u64,
         pending_digest: [32]u8,
         started: bool = false,
-        faults: usize = 0,
-        apply_fault: bool,
+        pending_batches: usize = 0,
+        apply_pending: bool,
+        healthy: bool,
         fn consume(ptr: *anyopaque, sequence: u64, record: @import("okx_public_market.zig").RawIngressRecord, bytes: []const u8) !void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             const times: private.Times = .{ .receive_time_utc_ns = record.receive_time_utc_ns, .monotonic_time_ns = record.monotonic_time_ns, .wall_time_utc_ns = record.wall_time_utc_ns };
@@ -250,12 +278,19 @@ fn checkFileRecovery(io: std.Io, path: []const u8, point: durable.FaultPoint) !v
                 try std.testing.expect((try self.implementation.replayPrivateWs(times, evidence, bytes)).rejection == null);
                 if (sequence == self.pending_sequence) {
                     const batch = (try replay.tryDrain()) orelse return error.MissingRecoveredFault;
-                    try std.testing.expectEqual(@as(usize, 1), batch.slice().len);
-                    try std.testing.expectEqual(canonical.EconomicFaultReason.inexact_amount, batch.events[0].event.economic_fault.reason);
+                    if (self.healthy) {
+                        try std.testing.expectEqual(@as(usize, 2), batch.slice().len);
+                        try std.testing.expectEqual(@as(i128, 20_000), batch.events[1].event.fill.quantity.lots);
+                        try std.testing.expectEqual(okx.usdt, batch.events[1].event.fill.fee.?.asset);
+                        try std.testing.expectEqual(@as(i128, 10_000), batch.events[1].event.fill.fee.?.atoms);
+                    } else {
+                        try std.testing.expectEqual(@as(usize, 1), batch.slice().len);
+                        try std.testing.expectEqual(canonical.EconomicFaultReason.inexact_amount, batch.events[0].event.economic_fault.reason);
+                    }
                     try std.testing.expectEqual(sequence, batch.events[0].envelope.raw_evidence.sequence);
                     try std.testing.expectEqualSlices(u8, &self.pending_digest, &batch.events[0].envelope.raw_evidence.digest);
-                    if (self.apply_fault) try self.owner.?.applyAdapterBatch(batch);
-                    self.faults += 1;
+                    if (self.apply_pending) try self.owner.?.applyAdapterBatch(batch);
+                    self.pending_batches += 1;
                 }
             } else {
                 if (!self.started) {
@@ -271,9 +306,106 @@ fn checkFileRecovery(io: std.Io, path: []const u8, point: durable.FaultPoint) !v
             }
         }
     };
-    var replay: Replay = .{ .implementation = &replay_adapter, .owner = if (point == .append) recovered else null, .pending_sequence = ingress.raw_evidence.stream_sequence, .pending_digest = ingress.raw_evidence.sha256, .apply_fault = point == .append };
-    try raw_ingress.replayCommitted(reopened.interface(), io, raw_stream, .{ .ptr = &replay, .consume_fn = Replay.consume });
-    try std.testing.expectEqual(@as(usize, 1), replay.faults);
+    var replay: Replay = .{ .implementation = &replay_adapter, .owner = if (point != .commit) recovered else null, .pending_sequence = ingress.raw_evidence.stream_sequence, .pending_digest = ingress.raw_evidence.sha256, .apply_pending = point != .commit, .healthy = point == null };
+    if (point == null) {
+        var sweep: recovery.Sweep = .{ .implementation = &replay_adapter, .owner = recovered, .index = &committed, .reconciliation_identity = 99, .last_sequence = raw_before.committed_barrier };
+        try recovered.replayCommittedIngress(raw_stream, sweep.consumer());
+    } else if (point != .commit)
+        try recovered.replayCommittedIngress(raw_stream, .{ .ptr = &replay, .consume_fn = Replay.consume })
+    else
+        try raw_ingress.replayCommitted(reopened.interface(), io, raw_stream, .{ .ptr = &replay, .consume_fn = Replay.consume });
+    if (point != null) try std.testing.expectEqual(@as(usize, 1), replay.pending_batches);
+    if (point == null) {
+        try std.testing.expect(!recovered.shard.recovery_admission_pending);
+        try std.testing.expect(!recovered.shard.oms.recovery_only);
+        try std.testing.expectEqual(@as(u64, 0), recovered.shard.economic_fault_count);
+        try std.testing.expect(recovered.shard.operational_state.effectiveTradingAuthority());
+        try std.testing.expectEqual(@as(i64, 20_000), try recovered.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
+        try std.testing.expectEqual(@as(i64, 10_000), recovered.shard.economicSummary().portfolio.fee_micros);
+        try std.testing.expectEqual(@as(i64, 10_000), recovered.shard.economicSummary().exchange.fee_micros);
+        try std.testing.expectEqual(@import("oms.zig").OrderState.filled, recovered.shard.oms.orderById(command.order_id).?.state);
+        var next_intent = intent;
+        next_intent.intent_sequence = recovered.shard.trace.len + 1;
+        next_intent.strategy_cursor = recovered.shard.trace.len;
+        next_intent.quantity = 1_000;
+        const next_command = (try recovered.apply(.{ .core = .{ .identity = next_intent.intent_sequence, .monotonic_time = 3, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = next_intent } } })) orelse return error.MissingHealthyRecoveryCommand;
+        try std.testing.expect(next_command.command_id != command.command_id);
+        try std.testing.expectEqual(@as(i64, 1_000), next_command.quantity);
+        try std.testing.expectEqual(@as(u64, 1), replay_chain.next_attempt_id);
+        try std.testing.expectEqual(@as(usize, 0), transport.sends);
+        const healthy_digest = recovered.shard.canonicalStateDigest();
+        reopened.close(io);
+        reopened_open = false;
+        const healthy_store = try allocator.create(durable.WindowsFileAdapter);
+        defer allocator.destroy(healthy_store);
+        @memset(std.mem.asBytes(healthy_store), 0);
+
+        try healthy_store.initWindowsVerification(io, path);
+        defer healthy_store.close(io);
+        const healthy_owner = try allocator.create(demo.Owner);
+        defer allocator.destroy(healthy_owner);
+        healthy_owner.* = try demo.Owner.recoverWithIngress(healthy_store.interface(), io, stream, raw_stream);
+        try std.testing.expect(healthy_owner.shard.recovery_admission_pending);
+        try std.testing.expectEqualSlices(u8, &healthy_digest, &healthy_owner.shard.canonicalStateDigest());
+        try std.testing.expectEqual(@as(i64, 20_000), try healthy_owner.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
+        try std.testing.expectEqual(@as(i64, 10_000), healthy_owner.shard.economicSummary().portfolio.fee_micros);
+        try std.testing.expect(!healthy_owner.shard.oms.recovery_only);
+        try std.testing.expectEqual(@as(u64, 0), healthy_owner.shard.economic_fault_count);
+        var verified_index = try recovery.CommittedInputs.init(healthy_store.interface(), io, stream);
+        try std.testing.expect(try verified_index.contains(output.events[1]));
+        var conflicting = output.events[1];
+        conflicting.event.fill.fee.?.atoms += 1;
+        try std.testing.expectError(error.ConflictingRecoveredPrivateFact, verified_index.contains(conflicting));
+        conflicting = output.events[1];
+        conflicting.envelope.raw_evidence.digest[0] ^= 1;
+        try std.testing.expectError(error.ConflictingRecoveredPrivateFact, verified_index.contains(conflicting));
+        try std.testing.expectError(error.PrivateRecoveryHistoryUnavailable, recovery.CommittedInputs.init(healthy_store.interface(), io, .{ .domain = .raw_ingress, .id = 1 }));
+        const before_repeat = healthy_owner.shard.canonicalStateDigest();
+        var duplicate_index = try recovery.CommittedInputs.init(healthy_store.interface(), io, stream);
+        var duplicate_raw = try raw_ingress.DurableSink.recover(healthy_store.interface(), io, raw_stream);
+        var duplicate_chain: live.Chain = .{ .mode = .replay, .qualification = qualification(), .raw_sink = duplicate_raw.interface(), .transport = transport.interface() };
+        var duplicate_reconciler: private.Reconciler = .{};
+        var duplicate_adapter = okx.OkxVenueAdapter.init(allocator, &duplicate_chain, clock.interface(), profile(), rules());
+        try duplicate_adapter.resumeAfter(duplicate_index.sequenceFor(1));
+        duplicate_adapter.attachPrivateReconciler(&duplicate_reconciler);
+        try duplicate_adapter.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4 });
+        try duplicate_adapter.beginPrivateSession();
+        try duplicate_adapter.rememberRecoveredOrder(command.order_id, command.client_order_id, command.portfolio_reduce_only, .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = command.quantity }, command.revision);
+        var duplicate_sweep: recovery.Sweep = .{ .implementation = &duplicate_adapter, .owner = healthy_owner, .index = &duplicate_index, .reconciliation_identity = 99, .last_sequence = raw_before.committed_barrier };
+        try healthy_owner.replayCommittedIngress(raw_stream, duplicate_sweep.consumer());
+        try std.testing.expectEqualSlices(u8, &before_repeat, &healthy_owner.shard.canonicalStateDigest());
+        try std.testing.expectEqual(@as(i64, 20_000), try healthy_owner.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
+        try std.testing.expectEqual(@as(i64, 10_000), healthy_owner.shard.economicSummary().portfolio.fee_micros);
+        // Interrupt a fresh reconciliation after one committed REST frame.
+        // Consuming every raw byte is insufficient when facts remain buffered.
+        try std.testing.expectEqual(venue.SendResult.accepted, try duplicate_adapter.adapter().trySend(.{ .account_reconciliation = .{ .identity = 100, .exchange_account = 2, .expected_session = 1 } }));
+        _ = try duplicate_adapter.adapter().tryDrain();
+        _ = try duplicate_adapter.ingestPrivateRest(private_times, .rest_account_config, .{ .final = true },
+            \\{"code":"0","data":[{"acctLv":"2","posMode":"net_mode","ctIsoMode":"automatic","autoLoan":false,"enableSpotBorrow":false,"perm":"read_only,trade"}]}
+        );
+        _ = try duplicate_adapter.adapter().tryDrain();
+        const incomplete_owner = try allocator.create(demo.Owner);
+        defer allocator.destroy(incomplete_owner);
+        incomplete_owner.* = try demo.Owner.recoverWithIngress(healthy_store.interface(), io, stream, raw_stream);
+        var incomplete_index = try recovery.CommittedInputs.init(healthy_store.interface(), io, stream);
+        var incomplete_reconciler: private.Reconciler = .{};
+        var incomplete_adapter = okx.OkxVenueAdapter.init(allocator, &duplicate_chain, clock.interface(), profile(), rules());
+        try incomplete_adapter.resumeAfter(incomplete_index.sequenceFor(1));
+        incomplete_adapter.attachPrivateReconciler(&incomplete_reconciler);
+        try incomplete_adapter.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4 });
+        try incomplete_adapter.beginPrivateSession();
+        try incomplete_adapter.rememberRecoveredOrder(command.order_id, command.client_order_id, command.portfolio_reduce_only, .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = command.quantity }, command.revision);
+        const incomplete_raw = try healthy_store.interface().recover(io, raw_stream);
+        var incomplete_sweep: recovery.Sweep = .{ .implementation = &incomplete_adapter, .owner = incomplete_owner, .index = &incomplete_index, .reconciliation_identity = 99, .last_sequence = incomplete_raw.committed_barrier };
+        try std.testing.expectError(error.IncompletePrivateRecovery, incomplete_owner.replayCommittedIngress(raw_stream, incomplete_sweep.consumer()));
+        try std.testing.expect(incomplete_owner.shard.recovery_admission_pending);
+        var incomplete_gateway: @import("execution_gateway.zig").Gateway = .{};
+        try std.testing.expectError(error.DecisionLogUnavailable, incomplete_owner.send(&incomplete_gateway, &guard, command.command_id, 1));
+        try std.testing.expectEqual(@as(i64, 20_000), try incomplete_owner.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
+        try std.testing.expectEqual(@as(i64, 10_000), incomplete_owner.shard.economicSummary().portfolio.fee_micros);
+        try std.testing.expectEqual(@as(usize, 0), transport.sends);
+        return;
+    }
     for ([_]venue.VenueAdapter{ adapter, replay_venue }) |closed_adapter|
         try std.testing.expectEqual(venue.SendResult.backpressure, try closed_adapter.trySend(.{ .order_command = .{
             .identity = 999,
@@ -306,12 +438,15 @@ fn checkFileRecovery(io: std.Io, path: []const u8, point: durable.FaultPoint) !v
         reopened_open = false;
         const closed_again = try allocator.create(durable.WindowsFileAdapter);
         defer allocator.destroy(closed_again);
-        closed_again.* = try durable.WindowsFileAdapter.openWindowsVerification(io, path);
+        @memset(std.mem.asBytes(closed_again), 0);
+
+        try closed_again.initWindowsVerification(io, path);
         defer closed_again.close(io);
         try std.testing.expectError(error.DecisionLogUnavailable, demo.Owner.recover(closed_again.interface(), io, stream));
         return;
     }
     try std.testing.expect(recovered.shard.oms.recovery_only);
+    try std.testing.expect(!recovered.shard.recovery_admission_pending);
     try std.testing.expect(!recovered.shard.operational_state.effectiveTradingAuthority());
     try std.testing.expectEqual(canonical.EconomicFaultReason.inexact_amount, recovered.shard.economic_fault_reason);
     try std.testing.expectEqualDeep(economic_before, recovered.shard.economicSummary());
@@ -330,11 +465,14 @@ fn checkFileRecovery(io: std.Io, path: []const u8, point: durable.FaultPoint) !v
 
     const final_store = try allocator.create(durable.WindowsFileAdapter);
     defer allocator.destroy(final_store);
-    final_store.* = try durable.WindowsFileAdapter.openWindowsVerification(io, path);
+    @memset(std.mem.asBytes(final_store), 0);
+
+    try final_store.initWindowsVerification(io, path);
     defer final_store.close(io);
     const final_owner = try allocator.create(demo.Owner);
     defer allocator.destroy(final_owner);
     final_owner.* = try demo.Owner.recover(final_store.interface(), io, stream);
+    try std.testing.expect(final_owner.shard.recovery_admission_pending);
     try std.testing.expectEqualSlices(u8, &fault_digest, &final_owner.shard.canonicalStateDigest());
     try std.testing.expect(final_owner.shard.oms.recovery_only);
     try std.testing.expect(!final_owner.shard.operational_state.effectiveTradingAuthority());
@@ -353,9 +491,25 @@ test "Windows file reopen recovers or closes an uncommitted OKX economic fault w
     const path = try std.fmt.bufPrint(&path_buffer, "C:\\Windows\\Temp\\ringwin-economic-fault-{d}", .{std.Io.Clock.real.now(io).nanoseconds});
     try std.Io.Dir.createDirAbsolute(io, path, .default_dir);
     defer std.Io.Dir.cwd().deleteTree(io, path) catch {};
-    for ([_]durable.FaultPoint{ .append, .commit }) |point| {
+    for ([_]?durable.FaultPoint{ .append, .commit, null }) |point| {
         var case_buffer: [280]u8 = undefined;
-        const case_path = try std.fmt.bufPrint(&case_buffer, "{s}\\{s}", .{ path, @tagName(point) });
-        try checkFileRecovery(io, case_path, point);
+        const case_path = try std.fmt.bufPrint(&case_buffer, "{s}\\{s}", .{ path, if (point) |fault| @tagName(fault) else "healthy" });
+        try checkFileRecovery(io, case_path, point, 0);
+    }
+}
+
+test "Windows retained committed input recovery skips a same frame report and applies only the missing Fill" {
+    if (builtin.os.tag != .windows) return;
+    var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var path_buffer: [260]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "C:\\Windows\\Temp\\ringwin-private-inputs-{d}", .{std.Io.Clock.real.now(io).nanoseconds});
+    try std.Io.Dir.createDirAbsolute(io, path, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(io, path) catch {};
+    for ([_]u2{ 1, 2 }) |prefix| {
+        var case_buffer: [280]u8 = undefined;
+        const case_path = try std.fmt.bufPrint(&case_buffer, "{s}\\{d}", .{ path, prefix });
+        try checkFileRecovery(io, case_path, null, prefix);
     }
 }

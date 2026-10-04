@@ -10,6 +10,7 @@ const execution = @import("execution_gateway.zig");
 const venue = @import("venue_adapter.zig");
 const okx = @import("okx_venue_adapter.zig");
 const failover = @import("failover.zig");
+const raw_ingress = @import("raw_ingress.zig");
 
 /// Explicit local Demo policy. It supplies authorization limits, never an
 /// account balance, lease token, Venue fact, or send proof.
@@ -185,6 +186,8 @@ pub const Owner = struct {
     decision_journal: journal.Journal = journal.Journal.init(),
     ready: bool = false,
     closed: bool = false,
+    recovery_ingress: ?durable.StreamIdentity = null,
+    recovery_ingress_store: ?durable.Store = null,
 
     /// Caller must supply an operator-owned virgin identity. A missing file is
     /// never interpreted as permission to create a new authority history.
@@ -201,7 +204,7 @@ pub const Owner = struct {
         if (recovered.status != .ready or recovered.gate != .open or
             recovered.committed_barrier == 0 or recovered.last_sequence != recovered.committed_barrier)
             return error.DecisionLogUnavailable;
-        const recovered_shard = if (recovered.tail.len == 0)
+        var recovered_shard = if (recovered.tail.len == 0)
             (trading.TradingShard.restoreSnapshot(recovered.snapshot) catch return error.DecisionLogUnavailable).shard
         else blk: {
             const restored = trading.TradingShard.restore(recovered.snapshot, recovered.tail) catch return error.DecisionLogUnavailable;
@@ -210,6 +213,9 @@ pub const Owner = struct {
             break :blk restored.shard;
         };
         if (recovered_shard.trace.len != recovered.committed_barrier) return error.DecisionLogUnavailable;
+        // A committed decision prefix may precede durable private facts. Every
+        // restart re-arms admission, independent of the saved snapshot flag.
+        recovered_shard.recovery_admission_pending = true;
         const next_sequence = std.math.add(u64, recovered.last_sequence, 1) catch return error.DecisionLogUnavailable;
         return .{
             .store = store,
@@ -221,41 +227,67 @@ pub const Owner = struct {
         };
     }
 
+    /// Bind the configured durable ingress identity explicitly. Decision-only
+    /// recovery remains read-only for new-risk admission; a caller cannot infer
+    /// a raw Store stream from canonical source-session identities.
+    pub fn recoverWithIngress(store: durable.Store, io: std.Io, stream: durable.StreamIdentity, ingress: durable.StreamIdentity) !Owner {
+        var owner = try recover(store, io, stream);
+        try owner.bindRecoveryIngress(store, ingress);
+        return owner;
+    }
+
+    /// Explicitly bind an execution-owned Store through its read-only public
+    /// seam. The caller owns its lifetime until the synchronous sweep returns.
+    pub fn bindRecoveryIngress(self: *Owner, store: durable.Store, ingress: durable.StreamIdentity) !void {
+        if (!self.ready or self.closed or !self.shard.recovery_admission_pending or self.recovery_ingress != null)
+            return error.DecisionLogUnavailable;
+        if (ingress.domain != .raw_ingress or ingress.id == 0) return error.DecisionLogUnavailable;
+        const raw = store.recover(self.io, ingress) catch return error.DecisionLogUnavailable;
+        if (raw.gate != .open or raw.last_sequence == 0 or raw.last_sequence != raw.committed_barrier)
+            return error.DecisionLogUnavailable;
+        self.recovery_ingress = ingress;
+        self.recovery_ingress_store = store;
+    }
+
     /// Apply to a candidate and publish only after every record and the
     /// barrier have been committed. A fault closes this owner permanently.
     pub fn apply(self: *Owner, input: trading.CanonicalEvent) !?trading.OrderCommand {
-        if (self.closed or self.store.safetyGate() != .open) return error.DecisionLogUnavailable;
+        if (self.closed or self.store.safetyGate() != .open) {
+            self.closeAdmission();
+            return error.DecisionLogUnavailable;
+        }
         var candidate = self.shard;
         var candidate_journal = self.decision_journal;
         const before = candidate_journal.last_sequence;
         var rejected: ?anyerror = null;
         const command = trading.applyStable(&candidate, &candidate_journal, input) catch |err| blk: {
+            if (err == error.RecoveryAdmissionPending) return err;
             rejected = err;
             break :blk null;
         };
         if (candidate_journal.last_sequence == before) {
             if (rejected == null) return null;
-            self.closed = true;
+            self.closeAdmission();
             return rejected.?;
         }
         var reader = journal.Reader.init(candidate_journal.bytes()) catch {
-            self.closed = true;
+            self.closeAdmission();
             return error.DecisionLogUnavailable;
         };
         while (true) switch (reader.next() catch {
-            self.closed = true;
+            self.closeAdmission();
             return error.DecisionLogUnavailable;
         }) {
             .end => break,
             .record => |record| if (record.sequence > before) {
                 self.store.append(self.io, .{ .stream = self.stream, .record = record }) catch {
-                    self.closed = true;
+                    self.closeAdmission();
                     return error.DecisionLogUnavailable;
                 };
             },
         };
         self.store.commit(self.io, self.stream, candidate_journal.last_sequence) catch {
-            self.closed = true;
+            self.closeAdmission();
             return error.DecisionLogUnavailable;
         };
         self.shard = candidate;
@@ -268,9 +300,34 @@ pub const Owner = struct {
         for (batch.slice()) |record| _ = try self.apply(.{ .venue = record });
     }
 
+    fn closeAdmission(self: *Owner) void {
+        self.closed = true;
+        self.shard.recovery_admission_pending = true;
+    }
+
+    /// Recovery owns the exhaustive durable ingress sweep. The trusted Venue
+    /// consumer must drain/apply every newly decoded fact before returning.
+    /// A fault or incomplete sweep leaves admission closed; successful replay
+    /// never clears the shard's durable economic/OMS safety latches.
+    pub fn replayCommittedIngress(self: *Owner, stream: durable.StreamIdentity, consumer: raw_ingress.ReplayConsumer) !void {
+        const bound = self.recovery_ingress orelse return error.DecisionLogUnavailable;
+        const ingress_store = self.recovery_ingress_store orelse return error.DecisionLogUnavailable;
+        if (!self.ready or self.closed or !self.shard.recovery_admission_pending or
+            self.store.safetyGate() != .open or !std.meta.eql(stream, bound))
+            return error.DecisionLogUnavailable;
+        const before = try ingress_store.recover(self.io, stream);
+        try raw_ingress.replayCommitted(ingress_store, self.io, stream, consumer);
+        const after = try ingress_store.recover(self.io, stream);
+        if (self.closed or self.store.safetyGate() != .open or after.gate != .open or
+            after.last_sequence != before.last_sequence or after.committed_barrier != before.committed_barrier)
+            return error.DecisionLogUnavailable;
+        self.shard.recovery_admission_pending = false;
+        self.recovery_ingress_store = null;
+    }
+
     /// Seal a genuinely ingested bootstrap before allowing dispatch.
     pub fn sealBootstrap(self: *Owner) !void {
-        if (self.ready or self.closed or self.store.safetyGate() != .open or self.shard.trace.len == 0 or
+        if (self.ready or self.closed or self.shard.recovery_admission_pending or self.store.safetyGate() != .open or self.shard.trace.len == 0 or
             self.shard.trace.len != self.decision_journal.last_sequence)
             return error.DecisionLogUnavailable;
         var sealed = self.decision_journal;
@@ -278,19 +335,19 @@ pub const Owner = struct {
         var snapshot_buffer: [durable.max_snapshot_bytes]u8 = undefined;
         const snapshot = self.shard.snapshot(&sealed, sealed.last_sequence, &snapshot_buffer) catch return error.DecisionLogUnavailable;
         self.store.seal(self.io, self.stream) catch {
-            self.closed = true;
+            self.closeAdmission();
             return error.DecisionLogUnavailable;
         };
         self.store.publishSnapshot(self.io, self.stream, sealed.last_sequence, snapshot) catch {
-            self.closed = true;
+            self.closeAdmission();
             return error.DecisionLogUnavailable;
         };
         self.store.rotate(self.io, self.stream) catch {
-            self.closed = true;
+            self.closeAdmission();
             return error.DecisionLogUnavailable;
         };
         const next_sequence = std.math.add(u64, sealed.last_sequence, 1) catch {
-            self.closed = true;
+            self.closeAdmission();
             return error.DecisionLogUnavailable;
         };
         self.decision_journal = journal.Journal.initAt(next_sequence);
@@ -346,6 +403,7 @@ fn sendFromShard(shard: *const trading.TradingShard, gateway: *execution.Gateway
         }
     }
     const current = command orelse return error.NotSent;
+    if (shard.recovery_admission_pending and current.operation != .cancel) return error.DecisionLogUnavailable;
     requireSafeDemoExposure(&shard.canonical_account, current.side == .sell) catch return error.NotSent;
     const position = shard.currentNetExchangePosition(current.instrument) orelse return error.NotSent;
     try gateway.observeAuthority(.{
@@ -522,7 +580,7 @@ test "Demo owner closes persistence faults at their last proven barrier" {
     }
 }
 
-test "Demo policy drives buy and fault cleanup through one durable Gateway" {
+fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     const fixture = @import("trading_shard_fixture.zig");
     var parsed = try Policy.parse(std.testing.allocator,
         \\{"schema":1,"startup":"virgin","exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_micros":20000000,"risk_limit_micros":10000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
@@ -531,6 +589,9 @@ test "Demo policy drives buy and fault cleanup through one durable Gateway" {
     const memory = try std.testing.allocator.create(durable.MemoryAdapter);
     defer std.testing.allocator.destroy(memory);
     memory.* = .init();
+    const dispatch_memory = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(dispatch_memory);
+    dispatch_memory.* = .init();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     var owner = try Owner.bootstrap(memory.interface(), undefined, stream);
     var snapshot = fixture.canonicalAt(1, 1, .{ .account_bootstrap_snapshot = .{
@@ -669,7 +730,7 @@ test "Demo policy drives buy and fault cleanup through one durable Gateway" {
         .supports_post_only = true,
         .supports_market_protection = true,
     } });
-    try gateway.bootstrapDurableDispatch(memory.interface(), undefined, .{ .domain = .control, .id = 92 });
+    try gateway.bootstrapDurableDispatch(dispatch_memory.interface(), undefined, .{ .domain = .control, .id = 92 });
     const sequence = owner.shard.trace.len + 1;
     const intent: @import("strategy_host_gateway.zig").OrderIntent = .{
         .strategy_identity = 40,
@@ -701,6 +762,50 @@ test "Demo policy drives buy and fault cleanup through one durable Gateway" {
     try std.testing.expectEqual(@as(u64, 0), spy.sends);
     try std.testing.expectEqual(venue.SendResult.accepted, try sendFromCommittedSnapshot(committed, owner.shard.trace.len, digest, &gateway, &guard, command.command_id, 2));
     try std.testing.expectEqual(@as(u64, 1), spy.sends);
+    var recovering = try Owner.recover(memory.interface(), undefined, stream);
+    // The same qualified pending-submit command was admitted immediately
+    // above. Calling Gateway directly cannot bypass restart admission.
+    try std.testing.expectError(error.NotSent, gateway.sendFromShard(&recovering.shard, command.command_id, 2));
+    try std.testing.expectError(error.DecisionLogUnavailable, recovering.send(&gateway, &guard, command.command_id, 2));
+    const pending_snapshot = try recovering.committedSnapshot(&snapshot_storage);
+    const pending_copy = try trading.TradingShard.restoreSnapshot(pending_snapshot);
+    try std.testing.expect(pending_copy.shard.recovery_admission_pending);
+    try std.testing.expectError(error.NotSent, gateway.sendFromShard(&pending_copy.shard, command.command_id, 2));
+    try std.testing.expectError(error.DecisionLogUnavailable, sendFromCommittedSnapshot(pending_snapshot, recovering.shard.trace.len, digest, &gateway, &guard, command.command_id, 2));
+    const pending_barrier = recovering.shard.trace.len;
+    try std.testing.expectError(error.RecoveryAdmissionPending, recovering.apply(.{ .core = .{ .identity = sequence, .payload = .{ .external_order_intent = intent } } }));
+    try std.testing.expectError(error.RecoveryAdmissionPending, recovering.apply(.{ .core = .{ .identity = sequence, .payload = .{ .timer = .{ .side = .buy, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = true, .quantity = 1, .limit_price_micros = 50_000_000 } } } }));
+    var pending_group: @import("oms.zig").IntentGroup = .{ .first_intent_sequence = 999, .count = 1 };
+    pending_group.members[0].operation = .place;
+    try std.testing.expectError(error.RecoveryAdmissionPending, recovering.apply(.{ .core = .{ .identity = sequence, .payload = .{ .oms_intent_group = pending_group } } }));
+    pending_group.count = @intCast(pending_group.members.len + 1);
+    try std.testing.expectError(error.InvalidIntentGroup, recovering.shard.apply(.{ .core = .{ .identity = sequence, .payload = .{ .oms_intent_group = pending_group } } }));
+    try std.testing.expectEqual(pending_barrier, recovering.shard.trace.len);
+    try std.testing.expect(!recovering.closed);
+    try std.testing.expectEqual(@as(u64, 1), spy.sends);
+    const raw_stream: durable.StreamIdentity = .{ .domain = .raw_ingress, .id = 93 };
+    var raw = try raw_ingress.DurableSink.init(memory.interface(), undefined, raw_stream);
+    const frame =
+        \\{"event":"subscribe","arg":{"channel":"orders","instType":"ANY"}}
+    ;
+    var raw_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(frame, &raw_digest, .{});
+    _ = try raw.interface().append(.{ .source_session = 1, .byte_len = frame.len, .sha256 = raw_digest, .receive_time_utc_ns = 1, .monotonic_time_ns = 1, .wall_time_utc_ns = 1 }, frame);
+    const Sweep = struct {
+        fn consume(_: *anyopaque, _: u64, _: @import("okx_public_market.zig").RawIngressRecord, bytes: []const u8) !void {
+            if (bytes.len == 0) return error.EmptyReplay;
+            return error.IncompleteReplay;
+        }
+    };
+    var context: u8 = 0;
+    try std.testing.expectError(error.DecisionLogUnavailable, recovering.replayCommittedIngress(raw_stream, .{ .ptr = &context, .consume_fn = Sweep.consume }));
+    recovering = try Owner.recoverWithIngress(memory.interface(), undefined, stream, raw_stream);
+    try std.testing.expectError(error.DecisionLogUnavailable, recovering.replayCommittedIngress(.{ .domain = .raw_ingress, .id = 94 }, .{ .ptr = &context, .consume_fn = Sweep.consume }));
+    try std.testing.expectError(error.IncompleteReplay, recovering.replayCommittedIngress(raw_stream, .{ .ptr = &context, .consume_fn = Sweep.consume }));
+    try std.testing.expectError(error.NotSent, gateway.sendFromShard(&recovering.shard, command.command_id, 2));
+    try std.testing.expect(recovering.shard.recovery_admission_pending);
+    try std.testing.expectEqualSlices(u8, &digest, &recovering.shard.canonicalStateDigest());
+    try std.testing.expectEqual(@as(u64, 1), spy.sends);
     // The spy deliberately emits no dispatch result: model a failure after the
     // external buy effect, then recover authoritative facts before cleanup.
     var restored_gateway: execution.Gateway = .{};
@@ -712,7 +817,7 @@ test "Demo policy drives buy and fault cleanup through one durable Gateway" {
         .supports_post_only = true,
         .supports_market_protection = true,
     } });
-    try restored_gateway.attachRecoveredDurableDispatch(memory.interface(), undefined, .{ .domain = .control, .id = 92 });
+    try restored_gateway.attachRecoveredDurableDispatch(dispatch_memory.interface(), undefined, .{ .domain = .control, .id = 92 });
     try std.testing.expectError(error.NotSent, owner.send(&restored_gateway, &guard, command.command_id, 2));
     try std.testing.expectEqual(@as(u64, 1), spy.sends);
     const venue_order = try canonical.VenueOrderRef.init(1, "demo-order");
@@ -811,7 +916,38 @@ test "Demo policy drives buy and fault cleanup through one durable Gateway" {
         .time_presence = .{ .monotonic = true },
         .payload = .{ .external_order_intent = cleanup_intent },
     } })) orelse return error.MissingDemoCommand;
+    if (fail_persistence) {
+        // This fresh qualified command is still pending-submit. The execution
+        // store and transport remain healthy when the decision append fails.
+        const source = try owner.source();
+        try gateway.observeAuthority(.{
+            .account = source.exchange_account_identity,
+            .effective_trading_authority = source.operational_state.effectiveTradingAuthority(),
+            .reservation_identity = cleanup.reservation_identity,
+            .reservation = cleanup.reservation,
+            .primary_lease_expires_at_monotonic_ns = guard.lease.expires_at_ns,
+            .fencing_token = guard.lease.token,
+            .exchange_position = source.currentNetExchangePosition(cleanup.instrument).?,
+            .authority_barrier = source.trace.len,
+        });
+        const healthy_digest = source.canonicalStateDigest();
+        const healthy_economics = source.economicSummary();
+        memory.injectFault(.eio);
+        try std.testing.expectError(error.DecisionLogUnavailable, owner.apply(.{ .core = .{ .identity = source.trace.len + 1, .payload = .{ .mark_price = .{ .instrument = okx.btc_usdt_spot, .price_micros = 50_000_000 } } } }));
+        try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
+        try std.testing.expectEqual(durable.GateState.open, dispatch_memory.interface().safetyGate());
+        try std.testing.expectEqualSlices(u8, &healthy_digest, &owner.shard.canonicalStateDigest());
+        try std.testing.expectEqualDeep(healthy_economics, owner.shard.economicSummary());
+        try std.testing.expectError(error.NotSent, gateway.sendFromShard(&owner.shard, cleanup.command_id, 3));
+        try std.testing.expectEqual(@as(u64, 1), spy.sends);
+        return;
+    }
     try std.testing.expectEqual(venue.SendResult.accepted, try owner.send(&gateway, &guard, cleanup.command_id, 3));
     try std.testing.expect(cleanup.portfolio_reduce_only);
     try std.testing.expectEqual(@as(u64, 2), spy.sends);
+}
+
+test "Demo policy drives buy and fault cleanup through one durable Gateway" {
+    try checkDemoPolicyGateway(false);
+    try checkDemoPolicyGateway(true);
 }

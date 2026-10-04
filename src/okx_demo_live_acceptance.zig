@@ -18,6 +18,7 @@ const execution = @import("execution_gateway.zig");
 const demo_authority = @import("demo_authority.zig");
 const durable = @import("durable_store.zig");
 const raw_ingress = @import("raw_ingress.zig");
+const private_recovery = @import("okx_private_recovery.zig");
 const failover = @import("failover.zig");
 const oms = @import("oms.zig");
 const strategy = @import("strategy_host_gateway.zig");
@@ -154,11 +155,12 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
     defer file_store.close(init.io);
     const decision_stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = policy.decision_stream_id };
     const dispatch_stream: durable.StreamIdentity = .{ .domain = .control, .id = policy.dispatch_stream_id };
+    const private_stream: durable.StreamIdentity = .{ .domain = .raw_ingress, .id = 93 };
     const decision_owner = try init.gpa.create(demo_authority.Owner);
     defer init.gpa.destroy(decision_owner);
     decision_owner.* = switch (policy.startup) {
         .virgin => try demo_authority.Owner.bootstrap(file_store.interface(), init.io, decision_stream),
-        .recover => try demo_authority.Owner.recover(file_store.interface(), init.io, decision_stream),
+        .recover => try demo_authority.Owner.recoverWithIngress(file_store.interface(), init.io, decision_stream, private_stream),
     };
     if (policy.startup == .recover and
         (decision_owner.shard.exchange_account_identity != policy.exchange_account or
@@ -193,7 +195,10 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
     defer init.gpa.destroy(transport);
     transport.* = try curl.TransportOwner.initWithEndpoint(try auth.Credentials.init(key, secret, passphrase), null, source_session, endpoint);
     defer transport.deinit();
-    var raw: RawSink = .{};
+    var raw = switch (policy.startup) {
+        .virgin => try raw_ingress.DurableSink.init(file_store.interface(), init.io, private_stream),
+        .recover => try raw_ingress.DurableSink.recover(file_store.interface(), init.io, private_stream),
+    };
     const reconciler = try init.gpa.create(private.Reconciler);
     defer init.gpa.destroy(reconciler);
     reconciler.* = .{};
@@ -210,6 +215,28 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
     defer init.gpa.destroy(projection);
     projection.* = .{};
     if (policy.startup == .recover) {
+        for (decision_owner.shard.oms.orders[0..decision_owner.shard.oms.order_count]) |owned| {
+            var client_id = owned.client_order_id;
+            for (gateway.uncertain_dispatches[0..gateway.uncertain_dispatch_count]) |item| {
+                for (decision_owner.shard.oms.command_history[0..decision_owner.shard.oms.command_history_count]) |command| {
+                    if (command.command_id == item.command_id and command.order_id == owned.id)
+                        client_id = item.client_order_id;
+                }
+            }
+            try implementation.rememberRecoveredOrder(owned.id, client_id, owned.portfolio_reduce_only, .{
+                .instrument = owned.instrument,
+                .rules_version = owned.limit_price.rules_version,
+                .lots = owned.quantity,
+            }, owned.revision);
+        }
+        const committed = try init.gpa.create(private_recovery.CommittedInputs);
+        defer init.gpa.destroy(committed);
+        committed.* = try private_recovery.CommittedInputs.init(file_store.interface(), init.io, decision_stream);
+        chain.mode = .replay;
+        try implementation.beginPrivateSession();
+        var sweep: private_recovery.Sweep = .{ .implementation = implementation, .owner = decision_owner, .index = committed, .session = source_session, .last_sequence = raw.next_sequence - 1 };
+        try decision_owner.replayCommittedIngress(private_stream, sweep.consumer());
+        chain.mode = .demo_live;
         for (gateway.uncertain_dispatches[0..gateway.uncertain_dispatch_count]) |item| {
             if (item.reconciliation_id != 0) continue;
             var recovered_command: ?oms.Command = null;
@@ -219,11 +246,6 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
                     break;
                 };
             const command = recovered_command orelse return error.MissingRecoveredCommand;
-            try implementation.rememberRecoveredOrder(command.order_id, item.client_order_id, command.portfolio_reduce_only, .{
-                .instrument = command.instrument,
-                .rules_version = command.limit_price.rules_version,
-                .lots = command.quantity,
-            }, command.revision);
             if (try adapter.trySend(.{ .order_reconciliation = .{
                 .identity = command.command_id,
                 .exchange_account = policy.exchange_account,
@@ -234,7 +256,10 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
             try projection.applyBatch(started);
         }
     }
-    try establishReady(init, transport, implementation, reconciler, decision_owner);
+    establishReady(init, transport, implementation, reconciler, decision_owner) catch |err| {
+        try drainDemo(adapter, decision_owner, projection);
+        return err;
+    };
     try drainDemo(adapter, decision_owner, projection);
     try requireNoPendingDemoOrders(init, transport);
     if (policy.startup == .recover) {
@@ -274,7 +299,8 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
         const mark = std.math.cast(i64, bootstrap_price * 100_000) orelse return error.InvalidTicker;
         try policy.initialize(decision_owner, mark, &bootstrap_guard, now, source_session);
     }
-    try establishPublicMarket(init, key, secret, passphrase, endpoint, &raw, decision_owner);
+    var public_raw: RawSink = .{};
+    try establishPublicMarket(init, key, secret, passphrase, endpoint, &public_raw, decision_owner);
     const required_trace_capacity = if (mode == .demo_live) demo_round_trip_trace_reserve else demo_order_trace_reserve;
     if (!demoTraceCapacityAvailable(
         decision_owner.shard.trace.len,
@@ -308,7 +334,10 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
         var bought_atoms = try currentNetBtc(decision_owner);
         if (privateRestRefreshRequired(buy_result, bought_atoms >= min_quantity_atoms)) {
             try beginPrivateRestRefresh(implementation, decision_owner, projection);
-            try refreshPrivateRest(init, transport, implementation, reconciler);
+            refreshPrivateRest(init, transport, implementation, reconciler) catch |err| {
+                try drainDemo(adapter, decision_owner, projection);
+                return err;
+            };
             try drainDemo(adapter, decision_owner, projection);
             bought_atoms = try currentNetBtc(decision_owner);
         }
@@ -326,7 +355,10 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
     var remaining_atoms = try currentNetBtc(decision_owner);
     if (privateRestRefreshRequired(cleaned, remaining_atoms == 0)) {
         try beginPrivateRestRefresh(implementation, decision_owner, projection);
-        try refreshPrivateRest(init, transport, implementation, reconciler);
+        refreshPrivateRest(init, transport, implementation, reconciler) catch |err| {
+            try drainDemo(adapter, decision_owner, projection);
+            return err;
+        };
         try drainDemo(adapter, decision_owner, projection);
         remaining_atoms = try currentNetBtc(decision_owner);
     }
@@ -376,7 +408,10 @@ fn establishPublicMarket(init: std.process.Init, key: []const u8, secret: []cons
 fn emergencyAuthoritativeCleanup(init: std.process.Init, policy: demo_authority.Policy, transport: *curl.TransportOwner, implementation: *okx_adapter.OkxVenueAdapter, adapter: venue.VenueAdapter, owner: *demo_authority.Owner, projection: *DemoProjection, gateway: *execution.Gateway, guard: *failover.GatewayLeaseGuard, authority: anytype, lease: *failover.PrimaryLease, have_lease: *bool) !void {
     try beginPrivateRestRefresh(implementation, owner, projection);
     for (0..2) |_| {
-        for (rest_endpoints) |endpoint| try ingestRestEndpoint(init, transport, implementation, endpoint);
+        for (rest_endpoints) |endpoint| ingestRestEndpoint(init, transport, implementation, endpoint) catch |err| {
+            try drainDemo(adapter, owner, projection);
+            return err;
+        };
     }
     try drainDemo(adapter, owner, projection);
     if (!owner.shard.oms.openOrdersClosed() or projection.has_unknown) {
@@ -445,7 +480,7 @@ fn emitDemoIntent(init: std.process.Init, policy: demo_authority.Policy, owner: 
     var host = try strategy.Gateway.init(config, &subscriptions);
     const now_i64 = std.math.cast(i64, now) orelse return error.ClockOutOfRange;
     try host.recordPublished(1, cursor, now_i64);
-    try host.activate(authz);
+    try host.activate(&owner.shard, &owner.decision_journal);
     const intent_sequence = cursor + 1;
     var frame_buffer: [256]u8 = undefined;
     const frame = try strategy.encodeOutputOrderFrame(&frame_buffer, config, 1, cursor, intent_sequence, .{
@@ -1069,6 +1104,10 @@ fn waitForOrder(
         const message = (try receiveWithKeepalive(owner, message_buffer)) orelse continue;
         const batch = try implementation.ingestPrivateWs((try clock(init.io)).times, message);
         if (batch.rejection) |reason| {
+            while (try implementation.adapter().tryDrain()) |output| {
+                if (decision_owner) |source| try source.applyAdapterBatch(output);
+                try projection.applyBatch(output);
+            }
             try diagnostic(init.io, "private_rejection", @tagName(reason));
             return error.PrivateIngressRejected;
         }
@@ -1230,7 +1269,7 @@ pub fn ingestRestEndpoint(
             std.debug.print("rest_request_failed source={s} outcome={s}\n", .{ @tagName(endpoint.source), @tagName(response.outcome) });
             return error.PrivateRequestUncertain;
         }
-        const row_count = try restRowCount(init.gpa, response.response.?);
+        const row_count = restRowCount(init.gpa, response.response.?) catch 0;
         const final = endpoint.cursor == .none or row_count < endpoint.page_size;
         const batch = try implementation.ingestPrivateRest(
             (try clock(init.io)).times,

@@ -51,7 +51,7 @@ Status: open
 
 ## Frontier
 
-- [02：停止真实金额取整并持久关闭新增风险](issues/02-fail-close-inexact-economic-facts.md) — 无 blocker；codex/asset-precision-accounting 已认领，实施中。
+- [03：让有界 Decimal 等价文本贯通规范事实](issues/03-normalize-bounded-decimal-ingress.md) — 02 离线安全止损已完成；codex/asset-precision-accounting 已认领，实施中。
 
 ## Decisions so far
 
