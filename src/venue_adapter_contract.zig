@@ -5,6 +5,41 @@ const canonical = @import("canonical_event.zig");
 const simulated = @import("simulated_venue.zig");
 const venue = @import("venue_adapter.zig");
 
+/// The same Owner/Core/store contract consumes a fault from any real adapter.
+pub fn exerciseEconomicFaultRecovery(batch: canonical.AdapterOutputBatch) !void {
+    const durable = @import("durable_store.zig");
+    const demo = @import("demo_authority.zig");
+    const trading = @import("trading_shard.zig");
+    const allocator = std.heap.page_allocator;
+    const memory = try allocator.create(durable.MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .init();
+    const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
+    const owner = try allocator.create(demo.Owner);
+    defer allocator.destroy(owner);
+    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    _ = try owner.apply(.{ .core = .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 3, .quantity_denominator = 10_000, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = batch.events[0].envelope.venue } } } });
+    _ = try owner.apply(.{ .core = .{ .identity = 2, .payload = .{ .margin_rules_activated = .{ .version = 1 } } } });
+    _ = try owner.apply(.{ .core = .{ .identity = 3, .payload = .{ .account_configuration = .{ .exchange_account_identity = batch.events[0].envelope.exchange_account orelse return error.MissingAccount } } } });
+    const economics_before = owner.shard.economicSummary();
+    try std.testing.expect(!owner.shard.oms.recovery_only);
+    try owner.applyAdapterBatch(batch);
+    const once = owner.shard.canonicalStateDigest();
+    try owner.applyAdapterBatch(batch);
+    try std.testing.expectEqualSlices(u8, &once, &owner.shard.canonicalStateDigest());
+    try owner.sealBootstrap();
+    try std.testing.expectEqualDeep(economics_before, owner.shard.economicSummary());
+    try std.testing.expectEqual(@as(u64, 1), owner.shard.economic_fault_count);
+    try std.testing.expect(owner.shard.oms.recovery_only);
+    const recovered = try allocator.create(demo.Owner);
+    defer allocator.destroy(recovered);
+    recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
+    var bytes: [durable.max_snapshot_bytes]u8 = undefined;
+    const restored = try trading.TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
+    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+}
+
 pub fn exercise(adapter: venue.VenueAdapter, adapter_request: canonical.AdapterRequest) !void {
     return exerciseWith(adapter, .{
         .venue = 1,

@@ -589,7 +589,7 @@ pub const OkxVenueAdapter = struct {
         if (explicit_rebate != null and explicit_rebate.?.atoms <= 0) return error.InvalidFee;
         const normalized_fee: canonical.AssetAmount = if (signed_fee.atoms < 0) .{
             .asset = signed_fee.asset,
-            .atoms = std.math.sub(i128, 0, signed_fee.atoms) catch return error.InvalidFee,
+            .atoms = std.math.sub(i128, 0, signed_fee.atoms) catch return error.DecimalOverflow,
         } else .{ .asset = signed_fee.asset, .atoms = 0 };
         try self.appendPrivate(output, envelope, .account, rules.identity, null, digestIdentity(envelope.source_fact_identity), .{ .fill = .{
             .identity = digestIdentity(envelope.source_fact_identity),
@@ -1799,11 +1799,10 @@ test "amend and cancel use the canonical VenueOrderRef without leaking an OKX or
 }
 
 fn economicReason(err: anyerror) canonical.EconomicFaultReason {
+    if (canonical.Decimal.faultReason(err)) |reason| return reason;
     return switch (err) {
-        error.InexactDecimal => .inexact_amount,
-        error.DecimalOverflow, error.Overflow => .overflow,
+        error.Overflow => .overflow,
         error.UnsupportedAsset => .unknown_asset,
-        error.InvalidDecimal => .malformed_amount,
         error.MissingBalanceTotal, error.MissingBalanceAvailable, error.MissingBalanceHeld, error.MissingMarginEquity => .missing_amount,
         else => .invalid_economic_fact,
     };

@@ -2,6 +2,7 @@
 //! records leave this module; venue field names stay adapter-private.
 const std = @import("std");
 const canonical = @import("canonical_event.zig");
+const canonical_codec = @import("canonical_event_codec.zig");
 const raw = @import("binance_order_raw.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
@@ -118,10 +119,15 @@ pub const Reconciler = struct {
         self.active_source_sequence = self.source_sequences[source_index];
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{ .parse_numbers = false }) catch return error.InvalidFrame;
         defer parsed.deinit();
-        self.decode(source, page, times, evidence, parsed.value) catch |err| {
+        var candidate = self.*;
+        candidate.decode(source, page, times, evidence, parsed.value) catch |err| {
             self.stage = .failed;
+            if (canonical.Decimal.faultReason(err)) |reason| {
+                try self.appendReady(try self.record(.account, null, null, digestIdentity(evidence.sha256), null, times, evidence, .{ .economic_fault = .{ .reason = reason } }));
+            }
             return err;
         };
+        self.* = candidate;
         return evidence;
     }
     pub fn drain(self: *Reconciler) ?canonical.AdapterOutputBatch {
@@ -214,18 +220,18 @@ pub const Reconciler = struct {
             const cumulative = try quantityFor(rules, cumulative_text);
             const original = try quantityFor(rules, try anyStringField(object, &.{ "q", "origQty" }));
             if (cumulative.lots > original.lots) return error.InvalidReportQuantity;
-            const key = reportFactKey(order_id, status, cumulative_text, update_ms);
-            if (try self.seenBefore(key, evidence.sha256)) return;
+            const key = reportFactKey(order_id, status, try canonical.Decimal.parse(cumulative_text), update_ms);
             const create_ms = try optionalU64Field(object, &.{ "O", "createTime" });
             const event: canonical.Payload = .{ .execution_report = .{ .identity = digestIdentity(key), .order = link.order, .client_order_id = link.client_order_id, .venue_order = try canonical.VenueOrderRef.init(binding.venue, order_id), .instrument = rules.identity, .exchange_account = binding.account, .revision = 1, .side = try sideFor(try anyStringField(object, &.{ "S", "side" })), .order_type = try orderTypeFor(try anyStringField(object, &.{ "o", "type" })), .time_in_force = try tifFor(try anyStringField(object, &.{ "f", "timeInForce" })), .venue_reduce_only = try optionalBoolField(object, "R"), .portfolio_reduce_only = link.portfolio_reduce_only, .position_mode_net = if (position_side) |value| value == .net else null, .position_side = position_side, .status = mapped_status, .reject_reason = if (mapped_status == .rejected) .other_venue_reject else null, .original_quantity = original, .cumulative_quantity = cumulative, .remaining_quantity = .{ .instrument = rules.identity, .rules_version = rules.rules_version, .lots = original.lots - cumulative.lots }, .limit_price = try optionalPrice(rules, try anyStringField(object, &.{ "p", "price" })), .average_fill_price = if (try optionalStringAny(object, &.{ "ap", "avgPrice", "L" })) |value| try optionalPrice(rules, value) else null, .venue_create_time_utc_ns = if (create_ms) |millis| try std.math.mul(u64, millis, 1_000_000) else null, .venue_update_time_utc_ns = source_time } };
+            if (try self.seenBefore(key, event)) return;
             try self.emit(.account, rules.identity, null, digestIdentity(key), source_time, times, evidence, event);
         } else {
             const trade_id = try anyStringField(object, &.{ "t", "id" });
             if (std.mem.eql(u8, trade_id, "-1") or std.mem.eql(u8, trade_id, "0")) return;
             const key = try factKey("fill", &.{trade_id});
-            if (try self.seenBefore(key, evidence.sha256)) return;
             const fee = try amountFor(try assetIdentity(try anyStringField(object, &.{ "N", "commissionAsset" })), try canonical.Decimal.parse(try anyStringField(object, &.{ "n", "commission" })));
-            const event: canonical.Payload = .{ .fill = .{ .identity = digestIdentity(key), .order = link.order, .client_order_id = link.client_order_id, .venue_order = try canonical.VenueOrderRef.init(binding.venue, order_id), .venue_trade = try canonical.VenueTradeRef.init(binding.venue, trade_id), .instrument = rules.identity, .exchange_account = binding.account, .side = try sideFor(try anyStringField(object, &.{ "S", "side" })), .quantity = try quantityFor(rules, try anyStringField(object, &.{ "l", "qty" })), .price = try priceFor(rules, try anyStringField(object, &.{ "L", "price" })), .fee = if (fee.atoms > 0) fee else null, .rebate = if (fee.atoms < 0) .{ .asset = fee.asset, .atoms = -fee.atoms } else null, .realized_pnl = if (try optionalStringAny(object, &.{ "rp", "realizedPnl" })) |value| try amountFor(usdt, try canonical.Decimal.parse(value)) else null, .liquidity = if (try makerFor(object)) .maker else .taker, .venue_fill_time_utc_ns = source_time } };
+            const event: canonical.Payload = .{ .fill = .{ .identity = digestIdentity(key), .order = link.order, .client_order_id = link.client_order_id, .venue_order = try canonical.VenueOrderRef.init(binding.venue, order_id), .venue_trade = try canonical.VenueTradeRef.init(binding.venue, trade_id), .instrument = rules.identity, .exchange_account = binding.account, .side = try sideFor(try anyStringField(object, &.{ "S", "side" })), .quantity = try quantityFor(rules, try anyStringField(object, &.{ "l", "qty" })), .price = try priceFor(rules, try anyStringField(object, &.{ "L", "price" })), .fee = if (fee.atoms > 0) fee else null, .rebate = if (fee.atoms < 0) .{ .asset = fee.asset, .atoms = std.math.sub(i128, 0, fee.atoms) catch return error.DecimalOverflow } else null, .realized_pnl = if (try optionalStringAny(object, &.{ "rp", "realizedPnl" })) |value| try amountFor(usdt, try canonical.Decimal.parse(value)) else null, .liquidity = if (try makerFor(object)) .maker else .taker, .venue_fill_time_utc_ns = source_time } };
+            if (try self.seenBefore(key, event)) return;
             try self.emit(.account, rules.identity, null, digestIdentity(key), source_time, times, evidence, event);
         }
     }
@@ -400,7 +406,10 @@ pub const Reconciler = struct {
         if (!std.mem.eql(u8, symbol, "BTCUSDT")) return error.UnsupportedInstrument;
         return if (linear) self.rules.linear else self.rules.spot;
     }
-    fn seenBefore(self: *Reconciler, key: [32]u8, content: [32]u8) !bool {
+    fn seenBefore(self: *Reconciler, key: [32]u8, event: canonical.Payload) !bool {
+        var encoded: [canonical_codec.max_encoded_len]u8 = undefined;
+        var content: [32]u8 = undefined;
+        Sha256.hash(try canonical_codec.encodePayload(&encoded, event), &content, .{});
         for (self.seen[0..self.seen_count]) |seen| if (std.mem.eql(u8, &seen.key, &key)) {
             if (!std.mem.eql(u8, &seen.content, &content)) return error.ConflictingFact;
             return true;
@@ -474,14 +483,18 @@ fn optionalU64Field(object: std.json.ObjectMap, names: []const []const u8) !?u64
     if (try optionalStringAny(object, names)) |value| return try std.fmt.parseInt(u64, value, 10);
     return null;
 }
-fn reportFactKey(order_id: []const u8, status: []const u8, cumulative: []const u8, update_ms: ?u64) [32]u8 {
+fn reportFactKey(order_id: []const u8, status: []const u8, cumulative: canonical.Decimal, update_ms: ?u64) [32]u8 {
     var hasher = Sha256.init(.{});
     hasher.update("report");
-    const pieces: [3][]const u8 = .{ order_id, status, cumulative };
+    const pieces: [2][]const u8 = .{ order_id, status };
     for (&pieces) |piece| {
         hasher.update(&[_]u8{0});
         hasher.update(piece);
     }
+    var amount_bytes: [17]u8 = undefined;
+    std.mem.writeInt(i128, amount_bytes[0..16], cumulative.coefficient, .little);
+    amount_bytes[16] = cumulative.scale;
+    hasher.update(&amount_bytes);
     var encoded: [8]u8 = undefined;
     std.mem.writeInt(u64, &encoded, update_ms orelse 0, .little);
     hasher.update(&encoded);
@@ -616,9 +629,14 @@ test "Binance separates report and fill, maps economics, and dedupes Venue refs"
     try start(&reconciler);
     const message = "{\"e\":\"executionReport\",\"E\":\"1\",\"s\":\"BTCUSDT\",\"c\":\"RWN-9\",\"S\":\"BUY\",\"o\":\"LIMIT\",\"f\":\"GTC\",\"q\":\"0.0100\",\"p\":\"50000.0\",\"X\":\"FILLED\",\"i\":\"42\",\"l\":\"0.0100\",\"z\":\"0.0100\",\"L\":\"50000.0\",\"n\":\"-0.000001\",\"N\":\"BTC\",\"T\":\"2\",\"t\":\"77\",\"m\":true}";
     _ = try reconciler.ingest(std.testing.allocator, .ws, null, fixture_times, message);
+    const equivalent = try std.mem.replaceOwned(u8, std.testing.allocator, message, "0.0100", "+000.010000000000000000000000000000000000000000000000");
+    defer std.testing.allocator.free(equivalent);
+    _ = try reconciler.ingest(std.testing.allocator, .ws, null, fixture_times, equivalent);
     _ = try reconciler.ingest(std.testing.allocator, .rest_spot_account, .{ .final = true }, fixture_times, "{\"balances\":[{\"asset\":\"USDT\",\"free\":\"10.000000\",\"locked\":\"0.000000\"}]}");
     _ = try reconciler.ingest(std.testing.allocator, .rest_orders, .{ .final = true }, fixture_times, "[]");
-    _ = try reconciler.ingest(std.testing.allocator, .rest_fills, .{ .final = true }, fixture_times, "[]");
+    _ = try reconciler.ingest(std.testing.allocator, .rest_fills, .{ .final = true }, fixture_times,
+        \\[{"orderId":"42","clientOrderId":"RWN-9","symbol":"BTCUSDT","side":"BUY","qty":"+000.010000000000000000000000000000000000000000000000","price":"+050000.0000000000","commission":"-0.0000010000000000","commissionAsset":"BTC","time":"2","id":"77","isMaker":true}]
+    );
     const output = reconciler.drain().?;
     try std.testing.expectEqual(@as(u8, 3), output.len);
     try std.testing.expect(output.events[0].event == .account_bootstrap_snapshot);
@@ -630,6 +648,10 @@ test "Binance separates report and fill, maps economics, and dedupes Venue refs"
     try std.testing.expectEqual(@as(i128, 100), output.events[2].event.fill.rebate.?.atoms);
     _ = try reconciler.ingest(std.testing.allocator, .ws, null, fixture_times, message);
     try std.testing.expect(reconciler.drain() == null);
+    const conflicting = try std.mem.replaceOwned(u8, std.testing.allocator, message, "-0.000001", "-0.000002");
+    defer std.testing.allocator.free(conflicting);
+    try std.testing.expectError(error.ConflictingFact, reconciler.ingest(std.testing.allocator, .ws, null, fixture_times, conflicting));
+    try std.testing.expectEqual(Stage.failed, reconciler.readiness().stage);
 }
 test "Binance bootstrap waits for every paginated source and gap requires a new session" {
     var sink = TestRaw{};

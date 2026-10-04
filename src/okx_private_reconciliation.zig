@@ -1141,7 +1141,7 @@ fn mapDecodeError(err: anyerror) RejectReason {
         error.MissingAmount => .missing_amount,
         error.MissingAsset => .missing_asset,
         error.InvalidDecimal => .malformed_amount,
-        error.DecimalOverflow => .amount_overflow,
+        error.DecimalOverflow, error.DecimalTextTooLong, error.DecimalScaleOutOfRange, error.DecimalRescaleOutOfRange, error.DecimalScalingOverflow => .amount_overflow,
         error.MalformedEnvelope => .malformed_envelope,
         error.VenueError => .venue_error,
         error.SourceMismatch => .source_mismatch,

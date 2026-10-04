@@ -99,6 +99,7 @@ pub const BinanceVenueAdapter = struct {
     unknown_count: u8 = 0,
     unknown_overflow: bool = false,
     private_reconciler: ?*private.Reconciler = null,
+    private_failed: bool = false,
     pending_account_reconciliation: ?u128 = null,
 
     pub const Clock = struct {
@@ -131,7 +132,10 @@ pub const BinanceVenueAdapter = struct {
     }
     pub fn ingestPrivate(self: *BinanceVenueAdapter, allocator: std.mem.Allocator, source: private.Source, page: ?private.Page, times: raw.Times, bytes: []const u8) !raw.RawEvidenceRef {
         if (self.state != .running) return error.NotStarted;
-        return (self.private_reconciler orelse return error.PrivateReconcilerMissing).ingest(allocator, source, page, times, bytes);
+        return (self.private_reconciler orelse return error.PrivateReconcilerMissing).ingest(allocator, source, page, times, bytes) catch |err| {
+            self.private_failed = true;
+            return err;
+        };
     }
     pub fn privateSourceGap(self: *BinanceVenueAdapter) void {
         if (self.private_reconciler) |reconciler| reconciler.sourceGap();
@@ -171,6 +175,9 @@ pub const BinanceVenueAdapter = struct {
             else => return error.InvalidRequest,
         };
         var output: canonical.AdapterOutputBatch = .{};
+        if (self.private_failed) for (commands[0..count]) |command| {
+            if (command.operation != .cancel) return .backpressure;
+        };
         if (count > self.profile.batch_max or count > canonical.max_order_commands_per_batch) {
             for (commands[0..count]) |command| self.append(&output, command, .not_sent, .adapter_backpressure, null);
             self.pending = output;
@@ -855,6 +862,11 @@ test "Binance private partial fills cross the shared recovery contract" {
     _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, first);
     _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, second);
     _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, second);
+    var equivalent: [2048]u8 = undefined;
+    const count = std.mem.replace(u8, second, "0.0100", "+000.0100000000000000000000000000000000000000000000000", &equivalent);
+    try std.testing.expectEqual(@as(usize, 2), count);
+    const len = second.len + count * ("+000.0100000000000000000000000000000000000000000000000".len - "0.0100".len);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, equivalent[0..len]);
     _ = try implementation.ingestPrivate(std.testing.allocator, .rest_spot_account, .{ .final = true }, times, "{\"balances\":[]}");
     _ = try implementation.ingestPrivate(std.testing.allocator, .rest_orders, .{ .final = true }, times, "[]");
     _ = try implementation.ingestPrivate(std.testing.allocator, .rest_fills, .{ .final = true }, times, "[]");
@@ -862,4 +874,17 @@ test "Binance private partial fills cross the shared recovery contract" {
     try contract.exerciseFillRecovery(output.slice(), .{ .venue = 21, .exchange_account = 2, .adapter_session = 6 });
     try std.testing.expect((try adapter.tryDrain()) == null);
     try std.testing.expectError(error.InvalidRequest, adapter.trySend(.{ .order_reconciliation = .{ .identity = 99, .exchange_account = 3, .order = 1 } }));
+    var overflowing: [2048]u8 = undefined;
+    const overflow_count = std.mem.replace(u8, second, "-0.000001", "-170141183460469231731687303715884105728", &overflowing);
+    try std.testing.expectEqual(@as(usize, 1), overflow_count);
+    const overflow_len = second.len + "-170141183460469231731687303715884105728".len - "-0.000001".len;
+    try std.testing.expectError(error.DecimalScalingOverflow, implementation.ingestPrivate(std.testing.allocator, .ws, null, times, overflowing[0..overflow_len]));
+    const fault = (try adapter.tryDrain()) orelse return error.MissingEconomicFault;
+    try std.testing.expectEqual(@as(u8, 1), fault.len);
+    try std.testing.expectEqual(canonical.EconomicFaultReason.overflow, fault.events[0].event.economic_fault.reason);
+    try contract.exerciseEconomicFaultRecovery(fault);
+    try std.testing.expectEqual(venue.SendResult.backpressure, try adapter.trySend(.{ .order_command = try testCommand(2) }));
+    try implementation.beginPrivateSession();
+    try std.testing.expectEqual(venue.SendResult.backpressure, try adapter.trySend(.{ .order_command = try testCommand(2) }));
+    try std.testing.expectEqual(@as(u64, 0), transport.calls);
 }

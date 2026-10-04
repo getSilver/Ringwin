@@ -88,6 +88,7 @@ pub const BybitVenueAdapter = struct {
     unknown_count: u8 = 0,
     unknown_overflow: bool = false,
     reconciler: ?*private.Reconciler = null,
+    private_failed: bool = false,
     pending_account_reconciliation: ?u128 = null,
 
     pub const Clock = struct {
@@ -117,7 +118,10 @@ pub const BybitVenueAdapter = struct {
     }
     pub fn ingestPrivate(self: *BybitVenueAdapter, allocator: std.mem.Allocator, source: private.Source, page: ?private.Page, times: private.Times, bytes: []const u8) !private.RawEvidenceRef {
         if (self.state != .running) return error.NotStarted;
-        return (self.reconciler orelse return error.PrivateReconcilerMissing).ingest(allocator, source, page, times, bytes);
+        return (self.reconciler orelse return error.PrivateReconcilerMissing).ingest(allocator, source, page, times, bytes) catch |err| {
+            self.private_failed = true;
+            return err;
+        };
     }
     pub fn privateSourceGap(self: *BybitVenueAdapter) void {
         if (self.reconciler) |value| value.sourceGap();
@@ -156,6 +160,9 @@ pub const BybitVenueAdapter = struct {
             else => return error.InvalidRequest,
         };
         var output: canonical.AdapterOutputBatch = .{};
+        if (self.private_failed) for (commands[0..count]) |command| {
+            if (command.operation != .cancel) return .backpressure;
+        };
         if (count > self.profile.batch_max or !self.rateAvailable(self.clock.now())) {
             for (commands[0..count]) |command| self.appendDispatch(&output, command, .not_sent, .adapter_backpressure, null);
             self.pending = output;
@@ -643,6 +650,11 @@ test "Bybit private partial fills cross the shared recovery contract" {
     _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, filled_order);
     _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, second_execution);
     _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, second_execution);
+    var equivalent: [2048]u8 = undefined;
+    const count = std.mem.replace(u8, filled_order, "0.0100", "+000.0100000000000000000000000000000000000000000000000", &equivalent);
+    try std.testing.expectEqual(@as(usize, 2), count);
+    const len = filled_order.len + count * ("+000.0100000000000000000000000000000000000000000000000".len - "0.0100".len);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, equivalent[0..len]);
     _ = try implementation.ingestPrivate(std.testing.allocator, .rest_wallet, .{ .final = true }, times, "{\"result\":{\"list\":[{\"coin\":[]}]}}");
     _ = try implementation.ingestPrivate(std.testing.allocator, .rest_positions, .{ .final = true }, times, "{\"result\":{\"list\":[]}}");
     _ = try implementation.ingestPrivate(std.testing.allocator, .rest_orders, .{ .final = true }, times, "{\"result\":{\"list\":[]}}");
@@ -651,6 +663,19 @@ test "Bybit private partial fills cross the shared recovery contract" {
     try contract.exerciseFillRecovery(output.slice(), .{ .venue = 1, .exchange_account = 2, .adapter_session = 3 });
     try std.testing.expect((try adapter.tryDrain()) == null);
     try std.testing.expectError(error.InvalidRequest, adapter.trySend(.{ .order_reconciliation = .{ .identity = 99, .exchange_account = 3, .order = 7 } }));
+    var overflowing: [2048]u8 = undefined;
+    const overflow_count = std.mem.replace(u8, second_execution, "0.000001", "-170141183460469231731687303715884105728", &overflowing);
+    try std.testing.expectEqual(@as(usize, 1), overflow_count);
+    const overflow_len = second_execution.len + "-170141183460469231731687303715884105728".len - "0.000001".len;
+    try std.testing.expectError(error.DecimalScalingOverflow, implementation.ingestPrivate(std.testing.allocator, .ws, null, times, overflowing[0..overflow_len]));
+    const fault = (try adapter.tryDrain()) orelse return error.MissingEconomicFault;
+    try std.testing.expectEqual(@as(u8, 1), fault.len);
+    try std.testing.expectEqual(canonical.EconomicFaultReason.overflow, fault.events[0].event.economic_fault.reason);
+    try contract.exerciseEconomicFaultRecovery(fault);
+    try std.testing.expectEqual(venue.SendResult.backpressure, try adapter.trySend(.{ .order_command = try testCommand() }));
+    try implementation.beginPrivateSession();
+    try std.testing.expectEqual(venue.SendResult.backpressure, try adapter.trySend(.{ .order_command = try testCommand() }));
+    try std.testing.expectEqual(@as(u64, 0), transport.calls);
 }
 
 test "Bybit required capabilities stay unverified without Testnet evidence" {

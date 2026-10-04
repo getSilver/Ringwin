@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const schema_version: u16 = 3;
+pub const schema_version: u16 = 4;
 
 pub const VenueIdentity = u64;
 pub const Product = enum(u8) { spot, isolated_linear_usdt };
@@ -63,9 +63,22 @@ pub const Decimal = struct {
     coefficient: i128,
     scale: u8,
 
+    pub const max_text_bytes = 1024;
+    pub const max_scale = 38;
+
+    pub fn faultReason(err: anyerror) ?EconomicFaultReason {
+        return switch (err) {
+            error.InvalidDecimal => .malformed_amount,
+            error.InexactDecimal => .inexact_amount,
+            error.DecimalOverflow, error.DecimalTextTooLong, error.DecimalScaleOutOfRange, error.DecimalRescaleOutOfRange, error.DecimalScalingOverflow => .overflow,
+            else => null,
+        };
+    }
+
     /// Parses ordinary Venue decimal text without float conversion or rounding.
     pub fn parse(text: []const u8) !Decimal {
         if (text.len == 0) return error.InvalidDecimal;
+        if (text.len > max_text_bytes) return error.DecimalTextTooLong;
         var cursor: usize = 0;
         var negative = false;
         if (text[cursor] == '-' or text[cursor] == '+') {
@@ -74,33 +87,46 @@ pub const Decimal = struct {
             if (cursor == text.len) return error.InvalidDecimal;
         }
 
-        var coefficient: i128 = 0;
-        var scale: u8 = 0;
-        var fractional = false;
+        const start = cursor;
+        var dot: ?usize = null;
         var digit_count: usize = 0;
         while (cursor < text.len) : (cursor += 1) {
             const byte = text[cursor];
             if (byte == '.') {
-                if (fractional) return error.InvalidDecimal;
-                fractional = true;
+                if (dot != null) return error.InvalidDecimal;
+                dot = cursor;
                 continue;
             }
             if (byte < '0' or byte > '9') return error.InvalidDecimal;
-            coefficient = std.math.mul(i128, coefficient, 10) catch return error.DecimalOverflow;
-            coefficient = std.math.add(i128, coefficient, byte - '0') catch return error.DecimalOverflow;
-            if (fractional) scale = std.math.add(u8, scale, 1) catch return error.DecimalOverflow;
             digit_count += 1;
         }
         if (digit_count == 0) return error.InvalidDecimal;
-        return .{ .coefficient = if (negative) -coefficient else coefficient, .scale = scale };
+        var end = text.len;
+        const scale: usize = if (dot) |point| blk: {
+            while (end > point + 1 and text[end - 1] == '0') end -= 1;
+            break :blk end - point - 1;
+        } else 0;
+        if (scale > max_scale) return error.DecimalScaleOutOfRange;
+        var coefficient: i128 = 0;
+        for (text[start..end]) |byte| {
+            if (byte == '.') continue;
+            coefficient = std.math.mul(i128, coefficient, 10) catch return error.DecimalOverflow;
+            coefficient = if (negative)
+                std.math.sub(i128, coefficient, byte - '0') catch return error.DecimalOverflow
+            else
+                std.math.add(i128, coefficient, byte - '0') catch return error.DecimalOverflow;
+        }
+        return .{ .coefficient = coefficient, .scale = if (coefficient == 0) 0 else @intCast(scale) };
     }
 
     /// Converts only exactly representable decimals to active-rule atomic units.
     pub fn exactAtoms(self: Decimal, atomic_scale: u8) !i128 {
+        if (self.scale > max_scale) return error.DecimalScaleOutOfRange;
+        if (atomic_scale > max_scale) return error.DecimalRescaleOutOfRange;
         if (self.scale == atomic_scale) return self.coefficient;
         if (self.scale < atomic_scale) {
             const multiplier = try pow10(atomic_scale - self.scale);
-            return std.math.mul(i128, self.coefficient, multiplier) catch error.DecimalOverflow;
+            return std.math.mul(i128, self.coefficient, multiplier) catch error.DecimalScalingOverflow;
         }
         const divisor = try pow10(self.scale - atomic_scale);
         if (@rem(self.coefficient, divisor) != 0) return error.InexactDecimal;
@@ -574,8 +600,8 @@ pub const AdapterOutputBatch = struct {
 
 test "decimal conversion is lossless and exact" {
     const value = try Decimal.parse("-12.3400");
-    try std.testing.expectEqual(@as(i128, -123400), value.coefficient);
-    try std.testing.expectEqual(@as(u8, 4), value.scale);
+    try std.testing.expectEqual(@as(i128, -1234), value.coefficient);
+    try std.testing.expectEqual(@as(u8, 2), value.scale);
     try std.testing.expectEqual(@as(i128, -1234), try value.exactAtoms(2));
     try std.testing.expectEqual(@as(i128, -1234), (try AssetAmount.fromDecimal(3, value, 2)).atoms);
     try std.testing.expectEqual(@as(i128, -24680), (try InstrumentPrice.fromDecimal(4, 5, value, 4, 5)).ticks);
@@ -589,4 +615,36 @@ test "opaque venue references are bounded" {
     try std.testing.expectEqual(@as(VenueIdentity, 3), order.venue);
     try std.testing.expectEqualStrings("venue-order-1", order.value.slice());
     try std.testing.expectError(error.InvalidOpaqueRef, VenueTradeRef.init(3, ""));
+}
+
+test "bounded decimal text normalizes before accumulation and preserves signed limits" {
+    for ([_][]const u8{ "1", "+0001.0000000000000000000000000000000000000000000000000000000000000000" }) |text| {
+        const value = try Decimal.parse(text);
+        try std.testing.expectEqual(@as(i128, 1), value.coefficient);
+        try std.testing.expectEqual(@as(u8, 0), value.scale);
+    }
+    for ([_][]const u8{ "0", "-000.000", "+.0000000000000000000000000000000000000000" }) |text| {
+        const value = try Decimal.parse(text);
+        try std.testing.expectEqual(@as(i128, 0), value.coefficient);
+        try std.testing.expectEqual(@as(u8, 0), value.scale);
+    }
+    try std.testing.expectEqual(std.math.maxInt(i128), (try Decimal.parse("170141183460469231731687303715884105727")).coefficient);
+    try std.testing.expectEqual(std.math.minInt(i128), (try Decimal.parse("-170141183460469231731687303715884105728")).coefficient);
+    try std.testing.expectError(error.DecimalOverflow, Decimal.parse("170141183460469231731687303715884105728"));
+    try std.testing.expectError(error.DecimalOverflow, Decimal.parse("-170141183460469231731687303715884105729"));
+    for ([_][]const u8{ "", "+", "-", ".", "0.0.0", "1e2", " 0", "0x" }) |text|
+        try std.testing.expectError(error.InvalidDecimal, Decimal.parse(text));
+    var long_text: [1025]u8 = @splat('0');
+    long_text[1023] = '1';
+    try std.testing.expectEqual(@as(i128, 1), (try Decimal.parse(long_text[0..1024])).coefficient);
+    try std.testing.expectError(error.DecimalTextTooLong, Decimal.parse(&long_text));
+    var fractional: [41]u8 = @splat('0');
+    fractional[1] = '.';
+    fractional[39] = '1';
+    try std.testing.expectEqual(@as(i128, 1), try (try Decimal.parse(fractional[0..40])).exactAtoms(38));
+    fractional[40] = '1';
+    try std.testing.expectError(error.DecimalScaleOutOfRange, Decimal.parse(&fractional));
+    try std.testing.expectError(error.DecimalRescaleOutOfRange, (try Decimal.parse("1")).exactAtoms(39));
+    try std.testing.expectError(error.DecimalScaleOutOfRange, (Decimal{ .coefficient = 1, .scale = 39 }).exactAtoms(38));
+    try std.testing.expectError(error.DecimalScalingOverflow, (try Decimal.parse("170141183460469231731687303715884105727")).exactAtoms(1));
 }

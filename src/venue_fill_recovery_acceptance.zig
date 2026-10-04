@@ -277,9 +277,14 @@ fn executeRawPrivateFillRecovery() !void {
     try std.testing.expect(first_batch.slice()[0].event == .execution_report);
     try std.testing.expect(first_batch.slice()[1].event == .fill);
     _ = try owner.apply(.{ .venue = first_batch.slice()[0] });
+    // The interrupted recovery branch owns a separate copy of the committed
+    // store; two live Owners must not append through stale journal cursors.
+    const tail_memory = try allocator.create(durable.MemoryAdapter);
+    defer allocator.destroy(tail_memory);
+    tail_memory.* = memory.*;
     const after_report = try allocator.create(demo.Owner);
     defer allocator.destroy(after_report);
-    after_report.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    after_report.* = try demo.Owner.recover(tail_memory.interface(), undefined, stream);
     const report_digest = after_report.shard.canonicalStateDigest();
     const raw_replayed_after_report = try allocator.create(demo.Owner);
     defer allocator.destroy(raw_replayed_after_report);
@@ -352,10 +357,13 @@ fn executeRawPrivateFillRecovery() !void {
     try std.testing.expect(!std.mem.eql(u8, &report_digest, &fill_digest));
     const after_fill = try allocator.create(demo.Owner);
     defer allocator.destroy(after_fill);
-    after_fill.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    after_fill.* = try demo.Owner.recover(tail_memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &fill_digest, &after_fill.shard.canonicalStateDigest());
     try std.testing.expectEqual(@as(i64, 10_000), try after_fill.shard.economic_projection.appliedCanonicalFillQuantity(@intCast(command.order_id)));
-    owner.* = after_report.*;
+    // The recovered Owner remains behind its process admission fence. Continue
+    // the live Owner after committing the same missing Fill independently.
+    try owner.applyAdapterBatch(fill_tail);
+    try std.testing.expectEqualSlices(u8, &fill_digest, &owner.shard.canonicalStateDigest());
     const second = try std.fmt.bufPrint(&frame,
         \\{{"arg":{{"channel":"orders"}},"data":[{{"instId":"BTC-USDT","ordId":"1001","clOrdId":"{s}","side":"buy","ordType":"limit","state":"filled","tdMode":"cash","posSide":"net","reduceOnly":"false","sz":"0.0002","px":"50000","accFillSz":"0.0002","avgPx":"50000","uTime":"1800000000200","tradeId":"2002","fillSz":"0.0001","fillPx":"50000","fillFee":"-0.01","fillFeeCcy":"USDT","rebate":"0.001","rebateCcy":"USDT","fillTime":"1800000000200","execType":"T"}}]}}
     , .{command.client_order_id.slice()});
@@ -410,6 +418,15 @@ fn executeRawPrivateFillRecovery() !void {
     const before_duplicate = owner.shard.canonicalStateDigest();
     try std.testing.expect((try implementation.ingestPrivateWs(private_times, second)).rejection == null);
     try std.testing.expect(!try applyDrain(owner, adapter));
+    // Different source bytes retain the same report/fill identity and content.
+    var equivalent_bytes: [2048]u8 = undefined;
+    const equivalent_count = std.mem.replace(u8, second, "0.0002", "+000.000200000000000000000000000000000000000000000000000", &equivalent_bytes);
+    try std.testing.expectEqual(@as(usize, 2), equivalent_count);
+    const equivalent_len = second.len + equivalent_count * ("+000.000200000000000000000000000000000000000000000000000".len - "0.0002".len);
+    const equivalent = equivalent_bytes[0..equivalent_len];
+    const equivalent_ingress = try implementation.ingestPrivateWs(private_times, equivalent);
+    try std.testing.expect(equivalent_ingress.rejection == null);
+    try std.testing.expect(!try applyDrain(owner, adapter));
     try std.testing.expectEqualSlices(u8, &before_duplicate, &owner.shard.canonicalStateDigest());
     var recovered_raw = try raw_ingress.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = 2 });
     var recovered_chain: live.Chain = .{ .mode = .demo_live, .qualification = qualification(), .raw_sink = recovered_raw.interface(), .transport = transport.interface() };
@@ -454,16 +471,21 @@ fn executeRawPrivateFillRecovery() !void {
     const Replay = struct {
         count: u64 = 0,
         saw_rest_route: bool = false,
+        saw_original: bool = false,
+        saw_equivalent: bool = false,
 
-        fn consume(ptr: *anyopaque, _: u64, record: @import("okx_public_market.zig").RawIngressRecord, _: []const u8) !void {
+        fn consume(ptr: *anyopaque, _: u64, record: @import("okx_public_market.zig").RawIngressRecord, bytes: []const u8) !void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             self.count += 1;
             self.saw_rest_route = self.saw_rest_route or record.origin != 0;
+            self.saw_original = self.saw_original or std.mem.indexOf(u8, bytes, "\"accFillSz\":\"0.0002\"") != null;
+            self.saw_equivalent = self.saw_equivalent or std.mem.indexOf(u8, bytes, "+000.000200000000000000000000000000000000000000000000000") != null;
         }
     };
     var replay = Replay{};
     try raw_ingress.replayCommitted(memory.interface(), undefined, raw_stream, .{ .ptr = &replay, .consume_fn = Replay.consume });
     try std.testing.expect(replay.count > 0 and replay.saw_rest_route);
+    try std.testing.expect(replay.saw_original and replay.saw_equivalent);
     try std.testing.expectEqual(@as(u64, 0), chain.next_attempt_id - 1);
 }
 
@@ -724,6 +746,10 @@ test "OKX ready economic faults distinguish micro fees rebates assets and decode
         .{ .fee = "0", .asset = "", .reason = .missing_asset, .rejection = .missing_asset },
         .{ .fee = "bad", .reason = .malformed_amount, .rejection = .malformed_amount },
         .{ .fee = "170141183460469231731687303715884105728", .reason = .overflow, .rejection = .amount_overflow },
+        .{ .fee = "-170141183460469231731687303715884105728", .reason = .overflow },
+        .{ .fee = "-170141183460469231731687303715884.105728", .reason = .overflow },
+        .{ .fee = "0.000000000000000000000000000000000000001", .reason = .overflow, .rejection = .amount_overflow },
+        .{ .fee = &@as([canonical.Decimal.max_text_bytes + 1]u8, @splat('0')), .reason = .overflow, .rejection = .amount_overflow },
     };
     for (cases) |case| for ([_]bool{ false, true }) |rest| {
         if (rest and case.rejection == null) continue;

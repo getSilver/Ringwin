@@ -51,7 +51,7 @@ Status: open
 
 ## Frontier
 
-- [03：让有界 Decimal 等价文本贯通规范事实](issues/03-normalize-bounded-decimal-ingress.md) — 02 离线安全止损已完成；codex/asset-precision-accounting 已认领，实施中。
+- [04：贯通 AssetDefinition 激活与精度范围准入](issues/04-activate-authoritative-asset-precision.md) — 02/03 离线切片已完成；下一实施前沿。
 
 ## Decisions so far
 

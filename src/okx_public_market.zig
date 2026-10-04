@@ -16,51 +16,7 @@ pub const Instrument = enum(u8) {
     btc_usdt_swap,
 };
 
-pub const Decimal = struct {
-    coefficient: i128,
-    scale: u8,
-
-    pub fn parse(text: []const u8) !Decimal {
-        if (text.len == 0) return error.InvalidDecimal;
-        var negative = false;
-        var cursor: usize = 0;
-        if (text[0] == '-') {
-            negative = true;
-            cursor = 1;
-        } else if (text[0] == '+') {
-            cursor = 1;
-        }
-        if (cursor == text.len) return error.InvalidDecimal;
-
-        var coefficient: i128 = 0;
-        var scale: u8 = 0;
-        var saw_digit = false;
-        var saw_dot = false;
-        while (cursor < text.len) : (cursor += 1) {
-            const byte = text[cursor];
-            if (byte == '.') {
-                if (saw_dot) return error.InvalidDecimal;
-                saw_dot = true;
-                continue;
-            }
-            if (byte < '0' or byte > '9') return error.InvalidDecimal;
-            saw_digit = true;
-            coefficient = std.math.mul(i128, coefficient, 10) catch
-                return error.DecimalOverflow;
-            coefficient = std.math.add(i128, coefficient, byte - '0') catch
-                return error.DecimalOverflow;
-            if (saw_dot) scale = std.math.add(u8, scale, 1) catch
-                return error.DecimalOverflow;
-        }
-        if (!saw_digit) return error.InvalidDecimal;
-        if (negative) coefficient = -coefficient;
-        while (scale > 0 and @mod(coefficient, 10) == 0) {
-            coefficient = @divTrunc(coefficient, 10);
-            scale -= 1;
-        }
-        return .{ .coefficient = coefficient, .scale = scale };
-    }
-};
+pub const Decimal = @import("canonical_event.zig").Decimal;
 
 pub const Times = struct {
     receive_time_utc_ns: u64,

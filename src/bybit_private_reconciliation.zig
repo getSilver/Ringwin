@@ -1,6 +1,7 @@
 //! Bybit V5 private facts. Raw bytes are committed before protocol decoding.
 const std = @import("std");
 const canonical = @import("canonical_event.zig");
+const canonical_codec = @import("canonical_event_codec.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
@@ -58,7 +59,7 @@ pub const Reconciler = struct {
     margin_count: u8 = 0,
     links: [max_links]Link = undefined,
     link_count: usize = 0,
-    seen: [max_seen][32]u8 = undefined,
+    seen: [max_seen]struct { key: [32]u8, content: [32]u8 } = undefined,
     seen_count: usize = 0,
     buffered: [max_events]canonical.EventRecord = undefined,
     buffered_count: usize = 0,
@@ -137,10 +138,15 @@ pub const Reconciler = struct {
         self.active_source_sequence = self.source_sequences[source_index];
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{ .parse_numbers = false }) catch return error.InvalidFrame;
         defer parsed.deinit();
-        self.decode(source, page, times, evidence, parsed.value) catch |err| {
+        var candidate = self.*;
+        candidate.decode(source, page, times, evidence, parsed.value) catch |err| {
             self.stage = .failed;
+            if (canonical.Decimal.faultReason(err)) |reason| {
+                try self.appendReady(try self.record(.account, null, null, identity(evidence.sha256), null, times, evidence, .{ .economic_fault = .{ .reason = reason } }));
+            }
             return err;
         };
+        self.* = candidate;
         return evidence;
     }
 
@@ -185,15 +191,22 @@ pub const Reconciler = struct {
             self.setStatus(link.order, status);
             const order_id = try string(item, "orderId");
             const cumulative = try string(item, "cumExecQty");
-            const key = keyFor(&.{ "report", order_id, status_text, cumulative, (try optionalString(item, "updatedTime")) orelse "" });
-            if (try self.seenBefore(key)) continue;
+            const normalized = try canonical.Decimal.parse(cumulative);
+            var amount_bytes: [17]u8 = undefined;
+            std.mem.writeInt(i128, amount_bytes[0..16], normalized.coefficient, .little);
+            amount_bytes[16] = normalized.scale;
+            const update = try optionalMillis(item, "updatedTime");
+            var time_bytes: [8]u8 = undefined;
+            std.mem.writeInt(u64, &time_bytes, update orelse 0, .little);
+            const key = keyFor(&.{ "report", order_id, status_text, &amount_bytes, &time_bytes });
             const rules = try self.rulesFor(item);
             const original = try quantity(rules, try string(item, "qty"));
             const executed = try quantity(rules, cumulative);
             if (executed.lots > original.lots) return error.InvalidReportQuantity;
-            const update = try optionalMillis(item, "updatedTime");
             const position_side = try positionSide(item);
-            try self.emit(.account, rules.identity, null, identity(key), update, times, evidence, .{ .execution_report = .{ .identity = identity(key), .order = link.order, .client_order_id = link.client, .venue_order = try canonical.VenueOrderRef.init((self.binding orelse return error.StaleSession).venue, order_id), .instrument = rules.identity, .exchange_account = (self.binding orelse return error.StaleSession).account, .revision = 1, .side = try side(try string(item, "side")), .order_type = try orderType(try string(item, "orderType")), .time_in_force = try tif(try string(item, "timeInForce")), .venue_reduce_only = try optionalBool(item, "reduceOnly"), .portfolio_reduce_only = link.portfolio_reduce_only, .position_mode_net = if (position_side) |position| position == .net else null, .position_side = position_side, .status = status, .reject_reason = if (status == .rejected) .other_venue_reject else null, .original_quantity = original, .cumulative_quantity = executed, .remaining_quantity = .{ .instrument = rules.identity, .rules_version = rules.rules_version, .lots = original.lots - executed.lots }, .limit_price = try optionalPrice(rules, (try optionalString(item, "price")) orelse "0"), .average_fill_price = try optionalPrice(rules, (try optionalString(item, "avgPrice")) orelse "0"), .venue_create_time_utc_ns = try optionalMillis(item, "createdTime"), .venue_update_time_utc_ns = update } });
+            const event: canonical.Payload = .{ .execution_report = .{ .identity = identity(key), .order = link.order, .client_order_id = link.client, .venue_order = try canonical.VenueOrderRef.init((self.binding orelse return error.StaleSession).venue, order_id), .instrument = rules.identity, .exchange_account = (self.binding orelse return error.StaleSession).account, .revision = 1, .side = try side(try string(item, "side")), .order_type = try orderType(try string(item, "orderType")), .time_in_force = try tif(try string(item, "timeInForce")), .venue_reduce_only = try optionalBool(item, "reduceOnly"), .portfolio_reduce_only = link.portfolio_reduce_only, .position_mode_net = if (position_side) |position| position == .net else null, .position_side = position_side, .status = status, .reject_reason = if (status == .rejected) .other_venue_reject else null, .original_quantity = original, .cumulative_quantity = executed, .remaining_quantity = .{ .instrument = rules.identity, .rules_version = rules.rules_version, .lots = original.lots - executed.lots }, .limit_price = try optionalPrice(rules, (try optionalString(item, "price")) orelse "0"), .average_fill_price = try optionalPrice(rules, (try optionalString(item, "avgPrice")) orelse "0"), .venue_create_time_utc_ns = try optionalMillis(item, "createdTime"), .venue_update_time_utc_ns = update } };
+            if (try self.seenBefore(key, event)) continue;
+            try self.emit(.account, rules.identity, null, identity(key), update, times, evidence, event);
         }
     }
     fn decodeExecutions(self: *Reconciler, times: Times, evidence: RawEvidenceRef, value: std.json.Value) !void {
@@ -205,12 +218,13 @@ pub const Reconciler = struct {
             const link = self.findLink(client) orelse continue;
             const execution_id = try string(item, "execId");
             const key = keyFor(&.{ "fill", execution_id });
-            if (try self.seenBefore(key)) continue;
             const rules = try self.rulesFor(item);
             const fee = if (try optionalString(item, "execFee")) |value_text| try amount(try asset((try optionalString(item, "feeCurrency")) orelse "USDT"), value_text) else null;
             const pnl = if (try optionalString(item, "execPnl")) |value_text| try amount(usdt, value_text) else null;
             const execution_time = try optionalMillis(item, "execTime");
-            try self.emit(.account, rules.identity, null, identity(key), execution_time, times, evidence, .{ .fill = .{ .identity = identity(key), .order = link.order, .client_order_id = link.client, .venue_order = try canonical.VenueOrderRef.init((self.binding orelse return error.StaleSession).venue, try string(item, "orderId")), .venue_trade = try canonical.VenueTradeRef.init((self.binding orelse return error.StaleSession).venue, execution_id), .instrument = rules.identity, .exchange_account = (self.binding orelse return error.StaleSession).account, .side = try side(try string(item, "side")), .quantity = try quantity(rules, try string(item, "execQty")), .price = try price(rules, try string(item, "execPrice")), .fee = if (fee) |value_fee| if (value_fee.atoms > 0) value_fee else null else null, .rebate = if (fee) |value_fee| if (value_fee.atoms < 0) .{ .asset = value_fee.asset, .atoms = -value_fee.atoms } else null else null, .realized_pnl = pnl, .liquidity = if (try boolField(item, "isMaker")) .maker else .taker, .venue_fill_time_utc_ns = execution_time } });
+            const event: canonical.Payload = .{ .fill = .{ .identity = identity(key), .order = link.order, .client_order_id = link.client, .venue_order = try canonical.VenueOrderRef.init((self.binding orelse return error.StaleSession).venue, try string(item, "orderId")), .venue_trade = try canonical.VenueTradeRef.init((self.binding orelse return error.StaleSession).venue, execution_id), .instrument = rules.identity, .exchange_account = (self.binding orelse return error.StaleSession).account, .side = try side(try string(item, "side")), .quantity = try quantity(rules, try string(item, "execQty")), .price = try price(rules, try string(item, "execPrice")), .fee = if (fee) |value_fee| if (value_fee.atoms > 0) value_fee else null else null, .rebate = if (fee) |value_fee| if (value_fee.atoms < 0) .{ .asset = value_fee.asset, .atoms = std.math.sub(i128, 0, value_fee.atoms) catch return error.DecimalOverflow } else null else null, .realized_pnl = pnl, .liquidity = if (try boolField(item, "isMaker")) .maker else .taker, .venue_fill_time_utc_ns = execution_time } };
+            if (try self.seenBefore(key, event)) continue;
+            try self.emit(.account, rules.identity, null, identity(key), execution_time, times, evidence, event);
         }
     }
     fn decodeWallet(self: *Reconciler, observed: bool, times: Times, evidence: RawEvidenceRef, value: std.json.Value) !void {
@@ -346,10 +360,16 @@ pub const Reconciler = struct {
         if (std.mem.eql(u8, category, "linear")) return self.rules.linear;
         return error.UnsupportedInstrument;
     }
-    fn seenBefore(self: *Reconciler, key: [32]u8) !bool {
-        for (self.seen[0..self.seen_count]) |known| if (std.mem.eql(u8, &known, &key)) return true;
+    fn seenBefore(self: *Reconciler, key: [32]u8, event: canonical.Payload) !bool {
+        var encoded: [canonical_codec.max_encoded_len]u8 = undefined;
+        var content: [32]u8 = undefined;
+        Sha256.hash(try canonical_codec.encodePayload(&encoded, event), &content, .{});
+        for (self.seen[0..self.seen_count]) |known| if (std.mem.eql(u8, &known.key, &key)) {
+            if (!std.mem.eql(u8, &known.content, &content)) return error.ConflictingFact;
+            return true;
+        };
         if (self.seen_count == self.seen.len) return error.FactCapacity;
-        self.seen[self.seen_count] = key;
+        self.seen[self.seen_count] = .{ .key = key, .content = content };
         self.seen_count += 1;
         return false;
     }
@@ -542,12 +562,17 @@ test "Bybit separates deduplicated reports and fills from economic facts" {
     const order = "{\"topic\":\"order\",\"data\":[{\"category\":\"linear\",\"symbol\":\"BTCUSDT\",\"orderId\":\"42\",\"orderLinkId\":\"RWN-9\",\"side\":\"Buy\",\"orderType\":\"Limit\",\"timeInForce\":\"GTC\",\"orderStatus\":\"Filled\",\"qty\":\"0.0100\",\"cumExecQty\":\"0.0100\",\"price\":\"50000.0\",\"avgPrice\":\"50000.0\",\"updatedTime\":\"2\",\"reduceOnly\":false}]}";
     const execution = "{\"topic\":\"execution\",\"data\":[{\"category\":\"linear\",\"symbol\":\"BTCUSDT\",\"orderId\":\"42\",\"orderLinkId\":\"RWN-9\",\"execId\":\"77\",\"side\":\"Buy\",\"execQty\":\"0.0100\",\"execPrice\":\"50000.0\",\"execFee\":\"0.010000\",\"feeCurrency\":\"USDT\",\"execPnl\":\"0\",\"execTime\":\"2\",\"isMaker\":true}]}";
     _ = try reconciler.ingest(std.testing.allocator, .ws, null, test_times, order);
+    const equivalent = try std.mem.replaceOwned(u8, std.testing.allocator, order, "0.0100", "+000.010000000000000000000000000000000000000000000000");
+    defer std.testing.allocator.free(equivalent);
+    _ = try reconciler.ingest(std.testing.allocator, .ws, null, test_times, equivalent);
     _ = try reconciler.ingest(std.testing.allocator, .ws, null, test_times, execution);
     _ = try reconciler.ingest(std.testing.allocator, .ws, null, test_times, execution);
     _ = try reconciler.ingest(std.testing.allocator, .rest_wallet, .{ .final = true }, test_times, "{\"result\":{\"list\":[{\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"10.000000\",\"availableToWithdraw\":\"9.000000\"}]}]}}");
     _ = try reconciler.ingest(std.testing.allocator, .rest_positions, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
     _ = try reconciler.ingest(std.testing.allocator, .rest_orders, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
-    _ = try reconciler.ingest(std.testing.allocator, .rest_executions, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
+    _ = try reconciler.ingest(std.testing.allocator, .rest_executions, .{ .final = true }, test_times,
+        \\{"result":{"list":[{"category":"linear","symbol":"BTCUSDT","orderId":"42","orderLinkId":"RWN-9","execId":"77","side":"Buy","execQty":"+000.010000000000000000000000000000000000000000000000","execPrice":"+050000.0000000000","execFee":"+000.010000000000000000000000000000000000000000000000","feeCurrency":"USDT","execPnl":"-0.0000000000","execTime":"2","isMaker":true}]}}
+    );
     var count: usize = 0;
     var fills: usize = 0;
     var reports: usize = 0;
@@ -562,6 +587,10 @@ test "Bybit separates deduplicated reports and fills from economic facts" {
     try std.testing.expect(count >= 3);
     try std.testing.expectEqual(@as(usize, 1), reports);
     try std.testing.expectEqual(@as(usize, 1), fills);
+    const conflicting = try std.mem.replaceOwned(u8, std.testing.allocator, execution, "0.010000", "0.020000");
+    defer std.testing.allocator.free(conflicting);
+    try std.testing.expectError(error.ConflictingFact, reconciler.ingest(std.testing.allocator, .ws, null, test_times, conflicting));
+    try std.testing.expectEqual(Stage.failed, reconciler.readiness().stage);
 }
 
 test "Bybit committed private ingress replays to identical canonical facts" {
