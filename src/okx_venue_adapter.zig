@@ -139,7 +139,12 @@ pub const OkxVenueAdapter = struct {
         if (self.pending_output != null) return error.OutputPending;
         const binding = self.binding orelse return error.InvalidBinding;
         const reconciler = self.reconciler orelse return error.MissingPrivateReconciler;
-        return reconciler.ingest(self.allocator, self.chain.raw_sink, @intCast(binding.session), times, source, page, raw);
+        var batch = reconciler.ingest(self.allocator, self.chain.raw_sink, @intCast(binding.session), times, source, page, raw) catch |err| {
+            self.private_failed = true;
+            return err;
+        };
+        try self.acceptPrivateBatch(&batch, times);
+        return batch;
     }
 
     /// Commits ACKs and private WebSocket frames before subscription, snapshot,
@@ -151,11 +156,11 @@ pub const OkxVenueAdapter = struct {
             return error.OutputPending;
         const binding = self.binding orelse return error.InvalidBinding;
         const reconciler = self.reconciler orelse return error.MissingPrivateReconciler;
-        var batch = try reconciler.ingestWsMessage(self.allocator, self.chain.raw_sink, @intCast(binding.session), times, raw);
-        if (batch.rejection == null) {
-            try self.queueReadyPrivate(batch.eventSlice());
-            batch.event_count = 0;
-        }
+        var batch = reconciler.ingestWsMessage(self.allocator, self.chain.raw_sink, @intCast(binding.session), times, raw) catch |err| {
+            self.private_failed = true;
+            return err;
+        };
+        try self.acceptPrivateBatch(&batch, times);
         return batch;
     }
 
@@ -167,10 +172,7 @@ pub const OkxVenueAdapter = struct {
         const binding = self.binding orelse return error.InvalidBinding;
         const reconciler = self.reconciler orelse return error.MissingPrivateReconciler;
         var batch = try reconciler.replayWsMessage(self.allocator, @intCast(binding.session), times, evidence, raw);
-        if (batch.rejection == null) {
-            try self.queueReadyPrivate(batch.eventSlice());
-            batch.event_count = 0;
-        }
+        try self.acceptPrivateBatch(&batch, times);
         return batch;
     }
 
@@ -182,11 +184,45 @@ pub const OkxVenueAdapter = struct {
         const binding = self.binding orelse return error.InvalidBinding;
         const reconciler = self.reconciler orelse return error.MissingPrivateReconciler;
         var batch = try reconciler.replayRest(self.allocator, @intCast(binding.session), times, source, page, evidence, raw);
-        if (batch.rejection == null) {
+        try self.acceptPrivateBatch(&batch, times);
+        return batch;
+    }
+
+    fn acceptPrivateBatch(self: *OkxVenueAdapter, batch: *private.IngressBatch, times: private.Times) !void {
+        if (batch.rejection) |reason| {
+            var output: canonical.AdapterOutputBatch = .{};
+            try self.appendEconomicFault(&output, .{
+                .source_time_utc_ns = null,
+                .receive_time_utc_ns = times.receive_time_utc_ns,
+                .monotonic_time_ns = times.monotonic_time_ns,
+                .wall_time_utc_ns = times.wall_time_utc_ns,
+                .raw_evidence = batch.raw_evidence,
+                .source_fact_identity = batch.raw_evidence.sha256,
+            }, switch (reason) {
+                .missing_amount => .missing_amount,
+                .missing_asset => .missing_asset,
+                .malformed_amount => .malformed_amount,
+                .amount_overflow => .overflow,
+                else => .decoder_rejected,
+            });
+            self.pending_output = output;
+        } else {
+            // A report from the same raw frame must not release occupancy
+            // before its economic facts have proved representable.
+            var candidate = self.*;
+            for (batch.eventSlice()) |event| {
+                var checked: canonical.AdapterOutputBatch = .{};
+                candidate.translatePrivate(&checked, event, false) catch |err| {
+                    var output: canonical.AdapterOutputBatch = .{};
+                    try self.appendEconomicFault(&output, event.envelope, economicReason(err));
+                    self.pending_output = output;
+                    batch.event_count = 0;
+                    return;
+                };
+            }
             try self.queueReadyPrivate(batch.eventSlice());
             batch.event_count = 0;
         }
-        return batch;
     }
 
     pub fn adapter(self: *OkxVenueAdapter) venue.VenueAdapter {
@@ -242,7 +278,14 @@ pub const OkxVenueAdapter = struct {
         const self: *OkxVenueAdapter = @ptrCast(@alignCast(ptr));
         if (self.state == .idle) return error.NotStarted;
         if (self.state == .stopped) return .stopped;
-        if (self.private_failed or self.pending_output != null) return .backpressure;
+        if (self.pending_output != null) return .backpressure;
+        if (self.private_failed) switch (request) {
+            .order_command => |command| if (command.operation != .cancel) return .backpressure,
+            .order_batch => |commands| for (commands.slice()) |command| {
+                if (command.operation != .cancel) return .backpressure;
+            },
+            else => {},
+        };
         switch (request) {
             .order_command => |command| try self.enqueue(command),
             .order_batch => |commands| {
@@ -331,7 +374,11 @@ pub const OkxVenueAdapter = struct {
         var output: canonical.AdapterOutputBatch = .{};
         while (self.pending_private_count != 0 and output.events.len - output.len >= 8) {
             const event = self.pending_private[0];
+            const previous_output = output;
             self.translatePrivate(&output, event, false) catch |err| {
+                output = previous_output;
+                self.appendEconomicFault(&output, event.envelope, economicReason(err)) catch return;
+                _ = self.takeReadyPrivate();
                 std.debug.print("okx_private_translate_failed={s}\n", .{@errorName(err)});
                 self.private_failed = true;
                 self.finishPrivateFailure(&output);
@@ -349,12 +396,15 @@ pub const OkxVenueAdapter = struct {
         };
         if (!reconciler.readiness().reconciliation_ready) return;
 
-        while (output.len < canonical.max_events_per_adapter_batch) {
+        while (output.events.len - output.len >= 8) {
             const event = reconciler.drainReconciled() orelse {
                 self.finishPrivateBatch(&output);
                 break;
             };
+            const previous_output = output;
             self.translatePrivate(&output, event, true) catch |err| {
+                output = previous_output;
+                self.appendEconomicFault(&output, event.envelope, economicReason(err)) catch return;
                 std.debug.print("okx_private_reconciled_translate_failed={s}\n", .{@errorName(err)});
                 self.private_failed = true;
                 self.finishPrivateFailure(&output);
@@ -409,6 +459,11 @@ pub const OkxVenueAdapter = struct {
         var output: canonical.AdapterOutputBatch = .{};
         self.appendUnresolvedResults(&output, complete);
         if (output.len != 0) self.pending_output = output;
+    }
+
+    fn appendEconomicFault(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, envelope: private.EventEnvelope, reason: canonical.EconomicFaultReason) !void {
+        self.private_failed = true;
+        try self.appendPrivate(output, envelope, .account, null, null, digestIdentity(envelope.source_fact_identity), .{ .economic_fault = .{ .reason = reason } });
     }
 
     fn finishPrivateFailure(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch) void {
@@ -692,7 +747,7 @@ pub const OkxVenueAdapter = struct {
     fn enqueue(self: *OkxVenueAdapter, command: canonical.OrderCommand) venue.SendError!void {
         const binding = self.binding orelse return error.InvalidRequest;
         if (command.exchange_account != binding.account) return error.InvalidRequest;
-        self.rememberOrder(command) catch {
+        if (command.operation != .cancel) self.rememberOrder(command) catch {
             self.appendResult(command, .not_sent, .adapter_backpressure, null);
             return;
         };
@@ -728,6 +783,12 @@ pub const OkxVenueAdapter = struct {
     }
 
     fn dispatchBatch(self: *OkxVenueAdapter, batch: order.TransportBatch) void {
+        if (self.private_failed) for (batch.slice()) |legacy| {
+            if (legacy.operation() != .cancel) {
+                for (batch.slice()) |item| if (self.takePending(item.command_id)) |pending| self.appendResult(pending.command, .not_sent, .venue_unavailable, null);
+                return;
+            }
+        };
         var commands: [order.max_batch_items]live.AuthorizedCommand = undefined;
         for (batch.slice(), 0..) |legacy, index| {
             const pending = self.findPending(legacy.command_id) orelse return;
@@ -1052,56 +1113,45 @@ fn assetScale(asset: canonical.AssetIdentity) !u8 {
 }
 
 fn assetAmount(asset: canonical.AssetIdentity, value: private.Decimal) !canonical.AssetAmount {
-    return accountAssetAmount(asset, value, false);
+    return accountAssetAmount(asset, value);
 }
 
-test "OKX USDT sell fee keeps sub-micro cost conservatively" {
-    const fee = try assetAmount(usdt, try private.Decimal.parse("-0.004198632165"));
-    try std.testing.expectEqual(@as(i128, -4_199), fee.atoms);
+test "OKX USDT sell fee rejects sub-micro cost" {
+    try std.testing.expectError(error.InexactDecimal, assetAmount(usdt, try private.Decimal.parse("-0.004198632165")));
 }
 
-fn accountAssetAmount(asset: canonical.AssetIdentity, value: private.Decimal, round_up: bool) !canonical.AssetAmount {
+fn accountAssetAmount(asset: canonical.AssetIdentity, value: private.Decimal) !canonical.AssetAmount {
     const scale = try assetScale(asset);
     const parsed = decimal(value);
-    const atoms = parsed.exactAtoms(scale) catch |err| switch (err) {
-        error.InexactDecimal => blk: {
-            var divisor: i128 = 1;
-            var index: u8 = 0;
-            while (index < parsed.scale - scale) : (index += 1)
-                divisor = std.math.mul(i128, divisor, 10) catch return error.DecimalOverflow;
-            const floor = @divFloor(parsed.coefficient, divisor);
-            break :blk if (round_up and @rem(parsed.coefficient, divisor) != 0) floor + 1 else floor;
-        },
-        else => return err,
-    };
+    const atoms = try parsed.exactAtoms(scale);
     return .{ .asset = asset, .atoms = atoms };
 }
 
 fn balanceFor(value: private.Balance) !canonical.AccountBalance {
     const asset = try assetIdentity(value.asset.slice());
-    const total = try accountAssetAmount(asset, value.equity orelse return error.MissingBalanceTotal, false);
-    const available = try accountAssetAmount(asset, value.available_balance orelse return error.MissingBalanceAvailable, false);
-    const held = try accountAssetAmount(asset, value.frozen_balance orelse return error.MissingBalanceHeld, true);
+    const total = try accountAssetAmount(asset, value.equity orelse return error.MissingBalanceTotal);
+    const available = try accountAssetAmount(asset, value.available_balance orelse return error.MissingBalanceAvailable);
+    const held = try accountAssetAmount(asset, value.frozen_balance orelse return error.MissingBalanceHeld);
     return .{
         .asset = asset,
         .total = total,
         .available = available,
         .held = held,
-        .liability = if (value.liability) |amount| try accountAssetAmount(asset, amount, true) else null,
-        .cash_balance = if (value.cash_balance) |amount| try accountAssetAmount(asset, amount, false) else null,
-        .isolated_liability = if (value.isolated_liability) |amount| try accountAssetAmount(asset, amount, true) else null,
-        .cross_liability = if (value.cross_liability) |amount| try accountAssetAmount(asset, amount, true) else null,
+        .liability = if (value.liability) |amount| try accountAssetAmount(asset, amount) else null,
+        .cash_balance = if (value.cash_balance) |amount| try accountAssetAmount(asset, amount) else null,
+        .isolated_liability = if (value.isolated_liability) |amount| try accountAssetAmount(asset, amount) else null,
+        .cross_liability = if (value.cross_liability) |amount| try accountAssetAmount(asset, amount) else null,
     };
 }
 
 fn marginFor(value: private.ExchangeMarginSnapshot) !canonical.AccountMargin {
-    const amount = try accountAssetAmount(usdt, value.total_equity_usd orelse return error.MissingMarginEquity, false);
+    const amount = try accountAssetAmount(usdt, value.total_equity_usd orelse return error.MissingMarginEquity);
     return .{
         .amount = amount,
-        .adjusted_equity = if (value.adjusted_equity_usd) |amount_value| try accountAssetAmount(usdt, amount_value, false) else null,
-        .initial_margin = if (value.initial_margin_usd) |amount_value| try accountAssetAmount(usdt, amount_value, true) else null,
-        .maintenance_margin = if (value.maintenance_margin_usd) |amount_value| try accountAssetAmount(usdt, amount_value, true) else null,
-        .isolated_equity = if (value.isolated_equity_usd) |amount_value| try accountAssetAmount(usdt, amount_value, false) else null,
+        .adjusted_equity = if (value.adjusted_equity_usd) |amount_value| try accountAssetAmount(usdt, amount_value) else null,
+        .initial_margin = if (value.initial_margin_usd) |amount_value| try accountAssetAmount(usdt, amount_value) else null,
+        .maintenance_margin = if (value.maintenance_margin_usd) |amount_value| try accountAssetAmount(usdt, amount_value) else null,
+        .isolated_equity = if (value.isolated_equity_usd) |amount_value| try accountAssetAmount(usdt, amount_value) else null,
         .margin_ratio = if (value.margin_ratio) |ratio| decimal(ratio) else null,
     };
 }
@@ -1515,11 +1565,9 @@ test "OKX private facts normalize fee signs into canonical execution fill and ac
     try adapter.stop(.{ .monotonic_ns = 1 });
 }
 
-test "OKX account amounts conservatively quantize sub-micro values" {
-    try std.testing.expectEqual(@as(i128, 25_123_456), (try accountAssetAmount(usdt, try private.Decimal.parse("25.123456789"), false)).atoms);
-    try std.testing.expectEqual(@as(i128, 25_123_457), (try accountAssetAmount(usdt, try private.Decimal.parse("25.123456789"), true)).atoms);
-    try std.testing.expectEqual(@as(i128, -25_123_457), (try accountAssetAmount(usdt, try private.Decimal.parse("-25.123456789"), false)).atoms);
-    try std.testing.expectEqual(@as(i128, -25_123_456), (try accountAssetAmount(usdt, try private.Decimal.parse("-25.123456789"), true)).atoms);
+test "OKX account amounts reject sub-micro values" {
+    try std.testing.expectError(error.InexactDecimal, accountAssetAmount(usdt, try private.Decimal.parse("25.123456789")));
+    try std.testing.expectError(error.InexactDecimal, accountAssetAmount(usdt, try private.Decimal.parse("-25.123456789")));
 }
 
 test "OKX adapter preserves fail-closed dispatch rejection causes" {
@@ -1748,4 +1796,15 @@ test "amend and cancel use the canonical VenueOrderRef without leaking an OKX or
     try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .order_command = cancel }));
     try std.testing.expectEqual(canonical.DispatchState.submitted, (try adapter.tryDrain()).?.events[0].event.order_dispatch_result.state);
     try adapter.stop(.{ .monotonic_ns = 1 });
+}
+
+fn economicReason(err: anyerror) canonical.EconomicFaultReason {
+    return switch (err) {
+        error.InexactDecimal => .inexact_amount,
+        error.DecimalOverflow, error.Overflow => .overflow,
+        error.UnsupportedAsset => .unknown_asset,
+        error.InvalidDecimal => .malformed_amount,
+        error.MissingBalanceTotal, error.MissingBalanceAvailable, error.MissingBalanceHeld, error.MissingMarginEquity => .missing_amount,
+        else => .invalid_economic_fact,
+    };
 }

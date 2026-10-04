@@ -7,7 +7,7 @@ Status: open
 
 按照已接受的多 Venue 数值方案，把交易所确认的费用、返佣及账户金额精确转换为版本化资产原子单位，贯通同一 TradingShard、原币账本、DurableStore 与恢复路径。无法精确表示的事实保持可审计并失败关闭，不把保守估算写成真实经济金额。
 
-本模块已发布优化落实 Spec 及 13 张实施 Ticket（02–14）。本次仅发布规划，不实施产品代码、不执行在线交易；后续按已确认阻塞关系推进，不因发布计划宣称修复或取得资格。
+本模块于 2026-10-03 发布优化落实 Spec 及 13 张实施 Ticket（02–14）；用户随后通过 `/goal $implement` 授权建立独立工作区并实施。当前按已确认阻塞关系推进，仅执行本地实现和离线验证，不执行在线交易或部署，不因发布计划宣称修复或取得资格。
 
 ## Definition of done
 
@@ -47,11 +47,11 @@ Status: open
 | [13：闭合多 Venue 精确账务公开接缝合同](issues/13-qualify-multi-venue-exact-accounting-contract.md) | S5 | OKX、Binance、Bybit 和 SimulatedVenue 经各自真实 Adapter 的公开路径遵守同一精度、费用、故障与恢复合同。 | [11](issues/11-prove-precision-crash-and-replay-invariants.md) |
 | [14：封存完整验收、覆盖矩阵与发布资格要求](issues/14-seal-exact-accounting-release-evidence.md) | S5 | 形成可复现、逐项对应 Spec 的实现证据，明确受支持范围及新源码版本仍需哪些在线资格。 | [12](issues/12-audit-historical-quantized-fees-readonly.md)、[13](issues/13-qualify-multi-venue-exact-accounting-contract.md) |
 
-所有实施票为 `Status: open`、`Label: ready-for-agent`；只有无未完成 blocker 的票可认领。阶段是 Spec 的范围分类，实际阻塞以本表为准：07/08 可在 06 完成后分别推进，11/12 可在 10 完成后分别推进；最终封存 14 同时等待历史审计 12 和多 Venue 合同 13。
+实施票当前状态以各票头部为准；只有无未完成 blocker 的票可认领。阶段是 Spec 的范围分类，实际阻塞以本表为准：07/08 可在 06 完成后分别推进，11/12 可在 10 完成后分别推进；最终封存 14 同时等待历史审计 12 和多 Venue 合同 13。
 
 ## Frontier
 
-- [02：停止真实金额取整并持久关闭新增风险](issues/02-fail-close-inexact-economic-facts.md) — 无 blocker；尚未认领、尚未实施。
+- [02：停止真实金额取整并持久关闭新增风险](issues/02-fail-close-inexact-economic-facts.md) — 无 blocker；codex/asset-precision-accounting 已认领，实施中。
 
 ## Decisions so far
 

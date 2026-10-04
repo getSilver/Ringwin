@@ -215,6 +215,10 @@ pub const Page = struct {
 };
 
 pub const RejectReason = enum(u8) {
+    missing_amount,
+    missing_asset,
+    malformed_amount,
+    amount_overflow,
     stale_session,
     malformed_json,
     malformed_envelope,
@@ -768,10 +772,9 @@ pub const Reconciler = struct {
         const fill_price = try optionalDecimalField(row, "fillPx") orelse return error.InvalidField;
         if (fill_size.coefficient == 0) return;
         const fill_time = try optionalMillisField(row, "fillTime") orelse update_time;
-        const fee = (try optionalDecimalField(row, "fillFee")) orelse
-            (try optionalDecimalField(row, "fee")) orelse Decimal{ .coefficient = 0, .scale = 0 };
-        const fee_ccy = (try optionalStringField(row, "fillFeeCcy")) orelse
-            (try optionalStringField(row, "feeCcy")) orelse "";
+        const fee = (try optionalDecimalField(row, "fillFee")) orelse return error.MissingAmount;
+        const fee_ccy = (try optionalStringField(row, "fillFeeCcy")) orelse return error.MissingAsset;
+        if (fee_ccy.len == 0) return error.MissingAsset;
         const fill: Fill = .{
             .venue_trade_id = try parseId(VenueTradeId, trade_text),
             .venue_bill_id = null,
@@ -783,11 +786,8 @@ pub const Reconciler = struct {
             .price = fill_price,
             .fee = fee,
             .fee_asset = try AssetCode.init(fee_ccy),
-            .rebate = try optionalDecimalField(row, "rebate"),
-            .rebate_asset = if (try optionalStringField(row, "rebateCcy")) |asset|
-                try AssetCode.init(asset)
-            else
-                null,
+            // Order-level fee/rebate fields are cumulative. Only signed
+            // fillFee describes this execution's fee or rebate.
             .realized_pnl = try optionalDecimalField(row, "fillPnl"),
             .liquidity = try optionalLiquidity(row),
             .venue_fill_time_utc_ns = fill_time,
@@ -809,6 +809,10 @@ pub const Reconciler = struct {
         );
         const instrument = try parseInstrument(try stringField(row, "instId"));
         try validateSourceInstrument(source, instrument);
+        // fills-history fee is signed and belongs to this execution.
+        const fee = (try optionalDecimalField(row, "fee")) orelse return error.MissingAmount;
+        const fee_ccy = (try optionalStringField(row, "feeCcy")) orelse return error.MissingAsset;
+        if (fee_ccy.len == 0) return error.MissingAsset;
         const fill: Fill = .{
             .venue_trade_id = try idField(VenueTradeId, row, "tradeId"),
             .venue_bill_id = try idField(VenueBillId, row, "billId"),
@@ -818,17 +822,8 @@ pub const Reconciler = struct {
             .side = try parseSide(try stringField(row, "side")),
             .quantity = try decimalField(row, "fillSz"),
             .price = try decimalField(row, "fillPx"),
-            .fee = (try optionalDecimalField(row, "fee")) orelse
-                (try optionalDecimalField(row, "fillFee")) orelse return error.InvalidField,
-            .fee_asset = try AssetCode.init(
-                (try optionalStringField(row, "feeCcy")) orelse
-                    (try optionalStringField(row, "fillFeeCcy")) orelse return error.InvalidField,
-            ),
-            .rebate = try optionalDecimalField(row, "rebate"),
-            .rebate_asset = if (try optionalStringField(row, "rebateCcy")) |asset|
-                try AssetCode.init(asset)
-            else
-                null,
+            .fee = fee,
+            .fee_asset = try AssetCode.init(fee_ccy),
             .realized_pnl = (try optionalDecimalField(row, "fillPnl")) orelse
                 (try optionalDecimalField(row, "pnl")),
             .liquidity = try optionalLiquidity(row),
@@ -1143,6 +1138,10 @@ fn allTrue(values: []const bool) bool {
 
 fn mapDecodeError(err: anyerror) RejectReason {
     return switch (err) {
+        error.MissingAmount => .missing_amount,
+        error.MissingAsset => .missing_asset,
+        error.InvalidDecimal => .malformed_amount,
+        error.DecimalOverflow => .amount_overflow,
         error.MalformedEnvelope => .malformed_envelope,
         error.VenueError => .venue_error,
         error.SourceMismatch => .source_mismatch,

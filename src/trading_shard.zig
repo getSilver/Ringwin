@@ -246,6 +246,9 @@ pub const TradingShard = struct {
     canonical_account: account_projection.AccountProjection = .{},
     last_funding_rate: ?canonical.FundingRatePublished = null,
     last_venue_configuration: ?canonical.VenueAccountConfigurationSnapshot = null,
+    economic_fault_count: u64 = 0,
+    economic_fault_reason: canonical.EconomicFaultReason = .invalid_economic_fact,
+    economic_fault_evidence: canonical.RawEvidenceRef = .{ .stream = 0, .sequence = 0, .digest = @splat(0) },
     canonical_ingress_count: u64 = 0,
     canonical_ingress_digest: [Sha256.digest_length]u8 = @splat(0),
     canonical_ingress_cursors: [max_canonical_ingress_streams]CanonicalIngressCursor = undefined,
@@ -286,6 +289,16 @@ pub const TradingShard = struct {
                     .open = false,
                 });
                 try candidate.trace.append(.canonical_order_reconciliation, event.envelope.identity.sequence);
+                self.* = candidate;
+            } else if (event.event == .fill and event.envelope.exchange_account == self.exchange_account_identity) {
+                candidate = self.*;
+                candidate.oms.begin();
+                try candidate.latchEconomicFault(event, switch (err) {
+                    error.Overflow, error.QuantityOutOfRange, error.PriceOutOfRange => .overflow,
+                    error.MissingFillFee => .missing_amount,
+                    else => .invalid_economic_fact,
+                });
+                try candidate.bindFreshCancellations(event.envelope.times.monotonic_ns orelse 0);
                 self.* = candidate;
             } else if (candidate.canonical_account.failure != account_failure_before) {
                 if (candidate.operational_state.initialized) try candidate.applyOperationalGate(.{
@@ -1199,6 +1212,11 @@ pub const TradingShard = struct {
         if (try self.rememberCanonicalIngress(record)) return null;
         const fact_identity = record.envelope.identity.sequence;
         switch (record.event) {
+            .economic_fault => |fault| {
+                if (record.envelope.scope != .account or record.envelope.exchange_account != self.exchange_account_identity)
+                    return error.CanonicalScopeMismatch;
+                try self.latchEconomicFault(record, fault.reason);
+            },
             .order_dispatch_result => |result| {
                 const command_id = std.math.cast(u64, result.command) orelse return error.IdentityOutOfRange;
                 var batch: oms_module.DispatchBatch = .{ .count = 1 };
@@ -1450,6 +1468,21 @@ pub const TradingShard = struct {
             },
         }
         return null;
+    }
+
+    fn latchEconomicFault(self: *TradingShard, record: canonical.EventRecord, reason: canonical.EconomicFaultReason) !void {
+        self.economic_fault_count = try std.math.add(u64, self.economic_fault_count, 1);
+        self.economic_fault_reason = reason;
+        self.economic_fault_evidence = record.envelope.raw_evidence;
+        self.oms.recovery_only = true;
+        if (self.operational_state.initialized) try self.applyOperationalGate(.{
+            .gate_identity = account_data_gate_identity,
+            .target_identity = self.operational_state.target_identity,
+            .kind = .latched,
+            .reason = .reconciliation_break,
+            .open = false,
+        });
+        try self.trace.append(.canonical_account_invalidated, record.envelope.identity.sequence);
     }
 
     fn rememberCanonicalIngress(self: *TradingShard, record: canonical.EventRecord) !bool {
@@ -2353,6 +2386,7 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
 }
 
 fn validateSnapshotState(shard: *const TradingShard) !void {
+    if (shard.economic_fault_count != 0 and (!shard.oms.recovery_only or shard.economic_fault_evidence.stream == 0 or shard.economic_fault_evidence.sequence == 0)) return error.InvalidSnapshotState;
     if (shard.trace.len > shard.trace.events.len or
         shard.instrument_registry.count > shard.instrument_registry.entries.len or
         shard.canonical_market.count > shard.canonical_market.entries.len or
@@ -2551,6 +2585,7 @@ pub fn applyStable(
     const account_failure_before = shard.canonical_account.failure;
     const market_failure_generation_before = shard.canonical_market.failure_generation;
     const oms_recovery_before = shard.oms.recovery_only;
+    const economic_fault_before = shard.economic_fault_count;
     var candidate_shard = shard.*;
     const result = candidate_shard.apply(input) catch |err| {
         // Account/market projection failure is itself a durable fact. Keep
@@ -2558,7 +2593,8 @@ pub fn applyStable(
         // the original observation error to the caller.
         if (candidate_shard.canonical_account.failure != account_failure_before or
             candidate_shard.canonical_market.failure_generation != market_failure_generation_before or
-            candidate_shard.oms.recovery_only != oms_recovery_before)
+            candidate_shard.oms.recovery_only != oms_recovery_before or
+            candidate_shard.economic_fault_count != economic_fault_before)
         {
             appendStableFactGroup(decision_journal, input, candidate_shard.trace.events[before..candidate_shard.trace.len]) catch |journal_err| {
                 decision_journal.restore(checkpoint);
@@ -2923,6 +2959,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         hasher.update(tombstone.client_order_id.slice());
         hasher.update(&tombstone.fact_digest);
     }
+    digestEconomicFault(&hasher, shard);
     digestBool(&hasher, shard.oms.recovery_only);
     digestEconomicProjection(&hasher, shard.economic_projection);
     digestInt(&hasher, u64, shard.fencing_token);
@@ -3084,6 +3121,7 @@ fn semanticStateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, u64, order.last_report_id);
         digestInt(&hasher, u64, order.last_reconciliation_id);
     }
+    digestEconomicFault(&hasher, shard);
     const economics_digest = shard.economic_projection.semanticDigest();
     hasher.update(&economics_digest);
     digestBool(&hasher, shard.canonical_account.valid);
@@ -3178,7 +3216,7 @@ fn replayReader(reader: *journal.Reader, initial: TradingShard) !ReplayResult {
             replay_error = err;
         };
         if (replay_error != null and candidate.canonical_account.failure == null and
-            candidate.canonical_market.latestFailure() == null)
+            candidate.canonical_market.latestFailure() == null and candidate.economic_fault_count == shard.economic_fault_count)
             return replay_error.?;
         const generated = candidate.trace.events[before..candidate.trace.len];
         if (generated.len == 0) return error.InputProducedNoFact;
@@ -3212,5 +3250,15 @@ pub fn assertExpectedDigest(
     if (!std.mem.eql(u8, &actual_hex, expected_hex)) {
         std.debug.print("state digest mismatch: expected {s}, actual {s}\n", .{ expected_hex, actual_hex });
         return error.UnexpectedStateDigest;
+    }
+}
+
+fn digestEconomicFault(hasher: *Sha256, shard: TradingShard) void {
+    digestInt(hasher, u64, shard.economic_fault_count);
+    if (shard.economic_fault_count != 0) {
+        digestInt(hasher, u8, @intFromEnum(shard.economic_fault_reason));
+        digestInt(hasher, u128, shard.economic_fault_evidence.stream);
+        digestInt(hasher, u64, shard.economic_fault_evidence.sequence);
+        hasher.update(&shard.economic_fault_evidence.digest);
     }
 }

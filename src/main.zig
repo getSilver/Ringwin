@@ -202,5 +202,6 @@ test {
     _ = credential_store;
     _ = windows_verification_runtime;
     _ = venue_fill_recovery_acceptance;
+    _ = @import("asset_precision_file_recovery_acceptance.zig");
     _ = raw_ingress;
 }

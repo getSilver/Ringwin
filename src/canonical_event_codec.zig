@@ -8,7 +8,7 @@ const std = @import("std");
 const canonical = @import("canonical_event.zig");
 const value_codec = @import("snapshot_codec.zig");
 
-pub const encoding_version: u16 = 2;
+pub const encoding_version: u16 = 3;
 pub const max_encoded_len: usize = 4096;
 
 const BootstrapHeader = struct {
@@ -117,6 +117,7 @@ fn decodeBootstrap(reader: *Reader) !canonical.AccountBootstrapSnapshot {
 
 fn encodeEvent(cursor: *Cursor, event: canonical.Payload) !void {
     switch (event) {
+        .economic_fault => |value| try putValue(cursor, value),
         .account_bootstrap_snapshot => |snapshot| try encodeBootstrap(cursor, snapshot),
         .order_dispatch_result => |value| try putValue(cursor, value),
         .execution_report => |value| try putValue(cursor, value),
@@ -161,6 +162,7 @@ pub fn decode(encoded: []const u8) !canonical.EventRecord {
     const envelope = try takeValue(&reader, canonical.EventEnvelope);
     const event_type = std.enums.fromInt(canonical.EventType, envelope.event_type) orelse return error.InvalidCanonicalEnvelope;
     const event: canonical.Payload = switch (event_type) {
+        .economic_fault => .{ .economic_fault = try takeValue(&reader, canonical.EconomicFault) },
         .account_bootstrap_snapshot => .{ .account_bootstrap_snapshot = try decodeBootstrap(&reader) },
         .order_dispatch_result => .{ .order_dispatch_result = try takeValue(&reader, canonical.OrderDispatchResult) },
         .execution_report => .{ .execution_report = try takeValue(&reader, canonical.ExecutionReport) },

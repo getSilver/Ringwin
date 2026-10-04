@@ -1,8 +1,8 @@
 # 02：停止真实金额取整并持久关闭新增风险
 
 Type: task
-Status: open
-Assignee:
+Status: in_progress
+Assignee: codex/asset-precision-accounting
 Blocked by: 无（可立即开始）
 Parent: [落实权威资产精度与精确经济账务](../map.md)
 Spec: [父 Spec](01-exact-asset-accounting-spec.md)
@@ -50,5 +50,15 @@ OKX 已确认的费用、返佣和账户金额无法精确表达时，不再制�
 
 ## Evidence
 
-尚未实施；验收项均待执行。本票按 2026-10-03 用户确认的拆分发布。
+2026-10-04：在独立工作区 `D:\github\Ringwin-asset-precision-accounting`、分支 `codex/asset-precision-accounting` 实施中；尚不关闭本票或解锁 03。
 
+- 原有六位 USDT、八位 BTC 的真实金额转换已移除取整兜底；新增账户范围 `economic_fault`，保留 RawEvidenceRef，并经既有 Owner、TradingShard、日志、快照及 replay 锁存新增风险关闭。canonical/schema 与 encoding 升至 3，journal/state/registry 升至 23/26/20。
+- ready 模式无对账请求的账户金额故障、微费用/返佣、未知资产、缺失/格式/溢出，以及核心经济拒绝已有公开路径回归。核心拒绝回滚候选经济状态后持久化安全状态，不写应用 Fill 标记。
+- Gateway 与 Adapter 的共享发送路径允许有完整安全依据的撤单，继续拒绝新增风险；实际 mock transport 的 attempt 计数证明撤单进入发送路径。输出不足保留未消费帧，重试后发布对应故障证据。
+- `zig test src/main.zig -ODebug --stack 67108864 --test-filter 'core rejected'`：2/2 通过。针对 ready 与持久化故障的原有 Debug/ReleaseSafe 检查通过；2026-10-04 正在扩展 REST 字段拒绝、Unknown 占用和真实文件重开检查，扩展后的结果另行记录。
+- OKX [官方字段合同](https://www.okx.com/docs-v5/en/)明确 WS `fillFee` 和 fills-history `fee` 是本次成交的有符号费用/返佣；订单累计 `fee/rebate` 不能附加为第二笔单次经济作用。WS 已保留累计字段为原始证据而不记入 Fill，REST 不再以其他字段猜补缺失费用或币种。
+- 新增同帧发布预检：在临时 Adapter 候选状态验证完整 ready 来源的规范转换，遇到经济拒绝只发布故障，不让同帧 execution_report 先释放 Unknown 占用。回归先发现 reservation 从 2 降为 1，修复后保持原始占用；微费用及 Decoder 拒绝经 WS/REST、Owner/replay/snapshot 验证，重新连接和 reduce-only 不能绕过发送关闭。
+- 扩展后的 `zig test src/main.zig -OReleaseSafe --stack 67108864 --test-filter 'OKX ready economic faults'`：2/2 通过。`zig test src/main.zig -ODebug --stack 67108864 --test-filter 'OKX raw private fills'`：2/2 通过，非零累计返佣字段未重复记账，单次正 `fillFee` 仍按返佣入账。格式与 diff 检查通过。
+- 真实 WindowsFileAdapter 已补 append/commit 故障与两次关闭重开检查（Debug 2/2）：append 故障时恢复已提交 Owner 前缀，公开 RawIngress 重放恢复经济故障，完整 Unknown 占用不释放；再次重开保持故障及 digest。commit 故障保留未完成尾部，Owner 在两次重开均拒绝恢复，RawIngress 仍可只读重放产生故障，两条分支均无 transport 调用。
+- 文件重开检查最终 Debug/ReleaseSafe 均 2/2 通过：`zig test src/main.zig -ODebug --stack 67108864 --test-filter 'Windows file reopen recovers or closes an uncommitted OKX economic fault'`，将 `-ODebug` 换为 `-OReleaseSafe` 结果相同。仅用公开 Store vtable 和既有 FileAdapter 故障注入，不增加产品测试接口。
+- 尚未证明：恢复健康 Owner 前缀到完成 RawIngress 重放之间的发送准入始终关闭。Owner.recover 本身不检查 RawIngress 待处理来源；不能以测试显式先重放的调用顺序代替产品准入栅栏。还需覆盖核心拒绝及其他实际金额路径的完整范围，再逐项核验本票。所有未完整证明的验收项保持未勾选；上述证据不代表完整资产精度实现、在线资格或部署授权。

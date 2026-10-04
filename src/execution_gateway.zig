@@ -386,6 +386,7 @@ pub const Gateway = struct {
             }
         }
         const oms_command = command_value orelse return error.NotSent;
+        if (shard.economic_fault_count != 0 and oms_command.operation != .cancel) return error.NotSent;
         const refs = oms_command.authority;
         if (!refs.complete() or refs.exchange_account != shard.exchange_account_identity or
             refs.virtual_portfolio != shard.portfolio_identity or refs.deadline_barrier > shard.trace.len or

@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const schema_version: u16 = 2;
+pub const schema_version: u16 = 3;
 
 pub const VenueIdentity = u64;
 pub const Product = enum(u8) { spot, isolated_linear_usdt };
@@ -468,7 +468,11 @@ pub const VenueAccountConfigurationSnapshot = struct {
     },
 };
 
+pub const EconomicFaultReason = enum(u8) { missing_amount, missing_asset, unknown_asset, malformed_amount, inexact_amount, overflow, invalid_economic_fact, decoder_rejected, persistence_failure };
+pub const EconomicFault = struct { reason: EconomicFaultReason };
+
 pub const Payload = union(enum) {
+    economic_fault: EconomicFault,
     order_dispatch_result: OrderDispatchResult,
     execution_report: ExecutionReport,
     fill: Fill,
@@ -488,6 +492,7 @@ pub const Payload = union(enum) {
 };
 
 pub const EventType = enum(u32) {
+    economic_fault = 22,
     order_dispatch_result = 1,
     execution_report = 3,
     fill = 4,
@@ -510,6 +515,7 @@ pub const TimeInForce = enum(u8) { good_til_canceled, immediate_or_cancel, fill_
 
 pub fn eventType(event: Payload) EventType {
     return switch (event) {
+        .economic_fault => .economic_fault,
         .order_dispatch_result => .order_dispatch_result,
         .execution_report => .execution_report,
         .fill => .fill,

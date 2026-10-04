@@ -8,9 +8,9 @@ const canonical = @import("canonical_event.zig");
 
 pub const contract_version: u16 = 1;
 pub const acceptance_schema_version: u16 = 13;
-pub const journal_schema_version: u16 = 22;
-pub const state_schema_version: u32 = 25;
-pub const schema_registry_identity: u64 = 19;
+pub const journal_schema_version: u16 = 23;
+pub const state_schema_version: u32 = 26;
+pub const schema_registry_identity: u64 = 20;
 pub const previous_journal_schema_version: u16 = journal_schema_version - 1;
 pub const previous_state_schema_version: u32 = state_schema_version - 1;
 pub const production_optimize = std.builtin.OptimizeMode.ReleaseSafe;
