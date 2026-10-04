@@ -75,3 +75,5 @@ OKX 已确认的费用、返佣和账户金额无法精确表达时，不再制�
 
 - 最终组合命令：`zig test src/main.zig -ODebug --stack 67108864 --test-filter 'OKX ready' --test-filter 'core rejected' --test-filter 'Windows file reopen' --test-filter 'Demo owner' --test-filter 'Demo policy' --test-filter 'response persistence failure'`，Debug/ReleaseSafe 各 9/9。Windows 实际 `--windows-chain-test` 在 Debug（构建时 `--stack 67108864`）与 ReleaseSafe 均 exit 0，包含跨进程恢复与恢复后格式错误账户金额：故障提交后 execution 角色预期非零退出，engine 保存 malformed_amount、OMS recovery_only 与不变经济摘要。Linux 实际入口/C shim ReleaseSafe 编译通过。
 - Windows 进程链 ReleaseSafe 曾复现 snapshot reflection 编码读取 canonical 事件未使用数组槽位而失败 SnapshotTooLarge；所有 IPC canonical 发送/接收已统一复用 canonical_event_codec。失败路径先 drain/提交规范故障再返回错误，REST 页辅助解析不拦截原文持久化。格式、diff、父 Spec 未修改检查通过；本票完成仅代表离线安全止损，03–14、完整精度实现及新源码在线资格仍未完成。
+
+- 后续 canonical 模块检查发现旧 happy-path 测试仍假定经济 Fill 拒绝不改变安全 digest。现将缺费用、冲突 Fill 的拒绝放入独立候选 shard，明确断言 OMS recovery_only、故障计数和不变经济摘要，保留主成功路径的幂等/重放断言。shared canonical adapter facts Debug 2/2 通过；未回退持久故障合同。

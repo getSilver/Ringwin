@@ -1337,7 +1337,13 @@ test "shared canonical adapter facts enter the TradingShard state seam" {
     };
     var missing_fee = canonical_fill;
     missing_fee.fee = null;
-    try std.testing.expectError(error.MissingFillFee, run.shard.apply(Fixture.record(22, .{ .fill = missing_fee })));
+    var rejected_shard = run.shard;
+    const before_rejection = rejected_shard.economicSummary();
+    try std.testing.expectError(error.MissingFillFee, rejected_shard.apply(Fixture.record(22, .{ .fill = missing_fee })));
+    try std.testing.expect(rejected_shard.oms.recovery_only);
+    try std.testing.expectEqual(@as(u64, 1), rejected_shard.economic_fault_count);
+    try std.testing.expectEqual(canonical.EconomicFaultReason.missing_amount, rejected_shard.economic_fault_reason);
+    try std.testing.expect(std.meta.eql(before_rejection, rejected_shard.economicSummary()));
     try std.testing.expectEqualSlices(u8, &accepted_digest, &run.shard.canonicalStateDigest());
     std.debug.print("core_input_rejection: l2=IncompleteL2Book fill_fee=MissingFillFee\n", .{});
     var overfill = run.shard;
@@ -1364,7 +1370,12 @@ test "shared canonical adapter facts enter the TradingShard state seam" {
     try std.testing.expectEqualSlices(u8, &fill_digest, &run.shard.canonicalStateDigest());
     var conflicting_fill = canonical_fill;
     conflicting_fill.venue_fill_time_utc_ns = 101;
-    try std.testing.expectError(error.ConflictingFillIdentity, run.shard.apply(Fixture.record(5, .{ .fill = conflicting_fill })));
+    var conflicting_shard = run.shard;
+    const before_conflict = conflicting_shard.economicSummary();
+    try std.testing.expectError(error.ConflictingFillIdentity, conflicting_shard.apply(Fixture.record(5, .{ .fill = conflicting_fill })));
+    try std.testing.expect(conflicting_shard.oms.recovery_only);
+    try std.testing.expectEqual(@as(u64, 1), conflicting_shard.economic_fault_count);
+    try std.testing.expect(std.meta.eql(before_conflict, conflicting_shard.economicSummary()));
     try std.testing.expectEqualSlices(u8, &fill_digest, &run.shard.canonicalStateDigest());
     const normalized_report = run.shard.oms.report_history[run.shard.oms.report_history_count - 1];
     try std.testing.expectEqual(command.order_id, normalized_report.order_id);
