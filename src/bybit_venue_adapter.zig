@@ -74,6 +74,7 @@ const Encoded = struct {
 };
 
 pub const BybitVenueAdapter = struct {
+    asset_definitions: @import("asset_registry.zig").Registry = .{},
     clock: Clock,
     profile: CapabilityProfile,
     auth: Authenticator,
@@ -106,6 +107,7 @@ pub const BybitVenueAdapter = struct {
     }
     pub fn attachPrivateReconciler(self: *BybitVenueAdapter, reconciler: *private.Reconciler) void {
         self.reconciler = reconciler;
+        reconciler.asset_definitions = self.asset_definitions;
     }
     pub fn beginPrivateSession(self: *BybitVenueAdapter) !void {
         const binding = self.binding orelse return error.NotStarted;
@@ -132,8 +134,11 @@ pub const BybitVenueAdapter = struct {
         if (self.state == .running) return error.AlreadyStarted;
         if (self.state == .stopped) return error.Stopped;
         if (config.environment != .demo or config.venue == 0 or config.exchange_account == 0 or config.adapter_session == 0 or config.adapter_session > std.math.maxInt(u64) or config.request_capacity == 0 or config.output_capacity < canonical.max_order_commands_per_batch or self.profile.session != @as(u64, @intCast(config.adapter_session))) return error.InvalidConfig;
+        self.asset_definitions = config.asset_definitions orelse .{};
+        self.asset_definitions.validate() catch return error.InvalidConfig;
         self.binding = .{ .venue = config.venue, .account = config.exchange_account, .session = config.adapter_session };
         if (self.reconciler) |value| value.beginSession(.{ .venue = config.venue, .account = config.exchange_account, .session = config.adapter_session });
+        if (self.reconciler) |reconciler| reconciler.asset_definitions = self.asset_definitions;
         self.state = .running;
     }
     fn send(ptr: *anyopaque, request: canonical.AdapterRequest) venue.SendError!venue.SendResult {
@@ -160,7 +165,7 @@ pub const BybitVenueAdapter = struct {
             else => return error.InvalidRequest,
         };
         var output: canonical.AdapterOutputBatch = .{};
-        if (self.private_failed) for (commands[0..count]) |command| {
+        if (self.private_failed or !self.asset_definitions.legacyConsumerCompatible()) for (commands[0..count]) |command| {
             if (command.operation != .cancel) return .backpressure;
         };
         if (count > self.profile.batch_max or !self.rateAvailable(self.clock.now())) {
@@ -508,7 +513,7 @@ test "Bybit sends canonical commands only after response raw commit" {
     var transport = TestTransport{};
     var adapter = testAdapter(&clock, &auth, &raw, &transport);
     const venue_adapter = adapter.adapter();
-    try venue_adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
+    try venue_adapter.start(.{ .venue = 1, .asset_definitions = try contract.activatedTestAssets(), .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
     try std.testing.expectEqual(venue.SendResult.accepted, try venue_adapter.trySend(.{ .order_command = try testCommand() }));
     const output = (try adapter.adapter().tryDrain()).?;
     try std.testing.expectEqual(canonical.DispatchState.submitted, output.slice()[0].event.order_dispatch_result.state);
@@ -524,7 +529,7 @@ test "Bybit parses response JSON instead of matching formatting" {
     var raw = TestRaw{};
     var transport = TestTransport{ .response = "{\"retCode\" : 0}" };
     var adapter = testAdapter(&clock, &auth, &raw, &transport);
-    try adapter.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
+    try adapter.adapter().start(.{ .venue = 1, .asset_definitions = try contract.activatedTestAssets(), .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
     _ = try adapter.adapter().trySend(.{ .order_command = try testCommand() });
     try std.testing.expectEqual(canonical.DispatchState.submitted, (try adapter.adapter().tryDrain()).?.slice()[0].event.order_dispatch_result.state);
 }
@@ -537,7 +542,7 @@ test "Bybit place admission does not block cancel" {
     var profile = testProfile();
     profile.testnet_admission = .{};
     var adapter = BybitVenueAdapter.init(clock.interface(), profile, auth.interface(), raw.sink(), transport.interface());
-    try adapter.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
+    try adapter.adapter().start(.{ .venue = 1, .asset_definitions = try contract.activatedTestAssets(), .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
     var cancel = try testCommand();
     cancel.operation = .cancel;
     cancel.venue_order = try canonical.VenueOrderRef.init(1, "42");
@@ -569,7 +574,7 @@ test "Bybit ConfirmedAbsent requires delay and inactive prior session" {
     var reconciler = private.Reconciler.init(raw.sink(), .{ .spot = .{ .identity = private.btc_usdt_spot, .rules_version = 1, .tick_size = .{ .coefficient = 1, .scale = 1 }, .lot_size = .{ .coefficient = 1, .scale = 4 } }, .linear = .{ .identity = private.btc_usdt_linear, .rules_version = 1, .tick_size = .{ .coefficient = 1, .scale = 1 }, .lot_size = .{ .coefficient = 1, .scale = 4 } } });
     var adapter = testAdapter(&clock, &auth, &raw, &transport);
     adapter.attachPrivateReconciler(&reconciler);
-    try adapter.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
+    try adapter.adapter().start(.{ .venue = 1, .asset_definitions = try contract.activatedTestAssets(), .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
     try adapter.beginPrivateReconciliation();
     _ = try adapter.adapter().trySend(.{ .order_command = try testCommand() });
     _ = try adapter.adapter().tryDrain();
@@ -592,13 +597,13 @@ test "Bybit Testnet sends require explicit no-withdraw admission and bounded not
     var profile = testProfile();
     profile.testnet_admission = .{};
     var adapter = BybitVenueAdapter.init(clock.interface(), profile, auth.interface(), raw.sink(), transport.interface());
-    try adapter.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
+    try adapter.adapter().start(.{ .venue = 1, .asset_definitions = try contract.activatedTestAssets(), .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
     try std.testing.expectEqual(venue.SendResult.accepted, try adapter.adapter().trySend(.{ .order_command = try testCommand() }));
     try std.testing.expectEqual(canonical.DispatchState.not_sent, (try adapter.adapter().tryDrain()).?.slice()[0].event.order_dispatch_result.state);
     profile = testProfile();
     profile.testnet_admission.max_order_notional_usdt_micros = 1;
     adapter = BybitVenueAdapter.init(clock.interface(), profile, auth.interface(), raw.sink(), transport.interface());
-    try adapter.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
+    try adapter.adapter().start(.{ .venue = 1, .asset_definitions = try contract.activatedTestAssets(), .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
     try std.testing.expectEqual(venue.SendResult.accepted, try adapter.adapter().trySend(.{ .order_command = try testCommand() }));
     try std.testing.expectEqual(canonical.CanonicalRejectReason.unsupported_value, (try adapter.adapter().tryDrain()).?.slice()[0].event.order_dispatch_result.reason.?);
 }
@@ -610,7 +615,7 @@ test "Bybit unknown dispatch remains closed until private reconciliation resolve
     var reconciler = private.Reconciler.init(raw.sink(), .{ .spot = .{ .identity = private.btc_usdt_spot, .rules_version = 1, .tick_size = .{ .coefficient = 1, .scale = 1 }, .lot_size = .{ .coefficient = 1, .scale = 4 } }, .linear = .{ .identity = private.btc_usdt_linear, .rules_version = 1, .tick_size = .{ .coefficient = 1, .scale = 1 }, .lot_size = .{ .coefficient = 1, .scale = 4 } } });
     var adapter = testAdapter(&clock, &auth, &raw, &transport);
     adapter.attachPrivateReconciler(&reconciler);
-    try adapter.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
+    try adapter.adapter().start(.{ .venue = 1, .asset_definitions = try contract.activatedTestAssets(), .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
     try adapter.beginPrivateReconciliation();
     try std.testing.expectEqual(venue.SendResult.accepted, try adapter.adapter().trySend(.{ .order_command = try testCommand() }));
     try std.testing.expectEqual(canonical.DispatchState.unknown, (try adapter.adapter().tryDrain()).?.slice()[0].event.order_dispatch_result.state);
@@ -625,7 +630,7 @@ test "Bybit adapter has the common VenueAdapter lifecycle" {
     var raw = TestRaw{};
     var transport = TestTransport{};
     var adapter = testAdapter(&clock, &auth, &raw, &transport);
-    try contract.exerciseWith(adapter.adapter(), .{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 }, .{ .order_command = try testCommand() });
+    try contract.exerciseWith(adapter.adapter(), .{ .venue = 1, .asset_definitions = try contract.activatedTestAssets(), .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 }, .{ .order_command = try testCommand() });
 }
 
 test "Bybit private partial fills cross the shared recovery contract" {
@@ -637,7 +642,7 @@ test "Bybit private partial fills cross the shared recovery contract" {
     var implementation = testAdapter(&clock, &auth, &raw, &transport);
     implementation.attachPrivateReconciler(&reconciler);
     const adapter = implementation.adapter();
-    try adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 8 });
+    try adapter.start(.{ .venue = 1, .asset_definitions = try contract.activatedTestAssets(), .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 8 });
     try implementation.beginPrivateReconciliation();
     try reconciler.registerOrder(7, try canonical.ClientOrderId.init("RWN-7"), false);
     const times = private.Times{ .receive_time_utc_ns = 1, .monotonic_time_ns = 2, .wall_time_utc_ns = 3 };
@@ -701,4 +706,47 @@ test "Bybit place amend cancel use official v5 paths" {
     var cancel = try testCommand();
     cancel.operation = .cancel;
     try std.testing.expectEqualStrings("/v5/order/cancel", (try adapter.encode(cancel)).path);
+}
+
+test "Bybit activated precision converts private fills without trading authority" {
+    var clock = TestClock{};
+    var auth = TestAuth{};
+    var raw = TestRaw{};
+    var transport = TestTransport{};
+    var reconciler = private.Reconciler.init(raw.sink(), .{ .spot = .{ .identity = private.btc_usdt_spot, .rules_version = 1, .tick_size = .{ .coefficient = 1, .scale = 1 }, .lot_size = .{ .coefficient = 1, .scale = 4 } }, .linear = .{ .identity = private.btc_usdt_linear, .rules_version = 1, .tick_size = .{ .coefficient = 1, .scale = 1 }, .lot_size = .{ .coefficient = 1, .scale = 4 } } });
+    var implementation = testAdapter(&clock, &auth, &raw, &transport);
+    implementation.attachPrivateReconciler(&reconciler);
+    const adapter = implementation.adapter();
+    try adapter.start(.{ .venue = 1, .asset_definitions = try contract.activatedTestAssetsWithScales(12, 9), .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 8 });
+    try implementation.beginPrivateReconciliation();
+    try reconciler.registerOrder(7, try canonical.ClientOrderId.init("RWN-7"), false);
+    const times = private.Times{ .receive_time_utc_ns = 1, .monotonic_time_ns = 2, .wall_time_utc_ns = 3 };
+    const partial_order = "{\"topic\":\"order\",\"data\":[{\"category\":\"spot\",\"symbol\":\"BTCUSDT\",\"orderId\":\"42\",\"orderLinkId\":\"RWN-7\",\"side\":\"Buy\",\"orderType\":\"Limit\",\"timeInForce\":\"GTC\",\"orderStatus\":\"PartiallyFilled\",\"qty\":\"0.0100\",\"cumExecQty\":\"0.0040\",\"price\":\"50000.0\",\"avgPrice\":\"50000.0\",\"updatedTime\":\"2\",\"reduceOnly\":false}]}";
+    const first_execution = "{\"topic\":\"execution\",\"data\":[{\"category\":\"spot\",\"symbol\":\"BTCUSDT\",\"orderId\":\"42\",\"orderLinkId\":\"RWN-7\",\"execId\":\"77\",\"side\":\"Buy\",\"execQty\":\"0.0040\",\"execPrice\":\"50000.0\",\"execFee\":\"0.004198632165\",\"feeCurrency\":\"USDT\",\"execPnl\":\"0\",\"execTime\":\"2\",\"isMaker\":true}]}";
+    const filled_order = "{\"topic\":\"order\",\"data\":[{\"category\":\"spot\",\"symbol\":\"BTCUSDT\",\"orderId\":\"42\",\"orderLinkId\":\"RWN-7\",\"side\":\"Buy\",\"orderType\":\"Limit\",\"timeInForce\":\"GTC\",\"orderStatus\":\"Filled\",\"qty\":\"0.0100\",\"cumExecQty\":\"0.0100\",\"price\":\"50000.0\",\"avgPrice\":\"50000.0\",\"updatedTime\":\"3\",\"reduceOnly\":false}]}";
+    const second_execution = "{\"topic\":\"execution\",\"data\":[{\"category\":\"spot\",\"symbol\":\"BTCUSDT\",\"orderId\":\"42\",\"orderLinkId\":\"RWN-7\",\"execId\":\"78\",\"side\":\"Buy\",\"execQty\":\"0.0060\",\"execPrice\":\"50000.0\",\"execFee\":\"0.004198632165\",\"feeCurrency\":\"USDT\",\"execPnl\":\"0\",\"execTime\":\"3\",\"isMaker\":true}]}";
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, partial_order);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, first_execution);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, filled_order);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, second_execution);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, second_execution);
+    var equivalent: [2048]u8 = undefined;
+    const count = std.mem.replace(u8, filled_order, "0.0100", "+000.0100000000000000000000000000000000000000000000000", &equivalent);
+    try std.testing.expectEqual(@as(usize, 2), count);
+    const len = filled_order.len + count * ("+000.0100000000000000000000000000000000000000000000000".len - "0.0100".len);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, equivalent[0..len]);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_wallet, .{ .final = true }, times, "{\"result\":{\"list\":[{\"coin\":[]}]}}");
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_positions, .{ .final = true }, times, "{\"result\":{\"list\":[]}}");
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_orders, .{ .final = true }, times, "{\"result\":{\"list\":[]}}");
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_executions, .{ .final = true }, times, "{\"result\":{\"list\":[]}}");
+    const output = (try adapter.tryDrain()).?;
+    var fills: usize = 0;
+    for (output.slice()) |record| if (record.event == .fill) {
+        fills += 1;
+        const fill = record.event.fill;
+        try std.testing.expectEqual(@as(i128, 4198632165), if (fill.rebate) |rebate| rebate.atoms else fill.fee.?.atoms);
+    };
+    try std.testing.expectEqual(@as(usize, 2), fills);
+    try std.testing.expectEqual(venue.SendResult.backpressure, try adapter.trySend(.{ .order_command = try testCommand() }));
+    try std.testing.expectEqual(@as(u64, 0), transport.calls);
 }

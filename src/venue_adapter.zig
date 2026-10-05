@@ -3,6 +3,8 @@ const canonical = @import("canonical_event.zig");
 pub const Environment = enum { simulation, demo };
 
 pub const VenueConfig = struct {
+    /// Copied only after Owner committed AssetDefinition activation. No implicit units.
+    asset_definitions: ?@import("asset_registry.zig").Registry = null,
     venue: canonical.VenueIdentity,
     environment: Environment,
     exchange_account: canonical.ExchangeAccountIdentity,

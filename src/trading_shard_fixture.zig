@@ -17,12 +17,12 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-pub const expected_happy_digest = "aa6b32710cae67298f3af0645ba8681e56a152281d654734d4e95843afc39f37";
+pub const expected_happy_digest = "588827435985e9bf135c686adf678a46c531056a67b706afa089b0a0f68ff610";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "572830ddd0ddd59b5b58f38634dd9e3b764833fe23cecf24ca1f3aa176fbd8e9",
-    "c6a4ce2542c1a1bd9e80608f0173563e1a729228e6353717b77ee140b2ef98c8",
-    "4bb6b1d309bcaa7ba32787251f37fd123f2c9fbe137c4c38678c56d07218d1ef",
+    "58be377513ed5bb86b70f1423befaa2ab16c60cad1e976d80dae261f077476cc",
+    "d50ff2b24b80392af4ddc104d5feaf643a4db92c9239de6f835b41f2b9173085",
+    "31cdf7fb4299b78e2a29677e9fbbccba760438c0943fd819268d5a9f6ce953dc",
     expected_happy_digest,
 };
 pub const order_limit_price: i64 = 50_100_000_000;
@@ -203,7 +203,8 @@ fn finish(run: *LiveRun) !LiveRun {
     return run.*;
 }
 
-pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_model: engine.ReservationModel) [18]engine.CanonicalEvent {
+pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_model: engine.ReservationModel) [20]engine.CanonicalEvent {
+    const assets = @import("asset_registry.zig").testDefinitions(6, 8);
     const denominator: i64 = switch (reservation_model) {
         .leveraged => contract_denominator,
         .cash => 100_000_000,
@@ -239,6 +240,8 @@ pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_mode
             .price_micros = 50_000_000,
         } } }),
         atGroup(3, .{ .identity = 1, .payload = .{ .account_configuration = .{ .exchange_account_identity = 2 } } }),
+        atGroup(3, .{ .identity = assets[0].asset, .payload = .{ .asset_definition_activated = assets[0] } }),
+        atGroup(3, .{ .identity = assets[1].asset, .payload = .{ .asset_definition_activated = assets[1] } }),
         atGroup(4, .{ .identity = 1, .payload = .{ .exchange_balance = .{ .cash_micros = initial_exchange_cash } } }),
         atGroup(5, .{ .identity = 1, .payload = .exchange_positions }),
         atGroup(6, .{ .identity = 1, .payload = .{ .opening_balance = .{ .cash_micros = initial_exchange_cash } } }),

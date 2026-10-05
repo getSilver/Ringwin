@@ -51,10 +51,11 @@ Status: open
 
 ## Frontier
 
-- [04：贯通 AssetDefinition 激活与精度范围准入](issues/04-activate-authoritative-asset-precision.md) — 02/03 离线切片已完成；下一实施前沿。
+- [05：贯通高精度结算资产费用与原币账务](issues/05-close-settlement-asset-precision.md) — 02–04 离线切片已完成；下一实施前沿。
 
 ## Decisions so far
 
+- 2026-10-05：04 完成权威 AssetDefinition 激活、共享 Adapter/Core/Simulated 配置及持久范围准入；Debug/ReleaseSafe 定向 12/12、实际 Windows 离线进程链及 Linux authoritative 编译通过，两轴最终审查无剩余发现。Frontier 推进到 05；高精度和真实 Venue 来源配置仍为 RecoveryOnly，旧金额/tick 消费者由后续票迁移。本地证据不构成在线或生产资格，父 Spec 原文与状态不变。
 - 2026-10-03：用户要求依据当前审查建议及已接受方案形成优化落实计划，并显式调用 to-spec。
 - 2026-10-03：用户确认测试接缝采用 `ingestPrivateWs/REST → VenueAdapter.tryDrain → TradingShard.apply`，并经既有 DurableStore、快照和重放验证；Decimal 仅补公共数值 interface 的边界检查。
 - 既有成交恢复模块已关闭，本模块复用其公开 seam、幂等与崩溃恢复证据，不以历史关闭状态证明费用精确。

@@ -386,7 +386,12 @@ pub const Gateway = struct {
             }
         }
         const oms_command = command_value orelse return error.NotSent;
-        if ((shard.economic_fault_count != 0 or shard.recovery_admission_pending) and oms_command.operation != .cancel) return error.NotSent;
+        const active_assets = shard.activatedAssets();
+        if (oms_command.operation != .cancel) for (active_assets.entries[0..active_assets.count]) |entry| {
+            if (entry.barrier > oms_command.risk_decision_identity) return error.NotSent;
+        };
+        if ((shard.economic_fault_count != 0 or shard.recovery_admission_pending or shard.oms.recovery_only or
+            shard.asset_configuration_failed or !shard.activatedAssets().legacyConsumerCompatible()) and oms_command.operation != .cancel) return error.NotSent;
         const refs = oms_command.authority;
         if (!refs.complete() or refs.exchange_account != shard.exchange_account_identity or
             refs.virtual_portfolio != shard.portfolio_identity or refs.deadline_barrier > shard.trace.len or

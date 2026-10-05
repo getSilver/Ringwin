@@ -79,6 +79,7 @@ const Bootstrap = struct {
 };
 
 pub const OkxVenueAdapter = struct {
+    asset_definitions: @import("asset_registry.zig").Registry = .{},
     allocator: std.mem.Allocator,
     chain: *live.Chain,
     clock: Clock,
@@ -270,6 +271,8 @@ pub const OkxVenueAdapter = struct {
             self.profile.gateway_session != @as(u64, @intCast(config.adapter_session)))
             return error.InvalidConfig;
         self.scheduler = order.Scheduler.init(self.profile) catch return error.InvalidConfig;
+        self.asset_definitions = config.asset_definitions orelse .{};
+        self.asset_definitions.validate() catch return error.InvalidConfig;
         self.binding = .{ .venue = config.venue, .account = config.exchange_account, .session = config.adapter_session };
         self.state = .running;
     }
@@ -279,7 +282,7 @@ pub const OkxVenueAdapter = struct {
         if (self.state == .idle) return error.NotStarted;
         if (self.state == .stopped) return .stopped;
         if (self.pending_output != null) return .backpressure;
-        if (self.private_failed) switch (request) {
+        if (self.private_failed or !self.asset_definitions.legacyConsumerCompatible()) switch (request) {
             .order_command => |command| if (command.operation != .cancel) return .backpressure,
             .order_batch => |commands| for (commands.slice()) |command| {
                 if (command.operation != .cancel) return .backpressure;
@@ -581,9 +584,9 @@ pub const OkxVenueAdapter = struct {
         const venue_order = try venueOrderRef(binding.venue, @intFromEnum(fill.venue_order_id));
         const venue_trade = try venueTradeRef(binding.venue, @intFromEnum(fill.venue_trade_id));
         const fee_asset = try assetIdentity(fill.fee_asset.slice());
-        const signed_fee = try assetAmount(fee_asset, fill.fee);
+        const signed_fee = try assetAmount(self.asset_definitions, fee_asset, fill.fee);
         const explicit_rebate = if (fill.rebate) |value|
-            try assetAmount(try assetIdentity((fill.rebate_asset orelse return error.MissingRebateAsset).slice()), value)
+            try assetAmount(self.asset_definitions, try assetIdentity((fill.rebate_asset orelse return error.MissingRebateAsset).slice()), value)
         else
             null;
         if (explicit_rebate != null and explicit_rebate.?.atoms <= 0) return error.InvalidFee;
@@ -607,7 +610,7 @@ pub const OkxVenueAdapter = struct {
             .price = try self.privatePrice(rules.identity, rules.rules, fill.price),
             .fee = normalized_fee,
             .rebate = explicit_rebate orelse if (signed_fee.atoms > 0) signed_fee else null,
-            .realized_pnl = if (fill.realized_pnl) |value| try assetAmount(usdt, value) else null,
+            .realized_pnl = if (fill.realized_pnl) |value| try assetAmount(self.asset_definitions, usdt, value) else null,
             .liquidity = switch (fill.liquidity orelse return error.MissingLiquidity) {
                 .maker => .maker,
                 .taker => .taker,
@@ -667,10 +670,10 @@ pub const OkxVenueAdapter = struct {
             .margin_count = 1,
         };
         for (balance.balances[0..balance.balance_count], 0..) |value, index|
-            snapshot.balances[index] = try balanceFor(value);
+            snapshot.balances[index] = try balanceFor(self.asset_definitions, value);
         for (positions.positions[0..positions.position_count], 0..) |value, index|
             snapshot.positions[index] = try self.positionFor(value);
-        snapshot.margins[0] = try marginFor(margin);
+        snapshot.margins[0] = try marginFor(self.asset_definitions, margin);
         if (self.bootstrap_released) return;
         self.active_bootstrap = snapshot.identity;
         self.bootstrap_released = true;
@@ -682,7 +685,7 @@ pub const OkxVenueAdapter = struct {
         const binding = self.binding orelse return error.InvalidBinding;
         for (snapshot.balances[0..snapshot.balance_count]) |value| {
             self.account_source_sequence = try std.math.add(u64, self.account_source_sequence, 1);
-            const balance = try balanceFor(value);
+            const balance = try balanceFor(self.asset_definitions, value);
             try self.appendPrivate(output, envelope, .asset, null, balance.asset, digestIdentity(envelope.source_fact_identity), .{ .account_observed = .{
                 .identity = digestIdentity(envelope.source_fact_identity) + self.account_source_sequence,
                 .exchange_account = binding.account,
@@ -715,7 +718,7 @@ pub const OkxVenueAdapter = struct {
         const bootstrap = self.active_bootstrap orelse return error.MissingBootstrap;
         const binding = self.binding orelse return error.InvalidBinding;
         self.account_source_sequence = try std.math.add(u64, self.account_source_sequence, 1);
-        const margin = try marginFor(snapshot);
+        const margin = try marginFor(self.asset_definitions, snapshot);
         try self.appendPrivate(output, envelope, .account, null, null, digestIdentity(envelope.source_fact_identity), .{ .account_observed = .{
             .identity = digestIdentity(envelope.source_fact_identity) + self.account_source_sequence,
             .exchange_account = binding.account,
@@ -738,9 +741,9 @@ pub const OkxVenueAdapter = struct {
             .average_price = if (value.average_price) |price| try self.privatePrice(mapped.identity, mapped.rules, price) else null,
             .mark_price = if (value.mark_price) |price| try self.privatePrice(mapped.identity, mapped.rules, price) else null,
             .liquidation_price = if (value.liquidation_price) |price| try self.privatePrice(mapped.identity, mapped.rules, price) else null,
-            .margin = if (value.margin) |amount| try assetAmount(usdt, amount) else null,
+            .margin = if (value.margin) |amount| try assetAmount(self.asset_definitions, usdt, amount) else null,
             .leverage = if (value.leverage) |leverage| decimal(leverage) else null,
-            .unrealized_pnl = if (value.unrealized_pnl) |pnl| try assetAmount(usdt, pnl) else null,
+            .unrealized_pnl = if (value.unrealized_pnl) |pnl| try assetAmount(self.asset_definitions, usdt, pnl) else null,
         };
     }
 
@@ -783,7 +786,7 @@ pub const OkxVenueAdapter = struct {
     }
 
     fn dispatchBatch(self: *OkxVenueAdapter, batch: order.TransportBatch) void {
-        if (self.private_failed) for (batch.slice()) |legacy| {
+        if (self.private_failed or !self.asset_definitions.legacyConsumerCompatible()) for (batch.slice()) |legacy| {
             if (legacy.operation() != .cancel) {
                 for (batch.slice()) |item| if (self.takePending(item.command_id)) |pending| self.appendResult(pending.command, .not_sent, .venue_unavailable, null);
                 return;
@@ -1104,54 +1107,35 @@ fn assetIdentity(code: []const u8) !canonical.AssetIdentity {
     return error.UnsupportedAsset;
 }
 
-fn assetScale(asset: canonical.AssetIdentity) !u8 {
-    return switch (asset) {
-        btc => 8,
-        usdt => 6,
-        else => error.UnsupportedAsset,
-    };
+fn assetAmount(assets: @import("asset_registry.zig").Registry, asset: canonical.AssetIdentity, value: private.Decimal) !canonical.AssetAmount {
+    return assets.amount(asset, decimal(value));
 }
 
-fn assetAmount(asset: canonical.AssetIdentity, value: private.Decimal) !canonical.AssetAmount {
-    return accountAssetAmount(asset, value);
-}
-
-test "OKX USDT sell fee rejects sub-micro cost" {
-    try std.testing.expectError(error.InexactDecimal, assetAmount(usdt, try private.Decimal.parse("-0.004198632165")));
-}
-
-fn accountAssetAmount(asset: canonical.AssetIdentity, value: private.Decimal) !canonical.AssetAmount {
-    const scale = try assetScale(asset);
-    const parsed = decimal(value);
-    const atoms = try parsed.exactAtoms(scale);
-    return .{ .asset = asset, .atoms = atoms };
-}
-
-fn balanceFor(value: private.Balance) !canonical.AccountBalance {
+fn balanceFor(assets: @import("asset_registry.zig").Registry, value: private.Balance) !canonical.AccountBalance {
     const asset = try assetIdentity(value.asset.slice());
-    const total = try accountAssetAmount(asset, value.equity orelse return error.MissingBalanceTotal);
-    const available = try accountAssetAmount(asset, value.available_balance orelse return error.MissingBalanceAvailable);
-    const held = try accountAssetAmount(asset, value.frozen_balance orelse return error.MissingBalanceHeld);
+    const total = try assetAmount(assets, asset, value.equity orelse return error.MissingBalanceTotal);
+    const available = try assetAmount(assets, asset, value.available_balance orelse return error.MissingBalanceAvailable);
+    const held = try assetAmount(assets, asset, value.frozen_balance orelse return error.MissingBalanceHeld);
     return .{
         .asset = asset,
         .total = total,
         .available = available,
         .held = held,
-        .liability = if (value.liability) |amount| try accountAssetAmount(asset, amount) else null,
-        .cash_balance = if (value.cash_balance) |amount| try accountAssetAmount(asset, amount) else null,
-        .isolated_liability = if (value.isolated_liability) |amount| try accountAssetAmount(asset, amount) else null,
-        .cross_liability = if (value.cross_liability) |amount| try accountAssetAmount(asset, amount) else null,
+        .liability = if (value.liability) |amount| try assetAmount(assets, asset, amount) else null,
+        .cash_balance = if (value.cash_balance) |amount| try assetAmount(assets, asset, amount) else null,
+        .isolated_liability = if (value.isolated_liability) |amount| try assetAmount(assets, asset, amount) else null,
+        .cross_liability = if (value.cross_liability) |amount| try assetAmount(assets, asset, amount) else null,
     };
 }
 
-fn marginFor(value: private.ExchangeMarginSnapshot) !canonical.AccountMargin {
-    const amount = try accountAssetAmount(usdt, value.total_equity_usd orelse return error.MissingMarginEquity);
+fn marginFor(assets: @import("asset_registry.zig").Registry, value: private.ExchangeMarginSnapshot) !canonical.AccountMargin {
+    const amount = try assetAmount(assets, usdt, value.total_equity_usd orelse return error.MissingMarginEquity);
     return .{
         .amount = amount,
-        .adjusted_equity = if (value.adjusted_equity_usd) |amount_value| try accountAssetAmount(usdt, amount_value) else null,
-        .initial_margin = if (value.initial_margin_usd) |amount_value| try accountAssetAmount(usdt, amount_value) else null,
-        .maintenance_margin = if (value.maintenance_margin_usd) |amount_value| try accountAssetAmount(usdt, amount_value) else null,
-        .isolated_equity = if (value.isolated_equity_usd) |amount_value| try accountAssetAmount(usdt, amount_value) else null,
+        .adjusted_equity = if (value.adjusted_equity_usd) |amount_value| try assetAmount(assets, usdt, amount_value) else null,
+        .initial_margin = if (value.initial_margin_usd) |amount_value| try assetAmount(assets, usdt, amount_value) else null,
+        .maintenance_margin = if (value.maintenance_margin_usd) |amount_value| try assetAmount(assets, usdt, amount_value) else null,
+        .isolated_equity = if (value.isolated_equity_usd) |amount_value| try assetAmount(assets, usdt, amount_value) else null,
         .margin_ratio = if (value.margin_ratio) |ratio| decimal(ratio) else null,
     };
 }
@@ -1290,7 +1274,7 @@ fn testCommand(identity: u128) !canonical.OrderCommand {
 }
 
 fn startTest(adapter: venue.VenueAdapter) !void {
-    try adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 6, .request_capacity = 4, .output_capacity = 4 });
+    try adapter.start(.{ .venue = 1, .asset_definitions = try contract.activatedTestAssets(), .environment = .demo, .exchange_account = 2, .adapter_session = 6, .request_capacity = 4, .output_capacity = 4 });
 }
 
 fn privateEnvelope(sequence: u64, identity: u8) private.EventEnvelope {
@@ -1565,11 +1549,6 @@ test "OKX private facts normalize fee signs into canonical execution fill and ac
     try adapter.stop(.{ .monotonic_ns = 1 });
 }
 
-test "OKX account amounts reject sub-micro values" {
-    try std.testing.expectError(error.InexactDecimal, accountAssetAmount(usdt, try private.Decimal.parse("25.123456789")));
-    try std.testing.expectError(error.InexactDecimal, accountAssetAmount(usdt, try private.Decimal.parse("-25.123456789")));
-}
-
 test "OKX adapter preserves fail-closed dispatch rejection causes" {
     try std.testing.expectEqual(canonical.CanonicalRejectReason.capability_unsupported, dispatchErrorReason(error.SideEffectsDisabled).?);
     try std.testing.expectEqual(canonical.CanonicalRejectReason.venue_unavailable, dispatchErrorReason(error.DemoNotQualified).?);
@@ -1773,7 +1752,7 @@ test "OKX adapter reuses the shared VenueAdapter contract" {
     var chain: live.Chain = .{ .mode = .demo_live, .qualification = qualification(), .raw_sink = raw.interface(), .transport = transport.interface() };
     var clock = TestClock{};
     var implementation = OkxVenueAdapter.init(std.testing.allocator, &chain, clock.interface(), testProfile(), testRules());
-    try contract.exerciseWith(implementation.adapter(), .{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 6, .request_capacity = 1, .output_capacity = 1 }, .{ .order_command = try testCommand(400) });
+    try contract.exerciseWith(implementation.adapter(), .{ .venue = 1, .asset_definitions = try contract.activatedTestAssets(), .environment = .demo, .exchange_account = 2, .adapter_session = 6, .request_capacity = 1, .output_capacity = 1 }, .{ .order_command = try testCommand(400) });
 }
 
 test "amend and cancel use the canonical VenueOrderRef without leaking an OKX order identity" {
@@ -1806,4 +1785,64 @@ fn economicReason(err: anyerror) canonical.EconomicFaultReason {
         error.MissingBalanceTotal, error.MissingBalanceAvailable, error.MissingBalanceHeld, error.MissingMarginEquity => .missing_amount,
         else => .invalid_economic_fact,
     };
+}
+
+test "OKX activated precision converts private fills without trading authority" {
+    var raw = TestRawSink{};
+    var transport = TestTransport{};
+    var chain: live.Chain = .{ .mode = .demo_live, .qualification = qualification(), .raw_sink = raw.interface(), .transport = transport.interface() };
+    var clock = TestClock{};
+    var reconciler: private.Reconciler = .{};
+    var implementation = OkxVenueAdapter.init(std.testing.allocator, &chain, clock.interface(), testProfile(), testRules());
+    implementation.attachPrivateReconciler(&reconciler);
+    const adapter = implementation.adapter();
+    try adapter.start(.{ .asset_definitions = try contract.activatedTestAssetsWithScales(12, 9), .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 6, .request_capacity = 4, .output_capacity = 4 });
+    try implementation.beginPrivateSession();
+    const subscriptions = [_][]const u8{
+        \\{"event":"subscribe","arg":{"channel":"orders","instType":"ANY"}}
+        ,
+        \\{"event":"subscribe","arg":{"channel":"account"}}
+        ,
+        \\{"event":"subscribe","arg":{"channel":"positions","instType":"ANY"}}
+        ,
+        \\{"arg":{"channel":"account"},"eventType":"snapshot","curPage":1,"lastPage":true,"data":[{"uTime":"1800000000000","totalEq":"25","adjEq":"25","imr":"0","mmr":"0","mgnRatio":"","isoEq":"25","details":[{"ccy":"USDT","cashBal":"25","availBal":"25","eq":"25","frozenBal":"0","liab":"0","isoLiab":"0","crossLiab":"0"}]}]}
+        ,
+        \\{"arg":{"channel":"positions"},"eventType":"snapshot","curPage":1,"lastPage":true,"data":[]}
+    };
+    for (subscriptions) |frame| try std.testing.expect((try implementation.ingestPrivateWs(private_test_times, frame)).rejection == null);
+    try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .account_reconciliation = .{ .identity = 99, .exchange_account = 2, .expected_session = 6 } }));
+    _ = (try adapter.tryDrain()).?;
+    try ingestOkxBootstrapRound(&implementation);
+    _ = try adapter.tryDrain();
+    try ingestOkxBootstrapRound(&implementation);
+    _ = (try adapter.tryDrain()).?;
+    try std.testing.expect(reconciler.readiness().reconciliation_ready);
+
+    var command = try testCommand(16);
+    command.client_order_id = try canonical.ClientOrderId.init("RWN16");
+    try implementation.rememberOrder(command);
+    try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .order_reconciliation = .{ .identity = 123, .exchange_account = 2, .order = 16 } }));
+    _ = (try adapter.tryDrain()).?; // ReconciliationStarted; the private report arrives afterward.
+    const venue_client_order_id = command.client_order_id;
+    var order_frame: [768]u8 = undefined;
+    const filled_order = try std.fmt.bufPrint(&order_frame,
+        \\{{"arg":{{"channel":"orders"}},"data":[{{"instId":"BTC-USDT","ordId":"1001","clOrdId":"{s}","side":"buy","ordType":"limit","state":"filled","tdMode":"cash","posSide":"net","reduceOnly":"false","sz":"0.0001","px":"50000","accFillSz":"0.0001","avgPx":"50000","uTime":"1800000000100","tradeId":"2001","fillSz":"0.0001","fillPx":"50000","fillFee":"-0.004198632165","fillFeeCcy":"USDT","fillTime":"1800000000100","execType":"T"}}]}}
+    , .{venue_client_order_id.slice()});
+    const order_batch = try implementation.ingestPrivateWs(private_test_times, filled_order);
+    try std.testing.expectEqual(@as(u8, 0), order_batch.event_count);
+    const account_batch = try implementation.ingestPrivateWs(private_test_times,
+        \\{"arg":{"channel":"account"},"eventType":"snapshot","curPage":1,"lastPage":true,"data":[{"uTime":"1800000000101","totalEq":"20","adjEq":"20","imr":"0","mmr":"0","mgnRatio":"","isoEq":"20","details":[{"ccy":"USDT","cashBal":"20","availBal":"20","eq":"20","frozenBal":"0","liab":"0","isoLiab":"0","crossLiab":"0"}]}]}
+    );
+    try std.testing.expectEqual(@as(u8, 0), account_batch.event_count);
+    try std.testing.expectError(error.OutputPending, adapter.stop(.{ .monotonic_ns = 1 }));
+    const output = (try adapter.tryDrain()).?;
+    var fills: usize = 0;
+    for (output.slice()) |record| if (record.event == .fill) {
+        fills += 1;
+        try std.testing.expectEqual(@as(i128, 4_198_632_165), record.event.fill.fee.?.atoms);
+        try std.testing.expectEqual(@as(i128, 1), record.event.fill.quantity.lots);
+    };
+    try std.testing.expectEqual(@as(usize, 1), fills);
+    try std.testing.expectEqual(venue.SendResult.backpressure, try adapter.trySend(.{ .order_command = command }));
+    try std.testing.expectEqual(@as(u64, 0), transport.calls);
 }

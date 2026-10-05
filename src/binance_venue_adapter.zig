@@ -85,6 +85,7 @@ const Encoded = struct {
 };
 
 pub const BinanceVenueAdapter = struct {
+    asset_definitions: @import("asset_registry.zig").Registry = .{},
     clock: Clock,
     profile: CapabilityProfile,
     auth: Authenticator,
@@ -119,6 +120,7 @@ pub const BinanceVenueAdapter = struct {
     /// CanonicalEvent records through the shared adapter drain seam.
     pub fn attachPrivateReconciler(self: *BinanceVenueAdapter, reconciler: *private.Reconciler) void {
         self.private_reconciler = reconciler;
+        reconciler.asset_definitions = self.asset_definitions;
     }
     pub fn beginPrivateReconciliation(self: *BinanceVenueAdapter) !void {
         if (self.state != .running) return error.NotStarted;
@@ -146,9 +148,12 @@ pub const BinanceVenueAdapter = struct {
         if (self.state == .running) return error.AlreadyStarted;
         if (self.state == .stopped) return error.Stopped;
         if (config.environment != .demo or config.venue == 0 or config.exchange_account == 0 or config.adapter_session == 0 or config.adapter_session > std.math.maxInt(u64) or config.request_capacity == 0 or config.output_capacity < canonical.max_order_commands_per_batch or self.profile.session != @as(u64, @intCast(config.adapter_session))) return error.InvalidConfig;
+        self.asset_definitions = config.asset_definitions orelse .{};
+        self.asset_definitions.validate() catch return error.InvalidConfig;
         self.binding = .{ .venue = config.venue, .account = config.exchange_account, .session = config.adapter_session };
         if (self.private_reconciler) |reconciler|
             reconciler.beginSession(.{ .venue = config.venue, .account = config.exchange_account, .session = config.adapter_session });
+        if (self.private_reconciler) |reconciler| reconciler.asset_definitions = self.asset_definitions;
         self.state = .running;
     }
     fn send(ptr: *anyopaque, request: canonical.AdapterRequest) venue.SendError!venue.SendResult {
@@ -175,7 +180,7 @@ pub const BinanceVenueAdapter = struct {
             else => return error.InvalidRequest,
         };
         var output: canonical.AdapterOutputBatch = .{};
-        if (self.private_failed) for (commands[0..count]) |command| {
+        if (self.private_failed or !self.asset_definitions.legacyConsumerCompatible()) for (commands[0..count]) |command| {
             if (command.operation != .cancel) return .backpressure;
         };
         if (count > self.profile.batch_max or count > canonical.max_order_commands_per_batch) {
@@ -588,7 +593,7 @@ fn privateRules(profile: CapabilityProfile) private.Rules {
     };
 }
 fn startTest(adapter: venue.VenueAdapter) !void {
-    try adapter.start(.{ .venue = 21, .environment = .demo, .exchange_account = 2, .adapter_session = 6, .request_capacity = 4, .output_capacity = 4 });
+    try adapter.start(.{ .venue = 21, .asset_definitions = try contract.activatedTestAssets(), .environment = .demo, .exchange_account = 2, .adapter_session = 6, .request_capacity = 4, .output_capacity = 4 });
 }
 
 test "Binance canonical commands authenticate, raw-commit, and dispatch independently" {
@@ -810,7 +815,7 @@ test "Binance implementation exercises the shared VenueAdapter contract" {
     var sink = TestRaw{};
     var transport = TestTransport{};
     var implementation = BinanceVenueAdapter.init(clock.interface(), testProfile(), auth.interface(), sink.interface(), transport.interface());
-    try contract.exerciseWith(implementation.adapter(), .{ .venue = 21, .environment = .demo, .exchange_account = 2, .adapter_session = 6, .request_capacity = 4, .output_capacity = 4 }, .{ .order_command = try testCommand(1) });
+    try contract.exerciseWith(implementation.adapter(), .{ .venue = 21, .asset_definitions = try contract.activatedTestAssets(), .environment = .demo, .exchange_account = 2, .adapter_session = 6, .request_capacity = 4, .output_capacity = 4 }, .{ .order_command = try testCommand(1) });
 }
 
 test "Binance private bootstrap drains through the shared VenueAdapter seam" {
@@ -886,5 +891,103 @@ test "Binance private partial fills cross the shared recovery contract" {
     try std.testing.expectEqual(venue.SendResult.backpressure, try adapter.trySend(.{ .order_command = try testCommand(2) }));
     try implementation.beginPrivateSession();
     try std.testing.expectEqual(venue.SendResult.backpressure, try adapter.trySend(.{ .order_command = try testCommand(2) }));
+    try std.testing.expectEqual(@as(u64, 0), transport.calls);
+}
+
+test "Binance activated precision converts private fills without trading authority" {
+    var clock = TestClock{};
+    var auth = TestAuth{};
+    var sink = TestRaw{};
+    var transport = TestTransport{};
+    const profile = testProfile();
+    var reconciler = private.Reconciler.init(sink.interface(), privateRules(profile));
+    var implementation = BinanceVenueAdapter.init(clock.interface(), profile, auth.interface(), sink.interface(), transport.interface());
+    implementation.attachPrivateReconciler(&reconciler);
+    const adapter = implementation.adapter();
+    try adapter.start(.{ .asset_definitions = try contract.activatedTestAssetsWithScales(12, 9), .venue = 21, .environment = .demo, .exchange_account = 2, .adapter_session = 6, .request_capacity = 4, .output_capacity = 4 });
+    try implementation.beginPrivateReconciliation();
+    try reconciler.registerOrder(1, try canonical.ClientOrderId.init("RWN-1"), false);
+    const times = raw.Times{ .receive_time_utc_ns = 1, .monotonic_time_ns = 2, .wall_time_utc_ns = 3 };
+    const first = "{\"e\":\"executionReport\",\"E\":\"1\",\"s\":\"BTCUSDT\",\"c\":\"RWN-1\",\"S\":\"BUY\",\"o\":\"LIMIT\",\"f\":\"GTC\",\"q\":\"0.0100\",\"p\":\"50000.0\",\"X\":\"PARTIALLY_FILLED\",\"i\":\"42\",\"l\":\"0.0040\",\"z\":\"0.0040\",\"L\":\"50000.0\",\"n\":\"-0.000000001\",\"N\":\"BTC\",\"T\":\"2\",\"t\":\"77\",\"m\":true}";
+    const second = "{\"e\":\"executionReport\",\"E\":\"2\",\"s\":\"BTCUSDT\",\"c\":\"RWN-1\",\"S\":\"BUY\",\"o\":\"LIMIT\",\"f\":\"GTC\",\"q\":\"0.0100\",\"p\":\"50000.0\",\"X\":\"FILLED\",\"i\":\"42\",\"l\":\"0.0060\",\"z\":\"0.0100\",\"L\":\"50000.0\",\"n\":\"-0.000000001\",\"N\":\"BTC\",\"T\":\"3\",\"t\":\"78\",\"m\":true}";
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, first);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, second);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, second);
+    var equivalent: [2048]u8 = undefined;
+    const count = std.mem.replace(u8, second, "0.0100", "+000.0100000000000000000000000000000000000000000000000", &equivalent);
+    try std.testing.expectEqual(@as(usize, 2), count);
+    const len = second.len + count * ("+000.0100000000000000000000000000000000000000000000000".len - "0.0100".len);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .ws, null, times, equivalent[0..len]);
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_spot_account, .{ .final = true }, times, "{\"balances\":[]}");
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_orders, .{ .final = true }, times, "[]");
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_fills, .{ .final = true }, times, "[]");
+    const output = (try adapter.tryDrain()).?;
+    var fills: usize = 0;
+    for (output.slice()) |record| if (record.event == .fill) {
+        fills += 1;
+        const fill = record.event.fill;
+        try std.testing.expectEqual(@as(i128, 1), if (fill.rebate) |rebate| rebate.atoms else fill.fee.?.atoms);
+    };
+    try std.testing.expectEqual(@as(usize, 2), fills);
+    try std.testing.expectEqual(venue.SendResult.backpressure, try adapter.trySend(.{ .order_command = try testCommand(2) }));
+    try std.testing.expectEqual(@as(u64, 0), transport.calls);
+}
+
+test "Binance missing activation retains raw fault and stops risk across reconnect" {
+    var clock = TestClock{};
+    var auth = TestAuth{};
+    var sink = TestRaw{};
+    var transport = TestTransport{};
+    const profile = testProfile();
+    var reconciler = private.Reconciler.init(sink.interface(), privateRules(profile));
+    var implementation = BinanceVenueAdapter.init(clock.interface(), profile, auth.interface(), sink.interface(), transport.interface());
+    implementation.attachPrivateReconciler(&reconciler);
+    const adapter = implementation.adapter();
+    try adapter.start(.{ .venue = 21, .environment = .demo, .exchange_account = 2, .adapter_session = 6, .request_capacity = 4, .output_capacity = 4 });
+    try implementation.beginPrivateReconciliation();
+    try reconciler.registerOrder(1, try canonical.ClientOrderId.init("RWN-1"), false);
+    const times = raw.Times{ .receive_time_utc_ns = 1, .monotonic_time_ns = 2, .wall_time_utc_ns = 3 };
+    const first = "{\"e\":\"executionReport\",\"E\":\"1\",\"s\":\"BTCUSDT\",\"c\":\"RWN-1\",\"S\":\"BUY\",\"o\":\"LIMIT\",\"f\":\"GTC\",\"q\":\"0.0100\",\"p\":\"50000.0\",\"X\":\"PARTIALLY_FILLED\",\"i\":\"42\",\"l\":\"0.0040\",\"z\":\"0.0040\",\"L\":\"50000.0\",\"n\":\"-0.000001\",\"N\":\"BTC\",\"T\":\"2\",\"t\":\"77\",\"m\":true}";
+    try std.testing.expectError(error.UnknownAssetDefinition, implementation.ingestPrivate(std.testing.allocator, .ws, null, times, first));
+    const fault = (try adapter.tryDrain()) orelse return error.MissingEconomicFault;
+    try std.testing.expectEqual(canonical.EconomicFaultReason.unknown_asset, fault.events[0].event.economic_fault.reason);
+    try contract.exerciseEconomicFaultRecovery(fault);
+    try std.testing.expectEqual(venue.SendResult.backpressure, try adapter.trySend(.{ .order_command = try testCommand(2) }));
+    try implementation.beginPrivateSession();
+    try std.testing.expectEqual(venue.SendResult.backpressure, try adapter.trySend(.{ .order_command = try testCommand(2) }));
+    try std.testing.expectEqual(@as(u64, 1), sink.calls);
+    try std.testing.expectEqual(@as(u64, 0), transport.calls);
+}
+
+test "Binance activated amount range retains raw fault and stops risk" {
+    var clock = TestClock{};
+    var auth = TestAuth{};
+    var sink = TestRaw{};
+    var transport = TestTransport{};
+    const profile = testProfile();
+    var reconciler = private.Reconciler.init(sink.interface(), privateRules(profile));
+    var implementation = BinanceVenueAdapter.init(clock.interface(), profile, auth.interface(), sink.interface(), transport.interface());
+    implementation.attachPrivateReconciler(&reconciler);
+    const adapter = implementation.adapter();
+    var configured: @import("trading_shard.zig").TradingShard = .{};
+    var definitions = @import("asset_registry.zig").testDefinitions(6, 8);
+    definitions[1].max_single_atoms = 1;
+    definitions[1].max_balance_atoms = 1;
+    definitions[1].max_cumulative_atoms = 1;
+    for (definitions) |definition|
+        _ = try configured.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
+    try adapter.start(.{ .asset_definitions = configured.activatedAssets(), .venue = 21, .environment = .demo, .exchange_account = 2, .adapter_session = 6, .request_capacity = 4, .output_capacity = 4 });
+    try implementation.beginPrivateReconciliation();
+    try reconciler.registerOrder(1, try canonical.ClientOrderId.init("RWN-1"), false);
+    const times = raw.Times{ .receive_time_utc_ns = 1, .monotonic_time_ns = 2, .wall_time_utc_ns = 3 };
+    const first = "{\"e\":\"executionReport\",\"E\":\"1\",\"s\":\"BTCUSDT\",\"c\":\"RWN-1\",\"S\":\"BUY\",\"o\":\"LIMIT\",\"f\":\"GTC\",\"q\":\"0.0100\",\"p\":\"50000.0\",\"X\":\"PARTIALLY_FILLED\",\"i\":\"42\",\"l\":\"0.0040\",\"z\":\"0.0040\",\"L\":\"50000.0\",\"n\":\"-0.000001\",\"N\":\"BTC\",\"T\":\"2\",\"t\":\"77\",\"m\":true}";
+    try std.testing.expectError(error.AssetAmountOutOfRange, implementation.ingestPrivate(std.testing.allocator, .ws, null, times, first));
+    const fault = (try adapter.tryDrain()) orelse return error.MissingEconomicFault;
+    try std.testing.expectEqual(canonical.EconomicFaultReason.overflow, fault.events[0].event.economic_fault.reason);
+    try contract.exerciseEconomicFaultRecovery(fault);
+    try std.testing.expectEqual(venue.SendResult.backpressure, try adapter.trySend(.{ .order_command = try testCommand(2) }));
+    try implementation.beginPrivateSession();
+    try std.testing.expectEqual(venue.SendResult.backpressure, try adapter.trySend(.{ .order_command = try testCommand(2) }));
+    try std.testing.expectEqual(@as(u64, 1), sink.calls);
     try std.testing.expectEqual(@as(u64, 0), transport.calls);
 }

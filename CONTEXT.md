@@ -656,6 +656,10 @@ _Avoid_: Float price, price_micros, Venue decimal string
 按明确 InstrumentRulesVersion 表示的整数数量单位；它不能脱离 Instrument 与合约规格解释。
 _Avoid_: Float quantity, raw size, universal lot
 
+**AssetDefinition**:
+在明确来源证据、配置版本和生效屏障上定义一个 Asset 的固定原子单位及允许经济范围的权威配置；同一账本历史不允许改变原子精度。它不由成交 lot、提现精度或自动观察值推测，测试来源不能授予真实交易资格。
+_Avoid_: Adapter decimals, token decimals, runtime amount scale
+
 **InstrumentDefinitionObserved**:
 适配器从 Venue 观察并标准化的产品身份、交易状态及规则候选事实；它在经验证的 ConfigEvent 生效前不能直接替换当前 InstrumentRules。
 _Avoid_: InstrumentRules activation, web page scrape, mutable symbol metadata

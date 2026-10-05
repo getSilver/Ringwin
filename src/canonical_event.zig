@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const schema_version: u16 = 4;
+pub const schema_version: u16 = 5;
 
 pub const VenueIdentity = u64;
 pub const Product = enum(u8) { spot, isolated_linear_usdt };
@@ -68,6 +68,9 @@ pub const Decimal = struct {
 
     pub fn faultReason(err: anyerror) ?EconomicFaultReason {
         return switch (err) {
+            error.UnknownAssetDefinition => .unknown_asset,
+            error.AssetDefinitionInactive => .invalid_economic_fact,
+            error.AssetAmountOutOfRange => .overflow,
             error.InvalidDecimal => .malformed_amount,
             error.InexactDecimal => .inexact_amount,
             error.DecimalOverflow, error.DecimalTextTooLong, error.DecimalScaleOutOfRange, error.DecimalRescaleOutOfRange, error.DecimalScalingOverflow => .overflow,
@@ -141,6 +144,23 @@ fn pow10(exponent: u8) !i128 {
         result = std.math.mul(i128, result, 10) catch return error.DecimalOverflow;
     return result;
 }
+
+/// Owner-published unit and bounded arithmetic scope; fixture evidence never qualifies production.
+pub const AssetDefinition = struct {
+    asset: AssetIdentity,
+    atomic_scale: u8,
+    version: u64,
+    source_identity: u128,
+    source_digest: [32]u8,
+    source_kind: enum(u8) { test_fixture, venue_economic_fields },
+    max_single_atoms: i128,
+    max_balance_atoms: i128,
+    max_cumulative_atoms: i128,
+    max_quantity_lots: i64,
+    max_price_ticks: i64,
+    max_rescale_power: u8,
+    max_postings: u16,
+};
 
 pub const AssetAmount = struct {
     asset: AssetIdentity,

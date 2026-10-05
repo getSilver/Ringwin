@@ -12,6 +12,8 @@ const production_contract = @import("production_contract.zig");
 pub const schema_version: u16 = production_contract.journal_schema_version;
 
 pub const EventKind = enum(u16) {
+    asset_definition_activated,
+    asset_definition_rejected,
     instrument_rules_activated,
     margin_rules_activated,
     account_configuration,
@@ -184,6 +186,7 @@ pub const EconomicSummary = struct {
 };
 
 pub const PayloadTag = enum(u16) {
+    asset_definition_activated,
     instrument_rules_activated,
     margin_rules_activated,
     account_configuration,
@@ -336,6 +339,7 @@ pub const CapabilityProfileActivation = struct {
 };
 
 pub const CorePayload = union(PayloadTag) {
+    asset_definition_activated: canonical.AssetDefinition,
     instrument_rules_activated: InstrumentRules,
     margin_rules_activated: MarginRules,
     account_configuration: AccountConfiguration,
@@ -409,6 +413,17 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
     try encoded.put(u64, input.identity);
     try encoded.put(u16, @intFromEnum(std.meta.activeTag(input.payload)));
     switch (input.payload) {
+        .asset_definition_activated => |value| {
+            inline for (std.meta.fields(canonical.AssetDefinition)) |field| {
+                const item = @field(value, field.name);
+                switch (@typeInfo(field.type)) {
+                    .int => try encoded.put(field.type, item),
+                    .@"enum" => try encoded.put(u8, @intFromEnum(item)),
+                    .array => for (item) |byte| try encoded.put(u8, byte),
+                    else => unreachable,
+                }
+            }
+        },
         .instrument_rules_activated => |value| {
             try encoded.put(u32, value.version);
             try encoded.put(u128, value.instrument_identity);
@@ -698,6 +713,22 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
         try readInputValue(u16, record.payload, &offset),
     ) orelse return error.UnknownInputType;
     const payload: CorePayload = switch (tag) {
+        .asset_definition_activated => blk: {
+            var value: canonical.AssetDefinition = undefined;
+            inline for (std.meta.fields(canonical.AssetDefinition)) |field| {
+                @field(value, field.name) = switch (@typeInfo(field.type)) {
+                    .int => try readInputValue(field.type, record.payload, &offset),
+                    .@"enum" => std.enums.fromInt(field.type, try readInputValue(u8, record.payload, &offset)) orelse return error.InvalidAssetDefinition,
+                    .array => array: {
+                        var bytes: field.type = undefined;
+                        for (&bytes) |*byte| byte.* = try readInputValue(u8, record.payload, &offset);
+                        break :array bytes;
+                    },
+                    else => unreachable,
+                };
+            }
+            break :blk .{ .asset_definition_activated = value };
+        },
         .instrument_rules_activated => .{ .instrument_rules_activated = .{
             .version = try readInputValue(u32, record.payload, &offset),
             .instrument_identity = try readInputValue(u128, record.payload, &offset),

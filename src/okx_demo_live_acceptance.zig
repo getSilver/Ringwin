@@ -114,7 +114,7 @@ fn runPrepareOnly(init: std.process.Init) !void {
     try progress(init.io, "observation_only");
 }
 
-fn readDemoPolicy(init: std.process.Init) !std.json.Parsed(demo_authority.Policy) {
+pub fn readDemoPolicy(init: std.process.Init) !std.json.Parsed(demo_authority.Policy) {
     const path = init.environ_map.get("RINGWIN_DEMO_POLICY_PATH") orelse return error.MissingDemoPolicy;
     var file = try std.Io.Dir.openFileAbsolute(init.io, path, .{});
     defer file.close(init.io);
@@ -162,6 +162,7 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
         .virgin => try demo_authority.Owner.bootstrap(file_store.interface(), init.io, decision_stream),
         .recover => try demo_authority.Owner.recoverWithIngress(file_store.interface(), init.io, decision_stream, private_stream),
     };
+    try policy.activateAssets(decision_owner);
     if (policy.startup == .recover and
         (decision_owner.shard.exchange_account_identity != policy.exchange_account or
             decision_owner.shard.portfolio_identity != policy.portfolio_identity or
@@ -210,7 +211,7 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
     if (policy.startup == .recover) try implementation.resumeAfter(try canonicalSequence(decision_owner, source_session));
     implementation.attachPrivateReconciler(reconciler);
     const adapter = implementation.adapter();
-    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4 });
+    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4, .asset_definitions = decision_owner.shard.activatedAssets() });
     const projection = try init.gpa.create(DemoProjection);
     defer init.gpa.destroy(projection);
     projection.* = .{};
@@ -683,6 +684,7 @@ fn checkOkxRawPrivateOwner(store: durable.Store, io: std.Io) !RawOwnerResult {
     const owner = try std.testing.allocator.create(demo_authority.Owner);
     defer std.testing.allocator.destroy(owner);
     owner.* = try demo_authority.Owner.bootstrap(store, io, .{ .domain = .decision_log, .id = 91 });
+    try @import("venue_adapter_contract.zig").activateTestAssets(owner);
     var raw = try raw_ingress.DurableSink.init(store, io, .{ .domain = .raw_ingress, .id = 93 });
     var transport: OfflineTransport = .{};
     transport.steps[0] = .{ .outcome = .response, .response = "{\"code\":\"0\",\"data\":[{\"sCode\":\"0\",\"ordId\":\"1001\"}]}" };
@@ -697,7 +699,7 @@ fn checkOkxRawPrivateOwner(store: durable.Store, io: std.Io) !RawOwnerResult {
     implementation.* = okx_adapter.OkxVenueAdapter.init(std.testing.allocator, &chain, clock_source.interface(), demoProfile(), demoRules());
     implementation.attachPrivateReconciler(reconciler);
     const adapter = implementation.adapter();
-    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4 });
+    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4, .asset_definitions = owner.shard.activatedAssets() });
     try implementation.beginPrivateSession();
     const times: private.Times = .{ .receive_time_utc_ns = 1_800_000_000_000_000_001, .monotonic_time_ns = 10_000_001, .wall_time_utc_ns = 1_800_000_000_000_000_002 };
     const ws_bootstrap = [_][]const u8{
@@ -1213,7 +1215,7 @@ test "private REST refresh starts account reconciliation before REST ingress" {
     var implementation = okx_adapter.OkxVenueAdapter.init(std.testing.allocator, &chain, clock_source.interface(), demoProfile(), demoRules());
     implementation.attachPrivateReconciler(&reconciler);
     const adapter = implementation.adapter();
-    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4 });
+    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4, .asset_definitions = try @import("venue_adapter_contract.zig").activatedTestAssets() });
     try implementation.beginPrivateSession();
     const frames = [_][]const u8{
         \\{"event":"subscribe","arg":{"channel":"orders","instType":"ANY"}}

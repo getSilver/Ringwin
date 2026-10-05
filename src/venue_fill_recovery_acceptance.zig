@@ -214,12 +214,12 @@ fn executeRawPrivateFillRecovery() !void {
     var implementation = okx.OkxVenueAdapter.init(allocator, &chain, clock.interface(), profile(), rules());
     implementation.attachPrivateReconciler(&reconciler);
     const adapter = implementation.adapter();
-    try adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4 });
-    try implementation.beginPrivateSession();
-
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
     owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    try @import("venue_adapter_contract.zig").activateTestAssets(owner);
+    try adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = owner.shard.activatedAssets() });
+    try implementation.beginPrivateSession();
 
     const subscriptions = [_][]const u8{
         \\{"event":"subscribe","arg":{"channel":"orders","instType":"ANY"}}
@@ -296,7 +296,7 @@ fn executeRawPrivateFillRecovery() !void {
     var tail_implementation = okx.OkxVenueAdapter.init(allocator, &tail_chain, tail_clock.interface(), profile(), rules());
     tail_implementation.attachPrivateReconciler(&tail_reconciler);
     const tail_adapter = tail_implementation.adapter();
-    try tail_adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4 });
+    try tail_adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = after_report.shard.activatedAssets() });
     try tail_implementation.beginPrivateSession();
     try tail_implementation.rememberRecoveredOrder(command.order_id, command.client_order_id, command.portfolio_reduce_only, .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = command.quantity }, command.revision);
     try replayCommittedFillTail(&tail_implementation, memory.interface(), raw_stream, first_ingress.raw_evidence.stream_sequence, first_batch.slice()[1]);
@@ -435,7 +435,7 @@ fn executeRawPrivateFillRecovery() !void {
     var recovered_implementation = okx.OkxVenueAdapter.init(allocator, &recovered_chain, recovered_clock.interface(), profile(), rules());
     recovered_implementation.attachPrivateReconciler(&recovered_reconciler);
     const recovered_adapter = recovered_implementation.adapter();
-    try recovered_adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4 });
+    try recovered_adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = owner.shard.activatedAssets() });
     try recovered_implementation.beginPrivateSession();
     try recovered_implementation.rememberRecoveredOrder(command.order_id, command.client_order_id, command.portfolio_reduce_only, .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = command.quantity }, command.revision);
     try recovered_implementation.rememberRecoveredOrder(full_command.order_id, full_command.client_order_id, full_command.portfolio_reduce_only, .{ .instrument = full_command.instrument, .rules_version = full_command.limit_price.rules_version, .lots = full_command.quantity }, full_command.revision);
@@ -522,11 +522,12 @@ fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canoni
     var implementation = okx.OkxVenueAdapter.init(allocator, &chain, clock.interface(), profile(), rules());
     implementation.attachPrivateReconciler(&reconciler);
     const adapter = implementation.adapter();
-    try adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4 });
-    try implementation.beginPrivateSession();
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
     owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    try @import("venue_adapter_contract.zig").activateTestAssets(owner);
+    try adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = owner.shard.activatedAssets() });
+    try implementation.beginPrivateSession();
     const subscriptions = [_][]const u8{
         \\{"event":"subscribe","arg":{"channel":"orders","instType":"ANY"}}
         ,
@@ -731,6 +732,121 @@ fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canoni
 
 test "OKX ready inexact account fact persists a fail closed result without reconciliation" {
     try checkReadyEconomicFault(null, "USDT", .inexact_amount, null, false, null, false);
+}
+
+test "OKX activated high precision account facts survive Owner replay without old unit economics" {
+    const allocator = std.heap.page_allocator;
+    const memory = try allocator.create(durable.MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .init();
+    const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
+    const owner = try allocator.create(demo.Owner);
+    defer allocator.destroy(owner);
+    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    for (@import("asset_registry.zig").testDefinitions(12, 9)) |definition|
+        _ = try owner.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
+    const economics_before = owner.shard.economicSummary();
+    var raw = try raw_ingress.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = 1 });
+    var transport = Transport{};
+    var chain: live.Chain = .{ .mode = .demo_live, .qualification = qualification(), .raw_sink = raw.interface(), .transport = transport.interface() };
+    var clock = Clock{};
+    var reconciler: private.Reconciler = .{};
+    var implementation = okx.OkxVenueAdapter.init(allocator, &chain, clock.interface(), profile(), rules());
+    implementation.attachPrivateReconciler(&reconciler);
+    const adapter = implementation.adapter();
+    try adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = owner.shard.activatedAssets() });
+    try implementation.beginPrivateSession();
+    const frames = [_][]const u8{
+        \\{"event":"subscribe","arg":{"channel":"orders","instType":"ANY"}}
+        ,
+        \\{"event":"subscribe","arg":{"channel":"account"}}
+        ,
+        \\{"event":"subscribe","arg":{"channel":"positions","instType":"ANY"}}
+        ,
+        \\{"arg":{"channel":"account"},"eventType":"snapshot","curPage":1,"lastPage":true,"data":[{"uTime":"1800000000000","totalEq":"25","adjEq":"25","imr":"0","mmr":"0","mgnRatio":"","isoEq":"0","details":[{"ccy":"USDT","cashBal":"25","availBal":"25","eq":"25","frozenBal":"0","liab":"0","isoLiab":"0","crossLiab":"0"}]}]}
+        ,
+        \\{"arg":{"channel":"positions"},"eventType":"snapshot","curPage":1,"lastPage":true,"data":[]}
+    };
+    for (frames) |frame| try std.testing.expect((try implementation.ingestPrivateWs(private_times, frame)).rejection == null);
+    try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .account_reconciliation = .{ .identity = 99, .exchange_account = 2, .expected_session = 1 } }));
+    try std.testing.expect(try applyDrain(owner, adapter));
+    try ingestBootstrapRound(&implementation);
+    try std.testing.expect(!try applyDrain(owner, adapter));
+    try ingestBootstrapRound(&implementation);
+    try std.testing.expect(try applyDrain(owner, adapter));
+    const observation =
+        \\{"arg":{"channel":"account"},"eventType":"update","curPage":1,"lastPage":true,"data":[{"uTime":"1800000000001","totalEq":"25","adjEq":"25","imr":"0","mmr":"0","mgnRatio":"","isoEq":"0","details":[{"ccy":"USDT","cashBal":"25.000000000001","availBal":"25.000000000001","eq":"25.000000000001","frozenBal":"0","liab":"0","isoLiab":"0","crossLiab":"0"},{"ccy":"BTC","cashBal":"0.000000001","availBal":"0.000000001","eq":"0.000000001","frozenBal":"0","liab":"0","isoLiab":"0","crossLiab":"0"}]}]}
+    ;
+    try std.testing.expect((try implementation.ingestPrivateWs(private_times, observation)).rejection == null);
+    try std.testing.expect(try applyDrain(owner, adapter));
+    try std.testing.expectEqual(@as(u8, 2), owner.shard.canonical_account.balance_count);
+    for (owner.shard.canonical_account.balances[0..2]) |balance| {
+        const expected: i128 = switch (balance.asset) {
+            okx.usdt => 25_000_000_000_001,
+            okx.btc => 1,
+            else => return error.UnexpectedAsset,
+        };
+        try std.testing.expectEqual(expected, balance.total.atoms);
+        try std.testing.expectEqual(expected, balance.available.atoms);
+    }
+    try std.testing.expectEqualDeep(economics_before, owner.shard.economicSummary());
+    try std.testing.expect(owner.shard.oms.recovery_only);
+    try std.testing.expectEqual(@as(u64, 0), owner.shard.economic_fault_count);
+    try owner.sealBootstrap();
+    const recovered = try allocator.create(demo.Owner);
+    defer allocator.destroy(recovered);
+    recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
+    try std.testing.expectEqualDeep(owner.shard.activatedAssets(), recovered.shard.activatedAssets());
+    var bytes: [durable.max_snapshot_bytes]u8 = undefined;
+    const restored = try @import("trading_shard.zig").TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
+    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+    try std.testing.expectEqual(@as(u64, 1), chain.next_attempt_id);
+}
+
+test "activated balance limits reject cumulative Suspense growth before Owner commit" {
+    const allocator = std.testing.allocator;
+    const memory = try allocator.create(durable.MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .init();
+    const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
+    const owner = try allocator.create(demo.Owner);
+    defer allocator.destroy(owner);
+    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    var definitions = @import("asset_registry.zig").testDefinitions(6, 8);
+    for (&definitions) |*definition| {
+        definition.max_single_atoms = 100;
+        definition.max_balance_atoms = 100;
+        definition.max_cumulative_atoms = 1000;
+        _ = try owner.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition.* } } });
+    }
+    const trading = @import("trading_shard.zig");
+    const bootstrap = [_]trading.CorePayload{
+        .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 3, .quantity_denominator = 10_000, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = 1 } },
+        .{ .margin_rules_activated = .{ .version = 1 } },
+        .{ .account_configuration = .{ .exchange_account_identity = 2 } },
+        .{ .exchange_balance = .{ .cash_micros = 100 } },
+        .exchange_positions,
+        .{ .opening_balance = .{ .cash_micros = 100 } },
+        .{ .funding_settlement = .{ .settlement_id = 10, .amount_micros = -100 } },
+    };
+    for (bootstrap, 0..) |payload, index|
+        _ = try owner.apply(.{ .core = .{ .identity = index + 3, .payload = payload } });
+    try std.testing.expectEqual(@as(i64, -100), owner.shard.economicSummary().suspense_usdt_micros);
+    const before = owner.shard.economicSummary();
+    const digest = owner.shard.canonicalStateDigest();
+    try owner.sealBootstrap();
+    try std.testing.expectError(error.AssetAmountOutOfRange, owner.apply(.{ .core = .{ .identity = 11, .payload = .{ .funding_settlement = .{ .settlement_id = 11, .amount_micros = -100 } } } }));
+    try std.testing.expect(owner.closed);
+    try std.testing.expectEqualDeep(before, owner.shard.economicSummary());
+    try std.testing.expectEqualSlices(u8, &digest, &owner.shard.canonicalStateDigest());
+    const recovered = try allocator.create(demo.Owner);
+    defer allocator.destroy(recovered);
+    recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try std.testing.expectEqualSlices(u8, &digest, &recovered.shard.canonicalStateDigest());
+    var bytes: [durable.max_snapshot_bytes]u8 = undefined;
+    const restored = try trading.TradingShard.restoreSnapshot(try recovered.committedSnapshot(&bytes));
+    try std.testing.expectEqualSlices(u8, &digest, &restored.shard.canonicalStateDigest());
 }
 
 test "OKX ready economic faults distinguish micro fees rebates assets and decoder failures" {

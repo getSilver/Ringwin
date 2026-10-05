@@ -180,6 +180,12 @@ pub fn runRole(
             try demo_authority.Owner.recover(state.store.interface(), init.io, .{ .domain = .decision_log, .id = 91 })
         else
             try demo_authority.Owner.bootstrap(state.store.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
+        var precision_policy = try readWindowsDemoPolicy(init, demo_transport);
+        defer precision_policy.deinit();
+        if (demo_transport)
+            try precision_policy.value.activateAssets(owner)
+        else
+            try precision_policy.value.activateAssetsForOfflineValidation(owner);
         okx_owner = owner;
     }
     var market_state: ?*MarketOwners = null;
@@ -251,6 +257,18 @@ pub fn runRole(
                     const path = try readPayloadFrame(client, generation, &path_buffer);
                     if (!std.fs.path.isAbsolute(path)) return error.InvalidDemoStateDirectory;
                     if (!owner.ready) {
+                        if (owner.closed or owner.store.safetyGate() != .open or owner.shard.trace.len != owner.decision_journal.last_sequence)
+                            return error.DecisionLogUnavailable;
+                        const committed = try owner.store.recover(init.io, owner.stream);
+                        if (committed.committed_barrier != owner.shard.trace.len or committed.last_sequence != committed.committed_barrier)
+                            return error.DecisionLogUnavailable;
+                        var sealed = owner.decision_journal;
+                        try sealed.seal();
+                        var storage: [durable_store.max_snapshot_bytes]u8 = undefined;
+                        const snapshot = try owner.shard.snapshot(&sealed, sealed.last_sequence, &storage);
+                        try writeStatus(client, .snapshot_ready);
+                        try writeSnapshotFrame(client, generation, .{ .bytes = snapshot, .barrier = sealed.last_sequence, .digest = owner.shard.canonicalStateDigest() });
+                        try expectStatus(client, .private_ready);
                         try writeStatus(client, .private_ready);
                         continue;
                     }
@@ -515,7 +533,7 @@ pub fn runRole(
                 const owner = okx_owner orelse return error.EngineOwnersMissing;
                 if (owner.ready) return error.RecoveredDemoRequiresActivation;
                 if (!owner.shard.canonical_account.valid) return error.PrivateAccountNotReady;
-                var policy = try demo_authority.Policy.parse(init.gpa, offline_okx_policy);
+                var policy = try readWindowsDemoPolicy(init, demo_transport);
                 defer policy.deinit();
                 const lease_now = if (demo_transport) try awakeNs(init.io) else 1;
                 var price_bytes: [8]u8 = undefined;
@@ -558,7 +576,7 @@ pub fn runRole(
                 if (try host.receive(init.io, 1) != .accepted or try host.receive(init.io, 2) != .accepted or
                     host.supervisor.state != .ready_for_recovery) return error.HostHandshakeFailed;
                 std.debug.print("windows_demo_host: stage=handshake\n", .{});
-                var policy = try demo_authority.Policy.parse(init.gpa, offline_okx_policy);
+                var policy = try readWindowsDemoPolicy(init, demo_transport);
                 defer policy.deinit();
                 const barrier = owner.shard.trace.len;
                 const digest = owner.shard.canonicalStateDigest();
@@ -1002,7 +1020,7 @@ const EngineOwners = struct {
         };
 
         const adapter = self.venue.adapter();
-        try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1 });
+        try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1, .asset_definitions = self.shard_run.shard.activatedAssets() });
         try self.gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
         try self.gateway.observeAuthority(.{
             .account = 2,
@@ -1387,10 +1405,6 @@ const ExecutionOwners = struct {
         self.reconciler = .{};
         self.venue = okx_venue.OkxVenueAdapter.init(init.gpa, &self.chain, self.clock.interface(), okx_demo.demoProfile(), okx_demo.demoRules());
         self.venue.attachPrivateReconciler(&self.reconciler);
-        if (!has_history) {
-            try self.venue.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4 });
-            try self.venue.beginPrivateSession();
-        }
         self.authority = .{};
         self.lease = .{ .key = .{ .exchange_account = 2, .decision_domain = 1 }, .node = 0, .token = 0, .issued_at_ns = 0, .expires_at_ns = 0 };
         self.guard = .{ .authority = &self.authority, .lease = &self.lease };
@@ -1418,9 +1432,9 @@ const ExecutionOwners = struct {
 
     fn preparePrivateRecovery(self: *ExecutionOwners, init: std.process.Init, snapshot: SnapshotFrame) !void {
         _ = init;
-        if (!self.recovering or self.venue.state != .idle) return error.InvalidRoleTransition;
+        if (self.venue.state != .idle) return error.InvalidRoleTransition;
         const restored = try trading_shard.TradingShard.restoreSnapshot(snapshot.bytes);
-        if (!restored.shard.recovery_admission_pending or restored.barrier != snapshot.barrier or
+        if (restored.shard.recovery_admission_pending != self.recovering or restored.barrier != snapshot.barrier or
             !std.mem.eql(u8, &restored.shard.canonicalStateDigest(), &snapshot.digest))
             return error.DecisionSnapshotMismatch;
         var floor: u64 = 0;
@@ -1429,7 +1443,7 @@ const ExecutionOwners = struct {
                 floor = cursor.identity.sequence;
                 break;
             };
-        self.chain.mode = .replay;
+        if (self.recovering) self.chain.mode = .replay;
         self.replay_economic_fault = restored.shard.economic_fault_count != 0;
         try self.venue.resumeAfter(floor);
         for (restored.shard.oms.orders[0..restored.shard.oms.order_count]) |owned| {
@@ -1447,7 +1461,7 @@ const ExecutionOwners = struct {
             if (wire_id == null and owned.dispatch_submitted) return error.MissingDispatchIdentity;
             try self.venue.rememberRecoveredOrder(owned.id, wire_id orelse owned.client_order_id, owned.portfolio_reduce_only, .{ .instrument = owned.instrument, .rules_version = owned.limit_price.rules_version, .lots = owned.quantity }, owned.revision);
         }
-        try self.venue.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4 });
+        try self.venue.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = restored.shard.activatedAssets() });
         try self.venue.beginPrivateSession();
     }
 
@@ -1752,6 +1766,15 @@ const ExecutionOwners = struct {
 const offline_okx_policy =
     \\{"schema":1,"startup":"virgin","exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_micros":20000000,"risk_limit_micros":10000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
 ;
+
+const offline_asset_definitions = @import("asset_registry.zig").testDefinitions(6, 8);
+
+fn readWindowsDemoPolicy(init: std.process.Init, live_mode: bool) !std.json.Parsed(demo_authority.Policy) {
+    if (live_mode) return okx_demo.readDemoPolicy(init);
+    var parsed = try demo_authority.Policy.parse(init.gpa, offline_okx_policy);
+    parsed.value.asset_definitions = &offline_asset_definitions;
+    return parsed;
+}
 
 const OkxFenceOwner = struct {
     store: failover.WindowsFencingStore,
@@ -3173,12 +3196,13 @@ fn recoverPrivateStartup(execution_pipe: Pipe, engine_pipe: Pipe, generation: u6
     if (status != .snapshot_ready) return error.PrivateRecoveryProtocolMismatch;
     var storage: [durable_store.max_snapshot_bytes]u8 = undefined;
     const snapshot = try readSnapshotFrame(engine_pipe, generation, &storage);
+    const recovering = (try trading_shard.TradingShard.restoreSnapshot(snapshot.bytes)).shard.recovery_admission_pending;
     try sendCommand(execution_pipe, .recover_private);
     try writeSnapshotFrame(execution_pipe, generation, snapshot);
     try expectStatus(execution_pipe, .private_ready);
     try writeStatus(engine_pipe, .private_ready);
     while (true) switch (try readStatus(engine_pipe)) {
-        .private_ready => return true,
+        .private_ready => return recovering,
         .private_replay => {
             var metadata: [128]u8 = undefined;
             const encoded = try readPayloadFrame(engine_pipe, generation, &metadata);

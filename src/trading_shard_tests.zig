@@ -1874,9 +1874,35 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 220, .count = 1 };
     group.members[0] = .{ .intent_sequence = 220, .operation = .place, .instrument = swap_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
     const place = atGroup(12, .{ .identity = 220, .payload = .{ .oms_intent_group = group } });
+    const limited = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(limited);
+    for ([_]bool{ true, false }) |limit_quantity| {
+        limited.* = live.shard;
+        var definition = limited.activatedAssets().get(settlement_asset).?.definition;
+        definition.version += 1;
+        if (limit_quantity) definition.max_quantity_lots = 9 else definition.max_price_ticks = 49_999_999;
+        _ = try limited.apply(atGroup(12, .{ .identity = 218, .payload = .{ .asset_definition_activated = definition } }));
+        const before_range_failure = limited.economicSummary();
+        try std.testing.expectError(error.AssetAmountOutOfRange, limited.apply(place));
+        try std.testing.expectEqual(@as(usize, 0), limited.oms.emitted().len);
+        try std.testing.expectEqual(@as(usize, 0), limited.oms.order_count);
+        try std.testing.expectEqualDeep(before_range_failure, limited.economicSummary());
+        try std.testing.expectError(error.AssetAmountOutOfRange, limited.apply(atGroup(13, .{ .identity = 221, .payload = .{ .venue_forced_execution = .{ .execution_id = 221, .side = .buy, .quantity = 10, .price_micros = 50_000_000 } } })));
+        try std.testing.expectEqualDeep(before_range_failure, limited.economicSummary());
+    }
     const placed = try live.shard.apply(place);
     try std.testing.expectEqual(@as(usize, 1), placed.oms_commands.len);
     const proved = placed.oms_commands[0];
+    for ([_]bool{ true, false }) |limit_quantity| {
+        limited.* = live.shard;
+        var definition = limited.activatedAssets().get(settlement_asset).?.definition;
+        definition.version += 1;
+        if (limit_quantity) definition.max_quantity_lots = 9 else definition.max_price_ticks = 49_999_999;
+        _ = try limited.apply(atGroup(12, .{ .identity = 218, .payload = .{ .asset_definition_activated = definition } }));
+        const before_range_failure = limited.economicSummary();
+        try std.testing.expectError(error.AssetAmountOutOfRange, limited.apply(atGroup(13, .{ .identity = 221, .payload = .{ .economic_fill = .{ .fill_id = 221, .order_id = proved.order_id, .quantity = 10, .price_micros = 50_000_000 } } })));
+        try std.testing.expectEqualDeep(before_range_failure, limited.economicSummary());
+    }
     try std.testing.expect(proved.risk_decision_identity != proved.reservation_identity);
     try std.testing.expectEqual(shard_event.EventKind.risk_accepted, live.shard.trace.events[proved.risk_decision_identity - 1].kind);
     try std.testing.expectEqual(shard_event.EventKind.risk_reservation_created, live.shard.trace.events[proved.reservation_identity - 1].kind);
@@ -1891,7 +1917,7 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
         }
     }.prepare;
     adapter.vtable = &native_vtable;
-    try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1 });
+    try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1, .asset_definitions = live.shard.activatedAssets() });
     var gateway: execution_gateway.Gateway = .{};
     try gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
     const current_authority: execution_gateway.AuthorityFacts = .{
@@ -1927,6 +1953,15 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     const durable_store = durable_memory.interface();
     const stream: @import("durable_store.zig").StreamIdentity = .{ .domain = .control, .id = 77 };
     try gateway.bootstrapDurableDispatch(durable_store, undefined, stream);
+    const failed_config = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(failed_config);
+    failed_config.* = live.shard;
+    var conflicting_asset = failed_config.activatedAssets().get(settlement_asset).?.definition;
+    conflicting_asset.source_digest = @splat(0x99);
+    try std.testing.expectError(error.AssetDefinitionConflict, failed_config.apply(.{ .core = .{ .identity = 400, .payload = .{ .asset_definition_activated = conflicting_asset } } }));
+    try std.testing.expectError(error.NotSent, gateway.sendFromShard(failed_config, proved.command_id, 2 * std.time.ns_per_s));
+    try std.testing.expectEqual(@as(u64, 0), gateway.send_attempt_count);
+    try std.testing.expectEqual(@as(u64, 1), (try durable_store.recover(undefined, stream)).committed_barrier);
     var paused = live.shard;
     _ = try paused.apply(lifecycleCommand(4, 3, .trading_pause));
     try std.testing.expect(!std.meta.eql(proved.authority.trading_authorization, (try paused.currentDispatchAuthorityRefs(swap_instrument)).trading_authorization));

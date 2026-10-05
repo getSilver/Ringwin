@@ -17,6 +17,7 @@ const Binding = struct {
 };
 
 pub const SimulatedVenue = struct {
+    asset_definitions: @import("asset_registry.zig").Registry = .{},
     state: State = .idle,
     binding: ?Binding = null,
     pending: ?canonical.AdapterOutputBatch = null,
@@ -38,6 +39,8 @@ pub const SimulatedVenue = struct {
         if (self.state == .stopped) return error.Stopped;
         if (config.environment != .simulation or config.request_capacity == 0 or config.output_capacity == 0)
             return error.InvalidConfig;
+        self.asset_definitions = config.asset_definitions orelse .{};
+        self.asset_definitions.validate() catch return error.InvalidConfig;
         self.binding = .{
             .venue = config.venue,
             .exchange_account = config.exchange_account,
@@ -71,6 +74,13 @@ pub const SimulatedVenue = struct {
             .order_reconciliation => {},
         }
 
+        switch (request) {
+            .order_command => |command| if (command.operation != .cancel and !self.asset_definitions.legacyConsumerCompatible()) return .backpressure,
+            .order_batch => |commands| for (commands.slice()) |command| {
+                if (command.operation != .cancel and !self.asset_definitions.legacyConsumerCompatible()) return .backpressure;
+            },
+            else => {},
+        }
         var batch: canonical.AdapterOutputBatch = .{};
         switch (request) {
             .order_command => |command| self.emitOrderCommand(&batch, binding, command) catch return error.InvalidRequest,
@@ -292,6 +302,7 @@ test "simulated venue returns a canonical result for every request kind" {
     const adapter = simulated.adapter();
     try adapter.start(.{
         .venue = 1,
+        .asset_definitions = try contract.activatedTestAssets(),
         .environment = .simulation,
         .exchange_account = 2,
         .adapter_session = 4,
@@ -333,6 +344,7 @@ test "simulated venue rejects requests outside its fixed account session" {
     const adapter = simulated.adapter();
     try adapter.start(.{
         .venue = 1,
+        .asset_definitions = try contract.activatedTestAssets(),
         .environment = .simulation,
         .exchange_account = 2,
         .adapter_session = 3,
@@ -352,6 +364,7 @@ test "simulated venue emits deterministic order lifecycle facts" {
     const adapter = simulated.adapter();
     try adapter.start(.{
         .venue = 1,
+        .asset_definitions = try contract.activatedTestAssets(),
         .environment = .simulation,
         .exchange_account = 2,
         .adapter_session = 3,
@@ -427,7 +440,7 @@ test "simulated venue emits deterministic order lifecycle facts" {
 test "account reconciliation drains replayable bootstrap facts" {
     var simulated: SimulatedVenue = .{};
     const adapter = simulated.adapter();
-    try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 8 });
+    try adapter.start(.{ .venue = 1, .asset_definitions = try contract.activatedTestAssets(), .environment = .simulation, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 8 });
     _ = try adapter.trySend(.{ .account_reconciliation = .{ .identity = 9, .exchange_account = 2, .expected_session = 3 } });
     const batch = (try adapter.tryDrain()).?;
     var live = account_projection.AccountProjection{};
@@ -444,7 +457,7 @@ test "account reconciliation drains replayable bootstrap facts" {
 test "both reconciliation result types leave through tryDrain" {
     var simulated: SimulatedVenue = .{};
     const adapter = simulated.adapter();
-    try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 8 });
+    try adapter.start(.{ .venue = 1, .asset_definitions = try contract.activatedTestAssets(), .environment = .simulation, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 8 });
     _ = try adapter.trySend(.{ .order_reconciliation = .{ .identity = 7, .exchange_account = 2, .order = 1 } });
     const order_batch = (try adapter.tryDrain()).?;
     try std.testing.expectEqual(canonical.ReconciliationResult{ .identity = 7, .complete = false }, order_batch.events[1].event.order_reconciliation_result);

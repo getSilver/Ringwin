@@ -5,6 +5,22 @@ const canonical = @import("canonical_event.zig");
 const simulated = @import("simulated_venue.zig");
 const venue = @import("venue_adapter.zig");
 
+pub fn activateTestAssets(owner: *@import("demo_authority.zig").Owner) !void {
+    for (@import("asset_registry.zig").testDefinitions(6, 8)) |definition|
+        _ = try owner.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
+}
+
+pub fn activatedTestAssets() !@import("asset_registry.zig").Registry {
+    return activatedTestAssetsWithScales(6, 8);
+}
+
+pub fn activatedTestAssetsWithScales(usdt_scale: u8, btc_scale: u8) !@import("asset_registry.zig").Registry {
+    var shard: @import("trading_shard.zig").TradingShard = .{};
+    for (@import("asset_registry.zig").testDefinitions(usdt_scale, btc_scale)) |definition|
+        _ = try shard.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
+    return shard.activatedAssets();
+}
+
 /// The same Owner/Core/store contract consumes a fault from any real adapter.
 pub fn exerciseEconomicFaultRecovery(batch: canonical.AdapterOutputBatch) !void {
     const durable = @import("durable_store.zig");
@@ -18,6 +34,7 @@ pub fn exerciseEconomicFaultRecovery(batch: canonical.AdapterOutputBatch) !void 
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
     owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    try activateTestAssets(owner);
     _ = try owner.apply(.{ .core = .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 3, .quantity_denominator = 10_000, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = batch.events[0].envelope.venue } } } });
     _ = try owner.apply(.{ .core = .{ .identity = 2, .payload = .{ .margin_rules_activated = .{ .version = 1 } } } });
     _ = try owner.apply(.{ .core = .{ .identity = 3, .payload = .{ .account_configuration = .{ .exchange_account_identity = batch.events[0].envelope.exchange_account orelse return error.MissingAccount } } } });
@@ -48,6 +65,7 @@ pub fn exercise(adapter: venue.VenueAdapter, adapter_request: canonical.AdapterR
         .adapter_session = 3,
         .request_capacity = 1,
         .output_capacity = 1,
+        .asset_definitions = try activatedTestAssets(),
     }, adapter_request);
 }
 

@@ -16,6 +16,7 @@ const raw_ingress = @import("raw_ingress.zig");
 /// account balance, lease token, Venue fact, or send proof.
 pub const Policy = struct {
     pub const Startup = enum { virgin, recover };
+    asset_definitions: []const canonical.AssetDefinition = &.{},
     schema: u16,
     startup: Startup,
     exchange_account: u128,
@@ -44,6 +45,30 @@ pub const Policy = struct {
         return parsed;
     }
 
+    /// Must run before the first private account frame; Owner commits all units.
+    pub fn activateAssets(self: Policy, owner: *Owner) !void {
+        return self.activateAssetDefinitions(owner, false);
+    }
+
+    /// Only callers with transport disabled may admit explicit fixture evidence.
+    pub fn activateAssetsForOfflineValidation(self: Policy, owner: *Owner) !void {
+        return self.activateAssetDefinitions(owner, true);
+    }
+
+    fn activateAssetDefinitions(self: Policy, owner: *Owner, offline: bool) !void {
+        if (self.asset_definitions.len == 0) {
+            owner.closeAdmission();
+            return error.MissingAssetDefinitions;
+        }
+        for (self.asset_definitions) |definition| {
+            if (definition.source_kind == .test_fixture and !offline) {
+                owner.closeAdmission();
+                return error.TestAssetDefinitionForbidden;
+            }
+            _ = try owner.apply(.{ .core = .{ .identity = @intCast(owner.shard.trace.len + 1), .payload = .{ .asset_definition_activated = definition } } });
+        }
+    }
+
     /// Virgin startup derives cash only from a complete private account
     /// snapshot; existing BTC/derivative exposure requires recovery instead.
     pub fn initialize(self: Policy, owner: *Owner, mark_price_micros: i64, guard: *failover.GatewayLeaseGuard, now_ns: u64, adapter_session: u64) !void {
@@ -55,6 +80,7 @@ pub const Policy = struct {
     /// The process-chain variant waits for a real ManagedHost recovery and
     /// activation handshake before sealing the decision owner as ready.
     pub fn initializePendingHost(self: Policy, owner: *Owner, mark_price_micros: i64, guard: *failover.GatewayLeaseGuard, now_ns: u64, adapter_session: u64) !void {
+        if (!owner.shard.activatedAssets().legacyConsumerCompatible()) return error.AssetPrecisionUnsupported;
         if (owner.ready or owner.closed or owner.shard.trace.len == 0 or
             owner.stream.id != self.decision_stream_id or mark_price_micros <= 0 or
             now_ns == 0 or adapter_session == 0 or
