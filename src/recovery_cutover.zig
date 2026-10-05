@@ -20,8 +20,8 @@ pub const VenueEvidence = struct {
     open_orders_closed: bool,
     portfolio_quantity: i64,
     exchange_quantity: i64,
-    portfolio_spot_quantity: i64,
-    exchange_spot_quantity: i64,
+    portfolio_spot_asset_atoms: i128,
+    exchange_spot_asset_atoms: i128,
     portfolio_open_cost_atoms: i128,
     exchange_open_cost_atoms: i128,
     portfolio_spot_open_cost_atoms: i128,
@@ -69,8 +69,8 @@ pub const RecoveryCoordinator = struct {
             .open_orders_closed = self.shard.oms.openOrdersClosed(),
             .portfolio_quantity = economic.portfolio.swap.quantity,
             .exchange_quantity = economic.exchange.swap.quantity,
-            .portfolio_spot_quantity = economic.portfolio.spot_asset_quantity,
-            .exchange_spot_quantity = economic.exchange.spot_asset_quantity,
+            .portfolio_spot_asset_atoms = economic.portfolio.spot_asset_atoms,
+            .exchange_spot_asset_atoms = economic.exchange.spot_asset_atoms,
             .portfolio_open_cost_atoms = economic.portfolio.swap.open_cost_atoms,
             .exchange_open_cost_atoms = economic.exchange.swap.open_cost_atoms,
             .portfolio_spot_open_cost_atoms = economic.portfolio.spot.open_cost_atoms,
@@ -152,8 +152,8 @@ fn venueEvidenceCloses(shard: trading.TradingShard, evidence: VenueEvidence) boo
     if (evidence.order_count != shard.oms.order_count or
         evidence.portfolio_quantity != expected.portfolio_quantity or
         evidence.exchange_quantity != expected.exchange_quantity or
-        evidence.portfolio_spot_quantity != expected.portfolio_spot_quantity or
-        evidence.exchange_spot_quantity != expected.exchange_spot_quantity or
+        evidence.portfolio_spot_asset_atoms != expected.portfolio_spot_asset_atoms or
+        evidence.exchange_spot_asset_atoms != expected.exchange_spot_asset_atoms or
         evidence.portfolio_open_cost_atoms != expected.portfolio_open_cost_atoms or
         evidence.exchange_open_cost_atoms != expected.exchange_open_cost_atoms or
         evidence.portfolio_spot_open_cost_atoms != expected.portfolio_spot_open_cost_atoms or
@@ -195,7 +195,7 @@ fn sameVenueEvidence(left: VenueEvidence, right: VenueEvidence) bool {
         if (!std.meta.eql(left_order, right_order)) return false;
     return left.open_orders_closed == right.open_orders_closed and
         left.portfolio_quantity == right.portfolio_quantity and left.exchange_quantity == right.exchange_quantity and
-        left.portfolio_spot_quantity == right.portfolio_spot_quantity and left.exchange_spot_quantity == right.exchange_spot_quantity and
+        left.portfolio_spot_asset_atoms == right.portfolio_spot_asset_atoms and left.exchange_spot_asset_atoms == right.exchange_spot_asset_atoms and
         left.portfolio_open_cost_atoms == right.portfolio_open_cost_atoms and
         left.exchange_open_cost_atoms == right.exchange_open_cost_atoms and
         left.portfolio_spot_open_cost_atoms == right.portfolio_spot_open_cost_atoms and
@@ -699,6 +699,8 @@ test "strategy cutover persists a scoped fence and leaves unrelated orders live"
 
 test "cutover failures and forward rollback never regress economic state or generation" {
     var shard: trading.TradingShard = .{ .release_generation = 4, .active_release = 10, .active_strategy_instance = 20 };
+    for (@import("asset_registry.zig").testDefinitions(6, 8)) |definition|
+        _ = try shard.apply(.{ .core = .{ .identity = @intCast(shard.trace.len + 1), .payload = .{ .asset_definition_activated = definition } } });
     _ = try shard.apply(.{ .core = .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{
         .version = 1,
         .instrument_identity = swap_instrument,

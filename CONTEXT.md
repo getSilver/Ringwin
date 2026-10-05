@@ -526,6 +526,7 @@ _Avoid_: Average entry price, market value, fee-inclusive cost
 
 **TradingFee**:
 Venue 因某个 Fill 实际扣收的费用，按扣收 Asset 独立归属于该 Fill 的 VirtualPortfolio；它不改变 AverageCost。
+现货基础 Asset 的费用与返佣改变原子余额，不改变成交 lots 或 PortfolioPosition 的 gross 数量；小于一个交易 lot 的余额仍完整保留。lot 的有理数规格与 AssetDefinition 原子精度经已生效配置显式换算。
 _Avoid_: Transaction cost, cost-basis adjustment
 
 **TradingRebate**:

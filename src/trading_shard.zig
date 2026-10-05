@@ -119,10 +119,10 @@ fn ceilDivPositive(numerator: i128, denominator: i128) !i128 {
     return @divFloor(rounded, denominator);
 }
 
-fn notionalAtomsScaled(quantity: i64, price_atoms: i128, quantity_denominator: i64) !i128 {
+fn notionalAtomsScaled(quantity: i64, price_atoms: i128, quantity_denominator: i64, quantity_numerator: i64) !i128 {
     if (quantity < 0 or price_atoms <= 0 or quantity_denominator <= 0)
         return error.InvalidNotionalInput;
-    return ceilDivPositive(try std.math.mul(i128, quantity, price_atoms), quantity_denominator);
+    return ceilDivPositive(try std.math.mul(i128, try std.math.mul(i128, quantity, price_atoms), quantity_numerator), quantity_denominator);
 }
 
 fn priceTicks(price_atoms: i128, tick_atoms: i128) !i128 {
@@ -619,6 +619,7 @@ pub const TradingShard = struct {
             .instrument = instrument_id,
             .rules_version = rules_version,
             .quantity_denominator = quantity_denominator,
+            .quantity_numerator = if (registered) |entry| entry.rules.quantity_numerator else 1,
             .price_tick_value = .{ .asset = if (registered) |entry| entry.rules.settlement_asset else settlement_asset, .atoms = margin.price_tick_atoms },
             .venue_initial_margin_ppm = margin.venue_initial_margin_ppm,
             .internal_initial_margin_ppm = margin.internal_initial_margin_ppm,
@@ -665,6 +666,7 @@ pub const TradingShard = struct {
     fn qualifyOmsGroup(self: *TradingShard, group: oms_module.IntentGroup) !QualifiedIntentGroup {
         var qualified = group;
         var active = try self.oms.activeReservations(settlement_asset);
+        var group_sell_atoms: i128 = 0;
         for (qualified.members[0..qualified.count]) |*intent| {
             for (self.fenced_strategy_instances[0..self.fenced_strategy_count]) |fenced|
                 if (intent.strategy_instance == fenced and intent.operation != .cancel)
@@ -678,6 +680,49 @@ pub const TradingShard = struct {
             }
             const instrument_config = self.instrumentEntry(intent.instrument) orelse return error.UnknownOmsInstrument;
             if (!instrument_config.margin_configured) return error.InstrumentRulesInactive;
+            if (instrument_config.product == .spot) {
+                const unit = try self.baseAtomsPerLot(instrument_config);
+                try self.asset_registry.checkAmount(.{ .asset = unit.asset, .atoms = try std.math.mul(i128, intent.quantity, unit.atoms) }, true);
+            }
+            if (instrument_config.product == .spot and intent.side == .sell) {
+                const unit = try self.baseAtomsPerLot(instrument_config);
+                var pending_lots: i64 = intent.quantity;
+                var committed_sell_atoms: i128 = 0;
+                for (self.oms.orders[0..self.oms.order_count]) |order| {
+                    if (order.instrument != intent.instrument or order.side != .sell) continue;
+                    // Reports describe executed lots; only unique applied fills
+                    // have debited the native inventory backing those lots.
+                    const applied = try self.economic_projection.appliedCanonicalFillQuantity(order.id);
+                    const obligation = if (order.reservation_active) @max(order.confirmed_quantity, @max(order.quantity, order.pending_basis_quantity)) else order.cumulative_quantity;
+                    const remaining = @max(try std.math.sub(i64, obligation, applied), 0);
+                    if (intent.operation == .amend and order.id == intent.target_order_id) {
+                        const prospective = try std.math.add(i64, intent.quantity, @max(try std.math.sub(i64, order.cumulative_quantity, applied), 0));
+                        pending_lots = @max(prospective, remaining);
+                        continue;
+                    }
+                    committed_sell_atoms = try std.math.add(i128, committed_sell_atoms, try std.math.mul(i128, remaining, unit.atoms));
+                }
+                for (self.oms.tombstones[0..self.oms.tombstone_count]) |archived| {
+                    if (archived.instrument != intent.instrument) continue;
+                    const applied = try self.economic_projection.appliedCanonicalFillQuantity(archived.order_id);
+                    const remaining = @max(try std.math.sub(i64, archived.cumulative_quantity, applied), 0);
+                    if (remaining == 0) continue;
+                    var side: ?oms_module.Side = null;
+                    for (self.oms.command_history[0..self.oms.command_history_count]) |command| {
+                        if (command.order_id == archived.order_id) {
+                            side = command.side;
+                            break;
+                        }
+                    }
+                    if (side == null) return error.IncompleteReconciliationEvidence;
+                    if (side.? == .sell)
+                        committed_sell_atoms = try std.math.add(i128, committed_sell_atoms, try std.math.mul(i128, remaining, unit.atoms));
+                }
+                group_sell_atoms = try std.math.add(i128, group_sell_atoms, try std.math.mul(i128, pending_lots, unit.atoms));
+                const required = try std.math.add(i128, committed_sell_atoms, group_sell_atoms);
+                if (required > self.economic_projection.portfolio.spot_asset_atoms or
+                    required > self.economic_projection.exchange.spot_asset_atoms) return error.InsufficientSpotAsset;
+            }
             try validateExactOmsSpec(intent.*, instrument_config);
             try self.checkAssetAmounts(canonical.InstrumentQuantity{ .instrument = intent.instrument, .rules_version = instrument_config.rules.version, .lots = intent.quantity }, true);
             try self.checkAssetAmounts(intent.limit_price, true);
@@ -968,16 +1013,49 @@ pub const TradingShard = struct {
         if (event == .mark_price and self.asset_registry.get(self.economic_projection.settlement_asset) == null)
             return self.economic_projection.applyChanged(event);
         try self.checkAssetAmounts(event, event != .account_snapshot);
-        const changed = try self.economic_projection.applyChanged(event);
+        switch (event) {
+            .fill => |fill| if (fill.product == .spot) {
+                try self.asset_registry.checkAmount(.{ .asset = fill.base_atom_value.asset, .atoms = try std.math.mul(i128, fill.quantity.lots, fill.base_atom_value.atoms) }, true);
+            },
+            .venue_forced_execution => |forced| if (forced.product == .spot) {
+                const entry = self.instrumentEntry(forced.quantity.instrument) orelse return error.UnknownOmsInstrument;
+                const unit = try self.baseAtomsPerLot(entry);
+                try self.asset_registry.checkAmount(.{ .asset = unit.asset, .atoms = try std.math.mul(i128, forced.quantity.lots, unit.atoms) }, true);
+            },
+            else => {},
+        }
+        const changed = switch (event) {
+            .fill => |fill| if (fill.order_id != 0) try self.economic_projection.applyCanonicalFill(fill, economics_module.coreFillDigest(fill)) else try self.economic_projection.applyChanged(event),
+            else => try self.economic_projection.applyChanged(event),
+        };
         try self.checkEconomicRanges();
         return changed;
     }
 
     fn checkEconomicRanges(self: *const TradingShard) !void {
         const quote = self.asset_registry.get(self.economic_projection.settlement_asset) orelse return error.UnknownAssetDefinition;
+        if (self.economic_projection.base_asset != 0) {
+            const base = self.asset_registry.get(self.economic_projection.base_asset) orelse return error.UnknownAssetDefinition;
+            var traded_atoms: i128 = 0;
+            for (self.economic_projection.ledger[0..self.economic_projection.ledger_count]) |transaction| {
+                if (transaction.layer != .portfolio) continue;
+                for (transaction.postings[0..transaction.posting_count]) |posting| {
+                    if (posting.unit != .base_atoms or posting.account != .trade) continue;
+                    const absolute = if (posting.amount < 0) try std.math.sub(i128, 0, posting.amount) else posting.amount;
+                    traded_atoms = try std.math.add(i128, traded_atoms, absolute);
+                }
+            }
+            if (traded_atoms > base.definition.max_cumulative_atoms) return error.AssetAmountOutOfRange;
+        }
         for ([_]i128{ self.economic_projection.treasury_usdt_atoms, self.economic_projection.suspense_usdt_atoms }) |amount|
             try self.asset_registry.checkAmount(.{ .asset = quote.definition.asset, .atoms = amount }, false);
         for ([_]economics_module.Layer{ self.economic_projection.portfolio, self.economic_projection.exchange }) |layer| {
+            if (self.economic_projection.base_asset != 0) {
+                const base = self.asset_registry.get(self.economic_projection.base_asset) orelse return error.UnknownAssetDefinition;
+                try self.asset_registry.checkAmount(.{ .asset = base.definition.asset, .atoms = layer.spot_asset_atoms }, false);
+                if (layer.base_fee_atoms > base.definition.max_cumulative_atoms or layer.base_rebate_atoms > base.definition.max_cumulative_atoms)
+                    return error.AssetAmountOutOfRange;
+            }
             for ([_]i128{ layer.usdt_balance_atoms, layer.margin_atoms }) |amount|
                 try self.asset_registry.checkAmount(.{ .asset = quote.definition.asset, .atoms = amount }, false);
             for ([_]i128{ layer.fee_atoms, layer.rebate_atoms, layer.funding_atoms, layer.penalty_atoms, layer.realized_pnl_atoms, layer.unrealized_pnl_atoms, layer.spot.open_cost_atoms, layer.swap.open_cost_atoms }) |amount| {
@@ -1062,7 +1140,9 @@ pub const TradingShard = struct {
                 if (balance.asset != entry.rules.base_asset) continue;
                 if (found_balance or balance.total.asset != entry.rules.base_asset or balance.total.atoms < 0)
                     return null;
-                result.lots = balance.total.atoms;
+                const unit = self.baseAtomsPerLot(entry) catch return null;
+                if (@rem(balance.total.atoms, unit.atoms) != 0) return null;
+                result.lots = @divExact(balance.total.atoms, unit.atoms);
                 found_balance = true;
             }
             return result;
@@ -1074,6 +1154,23 @@ pub const TradingShard = struct {
                 position.quantity.rules_version != entry.rules.version)
                 return null;
             result = position.quantity;
+            found = true;
+        }
+        return result;
+    }
+
+    /// Native holdings retain sublot residuals; they are never order quantities.
+    pub fn currentSpotAssetBalance(self: *const TradingShard, instrument: canonical.InstrumentIdentity) ?canonical.AssetAmount {
+        if (!self.canonical_account.valid or self.canonical_account.exchange_account != self.exchange_account_identity) return null;
+        const entry = self.instrument_registry.get(instrument) orelse return null;
+        if (entry.product != .spot or entry.rules.base_asset == 0) return null;
+        var result: canonical.AssetAmount = .{ .asset = entry.rules.base_asset, .atoms = 0 };
+        var found = false;
+        for (self.canonical_account.balances[0..self.canonical_account.balance_count]) |balance| {
+            if (balance.asset != result.asset) continue;
+            if (found or balance.total.asset != result.asset or balance.total.atoms < 0) return null;
+            self.asset_registry.checkAmount(balance.total, false) catch return null;
+            result = balance.total;
             found = true;
         }
         return result;
@@ -1207,6 +1304,7 @@ pub const TradingShard = struct {
             intent.quantity,
             try self.abiPriceAtoms(intent.limit_price_micros, instrument_config.rules.settlement_asset),
             instrument_config.rules.quantity_denominator,
+            instrument_config.rules.quantity_numerator,
         );
         self.last_risk_tier = try riskTier(requested_notional, self.asset_registry.get(instrument_config.rules.settlement_asset).?.definition.atomic_scale);
         if (self.market_health != .healthy) {
@@ -1380,6 +1478,7 @@ pub const TradingShard = struct {
                         .product = instrument.product,
                         .price_atoms = mark_price,
                         .quantity_denominator = instrument.rules.quantity_denominator,
+                        .quantity_numerator = instrument.rules.quantity_numerator,
                     } });
                     try self.trace.append(.mark_price, fact_identity);
                 } else try self.trace.append(.canonical_index_price, fact_identity);
@@ -1719,8 +1818,24 @@ pub const TradingShard = struct {
         if (self.asset_configuration_failed) return false;
         const entry = self.instrumentEntry(instrument) orelse return false;
         if (!entry.margin_configured) return false;
+        const denominator = if (entry.product == .spot) self.economic_projection.spot_quantity_denominator else self.economic_projection.swap_quantity_denominator;
+        const numerator = if (entry.product == .spot) self.economic_projection.spot_quantity_numerator else self.economic_projection.swap_quantity_numerator;
+        if (denominator != 0 and
+            (denominator != entry.rules.quantity_denominator or numerator != entry.rules.quantity_numerator)) return false;
         self.validateTickRange(instrument, entry.margin) catch return false;
+        if (entry.product == .spot) _ = self.baseAtomsPerLot(entry) catch return false;
         return self.asset_registry.consumerCompatible(entry.margin.native_settlement_atoms);
+    }
+
+    fn baseAtomsPerLot(self: *const TradingShard, configured: instrument_registry.Entry) !canonical.AssetAmount {
+        const base = self.asset_registry.get(configured.rules.base_asset) orelse return error.UnknownAssetDefinition;
+        const numerator = try (canonical.Decimal{ .coefficient = configured.rules.quantity_numerator, .scale = 0 }).exactAtoms(base.definition.atomic_scale);
+        if (@rem(numerator, configured.rules.quantity_denominator) != 0) return error.InexactEconomicAmount;
+        const atoms = @divExact(numerator, configured.rules.quantity_denominator);
+        if (atoms <= 0) return error.InvalidInstrumentConfiguration;
+        try self.asset_registry.checkAmount(.{ .asset = base.definition.asset, .atoms = atoms }, true);
+        _ = try std.math.mul(i128, atoms, base.definition.max_quantity_lots);
+        return .{ .asset = base.definition.asset, .atoms = atoms };
     }
 
     fn validateTickRange(self: *const TradingShard, instrument: canonical.InstrumentIdentity, rules: shard_event.MarginRules) !void {
@@ -1731,7 +1846,7 @@ pub const TradingShard = struct {
         };
         try self.asset_registry.checkAmount(.{ .asset = configured.rules.settlement_asset, .atoms = rules.price_tick_atoms }, true);
         const price = try std.math.mul(i128, entry.definition.max_price_ticks, rules.price_tick_atoms);
-        _ = try std.math.mul(i128, price, entry.definition.max_quantity_lots);
+        _ = try std.math.mul(i128, try std.math.mul(i128, price, entry.definition.max_quantity_lots), configured.rules.quantity_numerator);
         _ = try std.math.mul(i128, entry.definition.max_cumulative_atoms, entry.definition.max_quantity_lots);
     }
 
@@ -1744,6 +1859,11 @@ pub const TradingShard = struct {
             const amount = if (T == canonical.InstrumentQuantity) value.lots else value.ticks;
             const limit = if (T == canonical.InstrumentQuantity) asset.definition.max_quantity_lots else asset.definition.max_price_ticks;
             if (amount > limit or amount < -@as(i128, limit)) return error.AssetAmountOutOfRange;
+            if (T == canonical.InstrumentQuantity and instrument.product == .spot) {
+                const base = self.asset_registry.get(instrument.rules.base_asset) orelse return error.UnknownAssetDefinition;
+                if (amount > base.definition.max_quantity_lots or amount < -@as(i128, base.definition.max_quantity_lots))
+                    return error.AssetAmountOutOfRange;
+            }
             return;
         }
         switch (@typeInfo(T)) {
@@ -1778,6 +1898,10 @@ pub const TradingShard = struct {
             fill.price.rules_version != instrument_config.rules.version)
             return error.StaleInstrumentRules;
         const quantity = std.math.cast(i64, fill.quantity.lots) orelse return error.QuantityOutOfRange;
+        if (instrument_config.product == .spot) {
+            const unit = try self.baseAtomsPerLot(instrument_config);
+            try self.asset_registry.checkAmount(.{ .asset = unit.asset, .atoms = try std.math.mul(i128, quantity, unit.atoms) }, true);
+        }
         const price = std.math.cast(i64, fill.price.ticks) orelse return error.PriceOutOfRange;
         const applied_quantity = try self.economic_projection.appliedCanonicalFillQuantity(order_id);
         const next_filled = try std.math.add(i64, applied_quantity, quantity);
@@ -1787,18 +1911,13 @@ pub const TradingShard = struct {
         if (fee.atoms < 0 or rebate.atoms < 0) return error.InvalidEconomicFact;
         var settlement_fee = canonical.AssetAmount{ .asset = self.economic_projection.settlement_asset, .atoms = 0 };
         var settlement_rebate = canonical.AssetAmount{ .asset = self.economic_projection.settlement_asset, .atoms = 0 };
-        var base_fee_quantity: i64 = 0;
-        var base_rebate_quantity: i64 = 0;
-        if ((fee.asset == instrument_config.rules.base_asset and fee.atoms != 0) or (rebate.asset == instrument_config.rules.base_asset and rebate.atoms != 0)) {
-            const base = self.asset_registry.get(instrument_config.rules.base_asset) orelse return error.UnknownAssetDefinition;
-            const atoms_per_unit = try (canonical.Decimal{ .coefficient = 1, .scale = 0 }).exactAtoms(base.definition.atomic_scale);
-            if (atoms_per_unit != instrument_config.rules.quantity_denominator) return error.AssetPrecisionUnsupported;
-        }
+        var base_fee = canonical.AssetAmount{ .asset = if (instrument_config.product == .spot) instrument_config.rules.base_asset else settlement_asset, .atoms = 0 };
+        var base_rebate = base_fee;
         if (fee.atoms != 0) {
             if (fee.asset == self.economic_projection.settlement_asset)
                 settlement_fee = fee
             else if (instrument_config.product == .spot and fee.asset == instrument_config.rules.base_asset)
-                base_fee_quantity = std.math.cast(i64, fee.atoms) orelse return error.Overflow
+                base_fee = fee
             else
                 return error.InvalidEconomicFact;
         }
@@ -1806,7 +1925,7 @@ pub const TradingShard = struct {
             if (rebate.asset == self.economic_projection.settlement_asset)
                 settlement_rebate = rebate
             else if (instrument_config.product == .spot and rebate.asset == instrument_config.rules.base_asset)
-                base_rebate_quantity = std.math.cast(i64, rebate.atoms) orelse return error.Overflow
+                base_rebate = rebate
             else
                 return error.InvalidEconomicFact;
         }
@@ -1822,10 +1941,12 @@ pub const TradingShard = struct {
             .price = .{ .instrument = economic_instrument, .rules_version = fill.price.rules_version, .ticks = fill.price.ticks },
             .price_tick_value = .{ .asset = instrument_config.rules.settlement_asset, .atoms = instrument_config.margin.price_tick_atoms },
             .quantity_denominator = instrument_config.rules.quantity_denominator,
+            .quantity_numerator = instrument_config.rules.quantity_numerator,
             .fee = settlement_fee,
             .rebate = settlement_rebate,
-            .base_fee_quantity = base_fee_quantity,
-            .base_rebate_quantity = base_rebate_quantity,
+            .base_fee = base_fee,
+            .base_atom_value = if (instrument_config.product == .spot) try self.baseAtomsPerLot(instrument_config) else .{ .asset = settlement_asset, .atoms = 0 },
+            .base_rebate = base_rebate,
             .portfolio_margin_ppm = if (instrument_config.margin_configured) instrument_config.margin.internal_initial_margin_ppm else self.internal_initial_margin_ppm,
             .exchange_margin_ppm = if (instrument_config.margin_configured) instrument_config.margin.venue_initial_margin_ppm else self.venue_initial_margin_ppm,
             .product = instrument_config.product,
@@ -1861,7 +1982,7 @@ pub const TradingShard = struct {
                     try self.trace.append(.asset_definition_activated, input.identity);
                 // Until native unit consumers are qualified, new scales remain RecoveryOnly.
                 if ((previous != null and previous.?.definition.version != definition.version) or
-                    (definition.asset != self.economic_projection.settlement_asset and !asset_registry.legacyDefinitionCompatible(definition))) self.oms.recovery_only = true;
+                    (definition.asset != self.economic_projection.settlement_asset and definition.asset != 0x425443)) self.oms.recovery_only = true;
                 return null;
             },
             .control_command => |command| {
@@ -2264,6 +2385,7 @@ pub const TradingShard = struct {
                     .product = instrument.product,
                     .price_atoms = price.price_atoms,
                     .quantity_denominator = instrument.rules.quantity_denominator,
+                    .quantity_numerator = instrument.rules.quantity_numerator,
                 } });
                 try self.recalculateRisk(false);
                 try self.assertClosures();
@@ -2413,11 +2535,14 @@ pub const TradingShard = struct {
                 if (!self.settlementConsumersCompatible(instrument)) return error.AssetPrecisionUnsupported;
                 const changed = try self.applyEconomicProjection(.{ .fill = .{
                     .identity = fill.fill_id,
+                    .order_id = fill.order_id,
                     .side = if (order.side == .buy) .buy else .sell,
                     .quantity = .{ .instrument = instrument, .rules_version = instrument_config.rules.version, .lots = fill.quantity },
                     .price = .{ .instrument = instrument, .rules_version = instrument_config.rules.version, .ticks = fill.price_ticks },
                     .price_tick_value = .{ .asset = instrument_config.rules.settlement_asset, .atoms = instrument_config.margin.price_tick_atoms },
+                    .base_atom_value = if (instrument_config.product == .spot) try self.baseAtomsPerLot(instrument_config) else .{ .asset = settlement_asset, .atoms = 0 },
                     .quantity_denominator = instrument_config.rules.quantity_denominator,
+                    .quantity_numerator = instrument_config.rules.quantity_numerator,
                     .fee = .{ .asset = self.economic_projection.settlement_asset, .atoms = fill.fee_atoms },
                     .rebate = .{ .asset = self.economic_projection.settlement_asset, .atoms = fill.rebate_atoms },
                     .portfolio_margin_ppm = instrument_config.margin.internal_initial_margin_ppm,
@@ -2444,6 +2569,7 @@ pub const TradingShard = struct {
                     .price = .{ .instrument = instrument_config.instrument, .rules_version = instrument_config.rules.version, .ticks = forced.price_ticks },
                     .price_tick_value = .{ .asset = instrument_config.rules.settlement_asset, .atoms = instrument_config.margin.price_tick_atoms },
                     .quantity_denominator = instrument_config.rules.quantity_denominator,
+                    .quantity_numerator = instrument_config.rules.quantity_numerator,
                     .fee = .{ .asset = self.economic_projection.settlement_asset, .atoms = forced.fee_atoms },
                     .penalty = .{ .asset = self.economic_projection.settlement_asset, .atoms = forced.penalty_atoms },
                     .expected_realized_pnl_atoms = forced.expected_realized_pnl_atoms,
@@ -2469,7 +2595,7 @@ pub const TradingShard = struct {
                 const changed = try self.applyEconomicProjection(.{ .account_snapshot = .{
                     .identity = account_snapshot.snapshot_id,
                     .balance = .{ .asset = self.economic_projection.settlement_asset, .atoms = account_snapshot.usdt_balance_atoms },
-                    .spot_asset_quantity = account_snapshot.spot_asset_quantity,
+                    .spot_asset_atoms = account_snapshot.spot_asset_atoms,
                     .swap_position_quantity = account_snapshot.swap_position_quantity,
                     .margin = .{ .asset = self.economic_projection.settlement_asset, .atoms = account_snapshot.margin_atoms },
                 } });
@@ -2648,6 +2774,9 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
     }
     for (shard.economic_projection.ledger[0..shard.economic_projection.ledger_count]) |transaction|
         if (transaction.posting_count > transaction.postings.len) return error.InvalidSnapshotState;
+    try shard.economic_projection.assertClosed();
+    if (shard.asset_registry.get(shard.economic_projection.settlement_asset) != null)
+        try shard.checkEconomicRanges();
 }
 
 const StableInputTag = enum(u8) { core = 1, venue = 2 };
@@ -2862,6 +2991,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, u8, @intFromEnum(entry.product));
         digestInt(&hasher, u32, entry.rules.version);
         digestInt(&hasher, i64, entry.rules.quantity_denominator);
+        digestInt(&hasher, i64, entry.rules.quantity_numerator);
         digestInt(&hasher, u8, @intFromEnum(entry.rules.reservation_model));
         digestInt(&hasher, u8, @intFromEnum(entry.rules.product));
         digestInt(&hasher, u64, entry.rules.settlement_asset);

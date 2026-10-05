@@ -47,14 +47,13 @@ pub const Registry = struct {
         for (self.entries[0..self.count]) |entry| if (!legacyDefinitionCompatible(entry.definition)) return false;
         return true;
     }
-    /// Native settlement consumers coexist with the bounded legacy base-lot path.
+    /// Native quote/base consumers share fixed units; third assets remain gated.
     pub fn consumerCompatible(self: *const Registry, native_settlement_atoms: bool) bool {
         if (!native_settlement_atoms) return self.legacyConsumerCompatible();
         _ = self.get(1) orelse return false;
-        const base = self.get(0x425443) orelse return false;
-        if (!legacyDefinitionCompatible(base.definition)) return false;
+        _ = self.get(0x425443) orelse return false;
         for (self.entries[0..self.count]) |entry| {
-            if (entry.definition.asset != 1 and !legacyDefinitionCompatible(entry.definition)) return false;
+            if (entry.definition.asset != 1 and entry.definition.asset != 0x425443) return false;
         }
         return true;
     }

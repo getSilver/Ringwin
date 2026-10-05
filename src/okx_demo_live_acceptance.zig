@@ -211,7 +211,7 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
     if (policy.startup == .recover) try implementation.resumeAfter(try canonicalSequence(decision_owner, source_session));
     implementation.attachPrivateReconciler(reconciler);
     const adapter = implementation.adapter();
-    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4, .asset_definitions = decision_owner.shard.activatedAssets(), .native_settlement_atoms = if (decision_owner.shard.instrument_registry.get(okx_adapter.btc_usdt_spot)) |configured| configured.margin.native_settlement_atoms else false });
+    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4, .asset_definitions = decision_owner.shard.activatedAssets(), .instrument_definitions = decision_owner.shard.instrument_registry, .native_settlement_atoms = if (decision_owner.shard.instrument_registry.get(okx_adapter.btc_usdt_spot)) |configured| configured.margin.native_settlement_atoms else false });
     const projection = try init.gpa.create(DemoProjection);
     defer init.gpa.destroy(projection);
     projection.* = .{};
@@ -297,7 +297,7 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
         lease = try authority.acquire(.{ .exchange_account = policy.exchange_account, .decision_domain = policy.decision_domain }, policy.node_identity, now);
         have_lease = true;
         var bootstrap_guard: failover.GatewayLeaseGuard = .{ .authority = &authority, .lease = &lease };
-        const mark = std.math.cast(i64, bootstrap_price * 100_000) orelse return error.InvalidTicker;
+        const mark = try std.math.mul(i128, bootstrap_price, policy.price_tick_atoms);
         try policy.initialize(decision_owner, mark, &bootstrap_guard, now, source_session);
     }
     var public_raw: RawSink = .{};
@@ -678,7 +678,7 @@ const RawOwnerResult = struct { digest: [32]u8, raw_count: u64 };
 
 fn checkOkxRawPrivateOwner(store: durable.Store, io: std.Io) !RawOwnerResult {
     var parsed = try demo_authority.Policy.parse(std.testing.allocator,
-        \\{"schema":2,"price_tick_atoms":100000,"startup":"virgin","exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_atoms":20000000,"risk_limit_atoms":15000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
+        \\{"schema":3,"lot_size":{"coefficient":1,"scale":8},"price_tick_atoms":100000,"startup":"virgin","exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_atoms":20000000,"risk_limit_atoms":15000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
     );
     defer parsed.deinit();
     const owner = try std.testing.allocator.create(demo_authority.Owner);
@@ -699,7 +699,7 @@ fn checkOkxRawPrivateOwner(store: durable.Store, io: std.Io) !RawOwnerResult {
     implementation.* = okx_adapter.OkxVenueAdapter.init(std.testing.allocator, &chain, clock_source.interface(), demoProfile(), demoRules());
     implementation.attachPrivateReconciler(reconciler);
     const adapter = implementation.adapter();
-    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4, .asset_definitions = owner.shard.activatedAssets() });
+    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4, .asset_definitions = owner.shard.activatedAssets(), .instrument_definitions = owner.shard.instrument_registry });
     try implementation.beginPrivateSession();
     const times: private.Times = .{ .receive_time_utc_ns = 1_800_000_000_000_000_001, .monotonic_time_ns = 10_000_001, .wall_time_utc_ns = 1_800_000_000_000_000_002 };
     const ws_bootstrap = [_][]const u8{

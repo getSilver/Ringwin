@@ -17,12 +17,12 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-pub const expected_happy_digest = "19a6da355b7275a9a46b0a84b6a2bc443a5c227f395a6ae505d844e3bc3387f9";
+pub const expected_happy_digest = "36c6fb7790389bb8aced8fd2d87b59ae3cdd96c3f8835821d4b63c59fce38c40";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "5240a841a47eee42eb82d195f4037c3f8c36d0d752bcffa73f842b1665de4137",
-    "047090a69f8dbd4053137c0d4b5080f3686ab58dbaf889754c3618ec332d11cb",
-    "49df4a12477dda8bb65657dda2b8dda3ba0543f6b843c5df78834c0962a6e062",
+    "adab82ecbb622fbd5a603bc5c91305f55569d16c4d9527e1cd28bf1a95de4468",
+    "eb14743a5406216928761bdc21e8278cad62a4e05abdb69d1aefbfd10deacb66",
+    "a87f764b2de97d5afb4155955c0844aff4ff374a3dbcc68fac8108107a8a591e",
     expected_happy_digest,
 };
 pub const order_limit_price: i64 = 50_100_000_000;
@@ -216,6 +216,7 @@ pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_mode
             .quantity_denominator = denominator,
             .reservation_model = reservation_model,
             .product = if (reservation_model == .cash) .spot else .isolated_linear_usdt,
+            .base_asset = if (reservation_model == .cash) 0x425443 else 0,
             .venue = 1,
         } } }),
         atGroup(2, .{ .identity = 1, .payload = .{ .margin_rules_activated = .{ .version = 1 } } }),
@@ -225,6 +226,7 @@ pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_mode
             .quantity_denominator = 100_000_000,
             .reservation_model = .cash,
             .product = .spot,
+            .base_asset = 0x425443,
             .venue = 1,
         } } }),
         atGroup(2, .{ .identity = 2, .payload = .{ .margin_rules_activated = .{

@@ -19,6 +19,7 @@ const Binding = struct {
 pub const SimulatedVenue = struct {
     asset_definitions: @import("asset_registry.zig").Registry = .{},
     native_settlement_atoms: bool = false,
+    instrument_definitions: @import("instrument_registry.zig").Registry = .{},
     state: State = .idle,
     binding: ?Binding = null,
     pending: ?canonical.AdapterOutputBatch = null,
@@ -43,6 +44,9 @@ pub const SimulatedVenue = struct {
         self.asset_definitions = config.asset_definitions orelse .{};
         self.native_settlement_atoms = config.native_settlement_atoms;
         self.asset_definitions.validate() catch return error.InvalidConfig;
+        self.instrument_definitions = config.instrument_definitions orelse .{};
+        self.instrument_definitions.validate() catch return error.InvalidConfig;
+        if (self.native_settlement_atoms and self.instrument_definitions.count == 0) return error.InvalidConfig;
         self.binding = .{
             .venue = config.venue,
             .exchange_account = config.exchange_account,
@@ -77,9 +81,9 @@ pub const SimulatedVenue = struct {
         }
 
         switch (request) {
-            .order_command => |command| if (command.operation != .cancel and !self.asset_definitions.consumerCompatible(self.native_settlement_atoms)) return .backpressure,
+            .order_command => |command| if (command.operation != .cancel and !self.instrument_definitions.permitsEconomicUnits(&self.asset_definitions, command.instrument)) return .backpressure,
             .order_batch => |commands| for (commands.slice()) |command| {
-                if (command.operation != .cancel and !self.asset_definitions.consumerCompatible(self.native_settlement_atoms)) return .backpressure;
+                if (command.operation != .cancel and !self.instrument_definitions.permitsEconomicUnits(&self.asset_definitions, command.instrument)) return .backpressure;
             },
             else => {},
         }

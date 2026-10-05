@@ -23,7 +23,7 @@ const place_fee_atoms: i128 = 400_000;
 const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
 pub const acceptance_schema_version: u16 = production_contract.acceptance_schema_version;
-const expected_shared_summary = "0e7d4e5ded6c70f6a322b345eb48f67abb9445309378eefadb429c0316f85263";
+const expected_shared_summary = "237bf0381901daf73f042da573ae3431e1d26940fa85c6562e37d3c5def2fa8b";
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
     return trading.applyStable(shard, stable_journal, .{ .core = input });
@@ -93,7 +93,7 @@ const World = struct {
 
     fn projectedObservation(self: *World, identity: u128) !coordination.MarginObservation {
         var swap_quantity: i64 = 0;
-        var spot_quantity: i64 = 0;
+        var spot_asset_atoms: i128 = 0;
         var swap_margin: i128 = 0;
         var spot_margin: i128 = 0;
         var risk_tier: u8 = 0;
@@ -101,7 +101,7 @@ const World = struct {
         for (self.coordinator.summaries) |record| {
             if (!record.present) return error.IncompleteShardSummaries;
             swap_quantity = try std.math.add(i64, swap_quantity, record.value.swap_quantity);
-            spot_quantity = try std.math.add(i64, spot_quantity, record.value.spot_quantity);
+            spot_asset_atoms = try std.math.add(i128, spot_asset_atoms, record.value.spot_asset_atoms);
             swap_margin = try std.math.add(i128, swap_margin, record.value.exchange_margin_atoms);
             spot_margin = try std.math.add(i128, spot_margin, record.value.spot_margin_atoms);
             risk_tier = @max(risk_tier, record.value.risk_tier);
@@ -112,7 +112,7 @@ const World = struct {
             .barrier = self.coordinator.barrier,
             .venue_net_margin_atoms = try std.math.add(i128, spot_margin, swap_margin),
             .venue_swap_quantity = swap_quantity,
-            .venue_spot_quantity = spot_quantity,
+            .venue_spot_asset_atoms = spot_asset_atoms,
             .venue_spot_margin_atoms = spot_margin,
             .venue_swap_margin_atoms = swap_margin,
             .margin_mode = .isolated,
@@ -439,7 +439,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         .barrier = 1,
         .payload = .{ .account_snapshot = .{
             .cash_atoms = initial_cash - place_fee_atoms,
-            .spot_quantity = 0,
+            .spot_asset_atoms = 0,
             .swap_quantity = 0,
             .margin_atoms = 0,
         } },

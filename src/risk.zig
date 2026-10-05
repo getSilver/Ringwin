@@ -20,6 +20,7 @@ pub const Rules = struct {
     instrument: canonical.InstrumentIdentity,
     rules_version: u64,
     quantity_denominator: i64,
+    quantity_numerator: i64 = 1,
     price_tick_value: canonical.AssetAmount,
     venue_initial_margin_ppm: i64,
     internal_initial_margin_ppm: i64,
@@ -74,7 +75,7 @@ pub const Assessment = struct {
 
 pub fn assess(rules: Rules, limits: Limits, state: State, request: Request) !Assessment {
     const asset = rules.settlement_asset;
-    if (rules.quantity_denominator <= 0 or rules.price_tick_value.asset != asset or rules.price_tick_value.atoms <= 0 or
+    if (rules.quantity_denominator <= 0 or rules.quantity_numerator <= 0 or rules.price_tick_value.asset != asset or rules.price_tick_value.atoms <= 0 or
         request.quantity.instrument != rules.instrument or request.quantity.rules_version != rules.rules_version or
         request.risk_price.instrument != rules.instrument or request.risk_price.rules_version != rules.rules_version or
         state.portfolio_position.instrument != rules.instrument or state.portfolio_position.rules_version != rules.rules_version or
@@ -109,7 +110,7 @@ pub fn assess(rules: Rules, limits: Limits, state: State, request: Request) !Ass
     if (request.product == .spot and request.side == .sell and portfolio_after < 0)
         return error.InsufficientSpotAsset;
 
-    const notional = try notionalAtoms(request.quantity.lots, request.risk_price.ticks, rules.price_tick_value.atoms, rules.quantity_denominator);
+    const notional = try notionalAtoms(request.quantity.lots, request.risk_price.ticks, rules.price_tick_value.atoms, rules.quantity_numerator, rules.quantity_denominator);
     const fee = try rateAtoms(notional, rules.fee_ppm);
     const venue_initial = if (request.product == .isolated_linear_usdt and !venue_reduces)
         try rateAtoms(notional, rules.venue_initial_margin_ppm)
@@ -140,12 +141,12 @@ pub fn assess(rules: Rules, limits: Limits, state: State, request: Request) !Ass
         0;
     const portfolio_buffer = try std.math.sub(i128, try std.math.sub(i128, state.portfolio_cash.atoms, total), portfolio_maintenance);
     const exchange_buffer = try std.math.sub(i128, try std.math.sub(i128, state.exchange_cash.atoms, total), exchange_maintenance);
-    const portfolio_after_notional = try notionalAtoms(try abs128(portfolio_after), state.mark_price.ticks, rules.price_tick_value.atoms, rules.quantity_denominator);
-    const exchange_after_notional = try notionalAtoms(try abs128(exchange_after), state.mark_price.ticks, rules.price_tick_value.atoms, rules.quantity_denominator);
+    const portfolio_after_notional = try notionalAtoms(try abs128(portfolio_after), state.mark_price.ticks, rules.price_tick_value.atoms, rules.quantity_numerator, rules.quantity_denominator);
+    const exchange_after_notional = try notionalAtoms(try abs128(exchange_after), state.mark_price.ticks, rules.price_tick_value.atoms, rules.quantity_numerator, rules.quantity_denominator);
     const portfolio_buffer_bps = try bufferBps(portfolio_buffer, portfolio_after_notional);
     const exchange_buffer_bps = try bufferBps(exchange_buffer, exchange_after_notional);
-    const portfolio_distance = try liquidationDistanceTicks(portfolio_buffer, portfolio_after, rules.quantity_denominator, rules.price_tick_value.atoms);
-    const exchange_distance = try liquidationDistanceTicks(exchange_buffer, exchange_after, rules.quantity_denominator, rules.price_tick_value.atoms);
+    const portfolio_distance = try liquidationDistanceTicks(portfolio_buffer, portfolio_after, rules.quantity_denominator, try std.math.mul(i128, rules.price_tick_value.atoms, rules.quantity_numerator));
+    const exchange_distance = try liquidationDistanceTicks(exchange_buffer, exchange_after, rules.quantity_denominator, try std.math.mul(i128, rules.price_tick_value.atoms, rules.quantity_numerator));
     const account_risk_increasing = !portfolio_reduces or !venue_reduces;
     if (account_risk_increasing and !opens(rules, portfolio_buffer, portfolio_buffer_bps, portfolio_distance)) return error.PortfolioOpeningGateClosed;
     if (account_risk_increasing and !opens(rules, exchange_buffer, exchange_buffer_bps, exchange_distance)) return error.ExchangeOpeningGateClosed;
@@ -176,7 +177,7 @@ fn opens(rules: Rules, buffer: i128, buffer_bps: i64, distance_ticks: i64) bool 
 }
 
 fn maintenanceWithCloseFee(rules: Rules, quantity: i128, price_ticks: i128) !i128 {
-    const notional = try notionalAtoms(try abs128(quantity), price_ticks, rules.price_tick_value.atoms, rules.quantity_denominator);
+    const notional = try notionalAtoms(try abs128(quantity), price_ticks, rules.price_tick_value.atoms, rules.quantity_numerator, rules.quantity_denominator);
     return std.math.add(i128, try rateAtoms(notional, rules.internal_maintenance_margin_ppm), try rateAtoms(notional, rules.fee_ppm));
 }
 
@@ -221,8 +222,8 @@ fn abs128(value: i128) !i128 {
     return if (value < 0) -value else value;
 }
 
-fn notionalAtoms(quantity: i128, price_ticks: i128, tick_atoms: i128, denominator: i64) !i128 {
-    return ceilPositive(try std.math.mul(i128, try std.math.mul(i128, quantity, price_ticks), tick_atoms), denominator);
+fn notionalAtoms(quantity: i128, price_ticks: i128, tick_atoms: i128, quantity_numerator: i64, denominator: i64) !i128 {
+    return ceilPositive(try std.math.mul(i128, try std.math.mul(i128, try std.math.mul(i128, quantity, price_ticks), tick_atoms), quantity_numerator), denominator);
 }
 
 fn rateAtoms(notional: i128, ppm: i64) !i128 {

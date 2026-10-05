@@ -81,6 +81,7 @@ const Bootstrap = struct {
 pub const OkxVenueAdapter = struct {
     asset_definitions: @import("asset_registry.zig").Registry = .{},
     native_settlement_atoms: bool = false,
+    instrument_definitions: @import("instrument_registry.zig").Registry = .{},
     allocator: std.mem.Allocator,
     chain: *live.Chain,
     clock: Clock,
@@ -275,6 +276,13 @@ pub const OkxVenueAdapter = struct {
         self.asset_definitions = config.asset_definitions orelse .{};
         self.native_settlement_atoms = config.native_settlement_atoms;
         self.asset_definitions.validate() catch return error.InvalidConfig;
+        self.instrument_definitions = config.instrument_definitions orelse .{};
+        self.instrument_definitions.validate() catch return error.InvalidConfig;
+        if (self.native_settlement_atoms and self.instrument_definitions.count == 0) return error.InvalidConfig;
+        for ([_]InstrumentRules{ self.rules.spot, self.rules.swap }) |configured| {
+            if (self.instrument_definitions.get(configured.identity) != null)
+                self.instrument_definitions.validateVenueUnits(&self.asset_definitions, configured.identity, self.profile.rules_version, configured.lot_size, configured.tick_size) catch return error.InvalidConfig;
+        }
         self.binding = .{ .venue = config.venue, .account = config.exchange_account, .session = config.adapter_session };
         self.state = .running;
     }
@@ -284,13 +292,13 @@ pub const OkxVenueAdapter = struct {
         if (self.state == .idle) return error.NotStarted;
         if (self.state == .stopped) return .stopped;
         if (self.pending_output != null) return .backpressure;
-        if (self.private_failed or !self.asset_definitions.consumerCompatible(self.native_settlement_atoms)) switch (request) {
-            .order_command => |command| if (command.operation != .cancel) return .backpressure,
+        switch (request) {
+            .order_command => |command| if (command.operation != .cancel and (self.private_failed or !self.instrument_definitions.permitsEconomicUnits(&self.asset_definitions, command.instrument))) return .backpressure,
             .order_batch => |commands| for (commands.slice()) |command| {
-                if (command.operation != .cancel) return .backpressure;
+                if (command.operation != .cancel and (self.private_failed or !self.instrument_definitions.permitsEconomicUnits(&self.asset_definitions, command.instrument))) return .backpressure;
             },
             else => {},
-        };
+        }
         switch (request) {
             .order_command => |command| try self.enqueue(command),
             .order_batch => |commands| {

@@ -2404,7 +2404,7 @@ test "funding forced execution and snapshots preserve auditable local economics"
     try std.testing.expectEqual(@as(u8, 4), projected.ledger_transactions);
 
     const local_exchange = projected.exchange;
-    _ = try run.shard.apply(atGroup(14, .{ .identity = 12, .payload = .{ .economic_account_snapshot = .{ .snapshot_id = 12, .usdt_balance_atoms = before.exchange.usdt_balance_atoms, .spot_asset_quantity = 99, .swap_position_quantity = 99, .margin_atoms = 99 } } }));
+    _ = try run.shard.apply(atGroup(14, .{ .identity = 12, .payload = .{ .economic_account_snapshot = .{ .snapshot_id = 12, .usdt_balance_atoms = before.exchange.usdt_balance_atoms, .spot_asset_atoms = 99, .swap_position_quantity = 99, .margin_atoms = 99 } } }));
     try std.testing.expectEqualDeep(local_exchange, run.shard.economicSummary().exchange);
     try std.testing.expectError(error.ConflictingEconomicIdentity, run.shard.apply(atGroup(15, .{ .identity = 10, .payload = .{ .funding_settlement = .{ .settlement_id = 10, .amount_atoms = -26 } } })));
 }
@@ -2765,4 +2765,92 @@ fn applyHealthyPreludeReplay(replay_shard: *ReplayTradingShard) !void {
     _ = try replay_shard.apply(fixture.canonicalAt(12, 99, .{ .instrument_definition_observed = .{ .instrument = 3, .rules_version = 1 } }));
     _ = try replay_shard.apply(snapshotAt(13, 100));
     _ = try replay_shard.apply(deltaAt(14, 100, 101, 49_850_000_000));
+}
+
+test "direct core spot fill enforces native base single amount before economic commit" {
+    var run = try startScenario();
+    try applyHealthyPrelude(&run);
+    var group: oms_module.IntentGroup = .{ .first_intent_sequence = 79, .count = 1 };
+    group.members[0] = .{ .intent_sequence = 79, .operation = .place, .instrument = spot_instrument, .side = .buy, .quantity = 2, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
+    const placed = try run.shard.apply(atGroup(12, .{ .identity = 79, .payload = .{ .oms_intent_group = group } }));
+    try std.testing.expectEqual(@as(usize, 1), placed.oms_commands.len);
+    var definition = run.shard.asset_registry.get(0x425443).?.definition;
+    definition.version = 2;
+    definition.max_single_atoms = 1; // BTC8 and spot lot1e-8: one atom per lot.
+    _ = try run.shard.apply(atGroup(13, .{ .identity = 2, .payload = .{ .asset_definition_activated = definition } }));
+    const before = run.shard.economicSummary();
+    const digest = run.shard.canonicalStateDigest();
+    try std.testing.expectError(error.AssetAmountOutOfRange, run.shard.apply(atGroup(14, .{ .identity = 1, .payload = .{ .economic_fill = .{ .fill_id = 1, .order_id = placed.oms_commands[0].order_id, .quantity = 2, .price_ticks = 50_000_000 } } })));
+    try std.testing.expectEqualDeep(before, run.shard.economicSummary());
+    try std.testing.expectEqualSlices(u8, &digest, &run.shard.canonicalStateDigest());
+}
+
+test "direct core spot sells release only their uniquely applied inventory" {
+    var run = try startScenario();
+    try applyHealthyPrelude(&run);
+    var group: oms_module.IntentGroup = .{ .first_intent_sequence = 800, .count = 1 };
+    group.members[0] = .{ .intent_sequence = 800, .operation = .place, .instrument = spot_instrument, .side = .buy, .quantity = 3, .limit_price = fixtureOmsPrice(spot_instrument, 100_000_000) };
+    const bought = try run.shard.apply(atGroup(12, .{ .identity = 800, .payload = .{ .oms_intent_group = group } }));
+    _ = try run.shard.apply(atGroup(13, .{ .identity = 801, .payload = .{ .economic_fill = .{ .fill_id = 801, .order_id = bought.oms_commands[0].order_id, .quantity = 3, .price_ticks = 100_000_000 } } }));
+    group.first_intent_sequence = 802;
+    group.members[0].intent_sequence = 802;
+    group.members[0].side = .sell;
+    group.members[0].quantity = 1;
+    const sold = try run.shard.apply(atGroup(14, .{ .identity = 802, .payload = .{ .oms_intent_group = group } }));
+    try std.testing.expectEqual(@as(usize, 1), sold.oms_commands.len);
+    _ = try run.shard.apply(atGroup(15, .{ .identity = 803, .payload = .{ .economic_fill = .{ .fill_id = 803, .order_id = sold.oms_commands[0].order_id, .quantity = 1, .price_ticks = 100_000_000 } } }));
+    try std.testing.expectEqual(@as(i128, 2), run.shard.economicSummary().portfolio.spot_asset_atoms);
+    group.first_intent_sequence = 804;
+    group.members[0].intent_sequence = 804;
+    group.members[0].quantity = 2;
+    const remaining = try run.shard.apply(atGroup(16, .{ .identity = 804, .payload = .{ .oms_intent_group = group } }));
+    try std.testing.expectEqual(@as(usize, 1), remaining.oms_commands.len);
+}
+
+test "spot decreasing native amend reserves confirmed inventory until venue confirmation" {
+    var run = try startScenario();
+    try applyHealthyPrelude(&run);
+    _ = try run.shard.apply(atGroup(11, .{ .identity = 899, .payload = .{ .capability_profile_activation = .{
+        .exchange_account = 2,
+        .instrument = spot_instrument,
+        .venue = 1,
+        .environment = .simulation,
+        .product = .spot,
+        .version = 1,
+        .rules_version = 1,
+        .config_version = 1,
+        .adapter_session = 1,
+        .max_dispatch_age_ns = std.time.ns_per_s,
+        .supports_place = true,
+        .supports_cancel = true,
+        .supports_native_amend = true,
+        .supports_venue_reduce_only = false,
+        .supports_post_only = false,
+        .supports_market_protection = false,
+    } } }));
+    var group: oms_module.IntentGroup = .{ .first_intent_sequence = 900, .count = 1 };
+    group.members[0] = .{ .intent_sequence = 900, .operation = .place, .instrument = spot_instrument, .side = .buy, .quantity = 2, .limit_price = fixtureOmsPrice(spot_instrument, 100_000_000) };
+    const bought = try run.shard.apply(atGroup(12, .{ .identity = 900, .payload = .{ .oms_intent_group = group } }));
+    _ = try run.shard.apply(atGroup(13, .{ .identity = 901, .payload = .{ .economic_fill = .{ .fill_id = 901, .order_id = bought.oms_commands[0].order_id, .quantity = 2, .price_ticks = 100_000_000 } } }));
+    group.first_intent_sequence = 902;
+    group.members[0].intent_sequence = 902;
+    group.members[0].side = .sell;
+    const placed = try run.shard.apply(atGroup(14, .{ .identity = 902, .payload = .{ .oms_intent_group = group } }));
+    const order_id = placed.oms_commands[0].order_id;
+    _ = try run.shard.apply(atGroup(15, .{ .identity = 903, .payload = .{ .oms_execution_report = .{ .report_id = 903, .order_id = order_id, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 2 } } }));
+    var amend: oms_module.IntentGroup = .{ .first_intent_sequence = 904, .count = 1 };
+    amend.members[0] = .{ .intent_sequence = 904, .operation = .amend, .instrument = spot_instrument, .target_order_id = order_id, .expected_revision = 1, .side = .sell, .quantity = 1, .limit_price = fixtureOmsPrice(spot_instrument, 100_000_000), .native_amend = true };
+    const amended = try run.shard.apply(atGroup(16, .{ .identity = 904, .payload = .{ .oms_intent_group = amend } }));
+    try std.testing.expectEqual(@as(usize, 1), amended.oms_commands.len);
+    group.first_intent_sequence = 905;
+    group.members[0].intent_sequence = 905;
+    group.members[0].quantity = 1;
+    const pending = try run.shard.apply(atGroup(17, .{ .identity = 905, .payload = .{ .oms_intent_group = group } }));
+    try std.testing.expectEqual(@as(usize, 0), pending.oms_commands.len);
+    try std.testing.expectEqual(shard_event.RejectReason.insufficient_spot_asset, pending.facts[0].reject_reason);
+    _ = try run.shard.apply(atGroup(18, .{ .identity = 906, .payload = .{ .oms_execution_report = .{ .report_id = 906, .order_id = order_id, .revision = 2, .status = .amended, .cumulative_quantity = 0, .remaining_quantity = 1 } } }));
+    group.first_intent_sequence = 907;
+    group.members[0].intent_sequence = 907;
+    const confirmed = try run.shard.apply(atGroup(19, .{ .identity = 907, .payload = .{ .oms_intent_group = group } }));
+    try std.testing.expectEqual(@as(usize, 1), confirmed.oms_commands.len);
 }

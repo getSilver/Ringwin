@@ -35,12 +35,32 @@ pub const Registry = struct {
         return null;
     }
 
+    pub fn permitsEconomicUnits(self: *const Registry, assets: *const @import("asset_registry.zig").Registry, instrument: canonical.InstrumentIdentity) bool {
+        // Existing isolated decoder fixtures have no order configuration.
+        if (self.count == 0) return assets.legacyConsumerCompatible();
+        const entry = self.get(instrument) orelse return false;
+        return entry.margin_configured and assets.consumerCompatible(entry.margin.native_settlement_atoms);
+    }
+
+    /// Venue parsing units must equal the committed Core lot and tick authority.
+    pub fn validateVenueUnits(self: *const Registry, assets: *const @import("asset_registry.zig").Registry, instrument: canonical.InstrumentIdentity, version: u64, lot: canonical.Decimal, tick: canonical.Decimal) !void {
+        const entry = self.get(instrument) orelse return error.UnknownInstrument;
+        if (entry.rules.version != version or !entry.margin_configured or lot.coefficient <= 0 or tick.coefficient <= 0)
+            return error.InvalidInstrumentConfiguration;
+        const lot_power = try (canonical.Decimal{ .coefficient = 1, .scale = 0 }).exactAtoms(lot.scale);
+        if (try std.math.mul(i128, lot.coefficient, entry.rules.quantity_denominator) !=
+            try std.math.mul(i128, entry.rules.quantity_numerator, lot_power)) return error.InvalidInstrumentConfiguration;
+        const quote = assets.get(entry.rules.settlement_asset) orelse return error.UnknownAssetDefinition;
+        if (try tick.exactAtoms(quote.definition.atomic_scale) != entry.margin.price_tick_atoms)
+            return error.InvalidInstrumentConfiguration;
+    }
+
     /// Adds an entry or confirms an exact duplicate. A changed identity is
     /// never silently replaced, which keeps replay and snapshot state stable.
     pub fn register(self: *Registry, entry: Entry) !bool {
         if (entry.instrument == 0 or entry.rules.version == 0 or
             entry.rules.instrument_identity != entry.instrument or
-            entry.rules.quantity_denominator <= 0 or
+            entry.rules.quantity_denominator <= 0 or entry.rules.quantity_numerator <= 0 or
             entry.rules.product != entry.product or
             (entry.product == .spot and entry.rules.base_asset != 0 and entry.rules.base_asset == entry.rules.settlement_asset))
             return error.InvalidInstrumentConfiguration;
@@ -83,7 +103,7 @@ pub const Registry = struct {
         for (self.entries[0..self.count], 0..) |entry, index| {
             if (entry.instrument == 0 or entry.rules.version == 0 or
                 entry.rules.instrument_identity != entry.instrument or
-                entry.rules.quantity_denominator <= 0 or
+                entry.rules.quantity_denominator <= 0 or entry.rules.quantity_numerator <= 0 or
                 entry.rules.product != entry.product or
                 (entry.product == .spot and entry.rules.base_asset != 0 and entry.rules.base_asset == entry.rules.settlement_asset) or
                 (entry.capability != null and (entry.capability.?.instrument != entry.instrument or

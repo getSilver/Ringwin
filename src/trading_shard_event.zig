@@ -171,7 +171,7 @@ pub const VenueForcedExecution = struct {
 pub const EconomicAccountSnapshot = struct {
     snapshot_id: u64,
     usdt_balance_atoms: i128,
-    spot_asset_quantity: i64,
+    spot_asset_atoms: i128,
     swap_position_quantity: i64,
     margin_atoms: i128,
 };
@@ -230,6 +230,7 @@ pub const InstrumentRules = struct {
     version: u32,
     instrument_identity: u128,
     quantity_denominator: i64,
+    quantity_numerator: i64 = 1,
     reservation_model: ReservationModel,
     /// Explicit product semantics. A zero-value legacy Genesis is normalized
     /// from reservation_model at the compatibility boundary only.
@@ -429,6 +430,7 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u32, value.version);
             try encoded.put(u128, value.instrument_identity);
             try encoded.put(i64, value.quantity_denominator);
+            try encoded.put(i64, value.quantity_numerator);
             try encoded.put(u8, @intFromEnum(value.reservation_model));
             try encoded.put(u8, @intFromEnum(value.product));
             try encoded.put(u64, value.venue);
@@ -609,7 +611,7 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
         .economic_account_snapshot => |value| {
             try encoded.put(u64, value.snapshot_id);
             try encoded.put(i128, value.usdt_balance_atoms);
-            try encoded.put(i64, value.spot_asset_quantity);
+            try encoded.put(i128, value.spot_asset_atoms);
             try encoded.put(i64, value.swap_position_quantity);
             try encoded.put(i128, value.margin_atoms);
         },
@@ -735,6 +737,7 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             .version = try readInputValue(u32, record.payload, &offset),
             .instrument_identity = try readInputValue(u128, record.payload, &offset),
             .quantity_denominator = try readInputValue(i64, record.payload, &offset),
+            .quantity_numerator = try readInputValue(i64, record.payload, &offset),
             .reservation_model = std.enums.fromInt(
                 ReservationModel,
                 try readInputValue(u8, record.payload, &offset),
@@ -986,7 +989,7 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
         .economic_account_snapshot => .{ .economic_account_snapshot = .{
             .snapshot_id = try readInputValue(u64, record.payload, &offset),
             .usdt_balance_atoms = try readInputValue(i128, record.payload, &offset),
-            .spot_asset_quantity = try readInputValue(i64, record.payload, &offset),
+            .spot_asset_atoms = try readInputValue(i128, record.payload, &offset),
             .swap_position_quantity = try readInputValue(i64, record.payload, &offset),
             .margin_atoms = try readInputValue(i128, record.payload, &offset),
         } },

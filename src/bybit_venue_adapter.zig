@@ -76,6 +76,7 @@ const Encoded = struct {
 pub const BybitVenueAdapter = struct {
     asset_definitions: @import("asset_registry.zig").Registry = .{},
     native_settlement_atoms: bool = false,
+    instrument_definitions: @import("instrument_registry.zig").Registry = .{},
     clock: Clock,
     profile: CapabilityProfile,
     auth: Authenticator,
@@ -138,6 +139,19 @@ pub const BybitVenueAdapter = struct {
         self.asset_definitions = config.asset_definitions orelse .{};
         self.native_settlement_atoms = config.native_settlement_atoms;
         self.asset_definitions.validate() catch return error.InvalidConfig;
+        self.instrument_definitions = config.instrument_definitions orelse .{};
+        self.instrument_definitions.validate() catch return error.InvalidConfig;
+        if (self.native_settlement_atoms and self.instrument_definitions.count == 0) return error.InvalidConfig;
+        for ([_]InstrumentRules{ self.profile.spot, self.profile.linear }) |configured| {
+            if (self.instrument_definitions.get(configured.identity) != null)
+                self.instrument_definitions.validateVenueUnits(&self.asset_definitions, configured.identity, self.profile.rules_version, configured.lot_size, configured.tick_size) catch return error.InvalidConfig;
+        }
+        if (self.reconciler) |reconciler| {
+            for ([_]private.InstrumentRules{ reconciler.rules.spot, reconciler.rules.linear }) |configured| {
+                if (self.instrument_definitions.get(configured.identity) != null)
+                    self.instrument_definitions.validateVenueUnits(&self.asset_definitions, configured.identity, configured.rules_version, configured.lot_size, configured.tick_size) catch return error.InvalidConfig;
+            }
+        }
         self.binding = .{ .venue = config.venue, .account = config.exchange_account, .session = config.adapter_session };
         if (self.reconciler) |value| value.beginSession(.{ .venue = config.venue, .account = config.exchange_account, .session = config.adapter_session });
         if (self.reconciler) |reconciler| reconciler.asset_definitions = self.asset_definitions;
@@ -167,9 +181,9 @@ pub const BybitVenueAdapter = struct {
             else => return error.InvalidRequest,
         };
         var output: canonical.AdapterOutputBatch = .{};
-        if (self.private_failed or !self.asset_definitions.consumerCompatible(self.native_settlement_atoms)) for (commands[0..count]) |command| {
-            if (command.operation != .cancel) return .backpressure;
-        };
+        for (commands[0..count]) |command| {
+            if (command.operation != .cancel and (self.private_failed or !self.instrument_definitions.permitsEconomicUnits(&self.asset_definitions, command.instrument))) return .backpressure;
+        }
         if (count > self.profile.batch_max or !self.rateAvailable(self.clock.now())) {
             for (commands[0..count]) |command| self.appendDispatch(&output, command, .not_sent, .adapter_backpressure, null);
             self.pending = output;

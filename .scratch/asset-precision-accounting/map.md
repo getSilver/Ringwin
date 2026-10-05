@@ -51,9 +51,12 @@ Status: open
 
 ## Frontier
 
-- [06：精确记录基础资产费用并分离 atoms 与 lots](issues/06-separate-base-atoms-from-trade-lots.md) — 02–05 离线切片已完成；下一实施前沿。
+- [07：让第三 Asset 费用与返佣形成原币闭环](issues/07-account-for-third-asset-fees.md) — 02–06 离线切片已完成；当前可实施。
+- [08：精确接入原币余额与保证金观察](issues/08-preserve-native-balances-and-margin.md) — 06 blocker 已完成；当前可实施。
 
 ## Decisions so far
+
+- 2026-10-05：06 完成 native base i128 atoms 与 gross成交lots分离、独立资产posting、非单位lot/tick及dust完整保留；组合卖出、report先于Fill及未确认减量native-amend按唯一已应用经济证据保留库存占用。基础资产超i64、精度/累计/极值/冲突持久失败关闭及无发送恢复通过；Debug/ReleaseSafe综合定向各27/27、实际Windows离线链及Linux编译通过，两轴最终审查clean。Frontier推进至07/08；本地证据不构成新在线或生产资格，父Spec原文/状态不变。
 
 - 2026-10-05：05 完成 checked i128 结算 atoms、显式 tick 单位、独立费用/返佣 posting、风险保守舍入与实际结算精确失败关闭；原始 OKX→Owner 高精度/超 i64/重复/冲突/累计越界/畸形报告恢复通过。Debug/ReleaseSafe 定向各 15/15，实际 Windows 离线链及 Linux authoritative 编译通过，两轴最终审查无剩余发现。Frontier 推进到 06；base atoms 与 lots 分离及第三资产尚待后续票。本地证据不构成在线或生产资格，父 Spec 原文与状态不变。
 

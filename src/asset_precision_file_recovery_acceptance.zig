@@ -139,7 +139,7 @@ fn checkFileRecovery(io: std.Io, path: []const u8, point: ?durable.FaultPoint, c
     owner.* = try demo.Owner.bootstrap(store, io, stream);
     try @import("venue_adapter_contract.zig").activateTestAssets(owner);
     const adapter = implementation.adapter();
-    try adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = owner.shard.activatedAssets() });
+    try adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = owner.shard.activatedAssets(), .instrument_definitions = owner.shard.instrument_registry });
     try implementation.beginPrivateSession();
     const subscriptions = [_][]const u8{
         \\{"event":"subscribe","arg":{"channel":"orders","instType":"ANY"}}
@@ -162,7 +162,7 @@ fn checkFileRecovery(io: std.Io, path: []const u8, point: ?durable.FaultPoint, c
     try std.testing.expect(owner.shard.canonical_account.valid);
 
     var parsed = try demo.Policy.parse(allocator,
-        \\{"schema":2,"price_tick_atoms":100000,"startup":"virgin","exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_atoms":20000000,"risk_limit_atoms":15000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
+        \\{"schema":3,"lot_size":{"coefficient":1,"scale":8},"price_tick_atoms":100000,"startup":"virgin","exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_atoms":20000000,"risk_limit_atoms":15000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
     );
     defer parsed.deinit();
     var authority = failover.authorityForTesting();
@@ -258,7 +258,7 @@ fn checkFileRecovery(io: std.Io, path: []const u8, point: ?durable.FaultPoint, c
     if (point == null) try replay_adapter.resumeAfter(committed.sequenceFor(1));
     replay_adapter.attachPrivateReconciler(&replay_reconciler);
     const replay_venue = replay_adapter.adapter();
-    try replay_venue.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = if (point == .commit) owner.shard.activatedAssets() else recovered.shard.activatedAssets() });
+    try replay_venue.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = if (point == .commit) owner.shard.activatedAssets() else recovered.shard.activatedAssets(), .instrument_definitions = if (point == .commit) owner.shard.instrument_registry else recovered.shard.instrument_registry });
     try replay_adapter.beginPrivateSession();
     try replay_adapter.rememberRecoveredOrder(command.order_id, command.client_order_id, command.portfolio_reduce_only, .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = command.quantity }, command.revision);
     const Replay = struct {
@@ -369,7 +369,7 @@ fn checkFileRecovery(io: std.Io, path: []const u8, point: ?durable.FaultPoint, c
         var duplicate_adapter = okx.OkxVenueAdapter.init(allocator, &duplicate_chain, clock.interface(), profile(), rules());
         try duplicate_adapter.resumeAfter(duplicate_index.sequenceFor(1));
         duplicate_adapter.attachPrivateReconciler(&duplicate_reconciler);
-        try duplicate_adapter.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = healthy_owner.shard.activatedAssets() });
+        try duplicate_adapter.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = healthy_owner.shard.activatedAssets(), .instrument_definitions = healthy_owner.shard.instrument_registry });
         try duplicate_adapter.beginPrivateSession();
         try duplicate_adapter.rememberRecoveredOrder(command.order_id, command.client_order_id, command.portfolio_reduce_only, .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = command.quantity }, command.revision);
         var duplicate_sweep: recovery.Sweep = .{ .implementation = &duplicate_adapter, .owner = healthy_owner, .index = &duplicate_index, .reconciliation_identity = 99, .last_sequence = raw_before.committed_barrier };
@@ -393,7 +393,7 @@ fn checkFileRecovery(io: std.Io, path: []const u8, point: ?durable.FaultPoint, c
         var incomplete_adapter = okx.OkxVenueAdapter.init(allocator, &duplicate_chain, clock.interface(), profile(), rules());
         try incomplete_adapter.resumeAfter(incomplete_index.sequenceFor(1));
         incomplete_adapter.attachPrivateReconciler(&incomplete_reconciler);
-        try incomplete_adapter.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = incomplete_owner.shard.activatedAssets() });
+        try incomplete_adapter.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = incomplete_owner.shard.activatedAssets(), .instrument_definitions = incomplete_owner.shard.instrument_registry });
         try incomplete_adapter.beginPrivateSession();
         try incomplete_adapter.rememberRecoveredOrder(command.order_id, command.client_order_id, command.portfolio_reduce_only, .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = command.quantity }, command.revision);
         const incomplete_raw = try healthy_store.interface().recover(io, raw_stream);

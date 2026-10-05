@@ -2,7 +2,7 @@ const std = @import("std");
 const trading = @import("trading_shard.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const snapshot_magic: u64 = 0x54434341574e4952;
-const coordinator_snapshot_version: u16 = 6;
+const coordinator_snapshot_version: u16 = 7;
 const account_margin_gate_identity: u128 = 0x414343544d415247;
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
@@ -34,6 +34,7 @@ pub const ShardSummary = struct {
     lease_version: u64,
     reservation_atoms: i128,
     spot_quantity: i64,
+    spot_asset_atoms: i128 = 0,
     swap_quantity: i64,
     cash_atoms: i128,
     open_orders: u8,
@@ -88,7 +89,7 @@ pub const RiskLease = struct {
 
 /// Account-wide observations normalized once before deterministic fan-out.
 pub const AccountFactPayload = union(enum) {
-    account_snapshot: struct { cash_atoms: i128, spot_quantity: i64 = 0, swap_quantity: i64, margin_atoms: i128 },
+    account_snapshot: struct { cash_atoms: i128, spot_asset_atoms: i128 = 0, swap_quantity: i64, margin_atoms: i128 },
     forced_execution: struct { owner: ?ShardId, quantity: i64, price_ticks: i64, realized_pnl_atoms: i128 = 0, fee_atoms: i128, penalty_atoms: i128 = 0 },
 };
 
@@ -133,7 +134,7 @@ pub const MarginObservation = struct {
     barrier: u64,
     venue_net_margin_atoms: i128,
     venue_swap_quantity: i64,
-    venue_spot_quantity: i64 = 0,
+    venue_spot_asset_atoms: i128 = 0,
     venue_spot_margin_atoms: i128 = 0,
     venue_swap_margin_atoms: i128 = 0,
     margin_mode: AccountMarginMode,
@@ -175,7 +176,7 @@ pub const CoordinationJournal = struct {
         const encoded = try encodeCoordinationEvent(&storage, event);
         try self.stable.append(.{
             .type_id = coordinationEventType(event),
-            .schema_version = 3,
+            .schema_version = 4,
             .flags = trading.journal.input_flag,
             .sequence = try std.math.add(u64, self.stable.last_sequence, 1),
             .source_time = 0,
@@ -209,7 +210,7 @@ pub fn accountFactEvent(delivery: Delivery) !trading.CoreEvent {
             .account_snapshot => |snapshot| .{ .economic_account_snapshot = .{
                 .snapshot_id = identity,
                 .usdt_balance_atoms = snapshot.cash_atoms,
-                .spot_asset_quantity = snapshot.spot_quantity,
+                .spot_asset_atoms = snapshot.spot_asset_atoms,
                 .swap_position_quantity = snapshot.swap_quantity,
                 .margin_atoms = snapshot.margin_atoms,
             } },
@@ -353,6 +354,7 @@ pub fn shardSummaryFromShard(
         .lease_version = shard.risk_lease_version,
         .reservation_atoms = try shard.activeReservationAtoms(),
         .spot_quantity = economics_summary.portfolio.spot.quantity,
+        .spot_asset_atoms = economics_summary.portfolio.spot_asset_atoms,
         .swap_quantity = economics_summary.portfolio.swap.quantity,
         .cash_atoms = economics_summary.portfolio.usdt_balance_atoms,
         .open_orders = open_orders,
@@ -917,7 +919,7 @@ pub const AccountCoordinator = struct {
     pub fn reconcileMargin(self: *AccountCoordinator, observation: MarginObservation) !AccountGate {
         if (observation.identity == 0 or observation.barrier < self.barrier or
             observation.venue_net_margin_atoms < 0 or observation.rules_version == 0 or
-            observation.venue_spot_quantity < 0 or observation.bucket_rounding_atoms < 0)
+            observation.venue_spot_asset_atoms < 0 or observation.bucket_rounding_atoms < 0)
             return error.InvalidMarginObservation;
         if (self.last_margin_observation) |known| {
             if (observation.identity == known.identity) {
@@ -958,7 +960,7 @@ pub const AccountCoordinator = struct {
 
     const AccountProjection = struct {
         swap_quantity: i64 = 0,
-        spot_quantity: i64 = 0,
+        spot_asset_atoms: i128 = 0,
         swap_margin_atoms: i128 = 0,
         spot_margin_atoms: i128 = 0,
         total_margin_atoms: i128 = 0,
@@ -971,7 +973,7 @@ pub const AccountCoordinator = struct {
         for (self.summaries) |record| {
             if (!record.present) return error.IncompleteShardSummaries;
             projected.swap_quantity = try std.math.add(i64, projected.swap_quantity, record.value.swap_quantity);
-            projected.spot_quantity = try std.math.add(i64, projected.spot_quantity, record.value.spot_quantity);
+            projected.spot_asset_atoms = try std.math.add(i128, projected.spot_asset_atoms, record.value.spot_asset_atoms);
             projected.swap_margin_atoms = try std.math.add(i128, projected.swap_margin_atoms, record.value.exchange_margin_atoms);
             projected.spot_margin_atoms = try std.math.add(i128, projected.spot_margin_atoms, record.value.spot_margin_atoms);
             projected.total_margin_atoms = try std.math.add(i128, projected.total_margin_atoms, try std.math.add(i128, record.value.exchange_margin_atoms, record.value.spot_margin_atoms));
@@ -990,7 +992,7 @@ pub const AccountCoordinator = struct {
         const unit = observation.bucket_rounding_atoms;
         const explained = observation.margin_mode == .isolated and
             projected.swap_quantity == observation.venue_swap_quantity and
-            projected.spot_quantity == observation.venue_spot_quantity and
+            projected.spot_asset_atoms == observation.venue_spot_asset_atoms and
             withinRoundingUnit(projected.swap_margin_atoms, observation.venue_swap_margin_atoms, unit) and
             withinRoundingUnit(projected.spot_margin_atoms, observation.venue_spot_margin_atoms, unit) and
             withinRoundingUnit(projected.total_margin_atoms, observation.venue_net_margin_atoms, unit) and
@@ -1351,7 +1353,7 @@ fn encodeCoordinationEvent(destination: []u8, event: CoordinationEvent) ![]const
 }
 
 fn decodeCoordinationEvent(record: trading.journal.Record) !CoordinationEvent {
-    if (record.schema_version != 3 or record.flags != trading.journal.input_flag)
+    if (record.schema_version != 4 or record.flags != trading.journal.input_flag)
         return error.InvalidCoordinationTail;
     var reader: std.Io.Reader = .fixed(record.payload);
     const event: CoordinationEvent = switch (record.type_id) {
@@ -1542,7 +1544,7 @@ fn writeOptionalAccountFact(writer: *std.Io.Writer, fact: ?AccountFact) !void {
         .account_snapshot => |snapshot| {
             try writer.writeByte(0);
             try writer.writeInt(i128, snapshot.cash_atoms, .little);
-            try writer.writeInt(i64, snapshot.spot_quantity, .little);
+            try writer.writeInt(i128, snapshot.spot_asset_atoms, .little);
             try writer.writeInt(i64, snapshot.swap_quantity, .little);
             try writer.writeInt(i128, snapshot.margin_atoms, .little);
         },
@@ -1568,7 +1570,7 @@ fn readOptionalAccountFact(reader: *std.Io.Reader) !?AccountFact {
     const payload: AccountFactPayload = switch (try reader.takeByte()) {
         0 => .{ .account_snapshot = .{
             .cash_atoms = try reader.takeInt(i128, .little),
-            .spot_quantity = try reader.takeInt(i64, .little),
+            .spot_asset_atoms = try reader.takeInt(i128, .little),
             .swap_quantity = try reader.takeInt(i64, .little),
             .margin_atoms = try reader.takeInt(i128, .little),
         } },
@@ -1595,7 +1597,7 @@ fn writeOptionalMarginObservation(writer: *std.Io.Writer, observation: ?MarginOb
         try writer.writeInt(u64, value.barrier, .little);
         try writer.writeInt(i128, value.venue_net_margin_atoms, .little);
         try writer.writeInt(i64, value.venue_swap_quantity, .little);
-        try writer.writeInt(i64, value.venue_spot_quantity, .little);
+        try writer.writeInt(i128, value.venue_spot_asset_atoms, .little);
         try writer.writeInt(i128, value.venue_spot_margin_atoms, .little);
         try writer.writeInt(i128, value.venue_swap_margin_atoms, .little);
         try writer.writeByte(@intFromEnum(value.margin_mode));
@@ -1613,7 +1615,7 @@ fn readOptionalMarginObservation(reader: *std.Io.Reader) !?MarginObservation {
         .barrier = try reader.takeInt(u64, .little),
         .venue_net_margin_atoms = try reader.takeInt(i128, .little),
         .venue_swap_quantity = try reader.takeInt(i64, .little),
-        .venue_spot_quantity = try reader.takeInt(i64, .little),
+        .venue_spot_asset_atoms = try reader.takeInt(i128, .little),
         .venue_spot_margin_atoms = try reader.takeInt(i128, .little),
         .venue_swap_margin_atoms = try reader.takeInt(i128, .little),
         .margin_mode = std.enums.fromInt(AccountMarginMode, try reader.takeByte()) orelse return error.InvalidCoordinatorSnapshot,
@@ -2355,6 +2357,7 @@ fn fourBucketSummaries() !AccountCoordinator {
         summary.exchange_margin_atoms = if (index % 2 == 0) 120 else 80;
         summary.spot_margin_atoms = 10;
         summary.spot_quantity = 3;
+        summary.spot_asset_atoms = 3;
         summary.swap_quantity = if (index < 2) 5 else -5;
         summary.risk_tier = 2;
         summary.liquidation_distance_ticks = 900;
@@ -2369,7 +2372,7 @@ fn bucketObservation(identity: u128, barrier: u64) MarginObservation {
         .barrier = barrier,
         .venue_net_margin_atoms = 440,
         .venue_swap_quantity = 0,
-        .venue_spot_quantity = 12,
+        .venue_spot_asset_atoms = 12,
         .venue_spot_margin_atoms = 40,
         .venue_swap_margin_atoms = 400,
         .margin_mode = .isolated,
@@ -2464,7 +2467,7 @@ test "margin reconciliation covers mode buckets rounding and unknown evidence" {
     try std.testing.expectEqual(MarginReconciliationState.healthy, unknown_holder.margin_reconciliation_state);
 
     var spot_mismatch = bucketObservation(44, 83);
-    spot_mismatch.venue_spot_quantity = 13;
+    spot_mismatch.venue_spot_asset_atoms = 13;
     const position_break = try unknown_holder.reconcileMargin(spot_mismatch);
     try std.testing.expect(position_break.latched);
     for (unknown_holder.leases[0..unknown_holder.lease_count]) |lease| {

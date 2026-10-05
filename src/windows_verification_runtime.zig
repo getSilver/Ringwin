@@ -538,7 +538,10 @@ pub fn runRole(
                 const lease_now = if (demo_transport) try awakeNs(init.io) else 1;
                 var price_bytes: [8]u8 = undefined;
                 if (live_write) try readExact(client, &price_bytes);
-                const mark_price = if (live_write) std.mem.readInt(i64, &price_bytes, .little) else 50_000_000;
+                const mark_price_micros = if (live_write) std.mem.readInt(i64, &price_bytes, .little) else 50_000_000;
+                const instrument = owner.shard.instrument_registry.get(okx_venue.btc_usdt_spot) orelse return error.UnknownInstrument;
+                const quote = owner.shard.activatedAssets().get(instrument.rules.settlement_asset) orelse return error.UnknownAssetDefinition;
+                const mark_price = try (canonical.Decimal{ .coefficient = mark_price_micros, .scale = 6 }).exactAtoms(quote.definition.atomic_scale);
                 policy.value.initializePendingHost(owner, mark_price, &okx_fence.?.guard, lease_now, 1) catch |err| {
                     std.debug.print("windows_demo_prepare_failed={s}\n", .{@errorName(err)});
                     writeStatus(client, .failed) catch {};
@@ -722,7 +725,11 @@ pub fn runRole(
                     const selected = order_command orelse return error.MissingDemoCommand;
                     if (comptime live_transport_enabled) {
                         const transport = owners.curl_transport orelse return error.DemoTransportUnavailable;
-                        try okx_demo.windowsPriceStillExecutable(init, transport, if (selected.side == .buy) .buy else .sell, selected.quantity, @intCast(selected.limit_price.ticks * 100_000));
+                        const configured = restored.shard.instrument_registry.get(selected.instrument) orelse return error.UnknownInstrument;
+                        const quote = restored.shard.activatedAssets().get(configured.rules.settlement_asset) orelse return error.UnknownAssetDefinition;
+                        const price_atoms = try std.math.mul(i128, selected.limit_price.ticks, configured.margin.price_tick_atoms);
+                        const price_micros = try (canonical.Decimal{ .coefficient = price_atoms, .scale = quote.definition.atomic_scale }).exactAtoms(6);
+                        try okx_demo.windowsPriceStillExecutable(init, transport, if (selected.side == .buy) .buy else .sell, selected.quantity, std.math.cast(i64, price_micros) orelse return error.InvalidDemoPrice);
                     } else return error.DemoTransportBuildRequired;
                     try writeStatus(client, .okx_send_ready);
                     var path_storage: [256]u8 = undefined;
@@ -1020,7 +1027,7 @@ const EngineOwners = struct {
         };
 
         const adapter = self.venue.adapter();
-        try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1, .asset_definitions = self.shard_run.shard.activatedAssets(), .native_settlement_atoms = self.shard_run.shard.instrument_registry.get(proved.instrument).?.margin.native_settlement_atoms });
+        try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1, .asset_definitions = self.shard_run.shard.activatedAssets(), .instrument_definitions = self.shard_run.shard.instrument_registry, .native_settlement_atoms = self.shard_run.shard.instrument_registry.get(proved.instrument).?.margin.native_settlement_atoms });
         try self.gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
         try self.gateway.observeAuthority(.{
             .account = 2,
@@ -1461,7 +1468,7 @@ const ExecutionOwners = struct {
             if (wire_id == null and owned.dispatch_submitted) return error.MissingDispatchIdentity;
             try self.venue.rememberRecoveredOrder(owned.id, wire_id orelse owned.client_order_id, owned.portfolio_reduce_only, .{ .instrument = owned.instrument, .rules_version = owned.limit_price.rules_version, .lots = owned.quantity }, owned.revision);
         }
-        try self.venue.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = restored.shard.activatedAssets(), .native_settlement_atoms = if (restored.shard.instrument_registry.get(okx_venue.btc_usdt_spot)) |configured| configured.margin.native_settlement_atoms else false });
+        try self.venue.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = restored.shard.activatedAssets(), .instrument_definitions = restored.shard.instrument_registry, .native_settlement_atoms = if (restored.shard.instrument_registry.get(okx_venue.btc_usdt_spot)) |configured| configured.margin.native_settlement_atoms else false });
         try self.venue.beginPrivateSession();
     }
 
@@ -1764,7 +1771,7 @@ const ExecutionOwners = struct {
 };
 
 const offline_okx_policy =
-    \\{"schema":2,"price_tick_atoms":100000,"startup":"virgin","exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_atoms":20000000,"risk_limit_atoms":15000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
+    \\{"schema":3,"lot_size":{"coefficient":1,"scale":8},"price_tick_atoms":100000,"startup":"virgin","exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_atoms":20000000,"risk_limit_atoms":15000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
 ;
 
 const offline_asset_definitions = @import("asset_registry.zig").testDefinitions(6, 8);

@@ -27,6 +27,7 @@ pub const Policy = struct {
     portfolio_allocation_atoms: i128,
     risk_limit_atoms: i128,
     price_tick_atoms: i128,
+    lot_size: canonical.Decimal,
     native_settlement_atoms: bool = false,
     decision_stream_id: u64,
     dispatch_stream_id: u64,
@@ -37,7 +38,7 @@ pub const Policy = struct {
         const parsed = try std.json.parseFromSlice(Policy, gpa, bytes, .{});
         errdefer parsed.deinit();
         const value = parsed.value;
-        if (value.schema != 2 or value.price_tick_atoms <= 0 or value.exchange_account == 0 or value.portfolio_identity == 0 or
+        if (value.schema != 3 or value.lot_size.coefficient <= 0 or value.lot_size.coefficient > std.math.maxInt(i64) or value.lot_size.scale > 18 or value.price_tick_atoms <= 0 or value.exchange_account == 0 or value.portfolio_identity == 0 or
             value.strategy_identity == 0 or value.activation_identity == 0 or value.config_version == 0 or
             value.portfolio_allocation_atoms <= 0 or value.risk_limit_atoms <= 0 or
             value.risk_limit_atoms > value.portfolio_allocation_atoms or
@@ -75,10 +76,15 @@ pub const Policy = struct {
     /// Configuration is durable before private bootstrap; initialization later
     /// validates the same rules without republishing an identical fact.
     fn activateInstrumentConfiguration(self: Policy, owner: *Owner) !void {
+        if (self.schema != 3 or self.lot_size.coefficient <= 0 or self.lot_size.scale > 18 or self.price_tick_atoms <= 0)
+            return error.InvalidDemoPolicy;
+        const numerator = std.math.cast(i64, self.lot_size.coefficient) orelse return error.InvalidDemoPolicy;
+        const denominator = std.math.cast(i64, try (canonical.Decimal{ .coefficient = 1, .scale = 0 }).exactAtoms(self.lot_size.scale)) orelse return error.InvalidDemoPolicy;
         const rules: @import("trading_shard_event.zig").InstrumentRules = .{
             .version = 1,
             .instrument_identity = okx.btc_usdt_spot,
-            .quantity_denominator = 100_000_000,
+            .quantity_denominator = denominator,
+            .quantity_numerator = numerator,
             .reservation_model = .cash,
             .product = .spot,
             .venue = 1,
@@ -630,7 +636,7 @@ test "Demo owner closes persistence faults at their last proven barrier" {
 fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     const fixture = @import("trading_shard_fixture.zig");
     var parsed = try Policy.parse(std.testing.allocator,
-        \\{"schema":2,"price_tick_atoms":100000,"startup":"virgin","exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_atoms":20000000,"risk_limit_atoms":10000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
+        \\{"schema":3,"price_tick_atoms":100000,"lot_size":{"coefficient":1,"scale":8},"startup":"virgin","exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_atoms":20000000,"risk_limit_atoms":10000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
     );
     defer parsed.deinit();
     const memory = try std.testing.allocator.create(durable.MemoryAdapter);
@@ -913,7 +919,8 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     conflicting_report.venue.event.execution_report.status = .filled;
     try std.testing.expectError(error.ConflictingReportIdentity, conflict_owner.apply(conflicting_report));
     try std.testing.expect(conflict_owner.closed);
-    try std.testing.expectEqual(@as(i64, 19_999), owner.shard.economicSummary().portfolio.spot.quantity);
+    try std.testing.expectEqual(@as(i64, 20_000), owner.shard.economicSummary().portfolio.spot.quantity);
+    try std.testing.expectEqual(@as(i128, 19_999), owner.shard.economicSummary().portfolio.spot_asset_atoms);
 
     _ = try owner.apply(fixture.canonicalAt(23, 7, .{ .execution_report = .{
         .identity = 7,

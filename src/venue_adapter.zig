@@ -5,6 +5,7 @@ pub const Environment = enum { simulation, demo };
 pub const VenueConfig = struct {
     /// Copied only after Owner committed AssetDefinition activation. No implicit units.
     asset_definitions: ?@import("asset_registry.zig").Registry = null,
+    instrument_definitions: ?@import("instrument_registry.zig").Registry = null,
     /// Bound from the committed instrument margin configuration.
     native_settlement_atoms: bool = false,
     venue: canonical.VenueIdentity,
