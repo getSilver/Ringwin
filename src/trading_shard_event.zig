@@ -152,35 +152,35 @@ pub const EconomicFill = struct {
     fill_id: u64,
     order_id: u64,
     quantity: i64,
-    price_micros: i64,
-    fee_micros: i64 = 0,
-    rebate_micros: i64 = 0,
+    price_ticks: i64,
+    fee_atoms: i128 = 0,
+    rebate_atoms: i128 = 0,
 };
 
-pub const FundingSettlement = struct { settlement_id: u64, amount_micros: i64 };
+pub const FundingSettlement = struct { settlement_id: u64, amount_atoms: i128 };
 pub const VenueForcedExecution = struct {
     execution_id: u64,
     source_identity: u128 = 0,
     side: oms_module.Side,
     quantity: i64,
-    price_micros: i64,
-    fee_micros: i64 = 0,
-    penalty_micros: i64 = 0,
-    expected_realized_pnl_micros: ?i64 = null,
+    price_ticks: i64,
+    fee_atoms: i128 = 0,
+    penalty_atoms: i128 = 0,
+    expected_realized_pnl_atoms: ?i128 = null,
 };
 pub const EconomicAccountSnapshot = struct {
     snapshot_id: u64,
-    usdt_balance_micros: i64,
+    usdt_balance_atoms: i128,
     spot_asset_quantity: i64,
     swap_position_quantity: i64,
-    margin_micros: i64,
+    margin_atoms: i128,
 };
 
 pub const EconomicSummary = struct {
     portfolio: economics_module.Layer,
     exchange: economics_module.Layer,
-    treasury_usdt_micros: i64,
-    suspense_usdt_micros: i64,
+    treasury_usdt_atoms: i128,
+    suspense_usdt_atoms: i128,
     ledger_transactions: u8,
     reconciliation_break: bool,
 };
@@ -241,26 +241,27 @@ pub const InstrumentRules = struct {
 
 pub const MarginRules = struct {
     version: u32,
+    native_settlement_atoms: bool = false,
     instrument: canonical.InstrumentIdentity = 0,
-    price_tick_micros: i64 = 1,
+    price_tick_atoms: i128 = 1,
     venue_initial_margin_ppm: i64 = 20_000,
     internal_initial_margin_ppm: i64 = 22_000,
     internal_maintenance_margin_ppm: i64 = 11_000,
     fee_ppm: i64 = 750,
-    opening_buffer_micros: i64 = 0,
+    opening_buffer_atoms: i128 = 0,
     opening_buffer_bps: i64 = 0,
     opening_liquidation_distance_ticks: i64 = 0,
-    warning_buffer_micros: i64 = 0,
-    kill_buffer_micros: i64 = 0,
+    warning_buffer_atoms: i128 = 0,
+    kill_buffer_atoms: i128 = 0,
     warning_buffer_bps: i64 = 0,
     kill_buffer_bps: i64 = 0,
     warning_liquidation_distance_ticks: i64 = 0,
     kill_liquidation_distance_ticks: i64 = 0,
 };
 pub const AccountConfiguration = struct { exchange_account_identity: u128 };
-pub const Balance = struct { cash_micros: i64 };
+pub const Balance = struct { cash_atoms: i128 };
 pub const VirtualPortfolioActivation = struct { portfolio_identity: u128 };
-pub const PortfolioTransfer = struct { amount_micros: i64 };
+pub const PortfolioTransfer = struct { amount_atoms: i128 };
 pub const StrategyActivation = struct {
     strategy_identity: u128,
     config_version: u64,
@@ -284,17 +285,17 @@ pub const HostActivationRevoked = struct {
     reason: HostRevocationReason,
 };
 pub const PrimaryLease = struct { fencing_token: u64 };
-pub const MarkPrice = struct { instrument: canonical.InstrumentIdentity, price_micros: i64 };
+pub const MarkPrice = struct { instrument: canonical.InstrumentIdentity, price_atoms: i128 };
 pub const RiskLease = struct {
     lease_identity: u64 = 0,
     version: u64 = 1,
     valid_through_barrier: u64 = std.math.maxInt(u64),
     open: bool = true,
-    amount_micros: i64,
-    strategy_limit_micros: i64 = 0,
-    portfolio_limit_micros: i64 = 0,
-    exchange_account_limit_micros: i64 = 0,
-    global_limit_micros: i64 = 0,
+    amount_atoms: i128,
+    strategy_limit_atoms: i128 = 0,
+    portfolio_limit_atoms: i128 = 0,
+    exchange_account_limit_atoms: i128 = 0,
+    global_limit_atoms: i128 = 0,
 };
 /// Stable strategy-scoped intent fence used during cutover.
 pub const StrategyCutoverFence = struct { strategy_instance: u128 };
@@ -435,27 +436,28 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u64, value.base_asset);
         },
         .margin_rules_activated => |value| {
+            try encoded.put(u8, @intFromBool(value.native_settlement_atoms));
             try encoded.put(u32, value.version);
             try encoded.put(u128, value.instrument);
-            try encoded.put(i64, value.price_tick_micros);
+            try encoded.put(i128, value.price_tick_atoms);
             try encoded.put(i64, value.venue_initial_margin_ppm);
             try encoded.put(i64, value.internal_initial_margin_ppm);
             try encoded.put(i64, value.internal_maintenance_margin_ppm);
             try encoded.put(i64, value.fee_ppm);
-            try encoded.put(i64, value.opening_buffer_micros);
+            try encoded.put(i128, value.opening_buffer_atoms);
             try encoded.put(i64, value.opening_buffer_bps);
             try encoded.put(i64, value.opening_liquidation_distance_ticks);
-            try encoded.put(i64, value.warning_buffer_micros);
-            try encoded.put(i64, value.kill_buffer_micros);
+            try encoded.put(i128, value.warning_buffer_atoms);
+            try encoded.put(i128, value.kill_buffer_atoms);
             try encoded.put(i64, value.warning_buffer_bps);
             try encoded.put(i64, value.kill_buffer_bps);
             try encoded.put(i64, value.warning_liquidation_distance_ticks);
             try encoded.put(i64, value.kill_liquidation_distance_ticks);
         },
         .account_configuration => |value| try encoded.put(u128, value.exchange_account_identity),
-        .exchange_balance, .opening_balance => |value| try encoded.put(i64, value.cash_micros),
+        .exchange_balance, .opening_balance => |value| try encoded.put(i128, value.cash_atoms),
         .virtual_portfolio_activated => |value| try encoded.put(u128, value.portfolio_identity),
-        .portfolio_transfer => |value| try encoded.put(i64, value.amount_micros),
+        .portfolio_transfer => |value| try encoded.put(i128, value.amount_atoms),
         .strategy_activated => |value| {
             try encoded.put(u128, value.strategy_identity);
             try encoded.put(u64, value.config_version);
@@ -482,15 +484,15 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u64, value.version);
             try encoded.put(u64, value.valid_through_barrier);
             try encoded.put(u8, @intFromBool(value.open));
-            try encoded.put(i64, value.amount_micros);
-            try encoded.put(i64, value.strategy_limit_micros);
-            try encoded.put(i64, value.portfolio_limit_micros);
-            try encoded.put(i64, value.exchange_account_limit_micros);
-            try encoded.put(i64, value.global_limit_micros);
+            try encoded.put(i128, value.amount_atoms);
+            try encoded.put(i128, value.strategy_limit_atoms);
+            try encoded.put(i128, value.portfolio_limit_atoms);
+            try encoded.put(i128, value.exchange_account_limit_atoms);
+            try encoded.put(i128, value.global_limit_atoms);
         },
         .mark_price => |value| {
             try encoded.put(u128, value.instrument);
-            try encoded.put(i64, value.price_micros);
+            try encoded.put(i128, value.price_atoms);
         },
         .timer => |value| {
             try encoded.put(u8, @intFromEnum(value.side));
@@ -585,31 +587,31 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u64, value.fill_id);
             try encoded.put(u64, value.order_id);
             try encoded.put(i64, value.quantity);
-            try encoded.put(i64, value.price_micros);
-            try encoded.put(i64, value.fee_micros);
-            try encoded.put(i64, value.rebate_micros);
+            try encoded.put(i64, value.price_ticks);
+            try encoded.put(i128, value.fee_atoms);
+            try encoded.put(i128, value.rebate_atoms);
         },
         .funding_settlement => |value| {
             try encoded.put(u64, value.settlement_id);
-            try encoded.put(i64, value.amount_micros);
+            try encoded.put(i128, value.amount_atoms);
         },
         .venue_forced_execution => |value| {
             try encoded.put(u64, value.execution_id);
             try encoded.put(u128, value.source_identity);
             try encoded.put(u8, @intFromEnum(value.side));
             try encoded.put(i64, value.quantity);
-            try encoded.put(i64, value.price_micros);
-            try encoded.put(i64, value.fee_micros);
-            try encoded.put(i64, value.penalty_micros);
-            try encoded.put(u8, @intFromBool(value.expected_realized_pnl_micros != null));
-            if (value.expected_realized_pnl_micros) |pnl| try encoded.put(i64, pnl);
+            try encoded.put(i64, value.price_ticks);
+            try encoded.put(i128, value.fee_atoms);
+            try encoded.put(i128, value.penalty_atoms);
+            try encoded.put(u8, @intFromBool(value.expected_realized_pnl_atoms != null));
+            if (value.expected_realized_pnl_atoms) |pnl| try encoded.put(i128, pnl);
         },
         .economic_account_snapshot => |value| {
             try encoded.put(u64, value.snapshot_id);
-            try encoded.put(i64, value.usdt_balance_micros);
+            try encoded.put(i128, value.usdt_balance_atoms);
             try encoded.put(i64, value.spot_asset_quantity);
             try encoded.put(i64, value.swap_position_quantity);
-            try encoded.put(i64, value.margin_micros);
+            try encoded.put(i128, value.margin_atoms);
         },
         .control_command => |value| {
             try encoded.put(u128, value.command_identity);
@@ -746,18 +748,19 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             .base_asset = try readInputValue(u64, record.payload, &offset),
         } },
         .margin_rules_activated => .{ .margin_rules_activated = .{
+            .native_settlement_atoms = try readInputValue(u8, record.payload, &offset) == 1,
             .version = try readInputValue(u32, record.payload, &offset),
             .instrument = try readInputValue(u128, record.payload, &offset),
-            .price_tick_micros = try readInputValue(i64, record.payload, &offset),
+            .price_tick_atoms = try readInputValue(i128, record.payload, &offset),
             .venue_initial_margin_ppm = try readInputValue(i64, record.payload, &offset),
             .internal_initial_margin_ppm = try readInputValue(i64, record.payload, &offset),
             .internal_maintenance_margin_ppm = try readInputValue(i64, record.payload, &offset),
             .fee_ppm = try readInputValue(i64, record.payload, &offset),
-            .opening_buffer_micros = try readInputValue(i64, record.payload, &offset),
+            .opening_buffer_atoms = try readInputValue(i128, record.payload, &offset),
             .opening_buffer_bps = try readInputValue(i64, record.payload, &offset),
             .opening_liquidation_distance_ticks = try readInputValue(i64, record.payload, &offset),
-            .warning_buffer_micros = try readInputValue(i64, record.payload, &offset),
-            .kill_buffer_micros = try readInputValue(i64, record.payload, &offset),
+            .warning_buffer_atoms = try readInputValue(i128, record.payload, &offset),
+            .kill_buffer_atoms = try readInputValue(i128, record.payload, &offset),
             .warning_buffer_bps = try readInputValue(i64, record.payload, &offset),
             .kill_buffer_bps = try readInputValue(i64, record.payload, &offset),
             .warning_liquidation_distance_ticks = try readInputValue(i64, record.payload, &offset),
@@ -767,17 +770,17 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             .exchange_account_identity = try readInputValue(u128, record.payload, &offset),
         } },
         .exchange_balance => .{ .exchange_balance = .{
-            .cash_micros = try readInputValue(i64, record.payload, &offset),
+            .cash_atoms = try readInputValue(i128, record.payload, &offset),
         } },
         .exchange_positions => .exchange_positions,
         .opening_balance => .{ .opening_balance = .{
-            .cash_micros = try readInputValue(i64, record.payload, &offset),
+            .cash_atoms = try readInputValue(i128, record.payload, &offset),
         } },
         .virtual_portfolio_activated => .{ .virtual_portfolio_activated = .{
             .portfolio_identity = try readInputValue(u128, record.payload, &offset),
         } },
         .portfolio_transfer => .{ .portfolio_transfer = .{
-            .amount_micros = try readInputValue(i64, record.payload, &offset),
+            .amount_atoms = try readInputValue(i128, record.payload, &offset),
         } },
         .strategy_activated => .{ .strategy_activated = .{
             .strategy_identity = try readInputValue(u128, record.payload, &offset),
@@ -813,15 +816,15 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             .version = try readInputValue(u64, record.payload, &offset),
             .valid_through_barrier = try readInputValue(u64, record.payload, &offset),
             .open = try readInputBool(record.payload, &offset),
-            .amount_micros = try readInputValue(i64, record.payload, &offset),
-            .strategy_limit_micros = try readInputValue(i64, record.payload, &offset),
-            .portfolio_limit_micros = try readInputValue(i64, record.payload, &offset),
-            .exchange_account_limit_micros = try readInputValue(i64, record.payload, &offset),
-            .global_limit_micros = try readInputValue(i64, record.payload, &offset),
+            .amount_atoms = try readInputValue(i128, record.payload, &offset),
+            .strategy_limit_atoms = try readInputValue(i128, record.payload, &offset),
+            .portfolio_limit_atoms = try readInputValue(i128, record.payload, &offset),
+            .exchange_account_limit_atoms = try readInputValue(i128, record.payload, &offset),
+            .global_limit_atoms = try readInputValue(i128, record.payload, &offset),
         } },
         .mark_price => .{ .mark_price = .{
             .instrument = try readInputValue(u128, record.payload, &offset),
-            .price_micros = try readInputValue(i64, record.payload, &offset),
+            .price_atoms = try readInputValue(i128, record.payload, &offset),
         } },
         .timer => .{ .timer = .{
             .side = std.enums.fromInt(host_gateway.Side, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOrderSide,
@@ -958,34 +961,34 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             .fill_id = try readInputValue(u64, record.payload, &offset),
             .order_id = try readInputValue(u64, record.payload, &offset),
             .quantity = try readInputValue(i64, record.payload, &offset),
-            .price_micros = try readInputValue(i64, record.payload, &offset),
-            .fee_micros = try readInputValue(i64, record.payload, &offset),
-            .rebate_micros = try readInputValue(i64, record.payload, &offset),
+            .price_ticks = try readInputValue(i64, record.payload, &offset),
+            .fee_atoms = try readInputValue(i128, record.payload, &offset),
+            .rebate_atoms = try readInputValue(i128, record.payload, &offset),
         } },
         .funding_settlement => .{ .funding_settlement = .{
             .settlement_id = try readInputValue(u64, record.payload, &offset),
-            .amount_micros = try readInputValue(i64, record.payload, &offset),
+            .amount_atoms = try readInputValue(i128, record.payload, &offset),
         } },
         .venue_forced_execution => .{ .venue_forced_execution = .{
             .execution_id = try readInputValue(u64, record.payload, &offset),
             .source_identity = try readInputValue(u128, record.payload, &offset),
             .side = std.enums.fromInt(oms_module.Side, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOmsSide,
             .quantity = try readInputValue(i64, record.payload, &offset),
-            .price_micros = try readInputValue(i64, record.payload, &offset),
-            .fee_micros = try readInputValue(i64, record.payload, &offset),
-            .penalty_micros = try readInputValue(i64, record.payload, &offset),
-            .expected_realized_pnl_micros = switch (try readInputValue(u8, record.payload, &offset)) {
+            .price_ticks = try readInputValue(i64, record.payload, &offset),
+            .fee_atoms = try readInputValue(i128, record.payload, &offset),
+            .penalty_atoms = try readInputValue(i128, record.payload, &offset),
+            .expected_realized_pnl_atoms = switch (try readInputValue(u8, record.payload, &offset)) {
                 0 => null,
-                1 => try readInputValue(i64, record.payload, &offset),
+                1 => try readInputValue(i128, record.payload, &offset),
                 else => return error.InvalidForcedExecutionPnlEvidence,
             },
         } },
         .economic_account_snapshot => .{ .economic_account_snapshot = .{
             .snapshot_id = try readInputValue(u64, record.payload, &offset),
-            .usdt_balance_micros = try readInputValue(i64, record.payload, &offset),
+            .usdt_balance_atoms = try readInputValue(i128, record.payload, &offset),
             .spot_asset_quantity = try readInputValue(i64, record.payload, &offset),
             .swap_position_quantity = try readInputValue(i64, record.payload, &offset),
-            .margin_micros = try readInputValue(i64, record.payload, &offset),
+            .margin_atoms = try readInputValue(i128, record.payload, &offset),
         } },
         .control_command => .{ .control_command = .{
             .command_identity = try readInputValue(u128, record.payload, &offset),

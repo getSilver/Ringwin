@@ -24,8 +24,10 @@ pub const Policy = struct {
     strategy_identity: u128,
     activation_identity: u128,
     config_version: u64,
-    portfolio_allocation_micros: i64,
-    risk_limit_micros: i64,
+    portfolio_allocation_atoms: i128,
+    risk_limit_atoms: i128,
+    price_tick_atoms: i128,
+    native_settlement_atoms: bool = false,
     decision_stream_id: u64,
     dispatch_stream_id: u64,
     decision_domain: u64,
@@ -35,10 +37,10 @@ pub const Policy = struct {
         const parsed = try std.json.parseFromSlice(Policy, gpa, bytes, .{});
         errdefer parsed.deinit();
         const value = parsed.value;
-        if (value.schema != 1 or value.exchange_account == 0 or value.portfolio_identity == 0 or
+        if (value.schema != 2 or value.price_tick_atoms <= 0 or value.exchange_account == 0 or value.portfolio_identity == 0 or
             value.strategy_identity == 0 or value.activation_identity == 0 or value.config_version == 0 or
-            value.portfolio_allocation_micros <= 0 or value.risk_limit_micros <= 0 or
-            value.risk_limit_micros > value.portfolio_allocation_micros or
+            value.portfolio_allocation_atoms <= 0 or value.risk_limit_atoms <= 0 or
+            value.risk_limit_atoms > value.portfolio_allocation_atoms or
             value.decision_stream_id == 0 or value.dispatch_stream_id == 0 or
             value.decision_stream_id == value.dispatch_stream_id or value.decision_domain == 0 or value.node_identity == 0)
             return error.InvalidDemoPolicy;
@@ -67,22 +69,50 @@ pub const Policy = struct {
             }
             _ = try owner.apply(.{ .core = .{ .identity = @intCast(owner.shard.trace.len + 1), .payload = .{ .asset_definition_activated = definition } } });
         }
+        try self.activateInstrumentConfiguration(owner);
+    }
+
+    /// Configuration is durable before private bootstrap; initialization later
+    /// validates the same rules without republishing an identical fact.
+    fn activateInstrumentConfiguration(self: Policy, owner: *Owner) !void {
+        const rules: @import("trading_shard_event.zig").InstrumentRules = .{
+            .version = 1,
+            .instrument_identity = okx.btc_usdt_spot,
+            .quantity_denominator = 100_000_000,
+            .reservation_model = .cash,
+            .product = .spot,
+            .venue = 1,
+            .base_asset = okx.btc,
+        };
+        const margin: @import("trading_shard_event.zig").MarginRules = .{
+            .version = 1,
+            .instrument = okx.btc_usdt_spot,
+            .price_tick_atoms = self.price_tick_atoms,
+            .native_settlement_atoms = self.native_settlement_atoms,
+        };
+        const known = owner.shard.instrument_registry.get(okx.btc_usdt_spot);
+        if (known == null or !std.meta.eql(known.?.rules, rules))
+            _ = try owner.apply(.{ .core = .{ .identity = @intCast(owner.shard.trace.len + 1), .payload = .{ .instrument_rules_activated = rules } } });
+        const configured = owner.shard.instrument_registry.get(okx.btc_usdt_spot).?;
+        if (!configured.margin_configured or !std.meta.eql(configured.margin, margin))
+            _ = try owner.apply(.{ .core = .{ .identity = @intCast(owner.shard.trace.len + 1), .payload = .{ .margin_rules_activated = margin } } });
     }
 
     /// Virgin startup derives cash only from a complete private account
     /// snapshot; existing BTC/derivative exposure requires recovery instead.
-    pub fn initialize(self: Policy, owner: *Owner, mark_price_micros: i64, guard: *failover.GatewayLeaseGuard, now_ns: u64, adapter_session: u64) !void {
-        try self.initializePendingHost(owner, mark_price_micros, guard, now_ns, adapter_session);
+    pub fn initialize(self: Policy, owner: *Owner, mark_price_atoms: i128, guard: *failover.GatewayLeaseGuard, now_ns: u64, adapter_session: u64) !void {
+        try self.initializePendingHost(owner, mark_price_atoms, guard, now_ns, adapter_session);
         const barrier = owner.shard.trace.len;
         try self.activateHost(owner, .{ .fencing = guard.lease.token, .shard = 0, .generation = 1 }, barrier, owner.shard.canonicalStateDigest());
     }
 
     /// The process-chain variant waits for a real ManagedHost recovery and
     /// activation handshake before sealing the decision owner as ready.
-    pub fn initializePendingHost(self: Policy, owner: *Owner, mark_price_micros: i64, guard: *failover.GatewayLeaseGuard, now_ns: u64, adapter_session: u64) !void {
-        if (!owner.shard.activatedAssets().legacyConsumerCompatible()) return error.AssetPrecisionUnsupported;
+    pub fn initializePendingHost(self: Policy, owner: *Owner, mark_price_atoms: i128, guard: *failover.GatewayLeaseGuard, now_ns: u64, adapter_session: u64) !void {
+        try self.activateInstrumentConfiguration(owner);
+        if (!owner.shard.activatedAssets().consumerCompatible(self.native_settlement_atoms)) return error.AssetPrecisionUnsupported;
         if (owner.ready or owner.closed or owner.shard.trace.len == 0 or
-            owner.stream.id != self.decision_stream_id or mark_price_micros <= 0 or
+            owner.stream.id != self.decision_stream_id or mark_price_atoms <= 0 or
             now_ns == 0 or adapter_session == 0 or
             guard.lease.key.exchange_account != self.exchange_account or
             guard.lease.key.decision_domain != self.decision_domain or
@@ -93,16 +123,16 @@ pub const Policy = struct {
         if (!account.valid or account.exchange_account != self.exchange_account)
             return error.InvalidDemoAccount;
         try requireSafeDemoExposure(account, false);
-        var usdt_total: ?i64 = null;
-        var usdt_available: ?i64 = null;
+        var usdt_total: ?i128 = null;
+        var usdt_available: ?i128 = null;
         for (account.balances[0..account.balance_count]) |balance| {
             if (balance.asset != okx.usdt) continue;
             if (usdt_total != null or balance.total.asset != okx.usdt or balance.available.asset != okx.usdt or
-                balance.total.atoms <= 0 or balance.available.atoms < self.portfolio_allocation_micros or
+                balance.total.atoms <= 0 or balance.available.atoms < self.portfolio_allocation_atoms or
                 balance.available.atoms > balance.total.atoms)
                 return error.InvalidDemoAccount;
-            usdt_total = std.math.cast(i64, balance.total.atoms) orelse return error.InvalidDemoAccount;
-            usdt_available = std.math.cast(i64, balance.available.atoms) orelse return error.InvalidDemoAccount;
+            usdt_total = balance.total.atoms;
+            usdt_available = balance.available.atoms;
         }
         if (usdt_total == null or usdt_available == null) return error.MissingDemoCash;
         const core = struct {
@@ -111,22 +141,12 @@ pub const Policy = struct {
                     return error.UnexpectedDemoOrder;
             }
         }.put;
-        try core(owner, 1, .{ .instrument_rules_activated = .{
-            .version = 1,
-            .instrument_identity = okx.btc_usdt_spot,
-            .quantity_denominator = 100_000_000,
-            .reservation_model = .cash,
-            .product = .spot,
-            .venue = 1,
-            .base_asset = okx.btc,
-        } });
-        try core(owner, 2, .{ .margin_rules_activated = .{ .version = 1, .instrument = okx.btc_usdt_spot, .price_tick_micros = 100_000 } });
         try core(owner, 3, .{ .account_configuration = .{ .exchange_account_identity = self.exchange_account } });
-        try core(owner, 4, .{ .exchange_balance = .{ .cash_micros = usdt_total.? } });
+        try core(owner, 4, .{ .exchange_balance = .{ .cash_atoms = usdt_total.? } });
         try core(owner, 5, .exchange_positions);
-        try core(owner, 6, .{ .opening_balance = .{ .cash_micros = usdt_total.? } });
+        try core(owner, 6, .{ .opening_balance = .{ .cash_atoms = usdt_total.? } });
         try core(owner, 7, .{ .virtual_portfolio_activated = .{ .portfolio_identity = self.portfolio_identity } });
-        try core(owner, 8, .{ .portfolio_transfer = .{ .amount_micros = self.portfolio_allocation_micros } });
+        try core(owner, 8, .{ .portfolio_transfer = .{ .amount_atoms = self.portfolio_allocation_atoms } });
         try core(owner, 9, .{ .strategy_activated = .{
             .strategy_identity = self.strategy_identity,
             .config_version = self.config_version,
@@ -137,10 +157,10 @@ pub const Policy = struct {
         try core(owner, 11, .{ .risk_lease_granted = .{
             .lease_identity = 11,
             .version = 1,
-            .amount_micros = self.risk_limit_micros,
+            .amount_atoms = self.risk_limit_atoms,
             .valid_through_barrier = risk_valid_through,
         } });
-        try core(owner, 12, .{ .mark_price = .{ .instrument = okx.btc_usdt_spot, .price_micros = mark_price_micros } });
+        try core(owner, 12, .{ .mark_price = .{ .instrument = okx.btc_usdt_spot, .price_atoms = mark_price_atoms } });
         try core(owner, 13, .{ .control_command = .{
             .command_identity = 1,
             .content_hash = 1,
@@ -517,6 +537,7 @@ test "Demo owner commits before publication and recovers only a complete barrier
     try std.testing.expectEqualSlices(u8, &source.canonicalStateDigest(), &(try restored.source()).canonicalStateDigest());
     _ = try owner.apply(genesis[1]);
     _ = try owner.apply(genesis[6]);
+    try @import("venue_adapter_contract.zig").activateTestAssets(&owner);
     var account_snapshot = fixture.canonicalAt(2, 1, .{ .account_bootstrap_snapshot = .{
         .identity = 1,
         .exchange_account = 2,
@@ -544,7 +565,7 @@ test "Demo owner commits before publication and recovers only a complete barrier
             .bootstrap = 1,
             .source_stream = 1,
             .source_sequence = sequence,
-            .value = .{ .margin = .{ .value = .{ .amount = .{ .asset = 0x55534454, .atoms = 100 } } } },
+            .value = .{ .margin = .{ .value = .{ .amount = .{ .asset = 1, .atoms = 100 } } } },
         } }));
     }
     restored = try Owner.recover(memory.interface(), undefined, stream);
@@ -609,7 +630,7 @@ test "Demo owner closes persistence faults at their last proven barrier" {
 fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     const fixture = @import("trading_shard_fixture.zig");
     var parsed = try Policy.parse(std.testing.allocator,
-        \\{"schema":1,"startup":"virgin","exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_micros":20000000,"risk_limit_micros":10000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
+        \\{"schema":2,"price_tick_atoms":100000,"startup":"virgin","exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_atoms":20000000,"risk_limit_atoms":10000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
     );
     defer parsed.deinit();
     const memory = try std.testing.allocator.create(durable.MemoryAdapter);
@@ -620,6 +641,9 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     dispatch_memory.* = .init();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     var owner = try Owner.bootstrap(memory.interface(), undefined, stream);
+    const definitions = @import("asset_registry.zig").testDefinitions(6, 8);
+    parsed.value.asset_definitions = &definitions;
+    try parsed.value.activateAssetsForOfflineValidation(&owner);
     var snapshot = fixture.canonicalAt(1, 1, .{ .account_bootstrap_snapshot = .{
         .identity = 1,
         .exchange_account = 2,
@@ -627,7 +651,7 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
         .source_stream = 1,
         .source_sequence = 1,
         .balance_count = 2,
-        .position_count = 1,
+        .position_count = 0,
         .margin_count = 1,
     } });
     snapshot.venue.event.account_bootstrap_snapshot.balances[0] = .{
@@ -718,7 +742,7 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     book.venue.event.l2_book_snapshot.next_ask_quantity.?.instrument = okx.btc_usdt_spot;
     _ = try owner.apply(book);
     try std.testing.expect((try owner.source()).operational_state.effectiveTradingAuthority());
-    try std.testing.expectEqual(@as(i64, 10_000_000), (try owner.source()).risk_lease_micros);
+    try std.testing.expectEqual(@as(i64, 10_000_000), (try owner.source()).risk_lease_atoms);
     const recovered = try Owner.recover(memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &(try owner.source()).canonicalStateDigest(), &(try recovered.source()).canonicalStateDigest());
 
@@ -898,7 +922,7 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
         .venue_order = venue_order,
         .instrument = okx.btc_usdt_spot,
         .exchange_account = 2,
-        .revision = 2,
+        .revision = command.revision,
         .status = .filled,
         .cumulative_quantity = fill_quantity,
         .remaining_quantity = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .lots = 0 },
@@ -959,7 +983,7 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
         const healthy_digest = source.canonicalStateDigest();
         const healthy_economics = source.economicSummary();
         memory.injectFault(.eio);
-        try std.testing.expectError(error.DecisionLogUnavailable, owner.apply(.{ .core = .{ .identity = source.trace.len + 1, .payload = .{ .mark_price = .{ .instrument = okx.btc_usdt_spot, .price_micros = 50_000_000 } } } }));
+        try std.testing.expectError(error.DecisionLogUnavailable, owner.apply(.{ .core = .{ .identity = source.trace.len + 1, .payload = .{ .mark_price = .{ .instrument = okx.btc_usdt_spot, .price_atoms = 50_000_000 } } } }));
         try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
         try std.testing.expectEqual(durable.GateState.open, dispatch_memory.interface().safetyGate());
         try std.testing.expectEqualSlices(u8, &healthy_digest, &owner.shard.canonicalStateDigest());

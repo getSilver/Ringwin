@@ -8,9 +8,9 @@ const canonical = @import("canonical_event.zig");
 
 pub const contract_version: u16 = 1;
 pub const acceptance_schema_version: u16 = 13;
-pub const journal_schema_version: u16 = 25;
-pub const state_schema_version: u32 = 29;
-pub const schema_registry_identity: u64 = 23;
+pub const journal_schema_version: u16 = 26;
+pub const state_schema_version: u32 = 30;
+pub const schema_registry_identity: u64 = 24;
 pub const previous_journal_schema_version: u16 = journal_schema_version - 1;
 pub const previous_state_schema_version: u32 = state_schema_version - 1;
 pub const production_optimize = std.builtin.OptimizeMode.ReleaseSafe;
@@ -178,10 +178,10 @@ pub fn isWindowsProcessChainVerified(evidence: WindowsChainEvidence) bool {
 }
 
 test "production contract freezes Linux scope and schema" {
-    try std.testing.expectEqual(@as(u16, 24), journal_schema_version);
-    try std.testing.expectEqual(@as(u32, 28), state_schema_version);
-    try std.testing.expectEqual(@as(u16, 23), previous_journal_schema_version);
-    try std.testing.expectEqual(@as(u32, 27), previous_state_schema_version);
+    try std.testing.expectEqual(@as(u16, 26), journal_schema_version);
+    try std.testing.expectEqual(@as(u32, 30), state_schema_version);
+    try std.testing.expectEqual(@as(u16, 25), previous_journal_schema_version);
+    try std.testing.expectEqual(@as(u32, 29), previous_state_schema_version);
     try std.testing.expectEqual(@as(usize, 14), support_matrix.len);
     try std.testing.expectEqual(std.builtin.OptimizeMode.ReleaseSafe, production_optimize);
     try std.testing.expectEqual(ProductionPlatform.linux, production_platform);

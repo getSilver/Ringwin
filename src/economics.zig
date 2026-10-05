@@ -16,21 +16,21 @@ pub const max_postings = 4;
 
 pub const Position = struct {
     quantity: i64 = 0,
-    open_cost_micros: i64 = 0,
+    open_cost_atoms: i128 = 0,
 };
 
 pub const Layer = struct {
-    usdt_balance_micros: i64 = 0,
+    usdt_balance_atoms: i128 = 0,
     spot_asset_quantity: i64 = 0,
     spot: Position = .{},
     swap: Position = .{},
-    margin_micros: i64 = 0,
-    fee_micros: i64 = 0,
-    rebate_micros: i64 = 0,
-    funding_micros: i64 = 0,
-    penalty_micros: i64 = 0,
-    realized_pnl_micros: i64 = 0,
-    unrealized_pnl_micros: i64 = 0,
+    margin_atoms: i128 = 0,
+    fee_atoms: i128 = 0,
+    rebate_atoms: i128 = 0,
+    funding_atoms: i128 = 0,
+    penalty_atoms: i128 = 0,
+    realized_pnl_atoms: i128 = 0,
+    unrealized_pnl_atoms: i128 = 0,
 };
 
 pub const LedgerTransaction = struct {
@@ -41,7 +41,7 @@ pub const LedgerTransaction = struct {
     posting_count: u8,
 };
 
-pub const LedgerPosting = struct { account: LedgerAccount, unit: LedgerUnit, amount: i64 };
+pub const LedgerPosting = struct { account: LedgerAccount, unit: LedgerUnit, amount: i128 };
 
 /// Lifecycle ledger facts that are not represented by a market transaction
 /// posting. Kept inside the economic projection so TradingShard has no second
@@ -49,10 +49,10 @@ pub const LedgerPosting = struct { account: LedgerAccount, unit: LedgerUnit, amo
 pub const LedgerSummary = struct {
     transaction_count: u64 = 0,
     portfolio_transfer_count: u64 = 0,
-    portfolio_debits_micros: i64 = 0,
-    portfolio_credits_micros: i64 = 0,
-    exchange_debits_micros: i64 = 0,
-    exchange_credits_micros: i64 = 0,
+    portfolio_debits_atoms: i128 = 0,
+    portfolio_credits_atoms: i128 = 0,
+    exchange_debits_atoms: i128 = 0,
+    exchange_credits_atoms: i128 = 0,
     projections_complete: bool = false,
 };
 
@@ -62,6 +62,7 @@ pub const Fill = struct {
     side: Side,
     quantity: canonical.InstrumentQuantity,
     price: canonical.InstrumentPrice,
+    price_tick_value: canonical.AssetAmount,
     quantity_denominator: i64,
     fee: canonical.AssetAmount = .{ .asset = 0, .atoms = 0 },
     rebate: canonical.AssetAmount = .{ .asset = 0, .atoms = 0 },
@@ -83,10 +84,11 @@ pub const VenueForcedExecution = struct {
     side: Side,
     quantity: canonical.InstrumentQuantity,
     price: canonical.InstrumentPrice,
+    price_tick_value: canonical.AssetAmount,
     quantity_denominator: i64,
     fee: canonical.AssetAmount = .{ .asset = 0, .atoms = 0 },
     penalty: canonical.AssetAmount = .{ .asset = 0, .atoms = 0 },
-    expected_realized_pnl_micros: ?i64 = null,
+    expected_realized_pnl_atoms: ?i128 = null,
     portfolio_margin_ppm: i64 = 0,
     exchange_margin_ppm: i64 = 0,
     product: canonical.Product,
@@ -94,7 +96,7 @@ pub const VenueForcedExecution = struct {
 
 pub const MarkPrice = struct {
     product: canonical.Product,
-    price_micros: i64,
+    price_atoms: i128,
     quantity_denominator: i64,
 };
 
@@ -131,8 +133,8 @@ pub const Projection = struct {
     settlement_asset: canonical.AssetIdentity = settlement_asset,
     portfolio: Layer = .{},
     exchange: Layer = .{},
-    treasury_usdt_micros: i64 = 0,
-    suspense_usdt_micros: i64 = 0,
+    treasury_usdt_atoms: i128 = 0,
+    suspense_usdt_atoms: i128 = 0,
     reconciliation_break: bool = false,
     reconciliation_break_identity: u64 = 0,
     reconciliation_break_identities: [max_facts]u64 = undefined,
@@ -144,8 +146,8 @@ pub const Projection = struct {
     ledger: [max_ledger_transactions]LedgerTransaction = undefined,
     ledger_count: u8 = 0,
     ledger_summary: LedgerSummary = .{},
-    spot_mark_price_micros: i64 = 0,
-    swap_mark_price_micros: i64 = 0,
+    spot_mark_price_atoms: i128 = 0,
+    swap_mark_price_atoms: i128 = 0,
     spot_quantity_denominator: i64 = 0,
     swap_quantity_denominator: i64 = 0,
 
@@ -216,8 +218,8 @@ pub const Projection = struct {
         hashInt(&hasher, canonical.AssetIdentity, self.settlement_asset);
         hashLayer(&hasher, self.portfolio);
         hashLayer(&hasher, self.exchange);
-        hashInt(&hasher, i64, self.treasury_usdt_micros);
-        hashInt(&hasher, i64, self.suspense_usdt_micros);
+        hashInt(&hasher, i128, self.treasury_usdt_atoms);
+        hashInt(&hasher, i128, self.suspense_usdt_atoms);
         hashInt(&hasher, u8, @intFromBool(self.reconciliation_break));
         hashInt(&hasher, u64, self.reconciliation_break_identity);
         hashInt(&hasher, u8, self.reconciliation_break_count);
@@ -244,11 +246,11 @@ pub const Projection = struct {
             for (transaction.postings[0..transaction.posting_count]) |posting| {
                 hashInt(&hasher, u8, @intFromEnum(posting.account));
                 hashInt(&hasher, u8, @intFromEnum(posting.unit));
-                hashInt(&hasher, i64, posting.amount);
+                hashInt(&hasher, i128, posting.amount);
             }
         }
-        hashInt(&hasher, i64, self.spot_mark_price_micros);
-        hashInt(&hasher, i64, self.swap_mark_price_micros);
+        hashInt(&hasher, i128, self.spot_mark_price_atoms);
+        hashInt(&hasher, i128, self.swap_mark_price_atoms);
         hashInt(&hasher, i64, self.spot_quantity_denominator);
         hashInt(&hasher, i64, self.swap_quantity_denominator);
         var result: [Sha256.digest_length]u8 = undefined;
@@ -282,14 +284,14 @@ pub const Projection = struct {
 
     pub fn assertClosed(self: *const Projection) !void {
         for (self.ledger[0..self.ledger_count]) |transaction| {
-            var balances: [3]i64 = .{ 0, 0, 0 };
+            var balances: [3]i128 = .{ 0, 0, 0 };
             for (transaction.postings[0..transaction.posting_count]) |posting| {
                 const index: usize = @intFromEnum(posting.unit);
-                balances[index] = try std.math.add(i64, balances[index], posting.amount);
+                balances[index] = try std.math.add(i128, balances[index], posting.amount);
             }
             for (balances) |balance| if (balance != 0) return error.UnbalancedLedgerTransaction;
         }
-        if (try std.math.add(i64, self.portfolio.usdt_balance_micros, try std.math.add(i64, self.treasury_usdt_micros, self.suspense_usdt_micros)) != self.exchange.usdt_balance_micros or
+        if (try std.math.add(i128, self.portfolio.usdt_balance_atoms, try std.math.add(i128, self.treasury_usdt_atoms, self.suspense_usdt_atoms)) != self.exchange.usdt_balance_atoms or
             self.portfolio.spot_asset_quantity != self.exchange.spot_asset_quantity or
             (!self.reconciliation_break and !sameAttributedEconomics(self.portfolio, self.exchange)))
             return error.EconomicLayerMismatch;
@@ -297,6 +299,7 @@ pub const Projection = struct {
 
     fn applyMirroredFill(self: *Projection, fill: Fill, kind: FactKind) !void {
         if (fill.quantity.lots <= 0 or fill.price.ticks <= 0 or fill.quantity.instrument != fill.price.instrument or
+            fill.price_tick_value.asset != self.settlement_asset or fill.price_tick_value.atoms <= 0 or
             fill.quantity.rules_version != fill.price.rules_version or fill.quantity_denominator <= 0 or
             (fill.fee.atoms != 0 and fill.fee.asset != self.settlement_asset) or
             (fill.rebate.atoms != 0 and fill.rebate.asset != self.settlement_asset) or
@@ -313,8 +316,8 @@ pub const Projection = struct {
         const portfolio_movement = try applyFillToLayer(&portfolio, fill);
         const exchange_movement = try applyFillToLayer(&exchange, fill);
         if (fill.product == .isolated_linear_usdt) {
-            portfolio.margin_micros = try rateMicros(portfolio.swap.open_cost_micros, fill.portfolio_margin_ppm);
-            exchange.margin_micros = try rateMicros(exchange.swap.open_cost_micros, fill.exchange_margin_ppm);
+            portfolio.margin_atoms = try rateAtoms(portfolio.swap.open_cost_atoms, fill.portfolio_margin_ppm);
+            exchange.margin_atoms = try rateAtoms(exchange.swap.open_cost_atoms, fill.exchange_margin_ppm);
         }
         if (portfolio_movement != exchange_movement) return error.EconomicLayerMismatch;
         const position_delta: i64 = if (fill.side == .buy) std.math.cast(i64, fill.quantity.lots) orelse return error.Overflow else -(std.math.cast(i64, fill.quantity.lots) orelse return error.Overflow);
@@ -331,12 +334,12 @@ pub const Projection = struct {
         try self.appendLedger(fill.identity, kind, .portfolio, .trade, portfolio_movement);
         try self.appendLedger(fill.identity, kind, .exchange, .trade, exchange_movement);
         if (fill.fee.atoms > 0) {
-            const fee = std.math.cast(i64, fill.fee.atoms) orelse return error.Overflow;
+            const fee = fill.fee.atoms;
             try self.appendLedger(fill.identity, kind, .portfolio, .fee_expense, -fee);
             try self.appendLedger(fill.identity, kind, .exchange, .fee_expense, -fee);
         }
         if (fill.rebate.atoms > 0) {
-            const rebate = std.math.cast(i64, fill.rebate.atoms) orelse return error.Overflow;
+            const rebate = fill.rebate.atoms;
             try self.appendLedger(fill.identity, kind, .portfolio, .rebate_income, rebate);
             try self.appendLedger(fill.identity, kind, .exchange, .rebate_income, rebate);
         }
@@ -347,30 +350,31 @@ pub const Projection = struct {
 
     fn applyFunding(self: *Projection, funding: FundingSettlement) !void {
         if (funding.amount.asset != self.settlement_asset) return error.InvalidEconomicFact;
-        const amount = std.math.cast(i64, funding.amount.atoms) orelse return error.Overflow;
+        const amount = funding.amount.atoms;
         var fingerprint_hasher = std.hash.Wyhash.init(0);
         fingerprint_hasher.update(std.mem.asBytes(&funding.amount.asset));
         fingerprint_hasher.update(std.mem.asBytes(&funding.amount.atoms));
         const fingerprint = fingerprint_hasher.final();
         if (try self.remember(funding.identity, .funding, fingerprint)) return;
         if (self.portfolio.swap.quantity == 0) {
-            self.exchange.usdt_balance_micros = try std.math.add(i64, self.exchange.usdt_balance_micros, amount);
-            self.exchange.funding_micros = try std.math.add(i64, self.exchange.funding_micros, amount);
-            self.suspense_usdt_micros = try std.math.add(i64, self.suspense_usdt_micros, amount);
+            self.exchange.usdt_balance_atoms = try std.math.add(i128, self.exchange.usdt_balance_atoms, amount);
+            self.exchange.funding_atoms = try std.math.add(i128, self.exchange.funding_atoms, amount);
+            self.suspense_usdt_atoms = try std.math.add(i128, self.suspense_usdt_atoms, amount);
             try self.openBreak(funding.identity);
             try self.appendLedger(funding.identity, .funding, .exchange, .funding_pnl, amount);
             return;
         }
-        self.portfolio.usdt_balance_micros = try std.math.add(i64, self.portfolio.usdt_balance_micros, amount);
-        self.exchange.usdt_balance_micros = try std.math.add(i64, self.exchange.usdt_balance_micros, amount);
-        self.portfolio.funding_micros = try std.math.add(i64, self.portfolio.funding_micros, amount);
-        self.exchange.funding_micros = try std.math.add(i64, self.exchange.funding_micros, amount);
+        self.portfolio.usdt_balance_atoms = try std.math.add(i128, self.portfolio.usdt_balance_atoms, amount);
+        self.exchange.usdt_balance_atoms = try std.math.add(i128, self.exchange.usdt_balance_atoms, amount);
+        self.portfolio.funding_atoms = try std.math.add(i128, self.portfolio.funding_atoms, amount);
+        self.exchange.funding_atoms = try std.math.add(i128, self.exchange.funding_atoms, amount);
         try self.appendLedger(funding.identity, .funding, .portfolio, .funding_pnl, amount);
         try self.appendLedger(funding.identity, .funding, .exchange, .funding_pnl, amount);
     }
 
     fn applyForced(self: *Projection, forced: VenueForcedExecution) !void {
         if (forced.quantity.lots <= 0 or forced.price.ticks <= 0 or
+            forced.price_tick_value.asset != self.settlement_asset or forced.price_tick_value.atoms <= 0 or
             forced.quantity.instrument != forced.price.instrument or
             forced.quantity.rules_version != forced.price.rules_version or
             forced.product != .isolated_linear_usdt or
@@ -379,13 +383,14 @@ pub const Projection = struct {
             forced.fee.atoms < 0 or forced.penalty.atoms < 0)
             return error.InvalidEconomicFact;
         const quantity = std.math.cast(i64, forced.quantity.lots) orelse return error.Overflow;
-        const fee = std.math.cast(i64, forced.fee.atoms) orelse return error.Overflow;
-        const penalty = std.math.cast(i64, forced.penalty.atoms) orelse return error.Overflow;
+        const fee = forced.fee.atoms;
+        const penalty = forced.penalty.atoms;
         const fill: Fill = .{
             .identity = forced.identity,
             .side = forced.side,
             .quantity = forced.quantity,
             .price = forced.price,
+            .price_tick_value = forced.price_tick_value,
             .quantity_denominator = forced.quantity_denominator,
             .fee = forced.fee,
             .portfolio_margin_ppm = forced.portfolio_margin_ppm,
@@ -410,12 +415,12 @@ pub const Projection = struct {
             var exchange = self.exchange;
             const portfolio_movement = try applyFillToLayer(&portfolio, fill);
             const exchange_movement = try applyFillToLayer(&exchange, fill);
-            if (forced.expected_realized_pnl_micros) |expected| {
-                if (try std.math.sub(i64, portfolio.realized_pnl_micros, self.portfolio.realized_pnl_micros) != expected)
+            if (forced.expected_realized_pnl_atoms) |expected| {
+                if (try std.math.sub(i128, portfolio.realized_pnl_atoms, self.portfolio.realized_pnl_atoms) != expected)
                     return error.ForcedExecutionPnlMismatch;
             }
-            portfolio.margin_micros = try rateMicros(portfolio.swap.open_cost_micros, fill.portfolio_margin_ppm);
-            exchange.margin_micros = try rateMicros(exchange.swap.open_cost_micros, fill.exchange_margin_ppm);
+            portfolio.margin_atoms = try rateAtoms(portfolio.swap.open_cost_atoms, fill.portfolio_margin_ppm);
+            exchange.margin_atoms = try rateAtoms(exchange.swap.open_cost_atoms, fill.exchange_margin_ppm);
             const position_delta: i64 = if (forced.side == .buy) quantity else -quantity;
             try self.appendPositionLedger(forced.identity, .forced_execution, .portfolio, .isolated_linear_usdt, position_delta);
             try self.appendPositionLedger(forced.identity, .forced_execution, .exchange, .isolated_linear_usdt, position_delta);
@@ -428,10 +433,10 @@ pub const Projection = struct {
             self.portfolio = portfolio;
             self.exchange = exchange;
             self.setDenominator(forced.product, forced.quantity_denominator);
-            self.portfolio.penalty_micros = try std.math.add(i64, self.portfolio.penalty_micros, penalty);
-            self.exchange.penalty_micros = try std.math.add(i64, self.exchange.penalty_micros, penalty);
-            self.portfolio.usdt_balance_micros = try std.math.sub(i64, self.portfolio.usdt_balance_micros, penalty);
-            self.exchange.usdt_balance_micros = try std.math.sub(i64, self.exchange.usdt_balance_micros, penalty);
+            self.portfolio.penalty_atoms = try std.math.add(i128, self.portfolio.penalty_atoms, penalty);
+            self.exchange.penalty_atoms = try std.math.add(i128, self.exchange.penalty_atoms, penalty);
+            self.portfolio.usdt_balance_atoms = try std.math.sub(i128, self.portfolio.usdt_balance_atoms, penalty);
+            self.exchange.usdt_balance_atoms = try std.math.sub(i128, self.exchange.usdt_balance_atoms, penalty);
             if (penalty > 0) {
                 try self.appendLedger(forced.identity, .forced_execution, .portfolio, .penalty_expense, -penalty);
                 try self.appendLedger(forced.identity, .forced_execution, .exchange, .penalty_expense, -penalty);
@@ -439,20 +444,20 @@ pub const Projection = struct {
             return;
         }
         if (self.seen_count == max_facts) return error.EconomicFactCapacityExceeded;
-        if (forced.expected_realized_pnl_micros != null) return error.ForcedExecutionOwnerMismatch;
+        if (forced.expected_realized_pnl_atoms != null) return error.ForcedExecutionOwnerMismatch;
         self.seen[self.seen_count] = .{ .identity = forced.identity, .kind = .forced_execution, .fingerprint = fingerprint };
         self.seen_count += 1;
         var exchange = self.exchange;
         const movement = try applyFillToLayer(&exchange, fill);
-        exchange.penalty_micros = try std.math.add(i64, exchange.penalty_micros, penalty);
-        exchange.usdt_balance_micros = try std.math.sub(i64, exchange.usdt_balance_micros, penalty);
-        const cash_change = try std.math.sub(i64, exchange.usdt_balance_micros, self.exchange.usdt_balance_micros);
+        exchange.penalty_atoms = try std.math.add(i128, exchange.penalty_atoms, penalty);
+        exchange.usdt_balance_atoms = try std.math.sub(i128, exchange.usdt_balance_atoms, penalty);
+        const cash_change = try std.math.sub(i128, exchange.usdt_balance_atoms, self.exchange.usdt_balance_atoms);
         const position_delta: i64 = if (forced.side == .buy) quantity else -quantity;
         try self.appendPositionLedger(forced.identity, .forced_execution, .exchange, .isolated_linear_usdt, position_delta);
         try self.appendLedger(forced.identity, .forced_execution, .exchange, .trade, movement);
         if (fee > 0) try self.appendLedger(forced.identity, .forced_execution, .exchange, .fee_expense, -fee);
         if (penalty > 0) try self.appendLedger(forced.identity, .forced_execution, .exchange, .penalty_expense, -penalty);
-        self.suspense_usdt_micros = try std.math.add(i64, self.suspense_usdt_micros, cash_change);
+        self.suspense_usdt_atoms = try std.math.add(i128, self.suspense_usdt_atoms, cash_change);
         self.exchange = exchange;
         self.setDenominator(forced.product, forced.quantity_denominator);
         try self.openBreak(forced.identity);
@@ -461,8 +466,8 @@ pub const Projection = struct {
     fn reconcile(self: *Projection, snapshot: AccountSnapshot) !void {
         if (snapshot.balance.asset != self.settlement_asset or snapshot.margin.asset != self.settlement_asset)
             return error.InvalidEconomicFact;
-        const balance = std.math.cast(i64, snapshot.balance.atoms) orelse return error.Overflow;
-        const margin = std.math.cast(i64, snapshot.margin.atoms) orelse return error.Overflow;
+        const balance = snapshot.balance.atoms;
+        const margin = snapshot.margin.atoms;
         var hash = std.hash.Wyhash.init(0);
         hash.update(std.mem.asBytes(&snapshot.identity));
         hash.update(std.mem.asBytes(&snapshot.balance.asset));
@@ -472,31 +477,31 @@ pub const Projection = struct {
         hash.update(std.mem.asBytes(&snapshot.margin.asset));
         hash.update(std.mem.asBytes(&snapshot.margin.atoms));
         if (try self.remember(snapshot.identity, .account_snapshot, hash.final())) return;
-        const differs = balance != self.exchange.usdt_balance_micros or
+        const differs = balance != self.exchange.usdt_balance_atoms or
             snapshot.spot_asset_quantity != self.exchange.spot_asset_quantity or
             snapshot.swap_position_quantity != self.exchange.swap.quantity or
-            margin != self.exchange.margin_micros;
+            margin != self.exchange.margin_atoms;
         if (differs) {
             try self.openBreak(snapshot.identity);
         }
     }
 
     fn valueAt(self: *Projection, mark: MarkPrice) !void {
-        if (mark.price_micros <= 0 or mark.quantity_denominator <= 0) return error.InvalidEconomicFact;
+        if (mark.price_atoms <= 0 or mark.quantity_denominator <= 0) return error.InvalidEconomicFact;
         if (self.denominator(mark.product) != 0 and self.denominator(mark.product) != mark.quantity_denominator)
             return error.InconsistentQuantityDenominator;
         switch (mark.product) {
             .spot => {
-                self.spot_mark_price_micros = mark.price_micros;
+                self.spot_mark_price_atoms = mark.price_atoms;
                 self.spot_quantity_denominator = mark.quantity_denominator;
             },
             .isolated_linear_usdt => {
-                self.swap_mark_price_micros = mark.price_micros;
+                self.swap_mark_price_atoms = mark.price_atoms;
                 self.swap_quantity_denominator = mark.quantity_denominator;
             },
         }
-        self.portfolio.unrealized_pnl_micros = try std.math.add(i64, try self.unrealizedAt(.spot, self.portfolio.spot), try self.unrealizedAt(.isolated_linear_usdt, self.portfolio.swap));
-        self.exchange.unrealized_pnl_micros = try std.math.add(i64, try self.unrealizedAt(.spot, self.exchange.spot), try self.unrealizedAt(.isolated_linear_usdt, self.exchange.swap));
+        self.portfolio.unrealized_pnl_atoms = try std.math.add(i128, try self.unrealizedAt(.spot, self.portfolio.spot), try self.unrealizedAt(.isolated_linear_usdt, self.portfolio.swap));
+        self.exchange.unrealized_pnl_atoms = try std.math.add(i128, try self.unrealizedAt(.spot, self.exchange.spot), try self.unrealizedAt(.isolated_linear_usdt, self.exchange.swap));
     }
 
     fn denominator(self: *const Projection, product: canonical.Product) i64 {
@@ -507,8 +512,8 @@ pub const Projection = struct {
         if (product == .spot) self.spot_quantity_denominator = value else self.swap_quantity_denominator = value;
     }
 
-    fn unrealizedAt(self: *const Projection, product: canonical.Product, position: Position) !i64 {
-        const price = if (product == .spot) self.spot_mark_price_micros else self.swap_mark_price_micros;
+    fn unrealizedAt(self: *const Projection, product: canonical.Product, position: Position) !i128 {
+        const price = if (product == .spot) self.spot_mark_price_atoms else self.swap_mark_price_atoms;
         if (price == 0) return 0;
         return unrealized(position, price, self.denominator(product));
     }
@@ -526,7 +531,7 @@ pub const Projection = struct {
         return false;
     }
 
-    fn appendLedger(self: *Projection, identity: u64, kind: FactKind, layer: LedgerLayer, account: LedgerAccount, cash_delta: i64) !void {
+    fn appendLedger(self: *Projection, identity: u64, kind: FactKind, layer: LedgerLayer, account: LedgerAccount, cash_delta: i128) !void {
         if (cash_delta == 0) return;
         if (self.ledger_count == max_ledger_transactions) return error.LedgerCapacityExceeded;
         self.ledger[self.ledger_count] = .{
@@ -534,7 +539,7 @@ pub const Projection = struct {
             .kind = kind,
             .layer = layer,
             .posting_count = 2,
-            .postings = .{ .{ .account = .cash, .unit = .settlement_atoms, .amount = cash_delta }, .{ .account = account, .unit = .settlement_atoms, .amount = try std.math.sub(i64, 0, cash_delta) }, undefined, undefined },
+            .postings = .{ .{ .account = .cash, .unit = .settlement_atoms, .amount = cash_delta }, .{ .account = account, .unit = .settlement_atoms, .amount = try std.math.sub(i128, 0, cash_delta) }, undefined, undefined },
         };
         self.ledger_count += 1;
     }
@@ -610,19 +615,19 @@ fn sortLedger(values: []LedgerTransaction) void {
 }
 
 fn hashLayer(hasher: *Sha256, layer: Layer) void {
-    hashInt(hasher, i64, layer.usdt_balance_micros);
+    hashInt(hasher, i128, layer.usdt_balance_atoms);
     hashInt(hasher, i64, layer.spot_asset_quantity);
     hashInt(hasher, i64, layer.spot.quantity);
-    hashInt(hasher, i64, layer.spot.open_cost_micros);
+    hashInt(hasher, i128, layer.spot.open_cost_atoms);
     hashInt(hasher, i64, layer.swap.quantity);
-    hashInt(hasher, i64, layer.swap.open_cost_micros);
-    hashInt(hasher, i64, layer.margin_micros);
-    hashInt(hasher, i64, layer.fee_micros);
-    hashInt(hasher, i64, layer.rebate_micros);
-    hashInt(hasher, i64, layer.funding_micros);
-    hashInt(hasher, i64, layer.penalty_micros);
-    hashInt(hasher, i64, layer.realized_pnl_micros);
-    hashInt(hasher, i64, layer.unrealized_pnl_micros);
+    hashInt(hasher, i128, layer.swap.open_cost_atoms);
+    hashInt(hasher, i128, layer.margin_atoms);
+    hashInt(hasher, i128, layer.fee_atoms);
+    hashInt(hasher, i128, layer.rebate_atoms);
+    hashInt(hasher, i128, layer.funding_atoms);
+    hashInt(hasher, i128, layer.penalty_atoms);
+    hashInt(hasher, i128, layer.realized_pnl_atoms);
+    hashInt(hasher, i128, layer.unrealized_pnl_atoms);
 }
 
 fn hashInt(hasher: *Sha256, comptime T: type, value: T) void {
@@ -635,23 +640,27 @@ fn sameAttributedEconomics(portfolio: Layer, exchange: Layer) bool {
     return portfolio.spot_asset_quantity == exchange.spot_asset_quantity and
         std.meta.eql(portfolio.spot, exchange.spot) and
         std.meta.eql(portfolio.swap, exchange.swap) and
-        portfolio.fee_micros == exchange.fee_micros and
-        portfolio.rebate_micros == exchange.rebate_micros and
-        portfolio.funding_micros == exchange.funding_micros and
-        portfolio.penalty_micros == exchange.penalty_micros and
-        portfolio.realized_pnl_micros == exchange.realized_pnl_micros and
-        portfolio.unrealized_pnl_micros == exchange.unrealized_pnl_micros;
+        portfolio.fee_atoms == exchange.fee_atoms and
+        portfolio.rebate_atoms == exchange.rebate_atoms and
+        portfolio.funding_atoms == exchange.funding_atoms and
+        portfolio.penalty_atoms == exchange.penalty_atoms and
+        portfolio.realized_pnl_atoms == exchange.realized_pnl_atoms and
+        portfolio.unrealized_pnl_atoms == exchange.unrealized_pnl_atoms;
 }
 
-fn applyFillToLayer(layer: *Layer, fill: Fill) !i64 {
+fn applyFillToLayer(layer: *Layer, fill: Fill) !i128 {
     const quantity = std.math.cast(i64, fill.quantity.lots) orelse return error.Overflow;
-    const price = std.math.cast(i64, fill.price.ticks) orelse return error.Overflow;
-    const fee = std.math.cast(i64, fill.fee.atoms) orelse return error.Overflow;
-    const rebate = std.math.cast(i64, fill.rebate.atoms) orelse return error.Overflow;
-    const notional = try ceilPositive(@as(i128, quantity) * price, fill.quantity_denominator);
-    const net_fee = try std.math.sub(i64, fee, rebate);
-    layer.fee_micros = try std.math.add(i64, layer.fee_micros, fee);
-    layer.rebate_micros = try std.math.add(i64, layer.rebate_micros, rebate);
+    if (fill.price_tick_value.atoms <= 0 or fill.quantity_denominator <= 0)
+        return error.InvalidEconomicFact;
+    const fee = fill.fee.atoms;
+    const rebate = fill.rebate.atoms;
+    const price = try std.math.mul(i128, fill.price.ticks, fill.price_tick_value.atoms);
+    const numerator = try std.math.mul(i128, quantity, price);
+    if (@rem(numerator, fill.quantity_denominator) != 0) return error.InexactEconomicAmount;
+    const notional = @divExact(numerator, fill.quantity_denominator);
+    const net_fee = try std.math.sub(i128, fee, rebate);
+    layer.fee_atoms = try std.math.add(i128, layer.fee_atoms, fee);
+    layer.rebate_atoms = try std.math.add(i128, layer.rebate_atoms, rebate);
     if (fill.product == .spot) {
         const direction: i64 = if (fill.side == .buy) 1 else -1;
         const traded_delta = try std.math.mul(i64, direction, quantity);
@@ -665,46 +674,46 @@ fn applyFillToLayer(layer: *Layer, fill: Fill) !i64 {
         const realized = try updatePosition(&layer.spot, direction, position_quantity, notional);
         layer.spot_asset_quantity = next_asset;
         const trade_cash_delta = if (fill.side == .buy) -notional else notional;
-        layer.usdt_balance_micros = try std.math.add(i64, layer.usdt_balance_micros, try std.math.sub(i64, trade_cash_delta, net_fee));
-        layer.realized_pnl_micros = try std.math.add(i64, layer.realized_pnl_micros, realized);
+        layer.usdt_balance_atoms = try std.math.add(i128, layer.usdt_balance_atoms, try std.math.sub(i128, trade_cash_delta, net_fee));
+        layer.realized_pnl_atoms = try std.math.add(i128, layer.realized_pnl_atoms, realized);
         return trade_cash_delta;
     } else if (fill.product == .isolated_linear_usdt) {
         const direction: i64 = if (fill.side == .buy) 1 else -1;
         const realized = try updatePosition(&layer.swap, direction, quantity, notional);
-        layer.usdt_balance_micros = try std.math.add(i64, layer.usdt_balance_micros, try std.math.sub(i64, realized, net_fee));
-        layer.realized_pnl_micros = try std.math.add(i64, layer.realized_pnl_micros, realized);
+        layer.usdt_balance_atoms = try std.math.add(i128, layer.usdt_balance_atoms, try std.math.sub(i128, realized, net_fee));
+        layer.realized_pnl_atoms = try std.math.add(i128, layer.realized_pnl_atoms, realized);
         return realized;
     } else return error.UnknownInstrument;
 }
 
-fn updatePosition(position: *Position, direction: i64, quantity: i64, notional: i64) !i64 {
+fn updatePosition(position: *Position, direction: i64, quantity: i64, notional: i128) !i128 {
     const signed_quantity = try std.math.mul(i64, direction, quantity);
     if (position.quantity == 0 or (position.quantity > 0) == (signed_quantity > 0)) {
         position.quantity = try std.math.add(i64, position.quantity, signed_quantity);
-        position.open_cost_micros = try std.math.add(i64, position.open_cost_micros, notional);
+        position.open_cost_atoms = try std.math.add(i128, position.open_cost_atoms, notional);
         return 0;
     }
     const closing = @min(abs(position.quantity), quantity);
-    const released_cost = std.math.cast(i64, @divFloor(@as(i128, position.open_cost_micros) * closing, abs(position.quantity))) orelse return error.Overflow;
-    const closing_notional = std.math.cast(i64, @divFloor(@as(i128, notional) * closing, quantity)) orelse return error.Overflow;
-    const realized = if (position.quantity > 0) closing_notional - released_cost else released_cost - closing_notional;
+    const released_cost = @divFloor(try std.math.mul(i128, position.open_cost_atoms, closing), abs(position.quantity));
+    const closing_notional = @divFloor(try std.math.mul(i128, notional, closing), quantity);
+    const realized = if (position.quantity > 0) try std.math.sub(i128, closing_notional, released_cost) else try std.math.sub(i128, released_cost, closing_notional);
     const next = try std.math.add(i64, position.quantity, signed_quantity);
     if (next == 0) {
         position.* = .{};
     } else if ((next > 0) == (position.quantity > 0)) {
         position.quantity = next;
-        position.open_cost_micros = try std.math.sub(i64, position.open_cost_micros, released_cost);
+        position.open_cost_atoms = try std.math.sub(i128, position.open_cost_atoms, released_cost);
     } else {
         position.quantity = next;
-        position.open_cost_micros = try std.math.sub(i64, notional, closing_notional);
+        position.open_cost_atoms = try std.math.sub(i128, notional, closing_notional);
     }
     return realized;
 }
 
-fn unrealized(position: Position, price: i64, denominator: i64) !i64 {
+fn unrealized(position: Position, price: i128, denominator: i64) !i128 {
     if (position.quantity == 0) return 0;
-    const value = try ceilPositive(@as(i128, abs(position.quantity)) * price, denominator);
-    return if (position.quantity > 0) value - position.open_cost_micros else position.open_cost_micros - value;
+    const value = try ceilPositive(try std.math.mul(i128, abs(position.quantity), price), denominator);
+    return if (position.quantity > 0) try std.math.sub(i128, value, position.open_cost_atoms) else try std.math.sub(i128, position.open_cost_atoms, value);
 }
 
 fn fingerprintFill(fill: Fill) u64 {
@@ -715,6 +724,8 @@ fn fingerprintFill(fill: Fill) u64 {
     hash.update(&.{@intFromEnum(fill.side)});
     hash.update(std.mem.asBytes(&fill.quantity.lots));
     hash.update(std.mem.asBytes(&fill.price.ticks));
+    hash.update(std.mem.asBytes(&fill.price_tick_value.asset));
+    hash.update(std.mem.asBytes(&fill.price_tick_value.atoms));
     hash.update(std.mem.asBytes(&fill.quantity_denominator));
     hash.update(std.mem.asBytes(&fill.fee.asset));
     hash.update(std.mem.asBytes(&fill.fee.atoms));
@@ -737,13 +748,15 @@ fn fingerprintForced(forced: VenueForcedExecution) u64 {
     hash.update(std.mem.asBytes(&forced.quantity.rules_version));
     hash.update(std.mem.asBytes(&forced.quantity.lots));
     hash.update(std.mem.asBytes(&forced.price.ticks));
+    hash.update(std.mem.asBytes(&forced.price_tick_value.asset));
+    hash.update(std.mem.asBytes(&forced.price_tick_value.atoms));
     hash.update(std.mem.asBytes(&forced.quantity_denominator));
     hash.update(std.mem.asBytes(&forced.fee.asset));
     hash.update(std.mem.asBytes(&forced.fee.atoms));
     hash.update(std.mem.asBytes(&forced.penalty.asset));
     hash.update(std.mem.asBytes(&forced.penalty.atoms));
-    hash.update(&.{@intFromBool(forced.expected_realized_pnl_micros != null)});
-    if (forced.expected_realized_pnl_micros) |pnl| hash.update(std.mem.asBytes(&pnl));
+    hash.update(&.{@intFromBool(forced.expected_realized_pnl_atoms != null)});
+    if (forced.expected_realized_pnl_atoms) |pnl| hash.update(std.mem.asBytes(&pnl));
     hash.update(std.mem.asBytes(&forced.portfolio_margin_ppm));
     hash.update(std.mem.asBytes(&forced.exchange_margin_ppm));
     hash.update(&.{@intFromEnum(forced.product)});
@@ -754,14 +767,14 @@ fn abs(value: i64) i64 {
     return std.math.cast(i64, if (@as(i128, value) < 0) -@as(i128, value) else @as(i128, value)) orelse std.math.maxInt(i64);
 }
 
-fn ceilPositive(numerator: i128, denominator: i128) !i64 {
+fn ceilPositive(numerator: i128, denominator: i128) !i128 {
     if (numerator < 0 or denominator <= 0) return error.InvalidEconomicFact;
-    return std.math.cast(i64, @divFloor(numerator + denominator - 1, denominator)) orelse error.Overflow;
+    return std.math.add(i128, @divFloor(numerator, denominator), @as(i128, if (@rem(numerator, denominator) == 0) 0 else 1));
 }
 
-fn rateMicros(notional: i64, ppm: i64) !i64 {
+fn rateAtoms(notional: i128, ppm: i64) !i128 {
     if (ppm < 0) return error.InvalidEconomicFact;
-    return ceilPositive(@as(i128, notional) * ppm, 1_000_000);
+    return ceilPositive(try std.math.mul(i128, notional, ppm), 1_000_000);
 }
 
 fn fixtureQuantity(lots: i128) canonical.InstrumentQuantity {
@@ -778,67 +791,68 @@ fn fixtureAmount(atoms: i128) canonical.AssetAmount {
 
 test "partial fills close two layers with average cost fees rebates margin and valuation" {
     var projection: Projection = .{};
-    projection.portfolio.usdt_balance_micros = 10_000_000;
-    projection.exchange.usdt_balance_micros = 10_000_000;
-    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = fixtureQuantity(4), .price = fixturePrice(100), .quantity_denominator = 1, .fee = fixtureAmount(3), .rebate = fixtureAmount(1), .portfolio_margin_ppm = 100_000, .exchange_margin_ppm = 80_000, .product = .isolated_linear_usdt } });
-    try projection.apply(.{ .fill = .{ .identity = 2, .side = .buy, .quantity = fixtureQuantity(6), .price = fixturePrice(110), .quantity_denominator = 1, .fee = fixtureAmount(4), .portfolio_margin_ppm = 100_000, .exchange_margin_ppm = 80_000, .product = .isolated_linear_usdt } });
-    try projection.apply(.{ .fill = .{ .identity = 3, .side = .sell, .quantity = fixtureQuantity(5), .price = fixturePrice(120), .quantity_denominator = 1, .fee = fixtureAmount(2), .portfolio_margin_ppm = 100_000, .exchange_margin_ppm = 80_000, .product = .isolated_linear_usdt } });
-    try projection.apply(.{ .mark_price = .{ .product = .isolated_linear_usdt, .price_micros = 115, .quantity_denominator = 1 } });
+    projection.portfolio.usdt_balance_atoms = 10_000_000;
+    projection.exchange.usdt_balance_atoms = 10_000_000;
+    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = fixtureQuantity(4), .price = fixturePrice(100), .price_tick_value = fixtureAmount(1), .quantity_denominator = 1, .fee = fixtureAmount(3), .rebate = fixtureAmount(1), .portfolio_margin_ppm = 100_000, .exchange_margin_ppm = 80_000, .product = .isolated_linear_usdt } });
+    try projection.apply(.{ .fill = .{ .identity = 2, .side = .buy, .quantity = fixtureQuantity(6), .price = fixturePrice(110), .price_tick_value = fixtureAmount(1), .quantity_denominator = 1, .fee = fixtureAmount(4), .portfolio_margin_ppm = 100_000, .exchange_margin_ppm = 80_000, .product = .isolated_linear_usdt } });
+    try projection.apply(.{ .fill = .{ .identity = 3, .side = .sell, .quantity = fixtureQuantity(5), .price = fixturePrice(120), .price_tick_value = fixtureAmount(1), .quantity_denominator = 1, .fee = fixtureAmount(2), .portfolio_margin_ppm = 100_000, .exchange_margin_ppm = 80_000, .product = .isolated_linear_usdt } });
+    try projection.apply(.{ .mark_price = .{ .product = .isolated_linear_usdt, .price_atoms = 115, .quantity_denominator = 1 } });
     try std.testing.expectEqual(@as(i64, 5), projection.portfolio.swap.quantity);
-    try std.testing.expectEqual(@as(i64, 530), projection.portfolio.swap.open_cost_micros);
-    try std.testing.expectEqual(@as(i64, 70), projection.portfolio.realized_pnl_micros);
-    try std.testing.expectEqual(@as(i64, 45), projection.portfolio.unrealized_pnl_micros);
-    try std.testing.expectEqual(@as(i64, 53), projection.portfolio.margin_micros);
-    try std.testing.expectEqual(@as(i64, 43), projection.exchange.margin_micros);
-    try std.testing.expectEqual(@as(i64, 9), projection.portfolio.fee_micros);
-    try std.testing.expectEqual(@as(i64, 1), projection.portfolio.rebate_micros);
+    try std.testing.expectEqual(@as(i64, 530), projection.portfolio.swap.open_cost_atoms);
+    try std.testing.expectEqual(@as(i64, 70), projection.portfolio.realized_pnl_atoms);
+    try std.testing.expectEqual(@as(i64, 45), projection.portfolio.unrealized_pnl_atoms);
+    try std.testing.expectEqual(@as(i64, 53), projection.portfolio.margin_atoms);
+    try std.testing.expectEqual(@as(i64, 43), projection.exchange.margin_atoms);
+    try std.testing.expectEqual(@as(i64, 9), projection.portfolio.fee_atoms);
+    try std.testing.expectEqual(@as(i64, 1), projection.portfolio.rebate_atoms);
     try std.testing.expectEqual(@as(u8, 16), projection.ledger_count);
     try projection.assertClosed();
 }
 
 test "spot base-asset fee reduces acquired quantity without inventing cash fee" {
     var projection: Projection = .{};
-    projection.portfolio.usdt_balance_micros = 10_000;
-    projection.exchange.usdt_balance_micros = 10_000;
+    projection.portfolio.usdt_balance_atoms = 10_000;
+    projection.exchange.usdt_balance_atoms = 10_000;
     try projection.apply(.{ .fill = .{
         .identity = 1,
         .side = .buy,
         .quantity = fixtureQuantity(10),
         .price = fixturePrice(100),
+        .price_tick_value = fixtureAmount(1),
         .quantity_denominator = 1,
         .base_fee_quantity = 1,
         .product = .spot,
     } });
     try std.testing.expectEqual(@as(i64, 9), projection.portfolio.spot_asset_quantity);
     try std.testing.expectEqual(@as(i64, 9), projection.portfolio.spot.quantity);
-    try std.testing.expectEqual(@as(i64, 9_000), projection.portfolio.usdt_balance_micros);
-    try std.testing.expectEqual(@as(i64, 0), projection.portfolio.fee_micros);
+    try std.testing.expectEqual(@as(i64, 9_000), projection.portfolio.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i64, 0), projection.portfolio.fee_atoms);
     try projection.assertClosed();
 }
 
 test "funding and forced execution are idempotent and unowned facts enter suspense" {
     var projection: Projection = .{};
-    projection.treasury_usdt_micros = 1_000;
-    projection.exchange.usdt_balance_micros = 1_000;
+    projection.treasury_usdt_atoms = 1_000;
+    projection.exchange.usdt_balance_atoms = 1_000;
     try projection.apply(.{ .funding_settlement = .{ .identity = 10, .amount = fixtureAmount(-25) } });
     try projection.apply(.{ .funding_settlement = .{ .identity = 10, .amount = fixtureAmount(-25) } });
-    try std.testing.expectEqual(@as(i64, -25), projection.suspense_usdt_micros);
+    try std.testing.expectEqual(@as(i64, -25), projection.suspense_usdt_atoms);
     try std.testing.expect(projection.reconciliation_break);
     try std.testing.expectEqual(@as(u8, 1), projection.ledger_count);
     try std.testing.expectError(error.ConflictingEconomicIdentity, projection.apply(.{ .funding_settlement = .{ .identity = 10, .amount = fixtureAmount(-26) } }));
 
-    try projection.apply(.{ .venue_forced_execution = .{ .identity = 11, .side = .sell, .quantity = fixtureQuantity(2), .price = fixturePrice(100), .quantity_denominator = 1, .fee = fixtureAmount(3), .penalty = fixtureAmount(2), .product = .isolated_linear_usdt } });
-    try projection.apply(.{ .venue_forced_execution = .{ .identity = 11, .side = .sell, .quantity = fixtureQuantity(2), .price = fixturePrice(100), .quantity_denominator = 1, .fee = fixtureAmount(3), .penalty = fixtureAmount(2), .product = .isolated_linear_usdt } });
+    try projection.apply(.{ .venue_forced_execution = .{ .identity = 11, .side = .sell, .quantity = fixtureQuantity(2), .price = fixturePrice(100), .price_tick_value = fixtureAmount(1), .quantity_denominator = 1, .fee = fixtureAmount(3), .penalty = fixtureAmount(2), .product = .isolated_linear_usdt } });
+    try projection.apply(.{ .venue_forced_execution = .{ .identity = 11, .side = .sell, .quantity = fixtureQuantity(2), .price = fixturePrice(100), .price_tick_value = fixtureAmount(1), .quantity_denominator = 1, .fee = fixtureAmount(3), .penalty = fixtureAmount(2), .product = .isolated_linear_usdt } });
     try std.testing.expectEqual(@as(i64, -2), projection.exchange.swap.quantity);
-    try std.testing.expectEqual(@as(i64, -30), projection.suspense_usdt_micros);
+    try std.testing.expectEqual(@as(i64, -30), projection.suspense_usdt_atoms);
     try std.testing.expectEqual(@as(u8, 4), projection.ledger_count);
     try projection.assertClosed();
 }
 
 test "account snapshot opens a break without overwriting local economics" {
     var projection: Projection = .{};
-    projection.treasury_usdt_micros = 1_000;
-    projection.exchange.usdt_balance_micros = 1_000;
+    projection.treasury_usdt_atoms = 1_000;
+    projection.exchange.usdt_balance_atoms = 1_000;
     const before = projection.exchange;
     try projection.apply(.{ .account_snapshot = .{ .identity = 20, .balance = fixtureAmount(999), .spot_asset_quantity = 0, .swap_position_quantity = 7, .margin = fixtureAmount(55) } });
     try std.testing.expect(projection.reconciliation_break);
@@ -854,38 +868,39 @@ test "account snapshot opens a break without overwriting local economics" {
 
 test "duplicate attributed forced execution cannot charge penalty twice" {
     var projection: Projection = .{};
-    projection.portfolio.usdt_balance_micros = 1_000;
-    projection.exchange.usdt_balance_micros = 1_000;
-    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = fixtureQuantity(10), .price = fixturePrice(100), .quantity_denominator = 1, .product = .isolated_linear_usdt } });
-    const forced: Event = .{ .venue_forced_execution = .{ .identity = 2, .source_identity = 7, .side = .sell, .quantity = fixtureQuantity(2), .price = fixturePrice(90), .quantity_denominator = 1, .fee = fixtureAmount(3), .penalty = fixtureAmount(5), .product = .isolated_linear_usdt } };
+    projection.portfolio.usdt_balance_atoms = 1_000;
+    projection.exchange.usdt_balance_atoms = 1_000;
+    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = fixtureQuantity(10), .price = fixturePrice(100), .price_tick_value = fixtureAmount(1), .quantity_denominator = 1, .product = .isolated_linear_usdt } });
+    const forced: Event = .{ .venue_forced_execution = .{ .identity = 2, .source_identity = 7, .side = .sell, .quantity = fixtureQuantity(2), .price = fixturePrice(90), .price_tick_value = fixtureAmount(1), .quantity_denominator = 1, .fee = fixtureAmount(3), .penalty = fixtureAmount(5), .product = .isolated_linear_usdt } };
     try projection.apply(forced);
     const after = projection;
     try projection.apply(forced);
     try std.testing.expectEqualDeep(after, projection);
-    try std.testing.expectError(error.ConflictingEconomicIdentity, projection.apply(.{ .venue_forced_execution = .{ .identity = 2, .side = .sell, .quantity = fixtureQuantity(2), .price = fixturePrice(90), .quantity_denominator = 1, .fee = fixtureAmount(3), .penalty = fixtureAmount(6), .product = .isolated_linear_usdt } }));
-    try std.testing.expectError(error.ConflictingEconomicIdentity, projection.apply(.{ .venue_forced_execution = .{ .identity = 2, .source_identity = 8, .side = .sell, .quantity = fixtureQuantity(2), .price = fixturePrice(90), .quantity_denominator = 1, .fee = fixtureAmount(3), .penalty = fixtureAmount(5), .product = .isolated_linear_usdt } }));
+    try std.testing.expectError(error.ConflictingEconomicIdentity, projection.apply(.{ .venue_forced_execution = .{ .identity = 2, .side = .sell, .quantity = fixtureQuantity(2), .price = fixturePrice(90), .price_tick_value = fixtureAmount(1), .quantity_denominator = 1, .fee = fixtureAmount(3), .penalty = fixtureAmount(6), .product = .isolated_linear_usdt } }));
+    try std.testing.expectError(error.ConflictingEconomicIdentity, projection.apply(.{ .venue_forced_execution = .{ .identity = 2, .source_identity = 8, .side = .sell, .quantity = fixtureQuantity(2), .price = fixturePrice(90), .price_tick_value = fixtureAmount(1), .quantity_denominator = 1, .fee = fixtureAmount(3), .penalty = fixtureAmount(5), .product = .isolated_linear_usdt } }));
 }
 
 test "negative forced penalty is rejected without changing projection" {
     var projection: Projection = .{};
-    projection.treasury_usdt_micros = 1_000;
-    projection.exchange.usdt_balance_micros = 1_000;
+    projection.treasury_usdt_atoms = 1_000;
+    projection.exchange.usdt_balance_atoms = 1_000;
     const before = projection;
-    try std.testing.expectError(error.InvalidEconomicFact, projection.apply(.{ .venue_forced_execution = .{ .identity = 1, .side = .sell, .quantity = fixtureQuantity(1), .price = fixturePrice(100), .quantity_denominator = 1, .penalty = fixtureAmount(-1), .product = .isolated_linear_usdt } }));
+    try std.testing.expectError(error.InvalidEconomicFact, projection.apply(.{ .venue_forced_execution = .{ .identity = 1, .side = .sell, .quantity = fixtureQuantity(1), .price = fixturePrice(100), .price_tick_value = fixtureAmount(1), .quantity_denominator = 1, .penalty = fixtureAmount(-1), .product = .isolated_linear_usdt } }));
     try std.testing.expectEqualDeep(before, projection);
 }
 
 test "allocated forced PnL must match the closed portfolio position" {
     var projection: Projection = .{};
-    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = fixtureQuantity(1), .price = fixturePrice(100), .quantity_denominator = 1, .product = .isolated_linear_usdt } });
+    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = fixtureQuantity(1), .price = fixturePrice(100), .price_tick_value = fixtureAmount(1), .quantity_denominator = 1, .product = .isolated_linear_usdt } });
     const before = projection.digest();
     try std.testing.expectError(error.ForcedExecutionPnlMismatch, projection.apply(.{ .venue_forced_execution = .{
         .identity = 2,
         .side = .sell,
         .quantity = fixtureQuantity(1),
         .price = fixturePrice(100),
+        .price_tick_value = fixtureAmount(1),
         .quantity_denominator = 1,
-        .expected_realized_pnl_micros = 1,
+        .expected_realized_pnl_atoms = 1,
         .product = .isolated_linear_usdt,
     } }));
     try std.testing.expectEqualSlices(u8, &before, &projection.digest());
@@ -893,21 +908,21 @@ test "allocated forced PnL must match the closed portfolio position" {
 
 test "valuation respects the contract quantity denominator" {
     var projection: Projection = .{};
-    projection.portfolio.usdt_balance_micros = 1_000;
-    projection.exchange.usdt_balance_micros = 1_000;
-    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = fixtureQuantity(10), .price = fixturePrice(100), .quantity_denominator = 10, .product = .isolated_linear_usdt } });
-    try projection.apply(.{ .mark_price = .{ .product = .isolated_linear_usdt, .price_micros = 120, .quantity_denominator = 10 } });
-    try std.testing.expectEqual(@as(i64, 20), projection.portfolio.unrealized_pnl_micros);
+    projection.portfolio.usdt_balance_atoms = 1_000;
+    projection.exchange.usdt_balance_atoms = 1_000;
+    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = fixtureQuantity(10), .price = fixturePrice(100), .price_tick_value = fixtureAmount(1), .quantity_denominator = 10, .product = .isolated_linear_usdt } });
+    try projection.apply(.{ .mark_price = .{ .product = .isolated_linear_usdt, .price_atoms = 120, .quantity_denominator = 10 } });
+    try std.testing.expectEqual(@as(i64, 20), projection.portfolio.unrealized_pnl_atoms);
 }
 
 test "ledger postings reproduce signed fee rebate and funding cash movements" {
     var projection: Projection = .{};
-    projection.portfolio.usdt_balance_micros = 1_000;
-    projection.exchange.usdt_balance_micros = 1_000;
-    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = fixtureQuantity(1), .price = fixturePrice(100), .quantity_denominator = 1, .fee = fixtureAmount(3), .rebate = fixtureAmount(1), .product = .isolated_linear_usdt } });
+    projection.portfolio.usdt_balance_atoms = 1_000;
+    projection.exchange.usdt_balance_atoms = 1_000;
+    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = fixtureQuantity(1), .price = fixturePrice(100), .price_tick_value = fixtureAmount(1), .quantity_denominator = 1, .fee = fixtureAmount(3), .rebate = fixtureAmount(1), .product = .isolated_linear_usdt } });
     try projection.apply(.{ .funding_settlement = .{ .identity = 2, .amount = fixtureAmount(7) } });
 
-    try std.testing.expectEqual(@as(i64, 1_005), projection.portfolio.usdt_balance_micros);
+    try std.testing.expectEqual(@as(i64, 1_005), projection.portfolio.usdt_balance_atoms);
     try std.testing.expectEqual(@as(u8, 8), projection.ledger_count);
     try std.testing.expectEqualDeep(LedgerPosting{ .account = .swap_position, .unit = .swap_quantity, .amount = 1 }, projection.ledger[0].postings[0]);
     try std.testing.expectEqualDeep(LedgerPosting{ .account = .trade, .unit = .swap_quantity, .amount = -1 }, projection.ledger[0].postings[1]);
@@ -922,14 +937,15 @@ test "ledger postings reproduce signed fee rebate and funding cash movements" {
 
 test "canonical fill evidence is idempotent and rejects a conflicting payload" {
     var projection: Projection = .{};
-    projection.portfolio.usdt_balance_micros = 1_000;
-    projection.exchange.usdt_balance_micros = 1_000;
+    projection.portfolio.usdt_balance_atoms = 1_000;
+    projection.exchange.usdt_balance_atoms = 1_000;
     const fill: Fill = .{
         .identity = 7,
         .order_id = 1,
         .side = .buy,
         .quantity = fixtureQuantity(1),
         .price = fixturePrice(100),
+        .price_tick_value = fixtureAmount(1),
         .quantity_denominator = 1,
         .product = .isolated_linear_usdt,
     };

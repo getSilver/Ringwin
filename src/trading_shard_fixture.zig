@@ -17,12 +17,12 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-pub const expected_happy_digest = "588827435985e9bf135c686adf678a46c531056a67b706afa089b0a0f68ff610";
+pub const expected_happy_digest = "19a6da355b7275a9a46b0a84b6a2bc443a5c227f395a6ae505d844e3bc3387f9";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "58be377513ed5bb86b70f1423befaa2ab16c60cad1e976d80dae261f077476cc",
-    "d50ff2b24b80392af4ddc104d5feaf643a4db92c9239de6f835b41f2b9173085",
-    "31cdf7fb4299b78e2a29677e9fbbccba760438c0943fd819268d5a9f6ce953dc",
+    "5240a841a47eee42eb82d195f4037c3f8c36d0d752bcffa73f842b1665de4137",
+    "047090a69f8dbd4053137c0d4b5080f3686ab58dbaf889754c3618ec332d11cb",
+    "49df4a12477dda8bb65657dda2b8dda3ba0543f6b843c5df78834c0962a6e062",
     expected_happy_digest,
 };
 pub const order_limit_price: i64 = 50_100_000_000;
@@ -233,27 +233,27 @@ pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_mode
         } } }),
         atGroup(2, .{ .identity = 3, .payload = .{ .mark_price = .{
             .instrument = swap_instrument,
-            .price_micros = 50_000_000,
+            .price_atoms = 50_000_000,
         } } }),
         atGroup(2, .{ .identity = 4, .payload = .{ .mark_price = .{
             .instrument = spot_instrument,
-            .price_micros = 50_000_000,
+            .price_atoms = 50_000_000,
         } } }),
         atGroup(3, .{ .identity = 1, .payload = .{ .account_configuration = .{ .exchange_account_identity = 2 } } }),
         atGroup(3, .{ .identity = assets[0].asset, .payload = .{ .asset_definition_activated = assets[0] } }),
         atGroup(3, .{ .identity = assets[1].asset, .payload = .{ .asset_definition_activated = assets[1] } }),
-        atGroup(4, .{ .identity = 1, .payload = .{ .exchange_balance = .{ .cash_micros = initial_exchange_cash } } }),
+        atGroup(4, .{ .identity = 1, .payload = .{ .exchange_balance = .{ .cash_atoms = initial_exchange_cash } } }),
         atGroup(5, .{ .identity = 1, .payload = .exchange_positions }),
-        atGroup(6, .{ .identity = 1, .payload = .{ .opening_balance = .{ .cash_micros = initial_exchange_cash } } }),
+        atGroup(6, .{ .identity = 1, .payload = .{ .opening_balance = .{ .cash_atoms = initial_exchange_cash } } }),
         atGroup(7, .{ .identity = 1, .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = 1 } } }),
-        atGroup(8, .{ .identity = 1, .payload = .{ .portfolio_transfer = .{ .amount_micros = portfolio_allocation } } }),
+        atGroup(8, .{ .identity = 1, .payload = .{ .portfolio_transfer = .{ .amount_atoms = portfolio_allocation } } }),
         atGroup(9, .{ .identity = 1, .payload = .{ .strategy_activated = .{
             .strategy_identity = authorization.strategy_identity,
             .config_version = authorization.config_version,
             .activation_identity = authorization.activation_identity,
         } } }),
         atGroup(10, .{ .identity = 1, .payload = .{ .primary_lease_granted = .{ .fencing_token = 1 } } }),
-        atGroup(11, .{ .identity = 1, .payload = .{ .risk_lease_granted = .{ .amount_micros = risk_lease_total } } }),
+        atGroup(11, .{ .identity = 1, .payload = .{ .risk_lease_granted = .{ .amount_atoms = risk_lease_total } } }),
         atGroup(11, .{ .identity = 1, .payload = .{ .control_command = .{
             .command_identity = 1,
             .content_hash = 1,
@@ -327,7 +327,7 @@ pub fn gatewayActivationFixtureForSession(authorization: host_gateway.Authorizat
 }
 
 pub fn applyHealthyPrelude(run: *LiveRun) !void {
-    if (try apply(run, atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000_000 } } })) != null)
+    if (try apply(run, atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000_000 } } })) != null)
         return error.UnexpectedCommand;
     const prelude = [_]engine.CanonicalEvent{
         canonicalAt(12, 99, .{ .instrument_definition_observed = .{ .instrument = 3, .rules_version = 1 } }),
@@ -404,7 +404,7 @@ pub fn happyVenueFacts(command: engine.OrderCommand) ![6]engine.CanonicalEvent {
     const first_trade = try canonical.VenueTradeRef.init(1, "fixture-trade-1");
     const second_trade = try canonical.VenueTradeRef.init(1, "fixture-trade-2");
     const Report = struct {
-        fn make(identity: u128, status: canonical.ExecutionReportStatus, cumulative: i128, remaining: i128, client_order: canonical.ClientOrderId, order_ref: canonical.VenueOrderRef) canonical.ExecutionReport {
+        fn make(identity: u128, status: canonical.ExecutionReportStatus, cumulative: i128, remaining: i128, client_order: canonical.ClientOrderId, order_ref: canonical.VenueOrderRef, revision: u32) canonical.ExecutionReport {
             return .{
                 .identity = identity,
                 .order = 1,
@@ -412,7 +412,7 @@ pub fn happyVenueFacts(command: engine.OrderCommand) ![6]engine.CanonicalEvent {
                 .venue_order = order_ref,
                 .instrument = 3,
                 .exchange_account = 2,
-                .revision = @intCast(identity),
+                .revision = revision,
                 .side = .buy,
                 .order_type = .limit,
                 .time_in_force = .good_til_canceled,
@@ -426,7 +426,7 @@ pub fn happyVenueFacts(command: engine.OrderCommand) ![6]engine.CanonicalEvent {
     };
     return .{
         canonicalAt(15, 102, .{ .order_dispatch_result = .{ .command = command.command_id, .state = .submitted } }),
-        canonicalAt(16, 103, .{ .execution_report = Report.make(1, .accepted, 0, 100, client, venue_order) }),
+        canonicalAt(16, 103, .{ .execution_report = Report.make(1, .accepted, 0, 100, client, venue_order, command.revision) }),
         canonicalAt(17, 104, .{ .fill = .{
             .identity = 1,
             .order = 1,
@@ -441,7 +441,7 @@ pub fn happyVenueFacts(command: engine.OrderCommand) ![6]engine.CanonicalEvent {
             .fee = .{ .asset = settlement_asset, .atoms = 149_700 },
             .liquidity = .taker,
         } }),
-        canonicalAt(17, 105, .{ .execution_report = Report.make(2, .partially_filled, 40, 60, client, venue_order) }),
+        canonicalAt(17, 105, .{ .execution_report = Report.make(2, .partially_filled, 40, 60, client, venue_order, command.revision) }),
         canonicalAt(18, 106, .{ .fill = .{
             .identity = 2,
             .order = 1,
@@ -456,7 +456,7 @@ pub fn happyVenueFacts(command: engine.OrderCommand) ![6]engine.CanonicalEvent {
             .fee = .{ .asset = settlement_asset, .atoms = 225_450 },
             .liquidity = .taker,
         } }),
-        canonicalAt(18, 107, .{ .execution_report = Report.make(3, .filled, 100, 0, client, venue_order) }),
+        canonicalAt(18, 107, .{ .execution_report = Report.make(3, .filled, 100, 0, client, venue_order, command.revision) }),
     };
 }
 
@@ -467,19 +467,19 @@ fn assertPartialState(shard: engine.TradingShard) !void {
     const expected_reservation: i64 = if (report_applied) 6_838_650 else 11_397_750;
     const expected_remaining: i64 = if (report_applied) 9_988_770_150 else 9_984_211_050;
     if (economic.portfolio.swap.quantity != 40 or
-        economic.portfolio.swap.open_cost_micros != 199_600_000 or
+        economic.portfolio.swap.open_cost_atoms != 199_600_000 or
         economic.exchange.swap.quantity != 40 or
-        economic.exchange.swap.open_cost_micros != 199_600_000 or
-        economic.portfolio.fee_micros != 149_700 or
-        economic.portfolio.usdt_balance_micros != 19_999_850_300 or
-        economic.exchange.usdt_balance_micros != 24_999_850_300 or
-        shard.economic_projection.portfolio.margin_micros != 4_391_200 or
+        economic.exchange.swap.open_cost_atoms != 199_600_000 or
+        economic.portfolio.fee_atoms != 149_700 or
+        economic.portfolio.usdt_balance_atoms != 19_999_850_300 or
+        economic.exchange.usdt_balance_atoms != 24_999_850_300 or
+        shard.economic_projection.portfolio.margin_atoms != 4_391_200 or
         // The fill ledger is not allowed to guess OMS remaining quantity:
         // reservation changes only once the authoritative report is applied.
-        try shard.activeReservationMicros() != expected_reservation or
-        try shard.riskLeaseRemainingMicros() != expected_remaining)
+        try shard.activeReservationAtoms() != expected_reservation or
+        try shard.riskLeaseRemainingAtoms() != expected_remaining)
     {
-        std.debug.print("partial state: position_margin={d} reservation={d} remaining={d}\n", .{ shard.economic_projection.portfolio.margin_micros, try shard.activeReservationMicros(), try shard.riskLeaseRemainingMicros() });
+        std.debug.print("partial state: position_margin={d} reservation={d} remaining={d}\n", .{ shard.economic_projection.portfolio.margin_atoms, try shard.activeReservationAtoms(), try shard.riskLeaseRemainingAtoms() });
         return error.PartialEconomicProjectionMismatch;
     }
 }
@@ -492,7 +492,7 @@ pub fn runHappyPath() !LiveRun {
         if (try apply(&run, event) != null) return error.UnexpectedCommand;
         if (index == 2) try assertPartialState(run.shard);
     }
-    if (try apply(&run, atGroup(19, .{ .identity = 2, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_200_000_000 } } })) != null)
+    if (try apply(&run, atGroup(19, .{ .identity = 2, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_200_000_000 } } })) != null)
         return error.UnexpectedCommand;
     return finish(&run);
 }
@@ -553,7 +553,7 @@ pub fn runDuplicateReport() !LiveRun {
     try assertPartialState(run.shard);
     if (try apply(&run, facts[4]) != null) return error.UnexpectedCommand;
     if (try apply(&run, facts[5]) != null) return error.UnexpectedCommand;
-    if (try apply(&run, atGroup(20, .{ .identity = 2, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_200_000_000 } } })) != null)
+    if (try apply(&run, atGroup(20, .{ .identity = 2, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_200_000_000 } } })) != null)
         return error.UnexpectedCommand;
     return finish(&run);
 }
@@ -596,7 +596,7 @@ pub fn main(init: std.process.Init) !void {
         try out.print("{d:0>2} {s} id={d}\n", .{ event.sequence, @tagName(event.kind), event.identity });
     const economic = happy.shard.economicSummary();
     const final_order = happy.shard.oms.orderById(1) orelse return error.MissingOrder;
-    try out.print("happy_path: events={d}, order={s}, qty={d}, open_cost={d}, fees={d}, upl={d}, risk_remaining={d}, ledger=closed, economic_projections=complete\ndigest={s}\n", .{ happy.shard.trace.len, @tagName(final_order.state), final_order.cumulative_quantity, economic.portfolio.swap.open_cost_micros, economic.portfolio.fee_micros, economic.portfolio.unrealized_pnl_micros, try happy.shard.riskLeaseRemainingMicros(), &digest_hex });
+    try out.print("happy_path: events={d}, order={s}, qty={d}, open_cost={d}, fees={d}, upl={d}, risk_remaining={d}, ledger=closed, economic_projections=complete\ndigest={s}\n", .{ happy.shard.trace.len, @tagName(final_order.state), final_order.cumulative_quantity, economic.portfolio.swap.open_cost_atoms, economic.portfolio.fee_atoms, economic.portfolio.unrealized_pnl_atoms, try happy.shard.riskLeaseRemainingAtoms(), &digest_hex });
     try out.print("journal_records={d}, journal_bytes={d}, replay=equivalent, recovery_checks=ok\n", .{ happy.decision_journal.records, happy.decision_journal.len });
     const scenarios = [_]struct { name: []const u8, run: *const LiveRun }{
         .{ .name = "market-gap-v1", .run = &market_gap },          .{ .name = "risk-rejection-v1", .run = &risk_rejection },
@@ -617,7 +617,7 @@ pub const HostIngressSummary = struct {
     journal_records: u64,
     order_quantity: i64,
     order_limit_price_micros: i64,
-    reservation_micros: i64,
+    reservation_atoms: i64,
 };
 
 pub const QualifiedHostOrder = struct {
@@ -692,7 +692,7 @@ pub const TradingShardHostIngress = struct {
             .journal_records = self.run.decision_journal.records,
             .order_quantity = if (order) |value| value.quantity else 0,
             .order_limit_price_micros = if (order) |value| std.math.cast(i64, value.limit_price.ticks) orelse 0 else 0,
-            .reservation_micros = try self.run.shard.activeReservationMicros(),
+            .reservation_atoms = try self.run.shard.activeReservationAtoms(),
         };
         for (self.run.shard.trace.events[0..self.run.shard.trace.len]) |event| switch (event.kind) {
             .order_intent => result.order_intents += 1,
@@ -811,7 +811,7 @@ test "snapshot restore replays only the stable journal tail without send capabil
     const encoded = try prefix.shard.snapshot(&prefix.decision_journal, prefix.decision_journal.last_sequence, &snapshot_storage);
     var live = prefix.shard;
     var tail = journal.Journal.initAt(prefix.decision_journal.last_sequence + 1);
-    _ = try engine.applyStable(&live, &tail, atGroup(12, .{ .identity = 9, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = 50_000_000_000 } } }));
+    _ = try engine.applyStable(&live, &tail, atGroup(12, .{ .identity = 9, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000_000 } } }));
     try tail.seal();
     const recovered = try engine.TradingShard.restore(encoded, tail.bytes());
     try std.testing.expectEqual(journal.ScanStatus.clean, recovered.status);

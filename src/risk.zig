@@ -109,7 +109,7 @@ pub fn assess(rules: Rules, limits: Limits, state: State, request: Request) !Ass
     if (request.product == .spot and request.side == .sell and portfolio_after < 0)
         return error.InsufficientSpotAsset;
 
-    const notional = try notionalAtoms(request.quantity.lots, request.risk_price.ticks, rules.quantity_denominator);
+    const notional = try notionalAtoms(request.quantity.lots, request.risk_price.ticks, rules.price_tick_value.atoms, rules.quantity_denominator);
     const fee = try rateAtoms(notional, rules.fee_ppm);
     const venue_initial = if (request.product == .isolated_linear_usdt and !venue_reduces)
         try rateAtoms(notional, rules.venue_initial_margin_ppm)
@@ -140,8 +140,8 @@ pub fn assess(rules: Rules, limits: Limits, state: State, request: Request) !Ass
         0;
     const portfolio_buffer = try std.math.sub(i128, try std.math.sub(i128, state.portfolio_cash.atoms, total), portfolio_maintenance);
     const exchange_buffer = try std.math.sub(i128, try std.math.sub(i128, state.exchange_cash.atoms, total), exchange_maintenance);
-    const portfolio_after_notional = try notionalAtoms(try abs128(portfolio_after), state.mark_price.ticks, rules.quantity_denominator);
-    const exchange_after_notional = try notionalAtoms(try abs128(exchange_after), state.mark_price.ticks, rules.quantity_denominator);
+    const portfolio_after_notional = try notionalAtoms(try abs128(portfolio_after), state.mark_price.ticks, rules.price_tick_value.atoms, rules.quantity_denominator);
+    const exchange_after_notional = try notionalAtoms(try abs128(exchange_after), state.mark_price.ticks, rules.price_tick_value.atoms, rules.quantity_denominator);
     const portfolio_buffer_bps = try bufferBps(portfolio_buffer, portfolio_after_notional);
     const exchange_buffer_bps = try bufferBps(exchange_buffer, exchange_after_notional);
     const portfolio_distance = try liquidationDistanceTicks(portfolio_buffer, portfolio_after, rules.quantity_denominator, rules.price_tick_value.atoms);
@@ -176,7 +176,7 @@ fn opens(rules: Rules, buffer: i128, buffer_bps: i64, distance_ticks: i64) bool 
 }
 
 fn maintenanceWithCloseFee(rules: Rules, quantity: i128, price_ticks: i128) !i128 {
-    const notional = try notionalAtoms(try abs128(quantity), price_ticks, rules.quantity_denominator);
+    const notional = try notionalAtoms(try abs128(quantity), price_ticks, rules.price_tick_value.atoms, rules.quantity_denominator);
     return std.math.add(i128, try rateAtoms(notional, rules.internal_maintenance_margin_ppm), try rateAtoms(notional, rules.fee_ppm));
 }
 
@@ -221,8 +221,8 @@ fn abs128(value: i128) !i128 {
     return if (value < 0) -value else value;
 }
 
-fn notionalAtoms(quantity: i128, price_ticks: i128, denominator: i64) !i128 {
-    return ceilPositive(try std.math.mul(i128, quantity, price_ticks), denominator);
+fn notionalAtoms(quantity: i128, price_ticks: i128, tick_atoms: i128, denominator: i64) !i128 {
+    return ceilPositive(try std.math.mul(i128, try std.math.mul(i128, quantity, price_ticks), tick_atoms), denominator);
 }
 
 fn rateAtoms(notional: i128, ppm: i64) !i128 {
@@ -297,6 +297,22 @@ test "five layers, cash, isolated margin, and dual reduce-only are deterministic
     try std.testing.expectError(error.StrategyLimitExceeded, assess(rules, tight, state, .{ .product = .spot, .side = .buy, .quantity = testQuantity(2), .risk_price = price(50_000_000) }));
 }
 
+test "settlement precision scales risk atoms while lots and price ticks stay fixed" {
+    for ([_]i128{ 1, 1_000_000 }, [_]i128{ 5_003_750, 5_003_750_000_000 }) |scale, expected| {
+        var rules = fixtureRules();
+        rules.quantity_denominator = 100_000_000;
+        rules.price_tick_value = amount(100_000 * scale);
+        rules.opening_buffer = amount(1_000_000 * scale);
+        rules.warning_buffer = amount(500_000 * scale);
+        rules.kill_buffer = amount(100_000 * scale);
+        const cash = amount(100_000_000 * scale);
+        const limits: Limits = .{ .strategy = cash, .portfolio = cash, .decision_domain = cash, .exchange_account = cash, .global = cash };
+        const state: State = .{ .portfolio_cash = cash, .exchange_cash = cash, .portfolio_position = testQuantity(0), .exchange_position = testQuantity(0), .active_order_reservations = amount(0), .replaced_order_reservation = amount(0), .mark_price = price(500_000) };
+        const result = try assess(rules, limits, state, .{ .product = .spot, .side = .buy, .quantity = testQuantity(10_000), .risk_price = price(500_000) });
+        try std.testing.expectEqual(expected, result.order_reservation.atoms);
+    }
+}
+
 test "margin safety gate takes the strictest amount bps and liquidation distance" {
     var rules = fixtureRules();
     rules.price_tick_value = amount(1_000);
@@ -304,8 +320,8 @@ test "margin safety gate takes the strictest amount bps and liquidation distance
     rules.kill_buffer_bps = 500;
     rules.warning_liquidation_distance_ticks = 50_000;
     rules.kill_liquidation_distance_ticks = 15_000;
-    const state: State = .{ .portfolio_cash = amount(2_000_000), .exchange_cash = amount(2_000_000), .portfolio_position = testQuantity(10), .exchange_position = testQuantity(10), .active_order_reservations = amount(0), .replaced_order_reservation = amount(0), .mark_price = price(50_000_000) };
-    const assessment = try assess(rules, fixtureLimits(), state, .{ .product = .isolated_linear_usdt, .side = .buy, .quantity = testQuantity(1), .risk_price = price(50_000_000) });
+    const state: State = .{ .portfolio_cash = amount(2_000_000), .exchange_cash = amount(2_000_000), .portfolio_position = testQuantity(10), .exchange_position = testQuantity(10), .active_order_reservations = amount(0), .replaced_order_reservation = amount(0), .mark_price = price(50_000) };
+    const assessment = try assess(rules, fixtureLimits(), state, .{ .product = .isolated_linear_usdt, .side = .buy, .quantity = testQuantity(1), .risk_price = price(50_000) });
     try std.testing.expectEqual(MarginGate.kill, assessment.portfolio_gate);
     try std.testing.expect(assessment.portfolio_buffer_bps > 500);
     try std.testing.expectEqual(@as(i64, 14_595), assessment.portfolio_liquidation_distance_ticks);
@@ -315,8 +331,8 @@ test "opening gate rejects sufficient cash with insufficient liquidation distanc
     var rules = fixtureRules();
     rules.price_tick_value = amount(1_000);
     rules.opening_liquidation_distance_ticks = 20_000;
-    const state: State = .{ .portfolio_cash = amount(2_000_000), .exchange_cash = amount(2_000_000), .portfolio_position = testQuantity(10), .exchange_position = testQuantity(10), .active_order_reservations = amount(0), .replaced_order_reservation = amount(0), .mark_price = price(50_000_000) };
-    try std.testing.expectError(error.PortfolioOpeningGateClosed, assess(rules, fixtureLimits(), state, .{ .product = .isolated_linear_usdt, .side = .buy, .quantity = testQuantity(1), .risk_price = price(50_000_000) }));
+    const state: State = .{ .portfolio_cash = amount(2_000_000), .exchange_cash = amount(2_000_000), .portfolio_position = testQuantity(10), .exchange_position = testQuantity(10), .active_order_reservations = amount(0), .replaced_order_reservation = amount(0), .mark_price = price(50_000) };
+    try std.testing.expectError(error.PortfolioOpeningGateClosed, assess(rules, fixtureLimits(), state, .{ .product = .isolated_linear_usdt, .side = .buy, .quantity = testQuantity(1), .risk_price = price(50_000) }));
 }
 
 test "extreme risk arithmetic fails closed" {

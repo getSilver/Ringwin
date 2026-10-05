@@ -75,6 +75,7 @@ const Encoded = struct {
 
 pub const BybitVenueAdapter = struct {
     asset_definitions: @import("asset_registry.zig").Registry = .{},
+    native_settlement_atoms: bool = false,
     clock: Clock,
     profile: CapabilityProfile,
     auth: Authenticator,
@@ -135,6 +136,7 @@ pub const BybitVenueAdapter = struct {
         if (self.state == .stopped) return error.Stopped;
         if (config.environment != .demo or config.venue == 0 or config.exchange_account == 0 or config.adapter_session == 0 or config.adapter_session > std.math.maxInt(u64) or config.request_capacity == 0 or config.output_capacity < canonical.max_order_commands_per_batch or self.profile.session != @as(u64, @intCast(config.adapter_session))) return error.InvalidConfig;
         self.asset_definitions = config.asset_definitions orelse .{};
+        self.native_settlement_atoms = config.native_settlement_atoms;
         self.asset_definitions.validate() catch return error.InvalidConfig;
         self.binding = .{ .venue = config.venue, .account = config.exchange_account, .session = config.adapter_session };
         if (self.reconciler) |value| value.beginSession(.{ .venue = config.venue, .account = config.exchange_account, .session = config.adapter_session });
@@ -165,7 +167,7 @@ pub const BybitVenueAdapter = struct {
             else => return error.InvalidRequest,
         };
         var output: canonical.AdapterOutputBatch = .{};
-        if (self.private_failed or !self.asset_definitions.legacyConsumerCompatible()) for (commands[0..count]) |command| {
+        if (self.private_failed or !self.asset_definitions.consumerCompatible(self.native_settlement_atoms)) for (commands[0..count]) |command| {
             if (command.operation != .cancel) return .backpressure;
         };
         if (count > self.profile.batch_max or !self.rateAvailable(self.clock.now())) {

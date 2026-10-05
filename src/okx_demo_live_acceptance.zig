@@ -211,7 +211,7 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
     if (policy.startup == .recover) try implementation.resumeAfter(try canonicalSequence(decision_owner, source_session));
     implementation.attachPrivateReconciler(reconciler);
     const adapter = implementation.adapter();
-    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4, .asset_definitions = decision_owner.shard.activatedAssets() });
+    try adapter.start(.{ .venue = demo_venue, .environment = .demo, .exchange_account = demo_account, .adapter_session = source_session, .request_capacity = 4, .output_capacity = 4, .asset_definitions = decision_owner.shard.activatedAssets(), .native_settlement_atoms = if (decision_owner.shard.instrument_registry.get(okx_adapter.btc_usdt_spot)) |configured| configured.margin.native_settlement_atoms else false });
     const projection = try init.gpa.create(DemoProjection);
     defer init.gpa.destroy(projection);
     projection.* = .{};
@@ -678,7 +678,7 @@ const RawOwnerResult = struct { digest: [32]u8, raw_count: u64 };
 
 fn checkOkxRawPrivateOwner(store: durable.Store, io: std.Io) !RawOwnerResult {
     var parsed = try demo_authority.Policy.parse(std.testing.allocator,
-        \\{"schema":1,"startup":"virgin","exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_micros":20000000,"risk_limit_micros":10000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
+        \\{"schema":2,"price_tick_atoms":100000,"startup":"virgin","exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_atoms":20000000,"risk_limit_atoms":15000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
     );
     defer parsed.deinit();
     const owner = try std.testing.allocator.create(demo_authority.Owner);

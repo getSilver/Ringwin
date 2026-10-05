@@ -102,13 +102,13 @@ pub const Registry = struct {
 };
 
 pub fn validMargin(margin: shard_event.MarginRules) bool {
-    return margin.version != 0 and margin.price_tick_micros > 0 and
+    return margin.version != 0 and margin.price_tick_atoms > 0 and
         margin.venue_initial_margin_ppm > 0 and
         margin.internal_initial_margin_ppm >= margin.venue_initial_margin_ppm and
         margin.internal_maintenance_margin_ppm > 0 and
         margin.internal_maintenance_margin_ppm <= margin.internal_initial_margin_ppm and
-        margin.fee_ppm >= 0 and margin.opening_buffer_micros >= margin.warning_buffer_micros and
-        margin.warning_buffer_micros >= margin.kill_buffer_micros and margin.kill_buffer_micros >= 0 and
+        margin.fee_ppm >= 0 and margin.opening_buffer_atoms >= margin.warning_buffer_atoms and
+        margin.warning_buffer_atoms >= margin.kill_buffer_atoms and margin.kill_buffer_atoms >= 0 and
         (margin.opening_buffer_bps == 0 or margin.opening_buffer_bps >= margin.warning_buffer_bps) and
         margin.warning_buffer_bps >= margin.kill_buffer_bps and margin.kill_buffer_bps >= 0 and
         (margin.opening_liquidation_distance_ticks == 0 or

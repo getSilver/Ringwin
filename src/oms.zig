@@ -567,7 +567,8 @@ pub const Oms = struct {
         };
         self.report_history[self.report_history_count] = report;
         self.report_history_count += 1;
-        if (report.report_id < order.last_report_id) return;
+        const canonical_report = !std.mem.allEqual(u8, &report.canonical_digest, 0);
+        if (!canonical_report and report.report_id < order.last_report_id) return;
         if (report.report_id == order.last_report_id) {
             if (report.revision != order.last_report_revision or report.status != order.last_report_status or
                 report.cumulative_quantity != order.last_report_cumulative_quantity or
@@ -575,16 +576,29 @@ pub const Oms = struct {
                 return error.ConflictingReportIdentity;
             return;
         }
-        if (order.state == .filled or order.state == .canceled or order.state == .rejected) {
-            self.recovery_only = true;
-            return error.TerminalFactConflict;
-        }
         const reported_quantity = std.math.add(i64, report.cumulative_quantity, report.remaining_quantity) catch return error.Overflow;
         const pending_amend = order.pending_reservation != null;
+        if (canonical_report and !pending_amend and report.revision < order.revision) {
+            var historical_quantity: ?i64 = null;
+            for (self.command_history[0..self.command_history_count]) |known| {
+                if (known.order_id == report.order_id and known.revision == report.revision and known.operation == .place)
+                    historical_quantity = known.quantity;
+            }
+            for (self.report_history[0 .. self.report_history_count - 1]) |known| {
+                if (known.order_id == report.order_id and known.revision == report.revision and known.status == .amended)
+                    historical_quantity = try std.math.add(i64, known.cumulative_quantity, known.remaining_quantity);
+            }
+            const historical_total = historical_quantity orelse return error.StaleOrderRevision;
+            if (report.cumulative_quantity < 0 or report.remaining_quantity < 0 or reported_quantity > historical_total)
+                return error.InvalidExecutionReport;
+            if ((report.status == .accepted or report.status == .partially_filled) and
+                report.cumulative_quantity <= order.cumulative_quantity) return;
+            return error.InvalidExecutionReport;
+        }
         if (pending_amend and report.revision > order.revision) return error.StaleOrderRevision;
         const old_revision_report = pending_amend and report.revision < order.revision;
         const pending_max_total = if (pending_amend) std.math.add(i64, order.cumulative_quantity, order.pending_basis_quantity) catch return error.Overflow else 0;
-        if (report.cumulative_quantity < order.cumulative_quantity or report.remaining_quantity < 0 or
+        if (report.cumulative_quantity < 0 or (!canonical_report and report.cumulative_quantity < order.cumulative_quantity) or report.remaining_quantity < 0 or
             (old_revision_report and reported_quantity > order.confirmed_quantity) or
             (!pending_amend and reported_quantity > order.quantity) or
             (pending_amend and !old_revision_report and report.status != .rejected and
@@ -595,6 +609,33 @@ pub const Oms = struct {
             return error.InvalidExecutionReport;
         if (report.status == .amended and report.revision != order.revision) return error.StaleOrderRevision;
         if (report.status == .amended and report.remaining_quantity == 0) return error.InvalidExecutionReport;
+        if (canonical_report) {
+            if (report.cumulative_quantity < 0 or report.remaining_quantity < 0)
+                return error.InvalidExecutionReport;
+            if (report.revision > order.revision) return error.StaleOrderRevision;
+            // Canonical identities are content digests. Progress comes from Venue
+            // revision/cumulative state, never from the numeric digest value.
+            if (report.cumulative_quantity < order.cumulative_quantity) {
+                if (report.status == .filled or report.status == .canceled or report.status == .rejected) return error.InvalidExecutionReport;
+                return;
+            }
+            if (report.cumulative_quantity == order.cumulative_quantity) {
+                if (report.revision < order.last_report_revision) return;
+                if (report.revision == order.last_report_revision and report.status == .accepted and
+                    order.last_report_status != .accepted) return;
+                if (report.revision == order.last_report_revision and report.status == order.last_report_status and
+                    report.remaining_quantity == order.last_report_remaining_quantity)
+                {
+                    // Equivalent source evidence chooses a stable representative.
+                    if (report.report_id > order.last_report_id) rememberReport(order, report);
+                    return;
+                }
+            }
+        }
+        if (order.state == .filled or order.state == .canceled or order.state == .rejected) {
+            self.recovery_only = true;
+            return error.TerminalFactConflict;
+        }
         if (report.status == .rejected and pending_amend and !old_revision_report) {
             if (reported_quantity > order.confirmed_quantity) return error.InvalidExecutionReport;
             rememberReport(order, report);
@@ -1423,6 +1464,43 @@ test "canonical report digest is part of report identity" {
     report.canonical_digest = @splat(2);
     try std.testing.expectError(error.ConflictingReportIdentity, state.lookupReport(report));
     try std.testing.expectError(error.ConflictingReportIdentity, state.applyReport(report));
+}
+
+test "canonical report identities do not order cumulative execution state" {
+    var state = Oms{};
+    var group: IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
+    group.members[0] = .{ .intent_sequence = 1, .operation = .place, .instrument = 1, .quantity = 3, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 9 } };
+    try state.applyGroup(group);
+    try state.applyReport(.{ .report_id = 90, .order_id = 1, .revision = 1, .status = .partially_filled, .cumulative_quantity = 1, .remaining_quantity = 2, .canonical_digest = @splat(1) });
+    try state.applyReport(.{ .report_id = 10, .order_id = 1, .revision = 1, .status = .partially_filled, .cumulative_quantity = 2, .remaining_quantity = 1, .canonical_digest = @splat(2) });
+    try std.testing.expectEqual(@as(i64, 2), state.orderById(1).?.cumulative_quantity);
+    try std.testing.expectError(error.InvalidExecutionReport, state.applyReport(.{ .report_id = 11, .order_id = 1, .revision = 1, .status = .filled, .cumulative_quantity = 1, .remaining_quantity = 0, .canonical_digest = @splat(6) }));
+    try std.testing.expectError(error.InvalidExecutionReport, state.applyReport(.{ .report_id = 12, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 1, .remaining_quantity = 2, .canonical_digest = @splat(7) }));
+    try std.testing.expectEqual(@as(i64, 2), state.orderById(1).?.cumulative_quantity);
+    const terminal: ExecutionReport = .{ .report_id = 5, .order_id = 1, .revision = 1, .status = .filled, .cumulative_quantity = 3, .remaining_quantity = 0, .canonical_digest = @splat(3) };
+    try state.applyReport(terminal);
+    try state.applyReport(.{ .report_id = 100, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 3, .canonical_digest = @splat(4) });
+    try state.applyReport(terminal);
+    try std.testing.expectEqual(@as(i64, 3), state.orderById(1).?.cumulative_quantity);
+    try std.testing.expectEqual(OrderState.filled, state.orderById(1).?.state);
+    var conflicting = terminal;
+    conflicting.canonical_digest = @splat(5);
+    try std.testing.expectError(error.ConflictingReportIdentity, state.applyReport(conflicting));
+}
+
+test "canonical late accepted report retains the historical quantity after decreasing amend" {
+    var state = Oms{};
+    const placed = try placeSubmitted(&state, 1, 10);
+    try state.applyReport(.{ .report_id = 90, .order_id = placed.order_id, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 10, .canonical_digest = @splat(1) });
+    state.begin();
+    var group: IntentGroup = .{ .first_intent_sequence = 2, .count = 1 };
+    group.members[0] = .{ .intent_sequence = 2, .strategy_instance = 1, .operation = .amend, .instrument = 1, .target_order_id = placed.order_id, .expected_revision = 1, .quantity = 5, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 2 }, .reservation = .{ .asset = 1, .atoms = 5 } };
+    try state.applyGroup(group);
+    try state.applyReport(.{ .report_id = 10, .order_id = placed.order_id, .revision = 2, .status = .amended, .cumulative_quantity = 0, .remaining_quantity = 5, .canonical_digest = @splat(2) });
+    try state.applyReport(.{ .report_id = 100, .order_id = placed.order_id, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 10, .canonical_digest = @splat(3) });
+    try std.testing.expectEqual(@as(i64, 5), state.orderById(placed.order_id).?.quantity);
+    try std.testing.expectEqual(@as(u32, 2), state.orderById(placed.order_id).?.revision);
+    try std.testing.expectEqual(@as(u64, 10), state.orderById(placed.order_id).?.last_report_id);
 }
 
 test "hot terminal facts reject semantic changes and invalid filled quantities" {

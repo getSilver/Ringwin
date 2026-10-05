@@ -791,7 +791,7 @@ pub fn runRole(
                     try demo_authority.requireZeroDemoExposure(&owner.shard.canonical_account);
                 } else if (owner.shard.oms.orders[0].state != .filled or
                     owner.shard.economicSummary().portfolio.spot.quantity != 20_000 or
-                    owner.shard.economicSummary().portfolio.fee_micros != 1) return error.OkxLedgerNotClosed;
+                    owner.shard.economicSummary().portfolio.fee_atoms != 1) return error.OkxLedgerNotClosed;
                 try writeStatus(client, .okx_verified);
                 try writeAll(client, &owner.shard.canonicalStateDigest());
             },
@@ -965,7 +965,7 @@ const EngineOwners = struct {
         account_bootstrap.venue.envelope.raw_evidence.stream = 2;
         _ = try self.shard_run.apply(account_bootstrap);
         var market_prelude = [_]trading_shard.CanonicalEvent{
-            fixture.atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = fixture.swap_instrument, .price_micros = 50_000_000_000 } } }),
+            fixture.atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = fixture.swap_instrument, .price_atoms = 50_000_000_000 } } }),
             fixture.canonicalAt(12, 99, .{ .instrument_definition_observed = .{ .instrument = fixture.swap_instrument, .rules_version = 1 } }),
             fixture.snapshotAt(13, 100),
             fixture.deltaAt(14, 100, 101, 49_850_000_000),
@@ -1020,7 +1020,7 @@ const EngineOwners = struct {
         };
 
         const adapter = self.venue.adapter();
-        try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1, .asset_definitions = self.shard_run.shard.activatedAssets() });
+        try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1, .asset_definitions = self.shard_run.shard.activatedAssets(), .native_settlement_atoms = self.shard_run.shard.instrument_registry.get(proved.instrument).?.margin.native_settlement_atoms });
         try self.gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
         try self.gateway.observeAuthority(.{
             .account = 2,
@@ -1038,7 +1038,7 @@ const EngineOwners = struct {
         if (store.safetyGate() != .open) return error.DurableSafetyGateClosed;
         const recovered = try store.recover(init.io, stream);
         if (recovered.status != .ready or recovered.committed_barrier == 0) return error.DurableBootstrapIncomplete;
-        if (self.shard_run.shard.risk_lease_micros <= 0) return error.RiskLeaseClosed;
+        if (self.shard_run.shard.risk_lease_atoms <= 0) return error.RiskLeaseClosed;
         if (self.shard_run.shard.fencing_token == 0) return error.MissingFencingToken;
         if (!proved.authority.complete()) return error.IncompleteDispatchAuthority;
         const send_now = proved.authority.dispatch_deadline_monotonic_ns -| 1;
@@ -1461,7 +1461,7 @@ const ExecutionOwners = struct {
             if (wire_id == null and owned.dispatch_submitted) return error.MissingDispatchIdentity;
             try self.venue.rememberRecoveredOrder(owned.id, wire_id orelse owned.client_order_id, owned.portfolio_reduce_only, .{ .instrument = owned.instrument, .rules_version = owned.limit_price.rules_version, .lots = owned.quantity }, owned.revision);
         }
-        try self.venue.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = restored.shard.activatedAssets() });
+        try self.venue.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = restored.shard.activatedAssets(), .native_settlement_atoms = if (restored.shard.instrument_registry.get(okx_venue.btc_usdt_spot)) |configured| configured.margin.native_settlement_atoms else false });
         try self.venue.beginPrivateSession();
     }
 
@@ -1764,7 +1764,7 @@ const ExecutionOwners = struct {
 };
 
 const offline_okx_policy =
-    \\{"schema":1,"startup":"virgin","exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_micros":20000000,"risk_limit_micros":10000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
+    \\{"schema":2,"price_tick_atoms":100000,"startup":"virgin","exchange_account":2,"portfolio_identity":1,"strategy_identity":40,"activation_identity":50,"config_version":1,"portfolio_allocation_atoms":20000000,"risk_limit_atoms":15000000,"decision_stream_id":91,"dispatch_stream_id":92,"decision_domain":1,"node_identity":1}
 ;
 
 const offline_asset_definitions = @import("asset_registry.zig").testDefinitions(6, 8);
@@ -2650,9 +2650,9 @@ fn writeDemoEconomics(init: std.process.Init, decision: *const demo_authority.Ow
         try output.print("windows_demo_fill identity={d} local_order_id={d} quantity={d}\n", .{ fill.identity, fill.order_id, fill.quantity });
     }
     const digest = std.fmt.bytesToHex(decision.shard.canonicalStateDigest(), .lower);
-    try output.print("windows_demo_economics fee_micros={d} replay_digest={s} strategy_identity={d} config_version={d}\n", .{
-        decision.shard.economicSummary().portfolio.fee_micros, &digest,
-        decision.shard.strategy_identity,                      decision.shard.strategy_config_version,
+    try output.print("windows_demo_economics fee_atoms={d} replay_digest={s} strategy_identity={d} config_version={d}\n", .{
+        decision.shard.economicSummary().portfolio.fee_atoms, &digest,
+        decision.shard.strategy_identity,                     decision.shard.strategy_config_version,
     });
 }
 

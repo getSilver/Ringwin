@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const schema_version: u16 = 5;
+pub const schema_version: u16 = 6;
 
 pub const VenueIdentity = u64;
 pub const Product = enum(u8) { spot, isolated_linear_usdt };

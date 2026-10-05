@@ -80,6 +80,7 @@ const Bootstrap = struct {
 
 pub const OkxVenueAdapter = struct {
     asset_definitions: @import("asset_registry.zig").Registry = .{},
+    native_settlement_atoms: bool = false,
     allocator: std.mem.Allocator,
     chain: *live.Chain,
     clock: Clock,
@@ -272,6 +273,7 @@ pub const OkxVenueAdapter = struct {
             return error.InvalidConfig;
         self.scheduler = order.Scheduler.init(self.profile) catch return error.InvalidConfig;
         self.asset_definitions = config.asset_definitions orelse .{};
+        self.native_settlement_atoms = config.native_settlement_atoms;
         self.asset_definitions.validate() catch return error.InvalidConfig;
         self.binding = .{ .venue = config.venue, .account = config.exchange_account, .session = config.adapter_session };
         self.state = .running;
@@ -282,7 +284,7 @@ pub const OkxVenueAdapter = struct {
         if (self.state == .idle) return error.NotStarted;
         if (self.state == .stopped) return .stopped;
         if (self.pending_output != null) return .backpressure;
-        if (self.private_failed or !self.asset_definitions.legacyConsumerCompatible()) switch (request) {
+        if (self.private_failed or !self.asset_definitions.consumerCompatible(self.native_settlement_atoms)) switch (request) {
             .order_command => |command| if (command.operation != .cancel) return .backpressure,
             .order_batch => |commands| for (commands.slice()) |command| {
                 if (command.operation != .cancel) return .backpressure;
@@ -786,7 +788,7 @@ pub const OkxVenueAdapter = struct {
     }
 
     fn dispatchBatch(self: *OkxVenueAdapter, batch: order.TransportBatch) void {
-        if (self.private_failed or !self.asset_definitions.legacyConsumerCompatible()) for (batch.slice()) |legacy| {
+        if (self.private_failed or !self.asset_definitions.consumerCompatible(self.native_settlement_atoms)) for (batch.slice()) |legacy| {
             if (legacy.operation() != .cancel) {
                 for (batch.slice()) |item| if (self.takePending(item.command_id)) |pending| self.appendResult(pending.command, .not_sent, .venue_unavailable, null);
                 return;

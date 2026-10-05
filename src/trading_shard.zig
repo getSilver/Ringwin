@@ -110,26 +110,25 @@ pub const SnapshotRecovery = struct {
 
 const Position = struct {
     quantity: i64 = 0,
-    open_cost_micros: i64 = 0,
+    open_cost_atoms: i128 = 0,
 };
 
-fn ceilDivPositive(numerator: i128, denominator: i128) !i64 {
+fn ceilDivPositive(numerator: i128, denominator: i128) !i128 {
     if (numerator < 0 or denominator <= 0) return error.InvalidPositiveDivision;
     const rounded = try std.math.sub(i128, try std.math.add(i128, numerator, denominator), 1);
-    return std.math.cast(i64, @divFloor(rounded, denominator)) orelse
-        error.Overflow;
+    return @divFloor(rounded, denominator);
 }
 
-fn notionalMicrosScaled(quantity: i64, price_micros: i64, quantity_denominator: i64) !i64 {
-    if (quantity < 0 or price_micros <= 0 or quantity_denominator <= 0)
+fn notionalAtomsScaled(quantity: i64, price_atoms: i128, quantity_denominator: i64) !i128 {
+    if (quantity < 0 or price_atoms <= 0 or quantity_denominator <= 0)
         return error.InvalidNotionalInput;
-    return ceilDivPositive(try std.math.mul(i128, quantity, price_micros), quantity_denominator);
+    return ceilDivPositive(try std.math.mul(i128, quantity, price_atoms), quantity_denominator);
 }
 
-fn priceTicks(price_micros: i64, tick_micros: i64) !i128 {
-    if (price_micros <= 0 or tick_micros <= 0 or @mod(price_micros, tick_micros) != 0)
+fn priceTicks(price_atoms: i128, tick_atoms: i128) !i128 {
+    if (price_atoms <= 0 or tick_atoms <= 0 or @mod(price_atoms, tick_atoms) != 0)
         return error.InvalidPriceTick;
-    return @divExact(price_micros, tick_micros);
+    return @divExact(price_atoms, tick_atoms);
 }
 
 fn changesTradingAuthorization(kind: operational.CommandKind) bool {
@@ -139,10 +138,10 @@ fn changesTradingAuthorization(kind: operational.CommandKind) bool {
     };
 }
 
-fn riskTier(notional_micros: i64) !u8 {
-    if (notional_micros <= 500_000 * money_scale) return 1;
-    if (notional_micros <= 1_000_000 * money_scale) return 2;
-    if (notional_micros <= 1_500_000 * money_scale) return 3;
+fn riskTier(notional_atoms: i128, scale: u8) !u8 {
+    if (notional_atoms <= try (canonical.Decimal{ .coefficient = 500_000, .scale = 0 }).exactAtoms(scale)) return 1;
+    if (notional_atoms <= try (canonical.Decimal{ .coefficient = 1_000_000, .scale = 0 }).exactAtoms(scale)) return 2;
+    if (notional_atoms <= try (canonical.Decimal{ .coefficient = 1_500_000, .scale = 0 }).exactAtoms(scale)) return 3;
     return error.RiskLimitExceeded;
 }
 
@@ -176,44 +175,44 @@ pub const TradingShard = struct {
     fencing_token: u64 = 0,
     expected_source_sequence: ?u64 = null,
     market_health: MarketHealth = .initializing,
-    bid_price_micros: i64 = 0,
+    bid_price_ticks: i64 = 0,
     bid_quantity: i64 = 0,
-    ask_1_price_micros: i64 = 0,
+    ask_1_price_ticks: i64 = 0,
     ask_1_quantity: i64 = 0,
-    ask_2_price_micros: i64 = 0,
+    ask_2_price_ticks: i64 = 0,
     ask_2_quantity: i64 = 0,
     strategy_cursor: u64 = 0,
     strategy_decision_count: u64 = 0,
     timer_pending: bool = true,
     dispatch_attempt_count: u64 = 0,
     last_reject_reason: RejectReason = .none,
-    last_risk_required_micros: i64 = 0,
+    last_risk_required_atoms: i128 = 0,
     last_risk_tier: u8 = 0,
-    mark_price_micros: i64 = 0,
-    risk_lease_micros: i64 = 0,
+    mark_price_atoms: i128 = 0,
+    risk_lease_atoms: i128 = 0,
     risk_lease_identity: u64 = 0,
     risk_lease_version: u64 = 0,
     risk_lease_valid_through_barrier: u64 = 0,
-    strategy_limit_micros: i64 = 0,
-    portfolio_limit_micros: i64 = 0,
-    exchange_account_limit_micros: i64 = 0,
-    global_limit_micros: i64 = 0,
-    price_tick_micros: i64 = 0,
+    strategy_limit_atoms: i128 = 0,
+    portfolio_limit_atoms: i128 = 0,
+    exchange_account_limit_atoms: i128 = 0,
+    global_limit_atoms: i128 = 0,
+    price_tick_atoms: i128 = 0,
     venue_initial_margin_ppm: i64 = 0,
     internal_initial_margin_ppm: i64 = 0,
     internal_maintenance_margin_ppm: i64 = 0,
     risk_fee_ppm: i64 = 0,
-    opening_buffer_micros: i64 = 0,
+    opening_buffer_atoms: i128 = 0,
     opening_buffer_bps: i64 = 0,
     opening_liquidation_distance_ticks: i64 = 0,
-    warning_buffer_micros: i64 = 0,
-    kill_buffer_micros: i64 = 0,
+    warning_buffer_atoms: i128 = 0,
+    kill_buffer_atoms: i128 = 0,
     warning_buffer_bps: i64 = 0,
     kill_buffer_bps: i64 = 0,
     warning_liquidation_distance_ticks: i64 = 0,
     kill_liquidation_distance_ticks: i64 = 0,
-    portfolio_margin_buffer_micros: i64 = 0,
-    exchange_margin_buffer_micros: i64 = 0,
+    portfolio_margin_buffer_atoms: i128 = 0,
+    exchange_margin_buffer_atoms: i128 = 0,
     portfolio_buffer_bps: i64 = 0,
     exchange_buffer_bps: i64 = 0,
     portfolio_liquidation_distance_ticks: i64 = std.math.maxInt(i64),
@@ -298,7 +297,10 @@ pub const TradingShard = struct {
             // Projection invalidation is authoritative even when the public
             // apply call reports the rejected observation. This is the only
             // exception to the ordinary candidate-commit-on-success rule.
-            if (err == error.TombstoneFactConflict or err == error.ArchivedFactOutsideRetention or err == error.TerminalFactConflict) {
+            if (err == error.TombstoneFactConflict or err == error.ArchivedFactOutsideRetention or err == error.TerminalFactConflict or
+                (event.event == .execution_report and event.envelope.exchange_account == self.exchange_account_identity and
+                    (err == error.InvalidExecutionReport or err == error.StaleOrderRevision)))
+            {
                 candidate.oms.recovery_only = true;
                 if (candidate.operational_state.initialized) try candidate.applyOperationalGate(.{
                     .gate_identity = event.envelope.identity.sequence,
@@ -316,6 +318,7 @@ pub const TradingShard = struct {
                     error.Overflow, error.QuantityOutOfRange, error.PriceOutOfRange, error.AssetAmountOutOfRange => .overflow,
                     error.UnknownAssetDefinition => .unknown_asset,
                     error.MissingFillFee => .missing_amount,
+                    error.InexactEconomicAmount => .inexact_amount,
                     else => .invalid_economic_fact,
                 });
                 try candidate.bindFreshCancellations(event.envelope.times.monotonic_ns orelse 0);
@@ -487,8 +490,8 @@ pub const TradingShard = struct {
         return .{
             .portfolio = self.economic_projection.portfolio,
             .exchange = self.economic_projection.exchange,
-            .treasury_usdt_micros = self.economic_projection.treasury_usdt_micros,
-            .suspense_usdt_micros = self.economic_projection.suspense_usdt_micros,
+            .treasury_usdt_atoms = self.economic_projection.treasury_usdt_atoms,
+            .suspense_usdt_atoms = self.economic_projection.suspense_usdt_atoms,
             .ledger_transactions = self.economic_projection.ledger_count,
             .reconciliation_break = self.economic_projection.reconciliation_break,
         };
@@ -496,17 +499,17 @@ pub const TradingShard = struct {
 
     /// Remaining lease headroom derived from the authoritative economic and
     /// OMS reservation owners; it is never snapshotted as competing state.
-    pub fn riskLeaseRemainingMicros(self: *const TradingShard) !i64 {
+    pub fn riskLeaseRemainingAtoms(self: *const TradingShard) !i128 {
         return std.math.sub(
-            i64,
-            self.risk_lease_micros,
-            try std.math.add(i64, self.economic_projection.portfolio.margin_micros, try self.activeReservationMicros()),
+            i128,
+            self.risk_lease_atoms,
+            try std.math.add(i128, self.economic_projection.portfolio.margin_atoms, try self.activeReservationAtoms()),
         );
     }
 
-    pub fn activeReservationMicros(self: *const TradingShard) !i64 {
+    pub fn activeReservationAtoms(self: *const TradingShard) !i128 {
         const reservation = try self.oms.activeReservations(settlement_asset);
-        return std.math.cast(i64, reservation.atoms) orelse error.Overflow;
+        return reservation.atoms;
     }
 
     pub const IntegritySnapshot = struct {
@@ -547,61 +550,62 @@ pub const TradingShard = struct {
     }
 
     pub fn genesisReady(self: *const TradingShard) bool {
-        return self.asset_registry.legacyConsumerCompatible() and !self.asset_configuration_failed and self.instrument_registry.count != 0 and self.instrument_rules_version != 0 and self.margin_rules_version != 0 and
+        self.requireSettlementConsumers() catch return false;
+        return !self.asset_configuration_failed and self.instrument_registry.count != 0 and self.instrument_rules_version != 0 and self.margin_rules_version != 0 and
             self.account_configured and self.exchange_balance_observed and
             self.exchange_positions_observed and self.opening_balance_observed and
             self.virtual_portfolio_active and self.portfolio_funded and self.strategy_active and
-            self.fencing_token != 0 and self.risk_lease_micros > 0;
+            self.fencing_token != 0 and self.risk_lease_atoms > 0;
     }
 
     fn portfolioPosition(self: *const TradingShard) Position {
-        return .{ .quantity = self.economic_projection.portfolio.swap.quantity, .open_cost_micros = self.economic_projection.portfolio.swap.open_cost_micros };
+        return .{ .quantity = self.economic_projection.portfolio.swap.quantity, .open_cost_atoms = self.economic_projection.portfolio.swap.open_cost_atoms };
     }
 
     fn exchangePosition(self: *const TradingShard) Position {
-        return .{ .quantity = self.economic_projection.exchange.swap.quantity, .open_cost_micros = self.economic_projection.exchange.swap.open_cost_micros };
+        return .{ .quantity = self.economic_projection.exchange.swap.quantity, .open_cost_atoms = self.economic_projection.exchange.swap.open_cost_atoms };
     }
 
     fn spotPortfolioPosition(self: *const TradingShard) Position {
-        return .{ .quantity = self.economic_projection.portfolio.spot.quantity, .open_cost_micros = self.economic_projection.portfolio.spot.open_cost_micros };
+        return .{ .quantity = self.economic_projection.portfolio.spot.quantity, .open_cost_atoms = self.economic_projection.portfolio.spot.open_cost_atoms };
     }
 
     fn spotExchangePosition(self: *const TradingShard) Position {
-        return .{ .quantity = self.economic_projection.exchange.spot.quantity, .open_cost_micros = self.economic_projection.exchange.spot.open_cost_micros };
+        return .{ .quantity = self.economic_projection.exchange.spot.quantity, .open_cost_atoms = self.economic_projection.exchange.spot.open_cost_atoms };
     }
 
-    fn portfolioCash(self: *const TradingShard) i64 {
-        return self.economic_projection.portfolio.usdt_balance_micros;
+    fn portfolioCash(self: *const TradingShard) i128 {
+        return self.economic_projection.portfolio.usdt_balance_atoms;
     }
-    fn treasuryCash(self: *const TradingShard) i64 {
-        return self.economic_projection.treasury_usdt_micros;
+    fn treasuryCash(self: *const TradingShard) i128 {
+        return self.economic_projection.treasury_usdt_atoms;
     }
-    fn exchangeCash(self: *const TradingShard) i64 {
-        return self.economic_projection.exchange.usdt_balance_micros;
+    fn exchangeCash(self: *const TradingShard) i128 {
+        return self.economic_projection.exchange.usdt_balance_atoms;
     }
-    fn portfolioFee(self: *const TradingShard) i64 {
-        return self.economic_projection.portfolio.fee_micros;
+    fn portfolioFee(self: *const TradingShard) i128 {
+        return self.economic_projection.portfolio.fee_atoms;
     }
-    fn exchangeFee(self: *const TradingShard) i64 {
-        return self.economic_projection.exchange.fee_micros;
+    fn exchangeFee(self: *const TradingShard) i128 {
+        return self.economic_projection.exchange.fee_atoms;
     }
-    fn totalFees(self: *const TradingShard) i64 {
+    fn totalFees(self: *const TradingShard) i128 {
         return self.portfolioFee();
     }
-    fn realizedPnl(self: *const TradingShard) i64 {
-        return self.economic_projection.portfolio.realized_pnl_micros;
+    fn realizedPnl(self: *const TradingShard) i128 {
+        return self.economic_projection.portfolio.realized_pnl_atoms;
     }
-    fn unrealizedPnl(self: *const TradingShard) i64 {
-        return self.economic_projection.portfolio.unrealized_pnl_micros;
+    fn unrealizedPnl(self: *const TradingShard) i128 {
+        return self.economic_projection.portfolio.unrealized_pnl_atoms;
     }
 
     fn riskLimits(self: *const TradingShard) risk_module.Limits {
         return .{
-            .strategy = .{ .asset = settlement_asset, .atoms = self.strategy_limit_micros },
-            .portfolio = .{ .asset = settlement_asset, .atoms = self.portfolio_limit_micros },
-            .decision_domain = .{ .asset = settlement_asset, .atoms = self.risk_lease_micros },
-            .exchange_account = .{ .asset = settlement_asset, .atoms = self.exchange_account_limit_micros },
-            .global = .{ .asset = settlement_asset, .atoms = self.global_limit_micros },
+            .strategy = .{ .asset = settlement_asset, .atoms = self.strategy_limit_atoms },
+            .portfolio = .{ .asset = settlement_asset, .atoms = self.portfolio_limit_atoms },
+            .decision_domain = .{ .asset = settlement_asset, .atoms = self.risk_lease_atoms },
+            .exchange_account = .{ .asset = settlement_asset, .atoms = self.exchange_account_limit_atoms },
+            .global = .{ .asset = settlement_asset, .atoms = self.global_limit_atoms },
         };
     }
 
@@ -609,22 +613,22 @@ pub const TradingShard = struct {
         const registered = self.instrument_registry.get(instrument_id);
         const rules_version = if (registered) |entry| entry.rules.version else self.instrument_rules_version;
         const quantity_denominator = if (registered) |entry| entry.rules.quantity_denominator else self.quantity_denominator;
-        const margin = if (registered) |entry| entry.margin else shard_event.MarginRules{ .version = self.margin_rules_version, .price_tick_micros = self.price_tick_micros, .venue_initial_margin_ppm = self.venue_initial_margin_ppm, .internal_initial_margin_ppm = self.internal_initial_margin_ppm, .internal_maintenance_margin_ppm = self.internal_maintenance_margin_ppm, .fee_ppm = self.risk_fee_ppm, .opening_buffer_micros = self.opening_buffer_micros, .opening_buffer_bps = self.opening_buffer_bps, .opening_liquidation_distance_ticks = self.opening_liquidation_distance_ticks, .warning_buffer_micros = self.warning_buffer_micros, .kill_buffer_micros = self.kill_buffer_micros, .warning_buffer_bps = self.warning_buffer_bps, .kill_buffer_bps = self.kill_buffer_bps, .warning_liquidation_distance_ticks = self.warning_liquidation_distance_ticks, .kill_liquidation_distance_ticks = self.kill_liquidation_distance_ticks };
+        const margin = if (registered) |entry| entry.margin else shard_event.MarginRules{ .version = self.margin_rules_version, .price_tick_atoms = self.price_tick_atoms, .venue_initial_margin_ppm = self.venue_initial_margin_ppm, .internal_initial_margin_ppm = self.internal_initial_margin_ppm, .internal_maintenance_margin_ppm = self.internal_maintenance_margin_ppm, .fee_ppm = self.risk_fee_ppm, .opening_buffer_atoms = self.opening_buffer_atoms, .opening_buffer_bps = self.opening_buffer_bps, .opening_liquidation_distance_ticks = self.opening_liquidation_distance_ticks, .warning_buffer_atoms = self.warning_buffer_atoms, .kill_buffer_atoms = self.kill_buffer_atoms, .warning_buffer_bps = self.warning_buffer_bps, .kill_buffer_bps = self.kill_buffer_bps, .warning_liquidation_distance_ticks = self.warning_liquidation_distance_ticks, .kill_liquidation_distance_ticks = self.kill_liquidation_distance_ticks };
         return .{
             .settlement_asset = if (registered) |entry| entry.rules.settlement_asset else settlement_asset,
             .instrument = instrument_id,
             .rules_version = rules_version,
             .quantity_denominator = quantity_denominator,
-            .price_tick_value = .{ .asset = if (registered) |entry| entry.rules.settlement_asset else settlement_asset, .atoms = margin.price_tick_micros },
+            .price_tick_value = .{ .asset = if (registered) |entry| entry.rules.settlement_asset else settlement_asset, .atoms = margin.price_tick_atoms },
             .venue_initial_margin_ppm = margin.venue_initial_margin_ppm,
             .internal_initial_margin_ppm = margin.internal_initial_margin_ppm,
             .internal_maintenance_margin_ppm = margin.internal_maintenance_margin_ppm,
             .fee_ppm = margin.fee_ppm,
-            .opening_buffer = .{ .asset = if (registered) |entry| entry.rules.settlement_asset else settlement_asset, .atoms = margin.opening_buffer_micros },
+            .opening_buffer = .{ .asset = if (registered) |entry| entry.rules.settlement_asset else settlement_asset, .atoms = margin.opening_buffer_atoms },
             .opening_buffer_bps = margin.opening_buffer_bps,
             .opening_liquidation_distance_ticks = margin.opening_liquidation_distance_ticks,
-            .warning_buffer = .{ .asset = if (registered) |entry| entry.rules.settlement_asset else settlement_asset, .atoms = margin.warning_buffer_micros },
-            .kill_buffer = .{ .asset = if (registered) |entry| entry.rules.settlement_asset else settlement_asset, .atoms = margin.kill_buffer_micros },
+            .warning_buffer = .{ .asset = if (registered) |entry| entry.rules.settlement_asset else settlement_asset, .atoms = margin.warning_buffer_atoms },
+            .kill_buffer = .{ .asset = if (registered) |entry| entry.rules.settlement_asset else settlement_asset, .atoms = margin.kill_buffer_atoms },
             .warning_buffer_bps = margin.warning_buffer_bps,
             .kill_buffer_bps = margin.kill_buffer_bps,
             .warning_liquidation_distance_ticks = margin.warning_liquidation_distance_ticks,
@@ -634,7 +638,7 @@ pub const TradingShard = struct {
 
     const QualifiedIntentGroup = struct {
         group: oms_module.IntentGroup,
-        reservation_micros: i64,
+        reservation_atoms: i128,
     };
 
     fn validateExactOmsSpec(intent: oms_module.Intent, entry: instrument_registry.Entry) !void {
@@ -666,7 +670,7 @@ pub const TradingShard = struct {
                 if (intent.strategy_instance == fenced and intent.operation != .cancel)
                     return error.StrategyCutoverFenced;
             if (intent.operation == .cancel) continue;
-            try self.requireLegacyAssetConsumers();
+            if (!self.settlementConsumersCompatible(intent.instrument)) return error.AssetPrecisionUnsupported;
             var replaced: canonical.AssetAmount = .{ .asset = settlement_asset, .atoms = 0 };
             if (intent.operation == .amend) {
                 const target = self.oms.orderById(intent.target_order_id) orelse return error.UnknownOrder;
@@ -714,7 +718,7 @@ pub const TradingShard = struct {
                 return error.TradingNotAuthorized;
             const market = self.canonical_market.get(intent.instrument) orelse return error.MissingInstrumentDefinition;
             const mark = market.mark orelse return error.InvalidMarkPrice;
-            const mark_price = std.math.cast(i64, mark.ticks) orelse return error.PriceOutOfRange;
+            const mark_price = mark.ticks;
             const assessment = try risk_module.assess(self.riskRules(intent.instrument), self.riskLimits(), .{
                 .portfolio_cash = .{ .asset = settlement_asset, .atoms = self.portfolioCash() },
                 .exchange_cash = .{ .asset = settlement_asset, .atoms = self.exchangeCash() },
@@ -736,8 +740,8 @@ pub const TradingShard = struct {
             intent.venue_reduce_only = assessment.venue_reduce_only and
                 (if (instrument_config.capability) |capability| capability.supports_venue_reduce_only else false);
             active = assessment.total_reserved;
-            self.portfolio_margin_buffer_micros = std.math.cast(i64, assessment.portfolio_margin_buffer.atoms) orelse return error.Overflow;
-            self.exchange_margin_buffer_micros = std.math.cast(i64, assessment.exchange_margin_buffer.atoms) orelse return error.Overflow;
+            self.portfolio_margin_buffer_atoms = assessment.portfolio_margin_buffer.atoms;
+            self.exchange_margin_buffer_atoms = assessment.exchange_margin_buffer.atoms;
             self.portfolio_buffer_bps = assessment.portfolio_buffer_bps;
             self.exchange_buffer_bps = assessment.exchange_buffer_bps;
             self.portfolio_liquidation_distance_ticks = assessment.portfolio_liquidation_distance_ticks;
@@ -761,7 +765,7 @@ pub const TradingShard = struct {
         }
         return .{
             .group = qualified,
-            .reservation_micros = std.math.cast(i64, active.atoms) orelse return error.Overflow,
+            .reservation_atoms = active.atoms,
         };
     }
 
@@ -785,7 +789,7 @@ pub const TradingShard = struct {
         return self.instrumentEntry(identity);
     }
 
-    fn confirmPendingReplacement(self: *TradingShard, order_id: u64, sequence: u64, now_monotonic_ns: u64) !?i64 {
+    fn confirmPendingReplacement(self: *TradingShard, order_id: u64, sequence: u64, now_monotonic_ns: u64) !?i128 {
         const replacement = (self.oms.replacementIntent(order_id, sequence) catch {
             try self.oms.discardReplacement(order_id);
             return null;
@@ -825,14 +829,14 @@ pub const TradingShard = struct {
             .authority = try candidate.dispatchAuthorityRefs(intent.instrument, now_monotonic_ns, decision_barrier),
         });
         self.* = candidate;
-        return qualified.reservation_micros;
+        return qualified.reservation_atoms;
     }
 
-    fn adjustMarginBuffersForReservationChange(self: *TradingShard, previous: i64) !void {
-        const current_atoms = try self.activeReservationMicros();
-        const change = try std.math.sub(i64, current_atoms, previous);
-        self.portfolio_margin_buffer_micros = try std.math.sub(i64, self.portfolio_margin_buffer_micros, change);
-        self.exchange_margin_buffer_micros = try std.math.sub(i64, self.exchange_margin_buffer_micros, change);
+    fn adjustMarginBuffersForReservationChange(self: *TradingShard, previous: i128) !void {
+        const current_atoms = try self.activeReservationAtoms();
+        const change = try std.math.sub(i128, current_atoms, previous);
+        self.portfolio_margin_buffer_atoms = try std.math.sub(i128, self.portfolio_margin_buffer_atoms, change);
+        self.exchange_margin_buffer_atoms = try std.math.sub(i128, self.exchange_margin_buffer_atoms, change);
     }
 
     fn applyOperationalGate(self: *TradingShard, change: operational.SafetyGateChange) !void {
@@ -850,26 +854,26 @@ pub const TradingShard = struct {
             exchange_spot: Position = .{},
         } = .{},
         cash: struct {
-            portfolio_micros: i64 = 0,
-            treasury_micros: i64 = 0,
-            exchange_micros: i64 = 0,
+            portfolio_atoms: i128 = 0,
+            treasury_atoms: i128 = 0,
+            exchange_atoms: i128 = 0,
         } = .{},
         fees: struct {
-            portfolio_micros: i64 = 0,
-            exchange_micros: i64 = 0,
-            total_micros: i64 = 0,
+            portfolio_atoms: i128 = 0,
+            exchange_atoms: i128 = 0,
+            total_atoms: i128 = 0,
         } = .{},
         pnl: struct {
-            realized_micros: i64 = 0,
-            unrealized_micros: i64 = 0,
+            realized_atoms: i128 = 0,
+            unrealized_atoms: i128 = 0,
         } = .{},
         ledger: struct {
             transaction_count: u64 = 0,
             portfolio_transfer_count: u64 = 0,
-            portfolio_debits_micros: i64 = 0,
-            portfolio_credits_micros: i64 = 0,
-            exchange_debits_micros: i64 = 0,
-            exchange_credits_micros: i64 = 0,
+            portfolio_debits_atoms: i128 = 0,
+            portfolio_credits_atoms: i128 = 0,
+            exchange_debits_atoms: i128 = 0,
+            exchange_credits_atoms: i128 = 0,
             projections_complete: bool = false,
         } = .{},
         projection_digest: [Sha256.digest_length]u8 = @splat(0),
@@ -885,26 +889,26 @@ pub const TradingShard = struct {
                 .exchange_spot = self.spotExchangePosition(),
             },
             .cash = .{
-                .portfolio_micros = self.portfolioCash(),
-                .treasury_micros = self.treasuryCash(),
-                .exchange_micros = self.exchangeCash(),
+                .portfolio_atoms = self.portfolioCash(),
+                .treasury_atoms = self.treasuryCash(),
+                .exchange_atoms = self.exchangeCash(),
             },
             .fees = .{
-                .portfolio_micros = self.portfolioFee(),
-                .exchange_micros = self.exchangeFee(),
-                .total_micros = self.totalFees(),
+                .portfolio_atoms = self.portfolioFee(),
+                .exchange_atoms = self.exchangeFee(),
+                .total_atoms = self.totalFees(),
             },
             .pnl = .{
-                .realized_micros = self.realizedPnl(),
-                .unrealized_micros = self.unrealizedPnl(),
+                .realized_atoms = self.realizedPnl(),
+                .unrealized_atoms = self.unrealizedPnl(),
             },
             .ledger = .{
                 .transaction_count = self.economic_projection.ledger_summary.transaction_count,
                 .portfolio_transfer_count = self.economic_projection.ledger_summary.portfolio_transfer_count,
-                .portfolio_debits_micros = self.economic_projection.ledger_summary.portfolio_debits_micros,
-                .portfolio_credits_micros = self.economic_projection.ledger_summary.portfolio_credits_micros,
-                .exchange_debits_micros = self.economic_projection.ledger_summary.exchange_debits_micros,
-                .exchange_credits_micros = self.economic_projection.ledger_summary.exchange_credits_micros,
+                .portfolio_debits_atoms = self.economic_projection.ledger_summary.portfolio_debits_atoms,
+                .portfolio_credits_atoms = self.economic_projection.ledger_summary.portfolio_credits_atoms,
+                .exchange_debits_atoms = self.economic_projection.ledger_summary.exchange_debits_atoms,
+                .exchange_credits_atoms = self.economic_projection.ledger_summary.exchange_credits_atoms,
                 .projections_complete = self.economic_projection.ledger_summary.projections_complete,
             },
             .projection_digest = self.economic_projection.digest(),
@@ -924,11 +928,11 @@ pub const TradingShard = struct {
         // economic projection owns position margin; never recompute either
         // from the legacy single-order scalars.
         const used = try std.math.add(
-            i64,
-            self.economic_projection.portfolio.margin_micros,
-            try self.activeReservationMicros(),
+            i128,
+            self.economic_projection.portfolio.margin_atoms,
+            try self.activeReservationAtoms(),
         );
-        const remaining = try std.math.sub(i64, self.risk_lease_micros, used);
+        const remaining = try std.math.sub(i128, self.risk_lease_atoms, used);
         if (fail_if_exceeded and remaining < 0) return error.RiskLeaseExceeded;
     }
 
@@ -936,10 +940,10 @@ pub const TradingShard = struct {
         const portfolio_position = self.portfolioPosition();
         const exchange_position = self.exchangePosition();
         if (portfolio_position.quantity != exchange_position.quantity or
-            portfolio_position.open_cost_micros != exchange_position.open_cost_micros)
+            portfolio_position.open_cost_atoms != exchange_position.open_cost_atoms)
             return error.PositionLayerMismatch;
         if (try std.math.add(
-            i64,
+            i128,
             self.portfolioCash(),
             self.treasuryCash(),
         ) != self.exchangeCash())
@@ -948,14 +952,14 @@ pub const TradingShard = struct {
             self.totalFees() != self.portfolioFee())
             return error.FeeLayerMismatch;
         const ledger = self.economic_projection.ledger_summary;
-        if (ledger.portfolio_debits_micros != ledger.portfolio_credits_micros or
-            ledger.exchange_debits_micros != ledger.exchange_credits_micros)
+        if (ledger.portfolio_debits_atoms != ledger.portfolio_credits_atoms or
+            ledger.exchange_debits_atoms != ledger.exchange_credits_atoms)
             return error.LedgerPostingsDoNotClose;
-        if (try std.math.add(i64, try self.riskLeaseRemainingMicros(), try std.math.add(
-            i64,
-            try self.activeReservationMicros(),
-            self.economic_projection.portfolio.margin_micros,
-        )) != self.risk_lease_micros)
+        if (try std.math.add(i128, try self.riskLeaseRemainingAtoms(), try std.math.add(
+            i128,
+            try self.activeReservationAtoms(),
+            self.economic_projection.portfolio.margin_atoms,
+        )) != self.risk_lease_atoms)
             return error.RiskLeaseDoesNotClose;
     }
 
@@ -971,12 +975,12 @@ pub const TradingShard = struct {
 
     fn checkEconomicRanges(self: *const TradingShard) !void {
         const quote = self.asset_registry.get(self.economic_projection.settlement_asset) orelse return error.UnknownAssetDefinition;
-        for ([_]i64{ self.economic_projection.treasury_usdt_micros, self.economic_projection.suspense_usdt_micros }) |amount|
+        for ([_]i128{ self.economic_projection.treasury_usdt_atoms, self.economic_projection.suspense_usdt_atoms }) |amount|
             try self.asset_registry.checkAmount(.{ .asset = quote.definition.asset, .atoms = amount }, false);
         for ([_]economics_module.Layer{ self.economic_projection.portfolio, self.economic_projection.exchange }) |layer| {
-            for ([_]i64{ layer.usdt_balance_micros, layer.margin_micros }) |amount|
+            for ([_]i128{ layer.usdt_balance_atoms, layer.margin_atoms }) |amount|
                 try self.asset_registry.checkAmount(.{ .asset = quote.definition.asset, .atoms = amount }, false);
-            for ([_]i64{ layer.fee_micros, layer.rebate_micros, layer.funding_micros, layer.penalty_micros, layer.realized_pnl_micros, layer.unrealized_pnl_micros, layer.spot.open_cost_micros, layer.swap.open_cost_micros }) |amount| {
+            for ([_]i128{ layer.fee_atoms, layer.rebate_atoms, layer.funding_atoms, layer.penalty_atoms, layer.realized_pnl_atoms, layer.unrealized_pnl_atoms, layer.spot.open_cost_atoms, layer.swap.open_cost_atoms }) |amount| {
                 const limit = quote.definition.max_cumulative_atoms;
                 if (amount > limit or amount < -limit) return error.AssetAmountOutOfRange;
             }
@@ -1193,18 +1197,18 @@ pub const TradingShard = struct {
             },
             else => {},
         };
-        group.members[0].limit_price.ticks = priceTicks(intent.limit_price_micros, instrument_config.margin.price_tick_micros) catch {
+        group.members[0].limit_price.ticks = priceTicks(try self.abiPriceAtoms(intent.limit_price_micros, instrument_config.rules.settlement_asset), instrument_config.margin.price_tick_atoms) catch {
             try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, .unsupported_order_spec);
             return null;
         };
         try self.trace.append(.order_intent, intent.intent_sequence);
 
-        const requested_notional = try notionalMicrosScaled(
+        const requested_notional = try notionalAtomsScaled(
             intent.quantity,
-            intent.limit_price_micros,
+            try self.abiPriceAtoms(intent.limit_price_micros, instrument_config.rules.settlement_asset),
             instrument_config.rules.quantity_denominator,
         );
-        self.last_risk_tier = try riskTier(requested_notional);
+        self.last_risk_tier = try riskTier(requested_notional, self.asset_registry.get(instrument_config.rules.settlement_asset).?.definition.atomic_scale);
         if (self.market_health != .healthy) {
             try self.rejectSubmittedIntent(original_group, .risk_rejected_market_data, .market_data_gap);
             return null;
@@ -1249,14 +1253,14 @@ pub const TradingShard = struct {
             },
             else => return err,
         };
-        self.last_risk_required_micros = std.math.cast(i64, qualified.group.members[0].reservation.atoms) orelse return error.Overflow;
+        self.last_risk_required_atoms = qualified.group.members[0].reservation.atoms;
         self.last_reject_reason = .none;
         try self.trace.append(.risk_accepted, intent.intent_sequence);
         const decision_barrier: u64 = @intCast(self.trace.len);
         try self.trace.append(.risk_reservation_created, intent.intent_sequence);
         const refs = [_]oms_module.RiskFactRefs{.{ .decision = decision_barrier, .reservation = @intCast(self.trace.len), .authority = try self.dispatchAuthorityRefs(intent.instrument_identity, now_monotonic_ns, decision_barrier) }};
         try self.oms.applyQualifiedGroup(qualified.group, original_group, &refs);
-        try self.adjustMarginBuffersForReservationChange(qualified.reservation_micros);
+        try self.adjustMarginBuffersForReservationChange(qualified.reservation_atoms);
         const oms_command = self.oms.emitted()[0];
         self.oms.command_count = 0; // Compatibility output below is the single sendable command.
         try self.recalculateRisk(true);
@@ -1318,11 +1322,11 @@ pub const TradingShard = struct {
                 try self.canonical_market.apply(record.event);
                 self.expected_source_sequence = try std.math.add(u64, book_snapshot.sequence, 1);
                 self.market_health = .healthy;
-                self.bid_price_micros = std.math.cast(i64, book_snapshot.best_bid.ticks) orelse return error.PriceOutOfRange;
-                self.ask_1_price_micros = std.math.cast(i64, book_snapshot.best_ask.ticks) orelse return error.PriceOutOfRange;
+                self.bid_price_ticks = std.math.cast(i64, book_snapshot.best_bid.ticks) orelse return error.PriceOutOfRange;
+                self.ask_1_price_ticks = std.math.cast(i64, book_snapshot.best_ask.ticks) orelse return error.PriceOutOfRange;
                 self.bid_quantity = std.math.cast(i64, book_snapshot.best_bid_quantity.?.lots) orelse return error.QuantityOutOfRange;
                 self.ask_1_quantity = std.math.cast(i64, book_snapshot.best_ask_quantity.?.lots) orelse return error.QuantityOutOfRange;
-                self.ask_2_price_micros = if (book_snapshot.next_ask) |price| std.math.cast(i64, price.ticks) orelse return error.PriceOutOfRange else self.ask_1_price_micros;
+                self.ask_2_price_ticks = if (book_snapshot.next_ask) |price| std.math.cast(i64, price.ticks) orelse return error.PriceOutOfRange else self.ask_1_price_ticks;
                 self.ask_2_quantity = if (book_snapshot.next_ask_quantity) |quantity| std.math.cast(i64, quantity.lots) orelse return error.QuantityOutOfRange else 0;
                 if (self.operational_state.initialized) try self.applyOperationalGate(.{
                     .gate_identity = market_data_gate_identity,
@@ -1355,11 +1359,11 @@ pub const TradingShard = struct {
                     else => return err,
                 };
                 self.expected_source_sequence = try std.math.add(u64, delta.sequence, 1);
-                self.bid_price_micros = std.math.cast(i64, delta.best_bid.ticks) orelse return error.PriceOutOfRange;
-                self.ask_1_price_micros = std.math.cast(i64, delta.best_ask.ticks) orelse return error.PriceOutOfRange;
+                self.bid_price_ticks = std.math.cast(i64, delta.best_bid.ticks) orelse return error.PriceOutOfRange;
+                self.ask_1_price_ticks = std.math.cast(i64, delta.best_ask.ticks) orelse return error.PriceOutOfRange;
                 if (delta.best_bid_quantity) |quantity| self.bid_quantity = std.math.cast(i64, quantity.lots) orelse return error.QuantityOutOfRange;
                 if (delta.best_ask_quantity) |quantity| self.ask_1_quantity = std.math.cast(i64, quantity.lots) orelse return error.QuantityOutOfRange;
-                if (delta.next_ask) |price| self.ask_2_price_micros = std.math.cast(i64, price.ticks) orelse return error.PriceOutOfRange;
+                if (delta.next_ask) |price| self.ask_2_price_ticks = std.math.cast(i64, price.ticks) orelse return error.PriceOutOfRange;
                 if (delta.next_ask_quantity) |quantity| self.ask_2_quantity = std.math.cast(i64, quantity.lots) orelse return error.QuantityOutOfRange;
                 try self.trace.append(.l2_delta, fact_identity);
                 // A delta is valid only while the projection is already
@@ -1370,11 +1374,11 @@ pub const TradingShard = struct {
                 try self.canonical_market.apply(record.event);
                 if (price.kind == .mark) {
                     const instrument = self.instrument_registry.get(price.instrument) orelse return error.UnknownInstrument;
-                    const mark_price = std.math.cast(i64, try std.math.mul(i128, price.price.ticks, instrument.margin.price_tick_micros)) orelse return error.PriceOutOfRange;
-                    if (price.instrument == self.instrument_identity) self.mark_price_micros = mark_price;
+                    const mark_price = try std.math.mul(i128, price.price.ticks, instrument.margin.price_tick_atoms);
+                    if (price.instrument == self.instrument_identity) self.mark_price_atoms = mark_price;
                     _ = try self.applyEconomicProjection(.{ .mark_price = .{
                         .product = instrument.product,
-                        .price_micros = mark_price,
+                        .price_atoms = mark_price,
                         .quantity_denominator = instrument.rules.quantity_denominator,
                     } });
                     try self.trace.append(.mark_price, fact_identity);
@@ -1428,7 +1432,7 @@ pub const TradingShard = struct {
                 if ((status == .unresolved) == result.complete) status = .unresolved;
                 if (status != .unresolved and !reconciliationEvidenceValid(result, record.envelope)) status = .unresolved;
                 if (result.order != 0) process_order: {
-                    const previous_reservation = try self.activeReservationMicros();
+                    const previous_reservation = try self.activeReservationAtoms();
                     const order_id = std.math.cast(u64, result.order) orelse {
                         status = .unresolved;
                         break :process_order;
@@ -1682,7 +1686,7 @@ pub const TradingShard = struct {
             .duplicate => return,
             .unknown => {},
         }
-        const previous_reservation = try self.activeReservationMicros();
+        const previous_reservation = try self.activeReservationAtoms();
         try self.oms.applyReport(oms_report);
         const reflected_reservation = (try self.confirmPendingReplacement(oms_report.order_id, oms_report.report_id, now_monotonic_ns)) orelse previous_reservation;
         try self.adjustMarginBuffersForReservationChange(reflected_reservation);
@@ -1697,8 +1701,38 @@ pub const TradingShard = struct {
         }, fact_identity);
     }
 
-    fn requireLegacyAssetConsumers(self: *const TradingShard) !void {
-        if (self.asset_configuration_failed or !self.asset_registry.legacyConsumerCompatible()) return error.AssetPrecisionUnsupported;
+    fn abiPriceAtoms(self: *const TradingShard, micros: i64, asset: canonical.AssetIdentity) !i128 {
+        const entry = self.asset_registry.get(asset) orelse return error.UnknownAssetDefinition;
+        return (canonical.Decimal{ .coefficient = micros, .scale = 6 }).exactAtoms(entry.definition.atomic_scale);
+    }
+
+    fn requireSettlementConsumers(self: *const TradingShard) !void {
+        if (self.asset_configuration_failed) return error.AssetPrecisionUnsupported;
+        if (self.asset_registry.legacyConsumerCompatible()) return;
+        for (self.instrument_registry.entries[0..self.instrument_registry.count]) |entry| {
+            if (self.settlementConsumersCompatible(entry.instrument)) return;
+        }
+        return error.AssetPrecisionUnsupported;
+    }
+
+    pub fn settlementConsumersCompatible(self: *const TradingShard, instrument: canonical.InstrumentIdentity) bool {
+        if (self.asset_configuration_failed) return false;
+        const entry = self.instrumentEntry(instrument) orelse return false;
+        if (!entry.margin_configured) return false;
+        self.validateTickRange(instrument, entry.margin) catch return false;
+        return self.asset_registry.consumerCompatible(entry.margin.native_settlement_atoms);
+    }
+
+    fn validateTickRange(self: *const TradingShard, instrument: canonical.InstrumentIdentity, rules: shard_event.MarginRules) !void {
+        const configured = self.instrumentEntry(instrument) orelse return error.UnknownOmsInstrument;
+        const entry = self.asset_registry.get(configured.rules.settlement_asset) orelse {
+            if (rules.native_settlement_atoms) return error.UnknownAssetDefinition;
+            return;
+        };
+        try self.asset_registry.checkAmount(.{ .asset = configured.rules.settlement_asset, .atoms = rules.price_tick_atoms }, true);
+        const price = try std.math.mul(i128, entry.definition.max_price_ticks, rules.price_tick_atoms);
+        _ = try std.math.mul(i128, price, entry.definition.max_quantity_lots);
+        _ = try std.math.mul(i128, entry.definition.max_cumulative_atoms, entry.definition.max_quantity_lots);
     }
 
     fn checkAssetAmounts(self: *const TradingShard, value: anytype, single: bool) !void {
@@ -1725,7 +1759,7 @@ pub const TradingShard = struct {
     }
 
     fn applyCanonicalFill(self: *TradingShard, fill: canonical.Fill, fact_identity: u64) !void {
-        try self.requireLegacyAssetConsumers();
+        if (!self.settlementConsumersCompatible(fill.instrument)) return error.AssetPrecisionUnsupported;
         try self.checkAssetAmounts(fill, true);
         if (fill.exchange_account != self.exchange_account_identity)
             return error.CanonicalScopeMismatch;
@@ -1755,6 +1789,11 @@ pub const TradingShard = struct {
         var settlement_rebate = canonical.AssetAmount{ .asset = self.economic_projection.settlement_asset, .atoms = 0 };
         var base_fee_quantity: i64 = 0;
         var base_rebate_quantity: i64 = 0;
+        if ((fee.asset == instrument_config.rules.base_asset and fee.atoms != 0) or (rebate.asset == instrument_config.rules.base_asset and rebate.atoms != 0)) {
+            const base = self.asset_registry.get(instrument_config.rules.base_asset) orelse return error.UnknownAssetDefinition;
+            const atoms_per_unit = try (canonical.Decimal{ .coefficient = 1, .scale = 0 }).exactAtoms(base.definition.atomic_scale);
+            if (atoms_per_unit != instrument_config.rules.quantity_denominator) return error.AssetPrecisionUnsupported;
+        }
         if (fee.atoms != 0) {
             if (fee.asset == self.economic_projection.settlement_asset)
                 settlement_fee = fee
@@ -1781,6 +1820,7 @@ pub const TradingShard = struct {
             },
             .quantity = .{ .instrument = economic_instrument, .rules_version = fill.quantity.rules_version, .lots = fill.quantity.lots },
             .price = .{ .instrument = economic_instrument, .rules_version = fill.price.rules_version, .ticks = fill.price.ticks },
+            .price_tick_value = .{ .asset = instrument_config.rules.settlement_asset, .atoms = instrument_config.margin.price_tick_atoms },
             .quantity_denominator = instrument_config.rules.quantity_denominator,
             .fee = settlement_fee,
             .rebate = settlement_rebate,
@@ -1811,7 +1851,7 @@ pub const TradingShard = struct {
 
     fn handle(self: *TradingShard, input: CoreEvent) !?OrderCommand {
         switch (input.payload) {
-            .exchange_balance, .opening_balance, .portfolio_transfer, .economic_fill, .funding_settlement, .venue_forced_execution, .economic_account_snapshot => try self.requireLegacyAssetConsumers(),
+            .exchange_balance, .opening_balance, .portfolio_transfer, .economic_fill, .funding_settlement, .venue_forced_execution, .economic_account_snapshot => try self.requireSettlementConsumers(),
             else => {},
         }
         switch (input.payload) {
@@ -1821,7 +1861,7 @@ pub const TradingShard = struct {
                     try self.trace.append(.asset_definition_activated, input.identity);
                 // Until native unit consumers are qualified, new scales remain RecoveryOnly.
                 if ((previous != null and previous.?.definition.version != definition.version) or
-                    !asset_registry.legacyDefinitionCompatible(definition)) self.oms.recovery_only = true;
+                    (definition.asset != self.economic_projection.settlement_asset and !asset_registry.legacyDefinitionCompatible(definition))) self.oms.recovery_only = true;
                 return null;
             },
             .control_command => |command| {
@@ -1846,8 +1886,8 @@ pub const TradingShard = struct {
                         .target_identity = command.target_identity,
                         .kind = .self_recovering,
                         .reason = .risk_lease,
-                        .open = self.risk_lease_micros > 0,
-                        .continuity_proven = self.risk_lease_micros > 0,
+                        .open = self.risk_lease_atoms > 0,
+                        .continuity_proven = self.risk_lease_atoms > 0,
                     });
                 }
                 if (action.cancel_open_orders)
@@ -1881,7 +1921,7 @@ pub const TradingShard = struct {
                     progress.open_orders_closed != self.oms.openOrdersClosed() or
                     progress.reconciliation_complete != !self.economic_projection.reconciliation_break or
                     self.portfolioPosition().quantity != self.exchangePosition().quantity or
-                    try std.math.add(i64, self.portfolioCash(), self.treasuryCash()) != self.exchangeCash())
+                    try std.math.add(i128, self.portfolioCash(), self.treasuryCash()) != self.exchangeCash())
                     return error.InvalidLifecycleProgress;
                 try self.assertClosures();
                 try self.operational_state.applyProgress(progress);
@@ -1992,15 +2032,15 @@ pub const TradingShard = struct {
             },
             .margin_rules_activated => |rules| {
                 const instrument_id = if (rules.instrument != 0) rules.instrument else self.instrument_identity;
-                if (self.instrument_rules_version == 0 or instrument_id == 0 or rules.version == 0 or rules.price_tick_micros <= 0 or
+                if (self.instrument_rules_version == 0 or instrument_id == 0 or rules.version == 0 or rules.price_tick_atoms <= 0 or
                     rules.venue_initial_margin_ppm <= 0 or
                     rules.internal_initial_margin_ppm < rules.venue_initial_margin_ppm or
                     rules.internal_maintenance_margin_ppm <= 0 or
                     rules.internal_maintenance_margin_ppm > rules.internal_initial_margin_ppm or
                     rules.fee_ppm < 0 or
-                    rules.opening_buffer_micros < rules.warning_buffer_micros or
-                    rules.warning_buffer_micros < rules.kill_buffer_micros or
-                    rules.kill_buffer_micros < 0 or
+                    rules.opening_buffer_atoms < rules.warning_buffer_atoms or
+                    rules.warning_buffer_atoms < rules.kill_buffer_atoms or
+                    rules.kill_buffer_atoms < 0 or
                     (rules.opening_buffer_bps > 0 and rules.opening_buffer_bps < rules.warning_buffer_bps) or
                     rules.warning_buffer_bps < rules.kill_buffer_bps or
                     rules.kill_buffer_bps < 0 or
@@ -2011,20 +2051,21 @@ pub const TradingShard = struct {
                     return error.InvalidMarginRules;
                 if (self.instrument_registry.get(instrument_id) == null)
                     return error.UnknownInstrument;
+                try self.validateTickRange(instrument_id, rules);
                 const configured = try self.instrument_registry.configureMargin(instrument_id, rules);
                 if (!configured) return null;
                 if (instrument_id == self.instrument_identity) {
                     self.margin_rules_version = rules.version;
-                    self.price_tick_micros = rules.price_tick_micros;
+                    self.price_tick_atoms = rules.price_tick_atoms;
                     self.venue_initial_margin_ppm = rules.venue_initial_margin_ppm;
                     self.internal_initial_margin_ppm = rules.internal_initial_margin_ppm;
                     self.internal_maintenance_margin_ppm = rules.internal_maintenance_margin_ppm;
                     self.risk_fee_ppm = rules.fee_ppm;
-                    self.opening_buffer_micros = rules.opening_buffer_micros;
+                    self.opening_buffer_atoms = rules.opening_buffer_atoms;
                     self.opening_buffer_bps = rules.opening_buffer_bps;
                     self.opening_liquidation_distance_ticks = rules.opening_liquidation_distance_ticks;
-                    self.warning_buffer_micros = rules.warning_buffer_micros;
-                    self.kill_buffer_micros = rules.kill_buffer_micros;
+                    self.warning_buffer_atoms = rules.warning_buffer_atoms;
+                    self.kill_buffer_atoms = rules.kill_buffer_atoms;
                     self.warning_buffer_bps = rules.warning_buffer_bps;
                     self.kill_buffer_bps = rules.kill_buffer_bps;
                     self.warning_liquidation_distance_ticks = rules.warning_liquidation_distance_ticks;
@@ -2041,10 +2082,10 @@ pub const TradingShard = struct {
                 try self.trace.append(.account_configuration, input.identity);
             },
             .exchange_balance => |balance| {
-                try self.asset_registry.checkAmount(.{ .asset = self.economic_projection.settlement_asset, .atoms = balance.cash_micros }, false);
-                if (!self.account_configured or balance.cash_micros <= 0 or self.exchange_balance_observed)
+                try self.asset_registry.checkAmount(.{ .asset = self.economic_projection.settlement_asset, .atoms = balance.cash_atoms }, false);
+                if (!self.account_configured or balance.cash_atoms <= 0 or self.exchange_balance_observed)
                     return error.InvalidExchangeBalance;
-                self.economic_projection.exchange.usdt_balance_micros = balance.cash_micros;
+                self.economic_projection.exchange.usdt_balance_atoms = balance.cash_atoms;
                 self.exchange_balance_observed = true;
                 try self.trace.append(.exchange_balance, input.identity);
             },
@@ -2055,17 +2096,17 @@ pub const TradingShard = struct {
                 try self.trace.append(.exchange_positions, input.identity);
             },
             .opening_balance => |balance| {
-                try self.asset_registry.checkAmount(.{ .asset = self.economic_projection.settlement_asset, .atoms = balance.cash_micros }, false);
-                if (!self.exchange_positions_observed or balance.cash_micros <= 0 or
-                    balance.cash_micros != self.exchangeCash() or self.opening_balance_observed)
+                try self.asset_registry.checkAmount(.{ .asset = self.economic_projection.settlement_asset, .atoms = balance.cash_atoms }, false);
+                if (!self.exchange_positions_observed or balance.cash_atoms <= 0 or
+                    balance.cash_atoms != self.exchangeCash() or self.opening_balance_observed)
                     return error.InvalidOpeningBalance;
-                self.economic_projection.treasury_usdt_micros = balance.cash_micros;
+                self.economic_projection.treasury_usdt_atoms = balance.cash_atoms;
                 self.economic_projection.ledger_summary = .{
                     .transaction_count = 1,
-                    .portfolio_debits_micros = balance.cash_micros,
-                    .portfolio_credits_micros = balance.cash_micros,
-                    .exchange_debits_micros = balance.cash_micros,
-                    .exchange_credits_micros = balance.cash_micros,
+                    .portfolio_debits_atoms = balance.cash_atoms,
+                    .portfolio_credits_atoms = balance.cash_atoms,
+                    .exchange_debits_atoms = balance.cash_atoms,
+                    .exchange_credits_atoms = balance.cash_atoms,
                 };
                 self.opening_balance_observed = true;
                 try self.trace.append(.opening_balance, input.identity);
@@ -2079,29 +2120,29 @@ pub const TradingShard = struct {
                 try self.trace.append(.virtual_portfolio_activated, input.identity);
             },
             .portfolio_transfer => |transfer| {
-                try self.asset_registry.checkAmount(.{ .asset = self.economic_projection.settlement_asset, .atoms = transfer.amount_micros }, true);
-                if (!self.virtual_portfolio_active or transfer.amount_micros <= 0 or
-                    transfer.amount_micros > self.treasuryCash() or self.portfolio_funded)
+                try self.asset_registry.checkAmount(.{ .asset = self.economic_projection.settlement_asset, .atoms = transfer.amount_atoms }, true);
+                if (!self.virtual_portfolio_active or transfer.amount_atoms <= 0 or
+                    transfer.amount_atoms > self.treasuryCash() or self.portfolio_funded)
                     return error.InvalidPortfolioTransfer;
-                self.economic_projection.treasury_usdt_micros = try std.math.sub(
-                    i64,
+                self.economic_projection.treasury_usdt_atoms = try std.math.sub(
+                    i128,
                     self.treasuryCash(),
-                    transfer.amount_micros,
+                    transfer.amount_atoms,
                 );
-                self.economic_projection.portfolio.usdt_balance_micros = try std.math.add(
-                    i64,
+                self.economic_projection.portfolio.usdt_balance_atoms = try std.math.add(
+                    i128,
                     self.portfolioCash(),
-                    transfer.amount_micros,
+                    transfer.amount_atoms,
                 );
-                self.economic_projection.ledger_summary.portfolio_debits_micros = try std.math.add(
-                    i64,
-                    self.economic_projection.ledger_summary.portfolio_debits_micros,
-                    transfer.amount_micros,
+                self.economic_projection.ledger_summary.portfolio_debits_atoms = try std.math.add(
+                    i128,
+                    self.economic_projection.ledger_summary.portfolio_debits_atoms,
+                    transfer.amount_atoms,
                 );
-                self.economic_projection.ledger_summary.portfolio_credits_micros = try std.math.add(
-                    i64,
-                    self.economic_projection.ledger_summary.portfolio_credits_micros,
-                    transfer.amount_micros,
+                self.economic_projection.ledger_summary.portfolio_credits_atoms = try std.math.add(
+                    i128,
+                    self.economic_projection.ledger_summary.portfolio_credits_atoms,
+                    transfer.amount_atoms,
                 );
                 self.economic_projection.ledger_summary.portfolio_transfer_count = 1;
                 self.portfolio_funded = true;
@@ -2178,20 +2219,20 @@ pub const TradingShard = struct {
                 if (lease.version == self.risk_lease_version) {
                     if (lease_identity != self.risk_lease_identity or
                         lease.valid_through_barrier != self.risk_lease_valid_through_barrier or
-                        lease.amount_micros != self.risk_lease_micros or lease.open != (self.risk_lease_micros > 0))
+                        lease.amount_atoms != self.risk_lease_atoms or lease.open != (self.risk_lease_atoms > 0))
                         return error.RiskLeaseIdentityConflict;
                     return null;
                 }
-                if (lease.open and lease.amount_micros <= 0) return error.InvalidRiskLease;
-                if (!lease.open and lease.amount_micros != 0) return error.InvalidRiskLease;
+                if (lease.open and lease.amount_atoms <= 0) return error.InvalidRiskLease;
+                if (!lease.open and lease.amount_atoms != 0) return error.InvalidRiskLease;
                 self.risk_lease_identity = lease_identity;
                 self.risk_lease_version = lease.version;
                 self.risk_lease_valid_through_barrier = lease.valid_through_barrier;
-                self.risk_lease_micros = lease.amount_micros;
-                self.strategy_limit_micros = if (lease.strategy_limit_micros == 0) lease.amount_micros else lease.strategy_limit_micros;
-                self.portfolio_limit_micros = if (lease.portfolio_limit_micros == 0) lease.amount_micros else lease.portfolio_limit_micros;
-                self.exchange_account_limit_micros = if (lease.exchange_account_limit_micros == 0) lease.amount_micros else lease.exchange_account_limit_micros;
-                self.global_limit_micros = if (lease.global_limit_micros == 0) lease.amount_micros else lease.global_limit_micros;
+                self.risk_lease_atoms = lease.amount_atoms;
+                self.strategy_limit_atoms = if (lease.strategy_limit_atoms == 0) lease.amount_atoms else lease.strategy_limit_atoms;
+                self.portfolio_limit_atoms = if (lease.portfolio_limit_atoms == 0) lease.amount_atoms else lease.portfolio_limit_atoms;
+                self.exchange_account_limit_atoms = if (lease.exchange_account_limit_atoms == 0) lease.amount_atoms else lease.exchange_account_limit_atoms;
+                self.global_limit_atoms = if (lease.global_limit_atoms == 0) lease.amount_atoms else lease.global_limit_atoms;
                 if (self.operational_state.initialized) try self.applyOperationalGate(.{
                     .gate_identity = risk_lease_gate_identity,
                     .target_identity = self.operational_state.target_identity,
@@ -2200,28 +2241,28 @@ pub const TradingShard = struct {
                     .open = lease.open,
                     .continuity_proven = lease.open,
                 });
-                if (self.strategy_limit_micros > self.portfolio_limit_micros or
-                    self.portfolio_limit_micros > self.exchange_account_limit_micros or
-                    self.exchange_account_limit_micros > self.global_limit_micros or
-                    self.risk_lease_micros > self.exchange_account_limit_micros)
+                if (self.strategy_limit_atoms > self.portfolio_limit_atoms or
+                    self.portfolio_limit_atoms > self.exchange_account_limit_atoms or
+                    self.exchange_account_limit_atoms > self.global_limit_atoms or
+                    self.risk_lease_atoms > self.exchange_account_limit_atoms)
                     return error.InvalidRiskLeaseHierarchy;
                 try self.recalculateRisk(false);
                 try self.assertClosures();
                 try self.trace.append(.risk_lease_granted, input.identity);
             },
             .mark_price => |price| {
-                if (price.price_micros <= 0) return error.InvalidMarkPrice;
+                if (price.price_atoms <= 0) return error.InvalidMarkPrice;
                 const instrument = self.instrument_registry.get(price.instrument) orelse return error.UnknownInstrument;
-                const mark_ticks = try priceTicks(price.price_micros, instrument.margin.price_tick_micros);
+                const mark_ticks = try priceTicks(price.price_atoms, instrument.margin.price_tick_atoms);
                 try self.canonical_market.apply(.{ .reference_price = .{
                     .instrument = price.instrument,
                     .kind = .mark,
                     .price = .{ .instrument = price.instrument, .rules_version = instrument.rules.version, .ticks = mark_ticks },
                 } });
-                if (price.instrument == self.instrument_identity) self.mark_price_micros = price.price_micros;
+                if (price.instrument == self.instrument_identity) self.mark_price_atoms = price.price_atoms;
                 _ = try self.applyEconomicProjection(.{ .mark_price = .{
                     .product = instrument.product,
-                    .price_micros = price.price_micros,
+                    .price_atoms = price.price_atoms,
                     .quantity_denominator = instrument.rules.quantity_denominator,
                 } });
                 try self.recalculateRisk(false);
@@ -2330,20 +2371,20 @@ pub const TradingShard = struct {
                     refs[index].authority = try candidate.dispatchAuthorityRefs(intent.instrument, if (input.time_presence.monotonic) input.monotonic_time else 0, refs[index].decision);
                 }
                 try candidate.oms.applyQualifiedGroup(qualified.group, group, refs[0..qualified.group.count]);
-                try candidate.adjustMarginBuffersForReservationChange(qualified.reservation_micros);
+                try candidate.adjustMarginBuffersForReservationChange(qualified.reservation_atoms);
                 try candidate.trace.append(.oms_intent_group, group.first_intent_sequence);
                 self.* = candidate;
             },
             .oms_dispatch_batch => |batch| {
                 var candidate = self.*;
-                const previous_reservation = try candidate.activeReservationMicros();
+                const previous_reservation = try candidate.activeReservationAtoms();
                 try candidate.oms.applyDispatch(batch);
                 try candidate.adjustMarginBuffersForReservationChange(previous_reservation);
                 try candidate.trace.append(.oms_dispatch_batch, input.identity);
                 self.* = candidate;
             },
             .oms_execution_report => |report| {
-                const previous_reservation = try self.activeReservationMicros();
+                const previous_reservation = try self.activeReservationAtoms();
                 try self.oms.applyReport(report);
                 const reflected_reservation = (try self.confirmPendingReplacement(report.order_id, report.report_id, if (input.time_presence.monotonic) input.monotonic_time else 0)) orelse previous_reservation;
                 try self.adjustMarginBuffersForReservationChange(reflected_reservation);
@@ -2351,7 +2392,7 @@ pub const TradingShard = struct {
             },
             .oms_reconciliation_result => |result| {
                 if (result.status == .confirmed_absent) return error.IncompleteReconciliationEvidence;
-                const previous_reservation = try self.activeReservationMicros();
+                const previous_reservation = try self.activeReservationAtoms();
                 try self.oms.applyReconciliation(result);
                 if (result.status == .unresolved and self.operational_state.initialized) try self.applyOperationalGate(.{
                     .gate_identity = result.reconciliation_id,
@@ -2369,14 +2410,16 @@ pub const TradingShard = struct {
                 if (order.last_reconciliation_status == .confirmed_absent) return error.TerminalFactConflict;
                 const instrument = order.instrument;
                 const instrument_config = self.instrumentEntry(instrument) orelse return error.UnknownOmsInstrument;
+                if (!self.settlementConsumersCompatible(instrument)) return error.AssetPrecisionUnsupported;
                 const changed = try self.applyEconomicProjection(.{ .fill = .{
                     .identity = fill.fill_id,
                     .side = if (order.side == .buy) .buy else .sell,
                     .quantity = .{ .instrument = instrument, .rules_version = instrument_config.rules.version, .lots = fill.quantity },
-                    .price = .{ .instrument = instrument, .rules_version = instrument_config.rules.version, .ticks = fill.price_micros },
+                    .price = .{ .instrument = instrument, .rules_version = instrument_config.rules.version, .ticks = fill.price_ticks },
+                    .price_tick_value = .{ .asset = instrument_config.rules.settlement_asset, .atoms = instrument_config.margin.price_tick_atoms },
                     .quantity_denominator = instrument_config.rules.quantity_denominator,
-                    .fee = .{ .asset = self.economic_projection.settlement_asset, .atoms = fill.fee_micros },
-                    .rebate = .{ .asset = self.economic_projection.settlement_asset, .atoms = fill.rebate_micros },
+                    .fee = .{ .asset = self.economic_projection.settlement_asset, .atoms = fill.fee_atoms },
+                    .rebate = .{ .asset = self.economic_projection.settlement_asset, .atoms = fill.rebate_atoms },
                     .portfolio_margin_ppm = instrument_config.margin.internal_initial_margin_ppm,
                     .exchange_margin_ppm = instrument_config.margin.venue_initial_margin_ppm,
                     .product = instrument_config.product,
@@ -2387,21 +2430,23 @@ pub const TradingShard = struct {
                 }
             },
             .funding_settlement => |funding| {
-                const changed = try self.applyEconomicProjection(.{ .funding_settlement = .{ .identity = funding.settlement_id, .amount = .{ .asset = self.economic_projection.settlement_asset, .atoms = funding.amount_micros } } });
+                const changed = try self.applyEconomicProjection(.{ .funding_settlement = .{ .identity = funding.settlement_id, .amount = .{ .asset = self.economic_projection.settlement_asset, .atoms = funding.amount_atoms } } });
                 if (changed) try self.trace.append(.funding_settlement, funding.settlement_id);
             },
             .venue_forced_execution => |forced| {
                 const instrument_config = self.singleProductEntry(.isolated_linear_usdt) orelse return error.UnknownOmsInstrument;
+                if (!self.settlementConsumersCompatible(instrument_config.instrument)) return error.AssetPrecisionUnsupported;
                 const changed = try self.applyEconomicProjection(.{ .venue_forced_execution = .{
                     .identity = forced.execution_id,
                     .source_identity = forced.source_identity,
                     .side = if (forced.side == .buy) .buy else .sell,
                     .quantity = .{ .instrument = instrument_config.instrument, .rules_version = instrument_config.rules.version, .lots = forced.quantity },
-                    .price = .{ .instrument = instrument_config.instrument, .rules_version = instrument_config.rules.version, .ticks = forced.price_micros },
+                    .price = .{ .instrument = instrument_config.instrument, .rules_version = instrument_config.rules.version, .ticks = forced.price_ticks },
+                    .price_tick_value = .{ .asset = instrument_config.rules.settlement_asset, .atoms = instrument_config.margin.price_tick_atoms },
                     .quantity_denominator = instrument_config.rules.quantity_denominator,
-                    .fee = .{ .asset = self.economic_projection.settlement_asset, .atoms = forced.fee_micros },
-                    .penalty = .{ .asset = self.economic_projection.settlement_asset, .atoms = forced.penalty_micros },
-                    .expected_realized_pnl_micros = forced.expected_realized_pnl_micros,
+                    .fee = .{ .asset = self.economic_projection.settlement_asset, .atoms = forced.fee_atoms },
+                    .penalty = .{ .asset = self.economic_projection.settlement_asset, .atoms = forced.penalty_atoms },
+                    .expected_realized_pnl_atoms = forced.expected_realized_pnl_atoms,
                     .portfolio_margin_ppm = instrument_config.margin.internal_initial_margin_ppm,
                     .exchange_margin_ppm = instrument_config.margin.venue_initial_margin_ppm,
                     .product = instrument_config.product,
@@ -2423,10 +2468,10 @@ pub const TradingShard = struct {
             .economic_account_snapshot => |account_snapshot| {
                 const changed = try self.applyEconomicProjection(.{ .account_snapshot = .{
                     .identity = account_snapshot.snapshot_id,
-                    .balance = .{ .asset = self.economic_projection.settlement_asset, .atoms = account_snapshot.usdt_balance_micros },
+                    .balance = .{ .asset = self.economic_projection.settlement_asset, .atoms = account_snapshot.usdt_balance_atoms },
                     .spot_asset_quantity = account_snapshot.spot_asset_quantity,
                     .swap_position_quantity = account_snapshot.swap_position_quantity,
-                    .margin = .{ .asset = self.economic_projection.settlement_asset, .atoms = account_snapshot.margin_micros },
+                    .margin = .{ .asset = self.economic_projection.settlement_asset, .atoms = account_snapshot.margin_atoms },
                 } });
                 if (changed) {
                     if (self.operational_state.initialized and self.economic_projection.reconciliation_break) {
@@ -2844,7 +2889,8 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         }
         digestBool(&hasher, entry.margin_configured);
         digestInt(&hasher, u32, entry.margin.version);
-        digestInt(&hasher, i64, entry.margin.price_tick_micros);
+        digestInt(&hasher, i128, entry.margin.price_tick_atoms);
+        digestBool(&hasher, entry.margin.native_settlement_atoms);
         digestInt(&hasher, i64, entry.margin.venue_initial_margin_ppm);
         digestInt(&hasher, i64, entry.margin.internal_initial_margin_ppm);
         digestInt(&hasher, i64, entry.margin.internal_maintenance_margin_ppm);
@@ -3099,60 +3145,60 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     digestBool(&hasher, shard.expected_source_sequence != null);
     digestInt(&hasher, u64, shard.expected_source_sequence orelse 0);
     digestInt(&hasher, u8, @intFromEnum(shard.market_health));
-    digestInt(&hasher, i64, shard.bid_price_micros);
+    digestInt(&hasher, i64, shard.bid_price_ticks);
     digestInt(&hasher, i64, shard.bid_quantity);
-    digestInt(&hasher, i64, shard.ask_1_price_micros);
+    digestInt(&hasher, i64, shard.ask_1_price_ticks);
     digestInt(&hasher, i64, shard.ask_1_quantity);
-    digestInt(&hasher, i64, shard.ask_2_price_micros);
+    digestInt(&hasher, i64, shard.ask_2_price_ticks);
     digestInt(&hasher, i64, shard.ask_2_quantity);
     digestInt(&hasher, u64, shard.strategy_cursor);
     digestInt(&hasher, u64, shard.strategy_decision_count);
     digestBool(&hasher, shard.timer_pending);
     digestInt(&hasher, u64, shard.dispatch_attempt_count);
     digestInt(&hasher, u8, @intFromEnum(shard.last_reject_reason));
-    digestInt(&hasher, i64, shard.last_risk_required_micros);
+    digestInt(&hasher, i128, shard.last_risk_required_atoms);
     digestInt(&hasher, u8, shard.last_risk_tier);
-    digestInt(&hasher, i64, shard.mark_price_micros);
+    digestInt(&hasher, i128, shard.mark_price_atoms);
     digestInt(&hasher, i64, portfolio_position.quantity);
-    digestInt(&hasher, i64, portfolio_position.open_cost_micros);
+    digestInt(&hasher, i128, portfolio_position.open_cost_atoms);
     digestInt(&hasher, i64, exchange_position.quantity);
-    digestInt(&hasher, i64, exchange_position.open_cost_micros);
+    digestInt(&hasher, i128, exchange_position.open_cost_atoms);
     digestInt(&hasher, i64, spot_portfolio_position.quantity);
-    digestInt(&hasher, i64, spot_portfolio_position.open_cost_micros);
+    digestInt(&hasher, i128, spot_portfolio_position.open_cost_atoms);
     digestInt(&hasher, i64, spot_exchange_position.quantity);
-    digestInt(&hasher, i64, spot_exchange_position.open_cost_micros);
-    digestInt(&hasher, i64, shard.portfolioCash());
-    digestInt(&hasher, i64, shard.treasuryCash());
-    digestInt(&hasher, i64, shard.exchangeCash());
-    digestInt(&hasher, i64, shard.portfolioFee());
-    digestInt(&hasher, i64, shard.exchangeFee());
-    digestInt(&hasher, i64, shard.totalFees());
-    digestInt(&hasher, i64, shard.realizedPnl());
-    digestInt(&hasher, i64, shard.unrealizedPnl());
-    digestInt(&hasher, i64, shard.risk_lease_micros);
+    digestInt(&hasher, i128, spot_exchange_position.open_cost_atoms);
+    digestInt(&hasher, i128, shard.portfolioCash());
+    digestInt(&hasher, i128, shard.treasuryCash());
+    digestInt(&hasher, i128, shard.exchangeCash());
+    digestInt(&hasher, i128, shard.portfolioFee());
+    digestInt(&hasher, i128, shard.exchangeFee());
+    digestInt(&hasher, i128, shard.totalFees());
+    digestInt(&hasher, i128, shard.realizedPnl());
+    digestInt(&hasher, i128, shard.unrealizedPnl());
+    digestInt(&hasher, i128, shard.risk_lease_atoms);
     digestInt(&hasher, u64, shard.risk_lease_identity);
     digestInt(&hasher, u64, shard.risk_lease_version);
     digestInt(&hasher, u64, shard.risk_lease_valid_through_barrier);
-    digestInt(&hasher, i64, shard.strategy_limit_micros);
-    digestInt(&hasher, i64, shard.portfolio_limit_micros);
-    digestInt(&hasher, i64, shard.exchange_account_limit_micros);
-    digestInt(&hasher, i64, shard.global_limit_micros);
-    digestInt(&hasher, i64, shard.price_tick_micros);
+    digestInt(&hasher, i128, shard.strategy_limit_atoms);
+    digestInt(&hasher, i128, shard.portfolio_limit_atoms);
+    digestInt(&hasher, i128, shard.exchange_account_limit_atoms);
+    digestInt(&hasher, i128, shard.global_limit_atoms);
+    digestInt(&hasher, i128, shard.price_tick_atoms);
     digestInt(&hasher, i64, shard.venue_initial_margin_ppm);
     digestInt(&hasher, i64, shard.internal_initial_margin_ppm);
     digestInt(&hasher, i64, shard.internal_maintenance_margin_ppm);
     digestInt(&hasher, i64, shard.risk_fee_ppm);
-    digestInt(&hasher, i64, shard.opening_buffer_micros);
+    digestInt(&hasher, i128, shard.opening_buffer_atoms);
     digestInt(&hasher, i64, shard.opening_buffer_bps);
     digestInt(&hasher, i64, shard.opening_liquidation_distance_ticks);
-    digestInt(&hasher, i64, shard.warning_buffer_micros);
-    digestInt(&hasher, i64, shard.kill_buffer_micros);
+    digestInt(&hasher, i128, shard.warning_buffer_atoms);
+    digestInt(&hasher, i128, shard.kill_buffer_atoms);
     digestInt(&hasher, i64, shard.warning_buffer_bps);
     digestInt(&hasher, i64, shard.kill_buffer_bps);
     digestInt(&hasher, i64, shard.warning_liquidation_distance_ticks);
     digestInt(&hasher, i64, shard.kill_liquidation_distance_ticks);
-    digestInt(&hasher, i64, shard.portfolio_margin_buffer_micros);
-    digestInt(&hasher, i64, shard.exchange_margin_buffer_micros);
+    digestInt(&hasher, i128, shard.portfolio_margin_buffer_atoms);
+    digestInt(&hasher, i128, shard.exchange_margin_buffer_atoms);
     digestInt(&hasher, i64, shard.portfolio_buffer_bps);
     digestInt(&hasher, i64, shard.exchange_buffer_bps);
     digestInt(&hasher, i64, shard.portfolio_liquidation_distance_ticks);
@@ -3161,10 +3207,10 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     digestInt(&hasher, u8, @intFromEnum(shard.exchange_margin_gate));
     digestInt(&hasher, u64, ledger.transaction_count);
     digestInt(&hasher, u64, ledger.portfolio_transfer_count);
-    digestInt(&hasher, i64, ledger.portfolio_debits_micros);
-    digestInt(&hasher, i64, ledger.portfolio_credits_micros);
-    digestInt(&hasher, i64, ledger.exchange_debits_micros);
-    digestInt(&hasher, i64, ledger.exchange_credits_micros);
+    digestInt(&hasher, i128, ledger.portfolio_debits_atoms);
+    digestInt(&hasher, i128, ledger.portfolio_credits_atoms);
+    digestInt(&hasher, i128, ledger.exchange_debits_atoms);
+    digestInt(&hasher, i128, ledger.exchange_credits_atoms);
     digestBool(&hasher, ledger.projections_complete);
     digestCanonicalProjections(&hasher, shard);
     return hasher.finalResult();
@@ -3252,8 +3298,8 @@ fn semanticStateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     hasher.update(&economics_digest);
     digestBool(&hasher, shard.canonical_account.valid);
     digestBool(&hasher, shard.canonical_account.failure != null);
-    digestInt(&hasher, i64, shard.portfolioCash());
-    digestInt(&hasher, i64, shard.exchangeCash());
+    digestInt(&hasher, i128, shard.portfolioCash());
+    digestInt(&hasher, i128, shard.exchangeCash());
     return hasher.finalResult();
 }
 
@@ -3341,11 +3387,18 @@ fn replayReader(reader: *journal.Reader, initial: TradingShard) !ReplayResult {
         _ = candidate.apply(input) catch |err| {
             replay_error = err;
         };
+        const generated = candidate.trace.events[before..candidate.trace.len];
+        const rejected_canonical_report = if (replay_error) |err|
+            (err == error.InvalidExecutionReport or err == error.StaleOrderRevision or
+                err == error.TombstoneFactConflict or err == error.ArchivedFactOutsideRetention or err == error.TerminalFactConflict) and
+                input == .venue and input.venue.event == .execution_report and candidate.oms.recovery_only and
+                generated.len > 0 and generated[generated.len - 1].kind == .canonical_order_reconciliation
+        else
+            false;
         if (replay_error != null and candidate.canonical_account.failure == null and
             candidate.canonical_market.latestFailure() == null and candidate.economic_fault_count == shard.economic_fault_count and
-            candidate.asset_configuration_failure_count == shard.asset_configuration_failure_count)
+            candidate.asset_configuration_failure_count == shard.asset_configuration_failure_count and !rejected_canonical_report)
             return replay_error.?;
-        const generated = candidate.trace.events[before..candidate.trace.len];
         if (generated.len == 0) return error.InputProducedNoFact;
 
         for (generated, 0..) |expected, index| {
@@ -3422,7 +3475,7 @@ test "asset definition activation rejects rescaling and survives snapshot" {
     const definition: canonical.AssetDefinition = .{ .asset = 1, .atomic_scale = 12, .version = 1, .source_identity = 9, .source_digest = @splat(7), .source_kind = .test_fixture, .max_single_atoms = 1_000_000_000_000, .max_balance_atoms = 10_000_000_000_000, .max_cumulative_atoms = 100_000_000_000_000, .max_quantity_lots = 1000, .max_price_ticks = 1000, .max_rescale_power = 12, .max_postings = 4 };
     _ = try applyStable(&shard, &log, .{ .core = .{ .identity = 1, .payload = .{ .asset_definition_activated = definition } } });
     try std.testing.expectEqual(@as(u8, 12), shard.activatedAssets().get(1).?.definition.atomic_scale);
-    try std.testing.expect(shard.oms.recovery_only);
+    try std.testing.expect(!shard.genesisReady());
     var changed = definition;
     changed.version = 2;
     changed.atomic_scale = 6;

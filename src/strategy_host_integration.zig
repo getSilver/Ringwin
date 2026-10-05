@@ -169,7 +169,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
     try std.testing.expectEqual(@as(usize, 7), summary.host_rejections);
     try std.testing.expectEqual(@as(i64, 100), summary.order_quantity);
     try std.testing.expectEqual(@as(i64, 50_100_000_000), summary.order_limit_price_micros);
-    try std.testing.expectEqual(@as(i64, 11_397_750), summary.reservation_micros);
+    try std.testing.expectEqual(@as(i64, 11_397_750), summary.reservation_atoms);
     try ingress.verifyReplay();
     try host.shutdown(init.io, 3);
 }

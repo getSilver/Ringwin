@@ -391,7 +391,7 @@ pub const Gateway = struct {
             if (entry.barrier > oms_command.risk_decision_identity) return error.NotSent;
         };
         if ((shard.economic_fault_count != 0 or shard.recovery_admission_pending or shard.oms.recovery_only or
-            shard.asset_configuration_failed or !shard.activatedAssets().legacyConsumerCompatible()) and oms_command.operation != .cancel) return error.NotSent;
+            shard.asset_configuration_failed or !shard.settlementConsumersCompatible(oms_command.instrument)) and oms_command.operation != .cancel) return error.NotSent;
         const refs = oms_command.authority;
         if (!refs.complete() or refs.exchange_account != shard.exchange_account_identity or
             refs.virtual_portfolio != shard.portfolio_identity or refs.deadline_barrier > shard.trace.len or
@@ -449,7 +449,7 @@ pub const Gateway = struct {
             return error.NotSent;
         const increases_risk = oms_command.operation != .cancel and
             !genuinelyReduces(source_position.lots, oms_command.side, oms_command.quantity);
-        if (increases_risk and (shard.risk_lease_micros <= 0 or
+        if (increases_risk and (shard.risk_lease_atoms <= 0 or
             shard.risk_lease_valid_through_barrier < shard.trace.len))
             return error.NotSent;
         const token = std.math.cast(u64, refs.primary_lease.identity) orelse return error.NotSent;

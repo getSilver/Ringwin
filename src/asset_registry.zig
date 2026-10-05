@@ -47,6 +47,17 @@ pub const Registry = struct {
         for (self.entries[0..self.count]) |entry| if (!legacyDefinitionCompatible(entry.definition)) return false;
         return true;
     }
+    /// Native settlement consumers coexist with the bounded legacy base-lot path.
+    pub fn consumerCompatible(self: *const Registry, native_settlement_atoms: bool) bool {
+        if (!native_settlement_atoms) return self.legacyConsumerCompatible();
+        _ = self.get(1) orelse return false;
+        const base = self.get(0x425443) orelse return false;
+        if (!legacyDefinitionCompatible(base.definition)) return false;
+        for (self.entries[0..self.count]) |entry| {
+            if (entry.definition.asset != 1 and !legacyDefinitionCompatible(entry.definition)) return false;
+        }
+        return true;
+    }
     pub fn checkAmount(self: *const Registry, amount_value: canonical.AssetAmount, single: bool) !void {
         const entry = self.get(amount_value.asset) orelse return error.UnknownAssetDefinition;
         const limit = if (single) entry.definition.max_single_atoms else entry.definition.max_balance_atoms;

@@ -18,6 +18,7 @@ const Binding = struct {
 
 pub const SimulatedVenue = struct {
     asset_definitions: @import("asset_registry.zig").Registry = .{},
+    native_settlement_atoms: bool = false,
     state: State = .idle,
     binding: ?Binding = null,
     pending: ?canonical.AdapterOutputBatch = null,
@@ -40,6 +41,7 @@ pub const SimulatedVenue = struct {
         if (config.environment != .simulation or config.request_capacity == 0 or config.output_capacity == 0)
             return error.InvalidConfig;
         self.asset_definitions = config.asset_definitions orelse .{};
+        self.native_settlement_atoms = config.native_settlement_atoms;
         self.asset_definitions.validate() catch return error.InvalidConfig;
         self.binding = .{
             .venue = config.venue,
@@ -75,9 +77,9 @@ pub const SimulatedVenue = struct {
         }
 
         switch (request) {
-            .order_command => |command| if (command.operation != .cancel and !self.asset_definitions.legacyConsumerCompatible()) return .backpressure,
+            .order_command => |command| if (command.operation != .cancel and !self.asset_definitions.consumerCompatible(self.native_settlement_atoms)) return .backpressure,
             .order_batch => |commands| for (commands.slice()) |command| {
-                if (command.operation != .cancel and !self.asset_definitions.legacyConsumerCompatible()) return .backpressure;
+                if (command.operation != .cancel and !self.asset_definitions.consumerCompatible(self.native_settlement_atoms)) return .backpressure;
             },
             else => {},
         }

@@ -22,17 +22,17 @@ pub const VenueEvidence = struct {
     exchange_quantity: i64,
     portfolio_spot_quantity: i64,
     exchange_spot_quantity: i64,
-    portfolio_open_cost_micros: i64,
-    exchange_open_cost_micros: i64,
-    portfolio_spot_open_cost_micros: i64,
-    exchange_spot_open_cost_micros: i64,
-    portfolio_cash_micros: i64,
-    exchange_cash_micros: i64,
-    portfolio_fee_micros: i64,
-    exchange_fee_micros: i64,
-    suspense_micros: i64,
-    active_reservations_micros: i64,
-    margin_micros: i64,
+    portfolio_open_cost_atoms: i128,
+    exchange_open_cost_atoms: i128,
+    portfolio_spot_open_cost_atoms: i128,
+    exchange_spot_open_cost_atoms: i128,
+    portfolio_cash_atoms: i128,
+    exchange_cash_atoms: i128,
+    portfolio_fee_atoms: i128,
+    exchange_fee_atoms: i128,
+    suspense_atoms: i128,
+    active_reservations_atoms: i128,
+    margin_atoms: i128,
     ledger_closed: bool,
     reconciliation_break: bool,
 };
@@ -71,22 +71,22 @@ pub const RecoveryCoordinator = struct {
             .exchange_quantity = economic.exchange.swap.quantity,
             .portfolio_spot_quantity = economic.portfolio.spot_asset_quantity,
             .exchange_spot_quantity = economic.exchange.spot_asset_quantity,
-            .portfolio_open_cost_micros = economic.portfolio.swap.open_cost_micros,
-            .exchange_open_cost_micros = economic.exchange.swap.open_cost_micros,
-            .portfolio_spot_open_cost_micros = economic.portfolio.spot.open_cost_micros,
-            .exchange_spot_open_cost_micros = economic.exchange.spot.open_cost_micros,
-            .portfolio_cash_micros = economic.portfolio.usdt_balance_micros,
-            .exchange_cash_micros = economic.exchange.usdt_balance_micros,
-            .portfolio_fee_micros = economic.portfolio.fee_micros,
-            .exchange_fee_micros = economic.exchange.fee_micros,
-            .suspense_micros = economic.suspense_usdt_micros,
-            .active_reservations_micros = blk: {
-                const reservations = self.shard.oms.activeReservations(settlement_asset) catch break :blk std.math.maxInt(i64);
-                break :blk std.math.cast(i64, reservations.atoms) orelse std.math.maxInt(i64);
+            .portfolio_open_cost_atoms = economic.portfolio.swap.open_cost_atoms,
+            .exchange_open_cost_atoms = economic.exchange.swap.open_cost_atoms,
+            .portfolio_spot_open_cost_atoms = economic.portfolio.spot.open_cost_atoms,
+            .exchange_spot_open_cost_atoms = economic.exchange.spot.open_cost_atoms,
+            .portfolio_cash_atoms = economic.portfolio.usdt_balance_atoms,
+            .exchange_cash_atoms = economic.exchange.usdt_balance_atoms,
+            .portfolio_fee_atoms = economic.portfolio.fee_atoms,
+            .exchange_fee_atoms = economic.exchange.fee_atoms,
+            .suspense_atoms = economic.suspense_usdt_atoms,
+            .active_reservations_atoms = blk: {
+                const reservations = self.shard.oms.activeReservations(settlement_asset) catch break :blk std.math.maxInt(i128);
+                break :blk reservations.atoms;
             },
-            .margin_micros = self.shard.economic_projection.portfolio.margin_micros,
-            .ledger_closed = self.shard.economic_projection.ledger_summary.portfolio_debits_micros == self.shard.economic_projection.ledger_summary.portfolio_credits_micros and
-                self.shard.economic_projection.ledger_summary.exchange_debits_micros == self.shard.economic_projection.ledger_summary.exchange_credits_micros,
+            .margin_atoms = self.shard.economic_projection.portfolio.margin_atoms,
+            .ledger_closed = self.shard.economic_projection.ledger_summary.portfolio_debits_atoms == self.shard.economic_projection.ledger_summary.portfolio_credits_atoms and
+                self.shard.economic_projection.ledger_summary.exchange_debits_atoms == self.shard.economic_projection.ledger_summary.exchange_credits_atoms,
             .reconciliation_break = economic.reconciliation_break,
         };
         for (self.shard.oms.orders[0..self.shard.oms.order_count]) |order| {
@@ -154,17 +154,17 @@ fn venueEvidenceCloses(shard: trading.TradingShard, evidence: VenueEvidence) boo
         evidence.exchange_quantity != expected.exchange_quantity or
         evidence.portfolio_spot_quantity != expected.portfolio_spot_quantity or
         evidence.exchange_spot_quantity != expected.exchange_spot_quantity or
-        evidence.portfolio_open_cost_micros != expected.portfolio_open_cost_micros or
-        evidence.exchange_open_cost_micros != expected.exchange_open_cost_micros or
-        evidence.portfolio_spot_open_cost_micros != expected.portfolio_spot_open_cost_micros or
-        evidence.exchange_spot_open_cost_micros != expected.exchange_spot_open_cost_micros or
-        evidence.portfolio_cash_micros != expected.portfolio_cash_micros or
-        evidence.exchange_cash_micros != expected.exchange_cash_micros or
-        evidence.portfolio_fee_micros != expected.portfolio_fee_micros or
-        evidence.exchange_fee_micros != expected.exchange_fee_micros or
-        evidence.suspense_micros != expected.suspense_micros or
-        evidence.active_reservations_micros != expected.active_reservations_micros or
-        evidence.margin_micros != expected.margin_micros or
+        evidence.portfolio_open_cost_atoms != expected.portfolio_open_cost_atoms or
+        evidence.exchange_open_cost_atoms != expected.exchange_open_cost_atoms or
+        evidence.portfolio_spot_open_cost_atoms != expected.portfolio_spot_open_cost_atoms or
+        evidence.exchange_spot_open_cost_atoms != expected.exchange_spot_open_cost_atoms or
+        evidence.portfolio_cash_atoms != expected.portfolio_cash_atoms or
+        evidence.exchange_cash_atoms != expected.exchange_cash_atoms or
+        evidence.portfolio_fee_atoms != expected.portfolio_fee_atoms or
+        evidence.exchange_fee_atoms != expected.exchange_fee_atoms or
+        evidence.suspense_atoms != expected.suspense_atoms or
+        evidence.active_reservations_atoms != expected.active_reservations_atoms or
+        evidence.margin_atoms != expected.margin_atoms or
         !evidence.ledger_closed or evidence.reconciliation_break)
         return false;
     for (evidence.orders[0..evidence.order_count], 0..) |observed, index| {
@@ -196,15 +196,15 @@ fn sameVenueEvidence(left: VenueEvidence, right: VenueEvidence) bool {
     return left.open_orders_closed == right.open_orders_closed and
         left.portfolio_quantity == right.portfolio_quantity and left.exchange_quantity == right.exchange_quantity and
         left.portfolio_spot_quantity == right.portfolio_spot_quantity and left.exchange_spot_quantity == right.exchange_spot_quantity and
-        left.portfolio_open_cost_micros == right.portfolio_open_cost_micros and
-        left.exchange_open_cost_micros == right.exchange_open_cost_micros and
-        left.portfolio_spot_open_cost_micros == right.portfolio_spot_open_cost_micros and
-        left.exchange_spot_open_cost_micros == right.exchange_spot_open_cost_micros and
-        left.portfolio_cash_micros == right.portfolio_cash_micros and
-        left.exchange_cash_micros == right.exchange_cash_micros and
-        left.portfolio_fee_micros == right.portfolio_fee_micros and left.exchange_fee_micros == right.exchange_fee_micros and
-        left.suspense_micros == right.suspense_micros and left.active_reservations_micros == right.active_reservations_micros and
-        left.margin_micros == right.margin_micros and
+        left.portfolio_open_cost_atoms == right.portfolio_open_cost_atoms and
+        left.exchange_open_cost_atoms == right.exchange_open_cost_atoms and
+        left.portfolio_spot_open_cost_atoms == right.portfolio_spot_open_cost_atoms and
+        left.exchange_spot_open_cost_atoms == right.exchange_spot_open_cost_atoms and
+        left.portfolio_cash_atoms == right.portfolio_cash_atoms and
+        left.exchange_cash_atoms == right.exchange_cash_atoms and
+        left.portfolio_fee_atoms == right.portfolio_fee_atoms and left.exchange_fee_atoms == right.exchange_fee_atoms and
+        left.suspense_atoms == right.suspense_atoms and left.active_reservations_atoms == right.active_reservations_atoms and
+        left.margin_atoms == right.margin_atoms and
         left.ledger_closed == right.ledger_closed and left.reconciliation_break == right.reconciliation_break;
 }
 
@@ -519,7 +519,7 @@ test "restart recovery remains fenced until exact venue evidence closes" {
     try std.testing.expect(!recovery.shard.operational_state.trading_authorized);
 
     var mismatch = recovery.expectedVenueEvidence();
-    mismatch.exchange_cash_micros += 1;
+    mismatch.exchange_cash_atoms += 1;
     try std.testing.expectError(error.VenueReconciliationMismatch, recovery.reconcileStable(&stable_journal, 1, mismatch));
     try std.testing.expectEqual(RecoveryPhase.recovery_only, recovery.phase);
     try std.testing.expectEqual(@as(u8, 1), recovery.shard.operational_state.latch_count);
@@ -718,14 +718,14 @@ test "cutover failures and forward rollback never regress economic state or gene
     try shard.oms.applyReport(.{ .report_id = 1, .order_id = 1, .revision = 1, .status = .filled, .cumulative_quantity = 1, .remaining_quantity = 0 });
     _ = try shard.apply(.{ .core = .{ .identity = 3, .payload = .{ .mark_price = .{
         .instrument = swap_instrument,
-        .price_micros = 50_000_000,
+        .price_atoms = 50_000_000,
     } } } });
     _ = try shard.apply(.{ .core = .{ .identity = 4, .payload = .{ .economic_fill = .{
         .fill_id = 1,
         .order_id = 1,
         .quantity = 3,
-        .price_micros = 50_000_000,
-        .fee_micros = 7,
+        .price_ticks = 50_000_000,
+        .fee_atoms = 7,
     } } } });
     var stable_journal = trading.journal.Journal.initAt(shard.trace.len + 1);
     var cutover: Cutover = .{ .generation = 4, .active_release = 10, .active_strategy_instance = 20, .phase = .active };
@@ -760,7 +760,7 @@ test "cutover failures and forward rollback never regress economic state or gene
     try cutover.catchUpCandidate(shard, shard);
     const replay_baseline = shard;
     const activated = try cutover.activateStable(&shard, &stable_journal, 41);
-    _ = try applyCoreStable(&shard, &stable_journal, .{ .identity = 50, .payload = .{ .venue_forced_execution = .{ .execution_id = 2, .side = .sell, .quantity = 1, .price_micros = 55_000_000, .fee_micros = 3, .penalty_micros = 2 } } });
+    _ = try applyCoreStable(&shard, &stable_journal, .{ .identity = 50, .payload = .{ .venue_forced_execution = .{ .execution_id = 2, .side = .sell, .quantity = 1, .price_ticks = 55_000_000, .fee_atoms = 3, .penalty_atoms = 2 } } });
 
     const rollback: Candidate = .{
         .release = 10,
@@ -783,9 +783,9 @@ test "cutover failures and forward rollback never regress economic state or gene
     try std.testing.expectEqual(@as(u64, 10), rolled_back.new_release);
     try std.testing.expectEqual(@as(u128, 22), rolled_back.new_strategy_instance);
     try std.testing.expectEqual(@as(i64, 2), shard.economic_projection.portfolio.swap.quantity);
-    try std.testing.expectEqual(@as(i64, 100_000_000), shard.economic_projection.portfolio.swap.open_cost_micros);
-    try std.testing.expectEqual(@as(i64, 10), shard.economic_projection.portfolio.fee_micros);
-    try std.testing.expectEqual(@as(i64, 2), shard.economic_projection.portfolio.penalty_micros);
+    try std.testing.expectEqual(@as(i64, 100_000_000), shard.economic_projection.portfolio.swap.open_cost_atoms);
+    try std.testing.expectEqual(@as(i64, 10), shard.economic_projection.portfolio.fee_atoms);
+    try std.testing.expectEqual(@as(i64, 2), shard.economic_projection.portfolio.penalty_atoms);
     try std.testing.expectEqual(@as(i128, 0), (try shard.oms.activeReservations(1)).atoms);
 
     try stable_journal.seal();

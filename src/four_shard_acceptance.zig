@@ -9,21 +9,21 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 const swap_instrument: trading.oms.Instrument = 3;
 const settlement_asset: trading.canonical.AssetIdentity = 1;
 
-const money_scale: i64 = 1_000_000;
-const initial_cash: i64 = 25_000 * money_scale;
-const allocation: i64 = 20_000 * money_scale;
-const genesis_lease_amount: i64 = 10_000 * money_scale;
-const ceiling_micros: i64 = 40_000 * money_scale;
+const money_scale: i128 = 1_000_000;
+const initial_cash: i128 = 25_000 * money_scale;
+const allocation: i128 = 20_000 * money_scale;
+const genesis_lease_amount: i128 = 10_000 * money_scale;
+const ceiling_atoms: i128 = 40_000 * money_scale;
 const quantity_denominator: i64 = 10_000;
-const mark_price_micros: i64 = 50_000_000_000;
-const order_price_micros: i64 = 50_100_000_000;
-const fill_price_micros: i64 = 49_900_000_000;
+const mark_price_atoms: i128 = 50_000_000_000;
+const order_price_ticks: i64 = 50_100_000_000;
+const fill_price_ticks: i64 = 49_900_000_000;
 const order_quantity: i64 = 100;
-const place_fee_micros: i64 = 400_000;
+const place_fee_atoms: i128 = 400_000;
 const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
 pub const acceptance_schema_version: u16 = production_contract.acceptance_schema_version;
-const expected_shared_summary_v13 = "c1ed3c16215085079daf60a286e7b40e5936be6486371e243ba313e8a1dba6b3";
+const expected_shared_summary = "0e7d4e5ded6c70f6a322b345eb48f67abb9445309378eefadb429c0316f85263";
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
     return trading.applyStable(shard, stable_journal, .{ .core = input });
@@ -63,7 +63,7 @@ const World = struct {
         return .{
             .shards = undefined,
             .journals = undefined,
-            .coordinator = coordination.AccountCoordinator.init(exchange_account, ceiling_micros, ceiling_micros),
+            .coordinator = coordination.AccountCoordinator.init(exchange_account, ceiling_atoms, ceiling_atoms),
         };
     }
 
@@ -94,27 +94,27 @@ const World = struct {
     fn projectedObservation(self: *World, identity: u128) !coordination.MarginObservation {
         var swap_quantity: i64 = 0;
         var spot_quantity: i64 = 0;
-        var swap_margin: i64 = 0;
-        var spot_margin: i64 = 0;
+        var swap_margin: i128 = 0;
+        var spot_margin: i128 = 0;
         var risk_tier: u8 = 0;
         var distance: i64 = std.math.maxInt(i64);
         for (self.coordinator.summaries) |record| {
             if (!record.present) return error.IncompleteShardSummaries;
             swap_quantity = try std.math.add(i64, swap_quantity, record.value.swap_quantity);
             spot_quantity = try std.math.add(i64, spot_quantity, record.value.spot_quantity);
-            swap_margin = try std.math.add(i64, swap_margin, record.value.exchange_margin_micros);
-            spot_margin = try std.math.add(i64, spot_margin, record.value.spot_margin_micros);
+            swap_margin = try std.math.add(i128, swap_margin, record.value.exchange_margin_atoms);
+            spot_margin = try std.math.add(i128, spot_margin, record.value.spot_margin_atoms);
             risk_tier = @max(risk_tier, record.value.risk_tier);
             distance = @min(distance, record.value.liquidation_distance_ticks);
         }
         return .{
             .identity = identity,
             .barrier = self.coordinator.barrier,
-            .venue_net_margin_micros = try std.math.add(i64, spot_margin, swap_margin),
+            .venue_net_margin_atoms = try std.math.add(i128, spot_margin, swap_margin),
             .venue_swap_quantity = swap_quantity,
             .venue_spot_quantity = spot_quantity,
-            .venue_spot_margin_micros = spot_margin,
-            .venue_swap_margin_micros = swap_margin,
+            .venue_spot_margin_atoms = spot_margin,
+            .venue_swap_margin_atoms = swap_margin,
             .margin_mode = .isolated,
             .rules_version = 1,
             .venue_risk_tier = risk_tier,
@@ -159,18 +159,18 @@ fn genesisEvents(index: usize) [14]trading.CoreEvent {
         } } },
         .{ .identity = 1, .payload = .{ .margin_rules_activated = .{ .version = 1 } } },
         .{ .identity = 1, .payload = .{ .account_configuration = .{ .exchange_account_identity = exchange_account } } },
-        .{ .identity = 1, .payload = .{ .exchange_balance = .{ .cash_micros = initial_cash } } },
+        .{ .identity = 1, .payload = .{ .exchange_balance = .{ .cash_atoms = initial_cash } } },
         .{ .identity = 1, .payload = .exchange_positions },
-        .{ .identity = 1, .payload = .{ .opening_balance = .{ .cash_micros = initial_cash } } },
+        .{ .identity = 1, .payload = .{ .opening_balance = .{ .cash_atoms = initial_cash } } },
         .{ .identity = 1, .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = index + 11 } } },
-        .{ .identity = 1, .payload = .{ .portfolio_transfer = .{ .amount_micros = allocation } } },
+        .{ .identity = 1, .payload = .{ .portfolio_transfer = .{ .amount_atoms = allocation } } },
         .{ .identity = 1, .payload = .{ .strategy_activated = .{
             .strategy_identity = target,
             .config_version = 1,
             .activation_identity = target,
         } } },
         .{ .identity = 1, .payload = .{ .primary_lease_granted = .{ .fencing_token = index + 1 } } },
-        .{ .identity = 1, .payload = .{ .risk_lease_granted = .{ .amount_micros = genesis_lease_amount } } },
+        .{ .identity = 1, .payload = .{ .risk_lease_granted = .{ .amount_atoms = genesis_lease_amount } } },
         .{ .identity = 1, .payload = .{ .control_command = .{
             .command_identity = 1,
             .content_hash = 1,
@@ -198,7 +198,7 @@ fn replayShardFromJournal(bytes: []const u8) !trading.TradingShard {
 }
 
 fn replayCoordination(live: *const World) !coordination.AccountCoordinator {
-    var coordinator = coordination.AccountCoordinator.init(exchange_account, ceiling_micros, ceiling_micros);
+    var coordinator = coordination.AccountCoordinator.init(exchange_account, ceiling_atoms, ceiling_atoms);
     var ack_journal = coordination.CoordinationJournal.initAt(1);
     for (live.ops.entries[0..live.ops.len]) |entry| switch (entry) {
         .publish => |p| _ = try coordinator.publishSummary(p.identity, p.summary),
@@ -242,10 +242,10 @@ fn assertLedgersClosed(world: *const World) !void {
     for (0..max_shards) |index| {
         const shard = &world.shards[index];
         try std.testing.expectEqual(
-            shard.economicSummary().portfolio.usdt_balance_micros +
-                shard.economicSummary().treasury_usdt_micros +
-                shard.economicSummary().suspense_usdt_micros,
-            shard.economicSummary().exchange.usdt_balance_micros,
+            shard.economicSummary().portfolio.usdt_balance_atoms +
+                shard.economicSummary().treasury_usdt_atoms +
+                shard.economicSummary().suspense_usdt_atoms,
+            shard.economicSummary().exchange.usdt_balance_atoms,
         );
         try std.testing.expectEqual(
             shard.economicSummary().portfolio.swap.quantity,
@@ -281,6 +281,8 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     for (&world.shards, &world.journals, 0..) |*shard, *journal, index| {
         shard.* = .{};
         journal.* = trading.journal.Journal.init();
+        for (@import("asset_registry.zig").testDefinitions(6, 8)) |definition|
+            _ = try applyCoreStable(shard, journal, .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } });
         const events = genesisEvents(index);
         for (events) |event| _ = try applyCoreStable(shard, journal, event);
         const host_digest = shard.canonicalStateDigest();
@@ -297,7 +299,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     }
 
     for (0..max_shards) |index| {
-        try world.apply(index, .{ .identity = 5, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_micros = mark_price_micros } } });
+        try world.apply(index, .{ .identity = 5, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = mark_price_atoms } } });
         var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 10, .count = 1 };
         group.members[0] = .{
             .intent_sequence = 10,
@@ -305,7 +307,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
             .instrument = swap_instrument,
             .side = if (index == max_shards - 1) .sell else .buy,
             .quantity = order_quantity,
-            .limit_price = .{ .instrument = swap_instrument, .rules_version = 1, .ticks = order_price_micros },
+            .limit_price = .{ .instrument = swap_instrument, .rules_version = 1, .ticks = order_price_ticks },
             .reservation = .{ .asset = settlement_asset, .atoms = 11_400_000 },
         };
         const placed = try applyCoreStable(&world.shards[index], &world.journals[index], .{
@@ -395,16 +397,16 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
             .fill_id = @intCast(40 + index),
             .order_id = world.commands[index].order_id,
             .quantity = 40,
-            .price_micros = fill_price_micros,
-            .fee_micros = place_fee_micros,
+            .price_ticks = fill_price_ticks,
+            .fee_atoms = place_fee_atoms,
         } } });
     }
     try world.apply(0, .{ .identity = 35, .payload = .{ .economic_fill = .{
         .fill_id = 45,
         .order_id = world.commands[0].order_id,
         .quantity = 60,
-        .price_micros = fill_price_micros,
-        .fee_micros = place_fee_micros,
+        .price_ticks = fill_price_ticks,
+        .fee_atoms = place_fee_atoms,
     } } });
     try assertLedgersClosed(world);
     try std.testing.expectEqual(order_quantity, world.shards[0].economicSummary().portfolio.swap.quantity);
@@ -418,17 +420,17 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     const leases = try world.coordinator.allocateLeases(allocated_version, valid_through);
     try world.ops.record(.{ .allocate = .{ .version = allocated_version, .valid_through = valid_through } });
     const gross = try world.coordinator.grossPortfolioMargin();
-    var limit_total: i64 = 0;
-    var used_total: i64 = 0;
+    var limit_total: i128 = 0;
+    var used_total: i128 = 0;
     for (leases) |lease| {
-        limit_total = try std.math.add(i64, limit_total, lease.limit_micros);
-        used_total = try std.math.add(i64, used_total, lease.used_micros);
+        limit_total = try std.math.add(i128, limit_total, lease.limit_atoms);
+        used_total = try std.math.add(i128, used_total, lease.used_atoms);
         try std.testing.expect(lease.open);
-        try std.testing.expect(lease.used_micros <= lease.limit_micros);
+        try std.testing.expect(lease.used_atoms <= lease.limit_atoms);
     }
     try std.testing.expectEqual(used_total, gross);
-    try std.testing.expect(gross <= ceiling_micros);
-    try std.testing.expect(limit_total <= ceiling_micros);
+    try std.testing.expect(gross <= ceiling_atoms);
+    try std.testing.expect(limit_total <= ceiling_atoms);
 
     const snapshot_fact: coordination.AccountFact = .{
         .identity = world.nextId(),
@@ -436,10 +438,10 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         .version = 1,
         .barrier = 1,
         .payload = .{ .account_snapshot = .{
-            .cash_micros = initial_cash - place_fee_micros,
+            .cash_atoms = initial_cash - place_fee_atoms,
             .spot_quantity = 0,
             .swap_quantity = 0,
-            .margin_micros = 0,
+            .margin_atoms = 0,
         } },
     };
     try world.acceptFact(snapshot_fact);
@@ -453,9 +455,9 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     const healthy_gate = try world.coordinator.reconcileMargin(healthy_observation);
     try std.testing.expect(healthy_gate.open);
     try std.testing.expect(!healthy_gate.latched);
-    try std.testing.expect(world.coordinator.account_netting_benefit_micros > 0);
+    try std.testing.expect(world.coordinator.account_netting_benefit_atoms > 0);
     for (world.coordinator.leases[0..world.coordinator.lease_count]) |lease|
-        try std.testing.expect(lease.used_micros <= lease.limit_micros);
+        try std.testing.expect(lease.used_atoms <= lease.limit_atoms);
 
     const pre_fault_digests: [max_shards][Sha256.digest_length]u8 = .{
         world.shards[0].canonicalStateDigest(),
@@ -471,8 +473,8 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         .payload = .{ .forced_execution = .{
             .owner = .shard_1,
             .quantity = -2,
-            .price_micros = fill_price_micros,
-            .fee_micros = 1,
+            .price_ticks = fill_price_ticks,
+            .fee_atoms = 1,
         } },
     });
     var forced_allocation: coordination.ForcedExecutionAllocation = .{
@@ -480,7 +482,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         .forced_execution_identity = world.coordinator.forced_execution_source.?.identity,
         .count = 1,
     };
-    forced_allocation.slices[0] = .{ .owner = .shard_1, .quantity = -2, .position_delta = -2, .fee_micros = 1 };
+    forced_allocation.slices[0] = .{ .owner = .shard_1, .quantity = -2, .position_delta = -2, .fee_atoms = 1 };
     try world.allocateForced(forced_allocation);
     try std.testing.expect(!world.shards[1].operational_state.effectiveTradingAuthority());
     try std.testing.expectEqualSlices(u8, &pre_fault_digests[0], &world.shards[0].canonicalStateDigest());
@@ -495,8 +497,8 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         .payload = .{ .forced_execution = .{
             .owner = null,
             .quantity = 1,
-            .price_micros = fill_price_micros,
-            .fee_micros = 1,
+            .price_ticks = fill_price_ticks,
+            .fee_atoms = 1,
         } },
     });
     try std.testing.expect(world.coordinator.suspense_forced_execution != null);
@@ -513,7 +515,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     try std.testing.expect(broken_gate.latched);
     for (world.coordinator.leases[0..world.coordinator.lease_count]) |lease| {
         try std.testing.expect(lease.open);
-        try std.testing.expectEqual(lease.used_micros, lease.limit_micros);
+        try std.testing.expectEqual(lease.used_atoms, lease.limit_atoms);
     }
 
     const gate_deliveries = world.coordinator.accountGateDeliveries(broken_gate);
@@ -548,7 +550,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         .side = .sell,
         .portfolio_reduce_only = true,
         .quantity = 38,
-        .limit_price = .{ .instrument = swap_instrument, .rules_version = 1, .ticks = fill_price_micros },
+        .limit_price = .{ .instrument = swap_instrument, .rules_version = 1, .ticks = fill_price_ticks },
         .reservation = .{ .asset = settlement_asset, .atoms = 200_000 },
     };
     _ = try applyCoreStable(&world.shards[1], &world.journals[1], .{ .identity = 43, .payload = .{ .oms_intent_group = reduce_group } });
@@ -600,11 +602,11 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         .event = .{ .l2_book_snapshot = .{
             .instrument = 3,
             .sequence = 1,
-            .best_bid = .{ .instrument = 3, .rules_version = 1, .ticks = mark_price_micros - 100_000_000 },
-            .best_ask = .{ .instrument = 3, .rules_version = 1, .ticks = mark_price_micros + 100_000_000 },
+            .best_bid = .{ .instrument = 3, .rules_version = 1, .ticks = mark_price_atoms - 100_000_000 },
+            .best_ask = .{ .instrument = 3, .rules_version = 1, .ticks = mark_price_atoms + 100_000_000 },
             .best_bid_quantity = .{ .instrument = 3, .rules_version = 1, .lots = 1_000 },
             .best_ask_quantity = .{ .instrument = 3, .rules_version = 1, .lots = 1_000 },
-            .next_ask = .{ .instrument = 3, .rules_version = 1, .ticks = mark_price_micros + 200_000_000 },
+            .next_ask = .{ .instrument = 3, .rules_version = 1, .ticks = mark_price_atoms + 200_000_000 },
             .next_ask_quantity = .{ .instrument = 3, .rules_version = 1, .lots = 1_000 },
         } },
     };
@@ -673,8 +675,8 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     try std.testing.expect(path_success.coordinator.recovery_only);
     try std.testing.expectEqual(try world.coordinator.grossPortfolioMargin(), try path_success.coordinator.grossPortfolioMargin());
     try std.testing.expectEqual(
-        @max((try path_success.coordinator.grossPortfolioMargin()) - recovery_observation.venue_net_margin_micros, 0),
-        path_success.coordinator.account_netting_benefit_micros,
+        @max((try path_success.coordinator.grossPortfolioMargin()) - recovery_observation.venue_net_margin_atoms, 0),
+        path_success.coordinator.account_netting_benefit_atoms,
     );
     for (0..max_shards) |index| {
         try std.testing.expectEqual(world.shards[index].oms.order_count, path_success.shards[index].oms.order_count);
@@ -726,8 +728,8 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     try std.testing.expectEqualSlices(u8, &shared_a, &shared_b);
     try std.testing.expectEqualSlices(u8, &shared_b, &shared_c);
     const shared_hex = std.fmt.bytesToHex(shared_a, .lower);
-    if (!std.mem.eql(u8, expected_shared_summary_v13, &shared_hex)) {
-        std.debug.print("four-shard evidence mismatch: expected {s}, actual {s}\n", .{ expected_shared_summary_v13, &shared_hex });
+    if (!std.mem.eql(u8, expected_shared_summary, &shared_hex)) {
+        std.debug.print("four-shard evidence mismatch: expected {s}, actual {s}\n", .{ expected_shared_summary, &shared_hex });
         return error.FourShardEvidenceDrift;
     }
     try std.testing.expectEqual(@as(u8, max_shards), world.ownership.count);
