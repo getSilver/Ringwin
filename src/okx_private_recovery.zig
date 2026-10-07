@@ -28,7 +28,7 @@ const Entry = struct {
 fn privateFact(record: canonical.EventRecord) bool {
     if (std.mem.eql(u8, &record.envelope.raw_evidence.digest, &@as([32]u8, @splat(0)))) return false;
     return switch (record.event) {
-        .execution_report, .fill, .economic_fault, .account_bootstrap_snapshot, .account_observed, .venue_account_configuration_snapshot, .order_reconciliation_result => true,
+        .execution_report, .fill, .funding_settlement, .economic_fault, .account_bootstrap_snapshot, .account_observed, .venue_account_configuration_snapshot, .order_reconciliation_result => true,
         else => false,
     };
 }

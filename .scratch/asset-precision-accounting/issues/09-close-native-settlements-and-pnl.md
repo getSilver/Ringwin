@@ -64,3 +64,5 @@ Phase: S3
 
 范围说明：原币第三Asset与base/quote固定整数边界复用已闭合05–08的相同ledger和public验收；本票不生成已确认资金费，不将费率、mark、USD估值或风险舍入当实际结算公式，因此新Venue生成/舍入差分条款无新增适用路径。AverageCost检查证明成本合同，不宣称它证明Venue结算公式。外部资金费结算时点组合分配仍无证明，保持Suspense；离线闭合不构成新在线或生产资格。09完整tracker封存待相关回归最终完成。
 2026-10-07 封存：账户协调器及其依赖回归ReleaseSafe97/97；最终联合Debug/ReleaseSafe各13/13。六项本票离线验收闭合，09 resolved；外部资金费归属无证明仍留Suspense，不宣称在线资格。Frontier推进10。
+
+2026-10-07 恢复预查补充修复：11只读预查发现 okx_private_recovery.privateFact 漏列 funding_settlement，既有 CommittedInputs.applyBatch 会静默忽略实际账单。真实Adapter资金费fixture现经该公共恢复入口提交并检查retained.contains，先RED复现跳过，再补共享白名单GREEN；重复恢复入口无经济作用。定向Debug6/6、ReleaseSafe6/6（与当前10工作树联编），日志/snapshot摘要与no-send仍通过。完整raw中断Sweep矩阵仍由11补充，不将本检查称作原始断点恢复资格。

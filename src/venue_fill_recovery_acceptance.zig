@@ -1807,7 +1807,10 @@ fn checkNativeFundingBills(mode: enum { normal, unknown, inexact, range, conflic
             break;
         }
         try std.testing.expect(output.events[0].event == .funding_settlement);
-        try owner.applyAdapterBatch(output);
+        // Recovery must retain actual bill outputs, just as report and Fill inputs.
+        var retained: @import("okx_private_recovery.zig").CommittedInputs = .{};
+        try retained.applyBatch(owner, output);
+        try std.testing.expect(try retained.contains(output.events[0]));
         const economic = owner.shard.economicSummary();
         try std.testing.expectEqual(@as(i128, 100_000_000_000_000) + totals[index], economic.exchange.usdt_balance_atoms);
         try std.testing.expectEqual(@as(i128, 90_000_000_000_000), economic.portfolio.usdt_balance_atoms);
@@ -1817,6 +1820,8 @@ fn checkNativeFundingBills(mode: enum { normal, unknown, inexact, range, conflic
         try std.testing.expectEqual(@as(i128, 0), economic.portfolio.realized_pnl_atoms);
         try std.testing.expect(economic.reconciliation_break and !owner.shard.operational_state.effectiveTradingAuthority());
         const once = owner.shard.canonicalStateDigest();
+        try retained.applyBatch(owner, output);
+        try std.testing.expectEqualSlices(u8, &once, &owner.shard.canonicalStateDigest());
         try owner.applyAdapterBatch(output);
         try std.testing.expectEqualSlices(u8, &once, &owner.shard.canonicalStateDigest());
         try std.testing.expect((try implementation.ingestPrivateRest(private_times, .rest_account_bills, .{ .final = true }, frame)).rejection == null);
