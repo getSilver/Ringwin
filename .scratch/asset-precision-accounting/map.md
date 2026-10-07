@@ -51,9 +51,12 @@ Status: open
 
 ## Frontier
 
-- [10：用独立 Venue 事实核对逐 Asset 经济账](issues/10-reconcile-independent-venue-economics.md) — 02–09 离线切片已完成；当前实施中。
+- [11：证明精度账务与故障状态的崩溃恢复](issues/11-prove-precision-crash-and-replay-invariants.md) — 02–10 离线切片已完成；可实施。
+- [12：只读审计历史取整差额并保留更正边界](issues/12-audit-historical-quantized-fees-readonly.md) — 10 已完成；可并行实施。
 
 ## Decisions so far
+
+- 2026-10-08：10完成独立原币cash快照/真实bill链/唯一已应用经济fact完整摘要核对；差异不改账且锁存break。Raw请求/query持久与共享恢复解码器、重复proof sweep及Windows replay→live floor衔接闭合。联合Debug/ReleaseSafe各24/24、实际两种构建Windows离线重启与四shard通过，Linux ReleaseSafe编译通过，两轴审查无剩余重大问题。限定16bill/4query的cash proof，非零position cash保持未解决；在线与production资格仍not_run/false。Frontier推进11/12，完整套件/最终封存待14。
 
 - 2026-10-07：09完成实际OKX资金费原币、完整身份、真实opening时点防重计、未知归属Suspense、gross累计上限及可信Core成本/PnL/强制费用罚金合同；联合Debug/ReleaseSafe各13/13、economics各14/14、协调器ReleaseSafe97/97、实际两种构建离线轨迹恢复一致，两轴最终无剩余重大问题。Frontier推进10，完整回归/封存仍待14，外部组合资金费分配与在线资格未宣称。
 

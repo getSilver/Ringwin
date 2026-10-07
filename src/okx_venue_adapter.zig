@@ -5,6 +5,7 @@
 //! this boundary.
 
 const std = @import("std");
+const canonical_event_codec = @import("canonical_event_codec.zig");
 const canonical = @import("canonical_event.zig");
 const account_projection = @import("account_projection.zig");
 const live = @import("okx_live_chain.zig");
@@ -104,6 +105,21 @@ pub const OkxVenueAdapter = struct {
     pending_order_reconciliations: [reconciliation_capacity]PendingOrderReconciliation = undefined,
     pending_order_reconciliation_count: u8 = 0,
     pending_account_reconciliation: ?u128 = null,
+    pending_economic_boundary: ?u64 = null,
+    pending_economic_through: ?u64 = null,
+    independent_before: ?canonical.AccountEconomicEvidence = null,
+    economic_bills: [16]private.EconomicBillCheckpoint = undefined,
+    economic_bill_count: u8 = 0,
+    economic_queries: [4]canonical.RawEvidenceRef = undefined,
+    economic_query_count: u8 = 0,
+    economic_bill_after: ?u64 = null,
+    economic_bills_complete: bool = false,
+    known_economic_fills: [32]canonical.Fill = undefined,
+    known_economic_fill_count: u8 = 0,
+    balance_source_assets: [8]canonical.AssetIdentity = @splat(0),
+    balance_source_times: [8]u64 = @splat(0),
+    balance_source_count: u8 = 0,
+    margin_source_utc_ns: u64 = 0,
     bootstrap: Bootstrap = .{},
     active_bootstrap: ?canonical.BootstrapSnapshotIdentity = null,
     bootstrap_released: bool = false,
@@ -114,8 +130,11 @@ pub const OkxVenueAdapter = struct {
     }
 
     pub fn resumeAfter(self: *OkxVenueAdapter, last_sequence: u64) !void {
-        if (self.state != .idle or self.binding != null) return error.InvalidState;
-        self.next_event_sequence = try std.math.add(u64, last_sequence, 1);
+        const fresh = self.state == .idle and self.binding == null;
+        const replay_drained = self.state == .running and self.chain.mode == .replay and self.pending_output == null and self.pending_private_count == 0;
+        if (!fresh and !replay_drained)
+            return error.InvalidState;
+        self.next_event_sequence = @max(self.next_event_sequence, try std.math.add(u64, last_sequence, 1));
     }
 
     pub fn rememberRecoveredOrder(self: *OkxVenueAdapter, order_identity: canonical.OrderIdentity, client_order_id: canonical.ClientOrderId, portfolio_reduce_only: bool, quantity: canonical.InstrumentQuantity, revision: u32) !void {
@@ -142,10 +161,21 @@ pub const OkxVenueAdapter = struct {
         if (self.pending_output != null) return error.OutputPending;
         const binding = self.binding orelse return error.InvalidBinding;
         const reconciler = self.reconciler orelse return error.MissingPrivateReconciler;
-        var batch = reconciler.ingest(self.allocator, self.chain.raw_sink, @intCast(binding.session), times, source, page, raw) catch |err| {
+        var scoped_page = page;
+        if (source == .rest_account_bills and self.pending_economic_through != null) {
+            scoped_page.economic_from_utc_ns = self.pending_economic_boundary;
+            scoped_page.economic_through_utc_ns = self.pending_economic_through;
+        }
+        var batch = reconciler.ingest(self.allocator, self.chain.raw_sink, @intCast(binding.session), times, source, scoped_page, raw) catch |err| {
             self.private_failed = true;
             return err;
         };
+        if (source == .rest_account_bills and self.pending_economic_through != null and batch.rejection == null) {
+            self.rememberEconomicPage(page, batch) catch {
+                batch.rejection = .invalid_page_cursor;
+                batch.event_count = 0;
+            };
+        }
         try self.acceptPrivateBatch(&batch, times);
         return batch;
     }
@@ -186,9 +216,29 @@ pub const OkxVenueAdapter = struct {
         try self.requireReplayCapacity();
         const binding = self.binding orelse return error.InvalidBinding;
         const reconciler = self.reconciler orelse return error.MissingPrivateReconciler;
-        var batch = try reconciler.replayRest(self.allocator, @intCast(binding.session), times, source, page, evidence, raw);
+        var scoped_page = page;
+        if (source == .rest_account_bills and self.pending_economic_through != null) {
+            scoped_page.economic_from_utc_ns = self.pending_economic_boundary;
+            scoped_page.economic_through_utc_ns = self.pending_economic_through;
+        }
+        var batch = try reconciler.replayRest(self.allocator, @intCast(binding.session), times, source, scoped_page, evidence, raw);
+        if (source == .rest_account_bills and self.pending_economic_through != null and batch.rejection == null) {
+            self.rememberEconomicPage(page, batch) catch {
+                batch.rejection = .invalid_page_cursor;
+                batch.event_count = 0;
+            };
+        }
         try self.acceptPrivateBatch(&batch, times);
         return batch;
+    }
+
+    pub const EconomicRequestRecord = struct { version: u16 = 1, request: canonical.AccountReconciliationRequest };
+
+    pub fn replayEconomicRequest(self: *OkxVenueAdapter, raw: []const u8) !void {
+        if (self.chain.mode != .replay) return error.InvalidReplayRoute;
+        const value = try @import("snapshot_codec.zig").decodeBare(raw, EconomicRequestRecord);
+        if (value.version != 1 or value.request.economic_boundary_utc_ns == null) return error.InvalidReplayRoute;
+        try self.beginAccountReconciliation(value.request);
     }
 
     fn acceptPrivateBatch(self: *OkxVenueAdapter, batch: *private.IngressBatch, times: private.Times) !void {
@@ -351,6 +401,28 @@ pub const OkxVenueAdapter = struct {
         const reconciler = self.reconciler orelse return error.InvalidRequest;
         if (request.exchange_account != binding.account or request.expected_session != binding.session or self.pending_account_reconciliation != null)
             return error.InvalidRequest;
+        if (request.economic_boundary_utc_ns) |boundary| {
+            if (boundary == 0 or !reconciler.readiness().reconciliation_ready) return error.InvalidRequest;
+            if (request.economic_through_utc_ns) |through| if (through <= boundary) return error.InvalidRequest;
+            if (self.chain.mode != .replay) {
+                var bytes: [256]u8 = undefined;
+                const encoded = @import("snapshot_codec.zig").encodeBare(&bytes, EconomicRequestRecord{ .request = request }) catch return error.InvalidRequest;
+                _ = reconciler.commitRaw(self.chain.raw_sink, @intCast(binding.session), .{ .receive_time_utc_ns = 0, .monotonic_time_ns = self.clock.now(), .wall_time_utc_ns = 0 }, encoded, .economic_reconciliation_request) catch {
+                    self.private_failed = true;
+                    return error.InvalidRequest;
+                };
+            }
+            self.pending_account_reconciliation = request.identity;
+            self.pending_economic_boundary = boundary;
+            self.pending_economic_through = request.economic_through_utc_ns;
+            self.independent_before = null;
+            self.economic_bill_count = 0;
+            self.economic_query_count = 0;
+            self.economic_bill_after = null;
+            self.economic_bills_complete = false;
+            self.appendControl(.{ .account_reconciliation_started = request.identity }, request.identity);
+            return;
+        }
         reconciler.beginReconciliation(reconciler.rawWatermark()) catch return error.InvalidRequest;
         self.pending_account_reconciliation = request.identity;
         self.bootstrap = .{};
@@ -443,10 +515,10 @@ pub const OkxVenueAdapter = struct {
     fn finishPrivateBatch(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch) void {
         const required = self.pending_order_reconciliation_count + @intFromBool(self.pending_account_reconciliation != null);
         if (required > output.events.len - output.len) return;
-        if (self.pending_account_reconciliation) |identity| {
+        if (self.pending_economic_boundary == null) if (self.pending_account_reconciliation) |identity| {
             self.appendPrivateResult(output, .account_reconciliation_result, identity, .{ .identity = identity, .complete = self.active_bootstrap != null, .status = if (self.active_bootstrap == null) .unresolved else .found_terminal });
             self.pending_account_reconciliation = null;
-        }
+        };
         for (self.pending_order_reconciliations[0..self.pending_order_reconciliation_count]) |*request| {
             const link = self.findOrder(request.order);
             self.appendPrivateResult(output, .order_reconciliation_result, request.identity, if (request.result != .unresolved and link != null and request.cumulative != null and request.evidence != null and
@@ -506,6 +578,13 @@ pub const OkxVenueAdapter = struct {
 
     fn translatePrivate(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, event: private.PrivateEvent, historical: bool) !void {
         switch (event.payload) {
+            .economic_bill_checkpoint => |checkpoint| {
+                if (self.pending_economic_through != null) {
+                    if (self.economic_bill_count == self.economic_bills.len) return error.NativeAssetCapacityExceeded;
+                    self.economic_bills[self.economic_bill_count] = checkpoint;
+                    self.economic_bill_count += 1;
+                }
+            },
             .execution_report => |report| try self.translateReport(output, event.envelope, report, historical),
             .fill => |fill| try self.translateFill(output, event.envelope, fill, historical),
             .funding_settlement => |settlement| {
@@ -526,7 +605,12 @@ pub const OkxVenueAdapter = struct {
                     .settlement_time_utc_ns = settlement.settlement_time_utc_ns,
                 } });
             },
-            .exchange_balance_snapshot => |snapshot| if (snapshot.scope == .full_rest) {
+            .exchange_balance_snapshot => |snapshot| if (snapshot.scope == .full_rest and self.pending_economic_boundary != null) {
+                try self.emitBalanceObserved(output, event.envelope, snapshot);
+                try self.emitNativeReconciliation(output, event);
+            } else if (snapshot.scope == .full_rest and self.bootstrap_released) {
+                try self.emitBalanceObserved(output, event.envelope, snapshot);
+            } else if (snapshot.scope == .full_rest) {
                 self.bootstrap.balance = event;
                 try self.emitBootstrap(output);
             } else try self.emitBalanceObserved(output, event.envelope, snapshot),
@@ -534,12 +618,188 @@ pub const OkxVenueAdapter = struct {
                 self.bootstrap.positions = event;
                 try self.emitBootstrap(output);
             } else try self.emitPositionObserved(output, event.envelope, snapshot),
-            .exchange_margin_snapshot => |snapshot| if (snapshot.scope == .full_rest) {
+            .exchange_margin_snapshot => |snapshot| if (snapshot.scope == .full_rest and self.bootstrap_released) {
+                try self.emitMarginObserved(output, event.envelope, snapshot);
+            } else if (snapshot.scope == .full_rest) {
                 self.bootstrap.margin = event;
                 try self.emitBootstrap(output);
             } else try self.emitMarginObserved(output, event.envelope, snapshot),
             .venue_account_configuration_snapshot => |snapshot| try self.translateAccountConfiguration(output, event.envelope, snapshot),
         }
+    }
+
+    fn rememberEconomicPage(self: *OkxVenueAdapter, page: private.Page, batch: private.IngressBatch) !void {
+        const boundary = self.pending_economic_boundary orelse return error.InvalidRequest;
+        const through = self.pending_economic_through orelse return error.InvalidRequest;
+        const query = batch.query_evidence orelse return error.IncompleteReconciliationEvidence;
+        const target = page.request_target orelse return error.IncompleteReconciliationEvidence;
+        if (self.economic_bills_complete or page.requested_after != self.economic_bill_after) return error.InvalidRestPage;
+        if (boundary < std.time.ns_per_ms or boundary % std.time.ns_per_ms != 0 or through % std.time.ns_per_ms != 0) return error.InvalidRestPage;
+        var buffer: [256]u8 = undefined;
+        const expected = if (page.requested_after) |after|
+            try std.fmt.bufPrint(&buffer, "/api/v5/account/bills?begin={d}&end={d}&limit=8&after={d}", .{ boundary / std.time.ns_per_ms - 1, through / std.time.ns_per_ms + 1, after })
+        else
+            try std.fmt.bufPrint(&buffer, "/api/v5/account/bills?begin={d}&end={d}&limit=8", .{ boundary / std.time.ns_per_ms - 1, through / std.time.ns_per_ms + 1 });
+        if (!std.mem.eql(u8, target, expected) or batch.bill_row_count > 8 or page.final != (batch.bill_row_count < 8)) return error.InvalidRestPage;
+        var rows: u8 = 0;
+        var previous = page.requested_after;
+        for (batch.bill_cursors[0..batch.bill_row_count], batch.bill_times[0..batch.bill_row_count]) |cursor, time| {
+            if (previous) |older| if (cursor >= older) return error.InvalidRestPage;
+            if (try std.math.add(u64, time, std.time.ns_per_ms) < boundary or time > try std.math.add(u64, through, std.time.ns_per_ms)) return error.InvalidRestPage;
+            previous = cursor;
+            if (time > boundary and time <= through) rows += 1;
+        }
+        var checkpoints: u8 = 0;
+        for (batch.eventSlice()) |event| if (event.payload == .economic_bill_checkpoint) {
+            checkpoints += 1;
+        };
+        if (rows != checkpoints or self.economic_query_count == self.economic_queries.len) return error.IncompleteReconciliationEvidence;
+        self.economic_queries[self.economic_query_count] = .{ .stream = self.binding.?.session, .sequence = query.stream_sequence, .digest = query.sha256 };
+        self.economic_query_count += 1;
+        self.economic_bill_after = previous;
+        self.economic_bills_complete = page.final;
+    }
+
+    fn proveEconomicBills(self: *OkxVenueAdapter, evidence: *canonical.AccountEconomicEvidence) !bool {
+        if (!self.economic_bills_complete or self.economic_bill_count == 0 or evidence.query_count == 0) return false;
+        const before = self.independent_before orelse return false;
+        var balances = before.balances;
+        var bills = self.economic_bills;
+        var i: usize = 1;
+        while (i < self.economic_bill_count) : (i += 1) {
+            var j = i;
+            while (j > 0 and bills[j].bill_id < bills[j - 1].bill_id) : (j -= 1)
+                std.mem.swap(private.EconomicBillCheckpoint, &bills[j], &bills[j - 1]);
+        }
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        var latest: u64 = 0;
+        var fees: [16]i128 = @splat(0);
+        var rebates: [16]i128 = @splat(0);
+        var expected_fees: [16]i128 = @splat(0);
+        var expected_rebates: [16]i128 = @splat(0);
+        for (bills[0..self.economic_bill_count], 0..) |bill, index| {
+            if (index != 0 and bills[index - 1].bill_id == bill.bill_id) return false;
+            const asset = try self.asset_definitions.resolveCode(self.binding.?.venue, bill.asset.slice());
+            const after = try assetAmount(self.asset_definitions, asset, bill.balance);
+            const change = try assetAmount(self.asset_definitions, asset, bill.change);
+            const fee = try assetAmount(self.asset_definitions, asset, bill.fee);
+            var found = false;
+            for (balances[0..before.balance_count]) |*balance| {
+                if (balance.asset != asset) continue;
+                if (try std.math.add(i128, balance.atoms, change.atoms) != after.atoms) return false;
+                balance.* = after;
+                found = true;
+            }
+            if (!found) return false;
+            latest = @max(latest, bill.time_utc_ns);
+            const identity = std.math.cast(u64, digestIdentity(bill.related_identity)) orelse return error.IdentityOutOfRange;
+            var fact: canonical.EconomicFactRef = .{ .identity = identity, .kind = if (bill.funding) .funding else .fill, .digest = @splat(0), .fee_confirmed = false };
+            var bytes: [canonical_event_codec.max_encoded_len]u8 = undefined;
+            var expected_fee: i128 = 0;
+            var expected_rebate: i128 = 0;
+            if (bill.funding) {
+                const amount = try assetAmount(self.asset_definitions, asset, bill.funding_amount orelse return false);
+                if (amount.atoms != change.atoms or fee.atoms != 0) return false;
+                const mapped = self.mapPrivateInstrument(bill.instrument) orelse return false;
+                const configured = self.instrument_definitions.get(mapped.identity) orelse return false;
+                const payload: canonical.Payload = .{ .funding_settlement = .{ .identity = identity, .exchange_account = self.binding.?.account, .instrument = mapped.identity, .rules_version = configured.rules.version, .venue_bill_id = bill.bill_id, .amount = amount, .settlement_time_utc_ns = bill.time_utc_ns } };
+                std.crypto.hash.sha2.Sha256.hash(try canonical_event_codec.encodePayload(&bytes, payload), &fact.digest, .{});
+                fact.fee_confirmed = true;
+            } else {
+                var matched = false;
+                for (self.known_economic_fills[0..self.known_economic_fill_count]) |fill| {
+                    if (fill.identity != identity) continue;
+                    const filled_at = fill.venue_fill_time_utc_ns orelse return false;
+                    if (filled_at <= evidence.from_utc_ns or filled_at > bill.time_utc_ns) return false;
+                    std.crypto.hash.sha2.Sha256.hash(try canonical_event_codec.encodePayload(&bytes, .{ .fill = fill }), &fact.digest, .{});
+                    const charge = fill.fee orelse return false;
+                    const rebate = fill.rebate orelse canonical.AssetAmount{ .asset = charge.asset, .atoms = 0 };
+                    if (charge.asset != rebate.asset) return false;
+                    if (charge.asset == asset) fact.fee_confirmed = true else if (fee.atoms != 0) return false;
+                    expected_fee = charge.atoms;
+                    expected_rebate = rebate.atoms;
+                    matched = true;
+                }
+                if (!matched) return false;
+            }
+            var recorded = false;
+            var fact_index: usize = evidence.covered_economic_fact_count;
+            for (evidence.facts[0..evidence.covered_economic_fact_count], 0..) |*known, known_index| {
+                if (known.identity != fact.identity or known.kind != fact.kind) continue;
+                if (!std.mem.eql(u8, &known.digest, &fact.digest)) return false;
+                known.fee_confirmed = known.fee_confirmed or fact.fee_confirmed;
+                recorded = true;
+                fact_index = known_index;
+            }
+            if (!recorded) {
+                if (evidence.covered_economic_fact_count == evidence.facts.len) return error.NativeAssetCapacityExceeded;
+                evidence.facts[evidence.covered_economic_fact_count] = fact;
+                evidence.covered_economic_fact_count += 1;
+            }
+            expected_fees[fact_index] = expected_fee;
+            expected_rebates[fact_index] = expected_rebate;
+            if (fee.atoms < 0) fees[fact_index] = try std.math.add(i128, fees[fact_index], try std.math.sub(i128, 0, fee.atoms)) else rebates[fact_index] = try std.math.add(i128, rebates[fact_index], fee.atoms);
+            const encoded = try @import("snapshot_codec.zig").encodeBare(&bytes, .{ bill.bill_id, asset, after.atoms, change.atoms, fee.atoms, bill.time_utc_ns, bill.related_identity });
+            hasher.update(encoded);
+        }
+        if (latest != evidence.through_utc_ns or before.balance_count != evidence.balance_count) return false;
+        for (evidence.balances[0..evidence.balance_count]) |closing| {
+            var matched = false;
+            for (balances[0..before.balance_count]) |balance| if (std.meta.eql(balance, closing)) {
+                matched = true;
+            };
+            if (!matched) return false;
+        }
+        for (evidence.facts[0..evidence.covered_economic_fact_count], 0..) |*fact, fact_index| {
+            if (fact.kind == .fill) fact.fee_confirmed = fact.fee_confirmed and fees[fact_index] == expected_fees[fact_index] and rebates[fact_index] == expected_rebates[fact_index];
+        }
+        hasher.final(&evidence.bill_chain_digest);
+        evidence.bills_complete = true;
+        return true;
+    }
+
+    fn emitNativeReconciliation(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, event: private.PrivateEvent) !void {
+        const boundary = self.pending_economic_boundary orelse return;
+        const identity = self.pending_account_reconciliation orelse return error.InvalidRequest;
+        const binding = self.binding orelse return error.InvalidBinding;
+        const snapshot = event.payload.exchange_balance_snapshot;
+        var evidence: canonical.AccountEconomicEvidence = .{
+            .exchange_account = binding.account,
+            .scope = .spot_and_isolated_linear_usdt,
+            .from_utc_ns = boundary,
+            .through_utc_ns = snapshot.venue_update_time_utc_ns,
+            .source = .{ .stream = binding.session, .sequence = event.envelope.raw_evidence.stream_sequence, .digest = event.envelope.raw_evidence.sha256 },
+            .balance_count = snapshot.balance_count,
+        };
+        for (snapshot.balances[0..snapshot.balance_count], 0..) |balance, index| {
+            const asset = try self.asset_definitions.resolveCode(binding.venue, balance.asset.slice());
+            evidence.balances[index] = try assetAmount(self.asset_definitions, asset, balance.cash_balance orelse return error.MissingAmount);
+            evidence.asset_versions[index] = self.asset_definitions.get(asset).?.definition.version;
+        }
+        if (self.pending_economic_through != null and self.independent_before == null) {
+            if (evidence.through_utc_ns != boundary) return error.IncompleteReconciliationEvidence;
+            self.independent_before = evidence;
+            return;
+        }
+        var complete = boundary == evidence.through_utc_ns;
+        if (self.pending_economic_through) |through| {
+            const before = self.independent_before orelse return error.IncompleteReconciliationEvidence;
+            evidence.before_source = before.source;
+            evidence.before_balances = before.balances;
+            evidence.before_balance_count = before.balance_count;
+            evidence.query_count = self.economic_query_count;
+            @memcpy(evidence.query_sources[0..evidence.query_count], self.economic_queries[0..evidence.query_count]);
+            complete = evidence.through_utc_ns == through and try self.proveEconomicBills(&evidence);
+        }
+        try self.appendPrivate(output, event.envelope, .account, null, null, identity, .{ .account_reconciliation_result = .{
+            .identity = identity,
+            .complete = complete,
+            .status = if (complete) .found_terminal else .unresolved,
+            .account_economics = evidence,
+        } });
+        self.pending_account_reconciliation = null;
+        self.pending_economic_boundary = null;
+        self.pending_economic_through = null;
     }
 
     fn translateReport(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, envelope: private.EventEnvelope, report: private.ExecutionReport, historical: bool) !void {
@@ -645,6 +905,11 @@ pub const OkxVenueAdapter = struct {
             },
             .venue_fill_time_utc_ns = fill.venue_fill_time_utc_ns,
         } });
+        const translated_fill = output.events[output.len - 1].event.fill;
+        for (self.known_economic_fills[0..self.known_economic_fill_count]) |known| if (known.identity == translated_fill.identity) return;
+        if (self.known_economic_fill_count == self.known_economic_fills.len) return error.NativeAssetCapacityExceeded;
+        self.known_economic_fills[self.known_economic_fill_count] = translated_fill;
+        self.known_economic_fill_count += 1;
     }
 
     fn translateAccountConfiguration(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, envelope: private.EventEnvelope, snapshot: private.VenueAccountConfigurationSnapshot) !void {
@@ -703,17 +968,34 @@ pub const OkxVenueAdapter = struct {
             snapshot.positions[index] = try self.positionFor(value);
         snapshot.margins[0] = try marginFor(margin);
         if (self.bootstrap_released) return;
+        for (snapshot.balances[0..snapshot.balance_count]) |value| _ = try self.acceptBalanceTime(value.asset, balance.venue_update_time_utc_ns);
+        self.margin_source_utc_ns = @max(self.margin_source_utc_ns, margin.venue_update_time_utc_ns);
         self.active_bootstrap = snapshot.identity;
         self.bootstrap_released = true;
         try self.appendPrivate(output, balance_event.envelope, .account, null, null, snapshot.identity, .{ .account_bootstrap_snapshot = snapshot });
+    }
+
+    fn acceptBalanceTime(self: *OkxVenueAdapter, asset: canonical.AssetIdentity, time: u64) !bool {
+        for (self.balance_source_assets[0..self.balance_source_count], self.balance_source_times[0..self.balance_source_count]) |known, *latest| {
+            if (known != asset) continue;
+            if (time < latest.*) return false;
+            latest.* = time;
+            return true;
+        }
+        if (self.balance_source_count == self.balance_source_assets.len) return error.NativeAssetCapacityExceeded;
+        self.balance_source_assets[self.balance_source_count] = asset;
+        self.balance_source_times[self.balance_source_count] = time;
+        self.balance_source_count += 1;
+        return true;
     }
 
     fn emitBalanceObserved(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, envelope: private.EventEnvelope, snapshot: private.ExchangeBalanceSnapshot) !void {
         const bootstrap = self.active_bootstrap orelse return error.MissingBootstrap;
         const binding = self.binding orelse return error.InvalidBinding;
         for (snapshot.balances[0..snapshot.balance_count]) |value| {
-            self.account_source_sequence = try std.math.add(u64, self.account_source_sequence, 1);
             const balance = try balanceFor(self.asset_definitions, binding.venue, value);
+            if (!try self.acceptBalanceTime(balance.asset, snapshot.venue_update_time_utc_ns)) continue;
+            self.account_source_sequence = try std.math.add(u64, self.account_source_sequence, 1);
             try self.appendPrivate(output, envelope, .asset, null, balance.asset, digestIdentity(envelope.source_fact_identity), .{ .account_observed = .{
                 .identity = digestIdentity(envelope.source_fact_identity) + self.account_source_sequence,
                 .exchange_account = binding.account,
@@ -743,6 +1025,8 @@ pub const OkxVenueAdapter = struct {
     }
 
     fn emitMarginObserved(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, envelope: private.EventEnvelope, snapshot: private.ExchangeMarginSnapshot) !void {
+        if (snapshot.venue_update_time_utc_ns < self.margin_source_utc_ns) return;
+        self.margin_source_utc_ns = snapshot.venue_update_time_utc_ns;
         const bootstrap = self.active_bootstrap orelse return error.MissingBootstrap;
         const binding = self.binding orelse return error.InvalidBinding;
         self.account_source_sequence = try std.math.add(u64, self.account_source_sequence, 1);
@@ -1625,6 +1909,35 @@ test "OKX adapter resumes canonical event sequence before start" {
     const adapter = implementation.adapter();
     try startTest(adapter);
     try std.testing.expectError(error.InvalidState, implementation.resumeAfter(42));
+}
+
+test "OKX drained replay handoff preserves committed floor and fresh fault evidence" {
+    var raw = TestRawSink{};
+    var transport = TestTransport{};
+    var chain: live.Chain = .{ .mode = .replay, .qualification = qualification(), .raw_sink = raw.interface(), .transport = transport.interface() };
+    var clock = TestClock{};
+    var reconciler: private.Reconciler = .{};
+    var implementation = OkxVenueAdapter.init(std.testing.allocator, &chain, clock.interface(), testProfile(), testRules());
+    implementation.attachPrivateReconciler(&reconciler);
+    const adapter = implementation.adapter();
+    try startTest(adapter);
+    try implementation.beginPrivateSession();
+    const times: private.Times = .{ .receive_time_utc_ns = 1, .monotonic_time_ns = 2, .wall_time_utc_ns = 3 };
+    const first = try implementation.ingestPrivateWs(times, "{");
+    try std.testing.expectError(error.InvalidState, implementation.resumeAfter(41));
+    const initial = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(@as(u64, 1), initial.events[0].envelope.identity.sequence);
+    try implementation.resumeAfter(41);
+    try implementation.resumeAfter(10);
+    chain.mode = .demo_live;
+    const second = try implementation.ingestPrivateWs(times, "}");
+    const fresh = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(@as(u64, 42), fresh.events[0].envelope.identity.sequence);
+    try std.testing.expect(fresh.events[0].event == .economic_fault);
+    try std.testing.expectEqual(second.raw_evidence.stream_sequence, fresh.events[0].envelope.raw_evidence.sequence);
+    try std.testing.expectEqualSlices(u8, &second.raw_evidence.sha256, &fresh.events[0].envelope.raw_evidence.digest);
+    try std.testing.expect(second.raw_evidence.stream_sequence > first.raw_evidence.stream_sequence);
+    try std.testing.expectEqual(@as(u64, 1), chain.next_attempt_id);
 }
 
 test "OKX reconciliation result states are deterministic and bounded" {

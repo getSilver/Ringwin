@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const schema_version: u16 = 9;
+pub const schema_version: u16 = 10;
 
 pub const VenueIdentity = u64;
 pub const Product = enum(u8) { spot, isolated_linear_usdt };
@@ -325,6 +325,8 @@ pub const AccountReconciliationRequest = struct {
     identity: u128,
     exchange_account: ExchangeAccountIdentity,
     expected_session: AdapterSessionIdentity,
+    economic_boundary_utc_ns: ?u64 = null,
+    economic_through_utc_ns: ?u64 = null,
 };
 
 pub const AdapterRequest = union(enum) {
@@ -475,7 +477,31 @@ pub const ReconciliationResult = struct {
     terminal_status: ?ExecutionReportStatus = null,
     rules_version: u64 = 0,
     evidence: ?ReconciliationEvidence = null,
+    account_economics: ?AccountEconomicEvidence = null,
 };
+
+/// Native cash snapshots plus scoped bill and canonical fact references prove
+/// an economic interval. Receipt/Adapter sequences do not certify economics.
+pub const AccountEconomicEvidence = struct {
+    exchange_account: ExchangeAccountIdentity,
+    scope: enum(u8) { spot_and_isolated_linear_usdt },
+    from_utc_ns: u64,
+    through_utc_ns: u64,
+    source: RawEvidenceRef,
+    balances: [max_account_facts]AssetAmount = @splat(.{ .asset = 0, .atoms = 0 }),
+    asset_versions: [max_account_facts]u64 = @splat(0),
+    balance_count: u8 = 0,
+    covered_economic_fact_count: u16 = 0,
+    before_source: ?RawEvidenceRef = null,
+    before_balances: [max_account_facts]AssetAmount = @splat(.{ .asset = 0, .atoms = 0 }),
+    before_balance_count: u8 = 0,
+    query_sources: [4]RawEvidenceRef = @splat(.{ .stream = 0, .sequence = 0, .digest = @splat(0) }),
+    query_count: u8 = 0,
+    bills_complete: bool = false,
+    bill_chain_digest: [32]u8 = @splat(0),
+    facts: [16]EconomicFactRef = @splat(.{ .identity = 0, .kind = .funding, .digest = @splat(0), .fee_confirmed = false }),
+};
+pub const EconomicFactRef = struct { identity: u64, kind: enum(u8) { fill, funding }, digest: [32]u8, fee_confirmed: bool };
 
 pub const ExecutionReport = struct {
     identity: SourceFactIdentity,

@@ -1330,9 +1330,8 @@ const ExecutionOwners = struct {
     reconciliation_id: u128 = 1,
     recovering: bool = false,
     replay_sequence: u64 = 1,
-    replay_reconciliation_started: bool = false,
-    replay_previous_source: ?okx_private.IngressSource = null,
-    replay_after: ?u64 = null,
+    replay_canonical_floor: u64 = 0,
+    private_decoder: private_recovery.DecoderReplay = .{},
     replay_economic_fault: bool = false,
 
     const OfflineTransport = struct {
@@ -1385,9 +1384,7 @@ const ExecutionOwners = struct {
         const raw_stream: durable_store.StreamIdentity = .{ .domain = .raw_ingress, .id = 93 };
         self.recovering = has_history;
         self.replay_sequence = 1;
-        self.replay_reconciliation_started = false;
-        self.replay_previous_source = null;
-        self.replay_after = null;
+        self.private_decoder = .{};
         self.replay_economic_fault = false;
         self.raw = if (has_history)
             try raw_ingress.DurableSink.recover(self.store.interface(), init.io, raw_stream)
@@ -1472,7 +1469,9 @@ const ExecutionOwners = struct {
             };
         if (self.recovering) self.chain.mode = .replay;
         self.replay_economic_fault = restored.shard.economic_fault_count != 0;
-        try self.venue.resumeAfter(floor);
+        self.replay_canonical_floor = floor;
+        // Full raw history reconstructs the original canonical sequence.
+        try self.venue.resumeAfter(if (self.recovering) 0 else floor);
         for (restored.shard.oms.orders[0..restored.shard.oms.order_count]) |owned| {
             var wire_id: ?canonical.ClientOrderId = null;
             for (self.gateway.uncertain_dispatches[0..self.gateway.uncertain_dispatch_count]) |dispatch| {
@@ -1499,43 +1498,23 @@ const ExecutionOwners = struct {
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
         if (!std.mem.eql(u8, &digest, &metadata.record.sha256)) return error.RawEvidenceMismatch;
-        const record = metadata.record;
-        const times: okx_private.Times = .{ .receive_time_utc_ns = record.receive_time_utc_ns, .monotonic_time_ns = record.monotonic_time_ns, .wall_time_utc_ns = record.wall_time_utc_ns };
-        const evidence: okx_private.RawEvidenceRef = .{ .stream_sequence = metadata.sequence, .sha256 = record.sha256 };
-        if (record.origin == 0) {
-            _ = try self.venue.replayPrivateWs(times, evidence, bytes);
-        } else if (record.origin != okx_live.transport_response_origin) {
-            const source = std.enums.fromInt(okx_private.IngressSource, record.origin - 1) orelse return error.InvalidPrivateReplaySource;
-            if (source.isWebSocket()) return error.InvalidPrivateReplaySource;
-            if (!self.replay_reconciliation_started or (source == .rest_account_config and self.reconciler.readiness().reconciliation_ready)) {
-                if (try self.venue.adapter().trySend(.{ .account_reconciliation = .{ .identity = 1, .exchange_account = 2, .expected_session = 1 } }) != .accepted)
-                    return error.PrivateReplayReconciliationRejected;
-                self.replay_reconciliation_started = true;
-                try self.drainPrivate(pipe, generation);
+        const Drain = struct {
+            owners: *ExecutionOwners,
+            pipe: Pipe,
+            generation: u64,
+            fn call(ptr: *anyopaque) !void {
+                const context: *@This() = @ptrCast(@alignCast(ptr));
+                try context.owners.drainPrivate(context.pipe, context.generation);
             }
-            if (self.replay_previous_source != source) self.replay_after = null;
-            const endpoint = for (okx_demo.rest_endpoints) |candidate| {
-                if (candidate.source == source) break candidate;
-            } else return error.InvalidPrivateReplaySource;
-            const parsed = std.json.parseFromSlice(std.json.Value, self.venue.allocator, bytes, .{}) catch null;
-            defer if (parsed) |value| value.deinit();
-            const rows = if (parsed) |value| blk: {
-                if (value.value != .object) break :blk 0;
-                const data = value.value.object.get("data") orelse break :blk 0;
-                break :blk if (data == .array) data.array.items.len else 0;
-            } else 0;
-            const final = endpoint.cursor == .none or rows < endpoint.page_size;
-            const batch = try self.venue.replayPrivateRest(times, source, .{ .requested_after = self.replay_after, .final = final }, evidence, bytes);
-            self.replay_previous_source = source;
-            self.replay_after = if (final or batch.rejection != null) null else batch.oldest_cursor orelse {
-                try self.drainPrivate(pipe, generation);
-                return error.MissingRestPageCursor;
-            };
-        }
-        try self.drainPrivate(pipe, generation);
+        };
+        var context: Drain = .{ .owners = self, .pipe = pipe, .generation = generation };
+        try self.private_decoder.ingest(&self.venue, metadata.sequence, metadata.record, bytes, &context, Drain.call);
         self.replay_sequence = try std.math.add(u64, self.replay_sequence, 1);
         if (self.replay_sequence == self.raw.next_sequence) {
-            if (!self.reconciler.readiness().reconciliation_ready and !self.replay_economic_fault) return error.PrivateRecoveryIncomplete;
+            if (!self.private_decoder.complete(&self.venue, self.replay_economic_fault)) return error.PrivateRecoveryIncomplete;
+            // Raw history does not contain every synthetic control output.
+            // Reconstruct raw identities first, then resume above all committed output.
+            try self.venue.resumeAfter(self.replay_canonical_floor);
             self.recovering = false;
             self.chain.mode = .demo_live;
         }

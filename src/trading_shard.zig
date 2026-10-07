@@ -313,9 +313,18 @@ pub const TradingShard = struct {
                 });
                 try candidate.trace.append(.canonical_order_reconciliation, event.envelope.identity.sequence);
                 self.* = candidate;
-            } else if ((event.event == .fill or event.event == .funding_settlement) and event.envelope.exchange_account == self.exchange_account_identity) {
+            } else if ((event.event == .fill or event.event == .funding_settlement or
+                (event.event == .account_reconciliation_result and event.event.account_reconciliation_result.account_economics != null)) and event.envelope.exchange_account == self.exchange_account_identity)
+            {
                 candidate = self.*;
                 candidate.oms.begin();
+                if (event.event == .account_reconciliation_result) {
+                    if (std.math.cast(u64, event.event.account_reconciliation_result.identity)) |identity| {
+                        // Preserve verified identity for an unresolved result. A full
+                        // evidence store or existing conflict retains the original fault.
+                        _ = candidate.economic_projection.retainCanonicalSnapshot(identity, try canonicalPayloadDigest(event.event)) catch false;
+                    }
+                }
                 try candidate.latchEconomicFault(event, switch (err) {
                     error.Overflow, error.QuantityOutOfRange, error.PriceOutOfRange, error.AssetAmountOutOfRange => .overflow,
                     error.NativeAssetCapacityExceeded, error.LedgerCapacityExceeded, error.EconomicFactCapacityExceeded => .capacity_exhausted,
@@ -1702,7 +1711,10 @@ pub const TradingShard = struct {
                 try self.trace.append(.canonical_order_reconciliation, fact_identity);
             },
             .account_reconciliation_result => |result| {
-                if (!result.complete and self.operational_state.initialized) try self.applyOperationalGate(.{
+                if (result.account_economics) |evidence| {
+                    try self.applyNativeReconciliation(record, result, evidence);
+                }
+                if ((!result.complete or (result.account_economics == null and self.opening_balance_observed)) and self.operational_state.initialized) try self.applyOperationalGate(.{
                     .gate_identity = result.identity,
                     .target_identity = self.operational_state.target_identity,
                     .kind = .latched,
@@ -1713,6 +1725,82 @@ pub const TradingShard = struct {
             },
         }
         return null;
+    }
+
+    fn applyNativeReconciliation(self: *TradingShard, record: canonical.EventRecord, result: canonical.ReconciliationResult, evidence: canonical.AccountEconomicEvidence) !void {
+        if (record.envelope.scope != .account or record.envelope.exchange_account != self.exchange_account_identity or
+            evidence.exchange_account != self.exchange_account_identity or !std.meta.eql(evidence.source, record.envelope.raw_evidence))
+            return error.CanonicalScopeMismatch;
+        for (self.instrument_registry.entries[0..self.instrument_registry.count]) |entry|
+            if (entry.venue != record.envelope.venue) return error.CanonicalScopeMismatch;
+        if (!result.complete or !self.opening_balance_observed or self.economic_baseline_utc_ns == 0 or
+            evidence.from_utc_ns != self.economic_baseline_utc_ns or evidence.through_utc_ns < evidence.from_utc_ns or
+            record.envelope.times.source_utc_ns != evidence.through_utc_ns)
+        {
+            _ = try self.economic_projection.retainCanonicalSnapshot(std.math.cast(u64, result.identity) orelse return error.IdentityOutOfRange, try canonicalPayloadDigest(record.event));
+            try self.latchEconomicFault(record, .invalid_economic_fact);
+            return;
+        }
+        if (evidence.balance_count == 0 or evidence.balance_count > evidence.balances.len or evidence.before_balance_count > evidence.before_balances.len) return error.IncompleteReconciliationEvidence;
+        var facts_match = true;
+        if (evidence.through_utc_ns == evidence.from_utc_ns) {
+            if (evidence.covered_economic_fact_count != 0 or self.economic_projection.ledger_count != 0) {
+                _ = try self.economic_projection.retainCanonicalSnapshot(std.math.cast(u64, result.identity) orelse return error.IdentityOutOfRange, try canonicalPayloadDigest(record.event));
+                try self.latchEconomicFault(record, .invalid_economic_fact);
+                return;
+            }
+        } else {
+            const before = evidence.before_source orelse return error.IncompleteReconciliationEvidence;
+            if (!evidence.bills_complete or evidence.covered_economic_fact_count == 0 or
+                evidence.covered_economic_fact_count > evidence.facts.len or evidence.query_count == 0 or
+                evidence.query_count > evidence.query_sources.len or evidence.before_balance_count != evidence.balance_count or
+                before.stream != evidence.source.stream or before.sequence == 0 or before.sequence >= evidence.source.sequence or
+                std.mem.eql(u8, &evidence.bill_chain_digest, &@as([32]u8, @splat(0)))) return error.IncompleteReconciliationEvidence;
+            var previous = before.sequence;
+            for (evidence.query_sources[0..evidence.query_count]) |query| {
+                if (query.stream != evidence.source.stream or query.sequence <= previous or query.sequence >= evidence.source.sequence or
+                    std.mem.eql(u8, &query.digest, &@as([32]u8, @splat(0)))) return error.IncompleteReconciliationEvidence;
+                previous = query.sequence;
+            }
+            var money_facts: usize = 0;
+            for (self.economic_projection.seen[0..self.economic_projection.seen_count]) |known| {
+                if (known.kind == .forced_execution) return error.IncompleteReconciliationEvidence;
+                if (known.kind == .fill or known.kind == .funding) money_facts += 1;
+            }
+            if (money_facts != evidence.covered_economic_fact_count) return error.IncompleteReconciliationEvidence;
+            for (evidence.facts[0..evidence.covered_economic_fact_count], 0..) |fact, index| {
+                for (evidence.facts[0..index]) |known| if (known.identity == fact.identity and known.kind == fact.kind) return error.IncompleteReconciliationEvidence;
+                const applied = switch (fact.kind) {
+                    .fill => (try self.economic_projection.lookupCanonicalFill(fact.identity, fact.digest)) == .duplicate,
+                    .funding => try self.economic_projection.lookupCanonicalFunding(fact.identity, fact.digest),
+                };
+                if (!applied) return error.IncompleteReconciliationEvidence;
+                facts_match = facts_match and fact.fee_confirmed;
+            }
+            for (evidence.before_balances[0..evidence.before_balance_count]) |balance| {
+                try self.checkAssetAmounts(balance, false);
+                var found = false;
+                for (evidence.balances[0..evidence.balance_count]) |closing| if (balance.asset == closing.asset) {
+                    found = true;
+                };
+                if (!found) return error.IncompleteReconciliationEvidence;
+            }
+        }
+        if (evidence.balance_count == 0 or evidence.balance_count > evidence.balances.len) return error.IncompleteReconciliationEvidence;
+        for (evidence.balances[0..evidence.balance_count], evidence.asset_versions[0..evidence.balance_count]) |balance, version| {
+            const definition = self.asset_registry.get(balance.asset) orelse return error.UnknownAssetDefinition;
+            if (version != definition.definition.version) return error.IncompleteReconciliationEvidence;
+            try self.checkAssetAmounts(balance, false);
+        }
+        const identity = std.math.cast(u64, result.identity) orelse return error.IdentityOutOfRange;
+        _ = try self.economic_projection.reconcileNative(identity, evidence.balances[0..evidence.balance_count], try canonicalPayloadDigest(record.event), facts_match);
+        if (self.economic_projection.reconciliation_break and self.operational_state.initialized) try self.applyOperationalGate(.{
+            .gate_identity = identity,
+            .target_identity = self.operational_state.target_identity,
+            .kind = .latched,
+            .reason = .reconciliation_break,
+            .open = false,
+        });
     }
 
     fn latchEconomicFault(self: *TradingShard, record: canonical.EventRecord, reason: canonical.EconomicFaultReason) !void {
@@ -1794,6 +1882,13 @@ pub const TradingShard = struct {
     fn semanticDuplicate(self: *TradingShard, record: canonical.EventRecord) !bool {
         const account = if (self.exchange_account_identity != 0) self.exchange_account_identity else self.canonical_account.exchange_account orelse record.envelope.exchange_account;
         return switch (record.event) {
+            .account_reconciliation_result => |result| blk: {
+                if (result.account_economics == null) break :blk false;
+                if (record.envelope.exchange_account != account or result.account_economics.?.exchange_account != account)
+                    return error.CanonicalScopeMismatch;
+                const identity = std.math.cast(u64, result.identity) orelse return error.IdentityOutOfRange;
+                break :blk try self.economic_projection.lookupCanonicalFact(identity, .account_snapshot, try canonicalPayloadDigest(record.event));
+            },
             .funding_settlement => |settlement| blk: {
                 if (record.envelope.exchange_account != account or settlement.exchange_account != account)
                     return error.CanonicalScopeMismatch;

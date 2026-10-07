@@ -28,6 +28,7 @@ const Entry = struct {
 fn privateFact(record: canonical.EventRecord) bool {
     if (std.mem.eql(u8, &record.envelope.raw_evidence.digest, &@as([32]u8, @splat(0)))) return false;
     return switch (record.event) {
+        .account_reconciliation_result => |result| result.account_economics != null,
         .execution_report, .fill, .funding_settlement, .economic_fault, .account_bootstrap_snapshot, .account_observed, .venue_account_configuration_snapshot, .order_reconciliation_result => true,
         else => false,
     };
@@ -168,9 +169,7 @@ pub const Sweep = struct {
     reconciliation_identity: u128 = 1,
     rest_page_size: usize = 3,
     last_sequence: u64 = 0,
-    reconciliation_started: bool = false,
-    previous_source: ?private.IngressSource = null,
-    after: ?u64 = null,
+    decoder: DecoderReplay = .{},
 
     pub fn consumer(self: *Sweep) raw.ReplayConsumer {
         return .{ .ptr = self, .consume_fn = consume };
@@ -185,30 +184,77 @@ pub const Sweep = struct {
         if (self.last_sequence == 0 or sequence > self.last_sequence) return error.PrivateRecoveryBoundaryUnavailable;
         try self.consumeRecord(sequence, record, bytes);
         if (sequence == self.last_sequence) {
-            try self.index.verifySweep();
-            if (!self.implementation.reconciler.?.readiness().reconciliation_ready and self.owner.shard.economic_fault_count == 0)
+            if (!self.decoder.complete(self.implementation, self.owner.shard.economic_fault_count != 0))
                 return error.IncompletePrivateRecovery;
+            try self.index.verifySweep();
         }
     }
 
     fn consumeRecord(self: *Sweep, sequence: u64, record: market.RawIngressRecord, bytes: []const u8) !void {
+        self.decoder.session = self.session;
+        self.decoder.reconciliation_identity = self.reconciliation_identity;
+        self.decoder.rest_page_size = self.rest_page_size;
+        const Drain = struct {
+            fn call(ptr: *anyopaque) !void {
+                try @as(*Sweep, @ptrCast(@alignCast(ptr))).drain();
+            }
+        };
+        try self.decoder.ingest(self.implementation, sequence, record, bytes, self, Drain.call);
+    }
+};
+
+/// One raw-history decoder for in-process Owner recovery and the existing
+/// Windows execution process. The caller drains through its own Owner seam.
+pub const DecoderReplay = struct {
+    session: u64 = 1,
+    reconciliation_identity: u128 = 1,
+    rest_page_size: usize = 3,
+    reconciliation_started: bool = false,
+    previous_source: ?private.IngressSource = null,
+    after: ?u64 = null,
+    query_target: [256]u8 = undefined,
+    query_target_len: usize = 0,
+    query_evidence: ?private.RawEvidenceRef = null,
+
+    pub fn complete(self: *const DecoderReplay, implementation: *const okx.OkxVenueAdapter, economic_fault: bool) bool {
+        return self.query_evidence == null and implementation.pending_economic_boundary == null and
+            (implementation.reconciler.?.readiness().reconciliation_ready or economic_fault);
+    }
+
+    pub fn ingest(self: *DecoderReplay, implementation: *okx.OkxVenueAdapter, sequence: u64, record: market.RawIngressRecord, bytes: []const u8, drain_context: *anyopaque, drain_fn: *const fn (*anyopaque) anyerror!void) !void {
         if (record.source_session != self.session) return error.PrivateReplaySessionMismatch;
         if (record.origin == live.transport_response_origin) return;
         const evidence: private.RawEvidenceRef = .{ .stream_sequence = sequence, .sha256 = record.sha256 };
         const times: private.Times = .{ .receive_time_utc_ns = record.receive_time_utc_ns, .monotonic_time_ns = record.monotonic_time_ns, .wall_time_utc_ns = record.wall_time_utc_ns };
         if (record.origin == 0) {
-            _ = try self.implementation.replayPrivateWs(times, evidence, bytes);
+            _ = try implementation.replayPrivateWs(times, evidence, bytes);
         } else {
             const source = std.enums.fromInt(private.IngressSource, record.origin - 1) orelse return error.InvalidPrivateReplaySource;
             if (source.isWebSocket()) return error.InvalidPrivateReplaySource;
-            if (!self.reconciliation_started or (source == .rest_account_config and self.implementation.reconciler.?.readiness().reconciliation_ready)) {
-                if (try self.implementation.adapter().trySend(.{ .account_reconciliation = .{ .identity = self.reconciliation_identity, .exchange_account = self.implementation.binding.?.account, .expected_session = self.session } }) != .accepted)
+            if (source == .economic_reconciliation_request) {
+                if (self.query_evidence != null) return error.IncompletePrivateRecovery;
+                try implementation.replayEconomicRequest(bytes);
+                return drain_fn(drain_context);
+            }
+            if (source == .rest_account_bill_query) {
+                if (self.query_evidence != null or bytes.len == 0 or bytes.len > self.query_target.len)
+                    return error.IncompletePrivateRecovery;
+                @memcpy(self.query_target[0..bytes.len], bytes);
+                self.query_target_len = bytes.len;
+                self.query_evidence = evidence;
+                return;
+            }
+            if (self.query_evidence) |query| {
+                if (source != .rest_account_bills or sequence != try std.math.add(u64, query.stream_sequence, 1)) return error.IncompletePrivateRecovery;
+            }
+            if (!self.reconciliation_started or (source == .rest_account_config and implementation.reconciler.?.readiness().reconciliation_ready)) {
+                if (try implementation.adapter().trySend(.{ .account_reconciliation = .{ .identity = self.reconciliation_identity, .exchange_account = implementation.binding.?.account, .expected_session = self.session } }) != .accepted)
                     return error.PrivateReplayReconciliationRejected;
                 self.reconciliation_started = true;
-                try self.drain();
+                try drain_fn(drain_context);
             }
             if (self.previous_source != source) self.after = null;
-            const parsed = std.json.parseFromSlice(std.json.Value, self.implementation.allocator, bytes, .{}) catch null;
+            const parsed = std.json.parseFromSlice(std.json.Value, implementation.allocator, bytes, .{}) catch null;
             defer if (parsed) |value| value.deinit();
             const row_count = if (parsed) |value| blk: {
                 if (value.value != .object) break :blk 0;
@@ -220,16 +266,24 @@ pub const Sweep = struct {
                 else => false,
             };
             if (self.rest_page_size == 0) return error.InvalidRestPage;
-            const final = !paginated or row_count < self.rest_page_size;
-            const batch = try self.implementation.replayPrivateRest(times, source, .{ .requested_after = self.after, .final = final }, evidence, bytes);
+            const economic_page = source == .rest_account_bills and implementation.pending_economic_through != null;
+            if (economic_page and self.query_evidence == null) return error.IncompletePrivateRecovery;
+            const final = if (economic_page) row_count < 8 else !paginated or row_count < self.rest_page_size;
+            const batch = try implementation.replayPrivateRest(times, source, .{
+                .requested_after = if (economic_page) implementation.economic_bill_after else self.after,
+                .final = final,
+                .request_target = if (economic_page) self.query_target[0..self.query_target_len] else null,
+                .query_evidence = self.query_evidence,
+            }, evidence, bytes);
+            self.query_evidence = null;
             self.previous_source = source;
             self.after = if (final or batch.rejection != null) null else batch.oldest_cursor orelse {
-                try self.drain();
+                try drain_fn(drain_context);
                 return error.MissingRestPageCursor;
             };
         }
         // Rejections are canonical economic_fault outputs too. Always publish
         // them before permitting the Owner's exhaustive sweep to finish.
-        try self.drain();
+        try drain_fn(drain_context);
     }
 };

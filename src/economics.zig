@@ -517,13 +517,65 @@ pub const Projection = struct {
     }
 
     pub fn lookupCanonicalFunding(self: *const Projection, identity: u64, digest_value: [32]u8) !bool {
+        return self.lookupCanonicalFact(identity, .funding, digest_value);
+    }
+
+    pub fn lookupCanonicalFact(self: *const Projection, identity: u64, kind: FactKind, digest_value: [32]u8) !bool {
         for (self.seen[0..self.seen_count]) |known| {
-            if (known.kind != .funding or known.identity != identity) continue;
+            if (known.kind != kind or known.identity != identity) continue;
             if (known.canonical_digest == null or !std.mem.eql(u8, &known.canonical_digest.?, &digest_value))
                 return error.ConflictingEconomicIdentity;
             return true;
         }
         return false;
+    }
+
+    pub fn retainCanonicalSnapshot(self: *Projection, identity: u64, digest_value: [32]u8) !bool {
+        if (try self.lookupCanonicalFact(identity, .account_snapshot, digest_value)) return false;
+        _ = try self.remember(identity, .account_snapshot, std.mem.readInt(u64, digest_value[0..8], .little));
+        self.seen[self.seen_count - 1].canonical_digest = digest_value;
+        return true;
+    }
+
+    pub fn reconcileNative(self: *Projection, identity: u64, balances: []const canonical.AssetAmount, digest_value: [32]u8, facts_match: bool) !bool {
+        if (try self.lookupCanonicalFact(identity, .account_snapshot, digest_value)) return false;
+        var candidate = self.*;
+        _ = try candidate.retainCanonicalSnapshot(identity, digest_value);
+        var differs = !facts_match;
+        var settlement_found = false;
+        for (balances, 0..) |balance, index| {
+            if (balance.asset == 0) return error.InvalidEconomicFact;
+            for (balances[0..index]) |prior| if (prior.asset == balance.asset) return error.InvalidEconomicFact;
+            const expected = if (balance.asset == candidate.settlement_asset) blk: {
+                settlement_found = true;
+                break :blk candidate.exchange.usdt_balance_atoms;
+            } else if (balance.asset == candidate.base_asset)
+                candidate.exchange.spot_asset_atoms
+            else if (candidate.exchange.nativeAsset(balance.asset)) |entry|
+                entry.balance_atoms
+            else
+                0;
+            if (balance.atoms != expected) differs = true;
+        }
+        if (!settlement_found) return error.IncompleteReconciliationEvidence;
+        for (candidate.exchange.native_assets[0..candidate.exchange.native_asset_count]) |entry| {
+            var found = false;
+            for (balances) |balance| if (balance.asset == entry.asset) {
+                found = true;
+            };
+            if (!found and entry.balance_atoms != 0) return error.IncompleteReconciliationEvidence;
+        }
+        if (candidate.exchange.spot_asset_atoms != 0) {
+            var found = false;
+            for (balances) |balance| if (balance.asset == candidate.base_asset) {
+                found = true;
+            };
+            if (!found) return error.IncompleteReconciliationEvidence;
+        }
+        if (differs) try candidate.openBreak(identity);
+        try candidate.assertClosed();
+        self.* = candidate;
+        return true;
     }
 
     fn applyFunding(self: *Projection, funding: FundingSettlement) !void {

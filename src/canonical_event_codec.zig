@@ -8,7 +8,7 @@ const std = @import("std");
 const canonical = @import("canonical_event.zig");
 const value_codec = @import("snapshot_codec.zig");
 
-pub const encoding_version: u16 = 9;
+pub const encoding_version: u16 = 10;
 pub const max_encoded_len: usize = 4096;
 
 const BootstrapHeader = struct {
@@ -266,6 +266,40 @@ test "funding codec retains wide signed native amount bill time and identity und
     var storage: [max_encoded_len]u8 = undefined;
     const encoded = try encode(&storage, record);
     try std.testing.expectEqualDeep(record, try decode(encoded));
+    std.mem.writeInt(u16, storage[0..2], encoding_version - 1, .little);
+    try std.testing.expectError(error.UnsupportedCanonicalEncoding, decode(storage[0..encoded.len]));
+}
+
+test "native economic proof codec retains bounded full source chain and wide cash under current schema" {
+    var evidence: canonical.AccountEconomicEvidence = .{
+        .exchange_account = 2,
+        .scope = .spot_and_isolated_linear_usdt,
+        .from_utc_ns = 1800000000002000000,
+        .through_utc_ns = 1800000000200000000,
+        .source = .{ .stream = 3, .sequence = 99, .digest = @splat(7) },
+        .before_source = .{ .stream = 3, .sequence = 10, .digest = @splat(8) },
+        .balance_count = canonical.max_account_facts,
+        .before_balance_count = canonical.max_account_facts,
+        .query_count = 4,
+        .covered_economic_fact_count = 16,
+        .bills_complete = true,
+        .bill_chain_digest = @splat(9),
+    };
+    for (&evidence.balances, &evidence.before_balances, &evidence.asset_versions, 0..) |*after, *before, *version, i| {
+        after.* = .{ .asset = i + 1, .atoms = -10_000_000_000_000_000_001 };
+        before.* = .{ .asset = i + 1, .atoms = 10_000_000_000_000_000_001 };
+        version.* = 50 + i;
+    }
+    for (&evidence.query_sources, 0..) |*source, i| source.* = .{ .stream = 3, .sequence = 11 + i, .digest = @splat(@intCast(i + 1)) };
+    for (&evidence.facts, 0..) |*fact, i| fact.* = .{ .identity = 100 + i, .kind = if (i % 2 == 0) .fill else .funding, .digest = @splat(@intCast(i + 20)), .fee_confirmed = i % 3 == 0 };
+    const record: canonical.EventRecord = .{
+        .envelope = testEnvelope(.account_reconciliation_result),
+        .event = .{ .account_reconciliation_result = .{ .identity = 40, .complete = true, .status = .found_terminal, .account_economics = evidence } },
+    };
+    var storage: [max_encoded_len]u8 = undefined;
+    const encoded = try encode(&storage, record);
+    try std.testing.expectEqualDeep(record, try decode(encoded));
+    try std.testing.expectError(error.InvalidCanonicalEvent, decode(encoded[0 .. encoded.len - 1]));
     std.mem.writeInt(u16, storage[0..2], encoding_version - 1, .little);
     try std.testing.expectError(error.UnsupportedCanonicalEncoding, decode(storage[0..encoded.len]));
 }

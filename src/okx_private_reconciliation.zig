@@ -180,6 +180,19 @@ pub const EventPayload = union(enum) {
     exchange_margin_snapshot: ExchangeMarginSnapshot,
     venue_account_configuration_snapshot: VenueAccountConfigurationSnapshot,
     funding_settlement: FundingSettlement,
+    economic_bill_checkpoint: EconomicBillCheckpoint,
+};
+pub const EconomicBillCheckpoint = struct {
+    bill_id: u64,
+    asset: AssetCode,
+    balance: Decimal,
+    change: Decimal,
+    fee: Decimal,
+    related_identity: [32]u8,
+    funding: bool,
+    instrument: Instrument,
+    time_utc_ns: u64,
+    funding_amount: ?Decimal = null,
 };
 
 pub const FundingSettlement = struct {
@@ -211,6 +224,8 @@ pub const IngressSource = enum(u8) {
     rest_fills_history_spot,
     rest_fills_history_swap,
     rest_account_bills,
+    rest_account_bill_query,
+    economic_reconciliation_request,
 
     pub fn isWebSocket(self: IngressSource) bool {
         return switch (self) {
@@ -223,6 +238,12 @@ pub const IngressSource = enum(u8) {
 pub const Page = struct {
     requested_after: ?u64 = null,
     final: bool,
+    // Exact request target supplied by the owning HTTP transport, not an
+    // Adapter reconstruction of account reconciliation request parameters.
+    request_target: ?[]const u8 = null,
+    economic_from_utc_ns: ?u64 = null,
+    economic_through_utc_ns: ?u64 = null,
+    query_evidence: ?RawEvidenceRef = null,
 };
 
 pub const RejectReason = enum(u8) {
@@ -251,6 +272,12 @@ pub const IngressBatch = struct {
     rejection: ?RejectReason = null,
     buffered: bool = false,
     oldest_cursor: ?u64 = null,
+    query_evidence: ?RawEvidenceRef = null,
+    economic_from_utc_ns: ?u64 = null,
+    economic_through_utc_ns: ?u64 = null,
+    bill_cursors: [max_page_rows]u64 = @splat(0),
+    bill_times: [max_page_rows]u64 = @splat(0),
+    bill_row_count: u8 = 0,
 
     pub fn eventSlice(self: *const IngressBatch) []const PrivateEvent {
         return self.events[0..self.event_count];
@@ -455,7 +482,12 @@ pub const Reconciler = struct {
         page: ?Page,
         raw: []const u8,
     ) (RawSinkError || error{ OutOfMemory, FrameTooLarge })!IngressBatch {
+        const query = if (source == .rest_account_bills) if (page) |value| if (value.request_target) |target|
+            (try self.commitRaw(raw_sink, source_session, times, target, .rest_account_bill_query)).raw_evidence
+        else
+            null else null else null;
         var batch = try self.commitRaw(raw_sink, source_session, times, raw, source);
+        batch.query_evidence = query;
         return self.ingestCommitted(gpa, source_session, times, source, page, raw, &batch);
     }
 
@@ -499,7 +531,7 @@ pub const Reconciler = struct {
         evidence: RawEvidenceRef,
         raw: []const u8,
     ) error{OutOfMemory}!IngressBatch {
-        var batch: IngressBatch = .{ .raw_evidence = evidence };
+        var batch: IngressBatch = .{ .raw_evidence = evidence, .query_evidence = page.query_evidence };
         return self.ingestCommitted(gpa, source_session, times, source, page, raw, &batch);
     }
 
@@ -544,7 +576,7 @@ pub const Reconciler = struct {
         return self.ingestParsed(parsed.value, times, source, batch);
     }
 
-    fn commitRaw(
+    pub fn commitRaw(
         self: *Reconciler,
         raw_sink: RawSink,
         source_session: u64,
@@ -592,7 +624,7 @@ pub const Reconciler = struct {
                 batch.rejection = .invalid_field;
                 return batch.*;
             }
-        } else if ((self.stage != .reconciling and !(source == .rest_account_bills and self.stage == .ready)) or page == null) {
+        } else if ((self.stage != .reconciling and !((source == .rest_account_bills or source == .rest_balance) and self.stage == .ready)) or page == null) {
             batch.rejection = .invalid_field;
             return batch.*;
         }
@@ -601,10 +633,14 @@ pub const Reconciler = struct {
             return self.reject(batch, .malformed_json);
         };
         defer parsed.deinit();
+        if (page) |value| {
+            batch.economic_from_utc_ns = value.economic_from_utc_ns;
+            batch.economic_through_utc_ns = value.economic_through_utc_ns;
+        }
         self.decode(parsed.value, source, times, batch.raw_evidence, batch) catch |err| {
             return self.reject(batch, mapDecodeError(err));
         };
-        if (!source.isWebSocket() and source != .rest_account_bills) {
+        if (!source.isWebSocket() and source != .rest_account_bills and !(source == .rest_balance and self.stage == .ready)) {
             self.recordPage(source, page.?, batch.raw_evidence.sha256, batch) catch |err| {
                 return self.reject(batch, mapDecodeError(err));
             };
@@ -720,8 +756,49 @@ pub const Reconciler = struct {
             ),
             .rest_account_config => try self.decodeConfig(data, times, evidence, batch),
             .rest_leverage => try self.decodeLeverage(data, times, evidence, batch),
-            .rest_account_bills => for (data.items) |item| try self.decodeFundingBill(try asObject(item), times, evidence, batch),
+            .rest_account_bills => {
+                if (data.items.len > max_page_rows) return error.PageTooLarge;
+                batch.bill_row_count = @intCast(data.items.len);
+                for (data.items, 0..) |item, row_index| {
+                    const row = try asObject(item);
+                    batch.bill_cursors[row_index] = try std.fmt.parseInt(u64, try stringField(row, "billId"), 10);
+                    batch.bill_times[row_index] = try millisField(row, "ts");
+                    if (batch.bill_cursors[row_index] == 0) return error.InvalidField;
+                    if (batch.economic_from_utc_ns) |from| {
+                        const through = batch.economic_through_utc_ns orelse return error.InvalidField;
+                        if (batch.bill_times[row_index] <= from or batch.bill_times[row_index] > through) continue;
+                    }
+                    if (std.mem.eql(u8, try stringField(row, "type"), "8")) try self.decodeFundingBill(row, times, evidence, batch) else if (!std.mem.eql(u8, try stringField(row, "type"), "2")) return error.UnsupportedValue;
+                    if (row.get("bal") != null) try self.decodeBillCheckpoint(row, times, evidence, batch);
+                }
+            },
+            .rest_account_bill_query, .economic_reconciliation_request => return error.UnsupportedValue,
         }
+    }
+
+    fn decodeBillCheckpoint(_: *Reconciler, row: std.json.ObjectMap, times: Times, evidence: RawEvidenceRef, batch: *IngressBatch) !void {
+        const funding = std.mem.eql(u8, try stringField(row, "type"), "8");
+        const instrument = try parseInstrument(try stringField(row, "instId"));
+        // The initial cash proof excludes position-level cash and liabilities.
+        // These need their own native product projection, never addition to cashBal.
+        if ((try decimalField(row, "posBalChg")).coefficient != 0 or
+            (try decimalField(row, "posBal")).coefficient != 0) return error.UnsupportedValue;
+        const bill = try std.fmt.parseInt(u64, try stringField(row, "billId"), 10);
+        if (bill == 0) return error.InvalidField;
+        const checkpoint: EconomicBillCheckpoint = .{
+            .bill_id = bill,
+            .asset = try AssetCode.init(try stringField(row, "ccy")),
+            .balance = try decimalField(row, "bal"),
+            .change = try decimalField(row, "balChg"),
+            .fee = try decimalField(row, "fee"),
+            .related_identity = if (funding) billIdentity(@enumFromInt(bill)) else fillIdentity(instrument, try idField(VenueTradeId, row, "tradeId")),
+            .funding = funding,
+            .instrument = instrument,
+            .time_utc_ns = try millisField(row, "ts"),
+            .funding_amount = if (funding) try decimalField(row, "pnl") else null,
+        };
+        batch.oldest_cursor = minCursor(batch.oldest_cursor, bill);
+        try batch.append(makeEvent(times, checkpoint.time_utc_ns, evidence, checkpoint.related_identity, .{ .economic_bill_checkpoint = checkpoint }));
     }
 
     fn decodeFundingBill(self: *Reconciler, row: std.json.ObjectMap, times: Times, evidence: RawEvidenceRef, batch: *IngressBatch) !void {
