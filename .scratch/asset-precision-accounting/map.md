@@ -51,9 +51,11 @@ Status: open
 
 ## Frontier
 
-- [09：贯通资金结算及成本、PnL 的精度合同](issues/09-close-native-settlements-and-pnl.md) — 02–08 离线切片已完成；下一可实施切片。
+- [10：用独立 Venue 事实核对逐 Asset 经济账](issues/10-reconcile-independent-venue-economics.md) — 02–09 离线切片已完成；当前实施中。
 
 ## Decisions so far
+
+- 2026-10-07：09完成实际OKX资金费原币、完整身份、真实opening时点防重计、未知归属Suspense、gross累计上限及可信Core成本/PnL/强制费用罚金合同；联合Debug/ReleaseSafe各13/13、economics各14/14、协调器ReleaseSafe97/97、实际两种构建离线轨迹恢复一致，两轴最终无剩余重大问题。Frontier推进10，完整回归/封存仍待14，外部组合资金费分配与在线资格未宣称。
 
 - 2026-10-07：07/08实现提交72726cd2；原币第三资产费用、Treasury ownership、未估值报告、账户USD单位分离、连续流与持久重复/冲突、发送前原币证明和配置收紧预检完成。联合定向各35/35、最终健康/连续性各8/8及范围/Gateway定向通过；两轴最终无剩余重大问题。Frontier推进09，全套检查与发布封存待14，新在线/生产资格未运行。
 

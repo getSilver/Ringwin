@@ -23,7 +23,7 @@ const place_fee_atoms: i128 = 400_000;
 const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
 pub const acceptance_schema_version: u16 = production_contract.acceptance_schema_version;
-const expected_shared_summary = "9bbfb307f4f286c5d389af4f0795325d0c0784d9131398dc466687104e14aee4";
+const expected_shared_summary = "3beddffb6cd1c61daea2d1aa3f05e0226582bdfa4e91fe4a2f0ab246a88f64f2";
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
     return trading.applyStable(shard, stable_journal, .{ .core = input });

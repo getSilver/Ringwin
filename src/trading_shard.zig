@@ -237,6 +237,8 @@ pub const TradingShard = struct {
     exchange_balance_observed: bool = false,
     exchange_positions_observed: bool = false,
     opening_balance_observed: bool = false,
+    account_balance_utc_ns: u64 = 0,
+    economic_baseline_utc_ns: u64 = 0,
     portfolio_funded: bool = false,
     oms: oms_module.Oms = .{},
     economic_projection: economics_module.Projection = .{},
@@ -311,7 +313,7 @@ pub const TradingShard = struct {
                 });
                 try candidate.trace.append(.canonical_order_reconciliation, event.envelope.identity.sequence);
                 self.* = candidate;
-            } else if (event.event == .fill and event.envelope.exchange_account == self.exchange_account_identity) {
+            } else if ((event.event == .fill or event.event == .funding_settlement) and event.envelope.exchange_account == self.exchange_account_identity) {
                 candidate = self.*;
                 candidate.oms.begin();
                 try candidate.latchEconomicFault(event, switch (err) {
@@ -997,7 +999,7 @@ pub const TradingShard = struct {
         if (try std.math.add(
             i128,
             self.portfolioCash(),
-            self.treasuryCash(),
+            try std.math.add(i128, self.treasuryCash(), self.economic_projection.suspense_usdt_atoms),
         ) != self.exchangeCash())
             return error.CashLayerMismatch;
         if (self.portfolioFee() != self.exchangeFee() or
@@ -1067,6 +1069,16 @@ pub const TradingShard = struct {
             }
             if (traded_atoms > base.definition.max_cumulative_atoms) return error.AssetAmountOutOfRange;
         }
+        var settled_funding_atoms: i128 = 0;
+        for (self.economic_projection.ledger[0..self.economic_projection.ledger_count]) |transaction| {
+            if (transaction.kind != .funding or transaction.layer != .exchange) continue;
+            for (transaction.postings[0..transaction.posting_count]) |posting| {
+                if (posting.account != .cash) continue;
+                const absolute = if (posting.amount < 0) try std.math.sub(i128, 0, posting.amount) else posting.amount;
+                settled_funding_atoms = try std.math.add(i128, settled_funding_atoms, absolute);
+            }
+        }
+        if (settled_funding_atoms > quote.definition.max_cumulative_atoms) return error.AssetAmountOutOfRange;
         for ([_]i128{ self.economic_projection.treasury_usdt_atoms, self.economic_projection.suspense_usdt_atoms }) |amount|
             try self.asset_registry.checkAmount(.{ .asset = quote.definition.asset, .atoms = amount }, false);
         for (self.economic_projection.treasury_native_assets[0..self.economic_projection.treasury_native_asset_count]) |amount|
@@ -1407,6 +1419,35 @@ pub const TradingShard = struct {
                     return error.CanonicalScopeMismatch;
                 try self.latchEconomicFault(record, fault.reason);
             },
+            .funding_settlement => |settlement| {
+                if (record.envelope.exchange_account != self.exchange_account_identity or
+                    settlement.exchange_account != self.exchange_account_identity) return error.CanonicalScopeMismatch;
+                const configured = self.instrumentEntry(settlement.instrument) orelse return error.UnknownOmsInstrument;
+                if (record.envelope.scope != .account or record.envelope.venue != configured.venue or
+                    record.envelope.instrument != settlement.instrument or record.envelope.asset != settlement.amount.asset)
+                    return error.CanonicalScopeMismatch;
+                if (configured.product != .isolated_linear_usdt or
+                    settlement.rules_version != configured.rules.version or
+                    settlement.amount.asset != configured.rules.settlement_asset or
+                    settlement.venue_bill_id == 0 or settlement.settlement_time_utc_ns == 0) return error.InvalidEconomicFact;
+                if (self.economic_baseline_utc_ns == 0 or settlement.settlement_time_utc_ns <= self.economic_baseline_utc_ns)
+                    return error.UnresolvedSettlementBoundary;
+                try self.checkAssetAmounts(settlement.amount, true);
+                const identity = std.math.cast(u64, settlement.identity) orelse return error.IdentityOutOfRange;
+                // A historical bill does not prove portfolio holdings at its settlement time.
+                const changed = try self.applyEconomicProjection(.{ .funding_settlement = .{ .identity = identity, .amount = settlement.amount, .canonical_digest = try canonicalPayloadDigest(record.event) } });
+                if (changed) {
+                    try self.recalculateRisk(false);
+                    if (self.economic_projection.reconciliation_break and self.operational_state.initialized) try self.applyOperationalGate(.{
+                        .gate_identity = identity,
+                        .target_identity = self.operational_state.target_identity,
+                        .kind = .latched,
+                        .reason = .reconciliation_break,
+                        .open = false,
+                    });
+                    try self.trace.append(.funding_settlement, identity);
+                }
+            },
             .order_dispatch_result => |result| {
                 const command_id = std.math.cast(u64, result.command) orelse return error.IdentityOutOfRange;
                 var batch: oms_module.DispatchBatch = .{ .count = 1 };
@@ -1542,6 +1583,7 @@ pub const TradingShard = struct {
                     (self.exchange_account_identity != 0 and bootstrap_snapshot.exchange_account != self.exchange_account_identity))
                     return error.CanonicalScopeMismatch;
                 try self.canonical_account.apply(record.event);
+                self.account_balance_utc_ns = record.envelope.times.source_utc_ns orelse 0;
                 try self.trace.append(.canonical_account_bootstrap, fact_identity);
             },
             .account_observed => |observation| {
@@ -1550,6 +1592,8 @@ pub const TradingShard = struct {
                     (self.exchange_account_identity != 0 and observation.exchange_account != self.exchange_account_identity))
                     return error.CanonicalScopeMismatch;
                 try self.canonical_account.apply(record.event);
+                if (observation.value == .balance and observation.value.balance.asset == self.economic_projection.settlement_asset)
+                    self.account_balance_utc_ns = record.envelope.times.source_utc_ns orelse 0;
                 try self.trace.append(.canonical_account_observed, fact_identity);
             },
             .venue_account_configuration_snapshot => |configuration| {
@@ -1750,6 +1794,12 @@ pub const TradingShard = struct {
     fn semanticDuplicate(self: *TradingShard, record: canonical.EventRecord) !bool {
         const account = if (self.exchange_account_identity != 0) self.exchange_account_identity else self.canonical_account.exchange_account orelse record.envelope.exchange_account;
         return switch (record.event) {
+            .funding_settlement => |settlement| blk: {
+                if (record.envelope.exchange_account != account or settlement.exchange_account != account)
+                    return error.CanonicalScopeMismatch;
+                const identity = std.math.cast(u64, settlement.identity) orelse return error.IdentityOutOfRange;
+                break :blk try self.economic_projection.lookupCanonicalFunding(identity, try canonicalPayloadDigest(record.event));
+            },
             .account_observed => |observation| blk: {
                 if (record.envelope.exchange_account != account or
                     observation.exchange_account != account) return error.CanonicalScopeMismatch;
@@ -2360,6 +2410,7 @@ pub const TradingShard = struct {
                     .exchange_debits_atoms = balance.cash_atoms,
                     .exchange_credits_atoms = balance.cash_atoms,
                 };
+                self.economic_baseline_utc_ns = if (self.canonical_account.bootstrap != null) self.account_balance_utc_ns else if (input.time_presence.source) input.source_time else 0;
                 self.opening_balance_observed = true;
                 try self.trace.append(.opening_balance, input.identity);
             },
@@ -2686,8 +2737,18 @@ pub const TradingShard = struct {
                 }
             },
             .funding_settlement => |funding| {
-                const changed = try self.applyEconomicProjection(.{ .funding_settlement = .{ .identity = funding.settlement_id, .amount = .{ .asset = self.economic_projection.settlement_asset, .atoms = funding.amount_atoms } } });
-                if (changed) try self.trace.append(.funding_settlement, funding.settlement_id);
+                const changed = try self.applyEconomicProjection(.{ .funding_settlement = .{ .identity = funding.settlement_id, .portfolio_ownership_proven = true, .amount = .{ .asset = self.economic_projection.settlement_asset, .atoms = funding.amount_atoms } } });
+                if (changed) {
+                    try self.recalculateRisk(false);
+                    if (self.economic_projection.reconciliation_break and self.operational_state.initialized) try self.applyOperationalGate(.{
+                        .gate_identity = funding.settlement_id,
+                        .target_identity = self.operational_state.target_identity,
+                        .kind = .latched,
+                        .reason = .reconciliation_break,
+                        .open = false,
+                    });
+                    try self.trace.append(.funding_settlement, funding.settlement_id);
+                }
             },
             .venue_forced_execution => |forced| {
                 const instrument_config = self.singleProductEntry(.isolated_linear_usdt) orelse return error.UnknownOmsInstrument;
@@ -3050,7 +3111,7 @@ pub fn applyStable(
         if (input == .core and input.core.payload == .oms_intent_group and
             (shard.oms.groupIdentityStatus(input.core.payload.oms_intent_group) catch .fresh) == .duplicate)
             return null;
-        if (input == .core and input.core.payload == .venue_forced_execution) return null;
+        if (input == .core and (input.core.payload == .venue_forced_execution or input.core.payload == .funding_settlement)) return null;
         return error.InputProducedNoFact;
     }
     appendStableFactGroup(decision_journal, input, result.facts) catch |err| {
@@ -3181,6 +3242,8 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     digestBool(&hasher, shard.exchange_balance_observed);
     digestBool(&hasher, shard.exchange_positions_observed);
     digestBool(&hasher, shard.opening_balance_observed);
+    digestInt(&hasher, u64, shard.account_balance_utc_ns);
+    digestInt(&hasher, u64, shard.economic_baseline_utc_ns);
     digestBool(&hasher, shard.virtual_portfolio_active);
     digestInt(&hasher, u128, shard.portfolio_identity);
     digestBool(&hasher, shard.portfolio_funded);
@@ -3527,6 +3590,8 @@ fn digestEconomicProjection(hasher: *Sha256, projection: economics_module.Projec
 fn semanticStateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     var hasher = Sha256.init(.{});
     hasher.update("SemanticAuthorityDigestV1\x00");
+    digestInt(&hasher, u64, shard.economic_baseline_utc_ns);
+    digestInt(&hasher, u64, shard.account_balance_utc_ns);
     digestAssetRegistry(&hasher, shard, false);
     digestInt(&hasher, u8, shard.oms.order_count);
     for (shard.oms.orders[0..shard.oms.order_count]) |order| {

@@ -8,7 +8,7 @@ const std = @import("std");
 const canonical = @import("canonical_event.zig");
 const value_codec = @import("snapshot_codec.zig");
 
-pub const encoding_version: u16 = 8;
+pub const encoding_version: u16 = 9;
 pub const max_encoded_len: usize = 4096;
 
 const BootstrapHeader = struct {
@@ -134,6 +134,7 @@ fn encodeEvent(cursor: *Cursor, event: canonical.Payload) !void {
         .venue_account_configuration_snapshot => |value| try putValue(cursor, value),
         .order_reconciliation_result => |value| try putValue(cursor, value),
         .account_reconciliation_result => |value| try putValue(cursor, value),
+        .funding_settlement => |value| try putValue(cursor, value),
     }
 }
 
@@ -179,6 +180,7 @@ pub fn decode(encoded: []const u8) !canonical.EventRecord {
         .venue_account_configuration_snapshot => .{ .venue_account_configuration_snapshot = try takeValue(&reader, canonical.VenueAccountConfigurationSnapshot) },
         .order_reconciliation_result => .{ .order_reconciliation_result = try takeValue(&reader, canonical.ReconciliationResult) },
         .account_reconciliation_result => .{ .account_reconciliation_result = try takeValue(&reader, canonical.ReconciliationResult) },
+        .funding_settlement => .{ .funding_settlement = try takeValue(&reader, canonical.FundingSettlement) },
     };
     if (reader.position != encoded.len or envelope.schema_version != canonical.schema_version or
         envelope.event_type != @intFromEnum(canonical.eventType(event)))
@@ -249,4 +251,21 @@ test "native and USD margin observations preserve independent exact units" {
     try std.testing.expectEqualDeep(observation, decoded);
     try std.testing.expectEqual(@as(i128, 9223372036854775808), decoded.value.margin.value.amount.?.atoms);
     try std.testing.expectEqual(@as(u8, 20), decoded.value.margin.value.usd_valuation.?.initial_margin.?.scale);
+}
+
+test "funding codec retains wide signed native amount bill time and identity under current schema" {
+    const record: canonical.EventRecord = .{ .envelope = testEnvelope(.funding_settlement), .event = .{ .funding_settlement = .{
+        .identity = 11,
+        .exchange_account = 2,
+        .instrument = 3,
+        .rules_version = 4,
+        .venue_bill_id = 9,
+        .amount = .{ .asset = 5, .atoms = -10_000_000_000_000_000_001 },
+        .settlement_time_utc_ns = 1800000000200000000,
+    } } };
+    var storage: [max_encoded_len]u8 = undefined;
+    const encoded = try encode(&storage, record);
+    try std.testing.expectEqualDeep(record, try decode(encoded));
+    std.mem.writeInt(u16, storage[0..2], encoding_version - 1, .little);
+    try std.testing.expectError(error.UnsupportedCanonicalEncoding, decode(storage[0..encoded.len]));
 }

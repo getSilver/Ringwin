@@ -1714,3 +1714,152 @@ test "OKX native third asset ledger capacity preserves all preceding economics a
 test "OKX native account balances cash held and each liability retain independent exact asset units" {
     try checkNativeBaseFees(false, .native_liabilities);
 }
+
+fn checkNativeFundingBills(mode: enum { normal, unknown, inexact, range, conflict, historical, cumulative }) !void {
+    const allocator = std.heap.page_allocator;
+    const memory = try allocator.create(durable.MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .init();
+    const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
+    const owner = try allocator.create(demo.Owner);
+    defer allocator.destroy(owner);
+    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    const definitions = @import("asset_registry.zig").testDefinitions(12, 9);
+    const policy: demo.Policy = .{ .schema = 3, .startup = .virgin, .asset_definitions = &definitions, .lot_size = .{ .coefficient = 1, .scale = 7 }, .exchange_account = 2, .portfolio_identity = 1, .strategy_identity = 40, .activation_identity = 50, .config_version = 1, .portfolio_allocation_atoms = 90_000_000_000_000, .risk_limit_atoms = 80_000_000_000_000, .price_tick_atoms = 250_000_000_000, .native_settlement_atoms = true, .decision_stream_id = 91, .dispatch_stream_id = 92, .decision_domain = 1, .node_identity = 1 };
+    try policy.activateAssetsForOfflineValidation(owner);
+    _ = try owner.apply(.{ .core = .{ .identity = 100, .payload = .{ .instrument_rules_activated = .{
+        .version = 1,
+        .instrument_identity = okx.btc_usdt_swap,
+        .quantity_denominator = 100,
+        .reservation_model = .leveraged,
+        .product = .isolated_linear_usdt,
+        .venue = 1,
+        .settlement_asset = okx.usdt,
+    } } } });
+    _ = try owner.apply(.{ .core = .{ .identity = 101, .payload = .{ .margin_rules_activated = .{
+        .version = 1,
+        .instrument = okx.btc_usdt_swap,
+        .price_tick_atoms = 100_000_000_000,
+        .native_settlement_atoms = true,
+    } } } });
+    var raw = try raw_ingress.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = 1 });
+    var transport = Transport{};
+    var chain: live.Chain = .{ .mode = .demo_live, .qualification = qualification(), .raw_sink = raw.interface(), .transport = transport.interface() };
+    var clock = Clock{};
+    var reconciler: private.Reconciler = .{};
+    var specification = rules();
+    specification.spot.lot_size = policy.lot_size;
+    specification.spot.tick_size = .{ .coefficient = 25, .scale = 2 };
+    var implementation = okx.OkxVenueAdapter.init(allocator, &chain, clock.interface(), profile(), specification);
+    implementation.attachPrivateReconciler(&reconciler);
+    const adapter = implementation.adapter();
+    try adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = owner.shard.activatedAssets(), .instrument_definitions = owner.shard.instrument_registry, .native_settlement_atoms = true });
+    try bootstrapNativePrivateAccount(owner, &implementation, "100");
+    var authority = failover.authorityForTesting();
+    var lease = try authority.acquire(.{ .exchange_account = 2, .decision_domain = 1 }, 1, 1);
+    var guard: failover.GatewayLeaseGuard = .{ .authority = &authority, .lease = &lease };
+    try policy.initialize(owner, 50_000_000_000_000_000, &guard, 1, 1);
+    if (mode == .range or mode == .cumulative) {
+        var narrower = definitions[0];
+        narrower.version = 2;
+        narrower.max_single_atoms = if (mode == .range) 4_000_000_000 else 100_000_000_000_000;
+        if (mode == .cumulative) {
+            narrower.max_balance_atoms = 100_000_000_000_000;
+            narrower.max_cumulative_atoms = 100_000_000_000_000;
+        }
+        _ = try owner.apply(.{ .core = .{ .identity = 102, .payload = .{ .asset_definition_activated = narrower } } });
+    }
+    const frames = [_][]const u8{
+        \\{"code":"0","data":[{"billId":"9001","type":"8","subType":"173","instType":"SWAP","instId":"BTC-USDT-SWAP","ccy":"USDT","pnl":"-0.004198632165","fee":"0","balChg":"0","posBalChg":"-0.004198632165","px":"50000","mgnMode":"","ts":"1800000000200"}]}
+        ,
+        \\{"code":"0","data":[{"billId":"9002","type":"8","subType":"174","instType":"SWAP","instId":"BTC-USDT-SWAP","ccy":"USDT","pnl":"0.00423723852","fee":"0","balChg":"0","posBalChg":"0.00423723852","px":"50000","mgnMode":"","ts":"1800000000201"}]}
+    };
+    const totals = if (mode == .cumulative) [_]i128{ -60_000_000_000_000, 0 } else [_]i128{ -4_198_632_165, 38_606_355 };
+    for (frames, 0..) |original_frame, index| {
+        const frame = if (mode == .unknown)
+            \\{"code":"0","data":[{"billId":"9001","type":"8","subType":"173","instType":"SWAP","instId":"BTC-USDT-SWAP","ccy":"UNREGISTERED","pnl":"-0.004198632165","fee":"0","ts":"1800000000200"}]}
+        else if (mode == .inexact)
+            \\{"code":"0","data":[{"billId":"9001","type":"8","subType":"173","instType":"SWAP","instId":"BTC-USDT-SWAP","ccy":"USDT","pnl":"-0.0000000000001","fee":"0","ts":"1800000000200"}]}
+        else if (mode == .historical)
+            \\{"code":"0","data":[{"billId":"9001","type":"8","subType":"173","instType":"SWAP","instId":"BTC-USDT-SWAP","ccy":"USDT","pnl":"-0.004198632165","fee":"0","ts":"1800000000001"}]}
+        else if (mode == .cumulative and index == 0)
+            \\{"code":"0","data":[{"billId":"9001","type":"8","subType":"173","instType":"SWAP","instId":"BTC-USDT-SWAP","ccy":"USDT","pnl":"-60","fee":"0","ts":"1800000000200"}]}
+        else if (mode == .cumulative)
+            \\{"code":"0","data":[{"billId":"9002","type":"8","subType":"174","instType":"SWAP","instId":"BTC-USDT-SWAP","ccy":"USDT","pnl":"60","fee":"0","ts":"1800000000201"}]}
+        else
+            original_frame;
+        try std.testing.expect((try implementation.ingestPrivateRest(private_times, .rest_account_bills, .{ .final = true }, frame)).rejection == null);
+        const output = (try adapter.tryDrain()).?;
+        const before = owner.shard.economicSummary();
+        try std.testing.expectEqual(@as(u8, 1), output.len);
+        if (mode == .unknown or mode == .inexact) {
+            try std.testing.expect(output.events[0].event == .economic_fault);
+            try std.testing.expectEqual(if (mode == .unknown) canonical.EconomicFaultReason.unknown_asset else .inexact_amount, output.events[0].event.economic_fault.reason);
+            try owner.applyAdapterBatch(output);
+            try std.testing.expectEqualDeep(before, owner.shard.economicSummary());
+            try std.testing.expect(owner.shard.oms.recovery_only and owner.shard.economic_fault_count != 0);
+            break;
+        }
+        if (mode == .range or mode == .historical or (mode == .cumulative and index == 1)) {
+            try std.testing.expectError(if (mode == .historical) error.UnresolvedSettlementBoundary else error.AssetAmountOutOfRange, owner.applyAdapterBatch(output));
+            try std.testing.expectEqualDeep(before, owner.shard.economicSummary());
+            try std.testing.expect(owner.shard.oms.recovery_only);
+            break;
+        }
+        try std.testing.expect(output.events[0].event == .funding_settlement);
+        try owner.applyAdapterBatch(output);
+        const economic = owner.shard.economicSummary();
+        try std.testing.expectEqual(@as(i128, 100_000_000_000_000) + totals[index], economic.exchange.usdt_balance_atoms);
+        try std.testing.expectEqual(@as(i128, 90_000_000_000_000), economic.portfolio.usdt_balance_atoms);
+        try std.testing.expectEqual(totals[index], economic.suspense_usdt_atoms);
+        try std.testing.expectEqual(totals[index], economic.exchange.funding_atoms);
+        try std.testing.expectEqual(@as(i128, 0), economic.portfolio.funding_atoms);
+        try std.testing.expectEqual(@as(i128, 0), economic.portfolio.realized_pnl_atoms);
+        try std.testing.expect(economic.reconciliation_break and !owner.shard.operational_state.effectiveTradingAuthority());
+        const once = owner.shard.canonicalStateDigest();
+        try owner.applyAdapterBatch(output);
+        try std.testing.expectEqualSlices(u8, &once, &owner.shard.canonicalStateDigest());
+        try std.testing.expect((try implementation.ingestPrivateRest(private_times, .rest_account_bills, .{ .final = true }, frame)).rejection == null);
+        try std.testing.expect((try adapter.tryDrain()) == null);
+        try owner.shard.assertClosures();
+        if (mode == .conflict) {
+            var changed = output;
+            changed.events[0].event.funding_settlement.venue_bill_id += 1;
+            changed.events[0].envelope.identity.sequence += 1;
+            try std.testing.expectError(error.ConflictingEconomicIdentity, owner.applyAdapterBatch(changed));
+            try std.testing.expectEqualDeep(economic, owner.shard.economicSummary());
+            try std.testing.expect(owner.shard.oms.recovery_only);
+            break;
+        }
+    }
+    const recovered = try allocator.create(demo.Owner);
+    defer allocator.destroy(recovered);
+    recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
+    var bytes: [durable.max_snapshot_bytes]u8 = undefined;
+    const restored = try @import("trading_shard.zig").TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
+    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+    try std.testing.expectEqual(@as(u64, 1), chain.next_attempt_id);
+}
+
+test "OKX native funding bills retain actual payments in Suspense without fabricating portfolio PnL" {
+    try checkNativeFundingBills(.normal);
+}
+
+test "OKX native funding unknown inexact and range retain unresolved source without economic commit" {
+    try checkNativeFundingBills(.unknown);
+    try checkNativeFundingBills(.inexact);
+    try checkNativeFundingBills(.range);
+}
+
+test "OKX native funding full metadata conflict retains ledger and recoverable failure fence" {
+    try checkNativeFundingBills(.conflict);
+}
+
+test "OKX funding included in opening baseline stays unresolved without a second cash entry" {
+    try checkNativeFundingBills(.historical);
+}
+
+test "OKX opposite funding payments cannot hide cumulative native overflow by netting" {
+    try checkNativeFundingBills(.cumulative);
+}

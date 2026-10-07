@@ -41,6 +41,102 @@ const assertReplayEquivalentConfigured = fixture.assertReplayEquivalentConfigure
 const applyHealthyPrelude = fixture.applyHealthyPrelude;
 const atGroup = fixture.atGroup;
 
+test "Owner native settlements retain partial cost remainder reversal and classified cash exactly once" {
+    const demo = @import("demo_authority.zig");
+    const durable = @import("durable_store.zig");
+    const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(memory);
+    memory.* = .init();
+    const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 999 };
+    var owner = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    const native = @import("asset_registry.zig").testDefinitions(12, 9);
+    for (native) |definition| _ = try owner.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
+    for (genesis) |original| {
+        var event = original;
+        switch (event.core.payload) {
+            .asset_definition_activated => |*definition| definition.* = if (definition.asset == settlement_asset) native[0] else native[1],
+            .instrument_rules_activated => |*rules| if (rules.instrument_identity == swap_instrument) {
+                rules.quantity_denominator = 100;
+            },
+            .margin_rules_activated => |*rules| {
+                rules.native_settlement_atoms = true;
+                rules.price_tick_atoms = 100_000_000_000;
+            },
+            .mark_price => |*price| price.price_atoms = 11_000_000_000_000,
+            .exchange_balance => |*balance| balance.cash_atoms = 100_000_000_000_000,
+            .opening_balance => |*balance| balance.cash_atoms = 100_000_000_000_000,
+            .portfolio_transfer => |*transfer| transfer.amount_atoms = 90_000_000_000_000,
+            .risk_lease_granted => |*lease| lease.amount_atoms = 80_000_000_000_000,
+            else => {},
+        }
+        _ = try owner.apply(event);
+    }
+    try owner.sealBootstrap();
+    const sides = [_]oms_module.Side{ .buy, .buy, .sell, .sell, .buy };
+    const quantities = [_]i64{ 2, 1, 1, 3, 1 };
+    const prices = [_]i64{ 110, 111, 120, 120, 110 };
+    const costs = [_]i128{ 220_000_000_000, 331_000_000_000, 220_666_666_667, 120_000_000_000, 0 };
+    const pnls = [_]i128{ 0, 0, 9_666_666_667, 29_000_000_000, 39_000_000_000 };
+    var funding_atoms: i128 = 0;
+    for (sides, quantities, prices, 0..) |side, quantity, price, index| {
+        var group: oms_module.IntentGroup = .{ .first_intent_sequence = 100 + index * 3, .count = 1 };
+        group.members[0] = .{ .intent_sequence = group.first_intent_sequence, .operation = .place, .instrument = swap_instrument, .side = side, .quantity = quantity, .limit_price = fixtureOmsPrice(swap_instrument, price) };
+        _ = try owner.apply(.{ .core = .{ .identity = group.first_intent_sequence, .payload = .{ .oms_intent_group = group } } });
+        try std.testing.expectEqual(@as(u8, @intCast(index + 1)), owner.shard.oms.command_history_count);
+        const command = owner.shard.oms.command_history[index];
+        _ = try owner.apply(.{ .core = .{ .identity = 101 + index * 3, .payload = .{ .economic_fill = .{ .fill_id = 101 + index * 3, .order_id = command.order_id, .quantity = quantity, .price_ticks = price, .fee_atoms = 1, .rebate_atoms = 0 } } } });
+        _ = try owner.apply(.{ .core = .{ .identity = 102 + index * 3, .payload = .{ .oms_execution_report = .{ .report_id = 102 + index * 3, .order_id = command.order_id, .revision = 1, .status = .filled, .cumulative_quantity = quantity, .remaining_quantity = 0 } } } });
+        if (index == 0) {
+            const funding: CanonicalEvent = .{ .core = .{ .identity = 500, .payload = .{ .funding_settlement = .{ .settlement_id = 500, .amount_atoms = -4_198_632_165 } } } };
+            _ = try owner.apply(funding);
+            funding_atoms = -4_198_632_165;
+            const once = owner.shard.canonicalStateDigest();
+            _ = try owner.apply(funding);
+            try std.testing.expectEqualSlices(u8, &once, &owner.shard.canonicalStateDigest());
+        }
+        const economic = owner.shard.economicSummary();
+        try std.testing.expectEqual(funding_atoms, economic.portfolio.funding_atoms);
+        try std.testing.expectEqual(@as(i128, 0), economic.suspense_usdt_atoms);
+        try std.testing.expectEqual(costs[index], economic.portfolio.swap.open_cost_atoms);
+        try std.testing.expectEqual(pnls[index], economic.portfolio.realized_pnl_atoms);
+        try std.testing.expectEqual(@as(i128, 90_000_000_000_000) + funding_atoms + pnls[index] - @as(i128, index + 1), economic.portfolio.usdt_balance_atoms);
+        try owner.shard.assertClosures();
+    }
+    var reopen: oms_module.IntentGroup = .{ .first_intent_sequence = 600, .count = 1 };
+    reopen.members[0] = .{ .intent_sequence = 600, .operation = .place, .instrument = swap_instrument, .side = .buy, .quantity = 2, .limit_price = fixtureOmsPrice(swap_instrument, 110) };
+    _ = try owner.apply(.{ .core = .{ .identity = 600, .payload = .{ .oms_intent_group = reopen } } });
+    const opened = owner.shard.oms.command_history[5];
+    _ = try owner.apply(.{ .core = .{ .identity = 601, .payload = .{ .economic_fill = .{ .fill_id = 601, .order_id = opened.order_id, .quantity = 2, .price_ticks = 110 } } } });
+    // Current holdings cannot establish ownership of a historical external bill.
+    var historical = fixture.canonicalAt(20, 900, .{ .funding_settlement = .{ .identity = 900, .exchange_account = 2, .instrument = swap_instrument, .rules_version = 1, .venue_bill_id = 901, .amount = .{ .asset = settlement_asset, .atoms = -7 }, .settlement_time_utc_ns = 1_800_000_000_200_000_000 } });
+    historical.venue.envelope.instrument = swap_instrument;
+    historical.venue.envelope.asset = settlement_asset;
+    _ = try owner.apply(historical);
+    const unallocated = owner.shard.economicSummary();
+    try std.testing.expectEqual(@as(i128, -7), unallocated.suspense_usdt_atoms);
+    try std.testing.expectEqual(funding_atoms, unallocated.portfolio.funding_atoms);
+    try std.testing.expect(unallocated.reconciliation_break);
+    try owner.shard.assertClosures();
+    const forced: CanonicalEvent = .{ .core = .{ .identity = 602, .payload = .{ .venue_forced_execution = .{ .execution_id = 602, .source_identity = 700, .side = .sell, .quantity = 2, .price_ticks = 120, .fee_atoms = 4_000_000_001, .penalty_atoms = 2_000_000_003, .expected_realized_pnl_atoms = 20_000_000_000 } } } };
+    _ = try owner.apply(forced);
+    const closed = owner.shard.economicSummary();
+    try std.testing.expectEqual(@as(i128, 0), closed.portfolio.swap.open_cost_atoms);
+    try std.testing.expectEqual(@as(i128, 59_000_000_000), closed.portfolio.realized_pnl_atoms);
+    try std.testing.expectEqual(@as(i128, 4_000_000_006), closed.portfolio.fee_atoms);
+    try std.testing.expectEqual(@as(i128, 2_000_000_003), closed.portfolio.penalty_atoms);
+    try std.testing.expectEqual(@as(i128, 90_000_000_000_000 - 4_198_632_165 + 59_000_000_000 - 4_000_000_006 - 2_000_000_003), closed.portfolio.usdt_balance_atoms);
+    try std.testing.expect(!owner.shard.operational_state.effectiveTradingAuthority());
+    try owner.shard.assertClosures();
+    const once = owner.shard.canonicalStateDigest();
+    _ = try owner.apply(forced);
+    try std.testing.expectEqualSlices(u8, &once, &owner.shard.canonicalStateDigest());
+    const recovered = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
+    var bytes: [durable.max_snapshot_bytes]u8 = undefined;
+    const restored = try TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
+    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+}
+
 test "Owner rejects tighter native bounds without losing committed registry or recoverable holdings" {
     const demo = @import("demo_authority.zig");
     const durable = @import("durable_store.zig");

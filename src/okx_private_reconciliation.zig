@@ -179,6 +179,15 @@ pub const EventPayload = union(enum) {
     exchange_position_snapshot: ExchangePositionSnapshot,
     exchange_margin_snapshot: ExchangeMarginSnapshot,
     venue_account_configuration_snapshot: VenueAccountConfigurationSnapshot,
+    funding_settlement: FundingSettlement,
+};
+
+pub const FundingSettlement = struct {
+    venue_bill_id: VenueBillId,
+    instrument: Instrument,
+    asset: AssetCode,
+    amount: Decimal,
+    settlement_time_utc_ns: u64,
 };
 
 pub const PrivateEvent = struct {
@@ -201,6 +210,7 @@ pub const IngressSource = enum(u8) {
     rest_orders_history_swap,
     rest_fills_history_spot,
     rest_fills_history_swap,
+    rest_account_bills,
 
     pub fn isWebSocket(self: IngressSource) bool {
         return switch (self) {
@@ -582,7 +592,7 @@ pub const Reconciler = struct {
                 batch.rejection = .invalid_field;
                 return batch.*;
             }
-        } else if (self.stage != .reconciling or page == null) {
+        } else if ((self.stage != .reconciling and !(source == .rest_account_bills and self.stage == .ready)) or page == null) {
             batch.rejection = .invalid_field;
             return batch.*;
         }
@@ -594,7 +604,7 @@ pub const Reconciler = struct {
         self.decode(parsed.value, source, times, batch.raw_evidence, batch) catch |err| {
             return self.reject(batch, mapDecodeError(err));
         };
-        if (!source.isWebSocket()) {
+        if (!source.isWebSocket() and source != .rest_account_bills) {
             self.recordPage(source, page.?, batch.raw_evidence.sha256, batch) catch |err| {
                 return self.reject(batch, mapDecodeError(err));
             };
@@ -710,7 +720,37 @@ pub const Reconciler = struct {
             ),
             .rest_account_config => try self.decodeConfig(data, times, evidence, batch),
             .rest_leverage => try self.decodeLeverage(data, times, evidence, batch),
+            .rest_account_bills => for (data.items) |item| try self.decodeFundingBill(try asObject(item), times, evidence, batch),
         }
+    }
+
+    fn decodeFundingBill(self: *Reconciler, row: std.json.ObjectMap, times: Times, evidence: RawEvidenceRef, batch: *IngressBatch) !void {
+        if (!std.mem.eql(u8, try stringField(row, "type"), "8") or
+            !std.mem.eql(u8, try stringField(row, "instType"), "SWAP")) return error.UnsupportedValue;
+        const instrument = try parseInstrument(try stringField(row, "instId"));
+        if (instrument != .btc_usdt_swap) return error.UnsupportedInstrument;
+        const subtype = try stringField(row, "subType");
+        const amount = try decimalField(row, "pnl");
+        if ((!std.mem.eql(u8, subtype, "173") and !std.mem.eql(u8, subtype, "174")) or
+            (std.mem.eql(u8, subtype, "173") and amount.coefficient > 0) or
+            (std.mem.eql(u8, subtype, "174") and amount.coefficient < 0)) return error.UnsupportedValue;
+        const asset = try AssetCode.init(try stringField(row, "ccy"));
+        if (asset.len == 0) return error.MissingAsset;
+        // Funding bills expose the confirmed funding payment in pnl. A separate
+        // nonzero fee needs its own classified source, rather than guessed netting.
+        if (try optionalDecimalField(row, "fee")) |fee| if (fee.coefficient != 0) return error.UnsupportedValue;
+        const bill_id: VenueBillId = @enumFromInt(try std.fmt.parseInt(u64, try stringField(row, "billId"), 10));
+        if (@intFromEnum(bill_id) == 0) return error.InvalidField;
+        const settlement: FundingSettlement = .{ .venue_bill_id = bill_id, .instrument = instrument, .asset = asset, .amount = amount, .settlement_time_utc_ns = try millisField(row, "ts") };
+        var hasher = Sha256.init(.{});
+        hasher.update("OKXFundingSettlementV1");
+        hashU64(&hasher, @intFromEnum(bill_id));
+        hasher.update(asset.slice());
+        hashDecimal(&hasher, amount);
+        hashU64(&hasher, settlement.settlement_time_utc_ns);
+        const identity = billIdentity(bill_id);
+        if (!try self.remember(identity, hasher.finalResult()))
+            try batch.append(makeEvent(times, settlement.settlement_time_utc_ns, evidence, identity, .{ .funding_settlement = settlement }));
     }
 
     fn decodeOrder(
@@ -1771,6 +1811,32 @@ fn ingestRestRound(reconciler: *Reconciler, sink: *TestRawSink) !void {
         try std.testing.expectEqual(@as(?RejectReason, null), batch.rejection);
         try std.testing.expect(batch.buffered);
     }
+}
+
+test "ready funding bills retain signed native settlement and independent bill identity" {
+    var reconciler: Reconciler = .{};
+    var sink: TestRawSink = .{};
+    try establishPrivateStream(&reconciler, &sink);
+    try reconciler.beginReconciliation(sink.append_count);
+    try ingestRestRound(&reconciler, &sink);
+    _ = try reconciler.tryComplete();
+    try ingestRestRound(&reconciler, &sink);
+    _ = try reconciler.tryComplete();
+    while (reconciler.drainReconciled()) |_| {}
+    const frame =
+        \\{"code":"0","data":[{"billId":"9001","type":"8","subType":"173","instType":"SWAP","instId":"BTC-USDT-SWAP","ccy":"USDT","pnl":"-0.004198632165","fee":"0","balChg":"0","posBalChg":"-0.004198632165","px":"50000","mgnMode":"","ts":"1800000000200"}]}
+    ;
+    const batch = try ingestTest(&reconciler, &sink, .rest_account_bills, .{ .final = true }, frame);
+    try std.testing.expect(batch.rejection == null);
+    try std.testing.expectEqual(@as(usize, 1), batch.event_count);
+    const settlement = batch.eventSlice()[0].payload.funding_settlement;
+    try std.testing.expectEqual(@as(u64, 9001), @intFromEnum(settlement.venue_bill_id));
+    try std.testing.expectEqualStrings("USDT", settlement.asset.slice());
+    try std.testing.expectEqual(@as(i128, -4_198_632_165), settlement.amount.coefficient);
+    try std.testing.expectEqual(@as(u8, 12), settlement.amount.scale);
+    const repeated = try ingestTest(&reconciler, &sink, .rest_account_bills, .{ .final = true }, frame);
+    try std.testing.expect(repeated.rejection == null);
+    try std.testing.expectEqual(@as(usize, 0), repeated.event_count);
 }
 
 test "raw evidence precedes private decode failure" {

@@ -130,6 +130,8 @@ pub const Fill = struct {
 pub const FundingSettlement = struct {
     identity: u64,
     amount: canonical.AssetAmount,
+    canonical_digest: ?[32]u8 = null,
+    portfolio_ownership_proven: bool = false,
 };
 
 pub const VenueForcedExecution = struct {
@@ -176,6 +178,7 @@ const SeenFact = struct {
     identity: u64,
     kind: FactKind,
     fingerprint: u64,
+    canonical_digest: ?[32]u8 = null,
 };
 
 pub const CanonicalFactEvidence = struct {
@@ -318,6 +321,8 @@ pub const Projection = struct {
             hashInt(&hasher, u64, seen.identity);
             hashInt(&hasher, u8, @intFromEnum(seen.kind));
             hashInt(&hasher, u64, seen.fingerprint);
+            hashInt(&hasher, u8, @intFromBool(seen.canonical_digest != null));
+            if (seen.canonical_digest) |digest_value| hasher.update(&digest_value);
         }
         hashInt(&hasher, u8, self.canonical_fill_evidence_count);
         for (self.canonical_fill_evidence[0..self.canonical_fill_evidence_count]) |known| {
@@ -511,15 +516,28 @@ pub const Projection = struct {
         self.setDenominator(fill.product, fill.quantity_denominator, fill.quantity_numerator);
     }
 
+    pub fn lookupCanonicalFunding(self: *const Projection, identity: u64, digest_value: [32]u8) !bool {
+        for (self.seen[0..self.seen_count]) |known| {
+            if (known.kind != .funding or known.identity != identity) continue;
+            if (known.canonical_digest == null or !std.mem.eql(u8, &known.canonical_digest.?, &digest_value))
+                return error.ConflictingEconomicIdentity;
+            return true;
+        }
+        return false;
+    }
+
     fn applyFunding(self: *Projection, funding: FundingSettlement) !void {
         if (funding.amount.asset != self.settlement_asset) return error.InvalidEconomicFact;
+        if (funding.canonical_digest) |digest_value| if (try self.lookupCanonicalFunding(funding.identity, digest_value)) return;
         const amount = funding.amount.atoms;
         var fingerprint_hasher = std.hash.Wyhash.init(0);
         fingerprint_hasher.update(std.mem.asBytes(&funding.amount.asset));
         fingerprint_hasher.update(std.mem.asBytes(&funding.amount.atoms));
+        fingerprint_hasher.update(&.{@intFromBool(funding.portfolio_ownership_proven)});
         const fingerprint = fingerprint_hasher.final();
         if (try self.remember(funding.identity, .funding, fingerprint)) return;
-        if (self.portfolio.swap.quantity == 0) {
+        self.seen[self.seen_count - 1].canonical_digest = funding.canonical_digest;
+        if (!funding.portfolio_ownership_proven or self.portfolio.swap.quantity == 0) {
             self.exchange.usdt_balance_atoms = try std.math.add(i128, self.exchange.usdt_balance_atoms, amount);
             self.exchange.funding_atoms = try std.math.add(i128, self.exchange.funding_atoms, amount);
             self.suspense_usdt_atoms = try std.math.add(i128, self.suspense_usdt_atoms, amount);
@@ -1082,12 +1100,12 @@ test "funding and forced execution are idempotent and unowned facts enter suspen
     var projection: Projection = .{};
     projection.treasury_usdt_atoms = 1_000;
     projection.exchange.usdt_balance_atoms = 1_000;
-    try projection.apply(.{ .funding_settlement = .{ .identity = 10, .amount = fixtureAmount(-25) } });
-    try projection.apply(.{ .funding_settlement = .{ .identity = 10, .amount = fixtureAmount(-25) } });
+    try projection.apply(.{ .funding_settlement = .{ .identity = 10, .portfolio_ownership_proven = true, .amount = fixtureAmount(-25) } });
+    try projection.apply(.{ .funding_settlement = .{ .identity = 10, .portfolio_ownership_proven = true, .amount = fixtureAmount(-25) } });
     try std.testing.expectEqual(@as(i64, -25), projection.suspense_usdt_atoms);
     try std.testing.expect(projection.reconciliation_break);
     try std.testing.expectEqual(@as(u8, 1), projection.ledger_count);
-    try std.testing.expectError(error.ConflictingEconomicIdentity, projection.apply(.{ .funding_settlement = .{ .identity = 10, .amount = fixtureAmount(-26) } }));
+    try std.testing.expectError(error.ConflictingEconomicIdentity, projection.apply(.{ .funding_settlement = .{ .identity = 10, .portfolio_ownership_proven = true, .amount = fixtureAmount(-26) } }));
 
     try projection.apply(.{ .venue_forced_execution = .{ .identity = 11, .side = .sell, .quantity = fixtureQuantity(2), .price = fixturePrice(100), .price_tick_value = fixtureAmount(1), .quantity_denominator = 1, .fee = fixtureAmount(3), .penalty = fixtureAmount(2), .product = .isolated_linear_usdt } });
     try projection.apply(.{ .venue_forced_execution = .{ .identity = 11, .side = .sell, .quantity = fixtureQuantity(2), .price = fixturePrice(100), .price_tick_value = fixtureAmount(1), .quantity_denominator = 1, .fee = fixtureAmount(3), .penalty = fixtureAmount(2), .product = .isolated_linear_usdt } });
@@ -1168,7 +1186,7 @@ test "ledger postings reproduce signed fee rebate and funding cash movements" {
     projection.portfolio.usdt_balance_atoms = 1_000;
     projection.exchange.usdt_balance_atoms = 1_000;
     try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = fixtureQuantity(1), .price = fixturePrice(100), .price_tick_value = fixtureAmount(1), .quantity_denominator = 1, .fee = fixtureAmount(3), .rebate = fixtureAmount(1), .product = .isolated_linear_usdt } });
-    try projection.apply(.{ .funding_settlement = .{ .identity = 2, .amount = fixtureAmount(7) } });
+    try projection.apply(.{ .funding_settlement = .{ .identity = 2, .portfolio_ownership_proven = true, .amount = fixtureAmount(7) } });
 
     try std.testing.expectEqual(@as(i64, 1_005), projection.portfolio.usdt_balance_atoms);
     try std.testing.expectEqual(@as(u8, 8), projection.ledger_count);

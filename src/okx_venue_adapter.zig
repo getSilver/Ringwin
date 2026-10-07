@@ -508,6 +508,24 @@ pub const OkxVenueAdapter = struct {
         switch (event.payload) {
             .execution_report => |report| try self.translateReport(output, event.envelope, report, historical),
             .fill => |fill| try self.translateFill(output, event.envelope, fill, historical),
+            .funding_settlement => |settlement| {
+                const binding = self.binding orelse return error.InvalidBinding;
+                const mapped = self.mapPrivateInstrument(settlement.instrument) orelse return error.UnsupportedInstrument;
+                const configured = self.instrument_definitions.get(mapped.identity) orelse return error.UnsupportedInstrument;
+                const asset = try self.asset_definitions.resolveCode(binding.venue, settlement.asset.slice());
+                if (configured.product != .isolated_linear_usdt or configured.rules.settlement_asset != asset)
+                    return error.UnsupportedMarginUnit;
+                const identity = digestIdentity(event.envelope.source_fact_identity);
+                try self.appendPrivate(output, event.envelope, .account, mapped.identity, asset, identity, .{ .funding_settlement = .{
+                    .identity = identity,
+                    .exchange_account = binding.account,
+                    .instrument = mapped.identity,
+                    .rules_version = configured.rules.version,
+                    .venue_bill_id = @intFromEnum(settlement.venue_bill_id),
+                    .amount = try assetAmount(self.asset_definitions, asset, settlement.amount),
+                    .settlement_time_utc_ns = settlement.settlement_time_utc_ns,
+                } });
+            },
             .exchange_balance_snapshot => |snapshot| if (snapshot.scope == .full_rest) {
                 self.bootstrap.balance = event;
                 try self.emitBootstrap(output);

@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const schema_version: u16 = 8;
+pub const schema_version: u16 = 9;
 
 pub const VenueIdentity = u64;
 pub const Product = enum(u8) { spot, isolated_linear_usdt };
@@ -547,6 +547,15 @@ pub const VenueAccountConfigurationSnapshot = struct {
 
 pub const EconomicFaultReason = enum(u8) { missing_amount, missing_asset, unknown_asset, malformed_amount, inexact_amount, overflow, invalid_economic_fact, decoder_rejected, persistence_failure, capacity_exhausted };
 pub const EconomicFault = struct { reason: EconomicFaultReason };
+pub const FundingSettlement = struct {
+    identity: SourceFactIdentity,
+    exchange_account: ExchangeAccountIdentity,
+    instrument: InstrumentIdentity,
+    rules_version: u64,
+    venue_bill_id: u64,
+    amount: AssetAmount,
+    settlement_time_utc_ns: u64,
+};
 
 pub const Payload = union(enum) {
     economic_fault: EconomicFault,
@@ -566,10 +575,12 @@ pub const Payload = union(enum) {
     venue_account_configuration_snapshot: VenueAccountConfigurationSnapshot,
     order_reconciliation_result: ReconciliationResult,
     account_reconciliation_result: ReconciliationResult,
+    funding_settlement: FundingSettlement,
 };
 
 pub const EventType = enum(u32) {
     economic_fault = 22,
+    funding_settlement = 23,
     order_dispatch_result = 1,
     execution_report = 3,
     fill = 4,
@@ -593,6 +604,7 @@ pub const TimeInForce = enum(u8) { good_til_canceled, immediate_or_cancel, fill_
 pub fn eventType(event: Payload) EventType {
     return switch (event) {
         .economic_fault => .economic_fault,
+        .funding_settlement => .funding_settlement,
         .order_dispatch_result => .order_dispatch_result,
         .execution_report => .execution_report,
         .fill => .fill,
