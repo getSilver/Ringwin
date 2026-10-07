@@ -2,6 +2,30 @@ const std = @import("std");
 const canonical = @import("canonical_event.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
+test "third native fees and rebates preserve explicit opening ownership and incomplete valuation" {
+    var projection: Projection = .{};
+    try projection.openNativeBalances(&.{.{ .asset = 99, .atoms = 10_000 }});
+    try projection.apply(.{ .fill = .{
+        .identity = 1,
+        .side = .buy,
+        .product = .spot,
+        .quantity = fixtureQuantity(1),
+        .price = fixturePrice(100),
+        .price_tick_value = fixtureAmount(1),
+        .quantity_denominator = 1,
+        .base_atom_value = .{ .asset = 2, .atoms = 1 },
+        .native_fee = .{ .asset = 99, .atoms = 100 },
+        .native_rebate = .{ .asset = 99, .atoms = 50 },
+    } });
+    try std.testing.expectEqual(@as(i128, -50), projection.portfolio.nativeAsset(99).?.balance_atoms);
+    try std.testing.expectEqual(@as(i128, 9_950), projection.exchange.nativeAsset(99).?.balance_atoms);
+    try std.testing.expectEqual(@as(i128, 100), projection.portfolio.nativeAsset(99).?.fee_atoms);
+    try std.testing.expectEqual(@as(i128, 50), projection.portfolio.nativeAsset(99).?.rebate_atoms);
+    try std.testing.expectEqual(@as(i128, 10_000), projection.treasury_native_assets[0].atoms);
+    try std.testing.expect(!projection.reportingValuationComplete());
+    try projection.assertClosed();
+}
+
 pub const max_facts = 32;
 pub const max_ledger_transactions = 64;
 
@@ -10,7 +34,7 @@ const settlement_asset: canonical.AssetIdentity = 1;
 pub const Side = enum(u8) { buy, sell };
 pub const FactKind = enum(u8) { fill, funding, forced_execution, account_snapshot };
 pub const LedgerLayer = enum(u8) { portfolio, exchange };
-pub const LedgerUnit = enum(u8) { settlement_atoms, base_atoms, swap_quantity };
+pub const LedgerUnit = enum(u8) { settlement_atoms, base_atoms, swap_quantity, native_asset_atoms };
 pub const LedgerAccount = enum(u8) { cash, spot_asset, swap_position, trade, fee_expense, rebate_income, funding_pnl, penalty_expense };
 pub const max_postings = 4;
 
@@ -19,7 +43,17 @@ pub const Position = struct {
     open_cost_atoms: i128 = 0,
 };
 
+pub const max_native_assets = canonical.max_asset_definitions;
+pub const NativeAssetState = struct {
+    asset: canonical.AssetIdentity = 0,
+    balance_atoms: i128 = 0,
+    fee_atoms: i128 = 0,
+    rebate_atoms: i128 = 0,
+};
+
 pub const Layer = struct {
+    native_assets: [max_native_assets]NativeAssetState = @splat(.{}),
+    native_asset_count: u8 = 0,
     usdt_balance_atoms: i128 = 0,
     spot_asset_atoms: i128 = 0,
     spot: Position = .{},
@@ -33,6 +67,20 @@ pub const Layer = struct {
     penalty_atoms: i128 = 0,
     realized_pnl_atoms: i128 = 0,
     unrealized_pnl_atoms: i128 = 0,
+
+    pub fn nativeAsset(self: *const Layer, asset: canonical.AssetIdentity) ?NativeAssetState {
+        for (self.native_assets[0..self.native_asset_count]) |entry| if (entry.asset == asset) return entry;
+        return null;
+    }
+
+    fn nativeAssetMutable(self: *Layer, asset: canonical.AssetIdentity) !*NativeAssetState {
+        if (asset == 0) return error.InvalidEconomicFact;
+        for (self.native_assets[0..self.native_asset_count]) |*entry| if (entry.asset == asset) return entry;
+        if (self.native_asset_count == max_native_assets) return error.NativeAssetCapacityExceeded;
+        self.native_assets[self.native_asset_count] = .{ .asset = asset };
+        self.native_asset_count += 1;
+        return &self.native_assets[self.native_asset_count - 1];
+    }
 };
 
 pub const LedgerTransaction = struct {
@@ -72,6 +120,8 @@ pub const Fill = struct {
     base_atom_value: canonical.AssetAmount = .{ .asset = 1, .atoms = 0 },
     base_fee: canonical.AssetAmount = .{ .asset = 1, .atoms = 0 },
     base_rebate: canonical.AssetAmount = .{ .asset = 1, .atoms = 0 },
+    native_fee: ?canonical.AssetAmount = null,
+    native_rebate: ?canonical.AssetAmount = null,
     portfolio_margin_ppm: i64 = 0,
     exchange_margin_ppm: i64 = 0,
     product: canonical.Product,
@@ -136,6 +186,10 @@ pub const CanonicalFactEvidence = struct {
 };
 
 pub const Projection = struct {
+    treasury_native_assets: [max_native_assets]canonical.AssetAmount = @splat(.{ .asset = 0, .atoms = 0 }),
+    treasury_native_asset_count: u8 = 0,
+    suspense_native_assets: [max_native_assets]canonical.AssetAmount = @splat(.{ .asset = 0, .atoms = 0 }),
+    suspense_native_asset_count: u8 = 0,
     settlement_asset: canonical.AssetIdentity = settlement_asset,
     base_asset: canonical.AssetIdentity = 0,
     portfolio: Layer = .{},
@@ -162,6 +216,29 @@ pub const Projection = struct {
 
     pub fn apply(self: *Projection, event: Event) !void {
         _ = try self.applyChanged(event);
+    }
+
+    pub fn openNativeBalances(self: *Projection, balances: []const canonical.AssetAmount) !void {
+        if (balances.len > max_native_assets or self.treasury_native_asset_count != 0 or self.exchange.native_asset_count != 0)
+            return error.InvalidOpeningBalance;
+        var candidate = self.*;
+        for (balances, 0..) |balance, index| {
+            if (balance.asset == 0 or balance.asset == self.settlement_asset or balance.asset == self.base_asset or balance.atoms < 0)
+                return error.InvalidOpeningBalance;
+            for (balances[0..index]) |prior| if (prior.asset == balance.asset) return error.InvalidOpeningBalance;
+            (try candidate.exchange.nativeAssetMutable(balance.asset)).balance_atoms = balance.atoms;
+            _ = try candidate.portfolio.nativeAssetMutable(balance.asset);
+            candidate.treasury_native_assets[index] = balance;
+        }
+        candidate.treasury_native_asset_count = @intCast(balances.len);
+        try candidate.assertClosed();
+        self.* = candidate;
+    }
+
+    pub fn reportingValuationComplete(self: *const Projection) bool {
+        for (self.exchange.native_assets[0..self.exchange.native_asset_count]) |entry|
+            if (entry.balance_atoms != 0 or entry.fee_atoms != 0 or entry.rebate_atoms != 0) return false;
+        return true;
     }
 
     pub fn applyChanged(self: *Projection, event: Event) !bool {
@@ -230,6 +307,8 @@ pub const Projection = struct {
         hashLayer(&hasher, self.exchange);
         hashInt(&hasher, i128, self.treasury_usdt_atoms);
         hashInt(&hasher, i128, self.suspense_usdt_atoms);
+        hashNativeBalances(&hasher, self.treasury_native_assets[0..self.treasury_native_asset_count]);
+        hashNativeBalances(&hasher, self.suspense_native_assets[0..self.suspense_native_asset_count]);
         hashInt(&hasher, u8, @intFromBool(self.reconciliation_break));
         hashInt(&hasher, u64, self.reconciliation_break_identity);
         hashInt(&hasher, u8, self.reconciliation_break_count);
@@ -296,18 +375,49 @@ pub const Projection = struct {
     }
 
     pub fn assertClosed(self: *const Projection) !void {
+        if (self.portfolio.native_asset_count > max_native_assets or self.exchange.native_asset_count > max_native_assets or
+            self.treasury_native_asset_count > max_native_assets or self.suspense_native_asset_count > max_native_assets)
+            return error.InvalidEconomicFact;
+        for ([_][]const canonical.AssetAmount{
+            self.treasury_native_assets[0..self.treasury_native_asset_count],
+            self.suspense_native_assets[0..self.suspense_native_asset_count],
+        }, 0..) |balances, owner| {
+            for (balances, 0..) |balance, index| {
+                if (balance.asset == 0 or self.exchange.nativeAsset(balance.asset) == null) return error.InvalidEconomicFact;
+                if ((owner == 0 and balance.atoms < 0) or (owner == 1 and balance.atoms != 0 and !self.reconciliation_break)) return error.InvalidEconomicFact;
+                for (balances[0..index]) |prior| if (prior.asset == balance.asset) return error.InvalidEconomicFact;
+            }
+        }
+        for (self.exchange.native_assets[0..self.exchange.native_asset_count], 0..) |entry, index| {
+            if (entry.asset == 0 or entry.asset == self.settlement_asset or entry.asset == self.base_asset or
+                entry.balance_atoms < 0 or entry.fee_atoms < 0 or entry.rebate_atoms < 0) return error.InvalidEconomicFact;
+            for (self.exchange.native_assets[0..index]) |prior| if (prior.asset == entry.asset) return error.InvalidEconomicFact;
+            const portfolio = self.portfolio.nativeAsset(entry.asset) orelse return error.EconomicLayerMismatch;
+            if (portfolio.fee_atoms != entry.fee_atoms or portfolio.rebate_atoms != entry.rebate_atoms or
+                try std.math.add(i128, portfolio.balance_atoms, try std.math.add(i128, nativeBalance(self.treasury_native_assets[0..self.treasury_native_asset_count], entry.asset), nativeBalance(self.suspense_native_assets[0..self.suspense_native_asset_count], entry.asset))) != entry.balance_atoms)
+                return error.EconomicLayerMismatch;
+        }
+        if (self.portfolio.native_asset_count != self.exchange.native_asset_count) return error.EconomicLayerMismatch;
         for ([_]Layer{ self.portfolio, self.exchange }) |layer| {
             if (layer.spot_asset_atoms < 0 or layer.base_fee_atoms < 0 or layer.base_rebate_atoms < 0 or
                 (self.base_asset == 0 and (layer.spot_asset_atoms != 0 or layer.base_fee_atoms != 0 or layer.base_rebate_atoms != 0)))
                 return error.InvalidEconomicFact;
         }
         for (self.ledger[0..self.ledger_count]) |transaction| {
-            var balances: [3]i128 = .{ 0, 0, 0 };
+            var balances: [4]i128 = .{ 0, 0, 0, 0 };
+            var native_asset: ?canonical.AssetIdentity = null;
             for (transaction.postings[0..transaction.posting_count]) |posting| {
                 const expected_asset: canonical.AssetIdentity = switch (posting.unit) {
                     .settlement_atoms => self.settlement_asset,
                     .base_atoms => self.base_asset,
                     .swap_quantity => 0,
+                    .native_asset_atoms => blk: {
+                        if (posting.asset == 0 or self.exchange.nativeAsset(posting.asset) == null) return error.UnbalancedLedgerTransaction;
+                        if (native_asset) |asset| {
+                            if (asset != posting.asset) return error.UnbalancedLedgerTransaction;
+                        } else native_asset = posting.asset;
+                        break :blk posting.asset;
+                    },
                 };
                 if (posting.asset != expected_asset) return error.UnbalancedLedgerTransaction;
                 const index: usize = @intFromEnum(posting.unit);
@@ -329,7 +439,8 @@ pub const Projection = struct {
             (fill.fee.atoms != 0 and fill.fee.asset != self.settlement_asset) or
             (fill.rebate.atoms != 0 and fill.rebate.asset != self.settlement_asset) or
             fill.fee.atoms < 0 or fill.rebate.atoms < 0 or fill.base_fee.atoms < 0 or
-            fill.base_rebate.atoms < 0 or
+            fill.base_rebate.atoms < 0 or (if (fill.native_fee) |fee| fee.atoms < 0 else false) or
+            (if (fill.native_rebate) |rebate| rebate.atoms < 0 else false) or
             (fill.product != .spot and (fill.base_fee.atoms != 0 or fill.base_rebate.atoms != 0)))
             return error.InvalidEconomicFact;
         if (fill.product == .spot) {
@@ -354,6 +465,23 @@ pub const Projection = struct {
             exchange.margin_atoms = try rateAtoms(exchange.swap.open_cost_atoms, fill.exchange_margin_ppm);
         }
         if (portfolio_movement != exchange_movement) return error.EconomicLayerMismatch;
+        for ([_]struct { amount: ?canonical.AssetAmount, account: LedgerAccount }{
+            .{ .amount = fill.native_fee, .account = .fee_expense },
+            .{ .amount = fill.native_rebate, .account = .rebate_income },
+        }) |charge| {
+            const amount = charge.amount orelse continue;
+            if (amount.atoms == 0) continue;
+            if (amount.asset == 0 or amount.asset == self.settlement_asset or amount.asset == self.base_asset)
+                return error.InvalidEconomicFact;
+            const delta = if (charge.account == .fee_expense) try std.math.sub(i128, 0, amount.atoms) else amount.atoms;
+            for ([_]*Layer{ &portfolio, &exchange }) |layer| {
+                const entry = try layer.nativeAssetMutable(amount.asset);
+                entry.balance_atoms = try std.math.add(i128, entry.balance_atoms, delta);
+                if (charge.account == .fee_expense) entry.fee_atoms = try std.math.add(i128, entry.fee_atoms, amount.atoms) else entry.rebate_atoms = try std.math.add(i128, entry.rebate_atoms, amount.atoms);
+            }
+            try self.appendNativeChargeLedger(fill.identity, kind, .portfolio, charge.account, amount.asset, delta);
+            try self.appendNativeChargeLedger(fill.identity, kind, .exchange, charge.account, amount.asset, delta);
+        }
         const position_delta: i64 = if (fill.side == .buy) std.math.cast(i64, fill.quantity.lots) orelse return error.Overflow else -(std.math.cast(i64, fill.quantity.lots) orelse return error.Overflow);
         const traded_amount = if (fill.product == .spot) try std.math.mul(i128, position_delta, fill.base_atom_value.atoms) else position_delta;
         try self.appendPositionLedger(fill.identity, kind, .portfolio, fill.product, traded_amount);
@@ -617,6 +745,18 @@ pub const Projection = struct {
         self.ledger_count += 1;
     }
 
+    fn appendNativeChargeLedger(self: *Projection, identity: u64, kind: FactKind, layer: LedgerLayer, account: LedgerAccount, asset: canonical.AssetIdentity, delta: i128) !void {
+        if (self.ledger_count == max_ledger_transactions) return error.LedgerCapacityExceeded;
+        self.ledger[self.ledger_count] = .{
+            .source_identity = identity,
+            .kind = kind,
+            .layer = layer,
+            .posting_count = 2,
+            .postings = .{ .{ .account = .cash, .unit = .native_asset_atoms, .asset = asset, .amount = delta }, .{ .account = account, .unit = .native_asset_atoms, .asset = asset, .amount = try std.math.sub(i128, 0, delta) }, undefined, undefined },
+        };
+        self.ledger_count += 1;
+    }
+
     fn openBreak(self: *Projection, identity: u64) !void {
         for (self.reconciliation_break_identities[0..self.reconciliation_break_count]) |known| if (known == identity) return;
         if (self.reconciliation_break_count == max_facts) return error.ReconciliationBreakCapacityExceeded;
@@ -662,6 +802,20 @@ fn sortLedger(values: []LedgerTransaction) void {
 }
 
 fn hashLayer(hasher: *Sha256, layer: Layer) void {
+    hashInt(hasher, u8, layer.native_asset_count);
+    var previous: canonical.AssetIdentity = 0;
+    for (0..layer.native_asset_count) |_| {
+        var next: ?NativeAssetState = null;
+        for (layer.native_assets[0..layer.native_asset_count]) |entry| {
+            if (entry.asset > previous and (next == null or entry.asset < next.?.asset)) next = entry;
+        }
+        const entry = next orelse unreachable;
+        hashInt(hasher, canonical.AssetIdentity, entry.asset);
+        hashInt(hasher, i128, entry.balance_atoms);
+        hashInt(hasher, i128, entry.fee_atoms);
+        hashInt(hasher, i128, entry.rebate_atoms);
+        previous = entry.asset;
+    }
     hashInt(hasher, i128, layer.usdt_balance_atoms);
     hashInt(hasher, i128, layer.spot_asset_atoms);
     hashInt(hasher, i128, layer.base_fee_atoms);
@@ -677,6 +831,26 @@ fn hashLayer(hasher: *Sha256, layer: Layer) void {
     hashInt(hasher, i128, layer.penalty_atoms);
     hashInt(hasher, i128, layer.realized_pnl_atoms);
     hashInt(hasher, i128, layer.unrealized_pnl_atoms);
+}
+
+fn nativeBalance(balances: []const canonical.AssetAmount, asset: canonical.AssetIdentity) i128 {
+    for (balances) |balance| if (balance.asset == asset) return balance.atoms;
+    return 0;
+}
+
+fn hashNativeBalances(hasher: *Sha256, balances: []const canonical.AssetAmount) void {
+    hashInt(hasher, u8, @intCast(balances.len));
+    var previous: canonical.AssetIdentity = 0;
+    for (balances) |_| {
+        var next: ?canonical.AssetAmount = null;
+        for (balances) |balance| {
+            if (balance.asset > previous and (next == null or balance.asset < next.?.asset)) next = balance;
+        }
+        const balance = next orelse unreachable;
+        hashInt(hasher, canonical.AssetIdentity, balance.asset);
+        hashInt(hasher, i128, balance.atoms);
+        previous = balance.asset;
+    }
 }
 
 fn hashInt(hasher: *Sha256, comptime T: type, value: T) void {
@@ -798,6 +972,13 @@ fn hashFill(hash: anytype, fill: Fill) void {
     hash.update(std.mem.asBytes(&fill.base_fee.atoms));
     hash.update(std.mem.asBytes(&fill.base_rebate.asset));
     hash.update(std.mem.asBytes(&fill.base_rebate.atoms));
+    for ([_]?canonical.AssetAmount{ fill.native_fee, fill.native_rebate }) |amount| {
+        hash.update(&.{@intFromBool(amount != null)});
+        if (amount) |value| {
+            hash.update(std.mem.asBytes(&value.asset));
+            hash.update(std.mem.asBytes(&value.atoms));
+        }
+    }
     hash.update(std.mem.asBytes(&fill.portfolio_margin_ppm));
     hash.update(std.mem.asBytes(&fill.exchange_margin_ppm));
     hash.update(&.{@intFromEnum(fill.product)});

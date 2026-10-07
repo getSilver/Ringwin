@@ -41,6 +41,60 @@ const assertReplayEquivalentConfigured = fixture.assertReplayEquivalentConfigure
 const applyHealthyPrelude = fixture.applyHealthyPrelude;
 const atGroup = fixture.atGroup;
 
+test "Owner rejects tighter native bounds without losing committed registry or recoverable holdings" {
+    const demo = @import("demo_authority.zig");
+    const durable = @import("durable_store.zig");
+    const assets = @import("asset_registry.zig");
+    for ([_]bool{ false, true }) |third_asset| {
+        const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+        defer std.testing.allocator.destroy(memory);
+        memory.* = .init();
+        const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 990 };
+        var owner = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+        if (third_asset) {
+            for (assets.testDefinitions(6, 8)) |definition|
+                _ = try owner.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
+            var native = assets.testDefinitions(6, 8)[1];
+            native.asset = 99;
+            native.code_bindings = @splat(.{});
+            native.code_binding_count = 1;
+            native.code_bindings[0] = try canonical.AssetCodeBinding.init(1, "BNB");
+            _ = try owner.apply(.{ .core = .{ .identity = 99, .payload = .{ .asset_definition_activated = native } } });
+        }
+        for (genesis) |original| {
+            var event = original;
+            if (third_asset and event.core.payload == .margin_rules_activated)
+                event.core.payload.margin_rules_activated.native_settlement_atoms = true;
+            if (third_asset and event.core.payload == .opening_balance) {
+                var observed: canonical.AccountBootstrapSnapshot = .{ .identity = 90, .exchange_account = 2, .scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true }, .source_stream = 1, .source_sequence = 0, .balance_count = 2, .position_count = 0, .margin_count = 0 };
+                for ([_]canonical.AssetAmount{ .{ .asset = 1, .atoms = 25_000_000_000 }, .{ .asset = 99, .atoms = 1_000_000_000 } }, 0..) |balance, index|
+                    observed.balances[index] = .{ .asset = balance.asset, .total = balance, .available = balance, .cash_balance = balance, .held = .{ .asset = balance.asset, .atoms = 0 }, .liability = .{ .asset = balance.asset, .atoms = 0 }, .isolated_liability = .{ .asset = balance.asset, .atoms = 0 }, .cross_liability = .{ .asset = balance.asset, .atoms = 0 } };
+                _ = try owner.apply(fixture.canonicalAt(6, 90, .{ .account_bootstrap_snapshot = observed }));
+                event.core.payload.opening_balance.native_balance_count = 1;
+                event.core.payload.opening_balance.native_balances[0] = .{ .asset = 99, .atoms = 1_000_000_000 };
+            }
+            _ = try owner.apply(event);
+        }
+        try owner.sealBootstrap();
+        const before_registry = owner.shard.activatedAssets();
+        const before_economics = owner.shard.economicSummary();
+        var narrower = before_registry.get(if (third_asset) 99 else 1).?.definition;
+        narrower.version += 1;
+        narrower.max_balance_atoms = if (third_asset) 500_000_000 else 10_000_000_000;
+        narrower.max_single_atoms = narrower.max_balance_atoms;
+        try std.testing.expectError(error.AssetAmountOutOfRange, owner.apply(.{ .core = .{ .identity = 991, .payload = .{ .asset_definition_activated = narrower } } }));
+        try std.testing.expectEqualDeep(before_registry, owner.shard.activatedAssets());
+        try std.testing.expectEqualDeep(before_economics, owner.shard.economicSummary());
+        try std.testing.expect(owner.shard.asset_configuration_failed and owner.shard.oms.recovery_only and !owner.closed);
+        const recovered = try demo.Owner.recover(memory.interface(), undefined, stream);
+        try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
+        var bytes: [durable.max_snapshot_bytes]u8 = undefined;
+        const restored = try TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
+        try std.testing.expectEqualDeep(before_registry, restored.shard.activatedAssets());
+        try std.testing.expectEqualDeep(before_economics, restored.shard.economicSummary());
+    }
+}
+
 test "OMS command binds scoped capability and source-owned authority barriers" {
     var run = try startScenario();
     try applyHealthyPrelude(&run);
@@ -1873,6 +1927,25 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
         .margin_count = 0,
     } });
     account_bootstrap.venue.envelope.identity.stream = 2;
+    account_bootstrap.venue.event.account_bootstrap_snapshot.balance_count = 1;
+    account_bootstrap.venue.event.account_bootstrap_snapshot.balances[0] = .{
+        .asset = settlement_asset,
+        .total = .{ .asset = settlement_asset, .atoms = 25_000_000_000 },
+        .available = .{ .asset = settlement_asset, .atoms = 25_000_000_000 },
+        .held = .{ .asset = settlement_asset, .atoms = 0 },
+        .cash_balance = .{ .asset = settlement_asset, .atoms = 25_000_000_000 },
+        .liability = .{ .asset = settlement_asset, .atoms = 0 },
+        .isolated_liability = .{ .asset = settlement_asset, .atoms = 0 },
+        .cross_liability = .{ .asset = settlement_asset, .atoms = 0 },
+    };
+    account_bootstrap.venue.event.account_bootstrap_snapshot.margin_count = 1;
+    account_bootstrap.venue.event.account_bootstrap_snapshot.margins[0] = .{
+        .instrument = swap_instrument,
+        .amount = .{ .asset = settlement_asset, .atoms = 25_000_000_000 },
+        .initial_margin = .{ .asset = settlement_asset, .atoms = 0 },
+        .maintenance_margin = .{ .asset = settlement_asset, .atoms = 0 },
+        .isolated_equity = .{ .asset = settlement_asset, .atoms = 25_000_000_000 },
+    };
     account_bootstrap.venue.envelope.source_stream = 2;
     account_bootstrap.venue.envelope.raw_evidence.stream = 2;
     _ = try live.shard.apply(account_bootstrap);
@@ -1967,6 +2040,15 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     try std.testing.expectError(error.NotSent, gateway.sendFromShard(failed_config, proved.command_id, 2 * std.time.ns_per_s));
     try std.testing.expectEqual(@as(u64, 0), gateway.send_attempt_count);
     try std.testing.expectEqual(@as(u64, 1), (try durable_store.recover(undefined, stream)).committed_barrier);
+    failed_config.* = live.shard;
+    var tighter_asset = failed_config.activatedAssets().get(settlement_asset).?.definition;
+    tighter_asset.version += 1;
+    tighter_asset.max_single_atoms = 10_000_000_000;
+    tighter_asset.max_balance_atoms = 10_000_000_000;
+    try std.testing.expectError(error.AssetAmountOutOfRange, failed_config.apply(.{ .core = .{ .identity = 401, .payload = .{ .asset_definition_activated = tighter_asset } } }));
+    try std.testing.expectEqualDeep(live.shard.activatedAssets(), failed_config.activatedAssets());
+    try std.testing.expectError(error.NotSent, gateway.sendFromShard(failed_config, proved.command_id, 2 * std.time.ns_per_s));
+    try std.testing.expectEqual(@as(u64, 0), gateway.send_attempt_count);
     var paused = live.shard;
     _ = try paused.apply(lifecycleCommand(4, 3, .trading_pause));
     try std.testing.expect(!std.meta.eql(proved.authority.trading_authorization, (try paused.currentDispatchAuthorityRefs(swap_instrument)).trading_authorization));

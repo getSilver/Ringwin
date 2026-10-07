@@ -45,6 +45,7 @@ pub const Reconciler = struct {
     raw_watermark: u64 = 0,
     bootstrap: ?canonical.BootstrapSnapshotIdentity = null,
     next_sequence: u64 = 1,
+    account_sequence: u64 = 0,
     source_sequences: [source_count]u64 = @splat(0),
     active_source: Source = .ws,
     active_source_sequence: u64 = 0,
@@ -221,10 +222,10 @@ pub const Reconciler = struct {
             const execution_id = try string(item, "execId");
             const key = keyFor(&.{ "fill", execution_id });
             const rules = try self.rulesFor(item);
-            const fee = if (try optionalString(item, "execFee")) |value_text| try amount(self.asset_definitions, try asset((try optionalString(item, "feeCurrency")) orelse "USDT"), value_text) else null;
+            const fee = if (try optionalString(item, "execFee")) |value_text| try amount(self.asset_definitions, try self.asset_definitions.resolveCode((self.binding orelse return error.StaleSession).venue, (try optionalString(item, "feeCurrency")) orelse return error.MissingFeeAsset), value_text) else null;
             const pnl = if (try optionalString(item, "execPnl")) |value_text| try amount(self.asset_definitions, usdt, value_text) else null;
             const execution_time = try optionalMillis(item, "execTime");
-            const event: canonical.Payload = .{ .fill = .{ .identity = identity(key), .order = link.order, .client_order_id = link.client, .venue_order = try canonical.VenueOrderRef.init((self.binding orelse return error.StaleSession).venue, try string(item, "orderId")), .venue_trade = try canonical.VenueTradeRef.init((self.binding orelse return error.StaleSession).venue, execution_id), .instrument = rules.identity, .exchange_account = (self.binding orelse return error.StaleSession).account, .side = try side(try string(item, "side")), .quantity = try quantity(rules, try string(item, "execQty")), .price = try price(rules, try string(item, "execPrice")), .fee = if (fee) |value_fee| if (value_fee.atoms > 0) value_fee else null else null, .rebate = if (fee) |value_fee| if (value_fee.atoms < 0) .{ .asset = value_fee.asset, .atoms = std.math.sub(i128, 0, value_fee.atoms) catch return error.DecimalOverflow } else null else null, .realized_pnl = pnl, .liquidity = if (try boolField(item, "isMaker")) .maker else .taker, .venue_fill_time_utc_ns = execution_time } };
+            const event: canonical.Payload = .{ .fill = .{ .identity = identity(key), .order = link.order, .client_order_id = link.client, .venue_order = try canonical.VenueOrderRef.init((self.binding orelse return error.StaleSession).venue, try string(item, "orderId")), .venue_trade = try canonical.VenueTradeRef.init((self.binding orelse return error.StaleSession).venue, execution_id), .instrument = rules.identity, .exchange_account = (self.binding orelse return error.StaleSession).account, .side = try side(try string(item, "side")), .quantity = try quantity(rules, try string(item, "execQty")), .price = try price(rules, try string(item, "execPrice")), .fee = if (fee) |value_fee| if (value_fee.atoms > 0) value_fee else .{ .asset = value_fee.asset, .atoms = 0 } else null, .rebate = if (fee) |value_fee| if (value_fee.atoms < 0) .{ .asset = value_fee.asset, .atoms = std.math.sub(i128, 0, value_fee.atoms) catch return error.DecimalOverflow } else null else null, .realized_pnl = pnl, .liquidity = if (try boolField(item, "isMaker")) .maker else .taker, .venue_fill_time_utc_ns = execution_time } };
             if (try self.seenBefore(key, event)) continue;
             try self.emit(.account, rules.identity, null, identity(key), execution_time, times, evidence, event);
         }
@@ -238,13 +239,18 @@ pub const Reconciler = struct {
             const coins = try array(try field(account, "coin"));
             for (coins.items) |coin_value| {
                 const coin = try object(coin_value);
-                const asset_id = try asset(try string(coin, "coin"));
+                const asset_id = try self.asset_definitions.resolveCode((self.binding orelse return error.StaleSession).venue, try string(coin, "coin"));
                 const total = try amount(self.asset_definitions, asset_id, try string(coin, "walletBalance"));
-                const available = try amount(self.asset_definitions, asset_id, (try optionalString(coin, "availableToWithdraw")) orelse try string(coin, "walletBalance"));
-                const balance = canonical.AccountBalance{ .asset = asset_id, .total = total, .available = available, .held = .{ .asset = asset_id, .atoms = total.atoms - available.atoms }, .liability = if (try optionalString(coin, "borrowAmount")) |borrowed| try amount(self.asset_definitions, asset_id, borrowed) else null, .cash_balance = total };
+                const available = try amount(self.asset_definitions, asset_id, (try optionalString(coin, "availableToWithdraw")) orelse return error.MissingBalanceAvailable);
+                const balance = canonical.AccountBalance{ .asset = asset_id, .total = total, .available = available, .held = .{ .asset = asset_id, .atoms = try std.math.sub(i128, total.atoms, available.atoms) }, .liability = if (try optionalString(coin, "borrowAmount")) |borrowed| try amount(self.asset_definitions, asset_id, borrowed) else null, .cash_balance = total };
                 if (emit_observation) try self.emitObservedBalance(balance, times, evidence) else try self.storeBalance(balance);
                 if (asset_id == usdt) {
-                    const margin: canonical.AccountMargin = .{ .amount = total, .adjusted_equity = if (try optionalString(account, "totalEquity")) |equity| try amount(self.asset_definitions, usdt, equity) else null, .initial_margin = if (try optionalString(account, "totalInitialMargin")) |initial| try amount(self.asset_definitions, usdt, initial) else null, .maintenance_margin = if (try optionalString(account, "totalMaintenanceMargin")) |maintenance| try amount(self.asset_definitions, usdt, maintenance) else null };
+                    const valuation: canonical.AccountMarginUsdValuation = .{
+                        .total_equity = if (try optionalString(account, "totalEquity")) |equity| try canonical.Decimal.parse(equity) else null,
+                        .initial_margin = if (try optionalString(account, "totalInitialMargin")) |initial| try canonical.Decimal.parse(initial) else null,
+                        .maintenance_margin = if (try optionalString(account, "totalMaintenanceMargin")) |maintenance| try canonical.Decimal.parse(maintenance) else null,
+                    };
+                    const margin: canonical.AccountMargin = .{ .amount = total, .usd_valuation = if (valuation.total_equity != null or valuation.initial_margin != null or valuation.maintenance_margin != null) valuation else null };
                     if (emit_observation) try self.emitObservedMargin(margin, times, evidence) else try self.storeMargin(margin);
                 }
             }
@@ -273,7 +279,7 @@ pub const Reconciler = struct {
         snapshot.exchange_account = binding.account;
         snapshot.scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true };
         snapshot.source_stream = reconciliationStream(binding.session);
-        snapshot.source_sequence = 1;
+        snapshot.source_sequence = self.account_sequence;
         snapshot.balance_count = self.balance_count;
         snapshot.position_count = self.position_count;
         snapshot.margin_count = self.margin_count;
@@ -291,18 +297,21 @@ pub const Reconciler = struct {
     }
     fn emitObservedBalance(self: *Reconciler, value: canonical.AccountBalance, times: Times, evidence: RawEvidenceRef) !void {
         const bootstrap = self.bootstrap orelse return error.BootstrapRequired;
+        self.account_sequence = try std.math.add(u64, self.account_sequence, 1);
         const key = identity(evidence.sha256) +% self.next_sequence;
-        try self.emit(.asset, null, value.asset, key, null, times, evidence, .{ .account_observed = .{ .identity = key, .exchange_account = (self.binding orelse return error.StaleSession).account, .bootstrap = bootstrap, .source_stream = sourceStream((self.binding orelse return error.StaleSession).session, self.active_source), .source_sequence = self.active_source_sequence, .value = .{ .balance = .{ .asset = value.asset, .value = value } } } });
+        try self.emit(.asset, null, value.asset, key, null, times, evidence, .{ .account_observed = .{ .identity = key, .exchange_account = (self.binding orelse return error.StaleSession).account, .bootstrap = bootstrap, .source_stream = reconciliationStream((self.binding orelse return error.StaleSession).session), .source_sequence = self.account_sequence, .value = .{ .balance = .{ .asset = value.asset, .value = value } } } });
     }
     fn emitObservedPosition(self: *Reconciler, value: canonical.AccountPosition, times: Times, evidence: RawEvidenceRef) !void {
         const bootstrap = self.bootstrap orelse return error.BootstrapRequired;
+        self.account_sequence = try std.math.add(u64, self.account_sequence, 1);
         const key = identity(evidence.sha256) +% self.next_sequence;
-        try self.emit(.instrument, value.instrument, null, key, null, times, evidence, .{ .account_observed = .{ .identity = key, .exchange_account = (self.binding orelse return error.StaleSession).account, .bootstrap = bootstrap, .source_stream = sourceStream((self.binding orelse return error.StaleSession).session, self.active_source), .source_sequence = self.active_source_sequence, .value = .{ .position = .{ .instrument = value.instrument, .side = value.side, .value = value, .removed = value.quantity.lots == 0 } } } });
+        try self.emit(.instrument, value.instrument, null, key, null, times, evidence, .{ .account_observed = .{ .identity = key, .exchange_account = (self.binding orelse return error.StaleSession).account, .bootstrap = bootstrap, .source_stream = reconciliationStream((self.binding orelse return error.StaleSession).session), .source_sequence = self.account_sequence, .value = .{ .position = .{ .instrument = value.instrument, .side = value.side, .value = value, .removed = value.quantity.lots == 0 } } } });
     }
     fn emitObservedMargin(self: *Reconciler, value: canonical.AccountMargin, times: Times, evidence: RawEvidenceRef) !void {
         const bootstrap = self.bootstrap orelse return error.BootstrapRequired;
+        self.account_sequence = try std.math.add(u64, self.account_sequence, 1);
         const key = identity(evidence.sha256) +% self.next_sequence;
-        try self.emit(.account, value.instrument, null, key, null, times, evidence, .{ .account_observed = .{ .identity = key, .exchange_account = (self.binding orelse return error.StaleSession).account, .bootstrap = bootstrap, .source_stream = sourceStream((self.binding orelse return error.StaleSession).session, self.active_source), .source_sequence = self.active_source_sequence, .value = .{ .margin = .{ .instrument = value.instrument, .value = value } } } });
+        try self.emit(.account, value.instrument, null, key, null, times, evidence, .{ .account_observed = .{ .identity = key, .exchange_account = (self.binding orelse return error.StaleSession).account, .bootstrap = bootstrap, .source_stream = reconciliationStream((self.binding orelse return error.StaleSession).session), .source_sequence = self.account_sequence, .value = .{ .margin = .{ .instrument = value.instrument, .value = value } } } });
     }
     fn emit(self: *Reconciler, scope: canonical.CanonicalEventScope, instrument: ?canonical.InstrumentIdentity, asset_id: ?canonical.AssetIdentity, source_id: u128, source_time: ?u64, times: Times, evidence: RawEvidenceRef, event: canonical.Payload) !void {
         const emitted = try self.record(scope, instrument, asset_id, source_id, source_time, times, evidence, event);
@@ -478,12 +487,6 @@ fn positionSide(item: std.json.ObjectMap) !?canonical.PositionSide {
         else => error.UnsupportedValue,
     };
 }
-fn asset(code: []const u8) !canonical.AssetIdentity {
-    if (std.mem.eql(u8, code, "BTC")) return btc;
-    if (std.mem.eql(u8, code, "USDT")) return usdt;
-    return error.UnsupportedAsset;
-}
-
 fn amount(assets: @import("asset_registry.zig").Registry, asset_id: canonical.AssetIdentity, value: []const u8) !canonical.AssetAmount {
     return assets.amount(asset_id, try canonical.Decimal.parse(value));
 }
@@ -647,9 +650,35 @@ test "Bybit emits absolute observations only after a complete bootstrap" {
     _ = try reconciler.ingest(std.testing.allocator, .rest_positions, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
     _ = try reconciler.ingest(std.testing.allocator, .rest_orders, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
     _ = try reconciler.ingest(std.testing.allocator, .rest_executions, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
-    _ = reconciler.drain();
-    _ = try reconciler.ingest(std.testing.allocator, .ws, null, test_times, "{\"topic\":\"wallet\",\"data\":[{\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"11.000000\",\"availableToWithdraw\":\"10.000000\"}]}]}");
+    var projection = @import("account_projection.zig").AccountProjection{};
+    const bootstrap_output = reconciler.drain().?;
+    for (bootstrap_output.slice()) |record| try projection.apply(record.event);
+    _ = try reconciler.ingest(std.testing.allocator, .ws, null, test_times, "{\"topic\":\"wallet\",\"data\":[{\"totalEquity\":\"11.123456789012345678\",\"totalInitialMargin\":\"0.000000000000000001\",\"totalMaintenanceMargin\":\"0.000000000000000002\",\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"11.000000\",\"availableToWithdraw\":\"10.000000\",\"borrowAmount\":\"0.000001\"}]}]}");
     const output = reconciler.drain().?;
+    for (output.slice()) |record| {
+        try projection.apply(record.event);
+        try projection.apply(record.event);
+    }
+    try std.testing.expect(projection.valid);
+    try std.testing.expectEqual(@as(u64, 2), projection.last_sequence);
+    try std.testing.expectEqual(projection.source_stream.?, output.slice()[0].event.account_observed.source_stream);
+    try std.testing.expect(output.slice()[0].envelope.source_stream != output.slice()[0].event.account_observed.source_stream);
+    try std.testing.expectEqual(@as(u64, 1), output.slice()[0].event.account_observed.source_sequence);
+    try std.testing.expectEqual(@as(u64, 2), output.slice()[1].event.account_observed.source_sequence);
+    var gap = output.slice()[1].event.account_observed;
+    gap.identity +%= 1;
+    gap.source_sequence = 4;
+    try std.testing.expectError(error.SourceSequenceGap, projection.apply(.{ .account_observed = gap }));
+    try std.testing.expect(!projection.valid);
     try std.testing.expectEqual(canonical.EventType.account_observed, canonical.eventType(output.slice()[0].event));
     try std.testing.expectEqual(@as(u64, 1), output.slice()[0].envelope.source_sequence);
+    try std.testing.expectEqual(@as(i128, 11_000_000), output.slice()[0].event.account_observed.value.balance.value.cash_balance.?.atoms);
+    try std.testing.expectEqual(@as(i128, 1), output.slice()[0].event.account_observed.value.balance.value.liability.?.atoms);
+    const margin = output.slice()[1].event.account_observed.value.margin.value;
+    try std.testing.expectEqual(@as(i128, 11_000_000), margin.amount.?.atoms);
+    try std.testing.expect(margin.initial_margin == null);
+    try std.testing.expectEqual(@as(i128, 11123456789012345678), margin.usd_valuation.?.total_equity.?.coefficient);
+    try std.testing.expectEqual(@as(u8, 18), margin.usd_valuation.?.initial_margin.?.scale);
+    try std.testing.expectError(error.MissingBalanceAvailable, reconciler.ingest(std.testing.allocator, .ws, null, test_times, "{\"topic\":\"wallet\",\"data\":[{\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"11.000000\"}]}]}"));
+    try std.testing.expectEqual(Stage.failed, reconciler.readiness().stage);
 }

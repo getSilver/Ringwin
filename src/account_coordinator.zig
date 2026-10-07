@@ -2113,7 +2113,7 @@ test "account recovery retains a forced shard commit awaiting coordinator ack" {
         var shard: trading.TradingShard = .{};
         var journal = trading.journal.Journal.init();
         try activateFixtureAssets(&shard, &journal);
-        _ = try applyCoreStable(&shard, &journal, .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 1, .quantity_denominator = 1, .reservation_model = .leveraged } } });
+        _ = try applyCoreStable(&shard, &journal, .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 1, .venue = 1, .quantity_denominator = 1, .reservation_model = .leveraged } } });
         _ = try applyCoreStable(&shard, &journal, .{ .identity = 2, .payload = .{ .margin_rules_activated = .{ .version = 1 } } });
         _ = try applyCoreStable(&shard, &journal, .{ .identity = 3, .payload = .{ .account_configuration = .{ .exchange_account_identity = 900 } } });
         _ = try applyCoreStable(&shard, &journal, .{ .identity = 4, .payload = .{ .exchange_balance = .{ .cash_atoms = 10_000 } } });

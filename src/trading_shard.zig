@@ -316,6 +316,7 @@ pub const TradingShard = struct {
                 candidate.oms.begin();
                 try candidate.latchEconomicFault(event, switch (err) {
                     error.Overflow, error.QuantityOutOfRange, error.PriceOutOfRange, error.AssetAmountOutOfRange => .overflow,
+                    error.NativeAssetCapacityExceeded, error.LedgerCapacityExceeded, error.EconomicFactCapacityExceeded => .capacity_exhausted,
                     error.UnknownAssetDefinition => .unknown_asset,
                     error.MissingFillFee => .missing_amount,
                     error.InexactEconomicAmount => .inexact_amount,
@@ -494,6 +495,11 @@ pub const TradingShard = struct {
             .suspense_usdt_atoms = self.economic_projection.suspense_usdt_atoms,
             .ledger_transactions = self.economic_projection.ledger_count,
             .reconciliation_break = self.economic_projection.reconciliation_break,
+            .valuation_complete = self.economic_projection.reportingValuationComplete(),
+            .treasury_native_assets = self.economic_projection.treasury_native_assets,
+            .treasury_native_asset_count = self.economic_projection.treasury_native_asset_count,
+            .suspense_native_assets = self.economic_projection.suspense_native_assets,
+            .suspense_native_asset_count = self.economic_projection.suspense_native_asset_count,
         };
     }
 
@@ -523,7 +529,7 @@ pub const TradingShard = struct {
 
     pub fn integritySnapshot(self: *const TradingShard) IntegritySnapshot {
         return .{
-            .account_valid = self.canonical_account.valid,
+            .account_valid = self.canonical_account.valid and self.economic_fault_count == 0,
             .account_failure = self.canonical_account.failure,
             .market_health = self.canonical_market.aggregateHealth(),
             .market_failure = self.canonical_market.latestFailure(),
@@ -680,6 +686,7 @@ pub const TradingShard = struct {
             }
             const instrument_config = self.instrumentEntry(intent.instrument) orelse return error.UnknownOmsInstrument;
             if (!instrument_config.margin_configured) return error.InstrumentRulesInactive;
+            const observed_exchange_cash = try self.currentNativeRiskCash(intent.instrument);
             if (instrument_config.product == .spot) {
                 const unit = try self.baseAtomsPerLot(instrument_config);
                 try self.asset_registry.checkAmount(.{ .asset = unit.asset, .atoms = try std.math.mul(i128, intent.quantity, unit.atoms) }, true);
@@ -766,7 +773,7 @@ pub const TradingShard = struct {
             const mark_price = mark.ticks;
             const assessment = try risk_module.assess(self.riskRules(intent.instrument), self.riskLimits(), .{
                 .portfolio_cash = .{ .asset = settlement_asset, .atoms = self.portfolioCash() },
-                .exchange_cash = .{ .asset = settlement_asset, .atoms = self.exchangeCash() },
+                .exchange_cash = .{ .asset = settlement_asset, .atoms = observed_exchange_cash },
                 .portfolio_position = .{ .instrument = intent.instrument, .rules_version = instrument_config.rules.version, .lots = portfolio_position_quantity },
                 .exchange_position = .{ .instrument = intent.instrument, .rules_version = instrument_config.rules.version, .lots = exchange_position_quantity },
                 .active_order_reservations = active,
@@ -1013,6 +1020,7 @@ pub const TradingShard = struct {
         if (event == .mark_price and self.asset_registry.get(self.economic_projection.settlement_asset) == null)
             return self.economic_projection.applyChanged(event);
         try self.checkAssetAmounts(event, event != .account_snapshot);
+        if (event == .fill) try self.checkNativeCharges(event.fill.native_fee, event.fill.native_rebate);
         switch (event) {
             .fill => |fill| if (fill.product == .spot) {
                 try self.asset_registry.checkAmount(.{ .asset = fill.base_atom_value.asset, .atoms = try std.math.mul(i128, fill.quantity.lots, fill.base_atom_value.atoms) }, true);
@@ -1032,6 +1040,18 @@ pub const TradingShard = struct {
         return changed;
     }
 
+    fn checkNativeCharges(self: *const TradingShard, fee: ?canonical.AssetAmount, rebate: ?canonical.AssetAmount) !void {
+        for ([_]?canonical.AssetAmount{ fee, rebate }, 0..) |optional_amount, index| {
+            const amount = optional_amount orelse continue;
+            try self.asset_registry.checkAmount(amount, true);
+            const definition = self.asset_registry.get(amount.asset) orelse return error.UnknownAssetDefinition;
+            const current = self.economic_projection.portfolio.nativeAsset(amount.asset);
+            const accrued = if (current) |entry| if (index == 0) entry.fee_atoms else entry.rebate_atoms else 0;
+            if (try std.math.add(i128, accrued, amount.atoms) > definition.definition.max_cumulative_atoms)
+                return error.AssetAmountOutOfRange;
+        }
+    }
+
     fn checkEconomicRanges(self: *const TradingShard) !void {
         const quote = self.asset_registry.get(self.economic_projection.settlement_asset) orelse return error.UnknownAssetDefinition;
         if (self.economic_projection.base_asset != 0) {
@@ -1049,7 +1069,17 @@ pub const TradingShard = struct {
         }
         for ([_]i128{ self.economic_projection.treasury_usdt_atoms, self.economic_projection.suspense_usdt_atoms }) |amount|
             try self.asset_registry.checkAmount(.{ .asset = quote.definition.asset, .atoms = amount }, false);
+        for (self.economic_projection.treasury_native_assets[0..self.economic_projection.treasury_native_asset_count]) |amount|
+            try self.asset_registry.checkAmount(amount, false);
+        for (self.economic_projection.suspense_native_assets[0..self.economic_projection.suspense_native_asset_count]) |amount|
+            try self.asset_registry.checkAmount(amount, false);
         for ([_]economics_module.Layer{ self.economic_projection.portfolio, self.economic_projection.exchange }) |layer| {
+            for (layer.native_assets[0..layer.native_asset_count]) |native| {
+                const definition = self.asset_registry.get(native.asset) orelse return error.UnknownAssetDefinition;
+                try self.asset_registry.checkAmount(.{ .asset = native.asset, .atoms = native.balance_atoms }, false);
+                if (native.fee_atoms > definition.definition.max_cumulative_atoms or native.rebate_atoms > definition.definition.max_cumulative_atoms)
+                    return error.AssetAmountOutOfRange;
+            }
             if (self.economic_projection.base_asset != 0) {
                 const base = self.asset_registry.get(self.economic_projection.base_asset) orelse return error.UnknownAssetDefinition;
                 try self.asset_registry.checkAmount(.{ .asset = base.definition.asset, .atoms = layer.spot_asset_atoms }, false);
@@ -1666,13 +1696,19 @@ pub const TradingShard = struct {
                 if (known.event_type != event_type or
                     !std.mem.eql(u8, &known.raw_digest, &record.envelope.raw_evidence.digest) or
                     !std.mem.eql(u8, &known.payload_digest, &payload_digest))
+                {
+                    const account = if (self.exchange_account_identity != 0) self.exchange_account_identity else self.canonical_account.exchange_account orelse 0;
+                    if (record.envelope.exchange_account == account and
+                        (record.event == .account_observed or record.event == .account_bootstrap_snapshot))
+                        try self.canonical_account.rejectIdentityConflict();
                     return error.ConflictingCanonicalIdentity;
+                }
                 return true;
             }
             cursor_index = index;
             break;
         }
-        if (try self.semanticDuplicate(record.event)) return true;
+        if (try self.semanticDuplicate(record)) return true;
         if (cursor_index) |index|
             if (record.envelope.identity.sequence < self.canonical_ingress_cursors[index].identity.sequence)
                 return error.StaleCanonicalIdentity;
@@ -1711,8 +1747,21 @@ pub const TradingShard = struct {
         return false;
     }
 
-    fn semanticDuplicate(self: *const TradingShard, event: canonical.Payload) !bool {
-        return switch (event) {
+    fn semanticDuplicate(self: *TradingShard, record: canonical.EventRecord) !bool {
+        const account = if (self.exchange_account_identity != 0) self.exchange_account_identity else self.canonical_account.exchange_account orelse record.envelope.exchange_account;
+        return switch (record.event) {
+            .account_observed => |observation| blk: {
+                if (record.envelope.exchange_account != account or
+                    observation.exchange_account != account) return error.CanonicalScopeMismatch;
+                break :blk try self.canonical_account.lookupObservation(observation);
+            },
+            .account_bootstrap_snapshot => |bootstrap_snapshot| blk: {
+                if (record.envelope.exchange_account != account or
+                    bootstrap_snapshot.exchange_account != account) return error.CanonicalScopeMismatch;
+                if (self.canonical_account.bootstrap != bootstrap_snapshot.identity) break :blk false;
+                try self.canonical_account.apply(record.event);
+                break :blk true;
+            },
             .execution_report => |report| blk: {
                 const oms_report = self.omsReportFromCanonical(report) catch break :blk false;
                 const known = self.oms.lookupReport(oms_report) catch |err| switch (err) {
@@ -1814,10 +1863,62 @@ pub const TradingShard = struct {
         return error.AssetPrecisionUnsupported;
     }
 
+    /// The same current native evidence qualifies risk and authorizes dispatch.
+    pub fn currentNativeRiskCash(self: *const TradingShard, instrument: canonical.InstrumentIdentity) !i128 {
+        if (self.economic_fault_count != 0) return error.ExchangeOpeningGateClosed;
+        const configured = self.instrumentEntry(instrument) orelse return error.UnknownOmsInstrument;
+        var observed_exchange_cash = self.exchangeCash();
+        if (self.canonical_account.bootstrap != null) {
+            const account = &self.canonical_account;
+            if (!account.valid or account.exchange_account != self.exchange_account_identity)
+                return error.ExchangeOpeningGateClosed;
+            if (configured.product == .spot) {
+                const available = account.nativeAvailable(configured.rules.settlement_asset) orelse return error.ExchangeOpeningGateClosed;
+                for (account.margins[0..account.margin_count]) |margin| {
+                    if (margin.usd_valuation) |valuation| {
+                        for ([_]?canonical.Decimal{ valuation.initial_margin, valuation.maintenance_margin, valuation.isolated_equity }) |value|
+                            if (value) |amount| if (amount.coefficient != 0) return error.ExchangeOpeningGateClosed;
+                    }
+                }
+                for (account.balances[0..account.balance_count]) |balance|
+                    if (account.nativeAvailable(balance.asset) == null) return error.ExchangeOpeningGateClosed;
+                for (account.positions[0..account.position_count]) |position| {
+                    if (position.quantity.lots == 0) continue;
+                    const positioned = self.instrumentEntry(position.instrument) orelse return error.ExchangeOpeningGateClosed;
+                    if (positioned.product != .spot) return error.ExchangeOpeningGateClosed;
+                }
+                observed_exchange_cash = @min(observed_exchange_cash, available.atoms);
+            } else {
+                _ = account.nativeMarginEvidence(instrument, configured.rules.settlement_asset) orelse return error.ExchangeOpeningGateClosed;
+                for (account.positions[0..account.position_count]) |position| {
+                    if (position.quantity.lots == 0) continue;
+                    const positioned = self.instrumentEntry(position.instrument) orelse return error.ExchangeOpeningGateClosed;
+                    if (positioned.product != configured.product or positioned.rules.settlement_asset != configured.rules.settlement_asset)
+                        return error.ExchangeOpeningGateClosed;
+                }
+                var available: ?i128 = null;
+                for (account.balances[0..account.balance_count]) |balance| {
+                    if (balance.asset != configured.rules.settlement_asset) continue;
+                    if (available != null or balance.available.asset != balance.asset or balance.available.atoms < 0)
+                        return error.ExchangeOpeningGateClosed;
+                    for ([_]?canonical.AssetAmount{ balance.liability, balance.isolated_liability, balance.cross_liability }) |debt| {
+                        const amount = debt orelse return error.ExchangeOpeningGateClosed;
+                        if (amount.asset != balance.asset or amount.atoms != 0) return error.ExchangeOpeningGateClosed;
+                    }
+                    available = balance.available.atoms;
+                }
+                observed_exchange_cash = @min(observed_exchange_cash, available orelse return error.ExchangeOpeningGateClosed);
+            }
+        }
+        return observed_exchange_cash;
+    }
+
     pub fn settlementConsumersCompatible(self: *const TradingShard, instrument: canonical.InstrumentIdentity) bool {
         if (self.asset_configuration_failed) return false;
         const entry = self.instrumentEntry(instrument) orelse return false;
         if (!entry.margin_configured) return false;
+        if (!self.asset_registry.hasVenueCode(entry.rules.settlement_asset, entry.venue) or
+            (entry.product == .spot and !self.asset_registry.hasVenueCode(entry.rules.base_asset, entry.venue))) return false;
         const denominator = if (entry.product == .spot) self.economic_projection.spot_quantity_denominator else self.economic_projection.swap_quantity_denominator;
         const numerator = if (entry.product == .spot) self.economic_projection.spot_quantity_numerator else self.economic_projection.swap_quantity_numerator;
         if (denominator != 0 and
@@ -1913,13 +2014,15 @@ pub const TradingShard = struct {
         var settlement_rebate = canonical.AssetAmount{ .asset = self.economic_projection.settlement_asset, .atoms = 0 };
         var base_fee = canonical.AssetAmount{ .asset = if (instrument_config.product == .spot) instrument_config.rules.base_asset else settlement_asset, .atoms = 0 };
         var base_rebate = base_fee;
+        var native_fee: ?canonical.AssetAmount = null;
+        var native_rebate: ?canonical.AssetAmount = null;
         if (fee.atoms != 0) {
             if (fee.asset == self.economic_projection.settlement_asset)
                 settlement_fee = fee
             else if (instrument_config.product == .spot and fee.asset == instrument_config.rules.base_asset)
                 base_fee = fee
             else
-                return error.InvalidEconomicFact;
+                native_fee = fee;
         }
         if (rebate.atoms != 0) {
             if (rebate.asset == self.economic_projection.settlement_asset)
@@ -1927,9 +2030,10 @@ pub const TradingShard = struct {
             else if (instrument_config.product == .spot and rebate.asset == instrument_config.rules.base_asset)
                 base_rebate = rebate
             else
-                return error.InvalidEconomicFact;
+                native_rebate = rebate;
         }
         const economic_instrument = fill.instrument;
+        try self.checkNativeCharges(native_fee, native_rebate);
         const changed = try self.economic_projection.applyCanonicalFill(.{
             .identity = fill_id,
             .order_id = order_id,
@@ -1947,6 +2051,8 @@ pub const TradingShard = struct {
             .base_fee = base_fee,
             .base_atom_value = if (instrument_config.product == .spot) try self.baseAtomsPerLot(instrument_config) else .{ .asset = settlement_asset, .atoms = 0 },
             .base_rebate = base_rebate,
+            .native_fee = native_fee,
+            .native_rebate = native_rebate,
             .portfolio_margin_ppm = if (instrument_config.margin_configured) instrument_config.margin.internal_initial_margin_ppm else self.internal_initial_margin_ppm,
             .exchange_margin_ppm = if (instrument_config.margin_configured) instrument_config.margin.venue_initial_margin_ppm else self.venue_initial_margin_ppm,
             .product = instrument_config.product,
@@ -1978,11 +2084,22 @@ pub const TradingShard = struct {
         switch (input.payload) {
             .asset_definition_activated => |definition| {
                 const previous = self.asset_registry.get(definition.asset);
-                if (try self.asset_registry.activate(definition, @intCast(self.trace.len + 1)))
-                    try self.trace.append(.asset_definition_activated, input.identity);
-                // Until native unit consumers are qualified, new scales remain RecoveryOnly.
-                if ((previous != null and previous.?.definition.version != definition.version) or
-                    (definition.asset != self.economic_projection.settlement_asset and definition.asset != 0x425443)) self.oms.recovery_only = true;
+                var configured = self.*;
+                if (!try configured.asset_registry.activate(definition, @intCast(self.trace.len + 1))) return null;
+                if (configured.asset_registry.get(configured.economic_projection.settlement_asset) != null)
+                    try configured.checkEconomicRanges();
+                // Partial virgin activation has no complete monetary namespace yet.
+                if (configured.asset_registry.consumerCompatible(true)) {
+                    for (configured.canonical_account.balances[0..configured.canonical_account.balance_count]) |balance|
+                        try configured.checkAssetAmounts(balance, false);
+                    for (configured.canonical_account.positions[0..configured.canonical_account.position_count]) |position|
+                        try configured.checkAssetAmounts(position, false);
+                    for (configured.canonical_account.margins[0..configured.canonical_account.margin_count]) |margin|
+                        try configured.checkAssetAmounts(margin, false);
+                }
+                self.asset_registry = configured.asset_registry;
+                try self.trace.append(.asset_definition_activated, input.identity);
+                if (previous != null and previous.?.definition.version != definition.version) self.oms.recovery_only = true;
                 return null;
             },
             .control_command => |command| {
@@ -2221,7 +2338,21 @@ pub const TradingShard = struct {
                 if (!self.exchange_positions_observed or balance.cash_atoms <= 0 or
                     balance.cash_atoms != self.exchangeCash() or self.opening_balance_observed)
                     return error.InvalidOpeningBalance;
+                if (balance.native_balance_count > balance.native_balances.len) return error.InvalidOpeningBalance;
+                for (balance.native_balances[0..balance.native_balance_count]) |native| {
+                    try self.asset_registry.checkAmount(native, false);
+                    if (self.canonical_account.nativeAvailable(native.asset) == null) return error.InvalidOpeningBalance;
+                    var matches = false;
+                    for (self.canonical_account.balances[0..self.canonical_account.balance_count]) |observed| {
+                        if (observed.asset == native.asset and std.meta.eql(observed.total, native)) matches = true;
+                    }
+                    if (!matches) return error.InvalidOpeningBalance;
+                    for (self.instrument_registry.entries[0..self.instrument_registry.count]) |instrument|
+                        if (instrument.rules.base_asset == native.asset) return error.InvalidOpeningBalance;
+                }
                 self.economic_projection.treasury_usdt_atoms = balance.cash_atoms;
+                try self.economic_projection.openNativeBalances(balance.native_balances[0..balance.native_balance_count]);
+                try self.checkEconomicRanges();
                 self.economic_projection.ledger_summary = .{
                     .transaction_count = 1,
                     .portfolio_debits_atoms = balance.cash_atoms,
@@ -2640,6 +2771,10 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
     zeroUnused(u64, shard.economic_projection.reconciliation_break_identities[shard.economic_projection.reconciliation_break_count..]);
     zeroUnused(@TypeOf(shard.economic_projection.seen[0]), shard.economic_projection.seen[shard.economic_projection.seen_count..]);
     zeroUnused(economics_module.CanonicalFactEvidence, shard.economic_projection.canonical_fill_evidence[shard.economic_projection.canonical_fill_evidence_count..]);
+    zeroUnused(economics_module.NativeAssetState, shard.economic_projection.portfolio.native_assets[shard.economic_projection.portfolio.native_asset_count..]);
+    zeroUnused(economics_module.NativeAssetState, shard.economic_projection.exchange.native_assets[shard.economic_projection.exchange.native_asset_count..]);
+    zeroUnused(canonical.AssetAmount, shard.economic_projection.treasury_native_assets[shard.economic_projection.treasury_native_asset_count..]);
+    zeroUnused(canonical.AssetAmount, shard.economic_projection.suspense_native_assets[shard.economic_projection.suspense_native_asset_count..]);
     for (shard.economic_projection.ledger[0..shard.economic_projection.ledger_count]) |*transaction|
         zeroUnused(economics_module.LedgerPosting, transaction.postings[transaction.posting_count..]);
     zeroUnused(economics_module.LedgerTransaction, shard.economic_projection.ledger[shard.economic_projection.ledger_count..]);
@@ -2687,6 +2822,10 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         shard.economic_projection.canonical_fill_evidence_count > shard.economic_projection.canonical_fill_evidence.len or
         shard.economic_projection.ledger_count > shard.economic_projection.ledger.len or
         shard.economic_projection.reconciliation_break_count > shard.economic_projection.reconciliation_break_identities.len or
+        shard.economic_projection.portfolio.native_asset_count > economics_module.max_native_assets or
+        shard.economic_projection.exchange.native_asset_count > economics_module.max_native_assets or
+        shard.economic_projection.treasury_native_asset_count > economics_module.max_native_assets or
+        shard.economic_projection.suspense_native_asset_count > economics_module.max_native_assets or
         shard.operational_state.command_count > operational.max_commands or
         shard.operational_state.gate_count > operational.max_gates or
         shard.operational_state.latch_count > operational.max_latches or
@@ -2698,6 +2837,7 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         shard.fenced_strategy_count > shard.fenced_strategy_instances.len)
         return error.InvalidSnapshotState;
     try shard.asset_registry.validate();
+    try shard.canonical_account.validate();
     if (shard.asset_configuration_failed and !shard.oms.recovery_only) return error.InvalidSnapshotState;
     for (shard.asset_registry.entries[0..shard.asset_registry.count]) |entry| {
         if (entry.barrier > shard.trace.len or shard.trace.events[entry.barrier - 1].kind != .asset_definition_activated)
@@ -3347,6 +3487,8 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
 }
 
 fn digestCanonicalProjections(hasher: *Sha256, shard: TradingShard) void {
+    const account_digest = shard.canonical_account.digest();
+    hasher.update(&account_digest);
     digestBool(hasher, shard.canonical_account.valid);
     digestBool(hasher, shard.canonical_account.failure != null);
     if (shard.canonical_account.failure) |failure| digestInt(hasher, u8, @intFromEnum(failure));
@@ -3426,6 +3568,8 @@ fn semanticStateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     digestEconomicFault(&hasher, shard);
     const economics_digest = shard.economic_projection.semanticDigest();
     hasher.update(&economics_digest);
+    const account_digest = shard.canonical_account.semanticDigest();
+    hasher.update(&account_digest);
     digestBool(&hasher, shard.canonical_account.valid);
     digestBool(&hasher, shard.canonical_account.failure != null);
     digestInt(&hasher, i128, shard.portfolioCash());
@@ -3580,7 +3724,13 @@ fn digestAssetRegistry(hasher: *Sha256, shard: TradingShard, include_barriers: b
             switch (@typeInfo(field.type)) {
                 .int => digestInt(hasher, field.type, item),
                 .@"enum" => digestInt(hasher, u8, @intFromEnum(item)),
-                .array => hasher.update(&item),
+                .array => if (comptime std.mem.eql(u8, field.name, "code_bindings")) {
+                    for (item) |binding| {
+                        digestInt(hasher, u64, binding.venue);
+                        digestInt(hasher, u8, binding.code_len);
+                        hasher.update(&binding.code);
+                    }
+                } else hasher.update(&item),
                 else => unreachable,
             }
         }

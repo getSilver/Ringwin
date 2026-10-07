@@ -1,12 +1,12 @@
 # 07：让第三 Asset 费用与返佣形成原币闭环
 
 Type: task
-Status: open
-Assignee:
+Status: in-progress
+Assignee: codex/asset-precision-accounting
 Blocked by: [06：精确记录基础资产费用并分离 atoms 与 lots](06-separate-base-atoms-from-trade-lots.md)
 Parent: [落实权威资产精度与精确经济账务](../map.md)
 Spec: [父 Spec](01-exact-asset-accounting-spec.md)
-Label: ready-for-agent
+Label: in-progress
 Phase: S3
 
 ## Question
@@ -48,5 +48,6 @@ Phase: S3
 
 ## Evidence
 
-尚未实施；验收项均待执行。本票按 2026-10-03 用户确认的拆分发布。
+2026-10-05：从已完成 06 的提交 `92c0ede6` 认领本票；仅实施既有公开接缝上的原币费用、返佣及有界资产配置，验收项待实际验证。
 
+2026-10-06 定向证据（尚待最终审查）：原始 OKX ready ingress → tryDrain → Owner → ledger → DurableStore / snapshot / replay，结算/base/第三资产及原币账户联合 Debug/ReleaseSafe 各 26/26；包括第三资产费用/返佣/显式零、超 i64、未知/不可表示、相同身份冲突、累计界限、单订单部分成交耗尽 ledger 容量。固定整数断言 Portfolio/Exchange 原币 posting、Treasury opening ownership、未估值状态及恢复摘要，未执行任何在线写入。后续发送校验及跨 Venue 连续观察审查修复仍待封存，验收项未勾选。

@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const schema_version: u16 = 7;
+pub const schema_version: u16 = 8;
 
 pub const VenueIdentity = u64;
 pub const Product = enum(u8) { spot, isolated_linear_usdt };
@@ -68,7 +68,9 @@ pub const Decimal = struct {
 
     pub fn faultReason(err: anyerror) ?EconomicFaultReason {
         return switch (err) {
-            error.UnknownAssetDefinition => .unknown_asset,
+            error.UnknownAssetDefinition, error.UnsupportedAsset => .unknown_asset,
+            error.MissingAsset, error.MissingFeeAsset, error.MissingRebateAsset => .missing_asset,
+            error.NativeAssetCapacityExceeded, error.LedgerCapacityExceeded, error.EconomicFactCapacityExceeded, error.AssetRegistryFull => .capacity_exhausted,
             error.AssetDefinitionInactive => .invalid_economic_fact,
             error.AssetAmountOutOfRange => .overflow,
             error.InvalidDecimal => .malformed_amount,
@@ -146,6 +148,24 @@ fn pow10(exponent: u8) !i128 {
 }
 
 /// Owner-published unit and bounded arithmetic scope; fixture evidence never qualifies production.
+pub const max_asset_code_bindings = 4;
+pub const max_asset_definitions = 8;
+pub const AssetCodeBinding = struct {
+    venue: VenueIdentity = 0,
+    code: [16]u8 = @splat(0),
+    code_len: u8 = 0,
+
+    pub fn init(venue: VenueIdentity, code: []const u8) !AssetCodeBinding {
+        if (venue == 0 or code.len == 0 or code.len > 16) return error.InvalidAssetCode;
+        var result: AssetCodeBinding = .{ .venue = venue, .code_len = @intCast(code.len) };
+        for (code) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return error.InvalidAssetCode;
+        @memcpy(result.code[0..code.len], code);
+        return result;
+    }
+    pub fn slice(self: *const AssetCodeBinding) []const u8 {
+        return self.code[0..self.code_len];
+    }
+};
 pub const AssetDefinition = struct {
     asset: AssetIdentity,
     atomic_scale: u8,
@@ -160,6 +180,8 @@ pub const AssetDefinition = struct {
     max_price_ticks: i64,
     max_rescale_power: u8,
     max_postings: u16,
+    code_binding_count: u8 = 0,
+    code_bindings: [max_asset_code_bindings]AssetCodeBinding = @splat(.{}),
 };
 
 pub const AssetAmount = struct {
@@ -368,14 +390,23 @@ pub const AccountPosition = struct {
     leverage: ?Decimal = null,
     unrealized_pnl: ?AssetAmount = null,
 };
+/// USD valuations retain source decimals; they are never native cash.
+pub const AccountMarginUsdValuation = struct {
+    total_equity: ?Decimal = null,
+    adjusted_equity: ?Decimal = null,
+    initial_margin: ?Decimal = null,
+    maintenance_margin: ?Decimal = null,
+    isolated_equity: ?Decimal = null,
+};
 pub const AccountMargin = struct {
     instrument: ?InstrumentIdentity = null,
-    amount: AssetAmount,
+    amount: ?AssetAmount = null,
     adjusted_equity: ?AssetAmount = null,
     initial_margin: ?AssetAmount = null,
     maintenance_margin: ?AssetAmount = null,
     isolated_equity: ?AssetAmount = null,
     margin_ratio: ?Decimal = null,
+    usd_valuation: ?AccountMarginUsdValuation = null,
 };
 pub const max_account_facts = 8;
 pub const AccountSnapshotScope = struct { balances_complete: bool, positions_complete: bool, margins_complete: bool };
@@ -514,7 +545,7 @@ pub const VenueAccountConfigurationSnapshot = struct {
     },
 };
 
-pub const EconomicFaultReason = enum(u8) { missing_amount, missing_asset, unknown_asset, malformed_amount, inexact_amount, overflow, invalid_economic_fact, decoder_rejected, persistence_failure };
+pub const EconomicFaultReason = enum(u8) { missing_amount, missing_asset, unknown_asset, malformed_amount, inexact_amount, overflow, invalid_economic_fact, decoder_rejected, persistence_failure, capacity_exhausted };
 pub const EconomicFault = struct { reason: EconomicFaultReason };
 
 pub const Payload = union(enum) {

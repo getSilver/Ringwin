@@ -203,6 +203,7 @@ test {
     _ = windows_verification_runtime;
     _ = venue_fill_recovery_acceptance;
     _ = @import("asset_precision_file_recovery_acceptance.zig");
+    _ = @import("native_account_continuity_acceptance.zig");
     _ = @import("okx_live_chain.zig");
     _ = raw_ingress;
 }

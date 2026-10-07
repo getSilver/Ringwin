@@ -968,6 +968,26 @@ const EngineOwners = struct {
             .margin_count = 0,
         } });
         account_bootstrap.venue.envelope.identity.stream = 2;
+        // The simulated account supplies explicit native funding and margin facts.
+        account_bootstrap.venue.event.account_bootstrap_snapshot.balance_count = 1;
+        account_bootstrap.venue.event.account_bootstrap_snapshot.balances[0] = .{
+            .asset = fixture.settlement_asset,
+            .total = .{ .asset = fixture.settlement_asset, .atoms = 25_000_000_000 },
+            .available = .{ .asset = fixture.settlement_asset, .atoms = 25_000_000_000 },
+            .held = .{ .asset = fixture.settlement_asset, .atoms = 0 },
+            .cash_balance = .{ .asset = fixture.settlement_asset, .atoms = 25_000_000_000 },
+            .liability = .{ .asset = fixture.settlement_asset, .atoms = 0 },
+            .isolated_liability = .{ .asset = fixture.settlement_asset, .atoms = 0 },
+            .cross_liability = .{ .asset = fixture.settlement_asset, .atoms = 0 },
+        };
+        account_bootstrap.venue.event.account_bootstrap_snapshot.margin_count = 1;
+        account_bootstrap.venue.event.account_bootstrap_snapshot.margins[0] = .{
+            .instrument = fixture.swap_instrument,
+            .amount = .{ .asset = fixture.settlement_asset, .atoms = 25_000_000_000 },
+            .initial_margin = .{ .asset = fixture.settlement_asset, .atoms = 0 },
+            .maintenance_margin = .{ .asset = fixture.settlement_asset, .atoms = 0 },
+            .isolated_equity = .{ .asset = fixture.settlement_asset, .atoms = 25_000_000_000 },
+        };
         account_bootstrap.venue.envelope.source_stream = 2;
         account_bootstrap.venue.envelope.raw_evidence.stream = 2;
         _ = try self.shard_run.apply(account_bootstrap);

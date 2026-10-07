@@ -1,7 +1,7 @@
 //! Fixed units for one ledger history. TradingShard owns activation barriers.
 const std = @import("std");
 const canonical = @import("canonical_event.zig");
-pub const max_entries = 8;
+pub const max_entries = canonical.max_asset_definitions;
 pub const Entry = struct { definition: canonical.AssetDefinition, barrier: u64 };
 pub const Registry = struct {
     entries: [max_entries]Entry = @splat(std.mem.zeroes(Entry)),
@@ -12,6 +12,10 @@ pub const Registry = struct {
     }
     pub fn activate(self: *Registry, definition: canonical.AssetDefinition, barrier: u64) !bool {
         try validateDefinition(definition);
+        for (self.entries[0..self.count]) |entry| {
+            if (entry.definition.asset == definition.asset) continue;
+            try checkCodeConflicts(entry.definition, definition);
+        }
         if (barrier == 0) return error.AssetDefinitionInactive;
         for (self.entries[0..self.count]) |*entry| {
             const known = entry.definition;
@@ -35,8 +39,27 @@ pub const Registry = struct {
         for (self.entries[0..self.count], 0..) |entry, index| {
             try validateDefinition(entry.definition);
             if (entry.barrier == 0) return error.AssetDefinitionInactive;
-            for (self.entries[0..index]) |prior| if (prior.definition.asset == entry.definition.asset) return error.AssetDefinitionConflict;
+            for (self.entries[0..index]) |prior| {
+                if (prior.definition.asset == entry.definition.asset) return error.AssetDefinitionConflict;
+                try checkCodeConflicts(prior.definition, entry.definition);
+            }
         }
+    }
+    pub fn resolveCode(self: *const Registry, venue: canonical.VenueIdentity, code: []const u8) !canonical.AssetIdentity {
+        if (code.len == 0) return error.UnsupportedAsset;
+        for (self.entries[0..self.count]) |entry| {
+            if (entry.barrier == 0 or entry.definition.version == 0) return error.AssetDefinitionInactive;
+            for (entry.definition.code_bindings[0..entry.definition.code_binding_count]) |binding| {
+                if (binding.venue == venue and std.mem.eql(u8, binding.slice(), code)) return entry.definition.asset;
+            }
+        }
+        return error.UnsupportedAsset;
+    }
+    pub fn hasVenueCode(self: *const Registry, asset: canonical.AssetIdentity, venue: canonical.VenueIdentity) bool {
+        const entry = self.get(asset) orelse return false;
+        for (entry.definition.code_bindings[0..entry.definition.code_binding_count]) |binding|
+            if (binding.venue == venue) return true;
+        return false;
     }
     /// Temporary admission ceiling for existing micros/i64 economic consumers.
     /// New atom scales are representable ingress, but cannot authorize those consumers.
@@ -47,14 +70,11 @@ pub const Registry = struct {
         for (self.entries[0..self.count]) |entry| if (!legacyDefinitionCompatible(entry.definition)) return false;
         return true;
     }
-    /// Native quote/base consumers share fixed units; third assets remain gated.
+    /// Every activated native asset uses the same bounded economic consumer.
     pub fn consumerCompatible(self: *const Registry, native_settlement_atoms: bool) bool {
         if (!native_settlement_atoms) return self.legacyConsumerCompatible();
         _ = self.get(1) orelse return false;
         _ = self.get(0x425443) orelse return false;
-        for (self.entries[0..self.count]) |entry| {
-            if (entry.definition.asset != 1 and entry.definition.asset != 0x425443) return false;
-        }
         return true;
     }
     pub fn checkAmount(self: *const Registry, amount_value: canonical.AssetAmount, single: bool) !void {
@@ -87,6 +107,25 @@ pub fn validateDefinition(value: canonical.AssetDefinition) !void {
     _ = std.math.mul(i128, value.max_cumulative_atoms, value.max_postings) catch return error.AssetRangeOverflow;
     _ = std.math.mul(i128, value.max_quantity_lots, value.max_price_ticks) catch return error.AssetRangeOverflow;
     _ = (canonical.Decimal{ .coefficient = value.max_cumulative_atoms, .scale = 0 }).exactAtoms(value.max_rescale_power) catch return error.AssetRangeOverflow;
+    if (value.code_binding_count > canonical.max_asset_code_bindings) return error.InvalidAssetDefinition;
+    for (value.code_bindings, 0..) |binding, index| {
+        if (index >= value.code_binding_count) {
+            if (!std.meta.eql(binding, canonical.AssetCodeBinding{})) return error.InvalidAssetDefinition;
+            continue;
+        }
+        if (binding.code_len == 0 or binding.code_len > binding.code.len) return error.InvalidAssetDefinition;
+        const normalized = canonical.AssetCodeBinding.init(binding.venue, binding.slice()) catch return error.InvalidAssetDefinition;
+        if (!std.meta.eql(binding, normalized)) return error.InvalidAssetDefinition;
+        for (value.code_bindings[0..index]) |prior|
+            if (prior.venue == binding.venue and std.mem.eql(u8, prior.slice(), binding.slice())) return error.AssetCodeConflict;
+    }
+}
+
+fn checkCodeConflicts(a: canonical.AssetDefinition, b: canonical.AssetDefinition) !void {
+    for (a.code_bindings[0..a.code_binding_count]) |left| {
+        for (b.code_bindings[0..b.code_binding_count]) |right|
+            if (left.venue == right.venue and std.mem.eql(u8, left.slice(), right.slice())) return error.AssetCodeConflict;
+    }
 }
 
 /// Explicit offline evidence. Policy forbids these definitions on live transport.
@@ -94,6 +133,24 @@ pub fn testDefinitions(usdt_scale: u8, btc_scale: u8) [2]canonical.AssetDefiniti
     var definitions: [2]canonical.AssetDefinition = undefined;
     for (&definitions, [_]canonical.AssetIdentity{ 1, 0x425443 }, [_]u8{ usdt_scale, btc_scale }) |*definition, asset, scale| {
         definition.* = .{ .asset = asset, .atomic_scale = scale, .version = 1, .source_identity = 0x74657374 + asset, .source_digest = @splat(0x74), .source_kind = .test_fixture, .max_single_atoms = 1_000_000_000_000_000, .max_balance_atoms = 1_000_000_000_000_000, .max_cumulative_atoms = 1_000_000_000_000_000_000, .max_quantity_lots = 1_000_000_000, .max_price_ticks = 100_000_000_000, .max_rescale_power = scale, .max_postings = 4 };
+        definition.code_binding_count = 3;
+        for ([_]canonical.VenueIdentity{ 1, 21, 42 }, 0..) |venue, index|
+            definition.code_bindings[index] = canonical.AssetCodeBinding.init(venue, if (asset == 1) "USDT" else "BTC") catch unreachable;
     }
     return definitions;
+}
+
+test "activated source asset codes resolve by venue and reject ambiguous authority" {
+    var registry: Registry = .{};
+    var quote = testDefinitions(6, 8)[0];
+    quote.code_bindings = @splat(.{});
+    quote.code_binding_count = 1;
+    quote.code_bindings[0] = try canonical.AssetCodeBinding.init(1, "USDT");
+    _ = try registry.activate(quote, 1);
+    try std.testing.expectEqual(@as(canonical.AssetIdentity, 1), try registry.resolveCode(1, "USDT"));
+    try std.testing.expectError(error.UnsupportedAsset, registry.resolveCode(21, "USDT"));
+    var third = quote;
+    third.asset = 99;
+    try std.testing.expectError(error.AssetCodeConflict, registry.activate(third, 2));
+    try std.testing.expectEqual(@as(u8, 1), registry.count);
 }

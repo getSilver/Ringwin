@@ -593,13 +593,13 @@ pub const OkxVenueAdapter = struct {
         const binding = self.binding orelse return error.InvalidBinding;
         const venue_order = try venueOrderRef(binding.venue, @intFromEnum(fill.venue_order_id));
         const venue_trade = try venueTradeRef(binding.venue, @intFromEnum(fill.venue_trade_id));
-        const fee_asset = try assetIdentity(fill.fee_asset.slice());
+        const fee_asset = try self.asset_definitions.resolveCode(binding.venue, fill.fee_asset.slice());
         const signed_fee = try assetAmount(self.asset_definitions, fee_asset, fill.fee);
         const explicit_rebate = if (fill.rebate) |value|
-            try assetAmount(self.asset_definitions, try assetIdentity((fill.rebate_asset orelse return error.MissingRebateAsset).slice()), value)
+            try assetAmount(self.asset_definitions, try self.asset_definitions.resolveCode(binding.venue, (fill.rebate_asset orelse return error.MissingRebateAsset).slice()), value)
         else
             null;
-        if (explicit_rebate != null and explicit_rebate.?.atoms <= 0) return error.InvalidFee;
+        if (explicit_rebate != null and explicit_rebate.?.atoms < 0) return error.InvalidFee;
         const normalized_fee: canonical.AssetAmount = if (signed_fee.atoms < 0) .{
             .asset = signed_fee.asset,
             .atoms = std.math.sub(i128, 0, signed_fee.atoms) catch return error.DecimalOverflow,
@@ -680,10 +680,10 @@ pub const OkxVenueAdapter = struct {
             .margin_count = 1,
         };
         for (balance.balances[0..balance.balance_count], 0..) |value, index|
-            snapshot.balances[index] = try balanceFor(self.asset_definitions, value);
+            snapshot.balances[index] = try balanceFor(self.asset_definitions, binding.venue, value);
         for (positions.positions[0..positions.position_count], 0..) |value, index|
             snapshot.positions[index] = try self.positionFor(value);
-        snapshot.margins[0] = try marginFor(self.asset_definitions, margin);
+        snapshot.margins[0] = try marginFor(margin);
         if (self.bootstrap_released) return;
         self.active_bootstrap = snapshot.identity;
         self.bootstrap_released = true;
@@ -695,7 +695,7 @@ pub const OkxVenueAdapter = struct {
         const binding = self.binding orelse return error.InvalidBinding;
         for (snapshot.balances[0..snapshot.balance_count]) |value| {
             self.account_source_sequence = try std.math.add(u64, self.account_source_sequence, 1);
-            const balance = try balanceFor(self.asset_definitions, value);
+            const balance = try balanceFor(self.asset_definitions, binding.venue, value);
             try self.appendPrivate(output, envelope, .asset, null, balance.asset, digestIdentity(envelope.source_fact_identity), .{ .account_observed = .{
                 .identity = digestIdentity(envelope.source_fact_identity) + self.account_source_sequence,
                 .exchange_account = binding.account,
@@ -728,7 +728,7 @@ pub const OkxVenueAdapter = struct {
         const bootstrap = self.active_bootstrap orelse return error.MissingBootstrap;
         const binding = self.binding orelse return error.InvalidBinding;
         self.account_source_sequence = try std.math.add(u64, self.account_source_sequence, 1);
-        const margin = try marginFor(self.asset_definitions, snapshot);
+        const margin = try marginFor(snapshot);
         try self.appendPrivate(output, envelope, .account, null, null, digestIdentity(envelope.source_fact_identity), .{ .account_observed = .{
             .identity = digestIdentity(envelope.source_fact_identity) + self.account_source_sequence,
             .exchange_account = binding.account,
@@ -741,6 +741,15 @@ pub const OkxVenueAdapter = struct {
 
     fn positionFor(self: *const OkxVenueAdapter, value: private.Position) !canonical.AccountPosition {
         const mapped = self.mapPrivateInstrument(value.instrument) orelse return error.UnsupportedInstrument;
+        var settlement: canonical.AssetIdentity = 0;
+        if (value.margin != null or value.unrealized_pnl != null) {
+            const binding = self.binding orelse return error.InvalidBinding;
+            const currency = value.currency orelse return error.MissingAsset;
+            settlement = try self.asset_definitions.resolveCode(binding.venue, currency.slice());
+            const configured = self.instrument_definitions.get(mapped.identity) orelse return error.UnsupportedInstrument;
+            if (configured.venue != binding.venue or configured.rules.version != self.profile.rules_version or configured.rules.settlement_asset != settlement)
+                return error.UnsupportedMarginUnit;
+        }
         const signed = try self.privateQuantity(mapped.identity, mapped.rules, value.quantity);
         const side: canonical.PositionSide = if (signed.lots < 0) .short else .long;
         const quantity = canonical.InstrumentQuantity{ .instrument = mapped.identity, .rules_version = self.profile.rules_version, .lots = if (signed.lots < 0) -signed.lots else signed.lots };
@@ -751,9 +760,9 @@ pub const OkxVenueAdapter = struct {
             .average_price = if (value.average_price) |price| try self.privatePrice(mapped.identity, mapped.rules, price) else null,
             .mark_price = if (value.mark_price) |price| try self.privatePrice(mapped.identity, mapped.rules, price) else null,
             .liquidation_price = if (value.liquidation_price) |price| try self.privatePrice(mapped.identity, mapped.rules, price) else null,
-            .margin = if (value.margin) |amount| try assetAmount(self.asset_definitions, usdt, amount) else null,
+            .margin = if (value.margin) |amount| try assetAmount(self.asset_definitions, settlement, amount) else null,
             .leverage = if (value.leverage) |leverage| decimal(leverage) else null,
-            .unrealized_pnl = if (value.unrealized_pnl) |pnl| try assetAmount(self.asset_definitions, usdt, pnl) else null,
+            .unrealized_pnl = if (value.unrealized_pnl) |pnl| try assetAmount(self.asset_definitions, settlement, pnl) else null,
         };
     }
 
@@ -1111,18 +1120,12 @@ fn privateInstrumentIdentity(value: private.Instrument) ?canonical.InstrumentIde
     };
 }
 
-fn assetIdentity(code: []const u8) !canonical.AssetIdentity {
-    if (std.mem.eql(u8, code, "BTC")) return btc;
-    if (std.mem.eql(u8, code, "USDT")) return usdt;
-    return error.UnsupportedAsset;
-}
-
 fn assetAmount(assets: @import("asset_registry.zig").Registry, asset: canonical.AssetIdentity, value: private.Decimal) !canonical.AssetAmount {
     return assets.amount(asset, decimal(value));
 }
 
-fn balanceFor(assets: @import("asset_registry.zig").Registry, value: private.Balance) !canonical.AccountBalance {
-    const asset = try assetIdentity(value.asset.slice());
+fn balanceFor(assets: @import("asset_registry.zig").Registry, venue_identity: canonical.VenueIdentity, value: private.Balance) !canonical.AccountBalance {
+    const asset = try assets.resolveCode(venue_identity, value.asset.slice());
     const total = try assetAmount(assets, asset, value.equity orelse return error.MissingBalanceTotal);
     const available = try assetAmount(assets, asset, value.available_balance orelse return error.MissingBalanceAvailable);
     const held = try assetAmount(assets, asset, value.frozen_balance orelse return error.MissingBalanceHeld);
@@ -1138,14 +1141,16 @@ fn balanceFor(assets: @import("asset_registry.zig").Registry, value: private.Bal
     };
 }
 
-fn marginFor(assets: @import("asset_registry.zig").Registry, value: private.ExchangeMarginSnapshot) !canonical.AccountMargin {
-    const amount = try assetAmount(assets, usdt, value.total_equity_usd orelse return error.MissingMarginEquity);
+fn marginFor(value: private.ExchangeMarginSnapshot) !canonical.AccountMargin {
+    const total = value.total_equity_usd orelse return error.MissingMarginEquity;
     return .{
-        .amount = amount,
-        .adjusted_equity = if (value.adjusted_equity_usd) |amount_value| try assetAmount(assets, usdt, amount_value) else null,
-        .initial_margin = if (value.initial_margin_usd) |amount_value| try assetAmount(assets, usdt, amount_value) else null,
-        .maintenance_margin = if (value.maintenance_margin_usd) |amount_value| try assetAmount(assets, usdt, amount_value) else null,
-        .isolated_equity = if (value.isolated_equity_usd) |amount_value| try assetAmount(assets, usdt, amount_value) else null,
+        .usd_valuation = .{
+            .total_equity = decimal(total),
+            .adjusted_equity = if (value.adjusted_equity_usd) |amount_value| decimal(amount_value) else null,
+            .initial_margin = if (value.initial_margin_usd) |amount_value| decimal(amount_value) else null,
+            .maintenance_margin = if (value.maintenance_margin_usd) |amount_value| decimal(amount_value) else null,
+            .isolated_equity = if (value.isolated_equity_usd) |amount_value| decimal(amount_value) else null,
+        },
         .margin_ratio = if (value.margin_ratio) |ratio| decimal(ratio) else null,
     };
 }
@@ -1463,6 +1468,27 @@ test "OKX adapter releases ready private WS facts through the canonical seam" {
     while (try adapter.tryDrain()) |_| {}
     try std.testing.expect(reconciler.readiness().reconciliation_ready);
     try std.testing.expect(implementation.pending_account_reconciliation == null);
+    _ = try implementation.instrument_definitions.register(.{ .instrument = btc_usdt_swap, .venue = 1, .product = .isolated_linear_usdt, .rules = .{ .version = 8, .instrument_identity = btc_usdt_swap, .quantity_denominator = 10000, .reservation_model = .leveraged, .venue = 1, .settlement_asset = usdt }, .margin = .{ .version = 1 } });
+    const native_positions =
+        \\{"arg":{"channel":"positions"},"eventType":"snapshot","curPage":1,"lastPage":true,"data":[{"posId":"55","instId":"BTC-USDT-SWAP","mgnMode":"isolated","posSide":"net","pos":"1","margin":"1.000001","upl":"0.000001","ccy":"USDT","uTime":"1800000000300"}]}
+    ;
+    try std.testing.expect((try implementation.ingestPrivateWs(private_test_times, native_positions)).rejection == null);
+    const position_output = (try adapter.tryDrain()).?;
+    const native_position = position_output.slice()[0].event.account_observed.value.position.value;
+    try std.testing.expectEqual(@as(i128, 1_000_001), native_position.margin.?.atoms);
+    try std.testing.expectEqual(@as(i128, 1), native_position.unrealized_pnl.?.atoms);
+    try std.testing.expectEqual(usdt, native_position.margin.?.asset);
+    try std.testing.expect((try implementation.ingestPrivateWs(private_test_times,
+        \\{"arg":{"channel":"positions"},"eventType":"snapshot","curPage":1,"lastPage":true,"data":[{"posId":"55","instId":"BTC-USDT-SWAP","mgnMode":"isolated","posSide":"net","pos":"1","margin":"1.000001","upl":"0.000001","uTime":"1800000000301"}]}
+    )).rejection == null);
+    const failure = (try adapter.tryDrain()).?;
+    var missing_asset = false;
+    for (failure.slice()) |record| if (record.event == .economic_fault) {
+        try std.testing.expectEqual(canonical.EconomicFaultReason.missing_asset, record.event.economic_fault.reason);
+        missing_asset = true;
+    };
+    try std.testing.expect(missing_asset);
+    try std.testing.expect(implementation.private_failed);
 }
 
 test "OKX private facts normalize fee signs into canonical execution fill and account facts" {
@@ -1544,14 +1570,17 @@ test "OKX private facts normalize fee signs into canonical execution fill and ac
     try std.testing.expectEqual(@as(i128, 100_000), output.events[2].event.account_bootstrap_snapshot.balances[0].liability.?.atoms);
     try std.testing.expectEqual(@as(i128, 200_000), output.events[2].event.account_bootstrap_snapshot.balances[0].isolated_liability.?.atoms);
     try std.testing.expectEqual(@as(i128, 300_000), output.events[2].event.account_bootstrap_snapshot.balances[0].cross_liability.?.atoms);
-    try std.testing.expectEqual(@as(i128, 1_000_000), output.events[2].event.account_bootstrap_snapshot.margins[0].initial_margin.?.atoms);
-    try std.testing.expectEqual(@as(i128, 500_000), output.events[2].event.account_bootstrap_snapshot.margins[0].maintenance_margin.?.atoms);
-    try std.testing.expectEqual(@as(i128, 25_000_000), output.events[2].event.account_bootstrap_snapshot.margins[0].isolated_equity.?.atoms);
+    try std.testing.expect(output.events[2].event.account_bootstrap_snapshot.margins[0].amount == null);
+    try std.testing.expectEqual(@as(i128, 1), output.events[2].event.account_bootstrap_snapshot.margins[0].usd_valuation.?.initial_margin.?.coefficient);
+    try std.testing.expectEqual(@as(i128, 5), output.events[2].event.account_bootstrap_snapshot.margins[0].usd_valuation.?.maintenance_margin.?.coefficient);
+    try std.testing.expectEqual(@as(i128, 25), output.events[2].event.account_bootstrap_snapshot.margins[0].usd_valuation.?.isolated_equity.?.coefficient);
     var observed_positions: private.ExchangePositionSnapshot = undefined;
     observed_positions.scope = .ws_reported;
     observed_positions.position_count = 1;
     observed_positions.includes_zero_positions = true;
     observed_positions.positions[0] = .{ .venue_position_id = @enumFromInt(1), .instrument = .btc_usdt_swap, .margin_mode = .isolated, .position_side = .net, .quantity = try private.Decimal.parse("1"), .average_price = try private.Decimal.parse("50000"), .mark_price = try private.Decimal.parse("50001"), .liquidation_price = try private.Decimal.parse("40000"), .margin = try private.Decimal.parse("2"), .leverage = try private.Decimal.parse("3"), .unrealized_pnl = try private.Decimal.parse("1"), .venue_update_time_utc_ns = 1 };
+    observed_positions.positions[0].currency = try private.AssetCode.init("USDT");
+    _ = try implementation.instrument_definitions.register(.{ .instrument = btc_usdt_swap, .venue = 1, .product = .isolated_linear_usdt, .rules = .{ .version = 8, .instrument_identity = btc_usdt_swap, .quantity_denominator = 10000, .reservation_model = .leveraged, .venue = 1, .settlement_asset = usdt }, .margin = .{ .version = 1 } });
     try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(6, 6), .payload = .{ .exchange_position_snapshot = observed_positions } }, false);
     const observed = output.events[3].event.account_observed.value.position;
     try std.testing.expectEqual(@as(i128, 500_010), observed.value.mark_price.?.ticks);
@@ -1792,6 +1821,7 @@ fn economicReason(err: anyerror) canonical.EconomicFaultReason {
     return switch (err) {
         error.Overflow => .overflow,
         error.UnsupportedAsset => .unknown_asset,
+        error.MissingAsset => .missing_asset,
         error.MissingBalanceTotal, error.MissingBalanceAvailable, error.MissingBalanceHeld, error.MissingMarginEquity => .missing_amount,
         else => .invalid_economic_fact,
     };

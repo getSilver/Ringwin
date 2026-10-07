@@ -125,6 +125,7 @@ pub const Position = struct {
     mark_price: ?Decimal,
     liquidation_price: ?Decimal,
     margin: ?Decimal,
+    currency: ?AssetCode = null,
     leverage: ?Decimal,
     unrealized_pnl: ?Decimal,
     venue_update_time_utc_ns: u64,
@@ -971,6 +972,7 @@ pub const Reconciler = struct {
                 .mark_price = try optionalDecimalField(row, "markPx"),
                 .liquidation_price = try optionalDecimalField(row, "liqPx"),
                 .margin = try optionalDecimalField(row, "margin"),
+                .currency = if (try optionalStringField(row, "ccy")) |code| try AssetCode.init(code) else null,
                 .leverage = try optionalDecimalField(row, "lever"),
                 .unrealized_pnl = try optionalDecimalField(row, "upl"),
                 .venue_update_time_utc_ns = update_time,
@@ -1583,6 +1585,11 @@ fn hashPositions(snapshot: *const ExchangePositionSnapshot) [32]u8 {
         hashOptionalDecimal(&hasher, position.mark_price);
         hashOptionalDecimal(&hasher, position.liquidation_price);
         hashOptionalDecimal(&hasher, position.margin);
+        hasher.update(&.{@intFromBool(position.currency != null)});
+        if (position.currency) |currency| {
+            hasher.update(&.{@intCast(currency.slice().len)});
+            hasher.update(currency.slice());
+        }
         hashOptionalDecimal(&hasher, position.leverage);
         hashOptionalDecimal(&hasher, position.unrealized_pnl);
     }

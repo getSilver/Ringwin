@@ -128,11 +128,21 @@ pub const Policy = struct {
         const account = &owner.shard.canonical_account;
         if (!account.valid or account.exchange_account != self.exchange_account)
             return error.InvalidDemoAccount;
-        try requireSafeDemoExposure(account, false);
+        try requireSafeDemoExposure(account, false, owner.shard.activatedAssets());
         var usdt_total: ?i128 = null;
         var usdt_available: ?i128 = null;
+        var opening: @import("trading_shard_event.zig").OpeningBalance = .{ .cash_atoms = 0 };
+        const base_asset = owner.shard.instrument_registry.get(okx.btc_usdt_spot).?.rules.base_asset;
         for (account.balances[0..account.balance_count]) |balance| {
-            if (balance.asset != okx.usdt) continue;
+            if (balance.asset != okx.usdt) {
+                if (balance.asset == base_asset) continue;
+                if (account.nativeAvailable(balance.asset) == null or opening.native_balance_count == opening.native_balances.len)
+                    return error.InvalidDemoAccount;
+                try owner.shard.activatedAssets().checkAmount(balance.total, false);
+                opening.native_balances[opening.native_balance_count] = balance.total;
+                opening.native_balance_count += 1;
+                continue;
+            }
             if (usdt_total != null or balance.total.asset != okx.usdt or balance.available.asset != okx.usdt or
                 balance.total.atoms <= 0 or balance.available.atoms < self.portfolio_allocation_atoms or
                 balance.available.atoms > balance.total.atoms)
@@ -141,6 +151,7 @@ pub const Policy = struct {
             usdt_available = balance.available.atoms;
         }
         if (usdt_total == null or usdt_available == null) return error.MissingDemoCash;
+        opening.cash_atoms = usdt_total.?;
         const core = struct {
             fn put(target: *Owner, identity: u64, payload: trading.CorePayload) !void {
                 if (try target.apply(.{ .core = .{ .identity = identity, .payload = payload } }) != null)
@@ -150,7 +161,7 @@ pub const Policy = struct {
         try core(owner, 3, .{ .account_configuration = .{ .exchange_account_identity = self.exchange_account } });
         try core(owner, 4, .{ .exchange_balance = .{ .cash_atoms = usdt_total.? } });
         try core(owner, 5, .exchange_positions);
-        try core(owner, 6, .{ .opening_balance = .{ .cash_atoms = usdt_total.? } });
+        try core(owner, 6, .{ .opening_balance = opening });
         try core(owner, 7, .{ .virtual_portfolio_activated = .{ .portfolio_identity = self.portfolio_identity } });
         try core(owner, 8, .{ .portfolio_transfer = .{ .amount_atoms = self.portfolio_allocation_atoms } });
         try core(owner, 9, .{ .strategy_activated = .{
@@ -456,7 +467,7 @@ fn sendFromShard(shard: *const trading.TradingShard, gateway: *execution.Gateway
     }
     const current = command orelse return error.NotSent;
     if (shard.recovery_admission_pending and current.operation != .cancel) return error.DecisionLogUnavailable;
-    requireSafeDemoExposure(&shard.canonical_account, current.side == .sell) catch return error.NotSent;
+    requireSafeDemoExposure(&shard.canonical_account, current.side == .sell, shard.activatedAssets()) catch return error.NotSent;
     const position = shard.currentNetExchangePosition(current.instrument) orelse return error.NotSent;
     try gateway.observeAuthority(.{
         .account = shard.exchange_account_identity,
@@ -471,7 +482,7 @@ fn sendFromShard(shard: *const trading.TradingShard, gateway: *execution.Gateway
     return gateway.sendFromShard(shard, command_id, now_monotonic_ns);
 }
 
-fn requireSafeDemoExposure(account: *const @import("account_projection.zig").AccountProjection, allow_btc: bool) !void {
+fn requireSafeDemoExposure(account: *const @import("account_projection.zig").AccountProjection, allow_btc: bool, configured_assets: ?@import("asset_registry.zig").Registry) !void {
     if (!account.valid or account.margin_count != 1) return error.InvalidDemoAccount;
     var saw_btc = false;
     var saw_usdt = false;
@@ -500,22 +511,35 @@ fn requireSafeDemoExposure(account: *const @import("account_projection.zig").Acc
         if (balance.asset == okx.btc) {
             if (!allow_btc and balance.total.atoms != 0) return error.NonzeroDemoBaseline;
         } else if (balance.asset != okx.usdt and
-            (balance.total.atoms != 0 or balance.available.atoms != 0 or balance.held.atoms != 0)) return error.NonzeroDemoBaseline;
+            (balance.total.atoms != 0 or balance.available.atoms != 0 or balance.held.atoms != 0))
+        {
+            const assets = configured_assets orelse return error.NonzeroDemoBaseline;
+            _ = assets.get(balance.asset) orelse return error.InvalidDemoAccount;
+            _ = account.nativeAvailable(balance.asset) orelse return error.InvalidDemoAccount;
+        }
     }
     for (account.margins[0..account.margin_count]) |margin| {
-        if (margin.amount.asset != okx.usdt or margin.initial_margin == null or
-            margin.maintenance_margin == null or margin.isolated_equity == null)
-            return error.InvalidDemoAccount;
-        if (margin.instrument != null or margin.initial_margin.?.atoms != 0 or
-            margin.maintenance_margin.?.atoms != 0 or margin.isolated_equity.?.atoms != 0)
-            return error.NonzeroDemoBaseline;
+        if (margin.instrument != null) return error.NonzeroDemoBaseline;
+        if (margin.amount) |amount| {
+            if (amount.asset != okx.usdt or margin.initial_margin == null or
+                margin.maintenance_margin == null or margin.isolated_equity == null)
+                return error.InvalidDemoAccount;
+            if (margin.initial_margin.?.atoms != 0 or margin.maintenance_margin.?.atoms != 0 or margin.isolated_equity.?.atoms != 0)
+                return error.NonzeroDemoBaseline;
+        } else {
+            const observed = margin.usd_valuation orelse return error.InvalidDemoAccount;
+            if (observed.initial_margin == null or observed.maintenance_margin == null or observed.isolated_equity == null)
+                return error.InvalidDemoAccount;
+            if (observed.initial_margin.?.coefficient != 0 or observed.maintenance_margin.?.coefficient != 0 or observed.isolated_equity.?.coefficient != 0)
+                return error.NonzeroDemoBaseline;
+        }
     }
     // OKX full balance snapshots list nonzero assets only; absent BTC is zero.
     if (!saw_usdt) return error.InvalidDemoAccount;
 }
 
 pub fn requireZeroDemoExposure(account: *const @import("account_projection.zig").AccountProjection) !void {
-    return requireSafeDemoExposure(account, false);
+    return requireSafeDemoExposure(account, false, null);
 }
 
 test "Demo owner commits before publication and recovers only a complete barrier" {
@@ -663,6 +687,7 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     snapshot.venue.event.account_bootstrap_snapshot.balances[0] = .{
         .asset = okx.usdt,
         .total = .{ .asset = okx.usdt, .atoms = 25_000_000 },
+        .cash_balance = .{ .asset = okx.usdt, .atoms = 25_000_000 },
         .available = .{ .asset = okx.usdt, .atoms = 25_000_000 },
         .held = .{ .asset = okx.usdt, .atoms = 0 },
         .liability = .{ .asset = okx.usdt, .atoms = 0 },
@@ -672,6 +697,7 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     snapshot.venue.event.account_bootstrap_snapshot.balances[1] = .{
         .asset = okx.btc,
         .total = .{ .asset = okx.btc, .atoms = 0 },
+        .cash_balance = .{ .asset = okx.btc, .atoms = 0 },
         .available = .{ .asset = okx.btc, .atoms = 0 },
         .held = .{ .asset = okx.btc, .atoms = 0 },
         .liability = .{ .asset = okx.btc, .atoms = 0 },
@@ -691,35 +717,35 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     };
     _ = try owner.apply(snapshot);
     const clean_account = owner.shard.canonical_account;
-    try requireSafeDemoExposure(&clean_account, false);
+    try requireSafeDemoExposure(&clean_account, false, null);
     var missing_btc = clean_account;
     missing_btc.balance_count = 1;
-    try requireSafeDemoExposure(&missing_btc, false);
+    try requireSafeDemoExposure(&missing_btc, false, null);
     var btc_debt = clean_account;
     btc_debt.balances[1].liability.?.atoms = 1;
-    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&btc_debt, false));
+    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&btc_debt, false, null));
     var usdt_cross_debt = clean_account;
     usdt_cross_debt.balances[0].cross_liability.?.atoms = 1;
-    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&usdt_cross_debt, false));
+    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&usdt_cross_debt, false, null));
     var usdt_isolated_debt = clean_account;
     usdt_isolated_debt.balances[0].isolated_liability.?.atoms = 1;
-    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&usdt_isolated_debt, false));
+    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&usdt_isolated_debt, false, null));
     var borrowed_without_field = clean_account;
     borrowed_without_field.balances[1].liability = null;
-    try std.testing.expectError(error.InvalidDemoAccount, requireSafeDemoExposure(&borrowed_without_field, false));
+    try std.testing.expectError(error.InvalidDemoAccount, requireSafeDemoExposure(&borrowed_without_field, false, null));
     var margin_used = clean_account;
     margin_used.margins[0].initial_margin.?.atoms = 1;
-    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&margin_used, false));
+    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&margin_used, false, null));
     margin_used = clean_account;
     margin_used.margins[0].maintenance_margin.?.atoms = 1;
-    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&margin_used, false));
+    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&margin_used, false, null));
     margin_used = clean_account;
     margin_used.margins[0].isolated_equity.?.atoms = 1;
-    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&margin_used, false));
+    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&margin_used, false, null));
     var extra_asset = clean_account;
     extra_asset.balances[2] = .{ .asset = 99, .total = .{ .asset = 99, .atoms = 1 }, .available = .{ .asset = 99, .atoms = 1 }, .held = .{ .asset = 99, .atoms = 0 }, .liability = .{ .asset = 99, .atoms = 0 }, .isolated_liability = .{ .asset = 99, .atoms = 0 }, .cross_liability = .{ .asset = 99, .atoms = 0 } };
     extra_asset.balance_count = 3;
-    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&extra_asset, false));
+    try std.testing.expectError(error.NonzeroDemoBaseline, requireSafeDemoExposure(&extra_asset, false, null));
     var authority = failover.authorityForTesting();
     var lease = try authority.acquire(.{ .exchange_account = 2, .decision_domain = 1 }, 1, 1);
     var guard: failover.GatewayLeaseGuard = .{ .authority = &authority, .lease = &lease };
@@ -878,7 +904,7 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     try std.testing.expectEqual(@as(u64, 1), spy.sends);
     const venue_order = try canonical.VenueOrderRef.init(1, "demo-order");
     const fill_quantity: canonical.InstrumentQuantity = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .lots = 20_000 };
-    const fill_price: canonical.InstrumentPrice = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .ticks = 50_000_000 };
+    const fill_price: canonical.InstrumentPrice = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .ticks = 500 };
     _ = try owner.apply(fixture.canonicalAt(20, 4, .{ .order_dispatch_result = .{ .command = command.command_id, .state = .submitted } }));
     const accepted_report = fixture.canonicalAt(21, 5, .{ .execution_report = .{
         .identity = 5,
@@ -943,6 +969,7 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
         .value = .{ .balance = .{ .asset = okx.btc, .value = .{
             .asset = okx.btc,
             .total = .{ .asset = okx.btc, .atoms = 19_999 },
+            .cash_balance = .{ .asset = okx.btc, .atoms = 19_999 },
             .available = .{ .asset = okx.btc, .atoms = 19_999 },
             .held = .{ .asset = okx.btc, .atoms = 0 },
             .liability = .{ .asset = okx.btc, .atoms = 0 },

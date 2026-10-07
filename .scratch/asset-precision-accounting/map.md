@@ -51,8 +51,8 @@ Status: open
 
 ## Frontier
 
-- [07：让第三 Asset 费用与返佣形成原币闭环](issues/07-account-for-third-asset-fees.md) — 02–06 离线切片已完成；当前可实施。
-- [08：精确接入原币余额与保证金观察](issues/08-preserve-native-balances-and-margin.md) — 06 blocker 已完成；当前可实施。
+- [07：让第三 Asset 费用与返佣形成原币闭环](issues/07-account-for-third-asset-fees.md) — 02–06 离线切片已完成；当前实施中。
+- [08：精确接入原币余额与保证金观察](issues/08-preserve-native-balances-and-margin.md) — 06 blocker 已完成；当前实施中。
 
 ## Decisions so far
 

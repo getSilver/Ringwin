@@ -426,6 +426,11 @@ pub const Gateway = struct {
         const route_index = self.routeIndex(refs.exchange_account) orelse return error.NotSent;
         const route = &self.routes[route_index];
         const instrument = shard.registryInstrument(oms_command.instrument) orelse return error.NotSent;
+        if (oms_command.operation != .cancel) {
+            const native_cash = shard.currentNativeRiskCash(oms_command.instrument) catch return error.NotSent;
+            const committed_requirement = std.math.add(i128, shard.activeReservationAtoms() catch return error.NotSent, shard.economic_projection.exchange.margin_atoms) catch return error.NotSent;
+            if (native_cash < @max(committed_requirement, oms_command.reservation.atoms)) return error.NotSent;
+        }
         if (route.environment == .demo and instrument.product == .spot and instrument.rules.base_asset == 0)
             return error.NotSent;
         const profile = instrument.capability orelse return error.NotSent;

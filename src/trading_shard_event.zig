@@ -183,6 +183,11 @@ pub const EconomicSummary = struct {
     suspense_usdt_atoms: i128,
     ledger_transactions: u8,
     reconciliation_break: bool,
+    valuation_complete: bool,
+    treasury_native_assets: [economics_module.max_native_assets]canonical.AssetAmount,
+    treasury_native_asset_count: u8,
+    suspense_native_assets: [economics_module.max_native_assets]canonical.AssetAmount,
+    suspense_native_asset_count: u8,
 };
 
 pub const PayloadTag = enum(u16) {
@@ -261,6 +266,11 @@ pub const MarginRules = struct {
 };
 pub const AccountConfiguration = struct { exchange_account_identity: u128 };
 pub const Balance = struct { cash_atoms: i128 };
+pub const OpeningBalance = struct {
+    cash_atoms: i128,
+    native_balances: [economics_module.max_native_assets]canonical.AssetAmount = @splat(.{ .asset = 0, .atoms = 0 }),
+    native_balance_count: u8 = 0,
+};
 pub const VirtualPortfolioActivation = struct { portfolio_identity: u128 };
 pub const PortfolioTransfer = struct { amount_atoms: i128 };
 pub const StrategyActivation = struct {
@@ -347,7 +357,7 @@ pub const CorePayload = union(PayloadTag) {
     account_configuration: AccountConfiguration,
     exchange_balance: Balance,
     exchange_positions,
-    opening_balance: Balance,
+    opening_balance: OpeningBalance,
     virtual_portfolio_activated: VirtualPortfolioActivation,
     portfolio_transfer: PortfolioTransfer,
     strategy_activated: StrategyActivation,
@@ -421,7 +431,13 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
                 switch (@typeInfo(field.type)) {
                     .int => try encoded.put(field.type, item),
                     .@"enum" => try encoded.put(u8, @intFromEnum(item)),
-                    .array => for (item) |byte| try encoded.put(u8, byte),
+                    .array => if (comptime std.mem.eql(u8, field.name, "code_bindings")) {
+                        for (item) |binding| {
+                            try encoded.put(u64, binding.venue);
+                            try encoded.put(u8, binding.code_len);
+                            for (binding.code) |byte| try encoded.put(u8, byte);
+                        }
+                    } else for (item) |byte| try encoded.put(u8, byte),
                     else => unreachable,
                 }
             }
@@ -457,7 +473,16 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(i64, value.kill_liquidation_distance_ticks);
         },
         .account_configuration => |value| try encoded.put(u128, value.exchange_account_identity),
-        .exchange_balance, .opening_balance => |value| try encoded.put(i128, value.cash_atoms),
+        .exchange_balance => |value| try encoded.put(i128, value.cash_atoms),
+        .opening_balance => |value| {
+            if (value.native_balance_count > value.native_balances.len) return error.InvalidOpeningBalance;
+            try encoded.put(i128, value.cash_atoms);
+            try encoded.put(u8, value.native_balance_count);
+            for (value.native_balances[0..value.native_balance_count]) |balance| {
+                try encoded.put(u64, balance.asset);
+                try encoded.put(i128, balance.atoms);
+            }
+        },
         .virtual_portfolio_activated => |value| try encoded.put(u128, value.portfolio_identity),
         .portfolio_transfer => |value| try encoded.put(i128, value.amount_atoms),
         .strategy_activated => |value| {
@@ -725,7 +750,13 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
                     .@"enum" => std.enums.fromInt(field.type, try readInputValue(u8, record.payload, &offset)) orelse return error.InvalidAssetDefinition,
                     .array => array: {
                         var bytes: field.type = undefined;
-                        for (&bytes) |*byte| byte.* = try readInputValue(u8, record.payload, &offset);
+                        if (comptime std.mem.eql(u8, field.name, "code_bindings")) {
+                            for (&bytes) |*binding| {
+                                binding.venue = try readInputValue(u64, record.payload, &offset);
+                                binding.code_len = try readInputValue(u8, record.payload, &offset);
+                                for (&binding.code) |*byte| byte.* = try readInputValue(u8, record.payload, &offset);
+                            }
+                        } else for (&bytes) |*byte| byte.* = try readInputValue(u8, record.payload, &offset);
                         break :array bytes;
                     },
                     else => unreachable,
@@ -776,9 +807,16 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             .cash_atoms = try readInputValue(i128, record.payload, &offset),
         } },
         .exchange_positions => .exchange_positions,
-        .opening_balance => .{ .opening_balance = .{
-            .cash_atoms = try readInputValue(i128, record.payload, &offset),
-        } },
+        .opening_balance => blk: {
+            var opening: OpeningBalance = .{ .cash_atoms = try readInputValue(i128, record.payload, &offset) };
+            opening.native_balance_count = try readInputValue(u8, record.payload, &offset);
+            if (opening.native_balance_count > opening.native_balances.len) return error.InvalidOpeningBalance;
+            for (opening.native_balances[0..opening.native_balance_count]) |*balance| {
+                balance.asset = try readInputValue(u64, record.payload, &offset);
+                balance.atoms = try readInputValue(i128, record.payload, &offset);
+            }
+            break :blk .{ .opening_balance = opening };
+        },
         .virtual_portfolio_activated => .{ .virtual_portfolio_activated = .{
             .portfolio_identity = try readInputValue(u128, record.payload, &offset),
         } },

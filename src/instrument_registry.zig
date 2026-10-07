@@ -39,6 +39,8 @@ pub const Registry = struct {
         // Existing isolated decoder fixtures have no order configuration.
         if (self.count == 0) return assets.legacyConsumerCompatible();
         const entry = self.get(instrument) orelse return false;
+        if (!assets.hasVenueCode(entry.rules.settlement_asset, entry.venue) or
+            (entry.product == .spot and !assets.hasVenueCode(entry.rules.base_asset, entry.venue))) return false;
         return entry.margin_configured and assets.consumerCompatible(entry.margin.native_settlement_atoms);
     }
 
@@ -51,6 +53,8 @@ pub const Registry = struct {
         if (try std.math.mul(i128, lot.coefficient, entry.rules.quantity_denominator) !=
             try std.math.mul(i128, entry.rules.quantity_numerator, lot_power)) return error.InvalidInstrumentConfiguration;
         const quote = assets.get(entry.rules.settlement_asset) orelse return error.UnknownAssetDefinition;
+        if (!assets.hasVenueCode(entry.rules.settlement_asset, entry.venue) or
+            (entry.product == .spot and !assets.hasVenueCode(entry.rules.base_asset, entry.venue))) return error.InvalidInstrumentConfiguration;
         if (try tick.exactAtoms(quote.definition.atomic_scale) != entry.margin.price_tick_atoms)
             return error.InvalidInstrumentConfiguration;
     }

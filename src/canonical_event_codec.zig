@@ -8,7 +8,7 @@ const std = @import("std");
 const canonical = @import("canonical_event.zig");
 const value_codec = @import("snapshot_codec.zig");
 
-pub const encoding_version: u16 = 7;
+pub const encoding_version: u16 = 8;
 pub const max_encoded_len: usize = 4096;
 
 const BootstrapHeader = struct {
@@ -229,4 +229,24 @@ test "bootstrap encodes active facts without fixed-array tails" {
     try std.testing.expectEqual(@as(u8, 1), decoded.balance_count);
     try std.testing.expectEqualDeep(snapshot.balances[0], decoded.balances[0]);
     try std.testing.expectEqualDeep(std.mem.zeroes(canonical.AccountBalance), decoded.balances[1]);
+}
+
+test "native and USD margin observations preserve independent exact units" {
+    const observation: canonical.AccountObservation = .{
+        .identity = 1,
+        .exchange_account = 2,
+        .bootstrap = 3,
+        .source_stream = 4,
+        .source_sequence = 5,
+        .value = .{ .margin = .{ .value = .{
+            .amount = .{ .asset = 9, .atoms = 9223372036854775808 },
+            .usd_valuation = .{ .total_equity = .{ .coefficient = 4198632165, .scale = 12 }, .initial_margin = .{ .coefficient = 1, .scale = 20 } },
+        } } },
+    };
+    var bytes: [max_encoded_len]u8 = undefined;
+    const encoded = try encode(&bytes, .{ .envelope = testEnvelope(.account_observed), .event = .{ .account_observed = observation } });
+    const decoded = (try decode(encoded)).event.account_observed;
+    try std.testing.expectEqualDeep(observation, decoded);
+    try std.testing.expectEqual(@as(i128, 9223372036854775808), decoded.value.margin.value.amount.?.atoms);
+    try std.testing.expectEqual(@as(u8, 20), decoded.value.margin.value.usd_valuation.?.initial_margin.?.scale);
 }
