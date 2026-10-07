@@ -51,10 +51,11 @@ Status: open
 
 ## Frontier
 
-- [07：让第三 Asset 费用与返佣形成原币闭环](issues/07-account-for-third-asset-fees.md) — 02–06 离线切片已完成；当前实施中。
-- [08：精确接入原币余额与保证金观察](issues/08-preserve-native-balances-and-margin.md) — 06 blocker 已完成；当前实施中。
+- [09：贯通资金结算及成本、PnL 的精度合同](issues/09-close-native-settlements-and-pnl.md) — 02–08 离线切片已完成；下一可实施切片。
 
 ## Decisions so far
+
+- 2026-10-07：07/08实现提交72726cd2；原币第三资产费用、Treasury ownership、未估值报告、账户USD单位分离、连续流与持久重复/冲突、发送前原币证明和配置收紧预检完成。联合定向各35/35、最终健康/连续性各8/8及范围/Gateway定向通过；两轴最终无剩余重大问题。Frontier推进09，全套检查与发布封存待14，新在线/生产资格未运行。
 
 - 2026-10-05：06 完成 native base i128 atoms 与 gross成交lots分离、独立资产posting、非单位lot/tick及dust完整保留；组合卖出、report先于Fill及未确认减量native-amend按唯一已应用经济证据保留库存占用。基础资产超i64、精度/累计/极值/冲突持久失败关闭及无发送恢复通过；Debug/ReleaseSafe综合定向各27/27、实际Windows离线链及Linux编译通过，两轴最终审查clean。Frontier推进至07/08；本地证据不构成新在线或生产资格，父Spec原文/状态不变。
 

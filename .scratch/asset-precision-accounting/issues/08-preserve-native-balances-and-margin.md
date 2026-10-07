@@ -1,12 +1,12 @@
 # 08：精确接入原币余额与保证金观察
 
 Type: task
-Status: in_progress
+Status: done
 Assignee: native_margin_08_prep
 Blocked by: [06：精确记录基础资产费用并分离 atoms 与 lots](06-separate-base-atoms-from-trade-lots.md)
 Parent: [落实权威资产精度与精确经济账务](../map.md)
 Spec: [父 Spec](01-exact-asset-accounting-spec.md)
-Label: ready-for-agent
+Label: completed
 Phase: S3
 
 ## Question
@@ -19,12 +19,12 @@ bootstrap 和连续账户观察保留原币总额、可用、占用及负债；�
 
 ## Acceptance criteria
 
-- [ ] 账户快照/增量的原币 total/available/held、cash、各负债及原币保证金按已激活资产精度精确接入，不分别 floor/ceil。
-- [ ] USD 等估值与 USDT 原币账户金额区分；相同小数位不证明同一资产或等值，不能借虚构换币满足 margin 字段。
-- [ ] 真实观察与内部风险预留分别表达；在现有风险合同下缺必需原币事实或单位不明时禁止新增风险。
-- [ ] 来源会话、bootstrap 身份、范围、时点、游标和序号校验继续生效；观察不是覆盖本地经济账的命令。
-- [ ] 精确/不可表达、未知资产、重复冲突及核心窄化样本经公开接缝验证；错误不让旧账户视图保持健康。
-- [ ] 资产配置与观察解释进入相应 codec、快照和恢复，必要的 schema 变化随本票完成；不搭建通用估值平台。
+- [x] 账户快照/增量的原币 total/available/held、cash、各负债及原币保证金按已激活资产精度精确接入，不分别 floor/ceil。
+- [x] USD 等估值与 USDT 原币账户金额区分；相同小数位不证明同一资产或等值，不能借虚构换币满足 margin 字段。
+- [x] 真实观察与内部风险预留分别表达；在现有风险合同下缺必需原币事实或单位不明时禁止新增风险。
+- [x] 来源会话、bootstrap 身份、范围、时点、游标和序号校验继续生效；观察不是覆盖本地经济账的命令。
+- [x] 精确/不可表达、未知资产、重复冲突及核心窄化样本经公开接缝验证；错误不让旧账户视图保持健康。
+- [x] 资产配置与观察解释进入相应 codec、快照和恢复，必要的 schema 变化随本票完成；不搭建通用估值平台。
 
 ## Testing decisions
 
@@ -60,3 +60,5 @@ bootstrap 和连续账户观察保留原币总额、可用、占用及负债；�
 2026-10-06 根代理定向证据（尚待最终审查）：原始 OKX quote scale12/base scale9 的 cash/total/available/held/各负债及高精度 USD valuation，经 Owner 与日志/快照恢复保持固定整数和来源 Decimal；缺 cash、全 held、债务及 USD margin 非零时禁止新风险且不覆盖经济账。审查发现 accepted outbox 在后续缺 cash 时仍可能发送，已在 qualification / Gateway 共用 currentNativeRiskCash；公开健康控制可发送，降级账户后独立 Gateway NotSent、send_attempt_count=0、传输尝试无增长，Debug 回归 2/2。当前仍等待 Binance/Bybit 实际 Adapter→Owner 连续观察恢复证明及最终复核，不关闭票。
 
 2026-10-06 完整公开连续性证据：新增 native_account_continuity_acceptance 经实际 Binance/Bybit Adapter 的 REST bootstrap 和 ready WS 多行余额/保证金/仓位 → tryDrain → Owner.applyAdapterBatch，固定整数、整批重复、旧 bootstrap 重复、较早及最新观察同身份冲突、逻辑序号缺口均经过日志恢复/快照摘要校验；无传输发送。Core 复用 AccountProjection 有界已见观察处理语义重复，冲突持久失效。联合原币/故障/连续性/固定轨迹/四 shard Debug/ReleaseSafe 各35/35；最终健康视图及安全撤单/恢复定向各8/8。IntegritySnapshot.account_valid 排除未解决经济故障，currentNativeRiskCash 同样关闭；最后有效观察保留供受限撤单，不被当作当前风险准入证明。最终两轴复核仍进行中，未关闭票。
+
+2026-10-07 最终封存：实现提交 72726cd2。Standards 无阻塞文档规则违例，Spec 最终及收紧上限复核均 0 material findings。拟议 AssetDefinition 先校验既有经济状态和有效账户事实，再替换 registry；Quote25b→10b 与第三资产 Treasury10BNB→5BNB 拒绝后保留旧权威及账务，Owner 日志/快照恢复通过。Debug 定向3/3、ReleaseSafe5/5（含完整 OMS→Gateway→Simulated 接缝），拒绝配置后发送尝试为零。联合原币/恢复各35/35，最终健康/撤单/连续性各8/8；模块及既有实际离线 Windows/Linux 编译链证据见此前记录。仅离线切片完成，09–14仍待实施，全套 main 检查在14执行；新在线/生产资格未运行，父Spec和历史账不变。
