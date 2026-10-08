@@ -356,15 +356,19 @@ ProductionSupportContract 中按 Venue、Environment、ExchangeAccount 范围、
 _Avoid_: Adapter capability flags, venue checklist, inferred account support
 
 **ProductionRole**:
-由同一个签名 ReleaseArtifact 以显式 dispatcher 参数启动的受限 Linux 进程角色；首版角色为 engine、market-feed、execution-gateway、telemetry 和 control-fence。
-_Avoid_: Independent binary, Windows service, public API server
+由同一个签名 ReleaseArtifact 在相应生产平台上启动的受限进程角色；角色为 engine、market-feed、execution-gateway、telemetry 和 control-fence。
+_Avoid_: Independent binary, verification role, public API server
+
+**ProductionPlatform**:
+允许独立申请生产资格的操作系统平台，范围包括 Windows 与 Linux；平台属于支持范围不表示某个节点、版本或账户已取得生产资格。
+_Avoid_: Development environment, qualification result
 
 **ProductionProcessChain**:
-五个 ProductionRole 通过固定容量 Unix-domain control seam 共同形成的生命周期边界；它负责启动、恢复、交易授权、排空和失败关闭，但不拥有 TradingShard 经济状态或 SecretMaterial。
+五个 ProductionRole 通过有界且身份受验证的进程间通信共同形成的生命周期边界；它负责启动、恢复、交易授权、排空和失败关闭，权威经济状态和凭证仍由各自指定所有者持有。
 _Avoid_: Service mesh, process-local authority, credential store
 
 **WindowsVerificationRuntime**:
-Windows 上用于证明 ProductionProcessChain 已整合为可运行所有者闭环的验证运行时；它不是 ProductionPlatform，也不能使 `permitsProduction()` 为 true。
+Windows 上用于证明业务进程链已整合为可运行所有者闭环的验证运行时；其验证结果不授予生产资格，Windows 平台可通过独立生产验收取得资格。
 _Avoid_: ProductionPlatform, Windows production compatibility layer, ProductionRole
 
 **VerificationRole**:
@@ -1058,6 +1062,10 @@ _Avoid_: Best-effort deserialization, runtime object migration
 **CanonicalStateDigest**:
 在同一分片屏障上对订单、成交、持仓、账本、风险占用和游标等 AuthoritativeTradingState 计算的稳定摘要；状态迁移不得改变其结果。
 _Avoid_: Serialized byte hash, strategy output comparison
+
+**SemanticAuthorityDigest**:
+仅为比较同一组已验证 private order facts 的合法到达排列而计算的、与到达顺序无关的权威业务状态摘要；它排除 CanonicalStateDigest 中的审计 Trace、canonical ingress 游标及其屏障位置，绝不用于快照完整性、恢复身份或替代审计摘要。
+_Avoid_: CanonicalStateDigest, trace hash, event-order digest
 
 **StrategyStateTransition**:
 策略版本或参数版本切换时对 StrategyPrivateState 采取的明确方式，仅允许 Keep、Migrate 或 Rebuild；Rebuild 未完成预热和验证前策略不得产生 OrderIntent。
