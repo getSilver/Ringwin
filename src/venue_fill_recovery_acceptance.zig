@@ -845,7 +845,17 @@ fn bootstrapNativePrivateAccount(owner: *demo.Owner, implementation: *okx.OkxVen
     try std.testing.expect(try applyDrain(owner, adapter));
 }
 
-fn checkNativeSettlementFees(case: enum { long, tiny, wide, overflow, conflict, inexact, malformed }) !void {
+const NativeSettlementCase = enum { long, tiny, wide, overflow, conflict, inexact, malformed, swap_capacity };
+const NativeArrival = enum { ws_first, report_first, rest_first };
+const NativeArrivalEvidence = struct { semantic: [32]u8, canonical_digest: [32]u8 };
+
+fn checkNativeSettlementFees(case: NativeSettlementCase) !void {
+    _ = try runNativeSettlementFees(case, .ws_first, false);
+}
+
+fn runNativeSettlementFees(case: NativeSettlementCase, arrival: NativeArrival, with_rest: bool) !NativeArrivalEvidence {
+    const swap_capacity = case == .swap_capacity;
+    const instrument = if (swap_capacity) okx.btc_usdt_swap else okx.btc_usdt_spot;
     const malformed = case == .malformed;
     const inexact = case == .inexact;
     const tiny = case == .tiny;
@@ -859,7 +869,7 @@ fn checkNativeSettlementFees(case: enum { long, tiny, wide, overflow, conflict, 
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
     owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
-    var definitions = @import("asset_registry.zig").testDefinitions(if (inexact) 6 else if (wide) 18 else 12, 8);
+    var definitions = @import("asset_registry.zig").testDefinitions(if (inexact) 6 else if (wide) 18 else 12, if (with_rest) 9 else 8);
     if (wide) {
         definitions[0].max_single_atoms = 100_000_000_000_000_000_000;
         definitions[0].max_balance_atoms = 100_000_000_000_000_000_000;
@@ -890,12 +900,18 @@ fn checkNativeSettlementFees(case: enum { long, tiny, wide, overflow, conflict, 
         .node_identity = 1,
     };
     try policy.activateAssetsForOfflineValidation(owner);
+    if (swap_capacity) {
+        _ = try owner.apply(.{ .core = .{ .identity = 100, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = instrument, .quantity_denominator = 100000000, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = 1, .settlement_asset = okx.usdt } } } });
+        _ = try owner.apply(.{ .core = .{ .identity = 101, .payload = .{ .margin_rules_activated = .{ .version = 1, .instrument = instrument, .price_tick_atoms = 100000000000, .native_settlement_atoms = true } } } });
+    }
     var raw = try raw_ingress.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = 1 });
     var transport = Transport{};
     var chain: live.Chain = .{ .mode = .demo_live, .qualification = qualification(), .raw_sink = raw.interface(), .transport = transport.interface() };
     var clock = Clock{};
     var reconciler: private.Reconciler = .{};
-    var implementation = okx.OkxVenueAdapter.init(allocator, &chain, clock.interface(), profile(), rules());
+    var source_rules = rules();
+    if (swap_capacity) source_rules.swap.lot_size = .{ .coefficient = 1, .scale = 8 };
+    var implementation = okx.OkxVenueAdapter.init(allocator, &chain, clock.interface(), profile(), source_rules);
     implementation.attachPrivateReconciler(&reconciler);
     const adapter = implementation.adapter();
     try adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = owner.shard.activatedAssets(), .instrument_definitions = owner.shard.instrument_registry, .native_settlement_atoms = true });
@@ -904,21 +920,65 @@ fn checkNativeSettlementFees(case: enum { long, tiny, wide, overflow, conflict, 
     var lease = try authority.acquire(.{ .exchange_account = 2, .decision_domain = 1 }, 1, 1);
     var guard: failover.GatewayLeaseGuard = .{ .authority = &authority, .lease = &lease };
     try policy.initialize(owner, if (inexact) 50_000_000_000 else if (wide) 50_000_000_000_000_000_000_000 else 50_000_000_000_000_000, &guard, 1, 1);
-    try std.testing.expect(owner.shard.settlementConsumersCompatible(okx.btc_usdt_spot));
+    if (swap_capacity) {
+        // Trusted normalized margin prelude tests accounting capacity only;
+        // the OKX fixture's USD margin fields do not qualify native leverage.
+        _ = try owner.apply(fixtureOnSecondaryStream(17, 1, .{ .account_observed = .{
+            .identity = 700,
+            .exchange_account = 2,
+            .bootstrap = owner.shard.canonical_account.bootstrap.?,
+            .source_stream = 1,
+            .source_sequence = owner.shard.canonical_account.last_sequence + 1,
+            .value = .{ .margin = .{ .instrument = instrument, .value = .{
+                .instrument = instrument,
+                .amount = .{ .asset = okx.usdt, .atoms = 100000000000000 },
+                .initial_margin = .{ .asset = okx.usdt, .atoms = 0 },
+                .maintenance_margin = .{ .asset = okx.usdt, .atoms = 0 },
+                .isolated_equity = .{ .asset = okx.usdt, .atoms = 100000000000000 },
+            } } },
+        } }));
+        _ = try owner.apply(.{ .core = .{ .identity = 102, .payload = .{ .mark_price = .{ .instrument = instrument, .price_atoms = 50000000000000000 } } } });
+        _ = try owner.apply(.{ .core = .{ .identity = 103, .payload = .{ .capability_profile_activation = .{
+            .exchange_account = 2,
+            .instrument = instrument,
+            .venue = 1,
+            .environment = .demo,
+            .product = .isolated_linear_usdt,
+            .version = 1,
+            .rules_version = 1,
+            .config_version = 1,
+            .adapter_session = 1,
+            .max_dispatch_age_ns = 15000000000,
+            .supports_place = true,
+            .supports_cancel = true,
+            .supports_native_amend = false,
+            .supports_venue_reduce_only = true,
+            .supports_post_only = true,
+            .supports_market_protection = true,
+        } } } });
+    }
+    try std.testing.expect(owner.shard.settlementConsumersCompatible(instrument));
     try std.testing.expect(!owner.shard.oms.recovery_only);
-    _ = try owner.apply(fixtureOnSecondaryStream(18, 2, .{ .instrument_definition_observed = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1 } }));
+    _ = try owner.apply(fixtureOnSecondaryStream(18, 2, .{ .instrument_definition_observed = .{ .instrument = instrument, .rules_version = 1 } }));
     _ = try owner.apply(fixtureOnSecondaryStream(19, 3, .{ .l2_book_snapshot = .{
-        .instrument = okx.btc_usdt_spot,
+        .instrument = instrument,
         .sequence = 3,
-        .best_bid = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .ticks = 499_999 },
-        .best_ask = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .ticks = 500_000 },
-        .best_bid_quantity = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .lots = 1_000_000 },
-        .best_ask_quantity = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .lots = 1_000_000 },
+        .best_bid = .{ .instrument = instrument, .rules_version = 1, .ticks = 499_999 },
+        .best_ask = .{ .instrument = instrument, .rules_version = 1, .ticks = 500_000 },
+        .best_bid_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = 1_000_000 },
+        .best_ask_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = 1_000_000 },
     } }));
-    const count: usize = if (inexact or malformed) 1 else if (overflow) 2 else if (tiny) 10 else 4;
+    const count: usize = if (swap_capacity) 33 else if (inexact or malformed) 1 else if (overflow) 2 else if (tiny) 10 else 4;
     const sequence = owner.shard.trace.len + 1;
-    const intent: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.trace.len, .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = if (malformed) 40_000 else if (inexact) 1 else @intCast(count * 10_000), .limit_price_micros = 50_000_000_000 };
-    const command = (try owner.apply(.{ .core = .{ .identity = sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = intent } } })) orelse return error.MissingDemoCommand;
+    const intent: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.trace.len, .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = instrument, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = if (swap_capacity) 33 else if (malformed) 40_000 else if (inexact) 1 else @intCast(count * 10_000), .limit_price_micros = 50_000_000_000 };
+    const command = if (swap_capacity) blk: {
+        var group: @import("oms.zig").IntentGroup = .{ .first_intent_sequence = sequence, .count = 1 };
+        group.members[0] = .{ .intent_sequence = sequence, .operation = .place, .instrument = instrument, .side = .buy, .quantity = 33, .limit_price = .{ .instrument = instrument, .rules_version = 1, .ticks = 500000 } };
+        _ = try owner.apply(.{ .core = .{ .identity = sequence, .payload = .{ .oms_intent_group = group } } });
+        if (owner.shard.oms.command_history_count == 0) std.debug.print("swap capacity group rejection={s}\n", .{@tagName(owner.shard.last_reject_reason)});
+        try std.testing.expectEqual(@as(u8, 1), owner.shard.oms.command_history_count);
+        break :blk owner.shard.oms.command_history[0];
+    } else (try owner.apply(.{ .core = .{ .identity = sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = intent } } })) orelse return error.MissingDemoCommand;
     try implementation.rememberRecoveredOrder(command.order_id, command.client_order_id, false, .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = command.quantity }, command.revision);
     _ = try owner.apply(fixtureOnSecondaryStream(20, 4, .{ .order_dispatch_result = .{ .command = command.command_id, .state = .submitted } }));
     const long_fees = [_][]const u8{ "-0.004198632165", "-0.00423723852", "0.0000001", "0" };
@@ -926,16 +986,32 @@ fn checkNativeSettlementFees(case: enum { long, tiny, wide, overflow, conflict, 
     var frame: [1536]u8 = undefined;
     for (0..count) |index| {
         var cumulative: [16]u8 = undefined;
-        const cumulative_text = if (inexact) "0.00000001" else if (index == 9) "0.001" else try std.fmt.bufPrint(&cumulative, "0.000{d}", .{index + 1});
+        const cumulative_text = if (swap_capacity) try std.fmt.bufPrint(&cumulative, "0.{d:0>8}", .{index + 1}) else if (inexact) "0.00000001" else if (index == 9) "0.001" else try std.fmt.bufPrint(&cumulative, "0.000{d}", .{index + 1});
         const input = try std.fmt.bufPrint(&frame,
-            \\{{"arg":{{"channel":"orders"}},"data":[{{"instId":"BTC-USDT","ordId":"1001","clOrdId":"{s}","side":"buy","ordType":"limit","state":"{s}","tdMode":"cash","posSide":"net","reduceOnly":"false","sz":"{s}","px":"50000","accFillSz":"{s}","avgPx":"{s}","uTime":"{d}","tradeId":"{d}","fillSz":"{s}","fillPx":"{s}","fillFee":"{s}","fillFeeCcy":"USDT","fillTime":"{d}","execType":"T"}}]}}
-        , .{ command.client_order_id.slice(), if (!malformed and index + 1 == count) "filled" else "partially_filled", if (inexact) "0.00000001" else if (overflow) "0.0002" else if (tiny) "0.001" else "0.0004", cumulative_text, if (inexact) "0.1" else "50000", @as(u64, 1_800_000_000_100) + index, 2001 + index, if (inexact) "0.00000001" else "0.0001", if (inexact) "0.1" else "50000", if (inexact) "0" else if (overflow) "-60" else if (tiny) "-0.0000001" else long_fees[index], @as(u64, 1_800_000_000_100) + index });
+            \\{{"arg":{{"channel":"orders"}},"data":[{{"instId":"{s}","ordId":"1001","clOrdId":"{s}","side":"buy","ordType":"limit","state":"{s}","tdMode":"{s}","posSide":"net","reduceOnly":"false","sz":"{s}","px":"50000","accFillSz":"{s}","avgPx":"{s}","uTime":"{d}","tradeId":"{d}","fillSz":"{s}","fillPx":"{s}","fillFee":"{s}","fillFeeCcy":"USDT","fillTime":"{d}","execType":"T"}}]}}
+        , .{ if (swap_capacity) "BTC-USDT-SWAP" else "BTC-USDT", command.client_order_id.slice(), if (!malformed and index + 1 == count) "filled" else "partially_filled", if (swap_capacity) "isolated" else "cash", if (swap_capacity) "0.00000033" else if (inexact) "0.00000001" else if (overflow) "0.0002" else if (tiny) "0.001" else "0.0004", cumulative_text, if (inexact) "0.1" else "50000", @as(u64, 1_800_000_000_100) + index, 2001 + index, if (inexact or swap_capacity) "0.00000001" else "0.0001", if (inexact) "0.1" else "50000", if (inexact or swap_capacity) "0" else if (overflow) "-60" else if (tiny) "-0.0000001" else long_fees[index], @as(u64, 1_800_000_000_100) + index });
+        var rest_bytes: [1024]u8 = undefined;
+        const rest_input = if (with_rest) try std.fmt.bufPrint(&rest_bytes,
+            \\{{"code":"0","data":[{{"instId":"BTC-USDT","ordId":"1001","billId":"{d}","clOrdId":"{s}","side":"buy","tradeId":"{d}","fillSz":"0.0001","fillPx":"50000","fee":"{s}","feeCcy":"USDT","fillTime":"{d}","execType":"T"}}]}}
+        , .{ 3001 + index, command.client_order_id.slice(), 2001 + index, long_fees[index], @as(u64, 1_800_000_000_100) + index }) else "";
+        if (with_rest and arrival == .report_first) {
+            var report_bytes: [1024]u8 = undefined;
+            const report_input = try std.fmt.bufPrint(&report_bytes,
+                \\{{"arg":{{"channel":"orders"}},"data":[{{"instId":"BTC-USDT","ordId":"1001","clOrdId":"{s}","side":"buy","ordType":"limit","state":"{s}","tdMode":"cash","posSide":"net","reduceOnly":"false","sz":"0.0004","px":"50000","accFillSz":"{s}","avgPx":"50000","uTime":"{d}","tradeId":"{d}","fillSz":"0","fillPx":"50000"}}]}}
+            , .{ command.client_order_id.slice(), if (index + 1 == count) "filled" else "partially_filled", cumulative_text, @as(u64, 1_800_000_000_100) + index, 2001 + index });
+            try std.testing.expect((try implementation.ingestPrivateWs(private_times, report_input)).rejection == null);
+            try std.testing.expect(try applyDrain(owner, adapter));
+        }
+        if (with_rest and arrival != .ws_first) {
+            try std.testing.expect((try implementation.ingestPrivateRest(private_times, .rest_fills_history_spot, .{ .final = true }, rest_input)).rejection == null);
+            try std.testing.expect(try applyDrain(owner, adapter));
+        }
         try std.testing.expect((try implementation.ingestPrivateWs(private_times, input)).rejection == null);
-        const output = (try adapter.tryDrain()) orelse return error.MissingPrivateBatch;
+        const output = (try adapter.tryDrain()) orelse if (with_rest and arrival == .report_first) canonical.AdapterOutputBatch{} else return error.MissingPrivateBatch;
         for (output.slice()) |record| if (record.event == .fill) {
-            try std.testing.expectEqual(if (inexact) @as(i128, 0) else if (overflow) @as(i128, 60_000_000_000_000) else if (tiny) @as(i128, if (wide) 100_000_000_000 else 100_000) else fee_atoms[index], record.event.fill.fee.?.atoms);
-            try std.testing.expectEqual(@as(i128, if (inexact) 1 else 10_000), record.event.fill.quantity.lots);
-            if (!tiny and !overflow and !inexact and index == 2)
+            try std.testing.expectEqual(if (inexact or swap_capacity) @as(i128, 0) else if (overflow) @as(i128, 60_000_000_000_000) else if (tiny) @as(i128, if (wide) 100_000_000_000 else 100_000) else fee_atoms[index], record.event.fill.fee.?.atoms);
+            try std.testing.expectEqual(@as(i128, if (inexact or swap_capacity) 1 else 10_000), record.event.fill.quantity.lots);
+            if (!swap_capacity and !tiny and !overflow and !inexact and index == 2)
                 try std.testing.expectEqual(@as(i128, if (wide) 100_000_000_000 else 100_000), record.event.fill.rebate.?.atoms);
         };
         if (inexact or (overflow and index == 1)) {
@@ -946,34 +1022,60 @@ fn checkNativeSettlementFees(case: enum { long, tiny, wide, overflow, conflict, 
             try std.testing.expect(owner.shard.oms.recovery_only);
             continue;
         }
+        const before_capacity = owner.shard.economicSummary();
         try owner.applyAdapterBatch(output);
+        if (swap_capacity and index == 32) {
+            try std.testing.expectEqualDeep(before_capacity, owner.shard.economicSummary());
+            try std.testing.expectEqual(canonical.EconomicFaultReason.capacity_exhausted, owner.shard.economic_fault_reason);
+            try std.testing.expect(owner.shard.oms.recovery_only);
+            break;
+        }
+        if (with_rest and arrival == .ws_first) {
+            const before_duplicate = owner.shard.canonicalStateDigest();
+            const duplicate_rest = try implementation.ingestPrivateRest(private_times, .rest_fills_history_spot, .{ .final = true }, rest_input);
+            if (duplicate_rest.rejection) |reason| std.debug.print("native-arrival REST duplicate index={d} reason={s}\n", .{ index, @tagName(reason) });
+            try std.testing.expect(duplicate_rest.rejection == null);
+            while (try adapter.tryDrain()) |duplicate| try owner.applyAdapterBatch(duplicate);
+            try std.testing.expectEqualSlices(u8, &before_duplicate, &owner.shard.canonicalStateDigest());
+        }
         const digest = owner.shard.canonicalStateDigest();
         try std.testing.expect((try implementation.ingestPrivateWs(private_times, input)).rejection == null);
         while (try adapter.tryDrain()) |duplicate| try owner.applyAdapterBatch(duplicate);
         try std.testing.expectEqualSlices(u8, &digest, &owner.shard.canonicalStateDigest());
     }
     const economic = owner.shard.economicSummary();
-    try std.testing.expectEqual(if (malformed) @as(i128, 4_198_632_165) else if (inexact) @as(i128, 0) else if (overflow) @as(i128, 60_000_000_000_000) else if (wide) @as(i128, if (tiny) 1_000_000_000_000 else 8_435_870_685_000_000) else if (tiny) @as(i128, 1_000_000) else 8_435_870_685, economic.portfolio.fee_atoms);
-    try std.testing.expectEqual(if (malformed or inexact or overflow or tiny) @as(i128, 0) else if (wide) @as(i128, 100_000_000_000) else 100_000, economic.portfolio.rebate_atoms);
-    try std.testing.expectEqual(if (malformed) @as(i128, 84_995_801_367_835) else if (inexact) @as(i128, 90_000_000) else if (overflow) @as(i128, 25_000_000_000_000) else if (wide) @as(i128, if (tiny) 39_999_999_000_000_000_000 else 69_991_564_229_315_000_000) else if (tiny) @as(i128, 39_999_999_000_000) else 69_991_564_229_315, economic.portfolio.usdt_balance_atoms);
-    try std.testing.expectEqual(if (malformed) @as(i128, 94_995_801_367_835) else if (inexact) @as(i128, 100_000_000) else if (overflow) @as(i128, 35_000_000_000_000) else if (wide) @as(i128, if (tiny) 49_999_999_000_000_000_000 else 79_991_564_229_315_000_000) else if (tiny) @as(i128, 49_999_999_000_000) else 79_991_564_229_315, economic.exchange.usdt_balance_atoms);
-    try std.testing.expectEqual(@as(i64, if (inexact) 1 else @intCast(count * 10_000)), owner.shard.oms.orderById(command.order_id).?.cumulative_quantity);
-    try std.testing.expectEqual(@as(i64, if (inexact) 0 else if (overflow) 10_000 else @intCast(count * 10_000)), try owner.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
-    for ([_]@import("economics.zig").LedgerLayer{ .portfolio, .exchange }) |layer| {
-        var posted_fees: i128 = 0;
-        var posted_rebates: i128 = 0;
-        const projection = &owner.shard.economic_projection;
-        for (projection.ledger[0..projection.ledger_count]) |transaction| {
-            if (transaction.layer != layer) continue;
-            for (transaction.postings[0..transaction.posting_count]) |posting| {
-                if (posting.account != .fee_expense and posting.account != .rebate_income) continue;
-                try std.testing.expectEqual(@import("economics.zig").LedgerUnit.settlement_atoms, posting.unit);
-                try std.testing.expectEqual(@as(u8, 2), transaction.posting_count);
-                if (posting.account == .fee_expense) posted_fees = try std.math.add(i128, posted_fees, posting.amount) else posted_rebates = try std.math.sub(i128, posted_rebates, posting.amount);
+    if (swap_capacity) {
+        try std.testing.expectEqual(@as(u8, 32), owner.shard.economic_projection.seen_count);
+        try std.testing.expectEqual(@as(u8, 32), owner.shard.economic_projection.canonical_fill_evidence_count);
+        try std.testing.expectEqual(@as(u8, 64), owner.shard.economic_projection.ledger_count);
+        try std.testing.expectEqual(@as(i64, 32), try owner.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
+        try std.testing.expectEqual(@as(i128, 0), economic.portfolio.fee_atoms);
+        try std.testing.expectEqual(@as(i128, 16000000000), economic.portfolio.swap.open_cost_atoms);
+        try std.testing.expectEqual(@as(i128, 90000000000000), economic.portfolio.usdt_balance_atoms);
+        try std.testing.expectEqual(@as(i128, 100000000000000), economic.exchange.usdt_balance_atoms);
+    } else {
+        try std.testing.expectEqual(if (malformed) @as(i128, 4_198_632_165) else if (inexact) @as(i128, 0) else if (overflow) @as(i128, 60_000_000_000_000) else if (wide) @as(i128, if (tiny) 1_000_000_000_000 else 8_435_870_685_000_000) else if (tiny) @as(i128, 1_000_000) else 8_435_870_685, economic.portfolio.fee_atoms);
+        try std.testing.expectEqual(if (malformed or inexact or overflow or tiny) @as(i128, 0) else if (wide) @as(i128, 100_000_000_000) else 100_000, economic.portfolio.rebate_atoms);
+        try std.testing.expectEqual(if (malformed) @as(i128, 84_995_801_367_835) else if (inexact) @as(i128, 90_000_000) else if (overflow) @as(i128, 25_000_000_000_000) else if (wide) @as(i128, if (tiny) 39_999_999_000_000_000_000 else 69_991_564_229_315_000_000) else if (tiny) @as(i128, 39_999_999_000_000) else 69_991_564_229_315, economic.portfolio.usdt_balance_atoms);
+        try std.testing.expectEqual(if (malformed) @as(i128, 94_995_801_367_835) else if (inexact) @as(i128, 100_000_000) else if (overflow) @as(i128, 35_000_000_000_000) else if (wide) @as(i128, if (tiny) 49_999_999_000_000_000_000 else 79_991_564_229_315_000_000) else if (tiny) @as(i128, 49_999_999_000_000) else 79_991_564_229_315, economic.exchange.usdt_balance_atoms);
+        try std.testing.expectEqual(@as(i64, if (inexact) 1 else @intCast(count * 10_000)), owner.shard.oms.orderById(command.order_id).?.cumulative_quantity);
+        try std.testing.expectEqual(@as(i64, if (inexact) 0 else if (overflow) 10_000 else @intCast(count * 10_000)), try owner.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
+        for ([_]@import("economics.zig").LedgerLayer{ .portfolio, .exchange }) |layer| {
+            var posted_fees: i128 = 0;
+            var posted_rebates: i128 = 0;
+            const projection = &owner.shard.economic_projection;
+            for (projection.ledger[0..projection.ledger_count]) |transaction| {
+                if (transaction.layer != layer) continue;
+                for (transaction.postings[0..transaction.posting_count]) |posting| {
+                    if (posting.account != .fee_expense and posting.account != .rebate_income) continue;
+                    try std.testing.expectEqual(@import("economics.zig").LedgerUnit.settlement_atoms, posting.unit);
+                    try std.testing.expectEqual(@as(u8, 2), transaction.posting_count);
+                    if (posting.account == .fee_expense) posted_fees = try std.math.add(i128, posted_fees, posting.amount) else posted_rebates = try std.math.sub(i128, posted_rebates, posting.amount);
+                }
             }
+            try std.testing.expectEqual(economic.portfolio.fee_atoms, posted_fees);
+            try std.testing.expectEqual(economic.portfolio.rebate_atoms, posted_rebates);
         }
-        try std.testing.expectEqual(economic.portfolio.fee_atoms, posted_fees);
-        try std.testing.expectEqual(economic.portfolio.rebate_atoms, posted_rebates);
     }
     if (case == .conflict) {
         const before = owner.shard.economicSummary();
@@ -1013,6 +1115,11 @@ fn checkNativeSettlementFees(case: enum { long, tiny, wide, overflow, conflict, 
     const restored = try @import("trading_shard.zig").TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
     try std.testing.expectEqual(@as(u64, 1), chain.next_attempt_id);
+    if (with_rest) {
+        try std.testing.expectEqual(@as(i128, 400_000), economic.exchange.spot_asset_atoms);
+        try std.testing.expectEqual(@as(u64, 0), owner.shard.economic_fault_count);
+    }
+    return .{ .semantic = owner.shard.semanticAuthorityDigest(), .canonical_digest = owner.shard.canonicalStateDigest() };
 }
 
 test "OKX native settlement long fees rebates and explicit zero close Owner ledger and recover" {
@@ -1715,7 +1822,7 @@ test "OKX native account balances cash held and each liability retain independen
     try checkNativeBaseFees(false, .native_liabilities);
 }
 
-fn checkNativeFundingBills(mode: enum { normal, unknown, inexact, range, conflict, historical, cumulative }) !void {
+fn checkNativeFundingBills(mode: enum { normal, unknown, inexact, range, conflict, historical, cumulative, capacity }) !void {
     const allocator = std.heap.page_allocator;
     const memory = try allocator.create(durable.MemoryAdapter);
     defer allocator.destroy(memory);
@@ -1769,13 +1876,41 @@ fn checkNativeFundingBills(mode: enum { normal, unknown, inexact, range, conflic
         }
         _ = try owner.apply(.{ .core = .{ .identity = 102, .payload = .{ .asset_definition_activated = narrower } } });
     }
+    if (mode == .capacity) {
+        var exhausted = false;
+        for (0..33) |index| {
+            var bytes: [768]u8 = undefined;
+            const frame = try std.fmt.bufPrint(&bytes,
+                \\{{"code":"0","data":[{{"billId":"{d}","type":"8","subType":"173","instType":"SWAP","instId":"BTC-USDT-SWAP","ccy":"USDT","pnl":"-0.000000000001","fee":"0","ts":"{d}"}}]}}
+            , .{ 10000 + index, @as(u64, 1800000000200) + index });
+            const ingress = try implementation.ingestPrivateRest(private_times, .rest_account_bills, .{ .final = true }, frame);
+            try std.testing.expect(ingress.rejection == null);
+            const batch = (try adapter.tryDrain()).?;
+            const before = owner.shard.economicSummary();
+            owner.applyAdapterBatch(batch) catch |err| {
+                // The actual gate limit is reached before the larger fact table.
+                try std.testing.expect(err == error.SafetyGateSetFull);
+                try std.testing.expect(index < 32);
+                try std.testing.expectEqualDeep(before, owner.shard.economicSummary());
+                try std.testing.expectEqual(@as(u8, 16), owner.shard.operational_state.gate_count);
+                try std.testing.expectEqual(canonical.EconomicFaultReason.capacity_exhausted, owner.shard.economic_fault_reason);
+                try std.testing.expectEqual(ingress.raw_evidence.stream_sequence, owner.shard.economic_fault_evidence.sequence);
+                try std.testing.expectEqualSlices(u8, &ingress.raw_evidence.sha256, &owner.shard.economic_fault_evidence.digest);
+                try std.testing.expect(owner.shard.oms.recovery_only);
+                exhausted = true;
+                break;
+            };
+            try std.testing.expectEqual(@as(i128, 100000000000000) - @as(i128, @intCast(index + 1)), owner.shard.economicSummary().exchange.usdt_balance_atoms);
+        }
+        try std.testing.expect(exhausted);
+    }
     const frames = [_][]const u8{
         \\{"code":"0","data":[{"billId":"9001","type":"8","subType":"173","instType":"SWAP","instId":"BTC-USDT-SWAP","ccy":"USDT","pnl":"-0.004198632165","fee":"0","balChg":"0","posBalChg":"-0.004198632165","px":"50000","mgnMode":"","ts":"1800000000200"}]}
         ,
         \\{"code":"0","data":[{"billId":"9002","type":"8","subType":"174","instType":"SWAP","instId":"BTC-USDT-SWAP","ccy":"USDT","pnl":"0.00423723852","fee":"0","balChg":"0","posBalChg":"0.00423723852","px":"50000","mgnMode":"","ts":"1800000000201"}]}
     };
     const totals = if (mode == .cumulative) [_]i128{ -60_000_000_000_000, 0 } else [_]i128{ -4_198_632_165, 38_606_355 };
-    for (frames, 0..) |original_frame, index| {
+    if (mode != .capacity) for (frames, 0..) |original_frame, index| {
         const frame = if (mode == .unknown)
             \\{"code":"0","data":[{"billId":"9001","type":"8","subType":"173","instType":"SWAP","instId":"BTC-USDT-SWAP","ccy":"UNREGISTERED","pnl":"-0.004198632165","fee":"0","ts":"1800000000200"}]}
         else if (mode == .inexact)
@@ -1836,7 +1971,7 @@ fn checkNativeFundingBills(mode: enum { normal, unknown, inexact, range, conflic
             try std.testing.expect(owner.shard.oms.recovery_only);
             break;
         }
-    }
+    };
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
     recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
@@ -1867,4 +2002,21 @@ test "OKX funding included in opening baseline stays unresolved without a second
 
 test "OKX opposite funding payments cannot hide cumulative native overflow by netting" {
     try checkNativeFundingBills(.cumulative);
+}
+
+test "OKX native precision legal raw WS REST report Fill permutations converge without losing audit order" {
+    const baseline = try runNativeSettlementFees(.long, .ws_first, true);
+    for ([_]NativeArrival{ .report_first, .rest_first }) |arrival| {
+        const observed = try runNativeSettlementFees(.long, arrival, true);
+        try std.testing.expectEqualSlices(u8, &baseline.semantic, &observed.semantic);
+        try std.testing.expect(!std.mem.eql(u8, &baseline.canonical_digest, &observed.canonical_digest));
+    }
+}
+
+test "OKX native gate capacity retains unresolved raw bill without changing prior cash" {
+    try checkNativeFundingBills(.capacity);
+}
+
+test "OKX native perpetual capacity preserves 32 exact Fill facts and rejects the next source without partial economics" {
+    try checkNativeSettlementFees(.swap_capacity);
 }

@@ -1610,13 +1610,17 @@ test "legal private fact permutations preserve semantic authority while retainin
         if (row != 0) try std.testing.expect(!std.mem.eql(u8, &baseline_canonical, &run.shard.canonicalStateDigest()));
         try std.testing.expectEqual(@as(i64, happy_order_quantity), try run.shard.economic_projection.appliedCanonicalFillQuantity(1));
 
-        const before_conflict = run.shard.canonicalStateDigest();
+        const before_conflict = run.shard.economicSummary();
+        const before_trace = run.shard.trace.len;
         const command = run.shard.oms.command_history[0];
         var conflicting = (try privateFactsWithSplit(command, 40))[2];
         stampPrivateFact(&conflicting, privateFactArrival(permutation, 2));
         conflicting.venue.event.fill.price.ticks += 1;
         try std.testing.expectError(error.ConflictingFillIdentity, run.shard.apply(conflicting));
-        try std.testing.expectEqualSlices(u8, &before_conflict, &run.shard.canonicalStateDigest());
+        try std.testing.expectEqualDeep(before_conflict, run.shard.economicSummary());
+        try std.testing.expectEqual(@as(u64, 1), run.shard.economic_fault_count);
+        try std.testing.expect(run.shard.oms.recovery_only);
+        try std.testing.expect(run.shard.trace.len > before_trace);
     }
 }
 

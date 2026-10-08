@@ -51,10 +51,12 @@ Status: open
 
 ## Frontier
 
-- [11：证明精度账务与故障状态的崩溃恢复](issues/11-prove-precision-crash-and-replay-invariants.md) — 02–10 离线切片已完成；可实施。
+- [13：闭合多 Venue 精确账务公开接缝合同](issues/13-qualify-multi-venue-exact-accounting-contract.md) — 11 离线切片已完成；可实施。
 - [12：只读审计历史取整差额并保留更正边界](issues/12-audit-historical-quantized-fees-readonly.md) — 10 已完成；可并行实施。
 
 ## Decisions so far
+
+- 2026-10-08：11离线恢复切片完成，18个native文件中断场景含恢复途中再故障、32Fill/64ledger/33rd fault、真实WS/REST排列与旧schema拒绝；11/12联合Debug/ReleaseSafe各13/13。Frontier推进13，最终完整套件/独立两轴审查待14，在线未运行。
 
 - 2026-10-08：10完成独立原币cash快照/真实bill链/唯一已应用经济fact完整摘要核对；差异不改账且锁存break。Raw请求/query持久与共享恢复解码器、重复proof sweep及Windows replay→live floor衔接闭合。联合Debug/ReleaseSafe各24/24、实际两种构建Windows离线重启与四shard通过，Linux ReleaseSafe编译通过，两轴审查无剩余重大问题。限定16bill/4query的cash proof，非零position cash保持未解决；在线与production资格仍not_run/false。Frontier推进11/12，完整套件/最终封存待14。
 

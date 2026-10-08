@@ -619,12 +619,16 @@ pub const Reconciler = struct {
             batch.rejection = .conflicting_fact;
             return batch.*;
         }
+        const ready_rest = self.stage == .ready and switch (source) {
+            .rest_account_bills, .rest_balance, .rest_fills_history_spot, .rest_fills_history_swap => true,
+            else => false,
+        };
         if (source.isWebSocket()) {
             if (page != null) {
                 batch.rejection = .invalid_field;
                 return batch.*;
             }
-        } else if ((self.stage != .reconciling and !((source == .rest_account_bills or source == .rest_balance) and self.stage == .ready)) or page == null) {
+        } else if ((self.stage != .reconciling and !ready_rest) or page == null) {
             batch.rejection = .invalid_field;
             return batch.*;
         }
@@ -640,7 +644,7 @@ pub const Reconciler = struct {
         self.decode(parsed.value, source, times, batch.raw_evidence, batch) catch |err| {
             return self.reject(batch, mapDecodeError(err));
         };
-        if (!source.isWebSocket() and source != .rest_account_bills and !(source == .rest_balance and self.stage == .ready)) {
+        if (!source.isWebSocket() and source != .rest_account_bills and !ready_rest) {
             self.recordPage(source, page.?, batch.raw_evidence.sha256, batch) catch |err| {
                 return self.reject(batch, mapDecodeError(err));
             };

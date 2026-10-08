@@ -327,7 +327,7 @@ pub const TradingShard = struct {
                 }
                 try candidate.latchEconomicFault(event, switch (err) {
                     error.Overflow, error.QuantityOutOfRange, error.PriceOutOfRange, error.AssetAmountOutOfRange => .overflow,
-                    error.NativeAssetCapacityExceeded, error.LedgerCapacityExceeded, error.EconomicFactCapacityExceeded => .capacity_exhausted,
+                    error.NativeAssetCapacityExceeded, error.LedgerCapacityExceeded, error.EconomicFactCapacityExceeded, error.SafetyGateSetFull => .capacity_exhausted,
                     error.UnknownAssetDefinition => .unknown_asset,
                     error.MissingFillFee => .missing_amount,
                     error.InexactEconomicAmount => .inexact_amount,
@@ -1808,13 +1808,17 @@ pub const TradingShard = struct {
         self.economic_fault_reason = reason;
         self.economic_fault_evidence = record.envelope.raw_evidence;
         self.oms.recovery_only = true;
-        if (self.operational_state.initialized) try self.applyOperationalGate(.{
+        if (self.operational_state.initialized) self.applyOperationalGate(.{
             .gate_identity = account_data_gate_identity,
             .target_identity = self.operational_state.target_identity,
             .kind = .latched,
             .reason = .reconciliation_break,
             .open = false,
-        });
+        }) catch |err| switch (err) {
+            // Keep the original monetary fault even when no gate slot remains.
+            error.SafetyGateSetFull => self.operational_state.trading_authorized = false,
+            else => return err,
+        };
         try self.trace.append(.canonical_account_invalidated, record.envelope.identity.sequence);
     }
 
