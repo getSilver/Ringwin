@@ -991,7 +991,7 @@ test "Binance missing activation retains raw fault and stops risk across reconne
     try reconciler.registerOrder(1, try canonical.ClientOrderId.init("RWN-1"), false);
     const times = raw.Times{ .receive_time_utc_ns = 1, .monotonic_time_ns = 2, .wall_time_utc_ns = 3 };
     const first = "{\"e\":\"executionReport\",\"E\":\"1\",\"s\":\"BTCUSDT\",\"c\":\"RWN-1\",\"S\":\"BUY\",\"o\":\"LIMIT\",\"f\":\"GTC\",\"q\":\"0.0100\",\"p\":\"50000.0\",\"X\":\"PARTIALLY_FILLED\",\"i\":\"42\",\"l\":\"0.0040\",\"z\":\"0.0040\",\"L\":\"50000.0\",\"n\":\"-0.000001\",\"N\":\"BTC\",\"T\":\"2\",\"t\":\"77\",\"m\":true}";
-    try std.testing.expectError(error.UnknownAssetDefinition, implementation.ingestPrivate(std.testing.allocator, .ws, null, times, first));
+    try std.testing.expectError(error.UnsupportedAsset, implementation.ingestPrivate(std.testing.allocator, .ws, null, times, first));
     const fault = (try adapter.tryDrain()) orelse return error.MissingEconomicFault;
     try std.testing.expectEqual(canonical.EconomicFaultReason.unknown_asset, fault.events[0].event.economic_fault.reason);
     try contract.exerciseEconomicFaultRecovery(fault);

@@ -1,0 +1,5 @@
+1/4 main.test_0...OK
+2/4 trading_shard_tests.test.cancel reconciliation accepts one late Fill without duplicate economics...OK
+3/4 simulated_lifecycle_projection.test.simulated lifecycle makes fill the only economic fact and replays identically...OK
+4/4 binance_venue_adapter.test.Binance missing activation retains raw fault and stops risk across reconnect...OK
+All 4 tests passed.

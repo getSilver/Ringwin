@@ -1660,7 +1660,7 @@ fn canceledLateFillRun(order: [6]u8) !LiveRun {
     const facts = try privateFactsWithSplit(command, 40);
     var canceled = facts[5];
     canceled.venue.event.execution_report.identity = 3;
-    canceled.venue.event.execution_report.revision = 3;
+    canceled.venue.event.execution_report.revision = command.revision;
     canceled.venue.event.execution_report.status = .canceled;
     canceled.venue.event.execution_report.cumulative_quantity.lots = 40;
     canceled.venue.event.execution_report.remaining_quantity.lots = 60;
@@ -1669,12 +1669,12 @@ fn canceledLateFillRun(order: [6]u8) !LiveRun {
         .complete = true,
         .status = .found_terminal,
         .order = command.order_id,
-        .revision = 3,
+        .revision = command.revision,
         .cumulative_quantity = .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = 40 },
         .remaining_quantity = .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = 60 },
         .terminal_status = .canceled,
         .rules_version = command.limit_price.rules_version,
-        .evidence = fixture.reconciliationEvidence(19, 108, command.order_id, command.instrument, 3),
+        .evidence = fixture.reconciliationEvidence(19, 108, command.order_id, command.instrument, command.revision),
     } });
     const events = [_]CanonicalEvent{ facts[0], facts[1], facts[3], canceled, reconciliation, facts[2] };
     for (order, 0..) |index, arrival| {

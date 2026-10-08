@@ -74,7 +74,7 @@ test "simulated lifecycle makes fill the only economic fact and replays identica
     const venue = @import("venue_adapter.zig");
     var adapter_state: simulated.SimulatedVenue = .{};
     const adapter = adapter_state.adapter();
-    try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 8 });
+    try adapter.start(.{ .asset_definitions = try @import("venue_adapter_contract.zig").activatedTestAssets(), .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 8 });
     const command: canonical.OrderCommand = .{
         .identity = 7,
         .exchange_account = 2,

@@ -862,15 +862,7 @@ pub const OkxVenueAdapter = struct {
     }
 
     fn translateFill(self: *OkxVenueAdapter, output: *canonical.AdapterOutputBatch, envelope: private.EventEnvelope, fill: private.Fill, historical: bool) !void {
-        if (!fill.owned_by_ringwin) return;
-        const link = self.findOrderByClient(fill.client_order_id.slice()) orelse {
-            if (historical) return;
-            return error.UnmappedOrder;
-        };
-        const rules = self.mapPrivateInstrument(fill.instrument) orelse return error.UnsupportedInstrument;
         const binding = self.binding orelse return error.InvalidBinding;
-        const venue_order = try venueOrderRef(binding.venue, @intFromEnum(fill.venue_order_id));
-        const venue_trade = try venueTradeRef(binding.venue, @intFromEnum(fill.venue_trade_id));
         const fee_asset = try self.asset_definitions.resolveCode(binding.venue, fill.fee_asset.slice());
         const signed_fee = try assetAmount(self.asset_definitions, fee_asset, fill.fee);
         const explicit_rebate = if (fill.rebate) |value|
@@ -882,6 +874,16 @@ pub const OkxVenueAdapter = struct {
             .asset = signed_fee.asset,
             .atoms = std.math.sub(i128, 0, signed_fee.atoms) catch return error.DecimalOverflow,
         } else .{ .asset = signed_fee.asset, .atoms = 0 };
+        const realized_pnl = if (fill.realized_pnl) |value| try assetAmount(self.asset_definitions, usdt, value) else null;
+        // Account-wide monetary validation precedes portfolio ownership filtering.
+        if (!fill.owned_by_ringwin) return;
+        const link = self.findOrderByClient(fill.client_order_id.slice()) orelse {
+            if (historical) return;
+            return error.UnmappedOrder;
+        };
+        const rules = self.mapPrivateInstrument(fill.instrument) orelse return error.UnsupportedInstrument;
+        const venue_order = try venueOrderRef(binding.venue, @intFromEnum(fill.venue_order_id));
+        const venue_trade = try venueTradeRef(binding.venue, @intFromEnum(fill.venue_trade_id));
         try self.appendPrivate(output, envelope, .account, rules.identity, null, digestIdentity(envelope.source_fact_identity), .{ .fill = .{
             .identity = digestIdentity(envelope.source_fact_identity),
             .order = link.order,
@@ -898,7 +900,7 @@ pub const OkxVenueAdapter = struct {
             .price = try self.privatePrice(rules.identity, rules.rules, fill.price),
             .fee = normalized_fee,
             .rebate = explicit_rebate orelse if (signed_fee.atoms > 0) signed_fee else null,
-            .realized_pnl = if (fill.realized_pnl) |value| try assetAmount(self.asset_definitions, usdt, value) else null,
+            .realized_pnl = realized_pnl,
             .liquidity = switch (fill.liquidity orelse return error.MissingLiquidity) {
                 .maker => .maker,
                 .taker => .taker,
