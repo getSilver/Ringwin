@@ -51,10 +51,12 @@ Status: open
 
 ## Frontier
 
-- [13：闭合多 Venue 精确账务公开接缝合同](issues/13-qualify-multi-venue-exact-accounting-contract.md) — 11 离线切片已完成；可实施。
+- [14：封存完整验收、覆盖矩阵与发布资格要求](issues/14-seal-exact-accounting-release-evidence.md) — 12/13离线切片已完成；执行最终全套、独立审查和证据封存。
 
 
 ## Decisions so far
+
+- 2026-10-08：13实际多Venue公开精确账务合同完成离线切片。Binance/Bybit共享最终Debug/ReleaseSafe各14/14；OKX真实native证据和Simulated原币合同复用同一Owner/ledger/persistence。未知/余数/溢出/冲突/无private link/decoder/现代wallet故障持久关闭；Binance不完整Spot产品/bill scope和Bybit钱包availability保持未解决。Frontier推进14，最终全套/全分支独立双轴审查与源码绑定待执行；线上not_run/false。
 
 - 2026-10-08：12完成既有evidence命令的只读historical子模式与两条固定原币差额；支持严格旧单位/原始哈希/唯一执行/旧posting关联，缺原历史证据保持unverifiable，宽JSON保持精确。两种实际CLI/输入哈希不变验证通过，联合Debug/ReleaseSafe各13/13；没有历史更正或新在线资格。14等待13及最终全套/双轴审查。
 

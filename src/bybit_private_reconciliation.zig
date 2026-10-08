@@ -139,14 +139,23 @@ pub const Reconciler = struct {
         self.source_sequences[source_index] = try std.math.add(u64, self.source_sequences[source_index], 1);
         self.active_source = source;
         self.active_source_sequence = self.source_sequences[source_index];
-        const parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{ .parse_numbers = false }) catch return error.InvalidFrame;
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{ .parse_numbers = false }) catch {
+            self.stage = .failed;
+            try self.appendReady(try self.record(.account, null, null, identity(evidence.sha256), null, times, evidence, .{ .economic_fault = .{ .reason = .decoder_rejected } }));
+            return error.InvalidFrame;
+        };
         defer parsed.deinit();
         var candidate = self.*;
         candidate.decode(source, page, times, evidence, parsed.value) catch |err| {
             self.stage = .failed;
-            if (canonical.Decimal.faultReason(err)) |reason| {
-                try self.appendReady(try self.record(.account, null, null, identity(evidence.sha256), null, times, evidence, .{ .economic_fault = .{ .reason = reason } }));
-            }
+            const reason: canonical.EconomicFaultReason = switch (err) {
+                error.UnsupportedFeeComponents, error.UnsupportedWalletScope, error.ConflictingFact => .decoder_rejected,
+                error.MissingWalletAmount => .missing_amount,
+                error.InvalidWalletAmount => .invalid_economic_fact,
+                error.Overflow => .overflow,
+                else => canonical.Decimal.faultReason(err) orelse .decoder_rejected,
+            };
+            try self.appendReady(try self.record(.account, null, null, identity(evidence.sha256), null, times, evidence, .{ .economic_fault = .{ .reason = reason } }));
             return err;
         };
         self.* = candidate;
@@ -217,13 +226,20 @@ pub const Reconciler = struct {
         const rows = try rowsFor(root);
         for (rows) |row| {
             const item = try object(row);
+            if (item.get("extraFees")) |extra| switch (extra) {
+                .array => if (extra.array.items.len != 0) return error.UnsupportedFeeComponents,
+                .string => if (extra.string.len != 0) return error.UnsupportedFeeComponents,
+                else => return error.UnsupportedFeeComponents,
+            };
+            // Unknown ownership cannot make an invalid native economic amount
+            // disappear. Validate source money first without assigning an Order.
+            const fee = if (try optionalString(item, "execFee")) |value_text| try amount(self.asset_definitions, try self.asset_definitions.resolveCode((self.binding orelse return error.StaleSession).venue, (try optionalString(item, "feeCurrency")) orelse return error.MissingFeeAsset), value_text) else null;
+            const pnl = if (try optionalString(item, "execPnl")) |value_text| try amount(self.asset_definitions, usdt, value_text) else null;
             const client = try string(item, "orderLinkId");
             const link = self.findLink(client) orelse continue;
             const execution_id = try string(item, "execId");
             const key = keyFor(&.{ "fill", execution_id });
             const rules = try self.rulesFor(item);
-            const fee = if (try optionalString(item, "execFee")) |value_text| try amount(self.asset_definitions, try self.asset_definitions.resolveCode((self.binding orelse return error.StaleSession).venue, (try optionalString(item, "feeCurrency")) orelse return error.MissingFeeAsset), value_text) else null;
-            const pnl = if (try optionalString(item, "execPnl")) |value_text| try amount(self.asset_definitions, usdt, value_text) else null;
             const execution_time = try optionalMillis(item, "execTime");
             const event: canonical.Payload = .{ .fill = .{ .identity = identity(key), .order = link.order, .client_order_id = link.client, .venue_order = try canonical.VenueOrderRef.init((self.binding orelse return error.StaleSession).venue, try string(item, "orderId")), .venue_trade = try canonical.VenueTradeRef.init((self.binding orelse return error.StaleSession).venue, execution_id), .instrument = rules.identity, .exchange_account = (self.binding orelse return error.StaleSession).account, .side = try side(try string(item, "side")), .quantity = try quantity(rules, try string(item, "execQty")), .price = try price(rules, try string(item, "execPrice")), .fee = if (fee) |value_fee| if (value_fee.atoms > 0) value_fee else .{ .asset = value_fee.asset, .atoms = 0 } else null, .rebate = if (fee) |value_fee| if (value_fee.atoms < 0) .{ .asset = value_fee.asset, .atoms = std.math.sub(i128, 0, value_fee.atoms) catch return error.DecimalOverflow } else null else null, .realized_pnl = pnl, .liquidity = if (try boolField(item, "isMaker")) .maker else .taker, .venue_fill_time_utc_ns = execution_time } };
             if (try self.seenBefore(key, event)) continue;
@@ -231,29 +247,38 @@ pub const Reconciler = struct {
         }
     }
     fn decodeWallet(self: *Reconciler, observed: bool, times: Times, evidence: RawEvidenceRef, value: std.json.Value) !void {
+        _ = observed;
+        _ = times;
+        _ = evidence;
         const root = try object(value);
         const accounts = try rowsFor(root);
-        const emit_observation = observed and self.bootstrap != null;
         for (accounts) |account_value| {
             const account = try object(account_value);
             const coins = try array(try field(account, "coin"));
+            if (coins.items.len == 0) continue;
+            if (!std.mem.eql(u8, (try optionalString(account, "accountType")) orelse "", "UNIFIED")) return error.UnsupportedWalletScope;
             for (coins.items) |coin_value| {
                 const coin = try object(coin_value);
                 const asset_id = try self.asset_definitions.resolveCode((self.binding orelse return error.StaleSession).venue, try string(coin, "coin"));
-                const total = try amount(self.asset_definitions, asset_id, try string(coin, "walletBalance"));
-                const available = try amount(self.asset_definitions, asset_id, (try optionalString(coin, "availableToWithdraw")) orelse return error.MissingBalanceAvailable);
-                const balance = canonical.AccountBalance{ .asset = asset_id, .total = total, .available = available, .held = .{ .asset = asset_id, .atoms = try std.math.sub(i128, total.atoms, available.atoms) }, .liability = if (try optionalString(coin, "borrowAmount")) |borrowed| try amount(self.asset_definitions, asset_id, borrowed) else null, .cash_balance = total };
-                if (emit_observation) try self.emitObservedBalance(balance, times, evidence) else try self.storeBalance(balance);
-                if (asset_id == usdt) {
-                    const valuation: canonical.AccountMarginUsdValuation = .{
-                        .total_equity = if (try optionalString(account, "totalEquity")) |equity| try canonical.Decimal.parse(equity) else null,
-                        .initial_margin = if (try optionalString(account, "totalInitialMargin")) |initial| try canonical.Decimal.parse(initial) else null,
-                        .maintenance_margin = if (try optionalString(account, "totalMaintenanceMargin")) |maintenance| try canonical.Decimal.parse(maintenance) else null,
-                    };
-                    const margin: canonical.AccountMargin = .{ .amount = total, .usd_valuation = if (valuation.total_equity != null or valuation.initial_margin != null or valuation.maintenance_margin != null) valuation else null };
-                    if (emit_observation) try self.emitObservedMargin(margin, times, evidence) else try self.storeMargin(margin);
-                }
+                const wallet = try amount(self.asset_definitions, asset_id, (try optionalString(coin, "walletBalance")) orelse return error.MissingWalletAmount);
+                const spot_borrow = try amount(self.asset_definitions, asset_id, (try optionalString(coin, "spotBorrow")) orelse return error.MissingWalletAmount);
+                const debt = try amount(self.asset_definitions, asset_id, (try optionalString(coin, "borrowAmount")) orelse return error.MissingWalletAmount);
+                const locked = try amount(self.asset_definitions, asset_id, (try optionalString(coin, "locked")) orelse return error.MissingWalletAmount);
+                if (spot_borrow.atoms < 0 or debt.atoms < spot_borrow.atoms or locked.atoms < 0) return error.InvalidWalletAmount;
+                // Current UTA: old wallet cash = walletBalance - spotBorrow;
+                // borrowAmount already includes spot and derivative debt.
+                // Preserve these source fields in committed RawIngress, never
+                // omit spotBorrow or add it a second time to borrowAmount.
+                const cash = canonical.AssetAmount{ .asset = asset_id, .atoms = try std.math.sub(i128, wallet.atoms, spot_borrow.atoms) };
+                try self.asset_definitions.checkAmount(cash, false);
             }
+            // Official REST and WS wallet schemas are UNIFIED-only. They do
+            // not prove account margin mode or native trading availability:
+            // availableToWithdraw is deprecated; totalAvailableBalance is USD;
+            // locked covers spot orders only. AccountBalance requires proven
+            // native available/held, so retain raw cash/debt and emit a durable
+            // fault instead of inventing a balance or a completed observation.
+            return error.UnsupportedWalletScope;
         }
     }
     fn decodePositions(self: *Reconciler, observed: bool, times: Times, evidence: RawEvidenceRef, value: std.json.Value) !void {
@@ -459,8 +484,8 @@ fn keyFor(parts: []const []const u8) [32]u8 {
     }
     return hash.finalResult();
 }
-fn identity(digest: [32]u8) u128 {
-    return std.mem.readInt(u128, digest[0..16], .little);
+fn identity(digest: [32]u8) u64 {
+    return std.mem.readInt(u64, digest[0..8], .little);
 }
 fn privateStream(session: canonical.AdapterSessionIdentity) canonical.StreamIdentity {
     return session ^ 0x4259_4259_5052_4956_4154_455f_0000_0000;
@@ -555,6 +580,10 @@ test "Bybit raw ingress precedes invalid private frames" {
     try startTest(&reconciler);
     try std.testing.expectError(error.InvalidFrame, reconciler.ingest(std.testing.allocator, .ws, null, test_times, "bad"));
     try std.testing.expectEqual(@as(u64, 1), raw.calls);
+    const fault = reconciler.drain().?;
+    try std.testing.expectEqual(canonical.EconomicFaultReason.decoder_rejected, fault.slice()[0].event.economic_fault.reason);
+    try std.testing.expectEqual(@as(u64, 1), fault.slice()[0].envelope.raw_evidence.sequence);
+    try std.testing.expectEqual(Stage.failed, reconciler.readiness().stage);
 }
 test "Bybit separates deduplicated reports and fills from economic facts" {
     var raw = TestRaw{};
@@ -568,7 +597,7 @@ test "Bybit separates deduplicated reports and fills from economic facts" {
     _ = try reconciler.ingest(std.testing.allocator, .ws, null, test_times, equivalent);
     _ = try reconciler.ingest(std.testing.allocator, .ws, null, test_times, execution);
     _ = try reconciler.ingest(std.testing.allocator, .ws, null, test_times, execution);
-    _ = try reconciler.ingest(std.testing.allocator, .rest_wallet, .{ .final = true }, test_times, "{\"result\":{\"list\":[{\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"10.000000\",\"availableToWithdraw\":\"9.000000\"}]}]}}");
+    _ = try reconciler.ingest(std.testing.allocator, .rest_wallet, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
     _ = try reconciler.ingest(std.testing.allocator, .rest_positions, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
     _ = try reconciler.ingest(std.testing.allocator, .rest_orders, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
     _ = try reconciler.ingest(std.testing.allocator, .rest_executions, .{ .final = true }, test_times,
@@ -642,43 +671,95 @@ test "Bybit derives position mode from positionIdx" {
     try std.testing.expectEqual(@as(?bool, null), try positionModeNet(absent.value.object));
 }
 
-test "Bybit emits absolute observations only after a complete bootstrap" {
-    var raw = TestRaw{};
-    var reconciler = Reconciler.init(raw.sink(), testRules());
-    try startTest(&reconciler);
-    _ = try reconciler.ingest(std.testing.allocator, .rest_wallet, .{ .final = true }, test_times, "{\"result\":{\"list\":[{\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"10.000000\",\"availableToWithdraw\":\"9.000000\"}]}]}}");
-    _ = try reconciler.ingest(std.testing.allocator, .rest_positions, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
-    _ = try reconciler.ingest(std.testing.allocator, .rest_orders, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
-    _ = try reconciler.ingest(std.testing.allocator, .rest_executions, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
-    var projection = @import("account_projection.zig").AccountProjection{};
-    const bootstrap_output = reconciler.drain().?;
-    for (bootstrap_output.slice()) |record| try projection.apply(record.event);
-    _ = try reconciler.ingest(std.testing.allocator, .ws, null, test_times, "{\"topic\":\"wallet\",\"data\":[{\"totalEquity\":\"11.123456789012345678\",\"totalInitialMargin\":\"0.000000000000000001\",\"totalMaintenanceMargin\":\"0.000000000000000002\",\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"11.000000\",\"availableToWithdraw\":\"10.000000\",\"borrowAmount\":\"0.000001\"}]}]}");
-    const output = reconciler.drain().?;
-    for (output.slice()) |record| {
-        try projection.apply(record.event);
-        try projection.apply(record.event);
+test "Bybit modern wallet retains raw native cash debt and locks without inventing availability" {
+    const cases = [_]struct { frame: []const u8, failure: anyerror, reason: canonical.EconomicFaultReason }{
+        .{ .frame = "{\"topic\":\"wallet\",\"data\":[{\"accountType\":\"UNIFIED\",\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"11\",\"spotBorrow\":\"0.000001\",\"borrowAmount\":\"0.000002\",\"locked\":\"1\"}]}]}", .failure = error.UnsupportedWalletScope, .reason = .decoder_rejected },
+        .{ .frame = "{\"topic\":\"wallet\",\"data\":[{\"accountType\":\"UNIFIED\",\"totalAvailableBalance\":\"999999\",\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"11\",\"availableToWithdraw\":\"11\",\"spotBorrow\":\"0\",\"borrowAmount\":\"0\",\"locked\":\"1\"}]}]}", .failure = error.UnsupportedWalletScope, .reason = .decoder_rejected },
+        .{ .frame = "{\"topic\":\"wallet\",\"data\":[{\"accountType\":\"UNIFIED\",\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"11\",\"spotBorrow\":\"0\",\"locked\":\"0\"}]}]}", .failure = error.MissingWalletAmount, .reason = .missing_amount },
+        .{ .frame = "{\"topic\":\"wallet\",\"data\":[{\"accountType\":\"UNIFIED\",\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"11\",\"spotBorrow\":\"2\",\"borrowAmount\":\"1\",\"locked\":\"0\"}]}]}", .failure = error.InvalidWalletAmount, .reason = .invalid_economic_fact },
+        .{ .frame = "{\"topic\":\"wallet\",\"data\":[{\"accountType\":\"UNIFIED\",\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"11\",\"spotBorrow\":\"0.0000001\",\"borrowAmount\":\"0.0000001\",\"locked\":\"0\"}]}]}", .failure = error.InexactDecimal, .reason = .inexact_amount },
+        .{ .frame = "{\"topic\":\"wallet\",\"data\":[{\"accountType\":\"CLASSIC\",\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"11\",\"availableToWithdraw\":\"11\"}]}]}", .failure = error.UnsupportedWalletScope, .reason = .decoder_rejected },
+        .{ .frame = "{\"topic\":\"wallet\",\"data\":[{\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"11\",\"availableToWithdraw\":\"11\"}]}]}", .failure = error.UnsupportedWalletScope, .reason = .decoder_rejected },
+    };
+    for (cases) |case| {
+        var raw = TestRaw{};
+        var reconciler = Reconciler.init(raw.sink(), testRules());
+        try startTest(&reconciler);
+        _ = try reconciler.ingest(std.testing.allocator, .rest_wallet, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
+        _ = try reconciler.ingest(std.testing.allocator, .rest_positions, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
+        _ = try reconciler.ingest(std.testing.allocator, .rest_orders, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
+        _ = try reconciler.ingest(std.testing.allocator, .rest_executions, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
+        const bootstrap = reconciler.drain().?;
+        try std.testing.expectEqual(@as(u8, 0), bootstrap.slice()[0].event.account_bootstrap_snapshot.balance_count);
+        try std.testing.expectEqual(Stage.ready, reconciler.readiness().stage);
+        try std.testing.expectError(case.failure, reconciler.ingest(std.testing.allocator, .ws, null, test_times, case.frame));
+        const output = reconciler.drain().?;
+        try std.testing.expectEqual(@as(usize, 1), output.slice().len);
+        try std.testing.expectEqual(case.reason, output.slice()[0].event.economic_fault.reason);
+        try std.testing.expectEqual(@as(u64, 5), output.slice()[0].envelope.raw_evidence.sequence);
+        var expected_digest: [32]u8 = undefined;
+        Sha256.hash(case.frame, &expected_digest, .{});
+        try std.testing.expectEqualSlices(u8, &expected_digest, &output.slice()[0].envelope.raw_evidence.digest);
+        try std.testing.expectEqual(Stage.failed, reconciler.readiness().stage);
+        try std.testing.expectEqual(@as(u8, 0), reconciler.balance_count);
+        try std.testing.expectEqual(@as(u8, 0), reconciler.margin_count);
+        try std.testing.expectEqual(@as(u64, 0), reconciler.account_sequence);
     }
-    try std.testing.expect(projection.valid);
-    try std.testing.expectEqual(@as(u64, 2), projection.last_sequence);
-    try std.testing.expectEqual(projection.source_stream.?, output.slice()[0].event.account_observed.source_stream);
-    try std.testing.expect(output.slice()[0].envelope.source_stream != output.slice()[0].event.account_observed.source_stream);
-    try std.testing.expectEqual(@as(u64, 1), output.slice()[0].event.account_observed.source_sequence);
-    try std.testing.expectEqual(@as(u64, 2), output.slice()[1].event.account_observed.source_sequence);
-    var gap = output.slice()[1].event.account_observed;
-    gap.identity +%= 1;
-    gap.source_sequence = 4;
-    try std.testing.expectError(error.SourceSequenceGap, projection.apply(.{ .account_observed = gap }));
-    try std.testing.expect(!projection.valid);
-    try std.testing.expectEqual(canonical.EventType.account_observed, canonical.eventType(output.slice()[0].event));
-    try std.testing.expectEqual(@as(u64, 1), output.slice()[0].envelope.source_sequence);
-    try std.testing.expectEqual(@as(i128, 11_000_000), output.slice()[0].event.account_observed.value.balance.value.cash_balance.?.atoms);
-    try std.testing.expectEqual(@as(i128, 1), output.slice()[0].event.account_observed.value.balance.value.liability.?.atoms);
-    const margin = output.slice()[1].event.account_observed.value.margin.value;
-    try std.testing.expectEqual(@as(i128, 11_000_000), margin.amount.?.atoms);
-    try std.testing.expect(margin.initial_margin == null);
-    try std.testing.expectEqual(@as(i128, 11123456789012345678), margin.usd_valuation.?.total_equity.?.coefficient);
-    try std.testing.expectEqual(@as(u8, 18), margin.usd_valuation.?.initial_margin.?.scale);
-    try std.testing.expectError(error.MissingBalanceAvailable, reconciler.ingest(std.testing.allocator, .ws, null, test_times, "{\"topic\":\"wallet\",\"data\":[{\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"11.000000\"}]}]}"));
-    try std.testing.expectEqual(Stage.failed, reconciler.readiness().stage);
+}
+
+test "Bybit current REST wallet cannot bootstrap deprecated native availability" {
+    const cases = [_]struct { frame: []const u8, failure: anyerror }{
+        .{ .frame = "{\"result\":{\"list\":[{\"accountType\":\"UNIFIED\",\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"11\",\"availableToWithdraw\":\"11\",\"spotBorrow\":\"0\",\"borrowAmount\":\"0\",\"locked\":\"0\"}]}]}}", .failure = error.UnsupportedWalletScope },
+        .{ .frame = "not a wallet JSON response", .failure = error.InvalidFrame },
+        .{ .frame = "{\"result\":{\"list\":[{\"accountType\":\"UNIFIED\"}]}}", .failure = error.MissingField },
+    };
+    for (cases) |case| {
+        var raw = TestRaw{};
+        var reconciler = Reconciler.init(raw.sink(), testRules());
+        try startTest(&reconciler);
+        try std.testing.expectError(case.failure, reconciler.ingest(std.testing.allocator, .rest_wallet, .{ .final = true }, test_times, case.frame));
+        const output = reconciler.drain().?;
+        try std.testing.expectEqual(@as(usize, 1), output.slice().len);
+        try std.testing.expectEqual(canonical.EconomicFaultReason.decoder_rejected, output.slice()[0].event.economic_fault.reason);
+        try std.testing.expect(reconciler.bootstrap == null);
+        try std.testing.expect(!reconciler.balances_complete);
+    }
+}
+
+test "Bybit unlinked ready executions validate native fee before skipping ownership" {
+    const cases = [_]struct { fee: []const u8, asset: []const u8, failure: ?anyerror, reason: ?canonical.EconomicFaultReason }{
+        .{ .fee = "0.000001", .asset = "USDT", .failure = null, .reason = null },
+        .{ .fee = "0.000001", .asset = "UNREGISTERED", .failure = error.UnsupportedAsset, .reason = .unknown_asset },
+        .{ .fee = "0.0000001", .asset = "USDT", .failure = error.InexactDecimal, .reason = .inexact_amount },
+        .{ .fee = "170141183460469231731687303715884105728", .asset = "USDT", .failure = error.DecimalOverflow, .reason = .overflow },
+    };
+    for (cases) |case| {
+        var raw = TestRaw{};
+        var reconciler = Reconciler.init(raw.sink(), testRules());
+        reconciler.asset_definitions = try @import("venue_adapter_contract.zig").activatedTestAssets();
+        reconciler.beginSession(.{ .venue = 42, .account = 2, .session = 7 });
+        try reconciler.beginReconciliation(0);
+        for ([_]Source{ .rest_wallet, .rest_positions, .rest_orders, .rest_executions }) |source|
+            _ = try reconciler.ingest(std.testing.allocator, source, .{ .final = true }, test_times, "{\"result\":{\"list\":[]}}");
+        _ = reconciler.drain().?;
+        try std.testing.expectEqual(Stage.ready, reconciler.readiness().stage);
+        try std.testing.expectEqual(@as(usize, 0), reconciler.link_count);
+        var buffer: [512]u8 = undefined;
+        const frame = try std.fmt.bufPrint(&buffer,
+            \\{{"topic":"execution","data":[{{"orderLinkId":"UNLINKED","execFee":"{s}","feeCurrency":"{s}"}}]}}
+        , .{ case.fee, case.asset });
+        if (case.failure) |failure| {
+            try std.testing.expectError(failure, reconciler.ingest(std.testing.allocator, .ws, null, test_times, frame));
+            const output = reconciler.drain().?;
+            try std.testing.expectEqual(@as(usize, 1), output.slice().len);
+            try std.testing.expectEqual(case.reason.?, output.slice()[0].event.economic_fault.reason);
+            try std.testing.expectEqual(Stage.failed, reconciler.readiness().stage);
+        } else {
+            _ = try reconciler.ingest(std.testing.allocator, .ws, null, test_times, frame);
+            try std.testing.expect(reconciler.drain() == null);
+            try std.testing.expectEqual(Stage.ready, reconciler.readiness().stage);
+        }
+        try std.testing.expectEqual(@as(usize, 0), reconciler.link_count);
+        try std.testing.expectEqual(@as(u64, 5), raw.calls);
+    }
 }

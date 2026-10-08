@@ -92,12 +92,27 @@ fn exercise(comptime kind: Kind) !void {
         _ = try implementation.ingestPrivate(gpa, .rest_orders, .{ .final = true }, times, "[]");
         _ = try implementation.ingestPrivate(gpa, .rest_fills, .{ .final = true }, times, "[]");
     } else {
-        _ = try implementation.ingestPrivate(gpa, .rest_wallet, .{ .final = true }, times,
-            \\{"result":{"list":[{"totalEquity":"20.123456789012345678","coin":[{"coin":"USDT","walletBalance":"20","availableToWithdraw":"15","borrowAmount":"0"},{"coin":"BTC","walletBalance":"0.1","availableToWithdraw":"0.09","borrowAmount":"0"}]}]}}
-        );
-        _ = try implementation.ingestPrivate(gpa, .rest_positions, .{ .final = true }, times, "{\"result\":{\"list\":[]}}");
-        _ = try implementation.ingestPrivate(gpa, .rest_orders, .{ .final = true }, times, "{\"result\":{\"list\":[]}}");
-        _ = try implementation.ingestPrivate(gpa, .rest_executions, .{ .final = true }, times, "{\"result\":{\"list\":[]}}");
+        // Current UNIFIED wallet cannot prove native availability/product scope.
+        const before = owner.shard.economicSummary();
+        try owner.sealBootstrap();
+        try std.testing.expectError(error.UnsupportedWalletScope, implementation.ingestPrivate(gpa, .rest_wallet, .{ .final = true }, times,
+            \\{"result":{"list":[{"accountType":"UNIFIED","coin":[{"coin":"USDT","walletBalance":"20","spotBorrow":"0","borrowAmount":"0","locked":"5"}]}]}}
+        ));
+        while (try adapter.tryDrain()) |batch| try owner.applyAdapterBatch(batch);
+        try std.testing.expectEqualDeep(before, owner.shard.economicSummary());
+        try std.testing.expectEqual(@as(u8, 0), owner.shard.canonical_account.balance_count);
+        try std.testing.expectEqual(@as(u64, 1), owner.shard.economic_fault_count);
+        try std.testing.expect(owner.shard.oms.recovery_only);
+        const digest = owner.shard.canonicalStateDigest();
+        const recovered = try gpa.create(demo.Owner);
+        defer gpa.destroy(recovered);
+        recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+        try std.testing.expectEqualSlices(u8, &digest, &recovered.shard.canonicalStateDigest());
+        var bytes: [durable.max_snapshot_bytes]u8 = undefined;
+        const restored = try trading.TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
+        try std.testing.expectEqualSlices(u8, &digest, &restored.shard.canonicalStateDigest());
+        try std.testing.expectEqual(@as(u64, 0), io.calls);
+        return;
     }
     const bootstrap = (try adapter.tryDrain()).?;
     try owner.applyAdapterBatch(bootstrap);
@@ -107,13 +122,6 @@ fn exercise(comptime kind: Kind) !void {
     if (kind == .binance) {
         _ = try implementation.ingestPrivate(gpa, .ws, null, times,
             \\{"e":"ACCOUNT_UPDATE","a":{"B":[{"a":"USDT","wb":"21.000001","cw":"16.000001"},{"a":"BTC","wb":"0.10000001","cw":"0.09"}],"P":[{"s":"BTCUSDT","pa":"0.0100","ep":"50000.0","iw":"2.000001","up":"0.000001"}]}}
-        );
-    } else {
-        _ = try implementation.ingestPrivate(gpa, .ws, null, times,
-            \\{"topic":"wallet","data":[{"totalEquity":"21.123456789012345678","totalInitialMargin":"0.000000000000000001","totalMaintenanceMargin":"0.000000000000000002","coin":[{"coin":"USDT","walletBalance":"21.000001","availableToWithdraw":"16.000001","borrowAmount":"0.000001"},{"coin":"BTC","walletBalance":"0.10000001","availableToWithdraw":"0.09","borrowAmount":"0"}]}]}
-        );
-        _ = try implementation.ingestPrivate(gpa, .ws, null, times,
-            \\{"topic":"position","data":[{"category":"linear","symbol":"BTCUSDT","side":"Buy","size":"0.0100","entryPrice":"50000.0","positionIM":"2.000001","unrealisedPnl":"0.000001"}]}
         );
     }
     const continuous = (try adapter.tryDrain()).?;
@@ -165,10 +173,6 @@ fn exercise(comptime kind: Kind) !void {
         _ = try implementation.ingestPrivate(gpa, .ws, null, times,
             \\{"e":"ACCOUNT_UPDATE","a":{"B":[{"a":"USDT","wb":"22","cw":"17"}],"P":[]}}
         );
-    } else {
-        _ = try implementation.ingestPrivate(gpa, .ws, null, times,
-            \\{"topic":"wallet","data":[{"coin":[{"coin":"USDT","walletBalance":"22","availableToWithdraw":"17","borrowAmount":"0"}]}]}
-        );
     }
     const dropped = (try adapter.tryDrain()).?;
     var gap_batch = canonical.AdapterOutputBatch{};
@@ -203,6 +207,6 @@ test "native account continuity Binance Adapter Owner snapshot and replay" {
     try check(.binance);
 }
 
-test "native account continuity Bybit Adapter Owner snapshot and replay" {
+test "native account continuity Bybit unsupported wallet scope persists without inventing availability" {
     try check(.bybit);
 }

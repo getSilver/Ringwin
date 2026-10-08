@@ -211,6 +211,8 @@ test {
     _ = @import("asset_precision_file_recovery_acceptance.zig");
     _ = @import("native_account_continuity_acceptance.zig");
     _ = @import("native_economic_reconciliation_acceptance.zig");
+    _ = @import("native_multi_venue_accounting_acceptance.zig");
+    _ = @import("simulated_native_accounting_acceptance.zig");
     _ = @import("okx_live_chain.zig");
     _ = raw_ingress;
 }

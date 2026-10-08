@@ -15,7 +15,7 @@ pub const Rules = struct { spot: InstrumentRules, linear: InstrumentRules };
 pub const Binding = struct { venue: canonical.VenueIdentity, account: canonical.ExchangeAccountIdentity, session: canonical.AdapterSessionIdentity };
 pub const Source = enum(u8) { ws, rest_spot_account, rest_linear_account, rest_orders, rest_fills };
 const source_count = @typeInfo(Source).@"enum".fields.len;
-pub const Page = struct { final: bool };
+pub const Page = struct { final: bool, request_target: ?[]const u8 = null, query_evidence: ?raw.RawEvidenceRef = null };
 pub const Stage = enum(u8) { offline, buffering, reconciling, ready, failed };
 pub const Readiness = struct { stage: Stage, session: canonical.AdapterSessionIdentity, raw_watermark: u64, bootstrap: ?canonical.BootstrapSnapshotIdentity };
 const max_private_events = 96;
@@ -25,7 +25,7 @@ const max_pending_observations = 24;
 const SeenFact = struct { key: [32]u8, content: [32]u8 };
 const OrderLink = struct { order: canonical.OrderIdentity, client_order_id: canonical.ClientOrderId, portfolio_reduce_only: bool, status: ?canonical.ExecutionReportStatus = null };
 const PendingObservation = union(enum) {
-    balance: struct { value: canonical.AccountBalance, times: raw.Times, evidence: raw.RawEvidenceRef, source: Source, source_sequence: u64 },
+    balance: struct { value: canonical.AccountBalance, times: raw.Times, evidence: raw.RawEvidenceRef, source: Source, source_sequence: u64, source_time: ?u64 },
     position: struct { value: canonical.AccountPosition, times: raw.Times, evidence: raw.RawEvidenceRef, source: Source, source_sequence: u64 },
     margin: struct { value: canonical.AccountMargin, times: raw.Times, evidence: raw.RawEvidenceRef, source: Source, source_sequence: u64 },
 };
@@ -65,6 +65,34 @@ pub const Reconciler = struct {
     ready: [max_private_events]canonical.EventRecord = undefined,
     ready_count: usize = 0,
     ready_index: usize = 0,
+    spot_scope_confirmed: bool = false,
+    account_source_time: ?u64 = null,
+    snapshot_source_time: ?u64 = null,
+    pending_economic: ?canonical.AccountReconciliationRequest = null,
+    active_query: ?raw.RawEvidenceRef = null,
+
+    pub const EconomicRequestRecord = struct { version: u16 = 1, request: canonical.AccountReconciliationRequest };
+
+    pub fn beginEconomicReconciliation(self: *Reconciler, request: canonical.AccountReconciliationRequest) !void {
+        try self.validateEconomicRequest(request);
+        var bytes: [256]u8 = undefined;
+        _ = try self.commitRaw(.{ .receive_time_utc_ns = 0, .monotonic_time_ns = 0, .wall_time_utc_ns = 0 }, try @import("snapshot_codec.zig").encodeBare(&bytes, EconomicRequestRecord{ .request = request }));
+        self.pending_economic = request;
+    }
+
+    pub fn replayEconomicRequest(self: *Reconciler, bytes: []const u8) !void {
+        const recorded = try @import("snapshot_codec.zig").decodeBare(bytes, EconomicRequestRecord);
+        if (recorded.version != 1) return error.UnsupportedEconomicRequest;
+        try self.validateEconomicRequest(recorded.request);
+        self.pending_economic = recorded.request;
+    }
+
+    fn validateEconomicRequest(self: *const Reconciler, request: canonical.AccountReconciliationRequest) !void {
+        const binding = self.binding orelse return error.StaleSession;
+        if (self.stage != .ready or self.pending_economic != null or request.exchange_account != binding.account or request.expected_session != binding.session or
+            request.economic_boundary_utc_ns == null or request.economic_boundary_utc_ns.? == 0 or
+            (request.economic_through_utc_ns != null and request.economic_through_utc_ns.? < request.economic_boundary_utc_ns.?)) return error.InvalidEconomicRequest;
+    }
 
     pub fn init(raw_sink: raw.RawSink, rules: Rules) Reconciler {
         return .{ .raw_sink = raw_sink, .rules = rules };
@@ -106,31 +134,51 @@ pub const Reconciler = struct {
     /// This is the sole live/replay ingress point: a RawSink failure prevents
     /// parsing and state mutation, and committed bytes are deterministically decoded.
     pub fn ingest(self: *Reconciler, allocator: std.mem.Allocator, source: Source, page: ?Page, times: raw.Times, bytes: []const u8) !raw.RawEvidenceRef {
+        const query = if (source == .rest_spot_account) if (page) |value| if (value.request_target) |target| try self.commitRaw(times, target) else null else null else null;
+        const evidence = try self.commitRaw(times, bytes);
+        try self.ingestCommitted(allocator, source, page, times, evidence, query, bytes);
+        return evidence;
+    }
+
+    pub fn replay(self: *Reconciler, allocator: std.mem.Allocator, source: Source, page: ?Page, times: raw.Times, evidence: raw.RawEvidenceRef, bytes: []const u8) !void {
+        try self.ingestCommitted(allocator, source, page, times, evidence, if (page) |value| value.query_evidence else null, bytes);
+    }
+
+    fn commitRaw(self: *Reconciler, times: raw.Times, bytes: []const u8) !raw.RawEvidenceRef {
         const binding = self.binding orelse return error.StaleSession;
         if (bytes.len == 0 or bytes.len > 1024 * 1024 or bytes.len > std.math.maxInt(u32)) return error.InvalidFrame;
         var digest: [32]u8 = undefined;
         Sha256.hash(bytes, &digest, .{});
         const evidence = try self.raw_sink.append(.{ .source_session = @truncate(binding.session), .receive_time_utc_ns = times.receive_time_utc_ns, .monotonic_time_ns = times.monotonic_time_ns, .wall_time_utc_ns = times.wall_time_utc_ns, .byte_len = @intCast(bytes.len), .sha256 = digest }, bytes);
         self.raw_watermark = @max(self.raw_watermark, evidence.stream_sequence);
+        return evidence;
+    }
+
+    fn ingestCommitted(self: *Reconciler, allocator: std.mem.Allocator, source: Source, page: ?Page, times: raw.Times, evidence: raw.RawEvidenceRef, query: ?raw.RawEvidenceRef, bytes: []const u8) !void {
         if (self.stage == .offline or self.stage == .failed) return error.StaleSession;
         if (source == .ws and page != null) return error.InvalidPage;
-        if (source != .ws and (page == null or self.stage != .reconciling)) return error.InvalidPage;
+        if (source != .ws and (page == null or (self.stage != .reconciling and !(source == .rest_spot_account and self.stage == .ready)))) return error.InvalidPage;
         const source_index: usize = @intFromEnum(source);
         self.source_sequences[source_index] = try std.math.add(u64, self.source_sequences[source_index], 1);
         self.active_source = source;
         self.active_source_sequence = self.source_sequences[source_index];
-        const parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{ .parse_numbers = false }) catch return error.InvalidFrame;
+        self.active_query = query;
+        const parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{ .parse_numbers = false }) catch {
+            try self.rejectDecoded(error.InvalidFrame, times, evidence);
+            return error.InvalidFrame;
+        };
         defer parsed.deinit();
         var candidate = self.*;
         candidate.decode(source, page, times, evidence, parsed.value) catch |err| {
-            self.stage = .failed;
-            if (canonical.Decimal.faultReason(err)) |reason| {
-                try self.appendReady(try self.record(.account, null, null, digestIdentity(evidence.sha256), null, times, evidence, .{ .economic_fault = .{ .reason = reason } }));
-            }
+            try self.rejectDecoded(err, times, evidence);
             return err;
         };
         self.* = candidate;
-        return evidence;
+    }
+
+    fn rejectDecoded(self: *Reconciler, err: anyerror, times: raw.Times, evidence: raw.RawEvidenceRef) !void {
+        self.stage = .failed;
+        try self.appendReady(try self.record(.account, null, null, digestIdentity(evidence.sha256), null, times, evidence, .{ .economic_fault = .{ .reason = canonical.Decimal.faultReason(err) orelse .decoder_rejected } }));
     }
     pub fn drain(self: *Reconciler) ?canonical.AdapterOutputBatch {
         if (self.ready_index == self.ready_count) return null;
@@ -160,7 +208,7 @@ pub const Reconciler = struct {
     fn decode(self: *Reconciler, source: Source, page: ?Page, times: raw.Times, evidence: raw.RawEvidenceRef, value: std.json.Value) !void {
         switch (source) {
             .ws => try self.decodeWs(times, evidence, value),
-            .rest_spot_account => try self.decodeSpotAccount(times, evidence, value),
+            .rest_spot_account => try self.decodeSpotAccount(page.?, times, evidence, value),
             .rest_linear_account => try self.decodeLinearAccount(times, evidence, value),
             .rest_orders => try self.decodeRows(.report, false, times, evidence, value),
             .rest_fills => try self.decodeRows(.fill, false, times, evidence, value),
@@ -187,7 +235,10 @@ pub const Reconciler = struct {
             const order = try asObject(try objectField(object, "o"));
             try self.decodeOrder(.report, true, times, evidence, order);
             if ((try optionalStringField(order, "t")) != null and !std.mem.eql(u8, try stringField(order, "t"), "0")) try self.decodeOrder(.fill, true, times, evidence, order);
-        } else if (std.mem.eql(u8, event, "outboundAccountPosition")) try self.decodeSpotBalances(times, evidence, try asArray(try objectField(object, "B")), true) else if (std.mem.eql(u8, event, "ACCOUNT_UPDATE")) {
+        } else if (std.mem.eql(u8, event, "outboundAccountPosition")) {
+            self.account_source_time = if (try optionalU64Field(object, &.{"u"})) |millis| if (millis != 0) try std.math.mul(u64, millis, 1_000_000) else null else null;
+            try self.decodeSpotBalances(times, evidence, try asArray(try objectField(object, "B")), true);
+        } else if (std.mem.eql(u8, event, "ACCOUNT_UPDATE")) {
             const account = try asObject(try objectField(object, "a"));
             try self.decodeLinearAssets(times, evidence, try asArray(try objectField(account, "B")), true);
             try self.decodeLinearPositions(times, evidence, try asArray(try objectField(account, "P")), true);
@@ -209,6 +260,13 @@ pub const Reconciler = struct {
         const binding = self.binding orelse return error.StaleSession;
         const order_id = try anyStringField(object, &.{ "i", "orderId" });
         const client = try anyStringField(object, &.{ "c", "clientOrderId" });
+        var validated_fee: ?canonical.AssetAmount = null;
+        if (kind == .fill) {
+            const trade_id = try anyStringField(object, &.{ "t", "id" });
+            if (std.mem.eql(u8, trade_id, "-1") or std.mem.eql(u8, trade_id, "0")) return;
+            const fee_code = (try optionalStringAny(object, &.{ "N", "commissionAsset" })) orelse return error.MissingFeeAsset;
+            validated_fee = try amountFor(self.asset_definitions, try self.asset_definitions.resolveCode(binding.venue, fee_code), try canonical.Decimal.parse(try anyStringField(object, &.{ "n", "commission" })));
+        }
         const link = self.findOrder(client) orelse return;
         const rules = try self.instrumentRules(try anyStringField(object, &.{ "s", "symbol" }), linear);
         const update_ms = try optionalU64Field(object, &.{ "T", "updateTime", "time" });
@@ -231,16 +289,39 @@ pub const Reconciler = struct {
             const trade_id = try anyStringField(object, &.{ "t", "id" });
             if (std.mem.eql(u8, trade_id, "-1") or std.mem.eql(u8, trade_id, "0")) return;
             const key = try factKey("fill", &.{trade_id});
-            const fee_code = (try optionalStringAny(object, &.{ "N", "commissionAsset" })) orelse return error.MissingFeeAsset;
-            const fee = try amountFor(self.asset_definitions, try self.asset_definitions.resolveCode((self.binding orelse return error.StaleSession).venue, fee_code), try canonical.Decimal.parse(try anyStringField(object, &.{ "n", "commission" })));
+            const fee = validated_fee.?;
             const event: canonical.Payload = .{ .fill = .{ .identity = digestIdentity(key), .order = link.order, .client_order_id = link.client_order_id, .venue_order = try canonical.VenueOrderRef.init(binding.venue, order_id), .venue_trade = try canonical.VenueTradeRef.init(binding.venue, trade_id), .instrument = rules.identity, .exchange_account = binding.account, .side = try sideFor(try anyStringField(object, &.{ "S", "side" })), .quantity = try quantityFor(rules, try anyStringField(object, &.{ "l", "qty" })), .price = try priceFor(rules, try anyStringField(object, &.{ "L", "price" })), .fee = if (fee.atoms > 0) fee else .{ .asset = fee.asset, .atoms = 0 }, .rebate = if (fee.atoms < 0) .{ .asset = fee.asset, .atoms = std.math.sub(i128, 0, fee.atoms) catch return error.DecimalOverflow } else null, .realized_pnl = if (try optionalStringAny(object, &.{ "rp", "realizedPnl" })) |value| try amountFor(self.asset_definitions, usdt, try canonical.Decimal.parse(value)) else null, .liquidity = if (try makerFor(object)) .maker else .taker, .venue_fill_time_utc_ns = source_time } };
             if (try self.seenBefore(key, event)) return;
             try self.emit(.account, rules.identity, null, digestIdentity(key), source_time, times, evidence, event);
         }
     }
-    fn decodeSpotAccount(self: *Reconciler, times: raw.Times, evidence: raw.RawEvidenceRef, value: std.json.Value) !void {
+    fn decodeSpotAccount(self: *Reconciler, page: Page, times: raw.Times, evidence: raw.RawEvidenceRef, value: std.json.Value) !void {
         const object = try asObject(value);
-        try self.decodeSpotBalances(times, evidence, try asArray(try objectField(object, "balances")), false);
+        const target = page.request_target;
+        const account_type = try optionalStringField(object, "accountType");
+        self.spot_scope_confirmed = target != null and account_type != null and std.mem.eql(u8, account_type.?, "SPOT") and
+            (std.mem.eql(u8, target.?, "/api/v3/account") or std.mem.startsWith(u8, target.?, "/api/v3/account?"));
+        self.account_source_time = if (try optionalU64Field(object, &.{"updateTime"})) |millis| if (millis != 0) try std.math.mul(u64, millis, 1_000_000) else null else null;
+        self.snapshot_source_time = self.account_source_time;
+        self.balance_count = 0;
+        try self.decodeSpotBalances(times, evidence, try asArray(try objectField(object, "balances")), self.stage == .ready);
+        if (self.pending_economic) |request| {
+            const binding = self.binding orelse return error.StaleSession;
+            const through = self.account_source_time orelse request.economic_through_utc_ns orelse request.economic_boundary_utc_ns.?;
+            var economics: canonical.AccountEconomicEvidence = .{ .scope = .spot_and_isolated_linear_usdt, .exchange_account = binding.account, .from_utc_ns = request.economic_boundary_utc_ns.?, .through_utc_ns = through, .source = .{ .stream = rawStream(binding.session), .sequence = evidence.stream_sequence, .digest = evidence.sha256 }, .balance_count = self.balance_count };
+            for (self.balances[0..self.balance_count], 0..) |balance, index| {
+                economics.balances[index] = balance.total;
+                economics.asset_versions[index] = self.asset_definitions.get(balance.asset).?.definition.version;
+            }
+            if (self.active_query) |query| {
+                economics.query_count = 1;
+                economics.query_sources[0] = .{ .stream = rawStream(binding.session), .sequence = query.stream_sequence, .digest = query.sha256 };
+            }
+            // A Spot snapshot cannot certify the canonical combined Spot/linear
+            // scope or complete bill history, including at a zero-length interval.
+            try self.appendReady(try self.record(.account, null, null, request.identity, self.account_source_time, times, evidence, .{ .account_reconciliation_result = .{ .identity = request.identity, .complete = false, .status = .unresolved, .account_economics = economics } }));
+            self.pending_economic = null;
+        }
     }
     fn decodeSpotBalances(self: *Reconciler, times: raw.Times, evidence: raw.RawEvidenceRef, rows: std.json.Array, observed: bool) !void {
         for (rows.items) |row| {
@@ -248,11 +329,18 @@ pub const Reconciler = struct {
             const asset = try self.asset_definitions.resolveCode((self.binding orelse return error.StaleSession).venue, try anyStringField(object, &.{ "a", "asset" }));
             const free = try amountFor(self.asset_definitions, asset, try canonical.Decimal.parse(try anyStringField(object, &.{ "f", "free" })));
             const held = try amountFor(self.asset_definitions, asset, try canonical.Decimal.parse(try anyStringField(object, &.{ "l", "locked" })));
-            const value = canonical.AccountBalance{ .asset = asset, .total = .{ .asset = asset, .atoms = try std.math.add(i128, free.atoms, held.atoms) }, .available = free, .held = held };
-            if (observed) try self.emitBalanceObserved(value, times, evidence) else try self.storeBalance(value);
+            if (free.atoms < 0 or held.atoms < 0) return error.InvalidAccountUnits;
+            const zero: canonical.AssetAmount = .{ .asset = asset, .atoms = 0 };
+            const value = canonical.AccountBalance{ .asset = asset, .total = .{ .asset = asset, .atoms = try std.math.add(i128, free.atoms, held.atoms) }, .available = free, .held = held, .liability = if (self.spot_scope_confirmed) zero else null, .isolated_liability = if (self.spot_scope_confirmed) zero else null, .cross_liability = if (self.spot_scope_confirmed) zero else null };
+            if (!observed or self.active_source == .rest_spot_account) {
+                for (self.balances[0..self.balance_count]) |known| if (known.asset == asset) return error.DuplicateAccountKey;
+                try self.storeBalance(value);
+            }
+            if (observed) try self.emitBalanceObserved(value, times, evidence, self.account_source_time);
         }
     }
     fn decodeLinearAccount(self: *Reconciler, times: raw.Times, evidence: raw.RawEvidenceRef, value: std.json.Value) !void {
+        self.snapshot_source_time = null;
         const object = try asObject(value);
         try self.decodeLinearAssets(times, evidence, try asArray(try objectField(object, "assets")), false);
         try self.decodeLinearPositions(times, evidence, try asArray(try objectField(object, "positions")), false);
@@ -287,7 +375,7 @@ pub const Reconciler = struct {
             const total = try amountFor(self.asset_definitions, asset, try canonical.Decimal.parse(try anyStringField(object, &.{ "wb", "walletBalance", "totalWalletBalance" })));
             const available = try amountFor(self.asset_definitions, asset, try canonical.Decimal.parse(try anyStringField(object, &.{ "cw", "availableBalance", "crossWalletBalance" })));
             const value = canonical.AccountBalance{ .asset = asset, .total = total, .available = available, .held = .{ .asset = asset, .atoms = try std.math.sub(i128, total.atoms, available.atoms) }, .cash_balance = total };
-            if (observed) try self.emitBalanceObserved(value, times, evidence) else try self.storeBalance(value);
+            if (observed) try self.emitBalanceObserved(value, times, evidence, null) else try self.storeBalance(value);
             if (asset == usdt) {
                 const margin: canonical.AccountMargin = .{ .amount = total };
                 if (observed) try self.emitMarginObserved(margin, times, evidence) else try self.storeMargin(margin);
@@ -323,14 +411,14 @@ pub const Reconciler = struct {
         @memcpy(snapshot.margins[0..self.margin_count], self.margins[0..self.margin_count]);
         self.bootstrap = identity;
         self.stage = .ready;
-        try self.appendReady(try self.record(.account, null, null, identity, null, times, evidence, .{ .account_bootstrap_snapshot = snapshot }));
+        try self.appendReady(try self.record(.account, null, null, identity, self.snapshot_source_time, times, evidence, .{ .account_bootstrap_snapshot = snapshot }));
         for (self.buffered[0..self.buffered_count]) |event| try self.appendReady(event);
         self.buffered_count = 0;
         for (self.pending_observations[0..self.pending_observation_count]) |pending| switch (pending) {
             .balance => |value| {
                 self.active_source = value.source;
                 self.active_source_sequence = value.source_sequence;
-                try self.emitBalanceObserved(value.value, value.times, value.evidence);
+                try self.emitBalanceObserved(value.value, value.times, value.evidence, value.source_time);
             },
             .position => |value| {
                 self.active_source = value.source;
@@ -345,12 +433,12 @@ pub const Reconciler = struct {
         };
         self.pending_observation_count = 0;
     }
-    fn emitBalanceObserved(self: *Reconciler, balance: canonical.AccountBalance, times: raw.Times, evidence: raw.RawEvidenceRef) !void {
-        const bootstrap = self.bootstrap orelse return self.queueObservation(.{ .balance = .{ .value = balance, .times = times, .evidence = evidence, .source = self.active_source, .source_sequence = self.active_source_sequence } });
+    fn emitBalanceObserved(self: *Reconciler, balance: canonical.AccountBalance, times: raw.Times, evidence: raw.RawEvidenceRef, source_time: ?u64) !void {
+        const bootstrap = self.bootstrap orelse return self.queueObservation(.{ .balance = .{ .value = balance, .times = times, .evidence = evidence, .source = self.active_source, .source_sequence = self.active_source_sequence, .source_time = source_time } });
         self.account_sequence = try std.math.add(u64, self.account_sequence, 1);
         const identity = digestIdentity(evidence.sha256) +% self.account_sequence;
         const binding = self.binding orelse return error.StaleSession;
-        try self.emit(.asset, null, balance.asset, identity, null, times, evidence, .{ .account_observed = .{ .identity = identity, .exchange_account = binding.account, .bootstrap = bootstrap, .source_stream = reconciliationStream(binding.session), .source_sequence = self.account_sequence, .value = .{ .balance = .{ .asset = balance.asset, .value = balance } } } });
+        try self.emit(.asset, null, balance.asset, identity, source_time, times, evidence, .{ .account_observed = .{ .identity = identity, .exchange_account = binding.account, .bootstrap = bootstrap, .source_stream = reconciliationStream(binding.session), .source_sequence = self.account_sequence, .value = .{ .balance = .{ .asset = balance.asset, .value = balance } } } });
     }
     fn emitPositionObserved(self: *Reconciler, position: canonical.AccountPosition, times: raw.Times, evidence: raw.RawEvidenceRef) !void {
         const bootstrap = self.bootstrap orelse return self.queueObservation(.{ .position = .{ .value = position, .times = times, .evidence = evidence, .source = self.active_source, .source_sequence = self.active_source_sequence } });
@@ -529,8 +617,8 @@ fn factKey(prefix: []const u8, pieces: []const []const u8) ![32]u8 {
     }
     return hasher.finalResult();
 }
-fn digestIdentity(digest: [32]u8) u128 {
-    return std.mem.readInt(u128, digest[0..16], .little);
+fn digestIdentity(digest: [32]u8) u64 {
+    return std.mem.readInt(u64, digest[0..8], .little);
 }
 /// Private transport facts and command/control records have independent
 /// canonical streams even when they share an AdapterSessionIdentity.

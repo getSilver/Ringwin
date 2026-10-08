@@ -845,7 +845,7 @@ fn bootstrapNativePrivateAccount(owner: *demo.Owner, implementation: *okx.OkxVen
     try std.testing.expect(try applyDrain(owner, adapter));
 }
 
-const NativeSettlementCase = enum { long, tiny, wide, overflow, conflict, inexact, malformed, swap_capacity };
+const NativeSettlementCase = enum { long, long_tail, tiny, wide, overflow, conflict, inexact, malformed, swap_capacity };
 const NativeArrival = enum { ws_first, report_first, rest_first };
 const NativeArrivalEvidence = struct { semantic: [32]u8, canonical_digest: [32]u8 };
 
@@ -981,7 +981,8 @@ fn runNativeSettlementFees(case: NativeSettlementCase, arrival: NativeArrival, w
     } else (try owner.apply(.{ .core = .{ .identity = sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = intent } } })) orelse return error.MissingDemoCommand;
     try implementation.rememberRecoveredOrder(command.order_id, command.client_order_id, false, .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = command.quantity }, command.revision);
     _ = try owner.apply(fixtureOnSecondaryStream(20, 4, .{ .order_dispatch_result = .{ .command = command.command_id, .state = .submitted } }));
-    const long_fees = [_][]const u8{ "-0.004198632165", "-0.00423723852", "0.0000001", "0" };
+    const exact_fees = [_][]const u8{ "-0.004198632165", "-0.00423723852", "0.0000001", "0" };
+    const long_fees = if (case == .long_tail) [_][]const u8{ "-000.00419863216500000000000000000000000000000000000000000000000000000000", "-000.00423723852000000000000000000000000000000000000000000000000000000000", "+000.00000010000000000000000000000000000000000000000000000000000000000000", "-000.00000000000000000000000000000000000000000000000000000000000000000000" } else exact_fees;
     const fee_atoms: [4]i128 = if (wide) .{ 4_198_632_165_000_000, 4_237_238_520_000_000, 0, 0 } else .{ 4_198_632_165, 4_237_238_520, 0, 0 };
     var frame: [1536]u8 = undefined;
     for (0..count) |index| {
@@ -993,7 +994,7 @@ fn runNativeSettlementFees(case: NativeSettlementCase, arrival: NativeArrival, w
         var rest_bytes: [1024]u8 = undefined;
         const rest_input = if (with_rest) try std.fmt.bufPrint(&rest_bytes,
             \\{{"code":"0","data":[{{"instId":"BTC-USDT","ordId":"1001","billId":"{d}","clOrdId":"{s}","side":"buy","tradeId":"{d}","fillSz":"0.0001","fillPx":"50000","fee":"{s}","feeCcy":"USDT","fillTime":"{d}","execType":"T"}}]}}
-        , .{ 3001 + index, command.client_order_id.slice(), 2001 + index, long_fees[index], @as(u64, 1_800_000_000_100) + index }) else "";
+        , .{ 3001 + index, command.client_order_id.slice(), 2001 + index, exact_fees[index], @as(u64, 1_800_000_000_100) + index }) else "";
         if (with_rest and arrival == .report_first) {
             var report_bytes: [1024]u8 = undefined;
             const report_input = try std.fmt.bufPrint(&report_bytes,
@@ -1124,6 +1125,10 @@ fn runNativeSettlementFees(case: NativeSettlementCase, arrival: NativeArrival, w
 
 test "OKX native settlement long fees rebates and explicit zero close Owner ledger and recover" {
     try checkNativeSettlementFees(.long);
+}
+
+test "OKX native settlement long tail WS and short REST amounts retain exact identity and replay" {
+    _ = try runNativeSettlementFees(.long_tail, .ws_first, true);
 }
 
 test "OKX native settlement ten micro fees accumulate exactly through Owner and replay" {

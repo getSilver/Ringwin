@@ -141,6 +141,19 @@ pub const BinanceVenueAdapter = struct {
             return err;
         };
     }
+
+    pub fn replayPrivate(self: *BinanceVenueAdapter, allocator: std.mem.Allocator, source: private.Source, page: ?private.Page, times: raw.Times, evidence: raw.RawEvidenceRef, bytes: []const u8) !void {
+        if (self.state != .running) return error.NotStarted;
+        return (self.private_reconciler orelse return error.PrivateReconcilerMissing).replay(allocator, source, page, times, evidence, bytes) catch |err| {
+            self.private_failed = true;
+            return err;
+        };
+    }
+
+    pub fn replayEconomicRequest(self: *BinanceVenueAdapter, bytes: []const u8) !void {
+        if (self.state != .running) return error.NotStarted;
+        try (self.private_reconciler orelse return error.PrivateReconcilerMissing).replayEconomicRequest(bytes);
+    }
     pub fn privateSourceGap(self: *BinanceVenueAdapter) void {
         if (self.private_reconciler) |reconciler| reconciler.sourceGap();
     }
@@ -373,6 +386,20 @@ pub const BinanceVenueAdapter = struct {
             self.pending = output;
             return .accepted;
         };
+        if (request.economic_boundary_utc_ns != null) {
+            reconciler.beginEconomicReconciliation(request) catch {
+                self.private_failed = true;
+                return error.InvalidRequest;
+            };
+            self.pending = output;
+            return .accepted;
+        }
+        if (request.economic_through_utc_ns != null) return error.InvalidRequest;
+        if (reconciler.readiness().stage == .ready) {
+            self.appendEvent(&output, request.identity, .{ .account_reconciliation_result = .{ .identity = request.identity, .complete = false, .status = .unresolved } });
+            self.pending = output;
+            return .accepted;
+        }
         if (reconciler.readiness().stage == .buffering)
             reconciler.beginReconciliation(reconciler.readiness().raw_watermark) catch return error.InvalidRequest;
         self.pending_account_reconciliation = request.identity;
@@ -1006,4 +1033,127 @@ test "Binance activated amount range retains raw fault and stops risk" {
     try std.testing.expectEqual(venue.SendResult.backpressure, try adapter.trySend(.{ .order_command = try testCommand(2) }));
     try std.testing.expectEqual(@as(u64, 1), sink.calls);
     try std.testing.expectEqual(@as(u64, 0), transport.calls);
+}
+
+test "Binance scoped Spot snapshots stay unresolved without combined product and bill proof through Owner recovery" {
+    const demo = @import("demo_authority.zig");
+    const durable = @import("durable_store.zig");
+    const ingress = @import("raw_ingress.zig");
+    const fixture = @import("trading_shard_fixture.zig");
+    const Sink = struct {
+        raw: *ingress.DurableSink,
+        fn append(ptr: *anyopaque, record: raw.RawIngressRecord, bytes: []const u8) raw.RawSinkError!u64 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return (try self.raw.interface().append(.{ .source_session = record.source_session, .receive_time_utc_ns = record.receive_time_utc_ns, .monotonic_time_ns = record.monotonic_time_ns, .wall_time_utc_ns = record.wall_time_utc_ns, .byte_len = record.byte_len, .sha256 = record.sha256 }, bytes)).stream_sequence;
+        }
+    };
+    const boundary: u64 = 1_800_000_000_000_000_000;
+    for ([_]enum { zero, nonempty, missing_target, missing_range }{ .zero, .nonempty, .missing_target, .missing_range }) |case| {
+        const memory = try std.heap.page_allocator.create(durable.MemoryAdapter);
+        defer std.heap.page_allocator.destroy(memory);
+        memory.* = .init();
+        const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
+        const owner = try std.heap.page_allocator.create(demo.Owner);
+        defer std.heap.page_allocator.destroy(owner);
+        owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+        const assets = @import("asset_registry.zig").testDefinitions(12, 9);
+        for (assets) |definition| _ = try owner.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
+        for (fixture.genesisEvents(.{ .strategy_identity = 40, .config_version = 1, .activation_identity = 50, .activation_barrier = 1 }, .cash)) |original| {
+            var event = original;
+            switch (event.core.payload) {
+                .asset_definition_activated => |*definition| definition.* = if (definition.asset == 1) assets[0] else assets[1],
+                .instrument_rules_activated => |*rules| {
+                    if (rules.instrument_identity == fixture.spot_instrument) continue;
+                    rules.instrument_identity = btc_usdt_spot;
+                    rules.quantity_denominator = 10_000_000;
+                    rules.quantity_numerator = 2;
+                    rules.venue = 21;
+                },
+                .margin_rules_activated => |*margin| {
+                    if (margin.instrument == fixture.spot_instrument) continue;
+                    margin.instrument = btc_usdt_spot;
+                    margin.native_settlement_atoms = true;
+                    margin.price_tick_atoms = 250_000_000_000;
+                },
+                .mark_price => |*mark| {
+                    if (mark.instrument == fixture.spot_instrument) continue;
+                    mark.instrument = btc_usdt_spot;
+                    mark.price_atoms = 50_000_000_000_000_000;
+                },
+                .exchange_balance => |*balance| balance.cash_atoms = 100_000_000_000_000,
+                .opening_balance => |*balance| {
+                    balance.cash_atoms = 100_000_000_000_000;
+                    event.core.source_time = boundary;
+                    event.core.time_presence.source = true;
+                },
+                .portfolio_transfer => |*transfer| transfer.amount_atoms = 90_000_000_000_000,
+                .risk_lease_granted => |*lease| lease.amount_atoms = 80_000_000_000_000,
+                else => {},
+            }
+            _ = try owner.apply(event);
+        }
+        try owner.sealBootstrap();
+        var durable_raw = try ingress.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = 1 });
+        var sink: Sink = .{ .raw = &durable_raw };
+        const raw_sink: raw.RawSink = .{ .ptr = &sink, .append_fn = Sink.append };
+        var clock = TestClock{};
+        var auth = TestAuth{};
+        var transport = TestTransport{};
+        var profile = testProfile();
+        profile.session = 1;
+        profile.rules_version = 1;
+        profile.spot.tick_size = .{ .coefficient = 25, .scale = 2 };
+        profile.spot.lot_size = .{ .coefficient = 2, .scale = 7 };
+        var implementation = BinanceVenueAdapter.init(clock.interface(), profile, auth.interface(), raw_sink, transport.interface());
+        var reconciler = private.Reconciler.init(raw_sink, .{ .spot = .{ .identity = btc_usdt_spot, .rules_version = 1, .tick_size = profile.spot.tick_size, .lot_size = profile.spot.lot_size }, .linear = .{ .identity = btc_usdt_linear, .rules_version = 1, .tick_size = profile.linear.tick_size, .lot_size = profile.linear.lot_size } });
+        implementation.attachPrivateReconciler(&reconciler);
+        const adapter = implementation.adapter();
+        try adapter.start(.{ .venue = 21, .exchange_account = 2, .adapter_session = 1, .environment = .demo, .request_capacity = 4, .output_capacity = 4, .asset_definitions = owner.shard.activatedAssets(), .instrument_definitions = owner.shard.instrument_registry, .native_settlement_atoms = true });
+        try implementation.beginPrivateReconciliation();
+        const times: raw.Times = .{ .receive_time_utc_ns = boundary + 1, .monotonic_time_ns = 1, .wall_time_utc_ns = boundary + 2 };
+        const target = "/api/v3/account?timestamp=1800000000000";
+        const account = "{\"accountType\":\"SPOT\",\"updateTime\":1800000000000,\"balances\":[{\"asset\":\"USDT\",\"free\":\"99\",\"locked\":\"1\"},{\"asset\":\"BTC\",\"free\":\"0\",\"locked\":\"0\"}]}";
+        _ = try implementation.ingestPrivate(std.testing.allocator, .rest_spot_account, .{ .final = true, .request_target = target }, times, account);
+        _ = try implementation.ingestPrivate(std.testing.allocator, .rest_orders, .{ .final = true }, times, "[]");
+        _ = try implementation.ingestPrivate(std.testing.allocator, .rest_fills, .{ .final = true }, times, "[]");
+        while (try adapter.tryDrain()) |batch| try owner.applyAdapterBatch(batch);
+        const before = owner.shard.economicSummary();
+        try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .account_reconciliation = .{ .identity = 300, .exchange_account = 2, .expected_session = 1, .economic_boundary_utc_ns = if (case == .missing_range) null else boundary, .economic_through_utc_ns = if (case == .nonempty) boundary + 1_000_000 else null } }));
+        const started = (try adapter.tryDrain()).?;
+        var found = false;
+        if (case == .missing_range) for (started.slice()) |record| {
+            if (record.event != .account_reconciliation_result) continue;
+            found = true;
+            try std.testing.expect(!record.event.account_reconciliation_result.complete);
+            try std.testing.expect(record.event.account_reconciliation_result.status == .unresolved);
+            try std.testing.expect(record.event.account_reconciliation_result.account_economics == null);
+        };
+        try owner.applyAdapterBatch(started);
+        _ = try implementation.ingestPrivate(std.testing.allocator, .rest_spot_account, .{ .final = true, .request_target = if (case == .missing_target) null else target }, times, account);
+        while (try adapter.tryDrain()) |batch| {
+            for (batch.slice()) |record| if (record.event == .account_reconciliation_result) {
+                found = true;
+                const result = record.event.account_reconciliation_result;
+                try std.testing.expect(!result.complete and result.status == .unresolved);
+                const proof = result.account_economics.?;
+                try std.testing.expectEqual(@as(i128, 100_000_000_000_000), proof.balances[0].atoms);
+                try std.testing.expectEqual(@as(u64, 1), proof.asset_versions[0]);
+                try std.testing.expectEqual(boundary, proof.from_utc_ns);
+                try std.testing.expectEqual(boundary, proof.through_utc_ns);
+                try std.testing.expect(!proof.bills_complete);
+                try std.testing.expectEqual(@as(u8, if (case == .missing_target) 0 else 1), proof.query_count);
+            };
+            try owner.applyAdapterBatch(batch);
+        }
+        try std.testing.expect(found);
+        try std.testing.expectEqualDeep(before, owner.shard.economicSummary());
+        try std.testing.expect(!owner.shard.operational_state.effectiveTradingAuthority());
+        if (case != .missing_range) try std.testing.expect(owner.shard.oms.recovery_only and owner.shard.economic_fault_count != 0);
+        const recovered = try demo.Owner.recover(memory.interface(), undefined, stream);
+        try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
+        var snapshot: [durable.max_snapshot_bytes]u8 = undefined;
+        const restored = try @import("trading_shard.zig").TradingShard.restoreSnapshot(try owner.committedSnapshot(&snapshot));
+        try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+        try std.testing.expectEqual(@as(u64, 0), transport.calls);
+    }
 }
