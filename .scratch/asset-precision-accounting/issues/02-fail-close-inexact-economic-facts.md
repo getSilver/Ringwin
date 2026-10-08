@@ -1,12 +1,12 @@
 # 02：停止真实金额取整并持久关闭新增风险
 
 Type: task
-Status: done
+Status: resolved
 Assignee: codex/asset-precision-accounting
 Blocked by: 无（可立即开始）
 Parent: [落实权威资产精度与精确经济账务](../map.md)
 Spec: [父 Spec](01-exact-asset-accounting-spec.md)
-Label: ready-for-agent
+Label: completed
 Phase: S1
 
 ## Question

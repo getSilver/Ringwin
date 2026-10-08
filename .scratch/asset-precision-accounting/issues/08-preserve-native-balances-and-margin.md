@@ -1,7 +1,7 @@
 # 08：精确接入原币余额与保证金观察
 
 Type: task
-Status: done
+Status: resolved
 Assignee: native_margin_08_prep
 Blocked by: [06：精确记录基础资产费用并分离 atoms 与 lots](06-separate-base-atoms-from-trade-lots.md)
 Parent: [落实权威资产精度与精确经济账务](../map.md)

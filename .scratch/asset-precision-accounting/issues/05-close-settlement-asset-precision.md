@@ -1,7 +1,7 @@
 # 05：贯通高精度结算资产费用与原币账务
 
 Type: task
-Status: done
+Status: resolved
 Assignee: codex/asset-precision-accounting
 Blocked by: [04：贯通 AssetDefinition 激活与精度范围准入](04-activate-authoritative-asset-precision.md)
 Parent: [落实权威资产精度与精确经济账务](../map.md)

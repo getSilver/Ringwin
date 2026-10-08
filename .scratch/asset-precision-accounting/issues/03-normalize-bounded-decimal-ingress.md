@@ -1,12 +1,12 @@
 # 03：让有界 Decimal 等价文本贯通规范事实
 
 Type: task
-Status: done
+Status: resolved
 Assignee: codex/asset-precision-accounting
 Blocked by: [02：停止真实金额取整并持久关闭新增风险](02-fail-close-inexact-economic-facts.md)
 Parent: [落实权威资产精度与精确经济账务](../map.md)
 Spec: [父 Spec](01-exact-asset-accounting-spec.md)
-Label: ready-for-agent
+Label: completed
 Phase: S2
 
 ## Question

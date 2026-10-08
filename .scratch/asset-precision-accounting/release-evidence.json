@@ -1,0 +1,685 @@
+{
+  "sealed_at_utc": "2026-10-08T13:26:53.180812+00:00",
+  "source_revision": "521db8d13f1ba346b5815c412af060ace656b406",
+  "source_tree_git": "e5baa916acbef646565f51311edf8e2ba24d06c8",
+  "build_zig_git": "ff97566361b9354a7155fb061e2762c4c94adbc9",
+  "source_input_sha256": "8a5d0626a5db0300a4a7afe0e569cf081faa6b5b9de8701e5f198058c682d737",
+  "source_inputs": [
+    {
+      "path": "build.zig",
+      "sha256": "44b85ccabbb703d142c88b88050b4f24af9a2cc1f4fb1f600751987ef4be62ec"
+    },
+    {
+      "path": "src/account_coordinator.zig",
+      "sha256": "4f80ac70321b84da5cddba2073d20729fdec6d3d29758294e04556a72d91d232"
+    },
+    {
+      "path": "src/account_projection.zig",
+      "sha256": "cdff763133ef3ef5a52fcaea94d18d9dc4342131bee1395ef103b16a3cc6a26e"
+    },
+    {
+      "path": "src/asset_precision_file_recovery_acceptance.zig",
+      "sha256": "0217af93e119e289ebc3bcbbe04bfdc7b0b068dfe80d0e7ce069ee36b579c73b"
+    },
+    {
+      "path": "src/asset_registry.zig",
+      "sha256": "c910036185fb3f091e55e7c99596b3eb9a001fa8f1f1fabc68ec1b202bd85f23"
+    },
+    {
+      "path": "src/binance_market_feed.zig",
+      "sha256": "87e2a8f57680bf1f2eb354e297dd9a17c1687764426a42f66f54d7b8331b7b98"
+    },
+    {
+      "path": "src/binance_order_raw.zig",
+      "sha256": "912c1fb917de14aac7c91afbb93e6f4275ed14f00f31fae3d71eb27b263d299b"
+    },
+    {
+      "path": "src/binance_private_reconciliation.zig",
+      "sha256": "8b26794fe1ef849ff5644af2db406e11a14ab8939f9063e9a4d96a6e199c022d"
+    },
+    {
+      "path": "src/binance_public_market.zig",
+      "sha256": "352797bd308bed88ea012c3b2aa8cb70bd2ab69819500daea58fa013d395748e"
+    },
+    {
+      "path": "src/binance_testnet_acceptance.zig",
+      "sha256": "9da7d39bfd5c613b60ca411e7ed45064180ac9e064501185630e94f7d7f52409"
+    },
+    {
+      "path": "src/binance_venue_adapter.zig",
+      "sha256": "b8cb4e0b0d172537840496dfbb11f178f13a70f488d227e7e176c5072342ee0c"
+    },
+    {
+      "path": "src/bybit_market_feed.zig",
+      "sha256": "751e0fccbc07f9fc9d80161f5c4532ac6e328b298f8fbdbb4be3a9a5e215677b"
+    },
+    {
+      "path": "src/bybit_private_reconciliation.zig",
+      "sha256": "cb5ee5d202c0c11acdefc1250fb7c7e618f95eb705e3b06f0ce7d26648ce79e2"
+    },
+    {
+      "path": "src/bybit_testnet_acceptance.zig",
+      "sha256": "7cda8689f53dee1aa6f4b827dfefcffa492f66a1639e745716bea4007c28cfb6"
+    },
+    {
+      "path": "src/bybit_venue_adapter.zig",
+      "sha256": "0329bf4646bf0200ed3ae33da25948194e95ba7becca6b313f2471b69017484f"
+    },
+    {
+      "path": "src/canonical_event.zig",
+      "sha256": "4dafea35e2b78e63ba83d0f138aecd73a3c13d9bb8d83ea9822b908995a582be"
+    },
+    {
+      "path": "src/canonical_event_codec.zig",
+      "sha256": "f3dd86a59b0e30c46c49617629ce9f0c6e5e892a314750836fb4512b4366d136"
+    },
+    {
+      "path": "src/credential_store.zig",
+      "sha256": "bbf66e49f64ddbeebb5fc7af5517f6676eb95a753af6ddd0741b368a109351fd"
+    },
+    {
+      "path": "src/credential_store_visibility_test.zig",
+      "sha256": "fe1a7b780cf8f0bf3ac6e59696f2360a2d0993678753878d15946e0481f026d6"
+    },
+    {
+      "path": "src/demo_authority.zig",
+      "sha256": "159a730d460f2d8c14a224f43ca8645cd7df41ccd844c067d6429731b88f96f9"
+    },
+    {
+      "path": "src/durable_store.zig",
+      "sha256": "278078f34aa38bf98691f9c7f152e590a728b4a4494e810bb88bc800de57c52a"
+    },
+    {
+      "path": "src/economics.zig",
+      "sha256": "c408f9978daab56a7cef8a02da9933d67f6fb9e0c0a22097b386b14085264b3f"
+    },
+    {
+      "path": "src/execution_gateway.zig",
+      "sha256": "65b307bd2bbdb275eb99072c77ff993ea021e4b4c5ea96e95aed116391259708"
+    },
+    {
+      "path": "src/failover.zig",
+      "sha256": "c798f7677eedc56eeb7f9e9eb87060f2e92e6fc0bc1d8c444281d68e17061403"
+    },
+    {
+      "path": "src/four_shard_acceptance.zig",
+      "sha256": "220c47a86aab16466a88da91fda4a4d93f891d144c5431a9ec3513ba630332cf"
+    },
+    {
+      "path": "src/historical_fee_audit.zig",
+      "sha256": "ca84ec6773cc8cf359a47d795004ece429b24323d670c02435d7b56a455e96f0"
+    },
+    {
+      "path": "src/historical_fee_audit_samples.json",
+      "sha256": "0413365ccc5461ab9fa5a4271e743ac428054ac1fa42e8cb67b1704e1bca6e59"
+    },
+    {
+      "path": "src/instrument_registry.zig",
+      "sha256": "b64871be580d30b14115cd23059ced917a006dfd8bc60c6e293c04b90912ca7c"
+    },
+    {
+      "path": "src/journal.zig",
+      "sha256": "3dcd332ac5e4ea25a35208f0a9786c83d9f606813a0e0fd0d2ec0917dba03060"
+    },
+    {
+      "path": "src/main.zig",
+      "sha256": "ced03b22c8485f4e48b0ca962f25da659751203331f17b8a057444d684bb7fdc"
+    },
+    {
+      "path": "src/market_feed_adapter.zig",
+      "sha256": "da0d852c54a62e7012a7dbcccab78a13289fc1a920020d9aa0527237dea9b68e"
+    },
+    {
+      "path": "src/market_projection.zig",
+      "sha256": "a286a7e66e0d9bcfccc49fd7b3a666a92b837492b318b592eb4a1c7910304658"
+    },
+    {
+      "path": "src/multi_venue_testnet_acceptance.zig",
+      "sha256": "f30b2014f3a5d51d34d31e7dc67c30805c19c48506b3ad54e2816d17a5d9b19d"
+    },
+    {
+      "path": "src/native_account_continuity_acceptance.zig",
+      "sha256": "985422d2ebfdba790e9bdba839458c2e0e1b15178101980efdbf27205daac1d2"
+    },
+    {
+      "path": "src/native_economic_reconciliation_acceptance.zig",
+      "sha256": "13202eb3bf7f239f5c519c2f662e729a584e9805b9e6a8f99b40acef4e790bc9"
+    },
+    {
+      "path": "src/native_multi_venue_accounting_acceptance.zig",
+      "sha256": "79a2ef795617964ab369d87faf4b0ce3dd448a1f81d0a443446b309d1d1e8c46"
+    },
+    {
+      "path": "src/okx_curl_private_smoke.zig",
+      "sha256": "eca1e12bc1b6ce88f2fff44142c27c7edd9d3475b5ee5d40f77cfb7aff824d02"
+    },
+    {
+      "path": "src/okx_curl_public_smoke.zig",
+      "sha256": "17e9d188f17a9b050774895779dfd2f7113dec1bc77a52d14cbad411ac577ea4"
+    },
+    {
+      "path": "src/okx_curl_shim.c",
+      "sha256": "d4505b7b73cbe8514a9b8dec0c0349ac8ef07aa05c96daf2cd039cbd7ce5da36"
+    },
+    {
+      "path": "src/okx_curl_transport.zig",
+      "sha256": "4f2127ce36a199cb82612bd5b3e5f8601efe0c58ac6a24111f7f9aaedc1b86e5"
+    },
+    {
+      "path": "src/okx_demo_live_acceptance.zig",
+      "sha256": "5fcf0c1fc14c2b5818c7e815e698915deebc6aad3769b14c2ea799c7654c5c06"
+    },
+    {
+      "path": "src/okx_live_chain.zig",
+      "sha256": "ab15d8d30bd99a3cc297d28910575220e2293363f3ead2710b455b135dd3329c"
+    },
+    {
+      "path": "src/okx_market_feed.zig",
+      "sha256": "a7d7aaa7bbee7a55157a02a109bca8c36350f4e07012e4e511f4ca8274b76b55"
+    },
+    {
+      "path": "src/okx_order_entry.zig",
+      "sha256": "f927c347594391a66c53d46da8380c5e717d0591c81907770ff308a139ab14d8"
+    },
+    {
+      "path": "src/okx_private_reconciliation.zig",
+      "sha256": "ab6c31f4f21975f2c7f9d0408803603823dc237ae821dd636bc0086451d8a3f8"
+    },
+    {
+      "path": "src/okx_private_recovery.zig",
+      "sha256": "0c2d32029cd813723b4e66a67ffe919a26bc03e9aa24c1fd63ce12515ccb2800"
+    },
+    {
+      "path": "src/okx_public_market.zig",
+      "sha256": "056f09f0894d8912398691b415c378820da66eb78c3c29e5cb7872c88d44458e"
+    },
+    {
+      "path": "src/okx_rest_auth.zig",
+      "sha256": "e481265e14028c94bc1eb9badb89d3bff73d72c7086b1acddcc24fc839439ff2"
+    },
+    {
+      "path": "src/okx_venue_adapter.zig",
+      "sha256": "e284fd683adbebcaa35dce7279535c8b9ad8d3d1c7d2b6d6aab32cf5b4d4cf53"
+    },
+    {
+      "path": "src/oms.zig",
+      "sha256": "90e70975415f28050225870e009d3a263dea86d6908230dfb0ff68b89e25e9fb"
+    },
+    {
+      "path": "src/operational.zig",
+      "sha256": "1d140eabc6f43fa8a17068a8d50860ae7146fbb1e724fba89cf2ada49286e1c7"
+    },
+    {
+      "path": "src/production_contract.zig",
+      "sha256": "0cc4927ab88b49a958aa5597727430253a65e6b31316b1377fa109b306044f71"
+    },
+    {
+      "path": "src/production_runtime.zig",
+      "sha256": "42fa030ce7ae8955ecad1c2d54fc2653225762551c4213c916a591b69cb9d0ab"
+    },
+    {
+      "path": "src/raw_ingress.zig",
+      "sha256": "c003611fe846dbcd4c44330296213ae0238b115bdc6cf6bc13679fb25ad070fd"
+    },
+    {
+      "path": "src/recovery_cutover.zig",
+      "sha256": "a9ed5233a5baa1db2dee96a0a62efe76fce0751507cd64ab097c9c557c1558ad"
+    },
+    {
+      "path": "src/risk.zig",
+      "sha256": "e61dd55486ed323333df362bf4f7c60754377d7ad089df6a29d6cd068e534e55"
+    },
+    {
+      "path": "src/simulated_lifecycle_projection.zig",
+      "sha256": "5146ece692ec50f329aee09a501a08c8b20fc95455c1ace6db457ceb13621c91"
+    },
+    {
+      "path": "src/simulated_market_feed.zig",
+      "sha256": "d10ddc504d26a95ffd668fbee03fa42e1aaa245f8a0590d09ce205febc42168f"
+    },
+    {
+      "path": "src/simulated_native_accounting_acceptance.zig",
+      "sha256": "b9d6ad41c877885ea817037d1db6d5c67208f25b255391de78e9900e90309ff3"
+    },
+    {
+      "path": "src/simulated_venue.zig",
+      "sha256": "6c64e1fb66f5f8bd9bf5827b180a126c0585551a1293feb46fff9287979ad154"
+    },
+    {
+      "path": "src/snapshot_codec.zig",
+      "sha256": "e1e60d698ae29d3d4f33066fc09d6398e61b7ea45434075fc5bfe773c7971758"
+    },
+    {
+      "path": "src/strategy_host_capacity.zig",
+      "sha256": "b8e66a7da1a755fe13a897856b32b3a633c4a848c51d91a1a94cd16b1c983700"
+    },
+    {
+      "path": "src/strategy_host_failure_integration.zig",
+      "sha256": "334f4fd39fd857e17cb1ebeadcbbf964566257aa661b8afdd26c288771ded40d"
+    },
+    {
+      "path": "src/strategy_host_failures.zig",
+      "sha256": "c59a73f775c3fbee7930e4b448a1194e7fae6310eb59c7ae99d9c3d0deb344be"
+    },
+    {
+      "path": "src/strategy_host_gateway.zig",
+      "sha256": "a30bfec3c8b54b200fa77e4a651276e37ef787d77b252380c0538f08257e70e7"
+    },
+    {
+      "path": "src/strategy_host_integration.zig",
+      "sha256": "579a17174712424650a891f3e28f5476638675a28b4fa8ce0244e5c8678d472a"
+    },
+    {
+      "path": "src/strategy_host_ipc.zig",
+      "sha256": "ea3b01ada97176d2aba495b86f3f677b7176d4f950ff36cd063480dfd24a3fb2"
+    },
+    {
+      "path": "src/strategy_host_lifecycle.zig",
+      "sha256": "d82503073a3778708f88003bb1231cc319b13805b0b2b1debef06a46881f6f9f"
+    },
+    {
+      "path": "src/strategy_host_recovery.zig",
+      "sha256": "f67027c3c9a8c39a91e65e8566fa8c48733e7a4029805e039e21ce1cf4c250f4"
+    },
+    {
+      "path": "src/strategy_host_recovery_integration.zig",
+      "sha256": "f38de387b60eb5da499e90e4cb356f790a0ecfe50ae50fbf574cbdb60e9e6a00"
+    },
+    {
+      "path": "src/telemetry_qualification.zig",
+      "sha256": "bbb5d840232f980b4eac3e0621038a47fa18ab4bc06806a9d2e4f384247b6282"
+    },
+    {
+      "path": "src/trading_shard.zig",
+      "sha256": "ecde1cf4d00bfd99e30ce18d7259355f7474ca7f01cebf41d9786ffe0a49ec78"
+    },
+    {
+      "path": "src/trading_shard_benchmark.zig",
+      "sha256": "3685035dc8d4c07953badd2e0dce109246eaa64aed32d26389516ef6642a0d2c"
+    },
+    {
+      "path": "src/trading_shard_event.zig",
+      "sha256": "e745d3840b261c0caa27b125b8855e7c0400f3f7019a5c66394b41f1fbf5a3e2"
+    },
+    {
+      "path": "src/trading_shard_fixture.zig",
+      "sha256": "0d66d7d7bf54072bbd8b0d95f286108e616ddf5bf420792b670fd7a7c58fc8d3"
+    },
+    {
+      "path": "src/trading_shard_tests.zig",
+      "sha256": "7951bfc7ce4dfe629feb49c582125f980f421018fe0e61c82cbbf397046bf1e0"
+    },
+    {
+      "path": "src/venue_adapter.zig",
+      "sha256": "5dd81741b327f169b985b1157d8705c4c6f2628301473ffd1b7fd4b692e0e171"
+    },
+    {
+      "path": "src/venue_adapter_contract.zig",
+      "sha256": "85f622ec6d40517362231be33a31519f222f42534fa4301162829acd3b0f68bc"
+    },
+    {
+      "path": "src/venue_fill_recovery_acceptance.zig",
+      "sha256": "f17bb01b95f1e9cc19e65f969b31ccbd8baa5def0e35a86ac0d22660a6e01a1a"
+    },
+    {
+      "path": "src/windows_demo_main.zig",
+      "sha256": "3fe792783c0ff8e9cfffe428a480a533f71d2c1ddbe5eaac2f95d89d1b8c2f68"
+    },
+    {
+      "path": "src/windows_verification_runtime.zig",
+      "sha256": "a1db20626c58ba80aebd992e5d4437abb2ab9464fcd54abd39d11a49e953d56a"
+    }
+  ],
+  "zig_version": "0.17.0-dev.315+5b647b792",
+  "schemas": {
+    "canonical": 10,
+    "canonical_encoding": 10,
+    "journal": 30,
+    "state": 34,
+    "registry": 28,
+    "acceptance": 13
+  },
+  "checks": {
+    "debug": {
+      "passed": 424,
+      "total": 424,
+      "exit_code": 0
+    },
+    "releasesafe": {
+      "passed": 424,
+      "total": 424,
+      "exit_code": 0
+    },
+    "linux_compile": {
+      "target": "x86_64-linux-gnu",
+      "mode": "ReleaseSafe",
+      "exit_code": 0
+    },
+    "windows_compile": {
+      "mode": "ReleaseSafe",
+      "exit_code": 0
+    },
+    "windows_chain": {
+      "exit_code": 0,
+      "okx_offline": "passed",
+      "role_ownership": "passed",
+      "durable_recovery": "passed",
+      "global_qualification": "blocked"
+    },
+    "offline_fixture": {
+      "exit_code": 0
+    },
+    "four_shard": {
+      "exit_code": 0,
+      "shards": 4,
+      "recovery_paths": 3
+    }
+  },
+  "artifacts": {
+    "report-14-full-debug.log": {
+      "sha256": "23fe5b9f4cba47e314e23a302eb6634cb7a327898ebe0d418c19d2c40c486c3e"
+    },
+    "report-14-full-releasesafe.log": {
+      "sha256": "23fe5b9f4cba47e314e23a302eb6634cb7a327898ebe0d418c19d2c40c486c3e"
+    },
+    "report-14-linux-compile.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "report-14-windows-compile.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "report-14-windows-chain.log": {
+      "sha256": "586aefaa56b90ff02e022dcc490acdb5d33bb6a78492a02cc5eafb1a14257343"
+    },
+    "report-14-offline-fixture.log": {
+      "sha256": "63b6df22b02024e01b3e34f0257e52c3c2706a9ff873aa5e25f53cb34c033258"
+    },
+    "report-14-four-shard.log": {
+      "sha256": "25268b74f2434dc8d7bf9b931b5e4558e160c9f44b3d110186ce29a7822652aa"
+    }
+  },
+  "binaries": {
+    ".scratch/build/precision-14-linux": "3f2ad8a7791515d3ecef830a09c30ed9387909673a2b0371e23fbb9d88766528",
+    ".scratch/build/precision-14-windows-rs.exe": "371678836c7683e5ba1d4e3e0741b9d45bcba3cbd4f66ee0ddf5e13f3be30106"
+  },
+  "asset_configuration_scope": "Offline test_fixture only; source_digest sentinel is not production authority; activated registry hashes include definitions and barriers",
+  "matrix_cases": {
+    "binance:quote": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 27,
+      "raw_barrier": 6,
+      "canonical_state_digest": "b1a25aec3501630e9c0c615083c690666898fae3d6d15df78fc1ecd3dd952285",
+      "semantic_authority_digest": "68041942169180e0a31c4cbdf0f4b2def7b46b418a72a721f8fb7f79ad5e2596",
+      "external_transport_sends": 0
+    },
+    "bybit:quote": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 27,
+      "raw_barrier": 7,
+      "canonical_state_digest": "08b643365b2d8531691ba331a5e3d5912ac7b25b3381e6765a0e7b3f0f3f48c4",
+      "semantic_authority_digest": "67b0a48f23295ec516dd9b40148c3a88f39d2a38f089d193d274df1eacc3bd7e",
+      "external_transport_sends": 0
+    },
+    "bybit:extra_fees": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 24,
+      "raw_barrier": 5,
+      "canonical_state_digest": "b3b0a7003b2cb7b591a1e104bda915be7bcd50cdd481ff4c78022dc1b5736096",
+      "semantic_authority_digest": "e54de1f4294c532e88321b7804dd668cbb22d9801c9ccec19ed1753305927fdb",
+      "external_transport_sends": 0
+    },
+    "binance:base": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 27,
+      "raw_barrier": 6,
+      "canonical_state_digest": "1b893eb64213241e388c7198d87e4bc356112be415869f686a1beaa25421b32a",
+      "semantic_authority_digest": "b0d6dbac276cbceb873013e4d3c4f13927bd992c2c9e52ae1283310e5ac8e3e4",
+      "external_transport_sends": 0
+    },
+    "binance:quote_rebate": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 27,
+      "raw_barrier": 6,
+      "canonical_state_digest": "a729d54c154fb1b6a9aa4a168663be827e641da04aaf27eee9e24fac033ad17d",
+      "semantic_authority_digest": "a5f1f7981e6f079c778d687755f0f64d838663a035bda48acecf1b4ce62633ed",
+      "external_transport_sends": 0
+    },
+    "binance:base_rebate": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 27,
+      "raw_barrier": 6,
+      "canonical_state_digest": "3517a2ce9fa1bc5b6bf76b9a5dcf238230c4e39554b930b2fde46685d2852636",
+      "semantic_authority_digest": "b518d945e40c376ce7993698b5fc1bf4bbc51bf50b1d7e81b97d3f8ff391c343",
+      "external_transport_sends": 0
+    },
+    "binance:third_fee": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 28,
+      "raw_barrier": 6,
+      "canonical_state_digest": "1efd1a73643cece7b374d76622a8a01d403adfee44ae93adca105fd609b50b8a",
+      "semantic_authority_digest": "402e5b6d45de859b0efb7f2fb1373f8b5cc6fd13bdc399af0cade613464b47b1",
+      "external_transport_sends": 0
+    },
+    "binance:third_rebate": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 28,
+      "raw_barrier": 6,
+      "canonical_state_digest": "a3a72e7ee0cb64df120c7458ea1d6ee23ef800c9386e7163d4aa021ae53fb20b",
+      "semantic_authority_digest": "3f3c0dc113dff28457eae94746346421fa088ade58f099995f37ed23cf3acf4f",
+      "external_transport_sends": 0
+    },
+    "binance:zero": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 27,
+      "raw_barrier": 6,
+      "canonical_state_digest": "398248fc67bf71c783b95d46e89516a12e194e7d5c8e2ef6084bf5ec28f6d733",
+      "semantic_authority_digest": "72c86e62e27e20e844dbf97f2b81ceb89e5cb490c7f752a50508910f000bc7d0",
+      "external_transport_sends": 0
+    },
+    "binance:long_tail": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 27,
+      "raw_barrier": 6,
+      "canonical_state_digest": "d26d4f923fb7be2c6814f77e4c2028bcd8abbd438a23414a690430e66120867b",
+      "semantic_authority_digest": "68041942169180e0a31c4cbdf0f4b2def7b46b418a72a721f8fb7f79ad5e2596",
+      "external_transport_sends": 0
+    },
+    "bybit:base": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 27,
+      "raw_barrier": 7,
+      "canonical_state_digest": "259ac7414fd0509f18f986d587448f2681a4b4720f696d688bbb24e6aacdae79",
+      "semantic_authority_digest": "f273c753370232dcc193bcb6d197c10961aeb21da5d17281a81fbf54d2916ef5",
+      "external_transport_sends": 0
+    },
+    "bybit:quote_rebate": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 27,
+      "raw_barrier": 7,
+      "canonical_state_digest": "5cd25220aaeb84aa66f41fe8a464c8f53c3bf527a5dd9b6ca4b1c46f80d16e19",
+      "semantic_authority_digest": "d5662f0ebb5ae58548f8f836ce3aceaf05694a48740612c7f3e715f9d785b38e",
+      "external_transport_sends": 0
+    },
+    "bybit:base_rebate": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 27,
+      "raw_barrier": 7,
+      "canonical_state_digest": "73bfa6c9fbe62b03c0504b394bc78a3d5f4f90a51346c90f49887874234013fd",
+      "semantic_authority_digest": "e0b02b857facd56422c5063e27f6d48f981239ef3fea0d96399f686e04a5accb",
+      "external_transport_sends": 0
+    },
+    "bybit:third_fee": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 28,
+      "raw_barrier": 7,
+      "canonical_state_digest": "91509a625ef9664641967e4364fc95de5cc637a06e9b5da676d6ee80387f40d2",
+      "semantic_authority_digest": "59c0ef4f32f32abd29fb5c1b51949ab2c3a86451deef3410a00f0351d4a160e4",
+      "external_transport_sends": 0
+    },
+    "bybit:third_rebate": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 28,
+      "raw_barrier": 7,
+      "canonical_state_digest": "249ffaf58ba845684f54b3c6e183b2c01b92007874519bb5d5761e15f302f284",
+      "semantic_authority_digest": "e82173a1518b16ca8b96ee060f6e1dec4a9992f63dd688d59220c5bc40d499e7",
+      "external_transport_sends": 0
+    },
+    "bybit:zero": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 27,
+      "raw_barrier": 7,
+      "canonical_state_digest": "28291cbcab4c2ea9be0e5ccaf1bdf36c348ddb795840becc55133f018bf538a5",
+      "semantic_authority_digest": "40b18848fedd43a58239e074d9254a5420516bb7bd7eceb85db45243fc547b3f",
+      "external_transport_sends": 0
+    },
+    "bybit:long_tail": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 27,
+      "raw_barrier": 7,
+      "canonical_state_digest": "83eac0db132626ce034aedf7375e45e357f2a4a2924e2b6aa5707e264bb7f0ba",
+      "semantic_authority_digest": "67b0a48f23295ec516dd9b40148c3a88f39d2a38f089d193d274df1eacc3bd7e",
+      "external_transport_sends": 0
+    },
+    "binance:unknown": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 24,
+      "raw_barrier": 5,
+      "canonical_state_digest": "5e409adade2c46f71805d4adcc0f464f1faf82e9af343a374cbe130536576ae8",
+      "semantic_authority_digest": "f4037b03b76fbfa22695f78521f25219995e1aea1cb00098541f5b7832c327aa",
+      "external_transport_sends": 0
+    },
+    "binance:unknown_no_pending": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 24,
+      "raw_barrier": 5,
+      "canonical_state_digest": "5e409adade2c46f71805d4adcc0f464f1faf82e9af343a374cbe130536576ae8",
+      "semantic_authority_digest": "f4037b03b76fbfa22695f78521f25219995e1aea1cb00098541f5b7832c327aa",
+      "external_transport_sends": 0
+    },
+    "binance:inexact": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 24,
+      "raw_barrier": 5,
+      "canonical_state_digest": "a5690c3a41ea32e234cc6e66e47a6b15de8c0a3dd6c813aaed78fe888fed9aa8",
+      "semantic_authority_digest": "87192f841a89511f2f8cc02580e31a47dfc09eba05a1cd98a7729914ca2614bc",
+      "external_transport_sends": 0
+    },
+    "binance:overflow": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 24,
+      "raw_barrier": 5,
+      "canonical_state_digest": "8aa2cafb463bea8bb8b50e9ff2eeddca514d9fa055934897883ec4468ac945af",
+      "semantic_authority_digest": "4bfdb8cd53cf1baf059b59999094ee70a895a5699fcde062693c49ce9a674be8",
+      "external_transport_sends": 0
+    },
+    "bybit:unknown": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 24,
+      "raw_barrier": 5,
+      "canonical_state_digest": "a71d9bb5be7b7464e58e0a881566f3bd0dbcaaf4d9ee2673bba98a527ee2e01f",
+      "semantic_authority_digest": "d5f360a4482fe57e6958fc8962a4da56971f2f334d9090118396193f8049b15e",
+      "external_transport_sends": 0
+    },
+    "bybit:unknown_no_pending": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 24,
+      "raw_barrier": 5,
+      "canonical_state_digest": "a71d9bb5be7b7464e58e0a881566f3bd0dbcaaf4d9ee2673bba98a527ee2e01f",
+      "semantic_authority_digest": "d5f360a4482fe57e6958fc8962a4da56971f2f334d9090118396193f8049b15e",
+      "external_transport_sends": 0
+    },
+    "bybit:inexact": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 24,
+      "raw_barrier": 5,
+      "canonical_state_digest": "ecd9d94006810de8c9a49cb2ed1943e4a3a3bcd8cda00a86c9045a805c05a38d",
+      "semantic_authority_digest": "e2ac23cfd45a95cd15986e88181f75a795204cdc661f5a72bf14136b26b4c6db",
+      "external_transport_sends": 0
+    },
+    "bybit:overflow": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 24,
+      "raw_barrier": 5,
+      "canonical_state_digest": "30eff1e13210e5d0ad3d9d5ce53883588a9fcf908d1b8dfef25488e6a0cd7c31",
+      "semantic_authority_digest": "20a0ab17eb9d206a5edff4db666a64750a81df3fd42db52c058fa363026fbdbd",
+      "external_transport_sends": 0
+    },
+    "bybit:wallet_scope": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 24,
+      "raw_barrier": 5,
+      "canonical_state_digest": "9100865b814fed098b560a23125e0984967dfa1cee28364a7e9849ebdad71c9a",
+      "semantic_authority_digest": "667bcfa7170ccc37ee85bc8866a9786cce421135d0fe4bf95e472cf40b9c857a",
+      "external_transport_sends": 0
+    },
+    "bybit:report_first": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 27,
+      "raw_barrier": 7,
+      "canonical_state_digest": "ac7985da59da5770b3f3792b8869da45b36b6d178204d43940b2a6bf3ff6b24f",
+      "semantic_authority_digest": "67b0a48f23295ec516dd9b40148c3a88f39d2a38f089d193d274df1eacc3bd7e",
+      "external_transport_sends": 0
+    },
+    "binance:conflict": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 28,
+      "raw_barrier": 7,
+      "canonical_state_digest": "d6a6340cc0c38ff45774b2c36470fc2171eb1bb635b28f28e0b9091e917d85b6",
+      "semantic_authority_digest": "354b5b04c98d07daf7b31808d0087c93bece22e8e181b9bdd97591baab5178f3",
+      "external_transport_sends": 0
+    },
+    "bybit:conflict": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 28,
+      "raw_barrier": 8,
+      "canonical_state_digest": "573c3b61223b742f9365572470a833dfd64eea57918862c29eef2641c1d888d6",
+      "semantic_authority_digest": "aecb488fe89bc353cab73712eb8a07095f856bd95fb819768b943dbc05852b69",
+      "external_transport_sends": 0
+    },
+    "binance:malformed_ws": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 24,
+      "raw_barrier": 5,
+      "canonical_state_digest": "f28d68e1978624612f87d2163cba1024e675910cf79e224332e6865ac26f7714",
+      "semantic_authority_digest": "041069c8899e6ef9789f291aa0c511ba0f9de39e6c6ecfb6ae374c4eb415f947",
+      "external_transport_sends": 0
+    },
+    "bybit:malformed_ws": {
+      "registry_sha256": "2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21",
+      "decision_barrier": 24,
+      "raw_barrier": 5,
+      "canonical_state_digest": "a1879f762cbfba3fea0af1d06139e6bb3f001f710142bc2f36af35bc66cff0da",
+      "semantic_authority_digest": "210e35561d2593e0c84d6bfad1ce721b289350d9972fbbfad4671ccc7b2f5436",
+      "external_transport_sends": 0
+    },
+    "binance:single_fee": {
+      "registry_sha256": "d554c3cb07536dd417bb6005d3cd360e37cf405985cc16652533f3c453dfb7b4",
+      "decision_barrier": 24,
+      "raw_barrier": 5,
+      "canonical_state_digest": "7e3868643dc49bce60257fe99c50a6822d8b0e7f3f60c4352321360e64481450",
+      "semantic_authority_digest": "eefef6d12eb44adabbc33ac76b00c395c316a1185d67c0f1c9e12ad5dbc0c0be",
+      "external_transport_sends": 0
+    },
+    "bybit:single_fee": {
+      "registry_sha256": "d554c3cb07536dd417bb6005d3cd360e37cf405985cc16652533f3c453dfb7b4",
+      "decision_barrier": 24,
+      "raw_barrier": 5,
+      "canonical_state_digest": "221c8d4d94e6d541932b13bdaa85cbe48c2c3619a6142c7b74f5098e64d30c49",
+      "semantic_authority_digest": "1f0b6fad1c9eda31e2c8745ebf41031903efc27b6e26e1899343a08b0637b46b",
+      "external_transport_sends": 0
+    }
+  },
+  "qualification": {
+    "read_only": "not_run",
+    "demo_live": "not_run",
+    "testnet": "not_run",
+    "production_qualified": false,
+    "historical_correction": "not_run"
+  },
+  "reviews": {
+    "fixed_point": "e8488457b0553544e4f3d91c691797d7bf2edb32",
+    "standards": "no remaining findings after whole branch and delta review",
+    "spec": "P1/P2 repaired; accidental fixture change restored; final root suites pass"
+  },
+  "parent_spec_git": "cc61818a1f5bf67efd8716b125442a8c3c665b8d"
+}

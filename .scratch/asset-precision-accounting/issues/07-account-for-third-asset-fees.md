@@ -1,7 +1,7 @@
 # 07：让第三 Asset 费用与返佣形成原币闭环
 
 Type: task
-Status: done
+Status: resolved
 Assignee: codex/asset-precision-accounting
 Blocked by: [06：精确记录基础资产费用并分离 atoms 与 lots](06-separate-base-atoms-from-trade-lots.md)
 Parent: [落实权威资产精度与精确经济账务](../map.md)

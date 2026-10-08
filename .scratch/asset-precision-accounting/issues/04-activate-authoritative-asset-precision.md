@@ -6,7 +6,7 @@ Assignee: Codex
 Blocked by: [03：让有界 Decimal 等价文本贯通规范事实](03-normalize-bounded-decimal-ingress.md)
 Parent: [落实权威资产精度与精确经济账务](../map.md)
 Spec: [父 Spec](01-exact-asset-accounting-spec.md)
-Label: done
+Label: completed
 Phase: S2
 
 ## Question

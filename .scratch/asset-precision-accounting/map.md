@@ -1,7 +1,7 @@
 # 落实权威资产精度与精确经济账务
 
 Label: wayfinder:map
-Status: open
+Status: closed
 
 ## Destination
 
@@ -51,10 +51,12 @@ Status: open
 
 ## Frontier
 
-- [14：封存完整验收、覆盖矩阵与发布资格要求](issues/14-seal-exact-accounting-release-evidence.md) — 12/13离线切片已完成；执行最终全套、独立审查和证据封存。
+- 实施票02–14均resolved/completed，无实施Frontier。父Spec01原文及生命周期保持不变；生产配置及新源码在线/生产资格仍需独立授权与实际证据。封存见[覆盖索引](coverage-evidence.md)、[发布证据](release-evidence.md)、[精确manifest](release-evidence.json)。
 
 
 ## Decisions so far
+
+- 2026-10-08：14封存521db8d1实际源码/配置/完整覆盖。Debug与ReleaseSafe根合同各424/424、Linux和Windows ReleaseSafe编译exit0；实际Windows假transport角色/恢复与四shard/三路径通过，顶层资格保持blocked，所有在线not_run/production=false。完整分支及增量双轴审阅已闭合P1/P2，所有实施票02–14完成，无实施Frontier；父Spec生命周期不改，没有部署、账户交易、清理或历史更正。
 
 - 2026-10-08：13实际多Venue公开精确账务合同完成离线切片。Binance/Bybit共享最终Debug/ReleaseSafe各14/14；OKX真实native证据和Simulated原币合同复用同一Owner/ledger/persistence。未知/余数/溢出/冲突/无private link/decoder/现代wallet故障持久关闭；Binance不完整Spot产品/bill scope和Bybit钱包availability保持未解决。Frontier推进14，最终全套/全分支独立双轴审查与源码绑定待执行；线上not_run/false。
 

@@ -1,12 +1,12 @@
 # 06：精确记录基础资产费用并分离 atoms 与 lots
 
 Type: task
-Status: done
+Status: resolved
 Assignee: codex/asset-precision-accounting
 Blocked by: [05：贯通高精度结算资产费用与原币账务](05-close-settlement-asset-precision.md)
 Parent: [落实权威资产精度与精确经济账务](../map.md)
 Spec: [父 Spec](01-exact-asset-accounting-spec.md)
-Label: done
+Label: completed
 Phase: S3
 
 ## Question
