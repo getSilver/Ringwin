@@ -513,7 +513,8 @@ test "OKX raw private fills traverse adapter Owner durable recovery without deco
     }
 }
 
-fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canonical.EconomicFaultReason, rejection: ?private.RejectReason, core_reject: bool, persist_fault: ?durable.FaultPoint, rest: bool, unowned: bool) !void {
+fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canonical.EconomicFaultReason, rejection: ?private.RejectReason, core_reject: bool, persist_fault: ?durable.FaultPoint, rest: bool, ownership: enum { owned, external, external_single_limit }) !void {
+    const unowned = ownership != .owned;
     const allocator = std.heap.page_allocator;
     const memory = try allocator.create(durable.MemoryAdapter);
     defer allocator.destroy(memory);
@@ -530,7 +531,11 @@ fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canoni
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
     owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
-    try @import("venue_adapter_contract.zig").activateTestAssets(owner);
+    for (@import("asset_registry.zig").testDefinitions(6, 8)) |original_definition| {
+        var definition = original_definition;
+        if (ownership == .external_single_limit and definition.asset == 0x425443) definition.max_single_atoms = 40000;
+        _ = try owner.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
+    }
     try adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = owner.shard.activatedAssets(), .instrument_definitions = owner.shard.instrument_registry });
     try implementation.beginPrivateSession();
     const subscriptions = [_][]const u8{
@@ -588,8 +593,8 @@ fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canoni
     const input = if (rest) try std.fmt.bufPrint(&frame,
         \\{{"code":"0","data":[{{"instId":"BTC-USDT","ordId":"1001","billId":"3001","clOrdId":"{s}","side":"buy","tradeId":"2001","fillSz":"0.0001","fillPx":"50000","fee":"{s}","feeCcy":"{s}","fillTime":"1800000000100","execType":"M"}}]}}
     , .{ command.client_order_id.slice(), fee.?, asset }) else if (fee) |amount| try std.fmt.bufPrint(&frame,
-        \\{{"arg":{{"channel":"orders"}},"data":[{{"instId":"BTC-USDT","ordId":"1001","clOrdId":"{s}","side":"buy","ordType":"limit","state":"{s}","tdMode":"cash","posSide":"net","reduceOnly":"false","sz":"0.0002","px":"50000","accFillSz":"0.0001","avgPx":"50000","uTime":"1800000000100","tradeId":"2001","fillSz":"0.0001","fillPx":"50000","fillFee":"{s}","fillFeeCcy":"{s}","fee":"-0.01","feeCcy":"USDT","rebate":"{s}","rebateCcy":"USDT","fillTime":"1800000000100","execType":"M"}}]}}
-    , .{ if (unowned) "outside-closed" else command.client_order_id.slice(), if (unowned) "filled" else "partially_filled", amount, asset, "0.02" }) else
+        \\{{"arg":{{"channel":"orders"}},"data":[{{"instId":"BTC-USDT","ordId":"1001","clOrdId":"{s}","side":"buy","ordType":"limit","state":"{s}","tdMode":"cash","posSide":"net","reduceOnly":"false","sz":"{s}","px":"50000","accFillSz":"0.0001","avgPx":"50000","uTime":"1800000000100","tradeId":"2001","fillSz":"0.0001","fillPx":"50000","fillFee":"{s}","fillFeeCcy":"{s}","fee":"-0.01","feeCcy":"USDT","rebate":"{s}","rebateCcy":"USDT","fillTime":"1800000000100","execType":"M"}}]}}
+    , .{ if (unowned) "outside-closed" else command.client_order_id.slice(), if (unowned) "filled" else "partially_filled", if (unowned) "0.0001" else "0.0002", amount, asset, "0.02" }) else
         \\{"arg":{"channel":"account"},"eventType":"update","curPage":1,"lastPage":true,"data":[{"uTime":"1800000000001","totalEq":"25","adjEq":"25","imr":"0","mmr":"0","mgnRatio":"","isoEq":"0","details":[{"ccy":"USDT","cashBal":"25.123456789","eq":"25.123456789","availBal":"25","frozenBal":"0","liab":"0","isoLiab":"0","crossLiab":"0"}]}]}
     ;
     const account_input =
@@ -742,7 +747,7 @@ fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canoni
 }
 
 test "OKX ready inexact account fact persists a fail closed result without reconciliation" {
-    try checkReadyEconomicFault(null, "USDT", .inexact_amount, null, false, null, false, false);
+    try checkReadyEconomicFault(null, "USDT", .inexact_amount, null, false, null, false, .owned);
 }
 
 test "OKX activated high precision account facts survive Owner replay without old unit economics" {
@@ -1572,18 +1577,18 @@ test "OKX ready economic faults distinguish micro fees rebates assets and decode
     };
     for (cases) |case| for ([_]bool{ false, true }) |rest| {
         if (rest and case.rejection == null) continue;
-        try checkReadyEconomicFault(case.fee, case.asset, case.reason, case.rejection, false, null, rest, false);
+        try checkReadyEconomicFault(case.fee, case.asset, case.reason, case.rejection, false, null, rest, .owned);
     };
 }
 
 test "core rejected canonical economic amount persists without partial accounting or send authority" {
-    try checkReadyEconomicFault("-0.01", "USDT", .overflow, null, true, null, false, false);
-    try checkReadyEconomicFault(null, "USDT", .invalid_economic_fact, null, true, null, false, false);
+    try checkReadyEconomicFault("-0.01", "USDT", .overflow, null, true, null, false, .owned);
+    try checkReadyEconomicFault(null, "USDT", .invalid_economic_fact, null, true, null, false, .owned);
 }
 
 test "OKX economic fault append and commit failures retain raw facts and close sending" {
     for ([_]durable.FaultPoint{ .append, .commit }) |point|
-        try checkReadyEconomicFault("-0.0000001", "USDT", .inexact_amount, null, false, point, false, false);
+        try checkReadyEconomicFault("-0.0000001", "USDT", .inexact_amount, null, false, point, false, .owned);
 }
 
 test "OKX native account missing cash facts cannot use USD equity as available funds" {
@@ -2027,6 +2032,10 @@ test "OKX native perpetual capacity preserves 32 exact Fill facts and rejects th
 }
 
 test "OKX unowned terminal Fill validates native fee before skipping portfolio ownership" {
-    try checkReadyEconomicFault("-0.0000001", "USDT", .inexact_amount, null, false, null, false, true);
-    try checkReadyEconomicFault("-0.1", "UNCONFIGURED", .unknown_asset, null, false, null, false, true);
+    try checkReadyEconomicFault("-0.0000001", "USDT", .inexact_amount, null, false, null, false, .external);
+    try checkReadyEconomicFault("-0.1", "UNCONFIGURED", .unknown_asset, null, false, null, false, .external);
+}
+
+test "OKX unowned Fill enforces a single fee limit independently of its balance limit" {
+    try checkReadyEconomicFault("-0.00040001", "BTC", .overflow, null, false, null, false, .external_single_limit);
 }

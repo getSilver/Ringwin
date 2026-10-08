@@ -865,16 +865,19 @@ pub const OkxVenueAdapter = struct {
         const binding = self.binding orelse return error.InvalidBinding;
         const fee_asset = try self.asset_definitions.resolveCode(binding.venue, fill.fee_asset.slice());
         const signed_fee = try assetAmount(self.asset_definitions, fee_asset, fill.fee);
+        try self.asset_definitions.checkAmount(signed_fee, true);
         const explicit_rebate = if (fill.rebate) |value|
             try assetAmount(self.asset_definitions, try self.asset_definitions.resolveCode(binding.venue, (fill.rebate_asset orelse return error.MissingRebateAsset).slice()), value)
         else
             null;
+        if (explicit_rebate) |rebate| try self.asset_definitions.checkAmount(rebate, true);
         if (explicit_rebate != null and explicit_rebate.?.atoms < 0) return error.InvalidFee;
         const normalized_fee: canonical.AssetAmount = if (signed_fee.atoms < 0) .{
             .asset = signed_fee.asset,
             .atoms = std.math.sub(i128, 0, signed_fee.atoms) catch return error.DecimalOverflow,
         } else .{ .asset = signed_fee.asset, .atoms = 0 };
         const realized_pnl = if (fill.realized_pnl) |value| try assetAmount(self.asset_definitions, usdt, value) else null;
+        if (realized_pnl) |pnl| try self.asset_definitions.checkAmount(pnl, true);
         // Account-wide monetary validation precedes portfolio ownership filtering.
         if (!fill.owned_by_ringwin) return;
         const link = self.findOrderByClient(fill.client_order_id.slice()) orelse {

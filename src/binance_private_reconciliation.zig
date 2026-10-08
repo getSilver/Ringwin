@@ -261,11 +261,15 @@ pub const Reconciler = struct {
         const order_id = try anyStringField(object, &.{ "i", "orderId" });
         const client = try anyStringField(object, &.{ "c", "clientOrderId" });
         var validated_fee: ?canonical.AssetAmount = null;
+        var validated_pnl: ?canonical.AssetAmount = null;
         if (kind == .fill) {
             const trade_id = try anyStringField(object, &.{ "t", "id" });
             if (std.mem.eql(u8, trade_id, "-1") or std.mem.eql(u8, trade_id, "0")) return;
             const fee_code = (try optionalStringAny(object, &.{ "N", "commissionAsset" })) orelse return error.MissingFeeAsset;
             validated_fee = try amountFor(self.asset_definitions, try self.asset_definitions.resolveCode(binding.venue, fee_code), try canonical.Decimal.parse(try anyStringField(object, &.{ "n", "commission" })));
+            try self.asset_definitions.checkAmount(validated_fee.?, true);
+            validated_pnl = if (try optionalStringAny(object, &.{ "rp", "realizedPnl" })) |value| try amountFor(self.asset_definitions, usdt, try canonical.Decimal.parse(value)) else null;
+            if (validated_pnl) |pnl| try self.asset_definitions.checkAmount(pnl, true);
         }
         const link = self.findOrder(client) orelse return;
         const rules = try self.instrumentRules(try anyStringField(object, &.{ "s", "symbol" }), linear);
@@ -290,7 +294,7 @@ pub const Reconciler = struct {
             if (std.mem.eql(u8, trade_id, "-1") or std.mem.eql(u8, trade_id, "0")) return;
             const key = try factKey("fill", &.{trade_id});
             const fee = validated_fee.?;
-            const event: canonical.Payload = .{ .fill = .{ .identity = digestIdentity(key), .order = link.order, .client_order_id = link.client_order_id, .venue_order = try canonical.VenueOrderRef.init(binding.venue, order_id), .venue_trade = try canonical.VenueTradeRef.init(binding.venue, trade_id), .instrument = rules.identity, .exchange_account = binding.account, .side = try sideFor(try anyStringField(object, &.{ "S", "side" })), .quantity = try quantityFor(rules, try anyStringField(object, &.{ "l", "qty" })), .price = try priceFor(rules, try anyStringField(object, &.{ "L", "price" })), .fee = if (fee.atoms > 0) fee else .{ .asset = fee.asset, .atoms = 0 }, .rebate = if (fee.atoms < 0) .{ .asset = fee.asset, .atoms = std.math.sub(i128, 0, fee.atoms) catch return error.DecimalOverflow } else null, .realized_pnl = if (try optionalStringAny(object, &.{ "rp", "realizedPnl" })) |value| try amountFor(self.asset_definitions, usdt, try canonical.Decimal.parse(value)) else null, .liquidity = if (try makerFor(object)) .maker else .taker, .venue_fill_time_utc_ns = source_time } };
+            const event: canonical.Payload = .{ .fill = .{ .identity = digestIdentity(key), .order = link.order, .client_order_id = link.client_order_id, .venue_order = try canonical.VenueOrderRef.init(binding.venue, order_id), .venue_trade = try canonical.VenueTradeRef.init(binding.venue, trade_id), .instrument = rules.identity, .exchange_account = binding.account, .side = try sideFor(try anyStringField(object, &.{ "S", "side" })), .quantity = try quantityFor(rules, try anyStringField(object, &.{ "l", "qty" })), .price = try priceFor(rules, try anyStringField(object, &.{ "L", "price" })), .fee = if (fee.atoms > 0) fee else .{ .asset = fee.asset, .atoms = 0 }, .rebate = if (fee.atoms < 0) .{ .asset = fee.asset, .atoms = std.math.sub(i128, 0, fee.atoms) catch return error.DecimalOverflow } else null, .realized_pnl = validated_pnl, .liquidity = if (try makerFor(object)) .maker else .taker, .venue_fill_time_utc_ns = source_time } };
             if (try self.seenBefore(key, event)) return;
             try self.emit(.account, rules.identity, null, digestIdentity(key), source_time, times, evidence, event);
         }

@@ -235,6 +235,8 @@ pub const Reconciler = struct {
             // disappear. Validate source money first without assigning an Order.
             const fee = if (try optionalString(item, "execFee")) |value_text| try amount(self.asset_definitions, try self.asset_definitions.resolveCode((self.binding orelse return error.StaleSession).venue, (try optionalString(item, "feeCurrency")) orelse return error.MissingFeeAsset), value_text) else null;
             const pnl = if (try optionalString(item, "execPnl")) |value_text| try amount(self.asset_definitions, usdt, value_text) else null;
+            if (fee) |value_fee| try self.asset_definitions.checkAmount(value_fee, true);
+            if (pnl) |value_pnl| try self.asset_definitions.checkAmount(value_pnl, true);
             const client = try string(item, "orderLinkId");
             const link = self.findLink(client) orelse continue;
             const execution_id = try string(item, "execId");

@@ -12,7 +12,7 @@ const binance_raw = @import("binance_order_raw.zig");
 const bybit = @import("bybit_venue_adapter.zig");
 const bybit_private = @import("bybit_private_reconciliation.zig");
 const Kind = enum { binance, bybit };
-const Case = enum { quote, base, quote_rebate, base_rebate, third_fee, third_rebate, zero, long_tail, unknown, inexact, overflow, extra_fees, unknown_no_pending, wallet_scope, report_first, store_append, store_commit, conflict, malformed_ws };
+const Case = enum { quote, base, quote_rebate, base_rebate, third_fee, third_rebate, zero, long_tail, unknown, inexact, overflow, extra_fees, unknown_no_pending, wallet_scope, report_first, store_append, store_commit, conflict, malformed_ws, single_fee };
 const third: u128 = 0x424e42;
 fn fixedTimes(comptime T: type) T {
     return .{ .receive_time_utc_ns = 1800000000000000000, .monotonic_time_ns = 2, .wall_time_utc_ns = 1800000000000000000 };
@@ -58,9 +58,9 @@ fn exercise(comptime kind: Kind, case: Case) ![32]u8 {
     const base_fee = case == .base or case == .base_rebate;
     const third_fee = case == .third_fee or case == .third_rebate;
     const rebate = case == .quote_rebate or case == .base_rebate or case == .third_rebate;
-    const failure = extra_fees or case == .unknown or case == .unknown_no_pending or case == .inexact or case == .overflow or case == .wallet_scope or case == .malformed_ws;
-    const fee_code = if (case == .unknown or case == .unknown_no_pending) "UNCONFIGURED" else if (base_fee) "BTC" else if (third_fee) "BNB" else "USDT";
-    const fee_text = if (case == .zero) "0" else if (case == .unknown) "0.000000000001" else if (case == .inexact) "0.0000000000001" else if (case == .overflow) "1701411834604692317316873037158841057280" else if (case == .long_tail) "+000.00000000000100000000000000000000000000000000000000000000000000000000000000" else if (base_fee) (if (rebate) "-0.000000001" else "0.000000001") else if (rebate) "-0.000000000001" else "0.000000000001";
+    const failure = extra_fees or case == .unknown or case == .unknown_no_pending or case == .inexact or case == .overflow or case == .wallet_scope or case == .malformed_ws or case == .single_fee;
+    const fee_code = if (case == .unknown or case == .unknown_no_pending) "UNCONFIGURED" else if (base_fee) "BTC" else if (third_fee or case == .single_fee) "BNB" else "USDT";
+    const fee_text = if (case == .single_fee) "0.000000000101" else if (case == .zero) "0" else if (case == .unknown) "0.000000000001" else if (case == .inexact) "0.0000000000001" else if (case == .overflow) "1701411834604692317316873037158841057280" else if (case == .long_tail) "+000.00000000000100000000000000000000000000000000000000000000000000000000000000" else if (base_fee) (if (rebate) "-0.000000001" else "0.000000001") else if (rebate) "-0.000000000001" else "0.000000000001";
     const Module = if (kind == .binance) binance else bybit;
     const input_times = fixedTimes(if (kind == .binance) binance_raw.Times else bybit_private.Times);
     const Private = if (kind == .binance) binance_private else bybit_private;
@@ -80,6 +80,7 @@ fn exercise(comptime kind: Kind, case: Case) ![32]u8 {
     var extra = definitions[0];
     extra.asset = third;
     extra.source_identity = third;
+    if (case == .single_fee) extra.max_single_atoms = 100;
     for (extra.code_bindings[0..extra.code_binding_count]) |*code| code.* = try canonical.AssetCodeBinding.init(code.venue, "BNB");
     _ = try owner.apply(.{ .core = .{ .identity = third, .payload = .{ .asset_definition_activated = extra } } });
     if (third_fee) {
@@ -161,7 +162,7 @@ fn exercise(comptime kind: Kind, case: Case) ![32]u8 {
     const adapter = implementation.adapter();
     try adapter.start(.{ .venue = venue_id, .exchange_account = 2, .adapter_session = 1, .environment = .demo, .request_capacity = 4, .output_capacity = 4, .asset_definitions = owner.shard.activatedAssets(), .instrument_definitions = owner.shard.instrument_registry, .native_settlement_atoms = true });
     try implementation.beginPrivateReconciliation();
-    if (case != .unknown_no_pending) try reconciler.registerOrder(command.order_id, command.client_order_id, false);
+    if (case != .unknown_no_pending and case != .single_fee) try reconciler.registerOrder(command.order_id, command.client_order_id, false);
     if (kind == .binance) {
         _ = try implementation.ingestPrivate(allocator, .rest_spot_account, .{ .final = true, .request_target = "/api/v3/account" }, input_times, "{\"accountType\":\"SPOT\",\"updateTime\":1800000000000,\"balances\":[{\"asset\":\"USDT\",\"free\":\"100\",\"locked\":\"0\"},{\"asset\":\"BTC\",\"free\":\"0\",\"locked\":\"0\"},{\"asset\":\"BNB\",\"free\":\"10\",\"locked\":\"0\"}]}");
         _ = try implementation.ingestPrivate(allocator, .rest_orders, .{ .final = true }, input_times, "[]");
@@ -202,7 +203,7 @@ fn exercise(comptime kind: Kind, case: Case) ![32]u8 {
         return owner.shard.semanticAuthorityDigest();
     }
     if (failure) {
-        const expected_error = if (extra_fees) error.UnsupportedFeeComponents else if (case == .unknown or case == .unknown_no_pending) error.UnsupportedAsset else if (case == .inexact) error.InexactDecimal else if (case == .wallet_scope) error.UnsupportedWalletScope else if (case == .malformed_ws) error.InvalidFrame else error.DecimalOverflow;
+        const expected_error = if (extra_fees) error.UnsupportedFeeComponents else if (case == .unknown or case == .unknown_no_pending) error.UnsupportedAsset else if (case == .inexact) error.InexactDecimal else if (case == .wallet_scope) error.UnsupportedWalletScope else if (case == .malformed_ws) error.InvalidFrame else if (case == .single_fee) error.AssetAmountOutOfRange else error.DecimalOverflow;
         try std.testing.expectError(expected_error, implementation.ingestPrivate(allocator, .ws, null, input_times, if (case == .malformed_ws) "{" else if (case == .wallet_scope) "{\"topic\":\"wallet\",\"data\":[{\"accountType\":\"UNIFIED\",\"coin\":[{\"coin\":\"USDT\",\"walletBalance\":\"100\",\"spotBorrow\":\"0\",\"borrowAmount\":\"0\",\"locked\":\"0\"}]}]}" else frame));
         try drain(owner, adapter);
         try std.testing.expectEqualDeep(before, owner.shard.economicSummary());
@@ -304,5 +305,11 @@ test "native multi Venue conflicting economic identity preserves original ledger
 test "native multi Venue malformed private frame persists decoder rejection through restart" {
     inline for ([_]Kind{ .binance, .bybit }) |kind| {
         _ = try exercise(kind, .malformed_ws);
+    }
+}
+
+test "native multi Venue unlinked fee obeys single limit separately from account balance limit" {
+    inline for ([_]Kind{ .binance, .bybit }) |kind| {
+        _ = try exercise(kind, .single_fee);
     }
 }
