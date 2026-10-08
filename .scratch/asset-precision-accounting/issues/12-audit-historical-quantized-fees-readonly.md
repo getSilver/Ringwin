@@ -1,12 +1,12 @@
 # 12：只读审计历史取整差额并保留更正边界
 
 Type: task
-Status: open
-Assignee:
+Status: resolved
+Assignee: historical_12_prep
 Blocked by: [10：用独立 Venue 事实核对逐 Asset 经济账](10-reconcile-independent-venue-economics.md)
 Parent: [落实权威资产精度与精确经济账务](../map.md)
 Spec: [父 Spec](01-exact-asset-accounting-spec.md)
-Label: ready-for-agent
+Label: completed
 Phase: S4
 
 ## Question
@@ -19,12 +19,12 @@ Phase: S4
 
 ## Acceptance criteria
 
-- [ ] 按有权限的封存数据只读关联 RawIngress、规范 Fill、订单、LedgerTransaction 与精度版本，报告原值/已记值/差额/Asset/来源事务。
-- [ ] 保留 -0.004198632165 和既有 -0.00423723852 有损样本的独立真实值与旧 posting；审计结果不借新尺度改解释旧整数。
-- [ ] 缺原文、旧格式无法可靠读取或金额来源不确定时明确标记无法核实，不猜算补账、不删除旧证据。
-- [ ] 本票为只读审计入口和固定离线样本；真实账户/生产只读范围遵守原授权，不引入在线写入、凭证暴露或第二核心。
-- [ ] 更正仅列出需独立授权的追加冲正/更正方案，引用原事务；本票不实施跨 schema 迁移或经济记录覆盖。
-- [ ] 旧在线报告保持旧源码资格范围及原失败状态；审计差额本身不授予新版本资格，未执行项目不得写 passed。
+- [x] 按有权限的封存数据只读关联 RawIngress、规范 Fill、订单、LedgerTransaction 与精度版本，报告原值/已记值/差额/Asset/来源事务。
+- [x] 保留 -0.004198632165 和既有 -0.00423723852 有损样本的独立真实值与旧 posting；审计结果不借新尺度改解释旧整数。
+- [x] 缺原文、旧格式无法可靠读取或金额来源不确定时明确标记无法核实，不猜算补账、不删除旧证据。
+- [x] 本票为只读审计入口和固定离线样本；真实账户/生产只读范围遵守原授权，不引入在线写入、凭证暴露或第二核心。
+- [x] 更正仅列出需独立授权的追加冲正/更正方案，引用原事务；本票不实施跨 schema 迁移或经济记录覆盖。
+- [x] 旧在线报告保持旧源码资格范围及原失败状态；审计差额本身不授予新版本资格，未执行项目不得写 passed。
 
 ## Testing decisions
 
@@ -49,5 +49,12 @@ Phase: S4
 
 ## Evidence
 
-尚未实施；验收项均待执行。本票按 2026-10-03 用户确认的拆分发布。
+已实现有界只读导出审计和固定离线样本；历史原store完整性并未因此验证。
 
+2026-10-08：root接手代理额度中断后的检查；历史纯审计ReleaseSafe2/2通过，同一--windows-demo-evidence --historical真实ReleaseSafe导出固定JSON成功，原文件SHA256未变化。两个fixed_fixture cash_difference(scale12)=367835/761480、旧现金posting=-4199/-4238(scale6)；真实sealed_export缺raw保留unverifiable/missing_raw/difference=null。只证明提交export bundle的关联，original_store_integrity=not_checked，不冒充原历史store完整性。未修改经济记录、无发送或在线资格。当前保存本地report-historical-offline-releasesafe.json；最终审查仍待。
+
+2026-10-08封存：既有--windows-demo-evidence增加--historical <absolute-json-path>子模式，在打开Owner/store前分流，只读输入并写stdout；不链接/调用curl、credential或send。独立模块支持64KiB/8record的旧USDT解释（完整执行revision9939110dddbaab0e97c8cfb461f9e35a537d12dd、journal22/state25/registry19、scale6、old i64）；原子版本保持null，不借当前资产Registry重解释。检查raw SHA/stream/sequence/account、单执行字段fillFee、order/trade、旧Fill、source_identity和portfolio/exchange posting；一帧多条执行只选唯一完全匹配行，重复匹配保持unverifiable。
+
+固定样本原文-0.004198632165/-0.00423723852，旧cash posting -4199/-4238(scale6)，独立expected差额367835/761480(scale12)；这两条是明确标注的synthetic offline joins。真实2026-10-03报告摘要缺raw/Fill/事务时保留unverifiable/missing_raw/difference=null，原失败和旧源码资格不改。bundle_consistent只证明所提供export内关联，original_store_integrity=not_checked，不声称已核实封存原store。更正仅提示需独立授权的append-only反向/更正并引用source transaction；没有执行更正或跨schema迁移。
+
+纯模块当前Debug3/3通过；最新联合Debug13/13、ReleaseSafe13/13包含这三项。两种当前实际precision-11-12二进制CLI导出均通过，input SHA256未变化，固定expected及历史unverifiable均核对，宽UTC/i128字段用stdlib portable JSON选项保留精确十进制字符串。最终报告report-historical-offline-debug.json和report-historical-offline-rs.json对应当前实现；早期report-historical-offline-releasesafe.json保留为初步证据，其数值字段尚未采用最终宽JSON约定，不能替代最终报告。格式/diff检查通过；独立最终双轴全变更审查与完整套件待14。本票无持久模型改变，不新增核心schema或在线资格。

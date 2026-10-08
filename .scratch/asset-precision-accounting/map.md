@@ -52,9 +52,11 @@ Status: open
 ## Frontier
 
 - [13：闭合多 Venue 精确账务公开接缝合同](issues/13-qualify-multi-venue-exact-accounting-contract.md) — 11 离线切片已完成；可实施。
-- [12：只读审计历史取整差额并保留更正边界](issues/12-audit-historical-quantized-fees-readonly.md) — 10 已完成；可并行实施。
+
 
 ## Decisions so far
+
+- 2026-10-08：12完成既有evidence命令的只读historical子模式与两条固定原币差额；支持严格旧单位/原始哈希/唯一执行/旧posting关联，缺原历史证据保持unverifiable，宽JSON保持精确。两种实际CLI/输入哈希不变验证通过，联合Debug/ReleaseSafe各13/13；没有历史更正或新在线资格。14等待13及最终全套/双轴审查。
 
 - 2026-10-08：11离线恢复切片完成，18个native文件中断场景含恢复途中再故障、32Fill/64ledger/33rd fault、真实WS/REST排列与旧schema拒绝；11/12联合Debug/ReleaseSafe各13/13。Frontier推进13，最终完整套件/独立两轴审查待14，在线未运行。
 

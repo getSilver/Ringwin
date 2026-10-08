@@ -1,0 +1,184 @@
+{
+  "format": 1,
+  "records": [
+    {
+      "source_kind": "fixed_fixture",
+      "source_label": "Synthetic offline source joins; independent legacy fee amount and posting, not an actual historical account export",
+      "execution_revision": "9939110dddbaab0e97c8cfb461f9e35a537d12dd",
+      "journal_schema": 22,
+      "state_schema": 25,
+      "schema_registry": 19,
+      "asset": "USDT",
+      "original_value": "-0.004198632165",
+      "posted_cash_atoms": "-4199",
+      "posted_scale": 6,
+      "comparison_scale": 12,
+      "asset_version": null,
+      "raw": {
+        "bytes": "{\"arg\":{\"channel\":\"orders\"},\"data\":[{\"instId\":\"BTC-USDT\",\"ordId\":\"1001\",\"clOrdId\":\"RWN-FIXED-AUDIT-1\",\"tradeId\":\"2001\",\"fillSz\":\"0.0001\",\"fillFee\":\"-0.004198632165\",\"fillFeeCcy\":\"USDT\",\"fillTime\":\"1800000000100\"}]}",
+        "sha256": "869dfe21219dde0f2fd170d302de42ae15b39332679320e32f8e33d66e32614a",
+        "stream": 1,
+        "sequence": 1,
+        "exchange_account": 2
+      },
+      "fill": {
+        "identity": 3001,
+        "order": 1,
+        "exchange_account": 2,
+        "instrument": "BTC-USDT",
+        "venue_order": "1001",
+        "client_order_id": "RWN-FIXED-AUDIT-1",
+        "venue_trade": "2001",
+        "fee_asset": "USDT",
+        "fee_atoms": "4199",
+        "raw_stream": 1,
+        "raw_sequence": 1,
+        "raw_sha256": "869dfe21219dde0f2fd170d302de42ae15b39332679320e32f8e33d66e32614a"
+      },
+      "order": {
+        "identity": 1,
+        "exchange_account": 2,
+        "portfolio": 1,
+        "instrument": "BTC-USDT",
+        "venue_order": "1001",
+        "client_order_id": "RWN-FIXED-AUDIT-1"
+      },
+      "transactions": [
+        {
+          "source_identity": 3001,
+          "kind": "fill",
+          "layer": "portfolio",
+          "postings": [
+            {
+              "account": "cash",
+              "unit": "settlement_atoms",
+              "amount": "-4199"
+            },
+            {
+              "account": "fee_expense",
+              "unit": "settlement_atoms",
+              "amount": "4199"
+            }
+          ]
+        },
+        {
+          "source_identity": 3001,
+          "kind": "fill",
+          "layer": "exchange",
+          "postings": [
+            {
+              "account": "cash",
+              "unit": "settlement_atoms",
+              "amount": "-4199"
+            },
+            {
+              "account": "fee_expense",
+              "unit": "settlement_atoms",
+              "amount": "4199"
+            }
+          ]
+        }
+      ],
+      "coverage": {
+        "from_utc_ns": 1800000000000000000,
+        "through_utc_ns": 1800000000200000000
+      }
+    },
+    {
+      "source_kind": "fixed_fixture",
+      "source_label": "Synthetic offline source joins; independent legacy fee amount and posting, not an actual historical account export",
+      "execution_revision": "9939110dddbaab0e97c8cfb461f9e35a537d12dd",
+      "journal_schema": 22,
+      "state_schema": 25,
+      "schema_registry": 19,
+      "asset": "USDT",
+      "original_value": "-0.00423723852",
+      "posted_cash_atoms": "-4238",
+      "posted_scale": 6,
+      "comparison_scale": 12,
+      "asset_version": null,
+      "raw": {
+        "bytes": "{\"arg\":{\"channel\":\"orders\"},\"data\":[{\"instId\":\"BTC-USDT\",\"ordId\":\"1002\",\"clOrdId\":\"RWN-FIXED-AUDIT-2\",\"tradeId\":\"2002\",\"fillSz\":\"0.0001\",\"fillFee\":\"-0.00423723852\",\"fillFeeCcy\":\"USDT\",\"fillTime\":\"1800000000100\"}]}",
+        "sha256": "29fb44540602912c226e977af5d9cb86cb7b7fe540ce0222d86f407095c6b7eb",
+        "stream": 1,
+        "sequence": 2,
+        "exchange_account": 2
+      },
+      "fill": {
+        "identity": 3002,
+        "order": 2,
+        "exchange_account": 2,
+        "instrument": "BTC-USDT",
+        "venue_order": "1002",
+        "client_order_id": "RWN-FIXED-AUDIT-2",
+        "venue_trade": "2002",
+        "fee_asset": "USDT",
+        "fee_atoms": "4238",
+        "raw_stream": 1,
+        "raw_sequence": 2,
+        "raw_sha256": "29fb44540602912c226e977af5d9cb86cb7b7fe540ce0222d86f407095c6b7eb"
+      },
+      "order": {
+        "identity": 2,
+        "exchange_account": 2,
+        "portfolio": 1,
+        "instrument": "BTC-USDT",
+        "venue_order": "1002",
+        "client_order_id": "RWN-FIXED-AUDIT-2"
+      },
+      "transactions": [
+        {
+          "source_identity": 3002,
+          "kind": "fill",
+          "layer": "portfolio",
+          "postings": [
+            {
+              "account": "cash",
+              "unit": "settlement_atoms",
+              "amount": "-4238"
+            },
+            {
+              "account": "fee_expense",
+              "unit": "settlement_atoms",
+              "amount": "4238"
+            }
+          ]
+        },
+        {
+          "source_identity": 3002,
+          "kind": "fill",
+          "layer": "exchange",
+          "postings": [
+            {
+              "account": "cash",
+              "unit": "settlement_atoms",
+              "amount": "-4238"
+            },
+            {
+              "account": "fee_expense",
+              "unit": "settlement_atoms",
+              "amount": "4238"
+            }
+          ]
+        }
+      ],
+      "coverage": {
+        "from_utc_ns": 1800000000000000000,
+        "through_utc_ns": 1800000000200000000
+      }
+    },
+    {
+      "source_kind": "sealed_export",
+      "source_label": ".scratch/windows-process-chain-verification/report-demolive-2026-10-03-recovered.json: reported fee and aggregate posting; original RawIngress/Fill/transaction rows not inspected or exported",
+      "execution_revision": "9939110dddbaab0e97c8cfb461f9e35a537d12dd",
+      "journal_schema": 22,
+      "state_schema": 25,
+      "schema_registry": 19,
+      "asset": "USDT",
+      "original_value": "-0.00423723852",
+      "posted_cash_atoms": "-4238",
+      "posted_scale": 6,
+      "comparison_scale": 12
+    }
+  ]
+}

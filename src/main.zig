@@ -94,6 +94,11 @@ pub fn main(init: std.process.Init) !void {
         }
         if (std.mem.eql(u8, argument, "--windows-demo-evidence")) {
             const engine_dir = args.next() orelse return error.MissingStoreDir;
+            if (std.mem.eql(u8, engine_dir, "--historical")) {
+                const input_path = args.next() orelse return error.MissingHistoricalInput;
+                if (args.next() != null) return error.UnknownArgument;
+                return windows_verification_runtime.exportHistoricalEvidence(init, input_path);
+            }
             const execution_dir = args.next() orelse return error.MissingStoreDir;
             if (args.next() != null) return error.UnknownArgument;
             return windows_verification_runtime.exportDemoEvidence(init, engine_dir, execution_dir);
@@ -201,6 +206,7 @@ test {
     _ = demo_authority;
     _ = credential_store;
     _ = windows_verification_runtime;
+    _ = @import("historical_fee_audit.zig");
     _ = venue_fill_recovery_acceptance;
     _ = @import("asset_precision_file_recovery_acceptance.zig");
     _ = @import("native_account_continuity_acceptance.zig");

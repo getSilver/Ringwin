@@ -2669,6 +2669,42 @@ fn demoDispatchCommandMatches(command: @import("oms.zig").Command, dispatched: @
 }
 
 /// Read-only evidence collection. No transport, credentials, route or send capability is installed.
+pub fn exportHistoricalEvidence(init: std.process.Init, input_path: []const u8) !void {
+    const audit = @import("historical_fee_audit.zig");
+    if (!std.fs.path.isAbsolute(input_path)) return error.InvalidHistoricalInputPath;
+    var file = try std.Io.Dir.openFileAbsolute(init.io, input_path, .{});
+    defer file.close(init.io);
+    var input: [audit.max_input_bytes]u8 = undefined;
+    var length: usize = 0;
+    while (length < input.len) {
+        const amount = file.readStreaming(init.io, &.{input[length..]}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (amount == 0) break;
+        length += amount;
+    }
+    if (length == input.len) return error.HistoricalInputTooLarge;
+    var parsed = try audit.parse(init.gpa, input[0..length]);
+    defer parsed.deinit();
+    var results: [audit.max_records]audit.Result = undefined;
+    for (parsed.value.records, 0..) |record, index| results[index] = audit.audit(init.gpa, record);
+    var buffer: [512]u8 = undefined;
+    var output = std.Io.File.stdout().writer(init.io, &buffer);
+    try std.json.Stringify.value(.{
+        .format = @as(u16, 1),
+        .read_only = true,
+        .replay_send_capability = false,
+        .economic_records_modified = false,
+        .online_qualification = "not_run",
+        .production_qualification = false,
+        .records = results[0..parsed.value.records.len],
+    }, .{ .emit_nonportable_numbers_as_strings = true }, &output.interface);
+    try output.interface.writeByte('\n');
+    try output.interface.flush();
+}
+
+/// Read-only evidence collection. No transport, credentials, route or send capability is installed.
 pub fn exportDemoEvidence(init: std.process.Init, engine_dir: []const u8, execution_dir: []const u8) !void {
     if (!std.fs.path.isAbsolute(engine_dir) or !std.fs.path.isAbsolute(execution_dir)) return error.InvalidDemoStateDirectory;
     const store = try init.gpa.create(durable_store.WindowsFileAdapter);
