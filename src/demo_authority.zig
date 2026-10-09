@@ -561,11 +561,7 @@ pub const Owner = struct {
             archive.segment_count != generation or !try self.store.verifyArchiveReceipt(self.io, self.stream, barrier, archive.ordered_root))
             return error.DecisionLogUnavailable;
         const receipt = try self.shard.checkpointReceipt(self.stream.id, generation, archive.ordered_root);
-        self.committing_checkpoint = true;
-        defer self.committing_checkpoint = false;
-        _ = try self.apply(.{ .core = .{ .identity = generation, .payload = .{ .checkpoint_committed = receipt } } });
-        self.checkpoint_pending = false;
-        if (self.recovery_ingress_verified) self.shard.recovery_admission_pending = false;
+        try self.commitCheckpointReceipt(receipt);
     }
     fn checkpointCommitted(self: *Owner) !void {
         errdefer self.closeAdmission();
@@ -608,9 +604,13 @@ pub const Owner = struct {
         const receipt = try self.shard.checkpointReceipt(self.stream.id, generation, archive.ordered_root);
         const next_sequence = try std.math.add(u64, barrier, 1);
         self.decision_journal = journal.Journal.initAt(next_sequence);
+        try self.commitCheckpointReceipt(receipt);
+    }
+
+    fn commitCheckpointReceipt(self: *Owner, receipt: trading.CheckpointReceipt) !void {
         self.committing_checkpoint = true;
         defer self.committing_checkpoint = false;
-        _ = try self.apply(.{ .core = .{ .identity = generation, .payload = .{ .checkpoint_committed = receipt } } });
+        _ = try self.apply(.{ .core = .{ .identity = receipt.generation, .payload = .{ .checkpoint_committed = receipt } } });
         self.checkpoint_pending = false;
         if (self.recovery_ingress_verified) self.shard.recovery_admission_pending = false;
     }
@@ -859,10 +859,8 @@ test "Demo owner closes persistence faults at their last proven barrier" {
     }
 }
 
-fn checkOwnerCheckpointRounds(store: durable.Store, io: std.Io) ![32]u8 {
+fn setupOwnerCheckpointFixture(owner: *Owner) !trading.OrderCommand {
     const fixture = @import("trading_shard_fixture.zig");
-    const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 903 };
-    var owner = try Owner.bootstrap(store, io, stream);
     const genesis = fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged);
     for (genesis) |event| _ = try owner.apply(event);
     _ = try owner.apply(fixture.atGroup(11, .{ .identity = 3, .payload = .{ .host_activated = .{
@@ -883,6 +881,14 @@ fn checkOwnerCheckpointRounds(store: durable.Store, io: std.Io) ![32]u8 {
     for (facts[0..4]) |event| _ = try owner.apply(event);
     // A transport uncertainty never discards already applied economics.
     _ = try owner.apply(fixture.canonicalAt(19, 106, .{ .order_dispatch_result = .{ .command = command.command_id, .state = .unknown } }));
+    return command;
+}
+
+fn checkOwnerCheckpointRounds(store: durable.Store, io: std.Io) ![32]u8 {
+    const fixture = @import("trading_shard_fixture.zig");
+    const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 903 };
+    var owner = try Owner.bootstrap(store, io, stream);
+    const command = try setupOwnerCheckpointFixture(&owner);
     const initial_barrier = owner.shard.authoritativeBarrier();
     const reservation = try owner.shard.activeReservationAtoms();
     const initial_authority = try owner.shard.currentDispatchAuthorityRefs(3);
@@ -912,6 +918,129 @@ fn checkOwnerCheckpointRounds(store: durable.Store, io: std.Io) ![32]u8 {
     }
     try std.testing.expect(owner.shard.authoritativeBarrier() > initial_barrier + 3 * 256);
     return owner.shard.canonicalStateDigest();
+}
+
+fn expectCheckpointBusinessState(actual: *const trading.TradingShard, expected: *const trading.TradingShard) !void {
+    try std.testing.expectEqualSlices(u8, &expected.canonicalStateDigest(), &actual.canonicalStateDigest());
+    try std.testing.expectEqualDeep(expected.trace.history_head, actual.trace.history_head);
+    try std.testing.expectEqualDeep(expected.trace.input_head, actual.trace.input_head);
+    try std.testing.expectEqualDeep(expected.trace.pinned_root, actual.trace.pinned_root);
+    try std.testing.expectEqualDeep(expected.checkpoint, actual.checkpoint);
+    try std.testing.expectEqualDeep(expected.economicSummary(), actual.economicSummary());
+    try std.testing.expectEqual(try expected.activeReservationAtoms(), try actual.activeReservationAtoms());
+    try std.testing.expectEqualDeep(try expected.currentDispatchAuthorityRefs(3), try actual.currentDispatchAuthorityRefs(3));
+    try std.testing.expectEqualDeep(expected.oms.orders[0..expected.oms.order_count], actual.oms.orders[0..actual.oms.order_count]);
+    try std.testing.expectEqualDeep(expected.oms.command_history[0..expected.oms.command_history_count], actual.oms.command_history[0..actual.oms.command_history_count]);
+    // These are replayed dispatch facts, not calls to a live transport.
+    try std.testing.expectEqual(expected.dispatch_attempt_count, actual.dispatch_attempt_count);
+    try std.testing.expectEqual(trading.oms.OrderState.unknown, actual.oms.orders[0].state);
+    try std.testing.expectEqual(@as(i64, 40), actual.economicSummary().portfolio.swap.quantity);
+    try std.testing.expectEqual(@as(i128, 149_700), actual.economicSummary().portfolio.fee_atoms);
+}
+
+fn expectCheckpointAdmissionClosed(owner: *const Owner) !void {
+    var gateway: execution.Gateway = .{};
+    var authority = failover.authorityForTesting();
+    var lease = try authority.acquire(.{ .exchange_account = 2, .decision_domain = 1 }, 1, 1);
+    var guard: failover.GatewayLeaseGuard = .{ .authority = &authority, .lease = &lease };
+    try std.testing.expectError(error.DecisionLogUnavailable, owner.send(&gateway, &guard, owner.shard.oms.command_history[0].command_id, 2));
+    try std.testing.expectEqual(@as(u64, 0), gateway.send_attempt_count);
+}
+
+test "Checkpoint owner file interruptions preserve coherent Unknown fill economics and authority" {
+    const Context = struct {
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.check() catch |err| {
+                self.failure = err;
+            };
+        }
+        fn check(_: *@This()) !void {
+            const io = std.testing.io;
+            const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 903 };
+            const input = @import("trading_shard_fixture.zig").atGroup(900, .{ .identity = 900, .payload = .{ .mark_price = .{ .instrument = 3, .price_atoms = 50_000_001_000 } } });
+            var reference_temp = std.testing.tmpDir(.{});
+            defer reference_temp.cleanup();
+            var reference: durable.LinuxFileAdapter = .{ .dir = reference_temp.dir };
+            var clean = try Owner.bootstrap(reference.interface(), io, stream);
+            _ = try setupOwnerCheckpointFixture(&clean);
+            try clean.checkpoint();
+            const old = clean.shard;
+            _ = try clean.apply(input);
+            const before_receipt = clean.shard;
+            try clean.checkpoint();
+            const new = clean.shard;
+            const Case = struct { point: durable.FaultPoint, skip: usize = 0, apply_input: bool = false };
+            const cases = [_]Case{
+                .{ .point = .append, .apply_input = true },
+                .{ .point = .commit, .apply_input = true },
+                .{ .point = .root_publish, .apply_input = true },
+                .{ .point = .root_publish, .skip = 1, .apply_input = true },
+                .{ .point = .seal },
+                .{ .point = .publish },
+                .{ .point = .snapshot_sync },
+                .{ .point = .rotate },
+                .{ .point = .archive_sync },
+                .{ .point = .reclaim },
+                .{ .point = .reclaim, .skip = 1 },
+                // seal, snapshot, rotation, receipt append and receipt commit each publish a root.
+                .{ .point = .root_publish },
+                .{ .point = .root_publish, .skip = 1 },
+                .{ .point = .root_publish, .skip = 2 },
+                .{ .point = .root_publish, .skip = 3 },
+                .{ .point = .root_publish, .skip = 4 },
+                .{ .point = .append },
+                .{ .point = .commit },
+            };
+            const faults = [_]durable.Fault{ .short_write, .sync_timeout, .enospc, .eio, .corruption };
+            for (faults) |fault| for (cases, 0..) |case, case_index| {
+                std.debug.print("owner_file_fault: {s} case={d} point={s} skip={d}\n", .{ @tagName(fault), case_index, @tagName(case.point), case.skip });
+                var temp = std.testing.tmpDir(.{});
+                defer temp.cleanup();
+                var adapter: durable.LinuxFileAdapter = .{ .dir = temp.dir };
+                var owner = try Owner.bootstrap(adapter.interface(), io, stream);
+                _ = try setupOwnerCheckpointFixture(&owner);
+                try owner.checkpoint();
+                if (!case.apply_input) _ = try owner.apply(input);
+                adapter.injectFaultAfter(fault, case.point, case.skip);
+                if (case.apply_input) {
+                    if (owner.apply(input)) |_| return error.ExpectedOwnerFault else |_| {}
+                } else {
+                    if (owner.checkpoint()) |_| return error.ExpectedOwnerFault else |_| {}
+                }
+                try std.testing.expect(owner.closed);
+                try expectCheckpointAdmissionClosed(&owner);
+                try std.testing.expectEqual(durable.GateState.closed, adapter.interface().safetyGate());
+                // A real partial temporary manifest must never supersede the published root.
+                const partial = try temp.dir.createFile(io, "manifest.tmp", .{});
+                try partial.writeStreamingAll(io, "partial-manifest");
+                partial.close(io);
+                var reopened: durable.LinuxFileAdapter = .{ .dir = temp.dir };
+                const durable_state = try reopened.interface().recover(io, stream);
+                if (durable_state.last_sequence != durable_state.committed_barrier) {
+                    try std.testing.expectError(error.DecisionLogUnavailable, Owner.recover(reopened.interface(), io, stream));
+                    continue;
+                }
+                var recovered = try Owner.recover(reopened.interface(), io, stream);
+                try std.testing.expect(recovered.shard.recovery_admission_pending);
+                try expectCheckpointAdmissionClosed(&recovered);
+                const expected = if (case.apply_input) &old else if (recovered.shard.authoritativeBarrier() == new.authoritativeBarrier()) &new else &before_receipt;
+                try expectCheckpointBusinessState(&recovered.shard, expected);
+                if (recovered.checkpoint_pending) {
+                    try recovered.checkpoint();
+                    try expectCheckpointBusinessState(&recovered.shard, &new);
+                    try expectCheckpointAdmissionClosed(&recovered);
+                }
+                var again: durable.LinuxFileAdapter = .{ .dir = temp.dir };
+                const repeated = try Owner.recover(again.interface(), io, stream);
+                try expectCheckpointBusinessState(&repeated.shard, &recovered.shard);
+            };
+        }
+    };
+    var context: Context = .{};
+    const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
+    thread.join();
+    if (context.failure) |err| return err;
 }
 
 test "Checkpoint owner explicitly resumes each durable checkpoint interruption without sending" {

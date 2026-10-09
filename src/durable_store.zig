@@ -784,6 +784,7 @@ pub const LinuxFileAdapter = struct {
     manifest_loaded: bool = false,
     fault: Fault = .none,
     fault_point: FaultPoint = .any,
+    fault_skip: usize = 0,
     gate: GateState = .open,
 
     pub fn open(io: std.Io, absolute_path: []const u8) !LinuxFileAdapter {
@@ -824,6 +825,7 @@ pub const LinuxFileAdapter = struct {
     pub fn injectFault(self: *LinuxFileAdapter, fault: Fault) void {
         self.fault = fault;
         self.fault_point = .any;
+        self.fault_skip = 0;
     }
 
     fn fail(self: *LinuxFileAdapter, fault: Fault) !void {
@@ -834,12 +836,24 @@ pub const LinuxFileAdapter = struct {
     }
 
     pub fn injectFaultAt(self: *LinuxFileAdapter, fault: Fault, point: FaultPoint) void {
+        self.injectFaultAfter(fault, point, 0);
+    }
+
+    /// Deterministic fixture hook: target a later publication in one Owner operation.
+    pub fn injectFaultAfter(self: *LinuxFileAdapter, fault: Fault, point: FaultPoint, skip: usize) void {
         self.fault = fault;
         self.fault_point = point;
+        self.fault_skip = skip;
     }
 
     fn failAt(self: *LinuxFileAdapter, point: FaultPoint) !void {
-        if (self.fault_point == .any or self.fault_point == point) try self.fail(self.fault);
+        if (self.fault_point == .any or self.fault_point == point) {
+            if (self.fault_skip != 0) {
+                self.fault_skip -= 1;
+                return;
+            }
+            try self.fail(self.fault);
+        }
     }
 
     fn loadManifest(self: *LinuxFileAdapter, io: std.Io) !void {
