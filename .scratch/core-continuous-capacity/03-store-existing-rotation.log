@@ -1,0 +1,2 @@
+1/1 durable_store.test.segment rotation requires a snapshot at the sealed barrier...OK
+All 1 tests passed.

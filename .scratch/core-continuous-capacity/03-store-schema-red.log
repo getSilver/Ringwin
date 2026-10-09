@@ -1,0 +1,23 @@
+1/1 durable_store.test.checkpoint store rejects unknown journal schema despite valid frame manifest and payload checksums...expected .recovery_only, found .ready
+FAIL (TestExpectedEqual)
+D:\Program Files\zig\lib\std\testing.zig:118:17: 0x7ff77bea5d4c in expectEqualInner__anon_69109 (test_zcu.obj)
+                return error.TestExpectedEqual;
+                ^
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff77bea7577 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff77bea7577 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff77bea7577 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff77bea7577 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:1998:5: 0x7ff77bea75da in test.checkpoint store rejects unknown journal schema despite valid frame manifest and payload checksums (test_zcu.obj)
+    try std.testing.expectEqual(RecoveryStatus.recovery_only, unknown.status);
+    ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\bae9088a643aaa14b22b5371e92c783d\test.exe --seed=0xabbd6296

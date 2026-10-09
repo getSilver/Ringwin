@@ -1,0 +1,35 @@
+1/2 main.test_0...OK
+2/2 durable_store.test.checkpoint store local file 100 rotations retain audit and two snapshot generations...Stack overflow (no address available)
+D:\Program Files\zig\lib\compiler_rt\stack_probe.zig:127: 0x7ff7c56f74f6 in win_probe_stack_only (compiler_rt.lib)
+            asm volatile (
+
+D:\Program Files\zig\lib\compiler_rt\stack_probe.zig:269:5: 0x7ff7c56f74f6 in ___chkstk_ms (compiler_rt.lib)
+    @call(.always_inline, win_probe_stack_only, .{});
+    ^
+???:?:?: 0x110843f in ??? (???)
+???:?:?: 0x5761bffd27 in ??? (???)
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:1717: 0x7ff7c56d1d6a in test.checkpoint store local file 100 rotations retain audit and two snapshot generations (test_zcu.obj)
+test "checkpoint store local file 100 rotations retain audit and two snapshot generations" {
+
+D:\Program Files\zig\lib\compiler\test_runner.zig:291:25: 0x7ff7c5573d5a in mainTerminal (test_zcu.obj)
+        if (test_fn.func()) |_| {
+                        ^
+D:\Program Files\zig\lib\compiler\test_runner.zig:73:28: 0x7ff7c557342d in main (test_zcu.obj)
+        return mainTerminal(init);
+                           ^
+D:\Program Files\zig\lib\std\start.zig:712: 0x7ff7c5571151 in callMain (test_zcu.obj)
+    if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+
+D:\Program Files\zig\lib\std\start.zig:671:28: 0x7ff7c5571151 in main (test_zcu.obj)
+            return callMain(std.os.windows.peb().ProcessParameters.CommandLine.slice(), .global);
+                           ^
+D:\Program Files\zig\lib\libc\mingw\crt\crtexe.c:259: 0x7ff7c56f56bb in __tmainCRTStartup (crt2.obj)
+    mainret = _tmain (argc, argv, envp);
+
+D:\Program Files\zig\lib\libc\mingw\crt\crtexe.c:179: 0x7ff7c56f571b in mainCRTStartup (crt2.obj)
+  ret = __tmainCRTStartup ();
+
+???:?:?: 0x7ff834bf81f3 in ??? (KERNEL32.DLL)
+???:?:?: 0x7ff83513a250 in ??? (ntdll.dll)
+error: the following test command failed with exit code 3:
+.zig-cache\o\b0f93b33d79427feda89ce5e5ea56a80\test.exe --seed=0x401292e4

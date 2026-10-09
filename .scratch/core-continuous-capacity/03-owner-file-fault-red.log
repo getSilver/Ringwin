@@ -1,0 +1,10 @@
+1/2 main.test_0...OK
+2/2 demo_authority.test.Checkpoint owner file interruptions preserve coherent Unknown fill economics and authority...owner_file_fault: short_write case=0 point=append skip=0
+expected 0, found 2
+FAIL (TestExpectedEqual)
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:1020:32: 0x7ff79e00f8ad in test.Checkpoint owner file interruptions preserve coherent Unknown fill economics and authority (test_zcu.obj)
+    if (context.failure) |err| return err;
+                               ^
+1 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\3b1770a16b3f6355b9581f6166d7c565\test.exe --seed=0xfc7adeb8

@@ -1,0 +1,10 @@
+1/1 durable_store.test.checkpoint store bounded replay reads only requested horizon and rejects byte budget before delivery...FAIL (SegmentReplayUnavailable)
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:172:65: 0x7ff652af584b in replaySegmentsAfter (test_zcu.obj)
+        const replay = self.vtable.replay_segments_after orelse return error.SegmentReplayUnavailable;
+                                                                ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:1693:5: 0x7ff652af6182 in test.checkpoint store bounded replay reads only requested horizon and rejects byte budget before delivery (test_zcu.obj)
+    try reopened.interface().replaySegmentsAfter(io, stream, 98, 1024, .{ .ptr = &counter, .consume_fn = CountSegments.consume });
+    ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\c7e839d79280ecf99712bf213ce14d5e\test.exe --seed=0x20d477f9

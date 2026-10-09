@@ -1,0 +1,3 @@
+1/2 main.test_0...OK
+2/2 trading_shard_fixture.test.fixed trajectories retain their sealed barriers and recovery digests...OK
+All 2 tests passed.

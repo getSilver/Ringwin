@@ -1,0 +1,3 @@
+src\demo_authority.zig:1346:28: error: use of undeclared identifier 'allocator'
+    const raw_memory = try allocator.create(durable.MemoryAdapter);
+                           ^~~~~~~~~

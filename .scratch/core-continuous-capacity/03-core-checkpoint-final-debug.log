@@ -1,0 +1,4 @@
+1/2 main.test_0...OK
+2/2 trading_shard_tests.test.checkpoint maintenance carries ordered inputs and live authority through one hundred windows...checkpoint core: 100 rounds, barrier=929, encoded_snapshot_max=89683, shard_bytes=122352, pins_max=12/384, window=256
+OK
+All 2 tests passed.

@@ -1,0 +1,3 @@
+1/2 main.test_0...OK
+2/2 durable_store.test.checkpoint store local file 100 rotations retain audit and two snapshot generations...OK
+All 2 tests passed.

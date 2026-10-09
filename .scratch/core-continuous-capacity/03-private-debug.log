@@ -1,0 +1,5 @@
+1/3 main.test_0...OK
+2/3 venue_fill_recovery_acceptance.test.Checkpoint private horizon seeds after 1024 cumulative private inputs without scanning old epochs...private checkpoint horizon: epochs=8 raw_updates=1152 canonical_account_inputs=2304
+OK
+3/3 venue_fill_recovery_acceptance.test.Checkpoint private frame restores postseed order and applies missing Fill exactly once...OK
+All 3 tests passed.

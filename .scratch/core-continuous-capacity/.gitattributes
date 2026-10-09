@@ -1,0 +1,2 @@
+# Keep captured verification output byte-for-byte, including native CRLF.
+03-*.log binary

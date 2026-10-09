@@ -1,0 +1,4 @@
+1/3 main.test_0...OK
+2/3 trading_shard_tests.test.global shard barrier rejects checksummed sequence tampering before restore...OK
+3/3 trading_shard_tests.test.global shard barrier continues snapshot tail replay and preserves failed append...OK
+All 3 tests passed.

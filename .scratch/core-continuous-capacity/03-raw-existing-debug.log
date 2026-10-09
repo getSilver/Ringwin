@@ -1,0 +1,7 @@
+1/6 main.test_0...OK
+2/6 binance_private_reconciliation.test.Binance private raw ingress precedes malformed decoding...OK
+3/6 bybit_private_reconciliation.test.Bybit raw ingress precedes invalid private frames...OK
+4/6 raw_ingress.test.durable raw ingress replays committed bytes and fails closed on storage fault...OK
+5/6 raw_ingress.test.raw ingress retains a Demo bootstrap larger than the old 16 KiB segment...OK
+6/6 raw_ingress.test.Windows raw ingress rotates, reopens, and replays every committed segment...OK
+All 6 tests passed.

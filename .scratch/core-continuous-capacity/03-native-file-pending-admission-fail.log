@@ -1,0 +1,14 @@
+1/2 main.test_0...OK
+2/2 asset_precision_file_recovery_acceptance.test.Windows native file recovery preserves wide atoms partial facts faults and second reopen...FAIL (TestUnexpectedResult)
+D:\Program Files\zig\lib\std\testing.zig:615:14: 0x7ff734b8052f in expect (test_zcu.obj)
+    if (!ok) return error.TestUnexpectedResult;
+             ^
+D:\github\Ringwin-core-continuous-capacity\src\asset_precision_file_recovery_acceptance.zig:536:13: 0x7ff734c04ee9 in checkFileRecovery (test_zcu.obj)
+            try std.testing.expect((try recovered.source()).recovery_admission_pending);
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\asset_precision_file_recovery_acceptance.zig:757:9: 0x7ff734c10f9b in test.Windows native file recovery preserves wide atoms partial facts faults and second reopen (test_zcu.obj)
+        try checkFileRecovery(io, case_path, case);
+        ^
+1 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\ef978067d23aace1439ee5bef054b61a\test.exe --seed=0x7268d93f
