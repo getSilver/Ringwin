@@ -2073,7 +2073,7 @@ test "account recovery restores four matching shard tails under fresh evidence f
             .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = index + 11 } },
         });
         try stable_journal.seal();
-        shard_snapshots[index] = try shard.snapshot(&stable_journal, @intCast(shard.trace.len), &shard_snapshots_storage[index]);
+        shard_snapshots[index] = try shard.snapshot(&stable_journal, @intCast(shard.authoritativeBarrier()), &shard_snapshots_storage[index]);
         tail_journals[index] = trading.journal.Journal.initAt(stable_journal.last_sequence + 1);
         try tail_journals[index].seal();
         shard_tails[index] = tail_journals[index].bytes();
@@ -2122,7 +2122,7 @@ test "account recovery retains a forced shard commit awaiting coordinator ack" {
         _ = try applyCoreStable(&shard, &journal, .{ .identity = 7, .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = index + 11 } } });
         if (index == 0) try shard.economic_projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 1 }, .price = .{ .instrument = 1, .rules_version = 1, .ticks = 100 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1, .product = .isolated_linear_usdt } });
         try journal.seal();
-        shard_snapshots[index] = try shard.snapshot(&journal, @intCast(shard.trace.len), &snapshot_storage[index]);
+        shard_snapshots[index] = try shard.snapshot(&journal, @intCast(shard.authoritativeBarrier()), &snapshot_storage[index]);
         _ = try coordinator.publishSummary(index + 1, try shardSummaryFromShard(&shard, @enumFromInt(index), 1, @intCast(index + 1)));
         tails[index] = trading.journal.Journal.initAt(journal.last_sequence + 1);
     }
@@ -2146,7 +2146,7 @@ test "account recovery retains a forced shard commit awaiting coordinator ack" {
     try std.testing.expectEqual(@as(u8, 1), recovered.summary_refresh_mask);
     try std.testing.expectEqual(@as(usize, 1), (try recovered.coordinator.pendingForcedDeliveries()).len);
     var drift_shard = (try trading.TradingShard.restoreSnapshot(shard_snapshots[0])).shard;
-    var drift_tail = trading.journal.Journal.initAt(@as(u64, @intCast(drift_shard.trace.len)) + 1);
+    var drift_tail = trading.journal.Journal.initAt(@as(u64, @intCast(drift_shard.authoritativeBarrier())) + 1);
     _ = try applyCoreStable(&drift_shard, &drift_tail, try accountFactEvent(delivery));
     _ = try applyCoreStable(&drift_shard, &drift_tail, .{ .identity = 92, .payload = .{ .funding_settlement = .{ .settlement_id = 92, .amount_atoms = 1 } } });
     try drift_tail.seal();

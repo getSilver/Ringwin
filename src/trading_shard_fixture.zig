@@ -17,12 +17,12 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-pub const expected_happy_digest = "d61cb6490ad41e43e86c296951d4276711d788b47a2e4b9007b478622cc2cc37";
+pub const expected_happy_digest = "8304e5bd43d4ca7b696f770b085d3342ae4e67938cc240223e3cdc770d65ff5d";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "983f1bb314388444679f3fc409e2a7aff1eabf0c73ac19042ec04dc9c7da109f",
-    "0b95b1b352303da39b88c83c3a03651e448df12f644bdfe70ab3af182e7da783",
-    "5df38b3319432c168be482c67fa11dd63fa359095f65abdbbb0c45b7a550d831",
+    "b7702d50718635cd7d9ce36ac86f1df6fc93f3ff9ac6b00ec6fba1fe11a72efc",
+    "cfbb98d1f72be450016754ef2026f6132f9779b85e2ceedefaa40c98afd442d6",
+    "d9b988ac6b6ae326761ab6f9fb556cf968aa2e3a13e8644d1dc7e920bed62cf7",
     expected_happy_digest,
 };
 pub const order_limit_price: i64 = 50_100_000_000;
@@ -367,10 +367,7 @@ fn healthyScenarioAuthorizedForSession(authorization: host_gateway.Authorization
 }
 
 pub fn initializedBenchmarkRun() !LiveRun {
-    var run = try healthyRun();
-    run.shard.trace.len = 0;
-    run.decision_journal = journal.Journal.init();
-    return run;
+    return healthyRun();
 }
 
 pub fn replayDigest(run: LiveRun) ![32]u8 {
@@ -743,7 +740,7 @@ test "qualified SPOT IOC intent crosses Gateway and cash risk before OrderComman
         host_gateway.Subscription.of(authorization.strategy_identity, &.{.mark_price}),
     };
     var ingress = try TradingShardHostIngress.initHealthySpotFixtureFor(authorization);
-    const cursor: u64 = @intCast(ingress.run.shard.trace.len + 1);
+    const cursor: u64 = @intCast(ingress.run.shard.authoritativeBarrier() + 1);
     var gateway = try host_gateway.Gateway.init(config, &subscriptions);
     try gateway.recordPublished(1, cursor, 100);
     try gateway.activate(&ingress.run.shard, &ingress.run.decision_journal);

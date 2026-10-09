@@ -22,3 +22,6 @@ date: 2026-09-22
 排列测试可以证明合法事实集的业务收敛，同时保留完整、可追溯的输入顺序。任何需要比较新的
 private fact 类别时，必须先确认其纳入的状态是否可交换；不能以修改 Trace 或忽略冲突为代价让
 摘要相同。
+
+
+2026-10-09：驻留 Trace 与永久屏障的表示合同由 [ADR 0011](0011-use-global-shard-barriers-and-ordered-history-continuation.md) 显式演进。票 02 保留完整有序 Trace；票 03 在独立格式与恢复验收下引入有序历史承接。本文关于恢复完整性与 SemanticAuthorityDigest 的限制继续有效。

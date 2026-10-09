@@ -305,8 +305,8 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
     book.venue.event.l2_book_snapshot.next_ask.?.instrument = okx.btc_usdt_spot;
     book.venue.event.l2_book_snapshot.next_ask_quantity.?.instrument = okx.btc_usdt_spot;
     _ = try owner.apply(book);
-    const intent_sequence = owner.shard.trace.len + 1;
-    const intent: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = intent_sequence, .strategy_cursor = owner.shard.trace.len, .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 20_000, .limit_price_micros = 50_000_000 };
+    const intent_sequence = owner.shard.authoritativeBarrier() + 1;
+    const intent: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = intent_sequence, .strategy_cursor = owner.shard.authoritativeBarrier(), .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 20_000, .limit_price_micros = 50_000_000 };
     const command = (try owner.apply(.{ .core = .{ .identity = intent_sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = intent } } })) orelse return error.MissingDemoCommand;
     try implementation.rememberRecoveredOrder(command.order_id, command.client_order_id, command.portfolio_reduce_only, .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = command.quantity }, command.revision);
     if (economic_fault) _ = try owner.apply(fixtureOnSecondaryStream(20, 4, .{ .order_dispatch_result = .{ .command = command.command_id, .state = .unknown } }));
@@ -360,9 +360,9 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
             try store.seal(io, stream);
             if (case.snapshot_point == .publish) {
                 file_store.injectFault(.eio);
-                try std.testing.expectError(error.InputOutput, store.publishSnapshot(io, stream, owner.shard.trace.len, snapshot));
+                try std.testing.expectError(error.InputOutput, store.publishSnapshot(io, stream, owner.shard.authoritativeBarrier(), snapshot));
             } else {
-                try store.publishSnapshot(io, stream, owner.shard.trace.len, snapshot);
+                try store.publishSnapshot(io, stream, owner.shard.authoritativeBarrier(), snapshot);
                 try store.rotate(io, stream);
             }
         }
@@ -524,8 +524,8 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
         }
         try std.testing.expectEqual(@import("oms.zig").OrderState.filled, recovered.shard.oms.orderById(command.order_id).?.state);
         var next_intent = intent;
-        next_intent.intent_sequence = recovered.shard.trace.len + 1;
-        next_intent.strategy_cursor = recovered.shard.trace.len;
+        next_intent.intent_sequence = recovered.shard.authoritativeBarrier() + 1;
+        next_intent.strategy_cursor = recovered.shard.authoritativeBarrier();
         next_intent.quantity = 1_000;
         const next_input: @import("trading_shard.zig").CanonicalEvent = .{ .core = .{ .identity = next_intent.intent_sequence, .monotonic_time = 3, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = next_intent } } };
         if (case.snapshot_point == .publish) {

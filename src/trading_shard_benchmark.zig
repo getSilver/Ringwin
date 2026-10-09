@@ -107,6 +107,7 @@ fn nowNs(io: std.Io) u64 {
     return @intCast(std.Io.Clock.awake.now(io).nanoseconds);
 }
 
+// These microbenchmarks use independent fixtures; they do not qualify continuous history.
 fn initializedBenchmarkRun() !LiveRun {
     return fixture.initializedBenchmarkRun();
 }
@@ -130,8 +131,8 @@ fn runMarketBenchmark(
     while (completed < samples) {
         const batch_size = @min(burst_size, samples - completed);
         if (run.shard.trace.len + batch_size > run.shard.trace.events.len) {
-            run.shard.trace.len = 0;
-            run.decision_journal = journal.Journal.init();
+            run = try initializedBenchmarkRun();
+            _ = try fixture.apply(&run, fixture.snapshotAt(14, source_sequence));
         }
         const journal_records_before = run.decision_journal.records;
         for (queued[0..batch_size]) |*work| {
@@ -156,7 +157,7 @@ fn runMarketBenchmark(
             telemetry.dequeue();
             telemetry.events += 1;
             if (run.shard.market_health != .healthy or
-                run.shard.expected_source_sequence != source_sequence - batch_size + index + 1 or
+                run.shard.expected_source_sequence != source_sequence - batch_size + index + 2 or
                 run.decision_journal.records != journal_records_before + index + 1)
                 return error.BenchmarkCorrectnessFailure;
         }
@@ -192,7 +193,7 @@ fn runOrderBenchmark(io: std.Io, samples: usize, burst_size: usize) !BenchmarkRe
         for (queued[0..batch_size], 0..) |*work, index| {
             work.* = .{
                 .shard = base.shard,
-                .decision_journal = journal.Journal.init(),
+                .decision_journal = base.decision_journal,
                 .input = atGroup(completed + index + 15, .{
                     .identity = completed + index + 1,
                     .payload = .{ .timer = fixture.timer(happy_order_quantity) },
@@ -214,7 +215,7 @@ fn runOrderBenchmark(io: std.Io, samples: usize, burst_size: usize) !BenchmarkRe
             telemetry.commands += 1;
             if (command.reservation.atoms != 11_397_750 or
                 work.shard.oms.orders[0].state != .pending_submit or
-                work.decision_journal.records != 5)
+                work.decision_journal.records != base.decision_journal.records + 5)
                 return error.BenchmarkCorrectnessFailure;
         }
         completed += batch_size;
@@ -248,8 +249,9 @@ fn runRecoveryBenchmark(io: std.Io, samples: usize) !BenchmarkResult {
                 49_850_000_000,
             ),
         };
-        run.shard.trace.len = 0;
-        run.decision_journal = journal.Journal.init();
+        run = try initializedBenchmarkRun();
+        _ = try fixture.apply(&run, fixture.snapshotAt(14, source_sequence));
+        const records_before = run.decision_journal.records;
         var enqueued: [3]u64 = undefined;
         for (inputs[0..cycle], 0..) |_, index| {
             enqueued[index] = nowNs(io);
@@ -262,7 +264,7 @@ fn runRecoveryBenchmark(io: std.Io, samples: usize) !BenchmarkResult {
             telemetry.dequeue();
             telemetry.events += 1;
             const expected_records = [_]u64{ 2, 3, 5 };
-            if (run.decision_journal.records != expected_records[index])
+            if (run.decision_journal.records != records_before + expected_records[index])
                 return error.BenchmarkCorrectnessFailure;
         }
         source_sequence = snapshot_sequence + 1;
@@ -421,6 +423,8 @@ fn assertFourShardIsolation() ![4][Sha256.digest_length]u8 {
             .run = try initializedBenchmarkRun(),
         };
     }
+    const baseline_facts = shards[0].run.shard.trace.len;
+    const baseline_records = shards[0].run.decision_journal.records;
     var router: SharedMarketRouter = .{};
 
     try router.route(
@@ -430,7 +434,7 @@ fn assertFourShardIsolation() ![4][Sha256.digest_length]u8 {
     );
     try drainOne(&shards[0]);
     if (shards[0].run.shard.market_health != .gap or
-        shards[0].run.shard.trace.len != 2)
+        shards[0].run.shard.trace.len != baseline_facts + 2)
         return error.GapIsolationFailed;
 
     try shards[0].inbox.push(atGroup(16, .{
@@ -459,9 +463,9 @@ fn assertFourShardIsolation() ![4][Sha256.digest_length]u8 {
         return error.RouterIsolationFailed;
     for (1..4) |index| {
         if (shards[index].run.shard.market_health != .healthy or
-            shards[index].run.shard.expected_source_sequence != 102 or
-            shards[index].run.shard.trace.len != 1 or
-            shards[index].run.decision_journal.records != 1 or
+            shards[index].run.shard.expected_source_sequence != 103 or
+            shards[index].run.shard.trace.len != baseline_facts + 1 or
+            shards[index].run.decision_journal.records != baseline_records + 1 or
             shards[index].inbox.len != 0)
             return error.HealthyShardWasAffected;
     }
@@ -536,8 +540,8 @@ fn runRoutedShardBenchmark(worker: *FourShardWorker) !BenchmarkResult {
             continue;
         };
         if (run.shard.trace.len == run.shard.trace.events.len) {
-            run.shard.trace.len = 0;
-            run.decision_journal = journal.Journal.init();
+            run = try initializedBenchmarkRun();
+            _ = try fixture.apply(&run, fixture.snapshotAt(14, expected_source_sequence));
         }
         const records_before = run.decision_journal.records;
         if (try applyLive(&run.shard, &run.decision_journal, work.input) != null)
@@ -546,7 +550,7 @@ fn runRoutedShardBenchmark(worker: *FourShardWorker) !BenchmarkResult {
         telemetry.events += 1;
         expected_source_sequence += 1;
         if (run.shard.market_health != .healthy or
-            run.shard.expected_source_sequence != expected_source_sequence or
+            run.shard.expected_source_sequence != expected_source_sequence + 1 or
             run.decision_journal.records != records_before + 1)
             return error.BenchmarkCorrectnessFailure;
     }
@@ -722,5 +726,12 @@ pub fn runBenchmark(init: std.process.Init, four_shards: bool, raw: bool) !void 
 }
 
 test "four shards replay and isolate overload" {
+    const run = try initializedBenchmarkRun();
+    var sealed = run.decision_journal;
+    try sealed.seal();
+    var storage: [64 * 1024]u8 = undefined;
+    const restored = try TradingShard.restoreSnapshot(try run.shard.snapshot(&sealed, run.shard.authoritativeBarrier(), &storage));
+    try std.testing.expectEqual(run.shard.authoritativeBarrier(), restored.barrier);
+    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
     _ = try assertFourShardIsolation();
 }

@@ -169,7 +169,7 @@ pub const Gateway = struct {
         if (self.trading_enabled)
             self.activation_floor = @max(self.activation_floor, self.config.authorization.activation_identity);
         self.trading_enabled = false;
-        if (stable_journal.last_sequence != shard.trace.len or
+        if (stable_journal.last_sequence != shard.authoritativeBarrier() or
             shard.strategy_identity != self.config.authorization.strategy_identity)
             return error.UnstableHostAuthority;
         if (shard.host_activation_identity != 0 and
@@ -313,7 +313,7 @@ pub const Gateway = struct {
         if (self.trading_enabled and (self.authority_shard == null or self.authority_journal == null or
             self.authority_shard.?.host_activation_identity != self.config.authorization.activation_identity or
             self.authority_shard.?.host_activation_fact_sequence != self.activation_sequence or
-            self.authority_journal.?.last_sequence != self.authority_shard.?.trace.len))
+            self.authority_journal.?.last_sequence != self.authority_shard.?.authoritativeBarrier()))
             self.beginRecovery();
         const identity = if (frame.len >= output_header_len)
             get(u128, frame, 64)
@@ -371,7 +371,7 @@ pub const Gateway = struct {
             self.authority_shard == null or self.authority_journal == null or
             self.authority_shard.?.host_activation_identity != self.config.authorization.activation_identity or
             self.authority_shard.?.host_activation_fact_sequence != self.activation_sequence or
-            self.authority_journal.?.last_sequence != self.authority_shard.?.trace.len or
+            self.authority_journal.?.last_sequence != self.authority_shard.?.authoritativeBarrier() or
             get(u128, frame, 64) != self.config.authorization.strategy_identity or
             get(u64, frame, 88) != self.config.authorization.config_version or
             get(u128, frame, 108) != self.config.authorization.activation_identity)

@@ -93,18 +93,36 @@ pub const Fact = struct {
 };
 
 pub const Trace = struct {
-    // ponytail: bounded for this Demo round trip; checkpoint and rotate before longer runs.
+    // ADR 0011: full retained window until ticket 03 supplies durable history continuation.
     events: [256]Fact = undefined,
     len: usize = 0,
+    last_sequence: u64 = 0,
+
+    pub fn validate(self: *const Trace) !void {
+        // ponytail: scan the bounded 256-fact window; ticket 03 owns retained-window indexing.
+        if (self.len > self.events.len or self.last_sequence != self.len) return error.InvalidTrace;
+        for (self.events[0..self.len], 0..) |fact, index|
+            if (fact.sequence != index + 1 or fact.sequence > self.last_sequence) return error.InvalidTrace;
+    }
+
+    pub fn factAt(self: *const Trace, sequence: u64) ?Fact {
+        if (sequence == 0 or sequence > self.last_sequence or self.len > self.events.len) return null;
+        for (self.events[0..self.len]) |fact|
+            if (fact.sequence == sequence) return fact;
+        return null;
+    }
 
     pub fn append(self: *Trace, kind: EventKind, identity: u64) !void {
+        const sequence = try std.math.add(u64, self.last_sequence, 1);
+        try self.validate();
         if (self.len == self.events.len) return error.TraceFull;
         self.events[self.len] = .{
-            .sequence = self.len + 1,
+            .sequence = sequence,
             .kind = kind,
             .identity = identity,
         };
         self.len += 1;
+        self.last_sequence = sequence;
     }
 
     pub fn appendRejection(self: *Trace, kind: EventKind, identity: u64, reason: RejectReason) !void {

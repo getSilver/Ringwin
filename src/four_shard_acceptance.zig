@@ -252,7 +252,7 @@ fn assertLedgersClosed(world: *const World) !void {
             shard.economicSummary().portfolio.swap.quantity,
             shard.economicSummary().exchange.swap.quantity,
         );
-        try std.testing.expectEqual(world.journals[index].last_sequence, shard.trace.len);
+        try std.testing.expectEqual(world.journals[index].last_sequence, shard.authoritativeBarrier());
     }
 }
 
@@ -566,7 +566,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     var shard_snapshots: [max_shards][]const u8 = undefined;
     var shard_tails: [max_shards][]const u8 = undefined;
     for (0..max_shards) |index| {
-        live_barriers[index] = world.shards[index].trace.len;
+        live_barriers[index] = world.shards[index].authoritativeBarrier();
         shard_snapshots[index] = try world.shards[index].snapshot(&world.journals[index], live_barriers[index], &shard_snapshot_storage[index]);
         tail_journals[index] = trading.journal.Journal.initAt(live_barriers[index] + 1);
     }
@@ -739,7 +739,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     var shard_barriers: [max_shards]u64 = undefined;
     for (0..max_shards) |index| {
         shard_digests[index] = fenced_live[index].canonicalStateDigest();
-        shard_barriers[index] = fenced_live[index].trace.len;
+        shard_barriers[index] = fenced_live[index].authoritativeBarrier();
     }
     return .{
         .schema_version = acceptance_schema_version,

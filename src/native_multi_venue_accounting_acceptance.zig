@@ -258,7 +258,7 @@ fn exercise(comptime kind: Kind, case: Case) ![32]u8 {
     var config_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(config, &config_digest, .{});
     const committed_raw = try memory.interface().recover(undefined, .{ .domain = .raw_ingress, .id = 1 });
-    std.debug.print("precision13 venue={s} case={s} assets_sha256={s} decision_barrier={d} raw_barrier={d} canonical={s} semantic={s} sends=0\n", .{ @tagName(kind), @tagName(case), std.fmt.bytesToHex(config_digest, .lower), owner.shard.trace.len, committed_raw.committed_barrier, std.fmt.bytesToHex(final_digest, .lower), std.fmt.bytesToHex(owner.shard.semanticAuthorityDigest(), .lower) });
+    std.debug.print("precision13 venue={s} case={s} assets_sha256={s} decision_barrier={d} raw_barrier={d} canonical={s} semantic={s} sends=0\n", .{ @tagName(kind), @tagName(case), std.fmt.bytesToHex(config_digest, .lower), owner.shard.authoritativeBarrier(), committed_raw.committed_barrier, std.fmt.bytesToHex(final_digest, .lower), std.fmt.bytesToHex(owner.shard.semanticAuthorityDigest(), .lower) });
     return owner.shard.semanticAuthorityDigest();
 }
 

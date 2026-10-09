@@ -257,10 +257,10 @@ pub fn runRole(
                     const path = try readPayloadFrame(client, generation, &path_buffer);
                     if (!std.fs.path.isAbsolute(path)) return error.InvalidDemoStateDirectory;
                     if (!owner.ready) {
-                        if (owner.closed or owner.store.safetyGate() != .open or owner.shard.trace.len != owner.decision_journal.last_sequence)
+                        if (owner.closed or owner.store.safetyGate() != .open or owner.shard.authoritativeBarrier() != owner.decision_journal.last_sequence)
                             return error.DecisionLogUnavailable;
                         const committed = try owner.store.recover(init.io, owner.stream);
-                        if (committed.committed_barrier != owner.shard.trace.len or committed.last_sequence != committed.committed_barrier)
+                        if (committed.committed_barrier != owner.shard.authoritativeBarrier() or committed.last_sequence != committed.committed_barrier)
                             return error.DecisionLogUnavailable;
                         var sealed = owner.decision_journal;
                         try sealed.seal();
@@ -282,7 +282,7 @@ pub fn runRole(
                     var storage: [durable_store.max_snapshot_bytes]u8 = undefined;
                     const snapshot = try owner.committedSnapshot(&storage);
                     try writeStatus(client, .snapshot_ready);
-                    try writeSnapshotFrame(client, generation, .{ .bytes = snapshot, .barrier = owner.shard.trace.len, .digest = owner.shard.canonicalStateDigest() });
+                    try writeSnapshotFrame(client, generation, .{ .bytes = snapshot, .barrier = owner.shard.authoritativeBarrier(), .digest = owner.shard.canonicalStateDigest() });
                     try expectStatus(client, .private_ready);
                     const raw_state = try raw_store.interface().recover(init.io, raw_stream);
                     var replay: RemotePrivateSweep = .{ .owner = owner, .index = &index, .pipe = client, .generation = generation, .last_sequence = raw_state.committed_barrier };
@@ -333,7 +333,7 @@ pub fn runRole(
                 try writeStatus(client, .snapshot_ready);
                 try writeSnapshotFrame(client, generation, .{
                     .bytes = snapshot,
-                    .barrier = owner.shard_run.shard.trace.len,
+                    .barrier = owner.shard_run.shard.authoritativeBarrier(),
                     .digest = owner.shard_run.shard.canonicalStateDigest(),
                 });
             },
@@ -581,7 +581,7 @@ pub fn runRole(
                 std.debug.print("windows_demo_host: stage=handshake\n", .{});
                 var policy = try readWindowsDemoPolicy(init, demo_transport);
                 defer policy.deinit();
-                const barrier = owner.shard.trace.len;
+                const barrier = owner.shard.authoritativeBarrier();
                 const digest = owner.shard.canonicalStateDigest();
                 try policy.value.activateHost(owner, plan.session, barrier, digest);
                 std.debug.print("windows_demo_host: stage=owner_activated\n", .{});
@@ -603,7 +603,7 @@ pub fn runRole(
                 };
                 const subscriptions = [_]host_gateway.Subscription{host_gateway.Subscription.of(40, &.{.mark_price})};
                 var strategy_gateway = try host_gateway.Gateway.init(host_config, &subscriptions);
-                const cursor = owner.shard.trace.len;
+                const cursor = owner.shard.authoritativeBarrier();
                 const published_ns: i64 = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
                 var price_bytes: [8]u8 = undefined;
                 if (live_write) try readExact(client, &price_bytes) else std.mem.writeInt(i64, &price_bytes, 50_100_100_000, .little);
@@ -632,7 +632,7 @@ pub fn runRole(
                     },
                 };
                 const proved = (try owner.apply(.{ .core = .{
-                    .identity = cursor + 1,
+                    .identity = try std.math.add(u64, cursor, 1),
                     .monotonic_time = if (live_write) try awakeNs(init.io) else 2,
                     .time_presence = .{ .monotonic = true },
                     .payload = .{ .external_order_intent = intent },
@@ -655,7 +655,7 @@ pub fn runRole(
                 const price = std.mem.readInt(i64, &price_bytes, .little);
                 if (price <= 0) return error.InvalidDemoPrice;
                 const host = okx_host.?;
-                const cursor = owner.shard.trace.len;
+                const cursor = owner.shard.authoritativeBarrier();
                 const now = try awakeNs(init.io);
                 const config: host_gateway.Config = .{
                     .schema_registry = host.supervisor.plan.compatibility.schema_registry,
@@ -669,7 +669,7 @@ pub fn runRole(
                 try gateway.recordPublished(1, cursor, now_i64);
                 try gateway.activate(&owner.shard, &owner.decision_journal);
                 var output: [256]u8 = undefined;
-                const frame = try host_gateway.encodeOutputOrderFrame(&output, config, 1, cursor, cursor + 1, .{
+                const frame = try host_gateway.encodeOutputOrderFrame(&output, config, 1, cursor, try std.math.add(u64, cursor, 1), .{
                     .instrument_identity = okx_venue.btc_usdt_spot,
                     .side = .sell,
                     .time_in_force = .immediate_or_cancel,
@@ -682,7 +682,7 @@ pub fn runRole(
                     .rejected => return error.DemoCleanupIntentRejected,
                 };
                 const proved = (try owner.apply(.{ .core = .{
-                    .identity = cursor + 1,
+                    .identity = try std.math.add(u64, cursor, 1),
                     .monotonic_time = now,
                     .time_presence = .{ .monotonic = true },
                     .payload = .{ .external_order_intent = intent },
@@ -701,7 +701,7 @@ pub fn runRole(
                 var storage: [durable_store.max_snapshot_bytes]u8 = undefined;
                 const bytes = try owner.committedSnapshot(&storage);
                 try writeStatus(client, .snapshot_ready);
-                try writeSnapshotFrame(client, generation, .{ .bytes = bytes, .barrier = owner.shard.trace.len, .digest = owner.shard.canonicalStateDigest() });
+                try writeSnapshotFrame(client, generation, .{ .bytes = bytes, .barrier = owner.shard.authoritativeBarrier(), .digest = owner.shard.canonicalStateDigest() });
             },
             .send_okx => {
                 if (role != .execution_gateway or !risk_gate_open or draining) return error.InvalidRoleTransition;
@@ -907,7 +907,7 @@ const EngineOwners = struct {
             self.shard_run.shard.trace.events[trace_before].kind != .strategy_intent_rejected)
             return error.HostIntentBeforeActivation;
         const host_digest = self.shard_run.shard.canonicalStateDigest();
-        const activation_barrier = self.shard_run.shard.trace.len;
+        const activation_barrier = self.shard_run.shard.authoritativeBarrier();
         if (try self.shard_run.apply(fixture.atGroup(11, .{ .identity = 3, .payload = .{ .host_activated = .{
             .strategy_identity = 1,
             .config_version = 1,
@@ -1014,7 +1014,7 @@ const EngineOwners = struct {
         };
         const subscriptions = [_]host_gateway.Subscription{host_gateway.Subscription.of(1, &.{.mark_price})};
         var strategy_gateway = try host_gateway.Gateway.init(host_config, &subscriptions);
-        const cursor = self.shard_run.shard.trace.len;
+        const cursor = self.shard_run.shard.authoritativeBarrier();
         const published_ns: i64 = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
         const payload = [_]u8{1};
         const events = [_]host_gateway.EventEnvelope{.{

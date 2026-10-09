@@ -58,7 +58,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
         gateway_module.Subscription.of(0x1002, &.{.l2_delta}),
     };
     var gateway = try gateway_module.Gateway.init(config, &subscriptions);
-    const first_sequence: u64 = @intCast(ingress.run.shard.trace.len + 1);
+    const first_sequence: u64 = @intCast(try std.math.add(u64, ingress.run.shard.authoritativeBarrier(), 1));
     const last_sequence = first_sequence + 3;
     const mark_payload = [_]u8{1};
     const fill_payload = [_]u8{2};

@@ -68,7 +68,7 @@ pub const Policy = struct {
                 owner.closeAdmission();
                 return error.TestAssetDefinitionForbidden;
             }
-            _ = try owner.apply(.{ .core = .{ .identity = @intCast(owner.shard.trace.len + 1), .payload = .{ .asset_definition_activated = definition } } });
+            _ = try owner.apply(.{ .core = .{ .identity = @intCast(try std.math.add(u64, owner.shard.authoritativeBarrier(), 1)), .payload = .{ .asset_definition_activated = definition } } });
         }
         try self.activateInstrumentConfiguration(owner);
     }
@@ -98,17 +98,17 @@ pub const Policy = struct {
         };
         const known = owner.shard.instrument_registry.get(okx.btc_usdt_spot);
         if (known == null or !std.meta.eql(known.?.rules, rules))
-            _ = try owner.apply(.{ .core = .{ .identity = @intCast(owner.shard.trace.len + 1), .payload = .{ .instrument_rules_activated = rules } } });
+            _ = try owner.apply(.{ .core = .{ .identity = @intCast(try std.math.add(u64, owner.shard.authoritativeBarrier(), 1)), .payload = .{ .instrument_rules_activated = rules } } });
         const configured = owner.shard.instrument_registry.get(okx.btc_usdt_spot).?;
         if (!configured.margin_configured or !std.meta.eql(configured.margin, margin))
-            _ = try owner.apply(.{ .core = .{ .identity = @intCast(owner.shard.trace.len + 1), .payload = .{ .margin_rules_activated = margin } } });
+            _ = try owner.apply(.{ .core = .{ .identity = @intCast(try std.math.add(u64, owner.shard.authoritativeBarrier(), 1)), .payload = .{ .margin_rules_activated = margin } } });
     }
 
     /// Virgin startup derives cash only from a complete private account
     /// snapshot; existing BTC/derivative exposure requires recovery instead.
     pub fn initialize(self: Policy, owner: *Owner, mark_price_atoms: i128, guard: *failover.GatewayLeaseGuard, now_ns: u64, adapter_session: u64) !void {
         try self.initializePendingHost(owner, mark_price_atoms, guard, now_ns, adapter_session);
-        const barrier = owner.shard.trace.len;
+        const barrier = owner.shard.authoritativeBarrier();
         try self.activateHost(owner, .{ .fencing = guard.lease.token, .shard = 0, .generation = 1 }, barrier, owner.shard.canonicalStateDigest());
     }
 
@@ -117,7 +117,7 @@ pub const Policy = struct {
     pub fn initializePendingHost(self: Policy, owner: *Owner, mark_price_atoms: i128, guard: *failover.GatewayLeaseGuard, now_ns: u64, adapter_session: u64) !void {
         try self.activateInstrumentConfiguration(owner);
         if (!owner.shard.activatedAssets().consumerCompatible(self.native_settlement_atoms)) return error.AssetPrecisionUnsupported;
-        if (owner.ready or owner.closed or owner.shard.trace.len == 0 or
+        if (owner.ready or owner.closed or owner.shard.authoritativeBarrier() == 0 or
             owner.stream.id != self.decision_stream_id or mark_price_atoms <= 0 or
             now_ns == 0 or adapter_session == 0 or
             guard.lease.key.exchange_account != self.exchange_account or
@@ -170,7 +170,7 @@ pub const Policy = struct {
             .activation_identity = self.activation_identity,
         } });
         try core(owner, 10, .{ .primary_lease_granted = .{ .fencing_token = guard.lease.token } });
-        const risk_valid_through = std.math.add(u64, owner.shard.trace.len, 128) catch return error.InvalidDemoBootstrap;
+        const risk_valid_through = std.math.add(u64, owner.shard.authoritativeBarrier(), 128) catch return error.InvalidDemoBootstrap;
         try core(owner, 11, .{ .risk_lease_granted = .{
             .lease_identity = 11,
             .version = 1,
@@ -216,7 +216,7 @@ pub const Policy = struct {
     }
 
     pub fn activateHost(self: Policy, owner: *Owner, session: @import("strategy_host_ipc.zig").Session, barrier: u64, digest: [32]u8) !void {
-        if (owner.ready or owner.closed or barrier == 0 or barrier != owner.shard.trace.len or
+        if (owner.ready or owner.closed or barrier == 0 or barrier != owner.shard.authoritativeBarrier() or
             !std.mem.eql(u8, &digest, &owner.shard.canonicalStateDigest()) or
             owner.shard.strategy_identity != self.strategy_identity or
             owner.shard.strategy_config_version != self.config_version or
@@ -275,7 +275,7 @@ pub const Owner = struct {
             // continuity and the shard replay verified every derived fact.
             break :blk restored.shard;
         };
-        if (recovered_shard.trace.len != recovered.committed_barrier) return error.DecisionLogUnavailable;
+        if (recovered_shard.authoritativeBarrier() != recovered.committed_barrier) return error.DecisionLogUnavailable;
         // A committed decision prefix may precede durable private facts. Every
         // restart re-arms admission, independent of the saved snapshot flag.
         recovered_shard.recovery_admission_pending = true;
@@ -390,8 +390,8 @@ pub const Owner = struct {
 
     /// Seal a genuinely ingested bootstrap before allowing dispatch.
     pub fn sealBootstrap(self: *Owner) !void {
-        if (self.ready or self.closed or self.shard.recovery_admission_pending or self.store.safetyGate() != .open or self.shard.trace.len == 0 or
-            self.shard.trace.len != self.decision_journal.last_sequence)
+        if (self.ready or self.closed or self.shard.recovery_admission_pending or self.store.safetyGate() != .open or self.shard.authoritativeBarrier() == 0 or
+            self.shard.authoritativeBarrier() != self.decision_journal.last_sequence)
             return error.DecisionLogUnavailable;
         var sealed = self.decision_journal;
         sealed.seal() catch return error.DecisionLogUnavailable;
@@ -429,7 +429,7 @@ pub const Owner = struct {
         const shard = try self.source();
         var sealed = self.decision_journal;
         try sealed.seal();
-        return shard.snapshot(&sealed, shard.trace.len, destination);
+        return shard.snapshot(&sealed, shard.authoritativeBarrier(), destination);
     }
 
     pub fn send(self: *const Owner, gateway: *execution.Gateway, guard: *failover.GatewayLeaseGuard, command_id: u64, now_monotonic_ns: u64) !venue.SendResult {
@@ -477,7 +477,7 @@ fn sendFromShard(shard: *const trading.TradingShard, gateway: *execution.Gateway
         .primary_lease_expires_at_monotonic_ns = guard.lease.expires_at_ns,
         .fencing_token = guard.lease.token,
         .exchange_position = position,
-        .authority_barrier = shard.trace.len,
+        .authority_barrier = shard.authoritativeBarrier(),
     });
     return gateway.sendFromShard(shard, command_id, now_monotonic_ns);
 }
@@ -559,10 +559,10 @@ test "Demo owner commits before publication and recovers only a complete barrier
     var spot_rules = genesis[0];
     spot_rules.core.payload.instrument_rules_activated.base_asset = 0x425443;
     _ = try owner.apply(spot_rules);
-    try std.testing.expectEqual(owner.shard.trace.len, (try memory.interface().recover(undefined, stream)).committed_barrier);
+    try std.testing.expectEqual(owner.shard.authoritativeBarrier(), (try memory.interface().recover(undefined, stream)).committed_barrier);
     try owner.sealBootstrap();
     const source = try owner.source();
-    try std.testing.expectEqual(@as(u64, 1), source.trace.len);
+    try std.testing.expectEqual(@as(u64, 1), source.authoritativeBarrier());
     var restored = try Owner.recover(memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &source.canonicalStateDigest(), &(try restored.source()).canonicalStateDigest());
     _ = try owner.apply(genesis[1]);
@@ -603,7 +603,7 @@ test "Demo owner commits before publication and recovers only a complete barrier
     var snapshot_storage: [durable.max_snapshot_bytes]u8 = undefined;
     const snapshot = try owner.committedSnapshot(&snapshot_storage);
     const snapshot_copy = try trading.TradingShard.restoreSnapshot(snapshot);
-    try std.testing.expectEqual(owner.shard.trace.len, snapshot_copy.barrier);
+    try std.testing.expectEqual(owner.shard.authoritativeBarrier(), snapshot_copy.barrier);
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &snapshot_copy.shard.canonicalStateDigest());
     try std.testing.expect((try restored.source()).canonical_account.valid);
     try std.testing.expectEqual(@as(i128, 123), (try restored.source()).currentNetExchangePosition(3).?.lots);
@@ -754,10 +754,10 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
     authority.available = true;
     try parsed.value.initializePendingHost(&owner, 50_000_000, &guard, 1, 1);
-    try std.testing.expect(owner.shard.risk_lease_valid_through_barrier >= owner.shard.trace.len + 100);
+    try std.testing.expect(owner.shard.risk_lease_valid_through_barrier >= owner.shard.authoritativeBarrier() + 100);
     try std.testing.expectEqual(@as(u64, 15 * std.time.ns_per_s), owner.shard.registryInstrument(okx.btc_usdt_spot).?.capability.?.max_dispatch_age_ns);
     try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
-    const activation_barrier = owner.shard.trace.len;
+    const activation_barrier = owner.shard.authoritativeBarrier();
     const activation_digest = owner.shard.canonicalStateDigest();
     const host_session: @import("strategy_host_ipc.zig").Session = .{ .fencing = lease.token, .shard = 0, .generation = 1 };
     try std.testing.expectError(error.InvalidHostActivation, parsed.value.activateHost(&owner, host_session, activation_barrier + 1, activation_digest));
@@ -813,11 +813,11 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
         .supports_market_protection = true,
     } });
     try gateway.bootstrapDurableDispatch(dispatch_memory.interface(), undefined, .{ .domain = .control, .id = 92 });
-    const sequence = owner.shard.trace.len + 1;
+    const sequence = owner.shard.authoritativeBarrier() + 1;
     const intent: @import("strategy_host_gateway.zig").OrderIntent = .{
         .strategy_identity = 40,
         .intent_sequence = sequence,
-        .strategy_cursor = owner.shard.trace.len,
+        .strategy_cursor = owner.shard.authoritativeBarrier(),
         .config_version = 1,
         .activation_identity = 50,
         .portfolio_identity = 1,
@@ -839,10 +839,10 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     const digest = owner.shard.canonicalStateDigest();
     var wrong_digest = digest;
     wrong_digest[0] ^= 1;
-    try std.testing.expectError(error.DecisionSnapshotMismatch, sendFromCommittedSnapshot(committed, owner.shard.trace.len, wrong_digest, &gateway, &guard, command.command_id, 2));
-    try std.testing.expectError(error.DecisionSnapshotMismatch, sendFromCommittedSnapshot(committed, owner.shard.trace.len + 1, digest, &gateway, &guard, command.command_id, 2));
+    try std.testing.expectError(error.DecisionSnapshotMismatch, sendFromCommittedSnapshot(committed, owner.shard.authoritativeBarrier(), wrong_digest, &gateway, &guard, command.command_id, 2));
+    try std.testing.expectError(error.DecisionSnapshotMismatch, sendFromCommittedSnapshot(committed, owner.shard.authoritativeBarrier() + 1, digest, &gateway, &guard, command.command_id, 2));
     try std.testing.expectEqual(@as(u64, 0), spy.sends);
-    try std.testing.expectEqual(venue.SendResult.accepted, try sendFromCommittedSnapshot(committed, owner.shard.trace.len, digest, &gateway, &guard, command.command_id, 2));
+    try std.testing.expectEqual(venue.SendResult.accepted, try sendFromCommittedSnapshot(committed, owner.shard.authoritativeBarrier(), digest, &gateway, &guard, command.command_id, 2));
     try std.testing.expectEqual(@as(u64, 1), spy.sends);
     var recovering = try Owner.recover(memory.interface(), undefined, stream);
     // The same qualified pending-submit command was admitted immediately
@@ -853,8 +853,8 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     const pending_copy = try trading.TradingShard.restoreSnapshot(pending_snapshot);
     try std.testing.expect(pending_copy.shard.recovery_admission_pending);
     try std.testing.expectError(error.NotSent, gateway.sendFromShard(&pending_copy.shard, command.command_id, 2));
-    try std.testing.expectError(error.DecisionLogUnavailable, sendFromCommittedSnapshot(pending_snapshot, recovering.shard.trace.len, digest, &gateway, &guard, command.command_id, 2));
-    const pending_barrier = recovering.shard.trace.len;
+    try std.testing.expectError(error.DecisionLogUnavailable, sendFromCommittedSnapshot(pending_snapshot, recovering.shard.authoritativeBarrier(), digest, &gateway, &guard, command.command_id, 2));
+    const pending_barrier = recovering.shard.authoritativeBarrier();
     try std.testing.expectError(error.RecoveryAdmissionPending, recovering.apply(.{ .core = .{ .identity = sequence, .payload = .{ .external_order_intent = intent } } }));
     try std.testing.expectError(error.RecoveryAdmissionPending, recovering.apply(.{ .core = .{ .identity = sequence, .payload = .{ .timer = .{ .side = .buy, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = true, .quantity = 1, .limit_price_micros = 50_000_000 } } } }));
     var pending_group: @import("oms.zig").IntentGroup = .{ .first_intent_sequence = 999, .count = 1 };
@@ -862,7 +862,7 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     try std.testing.expectError(error.RecoveryAdmissionPending, recovering.apply(.{ .core = .{ .identity = sequence, .payload = .{ .oms_intent_group = pending_group } } }));
     pending_group.count = @intCast(pending_group.members.len + 1);
     try std.testing.expectError(error.InvalidIntentGroup, recovering.shard.apply(.{ .core = .{ .identity = sequence, .payload = .{ .oms_intent_group = pending_group } } }));
-    try std.testing.expectEqual(pending_barrier, recovering.shard.trace.len);
+    try std.testing.expectEqual(pending_barrier, recovering.shard.authoritativeBarrier());
     try std.testing.expect(!recovering.closed);
     try std.testing.expectEqual(@as(u64, 1), spy.sends);
     const raw_stream: durable.StreamIdentity = .{ .domain = .raw_ingress, .id = 93 };
@@ -934,10 +934,10 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
         .liquidity = .taker,
     } });
     _ = try owner.apply(accepted_fill);
-    const duplicate_barrier = owner.shard.trace.len;
+    const duplicate_barrier = owner.shard.authoritativeBarrier();
     _ = try owner.apply(accepted_report);
     _ = try owner.apply(accepted_fill);
-    try std.testing.expectEqual(duplicate_barrier, owner.shard.trace.len);
+    try std.testing.expectEqual(duplicate_barrier, owner.shard.authoritativeBarrier());
     try std.testing.expectEqual(duplicate_barrier, (try memory.interface().recover(undefined, stream)).committed_barrier);
     try std.testing.expect(!owner.closed);
     var conflict_owner = owner;
@@ -977,11 +977,11 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
             .cross_liability = .{ .asset = okx.btc, .atoms = 0 },
         } } },
     } }));
-    const cleanup_sequence = owner.shard.trace.len + 1;
+    const cleanup_sequence = owner.shard.authoritativeBarrier() + 1;
     const cleanup_intent: @import("strategy_host_gateway.zig").OrderIntent = .{
         .strategy_identity = 40,
         .intent_sequence = cleanup_sequence,
-        .strategy_cursor = owner.shard.trace.len,
+        .strategy_cursor = owner.shard.authoritativeBarrier(),
         .config_version = 1,
         .activation_identity = 50,
         .portfolio_identity = 1,
@@ -1012,12 +1012,12 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
             .primary_lease_expires_at_monotonic_ns = guard.lease.expires_at_ns,
             .fencing_token = guard.lease.token,
             .exchange_position = source.currentNetExchangePosition(cleanup.instrument).?,
-            .authority_barrier = source.trace.len,
+            .authority_barrier = source.authoritativeBarrier(),
         });
         const healthy_digest = source.canonicalStateDigest();
         const healthy_economics = source.economicSummary();
         memory.injectFault(.eio);
-        try std.testing.expectError(error.DecisionLogUnavailable, owner.apply(.{ .core = .{ .identity = source.trace.len + 1, .payload = .{ .mark_price = .{ .instrument = okx.btc_usdt_spot, .price_atoms = 50_000_000 } } } }));
+        try std.testing.expectError(error.DecisionLogUnavailable, owner.apply(.{ .core = .{ .identity = source.authoritativeBarrier() + 1, .payload = .{ .mark_price = .{ .instrument = okx.btc_usdt_spot, .price_atoms = 50_000_000 } } } }));
         try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
         try std.testing.expectEqual(durable.GateState.open, dispatch_memory.interface().safetyGate());
         try std.testing.expectEqualSlices(u8, &healthy_digest, &owner.shard.canonicalStateDigest());

@@ -1059,6 +1059,10 @@ _Avoid_: Release version, config version
 将一个明确 StateSchemaVersion 的 StrategyPrivateState 确定性转换为目标版本的纯函数；不存在明确迁移或迁移失败时，目标策略不得激活。
 _Avoid_: Best-effort deserialization, runtime object migration
 
+**ShardSequence**:
+同一 TradingShard 内已接受的权威事实所具有的连续递增身份；它形成该分片的确定顺序和屏障，重启、检查点或历史归档不能重置它。不同分片的序号不构成跨分片总序。
+_Avoid_: Trace index, memory offset, StreamSequence, HostBatchSequence
+
 **CanonicalStateDigest**:
 在同一分片屏障上对订单、成交、持仓、账本、风险占用和游标等 AuthoritativeTradingState 计算的稳定摘要；状态迁移不得改变其结果。
 _Avoid_: Serialized byte hash, strategy output comparison

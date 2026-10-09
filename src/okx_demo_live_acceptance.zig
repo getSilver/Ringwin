@@ -171,7 +171,7 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
             decision_owner.shard.strategy_config_version != policy.config_version))
         return error.RecoveredDemoPolicyMismatch;
     if (policy.startup == .recover and !demoTraceCapacityAvailable(
-        decision_owner.shard.trace.len,
+        decision_owner.shard.authoritativeBarrier(),
         decision_owner.shard.trace.events.len,
         demo_order_trace_reserve,
     )) return error.InsufficientDemoTraceCapacity;
@@ -304,7 +304,7 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
     try establishPublicMarket(init, key, secret, passphrase, endpoint, &public_raw, decision_owner);
     const required_trace_capacity = if (mode == .demo_live) demo_round_trip_trace_reserve else demo_order_trace_reserve;
     if (!demoTraceCapacityAvailable(
-        decision_owner.shard.trace.len,
+        decision_owner.shard.authoritativeBarrier(),
         decision_owner.shard.trace.events.len,
         required_trace_capacity,
     )) return error.InsufficientDemoTraceCapacity;
@@ -471,10 +471,10 @@ fn emitDemoIntent(init: std.process.Init, policy: demo_authority.Policy, owner: 
     if (!have_lease.*) {
         lease.* = try authority.acquire(.{ .exchange_account = policy.exchange_account, .decision_domain = policy.decision_domain }, policy.node_identity, now);
         have_lease.* = true;
-        const identity = owner.shard.trace.len + 1;
+        const identity = try std.math.add(u64, owner.shard.authoritativeBarrier(), 1);
         _ = try owner.apply(.{ .core = .{ .identity = identity, .payload = .{ .primary_lease_granted = .{ .fencing_token = lease.token } } } });
     }
-    const cursor = owner.shard.trace.len;
+    const cursor = owner.shard.authoritativeBarrier();
     const authz: strategy.Authorization = .{ .strategy_identity = policy.strategy_identity, .config_version = policy.config_version, .activation_identity = policy.activation_identity, .activation_barrier = owner.shard.host_activation_barrier };
     const config: strategy.Config = .{ .schema_registry = 1, .decision_domain = policy.decision_domain, .session = .{ .fencing = lease.token, .shard = 0, .generation = 1 }, .authorization = authz };
     const subscriptions = [_]strategy.Subscription{strategy.Subscription.of(policy.strategy_identity, &.{ .mark_price, .l2_delta })};
@@ -482,7 +482,7 @@ fn emitDemoIntent(init: std.process.Init, policy: demo_authority.Policy, owner: 
     const now_i64 = std.math.cast(i64, now) orelse return error.ClockOutOfRange;
     try host.recordPublished(1, cursor, now_i64);
     try host.activate(&owner.shard, &owner.decision_journal);
-    const intent_sequence = cursor + 1;
+    const intent_sequence = try std.math.add(u64, cursor, 1);
     var frame_buffer: [256]u8 = undefined;
     const frame = try strategy.encodeOutputOrderFrame(&frame_buffer, config, 1, cursor, intent_sequence, .{
         .instrument_identity = okx_adapter.btc_usdt_spot,
@@ -750,7 +750,7 @@ fn checkOkxRawPrivateOwner(store: durable.Store, io: std.Io) !RawOwnerResult {
     var lease = try authority.acquire(.{ .exchange_account = 2, .decision_domain = 1 }, 1, 1);
     var guard: failover.GatewayLeaseGuard = .{ .authority = &authority, .lease = &lease };
     try parsed.value.initializePendingHost(owner, 50_000_000, &guard, 1, source_session);
-    try parsed.value.activateHost(owner, .{ .fencing = lease.token, .shard = 0, .generation = 1 }, owner.shard.trace.len, owner.shard.canonicalStateDigest());
+    try parsed.value.activateHost(owner, .{ .fencing = lease.token, .shard = 0, .generation = 1 }, owner.shard.authoritativeBarrier(), owner.shard.canonicalStateDigest());
 
     const feed = try std.testing.allocator.create(okx_market_feed.OkxMarketFeed);
     defer std.testing.allocator.destroy(feed);
@@ -776,11 +776,11 @@ fn checkOkxRawPrivateOwner(store: durable.Store, io: std.Io) !RawOwnerResult {
     gateway.* = .{};
     try gateway.add(.{ .account = demo_account, .adapter = adapter, .venue_identity = demo_venue, .environment = .demo, .lease_guard = &guard, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = source_session, .supports_post_only = true, .supports_market_protection = true } });
     try gateway.bootstrapDurableDispatch(store, io, .{ .domain = .control, .id = 92 });
-    const sequence = owner.shard.trace.len + 1;
+    const sequence = try std.math.add(u64, owner.shard.authoritativeBarrier(), 1);
     const intent: strategy.OrderIntent = .{
         .strategy_identity = 40,
         .intent_sequence = sequence,
-        .strategy_cursor = owner.shard.trace.len,
+        .strategy_cursor = owner.shard.authoritativeBarrier(),
         .config_version = 1,
         .activation_identity = 50,
         .portfolio_identity = 1,
@@ -796,11 +796,11 @@ fn checkOkxRawPrivateOwner(store: durable.Store, io: std.Io) !RawOwnerResult {
     const command = (try owner.apply(.{ .core = .{ .identity = sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = intent } } })) orelse return error.MissingDemoCommand;
     var snapshot_storage: [durable.max_snapshot_bytes]u8 = undefined;
     const snapshot = try owner.committedSnapshot(&snapshot_storage);
-    const decision_barrier = owner.shard.trace.len;
+    const decision_barrier = owner.shard.authoritativeBarrier();
     const decision_digest = owner.shard.canonicalStateDigest();
     try std.testing.expectError(error.DecisionSnapshotMismatch, demo_authority.sendFromCommittedSnapshot(
         snapshot,
-        decision_barrier + 1,
+        try std.math.add(u64, decision_barrier, 1),
         decision_digest,
         gateway,
         &guard,
@@ -1175,7 +1175,7 @@ fn refreshPrivateRest(init: std.process.Init, owner: *curl.TransportOwner, imple
 }
 
 fn beginPrivateRestRefresh(implementation: *okx_adapter.OkxVenueAdapter, owner: *demo_authority.Owner, projection: *DemoProjection) !void {
-    const started = try startPrivateRestRefresh(implementation, owner.shard.trace.len + 1);
+    const started = try startPrivateRestRefresh(implementation, try std.math.add(u64, owner.shard.authoritativeBarrier(), 1));
     try owner.applyAdapterBatch(started);
     try projection.applyBatch(started);
 }

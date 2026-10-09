@@ -263,8 +263,8 @@ fn executeRawPrivateFillRecovery() !void {
     book.venue.event.l2_book_snapshot.next_ask.?.ticks = 500_001;
     _ = try owner.apply(book);
 
-    const sequence = owner.shard.trace.len + 1;
-    const intent: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.trace.len, .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 20_000, .limit_price_micros = 50_000_000_000 };
+    const sequence = owner.shard.authoritativeBarrier() + 1;
+    const intent: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.authoritativeBarrier(), .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 20_000, .limit_price_micros = 50_000_000_000 };
     const command = (try owner.apply(.{ .core = .{ .identity = sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = intent } } })) orelse return error.MissingDemoCommand;
     try implementation.rememberRecoveredOrder(command.order_id, command.client_order_id, command.portfolio_reduce_only, .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = command.quantity }, command.revision);
     _ = try owner.apply(fixtureOnSecondaryStream(20, 4, .{ .order_dispatch_result = .{ .command = command.command_id, .state = .submitted } }));
@@ -390,8 +390,8 @@ fn executeRawPrivateFillRecovery() !void {
     reconciled_owner.* = try demo.Owner.recover(memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &reconciled_digest, &reconciled_owner.shard.canonicalStateDigest());
 
-    const full_sequence = owner.shard.trace.len + 1;
-    const full_intent: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = full_sequence, .strategy_cursor = owner.shard.trace.len, .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 10_000, .limit_price_micros = 50_000_000_000 };
+    const full_sequence = owner.shard.authoritativeBarrier() + 1;
+    const full_intent: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = full_sequence, .strategy_cursor = owner.shard.authoritativeBarrier(), .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 10_000, .limit_price_micros = 50_000_000_000 };
     const full_command = (try owner.apply(.{ .core = .{ .identity = full_sequence, .monotonic_time = 3, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = full_intent } } })) orelse return error.MissingDemoCommand;
     try implementation.rememberRecoveredOrder(full_command.order_id, full_command.client_order_id, full_command.portfolio_reduce_only, .{ .instrument = full_command.instrument, .rules_version = full_command.limit_price.rules_version, .lots = full_command.quantity }, full_command.revision);
     _ = try owner.apply(fixtureOnSecondaryStream(21, 5, .{ .order_dispatch_result = .{ .command = full_command.command_id, .state = .submitted } }));
@@ -576,8 +576,8 @@ fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canoni
     book.venue.event.l2_book_snapshot.next_ask.?.instrument = okx.btc_usdt_spot;
     book.venue.event.l2_book_snapshot.next_ask_quantity.?.instrument = okx.btc_usdt_spot;
     _ = try owner.apply(book);
-    const sequence = owner.shard.trace.len + 1;
-    const intent: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.trace.len, .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 20_000, .limit_price_micros = 50_000_000 };
+    const sequence = owner.shard.authoritativeBarrier() + 1;
+    const intent: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.authoritativeBarrier(), .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 20_000, .limit_price_micros = 50_000_000 };
     const command = (try owner.apply(.{ .core = .{ .identity = sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = intent } } })) orelse return error.MissingDemoCommand;
     try implementation.rememberRecoveredOrder(command.order_id, command.client_order_id, command.portfolio_reduce_only, .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = command.quantity }, command.revision);
     const preserve_unknown = fee != null and !core_reject;
@@ -737,11 +737,11 @@ fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canoni
             .primary_lease_expires_at_monotonic_ns = lease.expires_at_ns,
             .fencing_token = lease.token,
             .exchange_position = owner.shard.currentNetExchangePosition(cancel.instrument).?,
-            .authority_barrier = owner.shard.trace.len,
+            .authority_barrier = owner.shard.authoritativeBarrier(),
         });
         try std.testing.expectError(error.NotSent, gateway.sendFromShard(&recovered.shard, command.command_id, 2));
         const cancellation_snapshot = try recovered.committedSnapshot(&snapshot_buffer);
-        try std.testing.expectEqual(venue.SendResult.accepted, try demo.sendFromCommittedSnapshot(cancellation_snapshot, recovered.shard.trace.len, recovered.shard.canonicalStateDigest(), &gateway, &guard, cancel.command_id, 2));
+        try std.testing.expectEqual(venue.SendResult.accepted, try demo.sendFromCommittedSnapshot(cancellation_snapshot, recovered.shard.authoritativeBarrier(), recovered.shard.canonicalStateDigest(), &gateway, &guard, cancel.command_id, 2));
         try std.testing.expectEqual(@as(u64, 2), chain.next_attempt_id);
     }
 }
@@ -974,8 +974,8 @@ fn runNativeSettlementFees(case: NativeSettlementCase, arrival: NativeArrival, w
         .best_ask_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = 1_000_000 },
     } }));
     const count: usize = if (swap_capacity) 33 else if (inexact or malformed) 1 else if (overflow) 2 else if (tiny) 10 else 4;
-    const sequence = owner.shard.trace.len + 1;
-    const intent: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.trace.len, .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = instrument, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = if (swap_capacity) 33 else if (malformed) 40_000 else if (inexact) 1 else @intCast(count * 10_000), .limit_price_micros = 50_000_000_000 };
+    const sequence = owner.shard.authoritativeBarrier() + 1;
+    const intent: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.authoritativeBarrier(), .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = instrument, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = if (swap_capacity) 33 else if (malformed) 40_000 else if (inexact) 1 else @intCast(count * 10_000), .limit_price_micros = 50_000_000_000 };
     const command = if (swap_capacity) blk: {
         var group: @import("oms.zig").IntentGroup = .{ .first_intent_sequence = sequence, .count = 1 };
         group.members[0] = .{ .intent_sequence = sequence, .operation = .place, .instrument = instrument, .side = .buy, .quantity = 33, .limit_price = .{ .instrument = instrument, .rules_version = 1, .ticks = 500000 } };
@@ -1247,13 +1247,13 @@ fn checkNativeBaseFees(nonunit: bool, mode: enum { normal, legacy_precision, con
     var pending_command: ?@import("oms.zig").Command = null;
     var dispatch_gateways: [2]@import("execution_gateway.zig").Gateway = @splat(.{});
     if (mode == .missing_cash) {
-        const sequence = owner.shard.trace.len + 1;
-        const accepted: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.trace.len, .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 1, .limit_price_micros = 50_000_000_000 };
+        const sequence = owner.shard.authoritativeBarrier() + 1;
+        const accepted: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.authoritativeBarrier(), .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 1, .limit_price_micros = 50_000_000_000 };
         pending_command = (try owner.apply(.{ .core = .{ .identity = sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = accepted } } })) orelse return error.MissingDemoCommand;
         for (&dispatch_gateways, 0..) |*gateway, index| {
             try gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .environment = .demo, .lease_guard = &guard, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1, .supports_post_only = true, .supports_market_protection = true } });
             try gateway.bootstrapDurableDispatch(memory.interface(), undefined, .{ .domain = .control, .id = 93 + index });
-            try gateway.observeAuthority(.{ .account = 2, .effective_trading_authority = true, .reservation_identity = pending_command.?.reservation_identity, .reservation = pending_command.?.reservation, .primary_lease_expires_at_monotonic_ns = lease.expires_at_ns, .fencing_token = lease.token, .exchange_position = owner.shard.currentNetExchangePosition(okx.btc_usdt_spot).?, .authority_barrier = owner.shard.trace.len });
+            try gateway.observeAuthority(.{ .account = 2, .effective_trading_authority = true, .reservation_identity = pending_command.?.reservation_identity, .reservation = pending_command.?.reservation, .primary_lease_expires_at_monotonic_ns = lease.expires_at_ns, .fencing_token = lease.token, .exchange_position = owner.shard.currentNetExchangePosition(okx.btc_usdt_spot).?, .authority_barrier = owner.shard.authoritativeBarrier() });
         }
         try std.testing.expectEqual(venue.SendResult.accepted, try dispatch_gateways[0].sendFromShard(&owner.shard, pending_command.?.command_id, 2));
         try std.testing.expectEqual(@as(u64, 1), dispatch_gateways[0].send_attempt_count);
@@ -1303,8 +1303,8 @@ fn checkNativeBaseFees(nonunit: bool, mode: enum { normal, legacy_precision, con
             try std.testing.expectEqual(@as(u8, 18), usd.initial_margin.?.scale);
             try std.testing.expectEqual(@as(i128, 2), usd.maintenance_margin.?.coefficient);
         }
-        const sequence = owner.shard.trace.len + 1;
-        const attempted: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.trace.len, .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 1, .limit_price_micros = 50_000_000_000 };
+        const sequence = owner.shard.authoritativeBarrier() + 1;
+        const attempted: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.authoritativeBarrier(), .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 1, .limit_price_micros = 50_000_000_000 };
         try std.testing.expect((try owner.apply(.{ .core = .{ .identity = sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = attempted } } })) == null);
         try std.testing.expectEqual(if (pending_command != null) @import("trading_shard_event.zig").RejectReason.open_order else .exchange_opening_gate_closed, owner.shard.last_reject_reason);
         try std.testing.expectEqual(@as(u8, if (pending_command != null) 1 else 0), owner.shard.oms.order_count);
@@ -1324,8 +1324,8 @@ fn checkNativeBaseFees(nonunit: bool, mode: enum { normal, legacy_precision, con
     for (0..count) |index| {
         if (index == 1) {
             const before = owner.shard.economicSummary();
-            const sequence = owner.shard.trace.len + 1;
-            const oversized: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.trace.len, .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .sell, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 1, .limit_price_micros = 50_000_000_000 };
+            const sequence = owner.shard.authoritativeBarrier() + 1;
+            const oversized: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.authoritativeBarrier(), .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .sell, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 1, .limit_price_micros = 50_000_000_000 };
             try std.testing.expect((try owner.apply(.{ .core = .{ .identity = sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = oversized } } })) == null);
             try std.testing.expectEqual(@import("trading_shard_event.zig").RejectReason.insufficient_spot_asset, owner.shard.last_reject_reason);
             try std.testing.expectEqualDeep(before, owner.shard.economicSummary());
@@ -1334,7 +1334,7 @@ fn checkNativeBaseFees(nonunit: bool, mode: enum { normal, legacy_precision, con
             const before = owner.shard.economicSummary();
             const order_count = owner.shard.oms.order_count;
             const command_count = owner.shard.oms.command_history_count;
-            const sequence = owner.shard.trace.len + 1;
+            const sequence = owner.shard.authoritativeBarrier() + 1;
             var group: @import("oms.zig").IntentGroup = .{ .first_intent_sequence = sequence, .count = 2 };
             for (0..2) |member| group.members[member] = .{ .intent_sequence = sequence + member, .operation = .place, .instrument = okx.btc_usdt_spot, .side = .sell, .quantity = 2, .limit_price = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .ticks = 200_000 } };
             try std.testing.expect((try owner.apply(.{ .core = .{ .identity = sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .oms_intent_group = group } } })) == null);
@@ -1343,8 +1343,8 @@ fn checkNativeBaseFees(nonunit: bool, mode: enum { normal, legacy_precision, con
             try std.testing.expectEqual(command_count, owner.shard.oms.command_history_count);
             try std.testing.expectEqualDeep(before, owner.shard.economicSummary());
         }
-        const sequence = owner.shard.trace.len + 1;
-        const intent: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.trace.len, .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = if (index == 2) .sell else .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 1, .limit_price_micros = 50_000_000_000 };
+        const sequence = owner.shard.authoritativeBarrier() + 1;
+        const intent: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.authoritativeBarrier(), .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = if (index == 2) .sell else .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 1, .limit_price_micros = 50_000_000_000 };
         const command = (try owner.apply(.{ .core = .{ .identity = sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = intent } } })) orelse return error.MissingDemoCommand;
         last_command = command;
         try std.testing.expectEqual(@as(i64, 1), command.quantity);
@@ -1385,10 +1385,10 @@ fn checkNativeBaseFees(nonunit: bool, mode: enum { normal, legacy_precision, con
             try std.testing.expectEqualDeep(before, owner.shard.economicSummary());
             try std.testing.expectEqual(@as(i64, 1), owner.shard.oms.orderById(command.order_id).?.cumulative_quantity);
             try std.testing.expectEqual(@as(i64, 0), try owner.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
-            const next_sequence = owner.shard.trace.len + 1;
+            const next_sequence = owner.shard.authoritativeBarrier() + 1;
             var oversell = intent;
             oversell.intent_sequence = next_sequence;
-            oversell.strategy_cursor = owner.shard.trace.len;
+            oversell.strategy_cursor = owner.shard.authoritativeBarrier();
             oversell.quantity = 2;
             try std.testing.expect((try owner.apply(.{ .core = .{ .identity = next_sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = oversell } } })) == null);
             try std.testing.expectEqual(@import("trading_shard_event.zig").RejectReason.insufficient_spot_asset, owner.shard.last_reject_reason);
@@ -1699,8 +1699,8 @@ fn checkNativeThirdFees(mode: enum { normal, wide, unknown, inexact, conflict, c
     var fees: i128 = 0;
     var rebates: i128 = 0;
     for (0..count) |index| {
-        const sequence = owner.shard.trace.len + 1;
-        const intent: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.trace.len, .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = if (mode == .capacity) 12 else 1, .limit_price_micros = 50_000_000_000 };
+        const sequence = owner.shard.authoritativeBarrier() + 1;
+        const intent: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.authoritativeBarrier(), .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = if (mode == .capacity) 12 else 1, .limit_price_micros = 50_000_000_000 };
         const command = if (mode == .capacity and index != 0) capacity_command.? else (try owner.apply(.{ .core = .{ .identity = sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = intent } } })) orelse return error.MissingDemoCommand;
         if (mode == .capacity) capacity_command = command;
         try implementation.rememberRecoveredOrder(command.order_id, command.client_order_id, false, .{ .instrument = command.instrument, .rules_version = command.limit_price.rules_version, .lots = command.quantity }, command.revision);

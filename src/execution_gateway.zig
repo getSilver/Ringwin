@@ -394,12 +394,12 @@ pub const Gateway = struct {
             shard.asset_configuration_failed or !shard.settlementConsumersCompatible(oms_command.instrument)) and oms_command.operation != .cancel) return error.NotSent;
         const refs = oms_command.authority;
         if (!refs.complete() or refs.exchange_account != shard.exchange_account_identity or
-            refs.virtual_portfolio != shard.portfolio_identity or refs.deadline_barrier > shard.trace.len or
+            refs.virtual_portfolio != shard.portfolio_identity or refs.deadline_barrier > shard.authoritativeBarrier() or
             oms_command.risk_decision_identity == 0 or oms_command.reservation_identity == 0 or
-            oms_command.risk_decision_identity >= oms_command.reservation_identity or oms_command.reservation_identity > shard.trace.len)
+            oms_command.risk_decision_identity >= oms_command.reservation_identity or oms_command.reservation_identity > shard.authoritativeBarrier())
             return error.NotSent;
-        const decision = shard.trace.events[oms_command.risk_decision_identity - 1];
-        const reservation_fact = shard.trace.events[oms_command.reservation_identity - 1];
+        const decision = shard.trace.factAt(oms_command.risk_decision_identity) orelse return error.NotSent;
+        const reservation_fact = shard.trace.factAt(oms_command.reservation_identity) orelse return error.NotSent;
         if (decision.kind != .risk_accepted or reservation_fact.kind != .risk_reservation_created or
             decision.identity != oms_command.intent_sequence or reservation_fact.identity != oms_command.intent_sequence)
             return error.NotSent;
@@ -455,7 +455,7 @@ pub const Gateway = struct {
         const increases_risk = oms_command.operation != .cancel and
             !genuinelyReduces(source_position.lots, oms_command.side, oms_command.quantity);
         if (increases_risk and (shard.risk_lease_atoms <= 0 or
-            shard.risk_lease_valid_through_barrier < shard.trace.len))
+            shard.risk_lease_valid_through_barrier < shard.authoritativeBarrier()))
             return error.NotSent;
         const token = std.math.cast(u64, refs.primary_lease.identity) orelse return error.NotSent;
         if (token == 0 or token != authority.fencing_token or authority.authority_barrier == 0 or

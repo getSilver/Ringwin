@@ -404,13 +404,18 @@ pub const TradingShard = struct {
         };
     }
 
+    pub fn authoritativeBarrier(self: *const TradingShard) u64 {
+        return self.trace.last_sequence;
+    }
+
     pub fn canonicalStateDigest(self: TradingShard) [Sha256.digest_length]u8 {
         return stateDigest(self);
     }
 
     pub fn appliedHostActivation(self: *const TradingShard, stable_journal: *const journal.Journal) !host_gateway.AppliedActivation {
+        try self.trace.validate();
         if (self.host_activation_identity == 0 or self.host_activation_fact_sequence == 0 or
-            stable_journal.last_sequence != self.trace.len or
+            stable_journal.last_sequence != self.authoritativeBarrier() or
             stable_journal.last_sequence < self.host_activation_fact_sequence)
             return error.HostNotActivated;
         return .{
@@ -452,7 +457,7 @@ pub const TradingShard = struct {
         destination: []u8,
     ) ![]const u8 {
         if (!stable_journal.sealed or barrier == 0 or
-            barrier != stable_journal.last_sequence or self.trace.len != barrier)
+            barrier != stable_journal.last_sequence or self.authoritativeBarrier() != barrier)
             return error.InvalidSnapshotBarrier;
         var authoritative = self;
         canonicalizeSnapshotState(&authoritative);
@@ -481,7 +486,7 @@ pub const TradingShard = struct {
         try validateSnapshotState(&recovered);
         const metadata = decoded.metadata;
         const digest = recovered.canonicalStateDigest();
-        if (metadata.barrier == 0 or recovered.trace.len != metadata.barrier or
+        if (metadata.barrier == 0 or recovered.authoritativeBarrier() != metadata.barrier or
             recovered.instrument_rules_version != metadata.instrument_rules_version or
             recovered.margin_rules_version != metadata.margin_rules_version or
             !std.mem.eql(u8, &metadata.state_digest, &digest))
@@ -493,7 +498,7 @@ pub const TradingShard = struct {
     pub fn restore(encoded: []const u8, stable_tail: []const u8) !SnapshotRecovery {
         const restored = try restoreSnapshot(encoded);
         var reader = try journal.Reader.init(stable_tail);
-        if (reader.next_sequence != restored.barrier + 1) return error.SnapshotJournalGap;
+        if (reader.next_sequence != try std.math.add(u64, restored.barrier, 1)) return error.SnapshotJournalGap;
         const recovered = try replayReader(&reader, restored.shard);
         return .{ .shard = recovered.shard, .barrier = restored.barrier, .status = recovered.status };
     }
@@ -884,11 +889,11 @@ pub const TradingShard = struct {
         };
         const intent = qualified.group.members[0];
         try candidate.trace.append(.risk_accepted, intent.intent_sequence);
-        const decision_barrier: u64 = @intCast(candidate.trace.len);
+        const decision_barrier: u64 = candidate.authoritativeBarrier();
         try candidate.trace.append(.risk_reservation_created, intent.intent_sequence);
         try candidate.oms.confirmReplacement(order_id, intent.reservation, intent.portfolio_reduce_only, intent.venue_reduce_only, intent.intent_sequence, .{
             .decision = decision_barrier,
-            .reservation = @intCast(candidate.trace.len),
+            .reservation = candidate.authoritativeBarrier(),
             .authority = try candidate.dispatchAuthorityRefs(intent.instrument, now_monotonic_ns, decision_barrier),
         });
         self.* = candidate;
@@ -1127,19 +1132,21 @@ pub const TradingShard = struct {
     }
 
     fn controlCommandAtBarrier(self: *const TradingShard, barrier: u64) ?operational.ControlCommand {
-        if (barrier == 0 or barrier > self.trace.len) return null;
+        if (self.trace.factAt(barrier) == null) return null;
         var command_index: usize = 0;
-        for (self.trace.events[0..barrier], 0..) |fact, index| {
+        for (self.trace.events[0..self.trace.len]) |fact| {
+            if (fact.sequence > barrier) break;
             if (fact.kind != .control_command_applied) continue;
             if (command_index >= self.operational_state.command_count) return null;
             const command = self.operational_state.command_history[command_index].command;
-            if (index + 1 == barrier) return command;
+            if (fact.sequence == barrier) return command;
             command_index += 1;
         }
         return null;
     }
 
     fn dispatchAuthorityRefs(self: *const TradingShard, instrument: canonical.InstrumentIdentity, now_monotonic_ns: u64, deadline_barrier: u64) !oms_module.DispatchAuthorityRefs {
+        try self.trace.validate();
         var refs: oms_module.DispatchAuthorityRefs = .{
             .exchange_account = self.exchange_account_identity,
             .virtual_portfolio = self.portfolio_identity,
@@ -1158,11 +1165,11 @@ pub const TradingShard = struct {
             refs.config = .{ .identity = self.strategy_activation_identity, .version = self.strategy_config_version, .barrier = fact.sequence };
         if (self.instrument_registry.get(instrument)) |entry| {
             if (entry.rules_barrier != 0) {
-                const fact = self.trace.events[entry.rules_barrier - 1];
+                const fact = self.trace.factAt(entry.rules_barrier) orelse return error.InvalidControlAuthority;
                 refs.instrument_rules = .{ .identity = fact.identity, .version = entry.rules.version, .barrier = entry.rules_barrier };
             }
             if (entry.capability) |profile| {
-                const fact = self.trace.events[entry.capability_barrier - 1];
+                const fact = self.trace.factAt(entry.capability_barrier) orelse return error.InvalidControlAuthority;
                 refs.capability = .{ .identity = fact.identity, .version = profile.version, .barrier = entry.capability_barrier };
                 refs.adapter_session = profile.adapter_session;
                 if (now_monotonic_ns != 0)
@@ -1230,7 +1237,7 @@ pub const TradingShard = struct {
     fn bindFreshCancellations(self: *TradingShard, now_monotonic_ns: u64) !void {
         for (self.oms.emitted()) |command| {
             if (command.operation != .cancel) continue;
-            const authority = try self.dispatchAuthorityRefs(command.instrument, now_monotonic_ns, @intCast(self.trace.len));
+            const authority = try self.dispatchAuthorityRefs(command.instrument, now_monotonic_ns, self.authoritativeBarrier());
             try self.oms.bindCancellationAuthority(command.command_id, authority);
         }
     }
@@ -1405,9 +1412,9 @@ pub const TradingShard = struct {
         self.last_risk_required_atoms = qualified.group.members[0].reservation.atoms;
         self.last_reject_reason = .none;
         try self.trace.append(.risk_accepted, intent.intent_sequence);
-        const decision_barrier: u64 = @intCast(self.trace.len);
+        const decision_barrier: u64 = self.authoritativeBarrier();
         try self.trace.append(.risk_reservation_created, intent.intent_sequence);
-        const refs = [_]oms_module.RiskFactRefs{.{ .decision = decision_barrier, .reservation = @intCast(self.trace.len), .authority = try self.dispatchAuthorityRefs(intent.instrument_identity, now_monotonic_ns, decision_barrier) }};
+        const refs = [_]oms_module.RiskFactRefs{.{ .decision = decision_barrier, .reservation = self.authoritativeBarrier(), .authority = try self.dispatchAuthorityRefs(intent.instrument_identity, now_monotonic_ns, decision_barrier) }};
         try self.oms.applyQualifiedGroup(qualified.group, original_group, &refs);
         try self.adjustMarginBuffersForReservationChange(qualified.reservation_atoms);
         const oms_command = self.oms.emitted()[0];
@@ -2234,7 +2241,7 @@ pub const TradingShard = struct {
             .asset_definition_activated => |definition| {
                 const previous = self.asset_registry.get(definition.asset);
                 var configured = self.*;
-                if (!try configured.asset_registry.activate(definition, @intCast(self.trace.len + 1))) return null;
+                if (!try configured.asset_registry.activate(definition, try std.math.add(u64, self.authoritativeBarrier(), 1))) return null;
                 if (configured.asset_registry.get(configured.economic_projection.settlement_asset) != null)
                     try configured.checkEconomicRanges();
                 // Partial virgin activation has no complete monetary namespace yet.
@@ -2291,7 +2298,7 @@ pub const TradingShard = struct {
                 }
                 try self.trace.append(.control_command_applied, input.identity);
                 if (changesTradingAuthorization(command.kind))
-                    self.authority_control_barrier = @intCast(self.trace.len);
+                    self.authority_control_barrier = self.authoritativeBarrier();
             },
             .recovery_completed => {
                 try self.operational_state.recoveryCompleted();
@@ -2350,7 +2357,7 @@ pub const TradingShard = struct {
                     activation.generation != try std.math.add(u64, self.release_generation, 1) or
                     activation.old_release != self.active_release or
                     activation.old_strategy_instance != self.active_strategy_instance or
-                    activation.barrier != try std.math.add(u64, @intCast(self.trace.len), 1) or
+                    activation.barrier != try std.math.add(u64, self.authoritativeBarrier(), 1) or
                     !std.mem.eql(u8, &activation.canonical_state_digest, &self.canonicalStateDigest()))
                     return error.InvalidVersionActivation;
                 self.release_generation = activation.generation;
@@ -2394,7 +2401,7 @@ pub const TradingShard = struct {
                 }
                 if (added) {
                     try self.trace.append(.instrument_rules_activated, input.identity);
-                    self.instrument_registry.getPtr(normalized.instrument_identity).?.rules_barrier = @intCast(self.trace.len);
+                    self.instrument_registry.getPtr(normalized.instrument_identity).?.rules_barrier = self.authoritativeBarrier();
                 }
             },
             .capability_profile_activation => |profile| {
@@ -2415,7 +2422,7 @@ pub const TradingShard = struct {
                 }
                 entry.capability = profile;
                 try self.trace.append(.capability_profile_activated, input.identity);
-                entry.capability_barrier = @intCast(self.trace.len);
+                entry.capability_barrier = self.authoritativeBarrier();
             },
             .margin_rules_activated => |rules| {
                 const instrument_id = if (rules.instrument != 0) rules.instrument else self.instrument_identity;
@@ -2589,7 +2596,7 @@ pub const TradingShard = struct {
                 self.host_activation_session = activation.session;
                 self.host_activation_state_digest = activation.state_digest;
                 try self.trace.append(.host_activated, input.identity);
-                self.host_activation_fact_sequence = @intCast(self.trace.len);
+                self.host_activation_fact_sequence = self.authoritativeBarrier();
             },
             .host_activation_revoked => |revocation| {
                 if (revocation.strategy_identity != self.strategy_identity or
@@ -2681,7 +2688,7 @@ pub const TradingShard = struct {
                 if (request.quantity <= 0 or request.limit_price_micros <= 0) return error.InvalidOrderQuantity;
                 try self.trace.append(.timer, input.identity);
                 self.timer_pending = false;
-                self.strategy_cursor = self.trace.len;
+                self.strategy_cursor = self.authoritativeBarrier();
                 self.strategy_decision_count = try std.math.add(u64, self.strategy_decision_count, 1);
                 return self.submitOrderIntent(.{
                     .strategy_identity = self.strategy_identity,
@@ -2768,9 +2775,9 @@ pub const TradingShard = struct {
                 var refs: [oms_module.max_group_members]oms_module.RiskFactRefs = undefined;
                 for (qualified.group.members[0..qualified.group.count], 0..) |intent, index| {
                     try candidate.trace.append(.risk_accepted, intent.intent_sequence);
-                    refs[index].decision = @intCast(candidate.trace.len);
+                    refs[index].decision = candidate.authoritativeBarrier();
                     try candidate.trace.append(.risk_reservation_created, intent.intent_sequence);
-                    refs[index].reservation = @intCast(candidate.trace.len);
+                    refs[index].reservation = candidate.authoritativeBarrier();
                     refs[index].authority = try candidate.dispatchAuthorityRefs(intent.instrument, if (input.time_presence.monotonic) input.monotonic_time else 0, refs[index].decision);
                 }
                 try candidate.oms.applyQualifiedGroup(qualified.group, group, refs[0..qualified.group.count]);
@@ -2967,6 +2974,7 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
 }
 
 fn validateSnapshotState(shard: *const TradingShard) !void {
+    shard.trace.validate() catch return error.InvalidSnapshotState;
     if (shard.economic_fault_count != 0 and (!shard.oms.recovery_only or shard.economic_fault_evidence.stream == 0 or shard.economic_fault_evidence.sequence == 0)) return error.InvalidSnapshotState;
     if (shard.trace.len > shard.trace.events.len or
         shard.instrument_registry.count > shard.instrument_registry.entries.len or
@@ -3000,7 +3008,7 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
     try shard.canonical_account.validate();
     if (shard.asset_configuration_failed and !shard.oms.recovery_only) return error.InvalidSnapshotState;
     for (shard.asset_registry.entries[0..shard.asset_registry.count]) |entry| {
-        if (entry.barrier > shard.trace.len or shard.trace.events[entry.barrier - 1].kind != .asset_definition_activated)
+        if (entry.barrier > shard.authoritativeBarrier() or (shard.trace.factAt(entry.barrier) orelse return error.InvalidSnapshotState).kind != .asset_definition_activated)
             return error.InvalidSnapshotState;
     }
     try shard.instrument_registry.validate();
@@ -3009,12 +3017,12 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         if (!changesTradingAuthorization(command.kind)) return error.InvalidSnapshotState;
     }
     for (shard.instrument_registry.entries[0..shard.instrument_registry.count]) |entry| {
-        if (entry.rules_barrier == 0 or entry.rules_barrier > shard.trace.len or
-            shard.trace.events[entry.rules_barrier - 1].kind != .instrument_rules_activated)
+        if (entry.rules_barrier == 0 or entry.rules_barrier > shard.authoritativeBarrier() or
+            (shard.trace.factAt(entry.rules_barrier) orelse return error.InvalidSnapshotState).kind != .instrument_rules_activated)
             return error.InvalidSnapshotState;
         if (entry.capability) |profile| {
-            if (entry.capability_barrier == 0 or entry.capability_barrier > shard.trace.len or
-                shard.trace.events[entry.capability_barrier - 1].kind != .capability_profile_activated or
+            if (entry.capability_barrier == 0 or entry.capability_barrier > shard.authoritativeBarrier() or
+                (shard.trace.factAt(entry.capability_barrier) orelse return error.InvalidSnapshotState).kind != .capability_profile_activated or
                 profile.exchange_account != shard.exchange_account_identity)
                 return error.InvalidSnapshotState;
         }
@@ -3028,10 +3036,10 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         const decision = command.risk_decision_identity;
         const reservation = command.reservation_identity;
         if (decision == 0 and reservation == 0) continue; // legacy, never qualified to send
-        if (decision == 0 or reservation == 0 or decision >= reservation or reservation > shard.trace.len)
+        if (decision == 0 or reservation == 0 or decision >= reservation or reservation > shard.authoritativeBarrier())
             return error.InvalidSnapshotState;
-        const decision_fact = shard.trace.events[decision - 1];
-        const reservation_fact = shard.trace.events[reservation - 1];
+        const decision_fact = shard.trace.factAt(decision) orelse return error.InvalidSnapshotState;
+        const reservation_fact = shard.trace.factAt(reservation) orelse return error.InvalidSnapshotState;
         if (decision_fact.kind != .risk_accepted or reservation_fact.kind != .risk_reservation_created or
             decision_fact.identity != command.intent_sequence or reservation_fact.identity != command.intent_sequence)
             return error.InvalidSnapshotState;
@@ -3049,7 +3057,7 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
             const kind = pair[1];
             if (ref.barrier == 0) {
                 if (ref.identity != 0 or ref.version != 0) return error.InvalidSnapshotState;
-            } else if (ref.barrier > shard.trace.len or shard.trace.events[ref.barrier - 1].kind != kind or
+            } else if (ref.barrier > shard.authoritativeBarrier() or (shard.trace.factAt(ref.barrier) orelse return error.InvalidSnapshotState).kind != kind or
                 ref.identity == 0 or ref.version == 0)
                 return error.InvalidSnapshotState;
         }
@@ -3060,12 +3068,12 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
                 refs.trading_authorization.version != (std.math.add(u64, control.expected_version, 1) catch return error.InvalidSnapshotState))
                 return error.InvalidSnapshotState;
         }
-        if (refs.capability.barrier != 0 and shard.trace.events[refs.capability.barrier - 1].identity != refs.capability.identity)
+        if (refs.capability.barrier != 0 and (shard.trace.factAt(refs.capability.barrier) orelse return error.InvalidSnapshotState).identity != refs.capability.identity)
             return error.InvalidSnapshotState;
-        if (refs.instrument_rules.barrier != 0 and shard.trace.events[refs.instrument_rules.barrier - 1].identity != refs.instrument_rules.identity)
+        if (refs.instrument_rules.barrier != 0 and (shard.trace.factAt(refs.instrument_rules.barrier) orelse return error.InvalidSnapshotState).identity != refs.instrument_rules.identity)
             return error.InvalidSnapshotState;
         if (refs.dispatch_deadline_monotonic_ns != 0 and
-            (refs.deadline_barrier == 0 or refs.deadline_barrier > shard.trace.len))
+            (refs.deadline_barrier == 0 or refs.deadline_barrier > shard.authoritativeBarrier()))
             return error.InvalidSnapshotState;
         if (refs.exchange_account != 0 and refs.exchange_account != shard.exchange_account_identity)
             return error.InvalidSnapshotState;
@@ -3281,7 +3289,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     const spot_portfolio_position = shard.spotPortfolioPosition();
     const spot_exchange_position = shard.spotExchangePosition();
     const ledger = shard.economic_projection.ledger_summary;
-    hasher.update("StateDigestV5\x00");
+    hasher.update("StateDigestV6\x00");
     digestInt(&hasher, u16, schema_version);
     digestAssetRegistry(&hasher, shard, true);
     digestInt(&hasher, u8, shard.instrument_registry.count);
@@ -3566,6 +3574,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     digestBool(&hasher, shard.oms.recovery_only);
     digestEconomicProjection(&hasher, shard.economic_projection);
     digestInt(&hasher, u64, shard.fencing_token);
+    digestInt(&hasher, u64, shard.authoritativeBarrier());
     digestInt(&hasher, u64, shard.trace.len);
     for (shard.trace.events[0..shard.trace.len]) |event| {
         digestInt(&hasher, u64, event.sequence);
@@ -3927,7 +3936,7 @@ test "asset definition activation rejects rescaling and survives snapshot" {
     try std.testing.expectEqual(@as(u8, 12), shard.activatedAssets().get(1).?.definition.atomic_scale);
     try log.seal();
     var bytes: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
-    const restored = try TradingShard.restoreSnapshot(try shard.snapshot(&log, @intCast(shard.trace.len), &bytes));
+    const restored = try TradingShard.restoreSnapshot(try shard.snapshot(&log, shard.authoritativeBarrier(), &bytes));
     try std.testing.expectEqualDeep(shard.activatedAssets(), restored.shard.activatedAssets());
 }
 

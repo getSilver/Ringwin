@@ -41,6 +41,71 @@ const assertReplayEquivalentConfigured = fixture.assertReplayEquivalentConfigure
 const applyHealthyPrelude = fixture.applyHealthyPrelude;
 const atGroup = fixture.atGroup;
 
+test "global shard barrier rejects checksummed sequence tampering before restore" {
+    var run = try startScenario();
+    try run.decision_journal.seal();
+    run.shard.trace.events[1].sequence = 1;
+    var storage: [64 * 1024]u8 = undefined;
+    const forged = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &storage);
+    try std.testing.expectError(error.InvalidSnapshotState, TradingShard.restoreSnapshot(forged));
+
+    run.shard.trace.events[1].sequence = 2;
+    run.shard.trace.last_sequence += 1;
+    try std.testing.expectError(error.InvalidTrace, run.shard.currentDispatchAuthorityRefs(swap_instrument));
+    try std.testing.expectError(error.InvalidTrace, run.shard.appliedHostActivation(&run.decision_journal));
+    try std.testing.expectError(error.InvalidSnapshotBarrier, run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &storage));
+    // Recompute framing and digest so restore must reject the semantic counter,
+    // rather than relying on a stale payload checksum or metadata digest.
+    const codec = @import("snapshot_codec.zig");
+    var canonical_state = (try codec.read(forged, TradingShard, engine.state_schema_version, engine.release_artifact_identity, engine.schema_registry_identity)).value;
+    canonical_state.trace.events[1].sequence = 2;
+    canonical_state.trace.last_sequence += 1;
+    const mismatched = try codec.write(&storage, .{
+        .state_schema = engine.state_schema_version,
+        .release_artifact = engine.release_artifact_identity,
+        .schema_registry = engine.schema_registry_identity,
+        .barrier = run.shard.trace.last_sequence,
+        .instrument_rules_version = run.shard.instrument_rules_version,
+        .margin_rules_version = run.shard.margin_rules_version,
+        .state_digest = canonical_state.canonicalStateDigest(),
+    }, canonical_state);
+    try std.testing.expectError(error.InvalidSnapshotState, TradingShard.restoreSnapshot(mismatched));
+    canonical_state.trace.last_sequence -= 1;
+    var old_metadata = (try codec.read(mismatched, TradingShard, engine.state_schema_version, engine.release_artifact_identity, engine.schema_registry_identity)).metadata;
+    old_metadata.state_schema = production_contract.previous_state_schema_version;
+    const old_schema = try codec.write(&storage, old_metadata, canonical_state);
+    try std.testing.expectError(error.InvalidSnapshotHeader, TradingShard.restoreSnapshot(old_schema));
+}
+
+test "global shard barrier continues snapshot tail replay and preserves failed append" {
+    var run = try startScenario();
+    try std.testing.expectEqual(@as(u64, 21), run.shard.authoritativeBarrier());
+    try run.decision_journal.seal();
+    var storage: [64 * 1024]u8 = undefined;
+    const snapshot = try run.shard.snapshot(&run.decision_journal, run.shard.authoritativeBarrier(), &storage);
+    var tail = engine.journal.Journal.initAt(run.shard.authoritativeBarrier() + 1);
+    const input = atGroup(11, .{ .identity = 22, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_001 } } });
+    _ = try applyLive(&run.shard, &tail, input);
+    try tail.seal();
+    const restored = try TradingShard.restore(snapshot, tail.bytes());
+    try std.testing.expectEqual(@as(u64, 22), restored.shard.authoritativeBarrier());
+    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+
+    while (run.shard.trace.len < run.shard.trace.events.len) {
+        _ = try run.shard.apply(.{ .core = .{ .identity = run.shard.authoritativeBarrier() + 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_002 } } } });
+    }
+    const digest = run.shard.canonicalStateDigest();
+    try std.testing.expectError(error.TraceFull, run.shard.apply(input));
+    try std.testing.expectEqual(@as(u64, 256), run.shard.authoritativeBarrier());
+    try std.testing.expectEqualSlices(u8, &digest, &run.shard.canonicalStateDigest());
+
+    run.shard.trace.last_sequence = std.math.maxInt(u64);
+    const overflow_digest = run.shard.canonicalStateDigest();
+    try std.testing.expectError(error.Overflow, run.shard.apply(input));
+    try std.testing.expectEqual(std.math.maxInt(u64), run.shard.authoritativeBarrier());
+    try std.testing.expectEqualSlices(u8, &overflow_digest, &run.shard.canonicalStateDigest());
+}
+
 test "Owner native settlements retain partial cost remainder reversal and classified cash exactly once" {
     const demo = @import("demo_authority.zig");
     const durable = @import("durable_store.zig");
@@ -376,7 +441,7 @@ test "unsupported OMS order semantics reject as replayable exact-only facts" {
             .end => break,
             .record => |record| {
                 var changed = record;
-                if (record.sequence == run.shard.trace.len) changed.flags ^= 1 << 8;
+                if (record.sequence == run.shard.authoritativeBarrier()) changed.flags ^= 1 << 8;
                 try forged.append(changed);
             },
         }
@@ -435,7 +500,7 @@ test "market gap rejects a native intent with a replayable reason" {
     try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{ .identity = 106, .payload = .{ .external_order_intent = .{
         .strategy_identity = 1,
         .intent_sequence = 1,
-        .strategy_cursor = run.shard.trace.len + 1,
+        .strategy_cursor = run.shard.authoritativeBarrier() + 1,
         .config_version = 1,
         .activation_identity = 1,
         .portfolio_identity = 1,
@@ -613,7 +678,7 @@ test "native and Python intents cross the same authority and risk seam" {
         .payload = .{ .external_order_intent = .{
             .strategy_identity = authorization.strategy_identity,
             .intent_sequence = 1,
-            .strategy_cursor = python.shard.trace.len + 1,
+            .strategy_cursor = python.shard.authoritativeBarrier() + 1,
             .config_version = authorization.config_version,
             .activation_identity = authorization.activation_identity,
             .portfolio_identity = 1,
@@ -644,7 +709,7 @@ test "native and Python intents cross the same authority and risk seam" {
     var blocked_by_order = python_input;
     blocked_by_order.core.identity = 3;
     blocked_by_order.core.payload.external_order_intent.intent_sequence = 2;
-    blocked_by_order.core.payload.external_order_intent.strategy_cursor = python.shard.trace.len + 1;
+    blocked_by_order.core.payload.external_order_intent.strategy_cursor = python.shard.authoritativeBarrier() + 1;
     const before_open_order = python.shard.trace.len;
     try std.testing.expect((try applyLive(&python.shard, &python.decision_journal, blocked_by_order)) == null);
     try std.testing.expectEqual(shard_event.RejectReason.open_order, python.shard.trace.events[before_open_order].reject_reason);
@@ -661,7 +726,7 @@ test "native and Python intents cross the same authority and risk seam" {
         .payload = .{ .external_order_intent = .{
             .strategy_identity = authorization.strategy_identity,
             .intent_sequence = 1,
-            .strategy_cursor = unauthorized.shard.trace.len + 1,
+            .strategy_cursor = unauthorized.shard.authoritativeBarrier() + 1,
             .config_version = authorization.config_version + 1,
             .activation_identity = authorization.activation_identity,
             .portfolio_identity = 1,
@@ -732,7 +797,7 @@ test "host fault revokes the old activation before a replacement can trade" {
     const premature_frame = try host_gateway.encodeOutputFrame(&premature_frame_storage, config, 1, old_proof.fact_sequence, 1, 100, order_limit_price);
     try std.testing.expectEqual(host_gateway.RejectReason.invalid_cursor, gateway.ingest(premature_frame, 101).rejected.reason);
     const old_identity = run.shard.host_activation_identity;
-    const old_cursor: u64 = @intCast(run.shard.trace.len + 1);
+    const old_cursor: u64 = run.shard.authoritativeBarrier() + 1;
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(12, .{ .identity = 80, .payload = .{ .host_activation_revoked = .{
         .strategy_identity = 1,
         .activation_identity = old_identity,
@@ -777,7 +842,7 @@ test "host fault revokes the old activation before a replacement can trade" {
         .activation_barrier = 0,
         .state_digest = digest,
     } } })));
-    const new_barrier: u64 = @intCast(run.shard.trace.len);
+    const new_barrier: u64 = run.shard.authoritativeBarrier();
     var next_config = config;
     next_config.session.generation += 1;
     next_config.authorization.activation_identity = 2;
@@ -804,7 +869,7 @@ test "host fault revokes the old activation before a replacement can trade" {
     try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(16, .{ .identity = 84, .payload = .{ .external_order_intent = .{
         .strategy_identity = 1,
         .intent_sequence = 3,
-        .strategy_cursor = @intCast(run.shard.trace.len + 1),
+        .strategy_cursor = run.shard.authoritativeBarrier() + 1,
         .config_version = 1,
         .activation_identity = 2,
         .portfolio_identity = 1,
@@ -842,7 +907,7 @@ test "new HostSession revokes the old direct-trade identity" {
     };
     const subscriptions = [_]host_gateway.Subscription{host_gateway.Subscription.of(1, &.{.mark_price})};
     var gateway = try host_gateway.Gateway.init(config, &subscriptions);
-    try gateway.recordPublished(1, @intCast(run.shard.trace.len + 1), 100);
+    try gateway.recordPublished(1, run.shard.authoritativeBarrier() + 1, 100);
     try gateway.activate(&run.shard, &run.decision_journal);
     var next = config;
     next.session.generation += 1;
@@ -872,7 +937,7 @@ test "fresh Gateway revokes a replayed old Host activation before restart" {
     };
     const subscriptions = [_]host_gateway.Subscription{host_gateway.Subscription.of(1, &.{.mark_price})};
     var stale_gateway = try host_gateway.Gateway.init(stale_config, &subscriptions);
-    try stale_gateway.recordPublished(1, @intCast(recovered.trace.len + 1), 100);
+    try stale_gateway.recordPublished(1, recovered.authoritativeBarrier() + 1, 100);
     try std.testing.expectError(error.InvalidAuthorization, stale_gateway.activate(&recovered, &tail));
     const config: host_gateway.Config = .{
         .schema_registry = 1,
@@ -904,7 +969,7 @@ test "active Host exit and timeout journal revocation blocks direct trade" {
         };
         const subscriptions = [_]host_gateway.Subscription{host_gateway.Subscription.of(1, &.{.mark_price})};
         var gateway = try host_gateway.Gateway.init(config, &subscriptions);
-        try gateway.recordPublished(1, @intCast(run.shard.trace.len + 1), 100);
+        try gateway.recordPublished(1, run.shard.authoritativeBarrier() + 1, 100);
         try gateway.activate(&run.shard, &run.decision_journal);
         var supervisor = try host_lifecycle.HostSupervisor.init(host_lifecycle.developmentPlan(0, 1, 0x0003_0900), 0);
         supervisor.state = .active;
@@ -2082,8 +2147,8 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
         try std.testing.expectEqualDeep(before_range_failure, limited.economicSummary());
     }
     try std.testing.expect(proved.risk_decision_identity != proved.reservation_identity);
-    try std.testing.expectEqual(shard_event.EventKind.risk_accepted, live.shard.trace.events[proved.risk_decision_identity - 1].kind);
-    try std.testing.expectEqual(shard_event.EventKind.risk_reservation_created, live.shard.trace.events[proved.reservation_identity - 1].kind);
+    try std.testing.expectEqual(shard_event.EventKind.risk_accepted, live.shard.trace.factAt(proved.risk_decision_identity).?.kind);
+    try std.testing.expectEqual(shard_event.EventKind.risk_reservation_created, live.shard.trace.factAt(proved.reservation_identity).?.kind);
 
     var implementation: simulated_venue.SimulatedVenue = .{};
     var adapter = implementation.adapter();
@@ -2155,7 +2220,7 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     try std.testing.expectError(error.NotSent, gateway.sendFromShard(&paused, proved.command_id, 2 * std.time.ns_per_s));
     try std.testing.expectEqual(@as(u64, 0), gateway.send_attempt_count);
     const lease_barrier = live.shard.risk_lease_valid_through_barrier;
-    live.shard.risk_lease_valid_through_barrier = live.shard.trace.len - 1;
+    live.shard.risk_lease_valid_through_barrier = live.shard.authoritativeBarrier() - 1;
     try std.testing.expectError(error.NotSent, gateway.sendFromShard(&live.shard, proved.command_id, 2 * std.time.ns_per_s));
     live.shard.risk_lease_valid_through_barrier = lease_barrier;
     try std.testing.expectError(error.NotSent, gateway.sendFromShard(&live.shard, proved.command_id, 3 * std.time.ns_per_s));

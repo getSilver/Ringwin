@@ -1,0 +1,10 @@
+1/8 main.test_0...OK
+2/8 trading_shard_tests.test.fresh Gateway revokes a replayed old Host activation before restart...OK
+3/8 trading_shard_tests.test.OMS outbox crosses the sole Gateway and SimulatedVenue seam...core_safety_invariants: dispatch_persist=pass replay_no_send=pass reduce_only_fencing=pass
+OK
+4/8 execution_gateway.test.Gateway reads current authority facts instead of caller proof fields...OK
+5/8 execution_gateway.test.Gateway route and batch admission fail atomically...OK
+6/8 execution_gateway.test.Gateway scopes uncertainty and market health to the affected route...OK
+7/8 trading_shard_fixture.test.qualified SPOT IOC intent crosses Gateway and cash risk before OrderCommand...OK
+8/8 demo_authority.test.Demo policy drives buy and fault cleanup through one durable Gateway...OK
+All 8 tests passed.

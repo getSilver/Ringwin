@@ -230,7 +230,7 @@ pub fn catchUpStrategy(
     var recovery = try strategy_recovery.Recovery.begin(checkpoint, expected, coordinator.barrier);
     if (expected.strategy_cursor < coordinator.barrier) {
         if (events.len == 0) return error.StrategyHistoryGap;
-        _ = try recovery.applyBatch(expected.strategy_cursor + 1, coordinator.barrier, events);
+        _ = try recovery.applyBatch(try std.math.add(u64, expected.strategy_cursor, 1), coordinator.barrier, events);
     } else if (events.len != 0) return error.StrategyReplayPastBarrier;
     const recovered = try recovery.finishRecovery();
     if (recovery.canTrade() or recovery.suppressed_intents == 0 and hasIntent(events)) {
@@ -256,7 +256,7 @@ pub fn catchUpPublishedStrategy(
         if (previous_cursor) |cursor| if (candidate.metadata.strategy_cursor >= cursor)
             return error.CheckpointsNotNewestFirst;
         previous_cursor = candidate.metadata.strategy_cursor;
-        const start = candidate.metadata.strategy_cursor + 1;
+        const start = try std.math.add(u64, candidate.metadata.strategy_cursor, 1);
         var first_index: usize = 0;
         while (first_index < events.len and events[first_index].sequence < start) : (first_index += 1) {}
         return catchUpStrategy(coordinator, candidate.container, candidate.metadata, events[first_index..]) catch |err| switch (err) {
@@ -329,10 +329,10 @@ pub const Cutover = struct {
     /// Records that the candidate consumed authoritative facts through the final barrier.
     pub fn catchUpCandidate(self: *Cutover, authoritative: trading.TradingShard, candidate: trading.TradingShard) !void {
         if (self.phase != .draining) return error.InvalidCutoverTransition;
-        if (candidate.trace.len != authoritative.trace.len or
+        if (candidate.authoritativeBarrier() != authoritative.authoritativeBarrier() or
             !std.mem.eql(u8, &candidate.canonicalStateDigest(), &authoritative.canonicalStateDigest()))
             return error.CandidateBehindCutoverBarrier;
-        self.candidate_barrier = candidate.trace.len;
+        self.candidate_barrier = candidate.authoritativeBarrier();
         self.candidate_digest = candidate.canonicalStateDigest();
     }
 
@@ -351,7 +351,7 @@ pub const Cutover = struct {
         command_identity: u128,
     ) ![]const trading.oms.Command {
         if (self.phase != .candidate) return error.InvalidCutoverTransition;
-        const barrier = shard.trace.len + 1;
+        const barrier = try std.math.add(u64, shard.authoritativeBarrier(), 1);
         _ = try applyCoreStable(shard, stable_journal, .{
             .identity = @truncate(command_identity),
             .payload = .{ .control_command = .{
@@ -383,7 +383,7 @@ pub const Cutover = struct {
             .payload = .{ .strategy_cutover_fence = .{ .strategy_instance = strategy_instance } },
         });
         self.scope = .{ .strategy_instance = strategy_instance };
-        self.quiesce_barrier = shard.trace.len;
+        self.quiesce_barrier = shard.authoritativeBarrier();
         self.phase = .quiescing;
         return shard.oms.emitted();
     }
@@ -409,9 +409,9 @@ pub const Cutover = struct {
     ) !VersionActivationEvent {
         if (self.phase != .draining) return error.InvalidCutoverTransition;
         const digest = shard.canonicalStateDigest();
-        if (self.candidate_barrier != shard.trace.len or !std.mem.eql(u8, &self.candidate_digest, &digest))
+        if (self.candidate_barrier != shard.authoritativeBarrier() or !std.mem.eql(u8, &self.candidate_digest, &digest))
             return error.CandidateBehindCutoverBarrier;
-        const barrier = shard.trace.len + 1;
+        const barrier = try std.math.add(u64, shard.authoritativeBarrier(), 1);
         const event: VersionActivationEvent = .{
             .activation_identity = activation_identity,
             .generation = self.generation + 1,
@@ -700,7 +700,7 @@ test "strategy cutover persists a scoped fence and leaves unrelated orders live"
 test "cutover failures and forward rollback never regress economic state or generation" {
     var shard: trading.TradingShard = .{ .release_generation = 4, .active_release = 10, .active_strategy_instance = 20 };
     for (@import("asset_registry.zig").testDefinitions(6, 8)) |definition|
-        _ = try shard.apply(.{ .core = .{ .identity = @intCast(shard.trace.len + 1), .payload = .{ .asset_definition_activated = definition } } });
+        _ = try shard.apply(.{ .core = .{ .identity = @intCast(shard.authoritativeBarrier() + 1), .payload = .{ .asset_definition_activated = definition } } });
     _ = try shard.apply(.{ .core = .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{
         .version = 1,
         .instrument_identity = swap_instrument,
@@ -729,7 +729,7 @@ test "cutover failures and forward rollback never regress economic state or gene
         .price_ticks = 50_000_000,
         .fee_atoms = 7,
     } } } });
-    var stable_journal = trading.journal.Journal.initAt(shard.trace.len + 1);
+    var stable_journal = trading.journal.Journal.initAt(shard.authoritativeBarrier() + 1);
     var cutover: Cutover = .{ .generation = 4, .active_release = 10, .active_strategy_instance = 20, .phase = .active };
     const candidate: Candidate = .{
         .release = 11,

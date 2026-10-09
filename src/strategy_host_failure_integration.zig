@@ -285,7 +285,7 @@ fn runOutputFull(host: *lifecycle.ManagedHost, plan: lifecycle.Plan, io: std.Io)
     var next_config = config;
     next_config.session.generation += 1;
     next_config.authorization.activation_identity = try authority.shard.nextHostActivationIdentity();
-    next_config.authorization.activation_barrier = @intCast(authority.shard.trace.len);
+    next_config.authorization.activation_barrier = @intCast(authority.shard.authoritativeBarrier());
     try gateway.beginSession(next_config, &authority.shard, &authority.decision_journal);
     const next_digest = authority.shard.canonicalStateDigest();
     _ = try fixture.apply(&authority, fixture.atGroup(3, .{ .identity = 3, .payload = .{ .host_activated = .{
