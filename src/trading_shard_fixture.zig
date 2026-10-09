@@ -5,6 +5,7 @@
 //! `TradingShard.apply`.
 
 const std = @import("std");
+const durable = @import("durable_store.zig");
 const canonical = @import("canonical_event.zig");
 const journal = @import("journal.zig");
 const host_gateway = @import("strategy_host_gateway.zig");
@@ -17,13 +18,13 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-pub const expected_happy_digest = "8304e5bd43d4ca7b696f770b085d3342ae4e67938cc240223e3cdc770d65ff5d";
+pub const expected_happy_digest = "322181e89ddf31d8929b2a91debc79ebe7325141ef0c38f64ac883cb3bda4fa4";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "b7702d50718635cd7d9ce36ac86f1df6fc93f3ff9ac6b00ec6fba1fe11a72efc",
-    "cfbb98d1f72be450016754ef2026f6132f9779b85e2ceedefaa40c98afd442d6",
-    "d9b988ac6b6ae326761ab6f9fb556cf968aa2e3a13e8644d1dc7e920bed62cf7",
-    expected_happy_digest,
+    "8e6602115475e7e74bd34f5a92b752411bdaca439c1de174f058357ce08a3c7c",
+    "c73ce82635b09725289e32225181e44ec70709014d7bc98b805d756adddacbdf",
+    "94dec6c3f1253983576fa827ff0d8058c3c070aeb311845d4e7a208081a6fd1c",
+    "565a9af845985f7b21f22013b0c32cc644430bf1da98f608d8ce77c174709dcc",
 };
 pub const order_limit_price: i64 = 50_100_000_000;
 
@@ -783,20 +784,20 @@ test "fixed trajectories retain their sealed barriers and recovery digests" {
 
 test "authoritative snapshot round trips at an exact shard barrier" {
     const run = try runHappyPath();
-    var storage: [64 * 1024]u8 = undefined;
+    var storage: [durable.max_snapshot_bytes]u8 = undefined;
     const encoded = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &storage);
     const restored = try engine.TradingShard.restoreSnapshot(encoded);
     try std.testing.expectEqual(run.decision_journal.last_sequence, restored.barrier);
     try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
 
-    var duplicate_storage: [64 * 1024]u8 = undefined;
+    var duplicate_storage: [durable.max_snapshot_bytes]u8 = undefined;
     const duplicate = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &duplicate_storage);
     try std.testing.expectEqualSlices(u8, encoded, duplicate);
     const independent = try runHappyPath();
-    var independent_storage: [64 * 1024]u8 = undefined;
+    var independent_storage: [durable.max_snapshot_bytes]u8 = undefined;
     const independent_encoded = try independent.shard.snapshot(&independent.decision_journal, independent.decision_journal.last_sequence, &independent_storage);
     try std.testing.expectEqualSlices(u8, encoded, independent_encoded);
-    var damaged_storage: [64 * 1024]u8 = undefined;
+    var damaged_storage: [durable.max_snapshot_bytes]u8 = undefined;
     @memcpy(damaged_storage[0..encoded.len], encoded);
     damaged_storage[encoded.len - 1] ^= 1;
     try std.testing.expectError(error.InvalidSnapshotPayload, engine.TradingShard.restoreSnapshot(damaged_storage[0..encoded.len]));
@@ -806,7 +807,7 @@ test "authoritative snapshot round trips at an exact shard barrier" {
 test "snapshot restore replays only the stable journal tail without send capability" {
     var prefix = try healthyScenarioAuthorized(defaultAuthorization(), .leveraged);
     try prefix.decision_journal.seal();
-    var snapshot_storage: [64 * 1024]u8 = undefined;
+    var snapshot_storage: [durable.max_snapshot_bytes]u8 = undefined;
     const encoded = try prefix.shard.snapshot(&prefix.decision_journal, prefix.decision_journal.last_sequence, &snapshot_storage);
     var live = prefix.shard;
     var tail = journal.Journal.initAt(prefix.decision_journal.last_sequence + 1);

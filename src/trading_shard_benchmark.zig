@@ -1,5 +1,6 @@
 //! Benchmark orchestration for deterministic TradingShard fixtures.
 const std = @import("std");
+const durable = @import("durable_store.zig");
 const builtin = @import("builtin");
 const engine = @import("trading_shard.zig");
 const fixture = @import("trading_shard_fixture.zig");
@@ -729,7 +730,7 @@ test "four shards replay and isolate overload" {
     const run = try initializedBenchmarkRun();
     var sealed = run.decision_journal;
     try sealed.seal();
-    var storage: [64 * 1024]u8 = undefined;
+    var storage: [durable.max_snapshot_bytes]u8 = undefined;
     const restored = try TradingShard.restoreSnapshot(try run.shard.snapshot(&sealed, run.shard.authoritativeBarrier(), &storage));
     try std.testing.expectEqual(run.shard.authoritativeBarrier(), restored.barrier);
     try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());

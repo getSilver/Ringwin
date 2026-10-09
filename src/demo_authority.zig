@@ -12,6 +12,66 @@ const okx = @import("okx_venue_adapter.zig");
 const failover = @import("failover.zig");
 const raw_ingress = @import("raw_ingress.zig");
 
+pub const max_private_resume_bytes = okx.max_resume_checkpoint_bytes;
+pub const PrivateRecoveryBoundary = struct {
+    schema: u16 = 1,
+    decision_stream: u64,
+    decision_barrier: u64,
+    core_digest: [32]u8,
+    raw_stream: durable.StreamIdentity,
+    raw_sequence: u64,
+    raw_digest: [32]u8,
+    raw_archive_root: [32]u8,
+    adapter_session: u64,
+    canonical_stream: u128,
+    canonical_sequence: u64,
+    seed_digest: [32]u8,
+};
+
+pub const PrivateCheckpointView = struct {
+    core_snapshot: []const u8,
+    boundary: ?PrivateRecoveryBoundary = null,
+    seed: []const u8 = &.{},
+};
+
+const private_bundle_magic = "RWPRV001";
+
+fn validatePrivateBoundary(boundary: PrivateRecoveryBoundary) !void {
+    if (boundary.schema != 1 or boundary.decision_stream == 0 or boundary.decision_barrier == 0 or
+        boundary.raw_stream.domain != .raw_ingress or boundary.raw_stream.id == 0 or boundary.raw_sequence == 0 or
+        boundary.adapter_session == 0 or boundary.canonical_stream == 0 or boundary.canonical_sequence == 0 or
+        boundary.canonical_stream != @as(u128, boundary.adapter_session) or boundary.canonical_sequence == std.math.maxInt(u64) or boundary.raw_sequence == std.math.maxInt(u64) or
+        std.mem.allEqual(u8, &boundary.raw_archive_root, 0) or std.mem.allEqual(u8, &boundary.raw_digest, 0))
+        return error.InvalidPrivateResumeCheckpoint;
+}
+
+pub fn privateCheckpointView(encoded: []const u8) !PrivateCheckpointView {
+    if (!std.mem.startsWith(u8, encoded, private_bundle_magic)) return .{ .core_snapshot = encoded };
+    if (encoded.len < 20) return error.InvalidPrivateResumeCheckpoint;
+    const metadata_len = std.mem.readInt(u32, encoded[8..12], .little);
+    const core_len = std.mem.readInt(u32, encoded[12..16], .little);
+    const seed_len = std.mem.readInt(u32, encoded[16..20], .little);
+    if (seed_len == 0 or seed_len > max_private_resume_bytes or core_len == 0 or
+        @as(u64, 20) + metadata_len + core_len + seed_len != encoded.len) return error.InvalidPrivateResumeCheckpoint;
+    const boundary = try @import("snapshot_codec.zig").decodeBare(encoded[20..][0..metadata_len], PrivateRecoveryBoundary);
+    try validatePrivateBoundary(boundary);
+    const seed = encoded[20 + metadata_len + core_len ..];
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(seed, &digest, .{});
+    if (!std.mem.eql(u8, &digest, &boundary.seed_digest)) return error.InvalidPrivateResumeCheckpoint;
+    return .{ .core_snapshot = encoded[20 + metadata_len ..][0..core_len], .boundary = boundary, .seed = seed };
+}
+
+pub fn recoverPrivateCheckpoint(store: durable.Store, io: std.Io, stream: durable.StreamIdentity) !PrivateCheckpointView {
+    const recovered = try store.recover(io, stream);
+    if (recovered.status != .ready or recovered.gate != .open or recovered.last_sequence != recovered.committed_barrier)
+        return error.PrivateRecoveryHistoryUnavailable;
+    const view = try privateCheckpointView(recovered.snapshot);
+    if (view.boundary) |boundary| if (boundary.decision_stream != stream.id or boundary.decision_barrier > recovered.snapshot_barrier)
+        return error.InvalidPrivateResumeCheckpoint;
+    return view;
+}
+
 /// Explicit local Demo policy. It supplies authorization limits, never an
 /// account balance, lease token, Venue fact, or send proof.
 pub const Policy = struct {
@@ -249,8 +309,15 @@ pub const Owner = struct {
     decision_journal: journal.Journal = journal.Journal.init(),
     ready: bool = false,
     closed: bool = false,
+    checkpoint_pending: bool = false,
+    recovery_ingress_verified: bool = false,
+    committing_checkpoint: bool = false,
     recovery_ingress: ?durable.StreamIdentity = null,
     recovery_ingress_store: ?durable.Store = null,
+    private_boundary: ?PrivateRecoveryBoundary = null,
+    private_resume: [max_private_resume_bytes]u8 = undefined,
+    private_resume_len: usize = 0,
+    private_seed_restored: bool = false,
 
     /// Caller must supply an operator-owned virgin identity. A missing file is
     /// never interpreted as permission to create a new authority history.
@@ -267,27 +334,53 @@ pub const Owner = struct {
         if (recovered.status != .ready or recovered.gate != .open or
             recovered.committed_barrier == 0 or recovered.last_sequence != recovered.committed_barrier)
             return error.DecisionLogUnavailable;
-        var recovered_shard = if (recovered.tail.len == 0)
-            (trading.TradingShard.restoreSnapshot(recovered.snapshot) catch return error.DecisionLogUnavailable).shard
+        const checkpoint_view = privateCheckpointView(recovered.snapshot) catch return error.DecisionLogUnavailable;
+        var recovered_shard = if (recovered.tail_count == 0 and recovered.tail.len == 0)
+            (trading.TradingShard.restoreSnapshot(checkpoint_view.core_snapshot) catch return error.DecisionLogUnavailable).shard
         else blk: {
-            const restored = trading.TradingShard.restore(recovered.snapshot, recovered.tail) catch return error.DecisionLogUnavailable;
+            const tails = if (recovered.tail_count != 0) recovered.tail_segments[0..recovered.tail_count] else &.{recovered.tail};
+            const restored = trading.TradingShard.restoreSegments(checkpoint_view.core_snapshot, tails) catch return error.DecisionLogUnavailable;
             // An open, fully committed tail is legal; the Store verified its
             // continuity and the shard replay verified every derived fact.
             break :blk restored.shard;
         };
         if (recovered_shard.authoritativeBarrier() != recovered.committed_barrier) return error.DecisionLogUnavailable;
+        if (recovered_shard.checkpoint) |receipt| if (receipt.stream != stream.id) return error.DecisionLogUnavailable;
+        if (recovered_shard.checkpointGeneration() != 0 and
+            !(store.verifyArchiveReceipt(io, stream, recovered_shard.checkpointArchiveBarrier(), recovered_shard.checkpointArchiveRoot()) catch return error.DecisionLogUnavailable))
+            return error.DecisionLogUnavailable;
         // A committed decision prefix may precede durable private facts. Every
         // restart re-arms admission, independent of the saved snapshot flag.
         recovered_shard.recovery_admission_pending = true;
         const next_sequence = std.math.add(u64, recovered.last_sequence, 1) catch return error.DecisionLogUnavailable;
-        return .{
+        var recovered_journal = journal.Journal.initAt(next_sequence);
+        const active_segment = if (recovered.active_segment.len != 0) recovered.active_segment else recovered.tail;
+        if (active_segment.len != 0) {
+            var reader = journal.Reader.init(active_segment) catch return error.DecisionLogUnavailable;
+            recovered_journal = journal.Journal.initAt(reader.next_sequence);
+            while (true) switch (reader.next() catch return error.DecisionLogUnavailable) {
+                .record => |record| recovered_journal.append(record) catch return error.DecisionLogUnavailable,
+                .end => break,
+            };
+            if (recovered.segment_sealed) recovered_journal.seal() catch return error.DecisionLogUnavailable;
+        }
+        var owner: Owner = .{
             .store = store,
             .io = io,
             .stream = stream,
             .shard = recovered_shard,
-            .decision_journal = journal.Journal.initAt(next_sequence),
+            .decision_journal = recovered_journal,
+            .checkpoint_pending = recovered.segment_sealed or (recovered.archived_barrier == recovered_shard.authoritativeBarrier() and !std.mem.eql(u8, &recovered.archive_root, &recovered_shard.checkpointArchiveRoot())),
             .ready = true,
         };
+        if (checkpoint_view.boundary) |boundary| {
+            if (boundary.decision_stream != stream.id or boundary.decision_barrier > recovered.snapshot_barrier)
+                return error.DecisionLogUnavailable;
+            owner.private_boundary = boundary;
+            @memcpy(owner.private_resume[0..checkpoint_view.seed.len], checkpoint_view.seed);
+            owner.private_resume_len = checkpoint_view.seed.len;
+        }
+        return owner;
     }
 
     /// Bind the configured durable ingress identity explicitly. Decision-only
@@ -308,6 +401,11 @@ pub const Owner = struct {
         const raw = store.recover(self.io, ingress) catch return error.DecisionLogUnavailable;
         if (raw.gate != .open or raw.last_sequence == 0 or raw.last_sequence != raw.committed_barrier)
             return error.DecisionLogUnavailable;
+        if (self.private_boundary) |boundary| {
+            if (!std.meta.eql(boundary.raw_stream, ingress) or
+                !(store.verifyArchiveReceipt(self.io, ingress, boundary.raw_sequence, boundary.raw_archive_root) catch return error.DecisionLogUnavailable))
+                return error.PrivateRecoveryBoundaryUnavailable;
+        }
         self.recovery_ingress = ingress;
         self.recovery_ingress_store = store;
     }
@@ -315,10 +413,16 @@ pub const Owner = struct {
     /// Apply to a candidate and publish only after every record and the
     /// barrier have been committed. A fault closes this owner permanently.
     pub fn apply(self: *Owner, input: trading.CanonicalEvent) !?trading.OrderCommand {
+        const maintenance = input == .core and input.core.payload == .checkpoint_committed;
+        if ((maintenance and !self.committing_checkpoint) or (self.checkpoint_pending and !maintenance)) return error.DecisionLogUnavailable;
         if (self.closed or self.store.safetyGate() != .open) {
             self.closeAdmission();
             return error.DecisionLogUnavailable;
         }
+        if (self.private_boundary) |boundary| if (self.shard.authoritativeBarrier() - boundary.decision_barrier >= 1024) {
+            self.closeAdmission();
+            return error.PrivateRecoveryCapacity;
+        };
         var candidate = self.shard;
         var candidate_journal = self.decision_journal;
         const before = candidate_journal.last_sequence;
@@ -333,6 +437,10 @@ pub const Owner = struct {
             self.closeAdmission();
             return rejected.?;
         }
+        if (self.private_boundary) |boundary| if (candidate.authoritativeBarrier() - boundary.decision_barrier > 1024) {
+            self.closeAdmission();
+            return error.PrivateRecoveryCapacity;
+        };
         var reader = journal.Reader.init(candidate_journal.bytes()) catch {
             self.closeAdmission();
             return error.DecisionLogUnavailable;
@@ -378,43 +486,133 @@ pub const Owner = struct {
         if (!self.ready or self.closed or !self.shard.recovery_admission_pending or
             self.store.safetyGate() != .open or !std.meta.eql(stream, bound))
             return error.DecisionLogUnavailable;
+        if (self.private_boundary != null and !self.private_seed_restored) return error.PrivateRecoveryBoundaryUnavailable;
         const before = try ingress_store.recover(self.io, stream);
-        try raw_ingress.replayCommitted(ingress_store, self.io, stream, consumer);
+        if (self.private_boundary) |boundary|
+            try raw_ingress.replayCommittedAfter(ingress_store, self.io, stream, boundary.raw_sequence, 2 * 1024 * 1024, consumer)
+        else
+            try raw_ingress.replayCommitted(ingress_store, self.io, stream, consumer);
         const after = try ingress_store.recover(self.io, stream);
         if (self.closed or self.store.safetyGate() != .open or after.gate != .open or
             after.last_sequence != before.last_sequence or after.committed_barrier != before.committed_barrier)
             return error.DecisionLogUnavailable;
-        self.shard.recovery_admission_pending = false;
+        self.recovery_ingress_verified = true;
+        self.shard.recovery_admission_pending = self.checkpoint_pending;
         self.recovery_ingress_store = null;
     }
 
     /// Seal a genuinely ingested bootstrap before allowing dispatch.
     pub fn sealBootstrap(self: *Owner) !void {
-        if (self.ready or self.closed or self.shard.recovery_admission_pending or self.store.safetyGate() != .open or self.shard.authoritativeBarrier() == 0 or
-            self.shard.authoritativeBarrier() != self.decision_journal.last_sequence)
+        if (self.ready or self.shard.recovery_admission_pending)
             return error.DecisionLogUnavailable;
-        var sealed = self.decision_journal;
-        sealed.seal() catch return error.DecisionLogUnavailable;
-        var snapshot_buffer: [durable.max_snapshot_bytes]u8 = undefined;
-        const snapshot = self.shard.snapshot(&sealed, sealed.last_sequence, &snapshot_buffer) catch return error.DecisionLogUnavailable;
-        self.store.seal(self.io, self.stream) catch {
-            self.closeAdmission();
-            return error.DecisionLogUnavailable;
-        };
-        self.store.publishSnapshot(self.io, self.stream, sealed.last_sequence, snapshot) catch {
-            self.closeAdmission();
-            return error.DecisionLogUnavailable;
-        };
-        self.store.rotate(self.io, self.stream) catch {
-            self.closeAdmission();
-            return error.DecisionLogUnavailable;
-        };
-        const next_sequence = std.math.add(u64, sealed.last_sequence, 1) catch {
-            self.closeAdmission();
-            return error.DecisionLogUnavailable;
-        };
-        self.decision_journal = journal.Journal.initAt(next_sequence);
+        self.checkpointCommitted() catch return error.DecisionLogUnavailable;
         self.ready = true;
+    }
+
+    /// Publish a complete old barrier before its verified continuation can
+    /// reclaim the resident trace. No candidate becomes sendable before commit.
+    pub fn checkpoint(self: *Owner) !void {
+        if (!self.ready) return error.DecisionLogUnavailable;
+        if (self.checkpoint_pending and self.decision_journal.records == 0) return self.completeCheckpoint();
+        self.checkpointCommitted() catch return error.DecisionLogUnavailable;
+    }
+
+    pub fn checkpointPrivate(self: *Owner, boundary: PrivateRecoveryBoundary, seed: []const u8) !void {
+        errdefer self.closeAdmission();
+        try validatePrivateBoundary(boundary);
+        if (!self.ready or self.closed or self.checkpoint_pending or seed.len == 0 or seed.len > self.private_resume.len or
+            boundary.schema != 1 or boundary.decision_stream != self.stream.id or
+            boundary.decision_barrier != self.shard.authoritativeBarrier() or
+            !std.mem.eql(u8, &boundary.core_digest, &self.shard.canonicalStateDigest()))
+            return error.PrivateRecoveryBoundaryUnavailable;
+        var seed_digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(seed, &seed_digest, .{});
+        if (!std.mem.eql(u8, &seed_digest, &boundary.seed_digest)) return error.InvalidPrivateResumeCheckpoint;
+        self.private_boundary = boundary;
+        @memcpy(self.private_resume[0..seed.len], seed);
+        self.private_resume_len = seed.len;
+        try self.checkpoint();
+    }
+
+    fn durableSnapshot(self: *const Owner, core_snapshot: []const u8, destination: []u8) ![]const u8 {
+        const boundary = self.private_boundary orelse return core_snapshot;
+        if (destination.len < 20) return error.SnapshotTooLarge;
+        const metadata = try @import("snapshot_codec.zig").encodeBare(destination[20..], boundary);
+        const len = 20 + metadata.len + core_snapshot.len + self.private_resume_len;
+        if (len > destination.len) return error.SnapshotTooLarge;
+        @memcpy(destination[0..8], private_bundle_magic);
+        std.mem.writeInt(u32, destination[8..12], @intCast(metadata.len), .little);
+        std.mem.writeInt(u32, destination[12..16], @intCast(core_snapshot.len), .little);
+        std.mem.writeInt(u32, destination[16..20], @intCast(self.private_resume_len), .little);
+        @memcpy(destination[20 + metadata.len ..][0..core_snapshot.len], core_snapshot);
+        @memcpy(destination[20 + metadata.len + core_snapshot.len ..][0..self.private_resume_len], self.private_resume[0..self.private_resume_len]);
+        return destination[0..len];
+    }
+
+    /// Resume an already durable rotation; recovery itself never writes or sends.
+    pub fn completeCheckpoint(self: *Owner) !void {
+        errdefer self.closeAdmission();
+        if (!self.ready or self.closed or !self.checkpoint_pending or self.decision_journal.records != 0 or self.store.safetyGate() != .open)
+            return error.DecisionLogUnavailable;
+        const barrier = self.shard.authoritativeBarrier();
+        const generation = try std.math.add(u64, self.shard.checkpointGeneration(), 1);
+        const archive = try self.store.archiveReceipt(self.io, self.stream);
+        if (!std.meta.eql(archive.stream, self.stream) or archive.covered_first != 1 or archive.covered_last != barrier or
+            archive.segment_count != generation or !try self.store.verifyArchiveReceipt(self.io, self.stream, barrier, archive.ordered_root))
+            return error.DecisionLogUnavailable;
+        const receipt = try self.shard.checkpointReceipt(self.stream.id, generation, archive.ordered_root);
+        self.committing_checkpoint = true;
+        defer self.committing_checkpoint = false;
+        _ = try self.apply(.{ .core = .{ .identity = generation, .payload = .{ .checkpoint_committed = receipt } } });
+        self.checkpoint_pending = false;
+        if (self.recovery_ingress_verified) self.shard.recovery_admission_pending = false;
+    }
+    fn checkpointCommitted(self: *Owner) !void {
+        errdefer self.closeAdmission();
+        if (self.closed or self.store.safetyGate() != .open or self.shard.authoritativeBarrier() == 0 or
+            self.shard.authoritativeBarrier() != self.decision_journal.last_sequence or self.decision_journal.records == 0)
+            return error.DecisionLogUnavailable;
+        const barrier = self.shard.authoritativeBarrier();
+        const generation = try std.math.add(u64, self.shard.checkpointGeneration(), 1);
+        var sealed = self.decision_journal;
+        if (!sealed.sealed) try sealed.seal();
+        var snapshot_buffer: [durable.max_snapshot_bytes]u8 = undefined;
+        const core_snapshot = try self.shard.snapshot(&sealed, barrier, &snapshot_buffer);
+        var bundle_buffer: [durable.max_snapshot_bytes]u8 = undefined;
+        const snapshot = try self.durableSnapshot(core_snapshot, &bundle_buffer);
+        if (!self.decision_journal.sealed) try self.store.seal(self.io, self.stream);
+        // A recovered seal may already have published this exact barrier.
+        // Reuse its committed snapshot: the restart admission fence is runtime
+        // state and must not create a conflicting snapshot object at that barrier.
+        var already_published = false;
+        if (self.checkpoint_pending and self.decision_journal.sealed) {
+            const published = try self.store.recover(self.io, self.stream);
+            if (published.snapshot_barrier == barrier and published.snapshot.len != 0) {
+                const view = try privateCheckpointView(published.snapshot);
+                const restored = try trading.TradingShard.restoreSnapshot(view.core_snapshot);
+                if (restored.barrier != barrier or !std.mem.eql(u8, &restored.shard.canonicalStateDigest(), &self.shard.canonicalStateDigest()))
+                    return error.DecisionLogUnavailable;
+                already_published = true;
+            }
+        }
+        if (!already_published) try self.store.publishSnapshot(self.io, self.stream, barrier, snapshot);
+        try self.store.rotate(self.io, self.stream);
+        const archive = try self.store.archiveReceipt(self.io, self.stream);
+        var payload_digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(sealed.bytes(), &payload_digest, .{});
+        if (!std.meta.eql(archive.stream, self.stream) or archive.covered_first != 1 or archive.covered_last != barrier or
+            archive.segment_count != generation or archive.latest_first_sequence != barrier - sealed.records + 1 or
+            archive.latest_last_sequence != barrier or archive.latest_byte_len != sealed.bytes().len or
+            !std.mem.eql(u8, &archive.latest_payload_digest, &payload_digest))
+            return error.DecisionLogUnavailable;
+        const receipt = try self.shard.checkpointReceipt(self.stream.id, generation, archive.ordered_root);
+        const next_sequence = try std.math.add(u64, barrier, 1);
+        self.decision_journal = journal.Journal.initAt(next_sequence);
+        self.committing_checkpoint = true;
+        defer self.committing_checkpoint = false;
+        _ = try self.apply(.{ .core = .{ .identity = generation, .payload = .{ .checkpoint_committed = receipt } } });
+        self.checkpoint_pending = false;
+        if (self.recovery_ingress_verified) self.shard.recovery_admission_pending = false;
     }
 
     pub fn source(self: *const Owner) !*const trading.TradingShard {
@@ -428,11 +626,12 @@ pub const Owner = struct {
     pub fn committedSnapshot(self: *const Owner, destination: []u8) ![]const u8 {
         const shard = try self.source();
         var sealed = self.decision_journal;
-        try sealed.seal();
+        if (!sealed.sealed) try sealed.seal();
         return shard.snapshot(&sealed, shard.authoritativeBarrier(), destination);
     }
 
     pub fn send(self: *const Owner, gateway: *execution.Gateway, guard: *failover.GatewayLeaseGuard, command_id: u64, now_monotonic_ns: u64) !venue.SendResult {
+        if (self.checkpoint_pending) return error.DecisionLogUnavailable;
         const shard = try self.source();
         return sendFromShard(shard, gateway, guard, command_id, now_monotonic_ns);
     }
@@ -550,6 +749,7 @@ test "Demo owner commits before publication and recovers only a complete barrier
     const memory = try std.testing.allocator.create(durable.MemoryAdapter);
     defer std.testing.allocator.destroy(memory);
     memory.* = .init();
+    defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     var owner = try Owner.bootstrap(memory.interface(), undefined, stream);
     try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
@@ -562,7 +762,8 @@ test "Demo owner commits before publication and recovers only a complete barrier
     try std.testing.expectEqual(owner.shard.authoritativeBarrier(), (try memory.interface().recover(undefined, stream)).committed_barrier);
     try owner.sealBootstrap();
     const source = try owner.source();
-    try std.testing.expectEqual(@as(u64, 1), source.authoritativeBarrier());
+    try std.testing.expectEqual(@as(u64, 2), source.authoritativeBarrier());
+    try std.testing.expectEqual(@as(u64, 1), source.checkpointGeneration());
     var restored = try Owner.recover(memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &source.canonicalStateDigest(), &(try restored.source()).canonicalStateDigest());
     _ = try owner.apply(genesis[1]);
@@ -640,6 +841,7 @@ test "Demo owner closes persistence faults at their last proven barrier" {
     };
     for (cases) |case| {
         var memory = durable.MemoryAdapter.init();
+        defer memory.deinit();
         var owner = try Owner.bootstrap(memory.interface(), undefined, stream);
         if (case.seal) {
             _ = try owner.apply(genesis[0]);
@@ -657,6 +859,288 @@ test "Demo owner closes persistence faults at their last proven barrier" {
     }
 }
 
+fn checkOwnerCheckpointRounds(store: durable.Store, io: std.Io) ![32]u8 {
+    const fixture = @import("trading_shard_fixture.zig");
+    const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 903 };
+    var owner = try Owner.bootstrap(store, io, stream);
+    const genesis = fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged);
+    for (genesis) |event| _ = try owner.apply(event);
+    _ = try owner.apply(fixture.atGroup(11, .{ .identity = 3, .payload = .{ .host_activated = .{
+        .strategy_identity = 1,
+        .config_version = 1,
+        .activation_identity = 1,
+        .session = .{ .fencing = 1, .shard = 0, .generation = 1 },
+        .activation_barrier = 0,
+        .state_digest = owner.shard.canonicalStateDigest(),
+    } } }));
+    try owner.sealBootstrap();
+    _ = try owner.apply(fixture.atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = 3, .price_atoms = 50_000_000_000 } } }));
+    _ = try owner.apply(fixture.canonicalAt(12, 99, .{ .instrument_definition_observed = .{ .instrument = 3, .rules_version = 1 } }));
+    _ = try owner.apply(fixture.snapshotAt(13, 100));
+    _ = try owner.apply(fixture.deltaAt(14, 100, 101, 49_850_000_000));
+    const command = (try owner.apply(fixture.atGroup(15, .{ .identity = 1, .payload = .{ .timer = fixture.timer(fixture.happy_order_quantity) } }))) orelse return error.MissingOrderCommand;
+    const facts = try fixture.happyVenueFacts(command);
+    for (facts[0..4]) |event| _ = try owner.apply(event);
+    // A transport uncertainty never discards already applied economics.
+    _ = try owner.apply(fixture.canonicalAt(19, 106, .{ .order_dispatch_result = .{ .command = command.command_id, .state = .unknown } }));
+    const initial_barrier = owner.shard.authoritativeBarrier();
+    const reservation = try owner.shard.activeReservationAtoms();
+    const initial_authority = try owner.shard.currentDispatchAuthorityRefs(3);
+    const initial_command = owner.shard.oms.command_history[0];
+    for (0..100) |round| {
+        for (0..8) |offset| {
+            const identity = 10_000 + round * 8 + offset;
+            _ = try owner.apply(fixture.atGroup(identity, .{ .identity = identity, .payload = .{ .mark_price = .{ .instrument = 3, .price_atoms = 50_000_000_000 + @as(i128, @intCast(identity)) } } }));
+        }
+        try owner.checkpoint();
+        try std.testing.expectEqual(@as(u64, round + 2), owner.shard.checkpointGeneration());
+        try std.testing.expectEqual(trading.oms.OrderState.unknown, owner.shard.oms.orderById(command.order_id).?.state);
+        try std.testing.expectEqual(@as(i64, 40), owner.shard.economicSummary().portfolio.swap.quantity);
+        try std.testing.expectEqual(@as(i128, 149_700), owner.shard.economicSummary().portfolio.fee_atoms);
+        try std.testing.expectEqual(reservation, try owner.shard.activeReservationAtoms());
+        try std.testing.expectEqualDeep(initial_authority, try owner.shard.currentDispatchAuthorityRefs(3));
+        try std.testing.expectEqualDeep(initial_command, owner.shard.oms.command_history[0]);
+        const recovered = try Owner.recover(store, io, stream);
+        try std.testing.expect(recovered.shard.recovery_admission_pending);
+        try std.testing.expectEqual(owner.shard.authoritativeBarrier(), recovered.shard.authoritativeBarrier());
+        try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
+        try std.testing.expectEqual(trading.oms.OrderState.unknown, recovered.shard.oms.orderById(command.order_id).?.state);
+        var snapshot_storage: [durable.max_snapshot_bytes]u8 = undefined;
+        const snapshot = try owner.committedSnapshot(&snapshot_storage);
+        const restored = try trading.TradingShard.restoreSnapshot(snapshot);
+        try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+    }
+    try std.testing.expect(owner.shard.authoritativeBarrier() > initial_barrier + 3 * 256);
+    return owner.shard.canonicalStateDigest();
+}
+
+test "Checkpoint owner explicitly resumes each durable checkpoint interruption without sending" {
+    const fixture = @import("trading_shard_fixture.zig");
+    for (0..3) |phase| {
+        const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+        defer std.testing.allocator.destroy(memory);
+        memory.* = .init();
+        memory.allocator = std.testing.allocator;
+        defer memory.deinit();
+        const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 904 };
+        var owner = try Owner.bootstrap(memory.interface(), undefined, stream);
+        for (fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged)) |event|
+            _ = try owner.apply(event);
+        try owner.sealBootstrap();
+        const price: trading.CanonicalEvent = .{ .core = .{ .identity = 900, .payload = .{ .mark_price = .{ .instrument = fixture.swap_instrument, .price_atoms = 50_000_003 } } } };
+        _ = try owner.apply(price);
+        const before = owner.shard.authoritativeBarrier();
+        var sealed = owner.decision_journal;
+        try sealed.seal();
+        try memory.interface().seal(undefined, stream);
+        if (phase >= 1) {
+            var bytes: [durable.max_snapshot_bytes]u8 = undefined;
+            try memory.interface().publishSnapshot(undefined, stream, before, try owner.shard.snapshot(&sealed, before, &bytes));
+        }
+        if (phase == 2) try memory.interface().rotate(undefined, stream);
+        var recovered = try Owner.recover(memory.interface(), undefined, stream);
+        try std.testing.expect(recovered.checkpoint_pending);
+        try std.testing.expect(recovered.shard.recovery_admission_pending);
+        try std.testing.expectEqual(before, recovered.shard.authoritativeBarrier());
+        try std.testing.expectError(error.DecisionLogUnavailable, recovered.apply(price));
+        try recovered.checkpoint();
+        try std.testing.expect(!recovered.checkpoint_pending);
+        try std.testing.expect(recovered.shard.recovery_admission_pending);
+        try std.testing.expectEqual(@as(u64, 2), recovered.shard.checkpointGeneration());
+        try std.testing.expectEqual(before + 1, recovered.shard.authoritativeBarrier());
+        const again = try Owner.recover(memory.interface(), undefined, stream);
+        try std.testing.expect(!again.checkpoint_pending);
+        try std.testing.expectEqualSlices(u8, &recovered.shard.canonicalStateDigest(), &again.shard.canonicalStateDigest());
+        try std.testing.expectEqual(@as(u64, 0), again.shard.dispatch_attempt_count);
+    }
+}
+
+test "Checkpoint owner commits 100 rotations with live authority and economic state" {
+    const Context = struct {
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.check() catch |err| {
+                self.failure = err;
+            };
+        }
+        fn check(_: *@This()) !void {
+            const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+            defer std.testing.allocator.destroy(memory);
+            memory.* = .init();
+            memory.allocator = std.testing.allocator;
+            defer memory.deinit();
+            _ = try checkOwnerCheckpointRounds(memory.interface(), undefined);
+        }
+    };
+    var context: Context = .{};
+    const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
+    thread.join();
+    if (context.failure) |err| return err;
+}
+
+test "Checkpoint owner durable private bundle owns its seed and rejects mixed metadata" {
+    const Context = struct {
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.check() catch |err| {
+                self.failure = err;
+            };
+        }
+        fn check(_: *@This()) !void {
+            const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+            defer std.testing.allocator.destroy(memory);
+            memory.* = .init();
+            memory.allocator = std.testing.allocator;
+            defer memory.deinit();
+            const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 990 };
+            var owner = try Owner.bootstrap(memory.interface(), undefined, stream);
+            const fixture = @import("trading_shard_fixture.zig");
+            const genesis = fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged);
+            _ = try owner.apply(genesis[0]);
+            try owner.sealBootstrap();
+            var seed = [_]u8{ 1, 2, 3 };
+            var seed_digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(&seed, &seed_digest, .{});
+            try owner.checkpointPrivate(.{
+                .decision_stream = stream.id,
+                .decision_barrier = owner.shard.authoritativeBarrier(),
+                .core_digest = owner.shard.canonicalStateDigest(),
+                .raw_stream = .{ .domain = .raw_ingress, .id = 991 },
+                .raw_sequence = 1,
+                .raw_digest = @splat(1),
+                .raw_archive_root = @splat(2),
+                .adapter_session = 1,
+                .canonical_stream = 1,
+                .canonical_sequence = 1,
+                .seed_digest = seed_digest,
+            }, &seed);
+            seed[0] = 99;
+            try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, owner.private_resume[0..owner.private_resume_len]);
+            const recovered = try Owner.recover(memory.interface(), undefined, stream);
+            try std.testing.expectEqualSlices(u8, owner.private_resume[0..owner.private_resume_len], recovered.private_resume[0..recovered.private_resume_len]);
+            try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
+            const before = try memory.interface().archiveReceipt(undefined, stream);
+            for (0..9) |field| {
+                var candidate = owner;
+                var invalid = owner.private_boundary.?;
+                invalid.decision_barrier = owner.shard.authoritativeBarrier();
+                invalid.core_digest = owner.shard.canonicalStateDigest();
+                switch (field) {
+                    0 => invalid.raw_stream.domain = .control,
+                    1 => invalid.raw_stream.id = 0,
+                    2 => invalid.raw_sequence = 0,
+                    3 => invalid.adapter_session = 0,
+                    4 => invalid.canonical_stream = 0,
+                    5 => invalid.canonical_sequence = 0,
+                    6 => invalid.canonical_stream = 2,
+                    7 => invalid.canonical_sequence = std.math.maxInt(u64),
+                    8 => invalid.raw_sequence = std.math.maxInt(u64),
+                    else => unreachable,
+                }
+                try std.testing.expectError(error.InvalidPrivateResumeCheckpoint, candidate.checkpointPrivate(invalid, owner.private_resume[0..owner.private_resume_len]));
+                try std.testing.expect(candidate.closed);
+                try std.testing.expectEqualDeep(before, try memory.interface().archiveReceipt(undefined, stream));
+            }
+            var core_buffer: [durable.max_snapshot_bytes]u8 = undefined;
+            const gateway_snapshot = try owner.committedSnapshot(&core_buffer);
+            try std.testing.expect(!std.mem.startsWith(u8, gateway_snapshot, private_bundle_magic));
+            const raw_recovery = try memory.interface().recover(undefined, stream);
+            var bundle: [durable.max_snapshot_bytes]u8 = undefined;
+            @memcpy(bundle[0..raw_recovery.snapshot.len], raw_recovery.snapshot);
+            bundle[raw_recovery.snapshot.len - 1] ^= 1;
+            try std.testing.expectError(error.InvalidPrivateResumeCheckpoint, privateCheckpointView(bundle[0..raw_recovery.snapshot.len]));
+        }
+    };
+    var context: Context = .{};
+    const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
+    thread.join();
+    if (context.failure) |err| return err;
+}
+
+test "Checkpoint owner rejects a valid receipt bound to a foreign decision stream" {
+    const Context = struct {
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.check() catch |err| {
+                self.failure = err;
+            };
+        }
+        fn check(_: *@This()) !void {
+            const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+            defer std.testing.allocator.destroy(memory);
+            memory.* = .init();
+            memory.allocator = std.testing.allocator;
+            defer memory.deinit();
+            const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 994 };
+            var owner = try Owner.bootstrap(memory.interface(), undefined, stream);
+            const genesis = @import("trading_shard_fixture.zig").genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged);
+            _ = try owner.apply(genesis[0]);
+            var sealed = owner.decision_journal;
+            try sealed.seal();
+            var buffer: [durable.max_snapshot_bytes]u8 = undefined;
+            try memory.interface().seal(undefined, stream);
+            try memory.interface().publishSnapshot(undefined, stream, 1, try owner.shard.snapshot(&sealed, 1, &buffer));
+            try memory.interface().rotate(undefined, stream);
+            const archive = try memory.interface().archiveReceipt(undefined, stream);
+            const receipt = try owner.shard.checkpointReceipt(995, 1, archive.ordered_root);
+            var tail = journal.Journal.initAt(2);
+            _ = try trading.applyStable(&owner.shard, &tail, .{ .core = .{ .identity = 1, .payload = .{ .checkpoint_committed = receipt } } });
+            var reader = try journal.Reader.init(tail.bytes());
+            while (true) switch (try reader.next()) {
+                .end => break,
+                .record => |record| try memory.interface().append(undefined, .{ .stream = stream, .record = record }),
+            };
+            try memory.interface().commit(undefined, stream, 2);
+            try tail.seal();
+            try memory.interface().seal(undefined, stream);
+            try memory.interface().publishSnapshot(undefined, stream, 2, try owner.shard.snapshot(&tail, 2, &buffer));
+            try std.testing.expect(try memory.interface().verifyArchiveReceipt(undefined, stream, 1, receipt.archive_root));
+            try std.testing.expectError(error.DecisionLogUnavailable, Owner.recover(memory.interface(), undefined, stream));
+        }
+    };
+    var context: Context = .{};
+    const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
+    thread.join();
+    if (context.failure) |err| return err;
+}
+
+test "Checkpoint owner Windows file commits 100 rotations and reopens without sending" {
+    if (@import("builtin").os.tag != .windows) return;
+    const Context = struct {
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.check() catch |err| {
+                self.failure = err;
+            };
+        }
+        fn check(_: *@This()) !void {
+            var threaded = std.Io.Threaded.init(std.testing.allocator, .{});
+            defer threaded.deinit();
+            const io = threaded.io();
+            var path_buffer: [260]u8 = undefined;
+            const path = try std.fmt.bufPrint(&path_buffer, "C:\\Windows\\Temp\\ringwin-owner-checkpoint-{d}", .{std.Io.Clock.real.now(io).nanoseconds});
+            try std.Io.Dir.createDirAbsolute(io, path, .default_dir);
+            defer std.Io.Dir.cwd().deleteTree(io, path) catch {};
+            var expected: [32]u8 = undefined;
+            {
+                var file = try durable.WindowsFileAdapter.openWindowsVerification(io, path);
+                defer file.close(io);
+                expected = try checkOwnerCheckpointRounds(file.interface(), io);
+            }
+            var reopened = try durable.WindowsFileAdapter.openWindowsVerification(io, path);
+            defer reopened.close(io);
+            const recovered = try Owner.recover(reopened.interface(), io, .{ .domain = .decision_log, .id = 903 });
+            try std.testing.expectEqual(@as(u64, 101), recovered.shard.checkpointGeneration());
+            try std.testing.expect(recovered.shard.recovery_admission_pending);
+            try std.testing.expectEqualSlices(u8, &expected, &recovered.shard.canonicalStateDigest());
+        }
+    };
+    var context: Context = .{};
+    const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
+    thread.join();
+    if (context.failure) |err| return err;
+}
+
 fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     const fixture = @import("trading_shard_fixture.zig");
     var parsed = try Policy.parse(std.testing.allocator,
@@ -666,9 +1150,11 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     const memory = try std.testing.allocator.create(durable.MemoryAdapter);
     defer std.testing.allocator.destroy(memory);
     memory.* = .init();
+    defer memory.deinit();
     const dispatch_memory = try std.testing.allocator.create(durable.MemoryAdapter);
     defer std.testing.allocator.destroy(dispatch_memory);
     dispatch_memory.* = .init();
+    defer dispatch_memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     var owner = try Owner.bootstrap(memory.interface(), undefined, stream);
     const definitions = @import("asset_registry.zig").testDefinitions(6, 8);
@@ -866,7 +1352,11 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     try std.testing.expect(!recovering.closed);
     try std.testing.expectEqual(@as(u64, 1), spy.sends);
     const raw_stream: durable.StreamIdentity = .{ .domain = .raw_ingress, .id = 93 };
-    var raw = try raw_ingress.DurableSink.init(memory.interface(), undefined, raw_stream);
+    const raw_memory = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(raw_memory);
+    raw_memory.* = .initWithAllocator(std.testing.allocator);
+    defer raw_memory.deinit();
+    var raw = try raw_ingress.DurableSink.init(raw_memory.interface(), undefined, raw_stream);
     const frame =
         \\{"event":"subscribe","arg":{"channel":"orders","instType":"ANY"}}
     ;
@@ -881,7 +1371,8 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     };
     var context: u8 = 0;
     try std.testing.expectError(error.DecisionLogUnavailable, recovering.replayCommittedIngress(raw_stream, .{ .ptr = &context, .consume_fn = Sweep.consume }));
-    recovering = try Owner.recoverWithIngress(memory.interface(), undefined, stream, raw_stream);
+    recovering = try Owner.recover(memory.interface(), undefined, stream);
+    try recovering.bindRecoveryIngress(raw_memory.interface(), raw_stream);
     try std.testing.expectError(error.DecisionLogUnavailable, recovering.replayCommittedIngress(.{ .domain = .raw_ingress, .id = 94 }, .{ .ptr = &context, .consume_fn = Sweep.consume }));
     try std.testing.expectError(error.IncompleteReplay, recovering.replayCommittedIngress(raw_stream, .{ .ptr = &context, .consume_fn = Sweep.consume }));
     try std.testing.expectError(error.NotSent, gateway.sendFromShard(&recovering.shard, command.command_id, 2));

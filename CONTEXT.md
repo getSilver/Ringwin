@@ -1067,6 +1067,8 @@ _Avoid_: Trace index, memory offset, StreamSequence, HostBatchSequence
 在同一分片屏障上对订单、成交、持仓、账本、风险占用和游标等 AuthoritativeTradingState 计算的稳定摘要；状态迁移不得改变其结果。
 _Avoid_: Serialized byte hash, strategy output comparison
 
+该摘要同时绑定有序权威事实与完整规范输入内容；驻留窗口之外的历史通过已提交检查点根、连续区间和有序链头承接，不能只用最终业务状态或 SemanticAuthorityDigest 替代。窗口回收是可重放的权威检查点确认，不重置 ShardSequence；见 ADR 0011。
+
 **SemanticAuthorityDigest**:
 仅为比较同一组已验证 private order facts 的合法到达排列而计算的、与到达顺序无关的权威业务状态摘要；它排除 CanonicalStateDigest 中的审计 Trace、canonical ingress 游标及其屏障位置，绝不用于快照完整性、恢复身份或替代审计摘要。
 _Avoid_: CanonicalStateDigest, trace hash, event-order digest

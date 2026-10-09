@@ -344,6 +344,19 @@ const WsSnapshotState = struct {
     complete: bool = false,
 };
 
+pub const ResumeCheckpoint = struct {
+    schema: u16 = 1,
+    session: u64,
+    subscriptions: [3]bool,
+    rest: [required_rest_count]EndpointState,
+    stable_rest_digests: [required_rest_count][32]u8,
+    ws_snapshots: [2]WsSnapshotState,
+    bootstrap_watermark: u64,
+    last_raw_sequence: u64,
+    seen: [max_seen_facts]SeenFact = @splat(.{ .identity = @splat(0), .content = @splat(0) }),
+    seen_count: usize,
+};
+
 pub const Reconciler = struct {
     stage: Stage = .offline,
     session: u64 = 0,
@@ -364,6 +377,58 @@ pub const Reconciler = struct {
     ws_event_count: usize = 0,
     drain_bootstrap_index: usize = 0,
     drain_ws_index: usize = 0,
+
+    pub fn exportResumeCheckpoint(self: *const Reconciler) !ResumeCheckpoint {
+        if (self.stage != .ready or self.stability_round != 2 or self.session == 0 or
+            self.unresolved_unknowns != 0 or self.unattributed_fact_seen or
+            self.seen_count > max_seen_facts or
+            self.drain_bootstrap_index != self.bootstrap_event_count or self.drain_ws_index != self.ws_event_count)
+            return error.PrivateRecoveryBoundaryUnavailable;
+        var result: ResumeCheckpoint = .{
+            .session = self.session,
+            .subscriptions = self.subscriptions,
+            .rest = self.rest,
+            .stable_rest_digests = self.stable_rest_digests,
+            .ws_snapshots = self.ws_snapshots,
+            .bootstrap_watermark = self.bootstrap_watermark orelse return error.PrivateRecoveryBoundaryUnavailable,
+            .last_raw_sequence = self.last_raw_sequence,
+            .seen_count = self.seen_count,
+        };
+        @memcpy(result.seen[0..self.seen_count], self.seen[0..self.seen_count]);
+        try validateResumeCheckpoint(result);
+        return result;
+    }
+
+    pub fn restoreResumeCheckpoint(self: *Reconciler, checkpoint: ResumeCheckpoint) !void {
+        try validateResumeCheckpoint(checkpoint);
+        self.* = .{
+            .stage = .ready,
+            .session = checkpoint.session,
+            .subscriptions = checkpoint.subscriptions,
+            .rest = checkpoint.rest,
+            .stable_rest_digests = checkpoint.stable_rest_digests,
+            .stability_round = 2,
+            .ws_snapshots = checkpoint.ws_snapshots,
+            .bootstrap_watermark = checkpoint.bootstrap_watermark,
+            .last_raw_sequence = checkpoint.last_raw_sequence,
+            .seen = checkpoint.seen,
+            .seen_count = checkpoint.seen_count,
+        };
+    }
+
+    fn validateResumeCheckpoint(checkpoint: ResumeCheckpoint) !void {
+        if (checkpoint.schema != 1 or checkpoint.session == 0 or checkpoint.last_raw_sequence == 0 or
+            checkpoint.bootstrap_watermark > checkpoint.last_raw_sequence or checkpoint.seen_count > max_seen_facts)
+            return error.InvalidPrivateResumeCheckpoint;
+        for (checkpoint.subscriptions) |subscribed| if (!subscribed) return error.InvalidPrivateResumeCheckpoint;
+        for (checkpoint.rest, checkpoint.stable_rest_digests) |endpoint, stable| {
+            if (!endpoint.complete or !std.mem.eql(u8, &endpoint.digest, &stable)) return error.InvalidPrivateResumeCheckpoint;
+        }
+        for (checkpoint.seen[0..checkpoint.seen_count], 0..) |fact, index| {
+            for (checkpoint.seen[0..index]) |earlier| if (std.mem.eql(u8, &fact.identity, &earlier.identity))
+                return error.InvalidPrivateResumeCheckpoint;
+        }
+    }
 
     pub fn beginSession(self: *Reconciler, session: u64) void {
         self.* = .{ .stage = .subscribing, .session = session };

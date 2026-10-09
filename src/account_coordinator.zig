@@ -1,4 +1,5 @@
 const std = @import("std");
+const durable = @import("durable_store.zig");
 const trading = @import("trading_shard.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const snapshot_magic: u64 = 0x54434341574e4952;
@@ -2036,7 +2037,7 @@ test "four shard coordinator snapshot restores deterministic authority" {
 
 test "account recovery restores four matching shard tails under fresh evidence fence" {
     var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
-    var shard_snapshots_storage: [max_shards][64 * 1024]u8 = undefined;
+    var shard_snapshots_storage: [max_shards][durable.max_snapshot_bytes]u8 = undefined;
     var shard_snapshots: [max_shards][]const u8 = undefined;
     var shard_tails: [max_shards][]const u8 = undefined;
     var tail_journals: [max_shards]trading.journal.Journal = undefined;
@@ -2105,7 +2106,7 @@ test "account recovery restores four matching shard tails under fresh evidence f
 
 test "account recovery retains a forced shard commit awaiting coordinator ack" {
     var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
-    var snapshot_storage: [max_shards][64 * 1024]u8 = undefined;
+    var snapshot_storage: [max_shards][durable.max_snapshot_bytes]u8 = undefined;
     var shard_snapshots: [max_shards][]const u8 = undefined;
     var shard_tails: [max_shards][]const u8 = undefined;
     var tails: [max_shards]trading.journal.Journal = undefined;

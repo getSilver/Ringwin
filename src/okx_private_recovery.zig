@@ -14,6 +14,7 @@ const raw = @import("raw_ingress.zig");
 const market = @import("okx_public_market.zig");
 
 const max_inputs = 1024;
+pub const recovery_byte_budget = 2 * 1024 * 1024;
 const Entry = struct {
     evidence: canonical.RawEvidenceRef,
     source_fact: u128,
@@ -66,6 +67,9 @@ pub const CommittedInputs = struct {
     streams: [16]canonical.EventIdentity = undefined,
     stream_count: usize = 0,
     next_sequence: u64 = 1,
+    boundary: ?demo.PrivateRecoveryBoundary = null,
+    private_seed: [demo.max_private_resume_bytes]u8 = undefined,
+    resume_len: usize = 0,
 
     pub fn init(store: durable.Store, io: std.Io, decision_stream: durable.StreamIdentity) !CommittedInputs {
         if (decision_stream.domain != .decision_log or !store.supportsSegmentReplay() or store.safetyGate() != .open)
@@ -74,7 +78,18 @@ pub const CommittedInputs = struct {
         if (recovered.gate != .open or recovered.committed_barrier == 0 or recovered.last_sequence != recovered.committed_barrier)
             return error.PrivateRecoveryHistoryUnavailable;
         var result: CommittedInputs = .{};
-        try store.replaySegments(io, decision_stream, .{ .ptr = &result, .consume_fn = segment });
+        const view = try demo.recoverPrivateCheckpoint(store, io, decision_stream);
+        if (view.boundary) |boundary| {
+            if (recovered.committed_barrier - boundary.decision_barrier > 1024) return error.PrivateRecoveryCapacity;
+            result.boundary = boundary;
+            @memcpy(result.private_seed[0..view.seed.len], view.seed);
+            result.resume_len = view.seed.len;
+            result.next_sequence = try std.math.add(u64, boundary.decision_barrier, 1);
+            try result.rememberSequence(.{ .stream = boundary.canonical_stream, .sequence = boundary.canonical_sequence });
+            try store.replaySegmentsAfter(io, decision_stream, boundary.decision_barrier, recovery_byte_budget, .{ .ptr = &result, .consume_fn = segment });
+        } else {
+            try store.replaySegments(io, decision_stream, .{ .ptr = &result, .consume_fn = segment });
+        }
         if (result.next_sequence != (try std.math.add(u64, recovered.committed_barrier, 1))) return error.PrivateRecoveryHistoryUnavailable;
         return result;
     }
@@ -88,6 +103,7 @@ pub const CommittedInputs = struct {
                 break;
             },
             .record => |record| {
+                if (self.boundary) |boundary| if (record.sequence <= boundary.decision_barrier) continue;
                 if (record.sequence != self.next_sequence) return error.PrivateRecoveryHistoryUnavailable;
                 self.next_sequence = try std.math.add(u64, self.next_sequence, 1);
                 if (record.flags & journal.input_flag == 0) continue;
@@ -119,6 +135,8 @@ pub const CommittedInputs = struct {
     }
 
     fn find(self: *const CommittedInputs, record: canonical.EventRecord) !?usize {
+        if (self.boundary) |boundary| if (record.envelope.raw_evidence.sequence <= boundary.raw_sequence)
+            return error.PrivateFactOutsideRecoveryBoundary;
         const incoming = try entryFor(record);
         for (self.entries[0..self.count], 0..) |known, index| {
             if (!sameFact(known, incoming)) continue;
@@ -161,6 +179,91 @@ pub const CommittedInputs = struct {
     }
 };
 
+/// Capture only a complete raw frame after its complete canonical drain has
+/// committed. This is an explicit checkpoint, never a canonical cursor guess.
+pub fn checkpointPrivate(owner: *demo.Owner, implementation: *okx.OkxVenueAdapter, decoder: *const DecoderReplay, sink: *raw.DurableSink) !void {
+    errdefer {
+        owner.closed = true;
+        owner.shard.recovery_admission_pending = true;
+    }
+    if (owner.checkpoint_pending or owner.closed or !owner.ready or !decoder.complete(implementation, false))
+        return error.PrivateRecoveryBoundaryUnavailable;
+    const reconciler = implementation.reconciler orelse return error.MissingPrivateReconciler;
+    const raw_sequence = try std.math.sub(u64, sink.next_sequence, 1);
+    if (raw_sequence == 0 or reconciler.rawWatermark() != raw_sequence) return error.PrivateRecoveryBoundaryUnavailable;
+    var seed_buffer: [okx.max_resume_checkpoint_bytes]u8 = undefined;
+    const seed = try implementation.exportResumeCheckpoint(&seed_buffer);
+    const binding = implementation.binding orelse return error.InvalidBinding;
+    if (binding.account != owner.shard.exchange_account_identity or implementation.next_event_sequence <= 1)
+        return error.PrivateRecoveryBoundaryUnavailable;
+    var matching_cursor = false;
+    for (owner.shard.canonical_ingress_cursors[0..owner.shard.canonical_ingress_cursor_count]) |cursor| {
+        if (cursor.identity.stream == binding.session and cursor.identity.sequence == implementation.next_event_sequence - 1)
+            matching_cursor = true;
+    }
+    if (!matching_cursor) return error.PrivateRecoveryBoundaryUnavailable;
+    const Continuity = struct {
+        stream: u128,
+        next: u64,
+        fn consume(ptr: *anyopaque, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            var inputs = try journal.Reader.init(bytes);
+            while (true) switch (try inputs.next()) {
+                .end => break,
+                .record => |record| {
+                    if (record.flags & journal.input_flag == 0) continue;
+                    const input = try trading.decodeStableInput(record);
+                    if (input != .venue or input.venue.envelope.identity.stream != self.stream) continue;
+                    const sequence = input.venue.envelope.identity.sequence;
+                    if (sequence < self.next) continue;
+                    if (sequence != self.next) return error.PrivateRecoveryBoundaryUnavailable;
+                    self.next = try std.math.add(u64, self.next, 1);
+                },
+            };
+        }
+    };
+    const after = if (owner.private_boundary) |boundary| boundary.decision_barrier else 0;
+    const floor = if (owner.private_boundary) |boundary| (if (boundary.canonical_stream == binding.session) boundary.canonical_sequence else 0) else 0;
+    var continuity: Continuity = .{ .stream = binding.session, .next = try std.math.add(u64, floor, 1) };
+    try owner.store.replaySegmentsAfter(owner.io, owner.stream, after, recovery_byte_budget, .{ .ptr = &continuity, .consume_fn = Continuity.consume });
+    if (continuity.next != implementation.next_event_sequence) return error.PrivateRecoveryBoundaryUnavailable;
+    const recovered = try sink.store.recover(sink.io, sink.stream);
+    if (recovered.gate != .open or recovered.last_sequence != raw_sequence or recovered.committed_barrier != raw_sequence)
+        return error.PrivateRecoveryBoundaryUnavailable;
+    var reader = try journal.Reader.init(recovered.active_segment);
+    var raw_digest: [32]u8 = undefined;
+    var found = false;
+    while (true) switch (try reader.next()) {
+        .end => break,
+        .record => |record| if (record.sequence == raw_sequence) {
+            if (record.payload.len < 72) return error.InvalidRawIngress;
+            std.crypto.hash.sha2.Sha256.hash(record.payload[72..], &raw_digest, .{});
+            if (!std.mem.eql(u8, &raw_digest, record.payload[40..72])) return error.InvalidRawIngress;
+            found = true;
+        },
+    };
+    if (!found) return error.PrivateRecoveryBoundaryUnavailable;
+    try sink.checkpoint();
+    const archive = try sink.store.archiveReceipt(sink.io, sink.stream);
+    if (archive.covered_last != raw_sequence or !try sink.store.verifyArchiveReceipt(sink.io, sink.stream, raw_sequence, archive.ordered_root))
+        return error.PrivateRecoveryBoundaryUnavailable;
+    var seed_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(seed, &seed_digest, .{});
+    try owner.checkpointPrivate(.{
+        .decision_stream = owner.stream.id,
+        .decision_barrier = owner.shard.authoritativeBarrier(),
+        .core_digest = owner.shard.canonicalStateDigest(),
+        .raw_stream = sink.stream,
+        .raw_sequence = raw_sequence,
+        .raw_digest = raw_digest,
+        .raw_archive_root = archive.ordered_root,
+        .adapter_session = @intCast(binding.session),
+        .canonical_stream = binding.session,
+        .canonical_sequence = implementation.next_event_sequence - 1,
+        .seed_digest = seed_digest,
+    }, seed);
+}
+
 pub const Sweep = struct {
     implementation: *okx.OkxVenueAdapter,
     owner: *demo.Owner,
@@ -170,6 +273,45 @@ pub const Sweep = struct {
     rest_page_size: usize = 3,
     last_sequence: u64 = 0,
     decoder: DecoderReplay = .{},
+    checkpoint_restored: bool = false,
+
+    pub fn restoreCheckpoint(self: *Sweep) !void {
+        errdefer {
+            self.owner.closed = true;
+            self.owner.shard.recovery_admission_pending = true;
+        }
+        const boundary = self.index.boundary orelse return;
+        const owner_boundary = self.owner.private_boundary orelse return error.PrivateRecoveryBoundaryUnavailable;
+        const ingress_store = self.owner.recovery_ingress_store orelse return error.PrivateRecoveryBoundaryUnavailable;
+        const ingress = self.owner.recovery_ingress orelse return error.PrivateRecoveryBoundaryUnavailable;
+        if (self.checkpoint_restored or !std.meta.eql(boundary, owner_boundary) or !std.meta.eql(boundary.raw_stream, ingress) or
+            boundary.adapter_session != self.session or
+            !try ingress_store.verifyArchiveReceipt(self.owner.io, ingress, boundary.raw_sequence, boundary.raw_archive_root))
+            return error.PrivateRecoveryBoundaryUnavailable;
+        try self.implementation.restoreResumeCheckpoint(self.index.private_seed[0..self.index.resume_len]);
+        const next_sequence = std.math.add(u64, boundary.canonical_sequence, 1) catch return error.InvalidPrivateResumeCheckpoint;
+        if (self.implementation.next_event_sequence != next_sequence or
+            self.implementation.reconciler.?.rawWatermark() != boundary.raw_sequence)
+            return error.InvalidPrivateResumeCheckpoint;
+        for (self.owner.shard.oms.orders[0..self.owner.shard.oms.order_count]) |order| {
+            try self.implementation.rememberRecoveredOrder(order.id, order.client_order_id, order.portfolio_reduce_only, .{ .instrument = order.instrument, .rules_version = order.limit_price.rules_version, .lots = order.quantity }, order.revision);
+        }
+        self.decoder.reconciliation_started = true;
+        self.checkpoint_restored = true;
+        self.owner.private_seed_restored = true;
+    }
+
+    pub fn replayCommitted(self: *Sweep, stream: durable.StreamIdentity) !void {
+        errdefer {
+            self.owner.closed = true;
+            self.owner.shard.recovery_admission_pending = true;
+        }
+        if (self.index.boundary != null and !self.checkpoint_restored) try self.restoreCheckpoint();
+        try self.owner.replayCommittedIngress(stream, self.consumer());
+        try self.index.verifySweep();
+        if (!self.decoder.complete(self.implementation, self.owner.shard.economic_fault_count != 0))
+            return error.IncompletePrivateRecovery;
+    }
 
     pub fn consumer(self: *Sweep) raw.ReplayConsumer {
         return .{ .ptr = self, .consume_fn = consume };
@@ -181,6 +323,8 @@ pub const Sweep = struct {
 
     fn consume(ptr: *anyopaque, sequence: u64, record: market.RawIngressRecord, bytes: []const u8) !void {
         const self: *Sweep = @ptrCast(@alignCast(ptr));
+        if (self.index.boundary) |boundary| if (!self.checkpoint_restored or sequence <= boundary.raw_sequence)
+            return error.PrivateRecoveryBoundaryUnavailable;
         if (self.last_sequence == 0 or sequence > self.last_sequence) return error.PrivateRecoveryBoundaryUnavailable;
         try self.consumeRecord(sequence, record, bytes);
         if (sequence == self.last_sequence) {

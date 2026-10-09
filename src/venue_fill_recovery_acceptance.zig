@@ -55,6 +55,24 @@ fn rules() okx.Rules {
     return .{ .spot = .{ .identity = okx.btc_usdt_spot, .tick_size = .{ .coefficient = 1, .scale = 1 }, .lot_size = .{ .coefficient = 1, .scale = 8 } }, .swap = .{ .identity = okx.btc_usdt_swap, .tick_size = .{ .coefficient = 1, .scale = 1 }, .lot_size = .{ .coefficient = 1, .scale = 2 } } };
 }
 
+fn privateFrameForSession(implementation: *const okx.OkxVenueAdapter, frame: []const u8, destination: []u8) ![]const u8 {
+    const session: u64 = @intCast(implementation.binding.?.session);
+    if (session == 1) return frame;
+    if (destination.len < frame.len + std.mem.count(u8, frame, "\"25\"")) return error.FrameTooLarge;
+    const replacements = std.mem.replace(u8, frame, "\"25\"", "\"100\"", destination);
+    const frame_len = frame.len + replacements;
+    for ([_][]const u8{ "1800000000000", "1800000000001" }, 0..) |needle, offset| {
+        var timestamp: [13]u8 = undefined;
+        const replacement = try std.fmt.bufPrint(&timestamp, "{d}", .{@as(u64, 1_800_000_000_000) + session * 1000 + offset});
+        var start: usize = 0;
+        while (std.mem.indexOfPos(u8, destination[0..frame_len], start, needle)) |index| {
+            @memcpy(destination[index..][0..replacement.len], replacement);
+            start = index + replacement.len;
+        }
+    }
+    return destination[0..frame_len];
+}
+
 fn ingestBootstrapRound(implementation: *okx.OkxVenueAdapter) !void {
     const sources = [_]private.IngressSource{ .rest_account_config, .rest_leverage, .rest_balance, .rest_positions, .rest_orders_pending, .rest_orders_history_spot, .rest_orders_history_swap, .rest_fills_history_spot, .rest_fills_history_swap };
     const frames = [_][]const u8{
@@ -76,8 +94,10 @@ fn ingestBootstrapRound(implementation: *okx.OkxVenueAdapter) !void {
         ,
         \\{"code":"0","data":[]}
     };
-    for (sources, frames) |source, frame|
-        try std.testing.expect((try implementation.ingestPrivateRest(private_times, source, .{ .final = true }, frame)).rejection == null);
+    for (sources, frames) |source, frame| {
+        var buffer: [4096]u8 = undefined;
+        try std.testing.expect((try implementation.ingestPrivateRest(private_times, source, .{ .final = true }, try privateFrameForSession(implementation, frame, &buffer))).rejection == null);
+    }
 }
 
 fn applyDrain(owner: *demo.Owner, adapter: venue.VenueAdapter) !bool {
@@ -204,6 +224,7 @@ fn executeRawPrivateFillRecovery() !void {
     const memory = try allocator.create(durable.MemoryAdapter);
     defer allocator.destroy(memory);
     memory.* = .init();
+    defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const raw_stream: durable.StreamIdentity = .{ .domain = .raw_ingress, .id = 1 };
     var raw = try raw_ingress.DurableSink.init(memory.interface(), undefined, raw_stream);
@@ -519,6 +540,7 @@ fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canoni
     const memory = try allocator.create(durable.MemoryAdapter);
     defer allocator.destroy(memory);
     memory.* = .init();
+    defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     var raw = try raw_ingress.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = 1 });
     var transport = Transport{};
@@ -755,6 +777,7 @@ test "OKX activated high precision account facts survive Owner replay without ol
     const memory = try allocator.create(durable.MemoryAdapter);
     defer allocator.destroy(memory);
     memory.* = .init();
+    defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
@@ -835,8 +858,11 @@ fn bootstrapNativePrivateAccount(owner: *demo.Owner, implementation: *okx.OkxVen
         ,
         \\{"arg":{"channel":"positions"},"eventType":"snapshot","curPage":1,"lastPage":true,"data":[]}
     };
-    for (bootstrap) |frame| try std.testing.expect((try implementation.ingestPrivateWs(private_times, frame)).rejection == null);
-    try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .account_reconciliation = .{ .identity = 99, .exchange_account = 2, .expected_session = 1 } }));
+    for (bootstrap) |frame| {
+        var buffer: [4096]u8 = undefined;
+        try std.testing.expect((try implementation.ingestPrivateWs(private_times, try privateFrameForSession(implementation, frame, &buffer))).rejection == null);
+    }
+    try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .account_reconciliation = .{ .identity = 99, .exchange_account = 2, .expected_session = implementation.binding.?.session } }));
     _ = try applyDrain(owner, adapter);
     try ingestBootstrapRound(implementation);
     _ = try applyDrain(owner, adapter);
@@ -846,7 +872,8 @@ fn bootstrapNativePrivateAccount(owner: *demo.Owner, implementation: *okx.OkxVen
     const cash = try std.fmt.bufPrint(&cash_frame,
         \\{{"arg":{{"channel":"account"}},"eventType":"update","curPage":1,"lastPage":true,"data":[{{"uTime":"1800000000001","totalEq":"{s}","adjEq":"{s}","imr":"0","mmr":"0","mgnRatio":"","isoEq":"0","details":[{{"ccy":"USDT","cashBal":"{s}","availBal":"{s}","eq":"{s}","frozenBal":"0","liab":"0","isoLiab":"0","crossLiab":"0"}}]}}]}}
     , .{ cash_text, cash_text, cash_text, cash_text, cash_text });
-    try std.testing.expect((try implementation.ingestPrivateWs(private_times, cash)).rejection == null);
+    var session_cash: [1024]u8 = undefined;
+    try std.testing.expect((try implementation.ingestPrivateWs(private_times, try privateFrameForSession(implementation, cash, &session_cash))).rejection == null);
     try std.testing.expect(try applyDrain(owner, adapter));
 }
 
@@ -870,6 +897,7 @@ fn runNativeSettlementFees(case: NativeSettlementCase, arrival: NativeArrival, w
     const memory = try allocator.create(durable.MemoryAdapter);
     defer allocator.destroy(memory);
     memory.* = .init();
+    defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
@@ -1165,6 +1193,7 @@ fn checkNativeBaseFees(nonunit: bool, mode: enum { normal, legacy_precision, con
     const memory = try allocator.create(durable.MemoryAdapter);
     defer allocator.destroy(memory);
     memory.* = .init();
+    defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
@@ -1517,6 +1546,7 @@ test "activated balance limits reject cumulative Suspense growth before Owner co
     const memory = try allocator.create(durable.MemoryAdapter);
     defer allocator.destroy(memory);
     memory.* = .init();
+    defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
@@ -1542,8 +1572,8 @@ test "activated balance limits reject cumulative Suspense growth before Owner co
         _ = try owner.apply(.{ .core = .{ .identity = index + 3, .payload = payload } });
     try std.testing.expectEqual(@as(i64, -100), owner.shard.economicSummary().suspense_usdt_atoms);
     const before = owner.shard.economicSummary();
-    const digest = owner.shard.canonicalStateDigest();
     try owner.sealBootstrap();
+    const digest = owner.shard.canonicalStateDigest();
     try std.testing.expectError(error.AssetAmountOutOfRange, owner.apply(.{ .core = .{ .identity = 11, .payload = .{ .funding_settlement = .{ .settlement_id = 11, .amount_atoms = -100 } } } }));
     try std.testing.expect(owner.closed);
     try std.testing.expectEqualDeep(before, owner.shard.economicSummary());
@@ -1608,6 +1638,7 @@ fn checkNativeThirdFees(mode: enum { normal, wide, unknown, inexact, conflict, c
     const memory = try allocator.create(durable.MemoryAdapter);
     defer allocator.destroy(memory);
     memory.* = .init();
+    defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
@@ -1837,6 +1868,7 @@ fn checkNativeFundingBills(mode: enum { normal, unknown, inexact, range, conflic
     const memory = try allocator.create(durable.MemoryAdapter);
     defer allocator.destroy(memory);
     memory.* = .init();
+    defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
@@ -2038,4 +2070,262 @@ test "OKX unowned terminal Fill validates native fee before skipping portfolio o
 
 test "OKX unowned Fill enforces a single fee limit independently of its balance limit" {
     try checkReadyEconomicFault("-0.00040001", "BTC", .overflow, null, false, null, false, .external_single_limit);
+}
+
+fn checkPrivateCheckpointHorizon() !void {
+    const recovery = @import("okx_private_recovery.zig");
+    const allocator = std.testing.allocator;
+    const memory = try allocator.create(durable.MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .init();
+    memory.allocator = allocator;
+    defer memory.deinit();
+    const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 941 };
+    const raw_stream: durable.StreamIdentity = .{ .domain = .raw_ingress, .id = 942 };
+    const owner = try allocator.create(demo.Owner);
+    defer allocator.destroy(owner);
+    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    var definitions = @import("asset_registry.zig").testDefinitions(12, 8);
+    const policy: demo.Policy = .{
+        .schema = 3,
+        .startup = .virgin,
+        .asset_definitions = &definitions,
+        .lot_size = .{ .coefficient = 1, .scale = 8 },
+        .price_tick_atoms = 100_000_000_000,
+        .exchange_account = 2,
+        .portfolio_identity = 1,
+        .strategy_identity = 40,
+        .activation_identity = 50,
+        .config_version = 1,
+        .portfolio_allocation_atoms = 90_000_000_000_000,
+        .risk_limit_atoms = 80_000_000_000_000,
+        .native_settlement_atoms = true,
+        .decision_stream_id = stream.id,
+        .dispatch_stream_id = 943,
+        .decision_domain = 1,
+        .node_identity = 1,
+    };
+    try policy.activateAssetsForOfflineValidation(owner);
+    var sink = try raw_ingress.DurableSink.init(memory.interface(), undefined, raw_stream);
+    var transport = Transport{};
+    var chain: live.Chain = .{ .mode = .replay, .qualification = qualification(), .raw_sink = sink.interface(), .transport = transport.interface() };
+    var clock = Clock{};
+    var reconciler: private.Reconciler = .{};
+    var implementation = okx.OkxVenueAdapter.init(allocator, &chain, clock.interface(), profile(), rules());
+    var decoder: recovery.DecoderReplay = .{};
+    var cumulative_private_inputs: usize = 0;
+    for (1..9) |epoch| {
+        if (epoch != 1) try implementation.adapter().stop(.{ .monotonic_ns = 1 });
+        reconciler = .{};
+        var epoch_profile = profile();
+        epoch_profile.gateway_session = epoch;
+        implementation = okx.OkxVenueAdapter.init(allocator, &chain, clock.interface(), epoch_profile, rules());
+        implementation.attachPrivateReconciler(&reconciler);
+        try implementation.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = epoch, .request_capacity = 4, .output_capacity = 4, .asset_definitions = owner.shard.activatedAssets(), .instrument_definitions = owner.shard.instrument_registry, .native_settlement_atoms = true });
+        try bootstrapNativePrivateAccount(owner, &implementation, "100");
+        if (epoch == 1) {
+            var authority = failover.authorityForTesting();
+            var lease = try authority.acquire(.{ .exchange_account = 2, .decision_domain = 1 }, 1, 1);
+            var guard: failover.GatewayLeaseGuard = .{ .authority = &authority, .lease = &lease };
+            try policy.initialize(owner, 50_000_000_000_000_000, &guard, 1, 1);
+        }
+        for (0..144) |index| {
+            var buffer: [1024]u8 = undefined;
+            const frame = try std.fmt.bufPrint(&buffer,
+                \\{{"arg":{{"channel":"account"}},"eventType":"update","curPage":1,"lastPage":true,"data":[{{"uTime":"{d}","totalEq":"100","adjEq":"100","imr":"0","mmr":"0","mgnRatio":"","isoEq":"0","details":[{{"ccy":"USDT","cashBal":"100","availBal":"100","eq":"100","frozenBal":"0","liab":"0","isoLiab":"0","crossLiab":"0"}}]}}]}}
+            , .{@as(u64, 1_800_000_000_000) + epoch * 1000 + 2 + index});
+            try std.testing.expect((try implementation.ingestPrivateWs(private_times, frame)).rejection == null);
+            while (try implementation.adapter().tryDrain()) |batch| {
+                for (batch.slice()) |record| if (record.event == .account_observed) {
+                    cumulative_private_inputs += 1;
+                };
+                try owner.applyAdapterBatch(batch);
+            }
+            if (index % 16 == 15) try recovery.checkpointPrivate(owner, &implementation, &decoder, &sink);
+        }
+    }
+    try std.testing.expect(cumulative_private_inputs > 1024);
+    try std.testing.expectEqual(@as(u8, 8), owner.shard.canonical_ingress_cursor_count);
+    const private_boundary = owner.private_boundary.?;
+    try std.testing.expectEqual(@as(u64, 8), private_boundary.adapter_session);
+    var committed = try recovery.CommittedInputs.init(memory.interface(), undefined, stream);
+    try std.testing.expectEqual(@as(usize, 0), committed.count);
+    try std.testing.expectEqual(private_boundary.decision_barrier + 2, committed.next_sequence);
+    const restarted = try allocator.create(demo.Owner);
+    defer allocator.destroy(restarted);
+    restarted.* = try demo.Owner.recoverWithIngress(memory.interface(), undefined, stream, raw_stream);
+    var replay_reconciler: private.Reconciler = .{};
+    var replay_adapter = okx.OkxVenueAdapter.init(allocator, &chain, clock.interface(), implementation.profile, rules());
+    replay_adapter.attachPrivateReconciler(&replay_reconciler);
+    try replay_adapter.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 8, .request_capacity = 4, .output_capacity = 4, .asset_definitions = restarted.shard.activatedAssets(), .instrument_definitions = restarted.shard.instrument_registry, .native_settlement_atoms = true });
+    var sweep: recovery.Sweep = .{ .implementation = &replay_adapter, .owner = restarted, .index = &committed, .session = 8, .last_sequence = sink.next_sequence - 1 };
+    try sweep.replayCommitted(raw_stream);
+    try std.testing.expect(!restarted.shard.recovery_admission_pending);
+    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restarted.shard.canonicalStateDigest());
+    try std.testing.expectEqual(@as(u64, 1), chain.next_attempt_id);
+
+    std.debug.print("private checkpoint horizon: epochs=8 raw_updates=1152 canonical_account_inputs={d}\n", .{cumulative_private_inputs});
+}
+
+test "Checkpoint private horizon seeds after 1024 cumulative private inputs without scanning old epochs" {
+    const Context = struct {
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            checkPrivateCheckpointHorizon() catch |err| {
+                if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(&.{ .return_addresses = trace.instruction_addresses[0..@min(trace.index, trace.instruction_addresses.len)], .skipped = .none });
+                self.failure = err;
+            };
+        }
+    };
+    var context: Context = .{};
+    const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
+    thread.join();
+    if (context.failure) |err| return err;
+}
+
+fn checkPrivateCheckpointPartialFrame() !void {
+    const recovery = @import("okx_private_recovery.zig");
+    const allocator = std.testing.allocator;
+    const memory = try allocator.create(durable.MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .init();
+    memory.allocator = allocator;
+    defer memory.deinit();
+    const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 941 };
+    const raw_stream: durable.StreamIdentity = .{ .domain = .raw_ingress, .id = 942 };
+    const owner = try allocator.create(demo.Owner);
+    defer allocator.destroy(owner);
+    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    var definitions = @import("asset_registry.zig").testDefinitions(12, 8);
+    const policy: demo.Policy = .{
+        .schema = 3,
+        .startup = .virgin,
+        .asset_definitions = &definitions,
+        .lot_size = .{ .coefficient = 1, .scale = 8 },
+        .price_tick_atoms = 100_000_000_000,
+        .exchange_account = 2,
+        .portfolio_identity = 1,
+        .strategy_identity = 40,
+        .activation_identity = 50,
+        .config_version = 1,
+        .portfolio_allocation_atoms = 90_000_000_000_000,
+        .risk_limit_atoms = 80_000_000_000_000,
+        .native_settlement_atoms = true,
+        .decision_stream_id = stream.id,
+        .dispatch_stream_id = 943,
+        .decision_domain = 1,
+        .node_identity = 1,
+    };
+    try policy.activateAssetsForOfflineValidation(owner);
+    var sink = try raw_ingress.DurableSink.init(memory.interface(), undefined, raw_stream);
+    var transport = Transport{};
+    var chain: live.Chain = .{ .mode = .replay, .qualification = qualification(), .raw_sink = sink.interface(), .transport = transport.interface() };
+    var clock = Clock{};
+    var reconciler: private.Reconciler = .{};
+    var implementation = okx.OkxVenueAdapter.init(allocator, &chain, clock.interface(), profile(), rules());
+    var decoder: recovery.DecoderReplay = .{};
+    implementation.attachPrivateReconciler(&reconciler);
+    try implementation.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = owner.shard.activatedAssets(), .instrument_definitions = owner.shard.instrument_registry, .native_settlement_atoms = true });
+    try bootstrapNativePrivateAccount(owner, &implementation, "100");
+    var authority = failover.authorityForTesting();
+    var lease = try authority.acquire(.{ .exchange_account = 2, .decision_domain = 1 }, 1, 1);
+    var guard: failover.GatewayLeaseGuard = .{ .authority = &authority, .lease = &lease };
+    try policy.initialize(owner, 50_000_000_000_000_000, &guard, 1, 1);
+    try recovery.checkpointPrivate(owner, &implementation, &decoder, &sink);
+    // The next raw frame emits Report + Fill; persist only Report, then crash.
+    _ = try owner.apply(.{ .core = .{ .identity = 8001, .payload = .{ .risk_lease_granted = .{
+        .lease_identity = 1,
+        .version = 2,
+        .valid_through_barrier = std.math.maxInt(u64),
+        .amount_atoms = policy.risk_limit_atoms,
+    } } } });
+    var capability = owner.shard.instrument_registry.get(okx.btc_usdt_spot).?.capability.?;
+    capability.version = 2;
+    capability.adapter_session = 1;
+    _ = try owner.apply(.{ .core = .{ .identity = 8002, .payload = .{ .capability_profile_activation = capability } } });
+    var book = fixture.canonicalAt(19, 2, .{ .l2_book_snapshot = .{
+        .instrument = okx.btc_usdt_spot,
+        .sequence = 2,
+        .best_bid = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .ticks = 499_999 },
+        .best_ask = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .ticks = 500_000 },
+        .best_bid_quantity = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .lots = 1_000_000 },
+        .best_ask_quantity = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .lots = 1_000_000 },
+    } });
+    book.venue.envelope.identity.stream = 77;
+    book.venue.envelope.source_stream = 77;
+    book.venue.envelope.raw_evidence.stream = 77;
+    // Market observations use a separate namespace from the private source.
+    var definition = fixture.canonicalAt(18, 1, .{ .instrument_definition_observed = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1 } });
+    definition.venue.envelope.identity.stream = 77;
+    definition.venue.envelope.source_stream = 77;
+    definition.venue.envelope.raw_evidence.stream = 77;
+    _ = try owner.apply(definition);
+    _ = try owner.apply(book);
+    const intent_sequence = owner.shard.authoritativeBarrier() + 1;
+    const command = (try owner.apply(.{ .core = .{ .identity = intent_sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = .{
+        .strategy_identity = 40,
+        .intent_sequence = intent_sequence,
+        .strategy_cursor = owner.shard.authoritativeBarrier(),
+        .config_version = 1,
+        .activation_identity = 50,
+        .portfolio_identity = 1,
+        .exchange_account_identity = 2,
+        .instrument_identity = okx.btc_usdt_spot,
+        .side = .buy,
+        .order_type = .limit,
+        .time_in_force = .immediate_or_cancel,
+        .portfolio_reduce_only = false,
+        .quantity = 20_000,
+        .limit_price_micros = 50_000_000_000,
+    } } } })) orelse return error.MissingDemoCommand;
+    try implementation.rememberRecoveredOrder(command.order_id, command.client_order_id, false, .{ .instrument = command.instrument, .rules_version = 1, .lots = command.quantity }, command.revision);
+    const pre_frame_boundary = owner.private_boundary.?;
+    var frame_buffer: [1536]u8 = undefined;
+    const frame = try std.fmt.bufPrint(&frame_buffer,
+        \\{{"arg":{{"channel":"orders"}},"data":[{{"instId":"BTC-USDT","ordId":"1001","clOrdId":"{s}","side":"buy","ordType":"limit","state":"filled","tdMode":"cash","posSide":"net","reduceOnly":"false","sz":"0.0002","px":"50000","accFillSz":"0.0002","avgPx":"50000","uTime":"1800000010000","tradeId":"90001","fillSz":"0.0002","fillPx":"50000","fillFee":"-0.000000000001","fillFeeCcy":"USDT","fillTime":"1800000010000","execType":"T"}}]}}
+    , .{command.client_order_id.slice()});
+    try std.testing.expect((try implementation.ingestPrivateWs(private_times, frame)).rejection == null);
+    const output = (try implementation.adapter().tryDrain()).?;
+    try std.testing.expectEqual(@as(usize, 2), output.slice().len);
+    try std.testing.expect(output.events[0].event == .execution_report);
+    try std.testing.expect(output.events[1].event == .fill);
+    _ = try owner.apply(.{ .venue = output.events[0] });
+    var incomplete = owner.*;
+    try std.testing.expectError(error.PrivateRecoveryBoundaryUnavailable, recovery.checkpointPrivate(&incomplete, &implementation, &decoder, &sink));
+    try std.testing.expect(incomplete.closed);
+    try std.testing.expectEqualDeep(pre_frame_boundary, owner.private_boundary.?);
+    try std.testing.expectEqual(@as(i128, 0), owner.shard.economicSummary().portfolio.fee_atoms);
+    var partial_index = try recovery.CommittedInputs.init(memory.interface(), undefined, stream);
+    try std.testing.expectEqual(@as(usize, 1), partial_index.count);
+    const restarted = try allocator.create(demo.Owner);
+    defer allocator.destroy(restarted);
+    restarted.* = try demo.Owner.recoverWithIngress(memory.interface(), undefined, stream, raw_stream);
+    var replay_reconciler: private.Reconciler = .{};
+    var replay_adapter = okx.OkxVenueAdapter.init(allocator, &chain, clock.interface(), implementation.profile, rules());
+    replay_adapter.attachPrivateReconciler(&replay_reconciler);
+    try replay_adapter.adapter().start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = restarted.shard.activatedAssets(), .instrument_definitions = restarted.shard.instrument_registry, .native_settlement_atoms = true });
+    var sweep: recovery.Sweep = .{ .implementation = &replay_adapter, .owner = restarted, .index = &partial_index, .session = 1, .last_sequence = sink.next_sequence - 1 };
+    try sweep.replayCommitted(raw_stream);
+    try std.testing.expectEqual(@as(i128, 1), restarted.shard.economicSummary().portfolio.fee_atoms);
+    try std.testing.expectEqual(@as(i64, 20_000), restarted.shard.economicSummary().portfolio.spot.quantity);
+    try std.testing.expectEqual(@as(u64, 1), chain.next_attempt_id);
+    const after_fill = restarted.shard.canonicalStateDigest();
+    try partial_index.applyBatch(restarted, output);
+    try std.testing.expectEqualSlices(u8, &after_fill, &restarted.shard.canonicalStateDigest());
+}
+
+test "Checkpoint private frame restores postseed order and applies missing Fill exactly once" {
+    const Context = struct {
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            checkPrivateCheckpointPartialFrame() catch |err| {
+                if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(&.{ .return_addresses = trace.instruction_addresses[0..@min(trace.index, trace.instruction_addresses.len)], .skipped = .none });
+                self.failure = err;
+            };
+        }
+    };
+    var context: Context = .{};
+    const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
+    thread.join();
+    if (context.failure) |err| return err;
 }

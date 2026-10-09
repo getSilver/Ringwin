@@ -279,6 +279,10 @@ pub fn runRole(
                     const raw_stream: durable_store.StreamIdentity = .{ .domain = .raw_ingress, .id = 93 };
                     try owner.bindRecoveryIngress(raw_store.interface(), raw_stream);
                     var index = try private_recovery.CommittedInputs.init(owner.store, init.io, owner.stream);
+                    // The current IPC handshake transfers only a core snapshot.
+                    // A private seed must reach the execution decoder before
+                    // admitting a suffix or an empty tail (platform integration).
+                    if (index.boundary != null) return error.PrivateRecoveryBoundaryUnavailable;
                     var storage: [durable_store.max_snapshot_bytes]u8 = undefined;
                     const snapshot = try owner.committedSnapshot(&storage);
                     try writeStatus(client, .snapshot_ready);

@@ -128,6 +128,7 @@ fn exerciseStored(mode: Case, supplied_store: ?durable.Store, io: std.Io) !void 
     const memory = try allocator.create(durable.MemoryAdapter);
     defer allocator.destroy(memory);
     memory.* = .init();
+    defer memory.deinit();
     const store = supplied_store orelse memory.interface();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);

@@ -1,8 +1,8 @@
 # 03: 贯通检查点、日志轮转与崩溃恢复
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in-progress
+Assignee: Codex
 Blocked by: [02 分离权威屏障与内存 Trace 下标](02-separate-authoritative-barrier-from-trace.md)
 Parent: [核心持续运行容量闭合](../map.md)
 
@@ -29,5 +29,5 @@ Parent: [核心持续运行容量闭合](../map.md)
 
 ## Out of scope
 
-本次仅发布任务，不实施代码。后续任务实现不包含部署、真实 Demo/Testnet/生产下单，
+用户已授权本票本地实现；不包含部署、真实 Demo/Testnet/生产下单，
 也不自动授予平台或 Venue 生产资格。

@@ -41,11 +41,105 @@ const assertReplayEquivalentConfigured = fixture.assertReplayEquivalentConfigure
 const applyHealthyPrelude = fixture.applyHealthyPrelude;
 const atGroup = fixture.atGroup;
 
+test "checkpoint maintenance carries ordered inputs and live authority through one hundred windows" {
+    var run = try startScenario();
+    try applyHealthyPrelude(&run);
+    var group: oms_module.IntentGroup = .{ .first_intent_sequence = 900, .count = 1 };
+    group.members[0] = .{ .intent_sequence = 900, .operation = .place, .instrument = swap_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(20, .{ .identity = 900, .payload = .{ .oms_intent_group = group } }));
+    const command = run.shard.oms.emitted()[0];
+    var snapshot_storage: [256 * 1024]u8 = undefined;
+    var archive_root: [32]u8 = @splat(0);
+    var max_snapshot_bytes: usize = 0;
+    var max_pins: usize = 0;
+    for (0..100) |round| {
+        for (0..8) |tick| _ = try applyLive(&run.shard, &run.decision_journal, .{ .core = .{ .identity = 1000 + round * 8 + tick, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 + @as(i64, @intCast(round * 8 + tick)) } } } });
+        try run.decision_journal.seal();
+        const barrier = run.shard.authoritativeBarrier();
+        const snapshot = try run.shard.snapshot(&run.decision_journal, barrier, &snapshot_storage);
+        max_snapshot_bytes = @max(max_snapshot_bytes, snapshot.len);
+        std.crypto.hash.sha2.Sha256.hash(run.decision_journal.bytes(), &archive_root, .{});
+        const receipt = try run.shard.checkpointReceipt(1, round + 1, archive_root);
+        if (round == 0) {
+            const before = run.shard.canonicalStateDigest();
+            var corrupt = receipt;
+            corrupt.archive_root[0] ^= 1;
+            try std.testing.expectError(error.InvalidCheckpointReceipt, run.shard.apply(.{ .core = .{ .identity = barrier + 1, .payload = .{ .checkpoint_committed = corrupt } } }));
+            corrupt = receipt;
+            corrupt.input_head[0] ^= 1;
+            try std.testing.expectError(error.InvalidCheckpointReceipt, run.shard.apply(.{ .core = .{ .identity = barrier + 1, .payload = .{ .checkpoint_committed = corrupt } } }));
+            try std.testing.expectEqualSlices(u8, &before, &run.shard.canonicalStateDigest());
+        }
+        var tail = engine.journal.Journal.initAt(barrier + 1);
+        _ = try applyLive(&run.shard, &tail, .{ .core = .{ .identity = barrier + 1, .payload = .{ .checkpoint_committed = receipt } } });
+        try tail.seal();
+        const restored = try TradingShard.restore(snapshot, tail.bytes());
+        try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+        try std.testing.expectEqual(engine.EventKind.risk_accepted, restored.shard.trace.factAt(command.risk_decision_identity).?.kind);
+        try std.testing.expectEqual(@as(u64, round + 1), restored.shard.checkpointGeneration());
+        try std.testing.expectEqual(@as(usize, 1), restored.shard.trace.len);
+        max_pins = @max(max_pins, restored.shard.trace.pinned_len);
+        const authority = try restored.shard.currentDispatchAuthorityRefs(swap_instrument);
+        try std.testing.expectEqual(command.authority.instrument_rules.barrier, authority.instrument_rules.barrier);
+        try std.testing.expectEqual(command.authority.risk_lease.barrier, authority.risk_lease.barrier);
+        if (round == 0) {
+            var next_tail = engine.journal.Journal.initAt(run.shard.authoritativeBarrier() + 1);
+            _ = try applyLive(&run.shard, &next_tail, .{ .core = .{ .identity = 1900, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_900 } } } });
+            try next_tail.seal();
+            const multi = try TradingShard.restoreSegments(snapshot, &.{ tail.bytes(), next_tail.bytes() });
+            try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &multi.shard.canonicalStateDigest());
+            try std.testing.expectError(error.SnapshotJournalGap, TradingShard.restoreSegments(snapshot, &.{ next_tail.bytes(), tail.bytes() }));
+            const truncated = tail.bytes()[0 .. tail.bytes().len - 1];
+            try std.testing.expectError(error.SnapshotJournalGap, TradingShard.restoreSegments(snapshot, &.{ truncated, next_tail.bytes() }));
+        }
+        if (round == 99) {
+            const post_snapshot = try run.shard.snapshot(&tail, run.shard.authoritativeBarrier(), &snapshot_storage);
+            max_snapshot_bytes = @max(max_snapshot_bytes, post_snapshot.len);
+            const codec = @import("snapshot_codec.zig");
+            const decoded = try codec.read(post_snapshot, TradingShard, engine.state_schema_version, engine.release_artifact_identity, engine.schema_registry_identity);
+            var forged_storage: [256 * 1024]u8 = undefined;
+            for (0..7) |corruption| {
+                var forged = decoded.value;
+                switch (corruption) {
+                    0 => forged.trace.pinned[0].identity ^= 1,
+                    1 => forged.trace.events[0].sequence += 1,
+                    2 => forged.trace.history_head[0] ^= 1,
+                    3 => forged.trace.input_head[0] ^= 1,
+                    4 => forged.checkpoint.?.archive_root[0] ^= 1,
+                    5 => forged.trace.events[0].input_first = false,
+                    6 => forged.trace.events[0].input_digest[0] ^= 1,
+                    else => unreachable,
+                }
+                var metadata = decoded.metadata;
+                metadata.state_digest = forged.canonicalStateDigest();
+                const invalid = try codec.write(&forged_storage, metadata, forged);
+                try std.testing.expectError(error.InvalidSnapshotState, TradingShard.restoreSnapshot(invalid));
+            }
+        }
+        run.decision_journal = engine.journal.Journal.initAt(run.shard.authoritativeBarrier() + 1);
+    }
+    try std.testing.expect(run.shard.authoritativeBarrier() > 768);
+    try std.testing.expectEqual(@as(u8, 1), run.shard.oms.order_count);
+    std.debug.print("checkpoint core: 100 rounds, barrier={d}, encoded_snapshot_max={d}, shard_bytes={d}, pins_max={d}/384, window=256\n", .{ run.shard.authoritativeBarrier(), max_snapshot_bytes, @sizeOf(TradingShard), max_pins });
+}
+
+test "ordered checkpoint history binds core input prices before final state convergence" {
+    var first = try startScenario();
+    var second = first;
+    for ([_]*LiveRun{ &first, &second }, 0..) |run, index| {
+        _ = try applyLive(&run.shard, &run.decision_journal, .{ .core = .{ .identity = 1000, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = if (index == 0) 50_000_001 else 50_000_002 } } } });
+        _ = try applyLive(&run.shard, &run.decision_journal, .{ .core = .{ .identity = 1001, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_003 } } } });
+    }
+    try std.testing.expectEqualSlices(u8, &first.shard.semanticAuthorityDigest(), &second.shard.semanticAuthorityDigest());
+    try std.testing.expect(!std.mem.eql(u8, &first.shard.canonicalStateDigest(), &second.shard.canonicalStateDigest()));
+    try std.testing.expect(!std.mem.eql(u8, &first.shard.trace.input_head, &second.shard.trace.input_head));
+}
+
 test "global shard barrier rejects checksummed sequence tampering before restore" {
     var run = try startScenario();
     try run.decision_journal.seal();
     run.shard.trace.events[1].sequence = 1;
-    var storage: [64 * 1024]u8 = undefined;
+    var storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
     const forged = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &storage);
     try std.testing.expectError(error.InvalidSnapshotState, TradingShard.restoreSnapshot(forged));
 
@@ -81,7 +175,7 @@ test "global shard barrier continues snapshot tail replay and preserves failed a
     var run = try startScenario();
     try std.testing.expectEqual(@as(u64, 21), run.shard.authoritativeBarrier());
     try run.decision_journal.seal();
-    var storage: [64 * 1024]u8 = undefined;
+    var storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
     const snapshot = try run.shard.snapshot(&run.decision_journal, run.shard.authoritativeBarrier(), &storage);
     var tail = engine.journal.Journal.initAt(run.shard.authoritativeBarrier() + 1);
     const input = atGroup(11, .{ .identity = 22, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_001 } } });
@@ -111,7 +205,8 @@ test "Owner native settlements retain partial cost remainder reversal and classi
     const durable = @import("durable_store.zig");
     const memory = try std.testing.allocator.create(durable.MemoryAdapter);
     defer std.testing.allocator.destroy(memory);
-    memory.* = .init();
+    memory.* = .initWithAllocator(std.testing.allocator);
+    defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 999 };
     var owner = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
     const native = @import("asset_registry.zig").testDefinitions(12, 9);
@@ -209,7 +304,8 @@ test "Owner rejects tighter native bounds without losing committed registry or r
     for ([_]bool{ false, true }) |third_asset| {
         const memory = try std.testing.allocator.create(durable.MemoryAdapter);
         defer std.testing.allocator.destroy(memory);
-        memory.* = .init();
+        memory.* = .initWithAllocator(std.testing.allocator);
+        defer memory.deinit();
         const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 990 };
         var owner = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
         if (third_asset) {
@@ -924,7 +1020,7 @@ test "new HostSession revokes the old direct-trade identity" {
 test "fresh Gateway revokes a replayed old Host activation before restart" {
     var original = try startScenario();
     try original.decision_journal.seal();
-    var snapshot_storage: [64 * 1024]u8 = undefined;
+    var snapshot_storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
     const snapshot = try original.shard.snapshot(&original.decision_journal, original.decision_journal.last_sequence, &snapshot_storage);
     const restored = try TradingShard.restoreSnapshot(snapshot);
     var recovered = restored.shard;
@@ -2001,11 +2097,11 @@ test "SPOT and linear instruments close economics and replay independently" {
     try std.testing.expect(commands[0].reservation.atoms != commands[1].reservation.atoms);
 
     try prefix.decision_journal.seal();
-    var snapshot_storage: [64 * 1024]u8 = undefined;
+    var snapshot_storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
     const snapshot = try prefix.shard.snapshot(&prefix.decision_journal, prefix.decision_journal.last_sequence, &snapshot_storage);
     var forged = prefix.shard;
     forged.oms.command_history[0].risk_decision_identity = forged.oms.command_history[0].reservation_identity;
-    var forged_storage: [64 * 1024]u8 = undefined;
+    var forged_storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
     const forged_snapshot = try forged.snapshot(&prefix.decision_journal, prefix.decision_journal.last_sequence, &forged_storage);
     try std.testing.expectError(error.InvalidSnapshotState, TradingShard.restoreSnapshot(forged_snapshot));
     const tail_events = [_]CanonicalEvent{
@@ -2176,7 +2272,8 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     try gateway.observeAuthority(current_authority);
     const fault_memory = try std.testing.allocator.create(@import("durable_store.zig").MemoryAdapter);
     defer std.testing.allocator.destroy(fault_memory);
-    fault_memory.* = .init();
+    fault_memory.* = .initWithAllocator(std.testing.allocator);
+    defer fault_memory.deinit();
     var fault_gateway: execution_gateway.Gateway = .{};
     try fault_gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
     var wrong_position = current_authority;
@@ -2192,7 +2289,8 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     try std.testing.expectEqual(@as(u64, 0), fault_gateway.send_attempt_count);
     const durable_memory = try std.testing.allocator.create(@import("durable_store.zig").MemoryAdapter);
     defer std.testing.allocator.destroy(durable_memory);
-    durable_memory.* = .init();
+    durable_memory.* = .initWithAllocator(std.testing.allocator);
+    defer durable_memory.deinit();
     const durable_store = durable_memory.interface();
     const stream: @import("durable_store.zig").StreamIdentity = .{ .domain = .control, .id = 77 };
     try gateway.bootstrapDurableDispatch(durable_store, undefined, stream);
@@ -2343,7 +2441,7 @@ test "OMS group identity is checked before new risk and conflict survives replay
     try std.testing.expectEqual(shard_event.EventKind.oms_intent_conflict, run.shard.trace.events[run.shard.trace.len - 1].kind);
     try run.decision_journal.seal();
     const digest = try fixture.assertReplayEquivalent(run);
-    var snapshot_storage: [64 * 1024]u8 = undefined;
+    var snapshot_storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
     const snapshot = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &snapshot_storage);
     var restored = (try TradingShard.restoreSnapshot(snapshot)).shard;
     try std.testing.expectEqualSlices(u8, &digest, &restored.canonicalStateDigest());

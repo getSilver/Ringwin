@@ -942,7 +942,8 @@ test "Gateway route and batch admission fail atomically" {
 test "dispatch namespace survives recovery and changes for a new stream" {
     const memory = try std.testing.allocator.create(durable.MemoryAdapter);
     defer std.testing.allocator.destroy(memory);
-    memory.* = .init();
+    memory.* = .initWithAllocator(std.testing.allocator);
+    defer memory.deinit();
     const store = memory.interface();
     var first: Gateway = .{};
     const first_stream: durable.StreamIdentity = .{ .domain = .control, .id = 91 };
@@ -952,19 +953,23 @@ test "dispatch namespace survives recovery and changes for a new stream" {
     try std.testing.expectEqualSlices(u8, &first.durable_dispatch.?.namespace, &recovered.durable_dispatch.?.namespace);
     var wrong_stream: Gateway = .{};
     try std.testing.expectError(error.DurableDispatchUnavailable, wrong_stream.attachRecoveredDurableDispatch(store, undefined, .{ .domain = .control, .id = 93 }));
+    var second: Gateway = .{};
+    try second.bootstrapDurableDispatch(store, undefined, .{ .domain = .control, .id = 92 });
+    try std.testing.expect(!std.mem.eql(u8, &first.durable_dispatch.?.namespace, &second.durable_dispatch.?.namespace));
     memory.snapshots[0][dispatch_snapshot.len] ^= 1;
     var wrong_schema: Gateway = .{};
     try std.testing.expectError(error.DurableDispatchUnavailable, wrong_schema.attachRecoveredDurableDispatch(store, undefined, first_stream));
     memory.snapshots[0][dispatch_snapshot.len] ^= 1;
-    var second: Gateway = .{};
-    try second.bootstrapDurableDispatch(store, undefined, .{ .domain = .control, .id = 92 });
-    try std.testing.expect(!std.mem.eql(u8, &first.durable_dispatch.?.namespace, &second.durable_dispatch.?.namespace));
+    try std.testing.expectEqual(durable.GateState.closed, store.safetyGate());
+    var closed: Gateway = .{};
+    try std.testing.expectError(error.DurableDispatchUnavailable, closed.bootstrapDurableDispatch(store, undefined, .{ .domain = .control, .id = 94 }));
 }
 
 test "recovered dispatch needs an order reconciliation newer than its send" {
     const memory = try std.testing.allocator.create(durable.MemoryAdapter);
     defer std.testing.allocator.destroy(memory);
-    memory.* = .init();
+    memory.* = .initWithAllocator(std.testing.allocator);
+    defer memory.deinit();
     var gateway: Gateway = .{};
     try gateway.bootstrapDurableDispatch(memory.interface(), undefined, .{ .domain = .control, .id = 94 });
     var shard: trading.TradingShard = .{};

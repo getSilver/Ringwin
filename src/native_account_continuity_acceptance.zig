@@ -44,6 +44,7 @@ fn exercise(comptime kind: Kind) !void {
     const memory = try gpa.create(durable.MemoryAdapter);
     defer gpa.destroy(memory);
     memory.* = .init();
+    defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = venue_id };
     var raw = try raw_ingress.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = venue_id });
     const owner = try gpa.create(demo.Owner);
@@ -140,6 +141,7 @@ fn exercise(comptime kind: Kind) !void {
     for ([_]usize{ 0, 3 }) |conflict_index| {
         const conflict_memory = try gpa.create(durable.MemoryAdapter);
         defer gpa.destroy(conflict_memory);
+        // ponytail: branch borrows immutable archive; clone payloads if this branch rotates.
         conflict_memory.* = memory.*;
         const conflicting_owner = try gpa.create(demo.Owner);
         defer gpa.destroy(conflicting_owner);

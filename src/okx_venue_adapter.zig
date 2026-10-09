@@ -79,6 +79,31 @@ const Bootstrap = struct {
     margin: ?private.PrivateEvent = null,
 };
 
+pub const ResumeCheckpoint = struct {
+    schema: u16 = 1,
+    binding: Binding,
+    profile: order.CapabilityProfile,
+    rules: Rules,
+    asset_definitions: @import("asset_registry.zig").Registry,
+    instrument_definitions: @import("instrument_registry.zig").Registry,
+    native_settlement_atoms: bool,
+    reconciler: private.ResumeCheckpoint,
+    next_legacy_id: u64,
+    next_event_sequence: u64,
+    order_links: [pending_capacity]OrderLink = @splat(std.mem.zeroes(OrderLink)),
+    order_link_count: u8,
+    known_economic_fills: [32]canonical.Fill = @splat(std.mem.zeroes(canonical.Fill)),
+    known_economic_fill_count: u8,
+    balance_source_assets: [8]canonical.AssetIdentity,
+    balance_source_times: [8]u64,
+    balance_source_count: u8,
+    margin_source_utc_ns: u64,
+    active_bootstrap: canonical.BootstrapSnapshotIdentity,
+    account_source_sequence: u64,
+};
+
+pub const max_resume_checkpoint_bytes = 96 * 1024;
+
 pub const OkxVenueAdapter = struct {
     asset_definitions: @import("asset_registry.zig").Registry = .{},
     native_settlement_atoms: bool = false,
@@ -124,6 +149,91 @@ pub const OkxVenueAdapter = struct {
     active_bootstrap: ?canonical.BootstrapSnapshotIdentity = null,
     bootstrap_released: bool = false,
     account_source_sequence: u64 = 0,
+
+    /// A ready, fully drained decoder checkpoint contains no transport or
+    /// execution authority. Its bounded identity sets retain their old limits.
+    pub fn exportResumeCheckpoint(self: *const OkxVenueAdapter, destination: []u8) ![]const u8 {
+        if (self.state != .running or self.private_failed or self.pending_count != 0 or self.pending_output != null or
+            self.pending_private_count != 0 or self.pending_order_reconciliation_count != 0 or
+            self.pending_account_reconciliation != null or self.pending_economic_boundary != null or
+            self.pending_economic_through != null or !self.bootstrap_released or
+            self.order_link_count > pending_capacity or self.known_economic_fill_count > 32 or self.balance_source_count > 8)
+            return error.PrivateRecoveryBoundaryUnavailable;
+        try self.asset_definitions.validate();
+        try self.instrument_definitions.validate();
+        var checkpoint: ResumeCheckpoint = .{
+            .binding = self.binding orelse return error.PrivateRecoveryBoundaryUnavailable,
+            .profile = self.profile,
+            .rules = self.rules,
+            .asset_definitions = self.asset_definitions,
+            .instrument_definitions = self.instrument_definitions,
+            .native_settlement_atoms = self.native_settlement_atoms,
+            .reconciler = try (self.reconciler orelse return error.MissingPrivateReconciler).exportResumeCheckpoint(),
+            .next_legacy_id = self.next_legacy_id,
+            .next_event_sequence = self.next_event_sequence,
+            .order_link_count = self.order_link_count,
+            .known_economic_fill_count = self.known_economic_fill_count,
+            .balance_source_assets = self.balance_source_assets,
+            .balance_source_times = self.balance_source_times,
+            .balance_source_count = self.balance_source_count,
+            .margin_source_utc_ns = self.margin_source_utc_ns,
+            .active_bootstrap = self.active_bootstrap orelse return error.PrivateRecoveryBoundaryUnavailable,
+            .account_source_sequence = self.account_source_sequence,
+        };
+        @memcpy(checkpoint.order_links[0..self.order_link_count], self.order_links[0..self.order_link_count]);
+        @memcpy(checkpoint.known_economic_fills[0..self.known_economic_fill_count], self.known_economic_fills[0..self.known_economic_fill_count]);
+        @memset(checkpoint.instrument_definitions.entries[checkpoint.instrument_definitions.count..], std.mem.zeroes(@import("instrument_registry.zig").Entry));
+        return @import("snapshot_codec.zig").encodeBare(destination, checkpoint);
+    }
+
+    pub fn restoreResumeCheckpoint(self: *OkxVenueAdapter, encoded: []const u8) !void {
+        if (self.state != .running or self.chain.mode != .replay or self.pending_count != 0 or
+            self.pending_output != null or self.pending_private_count != 0 or self.private_failed or
+            self.pending_order_reconciliation_count != 0 or self.pending_account_reconciliation != null or
+            self.pending_economic_boundary != null or self.pending_economic_through != null) return error.InvalidState;
+        const checkpoint = try @import("snapshot_codec.zig").decodeBare(encoded, ResumeCheckpoint);
+        if (checkpoint.schema != 1 or !std.meta.eql(checkpoint.binding, self.binding orelse return error.InvalidBinding) or
+            !std.meta.eql(checkpoint.profile, self.profile) or !std.meta.eql(checkpoint.rules, self.rules) or
+            checkpoint.order_link_count > pending_capacity or checkpoint.known_economic_fill_count > 32 or checkpoint.balance_source_count > 8 or
+            checkpoint.next_event_sequence == 0 or checkpoint.next_legacy_id == 0 or checkpoint.active_bootstrap == 0 or
+            checkpoint.reconciler.session != checkpoint.binding.session or checkpoint.account_source_sequence == 0)
+            return error.InvalidPrivateResumeCheckpoint;
+        try checkpoint.asset_definitions.validate();
+        try checkpoint.instrument_definitions.validate();
+        for (checkpoint.asset_definitions.entries[0..checkpoint.asset_definitions.count]) |entry| {
+            const configured = self.asset_definitions.get(entry.definition.asset) orelse return error.InvalidPrivateResumeCheckpoint;
+            if (!std.meta.eql(configured.definition, entry.definition)) return error.InvalidPrivateResumeCheckpoint;
+        }
+        for (checkpoint.instrument_definitions.entries[0..checkpoint.instrument_definitions.count]) |entry| {
+            const configured = self.instrument_definitions.get(entry.instrument) orelse return error.InvalidPrivateResumeCheckpoint;
+            if (!std.meta.eql(configured.rules, entry.rules) or configured.venue != entry.venue or configured.product != entry.product)
+                return error.InvalidPrivateResumeCheckpoint;
+        }
+        // Validate before publishing either decoder or adapter state.
+        var reconciler = (self.reconciler orelse return error.MissingPrivateReconciler).*;
+        try reconciler.restoreResumeCheckpoint(checkpoint.reconciler);
+        for (checkpoint.order_links[0..checkpoint.order_link_count], 0..) |link, index| {
+            if (link.order == 0 or link.revision == 0 or link.quantity.lots <= 0) return error.InvalidPrivateResumeCheckpoint;
+            for (checkpoint.order_links[0..index]) |previous| if (previous.order == link.order) return error.InvalidPrivateResumeCheckpoint;
+        }
+        self.reconciler.?.* = reconciler;
+        self.asset_definitions = checkpoint.asset_definitions;
+        self.instrument_definitions = checkpoint.instrument_definitions;
+        self.native_settlement_atoms = checkpoint.native_settlement_atoms;
+        self.next_legacy_id = checkpoint.next_legacy_id;
+        self.next_event_sequence = checkpoint.next_event_sequence;
+        self.order_links = checkpoint.order_links;
+        self.order_link_count = checkpoint.order_link_count;
+        self.known_economic_fills = checkpoint.known_economic_fills;
+        self.known_economic_fill_count = checkpoint.known_economic_fill_count;
+        self.balance_source_assets = checkpoint.balance_source_assets;
+        self.balance_source_times = checkpoint.balance_source_times;
+        self.balance_source_count = checkpoint.balance_source_count;
+        self.margin_source_utc_ns = checkpoint.margin_source_utc_ns;
+        self.active_bootstrap = checkpoint.active_bootstrap;
+        self.account_source_sequence = checkpoint.account_source_sequence;
+        self.bootstrap_released = true;
+    }
 
     pub fn init(allocator: std.mem.Allocator, chain: *live.Chain, clock: Clock, capability_profile: order.CapabilityProfile, instrument_rules: Rules) OkxVenueAdapter {
         return .{ .allocator = allocator, .chain = chain, .clock = clock, .profile = capability_profile, .rules = instrument_rules };
@@ -1914,6 +2024,54 @@ test "OKX adapter resumes canonical event sequence before start" {
     const adapter = implementation.adapter();
     try startTest(adapter);
     try std.testing.expectError(error.InvalidState, implementation.resumeAfter(42));
+}
+
+test "OKX private resume checkpoint is pure, bounded, and rejects pending output" {
+    var raw = TestRawSink{};
+    var transport = TestTransport{};
+    var chain: live.Chain = .{ .mode = .replay, .qualification = qualification(), .raw_sink = raw.interface(), .transport = transport.interface() };
+    var clock = TestClock{};
+    var reconciler: private.Reconciler = .{};
+    var implementation = OkxVenueAdapter.init(std.testing.allocator, &chain, clock.interface(), testProfile(), testRules());
+    implementation.attachPrivateReconciler(&reconciler);
+    try startTest(implementation.adapter());
+    var buffer: [max_resume_checkpoint_bytes]u8 = undefined;
+    try std.testing.expectError(error.PrivateRecoveryBoundaryUnavailable, implementation.exportResumeCheckpoint(&buffer));
+    var ready: private.ResumeCheckpoint = .{
+        .session = 6,
+        .subscriptions = .{ true, true, true },
+        .rest = undefined,
+        .stable_rest_digests = @splat(@splat(0)),
+        .ws_snapshots = .{ .{}, .{} },
+        .bootstrap_watermark = 1,
+        .last_raw_sequence = 4,
+        .seen_count = 0,
+    };
+    for (&ready.rest) |*endpoint| endpoint.* = .{ .started = true, .complete = true };
+    try reconciler.restoreResumeCheckpoint(ready);
+    implementation.active_bootstrap = 1;
+    implementation.bootstrap_released = true;
+    implementation.account_source_sequence = 1;
+    implementation.next_event_sequence = 43;
+    const encoded = try implementation.exportResumeCheckpoint(&buffer);
+    std.debug.print("private resume DTO bytes={d}\n", .{encoded.len});
+    var target_reconciler: private.Reconciler = .{};
+    var target = OkxVenueAdapter.init(std.testing.allocator, &chain, clock.interface(), testProfile(), testRules());
+    target.attachPrivateReconciler(&target_reconciler);
+    try startTest(target.adapter());
+    try target.restoreResumeCheckpoint(encoded);
+    try std.testing.expectEqual(@as(u64, 43), target.next_event_sequence);
+    try std.testing.expectEqual(@as(u64, 4), target_reconciler.rawWatermark());
+    try std.testing.expect(target_reconciler.readiness().reconciliation_ready);
+    try std.testing.expectEqual(@as(u64, 0), transport.calls);
+    target.pending_private_count = 1;
+    try std.testing.expectError(error.PrivateRecoveryBoundaryUnavailable, target.exportResumeCheckpoint(&buffer));
+    target.pending_private_count = 0;
+    var corrupt = try @import("snapshot_codec.zig").decodeBare(encoded, ResumeCheckpoint);
+    corrupt.schema = 99;
+    const old = try @import("snapshot_codec.zig").encodeBare(&buffer, corrupt);
+    try std.testing.expectError(error.InvalidPrivateResumeCheckpoint, target.restoreResumeCheckpoint(old));
+    try std.testing.expectEqual(@as(u64, 0), transport.calls);
 }
 
 test "OKX drained replay handoff preserves committed floor and fresh fault evidence" {

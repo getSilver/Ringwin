@@ -21,6 +21,7 @@ pub const DurableSink = struct {
     stream: durable.StreamIdentity,
     next_sequence: u64 = 1,
     segment_bytes: usize = journal.segment_header_size,
+    checkpoint_pending: bool = false,
 
     pub fn init(store: durable.Store, io: std.Io, stream: durable.StreamIdentity) !DurableSink {
         if (stream.domain != .raw_ingress or stream.id == 0 or store.safetyGate() != .open)
@@ -34,7 +35,30 @@ pub const DurableSink = struct {
         const recovered = store.recover(io, stream) catch return error.RawIngressUnavailable;
         if (recovered.gate != .open or recovered.last_sequence != recovered.committed_barrier)
             return error.RawIngressUnavailable;
-        return .{ .store = store, .io = io, .stream = stream, .next_sequence = std.math.add(u64, recovered.last_sequence, 1) catch return error.RawIngressUnavailable, .segment_bytes = if (recovered.tail.len == 0) journal.segment_header_size else recovered.tail.len };
+        return .{ .store = store, .io = io, .stream = stream, .next_sequence = std.math.add(u64, recovered.last_sequence, 1) catch return error.RawIngressUnavailable, .segment_bytes = @max(journal.segment_header_size, recovered.active_segment.len), .checkpoint_pending = recovered.segment_sealed };
+    }
+
+    /// Complete a durable seal explicitly; recovery itself never mutates Store.
+    pub fn checkpoint(self: *DurableSink) !void {
+        if (self.next_sequence == 1 or !self.store.supportsSegmentReplay() or self.store.safetyGate() != .open)
+            return error.RawIngressUnavailable;
+        const barrier = self.next_sequence - 1;
+        const recovered = try self.store.recover(self.io, self.stream);
+        if (recovered.gate != .open or recovered.last_sequence != barrier or recovered.committed_barrier != barrier)
+            return error.RawIngressUnavailable;
+        if (recovered.active_segment.len <= journal.segment_header_size) {
+            if (recovered.archived_barrier != barrier or !try self.store.verifyArchiveReceipt(self.io, self.stream, barrier, recovered.archive_root))
+                return error.RawIngressUnavailable;
+        } else {
+            self.checkpoint_pending = true;
+            if (!recovered.segment_sealed) try self.store.seal(self.io, self.stream);
+            var watermark: [8]u8 = undefined;
+            std.mem.writeInt(u64, &watermark, barrier, .little);
+            try self.store.publishSnapshot(self.io, self.stream, barrier, &watermark);
+            try self.store.rotate(self.io, self.stream);
+        }
+        self.segment_bytes = journal.segment_header_size;
+        self.checkpoint_pending = false;
     }
 
     pub fn interface(self: *DurableSink) market.RawSink {
@@ -44,7 +68,7 @@ pub const DurableSink = struct {
     fn append(ptr: *anyopaque, record: market.RawIngressRecord, bytes: []const u8) market.RawSinkError!u64 {
         const self: *DurableSink = @ptrCast(@alignCast(ptr));
         if (bytes.len > max_frame_bytes or bytes.len > std.math.maxInt(u32) or
-            record.byte_len != @as(u32, @intCast(bytes.len)) or self.store.safetyGate() != .open)
+            record.byte_len != @as(u32, @intCast(bytes.len)) or self.checkpoint_pending or self.store.safetyGate() != .open)
             return error.Unavailable;
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
@@ -63,12 +87,7 @@ pub const DurableSink = struct {
         const encoded_length = journal.record_header_size + header_bytes + bytes.len;
         if (self.segment_bytes + encoded_length + journal.footer_size > durable.max_segment_bytes) {
             if (!self.store.supportsSegmentReplay() or self.next_sequence == 1) return error.Unavailable;
-            self.store.seal(self.io, self.stream) catch return error.Unavailable;
-            var checkpoint: [8]u8 = undefined;
-            std.mem.writeInt(u64, &checkpoint, self.next_sequence - 1, .little);
-            self.store.publishSnapshot(self.io, self.stream, self.next_sequence - 1, &checkpoint) catch return error.Unavailable;
-            self.store.rotate(self.io, self.stream) catch return error.Unavailable;
-            self.segment_bytes = journal.segment_header_size;
+            self.checkpoint() catch return error.Unavailable;
         }
         const sequence = self.next_sequence;
         self.store.append(self.io, .{ .stream = self.stream, .record = .{
@@ -100,19 +119,25 @@ pub const ReplayConsumer = struct {
 };
 
 pub fn replayCommitted(store: durable.Store, io: std.Io, stream: durable.StreamIdentity, consumer: ReplayConsumer) !void {
+    return replayCommittedAfter(store, io, stream, 0, std.math.maxInt(usize), consumer);
+}
+
+pub fn replayCommittedAfter(store: durable.Store, io: std.Io, stream: durable.StreamIdentity, after: u64, byte_budget: usize, consumer: ReplayConsumer) !void {
     if (stream.domain != .raw_ingress or store.safetyGate() != .open) return error.RawIngressUnavailable;
     const recovered = try store.recover(io, stream);
     if (recovered.gate != .open or recovered.last_sequence == 0 or recovered.last_sequence != recovered.committed_barrier)
         return error.RawIngressUnavailable;
     const Walker = struct {
         consumer: ReplayConsumer,
-        next_sequence: u64 = 1,
+        after: u64,
+        next_sequence: u64,
         fn segment(ptr: *anyopaque, bytes: []const u8) !void {
             const self: *@This() = @ptrCast(@alignCast(ptr));
             var reader = try journal.Reader.init(bytes);
             while (true) switch (try reader.next()) {
                 .end => break,
                 .record => |entry| {
+                    if (entry.sequence <= self.after) continue;
                     if (entry.sequence != self.next_sequence) return error.InvalidRawIngress;
                     if (entry.type_id != record_type or entry.schema_version != production_contract.journal_schema_version or entry.payload.len < header_bytes)
                         return error.InvalidRawIngress;
@@ -137,12 +162,15 @@ pub fn replayCommitted(store: durable.Store, io: std.Io, stream: durable.StreamI
             };
         }
     };
-    var walker: Walker = .{ .consumer = consumer };
-    if (store.supportsSegmentReplay())
+    if (after > recovered.committed_barrier) return error.InvalidRawIngress;
+    var walker: Walker = .{ .consumer = consumer, .after = after, .next_sequence = try std.math.add(u64, after, 1) };
+    if (after != 0)
+        try store.replaySegmentsAfter(io, stream, after, byte_budget, .{ .ptr = &walker, .consume_fn = Walker.segment })
+    else if (store.supportsSegmentReplay())
         try store.replaySegments(io, stream, .{ .ptr = &walker, .consume_fn = Walker.segment })
     else
         try Walker.segment(&walker, recovered.tail);
-    if (walker.next_sequence != recovered.last_sequence + 1) return error.InvalidRawIngress;
+    if (walker.next_sequence != try std.math.add(u64, recovered.last_sequence, 1)) return error.InvalidRawIngress;
 }
 
 fn put(comptime T: type, bytes: []u8, offset: usize, value: T) void {
@@ -155,6 +183,7 @@ fn get(comptime T: type, bytes: []const u8, offset: usize) T {
 
 test "durable raw ingress replays committed bytes and fails closed on storage fault" {
     var memory = durable.MemoryAdapter.init();
+    defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .raw_ingress, .id = 7 };
     var sink = try DurableSink.init(memory.interface(), undefined, stream);
     const bytes = "{\"frame\":1}";
@@ -194,8 +223,66 @@ test "durable raw ingress replays committed bytes and fails closed on storage fa
     try std.testing.expectEqual(durable.GateState.closed, memory.interface().safetyGate());
 }
 
+test "raw checkpoint interruptions resume explicitly before the next frame" {
+    const bytes = "checkpoint-frame";
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    const record: market.RawIngressRecord = .{
+        .source_session = 4,
+        .origin = 2,
+        .receive_time_utc_ns = 10,
+        .monotonic_time_ns = 11,
+        .wall_time_utc_ns = 12,
+        .byte_len = bytes.len,
+        .sha256 = digest,
+    };
+    for (0..3) |phase| {
+        var memory = durable.MemoryAdapter.initWithAllocator(std.testing.allocator);
+        defer memory.deinit();
+        const store = memory.interface();
+        const stream: durable.StreamIdentity = .{ .domain = .raw_ingress, .id = 720 };
+        var sink = try DurableSink.init(store, undefined, stream);
+        _ = try sink.interface().append(record, bytes);
+        try store.seal(undefined, stream);
+        if (phase >= 1) {
+            var watermark: [8]u8 = undefined;
+            std.mem.writeInt(u64, &watermark, 1, .little);
+            try store.publishSnapshot(undefined, stream, 1, &watermark);
+        }
+        if (phase == 2) try store.rotate(undefined, stream);
+        const before = try store.recover(undefined, stream);
+        var recovered = try DurableSink.recover(store, undefined, stream);
+        const after = try store.recover(undefined, stream);
+        try std.testing.expectEqualDeep(before, after);
+        try std.testing.expectEqual(phase != 2, recovered.checkpoint_pending);
+        if (recovered.checkpoint_pending) {
+            try std.testing.expectError(error.Unavailable, recovered.interface().append(record, bytes));
+            try std.testing.expectEqual(durable.GateState.open, store.safetyGate());
+        }
+        try recovered.checkpoint();
+        const archived = try store.archiveReceipt(undefined, stream);
+        try recovered.checkpoint();
+        try std.testing.expectEqualDeep(archived, try store.archiveReceipt(undefined, stream));
+        try std.testing.expect(!recovered.checkpoint_pending);
+        try std.testing.expectEqual(@as(u64, 2), (try recovered.interface().append(record, bytes)).stream_sequence);
+        const Counter = struct {
+            count: u64 = 0,
+            fn consume(ptr: *anyopaque, sequence: u64, _: market.RawIngressRecord, replayed: []const u8) !void {
+                const self: *@This() = @ptrCast(@alignCast(ptr));
+                self.count += 1;
+                try std.testing.expectEqual(self.count, sequence);
+                try std.testing.expectEqualStrings("checkpoint-frame", replayed);
+            }
+        };
+        var counter: Counter = .{};
+        try replayCommitted(store, undefined, stream, .{ .ptr = &counter, .consume_fn = Counter.consume });
+        try std.testing.expectEqual(@as(u64, 2), counter.count);
+    }
+}
+
 test "raw ingress retains a Demo bootstrap larger than the old 16 KiB segment" {
     var memory = durable.MemoryAdapter.init();
+    defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .raw_ingress, .id = 9 };
     var sink = try DurableSink.init(memory.interface(), undefined, stream);
     const bytes: [600]u8 = @splat('x');

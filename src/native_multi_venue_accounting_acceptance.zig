@@ -71,6 +71,7 @@ fn exercise(comptime kind: Kind, case: Case) ![32]u8 {
     const memory = try allocator.create(durable.MemoryAdapter);
     defer allocator.destroy(memory);
     memory.* = .init();
+    defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);

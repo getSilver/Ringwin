@@ -83,6 +83,7 @@ pub const EventKind = enum(u16) {
     canonical_market_invalidated,
     capability_profile_activated,
     oms_intent_conflict,
+    checkpoint_committed,
 };
 
 pub const Fact = struct {
@@ -90,44 +91,137 @@ pub const Fact = struct {
     identity: u64,
     kind: EventKind,
     reject_reason: RejectReason = .none,
+    input_digest: [32]u8 = @splat(0),
+    input_first: bool = false,
+};
+
+pub const CheckpointReceipt = struct {
+    version: u16 = 1,
+    stream: u64,
+    generation: u64,
+    first_sequence: u64,
+    barrier: u64,
+    history_head: [32]u8,
+    input_head: [32]u8,
+    previous_checkpoint_root: [32]u8,
+    snapshot_digest: [32]u8,
+    pinned_fact_root: [32]u8,
+    archive_root: [32]u8,
+    checkpoint_root: [32]u8,
 };
 
 pub const Trace = struct {
-    // ADR 0011: full retained window until ticket 03 supplies durable history continuation.
     events: [256]Fact = undefined,
     len: usize = 0,
+    base_sequence: u64 = 0,
     last_sequence: u64 = 0,
+    base_history_head: [32]u8 = @splat(0),
+    history_head: [32]u8 = @splat(0),
+    base_input_head: [32]u8 = @splat(0),
+    input_head: [32]u8 = @splat(0),
+    pinned: [384]Fact = undefined,
+    pinned_len: usize = 0,
+    pinned_root: [32]u8 = @splat(0),
+
+    pub fn factHead(previous: [32]u8, fact: Fact) [32]u8 {
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update("OrderedShardFactV1\x00");
+        hasher.update(&previous);
+        var sequence: [8]u8 = undefined;
+        std.mem.writeInt(u64, &sequence, fact.sequence, .little);
+        hasher.update(&sequence);
+        std.mem.writeInt(u64, &sequence, fact.identity, .little);
+        hasher.update(&sequence);
+        var kind: [2]u8 = undefined;
+        std.mem.writeInt(u16, &kind, @intFromEnum(fact.kind), .little);
+        hasher.update(&kind);
+        hasher.update(&.{ @intFromEnum(fact.reject_reason), @intFromBool(fact.input_first) });
+        hasher.update(&fact.input_digest);
+        var result: [32]u8 = undefined;
+        hasher.final(&result);
+        return result;
+    }
+
+    fn inputHead(previous: [32]u8, fact: Fact) [32]u8 {
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update("OrderedShardInputV1\x00");
+        hasher.update(&previous);
+        var sequence: [8]u8 = undefined;
+        std.mem.writeInt(u64, &sequence, fact.sequence, .little);
+        hasher.update(&sequence);
+        hasher.update(&fact.input_digest);
+        var result: [32]u8 = undefined;
+        hasher.final(&result);
+        return result;
+    }
 
     pub fn validate(self: *const Trace) !void {
-        // ponytail: scan the bounded 256-fact window; ticket 03 owns retained-window indexing.
-        if (self.len > self.events.len or self.last_sequence != self.len) return error.InvalidTrace;
-        for (self.events[0..self.len], 0..) |fact, index|
-            if (fact.sequence != index + 1 or fact.sequence > self.last_sequence) return error.InvalidTrace;
+        // ponytail: scan bounded 256-fact and 384-pin windows; indexed history belongs to later tickets.
+        if (self.len > self.events.len or self.pinned_len > self.pinned.len or
+            self.last_sequence != try std.math.add(u64, self.base_sequence, @intCast(self.len))) return error.InvalidTrace;
+        var history = self.base_history_head;
+        var inputs = self.base_input_head;
+        for (self.events[0..self.len], 0..) |fact, index| {
+            if (fact.sequence != try std.math.add(u64, self.base_sequence, @as(u64, @intCast(index)) + 1)) return error.InvalidTrace;
+            history = factHead(history, fact);
+            if (fact.input_first) inputs = inputHead(inputs, fact);
+        }
+        if (!std.mem.eql(u8, &history, &self.history_head) or !std.mem.eql(u8, &inputs, &self.input_head)) return error.InvalidTrace;
+        for (self.pinned[0..self.pinned_len], 0..) |fact, index| {
+            if (fact.sequence == 0 or fact.sequence > self.base_sequence or
+                (index > 0 and self.pinned[index - 1].sequence >= fact.sequence)) return error.InvalidTrace;
+        }
+        if ((self.base_sequence != 0 or self.pinned_len != 0) and !std.mem.eql(u8, &self.pinned_root, &self.pinnedDigest())) return error.InvalidTrace;
+    }
+
+    pub fn pinnedDigest(self: *const Trace) [32]u8 {
+        var head: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash("PinnedShardFactsV1\x00", &head, .{});
+        for (self.pinned[0..self.pinned_len]) |fact| head = factHead(head, fact);
+        return head;
     }
 
     pub fn factAt(self: *const Trace, sequence: u64) ?Fact {
-        if (sequence == 0 or sequence > self.last_sequence or self.len > self.events.len) return null;
-        for (self.events[0..self.len]) |fact|
-            if (fact.sequence == sequence) return fact;
+        if (sequence == 0 or sequence > self.last_sequence or self.len > self.events.len or self.pinned_len > self.pinned.len) return null;
+        for (self.events[0..self.len]) |fact| if (fact.sequence == sequence) return fact;
+        for (self.pinned[0..self.pinned_len]) |fact| if (fact.sequence == sequence) return fact;
         return null;
     }
 
+    pub fn factsAfter(self: *const Trace, barrier: u64) ![]const Fact {
+        if (barrier < self.base_sequence or barrier > self.last_sequence or self.len > self.events.len or
+            barrier - self.base_sequence > self.len) return error.InvalidTrace;
+        return self.events[@intCast(barrier - self.base_sequence)..self.len];
+    }
+
+    pub fn finalizeInput(self: *Trace, barrier: u64, digest: [32]u8) !void {
+        const first: usize = @intCast(barrier - self.base_sequence);
+        if (first >= self.len) return;
+        for (self.events[first..self.len], 0..) |*fact, index| {
+            fact.input_digest = digest;
+            fact.input_first = index == 0;
+        }
+        self.history_head = self.base_history_head;
+        self.input_head = self.base_input_head;
+        for (self.events[0..self.len]) |fact| {
+            self.history_head = factHead(self.history_head, fact);
+            if (fact.input_first) self.input_head = inputHead(self.input_head, fact);
+        }
+    }
+
     pub fn append(self: *Trace, kind: EventKind, identity: u64) !void {
-        const sequence = try std.math.add(u64, self.last_sequence, 1);
-        try self.validate();
-        if (self.len == self.events.len) return error.TraceFull;
-        self.events[self.len] = .{
-            .sequence = sequence,
-            .kind = kind,
-            .identity = identity,
-        };
-        self.len += 1;
-        self.last_sequence = sequence;
+        try self.appendRejection(kind, identity, .none);
     }
 
     pub fn appendRejection(self: *Trace, kind: EventKind, identity: u64, reason: RejectReason) !void {
-        try self.append(kind, identity);
-        self.events[self.len - 1].reject_reason = reason;
+        const sequence = try std.math.add(u64, self.last_sequence, 1);
+        try self.validate();
+        if (self.len == self.events.len) return error.TraceFull;
+        const fact: Fact = .{ .sequence = sequence, .kind = kind, .identity = identity, .reject_reason = reason };
+        self.events[self.len] = fact;
+        self.len += 1;
+        self.last_sequence = sequence;
+        self.history_head = factHead(self.history_head, fact);
     }
 };
 
@@ -244,6 +338,7 @@ pub const PayloadTag = enum(u16) {
     version_activation,
     strategy_cutover_fence,
     capability_profile_activation,
+    checkpoint_committed,
 };
 
 pub const ReservationModel = enum(u8) { leveraged, cash };
@@ -404,6 +499,7 @@ pub const CorePayload = union(PayloadTag) {
     version_activation: VersionActivationEvent,
     strategy_cutover_fence: StrategyCutoverFence,
     capability_profile_activation: CapabilityProfileActivation,
+    checkpoint_committed: CheckpointReceipt,
 };
 
 /// Typed core-originated event carried by the authoritative CanonicalEvent.
@@ -443,6 +539,16 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
     try encoded.put(u64, input.identity);
     try encoded.put(u16, @intFromEnum(std.meta.activeTag(input.payload)));
     switch (input.payload) {
+        .checkpoint_committed => |receipt| {
+            inline for (std.meta.fields(CheckpointReceipt)) |field| {
+                const value = @field(receipt, field.name);
+                switch (@typeInfo(field.type)) {
+                    .int => try encoded.put(field.type, value),
+                    .array => for (value) |byte| try encoded.put(u8, byte),
+                    else => unreachable,
+                }
+            }
+        },
         .asset_definition_activated => |value| {
             inline for (std.meta.fields(canonical.AssetDefinition)) |field| {
                 const item = @field(value, field.name);
@@ -568,10 +674,12 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u64, value.intent_sequence);
         },
         .oms_intent_group => |value| {
+            if (value.count > value.members.len) return error.InvalidIntentGroup;
             try encoded.put(u64, value.first_intent_sequence);
             try encoded.put(u8, @intFromEnum(value.policy));
             try encoded.put(u8, value.count);
             for (value.members[0..value.count]) |member| {
+                if (member.client_order_id.len > member.client_order_id.bytes.len) return error.InvalidIntentGroup;
                 try encoded.put(u64, member.intent_sequence);
                 try encoded.put(u128, member.strategy_instance);
                 try encoded.put(u8, @intFromEnum(member.operation));
@@ -603,6 +711,7 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             }
         },
         .oms_dispatch_batch => |value| {
+            if (value.count > value.items.len) return error.InvalidDispatchBatch;
             try encoded.put(u8, value.count);
             for (value.items[0..value.count]) |item| {
                 try encoded.put(u64, item.command_id);
@@ -760,6 +869,19 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
         try readInputValue(u16, record.payload, &offset),
     ) orelse return error.UnknownInputType;
     const payload: CorePayload = switch (tag) {
+        .checkpoint_committed => blk: {
+            var receipt: CheckpointReceipt = undefined;
+            inline for (std.meta.fields(CheckpointReceipt)) |field| {
+                switch (@typeInfo(field.type)) {
+                    .int => @field(receipt, field.name) = try readInputValue(field.type, record.payload, &offset),
+                    .array => for (&@field(receipt, field.name)) |*byte| {
+                        byte.* = try readInputValue(u8, record.payload, &offset);
+                    },
+                    else => unreachable,
+                }
+            }
+            break :blk .{ .checkpoint_committed = receipt };
+        },
         .asset_definition_activated => blk: {
             var value: canonical.AssetDefinition = undefined;
             inline for (std.meta.fields(canonical.AssetDefinition)) |field| {

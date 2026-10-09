@@ -509,7 +509,7 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
     if (economic_fault or point == .commit) try std.testing.expectEqual(@as(usize, 1), replay.pending_batches);
     if (!economic_fault and point != .commit) {
         try std.testing.expectEqualSlices(u8, &expected.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
-        try std.testing.expect(!recovered.shard.recovery_admission_pending);
+        try std.testing.expectEqual(recovered.checkpoint_pending, recovered.shard.recovery_admission_pending);
         try std.testing.expect(!recovered.shard.oms.recovery_only);
         try std.testing.expectEqual(@as(u64, 0), recovered.shard.economic_fault_count);
         try std.testing.expect(recovered.shard.operational_state.effectiveTradingAuthority());
@@ -527,17 +527,24 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
         next_intent.intent_sequence = recovered.shard.authoritativeBarrier() + 1;
         next_intent.strategy_cursor = recovered.shard.authoritativeBarrier();
         next_intent.quantity = 1_000;
-        const next_input: @import("trading_shard.zig").CanonicalEvent = .{ .core = .{ .identity = next_intent.intent_sequence, .monotonic_time = 3, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = next_intent } } };
+        var next_input: @import("trading_shard.zig").CanonicalEvent = .{ .core = .{ .identity = next_intent.intent_sequence, .monotonic_time = 3, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = next_intent } } };
         if (case.snapshot_point == .publish) {
             // A sealed tail without its new published snapshot is read-only;
             // this test must not invent truncation or silently repair rotation.
             try std.testing.expectError(error.DecisionLogUnavailable, recovered.apply(next_input));
-            try std.testing.expectError(error.DecisionLogUnavailable, recovered.source());
-        } else {
-            const next_command = (try recovered.apply(next_input)) orelse return error.MissingHealthyRecoveryCommand;
-            try std.testing.expect(next_command.command_id != command.command_id);
-            try std.testing.expectEqual(@as(i64, 1_000), next_command.quantity);
+            try std.testing.expect(recovered.checkpoint_pending);
+            try std.testing.expect((try recovered.source()).recovery_admission_pending);
+            var pending_gateway: @import("execution_gateway.zig").Gateway = .{};
+            try std.testing.expectError(error.DecisionLogUnavailable, recovered.send(&pending_gateway, &guard, command.command_id, 3));
         }
+        if (recovered.checkpoint_pending) try recovered.checkpoint();
+        try std.testing.expect(!recovered.shard.recovery_admission_pending);
+        next_input.core.identity = recovered.shard.authoritativeBarrier() + 1;
+        next_input.core.payload.external_order_intent.intent_sequence = next_input.core.identity;
+        next_input.core.payload.external_order_intent.strategy_cursor = recovered.shard.authoritativeBarrier();
+        const next_command = (try recovered.apply(next_input)) orelse return error.MissingHealthyRecoveryCommand;
+        try std.testing.expect(next_command.command_id != command.command_id);
+        try std.testing.expectEqual(@as(i64, 1_000), next_command.quantity);
         try std.testing.expectEqual(@as(u64, 1), replay_chain.next_attempt_id);
         try std.testing.expectEqual(@as(usize, 0), transport.sends);
         const healthy_digest = recovered.shard.canonicalStateDigest();

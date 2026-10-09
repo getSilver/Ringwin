@@ -40,6 +40,7 @@ const shard_event = @import("trading_shard_event.zig");
 pub const schema_version = shard_event.schema_version;
 pub const EventKind = shard_event.EventKind;
 pub const Fact = shard_event.Fact;
+pub const CheckpointReceipt = shard_event.CheckpointReceipt;
 const Trace = shard_event.Trace;
 const MarketHealth = shard_event.MarketHealth;
 const RejectReason = shard_event.RejectReason;
@@ -167,6 +168,8 @@ pub const TradingShard = struct {
     /// canonical/semantic digests deliberately describe committed facts only.
     recovery_admission_pending: bool = false,
     trace: Trace = .{},
+    checkpoint: ?CheckpointReceipt = null,
+    control_fact_sequences: [operational.max_commands]u64 = @splat(0),
     instrument_rules_version: u32 = 0,
     margin_rules_version: u32 = 0,
     account_configured: bool = false,
@@ -269,6 +272,39 @@ pub const TradingShard = struct {
     /// The sole public core ingress seam. Both typed core events and canonical
     /// Venue records enter through this tagged event and commit transactionally.
     pub fn apply(self: *TradingShard, input: CanonicalEvent) !ApplyResult {
+        if (input == .venue and input.venue.envelope.schema_version != canonical.schema_version) return error.UnsupportedSchema;
+        _ = try std.math.add(u64, self.authoritativeBarrier(), 1);
+        try self.trace.validate();
+        var encoded: [journal.max_payload_size]u8 = undefined;
+        const payload = try encodeStableInput(&encoded, input);
+        var hasher = Sha256.init(.{});
+        hasher.update("AcceptedShardInputV1\x00");
+        digestInt(&hasher, u16, schema_version);
+        const times = stableTimes(input);
+        digestInt(&hasher, u64, times.source);
+        digestInt(&hasher, u64, times.receive);
+        digestInt(&hasher, u64, times.monotonic);
+        digestInt(&hasher, u64, times.wall);
+        digestInt(&hasher, u8, @bitCast(times.presence));
+        hasher.update(payload);
+        var input_digest: [32]u8 = undefined;
+        hasher.final(&input_digest);
+        const before = self.authoritativeBarrier();
+        var candidate = self.*;
+        const result = candidate.applyUnfinalized(input) catch |err| {
+            if (candidate.authoritativeBarrier() != before) {
+                try candidate.trace.finalizeInput(before, input_digest);
+                self.* = candidate;
+            }
+            return err;
+        };
+        if (candidate.authoritativeBarrier() != before) try candidate.trace.finalizeInput(before, input_digest);
+        self.* = candidate;
+        return .{ .facts = try self.trace.factsAfter(before), .order_command = result.order_command, .oms_commands = self.oms.emitted() };
+    }
+
+    fn applyUnfinalized(self: *TradingShard, input: CanonicalEvent) !ApplyResult {
+
         // Process admission cannot emit durable rejection facts: restart
         // replay reconstructs committed facts independently of this fence.
         if (self.recovery_admission_pending and input == .core) switch (input.core.payload) {
@@ -290,7 +326,7 @@ pub const TradingShard = struct {
         var candidate = self.*;
         const account_failure_before = candidate.canonical_account.failure;
         const market_failure_generation_before = candidate.canonical_market.failure_generation;
-        const before = candidate.trace.len;
+        const before = candidate.authoritativeBarrier();
         candidate.oms.begin();
         const command = blk: {
             if (event.envelope.schema_version != canonical.schema_version) return error.UnsupportedSchema;
@@ -362,7 +398,7 @@ pub const TradingShard = struct {
         try candidate.bindFreshCancellations(event.envelope.times.monotonic_ns orelse 0);
         self.* = candidate;
         return .{
-            .facts = self.trace.events[before..self.trace.len],
+            .facts = try self.trace.factsAfter(before),
             .order_command = command,
             .oms_commands = self.oms.emitted(),
         };
@@ -370,7 +406,7 @@ pub const TradingShard = struct {
 
     fn applyCore(self: *TradingShard, event: CoreEvent) !ApplyResult {
         var candidate = self.*;
-        const before = candidate.trace.len;
+        const before = candidate.authoritativeBarrier();
         candidate.oms.begin();
         const command = candidate.handle(event) catch |err| {
             if (event.payload == .asset_definition_activated) {
@@ -398,10 +434,80 @@ pub const TradingShard = struct {
         try candidate.bindFreshCancellations(if (event.time_presence.monotonic) event.monotonic_time else 0);
         self.* = candidate;
         return .{
-            .facts = self.trace.events[before..self.trace.len],
+            .facts = try self.trace.factsAfter(before),
             .order_command = command,
             .oms_commands = self.oms.emitted(),
         };
+    }
+
+    pub fn checkpointGeneration(self: *const TradingShard) u64 {
+        return if (self.checkpoint) |receipt| receipt.generation else 0;
+    }
+    pub fn checkpointArchiveBarrier(self: *const TradingShard) u64 {
+        return if (self.checkpoint) |receipt| receipt.barrier else 0;
+    }
+    pub fn checkpointArchiveRoot(self: *const TradingShard) [32]u8 {
+        return if (self.checkpoint) |receipt| receipt.archive_root else @splat(0);
+    }
+
+    fn pinFact(self: *const TradingShard, target: *Trace, sequence: u64) !void {
+        if (sequence == 0) return;
+        for (target.pinned[0..target.pinned_len]) |fact| if (fact.sequence == sequence) return;
+        if (target.pinned_len == target.pinned.len) return error.PinnedFactCapacityExceeded;
+        target.pinned[target.pinned_len] = self.trace.factAt(sequence) orelse return error.MissingPinnedFact;
+        target.pinned_len += 1;
+    }
+
+    fn checkpointPins(self: *const TradingShard) !Trace {
+        var target = self.trace;
+        target.pinned_len = 0;
+        for (self.asset_registry.entries[0..self.asset_registry.count]) |entry| try self.pinFact(&target, entry.barrier);
+        for (self.instrument_registry.entries[0..self.instrument_registry.count]) |entry| {
+            try self.pinFact(&target, entry.rules_barrier);
+            try self.pinFact(&target, entry.capability_barrier);
+        }
+        try self.pinFact(&target, self.host_activation_fact_sequence);
+        try self.pinFact(&target, self.authority_control_barrier);
+        for (self.control_fact_sequences[0..self.operational_state.command_count]) |sequence| try self.pinFact(&target, sequence);
+        for ([_]EventKind{ .primary_lease_granted, .risk_lease_granted, .strategy_activated, .canonical_account_reconciliation_started, .canonical_account_reconciliation }) |kind| {
+            if (self.latestFact(kind)) |fact| try self.pinFact(&target, fact.sequence);
+        }
+        for (self.oms.command_history[0..self.oms.command_history_count]) |command| {
+            try self.pinFact(&target, command.risk_decision_identity);
+            try self.pinFact(&target, command.reservation_identity);
+            const refs = command.authority;
+            for ([_]u64{ refs.trading_authorization.barrier, refs.primary_lease.barrier, refs.risk_lease.barrier, refs.capability.barrier, refs.instrument_rules.barrier, refs.config.barrier, refs.deadline_barrier }) |sequence| try self.pinFact(&target, sequence);
+        }
+        std.mem.sort(Fact, target.pinned[0..target.pinned_len], {}, struct {
+            fn less(_: void, a: Fact, b: Fact) bool {
+                return a.sequence < b.sequence;
+            }
+        }.less);
+        target.pinned_root = target.pinnedDigest();
+        return target;
+    }
+
+    pub fn checkpointReceipt(self: *const TradingShard, stream: u64, generation: u64, archive_root: [32]u8) !CheckpointReceipt {
+        try self.trace.validate();
+        if (stream == 0 or self.trace.len == 0 or std.mem.allEqual(u8, &archive_root, 0) or
+            generation != try std.math.add(u64, self.checkpointGeneration(), 1) or
+            (self.checkpoint != null and self.checkpoint.?.stream != stream)) return error.InvalidCheckpointReceipt;
+        const pins = try self.checkpointPins();
+        var receipt: CheckpointReceipt = .{
+            .stream = stream,
+            .generation = generation,
+            .first_sequence = try std.math.add(u64, self.trace.base_sequence, 1),
+            .barrier = self.authoritativeBarrier(),
+            .history_head = self.trace.history_head,
+            .input_head = self.trace.input_head,
+            .previous_checkpoint_root = if (self.checkpoint) |previous| previous.checkpoint_root else @splat(0),
+            .snapshot_digest = self.canonicalStateDigest(),
+            .pinned_fact_root = pins.pinned_root,
+            .archive_root = archive_root,
+            .checkpoint_root = @splat(0),
+        };
+        receipt.checkpoint_root = checkpointRoot(receipt);
+        return receipt;
     }
 
     pub fn authoritativeBarrier(self: *const TradingShard) u64 {
@@ -437,7 +543,7 @@ pub const TradingShard = struct {
     }
 
     /// A permutation-only business-state comparison. CanonicalStateDigest
-    /// remains the ordered Trace/snapshot integrity digest.
+    /// remains the ordered history/snapshot integrity digest.
     pub fn semanticAuthorityDigest(self: TradingShard) [Sha256.digest_length]u8 {
         return semanticStateDigest(self);
     }
@@ -456,6 +562,7 @@ pub const TradingShard = struct {
         barrier: u64,
         destination: []u8,
     ) ![]const u8 {
+        if (self.trace.len > self.trace.events.len or self.trace.pinned_len > self.trace.pinned.len) return error.InvalidSnapshotState;
         if (!stable_journal.sealed or barrier == 0 or
             barrier != stable_journal.last_sequence or self.authoritativeBarrier() != barrier)
             return error.InvalidSnapshotBarrier;
@@ -496,11 +603,23 @@ pub const TradingShard = struct {
 
     /// Restores a snapshot and semantically replays its immediately following journal segment.
     pub fn restore(encoded: []const u8, stable_tail: []const u8) !SnapshotRecovery {
+        return restoreSegments(encoded, &.{stable_tail});
+    }
+
+    /// Replays bounded contiguous segments without concatenating their headers.
+    pub fn restoreSegments(encoded: []const u8, stable_tails: []const []const u8) !SnapshotRecovery {
         const restored = try restoreSnapshot(encoded);
-        var reader = try journal.Reader.init(stable_tail);
-        if (reader.next_sequence != try std.math.add(u64, restored.barrier, 1)) return error.SnapshotJournalGap;
-        const recovered = try replayReader(&reader, restored.shard);
-        return .{ .shard = recovered.shard, .barrier = restored.barrier, .status = recovered.status };
+        var shard = restored.shard;
+        var status: journal.ScanStatus = .clean;
+        for (stable_tails, 0..) |tail, index| {
+            var reader = try journal.Reader.init(tail);
+            if (reader.next_sequence != try std.math.add(u64, shard.authoritativeBarrier(), 1)) return error.SnapshotJournalGap;
+            const recovered = try replayReader(&reader, shard);
+            shard = recovered.shard;
+            status = recovered.status;
+            if (status == .truncated_tail and index + 1 != stable_tails.len) return error.SnapshotJournalGap;
+        }
+        return .{ .shard = shard, .barrier = restored.barrier, .status = status };
     }
 
     pub fn economicSummary(self: *const TradingShard) EconomicSummary {
@@ -557,13 +676,9 @@ pub const TradingShard = struct {
     /// Account reconciliation is single-flight at the VenueAdapter seam, so
     /// the latest durable control/result trace pair is its recovery status.
     pub fn accountReconciliationPending(self: *const TradingShard) bool {
-        var pending = false;
-        for (self.trace.events[0..self.trace.len]) |fact| switch (fact.kind) {
-            .canonical_account_reconciliation_started => pending = true,
-            .canonical_account_reconciliation => pending = false,
-            else => {},
-        };
-        return pending;
+        const started = self.latestFact(.canonical_account_reconciliation_started) orelse return false;
+        const completed = self.latestFact(.canonical_account_reconciliation) orelse return true;
+        return started.sequence > completed.sequence;
     }
 
     /// A copied snapshot of exactly the replayed Owner configuration, without defaults.
@@ -1122,26 +1237,21 @@ pub const TradingShard = struct {
     }
 
     fn latestFact(self: *const TradingShard, kind: EventKind) ?Fact {
-        var index = self.trace.len;
-        while (index > 0) {
-            index -= 1;
-            const fact = self.trace.events[index];
-            if (fact.kind == kind) return fact;
-        }
-        return null;
+        var latest: ?Fact = null;
+        for (self.trace.pinned[0..self.trace.pinned_len]) |fact| if (fact.kind == kind) {
+            latest = fact;
+        };
+        for (self.trace.events[0..self.trace.len]) |fact| if (fact.kind == kind) {
+            latest = fact;
+        };
+        return latest;
     }
 
     fn controlCommandAtBarrier(self: *const TradingShard, barrier: u64) ?operational.ControlCommand {
-        if (self.trace.factAt(barrier) == null) return null;
-        var command_index: usize = 0;
-        for (self.trace.events[0..self.trace.len]) |fact| {
-            if (fact.sequence > barrier) break;
-            if (fact.kind != .control_command_applied) continue;
-            if (command_index >= self.operational_state.command_count) return null;
-            const command = self.operational_state.command_history[command_index].command;
-            if (fact.sequence == barrier) return command;
-            command_index += 1;
-        }
+        const fact = self.trace.factAt(barrier) orelse return null;
+        if (fact.kind != .control_command_applied) return null;
+        for (self.control_fact_sequences[0..self.operational_state.command_count], 0..) |sequence, index|
+            if (sequence == barrier) return self.operational_state.command_history[index].command;
         return null;
     }
 
@@ -2233,11 +2343,27 @@ pub const TradingShard = struct {
     }
 
     fn handle(self: *TradingShard, input: CoreEvent) !?OrderCommand {
+        if (input.payload == .checkpoint_committed) {
+            const receipt = input.payload.checkpoint_committed;
+            if (self.checkpoint) |previous| if (std.meta.eql(previous, receipt)) return null;
+            const expected = try self.checkpointReceipt(receipt.stream, receipt.generation, receipt.archive_root);
+            if (!std.meta.eql(expected, receipt)) return error.InvalidCheckpointReceipt;
+            var retained = try self.checkpointPins();
+            retained.base_sequence = receipt.barrier;
+            retained.base_history_head = receipt.history_head;
+            retained.base_input_head = receipt.input_head;
+            retained.len = 0;
+            self.trace = retained;
+            self.checkpoint = receipt;
+            try self.trace.append(.checkpoint_committed, input.identity);
+            return null;
+        }
         switch (input.payload) {
             .exchange_balance, .opening_balance, .portfolio_transfer, .economic_fill, .funding_settlement, .venue_forced_execution, .economic_account_snapshot => try self.requireSettlementConsumers(),
             else => {},
         }
         switch (input.payload) {
+            .checkpoint_committed => unreachable,
             .asset_definition_activated => |definition| {
                 const previous = self.asset_registry.get(definition.asset);
                 var configured = self.*;
@@ -2297,6 +2423,7 @@ pub const TradingShard = struct {
                     try self.assertClosures();
                 }
                 try self.trace.append(.control_command_applied, input.identity);
+                self.control_fact_sequences[self.operational_state.command_count - 1] = self.authoritativeBarrier();
                 if (changesTradingAuthorization(command.kind))
                     self.authority_control_barrier = self.authoritativeBarrier();
             },
@@ -2924,6 +3051,7 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
     zeroUnused(instrument_registry.Entry, shard.instrument_registry.entries[shard.instrument_registry.count..]);
     zeroUnused(market_projection.InstrumentProjection, shard.canonical_market.entries[shard.canonical_market.count..]);
     zeroUnused(Fact, shard.trace.events[shard.trace.len..]);
+    zeroUnused(Fact, shard.trace.pinned[shard.trace.pinned_len..]);
     zeroUnused(oms_module.Order, shard.oms.orders[shard.oms.order_count..]);
     shard.oms.command_count = 0;
     zeroUnused(oms_module.Command, shard.oms.commands[0..]);
@@ -2975,6 +3103,22 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
 
 fn validateSnapshotState(shard: *const TradingShard) !void {
     shard.trace.validate() catch return error.InvalidSnapshotState;
+    if (shard.trace.len != 0 and !shard.trace.events[0].input_first) return error.InvalidSnapshotState;
+    var group_digest: [32]u8 = @splat(0);
+    for (shard.trace.events[0..shard.trace.len]) |fact| {
+        if (std.mem.allEqual(u8, &fact.input_digest, 0)) return error.InvalidSnapshotState;
+        if (fact.input_first) group_digest = fact.input_digest else if (!std.mem.eql(u8, &group_digest, &fact.input_digest)) return error.InvalidSnapshotState;
+    }
+    for (shard.trace.pinned[0..shard.trace.pinned_len]) |fact| if (std.mem.allEqual(u8, &fact.input_digest, 0)) return error.InvalidSnapshotState;
+    if (shard.checkpoint) |receipt| {
+        if (receipt.version != 1 or receipt.stream == 0 or receipt.generation == 0 or receipt.first_sequence == 0 or receipt.first_sequence > receipt.barrier or
+            std.mem.allEqual(u8, &receipt.archive_root, 0) or receipt.barrier != shard.trace.base_sequence or
+            !std.mem.eql(u8, &receipt.history_head, &shard.trace.base_history_head) or
+            !std.mem.eql(u8, &receipt.input_head, &shard.trace.base_input_head) or
+            !std.mem.eql(u8, &receipt.pinned_fact_root, &shard.trace.pinned_root) or
+            !std.mem.eql(u8, &receipt.checkpoint_root, &checkpointRoot(receipt))) return error.InvalidSnapshotState;
+    } else if (shard.trace.base_sequence != 0 or shard.trace.pinned_len != 0 or
+        !std.mem.allEqual(u8, &shard.trace.base_history_head, 0) or !std.mem.allEqual(u8, &shard.trace.base_input_head, 0)) return error.InvalidSnapshotState;
     if (shard.economic_fault_count != 0 and (!shard.oms.recovery_only or shard.economic_fault_evidence.stream == 0 or shard.economic_fault_evidence.sequence == 0)) return error.InvalidSnapshotState;
     if (shard.trace.len > shard.trace.events.len or
         shard.instrument_registry.count > shard.instrument_registry.entries.len or
@@ -3006,6 +3150,15 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         return error.InvalidSnapshotState;
     try shard.asset_registry.validate();
     try shard.canonical_account.validate();
+    for (shard.control_fact_sequences[0..shard.operational_state.command_count], 0..) |sequence, index| {
+        const fact = shard.trace.factAt(sequence) orelse return error.InvalidSnapshotState;
+        if (fact.kind != .control_command_applied) return error.InvalidSnapshotState;
+        for (shard.control_fact_sequences[0..index]) |previous| if (previous == sequence) return error.InvalidSnapshotState;
+    }
+    if (shard.host_activation_fact_sequence != 0) {
+        const fact = shard.trace.factAt(shard.host_activation_fact_sequence) orelse return error.InvalidSnapshotState;
+        if (fact.kind != .host_activated or shard.host_activation_identity == 0) return error.InvalidSnapshotState;
+    }
     if (shard.asset_configuration_failed and !shard.oms.recovery_only) return error.InvalidSnapshotState;
     for (shard.asset_registry.entries[0..shard.asset_registry.count]) |entry| {
         if (entry.barrier > shard.authoritativeBarrier() or (shard.trace.factAt(entry.barrier) orelse return error.InvalidSnapshotState).kind != .asset_definition_activated)
@@ -3184,7 +3337,7 @@ pub fn applyStable(
     input: CanonicalEvent,
 ) !?OrderCommand {
     const checkpoint = decision_journal.checkpoint();
-    const before = shard.trace.len;
+    const before = shard.authoritativeBarrier();
     const account_failure_before = shard.canonical_account.failure;
     const market_failure_generation_before = shard.canonical_market.failure_generation;
     const oms_recovery_before = shard.oms.recovery_only;
@@ -3201,7 +3354,7 @@ pub fn applyStable(
             candidate_shard.oms.recovery_only != oms_recovery_before or
             candidate_shard.economic_fault_count != economic_fault_before)
         {
-            appendStableFactGroup(decision_journal, input, candidate_shard.trace.events[before..candidate_shard.trace.len]) catch |journal_err| {
+            appendStableFactGroup(decision_journal, input, try candidate_shard.trace.factsAfter(before)) catch |journal_err| {
                 decision_journal.restore(checkpoint);
                 return journal_err;
             };
@@ -3214,6 +3367,7 @@ pub fn applyStable(
         // duplicate; replay never needs to append the same source fact twice.
         if (input == .venue) return null;
         if (input == .core and input.core.payload == .asset_definition_activated) return null;
+        if (input == .core and input.core.payload == .checkpoint_committed) return null;
         if (input == .core and input.core.payload == .external_order_intent) return null;
         if (input == .core and input.core.payload == .oms_intent_group and
             (shard.oms.groupIdentityStatus(input.core.payload.oms_intent_group) catch .fresh) == .duplicate)
@@ -3227,6 +3381,23 @@ pub fn applyStable(
     };
     shard.* = candidate_shard;
     return result.order_command;
+}
+
+fn checkpointRoot(receipt: CheckpointReceipt) [32]u8 {
+    var hasher = Sha256.init(.{});
+    hasher.update("ShardCheckpointBindingV1\x00");
+    inline for (std.meta.fields(CheckpointReceipt)) |field| {
+        if (comptime !std.mem.eql(u8, field.name, "checkpoint_root")) {
+            switch (@typeInfo(field.type)) {
+                .int => digestInt(&hasher, field.type, @field(receipt, field.name)),
+                .array => hasher.update(&@field(receipt, field.name)),
+                else => unreachable,
+            }
+        }
+    }
+    var root: [32]u8 = undefined;
+    hasher.final(&root);
+    return root;
 }
 
 fn digestInt(hasher: *Sha256, comptime T: type, value: T) void {
@@ -3289,7 +3460,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     const spot_portfolio_position = shard.spotPortfolioPosition();
     const spot_exchange_position = shard.spotExchangePosition();
     const ledger = shard.economic_projection.ledger_summary;
-    hasher.update("StateDigestV6\x00");
+    hasher.update("StateDigestV7\x00");
     digestInt(&hasher, u16, schema_version);
     digestAssetRegistry(&hasher, shard, true);
     digestInt(&hasher, u8, shard.instrument_registry.count);
@@ -3575,13 +3746,12 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     digestEconomicProjection(&hasher, shard.economic_projection);
     digestInt(&hasher, u64, shard.fencing_token);
     digestInt(&hasher, u64, shard.authoritativeBarrier());
-    digestInt(&hasher, u64, shard.trace.len);
-    for (shard.trace.events[0..shard.trace.len]) |event| {
-        digestInt(&hasher, u64, event.sequence);
-        digestInt(&hasher, u16, @intFromEnum(event.kind));
-        digestInt(&hasher, u64, event.identity);
-        digestInt(&hasher, u8, @intFromEnum(event.reject_reason));
-    }
+    hasher.update(&shard.trace.history_head);
+    hasher.update(&shard.trace.input_head);
+    hasher.update(&shard.trace.pinned_root);
+    digestBool(&hasher, shard.checkpoint != null);
+    if (shard.checkpoint) |receipt| hasher.update(&receipt.checkpoint_root);
+    for (shard.control_fact_sequences[0..shard.operational_state.command_count]) |sequence| digestInt(&hasher, u64, sequence);
 
     digestBool(&hasher, shard.expected_source_sequence != null);
     digestInt(&hasher, u64, shard.expected_source_sequence orelse 0);
@@ -3829,12 +3999,17 @@ fn replayReader(reader: *journal.Reader, initial: TradingShard) !ReplayResult {
         if (first_record.flags & 0xff != journal.input_flag) return error.OrphanDerivedFact;
         var candidate = shard;
         const input = try decodeStableInput(first_record);
-        const before = candidate.trace.len;
+        const before = candidate.authoritativeBarrier();
         var replay_error: ?anyerror = null;
+        // The restart admission fence guards new work, not already committed
+        // historical inputs. Preserve the fence on the replay result.
+        const admission_pending = candidate.recovery_admission_pending;
+        candidate.recovery_admission_pending = false;
         _ = candidate.apply(input) catch |err| {
             replay_error = err;
         };
-        const generated = candidate.trace.events[before..candidate.trace.len];
+        candidate.recovery_admission_pending = admission_pending;
+        const generated = try candidate.trace.factsAfter(before);
         const rejected_canonical_report = if (replay_error) |err|
             (err == error.InvalidExecutionReport or err == error.StaleOrderRevision or
                 err == error.TombstoneFactConflict or err == error.ArchivedFactOutsideRetention or err == error.TerminalFactConflict) and

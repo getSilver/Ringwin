@@ -1052,6 +1052,7 @@ test "Binance scoped Spot snapshots stay unresolved without combined product and
         const memory = try std.heap.page_allocator.create(durable.MemoryAdapter);
         defer std.heap.page_allocator.destroy(memory);
         memory.* = .init();
+        defer memory.deinit();
         const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
         const owner = try std.heap.page_allocator.create(demo.Owner);
         defer std.heap.page_allocator.destroy(owner);

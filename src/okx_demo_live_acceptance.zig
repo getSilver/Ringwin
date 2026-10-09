@@ -216,6 +216,13 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
     defer init.gpa.destroy(projection);
     projection.* = .{};
     if (policy.startup == .recover) {
+        const committed = try init.gpa.create(private_recovery.CommittedInputs);
+        defer init.gpa.destroy(committed);
+        committed.* = try private_recovery.CommittedInputs.init(file_store.interface(), init.io, decision_stream);
+        chain.mode = .replay;
+        try implementation.beginPrivateSession();
+        var sweep: private_recovery.Sweep = .{ .implementation = implementation, .owner = decision_owner, .index = committed, .session = source_session, .last_sequence = raw.next_sequence - 1 };
+        if (committed.boundary != null) try sweep.restoreCheckpoint();
         for (decision_owner.shard.oms.orders[0..decision_owner.shard.oms.order_count]) |owned| {
             var client_id = owned.client_order_id;
             for (gateway.uncertain_dispatches[0..gateway.uncertain_dispatch_count]) |item| {
@@ -230,13 +237,7 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
                 .lots = owned.quantity,
             }, owned.revision);
         }
-        const committed = try init.gpa.create(private_recovery.CommittedInputs);
-        defer init.gpa.destroy(committed);
-        committed.* = try private_recovery.CommittedInputs.init(file_store.interface(), init.io, decision_stream);
-        chain.mode = .replay;
-        try implementation.beginPrivateSession();
-        var sweep: private_recovery.Sweep = .{ .implementation = implementation, .owner = decision_owner, .index = committed, .session = source_session, .last_sequence = raw.next_sequence - 1 };
-        try decision_owner.replayCommittedIngress(private_stream, sweep.consumer());
+        try sweep.replayCommitted(private_stream);
         chain.mode = .demo_live;
         for (gateway.uncertain_dispatches[0..gateway.uncertain_dispatch_count]) |item| {
             if (item.reconciliation_id != 0) continue;
@@ -876,7 +877,8 @@ test "OKX raw private report and Fill reach the committed Demo owner" {
                 return;
             };
             defer std.testing.allocator.destroy(memory);
-            memory.* = .init();
+            memory.* = .initWithAllocator(std.testing.allocator);
+            defer memory.deinit();
             _ = checkOkxRawPrivateOwner(memory.interface(), undefined) catch |err| {
                 self.failure = err;
             };
