@@ -47,13 +47,15 @@ Status: active
 12. [封存容量闭合证据并交接生产资格](issues/12-seal-capacity-closure-evidence.md) — blocked by 10, 11
 
 依赖主干：01 → 02 → 03；03 后分为 04、05 → 06 → 07、08 三支；04/07/08 → 09；09 → 10 与 11；10/11 → 12。
-所有票使用 ready-for-agent 标签，只有 blocker 全部完成的票可执行；目前全部尚未实现或验收。
+01已完成合同冻结；02–12尚未实现或验收，只有 blocker 全部完成的票可执行。
 
 ## Frontier
 
-- [01 冻结业务负载、容量和保留合同](issues/01-freeze-capacity-and-retention-contract.md)
+- [02 分离权威屏障与内存 Trace 下标](issues/02-separate-authoritative-barrier-from-trace.md)
 
 ## Decisions so far
+
+- 2026-10-09：01合同、容量矩阵和双轴审查完成，见 [01证据](01-evidence.md)。速率、冷热分布、保留和资源为合成验收假设；未取得任何容量或平台资格。02为下一张Frontier。
 
 - 2026-10-08：用户确认 12 张纵向任务及阻塞关系，替换未实施的旧五票拆分。01 为唯一初始 Frontier；10/11 互不阻塞，12 仅为整波封存。
 
@@ -87,12 +89,11 @@ Linux 路径沿用 [Linux 生产资格地图](../production-readiness/map.md)，
    [生产资格](../production-readiness/issues/11-qualify-linux-production-and-canary.md)。
    独立 NodeFence 选型、目标设备、账户与资金授权仍由对应票处理。
 
-## Not yet specified
+## Not yet verified
 
-- 持续/突发订单和事实速率、待归档终态预算、归档最大滞后。
-- 历史证据保留期限、删除条件、磁盘容量与快照/恢复时间预算。
-- 目标机器上的内存、复制开销和吞吐实测值；在票 01 冻结可测合同，在票 09–11 验证。
-- 历史索引与摘要连续承接的具体格式；票 01 明确方案及 ADR 变更后再实施。
+- 合成负载与容量/保留预算已在 [容量合同](capacity-contract.md) 冻结；具体实现及全部测量尚待02–12。
+- 当前accepted ADR0009尚未改动；票02在实施前明确修订有序摘要与schema，票03再启用轮转。
+- Windows/Linux各自的实际文件、性能、恢复及后续生产资格证据未取得。
 
 ## Out of scope
 
