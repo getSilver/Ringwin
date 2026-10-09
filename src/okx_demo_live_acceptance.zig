@@ -171,7 +171,7 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
             decision_owner.shard.strategy_config_version != policy.config_version))
         return error.RecoveredDemoPolicyMismatch;
     if (policy.startup == .recover and !demoTraceCapacityAvailable(
-        decision_owner.shard.authoritativeBarrier(),
+        decision_owner.shard.trace.len,
         decision_owner.shard.trace.events.len,
         demo_order_trace_reserve,
     )) return error.InsufficientDemoTraceCapacity;
@@ -304,7 +304,7 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
     try establishPublicMarket(init, key, secret, passphrase, endpoint, &public_raw, decision_owner);
     const required_trace_capacity = if (mode == .demo_live) demo_round_trip_trace_reserve else demo_order_trace_reserve;
     if (!demoTraceCapacityAvailable(
-        decision_owner.shard.authoritativeBarrier(),
+        decision_owner.shard.trace.len,
         decision_owner.shard.trace.events.len,
         required_trace_capacity,
     )) return error.InsufficientDemoTraceCapacity;
