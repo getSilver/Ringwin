@@ -47,13 +47,15 @@ Status: active
 12. [封存容量闭合证据并交接生产资格](issues/12-seal-capacity-closure-evidence.md) — blocked by 10, 11
 
 依赖主干：01 → 02 → 03；03 后分为 04、05 → 06 → 07、08 三支；04/07/08 → 09；09 → 10 与 11；10/11 → 12。
-01已完成合同冻结；02–12尚未实现或验收，只有 blocker 全部完成的票可执行。
+01合同冻结、02权威屏障改造已完成；03–12尚未实现或验收，只有 blocker 全部完成的票可执行。
 
 ## Frontier
 
-- [02 分离权威屏障与内存 Trace 下标](issues/02-separate-authoritative-barrier-from-trace.md)
+- [03 贯通检查点、日志轮转与崩溃恢复](issues/03-close-checkpoint-and-journal-rotation.md)
 
 ## Decisions so far
+
+- 2026-10-09：02完成，见 [02证据](02-evidence.md)。业务源码283f2406，Debug/ReleaseSafe各426/426；schema31/35/29，完整Trace仍保留。03为下一Frontier，尚无轮转、千单或平台容量资格。
 
 - 2026-10-09：01合同、容量矩阵和双轴审查完成，见 [01证据](01-evidence.md)。速率、冷热分布、保留和资源为合成验收假设；未取得任何容量或平台资格。02为下一张Frontier。
 
@@ -91,8 +93,8 @@ Linux 路径沿用 [Linux 生产资格地图](../production-readiness/map.md)，
 
 ## Not yet verified
 
-- 合成负载与容量/保留预算已在 [容量合同](capacity-contract.md) 冻结；具体实现及全部测量尚待02–12。
-- 当前accepted ADR0009尚未改动；票02在实施前明确修订有序摘要与schema，票03再启用轮转。
+- 合成负载与容量/保留预算已在 [容量合同](capacity-contract.md) 冻结；02已完成屏障与schema基线；持续容量实现及测量尚待03–12。
+- ADR0011已显式演进ADR0009；票02保留完整有序Trace，票03在独立恢复验收和格式身份下引入轮转与历史承接。
 - Windows/Linux各自的实际文件、性能、恢复及后续生产资格证据未取得。
 
 ## Out of scope
