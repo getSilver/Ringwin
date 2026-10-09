@@ -1,8 +1,8 @@
 # 01: 冻结业务负载、容量和保留合同
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in-progress
+Assignee: Codex
 Blocked by: None (can start immediately)
 Parent: [核心持续运行容量闭合](../map.md)
 
@@ -30,5 +30,5 @@ Parent: [核心持续运行容量闭合](../map.md)
 
 ## Out of scope
 
-本次仅发布任务，不实施代码。后续任务实现不包含部署、真实 Demo/Testnet/生产下单，
+本票冻结合同，不修改业务实现；用户已授权后续按 Frontier 实施。本波不包含部署、真实 Demo/Testnet/生产下单，
 也不自动授予平台或 Venue 生产资格。

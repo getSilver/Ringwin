@@ -1,0 +1,157 @@
+# 核心持续运行容量合同
+
+日期：2026-10-09。对应 [01](issues/01-freeze-capacity-and-retention-contract.md)；逐项源码盘点见 [容量矩阵](capacity-matrix.md)。本文冻结后续实现和验收的输入，不声明目标能力已经实现。
+
+本文中的业务规模来自已批准地图；速率、做市子集、机器预算和保留期限均为本票选择的**合成验收假设**，没有真实业务流量证据，不是用户提出的策略参数或生产吞吐承诺。超出该合同必须重新测量并修订，不能靠覆盖、清空历史或重置序号继续运行。
+
+## 1. 基线和范围
+
+- 源码身份以每次验收的完整 commit、worktree diff 和 artifact 哈希为准。本文核对的源码为 `3d130d1b9b07ecb061ccdef79a26eca9fc8b4822`（导入计划文档后的工作树）；历史 `9f47ae6f` 不代替当前身份。
+- 当前 `src/production_contract.zig` 为 journal schema **30**、state schema **34**、registry identity **28**；`src/canonical_event.zig` envelope schema 为 **10**。
+- `TradingShard.snapshot/restoreSnapshot` 当前仍将 barrier 与 `trace.len` 相等作为校验条件；`stateDigest` 的 `StateDigestV5` 包含有序 Trace 和 canonical ingress 摘要。现有小数组及 `DurableStore` 的 192 KiB segment、64 KiB snapshot、32 manifest 项不是本合同目标。
+- 遵循 [CONTEXT](../../CONTEXT.md)、[ADR 0004](../../docs/adr/0004-durable-store-persistence-contract.md)、[ADR 0009](../../docs/adr/0009-separate-semantic-authority-digest-from-audit-trace.md) 和 [ADR 0010](../../docs/adr/0010-qualify-windows-and-linux-independently.md)。
+- 本波复用 `VenueAdapter → TradingShard → DurableStore → snapshot/replay`；核心不进行网络或历史磁盘 I/O。不实现三套策略，不新增第四家 Venue 协议，不部署、不访问真实交易账户。
+
+## 2. 业务负载与存活订单
+
+观察组合的唯一口径是 `(Venue, 产品, Instrument)`，相同 Instrument 在不同 Venue 或产品下分别计数；账户不重复计入观察组合，但执行资格绑定账户/路由。
+
+合成 fixture 固定 500 个不同组合：四条 Venue/账户执行路由各125个，分别含75个现货、50个线性永续。第四条是离线模拟路由，不能据此宣称第四家协议接通。四分片各拥有125个组合；一个共享 ExchangeAccount 的风险/资金限制必须跨相关分片独立生效，不能四倍放宽。
+
+| 参数 | 冻结合成值 | 语义 |
+| --- | --- | --- |
+| 做市活跃组合 M | 每分片32，全局128 | 只是500个观察组合的子集，可配置 |
+| 每边报价档数 L | 8 | 可配置；双边报价数为 `2 × M × L = 512/分片` |
+| 资金费率套利 | 每分片128个存活订单预算 | 合成双腿开平仓/对冲意图，不实现算法 |
+| 跨交易所套利 | 每分片128个存活订单预算 | 合成双腿，跨路由，分别风控，不宣称原子成交 |
+| 安全/未闭合订单 | 每分片256个预算 | 混入 Unknown、PendingCancel、部分成交等 |
+| 存活订单上限 | 每分片1,024，四分片4,096 | 上述四类总和；每个分片独立达标 |
+| 待归档终态 | 每分片4,096个独立槽位 | 不占用或降低1,024存活目标 |
+
+存活指风险生命周期尚未闭合：已获准尚未发送、发送结果不确定、Live、部分成交、PendingCancel、Unknown 等均占用其订单身份的存活预算，不能因连接断开或撤单请求成功而释放。重复事实不新增订单槽位；终态且风险占用解除后才进入终态区。迟到成交所需身份和唯一 canonical-fill 累计随归档保留。OMS 的 exchange-reported cumulative quantity 不替代唯一已应用 Fill 数量。
+
+验证满载时需同时保留512做市单、256套利单、256未闭合风险单，并有终态积压；第1,025个新增存活订单拒绝/背压。验证另一组热点分布：全部500观察组合的输入集中一个入口，一条Venue路由没有订单，四分片仍各1,024存活；M/L 改为其他配置时检查 `2ML + 其他未闭合订单 ≤ 1,024`，不得隐式超配。
+
+## 3. 持续速率、突发和安全余量
+
+时间和序号来自固定种子 fixture 的逻辑时钟；运行时间测量用平台单调时钟。所有速率是进入持久化/核心之前的生成速率，不能通过丢弃输入得出达标结果。
+
+| 流量 | 持续 | 突发（30秒） | 包含范围 |
+| --- | --- | --- | --- |
+| 公开观察 | 全局1,000条/秒 | 全局4,000条/秒 | 每组合2Hz；突发8Hz；全部更新进入对应观察状态 |
+| 原始 private/control 输入 | 全局400条/秒 | 全局1,600条/秒 | 回报、成交、费用、资金费、对账、控制输入；公开观察之外 |
+| 所有原始输入 | 全局1,400条/秒 | 全局5,600条/秒 | 一次记录，不因四分片广播重新算作不同原始记录 |
+| 规范权威日志总记录 | 每分片512条/秒 | 每分片2,048条/秒 | 包含market输入及派生风险/命令/经济/控制事实；四分片2,048/8,192条每秒 |
+| 新订单/归入终态 | 每分片20个/秒 | 每分片80个/秒 | 稳态替换已闭合订单，维持1,024存活；不含重复 |
+| 历史新身份索引 | 每分片512项/秒上界 | 每分片2,048项/秒上界 | 按每条权威记录最多一个完整命名空间去重键预算，含Intent/Command/Order/经济及控制；不是只数Order |
+| 需90天完整经济证据 | 每分片24条/秒上界 | 每分片96条/秒上界 | Fill/Fee/Funding/Ledger及关联证据的去重后归档记录 |
+
+规范日志512条/秒内包含每分片250条观察记录；剩余262条留给私有事实和内部派生事实。fixture 必须实际统计每一个日志 record，若一次 intent 派生多条事实则逐条计数。突发最多每小时一次；72小时窗口取72次的预算，不允许将连续突发称为持续达标。
+
+安全输入队列与新单队列分离预算：每分片安全事实余量8,192条，其中至少2,048条可供撤单、2,048条可供回报/成交、2,048条可供对账/故障，余下2,048条可共享；新增风险候选独立1,024条。容量不得借给新单。安全队列正常最高水位≤50%，突发≤90%，持续处理能力至少2,560条规范记录/秒/分片，并在突发结束10秒内恢复≤50%。不可接受事实时先关闭新增风险权限，再对上游施加可验证背压/重连对账；不能丢失经济事实或清掉Unknown。
+
+归档从终态资格满足到可回收≤60秒，连续归档吞吐≥120终态订单/秒/分片，最长单次服务停顿≤10秒。4096终态预算覆盖 `80 × 30 + 20 × 60 = 3,600` 个，保留496余量；组合故障若超过该上界，应提前撤销新增风险，而不是占用存活槽。每秒观测终态水位，80%预警/停止增加风险，90%关闭对应新单准入；安全事实继续按独立预算处理。
+
+延迟目标（ReleaseSafe，完整fixture，不包含Venue网络）：持续输入到应用 p99≤20ms，30秒突发p99≤100ms；发送前持久commit p99≤50ms、最大≤1秒，超限关闭相应SafetyGate。Debug用于语义与故障检查，单独报告耗时，不借Debug结果证明性能。
+
+## 4. 保留、删除和不复活
+
+| 数据层 | 保留与回收合同 | 无法安全回收时 |
+| --- | --- | --- |
+| 当前权威状态 | 活跃订单、仓位、余额、占用、有效权限、未解除latch完整保留 | 不能按年龄删除；关闭新增风险 |
+| 终态区 | 满足终态、占用释放、对账闭合且关联证据落盘后≤60秒回收 | 保留身份及状态，按水位背压 |
+| 热历史缓存 | 每分片最近65,536项可验证身份/摘要；缓存仅加速查询 | cache miss进入历史查证，不能当作新事实 |
+| RawIngress完整记录 | 2天 | 有capture gap/未闭合引用则pin并关闭新增风险以限制增长 |
+| 有序canonical/决策日志 | 7天 | 保留恢复所需tail和未闭合证据；未完整发布检查点不得删 |
+| 历史身份及完整经济证据 | 90天 | 争议、Unknown、未对账、引用未闭合项必须pin；超额失败关闭 |
+| 检查点/根元数据 | 每分片最近2个完整可恢复检查点及对应尾部；历史按90天保留 | 不能删最后有效恢复链 |
+
+这里的天数按已提交、可重放的保留推进事实衡量，外部时钟回拨不提前删除。活跃状态与未解除风险不存在90天自动到期。90天不是合规保存承诺；需要更长业务/监管保留时重新冻结磁盘合同。
+
+删除前要求：归档对象已同步、内容摘要验证、manifest/root原子发布完成；唯一Fill累计和必要经济/风险投影已经纳入同屏障检查点；无活跃订单/控制/对账引用；保留边界已记录为权威事实；最近两个检查点及tail不依赖待删对象。物理删除晚于新根提交，删除失败可留下无效对象但不得恢复其权威性；进程崩溃只选旧或新完整根。
+
+保留期内，相同稳定身份/相同payload重复返回已应用无副作用；相同身份/不同payload冲突失败关闭。过期后不能把「查不到」解释为「从未出现」：持久化 stream high-water、退役stream范围、单调 OrderIntent/command/经济身份边界及retention floor，不重置、不复用。早于floor或退役身份空间的输入转入拒绝/隔离和显式权威对账，不重新建单、记账或发送。新身份但指向已过期旧Order的事实同样隔离。stream高水位不涵盖跨stream业务身份时，必须查证业务身份命名空间边界；无法证明新鲜即RecoveryOnly。
+
+活跃订单相关Fill、未结算/hold记录、Unknown及其关联证据不论年龄均pin，不因索引到期而失去去重保护。正常运行必须在90天内解除未闭合pin；无法解除而触及配额时停止新增风险并告警，由另行授权的对账/扩容处理。不承诺无限磁盘下永久持续运行。
+
+## 5. 全局屏障、历史查证和摘要演进提案
+
+以下是**对ADR 0009的显式修订提案**，目前accepted ADR仍约束现有实现，本文不修改ADR或代码，也不称摘要格式已经生效。02在实现前须将提案形成可审查ADR变更；无法保留完整顺序完整性则不得实施Trace回收。
+
+每分片持久 `u64 ShardSequence` 严格递增；它是分片全局权威屏障，不是进程全局或跨分片总序。Trace仅是有界窗口，保存first/last和全局序号；权限、risk refs、host activation、snapshot barrier不能再用窗口下标。计数/序号溢出返回错误并关闭新增风险，禁止回绕。必要旧authority ref的事实证据保留在当前投影或可验证历史引用。
+
+拟采用SHA-256有序链而不是集合摘要：
+
+```text
+H0 = SHA256(domain || digest_format || shard_identity || stream_identity || genesis)
+Hi = SHA256(domain || H(i-1) || u64(sequence) || type || schema || len || canonical_bytes)
+chunk_root = SHA256(domain || previous_chunk_root || stream_identity || first || last
+                    || H(first-1) || H(last) || byte_length || content_hash)
+archive_root = SHA256(domain || previous_archive_root || ordered_chunk_descriptors
+                      || identity_index_root || retention_floor || retired_identity_boundaries)
+CanonicalStateDigest = SHA256(new_domain || schema_registry || shard_identity || barrier
+                             || canonical_current_state || ordered_history_head
+                             || canonical_ingress_head || archive_root)
+```
+
+每个序号包括规范编码、边界、type/schema及对应稳定身份，验证连续性及chunk前后链；不能只hash最终OMS/账本或丢掉输入顺序。顺序交换、缺段、重复序号、payload改动、retention/root改动均必须改变/破坏恢复摘要。相同fixture、相同归档/保留事实与屏障的不中断/恢复运行摘要必须相同；不同维护事实不是同一有序历史，不强求摘要相同。
+
+相较ADR0009当前「完整Trace驻留并摘要」合同，新方案让完整历史的**有序密码学承接**进入恢复摘要，驻留Trace不再包含整个历史。保留期内可从chunk复算；合法删除后只能验证已提交历史承接和retention边界，不能声称仍能读取删除记录。保留策略进入权威历史，摘要保护其边界；未合法删除的缺段仍失败关闭。`SemanticAuthorityDigest`继续只用于排列测试，不进入snapshot、dispatch准入或资格。
+
+历史查证由DurableStore外部驱动：核心产生待查证需求，暂停该候选的应用/发送；外围读取归档并提供版本化结果，绑定请求身份、完整payload摘要、index/root、retention epoch、全局barrier、stream、命名空间和覆盖范围。结果必须能验证「相同」「冲突」「可证明首次」「过期不可判定」四类：包含证明绑定完整存档项与root；不包含证明绑定该身份所在有序索引页、邻界、页目录root及完整命名空间覆盖，未覆盖区间不能返回首次。查询未完成/超时/证明无效时保留可重试ingress，不推进已应用cursor，不应用经济副作用、不产生发送许可；恢复后仍须从同候选重试。缺失证明不是首次。结果作为规范、可持久化、可重放输入消费，重放不重新进行磁盘I/O。不可信调用方不能仅提供一个found布尔值，根不匹配或过期结果拒绝。全波沿用现有seam，无通用数据库框架。
+
+02首个不兼容步骤拟升级 **state34→35、journal30→31、registry28→29**，新增全局屏障/窗口/有序链证据，并为新记录注册codec；canonical envelope10只有结构发生变化才升级，不能误当journal版本。03及后续新增归档根/索引/投影结构时继续各自升级schema/registry，不将整波冻结在35/31/29。snapshot元数据、restore校验、release身份、fixtures及生产合同一致更新；34/30等旧schema明确失败关闭，本波不支持迁移，禁止best-effort读旧布局、只改常量或假定二进制兼容。若将来需要离线迁移，须另立任务与验证，不能作为本波默认路径。DurableStore manifest/index磁盘格式变更另设对应格式版本。
+
+## 6. 内存、布局、磁盘和恢复预算
+
+所有数值为后续验收上限，不是当前实测。单分片长期权威驻留（含独立终态区、热证据和trace）≤64MiB；四分片256MiB。四分片各安全队列8192、候选1024，单项含ownership metadata≤2KiB，则队列合计≤72MiB。外围adapter/store/index cache合计≤256MiB；四分片snapshot双缓冲合计≤256MiB；工作集/临时/测量余量184MiB，总进程峰值RSS/working-set≤1GiB。不允许用全历史内存索引通过磁盘合同。
+
+新schema编码snapshot≤32MiB/分片（四分片128MiB），必须逐字段测量：当前状态、live1024、terminal4096、热身份65536、窗口、root和控制/协调投影；超额修改布局或预算后重新审批合同，不能只增大`max_snapshot_bytes`。manifest活动目录≤4096项，较老目录分页归档，由root连接，启动加载≤16MiB；不能每轮追加一项直至耗尽。segment目标≤64MiB，用流式写/读和每stream≤256KiB缓存，不为每stream常驻64MiB数组。计数类型至少容纳目标及满载加一测试；不可依赖现有u8/u16计数隐式截断。
+
+布局验证记录 `@sizeOf/@alignOf`、每一数组容量×项大小、指针所有权、snapshot编码长度、复制字节/输入和线程栈峰值。持续路径合成512条/秒/分片时每规范输入平均复制≤64KiB、突发≤128KiB；包括按值TradingShard、rollback候选、digest/snapshot临时复制，不能仅数网络payload。在线核心线程栈峰值≤2MiB，不能用64MiB生产栈掩盖大型按值对象。Debug测试专用更大栈应单独记录，不证明生产布局。非trivial修改至少保留一项能通过公共业务接口暴露边界失效的可运行检查。
+
+磁盘按单节点四分片计算；热备/复制节点**各自**拥有同等容量，跨机副本不占单节点本地预算但双份总成本必须列出。fixture冻结 raw/decision完整record平均≤1024B（含头部和payload），最长record≤16KiB；经济归档平均≤1024B/条；身份索引全部物理开销平均≤128B/项。每条权威record按一个独立primary稳定身份键计入；一次生命周期产生Intent/Command/Order/Report/Fill等不同事实，每条都计。若一个record需要多个独立去重键，必须逐项计数并提高索引预算，不能将次要键漏算。raw序列用持久stream游标和命名空间边界处理，不另建逐条90天索引。索引页、校验、padding、重复根及压缩前后都计实际字节；不依赖压缩达标。未达到平均值假设即预算失败。
+
+持续增长上界与保留体积（1TiB=2^40B，均不扣除重复存储）：
+
+| 层 | 算式 | 持续保留体积 |
+| --- | --- | --- |
+| raw 2天 | `1400 × 1024 × 86400 × 2` | 247.73GB，约0.225TiB |
+| decision 7天 | `4 × 512 × 1024 × 86400 × 7` | 1268.36GB，约1.154TiB |
+| 完整经济证据90天 | `4 × 24 × 1024 × 86400 × 90` | 764.41GB，约0.695TiB |
+| 身份索引90天 | `4 × 512 × 128 × 86400 × 90` | 2038.43GB，约1.854TiB |
+| 持续合计 | 上述物理副本分别相加 | 约3.928TiB |
+
+突发按每小时一次30秒为持续速率额外3倍：增量系数 `1 + 3×30/3600 = 1.025`，含所有层向上取整约4.027TiB。raw持续1.367MiB/s，decision2MiB/s，经济归档0.094MiB/s，index0.250MiB/s；总持续写入约3.711MiB/s，突发约14.844MiB/s，另加snapshot和manifest。
+
+检查点每60秒或tail达256MiB/分片时触发（先到者）；四分片128MiB/60s最坏额外2.133MiB/s。32MiB/分片发布p99≤5秒、最大10秒。每节点持久化有效顺序带宽至少50MiB/s且满足前述commit时延，不以设备标称值代替同步实测。
+
+每节点工作数据**物理配额8TiB**，专用数据卷可用容量≥16TiB。8TiB内划分：常态历史4.027TiB、完整归档重写/新旧根并存≤2TiB、活动tail和snapshot临时≤0.5TiB、pin/故障及元数据余量≤1.473TiB。重写分批执行，不复制整个8TiB目录；snapshots最近两代四分片仅256MiB，已包括于临时预算。以物理allocated bytes而非文件logical size报告；80%配额预警并暂停非必要增长，90%关闭新增风险，100%/ENOSPC立即关闭SafetyGate，禁止先删活跃证据腾空间。以上持续体积加临时≤8TiB，若pin占满余量必须停止新风险；这是有限保留条件下的持续运行，不是无限事实总量承诺。
+
+正常恢复从最近完整snapshot开始：tail≤256MiB/分片、四分片≤1GiB，元数据≤16MiB，snapshot合计≤128MiB；不得扫描90天全量索引/历史。故障后若最新snapshot无效可用前一代及连续tail，恢复输入总量≤2GiB；超出进入RecoveryOnly，不能截断尾部。测量snapshot读/校验、tail解码/应用、root验证分别计时；正常本地文件恢复≤60秒、单代fallback≤120秒，复原相同屏障的订单/经济/占用/控制及CanonicalStateDigest。此时间不含Venue对账或生产TradingRTO，恢复成功不授予新增风险资格。历史查询p99≤50ms、最大1秒，超时保持候选未应用/未发送并关闭相关新增风险。
+
+## 7. 后续可执行验收与独立平台证据
+
+本票不新增runner。后续02–09在现有测试入口中实现fixture，10/11将同一fixture接真实文件adapter、子进程重开；实施票必须交付**准确可运行命令**与测试过滤名称，不能把本文的未来接口写成已存在CLI。公共链必须实际经过CanonicalEvent应用、发送前屏障、归档、快照与restore，不只修改内部数组。复用`zig test src/main.zig`的现有入口，Debug/ReleaseSafe各跑一次新增检查；具体栈参数根据布局记录，不借基线测试数量关闭新票。
+
+| 票 | 必须留下的可运行检查与判断 |
+| --- | --- |
+| 02 | 到达旧256条Trace边界并验证TraceFull失败关闭、不回绕；未经过03公共恢复回归前不启用窗口轮转；全局barrier/host/risk ref不变义；旧格式拒绝；篡改顺序/链失败 |
+| 03 | 连续跨至少3个旧256条Trace边界并至少100轮seal/rotate/snapshot/root发布；公共恢复回归通过后才能启用窗口轮转；每个发布阶段故障后只恢复旧或新完整根；缺段、重排、坏摘要失败关闭；manifest循环回收 |
+| 04 | 固定500组合与4模拟路由，同一Instrument跨Venue/product不混淆；128做市子集，其余持续观察；取消部分路由订单仍保留观察 |
+| 05 | 四分片1024live与3600terminal同时存在；跨4096累计终态至少10轮；查归档重复/冲突；Unknown无自动重发 |
+| 06–07 | Report→Fill与Fill→Report各自归档/恢复；重复不记两次、冲突关闭；资金费/fee/账本/对账跨至少10轮容量；唯一Fill量、现金、仓位、占用一致 |
+| 08 | 控制事实和账户协调累计至少10轮原容量；跨分片共享账户风险拒绝；撤权/权限版本/退役身份恢复后不复活 |
+| 09 | 固定种子0x20261008，逻辑时间72小时，至少72次30秒突发；均衡/热点、Unknown、10秒归档停顿、满载加一、histories超原容量；输出每秒水位及实际record/byte计数 |
+| 10/11 | 各自在真实平台文件adapter执行09链；1小时实时时间持续负载加一次突发，逻辑72小时保留/故障fixture另外运行；新进程从磁盘恢复、执行全部故障矩阵并测时间 |
+| 12 | 收集两平台各自成功/失败/未执行项；核对合同每项预算及剩余生产资格；不补写不存在的结果 |
+
+保留边界测试将逻辑时钟推进到2/7/90天前后，至少覆盖floor前一项、floor处、floor后一项；真实重复、跨stream同业务身份、过期旧单的新report身份、旧stream重新连接、冲突payload、已删除段被重新放回目录。所有情况下不重复经济应用、不重新发送、不复活权限。删除前后、同步前后、rename/root发布前后、reclaim前后分别中断；ENOSPC、short write、EIO、只读、sync timeout、truncation、corruption注入均有报告。
+
+Windows（10）：真实Windows运行，记录OS build、NTFS/ReFS等实际FS、卷及存储设备/驱动、进程权限；测试文件同步、发布/替换和目录可见性、文件重开及新进程恢复，明确每一持久化动作实际平台语义。API相似不视为Linux等价。
+
+Linux（11）：真实Linux运行，记录发行版/kernel、实际ext4/xfs等FS及mount options、存储设备、进程权限；记录file sync、same-FS rename、directory sync及重开恢复。交叉编译、WSL结果只能标为开发证据。
+
+两个平台各自输出一个证据目录，最低文件合同：`identity.json`（完整commit/diff/artifact、Zig/schema、OS/hardware/FS/config/seed、verification scope）；`workload.json`（实际500身份映射、M/L、速率和编码byte分布）；`samples.jsonl`（单调时间、各分片live/terminal/queues、RSS/stack/copy、allocated disk、tail/snapshot、apply/commit时延）；`faults.jsonl`（注入点、旧/新根、恢复barrier/digest、Unknown/占用及gate、耗时、pass/fail/not-run及理由）；`summary.md`（逐项预算结果、复现命令、退出码、原始日志哈希）。账号仅合成身份，不放凭证。记录全量失败，不能只封存成功种子。
+
+两平台可以独立取得本波文件容量证据，不互相等待或继承资格。1小时文件运行与逻辑72小时检查不是ADR0010要求的目标72小时soak，也不证明断电耐久性、凭证/转储保护、真实NodeFence、在线Venue或生产资格；这些由平台生产专项另行验收。本文所有目标目前均为待执行。
