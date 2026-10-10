@@ -51,7 +51,7 @@ Status: active
 
 ## Frontier
 
-- [05 贯通终态订单与发送证据归档](issues/05-close-order-and-dispatch-archive.md) — 下一张实施票
+- [05 贯通终态订单与发送证据归档](issues/05-close-order-and-dispatch-archive.md) — in-progress
 - [08 贯通控制与账户协调历史回收](issues/08-reclaim-control-and-account-coordination-history.md)
 
 ## Decisions so far

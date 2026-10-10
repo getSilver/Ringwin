@@ -1,8 +1,8 @@
 # 05: 贯通终态订单与发送证据归档
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in-progress
+Assignee: Codex
 Blocked by: [03 贯通检查点、日志轮转与崩溃恢复](03-close-checkpoint-and-journal-rotation.md)
 Parent: [核心持续运行容量闭合](../map.md)
 
@@ -24,10 +24,13 @@ Parent: [核心持续运行容量闭合](../map.md)
 
 ## Evidence
 
-尚未执行。仅在全部 Blocked by 任务完成后进入 Frontier；
-完成时填写当前源码身份、复现入口、实际结果和剩余范围，不沿用历史测试计数或资格。
+2026-10-10：03及04已完成，本票开始本地实现。沿用已批准的公共
+`VenueAdapter → Owner.applyAdapterBatch/apply → TradingShard → Store → snapshot/recover`
+及 `Owner.send → Gateway → counting Adapter` 接缝，先验证缺失 Fill 不具备归档资格。
+不以 Store 有序 segment 回执代替业务身份包含/非包含证明。
+完成时填写当前源码身份、复现入口、实际结果和剩余范围。
 
 ## Out of scope
 
-本次仅发布任务，不实施代码。后续任务实现不包含部署、真实 Demo/Testnet/生产下单，
+用户已授权本票本地实现；不包含部署、真实 Demo/Testnet/生产下单，
 也不自动授予平台或 Venue 生产资格。
