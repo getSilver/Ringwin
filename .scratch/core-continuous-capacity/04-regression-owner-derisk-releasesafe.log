@@ -1,0 +1,6 @@
+1/5 main.test_0...OK
+2/5 trading_shard_tests.test.global shard barrier continues snapshot tail replay and preserves failed append...OK
+3/5 trading_shard_tests.test.Owner native settlements retain partial cost remainder reversal and classified cash exactly once...OK
+4/5 trading_shard_tests.test.Owner rejects tighter native bounds without losing committed registry or recoverable holdings...OK
+5/5 trading_shard_tests.test.de risk locks target and flatten requires warning...OK
+All 5 tests passed.

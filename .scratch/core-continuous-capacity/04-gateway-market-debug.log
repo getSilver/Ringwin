@@ -1,0 +1,7 @@
+1/6 execution_gateway.test.Gateway reads current authority facts instead of caller proof fields...OK
+2/6 execution_gateway.test.Gateway route and batch admission fail atomically...OK
+3/6 execution_gateway.test.Gateway observation and resident authority capacities are independent of emitted commands...OK
+4/6 execution_gateway.test.Gateway public proof preserves physical binding and rechecks per instrument rules and selection...OK
+5/6 execution_gateway.test.Gateway scopes uncertainty and market health to the affected route...OK
+6/6 trading_shard_fixture.test.qualified SPOT IOC intent crosses Gateway and cash risk before OrderCommand...OK
+All 6 tests passed.

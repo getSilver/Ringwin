@@ -1,0 +1,25 @@
+1/24 economics.test.third native fees and rebates preserve explicit opening ownership and incomplete valuation...OK
+2/24 economics.test.different spot and perpetual instruments retain their own units inventory and marks through replay...OK
+3/24 economics.test.sibling base fees and rebates debit native inventory once in either fill order...OK
+4/24 economics.test.instrument position bound rejects the next instrument without replacing existing marks...OK
+5/24 economics.test.partial fills close two layers with average cost fees rebates margin and valuation...OK
+6/24 economics.test.spot base-asset fee preserves gross traded lots and open cost...OK
+7/24 economics.test.funding and forced execution are idempotent and unowned facts enter suspense...OK
+8/24 economics.test.account snapshot opens a break without overwriting local economics...OK
+9/24 economics.test.duplicate attributed forced execution cannot charge penalty twice...OK
+10/24 economics.test.negative forced penalty is rejected without changing projection...OK
+11/24 economics.test.allocated forced PnL must match the closed portfolio position...OK
+12/24 economics.test.valuation respects the contract quantity denominator...OK
+13/24 economics.test.ledger postings reproduce signed fee rebate and funding cash movements...OK
+14/24 economics.test.canonical fill evidence is idempotent and rejects a conflicting payload...OK
+15/24 canonical_event.test.decimal conversion is lossless and exact...OK
+16/24 canonical_event.test.opaque venue references are bounded...OK
+17/24 canonical_event.test.bounded decimal text normalizes before accumulation and preserves signed limits...OK
+18/24 instrument_registry.test.instrument registry is bounded, explicit, and idempotent...OK
+19/24 instrument_registry.test.rules upgrades retain independent margin and disabled trading authority...OK
+20/24 risk.test.five layers, cash, isolated margin, and dual reduce-only are deterministic...OK
+21/24 risk.test.settlement precision scales risk atoms while lots and price ticks stay fixed...OK
+22/24 risk.test.margin safety gate takes the strictest amount bps and liquidation distance...OK
+23/24 risk.test.opening gate rejects sufficient cash with insufficient liquidation distance...OK
+24/24 risk.test.extreme risk arithmetic fails closed...OK
+All 24 tests passed.

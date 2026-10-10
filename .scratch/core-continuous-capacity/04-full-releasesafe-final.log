@@ -1,0 +1,614 @@
+1/461 main.test_0...OK
+2/461 trading_shard.test.state digest binds instrument trading margin and economic position authority...OK
+3/461 trading_shard.test.asset definition activation rejects rescaling and survives snapshot...OK
+4/461 trading_shard.test.asset definition idempotence conflicts regression and invalid ranges are durable...OK
+5/461 trading_shard_tests.test.checkpoint maintenance carries ordered inputs and live authority through one hundred windows...checkpoint core: 100 rounds, barrier=931, encoded_snapshot_max=377282, shard_bytes=863568, pins_max=16/1024, window=256
+OK
+6/461 trading_shard_tests.test.ordered checkpoint history binds core input prices before final state convergence...OK
+7/461 trading_shard_tests.test.global shard barrier rejects checksummed sequence tampering before restore...OK
+8/461 trading_shard_tests.test.global shard barrier continues snapshot tail replay and preserves failed append...OK
+9/461 trading_shard_tests.test.Owner native settlements retain partial cost remainder reversal and classified cash exactly once...OK
+10/461 trading_shard_tests.test.Owner rejects tighter native bounds without losing committed registry or recoverable holdings...OK
+11/461 trading_shard_tests.test.OMS command binds scoped capability and source-owned authority barriers...OK
+12/461 trading_shard_tests.test.CancelOpenOrders preserves the actual TradingAuthorization grant...OK
+13/461 trading_shard_tests.test.unsupported OMS order semantics reject as replayable exact-only facts...OK
+14/461 trading_shard_tests.test.inexact direct price keeps a stable reject without an OMS command...OK
+15/461 trading_shard_tests.test.core mark micros become canonical ticks at the active venue tick...OK
+16/461 trading_shard_tests.test.market gap rejects a native intent with a replayable reason...OK
+17/461 trading_shard_tests.test.risk lease limit rejects a native intent with a replayable reason...OK
+18/461 trading_shard_tests.test.stable CanonicalEvent decoder rejects malformed envelopes without state change...OK
+19/461 trading_shard_tests.test.configurable Genesis fails closed until authority is complete...core_input_rejection: product_model=IncompatibleProductReservationModel
+OK
+20/461 trading_shard_tests.test.native and Python intents cross the same authority and risk seam...OK
+21/461 trading_shard_tests.test.host fault revokes the old activation before a replacement can trade...OK
+22/461 trading_shard_tests.test.new HostSession revokes the old direct-trade identity...OK
+23/461 trading_shard_tests.test.fresh Gateway revokes a replayed old Host activation before restart...OK
+24/461 trading_shard_tests.test.active Host exit and timeout journal revocation blocks direct trade...OK
+25/461 trading_shard_tests.test.control commands authorize pause cancel and replay lifecycle deterministically...OK
+26/461 trading_shard_tests.test.layered gates latch kill while warning and self recovery stay narrow...OK
+27/461 trading_shard_tests.test.de risk locks target and flatten requires warning...OK
+28/461 trading_shard_tests.test.keep positions stops through shard seam preserving economics...OK
+29/461 trading_shard_tests.test.full lifecycle trajectories authorize only prescribed risk cancel and reduce behavior...OK
+30/461 trading_shard_tests.test.venue facts and replay use apply without replay send capability...OK
+31/461 trading_shard_tests.test.shared canonical adapter facts enter the TradingShard state seam...core_input_rejection: l2=IncompleteL2Book fill_fee=MissingFillFee
+OK
+32/461 trading_shard_tests.test.legal private fact permutations preserve semantic authority while retaining audit order...OK
+33/461 trading_shard_tests.test.fixed-seed private fact fuzz retains the table-driven permutation invariant...OK
+34/461 trading_shard_tests.test.cancel reconciliation accepts one late Fill without duplicate economics...OK
+35/461 trading_shard_tests.test.account bootstrap snapshot is normalized before stable journal replay...OK
+36/461 trading_shard_tests.test.an existing account failure does not commit an unrelated rejected event...OK
+37/461 trading_shard_tests.test.canonical not-sent is terminal without entering the legacy shard schema...OK
+38/461 trading_shard_tests.test.bounded multi instrument OMS closes lifecycle and partial policy...OK
+39/461 trading_shard_tests.test.SPOT and linear instruments close economics and replay independently...OK
+40/461 trading_shard_tests.test.OMS outbox crosses the sole Gateway and SimulatedVenue seam...core_safety_invariants: dispatch_persist=pass replay_no_send=pass reduce_only_fencing=pass
+OK
+41/461 trading_shard_tests.test.CancelConfirmCreate discards stale replacement after an intervening fill...OK
+42/461 trading_shard_tests.test.OMS group identity is checked before new risk and conflict survives replay...OK
+43/461 trading_shard_tests.test.partial fill keeps another PendingCancel blocking CCC...OK
+44/461 trading_shard_tests.test.IntentGroup batch results remain itemized...OK
+45/461 trading_shard_tests.test.layered risk retains unknown reservations until authoritative terminal evidence...OK
+46/461 trading_shard_tests.test.unknown OMS dispatch blocks a later place until the order is resolved...OK
+47/461 trading_shard_tests.test.TradingShard preserves maintenance margin in the projected buffer...OK
+48/461 trading_shard_tests.test.rejected IntentGroup leaves authoritative state unchanged...OK
+49/461 trading_shard_tests.test.rejected dispatch batch leaves authoritative state unchanged...OK
+50/461 trading_shard_tests.test.rejected execution report leaves authoritative state unchanged...OK
+51/461 trading_shard_tests.test.authoritative reconciliation cannot regress a terminal order...OK
+52/461 trading_shard_tests.test.CancelConfirmCreate re-risks replacement against latest facts...OK
+53/461 trading_shard_tests.test.CancelConfirmCreate cannot recreate a fenced strategy...OK
+54/461 trading_shard_tests.test.forced position divergence blocks new qualification...OK
+55/461 trading_shard_tests.test.SPOT asset risk is isolated from SWAP positions...OK
+56/461 trading_shard_tests.test.economic fills derive ownership from OMS and close Portfolio Exchange ledgers...OK
+57/461 trading_shard_tests.test.funding forced execution and snapshots preserve auditable local economics...OK
+58/461 trading_shard_tests.test.duplicate economic facts are no-op at the TradingShard seam...OK
+59/461 trading_shard_tests.test.CancelConfirmCreate accepts authoritative reconciliation as confirmation...OK
+60/461 trading_shard_tests.test.canonical absence without source proof preserves the unknown order and reservation...OK
+61/461 trading_shard_tests.test.complete canonical absence closes only an unknown place and rejects late venue facts...OK
+62/461 trading_shard_tests.test.canonical terminal reconciliation confirms a CCC replacement...OK
+63/461 trading_shard_tests.test.canonical cancel report confirms a CCC replacement...OK
+64/461 trading_shard_tests.test.older reconciliation identity still rejects semantic conflict...OK
+65/461 trading_shard_tests.test.multiple SPOT and SWAP orders independently close place amend and cancel...OK
+66/461 trading_shard_tests.test.core safety invariants replay CCC intent conflict suspense and archive windows...core_safety_invariants: ccc=pass intent_conflict=pass suspense=pass tombstone_archive=pass host_activated=pass
+OK
+67/461 trading_shard_tests.test.direct core spot fill enforces native base single amount before economic commit...OK
+68/461 trading_shard_tests.test.direct core spot sells release only their uniquely applied inventory...OK
+69/461 trading_shard_tests.test.spot decreasing native amend reserves confirmed inventory until venue confirmation...OK
+70/461 recovery_cutover.test.restart recovery remains fenced until exact venue evidence closes...OK
+71/461 recovery_cutover.test.strategy checkpoint catches up to the core barrier without publishing intents...OK
+72/461 recovery_cutover.test.strategy recovery falls back from a damaged newest published checkpoint...OK
+73/461 recovery_cutover.test.cutover drain activates exactly one version at a stable barrier...OK
+74/461 recovery_cutover.test.cutover activation is a stable canonical fact before authority switches...OK
+75/461 recovery_cutover.test.strategy cutover persists a scoped fence and leaves unrelated orders live...OK
+76/461 recovery_cutover.test.cutover failures and forward rollback never regress economic state or generation...OK
+77/461 account_coordinator.test.shared account protocol rejects conflicting shard summaries...OK
+78/461 account_coordinator.test.risk leases allocate from gross reservations without netting benefit...OK
+79/461 account_coordinator.test.failed risk lease allocation is atomic and gross overflow fails closed...OK
+80/461 account_coordinator.test.summary barrier and lease expiry fail atomically on overflow...OK
+81/461 account_coordinator.test.account facts fan out once in stable shard order...OK
+82/461 account_coordinator.test.margin reconciliation preserves netting benefit but latches unexplained differences...OK
+83/461 account_coordinator.test.unowned economics stay in suspense until an immutable allocation...OK
+84/461 account_coordinator.test.caller owner cannot directly route forced execution...OK
+85/461 account_coordinator.test.completed forced allocation survives the next source and snapshot...OK
+86/461 account_coordinator.test.multi-owner forced allocation survives newer account facts and delivery replay...OK
+87/461 account_coordinator.test.partial forced attribution retains exact suspense until remaining slices are delivered...OK
+88/461 account_coordinator.test.opposing positions can be attributed in separate forced allocations...OK
+89/461 account_coordinator.test.forced delivery retry after shard commit does not charge penalty twice...OK
+90/461 account_coordinator.test.shared gateway routes itemized outcomes to the unique owning shard...OK
+91/461 account_coordinator.test.protocol rejects sequence gaps identity drift and cross shard delivery...OK
+92/461 account_coordinator.test.local faults stay local while account gates tighten every shard...OK
+93/461 account_coordinator.test.four shard coordinator snapshot restores deterministic authority...OK
+94/461 account_coordinator.test.account recovery restores four matching shard tails under fresh evidence fence...OK
+95/461 account_coordinator.test.account recovery retains a forced shard commit awaiting coordinator ack...OK
+96/461 account_coordinator.test.shard summaries derive from authoritative state and coordinate four real shards...OK
+97/461 account_coordinator.test.explicit lease tightening is a replayable deterministic fact...OK
+98/461 account_coordinator.test.margin reconciliation covers mode buckets rounding and unknown evidence...OK
+99/461 four_shard_acceptance.test.four-shard acceptance entry stops at the first broken assertion...OK
+100/461 canonical_event.test.decimal conversion is lossless and exact...OK
+101/461 canonical_event.test.opaque venue references are bounded...OK
+102/461 canonical_event.test.bounded decimal text normalizes before accumulation and preserves signed limits...OK
+103/461 canonical_event_codec.test.bootstrap encodes active facts without fixed-array tails...OK
+104/461 canonical_event_codec.test.native and USD margin observations preserve independent exact units...OK
+105/461 canonical_event_codec.test.funding codec retains wide signed native amount bill time and identity under current schema...OK
+106/461 canonical_event_codec.test.native economic proof codec retains bounded full source chain and wide cash under current schema...OK
+107/461 market_feed_adapter.test.market feed contract drains without blocking and stops at a boundary...OK
+108/461 simulated_venue.test.simulated venue returns a canonical result for every request kind...OK
+109/461 simulated_venue.test.simulated venue rejects requests outside its fixed account session...OK
+110/461 simulated_venue.test.simulated venue emits deterministic order lifecycle facts...OK
+111/461 simulated_venue.test.account reconciliation drains replayable bootstrap facts...OK
+112/461 simulated_venue.test.both reconciliation result types leave through tryDrain...OK
+113/461 venue_adapter_contract.test.contract harness is reusable across independent implementations...OK
+114/461 simulated_lifecycle_projection.test.simulated lifecycle makes fill the only economic fact and replays identically...OK
+115/461 execution_gateway.test.gateway fixes route and rechecks every command dependency...execution_gateway_acceptance: adapter_submissions=5
+OK
+116/461 execution_gateway.test.gateway drains each fixed route once...OK
+117/461 execution_gateway.test.DispatchProof rechecks authority reservation lease fencing and true reduce-only...OK
+118/461 execution_gateway.test.Gateway reads current authority facts instead of caller proof fields...OK
+119/461 execution_gateway.test.Gateway route and batch admission fail atomically...OK
+120/461 execution_gateway.test.Gateway observation and resident authority capacities are independent of emitted commands...OK
+121/461 execution_gateway.test.Gateway public proof preserves physical binding and rechecks per instrument rules and selection...OK
+122/461 execution_gateway.test.dispatch namespace survives recovery and changes for a new stream...OK
+123/461 execution_gateway.test.recovered dispatch needs an order reconciliation newer than its send...OK
+124/461 execution_gateway.test.Gateway scopes uncertainty and market health to the affected route...OK
+125/461 simulated_market_feed.test.simulated feed is account independent and starts with a bounded healthy snapshot...OK
+126/461 simulated_market_feed.test.book gap revokes health until a fresh feed session snapshot...OK
+127/461 market_projection.test.definition barrier and L2 continuity are isolated by Instrument...OK
+128/461 market_projection.test.book continuity follows the venue predecessor across non-unit sequences...OK
+129/461 account_projection.test.native account bootstrap identity conflicts and mixed units invalidate observations...OK
+130/461 account_projection.test.observations require a bootstrap and a continuous source...OK
+131/461 account_projection.test.native cash proofs and USD margin digests preserve exact observations...OK
+132/461 account_projection.test.partial snapshots and conflicting or regressing observations invalidate only this projection...OK
+133/461 account_projection.test.account observations retain a bounded duplicate window without exhausting the projection...OK
+134/461 okx_market_feed.test.OKX official public fixtures cross the market seam as shared facts...OK
+135/461 okx_market_feed.test.OKX market feed fails closed on a book gap and requires a new snapshot after re-subscribe...OK
+136/461 okx_market_feed.test.OKX implementation obeys the shared lifecycle and output backpressure contract...OK
+137/461 binance_market_feed.test.Binance official public fixtures cross the market seam as shared facts...OK
+138/461 binance_market_feed.test.Binance L2 gap and subscription reset require a fresh snapshot...OK
+139/461 binance_market_feed.test.Binance implementation obeys the shared lifecycle and raw-first contract...OK
+140/461 bybit_market_feed.test.Bybit official public fixtures cross the market seam as shared facts...OK
+141/461 bybit_market_feed.test.Bybit gap and subscription reset require a fresh snapshot...OK
+142/461 bybit_market_feed.test.Bybit implementation obeys the shared lifecycle and raw-first contract...OK
+143/461 okx_venue_adapter.test.OKX canonical economic identities fit the legacy authoritative seam...OK
+144/461 okx_venue_adapter.test.OKX fee-reduced spot sell rounds dispatch notional up for the Demo cap...OK
+145/461 okx_venue_adapter.test.OKX adapter releases buffered private bootstrap only after stable REST scope...OK
+146/461 okx_venue_adapter.test.OKX adapter releases ready private WS facts through the canonical seam...OK
+147/461 okx_venue_adapter.test.OKX private facts normalize fee signs into canonical execution fill and account facts...OK
+148/461 okx_venue_adapter.test.OKX adapter preserves fail-closed dispatch rejection causes...OK
+149/461 okx_venue_adapter.test.OKX adapter resumes canonical event sequence before start...OK
+150/461 okx_venue_adapter.test.OKX private resume checkpoint is pure, bounded, and rejects pending output...private resume DTO bytes=126714
+OK
+151/461 okx_venue_adapter.test.OKX drained replay handoff preserves committed floor and fresh fault evidence...OK
+152/461 okx_venue_adapter.test.OKX reconciliation result states are deterministic and bounded...OK
+153/461 okx_venue_adapter.test.OKX client order ID is stable per durable namespace account and order...OK
+154/461 okx_venue_adapter.test.OKX venue adapter translates canonical commands and itemizes a batch...OK
+155/461 okx_venue_adapter.test.OKX adapter preserves canonical order semantics at the execution seam...OK
+156/461 okx_venue_adapter.test.OKX venue adapter preserves not-sent and unknown without retrying transport...okx_translate_order_failed=StaleVersion
+OK
+157/461 okx_venue_adapter.test.replay and dry-run OKX adapters cannot call transport...[DEBUG-okx-adapter] dispatch_error=SideEffectsDisabled
+[DEBUG-okx-adapter] dispatch_error=SideEffectsDisabled
+[DEBUG-okx-adapter] dispatch_error=DemoNotQualified
+OK
+158/461 okx_venue_adapter.test.OKX adapter reuses the shared VenueAdapter contract...OK
+159/461 okx_venue_adapter.test.amend and cancel use the canonical VenueOrderRef without leaking an OKX order identity...OK
+160/461 okx_venue_adapter.test.OKX activated precision converts private fills without trading authority...OK
+161/461 binance_venue_adapter.test.Binance canonical commands authenticate, raw-commit, and dispatch independently...OK
+162/461 binance_venue_adapter.test.Binance parses response JSON instead of matching formatting...OK
+163/461 binance_venue_adapter.test.Binance Unknown gate still permits cancel...OK
+164/461 binance_venue_adapter.test.Binance clears only the reconciled Unknown order...OK
+165/461 binance_venue_adapter.test.Binance rejects stale and expired commands and latches unknown without retry...OK
+166/461 binance_venue_adapter.test.Binance Testnet sends require explicit no-withdraw admission and bounded notional...OK
+167/461 binance_venue_adapter.test.Binance validates TIF, post-only, reduce-only, amend, and deadline before transport...OK
+168/461 binance_venue_adapter.test.Binance required capabilities stay unverified without Testnet evidence...OK
+169/461 binance_venue_adapter.test.Binance spot and linear encode official methods and paths without operation...OK
+170/461 binance_venue_adapter.test.Binance implementation exercises the shared VenueAdapter contract...OK
+171/461 binance_venue_adapter.test.Binance private bootstrap drains through the shared VenueAdapter seam...OK
+172/461 binance_venue_adapter.test.Binance private partial fills cross the shared recovery contract...OK
+173/461 binance_venue_adapter.test.Binance activated precision converts private fills without trading authority...OK
+174/461 binance_venue_adapter.test.Binance missing activation retains raw fault and stops risk across reconnect...OK
+175/461 binance_venue_adapter.test.Binance activated amount range retains raw fault and stops risk...OK
+176/461 binance_venue_adapter.test.Binance scoped Spot snapshots stay unresolved without combined product and bill proof through Owner recovery...OK
+177/461 binance_private_reconciliation.test.Binance private raw ingress precedes malformed decoding...OK
+178/461 binance_private_reconciliation.test.Binance separates report and fill, maps economics, and dedupes Venue refs...OK
+179/461 binance_private_reconciliation.test.Binance bootstrap waits for every paginated source and gap requires a new session...OK
+180/461 binance_private_reconciliation.test.Binance committed private ingress replays to identical canonical facts...OK
+181/461 binance_private_reconciliation.test.Binance buffered and ready observations share a continuous logical account stream...OK
+182/461 binance_private_reconciliation.test.Binance multi-assets USD totals retain decimals and absent mode fails closed...OK
+183/461 binance_private_reconciliation.test.Binance USD-M maps fee PnL venue time and complete margin snapshot...OK
+184/461 binance_testnet_acceptance.test.Binance qualification stays not-run without an authoritative runner...OK
+185/461 binance_testnet_acceptance.test.Binance failure evidence is retained and old run ids are rejected...OK
+186/461 bybit_private_reconciliation.test.Bybit raw ingress precedes invalid private frames...OK
+187/461 bybit_private_reconciliation.test.Bybit separates deduplicated reports and fills from economic facts...OK
+188/461 bybit_private_reconciliation.test.Bybit committed private ingress replays to identical canonical facts...OK
+189/461 bybit_private_reconciliation.test.Bybit derives position mode from positionIdx...OK
+190/461 bybit_private_reconciliation.test.Bybit modern wallet retains raw native cash debt and locks without inventing availability...OK
+191/461 bybit_private_reconciliation.test.Bybit current REST wallet cannot bootstrap deprecated native availability...OK
+192/461 bybit_private_reconciliation.test.Bybit unlinked ready executions validate native fee before skipping ownership...OK
+193/461 bybit_venue_adapter.test.Bybit sends canonical commands only after response raw commit...OK
+194/461 bybit_venue_adapter.test.Bybit parses response JSON instead of matching formatting...OK
+195/461 bybit_venue_adapter.test.Bybit place admission does not block cancel...OK
+196/461 bybit_venue_adapter.test.Bybit clears only the reconciled Unknown order...OK
+197/461 bybit_venue_adapter.test.Bybit ConfirmedAbsent requires delay and inactive prior session...OK
+198/461 bybit_venue_adapter.test.Bybit Testnet sends require explicit no-withdraw admission and bounded notional...OK
+199/461 bybit_venue_adapter.test.Bybit unknown dispatch remains closed until private reconciliation resolves it...OK
+200/461 bybit_venue_adapter.test.Bybit adapter has the common VenueAdapter lifecycle...OK
+201/461 bybit_venue_adapter.test.Bybit private partial fills cross the shared recovery contract...OK
+202/461 bybit_venue_adapter.test.Bybit required capabilities stay unverified without Testnet evidence...OK
+203/461 bybit_venue_adapter.test.Bybit place amend cancel use official v5 paths...OK
+204/461 bybit_venue_adapter.test.Bybit activated precision converts private fills without trading authority...OK
+205/461 bybit_testnet_acceptance.test.Bybit qualification stays not-run without an authoritative runner...OK
+206/461 bybit_testnet_acceptance.test.Bybit failure evidence is retained and old run ids are rejected...OK
+207/461 multi_venue_testnet_acceptance.test.offline qualification explicitly reports all live environments not run...OK
+208/461 multi_venue_testnet_acceptance.test.Venue qualification types cannot be reused across adapters...OK
+209/461 trading_shard_fixture.test.qualified SPOT IOC intent crosses Gateway and cash risk before OrderCommand...OK
+210/461 trading_shard_fixture.test.fixed trajectories retain their sealed barriers and recovery digests...OK
+211/461 trading_shard_fixture.test.authoritative snapshot round trips at an exact shard barrier...OK
+212/461 trading_shard_fixture.test.snapshot restore replays only the stable journal tail without send capability...OK
+213/461 production_contract.test.production contract freezes Linux scope and schema...OK
+214/461 production_contract.test.demo and testnet evidence never promotes production authority...OK
+215/461 production_contract.test.Gate.io and Bitget are explicit disabled rows...OK
+216/461 production_contract.test.Windows verification success cannot permit production...OK
+217/461 production_contract.test.required capabilities are not verified evidence...OK
+218/461 production_runtime.test.bounded role IPC fails closed and drains FIFO...OK
+219/461 production_runtime.test.role chain revokes risk before draining and force stop...OK
+220/461 production_runtime.test.missing or failed role keeps the chain fail closed...OK
+221/461 telemetry_qualification.test.fixed telemetry has bounded labels and exact percentiles...OK
+222/461 telemetry_qualification.test.publisher drops without blocking and observability revokes risk...OK
+223/461 telemetry_qualification.test.qualification report preserves failed and invalid run states...OK
+224/461 telemetry_qualification.test.caller cannot promote incomplete evidence to passed...OK
+225/461 telemetry_qualification.test.qualification conclusion is independent of run order...OK
+226/461 telemetry_qualification.test.manifest mismatch cannot be treated as the same qualification...OK
+227/461 telemetry_qualification.test.observation A/B calculates a bounded overhead budget...OK
+228/461 telemetry_qualification.test.smoke schema includes native environment and all latency classes...OK
+229/461 failover.test.fencing tokens are strictly increasing and stale sends fail...OK
+230/461 failover.test.unbound fencing authority fails closed...OK
+231/461 failover.test.fencing checkpoint preserves token monotonicity across restart...OK
+232/461 failover.test.lease renewal failure enters recovery only and gateway checks clock...OK
+233/461 failover.test.operator recovery requires fence readback before revoking the old owner...OK
+234/461 failover.test.Linux fencing directory admits only one local owner...OK
+235/461 failover.test.standby observation credential and lag fail closed...OK
+236/461 failover.test.failover fences old node before allocating a new token...OK
+237/461 failover.test.network partition and untrusted state never auto promote...OK
+238/461 failover.test.failover report is immutable and keeps blocked evidence...OK
+239/461 durable_store.test.memory and file stores preserve sealed barrier and reject unsafe recovery...OK
+240/461 durable_store.test.memory fault injection always closes the safety gate...OK
+241/461 durable_store.test.manifest checksum covers entries as well as the header...OK
+242/461 durable_store.test.segment rotation requires a snapshot at the sealed barrier...OK
+243/461 durable_store.test.checkpoint store rotates 100 rounds without cumulative manifest exhaustion...OK
+244/461 durable_store.test.checkpoint store local file 100 rotations retain audit and two snapshot generations...OK
+245/461 durable_store.test.checkpoint store shared seven streams reclaim active metadata and replay memory history...store_layout: stream_cache=196672, memory_adapter=18357504, file_adapter=10755224, manifest_bound=8208, archived_descriptor=192, snapshot_bound=1048576
+OK
+246/461 durable_store.test.checkpoint store file fault boundaries select complete old or new roots...OK
+247/461 durable_store.test.checkpoint store rejects overflow and conflicting snapshot identity without reclaiming roots...OK
+248/461 durable_store.test.checkpoint store snapshot reclaim commits references before obsolete object deletion...OK
+249/461 durable_store.test.checkpoint store bounded replay reads only requested horizon and rejects byte budget before delivery...OK
+250/461 durable_store.test.checkpoint store virgin committed journal remains available before first snapshot...OK
+251/461 durable_store.test.checkpoint store archived replay remains stable across callback writes to another stream...OK
+252/461 durable_store.test.checkpoint store memory receipts require current root ancestry and stream namespace...OK
+253/461 durable_store.test.checkpoint store rejects unknown journal schema despite valid frame manifest and payload checksums...OK
+254/461 durable_store.test.checkpoint store publishes after fallback while preserving two valid generations...OK
+255/461 demo_authority.test.Demo owner commits before publication and recovers only a complete barrier...OK
+256/461 demo_authority.test.Demo owner closes persistence faults at their last proven barrier...OK
+257/461 demo_authority.test.Checkpoint owner file interruptions preserve coherent Unknown fill economics and authority...owner_file_fault: short_write case=0 point=append skip=0
+owner_file_fault: short_write case=1 point=commit skip=0
+owner_file_fault: short_write case=2 point=root_publish skip=0
+owner_file_fault: short_write case=3 point=root_publish skip=1
+owner_file_fault: short_write case=4 point=seal skip=0
+owner_file_fault: short_write case=5 point=publish skip=0
+owner_file_fault: short_write case=6 point=snapshot_sync skip=0
+owner_file_fault: short_write case=7 point=rotate skip=0
+owner_file_fault: short_write case=8 point=archive_sync skip=0
+owner_file_fault: short_write case=9 point=reclaim skip=0
+owner_file_fault: short_write case=10 point=reclaim skip=1
+owner_file_fault: short_write case=11 point=root_publish skip=0
+owner_file_fault: short_write case=12 point=root_publish skip=1
+owner_file_fault: short_write case=13 point=root_publish skip=2
+owner_file_fault: short_write case=14 point=root_publish skip=3
+owner_file_fault: short_write case=15 point=root_publish skip=4
+owner_file_fault: short_write case=16 point=append skip=0
+owner_file_fault: short_write case=17 point=commit skip=0
+owner_file_fault: sync_timeout case=0 point=append skip=0
+owner_file_fault: sync_timeout case=1 point=commit skip=0
+owner_file_fault: sync_timeout case=2 point=root_publish skip=0
+owner_file_fault: sync_timeout case=3 point=root_publish skip=1
+owner_file_fault: sync_timeout case=4 point=seal skip=0
+owner_file_fault: sync_timeout case=5 point=publish skip=0
+owner_file_fault: sync_timeout case=6 point=snapshot_sync skip=0
+owner_file_fault: sync_timeout case=7 point=rotate skip=0
+owner_file_fault: sync_timeout case=8 point=archive_sync skip=0
+owner_file_fault: sync_timeout case=9 point=reclaim skip=0
+owner_file_fault: sync_timeout case=10 point=reclaim skip=1
+owner_file_fault: sync_timeout case=11 point=root_publish skip=0
+owner_file_fault: sync_timeout case=12 point=root_publish skip=1
+owner_file_fault: sync_timeout case=13 point=root_publish skip=2
+owner_file_fault: sync_timeout case=14 point=root_publish skip=3
+owner_file_fault: sync_timeout case=15 point=root_publish skip=4
+owner_file_fault: sync_timeout case=16 point=append skip=0
+owner_file_fault: sync_timeout case=17 point=commit skip=0
+owner_file_fault: enospc case=0 point=append skip=0
+owner_file_fault: enospc case=1 point=commit skip=0
+owner_file_fault: enospc case=2 point=root_publish skip=0
+owner_file_fault: enospc case=3 point=root_publish skip=1
+owner_file_fault: enospc case=4 point=seal skip=0
+owner_file_fault: enospc case=5 point=publish skip=0
+owner_file_fault: enospc case=6 point=snapshot_sync skip=0
+owner_file_fault: enospc case=7 point=rotate skip=0
+owner_file_fault: enospc case=8 point=archive_sync skip=0
+owner_file_fault: enospc case=9 point=reclaim skip=0
+owner_file_fault: enospc case=10 point=reclaim skip=1
+owner_file_fault: enospc case=11 point=root_publish skip=0
+owner_file_fault: enospc case=12 point=root_publish skip=1
+owner_file_fault: enospc case=13 point=root_publish skip=2
+owner_file_fault: enospc case=14 point=root_publish skip=3
+owner_file_fault: enospc case=15 point=root_publish skip=4
+owner_file_fault: enospc case=16 point=append skip=0
+owner_file_fault: enospc case=17 point=commit skip=0
+owner_file_fault: eio case=0 point=append skip=0
+owner_file_fault: eio case=1 point=commit skip=0
+owner_file_fault: eio case=2 point=root_publish skip=0
+owner_file_fault: eio case=3 point=root_publish skip=1
+owner_file_fault: eio case=4 point=seal skip=0
+owner_file_fault: eio case=5 point=publish skip=0
+owner_file_fault: eio case=6 point=snapshot_sync skip=0
+owner_file_fault: eio case=7 point=rotate skip=0
+owner_file_fault: eio case=8 point=archive_sync skip=0
+owner_file_fault: eio case=9 point=reclaim skip=0
+owner_file_fault: eio case=10 point=reclaim skip=1
+owner_file_fault: eio case=11 point=root_publish skip=0
+owner_file_fault: eio case=12 point=root_publish skip=1
+owner_file_fault: eio case=13 point=root_publish skip=2
+owner_file_fault: eio case=14 point=root_publish skip=3
+owner_file_fault: eio case=15 point=root_publish skip=4
+owner_file_fault: eio case=16 point=append skip=0
+owner_file_fault: eio case=17 point=commit skip=0
+owner_file_fault: corruption case=0 point=append skip=0
+owner_file_fault: corruption case=1 point=commit skip=0
+owner_file_fault: corruption case=2 point=root_publish skip=0
+owner_file_fault: corruption case=3 point=root_publish skip=1
+owner_file_fault: corruption case=4 point=seal skip=0
+owner_file_fault: corruption case=5 point=publish skip=0
+owner_file_fault: corruption case=6 point=snapshot_sync skip=0
+owner_file_fault: corruption case=7 point=rotate skip=0
+owner_file_fault: corruption case=8 point=archive_sync skip=0
+owner_file_fault: corruption case=9 point=reclaim skip=0
+owner_file_fault: corruption case=10 point=reclaim skip=1
+owner_file_fault: corruption case=11 point=root_publish skip=0
+owner_file_fault: corruption case=12 point=root_publish skip=1
+owner_file_fault: corruption case=13 point=root_publish skip=2
+owner_file_fault: corruption case=14 point=root_publish skip=3
+owner_file_fault: corruption case=15 point=root_publish skip=4
+owner_file_fault: corruption case=16 point=append skip=0
+owner_file_fault: corruption case=17 point=commit skip=0
+OK
+258/461 demo_authority.test.Checkpoint owner explicitly resumes each durable checkpoint interruption without sending...OK
+259/461 demo_authority.test.Checkpoint owner commits 100 rotations with live authority and economic state...OK
+260/461 demo_authority.test.Checkpoint owner durable private bundle owns its seed and rejects mixed metadata...OK
+261/461 demo_authority.test.Checkpoint owner rejects a valid receipt bound to a foreign decision stream...OK
+262/461 demo_authority.test.Checkpoint owner Windows file commits 100 rotations and reopens without sending...OK
+263/461 demo_authority.test.Demo policy drives buy and fault cleanup through one durable Gateway...OK
+264/461 credential_store.test.credential metadata and secret payload are authenticated...OK
+265/461 credential_store.test.policy, lifecycle, and security failures close admission...OK
+266/461 credential_store.test.Secret exposes only read-only material and reports page protection...OK
+267/461 windows_verification_runtime.test.live Demo spot rules must match the execution adapter...OK
+268/461 windows_verification_runtime.test.Windows generation refuses corruption and advances after restart...OK
+269/461 windows_verification_runtime.test.Windows pipe rejects another process with the same user SID...OK
+270/461 windows_verification_runtime.test.verification bounded queue fails closed...OK
+271/461 windows_verification_runtime.test.Windows chain evidence cannot permit production...OK
+272/461 windows_verification_runtime.test.Demo evidence rejects a different dispatch command with reused local IDs...OK
+273/461 historical_fee_audit.test.historical fee audit preserves independent fixed values old posting scale and mirrored closure...OK
+274/461 historical_fee_audit.test.historical fee audit cannot trust incomplete mismatched or new scale joins...OK
+275/461 historical_fee_audit.test.historical fee audit selects one exact execution from a batched raw frame and rejects ambiguous joins...OK
+276/461 venue_fill_recovery_acceptance.test.OKX raw private fills traverse adapter Owner durable recovery without decoder leakage...okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+OK
+277/461 venue_fill_recovery_acceptance.test.OKX ready inexact account fact persists a fail closed result without reconciliation...OK
+278/461 venue_fill_recovery_acceptance.test.OKX activated high precision account facts survive Owner replay without old unit economics...OK
+279/461 venue_fill_recovery_acceptance.test.OKX native settlement long fees rebates and explicit zero close Owner ledger and recover...OK
+280/461 venue_fill_recovery_acceptance.test.OKX native settlement long tail WS and short REST amounts retain exact identity and replay...OK
+281/461 venue_fill_recovery_acceptance.test.OKX native settlement ten micro fees accumulate exactly through Owner and replay...OK
+282/461 venue_fill_recovery_acceptance.test.OKX native settlement balances beyond i64 close Owner ledger and replay...OK
+283/461 venue_fill_recovery_acceptance.test.OKX native settlement cumulative fee overflow preserves reports and rejects partial ledger commit...OK
+284/461 venue_fill_recovery_acceptance.test.OKX native settlement fee identity conflict retains exact ledger and recovery fault...OK
+285/461 venue_fill_recovery_acceptance.test.OKX native settlement actual subatom notional faults instead of applying risk rounding...OK
+286/461 venue_fill_recovery_acceptance.test.OKX native settlement malformed terminal report closes Owner authority without changing ledger...OK
+287/461 venue_fill_recovery_acceptance.test.OKX native base atom fees rebates preserve gross lots cost and sublot inventory...OK
+288/461 venue_fill_recovery_acceptance.test.OKX native base nonunit lot and tick keep exact buy sell inventory...OK
+289/461 venue_fill_recovery_acceptance.test.OKX native base eight digit precision rejects a ninth digit fee durably...OK
+290/461 venue_fill_recovery_acceptance.test.OKX native base fee conflict preserves ledger and recovers authority fence...OK
+291/461 venue_fill_recovery_acceptance.test.OKX native base checked extreme keeps raw fault and no partial ledger...OK
+292/461 venue_fill_recovery_acceptance.test.OKX native base startup requires committed lot and tick authority before monetary decode...OK
+293/461 venue_fill_recovery_acceptance.test.OKX native base balance beyond i64 remains exact through postings source observations and recovery...OK
+294/461 venue_fill_recovery_acceptance.test.OKX native base cumulative traded range rejects netted third fill before ledger commit...OK
+295/461 venue_fill_recovery_acceptance.test.activated balance limits reject cumulative Suspense growth before Owner commit...OK
+296/461 venue_fill_recovery_acceptance.test.OKX ready economic faults distinguish micro fees rebates assets and decoder failures...OK
+297/461 venue_fill_recovery_acceptance.test.core rejected canonical economic amount persists without partial accounting or send authority...OK
+298/461 venue_fill_recovery_acceptance.test.OKX economic fault append and commit failures retain raw facts and close sending...OK
+299/461 venue_fill_recovery_acceptance.test.OKX native account missing cash facts cannot use USD equity as available funds...OK
+300/461 venue_fill_recovery_acceptance.test.OKX native account held cash blocks risk despite unchanged local ledger and USD equity...OK
+301/461 venue_fill_recovery_acceptance.test.OKX native account USD valuation retains finer decimals without fabricating USDT margin...OK
+302/461 venue_fill_recovery_acceptance.test.OKX native third asset fees rebates zero retain portfolio ownership original postings and unvalued status...OK
+303/461 venue_fill_recovery_acceptance.test.OKX native third asset amounts beyond i64 preserve opening Treasury ownership and exact fees...OK
+304/461 venue_fill_recovery_acceptance.test.OKX native third asset unknown and subatom fees keep unresolved facts without ledger commit...OK
+305/461 venue_fill_recovery_acceptance.test.OKX native third asset conflict retains original ledger and recovered failure fence...OK
+306/461 venue_fill_recovery_acceptance.test.OKX native third asset cumulative fees cannot exceed activated bounds after net balance changes...OK
+307/461 venue_fill_recovery_acceptance.test.OKX native third asset ledger capacity preserves all preceding economics and unresolved fill...OK
+308/461 venue_fill_recovery_acceptance.test.OKX native account balances cash held and each liability retain independent exact asset units...OK
+309/461 venue_fill_recovery_acceptance.test.OKX native funding bills retain actual payments in Suspense without fabricating portfolio PnL...OK
+310/461 venue_fill_recovery_acceptance.test.OKX native funding unknown inexact and range retain unresolved source without economic commit...OK
+311/461 venue_fill_recovery_acceptance.test.OKX native funding full metadata conflict retains ledger and recoverable failure fence...OK
+312/461 venue_fill_recovery_acceptance.test.OKX funding included in opening baseline stays unresolved without a second cash entry...OK
+313/461 venue_fill_recovery_acceptance.test.OKX opposite funding payments cannot hide cumulative native overflow by netting...OK
+314/461 venue_fill_recovery_acceptance.test.OKX native precision legal raw WS REST report Fill permutations converge without losing audit order...OK
+315/461 venue_fill_recovery_acceptance.test.OKX native gate capacity retains unresolved raw bill without changing prior cash...OK
+316/461 venue_fill_recovery_acceptance.test.OKX native perpetual capacity preserves 32 exact Fill facts and rejects the next source without partial economics...OK
+317/461 venue_fill_recovery_acceptance.test.OKX unowned terminal Fill validates native fee before skipping portfolio ownership...OK
+318/461 venue_fill_recovery_acceptance.test.OKX unowned Fill enforces a single fee limit independently of its balance limit...OK
+319/461 venue_fill_recovery_acceptance.test.Checkpoint private horizon seeds after 1024 cumulative private inputs without scanning old epochs...private checkpoint horizon: epochs=8 raw_updates=1152 canonical_account_inputs=2304
+OK
+320/461 venue_fill_recovery_acceptance.test.Checkpoint private frame restores postseed order and applies missing Fill exactly once...OK
+321/461 asset_precision_file_recovery_acceptance.test.Windows file reopen recovers or closes an uncommitted OKX economic fault without sends...OK
+322/461 asset_precision_file_recovery_acceptance.test.Windows retained committed input recovery skips a same frame report and applies only the missing Fill...OK
+323/461 asset_precision_file_recovery_acceptance.test.Windows native file recovery preserves wide atoms partial facts faults and second reopen...OK
+324/461 native_account_continuity_acceptance.test.native account continuity Binance Adapter Owner snapshot and replay...OK
+325/461 native_account_continuity_acceptance.test.native account continuity Bybit unsupported wallet scope persists without inventing availability...OK
+326/461 native_economic_reconciliation_acceptance.test.independent native economic reconciliation matches multiple Assets without ledger writes...OK
+327/461 native_economic_reconciliation_acceptance.test.independent native economic reconciliation finds mirrored local one atom error...OK
+328/461 native_economic_reconciliation_acceptance.test.independent native economic reconciliation missing range and late facts remain unresolved...OK
+329/461 native_economic_reconciliation_acceptance.test.independent native economic reconciliation source identity conflict is durable...OK
+330/461 native_economic_reconciliation_acceptance.test.independent native economic reconciliation cannot heal numeric faults or Unknown...OK
+331/461 native_economic_reconciliation_acceptance.test.independent native nonempty bill interval closes actual microfee and base cash once...OK
+332/461 native_economic_reconciliation_acceptance.test.independent native bill interval cannot cover an unapplied Fill or a different HTTP range...OK
+333/461 native_economic_reconciliation_acceptance.test.independent older REST snapshots cannot restore newer unavailable cash or debt proof...OK
+334/461 native_economic_reconciliation_acceptance.test.independent native proof rejects wrong precision and conflicting canonical content durably...OK
+335/461 native_economic_reconciliation_acceptance.test.independent native bill interval reconciles third asset microfees without USD valuation...OK
+336/461 native_economic_reconciliation_acceptance.test.independent native bill pagination retains padded rows and requires exact continuation and terminal page...OK
+337/461 native_economic_reconciliation_acceptance.test.independent native nonempty proof raw sweep preserves scope query and admission without sends...OK
+338/461 native_multi_venue_accounting_acceptance.test.native multi Venue actual Binance and Bybit microfees reach the same Owner ledger and replay...precision13 venue=binance case=quote assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=29 raw_barrier=6 canonical=e4dd35c1237b8c08e746b14f8dc5919704970b25ec9e441c278c10f769a69ffb semantic=e43d3b509253b683b14b4931413c4f15a3e56adfef4cd148046f1d6c8f325d03 sends=0
+precision13 venue=bybit case=quote assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=29 raw_barrier=7 canonical=85bada28f75bf1803739133eb9212e3501a6df0a91ae24f468d32ebc62d5b1a9 semantic=dd7b8eea6a40122bcea9d20f6aecb26f3b0d3501fc4c69ab3079dbaa82fded2d sends=0
+OK
+339/461 native_multi_venue_accounting_acceptance.test.native multi Venue Bybit extra fee components remain unresolved instead of omitting cash charges...precision13 venue=bybit case=extra_fees assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=aefc98b6824969feb7876baa371fde97054ca1be9849a936a2a6391a59af66bf semantic=652b6037df77c7c2bc2fa22040352c7af9cecb101f77cc86f0b6426a123c02ad sends=0
+OK
+340/461 native_multi_venue_accounting_acceptance.test.native multi Venue shared base quote fee rebate zero and normalized long tail matrix...precision13 venue=binance case=base assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=29 raw_barrier=6 canonical=61c01d217bfb7c74d1ca4719c47610520501fb9a9c54f05b6cfd8ab9d8b417ab semantic=e24aef7e09b385d4dfddc297826a50a8052b7d7010fff3e6ddf3cd7b36bae2d5 sends=0
+precision13 venue=binance case=quote_rebate assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=29 raw_barrier=6 canonical=515f538e98875018a3acc3e0055d6caab67e0dddc2461c442a86cc4c9c179a74 semantic=3d24872dfebf64862826c2d35e20deab548097abdaa3bdc642e060e23925936d sends=0
+precision13 venue=binance case=base_rebate assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=29 raw_barrier=6 canonical=f13f893a1c77516ff27a771908e9a0a2248ed312d100c39598b43d68ea1edfd8 semantic=179b7ccdc300e05c5331aa93123904810d4f99b25c42fff64ba0dfeb6d2217e0 sends=0
+precision13 venue=binance case=third_fee assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=6 canonical=c41ff8cca8b09fedef5e971135c8647306fbf1a3026dcadc66e76e3dfddaf878 semantic=88ae98f71763594c06e146d7a409c1ab1fd312ce32a948c6816c8a8e7fa7dcab sends=0
+precision13 venue=binance case=third_rebate assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=6 canonical=4a139a7a12c6be78cbe183f8fd09bda261be40acbf859f25c9ecd8c27feb4f13 semantic=cd5654cbb5d366e138e4d9bb8eca43d0500eda80aac7c4bf7367e2b302c02099 sends=0
+precision13 venue=binance case=zero assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=29 raw_barrier=6 canonical=b96cbc62f6fe8aa200213f31bcabf112fbb6703eba4610cc2ef206dc62a93efd semantic=56dfe86b16b3ee732fbc136cd47afe1d6f163e7fa1b4f80ebf5a3671e6b88974 sends=0
+precision13 venue=binance case=long_tail assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=29 raw_barrier=6 canonical=3176d71d5a787c4adf67e362399057debea41cc43a98c8143174425b3d880591 semantic=e43d3b509253b683b14b4931413c4f15a3e56adfef4cd148046f1d6c8f325d03 sends=0
+precision13 venue=bybit case=base assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=29 raw_barrier=7 canonical=00f1d83ee01e1797df0131b7c6b8fdc21cdc49fe0258aa04cdc7cb7e031bf1fd semantic=966cbc5d81ec5ba5c9a850a0250ae0471e5fabb119e3940ce7bdca0a68a61c57 sends=0
+precision13 venue=bybit case=quote_rebate assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=29 raw_barrier=7 canonical=dd678fcb4425f433f8fdd577234efb85c7232d0a1591ba1d53e544f4f93ae849 semantic=e8d53c7897a4bab876d895b86a1b22756ec4f8b1236f833eec8ee2d8495ecca4 sends=0
+precision13 venue=bybit case=base_rebate assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=29 raw_barrier=7 canonical=e4dfaa8ac66a6869b211f01e6e01a4bdabb90b461caf05e7e707d9311310b5bc semantic=c8951b16dfece21a2cadb4663b7bf58f6650e072bd6eefc9b47de4f6ac8fccce sends=0
+precision13 venue=bybit case=third_fee assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=7 canonical=79591d53a605a3e472fdb9f6170264238f00abbfcb34ff889af672bbcbf339a0 semantic=1b69246159f29e7d7badc0249ddf34bbb999ab5c89b772704af4db7d7111ee9a sends=0
+precision13 venue=bybit case=third_rebate assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=7 canonical=1d1ca9c9aae2d9f151726900ed634ce4849571ebdfe12cb888a31c29baa394d3 semantic=605fa3e754d9ac605ba2c739fcd19fb25fe377b7be0816f6b152710f998d4201 sends=0
+precision13 venue=bybit case=zero assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=29 raw_barrier=7 canonical=376804f8b7069ee19510fbd80bf890e49e668393945f1a383946101ce3d11a04 semantic=b3d3158c7e3d2e4911a0122817fb587ec34b3178c8430c8f7807fc4eb39338e5 sends=0
+precision13 venue=bybit case=long_tail assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=29 raw_barrier=7 canonical=0a5d1b567511ddbd4ecb065b5bb61da66f7c1cf22c5801e6e8a7e0f9355928c2 semantic=dd7b8eea6a40122bcea9d20f6aecb26f3b0d3501fc4c69ab3079dbaa82fded2d sends=0
+OK
+341/461 native_multi_venue_accounting_acceptance.test.native multi Venue shared unknown subatom and overflow faults recover without partial accounting...precision13 venue=binance case=unknown assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=7afc58ed8dc361220d60e67e922c4276d6096fcc850825ac8b6f83c2c53c4e16 semantic=a01436daa34c4ddc24e68bc77b6c8891f6fd6cb902863799ae076da969fbc1f7 sends=0
+precision13 venue=binance case=unknown_no_pending assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=7afc58ed8dc361220d60e67e922c4276d6096fcc850825ac8b6f83c2c53c4e16 semantic=a01436daa34c4ddc24e68bc77b6c8891f6fd6cb902863799ae076da969fbc1f7 sends=0
+precision13 venue=binance case=inexact assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=e519462ad8e0f996e363d57f1d50bd68a5b83d9190bf4f247d6db158cdb9e4a7 semantic=6352dd6c15f54c3531b1c7bdb86def43bf940702252a20c1eb44d223394c1133 sends=0
+precision13 venue=binance case=overflow assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=e4322dcf0f1bf55602d1ee04189645e2b759c4c8d308e5dec5891befc84a2e1a semantic=31313674cacacafca6f6f19172e291303f42dde295ec19a1ee1e38df21a6ffe9 sends=0
+precision13 venue=bybit case=unknown assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=e71c5b5bd4ba6e126332001ca7d12c6e1c24766f83ce605e07fda1d02efba0a3 semantic=248446a5156793a5f60429ffb4f56fca79e7d75a52f0617acfbfd1be10cbd2ad sends=0
+precision13 venue=bybit case=unknown_no_pending assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=e71c5b5bd4ba6e126332001ca7d12c6e1c24766f83ce605e07fda1d02efba0a3 semantic=248446a5156793a5f60429ffb4f56fca79e7d75a52f0617acfbfd1be10cbd2ad sends=0
+precision13 venue=bybit case=inexact assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=7d5d0e729db12ff182fb94a027390e828395e804247e6441a34783f2bec0b5a9 semantic=563f95039a0bb8a628b775431f6b86c9e196c13fdae6fcc741032bf49777987e sends=0
+precision13 venue=bybit case=overflow assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=0a9b60bebae41f1607f122da9c945c5cce4be2e2b80a249bd3898d211e20e94a semantic=f2284b554f882ae23a7623d71cf05efff4b0f8fcca7695fb215554006f43c239 sends=0
+OK
+342/461 native_multi_venue_accounting_acceptance.test.native multi Venue Bybit modern wallet scope faults persist and order report may precede unique fill...precision13 venue=bybit case=wallet_scope assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=25e5c2536126a288b08b8efc90b32b306881e92aa97e10c5e565b817c72b4c84 semantic=856e374d2b24e442af932c51babf1db3cecc2e3461db4ce86d7cdbd17b9c1c11 sends=0
+precision13 venue=bybit case=quote assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=29 raw_barrier=7 canonical=85bada28f75bf1803739133eb9212e3501a6df0a91ae24f468d32ebc62d5b1a9 semantic=dd7b8eea6a40122bcea9d20f6aecb26f3b0d3501fc4c69ab3079dbaa82fded2d sends=0
+precision13 venue=bybit case=report_first assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=29 raw_barrier=7 canonical=9167a149b967981702593f34a407778cd163a5c4205b69d5bd87d719a9ec56ff semantic=dd7b8eea6a40122bcea9d20f6aecb26f3b0d3501fc4c69ab3079dbaa82fded2d sends=0
+OK
+343/461 native_multi_venue_accounting_acceptance.test.native multi Venue decision append and commit failure preserve source and prevent replay sends...OK
+344/461 native_multi_venue_accounting_acceptance.test.native multi Venue conflicting economic identity preserves original ledger and restart fence...precision13 venue=binance case=conflict assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=7 canonical=a4b30344a8b4477ddb42c8632db08dd046480c7fc9ccdb4bfb59128806f1d35c semantic=5f0ed7efac0d1926d92fc040390d183245f80a39aeeeac95e70c9e3fb726b852 sends=0
+precision13 venue=bybit case=conflict assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=8 canonical=7ecb0231930607ec044427aa060d4ffbe522402482fcc89caed7f5da02ad69b2 semantic=91ea599208b82c84ea44b4d21c10fba527476e9efbc3bba260771f91c14bf691 sends=0
+OK
+345/461 native_multi_venue_accounting_acceptance.test.native multi Venue malformed private frame persists decoder rejection through restart...precision13 venue=binance case=malformed_ws assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=b230a37fe3694015a691c359f2e47d20b985a6f57d03f1e0ab591e7d3ac0ab69 semantic=f248690b1a3d98c91858ab8ce9aab20ede4cb444488410591966a7c159f3e88a sends=0
+precision13 venue=bybit case=malformed_ws assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=70ba3541f943aa3845f7ca3afbdbb57a61d997576978a9f41f69f57b42392117 semantic=ce51453001e5a342458a696969920a99097a4a0a62c0d7d8b0aafd730ab77687 sends=0
+OK
+346/461 native_multi_venue_accounting_acceptance.test.native multi Venue unlinked fee obeys single limit separately from account balance limit...precision13 venue=binance case=single_fee assets_sha256=273bc6ff45e8c64a324e1def01e9f032b35a6f0b4050486008d2b58822f97618 decision_barrier=26 raw_barrier=5 canonical=ff4fdc1d0e9571bf720addebd5767742256c3465490097c6d99a35f305341bcc semantic=6348ee0c1e7f31ab88c6fa338dfb70ba83d53eb150dc688631bd1a8257e094d6 sends=0
+precision13 venue=bybit case=single_fee assets_sha256=273bc6ff45e8c64a324e1def01e9f032b35a6f0b4050486008d2b58822f97618 decision_barrier=26 raw_barrier=5 canonical=c18b89f7c84f1d5e702c47936e65c159c016a28a64945ff77a29a71042de7858 semantic=8fc3c793153fc45edfcccda9d4d26b7ab66c7f377c692212067c791453375c90 sends=0
+OK
+347/461 simulated_native_accounting_acceptance.test.Simulated native public Owner contract preserves split microfees rebates nonunit quantity and replay...OK
+348/461 simulated_native_accounting_acceptance.test.Simulated native public Owner contract persists unknown asset and amount range faults...OK
+349/461 okx_live_chain.test.replay and dry-run can never invoke the transport...OK
+350/461 okx_live_chain.test.qualified Demo response is raw-committed before dispatch classification...OK
+351/461 okx_live_chain.test.qualification and aggregate notional fail closed before transport...OK
+352/461 okx_live_chain.test.unknown dispatch latches and blocks the next send without a caller flag flip...OK
+353/461 okx_live_chain.test.response persistence failure closes subsequent transport admission...OK
+354/461 okx_live_chain.test.uncertain submission and rejected cleanup are never replayed automatically...OK
+355/461 core_observation_capacity_acceptance.test.Observation capacity public fifth instrument configuration precedes 500 combination acceptance...OK
+356/461 core_observation_capacity_acceptance.test.Observation capacity account Venue scope rejects fresh and duplicate public facts without mutation...OK
+357/461 core_observation_capacity_acceptance.test.Observation capacity 500 combinations four continuous Owners retain 128 selected resting orders...observation_capacity: combinations=500 selected_live=128 owners=4 max_snapshot_bytes=432940 shard_bytes=863568
+OK
+358/461 raw_ingress.test.durable raw ingress replays committed bytes and fails closed on storage fault...OK
+359/461 raw_ingress.test.raw checkpoint interruptions resume explicitly before the next frame...OK
+360/461 raw_ingress.test.raw ingress retains a Demo bootstrap larger than the old 16 KiB segment...OK
+361/461 raw_ingress.test.Windows raw ingress rotates, reopens, and replays every committed segment...OK
+362/461 journal.test.stable journal detects tail, corruption, and sequence gap...OK
+363/461 okx_public_market.test.books5 snapshot reaches the existing book authority without prevSeqId...OK
+364/461 okx_public_market.test.raw evidence is committed before malformed input is rejected...OK
+365/461 okx_public_market.test.instrument mark index and funding frames normalize without floats...OK
+366/461 okx_public_market.test.rule observations are candidates and later changes remain explicit facts...OK
+367/461 okx_public_market.test.public REST bootstrap shape preserves absent source time...OK
+368/461 okx_public_market.test.book duplicates are idempotent and gaps require a fresh snapshot...OK
+369/461 okx_public_market.test.conflicting duplicate and out-of-order book updates fail closed...OK
+370/461 okx_public_market.test.raw backpressure cannot advance book sequence...OK
+371/461 okx_public_market.test.empty same-sequence update is heartbeat and resubscribe blocks deltas...OK
+372/461 okx_public_market.test.malformed book frame revokes health after raw commit...OK
+373/461 operational.test.control authorization and latched recovery remain orthogonal...OK
+374/461 risk.test.five layers, cash, isolated margin, and dual reduce-only are deterministic...OK
+375/461 risk.test.settlement precision scales risk atoms while lots and price ticks stay fixed...OK
+376/461 risk.test.margin safety gate takes the strictest amount bps and liquidation distance...OK
+377/461 risk.test.opening gate rejects sufficient cash with insufficient liquidation distance...OK
+378/461 risk.test.extreme risk arithmetic fails closed...OK
+379/461 strategy_host_ipc.test.bounded rings and frozen bridge fail closed...OK
+380/461 oms.test.unknown order rejects a later place without changing identity...OK
+381/461 oms.test.OMS commands retain each member intent identity...OK
+382/461 oms.test.OMS commands bind distinct risk and reservation fact barriers...OK
+383/461 oms.test.OMS command keeps each exact order type and safety field...OK
+384/461 oms.test.pending cancel outbox is reconstructed after replay...OK
+385/461 oms.test.OMS rejects a price for another instrument and preserves reservation assets...OK
+386/461 oms.test.OMS rejects overflowing authoritative quantities...OK
+387/461 oms.test.pending amend keeps old and new remaining exposure through fills and rejection...OK
+388/461 oms.test.pending amend confirmation, Unknown and replay keep conservative reservations...OK
+389/461 oms.test.ConfirmedAbsent cannot become a fill and releases reservation...OK
+390/461 oms.test.an earlier live reconciliation forbids later absence for the same place...OK
+391/461 oms.test.FoundTerminal requires an explicit terminal category...OK
+392/461 oms.test.canonical report digest is part of report identity...OK
+393/461 oms.test.canonical report identities do not order cumulative execution state...OK
+394/461 oms.test.canonical late accepted report retains the historical quantity after decreasing amend...OK
+395/461 oms.test.hot terminal facts reject semantic changes and invalid filled quantities...OK
+396/461 oms.test.OrderIntentIdentity is idempotent and conflicts fail closed...OK
+397/461 oms.test.terminal orders compact to replayable tombstones without overwriting active state...OK
+398/461 oms.test.compacted second group member keeps its own intent identity...OK
+399/461 oms.test.tombstone capacity exhaustion enters RecoveryOnly without evicting active evidence...OK
+400/461 oms.test.canceled orders without archive window stay hot under capacity pressure...OK
+401/461 oms.test.live unknown and pending_cancel orders never compact...OK
+402/461 oms.test.ccc predecessor stays hot while successor is live...OK
+403/461 oms.test.compact refuses a mutated intent identity after the archive window closes...OK
+404/461 economics.test.third native fees and rebates preserve explicit opening ownership and incomplete valuation...OK
+405/461 economics.test.different spot and perpetual instruments retain their own units inventory and marks through replay...OK
+406/461 economics.test.sibling base fees and rebates debit native inventory once in either fill order...OK
+407/461 economics.test.instrument position bound rejects the next instrument without replacing existing marks...OK
+408/461 economics.test.partial fills close two layers with average cost fees rebates margin and valuation...OK
+409/461 economics.test.spot base-asset fee preserves gross traded lots and open cost...OK
+410/461 economics.test.funding and forced execution are idempotent and unowned facts enter suspense...OK
+411/461 economics.test.account snapshot opens a break without overwriting local economics...OK
+412/461 economics.test.duplicate attributed forced execution cannot charge penalty twice...OK
+413/461 economics.test.negative forced penalty is rejected without changing projection...OK
+414/461 economics.test.allocated forced PnL must match the closed portfolio position...OK
+415/461 economics.test.valuation respects the contract quantity denominator...OK
+416/461 economics.test.ledger postings reproduce signed fee rebate and funding cash movements...OK
+417/461 economics.test.canonical fill evidence is idempotent and rejects a conflicting payload...OK
+418/461 asset_registry.test.activated source asset codes resolve by venue and reject ambiguous authority...OK
+419/461 instrument_registry.test.instrument registry is bounded, explicit, and idempotent...OK
+420/461 instrument_registry.test.rules upgrades retain independent margin and disabled trading authority...OK
+421/461 strategy_host_gateway.test.subscription merge and intent rejection contract...OK
+422/461 snapshot_codec.test.snapshot codec rejects truncation CRC corruption and invalid enum values...OK
+423/461 snapshot_codec.test.in place decoding round trips nested arrays optional and union payloads...OK
+424/461 okx_order_entry.test.versioned OKX identities are deterministic alphanumeric and bounded...OK
+425/461 okx_order_entry.test.place amend and cancel encode only frozen OKX semantics...OK
+426/461 okx_order_entry.test.all qualified limit kinds map directly and spot omits derivatives fields...OK
+427/461 okx_order_entry.test.market requires a protection price but never encodes an unreviewed limit...OK
+428/461 okx_order_entry.test.bounded scheduler prioritizes safety batches and charges every item...OK
+429/461 okx_order_entry.test.stale versions revisions deadlines and queue pressure are proven not sent...OK
+430/461 okx_order_entry.test.queued amend is revalidated after a concurrent fill before dispatch...OK
+431/461 okx_order_entry.test.batch response is itemized and transport ambiguity makes every item unknown...OK
+432/461 okx_order_entry.test.cancel confirm create cannot overlap or reuse the old order...OK
+433/461 okx_private_reconciliation.test.explicit blank liability is zero while a missing field stays unknown...OK
+434/461 okx_private_reconciliation.test.unified private WS ingress raw-commits login ACKs and snapshots before routing...OK
+435/461 okx_private_reconciliation.test.unified private WS ingress rejects a nonzero venue event after raw commit...OK
+436/461 okx_private_reconciliation.test.ready funding bills retain signed native settlement and independent bill identity...OK
+437/461 okx_private_reconciliation.test.raw evidence precedes private decode failure...OK
+438/461 okx_private_reconciliation.test.nonempty REST fills are idempotent across stable reads...OK
+439/461 okx_private_reconciliation.test.ready private stream accepts an explicit account refresh...OK
+440/461 okx_private_reconciliation.test.Unknown requires stable rebootstrap and an explicit reconciliation result...OK
+441/461 okx_private_reconciliation.test.REST pagination requires the exact descending endpoint cursor...OK
+442/461 okx_private_reconciliation.test.repeated empty REST positions still release each account bootstrap...OK
+443/461 okx_private_reconciliation.test.reconnected orders subscription ack is accepted after REST recovery...OK
+444/461 okx_private_reconciliation.test.REST balance stability ignores observation uTime but not economic values...OK
+445/461 okx_private_reconciliation.test.orders duplicate with a changed update time is semantically idempotent...OK
+446/461 okx_private_reconciliation.test.account snapshot after initial private-stream page starts a new observation...OK
+447/461 okx_private_reconciliation.test.REST bill identity enriches an otherwise identical WS fill...OK
+448/461 okx_private_reconciliation.test.reconciliation retains REST bill provenance for an earlier matching WS fill...OK
+449/461 okx_demo_live_acceptance.test.Demo buy requires a terminal canonical observation with the minimum fill...OK
+450/461 okx_demo_live_acceptance.test.Demo cleanup only succeeds after terminal zero exposure and no open order or Unknown...OK
+451/461 okx_demo_live_acceptance.test.Demo trace capacity is reserved before external effects...OK
+452/461 okx_demo_live_acceptance.test.offline Demo transport lifecycle fails closed before an unarmed or replay write...OK
+453/461 okx_demo_live_acceptance.test.OKX raw private report and Fill reach the committed Demo owner...OK
+454/461 okx_demo_live_acceptance.test.Windows file store reopens OKX private report and economic Fill...OK
+455/461 okx_demo_live_acceptance.test.terminal order without its balance observation requires REST refresh...OK
+456/461 okx_demo_live_acceptance.test.missing BTC balance is a zero baseline...OK
+457/461 okx_demo_live_acceptance.test.Demo acceptance replays canonical Adapter output and rejects Unknown...OK
+458/461 okx_demo_live_acceptance.test.private REST refresh starts account reconciliation before REST ingress...OK
+459/461 okx_demo_live_acceptance.test.Demo price protection rejects non-executable limits...OK
+460/461 strategy_host_recovery.test.checkpoint replay is deterministic and fenced until cutover...OK
+461/461 strategy_host_lifecycle.test.supervisor compatibility, timeout, restart and stale-session fencing...OK
+All 461 tests passed.

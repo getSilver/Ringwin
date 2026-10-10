@@ -1,0 +1,30 @@
+{
+  "verification_scope": "offline-compilation-only",
+  "verified_at_utc": "2026-10-10 01:37:18 UTC",
+  "command": "zig build -Doptimize=ReleaseSafe",
+  "exit_code": 0,
+  "stdout_stderr": "empty",
+  "source_commit": "9bf7650892c25255ffe20b6d5af7f4e005738897",
+  "source_tree_git": "08588b5ac066cf6cc68c20e8698aedcb275b2fec",
+  "zig": "0.17.0-dev.315+5b647b792",
+  "target": "native Windows",
+  "optimize": "ReleaseSafe",
+  "artifact": "zig-out/bin/ringwin.exe",
+  "artifact_sha256": "32132c16bce6dad65be3bb03067d7026da874ce2b66bbff00298704c60994a61",
+  "test_debug": {
+    "command": "zig test src/main.zig --stack 268435456 -O Debug",
+    "passed": 461,
+    "total": 461,
+    "exit_code": 0,
+    "log": "04-full-debug-final.log"
+  },
+  "test_releasesafe": {
+    "command": "zig test src/main.zig --stack 268435456 -O ReleaseSafe",
+    "passed": 461,
+    "total": 461,
+    "exit_code": 0,
+    "log": "04-full-releasesafe-final.log"
+  },
+  "production_qualified": false,
+  "log": "04-build-releasesafe.log"
+}

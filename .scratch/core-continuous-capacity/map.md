@@ -47,15 +47,16 @@ Status: active
 12. [封存容量闭合证据并交接生产资格](issues/12-seal-capacity-closure-evidence.md) — blocked by 10, 11
 
 依赖主干：01 → 02 → 03；03 后分为 04、05 → 06 → 07、08 三支；04/07/08 → 09；09 → 10 与 11；10/11 → 12。
-01–03合同、权威屏障和检查点承接已完成；04–12尚未实现或验收，只有 blocker 全部完成的票可执行。
+01–04合同、权威屏障、检查点及观察选择已完成；05–12尚未实现或验收，只有 blocker 全部完成的票可执行。
 
 ## Frontier
 
-- [04 贯通多交易对观察与选择性交易](issues/04-support-observation-and-selective-trading.md) — 下一张实施票
-- [05 贯通终态订单与发送证据归档](issues/05-close-order-and-dispatch-archive.md)
+- [05 贯通终态订单与发送证据归档](issues/05-close-order-and-dispatch-archive.md) — 下一张实施票
 - [08 贯通控制与账户协调历史回收](issues/08-reclaim-control-and-account-coordination-history.md)
 
 ## Decisions so far
+
+- 2026-10-10：04完成，见 [04证据](04-evidence.md)。业务源码9bf76508，Debug/ReleaseSafe各461/461、构建通过；500实际观察组合、128 selected live、账户/Instrument隔离与恢复验证。05为下一张Frontier；千单、保留和平台容量尚未取得。
 
 - 2026-10-09：03完成，见 [03证据](03-evidence.md)。业务源码b5bb6607，Debug/ReleaseSafe各450/450、构建通过；100轮有序检查点、90例完整文件业务故障恢复及私有seed承接验证。04/05/08可进入Frontier，下一张04；千单、保留及平台容量尚未取得。
 
@@ -97,7 +98,7 @@ Linux 路径沿用 [Linux 生产资格地图](../production-readiness/map.md)，
 
 ## Not yet verified
 
-- 合成负载与容量/保留预算已在 [容量合同](capacity-contract.md) 冻结；02已完成屏障与schema基线；持续容量实现及测量尚待03–12。
+- 合成负载与容量/保留预算已在 [容量合同](capacity-contract.md) 冻结；02已完成屏障与schema基线；持续容量实现及测量尚待05–12。
 - ADR0011已显式演进ADR0009；票02保留完整有序Trace，票03在独立恢复验收和格式身份下引入轮转与历史承接。
 - Windows/Linux各自的实际文件、性能、恢复及后续生产资格证据未取得。
 

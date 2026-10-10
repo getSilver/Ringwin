@@ -1,0 +1,21 @@
+1/6 main.test_0...OK
+2/6 venue_fill_recovery_acceptance.test.OKX raw private fills traverse adapter Owner durable recovery without decoder leakage...okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+OK
+3/6 venue_fill_recovery_acceptance.test.OKX ready inexact account fact persists a fail closed result without reconciliation...OK
+4/6 venue_fill_recovery_acceptance.test.OKX native settlement long fees rebates and explicit zero close Owner ledger and recover...OK
+5/6 venue_fill_recovery_acceptance.test.OKX native base nonunit lot and tick keep exact buy sell inventory...OK
+6/6 venue_fill_recovery_acceptance.test.OKX native third asset fees rebates zero retain portfolio ownership original postings and unvalued status...OK
+All 6 tests passed.

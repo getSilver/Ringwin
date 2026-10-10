@@ -1,0 +1,123 @@
+1/12 main.test_0...OK
+2/12 native_multi_venue_accounting_acceptance.test.native multi Venue actual Binance and Bybit microfees reach the same Owner ledger and replay...native multi prelude kind=instrument_trading_authorization error=UnknownInstrument
+FAIL (UnknownInstrument)
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:438:13: 0x7ff7b26f2bae in apply (test_zcu.obj)
+            return rejected.?;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:142:13: 0x7ff7b27e1400 in exercise__anon_97519 (test_zcu.obj)
+            return err;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:267:9: 0x7ff7b28c859a in test.native multi Venue actual Binance and Bybit microfees reach the same Owner ledger and replay (test_zcu.obj)
+    _ = try exercise(.binance, .quote);
+        ^
+3/12 native_multi_venue_accounting_acceptance.test.native multi Venue Bybit extra fee components remain unresolved instead of omitting cash charges...native multi prelude kind=instrument_trading_authorization error=UnknownInstrument
+FAIL (UnknownInstrument)
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:438:13: 0x7ff7b26f2bae in apply (test_zcu.obj)
+            return rejected.?;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:142:13: 0x7ff7b27f3a1b in exercise__anon_99532 (test_zcu.obj)
+            return err;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:272:9: 0x7ff7b28c8523 in test.native multi Venue Bybit extra fee components remain unresolved instead of omitting cash charges (test_zcu.obj)
+    _ = try exercise(.bybit, .extra_fees);
+        ^
+4/12 native_multi_venue_accounting_acceptance.test.native multi Venue shared base quote fee rebate zero and normalized long tail matrix...native multi prelude kind=instrument_trading_authorization error=UnknownInstrument
+FAIL (UnknownInstrument)
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:438:13: 0x7ff7b26f2bae in apply (test_zcu.obj)
+            return rejected.?;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:142:13: 0x7ff7b27e1400 in exercise__anon_97519 (test_zcu.obj)
+            return err;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:277:13: 0x7ff7b28c843b in test.native multi Venue shared base quote fee rebate zero and normalized long tail matrix (test_zcu.obj)
+        _ = try exercise(kind, case);
+            ^
+5/12 native_multi_venue_accounting_acceptance.test.native multi Venue shared unknown subatom and overflow faults recover without partial accounting...native multi prelude kind=instrument_trading_authorization error=UnknownInstrument
+FAIL (UnknownInstrument)
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:438:13: 0x7ff7b26f2bae in apply (test_zcu.obj)
+            return rejected.?;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:142:13: 0x7ff7b27e1400 in exercise__anon_97519 (test_zcu.obj)
+            return err;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:283:13: 0x7ff7b28c82fb in test.native multi Venue shared unknown subatom and overflow faults recover without partial accounting (test_zcu.obj)
+        _ = try exercise(kind, case);
+            ^
+6/12 native_multi_venue_accounting_acceptance.test.native multi Venue Bybit modern wallet scope faults persist and order report may precede unique fill...native multi prelude kind=instrument_trading_authorization error=UnknownInstrument
+FAIL (UnknownInstrument)
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:438:13: 0x7ff7b26f2bae in apply (test_zcu.obj)
+            return rejected.?;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:142:13: 0x7ff7b27f3a1b in exercise__anon_99532 (test_zcu.obj)
+            return err;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:288:9: 0x7ff7b28c811d in test.native multi Venue Bybit modern wallet scope faults persist and order report may precede unique fill (test_zcu.obj)
+    _ = try exercise(.bybit, .wallet_scope);
+        ^
+7/12 native_multi_venue_accounting_acceptance.test.native multi Venue decision append and commit failure preserve source and prevent replay sends...native multi prelude kind=instrument_trading_authorization error=UnknownInstrument
+FAIL (UnknownInstrument)
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:438:13: 0x7ff7b26f2bae in apply (test_zcu.obj)
+            return rejected.?;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:142:13: 0x7ff7b27e1400 in exercise__anon_97519 (test_zcu.obj)
+            return err;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:296:13: 0x7ff7b28c801b in test.native multi Venue decision append and commit failure preserve source and prevent replay sends (test_zcu.obj)
+        _ = try exercise(kind, case);
+            ^
+8/12 native_multi_venue_accounting_acceptance.test.native multi Venue conflicting economic identity preserves original ledger and restart fence...native multi prelude kind=instrument_trading_authorization error=UnknownInstrument
+FAIL (UnknownInstrument)
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:438:13: 0x7ff7b26f2bae in apply (test_zcu.obj)
+            return rejected.?;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:142:13: 0x7ff7b27e1400 in exercise__anon_97519 (test_zcu.obj)
+            return err;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:302:13: 0x7ff7b28c7f2c in test.native multi Venue conflicting economic identity preserves original ledger and restart fence (test_zcu.obj)
+        _ = try exercise(kind, .conflict);
+            ^
+9/12 native_multi_venue_accounting_acceptance.test.native multi Venue malformed private frame persists decoder rejection through restart...native multi prelude kind=instrument_trading_authorization error=UnknownInstrument
+FAIL (UnknownInstrument)
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:438:13: 0x7ff7b26f2bae in apply (test_zcu.obj)
+            return rejected.?;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:142:13: 0x7ff7b27e1400 in exercise__anon_97519 (test_zcu.obj)
+            return err;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:308:13: 0x7ff7b28c7e2c in test.native multi Venue malformed private frame persists decoder rejection through restart (test_zcu.obj)
+        _ = try exercise(kind, .malformed_ws);
+            ^
+10/12 native_multi_venue_accounting_acceptance.test.native multi Venue unlinked fee obeys single limit separately from account balance limit...native multi prelude kind=instrument_trading_authorization error=UnknownInstrument
+FAIL (UnknownInstrument)
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:438:13: 0x7ff7b26f2bae in apply (test_zcu.obj)
+            return rejected.?;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:142:13: 0x7ff7b27e1400 in exercise__anon_97519 (test_zcu.obj)
+            return err;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\native_multi_venue_accounting_acceptance.zig:314:13: 0x7ff7b27f92ac in test.native multi Venue unlinked fee obeys single limit separately from account balance limit (test_zcu.obj)
+        _ = try exercise(kind, .single_fee);
+            ^
+11/12 simulated_native_accounting_acceptance.test.Simulated native public Owner contract preserves split microfees rebates nonunit quantity and replay...FAIL (UnknownInstrument)
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:438:13: 0x7ff7b26f2bae in apply (test_zcu.obj)
+            return rejected.?;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\simulated_native_accounting_acceptance.zig:55:13: 0x7ff7b273ed31 in exercise (test_zcu.obj)
+        _ = try owner.apply(event);
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\simulated_native_accounting_acceptance.zig:143:58: 0x7ff7b27beafc in test.Simulated native public Owner contract preserves split microfees rebates nonunit quantity and replay (test_zcu.obj)
+    for ([_]Case{ .quote, .base, .third, .zero }) |case| try exercise(case);
+                                                         ^
+12/12 simulated_native_accounting_acceptance.test.Simulated native public Owner contract persists unknown asset and amount range faults...FAIL (UnknownInstrument)
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:438:13: 0x7ff7b26f2bae in apply (test_zcu.obj)
+            return rejected.?;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\simulated_native_accounting_acceptance.zig:55:13: 0x7ff7b273ed31 in exercise (test_zcu.obj)
+        _ = try owner.apply(event);
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\simulated_native_accounting_acceptance.zig:147:60: 0x7ff7b274309c in test.Simulated native public Owner contract persists unknown asset and amount range faults (test_zcu.obj)
+    for ([_]Case{ .unknown, .overflow, .conflict }) |case| try exercise(case);
+                                                           ^
+1 passed; 0 skipped; 11 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\d609ac1088f0a8fb3348c1ae09323a00\test.exe --seed=0x74c3004e

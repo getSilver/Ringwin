@@ -1,0 +1,26 @@
+1/24 main.test_0...OK
+2/24 trading_shard_tests.test.bounded multi instrument OMS closes lifecycle and partial policy...OK
+3/24 trading_shard_tests.test.SPOT and linear instruments close economics and replay independently...OK
+4/24 trading_shard_tests.test.OMS outbox crosses the sole Gateway and SimulatedVenue seam...core_safety_invariants: dispatch_persist=pass replay_no_send=pass reduce_only_fencing=pass
+OK
+5/24 trading_shard_tests.test.CancelConfirmCreate discards stale replacement after an intervening fill...OK
+6/24 trading_shard_tests.test.OMS group identity is checked before new risk and conflict survives replay...OK
+7/24 trading_shard_tests.test.partial fill keeps another PendingCancel blocking CCC...OK
+8/24 trading_shard_tests.test.IntentGroup batch results remain itemized...OK
+9/24 trading_shard_tests.test.layered risk retains unknown reservations until authoritative terminal evidence...OK
+10/24 trading_shard_tests.test.unknown OMS dispatch blocks a later place until the order is resolved...OK
+11/24 trading_shard_tests.test.TradingShard preserves maintenance margin in the projected buffer...OK
+12/24 trading_shard_tests.test.rejected IntentGroup leaves authoritative state unchanged...OK
+13/24 trading_shard_tests.test.rejected dispatch batch leaves authoritative state unchanged...OK
+14/24 trading_shard_tests.test.authoritative reconciliation cannot regress a terminal order...OK
+15/24 trading_shard_tests.test.CancelConfirmCreate re-risks replacement against latest facts...OK
+16/24 trading_shard_tests.test.CancelConfirmCreate cannot recreate a fenced strategy...OK
+17/24 trading_shard_tests.test.economic fills derive ownership from OMS and close Portfolio Exchange ledgers...OK
+18/24 trading_shard_tests.test.CancelConfirmCreate accepts authoritative reconciliation as confirmation...OK
+19/24 trading_shard_tests.test.canonical absence without source proof preserves the unknown order and reservation...OK
+20/24 trading_shard_tests.test.complete canonical absence closes only an unknown place and rejects late venue facts...OK
+21/24 trading_shard_tests.test.canonical terminal reconciliation confirms a CCC replacement...OK
+22/24 trading_shard_tests.test.canonical cancel report confirms a CCC replacement...OK
+23/24 trading_shard_tests.test.older reconciliation identity still rejects semantic conflict...OK
+24/24 trading_shard_tests.test.multiple SPOT and SWAP orders independently close place amend and cancel...OK
+All 24 tests passed.

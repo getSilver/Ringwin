@@ -1,0 +1,9 @@
+1/2 main.test_0...OK
+2/2 venue_fill_recovery_acceptance.test.OKX raw private fills traverse adapter Owner durable recovery without decoder leakage...venue fill recovery worker failed: CanonicalScopeMismatch
+FAIL (CanonicalScopeMismatch)
+D:\github\Ringwin-core-continuous-capacity\src\venue_fill_recovery_acceptance.zig:532:32: 0x7ff753b351a9 in test.OKX raw private fills traverse adapter Owner durable recovery without decoder leakage (test_zcu.obj)
+    if (context.failure) |err| return err;
+                               ^
+1 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\fe1eca9f68685f86365305bc30d56593\test.exe --seed=0x84a55c1a

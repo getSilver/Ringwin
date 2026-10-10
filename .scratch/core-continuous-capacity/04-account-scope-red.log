@@ -1,0 +1,12 @@
+1/2 main.test_0...OK
+2/2 core_observation_capacity_acceptance.test.Observation capacity account Venue scope rejects fresh and duplicate public facts without mutation...expected error.CanonicalScopeMismatch, found .{ .facts = { .{ .sequence = 25, .identity = 2, .kind = .canonical_account_observed, .reject_reason = .none, .input_digest = { ... }, .input_first = true } }, .order_command = null, .oms_commands = {  } }
+FAIL (TestExpectedError)
+D:\Program Files\zig\lib\std\testing.zig:65:9: 0x7ff7066f1c7a in expectError__anon_75722 (test_zcu.obj)
+        return error.TestExpectedError;
+        ^
+D:\github\Ringwin-core-continuous-capacity\src\core_observation_capacity_acceptance.zig:304:9: 0x7ff7066f46db in test.Observation capacity account Venue scope rejects fresh and duplicate public facts without mutation (test_zcu.obj)
+        try std.testing.expectError(error.CanonicalScopeMismatch, run.shard.apply(event));
+        ^
+1 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\70ca44f5277683832a664e27ef52eaa2\test.exe --seed=0x9e877153

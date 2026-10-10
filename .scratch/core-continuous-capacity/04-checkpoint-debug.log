@@ -1,0 +1,21 @@
+1/22 main.test_0...OK
+2/22 trading_shard_tests.test.checkpoint maintenance carries ordered inputs and live authority through one hundred windows...thread 9524 panic: index out of bounds: index 0, len 0
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard_tests.zig:50:44: 0x7ff63fd863ec in test.checkpoint maintenance carries ordered inputs and live authority through one hundred windows (test_zcu.obj)
+    const command = run.shard.oms.emitted()[0];
+                                           ^
+D:\Program Files\zig\lib\compiler\test_runner.zig:291:25: 0x7ff63fb6fad6 in mainTerminal (test_zcu.obj)
+        if (test_fn.func()) |_| {
+                        ^
+D:\Program Files\zig\lib\compiler\test_runner.zig:73:28: 0x7ff63fb6f682 in main (test_zcu.obj)
+        return mainTerminal(init);
+                           ^
+D:\Program Files\zig\lib\std\start.zig:712: 0x7ff63fb6d83c in callMain (test_zcu.obj)
+    if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+
+D:\Program Files\zig\lib\std\start.zig:498:17: 0x7ff63fb6d83c in WinStartup (test_zcu.obj)
+        callMain(std.os.windows.peb().ProcessParameters.CommandLine.slice(), .global),
+                ^
+???:?:?: 0x7ff834bf81f3 in ??? (KERNEL32.DLL)
+???:?:?: 0x7ff83513a250 in ??? (ntdll.dll)
+error: the following test command failed with exit code 3:
+.zig-cache\o\1a8c63834633a29e534d5a98bd242cd1\test.exe --seed=0xf0ed5028

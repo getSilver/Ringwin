@@ -1,0 +1,32 @@
+1/5 main.test_0...OK
+2/5 trading_shard_fixture.test.qualified SPOT IOC intent crosses Gateway and cash risk before OrderCommand...OK
+3/5 trading_shard_fixture.test.fixed trajectories retain their sealed barriers and recovery digests...slices differ. first difference occurs at index 0 (0x0)
+
+============ expected this output: =============  len: 64 (0x40)
+
+33 32 32 31 38 31 65 38  39 64 64 66 33 31 64 38  322181e89ddf31d8
+39 32 39 62 32 61 39 31  64 65 62 63 37 39 65 62  929b2a91debc79eb
+65 37 33 32 35 31 34 31  65 66 30 63 33 38 66 36  e7325141ef0c38f6
+34 61 63 38 38 33 63 62  33 62 64 61 34 66 61 34  4ac883cb3bda4fa4
+
+============= instead found this: ==============  len: 64 (0x40)
+
+31 37 65 63 32 61 33 66  64 38 65 65 36 35 33 38  17ec2a3fd8ee6538
+39 31 31 61 34 32 63 62  65 39 64 35 64 36 62 37  911a42cbe9d5d6b7
+64 61 35 36 36 65 62 38  36 33 34 38 66 36 31 63  da566eb86348f61c
+30 35 64 31 30 32 31 34  35 64 39 31 31 64 37 35  05d102145d911d75
+
+================================================
+
+FAIL (TestExpectedEqual)
+D:\Program Files\zig\lib\std\testing.zig:379:5: 0x7ff7fca57358 in expectEqualSlices__anon_87366 (test_zcu.obj)
+    return error.TestExpectedEqual;
+    ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard_fixture.zig:797:9: 0x7ff7fcb0d0e7 in test.fixed trajectories retain their sealed barriers and recovery digests (test_zcu.obj)
+        try std.testing.expectEqualSlices(u8, expected_trajectory_digests[index], &digest_hex);
+        ^
+4/5 trading_shard_fixture.test.authoritative snapshot round trips at an exact shard barrier...OK
+5/5 trading_shard_fixture.test.snapshot restore replays only the stable journal tail without send capability...OK
+4 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\01e7f40bdef15bf38649d3cfe510bb99\test.exe --seed=0x35990912

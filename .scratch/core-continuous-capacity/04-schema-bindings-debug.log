@@ -1,0 +1,15 @@
+1/3 main.test_0...OK
+2/3 binance_venue_adapter.test.Binance scoped Spot snapshots stay unresolved without combined product and bill proof through Owner recovery...FAIL (CanonicalScopeMismatch)
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:438:13: 0x7ff720ce41ce in apply (test_zcu.obj)
+            return rejected.?;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:471:42: 0x7ff720d2364a in applyAdapterBatch (test_zcu.obj)
+        for (batch.slice()) |record| _ = try self.apply(.{ .venue = record });
+                                         ^
+D:\github\Ringwin-core-continuous-capacity\src\binance_venue_adapter.zig:1151:13: 0x7ff720d434a8 in test.Binance scoped Spot snapshots stay unresolved without combined product and bill proof through Owner recovery (test_zcu.obj)
+            try owner.applyAdapterBatch(batch);
+            ^
+3/3 production_contract.test.production contract freezes Linux scope and schema...OK
+2 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\d32f79638761a69d633cdddf54d144aa\test.exe --seed=0x6c90b0eb

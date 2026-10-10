@@ -1,0 +1,6 @@
+1/2 main.test_0...OK
+2/2 four_shard_acceptance.test.four-shard acceptance entry stops at the first broken assertion...four-shard evidence mismatch: expected 6746638d3a4fd8778de13598ef55a3a1a28559f191b86ba0965d8e70a2cc2103, actual 6851d149daea9276e0cf3f8a1c0ff346edf179482d314c9677af1d5f7d1f498b
+FAIL (FourShardEvidenceDrift)
+1 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\a30ec34ed66f0c6162f90d0f2f11f0d0\test.exe --seed=0xf1166c20
