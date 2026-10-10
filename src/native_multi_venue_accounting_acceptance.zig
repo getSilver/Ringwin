@@ -124,6 +124,10 @@ fn exercise(comptime kind: Kind, case: Case) ![32]u8 {
                 if (mark.instrument == 3) mark.instrument = instrument;
                 mark.price_atoms = 50000000000000000;
             },
+            .instrument_trading_authorization => |*authorization| {
+                if (authorization.instrument == fixture.spot_instrument) continue;
+                if (authorization.instrument == 3) authorization.instrument = instrument;
+            },
             .asset_definition_activated => |*definition| definition.* = if (definition.asset == 1) definitions[0] else definitions[1],
             .exchange_balance => |*balance| balance.cash_atoms = 100000000000000,
             .opening_balance => |*balance| {

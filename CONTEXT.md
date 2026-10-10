@@ -241,6 +241,10 @@ _Avoid_: Adapter flags, current documentation assumption, global Venue capabilit
 CapabilityProfile 向策略暴露的只读、规范化、版本化订单能力投影；它帮助策略选择语义，但不替代 OrderIntent 的明确要求或发送时资格复核。
 _Avoid_: Adapter endpoint flags, raw Venue features, execution guarantee
 
+**InstrumentTradingAuthorization**:
+在明确 StrategyActivationIdentity、ConfigVersion 和 ExchangeAccount 下，允许某个 Instrument 接收新增或替换订单的版本化权威事实；停用后保留观察、已存在的订单及撤单能力。它独立于 Venue 的 CapabilityProfile，恢复或能力刷新不能自动恢复被停用的交易权限。
+_Avoid_: Venue capability version, feed subscription, implicit send permission
+
 **TransportBatch**:
 为减少传输开销而按稳定顺序装入一次 Venue 请求的一组独立 OrderCommand；它不提供领域原子性，每项结果、风险占用和 Unknown 恢复仍独立。
 _Avoid_: Atomic batch, basket order, batch transaction

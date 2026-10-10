@@ -84,6 +84,7 @@ pub const EventKind = enum(u16) {
     capability_profile_activated,
     oms_intent_conflict,
     checkpoint_committed,
+    instrument_trading_authorized,
 };
 
 pub const Fact = struct {
@@ -119,7 +120,7 @@ pub const Trace = struct {
     history_head: [32]u8 = @splat(0),
     base_input_head: [32]u8 = @splat(0),
     input_head: [32]u8 = @splat(0),
-    pinned: [384]Fact = undefined,
+    pinned: [1024]Fact = undefined,
     pinned_len: usize = 0,
     pinned_root: [32]u8 = @splat(0),
 
@@ -339,6 +340,7 @@ pub const PayloadTag = enum(u16) {
     strategy_cutover_fence,
     capability_profile_activation,
     checkpoint_committed,
+    instrument_trading_authorization,
 };
 
 pub const ReservationModel = enum(u8) { leveraged, cash };
@@ -463,6 +465,15 @@ pub const CapabilityProfileActivation = struct {
     supports_market_protection: bool,
 };
 
+pub const InstrumentTradingAuthorization = struct {
+    exchange_account: canonical.ExchangeAccountIdentity,
+    instrument: canonical.InstrumentIdentity,
+    strategy_activation_identity: u128,
+    config_version: u64,
+    expected_version: u64,
+    enabled: bool,
+};
+
 pub const CorePayload = union(PayloadTag) {
     asset_definition_activated: canonical.AssetDefinition,
     instrument_rules_activated: InstrumentRules,
@@ -500,6 +511,7 @@ pub const CorePayload = union(PayloadTag) {
     strategy_cutover_fence: StrategyCutoverFence,
     capability_profile_activation: CapabilityProfileActivation,
     checkpoint_committed: CheckpointReceipt,
+    instrument_trading_authorization: InstrumentTradingAuthorization,
 };
 
 /// Typed core-originated event carried by the authoritative CanonicalEvent.
@@ -839,6 +851,14 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u8, @intFromBool(value.supports_venue_reduce_only));
             try encoded.put(u8, @intFromBool(value.supports_post_only));
             try encoded.put(u8, @intFromBool(value.supports_market_protection));
+        },
+        .instrument_trading_authorization => |value| {
+            try encoded.put(u128, value.exchange_account);
+            try encoded.put(u128, value.instrument);
+            try encoded.put(u128, value.strategy_activation_identity);
+            try encoded.put(u64, value.config_version);
+            try encoded.put(u64, value.expected_version);
+            try encoded.put(u8, @intFromBool(value.enabled));
         },
         else => {},
     }
@@ -1251,6 +1271,14 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             .supports_venue_reduce_only = try readInputBool(record.payload, &offset),
             .supports_post_only = try readInputBool(record.payload, &offset),
             .supports_market_protection = try readInputBool(record.payload, &offset),
+        } },
+        .instrument_trading_authorization => .{ .instrument_trading_authorization = .{
+            .exchange_account = try readInputValue(u128, record.payload, &offset),
+            .instrument = try readInputValue(u128, record.payload, &offset),
+            .strategy_activation_identity = try readInputValue(u128, record.payload, &offset),
+            .config_version = try readInputValue(u64, record.payload, &offset),
+            .expected_version = try readInputValue(u64, record.payload, &offset),
+            .enabled = try readInputBool(record.payload, &offset),
         } },
     };
     if (offset != record.payload.len) return error.TrailingInputPayload;

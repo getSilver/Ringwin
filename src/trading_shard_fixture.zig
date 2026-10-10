@@ -18,13 +18,13 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-pub const expected_happy_digest = "322181e89ddf31d8929b2a91debc79ebe7325141ef0c38f64ac883cb3bda4fa4";
+pub const expected_happy_digest = "3a6d15f22029938e4165f60f70a8b3e1e12e119619c0da9985162d85555a31d9";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "8e6602115475e7e74bd34f5a92b752411bdaca439c1de174f058357ce08a3c7c",
-    "c73ce82635b09725289e32225181e44ec70709014d7bc98b805d756adddacbdf",
-    "94dec6c3f1253983576fa827ff0d8058c3c070aeb311845d4e7a208081a6fd1c",
-    "565a9af845985f7b21f22013b0c32cc644430bf1da98f608d8ce77c174709dcc",
+    "a0faa2f1e1e7256493b25557c0837ddda1d2cad94be0f95b6aadeba68e8f556d",
+    "38b357281f127145bf5082ec14bfd17e9c2eecb0f15fbfae1d58d84674ac3b95",
+    "20344df95a081bc9f249a8d430a4888b5497c26494220cfc55cc16342df41d17",
+    "4e8a28fcd7206dffad6f9407495946d2393faddb989bab44eee659fe98b449f5",
 };
 pub const order_limit_price: i64 = 50_100_000_000;
 
@@ -204,7 +204,7 @@ fn finish(run: *LiveRun) !LiveRun {
     return run.*;
 }
 
-pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_model: engine.ReservationModel) [20]engine.CanonicalEvent {
+pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_model: engine.ReservationModel) [22]engine.CanonicalEvent {
     const assets = @import("asset_registry.zig").testDefinitions(6, 8);
     const denominator: i64 = switch (reservation_model) {
         .leveraged => contract_denominator,
@@ -266,6 +266,22 @@ pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_mode
             .kind = .start_recovery,
         } } }),
         atGroup(11, .{ .identity = 1, .payload = .recovery_completed }),
+        atGroup(11, .{ .identity = 30, .payload = .{ .instrument_trading_authorization = .{
+            .exchange_account = 2,
+            .instrument = swap_instrument,
+            .strategy_activation_identity = authorization.activation_identity,
+            .config_version = authorization.config_version,
+            .expected_version = 0,
+            .enabled = true,
+        } } }),
+        atGroup(11, .{ .identity = 31, .payload = .{ .instrument_trading_authorization = .{
+            .exchange_account = 2,
+            .instrument = spot_instrument,
+            .strategy_activation_identity = authorization.activation_identity,
+            .config_version = authorization.config_version,
+            .expected_version = 0,
+            .enabled = true,
+        } } }),
         atGroup(11, .{ .identity = 2, .payload = .{ .control_command = .{
             .command_identity = 2,
             .content_hash = 2,

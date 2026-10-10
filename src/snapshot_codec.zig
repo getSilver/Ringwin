@@ -95,7 +95,8 @@ pub fn read(encoded: []const u8, comptime T: type, expected_state_schema: u32, e
         return error.InvalidSnapshotPayload;
 
     var reader: Reader = .{ .bytes = payload };
-    const value = try decodeValue(&reader, T);
+    var value: T = undefined;
+    try decodeValueInto(&reader, &value);
     if (reader.position != payload.len) return error.InvalidSnapshotLength;
     var state_digest: [Sha256.digest_length]u8 = undefined;
     std.mem.writeInt(u256, &state_digest, header.state_digest, .little);
@@ -121,7 +122,8 @@ pub fn encodeBare(destination: []u8, value: anytype) ![]const u8 {
 /// Decodes one complete bounded value from a journal payload.
 pub fn decodeBare(encoded: []const u8, comptime T: type) !T {
     var reader: Reader = .{ .bytes = encoded };
-    const value = try decodeValue(&reader, T);
+    var value: T = undefined;
+    try decodeValueInto(&reader, &value);
     if (reader.position != encoded.len) return error.InvalidSnapshotLength;
     return value;
 }
@@ -200,55 +202,59 @@ fn encodeValue(writer: *Writer, value: anytype) !void {
     }
 }
 
-fn decodeValue(reader: *Reader, comptime T: type) !T {
-    return switch (@typeInfo(T)) {
-        .bool => switch (try reader.get(u8)) {
+fn decodeValueInto(reader: *Reader, destination: anytype) !void {
+    const T = @typeInfo(@TypeOf(destination)).pointer.child;
+    switch (@typeInfo(T)) {
+        .bool => destination.* = switch (try reader.get(u8)) {
             0 => false,
             1 => true,
-            else => error.InvalidSnapshotValue,
+            else => return error.InvalidSnapshotValue,
         },
-        .int => |info| if (info.bits % 8 == 0)
+        .int => |info| destination.* = if (info.bits % 8 == 0)
             try reader.get(T)
         else if (info.signedness == .signed)
-            std.math.cast(T, try reader.get(i64)) orelse error.InvalidSnapshotValue
+            std.math.cast(T, try reader.get(i64)) orelse return error.InvalidSnapshotValue
         else
-            std.math.cast(T, try reader.get(u64)) orelse error.InvalidSnapshotValue,
-        .@"enum" => |info| blk: {
+            std.math.cast(T, try reader.get(u64)) orelse return error.InvalidSnapshotValue,
+        .@"enum" => |info| {
             const raw = if (@typeInfo(info.tag_type).int.bits % 8 == 0)
-                try decodeValue(reader, info.tag_type)
+                try reader.get(info.tag_type)
             else
                 try reader.get(u64);
-            inline for (info.fields) |field|
-                if (raw == field.value) break :blk @field(T, field.name);
+            inline for (info.fields) |field| if (raw == field.value) {
+                destination.* = @field(T, field.name);
+                return;
+            };
             return error.InvalidSnapshotValue;
         },
-        .array => |info| blk: {
-            var result: T = undefined;
-            for (&result) |*item| item.* = try decodeValue(reader, info.child);
-            break :blk result;
+        .array => {
+            for (destination) |*item| try decodeValueInto(reader, item);
         },
         .optional => |info| switch (try reader.get(u8)) {
-            0 => null,
-            1 => try decodeValue(reader, info.child),
-            else => error.InvalidSnapshotValue,
+            0 => destination.* = null,
+            1 => {
+                destination.* = @as(info.child, undefined);
+                try decodeValueInto(reader, &destination.*.?);
+            },
+            else => return error.InvalidSnapshotValue,
         },
-        .@"struct" => |info| blk: {
-            var result: T = undefined;
+        .@"struct" => |info| {
             inline for (info.fields) |field|
-                @field(result, field.name) = try decodeValue(reader, field.type);
-            break :blk result;
+                try decodeValueInto(reader, &@field(destination.*, field.name));
         },
-        .@"union" => |info| blk: {
+        .@"union" => |info| {
             const Tag = info.tag_type orelse @compileError("snapshot unions must be tagged");
-            const tag = try decodeValue(reader, Tag);
+            var tag: Tag = undefined;
+            try decodeValueInto(reader, &tag);
             inline for (info.fields) |field| if (tag == @field(Tag, field.name)) {
-                const payload = if (field.type == void) {} else try decodeValue(reader, field.type);
-                break :blk @unionInit(T, field.name, payload);
+                destination.* = @unionInit(T, field.name, if (field.type == void) {} else undefined);
+                if (field.type != void) try decodeValueInto(reader, &@field(destination.*, field.name));
+                return;
             };
             return error.InvalidSnapshotValue;
         },
         else => @compileError("unsupported snapshot field type: " ++ @typeName(T)),
-    };
+    }
 }
 
 test "snapshot codec rejects truncation CRC corruption and invalid enum values" {
@@ -279,4 +285,23 @@ test "snapshot codec rejects truncation CRC corruption and invalid enum values" 
     header.header_crc = Crc32c.hash(std.mem.asBytes(&header)[0..@offsetOf(Header, "header_crc")]);
     @memcpy(corrupt[0..header_len], std.mem.asBytes(&header));
     try std.testing.expectError(error.InvalidSnapshotValue, read(corrupt[0..encoded.len], State, 1, 2, 3));
+}
+
+test "in place decoding round trips nested arrays optional and union payloads" {
+    const Payload = union(enum) { absent: void, rows: [125]struct { active: bool, quantity: i7, mark: ?i128 } };
+    var expected: Payload = .{ .rows = undefined };
+    for (&expected.rows, 0..) |*row, index| row.* = .{
+        .active = index % 2 == 0,
+        .quantity = -17,
+        .mark = if (index % 3 == 0) @as(i128, 1) << 80 else null,
+    };
+    var bytes: [8192]u8 = undefined;
+    const encoded = try encodeBare(&bytes, expected);
+    try std.testing.expectEqualDeep(expected, try decodeBare(encoded, Payload));
+    try std.testing.expectError(error.InvalidSnapshotLength, decodeBare(encoded[0 .. encoded.len - 1], Payload));
+    try std.testing.expectError(error.InvalidSnapshotLength, decodeBare(bytes[0 .. encoded.len + 1], Payload));
+    const absent = try encodeBare(&bytes, Payload{ .absent = {} });
+    try std.testing.expectEqualDeep(Payload{ .absent = {} }, try decodeBare(absent, Payload));
+    bytes[0] = 9;
+    try std.testing.expectError(error.InvalidSnapshotValue, decodeBare(absent, Payload));
 }

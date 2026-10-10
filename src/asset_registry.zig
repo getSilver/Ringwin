@@ -74,7 +74,6 @@ pub const Registry = struct {
     pub fn consumerCompatible(self: *const Registry, native_settlement_atoms: bool) bool {
         if (!native_settlement_atoms) return self.legacyConsumerCompatible();
         _ = self.get(1) orelse return false;
-        _ = self.get(0x425443) orelse return false;
         return true;
     }
     pub fn checkAmount(self: *const Registry, amount_value: canonical.AssetAmount, single: bool) !void {

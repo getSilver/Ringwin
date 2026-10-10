@@ -36,7 +36,12 @@ pub const Route = struct {
     environment: shard_event.CapabilityProfileActivation.Environment = .simulation,
     lease_guard: ?*failover.GatewayLeaseGuard = null,
     safety_gate: LatchedSafetyGate = .open,
+    /// Zero preserves legacy routing; new multi-product routes grant an explicit mask.
+    supported_products: u8 = 0,
 };
+pub fn productMask(product: canonical.Product) u8 {
+    return @as(u8, 1) << @as(u3, @intCast(@intFromEnum(product)));
+}
 pub const InstrumentOpeningGate = struct { instrument: canonical.InstrumentIdentity, state: OpeningGate = .open };
 pub const OmsDispatchContext = struct {
     account: canonical.ExchangeAccountIdentity,
@@ -66,7 +71,9 @@ pub const DispatchProof = struct {
 };
 pub const max_routes = 4;
 pub const max_adapter_batches_per_turn: u8 = 1;
-const max_authority_records = max_routes * oms.max_commands;
+pub const max_authority_records = 128;
+pub const max_dispatch_records = 256; // 128 selected places plus their cancellations, without archive reuse.
+pub const max_observed_instruments = 500;
 const AccountAuthority = struct {
     effective_trading_authority: bool = false,
     primary_lease_expires_at_monotonic_ns: u64 = 0,
@@ -114,18 +121,18 @@ const DurableDispatch = struct {
 pub const Gateway = struct {
     routes: [max_routes]Route = undefined,
     count: u8 = 0,
-    instrument_gates: [max_routes]InstrumentOpeningGate = undefined,
-    instrument_gate_count: u8 = 0,
+    instrument_gates: [max_observed_instruments]InstrumentOpeningGate = undefined,
+    instrument_gate_count: u16 = 0,
     instrument_gate_capacity_exhausted: bool = false,
     account_authority: [max_routes]AccountAuthority = @splat(.{}),
-    reservations: [max_authority_records]ReservationFact = undefined,
-    reservation_count: u8 = 0,
+    reservations: [max_dispatch_records]ReservationFact = undefined,
+    reservation_count: u16 = 0,
     exchange_positions: [max_authority_records]ExchangePositionFact = undefined,
     exchange_position_count: u8 = 0,
-    accepted_dispatches: [max_authority_records]AcceptedDispatch = undefined,
-    accepted_dispatch_count: u8 = 0,
-    uncertain_dispatches: [max_authority_records]UncertainDispatch = undefined,
-    uncertain_dispatch_count: u8 = 0,
+    accepted_dispatches: [max_dispatch_records]AcceptedDispatch = undefined,
+    accepted_dispatch_count: u16 = 0,
+    uncertain_dispatches: [max_dispatch_records]UncertainDispatch = undefined,
+    uncertain_dispatch_count: u16 = 0,
     durable_dispatch: ?DurableDispatch = null,
     send_attempt_count: u64 = 0,
 
@@ -420,13 +427,22 @@ pub const Gateway = struct {
             !std.meta.eql(refs.risk_lease, latest.risk_lease) or
             !std.meta.eql(refs.capability, latest.capability) or
             !std.meta.eql(refs.instrument_rules, latest.instrument_rules) or
+            !std.meta.eql(refs.margin_rules, latest.margin_rules) or
+            !std.meta.eql(refs.instrument_trading, latest.instrument_trading) or
             !std.meta.eql(refs.config, latest.config) or
             refs.adapter_session != latest.adapter_session)
             return error.NotSent;
         const route_index = self.routeIndex(refs.exchange_account) orelse return error.NotSent;
         const route = &self.routes[route_index];
         const instrument = shard.registryInstrument(oms_command.instrument) orelse return error.NotSent;
+        if (route.supported_products != 0 and route.supported_products & productMask(instrument.product) == 0)
+            return error.NotSent;
+        if (oms_command.operation != .cancel and !oms_command.portfolio_reduce_only) {
+            const market = shard.canonical_market.get(oms_command.instrument) orelse return error.NotSent;
+            if (market.health != .healthy) return error.NotSent;
+        }
         if (oms_command.operation != .cancel) {
+            if (!instrument.trading_enabled) return error.NotSent;
             const native_cash = shard.currentNativeRiskCash(oms_command.instrument) catch return error.NotSent;
             const committed_requirement = std.math.add(i128, shard.activeReservationAtoms() catch return error.NotSent, shard.economic_projection.exchange.margin_atoms) catch return error.NotSent;
             if (native_cash < @max(committed_requirement, oms_command.reservation.atoms)) return error.NotSent;
@@ -436,14 +452,13 @@ pub const Gateway = struct {
         const profile = instrument.capability orelse return error.NotSent;
         if (route.venue_identity == 0 or route.venue_identity != profile.venue or
             route.environment != profile.environment or route.capability.version != profile.version or
-            route.capability.rules_version != profile.rules_version or
             route.capability.config_version != profile.config_version or route.capability.session != profile.adapter_session or
-            route.capability.supports_place != profile.supports_place or
-            route.capability.supports_cancel != profile.supports_cancel or
-            route.capability.supports_native_amend != profile.supports_native_amend or
-            route.capability.supports_venue_reduce_only != profile.supports_venue_reduce_only or
-            route.capability.supports_post_only != profile.supports_post_only or
-            route.capability.supports_market_protection != profile.supports_market_protection)
+            (profile.supports_place and !route.capability.supports_place) or
+            (profile.supports_cancel and !route.capability.supports_cancel) or
+            (profile.supports_native_amend and !route.capability.supports_native_amend) or
+            (profile.supports_venue_reduce_only and !route.capability.supports_venue_reduce_only) or
+            (profile.supports_post_only and !route.capability.supports_post_only) or
+            (profile.supports_market_protection and !route.capability.supports_market_protection))
             return error.NotSent;
         const authority = self.account_authority[route_index];
         if (authority.effective_trading_authority != shard.operational_state.effectiveTradingAuthority())
@@ -530,7 +545,7 @@ pub const Gateway = struct {
     }
     fn sendUnprovedForContractTest(self: *Gateway, request: canonical.OrderCommand) !venue.SendResult {
         const route = self.routeFor(request.exchange_account) orelse return error.UnknownAccount;
-        try self.validateOrder(route, request);
+        try self.validateOrder(route, request, false);
         return self.sendRequestForRoute(route, .{ .order_command = request });
     }
 
@@ -567,7 +582,7 @@ pub const Gateway = struct {
             .fee_asset = command_value.reservation.asset,
             .fee_atoms = 0,
         };
-        try self.validateOrder(route, request);
+        try self.validateOrder(route, request, true);
         return self.sendRequestForRoute(route, .{ .order_command = request });
     }
 
@@ -682,7 +697,7 @@ pub const Gateway = struct {
         return self.accepted_dispatches[index].proof.command.client_order_id;
     }
 
-    fn validateOrder(self: *const Gateway, route: *const Route, request: canonical.OrderCommand) !void {
+    fn validateOrder(self: *const Gateway, route: *const Route, request: canonical.OrderCommand, instrument_rules_proven: bool) !void {
         if (request.operation != .cancel and !oms.exactOrderSpec(request.order_type, request.time_in_force, request.market_protection_price != null))
             return error.Rejected;
         const increasing = request.operation != .cancel and
@@ -697,7 +712,7 @@ pub const Gateway = struct {
         if ((request.order_type == .post_only or request.time_in_force == .post_only) and !route.capability.supports_post_only) return error.Rejected;
         if (request.market_protection_price != null and !route.capability.supports_market_protection) return error.Rejected;
         if (route.capability.version != request.capability_version or
-            route.capability.rules_version != request.rules_version or
+            (!instrument_rules_proven and route.capability.rules_version != request.rules_version) or
             route.capability.config_version != request.config_version or
             route.capability.session != request.adapter_session)
             return error.Rejected;
@@ -939,6 +954,295 @@ test "Gateway route and batch admission fail atomically" {
     try std.testing.expectEqual(@as(u64, 0), gateway.send_attempt_count);
     try std.testing.expectEqual(@as(u8, 0), adapter_fixture.sent);
 }
+
+test "Gateway observation and resident authority capacities are independent of emitted commands" {
+    var implementation: Fixture = .{};
+    var gateway: Gateway = .{};
+    for (1..max_routes + 1) |account| try gateway.add(.{ .account = account, .adapter = implementation.adapter(), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+    for (0..max_observed_instruments) |index| gateway.setInstrumentGap(index + 1);
+    try std.testing.expectEqual(@as(u16, max_observed_instruments), gateway.instrument_gate_count);
+    try std.testing.expect(!gateway.instrument_gate_capacity_exhausted);
+    for (0..max_authority_records) |index| try gateway.observeAuthority(.{
+        .account = index / 32 + 1,
+        .effective_trading_authority = true,
+        .reservation_identity = index + 1,
+        .reservation = .{ .asset = 1, .atoms = 10 },
+        .primary_lease_expires_at_monotonic_ns = 100,
+        .fencing_token = 1,
+        .exchange_position = .{ .instrument = index + 1, .rules_version = 1, .lots = 0 },
+        .authority_barrier = 1,
+    });
+    try std.testing.expectEqual(@as(u16, 128), gateway.reservation_count);
+    try std.testing.expectEqual(@as(u8, 128), gateway.exchange_position_count);
+    try std.testing.expectError(error.AuthorityCapacity, gateway.observeAuthority(.{
+        .account = 1,
+        .effective_trading_authority = true,
+        .reservation_identity = 129,
+        .reservation = .{ .asset = 1, .atoms = 10 },
+        .primary_lease_expires_at_monotonic_ns = 100,
+        .fencing_token = 1,
+        .exchange_position = .{ .instrument = 129, .rules_version = 1, .lots = 0 },
+        .authority_barrier = 1,
+    }));
+    try std.testing.expectEqual(@as(u16, 128), gateway.reservation_count);
+    try std.testing.expectEqual(@as(u8, 128), gateway.exchange_position_count);
+    for (0..max_authority_records) |index| try gateway.observeAuthority(.{
+        .account = index / 32 + 1,
+        .effective_trading_authority = true,
+        .reservation_identity = index + 129,
+        .reservation = .{ .asset = 1, .atoms = 10 },
+        .primary_lease_expires_at_monotonic_ns = 100,
+        .fencing_token = 1,
+        .exchange_position = .{ .instrument = index + 1, .rules_version = 1, .lots = 0 },
+        .authority_barrier = 1,
+    });
+    try std.testing.expectEqual(@as(u16, 256), gateway.reservation_count);
+    try std.testing.expectEqual(@as(u8, 128), gateway.exchange_position_count);
+    try std.testing.expectError(error.AuthorityCapacity, gateway.observeAuthority(.{
+        .account = 1,
+        .effective_trading_authority = true,
+        .reservation_identity = 257,
+        .reservation = .{ .asset = 1, .atoms = 10 },
+        .primary_lease_expires_at_monotonic_ns = 100,
+        .fencing_token = 1,
+        .exchange_position = .{ .instrument = 1, .rules_version = 1, .lots = 0 },
+        .authority_barrier = 1,
+    }));
+    try std.testing.expectEqual(@as(u16, 256), gateway.reservation_count);
+    gateway.setInstrumentGap(max_observed_instruments + 1);
+    try std.testing.expect(gateway.instrument_gate_capacity_exhausted);
+    try std.testing.expectEqual(@as(u16, max_observed_instruments), gateway.instrument_gate_count);
+    try std.testing.expectEqual(@as(u8, 0), implementation.sent);
+}
+
+fn gatewaySelectionFixture() !trading.TradingShard {
+    const fixture = @import("trading_shard_fixture.zig");
+    var run = try fixture.startScenarioAuthorized(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .cash);
+    // The generic prelude observes linear rules; this fixture already owns spot rules.
+    _ = try run.shard.apply(fixture.atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = 3, .price_atoms = 50_000_000_000 } } }));
+    _ = try run.shard.apply(fixture.snapshotAt(13, 100));
+    _ = try run.shard.apply(fixture.deltaAt(14, 100, 101, 49_850_000_000));
+    const profile: shard_event.CapabilityProfileActivation = .{
+        .exchange_account = 2,
+        .instrument = 3,
+        .venue = 1,
+        .environment = .simulation,
+        .product = .spot,
+        .version = 1,
+        .rules_version = 1,
+        .config_version = 1,
+        .adapter_session = 1,
+        .max_dispatch_age_ns = 10 * std.time.ns_per_s,
+        .supports_place = true,
+        .supports_cancel = true,
+        .supports_native_amend = false,
+        .supports_venue_reduce_only = false,
+        .supports_post_only = false,
+        .supports_market_protection = false,
+    };
+    _ = try run.shard.apply(fixture.atGroup(15, .{ .identity = 100, .payload = .{ .capability_profile_activation = profile } }));
+    var snapshot: canonical.AccountBootstrapSnapshot = .{
+        .identity = 1,
+        .exchange_account = 2,
+        .scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true },
+        .source_stream = 2,
+        .source_sequence = 1,
+        .balance_count = 2,
+        .position_count = 0,
+        .margin_count = 0,
+    };
+    for ([_]canonical.AssetIdentity{ 1, 0x425443 }, 0..) |asset, index| {
+        const amount: i128 = if (asset == 1) 25_000_000_000 else 0;
+        snapshot.balances[index] = .{
+            .asset = asset,
+            .total = .{ .asset = asset, .atoms = amount },
+            .available = .{ .asset = asset, .atoms = amount },
+            .held = .{ .asset = asset, .atoms = 0 },
+            .cash_balance = .{ .asset = asset, .atoms = amount },
+            .liability = .{ .asset = asset, .atoms = 0 },
+            .isolated_liability = .{ .asset = asset, .atoms = 0 },
+            .cross_liability = .{ .asset = asset, .atoms = 0 },
+        };
+    }
+    var input = fixture.canonicalAt(16, 1, .{ .account_bootstrap_snapshot = snapshot });
+    input.venue.envelope.identity.stream = 2;
+    input.venue.envelope.source_stream = 2;
+    _ = try run.shard.apply(input);
+    var group: oms.IntentGroup = .{ .first_intent_sequence = 101, .count = 1 };
+    group.members[0] = .{ .intent_sequence = 101, .operation = .place, .instrument = 3, .quantity = 10, .limit_price = fixture.omsPrice(3, 50_000_000) };
+    const placed = try run.shard.apply(fixture.atGroup(17, .{ .identity = 101, .payload = .{ .oms_intent_group = group } }));
+    try std.testing.expectEqual(@as(usize, 1), placed.oms_commands.len);
+    return run.shard;
+}
+
+fn observeGatewayCommand(gateway: *Gateway, shard: *const trading.TradingShard, value: oms.Command, barrier: u64) !void {
+    try gateway.observeAuthority(.{
+        .account = shard.exchange_account_identity,
+        .effective_trading_authority = shard.operational_state.effectiveTradingAuthority(),
+        .reservation_identity = value.reservation_identity,
+        .reservation = value.reservation,
+        .primary_lease_expires_at_monotonic_ns = 20 * std.time.ns_per_s,
+        .fencing_token = 1,
+        .exchange_position = shard.currentNetExchangePosition(value.instrument) orelse return error.MissingPosition,
+        .authority_barrier = barrier,
+    });
+}
+
+test "Gateway public proof preserves physical binding and rechecks per instrument rules and selection" {
+    const Context = struct {
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.check() catch |err| {
+                self.failure = err;
+            };
+        }
+        fn check(_: *@This()) !void {
+            const fixture = @import("trading_shard_fixture.zig");
+            const shard = try gatewaySelectionFixture();
+            const place = shard.oms.command_history[0];
+            const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+            defer std.testing.allocator.destroy(memory);
+            memory.* = .initWithAllocator(std.testing.allocator);
+            defer memory.deinit();
+            var implementation: Fixture = .{};
+            var gateway: Gateway = .{};
+            const route: Route = .{
+                .account = 2,
+                .adapter = implementation.adapter(),
+                .venue_identity = 1,
+                .supported_products = productMask(.spot) | productMask(.isolated_linear_usdt),
+                // A physical route does not own the version of every symbol's rules.
+                .capability = .{ .version = 1, .rules_version = 99, .config_version = 1, .session = 1, .supports_post_only = true },
+            };
+            try gateway.add(route);
+            try gateway.bootstrapDurableDispatch(memory.interface(), undefined, .{ .domain = .control, .id = 904 });
+            try observeGatewayCommand(&gateway, &shard, place, 1);
+            try std.testing.expectError(error.Rejected, gateway.sendUnprovedForContractTest(try command(2, 3)));
+            try std.testing.expectEqual(@as(u8, 0), implementation.sent);
+            for (0..8) |field| {
+                gateway.routes[0] = route;
+                switch (field) {
+                    0 => gateway.routes[0].account = 99,
+                    1 => gateway.routes[0].venue_identity = 99,
+                    2 => gateway.routes[0].environment = .demo,
+                    3 => gateway.routes[0].capability.session = 2,
+                    4 => gateway.routes[0].capability.version = 2,
+                    5 => gateway.routes[0].supported_products = productMask(.isolated_linear_usdt),
+                    6 => gateway.routes[0].capability.config_version = 2,
+                    7 => gateway.routes[0].capability.supports_cancel = false,
+                    else => unreachable,
+                }
+                try std.testing.expectError(error.NotSent, gateway.sendFromShard(&shard, place.command_id, 2 * std.time.ns_per_s));
+                try std.testing.expectEqual(@as(u8, 0), implementation.sent);
+            }
+            gateway.routes[0] = route;
+            var gapped = shard;
+            for ([_]bool{ false, true }) |explicit_health| {
+                gapped = shard;
+                if (explicit_health) {
+                    _ = try gapped.apply(fixture.canonicalAt(18, 102, .{ .market_data_health_changed = .{
+                        .instrument = 3,
+                        .health = .gap,
+                    } }));
+                } else {
+                    _ = try gapped.apply(fixture.deltaAt(18, 100, 102, 49_850_000_000));
+                }
+                var sibling_snapshot = fixture.snapshotAt(19, 103);
+                const book = &sibling_snapshot.venue.event.l2_book_snapshot;
+                book.instrument = 4;
+                book.best_bid.instrument = 4;
+                book.best_ask.instrument = 4;
+                book.next_ask.?.instrument = 4;
+                book.best_bid_quantity.?.instrument = 4;
+                book.best_ask_quantity.?.instrument = 4;
+                book.next_ask_quantity.?.instrument = 4;
+                _ = try gapped.apply(sibling_snapshot);
+                try std.testing.expectEqual(canonical.MarketDataHealth.gap, gapped.canonical_market.get(3).?.health);
+                try std.testing.expectEqual(canonical.MarketDataHealth.healthy, gapped.canonical_market.get(4).?.health);
+                try std.testing.expectEqual(@as(u16, 0), gateway.instrument_gate_count);
+                try std.testing.expectError(error.NotSent, gateway.sendFromShard(&gapped, place.command_id, 2 * std.time.ns_per_s));
+                try std.testing.expectEqual(@as(u8, 0), implementation.sent);
+                try std.testing.expectEqual(@as(u64, 0), gateway.send_attempt_count);
+                try std.testing.expectEqual(@as(u64, 1), (try memory.interface().recover(undefined, .{ .domain = .control, .id = 904 })).committed_barrier);
+            }
+            var stale_margin = shard;
+            var margin = stale_margin.registryInstrument(3).?.margin;
+            margin.instrument = 3;
+            margin.version += 1;
+            _ = try stale_margin.apply(fixture.atGroup(18, .{ .identity = 103, .payload = .{ .margin_rules_activated = margin } }));
+            try std.testing.expectError(error.NotSent, gateway.sendFromShard(&stale_margin, place.command_id, 2 * std.time.ns_per_s));
+            try std.testing.expectEqual(@as(u8, 0), implementation.sent);
+            var disabled = shard;
+            _ = try disabled.apply(fixture.atGroup(18, .{ .identity = 104, .payload = .{ .instrument_trading_authorization = .{
+                .exchange_account = 2,
+                .instrument = 3,
+                .strategy_activation_identity = 1,
+                .config_version = 1,
+                .expected_version = 1,
+                .enabled = false,
+            } } }));
+            try std.testing.expectError(error.NotSent, gateway.sendFromShard(&disabled, place.command_id, 2 * std.time.ns_per_s));
+            _ = try disabled.apply(fixture.atGroup(19, .{ .identity = 105, .payload = .{ .instrument_trading_authorization = .{
+                .exchange_account = 2,
+                .instrument = 3,
+                .strategy_activation_identity = 1,
+                .config_version = 1,
+                .expected_version = 2,
+                .enabled = true,
+            } } }));
+            // Re-enabling does not revive an earlier proof's selection version.
+            try std.testing.expectError(error.NotSent, gateway.sendFromShard(&disabled, place.command_id, 2 * std.time.ns_per_s));
+            try std.testing.expectEqual(@as(u8, 0), implementation.sent);
+            var sibling_disabled = shard;
+            var sibling_profile = shard.registryInstrument(3).?.capability.?;
+            sibling_profile.instrument = 4;
+            _ = try sibling_disabled.apply(fixture.atGroup(18, .{ .identity = 106, .payload = .{ .capability_profile_activation = sibling_profile } }));
+            _ = try sibling_disabled.apply(fixture.atGroup(19, .{ .identity = 107, .payload = .{ .instrument_trading_authorization = .{
+                .exchange_account = 2,
+                .instrument = 4,
+                .strategy_activation_identity = 1,
+                .config_version = 1,
+                .expected_version = 1,
+                .enabled = false,
+            } } }));
+            try std.testing.expectEqual(venue.SendResult.accepted, try gateway.sendFromShard(&sibling_disabled, place.command_id, 2 * std.time.ns_per_s));
+            try std.testing.expectEqual(@as(u8, 1), implementation.sent);
+            var cancellable = shard;
+            var dispatch: oms.DispatchBatch = .{ .count = 1 };
+            dispatch.items[0] = .{ .command_id = place.command_id, .state = .submitted };
+            _ = try cancellable.apply(fixture.atGroup(18, .{ .identity = 108, .payload = .{ .oms_dispatch_batch = dispatch } }));
+            _ = try cancellable.apply(fixture.atGroup(19, .{ .identity = 109, .payload = .{ .oms_execution_report = .{
+                .report_id = 109,
+                .order_id = place.order_id,
+                .revision = place.revision,
+                .status = .accepted,
+                .cumulative_quantity = 0,
+                .remaining_quantity = place.quantity,
+            } } }));
+            _ = try cancellable.apply(fixture.atGroup(20, .{ .identity = 110, .payload = .{ .instrument_trading_authorization = .{
+                .exchange_account = 2,
+                .instrument = 3,
+                .strategy_activation_identity = 1,
+                .config_version = 1,
+                .expected_version = 1,
+                .enabled = false,
+            } } }));
+            _ = try cancellable.apply(fixture.deltaAt(20, 100, 102, 49_850_000_000));
+            var cancellation: oms.IntentGroup = .{ .first_intent_sequence = 111, .count = 1 };
+            cancellation.members[0] = .{ .intent_sequence = 111, .operation = .cancel, .instrument = 3, .target_order_id = place.order_id, .expected_revision = place.revision };
+            const cancelled = try cancellable.apply(fixture.atGroup(21, .{ .identity = 111, .payload = .{ .oms_intent_group = cancellation } }));
+            try std.testing.expectEqual(@as(usize, 1), cancelled.oms_commands.len);
+            const cancel = cancelled.oms_commands[0];
+            try observeGatewayCommand(&gateway, &cancellable, cancel, 2);
+            try std.testing.expectEqual(venue.SendResult.accepted, try gateway.sendFromShard(&cancellable, cancel.command_id, 2 * std.time.ns_per_s));
+            try std.testing.expectEqual(@as(u8, 2), implementation.sent);
+        }
+    };
+    var context: Context = .{};
+    const thread = try std.Thread.spawn(.{ .stack_size = 128 * 1024 * 1024 }, Context.run, .{&context});
+    thread.join();
+    if (context.failure) |err| return err;
+}
 test "dispatch namespace survives recovery and changes for a new stream" {
     const memory = try std.testing.allocator.create(durable.MemoryAdapter);
     defer std.testing.allocator.destroy(memory);
@@ -1057,7 +1361,7 @@ test "Gateway scopes uncertainty and market health to the affected route" {
     gateway.observeMarketOutput(gap);
     try std.testing.expectEqual(.accepted, try gateway.sendUnprovedForContractTest(try command(22, 202)));
 
-    for (0..max_routes + 1) |index| gateway.setInstrumentGap(1_000 + index);
+    for (0..max_observed_instruments + 1) |index| gateway.setInstrumentGap(1_000 + index);
     try std.testing.expect(gateway.instrument_gate_capacity_exhausted);
     try std.testing.expectError(error.Rejected, gateway.sendUnprovedForContractTest(try command(22, 999)));
 }

@@ -1473,7 +1473,13 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     try std.testing.expectError(error.RecoveryAdmissionPending, recovering.apply(.{ .core = .{ .identity = sequence, .payload = .{ .external_order_intent = intent } } }));
     try std.testing.expectError(error.RecoveryAdmissionPending, recovering.apply(.{ .core = .{ .identity = sequence, .payload = .{ .timer = .{ .side = .buy, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = true, .quantity = 1, .limit_price_micros = 50_000_000 } } } }));
     var pending_group: @import("oms.zig").IntentGroup = .{ .first_intent_sequence = 999, .count = 1 };
-    pending_group.members[0].operation = .place;
+    pending_group.members[0] = .{
+        .intent_sequence = pending_group.first_intent_sequence,
+        .operation = .place,
+        .instrument = command.instrument,
+        .quantity = 1,
+        .limit_price = command.limit_price,
+    };
     try std.testing.expectError(error.RecoveryAdmissionPending, recovering.apply(.{ .core = .{ .identity = sequence, .payload = .{ .oms_intent_group = pending_group } } }));
     pending_group.count = @intCast(pending_group.members.len + 1);
     try std.testing.expectError(error.InvalidIntentGroup, recovering.shard.apply(.{ .core = .{ .identity = sequence, .payload = .{ .oms_intent_group = pending_group } } }));

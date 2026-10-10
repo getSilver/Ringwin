@@ -43,6 +43,25 @@ pub const Position = struct {
     open_cost_atoms: i128 = 0,
 };
 
+pub const max_instrument_positions = canonical.max_instrument_definitions;
+pub const InstrumentPosition = struct {
+    instrument: Instrument = 0,
+    product: canonical.Product = .spot,
+    rules_version: u64 = 0,
+    quantity_denominator: i64 = 0,
+    quantity_numerator: i64 = 1,
+    price_tick_atoms: i128 = 0,
+    base_asset: canonical.AssetIdentity = 0,
+    base_atoms_per_lot: i128 = 0,
+    position: Position = .{},
+    mark_price_atoms: i128 = 0,
+    margin_ppm: i64 = 0,
+    margin_atoms: i128 = 0,
+    spot_asset_atoms: i128 = 0,
+    base_fee_atoms: i128 = 0,
+    base_rebate_atoms: i128 = 0,
+};
+
 pub const max_native_assets = canonical.max_asset_definitions;
 pub const NativeAssetState = struct {
     asset: canonical.AssetIdentity = 0,
@@ -52,6 +71,8 @@ pub const NativeAssetState = struct {
 };
 
 pub const Layer = struct {
+    instrument_positions: [max_instrument_positions]InstrumentPosition = @splat(std.mem.zeroes(InstrumentPosition)),
+    instrument_position_count: u8 = 0,
     native_assets: [max_native_assets]NativeAssetState = @splat(.{}),
     native_asset_count: u8 = 0,
     usdt_balance_atoms: i128 = 0,
@@ -67,6 +88,55 @@ pub const Layer = struct {
     penalty_atoms: i128 = 0,
     realized_pnl_atoms: i128 = 0,
     unrealized_pnl_atoms: i128 = 0,
+
+    pub fn instrumentPosition(self: *const Layer, instrument: Instrument) ?InstrumentPosition {
+        for (self.instrument_positions[0..self.instrument_position_count]) |entry|
+            if (entry.instrument == instrument) return entry;
+        return null;
+    }
+
+    pub fn positionForInstrument(self: *const Layer, instrument: Instrument) Position {
+        return if (self.instrumentPosition(instrument)) |entry| entry.position else .{};
+    }
+
+    pub fn spotInventoryAtoms(self: *const Layer, asset: canonical.AssetIdentity) i128 {
+        return if (self.nativeAsset(asset)) |entry| entry.balance_atoms else 0;
+    }
+
+    fn instrumentMutable(self: *Layer, instrument: Instrument, product: canonical.Product) !*InstrumentPosition {
+        if (instrument == 0) return error.InvalidEconomicFact;
+        for (self.instrument_positions[0..self.instrument_position_count]) |*entry| if (entry.instrument == instrument) {
+            if (entry.product != product) return error.InvalidEconomicFact;
+            return entry;
+        };
+        if (self.instrument_position_count == max_instrument_positions) return error.InstrumentPositionCapacityExceeded;
+        const index = self.instrument_position_count;
+        self.instrument_position_count += 1;
+        self.instrument_positions[index] = .{ .instrument = instrument, .product = product };
+        return &self.instrument_positions[index];
+    }
+
+    fn refreshPositions(self: *Layer) !void {
+        self.margin_atoms = 0;
+        self.unrealized_pnl_atoms = 0;
+        var spot_seen = false;
+        var swap_seen = false;
+        for (self.instrument_positions[0..self.instrument_position_count]) |entry| {
+            self.margin_atoms = try std.math.add(i128, self.margin_atoms, entry.margin_atoms);
+            if (entry.mark_price_atoms != 0)
+                self.unrealized_pnl_atoms = try std.math.add(i128, self.unrealized_pnl_atoms, try unrealized(entry.position, try std.math.mul(i128, entry.mark_price_atoms, entry.quantity_numerator), entry.quantity_denominator));
+            if (entry.product == .spot and !spot_seen) {
+                spot_seen = true;
+                self.spot = entry.position;
+                self.spot_asset_atoms = self.spotInventoryAtoms(entry.base_asset);
+                self.base_fee_atoms = entry.base_fee_atoms;
+                self.base_rebate_atoms = entry.base_rebate_atoms;
+            } else if (entry.product == .isolated_linear_usdt and !swap_seen) {
+                swap_seen = true;
+                self.swap = entry.position;
+            }
+        }
+    }
 
     pub fn nativeAsset(self: *const Layer, asset: canonical.AssetIdentity) ?NativeAssetState {
         for (self.native_assets[0..self.native_asset_count]) |entry| if (entry.asset == asset) return entry;
@@ -152,6 +222,7 @@ pub const VenueForcedExecution = struct {
 };
 
 pub const MarkPrice = struct {
+    instrument: Instrument = 0,
     product: canonical.Product,
     quantity_numerator: i64 = 1,
     price_atoms: i128,
@@ -239,8 +310,14 @@ pub const Projection = struct {
     }
 
     pub fn reportingValuationComplete(self: *const Projection) bool {
-        for (self.exchange.native_assets[0..self.exchange.native_asset_count]) |entry|
-            if (entry.balance_atoms != 0 or entry.fee_atoms != 0 or entry.rebate_atoms != 0) return false;
+        for (self.exchange.native_assets[0..self.exchange.native_asset_count]) |entry| {
+            var spot_asset = false;
+            for (self.exchange.instrument_positions[0..self.exchange.instrument_position_count]) |position|
+                if (position.product == .spot and position.base_asset == entry.asset) {
+                    spot_asset = true;
+                };
+            if (!spot_asset and (entry.balance_atoms != 0 or entry.fee_atoms != 0 or entry.rebate_atoms != 0)) return false;
+        }
         return true;
     }
 
@@ -394,7 +471,7 @@ pub const Projection = struct {
             }
         }
         for (self.exchange.native_assets[0..self.exchange.native_asset_count], 0..) |entry, index| {
-            if (entry.asset == 0 or entry.asset == self.settlement_asset or entry.asset == self.base_asset or
+            if (entry.asset == 0 or entry.asset == self.settlement_asset or
                 entry.balance_atoms < 0 or entry.fee_atoms < 0 or entry.rebate_atoms < 0) return error.InvalidEconomicFact;
             for (self.exchange.native_assets[0..index]) |prior| if (prior.asset == entry.asset) return error.InvalidEconomicFact;
             const portfolio = self.portfolio.nativeAsset(entry.asset) orelse return error.EconomicLayerMismatch;
@@ -404,6 +481,34 @@ pub const Projection = struct {
         }
         if (self.portfolio.native_asset_count != self.exchange.native_asset_count) return error.EconomicLayerMismatch;
         for ([_]Layer{ self.portfolio, self.exchange }) |layer| {
+            if (layer.instrument_position_count > max_instrument_positions) return error.InvalidEconomicFact;
+            var margin: i128 = 0;
+            var pnl: i128 = 0;
+            for (layer.instrument_positions[0..layer.instrument_position_count], 0..) |entry, index| {
+                if (entry.instrument == 0 or entry.quantity_denominator <= 0 or entry.quantity_numerator <= 0 or
+                    entry.mark_price_atoms < 0 or entry.price_tick_atoms < 0 or entry.margin_ppm < 0 or entry.margin_atoms < 0 or
+                    entry.position.open_cost_atoms < 0 or entry.base_fee_atoms < 0 or entry.base_rebate_atoms < 0 or
+                    (entry.rules_version == 0 and (entry.position.quantity != 0 or entry.position.open_cost_atoms != 0)) or
+                    (entry.product == .spot and entry.rules_version != 0 and (entry.base_asset == 0 or entry.base_atoms_per_lot <= 0)))
+                    return error.InvalidEconomicFact;
+                if (entry.margin_atoms != (if (entry.product == .spot) @as(i128, 0) else try rateAtoms(entry.position.open_cost_atoms, entry.margin_ppm))) return error.InvalidEconomicFact;
+                for (layer.instrument_positions[0..index]) |known| if (known.instrument == entry.instrument) return error.InvalidEconomicFact;
+                margin = try std.math.add(i128, margin, entry.margin_atoms);
+                if (entry.mark_price_atoms != 0) pnl = try std.math.add(i128, pnl, try unrealized(entry.position, try std.math.mul(i128, entry.mark_price_atoms, entry.quantity_numerator), entry.quantity_denominator));
+            }
+            if (layer.instrument_position_count != 0 and (layer.margin_atoms != margin or layer.unrealized_pnl_atoms != pnl)) return error.InvalidEconomicFact;
+            var checked_spot = false;
+            var checked_swap = false;
+            for (layer.instrument_positions[0..layer.instrument_position_count]) |entry| {
+                if (entry.product == .spot and !checked_spot) {
+                    checked_spot = true;
+                    if (!std.meta.eql(layer.spot, entry.position) or layer.spot_asset_atoms != layer.spotInventoryAtoms(entry.base_asset) or
+                        layer.base_fee_atoms != entry.base_fee_atoms or layer.base_rebate_atoms != entry.base_rebate_atoms) return error.InvalidEconomicFact;
+                } else if (entry.product == .isolated_linear_usdt and !checked_swap) {
+                    checked_swap = true;
+                    if (!std.meta.eql(layer.swap, entry.position)) return error.InvalidEconomicFact;
+                }
+            }
             if (layer.spot_asset_atoms < 0 or layer.base_fee_atoms < 0 or layer.base_rebate_atoms < 0 or
                 (self.base_asset == 0 and (layer.spot_asset_atoms != 0 or layer.base_fee_atoms != 0 or layer.base_rebate_atoms != 0)))
                 return error.InvalidEconomicFact;
@@ -414,7 +519,13 @@ pub const Projection = struct {
             for (transaction.postings[0..transaction.posting_count]) |posting| {
                 const expected_asset: canonical.AssetIdentity = switch (posting.unit) {
                     .settlement_atoms => self.settlement_asset,
-                    .base_atoms => self.base_asset,
+                    .base_atoms => blk: {
+                        if (posting.asset == 0 or self.exchange.nativeAsset(posting.asset) == null) return error.UnbalancedLedgerTransaction;
+                        if (native_asset) |asset| {
+                            if (asset != posting.asset) return error.UnbalancedLedgerTransaction;
+                        } else native_asset = posting.asset;
+                        break :blk posting.asset;
+                    },
                     .swap_quantity => 0,
                     .native_asset_atoms => blk: {
                         if (posting.asset == 0 or self.exchange.nativeAsset(posting.asset) == null) return error.UnbalancedLedgerTransaction;
@@ -437,10 +548,10 @@ pub const Projection = struct {
     }
 
     fn applyMirroredFill(self: *Projection, fill: Fill, kind: FactKind) !void {
-        if (fill.quantity.lots <= 0 or fill.price.ticks <= 0 or fill.quantity.instrument != fill.price.instrument or
+        if (fill.quantity.instrument == 0 or fill.quantity.lots <= 0 or fill.price.ticks <= 0 or fill.quantity.instrument != fill.price.instrument or
             fill.price_tick_value.asset != self.settlement_asset or fill.price_tick_value.atoms <= 0 or
             fill.quantity.rules_version != fill.price.rules_version or fill.quantity_denominator <= 0 or
-            fill.quantity_numerator <= 0 or
+            fill.quantity_numerator <= 0 or fill.portfolio_margin_ppm < 0 or fill.exchange_margin_ppm < 0 or
             (fill.fee.atoms != 0 and fill.fee.asset != self.settlement_asset) or
             (fill.rebate.atoms != 0 and fill.rebate.asset != self.settlement_asset) or
             fill.fee.atoms < 0 or fill.rebate.atoms < 0 or fill.base_fee.atoms < 0 or
@@ -450,25 +561,18 @@ pub const Projection = struct {
             return error.InvalidEconomicFact;
         if (fill.product == .spot) {
             if (fill.base_atom_value.asset == 0 or fill.base_atom_value.atoms <= 0 or
-                (self.base_asset != 0 and self.base_asset != fill.base_atom_value.asset) or
                 (fill.base_fee.atoms != 0 and fill.base_fee.asset != fill.base_atom_value.asset) or
                 (fill.base_rebate.atoms != 0 and fill.base_rebate.asset != fill.base_atom_value.asset))
                 return error.InvalidEconomicFact;
-            self.base_asset = fill.base_atom_value.asset;
+            if (self.firstInstrument(.spot) == 0 or self.firstInstrument(.spot) == fill.quantity.instrument)
+                self.base_asset = fill.base_atom_value.asset;
         }
-        if (self.denominator(fill.product) != 0 and (self.denominator(fill.product) != fill.quantity_denominator or
-            (if (fill.product == .spot) self.spot_quantity_numerator else self.swap_quantity_numerator) != fill.quantity_numerator))
-            return error.InconsistentQuantityDenominator;
         const fingerprint = fingerprintFill(fill);
         if (try self.remember(fill.identity, kind, fingerprint)) return;
         var portfolio = self.portfolio;
         var exchange = self.exchange;
-        const portfolio_movement = try applyFillToLayer(&portfolio, fill);
-        const exchange_movement = try applyFillToLayer(&exchange, fill);
-        if (fill.product == .isolated_linear_usdt) {
-            portfolio.margin_atoms = try rateAtoms(portfolio.swap.open_cost_atoms, fill.portfolio_margin_ppm);
-            exchange.margin_atoms = try rateAtoms(exchange.swap.open_cost_atoms, fill.exchange_margin_ppm);
-        }
+        const portfolio_movement = try applyFillToLayer(&portfolio, fill, fill.portfolio_margin_ppm);
+        const exchange_movement = try applyFillToLayer(&exchange, fill, fill.exchange_margin_ppm);
         if (portfolio_movement != exchange_movement) return error.EconomicLayerMismatch;
         for ([_]struct { amount: ?canonical.AssetAmount, account: LedgerAccount }{
             .{ .amount = fill.native_fee, .account = .fee_expense },
@@ -476,7 +580,8 @@ pub const Projection = struct {
         }) |charge| {
             const amount = charge.amount orelse continue;
             if (amount.atoms == 0) continue;
-            if (amount.asset == 0 or amount.asset == self.settlement_asset or amount.asset == self.base_asset)
+            if (amount.asset == 0 or amount.asset == self.settlement_asset or
+                (fill.product == .spot and amount.asset == fill.base_atom_value.asset))
                 return error.InvalidEconomicFact;
             const delta = if (charge.account == .fee_expense) try std.math.sub(i128, 0, amount.atoms) else amount.atoms;
             for ([_]*Layer{ &portfolio, &exchange }) |layer| {
@@ -487,17 +592,19 @@ pub const Projection = struct {
             try self.appendNativeChargeLedger(fill.identity, kind, .portfolio, charge.account, amount.asset, delta);
             try self.appendNativeChargeLedger(fill.identity, kind, .exchange, charge.account, amount.asset, delta);
         }
+        try portfolio.refreshPositions();
+        try exchange.refreshPositions();
         const position_delta: i64 = if (fill.side == .buy) std.math.cast(i64, fill.quantity.lots) orelse return error.Overflow else -(std.math.cast(i64, fill.quantity.lots) orelse return error.Overflow);
         const traded_amount = if (fill.product == .spot) try std.math.mul(i128, position_delta, fill.base_atom_value.atoms) else position_delta;
-        try self.appendPositionLedger(fill.identity, kind, .portfolio, fill.product, traded_amount);
-        try self.appendPositionLedger(fill.identity, kind, .exchange, fill.product, traded_amount);
+        try self.appendPositionLedger(fill.identity, kind, .portfolio, fill.product, fill.base_atom_value.asset, traded_amount);
+        try self.appendPositionLedger(fill.identity, kind, .exchange, fill.product, fill.base_atom_value.asset, traded_amount);
         if (fill.base_fee.atoms != 0) {
-            try self.appendSpotChargeLedger(fill.identity, kind, .portfolio, .fee_expense, -fill.base_fee.atoms);
-            try self.appendSpotChargeLedger(fill.identity, kind, .exchange, .fee_expense, -fill.base_fee.atoms);
+            try self.appendSpotChargeLedger(fill.identity, kind, .portfolio, .fee_expense, fill.base_atom_value.asset, -fill.base_fee.atoms);
+            try self.appendSpotChargeLedger(fill.identity, kind, .exchange, .fee_expense, fill.base_atom_value.asset, -fill.base_fee.atoms);
         }
         if (fill.base_rebate.atoms != 0) {
-            try self.appendSpotChargeLedger(fill.identity, kind, .portfolio, .rebate_income, fill.base_rebate.atoms);
-            try self.appendSpotChargeLedger(fill.identity, kind, .exchange, .rebate_income, fill.base_rebate.atoms);
+            try self.appendSpotChargeLedger(fill.identity, kind, .portfolio, .rebate_income, fill.base_atom_value.asset, fill.base_rebate.atoms);
+            try self.appendSpotChargeLedger(fill.identity, kind, .exchange, .rebate_income, fill.base_atom_value.asset, fill.base_rebate.atoms);
         }
         try self.appendLedger(fill.identity, kind, .portfolio, .trade, portfolio_movement);
         try self.appendLedger(fill.identity, kind, .exchange, .trade, exchange_movement);
@@ -513,7 +620,11 @@ pub const Projection = struct {
         }
         self.portfolio = portfolio;
         self.exchange = exchange;
-        self.setDenominator(fill.product, fill.quantity_denominator, fill.quantity_numerator);
+        if (self.firstInstrument(fill.product) == fill.quantity.instrument)
+            self.setDenominator(fill.product, fill.quantity_denominator, fill.quantity_numerator);
+        const legacy_mark = if (fill.product == .spot) self.spot_mark_price_atoms else self.swap_mark_price_atoms;
+        if (self.firstInstrument(fill.product) == fill.quantity.instrument and legacy_mark != 0 and self.exchange.instrumentPosition(fill.quantity.instrument).?.mark_price_atoms == 0)
+            try self.valueAt(.{ .instrument = fill.quantity.instrument, .product = fill.product, .price_atoms = legacy_mark, .quantity_denominator = fill.quantity_denominator, .quantity_numerator = fill.quantity_numerator });
     }
 
     pub fn lookupCanonicalFunding(self: *const Projection, identity: u64, digest_value: [32]u8) !bool {
@@ -638,26 +749,25 @@ pub const Projection = struct {
                 return;
             }
         }
-        const closes_portfolio = self.portfolio.swap.quantity != 0 and
-            ((self.portfolio.swap.quantity > 0 and forced.side == .sell) or (self.portfolio.swap.quantity < 0 and forced.side == .buy)) and
-            quantity <= abs(self.portfolio.swap.quantity);
+        const owned_position = self.portfolio.positionForInstrument(forced.quantity.instrument);
+        const closes_portfolio = owned_position.quantity != 0 and
+            ((owned_position.quantity > 0 and forced.side == .sell) or (owned_position.quantity < 0 and forced.side == .buy)) and
+            quantity <= abs(owned_position.quantity);
         if (closes_portfolio) {
             if (self.seen_count == max_facts) return error.EconomicFactCapacityExceeded;
             self.seen[self.seen_count] = .{ .identity = forced.identity, .kind = .forced_execution, .fingerprint = fingerprint };
             self.seen_count += 1;
             var portfolio = self.portfolio;
             var exchange = self.exchange;
-            const portfolio_movement = try applyFillToLayer(&portfolio, fill);
-            const exchange_movement = try applyFillToLayer(&exchange, fill);
+            const portfolio_movement = try applyFillToLayer(&portfolio, fill, fill.portfolio_margin_ppm);
+            const exchange_movement = try applyFillToLayer(&exchange, fill, fill.exchange_margin_ppm);
             if (forced.expected_realized_pnl_atoms) |expected| {
                 if (try std.math.sub(i128, portfolio.realized_pnl_atoms, self.portfolio.realized_pnl_atoms) != expected)
                     return error.ForcedExecutionPnlMismatch;
             }
-            portfolio.margin_atoms = try rateAtoms(portfolio.swap.open_cost_atoms, fill.portfolio_margin_ppm);
-            exchange.margin_atoms = try rateAtoms(exchange.swap.open_cost_atoms, fill.exchange_margin_ppm);
             const position_delta: i64 = if (forced.side == .buy) quantity else -quantity;
-            try self.appendPositionLedger(forced.identity, .forced_execution, .portfolio, .isolated_linear_usdt, position_delta);
-            try self.appendPositionLedger(forced.identity, .forced_execution, .exchange, .isolated_linear_usdt, position_delta);
+            try self.appendPositionLedger(forced.identity, .forced_execution, .portfolio, .isolated_linear_usdt, 0, position_delta);
+            try self.appendPositionLedger(forced.identity, .forced_execution, .exchange, .isolated_linear_usdt, 0, position_delta);
             try self.appendLedger(forced.identity, .forced_execution, .portfolio, .trade, portfolio_movement);
             try self.appendLedger(forced.identity, .forced_execution, .exchange, .trade, exchange_movement);
             if (fee > 0) {
@@ -666,7 +776,8 @@ pub const Projection = struct {
             }
             self.portfolio = portfolio;
             self.exchange = exchange;
-            self.setDenominator(forced.product, forced.quantity_denominator, forced.quantity_numerator);
+            if (self.firstInstrument(forced.product) == forced.quantity.instrument)
+                self.setDenominator(forced.product, forced.quantity_denominator, forced.quantity_numerator);
             self.portfolio.penalty_atoms = try std.math.add(i128, self.portfolio.penalty_atoms, penalty);
             self.exchange.penalty_atoms = try std.math.add(i128, self.exchange.penalty_atoms, penalty);
             self.portfolio.usdt_balance_atoms = try std.math.sub(i128, self.portfolio.usdt_balance_atoms, penalty);
@@ -682,18 +793,19 @@ pub const Projection = struct {
         self.seen[self.seen_count] = .{ .identity = forced.identity, .kind = .forced_execution, .fingerprint = fingerprint };
         self.seen_count += 1;
         var exchange = self.exchange;
-        const movement = try applyFillToLayer(&exchange, fill);
+        const movement = try applyFillToLayer(&exchange, fill, fill.exchange_margin_ppm);
         exchange.penalty_atoms = try std.math.add(i128, exchange.penalty_atoms, penalty);
         exchange.usdt_balance_atoms = try std.math.sub(i128, exchange.usdt_balance_atoms, penalty);
         const cash_change = try std.math.sub(i128, exchange.usdt_balance_atoms, self.exchange.usdt_balance_atoms);
         const position_delta: i64 = if (forced.side == .buy) quantity else -quantity;
-        try self.appendPositionLedger(forced.identity, .forced_execution, .exchange, .isolated_linear_usdt, position_delta);
+        try self.appendPositionLedger(forced.identity, .forced_execution, .exchange, .isolated_linear_usdt, 0, position_delta);
         try self.appendLedger(forced.identity, .forced_execution, .exchange, .trade, movement);
         if (fee > 0) try self.appendLedger(forced.identity, .forced_execution, .exchange, .fee_expense, -fee);
         if (penalty > 0) try self.appendLedger(forced.identity, .forced_execution, .exchange, .penalty_expense, -penalty);
         self.suspense_usdt_atoms = try std.math.add(i128, self.suspense_usdt_atoms, cash_change);
         self.exchange = exchange;
-        self.setDenominator(forced.product, forced.quantity_denominator, forced.quantity_numerator);
+        if (self.firstInstrument(forced.product) == forced.quantity.instrument)
+            self.setDenominator(forced.product, forced.quantity_denominator, forced.quantity_numerator);
         try self.openBreak(forced.identity);
     }
 
@@ -722,7 +834,23 @@ pub const Projection = struct {
 
     fn valueAt(self: *Projection, mark: MarkPrice) !void {
         if (mark.price_atoms <= 0 or mark.quantity_denominator <= 0 or mark.quantity_numerator <= 0) return error.InvalidEconomicFact;
-        if (self.denominator(mark.product) != 0 and (self.denominator(mark.product) != mark.quantity_denominator or
+        const instrument = if (mark.instrument != 0) mark.instrument else self.firstInstrument(mark.product);
+        if (mark.instrument == 0 and instrument != 0) {
+            for (self.exchange.instrument_positions[0..self.exchange.instrument_position_count]) |entry|
+                if (entry.product == mark.product and entry.instrument != instrument) return error.InvalidEconomicFact;
+        }
+        if (instrument != 0) {
+            for ([_]*Layer{ &self.portfolio, &self.exchange }) |layer| {
+                const entry = try layer.instrumentMutable(instrument, mark.product);
+                if (entry.quantity_denominator != 0 and (entry.quantity_denominator != mark.quantity_denominator or entry.quantity_numerator != mark.quantity_numerator))
+                    return error.InconsistentQuantityDenominator;
+                entry.quantity_denominator = mark.quantity_denominator;
+                entry.quantity_numerator = mark.quantity_numerator;
+                entry.mark_price_atoms = mark.price_atoms;
+                try layer.refreshPositions();
+            }
+            if (self.firstInstrument(mark.product) != instrument) return;
+        } else if (self.denominator(mark.product) != 0 and (self.denominator(mark.product) != mark.quantity_denominator or
             (if (mark.product == .spot) self.spot_quantity_numerator else self.swap_quantity_numerator) != mark.quantity_numerator))
             return error.InconsistentQuantityDenominator;
         switch (mark.product) {
@@ -737,8 +865,16 @@ pub const Projection = struct {
                 self.swap_quantity_numerator = mark.quantity_numerator;
             },
         }
-        self.portfolio.unrealized_pnl_atoms = try std.math.add(i128, try self.unrealizedAt(.spot, self.portfolio.spot), try self.unrealizedAt(.isolated_linear_usdt, self.portfolio.swap));
-        self.exchange.unrealized_pnl_atoms = try std.math.add(i128, try self.unrealizedAt(.spot, self.exchange.spot), try self.unrealizedAt(.isolated_linear_usdt, self.exchange.swap));
+        if (instrument == 0) {
+            self.portfolio.unrealized_pnl_atoms = try std.math.add(i128, try self.unrealizedAt(.spot, self.portfolio.spot), try self.unrealizedAt(.isolated_linear_usdt, self.portfolio.swap));
+            self.exchange.unrealized_pnl_atoms = try std.math.add(i128, try self.unrealizedAt(.spot, self.exchange.spot), try self.unrealizedAt(.isolated_linear_usdt, self.exchange.swap));
+        }
+    }
+
+    fn firstInstrument(self: *const Projection, product: canonical.Product) Instrument {
+        for (self.exchange.instrument_positions[0..self.exchange.instrument_position_count]) |entry|
+            if (entry.product == product) return entry.instrument;
+        return 0;
     }
 
     fn denominator(self: *const Projection, product: canonical.Product) i64 {
@@ -787,12 +923,12 @@ pub const Projection = struct {
         self.ledger_count += 1;
     }
 
-    fn appendPositionLedger(self: *Projection, identity: u64, kind: FactKind, layer: LedgerLayer, product: canonical.Product, quantity_delta: i128) !void {
+    fn appendPositionLedger(self: *Projection, identity: u64, kind: FactKind, layer: LedgerLayer, product: canonical.Product, base_asset: canonical.AssetIdentity, quantity_delta: i128) !void {
         if (quantity_delta == 0) return;
         if (self.ledger_count == max_ledger_transactions) return error.LedgerCapacityExceeded;
         const unit: LedgerUnit = if (product == .spot) .base_atoms else .swap_quantity;
         const account: LedgerAccount = if (product == .spot) .spot_asset else .swap_position;
-        const asset: canonical.AssetIdentity = if (product == .spot) self.base_asset else 0;
+        const asset: canonical.AssetIdentity = if (product == .spot) base_asset else 0;
         self.ledger[self.ledger_count] = .{
             .source_identity = identity,
             .kind = kind,
@@ -803,14 +939,14 @@ pub const Projection = struct {
         self.ledger_count += 1;
     }
 
-    fn appendSpotChargeLedger(self: *Projection, identity: u64, kind: FactKind, layer: LedgerLayer, account: LedgerAccount, quantity_delta: i128) !void {
+    fn appendSpotChargeLedger(self: *Projection, identity: u64, kind: FactKind, layer: LedgerLayer, account: LedgerAccount, asset: canonical.AssetIdentity, quantity_delta: i128) !void {
         if (self.ledger_count == max_ledger_transactions) return error.LedgerCapacityExceeded;
         self.ledger[self.ledger_count] = .{
             .source_identity = identity,
             .kind = kind,
             .layer = layer,
             .posting_count = 2,
-            .postings = .{ .{ .account = .spot_asset, .unit = .base_atoms, .asset = self.base_asset, .amount = quantity_delta }, .{ .account = account, .unit = .base_atoms, .asset = self.base_asset, .amount = try std.math.sub(i128, 0, quantity_delta) }, undefined, undefined },
+            .postings = .{ .{ .account = .spot_asset, .unit = .base_atoms, .asset = asset, .amount = quantity_delta }, .{ .account = account, .unit = .base_atoms, .asset = asset, .amount = try std.math.sub(i128, 0, quantity_delta) }, undefined, undefined },
         };
         self.ledger_count += 1;
     }
@@ -872,6 +1008,33 @@ fn sortLedger(values: []LedgerTransaction) void {
 }
 
 fn hashLayer(hasher: *Sha256, layer: Layer) void {
+    hashInt(hasher, u8, layer.instrument_position_count);
+    var previous_instrument: Instrument = 0;
+    for (0..layer.instrument_position_count) |_| {
+        var next: ?InstrumentPosition = null;
+        for (layer.instrument_positions[0..layer.instrument_position_count]) |entry|
+            if (entry.instrument > previous_instrument and (next == null or entry.instrument < next.?.instrument)) {
+                next = entry;
+            };
+        const entry = next orelse unreachable;
+        hashInt(hasher, Instrument, entry.instrument);
+        hashInt(hasher, u8, @intFromEnum(entry.product));
+        hashInt(hasher, u64, entry.rules_version);
+        hashInt(hasher, i64, entry.quantity_denominator);
+        hashInt(hasher, i64, entry.quantity_numerator);
+        hashInt(hasher, i128, entry.price_tick_atoms);
+        hashInt(hasher, canonical.AssetIdentity, entry.base_asset);
+        hashInt(hasher, i128, entry.base_atoms_per_lot);
+        hashInt(hasher, i64, entry.position.quantity);
+        hashInt(hasher, i128, entry.position.open_cost_atoms);
+        hashInt(hasher, i128, entry.mark_price_atoms);
+        hashInt(hasher, i64, entry.margin_ppm);
+        hashInt(hasher, i128, entry.margin_atoms);
+        hashInt(hasher, i128, entry.spot_asset_atoms);
+        hashInt(hasher, i128, entry.base_fee_atoms);
+        hashInt(hasher, i128, entry.base_rebate_atoms);
+        previous_instrument = entry.instrument;
+    }
     hashInt(hasher, u8, layer.native_asset_count);
     var previous: canonical.AssetIdentity = 0;
     for (0..layer.native_asset_count) |_| {
@@ -930,6 +1093,14 @@ fn hashInt(hasher: *Sha256, comptime T: type, value: T) void {
 }
 
 fn sameAttributedEconomics(portfolio: Layer, exchange: Layer) bool {
+    if (portfolio.instrument_position_count != exchange.instrument_position_count) return false;
+    for (portfolio.instrument_positions[0..portfolio.instrument_position_count]) |entry| {
+        const other = exchange.instrumentPosition(entry.instrument) orelse return false;
+        var normalized = other;
+        normalized.margin_ppm = entry.margin_ppm;
+        normalized.margin_atoms = entry.margin_atoms;
+        if (!std.meta.eql(entry, normalized)) return false;
+    }
     return portfolio.spot_asset_atoms == exchange.spot_asset_atoms and
         portfolio.base_fee_atoms == exchange.base_fee_atoms and portfolio.base_rebate_atoms == exchange.base_rebate_atoms and
         std.meta.eql(portfolio.spot, exchange.spot) and
@@ -942,7 +1113,7 @@ fn sameAttributedEconomics(portfolio: Layer, exchange: Layer) bool {
         portfolio.unrealized_pnl_atoms == exchange.unrealized_pnl_atoms;
 }
 
-fn applyFillToLayer(layer: *Layer, fill: Fill) !i128 {
+fn applyFillToLayer(layer: *Layer, fill: Fill, margin_ppm: i64) !i128 {
     const quantity = std.math.cast(i64, fill.quantity.lots) orelse return error.Overflow;
     if (fill.price_tick_value.atoms <= 0 or fill.quantity_denominator <= 0)
         return error.InvalidEconomicFact;
@@ -952,6 +1123,17 @@ fn applyFillToLayer(layer: *Layer, fill: Fill) !i128 {
     const numerator = try std.math.mul(i128, try std.math.mul(i128, quantity, price), fill.quantity_numerator);
     if (@rem(numerator, fill.quantity_denominator) != 0) return error.InexactEconomicAmount;
     const notional = @divExact(numerator, fill.quantity_denominator);
+    const entry = try layer.instrumentMutable(fill.quantity.instrument, fill.product);
+    if (entry.quantity_denominator != 0 and (entry.quantity_denominator != fill.quantity_denominator or entry.quantity_numerator != fill.quantity_numerator))
+        return error.InconsistentQuantityDenominator;
+    if ((entry.rules_version != 0 and entry.rules_version != fill.quantity.rules_version) or
+        (entry.price_tick_atoms != 0 and entry.price_tick_atoms != fill.price_tick_value.atoms) or
+        (fill.product == .spot and entry.base_asset != 0 and (entry.base_asset != fill.base_atom_value.asset or entry.base_atoms_per_lot != fill.base_atom_value.atoms)))
+        return error.InvalidEconomicFact;
+    entry.rules_version = fill.quantity.rules_version;
+    entry.quantity_denominator = fill.quantity_denominator;
+    entry.quantity_numerator = fill.quantity_numerator;
+    entry.price_tick_atoms = fill.price_tick_value.atoms;
     const net_fee = try std.math.sub(i128, fee, rebate);
     layer.fee_atoms = try std.math.add(i128, layer.fee_atoms, fee);
     layer.rebate_atoms = try std.math.add(i128, layer.rebate_atoms, rebate);
@@ -959,21 +1141,30 @@ fn applyFillToLayer(layer: *Layer, fill: Fill) !i128 {
         const direction: i64 = if (fill.side == .buy) 1 else -1;
         const traded_delta = try std.math.mul(i64, direction, quantity);
         const native_delta = try std.math.mul(i128, traded_delta, fill.base_atom_value.atoms);
-        const next_asset = try std.math.add(i128, layer.spot_asset_atoms, try std.math.add(i128, native_delta, try std.math.sub(i128, fill.base_rebate.atoms, fill.base_fee.atoms)));
+        const inventory = try layer.nativeAssetMutable(fill.base_atom_value.asset);
+        const delta = try std.math.add(i128, native_delta, try std.math.sub(i128, fill.base_rebate.atoms, fill.base_fee.atoms));
+        const next_asset = try std.math.add(i128, inventory.balance_atoms, delta);
         if (next_asset < 0) return error.InsufficientSpotAsset;
-        const realized = try updatePosition(&layer.spot, direction, quantity, notional);
-        layer.spot_asset_atoms = next_asset;
-        layer.base_fee_atoms = try std.math.add(i128, layer.base_fee_atoms, fill.base_fee.atoms);
-        layer.base_rebate_atoms = try std.math.add(i128, layer.base_rebate_atoms, fill.base_rebate.atoms);
+        const realized = try updatePosition(&entry.position, direction, quantity, notional);
+        inventory.balance_atoms = next_asset;
+        entry.base_asset = fill.base_atom_value.asset;
+        entry.base_atoms_per_lot = fill.base_atom_value.atoms;
+        entry.spot_asset_atoms = try std.math.add(i128, entry.spot_asset_atoms, delta);
+        entry.base_fee_atoms = try std.math.add(i128, entry.base_fee_atoms, fill.base_fee.atoms);
+        entry.base_rebate_atoms = try std.math.add(i128, entry.base_rebate_atoms, fill.base_rebate.atoms);
         const trade_cash_delta = if (fill.side == .buy) -notional else notional;
         layer.usdt_balance_atoms = try std.math.add(i128, layer.usdt_balance_atoms, try std.math.sub(i128, trade_cash_delta, net_fee));
         layer.realized_pnl_atoms = try std.math.add(i128, layer.realized_pnl_atoms, realized);
+        try layer.refreshPositions();
         return trade_cash_delta;
     } else if (fill.product == .isolated_linear_usdt) {
         const direction: i64 = if (fill.side == .buy) 1 else -1;
-        const realized = try updatePosition(&layer.swap, direction, quantity, notional);
+        const realized = try updatePosition(&entry.position, direction, quantity, notional);
+        entry.margin_ppm = margin_ppm;
+        entry.margin_atoms = try rateAtoms(entry.position.open_cost_atoms, margin_ppm);
         layer.usdt_balance_atoms = try std.math.add(i128, layer.usdt_balance_atoms, try std.math.sub(i128, realized, net_fee));
         layer.realized_pnl_atoms = try std.math.add(i128, layer.realized_pnl_atoms, realized);
+        try layer.refreshPositions();
         return realized;
     } else return error.UnknownInstrument;
 }
@@ -1103,6 +1294,106 @@ fn fixturePrice(ticks: i128) canonical.InstrumentPrice {
 
 fn fixtureAmount(atoms: i128) canonical.AssetAmount {
     return .{ .asset = settlement_asset, .atoms = atoms };
+}
+
+test "different spot and perpetual instruments retain their own units inventory and marks through replay" {
+    const fills = [_]Fill{
+        .{ .identity = 1, .order_id = 1, .side = .buy, .product = .spot, .quantity = .{ .instrument = 101, .rules_version = 1, .lots = 10 }, .price = .{ .instrument = 101, .rules_version = 1, .ticks = 100 }, .price_tick_value = fixtureAmount(10), .quantity_denominator = 10, .base_atom_value = .{ .asset = 2, .atoms = 100 }, .base_fee = .{ .asset = 2, .atoms = 3 }, .fee = fixtureAmount(2) },
+        .{ .identity = 2, .order_id = 2, .side = .buy, .product = .spot, .quantity = .{ .instrument = 102, .rules_version = 1, .lots = 4 }, .price = .{ .instrument = 102, .rules_version = 1, .ticks = 50 }, .price_tick_value = fixtureAmount(5), .quantity_denominator = 2, .base_atom_value = .{ .asset = 3, .atoms = 10 }, .base_fee = .{ .asset = 3, .atoms = 1 }, .fee = fixtureAmount(3) },
+        .{ .identity = 3, .order_id = 3, .side = .buy, .product = .isolated_linear_usdt, .quantity = .{ .instrument = 201, .rules_version = 1, .lots = 6 }, .price = .{ .instrument = 201, .rules_version = 1, .ticks = 100 }, .price_tick_value = fixtureAmount(4), .quantity_denominator = 3, .portfolio_margin_ppm = 100_000, .exchange_margin_ppm = 80_000, .fee = fixtureAmount(4) },
+        .{ .identity = 4, .order_id = 4, .side = .buy, .product = .isolated_linear_usdt, .quantity = .{ .instrument = 202, .rules_version = 1, .lots = 8 }, .price = .{ .instrument = 202, .rules_version = 1, .ticks = 80 }, .price_tick_value = fixtureAmount(2), .quantity_denominator = 4, .quantity_numerator = 2, .portfolio_margin_ppm = 150_000, .exchange_margin_ppm = 100_000, .fee = fixtureAmount(5) },
+    };
+    const prices = [_]i128{ 1_200, 300, 500, 200 };
+    var reference: ?Projection = null;
+    for ([_][4]usize{ .{ 0, 1, 2, 3 }, .{ 3, 2, 1, 0 } }) |order| {
+        var projection: Projection = .{};
+        projection.portfolio.usdt_balance_atoms = 10_000;
+        projection.exchange.usdt_balance_atoms = 10_000;
+        for (fills, prices) |fill, price| try projection.apply(.{ .mark_price = .{ .instrument = fill.quantity.instrument, .product = fill.product, .price_atoms = price, .quantity_denominator = fill.quantity_denominator, .quantity_numerator = fill.quantity_numerator } });
+        for (order) |index| try std.testing.expect(try projection.applyCanonicalFill(fills[index], coreFillDigest(fills[index])));
+        try std.testing.expectEqual(@as(i128, 997), projection.portfolio.spotInventoryAtoms(2));
+        try std.testing.expectEqual(@as(i128, 39), projection.portfolio.spotInventoryAtoms(3));
+        try std.testing.expectEqual(@as(i128, 8_486), projection.portfolio.usdt_balance_atoms);
+        try std.testing.expectEqual(@as(i128, 176), projection.portfolio.margin_atoms);
+        try std.testing.expectEqual(@as(i128, 128), projection.exchange.margin_atoms);
+        try std.testing.expectEqual(@as(i128, 660), projection.portfolio.unrealized_pnl_atoms);
+        for (fills) |fill| try std.testing.expectEqual(@as(i64, @intCast(fill.quantity.lots)), projection.portfolio.positionForInstrument(fill.quantity.instrument).quantity);
+        const before = projection.digest();
+        for (fills) |fill| try std.testing.expect(!try projection.applyCanonicalFill(fill, coreFillDigest(fill)));
+        try std.testing.expectEqualSlices(u8, &before, &projection.digest());
+        if (reference) |prior| {
+            for (fills) |fill| try std.testing.expectEqualDeep(prior.portfolio.instrumentPosition(fill.quantity.instrument), projection.portfolio.instrumentPosition(fill.quantity.instrument));
+            for ([_]canonical.AssetIdentity{ 2, 3 }) |asset| {
+                try std.testing.expectEqualDeep(prior.portfolio.nativeAsset(asset), projection.portfolio.nativeAsset(asset));
+                try std.testing.expectEqualDeep(prior.exchange.nativeAsset(asset), projection.exchange.nativeAsset(asset));
+            }
+            try std.testing.expectEqualDeep(prior.portfolio.spot, projection.portfolio.spot);
+            try std.testing.expectEqualDeep(prior.portfolio.swap, projection.portfolio.swap);
+        } else reference = projection;
+        const other = projection.portfolio.instrumentPosition(202).?;
+        try projection.apply(.{ .mark_price = .{ .instrument = 201, .product = .isolated_linear_usdt, .price_atoms = 600, .quantity_denominator = 3 } });
+        try std.testing.expectEqualDeep(other, projection.portfolio.instrumentPosition(202).?);
+        try std.testing.expectEqual(@as(i128, 860), projection.portfolio.unrealized_pnl_atoms);
+        var incompatible = fills[1];
+        incompatible.identity = 20;
+        incompatible.quantity_denominator = 1;
+        const valid = projection.digest();
+        try std.testing.expectError(error.InconsistentQuantityDenominator, projection.apply(.{ .fill = incompatible }));
+        try std.testing.expectEqualSlices(u8, &valid, &projection.digest());
+        try std.testing.expectError(error.InvalidEconomicFact, projection.apply(.{ .mark_price = .{ .product = .spot, .price_atoms = 1_300, .quantity_denominator = 10 } }));
+        try std.testing.expectEqualSlices(u8, &valid, &projection.digest());
+        try projection.assertClosed();
+    }
+}
+
+test "sibling base fees and rebates debit native inventory once in either fill order" {
+    const opening: Fill = .{ .identity = 1, .order_id = 1, .side = .buy, .product = .spot, .quantity = .{ .instrument = 101, .rules_version = 1, .lots = 10 }, .price = .{ .instrument = 101, .rules_version = 1, .ticks = 100 }, .price_tick_value = fixtureAmount(10), .quantity_denominator = 10, .base_atom_value = .{ .asset = 2, .atoms = 100 } };
+    var sibling = opening;
+    sibling.identity = 2;
+    sibling.order_id = 2;
+    sibling.quantity = .{ .instrument = 102, .rules_version = 1, .lots = 4 };
+    sibling.price = .{ .instrument = 102, .rules_version = 1, .ticks = 50 };
+    sibling.price_tick_value = fixtureAmount(5);
+    sibling.quantity_denominator = 2;
+    sibling.base_atom_value = .{ .asset = 3, .atoms = 10 };
+    sibling.native_fee = .{ .asset = 2, .atoms = 25 };
+    sibling.native_rebate = .{ .asset = 2, .atoms = 5 };
+    var additional = opening;
+    additional.identity = 3;
+    additional.order_id = 3;
+    additional.quantity.lots = 2;
+    const fills = [_]Fill{ sibling, additional };
+    for ([_][2]usize{ .{ 0, 1 }, .{ 1, 0 } }) |order| {
+        var projection: Projection = .{};
+        projection.portfolio.usdt_balance_atoms = 10_000;
+        projection.exchange.usdt_balance_atoms = 10_000;
+        try std.testing.expect(try projection.applyCanonicalFill(opening, coreFillDigest(opening)));
+        for (order) |index| try std.testing.expect(try projection.applyCanonicalFill(fills[index], coreFillDigest(fills[index])));
+        for ([_]Layer{ projection.portfolio, projection.exchange }) |layer| {
+            try std.testing.expectEqual(@as(i128, 1_180), layer.spotInventoryAtoms(2));
+            try std.testing.expectEqual(@as(i128, 40), layer.spotInventoryAtoms(3));
+            try std.testing.expectEqual(@as(i128, 1_180), layer.spot_asset_atoms);
+            try std.testing.expectEqual(@as(i128, 25), layer.nativeAsset(2).?.fee_atoms);
+            try std.testing.expectEqual(@as(i128, 5), layer.nativeAsset(2).?.rebate_atoms);
+            try std.testing.expectEqualDeep(Position{ .quantity = 12, .open_cost_atoms = 1_200 }, layer.positionForInstrument(101));
+            try std.testing.expectEqualDeep(Position{ .quantity = 4, .open_cost_atoms = 500 }, layer.positionForInstrument(102));
+            try std.testing.expectEqual(@as(i128, 8_300), layer.usdt_balance_atoms);
+        }
+        const before = projection.digest();
+        for (fills) |fill| try std.testing.expect(!try projection.applyCanonicalFill(fill, coreFillDigest(fill)));
+        try std.testing.expectEqualSlices(u8, &before, &projection.digest());
+        try projection.assertClosed();
+    }
+}
+
+test "instrument position bound rejects the next instrument without replacing existing marks" {
+    var projection: Projection = .{};
+    for (1..max_instrument_positions + 1) |identity|
+        try projection.apply(.{ .mark_price = .{ .instrument = identity, .product = .isolated_linear_usdt, .price_atoms = 100 + @as(i128, @intCast(identity)), .quantity_denominator = 1 } });
+    const before = projection.digest();
+    try std.testing.expectError(error.InstrumentPositionCapacityExceeded, projection.apply(.{ .mark_price = .{ .instrument = max_instrument_positions + 1, .product = .spot, .price_atoms = 200, .quantity_denominator = 1 } }));
+    try std.testing.expectEqualSlices(u8, &before, &projection.digest());
+    try std.testing.expectEqual(@as(u8, 125), projection.exchange.instrument_position_count);
 }
 
 test "partial fills close two layers with average cost fees rebates margin and valuation" {

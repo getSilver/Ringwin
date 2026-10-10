@@ -149,7 +149,8 @@ fn pow10(exponent: u8) !i128 {
 
 /// Owner-published unit and bounded arithmetic scope; fixture evidence never qualifies production.
 pub const max_asset_code_bindings = 4;
-pub const max_asset_definitions = 8;
+pub const max_asset_definitions = 128;
+pub const max_instrument_definitions = 125;
 pub const AssetCodeBinding = struct {
     venue: VenueIdentity = 0,
     code: [16]u8 = @splat(0),

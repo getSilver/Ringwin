@@ -1070,6 +1070,10 @@ test "Binance scoped Spot snapshots stay unresolved without combined product and
                     rules.quantity_numerator = 2;
                     rules.venue = 21;
                 },
+                .instrument_trading_authorization => |*authorization| {
+                    if (authorization.instrument == fixture.spot_instrument) continue;
+                    authorization.instrument = btc_usdt_spot;
+                },
                 .margin_rules_activated => |*margin| {
                     if (margin.instrument == fixture.spot_instrument) continue;
                     margin.instrument = btc_usdt_spot;

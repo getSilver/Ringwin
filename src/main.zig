@@ -214,5 +214,6 @@ test {
     _ = @import("native_multi_venue_accounting_acceptance.zig");
     _ = @import("simulated_native_accounting_acceptance.zig");
     _ = @import("okx_live_chain.zig");
+    _ = @import("core_observation_capacity_acceptance.zig");
     _ = raw_ingress;
 }

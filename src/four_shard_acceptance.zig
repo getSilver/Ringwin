@@ -23,7 +23,7 @@ const place_fee_atoms: i128 = 400_000;
 const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
 pub const acceptance_schema_version: u16 = production_contract.acceptance_schema_version;
-const expected_shared_summary = "6746638d3a4fd8778de13598ef55a3a1a28559f191b86ba0965d8e70a2cc2103";
+const expected_shared_summary = "6851d149daea9276e0cf3f8a1c0ff346edf179482d314c9677af1d5f7d1f498b";
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
     return trading.applyStable(shard, stable_journal, .{ .core = input });
@@ -144,11 +144,11 @@ const World = struct {
     }
 };
 
-var shard_snapshot_storage: [max_shards][256 * 1024]u8 = undefined;
+var shard_snapshot_storage: [max_shards][@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
 var coordinator_snapshot_storage: [16384]u8 = undefined;
 var tail_journals: [max_shards]trading.journal.Journal = undefined;
 
-fn genesisEvents(index: usize) [14]trading.CoreEvent {
+fn genesisEvents(index: usize) [15]trading.CoreEvent {
     const target: u128 = @intCast(index + 1);
     return .{
         .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{
@@ -181,6 +181,14 @@ fn genesisEvents(index: usize) [14]trading.CoreEvent {
             .kind = .start_recovery,
         } } },
         .{ .identity = 1, .payload = .recovery_completed },
+        .{ .identity = 4, .payload = .{ .instrument_trading_authorization = .{
+            .exchange_account = exchange_account,
+            .instrument = swap_instrument,
+            .strategy_activation_identity = target,
+            .config_version = 1,
+            .expected_version = 0,
+            .enabled = true,
+        } } },
         .{ .identity = 2, .payload = .{ .control_command = .{
             .command_identity = 2,
             .content_hash = 2,
@@ -295,6 +303,15 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
             .activation_barrier = 0,
             .state_digest = host_digest,
         } } });
+        // The shared offline feed starts at one and observes the same book in every shard.
+        var snapshot = @import("trading_shard_fixture.zig").snapshotAt(11, 1);
+        snapshot.venue.envelope.identity.stream = 9;
+        snapshot.venue.envelope.source_stream = 9;
+        snapshot.venue.envelope.raw_evidence.stream = 9;
+        snapshot.venue.envelope.scope = .instrument;
+        snapshot.venue.envelope.instrument = swap_instrument;
+        snapshot.venue.envelope.exchange_account = exchange_account;
+        _ = try trading.applyStable(shard, journal, snapshot);
         try std.testing.expect(shard.genesisReady());
         try std.testing.expect(shard.operational_state.effectiveTradingAuthority());
     }
@@ -594,15 +611,16 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     _ = try trading.applyStable(&world.shards[1], &tail_journals[1], .{ .venue = instrument_definition });
     var snapshot_envelope = canonical_envelope;
     snapshot_envelope.event_type = @intFromEnum(trading.canonical.EventType.l2_book_snapshot);
-    snapshot_envelope.identity.sequence = 501;
-    snapshot_envelope.source_fact_identity = 501;
-    snapshot_envelope.source_sequence = 501;
-    snapshot_envelope.raw_evidence.sequence = 501;
+    snapshot_envelope.identity = .{ .stream = 9, .sequence = 2 };
+    snapshot_envelope.source_fact_identity = 2;
+    snapshot_envelope.source_stream = 9;
+    snapshot_envelope.source_sequence = 2;
+    snapshot_envelope.raw_evidence = .{ .stream = 9, .sequence = 2, .digest = @splat(0) };
     const book_snapshot: trading.canonical.EventRecord = .{
         .envelope = snapshot_envelope,
         .event = .{ .l2_book_snapshot = .{
             .instrument = 3,
-            .sequence = 1,
+            .sequence = 2,
             .best_bid = .{ .instrument = 3, .rules_version = 1, .ticks = mark_price_atoms - 100_000_000 },
             .best_ask = .{ .instrument = 3, .rules_version = 1, .ticks = mark_price_atoms + 100_000_000 },
             .best_bid_quantity = .{ .instrument = 3, .rules_version = 1, .lots = 1_000 },
@@ -728,12 +746,12 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     const shared_c = sharedSummary(path_c.coordinator.barrier, &path_c.shards, &path_c.coordinator.digest());
     try std.testing.expectEqualSlices(u8, &shared_a, &shared_b);
     try std.testing.expectEqualSlices(u8, &shared_b, &shared_c);
+    try std.testing.expectEqual(@as(u8, max_shards), world.ownership.count);
     const shared_hex = std.fmt.bytesToHex(shared_a, .lower);
     if (!std.mem.eql(u8, expected_shared_summary, &shared_hex)) {
         std.debug.print("four-shard evidence mismatch: expected {s}, actual {s}\n", .{ expected_shared_summary, &shared_hex });
         return error.FourShardEvidenceDrift;
     }
-    try std.testing.expectEqual(@as(u8, max_shards), world.ownership.count);
 
     var shard_digests: [max_shards][Sha256.digest_length]u8 = undefined;
     var shard_barriers: [max_shards]u64 = undefined;

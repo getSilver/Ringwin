@@ -3,7 +3,7 @@
 const canonical = @import("canonical_event.zig");
 const std = @import("std");
 
-pub const max_instruments = 4;
+pub const max_instruments = canonical.max_instrument_definitions;
 
 const MarketFailure = enum(u8) { missing_snapshot, sequence_gap, conflicting_delta, stale_snapshot, incomplete_snapshot, scope_mismatch };
 
@@ -188,8 +188,10 @@ test "definition barrier and L2 continuity are isolated by Instrument" {
     try std.testing.expect(projection.get(10).?.last_book == null);
     try projection.apply(.{ .instrument_definition_observed = .{ .instrument = 30, .rules_version = 1 } });
     try projection.apply(.{ .instrument_definition_observed = .{ .instrument = 40, .rules_version = 1 } });
+    for (0..max_instruments - 4) |index|
+        try projection.apply(.{ .instrument_definition_observed = .{ .instrument = 50 + index, .rules_version = 1 } });
     const before_capacity = projection;
-    try std.testing.expectError(error.MarketInstrumentCapacityExceeded, projection.apply(.{ .instrument_definition_observed = .{ .instrument = 50, .rules_version = 1 } }));
+    try std.testing.expectError(error.MarketInstrumentCapacityExceeded, projection.apply(.{ .instrument_definition_observed = .{ .instrument = 1000, .rules_version = 1 } }));
     try std.testing.expectEqualDeep(before_capacity, projection);
 }
 

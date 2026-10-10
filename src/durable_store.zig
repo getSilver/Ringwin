@@ -14,7 +14,7 @@ const Crc32c = std.hash.crc.Crc32Iscsi;
 // coordinator + spare. Separate capture owners use separate Store instances.
 pub const max_streams = 8;
 pub const max_segment_bytes = 192 * 1024;
-pub const max_snapshot_bytes = 256 * 1024; // Core 89,683B + private seed 61,879B + framing; no 32MiB qualification.
+pub const max_snapshot_bytes = 1024 * 1024; // Bounded resident multi-Instrument state and private seed; no 32MiB qualification.
 pub const max_manifest_entries = 32;
 
 const manifest_magic: u32 = 0x544e414d; // MANT

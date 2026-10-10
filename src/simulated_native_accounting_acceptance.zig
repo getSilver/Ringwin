@@ -45,6 +45,9 @@ fn exercise(case: Case) !void {
                 if (mark.instrument == fixture.spot_instrument) continue;
                 mark.price_atoms = 50_000_000_000_000_000;
             },
+            .instrument_trading_authorization => |authorization| {
+                if (authorization.instrument == fixture.spot_instrument) continue;
+            },
             .asset_definition_activated => |*definition| definition.* = if (definition.asset == 1) assets[0] else assets[1],
             .exchange_balance => |*balance| balance.cash_atoms = 100_000_000_000_000,
             .opening_balance => |*balance| balance.cash_atoms = 100_000_000_000_000,

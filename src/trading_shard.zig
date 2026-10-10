@@ -383,13 +383,6 @@ pub const TradingShard = struct {
                 try candidate.bindFreshCancellations(event.envelope.times.monotonic_ns orelse 0);
                 self.* = candidate;
             } else if (candidate.canonical_market.failure_generation != market_failure_generation_before) {
-                if (candidate.operational_state.initialized) try candidate.applyOperationalGate(.{
-                    .gate_identity = market_data_gate_identity,
-                    .target_identity = candidate.operational_state.target_identity,
-                    .kind = .self_recovering,
-                    .reason = .market_data,
-                    .open = false,
-                });
                 try candidate.trace.append(.canonical_market_invalidated, event.envelope.identity.sequence);
                 self.* = candidate;
             }
@@ -464,6 +457,8 @@ pub const TradingShard = struct {
         for (self.asset_registry.entries[0..self.asset_registry.count]) |entry| try self.pinFact(&target, entry.barrier);
         for (self.instrument_registry.entries[0..self.instrument_registry.count]) |entry| {
             try self.pinFact(&target, entry.rules_barrier);
+            try self.pinFact(&target, entry.margin_barrier);
+            try self.pinFact(&target, entry.trading_barrier);
             try self.pinFact(&target, entry.capability_barrier);
         }
         try self.pinFact(&target, self.host_activation_fact_sequence);
@@ -476,7 +471,7 @@ pub const TradingShard = struct {
             try self.pinFact(&target, command.risk_decision_identity);
             try self.pinFact(&target, command.reservation_identity);
             const refs = command.authority;
-            for ([_]u64{ refs.trading_authorization.barrier, refs.primary_lease.barrier, refs.risk_lease.barrier, refs.capability.barrier, refs.instrument_rules.barrier, refs.config.barrier, refs.deadline_barrier }) |sequence| try self.pinFact(&target, sequence);
+            for ([_]u64{ refs.trading_authorization.barrier, refs.primary_lease.barrier, refs.risk_lease.barrier, refs.capability.barrier, refs.instrument_rules.barrier, refs.margin_rules.barrier, refs.instrument_trading.barrier, refs.config.barrier, refs.deadline_barrier }) |sequence| try self.pinFact(&target, sequence);
         }
         std.mem.sort(Fact, target.pinned[0..target.pinned_len], {}, struct {
             fn less(_: void, a: Fact, b: Fact) bool {
@@ -803,8 +798,7 @@ pub const TradingShard = struct {
     fn qualifyOmsGroup(self: *TradingShard, group: oms_module.IntentGroup) !QualifiedIntentGroup {
         var qualified = group;
         var active = try self.oms.activeReservations(settlement_asset);
-        var group_sell_atoms: i128 = 0;
-        for (qualified.members[0..qualified.count]) |*intent| {
+        for (qualified.members[0..qualified.count], 0..) |*intent, member_index| {
             for (self.fenced_strategy_instances[0..self.fenced_strategy_count]) |fenced|
                 if (intent.strategy_instance == fenced and intent.operation != .cancel)
                     return error.StrategyCutoverFenced;
@@ -817,6 +811,9 @@ pub const TradingShard = struct {
             }
             const instrument_config = self.instrumentEntry(intent.instrument) orelse return error.UnknownOmsInstrument;
             if (!instrument_config.margin_configured) return error.InstrumentRulesInactive;
+            if (!instrument_config.trading_enabled) return error.TradingNotAuthorized;
+            const market_state = self.canonical_market.get(intent.instrument) orelse return error.MissingInstrumentDefinition;
+            if (market_state.health != .healthy) return error.MarketDataGap;
             const observed_exchange_cash = try self.currentNativeRiskCash(intent.instrument);
             if (instrument_config.product == .spot) {
                 const unit = try self.baseAtomsPerLot(instrument_config);
@@ -827,7 +824,9 @@ pub const TradingShard = struct {
                 var pending_lots: i64 = intent.quantity;
                 var committed_sell_atoms: i128 = 0;
                 for (self.oms.orders[0..self.oms.order_count]) |order| {
-                    if (order.instrument != intent.instrument or order.side != .sell) continue;
+                    const ordered = self.instrumentEntry(order.instrument) orelse return error.UnknownOmsInstrument;
+                    if (ordered.product != .spot or ordered.rules.base_asset != unit.asset or order.side != .sell) continue;
+                    const order_unit = try self.baseAtomsPerLot(ordered);
                     // Reports describe executed lots; only unique applied fills
                     // have debited the native inventory backing those lots.
                     const applied = try self.economic_projection.appliedCanonicalFillQuantity(order.id);
@@ -838,10 +837,12 @@ pub const TradingShard = struct {
                         pending_lots = @max(prospective, remaining);
                         continue;
                     }
-                    committed_sell_atoms = try std.math.add(i128, committed_sell_atoms, try std.math.mul(i128, remaining, unit.atoms));
+                    committed_sell_atoms = try std.math.add(i128, committed_sell_atoms, try std.math.mul(i128, remaining, order_unit.atoms));
                 }
                 for (self.oms.tombstones[0..self.oms.tombstone_count]) |archived| {
-                    if (archived.instrument != intent.instrument) continue;
+                    const archived_config = self.instrumentEntry(archived.instrument) orelse return error.UnknownOmsInstrument;
+                    if (archived_config.product != .spot or archived_config.rules.base_asset != unit.asset) continue;
+                    const archive_unit = try self.baseAtomsPerLot(archived_config);
                     const applied = try self.economic_projection.appliedCanonicalFillQuantity(archived.order_id);
                     const remaining = @max(try std.math.sub(i64, archived.cumulative_quantity, applied), 0);
                     if (remaining == 0) continue;
@@ -854,25 +855,27 @@ pub const TradingShard = struct {
                     }
                     if (side == null) return error.IncompleteReconciliationEvidence;
                     if (side.? == .sell)
-                        committed_sell_atoms = try std.math.add(i128, committed_sell_atoms, try std.math.mul(i128, remaining, unit.atoms));
+                        committed_sell_atoms = try std.math.add(i128, committed_sell_atoms, try std.math.mul(i128, remaining, archive_unit.atoms));
+                }
+                var group_sell_atoms: i128 = 0;
+                for (qualified.members[0..member_index]) |prior| {
+                    if (prior.operation == .cancel or prior.side != .sell) continue;
+                    const prior_entry = self.instrumentEntry(prior.instrument) orelse return error.UnknownOmsInstrument;
+                    if (prior_entry.product != .spot or prior_entry.rules.base_asset != unit.asset) continue;
+                    const prior_unit = try self.baseAtomsPerLot(prior_entry);
+                    group_sell_atoms = try std.math.add(i128, group_sell_atoms, try std.math.mul(i128, prior.quantity, prior_unit.atoms));
                 }
                 group_sell_atoms = try std.math.add(i128, group_sell_atoms, try std.math.mul(i128, pending_lots, unit.atoms));
                 const required = try std.math.add(i128, committed_sell_atoms, group_sell_atoms);
-                if (required > self.economic_projection.portfolio.spot_asset_atoms or
-                    required > self.economic_projection.exchange.spot_asset_atoms) return error.InsufficientSpotAsset;
+                if (required > self.economic_projection.portfolio.spotInventoryAtoms(unit.asset) or
+                    required > self.economic_projection.exchange.spotInventoryAtoms(unit.asset)) return error.InsufficientSpotAsset;
             }
             try validateExactOmsSpec(intent.*, instrument_config);
             try self.checkAssetAmounts(canonical.InstrumentQuantity{ .instrument = intent.instrument, .rules_version = instrument_config.rules.version, .lots = intent.quantity }, true);
             try self.checkAssetAmounts(intent.limit_price, true);
             if (intent.market_protection_price) |price| try self.checkAssetAmounts(price, true);
-            const portfolio_position_quantity = if (instrument_config.product == .spot)
-                self.spotPortfolioPosition().quantity
-            else
-                self.portfolioPosition().quantity;
-            const exchange_position_quantity = if (instrument_config.product == .spot)
-                self.spotExchangePosition().quantity
-            else
-                self.exchangePosition().quantity;
+            const portfolio_position_quantity = self.economic_projection.portfolio.positionForInstrument(intent.instrument).quantity;
+            const exchange_position_quantity = self.economic_projection.exchange.positionForInstrument(intent.instrument).quantity;
             const signed_delta = (if (intent.side == .buy) intent.quantity else -intent.quantity);
             const next_portfolio = try std.math.add(i64, portfolio_position_quantity, signed_delta);
             const reduces_portfolio = @abs(next_portfolio) <= @abs(portfolio_position_quantity) and
@@ -985,6 +988,7 @@ pub const TradingShard = struct {
         var group: oms_module.IntentGroup = .{ .first_intent_sequence = replacement.intent_sequence, .count = 1 };
         group.members[0] = replacement;
         const qualified = candidate.qualifyOmsGroup(group) catch |err| switch (err) {
+            error.MarketDataGap,
             error.StrategyLimitExceeded,
             error.VirtualPortfolioLimitExceeded,
             error.DecisionDomainLimitExceeded,
@@ -996,6 +1000,7 @@ pub const TradingShard = struct {
             error.PortfolioReduceOnlyViolation,
             error.MarginSafetyGateClosed,
             error.StrategyCutoverFenced,
+            error.TradingNotAuthorized,
             => {
                 try self.oms.discardReplacement(order_id);
                 return null;
@@ -1185,13 +1190,13 @@ pub const TradingShard = struct {
 
     fn checkEconomicRanges(self: *const TradingShard) !void {
         const quote = self.asset_registry.get(self.economic_projection.settlement_asset) orelse return error.UnknownAssetDefinition;
-        if (self.economic_projection.base_asset != 0) {
-            const base = self.asset_registry.get(self.economic_projection.base_asset) orelse return error.UnknownAssetDefinition;
+        for (self.asset_registry.entries[0..self.asset_registry.count]) |base| {
+            if (base.definition.asset == quote.definition.asset) continue;
             var traded_atoms: i128 = 0;
             for (self.economic_projection.ledger[0..self.economic_projection.ledger_count]) |transaction| {
                 if (transaction.layer != .portfolio) continue;
                 for (transaction.postings[0..transaction.posting_count]) |posting| {
-                    if (posting.unit != .base_atoms or posting.account != .trade) continue;
+                    if (posting.unit != .base_atoms or posting.account != .trade or posting.asset != base.definition.asset) continue;
                     const absolute = if (posting.amount < 0) try std.math.sub(i128, 0, posting.amount) else posting.amount;
                     traded_atoms = try std.math.add(i128, traded_atoms, absolute);
                 }
@@ -1221,11 +1226,14 @@ pub const TradingShard = struct {
                 if (native.fee_atoms > definition.definition.max_cumulative_atoms or native.rebate_atoms > definition.definition.max_cumulative_atoms)
                     return error.AssetAmountOutOfRange;
             }
-            if (self.economic_projection.base_asset != 0) {
-                const base = self.asset_registry.get(self.economic_projection.base_asset) orelse return error.UnknownAssetDefinition;
-                try self.asset_registry.checkAmount(.{ .asset = base.definition.asset, .atoms = layer.spot_asset_atoms }, false);
-                if (layer.base_fee_atoms > base.definition.max_cumulative_atoms or layer.base_rebate_atoms > base.definition.max_cumulative_atoms)
-                    return error.AssetAmountOutOfRange;
+            for (layer.instrument_positions[0..layer.instrument_position_count]) |position| {
+                if (position.product == .spot and position.base_asset != 0) {
+                    const base = self.asset_registry.get(position.base_asset) orelse return error.UnknownAssetDefinition;
+                    if (position.base_fee_atoms > base.definition.max_cumulative_atoms or position.base_rebate_atoms > base.definition.max_cumulative_atoms)
+                        return error.AssetAmountOutOfRange;
+                }
+                for ([_]i128{ position.position.open_cost_atoms, position.margin_atoms }) |amount|
+                    try self.asset_registry.checkAmount(.{ .asset = quote.definition.asset, .atoms = amount }, false);
             }
             for ([_]i128{ layer.usdt_balance_atoms, layer.margin_atoms }) |amount|
                 try self.asset_registry.checkAmount(.{ .asset = quote.definition.asset, .atoms = amount }, false);
@@ -1274,6 +1282,14 @@ pub const TradingShard = struct {
         if (self.latestFact(.strategy_activated)) |fact|
             refs.config = .{ .identity = self.strategy_activation_identity, .version = self.strategy_config_version, .barrier = fact.sequence };
         if (self.instrument_registry.get(instrument)) |entry| {
+            if (entry.margin_barrier != 0) {
+                const fact = self.trace.factAt(entry.margin_barrier) orelse return error.InvalidControlAuthority;
+                refs.margin_rules = .{ .identity = fact.identity, .version = entry.margin.version, .barrier = entry.margin_barrier };
+            }
+            if (entry.trading_barrier != 0) {
+                const fact = self.trace.factAt(entry.trading_barrier) orelse return error.InvalidControlAuthority;
+                refs.instrument_trading = .{ .identity = fact.identity, .version = entry.trading_version, .barrier = entry.trading_barrier };
+            }
             if (entry.rules_barrier != 0) {
                 const fact = self.trace.factAt(entry.rules_barrier) orelse return error.InvalidControlAuthority;
                 refs.instrument_rules = .{ .identity = fact.identity, .version = entry.rules.version, .barrier = entry.rules_barrier };
@@ -1475,11 +1491,12 @@ pub const TradingShard = struct {
             instrument_config.rules.quantity_numerator,
         );
         self.last_risk_tier = try riskTier(requested_notional, self.asset_registry.get(instrument_config.rules.settlement_asset).?.definition.atomic_scale);
-        if (self.market_health != .healthy) {
+        if ((self.canonical_market.get(intent.instrument_identity) orelse return error.MissingInstrumentDefinition).health != .healthy) {
             try self.rejectSubmittedIntent(original_group, .risk_rejected_market_data, .market_data_gap);
             return null;
         }
         const qualified = self.qualifyOmsGroup(group) catch |err| switch (err) {
+            error.MarketDataGap,
             error.StrategyLimitExceeded,
             error.VirtualPortfolioLimitExceeded,
             error.DecisionDomainLimitExceeded,
@@ -1497,6 +1514,7 @@ pub const TradingShard = struct {
             error.StrategyCutoverFenced,
             => {
                 const reason: RejectReason = switch (err) {
+                    error.MarketDataGap => .market_data_gap,
                     error.StrategyLimitExceeded => .strategy_limit_exceeded,
                     error.VirtualPortfolioLimitExceeded => .portfolio_limit_exceeded,
                     error.DecisionDomainLimitExceeded => .decision_domain_limit_exceeded,
@@ -1537,6 +1555,43 @@ pub const TradingShard = struct {
     fn handleCanonical(self: *TradingShard, record: canonical.EventRecord) !?OrderCommand {
         if (record.envelope.event_type != @intFromEnum(canonical.eventType(record.event)))
             return error.CanonicalEventTypeMismatch;
+        if (record.event == .account_bootstrap_snapshot or record.event == .account_observed) {
+            const valid_scope = if (record.event == .account_bootstrap_snapshot)
+                record.envelope.scope == .account
+            else switch (record.envelope.scope) {
+                .account => switch (record.event.account_observed.value) {
+                    .balance => |value| record.envelope.asset == null or record.envelope.asset == value.asset,
+                    .position => |value| record.envelope.instrument == null or record.envelope.instrument == value.instrument,
+                    .margin => |value| record.envelope.instrument == null or record.envelope.instrument == value.instrument,
+                },
+                .asset => switch (record.event.account_observed.value) {
+                    .balance => |value| record.envelope.asset == value.asset,
+                    else => false,
+                },
+                .instrument => switch (record.event.account_observed.value) {
+                    .position => |value| record.envelope.instrument == value.instrument,
+                    .margin => |value| value.instrument != null and record.envelope.instrument == value.instrument,
+                    else => false,
+                },
+                .venue => false,
+            };
+            if (!valid_scope) return error.CanonicalScopeMismatch;
+            for (self.instrument_registry.entries[0..self.instrument_registry.count]) |configured|
+                if (record.envelope.venue != configured.venue) return error.CanonicalScopeMismatch;
+        }
+        const observed_instrument: ?canonical.InstrumentIdentity = switch (record.event) {
+            .instrument_definition_observed => |value| value.instrument,
+            .l2_book_snapshot => |value| value.instrument,
+            .l2_book_delta => |value| value.instrument,
+            .reference_price => |value| value.instrument,
+            .market_data_health_changed => |value| value.instrument,
+            else => null,
+        };
+        if (observed_instrument) |identity| {
+            if (record.envelope.instrument) |scoped| if (scoped != identity) return error.CanonicalScopeMismatch;
+            if (record.envelope.exchange_account) |account| if (self.exchange_account_identity != 0 and account != self.exchange_account_identity) return error.CanonicalScopeMismatch;
+            if (self.instrumentEntry(identity)) |configured| if (record.envelope.venue != configured.venue) return error.CanonicalScopeMismatch;
+        }
         if (try self.rememberCanonicalIngress(record)) return null;
         const fact_identity = record.envelope.identity.sequence;
         switch (record.event) {
@@ -1615,22 +1670,16 @@ pub const TradingShard = struct {
                     ((book_snapshot.next_ask == null) != (book_snapshot.next_ask_quantity == null)))
                     return error.IncompleteL2Book;
                 try self.canonical_market.apply(record.event);
-                self.expected_source_sequence = try std.math.add(u64, book_snapshot.sequence, 1);
-                self.market_health = .healthy;
-                self.bid_price_ticks = std.math.cast(i64, book_snapshot.best_bid.ticks) orelse return error.PriceOutOfRange;
-                self.ask_1_price_ticks = std.math.cast(i64, book_snapshot.best_ask.ticks) orelse return error.PriceOutOfRange;
-                self.bid_quantity = std.math.cast(i64, book_snapshot.best_bid_quantity.?.lots) orelse return error.QuantityOutOfRange;
-                self.ask_1_quantity = std.math.cast(i64, book_snapshot.best_ask_quantity.?.lots) orelse return error.QuantityOutOfRange;
-                self.ask_2_price_ticks = if (book_snapshot.next_ask) |price| std.math.cast(i64, price.ticks) orelse return error.PriceOutOfRange else self.ask_1_price_ticks;
-                self.ask_2_quantity = if (book_snapshot.next_ask_quantity) |quantity| std.math.cast(i64, quantity.lots) orelse return error.QuantityOutOfRange else 0;
-                if (self.operational_state.initialized) try self.applyOperationalGate(.{
-                    .gate_identity = market_data_gate_identity,
-                    .target_identity = self.operational_state.target_identity,
-                    .kind = .self_recovering,
-                    .reason = .market_data,
-                    .open = true,
-                    .continuity_proven = true,
-                });
+                if (book_snapshot.instrument == self.instrument_identity) {
+                    self.expected_source_sequence = try std.math.add(u64, book_snapshot.sequence, 1);
+                    self.market_health = .healthy;
+                    self.bid_price_ticks = std.math.cast(i64, book_snapshot.best_bid.ticks) orelse return error.PriceOutOfRange;
+                    self.ask_1_price_ticks = std.math.cast(i64, book_snapshot.best_ask.ticks) orelse return error.PriceOutOfRange;
+                    self.bid_quantity = std.math.cast(i64, book_snapshot.best_bid_quantity.?.lots) orelse return error.QuantityOutOfRange;
+                    self.ask_1_quantity = std.math.cast(i64, book_snapshot.best_ask_quantity.?.lots) orelse return error.QuantityOutOfRange;
+                    self.ask_2_price_ticks = if (book_snapshot.next_ask) |price| std.math.cast(i64, price.ticks) orelse return error.PriceOutOfRange else self.ask_1_price_ticks;
+                    self.ask_2_quantity = if (book_snapshot.next_ask_quantity) |quantity| std.math.cast(i64, quantity.lots) orelse return error.QuantityOutOfRange else 0;
+                }
                 try self.trace.append(.l2_snapshot, fact_identity);
             },
             .l2_book_delta => |delta| {
@@ -1639,27 +1688,22 @@ pub const TradingShard = struct {
                     return error.IncompleteL2Book;
                 self.canonical_market.apply(record.event) catch |err| switch (err) {
                     error.MissingBookSnapshot, error.MarketGap, error.ConflictingBookDelta, error.BookSequenceGap => {
-                        self.market_health = .gap;
-                        if (self.operational_state.initialized) try self.applyOperationalGate(.{
-                            .gate_identity = market_data_gate_identity,
-                            .target_identity = self.operational_state.target_identity,
-                            .kind = .self_recovering,
-                            .reason = .market_data,
-                            .open = false,
-                        });
+                        if (delta.instrument == self.instrument_identity) self.market_health = .gap;
                         try self.trace.append(.l2_delta, fact_identity);
                         try self.trace.append(.market_gap, 1);
                         return null;
                     },
                     else => return err,
                 };
-                self.expected_source_sequence = try std.math.add(u64, delta.sequence, 1);
-                self.bid_price_ticks = std.math.cast(i64, delta.best_bid.ticks) orelse return error.PriceOutOfRange;
-                self.ask_1_price_ticks = std.math.cast(i64, delta.best_ask.ticks) orelse return error.PriceOutOfRange;
-                if (delta.best_bid_quantity) |quantity| self.bid_quantity = std.math.cast(i64, quantity.lots) orelse return error.QuantityOutOfRange;
-                if (delta.best_ask_quantity) |quantity| self.ask_1_quantity = std.math.cast(i64, quantity.lots) orelse return error.QuantityOutOfRange;
-                if (delta.next_ask) |price| self.ask_2_price_ticks = std.math.cast(i64, price.ticks) orelse return error.PriceOutOfRange;
-                if (delta.next_ask_quantity) |quantity| self.ask_2_quantity = std.math.cast(i64, quantity.lots) orelse return error.QuantityOutOfRange;
+                if (delta.instrument == self.instrument_identity) {
+                    self.expected_source_sequence = try std.math.add(u64, delta.sequence, 1);
+                    self.bid_price_ticks = std.math.cast(i64, delta.best_bid.ticks) orelse return error.PriceOutOfRange;
+                    self.ask_1_price_ticks = std.math.cast(i64, delta.best_ask.ticks) orelse return error.PriceOutOfRange;
+                    if (delta.best_bid_quantity) |quantity| self.bid_quantity = std.math.cast(i64, quantity.lots) orelse return error.QuantityOutOfRange;
+                    if (delta.best_ask_quantity) |quantity| self.ask_1_quantity = std.math.cast(i64, quantity.lots) orelse return error.QuantityOutOfRange;
+                    if (delta.next_ask) |price| self.ask_2_price_ticks = std.math.cast(i64, price.ticks) orelse return error.PriceOutOfRange;
+                    if (delta.next_ask_quantity) |quantity| self.ask_2_quantity = std.math.cast(i64, quantity.lots) orelse return error.QuantityOutOfRange;
+                }
                 try self.trace.append(.l2_delta, fact_identity);
                 // A delta is valid only while the projection is already
                 // healthy. It never proves recovery after a gap; only the
@@ -1672,6 +1716,7 @@ pub const TradingShard = struct {
                     const mark_price = try std.math.mul(i128, price.price.ticks, instrument.margin.price_tick_atoms);
                     if (price.instrument == self.instrument_identity) self.mark_price_atoms = mark_price;
                     _ = try self.applyEconomicProjection(.{ .mark_price = .{
+                        .instrument = price.instrument,
                         .product = instrument.product,
                         .price_atoms = mark_price,
                         .quantity_denominator = instrument.rules.quantity_denominator,
@@ -1686,19 +1731,11 @@ pub const TradingShard = struct {
             },
             .market_data_health_changed => |health| {
                 try self.canonical_market.apply(record.event);
-                self.market_health = switch (health.health) {
+                if (health.instrument == self.instrument_identity) self.market_health = switch (health.health) {
                     .healthy => .healthy,
                     .awaiting_snapshot => .initializing,
                     .gap => .gap,
                 };
-                if (health.health != .healthy and self.operational_state.initialized)
-                    try self.applyOperationalGate(.{
-                        .gate_identity = market_data_gate_identity,
-                        .target_identity = self.operational_state.target_identity,
-                        .kind = .self_recovering,
-                        .reason = .market_data,
-                        .open = false,
-                    });
                 try self.trace.append(if (health.health == .healthy) .market_healthy else .market_gap, fact_identity);
             },
             .account_bootstrap_snapshot => |bootstrap_snapshot| {
@@ -2138,43 +2175,29 @@ pub const TradingShard = struct {
             const account = &self.canonical_account;
             if (!account.valid or account.exchange_account != self.exchange_account_identity)
                 return error.ExchangeOpeningGateClosed;
-            if (configured.product == .spot) {
-                const available = account.nativeAvailable(configured.rules.settlement_asset) orelse return error.ExchangeOpeningGateClosed;
-                for (account.margins[0..account.margin_count]) |margin| {
-                    if (margin.usd_valuation) |valuation| {
-                        for ([_]?canonical.Decimal{ valuation.initial_margin, valuation.maintenance_margin, valuation.isolated_equity }) |value|
-                            if (value) |amount| if (amount.coefficient != 0) return error.ExchangeOpeningGateClosed;
-                    }
-                }
-                for (account.balances[0..account.balance_count]) |balance|
-                    if (account.nativeAvailable(balance.asset) == null) return error.ExchangeOpeningGateClosed;
-                for (account.positions[0..account.position_count]) |position| {
-                    if (position.quantity.lots == 0) continue;
-                    const positioned = self.instrumentEntry(position.instrument) orelse return error.ExchangeOpeningGateClosed;
-                    if (positioned.product != .spot) return error.ExchangeOpeningGateClosed;
-                }
-                observed_exchange_cash = @min(observed_exchange_cash, available.atoms);
-            } else {
-                _ = account.nativeMarginEvidence(instrument, configured.rules.settlement_asset) orelse return error.ExchangeOpeningGateClosed;
-                for (account.positions[0..account.position_count]) |position| {
-                    if (position.quantity.lots == 0) continue;
-                    const positioned = self.instrumentEntry(position.instrument) orelse return error.ExchangeOpeningGateClosed;
-                    if (positioned.product != configured.product or positioned.rules.settlement_asset != configured.rules.settlement_asset)
-                        return error.ExchangeOpeningGateClosed;
-                }
-                var available: ?i128 = null;
-                for (account.balances[0..account.balance_count]) |balance| {
-                    if (balance.asset != configured.rules.settlement_asset) continue;
-                    if (available != null or balance.available.asset != balance.asset or balance.available.atoms < 0)
-                        return error.ExchangeOpeningGateClosed;
-                    for ([_]?canonical.AssetAmount{ balance.liability, balance.isolated_liability, balance.cross_liability }) |debt| {
-                        const amount = debt orelse return error.ExchangeOpeningGateClosed;
-                        if (amount.asset != balance.asset or amount.atoms != 0) return error.ExchangeOpeningGateClosed;
-                    }
-                    available = balance.available.atoms;
-                }
-                observed_exchange_cash = @min(observed_exchange_cash, available orelse return error.ExchangeOpeningGateClosed);
+            const available = account.nativeAvailable(configured.rules.settlement_asset) orelse return error.ExchangeOpeningGateClosed;
+            for (account.balances[0..account.balance_count]) |balance|
+                if (account.nativeAvailable(balance.asset) == null) return error.ExchangeOpeningGateClosed;
+            for (account.positions[0..account.position_count]) |position| {
+                const positioned = self.instrumentEntry(position.instrument) orelse return error.ExchangeOpeningGateClosed;
+                if (position.quantity.rules_version != positioned.rules.version) return error.ExchangeOpeningGateClosed;
+                if (positioned.product != .spot and position.quantity.lots != 0)
+                    _ = account.nativeMarginEvidence(position.instrument, positioned.rules.settlement_asset) orelse return error.ExchangeOpeningGateClosed;
             }
+            if (configured.product != .spot)
+                _ = account.nativeMarginEvidence(instrument, configured.rules.settlement_asset) orelse return error.ExchangeOpeningGateClosed;
+            // USD valuations cannot substitute for native collateral evidence.
+            for (account.margins[0..account.margin_count]) |margin| {
+                if (margin.usd_valuation) |valuation| {
+                    var has_value = false;
+                    for ([_]?canonical.Decimal{ valuation.initial_margin, valuation.maintenance_margin, valuation.isolated_equity }) |value|
+                        if (value) |amount| {
+                            has_value = has_value or amount.coefficient != 0;
+                        };
+                    if (has_value and margin.amount == null) return error.ExchangeOpeningGateClosed;
+                }
+            }
+            observed_exchange_cash = @min(observed_exchange_cash, available.atoms);
         }
         return observed_exchange_cash;
     }
@@ -2185,10 +2208,10 @@ pub const TradingShard = struct {
         if (!entry.margin_configured) return false;
         if (!self.asset_registry.hasVenueCode(entry.rules.settlement_asset, entry.venue) or
             (entry.product == .spot and !self.asset_registry.hasVenueCode(entry.rules.base_asset, entry.venue))) return false;
-        const denominator = if (entry.product == .spot) self.economic_projection.spot_quantity_denominator else self.economic_projection.swap_quantity_denominator;
-        const numerator = if (entry.product == .spot) self.economic_projection.spot_quantity_numerator else self.economic_projection.swap_quantity_numerator;
-        if (denominator != 0 and
-            (denominator != entry.rules.quantity_denominator or numerator != entry.rules.quantity_numerator)) return false;
+        if (self.economic_projection.exchange.instrumentPosition(instrument)) |position| {
+            if (position.quantity_denominator != 0 and
+                (position.quantity_denominator != entry.rules.quantity_denominator or position.quantity_numerator != entry.rules.quantity_numerator)) return false;
+        }
         self.validateTickRange(instrument, entry.margin) catch return false;
         if (entry.product == .spot) _ = self.baseAtomsPerLot(entry) catch return false;
         return self.asset_registry.consumerCompatible(entry.margin.native_settlement_atoms);
@@ -2550,6 +2573,31 @@ pub const TradingShard = struct {
                 entry.capability = profile;
                 try self.trace.append(.capability_profile_activated, input.identity);
                 entry.capability_barrier = self.authoritativeBarrier();
+                if (entry.trading_version == 0) {
+                    entry.trading_enabled = true;
+                    entry.trading_version = 1;
+                    entry.trading_barrier = entry.capability_barrier;
+                }
+            },
+            .instrument_trading_authorization => |authorization| {
+                const entry = self.instrument_registry.getPtr(authorization.instrument) orelse return error.UnknownInstrument;
+                if (authorization.expected_version != std.math.maxInt(u64) and
+                    entry.trading_version == authorization.expected_version + 1 and entry.trading_enabled == authorization.enabled)
+                {
+                    const prior = self.trace.factAt(entry.trading_barrier) orelse return error.InvalidControlAuthority;
+                    if (prior.kind == .instrument_trading_authorized and prior.identity == input.identity and
+                        authorization.exchange_account == self.exchange_account_identity and
+                        authorization.strategy_activation_identity == self.strategy_activation_identity and
+                        authorization.config_version == self.strategy_config_version) return null;
+                }
+                if (input.identity == 0 or authorization.exchange_account != self.exchange_account_identity or
+                    authorization.strategy_activation_identity != self.strategy_activation_identity or
+                    authorization.config_version != self.strategy_config_version or !entry.margin_configured or
+                    authorization.expected_version != entry.trading_version) return error.InvalidControlAuthority;
+                entry.trading_version = try std.math.add(u64, entry.trading_version, 1);
+                entry.trading_enabled = authorization.enabled;
+                try self.trace.append(.instrument_trading_authorized, input.identity);
+                entry.trading_barrier = self.authoritativeBarrier();
             },
             .margin_rules_activated => |rules| {
                 const instrument_id = if (rules.instrument != 0) rules.instrument else self.instrument_identity;
@@ -2593,6 +2641,7 @@ pub const TradingShard = struct {
                     self.kill_liquidation_distance_ticks = rules.kill_liquidation_distance_ticks;
                 }
                 try self.trace.append(.margin_rules_activated, input.identity);
+                self.instrument_registry.getPtr(instrument_id).?.margin_barrier = self.authoritativeBarrier();
             },
             .account_configuration => |configuration| {
                 if (self.margin_rules_version == 0 or configuration.exchange_account_identity == 0 or
@@ -2797,6 +2846,7 @@ pub const TradingShard = struct {
                 } });
                 if (price.instrument == self.instrument_identity) self.mark_price_atoms = price.price_atoms;
                 _ = try self.applyEconomicProjection(.{ .mark_price = .{
+                    .instrument = price.instrument,
                     .product = instrument.product,
                     .price_atoms = price.price_atoms,
                     .quantity_denominator = instrument.rules.quantity_denominator,
@@ -2868,6 +2918,7 @@ pub const TradingShard = struct {
                         try self.rejectSubmittedIntent(group, .strategy_intent_rejected, if (err == error.CapabilityUnsupported) .capability_unsupported else .unsupported_order_spec);
                         return null;
                     },
+                    error.MarketDataGap,
                     error.StrategyLimitExceeded,
                     error.VirtualPortfolioLimitExceeded,
                     error.DecisionDomainLimitExceeded,
@@ -2882,6 +2933,7 @@ pub const TradingShard = struct {
                     error.StrategyCutoverFenced,
                     => {
                         const reason: RejectReason = switch (err) {
+                            error.MarketDataGap => .market_data_gap,
                             error.StrategyLimitExceeded => .strategy_limit_exceeded,
                             error.VirtualPortfolioLimitExceeded => .portfolio_limit_exceeded,
                             error.DecisionDomainLimitExceeded => .decision_domain_limit_exceeded,
@@ -3068,6 +3120,8 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
     zeroUnused(economics_module.CanonicalFactEvidence, shard.economic_projection.canonical_fill_evidence[shard.economic_projection.canonical_fill_evidence_count..]);
     zeroUnused(economics_module.NativeAssetState, shard.economic_projection.portfolio.native_assets[shard.economic_projection.portfolio.native_asset_count..]);
     zeroUnused(economics_module.NativeAssetState, shard.economic_projection.exchange.native_assets[shard.economic_projection.exchange.native_asset_count..]);
+    zeroUnused(economics_module.InstrumentPosition, shard.economic_projection.portfolio.instrument_positions[shard.economic_projection.portfolio.instrument_position_count..]);
+    zeroUnused(economics_module.InstrumentPosition, shard.economic_projection.exchange.instrument_positions[shard.economic_projection.exchange.instrument_position_count..]);
     zeroUnused(canonical.AssetAmount, shard.economic_projection.treasury_native_assets[shard.economic_projection.treasury_native_asset_count..]);
     zeroUnused(canonical.AssetAmount, shard.economic_projection.suspense_native_assets[shard.economic_projection.suspense_native_asset_count..]);
     for (shard.economic_projection.ledger[0..shard.economic_projection.ledger_count]) |*transaction|
@@ -3136,6 +3190,8 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         shard.economic_projection.reconciliation_break_count > shard.economic_projection.reconciliation_break_identities.len or
         shard.economic_projection.portfolio.native_asset_count > economics_module.max_native_assets or
         shard.economic_projection.exchange.native_asset_count > economics_module.max_native_assets or
+        shard.economic_projection.portfolio.instrument_position_count > economics_module.max_instrument_positions or
+        shard.economic_projection.exchange.instrument_position_count > economics_module.max_instrument_positions or
         shard.economic_projection.treasury_native_asset_count > economics_module.max_native_assets or
         shard.economic_projection.suspense_native_asset_count > economics_module.max_native_assets or
         shard.operational_state.command_count > operational.max_commands or
@@ -3179,6 +3235,15 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
                 profile.exchange_account != shard.exchange_account_identity)
                 return error.InvalidSnapshotState;
         }
+        if (entry.margin_configured and (entry.margin_barrier == 0 or entry.margin_barrier > shard.authoritativeBarrier() or
+            (shard.trace.factAt(entry.margin_barrier) orelse return error.InvalidSnapshotState).kind != .margin_rules_activated))
+            return error.InvalidSnapshotState;
+        if (entry.trading_version != 0) {
+            const fact = shard.trace.factAt(entry.trading_barrier) orelse return error.InvalidSnapshotState;
+            if (entry.trading_barrier > shard.authoritativeBarrier() or
+                (fact.kind != .instrument_trading_authorized and fact.kind != .capability_profile_activated) or
+                (fact.kind == .capability_profile_activated and entry.trading_version != 1)) return error.InvalidSnapshotState;
+        }
     }
     for (shard.oms.orders[0..shard.oms.order_count], 0..) |order, index| {
         if (order.id == 0) return error.InvalidSnapshotState;
@@ -3203,6 +3268,7 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
             .{ refs.risk_lease, EventKind.risk_lease_granted },
             .{ refs.capability, EventKind.capability_profile_activated },
             .{ refs.instrument_rules, EventKind.instrument_rules_activated },
+            .{ refs.margin_rules, EventKind.margin_rules_activated },
             .{ refs.config, EventKind.strategy_activated },
         };
         inline for (typed_refs) |pair| {
@@ -3214,6 +3280,16 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
                 ref.identity == 0 or ref.version == 0)
                 return error.InvalidSnapshotState;
         }
+        const trading_ref = refs.instrument_trading;
+        if (trading_ref.barrier == 0) {
+            if (trading_ref.identity != 0 or trading_ref.version != 0) return error.InvalidSnapshotState;
+        } else {
+            const fact = shard.trace.factAt(trading_ref.barrier) orelse return error.InvalidSnapshotState;
+            if (trading_ref.barrier > shard.authoritativeBarrier() or trading_ref.identity == 0 or trading_ref.version == 0 or
+                fact.identity != trading_ref.identity or
+                (fact.kind != .instrument_trading_authorized and fact.kind != .capability_profile_activated) or
+                (fact.kind == .capability_profile_activated and trading_ref.version != 1)) return error.InvalidSnapshotState;
+        }
         if (refs.trading_authorization.barrier != 0) {
             const control = shard.controlCommandAtBarrier(refs.trading_authorization.barrier) orelse return error.InvalidSnapshotState;
             if (!changesTradingAuthorization(control.kind) or
@@ -3224,6 +3300,8 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         if (refs.capability.barrier != 0 and (shard.trace.factAt(refs.capability.barrier) orelse return error.InvalidSnapshotState).identity != refs.capability.identity)
             return error.InvalidSnapshotState;
         if (refs.instrument_rules.barrier != 0 and (shard.trace.factAt(refs.instrument_rules.barrier) orelse return error.InvalidSnapshotState).identity != refs.instrument_rules.identity)
+            return error.InvalidSnapshotState;
+        if (refs.margin_rules.barrier != 0 and (shard.trace.factAt(refs.margin_rules.barrier) orelse return error.InvalidSnapshotState).identity != refs.margin_rules.identity)
             return error.InvalidSnapshotState;
         if (refs.dispatch_deadline_monotonic_ns != 0 and
             (refs.deadline_barrier == 0 or refs.deadline_barrier > shard.authoritativeBarrier()))
@@ -3368,6 +3446,7 @@ pub fn applyStable(
         if (input == .venue) return null;
         if (input == .core and input.core.payload == .asset_definition_activated) return null;
         if (input == .core and input.core.payload == .checkpoint_committed) return null;
+        if (input == .core and input.core.payload == .instrument_trading_authorization) return null;
         if (input == .core and input.core.payload == .external_order_intent) return null;
         if (input == .core and input.core.payload == .oms_intent_group and
             (shard.oms.groupIdentityStatus(input.core.payload.oms_intent_group) catch .fresh) == .duplicate)
@@ -3443,7 +3522,7 @@ fn digestOmsCommand(hasher: *Sha256, command: oms_module.Command) void {
     const refs = command.authority;
     digestInt(hasher, u128, refs.exchange_account);
     digestInt(hasher, u128, refs.virtual_portfolio);
-    inline for (.{ refs.trading_authorization, refs.primary_lease, refs.risk_lease, refs.capability, refs.instrument_rules, refs.config }) |ref| {
+    inline for (.{ refs.trading_authorization, refs.primary_lease, refs.risk_lease, refs.capability, refs.instrument_rules, refs.margin_rules, refs.instrument_trading, refs.config }) |ref| {
         digestInt(hasher, u128, ref.identity);
         digestInt(hasher, u64, ref.version);
         digestInt(hasher, u64, ref.barrier);
@@ -3460,7 +3539,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     const spot_portfolio_position = shard.spotPortfolioPosition();
     const spot_exchange_position = shard.spotExchangePosition();
     const ledger = shard.economic_projection.ledger_summary;
-    hasher.update("StateDigestV7\x00");
+    hasher.update("StateDigestV8\x00");
     digestInt(&hasher, u16, schema_version);
     digestAssetRegistry(&hasher, shard, true);
     digestInt(&hasher, u8, shard.instrument_registry.count);
@@ -3477,6 +3556,9 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, u64, entry.rules.base_asset);
         digestInt(&hasher, u64, entry.rules_barrier);
         digestInt(&hasher, u64, entry.capability_barrier);
+        digestBool(&hasher, entry.trading_enabled);
+        digestInt(&hasher, u64, entry.trading_version);
+        digestInt(&hasher, u64, entry.trading_barrier);
         digestBool(&hasher, entry.capability != null);
         if (entry.capability) |capability| {
             digestInt(&hasher, u128, capability.exchange_account);
@@ -3497,6 +3579,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
             digestBool(&hasher, capability.supports_market_protection);
         }
         digestBool(&hasher, entry.margin_configured);
+        digestInt(&hasher, u64, entry.margin_barrier);
         digestInt(&hasher, u32, entry.margin.version);
         digestInt(&hasher, i128, entry.margin.price_tick_atoms);
         digestBool(&hasher, entry.margin.native_settlement_atoms);
@@ -3504,6 +3587,8 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, i64, entry.margin.internal_initial_margin_ppm);
         digestInt(&hasher, i64, entry.margin.internal_maintenance_margin_ppm);
         digestInt(&hasher, i64, entry.margin.fee_ppm);
+        inline for (.{ entry.margin.opening_buffer_atoms, entry.margin.warning_buffer_atoms, entry.margin.kill_buffer_atoms }) |value| digestInt(&hasher, i128, value);
+        inline for (.{ entry.margin.opening_buffer_bps, entry.margin.warning_buffer_bps, entry.margin.kill_buffer_bps, entry.margin.opening_liquidation_distance_ticks, entry.margin.warning_liquidation_distance_ticks, entry.margin.kill_liquidation_distance_ticks }) |value| digestInt(&hasher, i64, value);
     }
     if (shard.canonical_ingress_count != 0) {
         hasher.update("CanonicalIngressV1\x00");
@@ -3823,8 +3908,33 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     digestInt(&hasher, i128, ledger.exchange_debits_atoms);
     digestInt(&hasher, i128, ledger.exchange_credits_atoms);
     digestBool(&hasher, ledger.projections_complete);
+    const economics_digest = shard.economic_projection.digest();
+    hasher.update(&economics_digest);
     digestCanonicalProjections(&hasher, shard);
     return hasher.finalResult();
+}
+
+test "state digest binds instrument trading margin and economic position authority" {
+    const shard = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(shard);
+    shard.* = .{};
+    _ = try shard.instrument_registry.register(.{
+        .instrument = 10,
+        .venue = 2,
+        .product = .spot,
+        .rules = .{ .version = 1, .instrument_identity = 10, .quantity_denominator = 1, .reservation_model = .cash, .product = .spot },
+        .margin = .{ .version = 1 },
+    });
+    var before = stateDigest(shard.*);
+    shard.instrument_registry.entries[0].trading_version = 2;
+    try std.testing.expect(!std.mem.eql(u8, &before, &stateDigest(shard.*)));
+    before = stateDigest(shard.*);
+    shard.instrument_registry.entries[0].margin.opening_buffer_atoms = @as(i128, 1) << 80;
+    try std.testing.expect(!std.mem.eql(u8, &before, &stateDigest(shard.*)));
+    before = stateDigest(shard.*);
+    shard.economic_projection.portfolio.instrument_position_count = 1;
+    shard.economic_projection.portfolio.instrument_positions[0] = .{ .instrument = 10, .product = .spot };
+    try std.testing.expect(!std.mem.eql(u8, &before, &stateDigest(shard.*)));
 }
 
 fn digestCanonicalProjections(hasher: *Sha256, shard: TradingShard) void {
@@ -3833,7 +3943,7 @@ fn digestCanonicalProjections(hasher: *Sha256, shard: TradingShard) void {
     digestBool(hasher, shard.canonical_account.valid);
     digestBool(hasher, shard.canonical_account.failure != null);
     if (shard.canonical_account.failure) |failure| digestInt(hasher, u8, @intFromEnum(failure));
-    digestInt(hasher, u8, shard.canonical_account.seen_count);
+    digestInt(hasher, u16, shard.canonical_account.seen_count);
     digestInt(hasher, u8, shard.canonical_account.balance_count);
     digestInt(hasher, u8, shard.canonical_account.position_count);
     digestInt(hasher, u8, shard.canonical_account.margin_count);

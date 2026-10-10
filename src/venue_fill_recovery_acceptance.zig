@@ -529,9 +529,7 @@ test "OKX raw private fills traverse adapter Owner durable recovery without deco
     var context = Context{};
     const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
     thread.join();
-    if (context.failure) |err| {
-        std.debug.panic("venue fill recovery failed: {s}", .{@errorName(err)});
-    }
+    if (context.failure) |err| return err;
 }
 
 fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canonical.EconomicFaultReason, rejection: ?private.RejectReason, core_reject: bool, persist_fault: ?durable.FaultPoint, rest: bool, ownership: enum { owned, external, external_single_limit }) !void {

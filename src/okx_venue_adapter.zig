@@ -80,7 +80,7 @@ const Bootstrap = struct {
 };
 
 pub const ResumeCheckpoint = struct {
-    schema: u16 = 1,
+    schema: u16 = 2,
     binding: Binding,
     profile: order.CapabilityProfile,
     rules: Rules,
@@ -102,7 +102,7 @@ pub const ResumeCheckpoint = struct {
     account_source_sequence: u64,
 };
 
-pub const max_resume_checkpoint_bytes = 96 * 1024;
+pub const max_resume_checkpoint_bytes = 192 * 1024;
 
 pub const OkxVenueAdapter = struct {
     asset_definitions: @import("asset_registry.zig").Registry = .{},
@@ -192,7 +192,7 @@ pub const OkxVenueAdapter = struct {
             self.pending_order_reconciliation_count != 0 or self.pending_account_reconciliation != null or
             self.pending_economic_boundary != null or self.pending_economic_through != null) return error.InvalidState;
         const checkpoint = try @import("snapshot_codec.zig").decodeBare(encoded, ResumeCheckpoint);
-        if (checkpoint.schema != 1 or !std.meta.eql(checkpoint.binding, self.binding orelse return error.InvalidBinding) or
+        if (checkpoint.schema != 2 or !std.meta.eql(checkpoint.binding, self.binding orelse return error.InvalidBinding) or
             !std.meta.eql(checkpoint.profile, self.profile) or !std.meta.eql(checkpoint.rules, self.rules) or
             checkpoint.order_link_count > pending_capacity or checkpoint.known_economic_fill_count > 32 or checkpoint.balance_source_count > 8 or
             checkpoint.next_event_sequence == 0 or checkpoint.next_legacy_id == 0 or checkpoint.active_bootstrap == 0 or

@@ -2,6 +2,10 @@
 
 const canonical = @import("canonical_event.zig");
 const std = @import("std");
+pub const max_balances = canonical.max_asset_definitions;
+pub const max_positions = @import("instrument_registry.zig").max_entries;
+pub const max_margins = max_positions;
+const max_seen = max_balances + max_positions + max_margins;
 
 pub const AccountProjection = struct {
     pub const Failure = enum(u8) { invalid_snapshot, incomplete_snapshot, sequence_gap, identity_conflict, capacity_exhausted, invalid_bootstrap };
@@ -14,13 +18,13 @@ pub const AccountProjection = struct {
     // depends on the Shard's unresolved faults, exposed by integritySnapshot.
     valid: bool = false,
     failure: ?Failure = null,
-    seen: [canonical.max_account_facts]canonical.AccountObservation = undefined,
-    seen_count: u8 = 0,
-    balances: [canonical.max_account_facts]canonical.AccountBalance = undefined,
+    seen: [max_seen]canonical.AccountObservation = undefined,
+    seen_count: u16 = 0,
+    balances: [max_balances]canonical.AccountBalance = undefined,
     balance_count: u8 = 0,
-    positions: [canonical.max_account_facts]canonical.AccountPosition = undefined,
+    positions: [max_positions]canonical.AccountPosition = undefined,
     position_count: u8 = 0,
-    margins: [canonical.max_account_facts]canonical.AccountMargin = undefined,
+    margins: [max_margins]canonical.AccountMargin = undefined,
     margin_count: u8 = 0,
 
     pub fn apply(self: *AccountProjection, event: canonical.Payload) !void {
@@ -145,7 +149,7 @@ pub const AccountProjection = struct {
         self.margins[self.margin_count] = observed.value;
         self.margin_count += 1;
     }
-    fn remove(comptime T: type, values: *[canonical.max_account_facts]T, count: *u8, index: usize) void {
+    fn remove(comptime T: type, values: []T, count: *u8, index: usize) void {
         var cursor = index;
         while (cursor + 1 < count.*) : (cursor += 1) values[cursor] = values[cursor + 1];
         count.* -= 1;
@@ -225,9 +229,9 @@ pub const AccountProjection = struct {
     pub fn semanticDigest(self: *const AccountProjection) [32]u8 {
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
         hashValue(&hasher, .{ self.exchange_account, self.valid, self.failure, self.balance_count, self.position_count, self.margin_count });
-        var balances: [canonical.max_account_facts]canonical.AccountBalance = undefined;
-        var positions: [canonical.max_account_facts]canonical.AccountPosition = undefined;
-        var margins: [canonical.max_account_facts]canonical.AccountMargin = undefined;
+        var balances: [max_balances]canonical.AccountBalance = undefined;
+        var positions: [max_positions]canonical.AccountPosition = undefined;
+        var margins: [max_margins]canonical.AccountMargin = undefined;
         @memcpy(balances[0..self.balance_count], self.balances[0..self.balance_count]);
         @memcpy(positions[0..self.position_count], self.positions[0..self.position_count]);
         @memcpy(margins[0..self.margin_count], self.margins[0..self.margin_count]);
@@ -405,14 +409,14 @@ test "account observations retain a bounded duplicate window without exhausting 
     var projection = AccountProjection{};
     try projection.apply(.{ .account_bootstrap_snapshot = .{ .identity = 1, .exchange_account = 2, .scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true }, .source_stream = 4, .source_sequence = 0, .balance_count = 0, .position_count = 0, .margin_count = 0 } });
     var observation: canonical.AccountObservation = .{ .identity = 100, .exchange_account = 2, .bootstrap = 1, .source_stream = 4, .source_sequence = 1, .value = .{ .margin = .{ .value = .{ .amount = .{ .asset = 5, .atoms = 1 } } } } };
-    for (0..canonical.max_account_facts + 1) |index| {
+    for (0..max_seen + 1) |index| {
         observation.identity = 100 + index;
         observation.source_sequence = 1 + index;
         observation.value.margin.value.amount.?.atoms = 1 + @as(i128, @intCast(index));
         try projection.apply(.{ .account_observed = observation });
     }
     try std.testing.expect(projection.valid);
-    try std.testing.expectEqual(@as(u8, canonical.max_account_facts), projection.seen_count);
+    try std.testing.expectEqual(@as(u16, max_seen), projection.seen_count);
     try projection.apply(.{ .account_observed = observation });
     observation.identity = 100;
     observation.source_sequence = 1;

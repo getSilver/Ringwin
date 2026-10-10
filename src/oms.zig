@@ -1,11 +1,12 @@
 const std = @import("std");
 const canonical = @import("canonical_event.zig");
 
-pub const max_orders = 8;
+// shortcut: 32 selected live plus one terminal share slots until ticket 05 separates archive retention.
+pub const max_orders = 33;
 pub const max_group_members = 4;
 pub const max_commands = 8;
-const max_command_history = 32;
-const max_fact_history = 32;
+const max_command_history = 64;
+const max_fact_history = 64;
 const max_intent_history = 64;
 pub const max_tombstones = 2;
 
@@ -98,6 +99,8 @@ pub const DispatchAuthorityRefs = struct {
     risk_lease: FactRef = .{},
     capability: FactRef = .{},
     instrument_rules: FactRef = .{},
+    margin_rules: FactRef = .{},
+    instrument_trading: FactRef = .{},
     config: FactRef = .{},
     adapter_session: canonical.AdapterSessionIdentity = 0,
     dispatch_deadline_monotonic_ns: u64 = 0,
@@ -110,6 +113,8 @@ pub const DispatchAuthorityRefs = struct {
             self.risk_lease.identity != 0 and self.risk_lease.version != 0 and self.risk_lease.barrier != 0 and
             self.capability.identity != 0 and self.capability.version != 0 and self.capability.barrier != 0 and
             self.instrument_rules.identity != 0 and self.instrument_rules.version != 0 and self.instrument_rules.barrier != 0 and
+            self.margin_rules.identity != 0 and self.margin_rules.version != 0 and self.margin_rules.barrier != 0 and
+            self.instrument_trading.identity != 0 and self.instrument_trading.version != 0 and self.instrument_trading.barrier != 0 and
             self.config.identity != 0 and self.config.version != 0 and self.config.barrier != 0 and
             self.adapter_session != 0 and self.dispatch_deadline_monotonic_ns != 0 and self.deadline_barrier != 0;
     }
