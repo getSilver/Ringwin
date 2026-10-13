@@ -107,11 +107,14 @@ fn exercise(comptime kind: Kind) !void {
         const digest = owner.shard.canonicalStateDigest();
         const recovered = try gpa.create(demo.Owner);
         defer gpa.destroy(recovered);
-        recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+        try demo.Owner.recoverInto(recovered, memory.interface(), undefined, stream);
         try std.testing.expectEqualSlices(u8, &digest, &recovered.shard.canonicalStateDigest());
-        var bytes: [durable.max_snapshot_bytes]u8 = undefined;
-        const restored = try trading.TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
-        try std.testing.expectEqualSlices(u8, &digest, &restored.shard.canonicalStateDigest());
+        const bytes = try gpa.alloc(u8, durable.max_snapshot_bytes);
+        defer gpa.free(bytes);
+        const restored = try gpa.create(trading.TradingShard);
+        defer gpa.destroy(restored);
+        _ = try trading.TradingShard.restoreSnapshotInto(restored, try owner.committedSnapshot(bytes));
+        try std.testing.expectEqualSlices(u8, &digest, &restored.canonicalStateDigest());
         try std.testing.expectEqual(@as(u64, 0), io.calls);
         return;
     }
@@ -142,10 +145,10 @@ fn exercise(comptime kind: Kind) !void {
         const conflict_memory = try gpa.create(durable.MemoryAdapter);
         defer gpa.destroy(conflict_memory);
         // ponytail: branch borrows immutable archive; clone payloads if this branch rotates.
-        conflict_memory.* = memory.*;
+        @memcpy(std.mem.asBytes(conflict_memory), std.mem.asBytes(memory));
         const conflicting_owner = try gpa.create(demo.Owner);
         defer gpa.destroy(conflicting_owner);
-        conflicting_owner.* = try demo.Owner.recover(conflict_memory.interface(), undefined, stream);
+        try demo.Owner.recoverInto(conflicting_owner, conflict_memory.interface(), undefined, stream);
         var conflicting = canonical.AdapterOutputBatch{};
         var changed = continuous.slice()[conflict_index];
         if (conflict_index == 0) changed.event.account_observed.value.balance.value.total.atoms += 1 else changed.event.account_observed.value.position.value.margin.?.atoms += 1;
@@ -160,16 +163,19 @@ fn exercise(comptime kind: Kind) !void {
         const conflict_digest = conflicting_owner.shard.canonicalStateDigest();
         const recovered_conflict = try gpa.create(demo.Owner);
         defer gpa.destroy(recovered_conflict);
-        recovered_conflict.* = try demo.Owner.recover(conflict_memory.interface(), undefined, stream);
+        try demo.Owner.recoverInto(recovered_conflict, conflict_memory.interface(), undefined, stream);
         try std.testing.expectEqualSlices(u8, &conflict_digest, &recovered_conflict.shard.canonicalStateDigest());
     }
     const recovered = try gpa.create(demo.Owner);
     defer gpa.destroy(recovered);
-    recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try demo.Owner.recoverInto(recovered, memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &once, &recovered.shard.canonicalStateDigest());
-    var bytes: [durable.max_snapshot_bytes]u8 = undefined;
-    const restored = try trading.TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
-    try std.testing.expectEqualSlices(u8, &once, &restored.shard.canonicalStateDigest());
+    const bytes = try gpa.alloc(u8, durable.max_snapshot_bytes);
+    defer gpa.free(bytes);
+    const restored = try gpa.create(trading.TradingShard);
+    defer gpa.destroy(restored);
+    _ = try trading.TradingShard.restoreSnapshotInto(restored, try owner.committedSnapshot(bytes));
+    try std.testing.expectEqualSlices(u8, &once, &restored.canonicalStateDigest());
     // Omit an emitted account observation to inject a real logical-source gap.
     if (kind == .binance) {
         _ = try implementation.ingestPrivate(gpa, .ws, null, times,
@@ -183,10 +189,10 @@ fn exercise(comptime kind: Kind) !void {
     try std.testing.expect(!owner.shard.canonical_account.valid);
     try std.testing.expect(owner.shard.oms.recovery_only);
     const failed = owner.shard.canonicalStateDigest();
-    recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try demo.Owner.recoverInto(recovered, memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &failed, &recovered.shard.canonicalStateDigest());
-    const failed_snapshot = try trading.TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
-    try std.testing.expectEqualSlices(u8, &failed, &failed_snapshot.shard.canonicalStateDigest());
+    _ = try trading.TradingShard.restoreSnapshotInto(restored, try owner.committedSnapshot(bytes));
+    try std.testing.expectEqualSlices(u8, &failed, &restored.canonicalStateDigest());
     try std.testing.expectEqual(@as(u64, 0), io.calls);
 }
 
@@ -200,7 +206,7 @@ fn check(comptime kind: Kind) !void {
         }
     };
     var worker = Worker{};
-    const thread = try std.Thread.spawn(.{ .stack_size = 128 * 1024 * 1024 }, Worker.run, .{&worker});
+    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Worker.run, .{&worker});
     thread.join();
     if (worker.failure) |err| return err;
 }

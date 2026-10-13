@@ -23,7 +23,8 @@ const place_fee_atoms: i128 = 400_000;
 const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
 pub const acceptance_schema_version: u16 = production_contract.acceptance_schema_version;
-const expected_shared_summary = "6851d149daea9276e0cf3f8a1c0ff346edf179482d314c9677af1d5f7d1f498b";
+// StateDigestV11; captured after economic and three-path recovery equality assertions.
+const expected_shared_summary = "b09266fa1e98725d945f4f57de07c465e78c499bf8f1ed6817b6be99395214a8";
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
     return trading.applyStable(shard, stable_journal, .{ .core = input });
@@ -59,12 +60,13 @@ const World = struct {
     summary_sequences: [max_shards]u64 = @splat(0),
     next_identity: u128 = 100,
 
-    fn init() World {
-        return .{
-            .shards = undefined,
-            .journals = undefined,
-            .coordinator = coordination.AccountCoordinator.init(exchange_account, ceiling_atoms, ceiling_atoms),
-        };
+    fn initInto(self: *World) void {
+        self.coordinator = coordination.AccountCoordinator.init(exchange_account, ceiling_atoms, ceiling_atoms);
+        self.coordination_journal = coordination.CoordinationJournal.initAt(1);
+        self.ownership = .{};
+        self.ops = .{};
+        self.summary_sequences = @splat(0);
+        self.next_identity = 100;
     }
 
     fn apply(self: *World, index: usize, event: trading.CoreEvent) !void {
@@ -200,10 +202,9 @@ fn genesisEvents(index: usize) [15]trading.CoreEvent {
     };
 }
 
-fn replayShardFromJournal(bytes: []const u8) !trading.TradingShard {
-    const recovered = try trading.recoverStable(.{}, bytes);
-    if (recovered.status != .clean) return error.TruncatedShardTail;
-    return recovered.shard;
+fn replayShardFromJournalInto(destination: *trading.TradingShard, initial: *const trading.TradingShard, bytes: []const u8) !void {
+    const status = try trading.recoverStableInto(destination, initial, bytes);
+    if (status != .clean) return error.TruncatedShardTail;
 }
 
 fn replayCoordination(live: *const World) !coordination.AccountCoordinator {
@@ -286,7 +287,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     const allocator = if (@import("builtin").is_test) std.testing.allocator else std.heap.page_allocator;
     const world = try allocator.create(World);
     defer allocator.destroy(world);
-    world.* = World.init();
+    world.initInto();
     for (&world.shards, &world.journals, 0..) |*shard, *journal, index| {
         shard.* = .{};
         journal.* = trading.journal.Journal.init();
@@ -650,11 +651,13 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
 
     const replayed_shards = try allocator.create([max_shards]trading.TradingShard);
     defer allocator.destroy(replayed_shards);
+    const replay_initial = try allocator.create(trading.TradingShard);
+    defer allocator.destroy(replay_initial);
     for (0..max_shards) |index| {
-        replayed_shards[index] = try replayShardFromJournal(world.journals[index].bytes());
-        const tail = try trading.recoverStable(replayed_shards[index], shard_tails[index]);
-        if (tail.status != .clean) return error.TruncatedShardTail;
-        replayed_shards[index] = tail.shard;
+        replay_initial.* = .{};
+        try replayShardFromJournalInto(&replayed_shards[index], replay_initial, world.journals[index].bytes());
+        @memcpy(std.mem.asBytes(replay_initial), std.mem.asBytes(&replayed_shards[index]));
+        try replayShardFromJournalInto(&replayed_shards[index], replay_initial, shard_tails[index]);
     }
     for (0..max_shards) |index|
         try std.testing.expectEqualSlices(
@@ -668,7 +671,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
 
     const path_b = try allocator.create(coordination.AccountRecovery);
     defer allocator.destroy(path_b);
-    path_b.* = try coordination.AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
+    try coordination.AccountRecovery.beginWithCoordinatorTailInto(path_b, coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
     try std.testing.expect(path_b.coordinator.recovery_only);
     try std.testing.expectEqualSlices(u8, &world.coordinator.digest(), &path_b.coordinator.digest());
     try std.testing.expectEqual(world.coordinator.barrier, path_b.coordinator.barrier);
@@ -687,7 +690,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
 
     const path_success = try allocator.create(coordination.AccountRecovery);
     defer allocator.destroy(path_success);
-    path_success.* = try coordination.AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
+    try coordination.AccountRecovery.beginWithCoordinatorTailInto(path_success, coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
     _ = try path_success.coordinator.reconcileMargin(recovery_observation);
     try std.testing.expectError(error.ForcedExecutionReconciliationBreak, path_success.coordinator.resolveMarginGate(recovery_observation.identity));
     try std.testing.expectError(error.ForcedExecutionReconciliationBreak, path_success.completeCoordinatorRecovery());
@@ -704,11 +707,11 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
 
     const path_c = try allocator.create(coordination.AccountRecovery);
     defer allocator.destroy(path_c);
-    path_c.* = try coordination.AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
+    try coordination.AccountRecovery.beginWithCoordinatorTailInto(path_c, coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
     try std.testing.expectEqualSlices(u8, &world.coordinator.digest(), &path_c.coordinator.digest());
     const mid_crash_observation = recovery_observation;
     _ = try path_c.coordinator.reconcileMargin(mid_crash_observation);
-    path_c.* = try coordination.AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
+    try coordination.AccountRecovery.beginWithCoordinatorTailInto(path_c, coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
     try std.testing.expectEqualSlices(u8, &world.coordinator.digest(), &path_c.coordinator.digest());
     try std.testing.expectError(error.ForcedExecutionReconciliationBreak, path_c.completeCoordinatorRecovery());
     _ = try path_c.coordinator.reconcileMargin(mid_crash_observation);
@@ -721,7 +724,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     for (replayed_shards) |*shard| fence(shard);
     const fenced_live = try allocator.create([max_shards]trading.TradingShard);
     defer allocator.destroy(fenced_live);
-    fenced_live.* = world.shards;
+    @memcpy(std.mem.asBytes(fenced_live), std.mem.asBytes(&world.shards));
     for (fenced_live) |*shard| fence(shard);
     for (0..max_shards) |index| {
         try std.testing.expectEqualSlices(

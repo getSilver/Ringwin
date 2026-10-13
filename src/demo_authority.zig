@@ -11,6 +11,8 @@ const venue = @import("venue_adapter.zig");
 const okx = @import("okx_venue_adapter.zig");
 const failover = @import("failover.zig");
 const raw_ingress = @import("raw_ingress.zig");
+const history = @import("business_history.zig");
+const snapshot_codec = @import("snapshot_codec.zig");
 
 pub const max_private_resume_bytes = okx.max_resume_checkpoint_bytes;
 pub const PrivateRecoveryBoundary = struct {
@@ -312,6 +314,8 @@ pub const Owner = struct {
     checkpoint_pending: bool = false,
     recovery_ingress_verified: bool = false,
     committing_checkpoint: bool = false,
+    committing_order_archive: bool = false,
+    committing_history_candidate: bool = false,
     recovery_ingress: ?durable.StreamIdentity = null,
     recovery_ingress_store: ?durable.Store = null,
     private_boundary: ?PrivateRecoveryBoundary = null,
@@ -322,39 +326,81 @@ pub const Owner = struct {
     /// Caller must supply an operator-owned virgin identity. A missing file is
     /// never interpreted as permission to create a new authority history.
     pub fn bootstrap(store: durable.Store, io: std.Io, stream: durable.StreamIdentity) !Owner {
+        var owner: Owner = undefined;
+        try bootstrapInto(&owner, store, io, stream);
+        return owner;
+    }
+
+    /// Caller publishes this destination only after virgin identity validation.
+    pub fn bootstrapInto(owner: *Owner, store: durable.Store, io: std.Io, stream: durable.StreamIdentity) !void {
+        errdefer {
+            owner.ready = false;
+            owner.closed = true;
+        }
         if (stream.domain != .decision_log or stream.id == 0 or store.safetyGate() != .open)
             return error.DecisionLogUnavailable;
-        return .{ .store = store, .io = io, .stream = stream };
+        owner.* = .{ .store = store, .io = io, .stream = stream };
     }
 
     pub fn recover(store: durable.Store, io: std.Io, stream: durable.StreamIdentity) !Owner {
+        var owner: Owner = undefined;
+        try recoverInto(&owner, store, io, stream);
+        return owner;
+    }
+
+    /// Caller publishes this destination only after complete recovery succeeds.
+    pub fn recoverInto(owner: *Owner, store: durable.Store, io: std.Io, stream: durable.StreamIdentity) !void {
+        errdefer {
+            owner.ready = false;
+            owner.closed = true;
+        }
+        owner.* = .{ .store = store, .io = io, .stream = stream, .shard = undefined };
         if (stream.domain != .decision_log or stream.id == 0 or store.safetyGate() != .open)
             return error.DecisionLogUnavailable;
         const recovered = store.recover(io, stream) catch return error.DecisionLogUnavailable;
         if (recovered.status != .ready or recovered.gate != .open or
-            recovered.committed_barrier == 0 or recovered.last_sequence != recovered.committed_barrier)
+            recovered.committed_barrier == 0 or recovered.last_sequence < recovered.committed_barrier or
+            recovered.snapshot_barrier > recovered.committed_barrier)
             return error.DecisionLogUnavailable;
         const checkpoint_view = privateCheckpointView(recovered.snapshot) catch return error.DecisionLogUnavailable;
-        var recovered_shard = if (recovered.tail_count == 0 and recovered.tail.len == 0)
-            (trading.TradingShard.restoreSnapshot(checkpoint_view.core_snapshot) catch return error.DecisionLogUnavailable).shard
-        else blk: {
+        const recovered_shard = &owner.shard;
+        if (recovered.tail_count == 0 and recovered.tail.len == 0) {
+            _ = trading.TradingShard.restoreSnapshotInto(recovered_shard, checkpoint_view.core_snapshot) catch return error.DecisionLogUnavailable;
+        } else {
             const tails = if (recovered.tail_count != 0) recovered.tail_segments[0..recovered.tail_count] else &.{recovered.tail};
-            const restored = trading.TradingShard.restoreSegments(checkpoint_view.core_snapshot, tails) catch return error.DecisionLogUnavailable;
-            // An open, fully committed tail is legal; the Store verified its
-            // continuity and the shard replay verified every derived fact.
-            break :blk restored.shard;
-        };
+            // Store verifies continuity; replay publishes only complete verified fact groups.
+            _ = trading.TradingShard.restoreSegmentsInto(recovered_shard, checkpoint_view.core_snapshot, tails) catch return error.DecisionLogUnavailable;
+        }
         if (recovered_shard.authoritativeBarrier() != recovered.committed_barrier) return error.DecisionLogUnavailable;
         if (recovered_shard.checkpoint) |receipt| if (receipt.stream != stream.id) return error.DecisionLogUnavailable;
         if (recovered_shard.checkpointGeneration() != 0 and
             !(store.verifyArchiveReceipt(io, stream, recovered_shard.checkpointArchiveBarrier(), recovered_shard.checkpointArchiveRoot()) catch return error.DecisionLogUnavailable))
             return error.DecisionLogUnavailable;
+        if (recovered_shard.business_history_root) |root| {
+            const archived = recovered_shard.last_order_archive orelse return error.DecisionLogUnavailable;
+            const request: history.LookupRequest = .{
+                .pending_id = archived.order_id,
+                .key = .{ .origin = root.origin, .identity = .{ .order = archived.order_id } },
+                .candidate_payload_digest = @splat(0),
+                .original_input_digest = archived.qualification_digest,
+                .root_digest = root.root_digest,
+                .epoch = root.epoch,
+                .barrier = root.barrier,
+            };
+            const result = store.queryOrderHistory(io, request) catch return error.DecisionLogUnavailable;
+            const verdict = history.verifyResult(request, &result.proof, root) catch return error.DecisionLogUnavailable;
+            if (verdict != .same and verdict != .conflict) return error.DecisionLogUnavailable;
+            history.validateRecord(&result) catch return error.DecisionLogUnavailable;
+            const qualification = snapshot_codec.decodeBare(result.record_bytes[0..result.record_len], trading.oms.OrderArchiveQualification) catch return error.DecisionLogUnavailable;
+            if (!std.mem.eql(u8, &qualification.digest(), &archived.qualification_digest)) return error.DecisionLogUnavailable;
+        }
         // A committed decision prefix may precede durable private facts. Every
         // restart re-arms admission, independent of the saved snapshot flag.
         recovered_shard.recovery_admission_pending = true;
-        const next_sequence = std.math.add(u64, recovered.last_sequence, 1) catch return error.DecisionLogUnavailable;
+        const next_sequence = std.math.add(u64, recovered.committed_barrier, 1) catch return error.DecisionLogUnavailable;
         var recovered_journal = journal.Journal.initAt(next_sequence);
-        const active_segment = if (recovered.active_segment.len != 0) recovered.active_segment else recovered.tail;
+        const physical_active = if (recovered.active_segment.len != 0) recovered.active_segment else recovered.tail;
+        const active_segment = if (physical_active.len != 0) durable.committedJournalPrefix(physical_active, recovered.committed_barrier) catch return error.DecisionLogUnavailable else physical_active;
         if (active_segment.len != 0) {
             var reader = journal.Reader.init(active_segment) catch return error.DecisionLogUnavailable;
             recovered_journal = journal.Journal.initAt(reader.next_sequence);
@@ -364,15 +410,10 @@ pub const Owner = struct {
             };
             if (recovered.segment_sealed) recovered_journal.seal() catch return error.DecisionLogUnavailable;
         }
-        var owner: Owner = .{
-            .store = store,
-            .io = io,
-            .stream = stream,
-            .shard = recovered_shard,
-            .decision_journal = recovered_journal,
-            .checkpoint_pending = recovered.segment_sealed or (recovered.archived_barrier == recovered_shard.authoritativeBarrier() and !std.mem.eql(u8, &recovered.archive_root, &recovered_shard.checkpointArchiveRoot())),
-            .ready = true,
-        };
+        owner.decision_journal = recovered_journal;
+        owner.checkpoint_pending = recovered.segment_sealed or (recovered.archived_barrier == recovered_shard.authoritativeBarrier() and !std.mem.eql(u8, &recovered.archive_root, &recovered_shard.checkpointArchiveRoot()));
+        // Quarantine the suffix; startup never truncates or reuses its identities.
+        owner.closed = recovered.last_sequence > recovered.committed_barrier or active_segment.len != physical_active.len;
         if (checkpoint_view.boundary) |boundary| {
             if (boundary.decision_stream != stream.id or boundary.decision_barrier > recovered.snapshot_barrier)
                 return error.DecisionLogUnavailable;
@@ -380,16 +421,23 @@ pub const Owner = struct {
             @memcpy(owner.private_resume[0..checkpoint_view.seed.len], checkpoint_view.seed);
             owner.private_resume_len = checkpoint_view.seed.len;
         }
-        return owner;
+        owner.ready = true;
     }
 
     /// Bind the configured durable ingress identity explicitly. Decision-only
     /// recovery remains read-only for new-risk admission; a caller cannot infer
     /// a raw Store stream from canonical source-session identities.
     pub fn recoverWithIngress(store: durable.Store, io: std.Io, stream: durable.StreamIdentity, ingress: durable.StreamIdentity) !Owner {
-        var owner = try recover(store, io, stream);
-        try owner.bindRecoveryIngress(store, ingress);
+        var owner: Owner = undefined;
+        try recoverWithIngressInto(&owner, store, io, stream, ingress);
         return owner;
+    }
+
+    /// Restore into unpublished caller-owned storage. A failed restore may
+    /// modify the destination; publish it only after recovery and binding succeed.
+    pub fn recoverWithIngressInto(owner: *Owner, store: durable.Store, io: std.Io, stream: durable.StreamIdentity, ingress: durable.StreamIdentity) !void {
+        try recoverInto(owner, store, io, stream);
+        try owner.bindRecoveryIngress(store, ingress);
     }
 
     /// Explicitly bind an execution-owned Store through its read-only public
@@ -413,27 +461,52 @@ pub const Owner = struct {
     /// Apply to a candidate and publish only after every record and the
     /// barrier have been committed. A fault closes this owner permanently.
     pub fn apply(self: *Owner, input: trading.CanonicalEvent) !?trading.OrderCommand {
-        const maintenance = input == .core and input.core.payload == .checkpoint_committed;
-        if ((maintenance and !self.committing_checkpoint) or (self.checkpoint_pending and !maintenance)) return error.DecisionLogUnavailable;
+        const checkpoint_maintenance = input == .core and input.core.payload == .checkpoint_committed;
+        const archive_maintenance = input == .core and input.core.payload == .order_archive_committed;
+        const history_maintenance = input == .core and (input.core.payload == .history_candidate_started or input.core.payload == .history_candidate_verified);
+        if ((checkpoint_maintenance and !self.committing_checkpoint) or
+            (archive_maintenance and !self.committing_order_archive) or
+            (history_maintenance and !self.committing_history_candidate) or
+            (self.checkpoint_pending and !checkpoint_maintenance)) return error.DecisionLogUnavailable;
         if (self.closed or self.store.safetyGate() != .open) {
             self.closeAdmission();
             return error.DecisionLogUnavailable;
+        }
+        if (!checkpoint_maintenance and !archive_maintenance and !history_maintenance) {
+            const recovery_maintenance = input == .core and (input.core.payload == .recovery_completed or input.core.payload == .safety_gate_change);
+            if ((self.shard.pending_history_candidate != null or self.shard.pending_safety_history_candidate != null or self.shard.deferred_history_admission_count != 0) and
+                !trading.TradingShard.historySafetyInput(input)) return error.HistoryLookupDeferred;
+            const cold_candidate = if (recovery_maintenance) null else lookup: {
+                break :lookup self.shard.historyCandidateFor(input) catch |err| {
+                    if (err == error.HistorySafetyCapacity and input == .venue) break :lookup null;
+                    if (err != error.HistorySafetyCapacity and err != error.HistoryLookupPending) self.closeAdmission();
+                    return err;
+                };
+            };
+            if (cold_candidate) |pending| {
+                self.committing_history_candidate = true;
+                defer self.committing_history_candidate = false;
+                _ = try self.apply(.{ .core = .{ .identity = std.math.cast(u64, pending.request.pending_id) orelse return error.HistoryPendingIdentityCapacity, .payload = .{ .history_candidate_started = pending } } });
+                return self.resolveHistoryCandidate(pending.request.pending_id);
+            }
         }
         if (self.private_boundary) |boundary| if (self.shard.authoritativeBarrier() - boundary.decision_barrier >= 1024) {
             self.closeAdmission();
             return error.PrivateRecoveryCapacity;
         };
-        var candidate = self.shard;
+        var candidate: trading.TradingShard = undefined;
+        @memcpy(std.mem.asBytes(&candidate), std.mem.asBytes(&self.shard));
         var candidate_journal = self.decision_journal;
         const before = candidate_journal.last_sequence;
         var rejected: ?anyerror = null;
-        const command = trading.applyStable(&candidate, &candidate_journal, input) catch |err| blk: {
+        const command = trading.applyStableOnCandidate(&candidate, &self.shard, &candidate_journal, input) catch |err| blk: {
             if (err == error.RecoveryAdmissionPending) return err;
             rejected = err;
             break :blk null;
         };
         if (candidate_journal.last_sequence == before) {
             if (rejected == null) return null;
+            if (rejected.? == error.HistorySafetyCapacity or rejected.? == error.HistoryLookupPending) return rejected.?;
             self.closeAdmission();
             return rejected.?;
         }
@@ -461,14 +534,114 @@ pub const Owner = struct {
             self.closeAdmission();
             return error.DecisionLogUnavailable;
         };
-        self.shard = candidate;
+        @memcpy(std.mem.asBytes(&self.shard), std.mem.asBytes(&candidate));
         self.decision_journal = candidate_journal;
         if (rejected) |err| return err;
         return command;
     }
 
     pub fn applyAdapterBatch(self: *Owner, batch: canonical.AdapterOutputBatch) !void {
-        for (batch.slice()) |record| _ = try self.apply(.{ .venue = record });
+        var deferred = false;
+        for (batch.slice()) |record| {
+            _ = self.apply(.{ .venue = record }) catch |err| switch (err) {
+                error.HistoryLookupDeferred, error.HistorySafetyCapacity => {
+                    // The caller retains this batch for retry; later known safety facts can progress.
+                    deferred = true;
+                    continue;
+                },
+                else => return err,
+            };
+        }
+        if (deferred) return error.HistoryLookupDeferred;
+    }
+
+    /// A missing or unavailable answer leaves the original candidate durable.
+    /// Only a verified answer is admitted back to the pure Core transition.
+    pub fn resolveColdCandidate(self: *Owner) !?trading.OrderCommand {
+        const pending = self.shard.pending_safety_history_candidate orelse self.shard.pending_history_candidate orelse return null;
+        return self.resolveHistoryCandidate(pending.request.pending_id);
+    }
+
+    fn pendingHistoryCandidate(self: *const Owner, pending_id: u128) ?@import("cold_business_candidate.zig").PendingCandidate {
+        if (self.shard.pending_safety_history_candidate) |pending| if (pending.request.pending_id == pending_id) return pending;
+        if (self.shard.pending_history_candidate) |pending| if (pending.request.pending_id == pending_id) return pending;
+        return null;
+    }
+
+    fn resolveHistoryCandidate(self: *Owner, pending_id: u128) !?trading.OrderCommand {
+        if (self.closed or !self.ready) return error.DecisionLogUnavailable;
+        const pending = self.pendingHistoryCandidate(pending_id) orelse return null;
+        const root = self.shard.business_history_root orelse return error.DecisionLogUnavailable;
+        const result = self.store.queryOrderHistory(self.io, pending.request) catch {
+            if (self.store.safetyGate() != .open) self.closeAdmission();
+            return error.HistoryLookupDeferred;
+        };
+        const verdict = pending.finalize(&result.proof, root) catch {
+            self.closeAdmission();
+            return error.InvalidHistoryProof;
+        };
+        if (verdict == .same or verdict == .conflict) history.validateRecord(&result) catch {
+            self.closeAdmission();
+            return error.InvalidHistoryProof;
+        };
+        self.committing_history_candidate = true;
+        defer self.committing_history_candidate = false;
+        const command = try self.apply(.{ .core = .{ .identity = std.math.cast(u64, pending.request.pending_id) orelse return error.HistoryPendingIdentityCapacity, .payload = .{ .history_candidate_verified = result.proof } } });
+        if (self.pendingHistoryCandidate(pending_id)) |remaining|
+            if (!std.meta.eql(remaining.request, pending.request)) return self.resolveHistoryCandidate(pending_id);
+        return command;
+    }
+
+    /// Archive evidence first, commit its root in the decision stream, then
+    /// release the execution cache. Any interrupted publication retains the
+    /// old hot order or the durable root needed to finish cache reclamation.
+    pub fn archiveTerminalOrder(self: *Owner, order_id: u64, gateway: *execution.Gateway) !history.Root {
+        if (!self.ready or self.closed or self.checkpoint_pending or self.committing_order_archive)
+            return error.DecisionLogUnavailable;
+        if (self.shard.pending_history_candidate != null or self.shard.pending_safety_history_candidate != null) return error.HistoryLookupDeferred;
+        gateway.completePreviousOrderArchive(&self.shard) catch |err| {
+            self.closeAdmission();
+            return err;
+        };
+        const origin: history.Origin = .{ .stream = self.stream, .account = self.shard.exchange_account_identity };
+        var builder = try @import("order_history_batch.zig").build(&self.shard, order_id, origin);
+        var evidence_buffer: [64]execution.DispatchEvidence = undefined;
+        const dispatches = try gateway.exportOrderDispatchEvidence(&self.shard, order_id, &evidence_buffer);
+        if (builder.qualification.order.dispatch_submitted and dispatches.len == 0) return error.DispatchArchiveEvidenceMissing;
+        for (dispatches) |dispatch| {
+            if (dispatch.proof.command.client_order_id.len == 0) return error.DispatchArchiveEvidenceMissing;
+            try builder.add(.{ .dispatch_command = dispatch.proof.command.command_id }, dispatch);
+            var first_for_client = true;
+            for (dispatches) |other| if (std.meta.eql(other.proof.command.client_order_id, dispatch.proof.command.client_order_id) and
+                other.proof.command.command_id < dispatch.proof.command.command_id)
+            {
+                first_for_client = false;
+                break;
+            };
+            if (first_for_client) try builder.add(.{ .client_order_id = dispatch.proof.command.client_order_id }, dispatch);
+        }
+        const previous = self.shard.business_history_root;
+        var view = try builder.batch(previous, self.shard.authoritativeBarrier(), if (previous) |root| root.epoch else 1);
+        const qualification_digest = builder.qualification.digest();
+        self.committing_order_archive = true;
+        defer self.committing_order_archive = false;
+        errdefer self.closeAdmission();
+        const receipt = try self.store.publishOrderHistory(self.io, view.value());
+        _ = try history.verifyReceipt(receipt, origin, qualification_digest, previous);
+        _ = try self.apply(.{ .core = .{ .identity = order_id, .payload = .{ .order_archive_committed = .{
+            .order_id = order_id,
+            .applied_fill_quantity = builder.qualification.applied_fill_quantity,
+            .qualification_digest = qualification_digest,
+            .receipt = receipt,
+        } } } });
+        try gateway.reclaimOrderDispatchEvidence(&self.shard, order_id);
+        return receipt.root;
+    }
+
+    pub fn resumeOrderArchive(self: *Owner, gateway: *execution.Gateway) !void {
+        const shard = try self.source();
+        const archived = shard.last_order_archive orelse return error.OrderArchiveNotCommitted;
+        try gateway.reclaimOrderDispatchEvidence(shard, archived.order_id);
     }
 
     fn closeAdmission(self: *Owner) void {
@@ -505,7 +678,7 @@ pub const Owner = struct {
     pub fn sealBootstrap(self: *Owner) !void {
         if (self.ready or self.shard.recovery_admission_pending)
             return error.DecisionLogUnavailable;
-        self.checkpointCommitted() catch return error.DecisionLogUnavailable;
+        self.checkpointCommitted(null) catch return error.DecisionLogUnavailable;
         self.ready = true;
     }
 
@@ -514,7 +687,15 @@ pub const Owner = struct {
     pub fn checkpoint(self: *Owner) !void {
         if (!self.ready) return error.DecisionLogUnavailable;
         if (self.checkpoint_pending and self.decision_journal.records == 0) return self.completeCheckpoint();
-        self.checkpointCommitted() catch return error.DecisionLogUnavailable;
+        self.checkpointCommitted(null) catch return error.DecisionLogUnavailable;
+    }
+
+    /// Scratch belongs to the caller and may be reused after this synchronous call.
+    /// It is never part of authoritative state, a digest, or a durable snapshot.
+    pub fn checkpointWithScratch(self: *Owner, scratch: []u8) !void {
+        if (!self.ready) return error.DecisionLogUnavailable;
+        if (self.checkpoint_pending and self.decision_journal.records == 0) return self.completeCheckpoint();
+        self.checkpointCommitted(scratch) catch return error.DecisionLogUnavailable;
     }
 
     pub fn checkpointPrivate(self: *Owner, boundary: PrivateRecoveryBoundary, seed: []const u8) !void {
@@ -563,7 +744,7 @@ pub const Owner = struct {
         const receipt = try self.shard.checkpointReceipt(self.stream.id, generation, archive.ordered_root);
         try self.commitCheckpointReceipt(receipt);
     }
-    fn checkpointCommitted(self: *Owner) !void {
+    fn checkpointCommitted(self: *Owner, scratch: ?[]u8) !void {
         errdefer self.closeAdmission();
         if (self.closed or self.store.safetyGate() != .open or self.shard.authoritativeBarrier() == 0 or
             self.shard.authoritativeBarrier() != self.decision_journal.last_sequence or self.decision_journal.records == 0)
@@ -572,11 +753,6 @@ pub const Owner = struct {
         const generation = try std.math.add(u64, self.shard.checkpointGeneration(), 1);
         var sealed = self.decision_journal;
         if (!sealed.sealed) try sealed.seal();
-        var snapshot_buffer: [durable.max_snapshot_bytes]u8 = undefined;
-        const core_snapshot = try self.shard.snapshot(&sealed, barrier, &snapshot_buffer);
-        var bundle_buffer: [durable.max_snapshot_bytes]u8 = undefined;
-        const snapshot = try self.durableSnapshot(core_snapshot, &bundle_buffer);
-        if (!self.decision_journal.sealed) try self.store.seal(self.io, self.stream);
         // A recovered seal may already have published this exact barrier.
         // Reuse its committed snapshot: the restart admission fence is runtime
         // state and must not create a conflicting snapshot object at that barrier.
@@ -585,13 +761,32 @@ pub const Owner = struct {
             const published = try self.store.recover(self.io, self.stream);
             if (published.snapshot_barrier == barrier and published.snapshot.len != 0) {
                 const view = try privateCheckpointView(published.snapshot);
-                const restored = try trading.TradingShard.restoreSnapshot(view.core_snapshot);
-                if (restored.barrier != barrier or !std.mem.eql(u8, &restored.shard.canonicalStateDigest(), &self.shard.canonicalStateDigest()))
+                const restored = try std.heap.page_allocator.create(trading.TradingShard);
+                defer std.heap.page_allocator.destroy(restored);
+                const restored_barrier = try trading.TradingShard.restoreSnapshotInto(restored, view.core_snapshot);
+                if (restored_barrier != barrier or !std.mem.eql(u8, &restored.canonicalStateDigest(), &self.shard.canonicalStateDigest()))
                     return error.DecisionLogUnavailable;
                 already_published = true;
             }
         }
-        if (!already_published) try self.store.publishSnapshot(self.io, self.stream, barrier, snapshot);
+        if (!already_published) {
+            if (scratch) |storage| {
+                if (storage.len < durable.max_snapshot_bytes) return error.SnapshotTooLarge;
+                const owner_start = @intFromPtr(self);
+                const scratch_start = @intFromPtr(storage.ptr);
+                const owner_end = try std.math.add(usize, owner_start, @sizeOf(Owner));
+                const scratch_end = try std.math.add(usize, scratch_start, storage.len);
+                if (scratch_start < owner_end and owner_start < scratch_end) return error.CheckpointScratchAliasesOwner;
+            }
+            const snapshot_buffer = scratch orelse try std.heap.page_allocator.alloc(u8, durable.max_snapshot_bytes);
+            defer if (scratch == null) std.heap.page_allocator.free(snapshot_buffer);
+            const core_snapshot = try self.shard.snapshot(&sealed, barrier, snapshot_buffer);
+            const bundle_buffer: []u8 = if (self.private_boundary != null) try std.heap.page_allocator.alloc(u8, durable.max_snapshot_bytes) else snapshot_buffer[0..0];
+            defer if (self.private_boundary != null) std.heap.page_allocator.free(bundle_buffer);
+            const snapshot = try self.durableSnapshot(core_snapshot, bundle_buffer);
+            if (!self.decision_journal.sealed) try self.store.seal(self.io, self.stream);
+            try self.store.publishSnapshot(self.io, self.stream, barrier, snapshot);
+        }
         try self.store.rotate(self.io, self.stream);
         const archive = try self.store.archiveReceipt(self.io, self.stream);
         var payload_digest: [32]u8 = undefined;
@@ -649,11 +844,13 @@ pub fn sendFromCommittedSnapshot(
     command_id: u64,
     now_monotonic_ns: u64,
 ) !venue.SendResult {
-    const restored = try trading.TradingShard.restoreSnapshot(bytes);
-    if (restored.barrier != expected_barrier or
-        !std.mem.eql(u8, &restored.shard.canonicalStateDigest(), &expected_digest))
+    const restored = try std.heap.page_allocator.create(trading.TradingShard);
+    defer std.heap.page_allocator.destroy(restored);
+    const barrier = try trading.TradingShard.restoreSnapshotInto(restored, bytes);
+    if (barrier != expected_barrier or
+        !std.mem.eql(u8, &restored.canonicalStateDigest(), &expected_digest))
         return error.DecisionSnapshotMismatch;
-    return sendFromShard(&restored.shard, gateway, guard, command_id, now_monotonic_ns);
+    return sendFromShard(restored, gateway, guard, command_id, now_monotonic_ns);
 }
 
 fn sendFromShard(shard: *const trading.TradingShard, gateway: *execution.Gateway, guard: *failover.GatewayLeaseGuard, command_id: u64, now_monotonic_ns: u64) !venue.SendResult {
@@ -668,7 +865,7 @@ fn sendFromShard(shard: *const trading.TradingShard, gateway: *execution.Gateway
     if (shard.recovery_admission_pending and current.operation != .cancel) return error.DecisionLogUnavailable;
     requireSafeDemoExposure(&shard.canonical_account, current.side == .sell, shard.activatedAssets()) catch return error.NotSent;
     const position = shard.currentNetExchangePosition(current.instrument) orelse return error.NotSent;
-    try gateway.observeAuthority(.{
+    try gateway.observeAuthorityFromShard(shard, .{
         .account = shard.exchange_account_identity,
         .effective_trading_authority = shard.operational_state.effectiveTradingAuthority(),
         .reservation_identity = current.reservation_identity,
@@ -751,11 +948,15 @@ test "Demo owner commits before publication and recovers only a complete barrier
     memory.* = .init();
     defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
-    var owner = try Owner.bootstrap(memory.interface(), undefined, stream);
+    const owner = try std.testing.allocator.create(Owner);
+    defer std.testing.allocator.destroy(owner);
+    owner.* = try Owner.bootstrap(memory.interface(), undefined, stream);
     try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
-    var gateway: execution.Gateway = .{};
+    const gateway = try std.testing.allocator.create(execution.Gateway);
+    defer std.testing.allocator.destroy(gateway);
+    gateway.init();
     var dummy_guard: failover.GatewayLeaseGuard = undefined;
-    try std.testing.expectError(error.DecisionLogUnavailable, owner.send(&gateway, &dummy_guard, 1, 1));
+    try std.testing.expectError(error.DecisionLogUnavailable, owner.send(gateway, &dummy_guard, 1, 1));
     var spot_rules = genesis[0];
     spot_rules.core.payload.instrument_rules_activated.base_asset = 0x425443;
     _ = try owner.apply(spot_rules);
@@ -764,11 +965,13 @@ test "Demo owner commits before publication and recovers only a complete barrier
     const source = try owner.source();
     try std.testing.expectEqual(@as(u64, 2), source.authoritativeBarrier());
     try std.testing.expectEqual(@as(u64, 1), source.checkpointGeneration());
-    var restored = try Owner.recover(memory.interface(), undefined, stream);
+    const restored = try std.testing.allocator.create(Owner);
+    defer std.testing.allocator.destroy(restored);
+    try Owner.recoverInto(restored, memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &source.canonicalStateDigest(), &(try restored.source()).canonicalStateDigest());
     _ = try owner.apply(genesis[1]);
     _ = try owner.apply(genesis[6]);
-    try @import("venue_adapter_contract.zig").activateTestAssets(&owner);
+    try @import("venue_adapter_contract.zig").activateTestAssets(owner);
     var account_snapshot = fixture.canonicalAt(2, 1, .{ .account_bootstrap_snapshot = .{
         .identity = 1,
         .exchange_account = 2,
@@ -799,13 +1002,16 @@ test "Demo owner commits before publication and recovers only a complete barrier
             .value = .{ .margin = .{ .value = .{ .amount = .{ .asset = 1, .atoms = 100 } } } },
         } }));
     }
-    restored = try Owner.recover(memory.interface(), undefined, stream);
+    try Owner.recoverInto(restored, memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &(try restored.source()).canonicalStateDigest());
-    var snapshot_storage: [durable.max_snapshot_bytes]u8 = undefined;
-    const snapshot = try owner.committedSnapshot(&snapshot_storage);
-    const snapshot_copy = try trading.TradingShard.restoreSnapshot(snapshot);
-    try std.testing.expectEqual(owner.shard.authoritativeBarrier(), snapshot_copy.barrier);
-    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &snapshot_copy.shard.canonicalStateDigest());
+    const snapshot_storage = try std.testing.allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer std.testing.allocator.free(snapshot_storage);
+    const snapshot = try owner.committedSnapshot(snapshot_storage);
+    const snapshot_copy = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(snapshot_copy);
+    const snapshot_barrier = try trading.TradingShard.restoreSnapshotInto(snapshot_copy, snapshot);
+    try std.testing.expectEqual(owner.shard.authoritativeBarrier(), snapshot_barrier);
+    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &snapshot_copy.canonicalStateDigest());
     try std.testing.expect((try restored.source()).canonical_account.valid);
     try std.testing.expectEqual(@as(i128, 123), (try restored.source()).currentNetExchangePosition(3).?.lots);
     var invalid = fixture.canonicalAt(3, 2, .{ .account_bootstrap_snapshot = .{
@@ -820,11 +1026,11 @@ test "Demo owner commits before publication and recovers only a complete barrier
     } });
     invalid.venue.envelope.schema_version = 99;
     try std.testing.expectError(error.UnsupportedSchema, restored.apply(invalid));
-    try std.testing.expectError(error.DecisionLogUnavailable, restored.send(&gateway, &dummy_guard, 1, 1));
+    try std.testing.expectError(error.DecisionLogUnavailable, restored.send(gateway, &dummy_guard, 1, 1));
     memory.injectFault(.eio);
     try std.testing.expectError(error.DecisionLogUnavailable, owner.apply(genesis[2]));
     try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
-    try std.testing.expectError(error.DecisionLogUnavailable, owner.committedSnapshot(&snapshot_storage));
+    try std.testing.expectError(error.DecisionLogUnavailable, owner.committedSnapshot(snapshot_storage));
 }
 
 test "Demo owner closes persistence faults at their last proven barrier" {
@@ -887,8 +1093,17 @@ fn setupOwnerCheckpointFixture(owner: *Owner) !trading.OrderCommand {
 fn checkOwnerCheckpointRounds(store: durable.Store, io: std.Io) ![32]u8 {
     const fixture = @import("trading_shard_fixture.zig");
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 903 };
-    var owner = try Owner.bootstrap(store, io, stream);
-    const command = try setupOwnerCheckpointFixture(&owner);
+    const allocator = std.testing.allocator;
+    const owner = try allocator.create(Owner);
+    defer allocator.destroy(owner);
+    owner.* = try Owner.bootstrap(store, io, stream);
+    const recovered = try allocator.create(Owner);
+    defer allocator.destroy(recovered);
+    const restored = try allocator.create(trading.TradingShard);
+    defer allocator.destroy(restored);
+    const snapshot_storage = try allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer allocator.free(snapshot_storage);
+    const command = try setupOwnerCheckpointFixture(owner);
     const initial_barrier = owner.shard.authoritativeBarrier();
     const reservation = try owner.shard.activeReservationAtoms();
     const initial_authority = try owner.shard.currentDispatchAuthorityRefs(3);
@@ -906,15 +1121,14 @@ fn checkOwnerCheckpointRounds(store: durable.Store, io: std.Io) ![32]u8 {
         try std.testing.expectEqual(reservation, try owner.shard.activeReservationAtoms());
         try std.testing.expectEqualDeep(initial_authority, try owner.shard.currentDispatchAuthorityRefs(3));
         try std.testing.expectEqualDeep(initial_command, owner.shard.oms.command_history[0]);
-        const recovered = try Owner.recover(store, io, stream);
+        try Owner.recoverInto(recovered, store, io, stream);
         try std.testing.expect(recovered.shard.recovery_admission_pending);
         try std.testing.expectEqual(owner.shard.authoritativeBarrier(), recovered.shard.authoritativeBarrier());
         try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
         try std.testing.expectEqual(trading.oms.OrderState.unknown, recovered.shard.oms.orderById(command.order_id).?.state);
-        var snapshot_storage: [durable.max_snapshot_bytes]u8 = undefined;
-        const snapshot = try owner.committedSnapshot(&snapshot_storage);
-        const restored = try trading.TradingShard.restoreSnapshot(snapshot);
-        try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+        const snapshot = try owner.committedSnapshot(snapshot_storage);
+        _ = try trading.TradingShard.restoreSnapshotInto(restored, snapshot);
+        try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.canonicalStateDigest());
     }
     try std.testing.expect(owner.shard.authoritativeBarrier() > initial_barrier + 3 * 256);
     return owner.shard.canonicalStateDigest();
@@ -947,6 +1161,10 @@ fn expectCheckpointAdmissionClosed(owner: *const Owner) !void {
     try std.testing.expectEqual(@as(u64, 0), gateway.send_attempt_count);
 }
 
+fn initializeFileAdapterInto(adapter: *durable.LinuxFileAdapter, dir: std.Io.Dir) void {
+    adapter.* = .{ .dir = dir };
+}
+
 test "Checkpoint owner file interruptions preserve coherent Unknown fill economics and authority" {
     const Context = struct {
         failure: ?anyerror = null,
@@ -961,15 +1179,26 @@ test "Checkpoint owner file interruptions preserve coherent Unknown fill economi
             const input = @import("trading_shard_fixture.zig").atGroup(900, .{ .identity = 900, .payload = .{ .mark_price = .{ .instrument = 3, .price_atoms = 50_000_001_000 } } });
             var reference_temp = std.testing.tmpDir(.{});
             defer reference_temp.cleanup();
-            var reference: durable.LinuxFileAdapter = .{ .dir = reference_temp.dir };
-            var clean = try Owner.bootstrap(reference.interface(), io, stream);
-            _ = try setupOwnerCheckpointFixture(&clean);
+            const reference = try std.testing.allocator.create(durable.LinuxFileAdapter);
+            defer std.testing.allocator.destroy(reference);
+            defer reference.deinit();
+            @call(.never_inline, initializeFileAdapterInto, .{ reference, reference_temp.dir });
+            const clean = try std.testing.allocator.create(Owner);
+            defer std.testing.allocator.destroy(clean);
+            clean.* = try Owner.bootstrap(reference.interface(), io, stream);
+            _ = try setupOwnerCheckpointFixture(clean);
             try clean.checkpoint();
-            const old = clean.shard;
+            const old = try std.testing.allocator.create(trading.TradingShard);
+            defer std.testing.allocator.destroy(old);
+            @memcpy(std.mem.asBytes(old), std.mem.asBytes(&clean.shard));
             _ = try clean.apply(input);
-            const before_receipt = clean.shard;
+            const before_receipt = try std.testing.allocator.create(trading.TradingShard);
+            defer std.testing.allocator.destroy(before_receipt);
+            @memcpy(std.mem.asBytes(before_receipt), std.mem.asBytes(&clean.shard));
             try clean.checkpoint();
-            const new = clean.shard;
+            const new = try std.testing.allocator.create(trading.TradingShard);
+            defer std.testing.allocator.destroy(new);
+            @memcpy(std.mem.asBytes(new), std.mem.asBytes(&clean.shard));
             const Case = struct { point: durable.FaultPoint, skip: usize = 0, apply_input: bool = false };
             const cases = [_]Case{
                 .{ .point = .append, .apply_input = true },
@@ -997,9 +1226,14 @@ test "Checkpoint owner file interruptions preserve coherent Unknown fill economi
                 std.debug.print("owner_file_fault: {s} case={d} point={s} skip={d}\n", .{ @tagName(fault), case_index, @tagName(case.point), case.skip });
                 var temp = std.testing.tmpDir(.{});
                 defer temp.cleanup();
-                var adapter: durable.LinuxFileAdapter = .{ .dir = temp.dir };
-                var owner = try Owner.bootstrap(adapter.interface(), io, stream);
-                _ = try setupOwnerCheckpointFixture(&owner);
+                const adapter = try std.testing.allocator.create(durable.LinuxFileAdapter);
+                defer std.testing.allocator.destroy(adapter);
+                defer adapter.deinit();
+                @call(.never_inline, initializeFileAdapterInto, .{ adapter, temp.dir });
+                const owner = try std.testing.allocator.create(Owner);
+                defer std.testing.allocator.destroy(owner);
+                owner.* = try Owner.bootstrap(adapter.interface(), io, stream);
+                _ = try setupOwnerCheckpointFixture(owner);
                 try owner.checkpoint();
                 if (!case.apply_input) _ = try owner.apply(input);
                 adapter.injectFaultAfter(fault, case.point, case.skip);
@@ -1009,36 +1243,49 @@ test "Checkpoint owner file interruptions preserve coherent Unknown fill economi
                     if (owner.checkpoint()) |_| return error.ExpectedOwnerFault else |_| {}
                 }
                 try std.testing.expect(owner.closed);
-                try expectCheckpointAdmissionClosed(&owner);
+                try expectCheckpointAdmissionClosed(owner);
                 try std.testing.expectEqual(durable.GateState.closed, adapter.interface().safetyGate());
                 // A real partial temporary manifest must never supersede the published root.
                 const partial = try temp.dir.createFile(io, "manifest.tmp", .{});
                 try partial.writeStreamingAll(io, "partial-manifest");
                 partial.close(io);
-                var reopened: durable.LinuxFileAdapter = .{ .dir = temp.dir };
+                const reopened = try std.testing.allocator.create(durable.LinuxFileAdapter);
+                defer std.testing.allocator.destroy(reopened);
+                defer reopened.deinit();
+                @call(.never_inline, initializeFileAdapterInto, .{ reopened, temp.dir });
                 const durable_state = try reopened.interface().recover(io, stream);
+
+                const recovered = try std.testing.allocator.create(Owner);
+                defer std.testing.allocator.destroy(recovered);
+                try Owner.recoverInto(recovered, reopened.interface(), io, stream);
                 if (durable_state.last_sequence != durable_state.committed_barrier) {
-                    try std.testing.expectError(error.DecisionLogUnavailable, Owner.recover(reopened.interface(), io, stream));
+                    try std.testing.expect(recovered.closed);
+                    try std.testing.expectError(error.DecisionLogUnavailable, recovered.source());
+                    try expectCheckpointBusinessState(&recovered.shard, if (case.apply_input) old else before_receipt);
                     continue;
                 }
-                var recovered = try Owner.recover(reopened.interface(), io, stream);
                 try std.testing.expect(recovered.shard.recovery_admission_pending);
-                try expectCheckpointAdmissionClosed(&recovered);
-                const expected = if (case.apply_input) &old else if (recovered.shard.authoritativeBarrier() == new.authoritativeBarrier()) &new else &before_receipt;
+                try expectCheckpointAdmissionClosed(recovered);
+                const expected = if (case.apply_input) old else if (recovered.shard.authoritativeBarrier() == new.authoritativeBarrier()) new else before_receipt;
                 try expectCheckpointBusinessState(&recovered.shard, expected);
                 if (recovered.checkpoint_pending) {
                     try recovered.checkpoint();
-                    try expectCheckpointBusinessState(&recovered.shard, &new);
-                    try expectCheckpointAdmissionClosed(&recovered);
+                    try expectCheckpointBusinessState(&recovered.shard, new);
+                    try expectCheckpointAdmissionClosed(recovered);
                 }
-                var again: durable.LinuxFileAdapter = .{ .dir = temp.dir };
-                const repeated = try Owner.recover(again.interface(), io, stream);
+                const again = try std.testing.allocator.create(durable.LinuxFileAdapter);
+                defer std.testing.allocator.destroy(again);
+                defer again.deinit();
+                @call(.never_inline, initializeFileAdapterInto, .{ again, temp.dir });
+                const repeated = try std.testing.allocator.create(Owner);
+                defer std.testing.allocator.destroy(repeated);
+                try Owner.recoverInto(repeated, again.interface(), io, stream);
                 try expectCheckpointBusinessState(&repeated.shard, &recovered.shard);
             };
         }
     };
     var context: Context = .{};
-    const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
+    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Context.run, .{&context});
     thread.join();
     if (context.failure) |err| return err;
 }
@@ -1052,7 +1299,9 @@ test "Checkpoint owner explicitly resumes each durable checkpoint interruption w
         memory.allocator = std.testing.allocator;
         defer memory.deinit();
         const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 904 };
-        var owner = try Owner.bootstrap(memory.interface(), undefined, stream);
+        const owner = try std.testing.allocator.create(Owner);
+        defer std.testing.allocator.destroy(owner);
+        owner.* = try Owner.bootstrap(memory.interface(), undefined, stream);
         for (fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged)) |event|
             _ = try owner.apply(event);
         try owner.sealBootstrap();
@@ -1063,21 +1312,28 @@ test "Checkpoint owner explicitly resumes each durable checkpoint interruption w
         try sealed.seal();
         try memory.interface().seal(undefined, stream);
         if (phase >= 1) {
-            var bytes: [durable.max_snapshot_bytes]u8 = undefined;
-            try memory.interface().publishSnapshot(undefined, stream, before, try owner.shard.snapshot(&sealed, before, &bytes));
+            const bytes = try std.testing.allocator.alloc(u8, durable.max_snapshot_bytes);
+            defer std.testing.allocator.free(bytes);
+            try memory.interface().publishSnapshot(undefined, stream, before, try owner.shard.snapshot(&sealed, before, bytes));
         }
         if (phase == 2) try memory.interface().rotate(undefined, stream);
-        var recovered = try Owner.recover(memory.interface(), undefined, stream);
+        const recovered = try std.testing.allocator.create(Owner);
+        defer std.testing.allocator.destroy(recovered);
+        try Owner.recoverInto(recovered, memory.interface(), undefined, stream);
         try std.testing.expect(recovered.checkpoint_pending);
         try std.testing.expect(recovered.shard.recovery_admission_pending);
         try std.testing.expectEqual(before, recovered.shard.authoritativeBarrier());
         try std.testing.expectError(error.DecisionLogUnavailable, recovered.apply(price));
-        try recovered.checkpoint();
+        const scratch = try std.testing.allocator.alloc(u8, durable.max_snapshot_bytes);
+        defer std.testing.allocator.free(scratch);
+        if (phase == 0) try recovered.checkpoint() else try recovered.checkpointWithScratch(scratch);
         try std.testing.expect(!recovered.checkpoint_pending);
         try std.testing.expect(recovered.shard.recovery_admission_pending);
         try std.testing.expectEqual(@as(u64, 2), recovered.shard.checkpointGeneration());
         try std.testing.expectEqual(before + 1, recovered.shard.authoritativeBarrier());
-        const again = try Owner.recover(memory.interface(), undefined, stream);
+        const again = try std.testing.allocator.create(Owner);
+        defer std.testing.allocator.destroy(again);
+        try Owner.recoverInto(again, memory.interface(), undefined, stream);
         try std.testing.expect(!again.checkpoint_pending);
         try std.testing.expectEqualSlices(u8, &recovered.shard.canonicalStateDigest(), &again.shard.canonicalStateDigest());
         try std.testing.expectEqual(@as(u64, 0), again.shard.dispatch_attempt_count);
@@ -1102,7 +1358,7 @@ test "Checkpoint owner commits 100 rotations with live authority and economic st
         }
     };
     var context: Context = .{};
-    const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
+    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Context.run, .{&context});
     thread.join();
     if (context.failure) |err| return err;
 }
@@ -1122,7 +1378,9 @@ test "Checkpoint owner durable private bundle owns its seed and rejects mixed me
             memory.allocator = std.testing.allocator;
             defer memory.deinit();
             const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 990 };
-            var owner = try Owner.bootstrap(memory.interface(), undefined, stream);
+            const owner = try std.testing.allocator.create(Owner);
+            defer std.testing.allocator.destroy(owner);
+            owner.* = try Owner.bootstrap(memory.interface(), undefined, stream);
             const fixture = @import("trading_shard_fixture.zig");
             const genesis = fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged);
             _ = try owner.apply(genesis[0]);
@@ -1145,12 +1403,16 @@ test "Checkpoint owner durable private bundle owns its seed and rejects mixed me
             }, &seed);
             seed[0] = 99;
             try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, owner.private_resume[0..owner.private_resume_len]);
-            const recovered = try Owner.recover(memory.interface(), undefined, stream);
+            const recovered = try std.testing.allocator.create(Owner);
+            defer std.testing.allocator.destroy(recovered);
+            try Owner.recoverInto(recovered, memory.interface(), undefined, stream);
             try std.testing.expectEqualSlices(u8, owner.private_resume[0..owner.private_resume_len], recovered.private_resume[0..recovered.private_resume_len]);
             try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
             const before = try memory.interface().archiveReceipt(undefined, stream);
+            const candidate = try std.testing.allocator.create(Owner);
+            defer std.testing.allocator.destroy(candidate);
             for (0..9) |field| {
-                var candidate = owner;
+                @memcpy(std.mem.asBytes(candidate), std.mem.asBytes(owner));
                 var invalid = owner.private_boundary.?;
                 invalid.decision_barrier = owner.shard.authoritativeBarrier();
                 invalid.core_digest = owner.shard.canonicalStateDigest();
@@ -1170,18 +1432,19 @@ test "Checkpoint owner durable private bundle owns its seed and rejects mixed me
                 try std.testing.expect(candidate.closed);
                 try std.testing.expectEqualDeep(before, try memory.interface().archiveReceipt(undefined, stream));
             }
-            var core_buffer: [durable.max_snapshot_bytes]u8 = undefined;
-            const gateway_snapshot = try owner.committedSnapshot(&core_buffer);
+            const core_buffer = try std.testing.allocator.alloc(u8, durable.max_snapshot_bytes);
+            defer std.testing.allocator.free(core_buffer);
+            const gateway_snapshot = try owner.committedSnapshot(core_buffer);
             try std.testing.expect(!std.mem.startsWith(u8, gateway_snapshot, private_bundle_magic));
             const raw_recovery = try memory.interface().recover(undefined, stream);
-            var bundle: [durable.max_snapshot_bytes]u8 = undefined;
-            @memcpy(bundle[0..raw_recovery.snapshot.len], raw_recovery.snapshot);
+            const bundle = try std.testing.allocator.dupe(u8, raw_recovery.snapshot);
+            defer std.testing.allocator.free(bundle);
             bundle[raw_recovery.snapshot.len - 1] ^= 1;
             try std.testing.expectError(error.InvalidPrivateResumeCheckpoint, privateCheckpointView(bundle[0..raw_recovery.snapshot.len]));
         }
     };
     var context: Context = .{};
-    const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
+    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Context.run, .{&context});
     thread.join();
     if (context.failure) |err| return err;
 }
@@ -1201,14 +1464,17 @@ test "Checkpoint owner rejects a valid receipt bound to a foreign decision strea
             memory.allocator = std.testing.allocator;
             defer memory.deinit();
             const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 994 };
-            var owner = try Owner.bootstrap(memory.interface(), undefined, stream);
+            const owner = try std.testing.allocator.create(Owner);
+            defer std.testing.allocator.destroy(owner);
+            owner.* = try Owner.bootstrap(memory.interface(), undefined, stream);
             const genesis = @import("trading_shard_fixture.zig").genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged);
             _ = try owner.apply(genesis[0]);
             var sealed = owner.decision_journal;
             try sealed.seal();
-            var buffer: [durable.max_snapshot_bytes]u8 = undefined;
+            const buffer = try std.testing.allocator.alloc(u8, durable.max_snapshot_bytes);
+            defer std.testing.allocator.free(buffer);
             try memory.interface().seal(undefined, stream);
-            try memory.interface().publishSnapshot(undefined, stream, 1, try owner.shard.snapshot(&sealed, 1, &buffer));
+            try memory.interface().publishSnapshot(undefined, stream, 1, try owner.shard.snapshot(&sealed, 1, buffer));
             try memory.interface().rotate(undefined, stream);
             const archive = try memory.interface().archiveReceipt(undefined, stream);
             const receipt = try owner.shard.checkpointReceipt(995, 1, archive.ordered_root);
@@ -1222,13 +1488,15 @@ test "Checkpoint owner rejects a valid receipt bound to a foreign decision strea
             try memory.interface().commit(undefined, stream, 2);
             try tail.seal();
             try memory.interface().seal(undefined, stream);
-            try memory.interface().publishSnapshot(undefined, stream, 2, try owner.shard.snapshot(&tail, 2, &buffer));
+            try memory.interface().publishSnapshot(undefined, stream, 2, try owner.shard.snapshot(&tail, 2, buffer));
             try std.testing.expect(try memory.interface().verifyArchiveReceipt(undefined, stream, 1, receipt.archive_root));
-            try std.testing.expectError(error.DecisionLogUnavailable, Owner.recover(memory.interface(), undefined, stream));
+            const rejected = try std.testing.allocator.create(Owner);
+            defer std.testing.allocator.destroy(rejected);
+            try std.testing.expectError(error.DecisionLogUnavailable, Owner.recoverInto(rejected, memory.interface(), undefined, stream));
         }
     };
     var context: Context = .{};
-    const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
+    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Context.run, .{&context});
     thread.join();
     if (context.failure) |err| return err;
 }
@@ -1252,20 +1520,26 @@ test "Checkpoint owner Windows file commits 100 rotations and reopens without se
             defer std.Io.Dir.cwd().deleteTree(io, path) catch {};
             var expected: [32]u8 = undefined;
             {
-                var file = try durable.WindowsFileAdapter.openWindowsVerification(io, path);
+                const file = try std.testing.allocator.create(durable.WindowsFileAdapter);
+                defer std.testing.allocator.destroy(file);
+                file.* = try durable.WindowsFileAdapter.openWindowsVerification(io, path);
                 defer file.close(io);
                 expected = try checkOwnerCheckpointRounds(file.interface(), io);
             }
-            var reopened = try durable.WindowsFileAdapter.openWindowsVerification(io, path);
+            const reopened = try std.testing.allocator.create(durable.WindowsFileAdapter);
+            defer std.testing.allocator.destroy(reopened);
+            reopened.* = try durable.WindowsFileAdapter.openWindowsVerification(io, path);
             defer reopened.close(io);
-            const recovered = try Owner.recover(reopened.interface(), io, .{ .domain = .decision_log, .id = 903 });
+            const recovered = try std.testing.allocator.create(Owner);
+            defer std.testing.allocator.destroy(recovered);
+            try Owner.recoverInto(recovered, reopened.interface(), io, .{ .domain = .decision_log, .id = 903 });
             try std.testing.expectEqual(@as(u64, 101), recovered.shard.checkpointGeneration());
             try std.testing.expect(recovered.shard.recovery_admission_pending);
             try std.testing.expectEqualSlices(u8, &expected, &recovered.shard.canonicalStateDigest());
         }
     };
     var context: Context = .{};
-    const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
+    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Context.run, .{&context});
     thread.join();
     if (context.failure) |err| return err;
 }
@@ -1285,10 +1559,12 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     dispatch_memory.* = .init();
     defer dispatch_memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
-    var owner = try Owner.bootstrap(memory.interface(), undefined, stream);
+    const owner = try std.testing.allocator.create(Owner);
+    defer std.testing.allocator.destroy(owner);
+    owner.* = try Owner.bootstrap(memory.interface(), undefined, stream);
     const definitions = @import("asset_registry.zig").testDefinitions(6, 8);
     parsed.value.asset_definitions = &definitions;
-    try parsed.value.activateAssetsForOfflineValidation(&owner);
+    try parsed.value.activateAssetsForOfflineValidation(owner);
     var snapshot = fixture.canonicalAt(1, 1, .{ .account_bootstrap_snapshot = .{
         .identity = 1,
         .exchange_account = 2,
@@ -1365,19 +1641,19 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     var lease = try authority.acquire(.{ .exchange_account = 2, .decision_domain = 1 }, 1, 1);
     var guard: failover.GatewayLeaseGuard = .{ .authority = &authority, .lease = &lease };
     authority.available = false;
-    try std.testing.expectError(error.InvalidDemoLease, parsed.value.initialize(&owner, 50_000_000, &guard, 1, 1));
+    try std.testing.expectError(error.InvalidDemoLease, parsed.value.initialize(owner, 50_000_000, &guard, 1, 1));
     try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
     authority.available = true;
-    try parsed.value.initializePendingHost(&owner, 50_000_000, &guard, 1, 1);
+    try parsed.value.initializePendingHost(owner, 50_000_000, &guard, 1, 1);
     try std.testing.expect(owner.shard.risk_lease_valid_through_barrier >= owner.shard.authoritativeBarrier() + 100);
     try std.testing.expectEqual(@as(u64, 15 * std.time.ns_per_s), owner.shard.registryInstrument(okx.btc_usdt_spot).?.capability.?.max_dispatch_age_ns);
     try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
     const activation_barrier = owner.shard.authoritativeBarrier();
     const activation_digest = owner.shard.canonicalStateDigest();
     const host_session: @import("strategy_host_ipc.zig").Session = .{ .fencing = lease.token, .shard = 0, .generation = 1 };
-    try std.testing.expectError(error.InvalidHostActivation, parsed.value.activateHost(&owner, host_session, activation_barrier + 1, activation_digest));
-    try std.testing.expectError(error.InvalidHostActivation, parsed.value.activateHost(&owner, .{ .fencing = lease.token, .shard = 0, .generation = 0 }, activation_barrier, activation_digest));
-    try parsed.value.activateHost(&owner, host_session, activation_barrier, activation_digest);
+    try std.testing.expectError(error.InvalidHostActivation, parsed.value.activateHost(owner, host_session, activation_barrier + 1, activation_digest));
+    try std.testing.expectError(error.InvalidHostActivation, parsed.value.activateHost(owner, .{ .fencing = lease.token, .shard = 0, .generation = 0 }, activation_barrier, activation_digest));
+    try parsed.value.activateHost(owner, host_session, activation_barrier, activation_digest);
     _ = try owner.apply(fixture.canonicalAt(18, 2, .{ .instrument_definition_observed = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1 } }));
     var book = fixture.snapshotAt(19, 3);
     book.venue.event.l2_book_snapshot.instrument = okx.btc_usdt_spot;
@@ -1390,7 +1666,9 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     _ = try owner.apply(book);
     try std.testing.expect((try owner.source()).operational_state.effectiveTradingAuthority());
     try std.testing.expectEqual(@as(i64, 10_000_000), (try owner.source()).risk_lease_atoms);
-    const recovered = try Owner.recover(memory.interface(), undefined, stream);
+    const recovered = try std.testing.allocator.create(Owner);
+    defer std.testing.allocator.destroy(recovered);
+    try Owner.recoverInto(recovered, memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &(try owner.source()).canonicalStateDigest(), &(try recovered.source()).canonicalStateDigest());
 
     const Spy = struct {
@@ -1418,7 +1696,9 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     var spy: Spy = .{};
     const adapter = spy.adapter();
     try adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1 });
-    var gateway: execution.Gateway = .{};
+    const gateway = try std.testing.allocator.create(execution.Gateway);
+    defer std.testing.allocator.destroy(gateway);
+    gateway.init();
     try gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .environment = .demo, .lease_guard = &guard, .capability = .{
         .version = 1,
         .rules_version = 1,
@@ -1449,26 +1729,31 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     try std.testing.expectEqual(@import("trading_shard_event.zig").RejectReason.none, owner.shard.last_reject_reason);
     const command = maybe_command orelse return error.MissingDemoCommand;
     try std.testing.expectEqual(@as(i128, 500), command.limit_price.ticks);
-    var snapshot_storage: [durable.max_snapshot_bytes]u8 = undefined;
-    const committed = try owner.committedSnapshot(&snapshot_storage);
+    const snapshot_storage = try std.testing.allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer std.testing.allocator.free(snapshot_storage);
+    const committed = try owner.committedSnapshot(snapshot_storage);
     const digest = owner.shard.canonicalStateDigest();
     var wrong_digest = digest;
     wrong_digest[0] ^= 1;
-    try std.testing.expectError(error.DecisionSnapshotMismatch, sendFromCommittedSnapshot(committed, owner.shard.authoritativeBarrier(), wrong_digest, &gateway, &guard, command.command_id, 2));
-    try std.testing.expectError(error.DecisionSnapshotMismatch, sendFromCommittedSnapshot(committed, owner.shard.authoritativeBarrier() + 1, digest, &gateway, &guard, command.command_id, 2));
+    try std.testing.expectError(error.DecisionSnapshotMismatch, sendFromCommittedSnapshot(committed, owner.shard.authoritativeBarrier(), wrong_digest, gateway, &guard, command.command_id, 2));
+    try std.testing.expectError(error.DecisionSnapshotMismatch, sendFromCommittedSnapshot(committed, owner.shard.authoritativeBarrier() + 1, digest, gateway, &guard, command.command_id, 2));
     try std.testing.expectEqual(@as(u64, 0), spy.sends);
-    try std.testing.expectEqual(venue.SendResult.accepted, try sendFromCommittedSnapshot(committed, owner.shard.authoritativeBarrier(), digest, &gateway, &guard, command.command_id, 2));
+    try std.testing.expectEqual(venue.SendResult.accepted, try sendFromCommittedSnapshot(committed, owner.shard.authoritativeBarrier(), digest, gateway, &guard, command.command_id, 2));
     try std.testing.expectEqual(@as(u64, 1), spy.sends);
-    var recovering = try Owner.recover(memory.interface(), undefined, stream);
+    const recovering = try std.testing.allocator.create(Owner);
+    defer std.testing.allocator.destroy(recovering);
+    try Owner.recoverInto(recovering, memory.interface(), undefined, stream);
     // The same qualified pending-submit command was admitted immediately
     // above. Calling Gateway directly cannot bypass restart admission.
     try std.testing.expectError(error.NotSent, gateway.sendFromShard(&recovering.shard, command.command_id, 2));
-    try std.testing.expectError(error.DecisionLogUnavailable, recovering.send(&gateway, &guard, command.command_id, 2));
-    const pending_snapshot = try recovering.committedSnapshot(&snapshot_storage);
-    const pending_copy = try trading.TradingShard.restoreSnapshot(pending_snapshot);
-    try std.testing.expect(pending_copy.shard.recovery_admission_pending);
-    try std.testing.expectError(error.NotSent, gateway.sendFromShard(&pending_copy.shard, command.command_id, 2));
-    try std.testing.expectError(error.DecisionLogUnavailable, sendFromCommittedSnapshot(pending_snapshot, recovering.shard.authoritativeBarrier(), digest, &gateway, &guard, command.command_id, 2));
+    try std.testing.expectError(error.DecisionLogUnavailable, recovering.send(gateway, &guard, command.command_id, 2));
+    const pending_snapshot = try recovering.committedSnapshot(snapshot_storage);
+    const pending_copy = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(pending_copy);
+    _ = try trading.TradingShard.restoreSnapshotInto(pending_copy, pending_snapshot);
+    try std.testing.expect(pending_copy.recovery_admission_pending);
+    try std.testing.expectError(error.NotSent, gateway.sendFromShard(pending_copy, command.command_id, 2));
+    try std.testing.expectError(error.DecisionLogUnavailable, sendFromCommittedSnapshot(pending_snapshot, recovering.shard.authoritativeBarrier(), digest, gateway, &guard, command.command_id, 2));
     const pending_barrier = recovering.shard.authoritativeBarrier();
     try std.testing.expectError(error.RecoveryAdmissionPending, recovering.apply(.{ .core = .{ .identity = sequence, .payload = .{ .external_order_intent = intent } } }));
     try std.testing.expectError(error.RecoveryAdmissionPending, recovering.apply(.{ .core = .{ .identity = sequence, .payload = .{ .timer = .{ .side = .buy, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = true, .quantity = 1, .limit_price_micros = 50_000_000 } } } }));
@@ -1506,7 +1791,7 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     };
     var context: u8 = 0;
     try std.testing.expectError(error.DecisionLogUnavailable, recovering.replayCommittedIngress(raw_stream, .{ .ptr = &context, .consume_fn = Sweep.consume }));
-    recovering = try Owner.recover(memory.interface(), undefined, stream);
+    try Owner.recoverInto(recovering, memory.interface(), undefined, stream);
     try recovering.bindRecoveryIngress(raw_memory.interface(), raw_stream);
     try std.testing.expectError(error.DecisionLogUnavailable, recovering.replayCommittedIngress(.{ .domain = .raw_ingress, .id = 94 }, .{ .ptr = &context, .consume_fn = Sweep.consume }));
     try std.testing.expectError(error.IncompleteReplay, recovering.replayCommittedIngress(raw_stream, .{ .ptr = &context, .consume_fn = Sweep.consume }));
@@ -1514,9 +1799,10 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     try std.testing.expect(recovering.shard.recovery_admission_pending);
     try std.testing.expectEqualSlices(u8, &digest, &recovering.shard.canonicalStateDigest());
     try std.testing.expectEqual(@as(u64, 1), spy.sends);
-    // The spy deliberately emits no dispatch result: model a failure after the
-    // external buy effect, then recover authoritative facts before cleanup.
-    var restored_gateway: execution.Gateway = .{};
+    // The outcome is durable before canonical ingress; recovering that acceptance must not resend.
+    const restored_gateway = try std.testing.allocator.create(execution.Gateway);
+    defer std.testing.allocator.destroy(restored_gateway);
+    restored_gateway.init();
     try restored_gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .environment = .demo, .lease_guard = &guard, .capability = .{
         .version = 1,
         .rules_version = 1,
@@ -1526,7 +1812,7 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
         .supports_market_protection = true,
     } });
     try restored_gateway.attachRecoveredDurableDispatch(dispatch_memory.interface(), undefined, .{ .domain = .control, .id = 92 });
-    try std.testing.expectError(error.NotSent, owner.send(&restored_gateway, &guard, command.command_id, 2));
+    try std.testing.expectEqual(venue.SendResult.accepted, try owner.send(restored_gateway, &guard, command.command_id, 2));
     try std.testing.expectEqual(@as(u64, 1), spy.sends);
     const venue_order = try canonical.VenueOrderRef.init(1, "demo-order");
     const fill_quantity: canonical.InstrumentQuantity = .{ .instrument = okx.btc_usdt_spot, .rules_version = 1, .lots = 20_000 };
@@ -1566,7 +1852,9 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     try std.testing.expectEqual(duplicate_barrier, owner.shard.authoritativeBarrier());
     try std.testing.expectEqual(duplicate_barrier, (try memory.interface().recover(undefined, stream)).committed_barrier);
     try std.testing.expect(!owner.closed);
-    var conflict_owner = owner;
+    const conflict_owner = try std.testing.allocator.create(Owner);
+    defer std.testing.allocator.destroy(conflict_owner);
+    @memcpy(std.mem.asBytes(conflict_owner), std.mem.asBytes(owner));
     var conflicting_report = accepted_report;
     conflicting_report.venue.event.execution_report.status = .filled;
     try std.testing.expectError(error.ConflictingReportIdentity, conflict_owner.apply(conflicting_report));
@@ -1630,7 +1918,7 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
         // This fresh qualified command is still pending-submit. The execution
         // store and transport remain healthy when the decision append fails.
         const source = try owner.source();
-        try gateway.observeAuthority(.{
+        try gateway.observeAuthorityFromShard(source, .{
             .account = source.exchange_account_identity,
             .effective_trading_authority = source.operational_state.effectiveTradingAuthority(),
             .reservation_identity = cleanup.reservation_identity,
@@ -1652,7 +1940,7 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
         try std.testing.expectEqual(@as(u64, 1), spy.sends);
         return;
     }
-    try std.testing.expectEqual(venue.SendResult.accepted, try owner.send(&gateway, &guard, cleanup.command_id, 3));
+    try std.testing.expectEqual(venue.SendResult.accepted, try owner.send(gateway, &guard, cleanup.command_id, 3));
     try std.testing.expect(cleanup.portfolio_reduce_only);
     try std.testing.expectEqual(@as(u64, 2), spy.sends);
 }
@@ -1660,4 +1948,52 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
 test "Demo policy drives buy and fault cleanup through one durable Gateway" {
     try checkDemoPolicyGateway(false);
     try checkDemoPolicyGateway(true);
+}
+
+test "optimization checkpoint scratch rejects short storage and owner alias before publication" {
+    const allocator = std.testing.allocator;
+    const fixture = @import("trading_shard_fixture.zig");
+    for (0..2) |case| {
+        const memory = try allocator.create(durable.MemoryAdapter);
+        defer allocator.destroy(memory);
+        memory.* = .initWithAllocator(allocator);
+        defer memory.deinit();
+        const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 908 };
+        const Storage = struct { owner: Owner, padding: [durable.max_snapshot_bytes]u8 };
+        const storage = try allocator.create(Storage);
+        defer allocator.destroy(storage);
+        const owner = &storage.owner;
+        owner.* = try Owner.bootstrap(memory.interface(), undefined, stream);
+        for (fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged)) |event|
+            _ = try owner.apply(event);
+        try owner.sealBootstrap();
+        const before = try memory.interface().recover(undefined, stream);
+        const scratch = if (case == 0) @as([]u8, &.{}) else std.mem.asBytes(storage)[0..durable.max_snapshot_bytes];
+        try std.testing.expectError(error.DecisionLogUnavailable, owner.checkpointWithScratch(scratch));
+        try std.testing.expect(owner.closed);
+        const after = try memory.interface().recover(undefined, stream);
+        try std.testing.expectEqual(before.snapshot_barrier, after.snapshot_barrier);
+        try std.testing.expectEqualSlices(u8, before.snapshot, after.snapshot);
+    }
+}
+
+test "caller owned virgin bootstrap retains validation and leaves failed destination closed" {
+    const allocator = std.testing.allocator;
+    const memory = try allocator.create(durable.MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .initWithAllocator(allocator);
+    defer memory.deinit();
+    const owner = try allocator.create(Owner);
+    defer allocator.destroy(owner);
+    const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 910 };
+    try Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
+    try std.testing.expect(!owner.ready and !owner.closed);
+    try std.testing.expectEqual(@as(u64, 0), owner.shard.authoritativeBarrier());
+    try std.testing.expectEqualDeep(stream, owner.stream);
+    try std.testing.expectError(error.DecisionLogUnavailable, Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .control, .id = stream.id }));
+    try std.testing.expect(!owner.ready and owner.closed);
+    try std.testing.expectError(error.DecisionLogUnavailable, Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 0 }));
+    memory.gate = .closed;
+    try std.testing.expectError(error.DecisionLogUnavailable, Owner.bootstrapInto(owner, memory.interface(), undefined, stream));
+    try std.testing.expect(!owner.ready and owner.closed);
 }

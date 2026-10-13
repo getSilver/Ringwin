@@ -43,9 +43,16 @@ pub const Metadata = struct {
 };
 
 pub fn write(destination: []u8, metadata: Metadata, value: anytype) ![]const u8 {
+    return writeWithPolicy(destination, metadata, value, IdentityEncodingPolicy);
+}
+
+/// Policy describes canonical field views without copying the source object.
+pub fn writeWithPolicy(destination: []u8, metadata: Metadata, value: anytype, comptime Policy: type) ![]const u8 {
     if (metadata.barrier == 0 or destination.len < header_len) return error.SnapshotTooLarge;
     var writer: Writer = .{ .bytes = destination[header_len..] };
-    try encodeValue(&writer, value);
+    if (comptime @typeInfo(@TypeOf(value)) == .pointer) {
+        try encodeBorrowedWithPolicy(&writer, value, Policy);
+    } else try encodeBorrowedWithPolicy(&writer, &value, Policy);
     const payload = destination[header_len .. header_len + writer.position];
     const total_len = header_len + payload.len;
     if (payload.len > std.math.maxInt(u32)) return error.SnapshotTooLarge;
@@ -75,7 +82,18 @@ pub fn write(destination: []u8, metadata: Metadata, value: anytype) ![]const u8 
     return encoded;
 }
 
-pub fn read(encoded: []const u8, comptime T: type, expected_state_schema: u32, expected_release_artifact: u64, expected_schema_registry: u64) !struct { value: T, metadata: Metadata } {
+pub fn ReadResult(comptime T: type) type {
+    return struct { value: T, metadata: Metadata };
+}
+
+pub fn read(encoded: []const u8, comptime T: type, expected_state_schema: u32, expected_release_artifact: u64, expected_schema_registry: u64) !ReadResult(T) {
+    var result: ReadResult(T) = undefined;
+    result.metadata = try readInto(encoded, &result.value, expected_state_schema, expected_release_artifact, expected_schema_registry);
+    return result;
+}
+
+/// Decodes into caller-owned scratch; a failed candidate must never be published.
+pub fn readInto(encoded: []const u8, destination: anytype, expected_state_schema: u32, expected_release_artifact: u64, expected_schema_registry: u64) !Metadata {
     if (encoded.len < header_len) return error.InvalidSnapshotHeader;
     var header: Header = undefined;
     @memcpy(std.mem.asBytes(&header), encoded[0..header_len]);
@@ -95,12 +113,11 @@ pub fn read(encoded: []const u8, comptime T: type, expected_state_schema: u32, e
         return error.InvalidSnapshotPayload;
 
     var reader: Reader = .{ .bytes = payload };
-    var value: T = undefined;
-    try decodeValueInto(&reader, &value);
+    try decodeValueInto(&reader, destination);
     if (reader.position != payload.len) return error.InvalidSnapshotLength;
     var state_digest: [Sha256.digest_length]u8 = undefined;
     std.mem.writeInt(u256, &state_digest, header.state_digest, .little);
-    return .{ .value = value, .metadata = .{
+    return .{
         .state_schema = header.state_schema,
         .release_artifact = header.release_artifact,
         .schema_registry = header.schema_registry,
@@ -108,7 +125,7 @@ pub fn read(encoded: []const u8, comptime T: type, expected_state_schema: u32, e
         .instrument_rules_version = header.instrument_rules_version,
         .margin_rules_version = header.margin_rules_version,
         .state_digest = state_digest,
-    } };
+    };
 }
 
 /// Encodes a bounded value without the snapshot header. Used by the stable
@@ -165,38 +182,105 @@ const Reader = struct {
     }
 };
 
+fn omsArrayCount(comptime T: type, comptime name: []const u8) ?[]const u8 {
+    if (@hasField(T, "deferred_history_admission_count") and comptime std.mem.eql(u8, name, "deferred_history_admissions")) return "deferred_history_admission_count";
+    if (@hasField(T, "dispatch_ingress_history_count") and comptime std.mem.eql(u8, name, "dispatch_ingress_history")) return "dispatch_ingress_history_count";
+    if (!@hasField(T, "next_order_id") or !@hasField(T, "next_command_id")) return null;
+    inline for (.{
+        .{ "orders", "order_count" },                                  .{ "commands", "command_count" },
+        .{ "command_history", "command_history_count" },               .{ "report_history", "report_history_count" },
+        .{ "reconciliation_history", "reconciliation_history_count" }, .{ "intent_history", "intent_history_count" },
+        .{ "tombstones", "tombstone_count" },
+    }) |mapping| if (std.mem.eql(u8, name, mapping[0])) return mapping[1];
+    return null;
+}
+
 fn encodeValue(writer: *Writer, value: anytype) !void {
-    const T = @TypeOf(value);
+    if (comptime @typeInfo(@TypeOf(value)) == .pointer) {
+        if (comptime @typeInfo(@TypeOf(value)).pointer.size != .one) @compileError("snapshot input must be one borrowed value");
+        try encodeBorrowed(writer, value);
+    } else try encodeBorrowed(writer, &value);
+}
+
+const IdentityEncodingPolicy = struct {
+    pub fn fieldIsZero(comptime T: type, comptime name: []const u8) bool {
+        _ = T;
+        _ = name;
+        return false;
+    }
+    pub fn counter(value: anytype, comptime name: []const u8) usize {
+        return @field(value.*, name);
+    }
+    pub fn tailCounter(comptime T: type, comptime name: []const u8) ?[]const u8 {
+        _ = T;
+        _ = name;
+        return null;
+    }
+    pub fn zeroValue(comptime T: type) T {
+        return std.mem.zeroes(T);
+    }
+};
+
+fn encodeBorrowed(writer: *Writer, value: anytype) !void {
+    try encodeBorrowedWithPolicy(writer, value, IdentityEncodingPolicy);
+}
+
+fn encodeBorrowedWithPolicy(writer: *Writer, value: anytype, comptime Policy: type) !void {
+    const T = @typeInfo(@TypeOf(value)).pointer.child;
     switch (@typeInfo(T)) {
-        .bool => try writer.put(@as(u8, if (value) 1 else 0)),
+        .bool => try writer.put(@as(u8, if (value.*) 1 else 0)),
         .int => |info| if (info.bits % 8 == 0)
-            try writer.put(value)
+            try writer.put(value.*)
         else if (info.signedness == .signed)
-            try writer.put(@as(i64, @intCast(value)))
+            try writer.put(@as(i64, @intCast(value.*)))
         else
-            try writer.put(@as(u64, @intCast(value))),
+            try writer.put(@as(u64, @intCast(value.*))),
         .@"enum" => |info| if (@typeInfo(info.tag_type).int.bits % 8 == 0)
-            try encodeValue(writer, @intFromEnum(value))
+            try writer.put(@intFromEnum(value.*))
         else
-            // Auto-tagged enums may use non-byte-sized tags such as u1.
-            try writer.put(@as(u64, @intCast(@intFromEnum(value)))),
-        .array => for (value) |item| try encodeValue(writer, item),
-        .optional => if (value) |item| {
+            try writer.put(@as(u64, @intCast(@intFromEnum(value.*)))),
+        .array => for (value) |*item| try encodeBorrowedWithPolicy(writer, item, Policy),
+        .optional => if (value.*) |*item| {
             try writer.put(@as(u8, 1));
-            try encodeValue(writer, item);
+            try encodeBorrowedWithPolicy(writer, item, Policy);
         } else try writer.put(@as(u8, 0)),
-        .@"struct" => |info| inline for (info.fields) |field|
-            try encodeValue(writer, @field(value, field.name)),
+        .@"struct" => |info| inline for (info.fields) |field| {
+            if (comptime Policy.fieldIsZero(T, field.name)) {
+                const zero: field.type = std.mem.zeroes(field.type);
+                try encodeBorrowedWithPolicy(writer, &zero, Policy);
+            } else if (comptime omsArrayCount(T, field.name)) |counter| {
+                const count = Policy.counter(value, counter);
+                const items = &@field(value.*, field.name);
+                if (count > items.len) return error.InvalidSnapshotValue;
+                try writer.put(@as(u32, @intCast(count)));
+                for (items[0..count]) |*item| try encodeBorrowedWithPolicy(writer, item, Policy);
+            } else if (comptime @typeInfo(field.type) == .array) {
+                if (comptime Policy.tailCounter(T, field.name)) |counter_name| {
+                    const count: usize = @field(value.*, counter_name);
+                    const items = &@field(value.*, field.name);
+                    if (count > items.len) return error.InvalidSnapshotValue;
+                    for (items[0..count]) |*item| try encodeBorrowedWithPolicy(writer, item, Policy);
+                    if (count != items.len) {
+                        const zero = Policy.zeroValue(@typeInfo(field.type).array.child);
+                        const start = writer.position;
+                        try encodeBorrowedWithPolicy(writer, &zero, Policy);
+                        const zero_bytes = writer.bytes[start..writer.position];
+                        for (count + 1..items.len) |_| {
+                            if (zero_bytes.len > writer.bytes.len - writer.position) return error.SnapshotTooLarge;
+                            @memcpy(writer.bytes[writer.position..][0..zero_bytes.len], zero_bytes);
+                            writer.position += zero_bytes.len;
+                        }
+                    }
+                } else try encodeBorrowedWithPolicy(writer, &@field(value.*, field.name), Policy);
+            } else try encodeBorrowedWithPolicy(writer, &@field(value.*, field.name), Policy);
+        },
         .@"union" => |info| {
             const Tag = info.tag_type orelse @compileError("snapshot unions must be tagged");
-            try encodeValue(writer, std.meta.activeTag(value));
-            switch (value) {
-                inline else => |payload, tag| {
-                    _ = tag;
-                    if (@TypeOf(payload) != void) try encodeValue(writer, payload);
-                },
-            }
-            _ = Tag;
+            const tag = std.meta.activeTag(value.*);
+            try encodeValue(writer, tag);
+            inline for (info.fields) |field| if (tag == @field(Tag, field.name)) {
+                if (field.type != void) try encodeBorrowedWithPolicy(writer, &@field(value.*, field.name), Policy);
+            };
         },
         else => @compileError("unsupported snapshot field type: " ++ @typeName(T)),
     }
@@ -239,8 +323,22 @@ fn decodeValueInto(reader: *Reader, destination: anytype) !void {
             else => return error.InvalidSnapshotValue,
         },
         .@"struct" => |info| {
-            inline for (info.fields) |field|
-                try decodeValueInto(reader, &@field(destination.*, field.name));
+            var active_lengths: [info.fields.len]?u32 = @splat(null);
+            inline for (info.fields, 0..) |field, index| {
+                if (comptime omsArrayCount(T, field.name)) |_| {
+                    const count = try reader.get(u32);
+                    const items = &@field(destination.*, field.name);
+                    if (count > items.len) return error.InvalidSnapshotValue;
+                    active_lengths[index] = count;
+                    for (items[0..count]) |*item| try decodeValueInto(reader, item);
+                    const Child = @typeInfo(field.type).array.child;
+                    for (items[count..]) |*item| item.* = std.mem.zeroes(Child);
+                } else try decodeValueInto(reader, &@field(destination.*, field.name));
+            }
+            inline for (info.fields, 0..) |field, index| {
+                if (comptime omsArrayCount(T, field.name)) |counter|
+                    if (@field(destination.*, counter) != active_lengths[index].?) return error.InvalidSnapshotValue;
+            }
         },
         .@"union" => |info| {
             const Tag = info.tag_type orelse @compileError("snapshot unions must be tagged");
@@ -304,4 +402,23 @@ test "in place decoding round trips nested arrays optional and union payloads" {
     try std.testing.expectEqualDeep(Payload{ .absent = {} }, try decodeBare(absent, Payload));
     bytes[0] = 9;
     try std.testing.expectError(error.InvalidSnapshotValue, decodeBare(absent, Payload));
+}
+
+test "OMS snapshot encodes active records without reserving unused terminal capacity" {
+    const oms = @import("oms.zig");
+    var source: oms.Oms = .{};
+    var bytes: [4096]u8 = undefined;
+    const encoded = try encodeBare(&bytes, source);
+    try std.testing.expect(encoded.len < 128);
+    const restored = try decodeBare(encoded, oms.Oms);
+    try std.testing.expectEqual(source.next_order_id, restored.next_order_id);
+    try std.testing.expectEqual(source.order_count, restored.order_count);
+    source.next_order_id = 7;
+    const updated = try encodeBare(&bytes, source);
+    try std.testing.expectEqual(@as(u64, 7), (try decodeBare(updated, oms.Oms)).next_order_id);
+    std.mem.writeInt(u16, bytes[4..6], 1, .little);
+    try std.testing.expectError(error.InvalidSnapshotValue, decodeBare(updated, oms.Oms));
+    _ = try encodeBare(&bytes, &source);
+    std.mem.writeInt(u32, bytes[0..4], oms.max_orders + 1, .little);
+    try std.testing.expectError(error.InvalidSnapshotValue, decodeBare(updated, oms.Oms));
 }

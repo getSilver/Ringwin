@@ -1039,6 +1039,33 @@ _Avoid_: Trading halt, missing dashboard
 
 ## State Evolution
 
+**OrderArchiveQualification**:
+在明确终态、风险占用释放、引用闭合、唯一已应用 canonical Fill 与已报告累计相等，以及迟到历史查询范围完整时，为一个 Order 形成的不可变归档资格；它本身不证明历史已持久发布，不能单独释放热状态。
+_Avoid_: FoundTerminal, terminal boolean, Store archive receipt
+
+**BusinessHistoryProof**:
+在已提交业务历史根上绑定完整身份、候选内容、请求、保留 epoch、屏障和目录覆盖的认证包含或不包含证明；核心无 I/O 消费其规范事实，缺失或超时不能解释为首次。
+_Avoid_: Found flag, cache miss, journal segment checksum
+
+**PendingHistoryCandidate**:
+保留原始输入和固定历史根查验请求的持久候选；风险与安全各有一个有界槽位。
+挂起候选不授权发送，不阻断独立安全事实；同一订单的后续 report／reconciliation
+等待先前状态更新完成，以免查验完成顺序回退订单状态。
+候选同时保存开始时的源序号准入结果；首次业务身份的历史证明不能使原本过期的输入变为可接受。
+_Avoid_: New order permission, disposable retry buffer
+
+**DeferredHistoryAdmission**:
+安全查验背压时已持久记录、尚未应用的 canonical 输入身份与原始摘要。
+后续成交推进源游标后，完全相同的原始输入仍可继续查验；摘要冲突必须拒绝。
+其有界槽位、固定事实引用和所属订单通过快照恢复；处理完成才释放，期间不能归档所属订单。
+尚有这类证据时，查验槽清空也不恢复增加风险的准入。
+_Avoid_: Historical business index, order permission
+
+**DispatchIngressEvidence**:
+按 command／state 保留的 canonical dispatch 完整语义和首次输入证据；它用于
+热回执去重，安全终态时随命令语义归档后回收，不替代 Gateway 的发送证明。
+_Avoid_: Accepted dispatch proof, latest stream cursor
+
 **AuthoritativeTradingState**:
 订单、成交、持仓、账本、风险占用、配置版本和分片游标等决定真实经济结果的状态；它由权威事实、快照和日志恢复，不属于策略私有状态迁移。
 _Avoid_: Strategy state, process memory

@@ -143,9 +143,13 @@ fn checkRawFailure(io: std.Io, path: []const u8, file_store: *durable.WindowsFil
         try std.testing.expectEqual(before.last_sequence + @as(u64, if (point == .commit) 1 else 0), source.last_sequence);
         if (point == .commit) {
             try std.testing.expectError(error.RawIngressUnavailable, raw_ingress.DurableSink.recover(reopened.interface(), io, raw_stream));
-            try std.testing.expectError(error.DecisionLogUnavailable, demo.Owner.recoverWithIngress(reopened.interface(), io, stream, raw_stream));
+            const rejected_owner = try std.heap.page_allocator.create(demo.Owner);
+            defer std.heap.page_allocator.destroy(rejected_owner);
+            try std.testing.expectError(error.DecisionLogUnavailable, demo.Owner.recoverWithIngressInto(rejected_owner, reopened.interface(), io, stream, raw_stream));
         } else {
-            const restored = try demo.Owner.recoverWithIngress(reopened.interface(), io, stream, raw_stream);
+            const restored = try std.heap.page_allocator.create(demo.Owner);
+            defer std.heap.page_allocator.destroy(restored);
+            try demo.Owner.recoverWithIngressInto(restored, reopened.interface(), io, stream, raw_stream);
             try std.testing.expectEqualSlices(u8, &expected, &restored.shard.canonicalStateDigest());
             try std.testing.expect(restored.shard.recovery_admission_pending);
         }
@@ -160,9 +164,11 @@ fn checkNativeSchemaRejection(owner: *demo.Owner, store: durable.Store, io: std.
     const canonical_codec = @import("canonical_event_codec.zig");
     const source = try store.recover(io, raw_stream);
     const before = owner.shard.canonicalStateDigest();
-    var original: [durable.max_snapshot_bytes]u8 = undefined;
-    const snapshot = try owner.committedSnapshot(&original);
-    var damaged: [durable.max_snapshot_bytes]u8 = undefined;
+    const original = try std.heap.page_allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer std.heap.page_allocator.free(original);
+    const snapshot = try owner.committedSnapshot(original);
+    const damaged = try std.heap.page_allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer std.heap.page_allocator.free(damaged);
     // Stable physical-header fields; reseal its checksum so rejection tests the
     // compatibility boundary, independently of transport integrity corruption.
     const variants = [_]enum { state, registry, artifact, encoding }{ .state, .registry, .artifact, .encoding };
@@ -175,12 +181,18 @@ fn checkNativeSchemaRejection(owner: *demo.Owner, store: durable.Store, io: std.
             .encoding => std.mem.writeInt(u16, damaged[8..10], 0, .little),
         }
         std.mem.writeInt(u32, damaged[124..128], std.hash.crc.Crc32Iscsi.hash(damaged[0..124]), .little);
-        try std.testing.expectError(error.InvalidSnapshotHeader, trading.TradingShard.restoreSnapshot(damaged[0..snapshot.len]));
+        const rejected_snapshot = try std.heap.page_allocator.create(trading.TradingShard);
+        defer std.heap.page_allocator.destroy(rejected_snapshot);
+        try std.testing.expectError(error.InvalidSnapshotHeader, trading.TradingShard.restoreSnapshotInto(rejected_snapshot, damaged[0..snapshot.len]));
     }
     @memcpy(damaged[0..snapshot.len], snapshot);
     damaged[codec.header_len] ^= 1;
-    try std.testing.expectError(error.InvalidSnapshotPayload, trading.TradingShard.restoreSnapshot(damaged[0..snapshot.len]));
-    const intact = try trading.TradingShard.restoreSnapshot(snapshot);
+    const rejected_payload = try std.heap.page_allocator.create(trading.TradingShard);
+    defer std.heap.page_allocator.destroy(rejected_payload);
+    try std.testing.expectError(error.InvalidSnapshotPayload, trading.TradingShard.restoreSnapshotInto(rejected_payload, damaged[0..snapshot.len]));
+    const intact = try std.heap.page_allocator.create(@import("trading_shard.zig").SnapshotRestore);
+    defer std.heap.page_allocator.destroy(intact);
+    intact.barrier = try @import("trading_shard.zig").TradingShard.restoreSnapshotInto(&intact.shard, snapshot);
     try std.testing.expectEqualSlices(u8, &before, &intact.shard.canonicalStateDigest());
     var encoded: [canonical_codec.max_encoded_len]u8 = undefined;
     const valid = try canonical_codec.encode(&encoded, event);
@@ -324,7 +336,9 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
     const ingress = try implementation.ingestPrivateWs(private_times, input);
     try std.testing.expect(ingress.rejection == null);
     const output = (try adapter.tryDrain()) orelse return error.MissingEconomicFault;
-    var expected = owner.shard;
+    const expected = try std.heap.page_allocator.create(@import("trading_shard.zig").TradingShard);
+    defer std.heap.page_allocator.destroy(expected);
+    @memcpy(std.mem.asBytes(expected), std.mem.asBytes(&owner.shard));
     for (output.slice()) |record| _ = try expected.apply(.{ .venue = record });
     if (!economic_fault) {
         try std.testing.expectEqual(@as(usize, 2), output.slice().len);
@@ -351,8 +365,9 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
         try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
     }
     if (case.snapshot_point != null or case.publish_snapshot) {
-        var storage: [durable.max_snapshot_bytes]u8 = undefined;
-        const snapshot = try owner.committedSnapshot(&storage);
+        const storage = try std.heap.page_allocator.alloc(u8, durable.max_snapshot_bytes);
+        defer std.heap.page_allocator.free(storage);
+        const snapshot = try owner.committedSnapshot(storage);
         if (case.snapshot_point == .seal) {
             file_store.injectFault(.eio);
             try std.testing.expectError(error.InputOutput, store.seal(io, stream));
@@ -383,22 +398,32 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
     if (point != .commit) {
-        recovered.* = try demo.Owner.recoverWithIngress(reopened.interface(), io, stream, raw_stream);
+        try demo.Owner.recoverWithIngressInto(recovered, reopened.interface(), io, stream, raw_stream);
         try std.testing.expectEqualSlices(u8, &owner_digest, &recovered.shard.canonicalStateDigest());
         try std.testing.expectEqualDeep(economic_prefix, recovered.shard.economicSummary());
         try std.testing.expectEqual(@as(i64, if (committed_prefix == 2) 20_000 else 0), try recovered.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
         // Recovery of a healthy decision prefix grants no dispatch authority
         // while its committed private ingress still contains an unapplied fault.
-        var gateway: @import("execution_gateway.zig").Gateway = .{};
-        try std.testing.expectError(error.DecisionLogUnavailable, recovered.send(&gateway, &guard, command.command_id, 1));
+        const gateway = try std.heap.page_allocator.create(@import("execution_gateway.zig").Gateway);
+        defer std.heap.page_allocator.destroy(gateway);
+        gateway.init();
+        try std.testing.expectError(error.DecisionLogUnavailable, recovered.send(gateway, &guard, command.command_id, 1));
         try std.testing.expect((try recovered.source()).recovery_admission_pending);
-        var snapshot_buffer: [durable.max_snapshot_bytes]u8 = undefined;
-        const pending_snapshot = try recovered.committedSnapshot(&snapshot_buffer);
-        const pending_copy = try @import("trading_shard.zig").TradingShard.restoreSnapshot(pending_snapshot);
+        const snapshot_buffer = try std.heap.page_allocator.alloc(u8, durable.max_snapshot_bytes);
+        defer std.heap.page_allocator.free(snapshot_buffer);
+        const pending_snapshot = try recovered.committedSnapshot(snapshot_buffer);
+        const pending_copy = try std.heap.page_allocator.create(@import("trading_shard.zig").SnapshotRestore);
+        defer std.heap.page_allocator.destroy(pending_copy);
+        pending_copy.barrier = try @import("trading_shard.zig").TradingShard.restoreSnapshotInto(&pending_copy.shard, pending_snapshot);
         try std.testing.expect(pending_copy.shard.recovery_admission_pending);
         try std.testing.expectEqual(@as(usize, 0), transport.sends);
     } else {
-        try std.testing.expectError(error.DecisionLogUnavailable, demo.Owner.recover(reopened.interface(), io, stream));
+        const rejected_owner = try std.heap.page_allocator.create(demo.Owner);
+        defer std.heap.page_allocator.destroy(rejected_owner);
+        try demo.Owner.recoverInto(rejected_owner, reopened.interface(), io, stream);
+        try std.testing.expect(rejected_owner.closed and rejected_owner.shard.recovery_admission_pending);
+        try std.testing.expectError(error.DecisionLogUnavailable, rejected_owner.source());
+        try std.testing.expectEqualSlices(u8, &owner_digest, &rejected_owner.shard.canonicalStateDigest());
         const uncommitted = try reopened.interface().recover(io, stream);
         try std.testing.expect(uncommitted.last_sequence > uncommitted.committed_barrier);
     }
@@ -484,16 +509,23 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
             const twice_owner = try allocator.create(demo.Owner);
             defer allocator.destroy(twice_owner);
             if (recovery_point == .commit) {
-                try std.testing.expectError(error.DecisionLogUnavailable, demo.Owner.recover(twice.interface(), io, stream));
+                const rejected_owner = try std.heap.page_allocator.create(demo.Owner);
+                defer std.heap.page_allocator.destroy(rejected_owner);
+                try demo.Owner.recoverInto(rejected_owner, twice.interface(), io, stream);
+                try std.testing.expect(rejected_owner.closed and rejected_owner.shard.recovery_admission_pending);
+                try std.testing.expectError(error.DecisionLogUnavailable, rejected_owner.source());
+                try std.testing.expectEqualSlices(u8, &owner_digest, &rejected_owner.shard.canonicalStateDigest());
                 const unfinished = try twice.interface().recover(io, stream);
                 try std.testing.expect(unfinished.last_sequence > unfinished.committed_barrier);
             } else {
-                twice_owner.* = try demo.Owner.recoverWithIngress(twice.interface(), io, stream, raw_stream);
+                try demo.Owner.recoverWithIngressInto(twice_owner, twice.interface(), io, stream, raw_stream);
                 try std.testing.expectEqualSlices(u8, &owner_digest, &twice_owner.shard.canonicalStateDigest());
                 try std.testing.expectEqualDeep(economic_prefix, twice_owner.shard.economicSummary());
                 try std.testing.expect(twice_owner.shard.recovery_admission_pending);
-                var denied_gateway: @import("execution_gateway.zig").Gateway = .{};
-                try std.testing.expectError(error.DecisionLogUnavailable, twice_owner.send(&denied_gateway, &guard, command.command_id, 1));
+                const denied_gateway = try std.heap.page_allocator.create(@import("execution_gateway.zig").Gateway);
+                defer std.heap.page_allocator.destroy(denied_gateway);
+                denied_gateway.init();
+                try std.testing.expectError(error.DecisionLogUnavailable, twice_owner.send(denied_gateway, &guard, command.command_id, 1));
             }
             const retained = try twice.interface().recover(io, raw_stream);
             try std.testing.expectEqual(raw_before.last_sequence, retained.last_sequence);
@@ -534,8 +566,10 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
             try std.testing.expectError(error.DecisionLogUnavailable, recovered.apply(next_input));
             try std.testing.expect(recovered.checkpoint_pending);
             try std.testing.expect((try recovered.source()).recovery_admission_pending);
-            var pending_gateway: @import("execution_gateway.zig").Gateway = .{};
-            try std.testing.expectError(error.DecisionLogUnavailable, recovered.send(&pending_gateway, &guard, command.command_id, 3));
+            const pending_gateway = try std.heap.page_allocator.create(@import("execution_gateway.zig").Gateway);
+            defer std.heap.page_allocator.destroy(pending_gateway);
+            pending_gateway.init();
+            try std.testing.expectError(error.DecisionLogUnavailable, recovered.send(pending_gateway, &guard, command.command_id, 3));
         }
         if (recovered.checkpoint_pending) try recovered.checkpoint();
         try std.testing.expect(!recovered.shard.recovery_admission_pending);
@@ -558,7 +592,7 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
         defer healthy_store.close(io);
         const healthy_owner = try allocator.create(demo.Owner);
         defer allocator.destroy(healthy_owner);
-        healthy_owner.* = try demo.Owner.recoverWithIngress(healthy_store.interface(), io, stream, raw_stream);
+        try demo.Owner.recoverWithIngressInto(healthy_owner, healthy_store.interface(), io, stream, raw_stream);
         try std.testing.expect(healthy_owner.shard.recovery_admission_pending);
         try std.testing.expectEqualSlices(u8, &healthy_digest, &healthy_owner.shard.canonicalStateDigest());
         try std.testing.expectEqual(@as(i64, 20_000), try healthy_owner.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
@@ -599,7 +633,7 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
         _ = try duplicate_adapter.adapter().tryDrain();
         const incomplete_owner = try allocator.create(demo.Owner);
         defer allocator.destroy(incomplete_owner);
-        incomplete_owner.* = try demo.Owner.recoverWithIngress(healthy_store.interface(), io, stream, raw_stream);
+        try demo.Owner.recoverWithIngressInto(incomplete_owner, healthy_store.interface(), io, stream, raw_stream);
         var incomplete_index = try recovery.CommittedInputs.init(healthy_store.interface(), io, stream);
         var incomplete_reconciler: private.Reconciler = .{};
         var incomplete_adapter = okx.OkxVenueAdapter.init(allocator, &duplicate_chain, clock.interface(), profile(), rules());
@@ -611,8 +645,10 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
         var incomplete_sweep: recovery.Sweep = .{ .implementation = &incomplete_adapter, .owner = incomplete_owner, .index = &incomplete_index, .reconciliation_identity = 99, .last_sequence = incomplete_raw.committed_barrier };
         try std.testing.expectError(error.IncompletePrivateRecovery, incomplete_owner.replayCommittedIngress(raw_stream, incomplete_sweep.consumer()));
         try std.testing.expect(incomplete_owner.shard.recovery_admission_pending);
-        var incomplete_gateway: @import("execution_gateway.zig").Gateway = .{};
-        try std.testing.expectError(error.DecisionLogUnavailable, incomplete_owner.send(&incomplete_gateway, &guard, command.command_id, 1));
+        const incomplete_gateway = try std.heap.page_allocator.create(@import("execution_gateway.zig").Gateway);
+        defer std.heap.page_allocator.destroy(incomplete_gateway);
+        incomplete_gateway.init();
+        try std.testing.expectError(error.DecisionLogUnavailable, incomplete_owner.send(incomplete_gateway, &guard, command.command_id, 1));
         try std.testing.expectEqual(@as(i64, 20_000), try incomplete_owner.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
         try std.testing.expectEqual(expected_fee, incomplete_owner.shard.economicSummary().portfolio.fee_atoms);
         try std.testing.expectEqual(@as(usize, 0), transport.sends);
@@ -638,8 +674,8 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
         } }));
     try std.testing.expectEqual(@as(usize, 0), transport.sends);
     if (point == .commit) {
-        // The public Owner refuses an uncommitted canonical tail. Recovery
-        // reparses RawIngress for evidence but never promotes it or sends.
+        // Recovery retains the committed state behind a quarantine fence.
+        // RawIngress remains evidence; the physical tail is never promoted or sent.
         try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
         const preserved_raw = try reopened.interface().recover(io, raw_stream);
         try std.testing.expectEqual(raw_before.committed_barrier, preserved_raw.committed_barrier);
@@ -654,7 +690,12 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
 
         try closed_again.initWindowsVerification(io, path);
         defer closed_again.close(io);
-        try std.testing.expectError(error.DecisionLogUnavailable, demo.Owner.recover(closed_again.interface(), io, stream));
+        const rejected_owner = try std.heap.page_allocator.create(demo.Owner);
+        defer std.heap.page_allocator.destroy(rejected_owner);
+        try demo.Owner.recoverInto(rejected_owner, closed_again.interface(), io, stream);
+        try std.testing.expect(rejected_owner.closed and rejected_owner.shard.recovery_admission_pending);
+        try std.testing.expectError(error.DecisionLogUnavailable, rejected_owner.source());
+        try std.testing.expectEqualSlices(u8, &owner_digest, &rejected_owner.shard.canonicalStateDigest());
         return;
     }
     try std.testing.expect(recovered.shard.oms.recovery_only);
@@ -683,7 +724,7 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
     defer final_store.close(io);
     const final_owner = try allocator.create(demo.Owner);
     defer allocator.destroy(final_owner);
-    final_owner.* = try demo.Owner.recover(final_store.interface(), io, stream);
+    try demo.Owner.recoverInto(final_owner, final_store.interface(), io, stream);
     try std.testing.expect(final_owner.shard.recovery_admission_pending);
     try std.testing.expectEqualSlices(u8, &fault_digest, &final_owner.shard.canonicalStateDigest());
     try std.testing.expect(final_owner.shard.oms.recovery_only);

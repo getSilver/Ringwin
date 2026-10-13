@@ -15,7 +15,9 @@ pub fn activatedTestAssets() !@import("asset_registry.zig").Registry {
 }
 
 pub fn activatedTestAssetsWithScales(usdt_scale: u8, btc_scale: u8) !@import("asset_registry.zig").Registry {
-    var shard: @import("trading_shard.zig").TradingShard = .{};
+    const shard = try std.heap.page_allocator.create(@import("trading_shard.zig").TradingShard);
+    defer std.heap.page_allocator.destroy(shard);
+    shard.* = .{};
     for (@import("asset_registry.zig").testDefinitions(usdt_scale, btc_scale)) |definition|
         _ = try shard.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
     return shard.activatedAssets();
@@ -51,11 +53,14 @@ pub fn exerciseEconomicFaultRecovery(batch: canonical.AdapterOutputBatch) !void 
     try std.testing.expect(owner.shard.oms.recovery_only);
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
-    recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try demo.Owner.recoverInto(recovered, memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
-    var bytes: [durable.max_snapshot_bytes]u8 = undefined;
-    const restored = try trading.TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
-    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+    const bytes = try allocator.create([durable.max_snapshot_bytes]u8);
+    defer allocator.destroy(bytes);
+    const restored = try allocator.create(trading.TradingShard);
+    defer allocator.destroy(restored);
+    _ = try trading.TradingShard.restoreSnapshotInto(restored, try owner.committedSnapshot(bytes));
+    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.canonicalStateDigest());
 }
 
 pub fn exercise(adapter: venue.VenueAdapter, adapter_request: canonical.AdapterRequest) !void {

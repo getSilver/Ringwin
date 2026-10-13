@@ -305,14 +305,14 @@ fn executeRawPrivateFillRecovery() !void {
     // store; two live Owners must not append through stale journal cursors.
     const tail_memory = try allocator.create(durable.MemoryAdapter);
     defer allocator.destroy(tail_memory);
-    tail_memory.* = memory.*;
+    @memcpy(std.mem.asBytes(tail_memory), std.mem.asBytes(memory));
     const after_report = try allocator.create(demo.Owner);
     defer allocator.destroy(after_report);
-    after_report.* = try demo.Owner.recover(tail_memory.interface(), undefined, stream);
+    try demo.Owner.recoverInto(after_report, tail_memory.interface(), undefined, stream);
     const report_digest = after_report.shard.canonicalStateDigest();
     const raw_replayed_after_report = try allocator.create(demo.Owner);
     defer allocator.destroy(raw_replayed_after_report);
-    raw_replayed_after_report.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try demo.Owner.recoverInto(raw_replayed_after_report, memory.interface(), undefined, stream);
     var tail_raw = try raw_ingress.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = 3 });
     var tail_chain: live.Chain = .{ .mode = .demo_live, .qualification = qualification(), .raw_sink = tail_raw.interface(), .transport = transport.interface() };
     var tail_clock = Clock{};
@@ -381,7 +381,7 @@ fn executeRawPrivateFillRecovery() !void {
     try std.testing.expect(!std.mem.eql(u8, &report_digest, &fill_digest));
     const after_fill = try allocator.create(demo.Owner);
     defer allocator.destroy(after_fill);
-    after_fill.* = try demo.Owner.recover(tail_memory.interface(), undefined, stream);
+    try demo.Owner.recoverInto(after_fill, tail_memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &fill_digest, &after_fill.shard.canonicalStateDigest());
     try std.testing.expectEqual(@as(i64, 10_000), try after_fill.shard.economic_projection.appliedCanonicalFillQuantity(@intCast(command.order_id)));
     // The recovered Owner remains behind its process admission fence. Continue
@@ -408,7 +408,7 @@ fn executeRawPrivateFillRecovery() !void {
     const reconciled_digest = owner.shard.canonicalStateDigest();
     const reconciled_owner = try allocator.create(demo.Owner);
     defer allocator.destroy(reconciled_owner);
-    reconciled_owner.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try demo.Owner.recoverInto(reconciled_owner, memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &reconciled_digest, &reconciled_owner.shard.canonicalStateDigest());
 
     const full_sequence = owner.shard.authoritativeBarrier() + 1;
@@ -434,7 +434,7 @@ fn executeRawPrivateFillRecovery() !void {
     const pending_digest = owner.shard.canonicalStateDigest();
     const pending_recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(pending_recovered);
-    pending_recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try demo.Owner.recoverInto(pending_recovered, memory.interface(), undefined, stream);
     try std.testing.expect(pending_recovered.shard.accountReconciliationPending());
     try std.testing.expect(std.meta.eql(account_before_refresh, pending_recovered.shard.canonical_account));
     try std.testing.expectEqualSlices(u8, &pending_digest, &pending_recovered.shard.canonicalStateDigest());
@@ -492,7 +492,7 @@ fn executeRawPrivateFillRecovery() !void {
     const live_digest = owner.shard.canonicalStateDigest();
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
-    recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try demo.Owner.recoverInto(recovered, memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &live_digest, &(try recovered.source()).canonicalStateDigest());
     const Replay = struct {
         count: u64 = 0,
@@ -527,7 +527,7 @@ test "OKX raw private fills traverse adapter Owner durable recovery without deco
         }
     };
     var context = Context{};
-    const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
+    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Context.run, .{&context});
     thread.join();
     if (context.failure) |err| return err;
 }
@@ -628,7 +628,9 @@ fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canoni
         try std.testing.expectError(error.DecisionLogUnavailable, owner.applyAdapterBatch(output));
         try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
         try std.testing.expectEqualDeep(economic_before, owner.shard.economicSummary());
-        try std.testing.expectError(error.DecisionLogUnavailable, demo.Owner.recover(memory.interface(), undefined, stream));
+        const failed_recovery = try allocator.create(demo.Owner);
+        defer allocator.destroy(failed_recovery);
+        try std.testing.expectError(error.DecisionLogUnavailable, demo.Owner.recoverInto(failed_recovery, memory.interface(), undefined, stream));
         const pending_raw = try memory.interface().recover(undefined, .{ .domain = .raw_ingress, .id = 1 });
         try std.testing.expectEqual(ingress.raw_evidence.stream_sequence, pending_raw.committed_barrier);
         try std.testing.expectEqual(pending_raw.last_sequence, pending_raw.committed_barrier);
@@ -698,12 +700,15 @@ fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canoni
     try std.testing.expectEqual(@as(i64, 0), try owner.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
-    recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try demo.Owner.recoverInto(recovered, memory.interface(), undefined, stream);
     try std.testing.expect(recovered.shard.oms.recovery_only);
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
-    var snapshot_buffer: [durable.max_snapshot_bytes]u8 = undefined;
-    const snapshot = try owner.committedSnapshot(&snapshot_buffer);
-    const restored = try @import("trading_shard.zig").TradingShard.restoreSnapshot(snapshot);
+    const snapshot_buffer = try std.heap.page_allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer std.heap.page_allocator.free(snapshot_buffer);
+    const snapshot = try owner.committedSnapshot(snapshot_buffer);
+    const restored = try std.heap.page_allocator.create(@import("trading_shard.zig").SnapshotRestore);
+    defer std.heap.page_allocator.destroy(restored);
+    restored.barrier = try @import("trading_shard.zig").TradingShard.restoreSnapshotInto(&restored.shard, snapshot);
     try std.testing.expect(!recovered.shard.integritySnapshot().account_valid);
     try std.testing.expect(!restored.shard.integritySnapshot().account_valid);
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
@@ -732,7 +737,9 @@ fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canoni
         try std.testing.expect(recovered.shard.oms.recovery_only);
     }
     if (fee == null and !core_reject) {
-        var gateway: @import("execution_gateway.zig").Gateway = .{};
+        const gateway = try allocator.create(@import("execution_gateway.zig").Gateway);
+        defer allocator.destroy(gateway);
+        gateway.init();
         try gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .environment = .demo, .lease_guard = &guard, .capability = .{
             .version = 1,
             .rules_version = 1,
@@ -749,19 +756,19 @@ fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canoni
             cancellation = known;
         };
         const cancel = cancellation orelse return error.MissingSafetyCancellation;
-        try gateway.observeAuthority(.{
+        try gateway.observeAuthorityFromShard(&recovered.shard, .{
             .account = 2,
             .effective_trading_authority = false,
             .reservation_identity = cancel.reservation_identity,
             .reservation = cancel.reservation,
             .primary_lease_expires_at_monotonic_ns = lease.expires_at_ns,
             .fencing_token = lease.token,
-            .exchange_position = owner.shard.currentNetExchangePosition(cancel.instrument).?,
-            .authority_barrier = owner.shard.authoritativeBarrier(),
+            .exchange_position = recovered.shard.currentNetExchangePosition(cancel.instrument).?,
+            .authority_barrier = recovered.shard.authoritativeBarrier(),
         });
         try std.testing.expectError(error.NotSent, gateway.sendFromShard(&recovered.shard, command.command_id, 2));
-        const cancellation_snapshot = try recovered.committedSnapshot(&snapshot_buffer);
-        try std.testing.expectEqual(venue.SendResult.accepted, try demo.sendFromCommittedSnapshot(cancellation_snapshot, recovered.shard.authoritativeBarrier(), recovered.shard.canonicalStateDigest(), &gateway, &guard, cancel.command_id, 2));
+        const cancellation_snapshot = try recovered.committedSnapshot(snapshot_buffer);
+        try std.testing.expectEqual(venue.SendResult.accepted, try demo.sendFromCommittedSnapshot(cancellation_snapshot, recovered.shard.authoritativeBarrier(), recovered.shard.canonicalStateDigest(), gateway, &guard, cancel.command_id, 2));
         try std.testing.expectEqual(@as(u64, 2), chain.next_attempt_id);
     }
 }
@@ -771,10 +778,10 @@ test "OKX ready inexact account fact persists a fail closed result without recon
 }
 
 test "OKX activated high precision account facts survive Owner replay without old unit economics" {
-    const allocator = std.heap.page_allocator;
+    const allocator = std.testing.allocator;
     const memory = try allocator.create(durable.MemoryAdapter);
     defer allocator.destroy(memory);
-    memory.* = .init();
+    memory.* = .initWithAllocator(allocator);
     defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
@@ -833,12 +840,16 @@ test "OKX activated high precision account facts survive Owner replay without ol
     try owner.sealBootstrap();
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
-    recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try demo.Owner.recoverInto(recovered, memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
     try std.testing.expectEqualDeep(owner.shard.activatedAssets(), recovered.shard.activatedAssets());
-    var bytes: [durable.max_snapshot_bytes]u8 = undefined;
-    const restored = try @import("trading_shard.zig").TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
-    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+    const trading = @import("trading_shard.zig");
+    const bytes = try allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer allocator.free(bytes);
+    const restored = try allocator.create(trading.TradingShard);
+    defer allocator.destroy(restored);
+    _ = try trading.TradingShard.restoreSnapshotInto(restored, try owner.committedSnapshot(bytes));
+    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.canonicalStateDigest());
     try std.testing.expectEqual(@as(u64, 1), chain.next_attempt_id);
 }
 
@@ -1141,10 +1152,13 @@ fn runNativeSettlementFees(case: NativeSettlementCase, arrival: NativeArrival, w
     try owner.shard.assertClosures();
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
-    recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try demo.Owner.recoverInto(recovered, memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
-    var bytes: [durable.max_snapshot_bytes]u8 = undefined;
-    const restored = try @import("trading_shard.zig").TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
+    const bytes = try std.heap.page_allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer std.heap.page_allocator.free(bytes);
+    const restored = try std.heap.page_allocator.create(@import("trading_shard.zig").SnapshotRestore);
+    defer std.heap.page_allocator.destroy(restored);
+    restored.barrier = try @import("trading_shard.zig").TradingShard.restoreSnapshotInto(&restored.shard, try owner.committedSnapshot(bytes));
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
     try std.testing.expectEqual(@as(u64, 1), chain.next_attempt_id);
     if (with_rest) {
@@ -1272,15 +1286,17 @@ fn checkNativeBaseFees(nonunit: bool, mode: enum { normal, legacy_precision, con
     } }));
     const account_case = mode == .missing_cash or mode == .unavailable_cash or mode == .usd_precision or mode == .native_liabilities;
     var pending_command: ?@import("oms.zig").Command = null;
-    var dispatch_gateways: [2]@import("execution_gateway.zig").Gateway = @splat(.{});
+    const dispatch_gateways = try allocator.create([2]@import("execution_gateway.zig").Gateway);
+    defer allocator.destroy(dispatch_gateways);
+    for (dispatch_gateways) |*gateway| gateway.init();
     if (mode == .missing_cash) {
         const sequence = owner.shard.authoritativeBarrier() + 1;
         const accepted: host.OrderIntent = .{ .strategy_identity = 40, .intent_sequence = sequence, .strategy_cursor = owner.shard.authoritativeBarrier(), .config_version = 1, .activation_identity = 50, .portfolio_identity = 1, .exchange_account_identity = 2, .instrument_identity = okx.btc_usdt_spot, .side = .buy, .order_type = .limit, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 1, .limit_price_micros = 50_000_000_000 };
         pending_command = (try owner.apply(.{ .core = .{ .identity = sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = accepted } } })) orelse return error.MissingDemoCommand;
-        for (&dispatch_gateways, 0..) |*gateway, index| {
+        for (dispatch_gateways, 0..) |*gateway, index| {
             try gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .environment = .demo, .lease_guard = &guard, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1, .supports_post_only = true, .supports_market_protection = true } });
             try gateway.bootstrapDurableDispatch(memory.interface(), undefined, .{ .domain = .control, .id = 93 + index });
-            try gateway.observeAuthority(.{ .account = 2, .effective_trading_authority = true, .reservation_identity = pending_command.?.reservation_identity, .reservation = pending_command.?.reservation, .primary_lease_expires_at_monotonic_ns = lease.expires_at_ns, .fencing_token = lease.token, .exchange_position = owner.shard.currentNetExchangePosition(okx.btc_usdt_spot).?, .authority_barrier = owner.shard.authoritativeBarrier() });
+            try gateway.observeAuthorityFromShard(&owner.shard, .{ .account = 2, .effective_trading_authority = owner.shard.operational_state.effectiveTradingAuthority(), .reservation_identity = pending_command.?.reservation_identity, .reservation = pending_command.?.reservation, .primary_lease_expires_at_monotonic_ns = lease.expires_at_ns, .fencing_token = lease.token, .exchange_position = owner.shard.currentNetExchangePosition(okx.btc_usdt_spot).?, .authority_barrier = owner.shard.authoritativeBarrier() });
         }
         try std.testing.expectEqual(venue.SendResult.accepted, try dispatch_gateways[0].sendFromShard(&owner.shard, pending_command.?.command_id, 2));
         try std.testing.expectEqual(@as(u64, 1), dispatch_gateways[0].send_attempt_count);
@@ -1498,10 +1514,13 @@ fn checkNativeBaseFees(nonunit: bool, mode: enum { normal, legacy_precision, con
     try owner.shard.assertClosures();
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
-    recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try demo.Owner.recoverInto(recovered, memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
-    var bytes: [durable.max_snapshot_bytes]u8 = undefined;
-    const restored = try @import("trading_shard.zig").TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
+    const bytes = try std.heap.page_allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer std.heap.page_allocator.free(bytes);
+    const restored = try std.heap.page_allocator.create(@import("trading_shard.zig").SnapshotRestore);
+    defer std.heap.page_allocator.destroy(restored);
+    restored.barrier = try @import("trading_shard.zig").TradingShard.restoreSnapshotInto(&restored.shard, try owner.committedSnapshot(bytes));
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
     try std.testing.expectEqual(@as(u64, if (mode == .missing_cash) 2 else 1), chain.next_attempt_id);
 }
@@ -1543,7 +1562,7 @@ test "activated balance limits reject cumulative Suspense growth before Owner co
     const allocator = std.testing.allocator;
     const memory = try allocator.create(durable.MemoryAdapter);
     defer allocator.destroy(memory);
-    memory.* = .init();
+    memory.* = .initWithAllocator(allocator);
     defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
@@ -1578,11 +1597,14 @@ test "activated balance limits reject cumulative Suspense growth before Owner co
     try std.testing.expectEqualSlices(u8, &digest, &owner.shard.canonicalStateDigest());
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
-    recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try demo.Owner.recoverInto(recovered, memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &digest, &recovered.shard.canonicalStateDigest());
-    var bytes: [durable.max_snapshot_bytes]u8 = undefined;
-    const restored = try trading.TradingShard.restoreSnapshot(try recovered.committedSnapshot(&bytes));
-    try std.testing.expectEqualSlices(u8, &digest, &restored.shard.canonicalStateDigest());
+    const bytes = try allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer allocator.free(bytes);
+    const restored = try allocator.create(trading.TradingShard);
+    defer allocator.destroy(restored);
+    _ = try trading.TradingShard.restoreSnapshotInto(restored, try recovered.committedSnapshot(bytes));
+    try std.testing.expectEqualSlices(u8, &digest, &restored.canonicalStateDigest());
 }
 
 test "OKX ready economic faults distinguish micro fees rebates assets and decoder failures" {
@@ -1824,10 +1846,13 @@ fn checkNativeThirdFees(mode: enum { normal, wide, unknown, inexact, conflict, c
     try owner.shard.assertClosures();
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
-    recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try demo.Owner.recoverInto(recovered, memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
-    var bytes: [durable.max_snapshot_bytes]u8 = undefined;
-    const restored = try @import("trading_shard.zig").TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
+    const bytes = try std.heap.page_allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer std.heap.page_allocator.free(bytes);
+    const restored = try std.heap.page_allocator.create(@import("trading_shard.zig").SnapshotRestore);
+    defer std.heap.page_allocator.destroy(restored);
+    restored.barrier = try @import("trading_shard.zig").TradingShard.restoreSnapshotInto(&restored.shard, try owner.committedSnapshot(bytes));
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
     try std.testing.expectEqual(@as(u64, 1), chain.next_attempt_id);
 }
@@ -1920,7 +1945,7 @@ fn checkNativeFundingBills(mode: enum { normal, unknown, inexact, range, conflic
         var exhausted = false;
         for (0..33) |index| {
             var bytes: [768]u8 = undefined;
-            const frame = try std.fmt.bufPrint(&bytes,
+            const frame = try std.fmt.bufPrint(bytes[0..],
                 \\{{"code":"0","data":[{{"billId":"{d}","type":"8","subType":"173","instType":"SWAP","instId":"BTC-USDT-SWAP","ccy":"USDT","pnl":"-0.000000000001","fee":"0","ts":"{d}"}}]}}
             , .{ 10000 + index, @as(u64, 1800000000200) + index });
             const ingress = try implementation.ingestPrivateRest(private_times, .rest_account_bills, .{ .final = true }, frame);
@@ -2014,10 +2039,13 @@ fn checkNativeFundingBills(mode: enum { normal, unknown, inexact, range, conflic
     };
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
-    recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try demo.Owner.recoverInto(recovered, memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
-    var bytes: [durable.max_snapshot_bytes]u8 = undefined;
-    const restored = try @import("trading_shard.zig").TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
+    const bytes = try std.heap.page_allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer std.heap.page_allocator.free(bytes);
+    const restored = try std.heap.page_allocator.create(@import("trading_shard.zig").SnapshotRestore);
+    defer std.heap.page_allocator.destroy(restored);
+    restored.barrier = try @import("trading_shard.zig").TradingShard.restoreSnapshotInto(&restored.shard, try owner.committedSnapshot(bytes));
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
     try std.testing.expectEqual(@as(u64, 1), chain.next_attempt_id);
 }
@@ -2151,7 +2179,7 @@ fn checkPrivateCheckpointHorizon() !void {
     try std.testing.expectEqual(private_boundary.decision_barrier + 2, committed.next_sequence);
     const restarted = try allocator.create(demo.Owner);
     defer allocator.destroy(restarted);
-    restarted.* = try demo.Owner.recoverWithIngress(memory.interface(), undefined, stream, raw_stream);
+    try demo.Owner.recoverWithIngressInto(restarted, memory.interface(), undefined, stream, raw_stream);
     var replay_reconciler: private.Reconciler = .{};
     var replay_adapter = okx.OkxVenueAdapter.init(allocator, &chain, clock.interface(), implementation.profile, rules());
     replay_adapter.attachPrivateReconciler(&replay_reconciler);
@@ -2176,7 +2204,7 @@ test "Checkpoint private horizon seeds after 1024 cumulative private inputs with
         }
     };
     var context: Context = .{};
-    const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
+    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Context.run, .{&context});
     thread.join();
     if (context.failure) |err| return err;
 }
@@ -2297,7 +2325,7 @@ fn checkPrivateCheckpointPartialFrame() !void {
     try std.testing.expectEqual(@as(usize, 1), partial_index.count);
     const restarted = try allocator.create(demo.Owner);
     defer allocator.destroy(restarted);
-    restarted.* = try demo.Owner.recoverWithIngress(memory.interface(), undefined, stream, raw_stream);
+    try demo.Owner.recoverWithIngressInto(restarted, memory.interface(), undefined, stream, raw_stream);
     var replay_reconciler: private.Reconciler = .{};
     var replay_adapter = okx.OkxVenueAdapter.init(allocator, &chain, clock.interface(), implementation.profile, rules());
     replay_adapter.attachPrivateReconciler(&replay_reconciler);
@@ -2323,7 +2351,7 @@ test "Checkpoint private frame restores postseed order and applies missing Fill 
         }
     };
     var context: Context = .{};
-    const thread = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
+    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Context.run, .{&context});
     thread.join();
     if (context.failure) |err| return err;
 }

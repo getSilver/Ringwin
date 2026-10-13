@@ -132,11 +132,14 @@ fn exercise(case: Case) !void {
     try owner.shard.assertClosures();
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
-    recovered.* = try demo.Owner.recover(memory.interface(), undefined, stream);
+    try demo.Owner.recoverInto(recovered, memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
-    var storage: [durable.max_snapshot_bytes]u8 = undefined;
-    const restored = try @import("trading_shard.zig").TradingShard.restoreSnapshot(try owner.committedSnapshot(&storage));
-    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+    const storage = try allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer allocator.free(storage);
+    const restored = try allocator.create(@import("trading_shard.zig").TradingShard);
+    defer allocator.destroy(restored);
+    _ = try @import("trading_shard.zig").TradingShard.restoreSnapshotInto(restored, try owner.committedSnapshot(storage));
+    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.canonicalStateDigest());
     try std.testing.expect((try adapter.tryDrain()) == null);
     if (failure or case == .conflict) try std.testing.expect(recovered.shard.oms.recovery_only);
     try adapter.stop(.{ .monotonic_ns = 100 });

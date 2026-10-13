@@ -215,5 +215,13 @@ test {
     _ = @import("simulated_native_accounting_acceptance.zig");
     _ = @import("okx_live_chain.zig");
     _ = @import("core_observation_capacity_acceptance.zig");
+    _ = @import("order_dispatch_archive_acceptance.zig");
+    _ = @import("order_history_batch.zig");
+    _ = @import("cold_business_candidate.zig");
+    _ = @import("order_gateway_archive_acceptance.zig");
+    _ = @import("cold_core_protocol_acceptance.zig");
+    _ = @import("order_capacity_acceptance.zig");
+    _ = @import("order_public_capacity_acceptance.zig");
+    _ = @import("order_history_safety_acceptance.zig");
     _ = raw_ingress;
 }

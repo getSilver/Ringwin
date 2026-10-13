@@ -22,7 +22,7 @@ fn instrument(route: usize, index: usize) u128 {
     return (@as(u128, venues[route]) << 64) | (@as(u128, if (index < 75) 1 else 2) << 32) | (1000 + index % 75);
 }
 fn selected(index: usize) bool {
-    return index < 16 or (index >= 75 and index < 91);
+    return index < 9 or (index >= 75 and index < 91);
 }
 fn tick(index: usize) i128 {
     return @intCast(100 + index);
@@ -197,7 +197,7 @@ fn toggle(owner: *demo.Owner, route: usize, index: usize, enabled: bool, identit
 }
 fn dispatch(owner: *demo.Owner, gateway: *execution.Gateway, adapter: *RestingVenue, command: trading.OrderCommand) !void {
     const pos = owner.shard.currentNetExchangePosition(command.instrument) orelse return error.MissingAccountPosition;
-    try gateway.observeAuthority(.{ .account = owner.shard.exchange_account_identity, .effective_trading_authority = owner.shard.operational_state.effectiveTradingAuthority(), .reservation_identity = command.reservation_identity, .reservation = command.reservation, .primary_lease_expires_at_monotonic_ns = std.math.maxInt(u64), .fencing_token = 1, .exchange_position = pos, .authority_barrier = owner.shard.authoritativeBarrier() });
+    try gateway.observeAuthorityFromShard(try owner.source(), .{ .account = owner.shard.exchange_account_identity, .effective_trading_authority = owner.shard.operational_state.effectiveTradingAuthority(), .reservation_identity = command.reservation_identity, .reservation = command.reservation, .primary_lease_expires_at_monotonic_ns = std.math.maxInt(u64), .fencing_token = 1, .exchange_position = pos, .authority_barrier = owner.shard.authoritativeBarrier() });
     const result = gateway.sendFromShard(try owner.source(), command.command_id, 2) catch |err| {
         std.debug.print("observation_dispatch: instrument={d} command={d} operation={s} error={s}\n", .{ command.instrument, command.command_id, @tagName(command.operation), @errorName(err) });
         return err;
@@ -368,7 +368,7 @@ test "Observation capacity account Venue scope rejects fresh and duplicate publi
     }
 }
 
-test "Observation capacity 500 combinations four continuous Owners retain 128 selected resting orders" {
+test "Observation capacity 500 combinations four continuous Owners retain 100 selected resting orders" {
     const allocator = std.testing.allocator;
     const owners = try allocator.alloc(demo.Owner, 4);
     defer allocator.free(owners);
@@ -570,13 +570,13 @@ test "Observation capacity 500 combinations four continuous Owners retain 128 se
             if (index == 0 or index == 1 or index == 75 or index == 76)
                 try partialFill(owner, &adapters[route], command, route, index);
         };
-        try std.testing.expectEqual(@as(u8, 33), owner.shard.oms.order_count);
-        try std.testing.expectEqual(@as(usize, 34), adapters[route].sends);
+        try std.testing.expectEqual(@as(u8, 26), owner.shard.oms.order_count);
+        try std.testing.expectEqual(@as(usize, 27), adapters[route].sends);
         var live_orders: usize = 0;
         for (owner.shard.oms.orders[0..owner.shard.oms.order_count]) |order| {
             if (order.state == .live) live_orders += 1 else try std.testing.expectEqual(trading.oms.OrderState.canceled, order.state);
         }
-        try std.testing.expectEqual(@as(usize, 32), live_orders);
+        try std.testing.expectEqual(@as(usize, 25), live_orders);
         try owner.checkpoint();
         const encoded = try owner.committedSnapshot(snapshot_bytes);
         max_encoded = @max(max_encoded, encoded.len);
@@ -588,7 +588,7 @@ test "Observation capacity 500 combinations four continuous Owners retain 128 se
         try std.testing.expectEqual(@as(u8, 76), restored.shard.canonical_account.balance_count);
         try std.testing.expectEqual(@as(u8, 125), restored.shard.canonical_account.position_count);
         try std.testing.expectEqual(@as(u8, 50), restored.shard.canonical_account.margin_count);
-        try std.testing.expectEqual(@as(u8, 33), restored.shard.oms.order_count);
+        try std.testing.expectEqual(@as(u8, 26), restored.shard.oms.order_count);
         for ([_]usize{ 0, 1, 75, 76 }) |index|
             try std.testing.expectEqual(@as(i64, 10), restored.shard.economic_projection.portfolio.positionForInstrument(instrument(route, index)).quantity);
         try std.testing.expectEqual(@as(i128, 9), restored.shard.economic_projection.portfolio.spotInventoryAtoms(1000));
@@ -620,5 +620,5 @@ test "Observation capacity 500 combinations four continuous Owners retain 128 se
         } } } }));
         try std.testing.expectEqualSlices(u8, &before_overflow, &restored.shard.canonicalStateDigest());
     }
-    std.debug.print("observation_capacity: combinations=500 selected_live=128 owners=4 max_snapshot_bytes={d} shard_bytes={d}\n", .{ max_encoded, @sizeOf(trading.TradingShard) });
+    std.debug.print("observation_capacity: combinations=500 selected_live=100 owners=4 max_snapshot_bytes={d} shard_bytes={d}\n", .{ max_encoded, @sizeOf(trading.TradingShard) });
 }

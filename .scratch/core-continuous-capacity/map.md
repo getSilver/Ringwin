@@ -22,6 +22,7 @@ Status: active
 
 ## Rules
 
+- 2026-10-13 用户更新执行口径：不再执行千单或容量压力测试，重点验证全部功能点。订单夹具每类 live/terminal 总量不超过100；保留多分片归属、归档/查证、重复/冲突、安全锁存、故障恢复与零重发。原容量/资源数字保留为设计参考，不将小规模功能结果记作压力或生产资格。
 - 2026-10-08 的计划阶段已由用户 implement 请求推进为本地实施；在独立工作树逐张完成 Frontier、验证、审查与提交。
 - 后续实现一次只执行一张无未完成 blocker 的 Frontier。
 - 复用现有 seam；交易所私有事实翻译属于 VenueAdapter，核心不执行网络或磁盘 I/O。
@@ -47,14 +48,16 @@ Status: active
 12. [封存容量闭合证据并交接生产资格](issues/12-seal-capacity-closure-evidence.md) — blocked by 10, 11
 
 依赖主干：01 → 02 → 03；03 后分为 04、05 → 06 → 07、08 三支；04/07/08 → 09；09 → 10 与 11；10/11 → 12。
-01–04合同、权威屏障、检查点及观察选择已完成；05–12尚未实现或验收，只有 blocker 全部完成的票可执行。
+01–05合同、权威屏障、检查点、观察选择及订单/发送证据归档功能已完成；06–12尚未实现或验收，只有 blocker 全部完成的票可执行。
 
 ## Frontier
 
-- [05 贯通终态订单与发送证据归档](issues/05-close-order-and-dispatch-archive.md) — in-progress
+- [06 贯通成交与费用历史归档](issues/06-close-fill-and-fee-archive.md)
 - [08 贯通控制与账户协调历史回收](issues/08-reclaim-control-and-account-coordination-history.md)
 
 ## Decisions so far
+
+- 2026-10-13：05功能验收完成，见 [05证据](05-evidence.md)。源码85c00368，完整Debug/ReleaseSafe各538/538且串行执行，应用/CLI重建和两项离线CLI均退出0；四分片各25 live/25 terminal、十轮替换及最终Owner/Gateway恢复通过。按用户最新要求取消千单和容量压力执行；06/08为Frontier，资源、索引成本与平台生产资格未取得。
 
 - 2026-10-10：04完成，见 [04证据](04-evidence.md)。业务源码9bf76508，Debug/ReleaseSafe各461/461、构建通过；500实际观察组合、128 selected live、账户/Instrument隔离与恢复验证。05为下一张Frontier；千单、保留和平台容量尚未取得。
 
@@ -98,7 +101,7 @@ Linux 路径沿用 [Linux 生产资格地图](../production-readiness/map.md)，
 
 ## Not yet verified
 
-- 合成负载与容量/保留预算已在 [容量合同](capacity-contract.md) 冻结；02已完成屏障与schema基线；持续容量实现及测量尚待05–12。
+- 合成负载与容量/保留预算已在 [容量合同](capacity-contract.md) 冻结，执行口径按用户最新功能验证要求更新；01–05已完成，成交、费用、账本、控制与平台恢复等剩余功能尚待06–12，未授予压力或资源资格。
 - ADR0011已显式演进ADR0009；票02保留完整有序Trace，票03在独立恢复验收和格式身份下引入轮转与历史承接。
 - Windows/Linux各自的实际文件、性能、恢复及后续生产资格证据未取得。
 

@@ -17,6 +17,7 @@ const Binding = struct {
 };
 
 pub const SimulatedVenue = struct {
+    receipt_times: canonical.Times = .{ .receive_utc_ns = 1, .monotonic_ns = 1, .audit_utc_ns = 1 },
     asset_definitions: @import("asset_registry.zig").Registry = .{},
     native_settlement_atoms: bool = false,
     instrument_definitions: @import("instrument_registry.zig").Registry = .{},
@@ -270,7 +271,7 @@ pub const SimulatedVenue = struct {
     fn append(self: *SimulatedVenue, batch: *canonical.AdapterOutputBatch, binding: Binding, source_fact_identity: u128, event: canonical.Payload) !void {
         const identity = self.next_event_identity;
         self.next_event_identity += 1;
-        var event_envelope = envelope(binding, identity, source_fact_identity);
+        var event_envelope = envelope(binding, identity, source_fact_identity, self.receipt_times);
         event_envelope.event_type = @intFromEnum(canonical.eventType(event));
         try batch.append(.{ .envelope = event_envelope, .event = event });
     }
@@ -285,7 +286,7 @@ pub const SimulatedVenue = struct {
         return canonical.VenueTradeRef.init(venue_identity, try std.fmt.bufPrint(&buffer, "sim-trade-{d}-{d}", .{ order, leg }));
     }
 
-    fn envelope(binding: Binding, identity: u64, source_fact_identity: u128) canonical.EventEnvelope {
+    fn envelope(binding: Binding, identity: u64, source_fact_identity: u128, times: canonical.Times) canonical.EventEnvelope {
         return .{
             .event_type = 1,
             .schema_version = canonical.schema_version,
@@ -297,14 +298,14 @@ pub const SimulatedVenue = struct {
             .source_stream = 1,
             .source_sequence = identity,
             .adapter_session = binding.adapter_session,
-            .times = .{ .receive_utc_ns = 1, .monotonic_ns = 1, .audit_utc_ns = 1 },
+            .times = times,
             .raw_evidence = .{ .stream = 1, .sequence = identity, .digest = @splat(0) },
         };
     }
 };
 
 test "simulated venue returns a canonical result for every request kind" {
-    var simulated: SimulatedVenue = .{};
+    var simulated: SimulatedVenue = .{ .receipt_times = .{ .receive_utc_ns = 500, .monotonic_ns = 400, .audit_utc_ns = 501 } };
     const adapter = simulated.adapter();
     try adapter.start(.{
         .venue = 1,
@@ -340,6 +341,7 @@ test "simulated venue returns a canonical result for every request kind" {
         try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(request));
         const batch = (try adapter.tryDrain()).?;
         try std.testing.expect(batch.len >= 1);
+        for (batch.events[0..batch.len]) |record| try std.testing.expectEqualDeep(simulated.receipt_times, record.envelope.times);
         try std.testing.expectEqual(expected_tag, std.meta.activeTag(batch.events[0].event));
     }
     try adapter.stop(.{ .monotonic_ns = 1 });

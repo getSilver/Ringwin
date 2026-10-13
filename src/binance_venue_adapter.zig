@@ -1047,15 +1047,17 @@ test "Binance scoped Spot snapshots stay unresolved without combined product and
             return (try self.raw.interface().append(.{ .source_session = record.source_session, .receive_time_utc_ns = record.receive_time_utc_ns, .monotonic_time_ns = record.monotonic_time_ns, .wall_time_utc_ns = record.wall_time_utc_ns, .byte_len = record.byte_len, .sha256 = record.sha256 }, bytes)).stream_sequence;
         }
     };
+    const allocator = std.testing.allocator;
+    const trading = @import("trading_shard.zig");
     const boundary: u64 = 1_800_000_000_000_000_000;
     for ([_]enum { zero, nonempty, missing_target, missing_range }{ .zero, .nonempty, .missing_target, .missing_range }) |case| {
-        const memory = try std.heap.page_allocator.create(durable.MemoryAdapter);
-        defer std.heap.page_allocator.destroy(memory);
-        memory.* = .init();
+        const memory = try allocator.create(durable.MemoryAdapter);
+        defer allocator.destroy(memory);
+        memory.* = .initWithAllocator(allocator);
         defer memory.deinit();
         const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
-        const owner = try std.heap.page_allocator.create(demo.Owner);
-        defer std.heap.page_allocator.destroy(owner);
+        const owner = try allocator.create(demo.Owner);
+        defer allocator.destroy(owner);
         owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
         const assets = @import("asset_registry.zig").testDefinitions(12, 9);
         for (assets) |definition| _ = try owner.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
@@ -1154,11 +1156,16 @@ test "Binance scoped Spot snapshots stay unresolved without combined product and
         try std.testing.expectEqualDeep(before, owner.shard.economicSummary());
         try std.testing.expect(!owner.shard.operational_state.effectiveTradingAuthority());
         if (case != .missing_range) try std.testing.expect(owner.shard.oms.recovery_only and owner.shard.economic_fault_count != 0);
-        const recovered = try demo.Owner.recover(memory.interface(), undefined, stream);
+        const recovered = try allocator.create(demo.Owner);
+        defer allocator.destroy(recovered);
+        try demo.Owner.recoverInto(recovered, memory.interface(), undefined, stream);
         try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
-        var snapshot: [durable.max_snapshot_bytes]u8 = undefined;
-        const restored = try @import("trading_shard.zig").TradingShard.restoreSnapshot(try owner.committedSnapshot(&snapshot));
-        try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+        const snapshot = try allocator.alloc(u8, durable.max_snapshot_bytes);
+        defer allocator.free(snapshot);
+        const restored = try allocator.create(trading.TradingShard);
+        defer allocator.destroy(restored);
+        _ = try trading.TradingShard.restoreSnapshotInto(restored, try owner.committedSnapshot(snapshot));
+        try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.canonicalStateDigest());
         try std.testing.expectEqual(@as(u64, 0), transport.calls);
     }
 }

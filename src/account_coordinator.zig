@@ -1419,15 +1419,24 @@ pub const AccountRecovery = struct {
         shard_snapshots: [max_shards][]const u8,
         shard_tails: [max_shards][]const u8,
     ) !AccountRecovery {
-        var result: AccountRecovery = .{
-            .coordinator = try AccountCoordinator.restore(coordinator_snapshot),
-            .shards = undefined,
-            .shard_barriers = undefined,
-        };
+        var result: AccountRecovery = undefined;
+        try beginWithCoordinatorTailInto(&result, coordinator_snapshot, coordinator_tail, shard_snapshots, shard_tails);
+        return result;
+    }
+
+    /// Failure may modify this destination; publish it only after every shard validates.
+    pub fn beginWithCoordinatorTailInto(
+        result: *AccountRecovery,
+        coordinator_snapshot: []const u8,
+        coordinator_tail: []const u8,
+        shard_snapshots: [max_shards][]const u8,
+        shard_tails: [max_shards][]const u8,
+    ) !void {
+        result.coordinator = try AccountCoordinator.restore(coordinator_snapshot);
+        result.summary_refresh_mask = 0;
         try replayCoordinationTail(&result.coordinator, coordinator_tail);
         for (0..max_shards) |index| {
-            const recovered = try trading.TradingShard.restore(shard_snapshots[index], shard_tails[index]);
-            result.shards[index] = recovered.shard;
+            const recovered = try trading.TradingShard.restoreSegmentsInto(&result.shards[index], shard_snapshots[index], &.{shard_tails[index]});
             result.shards[index].operational_state.trading_authorized = false;
             result.shards[index].operational_state.mode = .recovering;
             result.shard_barriers[index] = recovered.barrier;
@@ -1454,7 +1463,6 @@ pub const AccountRecovery = struct {
                 break;
             }
         }
-        return result;
     }
 
     /// Releases only the coordinator fence; each shard still requires Venue recovery and enable.
@@ -1781,10 +1789,12 @@ test "unowned economics stay in suspense until an immutable allocation" {
     try std.testing.expectEqualSlices(u8, &coordinator.digest(), &recovered.digest());
     try std.testing.expectEqual(ShardId.shard_0, (try recovered.allocateForcedExecution(allocation))[0].shard_id);
 
-    var shard: trading.TradingShard = .{};
+    const shard = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(shard);
+    shard.* = .{};
     shard.operational_state = trading.operational.State.init(100);
     var stable_journal = trading.journal.Journal.init();
-    _ = try applyCoreStable(&shard, &stable_journal, .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{
+    _ = try applyCoreStable(shard, &stable_journal, .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{
         .version = 1,
         .instrument_identity = 3,
         .quantity_denominator = 1,
@@ -1792,13 +1802,13 @@ test "unowned economics stay in suspense until an immutable allocation" {
         .product = .isolated_linear_usdt,
         .venue = 1,
     } } });
-    _ = try applyCoreStable(&shard, &stable_journal, .{ .identity = 2, .payload = .{ .margin_rules_activated = .{
+    _ = try applyCoreStable(shard, &stable_journal, .{ .identity = 2, .payload = .{ .margin_rules_activated = .{
         .version = 1,
         .instrument = 3,
     } } });
     try std.testing.expectEqual(@as(u128, 33), allocated[0].source_identity);
     const gate_delivery: GateDelivery = .{ .shard_id = .shard_0, .gate = .{ .identity = 44, .open = false, .latched = true } };
-    try applyAccountGateStable(gate_delivery, .shard_0, &shard, &stable_journal);
+    try applyAccountGateStable(gate_delivery, .shard_0, shard, &stable_journal);
     try std.testing.expect(!shard.operational_state.effectiveTradingAuthority());
     try std.testing.expect(shard.operational_state.latch_count > 0);
 }
@@ -1816,9 +1826,11 @@ test "caller owner cannot directly route forced execution" {
     try std.testing.expectEqual(@as(u128, 50), coordinator.suspense_forced_execution.?.identity);
     try std.testing.expect(coordinator.margin_gate.latched);
     var forged: Delivery = .{ .shard_id = .shard_0, .fact = coordinator.suspense_forced_execution.?, .allocation_identity = 1, .source_identity = 50 };
-    var shard: trading.TradingShard = .{};
+    const shard = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(shard);
+    shard.* = .{};
     var journal = trading.journal.Journal.init();
-    try std.testing.expectError(error.ForcedAllocationRequired, applyAccountFactStable(forged, .shard_0, &shard, &journal));
+    try std.testing.expectError(error.ForcedAllocationRequired, applyAccountFactStable(forged, .shard_0, shard, &journal));
     forged.allocation_identity = 0;
     try std.testing.expectError(error.UnallocatedForcedExecution, accountFactEvent(forged));
 }
@@ -1938,18 +1950,20 @@ test "forced delivery retry after shard commit does not charge penalty twice" {
     allocation.slices[0] = .{ .owner = .shard_0, .quantity = -1, .position_delta = -1, .penalty_atoms = 2 };
     var coordination_journal = CoordinationJournal.initAt(1);
     const delivery = (try coordinator.commitForcedAllocation(&coordination_journal, allocation))[0];
-    var shard: trading.TradingShard = .{};
+    const shard = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(shard);
+    shard.* = .{};
     var stable_journal = trading.journal.Journal.init();
-    try activateFixtureAssets(&shard, &stable_journal);
-    _ = try applyCoreStable(&shard, &stable_journal, .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 3, .quantity_denominator = 1, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = 1 } } });
-    _ = try applyCoreStable(&shard, &stable_journal, .{ .identity = 2, .payload = .{ .margin_rules_activated = .{ .version = 1, .instrument = 3 } } });
+    try activateFixtureAssets(shard, &stable_journal);
+    _ = try applyCoreStable(shard, &stable_journal, .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 3, .quantity_denominator = 1, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = 1 } } });
+    _ = try applyCoreStable(shard, &stable_journal, .{ .identity = 2, .payload = .{ .margin_rules_activated = .{ .version = 1, .instrument = 3 } } });
     try shard.economic_projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = .{ .instrument = 3, .rules_version = 1, .lots = 1 }, .price = .{ .instrument = 3, .rules_version = 1, .ticks = 100 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1, .product = .isolated_linear_usdt } });
-    try std.testing.expectError(error.ForcedDeliveryNotCommitted, coordinator.ackForcedDeliveryFromShard(&coordination_journal, delivery, &shard));
-    _ = try applyCoreStable(&shard, &stable_journal, try accountFactEvent(delivery));
+    try std.testing.expectError(error.ForcedDeliveryNotCommitted, coordinator.ackForcedDeliveryFromShard(&coordination_journal, delivery, shard));
+    _ = try applyCoreStable(shard, &stable_journal, try accountFactEvent(delivery));
     const after_first = shard.economic_projection.digest();
     try std.testing.expectEqual(@as(i64, 2), shard.economic_projection.portfolio.penalty_atoms);
     try std.testing.expectEqual(@as(usize, 1), (try coordinator.pendingForcedDeliveries()).len);
-    try applyForcedDeliveryStable(&coordinator, &coordination_journal, delivery, .shard_0, &shard, &stable_journal);
+    try applyForcedDeliveryStable(&coordinator, &coordination_journal, delivery, .shard_0, shard, &stable_journal);
     try std.testing.expectEqualSlices(u8, &after_first, &shard.economic_projection.digest());
     try std.testing.expectEqual(@as(usize, 0), (try coordinator.pendingForcedDeliveries()).len);
     try std.testing.expect(coordinator.suspense_forced_execution == null);
@@ -1992,10 +2006,12 @@ test "protocol rejects sequence gaps identity drift and cross shard delivery" {
         .barrier = 1,
         .payload = .{ .forced_execution = .{ .owner = .shard_0, .quantity = -1, .price_ticks = 1, .fee_atoms = 0 } },
     } };
-    var shard: trading.TradingShard = .{};
+    const shard = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(shard);
+    shard.* = .{};
     var stable_journal = trading.journal.Journal.init();
-    try activateFixtureAssets(&shard, &stable_journal);
-    try std.testing.expectError(error.CrossShardDelivery, applyAccountFactStable(delivery, .shard_1, &shard, &stable_journal));
+    try activateFixtureAssets(shard, &stable_journal);
+    try std.testing.expectError(error.CrossShardDelivery, applyAccountFactStable(delivery, .shard_1, shard, &stable_journal));
 }
 
 test "local faults stay local while account gates tighten every shard" {
@@ -2037,39 +2053,42 @@ test "four shard coordinator snapshot restores deterministic authority" {
 
 test "account recovery restores four matching shard tails under fresh evidence fence" {
     var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
-    var shard_snapshots_storage: [max_shards][durable.max_snapshot_bytes]u8 = undefined;
+    const shard_snapshots_storage = try std.testing.allocator.create([max_shards][durable.max_snapshot_bytes]u8);
+    defer std.testing.allocator.destroy(shard_snapshots_storage);
     var shard_snapshots: [max_shards][]const u8 = undefined;
     var shard_tails: [max_shards][]const u8 = undefined;
     var tail_journals: [max_shards]trading.journal.Journal = undefined;
     for (0..max_shards) |index| {
-        var shard: trading.TradingShard = .{};
+        const shard = try std.testing.allocator.create(trading.TradingShard);
+        defer std.testing.allocator.destroy(shard);
+        shard.* = .{};
         var stable_journal = trading.journal.Journal.init();
-        try activateFixtureAssets(&shard, &stable_journal);
-        _ = try applyCoreStable(&shard, &stable_journal, .{
+        try activateFixtureAssets(shard, &stable_journal);
+        _ = try applyCoreStable(shard, &stable_journal, .{
             .identity = 1,
             .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 1, .quantity_denominator = 1, .reservation_model = .leveraged } },
         });
-        _ = try applyCoreStable(&shard, &stable_journal, .{
+        _ = try applyCoreStable(shard, &stable_journal, .{
             .identity = 1,
             .payload = .{ .margin_rules_activated = .{ .version = 1 } },
         });
-        _ = try applyCoreStable(&shard, &stable_journal, .{
+        _ = try applyCoreStable(shard, &stable_journal, .{
             .identity = 1,
             .payload = .{ .account_configuration = .{ .exchange_account_identity = 900 } },
         });
-        _ = try applyCoreStable(&shard, &stable_journal, .{
+        _ = try applyCoreStable(shard, &stable_journal, .{
             .identity = 1,
             .payload = .{ .exchange_balance = .{ .cash_atoms = 10_000 } },
         });
-        _ = try applyCoreStable(&shard, &stable_journal, .{
+        _ = try applyCoreStable(shard, &stable_journal, .{
             .identity = 1,
             .payload = .exchange_positions,
         });
-        _ = try applyCoreStable(&shard, &stable_journal, .{
+        _ = try applyCoreStable(shard, &stable_journal, .{
             .identity = 1,
             .payload = .{ .opening_balance = .{ .cash_atoms = 10_000 } },
         });
-        _ = try applyCoreStable(&shard, &stable_journal, .{
+        _ = try applyCoreStable(shard, &stable_journal, .{
             .identity = 1,
             .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = index + 11 } },
         });
@@ -2079,7 +2098,7 @@ test "account recovery restores four matching shard tails under fresh evidence f
         try tail_journals[index].seal();
         shard_tails[index] = tail_journals[index].bytes();
         for (1..8) |sequence| {
-            const derived = try shardSummaryFromShard(&shard, @enumFromInt(index), sequence, @intCast(index + 1));
+            const derived = try shardSummaryFromShard(shard, @enumFromInt(index), sequence, @intCast(index + 1));
             _ = try coordinator.publishSummary(index * 100 + sequence, derived);
         }
     }
@@ -2095,36 +2114,41 @@ test "account recovery restores four matching shard tails under fresh evidence f
         _ = try coordinator.publishSummary(event.publish_summary.identity, event.publish_summary.summary);
     }
     try coordinator_tail.seal();
-    var recovered = try AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
+    const recovered = try std.testing.allocator.create(AccountRecovery);
+    defer std.testing.allocator.destroy(recovered);
+    try AccountRecovery.beginWithCoordinatorTailInto(recovered, coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
     try std.testing.expect(recovered.coordinator.recovery_only);
     var expected = coordinator;
     expected.recovery_only = true;
     try std.testing.expectEqualSlices(u8, &expected.digest(), &recovered.coordinator.digest());
-    for (recovered.shards) |shard| try std.testing.expectEqual(trading.operational.OperationalMode.recovering, shard.operational_state.mode);
+    for (&recovered.shards) |*shard| try std.testing.expectEqual(trading.operational.OperationalMode.recovering, shard.operational_state.mode);
     try std.testing.expectError(error.FreshMarginObservationRequired, recovered.completeCoordinatorRecovery());
 }
 
 test "account recovery retains a forced shard commit awaiting coordinator ack" {
     var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
-    var snapshot_storage: [max_shards][durable.max_snapshot_bytes]u8 = undefined;
+    const snapshot_storage = try std.testing.allocator.create([max_shards][durable.max_snapshot_bytes]u8);
+    defer std.testing.allocator.destroy(snapshot_storage);
     var shard_snapshots: [max_shards][]const u8 = undefined;
     var shard_tails: [max_shards][]const u8 = undefined;
     var tails: [max_shards]trading.journal.Journal = undefined;
     for (0..max_shards) |index| {
-        var shard: trading.TradingShard = .{};
+        const shard = try std.testing.allocator.create(trading.TradingShard);
+        defer std.testing.allocator.destroy(shard);
+        shard.* = .{};
         var journal = trading.journal.Journal.init();
-        try activateFixtureAssets(&shard, &journal);
-        _ = try applyCoreStable(&shard, &journal, .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 1, .venue = 1, .quantity_denominator = 1, .reservation_model = .leveraged } } });
-        _ = try applyCoreStable(&shard, &journal, .{ .identity = 2, .payload = .{ .margin_rules_activated = .{ .version = 1 } } });
-        _ = try applyCoreStable(&shard, &journal, .{ .identity = 3, .payload = .{ .account_configuration = .{ .exchange_account_identity = 900 } } });
-        _ = try applyCoreStable(&shard, &journal, .{ .identity = 4, .payload = .{ .exchange_balance = .{ .cash_atoms = 10_000 } } });
-        _ = try applyCoreStable(&shard, &journal, .{ .identity = 5, .payload = .exchange_positions });
-        _ = try applyCoreStable(&shard, &journal, .{ .identity = 6, .payload = .{ .opening_balance = .{ .cash_atoms = 10_000 } } });
-        _ = try applyCoreStable(&shard, &journal, .{ .identity = 7, .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = index + 11 } } });
+        try activateFixtureAssets(shard, &journal);
+        _ = try applyCoreStable(shard, &journal, .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 1, .venue = 1, .quantity_denominator = 1, .reservation_model = .leveraged } } });
+        _ = try applyCoreStable(shard, &journal, .{ .identity = 2, .payload = .{ .margin_rules_activated = .{ .version = 1 } } });
+        _ = try applyCoreStable(shard, &journal, .{ .identity = 3, .payload = .{ .account_configuration = .{ .exchange_account_identity = 900 } } });
+        _ = try applyCoreStable(shard, &journal, .{ .identity = 4, .payload = .{ .exchange_balance = .{ .cash_atoms = 10_000 } } });
+        _ = try applyCoreStable(shard, &journal, .{ .identity = 5, .payload = .exchange_positions });
+        _ = try applyCoreStable(shard, &journal, .{ .identity = 6, .payload = .{ .opening_balance = .{ .cash_atoms = 10_000 } } });
+        _ = try applyCoreStable(shard, &journal, .{ .identity = 7, .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = index + 11 } } });
         if (index == 0) try shard.economic_projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 1 }, .price = .{ .instrument = 1, .rules_version = 1, .ticks = 100 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1, .product = .isolated_linear_usdt } });
         try journal.seal();
         shard_snapshots[index] = try shard.snapshot(&journal, @intCast(shard.authoritativeBarrier()), &snapshot_storage[index]);
-        _ = try coordinator.publishSummary(index + 1, try shardSummaryFromShard(&shard, @enumFromInt(index), 1, @intCast(index + 1)));
+        _ = try coordinator.publishSummary(index + 1, try shardSummaryFromShard(shard, @enumFromInt(index), 1, @intCast(index + 1)));
         tails[index] = trading.journal.Journal.initAt(journal.last_sequence + 1);
     }
     var coordinator_storage: [16384]u8 = undefined;
@@ -2136,41 +2160,53 @@ test "account recovery retains a forced shard commit awaiting coordinator ack" {
     var allocation: ForcedExecutionAllocation = .{ .identity = 91, .forced_execution_identity = 90, .count = 1 };
     allocation.slices[0] = .{ .owner = .shard_0, .quantity = -1, .position_delta = -1 };
     const delivery = (try coordinator.commitForcedAllocation(&coordinator_tail, allocation))[0];
-    var committed_shard = (try trading.TradingShard.restoreSnapshot(shard_snapshots[0])).shard;
-    _ = try applyCoreStable(&committed_shard, &tails[0], try accountFactEvent(delivery));
+    const committed_shard = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(committed_shard);
+    _ = try trading.TradingShard.restoreSnapshotInto(committed_shard, shard_snapshots[0]);
+    _ = try applyCoreStable(committed_shard, &tails[0], try accountFactEvent(delivery));
     for (0..max_shards) |index| {
         try tails[index].seal();
         shard_tails[index] = tails[index].bytes();
     }
     try coordinator_tail.seal();
-    var recovered = try AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
+    const recovered = try std.testing.allocator.create(AccountRecovery);
+    defer std.testing.allocator.destroy(recovered);
+    try AccountRecovery.beginWithCoordinatorTailInto(recovered, coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, shard_tails);
     try std.testing.expectEqual(@as(u8, 1), recovered.summary_refresh_mask);
     try std.testing.expectEqual(@as(usize, 1), (try recovered.coordinator.pendingForcedDeliveries()).len);
-    var drift_shard = (try trading.TradingShard.restoreSnapshot(shard_snapshots[0])).shard;
+    const drift_shard = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(drift_shard);
+    _ = try trading.TradingShard.restoreSnapshotInto(drift_shard, shard_snapshots[0]);
     var drift_tail = trading.journal.Journal.initAt(@as(u64, @intCast(drift_shard.authoritativeBarrier())) + 1);
-    _ = try applyCoreStable(&drift_shard, &drift_tail, try accountFactEvent(delivery));
-    _ = try applyCoreStable(&drift_shard, &drift_tail, .{ .identity = 92, .payload = .{ .funding_settlement = .{ .settlement_id = 92, .amount_atoms = 1 } } });
+    _ = try applyCoreStable(drift_shard, &drift_tail, try accountFactEvent(delivery));
+    _ = try applyCoreStable(drift_shard, &drift_tail, .{ .identity = 92, .payload = .{ .funding_settlement = .{ .settlement_id = 92, .amount_atoms = 1 } } });
     try drift_tail.seal();
     var drift_tails = shard_tails;
     drift_tails[0] = drift_tail.bytes();
-    try std.testing.expectError(error.AccountRecoveryBarrierMismatch, AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, drift_tails));
+    const rejected = try std.testing.allocator.create(AccountRecovery);
+    defer std.testing.allocator.destroy(rejected);
+    try std.testing.expectError(error.AccountRecoveryBarrierMismatch, AccountRecovery.beginWithCoordinatorTailInto(rejected, coordinator_snapshot, coordinator_tail.bytes(), shard_snapshots, drift_tails));
     var ack_tail = CoordinationJournal.initAt(1);
     try ack_tail.append(.{ .account_fact = source });
     try ack_tail.append(.{ .forced_execution_allocation = allocation });
     try ack_tail.append(.{ .forced_delivery_ack = .{ .allocation_identity = 91, .slice_index = 0 } });
     try ack_tail.seal();
-    const after_ack = try AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, ack_tail.bytes(), shard_snapshots, shard_tails);
+    const after_ack = try std.testing.allocator.create(AccountRecovery);
+    defer std.testing.allocator.destroy(after_ack);
+    try AccountRecovery.beginWithCoordinatorTailInto(after_ack, coordinator_snapshot, ack_tail.bytes(), shard_snapshots, shard_tails);
     try std.testing.expectEqual(@as(u8, 1), after_ack.summary_refresh_mask);
     try std.testing.expect(after_ack.coordinator.suspense_forced_execution == null);
     var empty_tails: [max_shards][]const u8 = undefined;
     var empty_journals: [max_shards]trading.journal.Journal = undefined;
     for (0..max_shards) |index| {
-        const initial_shard = try trading.TradingShard.restoreSnapshot(shard_snapshots[index]);
-        empty_journals[index] = trading.journal.Journal.initAt(initial_shard.barrier + 1);
+        const initial_shard = try std.testing.allocator.create(trading.TradingShard);
+        defer std.testing.allocator.destroy(initial_shard);
+        const initial_barrier = try trading.TradingShard.restoreSnapshotInto(initial_shard, shard_snapshots[index]);
+        empty_journals[index] = trading.journal.Journal.initAt(initial_barrier + 1);
         try empty_journals[index].seal();
         empty_tails[index] = empty_journals[index].bytes();
     }
-    try std.testing.expectError(error.ForcedDeliveryAckWithoutShardCommit, AccountRecovery.beginWithCoordinatorTail(coordinator_snapshot, ack_tail.bytes(), shard_snapshots, empty_tails));
+    try std.testing.expectError(error.ForcedDeliveryAckWithoutShardCommit, AccountRecovery.beginWithCoordinatorTailInto(rejected, coordinator_snapshot, ack_tail.bytes(), shard_snapshots, empty_tails));
     var recovery_ack_journal = CoordinationJournal.initAt(3);
     try recovered.coordinator.ackForcedDeliveryFromShard(&recovery_ack_journal, delivery, &recovered.shards[0]);
     try std.testing.expectEqual(@as(u64, 1), recovery_ack_journal.stable.records);
@@ -2181,7 +2217,8 @@ test "account recovery retains a forced shard commit awaiting coordinator ack" {
 }
 
 test "shard summaries derive from authoritative state and coordinate four real shards" {
-    var shards: [max_shards]trading.TradingShard = undefined;
+    const shards = try std.testing.allocator.create([max_shards]trading.TradingShard);
+    defer std.testing.allocator.destroy(shards);
     var journals: [max_shards]trading.journal.Journal = undefined;
     for (0..max_shards) |index| {
         shards[index] = .{};
@@ -2217,7 +2254,10 @@ test "shard summaries derive from authoritative state and coordinate four real s
             .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = index + 11 } },
         });
     }
-    try std.testing.expectError(error.InvalidShardSummary, shardSummaryFromShard(&trading.TradingShard{}, .shard_0, 1, 1));
+    const invalid = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(invalid);
+    invalid.* = .{};
+    try std.testing.expectError(error.InvalidShardSummary, shardSummaryFromShard(invalid, .shard_0, 1, 1));
 
     var coordinator = AccountCoordinator.init(900, 4_000, 4_000);
     var initial: [max_shards]ShardSummary = undefined;
@@ -2265,9 +2305,11 @@ test "shard summaries derive from authoritative state and coordinate four real s
     try std.testing.expect(coordinator.margin_gate.open);
     try std.testing.expectEqual(@as(i64, 500), coordinator.account_netting_benefit_atoms);
 
-    var gated_shard = shards[0];
-    try applyAccountGateStable(.{ .shard_id = .shard_0, .gate = .{ .identity = 8, .open = false, .latched = true } }, .shard_0, &gated_shard, &journals[0]);
-    const latched = try shardSummaryFromShard(&gated_shard, .shard_0, 3, 1);
+    const gated_shard = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(gated_shard);
+    @memcpy(std.mem.asBytes(gated_shard), std.mem.asBytes(&shards[0]));
+    try applyAccountGateStable(.{ .shard_id = .shard_0, .gate = .{ .identity = 8, .open = false, .latched = true } }, .shard_0, gated_shard, &journals[0]);
+    const latched = try shardSummaryFromShard(gated_shard, .shard_0, 3, 1);
     try std.testing.expect(latched.local_gate_closed);
 
     var replayed = AccountCoordinator.init(900, 4_000, 4_000);

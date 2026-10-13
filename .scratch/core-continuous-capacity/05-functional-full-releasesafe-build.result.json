@@ -1,0 +1,8 @@
+{
+  "source_tree_sha256": "85c00368e0bce74b876a6934864911bb810094992434e29e95da7536d975f999",
+  "started_utc": "2026-10-13T14:11:36.2792972Z",
+  "finished_utc": "2026-10-13T14:15:08.3908189Z",
+  "exit_code": 0,
+  "command": "D:\\Program Files\\zig\\zig.exe test src/main.zig -O ReleaseSafe --stack 268435456 --test-no-exec -femit-bin=.scratch/core-continuous-capacity/05-functional-full-releasesafe.exe",
+  "capture": "native direct file handles"
+}

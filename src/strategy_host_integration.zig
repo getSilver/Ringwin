@@ -44,7 +44,9 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
     try expectLifecycle(.accepted, try host.receive(init.io, 1));
     try expectLifecycle(.accepted, try host.receive(init.io, 2));
 
-    var ingress = try fixture.TradingShardHostIngress.initHealthyFixtureForSession(authorization, plan.session);
+    const ingress = try init.gpa.create(fixture.TradingShardHostIngress);
+    defer init.gpa.destroy(ingress);
+    try fixture.TradingShardHostIngress.initHealthyFixtureForSessionInto(ingress, authorization, plan.session);
     const activation_digest = ingress.run.shard.canonicalStateDigest();
     try host.activate(init.io, .{
         .strategy_identity = authorization.strategy_identity,
@@ -88,7 +90,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
 
     try std.testing.expect(try ingress.applyDecision(accepted));
 
-    try applyRejected(&ingress, gateway.ingest(frame, published_ns + 1), .duplicate_identity);
+    try applyRejected(ingress, gateway.ingest(frame, published_ns + 1), .duplicate_identity);
     var variant_storage: [256]u8 = undefined;
     var variant = try gateway_module.encodeOutputFrame(
         &variant_storage,
@@ -99,7 +101,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
         101,
         50_100_000_000,
     );
-    try applyRejected(&ingress, gateway.ingest(variant, published_ns + 2), .conflicting_identity);
+    try applyRejected(ingress, gateway.ingest(variant, published_ns + 2), .conflicting_identity);
 
     var old_config = config;
     old_config.session.generation -= 1;
@@ -112,7 +114,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
         100,
         50_100_000_000,
     );
-    try applyRejected(&ingress, gateway.ingest(variant, published_ns + 3), .old_session);
+    try applyRejected(ingress, gateway.ingest(variant, published_ns + 3), .old_session);
 
     variant = try gateway_module.encodeOutputFrame(
         &variant_storage,
@@ -123,7 +125,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
         100,
         50_100_000_000,
     );
-    try applyRejected(&ingress, gateway.ingest(variant, published_ns + 4), .invalid_cursor);
+    try applyRejected(ingress, gateway.ingest(variant, published_ns + 4), .invalid_cursor);
 
     var unknown_schema = config;
     unknown_schema.schema_registry += 1;
@@ -136,7 +138,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
         100,
         50_100_000_000,
     );
-    try applyRejected(&ingress, gateway.ingest(variant, published_ns + 5), .unknown_schema);
+    try applyRejected(ingress, gateway.ingest(variant, published_ns + 5), .unknown_schema);
 
     var unauthorized = config;
     unauthorized.authorization.activation_identity += 1;
@@ -149,7 +151,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
         100,
         50_100_000_000,
     );
-    try applyRejected(&ingress, gateway.ingest(variant, published_ns + 6), .unauthorized);
+    try applyRejected(ingress, gateway.ingest(variant, published_ns + 6), .unauthorized);
 
     variant = try gateway_module.encodeOutputFrame(
         &variant_storage,
@@ -160,7 +162,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
         100,
         50_100_000_000,
     );
-    try applyRejected(&ingress, gateway.ingest(variant, published_ns + 100_000_001), .stale);
+    try applyRejected(ingress, gateway.ingest(variant, published_ns + 100_000_001), .stale);
 
     const summary = try ingress.summary();
     try std.testing.expectEqual(@as(usize, 1), summary.order_intents);

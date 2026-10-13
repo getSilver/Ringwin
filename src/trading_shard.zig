@@ -19,6 +19,10 @@ const market_projection = @import("market_projection.zig");
 const asset_registry = @import("asset_registry.zig");
 const instrument_registry = @import("instrument_registry.zig");
 const production_contract = @import("production_contract.zig");
+const history = @import("business_history.zig");
+const cold = @import("cold_business_candidate.zig");
+const history_batch = @import("order_history_batch.zig");
+pub const OrderArchiveCommit = @import("trading_shard_event.zig").OrderArchiveCommit;
 
 /// Current physical schema for AuthoritativeTradingState snapshots.
 pub const state_schema_version: u32 = production_contract.state_schema_version;
@@ -91,7 +95,7 @@ pub const ReplayTradingShard = struct {
         return (try self.shard.apply(input)).facts;
     }
 
-    pub fn canonicalStateDigest(self: ReplayTradingShard) [Sha256.digest_length]u8 {
+    pub fn canonicalStateDigest(self: *const ReplayTradingShard) [Sha256.digest_length]u8 {
         return self.shard.canonicalStateDigest();
     }
 };
@@ -103,6 +107,11 @@ pub const SnapshotRestore = struct {
 };
 
 /// Recovered authoritative state and the stable tail scan result.
+pub const RestoreMetadata = struct {
+    barrier: u64,
+    status: journal.ScanStatus,
+};
+
 pub const SnapshotRecovery = struct {
     shard: TradingShard,
     barrier: u64,
@@ -153,6 +162,28 @@ const CanonicalIngressCursor = struct {
     payload_digest: [Sha256.digest_length]u8,
 };
 
+pub const DispatchIngressBody = struct {
+    command: u64,
+    state: canonical.DispatchState,
+    venue: canonical.VenueIdentity,
+    account: canonical.ExchangeAccountIdentity,
+    canonical_digest: [32]u8,
+};
+pub const DispatchIngressEvidence = struct {
+    body: DispatchIngressBody,
+    cursor: struct { identity: canonical.EventIdentity, raw_digest: [32]u8, payload_digest: [32]u8 },
+};
+
+const DeferredHistoryAdmission = struct {
+    identity: canonical.EventIdentity,
+    event_type: u32,
+    order_id: u64,
+    raw_digest: [32]u8,
+    payload_digest: [32]u8,
+    original_input_digest: [32]u8,
+    fact_sequence: u64,
+};
+
 fn canonicalPayloadDigest(event: canonical.Payload) ![Sha256.digest_length]u8 {
     var payload_bytes: [canonical_event_codec.max_encoded_len]u8 = undefined;
     const payload = try canonical_event_codec.encodePayload(&payload_bytes, event);
@@ -163,6 +194,16 @@ fn canonicalPayloadDigest(event: canonical.Payload) ![Sha256.digest_length]u8 {
 const max_canonical_ingress_streams = 16;
 
 pub const TradingShard = struct {
+    pending_history_candidate: ?cold.PendingCandidate = null,
+    pending_history_member_index: ?u8 = null,
+    pending_safety_history_candidate: ?cold.PendingCandidate = null,
+    pending_safety_history_member_index: ?u8 = null,
+    history_conflict_latched: bool = false,
+    next_history_pending_id: u128 = 1,
+    business_history_root: ?history.Root = null,
+    last_order_archive: ?OrderArchiveCommit = null,
+    deferred_history_admissions: [64]DeferredHistoryAdmission = undefined,
+    deferred_history_admission_count: u8 = 0,
     /// Restart admission is separate from deterministic economic state: Owner
     /// re-arms it on every recovery. Snapshot encoding preserves the fence;
     /// canonical/semantic digests deliberately describe committed facts only.
@@ -262,6 +303,8 @@ pub const TradingShard = struct {
     canonical_ingress_digest: [Sha256.digest_length]u8 = @splat(0),
     canonical_ingress_cursors: [max_canonical_ingress_streams]CanonicalIngressCursor = undefined,
     canonical_ingress_cursor_count: u8 = 0,
+    dispatch_ingress_history: [oms_module.max_command_history * 3]DispatchIngressEvidence = undefined,
+    dispatch_ingress_history_count: u16 = 0,
     asset_registry: asset_registry.Registry = .{},
     asset_configuration_failed: bool = false,
     asset_configuration_failure_count: u64 = 0,
@@ -271,7 +314,255 @@ pub const TradingShard = struct {
 
     /// The sole public core ingress seam. Both typed core events and canonical
     /// Venue records enter through this tagged event and commit transactionally.
+    pub fn historySafetyInput(input: CanonicalEvent) bool {
+        return switch (input) {
+            .venue => true,
+            .core => |event| switch (event.payload) {
+                .timer, .order_archive_committed => false,
+                .external_order_intent => |intent| intent.portfolio_reduce_only,
+                .oms_intent_group => |group| blk: {
+                    if (group.count == 0 or group.count > group.members.len) break :blk false;
+                    for (group.members[0..group.count]) |intent|
+                        if (intent.operation != .cancel and !intent.portfolio_reduce_only) break :blk false;
+                    break :blk true;
+                },
+                else => true,
+            },
+        };
+    }
+
+    pub fn historyCandidateFor(self: *const TradingShard, input: CanonicalEvent) !?cold.PendingCandidate {
+        const root = self.business_history_root orelse return null;
+        if ((self.pending_history_candidate != null or self.pending_safety_history_candidate != null or self.deferred_history_admission_count != 0) and !historySafetyInput(input)) return error.HistoryLookupPending;
+        switch (input) {
+            .core => |event| switch (event.payload) {
+                .oms_intent_group => |group| if (try self.oms.groupIdentityStatus(group) != .fresh) return null,
+                .external_order_intent => |intent| if (try self.oms.groupIdentityStatus(originalHostIntentGroup(intent)) != .fresh) return null,
+                .oms_execution_report => |report| for (self.oms.report_history[0..self.oms.report_history_count]) |known| {
+                    if (known.report_id == report.report_id) return null;
+                },
+                .oms_reconciliation_result => |result| for (self.oms.reconciliation_history[0..self.oms.reconciliation_history_count]) |known| {
+                    if (known.reconciliation_id == result.reconciliation_id) return null;
+                },
+                else => return null,
+            },
+            .venue => |event| switch (event.event) {
+                .order_dispatch_result => |result| for (self.dispatch_ingress_history[0..self.dispatch_ingress_history_count]) |known| {
+                    if (known.body.command == result.command and known.body.state == result.state) return null;
+                },
+                .execution_report => |report| for (self.oms.report_history[0..self.oms.report_history_count]) |known| {
+                    if (known.report_id == report.identity) return null;
+                },
+                .order_reconciliation_result => |result| for (self.oms.reconciliation_history[0..self.oms.reconciliation_history_count]) |known| {
+                    if (known.reconciliation_id == result.identity) return null;
+                },
+                else => return null,
+            },
+        }
+        const semantic = (try self.historySemantic(input, null)) orelse return null;
+        if (historyOrderUpdate(input)) |order_id| {
+            inline for (.{ "pending_history_candidate", "pending_safety_history_candidate" }) |field| {
+                if (@field(self, field)) |pending| {
+                    const earlier = try decodeStableInput(pending.originalRecord());
+                    if (historyOrderUpdate(earlier)) |earlier_order|
+                        if (earlier_order == order_id) return error.HistorySafetyCapacity;
+                }
+            }
+        }
+        if (self.pending_safety_history_candidate != null) return error.HistorySafetyCapacity;
+        var storage: [cold.max_original_input_size]u8 = undefined;
+        const payload = try encodeStableInput(&storage, input);
+        const times = stableTimes(input);
+        const record: journal.Record = .{ .type_id = 0, .schema_version = schema_version, .flags = journal.input_flag, .sequence = self.authoritativeBarrier() + 1, .source_time = times.source, .receive_time = times.receive, .monotonic_time = times.monotonic, .wall_time = times.wall, .time_presence = times.presence, .payload = payload };
+        if (self.next_history_pending_id == 0 or self.next_history_pending_id > std.math.maxInt(u64)) return error.HistoryPendingIdentityCapacity;
+        var pending = try cold.begin(record, .{ .pending_id = self.next_history_pending_id, .key = .{ .origin = root.origin, .identity = semantic.identity }, .candidate_payload_digest = semantic.digest, .original_input_digest = cold.inputDigest(record), .root_digest = root.root_digest, .epoch = root.epoch, .barrier = root.barrier }, root);
+        pending.original_was_admissible = try self.canonicalInputWasAdmissible(input, pending.request.original_input_digest);
+        return pending;
+    }
+
+    fn canonicalInputWasAdmissible(self: *const TradingShard, input: CanonicalEvent, input_digest: [32]u8) !bool {
+        if (input != .venue) return true;
+        const record = input.venue;
+        const payload_digest = try canonicalPayloadDigest(record.event);
+        for (self.deferred_history_admissions[0..self.deferred_history_admission_count]) |admission| {
+            if (!std.meta.eql(admission.identity, record.envelope.identity)) continue;
+            if (admission.event_type != record.envelope.event_type or !std.mem.eql(u8, &admission.raw_digest, &record.envelope.raw_evidence.digest) or
+                !std.mem.eql(u8, &admission.payload_digest, &payload_digest)) return error.ConflictingCanonicalIdentity;
+            if (std.mem.eql(u8, &admission.original_input_digest, &input_digest)) return true;
+            // The first durable admission fixes the original clock and envelope.
+            // A retimed retry cannot create another row or acquire fresh admission.
+            return error.ConflictingCanonicalIdentity;
+        }
+        for (self.canonical_ingress_cursors[0..self.canonical_ingress_cursor_count]) |cursor| {
+            const envelope = input.venue.envelope;
+            if (cursor.identity.stream != envelope.identity.stream) continue;
+            if (envelope.identity.sequence == cursor.identity.sequence and
+                (cursor.event_type != canonical.eventType(input.venue.event) or
+                    !std.mem.eql(u8, &cursor.raw_digest, &envelope.raw_evidence.digest) or
+                    !std.mem.eql(u8, &cursor.payload_digest, &try canonicalPayloadDigest(input.venue.event)))) return error.ConflictingCanonicalIdentity;
+            return envelope.identity.sequence > cursor.identity.sequence;
+        }
+        return true;
+    }
+
+    fn acceptedOriginalDigest(input: CanonicalEvent) ![32]u8 {
+        var bytes: [cold.max_original_input_size]u8 = undefined;
+        const times = stableTimes(input);
+        return cold.inputDigest(.{ .type_id = 0, .schema_version = schema_version, .flags = journal.input_flag, .sequence = 1, .source_time = times.source, .receive_time = times.receive, .monotonic_time = times.monotonic, .wall_time = times.wall, .time_presence = times.presence, .payload = try encodeStableInput(&bytes, input) });
+    }
+
+    fn retainDeferredHistoryAdmission(self: *TradingShard, input: CanonicalEvent) !void {
+        if (input != .venue or (try self.historySemantic(input, null)) == null) return error.HistorySafetyCapacity;
+        const input_digest = try acceptedOriginalDigest(input);
+        if (!try self.canonicalInputWasAdmissible(input, input_digest)) return error.StaleCanonicalIdentity;
+        for (self.deferred_history_admissions[0..self.deferred_history_admission_count]) |admission|
+            if (std.meta.eql(admission.identity, input.venue.envelope.identity) and std.mem.eql(u8, &admission.original_input_digest, &input_digest)) return;
+        if (self.deferred_history_admission_count == self.deferred_history_admissions.len) return error.HistoryAdmissionCapacity;
+        var order_id = historyOrderUpdate(input) orelse 0;
+        if (input.venue.event == .order_dispatch_result) for (self.oms.command_history[0..self.oms.command_history_count]) |command| {
+            if (command.command_id == input.venue.event.order_dispatch_result.command) {
+                order_id = command.order_id;
+                break;
+            }
+        };
+        try self.trace.append(.canonical_history_deferred, input.venue.envelope.identity.sequence);
+        self.deferred_history_admissions[self.deferred_history_admission_count] = .{ .identity = input.venue.envelope.identity, .event_type = input.venue.envelope.event_type, .order_id = order_id, .raw_digest = input.venue.envelope.raw_evidence.digest, .payload_digest = try canonicalPayloadDigest(input.venue.event), .original_input_digest = input_digest, .fact_sequence = self.authoritativeBarrier() };
+        self.deferred_history_admission_count += 1;
+    }
+
+    fn releaseDeferredHistoryAdmission(self: *TradingShard, input: CanonicalEvent) bool {
+        if (input != .venue) return false;
+        for (self.deferred_history_admissions[0..self.deferred_history_admission_count], 0..) |admission, index| {
+            if (!std.meta.eql(admission.identity, input.venue.envelope.identity)) continue;
+            var move = index;
+            while (move + 1 < self.deferred_history_admission_count) : (move += 1)
+                self.deferred_history_admissions[move] = self.deferred_history_admissions[move + 1];
+            self.deferred_history_admission_count -= 1;
+            return true;
+        }
+        return false;
+    }
+
+    pub fn hasDeferredOrderHistory(self: *const TradingShard, order_id: u64) bool {
+        for (self.deferred_history_admissions[0..self.deferred_history_admission_count]) |admission| if (admission.order_id == order_id) return true;
+        return false;
+    }
+
+    fn historyOrderUpdate(input: CanonicalEvent) ?u64 {
+        return switch (input) {
+            .core => |event| switch (event.payload) {
+                .oms_execution_report => |report| report.order_id,
+                .oms_reconciliation_result => |result| result.order_id,
+                else => null,
+            },
+            .venue => |event| switch (event.event) {
+                .execution_report => |report| std.math.cast(u64, report.order),
+                .order_reconciliation_result => |result| std.math.cast(u64, result.order),
+                else => null,
+            },
+        };
+    }
+
+    const HistorySemantic = struct { identity: history.Identity, digest: history.Digest };
+
+    fn historySemantic(self: *const TradingShard, input: CanonicalEvent, member: ?u8) !?HistorySemantic {
+        var bytes: [cold.max_original_input_size]u8 = undefined;
+        switch (input) {
+            .core => |event| switch (event.payload) {
+                .oms_intent_group => |group| return try groupHistorySemantic(group, member, &bytes),
+                .external_order_intent => |intent| return try groupHistorySemantic(originalHostIntentGroup(intent), member, &bytes),
+                .oms_execution_report => |report| return .{ .identity = .{ .report = report.report_id }, .digest = history.hash(try snapshot_codec.encodeBare(&bytes, report)) },
+                .oms_reconciliation_result => |result| return .{ .identity = .{ .reconciliation = result.reconciliation_id }, .digest = history.hash(try snapshot_codec.encodeBare(&bytes, result)) },
+                else => return null,
+            },
+            .venue => |event| switch (event.event) {
+                .order_dispatch_result => |result| {
+                    const body = try self.dispatchIngressBody(event);
+                    return .{ .identity = .{ .dispatch_result = .{ .command = body.command, .state = result.state } }, .digest = history.hash(try snapshot_codec.encodeBare(&bytes, body)) };
+                },
+                .execution_report => |report| {
+                    try self.validateHistoryEnvelope(event, report.instrument);
+                    if (report.exchange_account != self.exchange_account_identity or report.instrument != report.cumulative_quantity.instrument or report.instrument != report.remaining_quantity.instrument) return error.CanonicalScopeMismatch;
+                    const converted: oms.ExecutionReport = .{ .report_id = std.math.cast(u64, report.identity) orelse return error.IdentityOutOfRange, .order_id = std.math.cast(u64, report.order) orelse return error.IdentityOutOfRange, .revision = report.revision, .status = switch (report.status) {
+                        .accepted => .accepted,
+                        .partially_filled => .partially_filled,
+                        .filled => .filled,
+                        .canceled => .canceled,
+                        .rejected => .rejected,
+                        .amended => .amended,
+                    }, .cumulative_quantity = std.math.cast(i64, report.cumulative_quantity.lots) orelse return error.QuantityOutOfRange, .remaining_quantity = std.math.cast(i64, report.remaining_quantity.lots) orelse return error.QuantityOutOfRange, .canonical_digest = try canonicalPayloadDigest(event.event) };
+                    return .{ .identity = .{ .report = report.identity }, .digest = history.hash(try snapshot_codec.encodeBare(&bytes, converted)) };
+                },
+                .order_reconciliation_result => |result| {
+                    const evidence = result.evidence orelse return error.IncompleteReconciliationEvidence;
+                    try self.validateHistoryEnvelope(event, evidence.scope.instrument);
+                    if (!reconciliationEvidenceValid(result, event.envelope)) return error.IncompleteReconciliationEvidence;
+                    if (event.envelope.exchange_account != self.exchange_account_identity) return error.CanonicalScopeMismatch;
+                    const converted: oms.ReconciliationResult = .{ .reconciliation_id = std.math.cast(u64, result.identity) orelse return error.IdentityOutOfRange, .order_id = std.math.cast(u64, result.order) orelse return error.IdentityOutOfRange, .revision = result.revision, .status = switch (result.status) {
+                        .found_live => .found_live,
+                        .found_terminal => .found_terminal,
+                        .confirmed_absent => .confirmed_absent,
+                        .unresolved => .unresolved,
+                    }, .cumulative_quantity = std.math.cast(i64, (result.cumulative_quantity orelse return error.InvalidReconciliation).lots) orelse return error.QuantityOutOfRange, .remaining_quantity = std.math.cast(i64, (result.remaining_quantity orelse return error.InvalidReconciliation).lots) orelse return error.QuantityOutOfRange, .terminal_state = if (result.terminal_status) |terminal| switch (terminal) {
+                        .filled => .filled,
+                        .canceled => .canceled,
+                        .rejected => .rejected,
+                        else => return error.InvalidReconciliation,
+                    } else null, .canonical_digest = try canonicalPayloadDigest(event.event) };
+                    return .{ .identity = .{ .reconciliation = result.identity }, .digest = history.hash(try snapshot_codec.encodeBare(&bytes, converted)) };
+                },
+                else => return null,
+            },
+        }
+    }
+
+    fn groupHistorySemantic(group: oms.IntentGroup, member: ?u8, bytes: []u8) !HistorySemantic {
+        if (group.count == 0 or group.count > group.members.len) return error.InvalidIntentGroup;
+        var record: @import("order_history_batch.zig").GroupRecord = .{ .strategy = group.members[0].strategy_instance, .first_sequence = group.first_intent_sequence, .count = group.count, .members = std.mem.zeroes([oms.max_group_members]oms.SeenIntent) };
+        for (group.members[0..group.count], 0..) |intent, index| {
+            if (intent.strategy_instance != record.strategy or intent.intent_sequence != try std.math.add(u64, group.first_intent_sequence, index)) return error.NonConsecutiveIntentGroup;
+            record.members[index] = .{ .strategy_instance = intent.strategy_instance, .intent_sequence = intent.intent_sequence, .group = group.first_intent_sequence, .policy = group.policy, .fingerprint = oms.intentFingerprint(intent, group.count) };
+        }
+        if (member != null or group.count == 1) {
+            const index = member orelse 0;
+            if (index >= group.count) return error.InvalidHistoryCandidate;
+            const intent = record.members[index];
+            return .{ .identity = .{ .intent = .{ .strategy = intent.strategy_instance, .sequence = intent.intent_sequence } }, .digest = history.hash(try snapshot_codec.encodeBare(bytes, intent)) };
+        }
+        return .{ .identity = .{ .group = .{ .strategy = record.strategy, .first_sequence = record.first_sequence } }, .digest = history.hash(try snapshot_codec.encodeBare(bytes, record)) };
+    }
+
+    fn validateHistoryEnvelope(self: *const TradingShard, event: canonical.EventRecord, instrument: canonical.InstrumentIdentity) !void {
+        if (event.envelope.schema_version != canonical.schema_version or event.envelope.exchange_account != self.exchange_account_identity or
+            (event.envelope.scope != .account and event.envelope.scope != .instrument) or
+            (event.envelope.instrument != null and event.envelope.instrument != instrument)) return error.CanonicalScopeMismatch;
+        const configured = self.instrumentEntry(instrument) orelse return error.UnknownOmsInstrument;
+        if (event.envelope.venue != configured.venue) return error.CanonicalScopeMismatch;
+    }
+
     pub fn apply(self: *TradingShard, input: CanonicalEvent) !ApplyResult {
+        const before = self.authoritativeBarrier();
+        var candidate: TradingShard = undefined;
+        copyTradingState(&candidate, self);
+        var publish_on_error = false;
+        const result = candidate.applyCandidate(self, input, &publish_on_error, null) catch |err| {
+            if (publish_on_error) copyTradingState(self, &candidate);
+            return err;
+        };
+        copyTradingState(self, &candidate);
+        return .{ .facts = try self.trace.factsAfter(before), .order_command = result.order_command, .oms_commands = self.oms.emitted() };
+    }
+
+    /// Applies to an unpublished copy of previous. Errors may mutate this copy;
+    /// publish_on_error is true only for the original authoritative error path.
+    pub fn applyOwnedCandidate(self: *TradingShard, previous: *const TradingShard, input: CanonicalEvent, publish_on_error: *bool) !ApplyResult {
+        return self.applyCandidate(previous, input, publish_on_error, previous);
+    }
+
+    fn applyCandidate(self: *TradingShard, previous: *const TradingShard, input: CanonicalEvent, publish_on_error: *bool, rollback: ?*const TradingShard) !ApplyResult {
+        publish_on_error.* = false;
+        if (self == previous) return error.OwnedCandidateAliasesCommittedState;
+        if (self.authoritativeBarrier() != previous.authoritativeBarrier()) return error.OwnedCandidateBarrierMismatch;
         if (input == .venue and input.venue.envelope.schema_version != canonical.schema_version) return error.UnsupportedSchema;
         _ = try std.math.add(u64, self.authoritativeBarrier(), 1);
         try self.trace.validate();
@@ -290,20 +581,49 @@ pub const TradingShard = struct {
         var input_digest: [32]u8 = undefined;
         hasher.final(&input_digest);
         const before = self.authoritativeBarrier();
-        var candidate = self.*;
-        const result = candidate.applyUnfinalized(input) catch |err| {
-            if (candidate.authoritativeBarrier() != before) {
-                try candidate.trace.finalizeInput(before, input_digest);
-                self.* = candidate;
+        const result = self.applyUnfinalized(input, true, rollback) catch |err| {
+            if (self.authoritativeBarrier() != before) {
+                try self.trace.finalizeInput(before, input_digest);
+                publish_on_error.* = true;
             }
             return err;
         };
-        if (candidate.authoritativeBarrier() != before) try candidate.trace.finalizeInput(before, input_digest);
-        self.* = candidate;
+        if (input != .core or input.core.payload != .history_candidate_verified) try self.observeOrderArchiveTimes(previous, input);
+        if (self.authoritativeBarrier() != before) try self.trace.finalizeInput(before, input_digest);
+        // The original public path published before materializing its borrowed result.
+        publish_on_error.* = true;
         return .{ .facts = try self.trace.factsAfter(before), .order_command = result.order_command, .oms_commands = self.oms.emitted() };
     }
 
-    fn applyUnfinalized(self: *TradingShard, input: CanonicalEvent) !ApplyResult {
+    fn observeOrderArchiveTimes(self: *TradingShard, previous: *const TradingShard, input: CanonicalEvent) !void {
+        const times = stableTimes(input);
+        if (!times.presence.receive or times.receive == 0) return;
+        for (self.oms.orders[0..self.oms.order_count], 0..) |*order, index| {
+            if (order.id >= previous.oms.next_order_id) try self.oms.noteOrderCreated(order.id, times.receive);
+            const terminal = switch (order.state) {
+                .filled, .canceled, .rejected => true,
+                else => false,
+            };
+            if (!terminal) continue;
+            const was = if (index < previous.oms.order_count and previous.oms.orders[index].id == order.id)
+                previous.oms.orders[index]
+            else
+                previous.oms.orderById(order.id);
+            const newly_observed = was == null or order.last_report_id != was.?.last_report_id or order.last_reconciliation_id != was.?.last_reconciliation_id;
+            if (newly_observed and order.created_at_utc_ns != 0) try self.oms.noteTerminalObserved(order.id, times.receive);
+        }
+    }
+
+    fn applyUnfinalized(self: *TradingShard, input: CanonicalEvent, allow_cold_staging: bool, rollback: ?*const TradingShard) anyerror!ApplyResult {
+        if ((self.deferred_history_admission_count != 0 or (allow_cold_staging and (self.pending_history_candidate != null or self.pending_safety_history_candidate != null))) and !historySafetyInput(input))
+            return error.HistoryLookupPending;
+        if (allow_cold_staging) if (self.historyCandidateFor(input) catch |err| {
+            if (err == error.HistorySafetyCapacity and input == .venue) try self.retainDeferredHistoryAdmission(input);
+            return err;
+        }) |pending| {
+            const staged: CoreEvent = .{ .identity = std.math.cast(u64, pending.request.pending_id) orelse return error.HistoryPendingIdentityCapacity, .payload = .{ .history_candidate_started = pending } };
+            return if (rollback) |previous| self.applyCoreOnOwnedCandidate(previous, staged) else self.applyCore(staged);
+        };
 
         // Process admission cannot emit durable rejection facts: restart
         // replay reconstructs committed facts independently of this fence.
@@ -317,20 +637,37 @@ pub const TradingShard = struct {
             else => {},
         };
         return switch (input) {
-            .core => |event| self.applyCore(event),
-            .venue => |event| self.applyVenue(event),
+            // The authenticated original executes inside the outer proof transaction candidate.
+            .core => |event| if (allow_cold_staging)
+                if (rollback) |previous| self.applyCoreOnOwnedCandidate(previous, event) else self.applyCore(event)
+            else
+                self.applyCoreInPlace(event),
+            .venue => |event| if (rollback) |previous| self.applyVenueOnOwnedCandidate(previous, event, !allow_cold_staging) else self.applyVenue(event, !allow_cold_staging),
         };
     }
 
-    fn applyVenue(self: *TradingShard, event: canonical.EventRecord) !ApplyResult {
-        var candidate = self.*;
-        const account_failure_before = candidate.canonical_account.failure;
-        const market_failure_generation_before = candidate.canonical_market.failure_generation;
-        const before = candidate.authoritativeBarrier();
-        candidate.oms.begin();
+    fn applyVenue(self: *TradingShard, event: canonical.EventRecord, verified_original: bool) !ApplyResult {
+        var candidate: TradingShard = undefined;
+        copyTradingState(&candidate, self);
+        const before = self.authoritativeBarrier();
+        const result = candidate.applyVenueOnOwnedCandidate(self, event, verified_original) catch |err| {
+            copyTradingState(self, &candidate);
+            return err;
+        };
+        copyTradingState(self, &candidate);
+        return .{ .facts = try self.trace.factsAfter(before), .order_command = result.order_command, .oms_commands = self.oms.emitted() };
+    }
+
+    fn applyVenueOnOwnedCandidate(self: *TradingShard, previous: *const TradingShard, event: canonical.EventRecord, verified_original: bool) !ApplyResult {
+        var publish = false;
+        defer if (!publish) copyTradingState(self, previous);
+        const account_failure_before = self.canonical_account.failure;
+        const market_failure_generation_before = self.canonical_market.failure_generation;
+        const before = self.authoritativeBarrier();
+        self.oms.begin();
         const command = blk: {
             if (event.envelope.schema_version != canonical.schema_version) return error.UnsupportedSchema;
-            break :blk candidate.handleCanonical(event);
+            break :blk self.handleCanonical(event, verified_original);
         } catch |err| {
             // Projection invalidation is authoritative even when the public
             // apply call reports the rejected observation. This is the only
@@ -339,29 +676,29 @@ pub const TradingShard = struct {
                 (event.event == .execution_report and event.envelope.exchange_account == self.exchange_account_identity and
                     (err == error.InvalidExecutionReport or err == error.StaleOrderRevision)))
             {
-                candidate.oms.recovery_only = true;
-                if (candidate.operational_state.initialized) try candidate.applyOperationalGate(.{
+                self.oms.recovery_only = true;
+                if (self.operational_state.initialized) try self.applyOperationalGate(.{
                     .gate_identity = event.envelope.identity.sequence,
-                    .target_identity = candidate.operational_state.target_identity,
+                    .target_identity = self.operational_state.target_identity,
                     .kind = .latched,
                     .reason = .reconciliation_break,
                     .open = false,
                 });
-                try candidate.trace.append(.canonical_order_reconciliation, event.envelope.identity.sequence);
-                self.* = candidate;
+                try self.trace.append(.canonical_order_reconciliation, event.envelope.identity.sequence);
+                publish = true;
             } else if ((event.event == .fill or event.event == .funding_settlement or
                 (event.event == .account_reconciliation_result and event.event.account_reconciliation_result.account_economics != null)) and event.envelope.exchange_account == self.exchange_account_identity)
             {
-                candidate = self.*;
-                candidate.oms.begin();
+                copyTradingState(self, previous);
+                self.oms.begin();
                 if (event.event == .account_reconciliation_result) {
                     if (std.math.cast(u64, event.event.account_reconciliation_result.identity)) |identity| {
                         // Preserve verified identity for an unresolved result. A full
                         // evidence store or existing conflict retains the original fault.
-                        _ = candidate.economic_projection.retainCanonicalSnapshot(identity, try canonicalPayloadDigest(event.event)) catch false;
+                        _ = self.economic_projection.retainCanonicalSnapshot(identity, try canonicalPayloadDigest(event.event)) catch false;
                     }
                 }
-                try candidate.latchEconomicFault(event, switch (err) {
+                try self.latchEconomicFault(event, switch (err) {
                     error.Overflow, error.QuantityOutOfRange, error.PriceOutOfRange, error.AssetAmountOutOfRange => .overflow,
                     error.NativeAssetCapacityExceeded, error.LedgerCapacityExceeded, error.EconomicFactCapacityExceeded, error.SafetyGateSetFull => .capacity_exhausted,
                     error.UnknownAssetDefinition => .unknown_asset,
@@ -369,27 +706,27 @@ pub const TradingShard = struct {
                     error.InexactEconomicAmount => .inexact_amount,
                     else => .invalid_economic_fact,
                 });
-                try candidate.bindFreshCancellations(event.envelope.times.monotonic_ns orelse 0);
-                self.* = candidate;
+                try self.bindFreshCancellations(event.envelope.times.monotonic_ns orelse 0);
+                publish = true;
             } else if ((event.event == .account_bootstrap_snapshot or event.event == .account_observed) and
                 (err == error.UnknownAssetDefinition or err == error.AssetAmountOutOfRange))
             {
-                candidate = self.*;
-                candidate.oms.begin();
-                try candidate.latchEconomicFault(event, if (err == error.UnknownAssetDefinition) .unknown_asset else .overflow);
-                self.* = candidate;
-            } else if (candidate.canonical_account.failure != account_failure_before) {
-                try candidate.latchEconomicFault(event, .invalid_economic_fact);
-                try candidate.bindFreshCancellations(event.envelope.times.monotonic_ns orelse 0);
-                self.* = candidate;
-            } else if (candidate.canonical_market.failure_generation != market_failure_generation_before) {
-                try candidate.trace.append(.canonical_market_invalidated, event.envelope.identity.sequence);
-                self.* = candidate;
+                copyTradingState(self, previous);
+                self.oms.begin();
+                try self.latchEconomicFault(event, if (err == error.UnknownAssetDefinition) .unknown_asset else .overflow);
+                publish = true;
+            } else if (self.canonical_account.failure != account_failure_before) {
+                try self.latchEconomicFault(event, .invalid_economic_fact);
+                try self.bindFreshCancellations(event.envelope.times.monotonic_ns orelse 0);
+                publish = true;
+            } else if (self.canonical_market.failure_generation != market_failure_generation_before) {
+                try self.trace.append(.canonical_market_invalidated, event.envelope.identity.sequence);
+                publish = true;
             }
             return err;
         };
-        try candidate.bindFreshCancellations(event.envelope.times.monotonic_ns orelse 0);
-        self.* = candidate;
+        try self.bindFreshCancellations(event.envelope.times.monotonic_ns orelse 0);
+        publish = true;
         return .{
             .facts = try self.trace.factsAfter(before),
             .order_command = command,
@@ -398,34 +735,56 @@ pub const TradingShard = struct {
     }
 
     fn applyCore(self: *TradingShard, event: CoreEvent) !ApplyResult {
-        var candidate = self.*;
-        const before = candidate.authoritativeBarrier();
-        candidate.oms.begin();
-        const command = candidate.handle(event) catch |err| {
+        var candidate: TradingShard = undefined;
+        copyTradingState(&candidate, self);
+        const before = self.authoritativeBarrier();
+        const result = candidate.applyCoreInPlace(event) catch |err| {
+            if (event.payload == .asset_definition_activated or err == error.TombstoneFactConflict or
+                err == error.ArchivedFactOutsideRetention or err == error.TerminalFactConflict)
+                copyTradingState(self, &candidate);
+            return err;
+        };
+        copyTradingState(self, &candidate);
+        return .{ .facts = try self.trace.factsAfter(before), .order_command = result.order_command, .oms_commands = self.oms.emitted() };
+    }
+
+    fn applyCoreOnOwnedCandidate(self: *TradingShard, previous: *const TradingShard, event: CoreEvent) !ApplyResult {
+        return self.applyCoreInPlace(event) catch |err| {
+            if (event.payload != .asset_definition_activated and err != error.TombstoneFactConflict and
+                err != error.ArchivedFactOutsideRetention and err != error.TerminalFactConflict)
+                copyTradingState(self, previous);
+            return err;
+        };
+    }
+
+    fn applyCoreInPlace(self: *TradingShard, event: CoreEvent) !ApplyResult {
+        const before = self.authoritativeBarrier();
+        const asset_failures_before = self.asset_configuration_failure_count;
+        self.oms.begin();
+        const command = self.handle(event) catch |err| {
             if (event.payload == .asset_definition_activated) {
-                candidate.asset_configuration_failed = true;
-                candidate.asset_configuration_failure_count = try std.math.add(u64, self.asset_configuration_failure_count, 1);
-                candidate.oms.recovery_only = true;
-                try candidate.trace.append(.asset_definition_rejected, event.identity);
-                self.* = candidate;
+                self.asset_configuration_failed = true;
+                self.asset_configuration_failure_count = try std.math.add(u64, asset_failures_before, 1);
+                self.oms.recovery_only = true;
+                try self.trace.append(.asset_definition_rejected, event.identity);
             }
 
             if (err == error.TombstoneFactConflict or err == error.ArchivedFactOutsideRetention or err == error.TerminalFactConflict) {
-                candidate.oms.recovery_only = true;
-                if (candidate.operational_state.initialized) try candidate.applyOperationalGate(.{
+                self.oms.recovery_only = true;
+                if (self.operational_state.initialized) try self.applyOperationalGate(.{
                     .gate_identity = event.identity,
-                    .target_identity = candidate.operational_state.target_identity,
+                    .target_identity = self.operational_state.target_identity,
                     .kind = .latched,
                     .reason = .reconciliation_break,
                     .open = false,
                 });
-                try candidate.trace.append(.oms_reconciliation_result, event.identity);
-                self.* = candidate;
+                try self.trace.append(.oms_reconciliation_result, event.identity);
             }
             return err;
         };
-        try candidate.bindFreshCancellations(if (event.time_presence.monotonic) event.monotonic_time else 0);
-        self.* = candidate;
+        // Verified candidates already bind cancellation authority with their original clock.
+        if (event.payload != .history_candidate_verified)
+            try self.bindFreshCancellations(if (event.time_presence.monotonic) event.monotonic_time else 0);
         return .{
             .facts = try self.trace.factsAfter(before),
             .order_command = command,
@@ -451,6 +810,16 @@ pub const TradingShard = struct {
         target.pinned_len += 1;
     }
 
+    fn commandNeedsDispatchFacts(self: *const TradingShard, order_id: u64) bool {
+        const order = self.oms.orderById(order_id) orelse return true;
+        return switch (order.state) {
+            .filled, .canceled, .rejected => order.reservation_active or order.reservation.atoms != 0 or
+                order.pending_reservation != null or order.pending_previous_spec != null or
+                order.pending_basis_quantity != 0 or order.replacement != null,
+            else => true,
+        };
+    }
+
     fn checkpointPins(self: *const TradingShard) !Trace {
         var target = self.trace;
         target.pinned_len = 0;
@@ -468,11 +837,16 @@ pub const TradingShard = struct {
             if (self.latestFact(kind)) |fact| try self.pinFact(&target, fact.sequence);
         }
         for (self.oms.command_history[0..self.oms.command_history_count]) |command| {
+            if (!self.commandNeedsDispatchFacts(command.order_id)) continue;
             try self.pinFact(&target, command.risk_decision_identity);
             try self.pinFact(&target, command.reservation_identity);
             const refs = command.authority;
             for ([_]u64{ refs.trading_authorization.barrier, refs.primary_lease.barrier, refs.risk_lease.barrier, refs.capability.barrier, refs.instrument_rules.barrier, refs.margin_rules.barrier, refs.instrument_trading.barrier, refs.config.barrier, refs.deadline_barrier }) |sequence| try self.pinFact(&target, sequence);
         }
+        if (self.last_order_archive) |commit| try self.pinFact(&target, try std.math.add(u64, commit.receipt.root.barrier, 1));
+        for (self.deferred_history_admissions[0..self.deferred_history_admission_count]) |admission| try self.pinFact(&target, admission.fact_sequence);
+        if (self.pending_history_candidate) |pending| try self.pinFact(&target, pending.original.sequence);
+        if (self.pending_safety_history_candidate) |pending| try self.pinFact(&target, pending.original.sequence);
         std.mem.sort(Fact, target.pinned[0..target.pinned_len], {}, struct {
             fn less(_: void, a: Fact, b: Fact) bool {
                 return a.sequence < b.sequence;
@@ -509,8 +883,8 @@ pub const TradingShard = struct {
         return self.trace.last_sequence;
     }
 
-    pub fn canonicalStateDigest(self: TradingShard) [Sha256.digest_length]u8 {
-        return stateDigest(self);
+    pub fn canonicalStateDigest(self: *const TradingShard) [Sha256.digest_length]u8 {
+        return stateDigestBorrowed(self);
     }
 
     pub fn appliedHostActivation(self: *const TradingShard, stable_journal: *const journal.Journal) !host_gateway.AppliedActivation {
@@ -539,7 +913,7 @@ pub const TradingShard = struct {
 
     /// A permutation-only business-state comparison. CanonicalStateDigest
     /// remains the ordered history/snapshot integrity digest.
-    pub fn semanticAuthorityDigest(self: TradingShard) [Sha256.digest_length]u8 {
+    pub fn semanticAuthorityDigest(self: *const TradingShard) [Sha256.digest_length]u8 {
         return semanticStateDigest(self);
     }
 
@@ -552,7 +926,7 @@ pub const TradingShard = struct {
 
     /// Encodes authoritative state at the exact sealed stable-journal barrier.
     pub fn snapshot(
-        self: TradingShard,
+        self: *const TradingShard,
         stable_journal: *const journal.Journal,
         barrier: u64,
         destination: []u8,
@@ -561,9 +935,7 @@ pub const TradingShard = struct {
         if (!stable_journal.sealed or barrier == 0 or
             barrier != stable_journal.last_sequence or self.authoritativeBarrier() != barrier)
             return error.InvalidSnapshotBarrier;
-        var authoritative = self;
-        canonicalizeSnapshotState(&authoritative);
-        return snapshot_codec.write(destination, .{
+        return snapshot_codec.writeWithPolicy(destination, .{
             .state_schema = state_schema_version,
             .release_artifact = release_artifact_identity,
             .schema_registry = schema_registry_identity,
@@ -571,29 +943,27 @@ pub const TradingShard = struct {
             .instrument_rules_version = self.instrument_rules_version,
             .margin_rules_version = self.margin_rules_version,
             .state_digest = self.canonicalStateDigest(),
-        }, authoritative);
+        }, self, CoreSnapshotEncodingPolicy);
     }
 
-    /// Restores a validated snapshot through the side-effect-free replay seam.
-    pub fn restoreSnapshot(encoded: []const u8) !SnapshotRestore {
-        const decoded = try snapshot_codec.read(
-            encoded,
-            TradingShard,
-            state_schema_version,
-            release_artifact_identity,
-            schema_registry_identity,
-        );
-        var recovered = decoded.value;
+    /// Restores a validated snapshot into caller-owned recovery storage.
+    pub fn restoreSnapshotInto(recovered: *TradingShard, encoded: []const u8) !u64 {
+        const metadata = try snapshot_codec.readInto(encoded, recovered, state_schema_version, release_artifact_identity, schema_registry_identity);
         recovered.oms.begin();
-        try validateSnapshotState(&recovered);
-        const metadata = decoded.metadata;
+        try validateSnapshotState(recovered);
         const digest = recovered.canonicalStateDigest();
         if (metadata.barrier == 0 or recovered.authoritativeBarrier() != metadata.barrier or
             recovered.instrument_rules_version != metadata.instrument_rules_version or
             recovered.margin_rules_version != metadata.margin_rules_version or
             !std.mem.eql(u8, &metadata.state_digest, &digest))
             return error.InvalidSnapshotState;
-        return .{ .shard = recovered, .barrier = metadata.barrier };
+        return metadata.barrier;
+    }
+
+    pub fn restoreSnapshot(encoded: []const u8) !SnapshotRestore {
+        var restored: SnapshotRestore = undefined;
+        restored.barrier = try restoreSnapshotInto(&restored.shard, encoded);
+        return restored;
     }
 
     /// Restores a snapshot and semantically replays its immediately following journal segment.
@@ -601,20 +971,25 @@ pub const TradingShard = struct {
         return restoreSegments(encoded, &.{stable_tail});
     }
 
-    /// Replays bounded contiguous segments without concatenating their headers.
-    pub fn restoreSegments(encoded: []const u8, stable_tails: []const []const u8) !SnapshotRecovery {
-        const restored = try restoreSnapshot(encoded);
-        var shard = restored.shard;
+    /// Publishes only complete verified fact groups into caller-owned recovery storage.
+    pub fn restoreSegmentsInto(shard: *TradingShard, encoded: []const u8, stable_tails: []const []const u8) !RestoreMetadata {
+        const barrier = try restoreSnapshotInto(shard, encoded);
         var status: journal.ScanStatus = .clean;
         for (stable_tails, 0..) |tail, index| {
             var reader = try journal.Reader.init(tail);
             if (reader.next_sequence != try std.math.add(u64, shard.authoritativeBarrier(), 1)) return error.SnapshotJournalGap;
-            const recovered = try replayReader(&reader, shard);
-            shard = recovered.shard;
-            status = recovered.status;
+            status = try replayReaderInto(&reader, shard);
             if (status == .truncated_tail and index + 1 != stable_tails.len) return error.SnapshotJournalGap;
         }
-        return .{ .shard = shard, .barrier = restored.barrier, .status = status };
+        return .{ .barrier = barrier, .status = status };
+    }
+
+    pub fn restoreSegments(encoded: []const u8, stable_tails: []const []const u8) !SnapshotRecovery {
+        var restored: SnapshotRecovery = undefined;
+        const metadata = try restoreSegmentsInto(&restored.shard, encoded, stable_tails);
+        restored.barrier = metadata.barrier;
+        restored.status = metadata.status;
+        return restored;
     }
 
     pub fn economicSummary(self: *const TradingShard) EconomicSummary {
@@ -984,7 +1359,8 @@ pub const TradingShard = struct {
             try self.oms.discardReplacement(order_id);
             return null;
         }
-        var candidate = self.*;
+        var candidate: TradingShard = undefined;
+        copyTradingState(&candidate, self);
         var group: oms_module.IntentGroup = .{ .first_intent_sequence = replacement.intent_sequence, .count = 1 };
         group.members[0] = replacement;
         const qualified = candidate.qualifyOmsGroup(group) catch |err| switch (err) {
@@ -1016,7 +1392,7 @@ pub const TradingShard = struct {
             .reservation = candidate.authoritativeBarrier(),
             .authority = try candidate.dispatchAuthorityRefs(intent.instrument, now_monotonic_ns, decision_barrier),
         });
-        self.* = candidate;
+        copyTradingState(self, &candidate);
         return qualified.reservation_atoms;
     }
 
@@ -1124,7 +1500,7 @@ pub const TradingShard = struct {
         if (fail_if_exceeded and remaining < 0) return error.RiskLeaseExceeded;
     }
 
-    pub fn assertClosures(self: TradingShard) !void {
+    pub fn assertClosures(self: *const TradingShard) !void {
         const portfolio_position = self.portfolioPosition();
         const exchange_position = self.exchangePosition();
         if (portfolio_position.quantity != exchange_position.quantity or
@@ -1401,6 +1777,31 @@ pub const TradingShard = struct {
         return canonical.ClientOrderId.init(digest[0..16]) catch unreachable;
     }
 
+    fn originalHostIntentGroup(intent: host_gateway.OrderIntent) oms.IntentGroup {
+        var group: oms_module.IntentGroup = .{ .first_intent_sequence = intent.intent_sequence, .count = 1 };
+        group.members[0] = .{
+            .intent_sequence = intent.intent_sequence,
+            .strategy_instance = intent.strategy_identity,
+            .operation = .place,
+            .instrument = intent.instrument_identity,
+            .side = if (intent.side == .buy) .buy else .sell,
+            .portfolio_reduce_only = intent.portfolio_reduce_only,
+            .quantity = intent.quantity,
+            .limit_price = .{
+                .instrument = intent.instrument_identity,
+                .rules_version = 0,
+                .ticks = intent.limit_price_micros,
+            },
+            .order_type = .limit,
+            .time_in_force = switch (intent.time_in_force) {
+                .good_til_canceled => .good_til_canceled,
+                .immediate_or_cancel => .immediate_or_cancel,
+            },
+        };
+        group.members[0].client_order_id = hostIntentIdentityToken(intent);
+        return group;
+    }
+
     fn submitOrderIntent(self: *TradingShard, intent: host_gateway.OrderIntent, now_monotonic_ns: u64, cursor_floor: ?u64) !?OrderCommand {
         if (!self.genesisReady()) return error.GenesisIncomplete;
         var group: oms_module.IntentGroup = .{ .first_intent_sequence = intent.intent_sequence, .count = 1 };
@@ -1552,7 +1953,7 @@ pub const TradingShard = struct {
         return oms_command;
     }
 
-    fn handleCanonical(self: *TradingShard, record: canonical.EventRecord) !?OrderCommand {
+    fn handleCanonical(self: *TradingShard, record: canonical.EventRecord, verified_original: bool) !?OrderCommand {
         if (record.envelope.event_type != @intFromEnum(canonical.eventType(record.event)))
             return error.CanonicalEventTypeMismatch;
         if (record.event == .account_bootstrap_snapshot or record.event == .account_observed) {
@@ -1592,7 +1993,10 @@ pub const TradingShard = struct {
             if (record.envelope.exchange_account) |account| if (self.exchange_account_identity != 0 and account != self.exchange_account_identity) return error.CanonicalScopeMismatch;
             if (self.instrumentEntry(identity)) |configured| if (record.envelope.venue != configured.venue) return error.CanonicalScopeMismatch;
         }
-        if (try self.rememberCanonicalIngress(record)) return null;
+        if (try self.rememberCanonicalIngress(record, verified_original)) {
+            if (self.releaseDeferredHistoryAdmission(.{ .venue = record })) try self.trace.append(.canonical_history_admission_released, record.envelope.identity.sequence);
+            return null;
+        }
         const fact_identity = record.envelope.identity.sequence;
         switch (record.event) {
             .economic_fault => |fault| {
@@ -1641,6 +2045,12 @@ pub const TradingShard = struct {
                     },
                 };
                 try self.oms.applyDispatch(batch);
+                if (self.dispatch_ingress_history_count == self.dispatch_ingress_history.len) return error.DispatchIngressCapacity;
+                self.dispatch_ingress_history[self.dispatch_ingress_history_count] = .{
+                    .body = try self.dispatchIngressBody(record),
+                    .cursor = .{ .identity = record.envelope.identity, .raw_digest = record.envelope.raw_evidence.digest, .payload_digest = try canonicalPayloadDigest(record.event) },
+                };
+                self.dispatch_ingress_history_count += 1;
                 self.dispatch_attempt_count = try std.math.add(u64, self.dispatch_attempt_count, 1);
                 switch (result.state) {
                     .not_sent => {
@@ -1852,6 +2262,13 @@ pub const TradingShard = struct {
                         } else null else null,
                         .canonical_digest = try canonicalPayloadDigest(record.event),
                     });
+                    if (status == .found_terminal) {
+                        const reconciled_order = self.oms.orderById(order_id).?;
+                        if (reconciled_order.created_at_utc_ns != 0)
+                            try self.oms.noteTerminalObserved(order_id, record.envelope.times.receive_utc_ns orelse return error.InvalidOrderArchiveTime);
+                        if (result.evidence.?.terminal_archive != null)
+                            try self.oms.retainTerminalArchiveCoverage(order_id, result.evidence.?);
+                    }
                     const reflected_reservation = (try self.confirmPendingReplacement(order_id, std.math.cast(u64, result.identity) orelse return error.IdentityOutOfRange, record.envelope.times.monotonic_ns orelse 0)) orelse previous_reservation;
                     try self.adjustMarginBuffersForReservationChange(reflected_reservation);
                 } else status = .unresolved;
@@ -1976,9 +2393,14 @@ pub const TradingShard = struct {
         try self.trace.append(.canonical_account_invalidated, record.envelope.identity.sequence);
     }
 
-    fn rememberCanonicalIngress(self: *TradingShard, record: canonical.EventRecord) !bool {
+    fn rememberCanonicalIngress(self: *TradingShard, record: canonical.EventRecord, verified_original: bool) !bool {
         const event_type = canonical.eventType(record.event);
         const payload_digest = try canonicalPayloadDigest(record.event);
+        for (self.deferred_history_admissions[0..self.deferred_history_admission_count]) |admission| {
+            if (std.meta.eql(admission.identity, record.envelope.identity) and
+                (admission.event_type != record.envelope.event_type or !std.mem.eql(u8, &admission.raw_digest, &record.envelope.raw_evidence.digest) or
+                    !std.mem.eql(u8, &admission.payload_digest, &payload_digest))) return error.ConflictingCanonicalIdentity;
+        }
         var cursor_index: ?usize = null;
         for (self.canonical_ingress_cursors[0..self.canonical_ingress_cursor_count], 0..) |known, index| {
             if (known.identity.stream != record.envelope.identity.stream) continue;
@@ -1999,7 +2421,7 @@ pub const TradingShard = struct {
             break;
         }
         if (try self.semanticDuplicate(record)) return true;
-        if (cursor_index) |index|
+        if (!verified_original) if (cursor_index) |index|
             if (record.envelope.identity.sequence < self.canonical_ingress_cursors[index].identity.sequence)
                 return error.StaleCanonicalIdentity;
         const target_index = cursor_index orelse blk: {
@@ -2028,18 +2450,55 @@ pub const TradingShard = struct {
         hasher.update(&payload_digest);
         hasher.final(&self.canonical_ingress_digest);
         self.canonical_ingress_count = try std.math.add(u64, self.canonical_ingress_count, 1);
-        self.canonical_ingress_cursors[target_index] = .{
-            .identity = record.envelope.identity,
-            .event_type = event_type,
-            .raw_digest = record.envelope.raw_evidence.digest,
-            .payload_digest = payload_digest,
-        };
+        // A proof may resolve behind later safety facts without lowering the source cursor.
+        if (cursor_index == null or record.envelope.identity.sequence > self.canonical_ingress_cursors[target_index].identity.sequence)
+            self.canonical_ingress_cursors[target_index] = .{
+                .identity = record.envelope.identity,
+                .event_type = event_type,
+                .raw_digest = record.envelope.raw_evidence.digest,
+                .payload_digest = payload_digest,
+            };
         return false;
+    }
+
+    fn dispatchIngressBody(self: *const TradingShard, record: canonical.EventRecord) !DispatchIngressBody {
+        if (record.event != .order_dispatch_result or record.envelope.schema_version != canonical.schema_version or
+            record.envelope.exchange_account != self.exchange_account_identity or record.envelope.scope != .account)
+            return error.CanonicalScopeMismatch;
+        const command_id = std.math.cast(u64, record.event.order_dispatch_result.command) orelse return error.IdentityOutOfRange;
+        var venue_configured = false;
+        for (self.instrument_registry.entries[0..self.instrument_registry.count]) |entry|
+            if (entry.venue == record.envelope.venue) {
+                venue_configured = true;
+                break;
+            };
+        if (!venue_configured) return error.CanonicalScopeMismatch;
+        for (self.oms.command_history[0..self.oms.command_history_count]) |command|
+            if (command.command_id == command_id) {
+                try self.validateHistoryEnvelope(record, command.instrument);
+                break;
+            };
+        return .{ .command = command_id, .state = record.event.order_dispatch_result.state, .venue = record.envelope.venue, .account = self.exchange_account_identity, .canonical_digest = try canonicalPayloadDigest(record.event) };
     }
 
     fn semanticDuplicate(self: *TradingShard, record: canonical.EventRecord) !bool {
         const account = if (self.exchange_account_identity != 0) self.exchange_account_identity else self.canonical_account.exchange_account orelse record.envelope.exchange_account;
         return switch (record.event) {
+            .order_dispatch_result => |result| blk: {
+                const body = try self.dispatchIngressBody(record);
+                for (self.dispatch_ingress_history[0..self.dispatch_ingress_history_count]) |known| {
+                    if (std.meta.eql(known.cursor.identity, record.envelope.identity) and
+                        (!std.mem.eql(u8, &known.cursor.raw_digest, &record.envelope.raw_evidence.digest) or
+                            !std.mem.eql(u8, &known.cursor.payload_digest, &body.canonical_digest))) return error.ConflictingCanonicalIdentity;
+                }
+                for (self.dispatch_ingress_history[0..self.dispatch_ingress_history_count]) |known| {
+                    if (known.body.command == result.command and known.body.state == result.state) {
+                        if (!std.meta.eql(known.body, body)) return error.ConflictingCanonicalIdentity;
+                        break :blk true;
+                    }
+                }
+                break :blk false;
+            },
             .account_reconciliation_result => |result| blk: {
                 if (result.account_economics == null) break :blk false;
                 if (record.envelope.exchange_account != account or result.account_economics.?.exchange_account != account)
@@ -2365,7 +2824,288 @@ pub const TradingShard = struct {
         try self.trace.append(.host_activation_revoked, fact_identity);
     }
 
+    fn rejectColdCandidate(self: *TradingShard, identity: u64) !?OrderCommand {
+        if (self.history_conflict_latched) return null;
+        self.history_conflict_latched = true;
+        self.oms.recovery_only = true;
+        if (self.operational_state.initialized) try self.applyOperationalGate(.{ .gate_identity = identity, .target_identity = self.operational_state.target_identity, .kind = .latched, .reason = .reconciliation_break, .open = false });
+        try self.trace.append(.history_candidate_conflict, identity);
+        try self.trace.append(.canonical_order_reconciliation, identity);
+        return null;
+    }
+
+    fn handleOmsGroup(self: *TradingShard, input: CoreEvent, group: oms.IntentGroup) !?OrderCommand {
+        if (!self.genesisReady()) return error.GenesisIncomplete;
+        switch (try self.oms.groupIdentityStatus(group)) {
+            .duplicate => return null,
+            .conflict => {
+                try self.rejectIntent(.oms_intent_conflict, group.first_intent_sequence, .intent_identity_conflict);
+                return null;
+            },
+            .fresh => {},
+        }
+        var candidate: TradingShard = undefined;
+        copyTradingState(&candidate, self);
+        const qualified = candidate.qualifyOmsGroup(group) catch |err| switch (err) {
+            error.MarginSafetyGateClosed => {
+                try candidate.rejectSubmittedIntent(group, .strategy_intent_rejected, .margin_safety_gate_closed);
+                copyTradingState(self, &candidate);
+                return null;
+            },
+            error.UnsupportedOrderSpec, error.CapabilityUnsupported => {
+                try self.rejectSubmittedIntent(group, .strategy_intent_rejected, if (err == error.CapabilityUnsupported) .capability_unsupported else .unsupported_order_spec);
+                return null;
+            },
+            error.MarketDataGap,
+            error.StrategyLimitExceeded,
+            error.VirtualPortfolioLimitExceeded,
+            error.DecisionDomainLimitExceeded,
+            error.ExchangeAccountLimitExceeded,
+            error.GlobalLimitExceeded,
+            error.PortfolioOpeningGateClosed,
+            error.ExchangeOpeningGateClosed,
+            error.InsufficientSpotAsset,
+            error.PortfolioReduceOnlyViolation,
+            error.TradingNotAuthorized,
+            error.DeRiskTargetViolation,
+            error.StrategyCutoverFenced,
+            => {
+                const reason: RejectReason = switch (err) {
+                    error.MarketDataGap => .market_data_gap,
+                    error.StrategyLimitExceeded => .strategy_limit_exceeded,
+                    error.VirtualPortfolioLimitExceeded => .portfolio_limit_exceeded,
+                    error.DecisionDomainLimitExceeded => .decision_domain_limit_exceeded,
+                    error.ExchangeAccountLimitExceeded => .exchange_account_limit_exceeded,
+                    error.GlobalLimitExceeded => .global_limit_exceeded,
+                    error.PortfolioOpeningGateClosed => .portfolio_opening_gate_closed,
+                    error.ExchangeOpeningGateClosed => .exchange_opening_gate_closed,
+                    error.InsufficientSpotAsset => .insufficient_spot_asset,
+                    error.PortfolioReduceOnlyViolation => .portfolio_reduce_only_violation,
+                    error.TradingNotAuthorized, error.DeRiskTargetViolation, error.StrategyCutoverFenced => .authorization_closed,
+                    else => unreachable,
+                };
+                try self.rejectSubmittedIntent(group, if (reason == .authorization_closed) .strategy_intent_rejected else .risk_rejected_lease, reason);
+                return null;
+            },
+            else => return err,
+        };
+        var refs: [oms_module.max_group_members]oms_module.RiskFactRefs = undefined;
+        for (qualified.group.members[0..qualified.group.count], 0..) |intent, index| {
+            try candidate.trace.append(.risk_accepted, intent.intent_sequence);
+            refs[index].decision = candidate.authoritativeBarrier();
+            try candidate.trace.append(.risk_reservation_created, intent.intent_sequence);
+            refs[index].reservation = candidate.authoritativeBarrier();
+            refs[index].authority = try candidate.dispatchAuthorityRefs(intent.instrument, if (input.time_presence.monotonic) input.monotonic_time else 0, refs[index].decision);
+        }
+        try candidate.oms.applyQualifiedGroup(qualified.group, group, refs[0..qualified.group.count]);
+        try candidate.adjustMarginBuffersForReservationChange(qualified.reservation_atoms);
+        try candidate.trace.append(.oms_intent_group, group.first_intent_sequence);
+        copyTradingState(self, &candidate);
+
+        return null;
+    }
+
+    fn handleOmsDispatch(self: *TradingShard, input: CoreEvent, batch: oms.DispatchBatch) !?OrderCommand {
+        var candidate: TradingShard = undefined;
+        copyTradingState(&candidate, self);
+        const previous_reservation = try candidate.activeReservationAtoms();
+        try candidate.oms.applyDispatch(batch);
+        try candidate.adjustMarginBuffersForReservationChange(previous_reservation);
+        try candidate.trace.append(.oms_dispatch_batch, input.identity);
+        copyTradingState(self, &candidate);
+
+        return null;
+    }
+
+    fn handleAssetDefinition(self: *TradingShard, input: CoreEvent, definition: canonical.AssetDefinition) !?OrderCommand {
+        const previous = self.asset_registry.get(definition.asset);
+        var configured: TradingShard = undefined;
+        copyTradingState(&configured, self);
+        if (!try configured.asset_registry.activate(definition, try std.math.add(u64, self.authoritativeBarrier(), 1))) return null;
+        if (configured.asset_registry.get(configured.economic_projection.settlement_asset) != null)
+            try configured.checkEconomicRanges();
+        // Partial virgin activation has no complete monetary namespace yet.
+        if (configured.asset_registry.consumerCompatible(true)) {
+            for (configured.canonical_account.balances[0..configured.canonical_account.balance_count]) |balance|
+                try configured.checkAssetAmounts(balance, false);
+            for (configured.canonical_account.positions[0..configured.canonical_account.position_count]) |position|
+                try configured.checkAssetAmounts(position, false);
+            for (configured.canonical_account.margins[0..configured.canonical_account.margin_count]) |margin|
+                try configured.checkAssetAmounts(margin, false);
+        }
+        self.asset_registry = configured.asset_registry;
+        try self.trace.append(.asset_definition_activated, input.identity);
+        if (previous != null and previous.?.definition.version != definition.version) self.oms.recovery_only = true;
+        return null;
+    }
+
+    fn observeColdOrderArchiveTimes(self: *TradingShard, previous_next_order_id: u64, input: CanonicalEvent) !void {
+        const times = stableTimes(input);
+        if (!times.presence.receive or times.receive == 0) return;
+        for (self.oms.orders[0..self.oms.order_count]) |order| {
+            if (order.id >= previous_next_order_id) try self.oms.noteOrderCreated(order.id, times.receive);
+        }
+        const order_id: ?u64 = switch (input) {
+            .core => |event| switch (event.payload) {
+                .oms_execution_report => |report| report.order_id,
+                .oms_reconciliation_result => |result| result.order_id,
+                else => null,
+            },
+            .venue => |event| switch (event.event) {
+                .execution_report => |report| std.math.cast(u64, report.order),
+                .order_reconciliation_result => |result| std.math.cast(u64, result.order),
+                else => null,
+            },
+        };
+        if (order_id) |id| if (self.oms.orderById(id)) |order| {
+            if (order.created_at_utc_ns != 0 and switch (order.state) {
+                .filled, .canceled, .rejected => true,
+                else => false,
+            }) try self.oms.noteTerminalObserved(id, times.receive);
+        };
+    }
+
+    fn handleHistoryVerified(self: *TradingShard, input: CoreEvent) !?OrderCommand {
+        if (self.pending_safety_history_candidate) |pending| if (pending.request.pending_id == input.payload.history_candidate_verified.request.pending_id) {
+            const main = self.pending_history_candidate;
+            const main_member = self.pending_history_member_index;
+            self.pending_history_candidate = pending;
+            self.pending_history_member_index = self.pending_safety_history_member_index;
+            self.pending_safety_history_candidate = null;
+            self.pending_safety_history_member_index = null;
+            defer {
+                self.pending_safety_history_candidate = self.pending_history_candidate;
+                self.pending_safety_history_member_index = self.pending_history_member_index;
+                self.pending_history_candidate = main;
+                self.pending_history_member_index = main_member;
+            }
+            return self.finalizeHistoryCandidate(input);
+        };
+        return self.finalizeHistoryCandidate(input);
+    }
+
+    fn finalizeHistoryCandidate(self: *TradingShard, input: CoreEvent) !?OrderCommand {
+        const pending = self.pending_history_candidate orelse return error.InvalidHistoryCandidate;
+        const root = self.business_history_root orelse return error.InvalidHistoryCandidate;
+        const verdict = try pending.finalize(&input.payload.history_candidate_verified, root);
+        const original = try decodeStableInput(pending.originalRecord());
+        if (verdict == .same and self.pending_history_member_index == null) {
+            _ = self.releaseDeferredHistoryAdmission(original);
+            self.pending_history_candidate = null;
+            self.pending_history_member_index = null;
+            try self.trace.append(.history_candidate_verified, input.identity);
+            return null;
+        }
+        if (verdict != .proven_first) return self.rejectColdCandidate(input.identity);
+        const group_count: ?u8 = if (original == .core) switch (original.core.payload) {
+            .oms_intent_group => |group| group.count,
+            .external_order_intent => 1,
+            else => null,
+        } else null;
+        if (group_count != null and group_count.? > 1) {
+            const next_member: u8 = if (self.pending_history_member_index) |index| index + 1 else 0;
+            if (next_member < group_count.?) {
+                const semantic = (try self.historySemantic(original, next_member)) orelse return error.InvalidHistoryCandidate;
+                self.pending_history_candidate.?.request.key.identity = semantic.identity;
+                self.pending_history_candidate.?.request.candidate_payload_digest = semantic.digest;
+                self.pending_history_member_index = next_member;
+                try self.trace.append(.history_candidate_verified, input.identity);
+                return null;
+            }
+        }
+        const order_id: ?u64 = switch (original) {
+            .core => |event| switch (event.payload) {
+                .oms_execution_report => |report| report.order_id,
+                .oms_reconciliation_result => |result| result.order_id,
+                else => null,
+            },
+            .venue => |event| switch (event.event) {
+                .execution_report => |report| std.math.cast(u64, report.order),
+                .order_reconciliation_result => |result| std.math.cast(u64, result.order),
+                else => null,
+            },
+        };
+        if (order_id) |id| if (self.oms.orderById(id) == null) return self.rejectColdCandidate(input.identity);
+        if (original == .venue and original.venue.event == .order_dispatch_result) {
+            const command_id = original.venue.event.order_dispatch_result.command;
+            var retained = false;
+            for (self.oms.command_history[0..self.oms.command_history_count]) |command|
+                if (command.command_id == command_id) {
+                    retained = true;
+                    break;
+                };
+            if (!retained) return self.rejectColdCandidate(input.identity);
+        }
+        if (!pending.original_was_admissible) return self.rejectColdCandidate(input.identity);
+        if (self.deferred_history_admission_count != 0 and !historySafetyInput(original)) return error.HistoryLookupPending;
+        _ = self.releaseDeferredHistoryAdmission(original);
+        self.pending_history_candidate = null;
+        self.pending_history_member_index = null;
+        try self.trace.append(.history_candidate_verified, input.identity);
+        const previous_next_order_id = self.oms.next_order_id;
+        const result = try self.applyUnfinalized(original, false, null);
+        try self.observeColdOrderArchiveTimes(previous_next_order_id, original);
+        return result.order_command;
+    }
+
     fn handle(self: *TradingShard, input: CoreEvent) !?OrderCommand {
+        if (input.payload == .history_candidate_started) {
+            const pending = input.payload.history_candidate_started;
+            const original = try decodeStableInput(pending.originalRecord());
+            const expected = (try self.historyCandidateFor(original)) orelse return error.InvalidHistoryCandidate;
+            if (!std.meta.eql(expected, pending)) return error.InvalidHistoryCandidate;
+            if (self.pending_history_candidate != null) {
+                if (!historySafetyInput(original) or self.pending_safety_history_candidate != null) return error.HistorySafetyCapacity;
+                self.pending_safety_history_candidate = pending;
+                self.pending_safety_history_member_index = null;
+            } else {
+                self.pending_history_candidate = pending;
+                self.pending_history_member_index = null;
+            }
+            self.next_history_pending_id = try std.math.add(u128, self.next_history_pending_id, 1);
+            try self.trace.append(.history_candidate_started, input.identity);
+            if (!pending.original_was_admissible) self.trace.events[self.trace.len - 1].reject_reason = .stale_canonical_source;
+            return null;
+        }
+        if (input.payload == .history_candidate_verified) return self.handleHistoryVerified(input);
+        if (input.payload == .order_archive_committed) {
+            const commit = input.payload.order_archive_committed;
+            if (self.hasDeferredOrderHistory(commit.order_id)) return error.OrderArchivePinned;
+            const qualification = try self.oms.prepareOrderArchive(commit.order_id, try self.economic_projection.appliedCanonicalFillQuantity(commit.order_id), self.exchange_account_identity);
+            const stream = (self.checkpoint orelse return error.OrderArchiveOriginUnavailable).stream;
+            if (commit.applied_fill_quantity != qualification.applied_fill_quantity or
+                !std.mem.eql(u8, &commit.qualification_digest, &qualification.digest()) or
+                commit.receipt.root.origin.stream.domain != .decision_log or commit.receipt.root.origin.stream.id != stream or
+                commit.receipt.root.origin.account != self.exchange_account_identity or
+                commit.receipt.root.barrier != self.authoritativeBarrier() or
+                !std.mem.eql(u8, &commit.receipt.qualification_digest, &commit.qualification_digest)) return error.InvalidOrderArchiveCommit;
+            _ = try history.verifyReceipt(commit.receipt, commit.receipt.root.origin, commit.qualification_digest, self.business_history_root);
+            var related_dispatches: [2048]u8 = @splat(0);
+            for (self.oms.command_history[0..self.oms.command_history_count]) |command| if (command.order_id == commit.order_id) {
+                const bit: usize = @intCast(command.command_id % (related_dispatches.len * 8));
+                related_dispatches[bit / 8] |= @as(u8, 1) << @intCast(bit % 8);
+            };
+            var kept_dispatches: u16 = 0;
+            for (self.dispatch_ingress_history[0..self.dispatch_ingress_history_count]) |entry| {
+                var released = false;
+                const bit: usize = @intCast(entry.body.command % (related_dispatches.len * 8));
+                if (related_dispatches[bit / 8] & (@as(u8, 1) << @intCast(bit % 8)) != 0)
+                    for (self.oms.command_history[0..self.oms.command_history_count]) |command| if (command.command_id == entry.body.command) {
+                        released = command.order_id == commit.order_id;
+                        break;
+                    };
+                if (!released) {
+                    self.dispatch_ingress_history[kept_dispatches] = entry;
+                    kept_dispatches += 1;
+                }
+            }
+            self.dispatch_ingress_history_count = kept_dispatches;
+            try self.oms.commitOrderArchive(qualification);
+            self.business_history_root = commit.receipt.root;
+            self.last_order_archive = commit;
+            try self.trace.append(.order_archive_committed, input.identity);
+            return null;
+        }
         if (input.payload == .checkpoint_committed) {
             const receipt = input.payload.checkpoint_committed;
             if (self.checkpoint) |previous| if (std.meta.eql(previous, receipt)) return null;
@@ -2387,26 +3127,9 @@ pub const TradingShard = struct {
         }
         switch (input.payload) {
             .checkpoint_committed => unreachable,
-            .asset_definition_activated => |definition| {
-                const previous = self.asset_registry.get(definition.asset);
-                var configured = self.*;
-                if (!try configured.asset_registry.activate(definition, try std.math.add(u64, self.authoritativeBarrier(), 1))) return null;
-                if (configured.asset_registry.get(configured.economic_projection.settlement_asset) != null)
-                    try configured.checkEconomicRanges();
-                // Partial virgin activation has no complete monetary namespace yet.
-                if (configured.asset_registry.consumerCompatible(true)) {
-                    for (configured.canonical_account.balances[0..configured.canonical_account.balance_count]) |balance|
-                        try configured.checkAssetAmounts(balance, false);
-                    for (configured.canonical_account.positions[0..configured.canonical_account.position_count]) |position|
-                        try configured.checkAssetAmounts(position, false);
-                    for (configured.canonical_account.margins[0..configured.canonical_account.margin_count]) |margin|
-                        try configured.checkAssetAmounts(margin, false);
-                }
-                self.asset_registry = configured.asset_registry;
-                try self.trace.append(.asset_definition_activated, input.identity);
-                if (previous != null and previous.?.definition.version != definition.version) self.oms.recovery_only = true;
-                return null;
-            },
+            .order_archive_committed => unreachable,
+            .history_candidate_started, .history_candidate_verified => unreachable,
+            .asset_definition_activated => |definition| return self.handleAssetDefinition(input, definition),
             .control_command => |command| {
                 const keep_positions = command.kind == .stop_keep_positions;
                 const preserved = if (keep_positions)
@@ -2897,81 +3620,8 @@ pub const TradingShard = struct {
             .strategy_intent_rejected => |rejection| {
                 try self.trace.append(.strategy_intent_rejected, rejection.intent_sequence);
             },
-            .oms_intent_group => |group| {
-                if (!self.genesisReady()) return error.GenesisIncomplete;
-                switch (try self.oms.groupIdentityStatus(group)) {
-                    .duplicate => return null,
-                    .conflict => {
-                        try self.rejectIntent(.oms_intent_conflict, group.first_intent_sequence, .intent_identity_conflict);
-                        return null;
-                    },
-                    .fresh => {},
-                }
-                var candidate = self.*;
-                const qualified = candidate.qualifyOmsGroup(group) catch |err| switch (err) {
-                    error.MarginSafetyGateClosed => {
-                        try candidate.rejectSubmittedIntent(group, .strategy_intent_rejected, .margin_safety_gate_closed);
-                        self.* = candidate;
-                        return null;
-                    },
-                    error.UnsupportedOrderSpec, error.CapabilityUnsupported => {
-                        try self.rejectSubmittedIntent(group, .strategy_intent_rejected, if (err == error.CapabilityUnsupported) .capability_unsupported else .unsupported_order_spec);
-                        return null;
-                    },
-                    error.MarketDataGap,
-                    error.StrategyLimitExceeded,
-                    error.VirtualPortfolioLimitExceeded,
-                    error.DecisionDomainLimitExceeded,
-                    error.ExchangeAccountLimitExceeded,
-                    error.GlobalLimitExceeded,
-                    error.PortfolioOpeningGateClosed,
-                    error.ExchangeOpeningGateClosed,
-                    error.InsufficientSpotAsset,
-                    error.PortfolioReduceOnlyViolation,
-                    error.TradingNotAuthorized,
-                    error.DeRiskTargetViolation,
-                    error.StrategyCutoverFenced,
-                    => {
-                        const reason: RejectReason = switch (err) {
-                            error.MarketDataGap => .market_data_gap,
-                            error.StrategyLimitExceeded => .strategy_limit_exceeded,
-                            error.VirtualPortfolioLimitExceeded => .portfolio_limit_exceeded,
-                            error.DecisionDomainLimitExceeded => .decision_domain_limit_exceeded,
-                            error.ExchangeAccountLimitExceeded => .exchange_account_limit_exceeded,
-                            error.GlobalLimitExceeded => .global_limit_exceeded,
-                            error.PortfolioOpeningGateClosed => .portfolio_opening_gate_closed,
-                            error.ExchangeOpeningGateClosed => .exchange_opening_gate_closed,
-                            error.InsufficientSpotAsset => .insufficient_spot_asset,
-                            error.PortfolioReduceOnlyViolation => .portfolio_reduce_only_violation,
-                            error.TradingNotAuthorized, error.DeRiskTargetViolation, error.StrategyCutoverFenced => .authorization_closed,
-                            else => unreachable,
-                        };
-                        try self.rejectSubmittedIntent(group, if (reason == .authorization_closed) .strategy_intent_rejected else .risk_rejected_lease, reason);
-                        return null;
-                    },
-                    else => return err,
-                };
-                var refs: [oms_module.max_group_members]oms_module.RiskFactRefs = undefined;
-                for (qualified.group.members[0..qualified.group.count], 0..) |intent, index| {
-                    try candidate.trace.append(.risk_accepted, intent.intent_sequence);
-                    refs[index].decision = candidate.authoritativeBarrier();
-                    try candidate.trace.append(.risk_reservation_created, intent.intent_sequence);
-                    refs[index].reservation = candidate.authoritativeBarrier();
-                    refs[index].authority = try candidate.dispatchAuthorityRefs(intent.instrument, if (input.time_presence.monotonic) input.monotonic_time else 0, refs[index].decision);
-                }
-                try candidate.oms.applyQualifiedGroup(qualified.group, group, refs[0..qualified.group.count]);
-                try candidate.adjustMarginBuffersForReservationChange(qualified.reservation_atoms);
-                try candidate.trace.append(.oms_intent_group, group.first_intent_sequence);
-                self.* = candidate;
-            },
-            .oms_dispatch_batch => |batch| {
-                var candidate = self.*;
-                const previous_reservation = try candidate.activeReservationAtoms();
-                try candidate.oms.applyDispatch(batch);
-                try candidate.adjustMarginBuffersForReservationChange(previous_reservation);
-                try candidate.trace.append(.oms_dispatch_batch, input.identity);
-                self.* = candidate;
-            },
+            .oms_intent_group => |group| return self.handleOmsGroup(input, group),
+            .oms_dispatch_batch => |batch| return self.handleOmsDispatch(input, batch),
             .oms_execution_report => |report| {
                 const previous_reservation = try self.activeReservationAtoms();
                 try self.oms.applyReport(report);
@@ -3098,7 +3748,67 @@ fn zeroUnused(comptime T: type, storage: []T) void {
     @memset(storage, std.mem.zeroes(T));
 }
 
+/// Emits precisely the old canonicalized snapshot view without copying Core
+/// or clearing arrays whose unused contents are not authoritative.
+const CoreSnapshotEncodingPolicy = struct {
+    pub fn fieldIsZero(comptime T: type, comptime name: []const u8) bool {
+        return T == oms_module.Oms and std.mem.eql(u8, name, "command_count");
+    }
+    pub fn counter(value: anytype, comptime name: []const u8) usize {
+        if (comptime fieldIsZero(@TypeOf(value.*), name)) return 0;
+        return @field(value.*, name);
+    }
+    fn mappedTail(comptime name: []const u8, comptime mappings: anytype) ?[]const u8 {
+        inline for (mappings) |mapping| if (std.mem.eql(u8, name, mapping[0])) return mapping[1];
+        return null;
+    }
+    pub fn tailCounter(comptime T: type, comptime name: []const u8) ?[]const u8 {
+        if (T == TradingShard) return mappedTail(name, .{ .{ "fenced_strategy_instances", "fenced_strategy_count" }, .{ "canonical_ingress_cursors", "canonical_ingress_cursor_count" } });
+        if (T == @FieldType(TradingShard, "asset_registry")) return mappedTail(name, .{.{ "entries", "count" }});
+        if (T == @FieldType(TradingShard, "instrument_registry")) return mappedTail(name, .{.{ "entries", "count" }});
+        if (T == @FieldType(TradingShard, "canonical_market")) return mappedTail(name, .{.{ "entries", "count" }});
+        if (T == @FieldType(TradingShard, "trace")) return mappedTail(name, .{ .{ "events", "len" }, .{ "pinned", "pinned_len" } });
+        if (T == @FieldType(TradingShard, "operational_state")) return mappedTail(name, .{ .{ "gates", "gate_count" }, .{ "command_history", "command_count" }, .{ "latches", "latch_count" } });
+        if (T == @FieldType(TradingShard, "economic_projection")) return mappedTail(name, .{ .{ "reconciliation_break_identities", "reconciliation_break_count" }, .{ "seen", "seen_count" }, .{ "canonical_fill_evidence", "canonical_fill_evidence_count" }, .{ "treasury_native_assets", "treasury_native_asset_count" }, .{ "suspense_native_assets", "suspense_native_asset_count" }, .{ "ledger", "ledger_count" } });
+        if (T == economics_module.Layer) return mappedTail(name, .{ .{ "native_assets", "native_asset_count" }, .{ "instrument_positions", "instrument_position_count" } });
+        if (T == economics_module.LedgerTransaction) return mappedTail(name, .{.{ "postings", "posting_count" }});
+        if (T == @FieldType(TradingShard, "canonical_account")) return mappedTail(name, .{ .{ "seen", "seen_count" }, .{ "balances", "balance_count" }, .{ "positions", "position_count" }, .{ "margins", "margin_count" } });
+        if (T == cold.PendingCandidate) return mappedTail(name, .{.{ "original_bytes", "original_len" }});
+        return null;
+    }
+    pub fn zeroValue(comptime T: type) T {
+        if (T == @typeInfo(@FieldType(@FieldType(TradingShard, "canonical_account"), "seen")).array.child) return .{
+            .identity = 0,
+            .exchange_account = 0,
+            .bootstrap = 0,
+            .source_stream = 0,
+            .source_sequence = 0,
+            .value = .{ .balance = .{
+                .asset = 0,
+                .value = .{
+                    .asset = 0,
+                    .total = .{ .asset = 0, .atoms = 0 },
+                    .available = .{ .asset = 0, .atoms = 0 },
+                    .held = .{ .asset = 0, .atoms = 0 },
+                },
+            } },
+        };
+        if (T == @typeInfo(@FieldType(TradingShard, "canonical_ingress_cursors")).array.child) return .{
+            .identity = .{ .stream = 0, .sequence = 0 },
+            .event_type = .order_dispatch_result,
+            .raw_digest = @splat(0),
+            .payload_digest = @splat(0),
+        };
+        return std.mem.zeroes(T);
+    }
+};
+
 fn canonicalizeSnapshotState(shard: *TradingShard) void {
+    inline for (.{ "pending_history_candidate", "pending_safety_history_candidate" }) |field| {
+        if (@field(shard, field)) |*pending| {
+            if (pending.original_len <= pending.original_bytes.len) @memset(pending.original_bytes[pending.original_len..], 0);
+        }
+    }
     zeroUnused(asset_registry.Entry, shard.asset_registry.entries[shard.asset_registry.count..]);
     zeroUnused(instrument_registry.Entry, shard.instrument_registry.entries[shard.instrument_registry.count..]);
     zeroUnused(market_projection.InstrumentProjection, shard.canonical_market.entries[shard.canonical_market.count..]);
@@ -3108,6 +3818,10 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
     shard.oms.command_count = 0;
     zeroUnused(oms_module.Command, shard.oms.commands[0..]);
     zeroUnused(oms_module.Command, shard.oms.command_history[shard.oms.command_history_count..]);
+    for (shard.dispatch_ingress_history[shard.dispatch_ingress_history_count..]) |*entry| entry.* = .{
+        .body = std.mem.zeroes(DispatchIngressBody),
+        .cursor = .{ .identity = .{ .stream = 0, .sequence = 0 }, .raw_digest = @splat(0), .payload_digest = @splat(0) },
+    };
     zeroUnused(oms_module.ExecutionReport, shard.oms.report_history[shard.oms.report_history_count..]);
     zeroUnused(oms_module.ReconciliationResult, shard.oms.reconciliation_history[shard.oms.reconciliation_history_count..]);
     zeroUnused(oms_module.SeenIntent, shard.oms.intent_history[shard.oms.intent_history_count..]);
@@ -3156,7 +3870,73 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
 }
 
 fn validateSnapshotState(shard: *const TradingShard) !void {
+    if (shard.deferred_history_admission_count > shard.deferred_history_admissions.len) return error.InvalidSnapshotState;
+    for (shard.deferred_history_admissions[0..shard.deferred_history_admission_count], 0..) |admission, index| {
+        if (admission.identity.stream == 0 or admission.identity.sequence == 0 or admission.fact_sequence == 0 or
+            (admission.event_type != @intFromEnum(canonical.EventType.order_dispatch_result) and
+                admission.event_type != @intFromEnum(canonical.EventType.execution_report) and
+                admission.event_type != @intFromEnum(canonical.EventType.order_reconciliation_result))) return error.InvalidSnapshotState;
+        const fact = shard.trace.factAt(admission.fact_sequence) orelse return error.InvalidSnapshotState;
+        if (fact.kind != .canonical_history_deferred or fact.identity != admission.identity.sequence or
+            !std.mem.eql(u8, &fact.input_digest, &admission.original_input_digest) or std.mem.allEqual(u8, &admission.payload_digest, 0)) return error.InvalidSnapshotState;
+        for (shard.deferred_history_admissions[0..index]) |prior|
+            if (std.meta.eql(prior.identity, admission.identity)) return error.InvalidSnapshotState;
+    }
+    if (shard.dispatch_ingress_history_count > shard.dispatch_ingress_history.len) return error.InvalidSnapshotState;
+    for (shard.dispatch_ingress_history[0..shard.dispatch_ingress_history_count], 0..) |entry, index| {
+        if (entry.body.command == 0 or entry.body.account != shard.exchange_account_identity or entry.cursor.identity.stream == 0 or entry.cursor.identity.sequence == 0 or
+            !std.mem.eql(u8, &entry.body.canonical_digest, &entry.cursor.payload_digest)) return error.InvalidSnapshotState;
+        const expected_digest = try canonicalPayloadDigest(.{ .order_dispatch_result = .{ .command = entry.body.command, .state = entry.body.state } });
+        if (!std.mem.eql(u8, &entry.body.canonical_digest, &expected_digest)) return error.InvalidSnapshotState;
+        var retained = false;
+        for (shard.oms.command_history[0..shard.oms.command_history_count]) |command| if (command.command_id == entry.body.command) {
+            const instrument = shard.instrumentEntry(command.instrument) orelse return error.InvalidSnapshotState;
+            if (instrument.venue != entry.body.venue) return error.InvalidSnapshotState;
+            retained = true;
+            break;
+        };
+        if (!retained) return error.InvalidSnapshotState;
+        for (shard.dispatch_ingress_history[0..index]) |prior|
+            if (prior.body.command == entry.body.command and prior.body.state == entry.body.state) return error.InvalidSnapshotState;
+    }
+
     shard.trace.validate() catch return error.InvalidSnapshotState;
+    if (shard.next_history_pending_id == 0) return error.InvalidSnapshotState;
+    inline for (.{ .{ "pending_history_candidate", "pending_history_member_index" }, .{ "pending_safety_history_candidate", "pending_safety_history_member_index" } }) |fields| {
+        if (@field(shard, fields[0])) |pending| {
+            var pending_bytes: [cold.max_encoded_size]u8 = undefined;
+            _ = cold.encodeCompact(&pending_bytes, &pending) catch return error.InvalidSnapshotState;
+            const root = shard.business_history_root orelse return error.InvalidSnapshotState;
+            if (pending.request.pending_id >= shard.next_history_pending_id or
+                !std.meta.eql(pending.request.key.origin, root.origin) or pending.request.epoch != root.epoch or pending.request.barrier != root.barrier or
+                !std.mem.eql(u8, &pending.request.root_digest, &root.root_digest)) return error.InvalidSnapshotState;
+            const original = decodeStableInput(pending.originalRecord()) catch return error.InvalidSnapshotState;
+            if (original == .core and !pending.original_was_admissible) return error.InvalidSnapshotState;
+            if (comptime std.mem.eql(u8, fields[0], "pending_safety_history_candidate")) {
+                if (!TradingShard.historySafetyInput(original)) return error.InvalidSnapshotState;
+            }
+            const semantic = (shard.historySemantic(original, @field(shard, fields[1])) catch return error.InvalidSnapshotState) orelse return error.InvalidSnapshotState;
+            if (!std.meta.eql(semantic.identity, pending.request.key.identity) or !std.mem.eql(u8, &semantic.digest, &pending.request.candidate_payload_digest)) return error.InvalidSnapshotState;
+            const fact = shard.trace.factAt(pending.original.sequence) orelse return error.InvalidSnapshotState;
+            if (fact.kind != .history_candidate_started or
+                (fact.reject_reason != .none and fact.reject_reason != .stale_canonical_source) or
+                pending.original_was_admissible != (fact.reject_reason == .none)) return error.InvalidSnapshotState;
+        } else if (@field(shard, fields[1]) != null) return error.InvalidSnapshotState;
+    }
+    if (shard.pending_history_candidate != null and shard.pending_safety_history_candidate != null and
+        shard.pending_history_candidate.?.request.pending_id == shard.pending_safety_history_candidate.?.request.pending_id) return error.InvalidSnapshotState;
+    if (shard.history_conflict_latched and ((shard.pending_history_candidate == null and shard.pending_safety_history_candidate == null) or !shard.oms.recovery_only or
+        shard.operational_state.effectiveTradingAuthority())) return error.InvalidSnapshotState;
+    if (shard.business_history_root) |root| {
+        history.validateRoot(root) catch return error.InvalidSnapshotState;
+        const commit = shard.last_order_archive orelse return error.InvalidSnapshotState;
+        const checkpoint = shard.checkpoint orelse return error.InvalidSnapshotState;
+        if (!std.meta.eql(root, commit.receipt.root) or root.origin.stream.domain != .decision_log or
+            root.origin.stream.id != checkpoint.stream or root.origin.account != shard.exchange_account_identity or
+            root.barrier >= shard.authoritativeBarrier() or
+            !std.mem.eql(u8, &root.qualification_digest, &commit.qualification_digest) or
+            shard.oms.orderById(commit.order_id) != null) return error.InvalidSnapshotState;
+    } else if (shard.last_order_archive != null) return error.InvalidSnapshotState;
     if (shard.trace.len != 0 and !shard.trace.events[0].input_first) return error.InvalidSnapshotState;
     var group_digest: [32]u8 = @splat(0);
     for (shard.trace.events[0..shard.trace.len]) |fact| {
@@ -3256,11 +4036,14 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         if (decision == 0 and reservation == 0) continue; // legacy, never qualified to send
         if (decision == 0 or reservation == 0 or decision >= reservation or reservation > shard.authoritativeBarrier())
             return error.InvalidSnapshotState;
-        const decision_fact = shard.trace.factAt(decision) orelse return error.InvalidSnapshotState;
-        const reservation_fact = shard.trace.factAt(reservation) orelse return error.InvalidSnapshotState;
-        if (decision_fact.kind != .risk_accepted or reservation_fact.kind != .risk_reservation_created or
-            decision_fact.identity != command.intent_sequence or reservation_fact.identity != command.intent_sequence)
-            return error.InvalidSnapshotState;
+        const needs_facts = shard.commandNeedsDispatchFacts(command.order_id);
+        if (needs_facts) {
+            const decision_fact = shard.trace.factAt(decision) orelse return error.InvalidSnapshotState;
+            const reservation_fact = shard.trace.factAt(reservation) orelse return error.InvalidSnapshotState;
+            if (decision_fact.kind != .risk_accepted or reservation_fact.kind != .risk_reservation_created or
+                decision_fact.identity != command.intent_sequence or reservation_fact.identity != command.intent_sequence)
+                return error.InvalidSnapshotState;
+        }
         const refs = command.authority;
         const typed_refs = .{
             .{ refs.trading_authorization, EventKind.control_command_applied },
@@ -3276,32 +4059,35 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
             const kind = pair[1];
             if (ref.barrier == 0) {
                 if (ref.identity != 0 or ref.version != 0) return error.InvalidSnapshotState;
-            } else if (ref.barrier > shard.authoritativeBarrier() or (shard.trace.factAt(ref.barrier) orelse return error.InvalidSnapshotState).kind != kind or
-                ref.identity == 0 or ref.version == 0)
-                return error.InvalidSnapshotState;
+            } else {
+                if (ref.barrier > shard.authoritativeBarrier() or ref.identity == 0 or ref.version == 0) return error.InvalidSnapshotState;
+                if (needs_facts and (shard.trace.factAt(ref.barrier) orelse return error.InvalidSnapshotState).kind != kind) return error.InvalidSnapshotState;
+            }
         }
         const trading_ref = refs.instrument_trading;
         if (trading_ref.barrier == 0) {
             if (trading_ref.identity != 0 or trading_ref.version != 0) return error.InvalidSnapshotState;
         } else {
-            const fact = shard.trace.factAt(trading_ref.barrier) orelse return error.InvalidSnapshotState;
-            if (trading_ref.barrier > shard.authoritativeBarrier() or trading_ref.identity == 0 or trading_ref.version == 0 or
-                fact.identity != trading_ref.identity or
-                (fact.kind != .instrument_trading_authorized and fact.kind != .capability_profile_activated) or
-                (fact.kind == .capability_profile_activated and trading_ref.version != 1)) return error.InvalidSnapshotState;
+            if (trading_ref.barrier > shard.authoritativeBarrier() or trading_ref.identity == 0 or trading_ref.version == 0) return error.InvalidSnapshotState;
+            if (needs_facts) {
+                const fact = shard.trace.factAt(trading_ref.barrier) orelse return error.InvalidSnapshotState;
+                if (fact.identity != trading_ref.identity or
+                    (fact.kind != .instrument_trading_authorized and fact.kind != .capability_profile_activated) or
+                    (fact.kind == .capability_profile_activated and trading_ref.version != 1)) return error.InvalidSnapshotState;
+            }
         }
-        if (refs.trading_authorization.barrier != 0) {
+        if (needs_facts and refs.trading_authorization.barrier != 0) {
             const control = shard.controlCommandAtBarrier(refs.trading_authorization.barrier) orelse return error.InvalidSnapshotState;
             if (!changesTradingAuthorization(control.kind) or
                 refs.trading_authorization.identity != control.command_identity or
                 refs.trading_authorization.version != (std.math.add(u64, control.expected_version, 1) catch return error.InvalidSnapshotState))
                 return error.InvalidSnapshotState;
         }
-        if (refs.capability.barrier != 0 and (shard.trace.factAt(refs.capability.barrier) orelse return error.InvalidSnapshotState).identity != refs.capability.identity)
+        if (needs_facts and refs.capability.barrier != 0 and (shard.trace.factAt(refs.capability.barrier) orelse return error.InvalidSnapshotState).identity != refs.capability.identity)
             return error.InvalidSnapshotState;
-        if (refs.instrument_rules.barrier != 0 and (shard.trace.factAt(refs.instrument_rules.barrier) orelse return error.InvalidSnapshotState).identity != refs.instrument_rules.identity)
+        if (needs_facts and refs.instrument_rules.barrier != 0 and (shard.trace.factAt(refs.instrument_rules.barrier) orelse return error.InvalidSnapshotState).identity != refs.instrument_rules.identity)
             return error.InvalidSnapshotState;
-        if (refs.margin_rules.barrier != 0 and (shard.trace.factAt(refs.margin_rules.barrier) orelse return error.InvalidSnapshotState).identity != refs.margin_rules.identity)
+        if (needs_facts and refs.margin_rules.barrier != 0 and (shard.trace.factAt(refs.margin_rules.barrier) orelse return error.InvalidSnapshotState).identity != refs.margin_rules.identity)
             return error.InvalidSnapshotState;
         if (refs.dispatch_deadline_monotonic_ns != 0 and
             (refs.deadline_barrier == 0 or refs.deadline_barrier > shard.authoritativeBarrier()))
@@ -3414,6 +4200,25 @@ pub fn applyStable(
     decision_journal: *journal.Journal,
     input: CanonicalEvent,
 ) !?OrderCommand {
+    const before = decision_journal.last_sequence;
+    var candidate: TradingShard = undefined;
+    copyTradingState(&candidate, shard);
+    const command = applyStableOnCandidate(&candidate, shard, decision_journal, input) catch |err| {
+        if (decision_journal.last_sequence != before) copyTradingState(shard, &candidate);
+        return err;
+    };
+    if (decision_journal.last_sequence != before) copyTradingState(shard, &candidate);
+    return command;
+}
+
+/// The caller owns this unpublished candidate and its journal. A failed append
+/// restores the journal; the caller must discard the candidate on failure.
+pub fn applyStableOnCandidate(
+    shard: *TradingShard,
+    previous: *const TradingShard,
+    decision_journal: *journal.Journal,
+    input: CanonicalEvent,
+) !?OrderCommand {
     const checkpoint = decision_journal.checkpoint();
     const before = shard.authoritativeBarrier();
     const account_failure_before = shard.canonical_account.failure;
@@ -3421,22 +4226,23 @@ pub fn applyStable(
     const oms_recovery_before = shard.oms.recovery_only;
     const asset_failed_before = shard.asset_configuration_failure_count;
     const economic_fault_before = shard.economic_fault_count;
-    var candidate_shard = shard.*;
-    const result = candidate_shard.apply(input) catch |err| {
+    var publish_on_error = false;
+    const result = shard.applyOwnedCandidate(previous, input, &publish_on_error) catch |err| {
+        if (!publish_on_error) return err;
         // Account/market projection failure is itself a durable fact. Keep
         // the invalid candidate and journal its fact group before surfacing
         // the original observation error to the caller.
-        if (candidate_shard.asset_configuration_failure_count != asset_failed_before or
-            candidate_shard.canonical_account.failure != account_failure_before or
-            candidate_shard.canonical_market.failure_generation != market_failure_generation_before or
-            candidate_shard.oms.recovery_only != oms_recovery_before or
-            candidate_shard.economic_fault_count != economic_fault_before)
+        if (shard.asset_configuration_failure_count != asset_failed_before or
+            shard.canonical_account.failure != account_failure_before or
+            shard.canonical_market.failure_generation != market_failure_generation_before or
+            shard.oms.recovery_only != oms_recovery_before or
+            shard.economic_fault_count != economic_fault_before or
+            (err == error.HistorySafetyCapacity and shard.authoritativeBarrier() != before))
         {
-            appendStableFactGroup(decision_journal, input, try candidate_shard.trace.factsAfter(before)) catch |journal_err| {
+            appendStableFactGroup(decision_journal, input, try shard.trace.factsAfter(before)) catch |journal_err| {
                 decision_journal.restore(checkpoint);
                 return journal_err;
             };
-            shard.* = candidate_shard;
         }
         return err;
     };
@@ -3449,7 +4255,7 @@ pub fn applyStable(
         if (input == .core and input.core.payload == .instrument_trading_authorization) return null;
         if (input == .core and input.core.payload == .external_order_intent) return null;
         if (input == .core and input.core.payload == .oms_intent_group and
-            (shard.oms.groupIdentityStatus(input.core.payload.oms_intent_group) catch .fresh) == .duplicate)
+            (previous.oms.groupIdentityStatus(input.core.payload.oms_intent_group) catch .fresh) == .duplicate)
             return null;
         if (input == .core and (input.core.payload == .venue_forced_execution or input.core.payload == .funding_settlement)) return null;
         return error.InputProducedNoFact;
@@ -3458,7 +4264,6 @@ pub fn applyStable(
         decision_journal.restore(checkpoint);
         return err;
     };
-    shard.* = candidate_shard;
     return result.order_command;
 }
 
@@ -3532,15 +4337,40 @@ fn digestOmsCommand(hasher: *Sha256, command: oms_module.Command) void {
     digestInt(hasher, u64, refs.deadline_barrier);
 }
 
+fn digestBare(hasher: *Sha256, value: anytype) void {
+    var bytes: [4096]u8 = undefined;
+    const encoded = snapshot_codec.encodeBare(&bytes, value) catch unreachable;
+    hasher.update(encoded);
+}
+
 pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
+    return stateDigestBorrowed(&shard);
+}
+
+fn stateDigestBorrowed(shard: *const TradingShard) [Sha256.digest_length]u8 {
     var hasher = Sha256.init(.{});
     const portfolio_position = shard.portfolioPosition();
     const exchange_position = shard.exchangePosition();
     const spot_portfolio_position = shard.spotPortfolioPosition();
     const spot_exchange_position = shard.spotExchangePosition();
     const ledger = shard.economic_projection.ledger_summary;
-    hasher.update("StateDigestV8\x00");
+    hasher.update("StateDigestV11\x00");
     digestInt(&hasher, u16, schema_version);
+    digestBare(&hasher, shard.business_history_root);
+    digestInt(&hasher, u128, shard.next_history_pending_id);
+    digestBool(&hasher, shard.history_conflict_latched);
+    inline for (.{ .{ "pending_history_candidate", "pending_history_member_index" }, .{ "pending_safety_history_candidate", "pending_safety_history_member_index" } }) |fields| {
+        digestBare(&hasher, @field(shard, fields[1]));
+        if (@field(shard, fields[0])) |pending| {
+            var bytes: [cold.max_encoded_size]u8 = undefined;
+            hasher.update(cold.encodeCompact(&bytes, &pending) catch unreachable);
+        } else hasher.update(&.{0});
+    }
+    digestBare(&hasher, shard.last_order_archive);
+    digestInt(&hasher, u8, shard.deferred_history_admission_count);
+    for (shard.deferred_history_admissions[0..shard.deferred_history_admission_count]) |admission| digestBare(&hasher, admission);
+    digestInt(&hasher, u16, shard.dispatch_ingress_history_count);
+    for (shard.dispatch_ingress_history[0..shard.dispatch_ingress_history_count]) |entry| digestBare(&hasher, entry);
     digestAssetRegistry(&hasher, shard, true);
     digestInt(&hasher, u8, shard.instrument_registry.count);
     for (shard.instrument_registry.entries[0..shard.instrument_registry.count]) |entry| {
@@ -3677,7 +4507,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         for (shard.fenced_strategy_instances[0..shard.fenced_strategy_count]) |identity|
             digestInt(&hasher, u128, identity);
     }
-    digestInt(&hasher, u8, shard.oms.order_count);
+    digestInt(&hasher, u16, shard.oms.order_count);
     for (shard.oms.orders[0..shard.oms.order_count]) |order| {
         digestInt(&hasher, u64, order.id);
         if (order.strategy_instance != 0) digestInt(&hasher, u128, order.strategy_instance);
@@ -3770,15 +4600,18 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, u32, order.last_reconciliation_revision);
         digestInt(&hasher, i64, order.last_reconciliation_cumulative_quantity);
         digestInt(&hasher, i64, order.last_reconciliation_remaining_quantity);
+        digestInt(&hasher, u64, order.created_at_utc_ns);
+        digestInt(&hasher, u64, order.terminal_observed_at_utc_ns);
+        digestBare(&hasher, order.terminal_archive_evidence);
         digestBool(&hasher, order.archive_window_closed);
         hasher.update(&order.archive_audit_digest);
     }
     digestInt(&hasher, u64, shard.oms.next_order_id);
     digestInt(&hasher, u64, shard.oms.next_command_id);
-    digestInt(&hasher, u8, shard.oms.command_history_count);
+    digestInt(&hasher, u16, shard.oms.command_history_count);
     for (shard.oms.command_history[0..shard.oms.command_history_count]) |command|
         digestOmsCommand(&hasher, command);
-    digestInt(&hasher, u8, shard.oms.report_history_count);
+    digestInt(&hasher, u16, shard.oms.report_history_count);
     for (shard.oms.report_history[0..shard.oms.report_history_count]) |report| {
         digestInt(&hasher, u64, report.report_id);
         digestInt(&hasher, u64, report.order_id);
@@ -3788,7 +4621,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, i64, report.remaining_quantity);
         hasher.update(&report.canonical_digest);
     }
-    digestInt(&hasher, u8, shard.oms.reconciliation_history_count);
+    digestInt(&hasher, u16, shard.oms.reconciliation_history_count);
     for (shard.oms.reconciliation_history[0..shard.oms.reconciliation_history_count]) |result| {
         digestInt(&hasher, u64, result.reconciliation_id);
         digestInt(&hasher, u64, result.order_id);
@@ -3800,7 +4633,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, u8, if (result.terminal_state) |terminal| @intFromEnum(terminal) else 0);
         hasher.update(&result.canonical_digest);
     }
-    digestInt(&hasher, u8, shard.oms.intent_history_count);
+    digestInt(&hasher, u16, shard.oms.intent_history_count);
     for (shard.oms.intent_history[0..shard.oms.intent_history_count]) |known| {
         digestInt(&hasher, u64, known.group);
         digestInt(&hasher, u8, @intFromEnum(known.policy));
@@ -3808,7 +4641,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, u128, known.strategy_instance);
         hasher.update(&known.fingerprint);
     }
-    digestInt(&hasher, u8, shard.oms.tombstone_count);
+    digestInt(&hasher, u16, shard.oms.tombstone_count);
     for (shard.oms.tombstones[0..shard.oms.tombstone_count]) |tombstone| {
         digestInt(&hasher, u64, tombstone.order_id);
         digestInt(&hasher, u128, tombstone.strategy_instance);
@@ -3828,6 +4661,7 @@ pub fn stateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
     }
     digestEconomicFault(&hasher, shard);
     digestBool(&hasher, shard.oms.recovery_only);
+    digestBool(&hasher, shard.oms.capacity_pressure);
     digestEconomicProjection(&hasher, shard.economic_projection);
     digestInt(&hasher, u64, shard.fencing_token);
     digestInt(&hasher, u64, shard.authoritativeBarrier());
@@ -3937,7 +4771,7 @@ test "state digest binds instrument trading margin and economic position authori
     try std.testing.expect(!std.mem.eql(u8, &before, &stateDigest(shard.*)));
 }
 
-fn digestCanonicalProjections(hasher: *Sha256, shard: TradingShard) void {
+fn digestCanonicalProjections(hasher: *Sha256, shard: *const TradingShard) void {
     const account_digest = shard.canonical_account.digest();
     hasher.update(&account_digest);
     digestBool(hasher, shard.canonical_account.valid);
@@ -3975,13 +4809,13 @@ fn digestEconomicProjection(hasher: *Sha256, projection: economics_module.Projec
     hasher.update(&economic_digest);
 }
 
-fn semanticStateDigest(shard: TradingShard) [Sha256.digest_length]u8 {
+fn semanticStateDigest(shard: *const TradingShard) [Sha256.digest_length]u8 {
     var hasher = Sha256.init(.{});
     hasher.update("SemanticAuthorityDigestV1\x00");
     digestInt(&hasher, u64, shard.economic_baseline_utc_ns);
     digestInt(&hasher, u64, shard.account_balance_utc_ns);
     digestAssetRegistry(&hasher, shard, false);
-    digestInt(&hasher, u8, shard.oms.order_count);
+    digestInt(&hasher, u16, shard.oms.order_count);
     for (shard.oms.orders[0..shard.oms.order_count]) |order| {
         digestInt(&hasher, u64, order.id);
         digestInt(&hasher, u32, order.revision);
@@ -4073,10 +4907,12 @@ fn replay(bytes: []const u8) !ReplayResult {
 
 fn replayConfigured(bytes: []const u8, quantity_denominator: i64, reservation_model: ReservationModel) !ReplayResult {
     var reader = try journal.Reader.init(bytes);
-    return replayReader(&reader, .{
+    var recovered: ReplayResult = .{ .shard = .{
         .quantity_denominator = quantity_denominator,
         .reservation_model = reservation_model,
-    });
+    }, .status = undefined };
+    recovered.status = try replayReaderInto(&reader, &recovered.shard);
+    return recovered;
 }
 
 /// Replays a stable journal and reports only its externally comparable digest.
@@ -4092,22 +4928,29 @@ pub fn replayDigest(
 
 /// Replays authoritative CanonicalEvents from an explicit recovery point.
 pub fn recoverStable(initial: TradingShard, bytes: []const u8) !StableRecovery {
-    var reader = try journal.Reader.init(bytes);
-    const recovered = try replayReader(&reader, initial);
-    return .{ .shard = recovered.shard, .status = recovered.status };
+    var recovered: StableRecovery = undefined;
+    recovered.status = try recoverStableInto(&recovered.shard, &initial, bytes);
+    return recovered;
 }
 
-fn replayReader(reader: *journal.Reader, initial: TradingShard) !ReplayResult {
-    var shard = initial;
+/// Destination remains unpublished until replay succeeds; failed replay may modify it.
+pub fn recoverStableInto(destination: *TradingShard, initial: *const TradingShard, bytes: []const u8) !journal.ScanStatus {
+    var reader = try journal.Reader.init(bytes);
+    copyTradingState(destination, initial);
+    return replayReaderInto(&reader, destination);
+}
+
+fn replayReaderInto(reader: *journal.Reader, shard: *TradingShard) !journal.ScanStatus {
+    var candidate: TradingShard = undefined;
 
     while (true) {
         const next = try reader.next();
         const first_record = switch (next) {
-            .end => |status| return .{ .shard = shard, .status = status },
+            .end => |status| return status,
             .record => |record| record,
         };
         if (first_record.flags & 0xff != journal.input_flag) return error.OrphanDerivedFact;
-        var candidate = shard;
+        @memcpy(std.mem.asBytes(&candidate), std.mem.asBytes(shard));
         const input = try decodeStableInput(first_record);
         const before = candidate.authoritativeBarrier();
         var replay_error: ?anyerror = null;
@@ -4127,7 +4970,8 @@ fn replayReader(reader: *journal.Reader, initial: TradingShard) !ReplayResult {
                 generated.len > 0 and generated[generated.len - 1].kind == .canonical_order_reconciliation
         else
             false;
-        if (replay_error != null and candidate.canonical_account.failure == null and
+        const deferred_admission = if (replay_error) |err| err == error.HistorySafetyCapacity and generated.len != 0 and generated[generated.len - 1].kind == .canonical_history_deferred else false;
+        if (replay_error != null and !deferred_admission and candidate.canonical_account.failure == null and
             candidate.canonical_market.latestFailure() == null and candidate.economic_fault_count == shard.economic_fault_count and
             candidate.asset_configuration_failure_count == shard.asset_configuration_failure_count and !rejected_canonical_report)
             return replay_error.?;
@@ -4138,13 +4982,13 @@ fn replayReader(reader: *journal.Reader, initial: TradingShard) !ReplayResult {
                 .record => |record| record,
                 .end => |status| {
                     if (status == .truncated_tail)
-                        return .{ .shard = shard, .status = status };
+                        return status;
                     return error.IncompleteFactGroup;
                 },
             };
             try validateReplayRecord(record, expected, input, index == 0);
         }
-        shard = candidate;
+        @memcpy(std.mem.asBytes(shard), std.mem.asBytes(&candidate));
     }
 }
 
@@ -4165,7 +5009,7 @@ pub fn assertExpectedDigest(
     }
 }
 
-fn digestAssetRegistry(hasher: *Sha256, shard: TradingShard, include_barriers: bool) void {
+fn digestAssetRegistry(hasher: *Sha256, shard: *const TradingShard, include_barriers: bool) void {
     digestBool(hasher, shard.asset_configuration_failed);
     digestInt(hasher, u64, shard.asset_configuration_failure_count);
     digestInt(hasher, u8, shard.asset_registry.count);
@@ -4197,7 +5041,7 @@ fn digestAssetRegistry(hasher: *Sha256, shard: TradingShard, include_barriers: b
     }
 }
 
-fn digestEconomicFault(hasher: *Sha256, shard: TradingShard) void {
+fn digestEconomicFault(hasher: *Sha256, shard: *const TradingShard) void {
     digestInt(hasher, u64, shard.economic_fault_count);
     if (shard.economic_fault_count != 0) {
         digestInt(hasher, u8, @intFromEnum(shard.economic_fault_reason));
@@ -4252,6 +5096,225 @@ test "asset definition idempotence conflicts regression and invalid ranges are d
     try std.testing.expectEqual(@as(u64, 5), shard.asset_configuration_failure_count);
     try std.testing.expect(shard.oms.recovery_only);
     try log.seal();
-    const recovered = try recoverStable(.{}, log.bytes());
-    try std.testing.expectEqualSlices(u8, &shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
+    const initial = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(initial);
+    initial.* = .{};
+    const recovered = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(recovered);
+    try std.testing.expectEqual(journal.ScanStatus.clean, try recoverStableInto(recovered, initial, log.bytes()));
+    try std.testing.expectEqualSlices(u8, &shard.canonicalStateDigest(), &recovered.canonicalStateDigest());
+}
+
+test "cold core staging preserves candidate and blocks fresh risk before proof" {
+    var shard = TradingShard{};
+    shard.exchange_account_identity = 9;
+    const root = coldCoreTestRoot();
+    shard.business_history_root = root;
+    var group: oms.IntentGroup = .{ .first_intent_sequence = 7, .count = 1 };
+    group.members[0] = .{ .intent_sequence = 7, .strategy_instance = 3, .operation = .place, .instrument = 1, .quantity = 2, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 6 } };
+    const original: CanonicalEvent = .{ .core = .{ .identity = 10, .receive_time = 40, .time_presence = .{ .receive = true }, .payload = .{ .oms_intent_group = group } } };
+    const pending = (try shard.historyCandidateFor(original)).?;
+    _ = try shard.apply(.{ .core = .{ .identity = 11, .payload = .{ .history_candidate_started = pending } } });
+    try std.testing.expect(shard.pending_history_candidate != null);
+    try std.testing.expectEqual(@as(u64, 0), shard.canonical_ingress_count);
+    try std.testing.expectEqual(@as(u8, 0), shard.oms.order_count);
+    try std.testing.expectError(error.HistoryLookupPending, shard.apply(original));
+}
+
+fn coldCoreTestRoot() history.Root {
+    var root: history.Root = .{ .origin = .{ .stream = .{ .domain = .decision_log, .id = 71 }, .account = 9 }, .generation = 1, .barrier = 1, .epoch = 1, .tree_offset = 0, .tree_digest = @splat(1), .previous_root = @splat(0), .batch_digest = @splat(2), .qualification_digest = @splat(3), .root_digest = @splat(0) };
+    root.root_digest = history.rootDigest(root);
+    return root;
+}
+
+// Avoid Debug's full-state assignment temporaries; the transaction still owns exactly one candidate copy.
+fn copyTradingState(destination: *TradingShard, source: *const TradingShard) void {
+    @memcpy(std.mem.asBytes(destination), std.mem.asBytes(source));
+}
+
+test "optimization borrowed canonical snapshot matches copy canonicalization without mutating source" {
+    const allocator = std.testing.allocator;
+    const source = try allocator.create(TradingShard);
+    defer allocator.destroy(source);
+    source.* = .{};
+    source.fenced_strategy_count = 1;
+    source.fenced_strategy_instances[0] = 17;
+    source.fenced_strategy_instances[1] = 91;
+    source.asset_registry.entries[0].definition.asset = 77;
+    source.trace.events[0].identity = 42;
+    source.canonical_account.seen[0].identity = 123;
+    source.canonical_ingress_cursors[0].identity.sequence = 321;
+    source.oms.command_count = 1;
+    source.economic_projection.ledger_count = 1;
+    source.economic_projection.ledger[0].posting_count = 1;
+    source.economic_projection.ledger[0].postings[1] = std.mem.zeroes(economics_module.LedgerPosting);
+    const original = try allocator.create(TradingShard);
+    defer allocator.destroy(original);
+    original.* = source.*;
+    const canonical_copy = try allocator.create(TradingShard);
+    defer allocator.destroy(canonical_copy);
+    canonical_copy.* = source.*;
+    canonicalizeSnapshotState(canonical_copy);
+    const old_buffer = try allocator.alloc(u8, 32 * 1024 * 1024);
+    defer allocator.free(old_buffer);
+    const new_buffer = try allocator.alloc(u8, old_buffer.len);
+    defer allocator.free(new_buffer);
+    const metadata: snapshot_codec.Metadata = .{
+        .state_schema = state_schema_version,
+        .release_artifact = release_artifact_identity,
+        .schema_registry = schema_registry_identity,
+        .barrier = 1,
+        .instrument_rules_version = source.instrument_rules_version,
+        .margin_rules_version = source.margin_rules_version,
+        .state_digest = @splat(9),
+    };
+    const old_bytes = try snapshot_codec.write(old_buffer, metadata, canonical_copy);
+    const new_bytes = try snapshot_codec.writeWithPolicy(new_buffer, metadata, source, CoreSnapshotEncodingPolicy);
+    try std.testing.expectEqualSlices(u8, old_bytes, new_bytes);
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(original), std.mem.asBytes(source));
+    const legacy_start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+    for (0..3) |_| {
+        canonical_copy.* = source.*;
+        canonicalizeSnapshotState(canonical_copy);
+        const encoded = try snapshot_codec.write(old_buffer, metadata, canonical_copy);
+        try std.testing.expectEqualSlices(u8, encoded, new_bytes);
+    }
+    const legacy_end = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+    for (0..3) |_| {
+        const encoded = try snapshot_codec.writeWithPolicy(new_buffer, metadata, source, CoreSnapshotEncodingPolicy);
+        try std.testing.expectEqualSlices(u8, old_bytes, encoded);
+    }
+    const borrowed_end = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+    std.debug.print("snapshot comparison: 3 identical encodings, legacy={d} us borrowed={d} us bytes={d}\n", .{
+        @divTrunc(legacy_end - legacy_start, 1000),
+        @divTrunc(borrowed_end - legacy_end, 1000),
+        new_bytes.len,
+    });
+}
+
+test "optimization owned stable candidate preserves public commits rejects duplicates and journal rollback" {
+    const allocator = std.testing.allocator;
+    const fixture = @import("trading_shard_fixture.zig");
+    const public = try allocator.create(TradingShard);
+    defer allocator.destroy(public);
+    public.* = .{};
+    const committed = try allocator.create(TradingShard);
+    defer allocator.destroy(committed);
+    committed.* = .{};
+    const candidate = try allocator.create(TradingShard);
+    defer allocator.destroy(candidate);
+    var public_log = journal.Journal.init();
+    var owned_log = journal.Journal.init();
+    const genesis = fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged);
+    for (genesis) |input| {
+        const expected = try applyStable(public, &public_log, input);
+        candidate.* = committed.*;
+        const actual = try applyStableOnCandidate(candidate, committed, &owned_log, input);
+        committed.* = candidate.*;
+        try std.testing.expectEqualDeep(expected, actual);
+        try std.testing.expectEqualSlices(u8, &public.canonicalStateDigest(), &committed.canonicalStateDigest());
+        try std.testing.expectEqualSlices(u8, public_log.bytes(), owned_log.bytes());
+    }
+    const asset_input = for (genesis) |input| {
+        if (input == .core and input.core.payload == .asset_definition_activated) break input;
+    } else unreachable;
+    // An exact asset-definition duplicate produces no additional durable fact.
+    candidate.* = committed.*;
+    _ = try applyStable(public, &public_log, asset_input);
+    _ = try applyStableOnCandidate(candidate, committed, &owned_log, asset_input);
+    try std.testing.expectEqualSlices(u8, &public.canonicalStateDigest(), &committed.canonicalStateDigest());
+    try std.testing.expectEqualSlices(u8, public_log.bytes(), owned_log.bytes());
+    // An authoritative rejection still commits its error fact group.
+    var invalid = asset_input;
+    invalid.core.identity += 1000;
+    invalid.core.payload.asset_definition_activated.atomic_scale = 255;
+    const before = owned_log.last_sequence;
+    candidate.* = committed.*;
+    var public_error: ?anyerror = null;
+    _ = applyStable(public, &public_log, invalid) catch |err| blk: {
+        public_error = err;
+        break :blk null;
+    };
+    var owned_error: ?anyerror = null;
+    _ = applyStableOnCandidate(candidate, committed, &owned_log, invalid) catch |err| blk: {
+        owned_error = err;
+        break :blk null;
+    };
+    if (owned_log.last_sequence != before) committed.* = candidate.*;
+    try std.testing.expect(public_error != null);
+    try std.testing.expectEqual(public_error, owned_error);
+    try std.testing.expectEqualSlices(u8, &public.canonicalStateDigest(), &committed.canonicalStateDigest());
+    try std.testing.expectEqualSlices(u8, public_log.bytes(), owned_log.bytes());
+    try public_log.seal();
+    try owned_log.seal();
+    const digest_before = committed.canonicalStateDigest();
+    candidate.* = committed.*;
+    public_error = null;
+    _ = applyStable(public, &public_log, invalid) catch |err| blk: {
+        public_error = err;
+        break :blk null;
+    };
+    owned_error = null;
+    _ = applyStableOnCandidate(candidate, committed, &owned_log, invalid) catch |err| blk: {
+        owned_error = err;
+        break :blk null;
+    };
+    try std.testing.expect(public_error != null);
+    try std.testing.expectEqual(public_error, owned_error);
+    try std.testing.expectEqualSlices(u8, &digest_before, &public.canonicalStateDigest());
+    try std.testing.expectEqualSlices(u8, public_log.bytes(), owned_log.bytes());
+}
+
+test "optimization owned Core and Venue rollback matches nested public candidates" {
+    const allocator = std.testing.allocator;
+    const fixture = @import("trading_shard_fixture.zig");
+    const legacy = try allocator.create(TradingShard);
+    defer allocator.destroy(legacy);
+    legacy.* = .{};
+    const committed = try allocator.create(TradingShard);
+    defer allocator.destroy(committed);
+    committed.* = .{};
+    const candidate = try allocator.create(TradingShard);
+    defer allocator.destroy(candidate);
+    const Check = struct {
+        fn step(old: *TradingShard, current: *TradingShard, work: *TradingShard, input: CanonicalEvent) !void {
+            work.* = current.*;
+            var expected_error: ?anyerror = null;
+            _ = old.apply(input) catch |err| blk: {
+                expected_error = err;
+                break :blk ApplyResult{ .facts = &.{}, .order_command = null, .oms_commands = &.{} };
+            };
+            var publish = false;
+            var actual_error: ?anyerror = null;
+            _ = work.applyOwnedCandidate(current, input, &publish) catch |err| blk: {
+                actual_error = err;
+                break :blk ApplyResult{ .facts = &.{}, .order_command = null, .oms_commands = &.{} };
+            };
+            if (actual_error == null or publish) current.* = work.*;
+            try std.testing.expectEqual(expected_error, actual_error);
+            try std.testing.expectEqualSlices(u8, &old.canonicalStateDigest(), &current.canonicalStateDigest());
+            try std.testing.expectEqualDeep(old.trace.events[0..old.trace.len], current.trace.events[0..current.trace.len]);
+            try std.testing.expectEqualDeep(old.oms.emitted(), current.oms.emitted());
+        }
+    };
+    for (fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged)) |input|
+        try Check.step(legacy, committed, candidate, input);
+    try Check.step(legacy, committed, candidate, fixture.snapshotAt(20, 1));
+    try Check.step(legacy, committed, candidate, fixture.atGroup(21, .{ .identity = 21, .payload = .{ .mark_price = .{ .instrument = 3, .price_atoms = -1 } } }));
+    var unsupported = fixture.snapshotAt(22, 2);
+    unsupported.venue.envelope.schema_version += 1;
+    try Check.step(legacy, committed, candidate, unsupported);
+    // A discontinuous book invalidates market authority and publishes its fault.
+    try Check.step(legacy, committed, candidate, fixture.deltaAt(23, 999, 1000, 49_800_000));
+    try Check.step(legacy, committed, candidate, fixture.canonicalAt(24, 1001, .{ .execution_report = .{
+        .identity = 1001,
+        .order = 999,
+        .client_order_id = .{},
+        .instrument = 3,
+        .exchange_account = 2,
+        .revision = 1,
+        .status = .accepted,
+        .cumulative_quantity = .{ .instrument = 3, .rules_version = 1, .lots = 0 },
+        .remaining_quantity = .{ .instrument = 3, .rules_version = 1, .lots = 20 },
+    } }));
 }

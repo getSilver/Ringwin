@@ -8,6 +8,16 @@ const journal = @import("journal.zig");
 const oms_module = @import("oms.zig");
 const operational = @import("operational.zig");
 const production_contract = @import("production_contract.zig");
+const history_module = @import("business_history.zig");
+const snapshot_codec = @import("snapshot_codec.zig");
+const cold = @import("cold_business_candidate.zig");
+
+pub const OrderArchiveCommit = struct {
+    order_id: u64,
+    applied_fill_quantity: i64,
+    qualification_digest: [32]u8,
+    receipt: history_module.Receipt,
+};
 
 pub const schema_version: u16 = production_contract.journal_schema_version;
 
@@ -85,6 +95,12 @@ pub const EventKind = enum(u16) {
     oms_intent_conflict,
     checkpoint_committed,
     instrument_trading_authorized,
+    order_archive_committed,
+    history_candidate_started,
+    history_candidate_verified,
+    history_candidate_conflict,
+    canonical_history_deferred,
+    canonical_history_admission_released,
 };
 
 pub const Fact = struct {
@@ -120,7 +136,7 @@ pub const Trace = struct {
     history_head: [32]u8 = @splat(0),
     base_input_head: [32]u8 = @splat(0),
     input_head: [32]u8 = @splat(0),
-    pinned: [1024]Fact = undefined,
+    pinned: [8192]Fact = undefined,
     pinned_len: usize = 0,
     pinned_root: [32]u8 = @splat(0),
 
@@ -157,7 +173,7 @@ pub const Trace = struct {
     }
 
     pub fn validate(self: *const Trace) !void {
-        // ponytail: scan bounded 256-fact and 384-pin windows; indexed history belongs to later tickets.
+        // shortcut: bounded linear pin validation; index only if measured lookup cost requires it.
         if (self.len > self.events.len or self.pinned_len > self.pinned.len or
             self.last_sequence != try std.math.add(u64, self.base_sequence, @intCast(self.len))) return error.InvalidTrace;
         var history = self.base_history_head;
@@ -251,6 +267,7 @@ pub const RejectReason = enum(u8) {
     invalid_cursor,
     margin_safety_gate_closed,
     identity_capacity_exhausted,
+    stale_canonical_source,
 };
 
 pub const TimerRequest = struct {
@@ -341,6 +358,9 @@ pub const PayloadTag = enum(u16) {
     capability_profile_activation,
     checkpoint_committed,
     instrument_trading_authorization,
+    order_archive_committed,
+    history_candidate_started,
+    history_candidate_verified,
 };
 
 pub const ReservationModel = enum(u8) { leveraged, cash };
@@ -512,6 +532,9 @@ pub const CorePayload = union(PayloadTag) {
     capability_profile_activation: CapabilityProfileActivation,
     checkpoint_committed: CheckpointReceipt,
     instrument_trading_authorization: InstrumentTradingAuthorization,
+    order_archive_committed: OrderArchiveCommit,
+    history_candidate_started: cold.PendingCandidate,
+    history_candidate_verified: history_module.LookupProof,
 };
 
 /// Typed core-originated event carried by the authoritative CanonicalEvent.
@@ -551,6 +574,18 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
     try encoded.put(u64, input.identity);
     try encoded.put(u16, @intFromEnum(std.meta.activeTag(input.payload)));
     switch (input.payload) {
+        .history_candidate_started => |pending| {
+            const bytes = try cold.encodeCompact(encoded.bytes[encoded.len..], &pending);
+            encoded.len += bytes.len;
+        },
+        .history_candidate_verified => |proof| {
+            const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], proof);
+            encoded.len += bytes.len;
+        },
+        .order_archive_committed => |commit| {
+            const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], commit);
+            encoded.len += bytes.len;
+        },
         .checkpoint_committed => |receipt| {
             inline for (std.meta.fields(CheckpointReceipt)) |field| {
                 const value = @field(receipt, field.name);
@@ -889,6 +924,21 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
         try readInputValue(u16, record.payload, &offset),
     ) orelse return error.UnknownInputType;
     const payload: CorePayload = switch (tag) {
+        .history_candidate_started => blk: {
+            const pending = try cold.decodeCompact(record.payload[offset..]);
+            offset = record.payload.len;
+            break :blk .{ .history_candidate_started = pending };
+        },
+        .history_candidate_verified => blk: {
+            const proof = try snapshot_codec.decodeBare(record.payload[offset..], history_module.LookupProof);
+            offset = record.payload.len;
+            break :blk .{ .history_candidate_verified = proof };
+        },
+        .order_archive_committed => blk: {
+            const commit = try snapshot_codec.decodeBare(record.payload[offset..], OrderArchiveCommit);
+            offset = record.payload.len;
+            break :blk .{ .order_archive_committed = commit };
+        },
         .checkpoint_committed => blk: {
             var receipt: CheckpointReceipt = undefined;
             inline for (std.meta.fields(CheckpointReceipt)) |field| {

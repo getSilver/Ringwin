@@ -536,7 +536,9 @@ test "subscription merge and intent rejection contract" {
         Subscription.of(41, &.{.l2_delta}),
     };
     var gateway = try Gateway.init(config, &subscriptions);
-    var authority = try fixture.gatewayActivationFixtureForSession(config.authorization, config.session);
+    const authority = try std.testing.allocator.create(fixture.LiveRun);
+    defer std.testing.allocator.destroy(authority);
+    try fixture.gatewayActivationFixtureForSessionInto(authority, config.authorization, config.session);
     const payload = [_]u8{1};
     const events = [_]EventEnvelope{
         .{ .event_type = .mark_price, .shard_sequence = 10, .source_time_ns = 1, .receive_time_ns = 2, .monotonic_time_ns = 3, .wall_time_utc_ns = 4, .payload = &payload },
@@ -591,7 +593,9 @@ test "subscription merge and intent rejection contract" {
         &next_events,
     );
     try gateway.recordPublished(1, 13, 105);
-    var next_authority = try fixture.gatewayActivationFixtureForSession(next_config.authorization, next_config.session);
+    const next_authority = try std.testing.allocator.create(fixture.LiveRun);
+    defer std.testing.allocator.destroy(next_authority);
+    try fixture.gatewayActivationFixtureForSessionInto(next_authority, next_config.authorization, next_config.session);
     try gateway.activate(&next_authority.shard, &next_authority.decision_journal);
     const retried = try encodeOutputFrame(
         &frame_storage,

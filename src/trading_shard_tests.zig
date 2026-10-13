@@ -41,14 +41,33 @@ const assertReplayEquivalentConfigured = fixture.assertReplayEquivalentConfigure
 const applyHealthyPrelude = fixture.applyHealthyPrelude;
 const atGroup = fixture.atGroup;
 
+fn bootstrapOwnerInto(owner: *@import("demo_authority.zig").Owner, store: @import("durable_store.zig").Store, stream: @import("durable_store.zig").StreamIdentity) !void {
+    owner.* = try @import("demo_authority.zig").Owner.bootstrap(store, undefined, stream);
+}
+
+fn createScenario() !*LiveRun {
+    const run = try std.testing.allocator.create(LiveRun);
+    errdefer std.testing.allocator.destroy(run);
+    try fixture.initializeScenario(run);
+    return run;
+}
+
 test "checkpoint maintenance carries ordered inputs and live authority through one hundred windows" {
-    var run = try startScenario();
-    try applyHealthyPrelude(&run);
+    const allocator = std.testing.allocator;
+    const run = try allocator.create(LiveRun);
+    defer allocator.destroy(run);
+    try fixture.initializeScenario(run);
+    try applyHealthyPrelude(run);
+    const restored = try allocator.create(TradingShard);
+    defer allocator.destroy(restored);
+    const forged = try allocator.create(TradingShard);
+    defer allocator.destroy(forged);
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 900, .count = 1 };
     group.members[0] = .{ .intent_sequence = 900, .operation = .place, .instrument = swap_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(20, .{ .identity = 900, .payload = .{ .oms_intent_group = group } }));
     const command = run.shard.oms.emitted()[0];
-    var snapshot_storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
+    const snapshot_storage = try allocator.alloc(u8, @import("durable_store.zig").max_snapshot_bytes);
+    defer allocator.free(snapshot_storage);
     var archive_root: [32]u8 = @splat(0);
     var max_snapshot_bytes: usize = 0;
     var max_pins: usize = 0;
@@ -56,7 +75,7 @@ test "checkpoint maintenance carries ordered inputs and live authority through o
         for (0..8) |tick| _ = try applyLive(&run.shard, &run.decision_journal, .{ .core = .{ .identity = 1000 + round * 8 + tick, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 + @as(i64, @intCast(round * 8 + tick)) } } } });
         try run.decision_journal.seal();
         const barrier = run.shard.authoritativeBarrier();
-        const snapshot = try run.shard.snapshot(&run.decision_journal, barrier, &snapshot_storage);
+        const snapshot = try run.shard.snapshot(&run.decision_journal, barrier, snapshot_storage);
         max_snapshot_bytes = @max(max_snapshot_bytes, snapshot.len);
         std.crypto.hash.sha2.Sha256.hash(run.decision_journal.bytes(), &archive_root, .{});
         const receipt = try run.shard.checkpointReceipt(1, round + 1, archive_root);
@@ -73,33 +92,36 @@ test "checkpoint maintenance carries ordered inputs and live authority through o
         var tail = engine.journal.Journal.initAt(barrier + 1);
         _ = try applyLive(&run.shard, &tail, .{ .core = .{ .identity = barrier + 1, .payload = .{ .checkpoint_committed = receipt } } });
         try tail.seal();
-        const restored = try TradingShard.restore(snapshot, tail.bytes());
-        try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
-        try std.testing.expectEqual(engine.EventKind.risk_accepted, restored.shard.trace.factAt(command.risk_decision_identity).?.kind);
-        try std.testing.expectEqual(@as(u64, round + 1), restored.shard.checkpointGeneration());
-        try std.testing.expectEqual(@as(usize, 1), restored.shard.trace.len);
-        max_pins = @max(max_pins, restored.shard.trace.pinned_len);
-        const authority = try restored.shard.currentDispatchAuthorityRefs(swap_instrument);
+        _ = try TradingShard.restoreSegmentsInto(restored, snapshot, &.{tail.bytes()});
+        try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.canonicalStateDigest());
+        try std.testing.expectEqual(engine.EventKind.risk_accepted, restored.trace.factAt(command.risk_decision_identity).?.kind);
+        try std.testing.expectEqual(@as(u64, round + 1), restored.checkpointGeneration());
+        try std.testing.expectEqual(@as(usize, 1), restored.trace.len);
+        max_pins = @max(max_pins, restored.trace.pinned_len);
+        const authority = try restored.currentDispatchAuthorityRefs(swap_instrument);
         try std.testing.expectEqual(command.authority.instrument_rules.barrier, authority.instrument_rules.barrier);
         try std.testing.expectEqual(command.authority.risk_lease.barrier, authority.risk_lease.barrier);
         if (round == 0) {
             var next_tail = engine.journal.Journal.initAt(run.shard.authoritativeBarrier() + 1);
             _ = try applyLive(&run.shard, &next_tail, .{ .core = .{ .identity = 1900, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_900 } } } });
             try next_tail.seal();
-            const multi = try TradingShard.restoreSegments(snapshot, &.{ tail.bytes(), next_tail.bytes() });
-            try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &multi.shard.canonicalStateDigest());
-            try std.testing.expectError(error.SnapshotJournalGap, TradingShard.restoreSegments(snapshot, &.{ next_tail.bytes(), tail.bytes() }));
+            _ = try TradingShard.restoreSegmentsInto(restored, snapshot, &.{ tail.bytes(), next_tail.bytes() });
+            try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.canonicalStateDigest());
+            try std.testing.expectError(error.SnapshotJournalGap, TradingShard.restoreSegmentsInto(restored, snapshot, &.{ next_tail.bytes(), tail.bytes() }));
             const truncated = tail.bytes()[0 .. tail.bytes().len - 1];
-            try std.testing.expectError(error.SnapshotJournalGap, TradingShard.restoreSegments(snapshot, &.{ truncated, next_tail.bytes() }));
+            try std.testing.expectError(error.SnapshotJournalGap, TradingShard.restoreSegmentsInto(restored, snapshot, &.{ truncated, next_tail.bytes() }));
         }
         if (round == 99) {
-            const post_snapshot = try run.shard.snapshot(&tail, run.shard.authoritativeBarrier(), &snapshot_storage);
+            const post_snapshot = try run.shard.snapshot(&tail, run.shard.authoritativeBarrier(), snapshot_storage);
             max_snapshot_bytes = @max(max_snapshot_bytes, post_snapshot.len);
             const codec = @import("snapshot_codec.zig");
-            const decoded = try codec.read(post_snapshot, TradingShard, engine.state_schema_version, engine.release_artifact_identity, engine.schema_registry_identity);
-            var forged_storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
+            const metadata_before = try codec.readInto(post_snapshot, restored, engine.state_schema_version, engine.release_artifact_identity, engine.schema_registry_identity);
+            const forged_storage = try allocator.alloc(u8, @import("durable_store.zig").max_snapshot_bytes);
+            defer allocator.free(forged_storage);
+            const rejected = try allocator.create(TradingShard);
+            defer allocator.destroy(rejected);
             for (0..7) |corruption| {
-                var forged = decoded.value;
+                @memcpy(std.mem.asBytes(forged), std.mem.asBytes(restored));
                 switch (corruption) {
                     0 => forged.trace.pinned[0].identity ^= 1,
                     1 => forged.trace.events[0].sequence += 1,
@@ -110,23 +132,27 @@ test "checkpoint maintenance carries ordered inputs and live authority through o
                     6 => forged.trace.events[0].input_digest[0] ^= 1,
                     else => unreachable,
                 }
-                var metadata = decoded.metadata;
+                var metadata = metadata_before;
                 metadata.state_digest = forged.canonicalStateDigest();
-                const invalid = try codec.write(&forged_storage, metadata, forged);
-                try std.testing.expectError(error.InvalidSnapshotState, TradingShard.restoreSnapshot(invalid));
+                const invalid = try codec.write(forged_storage, metadata, forged);
+                try std.testing.expectError(error.InvalidSnapshotState, TradingShard.restoreSnapshotInto(rejected, invalid));
             }
         }
         run.decision_journal = engine.journal.Journal.initAt(run.shard.authoritativeBarrier() + 1);
     }
     try std.testing.expect(run.shard.authoritativeBarrier() > 768);
     try std.testing.expectEqual(@as(u8, 1), run.shard.oms.order_count);
-    std.debug.print("checkpoint core: 100 rounds, barrier={d}, encoded_snapshot_max={d}, shard_bytes={d}, pins_max={d}/1024, window=256\n", .{ run.shard.authoritativeBarrier(), max_snapshot_bytes, @sizeOf(TradingShard), max_pins });
+    std.debug.print("checkpoint core: 100 rounds, barrier={d}, encoded_snapshot_max={d}, shard_bytes={d}, pins_max={d}/{d}, window=256\n", .{ run.shard.authoritativeBarrier(), max_snapshot_bytes, @sizeOf(TradingShard), max_pins, run.shard.trace.pinned.len });
 }
 
 test "ordered checkpoint history binds core input prices before final state convergence" {
-    var first = try startScenario();
-    var second = first;
-    for ([_]*LiveRun{ &first, &second }, 0..) |run, index| {
+    const first = try std.testing.allocator.create(LiveRun);
+    defer std.testing.allocator.destroy(first);
+    const second = try std.testing.allocator.create(LiveRun);
+    defer std.testing.allocator.destroy(second);
+    try fixture.initializeScenario(first);
+    @memcpy(std.mem.asBytes(second), std.mem.asBytes(first));
+    for ([_]*LiveRun{ first, second }, 0..) |run, index| {
         _ = try applyLive(&run.shard, &run.decision_journal, .{ .core = .{ .identity = 1000, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = if (index == 0) 50_000_001 else 50_000_002 } } } });
         _ = try applyLive(&run.shard, &run.decision_journal, .{ .core = .{ .identity = 1001, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_003 } } } });
     }
@@ -136,25 +162,33 @@ test "ordered checkpoint history binds core input prices before final state conv
 }
 
 test "global shard barrier rejects checksummed sequence tampering before restore" {
-    var run = try startScenario();
+    const allocator = std.testing.allocator;
+    const run = try allocator.create(LiveRun);
+    defer allocator.destroy(run);
+    try fixture.initializeScenario(run);
     try run.decision_journal.seal();
     run.shard.trace.events[1].sequence = 1;
-    var storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
-    const forged = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &storage);
-    try std.testing.expectError(error.InvalidSnapshotState, TradingShard.restoreSnapshot(forged));
+    const storage = try allocator.alloc(u8, @import("durable_store.zig").max_snapshot_bytes);
+    defer allocator.free(storage);
+    const rejected = try allocator.create(TradingShard);
+    defer allocator.destroy(rejected);
+    const forged = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, storage);
+    try std.testing.expectError(error.InvalidSnapshotState, TradingShard.restoreSnapshotInto(rejected, forged));
 
     run.shard.trace.events[1].sequence = 2;
     run.shard.trace.last_sequence += 1;
     try std.testing.expectError(error.InvalidTrace, run.shard.currentDispatchAuthorityRefs(swap_instrument));
     try std.testing.expectError(error.InvalidTrace, run.shard.appliedHostActivation(&run.decision_journal));
-    try std.testing.expectError(error.InvalidSnapshotBarrier, run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &storage));
+    try std.testing.expectError(error.InvalidSnapshotBarrier, run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, storage));
     // Recompute framing and digest so restore must reject the semantic counter,
     // rather than relying on a stale payload checksum or metadata digest.
     const codec = @import("snapshot_codec.zig");
-    var canonical_state = (try codec.read(forged, TradingShard, engine.state_schema_version, engine.release_artifact_identity, engine.schema_registry_identity)).value;
+    const canonical_state = try allocator.create(TradingShard);
+    defer allocator.destroy(canonical_state);
+    _ = try codec.readInto(forged, canonical_state, engine.state_schema_version, engine.release_artifact_identity, engine.schema_registry_identity);
     canonical_state.trace.events[1].sequence = 2;
     canonical_state.trace.last_sequence += 1;
-    const mismatched = try codec.write(&storage, .{
+    const mismatched = try codec.write(storage, .{
         .state_schema = engine.state_schema_version,
         .release_artifact = engine.release_artifact_identity,
         .schema_registry = engine.schema_registry_identity,
@@ -163,27 +197,33 @@ test "global shard barrier rejects checksummed sequence tampering before restore
         .margin_rules_version = run.shard.margin_rules_version,
         .state_digest = canonical_state.canonicalStateDigest(),
     }, canonical_state);
-    try std.testing.expectError(error.InvalidSnapshotState, TradingShard.restoreSnapshot(mismatched));
+    try std.testing.expectError(error.InvalidSnapshotState, TradingShard.restoreSnapshotInto(rejected, mismatched));
     canonical_state.trace.last_sequence -= 1;
-    var old_metadata = (try codec.read(mismatched, TradingShard, engine.state_schema_version, engine.release_artifact_identity, engine.schema_registry_identity)).metadata;
+    var old_metadata = try codec.readInto(mismatched, rejected, engine.state_schema_version, engine.release_artifact_identity, engine.schema_registry_identity);
     old_metadata.state_schema = production_contract.previous_state_schema_version;
-    const old_schema = try codec.write(&storage, old_metadata, canonical_state);
-    try std.testing.expectError(error.InvalidSnapshotHeader, TradingShard.restoreSnapshot(old_schema));
+    const old_schema = try codec.write(storage, old_metadata, canonical_state);
+    try std.testing.expectError(error.InvalidSnapshotHeader, TradingShard.restoreSnapshotInto(rejected, old_schema));
 }
 
 test "global shard barrier continues snapshot tail replay and preserves failed append" {
-    var run = try startScenario();
+    const allocator = std.testing.allocator;
+    const run = try allocator.create(LiveRun);
+    defer allocator.destroy(run);
+    try fixture.initializeScenario(run);
     try std.testing.expectEqual(@as(u64, 23), run.shard.authoritativeBarrier());
     try run.decision_journal.seal();
-    var storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
-    const snapshot = try run.shard.snapshot(&run.decision_journal, run.shard.authoritativeBarrier(), &storage);
+    const storage = try allocator.alloc(u8, @import("durable_store.zig").max_snapshot_bytes);
+    defer allocator.free(storage);
+    const snapshot = try run.shard.snapshot(&run.decision_journal, run.shard.authoritativeBarrier(), storage);
     var tail = engine.journal.Journal.initAt(run.shard.authoritativeBarrier() + 1);
     const input = atGroup(11, .{ .identity = 22, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_001 } } });
     _ = try applyLive(&run.shard, &tail, input);
     try tail.seal();
-    const restored = try TradingShard.restore(snapshot, tail.bytes());
-    try std.testing.expectEqual(@as(u64, 24), restored.shard.authoritativeBarrier());
-    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+    const restored = try allocator.create(TradingShard);
+    defer allocator.destroy(restored);
+    _ = try TradingShard.restoreSegmentsInto(restored, snapshot, &.{tail.bytes()});
+    try std.testing.expectEqual(@as(u64, 24), restored.authoritativeBarrier());
+    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.canonicalStateDigest());
 
     while (run.shard.trace.len < run.shard.trace.events.len) {
         _ = try run.shard.apply(.{ .core = .{ .identity = run.shard.authoritativeBarrier() + 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_002 } } } });
@@ -208,7 +248,9 @@ test "Owner native settlements retain partial cost remainder reversal and classi
     memory.* = .initWithAllocator(std.testing.allocator);
     defer memory.deinit();
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 999 };
-    var owner = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    const owner = try std.testing.allocator.create(demo.Owner);
+    defer std.testing.allocator.destroy(owner);
+    try @call(.never_inline, bootstrapOwnerInto, .{ owner, memory.interface(), stream });
     const native = @import("asset_registry.zig").testDefinitions(12, 9);
     for (native) |definition| _ = try owner.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
     for (genesis) |original| {
@@ -291,11 +333,16 @@ test "Owner native settlements retain partial cost remainder reversal and classi
     const once = owner.shard.canonicalStateDigest();
     _ = try owner.apply(forced);
     try std.testing.expectEqualSlices(u8, &once, &owner.shard.canonicalStateDigest());
-    const recovered = try demo.Owner.recover(memory.interface(), undefined, stream);
+    const recovered = try std.testing.allocator.create(demo.Owner);
+    defer std.testing.allocator.destroy(recovered);
+    try demo.Owner.recoverInto(recovered, memory.interface(), undefined, stream);
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
-    var bytes: [durable.max_snapshot_bytes]u8 = undefined;
-    const restored = try TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
-    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+    const bytes = try std.testing.allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer std.testing.allocator.free(bytes);
+    const restored = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(restored);
+    _ = try TradingShard.restoreSnapshotInto(restored, try owner.committedSnapshot(bytes));
+    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.canonicalStateDigest());
 }
 
 test "Owner rejects tighter native bounds without losing committed registry or recoverable holdings" {
@@ -308,7 +355,9 @@ test "Owner rejects tighter native bounds without losing committed registry or r
         memory.* = .initWithAllocator(std.testing.allocator);
         defer memory.deinit();
         const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 990 };
-        var owner = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+        const owner = try std.testing.allocator.create(demo.Owner);
+        defer std.testing.allocator.destroy(owner);
+        try @call(.never_inline, bootstrapOwnerInto, .{ owner, memory.interface(), stream });
         if (third_asset) {
             for (assets.testDefinitions(6, 8)) |definition|
                 _ = try owner.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
@@ -344,18 +393,24 @@ test "Owner rejects tighter native bounds without losing committed registry or r
         try std.testing.expectEqualDeep(before_registry, owner.shard.activatedAssets());
         try std.testing.expectEqualDeep(before_economics, owner.shard.economicSummary());
         try std.testing.expect(owner.shard.asset_configuration_failed and owner.shard.oms.recovery_only and !owner.closed);
-        const recovered = try demo.Owner.recover(memory.interface(), undefined, stream);
+        const recovered = try std.testing.allocator.create(demo.Owner);
+        defer std.testing.allocator.destroy(recovered);
+        try demo.Owner.recoverInto(recovered, memory.interface(), undefined, stream);
         try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
-        var bytes: [durable.max_snapshot_bytes]u8 = undefined;
-        const restored = try TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
-        try std.testing.expectEqualDeep(before_registry, restored.shard.activatedAssets());
-        try std.testing.expectEqualDeep(before_economics, restored.shard.economicSummary());
+        const bytes = try std.testing.allocator.alloc(u8, durable.max_snapshot_bytes);
+        defer std.testing.allocator.free(bytes);
+        const restored = try std.testing.allocator.create(TradingShard);
+        defer std.testing.allocator.destroy(restored);
+        _ = try TradingShard.restoreSnapshotInto(restored, try owner.committedSnapshot(bytes));
+        try std.testing.expectEqualDeep(before_registry, restored.activatedAssets());
+        try std.testing.expectEqualDeep(before_economics, restored.economicSummary());
     }
 }
 
 test "OMS command binds scoped capability and source-owned authority barriers" {
-    var run = try startScenario();
-    try applyHealthyPrelude(&run);
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
+    try applyHealthyPrelude(run);
     const profile: shard_event.CapabilityProfileActivation = .{
         .exchange_account = 2,
         .instrument = swap_instrument,
@@ -410,14 +465,18 @@ test "OMS command binds scoped capability and source-owned authority barriers" {
     try std.testing.expectEqual(@as(u64, 4), run.shard.oms.command_history[0].authority.capability.version);
     try run.decision_journal.seal();
     _ = try assertReplayEquivalent(run);
-    var snapshot_storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
-    const snapshot = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &snapshot_storage);
-    const restored = try TradingShard.restoreSnapshot(snapshot);
-    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+    const snapshot_storage = try std.testing.allocator.alloc(u8, @import("durable_store.zig").max_snapshot_bytes);
+    defer std.testing.allocator.free(snapshot_storage);
+    const snapshot = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, snapshot_storage);
+    const restored = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(restored);
+    _ = try TradingShard.restoreSnapshotInto(restored, snapshot);
+    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.canonicalStateDigest());
 }
 
 test "CancelOpenOrders preserves the actual TradingAuthorization grant" {
-    var run = try startScenario();
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
     const granted = try run.shard.currentDispatchAuthorityRefs(swap_instrument);
     try std.testing.expectEqual(@as(u128, 2), granted.trading_authorization.identity);
     _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(4, 3, .cancel_open_orders));
@@ -434,8 +493,9 @@ test "CancelOpenOrders preserves the actual TradingAuthorization grant" {
 }
 
 test "unsupported OMS order semantics reject as replayable exact-only facts" {
-    var run = try startScenario();
-    try applyHealthyPrelude(&run);
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
+    try applyHealthyPrelude(run);
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{ .identity = 70, .payload = .{ .capability_profile_activation = .{
         .exchange_account = 2,
         .instrument = swap_instrument,
@@ -544,7 +604,12 @@ test "unsupported OMS order semantics reject as replayable exact-only facts" {
         }
     }
     try forged.seal();
-    try std.testing.expectError(error.ReplayFactMismatch, engine.replayDigest(forged.bytes(), run.shard.quantity_denominator, run.shard.reservation_model));
+    const initial = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(initial);
+    initial.* = .{ .quantity_denominator = run.shard.quantity_denominator, .reservation_model = run.shard.reservation_model };
+    const recovered = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(recovered);
+    try std.testing.expectError(error.ReplayFactMismatch, engine.recoverStableInto(recovered, initial, forged.bytes()));
 }
 
 test "inexact direct price keeps a stable reject without an OMS command" {
@@ -571,7 +636,7 @@ test "inexact direct price keeps a stable reject without an OMS command" {
     try std.testing.expectEqual(shard_event.RejectReason.unsupported_order_spec, run.shard.last_reject_reason);
     try std.testing.expectEqual(@as(usize, 0), run.shard.oms.order_count);
     try run.decision_journal.seal();
-    _ = try assertReplayEquivalent(run);
+    _ = try assertReplayEquivalent(&run);
 }
 
 test "core mark micros become canonical ticks at the active venue tick" {
@@ -585,14 +650,15 @@ test "core mark micros become canonical ticks at the active venue tick" {
 }
 
 test "market gap rejects a native intent with a replayable reason" {
-    var run = try startScenario();
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
     const before = run.shard.trace.len;
     try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(12, .{ .identity = 103, .payload = .{ .timer = fixture.timer(1) } }))) == null);
     try std.testing.expectEqual(shard_event.RejectReason.market_data_gap, run.shard.last_reject_reason);
     try std.testing.expectEqual(shard_event.RejectReason.market_data_gap, run.shard.trace.events[run.shard.trace.len - 1].reject_reason);
     try std.testing.expect(run.shard.trace.len > before);
     try std.testing.expectEqual(@as(u8, 0), run.shard.oms.order_count);
-    try applyHealthyPrelude(&run);
+    try applyHealthyPrelude(run);
     const before_retry = run.shard.trace.len;
     try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{ .identity = 106, .payload = .{ .external_order_intent = .{
         .strategy_identity = 1,
@@ -618,8 +684,9 @@ test "market gap rejects a native intent with a replayable reason" {
 }
 
 test "risk lease limit rejects a native intent with a replayable reason" {
-    var run = try startScenario();
-    try applyHealthyPrelude(&run);
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
+    try applyHealthyPrelude(run);
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{ .identity = 104, .payload = .{ .risk_lease_granted = .{
         .lease_identity = 104,
         .version = 2,
@@ -704,8 +771,20 @@ fn omsBookSnapshots() [2]CanonicalEvent {
 }
 
 fn startOmsScenario() !LiveRun {
-    var run = try startScenario();
-    for (omsBookSnapshots()) |snapshot| _ = try fixture.apply(&run, snapshot);
+    var run: LiveRun = undefined;
+    try startOmsScenarioInto(&run);
+    return run;
+}
+
+fn startOmsScenarioInto(run: *LiveRun) !void {
+    try fixture.initializeScenario(run);
+    for (omsBookSnapshots()) |snapshot| _ = try fixture.apply(run, snapshot);
+}
+
+fn createOmsScenario() !*LiveRun {
+    const run = try std.testing.allocator.create(LiveRun);
+    errdefer std.testing.allocator.destroy(run);
+    try startOmsScenarioInto(run);
     return run;
 }
 
@@ -749,31 +828,39 @@ test "stable CanonicalEvent decoder rejects malformed envelopes without state ch
 }
 
 test "configurable Genesis fails closed until authority is complete" {
-    var mismatched: TradingShard = .{};
+    const mismatched = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(mismatched);
+    mismatched.* = .{};
     var cash_as_linear = fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 1 }, .cash)[0];
     cash_as_linear.core.payload.instrument_rules_activated.product = .isolated_linear_usdt;
     const before_mismatch = mismatched.canonicalStateDigest();
     try std.testing.expectError(error.IncompatibleProductReservationModel, mismatched.apply(cash_as_linear));
     try std.testing.expectEqualSlices(u8, &before_mismatch, &mismatched.canonicalStateDigest());
     std.debug.print("core_input_rejection: product_model=IncompatibleProductReservationModel\n", .{});
-    var incomplete: TradingShard = .{};
+    const incomplete = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(incomplete);
+    incomplete.* = .{};
     try std.testing.expectError(error.GenesisIncomplete, incomplete.apply(atGroup(1, .{
         .identity = 1,
         .payload = .{ .oms_intent_group = .{ .first_intent_sequence = 1, .count = 0 } },
     })));
 
-    var out_of_order: TradingShard = .{};
+    const out_of_order = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(out_of_order);
+    out_of_order.* = .{};
     try std.testing.expectError(error.InvalidMarginRules, out_of_order.apply(.{ .core = .{
         .identity = 1,
         .payload = .{ .margin_rules_activated = .{ .version = 1 } },
     } }));
 
-    var configured = try startScenarioAuthorized(.{
+    const configured = try std.testing.allocator.create(LiveRun);
+    defer std.testing.allocator.destroy(configured);
+    try fixture.startScenarioInto(configured, .{
         .strategy_identity = 9,
         .config_version = 7,
         .activation_identity = 8,
         .activation_barrier = 0,
-    }, .cash);
+    }, .cash, .{ .fencing = 1, .shard = 0, .generation = 1 });
     try std.testing.expect(configured.shard.genesisReady());
     try std.testing.expectEqual(@as(u128, 9), configured.shard.strategy_identity);
     try std.testing.expectEqual(@as(i64, 100_000_000), configured.shard.quantity_denominator);
@@ -788,10 +875,14 @@ test "native and Python intents cross the same authority and risk seam" {
         .activation_identity = 50,
         .activation_barrier = 0,
     };
-    var native = try startScenarioAuthorized(authorization, .leveraged);
-    var python = try startScenarioAuthorized(authorization, .leveraged);
-    try applyHealthyPrelude(&native);
-    try applyHealthyPrelude(&python);
+    const native = try std.testing.allocator.create(LiveRun);
+    defer std.testing.allocator.destroy(native);
+    try fixture.startScenarioInto(native, authorization, .leveraged, .{ .fencing = 1, .shard = 0, .generation = 1 });
+    const python = try std.testing.allocator.create(LiveRun);
+    defer std.testing.allocator.destroy(python);
+    try fixture.startScenarioInto(python, authorization, .leveraged, .{ .fencing = 1, .shard = 0, .generation = 1 });
+    try applyHealthyPrelude(native);
+    try applyHealthyPrelude(python);
 
     const native_command = (try native.shard.apply(atGroup(15, .{
         .identity = 1,
@@ -842,8 +933,10 @@ test "native and Python intents cross the same authority and risk seam" {
     try python.decision_journal.seal();
     _ = try assertReplayEquivalent(python);
 
-    var unauthorized = try startScenarioAuthorized(authorization, .leveraged);
-    try applyHealthyPrelude(&unauthorized);
+    const unauthorized = try std.testing.allocator.create(LiveRun);
+    defer std.testing.allocator.destroy(unauthorized);
+    try fixture.startScenarioInto(unauthorized, authorization, .leveraged, .{ .fencing = 1, .shard = 0, .generation = 1 });
+    try applyHealthyPrelude(unauthorized);
     const reject_before = unauthorized.shard.trace.len;
     const wrong_config = atGroup(15, .{
         .identity = 1,
@@ -878,14 +971,18 @@ test "native and Python intents cross the same authority and risk seam" {
     try std.testing.expectEqual(@as(u8, 0), unauthorized.shard.oms.order_count);
     try unauthorized.decision_journal.seal();
     _ = try assertReplayEquivalent(unauthorized);
-    var rejected_snapshot_storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
-    const rejected_snapshot = try unauthorized.shard.snapshot(&unauthorized.decision_journal, unauthorized.decision_journal.last_sequence, &rejected_snapshot_storage);
-    const restored_rejection = try TradingShard.restoreSnapshot(rejected_snapshot);
-    try std.testing.expectEqual(shard_event.RejectReason.identity_mismatch, restored_rejection.shard.trace.events[reject_before].reject_reason);
+    const rejected_snapshot_storage = try std.testing.allocator.alloc(u8, @import("durable_store.zig").max_snapshot_bytes);
+    defer std.testing.allocator.free(rejected_snapshot_storage);
+    const rejected_snapshot = try unauthorized.shard.snapshot(&unauthorized.decision_journal, unauthorized.decision_journal.last_sequence, rejected_snapshot_storage);
+    const restored_rejection = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(restored_rejection);
+    _ = try TradingShard.restoreSnapshotInto(restored_rejection, rejected_snapshot);
+    try std.testing.expectEqual(shard_event.RejectReason.identity_mismatch, restored_rejection.trace.events[reject_before].reject_reason);
 }
 
 test "host fault revokes the old activation before a replacement can trade" {
-    var run = try startScenario();
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
     const config: host_gateway.Config = .{
         .schema_registry = 1,
         .decision_domain = 1,
@@ -989,7 +1086,7 @@ test "host fault revokes the old activation before a replacement can trade" {
     var frame_storage: [256]u8 = undefined;
     const old_frame = try host_gateway.encodeOutputFrame(&frame_storage, config, 1, old_proof.fact_sequence, 1, 100, order_limit_price);
     try std.testing.expectEqual(host_gateway.RejectReason.old_session, gateway.ingest(old_frame, 102).rejected.reason);
-    try applyHealthyPrelude(&run);
+    try applyHealthyPrelude(run);
     try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(16, .{ .identity = 84, .payload = .{ .external_order_intent = .{
         .strategy_identity = 1,
         .intent_sequence = 3,
@@ -1022,7 +1119,8 @@ test "host fault revokes the old activation before a replacement can trade" {
 }
 
 test "new HostSession revokes the old direct-trade identity" {
-    var run = try startScenario();
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
     const config: host_gateway.Config = .{
         .schema_registry = 1,
         .decision_domain = 1,
@@ -1046,13 +1144,17 @@ test "new HostSession revokes the old direct-trade identity" {
 }
 
 test "fresh Gateway revokes a replayed old Host activation before restart" {
-    var original = try startScenario();
+    const allocator = std.testing.allocator;
+    const original = try createScenario();
+    defer allocator.destroy(original);
     try original.decision_journal.seal();
-    var snapshot_storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
-    const snapshot = try original.shard.snapshot(&original.decision_journal, original.decision_journal.last_sequence, &snapshot_storage);
-    const restored = try TradingShard.restoreSnapshot(snapshot);
-    var recovered = restored.shard;
-    var tail = engine.journal.Journal.initAt(restored.barrier + 1);
+    const snapshot_storage = try allocator.alloc(u8, @import("durable_store.zig").max_snapshot_bytes);
+    defer allocator.free(snapshot_storage);
+    const snapshot = try original.shard.snapshot(&original.decision_journal, original.decision_journal.last_sequence, snapshot_storage);
+    const recovered = try allocator.create(TradingShard);
+    defer allocator.destroy(recovered);
+    const barrier = try TradingShard.restoreSnapshotInto(recovered, snapshot);
+    var tail = engine.journal.Journal.initAt(barrier + 1);
     const stale_config: host_gateway.Config = .{
         .schema_registry = 1,
         .decision_domain = 1,
@@ -1062,7 +1164,7 @@ test "fresh Gateway revokes a replayed old Host activation before restart" {
     const subscriptions = [_]host_gateway.Subscription{host_gateway.Subscription.of(1, &.{.mark_price})};
     var stale_gateway = try host_gateway.Gateway.init(stale_config, &subscriptions);
     try stale_gateway.recordPublished(1, recovered.authoritativeBarrier() + 1, 100);
-    try std.testing.expectError(error.InvalidAuthorization, stale_gateway.activate(&recovered, &tail));
+    try std.testing.expectError(error.InvalidAuthorization, stale_gateway.activate(recovered, &tail));
     const config: host_gateway.Config = .{
         .schema_registry = 1,
         .decision_domain = 1,
@@ -1073,18 +1175,21 @@ test "fresh Gateway revokes a replayed old Host activation before restart" {
     var next = config;
     next.session.generation += 1;
     next.authorization.activation_identity = 2;
-    try fresh_gateway.beginSession(next, &recovered, &tail);
+    try fresh_gateway.beginSession(next, recovered, &tail);
     try std.testing.expectEqual(@as(u128, 0), recovered.host_activation_identity);
-    try std.testing.expect((try applyLive(&recovered, &tail, atGroup(12, .{ .identity = 91, .payload = .{ .timer = fixture.timer(1) } }))) == null);
+    try std.testing.expect((try applyLive(recovered, &tail, atGroup(12, .{ .identity = 91, .payload = .{ .timer = fixture.timer(1) } }))) == null);
     try std.testing.expectEqual(shard_event.RejectReason.host_not_activated, recovered.last_reject_reason);
     try tail.seal();
-    const replayed = try TradingShard.restore(snapshot, tail.bytes());
-    try std.testing.expectEqualSlices(u8, &recovered.canonicalStateDigest(), &replayed.shard.canonicalStateDigest());
+    const replayed = try allocator.create(TradingShard);
+    defer allocator.destroy(replayed);
+    _ = try TradingShard.restoreSegmentsInto(replayed, snapshot, &.{tail.bytes()});
+    try std.testing.expectEqualSlices(u8, &recovered.canonicalStateDigest(), &replayed.canonicalStateDigest());
 }
 
 test "active Host exit and timeout journal revocation blocks direct trade" {
     inline for (.{ false, true }) |timeout| {
-        var run = try startScenario();
+        const run = try createScenario();
+        defer std.testing.allocator.destroy(run);
         const config: host_gateway.Config = .{
             .schema_registry = 1,
             .decision_domain = 1,
@@ -1111,7 +1216,8 @@ test "active Host exit and timeout journal revocation blocks direct trade" {
 }
 
 test "control commands authorize pause cancel and replay lifecycle deterministically" {
-    var run = try startScenario();
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
     try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
 
     const duplicate = try run.shard.apply(genesis[genesis.len - 1]);
@@ -1158,7 +1264,8 @@ test "control commands authorize pause cancel and replay lifecycle deterministic
 }
 
 test "layered gates latch kill while warning and self recovery stay narrow" {
-    var run = try startScenario();
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
     _ = try run.shard.apply(atGroup(12, .{ .identity = 10, .payload = .{ .safety_gate_change = .{
         .gate_identity = 10,
         .target_identity = 1,
@@ -1213,7 +1320,8 @@ test "layered gates latch kill while warning and self recovery stay narrow" {
 }
 
 test "de risk locks target and flatten requires warning" {
-    var run = try startScenario();
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
     try establishSwapPosition(&run.shard, 500, 10);
     try std.testing.expectError(error.RiskWarningRequired, run.shard.apply(atGroup(12, .{ .identity = 3, .payload = .{ .control_command = .{
         .command_identity = 3,
@@ -1288,10 +1396,11 @@ fn expectKeepPositionsStopped(run: *const LiveRun, preserved: TradingShard.Lifec
 }
 
 test "keep positions stops through shard seam preserving economics" {
-    var run = try startScenario();
-    try applyHealthyPrelude(&run);
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
+    try applyHealthyPrelude(run);
 
-    const opened = try placeIntentGroup(&run, 15, 100, 100, .buy, happy_order_quantity);
+    const opened = try placeIntentGroup(run, 15, 100, 100, .buy, happy_order_quantity);
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(16, .{ .identity = 101, .payload = .{ .economic_fill = .{
         .fill_id = 101,
         .order_id = opened.order_id,
@@ -1323,7 +1432,7 @@ test "keep positions stops through shard seam preserving economics" {
 
     const stopped = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(40, 3, .stop_keep_positions));
     _ = stopped;
-    try expectKeepPositionsStopped(&run, preserved);
+    try expectKeepPositionsStopped(run, preserved);
 
     // A stopped shard may preserve a position, but the cancellation it issued
     // must still be reconciled before a later session sends another order.
@@ -1370,7 +1479,7 @@ test "keep positions stops through shard seam preserving economics" {
     try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
     try std.testing.expectEqual(preserved.positions.portfolio_swap.quantity, run.shard.economicSummary().portfolio.swap.quantity);
 
-    const resumed_reduce = try placeIntentGroup(&run, 22, 130, 130, .sell, 40);
+    const resumed_reduce = try placeIntentGroup(run, 22, 130, 130, .sell, 40);
     try std.testing.expect(resumed_reduce.portfolio_reduce_only);
     try std.testing.expectEqual(@as(i64, 40), resumed_reduce.quantity);
 
@@ -1379,10 +1488,11 @@ test "keep positions stops through shard seam preserving economics" {
 }
 
 test "full lifecycle trajectories authorize only prescribed risk cancel and reduce behavior" {
-    var run = try startScenario();
-    try applyHealthyPrelude(&run);
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
+    try applyHealthyPrelude(run);
 
-    const first_order = try placeIntentGroup(&run, 15, 100, 100, .buy, happy_order_quantity);
+    const first_order = try placeIntentGroup(run, 15, 100, 100, .buy, happy_order_quantity);
     _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(3, 3, .cancel_open_orders));
     try std.testing.expectEqual(@as(usize, 1), run.shard.oms.emitted().len);
     try std.testing.expectEqual(oms_module.Operation.cancel, run.shard.oms.emitted()[0].operation);
@@ -1395,7 +1505,7 @@ test "full lifecycle trajectories authorize only prescribed risk cancel and redu
         .cumulative_quantity = 0,
         .remaining_quantity = happy_order_quantity,
     } } }));
-    const requote_order = try placeIntentGroup(&run, 17, 101, 101, .buy, happy_order_quantity);
+    const requote_order = try placeIntentGroup(run, 17, 101, 101, .buy, happy_order_quantity);
     try std.testing.expectEqual(operational.OperationalMode.trading, run.shard.operational_state.mode);
 
     _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(4, 4, .trading_pause));
@@ -1427,7 +1537,7 @@ test "full lifecycle trajectories authorize only prescribed risk cancel and redu
     _ = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(5, 6, .enable_trading));
     try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
 
-    const position_order = try placeIntentGroup(&run, 21, 102, 102, .buy, happy_order_quantity);
+    const position_order = try placeIntentGroup(run, 21, 102, 102, .buy, happy_order_quantity);
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(22, .{ .identity = 107, .payload = .{ .economic_fill = .{
         .fill_id = 107,
         .order_id = position_order.order_id,
@@ -1441,7 +1551,7 @@ test "full lifecycle trajectories authorize only prescribed risk cancel and redu
 
     const stopped = try applyLive(&run.shard, &run.decision_journal, lifecycleCommand(6, 7, .stop_keep_positions));
     _ = stopped;
-    try expectKeepPositionsStopped(&run, preserved);
+    try expectKeepPositionsStopped(run, preserved);
     var stop_buy_group: oms_module.IntentGroup = .{ .first_intent_sequence = 103, .count = 1 };
     stop_buy_group.members[0] = .{ .intent_sequence = 103, .operation = .place, .instrument = swap_instrument, .side = .buy, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, order_limit_price) };
     try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(23, .{ .identity = 108, .payload = .{ .oms_intent_group = stop_buy_group } }))) == null);
@@ -1470,7 +1580,7 @@ test "full lifecycle trajectories authorize only prescribed risk cancel and redu
     increase_group.members[0] = .{ .intent_sequence = 104, .operation = .place, .instrument = swap_instrument, .side = .buy, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, order_limit_price) };
     try std.testing.expect((try applyLive(&run.shard, &run.decision_journal, atGroup(25, .{ .identity = 110, .payload = .{ .oms_intent_group = increase_group } }))) == null);
     try std.testing.expectEqual(shard_event.RejectReason.authorization_closed, run.shard.last_reject_reason);
-    const derisk_sell = try placeIntentGroup(&run, 26, 105, 105, .sell, 60);
+    const derisk_sell = try placeIntentGroup(run, 26, 105, 105, .sell, 60);
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(27, .{ .identity = 112, .payload = .{ .economic_fill = .{
         .fill_id = 112,
         .order_id = derisk_sell.order_id,
@@ -1502,7 +1612,7 @@ test "full lifecycle trajectories authorize only prescribed risk cancel and redu
     } } }));
     _ = try applyLive(&run.shard, &run.decision_journal, deRiskCommand(10, 14, 0, 31));
     try std.testing.expectEqual(operational.OperationalMode.draining, run.shard.operational_state.mode);
-    const flatten_sell = try placeIntentGroup(&run, 30, 106, 106, .sell, 40);
+    const flatten_sell = try placeIntentGroup(run, 30, 106, 106, .sell, 40);
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(31, .{ .identity = 116, .payload = .{ .economic_fill = .{
         .fill_id = 116,
         .order_id = flatten_sell.order_id,
@@ -1552,8 +1662,9 @@ test "full lifecycle trajectories authorize only prescribed risk cancel and redu
 
 test "venue facts and replay use apply without replay send capability" {
     comptime std.debug.assert(!@hasDecl(ReplayTradingShard, "trySend"));
-    var live = try startScenario();
-    try applyHealthyPrelude(&live);
+    const live = try createScenario();
+    defer std.testing.allocator.destroy(live);
+    try applyHealthyPrelude(live);
     const command = (try live.shard.apply(atGroup(15, .{
         .identity = 1,
         .payload = .{ .timer = fixture.timer(happy_order_quantity) },
@@ -1562,9 +1673,11 @@ test "venue facts and replay use apply without replay send capability" {
     for (facts) |event|
         try std.testing.expect((try live.shard.apply(event)).order_command == null);
 
-    var replay_shard: ReplayTradingShard = .{};
-    try applyGenesisReplay(&replay_shard);
-    try applyHealthyPreludeReplay(&replay_shard);
+    const replay_shard = try std.testing.allocator.create(ReplayTradingShard);
+    defer std.testing.allocator.destroy(replay_shard);
+    replay_shard.* = .{};
+    try applyGenesisReplay(replay_shard);
+    try applyHealthyPreludeReplay(replay_shard);
     _ = try replay_shard.apply(atGroup(15, .{
         .identity = 1,
         .payload = .{ .timer = fixture.timer(happy_order_quantity) },
@@ -1587,14 +1700,15 @@ test "shared canonical adapter facts enter the TradingShard state seam" {
                 .source_stream = 2,
                 .source_sequence = sequence,
                 .adapter_session = 4,
-                .times = .{ .receive_utc_ns = sequence, .monotonic_ns = sequence, .audit_utc_ns = sequence },
+                .times = fixture.canonicalAt(15 + sequence, sequence, event).venue.envelope.times,
                 .raw_evidence = .{ .stream = 2, .sequence = sequence, .digest = @splat(0) },
             }, .event = event } };
         }
     };
 
-    var run = try startScenario();
-    try applyHealthyPrelude(&run);
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
+    try applyHealthyPrelude(run);
     const command = (try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{
         .identity = 1,
         .payload = .{ .timer = fixture.timer(happy_order_quantity) },
@@ -1676,7 +1790,9 @@ test "shared canonical adapter facts enter the TradingShard state seam" {
     };
     var missing_fee = canonical_fill;
     missing_fee.fee = null;
-    var rejected_shard = run.shard;
+    const rejected_shard = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(rejected_shard);
+    rejected_shard.* = run.shard;
     const before_rejection = rejected_shard.economicSummary();
     try std.testing.expectError(error.MissingFillFee, rejected_shard.apply(Fixture.record(22, .{ .fill = missing_fee })));
     try std.testing.expect(rejected_shard.oms.recovery_only);
@@ -1685,7 +1801,9 @@ test "shared canonical adapter facts enter the TradingShard state seam" {
     try std.testing.expect(std.meta.eql(before_rejection, rejected_shard.economicSummary()));
     try std.testing.expectEqualSlices(u8, &accepted_digest, &run.shard.canonicalStateDigest());
     std.debug.print("core_input_rejection: l2=IncompleteL2Book fill_fee=MissingFillFee\n", .{});
-    var overfill = run.shard;
+    const overfill = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(overfill);
+    overfill.* = run.shard;
     var partial_fill = canonical_fill;
     partial_fill.identity = 4;
     partial_fill.quantity.lots = 50;
@@ -1709,7 +1827,9 @@ test "shared canonical adapter facts enter the TradingShard state seam" {
     try std.testing.expectEqualSlices(u8, &fill_digest, &run.shard.canonicalStateDigest());
     var conflicting_fill = canonical_fill;
     conflicting_fill.venue_fill_time_utc_ns = 101;
-    var conflicting_shard = run.shard;
+    const conflicting_shard = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(conflicting_shard);
+    conflicting_shard.* = run.shard;
     const before_conflict = conflicting_shard.economicSummary();
     try std.testing.expectError(error.ConflictingFillIdentity, conflicting_shard.apply(Fixture.record(5, .{ .fill = conflicting_fill })));
     try std.testing.expect(conflicting_shard.oms.recovery_only);
@@ -1725,10 +1845,13 @@ test "shared canonical adapter facts enter the TradingShard state seam" {
     try std.testing.expectEqual(@as(i64, 2), economics.portfolio.rebate_atoms);
     try run.decision_journal.seal();
     _ = try assertReplayEquivalent(run);
-    var snapshot_storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
-    const snapshot = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &snapshot_storage);
-    const restored = try TradingShard.restoreSnapshot(snapshot);
-    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+    const snapshot_storage = try std.testing.allocator.alloc(u8, @import("durable_store.zig").max_snapshot_bytes);
+    defer std.testing.allocator.free(snapshot_storage);
+    const snapshot = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, snapshot_storage);
+    const restored = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(restored);
+    _ = try TradingShard.restoreSnapshotInto(restored, snapshot);
+    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.canonicalStateDigest());
 }
 
 const PrivateFactPermutation = struct {
@@ -1762,9 +1885,10 @@ fn privateFactsWithSplit(command: engine.OrderCommand, first_fill_quantity: i128
     return facts;
 }
 
-fn privateFactPermutationRun(permutation: PrivateFactPermutation, first_fill_quantity: i128) !LiveRun {
-    var run = try startScenario();
-    try applyHealthyPrelude(&run);
+fn privateFactPermutationRun(permutation: PrivateFactPermutation, first_fill_quantity: i128) !*LiveRun {
+    const run = try createScenario();
+    errdefer std.testing.allocator.destroy(run);
+    try applyHealthyPrelude(run);
     const command = (try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{
         .identity = 1,
         .payload = .{ .timer = fixture.timer(happy_order_quantity) },
@@ -1789,11 +1913,13 @@ fn privateFactArrival(permutation: PrivateFactPermutation, wanted: u8) u64 {
 test "legal private fact permutations preserve semantic authority while retaining audit order" {
     comptime std.debug.assert(!@hasDecl(ReplayTradingShard, "trySend"));
     const baseline = try privateFactPermutationRun(private_fact_permutations[0], 40);
+    defer std.testing.allocator.destroy(baseline);
     const baseline_semantic = baseline.shard.semanticAuthorityDigest();
     const baseline_canonical = baseline.shard.canonicalStateDigest();
 
     for (private_fact_permutations, 0..) |permutation, row| {
-        var run = try privateFactPermutationRun(permutation, 40);
+        const run = try privateFactPermutationRun(permutation, 40);
+        defer std.testing.allocator.destroy(run);
         const semantic = run.shard.semanticAuthorityDigest();
         try std.testing.expectEqualSlices(u8, &baseline_semantic, &semantic);
         if (row != 0) try std.testing.expect(!std.mem.eql(u8, &baseline_canonical, &run.shard.canonicalStateDigest()));
@@ -1826,10 +1952,12 @@ test "fixed-seed private fact fuzz retains the table-driven permutation invarian
             std.debug.print("private-fact-fuzz seed={d} case={d} split={d} events={d} baseline\n", .{ seed_start, case_index, split, max_events });
             return err;
         };
+        defer std.testing.allocator.destroy(baseline);
         const permuted = privateFactPermutationRun(private_fact_permutations[permutation_index], split) catch |err| {
             std.debug.print("private-fact-fuzz seed={d} case={d} split={d} events={d} order={s}\n", .{ seed_start, case_index, split, max_events, private_fact_permutations[permutation_index].name });
             return err;
         };
+        defer std.testing.allocator.destroy(permuted);
         if (!std.mem.eql(u8, &baseline.shard.semanticAuthorityDigest(), &permuted.shard.semanticAuthorityDigest())) {
             std.debug.print("private-fact-fuzz seed={d} case={d} split={d} events={d} order={s}\n", .{ seed_start, case_index, split, max_events, private_fact_permutations[permutation_index].name });
             return error.SemanticPermutationMismatch;
@@ -1839,9 +1967,10 @@ test "fixed-seed private fact fuzz retains the table-driven permutation invarian
     }
 }
 
-fn canceledLateFillRun(order: [6]u8) !LiveRun {
-    var run = try startScenario();
-    try applyHealthyPrelude(&run);
+fn canceledLateFillRun(order: [6]u8) !*LiveRun {
+    const run = try createScenario();
+    errdefer std.testing.allocator.destroy(run);
+    try applyHealthyPrelude(run);
     const command = (try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{
         .identity = 1,
         .payload = .{ .timer = fixture.timer(happy_order_quantity) },
@@ -1878,7 +2007,9 @@ fn canceledLateFillRun(order: [6]u8) !LiveRun {
 
 test "cancel reconciliation accepts one late Fill without duplicate economics" {
     const before_terminal = try canceledLateFillRun(.{ 0, 1, 2, 5, 3, 4 });
+    defer std.testing.allocator.destroy(before_terminal);
     const after_terminal = try canceledLateFillRun(.{ 0, 1, 2, 3, 4, 5 });
+    defer std.testing.allocator.destroy(after_terminal);
     try std.testing.expectEqual(oms_module.OrderState.canceled, before_terminal.shard.oms.orderById(1).?.state);
     try std.testing.expectEqual(oms_module.OrderState.canceled, after_terminal.shard.oms.orderById(1).?.state);
     try std.testing.expectEqual(@as(i64, 40), try before_terminal.shard.economic_projection.appliedCanonicalFillQuantity(1));
@@ -1907,7 +2038,8 @@ test "account bootstrap snapshot is normalized before stable journal replay" {
         }
     };
 
-    var run = try startScenario();
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
     const snapshot: canonical.AccountBootstrapSnapshot = .{
         .identity = 77,
         .exchange_account = 2,
@@ -1949,7 +2081,8 @@ test "an existing account failure does not commit an unrelated rejected event" {
         }
     };
 
-    var run = try startScenario();
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
     const snapshot: canonical.AccountBootstrapSnapshot = .{
         .identity = 77,
         .exchange_account = 2,
@@ -2007,8 +2140,9 @@ test "canonical not-sent is terminal without entering the legacy shard schema" {
             }, .event = event } };
         }
     };
-    var run = try startScenario();
-    try applyHealthyPrelude(&run);
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
+    try applyHealthyPrelude(run);
     const command = (try applyLive(&run.shard, &run.decision_journal, atGroup(15, .{ .identity = 1, .payload = .{ .timer = fixture.timer(happy_order_quantity) } }))) orelse return error.MissingOrderCommand;
     _ = try run.shard.apply(Fixture.record(command.command_id));
     try std.testing.expectEqual(oms_module.OrderState.rejected, run.shard.oms.orders[0].state);
@@ -2016,7 +2150,8 @@ test "canonical not-sent is terminal without entering the legacy shard schema" {
 }
 
 test "bounded multi instrument OMS closes lifecycle and partial policy" {
-    var run = try startOmsScenario();
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
     const native_amend_capability = atGroup(10, .{ .identity = 100, .payload = .{ .capability_profile_activation = .{
         .exchange_account = 2,
         .instrument = spot_instrument,
@@ -2113,7 +2248,8 @@ test "bounded multi instrument OMS closes lifecycle and partial policy" {
 }
 
 test "SPOT and linear instruments close economics and replay independently" {
-    var prefix = try startOmsScenario();
+    const prefix = try createOmsScenario();
+    defer std.testing.allocator.destroy(prefix);
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 200, .policy = .independent, .count = 2 };
     group.members[0] = .{ .intent_sequence = 200, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 30_000_000) };
     group.members[1] = .{ .intent_sequence = 201, .operation = .place, .instrument = swap_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
@@ -2126,13 +2262,19 @@ test "SPOT and linear instruments close economics and replay independently" {
     try std.testing.expect(commands[0].reservation.atoms != commands[1].reservation.atoms);
 
     try prefix.decision_journal.seal();
-    var snapshot_storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
-    const snapshot = try prefix.shard.snapshot(&prefix.decision_journal, prefix.decision_journal.last_sequence, &snapshot_storage);
-    var forged = prefix.shard;
+    const snapshot_storage = try std.testing.allocator.alloc(u8, @import("durable_store.zig").max_snapshot_bytes);
+    defer std.testing.allocator.free(snapshot_storage);
+    const snapshot = try prefix.shard.snapshot(&prefix.decision_journal, prefix.decision_journal.last_sequence, snapshot_storage);
+    const forged = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(forged);
+    @memcpy(std.mem.asBytes(forged), std.mem.asBytes(&prefix.shard));
     forged.oms.command_history[0].risk_decision_identity = forged.oms.command_history[0].reservation_identity;
-    var forged_storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
-    const forged_snapshot = try forged.snapshot(&prefix.decision_journal, prefix.decision_journal.last_sequence, &forged_storage);
-    try std.testing.expectError(error.InvalidSnapshotState, TradingShard.restoreSnapshot(forged_snapshot));
+    const forged_storage = try std.testing.allocator.alloc(u8, @import("durable_store.zig").max_snapshot_bytes);
+    defer std.testing.allocator.free(forged_storage);
+    const forged_snapshot = try forged.snapshot(&prefix.decision_journal, prefix.decision_journal.last_sequence, forged_storage);
+    const rejected = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(rejected);
+    try std.testing.expectError(error.InvalidSnapshotState, TradingShard.restoreSnapshotInto(rejected, forged_snapshot));
     const tail_events = [_]CanonicalEvent{
         atGroup(13, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .partially_filled, .cumulative_quantity = 40, .remaining_quantity = 60 } } }),
         atGroup(14, .{ .identity = 1, .payload = .{ .economic_fill = .{ .fill_id = 1, .order_id = 1, .quantity = 40, .price_ticks = 30_000_000 } } }),
@@ -2144,9 +2286,11 @@ test "SPOT and linear instruments close economics and replay independently" {
         atGroup(20, .{ .identity = 6, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 60_000_000 } } }),
     };
 
-    var live = prefix.shard;
+    const live = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(live);
+    @memcpy(std.mem.asBytes(live), std.mem.asBytes(&prefix.shard));
     var tail = engine.journal.Journal.initAt(prefix.decision_journal.last_sequence + 1);
-    for (tail_events) |event| _ = try engine.applyStable(&live, &tail, event);
+    for (tail_events) |event| _ = try engine.applyStable(live, &tail, event);
     try tail.seal();
     try std.testing.expectEqual(oms_module.OrderState.filled, live.oms.orders[0].state);
     try std.testing.expectEqual(oms_module.OrderState.filled, live.oms.orders[1].state);
@@ -2154,14 +2298,18 @@ test "SPOT and linear instruments close economics and replay independently" {
     try std.testing.expectEqual(@as(i64, 10), live.economicSummary().portfolio.swap.quantity);
     try std.testing.expectEqual(@as(i64, 10_010), live.economicSummary().portfolio.unrealized_pnl_atoms);
 
-    var replayed: ReplayTradingShard = .{};
-    try applyGenesisReplay(&replayed);
+    const replayed = try std.testing.allocator.create(ReplayTradingShard);
+    defer std.testing.allocator.destroy(replayed);
+    replayed.* = .{};
+    try applyGenesisReplay(replayed);
     for (omsBookSnapshots()) |snapshot_event| _ = try replayed.apply(snapshot_event);
     _ = try replayed.apply(place);
     for (tail_events) |event| _ = try replayed.apply(event);
     try std.testing.expectEqualSlices(u8, &live.canonicalStateDigest(), &replayed.canonicalStateDigest());
-    const recovered = try TradingShard.restore(snapshot, tail.bytes());
-    try std.testing.expectEqualSlices(u8, &live.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
+    const recovered = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(recovered);
+    _ = try TradingShard.restoreSegmentsInto(recovered, snapshot, &.{tail.bytes()});
+    try std.testing.expectEqualSlices(u8, &live.canonicalStateDigest(), &recovered.canonicalStateDigest());
 
     const before_mismatch = live.canonicalStateDigest();
     const economics_before_mismatch = live.economicSummary();
@@ -2187,7 +2335,8 @@ test "SPOT and linear instruments close economics and replay independently" {
 }
 
 test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
-    var live = try startOmsScenario();
+    const live = try createOmsScenario();
+    defer std.testing.allocator.destroy(live);
     const capability = atGroup(12, .{ .identity = 219, .payload = .{ .capability_profile_activation = .{
         .exchange_account = 2,
         .instrument = swap_instrument,
@@ -2246,7 +2395,7 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     const limited = try std.testing.allocator.create(TradingShard);
     defer std.testing.allocator.destroy(limited);
     for ([_]bool{ true, false }) |limit_quantity| {
-        limited.* = live.shard;
+        @memcpy(std.mem.asBytes(limited), std.mem.asBytes(&live.shard));
         var definition = limited.activatedAssets().get(settlement_asset).?.definition;
         definition.version += 1;
         if (limit_quantity) definition.max_quantity_lots = 9 else definition.max_price_ticks = 49_999_999;
@@ -2263,7 +2412,7 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     try std.testing.expectEqual(@as(usize, 1), placed.oms_commands.len);
     const proved = placed.oms_commands[0];
     for ([_]bool{ true, false }) |limit_quantity| {
-        limited.* = live.shard;
+        @memcpy(std.mem.asBytes(limited), std.mem.asBytes(&live.shard));
         var definition = limited.activatedAssets().get(settlement_asset).?.definition;
         definition.version += 1;
         if (limit_quantity) definition.max_quantity_lots = 9 else definition.max_price_ticks = 49_999_999;
@@ -2276,9 +2425,30 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     try std.testing.expectEqual(shard_event.EventKind.risk_accepted, live.shard.trace.factAt(proved.risk_decision_identity).?.kind);
     try std.testing.expectEqual(shard_event.EventKind.risk_reservation_created, live.shard.trace.factAt(proved.reservation_identity).?.kind);
 
-    var implementation: simulated_venue.SimulatedVenue = .{};
-    var adapter = implementation.adapter();
+    const OutcomeCrash = struct {
+        implementation: simulated_venue.SimulatedVenue = .{},
+        store: ?*@import("durable_store.zig").MemoryAdapter = null,
+        receive_utc_ns: u64 = 0,
+        fn send(ptr: *anyopaque, request: canonical.AdapterRequest) @import("venue_adapter.zig").SendError!@import("venue_adapter.zig").SendResult {
+            const inner: *simulated_venue.SimulatedVenue = @ptrCast(@alignCast(ptr));
+            const self: *@This() = @fieldParentPtr("implementation", inner);
+            const result = try inner.adapter().trySend(request);
+            if (result == .accepted) if (self.store) |memory| memory.injectFault(.eio);
+            return result;
+        }
+        fn drain(ptr: *anyopaque) @import("venue_adapter.zig").DrainError!?canonical.AdapterOutputBatch {
+            const inner: *simulated_venue.SimulatedVenue = @ptrCast(@alignCast(ptr));
+            const self: *@This() = @fieldParentPtr("implementation", inner);
+            var output = (try inner.adapter().tryDrain()) orelse return null;
+            for (output.events[0..output.len]) |*record| record.envelope.times = .{ .source_utc_ns = self.receive_utc_ns, .receive_utc_ns = self.receive_utc_ns, .audit_utc_ns = self.receive_utc_ns, .monotonic_ns = 2 * std.time.ns_per_s };
+            return output;
+        }
+    };
+    var implementation: OutcomeCrash = .{ .receive_utc_ns = place.core.receive_time + std.time.ns_per_s };
+    var adapter = implementation.implementation.adapter();
     var native_vtable = adapter.vtable.*;
+    native_vtable.try_send = OutcomeCrash.send;
+    native_vtable.try_drain = OutcomeCrash.drain;
     native_vtable.prepare_client_order_id = struct {
         fn prepare(_: *anyopaque, namespace: [16]u8, account: canonical.ExchangeAccountIdentity, order_id: u64, _: canonical.ClientOrderId) !canonical.ClientOrderId {
             var text: [64]u8 = undefined;
@@ -2287,7 +2457,9 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     }.prepare;
     adapter.vtable = &native_vtable;
     try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1, .asset_definitions = live.shard.activatedAssets() });
-    var gateway: execution_gateway.Gateway = .{};
+    const gateway = try std.testing.allocator.create(execution_gateway.Gateway);
+    defer std.testing.allocator.destroy(gateway);
+    gateway.init();
     try gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
     const current_authority: execution_gateway.AuthorityFacts = .{
         .account = 2,
@@ -2299,21 +2471,23 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
         .exchange_position = .{ .instrument = swap_instrument, .rules_version = 1, .lots = 0 },
         .authority_barrier = 1,
     };
-    try gateway.observeAuthority(current_authority);
+    try gateway.observeAuthorityFromShard(&live.shard, current_authority);
     const fault_memory = try std.testing.allocator.create(@import("durable_store.zig").MemoryAdapter);
     defer std.testing.allocator.destroy(fault_memory);
     fault_memory.* = .initWithAllocator(std.testing.allocator);
     defer fault_memory.deinit();
-    var fault_gateway: execution_gateway.Gateway = .{};
+    const fault_gateway = try std.testing.allocator.create(execution_gateway.Gateway);
+    defer std.testing.allocator.destroy(fault_gateway);
+    fault_gateway.init();
     try fault_gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
     var wrong_position = current_authority;
     wrong_position.exchange_position.lots = 1;
-    try fault_gateway.observeAuthority(wrong_position);
+    try std.testing.expectError(error.InvalidAuthorityFacts, fault_gateway.observeAuthorityFromShard(&live.shard, wrong_position));
     try fault_gateway.bootstrapDurableDispatch(fault_memory.interface(), undefined, .{ .domain = .control, .id = 78 });
     try std.testing.expectError(error.NotSent, fault_gateway.sendFromShard(&live.shard, proved.command_id, 2 * std.time.ns_per_s));
     var corrected_position = current_authority;
     corrected_position.authority_barrier = 2;
-    try fault_gateway.observeAuthority(corrected_position);
+    try fault_gateway.observeAuthorityFromShard(&live.shard, corrected_position);
     fault_memory.injectFault(.eio);
     try std.testing.expectError(error.NotSent, fault_gateway.sendFromShard(&live.shard, proved.command_id, 2 * std.time.ns_per_s));
     try std.testing.expectEqual(@as(u64, 0), fault_gateway.send_attempt_count);
@@ -2326,14 +2500,14 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     try gateway.bootstrapDurableDispatch(durable_store, undefined, stream);
     const failed_config = try std.testing.allocator.create(TradingShard);
     defer std.testing.allocator.destroy(failed_config);
-    failed_config.* = live.shard;
+    @memcpy(std.mem.asBytes(failed_config), std.mem.asBytes(&live.shard));
     var conflicting_asset = failed_config.activatedAssets().get(settlement_asset).?.definition;
     conflicting_asset.source_digest = @splat(0x99);
     try std.testing.expectError(error.AssetDefinitionConflict, failed_config.apply(.{ .core = .{ .identity = 400, .payload = .{ .asset_definition_activated = conflicting_asset } } }));
     try std.testing.expectError(error.NotSent, gateway.sendFromShard(failed_config, proved.command_id, 2 * std.time.ns_per_s));
     try std.testing.expectEqual(@as(u64, 0), gateway.send_attempt_count);
     try std.testing.expectEqual(@as(u64, 1), (try durable_store.recover(undefined, stream)).committed_barrier);
-    failed_config.* = live.shard;
+    @memcpy(std.mem.asBytes(failed_config), std.mem.asBytes(&live.shard));
     var tighter_asset = failed_config.activatedAssets().get(settlement_asset).?.definition;
     tighter_asset.version += 1;
     tighter_asset.max_single_atoms = 10_000_000_000;
@@ -2342,10 +2516,12 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     try std.testing.expectEqualDeep(live.shard.activatedAssets(), failed_config.activatedAssets());
     try std.testing.expectError(error.NotSent, gateway.sendFromShard(failed_config, proved.command_id, 2 * std.time.ns_per_s));
     try std.testing.expectEqual(@as(u64, 0), gateway.send_attempt_count);
-    var paused = live.shard;
+    const paused = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(paused);
+    @memcpy(std.mem.asBytes(paused), std.mem.asBytes(&live.shard));
     _ = try paused.apply(lifecycleCommand(4, 3, .trading_pause));
     try std.testing.expect(!std.meta.eql(proved.authority.trading_authorization, (try paused.currentDispatchAuthorityRefs(swap_instrument)).trading_authorization));
-    try std.testing.expectError(error.NotSent, gateway.sendFromShard(&paused, proved.command_id, 2 * std.time.ns_per_s));
+    try std.testing.expectError(error.NotSent, gateway.sendFromShard(paused, proved.command_id, 2 * std.time.ns_per_s));
     try std.testing.expectEqual(@as(u64, 0), gateway.send_attempt_count);
     const lease_barrier = live.shard.risk_lease_valid_through_barrier;
     live.shard.risk_lease_valid_through_barrier = live.shard.authoritativeBarrier() - 1;
@@ -2353,10 +2529,16 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     live.shard.risk_lease_valid_through_barrier = lease_barrier;
     try std.testing.expectError(error.NotSent, gateway.sendFromShard(&live.shard, proved.command_id, 3 * std.time.ns_per_s));
     try std.testing.expectEqual(@as(u64, 1), (try durable_store.recover(undefined, stream)).committed_barrier);
-    try std.testing.expectEqual(.accepted, try gateway.sendFromShard(&live.shard, proved.command_id, 2 * std.time.ns_per_s));
+    implementation.store = durable_memory;
+    try std.testing.expectError(error.NotSent, gateway.sendFromShard(&live.shard, proved.command_id, 2 * std.time.ns_per_s));
+    // Reopen the persisted attempt after losing outcome publication; never invent acceptance.
+    durable_memory.fault = .none;
+    durable_memory.gate = .open;
     try std.testing.expectEqual(@as(u64, 2), (try durable_store.recover(undefined, stream)).committed_barrier);
     try std.testing.expectEqual(@as(u64, 1), gateway.send_attempt_count);
-    var recovered_gateway: execution_gateway.Gateway = .{};
+    const recovered_gateway = try std.testing.allocator.create(execution_gateway.Gateway);
+    defer std.testing.allocator.destroy(recovered_gateway);
+    recovered_gateway.init();
     try recovered_gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
     try recovered_gateway.attachRecoveredDurableDispatch(durable_store, undefined, stream);
     try std.testing.expect(!std.mem.eql(u8, proved.client_order_id.slice(), recovered_gateway.uncertain_dispatches[0].client_order_id.slice()));
@@ -2384,15 +2566,19 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
     try recovered_gateway.reconcileRecoveredDispatch(&live.shard, proved.command_id);
     try recovered_gateway.reconcileRecoveredDispatch(&live.shard, proved.command_id);
     try std.testing.expectEqual(@as(u64, 3), (try durable_store.recover(undefined, stream)).committed_barrier);
-    var recovered_again: execution_gateway.Gateway = .{};
+    const recovered_again = try std.testing.allocator.create(execution_gateway.Gateway);
+    defer std.testing.allocator.destroy(recovered_again);
+    recovered_again.init();
     try recovered_again.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
     try recovered_again.attachRecoveredDurableDispatch(durable_store, undefined, stream);
     try recovered_again.reconcileRecoveredDispatch(&live.shard, proved.command_id);
     try std.testing.expectError(error.NotSent, recovered_again.sendFromShard(&live.shard, proved.command_id, 2 * std.time.ns_per_s));
     try std.testing.expectEqual(@as(u64, 0), recovered_again.send_attempt_count);
 
-    var replayed: ReplayTradingShard = .{};
-    try applyGenesisReplay(&replayed);
+    const replayed = try std.testing.allocator.create(ReplayTradingShard);
+    defer std.testing.allocator.destroy(replayed);
+    replayed.* = .{};
+    try applyGenesisReplay(replayed);
     for (omsBookSnapshots()) |snapshot_event| _ = try replayed.apply(snapshot_event);
     _ = try replayed.apply(capability);
     _ = try replayed.apply(account_bootstrap);
@@ -2405,7 +2591,8 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
 }
 
 test "CancelConfirmCreate discards stale replacement after an intervening fill" {
-    var run = try startOmsScenario();
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 20, .count = 1 };
     place.members[0] = .{ .intent_sequence = 20, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000), .reservation = fixtureReservation(5_000_000) };
@@ -2439,13 +2626,14 @@ test "CancelConfirmCreate discards stale replacement after an intervening fill" 
 }
 
 test "OMS group identity is checked before new risk and conflict survives replay" {
-    var run = try startOmsScenario();
-    _ = try fixture.apply(&run, atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
+    _ = try fixture.apply(run, atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 300, .count = 2 };
     group.members[0] = .{ .intent_sequence = 300, .strategy_instance = 1, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
     group.members[1] = .{ .intent_sequence = 301, .strategy_instance = 1, .operation = .place, .instrument = swap_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
-    _ = try fixture.apply(&run, atGroup(12, .{ .identity = 300, .payload = .{ .oms_intent_group = group } }));
-    _ = try fixture.apply(&run, atGroup(13, .{ .identity = 301, .payload = .{ .risk_lease_granted = .{
+    _ = try fixture.apply(run, atGroup(12, .{ .identity = 300, .payload = .{ .oms_intent_group = group } }));
+    _ = try fixture.apply(run, atGroup(13, .{ .identity = 301, .payload = .{ .risk_lease_granted = .{
         .lease_identity = 301,
         .version = 2,
         .amount_atoms = 1,
@@ -2456,30 +2644,35 @@ test "OMS group identity is checked before new risk and conflict survives replay
     } } }));
     const before_duplicate = run.shard.canonicalStateDigest();
     const journal_sequence = run.decision_journal.last_sequence;
-    try std.testing.expect((try fixture.apply(&run, atGroup(14, .{ .identity = 302, .payload = .{ .oms_intent_group = group } }))) == null);
+    try std.testing.expect((try fixture.apply(run, atGroup(14, .{ .identity = 302, .payload = .{ .oms_intent_group = group } }))) == null);
     try std.testing.expectEqual(journal_sequence, run.decision_journal.last_sequence);
     try std.testing.expectEqualSlices(u8, &before_duplicate, &run.shard.canonicalStateDigest());
     try std.testing.expectEqual(@as(u8, 2), run.shard.oms.order_count);
 
     var changed = group;
     changed.members[1].quantity = 11;
-    try std.testing.expect((try fixture.apply(&run, atGroup(15, .{ .identity = 303, .payload = .{ .oms_intent_group = changed } }))) == null);
+    try std.testing.expect((try fixture.apply(run, atGroup(15, .{ .identity = 303, .payload = .{ .oms_intent_group = changed } }))) == null);
     try std.testing.expectEqual(shard_event.EventKind.oms_intent_conflict, run.shard.trace.events[run.shard.trace.len - 1].kind);
     try std.testing.expectEqual(@as(u8, 2), run.shard.oms.order_count);
     var truncated = group;
     truncated.count = 1;
-    try std.testing.expect((try fixture.apply(&run, atGroup(16, .{ .identity = 304, .payload = .{ .oms_intent_group = truncated } }))) == null);
+    try std.testing.expect((try fixture.apply(run, atGroup(16, .{ .identity = 304, .payload = .{ .oms_intent_group = truncated } }))) == null);
     try std.testing.expectEqual(shard_event.EventKind.oms_intent_conflict, run.shard.trace.events[run.shard.trace.len - 1].kind);
     try run.decision_journal.seal();
     const digest = try fixture.assertReplayEquivalent(run);
-    var snapshot_storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
-    const snapshot = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, &snapshot_storage);
-    var restored = (try TradingShard.restoreSnapshot(snapshot)).shard;
+    const snapshot_storage = try std.testing.allocator.alloc(u8, @import("durable_store.zig").max_snapshot_bytes);
+    defer std.testing.allocator.free(snapshot_storage);
+    const snapshot = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, snapshot_storage);
+    const restored = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(restored);
+    _ = try TradingShard.restoreSnapshotInto(restored, snapshot);
     try std.testing.expectEqualSlices(u8, &digest, &restored.canonicalStateDigest());
     const restored_before = restored.canonicalStateDigest();
     _ = try restored.apply(atGroup(17, .{ .identity = 305, .payload = .{ .oms_intent_group = group } }));
     try std.testing.expectEqualSlices(u8, &restored_before, &restored.canonicalStateDigest());
-    var live_after = run.shard;
+    const live_after = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(live_after);
+    live_after.* = run.shard;
     const repeated_conflict = atGroup(18, .{ .identity = 306, .payload = .{ .oms_intent_group = changed } });
     _ = try live_after.apply(repeated_conflict);
     _ = try restored.apply(repeated_conflict);
@@ -2487,24 +2680,25 @@ test "OMS group identity is checked before new risk and conflict survives replay
 }
 
 test "partial fill keeps another PendingCancel blocking CCC" {
-    var run = try startOmsScenario();
-    _ = try fixture.apply(&run, atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
+    _ = try fixture.apply(run, atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 310, .count = 2 };
     group.members[0] = .{ .intent_sequence = 310, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
     group.members[1] = .{ .intent_sequence = 311, .operation = .place, .instrument = swap_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
-    _ = try fixture.apply(&run, atGroup(12, .{ .identity = 310, .payload = .{ .oms_intent_group = group } }));
-    _ = try fixture.apply(&run, atGroup(13, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
-    _ = try fixture.apply(&run, atGroup(14, .{ .identity = 2, .payload = .{ .oms_execution_report = .{ .report_id = 2, .order_id = 2, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 10 } } }));
+    _ = try fixture.apply(run, atGroup(12, .{ .identity = 310, .payload = .{ .oms_intent_group = group } }));
+    _ = try fixture.apply(run, atGroup(13, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
+    _ = try fixture.apply(run, atGroup(14, .{ .identity = 2, .payload = .{ .oms_execution_report = .{ .report_id = 2, .order_id = 2, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 10 } } }));
     var amend: oms_module.IntentGroup = .{ .first_intent_sequence = 312, .count = 1 };
     amend.members[0] = .{ .intent_sequence = 312, .operation = .amend, .instrument = spot_instrument, .target_order_id = 1, .expected_revision = 1, .quantity = 80, .limit_price = fixtureOmsPrice(spot_instrument, 49_000_000), .native_amend = false, .allow_cancel_confirm_create = true };
-    _ = try fixture.apply(&run, atGroup(15, .{ .identity = 312, .payload = .{ .oms_intent_group = amend } }));
+    _ = try fixture.apply(run, atGroup(15, .{ .identity = 312, .payload = .{ .oms_intent_group = amend } }));
     var cancel: oms_module.IntentGroup = .{ .first_intent_sequence = 313, .count = 1 };
     cancel.members[0] = .{ .intent_sequence = 313, .operation = .cancel, .instrument = swap_instrument, .target_order_id = 2, .expected_revision = 1 };
-    _ = try fixture.apply(&run, atGroup(16, .{ .identity = 313, .payload = .{ .oms_intent_group = cancel } }));
-    _ = try fixture.apply(&run, atGroup(17, .{ .identity = 3, .payload = .{ .oms_execution_report = .{ .report_id = 3, .order_id = 2, .revision = 1, .status = .partially_filled, .cumulative_quantity = 5, .remaining_quantity = 5 } } }));
+    _ = try fixture.apply(run, atGroup(16, .{ .identity = 313, .payload = .{ .oms_intent_group = cancel } }));
+    _ = try fixture.apply(run, atGroup(17, .{ .identity = 3, .payload = .{ .oms_execution_report = .{ .report_id = 3, .order_id = 2, .revision = 1, .status = .partially_filled, .cumulative_quantity = 5, .remaining_quantity = 5 } } }));
     try std.testing.expectEqual(oms_module.OrderState.pending_cancel, run.shard.oms.orderById(2).?.state);
     try std.testing.expect(run.shard.oms.blocksNewSend());
-    const closed = try fixture.apply(&run, atGroup(18, .{ .identity = 4, .payload = .{ .oms_execution_report = .{ .report_id = 4, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
+    const closed = try fixture.apply(run, atGroup(18, .{ .identity = 4, .payload = .{ .oms_execution_report = .{ .report_id = 4, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
     try std.testing.expect(closed == null);
     try std.testing.expectEqual(@as(u8, 2), run.shard.oms.order_count);
     try std.testing.expectEqual(oms_module.OrderState.canceled, run.shard.oms.orderById(1).?.state);
@@ -2514,7 +2708,8 @@ test "partial fill keeps another PendingCancel blocking CCC" {
 }
 
 test "IntentGroup batch results remain itemized" {
-    var run = try startOmsScenario();
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 30, .policy = .cancel_remaining, .count = 3 };
     for (group.members[0..3], 0..) |*member, index| {
@@ -2538,7 +2733,8 @@ test "IntentGroup batch results remain itemized" {
 }
 
 test "layered risk retains unknown reservations until authoritative terminal evidence" {
-    var run = try startOmsScenario();
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 40, .count = 1 };
     group.members[0] = .{ .intent_sequence = 40, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000), .reservation = fixtureReservation(1) };
@@ -2555,7 +2751,8 @@ test "layered risk retains unknown reservations until authoritative terminal evi
     _ = try run.shard.apply(atGroup(15, .{ .identity = 2, .payload = .{ .oms_reconciliation_result = .{ .reconciliation_id = 2, .order_id = 1, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 100, .terminal_state = .canceled } } }));
     try std.testing.expectEqual(@as(i64, 0), try run.shard.activeReservationAtoms());
 
-    var limited = try startOmsScenario();
+    const limited = try createOmsScenario();
+    defer std.testing.allocator.destroy(limited);
     _ = try limited.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     _ = try limited.shard.apply(atGroup(12, .{ .identity = 2, .payload = .{ .risk_lease_granted = .{
         .lease_identity = 2,
@@ -2571,7 +2768,8 @@ test "layered risk retains unknown reservations until authoritative terminal evi
 }
 
 test "unknown OMS dispatch blocks a later place until the order is resolved" {
-    var run = try startOmsScenario();
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var first: oms_module.IntentGroup = .{ .first_intent_sequence = 90, .count = 1 };
     first.members[0] = .{
@@ -2604,7 +2802,8 @@ test "unknown OMS dispatch blocks a later place until the order is resolved" {
 }
 
 test "TradingShard preserves maintenance margin in the projected buffer" {
-    var run = try startOmsScenario();
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 45, .count = 1 };
     group.members[0] = .{ .intent_sequence = 45, .operation = .place, .instrument = swap_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
@@ -2614,7 +2813,8 @@ test "TradingShard preserves maintenance margin in the projected buffer" {
 }
 
 test "rejected IntentGroup leaves authoritative state unchanged" {
-    var run = try startOmsScenario();
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     const before = run.shard.canonicalStateDigest();
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 50, .count = 2 };
@@ -2625,7 +2825,8 @@ test "rejected IntentGroup leaves authoritative state unchanged" {
 }
 
 test "rejected dispatch batch leaves authoritative state unchanged" {
-    var run = try startOmsScenario();
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 55, .count = 1 };
     group.members[0] = .{ .intent_sequence = 55, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
@@ -2639,7 +2840,8 @@ test "rejected dispatch batch leaves authoritative state unchanged" {
 }
 
 test "rejected execution report leaves authoritative state unchanged" {
-    var run = try startScenario();
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
     const before = run.shard.canonicalStateDigest();
     try std.testing.expectError(error.UnknownOrder, run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .oms_execution_report = .{
         .report_id = 1,
@@ -2653,7 +2855,8 @@ test "rejected execution report leaves authoritative state unchanged" {
 }
 
 test "authoritative reconciliation cannot regress a terminal order" {
-    var run = try startOmsScenario();
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 60, .count = 1 };
     group.members[0] = .{ .intent_sequence = 60, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
@@ -2666,7 +2869,8 @@ test "authoritative reconciliation cannot regress a terminal order" {
 }
 
 test "CancelConfirmCreate re-risks replacement against latest facts" {
-    var run = try startOmsScenario();
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 70, .count = 1 };
     place.members[0] = .{ .intent_sequence = 70, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
@@ -2691,17 +2895,18 @@ test "CancelConfirmCreate re-risks replacement against latest facts" {
 }
 
 test "CancelConfirmCreate cannot recreate a fenced strategy" {
-    var run = try startOmsScenario();
-    _ = try fixture.apply(&run, atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
+    _ = try fixture.apply(run, atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 80, .count = 1 };
     place.members[0] = .{ .intent_sequence = 80, .strategy_instance = 1, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
-    _ = try fixture.apply(&run, atGroup(12, .{ .identity = 80, .payload = .{ .oms_intent_group = place } }));
-    _ = try fixture.apply(&run, atGroup(13, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
+    _ = try fixture.apply(run, atGroup(12, .{ .identity = 80, .payload = .{ .oms_intent_group = place } }));
+    _ = try fixture.apply(run, atGroup(13, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
     var replace: oms_module.IntentGroup = .{ .first_intent_sequence = 81, .count = 1 };
     replace.members[0] = .{ .intent_sequence = 81, .strategy_instance = 1, .operation = .amend, .instrument = spot_instrument, .target_order_id = 1, .expected_revision = 1, .quantity = 80, .limit_price = fixtureOmsPrice(spot_instrument, 49_000_000), .native_amend = false, .allow_cancel_confirm_create = true };
-    _ = try fixture.apply(&run, atGroup(14, .{ .identity = 81, .payload = .{ .oms_intent_group = replace } }));
-    _ = try fixture.apply(&run, atGroup(15, .{ .identity = 82, .payload = .{ .strategy_cutover_fence = .{ .strategy_instance = 1 } } }));
-    _ = try fixture.apply(&run, fixture.canonicalAt(16, 904, .{ .execution_report = .{
+    _ = try fixture.apply(run, atGroup(14, .{ .identity = 81, .payload = .{ .oms_intent_group = replace } }));
+    _ = try fixture.apply(run, atGroup(15, .{ .identity = 82, .payload = .{ .strategy_cutover_fence = .{ .strategy_instance = 1 } } }));
+    _ = try fixture.apply(run, fixture.canonicalAt(16, 904, .{ .execution_report = .{
         .identity = 904,
         .order = 1,
         .client_order_id = try canonical.ClientOrderId.init("RWN-1"),
@@ -2719,7 +2924,8 @@ test "CancelConfirmCreate cannot recreate a fenced strategy" {
 }
 
 test "forced position divergence blocks new qualification" {
-    var run = try startScenario();
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
     try establishSwapPosition(&run.shard, 600, 10);
     _ = try run.shard.apply(atGroup(604, .{ .identity = 601, .payload = .{ .venue_forced_execution = .{
         .execution_id = 601,
@@ -2735,7 +2941,8 @@ test "forced position divergence blocks new qualification" {
 }
 
 test "SPOT asset risk is isolated from SWAP positions" {
-    var run = try startScenario();
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
     try establishSwapPosition(&run.shard, 700, 10);
     var snapshot = snapshotAt(704, 701);
     const book = &snapshot.venue.event.l2_book_snapshot;
@@ -2753,7 +2960,8 @@ test "SPOT asset risk is isolated from SWAP positions" {
 }
 
 test "economic fills derive ownership from OMS and close Portfolio Exchange ledgers" {
-    var run = try startOmsScenario();
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 79, .count = 1 };
     group.members[0] = .{ .intent_sequence = 79, .operation = .place, .instrument = swap_instrument, .side = .buy, .quantity = 10, .limit_price = fixtureOmsPrice(swap_instrument, 50_000_000) };
@@ -2775,7 +2983,8 @@ test "economic fills derive ownership from OMS and close Portfolio Exchange ledg
 }
 
 test "funding forced execution and snapshots preserve auditable local economics" {
-    var run = try startScenario();
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     const before = run.shard.economicSummary();
     _ = try run.shard.apply(atGroup(12, .{ .identity = 10, .payload = .{ .funding_settlement = .{ .settlement_id = 10, .amount_atoms = -25 } } }));
@@ -2796,7 +3005,8 @@ test "funding forced execution and snapshots preserve auditable local economics"
 }
 
 test "duplicate economic facts are no-op at the TradingShard seam" {
-    var run = try startScenario();
+    const run = try createScenario();
+    defer std.testing.allocator.destroy(run);
     const funding = atGroup(11, .{ .identity = 30, .payload = .{ .funding_settlement = .{ .settlement_id = 30, .amount_atoms = -5 } } });
     _ = try run.shard.apply(funding);
     const before = run.shard.canonicalStateDigest();
@@ -2806,7 +3016,8 @@ test "duplicate economic facts are no-op at the TradingShard seam" {
 }
 
 test "CancelConfirmCreate accepts authoritative reconciliation as confirmation" {
-    var run = try startOmsScenario();
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 76, .count = 1 };
     place.members[0] = .{ .intent_sequence = 76, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
@@ -2822,7 +3033,8 @@ test "CancelConfirmCreate accepts authoritative reconciliation as confirmation" 
 }
 
 test "canonical absence without source proof preserves the unknown order and reservation" {
-    var run = try startOmsScenario();
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 176, .count = 1 };
     group.members[0] = .{ .intent_sequence = 176, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
@@ -2847,8 +3059,9 @@ test "canonical absence without source proof preserves the unknown order and res
 }
 
 test "complete canonical absence closes only an unknown place and rejects late venue facts" {
-    var run = try startOmsScenario();
-    _ = try fixture.apply(&run, atGroup(11, .{ .identity = 1800, .payload = .{ .capability_profile_activation = .{
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
+    _ = try fixture.apply(run, atGroup(11, .{ .identity = 1800, .payload = .{ .capability_profile_activation = .{
         .exchange_account = 2,
         .instrument = spot_instrument,
         .venue = 1,
@@ -2866,14 +3079,14 @@ test "complete canonical absence closes only an unknown place and rejects late v
         .supports_post_only = false,
         .supports_market_protection = false,
     } } }));
-    _ = try fixture.apply(&run, atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
+    _ = try fixture.apply(run, atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 177, .count = 1 };
     group.members[0] = .{ .intent_sequence = 177, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
-    _ = try fixture.apply(&run, atGroup(12, .{ .identity = 177, .payload = .{ .oms_intent_group = group } }));
+    _ = try fixture.apply(run, atGroup(12, .{ .identity = 177, .payload = .{ .oms_intent_group = group } }));
     const command = run.shard.oms.command_history[0];
     var dispatch: oms_module.DispatchBatch = .{ .count = 1 };
     dispatch.items[0] = .{ .command_id = command.command_id, .state = .unknown };
-    _ = try fixture.apply(&run, atGroup(13, .{ .identity = 1, .payload = .{ .oms_dispatch_batch = dispatch } }));
+    _ = try fixture.apply(run, atGroup(13, .{ .identity = 1, .payload = .{ .oms_dispatch_batch = dispatch } }));
     var absent: canonical.ReconciliationResult = .{
         .identity = 910,
         .complete = true,
@@ -2887,7 +3100,9 @@ test "complete canonical absence closes only an unknown place and rejects late v
     };
     const incomplete = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
     for (incomplete) |case| {
-        var candidate = run.shard;
+        const candidate = try std.testing.allocator.create(TradingShard);
+        defer std.testing.allocator.destroy(candidate);
+        candidate.* = run.shard;
         var claim = absent;
         switch (case) {
             0 => claim.evidence.?.scope.order = 2,
@@ -2910,7 +3125,7 @@ test "complete canonical absence closes only an unknown place and rejects late v
         try std.testing.expect(!candidate.operational_state.effectiveTradingAuthority());
     }
     const event = fixture.canonicalAt(14, 910, .{ .order_reconciliation_result = absent });
-    _ = try fixture.apply(&run, event);
+    _ = try fixture.apply(run, event);
     try std.testing.expectEqual(oms_module.OrderState.canceled, run.shard.oms.orderById(command.order_id).?.state);
     try std.testing.expectEqual(@as(i64, 0), try run.shard.activeReservationAtoms());
     try std.testing.expectEqual(@as(i64, 0), try run.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
@@ -2920,7 +3135,9 @@ test "complete canonical absence closes only an unknown place and rejects late v
     absent.evidence.?.source.digest = @splat(2);
     try std.testing.expectError(error.ConflictingCanonicalIdentity, run.shard.apply(fixture.canonicalAt(14, 910, .{ .order_reconciliation_result = absent })));
     const venue_order = try canonical.VenueOrderRef.init(1, "late-order");
-    var after_report = run.shard;
+    const after_report = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(after_report);
+    after_report.* = run.shard;
     try std.testing.expectError(error.TerminalFactConflict, after_report.apply(fixture.canonicalAt(15, 911, .{ .execution_report = .{
         .identity = 911,
         .order = command.order_id,
@@ -2932,7 +3149,9 @@ test "complete canonical absence closes only an unknown place and rejects late v
         .cumulative_quantity = .{ .instrument = spot_instrument, .rules_version = 1, .lots = 0 },
         .remaining_quantity = .{ .instrument = spot_instrument, .rules_version = 1, .lots = 10 },
     } })));
-    var after_fill = run.shard;
+    const after_fill = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(after_fill);
+    after_fill.* = run.shard;
     try std.testing.expectError(error.TerminalFactConflict, after_fill.apply(fixture.canonicalAt(15, 912, .{ .fill = .{
         .identity = 912,
         .order = command.order_id,
@@ -2947,7 +3166,9 @@ test "complete canonical absence closes only an unknown place and rejects late v
         .liquidity = .taker,
     } })));
     try std.testing.expectEqual(@as(i64, 0), try after_fill.economic_projection.appliedCanonicalFillQuantity(command.order_id));
-    var after_core_fill = run.shard;
+    const after_core_fill = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(after_core_fill);
+    after_core_fill.* = run.shard;
     try std.testing.expectError(error.TerminalFactConflict, after_core_fill.apply(atGroup(15, .{ .identity = 913, .payload = .{ .economic_fill = .{
         .fill_id = 913,
         .order_id = command.order_id,
@@ -2959,16 +3180,17 @@ test "complete canonical absence closes only an unknown place and rejects late v
 }
 
 test "canonical terminal reconciliation confirms a CCC replacement" {
-    var run = try startOmsScenario();
-    _ = try fixture.apply(&run, atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
+    _ = try fixture.apply(run, atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 180, .count = 1 };
     place.members[0] = .{ .intent_sequence = 180, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
-    _ = try fixture.apply(&run, atGroup(12, .{ .identity = 180, .payload = .{ .oms_intent_group = place } }));
-    _ = try fixture.apply(&run, atGroup(13, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
+    _ = try fixture.apply(run, atGroup(12, .{ .identity = 180, .payload = .{ .oms_intent_group = place } }));
+    _ = try fixture.apply(run, atGroup(13, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
     var replace: oms_module.IntentGroup = .{ .first_intent_sequence = 181, .count = 1 };
     replace.members[0] = .{ .intent_sequence = 181, .operation = .amend, .instrument = spot_instrument, .target_order_id = 1, .expected_revision = 1, .quantity = 80, .limit_price = fixtureOmsPrice(spot_instrument, 49_000_000), .native_amend = false, .allow_cancel_confirm_create = true };
-    _ = try fixture.apply(&run, atGroup(14, .{ .identity = 181, .payload = .{ .oms_intent_group = replace } }));
-    _ = try fixture.apply(&run, fixture.canonicalAt(15, 902, .{ .order_reconciliation_result = .{
+    _ = try fixture.apply(run, atGroup(14, .{ .identity = 181, .payload = .{ .oms_intent_group = replace } }));
+    _ = try fixture.apply(run, fixture.canonicalAt(15, 902, .{ .order_reconciliation_result = .{
         .identity = 902,
         .complete = true,
         .status = .found_terminal,
@@ -2989,16 +3211,17 @@ test "canonical terminal reconciliation confirms a CCC replacement" {
 }
 
 test "canonical cancel report confirms a CCC replacement" {
-    var run = try startOmsScenario();
-    _ = try fixture.apply(&run, atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
+    _ = try fixture.apply(run, atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 190, .count = 1 };
     place.members[0] = .{ .intent_sequence = 190, .operation = .place, .instrument = spot_instrument, .quantity = 100, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
-    _ = try fixture.apply(&run, atGroup(12, .{ .identity = 190, .payload = .{ .oms_intent_group = place } }));
-    _ = try fixture.apply(&run, atGroup(13, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
+    _ = try fixture.apply(run, atGroup(12, .{ .identity = 190, .payload = .{ .oms_intent_group = place } }));
+    _ = try fixture.apply(run, atGroup(13, .{ .identity = 1, .payload = .{ .oms_execution_report = .{ .report_id = 1, .order_id = 1, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 100 } } }));
     var replace: oms_module.IntentGroup = .{ .first_intent_sequence = 191, .count = 1 };
     replace.members[0] = .{ .intent_sequence = 191, .operation = .amend, .instrument = spot_instrument, .target_order_id = 1, .expected_revision = 1, .quantity = 80, .limit_price = fixtureOmsPrice(spot_instrument, 49_000_000), .native_amend = false, .allow_cancel_confirm_create = true };
-    _ = try fixture.apply(&run, atGroup(14, .{ .identity = 191, .payload = .{ .oms_intent_group = replace } }));
-    _ = try fixture.apply(&run, fixture.canonicalAt(15, 903, .{ .execution_report = .{
+    _ = try fixture.apply(run, atGroup(14, .{ .identity = 191, .payload = .{ .oms_intent_group = replace } }));
+    _ = try fixture.apply(run, fixture.canonicalAt(15, 903, .{ .execution_report = .{
         .identity = 903,
         .order = 1,
         .client_order_id = try canonical.ClientOrderId.init("RWN-1"),
@@ -3018,7 +3241,8 @@ test "canonical cancel report confirms a CCC replacement" {
 }
 
 test "older reconciliation identity still rejects semantic conflict" {
-    var run = try startOmsScenario();
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 78, .count = 1 };
     place.members[0] = .{ .intent_sequence = 78, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
@@ -3029,7 +3253,8 @@ test "older reconciliation identity still rejects semantic conflict" {
 }
 
 test "multiple SPOT and SWAP orders independently close place amend and cancel" {
-    var run = try startOmsScenario();
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
     _ = try run.shard.apply(atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
     var place: oms_module.IntentGroup = .{ .first_intent_sequence = 80, .count = 4 };
     place.members[0] = .{ .intent_sequence = 80, .operation = .place, .instrument = spot_instrument, .quantity = 10, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
@@ -3082,7 +3307,8 @@ test "multiple SPOT and SWAP orders independently close place amend and cancel" 
 }
 
 test "core safety invariants replay CCC intent conflict suspense and archive windows" {
-    var run = try startOmsScenario();
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
     try std.testing.expect(run.shard.host_activation_identity != 0);
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(11, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000 } } }));
 
@@ -3112,9 +3338,10 @@ test "core safety invariants replay CCC intent conflict suspense and archive win
     try std.testing.expectEqual(@as(i64, -2), run.shard.economicSummary().exchange.swap.quantity);
     try std.testing.expect(run.shard.economicSummary().suspense_usdt_atoms != 0);
 
-    var archive = try startOmsScenario();
+    const archive = try createOmsScenario();
+    defer std.testing.allocator.destroy(archive);
     var sequence: u64 = 1;
-    while (sequence <= oms_module.max_orders + 1) : (sequence += 1) {
+    while (sequence <= 3) : (sequence += 1) {
         var group: oms_module.IntentGroup = .{ .first_intent_sequence = 500 + sequence, .count = 1 };
         group.members[0] = .{ .intent_sequence = 500 + sequence, .operation = .place, .instrument = spot_instrument, .quantity = 1, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
         _ = try applyLive(&archive.shard, &archive.decision_journal, atGroup(20 + sequence, .{ .identity = 500 + sequence, .payload = .{ .oms_intent_group = group } }));
@@ -3122,28 +3349,39 @@ test "core safety invariants replay CCC intent conflict suspense and archive win
         _ = try applyLive(&archive.shard, &archive.decision_journal, atGroup(60 + sequence, .{ .identity = 700 + sequence, .payload = .{ .oms_execution_report = .{ .report_id = 700 + sequence, .order_id = command_value.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 1 } } }));
         _ = try applyLive(&archive.shard, &archive.decision_journal, atGroup(80 + sequence, .{ .identity = 800 + sequence, .payload = .{ .oms_reconciliation_result = .{ .reconciliation_id = 800 + sequence, .order_id = command_value.order_id, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 1, .terminal_state = .canceled } } }));
     }
-    try std.testing.expectEqual(@as(u8, 1), archive.shard.oms.tombstone_count);
-    try std.testing.expect(archive.shard.oms.orderById(1) == null);
-    const archived = archive.shard.oms.tombstones[0];
-    try std.testing.expectEqual(@as(u64, 501), archived.intent_sequence);
-    try std.testing.expect(!std.mem.eql(u8, &archived.fact_digest, &@as([32]u8, @splat(0))));
+    // FoundTerminal does not establish complete late-fact coverage. Keep every
+    // terminal order and its audit facts until an Owner commits business history.
+    try std.testing.expectEqual(@as(u16, 3), archive.shard.oms.order_count);
+    try std.testing.expectEqual(@as(u8, 0), archive.shard.oms.tombstone_count);
+    const retained = archive.shard.oms.orderById(1).?;
+    try std.testing.expectEqual(@as(u64, 501), retained.intent_sequence);
+    try std.testing.expect(!retained.archive_window_closed);
+    try std.testing.expectError(error.OrderArchiveNotQualified, archive.shard.oms.prepareOrderArchive(1, 0, 2));
     try archive.decision_journal.seal();
-    var snapshot_storage: [@import("durable_store.zig").max_snapshot_bytes]u8 = undefined;
-    const snapshot = try archive.shard.snapshot(&archive.decision_journal, archive.decision_journal.last_sequence, &snapshot_storage);
-    var restored = try TradingShard.restoreSnapshot(snapshot);
-    try std.testing.expectEqual(archived.intent_sequence, restored.shard.oms.tombstones[0].intent_sequence);
-    try std.testing.expectEqualSlices(u8, &archive.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
-    const before_late = restored.shard.canonicalStateDigest();
-    try restored.shard.oms.applyReport(.{ .report_id = 701, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 1 });
-    try std.testing.expectEqualSlices(u8, &before_late, &restored.shard.canonicalStateDigest());
-    try std.testing.expectError(error.TombstoneFactConflict, restored.shard.oms.applyReport(.{ .report_id = 701, .order_id = 1, .revision = 1, .status = .filled, .cumulative_quantity = 1, .remaining_quantity = 0 }));
-    try std.testing.expect(restored.shard.oms.recovery_only);
+    const snapshot_storage = try std.testing.allocator.alloc(u8, @import("durable_store.zig").max_snapshot_bytes);
+    defer std.testing.allocator.free(snapshot_storage);
+    const snapshot = try archive.shard.snapshot(&archive.decision_journal, archive.decision_journal.last_sequence, snapshot_storage);
+    const restored = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(restored);
+    _ = try TradingShard.restoreSnapshotInto(restored, snapshot);
+    try std.testing.expectEqual(retained.intent_sequence, restored.oms.orderById(1).?.intent_sequence);
+    try std.testing.expect(!restored.oms.orderById(1).?.archive_window_closed);
+    try std.testing.expectEqual(@as(u8, 0), restored.oms.tombstone_count);
+    try std.testing.expectEqualSlices(u8, &archive.shard.canonicalStateDigest(), &restored.canonicalStateDigest());
+    const before_late = restored.canonicalStateDigest();
+    try restored.oms.applyReport(.{ .report_id = 701, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 1 });
+    try std.testing.expectEqualSlices(u8, &before_late, &restored.canonicalStateDigest());
+    // Hot duplicate identity validation rejects atomically; no archived-history
+    // lookup or tombstone conflict has occurred, so the retained state stays intact.
+    try std.testing.expectError(error.ConflictingReportIdentity, restored.oms.applyReport(.{ .report_id = 701, .order_id = 1, .revision = 1, .status = .filled, .cumulative_quantity = 1, .remaining_quantity = 0 }));
+    try std.testing.expectEqualSlices(u8, &before_late, &restored.canonicalStateDigest());
+    try std.testing.expectEqual(oms_module.OrderState.canceled, restored.oms.orderById(1).?.state);
 
     try run.decision_journal.seal();
     _ = try assertReplayEquivalent(run);
     _ = try assertReplayEquivalent(archive);
     comptime std.debug.assert(!@hasField(ReplayTradingShard, "gateway"));
-    std.debug.print("core_safety_invariants: ccc=pass intent_conflict=pass suspense=pass tombstone_archive=pass host_activated=pass\n", .{});
+    std.debug.print("core_safety_invariants: ccc=pass intent_conflict=pass suspense=pass unclosed_archive_window=pass host_activated=pass\n", .{});
 }
 
 fn applyHealthyPreludeReplay(replay_shard: *ReplayTradingShard) !void {
@@ -3154,8 +3392,9 @@ fn applyHealthyPreludeReplay(replay_shard: *ReplayTradingShard) !void {
 }
 
 test "direct core spot fill enforces native base single amount before economic commit" {
-    var run = try startOmsScenario();
-    try applyHealthyPrelude(&run);
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
+    try applyHealthyPrelude(run);
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 79, .count = 1 };
     group.members[0] = .{ .intent_sequence = 79, .operation = .place, .instrument = spot_instrument, .side = .buy, .quantity = 2, .limit_price = fixtureOmsPrice(spot_instrument, 50_000_000) };
     const placed = try run.shard.apply(atGroup(12, .{ .identity = 79, .payload = .{ .oms_intent_group = group } }));
@@ -3172,8 +3411,9 @@ test "direct core spot fill enforces native base single amount before economic c
 }
 
 test "direct core spot sells release only their uniquely applied inventory" {
-    var run = try startOmsScenario();
-    try applyHealthyPrelude(&run);
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
+    try applyHealthyPrelude(run);
     var group: oms_module.IntentGroup = .{ .first_intent_sequence = 800, .count = 1 };
     group.members[0] = .{ .intent_sequence = 800, .operation = .place, .instrument = spot_instrument, .side = .buy, .quantity = 3, .limit_price = fixtureOmsPrice(spot_instrument, 100_000_000) };
     const bought = try run.shard.apply(atGroup(12, .{ .identity = 800, .payload = .{ .oms_intent_group = group } }));
@@ -3194,8 +3434,9 @@ test "direct core spot sells release only their uniquely applied inventory" {
 }
 
 test "spot decreasing native amend reserves confirmed inventory until venue confirmation" {
-    var run = try startOmsScenario();
-    try applyHealthyPrelude(&run);
+    const run = try createOmsScenario();
+    defer std.testing.allocator.destroy(run);
+    try applyHealthyPrelude(run);
     _ = try run.shard.apply(atGroup(11, .{ .identity = 899, .payload = .{ .capability_profile_activation = .{
         .exchange_account = 2,
         .instrument = spot_instrument,

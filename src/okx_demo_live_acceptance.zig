@@ -795,8 +795,9 @@ fn checkOkxRawPrivateOwner(store: durable.Store, io: std.Io) !RawOwnerResult {
         .limit_price_micros = 50_100_100_000,
     };
     const command = (try owner.apply(.{ .core = .{ .identity = sequence, .monotonic_time = 2, .time_presence = .{ .monotonic = true }, .payload = .{ .external_order_intent = intent } } })) orelse return error.MissingDemoCommand;
-    var snapshot_storage: [durable.max_snapshot_bytes]u8 = undefined;
-    const snapshot = try owner.committedSnapshot(&snapshot_storage);
+    const snapshot_storage = try std.testing.allocator.create([durable.max_snapshot_bytes]u8);
+    defer std.testing.allocator.destroy(snapshot_storage);
+    const snapshot = try owner.committedSnapshot(snapshot_storage);
     const decision_barrier = owner.shard.authoritativeBarrier();
     const decision_digest = owner.shard.canonicalStateDigest();
     try std.testing.expectError(error.DecisionSnapshotMismatch, demo_authority.sendFromCommittedSnapshot(
@@ -862,7 +863,9 @@ fn checkOkxRawPrivateOwner(store: durable.Store, io: std.Io) !RawOwnerResult {
     try std.testing.expect((try implementation.ingestPrivateWs(times, filled_order)).rejection == null);
     while (try adapter.tryDrain()) |batch| try owner.applyAdapterBatch(batch);
     try std.testing.expectEqualSlices(u8, &settled_digest, &owner.shard.canonicalStateDigest());
-    const recovered = try demo_authority.Owner.recover(store, io, .{ .domain = .decision_log, .id = 91 });
+    const recovered = try std.testing.allocator.create(demo_authority.Owner);
+    defer std.testing.allocator.destroy(recovered);
+    try demo_authority.Owner.recoverInto(recovered, store, io, .{ .domain = .decision_log, .id = 91 });
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
     try std.testing.expect(raw.next_sequence > 1);
     return .{ .digest = settled_digest, .raw_count = raw.next_sequence - 1 };
@@ -920,7 +923,9 @@ test "Windows file store reopens OKX private report and economic Fill" {
             }
             var reopened = try durable.WindowsFileAdapter.openWindowsVerification(io, path);
             defer reopened.close(io);
-            const recovered = try demo_authority.Owner.recover(reopened.interface(), io, .{ .domain = .decision_log, .id = 91 });
+            const recovered = try std.testing.allocator.create(demo_authority.Owner);
+            defer std.testing.allocator.destroy(recovered);
+            try demo_authority.Owner.recoverInto(recovered, reopened.interface(), io, .{ .domain = .decision_log, .id = 91 });
             try std.testing.expectEqual(oms.OrderState.filled, recovered.shard.oms.orders[0].state);
             try std.testing.expectEqual(@as(i64, 20_000), recovered.shard.economicSummary().portfolio.spot.quantity);
             try std.testing.expect(recovered.shard.canonical_account.valid);

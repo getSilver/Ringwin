@@ -289,10 +289,13 @@ fn exerciseStored(mode: Case, supplied_store: ?durable.Store, io: std.Io) !void 
     if (mode == .stale_debt) try std.testing.expectError(error.ExchangeOpeningGateClosed, owner.shard.currentNativeRiskCash(okx.btc_usdt_spot));
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
-    recovered.* = try demo.Owner.recover(store, io, stream);
+    try demo.Owner.recoverInto(recovered, store, io, stream);
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
-    var bytes: [durable.max_snapshot_bytes]u8 = undefined;
-    const restored = try @import("trading_shard.zig").TradingShard.restoreSnapshot(try owner.committedSnapshot(&bytes));
+    const bytes = try std.heap.page_allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer std.heap.page_allocator.free(bytes);
+    const restored = try std.heap.page_allocator.create(@import("trading_shard.zig").SnapshotRestore);
+    defer std.heap.page_allocator.destroy(restored);
+    restored.barrier = try @import("trading_shard.zig").TradingShard.restoreSnapshotInto(&restored.shard, try owner.committedSnapshot(bytes));
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
     try std.testing.expectEqual(@as(u64, 1), chain.next_attempt_id);
 }
@@ -423,10 +426,13 @@ fn exerciseInterval(owner: *demo.Owner, implementation: *okx.OkxVenueAdapter, ch
     if (unapplied or bad_query or cursor_fault or difference or pagination == .missing_tail) try std.testing.expect(!owner.shard.operational_state.effectiveTradingAuthority());
     const recovered = try std.heap.page_allocator.create(demo.Owner);
     defer std.heap.page_allocator.destroy(recovered);
-    recovered.* = try demo.Owner.recover(store, io, stream);
+    try demo.Owner.recoverInto(recovered, store, io, stream);
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
-    var snapshot: [durable.max_snapshot_bytes]u8 = undefined;
-    const restored = try @import("trading_shard.zig").TradingShard.restoreSnapshot(try owner.committedSnapshot(&snapshot));
+    const snapshot = try std.heap.page_allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer std.heap.page_allocator.free(snapshot);
+    const restored = try std.heap.page_allocator.create(@import("trading_shard.zig").SnapshotRestore);
+    defer std.heap.page_allocator.destroy(restored);
+    restored.barrier = try @import("trading_shard.zig").TradingShard.restoreSnapshotInto(&restored.shard, try owner.committedSnapshot(snapshot));
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
     try std.testing.expectEqual(@as(u64, 1), chain.next_attempt_id);
 }
@@ -471,11 +477,13 @@ fn checkEconomicSweep(owner: *demo.Owner, original: *okx.OkxVenueAdapter, store:
     const allocator = std.heap.page_allocator;
     const raw_stream: durable.StreamIdentity = .{ .domain = .raw_ingress, .id = 1 };
     const boundary = try store.recover(io, raw_stream);
-    var expected = owner.shard;
+    const expected = try std.heap.page_allocator.create(@import("trading_shard.zig").TradingShard);
+    defer std.heap.page_allocator.destroy(expected);
+    @memcpy(std.mem.asBytes(expected), std.mem.asBytes(&owner.shard));
     for (proof.slice()) |record| _ = try expected.apply(.{ .venue = record });
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
-    recovered.* = try demo.Owner.recoverWithIngress(store, io, stream, raw_stream);
+    try demo.Owner.recoverWithIngressInto(recovered, store, io, stream, raw_stream);
     try std.testing.expect(recovered.shard.recovery_admission_pending);
     var sink = try raw_ingress.DurableSink.recover(store, io, raw_stream);
     var transport = Transport{};

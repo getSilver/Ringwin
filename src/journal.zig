@@ -7,7 +7,7 @@ const footer_magic: u32 = 0x444e4551; // QEND
 const segment_header_len = 64;
 const record_header_len = 72;
 const footer_len = 32;
-const max_payload_len = 4096;
+const max_payload_len = 16 * 1024 - record_header_len;
 
 pub const max_payload_size = max_payload_len;
 

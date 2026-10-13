@@ -486,11 +486,19 @@ pub const Cutover = struct {
     }
 };
 
+fn beginRecoveryFixtureInto(coordinator: *RecoveryCoordinator, restored: *const trading.TradingShard, barrier: u64) void {
+    coordinator.* = RecoveryCoordinator.begin(restored.*, barrier);
+}
+
 test "restart recovery remains fenced until exact venue evidence closes" {
-    const run = try fixture.startScenario();
-    var shard = run.shard;
+    const run = try std.testing.allocator.create(fixture.LiveRun);
+    defer std.testing.allocator.destroy(run);
+    try fixture.initializeScenario(run);
+    const shard = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(shard);
+    @memcpy(std.mem.asBytes(shard), std.mem.asBytes(&run.shard));
     var stable_journal = run.decision_journal;
-    _ = try applyCoreStable(&shard, &stable_journal, .{
+    _ = try applyCoreStable(shard, &stable_journal, .{
         .identity = 89,
         .payload = .{ .control_command = .{
             .command_identity = 89,
@@ -502,7 +510,7 @@ test "restart recovery remains fenced until exact venue evidence closes" {
         } },
     });
     const first_recovery_sequence = stable_journal.last_sequence + 1;
-    _ = try applyCoreStable(&shard, &stable_journal, .{
+    _ = try applyCoreStable(shard, &stable_journal, .{
         .identity = 90,
         .payload = .{ .control_command = .{
             .command_identity = 90,
@@ -514,7 +522,9 @@ test "restart recovery remains fenced until exact venue evidence closes" {
         } },
     });
 
-    var recovery = RecoveryCoordinator.begin(shard, first_recovery_sequence);
+    const recovery = try std.testing.allocator.create(RecoveryCoordinator);
+    defer std.testing.allocator.destroy(recovery);
+    beginRecoveryFixtureInto(recovery, shard, first_recovery_sequence);
     try std.testing.expectEqual(RecoveryPhase.recovery_only, recovery.phase);
     try std.testing.expect(!recovery.shard.operational_state.trading_authorized);
 
@@ -525,10 +535,15 @@ test "restart recovery remains fenced until exact venue evidence closes" {
     try std.testing.expectEqual(@as(u8, 1), recovery.shard.operational_state.latch_count);
     try std.testing.expectEqual(first_recovery_sequence + 1, stable_journal.last_sequence);
     try stable_journal.seal();
-    const replayed = try trading.recoverStable(.{}, stable_journal.bytes());
-    try std.testing.expectEqual(recovery.shard.operational_state.latch_count, replayed.shard.operational_state.latch_count);
+    const initial = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(initial);
+    initial.* = .{};
+    const replayed = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(replayed);
+    _ = try trading.recoverStableInto(replayed, initial, stable_journal.bytes());
+    try std.testing.expectEqual(recovery.shard.operational_state.latch_count, replayed.operational_state.latch_count);
 
-    recovery = RecoveryCoordinator.begin(shard, first_recovery_sequence);
+    beginRecoveryFixtureInto(recovery, shard, first_recovery_sequence);
     try recovery.reconcile(2, recovery.expectedVenueEvidence());
     try std.testing.expectEqual(RecoveryPhase.ready, recovery.phase);
     try std.testing.expectEqual(trading.operational.OperationalMode.ready, recovery.shard.operational_state.mode);
@@ -538,7 +553,10 @@ test "restart recovery remains fenced until exact venue evidence closes" {
 }
 
 test "strategy checkpoint catches up to the core barrier without publishing intents" {
-    var coordinator = RecoveryCoordinator.begin(.{}, 5);
+    const coordinator = try std.testing.allocator.create(RecoveryCoordinator);
+    defer std.testing.allocator.destroy(coordinator);
+    coordinator.shard = .{};
+    beginRecoveryFixtureInto(coordinator, &coordinator.shard, 5);
     coordinator.phase = .ready;
     coordinator.shard.operational_state.mode = .ready;
     const metadata: strategy_recovery.Metadata = .{
@@ -553,7 +571,7 @@ test "strategy checkpoint catches up to the core barrier without publishing inte
     };
     var storage: [512]u8 = undefined;
     const checkpoint = try strategy_recovery.encodeCheckpoint(&storage, metadata, .{ .accumulator = 30, .event_count = 2 });
-    const recovered = try catchUpStrategy(&coordinator, checkpoint, metadata, &.{
+    const recovered = try catchUpStrategy(coordinator, checkpoint, metadata, &.{
         .{ .sequence = 3, .delta = 30, .would_emit_intent = false },
         .{ .sequence = 4, .delta = 40, .would_emit_intent = true },
         .{ .sequence = 5, .delta = 50, .would_emit_intent = false },
@@ -564,13 +582,16 @@ test "strategy checkpoint catches up to the core barrier without publishing inte
     var damaged: [512]u8 = undefined;
     @memcpy(damaged[0..checkpoint.len], checkpoint);
     damaged[checkpoint.len - 1] ^= 1;
-    try std.testing.expectError(error.InvalidCheckpoint, catchUpStrategy(&coordinator, damaged[0..checkpoint.len], metadata, &.{}));
+    try std.testing.expectError(error.InvalidCheckpoint, catchUpStrategy(coordinator, damaged[0..checkpoint.len], metadata, &.{}));
     coordinator.phase = .recovery_only;
-    try std.testing.expectError(error.CoreRecoveryIncomplete, catchUpStrategy(&coordinator, checkpoint, metadata, &.{}));
+    try std.testing.expectError(error.CoreRecoveryIncomplete, catchUpStrategy(coordinator, checkpoint, metadata, &.{}));
 }
 
 test "strategy recovery falls back from a damaged newest published checkpoint" {
-    var coordinator = RecoveryCoordinator.begin(.{}, 5);
+    const coordinator = try std.testing.allocator.create(RecoveryCoordinator);
+    defer std.testing.allocator.destroy(coordinator);
+    coordinator.shard = .{};
+    beginRecoveryFixtureInto(coordinator, &coordinator.shard, 5);
     coordinator.phase = .ready;
     const older: strategy_recovery.Metadata = .{
         .schema_registry = 1,
@@ -593,7 +614,7 @@ test "strategy recovery falls back from a damaged newest published checkpoint" {
     };
     const newest = try strategy_recovery.encodeCheckpoint(&newest_storage, newest_metadata, .{ .accumulator = 100, .event_count = 4 });
     newest_storage[newest.len - 1] ^= 1;
-    const recovered = try catchUpPublishedStrategy(&coordinator, &.{
+    const recovered = try catchUpPublishedStrategy(coordinator, &.{
         .{ .container = newest_storage[0..newest.len], .metadata = newest_metadata },
         .{ .container = older_checkpoint, .metadata = older },
     }, &.{
@@ -605,7 +626,9 @@ test "strategy recovery falls back from a damaged newest published checkpoint" {
 }
 
 test "cutover drain activates exactly one version at a stable barrier" {
-    var shard: trading.TradingShard = .{ .release_generation = 4, .active_release = 10, .active_strategy_instance = 20 };
+    const shard = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(shard);
+    shard.* = .{ .release_generation = 4, .active_release = 10, .active_strategy_instance = 20 };
     var stable_journal = trading.journal.Journal.init();
     var cutover: Cutover = .{ .generation = 4, .active_release = 10, .active_strategy_instance = 20 };
     try cutover.prepare(.{
@@ -623,9 +646,9 @@ test "cutover drain activates exactly one version at a stable barrier" {
     var evidence: VenueEvidence = std.mem.zeroes(VenueEvidence);
     evidence.open_orders_closed = true;
     evidence.ledger_closed = true;
-    try cutover.drain(shard, evidence);
-    try cutover.catchUpCandidate(shard, shard);
-    const event = try cutover.activateStable(&shard, &stable_journal, 40);
+    try cutover.drain(shard.*, evidence);
+    try cutover.catchUpCandidate(shard.*, shard.*);
+    const event = try cutover.activateStable(shard, &stable_journal, 40);
     try std.testing.expectEqual(@as(u64, 11), cutover.active_release);
     try std.testing.expectEqual(@as(u128, 21), cutover.active_strategy_instance);
     try std.testing.expectEqual(@as(u64, 5), event.generation);
@@ -633,7 +656,9 @@ test "cutover drain activates exactly one version at a stable barrier" {
 }
 
 test "cutover activation is a stable canonical fact before authority switches" {
-    var shard: trading.TradingShard = .{};
+    const shard = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(shard);
+    shard.* = .{};
     var stable_journal = trading.journal.Journal.init();
     var cutover: Cutover = .{ .generation = 0, .active_release = 0, .active_strategy_instance = 0 };
     try cutover.prepare(.{
@@ -651,14 +676,16 @@ test "cutover activation is a stable canonical fact before authority switches" {
     var evidence: VenueEvidence = std.mem.zeroes(VenueEvidence);
     evidence.open_orders_closed = true;
     evidence.ledger_closed = true;
-    try cutover.drain(shard, evidence);
-    try cutover.catchUpCandidate(shard, shard);
-    const activation = try cutover.activateStable(&shard, &stable_journal, 40);
+    try cutover.drain(shard.*, evidence);
+    try cutover.catchUpCandidate(shard.*, shard.*);
+    const activation = try cutover.activateStable(shard, &stable_journal, 40);
     try std.testing.expectEqual(@as(u64, 1), stable_journal.last_sequence);
     try std.testing.expectEqual(@as(u64, 11), shard.active_release);
     try std.testing.expectEqual(activation.new_release, cutover.active_release);
     try stable_journal.seal();
-    var replayed: trading.ReplayTradingShard = .{};
+    const replayed = try std.testing.allocator.create(trading.ReplayTradingShard);
+    defer std.testing.allocator.destroy(replayed);
+    replayed.* = .{};
     var reader = try trading.journal.Reader.init(stable_journal.bytes());
     const record = switch (try reader.next()) {
         .record => |value| value,
@@ -670,7 +697,9 @@ test "cutover activation is a stable canonical fact before authority switches" {
 }
 
 test "strategy cutover persists a scoped fence and leaves unrelated orders live" {
-    var shard: trading.TradingShard = .{};
+    const shard = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(shard);
+    shard.* = .{};
     var journal = trading.journal.Journal.init();
     var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
     group.members[0] = .{ .intent_sequence = 1, .strategy_instance = 11, .operation = .place, .instrument = spot_instrument, .quantity = 1, .limit_price = .{ .instrument = spot_instrument, .rules_version = 1, .ticks = 2 }, .reservation = .{ .asset = settlement_asset, .atoms = 2 } };
@@ -679,7 +708,7 @@ test "strategy cutover persists a scoped fence and leaves unrelated orders live"
     try shard.oms.applyGroup(group);
     var cutover: Cutover = .{ .active_strategy_instance = 11 };
     try cutover.prepare(.{ .release = 1, .strategy_instance = 21, .strategy_definition = 1, .parameter_version = 1, .state_schema_version = 1, .transition = .keep, .structure_valid = true, .economic_digest_valid = true, .strategy_invariants_valid = true });
-    const commands = try cutover.quiesceStrategy(&shard, &journal, 11);
+    const commands = try cutover.quiesceStrategy(shard, &journal, 11);
     try std.testing.expectEqual(@as(usize, 1), commands.len);
     try std.testing.expectEqual(@as(u128, 11), commands[0].strategy_instance);
     try std.testing.expectEqual(trading.oms.OrderState.pending_cancel, shard.oms.orders[0].state);
@@ -687,18 +716,23 @@ test "strategy cutover persists a scoped fence and leaves unrelated orders live"
     try std.testing.expectEqual(@as(u64, 1), journal.last_sequence);
     var recovered_cutover: Cutover = .{};
     var outbox: [trading.oms.max_orders]trading.oms.Command = undefined;
-    const recovered = try recovered_cutover.recoverCancelOutbox(&shard, &outbox);
+    const recovered = try recovered_cutover.recoverCancelOutbox(shard, &outbox);
     try std.testing.expectEqual(@as(usize, 1), recovered.len);
     try std.testing.expectEqual(commands[0].command_id, recovered[0].command_id);
     try std.testing.expect(shard.strategyFenced(11));
     try shard.oms.applyReport(.{ .report_id = 1, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 1 });
-    const evidence = (RecoveryCoordinator{ .shard = shard, .barrier = 1 }).expectedVenueEvidence();
-    try cutover.drain(shard, evidence);
-    try std.testing.expectEqual(@as(usize, 0), (try recovered_cutover.recoverCancelOutbox(&shard, &outbox)).len);
+    const evidence_coordinator = try std.testing.allocator.create(RecoveryCoordinator);
+    defer std.testing.allocator.destroy(evidence_coordinator);
+    beginRecoveryFixtureInto(evidence_coordinator, shard, 1);
+    const evidence = evidence_coordinator.expectedVenueEvidence();
+    try cutover.drain(shard.*, evidence);
+    try std.testing.expectEqual(@as(usize, 0), (try recovered_cutover.recoverCancelOutbox(shard, &outbox)).len);
 }
 
 test "cutover failures and forward rollback never regress economic state or generation" {
-    var shard: trading.TradingShard = .{ .release_generation = 4, .active_release = 10, .active_strategy_instance = 20 };
+    const shard = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(shard);
+    shard.* = .{ .release_generation = 4, .active_release = 10, .active_strategy_instance = 20 };
     for (@import("asset_registry.zig").testDefinitions(6, 8)) |definition|
         _ = try shard.apply(.{ .core = .{ .identity = @intCast(shard.authoritativeBarrier() + 1), .payload = .{ .asset_definition_activated = definition } } });
     _ = try shard.apply(.{ .core = .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{
@@ -750,19 +784,24 @@ test "cutover failures and forward rollback never regress economic state or gene
 
     try cutover.prepare(candidate);
     try cutover.quiesce(100);
-    const evidence = (RecoveryCoordinator{ .shard = shard, .barrier = 1 }).expectedVenueEvidence();
-    try cutover.drain(shard, evidence);
+    const evidence_coordinator = try std.testing.allocator.create(RecoveryCoordinator);
+    defer std.testing.allocator.destroy(evidence_coordinator);
+    beginRecoveryFixtureInto(evidence_coordinator, shard, 1);
+    const evidence = evidence_coordinator.expectedVenueEvidence();
+    try cutover.drain(shard.*, evidence);
     try cutover.failBeforeActivation();
     try std.testing.expectEqual(@as(u64, 10), cutover.active_release);
 
     cutover.phase = .active;
     try cutover.prepare(candidate);
     try cutover.quiesce(102);
-    try cutover.drain(shard, evidence);
-    try cutover.catchUpCandidate(shard, shard);
-    const replay_baseline = shard;
-    const activated = try cutover.activateStable(&shard, &stable_journal, 41);
-    _ = try applyCoreStable(&shard, &stable_journal, .{ .identity = 50, .payload = .{ .venue_forced_execution = .{ .execution_id = 2, .side = .sell, .quantity = 1, .price_ticks = 55_000_000, .fee_atoms = 3, .penalty_atoms = 2 } } });
+    try cutover.drain(shard.*, evidence);
+    try cutover.catchUpCandidate(shard.*, shard.*);
+    const replay_baseline = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(replay_baseline);
+    @memcpy(std.mem.asBytes(replay_baseline), std.mem.asBytes(shard));
+    const activated = try cutover.activateStable(shard, &stable_journal, 41);
+    _ = try applyCoreStable(shard, &stable_journal, .{ .identity = 50, .payload = .{ .venue_forced_execution = .{ .execution_id = 2, .side = .sell, .quantity = 1, .price_ticks = 55_000_000, .fee_atoms = 3, .penalty_atoms = 2 } } });
 
     const rollback: Candidate = .{
         .release = 10,
@@ -777,10 +816,11 @@ test "cutover failures and forward rollback never regress economic state or gene
     };
     try cutover.prepare(rollback);
     try cutover.quiesce(104);
-    const rollback_evidence = (RecoveryCoordinator{ .shard = shard, .barrier = 1 }).expectedVenueEvidence();
-    try cutover.drain(shard, rollback_evidence);
-    try cutover.catchUpCandidate(shard, shard);
-    const rolled_back = try cutover.activateStable(&shard, &stable_journal, 42);
+    beginRecoveryFixtureInto(evidence_coordinator, shard, 1);
+    const rollback_evidence = evidence_coordinator.expectedVenueEvidence();
+    try cutover.drain(shard.*, rollback_evidence);
+    try cutover.catchUpCandidate(shard.*, shard.*);
+    const rolled_back = try cutover.activateStable(shard, &stable_journal, 42);
     try std.testing.expectEqual(activated.generation + 1, rolled_back.generation);
     try std.testing.expectEqual(@as(u64, 10), rolled_back.new_release);
     try std.testing.expectEqual(@as(u128, 22), rolled_back.new_strategy_instance);
@@ -792,7 +832,9 @@ test "cutover failures and forward rollback never regress economic state or gene
 
     try stable_journal.seal();
     var replay_reader = try trading.journal.Reader.init(stable_journal.bytes());
-    var replayed_shard: trading.ReplayTradingShard = .{ .shard = replay_baseline };
+    const replayed_shard = try std.testing.allocator.create(trading.ReplayTradingShard);
+    defer std.testing.allocator.destroy(replayed_shard);
+    @memcpy(std.mem.asBytes(&replayed_shard.shard), std.mem.asBytes(replay_baseline));
     while (true) switch (try replay_reader.next()) {
         .record => |record| _ = try replayed_shard.apply(try trading.decodeStableInput(record)),
         .end => break,

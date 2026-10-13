@@ -6,6 +6,17 @@ const builtin = @import("builtin");
 const std = @import("std");
 const journal = @import("journal.zig");
 const production_contract = @import("production_contract.zig");
+pub const business_history = @import("business_history.zig");
+const snapshot_codec = @import("snapshot_codec.zig");
+
+const HistoryHead = struct {
+    current: ?business_history.Receipt = null,
+    previous: ?business_history.Receipt = null,
+};
+const HistoryHeads = struct {
+    version: u16 = 1,
+    entries: [8]HistoryHead = @splat(.{}),
+};
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Crc32c = std.hash.crc.Crc32Iscsi;
@@ -14,7 +25,9 @@ const Crc32c = std.hash.crc.Crc32Iscsi;
 // coordinator + spare. Separate capture owners use separate Store instances.
 pub const max_streams = 8;
 pub const max_segment_bytes = 192 * 1024;
-pub const max_snapshot_bytes = 1024 * 1024; // Bounded resident multi-Instrument state and private seed; no 32MiB qualification.
+pub const max_snapshot_bytes = 32 * 1024 * 1024;
+const inline_snapshot_bytes = 1024 * 1024;
+// shortcut: large snapshot overflow is temporary owned storage; streaming cache qualification belongs to ticket 09.
 pub const max_manifest_entries = 32;
 
 const manifest_magic: u32 = 0x544e414d; // MANT
@@ -124,10 +137,28 @@ pub const Store = struct {
         verify_archive_receipt: ?*const fn (*anyopaque, std.Io, StreamIdentity, u64, [32]u8) anyerror!bool = null,
         replay_segments_after: ?*const fn (*anyopaque, std.Io, StreamIdentity, u64, usize, SegmentConsumer) anyerror!void = null,
         replay_segments: ?*const fn (*anyopaque, std.Io, StreamIdentity, SegmentConsumer) anyerror!void = null,
+        publish_order_history: ?*const fn (*anyopaque, std.Io, business_history.Batch) anyerror!business_history.Receipt = null,
+        query_order_history: ?*const fn (*anyopaque, std.Io, business_history.LookupRequest) anyerror!business_history.LookupResult = null,
+        recover_order_history: ?*const fn (*anyopaque, std.Io, business_history.Origin) anyerror!business_history.Receipt = null,
     };
 
     pub fn append(self: Store, io: std.Io, request: Append) !void {
         return self.vtable.append(self.context, io, request);
+    }
+
+    pub fn publishOrderHistory(self: Store, io: std.Io, batch: business_history.Batch) !business_history.Receipt {
+        const publish = self.vtable.publish_order_history orelse return error.OrderHistoryUnavailable;
+        return publish(self.context, io, batch);
+    }
+
+    pub fn queryOrderHistory(self: Store, io: std.Io, request: business_history.LookupRequest) !business_history.LookupResult {
+        const query = self.vtable.query_order_history orelse return error.OrderHistoryUnavailable;
+        return query(self.context, io, request);
+    }
+
+    pub fn recoverOrderHistory(self: Store, io: std.Io, origin: business_history.Origin) !business_history.Receipt {
+        const recover_history = self.vtable.recover_order_history orelse return error.OrderHistoryUnavailable;
+        return recover_history(self.context, io, origin);
     }
 
     pub fn commit(self: Store, io: std.Io, stream: StreamIdentity, barrier: u64) !void {
@@ -363,10 +394,23 @@ fn verifyJournal(stream: *const Stream) !RecoveryStatus {
     return .ready;
 }
 
+/// Borrow the committed prefix without hiding or modifying the physical crash suffix.
+pub fn committedJournalPrefix(bytes: []const u8, committed_barrier: u64) ![]const u8 {
+    var reader = try journal.Reader.init(bytes);
+    while (true) {
+        const offset = reader.offset;
+        switch (try reader.next()) {
+            .record => |record| if (record.sequence > committed_barrier) return bytes[0..offset],
+            .end => |status| return if (status == .truncated_tail) bytes[0..reader.offset] else bytes,
+        }
+    }
+}
+
 fn recoveryWithTails(stream: *const Stream, entry: ManifestEntry, snapshot: []const u8, barrier: u64, archived: [2][]const u8, archived_count: u8, gate: GateState) !Recovery {
     _ = try verifyJournal(stream);
     if (snapshot.len == 0 or (archived_count == 0 and !snapshotTailIsContinuous(stream, barrier))) return error.SnapshotObjectUnavailable;
-    const tail = if (barrier == stream.journal.last_sequence or stream.journal.records == 0) &.{} else stream.journal.bytes();
+    const committed_active = try committedJournalPrefix(stream.journal.bytes(), stream.committed_barrier);
+    const tail = if (barrier == stream.committed_barrier or stream.journal.records == 0) &.{} else committed_active;
     var tails: [3][]const u8 = .{ &.{}, &.{}, &.{} };
     for (0..archived_count) |index| tails[index] = archived[archived_count - index - 1];
     var count = archived_count;
@@ -392,16 +436,37 @@ fn virginJournalRecovery(stream: *const Stream, entry: ManifestEntry, gate: Gate
     return .{ .status = .recovery_only, .snapshot = &.{}, .tail = tail, .committed_barrier = stream.committed_barrier, .last_sequence = stream.journal.last_sequence, .segment_index = stream.segment_index, .segment_digest = entry.digest, .active_segment = tail, .segment_sealed = stream.journal.sealed, .tail_segments = .{ tail, &.{}, &.{} }, .tail_count = 1, .gate = gate };
 }
 
+fn snapshotCacheView(inline_bytes: *[inline_snapshot_bytes]u8, large: *std.ArrayList(u8), len: usize) []u8 {
+    return if (len <= inline_bytes.len) inline_bytes[0..len] else large.items[0..len];
+}
+
+fn snapshotCachePut(inline_bytes: *[inline_snapshot_bytes]u8, large: *std.ArrayList(u8), allocator: std.mem.Allocator, bytes: []const u8) !void {
+    if (bytes.len > max_snapshot_bytes) return error.SnapshotTooLarge;
+    if (bytes.len <= inline_bytes.len) {
+        std.mem.copyForwards(u8, inline_bytes[0..bytes.len], bytes);
+        large.deinit(allocator);
+        large.* = .empty;
+    } else {
+        try large.resize(allocator, bytes.len);
+        std.mem.copyForwards(u8, large.items, bytes);
+    }
+}
+
 pub const MemoryAdapter = struct {
     streams: [max_streams]Stream = @splat(.{}),
-    snapshots: [max_streams][max_snapshot_bytes]u8 = undefined,
-    previous_snapshots: [max_streams][max_snapshot_bytes]u8 = undefined,
+    snapshots: [max_streams][inline_snapshot_bytes]u8 = undefined,
+    large_snapshots: [max_streams]std.ArrayList(u8) = @splat(.empty),
+    previous_snapshots: [max_streams][inline_snapshot_bytes]u8 = undefined,
+    large_previous_snapshots: [max_streams]std.ArrayList(u8) = @splat(.empty),
     previous_snapshot_lens: [max_streams]usize = @splat(0),
     snapshot_lens: [max_streams]usize = @splat(0),
     snapshot_barriers: [max_streams]u64 = @splat(0),
     manifest: [max_manifest_entries]ManifestEntry = @splat(.{}),
     // MemoryAdapter is a deterministic test archive, not a production RSS proof.
     archive: std.ArrayList(MemoryArchive) = .empty,
+    history_objects: std.ArrayList(u8) = .empty,
+    history_roots: [max_streams]?business_history.Receipt = @splat(null),
+    previous_history_roots: [max_streams]?business_history.Receipt = @splat(null),
     allocator: std.mem.Allocator = std.heap.page_allocator,
     archive_bytes: usize = 0,
     archive_quota: usize = 32 * 1024 * 1024,
@@ -420,6 +485,9 @@ pub const MemoryAdapter = struct {
     pub fn deinit(self: *MemoryAdapter) void {
         for (self.archive.items) |item| self.allocator.free(item.payload);
         self.archive.deinit(self.allocator);
+        self.history_objects.deinit(self.allocator);
+        for (&self.large_snapshots) |*bytes| bytes.deinit(self.allocator);
+        for (&self.large_previous_snapshots) |*bytes| bytes.deinit(self.allocator);
     }
 
     pub fn interface(self: *MemoryAdapter) Store {
@@ -520,7 +588,8 @@ pub const MemoryAdapter = struct {
         const page = archivePage(entry.*);
         _ = try receiptFromPage(&page, digest(&page));
         const bytes = stream.journal.bytes();
-        if (self.archive_bytes > self.archive_quota or bytes.len > self.archive_quota - self.archive_bytes) {
+        const used = try std.math.add(usize, self.archive_bytes, self.history_objects.items.len);
+        if (used > self.archive_quota or bytes.len > self.archive_quota - used) {
             self.gate = .closed;
             return error.NoSpaceLeft;
         }
@@ -562,27 +631,49 @@ pub const MemoryAdapter = struct {
         if (entry.snapshot_barrier == barrier) {
             if (!std.mem.eql(u8, &entry.snapshot_digest, &digest(bytes))) return error.SnapshotIdentityConflict;
             const index = streamIndex(&self.streams, stream);
-            if (!std.mem.eql(u8, &digest(self.snapshots[index][0..self.snapshot_lens[index]]), &entry.snapshot_digest)) return error.SnapshotObjectUnavailable;
+            if (!std.mem.eql(u8, &digest(snapshotCacheView(&self.snapshots[index], &self.large_snapshots[index], self.snapshot_lens[index])), &entry.snapshot_digest)) return error.SnapshotObjectUnavailable;
             return;
         }
         const index = streamIndex(&self.streams, stream);
+        var preserved_input: ?[]u8 = null;
+        defer if (preserved_input) |copy| self.allocator.free(copy);
+        var input = bytes;
+        if (entry.snapshot_barrier != 0 and self.snapshot_lens[index] <= inline_snapshot_bytes) {
+            const previous = snapshotCacheView(&self.previous_snapshots[index], &self.large_previous_snapshots[index], self.previous_snapshot_lens[index]);
+            const input_start = @intFromPtr(bytes.ptr);
+            const previous_start = @intFromPtr(previous.ptr);
+            if (bytes.len != 0 and previous.len != 0 and input_start < previous_start + previous.len and previous_start < input_start + bytes.len) {
+                // Preserving inline current may overwrite or free borrowed previous bytes.
+                preserved_input = try self.allocator.dupe(u8, bytes);
+                input = preserved_input.?;
+            }
+        }
         if (entry.snapshot_barrier != 0) {
-            const current = self.snapshots[index][0..self.snapshot_lens[index]];
+            const current = snapshotCacheView(&self.snapshots[index], &self.large_snapshots[index], self.snapshot_lens[index]);
             if (current.len != 0 and std.mem.eql(u8, &digest(current), &entry.snapshot_digest)) {
                 entry.previous_snapshot_barrier = entry.snapshot_barrier;
                 entry.previous_snapshot_digest = entry.snapshot_digest;
-                @memcpy(self.previous_snapshots[index][0..current.len], current);
-                self.previous_snapshot_lens[index] = current.len;
+                if (current.len > inline_snapshot_bytes) {
+                    // Rotate owned overflow buffers: the old current remains a
+                    // complete fallback even if allocation of the new current fails.
+                    const previous_len = self.previous_snapshot_lens[index];
+                    std.mem.swap(std.ArrayList(u8), &self.large_snapshots[index], &self.large_previous_snapshots[index]);
+                    self.previous_snapshot_lens[index] = current.len;
+                    self.snapshot_lens[index] = previous_len;
+                } else {
+                    try snapshotCachePut(&self.previous_snapshots[index], &self.large_previous_snapshots[index], self.allocator, current);
+                    self.previous_snapshot_lens[index] = current.len;
+                }
             } else {
-                const previous = self.previous_snapshots[index][0..self.previous_snapshot_lens[index]];
+                const previous = snapshotCacheView(&self.previous_snapshots[index], &self.large_previous_snapshots[index], self.previous_snapshot_lens[index]);
                 if (entry.previous_snapshot_barrier == 0 or previous.len == 0 or !std.mem.eql(u8, &digest(previous), &entry.previous_snapshot_digest))
                     return error.SnapshotObjectUnavailable;
             }
         }
         entry.snapshot_barrier = barrier;
-        entry.snapshot_digest = digest(bytes);
-        @memcpy(self.snapshots[index][0..bytes.len], bytes);
-        self.snapshot_lens[index] = bytes.len;
+        entry.snapshot_digest = digest(input);
+        try snapshotCachePut(&self.snapshots[index], &self.large_snapshots[index], self.allocator, input);
+        self.snapshot_lens[index] = input.len;
         self.snapshot_barriers[index] = barrier;
     }
 
@@ -621,10 +712,10 @@ pub const MemoryAdapter = struct {
                 return emptyRecovery(self.gate);
             }
         }
-        var snapshot = self.snapshots[index][0..self.snapshot_lens[index]];
+        var snapshot = snapshotCacheView(&self.snapshots[index], &self.large_snapshots[index], self.snapshot_lens[index]);
         var barrier = self.snapshot_barriers[index];
         if (snapshot.len == 0 or !std.mem.eql(u8, &digest(snapshot), &entry.snapshot_digest)) {
-            snapshot = self.previous_snapshots[index][0..self.previous_snapshot_lens[index]];
+            snapshot = snapshotCacheView(&self.previous_snapshots[index], &self.large_previous_snapshots[index], self.previous_snapshot_lens[index]);
             barrier = entry.previous_snapshot_barrier;
             if (snapshot.len == 0 or !std.mem.eql(u8, &digest(snapshot), &entry.previous_snapshot_digest)) {
                 self.gate = .closed;
@@ -660,14 +751,18 @@ pub const MemoryAdapter = struct {
         return @as(*MemoryAdapter, @ptrCast(@alignCast(context))).gate;
     }
 
-    // ponytail: linear page lookup is bounded by the test archive quota;
-    // the production adapter opens immutable pages directly by content name.
+    // shortcut: old roots use a quota-bounded scan; production opens pages by content name.
     fn archiveItem(self: *MemoryAdapter, identity: StreamIdentity, root: [32]u8) !*const MemoryArchive {
-        for (self.archive.items) |*item| if (std.mem.eql(u8, &digest(&item.page), &root)) {
-            const receipt = try receiptFromPage(&item.page, root);
-            if (!sameStream(receipt.stream, identity)) return error.ArchiveRootConflict;
-            return item;
-        };
+        var index = self.archive.items.len;
+        while (index != 0) {
+            index -= 1;
+            const item = &self.archive.items[index];
+            if (std.mem.eql(u8, &digest(&item.page), &root)) {
+                const receipt = try receiptFromPage(&item.page, root);
+                if (!sameStream(receipt.stream, identity)) return error.ArchiveRootConflict;
+                return item;
+            }
+        }
         return error.ArchiveRootConflict;
     }
 
@@ -764,7 +859,84 @@ pub const MemoryAdapter = struct {
         }
     }
 
-    const memory_vtable: Store.VTable = .{ .append = appendImpl, .commit = commitImpl, .seal = sealImpl, .rotate = rotateImpl, .publish = publishImpl, .recover = recoverImpl, .gate = gateImpl, .archive_receipt = archiveReceiptImpl, .verify_archive_receipt = verifyArchiveReceiptImpl, .replay_segments = replaySegmentsImpl, .replay_segments_after = replaySegmentsAfterImpl };
+    fn historyIndex(self: *MemoryAdapter, origin: business_history.Origin, create: bool) !usize {
+        for (self.history_roots, 0..) |receipt, index| if (receipt) |known| {
+            if (std.meta.eql(known.root.origin, origin)) return index;
+        };
+        if (create) for (self.history_roots, 0..) |receipt, index| {
+            if (receipt == null) return index;
+        };
+        return error.OrderHistoryUnavailable;
+    }
+
+    fn readHistoryObject(context: *anyopaque, offset: u64, destination: []u8) anyerror!usize {
+        const self: *MemoryAdapter = @ptrCast(@alignCast(context));
+        if (offset > self.history_objects.items.len or destination.len > self.history_objects.items.len - offset)
+            return error.InvalidHistoryObject;
+        @memcpy(destination, self.history_objects.items[@intCast(offset)..][0..destination.len]);
+        return destination.len;
+    }
+
+    fn writeHistoryObject(context: *anyopaque, bytes: []const u8) anyerror!u64 {
+        const self: *MemoryAdapter = @ptrCast(@alignCast(context));
+        try self.fail(.append);
+        const used = try std.math.add(usize, self.archive_bytes, self.history_objects.items.len);
+        if (used > self.archive_quota or bytes.len > self.archive_quota - used) return error.NoSpaceLeft;
+        const offset: u64 = @intCast(self.history_objects.items.len);
+        try self.history_objects.appendSlice(self.allocator, bytes);
+        return offset;
+    }
+
+    fn historyObjects(self: *MemoryAdapter) business_history.Objects {
+        return .{ .context = self, .read_fn = readHistoryObject, .write_fn = writeHistoryObject };
+    }
+
+    fn publishOrderHistoryImpl(context: *anyopaque, _: std.Io, batch: business_history.Batch) anyerror!business_history.Receipt {
+        const self: *MemoryAdapter = @ptrCast(@alignCast(context));
+        errdefer self.gate = .closed;
+        if (self.gate != .open) return error.DurableStoreClosed;
+        const index = try self.historyIndex(batch.origin, true);
+        const expected_batch = try business_history.batchDigest(batch);
+        if (self.history_roots[index]) |current| {
+            if (std.mem.eql(u8, &current.batch_digest, &expected_batch)) {
+                try business_history.verifyBatch(self.historyObjects(), current, batch);
+                return current;
+            }
+            if (batch.previous_root == null or !std.meta.eql(batch.previous_root.?, current.root)) return error.StaleHistoryRoot;
+        } else if (batch.previous_root != null) return error.StaleHistoryRoot;
+        const receipt = try business_history.publish(self.historyObjects(), batch);
+        try self.fail(.archive_sync);
+        try business_history.verifyBatch(self.historyObjects(), receipt, batch);
+        try self.fail(.root_publish);
+        self.previous_history_roots[index] = self.history_roots[index];
+        self.history_roots[index] = receipt;
+        return receipt;
+    }
+
+    fn queryOrderHistoryImpl(context: *anyopaque, _: std.Io, request: business_history.LookupRequest) anyerror!business_history.LookupResult {
+        const self: *MemoryAdapter = @ptrCast(@alignCast(context));
+        if (self.gate != .open) return error.DurableStoreClosed;
+        const index = try self.historyIndex(request.key.origin, false);
+        const current = self.history_roots[index].?;
+        const selected = if (std.mem.eql(u8, &current.root.root_digest, &request.root_digest)) current else if (self.previous_history_roots[index]) |previous|
+            if (std.mem.eql(u8, &previous.root.root_digest, &request.root_digest)) previous else return error.StaleHistoryRoot
+        else
+            return error.StaleHistoryRoot;
+        const result = try business_history.query(self.historyObjects(), selected.root, request);
+        try requireCurrentAbsence(current.root, &result);
+        return result;
+    }
+
+    fn recoverOrderHistoryImpl(context: *anyopaque, _: std.Io, origin: business_history.Origin) anyerror!business_history.Receipt {
+        const self: *MemoryAdapter = @ptrCast(@alignCast(context));
+        if (self.gate != .open) return error.DurableStoreClosed;
+        const index = try self.historyIndex(origin, false);
+        const receipt = self.history_roots[index].?;
+        try business_history.verifyStoredRoot(self.historyObjects(), receipt.root);
+        return receipt;
+    }
+
+    const memory_vtable: Store.VTable = .{ .append = appendImpl, .commit = commitImpl, .seal = sealImpl, .rotate = rotateImpl, .publish = publishImpl, .recover = recoverImpl, .gate = gateImpl, .archive_receipt = archiveReceiptImpl, .verify_archive_receipt = verifyArchiveReceiptImpl, .replay_segments = replaySegmentsImpl, .replay_segments_after = replaySegmentsAfterImpl, .publish_order_history = publishOrderHistoryImpl, .query_order_history = queryOrderHistoryImpl, .recover_order_history = recoverOrderHistoryImpl };
 };
 
 fn streamIndex(streams: *[max_streams]Stream, target: *const Stream) usize {
@@ -777,7 +949,8 @@ pub const LinuxFileAdapter = struct {
     replay_scratch: [max_segment_bytes]u8 = undefined,
     fallback_archives: [2][max_segment_bytes]u8 = undefined,
     streams: [max_streams]Stream = @splat(.{}),
-    snapshots: [max_streams][max_snapshot_bytes]u8 = undefined,
+    snapshots: [max_streams][inline_snapshot_bytes]u8 = undefined,
+    large_snapshots: [max_streams]std.ArrayList(u8) = @splat(.empty),
     snapshot_lens: [max_streams]usize = @splat(0),
     snapshot_barriers: [max_streams]u64 = @splat(0),
     manifest: [max_manifest_entries]ManifestEntry = @splat(.{}),
@@ -814,7 +987,12 @@ pub const LinuxFileAdapter = struct {
         return .{ .dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{}) };
     }
 
+    pub fn deinit(self: *LinuxFileAdapter) void {
+        for (&self.large_snapshots) |*bytes| bytes.deinit(std.heap.page_allocator);
+    }
+
     pub fn close(self: *LinuxFileAdapter, io: std.Io) void {
+        self.deinit();
         self.dir.close(io);
     }
 
@@ -1099,7 +1277,7 @@ pub const LinuxFileAdapter = struct {
             return err;
         };
         const index = streamIndex(&self.streams, stream);
-        @memcpy(self.snapshots[index][0..bytes.len], bytes);
+        try snapshotCachePut(&self.snapshots[index], &self.large_snapshots[index], std.heap.page_allocator, bytes);
         self.snapshot_lens[index] = bytes.len;
         self.snapshot_barriers[index] = barrier;
         try self.failAt(.reclaim);
@@ -1181,7 +1359,7 @@ pub const LinuxFileAdapter = struct {
             }
             if (end_sequence != barrier) return error.ArchiveRootConflict;
         }
-        return recoveryWithTails(stream, entry.*, self.snapshots[index][0..self.snapshot_lens[index]], barrier, archives, count, self.gate) catch {
+        return recoveryWithTails(stream, entry.*, snapshotCacheView(&self.snapshots[index], &self.large_snapshots[index], self.snapshot_lens[index]), barrier, archives, count, self.gate) catch {
             self.gate = .closed;
             return emptyRecovery(self.gate);
         };
@@ -1300,7 +1478,160 @@ pub const LinuxFileAdapter = struct {
         return receipt;
     }
 
-    const file_vtable: Store.VTable = .{ .append = appendImpl, .commit = commitImpl, .seal = sealImpl, .rotate = rotateImpl, .publish = publishImpl, .recover = recoverImpl, .gate = gateImpl, .replay_segments = replaySegmentsImpl, .archive_receipt = archiveReceiptImpl, .verify_archive_receipt = verifyArchiveReceiptImpl, .replay_segments_after = replaySegmentsAfterImpl };
+    const HistoryObjects = struct {
+        adapter: *LinuxFileAdapter,
+        io: std.Io,
+        file: std.Io.File,
+        end: u64,
+
+        fn read(context: *anyopaque, offset: u64, bytes: []u8) anyerror!usize {
+            const self: *HistoryObjects = @ptrCast(@alignCast(context));
+            if (offset < 8 or offset > self.end or bytes.len > self.end - offset) return error.InvalidHistoryObject;
+            return self.file.readPositionalAll(self.io, bytes, offset);
+        }
+
+        fn write(context: *anyopaque, bytes: []const u8) anyerror!u64 {
+            const self: *HistoryObjects = @ptrCast(@alignCast(context));
+            try self.adapter.failAt(.append);
+            // shortcut: enforce allocated-volume quota and reclaim obsolete pages before ticket09 qualification.
+            const quota: u64 = 8 * 1024 * 1024 * 1024 * 1024;
+            if (self.end > quota or bytes.len > quota - self.end) return error.NoSpaceLeft;
+            const offset = self.end;
+            try self.file.writePositionalAll(self.io, bytes, offset);
+            self.end = try std.math.add(u64, offset, bytes.len);
+            return offset;
+        }
+
+        fn interface(self: *HistoryObjects) business_history.Objects {
+            return .{ .context = self, .read_fn = read, .write_fn = write };
+        }
+    };
+
+    fn readHistoryHeads(self: *LinuxFileAdapter, io: std.Io) !HistoryHeads {
+        var bytes: [8192]u8 = undefined;
+        const length = readInto(self.dir, io, "order-history.roots", &bytes) catch |err| switch (err) {
+            error.FileNotFound => {
+                const objects = self.dir.openFile(io, "order-history.objects", .{}) catch |open_error| switch (open_error) {
+                    error.FileNotFound => return .{},
+                    else => return open_error,
+                };
+                defer objects.close(io);
+                // Nonempty history without its roots cannot establish virginity.
+                if (try objects.length(io) > 8) return error.InvalidHistoryRoot;
+                return .{};
+            },
+            else => return err,
+        };
+        if (length < 40 or !std.mem.eql(u8, bytes[0..8], "RWOHHD01") or
+            !std.mem.eql(u8, bytes[length - 32 .. length], &digest(bytes[0 .. length - 32]))) return error.InvalidHistoryRoot;
+        const heads = try snapshot_codec.decodeBare(bytes[8 .. length - 32], HistoryHeads);
+        if (heads.version != 1) return error.InvalidHistoryRoot;
+        for (heads.entries, 0..) |head, index| {
+            if (head.current) |current| {
+                _ = try business_history.verifyReceipt(current, current.root.origin, current.qualification_digest, if (head.previous) |previous| previous.root else null);
+                for (heads.entries[0..index]) |prior| if (prior.current) |known| {
+                    if (std.meta.eql(current.root.origin, known.root.origin)) return error.InvalidHistoryRoot;
+                };
+            } else if (head.previous != null) return error.InvalidHistoryRoot;
+        }
+        return heads;
+    }
+
+    fn historyHeadIndex(heads: *const HistoryHeads, origin: business_history.Origin, create: bool) !usize {
+        for (heads.entries, 0..) |head, index| if (head.current) |current| {
+            if (std.meta.eql(current.root.origin, origin)) return index;
+        };
+        if (create) for (heads.entries, 0..) |head, index| {
+            if (head.current == null) return index;
+        };
+        return error.OrderHistoryUnavailable;
+    }
+
+    fn checkHistoryObjects(file: std.Io.File, io: std.Io) !u64 {
+        const length = try file.length(io);
+        var magic: [8]u8 = undefined;
+        if (length < magic.len or try file.readPositionalAll(io, &magic, 0) != magic.len or
+            !std.mem.eql(u8, &magic, "RWOHOB01")) return error.InvalidHistoryObject;
+        return length;
+    }
+
+    fn publishOrderHistoryImpl(context: *anyopaque, io: std.Io, batch: business_history.Batch) anyerror!business_history.Receipt {
+        const self: *LinuxFileAdapter = @ptrCast(@alignCast(context));
+        errdefer self.gate = .closed;
+        if (self.gate != .open) return error.DurableStoreClosed;
+        const file = try self.dir.createFile(io, "order-history.objects", .{ .read = true, .truncate = false, .lock = .exclusive, .lock_nonblocking = true });
+        defer file.close(io);
+        var heads = try self.readHistoryHeads(io);
+        const index = try historyHeadIndex(&heads, batch.origin, true);
+        const expected_batch = try business_history.batchDigest(batch);
+        if (heads.entries[index].current) |current| {
+            if (std.mem.eql(u8, &current.batch_digest, &expected_batch)) {
+                var existing: HistoryObjects = .{ .adapter = self, .io = io, .file = file, .end = try checkHistoryObjects(file, io) };
+                try business_history.verifyBatch(existing.interface(), current, batch);
+                return current;
+            }
+            if (batch.previous_root == null or !std.meta.eql(batch.previous_root.?, current.root)) return error.StaleHistoryRoot;
+        } else if (batch.previous_root != null) return error.StaleHistoryRoot;
+        var length = try file.length(io);
+        if (length == 0) {
+            for (heads.entries) |head| if (head.current != null) return error.InvalidHistoryObject;
+            try file.writePositionalAll(io, "RWOHOB01", 0);
+            length = 8;
+        } else length = try checkHistoryObjects(file, io);
+        var objects: HistoryObjects = .{ .adapter = self, .io = io, .file = file, .end = length };
+        const receipt = try business_history.publish(objects.interface(), batch);
+        try self.failAt(.archive_sync);
+        try file.sync(io);
+        try business_history.verifyBatch(objects.interface(), receipt, batch);
+        heads.entries[index].previous = heads.entries[index].current;
+        heads.entries[index].current = receipt;
+        var encoded: [8192]u8 = undefined;
+        @memcpy(encoded[0..8], "RWOHHD01");
+        const payload = try snapshot_codec.encodeBare(encoded[8 .. encoded.len - 32], heads);
+        const head_len = 8 + payload.len;
+        @memcpy(encoded[head_len..][0..32], &digest(encoded[0..head_len]));
+        try self.failAt(.snapshot_sync);
+        try writeFile(self.dir, io, "order-history.roots.tmp", encoded[0 .. head_len + 32], true);
+        try self.failAt(.root_publish);
+        try self.dir.rename("order-history.roots.tmp", self.dir, "order-history.roots", io);
+        try syncDirectory(self.dir);
+        try self.failAt(.commit);
+        return receipt;
+    }
+
+    fn queryOrderHistoryImpl(context: *anyopaque, io: std.Io, request: business_history.LookupRequest) anyerror!business_history.LookupResult {
+        const self: *LinuxFileAdapter = @ptrCast(@alignCast(context));
+        if (self.gate != .open) return error.DurableStoreClosed;
+        const file = try self.dir.openFile(io, "order-history.objects", .{ .lock = .shared, .lock_nonblocking = true });
+        defer file.close(io);
+        const heads = try self.readHistoryHeads(io);
+        const index = try historyHeadIndex(&heads, request.key.origin, false);
+        const head = heads.entries[index];
+        const selected = if (std.mem.eql(u8, &head.current.?.root.root_digest, &request.root_digest)) head.current.? else if (head.previous) |previous|
+            if (std.mem.eql(u8, &previous.root.root_digest, &request.root_digest)) previous else return error.StaleHistoryRoot
+        else
+            return error.StaleHistoryRoot;
+        var objects: HistoryObjects = .{ .adapter = self, .io = io, .file = file, .end = try checkHistoryObjects(file, io) };
+        const result = try business_history.query(objects.interface(), selected.root, request);
+        try requireCurrentAbsence(head.current.?.root, &result);
+        return result;
+    }
+
+    fn recoverOrderHistoryImpl(context: *anyopaque, io: std.Io, origin: business_history.Origin) anyerror!business_history.Receipt {
+        const self: *LinuxFileAdapter = @ptrCast(@alignCast(context));
+        errdefer self.gate = .closed;
+        if (self.gate != .open) return error.DurableStoreClosed;
+        const file = try self.dir.openFile(io, "order-history.objects", .{ .lock = .shared, .lock_nonblocking = true });
+        defer file.close(io);
+        const heads = try self.readHistoryHeads(io);
+        const index = try historyHeadIndex(&heads, origin, false);
+        const receipt = heads.entries[index].current.?;
+        var objects: HistoryObjects = .{ .adapter = self, .io = io, .file = file, .end = try checkHistoryObjects(file, io) };
+        try business_history.verifyStoredRoot(objects.interface(), receipt.root);
+        return receipt;
+    }
+
+    const file_vtable: Store.VTable = .{ .append = appendImpl, .commit = commitImpl, .seal = sealImpl, .rotate = rotateImpl, .publish = publishImpl, .recover = recoverImpl, .gate = gateImpl, .replay_segments = replaySegmentsImpl, .archive_receipt = archiveReceiptImpl, .verify_archive_receipt = verifyArchiveReceiptImpl, .replay_segments_after = replaySegmentsAfterImpl, .publish_order_history = publishOrderHistoryImpl, .query_order_history = queryOrderHistoryImpl, .recover_order_history = recoverOrderHistoryImpl };
 
     fn persistSegment(self: *LinuxFileAdapter, io: std.Io, stream: *Stream, sync: bool) !void {
         const identity = stream.identity;
@@ -1361,7 +1692,7 @@ pub const LinuxFileAdapter = struct {
         const payload = bytes[snapshot_header_len..len];
         const expected = digest(payload);
         if (!std.mem.eql(u8, &expected, bytes[40..72]) or !std.mem.eql(u8, &expected, &expected_digest) or get(u64, &bytes, 24) != barrier) return false;
-        @memcpy(self.snapshots[index][0..payload.len], payload);
+        try snapshotCachePut(&self.snapshots[index], &self.large_snapshots[index], std.heap.page_allocator, payload);
         self.snapshot_lens[index] = payload.len;
         self.snapshot_barriers[index] = get(u64, &bytes, 24);
         return true;
@@ -1467,6 +1798,342 @@ fn syncDirectory(dir: std.Io.Dir) !void {
 }
 
 pub const WindowsFileAdapter = LinuxFileAdapter;
+
+test "order history public store publish query verifies same conflict and covered first" {
+    const h = business_history;
+    var memory = MemoryAdapter.initWithAllocator(std.testing.allocator);
+    defer memory.deinit();
+    const store = memory.interface();
+    const origin: h.Origin = .{ .stream = .{ .domain = .decision_log, .id = 770 }, .account = 9 };
+    const key: h.Key = .{ .origin = origin, .identity = .{ .order = 1 } };
+    const records = [_]h.Record{.{ .bytes = "complete archived order", .payload_digest = h.hash("complete archived order") }};
+    const entries = [_]h.Entry{.{ .key = key, .record_index = 0 }};
+    const receipt = try store.publishOrderHistory(undefined, .{ .origin = origin, .barrier = 12, .epoch = 1, .qualification_digest = h.hash("qualification"), .records = &records, .entries = &entries });
+    var request: h.LookupRequest = .{ .pending_id = 99, .key = key, .candidate_payload_digest = records[0].payload_digest, .original_input_digest = h.hash("original ingress"), .root_digest = receipt.root.root_digest, .epoch = 1, .barrier = 12 };
+    const proof = try store.queryOrderHistory(undefined, request);
+    try std.testing.expectEqual(h.Verdict.same, try h.verifyResult(request, &proof.proof, receipt.root));
+    try h.validateRecord(&proof);
+    request.candidate_payload_digest = h.hash("changed payload");
+    const conflict = try store.queryOrderHistory(undefined, request);
+    try std.testing.expectEqual(h.Verdict.conflict, try h.verifyResult(request, &conflict.proof, receipt.root));
+    request.key.identity = .{ .order = 2 };
+    const absent = try store.queryOrderHistory(undefined, request);
+    try std.testing.expectEqual(h.Verdict.proven_first, try h.verifyResult(request, &absent.proof, receipt.root));
+    try std.testing.expectEqualDeep(receipt, try store.recoverOrderHistory(undefined, origin));
+    var tampered = proof.proof;
+    tampered.lower.?.siblings[0][0] ^= 1;
+    try std.testing.expectError(error.InvalidHistoryProof, h.verifyResult(proof.proof.request, &tampered, receipt.root));
+    var damaged_record = proof;
+    damaged_record.record_bytes[0] ^= 1;
+    try std.testing.expectError(error.InvalidHistoryRecord, h.validateRecord(&damaged_record));
+}
+
+test "order history public file store reopens the same authenticated root and duplicate body" {
+    const h = business_history;
+    const allocator = std.testing.allocator;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const io = std.testing.io;
+    const first = try allocator.create(LinuxFileAdapter);
+    defer allocator.destroy(first);
+    first.* = .{ .dir = temp.dir };
+    const origin: h.Origin = .{ .stream = .{ .domain = .decision_log, .id = 772 }, .account = 9 };
+    const key: h.Key = .{ .origin = origin, .identity = .{ .command = 11 } };
+    const body = "complete accepted command proof without a send capability";
+    const records = [_]h.Record{.{ .bytes = body, .payload_digest = h.hash(body) }};
+    const entries = [_]h.Entry{.{ .key = key, .record_index = 0 }};
+    const batch: h.Batch = .{ .origin = origin, .barrier = 12, .epoch = 1, .qualification_digest = h.hash("safe terminal order"), .records = &records, .entries = &entries };
+    const receipt = try first.interface().publishOrderHistory(io, batch);
+    const reopened = try allocator.create(LinuxFileAdapter);
+    defer allocator.destroy(reopened);
+    reopened.* = .{ .dir = temp.dir };
+    const restored = try reopened.interface().recoverOrderHistory(io, origin);
+    try std.testing.expectEqualDeep(receipt, restored);
+    const request: h.LookupRequest = .{ .pending_id = 1, .key = key, .candidate_payload_digest = h.hash(body), .original_input_digest = h.hash("old command retry"), .root_digest = restored.root.root_digest, .epoch = 1, .barrier = 12 };
+    const result = try reopened.interface().queryOrderHistory(io, request);
+    try std.testing.expectEqual(h.Verdict.same, try h.verifyResult(request, &result.proof, receipt.root));
+    try h.validateRecord(&result);
+    try std.testing.expectEqualStrings(body, result.record_bytes[0..result.record_len]);
+    try std.testing.expectEqualDeep(receipt, try reopened.interface().publishOrderHistory(io, batch));
+    const damaged = try temp.dir.openFile(io, "order-history.objects", .{ .mode = .read_write });
+    try damaged.writePositionalAll(io, "X", receipt.root.tree_offset);
+    try damaged.sync(io);
+    damaged.close(io);
+    try std.testing.expectError(error.InvalidHistoryPage, reopened.interface().publishOrderHistory(io, batch));
+    try std.testing.expectEqual(GateState.closed, reopened.interface().safetyGate());
+}
+
+fn requireCurrentAbsence(current: business_history.Root, result: *const business_history.LookupResult) !void {
+    if (!std.mem.eql(u8, &current.root_digest, &result.proof.root.root_digest)) {
+        switch (try business_history.verifyResult(result.proof.request, &result.proof, result.proof.root)) {
+            .same, .conflict => {},
+            .proven_first, .expired => return error.StaleHistoryRoot,
+        }
+    }
+}
+
+fn historyTestRequest(root: business_history.Root, command_id: u64) business_history.LookupRequest {
+    const h = business_history;
+    return .{
+        .pending_id = command_id + 1,
+        .key = .{ .origin = root.origin, .identity = .{ .command = command_id } },
+        .candidate_payload_digest = h.hash("archived command body"),
+        .original_input_digest = h.hash("stable original input"),
+        .root_digest = root.root_digest,
+        .epoch = root.epoch,
+        .barrier = root.barrier,
+    };
+}
+
+fn publishHistoryTestCommand(store: Store, io: std.Io, origin: business_history.Origin, previous: ?business_history.Root, command_id: u64) !business_history.Receipt {
+    const h = business_history;
+    const records = [_]h.Record{.{ .bytes = "archived command body", .payload_digest = h.hash("archived command body") }};
+    const entries = [_]h.Entry{.{ .key = .{ .origin = origin, .identity = .{ .command = command_id } }, .record_index = 0 }};
+    return store.publishOrderHistory(io, .{
+        .origin = origin,
+        .previous_root = previous,
+        .barrier = if (previous) |old| old.barrier + 10 else 10,
+        .epoch = 1,
+        .qualification_digest = h.hash("terminal qualification"),
+        .records = &records,
+        .entries = &entries,
+    });
+}
+
+test "order history file missing root cannot bootstrap over existing objects" {
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const io = std.testing.io;
+    const adapter = try std.testing.allocator.create(LinuxFileAdapter);
+    defer std.testing.allocator.destroy(adapter);
+    adapter.* = .{ .dir = temp.dir };
+    const origin: business_history.Origin = .{ .stream = .{ .domain = .decision_log, .id = 780 }, .account = 9 };
+    _ = try publishHistoryTestCommand(adapter.interface(), io, origin, null, 1);
+    try temp.dir.deleteFile(io, "order-history.roots");
+    const reopened = try std.testing.allocator.create(LinuxFileAdapter);
+    defer std.testing.allocator.destroy(reopened);
+    reopened.* = .{ .dir = temp.dir };
+    try std.testing.expectError(error.InvalidHistoryRoot, publishHistoryTestCommand(reopened.interface(), io, origin, null, 2));
+}
+
+test "order history file frozen previous root may prove duplicate but cannot prove fresh" {
+    const h = business_history;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const io = std.testing.io;
+    const adapter = try std.testing.allocator.create(LinuxFileAdapter);
+    defer std.testing.allocator.destroy(adapter);
+    adapter.* = .{ .dir = temp.dir };
+    const origin: h.Origin = .{ .stream = .{ .domain = .decision_log, .id = 781 }, .account = 9 };
+    const old = try publishHistoryTestCommand(adapter.interface(), io, origin, null, 1);
+    const next = try publishHistoryTestCommand(adapter.interface(), io, origin, old.root, 2);
+    const old_duplicate_request = historyTestRequest(old.root, 1);
+    const old_duplicate = try adapter.interface().queryOrderHistory(io, old_duplicate_request);
+    try std.testing.expectEqual(h.Verdict.same, try h.verifyResult(old_duplicate_request, &old_duplicate.proof, old.root));
+    try h.validateRecord(&old_duplicate);
+    try std.testing.expectError(error.StaleHistoryRoot, adapter.interface().queryOrderHistory(io, historyTestRequest(old.root, 2)));
+    const current_request = historyTestRequest(next.root, 2);
+    const current = try adapter.interface().queryOrderHistory(io, current_request);
+    try std.testing.expectEqual(h.Verdict.same, try h.verifyResult(current_request, &current.proof, next.root));
+}
+
+test "order history file publication fault boundaries reopen a complete old or new root" {
+    const h = business_history;
+    const io = std.testing.io;
+    const points = [_]FaultPoint{ .append, .archive_sync, .snapshot_sync, .root_publish, .commit };
+    for (points) |point| {
+        var temp = std.testing.tmpDir(.{});
+        defer temp.cleanup();
+        const adapter = try std.testing.allocator.create(LinuxFileAdapter);
+        defer std.testing.allocator.destroy(adapter);
+        adapter.* = .{ .dir = temp.dir };
+        const origin: h.Origin = .{ .stream = .{ .domain = .decision_log, .id = 782 }, .account = 9 };
+        const first = try publishHistoryTestCommand(adapter.interface(), io, origin, null, 1);
+        const old = try publishHistoryTestCommand(adapter.interface(), io, origin, first.root, 2);
+        adapter.injectFaultAt(.sync_timeout, point);
+        try std.testing.expectError(error.SyncTimeout, publishHistoryTestCommand(adapter.interface(), io, origin, old.root, 3));
+        try std.testing.expectEqual(GateState.closed, adapter.interface().safetyGate());
+        const reopened = try std.testing.allocator.create(LinuxFileAdapter);
+        defer std.testing.allocator.destroy(reopened);
+        reopened.* = .{ .dir = temp.dir };
+        const restored = try reopened.interface().recoverOrderHistory(io, origin);
+        const published = point == .commit;
+        try std.testing.expectEqual(if (published) @as(u64, 3) else 2, restored.root.generation);
+        try std.testing.expectEqual(if (published) @as(u64, 30) else 20, restored.root.barrier);
+        if (!published) try std.testing.expectEqualDeep(old, restored);
+        const duplicate_request = historyTestRequest(restored.root, 1);
+        const duplicate = try reopened.interface().queryOrderHistory(io, duplicate_request);
+        try std.testing.expectEqual(h.Verdict.same, try h.verifyResult(duplicate_request, &duplicate.proof, restored.root));
+        try h.validateRecord(&duplicate);
+        const new_request = historyTestRequest(restored.root, 3);
+        const new_result = try reopened.interface().queryOrderHistory(io, new_request);
+        try std.testing.expectEqual(if (published) h.Verdict.same else .proven_first, try h.verifyResult(new_request, &new_result.proof, restored.root));
+        if (published) try h.validateRecord(&new_result);
+        const old_request = historyTestRequest(old.root, 2);
+        const old_result = try reopened.interface().queryOrderHistory(io, old_request);
+        try std.testing.expectEqual(h.Verdict.same, try h.verifyResult(old_request, &old_result.proof, old.root));
+        try h.validateRecord(&old_result);
+        // Retrying a committed publication cannot create a fourth generation.
+        const retried = try publishHistoryTestCommand(reopened.interface(), io, origin, old.root, 3);
+        try std.testing.expectEqual(@as(u64, 3), retried.root.generation);
+        const again = try std.testing.allocator.create(LinuxFileAdapter);
+        defer std.testing.allocator.destroy(again);
+        again.* = .{ .dir = temp.dir };
+        try std.testing.expectEqualDeep(retried, try again.interface().recoverOrderHistory(io, origin));
+    }
+}
+
+test "order history file physical root damage missing object and truncated page fail closed" {
+    const io = std.testing.io;
+    const Damage = enum { root_truncated, root_corrupt, objects_missing, objects_truncated, page_corrupt, record_corrupt };
+    for (std.enums.values(Damage)) |damage| {
+        var temp = std.testing.tmpDir(.{});
+        defer temp.cleanup();
+        const adapter = try std.testing.allocator.create(LinuxFileAdapter);
+        defer std.testing.allocator.destroy(adapter);
+        adapter.* = .{ .dir = temp.dir };
+        const origin: business_history.Origin = .{ .stream = .{ .domain = .decision_log, .id = 783 }, .account = 9 };
+        const receipt = try publishHistoryTestCommand(adapter.interface(), io, origin, null, 1);
+        const request = historyTestRequest(receipt.root, 1);
+        const intact = try adapter.interface().queryOrderHistory(io, request);
+        switch (damage) {
+            .root_truncated => try writeFile(temp.dir, io, "order-history.roots", "RWOHHD01", true),
+            .root_corrupt => {
+                const file = try temp.dir.openFile(io, "order-history.roots", .{ .mode = .read_write });
+                defer file.close(io);
+                try file.writePositionalAll(io, "X", 16);
+                try file.sync(io);
+            },
+            .objects_missing => try temp.dir.deleteFile(io, "order-history.objects"),
+            .objects_truncated => try writeFile(temp.dir, io, "order-history.objects", "RWOHOB01", true),
+            .page_corrupt, .record_corrupt => {
+                const file = try temp.dir.openFile(io, "order-history.objects", .{ .mode = .read_write });
+                defer file.close(io);
+                const offset = if (damage == .page_corrupt) receipt.root.tree_offset else intact.proof.lower.?.item.offset;
+                try file.writePositionalAll(io, "X", offset);
+                try file.sync(io);
+            },
+        }
+        const reopened = try std.testing.allocator.create(LinuxFileAdapter);
+        defer std.testing.allocator.destroy(reopened);
+        reopened.* = .{ .dir = temp.dir };
+        switch (damage) {
+            .root_truncated, .root_corrupt => try std.testing.expectError(error.InvalidHistoryRoot, reopened.interface().recoverOrderHistory(io, origin)),
+            .objects_missing => try std.testing.expectError(error.FileNotFound, reopened.interface().recoverOrderHistory(io, origin)),
+            .objects_truncated => try std.testing.expectError(error.InvalidHistoryObject, reopened.interface().recoverOrderHistory(io, origin)),
+            .page_corrupt => try std.testing.expectError(error.InvalidHistoryPage, reopened.interface().recoverOrderHistory(io, origin)),
+            .record_corrupt => {
+                // Recovery loads the authenticated top page; cold bodies are
+                // checked on demand rather than scanning retained history.
+                try std.testing.expectEqualDeep(receipt, try reopened.interface().recoverOrderHistory(io, origin));
+                try std.testing.expectError(error.InvalidHistoryRecord, reopened.interface().queryOrderHistory(io, request));
+            },
+        }
+    }
+}
+
+test "order history file isolates eight owner origins and rejects foreign root requests" {
+    const h = business_history;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const adapter = try std.testing.allocator.create(LinuxFileAdapter);
+    defer std.testing.allocator.destroy(adapter);
+    adapter.* = .{ .dir = temp.dir };
+    var receipts: [max_streams]h.Receipt = undefined;
+    for (&receipts, 0..) |*receipt, index| {
+        const origin: h.Origin = .{ .stream = .{ .domain = .decision_log, .id = 800 + index }, .account = 9 };
+        receipt.* = try publishHistoryTestCommand(adapter.interface(), io, origin, null, 1);
+    }
+    const reopened = try std.testing.allocator.create(LinuxFileAdapter);
+    defer std.testing.allocator.destroy(reopened);
+    reopened.* = .{ .dir = temp.dir };
+    for (receipts) |receipt| {
+        try std.testing.expectEqualDeep(receipt, try reopened.interface().recoverOrderHistory(io, receipt.root.origin));
+        const request = historyTestRequest(receipt.root, 1);
+        const result = try reopened.interface().queryOrderHistory(io, request);
+        try std.testing.expectEqual(h.Verdict.same, try h.verifyResult(request, &result.proof, receipt.root));
+        try h.validateRecord(&result);
+    }
+    var foreign = historyTestRequest(receipts[0].root, 1);
+    foreign.key.origin = receipts[1].root.origin;
+    try std.testing.expectError(error.StaleHistoryRoot, reopened.interface().queryOrderHistory(io, foreign));
+    foreign.key.origin.stream.id = 999;
+    try std.testing.expectError(error.OrderHistoryUnavailable, reopened.interface().queryOrderHistory(io, foreign));
+    const extra: h.Origin = .{ .stream = .{ .domain = .decision_log, .id = 999 }, .account = 9 };
+    try std.testing.expectError(error.OrderHistoryUnavailable, publishHistoryTestCommand(reopened.interface(), io, extra, null, 1));
+    try std.testing.expectEqual(GateState.closed, reopened.interface().safetyGate());
+    // History sidecars do not consume any additional journal Stream slots.
+    for (adapter.streams) |stream| try std.testing.expect(!stream.used);
+}
+
+test "order history public store proves sibling boundaries after interleaved root generations" {
+    const h = business_history;
+    const allocator = std.testing.allocator;
+    const memory = try allocator.create(MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .initWithAllocator(allocator);
+    defer memory.deinit();
+    const store = memory.interface();
+    const origin: h.Origin = .{ .stream = .{ .domain = .decision_log, .id = 771 }, .account = 9 };
+    var payloads: [192][8]u8 = undefined;
+    var records: [96]h.Record = undefined;
+    var entries: [96]h.Entry = undefined;
+    var previous: ?h.Root = null;
+    for (0..2) |round| {
+        for (0..96) |index| {
+            const id: u64 = @intCast(1 + 2 * index + round);
+            std.mem.writeInt(u64, &payloads[id - 1], id, .little);
+            records[index] = .{ .bytes = &payloads[id - 1], .payload_digest = h.hash(&payloads[id - 1]) };
+            entries[index] = .{ .key = .{ .origin = origin, .identity = .{ .order = id } }, .record_index = @intCast(index) };
+        }
+        const receipt = try store.publishOrderHistory(undefined, .{
+            .origin = origin,
+            .previous_root = previous,
+            .barrier = 100 + round,
+            .epoch = 1,
+            .qualification_digest = h.hash("complete terminal batch"),
+            .records = &records,
+            .entries = &entries,
+        });
+        try std.testing.expectEqual(@as(u64, round + 1), receipt.root.generation);
+        previous = receipt.root;
+        for (0..96 * (round + 1)) |index| {
+            const id: u64 = @intCast(if (round == 0) 1 + 2 * index else index + 1);
+            const request: h.LookupRequest = .{
+                .pending_id = id,
+                .key = .{ .origin = origin, .identity = .{ .order = id } },
+                .candidate_payload_digest = h.hash(&payloads[id - 1]),
+                .original_input_digest = h.hash("original replayable request"),
+                .root_digest = receipt.root.root_digest,
+                .epoch = 1,
+                .barrier = receipt.root.barrier,
+            };
+            const result = try store.queryOrderHistory(undefined, request);
+            try std.testing.expectEqual(h.Verdict.same, try h.verifyResult(request, &result.proof, receipt.root));
+            try h.validateRecord(&result);
+            try std.testing.expectEqual(id, std.mem.readInt(u64, result.record_bytes[0..8], .little));
+            try std.testing.expect(result.proof.path_len > 0);
+        }
+        const absent_ids: []const u64 = if (round == 0) &.{ 0, 2, 24, 48, 94, 192, 193 } else &.{ 0, 193 };
+        for (absent_ids) |id| {
+            const request: h.LookupRequest = .{
+                .pending_id = id + 1,
+                .key = .{ .origin = origin, .identity = .{ .order = id } },
+                .candidate_payload_digest = h.hash("new candidate"),
+                .original_input_digest = h.hash("original replayable request"),
+                .root_digest = receipt.root.root_digest,
+                .epoch = 1,
+                .barrier = receipt.root.barrier,
+            };
+            const result = try store.queryOrderHistory(undefined, request);
+            try std.testing.expectEqual(h.Verdict.proven_first, try h.verifyResult(request, &result.proof, receipt.root));
+            var changed = result.proof;
+            changed.path[0].item.upper.bytes[0] ^= 1;
+            try std.testing.expectError(error.InvalidHistoryProof, h.verifyResult(request, &changed, receipt.root));
+        }
+    }
+}
 
 const windows_nt = if (builtin.os.tag == .windows) struct {
     extern "kernel32" fn FlushFileBuffers(handle: std.os.windows.HANDLE) callconv(.winapi) i32;
@@ -1697,6 +2364,30 @@ test "checkpoint store rotates 100 rounds without cumulative manifest exhaustion
 
 fn appendCheckpointRecord(store: Store, io: std.Io, stream: StreamIdentity, sequence: u64) !void {
     try store.append(io, .{ .stream = stream, .record = .{ .type_id = 1, .schema_version = production_contract.journal_schema_version, .flags = 0, .sequence = sequence, .source_time = 0, .receive_time = 0, .monotonic_time = 0, .wall_time = 0, .time_presence = .{}, .payload = &.{7} } });
+}
+
+test "memory journal rotation counts retained business history in the shared archive quota" {
+    const memory = try std.testing.allocator.create(MemoryAdapter);
+    defer std.testing.allocator.destroy(memory);
+    memory.* = .initWithAllocator(std.testing.allocator);
+    defer memory.deinit();
+    const store = memory.interface();
+    const origin: business_history.Origin = .{ .stream = .{ .domain = .decision_log, .id = 779 }, .account = 9 };
+    const records = [_]business_history.Record{.{ .bytes = "retained history", .payload_digest = business_history.hash("retained history") }};
+    const entries = [_]business_history.Entry{.{ .key = .{ .origin = origin, .identity = .{ .order = 1 } }, .record_index = 0 }};
+    _ = try store.publishOrderHistory(undefined, .{ .origin = origin, .barrier = 1, .epoch = 1, .qualification_digest = business_history.hash("quota qualification"), .records = &records, .entries = &entries });
+    const stream: StreamIdentity = .{ .domain = .control, .id = 780 };
+    try appendCheckpointRecord(store, undefined, stream, 1);
+    try store.commit(undefined, stream, 1);
+    try store.seal(undefined, stream);
+    try store.publishSnapshot(undefined, stream, 1, &.{7});
+    const sealed_bytes = (try store.recover(undefined, stream)).active_segment.len;
+    const history_bytes = memory.history_objects.items.len;
+    memory.archive_quota = history_bytes + sealed_bytes - 1;
+    try std.testing.expectError(error.NoSpaceLeft, store.rotate(undefined, stream));
+    try std.testing.expectEqual(GateState.closed, store.safetyGate());
+    try std.testing.expectEqual(@as(usize, 0), memory.archive_bytes);
+    try std.testing.expectEqual(history_bytes, memory.history_objects.items.len);
 }
 
 const CountSegments = struct {
@@ -2029,6 +2720,8 @@ test "checkpoint store memory receipts require current root ancestry and stream 
         if (sequence == 1) old = try store.archiveReceipt(undefined, raw);
     }
     const latest = try store.archiveReceipt(undefined, raw);
+    try std.testing.expect(try store.verifyArchiveReceipt(undefined, raw, 1, old.ordered_root));
+    try std.testing.expect(try store.verifyArchiveReceipt(undefined, raw, 2, latest.ordered_root));
     const entry = try findManifest(&memory.manifest, raw, 2, false);
     entry.archive_root = old.ordered_root;
     try std.testing.expectError(error.ArchiveRootConflict, store.verifyArchiveReceipt(undefined, raw, 2, latest.ordered_root));
@@ -2132,5 +2825,208 @@ test "checkpoint store publishes after fallback while preserving two valid gener
         var count: CountSegments = .{ .records = 1 };
         for (fallback.tail_segments[0..fallback.tail_count]) |segment| try CountSegments.consume(&count, segment);
         try std.testing.expectEqual(@as(u64, 4), count.records);
+    }
+}
+
+test "large resident snapshots survive memory publication and two file reopens" {
+    const allocator = std.testing.allocator;
+    const bytes = try allocator.alloc(u8, 1024 * 1024 + 1024);
+    defer allocator.free(bytes);
+    @memset(bytes, 71);
+    const stream: StreamIdentity = .{ .domain = .decision_log, .id = 805 };
+    const memory = try allocator.create(MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .initWithAllocator(allocator);
+    defer memory.deinit();
+    try appendCheckpointRecord(memory.interface(), undefined, stream, 1);
+    try memory.interface().commit(undefined, stream, 1);
+    try memory.interface().seal(undefined, stream);
+    try memory.interface().publishSnapshot(undefined, stream, 1, bytes);
+    try std.testing.expectEqualSlices(u8, bytes, (try memory.interface().recover(undefined, stream)).snapshot);
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const file = try allocator.create(LinuxFileAdapter);
+    defer allocator.destroy(file);
+    file.* = .{ .dir = temp.dir };
+    defer file.deinit();
+    const io = std.testing.io;
+    try appendCheckpointRecord(file.interface(), io, stream, 1);
+    try file.interface().commit(io, stream, 1);
+    try file.interface().seal(io, stream);
+    try file.interface().publishSnapshot(io, stream, 1, bytes);
+    const reopened = try allocator.create(LinuxFileAdapter);
+    defer allocator.destroy(reopened);
+    reopened.* = .{ .dir = temp.dir };
+    defer reopened.deinit();
+    try std.testing.expectEqualSlices(u8, bytes, (try reopened.interface().recover(io, stream)).snapshot);
+    try reopened.interface().rotate(io, stream);
+    try appendCheckpointRecord(reopened.interface(), io, stream, 2);
+    try reopened.interface().commit(io, stream, 2);
+    try reopened.interface().seal(io, stream);
+    @memset(bytes, 93);
+    try reopened.interface().publishSnapshot(io, stream, 2, bytes);
+    const second_reopen = try allocator.create(LinuxFileAdapter);
+    defer allocator.destroy(second_reopen);
+    second_reopen.* = .{ .dir = temp.dir };
+    defer second_reopen.deinit();
+    const recovered = try second_reopen.interface().recover(io, stream);
+    try std.testing.expectEqual(@as(u64, 2), recovered.snapshot_barrier);
+    try std.testing.expectEqualSlices(u8, bytes, recovered.snapshot);
+}
+
+test "committed recovery prefix retains physical uncommitted suffix across file reopen" {
+    const allocator = std.testing.allocator;
+    const memory = try allocator.create(MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .initWithAllocator(allocator);
+    defer memory.deinit();
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const file = try allocator.create(LinuxFileAdapter);
+    defer allocator.destroy(file);
+    file.* = .{ .dir = temp.dir };
+    defer file.deinit();
+    const reopened = try allocator.create(LinuxFileAdapter);
+    defer allocator.destroy(reopened);
+    reopened.* = .{ .dir = temp.dir };
+    defer reopened.deinit();
+    const io = std.testing.io;
+    for ([_]Store{ memory.interface(), file.interface() }, 0..) |store, index| {
+        const store_io = if (index == 0) undefined else io;
+        const stream: StreamIdentity = .{ .domain = .decision_log, .id = 806 };
+        try appendCheckpointRecord(store, store_io, stream, 1);
+        try store.commit(store_io, stream, 1);
+        try store.seal(store_io, stream);
+        try store.publishSnapshot(store_io, stream, 1, &.{71});
+        try store.rotate(store_io, stream);
+        try appendCheckpointRecord(store, store_io, stream, 2);
+        try store.commit(store_io, stream, 2);
+        try appendCheckpointRecord(store, store_io, stream, 3);
+        const physical = try store.recover(store_io, stream);
+        const original_digest = digest(physical.active_segment);
+        const recovered = try (if (index == 0) store else reopened.interface()).recover(store_io, stream);
+        try std.testing.expectEqual(@as(u64, 3), recovered.last_sequence);
+        try std.testing.expectEqual(@as(u64, 2), recovered.committed_barrier);
+        try std.testing.expectEqualSlices(u8, &original_digest, &digest(recovered.active_segment));
+        var committed = try journal.Reader.init(recovered.tail);
+        switch (try committed.next()) {
+            .record => |record| try std.testing.expectEqual(@as(u64, 2), record.sequence),
+            .end => return error.MissingCommittedRecord,
+        }
+        switch (try committed.next()) {
+            .record => return error.ReplayedUncommittedRecord,
+            .end => {},
+        }
+        var all = try journal.Reader.init(recovered.active_segment);
+        _ = try all.next();
+        switch (try all.next()) {
+            .record => |record| try std.testing.expectEqual(@as(u64, 3), record.sequence),
+            .end => return error.LostPhysicalSuffix,
+        }
+    }
+}
+
+test "committed recovery prefix excludes a partial crash frame without modifying bytes" {
+    var log = journal.Journal.init();
+    const record: journal.Record = .{ .type_id = 1, .schema_version = production_contract.journal_schema_version, .flags = 0, .sequence = 1, .source_time = 0, .receive_time = 0, .monotonic_time = 0, .wall_time = 0, .time_presence = .{}, .payload = &.{71} };
+    try log.append(record);
+    const committed_len = log.bytes().len;
+    var next = record;
+    next.sequence = 2;
+    try log.append(next);
+    const partial = log.bytes()[0 .. committed_len + 10];
+    const before = digest(partial);
+    const prefix = try committedJournalPrefix(partial, 1);
+    try std.testing.expectEqual(committed_len, prefix.len);
+    try std.testing.expectEqualSlices(u8, log.bytes()[0..committed_len], prefix);
+    try std.testing.expectEqualSlices(u8, &before, &digest(partial));
+}
+
+test "optimization memory overflow snapshot rotation preserves borrowed buffers and inline transitions" {
+    const allocator = std.testing.allocator;
+    const memory = try allocator.create(MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .initWithAllocator(allocator);
+    defer memory.deinit();
+    const store = memory.interface();
+    const stream: StreamIdentity = .{ .domain = .decision_log, .id = 807 };
+    const large = try allocator.alloc(u8, inline_snapshot_bytes + 1024);
+    defer allocator.free(large);
+    @memset(large, 71);
+    for (1..8) |sequence| {
+        try appendCheckpointRecord(store, undefined, stream, sequence);
+        try store.commit(undefined, stream, sequence);
+        try store.seal(undefined, stream);
+        const bytes: []const u8 = switch (sequence) {
+            1, 3 => large,
+            2 => &.{93},
+            4 => memory.large_snapshots[0].items,
+            5 => &.{93},
+            6 => memory.large_previous_snapshots[0].items,
+            7 => memory.large_snapshots[0].items,
+            else => unreachable,
+        };
+        try store.publishSnapshot(undefined, stream, sequence, bytes);
+        const recovered = try store.recover(undefined, stream);
+        try std.testing.expectEqual(sequence, recovered.snapshot_barrier);
+        try std.testing.expectEqualSlices(u8, if (sequence == 2 or sequence == 5) &.{93} else large, recovered.snapshot);
+        try store.rotate(undefined, stream);
+    }
+    memory.large_snapshots[0].items[0] ^= 1;
+    const fallback = try store.recover(undefined, stream);
+    try std.testing.expectEqual(@as(u64, 6), fallback.snapshot_barrier);
+    try std.testing.expectEqualSlices(u8, large, fallback.snapshot);
+}
+
+test "optimization memory overflow snapshot allocation failure retains previous committed generation" {
+    const allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    const memory = try allocator.create(MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .initWithAllocator(failing.allocator());
+    defer memory.deinit();
+    const store = memory.interface();
+    const stream: StreamIdentity = .{ .domain = .decision_log, .id = 808 };
+    const large = try allocator.alloc(u8, inline_snapshot_bytes + 1024);
+    defer allocator.free(large);
+    @memset(large, 71);
+    try appendCheckpointRecord(store, undefined, stream, 1);
+    try store.commit(undefined, stream, 1);
+    try store.seal(undefined, stream);
+    try store.publishSnapshot(undefined, stream, 1, large);
+    try store.rotate(undefined, stream);
+    try appendCheckpointRecord(store, undefined, stream, 2);
+    try store.commit(undefined, stream, 2);
+    try store.seal(undefined, stream);
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    try std.testing.expectError(error.OutOfMemory, store.publishSnapshot(undefined, stream, 2, large));
+    try std.testing.expectEqual(GateState.closed, store.safetyGate());
+    const recovered = try store.recover(undefined, stream);
+    try std.testing.expectEqual(@as(u64, 1), recovered.snapshot_barrier);
+    try std.testing.expectEqualSlices(u8, large, recovered.snapshot);
+}
+
+test "optimization memory inline snapshot publication preserves borrowed previous input" {
+    const allocator = std.testing.allocator;
+    const memory = try allocator.create(MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .initWithAllocator(allocator);
+    defer memory.deinit();
+    const store = memory.interface();
+    const stream: StreamIdentity = .{ .domain = .decision_log, .id = 809 };
+    for (1..4) |sequence| {
+        try appendCheckpointRecord(store, undefined, stream, sequence);
+        try store.commit(undefined, stream, sequence);
+        try store.seal(undefined, stream);
+        const bytes: []const u8 = switch (sequence) {
+            1 => &.{71},
+            2 => &.{93},
+            3 => memory.previous_snapshots[0][0..1],
+            else => unreachable,
+        };
+        try store.publishSnapshot(undefined, stream, sequence, bytes);
+        try std.testing.expectEqualSlices(u8, if (sequence == 2) &.{93} else &.{71}, (try store.recover(undefined, stream)).snapshot);
+        try store.rotate(undefined, stream);
     }
 }

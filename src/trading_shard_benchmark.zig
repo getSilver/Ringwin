@@ -410,26 +410,29 @@ fn drainOne(shard: *QualifiedShard) !void {
 }
 
 fn assertFourShardIsolation() ![4][Sha256.digest_length]u8 {
+    const allocator = if (builtin.is_test) std.testing.allocator else std.heap.page_allocator;
+    const run = try allocator.create(LiveRun);
+    defer allocator.destroy(run);
     var digests: [4][Sha256.digest_length]u8 = undefined;
     for (&digests) |*digest| {
-        const run = try runHappyPath();
+        try fixture.runHappyPathInto(run);
         digest.* = try fixture.replayDigest(run);
         try assertExpectedDigest(digest.*, expected_happy_digest);
     }
 
-    var shards: [4]QualifiedShard = undefined;
-    for (&shards, 0..) |*shard, index| {
-        shard.* = .{
-            .decision_domain = @intCast(index),
-            .run = try initializedBenchmarkRun(),
-        };
+    const shards = try allocator.create([4]QualifiedShard);
+    defer allocator.destroy(shards);
+    for (shards, 0..) |*shard, index| {
+        shard.decision_domain = @intCast(index);
+        shard.inbox = .{};
+        try fixture.initializedBenchmarkRunInto(&shard.run);
     }
     const baseline_facts = shards[0].run.shard.trace.len;
     const baseline_records = shards[0].run.decision_journal.records;
     var router: SharedMarketRouter = .{};
 
     try router.route(
-        &shards,
+        shards,
         0,
         deltaAt(15, 102, 103, 49_860_000_000),
     );
@@ -451,7 +454,7 @@ fn assertFourShardIsolation() ![4][Sha256.digest_length]u8 {
 
     for (1..4) |index| {
         try router.route(
-            &shards,
+            shards,
             @intCast(index),
             deltaAt(15, 101, 102, 49_850_000_000 + @as(i64, @intCast(index))),
         );
@@ -727,12 +730,18 @@ pub fn runBenchmark(init: std.process.Init, four_shards: bool, raw: bool) !void 
 }
 
 test "four shards replay and isolate overload" {
-    const run = try initializedBenchmarkRun();
+    const allocator = std.testing.allocator;
+    const run = try allocator.create(LiveRun);
+    defer allocator.destroy(run);
+    try fixture.initializedBenchmarkRunInto(run);
     var sealed = run.decision_journal;
     try sealed.seal();
-    var storage: [durable.max_snapshot_bytes]u8 = undefined;
-    const restored = try TradingShard.restoreSnapshot(try run.shard.snapshot(&sealed, run.shard.authoritativeBarrier(), &storage));
-    try std.testing.expectEqual(run.shard.authoritativeBarrier(), restored.barrier);
-    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
+    const storage = try allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer allocator.free(storage);
+    const restored = try allocator.create(TradingShard);
+    defer allocator.destroy(restored);
+    const barrier = try TradingShard.restoreSnapshotInto(restored, try run.shard.snapshot(&sealed, run.shard.authoritativeBarrier(), storage));
+    try std.testing.expectEqual(run.shard.authoritativeBarrier(), barrier);
+    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.canonicalStateDigest());
     _ = try assertFourShardIsolation();
 }

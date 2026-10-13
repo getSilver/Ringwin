@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const schema_version: u16 = 10;
+pub const schema_version: u16 = 12;
 
 pub const VenueIdentity = u64;
 pub const Product = enum(u8) { spot, isolated_linear_usdt };
@@ -461,11 +461,19 @@ pub const AbsenceCoverage = struct {
     fills_complete: bool,
     economics_complete: bool,
 };
+pub const TerminalArchiveCoverage = struct {
+    visibility_deadline_utc_ns: u64,
+    order_history_complete: bool,
+    terminal_history_complete: bool,
+    fills_complete: bool,
+    economics_complete: bool,
+};
 pub const ReconciliationEvidence = struct {
     scope: OrderQueryScope,
     observed_at_utc_ns: u64,
     source: RawEvidenceRef,
     absence: ?AbsenceCoverage = null,
+    terminal_archive: ?TerminalArchiveCoverage = null,
 };
 pub const ReconciliationResult = struct {
     identity: u128,

@@ -1,13 +1,16 @@
 const std = @import("std");
 const canonical = @import("canonical_event.zig");
 
-// shortcut: 32 selected live plus one terminal share slots until ticket 05 separates archive retention.
-pub const max_orders = 33;
+pub const max_live_orders = 1024;
+pub const max_retained_terminal_orders = 4096;
+// Existing live slots retain authoritative terminal facts during pressure;
+// admission budgets remain independent and no slot is silently recycled.
+pub const max_orders = max_live_orders + max_retained_terminal_orders;
 pub const max_group_members = 4;
 pub const max_commands = 8;
-const max_command_history = 64;
-const max_fact_history = 64;
-const max_intent_history = 64;
+pub const max_command_history = 2 * max_orders;
+pub const max_fact_history = 3 * max_orders;
+pub const max_intent_history = 2 * max_orders;
 pub const max_tombstones = 2;
 
 pub const Instrument = canonical.InstrumentIdentity;
@@ -210,8 +213,29 @@ pub const Order = struct {
     last_reconciliation_revision: u32 = 0,
     last_reconciliation_cumulative_quantity: i64 = 0,
     last_reconciliation_remaining_quantity: i64 = 0,
+    created_at_utc_ns: u64 = 0,
+    terminal_observed_at_utc_ns: u64 = 0,
+    terminal_archive_evidence: ?canonical.ReconciliationEvidence = null,
     archive_window_closed: bool = false,
     archive_audit_digest: [32]u8 = @splat(0),
+};
+
+pub const OrderArchiveQualification = struct {
+    order: Order,
+    last_report: ?ExecutionReport,
+    last_reconciliation: ?ReconciliationResult,
+    applied_fill_quantity: i64,
+    exchange_account: canonical.ExchangeAccountIdentity,
+    reference_digest: [32]u8,
+
+    pub fn digest(self: @This()) [32]u8 {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hash.update("OrderArchiveQualificationV1");
+        archiveHashValue(&hash, self);
+        var result: [32]u8 = undefined;
+        hash.final(&result);
+        return result;
+    }
 };
 
 pub const Tombstone = struct {
@@ -236,24 +260,262 @@ pub const Tombstone = struct {
 const Replacement = struct { instrument: Instrument, side: Side, portfolio_reduce_only: bool, venue_reduce_only: bool, quantity: i64, limit_price: Price, reservation: Reservation, order_type: canonical.OrderType, time_in_force: canonical.TimeInForce, market_protection_price: ?Price, client_order_id: canonical.ClientOrderId, expected_revision: u32, expected_cumulative_quantity: i64 };
 pub const SeenIntent = struct { strategy_instance: u128, intent_sequence: u64, group: u64, policy: PartialExecutionPolicy, fingerprint: [16]u8 };
 
+// Negative membership skips unrelated history; every positive still uses the
+// original exact lookup, including intentional bit collisions.
+const IntentMembership = struct {
+    bits: [2048]u8 = @splat(0),
+
+    fn bit(sequence: u64) usize {
+        return @intCast((sequence ^ (sequence >> 32)) & (2048 * 8 - 1));
+    }
+
+    fn add(self: *IntentMembership, sequence: u64) void {
+        const index = bit(sequence);
+        self.bits[index / 8] |= @as(u8, 1) << @as(u3, @intCast(index % 8));
+    }
+
+    fn maybeContains(self: *const IntentMembership, sequence: u64) bool {
+        const index = bit(sequence);
+        return self.bits[index / 8] & (@as(u8, 1) << @as(u3, @intCast(index % 8))) != 0;
+    }
+};
+
+// These transactions append histories; only existing order rows need an undo copy.
+const MutationUndo = struct {
+    const max_rows = max_commands * (max_group_members + 1);
+    const Header = struct {
+        order_count: u16,
+        command_count: u8,
+        command_history_count: u16,
+        report_history_count: u16,
+        reconciliation_history_count: u16,
+        intent_history_count: u16,
+        tombstone_count: u16,
+        recovery_only: bool,
+        capacity_pressure: bool,
+        next_order_id: u64,
+        next_command_id: u64,
+    };
+
+    header: Header,
+    indices: [max_rows]u16,
+    rows: [max_rows]Order,
+    count: usize,
+
+    fn init(self: *MutationUndo, state: *const Oms) void {
+        self.count = 0;
+        inline for (std.meta.fields(Header)) |field| @field(self.header, field.name) = @field(state, field.name);
+    }
+
+    fn captureOrder(self: *MutationUndo, state: *const Oms, id: u64) bool {
+        const index = state.orderIndex(id) orelse return true;
+        for (self.indices[0..self.count]) |known| if (known == index) return true;
+        if (self.count == max_rows) return false;
+        self.indices[self.count] = @intCast(index);
+        self.rows[self.count] = state.orders[index];
+        self.count += 1;
+        return true;
+    }
+
+    fn captureGroup(self: *MutationUndo, state: *const Oms, group: u64) bool {
+        for (state.orders[0..state.order_count]) |*order| {
+            if (order.group_first_sequence == group and !self.captureOrder(state, order.id)) return false;
+        }
+        return true;
+    }
+
+    fn rollback(self: *const MutationUndo, state: *Oms) void {
+        for (self.indices[0..self.count], self.rows[0..self.count]) |index, row| state.orders[index] = row;
+        inline for (std.meta.fields(Header)) |field| @field(state, field.name) = @field(self.header, field.name);
+    }
+};
+
 pub const Oms = struct {
     orders: [max_orders]Order = undefined,
-    order_count: u8 = 0,
+    order_count: u16 = 0,
     commands: [max_commands]Command = undefined,
     command_count: u8 = 0,
     command_history: [max_command_history]Command = undefined,
-    command_history_count: u8 = 0,
+    command_history_count: u16 = 0,
     report_history: [max_fact_history]ExecutionReport = undefined,
-    report_history_count: u8 = 0,
+    report_history_count: u16 = 0,
     reconciliation_history: [max_fact_history]ReconciliationResult = undefined,
-    reconciliation_history_count: u8 = 0,
+    reconciliation_history_count: u16 = 0,
     intent_history: [max_intent_history]SeenIntent = undefined,
-    intent_history_count: u8 = 0,
+    intent_history_count: u16 = 0,
     tombstones: [max_tombstones]Tombstone = undefined,
-    tombstone_count: u8 = 0,
+    tombstone_count: u16 = 0,
     recovery_only: bool = false,
+    capacity_pressure: bool = false,
     next_order_id: u64 = 1,
     next_command_id: u64 = 1,
+
+    pub fn liveOrderCount(self: *const Oms) u16 {
+        var count: u16 = 0;
+        for (self.orders[0..self.order_count]) |*order| if (!retainedTerminal(order)) {
+            count += 1;
+        };
+        return count;
+    }
+
+    pub fn retainedTerminalOrderCount(self: *const Oms) u16 {
+        return self.order_count - self.liveOrderCount();
+    }
+
+    fn retainCapacityPressure(self: *Oms) void {
+        if (self.order_count <= max_retained_terminal_orders) return;
+        if (self.retainedTerminalOrderCount() > max_retained_terminal_orders) self.capacity_pressure = true;
+    }
+
+    pub fn noteOrderCreated(self: *Oms, order_id: u64, utc_ns: u64) !void {
+        const order = try self.mutableOrder(order_id);
+        if (utc_ns == 0) return error.InvalidOrderArchiveTime;
+        if (order.created_at_utc_ns != 0 and order.created_at_utc_ns != utc_ns) return error.ConflictingOrderArchiveTime;
+        order.created_at_utc_ns = utc_ns;
+    }
+
+    pub fn noteTerminalObserved(self: *Oms, order_id: u64, utc_ns: u64) !void {
+        const order = try self.mutableOrder(order_id);
+        if (!safeTerminal(order.*) or utc_ns == 0 or order.created_at_utc_ns == 0 or utc_ns < order.created_at_utc_ns)
+            return error.InvalidOrderArchiveTime;
+        if (order.terminal_observed_at_utc_ns == 0) order.terminal_observed_at_utc_ns = utc_ns;
+    }
+
+    pub fn retainTerminalArchiveCoverage(self: *Oms, order_id: u64, evidence: canonical.ReconciliationEvidence) !void {
+        const order = try self.mutableOrder(order_id);
+        try validateTerminalArchiveCoverage(order.*, evidence, evidence.scope.exchange_account);
+        order.terminal_archive_evidence = evidence;
+    }
+
+    pub fn prepareOrderArchive(self: *const Oms, order_id: u64, applied_fill_quantity: i64, exchange_account: canonical.ExchangeAccountIdentity) !OrderArchiveQualification {
+        const order = self.orderById(order_id) orelse return error.UnknownOrder;
+        if (self.recovery_only) return error.OrderArchiveNotQualified;
+        if (!safeTerminal(order) or order.reservation_active or order.reservation.atoms != 0 or
+            order.pending_reservation != null or order.pending_previous_spec != null or
+            order.pending_basis_quantity != 0 or order.replacement != null or
+            applied_fill_quantity < 0 or applied_fill_quantity != order.cumulative_quantity)
+            return error.OrderArchiveNotQualified;
+        const evidence = order.terminal_archive_evidence orelse return error.OrderArchiveNotQualified;
+        try validateTerminalArchiveCoverage(order, evidence, exchange_account);
+        for (self.orders[0..self.order_count]) |other| {
+            if (other.id == order.id) continue;
+            if (other.predecessor_order_id == order.id or
+                (other.strategy_instance == order.strategy_instance and other.group_first_sequence == order.group_first_sequence and
+                    (!safeTerminal(other) or other.reservation_active or other.reservation.atoms != 0 or
+                        other.pending_reservation != null or other.pending_previous_spec != null or
+                        other.pending_basis_quantity != 0 or other.replacement != null)))
+                return error.OrderArchiveReferenced;
+        }
+        const report = try self.lastReportEvidence(order);
+        const reconciliation = try self.lastReconciliationEvidence(order);
+        if (reconciliation == null or reconciliation.?.status != .found_terminal or
+            reconciliation.?.cumulative_quantity != order.cumulative_quantity)
+            return error.OrderArchiveNotQualified;
+        return .{ .order = order, .last_report = report, .last_reconciliation = reconciliation, .applied_fill_quantity = applied_fill_quantity, .exchange_account = exchange_account, .reference_digest = self.archiveReferenceDigest(order) };
+    }
+
+    /// Core calls this only after validating the durable business-history root fact.
+    pub fn commitOrderArchive(self: *Oms, qualification: OrderArchiveQualification) !void {
+        const current = try self.prepareOrderArchive(qualification.order.id, qualification.applied_fill_quantity, qualification.exchange_account);
+        if (!std.mem.eql(u8, &current.digest(), &qualification.digest())) return error.StaleOrderArchiveQualification;
+        const order = qualification.order;
+        const membership = self.orderIntentMembership(order.id);
+        var index: usize = 0;
+        while (index < self.intent_history_count) {
+            const intent = self.intent_history[index];
+            if (!self.intentReferencesOrder(intent, order, &membership)) {
+                index += 1;
+                continue;
+            }
+            var referenced = false;
+            for (self.orders[0..self.order_count]) |other| {
+                if (other.id != order.id and other.strategy_instance == intent.strategy_instance and other.group_first_sequence == intent.group) referenced = true;
+            }
+            for (self.command_history[0..self.command_history_count]) |command| {
+                if (command.order_id != order.id and command.strategy_instance == intent.strategy_instance and command.intent_sequence == intent.intent_sequence) referenced = true;
+            }
+            if (!referenced) removeArchiveEntry(SeenIntent, &self.intent_history, &self.intent_history_count, index) else index += 1;
+        }
+        index = 0;
+        while (index < self.order_count) {
+            if (self.orders[index].id == order.id) {
+                removeArchiveEntry(Order, &self.orders, &self.order_count, index);
+                break;
+            }
+            index += 1;
+        }
+        index = 0;
+        while (index < self.command_count) {
+            if (self.commands[index].order_id == order.id) removeArchiveEntry(Command, &self.commands, &self.command_count, index) else index += 1;
+        }
+        index = 0;
+        while (index < self.command_history_count) {
+            if (self.command_history[index].order_id == order.id) removeArchiveEntry(Command, &self.command_history, &self.command_history_count, index) else index += 1;
+        }
+        index = 0;
+        while (index < self.report_history_count) {
+            if (self.report_history[index].order_id == order.id) removeArchiveEntry(ExecutionReport, &self.report_history, &self.report_history_count, index) else index += 1;
+        }
+        index = 0;
+        while (index < self.reconciliation_history_count) {
+            if (self.reconciliation_history[index].order_id == order.id) removeArchiveEntry(ReconciliationResult, &self.reconciliation_history, &self.reconciliation_history_count, index) else index += 1;
+        }
+        index = 0;
+        while (index < self.tombstone_count) {
+            if (self.tombstones[index].order_id == order.id) removeArchiveEntry(Tombstone, &self.tombstones, &self.tombstone_count, index) else index += 1;
+        }
+    }
+
+    fn orderIntentMembership(self: *const Oms, order_id: u64) IntentMembership {
+        var membership: IntentMembership = .{};
+        for (self.command_history[0..self.command_history_count]) |*command| {
+            if (command.order_id == order_id) membership.add(command.intent_sequence);
+        }
+        return membership;
+    }
+
+    fn intentReferencesOrder(self: *const Oms, intent: SeenIntent, order: Order, membership: *const IntentMembership) bool {
+        if (intent.strategy_instance != order.strategy_instance) return false;
+        if (intent.group == order.group_first_sequence or intent.intent_sequence == order.intent_sequence) return true;
+        if (!membership.maybeContains(intent.intent_sequence)) return false;
+        for (self.command_history[0..self.command_history_count]) |*command| {
+            if (command.order_id == order.id and command.intent_sequence == intent.intent_sequence) return true;
+        }
+        return false;
+    }
+
+    fn archiveReferenceDigest(self: *const Oms, order: Order) [32]u8 {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hash.update("OmsArchiveReferencesV1");
+        const membership = self.orderIntentMembership(order.id);
+        for (self.command_history[0..self.command_history_count]) |command| {
+            if (command.order_id == order.id) {
+                hash.update(&.{1});
+                archiveHashValue(&hash, command);
+            }
+        }
+        for (self.intent_history[0..self.intent_history_count]) |intent| {
+            if (self.intentReferencesOrder(intent, order, &membership)) {
+                hash.update(&.{2});
+                archiveHashValue(&hash, intent);
+            }
+        }
+        for (self.report_history[0..self.report_history_count]) |report| {
+            if (report.order_id == order.id) {
+                hash.update(&.{3});
+                archiveHashValue(&hash, report);
+            }
+        }
+        for (self.reconciliation_history[0..self.reconciliation_history_count]) |reconciliation| {
+            if (reconciliation.order_id == order.id) {
+                hash.update(&.{4});
+                archiveHashValue(&hash, reconciliation);
+            }
+        }
+        var digest: [32]u8 = undefined;
+        hash.final(&digest);
+        return digest;
+    }
 
     pub fn begin(self: *Oms) void {
         self.command_count = 0;
@@ -330,6 +592,7 @@ pub const Oms = struct {
 
     /// Unknown and PendingCancel must not overlap a later place or amend send.
     pub fn blocksNewSend(self: *const Oms) bool {
+        if (self.capacity_pressure) return true;
         for (self.orders[0..self.order_count]) |order| switch (order.state) {
             .unknown, .pending_cancel => return true,
             else => {},
@@ -338,7 +601,17 @@ pub const Oms = struct {
     }
 
     pub fn orderById(self: *const Oms, id: u64) ?Order {
-        for (self.orders[0..self.order_count]) |order| if (order.id == id) return order;
+        const index = self.orderIndex(id) orelse return null;
+        return self.orders[index];
+    }
+
+    fn orderIndex(self: *const Oms, id: u64) ?usize {
+        // shortcut: sparse ID windows use a bounded scan; index if qualified lookup latency requires it.
+        if (self.order_count != 0 and id >= self.orders[0].id) {
+            const hint = id - self.orders[0].id;
+            if (hint < self.order_count and self.orders[@intCast(hint)].id == id) return @intCast(hint);
+        }
+        for (self.orders[0..self.order_count], 0..) |*order, index| if (order.id == id) return index;
         return null;
     }
 
@@ -402,11 +675,34 @@ pub const Oms = struct {
     }
 
     fn applyGroupWithRefs(self: *Oms, group: IntentGroup, original: IntentGroup, refs: []const RiskFactRefs) !void {
+        var undo: MutationUndo = undefined;
+        undo.init(self);
+        if (group.count == 0 or group.count > max_group_members)
+            return @call(.never_inline, applyGroupWithRefsCopy, .{ self, group, original, refs });
+        for (group.members[0..group.count]) |intent| {
+            if (!undo.captureOrder(self, intent.target_order_id))
+                return @call(.never_inline, applyGroupWithRefsCopy, .{ self, group, original, refs });
+        }
+        // Numeric group identities may span more rows than one bounded intent group.
+        if (group.policy == .cancel_remaining and !undo.captureGroup(self, group.first_intent_sequence))
+            return @call(.never_inline, applyGroupWithRefsCopy, .{ self, group, original, refs });
+        self.applyGroupInPlace(group, original, refs) catch |err| {
+            const recovery_only = self.recovery_only;
+            const capacity_pressure = self.capacity_pressure;
+            undo.rollback(self);
+            self.recovery_only = self.recovery_only or recovery_only;
+            self.capacity_pressure = self.capacity_pressure or capacity_pressure;
+            return err;
+        };
+    }
+
+    fn applyGroupWithRefsCopy(self: *Oms, group: IntentGroup, original: IntentGroup, refs: []const RiskFactRefs) !void {
         var candidate = self.*;
         candidate.applyGroupInPlace(group, original, refs) catch |err| {
             // Capacity exhaustion is an authoritative safety transition even
             // though the rejected intent group itself is not committed.
             if (candidate.recovery_only) self.recovery_only = true;
+            if (candidate.capacity_pressure) self.capacity_pressure = true;
             return err;
         };
         self.* = candidate;
@@ -489,8 +785,29 @@ pub const Oms = struct {
     }
 
     pub fn applyDispatch(self: *Oms, batch: DispatchBatch) !void {
+        var undo: MutationUndo = undefined;
+        undo.init(self);
+        if (batch.count == 0 or batch.count > max_commands)
+            return @call(.never_inline, applyDispatchCopy, .{ self, batch });
+        for (batch.items[0..batch.count]) |item| {
+            const command = self.findCommand(item.command_id) orelse continue;
+            if (!undo.captureOrder(self, command.order_id))
+                return @call(.never_inline, applyDispatchCopy, .{ self, batch });
+            const order = self.orderById(command.order_id) orelse continue;
+            if (order.group_policy == .cancel_remaining and !undo.captureGroup(self, order.group_first_sequence))
+                return @call(.never_inline, applyDispatchCopy, .{ self, batch });
+        }
+        self.applyDispatchInPlace(batch) catch |err| {
+            undo.rollback(self);
+            return err;
+        };
+        self.retainCapacityPressure();
+    }
+
+    fn applyDispatchCopy(self: *Oms, batch: DispatchBatch) !void {
         var candidate = self.*;
         try candidate.applyDispatchInPlace(batch);
+        candidate.retainCapacityPressure();
         self.* = candidate;
     }
 
@@ -533,12 +850,17 @@ pub const Oms = struct {
     }
 
     pub fn applyReport(self: *Oms, report: ExecutionReport) !void {
-        var candidate = self.*;
-        candidate.applyReportInPlace(report) catch |err| {
-            if (candidate.recovery_only) self.recovery_only = true;
+        var undo: MutationUndo = undefined;
+        undo.init(self);
+        const captured = undo.captureOrder(self, report.order_id);
+        std.debug.assert(captured);
+        self.applyReportInPlace(report) catch |err| {
+            const recovery_only = self.recovery_only;
+            undo.rollback(self);
+            self.recovery_only = self.recovery_only or recovery_only;
             return err;
         };
-        self.* = candidate;
+        self.retainCapacityPressure();
     }
 
     fn applyReportInPlace(self: *Oms, report: ExecutionReport) !void {
@@ -691,12 +1013,17 @@ pub const Oms = struct {
     }
 
     pub fn applyReconciliation(self: *Oms, result: ReconciliationResult) !void {
-        var candidate = self.*;
-        candidate.applyReconciliationInPlace(result) catch |err| {
-            if (candidate.recovery_only) self.recovery_only = true;
+        var undo: MutationUndo = undefined;
+        undo.init(self);
+        const captured = undo.captureOrder(self, result.order_id);
+        std.debug.assert(captured);
+        self.applyReconciliationInPlace(result) catch |err| {
+            const recovery_only = self.recovery_only;
+            undo.rollback(self);
+            self.recovery_only = self.recovery_only or recovery_only;
             return err;
         };
-        self.* = candidate;
+        self.retainCapacityPressure();
     }
 
     pub fn canConfirmAbsent(self: *const Oms, order_id: u64, revision: u32) bool {
@@ -792,7 +1119,7 @@ pub const Oms = struct {
             if (result.status != .found_terminal or result.terminal_state.? != expected or
                 result.cumulative_quantity != order.cumulative_quantity or
                 result.remaining_quantity != order.quantity - order.cumulative_quantity or
-                order.last_reconciliation_id != 0)
+                result.revision != order.revision)
             {
                 self.recovery_only = true;
                 return error.TerminalFactConflict;
@@ -805,7 +1132,7 @@ pub const Oms = struct {
         order.last_reconciliation_remaining_quantity = result.remaining_quantity;
         if (order.state == .filled or order.state == .canceled or order.state == .rejected) {
             if (result.status == .found_terminal or result.status == .confirmed_absent)
-                try commitArchiveQualification(self, order);
+                try rememberTerminalAudit(self, order);
             return;
         }
         switch (result.status) {
@@ -841,13 +1168,13 @@ pub const Oms = struct {
                 order.pending_reservation = null;
                 order.pending_basis_quantity = 0;
                 order.pending_previous_spec = null;
-                try commitArchiveQualification(self, order);
+                try rememberTerminalAudit(self, order);
             },
             .confirmed_absent => {
                 order.state = .canceled;
                 order.reservation_active = false;
                 order.reservation.atoms = 0;
-                try commitArchiveQualification(self, order);
+                try rememberTerminalAudit(self, order);
             },
         }
     }
@@ -874,9 +1201,14 @@ pub const Oms = struct {
     }
 
     pub fn confirmReplacement(self: *Oms, order_id: u64, reservation: Reservation, portfolio_reduce_only: bool, venue_reduce_only: bool, intent_sequence: u64, refs: RiskFactRefs) !void {
-        var candidate = self.*;
-        try candidate.confirmReplacementInPlace(order_id, reservation, portfolio_reduce_only, venue_reduce_only, intent_sequence, refs);
-        self.* = candidate;
+        var undo: MutationUndo = undefined;
+        undo.init(self);
+        const captured = undo.captureOrder(self, order_id);
+        std.debug.assert(captured);
+        self.confirmReplacementInPlace(order_id, reservation, portfolio_reduce_only, venue_reduce_only, intent_sequence, refs) catch |err| {
+            undo.rollback(self);
+            return err;
+        };
     }
 
     fn confirmReplacementInPlace(self: *Oms, order_id: u64, reservation: Reservation, portfolio_reduce_only: bool, venue_reduce_only: bool, intent_sequence: u64, refs: RiskFactRefs) !void {
@@ -899,10 +1231,15 @@ pub const Oms = struct {
 
     fn createOrder(self: *Oms, strategy_instance: u128, instrument: Instrument, side: Side, portfolio_reduce_only: bool, venue_reduce_only: bool, quantity: i64, price: Price, reservation: Reservation, requested_client_order_id: canonical.ClientOrderId, predecessor: u64, intent_sequence: u64, group: u64, policy: PartialExecutionPolicy) !*Order {
         if (self.recovery_only) return error.OmsRecoveryOnly;
-        if (self.order_count == max_orders) self.compactOne() catch |err| {
-            self.recovery_only = true;
-            return err;
-        };
+        const live_count = self.liveOrderCount();
+        if (live_count >= max_live_orders or self.order_count == max_orders) {
+            self.capacity_pressure = true;
+            return error.OrderCapacityExceeded;
+        }
+        if (self.order_count - live_count >= max_retained_terminal_orders) {
+            self.capacity_pressure = true;
+            return error.TerminalCapacityExceeded;
+        }
         const index = self.order_count;
         self.order_count += 1;
         var client_order_id = requested_client_order_id;
@@ -1007,68 +1344,13 @@ pub const Oms = struct {
     }
 
     fn mutableOrder(self: *Oms, id: u64) !*Order {
-        for (self.orders[0..self.order_count]) |*order| if (order.id == id) return order;
-        return error.UnknownOrder;
+        const index = self.orderIndex(id) orelse return error.UnknownOrder;
+        return &self.orders[index];
     }
 
     fn tombstoneById(self: *const Oms, id: u64) ?Tombstone {
         for (self.tombstones[0..self.tombstone_count]) |tombstone| if (tombstone.order_id == id) return tombstone;
         return null;
-    }
-
-    fn compactOne(self: *Oms) !void {
-        if (self.tombstone_count == max_tombstones) return error.TombstoneCapacityExceeded;
-        var index: usize = 0;
-        while (index < self.order_count) : (index += 1) {
-            const order = self.orders[index];
-            if (!self.isArchiveEligible(order)) continue;
-            const last_report = try self.lastReportEvidence(order);
-            const last_reconciliation = try self.lastReconciliationEvidence(order);
-            const digest = orderFactDigest(order, last_report, last_reconciliation);
-            if (!std.mem.eql(u8, &digest, &order.archive_audit_digest)) {
-                self.recovery_only = true;
-                return error.ArchiveAuditDigestMismatch;
-            }
-            self.tombstones[self.tombstone_count] = .{
-                .order_id = order.id,
-                .strategy_instance = order.strategy_instance,
-                .instrument = order.instrument,
-                .revision = order.revision,
-                .state = order.state,
-                .quantity = order.quantity,
-                .cumulative_quantity = order.cumulative_quantity,
-                .predecessor_order_id = order.predecessor_order_id,
-                .group_first_sequence = order.group_first_sequence,
-                .last_report_id = order.last_report_id,
-                .last_reconciliation_id = order.last_reconciliation_id,
-                .last_report = last_report,
-                .last_reconciliation = last_reconciliation,
-                .intent_sequence = order.intent_sequence,
-                .client_order_id = order.client_order_id,
-                .fact_digest = orderFactDigest(order, last_report, last_reconciliation),
-            };
-            self.tombstone_count += 1;
-            var move = index;
-            while (move + 1 < self.order_count) : (move += 1) self.orders[move] = self.orders[move + 1];
-            self.order_count -= 1;
-            return;
-        }
-        return error.OrderCapacityExceeded;
-    }
-
-    fn isArchiveEligible(self: *const Oms, order: Order) bool {
-        switch (order.state) {
-            .filled, .canceled, .rejected => {},
-            else => return false,
-        }
-        if (order.reservation_active or order.replacement != null or !order.archive_window_closed)
-            return false;
-        if (std.mem.eql(u8, &order.archive_audit_digest, &@as([32]u8, @splat(0))))
-            return false;
-        for (self.orders[0..self.order_count]) |other| {
-            if (other.id != order.id and other.predecessor_order_id == order.id) return false;
-        }
-        return true;
     }
 
     fn lastReportEvidence(self: *const Oms, order: Order) !?ExecutionReport {
@@ -1156,7 +1438,7 @@ fn scaledReservation(atoms: i128, remaining: i64, basis: i64) !i128 {
     return @divFloor(try std.math.add(i128, numerator, basis - 1), basis);
 }
 
-fn intentFingerprint(intent: Intent, group_count: u8) [16]u8 {
+pub fn intentFingerprint(intent: Intent, group_count: u8) [16]u8 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update(&.{group_count});
     hash.update(std.mem.asBytes(&intent.intent_sequence));
@@ -1229,6 +1511,79 @@ fn orderFactDigest(order: Order, last_report: ?ExecutionReport, last_reconciliat
     return result;
 }
 
+test "optimization OMS late group report and replacement failures restore resident authority" {
+    const state = try std.testing.allocator.create(Oms);
+    defer std.testing.allocator.destroy(state);
+    state.* = .{};
+    var group: IntentGroup = .{ .first_intent_sequence = 1, .count = 2 };
+    group.members[0] = .{ .intent_sequence = 1, .strategy_instance = 1, .operation = .place, .instrument = 1, .quantity = 2, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 6 } };
+    group.members[1] = group.members[0];
+    group.members[1].intent_sequence = 2;
+    group.members[1].quantity = 0;
+    try std.testing.expectError(error.InvalidOrderSpec, state.applyGroup(group));
+    try std.testing.expectEqual(@as(u16, 0), state.order_count);
+    try std.testing.expectEqual(@as(u16, 0), state.command_history_count);
+    try std.testing.expectEqual(@as(u16, 0), state.intent_history_count);
+    try std.testing.expectEqual(@as(u64, 1), state.next_order_id);
+    try std.testing.expectEqual(@as(u64, 1), state.next_command_id);
+    const placed = try placeSubmitted(state, 1, 2);
+    try state.applyReport(.{ .report_id = 1, .order_id = placed.order_id, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    const original = state.orderById(placed.order_id).?;
+    try std.testing.expectError(error.InvalidExecutionReport, state.applyReport(.{ .report_id = 2, .order_id = placed.order_id, .revision = 1, .status = .partially_filled, .cumulative_quantity = 3, .remaining_quantity = 0 }));
+    try std.testing.expectEqualDeep(original, state.orderById(placed.order_id).?);
+    try std.testing.expectEqual(@as(u16, 1), state.report_history_count);
+    try state.applyReport(.{ .report_id = 2, .order_id = placed.order_id, .revision = 1, .status = .partially_filled, .cumulative_quantity = 1, .remaining_quantity = 1 });
+    try std.testing.expectEqual(@as(u16, 2), state.report_history_count);
+    state.begin();
+    var amend: IntentGroup = .{ .first_intent_sequence = 2, .count = 1 };
+    amend.members[0] = .{ .intent_sequence = 2, .strategy_instance = 1, .operation = .amend, .instrument = 1, .target_order_id = placed.order_id, .expected_revision = 1, .expected_cumulative_quantity = 1, .quantity = 1, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 3 }, .native_amend = false, .allow_cancel_confirm_create = true };
+    try state.applyGroup(amend);
+    try state.applyReport(.{ .report_id = 3, .order_id = placed.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 1, .remaining_quantity = 1 });
+    const predecessor = state.orderById(placed.order_id).?;
+    const command_count = state.command_history_count;
+    state.next_command_id = std.math.maxInt(u64);
+    try std.testing.expectError(error.Overflow, state.confirmReplacement(placed.order_id, .{ .asset = 1, .atoms = 3 }, false, false, 2, .{}));
+    try std.testing.expectEqualDeep(predecessor, state.orderById(placed.order_id).?);
+    try std.testing.expectEqual(@as(u16, 1), state.order_count);
+    try std.testing.expectEqual(command_count, state.command_history_count);
+    try std.testing.expectEqual(@as(u64, 2), state.next_order_id);
+    try std.testing.expectEqual(std.math.maxInt(u64), state.next_command_id);
+}
+
+test "optimization OMS dispatch rolls back cross strategy group cancellation at small and large scope" {
+    const state = try std.testing.allocator.create(Oms);
+    defer std.testing.allocator.destroy(state);
+    for ([_]usize{ 3, 41 }) |order_count| {
+        state.* = .{};
+        for (0..order_count) |index| {
+            state.begin();
+            var group: IntentGroup = .{ .first_intent_sequence = 1, .count = 1, .policy = .cancel_remaining };
+            group.members[0] = .{ .intent_sequence = 1, .strategy_instance = index + 1, .operation = .place, .instrument = 1, .quantity = 2, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 6 } };
+            try state.applyGroup(group);
+        }
+        state.begin();
+        var dispatch: DispatchBatch = .{ .count = 2 };
+        dispatch.items[0] = .{ .command_id = 1, .state = .not_sent };
+        dispatch.items[1] = .{ .command_id = 9999, .state = .unknown };
+        try std.testing.expectError(error.UnknownCommand, state.applyDispatch(dispatch));
+        for (state.orders[0..state.order_count]) |order| {
+            try std.testing.expectEqual(OrderState.pending_submit, order.state);
+            try std.testing.expect(order.reservation_active);
+            try std.testing.expect(!order.dispatch_submitted);
+        }
+        try std.testing.expectEqual(@as(u8, 0), state.command_count);
+        try std.testing.expectEqual(@as(u16, @intCast(order_count)), state.command_history_count);
+        try std.testing.expectEqual(@as(u64, @intCast(order_count + 1)), state.next_command_id);
+        try std.testing.expect(!state.recovery_only and !state.capacity_pressure);
+        dispatch.count = 1;
+        try state.applyDispatch(dispatch);
+        for (state.orders[0..state.order_count]) |order| {
+            try std.testing.expectEqual(OrderState.rejected, order.state);
+            try std.testing.expect(!order.reservation_active);
+        }
+    }
+}
+
 test "unknown order rejects a later place without changing identity" {
     var state: Oms = .{};
     var first: IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
@@ -1240,7 +1595,7 @@ test "unknown order rejects a later place without changing identity" {
     var second: IntentGroup = .{ .first_intent_sequence = 2, .count = 1 };
     second.members[0] = .{ .intent_sequence = 2, .operation = .place, .instrument = 2, .quantity = 1, .limit_price = .{ .instrument = 2, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 4 } };
     try std.testing.expectError(error.UncertainOrderBlocksSend, state.applyGroup(second));
-    try std.testing.expectEqual(@as(u8, 1), state.order_count);
+    try std.testing.expectEqual(@as(u16, 1), state.order_count);
 }
 
 test "OMS commands retain each member intent identity" {
@@ -1535,39 +1890,45 @@ test "OrderIntentIdentity is idempotent and conflicts fail closed" {
     try std.testing.expectError(error.ConflictingIntentIdentity, state.applyGroup(group));
 }
 
-test "terminal orders compact to replayable tombstones without overwriting active state" {
+test "explicit terminal archive preserves unrelated active orders and monotonic identities" {
     var state = Oms{};
-    for (1..max_orders + 2) |raw_sequence| {
-        state.begin();
-        const sequence: u64 = @intCast(raw_sequence);
-        var group: IntentGroup = .{ .first_intent_sequence = sequence, .count = 1 };
-        group.members[0] = .{ .intent_sequence = sequence, .strategy_instance = 1, .operation = .place, .instrument = 1, .quantity = 2, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 3 }, .reservation = .{ .asset = 1, .atoms = 6 } };
-        try state.applyGroup(group);
-        const order_id = state.emitted()[0].order_id;
-        var dispatch: DispatchBatch = .{ .count = 1 };
-        dispatch.items[0] = .{ .command_id = state.emitted()[0].command_id, .state = .submitted };
-        try state.applyDispatch(dispatch);
-        try state.applyReport(.{ .report_id = sequence, .order_id = order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
-        if (order_id == 1) try state.applyReconciliation(.{ .reconciliation_id = 100, .order_id = 1, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .canceled });
-    }
-    try std.testing.expectEqual(@as(u8, max_orders), state.order_count);
-    try std.testing.expectEqual(@as(u8, 1), state.tombstone_count);
-    try std.testing.expect(state.orderById(1) == null);
+    const first = try placeSubmitted(&state, 1, 2);
+    try state.applyReport(.{ .report_id = 1, .order_id = first.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    try state.applyReconciliation(.{ .reconciliation_id = 2, .order_id = first.order_id, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .canceled });
+    for (2..max_live_orders + 1) |sequence| _ = try placeSubmitted(&state, @intCast(sequence), 2);
+    try qualifyTestTerminal(&state, first.order_id);
+    const qualified = try state.prepareOrderArchive(first.order_id, 0, 9);
+    try state.commitOrderArchive(qualified);
+    try std.testing.expect(state.orderById(first.order_id) == null);
     try std.testing.expect(state.orderById(2) != null);
-    try std.testing.expect(!state.recovery_only);
-    try std.testing.expectEqual(@as(u64, 1), state.tombstones[0].intent_sequence);
-    try std.testing.expectEqualStrings("RWN-1", state.tombstones[0].client_order_id.slice());
-    try std.testing.expect(!std.mem.eql(u8, &state.tombstones[0].fact_digest, &@as([32]u8, @splat(0))));
-    try state.applyReport(.{ .report_id = 1, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
-    try state.applyReconciliation(.{ .reconciliation_id = 100, .order_id = 1, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .canceled });
-    try std.testing.expectError(error.TombstoneFactConflict, state.applyReconciliation(.{ .reconciliation_id = 100, .order_id = 1, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .filled }));
-    try std.testing.expectError(error.TombstoneFactConflict, state.applyReport(.{ .report_id = 0, .order_id = 1, .revision = 2, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 }));
-    try std.testing.expectError(error.TombstoneFactConflict, state.applyReconciliation(.{ .reconciliation_id = 0, .order_id = 1, .status = .found_terminal, .revision = 99, .cumulative_quantity = 0, .remaining_quantity = 0, .terminal_state = .filled }));
-    try std.testing.expectError(error.TombstoneFactConflict, state.applyReport(.{ .report_id = 99, .order_id = 1, .revision = 1, .status = .filled, .cumulative_quantity = 2, .remaining_quantity = 0 }));
-    try std.testing.expect(state.recovery_only);
+    try std.testing.expectEqual(@as(u16, max_live_orders - 1), state.order_count);
+    const next = try placeSubmitted(&state, max_live_orders + 1, 2);
+    try std.testing.expectEqual(@as(u64, max_live_orders + 1), next.order_id);
+    try std.testing.expectEqual(@as(u16, max_live_orders), state.order_count);
+    try std.testing.expectEqual(@as(u16, 0), state.tombstone_count);
+    try std.testing.expectError(error.ArchivedFactOutsideRetention, state.applyReport(.{ .report_id = 1, .order_id = first.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 }));
 }
 
-test "compacted second group member keeps its own intent identity" {
+test "order lookup and report updates preserve identity across an archived middle slot" {
+    var state = Oms{};
+    const first = try placeSubmitted(&state, 1, 2);
+    const middle = try placeSubmitted(&state, 2, 2);
+    const last = try placeSubmitted(&state, 3, 2);
+    try state.applyReport(.{ .report_id = 1, .order_id = middle.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    try state.applyReconciliation(.{ .reconciliation_id = 2, .order_id = middle.order_id, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .canceled });
+    try qualifyTestTerminal(&state, middle.order_id);
+    try state.commitOrderArchive(try state.prepareOrderArchive(middle.order_id, 0, 9));
+    try std.testing.expectEqual(first.order_id, state.orderById(first.order_id).?.id);
+    try std.testing.expectEqual(last.order_id, state.orderById(last.order_id).?.id);
+    try std.testing.expect(state.orderById(middle.order_id) == null);
+    try std.testing.expect(state.orderById(0) == null);
+    try std.testing.expect(state.orderById(std.math.maxInt(u64)) == null);
+    try state.applyReport(.{ .report_id = 3, .order_id = last.order_id, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    try std.testing.expectEqual(OrderState.live, state.orderById(last.order_id).?.state);
+    try std.testing.expectEqual(OrderState.pending_submit, state.orderById(first.order_id).?.state);
+}
+
+test "group archive retains member identities until all active references close" {
     var state = Oms{};
     var group: IntentGroup = .{ .first_intent_sequence = 7, .count = 2 };
     for (group.members[0..2], 0..) |*intent, index| intent.* = .{
@@ -1580,89 +1941,72 @@ test "compacted second group member keeps its own intent identity" {
         .reservation = .{ .asset = 1, .atoms = 3 },
     };
     try state.applyGroup(group);
-    const second = state.emitted()[1];
     var dispatch: DispatchBatch = .{ .count = 2 };
     for (state.emitted()[0..2], 0..) |command, index| dispatch.items[index] = .{ .command_id = command.command_id, .state = .submitted };
     try state.applyDispatch(dispatch);
-    try state.applyReport(.{ .report_id = 80, .order_id = second.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 1 });
-    try state.applyReconciliation(.{ .reconciliation_id = 81, .order_id = second.order_id, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 1, .terminal_state = .canceled });
-    var sequence: u64 = 9;
-    while (state.order_count < max_orders) : (sequence += 1) _ = try placeSubmitted(&state, sequence, 1);
-    _ = try placeSubmitted(&state, sequence, 1);
-    try std.testing.expectEqual(@as(u64, second.order_id), state.tombstones[0].order_id);
-    try std.testing.expectEqual(@as(u64, 7), state.tombstones[0].group_first_sequence);
-    try std.testing.expectEqual(@as(u64, 8), state.tombstones[0].intent_sequence);
+    try state.applyReport(.{ .report_id = 80, .order_id = 2, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 1 });
+    try state.applyReconciliation(.{ .reconciliation_id = 81, .order_id = 2, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 1, .terminal_state = .canceled });
+    try qualifyTestTerminal(&state, 2);
+    try std.testing.expectError(error.OrderArchiveReferenced, state.prepareOrderArchive(2, 0, 9));
+    try state.applyReport(.{ .report_id = 82, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 1 });
+    try state.applyReconciliation(.{ .reconciliation_id = 83, .order_id = 1, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 1, .terminal_state = .canceled });
+    const qualified = try state.prepareOrderArchive(2, 0, 9);
+    try std.testing.expectEqual(@as(u64, 8), qualified.order.intent_sequence);
+    try std.testing.expectEqual(@as(u64, 7), qualified.order.group_first_sequence);
+    try state.commitOrderArchive(qualified);
     try std.testing.expect(state.orderById(1) != null);
-    const count = state.order_count;
+    try std.testing.expectEqual(@as(u16, 2), state.intent_history_count);
     try state.applyGroup(group);
-    try std.testing.expectEqual(count, state.order_count);
+    try std.testing.expectEqual(@as(u16, 1), state.order_count);
     group.members[1].quantity = 2;
     try std.testing.expectError(error.ConflictingIntentIdentity, state.applyGroup(group));
-    try state.applyReport(.{ .report_id = 80, .order_id = second.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 1 });
-    try std.testing.expectError(error.TombstoneFactConflict, state.applyReport(.{ .report_id = 82, .order_id = second.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 1 }));
+    try qualifyTestTerminal(&state, 1);
+    try state.commitOrderArchive(try state.prepareOrderArchive(1, 0, 9));
+    try std.testing.expectEqual(@as(u16, 0), state.intent_history_count);
 }
 
-test "tombstone capacity exhaustion enters RecoveryOnly without evicting active evidence" {
+test "explicit archive frees repeated lifecycles without spending tombstone capacity" {
     var state = Oms{};
-    var sequence: u64 = 1;
-    while (sequence <= max_orders) : (sequence += 1) {
+    for (1..36) |raw_sequence| {
+        const sequence: u64 = @intCast(raw_sequence);
         const placed = try placeSubmitted(&state, sequence, 1);
         try state.applyReport(.{ .report_id = sequence, .order_id = placed.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 1 });
-        try state.applyReconciliation(.{
-            .reconciliation_id = 100 + sequence,
-            .order_id = placed.order_id,
-            .status = .found_terminal,
-            .revision = 1,
-            .cumulative_quantity = 0,
-            .remaining_quantity = 1,
-            .terminal_state = .canceled,
-        });
+        try state.applyReconciliation(.{ .reconciliation_id = 100 + sequence, .order_id = placed.order_id, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 1, .terminal_state = .canceled });
+        try qualifyTestTerminal(&state, placed.order_id);
+        try state.commitOrderArchive(try state.prepareOrderArchive(placed.order_id, 0, 9));
+        try std.testing.expectEqual(@as(u16, 0), state.order_count);
+        try std.testing.expectEqual(@as(u16, 0), state.tombstone_count);
+        try std.testing.expect(!state.recovery_only);
     }
-    while (sequence <= max_orders + max_tombstones) : (sequence += 1) {
-        const placed = try placeSubmitted(&state, sequence, 1);
-        try state.applyReport(.{ .report_id = sequence, .order_id = placed.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 1 });
-        try state.applyReconciliation(.{
-            .reconciliation_id = 100 + sequence,
-            .order_id = placed.order_id,
-            .status = .found_terminal,
-            .revision = 1,
-            .cumulative_quantity = 0,
-            .remaining_quantity = 1,
-            .terminal_state = .canceled,
-        });
-    }
-    state.begin();
-    var overflow: IntentGroup = .{ .first_intent_sequence = sequence, .count = 1 };
-    overflow.members[0] = .{ .intent_sequence = sequence, .strategy_instance = 1, .operation = .place, .instrument = 1, .quantity = 1, .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 1 }, .reservation = .{ .asset = 1, .atoms = 1 } };
-    try std.testing.expectError(error.TombstoneCapacityExceeded, state.applyGroup(overflow));
-    try std.testing.expect(state.recovery_only);
-    try std.testing.expectEqual(@as(u8, max_orders), state.order_count);
-    try std.testing.expectEqual(@as(u8, max_tombstones), state.tombstone_count);
+    for (1..max_live_orders + 1) |raw_sequence| _ = try placeSubmitted(&state, 100 + @as(u64, @intCast(raw_sequence)), 1);
+    try std.testing.expectError(error.OrderCapacityExceeded, placeSubmitted(&state, 1000000, 1));
+    try std.testing.expect(state.capacity_pressure);
+    try std.testing.expectEqual(@as(u16, max_live_orders), state.order_count);
 }
 
 test "canceled orders without archive window stay hot under capacity pressure" {
     var state = Oms{};
     var sequence: u64 = 1;
-    while (sequence <= max_orders) : (sequence += 1) {
+    while (sequence <= max_retained_terminal_orders) : (sequence += 1) {
         const placed = try placeSubmitted(&state, sequence, 2);
         try state.applyReport(.{ .report_id = sequence, .order_id = placed.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
         try std.testing.expect(!state.orderById(placed.order_id).?.archive_window_closed);
     }
-    try std.testing.expectError(error.OrderCapacityExceeded, placeSubmitted(&state, sequence, 2));
-    try std.testing.expect(state.recovery_only);
-    try std.testing.expectEqual(@as(u8, max_orders), state.order_count);
-    try std.testing.expectEqual(@as(u8, 0), state.tombstone_count);
+    try std.testing.expectError(error.TerminalCapacityExceeded, placeSubmitted(&state, sequence, 2));
+    try std.testing.expect(state.capacity_pressure);
+    try std.testing.expectEqual(@as(u16, max_retained_terminal_orders), state.order_count);
+    try std.testing.expectEqual(@as(u16, 0), state.tombstone_count);
 }
 
 test "live unknown and pending_cancel orders never compact" {
     var live = Oms{};
     var sequence: u64 = 1;
-    while (sequence <= max_orders) : (sequence += 1) {
+    while (sequence <= max_live_orders) : (sequence += 1) {
         _ = try placeSubmitted(&live, sequence, 2);
     }
     try std.testing.expectError(error.OrderCapacityExceeded, placeSubmitted(&live, sequence, 2));
-    try std.testing.expect(live.recovery_only);
-    try std.testing.expectEqual(@as(u8, 0), live.tombstone_count);
+    try std.testing.expect(live.capacity_pressure);
+    try std.testing.expectEqual(@as(u16, 0), live.tombstone_count);
     for (live.orders[0..live.order_count]) |order| try std.testing.expectEqual(OrderState.pending_submit, order.state);
 
     var unknown = Oms{};
@@ -1672,8 +2016,8 @@ test "live unknown and pending_cancel orders never compact" {
     try unknown.applyDispatch(unknown_dispatch);
     try std.testing.expectError(error.UncertainOrderBlocksSend, placeSubmitted(&unknown, 2, 2));
     try std.testing.expectEqual(OrderState.unknown, unknown.orderById(unknown_placed.order_id).?.state);
-    try std.testing.expectEqual(@as(u8, 1), unknown.order_count);
-    try std.testing.expectEqual(@as(u8, 0), unknown.tombstone_count);
+    try std.testing.expectEqual(@as(u16, 1), unknown.order_count);
+    try std.testing.expectEqual(@as(u16, 0), unknown.tombstone_count);
 
     var pending = Oms{};
     const pending_placed = try placeSubmitted(&pending, 1, 2);
@@ -1692,8 +2036,8 @@ test "live unknown and pending_cancel orders never compact" {
     try std.testing.expectEqual(OrderState.pending_cancel, pending.orderById(pending_placed.order_id).?.state);
     try std.testing.expectError(error.UncertainOrderBlocksSend, placeSubmitted(&pending, 2, 2));
     try std.testing.expectEqual(OrderState.pending_cancel, pending.orderById(pending_placed.order_id).?.state);
-    try std.testing.expectEqual(@as(u8, 1), pending.order_count);
-    try std.testing.expectEqual(@as(u8, 0), pending.tombstone_count);
+    try std.testing.expectEqual(@as(u16, 1), pending.order_count);
+    try std.testing.expectEqual(@as(u16, 0), pending.tombstone_count);
 }
 
 test "ccc predecessor stays hot while successor is live" {
@@ -1726,7 +2070,7 @@ test "ccc predecessor stays hot while successor is live" {
         .remaining_quantity = 2,
         .terminal_state = .canceled,
     });
-    try std.testing.expect(state.orderById(placed.order_id).?.archive_window_closed);
+    try std.testing.expect(!state.orderById(placed.order_id).?.archive_window_closed);
     try std.testing.expect(state.orderById(placed.order_id).?.replacement != null);
     try state.confirmReplacement(placed.order_id, .{ .asset = 1, .atoms = 6 }, false, false, 2, .{});
     const successor = state.orderById(2) orelse return error.MissingReplacement;
@@ -1735,48 +2079,34 @@ test "ccc predecessor stays hot while successor is live" {
     var archived = state;
     try archived.applyReport(.{ .report_id = 3, .order_id = successor.id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
     try archived.applyReconciliation(.{ .reconciliation_id = 11, .order_id = successor.id, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .canceled });
-    var archive_sequence: u64 = 3;
-    while (archived.order_count < max_orders) : (archive_sequence += 1) _ = try placeSubmitted(&archived, archive_sequence, 2);
-    _ = try placeSubmitted(&archived, archive_sequence, 2);
-    try std.testing.expectEqual(successor.id, archived.tombstones[0].order_id);
-    try std.testing.expectEqual(@as(u64, 1), archived.tombstones[0].group_first_sequence);
-    try std.testing.expectEqual(@as(u64, 2), archived.tombstones[0].intent_sequence);
-    try std.testing.expectEqual(placed.order_id, archived.tombstones[0].predecessor_order_id);
-    try archived.applyReport(.{ .report_id = 3, .order_id = successor.id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
-    const archived_count = archived.order_count;
-    try archived.applyGroup(replace);
-    try std.testing.expectEqual(archived_count, archived.order_count);
-    var conflicting_replace = replace;
-    conflicting_replace.members[0].quantity = 3;
-    try std.testing.expectError(error.ConflictingIntentIdentity, archived.applyGroup(conflicting_replace));
+    try qualifyTestTerminal(&archived, placed.order_id);
+    try qualifyTestTerminal(&archived, successor.id);
+    try std.testing.expectError(error.OrderArchiveReferenced, archived.prepareOrderArchive(placed.order_id, 0, 9));
+    const successor_qualification = try archived.prepareOrderArchive(successor.id, 0, 9);
+    try std.testing.expectEqual(placed.order_id, successor_qualification.order.predecessor_order_id);
+    try std.testing.expectEqual(@as(u64, 2), successor_qualification.order.intent_sequence);
+    try archived.commitOrderArchive(successor_qualification);
+    try std.testing.expect(archived.orderById(placed.order_id) != null);
+    try archived.commitOrderArchive(try archived.prepareOrderArchive(placed.order_id, 0, 9));
+    try std.testing.expectEqual(@as(u16, 0), archived.order_count);
     var sequence: u64 = 3;
-    while (sequence <= max_orders) : (sequence += 1) _ = try placeSubmitted(&state, sequence, 2);
+    while (sequence <= max_live_orders + 1) : (sequence += 1) _ = try placeSubmitted(&state, sequence, 2);
     try std.testing.expectError(error.OrderCapacityExceeded, placeSubmitted(&state, sequence, 2));
     try std.testing.expect(state.orderById(placed.order_id) != null);
-    try std.testing.expectEqual(@as(u8, 0), state.tombstone_count);
+    try std.testing.expectEqual(@as(u16, 0), state.tombstone_count);
 }
 
-test "compact refuses a mutated intent identity after the archive window closes" {
+test "archive commit refuses mutated intent evidence without evicting hot state" {
     var state = Oms{};
-    var sequence: u64 = 1;
-    while (sequence <= max_orders) : (sequence += 1) {
-        const placed = try placeSubmitted(&state, sequence, 2);
-        try state.applyReport(.{ .report_id = sequence, .order_id = placed.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
-        try state.applyReconciliation(.{
-            .reconciliation_id = 200 + sequence,
-            .order_id = placed.order_id,
-            .status = .found_terminal,
-            .revision = 1,
-            .cumulative_quantity = 0,
-            .remaining_quantity = 2,
-            .terminal_state = .canceled,
-        });
-    }
-    state.orders[0].intent_sequence = 99;
-    try std.testing.expectError(error.ArchiveAuditDigestMismatch, placeSubmitted(&state, sequence, 2));
-    try std.testing.expect(state.recovery_only);
-    try std.testing.expectEqual(@as(u8, max_orders), state.order_count);
-    try std.testing.expectEqual(@as(u8, 0), state.tombstone_count);
+    const placed = try placeSubmitted(&state, 1, 2);
+    try state.applyReport(.{ .report_id = 1, .order_id = placed.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    try state.applyReconciliation(.{ .reconciliation_id = 2, .order_id = placed.order_id, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .canceled });
+    try qualifyTestTerminal(&state, placed.order_id);
+    const qualified = try state.prepareOrderArchive(placed.order_id, 0, 9);
+    state.intent_history[0].fingerprint[0] ^= 1;
+    try std.testing.expectError(error.StaleOrderArchiveQualification, state.commitOrderArchive(qualified));
+    try std.testing.expectEqual(@as(u16, 1), state.order_count);
+    try std.testing.expectEqual(@as(u16, 0), state.tombstone_count);
 }
 
 fn placeSubmitted(state: *Oms, sequence: u64, quantity: i64) !struct { order_id: u64, command_id: u64 } {
@@ -1799,7 +2129,7 @@ fn placeSubmitted(state: *Oms, sequence: u64, quantity: i64) !struct { order_id:
     return .{ .order_id = command_value.order_id, .command_id = command_value.command_id };
 }
 
-fn commitArchiveQualification(self: *Oms, order: *Order) !void {
+fn rememberTerminalAudit(self: *Oms, order: *Order) !void {
     switch (order.state) {
         .filled, .canceled, .rejected => {},
         else => return,
@@ -1816,7 +2146,6 @@ fn commitArchiveQualification(self: *Oms, order: *Order) !void {
         return;
     }
     order.archive_audit_digest = digest;
-    order.archive_window_closed = true;
 }
 
 fn rememberReport(order: *Order, report: ExecutionReport) void {
@@ -1825,4 +2154,221 @@ fn rememberReport(order: *Order, report: ExecutionReport) void {
     order.last_report_status = report.status;
     order.last_report_cumulative_quantity = report.cumulative_quantity;
     order.last_report_remaining_quantity = report.remaining_quantity;
+}
+
+test "OMS terminal archive requires complete coverage and applied fills" {
+    var state = Oms{};
+    const placed = try placeSubmitted(&state, 1, 2);
+    try state.noteOrderCreated(placed.order_id, 100);
+    try state.applyReport(.{ .report_id = 1, .order_id = placed.order_id, .revision = 1, .status = .filled, .cumulative_quantity = 2, .remaining_quantity = 0 });
+    try state.noteTerminalObserved(placed.order_id, 200);
+    try state.noteTerminalObserved(placed.order_id, 300);
+    try state.applyReconciliation(.{ .reconciliation_id = 2, .order_id = placed.order_id, .status = .found_terminal, .revision = 1, .cumulative_quantity = 2, .remaining_quantity = 0, .terminal_state = .filled });
+    try std.testing.expectError(error.OrderArchiveNotQualified, state.prepareOrderArchive(placed.order_id, 2, 9));
+    const evidence = testTerminalArchiveEvidence(placed.order_id);
+    try state.retainTerminalArchiveCoverage(placed.order_id, evidence);
+    try std.testing.expectError(error.OrderArchiveNotQualified, state.prepareOrderArchive(placed.order_id, 0, 9));
+    const qualified = try state.prepareOrderArchive(placed.order_id, 2, 9);
+    try std.testing.expectEqual(@as(u64, 200), qualified.order.terminal_observed_at_utc_ns);
+    try std.testing.expectEqual(@as(i64, 2), qualified.applied_fill_quantity);
+    try std.testing.expectEqual(@as(i64, 2), qualified.order.cumulative_quantity);
+    try std.testing.expectEqual(@as(u16, 1), state.order_count);
+}
+
+fn testTerminalArchiveEvidence(order_id: u64) canonical.ReconciliationEvidence {
+    return .{
+        .scope = .{ .exchange_account = 9, .instrument = 1, .order = order_id, .revision = 1, .from_utc_ns = 100, .through_utc_ns = 30_000_000_200 },
+        .observed_at_utc_ns = 30_000_000_200,
+        .source = .{ .stream = 1, .sequence = 1, .digest = @splat(1) },
+        .terminal_archive = .{ .visibility_deadline_utc_ns = 30_000_000_200, .order_history_complete = true, .terminal_history_complete = true, .fills_complete = true, .economics_complete = true },
+    };
+}
+
+fn safeTerminal(order: Order) bool {
+    return switch (order.state) {
+        .filled, .canceled, .rejected => true,
+        else => false,
+    };
+}
+
+fn retainedTerminal(order: *const Order) bool {
+    const terminal = switch (order.state) {
+        .filled, .canceled, .rejected => true,
+        else => false,
+    };
+    return terminal and !order.reservation_active and order.reservation.atoms == 0 and
+        order.pending_reservation == null and order.pending_previous_spec == null and
+        order.pending_basis_quantity == 0 and order.replacement == null;
+}
+
+fn validateTerminalArchiveCoverage(order: Order, evidence: canonical.ReconciliationEvidence, exchange_account: canonical.ExchangeAccountIdentity) !void {
+    const coverage = evidence.terminal_archive orelse return error.OrderArchiveNotQualified;
+    // shortcut: 30 seconds is the frozen synthetic lateness bound; qualify real Venue guarantees separately.
+    const deadline = std.math.add(u64, order.terminal_observed_at_utc_ns, 30 * std.time.ns_per_s) catch return error.OrderArchiveNotQualified;
+    if (!safeTerminal(order) or order.created_at_utc_ns == 0 or order.terminal_observed_at_utc_ns == 0 or
+        exchange_account == 0 or evidence.scope.exchange_account != exchange_account or
+        evidence.scope.order != order.id or evidence.scope.instrument != order.instrument or evidence.scope.revision != order.revision or
+        evidence.scope.from_utc_ns > order.created_at_utc_ns or evidence.scope.through_utc_ns < coverage.visibility_deadline_utc_ns or
+        coverage.visibility_deadline_utc_ns < deadline or evidence.observed_at_utc_ns < evidence.scope.through_utc_ns or
+        evidence.source.stream == 0 or evidence.source.sequence == 0 or std.mem.eql(u8, &evidence.source.digest, &@as([32]u8, @splat(0))) or
+        !coverage.order_history_complete or !coverage.terminal_history_complete or !coverage.fills_complete or !coverage.economics_complete)
+        return error.OrderArchiveNotQualified;
+}
+
+fn archiveHashValue(hash: *std.crypto.hash.sha2.Sha256, value: anytype) void {
+    const T = @TypeOf(value);
+    if (T == canonical.ClientOrderId) {
+        archiveHashValue(hash, value.len);
+        hash.update(value.slice());
+        return;
+    }
+    switch (@typeInfo(T)) {
+        .@"struct" => inline for (std.meta.fields(T)) |field| archiveHashValue(hash, @field(value, field.name)),
+        .optional => {
+            hash.update(&.{@intFromBool(value != null)});
+            if (value) |present| archiveHashValue(hash, present);
+        },
+        .@"enum" => archiveHashValue(hash, @intFromEnum(value)),
+        .bool => hash.update(&.{@intFromBool(value)}),
+        .int => {
+            var bytes: [@sizeOf(T)]u8 = undefined;
+            const Encoded = @Int(@typeInfo(T).int.signedness, @sizeOf(T) * 8);
+            std.mem.writeInt(Encoded, &bytes, value, .little);
+            hash.update(&bytes);
+        },
+        .array => for (value) |element| archiveHashValue(hash, element),
+        else => @compileError("unsupported archive field"),
+    }
+}
+
+test "OMS explicit archive commit frees hot evidence and rejects a stale qualification" {
+    var state = Oms{};
+    const placed = try placeSubmitted(&state, 1, 2);
+    try state.applyReport(.{ .report_id = 1, .order_id = placed.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    try state.applyReconciliation(.{ .reconciliation_id = 2, .order_id = placed.order_id, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .canceled });
+    try state.noteOrderCreated(placed.order_id, 100);
+    try state.noteTerminalObserved(placed.order_id, 200);
+    try state.retainTerminalArchiveCoverage(placed.order_id, testTerminalArchiveEvidence(placed.order_id));
+    const qualified = try state.prepareOrderArchive(placed.order_id, 0, 9);
+    var stale = qualified;
+    stale.order.intent_sequence += 1;
+    try std.testing.expectError(error.StaleOrderArchiveQualification, state.commitOrderArchive(stale));
+    try std.testing.expectEqual(@as(u16, 1), state.order_count);
+    try state.commitOrderArchive(qualified);
+    try std.testing.expectEqual(@as(u16, 0), state.order_count);
+    try std.testing.expectEqual(@as(u16, 0), state.command_history_count);
+    try std.testing.expectEqual(@as(u16, 0), state.report_history_count);
+    try std.testing.expectEqual(@as(u16, 0), state.reconciliation_history_count);
+    try std.testing.expectEqual(@as(u16, 0), state.intent_history_count);
+    try std.testing.expectEqual(@as(u16, 0), state.tombstone_count);
+    const next = try placeSubmitted(&state, 2, 2);
+    try std.testing.expectEqual(@as(u64, 2), next.order_id);
+    try std.testing.expectEqual(@as(u64, 2), next.command_id);
+}
+
+fn removeArchiveEntry(comptime T: type, entries: []T, count: anytype, index: usize) void {
+    var move = index;
+    while (move + 1 < count.*) : (move += 1) entries[move] = entries[move + 1];
+    count.* -= 1;
+}
+
+test "OMS capacity never substitutes implicit compaction for durable archive commit" {
+    var state = Oms{};
+    const first = try placeSubmitted(&state, 1, 2);
+    try state.applyReport(.{ .report_id = 1, .order_id = first.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    try state.applyReconciliation(.{ .reconciliation_id = 2, .order_id = first.order_id, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .canceled });
+    try state.noteOrderCreated(first.order_id, 100);
+    try state.noteTerminalObserved(first.order_id, 200);
+    try state.retainTerminalArchiveCoverage(first.order_id, testTerminalArchiveEvidence(first.order_id));
+    state.orders[0].archive_window_closed = true;
+    for (2..max_live_orders + 2) |sequence| _ = try placeSubmitted(&state, @intCast(sequence), 2);
+    try std.testing.expectError(error.OrderCapacityExceeded, placeSubmitted(&state, max_live_orders + 2, 2));
+    try std.testing.expect(state.orderById(first.order_id) != null);
+    try std.testing.expectEqual(@as(u16, 0), state.tombstone_count);
+}
+
+fn qualifyTestTerminal(state: *Oms, order_id: u64) !void {
+    try state.noteOrderCreated(order_id, 100);
+    try state.noteTerminalObserved(order_id, 200);
+    try state.retainTerminalArchiveCoverage(order_id, testTerminalArchiveEvidence(order_id));
+}
+
+test "OMS archive coverage rejects incomplete or early queries without replacing valid evidence" {
+    var state = Oms{};
+    const placed = try placeSubmitted(&state, 1, 2);
+    try state.applyReport(.{ .report_id = 1, .order_id = placed.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    try state.applyReconciliation(.{ .reconciliation_id = 2, .order_id = placed.order_id, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .canceled });
+    try qualifyTestTerminal(&state, placed.order_id);
+    const original = (try state.prepareOrderArchive(placed.order_id, 0, 9)).digest();
+    for (0..12) |case| {
+        var evidence = testTerminalArchiveEvidence(placed.order_id);
+        switch (case) {
+            0 => evidence.terminal_archive.?.order_history_complete = false,
+            1 => evidence.terminal_archive.?.terminal_history_complete = false,
+            2 => evidence.terminal_archive.?.fills_complete = false,
+            3 => evidence.terminal_archive.?.economics_complete = false,
+            4 => evidence.terminal_archive.?.visibility_deadline_utc_ns -= 1,
+            5 => evidence.scope.from_utc_ns += 1,
+            6 => evidence.scope.through_utc_ns -= 1,
+            7 => evidence.observed_at_utc_ns -= 1,
+            8 => evidence.scope.order += 1,
+            9 => evidence.scope.revision += 1,
+            10 => evidence.scope.instrument += 1,
+            11 => evidence.source.digest = @splat(0),
+            else => unreachable,
+        }
+        try std.testing.expectError(error.OrderArchiveNotQualified, state.retainTerminalArchiveCoverage(placed.order_id, evidence));
+        try std.testing.expectEqualSlices(u8, &original, &(try state.prepareOrderArchive(placed.order_id, 0, 9)).digest());
+    }
+    try std.testing.expectError(error.OrderArchiveNotQualified, state.prepareOrderArchive(placed.order_id, 0, 8));
+}
+
+test "OMS terminal conflict blocks archive qualification and preserves hot evidence" {
+    var state = Oms{};
+    const placed = try placeSubmitted(&state, 1, 2);
+    try state.applyReport(.{ .report_id = 1, .order_id = placed.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    try state.applyReconciliation(.{ .reconciliation_id = 2, .order_id = placed.order_id, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .canceled });
+    try qualifyTestTerminal(&state, placed.order_id);
+    try std.testing.expectError(error.TerminalFactConflict, state.applyReconciliation(.{ .reconciliation_id = 3, .order_id = placed.order_id, .status = .found_terminal, .revision = 1, .cumulative_quantity = 1, .remaining_quantity = 1, .terminal_state = .canceled }));
+    try std.testing.expectError(error.OrderArchiveNotQualified, state.prepareOrderArchive(placed.order_id, 0, 9));
+    try std.testing.expectEqual(@as(u16, 1), state.order_count);
+    try std.testing.expectEqual(@as(i64, 0), state.orderById(placed.order_id).?.cumulative_quantity);
+}
+
+test "OMS later complete terminal reconciliation preserves first terminal observation" {
+    var state = Oms{};
+    const placed = try placeSubmitted(&state, 1, 2);
+    try state.noteOrderCreated(placed.order_id, 100);
+    try state.applyReport(.{ .report_id = 1, .order_id = placed.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    try state.noteTerminalObserved(placed.order_id, 200);
+    try state.applyReconciliation(.{ .reconciliation_id = 2, .order_id = placed.order_id, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .canceled });
+    try state.applyReconciliation(.{ .reconciliation_id = 3, .order_id = placed.order_id, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .canceled });
+    try state.noteTerminalObserved(placed.order_id, 30_000_000_200);
+    try state.retainTerminalArchiveCoverage(placed.order_id, testTerminalArchiveEvidence(placed.order_id));
+    const qualified = try state.prepareOrderArchive(placed.order_id, 0, 9);
+    try std.testing.expectEqual(@as(u64, 3), qualified.last_reconciliation.?.reconciliation_id);
+    try std.testing.expectEqual(@as(u64, 200), qualified.order.terminal_observed_at_utc_ns);
+}
+
+test "OMS archive qualification rejects every unfinished reservation branch" {
+    var state = Oms{};
+    const placed = try placeSubmitted(&state, 1, 2);
+    try state.applyReport(.{ .report_id = 1, .order_id = placed.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
+    try state.applyReconciliation(.{ .reconciliation_id = 2, .order_id = placed.order_id, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .canceled });
+    try qualifyTestTerminal(&state, placed.order_id);
+    const closed = state.orders[0];
+    for (0..6) |case| {
+        state.orders[0] = closed;
+        switch (case) {
+            0 => state.orders[0].reservation_active = true,
+            1 => state.orders[0].reservation.atoms = 1,
+            2 => state.orders[0].pending_reservation = .{ .asset = 1, .atoms = 1 },
+            3 => state.orders[0].pending_basis_quantity = 1,
+            4 => state.orders[0].state = .unknown,
+            5 => state.orders[0].state = .pending_cancel,
+            else => unreachable,
+        }
+        try std.testing.expectError(error.OrderArchiveNotQualified, state.prepareOrderArchive(placed.order_id, 0, 9));
+        try std.testing.expectEqual(@as(u16, 1), state.order_count);
+    }
 }
