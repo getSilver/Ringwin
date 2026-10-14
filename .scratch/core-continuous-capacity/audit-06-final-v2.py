@@ -79,5 +79,12 @@ report = {
     'steps': len(names), 'checks': checks, 'result': 'passed',
     'scope': 'ticket06 small functional acceptance only;not capacity,resource or production qualification',
 }
-(out / (prefix + '-acceptance-audit.json')).write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+report_path = out / (prefix + '-acceptance-audit.json')
+if report_path.exists():
+    previous = json.loads(report_path.read_text(encoding='utf-8-sig'))
+    for field in ['source_tree_sha256', 'steps', 'checks', 'result', 'scope']:
+        if previous[field] != report[field]:
+            raise RuntimeError('existing audit record differs: ' + field)
+else:
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 print('audit passed:', len(checks), 'checks;', len(names), 'captured commands;source', manifest['source_tree_sha256'])
