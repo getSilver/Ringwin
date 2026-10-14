@@ -377,12 +377,23 @@ pub const Owner = struct {
             !(store.verifyArchiveReceipt(io, stream, recovered_shard.checkpointArchiveBarrier(), recovered_shard.checkpointArchiveRoot()) catch return error.DecisionLogUnavailable))
             return error.DecisionLogUnavailable;
         if (recovered_shard.business_history_root) |root| {
-            const archived = recovered_shard.last_order_archive orelse return error.DecisionLogUnavailable;
+            const kind = recovered_shard.last_business_archive_kind orelse return error.DecisionLogUnavailable;
+            const archive_id = switch (kind) {
+                .order => (recovered_shard.last_order_archive orelse return error.DecisionLogUnavailable).order_id,
+                .fill => (recovered_shard.last_fill_archive orelse return error.DecisionLogUnavailable).fill_id,
+            };
+            const qualification_digest = switch (kind) {
+                .order => recovered_shard.last_order_archive.?.qualification_digest,
+                .fill => recovered_shard.last_fill_archive.?.qualification_digest,
+            };
             const request: history.LookupRequest = .{
-                .pending_id = archived.order_id,
-                .key = .{ .origin = root.origin, .identity = .{ .order = archived.order_id } },
+                .pending_id = archive_id,
+                .key = .{ .origin = root.origin, .identity = switch (kind) {
+                    .order => .{ .order = archive_id },
+                    .fill => .{ .fill_detail = archive_id },
+                } },
                 .candidate_payload_digest = @splat(0),
-                .original_input_digest = archived.qualification_digest,
+                .original_input_digest = qualification_digest,
                 .root_digest = root.root_digest,
                 .epoch = root.epoch,
                 .barrier = root.barrier,
@@ -391,8 +402,17 @@ pub const Owner = struct {
             const verdict = history.verifyResult(request, &result.proof, root) catch return error.DecisionLogUnavailable;
             if (verdict != .same and verdict != .conflict) return error.DecisionLogUnavailable;
             history.validateRecord(&result) catch return error.DecisionLogUnavailable;
-            const qualification = snapshot_codec.decodeBare(result.record_bytes[0..result.record_len], trading.oms.OrderArchiveQualification) catch return error.DecisionLogUnavailable;
-            if (!std.mem.eql(u8, &qualification.digest(), &archived.qualification_digest)) return error.DecisionLogUnavailable;
+            const recovered_qualification_digest = switch (kind) {
+                .order => blk: {
+                    const qualification = snapshot_codec.decodeBare(result.record_bytes[0..result.record_len], trading.oms.OrderArchiveQualification) catch return error.DecisionLogUnavailable;
+                    break :blk qualification.digest();
+                },
+                .fill => blk: {
+                    const qualification = snapshot_codec.decodeBare(result.record_bytes[0..result.record_len], @import("economics.zig").FillArchiveQualification) catch return error.DecisionLogUnavailable;
+                    break :blk qualification.digest();
+                },
+            };
+            if (!std.mem.eql(u8, &recovered_qualification_digest, &qualification_digest)) return error.DecisionLogUnavailable;
         }
         // A committed decision prefix may precede durable private facts. Every
         // restart re-arms admission, independent of the saved snapshot flag.
@@ -462,8 +482,8 @@ pub const Owner = struct {
     /// barrier have been committed. A fault closes this owner permanently.
     pub fn apply(self: *Owner, input: trading.CanonicalEvent) !?trading.OrderCommand {
         const checkpoint_maintenance = input == .core and input.core.payload == .checkpoint_committed;
-        const archive_maintenance = input == .core and input.core.payload == .order_archive_committed;
-        const history_maintenance = input == .core and (input.core.payload == .history_candidate_started or input.core.payload == .history_candidate_verified);
+        const archive_maintenance = input == .core and (input.core.payload == .order_archive_committed or input.core.payload == .fill_archive_committed);
+        const history_maintenance = input == .core and (input.core.payload == .history_candidate_started or input.core.payload == .history_candidate_verified or input.core.payload == .history_safety_candidate_verified);
         if ((checkpoint_maintenance and !self.committing_checkpoint) or
             (archive_maintenance and !self.committing_order_archive) or
             (history_maintenance and !self.committing_history_candidate) or
@@ -478,7 +498,10 @@ pub const Owner = struct {
                 !trading.TradingShard.historySafetyInput(input)) return error.HistoryLookupDeferred;
             const cold_candidate = if (recovery_maintenance) null else lookup: {
                 break :lookup self.shard.historyCandidateFor(input) catch |err| {
-                    if (err == error.HistorySafetyCapacity and input == .venue) break :lookup null;
+                    if (err == error.HistorySafetyCapacity and input == .venue) {
+                        if (try self.applySynchronousSafetyFill(input)) return null;
+                        break :lookup null;
+                    }
                     if (err != error.HistorySafetyCapacity and err != error.HistoryLookupPending) self.closeAdmission();
                     return err;
                 };
@@ -555,6 +578,30 @@ pub const Owner = struct {
         if (deferred) return error.HistoryLookupDeferred;
     }
 
+    fn applySynchronousSafetyFill(self: *Owner, input: trading.CanonicalEvent) anyerror!bool {
+        const pending = (try self.shard.historySafetyCandidateFor(input)) orelse return false;
+        const result = self.store.queryOrderHistory(self.io, pending.request) catch {
+            if (self.store.safetyGate() != .open) {
+                self.closeAdmission();
+                return error.DecisionLogUnavailable;
+            }
+            return false;
+        };
+        const root = self.shard.business_history_root orelse return error.DecisionLogUnavailable;
+        const verdict = pending.finalize(&result.proof, root) catch {
+            self.closeAdmission();
+            return error.InvalidHistoryProof;
+        };
+        if (verdict == .same or verdict == .conflict) history.validateRecord(&result) catch {
+            self.closeAdmission();
+            return error.InvalidHistoryProof;
+        };
+        self.committing_history_candidate = true;
+        defer self.committing_history_candidate = false;
+        _ = try self.apply(.{ .core = .{ .identity = std.math.cast(u64, pending.request.pending_id) orelse return error.HistoryPendingIdentityCapacity, .payload = .{ .history_safety_candidate_verified = .{ .pending = pending, .proof = result.proof } } } });
+        return true;
+    }
+
     /// A missing or unavailable answer leaves the original candidate durable.
     /// Only a verified answer is admitted back to the pure Core transition.
     pub fn resolveColdCandidate(self: *Owner) !?trading.OrderCommand {
@@ -603,6 +650,7 @@ pub const Owner = struct {
             self.closeAdmission();
             return err;
         };
+        if (self.shard.last_business_archive_kind == .fill) try gateway.acknowledgeEconomicHistory(&self.shard);
         const origin: history.Origin = .{ .stream = self.stream, .account = self.shard.exchange_account_identity };
         var builder = try @import("order_history_batch.zig").build(&self.shard, order_id, origin);
         var evidence_buffer: [64]execution.DispatchEvidence = undefined;
@@ -642,6 +690,33 @@ pub const Owner = struct {
         const shard = try self.source();
         const archived = shard.last_order_archive orelse return error.OrderArchiveNotCommitted;
         try gateway.reclaimOrderDispatchEvidence(shard, archived.order_id);
+    }
+
+    pub fn archiveFillHistory(self: *Owner, fill_id: u64, gateway: *execution.Gateway) !history.Root {
+        if (!self.ready or self.closed or self.checkpoint_pending or self.committing_order_archive) return error.DecisionLogUnavailable;
+        if (self.shard.pending_history_candidate != null or self.shard.pending_safety_history_candidate != null or self.shard.deferred_history_admission_count != 0) return error.HistoryLookupDeferred;
+        gateway.completePreviousOrderArchive(&self.shard) catch |err| {
+            self.closeAdmission();
+            return err;
+        };
+        if (self.shard.last_business_archive_kind == .fill) try gateway.acknowledgeEconomicHistory(&self.shard);
+        const origin: history.Origin = .{ .stream = self.stream, .account = self.shard.exchange_account_identity };
+        var builder = try @import("fill_history_batch.zig").build(&self.shard.economic_projection, fill_id, origin, self.shard.authoritativeBarrier());
+        const previous = self.shard.business_history_root;
+        var view = try builder.batch(previous, if (previous) |root| root.epoch else 1);
+        const qualification_digest = builder.qualification.digest();
+        self.committing_order_archive = true;
+        defer self.committing_order_archive = false;
+        errdefer self.closeAdmission();
+        const receipt = try self.store.publishOrderHistory(self.io, view.value());
+        _ = try history.verifyReceipt(receipt, origin, qualification_digest, previous);
+        _ = try self.apply(.{ .core = .{ .identity = fill_id, .payload = .{ .fill_archive_committed = .{ .fill_id = fill_id, .qualification_digest = qualification_digest, .receipt = receipt } } } });
+        try gateway.acknowledgeEconomicHistory(&self.shard);
+        return receipt.root;
+    }
+
+    pub fn resumeFillArchive(self: *Owner, gateway: *execution.Gateway) !void {
+        try gateway.acknowledgeEconomicHistory(try self.source());
     }
 
     fn closeAdmission(self: *Owner) void {

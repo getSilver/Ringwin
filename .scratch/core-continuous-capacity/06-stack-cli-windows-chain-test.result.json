@@ -1,0 +1,8 @@
+{
+  "started_utc": "2026-10-14T08:27:18.3761292Z",
+  "finished_utc": "2026-10-14T08:27:42.9233466Z",
+  "exit_code": 0,
+  "command": "\"\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-final-cli.exe\" --windows-chain-test 1>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-stack-cli-windows-chain-test.stdout.log\" 2>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-stack-cli-windows-chain-test.log\"\"",
+  "source_tree_sha256": "15e3f31fd9a3a1239677af28e8572cf764515f4c8f2cf0569ced2b73d4dc5c47",
+  "scope": "256MiB CLI comparison with failed64MiB app"
+}

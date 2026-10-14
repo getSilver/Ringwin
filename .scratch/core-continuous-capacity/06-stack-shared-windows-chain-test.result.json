@@ -1,0 +1,8 @@
+{
+  "started_utc": "2026-10-14T09:13:53.1752653Z",
+  "finished_utc": "2026-10-14T09:14:13.8050247Z",
+  "exit_code": 0,
+  "command": "\"\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-stack-shared.exe\" --windows-chain-test 1>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-stack-shared-windows-chain-test.stdout.log\" 2>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-stack-shared-windows-chain-test.log\"\"",
+  "artifact_sha256": "8396643796e467527357b19a3c62a92f3e39d8734dfe9a61907a600d93337dc6",
+  "scope": "functional offline only;64MiB;no live orders or remote writes"
+}

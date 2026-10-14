@@ -1,0 +1,50 @@
+Stack overflow (no address available)
+D:\Program Files\zig\lib\compiler_rt\stack_probe.zig:127: 0x7ff7b8802bc6 in win_probe_stack_only (compiler_rt.lib)
+            asm volatile (
+
+D:\Program Files\zig\lib\compiler_rt\stack_probe.zig:269:5: 0x7ff7b8802bc6 in ___chkstk_ms (compiler_rt.lib)
+    @call(.always_inline, win_probe_stack_only, .{});
+    ^
+???:?:?: 0x153c15f in ??? (???)
+???:?:?: 0xd64028332f in ??? (???)
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:800: 0x7ff7b875c723 in applyCore (06-stack-isolated_zcu.obj)
+    fn applyCore(self: *TradingShard, event: CoreEvent) !ApplyResult {
+
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:705:128: 0x7ff7b87256da in applyUnfinalized (06-stack-isolated_zcu.obj)
+                if (rollback) |previous| self.applyCoreOnOwnedCandidate(previous, event) else @call(.never_inline, TradingShard.applyCore, .{ self, event })
+                                                                                                                               ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:647:45: 0x7ff7b863d1e0 in applyCandidate (06-stack-isolated_zcu.obj)
+        const result = self.applyUnfinalized(input, true, rollback, null) catch |err| {
+                                            ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:611:48: 0x7ff7b863d7d1 in apply (06-stack-isolated_zcu.obj)
+        const result = candidate.applyCandidate(self, input, &publish_on_error, null) catch |err| {
+                                               ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:5112:28: 0x7ff7b863dbad in replayReaderInto (06-stack-isolated_zcu.obj)
+        _ = candidate.apply(input) catch |err| {
+                           ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:5091:28: 0x7ff7b877aaed in recoverStableInto (06-stack-isolated_zcu.obj)
+    return replayReaderInto(&reader, destination);
+                           ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard_fixture.zig:416:48: 0x7ff7b87db232 in replayDigestConfigured (06-stack-isolated_zcu.obj)
+    const status = try engine.recoverStableInto(recovered, initial, run.decision_journal.bytes());
+                                               ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard_fixture.zig:423: 0x7ff7b87dd476 in assertReplayEquivalentConfigured (06-stack-isolated_zcu.obj)
+    const replay_digest = try replayDigestConfigured(run, quantity_denominator, reservation_model);
+
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard_fixture.zig:628: 0x7ff7b87dd476 in verifyScenario (06-stack-isolated_zcu.obj)
+    _ = try assertReplayEquivalentConfigured(run, run.shard.quantity_denominator, run.shard.reservation_model);
+
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard_fixture.zig:653:41: 0x7ff7b87dd476 in main (06-stack-isolated_zcu.obj)
+    for (runs) |*run| try verifyScenario(run);
+                                        ^
+D:\github\Ringwin-core-continuous-capacity\src\main.zig:135: 0x7ff7b869529b in main (06-stack-isolated_zcu.obj)
+            return trading_shard_fixture.main(init);
+
+D:\Program Files\zig\lib\std\start.zig:750: 0x7ff7b869529b in callMain (06-stack-isolated_zcu.obj)
+    return wrapMain(root.main(.{
+
+D:\Program Files\zig\lib\std\start.zig:498:17: 0x7ff7b869529b in WinStartup (06-stack-isolated_zcu.obj)
+        callMain(std.os.windows.peb().ProcessParameters.CommandLine.slice(), .global),
+                ^
+???:?:?: 0x7ff834bf81f3 in ??? (KERNEL32.DLL)
+???:?:?: 0x7ff83513a250 in ??? (ntdll.dll)

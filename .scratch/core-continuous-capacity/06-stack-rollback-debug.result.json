@@ -1,0 +1,7 @@
+{
+  "started_utc": "2026-10-14T08:43:50.8979961Z",
+  "finished_utc": "2026-10-14T08:44:19.0997836Z",
+  "exit_code": 0,
+  "command": "\"\"D:\\Program Files\\zig\\zig.exe\" test src/main.zig -O Debug --stack 268435456 --test-filter \"optimization\" \"-femit-bin=D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-stack-rollback-debug.exe\" 1>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-stack-rollback-debug.stdout.log\" 2>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-stack-rollback-debug.log\"\"",
+  "scope": "owned/public rollback and borrowed snapshot comparators after fallback noinline; before final freeze"
+}

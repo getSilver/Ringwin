@@ -183,6 +183,8 @@ const Reader = struct {
 };
 
 fn omsArrayCount(comptime T: type, comptime name: []const u8) ?[]const u8 {
+    if (@hasField(T, "applied_fill_total_count") and comptime std.mem.eql(u8, name, "applied_fill_totals")) return "applied_fill_total_count";
+    if (@hasField(T, "applied_fill_count") and comptime std.mem.eql(u8, name, "applied_fills")) return "applied_fill_count";
     if (@hasField(T, "deferred_history_admission_count") and comptime std.mem.eql(u8, name, "deferred_history_admissions")) return "deferred_history_admission_count";
     if (@hasField(T, "dispatch_ingress_history_count") and comptime std.mem.eql(u8, name, "dispatch_ingress_history")) return "dispatch_ingress_history_count";
     if (!@hasField(T, "next_order_id") or !@hasField(T, "next_command_id")) return null;
@@ -196,6 +198,7 @@ fn omsArrayCount(comptime T: type, comptime name: []const u8) ?[]const u8 {
 }
 
 fn encodeValue(writer: *Writer, value: anytype) !void {
+    @setEvalBranchQuota(10000);
     if (comptime @typeInfo(@TypeOf(value)) == .pointer) {
         if (comptime @typeInfo(@TypeOf(value)).pointer.size != .one) @compileError("snapshot input must be one borrowed value");
         try encodeBorrowed(writer, value);
@@ -287,6 +290,7 @@ fn encodeBorrowedWithPolicy(writer: *Writer, value: anytype, comptime Policy: ty
 }
 
 fn decodeValueInto(reader: *Reader, destination: anytype) !void {
+    @setEvalBranchQuota(10000);
     const T = @typeInfo(@TypeOf(destination)).pointer.child;
     switch (@typeInfo(T)) {
         .bool => destination.* = switch (try reader.get(u8)) {

@@ -50,14 +50,16 @@ Status: active
 12. [封存容量闭合证据并交接生产资格](issues/12-seal-capacity-closure-evidence.md) — blocked by 10, 11
 
 依赖主干：01 → 02 → 03；03 后分为 04、05 → 06 → 07、08 三支；04/07/08 → 09；09 → 10 与 11；10/11 → 12。
-01–05合同、权威屏障、检查点、观察选择及订单/发送证据归档功能已完成；06–12尚未实现或验收，只有 blocker 全部完成的票可执行。
+01–06合同、权威屏障、检查点、观察选择及订单/发送/成交费用归档功能已完成；07–12尚未实现或验收，只有 blocker 全部完成的票可执行。
 
 ## Frontier
 
-- [06 贯通成交与费用历史归档](issues/06-close-fill-and-fee-archive.md)
+- [07 贯通资金费、账本与对账历史归档](issues/07-close-funding-ledger-and-reconciliation-history.md)
 - [08 贯通控制与账户协调历史回收](issues/08-reclaim-control-and-account-coordination-history.md)
 
 ## Decisions so far
+
+- 2026-10-14：06功能验收完成，见[06证据](06-evidence.md)。最新91份源码c508f89c，完整Debug/ReleaseSafe串行各551/551，应用/CLI重建及两个离线模式退出0，46项身份/日志/产物核对通过；Standards/Spec无剩余具体P1/P2。07/08为Frontier。用户要求本代理关闭并提交06后停止，07交由其他代理实施；07–12及压力/资源/平台生产资格均未取得。
 
 - 2026-10-14：用户再次确认不做千单容量／压力测试。09–12验收条款已直接改为每类live/terminal全夹具总量不超过100，保留完整业务、故障、十轮检查点归档及两平台真实文件恢复；原1024、100000生命周期与资源／性能资格明确deferred，不用小规模通过冒充。06恢复及文件栈修复已通过64MiB两应用模式，最新源码c508f89c的完整两模式正在串行验收，尚不关闭06。
 

@@ -1,6 +1,9 @@
 const std = @import("std");
 const canonical = @import("canonical_event.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const history = @import("business_history.zig");
+const codec = @import("snapshot_codec.zig");
+const oms = @import("oms.zig");
 
 test "third native fees and rebates preserve explicit opening ownership and incomplete valuation" {
     var projection: Projection = .{};
@@ -259,6 +262,38 @@ pub const CanonicalFactEvidence = struct {
     digest: [Sha256.digest_length]u8,
 };
 
+pub const FillSource = struct {
+    canonical_fill: ?canonical.Fill = null,
+    core_payload_len: u16 = 0,
+    core_payload_bytes: [256]u8 = @splat(0),
+    exchange_account: u128 = 0,
+    portfolio: u128 = 0,
+    strategy: u128 = 0,
+};
+pub const AppliedFill = struct {
+    fill: Fill,
+    source: FillSource = .{},
+    payload_digest: history.Digest,
+    canonical_accounted: bool = false,
+};
+pub const OrderFillTotal = struct { order_id: u64, quantity: i64, archived_quantity: i64 = 0 };
+pub const FillArchiveRecord = struct {
+    applied: AppliedFill,
+    ledger: [max_ledger_transactions]LedgerTransaction = undefined,
+    ledger_count: u8 = 0,
+};
+pub const FillArchiveQualification = struct {
+    origin: history.Origin,
+    barrier: u64,
+    projection_digest: history.Digest,
+    record: FillArchiveRecord,
+
+    pub fn digest(self: *const @This()) history.Digest {
+        var bytes: [history.max_record_bytes]u8 = undefined;
+        return history.hash(codec.encodeBare(&bytes, self.*) catch unreachable);
+    }
+};
+
 pub const Projection = struct {
     treasury_native_assets: [max_native_assets]canonical.AssetAmount = @splat(.{ .asset = 0, .atoms = 0 }),
     treasury_native_asset_count: u8 = 0,
@@ -281,6 +316,11 @@ pub const Projection = struct {
     ledger: [max_ledger_transactions]LedgerTransaction = undefined,
     ledger_count: u8 = 0,
     ledger_summary: LedgerSummary = .{},
+    applied_fills: [max_facts]AppliedFill = undefined,
+    applied_fill_count: u8 = 0,
+    applied_fill_totals: [oms.max_orders]OrderFillTotal = undefined,
+    applied_fill_total_count: u16 = 0,
+    archived_fill_count: u64 = 0,
     spot_mark_price_atoms: i128 = 0,
     swap_mark_price_atoms: i128 = 0,
     spot_quantity_denominator: i64 = 0,
@@ -349,15 +389,27 @@ pub const Projection = struct {
     }
 
     pub fn appliedCanonicalFillQuantity(self: *const Projection, order_id: u64) !i64 {
-        var total: i64 = 0;
-        for (self.canonical_fill_evidence[0..self.canonical_fill_evidence_count]) |known| {
-            if (known.order_id == order_id)
-                total = try std.math.add(i64, total, known.quantity);
-        }
-        return total;
+        for (self.applied_fill_totals[0..self.applied_fill_total_count]) |known|
+            if (known.order_id == order_id) return known.quantity;
+        return 0;
     }
 
     pub fn applyCanonicalFill(self: *Projection, fill: Fill, payload_digest: [Sha256.digest_length]u8) !bool {
+        return self.applyCanonicalFillWithSource(fill, payload_digest, .{});
+    }
+
+    pub fn applyCanonicalFillWithSource(self: *Projection, fill: Fill, payload_digest: history.Digest, source: FillSource) !bool {
+        if (source.core_payload_len > source.core_payload_bytes.len or
+            !std.mem.allEqual(u8, source.core_payload_bytes[source.core_payload_len..], 0) or
+            (source.canonical_fill != null and source.core_payload_len != 0)) return error.InvalidEconomicFact;
+        if (source.canonical_fill) |original| {
+            var bytes: [4096]u8 = undefined;
+            const encoded = try @import("canonical_event_codec.zig").encodePayload(&bytes, .{ .fill = original });
+            if (original.identity != fill.identity or original.order != fill.order_id or
+                original.exchange_account != source.exchange_account or original.instrument != fill.quantity.instrument or
+                !std.meta.eql(original.quantity, fill.quantity) or !std.meta.eql(original.price, fill.price) or
+                @intFromEnum(original.side) != @intFromEnum(fill.side) or !std.mem.eql(u8, &history.hash(encoded), &payload_digest)) return error.InvalidEconomicFact;
+        }
         switch (try self.lookupCanonicalFill(fill.identity, payload_digest)) {
             .duplicate => return false,
             .unknown => {},
@@ -375,8 +427,102 @@ pub const Projection = struct {
             .digest = payload_digest,
         };
         candidate.canonical_fill_evidence_count += 1;
+        var found = false;
+        for (candidate.applied_fill_totals[0..candidate.applied_fill_total_count]) |*known| {
+            if (known.order_id != fill.order_id) continue;
+            known.quantity = try std.math.add(i64, known.quantity, quantity);
+            found = true;
+            break;
+        }
+        if (!found) {
+            if (candidate.applied_fill_total_count == candidate.applied_fill_totals.len) return error.EconomicFactCapacityExceeded;
+            candidate.applied_fill_totals[candidate.applied_fill_total_count] = .{ .order_id = fill.order_id, .quantity = quantity };
+            candidate.applied_fill_total_count += 1;
+        }
+        for (candidate.applied_fills[0..candidate.applied_fill_count]) |*applied| if (applied.fill.identity == fill.identity) {
+            applied.source = source;
+            applied.payload_digest = payload_digest;
+            applied.canonical_accounted = true;
+            break;
+        };
+        try candidate.assertClosed();
         self.* = candidate;
         return changed;
+    }
+
+    pub fn prepareFillArchive(self: *const Projection, identity: u64, origin: history.Origin, barrier: u64) !FillArchiveQualification {
+        if (identity == 0 or barrier == 0 or origin.account == 0 or origin.stream.domain != .decision_log or origin.stream.id == 0 or
+            self.reconciliation_break or self.suspense_usdt_atoms != 0 or self.suspense_native_asset_count != 0) return error.FillArchivePinned;
+        var applied: ?AppliedFill = null;
+        for (self.applied_fills[0..self.applied_fill_count]) |known| if (known.fill.identity == identity) {
+            applied = known;
+            break;
+        };
+        const known = applied orelse return error.UnknownEconomicFill;
+        if (known.source.exchange_account != 0 and known.source.exchange_account != origin.account) return error.InvalidFillArchiveOrigin;
+        var result: FillArchiveQualification = .{ .origin = origin, .barrier = barrier, .projection_digest = self.digest(), .record = .{ .applied = known } };
+        // Zero unused entries because the bare record codec includes the full bounded array.
+        result.record.ledger = std.mem.zeroes(@TypeOf(result.record.ledger));
+        for (self.ledger[0..self.ledger_count]) |transaction| if (transaction.kind == .fill and transaction.source_identity == identity) {
+            result.record.ledger[result.record.ledger_count] = transaction;
+            result.record.ledger_count += 1;
+        };
+        if (result.record.ledger_count == 0) return error.IncompleteFillArchive;
+        for (result.record.ledger[0..result.record.ledger_count]) |*transaction|
+            @memset(transaction.postings[transaction.posting_count..], std.mem.zeroes(LedgerPosting));
+        return result;
+    }
+
+    pub fn commitFillArchive(self: *Projection, qualification: FillArchiveQualification, receipt: history.Receipt, previous_root: ?history.Root) !void {
+        const current = try self.prepareFillArchive(qualification.record.applied.fill.identity, qualification.origin, qualification.barrier);
+        if (!std.mem.eql(u8, &current.digest(), &qualification.digest()) or receipt.root.barrier != qualification.barrier) return error.InvalidFillArchiveCommit;
+        _ = try history.verifyReceipt(receipt, qualification.origin, qualification.digest(), previous_root);
+        const archived_count = try std.math.add(u64, self.archived_fill_count, 1);
+        const identity = qualification.record.applied.fill.identity;
+        if (qualification.record.applied.canonical_accounted) {
+            for (self.applied_fill_totals[0..self.applied_fill_total_count]) |*total| if (total.order_id == qualification.record.applied.fill.order_id) {
+                total.archived_quantity = try std.math.add(i64, total.archived_quantity, std.math.cast(i64, qualification.record.applied.fill.quantity.lots) orelse return error.Overflow);
+                break;
+            };
+        }
+        var kept: u8 = 0;
+        for (self.applied_fills[0..self.applied_fill_count]) |known| if (known.fill.identity != identity) {
+            self.applied_fills[kept] = known;
+            kept += 1;
+        };
+        self.applied_fill_count = kept;
+        kept = 0;
+        for (self.canonical_fill_evidence[0..self.canonical_fill_evidence_count]) |known| if (known.identity != identity) {
+            self.canonical_fill_evidence[kept] = known;
+            kept += 1;
+        };
+        self.canonical_fill_evidence_count = kept;
+        kept = 0;
+        for (self.seen[0..self.seen_count]) |known| if (known.kind != .fill or known.identity != identity) {
+            self.seen[kept] = known;
+            kept += 1;
+        };
+        self.seen_count = kept;
+        kept = 0;
+        for (self.ledger[0..self.ledger_count]) |transaction| if (transaction.kind != .fill or transaction.source_identity != identity) {
+            self.ledger[kept] = transaction;
+            kept += 1;
+        };
+        self.ledger_count = kept;
+        self.archived_fill_count = archived_count;
+    }
+
+    pub fn releaseOrderFillTotal(self: *Projection, qualification: oms.OrderArchiveQualification, receipt: history.Receipt, previous_root: ?history.Root) !void {
+        _ = try history.verifyReceipt(receipt, receipt.root.origin, qualification.digest(), previous_root);
+        if (receipt.root.origin.account != qualification.exchange_account or
+            try self.appliedCanonicalFillQuantity(qualification.order.id) != qualification.applied_fill_quantity) return error.InvalidFillArchiveCommit;
+        for (self.applied_fills[0..self.applied_fill_count]) |known| if (known.fill.order_id == qualification.order.id) return error.FillArchivePinned;
+        var kept: u16 = 0;
+        for (self.applied_fill_totals[0..self.applied_fill_total_count]) |known| if (known.order_id != qualification.order.id) {
+            self.applied_fill_totals[kept] = known;
+            kept += 1;
+        };
+        self.applied_fill_total_count = kept;
     }
 
     pub fn digest(self: *const Projection) [Sha256.digest_length]u8 {
@@ -408,6 +554,17 @@ pub const Projection = struct {
             hashInt(&hasher, i64, known.quantity);
             hasher.update(&known.digest);
         }
+        hashInt(&hasher, u16, self.applied_fill_total_count);
+        for (self.applied_fill_totals[0..self.applied_fill_total_count]) |known| {
+            hashInt(&hasher, u64, known.order_id);
+            hashInt(&hasher, i64, known.quantity);
+            hashInt(&hasher, i64, known.archived_quantity);
+        }
+        hashInt(&hasher, u64, self.archived_fill_count);
+        hashInt(&hasher, u8, self.applied_fill_count);
+        var fill_bytes: [4096]u8 = undefined;
+        for (self.applied_fills[0..self.applied_fill_count]) |known|
+            hasher.update(codec.encodeBare(&fill_bytes, known) catch unreachable);
         hashInt(&hasher, u8, self.ledger_count);
         for (self.ledger[0..self.ledger_count]) |transaction| {
             hashInt(&hasher, u64, transaction.source_identity);
@@ -443,6 +600,16 @@ pub const Projection = struct {
         var normalized = self.*;
         sortCanonicalEvidence(normalized.canonical_fill_evidence[0..normalized.canonical_fill_evidence_count]);
         sortLedger(normalized.ledger[0..normalized.ledger_count]);
+        std.mem.sort(OrderFillTotal, normalized.applied_fill_totals[0..normalized.applied_fill_total_count], {}, struct {
+            fn less(_: void, a: OrderFillTotal, b: OrderFillTotal) bool {
+                return a.order_id < b.order_id;
+            }
+        }.less);
+        std.mem.sort(AppliedFill, normalized.applied_fills[0..normalized.applied_fill_count], {}, struct {
+            fn less(_: void, a: AppliedFill, b: AppliedFill) bool {
+                return a.fill.identity < b.fill.identity;
+            }
+        }.less);
         return normalized;
     }
 
@@ -457,6 +624,59 @@ pub const Projection = struct {
     }
 
     pub fn assertClosed(self: *const Projection) !void {
+        if (self.applied_fill_count > self.applied_fills.len or self.applied_fill_total_count > self.applied_fill_totals.len or self.canonical_fill_evidence_count > self.canonical_fill_evidence.len) return error.InvalidEconomicFact;
+        for (self.applied_fill_totals[0..self.applied_fill_total_count], 0..) |total, index| {
+            if (total.order_id == 0 or total.quantity <= 0 or total.archived_quantity < 0) return error.InvalidEconomicFact;
+            for (self.applied_fill_totals[0..index]) |known| if (known.order_id == total.order_id) return error.InvalidEconomicFact;
+            var resident_quantity: i64 = 0;
+            for (self.canonical_fill_evidence[0..self.canonical_fill_evidence_count]) |known| if (known.order_id == total.order_id) {
+                resident_quantity = try std.math.add(i64, resident_quantity, known.quantity);
+            };
+            if (total.quantity != try std.math.add(i64, total.archived_quantity, resident_quantity)) return error.InvalidEconomicFact;
+        }
+        for (self.applied_fills[0..self.applied_fill_count], 0..) |applied, index| {
+            if (applied.fill.identity == 0 or applied.source.core_payload_len > applied.source.core_payload_bytes.len or
+                !std.mem.allEqual(u8, applied.source.core_payload_bytes[applied.source.core_payload_len..], 0) or
+                (applied.source.canonical_fill != null and applied.source.core_payload_len != 0)) return error.InvalidEconomicFact;
+            for (self.applied_fills[0..index]) |known| if (known.fill.identity == applied.fill.identity) return error.InvalidEconomicFact;
+            if (applied.canonical_accounted) {
+                var matched = false;
+                for (self.canonical_fill_evidence[0..self.canonical_fill_evidence_count]) |evidence| if (evidence.identity == applied.fill.identity) {
+                    if (evidence.order_id != applied.fill.order_id or evidence.quantity != applied.fill.quantity.lots or
+                        !std.mem.eql(u8, &evidence.digest, &applied.payload_digest)) return error.InvalidEconomicFact;
+                    matched = true;
+                };
+                if (!matched) return error.InvalidEconomicFact;
+                if (applied.source.canonical_fill) |original| {
+                    var bytes: [4096]u8 = undefined;
+                    const encoded = try @import("canonical_event_codec.zig").encodePayload(&bytes, .{ .fill = original });
+                    if (original.identity != applied.fill.identity or original.order != applied.fill.order_id or
+                        original.exchange_account != applied.source.exchange_account or original.instrument != applied.fill.quantity.instrument or
+                        @intFromEnum(original.side) != @intFromEnum(applied.fill.side) or !std.meta.eql(original.quantity, applied.fill.quantity) or
+                        !std.meta.eql(original.price, applied.fill.price) or !std.mem.eql(u8, &history.hash(encoded), &applied.payload_digest)) return error.InvalidEconomicFact;
+                }
+                if (applied.source.core_payload_len != 0) {
+                    const original = try codec.decodeBare(applied.source.core_payload_bytes[0..applied.source.core_payload_len], @import("trading_shard_event.zig").EconomicFill);
+                    if (original.fill_id != applied.fill.identity or original.order_id != applied.fill.order_id or original.quantity != applied.fill.quantity.lots or
+                        original.price_ticks != applied.fill.price.ticks or original.fee_atoms != applied.fill.fee.atoms or original.rebate_atoms != applied.fill.rebate.atoms or
+                        !std.mem.eql(u8, &coreFillDigest(applied.fill), &applied.payload_digest)) return error.InvalidEconomicFact;
+                }
+            }
+        }
+        for (self.canonical_fill_evidence[0..self.canonical_fill_evidence_count], 0..) |evidence, index| {
+            if (evidence.identity == 0 or evidence.order_id == 0 or evidence.quantity <= 0) return error.InvalidEconomicFact;
+            for (self.canonical_fill_evidence[0..index]) |known| if (known.identity == evidence.identity) return error.InvalidEconomicFact;
+            var matched = false;
+            for (self.applied_fills[0..self.applied_fill_count]) |applied| if (applied.canonical_accounted and applied.fill.identity == evidence.identity) {
+                matched = true;
+            };
+            if (!matched) return error.InvalidEconomicFact;
+            var resident_quantity: i64 = 0;
+            for (self.canonical_fill_evidence[0..self.canonical_fill_evidence_count]) |known| if (known.order_id == evidence.order_id) {
+                resident_quantity = try std.math.add(i64, resident_quantity, known.quantity);
+            };
+            if (try self.appliedCanonicalFillQuantity(evidence.order_id) < resident_quantity) return error.InvalidEconomicFact;
+        }
         if (self.portfolio.native_asset_count > max_native_assets or self.exchange.native_asset_count > max_native_assets or
             self.treasury_native_asset_count > max_native_assets or self.suspense_native_asset_count > max_native_assets)
             return error.InvalidEconomicFact;
@@ -569,6 +789,11 @@ pub const Projection = struct {
         }
         const fingerprint = fingerprintFill(fill);
         if (try self.remember(fill.identity, kind, fingerprint)) return;
+        if (kind == .fill) {
+            if (self.applied_fill_count == self.applied_fills.len) return error.EconomicFactCapacityExceeded;
+            self.applied_fills[self.applied_fill_count] = .{ .fill = fill, .payload_digest = coreFillDigest(fill) };
+            self.applied_fill_count += 1;
+        }
         var portfolio = self.portfolio;
         var exchange = self.exchange;
         const portfolio_movement = try applyFillToLayer(&portfolio, fill, fill.portfolio_margin_ppm);

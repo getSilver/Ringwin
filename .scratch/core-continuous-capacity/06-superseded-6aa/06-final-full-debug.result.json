@@ -1,0 +1,12 @@
+{
+  "source_tree_sha256": "6aa4145e60c33b3ea8812bf1d779aa29a49b6c71694895e3cef77ebb72763477",
+  "disposition": "intentionally-aborted",
+  "started_utc": "2026-10-14T04:09:46.7945245Z",
+  "stopped_utc": "2026-10-14T04:27:59.8220906Z",
+  "exit_code": null,
+  "runner_exit_code": -1,
+  "source_mismatches_after": 0,
+  "reason": "Residual 40960 dispatch proof and 8192 reservation evidence fixtures violate user small functional test policy",
+  "log_sha256": "7eb3253899e3ee84acb2b53a3c44044662787fc2908329abad8c52664954c08f",
+  "child_exit_note": "Child was force-terminated; child native exit code was not retained by the killed wrapper"
+}

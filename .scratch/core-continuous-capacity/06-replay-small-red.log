@@ -1,0 +1,12 @@
+src\trading_shard.zig:5229:122: error: coercion from enum 'trading_shard_event.PayloadTag' to union 'trading_shard_event.CorePayload' must initialize 'trading_shard_event.TimerRequest' field 'timer'
+    try std.testing.expectError(error.RecoveryAdmissionPending, recovered.apply(.{ .core = .{ .identity = 3, .payload = .timer } }));
+                                                                                                                        ~^~~~~
+src\trading_shard_event.zig:524:5: note: field 'timer' declared here
+    timer: TimerRequest,
+    ^~~~~
+src\trading_shard_event.zig:508:25: note: union declared here
+pub const CorePayload = union(PayloadTag) {
+                        ^~~~~
+referenced by:
+    trading_shard: src\main.zig:2:31
+    test_0: src\main.zig:174:9

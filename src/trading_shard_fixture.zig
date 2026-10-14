@@ -18,13 +18,13 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-pub const expected_happy_digest = "9d039e36cc42c564eceb8d5274bb6e2b3d57985e70f6ff1ed560cd66f0fce35e";
+pub const expected_happy_digest = "d0a8c165caee929ca632249526ad6197ddccf954e4d63782415ff6882ad9b95b";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "0edc668ad1519f79345f4c61be58432584b9673077f5ed88fac06f41f8fe679a",
-    "bb73e6f43858e75d29bada0ba81e2bcce0bc9056f52752e1ed11ea5ece56a677",
-    "02a5e05fed478514d2e349b6d8cfdc8b69047e09da5d84d187c3d04b9640b044",
-    "61ad96e90dcc7c3911aa1e5eeaf9c34ea07cbfe83801c7ae2f1478b04c89c17a",
+    "630d4448dc5154be61015a5bbf245c72ae06a196bf1cc59096958067c790c182",
+    "d6e80b2e7e96fe152ce0a081aecf6aecdf87fa2d02a95ad34ecbd45029c8c295",
+    "11973690001f9106d2996d8c2fe30e87862f3fbbf08b6bf2ce469b635d901138",
+    "fbbba568c8a66ff854326566acc71c518601f9dea90d2feba8b287556cdf1870",
 };
 pub const order_limit_price: i64 = 50_100_000_000;
 
@@ -155,7 +155,8 @@ pub fn deltaAt(group: u64, previous: u64, current: u64, bid_price_micros: i64) e
 }
 
 pub fn apply(run: *LiveRun, event: engine.CanonicalEvent) !?engine.OrderCommand {
-    return engine.applyStable(&run.shard, &run.decision_journal, event);
+    // Keep the transactional candidate in one frame across nested fixture callers.
+    return @call(.never_inline, engine.applyStable, .{ &run.shard, &run.decision_journal, event });
 }
 
 pub fn lifecycleCommand(command_identity: u128, expected_version: u64, kind: engine.operational.CommandKind) engine.CanonicalEvent {

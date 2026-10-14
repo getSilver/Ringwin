@@ -1,0 +1,47 @@
+1/2 main.test_0...OK
+2/2 trading_shard.test.recovery retains admission fence and durable rejection without publishing truncated input...Stack overflow (no address available)
+D:\Program Files\zig\lib\compiler_rt\stack_probe.zig:127: 0x7ff7f8f21f36 in win_probe_stack_only (compiler_rt.lib)
+            asm volatile (
+
+D:\Program Files\zig\lib\compiler_rt\stack_probe.zig:269:5: 0x7ff7f8f21f36 in ___chkstk_ms (compiler_rt.lib)
+    @call(.always_inline, win_probe_stack_only, .{});
+    ^
+???:?:?: 0x153c15f in ??? (???)
+???:?:?: 0xeadcaf9cef in ??? (???)
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:800: 0x7ff7f8f10cc3 in applyCore (06-replay-small-red-v3_zcu.obj)
+    fn applyCore(self: *TradingShard, event: CoreEvent) !ApplyResult {
+
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:705:128: 0x7ff7f8ed169a in applyUnfinalized (06-replay-small-red-v3_zcu.obj)
+                if (rollback) |previous| self.applyCoreOnOwnedCandidate(previous, event) else @call(.never_inline, TradingShard.applyCore, .{ self, event })
+                                                                                                                               ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:647:45: 0x7ff7f8ea7d60 in applyCandidate (06-replay-small-red-v3_zcu.obj)
+        const result = self.applyUnfinalized(input, true, rollback, null) catch |err| {
+                                            ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:611:48: 0x7ff7f8ebc201 in apply (06-replay-small-red-v3_zcu.obj)
+        const result = candidate.applyCandidate(self, input, &publish_on_error, null) catch |err| {
+                                               ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:5112: 0x7ff7f8ebc689 in replayReaderInto (06-replay-small-red-v3_zcu.obj)
+        _ = candidate.apply(input) catch |err| {
+
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:5091:28: 0x7ff7f8ebc689 in recoverStableInto (06-replay-small-red-v3_zcu.obj)
+    return replayReaderInto(&reader, destination);
+                           ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:5224:80: 0x7ff7f8ebf5ec in test.recovery retains admission fence and durable rejection without publishing truncated input (06-replay-small-red-v3_zcu.obj)
+    try std.testing.expectEqual(journal.ScanStatus.clean, try recoverStableInto(recovered, initial, log.bytes()));
+                                                                               ^
+D:\Program Files\zig\lib\compiler\test_runner.zig:291: 0x7ff7f8e43c58 in mainTerminal (06-replay-small-red-v3_zcu.obj)
+        if (test_fn.func()) |_| {
+
+D:\Program Files\zig\lib\compiler\test_runner.zig:73:28: 0x7ff7f8e43c58 in main (06-replay-small-red-v3_zcu.obj)
+        return mainTerminal(init);
+                           ^
+D:\Program Files\zig\lib\std\start.zig:712: 0x7ff7f8e41059 in callMain (06-replay-small-red-v3_zcu.obj)
+    if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+
+D:\Program Files\zig\lib\std\start.zig:498:17: 0x7ff7f8e41059 in WinStartup (06-replay-small-red-v3_zcu.obj)
+        callMain(std.os.windows.peb().ProcessParameters.CommandLine.slice(), .global),
+                ^
+???:?:?: 0x7ff834bf81f3 in ??? (KERNEL32.DLL)
+???:?:?: 0x7ff83513a250 in ??? (ntdll.dll)
+error: the following test command failed with exit code 3:
+D:\github\Ringwin-core-continuous-capacity\.scratch\core-continuous-capacity\06-replay-small-red-v3.exe --seed=0x6c8de035

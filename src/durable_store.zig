@@ -1228,24 +1228,22 @@ pub const LinuxFileAdapter = struct {
             if (!try self.loadSnapshotObject(io, identity, streamIndex(&self.streams, stream), barrier, entry.snapshot_digest)) return error.SnapshotObjectUnavailable;
             return;
         }
-        var encoded: [snapshot_header_len + max_snapshot_bytes]u8 = undefined;
-        @memset(encoded[0..snapshot_header_len], 0);
-        put(u32, &encoded, 0, snapshot_magic);
-        put(u16, &encoded, 4, format_schema);
-        put(u16, &encoded, 6, snapshot_header_len);
-        encoded[8] = @intFromEnum(identity.domain);
-        put(u64, &encoded, 16, identity.id);
-        put(u64, &encoded, 24, barrier);
-        put(u32, &encoded, 32, @intCast(bytes.len));
-        put(u32, &encoded, 36, Crc32c.hash(bytes));
+        var header: [snapshot_header_len]u8 = @splat(0);
+        put(u32, &header, 0, snapshot_magic);
+        put(u16, &header, 4, format_schema);
+        put(u16, &header, 6, snapshot_header_len);
+        header[8] = @intFromEnum(identity.domain);
+        put(u64, &header, 16, identity.id);
+        put(u64, &header, 24, barrier);
+        put(u32, &header, 32, @intCast(bytes.len));
+        put(u32, &header, 36, Crc32c.hash(bytes));
         const snapshot_digest = digest(bytes);
-        @memcpy(encoded[40..72], &snapshot_digest);
-        put(u32, &encoded, 72, Crc32c.hash(encoded[0..72]));
-        @memcpy(encoded[snapshot_header_len .. snapshot_header_len + bytes.len], bytes);
+        @memcpy(header[40..72], &snapshot_digest);
+        put(u32, &header, 72, Crc32c.hash(header[0..72]));
         const name = try snapshotObjectName(identity, barrier, snapshot_digest);
         var temp_name: [176]u8 = undefined;
         const temp = try std.fmt.bufPrint(&temp_name, "{s}.tmp", .{name.slice()});
-        writeFile(self.dir, io, temp, encoded[0 .. snapshot_header_len + bytes.len], true) catch |err| {
+        writeSnapshotFile(self.dir, io, temp, &header, bytes) catch |err| {
             self.gate = .closed;
             return err;
         };
@@ -1770,6 +1768,14 @@ fn writeFile(dir: std.Io.Dir, io: std.Io, name: []const u8, bytes: []const u8, s
     defer file.close(io);
     try file.writeStreamingAll(io, bytes);
     if (sync) try file.sync(io);
+}
+
+fn writeSnapshotFile(dir: std.Io.Dir, io: std.Io, name: []const u8, header: []const u8, payload: []const u8) !void {
+    var file = try dir.createFile(io, name, .{ .truncate = true });
+    defer file.close(io);
+    try file.writeStreamingAll(io, header);
+    try file.writeStreamingAll(io, payload);
+    try file.sync(io);
 }
 
 fn writeAtomicFile(dir: std.Io.Dir, io: std.Io, name: []const u8, bytes: []const u8, sync: bool) !void {
@@ -2853,6 +2859,7 @@ test "large resident snapshots survive memory publication and two file reopens" 
     try appendCheckpointRecord(file.interface(), io, stream, 1);
     try file.interface().commit(io, stream, 1);
     try file.interface().seal(io, stream);
+    try file.interface().publishSnapshot(io, stream, 1, bytes);
     try file.interface().publishSnapshot(io, stream, 1, bytes);
     const reopened = try allocator.create(LinuxFileAdapter);
     defer allocator.destroy(reopened);

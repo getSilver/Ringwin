@@ -1,0 +1,72 @@
+1/2 main.test_0...OK
+2/2 order_history_safety_acceptance.test.Owner preserves deferred history while canonical fills progress and both pending lanes recover...expected 20, found 0
+FAIL (TestExpectedEqual)
+D:\Program Files\zig\lib\std\testing.zig:118:17: 0x7ff73f88f58a in expectEqualInner__anon_100568 (06-safety-fill-red-debug_zcu.obj)
+                return error.TestExpectedEqual;
+                ^
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff73f8997fa in expectEqual (06-safety-fill-red-debug_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\github\Ringwin-core-continuous-capacity\src\order_history_safety_acceptance.zig:56:5: 0x7ff73f8998b0 in test.Owner preserves deferred history while canonical fills progress and both pending lanes recover (06-safety-fill-red-debug_zcu.obj)
+    try std.testing.expectEqual(@as(i64, 20), try harness.owner.shard.economic_projection.appliedCanonicalFillQuantity(next.order_id));
+    ^
+1 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+D:\github\Ringwin-core-continuous-capacity\.scratch\core-continuous-capacity\06-safety-fill-red-debug.exe --seed=0xde9a93c2

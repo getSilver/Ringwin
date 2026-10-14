@@ -1,0 +1,10 @@
+{
+  "scope": "full functional suite with no thousand-order stress fixtures",
+  "finished_utc": "2026-10-14T03:27:25.4654112Z",
+  "source_mismatches_after": 0,
+  "source_tree_sha256": "3cc1586d6fabd2125ed6dad57946233582ea452a19fc9267660d1bdc5a0c4097",
+  "exit_code": 1,
+  "started_utc": "2026-10-14T03:05:54.0951803Z",
+  "artifact_sha256": "de95f16b9e2256040b6b4d2ebfe908078ecbdcf00bc100283fa7c77d8bcbd850",
+  "log_sha256": "93cf84749587059c94b99174b42c2db36c68112d35f8f331df088eb0fbbf514f"
+}

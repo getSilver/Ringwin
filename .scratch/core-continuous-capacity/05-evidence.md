@@ -58,4 +58,6 @@ cmd /d /c '.scratch\core-continuous-capacity\05-functional-cli.exe --windows-cha
 
 原`ea80a6ae`大负载执行按用户请求停止，退出-1，前418/538通过；四分片初始1,024 live/3,600 terminal已断言，分片0完成初始归档、分片1仅到1,024归档，十轮及最终恢复未完成。其[日志](05-final-acceptance-full-releasesafe.log)及[退出记录](05-final-acceptance-full-releasesafe.result.json)完整保留，不记为通过。该源码Debug仅编译、未运行；后续不再自动启动旧大测试。
 
-06–12仍需按最新小规模功能口径实施。CLI中的production_qualification=false、read_only=not_run、demo_live=not_run保持；本票不部署、不真实下单，不授予资源、索引成本或平台生产资格。
+该05冻结阶段之后，06已按最新小规模功能口径完成，见[06证据](06-evidence.md)；07–12尚未完成。CLI中的production_qualification=false、read_only=not_run、demo_live=not_run保持；本票不部署、不真实下单，不授予资源、索引成本或平台生产资格。
+
+2026-10-14执行口径补充：06复查发现完整套件中的两处旧Gateway夹具仍合成40960 dispatch证明及8192 reservation，虽OMS本身少量订单，也属于用户已取消的大容量证据构造。这一遗漏已在06改为100恢复证明及6 reservation/3 position，生产边界保留纯数字检查。05记录中的538/538是其冻结源码当时实际结果，不能宣称整套没有这两处旧大夹具；最新小规模套件以06的新冻结身份重新验收，不据旧构造授予压力/资源资格。

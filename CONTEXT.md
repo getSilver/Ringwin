@@ -1039,6 +1039,14 @@ _Avoid_: Trading halt, missing dashboard
 
 ## State Evolution
 
+**AppliedOrderFillQuantity**:
+一个 Order 已唯一应用的成交数量总计；它与交易所报告累计量分别承担不同责任。成交明细归档不减少此总计；终态订单完成包含最终总计的历史承接后，才可释放其驻留总计。
+_Avoid_: OMS reported cumulative, sum of resident fill details
+
+**FillArchiveQualification**:
+对已应用成交、原始归属、费用及其全部账本事务形成的不可变归档资格。历史发布与权威提交完成后可回收这些明细，但不得改变余额、库存、成本或已应用成交总计。
+_Avoid_: Balance reset, fill cache eviction, fee omission
+
 **OrderArchiveQualification**:
 在明确终态、风险占用释放、引用闭合、唯一已应用 canonical Fill 与已报告累计相等，以及迟到历史查询范围完整时，为一个 Order 形成的不可变归档资格；它本身不证明历史已持久发布，不能单独释放热状态。
 _Avoid_: FoundTerminal, terminal boolean, Store archive receipt

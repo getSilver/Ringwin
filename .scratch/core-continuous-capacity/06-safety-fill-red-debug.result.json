@@ -1,0 +1,8 @@
+{
+  "started_utc": "2026-10-14T03:30:21.1918446Z",
+  "finished_utc": "2026-10-14T03:30:46.7617375Z",
+  "exit_code": 1,
+  "command": "\"\"D:\\Program Files\\zig\\zig.exe\" test src/main.zig -O Debug --stack 268435456 --test-filter \"Owner preserves deferred history\" \"-femit-bin=D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-safety-fill-red-debug.exe\" 1>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-safety-fill-red-debug.stdout.log\" 2>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-safety-fill-red-debug.log\"\"",
+  "source_tree_sha256": "3cc1586d6fabd2125ed6dad57946233582ea452a19fc9267660d1bdc5a0c4097",
+  "scope": "existing public safety regression; no source edits"
+}

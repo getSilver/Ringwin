@@ -13,6 +13,17 @@ pub const max_fact_history = 3 * max_orders;
 pub const max_intent_history = 2 * max_orders;
 pub const max_tombstones = 2;
 
+fn orderCapacityReached(live_count: usize, total_count: usize) bool {
+    return live_count >= max_live_orders or total_count == max_orders;
+}
+
+test "OMS order capacity guard checks numeric boundaries without order population" {
+    try std.testing.expect(!orderCapacityReached(1023, max_orders - 1));
+    try std.testing.expect(orderCapacityReached(1024, max_orders - 1));
+    try std.testing.expect(orderCapacityReached(0, max_orders));
+    try std.testing.expect(!orderCapacityReached(0, max_orders - 1));
+}
+
 pub const Instrument = canonical.InstrumentIdentity;
 pub const Quantity = canonical.InstrumentQuantity;
 pub const Price = canonical.InstrumentPrice;
@@ -1232,7 +1243,7 @@ pub const Oms = struct {
     fn createOrder(self: *Oms, strategy_instance: u128, instrument: Instrument, side: Side, portfolio_reduce_only: bool, venue_reduce_only: bool, quantity: i64, price: Price, reservation: Reservation, requested_client_order_id: canonical.ClientOrderId, predecessor: u64, intent_sequence: u64, group: u64, policy: PartialExecutionPolicy) !*Order {
         if (self.recovery_only) return error.OmsRecoveryOnly;
         const live_count = self.liveOrderCount();
-        if (live_count >= max_live_orders or self.order_count == max_orders) {
+        if (orderCapacityReached(live_count, self.order_count)) {
             self.capacity_pressure = true;
             return error.OrderCapacityExceeded;
         }
@@ -1895,16 +1906,16 @@ test "explicit terminal archive preserves unrelated active orders and monotonic 
     const first = try placeSubmitted(&state, 1, 2);
     try state.applyReport(.{ .report_id = 1, .order_id = first.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
     try state.applyReconciliation(.{ .reconciliation_id = 2, .order_id = first.order_id, .status = .found_terminal, .revision = 1, .cumulative_quantity = 0, .remaining_quantity = 2, .terminal_state = .canceled });
-    for (2..max_live_orders + 1) |sequence| _ = try placeSubmitted(&state, @intCast(sequence), 2);
+    for (2..11) |sequence| _ = try placeSubmitted(&state, @intCast(sequence), 2);
     try qualifyTestTerminal(&state, first.order_id);
     const qualified = try state.prepareOrderArchive(first.order_id, 0, 9);
     try state.commitOrderArchive(qualified);
     try std.testing.expect(state.orderById(first.order_id) == null);
     try std.testing.expect(state.orderById(2) != null);
-    try std.testing.expectEqual(@as(u16, max_live_orders - 1), state.order_count);
-    const next = try placeSubmitted(&state, max_live_orders + 1, 2);
-    try std.testing.expectEqual(@as(u64, max_live_orders + 1), next.order_id);
-    try std.testing.expectEqual(@as(u16, max_live_orders), state.order_count);
+    try std.testing.expectEqual(@as(u16, 9), state.order_count);
+    const next = try placeSubmitted(&state, 11, 2);
+    try std.testing.expectEqual(@as(u64, 11), next.order_id);
+    try std.testing.expectEqual(@as(u16, 10), state.order_count);
     try std.testing.expectEqual(@as(u16, 0), state.tombstone_count);
     try std.testing.expectError(error.ArchivedFactOutsideRetention, state.applyReport(.{ .report_id = 1, .order_id = first.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 }));
 }
@@ -1978,34 +1989,53 @@ test "explicit archive frees repeated lifecycles without spending tombstone capa
         try std.testing.expectEqual(@as(u16, 0), state.tombstone_count);
         try std.testing.expect(!state.recovery_only);
     }
-    for (1..max_live_orders + 1) |raw_sequence| _ = try placeSubmitted(&state, 100 + @as(u64, @intCast(raw_sequence)), 1);
-    try std.testing.expectError(error.OrderCapacityExceeded, placeSubmitted(&state, 1000000, 1));
+    for (1..11) |raw_sequence| _ = try placeSubmitted(&state, 100 + @as(u64, @intCast(raw_sequence)), 1);
+    // Inject an existing pressure latch; this functional case does not fill the production capacity.
+    state.capacity_pressure = true;
+    const next_order = state.next_order_id;
+    const next_command = state.next_command_id;
+    try std.testing.expectError(error.UncertainOrderBlocksSend, placeSubmitted(&state, 1000000, 1));
     try std.testing.expect(state.capacity_pressure);
-    try std.testing.expectEqual(@as(u16, max_live_orders), state.order_count);
+    try std.testing.expectEqual(@as(u16, 10), state.order_count);
+    try std.testing.expectEqual(next_order, state.next_order_id);
+    try std.testing.expectEqual(next_command, state.next_command_id);
 }
 
-test "canceled orders without archive window stay hot under capacity pressure" {
+test "canceled orders without archive window stay hot under an injected pressure latch" {
     var state = Oms{};
     var sequence: u64 = 1;
-    while (sequence <= max_retained_terminal_orders) : (sequence += 1) {
+    while (sequence <= 10) : (sequence += 1) {
         const placed = try placeSubmitted(&state, sequence, 2);
         try state.applyReport(.{ .report_id = sequence, .order_id = placed.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
         try std.testing.expect(!state.orderById(placed.order_id).?.archive_window_closed);
     }
-    try std.testing.expectError(error.TerminalCapacityExceeded, placeSubmitted(&state, sequence, 2));
+    // Inject an existing pressure latch without fabricating a full terminal population.
+    state.capacity_pressure = true;
+    const next_order = state.next_order_id;
+    const next_command = state.next_command_id;
+    try std.testing.expectError(error.UncertainOrderBlocksSend, placeSubmitted(&state, sequence, 2));
     try std.testing.expect(state.capacity_pressure);
-    try std.testing.expectEqual(@as(u16, max_retained_terminal_orders), state.order_count);
+    try std.testing.expectEqual(@as(u16, 10), state.order_count);
+    try std.testing.expectEqual(next_order, state.next_order_id);
+    try std.testing.expectEqual(next_command, state.next_command_id);
     try std.testing.expectEqual(@as(u16, 0), state.tombstone_count);
 }
 
 test "live unknown and pending_cancel orders never compact" {
     var live = Oms{};
     var sequence: u64 = 1;
-    while (sequence <= max_live_orders) : (sequence += 1) {
+    while (sequence <= 8) : (sequence += 1) {
         _ = try placeSubmitted(&live, sequence, 2);
     }
-    try std.testing.expectError(error.OrderCapacityExceeded, placeSubmitted(&live, sequence, 2));
+    // Fault injection closes new risk while the real live population remains small.
+    live.capacity_pressure = true;
+    const next_order = live.next_order_id;
+    const next_command = live.next_command_id;
+    try std.testing.expectError(error.UncertainOrderBlocksSend, placeSubmitted(&live, sequence, 2));
     try std.testing.expect(live.capacity_pressure);
+    try std.testing.expectEqual(@as(u16, 8), live.liveOrderCount());
+    try std.testing.expectEqual(next_order, live.next_order_id);
+    try std.testing.expectEqual(next_command, live.next_command_id);
     try std.testing.expectEqual(@as(u16, 0), live.tombstone_count);
     for (live.orders[0..live.order_count]) |order| try std.testing.expectEqual(OrderState.pending_submit, order.state);
 
@@ -2090,8 +2120,14 @@ test "ccc predecessor stays hot while successor is live" {
     try archived.commitOrderArchive(try archived.prepareOrderArchive(placed.order_id, 0, 9));
     try std.testing.expectEqual(@as(u16, 0), archived.order_count);
     var sequence: u64 = 3;
-    while (sequence <= max_live_orders + 1) : (sequence += 1) _ = try placeSubmitted(&state, sequence, 2);
-    try std.testing.expectError(error.OrderCapacityExceeded, placeSubmitted(&state, sequence, 2));
+    while (sequence <= 10) : (sequence += 1) _ = try placeSubmitted(&state, sequence, 2);
+    // Fault injection cannot authorize eviction of a still-referenced predecessor.
+    state.capacity_pressure = true;
+    const next_order = state.next_order_id;
+    const next_command = state.next_command_id;
+    try std.testing.expectError(error.UncertainOrderBlocksSend, placeSubmitted(&state, sequence, 2));
+    try std.testing.expectEqual(next_order, state.next_order_id);
+    try std.testing.expectEqual(next_command, state.next_command_id);
     try std.testing.expect(state.orderById(placed.order_id) != null);
     try std.testing.expectEqual(@as(u16, 0), state.tombstone_count);
 }
@@ -2272,7 +2308,7 @@ fn removeArchiveEntry(comptime T: type, entries: []T, count: anytype, index: usi
     count.* -= 1;
 }
 
-test "OMS capacity never substitutes implicit compaction for durable archive commit" {
+test "OMS functional admission never substitutes implicit compaction for durable archive commit" {
     var state = Oms{};
     const first = try placeSubmitted(&state, 1, 2);
     try state.applyReport(.{ .report_id = 1, .order_id = first.order_id, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 2 });
@@ -2281,8 +2317,16 @@ test "OMS capacity never substitutes implicit compaction for durable archive com
     try state.noteTerminalObserved(first.order_id, 200);
     try state.retainTerminalArchiveCoverage(first.order_id, testTerminalArchiveEvidence(first.order_id));
     state.orders[0].archive_window_closed = true;
-    for (2..max_live_orders + 2) |sequence| _ = try placeSubmitted(&state, @intCast(sequence), 2);
-    try std.testing.expectError(error.OrderCapacityExceeded, placeSubmitted(&state, max_live_orders + 2, 2));
+    for (2..11) |sequence| _ = try placeSubmitted(&state, @intCast(sequence), 2);
+    try std.testing.expectEqual(@as(u16, 10), state.order_count);
+    try std.testing.expect(state.orderById(first.order_id) != null);
+    // Fault injection exercises closed admission without asserting a full-capacity population.
+    state.capacity_pressure = true;
+    const next_order = state.next_order_id;
+    const next_command = state.next_command_id;
+    try std.testing.expectError(error.UncertainOrderBlocksSend, placeSubmitted(&state, 11, 2));
+    try std.testing.expectEqual(next_order, state.next_order_id);
+    try std.testing.expectEqual(next_command, state.next_command_id);
     try std.testing.expect(state.orderById(first.order_id) != null);
     try std.testing.expectEqual(@as(u16, 0), state.tombstone_count);
 }

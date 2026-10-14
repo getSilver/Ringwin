@@ -38,23 +38,37 @@ pub const CountingSimulator = struct {
 };
 
 pub fn initializeOwner(owner: *demo.Owner) !void {
-    for (fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .cash)) |event| _ = try owner.apply(event);
+    return initializeOwnerWithNativeBalances(owner, &.{}, &.{});
+}
+
+fn initializeOwnerWithNativeBalances(owner: *demo.Owner, definitions: []const canonical.AssetDefinition, balances: []const canonical.AssetAmount) !void {
+    for (fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .cash)) |original| {
+        var event = original;
+        if (balances.len != 0) switch (event.core.payload) {
+            .opening_balance => |*opening| {
+                if (balances.len > opening.native_balances.len) return error.InvalidOpeningBalance;
+                // Native tick validation needs the default settlement definitions already active.
+                for (owner.shard.instrument_registry.entries[0..owner.shard.instrument_registry.count]) |configured| {
+                    var margin = configured.margin;
+                    margin.instrument = configured.instrument;
+                    margin.version += 1;
+                    margin.native_settlement_atoms = true;
+                    _ = try owner.apply(fixture.atGroup(6, .{ .identity = std.math.cast(u64, configured.instrument) orelse return error.IdentityOutOfRange, .payload = .{ .margin_rules_activated = margin } }));
+                }
+                for (definitions) |definition| _ = try owner.apply(fixture.atGroup(6, .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } }));
+                // Native opening is justified by the complete private account snapshot first.
+                try bootstrapArchiveAccount(owner, balances);
+                @memcpy(opening.native_balances[0..balances.len], balances);
+                opening.native_balance_count = @intCast(balances.len);
+            },
+            else => {},
+        };
+        _ = try owner.apply(event);
+    }
     const digest = owner.shard.canonicalStateDigest();
     _ = try owner.apply(fixture.atGroup(12, .{ .identity = 3, .payload = .{ .host_activated = .{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .session = .{ .fencing = 1, .shard = 0, .generation = 1 }, .activation_barrier = 0, .state_digest = digest } } }));
     _ = try owner.apply(fixture.atGroup(13, .{ .identity = 4, .payload = .{ .capability_profile_activation = .{ .exchange_account = 2, .instrument = 3, .venue = 1, .environment = .simulation, .product = .spot, .version = 1, .rules_version = 1, .config_version = 1, .adapter_session = 1, .max_dispatch_age_ns = 10 * std.time.ns_per_s, .supports_place = true, .supports_cancel = true, .supports_native_amend = false, .supports_venue_reduce_only = false, .supports_post_only = false, .supports_market_protection = false } } }));
-    var snapshot: canonical.AccountBootstrapSnapshot = .{ .identity = 1, .exchange_account = 2, .scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true }, .source_stream = 7, .source_sequence = 1, .balance_count = 2, .position_count = 0, .margin_count = 1 };
-    for ([_]u64{ 1, 0x425443 }, 0..) |asset, index| {
-        const amount: canonical.AssetAmount = .{ .asset = asset, .atoms = if (asset == 1) 25_000_000_000 else 0 };
-        const zero: canonical.AssetAmount = .{ .asset = asset, .atoms = 0 };
-        snapshot.balances[index] = .{ .asset = asset, .total = amount, .available = amount, .held = zero, .cash_balance = amount, .liability = zero, .isolated_liability = zero, .cross_liability = zero };
-    }
-    const zero: canonical.AssetAmount = .{ .asset = 1, .atoms = 0 };
-    snapshot.margins[0] = .{ .amount = zero, .initial_margin = zero, .maintenance_margin = zero, .isolated_equity = zero };
-    var account = fixture.canonicalAt(14, 1, .{ .account_bootstrap_snapshot = snapshot });
-    account.venue.envelope.identity.stream = 7;
-    account.venue.envelope.source_stream = 7;
-    account.venue.envelope.raw_evidence.stream = 7;
-    _ = try owner.apply(account);
+    if (balances.len == 0) try bootstrapArchiveAccount(owner, balances);
     var book = fixture.snapshotAt(15, 2);
     book.venue.envelope.identity.stream = 7;
     book.venue.envelope.source_stream = 7;
@@ -63,8 +77,43 @@ pub fn initializeOwner(owner: *demo.Owner) !void {
     try owner.sealBootstrap();
 }
 
+fn bootstrapArchiveAccount(owner: *demo.Owner, balances: []const canonical.AssetAmount) !void {
+    var snapshot: canonical.AccountBootstrapSnapshot = .{ .identity = 1, .exchange_account = 2, .scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true }, .source_stream = 7, .source_sequence = 1, .balance_count = 2, .position_count = 0, .margin_count = 1 };
+    for ([_]u64{ 1, 0x425443 }, 0..) |asset, index| {
+        const amount: canonical.AssetAmount = .{ .asset = asset, .atoms = if (asset == 1) 25_000_000_000 else 0 };
+        const zero: canonical.AssetAmount = .{ .asset = asset, .atoms = 0 };
+        snapshot.balances[index] = .{ .asset = asset, .total = amount, .available = amount, .held = zero, .cash_balance = amount, .liability = zero, .isolated_liability = zero, .cross_liability = zero };
+    }
+    if (balances.len > snapshot.balances.len - snapshot.balance_count) return error.InvalidOpeningBalance;
+    for (balances) |amount| {
+        const native_zero: canonical.AssetAmount = .{ .asset = amount.asset, .atoms = 0 };
+        snapshot.balances[snapshot.balance_count] = .{ .asset = amount.asset, .total = amount, .available = amount, .held = native_zero, .cash_balance = amount, .liability = native_zero, .isolated_liability = native_zero, .cross_liability = native_zero };
+        snapshot.balance_count += 1;
+    }
+    const zero: canonical.AssetAmount = .{ .asset = 1, .atoms = 0 };
+    snapshot.margins[0] = .{ .amount = zero, .initial_margin = zero, .maintenance_margin = zero, .isolated_equity = zero };
+    var account = fixture.canonicalAt(14, 1, .{ .account_bootstrap_snapshot = snapshot });
+    account.venue.envelope.identity.stream = 7;
+    account.venue.envelope.source_stream = 7;
+    account.venue.envelope.raw_evidence.stream = 7;
+    _ = try owner.apply(account);
+}
+
 pub fn recordTerminalArchiveCoverage(owner: *demo.Owner, command: trading.oms.Command) !void {
     return recordTerminalArchiveCoverageFor(owner, command, .filled, 20);
+}
+
+pub fn archiveOrderFills(owner: *demo.Owner, gateway: *execution.Gateway, order_id: u64) !void {
+    while (true) {
+        var identity: ?u64 = null;
+        for (owner.shard.economic_projection.applied_fills[0..owner.shard.economic_projection.applied_fill_count]) |applied| {
+            if (applied.fill.order_id == order_id) {
+                identity = applied.fill.identity;
+                break;
+            }
+        }
+        _ = try owner.archiveFillHistory(identity orelse return, gateway);
+    }
 }
 
 pub fn recordTerminalArchiveCoverageFor(owner: *demo.Owner, command: trading.oms.Command, status: canonical.ExecutionReportStatus, cumulative: i64) !void {
@@ -121,7 +170,12 @@ test "Owner archives a truly accepted Gateway command and verifies cold retries 
     const client = evidence[0].proof.command.client_order_id;
     var encoded: [history.max_record_bytes]u8 = undefined;
     const evidence_digest = history.hash(try @import("snapshot_codec.zig").encodeBare(&encoded, evidence[0]));
+    try std.testing.expectError(error.OrderArchivePinned, owner.archiveTerminalOrder(command.order_id, gateway));
+    try archiveOrderFills(owner, gateway, command.order_id);
+    const fill_root = owner.shard.business_history_root.?;
     const root = try owner.archiveTerminalOrder(command.order_id, gateway);
+    try std.testing.expectEqual(fill_root.generation + 1, root.generation);
+    try std.testing.expectEqualSlices(u8, &fill_root.root_digest, &root.previous_root);
     try std.testing.expect(owner.shard.oms.orderById(command.order_id) == null);
     try std.testing.expect(gateway.acceptedClientOrderIdFromShard(&owner.shard, command.command_id) == null);
     const request: history.LookupRequest = .{ .pending_id = 1, .key = .{ .origin = root.origin, .identity = .{ .client_order_id = client } }, .candidate_payload_digest = evidence_digest, .original_input_digest = history.hash("same original command retry"), .root_digest = root.root_digest, .epoch = root.epoch, .barrier = root.barrier };
@@ -262,6 +316,10 @@ pub const ArchiveHarness = struct {
     dispatch_stream: durable.StreamIdentity,
 
     pub fn createBase(allocator: std.mem.Allocator, stream_id: u64) !*@This() {
+        return createBaseWithNativeBalances(allocator, stream_id, &.{}, &.{});
+    }
+
+    pub fn createBaseWithNativeBalances(allocator: std.mem.Allocator, stream_id: u64, definitions: []const canonical.AssetDefinition, balances: []const canonical.AssetAmount) !*@This() {
         const self = try allocator.create(@This());
         errdefer allocator.destroy(self);
         self.allocator = allocator;
@@ -278,7 +336,7 @@ pub const ArchiveHarness = struct {
         self.stream = .{ .domain = .decision_log, .id = stream_id };
         self.dispatch_stream = .{ .domain = .control, .id = stream_id + 1 };
         try @call(.never_inline, bootstrapOwnerInto, .{ self.owner, self.backend.interface(), self.stream });
-        try initializeOwner(self.owner);
+        try initializeOwnerWithNativeBalances(self.owner, definitions, balances);
         self.authority = failover.authorityForTesting();
         self.lease = try self.authority.acquire(.{ .exchange_account = 2, .decision_domain = 1 }, 1, 3 * std.time.ns_per_s / 2);
         self.guard = .{ .authority = &self.authority, .lease = &self.lease };
@@ -319,6 +377,8 @@ test "Owner Gateway archive failure boundaries preserve committed evidence on re
     for ([_]@TypeOf(@as(ArchiveFaultMemory, undefined).stage){ .history_publish, .decision_commit, .gateway_checkpoint }, 0..) |stage, index| {
         const harness = try ArchiveHarness.create(std.testing.allocator, 940 + 2 * index);
         defer harness.destroy();
+        try archiveOrderFills(harness.owner, harness.gateway, harness.command.order_id);
+        const fill_root = harness.owner.shard.business_history_root.?;
         const client = harness.gateway.acceptedClientOrderIdFromShard(&harness.owner.shard, harness.command.command_id).?;
         var evidence: [1]execution.DispatchEvidence = undefined;
         const exported = try harness.gateway.exportOrderDispatchEvidence(&harness.owner.shard, harness.command.order_id, &evidence);
@@ -331,10 +391,12 @@ test "Owner Gateway archive failure boundaries preserve committed evidence on re
         try std.testing.expect(harness.gateway.acceptedClientOrderIdFromShard(&harness.owner.shard, harness.command.command_id) != null);
         if (stage == .gateway_checkpoint) {
             try std.testing.expect(harness.owner.shard.oms.orderById(harness.command.order_id) == null);
-            try std.testing.expect(harness.owner.shard.business_history_root != null);
+            const order_root = harness.owner.shard.business_history_root.?;
+            try std.testing.expectEqual(fill_root.generation + 1, order_root.generation);
+            try std.testing.expectEqualSlices(u8, &fill_root.root_digest, &order_root.previous_root);
         } else {
             try std.testing.expect(harness.owner.shard.oms.orderById(harness.command.order_id) != null);
-            try std.testing.expect(harness.owner.shard.business_history_root == null);
+            try std.testing.expectEqualDeep(fill_root, harness.owner.shard.business_history_root.?);
         }
         // A new process uses the same durable backend without the failed process's gate.
         const store = harness.backend.memory.interface();
@@ -354,7 +416,7 @@ test "Owner Gateway archive failure boundaries preserve committed evidence on re
         try std.testing.expectEqual(@as(u64, 1), harness.simulator.sends);
         if (stage == .decision_commit) {
             try std.testing.expect(recovered_owner.closed);
-            try std.testing.expect(recovered_owner.shard.business_history_root == null);
+            try std.testing.expectEqualDeep(fill_root, recovered_owner.shard.business_history_root.?);
             const barrier = recovered_owner.shard.authoritativeBarrier();
             try std.testing.expectEqual(persisted.committed_barrier, barrier);
             try std.testing.expectError(error.DecisionLogUnavailable, recovered_owner.source());
@@ -395,6 +457,7 @@ fn recoverOwnerInto(owner: *demo.Owner, store: durable.Store, stream: durable.St
 test "Gateway blocks a qualified increasing risk command during a durable cold lookup" {
     const harness = try ArchiveHarness.create(std.testing.allocator, 952);
     defer harness.destroy();
+    try archiveOrderFills(harness.owner, harness.gateway, harness.command.order_id);
     _ = try harness.owner.archiveTerminalOrder(harness.command.order_id, harness.gateway);
     var next: trading.oms.IntentGroup = .{ .first_intent_sequence = 102, .count = 1 };
     next.members[0] = .{ .intent_sequence = 102, .operation = .place, .instrument = 3, .quantity = 20, .limit_price = fixture.omsPrice(3, 50_000_000) };

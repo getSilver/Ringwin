@@ -1,0 +1,56 @@
+1/2 main.test_0...OK
+2/2 trading_shard.test.recovery retains admission fence and durable rejection without publishing truncated input...Stack overflow (no address available)
+D:\Program Files\zig\lib\compiler_rt\stack_probe.zig:127: 0x7ff788441ea6 in win_probe_stack_only (compiler_rt.lib)
+            asm volatile (
+
+D:\Program Files\zig\lib\compiler_rt\stack_probe.zig:269:5: 0x7ff788441ea6 in ___chkstk_ms (compiler_rt.lib)
+    @call(.always_inline, win_probe_stack_only, .{});
+    ^
+???:?:?: 0x153c837 in ??? (???)
+???:?:?: 0xee2d1b33ef in ??? (???)
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:2996: 0x7ff788432935 in handleAssetDefinition (06-replay-small-green_zcu.obj)
+    fn handleAssetDefinition(self: *TradingShard, input: CoreEvent, definition: canonical.AssetDefinition) !?OrderCommand {
+
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:3262:90: 0x7ff788429bac in handle (06-replay-small-green_zcu.obj)
+            .asset_definition_activated => |definition| return self.handleAssetDefinition(input, definition),
+                                                                                         ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:829:36: 0x7ff7884309ea in applyCoreInPlace (06-replay-small-green_zcu.obj)
+        const command = self.handle(event) catch |err| {
+                                   ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:816: 0x7ff7883f14c3 in applyCoreOnOwnedCandidate (06-replay-small-green_zcu.obj)
+        return self.applyCoreInPlace(event) catch |err| {
+
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:705:72: 0x7ff7883f14c3 in applyUnfinalized (06-replay-small-green_zcu.obj)
+                if (rollback) |previous| self.applyCoreOnOwnedCandidate(previous, event) else @call(.never_inline, TradingShard.applyCore, .{ self, event })
+                                                                       ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:647:45: 0x7ff7883c7d60 in applyCandidate (06-replay-small-green_zcu.obj)
+        const result = self.applyUnfinalized(input, true, rollback, null) catch |err| {
+                                            ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:622: 0x7ff7883c8b1b in applyOwnedCandidate (06-replay-small-green_zcu.obj)
+        return self.applyCandidate(previous, input, publish_on_error, previous);
+
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:4379: 0x7ff7883c8b1b in applyStableOnCandidate (06-replay-small-green_zcu.obj)
+    const result = shard.applyOwnedCandidate(previous, input, &publish_on_error) catch |err| {
+
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:4355:43: 0x7ff7883c8b1b in applyStable (06-replay-small-green_zcu.obj)
+    const command = applyStableOnCandidate(&candidate, shard, decision_journal, input) catch |err| {
+                                          ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:5221:24: 0x7ff7883dee4c in test.recovery retains admission fence and durable rejection without publishing truncated input (06-replay-small-green_zcu.obj)
+    _ = try applyStable(live, &log, .{ .core = .{ .identity = 1, .payload = .{ .asset_definition_activated = definition } } });
+                       ^
+D:\Program Files\zig\lib\compiler\test_runner.zig:291: 0x7ff788363c58 in mainTerminal (06-replay-small-green_zcu.obj)
+        if (test_fn.func()) |_| {
+
+D:\Program Files\zig\lib\compiler\test_runner.zig:73:28: 0x7ff788363c58 in main (06-replay-small-green_zcu.obj)
+        return mainTerminal(init);
+                           ^
+D:\Program Files\zig\lib\std\start.zig:712: 0x7ff788361059 in callMain (06-replay-small-green_zcu.obj)
+    if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+
+D:\Program Files\zig\lib\std\start.zig:498:17: 0x7ff788361059 in WinStartup (06-replay-small-green_zcu.obj)
+        callMain(std.os.windows.peb().ProcessParameters.CommandLine.slice(), .global),
+                ^
+???:?:?: 0x7ff834bf81f3 in ??? (KERNEL32.DLL)
+???:?:?: 0x7ff83513a250 in ??? (ntdll.dll)
+error: the following test command failed with exit code 3:
+D:\github\Ringwin-core-continuous-capacity\.scratch\core-continuous-capacity\06-replay-small-green.exe --seed=0xf44af9cd

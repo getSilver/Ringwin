@@ -84,6 +84,7 @@ pub const Builder = struct {
 
 pub fn build(shard: *const trading.TradingShard, order_id: u64, origin: history.Origin) !Builder {
     if (shard.hasDeferredOrderHistory(order_id)) return error.OrderArchivePinned;
+    for (shard.economic_projection.applied_fills[0..shard.economic_projection.applied_fill_count]) |fill| if (fill.fill.order_id == order_id) return error.OrderArchivePinned;
     const checkpoint = shard.checkpoint orelse return error.InvalidOrderHistoryOrigin;
     if (origin.stream.domain != .decision_log or origin.stream.id == 0 or origin.account == 0 or
         origin.account != shard.exchange_account_identity or checkpoint.stream != origin.stream.id)
@@ -326,6 +327,7 @@ test "order history batch owns relocated records and archives every released sem
             .report => try std.testing.expectEqualDeep(shard.oms.report_history[0], try codec.decodeBare(bytes, oms.ExecutionReport)),
             .reconciliation => try std.testing.expectEqualDeep(shard.oms.reconciliation_history[0], try codec.decodeBare(bytes, oms.ReconciliationResult)),
             .client_order_id, .dispatch_command, .dispatch_result => return error.UnexpectedClientOrderIdKey,
+            .canonical_fill, .core_fill, .fill_detail, .fill_economic_digest => return error.UnexpectedFillHistoryKey,
         }
     }
     try std.testing.expectEqual(@as(u8, 1), shard.oms.order_count);
@@ -401,9 +403,12 @@ test "order history batch refuses wrong owner incomplete fills and inconsistent 
     try std.testing.expectError(error.InvalidOrderHistoryOrigin, build(shard, 1, foreign));
     shard.economic_projection.canonical_fill_evidence[0] = .{ .identity = 1, .order_id = 1, .quantity = 1, .digest = history.hash("retained fill") };
     shard.economic_projection.canonical_fill_evidence_count = 1;
+    shard.economic_projection.applied_fill_totals[0] = .{ .order_id = 1, .quantity = 1 };
+    shard.economic_projection.applied_fill_total_count = 1;
     try std.testing.expectError(error.OrderArchiveNotQualified, build(shard, 1, origin));
     try std.testing.expectEqual(@as(u8, 1), shard.economic_projection.canonical_fill_evidence_count);
     shard.economic_projection.canonical_fill_evidence_count = 0;
+    shard.economic_projection.applied_fill_total_count = 0;
     shard.oms.commands[0].quantity += 1;
     try std.testing.expectError(error.ConflictingOrderHistoryRecord, build(shard, 1, origin));
     try std.testing.expectEqual(@as(u8, 1), shard.oms.order_count);

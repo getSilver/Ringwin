@@ -1,0 +1,193 @@
+{
+  "recorded_utc": "2026-10-14T10:23:07.466377+00:00",
+  "source_tree_sha256": "c508f89c8c6faae0c428e3e2195df957d4377a453a673ee772edec2c9d2b17b4",
+  "steps": 12,
+  "checks": [
+    {
+      "check": "all 91 frozen source file hashes",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-four-shard-rs-build exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-four-shard-rs-build exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-four-shard-rs exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-four-shard-rs exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-full-releasesafe-build exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-full-releasesafe-build exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-full-releasesafe exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-full-releasesafe exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-full-debug-build exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-full-debug-build exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-full-debug exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-full-debug exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-app-build exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-app-build exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-cli-build exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-cli-build exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-app-offline-fixture exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-app-offline-fixture exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-app-windows-chain-test exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-app-windows-chain-test exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-cli-offline-fixture exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-cli-offline-fixture exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-cli-windows-chain-test exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "06-final-v2-cli-windows-chain-test exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "releasesafe full terminal 551/551",
+      "passed": true
+    },
+    {
+      "check": "debug full terminal 551/551",
+      "passed": true
+    },
+    {
+      "check": "full modes serial",
+      "passed": true
+    },
+    {
+      "check": "artifact manifest same source",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/06-final-v2-full-releasesafe.exe artifact hash",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/06-final-v2-full-releasesafe.exe PE header type",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/06-final-v2-full-releasesafe.exe PE stack metadata",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/06-final-v2-full-debug.exe artifact hash",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/06-final-v2-full-debug.exe PE header type",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/06-final-v2-full-debug.exe PE stack metadata",
+      "passed": true
+    },
+    {
+      "check": "zig-out/bin/ringwin.exe artifact hash",
+      "passed": true
+    },
+    {
+      "check": "zig-out/bin/ringwin.exe PE header type",
+      "passed": true
+    },
+    {
+      "check": "zig-out/bin/ringwin.exe PE stack metadata",
+      "passed": true
+    },
+    {
+      "check": "application stack remains64MiB",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/06-final-v2-cli.exe artifact hash",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/06-final-v2-cli.exe PE header type",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/06-final-v2-cli.exe PE stack metadata",
+      "passed": true
+    },
+    {
+      "check": "app five trajectories with recovery",
+      "passed": true
+    },
+    {
+      "check": "app offline chain and no new qualification",
+      "passed": true
+    },
+    {
+      "check": "cli five trajectories with recovery",
+      "passed": true
+    },
+    {
+      "check": "cli offline chain and no new qualification",
+      "passed": true
+    }
+  ],
+  "result": "passed",
+  "scope": "ticket06 small functional acceptance only;not capacity,resource or production qualification"
+}

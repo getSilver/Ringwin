@@ -1,0 +1,8 @@
+{
+  "exit_code": 0,
+  "source_tree_sha256": "3cc1586d6fabd2125ed6dad57946233582ea452a19fc9267660d1bdc5a0c4097",
+  "command": "\"\"D:\\Program Files\\zig\\zig.exe\" test src/main.zig -O Debug --stack 268435456 --test-no-exec \"-femit-bin=D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-rollback-full-debug.exe\" 2>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-rollback-full-debug-build.log\"\"",
+  "finished_utc": "2026-10-14T03:03:54.2848393Z",
+  "started_utc": "2026-10-14T03:03:05.1190109Z",
+  "scope": "compile only; Debug executes after successful full ReleaseSafe"
+}

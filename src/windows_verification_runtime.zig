@@ -832,6 +832,7 @@ const EngineOwners = struct {
     shard_run: demo_authority.Owner,
     venue: simulated_venue.SimulatedVenue,
     gateway: execution_gateway.Gateway,
+    dispatch_snapshot_storage: []u8,
     premature_host_intent: host_gateway.OrderIntent,
     fill_count: u64 = 0,
     replay_send_capability: bool = true,
@@ -841,6 +842,8 @@ const EngineOwners = struct {
         if (store_dir.len == 0 or credential_dir.len == 0) return error.EnginePathsRequired;
         const self = try init.gpa.create(EngineOwners);
         errdefer init.gpa.destroy(self);
+        self.dispatch_snapshot_storage = try init.gpa.alloc(u8, durable_store.max_snapshot_bytes);
+        errdefer init.gpa.free(self.dispatch_snapshot_storage);
         const python_abi = try strategy_host_lifecycle.discoverPythonAbi(init, "python");
         self.host = try strategy_host_lifecycle.ManagedHost.start(
             init,
@@ -874,7 +877,7 @@ const EngineOwners = struct {
         if (self.recovered_history) {
             try demo_authority.Owner.recoverInto(&self.shard_run, self.store.interface(), init.io, .{ .domain = .decision_log, .id = 78 });
             self.venue = .{};
-            self.gateway.init();
+            self.gateway.initWithDispatchSnapshotBuffer(self.dispatch_snapshot_storage);
             self.fill_count = 0;
             self.replay_send_capability = false;
             return self;
@@ -931,13 +934,14 @@ const EngineOwners = struct {
         });
 
         self.venue = .{};
-        self.gateway.init();
+        self.gateway.initWithDispatchSnapshotBuffer(self.dispatch_snapshot_storage);
         self.fill_count = 0;
         self.replay_send_capability = false;
         return self;
     }
 
     fn deinit(self: *EngineOwners, init: std.process.Init) void {
+        init.gpa.free(self.dispatch_snapshot_storage);
         self.store.close(init.io);
         self.credentials.close(init.io);
         self.host.deinit(init.io);
@@ -1316,6 +1320,7 @@ const ExecutionOwners = struct {
     reconciler: okx_private.Reconciler,
     venue: okx_venue.OkxVenueAdapter,
     gateway: execution_gateway.Gateway,
+    dispatch_snapshot_storage: []u8,
     authority: failover.FencingAuthority,
     lease: failover.PrimaryLease,
     guard: failover.GatewayLeaseGuard,
@@ -1356,6 +1361,8 @@ const ExecutionOwners = struct {
         if (live_mode and !live_transport_enabled) return error.DemoTransportBuildRequired;
         const self = try init.gpa.create(ExecutionOwners);
         errdefer init.gpa.destroy(self);
+        self.dispatch_snapshot_storage = try init.gpa.alloc(u8, durable_store.max_snapshot_bytes);
+        errdefer init.gpa.free(self.dispatch_snapshot_storage);
         self.fence_path = null;
         self.live_mode = live_mode;
         if (comptime live_transport_enabled) {
@@ -1425,16 +1432,18 @@ const ExecutionOwners = struct {
         self.authority = .{};
         self.lease = .{ .key = .{ .exchange_account = 2, .decision_domain = 1 }, .node = 0, .token = 0, .issued_at_ns = 0, .expires_at_ns = 0 };
         self.guard = .{ .authority = &self.authority, .lease = &self.lease };
-        self.gateway.init();
+        self.gateway.initWithDispatchSnapshotBuffer(self.dispatch_snapshot_storage);
         try self.gateway.add(.{ .account = 2, .adapter = self.venue.adapter(), .venue_identity = 1, .environment = .demo, .lease_guard = &self.guard, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1, .supports_post_only = true, .supports_market_protection = true } });
-        if (has_history)
-            try self.gateway.attachRecoveredDurableDispatch(self.store.interface(), init.io, .{ .domain = .control, .id = 92 })
-        else
+        if (has_history) {
+            try self.gateway.attachRecoveredDurableDispatch(self.store.interface(), init.io, .{ .domain = .control, .id = 92 });
+        } else {
             try self.gateway.bootstrapDurableDispatch(self.store.interface(), init.io, .{ .domain = .control, .id = 92 });
+        }
         return self;
     }
 
     fn deinit(self: *ExecutionOwners, init: std.process.Init) void {
+        init.gpa.free(self.dispatch_snapshot_storage);
         if (self.fence_path) |path| init.gpa.free(path);
         if (comptime live_transport_enabled) {
             if (self.curl_transport) |owner| {

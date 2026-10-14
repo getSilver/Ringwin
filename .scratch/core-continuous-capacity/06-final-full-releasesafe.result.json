@@ -1,0 +1,15 @@
+{
+  "source_tree_sha256": "15e3f31fd9a3a1239677af28e8572cf764515f4c8f2cf0569ced2b73d4dc5c47",
+  "zig": "0.17.0-dev.315+5b647b792",
+  "started_utc": "2026-10-14T04:42:50.9258676Z",
+  "finished_utc": "2026-10-14T05:02:47.5168340Z",
+  "exit_code": 0,
+  "command": "\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-final-full-releasesafe.exe\"",
+  "capture": "native direct file handles",
+  "workload": "functional; <=100 live and <=100 retained terminal across shards; no capacity pressure",
+  "source_mismatches_after": 0,
+  "log_bytes": 85984,
+  "log_sha256": "819f3b1b0b59b2db9fe5d72e0bb1f29dc15b45286eec656df19e555dcb1ecaae",
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "artifact_sha256": "e34cece6f758337aaad8dc3efe8a8d7c382de5329f71ab4f6ddf152fb27088f8"
+}

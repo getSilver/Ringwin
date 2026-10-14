@@ -1,0 +1,12 @@
+{
+  "scope": "Five existing public Store snapshot tests; zero order fixtures",
+  "source_path": "src/durable_store.zig",
+  "source_sha256": "4e1329c7c1a8f1bc0f6d89b89092ed060a9927c550bff1e7c91d0c74a1c764fc",
+  "source_unchanged": true,
+  "started_utc": "2026-10-14T09:09:28.3865911Z",
+  "completed_utc": "2026-10-14T09:10:13.4648072Z",
+  "exit_code": 0,
+  "stderr_log": "D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-file-snapshot-split-targeted-releasesafe.log",
+  "stdout_log": "D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-file-snapshot-split-targeted-releasesafe.stdout.log",
+  "stderr_sha256": "90ffc4dfe9f17909a5902a7ecedf9ecb28e0313f974f20ef3bf15a7d92261477"
+}

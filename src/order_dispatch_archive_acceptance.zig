@@ -89,6 +89,8 @@ test "Order archive terminal reconciliation cannot close the window before uniqu
     const absent_gateway = try allocator.create(@import("execution_gateway.zig").Gateway);
     defer allocator.destroy(absent_gateway);
     absent_gateway.init();
+    try absent_gateway.bootstrapDurableDispatch(memory.interface(), undefined, .{ .domain = .control, .id = 506 });
+    try @import("order_gateway_archive_acceptance.zig").archiveOrderFills(owner, absent_gateway, command.order_id);
     try std.testing.expectError(error.DispatchArchiveEvidenceMissing, owner.archiveTerminalOrder(command.order_id, absent_gateway));
     try std.testing.expect(owner.shard.oms.orderById(command.order_id) != null);
     try std.testing.expect(!owner.closed);

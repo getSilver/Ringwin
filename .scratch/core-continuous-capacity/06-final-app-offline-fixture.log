@@ -1,0 +1,29 @@
+Stack overflow (no address available)
+D:\Program Files\zig\lib\compiler_rt\stack_probe.zig:127: 0x7ff71e323376 in win_probe_stack_only (compiler_rt.lib)
+            asm volatile (
+
+D:\Program Files\zig\lib\compiler_rt\stack_probe.zig:269:5: 0x7ff71e323376 in ___chkstk_ms (compiler_rt.lib)
+    @call(.always_inline, win_probe_stack_only, .{});
+    ^
+???:?:?: 0x15b6927 in ??? (???)
+???:?:?: 0x281953affff in ??? (???)
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard_fixture.zig:387: 0x7ff71e2f8025 in healthyRunInto (ringwin_zcu.obj)
+fn healthyRunInto(run: *LiveRun) !void {
+
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard_fixture.zig:529:23: 0x7ff71e2fa7d8 in runHappyPathInto (ringwin_zcu.obj)
+    try healthyRunInto(run);
+                      ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard_fixture.zig:647:25: 0x7ff71e2fbc44 in main (ringwin_zcu.obj)
+    try runHappyPathInto(happy);
+                        ^
+D:\github\Ringwin-core-continuous-capacity\src\main.zig:135: 0x7ff71e1b529b in main (ringwin_zcu.obj)
+            return trading_shard_fixture.main(init);
+
+D:\Program Files\zig\lib\std\start.zig:750: 0x7ff71e1b529b in callMain (ringwin_zcu.obj)
+    return wrapMain(root.main(.{
+
+D:\Program Files\zig\lib\std\start.zig:498:17: 0x7ff71e1b529b in WinStartup (ringwin_zcu.obj)
+        callMain(std.os.windows.peb().ProcessParameters.CommandLine.slice(), .global),
+                ^
+???:?:?: 0x7ff834bf81f3 in ??? (KERNEL32.DLL)
+???:?:?: 0x7ff83513a250 in ??? (ntdll.dll)

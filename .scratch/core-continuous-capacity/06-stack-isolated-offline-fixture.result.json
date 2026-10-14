@@ -1,0 +1,7 @@
+{
+  "started_utc": "2026-10-14T08:44:34.3326349Z",
+  "finished_utc": "2026-10-14T08:44:37.5094047Z",
+  "exit_code": 3,
+  "command": "\"\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-stack-isolated.exe\" --offline-fixture 1>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-stack-isolated-offline-fixture.stdout.log\" 2>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-stack-isolated-offline-fixture.log\"\"",
+  "scope": "64MiB startup and all offline assertions, before final freeze"
+}

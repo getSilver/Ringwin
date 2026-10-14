@@ -1,0 +1,9 @@
+src\trading_shard.zig:5229:168: error: enum 'strategy_host_gateway.TimeInForce' has no member named 'gtc'
+    try std.testing.expectError(error.RecoveryAdmissionPending, recovered.apply(.{ .core = .{ .identity = 3, .payload = .{ .timer = .{ .side = .buy, .time_in_force = .gtc, .portfolio_reduce_only = false, .quantity = 1, .limit_price_micros = 1 } } } }));
+                                                                                                                                                                      ~^~~
+src\strategy_host_gateway.zig:69:25: note: enum declared here
+pub const TimeInForce = enum(u8) { good_til_canceled = 1, immediate_or_cancel = 2 };
+                        ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+referenced by:
+    trading_shard: src\main.zig:2:31
+    test_0: src\main.zig:174:9

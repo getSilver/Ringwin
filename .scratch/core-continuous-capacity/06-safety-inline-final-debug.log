@@ -1,0 +1,3 @@
+1/2 main.test_0...OK
+2/2 order_history_safety_acceptance.test.Owner preserves deferred history while canonical fills progress and both pending lanes recover...OK
+All 2 tests passed.

@@ -20,6 +20,10 @@ pub const Identity = union(enum) {
     reconciliation: u128,
     dispatch_command: u64,
     dispatch_result: struct { command: u64, state: canonical.DispatchState },
+    canonical_fill: u64,
+    core_fill: u64,
+    fill_detail: u64,
+    fill_economic_digest: u64,
 };
 pub const Key = struct { origin: Origin, identity: Identity };
 pub const Root = struct {
@@ -210,7 +214,7 @@ pub fn encodeKey(key: Key) !EncodedKey {
             result.bytes[25] = @intFromEnum(v.state);
             result.len = 26;
         },
-        .order, .command, .dispatch_command => |v| {
+        .order, .command, .dispatch_command, .canonical_fill, .core_fill, .fill_detail, .fill_economic_digest => |v| {
             std.mem.writeInt(u64, result.bytes[17..25], v, .big);
             result.len = 25;
         },

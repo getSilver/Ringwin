@@ -223,5 +223,7 @@ test {
     _ = @import("order_capacity_acceptance.zig");
     _ = @import("order_public_capacity_acceptance.zig");
     _ = @import("order_history_safety_acceptance.zig");
+    _ = @import("fill_history_batch.zig");
+    _ = @import("fill_archive_acceptance.zig");
     _ = raw_ingress;
 }

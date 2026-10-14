@@ -13,7 +13,8 @@ const dispatch_record_type: u16 = 0x4701;
 const resolution_record_type: u16 = 0x4702;
 const accepted_record_type: u16 = 0x4703;
 const archive_record_type: u16 = 0x4704;
-const dispatch_snapshot = "GatewayDispatchV5";
+const economic_history_record_type: u16 = 0x4705;
+const dispatch_snapshot = "GatewayDispatchV6";
 const namespace_size = 16;
 const snapshot_prefix_size = dispatch_snapshot.len + @sizeOf(u16);
 
@@ -85,13 +86,34 @@ pub const DispatchEvidence = struct {
     reconciliation_id: u64 = 0,
     reconciliation_status: ?oms.ReconciliationStatus = null,
 };
-const ArchiveBinding = struct { origin: DispatchOrigin, root: history.Root };
+const ArchiveBinding = struct { origin: DispatchOrigin, root: history.Root, last_order: ?DispatchArchiveCommit = null };
 const DispatchArchiveCommit = struct { origin: DispatchOrigin, order_id: u64, receipt: history.Receipt };
+const EconomicHistoryCommit = struct { origin: DispatchOrigin, fill_id: u64, qualification_digest: history.Digest, receipt: history.Receipt };
 pub const max_routes = 4;
 pub const max_adapter_batches_per_turn: u8 = 1;
 pub const max_authority_records = 128;
 pub const max_dispatch_records = 4 * (1024 + 4096) * 2;
 pub const max_reservation_facts = 4 * 1024 * 2;
+
+fn atCapacity(count: usize, limit: usize) bool {
+    return count == limit;
+}
+
+fn dispatchBudgetFull(accepted: u16, uncertain: u16) bool {
+    return atCapacity(@as(usize, accepted) + uncertain, max_dispatch_records);
+}
+
+test "Gateway production dispatch and authority limits reject their numeric boundaries without resident load" {
+    try std.testing.expect(!dispatchBudgetFull(40959, 0));
+    try std.testing.expect(!dispatchBudgetFull(40958, 1));
+    try std.testing.expect(dispatchBudgetFull(40959, 1));
+    try std.testing.expect(dispatchBudgetFull(40960, 0));
+    try std.testing.expect(dispatchBudgetFull(0, 40960));
+    try std.testing.expect(!atCapacity(8191, max_reservation_facts));
+    try std.testing.expect(atCapacity(8192, max_reservation_facts));
+    try std.testing.expect(!atCapacity(499, max_exchange_position_facts));
+    try std.testing.expect(atCapacity(500, max_exchange_position_facts));
+}
 pub const max_observed_instruments = 500;
 pub const max_exchange_position_facts = max_observed_instruments;
 const AccountAuthority = struct {
@@ -143,7 +165,7 @@ const DurableDispatch = struct {
     namespace: [namespace_size]u8,
     next_sequence: u64,
 };
-const dispatch_snapshot_version: u16 = 5;
+const dispatch_snapshot_version: u16 = 6;
 const DispatchSnapshotHeader = struct {
     version: u16 = dispatch_snapshot_version,
     stream: durable.StreamIdentity,
@@ -195,6 +217,8 @@ pub const Gateway = struct {
     uncertain_dispatches: [max_dispatch_records]UncertainDispatch = undefined,
     uncertain_dispatch_count: u16 = 0,
     durable_dispatch: ?DurableDispatch = null,
+    // Borrowed caller-owned storage; never encoded into durable state.
+    dispatch_snapshot_buffer: ?[]u8 = null,
     send_attempt_count: u64 = 0,
 
     /// Initializes caller-owned storage without materializing the large resident arrays.
@@ -210,18 +234,35 @@ pub const Gateway = struct {
         self.accepted_dispatch_count = 0;
         self.uncertain_dispatch_count = 0;
         self.durable_dispatch = null;
+        self.dispatch_snapshot_buffer = null;
         self.send_attempt_count = 0;
+    }
+
+    /// Storage must remain exclusively available until this Gateway is retired.
+    pub fn initWithDispatchSnapshotBuffer(self: *Gateway, snapshot_buffer: []u8) void {
+        self.init();
+        self.dispatch_snapshot_buffer = snapshot_buffer;
     }
 
     /// Explicit virgin-stream bootstrap. Production callers must establish
     /// stream identity from operator-owned durable metadata, not a missing file.
     pub fn bootstrapDurableDispatch(self: *Gateway, store: durable.Store, io: std.Io, stream: durable.StreamIdentity) !void {
+        if (self.dispatch_snapshot_buffer) |buffer| return self.bootstrapDurableDispatchWithBuffer(store, io, stream, buffer);
+        return @call(.never_inline, Gateway.bootstrapDurableDispatchOnStack, .{ self, store, io, stream });
+    }
+
+    fn bootstrapDurableDispatchOnStack(self: *Gateway, store: durable.Store, io: std.Io, stream: durable.StreamIdentity) !void {
+        var snapshot_buffer: [durable.max_snapshot_bytes]u8 = undefined;
+        return self.bootstrapDurableDispatchWithBuffer(store, io, stream, &snapshot_buffer);
+    }
+
+    /// The caller owns snapshot storage through synchronous durable publication.
+    pub fn bootstrapDurableDispatchWithBuffer(self: *Gateway, store: durable.Store, io: std.Io, stream: durable.StreamIdentity, snapshot_buffer: []u8) !void {
         if (self.durable_dispatch != null or stream.domain != .control or stream.id == 0 or store.safetyGate() != .open)
             return error.DurableDispatchUnavailable;
         var namespace: [namespace_size]u8 = undefined;
         std.Io.randomSecure(std.Io.Threaded.global_single_threaded.io(), &namespace) catch return error.DurableDispatchUnavailable;
-        var snapshot_buffer: [durable.max_snapshot_bytes]u8 = undefined;
-        const snapshot = try self.encodeDispatchSnapshot(&snapshot_buffer, stream, 1, namespace);
+        const snapshot = try self.encodeDispatchSnapshot(snapshot_buffer, stream, 1, namespace);
         store.append(io, .{ .stream = stream, .record = .{
             .type_id = dispatch_record_type,
             .schema_version = production_contract.journal_schema_version,
@@ -256,14 +297,24 @@ pub const Gateway = struct {
     }
 
     pub fn checkpointDurableDispatch(self: *Gateway) !void {
+        if (self.dispatch_snapshot_buffer) |buffer| return self.checkpointDurableDispatchWithBuffer(buffer);
+        return @call(.never_inline, Gateway.checkpointDurableDispatchOnStack, .{self});
+    }
+
+    fn checkpointDurableDispatchOnStack(self: *Gateway) !void {
+        var snapshot_buffer: [durable.max_snapshot_bytes]u8 = undefined;
+        return self.checkpointDurableDispatchWithBuffer(&snapshot_buffer);
+    }
+
+    /// Uses independent caller-owned storage; Store recovery may load older snapshots.
+    pub fn checkpointDurableDispatchWithBuffer(self: *Gateway, snapshot_buffer: []u8) !void {
         errdefer for (self.routes[0..self.count]) |*route| {
             route.safety_gate = .latched;
         };
         const committed = self.durable_dispatch orelse return error.DurableDispatchUnavailable;
         if (committed.store.safetyGate() != .open or committed.next_sequence <= 1) return error.DurableDispatchUnavailable;
         const barrier = committed.next_sequence - 1;
-        var snapshot_buffer: [durable.max_snapshot_bytes]u8 = undefined;
-        const snapshot = try self.encodeDispatchSnapshot(&snapshot_buffer, committed.stream, barrier, committed.namespace);
+        const snapshot = try self.encodeDispatchSnapshot(snapshot_buffer, committed.stream, barrier, committed.namespace);
         const persisted = try committed.store.recover(committed.io, committed.stream);
         if (persisted.status == .ready and persisted.gate == .open and persisted.snapshot_barrier == barrier and
             persisted.committed_barrier == barrier and persisted.last_sequence == barrier)
@@ -315,6 +366,16 @@ pub const Gateway = struct {
             if (binding.origin.decision_stream != binding.root.origin.stream.id or binding.origin.account != binding.root.origin.account or
                 binding.origin.portfolio == 0 or binding.origin.test_shard != 0 or candidate.archiveBindingIndex(binding.origin) != null)
                 return error.DurableDispatchUnavailable;
+            if (binding.last_order) |order| {
+                try history.validateRoot(order.receipt.root);
+                if (!std.meta.eql(order.origin, binding.origin) or order.order_id == 0 or
+                    !std.meta.eql(order.receipt.root.origin, binding.root.origin) or order.receipt.root.generation > binding.root.generation or
+                    !std.mem.eql(u8, &order.receipt.previous_root, &order.receipt.root.previous_root) or
+                    !std.mem.eql(u8, &order.receipt.qualification_digest, &order.receipt.root.qualification_digest) or
+                    !std.mem.eql(u8, &order.receipt.batch_digest, &order.receipt.root.batch_digest) or
+                    (order.receipt.root.generation == binding.root.generation and !std.meta.eql(order.receipt.root, binding.root)))
+                    return error.DurableDispatchUnavailable;
+            }
             candidate.archive_bindings[candidate.archive_binding_count] = binding;
             candidate.archive_binding_count += 1;
         }
@@ -385,6 +446,10 @@ pub const Gateway = struct {
                             const commit = snapshot_codec.decodeBare(record.payload, DispatchArchiveCommit) catch return error.DurableDispatchUnavailable;
                             try candidate.applyDispatchArchive(commit);
                         },
+                        economic_history_record_type => {
+                            const commit = snapshot_codec.decodeBare(record.payload, EconomicHistoryCommit) catch return error.DurableDispatchUnavailable;
+                            try candidate.applyEconomicHistory(commit);
+                        },
                         else => return error.DurableDispatchUnavailable,
                     }
                 },
@@ -403,7 +468,7 @@ pub const Gateway = struct {
         const account = proof.context.account;
         const command_id = proof.command.command_id;
         if (self.uncertainIndex(proof.origin, account, command_id) != null) return;
-        if (self.dispatchCount() == max_dispatch_records) return error.DispatchCapacity;
+        if (dispatchBudgetFull(self.accepted_dispatch_count, self.uncertain_dispatch_count)) return error.DispatchCapacity;
         self.uncertain_dispatches[self.uncertain_dispatch_count] = .{ .origin = proof.origin, .account = account, .command_id = command_id, .client_order_id = proof.command.client_order_id, .prior_reconciliation_id = proof.prior_reconciliation_id, .recovered_proof = proof };
         self.uncertain_dispatch_count += 1;
     }
@@ -549,9 +614,9 @@ pub const Gateway = struct {
 
         const reservation_index = self.reservationIndex(origin, facts.account, facts.reservation_identity);
         const position_index = self.exchangePositionIndex(origin, facts.account, facts.exchange_position.instrument);
-        if (reservation_index == null and self.reservation_count == self.reservations.len)
+        if (reservation_index == null and atCapacity(self.reservation_count, self.reservations.len))
             return error.AuthorityCapacity;
-        if (position_index == null and self.exchange_position_count == self.exchange_positions.len)
+        if (position_index == null and atCapacity(self.exchange_position_count, self.exchange_positions.len))
             return error.AuthorityCapacity;
         if (reservation_index) |index| {
             const known = self.reservations[index];
@@ -601,7 +666,7 @@ pub const Gateway = struct {
             if (!std.meta.eql(self.accepted_dispatches[index].proof, proof)) return error.DispatchIdentityConflict;
             return;
         }
-        if (self.dispatchCount() == max_dispatch_records) return error.DispatchCapacity;
+        if (dispatchBudgetFull(self.accepted_dispatch_count, self.uncertain_dispatch_count)) return error.DispatchCapacity;
         self.accepted_dispatches[self.accepted_dispatch_count] = .{ .origin = proof.origin, .account = account, .command_id = command_id, .proof = proof };
         self.accepted_dispatch_count += 1;
     }
@@ -746,7 +811,7 @@ pub const Gateway = struct {
         if (self.acceptedDispatchIndex(origin, refs.exchange_account, command_id) != null) return self.sendProofInternal(proof);
         for (self.uncertain_dispatches[0..self.uncertain_dispatch_count]) |uncertain|
             if (std.meta.eql(uncertain.origin, origin) and uncertain.account == refs.exchange_account and uncertain.command_id == command_id) return error.NotSent;
-        if (self.dispatchCount() == max_dispatch_records) return error.NotSent;
+        if (dispatchBudgetFull(self.accepted_dispatch_count, self.uncertain_dispatch_count)) return error.NotSent;
         var payload_buffer: [trading.journal.max_payload_size]u8 = undefined;
         const payload = snapshot_codec.encodeBare(&payload_buffer, proof) catch return error.NotSent;
         committed.store.append(committed.io, .{ .stream = committed.stream, .record = .{
@@ -867,7 +932,7 @@ pub const Gateway = struct {
             if (!std.meta.eql(self.accepted_dispatches[index].proof, proof)) return error.NotSent;
             return .accepted;
         }
-        if (self.dispatchCount() == max_dispatch_records) return error.NotSent;
+        if (dispatchBudgetFull(self.accepted_dispatch_count, self.uncertain_dispatch_count)) return error.NotSent;
         const route_index = self.routeIndex(proof.context.account) orelse return error.NotSent;
         const authority = if (proof.origin.account == 0) self.account_authority[route_index] else self.origin_authority[self.originAuthorityIndex(proof.origin) orelse return error.NotSent].authority;
         const reservation_index = self.reservationIndex(proof.origin, proof.context.account, command_value.reservation_identity) orelse return error.NotSent;
@@ -1002,18 +1067,73 @@ pub const Gateway = struct {
         const archived = shard.last_order_archive orelse return;
         const origin = try sourceOrigin(shard, false);
         if (self.archiveBindingIndex(origin)) |index| {
-            if (std.meta.eql(self.archive_bindings[index].root, archived.receipt.root)) {
-                const committed = self.durable_dispatch orelse return error.DurableDispatchUnavailable;
-                if (committed.next_sequence <= 1) return error.DurableDispatchUnavailable;
-                const persisted = try committed.store.recover(committed.io, committed.stream);
-                if (persisted.status != .ready or persisted.gate != .open or
-                    persisted.last_sequence != committed.next_sequence - 1 or persisted.committed_barrier != persisted.last_sequence)
-                    return error.DurableDispatchUnavailable;
-                if (persisted.segment_sealed) try self.checkpointDurableDispatch();
-                return;
+            if (self.archive_bindings[index].last_order) |completed| {
+                if (completed.order_id == archived.order_id and std.meta.eql(completed.origin, origin) and
+                    std.meta.eql(completed.receipt, archived.receipt))
+                {
+                    const committed = self.durable_dispatch orelse return error.DurableDispatchUnavailable;
+                    if (committed.next_sequence <= 1) return error.DurableDispatchUnavailable;
+                    const persisted = try committed.store.recover(committed.io, committed.stream);
+                    if (persisted.status != .ready or persisted.gate != .open or
+                        persisted.last_sequence != committed.next_sequence - 1 or persisted.committed_barrier != persisted.last_sequence)
+                        return error.DurableDispatchUnavailable;
+                    if (persisted.segment_sealed) try self.checkpointDurableDispatch();
+                    return;
+                }
             }
         }
         try self.reclaimOrderDispatchEvidence(shard, archived.order_id);
+    }
+
+    /// Only the published Core fill commit can advance history without retiring dispatch evidence.
+    pub fn acknowledgeEconomicHistory(self: *Gateway, shard: *const trading.TradingShard) !void {
+        const origin = try sourceOrigin(shard, false);
+        const commit = shard.last_fill_archive orelse return error.EconomicHistoryNotCommitted;
+        const root = shard.business_history_root orelse return error.EconomicHistoryNotCommitted;
+        if (shard.last_business_archive_kind != .fill or !std.meta.eql(root, commit.receipt.root) or
+            !std.mem.eql(u8, &commit.qualification_digest, &commit.receipt.qualification_digest)) return error.EconomicHistoryNotCommitted;
+        const record: EconomicHistoryCommit = .{ .origin = origin, .fill_id = commit.fill_id, .qualification_digest = commit.qualification_digest, .receipt = commit.receipt };
+        const previous_index = self.archiveBindingIndex(origin);
+        const previous_count = self.archive_binding_count;
+        const previous_binding: ?ArchiveBinding = if (previous_index) |index| self.archive_bindings[index] else null;
+        const previous_dispatch = self.durable_dispatch orelse return error.DurableDispatchUnavailable;
+        // This single-writer transition changes only one binding and its durable cursor.
+        errdefer {
+            self.archive_binding_count = previous_count;
+            if (previous_index) |index| self.archive_bindings[index] = previous_binding.?;
+            self.durable_dispatch = previous_dispatch;
+        }
+        const already_committed = previous_index != null and std.meta.eql(self.archive_bindings[previous_index.?].root, root);
+        try self.applyEconomicHistory(record);
+        if (!already_committed) {
+            var payload_buffer: [trading.journal.max_payload_size]u8 = undefined;
+            const payload = try snapshot_codec.encodeBare(&payload_buffer, record);
+            try self.commitDispatchRecord(economic_history_record_type, 0, payload);
+        }
+        try self.checkpointDurableDispatch();
+    }
+
+    fn applyEconomicHistory(self: *Gateway, commit: EconomicHistoryCommit) !void {
+        const origin = commit.origin;
+        const root = commit.receipt.root;
+        if (origin.decision_stream == 0 or origin.portfolio == 0 or origin.test_shard != 0 or commit.fill_id == 0 or
+            origin.account != root.origin.account or origin.decision_stream != root.origin.stream.id or
+            !std.mem.eql(u8, &commit.qualification_digest, &commit.receipt.qualification_digest)) return error.EconomicHistoryNotCommitted;
+        const previous_index = self.archiveBindingIndex(origin);
+        const previous: ?history.Root = if (previous_index) |index| self.archive_bindings[index].root else null;
+        if (previous != null and std.meta.eql(previous.?, root)) {
+            try history.validateRoot(root);
+            if (!std.mem.eql(u8, &commit.receipt.previous_root, &root.previous_root) or
+                !std.mem.eql(u8, &commit.qualification_digest, &root.qualification_digest) or
+                !std.mem.eql(u8, &commit.receipt.batch_digest, &root.batch_digest)) return error.InvalidHistoryReceipt;
+            return;
+        }
+        _ = try history.verifyReceipt(commit.receipt, root.origin, commit.qualification_digest, previous);
+        if (previous_index == null and self.archive_binding_count == self.archive_bindings.len) return error.DispatchCapacity;
+        const target = previous_index orelse self.archive_binding_count;
+        const last_order = if (previous_index) |index| self.archive_bindings[index].last_order else null;
+        if (previous_index == null) self.archive_binding_count += 1;
+        self.archive_bindings[target] = .{ .origin = origin, .root = root, .last_order = last_order };
     }
 
     pub fn reclaimOrderDispatchEvidence(self: *Gateway, shard: *const trading.TradingShard, order_id: u64) !void {
@@ -1058,7 +1178,7 @@ pub const Gateway = struct {
         if (binding_index == null and self.archive_binding_count == self.archive_bindings.len) return error.DispatchCapacity;
         const target = binding_index orelse self.archive_binding_count;
         if (binding_index == null) self.archive_binding_count += 1;
-        self.archive_bindings[target] = .{ .origin = origin, .root = root };
+        self.archive_bindings[target] = .{ .origin = origin, .root = root, .last_order = commit };
         var index: usize = 0;
         while (index < self.uncertain_dispatch_count) {
             const entry = self.uncertain_dispatches[index];
@@ -1333,7 +1453,12 @@ test "Gateway checkpoint encodes only resident dispatch evidence" {
     defer std.testing.allocator.destroy(gateway);
     gateway.init();
     const stream: durable.StreamIdentity = .{ .domain = .control, .id = 978 };
-    try gateway.bootstrapDurableDispatch(memory.interface(), undefined, stream);
+    var bootstrap_buffer: [4096]u8 = undefined;
+    try std.testing.expectError(error.DurableDispatchUnavailable, gateway.bootstrapDurableDispatchWithBuffer(memory.interface(), undefined, stream, bootstrap_buffer[0..1]));
+    try std.testing.expect(gateway.durable_dispatch == null);
+    try std.testing.expectEqual(durable.GateState.open, memory.interface().safetyGate());
+    try gateway.bootstrapDurableDispatchWithBuffer(memory.interface(), undefined, stream, &bootstrap_buffer);
+    @memset(&bootstrap_buffer, 0);
     const restored = try memory.interface().recover(undefined, stream);
     var layout_bytes: [4096]u8 = undefined;
     const accepted_bytes = (try snapshot_codec.encodeBare(&layout_bytes, std.mem.zeroes(DispatchProof))).len;
@@ -1348,8 +1473,10 @@ test "Gateway checkpoint encodes only resident dispatch evidence" {
     try std.testing.expect(restored.snapshot.len < 256);
     const recovered = try std.testing.allocator.create(Gateway);
     defer std.testing.allocator.destroy(recovered);
-    recovered.init();
+    recovered.initWithDispatchSnapshotBuffer(&bootstrap_buffer);
     try recovered.attachRecoveredDurableDispatch(memory.interface(), undefined, stream);
+    try recovered.checkpointDurableDispatch();
+    try recovered.checkpointDurableDispatch();
     try std.testing.expectEqual(@as(u64, 0), recovered.send_attempt_count);
 }
 
@@ -1376,7 +1503,8 @@ test "Gateway accepted dispatch survives restart without another adapter send" {
     const client = gateway.acceptedClientOrderId(2, place.command_id).?;
     const recovered = try std.testing.allocator.create(Gateway);
     defer std.testing.allocator.destroy(recovered);
-    recovered.init();
+    var recovered_snapshot_buffer: [4096]u8 = undefined;
+    recovered.initWithDispatchSnapshotBuffer(&recovered_snapshot_buffer);
     try recovered.add(route);
     try recovered.attachRecoveredDurableDispatch(memory.interface(), undefined, stream);
     try observeGatewayCommand(recovered, shard, place, 1);
@@ -1483,7 +1611,7 @@ test "Gateway accepted outcome commit failure cannot publish acceptance or resen
     try std.testing.expectEqual(@as(u64, 1), implementation.sends);
 }
 
-test "Gateway recovered accepted and Unknown share the full node dispatch budget" {
+test "Gateway recovers accepted and Unknown together without sending and rejects expired authority" {
     const shard = try gatewaySelectionHeapFixture();
     defer std.testing.allocator.destroy(shard);
     const command_value = shard.oms.command_history[0];
@@ -1503,26 +1631,26 @@ test "Gateway recovered accepted and Unknown share the full node dispatch budget
     try gateway.bootstrapDurableDispatch(memory.interface(), undefined, stream);
     try observeGatewayCommand(gateway, shard, command_value, 1);
     try std.testing.expectEqual(venue.SendResult.accepted, try gateway.sendFromShard(shard, command_value.command_id, 2 * std.time.ns_per_s));
-    // Build a recovery-capacity artifact from an actual durable SDK attempt.
+    // Preserve both recovered kinds in a small artifact from an actual SDK attempt.
     const durable_state = try memory.interface().recover(undefined, stream);
     var reader = try trading.journal.Reader.init(durable_state.tail);
     const record = (try reader.next()).record;
     var proof = try snapshot_codec.decodeBare(record.payload, DispatchProof);
-    const bytes = try std.testing.allocator.alloc(u8, durable.max_snapshot_bytes);
+    const bytes = try std.testing.allocator.alloc(u8, 128 * 1024);
     defer std.testing.allocator.free(bytes);
     @memcpy(bytes[0..dispatch_snapshot.len], dispatch_snapshot);
     std.mem.writeInt(u16, bytes[dispatch_snapshot.len..][0..2], production_contract.journal_schema_version, .little);
     var position: usize = snapshot_prefix_size;
-    try writeSnapshotRow(bytes, &position, DispatchSnapshotHeader{ .stream = stream, .barrier = 3, .namespace = gateway.durable_dispatch.?.namespace, .archive_count = 0, .accepted_count = 40959, .uncertain_count = 1, .latch_count = 0 });
-    for (0..40959) |index| {
+    try writeSnapshotRow(bytes, &position, DispatchSnapshotHeader{ .stream = stream, .barrier = 3, .namespace = gateway.durable_dispatch.?.namespace, .archive_count = 0, .accepted_count = 99, .uncertain_count = 1, .latch_count = 0 });
+    for (0..99) |index| {
         proof.command.command_id = index + 1000;
         proof.command.order_id = index + 1000;
         try writeSnapshotRow(bytes, &position, proof);
     }
-    proof.command.command_id = 41959;
-    proof.command.order_id = 41959;
+    proof.command.command_id = 1099;
+    proof.command.order_id = 1099;
     try writeSnapshotRow(bytes, &position, SnapshotUnknown{ .proof = proof, .reconciliation_id = 0, .reconciliation_status = null });
-    try std.testing.expect(position < 32 * 1024 * 1024);
+    try std.testing.expect(position < 128 * 1024);
     try memory.interface().seal(undefined, stream);
     try memory.interface().publishSnapshot(undefined, stream, 3, bytes[0..position]);
     try memory.interface().rotate(undefined, stream);
@@ -1531,11 +1659,12 @@ test "Gateway recovered accepted and Unknown share the full node dispatch budget
     recovered.init();
     try recovered.add(route);
     try recovered.attachRecoveredDurableDispatch(memory.interface(), undefined, stream);
-    try std.testing.expectEqual(@as(u16, 40959), recovered.accepted_dispatch_count);
+    try std.testing.expectEqual(@as(u16, 99), recovered.accepted_dispatch_count);
     try std.testing.expectEqual(@as(u16, 1), recovered.uncertain_dispatch_count);
+    try std.testing.expectEqual(@as(usize, 100), recovered.dispatchCount());
     try observeGatewayCommand(recovered, shard, command_value, 1);
     const before = try memory.interface().recover(undefined, stream);
-    try std.testing.expectError(error.NotSent, recovered.sendFromShard(shard, command_value.command_id, 2 * std.time.ns_per_s));
+    try std.testing.expectError(error.NotSent, recovered.sendFromShard(shard, command_value.command_id, 100 * std.time.ns_per_s));
     const after = try memory.interface().recover(undefined, stream);
     try std.testing.expectEqual(before.committed_barrier, after.committed_barrier);
     try std.testing.expectEqual(@as(u64, 1), implementation.sends);
@@ -1756,7 +1885,7 @@ test "Gateway route and batch admission fail atomically" {
     try std.testing.expectEqual(@as(u8, 0), adapter_fixture.sent);
 }
 
-test "Gateway observation and resident authority capacities are independent of emitted commands" {
+test "Gateway observation universe and resident authority facts remain independent without emitted commands" {
     var implementation: Fixture = .{};
     const gateway = try std.testing.allocator.create(Gateway);
     defer std.testing.allocator.destroy(gateway);
@@ -1765,8 +1894,8 @@ test "Gateway observation and resident authority capacities are independent of e
     for (0..max_observed_instruments) |index| gateway.setInstrumentGap(index + 1);
     try std.testing.expectEqual(@as(u16, max_observed_instruments), gateway.instrument_gate_count);
     try std.testing.expect(!gateway.instrument_gate_capacity_exhausted);
-    for (0..max_exchange_position_facts) |index| try gateway.observeAuthority(.{
-        .account = index / 125 + 1,
+    for (0..3) |index| try gateway.observeAuthority(.{
+        .account = index + 1,
         .effective_trading_authority = true,
         .reservation_identity = index + 1,
         .reservation = .{ .asset = 1, .atoms = 10 },
@@ -1775,44 +1904,20 @@ test "Gateway observation and resident authority capacities are independent of e
         .exchange_position = .{ .instrument = index + 1, .rules_version = 1, .lots = 0 },
         .authority_barrier = 1,
     });
-    try std.testing.expectEqual(@as(u16, 500), gateway.reservation_count);
-    try std.testing.expectEqual(@as(u16, 500), gateway.exchange_position_count);
-    try std.testing.expectError(error.AuthorityCapacity, gateway.observeAuthority(.{
-        .account = 1,
+    try std.testing.expectEqual(@as(u16, 3), gateway.reservation_count);
+    try std.testing.expectEqual(@as(u16, 3), gateway.exchange_position_count);
+    for (0..3) |index| try gateway.observeAuthority(.{
+        .account = index + 1,
         .effective_trading_authority = true,
-        .reservation_identity = 501,
-        .reservation = .{ .asset = 1, .atoms = 10 },
-        .primary_lease_expires_at_monotonic_ns = 100,
-        .fencing_token = 1,
-        .exchange_position = .{ .instrument = 501, .rules_version = 1, .lots = 0 },
-        .authority_barrier = 1,
-    }));
-    try std.testing.expectEqual(@as(u16, 500), gateway.reservation_count);
-    try std.testing.expectEqual(@as(u16, 500), gateway.exchange_position_count);
-    for (0..max_exchange_position_facts) |index| try gateway.observeAuthority(.{
-        .account = index / 125 + 1,
-        .effective_trading_authority = true,
-        .reservation_identity = index + 501,
+        .reservation_identity = index + 4,
         .reservation = .{ .asset = 1, .atoms = 10 },
         .primary_lease_expires_at_monotonic_ns = 100,
         .fencing_token = 1,
         .exchange_position = .{ .instrument = index + 1, .rules_version = 1, .lots = 0 },
         .authority_barrier = 1,
     });
-    try std.testing.expectEqual(@as(u16, 1000), gateway.reservation_count);
-    try std.testing.expectEqual(@as(u16, 500), gateway.exchange_position_count);
-    for (1001..max_reservation_facts + 1) |identity| try gateway.observeAuthority(.{ .account = 1, .effective_trading_authority = true, .reservation_identity = identity, .reservation = .{ .asset = 1, .atoms = 10 }, .primary_lease_expires_at_monotonic_ns = 100, .fencing_token = 1, .exchange_position = .{ .instrument = 1, .rules_version = 1, .lots = 0 }, .authority_barrier = 1 });
-    try std.testing.expectError(error.AuthorityCapacity, gateway.observeAuthority(.{
-        .account = 1,
-        .effective_trading_authority = true,
-        .reservation_identity = max_reservation_facts + 1,
-        .reservation = .{ .asset = 1, .atoms = 10 },
-        .primary_lease_expires_at_monotonic_ns = 100,
-        .fencing_token = 1,
-        .exchange_position = .{ .instrument = 1, .rules_version = 1, .lots = 0 },
-        .authority_barrier = 1,
-    }));
-    try std.testing.expectEqual(@as(u16, max_reservation_facts), gateway.reservation_count);
+    try std.testing.expectEqual(@as(u16, 6), gateway.reservation_count);
+    try std.testing.expectEqual(@as(u16, 3), gateway.exchange_position_count);
     gateway.setInstrumentGap(max_observed_instruments + 1);
     try std.testing.expect(gateway.instrument_gate_capacity_exhausted);
     try std.testing.expectEqual(@as(u16, max_observed_instruments), gateway.instrument_gate_count);
@@ -2214,4 +2319,99 @@ fn copyShardForTesting(shard: *const trading.TradingShard) !*trading.TradingShar
     const copy = try std.testing.allocator.create(trading.TradingShard);
     @memcpy(std.mem.asBytes(copy), std.mem.asBytes(shard));
     return copy;
+}
+
+test "Gateway economic history binds committed adjacent roots without retiring dispatch and recovers order completion" {
+    const allocator = std.testing.allocator;
+    const shard = try gatewaySelectionHeapFixture();
+    defer allocator.destroy(shard);
+    shard.checkpoint = try shard.checkpointReceipt(981, 1, history.hash("gateway checkpoint"));
+    const memory = try allocator.create(durable.MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .initWithAllocator(allocator);
+    defer memory.deinit();
+    const store = memory.interface();
+    var implementation: CountingSimulatedVenue = .{};
+    const adapter = implementation.adapter();
+    try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1, .asset_definitions = shard.activatedAssets(), .instrument_definitions = shard.instrument_registry });
+    const route: Route = .{ .account = 2, .adapter = adapter, .venue_identity = 1, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } };
+    const gateway = try allocator.create(Gateway);
+    defer allocator.destroy(gateway);
+    gateway.init();
+    try gateway.add(route);
+    const stream: durable.StreamIdentity = .{ .domain = .control, .id = 982 };
+    try gateway.bootstrapDurableDispatch(store, undefined, stream);
+    const command_value = shard.oms.command_history[0];
+    try observeGatewayCommand(gateway, shard, command_value, 1);
+    try std.testing.expectEqual(venue.SendResult.accepted, try gateway.sendFromShard(shard, command_value.command_id, 2 * std.time.ns_per_s));
+    const accepted = gateway.accepted_dispatches[0];
+    var uncertain_proof = accepted.proof;
+    uncertain_proof.command.command_id += 100;
+    uncertain_proof.command.order_id += 100;
+    var attempt_bytes: [trading.journal.max_payload_size]u8 = undefined;
+    try gateway.commitDispatchRecord(dispatch_record_type, 0, try snapshot_codec.encodeBare(&attempt_bytes, uncertain_proof));
+    try gateway.markUncertain(uncertain_proof);
+    const origin: history.Origin = .{ .stream = .{ .domain = .decision_log, .id = 981 }, .account = 2 };
+    const records = [_]history.Record{.{ .bytes = "committed archive", .payload_digest = history.hash("committed archive") }};
+    var entries = [_]history.Entry{.{ .key = .{ .origin = origin, .identity = .{ .order = 999 } }, .record_index = 0 }};
+    const first = try store.publishOrderHistory(undefined, .{ .origin = origin, .barrier = 1, .epoch = 1, .qualification_digest = history.hash("order qualification"), .records = &records, .entries = &entries });
+    shard.business_history_root = first.root;
+    shard.last_order_archive = .{ .order_id = 999, .applied_fill_quantity = 0, .qualification_digest = first.qualification_digest, .receipt = first };
+    shard.last_business_archive_kind = .order;
+    try gateway.reclaimOrderDispatchEvidence(shard, 999);
+    const completed_order = gateway.archive_bindings[0].last_order.?;
+    const reservation_count = gateway.reservation_count;
+    entries[0].key.identity = .{ .order = 1000 };
+    const second = try store.publishOrderHistory(undefined, .{ .origin = origin, .previous_root = first.root, .barrier = 2, .epoch = 1, .qualification_digest = history.hash("fill qualification"), .records = &records, .entries = &entries });
+    shard.business_history_root = second.root;
+    shard.last_fill_archive = .{ .fill_id = 10, .qualification_digest = second.qualification_digest, .receipt = second };
+    try std.testing.expectError(error.EconomicHistoryNotCommitted, gateway.acknowledgeEconomicHistory(shard));
+    shard.last_business_archive_kind = .fill;
+    shard.last_fill_archive.?.qualification_digest = history.hash("wrong qualification");
+    try std.testing.expectError(error.EconomicHistoryNotCommitted, gateway.acknowledgeEconomicHistory(shard));
+    shard.last_fill_archive.?.qualification_digest = second.qualification_digest;
+    entries[0].key.identity = .{ .order = 1001 };
+    const third = try store.publishOrderHistory(undefined, .{ .origin = origin, .previous_root = second.root, .barrier = 3, .epoch = 1, .qualification_digest = history.hash("next fill qualification"), .records = &records, .entries = &entries });
+    shard.business_history_root = third.root;
+    shard.last_fill_archive = .{ .fill_id = 11, .qualification_digest = third.qualification_digest, .receipt = third };
+    try std.testing.expectError(error.InvalidHistoryReceipt, gateway.acknowledgeEconomicHistory(shard));
+    try std.testing.expectEqualDeep(first.root, gateway.archive_bindings[0].root);
+    shard.business_history_root = second.root;
+    shard.last_fill_archive = .{ .fill_id = 10, .qualification_digest = second.qualification_digest, .receipt = second };
+    try gateway.acknowledgeEconomicHistory(shard);
+    try gateway.acknowledgeEconomicHistory(shard);
+    try std.testing.expectEqualDeep(second.root, gateway.archive_bindings[0].root);
+    try std.testing.expectEqualDeep(completed_order, gateway.archive_bindings[0].last_order.?);
+    try std.testing.expectEqualDeep(accepted, gateway.accepted_dispatches[0]);
+    try std.testing.expectEqual(@as(u16, 1), gateway.accepted_dispatch_count);
+    try std.testing.expectEqual(@as(u16, 1), gateway.uncertain_dispatch_count);
+    try std.testing.expectEqual(reservation_count, gateway.reservation_count);
+    try gateway.completePreviousOrderArchive(shard);
+    const recovered = try allocator.create(Gateway);
+    defer allocator.destroy(recovered);
+    recovered.init();
+    try recovered.add(route);
+    try recovered.attachRecoveredDurableDispatch(store, undefined, stream);
+    try std.testing.expectEqualDeep(gateway.archive_bindings[0], recovered.archive_bindings[0]);
+    try std.testing.expectEqual(@as(u16, 1), recovered.accepted_dispatch_count);
+    try std.testing.expectEqual(@as(u16, 1), recovered.uncertain_dispatch_count);
+    try recovered.completePreviousOrderArchive(shard);
+    // A committed economic record also survives interruption before its checkpoint.
+    const tail_commit: EconomicHistoryCommit = .{ .origin = accepted.origin, .fill_id = 11, .qualification_digest = third.qualification_digest, .receipt = third };
+    try recovered.commitDispatchRecord(economic_history_record_type, 0, try snapshot_codec.encodeBare(&attempt_bytes, tail_commit));
+    const tail_recovered = try allocator.create(Gateway);
+    defer allocator.destroy(tail_recovered);
+    tail_recovered.init();
+    try tail_recovered.add(route);
+    try tail_recovered.attachRecoveredDurableDispatch(store, undefined, stream);
+    try std.testing.expectEqualDeep(third.root, tail_recovered.archive_bindings[0].root);
+    try std.testing.expectEqualDeep(completed_order, tail_recovered.archive_bindings[0].last_order.?);
+    try std.testing.expectEqual(@as(u16, 1), tail_recovered.accepted_dispatch_count);
+    try std.testing.expectEqual(@as(u16, 1), tail_recovered.uncertain_dispatch_count);
+    try tail_recovered.completePreviousOrderArchive(shard);
+    const barrier = recovered.durable_dispatch.?.next_sequence;
+    shard.last_order_archive.?.order_id += 1;
+    try std.testing.expectError(error.DispatchArchiveNotCommitted, recovered.completePreviousOrderArchive(shard));
+    try std.testing.expectEqual(barrier, recovered.durable_dispatch.?.next_sequence);
+    try std.testing.expectEqual(@as(u64, 1), implementation.sends);
 }

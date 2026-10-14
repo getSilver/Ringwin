@@ -1,0 +1,15 @@
+{
+  "source_tree_sha256": "c508f89c8c6faae0c428e3e2195df957d4377a453a673ee772edec2c9d2b17b4",
+  "zig": "0.17.0-dev.315+5b647b792",
+  "started_utc": "2026-10-14T10:17:44.4088237Z",
+  "finished_utc": "2026-10-14T10:18:01.2404874Z",
+  "exit_code": 0,
+  "command": "\"D:\\github\\Ringwin-core-continuous-capacity\\zig-out\\bin\\ringwin.exe\" --windows-chain-test",
+  "capture": "native direct file handles",
+  "workload": "functional; <=100 live and <=100 retained terminal across shards; no capacity pressure",
+  "source_mismatches_after": 0,
+  "log_bytes": 673,
+  "log_sha256": "bf856e8346e46d5ab149006125a014d515d0f547aceaf7dde6d0b9f865d51188",
+  "stdout_sha256": "a57f931f879d8e3cb6bedac7a4366c234ea4e92cb53175edd2acdea15e4fa20a",
+  "artifact_sha256": "5cc551840a9f55524bf1e513c57b2b092b6bd79bc6e4df506fbfc7e44cd756fc"
+}

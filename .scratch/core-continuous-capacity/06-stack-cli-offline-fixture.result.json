@@ -1,0 +1,8 @@
+{
+  "started_utc": "2026-10-14T08:27:05.8416097Z",
+  "finished_utc": "2026-10-14T08:27:18.2074064Z",
+  "exit_code": 0,
+  "command": "\"\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-final-cli.exe\" --offline-fixture 1>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-stack-cli-offline-fixture.stdout.log\" 2>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-stack-cli-offline-fixture.log\"\"",
+  "source_tree_sha256": "15e3f31fd9a3a1239677af28e8572cf764515f4c8f2cf0569ced2b73d4dc5c47",
+  "scope": "256MiB CLI comparison with failed64MiB app"
+}

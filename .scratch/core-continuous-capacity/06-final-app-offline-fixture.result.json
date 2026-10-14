@@ -1,0 +1,15 @@
+{
+  "source_tree_sha256": "15e3f31fd9a3a1239677af28e8572cf764515f4c8f2cf0569ced2b73d4dc5c47",
+  "zig": "0.17.0-dev.315+5b647b792",
+  "started_utc": "2026-10-14T05:47:13.8537591Z",
+  "finished_utc": "2026-10-14T05:47:14.5313053Z",
+  "exit_code": 3,
+  "command": "\"D:\\github\\Ringwin-core-continuous-capacity\\zig-out\\bin\\ringwin.exe\" --offline-fixture",
+  "capture": "native direct file handles",
+  "workload": "functional; <=100 live and <=100 retained terminal across shards; no capacity pressure",
+  "source_mismatches_after": 0,
+  "log_bytes": 1524,
+  "log_sha256": "8b780265ad91346c789199d426bafb5a1d4df576555eb3c19395a9071e567781",
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "artifact_sha256": "f4acb7c9a66751ca392f5bef162978b3bffd694853a71fb04d3c27e6894b563c"
+}

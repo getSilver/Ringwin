@@ -19,6 +19,14 @@ pub const OrderArchiveCommit = struct {
     receipt: history_module.Receipt,
 };
 
+pub const FillArchiveCommit = struct {
+    fill_id: u64,
+    qualification_digest: [32]u8,
+    receipt: history_module.Receipt,
+};
+
+pub const HistorySafetyCandidateVerified = struct { pending: cold.PendingCandidate, proof: history_module.LookupProof };
+
 pub const schema_version: u16 = production_contract.journal_schema_version;
 
 pub const EventKind = enum(u16) {
@@ -101,6 +109,7 @@ pub const EventKind = enum(u16) {
     history_candidate_conflict,
     canonical_history_deferred,
     canonical_history_admission_released,
+    fill_archive_committed,
 };
 
 pub const Fact = struct {
@@ -361,6 +370,8 @@ pub const PayloadTag = enum(u16) {
     order_archive_committed,
     history_candidate_started,
     history_candidate_verified,
+    fill_archive_committed,
+    history_safety_candidate_verified,
 };
 
 pub const ReservationModel = enum(u8) { leveraged, cash };
@@ -535,6 +546,8 @@ pub const CorePayload = union(PayloadTag) {
     order_archive_committed: OrderArchiveCommit,
     history_candidate_started: cold.PendingCandidate,
     history_candidate_verified: history_module.LookupProof,
+    fill_archive_committed: FillArchiveCommit,
+    history_safety_candidate_verified: HistorySafetyCandidateVerified,
 };
 
 /// Typed core-originated event carried by the authoritative CanonicalEvent.
@@ -582,7 +595,20 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], proof);
             encoded.len += bytes.len;
         },
+        .history_safety_candidate_verified => |verified| {
+            const length_offset = encoded.len;
+            try encoded.put(u32, 0);
+            const pending_bytes = try cold.encodeCompact(encoded.bytes[encoded.len..], &verified.pending);
+            std.mem.writeInt(u32, encoded.bytes[length_offset..][0..4], @intCast(pending_bytes.len), .little);
+            encoded.len += pending_bytes.len;
+            const proof_bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], verified.proof);
+            encoded.len += proof_bytes.len;
+        },
         .order_archive_committed => |commit| {
+            const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], commit);
+            encoded.len += bytes.len;
+        },
+        .fill_archive_committed => |commit| {
             const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], commit);
             encoded.len += bytes.len;
         },
@@ -934,10 +960,24 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             offset = record.payload.len;
             break :blk .{ .history_candidate_verified = proof };
         },
+        .history_safety_candidate_verified => blk: {
+            const pending_len = try readInputValue(u32, record.payload, &offset);
+            if (pending_len > record.payload.len - offset) return error.InvalidInputEncoding;
+            const pending = try cold.decodeCompact(record.payload[offset..][0..pending_len]);
+            offset += pending_len;
+            const proof = try snapshot_codec.decodeBare(record.payload[offset..], history_module.LookupProof);
+            offset = record.payload.len;
+            break :blk .{ .history_safety_candidate_verified = .{ .pending = pending, .proof = proof } };
+        },
         .order_archive_committed => blk: {
             const commit = try snapshot_codec.decodeBare(record.payload[offset..], OrderArchiveCommit);
             offset = record.payload.len;
             break :blk .{ .order_archive_committed = commit };
+        },
+        .fill_archive_committed => blk: {
+            const commit = try snapshot_codec.decodeBare(record.payload[offset..], FillArchiveCommit);
+            offset = record.payload.len;
+            break :blk .{ .fill_archive_committed = commit };
         },
         .checkpoint_committed => blk: {
             var receipt: CheckpointReceipt = undefined;
