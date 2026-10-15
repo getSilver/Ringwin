@@ -24,7 +24,43 @@ const cold = @import("cold_business_candidate.zig");
 const history_batch = @import("order_history_batch.zig");
 pub const OrderArchiveCommit = @import("trading_shard_event.zig").OrderArchiveCommit;
 pub const FillArchiveCommit = @import("trading_shard_event.zig").FillArchiveCommit;
-pub const BusinessArchiveKind = enum { order, fill };
+pub const FundingArchiveCommit = shard_event.FundingArchiveCommit;
+pub const ReconciliationArchiveCommit = shard_event.ReconciliationArchiveCommit;
+pub const BusinessArchiveKind = enum { order, fill, funding, reconciliation };
+const ArchiveCommitInput = struct { identity: u64, times: StableTimes };
+
+pub const OpenEconomicFact = struct {
+    identity: u64,
+    kind: @FieldType(canonical.EconomicFactRef, "kind"),
+    digest: history.Digest,
+    economic_time_utc_ns: ?u64,
+    accepted_input_digest: history.Digest = @splat(0),
+};
+pub const ReconciliationCursor = struct {
+    identity: u128,
+    through_utc_ns: u64,
+    closed_economic_fact_count: u64,
+    balance_count: u8,
+    balances: [canonical.max_account_facts]canonical.AssetAmount,
+    root_digest: history.Digest,
+};
+pub const ReconciliationWindow = struct {
+    identity: u128,
+    original: canonical.EventRecord,
+    previous_cursor: ?ReconciliationCursor,
+    economic_fact_count: u64,
+    projection_digest: history.Digest,
+};
+pub const ReconciliationWindowArchiveQualification = struct {
+    origin: history.Origin,
+    barrier: u64,
+    projection_digest: history.Digest,
+    window: ReconciliationWindow,
+    pub fn digest(self: *const @This()) history.Digest {
+        var bytes: [history.max_record_bytes]u8 = undefined;
+        return history.hash(snapshot_codec.encodeBare(&bytes, self.*) catch unreachable);
+    }
+};
 
 /// Current physical schema for AuthoritativeTradingState snapshots.
 pub const state_schema_version: u32 = production_contract.state_schema_version;
@@ -205,6 +241,18 @@ pub const TradingShard = struct {
     business_history_root: ?history.Root = null,
     last_order_archive: ?OrderArchiveCommit = null,
     last_fill_archive: ?FillArchiveCommit = null,
+    last_funding_archive: ?FundingArchiveCommit = null,
+    last_funding_archive_input: ?ArchiveCommitInput = null,
+    last_reconciliation_archive: ?ReconciliationArchiveCommit = null,
+    last_reconciliation_archive_input: ?ArchiveCommitInput = null,
+    reconciliation_cursor: ?ReconciliationCursor = null,
+    pending_reconciliation_window: ?ReconciliationWindow = null,
+    open_economic_facts: [16]OpenEconomicFact = undefined,
+    open_economic_fact_count: u64 = 0,
+    open_economic_commitment_sequence: u64 = 0,
+    open_economic_min_utc_ns: u64 = 0,
+    open_economic_max_utc_ns: u64 = 0,
+    open_economic_unknown_time_count: u64 = 0,
     last_business_archive_kind: ?BusinessArchiveKind = null,
     deferred_history_admissions: [64]DeferredHistoryAdmission = undefined,
     deferred_history_admission_count: u8 = 0,
@@ -287,6 +335,8 @@ pub const TradingShard = struct {
     opening_balance_observed: bool = false,
     account_balance_utc_ns: u64 = 0,
     economic_baseline_utc_ns: u64 = 0,
+    economic_baseline_balances: [canonical.max_account_facts]canonical.AssetAmount = @splat(.{ .asset = 0, .atoms = 0 }),
+    economic_baseline_balance_count: u8 = 0,
     portfolio_funded: bool = false,
     oms: oms_module.Oms = .{},
     economic_projection: economics_module.Projection = .{},
@@ -322,7 +372,7 @@ pub const TradingShard = struct {
         return switch (input) {
             .venue => true,
             .core => |event| switch (event.payload) {
-                .timer, .order_archive_committed, .fill_archive_committed => false,
+                .timer, .order_archive_committed, .fill_archive_committed, .funding_archive_committed, .reconciliation_archive_committed => false,
                 .external_order_intent => |intent| intent.portfolio_reduce_only,
                 .oms_intent_group => |group| blk: {
                     if (group.count == 0 or group.count > group.members.len) break :blk false;
@@ -351,6 +401,9 @@ pub const TradingShard = struct {
             .core => |event| switch (event.payload) {
                 .oms_intent_group => |group| if (try self.oms.groupIdentityStatus(group) != .fresh) return null,
                 .external_order_intent => |intent| if (try self.oms.groupIdentityStatus(originalHostIntentGroup(intent)) != .fresh) return null,
+                .funding_settlement => |funding| for (self.economic_projection.applied_fundings[0..self.economic_projection.applied_funding_count]) |known| {
+                    if (known.funding.identity == funding.settlement_id) return null;
+                },
                 .economic_fill => |fill| for (self.economic_projection.canonical_fill_evidence[0..self.economic_projection.canonical_fill_evidence_count]) |known| {
                     if (known.identity == fill.fill_id) return null;
                 },
@@ -363,6 +416,9 @@ pub const TradingShard = struct {
                 else => return null,
             },
             .venue => |event| switch (event.event) {
+                .funding_settlement => |funding| for (self.economic_projection.applied_fundings[0..self.economic_projection.applied_funding_count]) |known| {
+                    if (known.funding.identity == funding.identity) return null;
+                },
                 .fill => |fill| for (self.economic_projection.canonical_fill_evidence[0..self.economic_projection.canonical_fill_evidence_count]) |known| {
                     if (known.identity == fill.identity) return null;
                 },
@@ -494,12 +550,18 @@ pub const TradingShard = struct {
             .core => |event| switch (event.payload) {
                 .oms_intent_group => |group| return try groupHistorySemantic(group, member, &bytes),
                 .external_order_intent => |intent| return try groupHistorySemantic(originalHostIntentGroup(intent), member, &bytes),
+                .funding_settlement => |funding| return .{ .identity = .{ .core_funding = funding.settlement_id }, .digest = history.hash(try snapshot_codec.encodeBare(&bytes, funding)) },
                 .economic_fill => |fill| return .{ .identity = .{ .core_fill = fill.fill_id }, .digest = history.hash(try snapshot_codec.encodeBare(&bytes, fill)) },
                 .oms_execution_report => |report| return .{ .identity = .{ .report = report.report_id }, .digest = history.hash(try snapshot_codec.encodeBare(&bytes, report)) },
                 .oms_reconciliation_result => |result| return .{ .identity = .{ .reconciliation = result.reconciliation_id }, .digest = history.hash(try snapshot_codec.encodeBare(&bytes, result)) },
                 else => return null,
             },
             .venue => |event| switch (event.event) {
+                .funding_settlement => |funding| {
+                    try self.validateHistoryEnvelope(event, funding.instrument);
+                    if (funding.exchange_account != self.exchange_account_identity) return error.CanonicalScopeMismatch;
+                    return .{ .identity = .{ .canonical_funding = std.math.cast(u64, funding.identity) orelse return error.IdentityOutOfRange }, .digest = try canonicalPayloadDigest(event.event) };
+                },
                 .fill => |fill| {
                     try self.validateHistoryEnvelope(event, fill.instrument);
                     if (fill.exchange_account != self.exchange_account_identity or fill.instrument != fill.quantity.instrument or fill.instrument != fill.price.instrument) return error.CanonicalScopeMismatch;
@@ -542,13 +604,17 @@ pub const TradingShard = struct {
                 },
                 .account_reconciliation_result => |result| {
                     const evidence = result.account_economics orelse return null;
+                    if (member == null and self.reconciliation_cursor != null) return .{ .identity = .{ .canonical_account_reconciliation = result.identity }, .digest = try canonicalPayloadDigest(event.event) };
                     if (evidence.covered_economic_fact_count > evidence.facts.len) return error.IncompleteReconciliationEvidence;
                     const index = member orelse (try self.coldAccountFactIndex(input, 0) orelse return null);
                     if (event.envelope.exchange_account != self.exchange_account_identity or evidence.exchange_account != self.exchange_account_identity or
                         event.envelope.scope != .account) return error.CanonicalScopeMismatch;
-                    if (index >= evidence.covered_economic_fact_count or evidence.facts[index].kind != .fill) return error.InvalidHistoryCandidate;
+                    if (index >= evidence.covered_economic_fact_count) return error.InvalidHistoryCandidate;
                     const fact = evidence.facts[index];
-                    return .{ .identity = .{ .fill_economic_digest = fact.identity }, .digest = history.hash(&fact.digest) };
+                    return .{ .identity = switch (fact.kind) {
+                        .fill => .{ .fill_economic_digest = fact.identity },
+                        .funding => .{ .funding_economic_digest = fact.identity },
+                    }, .digest = history.hash(&fact.digest) };
                 },
                 else => return null,
             },
@@ -560,13 +626,22 @@ pub const TradingShard = struct {
         const evidence = input.venue.event.account_reconciliation_result.account_economics orelse return null;
         if (evidence.covered_economic_fact_count > evidence.facts.len) return error.IncompleteReconciliationEvidence;
         for (evidence.facts[0..evidence.covered_economic_fact_count], 0..) |fact, index| {
-            if (index < first or fact.kind != .fill) continue;
+            if (index < first) continue;
             var retained = false;
-            for (self.economic_projection.canonical_fill_evidence[0..self.economic_projection.canonical_fill_evidence_count]) |known|
-                if (known.identity == fact.identity) {
-                    retained = true;
-                    break;
-                };
+            switch (fact.kind) {
+                .fill => for (self.economic_projection.canonical_fill_evidence[0..self.economic_projection.canonical_fill_evidence_count]) |known| {
+                    if (known.identity == fact.identity) {
+                        retained = true;
+                        break;
+                    }
+                },
+                .funding => for (self.economic_projection.applied_fundings[0..self.economic_projection.applied_funding_count]) |known| {
+                    if (known.funding.identity == fact.identity) {
+                        retained = true;
+                        break;
+                    }
+                },
+            }
             if (!retained) return @intCast(index);
         }
         return null;
@@ -652,6 +727,11 @@ pub const TradingShard = struct {
             return err;
         };
         if (input != .core or (input.core.payload != .history_candidate_verified and input.core.payload != .history_safety_candidate_verified)) try self.observeOrderArchiveTimes(previous, input);
+        if (self.open_economic_fact_count != previous.open_economic_fact_count or !std.meta.eql(self.reconciliation_cursor, previous.reconciliation_cursor)) {
+            if (self.open_economic_fact_count > previous.open_economic_fact_count and self.open_economic_fact_count <= self.open_economic_facts.len)
+                self.open_economic_facts[@intCast(self.open_economic_fact_count - 1)].accepted_input_digest = input_digest;
+            try self.commitOpenEconomicFacts();
+        }
         if (self.authoritativeBarrier() != before) try self.trace.finalizeInput(before, input_digest);
         // The original public path published before materializing its borrowed result.
         publish_on_error.* = true;
@@ -803,7 +883,7 @@ pub const TradingShard = struct {
         const before = self.authoritativeBarrier();
         const result = candidate.applyCoreInPlace(event) catch |err| {
             if (event.payload == .asset_definition_activated or err == error.TombstoneFactConflict or
-                err == error.ArchivedFactOutsideRetention or err == error.TerminalFactConflict or
+                err == error.ArchivedFactOutsideRetention or err == error.TerminalFactConflict or err == error.LateEconomicFact or err == error.UnresolvedSettlementBoundary or err == error.ConflictingEconomicIdentity or
                 ((event.payload == .history_candidate_verified or event.payload == .history_safety_candidate_verified) and candidate.economic_fault_count > self.economic_fault_count))
                 copyTradingState(self, &candidate);
             return err;
@@ -815,7 +895,7 @@ pub const TradingShard = struct {
     fn applyCoreOnOwnedCandidate(self: *TradingShard, previous: *const TradingShard, event: CoreEvent) !ApplyResult {
         return self.applyCoreInPlace(event) catch |err| {
             if (event.payload != .asset_definition_activated and err != error.TombstoneFactConflict and
-                err != error.ArchivedFactOutsideRetention and err != error.TerminalFactConflict and
+                err != error.ArchivedFactOutsideRetention and err != error.TerminalFactConflict and err != error.LateEconomicFact and err != error.UnresolvedSettlementBoundary and err != error.ConflictingEconomicIdentity and
                 !((event.payload == .history_candidate_verified or event.payload == .history_safety_candidate_verified) and self.economic_fault_count > previous.economic_fault_count))
                 copyTradingState(self, previous);
             return err;
@@ -834,7 +914,7 @@ pub const TradingShard = struct {
                 try self.trace.append(.asset_definition_rejected, event.identity);
             }
 
-            if (err == error.TombstoneFactConflict or err == error.ArchivedFactOutsideRetention or err == error.TerminalFactConflict) {
+            if (err == error.TombstoneFactConflict or err == error.ArchivedFactOutsideRetention or err == error.TerminalFactConflict or err == error.LateEconomicFact or err == error.UnresolvedSettlementBoundary or err == error.ConflictingEconomicIdentity) {
                 self.oms.recovery_only = true;
                 if (self.operational_state.initialized) try self.applyOperationalGate(.{
                     .gate_identity = event.identity,
@@ -910,6 +990,9 @@ pub const TradingShard = struct {
         }
         if (self.last_order_archive) |commit| try self.pinFact(&target, try std.math.add(u64, commit.receipt.root.barrier, 1));
         if (self.last_fill_archive) |commit| try self.pinFact(&target, try std.math.add(u64, commit.receipt.root.barrier, 1));
+        if (self.last_funding_archive) |commit| try self.pinFact(&target, try std.math.add(u64, commit.receipt.root.barrier, 1));
+        if (self.last_reconciliation_archive) |commit| try self.pinFact(&target, try std.math.add(u64, commit.receipt.root.barrier, 1));
+        if (self.open_economic_commitment_sequence != 0) try self.pinFact(&target, self.open_economic_commitment_sequence);
         for (self.deferred_history_admissions[0..self.deferred_history_admission_count]) |admission| try self.pinFact(&target, admission.fact_sequence);
         if (self.pending_history_candidate) |pending| try self.pinFact(&target, pending.original.sequence);
         if (self.pending_safety_history_candidate) |pending| try self.pinFact(&target, pending.original.sequence);
@@ -1593,6 +1676,202 @@ pub const TradingShard = struct {
             return error.RiskLeaseDoesNotClose;
     }
 
+    fn totalEconomicFactCount(self: *const TradingShard) !u64 {
+        if (self.economic_projection.seen_count > self.economic_projection.seen.len) return error.InvalidEconomicFact;
+        var count = try std.math.add(u64, self.economic_projection.archived_fill_count, self.economic_projection.archived_funding_count);
+        for (self.economic_projection.seen[0..self.economic_projection.seen_count]) |known| {
+            if (known.kind == .fill or known.kind == .funding) count = try std.math.add(u64, count, 1);
+        }
+        return count;
+    }
+
+    fn openEconomicFactsDigest(self: *const TradingShard) history.Digest {
+        var hasher = Sha256.init(.{});
+        hasher.update("OpenEconomicFactsV1\x00");
+        digestInt(&hasher, u64, self.open_economic_fact_count);
+        digestInt(&hasher, u64, self.open_economic_min_utc_ns);
+        digestInt(&hasher, u64, self.open_economic_max_utc_ns);
+        digestInt(&hasher, u64, self.open_economic_unknown_time_count);
+        digestBare(&hasher, self.reconciliation_cursor);
+        for (self.open_economic_facts[0..@min(self.open_economic_fact_count, self.open_economic_facts.len)]) |fact| digestBare(&hasher, fact);
+        var result: history.Digest = undefined;
+        hasher.final(&result);
+        return result;
+    }
+
+    fn commitOpenEconomicFacts(self: *TradingShard) !void {
+        // This derived fact belongs to the same authoritative input group.
+        // Journal replay derives them again; checkpoint pinning preserves their
+        // independently authenticated commitment after the original group retires.
+        const digest = self.openEconomicFactsDigest();
+        self.open_economic_commitment_sequence = try std.math.add(u64, self.authoritativeBarrier(), 1);
+        try self.trace.appendEconomicCommitment(self.open_economic_fact_count, digest);
+    }
+
+    fn admitEconomicTime(self: *const TradingShard, economic_time: ?u64) !void {
+        if (self.pending_reconciliation_window != null and self.reconciliation_cursor != null) return error.ReconciliationWindowPending;
+        if (self.reconciliation_cursor) |cursor| {
+            const time = economic_time orelse return error.UnresolvedSettlementBoundary;
+            if (time == 0 or time <= cursor.through_utc_ns) return error.LateEconomicFact;
+        }
+    }
+
+    fn rememberEconomicTime(self: *TradingShard, identity: u64, kind: @FieldType(canonical.EconomicFactRef, "kind"), payload_digest: history.Digest, economic_time: ?u64) !void {
+        // A new economic fact invalidates an uncommitted first window. Later
+        // windows reject it at admission until their cursor commits.
+        self.pending_reconciliation_window = null;
+        if (self.open_economic_fact_count < self.open_economic_facts.len) {
+            self.open_economic_facts[@intCast(self.open_economic_fact_count)] = .{ .identity = identity, .kind = kind, .digest = payload_digest, .economic_time_utc_ns = economic_time };
+        }
+        self.open_economic_fact_count = try std.math.add(u64, self.open_economic_fact_count, 1);
+        const time = economic_time orelse 0;
+        if (time == 0) {
+            self.open_economic_unknown_time_count = try std.math.add(u64, self.open_economic_unknown_time_count, 1);
+        } else {
+            if (self.open_economic_min_utc_ns == 0 or time < self.open_economic_min_utc_ns) self.open_economic_min_utc_ns = time;
+            self.open_economic_max_utc_ns = @max(self.open_economic_max_utc_ns, time);
+        }
+    }
+
+    fn reconciliationAnchorMatches(self: *const TradingShard, evidence: canonical.AccountEconomicEvidence) bool {
+        if (evidence.before_balance_count > evidence.before_balances.len or evidence.balance_count > evidence.balances.len or evidence.before_balance_count != evidence.balance_count) return false;
+        if (self.economic_baseline_balance_count > self.economic_baseline_balances.len) return false;
+        if (self.reconciliation_cursor) |cursor| if (cursor.balance_count > cursor.balances.len) return false;
+        const anchor = if (self.reconciliation_cursor) |*cursor| cursor.balances[0..cursor.balance_count] else self.economic_baseline_balances[0..self.economic_baseline_balance_count];
+        if (self.reconciliation_cursor != null and evidence.before_balance_count != anchor.len) return false;
+        for (anchor) |balance| {
+            var found = false;
+            for (evidence.before_balances[0..evidence.before_balance_count]) |before| if (before.asset == balance.asset and before.atoms == balance.atoms) {
+                found = true;
+            };
+            if (!found) return false;
+        }
+        for (evidence.before_balances[0..evidence.before_balance_count], 0..) |before, index| {
+            for (evidence.before_balances[0..index]) |known| if (known.asset == before.asset) return false;
+            var found = false;
+            for (anchor) |balance| if (balance.asset == before.asset) {
+                found = true;
+            };
+            if (!found and before.atoms != 0) return false;
+            found = false;
+            for (evidence.balances[0..evidence.balance_count]) |after| if (after.asset == before.asset) {
+                found = true;
+            };
+            if (!found) return false;
+        }
+        return true;
+    }
+
+    fn reconciliationClosingMatches(self: *const TradingShard, evidence: canonical.AccountEconomicEvidence) bool {
+        if (evidence.balance_count == 0 or evidence.balance_count > evidence.balances.len) return false;
+        if (self.economic_projection.exchange.native_asset_count > self.economic_projection.exchange.native_assets.len) return false;
+        var settlement_found = false;
+        for (evidence.balances[0..evidence.balance_count], 0..) |balance, index| {
+            const definition = self.asset_registry.get(balance.asset) orelse return false;
+            if (evidence.asset_versions[index] != definition.definition.version) return false;
+            for (evidence.balances[0..index]) |known| if (known.asset == balance.asset) return false;
+            const expected = if (balance.asset == self.economic_projection.settlement_asset) blk: {
+                settlement_found = true;
+                break :blk self.economic_projection.exchange.usdt_balance_atoms;
+            } else if (self.economic_projection.exchange.nativeAsset(balance.asset)) |asset| asset.balance_atoms else 0;
+            if (balance.atoms != expected) return false;
+        }
+        if (!settlement_found) return false;
+        for (self.economic_projection.exchange.native_assets[0..self.economic_projection.exchange.native_asset_count]) |asset| {
+            if (asset.balance_atoms == 0) continue;
+            var found = false;
+            for (evidence.balances[0..evidence.balance_count]) |balance| if (balance.asset == asset.asset) {
+                found = true;
+            };
+            if (!found) return false;
+        }
+        return true;
+    }
+
+    fn unresolvedEconomicGate(self: *const TradingShard) bool {
+        if (self.economic_fault_count != 0 or self.history_conflict_latched) return true;
+        if (self.operational_state.latch_count > self.operational_state.latches.len) return true;
+        for (self.operational_state.latches[0..self.operational_state.latch_count]) |latch| if (!latch.resolved and latch.reason == .reconciliation_break) return true;
+        return false;
+    }
+
+    pub fn prepareFundingArchive(self: *const TradingShard, identity: u64, origin: history.Origin, barrier: u64) !economics_module.FundingArchiveQualification {
+        if (self.unresolvedEconomicGate() or self.pending_history_candidate != null or self.pending_safety_history_candidate != null or self.deferred_history_admission_count != 0) return error.FundingArchivePinned;
+        if (barrier != self.authoritativeBarrier() or origin.account != self.exchange_account_identity or
+            origin.stream.domain != .decision_log or origin.stream.id != (self.checkpoint orelse return error.OrderArchiveOriginUnavailable).stream) return error.InvalidFundingArchiveOrigin;
+        return self.economic_projection.prepareFundingArchive(identity, origin, barrier);
+    }
+
+    pub fn prepareReconciliationWindowArchive(self: *const TradingShard, identity: u128, origin: history.Origin, barrier: u64) !ReconciliationWindowArchiveQualification {
+        const window = self.pending_reconciliation_window orelse return error.ReconciliationWindowUnavailable;
+        const evidence = window.original.event.account_reconciliation_result.account_economics orelse return error.InvalidReconciliationWindow;
+        if (!evidence.bills_complete or evidence.query_count == 0 or evidence.query_count > evidence.query_sources.len or
+            evidence.before_source == null or evidence.before_balance_count != evidence.balance_count or
+            std.mem.allEqual(u8, &evidence.bill_chain_digest, 0)) return error.ReconciliationWindowPinned;
+        if (!window.original.event.account_reconciliation_result.complete or window.original.envelope.scope != .account or
+            window.original.envelope.exchange_account != origin.account or evidence.exchange_account != origin.account or
+            !std.meta.eql(evidence.source, window.original.envelope.raw_evidence) or
+            evidence.from_utc_ns != (if (self.reconciliation_cursor) |cursor| cursor.through_utc_ns else self.economic_baseline_utc_ns) or
+            evidence.through_utc_ns < evidence.from_utc_ns or window.original.envelope.times.source_utc_ns != evidence.through_utc_ns or
+            !self.reconciliationAnchorMatches(evidence) or !self.reconciliationClosingMatches(evidence) or
+            evidence.covered_economic_fact_count > evidence.facts.len) return error.ReconciliationWindowPinned;
+        const before_source = evidence.before_source.?;
+        if (before_source.stream != evidence.source.stream or before_source.sequence == 0 or before_source.sequence >= evidence.source.sequence or
+            std.mem.allEqual(u8, &before_source.digest, 0) or std.mem.allEqual(u8, &evidence.source.digest, 0)) return error.ReconciliationWindowPinned;
+        var query_sequence = before_source.sequence;
+        for (evidence.query_sources[0..evidence.query_count]) |query| {
+            if (query.stream != evidence.source.stream or query.sequence <= query_sequence or query.sequence >= evidence.source.sequence or std.mem.allEqual(u8, &query.digest, 0)) return error.ReconciliationWindowPinned;
+            query_sequence = query.sequence;
+        }
+        for (evidence.facts[0..evidence.covered_economic_fact_count], 0..) |fact, index| {
+            if (!fact.fee_confirmed) return error.ReconciliationWindowPinned;
+            for (evidence.facts[0..index]) |known| if (known.identity == fact.identity and known.kind == fact.kind) return error.ReconciliationWindowPinned;
+        }
+        if (identity != window.identity or barrier != self.authoritativeBarrier() or origin.account != self.exchange_account_identity or
+            origin.stream.domain != .decision_log or origin.stream.id != (self.checkpoint orelse return error.OrderArchiveOriginUnavailable).stream or
+            self.pending_history_candidate != null or self.pending_safety_history_candidate != null or self.deferred_history_admission_count != 0 or
+            self.economic_projection.reconciliation_break or self.economic_projection.suspense_usdt_atoms != 0 or self.economic_projection.suspense_native_asset_count != 0 or
+            self.unresolvedEconomicGate() or
+            !std.meta.eql(window.previous_cursor, self.reconciliation_cursor) or window.economic_fact_count != try self.totalEconomicFactCount() or
+            self.open_economic_unknown_time_count != 0 or self.open_economic_max_utc_ns > evidence.through_utc_ns or
+            (self.open_economic_min_utc_ns != 0 and self.open_economic_min_utc_ns <= evidence.from_utc_ns) or
+            self.open_economic_fact_count != evidence.covered_economic_fact_count or
+            (window.original.envelope.times.monotonic_ns orelse 0) == 0 or (window.original.envelope.times.receive_utc_ns orelse 0) == 0)
+            return error.ReconciliationWindowPinned;
+        if (self.open_economic_fact_count > self.open_economic_facts.len) return error.ReconciliationWindowPinned;
+        for (self.open_economic_facts[0..@intCast(self.open_economic_fact_count)]) |known| {
+            var matched = false;
+            for (evidence.facts[0..evidence.covered_economic_fact_count]) |fact| if (fact.kind == known.kind and fact.identity == known.identity) {
+                if (!std.mem.eql(u8, &fact.digest, &known.digest)) return error.ReconciliationWindowPinned;
+                matched = true;
+            };
+            if (!matched) return error.ReconciliationWindowPinned;
+        }
+        for (self.economic_projection.seen[0..self.economic_projection.seen_count]) |known| if (known.kind == .forced_execution) return error.ReconciliationWindowPinned;
+        return .{ .origin = origin, .barrier = barrier, .projection_digest = self.economic_projection.digest(), .window = window };
+    }
+
+    fn applyFundingProjection(self: *TradingShard, funding: economics_module.FundingSettlement, source: economics_module.FundingSource) !bool {
+        try self.checkAssetAmounts(funding.amount, true);
+        var retained = false;
+        for (self.economic_projection.applied_fundings[0..self.economic_projection.applied_funding_count]) |known| {
+            if (known.funding.identity == funding.identity) {
+                retained = true;
+                break;
+            }
+        }
+        if (!retained) try self.admitEconomicTime(source.exchange_time_utc_ns);
+        const changed = try self.economic_projection.applyFundingWithSource(funding, source);
+        if (changed) {
+            for (self.economic_projection.applied_fundings[0..self.economic_projection.applied_funding_count]) |known| if (known.funding.identity == funding.identity) {
+                try self.rememberEconomicTime(funding.identity, .funding, known.payload_digest, source.exchange_time_utc_ns);
+                break;
+            };
+        }
+        try self.checkEconomicRanges();
+        return changed;
+    }
+
     fn applyEconomicProjection(self: *TradingShard, event: economics.Event) !bool {
         return self.applyEconomicProjectionWithSource(event, .{});
     }
@@ -1618,6 +1897,7 @@ pub const TradingShard = struct {
             .fill => |fill| if (fill.order_id != 0) try self.economic_projection.applyCanonicalFillWithSource(fill, economics_module.coreFillDigest(fill), source) else try self.economic_projection.applyChanged(event),
             else => try self.economic_projection.applyChanged(event),
         };
+        if (changed and event == .venue_forced_execution) self.pending_reconciliation_window = null;
         try self.checkEconomicRanges();
         return changed;
     }
@@ -1649,16 +1929,7 @@ pub const TradingShard = struct {
             }
             if (traded_atoms > base.definition.max_cumulative_atoms) return error.AssetAmountOutOfRange;
         }
-        var settled_funding_atoms: i128 = 0;
-        for (self.economic_projection.ledger[0..self.economic_projection.ledger_count]) |transaction| {
-            if (transaction.kind != .funding or transaction.layer != .exchange) continue;
-            for (transaction.postings[0..transaction.posting_count]) |posting| {
-                if (posting.account != .cash) continue;
-                const absolute = if (posting.amount < 0) try std.math.sub(i128, 0, posting.amount) else posting.amount;
-                settled_funding_atoms = try std.math.add(i128, settled_funding_atoms, absolute);
-            }
-        }
-        if (settled_funding_atoms > quote.definition.max_cumulative_atoms) return error.AssetAmountOutOfRange;
+        if (self.economic_projection.cumulative_funding_absolute_atoms > quote.definition.max_cumulative_atoms) return error.AssetAmountOutOfRange;
         for ([_]i128{ self.economic_projection.treasury_usdt_atoms, self.economic_projection.suspense_usdt_atoms }) |amount|
             try self.asset_registry.checkAmount(.{ .asset = quote.definition.asset, .atoms = amount }, false);
         for (self.economic_projection.treasury_native_assets[0..self.economic_projection.treasury_native_asset_count]) |amount|
@@ -2090,7 +2361,17 @@ pub const TradingShard = struct {
                 try self.checkAssetAmounts(settlement.amount, true);
                 const identity = std.math.cast(u64, settlement.identity) orelse return error.IdentityOutOfRange;
                 // A historical bill does not prove portfolio holdings at its settlement time.
-                const changed = try self.applyEconomicProjection(.{ .funding_settlement = .{ .identity = identity, .amount = settlement.amount, .canonical_digest = try canonicalPayloadDigest(record.event) } });
+                const changed = try self.applyFundingProjection(.{ .identity = identity, .amount = settlement.amount, .canonical_digest = try canonicalPayloadDigest(record.event) }, .{
+                    .canonical_funding = settlement,
+                    .canonical_envelope = record.envelope,
+                    .audit_time_utc_ns = record.envelope.times.audit_utc_ns,
+                    .exchange_account = self.exchange_account_identity,
+                    .instrument = settlement.instrument,
+                    .rules_version = settlement.rules_version,
+                    .exchange_time_utc_ns = settlement.settlement_time_utc_ns,
+                    .received_time_utc_ns = record.envelope.times.receive_utc_ns orelse 0,
+                    .received_monotonic_ns = record.envelope.times.monotonic_ns orelse 0,
+                });
                 if (changed) {
                     try self.recalculateRisk(false);
                     if (self.economic_projection.reconciliation_break and self.operational_state.initialized) try self.applyOperationalGate(.{
@@ -2380,7 +2661,7 @@ pub const TradingShard = struct {
         for (self.instrument_registry.entries[0..self.instrument_registry.count]) |entry|
             if (entry.venue != record.envelope.venue) return error.CanonicalScopeMismatch;
         if (!result.complete or !self.opening_balance_observed or self.economic_baseline_utc_ns == 0 or
-            evidence.from_utc_ns != self.economic_baseline_utc_ns or evidence.through_utc_ns < evidence.from_utc_ns or
+            evidence.from_utc_ns != (if (self.reconciliation_cursor) |cursor| cursor.through_utc_ns else self.economic_baseline_utc_ns) or evidence.through_utc_ns < evidence.from_utc_ns or
             record.envelope.times.source_utc_ns != evidence.through_utc_ns)
         {
             _ = try self.economic_projection.retainCanonicalSnapshot(std.math.cast(u64, result.identity) orelse return error.IdentityOutOfRange, try canonicalPayloadDigest(record.event));
@@ -2388,16 +2669,31 @@ pub const TradingShard = struct {
             return;
         }
         if (evidence.balance_count == 0 or evidence.balance_count > evidence.balances.len or evidence.before_balance_count > evidence.before_balances.len) return error.IncompleteReconciliationEvidence;
+        if (self.reconciliation_cursor != null) {
+            if (self.open_economic_fact_count != evidence.covered_economic_fact_count or self.open_economic_fact_count > self.open_economic_facts.len or
+                self.open_economic_unknown_time_count != 0 or self.open_economic_max_utc_ns > evidence.through_utc_ns or
+                (self.open_economic_min_utc_ns != 0 and self.open_economic_min_utc_ns <= evidence.from_utc_ns)) return error.IncompleteReconciliationEvidence;
+            for (self.open_economic_facts[0..@intCast(self.open_economic_fact_count)]) |known| {
+                var matched = false;
+                for (evidence.facts[0..evidence.covered_economic_fact_count]) |fact| if (fact.identity == known.identity and fact.kind == known.kind) {
+                    if (!std.mem.eql(u8, &fact.digest, &known.digest)) return error.IncompleteReconciliationEvidence;
+                    matched = true;
+                };
+                if (!matched) return error.IncompleteReconciliationEvidence;
+            }
+        }
+
+        if (evidence.through_utc_ns > evidence.from_utc_ns and !self.reconciliationAnchorMatches(evidence)) return error.IncompleteReconciliationEvidence;
         var facts_match = true;
         if (evidence.through_utc_ns == evidence.from_utc_ns) {
-            if (evidence.covered_economic_fact_count != 0 or self.economic_projection.ledger_count != 0 or self.economic_projection.archived_fill_count != 0) {
+            if (evidence.covered_economic_fact_count != 0 or (try self.totalEconomicFactCount()) != (if (self.reconciliation_cursor) |cursor| cursor.closed_economic_fact_count else 0)) {
                 _ = try self.economic_projection.retainCanonicalSnapshot(std.math.cast(u64, result.identity) orelse return error.IdentityOutOfRange, try canonicalPayloadDigest(record.event));
                 try self.latchEconomicFault(record, .invalid_economic_fact);
                 return;
             }
         } else {
             const before = evidence.before_source orelse return error.IncompleteReconciliationEvidence;
-            if (!evidence.bills_complete or evidence.covered_economic_fact_count == 0 or
+            if (!evidence.bills_complete or
                 evidence.covered_economic_fact_count > evidence.facts.len or evidence.query_count == 0 or
                 evidence.query_count > evidence.query_sources.len or evidence.before_balance_count != evidence.balance_count or
                 before.stream != evidence.source.stream or before.sequence == 0 or before.sequence >= evidence.source.sequence or
@@ -2408,18 +2704,37 @@ pub const TradingShard = struct {
                     std.mem.eql(u8, &query.digest, &@as([32]u8, @splat(0)))) return error.IncompleteReconciliationEvidence;
                 previous = query.sequence;
             }
-            var money_facts: u64 = self.economic_projection.archived_fill_count;
-            for (self.economic_projection.seen[0..self.economic_projection.seen_count]) |known| {
-                if (known.kind == .forced_execution) return error.IncompleteReconciliationEvidence;
-                if (known.kind == .fill or known.kind == .funding) money_facts = try std.math.add(u64, money_facts, 1);
-            }
+            const money_facts = try std.math.sub(u64, try self.totalEconomicFactCount(), if (self.reconciliation_cursor) |cursor| cursor.closed_economic_fact_count else 0);
+            for (self.economic_projection.seen[0..self.economic_projection.seen_count]) |known| if (known.kind == .forced_execution) return error.IncompleteReconciliationEvidence;
             if (money_facts != evidence.covered_economic_fact_count) return error.IncompleteReconciliationEvidence;
             for (evidence.facts[0..evidence.covered_economic_fact_count], 0..) |fact, index| {
+                if (self.reconciliation_cursor != null) switch (fact.kind) {
+                    .fill => for (self.economic_projection.applied_fills[0..self.economic_projection.applied_fill_count]) |known| {
+                        if (known.fill.identity != fact.identity) continue;
+                        const time = if (known.source.canonical_fill) |original| original.venue_fill_time_utc_ns else null;
+                        if (time) |utc| {
+                            if (utc <= evidence.from_utc_ns or utc > evidence.through_utc_ns) return error.IncompleteReconciliationEvidence;
+                        }
+                    },
+                    .funding => for (self.economic_projection.applied_fundings[0..self.economic_projection.applied_funding_count]) |known| {
+                        if (known.funding.identity != fact.identity) continue;
+                        const utc = known.source.exchange_time_utc_ns orelse return error.IncompleteReconciliationEvidence;
+                        if (utc <= evidence.from_utc_ns or utc > evidence.through_utc_ns) return error.IncompleteReconciliationEvidence;
+                    },
+                };
                 for (evidence.facts[0..index]) |known| if (known.identity == fact.identity and known.kind == fact.kind) return error.IncompleteReconciliationEvidence;
                 const applied = switch (fact.kind) {
                     // The private capability exists only after every cold reference in this exact input proves same.
                     .fill => (try self.economic_projection.lookupCanonicalFill(fact.identity, fact.digest)) == .duplicate or coverage != null,
-                    .funding => try self.economic_projection.lookupCanonicalFunding(fact.identity, fact.digest),
+                    .funding => blk: {
+                        var matched = false;
+                        for (self.economic_projection.applied_fundings[0..self.economic_projection.applied_funding_count]) |known| {
+                            if (known.funding.identity != fact.identity) continue;
+                            if (!std.mem.eql(u8, &known.payload_digest, &fact.digest)) return error.ConflictingEconomicIdentity;
+                            matched = true;
+                        }
+                        break :blk matched or coverage != null;
+                    },
                 };
                 if (!applied) return error.IncompleteReconciliationEvidence;
                 facts_match = facts_match and fact.fee_confirmed;
@@ -2441,6 +2756,16 @@ pub const TradingShard = struct {
         }
         const identity = std.math.cast(u64, result.identity) orelse return error.IdentityOutOfRange;
         _ = try self.economic_projection.reconcileNative(identity, evidence.balances[0..evidence.balance_count], try canonicalPayloadDigest(record.event), facts_match);
+        if (!self.economic_projection.reconciliation_break and evidence.bills_complete and evidence.before_source != null and evidence.query_count != 0) {
+            if (self.reconciliation_cursor != null and self.pending_reconciliation_window != null) return error.ReconciliationWindowPending;
+            self.pending_reconciliation_window = .{
+                .identity = result.identity,
+                .original = record,
+                .previous_cursor = self.reconciliation_cursor,
+                .economic_fact_count = try self.totalEconomicFactCount(),
+                .projection_digest = self.economic_projection.digest(),
+            };
+        }
         if (self.economic_projection.reconciliation_break and self.operational_state.initialized) try self.applyOperationalGate(.{
             .gate_identity = identity,
             .target_identity = self.operational_state.target_identity,
@@ -2814,6 +3139,7 @@ pub const TradingShard = struct {
             .duplicate => return,
             .unknown => {},
         }
+        try self.admitEconomicTime(fill.venue_fill_time_utc_ns);
         const order_id = std.math.cast(u64, fill.order) orelse return error.IdentityOutOfRange;
         const order = self.oms.orderById(order_id) orelse return error.UnknownOrder;
         if (order.last_reconciliation_status == .confirmed_absent) return error.TerminalFactConflict;
@@ -2882,6 +3208,7 @@ pub const TradingShard = struct {
             .product = instrument_config.product,
         }, payload_digest, .{ .canonical_fill = fill, .exchange_account = self.exchange_account_identity, .portfolio = self.portfolio_identity, .strategy = order.strategy_instance });
         if (!changed) return;
+        try self.rememberEconomicTime(fill_id, .fill, payload_digest, fill.venue_fill_time_utc_ns);
         try self.checkEconomicRanges();
         try self.recalculateRisk(false);
         try self.assertClosures();
@@ -3065,8 +3392,19 @@ pub const TradingShard = struct {
         const root = self.business_history_root orelse return error.InvalidHistoryCandidate;
         const verdict = try pending.finalize(&input.payload.history_candidate_verified, root);
         const original = try decodeStableInput(pending.originalRecord());
-        const account_coverage = original == .venue and original.venue.event == .account_reconciliation_result;
+        const account_input = original == .venue and original.venue.event == .account_reconciliation_result;
+        const account_coverage = account_input and pending.request.key.identity != .canonical_account_reconciliation;
         var coverage: ?VerifiedAccountCoverage = null;
+        if (account_input and pending.request.key.identity == .canonical_account_reconciliation and verdict == .proven_first) {
+            if (try self.coldAccountFactIndex(original, 0)) |member| {
+                const semantic = (try self.historySemantic(original, member)) orelse return error.InvalidHistoryCandidate;
+                self.pending_history_candidate.?.request.key.identity = semantic.identity;
+                self.pending_history_candidate.?.request.candidate_payload_digest = semantic.digest;
+                self.pending_history_member_index = member;
+                try self.trace.append(.history_candidate_verified, input.identity);
+                return null;
+            }
+        }
         if (account_coverage) {
             if (verdict != .same) return self.rejectColdCandidate(input.identity);
             const member = self.pending_history_member_index orelse return error.InvalidHistoryCandidate;
@@ -3166,7 +3504,7 @@ pub const TradingShard = struct {
             const original = try decodeStableInput(pending.originalRecord());
             const expected = (try self.historyCandidateFor(original)) orelse return error.InvalidHistoryCandidate;
             if (!std.meta.eql(expected, pending)) return error.InvalidHistoryCandidate;
-            const account_member = try self.coldAccountFactIndex(original, 0);
+            const account_member = if (pending.request.key.identity == .canonical_account_reconciliation) null else try self.coldAccountFactIndex(original, 0);
             if (self.pending_history_candidate != null) {
                 if (!historySafetyInput(original) or self.pending_safety_history_candidate != null) return error.HistorySafetyCapacity;
                 self.pending_safety_history_candidate = pending;
@@ -3181,6 +3519,50 @@ pub const TradingShard = struct {
             return null;
         }
         if (input.payload == .history_candidate_verified) return self.handleHistoryVerified(input);
+        if (input.payload == .funding_archive_committed) {
+            const commit = input.payload.funding_archive_committed;
+            if (self.pending_history_candidate != null or self.pending_safety_history_candidate != null or self.deferred_history_admission_count != 0) return error.HistoryLookupDeferred;
+            const stream = (self.checkpoint orelse return error.OrderArchiveOriginUnavailable).stream;
+            const origin: history.Origin = .{ .stream = .{ .domain = .decision_log, .id = stream }, .account = self.exchange_account_identity };
+            const qualification = try self.prepareFundingArchive(commit.funding_id, origin, self.authoritativeBarrier());
+            if (!std.mem.eql(u8, &commit.qualification_digest, &qualification.digest())) return error.InvalidFundingArchiveCommit;
+            try self.economic_projection.commitFundingArchive(qualification, commit.receipt, self.business_history_root);
+            self.business_history_root = commit.receipt.root;
+            self.last_funding_archive = commit;
+            self.last_funding_archive_input = .{ .identity = input.identity, .times = stableTimes(.{ .core = input }) };
+            self.last_business_archive_kind = .funding;
+            try self.trace.append(.funding_archive_committed, input.identity);
+            return null;
+        }
+        if (input.payload == .reconciliation_archive_committed) {
+            const commit = input.payload.reconciliation_archive_committed;
+            const stream = (self.checkpoint orelse return error.OrderArchiveOriginUnavailable).stream;
+            const origin: history.Origin = .{ .stream = .{ .domain = .decision_log, .id = stream }, .account = self.exchange_account_identity };
+            const qualification = try self.prepareReconciliationWindowArchive(commit.window_id, origin, self.authoritativeBarrier());
+            if (!std.mem.eql(u8, &commit.qualification_digest, &qualification.digest()) or commit.receipt.root.barrier != qualification.barrier) return error.InvalidReconciliationArchiveCommit;
+            _ = try history.verifyReceipt(commit.receipt, origin, qualification.digest(), self.business_history_root);
+            const window = qualification.window;
+            const evidence = window.original.event.account_reconciliation_result.account_economics.?;
+            self.reconciliation_cursor = .{ .identity = window.identity, .through_utc_ns = evidence.through_utc_ns, .closed_economic_fact_count = window.economic_fact_count, .balance_count = evidence.balance_count, .balances = evidence.balances, .root_digest = commit.receipt.root.root_digest };
+            self.pending_reconciliation_window = null;
+            self.open_economic_fact_count = 0;
+            self.open_economic_min_utc_ns = 0;
+            self.open_economic_max_utc_ns = 0;
+            self.open_economic_unknown_time_count = 0;
+            var kept: u8 = 0;
+            for (self.economic_projection.seen[0..self.economic_projection.seen_count]) |known| {
+                if (known.kind == .account_snapshot and known.identity == window.identity) continue;
+                self.economic_projection.seen[kept] = known;
+                kept += 1;
+            }
+            self.economic_projection.seen_count = kept;
+            self.business_history_root = commit.receipt.root;
+            self.last_reconciliation_archive = commit;
+            self.last_reconciliation_archive_input = .{ .identity = input.identity, .times = stableTimes(.{ .core = input }) };
+            self.last_business_archive_kind = .reconciliation;
+            try self.trace.append(.reconciliation_archive_committed, input.identity);
+            return null;
+        }
         if (input.payload == .fill_archive_committed) {
             const commit = input.payload.fill_archive_committed;
             if (self.pending_history_candidate != null or self.pending_safety_history_candidate != null or self.deferred_history_admission_count != 0) return error.HistoryLookupDeferred;
@@ -3257,7 +3639,7 @@ pub const TradingShard = struct {
         }
         switch (input.payload) {
             .checkpoint_committed => unreachable,
-            .order_archive_committed, .fill_archive_committed => unreachable,
+            .order_archive_committed, .fill_archive_committed, .funding_archive_committed, .reconciliation_archive_committed => unreachable,
             .history_candidate_started, .history_candidate_verified, .history_safety_candidate_verified => unreachable,
             .asset_definition_activated => |definition| return self.handleAssetDefinition(input, definition),
             .control_command => |command| {
@@ -3519,6 +3901,8 @@ pub const TradingShard = struct {
                 try self.trace.append(.exchange_positions, input.identity);
             },
             .opening_balance => |balance| {
+                if (@as(usize, balance.native_balance_count) + 1 > self.economic_baseline_balances.len)
+                    return error.EconomicBaselineCapacityExceeded;
                 try self.asset_registry.checkAmount(.{ .asset = self.economic_projection.settlement_asset, .atoms = balance.cash_atoms }, false);
                 if (!self.exchange_positions_observed or balance.cash_atoms <= 0 or
                     balance.cash_atoms != self.exchangeCash() or self.opening_balance_observed)
@@ -3546,6 +3930,12 @@ pub const TradingShard = struct {
                     .exchange_credits_atoms = balance.cash_atoms,
                 };
                 self.economic_baseline_utc_ns = if (self.canonical_account.bootstrap != null) self.account_balance_utc_ns else if (input.time_presence.source) input.source_time else 0;
+                self.economic_baseline_balances[0] = .{ .asset = self.economic_projection.settlement_asset, .atoms = balance.cash_atoms };
+                self.economic_baseline_balance_count = 1;
+                for (balance.native_balances[0..balance.native_balance_count]) |native| {
+                    self.economic_baseline_balances[self.economic_baseline_balance_count] = native;
+                    self.economic_baseline_balance_count += 1;
+                }
                 self.opening_balance_observed = true;
                 try self.trace.append(.opening_balance, input.identity);
             },
@@ -3775,6 +4165,15 @@ pub const TradingShard = struct {
                 try self.trace.append(.oms_reconciliation_result, result.reconciliation_id);
             },
             .economic_fill => |fill| {
+                const economic_time: ?u64 = if (input.time_presence.source) input.source_time else null;
+                var retained = false;
+                for (self.economic_projection.canonical_fill_evidence[0..self.economic_projection.canonical_fill_evidence_count]) |known| {
+                    if (known.identity == fill.fill_id) {
+                        retained = true;
+                        break;
+                    }
+                }
+                if (!retained) try self.admitEconomicTime(economic_time);
                 const order = self.oms.orderById(fill.order_id) orelse return error.UnknownOrder;
                 if (order.last_reconciliation_status == .confirmed_absent) return error.TerminalFactConflict;
                 const instrument = order.instrument;
@@ -3799,12 +4198,31 @@ pub const TradingShard = struct {
                     .product = instrument_config.product,
                 } }, source);
                 if (changed) {
+                    for (self.economic_projection.applied_fills[0..self.economic_projection.applied_fill_count]) |known| if (known.fill.identity == fill.fill_id) {
+                        try self.rememberEconomicTime(fill.fill_id, .fill, known.payload_digest, economic_time);
+                        break;
+                    };
                     try self.recalculateRisk(false);
                     try self.trace.append(.economic_fill, fill.fill_id);
                 }
             },
             .funding_settlement => |funding| {
-                const changed = try self.applyEconomicProjection(.{ .funding_settlement = .{ .identity = funding.settlement_id, .portfolio_ownership_proven = true, .amount = .{ .asset = self.economic_projection.settlement_asset, .atoms = funding.amount_atoms } } });
+                const instrument_config = self.singleProductEntry(.isolated_linear_usdt) orelse return error.UnknownOmsInstrument;
+                var source: economics_module.FundingSource = .{
+                    .core_event_identity = input.identity,
+                    .core_times = .{ .source = input.source_time, .receive = input.receive_time, .monotonic = input.monotonic_time, .wall = input.wall_time, .presence = input.time_presence },
+                    .audit_time_utc_ns = if (input.time_presence.wall) input.wall_time else null,
+                    .exchange_account = self.exchange_account_identity,
+                    .portfolio = self.portfolio_identity,
+                    .strategy = self.strategy_identity,
+                    .instrument = instrument_config.instrument,
+                    .rules_version = instrument_config.rules.version,
+                    .exchange_time_utc_ns = if (input.time_presence.source) input.source_time else null,
+                    .received_time_utc_ns = if (input.time_presence.receive) input.receive_time else 0,
+                    .received_monotonic_ns = if (input.time_presence.monotonic) input.monotonic_time else 0,
+                };
+                source.core_payload_len = @intCast((try snapshot_codec.encodeBare(&source.core_payload_bytes, funding)).len);
+                const changed = try self.applyFundingProjection(.{ .identity = funding.settlement_id, .portfolio_ownership_proven = true, .amount = .{ .asset = self.economic_projection.settlement_asset, .atoms = funding.amount_atoms } }, source);
                 if (changed) {
                     try self.recalculateRisk(false);
                     if (self.economic_projection.reconciliation_break and self.operational_state.initialized) try self.applyOperationalGate(.{
@@ -3888,6 +4306,7 @@ const CoreSnapshotEncodingPolicy = struct {
     }
     pub fn counter(value: anytype, comptime name: []const u8) usize {
         if (comptime fieldIsZero(@TypeOf(value.*), name)) return 0;
+        if (comptime @TypeOf(value.*) == TradingShard and std.mem.eql(u8, name, "open_economic_fact_count")) return @intCast(@min(value.open_economic_fact_count, value.open_economic_facts.len));
         return @field(value.*, name);
     }
     fn mappedTail(comptime name: []const u8, comptime mappings: anytype) ?[]const u8 {
@@ -3895,13 +4314,14 @@ const CoreSnapshotEncodingPolicy = struct {
         return null;
     }
     pub fn tailCounter(comptime T: type, comptime name: []const u8) ?[]const u8 {
-        if (T == TradingShard) return mappedTail(name, .{ .{ "fenced_strategy_instances", "fenced_strategy_count" }, .{ "canonical_ingress_cursors", "canonical_ingress_cursor_count" } });
+        if (T == TradingShard) return mappedTail(name, .{ .{ "fenced_strategy_instances", "fenced_strategy_count" }, .{ "canonical_ingress_cursors", "canonical_ingress_cursor_count" }, .{ "open_economic_facts", "open_economic_fact_count" }, .{ "economic_baseline_balances", "economic_baseline_balance_count" } });
+        if (T == ReconciliationCursor) return mappedTail(name, .{.{ "balances", "balance_count" }});
         if (T == @FieldType(TradingShard, "asset_registry")) return mappedTail(name, .{.{ "entries", "count" }});
         if (T == @FieldType(TradingShard, "instrument_registry")) return mappedTail(name, .{.{ "entries", "count" }});
         if (T == @FieldType(TradingShard, "canonical_market")) return mappedTail(name, .{.{ "entries", "count" }});
         if (T == @FieldType(TradingShard, "trace")) return mappedTail(name, .{ .{ "events", "len" }, .{ "pinned", "pinned_len" } });
         if (T == @FieldType(TradingShard, "operational_state")) return mappedTail(name, .{ .{ "gates", "gate_count" }, .{ "command_history", "command_count" }, .{ "latches", "latch_count" } });
-        if (T == @FieldType(TradingShard, "economic_projection")) return mappedTail(name, .{ .{ "reconciliation_break_identities", "reconciliation_break_count" }, .{ "seen", "seen_count" }, .{ "canonical_fill_evidence", "canonical_fill_evidence_count" }, .{ "applied_fills", "applied_fill_count" }, .{ "applied_fill_totals", "applied_fill_total_count" }, .{ "treasury_native_assets", "treasury_native_asset_count" }, .{ "suspense_native_assets", "suspense_native_asset_count" }, .{ "ledger", "ledger_count" } });
+        if (T == @FieldType(TradingShard, "economic_projection")) return mappedTail(name, .{ .{ "reconciliation_break_identities", "reconciliation_break_count" }, .{ "seen", "seen_count" }, .{ "canonical_fill_evidence", "canonical_fill_evidence_count" }, .{ "applied_fills", "applied_fill_count" }, .{ "applied_fundings", "applied_funding_count" }, .{ "applied_fill_totals", "applied_fill_total_count" }, .{ "treasury_native_assets", "treasury_native_asset_count" }, .{ "suspense_native_assets", "suspense_native_asset_count" }, .{ "ledger", "ledger_count" } });
         if (T == economics_module.Layer) return mappedTail(name, .{ .{ "native_assets", "native_asset_count" }, .{ "instrument_positions", "instrument_position_count" } });
         if (T == economics_module.LedgerTransaction) return mappedTail(name, .{.{ "postings", "posting_count" }});
         if (T == @FieldType(TradingShard, "canonical_account")) return mappedTail(name, .{ .{ "seen", "seen_count" }, .{ "balances", "balance_count" }, .{ "positions", "position_count" }, .{ "margins", "margin_count" } });
@@ -3964,6 +4384,13 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
     zeroUnused(u64, shard.economic_projection.reconciliation_break_identities[shard.economic_projection.reconciliation_break_count..]);
     zeroUnused(@TypeOf(shard.economic_projection.seen[0]), shard.economic_projection.seen[shard.economic_projection.seen_count..]);
     zeroUnused(economics_module.CanonicalFactEvidence, shard.economic_projection.canonical_fill_evidence[shard.economic_projection.canonical_fill_evidence_count..]);
+    zeroUnused(economics_module.AppliedFunding, shard.economic_projection.applied_fundings[shard.economic_projection.applied_funding_count..]);
+    zeroUnused(OpenEconomicFact, shard.open_economic_facts[@min(shard.open_economic_fact_count, shard.open_economic_facts.len)..]);
+    zeroUnused(canonical.AssetAmount, shard.economic_baseline_balances[shard.economic_baseline_balance_count..]);
+    if (shard.reconciliation_cursor) |*cursor| zeroUnused(canonical.AssetAmount, cursor.balances[cursor.balance_count..]);
+    if (shard.pending_reconciliation_window) |*window| {
+        if (window.previous_cursor) |*cursor| zeroUnused(canonical.AssetAmount, cursor.balances[cursor.balance_count..]);
+    }
     zeroUnused(economics_module.AppliedFill, shard.economic_projection.applied_fills[shard.economic_projection.applied_fill_count..]);
     zeroUnused(economics_module.OrderFillTotal, shard.economic_projection.applied_fill_totals[shard.economic_projection.applied_fill_total_count..]);
     zeroUnused(economics_module.NativeAssetState, shard.economic_projection.portfolio.native_assets[shard.economic_projection.portfolio.native_asset_count..]);
@@ -4001,6 +4428,16 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
         .raw_digest = @splat(0),
         .payload_digest = @splat(0),
     };
+}
+
+fn validateArchiveCommitInput(shard: *const TradingShard, original: ?ArchiveCommitInput, barrier: u64, kind: EventKind, payload: CorePayload) !void {
+    const input = original orelse return error.InvalidSnapshotState;
+    const sequence = std.math.add(u64, barrier, 1) catch return error.InvalidSnapshotState;
+    const fact = shard.trace.factAt(sequence) orelse return error.InvalidSnapshotState;
+    if (fact.kind != kind or fact.identity != input.identity or !fact.input_first or input.times.presence.reserved != 0) return error.InvalidSnapshotState;
+    const reconstructed: CanonicalEvent = .{ .core = .{ .identity = input.identity, .source_time = input.times.source, .receive_time = input.times.receive, .monotonic_time = input.times.monotonic, .wall_time = input.times.wall, .time_presence = input.times.presence, .payload = payload } };
+    const digest = TradingShard.acceptedOriginalDigest(reconstructed) catch return error.InvalidSnapshotState;
+    if (!std.mem.eql(u8, &digest, &fact.input_digest)) return error.InvalidSnapshotState;
 }
 
 fn validateSnapshotState(shard: *const TradingShard) !void {
@@ -4068,10 +4505,14 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         const receipt = switch (kind) {
             .order => (shard.last_order_archive orelse return error.InvalidSnapshotState).receipt,
             .fill => (shard.last_fill_archive orelse return error.InvalidSnapshotState).receipt,
+            .funding => (shard.last_funding_archive orelse return error.InvalidSnapshotState).receipt,
+            .reconciliation => (shard.last_reconciliation_archive orelse return error.InvalidSnapshotState).receipt,
         };
         const qualification_digest = switch (kind) {
             .order => shard.last_order_archive.?.qualification_digest,
             .fill => shard.last_fill_archive.?.qualification_digest,
+            .funding => shard.last_funding_archive.?.qualification_digest,
+            .reconciliation => shard.last_reconciliation_archive.?.qualification_digest,
         };
         const checkpoint = shard.checkpoint orelse return error.InvalidSnapshotState;
         if (!std.meta.eql(root, receipt.root) or root.origin.stream.domain != .decision_log or
@@ -4079,7 +4520,82 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
             root.barrier >= shard.authoritativeBarrier() or
             !std.mem.eql(u8, &root.qualification_digest, &qualification_digest)) return error.InvalidSnapshotState;
         if (shard.last_order_archive) |commit| if (shard.oms.orderById(commit.order_id) != null) return error.InvalidSnapshotState;
-    } else if (shard.last_order_archive != null or shard.last_fill_archive != null or shard.last_business_archive_kind != null) return error.InvalidSnapshotState;
+    } else if (shard.last_order_archive != null or shard.last_fill_archive != null or shard.last_funding_archive != null or shard.last_reconciliation_archive != null or shard.last_business_archive_kind != null) return error.InvalidSnapshotState;
+    if (shard.last_funding_archive) |commit| {
+        try validateArchiveCommitInput(shard, shard.last_funding_archive_input, commit.receipt.root.barrier, .funding_archive_committed, .{ .funding_archive_committed = commit });
+    } else if (shard.last_funding_archive_input != null) return error.InvalidSnapshotState;
+    if (shard.last_reconciliation_archive) |commit| {
+        try validateArchiveCommitInput(shard, shard.last_reconciliation_archive_input, commit.receipt.root.barrier, .reconciliation_archive_committed, .{ .reconciliation_archive_committed = commit });
+    } else if (shard.last_reconciliation_archive_input != null) return error.InvalidSnapshotState;
+    if (shard.reconciliation_cursor) |cursor| {
+        const committed = shard.last_reconciliation_archive orelse return error.InvalidSnapshotState;
+        const total = shard.totalEconomicFactCount() catch return error.InvalidSnapshotState;
+        if (cursor.identity != committed.window_id or cursor.through_utc_ns < shard.economic_baseline_utc_ns or
+            cursor.balance_count == 0 or cursor.balance_count > cursor.balances.len or cursor.closed_economic_fact_count > total or
+            shard.open_economic_fact_count != total - cursor.closed_economic_fact_count or
+            !std.mem.eql(u8, &cursor.root_digest, &committed.receipt.root.root_digest)) return error.InvalidSnapshotState;
+        for (cursor.balances[0..cursor.balance_count], 0..) |balance, index| {
+            if (shard.asset_registry.get(balance.asset) == null) return error.InvalidSnapshotState;
+            for (cursor.balances[0..index]) |previous| if (previous.asset == balance.asset) return error.InvalidSnapshotState;
+        }
+        if (shard.open_economic_unknown_time_count != 0 or
+            (shard.open_economic_fact_count != 0 and shard.open_economic_min_utc_ns <= cursor.through_utc_ns)) return error.InvalidSnapshotState;
+        if (shard.open_economic_fact_count == 0 and !shard.economic_projection.reconciliation_break) {
+            var evidence: canonical.AccountEconomicEvidence = .{ .exchange_account = shard.exchange_account_identity, .scope = .spot_and_isolated_linear_usdt, .from_utc_ns = cursor.through_utc_ns, .through_utc_ns = cursor.through_utc_ns, .source = .{ .stream = 0, .sequence = 0, .digest = @splat(0) }, .balances = cursor.balances, .balance_count = cursor.balance_count };
+            for (cursor.balances[0..cursor.balance_count], 0..) |balance, index| evidence.asset_versions[index] = (shard.asset_registry.get(balance.asset) orelse return error.InvalidSnapshotState).definition.version;
+            if (!shard.reconciliationClosingMatches(evidence)) return error.InvalidSnapshotState;
+        }
+    } else {
+        if (shard.last_reconciliation_archive != null or shard.open_economic_fact_count != (shard.totalEconomicFactCount() catch return error.InvalidSnapshotState))
+            return error.InvalidSnapshotState;
+    }
+    if (shard.open_economic_commitment_sequence != 0) {
+        const digest = shard.openEconomicFactsDigest();
+        const fact = shard.trace.factAt(shard.open_economic_commitment_sequence) orelse return error.InvalidSnapshotState;
+        const committed_digest = fact.economic_open_digest orelse return error.InvalidSnapshotState;
+        if (fact.kind != .economic_open_commitment or fact.identity != shard.open_economic_fact_count or !std.mem.eql(u8, &digest, &committed_digest)) return error.InvalidSnapshotState;
+    } else if (shard.open_economic_fact_count != 0 or shard.reconciliation_cursor != null) return error.InvalidSnapshotState;
+    if (shard.open_economic_unknown_time_count > shard.open_economic_fact_count or
+        shard.open_economic_min_utc_ns > shard.open_economic_max_utc_ns or
+        (shard.open_economic_fact_count == 0 and (shard.open_economic_min_utc_ns != 0 or shard.open_economic_max_utc_ns != 0 or shard.open_economic_unknown_time_count != 0))) return error.InvalidSnapshotState;
+    if (shard.open_economic_fact_count <= shard.open_economic_facts.len) {
+        var unknown: u64 = 0;
+        var earliest: u64 = 0;
+        var latest: u64 = 0;
+        for (shard.open_economic_facts[0..@intCast(shard.open_economic_fact_count)], 0..) |fact, index| {
+            if (fact.identity == 0 or std.mem.allEqual(u8, &fact.digest, 0)) return error.InvalidSnapshotState;
+            for (shard.open_economic_facts[0..index]) |previous| if (previous.identity == fact.identity and previous.kind == fact.kind) return error.InvalidSnapshotState;
+            if (std.mem.allEqual(u8, &fact.accepted_input_digest, 0)) return error.InvalidSnapshotState;
+            switch (fact.kind) {
+                .funding => for (shard.economic_projection.applied_fundings[0..shard.economic_projection.applied_funding_count]) |applied| {
+                    if (applied.funding.identity == fact.identity and (!std.mem.eql(u8, &applied.payload_digest, &fact.digest) or
+                        !std.meta.eql(applied.source.exchange_time_utc_ns, fact.economic_time_utc_ns))) return error.InvalidSnapshotState;
+                },
+                .fill => for (shard.economic_projection.applied_fills[0..shard.economic_projection.applied_fill_count]) |applied| {
+                    if (applied.fill.identity == fact.identity and !std.mem.eql(u8, &applied.payload_digest, &fact.digest)) return error.InvalidSnapshotState;
+                },
+            }
+            const time = fact.economic_time_utc_ns orelse 0;
+            if (time == 0) unknown += 1 else {
+                if (earliest == 0 or time < earliest) earliest = time;
+                latest = @max(latest, time);
+            }
+        }
+        if (unknown != shard.open_economic_unknown_time_count or earliest != shard.open_economic_min_utc_ns or latest != shard.open_economic_max_utc_ns) return error.InvalidSnapshotState;
+    }
+    if (shard.pending_reconciliation_window) |window| {
+        if (window.original.event != .account_reconciliation_result or window.original.event.account_reconciliation_result.identity != window.identity or
+            !std.meta.eql(window.previous_cursor, shard.reconciliation_cursor) or
+            window.economic_fact_count > (shard.totalEconomicFactCount() catch return error.InvalidSnapshotState)) return error.InvalidSnapshotState;
+        const evidence = window.original.event.account_reconciliation_result.account_economics orelse return error.InvalidSnapshotState;
+        if (evidence.balance_count == 0 or evidence.balance_count > evidence.balances.len or evidence.before_balance_count > evidence.before_balances.len or
+            evidence.covered_economic_fact_count > evidence.facts.len or evidence.query_count > evidence.query_sources.len or
+            evidence.from_utc_ns != (if (shard.reconciliation_cursor) |cursor| cursor.through_utc_ns else shard.economic_baseline_utc_ns) or
+            evidence.through_utc_ns < evidence.from_utc_ns or !std.meta.eql(evidence.source, window.original.envelope.raw_evidence) or
+            window.original.envelope.times.source_utc_ns != evidence.through_utc_ns) return error.InvalidSnapshotState;
+        if (!shard.reconciliationAnchorMatches(evidence) or
+            (window.economic_fact_count == (shard.totalEconomicFactCount() catch return error.InvalidSnapshotState) and !shard.reconciliationClosingMatches(evidence))) return error.InvalidSnapshotState;
+    }
     if (shard.trace.len != 0 and !shard.trace.events[0].input_first) return error.InvalidSnapshotState;
     var group_digest: [32]u8 = @splat(0);
     for (shard.trace.events[0..shard.trace.len]) |fact| {
@@ -4109,6 +4625,8 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         shard.oms.tombstone_count > shard.oms.tombstones.len or
         shard.economic_projection.seen_count > shard.economic_projection.seen.len or
         shard.economic_projection.canonical_fill_evidence_count > shard.economic_projection.canonical_fill_evidence.len or
+        shard.economic_baseline_balance_count > shard.economic_baseline_balances.len or
+        shard.economic_projection.applied_funding_count > shard.economic_projection.applied_fundings.len or
         shard.economic_projection.applied_fill_count > shard.economic_projection.applied_fills.len or
         shard.economic_projection.applied_fill_total_count > shard.economic_projection.applied_fill_totals.len or
         shard.economic_projection.ledger_count > shard.economic_projection.ledger.len or
@@ -4326,9 +4844,13 @@ fn appendStableFactGroup(
     const encoded_input = try encodeStableInput(&storage, input);
     const times = stableTimes(input);
     for (facts, 0..) |event, index| {
-        var fact_bytes: [@sizeOf(u64) + 1]u8 = undefined;
+        var fact_bytes: [@sizeOf(u64) + 1 + 32]u8 = undefined;
         std.mem.writeInt(u64, fact_bytes[0..@sizeOf(u64)], event.identity, .little);
         fact_bytes[@sizeOf(u64)] = @intFromEnum(event.reject_reason);
+        const fact_len: usize = if (event.economic_open_digest) |digest| blk: {
+            @memcpy(fact_bytes[9..41], &digest);
+            break :blk 41;
+        } else 9;
         try decision_journal.append(.{
             .type_id = @intFromEnum(event.kind),
             .schema_version = schema_version,
@@ -4339,7 +4861,7 @@ fn appendStableFactGroup(
             .monotonic_time = times.monotonic,
             .wall_time = times.wall,
             .time_presence = times.presence,
-            .payload = if (index == 0) encoded_input else &fact_bytes,
+            .payload = if (index == 0) encoded_input else fact_bytes[0..fact_len],
         });
     }
 }
@@ -4517,6 +5039,20 @@ fn stateDigestBorrowed(shard: *const TradingShard) [Sha256.digest_length]u8 {
     }
     digestBare(&hasher, shard.last_order_archive);
     digestBare(&hasher, shard.last_fill_archive);
+    digestBare(&hasher, shard.last_funding_archive);
+    digestBare(&hasher, shard.last_funding_archive_input);
+    digestBare(&hasher, shard.last_reconciliation_archive);
+    digestBare(&hasher, shard.last_reconciliation_archive_input);
+    digestBare(&hasher, shard.reconciliation_cursor);
+    digestBare(&hasher, shard.pending_reconciliation_window);
+    digestInt(&hasher, u64, shard.open_economic_fact_count);
+    digestInt(&hasher, u64, shard.open_economic_commitment_sequence);
+    digestInt(&hasher, u64, shard.open_economic_min_utc_ns);
+    digestInt(&hasher, u64, shard.open_economic_max_utc_ns);
+    digestInt(&hasher, u64, shard.open_economic_unknown_time_count);
+    for (shard.open_economic_facts[0..@min(shard.open_economic_fact_count, shard.open_economic_facts.len)]) |fact| digestBare(&hasher, fact);
+    digestInt(&hasher, u8, shard.economic_baseline_balance_count);
+    for (shard.economic_baseline_balances[0..shard.economic_baseline_balance_count]) |balance| digestBare(&hasher, balance);
     digestBare(&hasher, shard.last_business_archive_kind);
     digestInt(&hasher, u8, shard.deferred_history_admission_count);
     for (shard.deferred_history_admissions[0..shard.deferred_history_admission_count]) |admission| digestBare(&hasher, admission);
@@ -5032,7 +5568,8 @@ fn validateReplayRecord(
     is_input: bool,
 ) !void {
     if (record.schema_version != schema_version) return error.UnsupportedSchema;
-    if (!is_input and (record.flags != 0 or record.payload.len != @sizeOf(u64) + 1))
+    const derived_len: usize = if (expected.economic_open_digest != null) 41 else 9;
+    if (!is_input and (record.flags != 0 or record.payload.len != derived_len))
         return error.InvalidDerivedFactRecord;
     const kind = std.enums.fromInt(EventKind, record.type_id) orelse
         return error.UnknownEventType;
@@ -5040,6 +5577,9 @@ fn validateReplayRecord(
         (!is_input and (try eventIdentity(record.payload) != expected.identity or
             record.payload[@sizeOf(u64)] != @intFromEnum(expected.reject_reason))))
         return error.ReplayFactMismatch;
+    if (!is_input) if (expected.economic_open_digest) |digest| {
+        if (!std.mem.eql(u8, record.payload[9..41], &digest)) return error.ReplayFactMismatch;
+    };
     const times = stableTimes(input);
     if (record.source_time != times.source or
         record.receive_time != times.receive or

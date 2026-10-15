@@ -1,0 +1,13 @@
+src\trading_shard_event.zig:515:25: error: union field order does not match tag enum field order
+pub const CorePayload = union(PayloadTag) {
+                        ^~~~~
+src\trading_shard_event.zig:559:5: note: union field 'history_safety_candidate_verified' is index 43
+    history_safety_candidate_verified: HistorySafetyCandidateVerified,
+    ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src\trading_shard_event.zig:379:5: note: enum field 'history_safety_candidate_verified' is index 41
+    history_safety_candidate_verified,
+    ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+referenced by:
+    trading_shard_event.CoreEvent: src\trading_shard_event.zig:570:14
+    trading_shard_event.CanonicalEvent: src\trading_shard_event.zig:575:11
+    7 reference(s) hidden; use '-freference-trace=9' to see all references

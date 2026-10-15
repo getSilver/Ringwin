@@ -1,0 +1,4 @@
+1/2 main.test_0...OK
+2/2 four_shard_acceptance.test.four-shard acceptance entry stops at the first broken assertion...four-shard evidence mismatch: expected 6d6faae5988291f1a2f920bac2d257fa3eb9ecc5db664daf881adfcca7343c62, actual f17479cc0902fd8aaa9adae41bb818b80bc6aa9ca92b39021b9e797e57b226e2
+FAIL (FourShardEvidenceDrift)
+1 passed; 0 skipped; 1 failed.

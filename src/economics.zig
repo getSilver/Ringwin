@@ -294,6 +294,54 @@ pub const FillArchiveQualification = struct {
     }
 };
 
+pub const FundingCoreTimes = struct {
+    source: u64,
+    receive: u64,
+    monotonic: u64,
+    wall: u64,
+    presence: @import("journal.zig").TimePresence,
+};
+pub const FundingSource = struct {
+    canonical_funding: ?canonical.FundingSettlement = null,
+    canonical_envelope: ?canonical.EventEnvelope = null,
+    core_event_identity: u64 = 0,
+    core_times: ?FundingCoreTimes = null,
+    audit_time_utc_ns: ?u64 = null,
+    core_payload_len: u16 = 0,
+    core_payload_bytes: [256]u8 = @splat(0),
+    exchange_account: u128 = 0,
+    portfolio: u128 = 0,
+    strategy: u128 = 0,
+    instrument: canonical.InstrumentIdentity = 0,
+    rules_version: u64 = 0,
+    exchange_time_utc_ns: ?u64 = null,
+    received_time_utc_ns: u64 = 0,
+    received_monotonic_ns: u64 = 0,
+};
+pub const AppliedFunding = struct {
+    funding: FundingSettlement,
+    portfolio_applied: bool,
+    source: FundingSource = .{},
+    source_digest: history.Digest,
+    payload_digest: history.Digest,
+};
+pub const FundingArchiveRecord = struct {
+    applied: AppliedFunding,
+    ledger: [max_ledger_transactions]LedgerTransaction = undefined,
+    ledger_count: u8 = 0,
+};
+pub const FundingArchiveQualification = struct {
+    origin: history.Origin,
+    barrier: u64,
+    projection_digest: history.Digest,
+    record: FundingArchiveRecord,
+
+    pub fn digest(self: *const @This()) history.Digest {
+        var bytes: [history.max_record_bytes]u8 = undefined;
+        return history.hash(codec.encodeBare(&bytes, self.*) catch unreachable);
+    }
+};
+
 pub const Projection = struct {
     treasury_native_assets: [max_native_assets]canonical.AssetAmount = @splat(.{ .asset = 0, .atoms = 0 }),
     treasury_native_asset_count: u8 = 0,
@@ -321,6 +369,11 @@ pub const Projection = struct {
     applied_fill_totals: [oms.max_orders]OrderFillTotal = undefined,
     applied_fill_total_count: u16 = 0,
     archived_fill_count: u64 = 0,
+    applied_fundings: [max_facts]AppliedFunding = undefined,
+    applied_funding_count: u8 = 0,
+    archived_funding_count: u64 = 0,
+    cumulative_funding_absolute_atoms: i128 = 0,
+    archived_funding_absolute_atoms: i128 = 0,
     spot_mark_price_atoms: i128 = 0,
     swap_mark_price_atoms: i128 = 0,
     spot_quantity_denominator: i64 = 0,
@@ -512,6 +565,80 @@ pub const Projection = struct {
         self.archived_fill_count = archived_count;
     }
 
+    pub fn applyFundingWithSource(self: *Projection, funding: FundingSettlement, source: FundingSource) !bool {
+        try validateFundingSource(funding, source);
+        var candidate = self.*;
+        const before_count = candidate.applied_funding_count;
+        try candidate.applyFunding(funding);
+        if (candidate.applied_funding_count == before_count) {
+            for (candidate.applied_fundings[0..candidate.applied_funding_count]) |known| if (known.funding.identity == funding.identity) {
+                if (!std.meta.eql(known.source, source)) return error.ConflictingEconomicIdentity;
+            };
+            return false;
+        }
+        var applied = &candidate.applied_fundings[candidate.applied_funding_count - 1];
+        applied.source = source;
+        applied.source_digest = try fundingSourceDigest(funding, source);
+        try candidate.assertClosed();
+        self.* = candidate;
+        return true;
+    }
+
+    pub fn prepareFundingArchive(self: *const Projection, identity: u64, origin: history.Origin, barrier: u64) !FundingArchiveQualification {
+        if (identity == 0 or barrier == 0 or origin.account == 0 or origin.stream.domain != .decision_log or origin.stream.id == 0 or
+            self.reconciliation_break or self.suspense_usdt_atoms != 0 or self.suspense_native_asset_count != 0) return error.FundingArchivePinned;
+        var applied: ?AppliedFunding = null;
+        for (self.applied_fundings[0..self.applied_funding_count]) |known| if (known.funding.identity == identity) {
+            applied = known;
+            break;
+        };
+        const known = applied orelse return error.UnknownEconomicFunding;
+        if (!known.funding.portfolio_ownership_proven or !known.portfolio_applied or known.source.received_time_utc_ns == 0 or known.source.received_monotonic_ns == 0 or known.source.exchange_time_utc_ns == null or known.source.exchange_time_utc_ns.? == 0 or
+            known.source.exchange_account == 0 or known.source.portfolio == 0 or known.source.strategy == 0 or known.source.instrument == 0 or known.source.rules_version == 0 or
+            (known.source.canonical_funding == null and known.source.core_payload_len == 0)) return error.FundingArchivePinned;
+        if (known.source.canonical_funding == null and (known.source.core_event_identity == 0 or known.source.core_times == null)) return error.FundingArchivePinned;
+        if (known.source.exchange_account != origin.account) return error.InvalidFundingArchiveOrigin;
+        try self.assertClosed();
+        var result: FundingArchiveQualification = .{ .origin = origin, .barrier = barrier, .projection_digest = self.digest(), .record = .{ .applied = known } };
+        result.record.ledger = std.mem.zeroes(@TypeOf(result.record.ledger));
+        for (self.ledger[0..self.ledger_count]) |transaction| if (transaction.kind == .funding and transaction.source_identity == identity) {
+            result.record.ledger[result.record.ledger_count] = transaction;
+            result.record.ledger_count += 1;
+        };
+        if (result.record.ledger_count != (if (known.funding.amount.atoms == 0) @as(u8, 0) else @as(u8, 2))) return error.IncompleteFundingArchive;
+        for (result.record.ledger[0..result.record.ledger_count]) |*transaction|
+            @memset(transaction.postings[transaction.posting_count..], std.mem.zeroes(LedgerPosting));
+        return result;
+    }
+
+    pub fn commitFundingArchive(self: *Projection, qualification: FundingArchiveQualification, receipt: history.Receipt, previous_root: ?history.Root) !void {
+        const current = try self.prepareFundingArchive(qualification.record.applied.funding.identity, qualification.origin, qualification.barrier);
+        if (!std.mem.eql(u8, &current.digest(), &qualification.digest()) or receipt.root.barrier != qualification.barrier) return error.InvalidFundingArchiveCommit;
+        _ = try history.verifyReceipt(receipt, qualification.origin, qualification.digest(), previous_root);
+        const archived_count = try std.math.add(u64, self.archived_funding_count, 1);
+        const identity = qualification.record.applied.funding.identity;
+        var kept: u8 = 0;
+        for (self.applied_fundings[0..self.applied_funding_count]) |known| if (known.funding.identity != identity) {
+            self.applied_fundings[kept] = known;
+            kept += 1;
+        };
+        self.applied_funding_count = kept;
+        kept = 0;
+        for (self.seen[0..self.seen_count]) |known| if (known.kind != .funding or known.identity != identity) {
+            self.seen[kept] = known;
+            kept += 1;
+        };
+        self.seen_count = kept;
+        kept = 0;
+        for (self.ledger[0..self.ledger_count]) |transaction| if (transaction.kind != .funding or transaction.source_identity != identity) {
+            self.ledger[kept] = transaction;
+            kept += 1;
+        };
+        self.ledger_count = kept;
+        self.archived_funding_count = archived_count;
+        self.archived_funding_absolute_atoms = try std.math.add(i128, self.archived_funding_absolute_atoms, try fundingAbsoluteAmount(qualification.record.applied.funding));
+    }
+
     pub fn releaseOrderFillTotal(self: *Projection, qualification: oms.OrderArchiveQualification, receipt: history.Receipt, previous_root: ?history.Root) !void {
         _ = try history.verifyReceipt(receipt, receipt.root.origin, qualification.digest(), previous_root);
         if (receipt.root.origin.account != qualification.exchange_account or
@@ -565,6 +692,12 @@ pub const Projection = struct {
         var fill_bytes: [4096]u8 = undefined;
         for (self.applied_fills[0..self.applied_fill_count]) |known|
             hasher.update(codec.encodeBare(&fill_bytes, known) catch unreachable);
+        hashInt(&hasher, u64, self.archived_funding_count);
+        hashInt(&hasher, i128, self.cumulative_funding_absolute_atoms);
+        hashInt(&hasher, i128, self.archived_funding_absolute_atoms);
+        hashInt(&hasher, u8, self.applied_funding_count);
+        for (self.applied_fundings[0..self.applied_funding_count]) |known|
+            hasher.update(codec.encodeBare(&fill_bytes, known) catch unreachable);
         hashInt(&hasher, u8, self.ledger_count);
         for (self.ledger[0..self.ledger_count]) |transaction| {
             hashInt(&hasher, u64, transaction.source_identity);
@@ -610,6 +743,11 @@ pub const Projection = struct {
                 return a.fill.identity < b.fill.identity;
             }
         }.less);
+        std.mem.sort(AppliedFunding, normalized.applied_fundings[0..normalized.applied_funding_count], {}, struct {
+            fn less(_: void, a: AppliedFunding, b: AppliedFunding) bool {
+                return a.funding.identity < b.funding.identity;
+            }
+        }.less);
         return normalized;
     }
 
@@ -625,6 +763,51 @@ pub const Projection = struct {
 
     pub fn assertClosed(self: *const Projection) !void {
         if (self.applied_fill_count > self.applied_fills.len or self.applied_fill_total_count > self.applied_fill_totals.len or self.canonical_fill_evidence_count > self.canonical_fill_evidence.len) return error.InvalidEconomicFact;
+        if (self.applied_funding_count > self.applied_fundings.len) return error.InvalidEconomicFact;
+        var resident_funding_absolute_atoms: i128 = 0;
+        for (self.applied_fundings[0..self.applied_funding_count], 0..) |applied, index| {
+            resident_funding_absolute_atoms = try std.math.add(i128, resident_funding_absolute_atoms, try fundingAbsoluteAmount(applied.funding));
+            try validateFundingSource(applied.funding, applied.source);
+            if (applied.funding.amount.asset != self.settlement_asset or !std.mem.eql(u8, &applied.payload_digest, &fundingEconomicDigest(applied.funding, applied.portfolio_applied)) or
+                !std.mem.eql(u8, &applied.source_digest, &try fundingSourceDigest(applied.funding, applied.source))) return error.InvalidEconomicFact;
+            for (self.applied_fundings[0..index]) |known| if (known.funding.identity == applied.funding.identity) return error.InvalidEconomicFact;
+            var found = false;
+            for (self.seen[0..self.seen_count]) |known| if (known.kind == .funding and known.identity == applied.funding.identity) {
+                if (!std.meta.eql(known.canonical_digest, applied.funding.canonical_digest) or known.fingerprint != fingerprintFunding(applied.funding)) return error.InvalidEconomicFact;
+                found = true;
+            };
+            if (!found) return error.InvalidEconomicFact;
+            if (applied.portfolio_applied and !applied.funding.portfolio_ownership_proven) return error.InvalidEconomicFact;
+            var layers = [_]bool{ false, false };
+            var ledger_count: u8 = 0;
+            for (self.ledger[0..self.ledger_count]) |transaction| if (transaction.kind == .funding and transaction.source_identity == applied.funding.identity) {
+                const layer_index: usize = @intFromEnum(transaction.layer);
+                if (layers[layer_index] or (!applied.portfolio_applied and transaction.layer == .portfolio) or
+                    transaction.posting_count != 2 or transaction.postings[0].account != .cash or transaction.postings[1].account != .funding_pnl or
+                    transaction.postings[0].unit != .settlement_atoms or transaction.postings[1].unit != .settlement_atoms or
+                    transaction.postings[0].asset != self.settlement_asset or transaction.postings[1].asset != self.settlement_asset or
+                    transaction.postings[0].amount != applied.funding.amount.atoms or transaction.postings[1].amount != try std.math.sub(i128, 0, applied.funding.amount.atoms)) return error.InvalidEconomicFact;
+                layers[layer_index] = true;
+                ledger_count += 1;
+            };
+            const expected_count: u8 = if (applied.funding.amount.atoms == 0) 0 else if (applied.portfolio_applied) 2 else 1;
+            if (ledger_count != expected_count) return error.InvalidEconomicFact;
+        }
+        for (self.ledger[0..self.ledger_count]) |transaction| if (transaction.kind == .funding) {
+            var found = false;
+            for (self.applied_fundings[0..self.applied_funding_count]) |applied| if (applied.funding.identity == transaction.source_identity) {
+                found = true;
+            };
+            if (!found) return error.InvalidEconomicFact;
+        };
+        if (self.archived_funding_absolute_atoms < 0 or self.cumulative_funding_absolute_atoms != try std.math.add(i128, self.archived_funding_absolute_atoms, resident_funding_absolute_atoms)) return error.InvalidEconomicFact;
+        for (self.seen[0..self.seen_count]) |known| if (known.kind == .funding) {
+            var found = false;
+            for (self.applied_fundings[0..self.applied_funding_count]) |applied| if (applied.funding.identity == known.identity) {
+                found = true;
+            };
+            if (!found) return error.InvalidEconomicFact;
+        };
         for (self.applied_fill_totals[0..self.applied_fill_total_count], 0..) |total, index| {
             if (total.order_id == 0 or total.quantity <= 0 or total.archived_quantity < 0) return error.InvalidEconomicFact;
             for (self.applied_fill_totals[0..index]) |known| if (known.order_id == total.order_id) return error.InvalidEconomicFact;
@@ -918,13 +1101,14 @@ pub const Projection = struct {
         if (funding.amount.asset != self.settlement_asset) return error.InvalidEconomicFact;
         if (funding.canonical_digest) |digest_value| if (try self.lookupCanonicalFunding(funding.identity, digest_value)) return;
         const amount = funding.amount.atoms;
-        var fingerprint_hasher = std.hash.Wyhash.init(0);
-        fingerprint_hasher.update(std.mem.asBytes(&funding.amount.asset));
-        fingerprint_hasher.update(std.mem.asBytes(&funding.amount.atoms));
-        fingerprint_hasher.update(&.{@intFromBool(funding.portfolio_ownership_proven)});
-        const fingerprint = fingerprint_hasher.final();
+        const fingerprint = fingerprintFunding(funding);
         if (try self.remember(funding.identity, .funding, fingerprint)) return;
         self.seen[self.seen_count - 1].canonical_digest = funding.canonical_digest;
+        if (self.applied_funding_count == self.applied_fundings.len) return error.EconomicFactCapacityExceeded;
+        const portfolio_applied = funding.portfolio_ownership_proven and self.portfolio.swap.quantity != 0;
+        self.applied_fundings[self.applied_funding_count] = .{ .funding = funding, .portfolio_applied = portfolio_applied, .source_digest = try fundingSourceDigest(funding, .{}), .payload_digest = fundingEconomicDigest(funding, portfolio_applied) };
+        self.applied_funding_count += 1;
+        self.cumulative_funding_absolute_atoms = try std.math.add(i128, self.cumulative_funding_absolute_atoms, try fundingAbsoluteAmount(funding));
         if (!funding.portfolio_ownership_proven or self.portfolio.swap.quantity == 0) {
             self.exchange.usdt_balance_atoms = try std.math.add(i128, self.exchange.usdt_balance_atoms, amount);
             self.exchange.funding_atoms = try std.math.add(i128, self.exchange.funding_atoms, amount);
@@ -1422,6 +1606,70 @@ fn unrealized(position: Position, price: i128, denominator: i64) !i128 {
     if (position.quantity == 0) return 0;
     const value = try ceilPositive(try std.math.mul(i128, abs(position.quantity), price), denominator);
     return if (position.quantity > 0) try std.math.sub(i128, value, position.open_cost_atoms) else try std.math.sub(i128, position.open_cost_atoms, value);
+}
+
+fn fingerprintFunding(funding: FundingSettlement) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(std.mem.asBytes(&funding.amount.asset));
+    hasher.update(std.mem.asBytes(&funding.amount.atoms));
+    hasher.update(&.{@intFromBool(funding.portfolio_ownership_proven)});
+    return hasher.final();
+}
+
+fn fundingAbsoluteAmount(funding: FundingSettlement) !i128 {
+    return if (funding.amount.atoms < 0) try std.math.sub(i128, 0, funding.amount.atoms) else funding.amount.atoms;
+}
+
+pub fn coreFundingDigest(funding: FundingSettlement) history.Digest {
+    var economic = funding;
+    economic.canonical_digest = null;
+    var bytes: [256]u8 = undefined;
+    return history.hash(codec.encodeBare(&bytes, economic) catch unreachable);
+}
+
+pub fn fundingEconomicDigest(funding: FundingSettlement, portfolio_applied: bool) history.Digest {
+    const Result = struct { identity: u64, asset: canonical.AssetIdentity, exchange_delta: i128, portfolio_delta: i128, suspense_delta: i128, portfolio_applied: bool };
+    const result: Result = .{ .identity = funding.identity, .asset = funding.amount.asset, .exchange_delta = funding.amount.atoms, .portfolio_delta = if (portfolio_applied) funding.amount.atoms else 0, .suspense_delta = if (portfolio_applied) 0 else funding.amount.atoms, .portfolio_applied = portfolio_applied };
+    var bytes: [256]u8 = undefined;
+    return history.hash(codec.encodeBare(&bytes, result) catch unreachable);
+}
+
+pub fn fundingSourceDigest(funding: FundingSettlement, source: FundingSource) !history.Digest {
+    if (source.canonical_funding) |original| {
+        var bytes: [4096]u8 = undefined;
+        return history.hash(try @import("canonical_event_codec.zig").encodePayload(&bytes, .{ .funding_settlement = original }));
+    }
+    if (source.core_payload_len != 0) return history.hash(source.core_payload_bytes[0..source.core_payload_len]);
+    return funding.canonical_digest orelse coreFundingDigest(funding);
+}
+
+fn validateFundingSource(funding: FundingSettlement, source: FundingSource) !void {
+    if (source.core_times) |times| {
+        if (source.canonical_funding != null or source.core_event_identity == 0 or source.core_payload_len == 0 or times.presence.reserved != 0 or
+            !std.meta.eql(source.exchange_time_utc_ns, if (times.presence.source) @as(?u64, times.source) else null) or
+            source.received_time_utc_ns != (if (times.presence.receive) times.receive else 0) or
+            source.received_monotonic_ns != (if (times.presence.monotonic) times.monotonic else 0) or
+            !std.meta.eql(source.audit_time_utc_ns, if (times.presence.wall) @as(?u64, times.wall) else null)) return error.InvalidEconomicFact;
+    }
+    if (source.canonical_envelope) |envelope| {
+        if (source.canonical_funding == null or envelope.exchange_account != source.exchange_account or
+            envelope.instrument != source.instrument or envelope.asset != funding.amount.asset or
+            (envelope.times.receive_utc_ns orelse 0) != source.received_time_utc_ns or (envelope.times.monotonic_ns orelse 0) != source.received_monotonic_ns or
+            !std.meta.eql(envelope.times.audit_utc_ns, source.audit_time_utc_ns)) return error.InvalidEconomicFact;
+    }
+    if (funding.identity == 0 or source.core_payload_len > source.core_payload_bytes.len or
+        !std.mem.allEqual(u8, source.core_payload_bytes[source.core_payload_len..], 0) or
+        (source.canonical_funding != null and source.core_payload_len != 0)) return error.InvalidEconomicFact;
+    if (source.canonical_funding) |original| {
+        if (original.identity != funding.identity or original.exchange_account != source.exchange_account or
+            original.instrument != source.instrument or original.rules_version != source.rules_version or
+            !std.meta.eql(original.amount, funding.amount) or funding.canonical_digest == null or
+            funding.portfolio_ownership_proven or !std.mem.eql(u8, &funding.canonical_digest.?, &try fundingSourceDigest(funding, source))) return error.InvalidEconomicFact;
+    }
+    if (source.core_payload_len != 0) {
+        const original = try codec.decodeBare(source.core_payload_bytes[0..source.core_payload_len], @import("trading_shard_event.zig").FundingSettlement);
+        if (original.settlement_id != funding.identity or original.amount_atoms != funding.amount.atoms or funding.canonical_digest != null) return error.InvalidEconomicFact;
+    }
 }
 
 pub fn coreFillDigest(fill: Fill) [Sha256.digest_length]u8 {

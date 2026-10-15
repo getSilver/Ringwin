@@ -1,0 +1,40 @@
+1/15 main.test_0...OK
+2/15 funding_history_batch.test.07 funding Store records preserve complete postings zero identity source clocks and cumulative settlement...OK
+3/15 funding_history_batch.test.07 funding archive pins unknown canonical ownership missing source clocks and changed balanced ledgers...OK
+4/15 funding_archive_acceptance.test.07 Owner funding archive authenticates complete ledger and zero amount identity through recovery...OK
+5/15 funding_archive_acceptance.test.07 Owner funding archive faults preserve old or committed economic state and never dispatch...OK
+6/15 funding_archive_acceptance.test.07 Owner funding hot and cold conflicts preserve economics and latch authority...OK
+7/15 funding_archive_acceptance.test.07 Owner pins missing funding source time and unknown canonical settlement ownership...OK
+8/15 reconciliation_archive_acceptance.test.07 Owner ten closed funding windows preserve holdings economics and exact cold history across checkpoints...OK
+9/15 reconciliation_archive_acceptance.test.07 Owner complete empty windows advance with zero holdings and no economic facts...OK
+10/15 reconciliation_archive_safety_acceptance.test.07 Closed window same is inert and conflicts or late new funding fail closed...OK
+11/15 reconciliation_archive_safety_acceptance.test.07 Window archive fault boundaries recover old or new complete cursor without dispatch...OK
+12/15 reconciliation_archive_safety_acceptance.test.07 Window omission before balance tamper and missing bill completeness preserve the economic boundary...OK
+13/15 reconciliation_archive_safety_acceptance.test.07 Window checkpoint publication and unavailable recovery history fail closed with durable cursor intact...expected error.InjectedEio, found error.DecisionLogUnavailable
+FAIL (TestUnexpectedError)
+D:\github\Ringwin-core-continuous-capacity\src\order_gateway_archive_acceptance.zig:276:9: 0x7ff7ddc15461 in fail (test_zcu.obj)
+        return error.InjectedEio;
+        ^
+D:\github\Ringwin-core-continuous-capacity\src\order_gateway_archive_acceptance.zig:310:81: 0x7ff7ddc1531f in publishSnapshot (test_zcu.obj)
+        if (self.stage == .owner_checkpoint and stream.domain == .decision_log) return self.fail();
+                                                                                ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:177:9: 0x7ff7ddb11058 in publishSnapshot (test_zcu.obj)
+        return self.vtable.publish(self.context, io, stream, barrier, bytes);
+        ^
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:948:13: 0x7ff7ddb14654 in checkpointCommitted (test_zcu.obj)
+            try self.store.publishSnapshot(self.io, self.stream, barrier, snapshot);
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:850:46: 0x7ff7ddb38bb1 in checkpoint (test_zcu.obj)
+        self.checkpointCommitted(null) catch return error.DecisionLogUnavailable;
+                                             ^
+D:\Program Files\zig\lib\std\testing.zig:72:13: 0x7ff7ddc40d5e in expectError__anon_114146 (test_zcu.obj)
+            return error.TestUnexpectedError;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\reconciliation_archive_safety_acceptance.zig:105:13: 0x7ff7ddc412c9 in test.07 Window checkpoint publication and unavailable recovery history fail closed with durable cursor intact (test_zcu.obj)
+            try std.testing.expectError(error.InjectedEio, harness.owner.checkpoint());
+            ^
+14/15 reconciliation_archive_safety_acceptance.test.07 Rehashed cursor and pending window tampering cannot certify a false economic boundary...OK
+15/15 fill_archive_acceptance.test.07 Owner archives repeated third asset fees and rebates with complete ledger and closed window...OK
+14 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\162efd5b000169c445e141a3f8b8233f\test.exe --seed=0x4540efb9

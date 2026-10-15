@@ -1,0 +1,18 @@
+1/17 main.test_0...OK
+2/17 funding_history_batch.test.07 funding Store records preserve complete postings zero identity source clocks and cumulative settlement...OK
+3/17 funding_history_batch.test.07 funding archive pins unknown canonical ownership missing source clocks and changed balanced ledgers...OK
+4/17 funding_archive_acceptance.test.07 Owner funding archive authenticates complete ledger and zero amount identity through recovery...OK
+5/17 funding_archive_acceptance.test.07 Owner funding archive faults preserve old or committed economic state and never dispatch...OK
+6/17 funding_archive_acceptance.test.07 Owner funding hot and cold conflicts preserve economics and latch authority...OK
+7/17 funding_archive_acceptance.test.07 Owner pins missing funding source time and unknown canonical settlement ownership...OK
+8/17 reconciliation_archive_acceptance.test.07 Owner ten closed funding windows preserve holdings economics and exact cold history across checkpoints...OK
+9/17 reconciliation_archive_acceptance.test.07 Owner complete empty windows advance with zero holdings and no economic facts...OK
+10/17 reconciliation_archive_safety_acceptance.test.07 Closed window same is inert and conflicts or late new funding fail closed...OK
+11/17 reconciliation_archive_safety_acceptance.test.07 Window archive fault boundaries recover old or new complete cursor without dispatch...OK
+12/17 reconciliation_archive_safety_acceptance.test.07 Window omission before balance tamper and missing bill completeness preserve the economic boundary...OK
+13/17 reconciliation_archive_safety_acceptance.test.07 Window checkpoint publication and unavailable recovery history fail closed with durable cursor intact...OK
+14/17 reconciliation_archive_safety_acceptance.test.07 Rehashed cursor and pending window tampering cannot certify a false economic boundary...OK
+15/17 reconciliation_archive_safety_acceptance.test.07 Open economic commitments reject rehashed hot cold identity and original time substitution...OK
+16/17 reconciliation_archive_safety_acceptance.test.07 Opening native balance count reserves the settlement baseline slot before mutation...OK
+17/17 fill_archive_acceptance.test.07 Owner archives repeated third asset fees and rebates with complete ledger and closed window...OK
+All 17 tests passed.

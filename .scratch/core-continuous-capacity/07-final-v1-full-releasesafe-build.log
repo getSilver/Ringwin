@@ -1,0 +1,10 @@
+src\trading_shard.zig:4391:18: error: root source file struct 'canonical_event' has no member named 'normalizePayload'
+        canonical.normalizePayload(&window.original.event);
+        ~~~~~~~~~^~~~~~~~~~~~~~~~~
+src\canonical_event.zig:1:1: note: struct declared here
+//! Stable, Venue-neutral values that cross the Adapter seams.
+^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+referenced by:
+    test.optimization borrowed canonical snapshot matches copy canonicalization without mutating source: src\trading_shard.zig:5992:30
+    trading_shard: src\main.zig:2:31
+    1 reference(s) hidden; use '-freference-trace=3' to see all references

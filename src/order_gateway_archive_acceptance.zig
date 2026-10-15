@@ -77,7 +77,11 @@ fn initializeOwnerWithNativeBalances(owner: *demo.Owner, definitions: []const ca
     try owner.sealBootstrap();
 }
 
-fn bootstrapArchiveAccount(owner: *demo.Owner, balances: []const canonical.AssetAmount) !void {
+pub fn bootstrapArchiveAccount(owner: *demo.Owner, balances: []const canonical.AssetAmount) !void {
+    return bootstrapArchiveAccountFor(owner, balances, null);
+}
+
+pub fn bootstrapArchiveAccountFor(owner: *demo.Owner, balances: []const canonical.AssetAmount, isolated_instrument: ?canonical.InstrumentIdentity) !void {
     var snapshot: canonical.AccountBootstrapSnapshot = .{ .identity = 1, .exchange_account = 2, .scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true }, .source_stream = 7, .source_sequence = 1, .balance_count = 2, .position_count = 0, .margin_count = 1 };
     for ([_]u64{ 1, 0x425443 }, 0..) |asset, index| {
         const amount: canonical.AssetAmount = .{ .asset = asset, .atoms = if (asset == 1) 25_000_000_000 else 0 };
@@ -92,6 +96,11 @@ fn bootstrapArchiveAccount(owner: *demo.Owner, balances: []const canonical.Asset
     }
     const zero: canonical.AssetAmount = .{ .asset = 1, .atoms = 0 };
     snapshot.margins[0] = .{ .amount = zero, .initial_margin = zero, .maintenance_margin = zero, .isolated_equity = zero };
+    if (isolated_instrument) |instrument| {
+        snapshot.margins[0].instrument = instrument;
+        snapshot.margins[0].amount.?.atoms = 25_000_000_000;
+        snapshot.margins[0].isolated_equity.?.atoms = 25_000_000_000;
+    }
     var account = fixture.canonicalAt(14, 1, .{ .account_bootstrap_snapshot = snapshot });
     account.venue.envelope.identity.stream = 7;
     account.venue.envelope.source_stream = 7;
@@ -235,7 +244,7 @@ pub const ArchiveFaultMemory = struct {
     memory: durable.MemoryAdapter,
     original: @TypeOf(@as(durable.Store, undefined).vtable),
     vtable: @typeInfo(@TypeOf(@as(durable.Store, undefined).vtable)).pointer.child,
-    stage: enum { none, history_publish, decision_commit, gateway_append, gateway_checkpoint } = .none,
+    stage: enum { none, history_publish, decision_commit, gateway_append, gateway_checkpoint, owner_checkpoint, recovery_history_query } = .none,
     closed: bool = false,
     timeout_intent_sequence: ?u64 = null,
     timeout_report_identity: ?u128 = null,
@@ -272,6 +281,7 @@ pub const ArchiveFaultMemory = struct {
     }
     fn queryHistory(ptr: *anyopaque, io: std.Io, request: history.LookupRequest) anyerror!history.LookupResult {
         const self = from(ptr);
+        if (self.stage == .recovery_history_query) return error.InjectedQueryTimeout;
         switch (request.key.identity) {
             .intent => |identity| if (self.timeout_intent_sequence == identity.sequence) return error.InjectedQueryTimeout,
             .report => |identity| if (self.timeout_report_identity == identity) return error.InjectedQueryTimeout,
@@ -297,6 +307,7 @@ pub const ArchiveFaultMemory = struct {
     fn publishSnapshot(ptr: *anyopaque, io: std.Io, stream: durable.StreamIdentity, barrier: u64, bytes: []const u8) anyerror!void {
         const self = from(ptr);
         if (self.stage == .gateway_checkpoint and stream.domain == .control) return self.fail();
+        if (self.stage == .owner_checkpoint and stream.domain == .decision_log) return self.fail();
         return self.original.publish(ptr, io, stream, barrier, bytes);
     }
 };

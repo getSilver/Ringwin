@@ -259,7 +259,7 @@ fn encodeBorrowedWithPolicy(writer: *Writer, value: anytype, comptime Policy: ty
                 for (items[0..count]) |*item| try encodeBorrowedWithPolicy(writer, item, Policy);
             } else if (comptime @typeInfo(field.type) == .array) {
                 if (comptime Policy.tailCounter(T, field.name)) |counter_name| {
-                    const count: usize = @field(value.*, counter_name);
+                    const count = Policy.counter(value, counter_name);
                     const items = &@field(value.*, field.name);
                     if (count > items.len) return error.InvalidSnapshotValue;
                     for (items[0..count]) |*item| try encodeBorrowedWithPolicy(writer, item, Policy);

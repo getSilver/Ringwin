@@ -328,6 +328,7 @@ test "order history batch owns relocated records and archives every released sem
             .reconciliation => try std.testing.expectEqualDeep(shard.oms.reconciliation_history[0], try codec.decodeBare(bytes, oms.ReconciliationResult)),
             .client_order_id, .dispatch_command, .dispatch_result => return error.UnexpectedClientOrderIdKey,
             .canonical_fill, .core_fill, .fill_detail, .fill_economic_digest => return error.UnexpectedFillHistoryKey,
+            .canonical_funding, .core_funding, .funding_detail, .funding_economic_digest, .reconciliation_window, .canonical_account_reconciliation => return error.UnexpectedEconomicHistoryKey,
         }
     }
     try std.testing.expectEqual(@as(u8, 1), shard.oms.order_count);

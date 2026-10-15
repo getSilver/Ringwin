@@ -14,7 +14,7 @@ const resolution_record_type: u16 = 0x4702;
 const accepted_record_type: u16 = 0x4703;
 const archive_record_type: u16 = 0x4704;
 const economic_history_record_type: u16 = 0x4705;
-const dispatch_snapshot = "GatewayDispatchV6";
+const dispatch_snapshot = "GatewayDispatchV7";
 const namespace_size = 16;
 const snapshot_prefix_size = dispatch_snapshot.len + @sizeOf(u16);
 
@@ -88,7 +88,8 @@ pub const DispatchEvidence = struct {
 };
 const ArchiveBinding = struct { origin: DispatchOrigin, root: history.Root, last_order: ?DispatchArchiveCommit = null };
 const DispatchArchiveCommit = struct { origin: DispatchOrigin, order_id: u64, receipt: history.Receipt };
-const EconomicHistoryCommit = struct { origin: DispatchOrigin, fill_id: u64, qualification_digest: history.Digest, receipt: history.Receipt };
+const EconomicHistoryKind = enum { fill, funding, reconciliation_window };
+const EconomicHistoryCommit = struct { origin: DispatchOrigin, kind: EconomicHistoryKind, identity: u128, qualification_digest: history.Digest, receipt: history.Receipt };
 pub const max_routes = 4;
 pub const max_adapter_batches_per_turn: u8 = 1;
 pub const max_authority_records = 128;
@@ -165,7 +166,7 @@ const DurableDispatch = struct {
     namespace: [namespace_size]u8,
     next_sequence: u64,
 };
-const dispatch_snapshot_version: u16 = 6;
+const dispatch_snapshot_version: u16 = 7;
 const DispatchSnapshotHeader = struct {
     version: u16 = dispatch_snapshot_version,
     stream: durable.StreamIdentity,
@@ -1085,14 +1086,28 @@ pub const Gateway = struct {
         try self.reclaimOrderDispatchEvidence(shard, archived.order_id);
     }
 
-    /// Only the published Core fill commit can advance history without retiring dispatch evidence.
+    /// Only the published Core economic commit can advance history without retiring dispatch evidence.
     pub fn acknowledgeEconomicHistory(self: *Gateway, shard: *const trading.TradingShard) !void {
         const origin = try sourceOrigin(shard, false);
-        const commit = shard.last_fill_archive orelse return error.EconomicHistoryNotCommitted;
         const root = shard.business_history_root orelse return error.EconomicHistoryNotCommitted;
-        if (shard.last_business_archive_kind != .fill or !std.meta.eql(root, commit.receipt.root) or
-            !std.mem.eql(u8, &commit.qualification_digest, &commit.receipt.qualification_digest)) return error.EconomicHistoryNotCommitted;
-        const record: EconomicHistoryCommit = .{ .origin = origin, .fill_id = commit.fill_id, .qualification_digest = commit.qualification_digest, .receipt = commit.receipt };
+        const record: EconomicHistoryCommit = switch (shard.last_business_archive_kind orelse return error.EconomicHistoryNotCommitted) {
+            .order => return error.EconomicHistoryNotCommitted,
+            .fill => blk: {
+                const commit = shard.last_fill_archive orelse return error.EconomicHistoryNotCommitted;
+                if (!std.meta.eql(root, commit.receipt.root)) return error.EconomicHistoryNotCommitted;
+                break :blk .{ .origin = origin, .kind = .fill, .identity = commit.fill_id, .qualification_digest = commit.qualification_digest, .receipt = commit.receipt };
+            },
+            .funding => blk: {
+                const commit = shard.last_funding_archive orelse return error.EconomicHistoryNotCommitted;
+                if (!std.meta.eql(root, commit.receipt.root)) return error.EconomicHistoryNotCommitted;
+                break :blk .{ .origin = origin, .kind = .funding, .identity = commit.funding_id, .qualification_digest = commit.qualification_digest, .receipt = commit.receipt };
+            },
+            .reconciliation => blk: {
+                const commit = shard.last_reconciliation_archive orelse return error.EconomicHistoryNotCommitted;
+                if (!std.meta.eql(root, commit.receipt.root)) return error.EconomicHistoryNotCommitted;
+                break :blk .{ .origin = origin, .kind = .reconciliation_window, .identity = commit.window_id, .qualification_digest = commit.qualification_digest, .receipt = commit.receipt };
+            },
+        };
         const previous_index = self.archiveBindingIndex(origin);
         const previous_count = self.archive_binding_count;
         const previous_binding: ?ArchiveBinding = if (previous_index) |index| self.archive_bindings[index] else null;
@@ -1116,9 +1131,10 @@ pub const Gateway = struct {
     fn applyEconomicHistory(self: *Gateway, commit: EconomicHistoryCommit) !void {
         const origin = commit.origin;
         const root = commit.receipt.root;
-        if (origin.decision_stream == 0 or origin.portfolio == 0 or origin.test_shard != 0 or commit.fill_id == 0 or
+        if (origin.decision_stream == 0 or origin.portfolio == 0 or origin.test_shard != 0 or commit.identity == 0 or
             origin.account != root.origin.account or origin.decision_stream != root.origin.stream.id or
             !std.mem.eql(u8, &commit.qualification_digest, &commit.receipt.qualification_digest)) return error.EconomicHistoryNotCommitted;
+        if (commit.kind != .reconciliation_window and commit.identity > std.math.maxInt(u64)) return error.EconomicHistoryNotCommitted;
         const previous_index = self.archiveBindingIndex(origin);
         const previous: ?history.Root = if (previous_index) |index| self.archive_bindings[index].root else null;
         if (previous != null and std.meta.eql(previous.?, root)) {
@@ -2397,7 +2413,7 @@ test "Gateway economic history binds committed adjacent roots without retiring d
     try std.testing.expectEqual(@as(u16, 1), recovered.uncertain_dispatch_count);
     try recovered.completePreviousOrderArchive(shard);
     // A committed economic record also survives interruption before its checkpoint.
-    const tail_commit: EconomicHistoryCommit = .{ .origin = accepted.origin, .fill_id = 11, .qualification_digest = third.qualification_digest, .receipt = third };
+    const tail_commit: EconomicHistoryCommit = .{ .origin = accepted.origin, .kind = .fill, .identity = 11, .qualification_digest = third.qualification_digest, .receipt = third };
     try recovered.commitDispatchRecord(economic_history_record_type, 0, try snapshot_codec.encodeBare(&attempt_bytes, tail_commit));
     const tail_recovered = try allocator.create(Gateway);
     defer allocator.destroy(tail_recovered);
@@ -2409,6 +2425,27 @@ test "Gateway economic history binds committed adjacent roots without retiring d
     try std.testing.expectEqual(@as(u16, 1), tail_recovered.accepted_dispatch_count);
     try std.testing.expectEqual(@as(u16, 1), tail_recovered.uncertain_dispatch_count);
     try tail_recovered.completePreviousOrderArchive(shard);
+    // Funding and closed windows advance the same continuous root without retiring either outcome.
+    entries[0].key.identity = .{ .funding_detail = 901 };
+    const fourth = try store.publishOrderHistory(undefined, .{ .origin = origin, .previous_root = third.root, .barrier = 4, .epoch = 1, .qualification_digest = history.hash("funding qualification"), .records = &records, .entries = &entries });
+    shard.business_history_root = fourth.root;
+    shard.last_funding_archive = .{ .funding_id = 901, .qualification_digest = fourth.qualification_digest, .receipt = fourth };
+    shard.last_business_archive_kind = .funding;
+    try tail_recovered.acknowledgeEconomicHistory(shard);
+    entries[0].key.identity = .{ .reconciliation_window = @as(u128, std.math.maxInt(u64)) + 1 };
+    const fifth = try store.publishOrderHistory(undefined, .{ .origin = origin, .previous_root = fourth.root, .barrier = 5, .epoch = 1, .qualification_digest = history.hash("window qualification"), .records = &records, .entries = &entries });
+    shard.business_history_root = fifth.root;
+    shard.last_reconciliation_archive = .{ .window_id = @as(u128, std.math.maxInt(u64)) + 1, .qualification_digest = fifth.qualification_digest, .receipt = fifth };
+    shard.last_business_archive_kind = .reconciliation;
+    try tail_recovered.acknowledgeEconomicHistory(shard);
+    try tail_recovered.acknowledgeEconomicHistory(shard);
+    recovered.init();
+    try recovered.add(route);
+    try recovered.attachRecoveredDurableDispatch(store, undefined, stream);
+    try std.testing.expectEqualDeep(fifth.root, recovered.archive_bindings[0].root);
+    try std.testing.expectEqualDeep(accepted, recovered.accepted_dispatches[0]);
+    try std.testing.expectEqual(@as(u16, 1), recovered.uncertain_dispatch_count);
+    try std.testing.expectEqual(@as(u64, 0), recovered.send_attempt_count);
     const barrier = recovered.durable_dispatch.?.next_sequence;
     shard.last_order_archive.?.order_id += 1;
     try std.testing.expectError(error.DispatchArchiveNotCommitted, recovered.completePreviousOrderArchive(shard));

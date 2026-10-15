@@ -1,0 +1,86 @@
+1/39 main.test_0...OK
+2/39 trading_shard_tests.test.Owner native settlements retain partial cost remainder reversal and classified cash exactly once...OK
+3/39 trading_shard_tests.test.Owner rejects tighter native bounds without losing committed registry or recoverable holdings...OK
+4/39 binance_venue_adapter.test.Binance scoped Spot snapshots stay unresolved without combined product and bill proof through Owner recovery...OK
+5/39 venue_fill_recovery_acceptance.test.OKX raw private fills traverse adapter Owner durable recovery without decoder leakage...okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+OK
+6/39 venue_fill_recovery_acceptance.test.OKX activated high precision account facts survive Owner replay without old unit economics...OK
+7/39 venue_fill_recovery_acceptance.test.OKX native settlement long fees rebates and explicit zero close Owner ledger and recover...OK
+8/39 venue_fill_recovery_acceptance.test.OKX native settlement ten micro fees accumulate exactly through Owner and replay...OK
+9/39 venue_fill_recovery_acceptance.test.OKX native settlement balances beyond i64 close Owner ledger and replay...OK
+10/39 venue_fill_recovery_acceptance.test.OKX native settlement malformed terminal report closes Owner authority without changing ledger...OK
+11/39 venue_fill_recovery_acceptance.test.activated balance limits reject cumulative Suspense growth before Owner commit...OK
+12/39 native_account_continuity_acceptance.test.native account continuity Binance Adapter Owner snapshot and replay...OK
+13/39 native_multi_venue_accounting_acceptance.test.native multi Venue actual Binance and Bybit microfees reach the same Owner ledger and replay...precision13 venue=binance case=quote assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=29 raw_barrier=6 canonical=f1e03681a6299de0bd0aee64f7a81766af5cde5e6d45f9a7f440685e6ccbf123 semantic=301766efbba09a1a674b630c0eb2c232aceb4b10d6e9c487278aa63fec1addd2 sends=0
+precision13 venue=bybit case=quote assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=29 raw_barrier=7 canonical=086c9461992ee4afcb11ff80ac067efc008bf85d718b8e7de9ad35b3cbff3855 semantic=0fda20d71864563b0fe054b6fd191c022554255ec16f9e2bd998e89c332eda94 sends=0
+OK
+14/39 simulated_native_accounting_acceptance.test.Simulated native public Owner contract preserves split microfees rebates nonunit quantity and replay...OK
+15/39 simulated_native_accounting_acceptance.test.Simulated native public Owner contract persists unknown asset and amount range faults...OK
+16/39 core_observation_capacity_acceptance.test.Observation capacity 500 combinations four continuous Owners retain 100 selected resting orders...observation_capacity: combinations=500 selected_live=100 owners=4 max_snapshot_bytes=788249 shard_bytes=22300256
+OK
+17/39 order_gateway_archive_acceptance.test.Owner archives a truly accepted Gateway command and verifies cold retries without sending...OK
+18/39 order_gateway_archive_acceptance.test.Owner Gateway archive failure boundaries preserve committed evidence on recovery...archive fault history_publish: status=ready gate=open last=43 committed=43 tails=1 snapshot=26
+archive fault decision_commit: status=ready gate=open last=44 committed=43 tails=1 snapshot=26
+archive fault gateway_checkpoint: status=ready gate=open last=44 committed=44 tails=1 snapshot=26
+OK
+19/39 order_gateway_archive_acceptance.test.Owner archives accepted place and cancel sharing a client ID and retries both command proofs...OK
+20/39 order_public_capacity_acceptance.test.Owner public archive closes true CCC successor before predecessor and cold identities recover without resend...OK
+21/39 order_public_capacity_acceptance.test.Owner public archive retains shared multi member group until final member and cold identities recover without resend...OK
+22/39 order_public_capacity_acceptance.test.Owner public capacity fixture preserves two order identities through archive and replacement...Owner capacity shard 0: live=2, terminal=2, adapter_sends=6
+Owner capacity shard 0: archived_terminal=2 journal_bytes=27968 history_bytes=16492 quota=1073741824
+Owner capacity all 1 shards: round=1, live_each=2, cumulative_terminal_each=3
+Owner capacity all 1 shards: round=2, live_each=2, cumulative_terminal_each=4
+OK
+23/39 order_public_capacity_acceptance.test.Owner archive compaction preserves the surviving order observation times...OK
+24/39 order_public_capacity_acceptance.test.Owner public archive four shards retain 25 live and 25 terminal through ten replacement rounds...Owner capacity shard 0: live=25, terminal=25, adapter_sends=75
+Owner capacity shard 1: live=25, terminal=25, adapter_sends=75
+Owner capacity shard 2: live=25, terminal=25, adapter_sends=75
+Owner capacity shard 3: live=25, terminal=25, adapter_sends=75
+Owner capacity shard 0: archived_terminal=25 journal_bytes=276071 history_bytes=1119558 quota=1073741824
+Owner capacity shard 1: archived_terminal=25 journal_bytes=276071 history_bytes=1119558 quota=1073741824
+Owner capacity shard 2: archived_terminal=25 journal_bytes=276071 history_bytes=1119558 quota=1073741824
+Owner capacity shard 3: archived_terminal=25 journal_bytes=276071 history_bytes=1119558 quota=1073741824
+Owner capacity all 4 shards: round=1, live_each=25, cumulative_terminal_each=30
+Owner capacity all 4 shards: round=2, live_each=25, cumulative_terminal_each=35
+Owner capacity all 4 shards: round=3, live_each=25, cumulative_terminal_each=40
+Owner capacity all 4 shards: round=4, live_each=25, cumulative_terminal_each=45
+Owner capacity all 4 shards: round=5, live_each=25, cumulative_terminal_each=50
+Owner capacity all 4 shards: round=6, live_each=25, cumulative_terminal_each=55
+Owner capacity all 4 shards: round=7, live_each=25, cumulative_terminal_each=60
+Owner capacity all 4 shards: round=8, live_each=25, cumulative_terminal_each=65
+Owner capacity all 4 shards: round=9, live_each=25, cumulative_terminal_each=70
+Owner capacity all 4 shards: round=10, live_each=25, cumulative_terminal_each=75
+OK
+25/39 order_public_capacity_acceptance.test.Owner public capacity cycles active authority through checkpoints and cold lookup...Owner capacity shard 0: live=32, terminal=16, adapter_sends=64
+Owner capacity shard 0: archived_terminal=16 journal_bytes=227946 history_bytes=451424 quota=1073741824
+Owner capacity all 1 shards: round=1, live_each=32, cumulative_terminal_each=20
+Owner capacity all 1 shards: round=2, live_each=32, cumulative_terminal_each=24
+OK
+26/39 order_public_capacity_acceptance.test.Owner sends protective cancel while an unrelated archived intent lookup is deferred...OK
+27/39 order_public_capacity_acceptance.test.Owner completes interrupted predecessor archive before committing another order...OK
+28/39 order_history_safety_acceptance.test.Owner synchronous safety Fill preserves occupied lanes on duplicates conflicts economic rejection and durable failure...OK
+29/39 order_history_safety_acceptance.test.Owner preserves deferred history while canonical fills progress and both pending lanes recover...OK
+30/39 funding_archive_acceptance.test.Owner funding archive authenticates complete ledger and zero amount identity through recovery...OK
+31/39 funding_archive_acceptance.test.Owner funding archive faults preserve old or committed economic state and never dispatch...OK
+32/39 reconciliation_archive_acceptance.test.Owner ten closed funding windows preserve holdings economics and exact cold history across checkpoints...OK
+33/39 reconciliation_archive_acceptance.test.Owner complete empty windows advance with zero holdings and no economic facts...OK
+34/39 fill_archive_acceptance.test.Owner fill archive preserves Core fill economic coverage through cold proof and recovery...OK
+35/39 fill_archive_acceptance.test.Owner fill snapshot rejects inconsistent cumulative quantity and resident evidence...OK
+36/39 fill_archive_acceptance.test.Owner reclaims ten partial fill windows without losing per order quantity and recovers cold facts without sending...OK
+37/39 fill_archive_acceptance.test.Owner archives repeated third asset fees and rebates without changing native balances...OK
+38/39 fill_archive_acceptance.test.Owner fill archive publication and Gateway failure boundaries retain recoverable economic facts...OK
+39/39 fill_archive_acceptance.test.Owner order then fill then order archive lineage recovers old ownership without sending...OK
+All 39 tests passed.

@@ -1047,6 +1047,18 @@ _Avoid_: OMS reported cumulative, sum of resident fill details
 对已应用成交、原始归属、费用及其全部账本事务形成的不可变归档资格。历史发布与权威提交完成后可回收这些明细，但不得改变余额、库存、成本或已应用成交总计。
 _Avoid_: Balance reset, fill cache eviction, fee omission
 
+**FundingArchiveQualification**:
+对已应用资金费、原始来源与归属声明及全部相关账本事务形成的不可变归档资格；零金额结算仍保留身份，归档不改变经济余额或PnL。
+_Avoid_: Funding allocation inference, balance reset, seen eviction
+
+**ReconciliationWindow**:
+在连续经济区间上完整核对的不可变账户证据，包含逐资产期初期末余额、来源查询、确切经济事实集合与前窗口承接关系。
+_Avoid_: Latest balance snapshot, initial baseline rewrite
+
+**ReconciliationCursor**:
+已持久提交对账窗口的连续承接边界，保存已闭合时点、累计事实覆盖与期末余额；明细回收不降低覆盖要求，迟到新事实不能重新归入已闭合区间。
+_Avoid_: Receive timestamp high water, resident fact count
+
 **OrderArchiveQualification**:
 在明确终态、风险占用释放、引用闭合、唯一已应用 canonical Fill 与已报告累计相等，以及迟到历史查询范围完整时，为一个 Order 形成的不可变归档资格；它本身不证明历史已持久发布，不能单独释放热状态。
 _Avoid_: FoundTerminal, terminal boolean, Store archive receipt

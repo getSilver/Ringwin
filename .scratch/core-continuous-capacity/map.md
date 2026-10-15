@@ -50,14 +50,15 @@ Status: active
 12. [封存容量闭合证据并交接生产资格](issues/12-seal-capacity-closure-evidence.md) — blocked by 10, 11
 
 依赖主干：01 → 02 → 03；03 后分为 04、05 → 06 → 07、08 三支；04/07/08 → 09；09 → 10 与 11；10/11 → 12。
-01–06合同、权威屏障、检查点、观察选择及订单/发送/成交费用归档功能已完成；07–12尚未实现或验收，只有 blocker 全部完成的票可执行。
+01–07合同、权威屏障、检查点、观察选择及订单/发送/成交费用/资金费账本对账历史归档功能已完成；08–12尚未实现或验收，只有 blocker 全部完成的票可执行。
 
 ## Frontier
 
-- [07 贯通资金费、账本与对账历史归档](issues/07-close-funding-ledger-and-reconciliation-history.md)
 - [08 贯通控制与账户协调历史回收](issues/08-reclaim-control-and-account-coordination-history.md)
 
 ## Decisions so far
+
+- 2026-10-15：07小规模功能验收完成，见[07证据](07-evidence.md)。最终96份源码a8c99fb7，完整Debug/ReleaseSafe串行各567/567，应用64MiB/CLI256MiB重建及各两个离线模式退出0，10步终态及129项身份/日志/产物审计通过；独立Standards/Spec无剩余确认P1/P2。08为唯一Frontier，09仍阻塞于08。强制执行分配/ack证据继续pin；压力、资源、Venue与平台生产资格均未取得，Windows链总资格保持blocked。
 
 - 2026-10-14：06功能验收完成，见[06证据](06-evidence.md)。最新91份源码c508f89c，完整Debug/ReleaseSafe串行各551/551，应用/CLI重建及两个离线模式退出0，46项身份/日志/产物核对通过；Standards/Spec无剩余具体P1/P2。07/08为Frontier。用户要求本代理关闭并提交06后停止，07交由其他代理实施；07–12及压力/资源/平台生产资格均未取得。
 
@@ -107,7 +108,7 @@ Linux 路径沿用 [Linux 生产资格地图](../production-readiness/map.md)，
 
 ## Not yet verified
 
-- 合成负载与容量/保留预算已在 [容量合同](capacity-contract.md) 冻结，执行口径按用户最新功能验证要求更新；01–05已完成，成交、费用、账本、控制与平台恢复等剩余功能尚待06–12，未授予压力或资源资格。
+- 合成负载与容量/保留预算已在 [容量合同](capacity-contract.md) 冻结，执行口径按用户最新功能验证要求更新；01–07已完成，控制与平台恢复等剩余功能尚待08–12，未授予压力或资源资格。
 - ADR0011已显式演进ADR0009；票02保留完整有序Trace，票03在独立恢复验收和格式身份下引入轮转与历史承接。
 - Windows/Linux各自的实际文件、性能、恢复及后续生产资格证据未取得。
 

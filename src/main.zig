@@ -224,6 +224,11 @@ test {
     _ = @import("order_public_capacity_acceptance.zig");
     _ = @import("order_history_safety_acceptance.zig");
     _ = @import("fill_history_batch.zig");
+    _ = @import("funding_history_batch.zig");
+    _ = @import("reconciliation_history_batch.zig");
+    _ = @import("funding_archive_acceptance.zig");
+    _ = @import("reconciliation_archive_acceptance.zig");
+    _ = @import("reconciliation_archive_safety_acceptance.zig");
     _ = @import("fill_archive_acceptance.zig");
     _ = raw_ingress;
 }

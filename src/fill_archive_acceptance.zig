@@ -102,7 +102,9 @@ test "Owner fill snapshot rejects inconsistent cumulative quantity and resident 
             else => unreachable,
         }
         const encoded = try harness.owner.shard.snapshot(&sealed, harness.owner.shard.authoritativeBarrier(), storage);
-        try std.testing.expectError(if (mode == 3) error.InvalidSnapshotState else error.InvalidEconomicFact, trading.TradingShard.restoreSnapshotInto(restored, encoded));
+        // Payload substitution is rejected by the open-fact cross-check before
+        // the economic projection validates cumulative quantities.
+        try std.testing.expectError(if (mode == 2 or mode == 3) error.InvalidSnapshotState else error.InvalidEconomicFact, trading.TradingShard.restoreSnapshotInto(restored, encoded));
         projection.applied_fill_totals[0].quantity = 18;
         projection.applied_fill_total_count = 1;
         projection.applied_fills[0].payload_digest = digest;
@@ -287,9 +289,13 @@ test "Owner reclaims ten partial fill windows without losing per order quantity 
             try harness.gateway.checkpointDurableDispatch();
         }
     }
+    // The bounded detail view retains sixteen entries while the complete
+    // authoritative high-water count still covers all twenty archived fills.
+    try std.testing.expectEqual(@as(u64, 20), harness.owner.shard.open_economic_fact_count);
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
     try demo.Owner.recoverInto(recovered, harness.backend.interface(), undefined, harness.stream);
+    try std.testing.expectEqual(@as(u64, 20), recovered.shard.open_economic_fact_count);
     const gateway = try allocator.create(execution.Gateway);
     defer allocator.destroy(gateway);
     gateway.init();
@@ -329,7 +335,7 @@ test "Owner reclaims ten partial fill windows without losing per order quantity 
     try std.testing.expectEqual(@as(u64, 2), simulator.sends);
 }
 
-test "Owner archives repeated third asset fees and rebates without changing native balances" {
+test "07 Owner archives repeated third asset fees and rebates with complete ledger and closed window" {
     const allocator = std.testing.allocator;
     const third: canonical.AssetIdentity = 0x424e42;
     var definition = @import("asset_registry.zig").testDefinitions(6, 8)[0];
@@ -350,13 +356,34 @@ test "Owner archives repeated third asset fees and rebates without changing nati
     var simulator: acceptance.RestingSimulator = .{};
     try harness.bindAdapter(simulator.adapter());
     const command = try place(harness, &simulator, 101);
-    const first = try fillInput(harness, command, 1, 3001, 2, third);
+    var first = try fillInput(harness, command, 1, 3001, 2, third);
+    first.venue.event.fill.venue_fill_time_utc_ns = first.venue.envelope.times.source_utc_ns;
+    var facts: [2]canonical.EconomicFactRef = undefined;
     for (0..2) |index| {
-        const input = if (index == 0) first else try fillInput(harness, command, 2, 3002, 2, third);
+        var input = if (index == 0) first else try fillInput(harness, command, 2, 3002, 2, third);
+        input.venue.event.fill.venue_fill_time_utc_ns = input.venue.envelope.times.source_utc_ns;
         _ = try harness.owner.apply(input);
+        facts[index] = .{ .identity = 3001 + index, .kind = .fill, .digest = harness.owner.shard.economic_projection.canonical_fill_evidence[0].digest, .fee_confirmed = true };
         const portfolio = harness.owner.shard.economic_projection.portfolio;
         const exchange = harness.owner.shard.economic_projection.exchange;
-        _ = try harness.owner.archiveFillHistory(3001 + index, harness.gateway);
+        const root = try harness.owner.archiveFillHistory(3001 + index, harness.gateway);
+        const stored = try harness.backend.interface().queryOrderHistory(undefined, .{ .pending_id = 1, .key = .{ .origin = root.origin, .identity = .{ .fill_detail = 3001 + index } }, .candidate_payload_digest = @splat(0), .original_input_digest = root.qualification_digest, .root_digest = root.root_digest, .epoch = root.epoch, .barrier = root.barrier });
+        try history.validateRecord(&stored);
+        const record = (try @import("snapshot_codec.zig").decodeBare(stored.record_bytes[0..stored.record_len], @import("economics.zig").FillArchiveQualification)).record;
+        var native_transactions: u8 = 0;
+        for (record.ledger[0..record.ledger_count]) |transaction| {
+            if (transaction.postings[0].asset != third or transaction.postings[0].unit != .native_asset_atoms) continue;
+            native_transactions += 1;
+            try std.testing.expectEqual(@as(u8, 2), transaction.posting_count);
+            try std.testing.expectEqual(@as(i128, 0), transaction.postings[0].amount + transaction.postings[1].amount);
+            try std.testing.expectEqual(third, transaction.postings[1].asset);
+            switch (transaction.postings[1].account) {
+                .fee_expense => try std.testing.expectEqual(@as(i128, -3), transaction.postings[0].amount),
+                .rebate_income => try std.testing.expectEqual(@as(i128, 1), transaction.postings[0].amount),
+                else => return error.UnexpectedNativePosting,
+            }
+        }
+        try std.testing.expectEqual(@as(u8, 4), native_transactions);
         try std.testing.expectEqualDeep(portfolio, harness.owner.shard.economic_projection.portfolio);
         try std.testing.expectEqualDeep(exchange, harness.owner.shard.economic_projection.exchange);
     }
@@ -371,6 +398,19 @@ test "Owner archives repeated third asset fees and rebates without changing nati
     try std.testing.expectEqual(@as(i128, 2), exchange_native.rebate_atoms);
     try std.testing.expectEqual(@as(i128, 6), exchange_native.balance_atoms);
     try std.testing.expectEqualDeep(opening[0], harness.owner.shard.economic_projection.treasury_native_assets[0]);
+    var account_window = @import("reconciliation_archive_acceptance.zig").windowInput(harness, 0, &facts);
+    const closing = fixture.canonicalAt(200, 10, .{ .account_reconciliation_result = .{ .identity = 10000, .complete = true } });
+    account_window.venue.envelope.times = closing.venue.envelope.times;
+    var evidence = &account_window.venue.event.account_reconciliation_result.account_economics.?;
+    evidence.through_utc_ns = closing.venue.envelope.times.source_utc_ns.?;
+    evidence.balance_count = 3;
+    evidence.before_balance_count = 3;
+    evidence.before_balances[2] = opening[0];
+    evidence.balances[1].atoms = 4;
+    evidence.balances[2] = .{ .asset = third, .atoms = 6 };
+    evidence.asset_versions[2] = definition.version;
+    _ = try harness.owner.apply(account_window);
+    _ = try harness.owner.archiveReconciliationWindowHistory(10000, harness.gateway);
     try harness.owner.checkpoint();
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);

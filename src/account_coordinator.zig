@@ -2145,7 +2145,47 @@ test "account recovery retains a forced shard commit awaiting coordinator ack" {
         _ = try applyCoreStable(shard, &journal, .{ .identity = 5, .payload = .exchange_positions });
         _ = try applyCoreStable(shard, &journal, .{ .identity = 6, .payload = .{ .opening_balance = .{ .cash_atoms = 10_000 } } });
         _ = try applyCoreStable(shard, &journal, .{ .identity = 7, .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = index + 11 } } });
-        if (index == 0) try shard.economic_projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 1 }, .price = .{ .instrument = 1, .rules_version = 1, .ticks = 100 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1, .product = .isolated_linear_usdt } });
+        if (index == 0) {
+            // One owned order and Fill establish the position through the same
+            // public journal/recovery path used by the subsequent forced delivery.
+            const fixture = @import("trading_shard_fixture.zig");
+            _ = try trading.applyStable(shard, &journal, fixture.atGroup(8, .{ .identity = 8, .payload = .{ .portfolio_transfer = .{ .amount_atoms = 1_000 } } }));
+            const genesis = fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged);
+            for (genesis[14..], 14..) |original, genesis_index| {
+                if (genesis_index == 20) continue; // This fixture owns only the perpetual instrument.
+                var input = original;
+                if (input.core.payload == .risk_lease_granted) input.core.payload.risk_lease_granted.amount_atoms = 1_000;
+                if (input.core.payload == .instrument_trading_authorization) {
+                    input.core.payload.instrument_trading_authorization.exchange_account = 900;
+                    input.core.payload.instrument_trading_authorization.instrument = 1;
+                }
+                _ = try trading.applyStable(shard, &journal, input);
+            }
+            _ = try trading.applyStable(shard, &journal, fixture.atGroup(12, .{ .identity = 9, .payload = .{ .host_activated = .{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .session = .{ .fencing = 1, .shard = 0, .generation = 1 }, .activation_barrier = 0, .state_digest = shard.canonicalStateDigest() } } }));
+            _ = try trading.applyStable(shard, &journal, fixture.atGroup(13, .{ .identity = 10, .payload = .{ .mark_price = .{ .instrument = 1, .price_atoms = 100 } } }));
+            var book = fixture.snapshotAt(14, 1);
+            book.venue.envelope.exchange_account = 900;
+            book.venue.envelope.instrument = 1;
+            var snapshot = &book.venue.event.l2_book_snapshot;
+            snapshot.instrument = 1;
+            snapshot.best_bid = .{ .instrument = 1, .rules_version = 1, .ticks = 99 };
+            snapshot.best_ask = .{ .instrument = 1, .rules_version = 1, .ticks = 100 };
+            snapshot.next_ask = .{ .instrument = 1, .rules_version = 1, .ticks = 101 };
+            snapshot.best_bid_quantity.?.instrument = 1;
+            snapshot.best_ask_quantity.?.instrument = 1;
+            snapshot.next_ask_quantity.?.instrument = 1;
+            _ = try trading.applyStable(shard, &journal, book);
+            _ = try trading.applyStable(shard, &journal, fixture.atGroup(15, .{ .identity = 11, .payload = .{ .capability_profile_activation = .{ .exchange_account = 900, .instrument = 1, .venue = 1, .environment = .simulation, .product = .isolated_linear_usdt, .version = 1, .rules_version = 1, .config_version = 1, .adapter_session = 1, .max_dispatch_age_ns = 10 * std.time.ns_per_s, .supports_place = true, .supports_cancel = true, .supports_native_amend = false, .supports_venue_reduce_only = false, .supports_post_only = false, .supports_market_protection = false } } }));
+            const command = (try trading.applyStable(shard, &journal, fixture.atGroup(16, .{ .identity = 12, .payload = .{ .timer = .{ .side = .buy, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 1, .limit_price_micros = 100 } } }))) orelse return error.ExpectedOwnedSeedOrder;
+            _ = try trading.applyStable(shard, &journal, fixture.atGroup(17, .{ .identity = 13, .payload = .{ .economic_fill = .{ .fill_id = 1, .order_id = command.order_id, .quantity = 1, .price_ticks = 100 } } }));
+            _ = try trading.applyStable(shard, &journal, fixture.atGroup(18, .{ .identity = 14, .payload = .{ .oms_execution_report = .{ .report_id = 14, .order_id = command.order_id, .revision = 1, .status = .filled, .cumulative_quantity = 1, .remaining_quantity = 0 } } }));
+            try std.testing.expectEqual(@as(i64, 1), shard.economic_projection.portfolio.swap.quantity);
+            try std.testing.expectEqual(@as(i64, 1), shard.economic_projection.exchange.swap.quantity);
+            try std.testing.expectEqual(@as(i128, 100), shard.economic_projection.portfolio.swap.open_cost_atoms);
+            try std.testing.expectEqual(@as(i128, 100), shard.economic_projection.exchange.swap.open_cost_atoms);
+            try std.testing.expectEqual(@as(u64, 1), shard.open_economic_fact_count);
+            try std.testing.expect(!shard.economic_projection.reconciliation_break);
+        }
         try journal.seal();
         shard_snapshots[index] = try shard.snapshot(&journal, @intCast(shard.authoritativeBarrier()), &snapshot_storage[index]);
         _ = try coordinator.publishSummary(index + 1, try shardSummaryFromShard(shard, @enumFromInt(index), 1, @intCast(index + 1)));

@@ -25,6 +25,9 @@ pub const FillArchiveCommit = struct {
     receipt: history_module.Receipt,
 };
 
+pub const FundingArchiveCommit = struct { funding_id: u64, qualification_digest: [32]u8, receipt: history_module.Receipt };
+pub const ReconciliationArchiveCommit = struct { window_id: u128, qualification_digest: [32]u8, receipt: history_module.Receipt };
+
 pub const HistorySafetyCandidateVerified = struct { pending: cold.PendingCandidate, proof: history_module.LookupProof };
 
 pub const schema_version: u16 = production_contract.journal_schema_version;
@@ -110,6 +113,9 @@ pub const EventKind = enum(u16) {
     canonical_history_deferred,
     canonical_history_admission_released,
     fill_archive_committed,
+    funding_archive_committed,
+    reconciliation_archive_committed,
+    economic_open_commitment,
 };
 
 pub const Fact = struct {
@@ -119,6 +125,7 @@ pub const Fact = struct {
     reject_reason: RejectReason = .none,
     input_digest: [32]u8 = @splat(0),
     input_first: bool = false,
+    economic_open_digest: ?[32]u8 = null,
 };
 
 pub const CheckpointReceipt = struct {
@@ -163,6 +170,8 @@ pub const Trace = struct {
         hasher.update(&kind);
         hasher.update(&.{ @intFromEnum(fact.reject_reason), @intFromBool(fact.input_first) });
         hasher.update(&fact.input_digest);
+        hasher.update(&.{@intFromBool(fact.economic_open_digest != null)});
+        if (fact.economic_open_digest) |digest| hasher.update(&digest);
         var result: [32]u8 = undefined;
         hasher.final(&result);
         return result;
@@ -189,11 +198,13 @@ pub const Trace = struct {
         var inputs = self.base_input_head;
         for (self.events[0..self.len], 0..) |fact, index| {
             if (fact.sequence != try std.math.add(u64, self.base_sequence, @as(u64, @intCast(index)) + 1)) return error.InvalidTrace;
+            if ((fact.kind == .economic_open_commitment) != (fact.economic_open_digest != null)) return error.InvalidTrace;
             history = factHead(history, fact);
             if (fact.input_first) inputs = inputHead(inputs, fact);
         }
         if (!std.mem.eql(u8, &history, &self.history_head) or !std.mem.eql(u8, &inputs, &self.input_head)) return error.InvalidTrace;
         for (self.pinned[0..self.pinned_len], 0..) |fact, index| {
+            if ((fact.kind == .economic_open_commitment) != (fact.economic_open_digest != null)) return error.InvalidTrace;
             if (fact.sequence == 0 or fact.sequence > self.base_sequence or
                 (index > 0 and self.pinned[index - 1].sequence >= fact.sequence)) return error.InvalidTrace;
         }
@@ -240,10 +251,19 @@ pub const Trace = struct {
     }
 
     pub fn appendRejection(self: *Trace, kind: EventKind, identity: u64, reason: RejectReason) !void {
+        try self.appendFact(kind, identity, reason, null);
+    }
+
+    pub fn appendEconomicCommitment(self: *Trace, identity: u64, digest: [32]u8) !void {
+        try self.appendFact(.economic_open_commitment, identity, .none, digest);
+    }
+
+    fn appendFact(self: *Trace, kind: EventKind, identity: u64, reason: RejectReason, economic_digest: ?[32]u8) !void {
+        if ((kind == .economic_open_commitment) != (economic_digest != null)) return error.InvalidTrace;
         const sequence = try std.math.add(u64, self.last_sequence, 1);
         try self.validate();
         if (self.len == self.events.len) return error.TraceFull;
-        const fact: Fact = .{ .sequence = sequence, .kind = kind, .identity = identity, .reject_reason = reason };
+        const fact: Fact = .{ .sequence = sequence, .kind = kind, .identity = identity, .reject_reason = reason, .economic_open_digest = economic_digest };
         self.events[self.len] = fact;
         self.len += 1;
         self.last_sequence = sequence;
@@ -372,6 +392,8 @@ pub const PayloadTag = enum(u16) {
     history_candidate_verified,
     fill_archive_committed,
     history_safety_candidate_verified,
+    funding_archive_committed,
+    reconciliation_archive_committed,
 };
 
 pub const ReservationModel = enum(u8) { leveraged, cash };
@@ -548,6 +570,8 @@ pub const CorePayload = union(PayloadTag) {
     history_candidate_verified: history_module.LookupProof,
     fill_archive_committed: FillArchiveCommit,
     history_safety_candidate_verified: HistorySafetyCandidateVerified,
+    funding_archive_committed: FundingArchiveCommit,
+    reconciliation_archive_committed: ReconciliationArchiveCommit,
 };
 
 /// Typed core-originated event carried by the authoritative CanonicalEvent.
@@ -605,6 +629,14 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             encoded.len += proof_bytes.len;
         },
         .order_archive_committed => |commit| {
+            const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], commit);
+            encoded.len += bytes.len;
+        },
+        .funding_archive_committed => |commit| {
+            const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], commit);
+            encoded.len += bytes.len;
+        },
+        .reconciliation_archive_committed => |commit| {
             const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], commit);
             encoded.len += bytes.len;
         },
@@ -973,6 +1005,16 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             const commit = try snapshot_codec.decodeBare(record.payload[offset..], OrderArchiveCommit);
             offset = record.payload.len;
             break :blk .{ .order_archive_committed = commit };
+        },
+        .funding_archive_committed => blk: {
+            const commit = try snapshot_codec.decodeBare(record.payload[offset..], FundingArchiveCommit);
+            offset = record.payload.len;
+            break :blk .{ .funding_archive_committed = commit };
+        },
+        .reconciliation_archive_committed => blk: {
+            const commit = try snapshot_codec.decodeBare(record.payload[offset..], ReconciliationArchiveCommit);
+            offset = record.payload.len;
+            break :blk .{ .reconciliation_archive_committed = commit };
         },
         .fill_archive_committed => blk: {
             const commit = try snapshot_codec.decodeBare(record.payload[offset..], FillArchiveCommit);

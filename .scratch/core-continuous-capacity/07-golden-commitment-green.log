@@ -1,0 +1,8 @@
+1/2 main.test_0...OK
+2/2 trading_shard_fixture.test.fixed trajectories retain their sealed barriers and recovery digests...validated trajectory 0: barrier=51, digest=3f91b08ae21f7d9a9288dbed7eb00eaf255ccea56d3ec0c09156b94d29b575c4
+validated trajectory 1: barrier=34, digest=d2a1e62925b82254ef4254ce77c7f2ff30b1b32e7b9d7aa4ae65ba87c1df0ed0
+validated trajectory 2: barrier=30, digest=2da5e0a5bed2f9c2b60c4c90ce511ce7aa82f130c39bc67a60e95dd3e594a64d
+validated trajectory 3: barrier=35, digest=fa32cd85e4183c273d29795822c1a6f7edf6c5a37f9662a98489aceef32632bb
+validated trajectory 4: barrier=51, digest=80fd85a963c40811f66096b4f13bd4c15896fb5d20983d986e296fcb21b7ace6
+OK
+All 2 tests passed.

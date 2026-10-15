@@ -1,0 +1,19 @@
+1/10 main.test_0...OK
+2/10 funding_history_batch.test.07 funding Store records preserve complete postings zero identity source clocks and cumulative settlement...OK
+3/10 funding_history_batch.test.07 funding archive pins unknown canonical ownership missing source clocks and changed balanced ledgers...OK
+4/10 funding_archive_acceptance.test.07 Owner funding archive authenticates complete ledger and zero amount identity through recovery...OK
+5/10 funding_archive_acceptance.test.07 Owner funding archive faults preserve old or committed economic state and never dispatch...OK
+6/10 reconciliation_archive_acceptance.test.07 Owner ten closed funding windows preserve holdings economics and exact cold history across checkpoints...OK
+7/10 reconciliation_archive_acceptance.test.07 Owner complete empty windows advance with zero holdings and no economic facts...OK
+8/10 reconciliation_archive_safety_acceptance.test.07 Closed window same is inert and conflicts or late new funding fail closed...FAIL (TestUnexpectedResult)
+D:\Program Files\zig\lib\std\testing.zig:615:14: 0x7ff685a6afbf in expect (test_zcu.obj)
+    if (!ok) return error.TestUnexpectedResult;
+             ^
+D:\github\Ringwin-core-continuous-capacity\src\reconciliation_archive_safety_acceptance.zig:34:9: 0x7ff685b8adc8 in test.07 Closed window same is inert and conflicts or late new funding fail closed (test_zcu.obj)
+        try std.testing.expect(harness.owner.shard.oms.recovery_only);
+        ^
+9/10 reconciliation_archive_safety_acceptance.test.07 Window archive fault boundaries recover old or new complete cursor without dispatch...OK
+10/10 reconciliation_archive_safety_acceptance.test.07 Window omission before balance tamper and missing bill completeness preserve the economic boundary...OK
+9 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\d771cf49036c0bae9fd879ecb4cdcb0a\test.exe --seed=0xfe1f369c

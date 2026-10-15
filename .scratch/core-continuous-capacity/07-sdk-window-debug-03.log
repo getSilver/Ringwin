@@ -1,0 +1,14 @@
+1/2 main.test_0...OK
+2/2 reconciliation_archive_acceptance.test.07 Owner ten closed funding windows preserve holdings economics and exact cold history across checkpoints...FAIL (NotSent)
+D:\github\Ringwin-core-continuous-capacity\src\execution_gateway.zig:755:13: 0x7ff7ba6a2cc7 in sendFromShard (test_zcu.obj)
+            return error.NotSent;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\funding_archive_acceptance.zig:36:87: 0x7ff7ba6a5c01 in createFundingHarnessWithAdapter (test_zcu.obj)
+        try std.testing.expectEqual(@import("venue_adapter.zig").SendResult.accepted, try harness.gateway.sendFromShard(&harness.owner.shard, harness.command.command_id, 2 * std.time.ns_per_s));
+                                                                                      ^
+D:\github\Ringwin-core-continuous-capacity\src\reconciliation_archive_acceptance.zig:58:21: 0x7ff7ba6d6252 in test.07 Owner ten closed funding windows preserve holdings economics and exact cold history across checkpoints (test_zcu.obj)
+    const harness = try funding_acceptance.createFundingHarnessWithAdapter(1900, &simulator);
+                    ^
+1 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\9375132f62f164b5e7bc70b0c73cf9d3\test.exe --seed=0x3b4ca47f

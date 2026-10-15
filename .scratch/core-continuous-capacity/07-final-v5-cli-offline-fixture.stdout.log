@@ -1,0 +1,53 @@
+trading_engine: zig=0.17.0-dev.315+5b647b792, mode=ReleaseSafe, self_check=ok
+01 instrument_rules_activated id=1
+02 margin_rules_activated id=1
+03 instrument_rules_activated id=2
+04 margin_rules_activated id=2
+05 mark_price id=3
+06 mark_price id=4
+07 account_configuration id=1
+08 asset_definition_activated id=1
+09 asset_definition_activated id=4346947
+10 exchange_balance id=1
+11 exchange_positions id=1
+12 opening_balance id=1
+13 virtual_portfolio_activated id=1
+14 portfolio_transfer id=1
+15 strategy_activated id=1
+16 primary_lease_granted id=1
+17 risk_lease_granted id=1
+18 control_command_applied id=1
+19 recovery_completed id=1
+20 instrument_trading_authorized id=30
+21 instrument_trading_authorized id=31
+22 control_command_applied id=2
+23 host_activated id=3
+24 mark_price id=1
+25 canonical_instrument_definition id=99
+26 l2_snapshot id=100
+27 l2_delta id=101
+28 timer id=1
+29 order_intent id=1
+30 risk_accepted id=1
+31 risk_reservation_created id=1
+32 order_command id=1
+33 order_dispatched id=102
+34 order_accepted id=103
+35 fill id=104
+36 fee_ledger_transaction id=104
+37 risk_reservation_rebalanced id=104
+38 economic_open_commitment id=1
+39 order_partially_filled id=105
+40 fill id=106
+41 fee_ledger_transaction id=106
+42 risk_reservation_rebalanced id=106
+43 economic_open_commitment id=2
+44 order_filled id=107
+45 mark_price id=2
+happy_path: events=45, order=filled, qty=100, open_cost=500200000, fees=375150, upl=1800000, risk_remaining=9988995600, ledger=closed, economic_projections=complete
+digest=44afdb2255d28dfc6db6a1618dcb508335d5418e3ab2be6f0dd0fd9c6a55bf0a
+journal_records=45, journal_bytes=10070, replay=equivalent, recovery_checks=ok
+market-gap-v1: events=34, replay=equivalent, digest=1215896591e5bc6b6acc55eb8bda98fb9ee5b4a3b6bed0d240b2983c262adac5
+risk-rejection-v1: events=30, replay=equivalent, digest=7b57f63d559ae1e2c58ec9269775d9042431f5c17568ddff76672487e8e93792
+unknown-reconciliation-v1: events=35, replay=equivalent, digest=bf3c59b9535c872f5fd948d7d2f5ec340bfce66876e9ce06eba596fc4549dcc4
+duplicate-report-v1: events=45, replay=equivalent, digest=a823dc31341030fde0d6c2bd57abf4877cfee6835a040c264a60b33c9b76096e

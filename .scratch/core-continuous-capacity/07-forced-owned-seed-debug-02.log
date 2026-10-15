@@ -1,0 +1,12 @@
+src\account_coordinator.zig:2178:145: error: missing struct field: supports_native_amend
+            _ = try trading.applyStable(shard, &journal, fixture.atGroup(15, .{ .identity = 11, .payload = .{ .capability_profile_activation = .{ .exchange_account = 900, .instrument = 1, .venue = 1, .environment = .simulation, .product = .isolated_linear_usdt, .version = 1, .rules_version = 1, .config_version = 1, .adapter_session = 1, .max_dispatch_age_ns = 10 * std.time.ns_per_s, .supports_place = true, .supports_cancel = true } } }));
+                                                                                                                                               ~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src\account_coordinator.zig:2178:145: note: missing struct field: supports_venue_reduce_only
+src\account_coordinator.zig:2178:145: note: missing struct field: supports_post_only
+src\account_coordinator.zig:2178:145: note: missing struct field: supports_market_protection
+src\trading_shard_event.zig:501:41: note: struct declared here
+pub const CapabilityProfileActivation = struct {
+                                        ^~~~~~
+referenced by:
+    account_coordinator: src\main.zig:5:37
+    test_0: src\main.zig:177:9

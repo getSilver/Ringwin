@@ -1,0 +1,11 @@
+1/2 main.test_0...OK
+2/2 reconciliation_archive_acceptance.test.07 Owner ten closed funding windows preserve holdings economics and exact cold history across checkpoints...FAIL (DurableDispatchUnavailable)
+D:\github\Ringwin-core-continuous-capacity\src\execution_gateway.zig:401:70: 0x7ff7800c6905 in attachRecoveredDurableDispatch (test_zcu.obj)
+            const index = candidate.routeIndex(latch.account) orelse return error.DurableDispatchUnavailable;
+                                                                     ^
+D:\github\Ringwin-core-continuous-capacity\src\reconciliation_archive_acceptance.zig:105:9: 0x7ff7800c9dcf in test.07 Owner ten closed funding windows preserve holdings economics and exact cold history across checkpoints (test_zcu.obj)
+        try recovered_gateway.attachRecoveredDurableDispatch(harness.backend.interface(), undefined, harness.dispatch_stream);
+        ^
+1 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\2f9701a99566d0b43cfcf0f0aa0f4392\test.exe --seed=0xd43025f7
