@@ -1,0 +1,10 @@
+1/1 trading_shard.test.09 canonical stream and deferred admission numeric boundaries preserve the final free slot...FAIL (TestUnexpectedResult)
+D:\Program Files\zig\lib\std\testing.zig:615:14: 0x7ff688ae50ff in expect (test_zcu.obj)
+    if (!ok) return error.TestUnexpectedResult;
+             ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:242:9: 0x7ff688ae52a2 in test.09 canonical stream and deferred admission numeric boundaries preserve the final free slot (test_zcu.obj)
+        try std.testing.expect(ingressAdmissionFull(capacity + 1, capacity));
+        ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\4e59149d51cde7f42e82226611491513\test.exe --seed=0xd31d0f16

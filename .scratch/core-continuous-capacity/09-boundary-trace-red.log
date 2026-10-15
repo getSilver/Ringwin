@@ -1,0 +1,10 @@
+1/1 trading_shard_event.test.09 boundary Trace guard rejects full and excess counts without populating facts...FAIL (TestUnexpectedResult)
+D:\Program Files\zig\lib\std\testing.zig:615:14: 0x7ff605c750ff in expect (test_zcu.obj)
+    if (!ok) return error.TestUnexpectedResult;
+             ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard_event.zig:287:5: 0x7ff605c75217 in test.09 boundary Trace guard rejects full and excess counts without populating facts (test_zcu.obj)
+    try std.testing.expect(traceCapacityReached(257));
+    ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\aa44236e5d6259365cdf75da1d4f441b\test.exe --seed=0xb1b53751

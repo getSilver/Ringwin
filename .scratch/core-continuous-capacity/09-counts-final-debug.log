@@ -1,0 +1,7 @@
+1/6 main.test_0...OK
+2/6 trading_shard.test.09 canonical stream and deferred admission numeric boundaries preserve the final free slot...OK
+3/6 recovery_cutover.test.09 recovery order evidence count represents the full resident domain without population...OK
+4/6 account_coordinator.test.09 coordinator summary count domain admits 1024 and rejects impossible totals without orders...OK
+5/6 account_coordinator.test.09 coordinator widened summary round trips new snapshot and tail and refuses retired formats...OK
+6/6 oms.test.OMS order capacity guard checks numeric boundaries without order population...OK
+All 6 tests passed.

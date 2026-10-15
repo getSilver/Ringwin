@@ -363,9 +363,27 @@ fn faultError(fault: Fault) !void {
     };
 }
 
+fn slotCapacityReached(count: usize, capacity: usize) bool {
+    return count >= capacity;
+}
+
+test "09 boundary Store directory guards reject full and excess counts without populating slots" {
+    for ([_]usize{ max_streams, max_manifest_entries }) |capacity| {
+        try std.testing.expect(!slotCapacityReached(capacity - 1, capacity));
+        try std.testing.expect(slotCapacityReached(capacity, capacity));
+        try std.testing.expect(slotCapacityReached(capacity + 1, capacity));
+        try std.testing.expect(slotCapacityReached(std.math.maxInt(usize), capacity));
+    }
+}
+
 fn findStream(streams: *[max_streams]Stream, identity: StreamIdentity, create: bool) !*Stream {
-    for (streams) |*stream| if (stream.used and sameStream(stream.identity, identity)) return stream;
+    var used: usize = 0;
+    for (streams) |*stream| {
+        if (stream.used and sameStream(stream.identity, identity)) return stream;
+        used += @intFromBool(stream.used);
+    }
     if (!create) return error.StreamNotFound;
+    if (slotCapacityReached(used, max_streams)) return error.StreamCapacity;
     for (streams) |*stream| if (!stream.used) {
         stream.* = .{ .used = true, .identity = identity, .journal = journal.Journal.init() };
         return stream;
@@ -374,8 +392,13 @@ fn findStream(streams: *[max_streams]Stream, identity: StreamIdentity, create: b
 }
 
 fn findManifest(entries: *[max_manifest_entries]ManifestEntry, identity: StreamIdentity, segment_index: u32, create: bool) !*ManifestEntry {
-    for (entries) |*entry| if (entry.used and sameStream(entry.identity, identity) and entry.segment_index == segment_index) return entry;
+    var used: usize = 0;
+    for (entries) |*entry| {
+        if (entry.used and sameStream(entry.identity, identity) and entry.segment_index == segment_index) return entry;
+        used += @intFromBool(entry.used);
+    }
     if (!create) return error.ManifestEntryMissing;
+    if (slotCapacityReached(used, max_manifest_entries)) return error.ManifestCapacity;
     for (entries) |*entry| if (!entry.used) {
         entry.* = .{ .used = true, .identity = identity, .segment_index = segment_index };
         return entry;

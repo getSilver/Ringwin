@@ -1,0 +1,4 @@
+1/2 main.test_0...OK
+2/2 continuous_account_acceptance.test.09 four actual Owners enforce one shared account ceiling and retain shard reservations through recovery...continuous shared account owners=4 live=4 terminal=0 sdk_sends=0 gross=9100 ceiling_reject=preserved recovered=equal
+OK
+All 2 tests passed.

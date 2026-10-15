@@ -268,7 +268,7 @@ pub const Trace = struct {
         if ((kind == .economic_open_commitment) != (economic_digest != null)) return error.InvalidTrace;
         const sequence = try std.math.add(u64, self.last_sequence, 1);
         try self.validate();
-        if (self.len == self.events.len) return error.TraceFull;
+        if (traceCapacityReached(self.len)) return error.TraceFull;
         const fact: Fact = .{ .sequence = sequence, .kind = kind, .identity = identity, .reject_reason = reason, .economic_open_digest = economic_digest };
         self.events[self.len] = fact;
         self.len += 1;
@@ -276,6 +276,17 @@ pub const Trace = struct {
         self.history_head = factHead(self.history_head, fact);
     }
 };
+
+fn traceCapacityReached(count: usize) bool {
+    return count >= @typeInfo(@FieldType(Trace, "events")).array.len;
+}
+
+test "09 boundary Trace guard rejects full and excess counts without populating facts" {
+    try std.testing.expect(!traceCapacityReached(255));
+    try std.testing.expect(traceCapacityReached(256));
+    try std.testing.expect(traceCapacityReached(257));
+    try std.testing.expect(traceCapacityReached(std.math.maxInt(usize)));
+}
 
 pub const MarketHealth = enum(u8) { initializing, healthy, gap };
 /// Stable decision rejection taxonomy.  The trace may group these into a

@@ -14,13 +14,15 @@ pub const max_intent_history = 2 * max_orders;
 pub const max_tombstones = 2;
 
 fn orderCapacityReached(live_count: usize, total_count: usize) bool {
-    return live_count >= max_live_orders or total_count == max_orders;
+    return live_count >= max_live_orders or total_count >= max_orders;
 }
 
 test "OMS order capacity guard checks numeric boundaries without order population" {
     try std.testing.expect(!orderCapacityReached(1023, max_orders - 1));
     try std.testing.expect(orderCapacityReached(1024, max_orders - 1));
     try std.testing.expect(orderCapacityReached(0, max_orders));
+    try std.testing.expect(orderCapacityReached(0, max_orders + 1));
+    try std.testing.expect(orderCapacityReached(max_live_orders + 1, max_orders - 1));
     try std.testing.expect(!orderCapacityReached(0, max_orders - 1));
 }
 

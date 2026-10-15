@@ -1,0 +1,5 @@
+1/4 continuous_backpressure_acceptance.test.continuous backpressure closed risk still accepts legal reports protective cancel reconciliation and faults...OK
+2/4 continuous_backpressure_acceptance.test.continuous backpressure history timeout retains both lanes while fills reconciliation and faults progress then retries recover...OK
+3/4 continuous_backpressure_acceptance.test.continuous backpressure Unknown accepted command survives Store recovery with zero resend...OK
+4/4 continuous_backpressure_acceptance.test.continuous backpressure inadmissible Fill preserves caller input and unprocessed suffix with committed economics on recovery...OK
+All 4 tests passed.

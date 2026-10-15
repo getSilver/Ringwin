@@ -1,0 +1,13 @@
+verified existing frozen ReleaseSafe build; tests have not been skipped
+09-final-v1-full-releasesafe exit=0 source=7d70c32ad257806e99695fa9692822373977ca2c9410695be1541afd9627fc02
+09-final-v1-full-debug-build exit=0 source=7d70c32ad257806e99695fa9692822373977ca2c9410695be1541afd9627fc02
+09-final-v1-full-debug exit=0 source=7d70c32ad257806e99695fa9692822373977ca2c9410695be1541afd9627fc02
+09-final-v1-app-build exit=0 source=7d70c32ad257806e99695fa9692822373977ca2c9410695be1541afd9627fc02
+09-final-v1-cli-build exit=0 source=7d70c32ad257806e99695fa9692822373977ca2c9410695be1541afd9627fc02
+09-final-v1-app-offline-fixture exit=0 source=7d70c32ad257806e99695fa9692822373977ca2c9410695be1541afd9627fc02
+09-final-v1-app-windows-chain-test exit=0 source=7d70c32ad257806e99695fa9692822373977ca2c9410695be1541afd9627fc02
+09-final-v1-cli-offline-fixture exit=0 source=7d70c32ad257806e99695fa9692822373977ca2c9410695be1541afd9627fc02
+09-final-v1-cli-windows-chain-test exit=0 source=7d70c32ad257806e99695fa9692822373977ca2c9410695be1541afd9627fc02
+09-final-v1-functional-sample-build exit=0 source=7d70c32ad257806e99695fa9692822373977ca2c9410695be1541afd9627fc02
+09-final-v1-functional-sample exit=0 source=7d70c32ad257806e99695fa9692822373977ca2c9410695be1541afd9627fc02
+09 acceptance commands completed; audit and reviews required before closure

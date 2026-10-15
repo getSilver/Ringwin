@@ -231,6 +231,19 @@ fn canonicalPayloadDigest(event: canonical.Payload) ![Sha256.digest_length]u8 {
 }
 const max_canonical_ingress_streams = 16;
 
+fn ingressAdmissionFull(count: usize, capacity: usize) bool {
+    return count >= capacity;
+}
+
+test "09 canonical stream and deferred admission numeric boundaries preserve the final free slot" {
+    for ([_]usize{ max_canonical_ingress_streams, 64 }) |capacity| {
+        try std.testing.expect(!ingressAdmissionFull(capacity - 1, capacity));
+        try std.testing.expect(ingressAdmissionFull(capacity, capacity));
+        try std.testing.expect(ingressAdmissionFull(capacity + 1, capacity));
+        try std.testing.expect(ingressAdmissionFull(std.math.maxInt(usize), capacity));
+    }
+}
+
 pub const TradingShard = struct {
     pending_history_candidate: ?cold.PendingCandidate = null,
     pending_history_member_index: ?u8 = null,
@@ -520,7 +533,7 @@ pub const TradingShard = struct {
         if (!try self.canonicalInputWasAdmissible(input, input_digest)) return error.StaleCanonicalIdentity;
         for (self.deferred_history_admissions[0..self.deferred_history_admission_count]) |admission|
             if (std.meta.eql(admission.identity, input.venue.envelope.identity) and std.mem.eql(u8, &admission.original_input_digest, &input_digest)) return;
-        if (self.deferred_history_admission_count == self.deferred_history_admissions.len) return error.HistoryAdmissionCapacity;
+        if (ingressAdmissionFull(self.deferred_history_admission_count, self.deferred_history_admissions.len)) return error.HistoryAdmissionCapacity;
         var order_id = historyOrderUpdate(input) orelse 0;
         if (input.venue.event == .fill) order_id = std.math.cast(u64, input.venue.event.fill.order) orelse return error.IdentityOutOfRange;
         if (input.venue.event == .order_dispatch_result) for (self.oms.command_history[0..self.oms.command_history_count]) |command| {
@@ -2913,7 +2926,7 @@ pub const TradingShard = struct {
             if (record.envelope.identity.sequence < self.canonical_ingress_cursors[index].identity.sequence)
                 return error.StaleCanonicalIdentity;
         const target_index = cursor_index orelse blk: {
-            if (self.canonical_ingress_cursor_count == self.canonical_ingress_cursors.len)
+            if (ingressAdmissionFull(self.canonical_ingress_cursor_count, self.canonical_ingress_cursors.len))
                 return error.CanonicalStreamSetFull;
             const index = self.canonical_ingress_cursor_count;
             self.canonical_ingress_cursor_count += 1;

@@ -50,13 +50,16 @@ Status: active
 12. [封存容量闭合证据并交接生产资格](issues/12-seal-capacity-closure-evidence.md) — blocked by 10, 11
 
 依赖主干：01 → 02 → 03；03 后分为 04、05 → 06 → 07、08 三支；04/07/08 → 09；09 → 10 与 11；10/11 → 12。
-01–08合同、权威屏障、检查点、观察选择及订单/发送/成交费用/资金费账本对账/控制账户协调历史归档功能已完成；09–12尚未实现或验收，只有 blocker 全部完成的票可执行。
+01–09合同、权威屏障、检查点、观察选择、各历史归档及小规模订单/安全背压功能已完成；10–12尚未验收，只有 blocker 全部完成的票可执行。
 
 ## Frontier
 
-- [09 贯通千单负载与安全背压](issues/09-qualify-live-order-capacity-and-backpressure.md)
+- [10 验证 Windows 文件持久化与持续恢复](issues/10-verify-windows-file-recovery.md)
+- [11 验证 Linux 文件持久化与持续恢复](issues/11-verify-linux-file-recovery.md)
 
 ## Decisions so far
+
+- 2026-10-16：09小规模功能验收完成，见[09证据](09-evidence.md)。最终110份源码7d70c32a，完整Debug/ReleaseSafe串行各616/616、应用64MiB/CLI256MiB同源码重建及两个离线模式退出0，独立功能样本9/9与131项身份/日志/五产物审计通过；独立Standards/Spec无剩余确认P1/P2。真实三类别、四片十轮非零经济接管、共享账户ceiling、计数宽度/纯边界、安全背压及零重发完成。测试进程RSS和显式结构复制不作为预算通过，实际栈/索引成本仍未测；千单、压力、目标平台性能及生产资格deferred。10/11成为独立Frontier，本次仅关闭并提交09，没有提前执行平台任务。
 
 - 2026-10-16：08小规模功能验收完成，见[08证据](08-evidence.md)。最终107份源码1ac484f6，完整Debug/ReleaseSafe串行各602/602、应用64MiB/CLI256MiB同源码重建及各两个离线模式退出0，149项身份/日志/产物/十轮输出审计通过；独立Standards/Spec无剩余确认P1/P2。控制、策略fence、gate/latch、forced全source/ledger/ack、账户协调和路由历史持续承接，保留风险引用/锁存/未完成协调及token/generation高水位。09为唯一Frontier，仍按每类live/terminal跨全部分片各不超过100的小规模功能口径执行；千单、压力/资源、Venue和平台生产资格未取得。
 
@@ -82,7 +85,7 @@ Status: active
   本波容量合同平台无关；两个平台各自验证持久化、安全、性能和恢复，不以 Linux 通过作为 Windows 的前提。
 
 - 2026-10-08：用户确认先完成计划与本地拆分，按每分片 1,024 个同时存活订单设计。
-- 当前源码基线 HEAD 为 9f47ae6f，工作区含既有修改；实施与证据封存时重新记录完整源码身份。
+- 计划阶段源码基线 HEAD 为 9f47ae6f，工作区含既有修改；各实施票按其证据重新记录完整源码身份，09最终为7d70c32a。
 - 当前观察到 OMS 8 个热槽位/2 个墓碑、Trace 256 条、经济事实 32 条/账本事务 64 条，
   DurableStore segment 192 KiB/snapshot 64 KiB/manifest 32 项；这些是源码现状而非目标配置。
 - 既有终态墓碑实现只证明有界归档和耗尽时 RecoveryOnly；本波补齐持续回收与历史证据链。
@@ -110,7 +113,7 @@ Linux 路径沿用 [Linux 生产资格地图](../production-readiness/map.md)，
 
 ## Not yet verified
 
-- 合成负载与容量/保留预算已在 [容量合同](capacity-contract.md) 冻结，执行口径按用户最新功能验证要求更新；01–07已完成，控制与平台恢复等剩余功能尚待08–12，未授予压力或资源资格。
+- 合成负载与容量/保留预算已在 [容量合同](capacity-contract.md) 冻结，执行口径按用户最新功能验证要求更新；01–09小规模功能已完成，平台文件恢复与证据封存尚待10–12，未授予千单、压力或资源资格。
 - ADR0011已显式演进ADR0009；票02保留完整有序Trace，票03在独立恢复验收和格式身份下引入轮转与历史承接。
 - Windows/Linux各自的实际文件、性能、恢复及后续生产资格证据未取得。
 

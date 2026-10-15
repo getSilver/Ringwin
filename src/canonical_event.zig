@@ -305,7 +305,7 @@ pub const OrderCommandBatch = struct {
     len: u8 = 0,
 
     pub fn append(self: *OrderCommandBatch, command: OrderCommand) !void {
-        if (self.len == self.commands.len) return error.OrderBatchFull;
+        if (batchCapacityReached(self.len, max_order_commands_per_batch)) return error.OrderBatchFull;
         self.commands[self.len] = command;
         self.len += 1;
     }
@@ -686,7 +686,7 @@ pub const AdapterOutputBatch = struct {
     len: u8 = 0,
 
     pub fn append(self: *AdapterOutputBatch, event: EventRecord) !void {
-        if (self.len == self.events.len) return error.AdapterOutputFull;
+        if (batchCapacityReached(self.len, max_events_per_adapter_batch)) return error.AdapterOutputFull;
         self.events[self.len] = event;
         self.len += 1;
     }
@@ -695,6 +695,19 @@ pub const AdapterOutputBatch = struct {
         return self.events[0..self.len];
     }
 };
+
+fn batchCapacityReached(count: usize, capacity: usize) bool {
+    return count >= capacity;
+}
+
+test "09 boundary Adapter batches reject full and excess counts without populating output" {
+    for ([_]usize{ max_order_commands_per_batch, max_events_per_adapter_batch }) |capacity| {
+        try std.testing.expect(!batchCapacityReached(capacity - 1, capacity));
+        try std.testing.expect(batchCapacityReached(capacity, capacity));
+        try std.testing.expect(batchCapacityReached(capacity + 1, capacity));
+        try std.testing.expect(batchCapacityReached(std.math.maxInt(usize), capacity));
+    }
+}
 
 test "decimal conversion is lossless and exact" {
     const value = try Decimal.parse("-12.3400");

@@ -1,0 +1,38 @@
+{
+  "recorded_utc": "2026-10-15T19:25:30.407112+00:00",
+  "source_tree_sha256": "7d70c32ad257806e99695fa9692822373977ca2c9410695be1541afd9627fc02",
+  "zig": "0.17.0-dev.315+5b647b792",
+  "artifacts": [
+    {
+      "path": ".scratch/core-continuous-capacity/09-final-v1-full-releasesafe.exe",
+      "bytes": 116858368,
+      "sha256": "be24a00675421f9b4fd23199a3dbdf6dd0fe76d0cfb88cbccc0344a34d59d02e",
+      "pe_stack_reserve_bytes": 268435456
+    },
+    {
+      "path": ".scratch/core-continuous-capacity/09-final-v1-full-debug.exe",
+      "bytes": 228774400,
+      "sha256": "1efe776d4b66cd08e3a52e3af651adfd92b53967a63d07a88cb5446016bcf578",
+      "pe_stack_reserve_bytes": 268435456
+    },
+    {
+      "path": "zig-out/bin/ringwin.exe",
+      "bytes": 68481024,
+      "sha256": "896f75b097b1d7d30265ac6d0be7214290233922b1b363782b3b0f99169c2019",
+      "pe_stack_reserve_bytes": 67108864
+    },
+    {
+      "path": ".scratch/core-continuous-capacity/09-final-v1-cli.exe",
+      "bytes": 68481024,
+      "sha256": "056e7518b97a9ae40154cc3a7085989afc10eaddd8415be4dd356f565692786d",
+      "pe_stack_reserve_bytes": 268435456
+    },
+    {
+      "path": ".scratch/core-continuous-capacity/09-final-v1-functional-sample.exe",
+      "bytes": 50307072,
+      "sha256": "79d4f0f0bf80197f312fc9dc54f3e5e6a44c538331172d941cf66fc678c61bcf",
+      "pe_stack_reserve_bytes": 268435456
+    }
+  ],
+  "scope": "functional artifacts only; no capacity pressure or production qualification"
+}

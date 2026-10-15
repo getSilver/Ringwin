@@ -238,5 +238,9 @@ test {
     _ = @import("coordinator_safety_acceptance.zig");
     _ = @import("coordination_gateway_acceptance.zig");
     _ = @import("forced_archive_acceptance.zig");
+    _ = @import("trading_shard_event.zig");
+    _ = @import("continuous_capacity_acceptance.zig");
+    _ = @import("continuous_backpressure_acceptance.zig");
+    _ = @import("continuous_account_acceptance.zig");
     _ = raw_ingress;
 }

@@ -1,0 +1,5 @@
+1/4 main.test_0...OK
+2/4 recovery_cutover.test.09 recovery order evidence count represents the full resident domain without population...OK
+3/4 account_coordinator.test.09 coordinator summary count domain admits 1024 and rejects impossible totals without orders...OK
+4/4 account_coordinator.test.09 coordinator widened summary round trips new snapshot and tail and refuses retired formats...OK
+All 4 tests passed.

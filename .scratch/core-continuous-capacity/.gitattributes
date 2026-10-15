@@ -2,3 +2,11 @@
 03-*.log binary
 04-*.log binary
 05-*.log binary
+# Frontier 09 capture hashes bind native bytes; retain CRLF without disabling
+# checks for actual trailing spaces in structured evidence or capture scripts.
+09-*.log binary
+frontier09-*.log binary
+09-*.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+09-*.jsonl -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+09-*.md whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+*-09-*.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

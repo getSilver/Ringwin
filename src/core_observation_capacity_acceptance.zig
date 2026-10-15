@@ -183,7 +183,10 @@ fn capability(route: usize, index: usize) @import("trading_shard_event.zig").Cap
     return .{ .exchange_account = 100 + route, .instrument = instrument(route, index), .venue = venues[route], .environment = .simulation, .product = product(index), .version = 1, .rules_version = 1, .config_version = 1, .adapter_session = 1, .max_dispatch_age_ns = 1_000_000, .supports_place = true, .supports_cancel = true, .supports_native_amend = false, .supports_venue_reduce_only = true, .supports_post_only = false, .supports_market_protection = false };
 }
 fn intent(owner: *const demo.Owner, route: usize, index: usize, sequence: u64) host.OrderIntent {
-    return .{ .strategy_identity = 1, .intent_sequence = sequence, .strategy_cursor = owner.shard.authoritativeBarrier(), .config_version = 1, .activation_identity = 1, .portfolio_identity = 1, .exchange_account_identity = 100 + route, .instrument_identity = instrument(route, index), .side = .buy, .order_type = .limit, .time_in_force = .good_til_canceled, .portfolio_reduce_only = false, .quantity = 100, .limit_price_micros = @intCast(askTicks(index) * tick(index)) };
+    // Funding: spot0 long / perpetual75 short, with the same base quantity.
+    // Cross-Venue: perpetual76 long on route0 / short on route1.
+    // Remaining selected instruments carry synthetic resting quotes.
+    return .{ .strategy_identity = 1, .intent_sequence = sequence, .strategy_cursor = owner.shard.authoritativeBarrier(), .config_version = 1, .activation_identity = 1, .portfolio_identity = 1, .exchange_account_identity = 100 + route, .instrument_identity = instrument(route, index), .side = if (index == 75 or (route == 1 and index == 76)) .sell else .buy, .order_type = .limit, .time_in_force = .good_til_canceled, .portfolio_reduce_only = false, .quantity = if (index == 0) 1_000_000 else 100, .limit_price_micros = @intCast(askTicks(index) * tick(index)) };
 }
 fn toggle(owner: *demo.Owner, route: usize, index: usize, enabled: bool, identity: u64) !void {
     _ = try apply(owner, .{ .instrument_trading_authorization = .{
@@ -218,24 +221,25 @@ fn partialFill(owner: *demo.Owner, adapter: *RestingVenue, command: trading.Orde
         .venue_trade = try canonical.VenueTradeRef.init(venues[route], text),
         .instrument = command.instrument,
         .exchange_account = 100 + route,
-        .side = .buy,
-        .quantity = .{ .instrument = command.instrument, .rules_version = 1, .lots = 10 },
+        .side = if (command.side == .buy) .buy else .sell,
+        .quantity = .{ .instrument = command.instrument, .rules_version = 1, .lots = if (index == 0) 100_000 else 10 },
         .price = .{ .instrument = command.instrument, .rules_version = 1, .ticks = askTicks(index) },
         .fee = if (index == 1) .{ .asset = 1000, .atoms = 1 } else .{ .asset = 1, .atoms = 0 },
         .liquidity = .taker,
     } };
     try private(owner, adapter, fill);
     const economic = &owner.shard.economic_projection;
-    try std.testing.expectEqual(@as(i64, 10), economic.portfolio.positionForInstrument(command.instrument).quantity);
-    try std.testing.expectEqual(@as(i64, 10), economic.exchange.positionForInstrument(command.instrument).quantity);
-    if (index < 75) try std.testing.expectEqual(@as(i128, 10 * (1 + index % 3)), economic.portfolio.spotInventoryAtoms(1000 + index));
+    const expected_quantity: i64 = if (index == 0) 100_000 else if (index == 75 or (route == 1 and index == 76)) -10 else 10;
+    try std.testing.expectEqual(expected_quantity, economic.portfolio.positionForInstrument(command.instrument).quantity);
+    try std.testing.expectEqual(expected_quantity, economic.exchange.positionForInstrument(command.instrument).quantity);
+    if (index < 75) try std.testing.expectEqual(@as(i128, if (index == 0) 100_000 else 10 * (1 + index % 3)), economic.portfolio.spotInventoryAtoms(1000 + index));
     if (index == 1) {
-        try std.testing.expectEqual(@as(i128, 9), economic.portfolio.spotInventoryAtoms(1000));
-        try std.testing.expectEqual(@as(i128, 9), economic.exchange.spotInventoryAtoms(1000));
+        try std.testing.expectEqual(@as(i128, 99_999), economic.portfolio.spotInventoryAtoms(1000));
+        try std.testing.expectEqual(@as(i128, 99_999), economic.exchange.spotInventoryAtoms(1000));
         const transactions = economic.ledger_count;
         try private(owner, adapter, fill);
         try std.testing.expectEqual(transactions, owner.shard.economic_projection.ledger_count);
-        try std.testing.expectEqual(@as(i128, 9), owner.shard.economic_projection.portfolio.spotInventoryAtoms(1000));
+        try std.testing.expectEqual(@as(i128, 99_999), owner.shard.economic_projection.portfolio.spotInventoryAtoms(1000));
         try std.testing.expectEqual(@as(i64, 10), owner.shard.economic_projection.portfolio.positionForInstrument(command.instrument).quantity);
     }
 }
@@ -548,6 +552,14 @@ test "Observation capacity 500 combinations four continuous Owners retain 100 se
         for (0..125) |index| if (selected(index)) {
             const sequence = 10_000 + index;
             const command = (try apply(owner, .{ .external_order_intent = intent(owner, route, index, sequence) }, sequence)) orelse return error.MissingSelectedOrder;
+            // Funding entry is long spot / short perpetual; the other
+            // perpetual pair is long route 0 / short route 1. Each leg must
+            // carry its own account, Venue and risk qualification.
+            if (index == 75 or (route == 1 and index == 76)) try std.testing.expectEqual(trading.oms.Side.sell, command.side);
+            try std.testing.expectEqual(@as(u128, 100 + route), command.authority.exchange_account);
+            try std.testing.expect(command.authority.complete());
+            try std.testing.expect(command.reservation.atoms > 0);
+            try std.testing.expectEqual(instrument(route, index), command.instrument);
             if (index == 90) {
                 try dispatch(owner, &gateways[route], &adapters[route], command);
                 try toggle(owner, route, index, false, 20_000);
@@ -589,10 +601,12 @@ test "Observation capacity 500 combinations four continuous Owners retain 100 se
         try std.testing.expectEqual(@as(u8, 125), restored.shard.canonical_account.position_count);
         try std.testing.expectEqual(@as(u8, 50), restored.shard.canonical_account.margin_count);
         try std.testing.expectEqual(@as(u8, 26), restored.shard.oms.order_count);
-        for ([_]usize{ 0, 1, 75, 76 }) |index|
-            try std.testing.expectEqual(@as(i64, 10), restored.shard.economic_projection.portfolio.positionForInstrument(instrument(route, index)).quantity);
-        try std.testing.expectEqual(@as(i128, 9), restored.shard.economic_projection.portfolio.spotInventoryAtoms(1000));
-        try std.testing.expectEqual(@as(i128, 9), restored.shard.economic_projection.exchange.spotInventoryAtoms(1000));
+        for ([_]usize{ 0, 1, 75, 76 }) |index| {
+            const expected_quantity: i64 = if (index == 0) 100_000 else if (index == 75 or (route == 1 and index == 76)) -10 else 10;
+            try std.testing.expectEqual(expected_quantity, restored.shard.economic_projection.portfolio.positionForInstrument(instrument(route, index)).quantity);
+        }
+        try std.testing.expectEqual(@as(i128, 99_999), restored.shard.economic_projection.portfolio.spotInventoryAtoms(1000));
+        try std.testing.expectEqual(@as(i128, 99_999), restored.shard.economic_projection.exchange.spotInventoryAtoms(1000));
         try std.testing.expectError(error.NotSent, gateways[route].sendFromShard(&restored.shard, restored.shard.oms.command_history[0].command_id, 2));
         try std.testing.expect(feeds[route].source.sequence > 1000);
         var foreign = fixture.canonicalAt(40_000, feeds[route].source.sequence + 1, .{ .market_data_health_changed = .{
@@ -620,5 +634,25 @@ test "Observation capacity 500 combinations four continuous Owners retain 100 se
         } } } }));
         try std.testing.expectEqualSlices(u8, &before_overflow, &restored.shard.canonicalStateDigest());
     }
+    // Both compositions are real partially filled orders on independent
+    // public admission and dispatch paths, not atomic exchange transactions.
+    for (owners, 0..) |*owner, route| {
+        const spot = owner.shard.instrument_registry.get(instrument(route, 0)).?;
+        const swap = owner.shard.instrument_registry.get(instrument(route, 75)).?;
+        try std.testing.expectEqual(@import("risk.zig").Product.spot, spot.product);
+        try std.testing.expectEqual(@import("risk.zig").Product.isolated_linear_usdt, swap.product);
+        try std.testing.expectEqual(spot.rules.base_asset, swap.rules.base_asset);
+        try std.testing.expectEqual(@as(i128, 100_000) * spot.rules.quantity_numerator * swap.rules.quantity_denominator, @as(i128, 10) * swap.rules.quantity_numerator * spot.rules.quantity_denominator);
+        try std.testing.expectEqual(venues[route], adapters[route].source.venue_identity);
+        try std.testing.expectEqual(@as(u128, 100 + route), adapters[route].source.account);
+    }
+    const long = owners[0].shard.instrument_registry.get(instrument(0, 76)).?;
+    const short = owners[1].shard.instrument_registry.get(instrument(1, 76)).?;
+    try std.testing.expect(long.venue != short.venue);
+    try std.testing.expectEqual(long.rules.base_asset, short.rules.base_asset);
+    try std.testing.expectEqual(@as(i128, long.rules.quantity_numerator) * short.rules.quantity_denominator, @as(i128, short.rules.quantity_numerator) * long.rules.quantity_denominator);
+    try std.testing.expectEqual(@as(i64, 10), owners[0].shard.economic_projection.portfolio.positionForInstrument(long.instrument).quantity);
+    try std.testing.expectEqual(@as(i64, -10), owners[1].shard.economic_projection.portfolio.positionForInstrument(short.instrument).quantity);
+    std.debug.print("continuous classes selected_quotes=true funding_spot_perpetual_pairs=4 cross_venue_pairs=1 independent_risk=true matched_base_quantity=true\n", .{});
     std.debug.print("observation_capacity: combinations=500 selected_live=100 owners=4 max_snapshot_bytes={d} shard_bytes={d}\n", .{ max_encoded, @sizeOf(trading.TradingShard) });
 }

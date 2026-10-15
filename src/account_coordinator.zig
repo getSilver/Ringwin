@@ -3,10 +3,14 @@ const durable = @import("durable_store.zig");
 const trading = @import("trading_shard.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const snapshot_magic: u64 = 0x54434341574e4952;
-const coordinator_snapshot_version: u16 = 8;
+const coordinator_snapshot_version: u16 = 9;
 const history = @import("business_history.zig");
 const codec = @import("snapshot_codec.zig");
 const account_margin_gate_identity: u128 = 0x414343544d415247;
+
+fn summaryOrderCountsValid(open: u16, unknown: u16) bool {
+    return @as(u32, open) + unknown <= trading.oms.max_live_orders;
+}
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
     return trading.applyStable(shard, stable_journal, .{ .core = input });
@@ -40,8 +44,8 @@ pub const ShardSummary = struct {
     spot_asset_atoms: i128 = 0,
     swap_quantity: i64,
     cash_atoms: i128,
-    open_orders: u8,
-    unknown_orders: u8,
+    open_orders: u16,
+    unknown_orders: u16,
     local_gate_closed: bool,
     spot_margin_atoms: i128 = 0,
     exchange_margin_atoms: i128 = 0,
@@ -358,8 +362,8 @@ pub fn shardSummaryFromShard(
         return error.InvalidShardSummary;
     const rules_version = @min(shard.instrument_rules_version, shard.margin_rules_version);
     if (rules_version == 0 or shard.portfolio_identity == 0) return error.InvalidShardSummary;
-    var open_orders: u8 = 0;
-    var unknown_orders: u8 = 0;
+    var open_orders: u16 = 0;
+    var unknown_orders: u16 = 0;
     for (shard.oms.orders[0..shard.oms.order_count]) |order| switch (order.state) {
         .unknown => unknown_orders += 1,
         .filled, .canceled, .rejected => {},
@@ -612,7 +616,8 @@ pub const AccountCoordinator = struct {
     pub fn publishSummary(self: *AccountCoordinator, identity: u128, summary: ShardSummary) !bool {
         if (identity == 0 or summary.decision_domain == 0 or summary.virtual_portfolio == 0 or
             summary.exchange_account != self.exchange_account or summary.shard_sequence == 0 or
-            summary.rules_version == 0 or summary.reservation_atoms < 0)
+            summary.rules_version == 0 or summary.reservation_atoms < 0 or
+            !summaryOrderCountsValid(summary.open_orders, summary.unknown_orders))
             return error.InvalidShardSummary;
         const index: usize = @intFromEnum(summary.shard_id);
         const known = &self.summaries[index];
@@ -639,7 +644,7 @@ pub const AccountCoordinator = struct {
     /// Computes a stable digest of coordination-owned state only.
     pub fn digest(self: *const AccountCoordinator) [Sha256.digest_length]u8 {
         var hasher = Sha256.init(.{});
-        hasher.update("coordinator-history-v8");
+        hasher.update("coordinator-history-v9");
         if (self.history_root) |root| hasher.update(&root.root_digest);
         var gateway_bytes: [1024]u8 = undefined;
         digestInt(&hasher, u128, self.gateway_ownership.exchange_account);
@@ -1360,6 +1365,7 @@ pub const AccountCoordinator = struct {
                 else
                     try reader.takeInt(field.type, .little);
             }
+            if (!summaryOrderCountsValid(record.value.open_orders, record.value.unknown_orders)) return error.InvalidCoordinatorSnapshot;
         }
         result.lease_count = try reader.takeInt(u8, .little);
         if (result.lease_count > result.leases.len) return error.InvalidCoordinatorSnapshot;
@@ -1435,7 +1441,8 @@ pub const AccountCoordinator = struct {
 
 fn coordinationEventType(event: CoordinationEvent) u16 {
     return switch (event) {
-        .publish_summary => 1,
+        // Type 1 carried u8 counts and is retired, never guessed as this layout.
+        .publish_summary => 14,
         .allocate_leases => 2,
         .account_fact => 3,
         .margin_observation => 4,
@@ -1592,7 +1599,7 @@ fn decodeCoordinationEvent(record: trading.journal.Record) !CoordinationEvent {
         return error.InvalidCoordinationTail;
     var reader: std.Io.Reader = .fixed(record.payload);
     const event: CoordinationEvent = switch (record.type_id) {
-        1 => .{ .publish_summary = .{
+        14 => .{ .publish_summary = .{
             .identity = try reader.takeInt(u128, .little),
             .summary = try readPlainStruct(&reader, ShardSummary),
         } },
@@ -1841,6 +1848,45 @@ fn readBool(reader: *std.Io.Reader) !bool {
         1 => true,
         else => error.InvalidCoordinatorSnapshot,
     };
+}
+
+test "09 coordinator summary count domain admits 1024 and rejects impossible totals without orders" {
+    const Count = @FieldType(ShardSummary, "open_orders");
+    try std.testing.expect(std.math.maxInt(Count) >= 1025);
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    var summary = ShardSummary.fixture(.shard_0, 1, 100);
+    summary.open_orders = @intCast(@as(usize, 1024));
+    _ = try coordinator.publishSummary(1, summary);
+    summary.shard_sequence = 2;
+    summary.unknown_orders = 1;
+    const before = coordinator.digest();
+    try std.testing.expectError(error.InvalidShardSummary, coordinator.publishSummary(2, summary));
+    try std.testing.expectEqualSlices(u8, &before, &coordinator.digest());
+}
+
+test "09 coordinator widened summary round trips new snapshot and tail and refuses retired formats" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    var summary = ShardSummary.fixture(.shard_0, 1, 100);
+    summary.open_orders = 768;
+    summary.unknown_orders = 256;
+    _ = try coordinator.publishSummary(1, summary);
+    var bytes: [64 * 1024]u8 = undefined;
+    const encoded = try coordinator.snapshot(&bytes);
+    var recovered = try AccountCoordinator.restore(encoded);
+    try std.testing.expectEqualDeep(summary, recovered.summaries[0].value);
+    // Restore fences authorization; compare the retained summary, not authority mode.
+    var tail = CoordinationJournal.initAt(1);
+    summary.shard_sequence = 2;
+    try tail.append(.{ .publish_summary = .{ .identity = 2, .summary = summary } });
+    try tail.seal();
+    try replayCoordinationTail(&recovered, tail.bytes());
+    try std.testing.expectEqualDeep(summary, recovered.summaries[0].value);
+    var reader = try trading.journal.Reader.init(tail.bytes());
+    var retired = (try reader.next()).record;
+    retired.type_id = 1;
+    try std.testing.expectError(error.InvalidCoordinationTail, decodeCoordinationEvent(retired));
+    std.mem.writeInt(u16, bytes[8..10], 8, .little);
+    try std.testing.expectError(error.InvalidCoordinatorSnapshot, AccountCoordinator.restore(bytes[0..encoded.len]));
 }
 
 test "shared account protocol rejects conflicting shard summaries" {

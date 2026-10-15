@@ -1,0 +1,120 @@
+1/2 main.test_0...OK
+2/2 core_observation_capacity_acceptance.test.Observation capacity 500 combinations four continuous Owners retain 100 selected resting orders...expected .sell, found .buy
+FAIL (TestExpectedEqual)
+D:\Program Files\zig\lib\std\testing.zig:118:17: 0x7ff6e99b4a93 in expectEqualInner__anon_104936 (test_zcu.obj)
+                return error.TestExpectedEqual;
+                ^
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:83: 0x7ff6e99d1407 in expectEqual (test_zcu.obj)
+    return expectEqualInner(T, expected, actual);
+
+D:\github\Ringwin-core-continuous-capacity\src\core_observation_capacity_acceptance.zig:554:62: 0x7ff6e99d1562 in test.Observation capacity 500 combinations four continuous Owners retain 100 selected resting orders (test_zcu.obj)
+            if (index == 75 or (route == 1 and index == 76)) try std.testing.expectEqual(trading.oms.Side.sell, command.side);
+                                                             ^
+1 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\5fb06b241cf9679af6951429c3a0a04f\test.exe --seed=0x22997324

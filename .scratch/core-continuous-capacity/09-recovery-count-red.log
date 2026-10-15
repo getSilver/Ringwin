@@ -1,0 +1,11 @@
+1/2 main.test_0...OK
+2/2 recovery_cutover.test.09 recovery order evidence count represents the full resident domain without population...FAIL (TestUnexpectedResult)
+D:\Program Files\zig\lib\std\testing.zig:615:14: 0x7ff63fbd510f in expect (test_zcu.obj)
+    if (!ok) return error.TestUnexpectedResult;
+             ^
+D:\github\Ringwin-core-continuous-capacity\src\recovery_cutover.zig:18:5: 0x7ff63fbd5167 in test.09 recovery order evidence count represents the full resident domain without population (test_zcu.obj)
+    try std.testing.expect(std.math.maxInt(Count) >= trading.oms.max_orders + 1);
+    ^
+1 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\ff1e1611fc41efe35264c98b6b6eeed1\test.exe --seed=0xab4cd08c

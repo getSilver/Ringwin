@@ -489,7 +489,7 @@ test "Gateway blocks a qualified increasing risk command during a durable cold l
 }
 
 fn bootstrapOwnerInto(owner: *demo.Owner, store: durable.Store, stream: durable.StreamIdentity) !void {
-    owner.* = try demo.Owner.bootstrap(store, undefined, stream);
+    try demo.Owner.bootstrapInto(owner, store, undefined, stream);
 }
 
 /// This offline venue rests a place until cancel; every output is public canonical ingress.

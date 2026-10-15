@@ -1,0 +1,109 @@
+1/5 main.test_0...OK
+2/5 account_coordinator.test.four shard coordinator snapshot restores deterministic authority...OK
+3/5 order_capacity_acceptance.test.OMS functional archive four shards retain 25 live and 25 terminal then complete ten rounds...OMS functional shard 0: live=25, retained=25, completed=25
+OMS functional shard 1: live=25, retained=25, completed=25
+OMS functional shard 2: live=25, retained=25, completed=25
+OMS functional shard 3: live=25, retained=25, completed=25
+OMS functional shard 0: round=1, live=25, retained=0, completed=30
+OMS functional shard 1: round=1, live=25, retained=0, completed=30
+OMS functional shard 2: round=1, live=25, retained=0, completed=30
+OMS functional shard 3: round=1, live=25, retained=0, completed=30
+OMS functional shard 0: round=2, live=25, retained=0, completed=35
+OMS functional shard 1: round=2, live=25, retained=0, completed=35
+OMS functional shard 2: round=2, live=25, retained=0, completed=35
+OMS functional shard 3: round=2, live=25, retained=0, completed=35
+OMS functional shard 0: round=3, live=25, retained=0, completed=40
+OMS functional shard 1: round=3, live=25, retained=0, completed=40
+OMS functional shard 2: round=3, live=25, retained=0, completed=40
+OMS functional shard 3: round=3, live=25, retained=0, completed=40
+OMS functional shard 0: round=4, live=25, retained=0, completed=45
+OMS functional shard 1: round=4, live=25, retained=0, completed=45
+OMS functional shard 2: round=4, live=25, retained=0, completed=45
+OMS functional shard 3: round=4, live=25, retained=0, completed=45
+OMS functional shard 0: round=5, live=25, retained=0, completed=50
+OMS functional shard 1: round=5, live=25, retained=0, completed=50
+OMS functional shard 2: round=5, live=25, retained=0, completed=50
+OMS functional shard 3: round=5, live=25, retained=0, completed=50
+OMS functional shard 0: round=6, live=25, retained=0, completed=55
+OMS functional shard 1: round=6, live=25, retained=0, completed=55
+OMS functional shard 2: round=6, live=25, retained=0, completed=55
+OMS functional shard 3: round=6, live=25, retained=0, completed=55
+OMS functional shard 0: round=7, live=25, retained=0, completed=60
+OMS functional shard 1: round=7, live=25, retained=0, completed=60
+OMS functional shard 2: round=7, live=25, retained=0, completed=60
+OMS functional shard 3: round=7, live=25, retained=0, completed=60
+OMS functional shard 0: round=8, live=25, retained=0, completed=65
+OMS functional shard 1: round=8, live=25, retained=0, completed=65
+OMS functional shard 2: round=8, live=25, retained=0, completed=65
+OMS functional shard 3: round=8, live=25, retained=0, completed=65
+OMS functional shard 0: round=9, live=25, retained=0, completed=70
+OMS functional shard 1: round=9, live=25, retained=0, completed=70
+OMS functional shard 2: round=9, live=25, retained=0, completed=70
+OMS functional shard 3: round=9, live=25, retained=0, completed=70
+OMS functional shard 0: round=10, live=25, retained=0, completed=75
+OMS functional shard 1: round=10, live=25, retained=0, completed=75
+OMS functional shard 2: round=10, live=25, retained=0, completed=75
+OMS functional shard 3: round=10, live=25, retained=0, completed=75
+OK
+4/5 order_public_capacity_acceptance.test.Owner public archive four shards retain 25 live and 25 terminal through ten replacement rounds...Owner capacity shard 0: live=25, terminal=25, adapter_sends=75
+Owner capacity shard 1: live=25, terminal=25, adapter_sends=75
+Owner capacity shard 2: live=25, terminal=25, adapter_sends=75
+Owner capacity shard 3: live=25, terminal=25, adapter_sends=75
+Owner capacity shard 0: archived_terminal=25 journal_bytes=276071 history_bytes=1119558 quota=1073741824
+Owner capacity shard 1: archived_terminal=25 journal_bytes=276071 history_bytes=1119558 quota=1073741824
+Owner capacity shard 2: archived_terminal=25 journal_bytes=276071 history_bytes=1119558 quota=1073741824
+Owner capacity shard 3: archived_terminal=25 journal_bytes=276071 history_bytes=1119558 quota=1073741824
+Owner capacity all 4 shards: round=1, live_each=25, cumulative_terminal_each=30
+Owner capacity all 4 shards: round=2, live_each=25, cumulative_terminal_each=35
+Owner capacity all 4 shards: round=3, live_each=25, cumulative_terminal_each=40
+Owner capacity all 4 shards: round=4, live_each=25, cumulative_terminal_each=45
+Owner capacity all 4 shards: round=5, live_each=25, cumulative_terminal_each=50
+Owner capacity all 4 shards: round=6, live_each=25, cumulative_terminal_each=55
+Owner capacity all 4 shards: round=7, live_each=25, cumulative_terminal_each=60
+Owner capacity all 4 shards: round=8, live_each=25, cumulative_terminal_each=65
+Owner capacity all 4 shards: round=9, live_each=25, cumulative_terminal_each=70
+Owner capacity all 4 shards: round=10, live_each=25, cumulative_terminal_each=75
+OK
+5/5 continuous_capacity_acceptance.test.Continuous capacity four shards retain 500 observation projections and recover ten balanced and hotspot rounds without resend...continuous layout owner=23055808 shard=22662224 oms=15488768 gateway=75811648 adapter_batch=347152 canonical_record=10848 command=640 fixture=1084640
+continuous seed=0x20261008 round=1 shard=0 live=1 terminal=0 trace=1 ingress=135 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=297 snapshot_bytes=770915 history_generation=1 history_root=dee40e40e6046e7e50ad83a77b1b26f4817c3423eeff6c5cc3a294fa59f1a3c5 sends=3 submit_samples=3 submit_total_ns=258467700
+continuous seed=0x20261008 round=1 shard=1 live=1 terminal=0 trace=1 ingress=135 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=297 snapshot_bytes=770915 history_generation=1 history_root=3021a32e2043c3215e9ad80d5cc5cfae9c002ab5e0ff5c14f9ebb20ef4e89c65 sends=3 submit_samples=3 submit_total_ns=252417400
+continuous seed=0x20261008 round=1 shard=2 live=1 terminal=0 trace=1 ingress=135 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=297 snapshot_bytes=770915 history_generation=1 history_root=75d47113f695bd40939e62c8c74025deac336588884a6912edc747ec885f3607 sends=3 submit_samples=3 submit_total_ns=254317600
+continuous seed=0x20261008 round=1 shard=3 live=1 terminal=0 trace=1 ingress=135 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=297 snapshot_bytes=770915 history_generation=1 history_root=8e011fe3d328cd7c7f972dda1d3e8a03b8a872ed628b3a17b5f9189ce23c447e sends=3 submit_samples=3 submit_total_ns=254141300
+continuous seed=0x20261008 round=2 shard=0 live=1 terminal=0 trace=1 ingress=141 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=328 snapshot_bytes=770915 history_generation=2 history_root=57bc436d8c67148ef14af8fad56feeb3b1d3146ee2cb6b4771c726419cff253d sends=5 submit_samples=5 submit_total_ns=575228800
+continuous seed=0x20261008 round=2 shard=1 live=1 terminal=0 trace=1 ingress=141 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=328 snapshot_bytes=770915 history_generation=2 history_root=bfe4dca84f940ba01c0db1fcfa4212ffbe9c080e90ed914b2528131d6835bfa1 sends=5 submit_samples=5 submit_total_ns=572975200
+continuous seed=0x20261008 round=2 shard=2 live=1 terminal=0 trace=1 ingress=141 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=328 snapshot_bytes=770915 history_generation=2 history_root=c9e0479ac866031f32bff69741d78fa53421069908fba315412cbb4ef0b1678c sends=5 submit_samples=5 submit_total_ns=603680500
+continuous seed=0x20261008 round=2 shard=3 live=1 terminal=0 trace=1 ingress=141 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=328 snapshot_bytes=770915 history_generation=2 history_root=f8a75eeb906597c11bb30aac803c9a0f6af953a86f2e6420d33a14ebc34939b7 sends=5 submit_samples=5 submit_total_ns=594808500
+continuous seed=0x20261008 round=3 shard=0 live=1 terminal=0 trace=1 ingress=146 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=359 snapshot_bytes=770915 history_generation=3 history_root=febb4df1c79c095647dcd62ceed3004a4fbe81c30527e86df621640c3239ec41 sends=7 submit_samples=7 submit_total_ns=884566300
+continuous seed=0x20261008 round=3 shard=1 live=1 terminal=0 trace=1 ingress=146 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=359 snapshot_bytes=770915 history_generation=3 history_root=c81f4dea65542cb20c60524df60a18c8f927bbd64a41ddfb0ffadc6574de6787 sends=7 submit_samples=7 submit_total_ns=913048800
+continuous seed=0x20261008 round=3 shard=2 live=1 terminal=0 trace=1 ingress=146 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=359 snapshot_bytes=770915 history_generation=3 history_root=a5f4cedff6576f1def415a817f0d98e35dda3a5f40e3f455f95a40d6a3c61a12 sends=7 submit_samples=7 submit_total_ns=930688000
+continuous seed=0x20261008 round=3 shard=3 live=1 terminal=0 trace=1 ingress=146 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=359 snapshot_bytes=770915 history_generation=3 history_root=8a6cbc93afe318a4d7012e203fe9aef04a723a60cbcff61e8f44c13593c86d90 sends=7 submit_samples=7 submit_total_ns=929580200
+continuous seed=0x20261008 round=4 shard=0 live=1 terminal=0 trace=1 ingress=151 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=389 snapshot_bytes=770915 history_generation=4 history_root=0b92127de65e4f7f9b5dc5928ca7f3cb78796a8f8b8bdbfa27788cb529184995 sends=9 submit_samples=9 submit_total_ns=1160222400
+continuous seed=0x20261008 round=4 shard=1 live=1 terminal=0 trace=1 ingress=151 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=389 snapshot_bytes=770915 history_generation=4 history_root=43b778ce6e7af76d92be37c9182a13586f11c4cbfb02f5b2958dff6cf7622d84 sends=9 submit_samples=9 submit_total_ns=1190714400
+continuous seed=0x20261008 round=4 shard=2 live=1 terminal=0 trace=1 ingress=151 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=389 snapshot_bytes=770915 history_generation=4 history_root=7b161faf80a154d74b29b38def8e3a9612603af6933e753a0f0375c1b1b6bdc3 sends=9 submit_samples=9 submit_total_ns=1205214200
+continuous seed=0x20261008 round=4 shard=3 live=1 terminal=0 trace=1 ingress=151 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=389 snapshot_bytes=770915 history_generation=4 history_root=a0106f1bb60ea8f654c188254ac9450b43be2fbd5750220a4e148a3590368a96 sends=9 submit_samples=9 submit_total_ns=1204141400
+continuous seed=0x20261008 round=5 shard=0 live=1 terminal=0 trace=1 ingress=156 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=419 snapshot_bytes=770915 history_generation=5 history_root=17fa60c54cc3c1744a5a6dd4cd9474e9780e0a42c90480250bf2ed39601a1155 sends=11 submit_samples=11 submit_total_ns=1481532000
+continuous seed=0x20261008 round=5 shard=1 live=1 terminal=0 trace=1 ingress=156 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=419 snapshot_bytes=770915 history_generation=5 history_root=bccdee1c764dded3e28b614f38fb03317f3f044e685f9940538a576a102553e0 sends=11 submit_samples=11 submit_total_ns=1512397400
+continuous seed=0x20261008 round=5 shard=2 live=1 terminal=0 trace=1 ingress=156 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=419 snapshot_bytes=770915 history_generation=5 history_root=359ec33b3353eee2a509b7a9baed642fbb9e7e25ae10ed611feef97c66b35e9c sends=11 submit_samples=11 submit_total_ns=1523712300
+continuous seed=0x20261008 round=5 shard=3 live=1 terminal=0 trace=1 ingress=156 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=419 snapshot_bytes=770915 history_generation=5 history_root=47919791b6ee6eb26402a98fb5f989f4693e8a39257d5b9df5d6360eeb3a0c80 sends=11 submit_samples=11 submit_total_ns=1526425000
+continuous seed=0x20261008 round=6 shard=0 live=1 terminal=0 trace=1 ingress=172 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=506 snapshot_bytes=770915 history_generation=8 history_root=0882cac5482956d47b4a3de117e477e25aed9a2ff36ee8c54422b5289d07d5cb sends=17 submit_samples=17 submit_total_ns=2355918300
+continuous seed=0x20261008 round=6 shard=1 live=1 terminal=0 trace=1 ingress=162 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=451 snapshot_bytes=770915 history_generation=6 history_root=43d013ba23c5b55a9f51009c69ba7a36a2a77f04e6e2e5e680ae0798d2b1c605 sends=13 submit_samples=13 submit_total_ns=1841345700
+continuous seed=0x20261008 round=6 shard=2 live=1 terminal=0 trace=1 ingress=162 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=451 snapshot_bytes=770915 history_generation=6 history_root=5677b38393c28f5847179de2dbc6c0aab792d3d063eb0f7ced0ebb91b140bc4b sends=13 submit_samples=13 submit_total_ns=1857078900
+continuous seed=0x20261008 round=6 shard=3 live=1 terminal=0 trace=1 ingress=156 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=422 snapshot_bytes=770915 history_generation=5 history_root=47919791b6ee6eb26402a98fb5f989f4693e8a39257d5b9df5d6360eeb3a0c80 sends=11 submit_samples=11 submit_total_ns=1526425000
+continuous seed=0x20261008 round=7 shard=0 live=1 terminal=0 trace=1 ingress=188 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=592 snapshot_bytes=770915 history_generation=11 history_root=ae9567b25dbf195a8cee6a0375c43b92094f1d914d46cbbb1dd12a2849d2e5de sends=23 submit_samples=23 submit_total_ns=3271489000
+continuous seed=0x20261008 round=7 shard=1 live=1 terminal=0 trace=1 ingress=167 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=481 snapshot_bytes=770915 history_generation=7 history_root=19c61ad1427422fbd8867b78737957ddfe6d2e96f37a950b56b5c7d9b1521bfc sends=15 submit_samples=15 submit_total_ns=2153807200
+continuous seed=0x20261008 round=7 shard=2 live=1 terminal=0 trace=1 ingress=167 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=481 snapshot_bytes=770915 history_generation=7 history_root=a0b6a35f7dde24fb63999714be31625d036ab471432972fd0353688fc5f1e224 sends=15 submit_samples=15 submit_total_ns=2168615600
+continuous seed=0x20261008 round=7 shard=3 live=1 terminal=0 trace=1 ingress=156 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=425 snapshot_bytes=770915 history_generation=5 history_root=47919791b6ee6eb26402a98fb5f989f4693e8a39257d5b9df5d6360eeb3a0c80 sends=11 submit_samples=11 submit_total_ns=1526425000
+continuous seed=0x20261008 round=8 shard=0 live=1 terminal=0 trace=1 ingress=204 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=678 snapshot_bytes=770915 history_generation=14 history_root=23cf32e833986c2c83a285e11fb2ae9c4db2ce65145144891faa353ad2239bac sends=29 submit_samples=29 submit_total_ns=4233265200
+continuous seed=0x20261008 round=8 shard=1 live=1 terminal=0 trace=1 ingress=172 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=512 snapshot_bytes=770915 history_generation=8 history_root=0325ddc59ff459aa6f4b8eeac8edfac36acff04276fd2b352e8972a82eec1515 sends=17 submit_samples=17 submit_total_ns=2457483300
+continuous seed=0x20261008 round=8 shard=2 live=1 terminal=0 trace=1 ingress=172 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=512 snapshot_bytes=770915 history_generation=8 history_root=d55e99a7cd7517238e535ce107aaf7505f4dcab5eaf5c1d83ccd0893869aa8e4 sends=17 submit_samples=17 submit_total_ns=2483892600
+continuous seed=0x20261008 round=8 shard=3 live=1 terminal=0 trace=1 ingress=156 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=428 snapshot_bytes=770915 history_generation=5 history_root=47919791b6ee6eb26402a98fb5f989f4693e8a39257d5b9df5d6360eeb3a0c80 sends=11 submit_samples=11 submit_total_ns=1526425000
+continuous seed=0x20261008 round=9 shard=0 live=1 terminal=0 trace=1 ingress=219 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=763 snapshot_bytes=770915 history_generation=17 history_root=36159fedcd85cd5897cacaf9757d5a11226abc9733ee5d976e107ccc47d0e65b sends=35 submit_samples=35 submit_total_ns=5174483400
+continuous seed=0x20261008 round=9 shard=1 live=1 terminal=0 trace=1 ingress=177 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=542 snapshot_bytes=770915 history_generation=9 history_root=f17e1e6edc6a17602ba7049d4178f786fba7464e7ce5a18b86892db281b29660 sends=19 submit_samples=19 submit_total_ns=2718330400
+continuous seed=0x20261008 round=9 shard=2 live=1 terminal=0 trace=1 ingress=177 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=542 snapshot_bytes=770915 history_generation=9 history_root=7992ec28853204a42ba66d54f1c5491d690bec1c7ba77b90d94b7e4c07c164ec sends=19 submit_samples=19 submit_total_ns=2746686200
+continuous seed=0x20261008 round=9 shard=3 live=1 terminal=0 trace=1 ingress=156 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=431 snapshot_bytes=770915 history_generation=5 history_root=47919791b6ee6eb26402a98fb5f989f4693e8a39257d5b9df5d6360eeb3a0c80 sends=11 submit_samples=11 submit_total_ns=1526425000
+continuous seed=0x20261008 round=10 shard=0 live=1 terminal=0 trace=1 ingress=235 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=850 snapshot_bytes=770915 history_generation=20 history_root=ce362280545f11b7eb7a31d470da2dd1a2313b0fa00000286db2a18d5f229b5e sends=41 submit_samples=41 submit_total_ns=6035632700
+continuous seed=0x20261008 round=10 shard=1 live=1 terminal=0 trace=1 ingress=183 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=574 snapshot_bytes=770915 history_generation=10 history_root=e636e6392db34ca29f9845e3f8a6d34b0bc0b3aa0c8645ab7bf2324aad13c5f7 sends=21 submit_samples=21 submit_total_ns=3043807200
+continuous seed=0x20261008 round=10 shard=2 live=1 terminal=0 trace=1 ingress=183 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=574 snapshot_bytes=770915 history_generation=10 history_root=a1072b84d7adb0992eebd6cbe02fec6d21c4c99eab1ef5ab6fb30ae9084949b2 sends=21 submit_samples=21 submit_total_ns=3068887700
+continuous seed=0x20261008 round=10 shard=3 live=1 terminal=0 trace=1 ingress=156 ledger=0 fills=0 accepted=1 unknown=0 adapter_queue=0 barrier=434 snapshot_bytes=770915 history_generation=5 history_root=47919791b6ee6eb26402a98fb5f989f4693e8a39257d5b9df5d6360eeb3a0c80 sends=11 submit_samples=11 submit_total_ns=1526425000
+OK
+All 5 tests passed.

@@ -1,0 +1,20 @@
+windows_demo_host: stage=begin
+windows_demo_host: stage=abi
+windows_demo_host: stage=price
+windows_demo_host: stage=started
+windows_demo_host: stage=plan_sent
+windows_demo_host: stage=handshake
+windows_demo_host: stage=owner_activated
+windows_demo_host: stage=host_activated
+error: PrivateIngressRejected
+error: InvalidControlFrame
+error: InvalidDecisionSnapshotFrame
+error: InvalidSnapshotHeader
+error: DecisionSnapshotMismatch
+error: DecisionSnapshotMismatch
+windows_demo_send_failed=DecisionSnapshotMismatch
+error: DecisionSnapshotMismatch
+windows_demo_send_failed=InvalidAuthorityFacts
+error: InvalidAuthorityFacts
+error: InvalidBusinessFrame
+error: GenerationMismatch

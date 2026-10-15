@@ -13,10 +13,15 @@ fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journa
 /// Restart admission phase; only ready may later accept a fresh EnableTrading.
 pub const RecoveryPhase = enum(u8) { recovery_only, ready };
 
+test "09 recovery order evidence count represents the full resident domain without population" {
+    const Count = @FieldType(VenueEvidence, "order_count");
+    try std.testing.expect(std.math.maxInt(Count) >= trading.oms.max_orders + 1);
+}
+
 /// Exact Venue evidence required to close restart uncertainty.
 pub const VenueEvidence = struct {
     orders: [trading.oms.max_orders]VenueOrderEvidence = undefined,
-    order_count: u8 = 0,
+    order_count: u16 = 0,
     open_orders_closed: bool,
     portfolio_quantity: i64,
     exchange_quantity: i64,
@@ -190,6 +195,7 @@ fn venueEvidenceCloses(shard: trading.TradingShard, evidence: VenueEvidence) boo
 }
 
 fn sameVenueEvidence(left: VenueEvidence, right: VenueEvidence) bool {
+    if (left.order_count > left.orders.len or right.order_count > right.orders.len) return false;
     if (left.order_count != right.order_count) return false;
     for (left.orders[0..left.order_count], right.orders[0..right.order_count]) |left_order, right_order|
         if (!std.meta.eql(left_order, right_order)) return false;
