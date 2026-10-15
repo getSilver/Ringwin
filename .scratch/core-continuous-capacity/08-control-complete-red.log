@@ -1,0 +1,4 @@
+1/1 control_archive_acceptance.test.Owner control history crosses command gate latch and strategy fence bounds through recovery...FAIL (JournalFull)
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\dbab04c18606b787efca754135662cba\test.exe --seed=0xf7e69f80

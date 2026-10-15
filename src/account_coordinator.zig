@@ -3,7 +3,9 @@ const durable = @import("durable_store.zig");
 const trading = @import("trading_shard.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const snapshot_magic: u64 = 0x54434341574e4952;
-const coordinator_snapshot_version: u16 = 7;
+const coordinator_snapshot_version: u16 = 8;
+const history = @import("business_history.zig");
+const codec = @import("snapshot_codec.zig");
 const account_margin_gate_identity: u128 = 0x414343544d415247;
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
@@ -96,6 +98,7 @@ pub const AccountFactPayload = union(enum) {
 
 /// Account-wide observations normalized once before deterministic fan-out.
 pub const AccountFact = struct {
+    times: ?@import("economics.zig").FundingCoreTimes = null,
     identity: u128,
     exchange_account: u128,
     version: u64,
@@ -122,9 +125,19 @@ pub const ForcedExecutionAllocation = struct {
     count: u8,
 };
 
-const ForcedAllocationRecord = struct {
+pub const ForcedAllocationRecord = struct {
     allocation: ForcedExecutionAllocation,
     delivered_mask: u8 = 0,
+};
+
+/// Immutable complete source evidence; unused records have canonical zero values.
+pub const ForcedOwner = struct { portfolio: u128 = 0, decision_domain: u128 = 0 };
+pub const ForcedSourceHistory = struct {
+    owners: [max_shards]ForcedOwner,
+    source: AccountFact,
+    positions: [max_shards]i64,
+    allocations: [max_shards]ForcedAllocationRecord,
+    count: u8,
 };
 
 pub const ForcedSuspense = struct { quantity: i64, position_delta: i64, realized_pnl_atoms: i128, fee_atoms: i128, penalty_atoms: i128 };
@@ -160,6 +173,11 @@ pub const CoordinationEvent = union(enum) {
     tighten_leases: struct { valid_through_barrier: u64, requested_limits: [max_shards]i128 },
     forced_execution_allocation: ForcedExecutionAllocation,
     forced_delivery_ack: struct { allocation_identity: u128, slice_index: u8 },
+    forced_history_commit: history.Receipt,
+    forced_history_checked: struct { allocation: ForcedExecutionAllocation, proof: history.LookupProof },
+    forced_source_checked: struct { fact: AccountFact, proof: history.LookupProof },
+    gateway_record: struct { request: GatewayRequest, proof: ?history.LookupProof = null },
+    gateway_retire: struct { qualification: GatewayRetirement, receipt: history.Receipt },
 };
 
 /// Append-only, checksummed durable tail for inputs owned by AccountCoordinator.
@@ -173,11 +191,11 @@ pub const CoordinationJournal = struct {
 
     /// Appends one normalized coordinator input before it is applied live.
     pub fn append(self: *CoordinationJournal, event: CoordinationEvent) !void {
-        var storage: [512]u8 = undefined;
+        var storage: [trading.journal.max_payload_size]u8 = undefined;
         const encoded = try encodeCoordinationEvent(&storage, event);
         try self.stable.append(.{
             .type_id = coordinationEventType(event),
-            .schema_version = 4,
+            .schema_version = @import("production_contract.zig").journal_schema_version,
             .flags = trading.journal.input_flag,
             .sequence = try std.math.add(u64, self.stable.last_sequence, 1),
             .source_time = 0,
@@ -207,6 +225,11 @@ pub fn accountFactEvent(delivery: Delivery) !trading.CoreEvent {
         (delivery.allocation_identity == 0 or delivery.source_identity == 0)) return error.UnallocatedForcedExecution;
     return .{
         .identity = identity,
+        .source_time = if (delivery.fact.times) |times| times.source else 0,
+        .receive_time = if (delivery.fact.times) |times| times.receive else 0,
+        .monotonic_time = if (delivery.fact.times) |times| times.monotonic else 0,
+        .wall_time = if (delivery.fact.times) |times| times.wall else 0,
+        .time_presence = if (delivery.fact.times) |times| times.presence else .{},
         .payload = switch (delivery.fact.payload) {
             .account_snapshot => |snapshot| .{ .economic_account_snapshot = .{
                 .snapshot_id = identity,
@@ -391,12 +414,27 @@ pub const GatewayOutcome = struct {
     state: trading.oms.DispatchState,
 };
 
-const GatewayRecord = struct { exchange_account: u128, shard_id: ShardId, command_id: u64, order_id: u64, revision: u32, fencing_token: u64 };
+pub const GatewayRetirement = struct {
+    record: GatewayRecord,
+    source_origin: history.Origin,
+    source_barrier: u64,
+    source_digest: history.Digest,
+    order: trading.oms.OrderArchiveQualification,
+    pub fn digest(self: GatewayRetirement) history.Digest {
+        var bytes: [history.max_record_bytes]u8 = undefined;
+        return history.hash(codec.encodeBare(&bytes, self) catch unreachable);
+    }
+};
+pub const GatewayRecord = struct { exchange_account: u128, shard_id: ShardId, command_id: u64, order_id: u64, revision: u32, fencing_token: u64, command_digest: history.Digest };
+fn gatewayRecord(request: GatewayRequest) GatewayRecord {
+    var bytes: [2048]u8 = undefined;
+    return .{ .exchange_account = request.exchange_account, .shard_id = request.shard_id, .command_id = request.command.command_id, .order_id = request.command.order_id, .revision = request.command.revision, .fencing_token = request.fencing_token, .command_digest = history.hash(codec.encodeBare(&bytes, request.command) catch unreachable) };
+}
 
 /// Fixed-capacity ownership ledger used beside the sole transport Gateway.
 pub const GatewayOwnership = struct {
     exchange_account: u128 = 0,
-    records: [32]GatewayRecord = undefined,
+    records: [32]GatewayRecord = @splat(std.mem.zeroes(GatewayRecord)),
     count: u8 = 0,
     latest_fencing_tokens: [max_shards]u64 = @splat(0),
 
@@ -416,14 +454,7 @@ pub const GatewayOwnership = struct {
         if (self.count == self.records.len) return error.GatewayCapacityExceeded;
         if (self.exchange_account == 0) self.exchange_account = request.exchange_account;
         self.latest_fencing_tokens[shard_index] = request.fencing_token;
-        self.records[self.count] = .{
-            .exchange_account = request.exchange_account,
-            .shard_id = request.shard_id,
-            .command_id = request.command.command_id,
-            .order_id = request.command.order_id,
-            .revision = request.command.revision,
-            .fencing_token = request.fencing_token,
-        };
+        self.records[self.count] = gatewayRecord(request);
         self.count += 1;
         return .{ .shard_id = request.shard_id, .command_id = request.command.command_id };
     }
@@ -510,11 +541,63 @@ pub const AccountCoordinator = struct {
     reconciliation_break_identity: u128 = 0,
     forced_execution_source: ?AccountFact = null,
     forced_source_positions: [max_shards]i64 = @splat(0),
+    forced_source_owners: [max_shards]ForcedOwner = @splat(.{}),
     forced_allocations: [max_shards]ForcedAllocationRecord = undefined,
     forced_allocation_count: u8 = 0,
     completed_forced_allocations: [max_completed_forced_allocations]ForcedExecutionAllocation = undefined,
     completed_forced_allocation_count: u8 = 0,
     forced_deliveries: [max_shards * max_shards]Delivery = undefined,
+    history_root: ?history.Root = null,
+    gateway_ownership: GatewayOwnership = .{},
+
+    /// Keeps incomplete sources and their exact ACK state resident.
+    pub fn prepareForcedSourceHistory(self: *const AccountCoordinator) !ForcedSourceHistory {
+        const source = self.forced_execution_source orelse return error.ForcedSourceNotClosed;
+        if (self.suspense_forced_execution != null or self.reconciliation_break_identity != 0 or
+            self.forced_allocation_count == 0) return error.ForcedSourceNotClosed;
+        var result: ForcedSourceHistory = .{ .source = source, .owners = self.forced_source_owners, .positions = self.forced_source_positions, .allocations = @splat(.{ .allocation = .{ .identity = 0, .forced_execution_identity = 0, .count = 0 } }), .count = self.forced_allocation_count };
+        for (self.forced_allocations[0..self.forced_allocation_count], 0..) |record, index| {
+            if (record.delivered_mask != (@as(u8, 1) << @intCast(record.allocation.count)) - 1)
+                return error.ForcedSourceNotClosed;
+            result.allocations[index] = record;
+        }
+        return result;
+    }
+
+    fn commitForcedSourceHistory(self: *AccountCoordinator, receipt: history.Receipt) !void {
+        const source = try self.prepareForcedSourceHistory();
+        var bytes: [8192]u8 = undefined;
+        const qualification = history.hash(try codec.encodeBare(&bytes, source));
+        if (receipt.root.origin.stream.domain != .control or receipt.root.origin.account != self.exchange_account)
+            return error.InvalidCoordinatorHistoryOrigin;
+        const root = try history.verifyReceipt(receipt, receipt.root.origin, qualification, self.history_root);
+        self.history_root = root;
+        self.forced_execution_source = null;
+        self.forced_allocation_count = 0;
+        self.forced_source_positions = @splat(0);
+        self.forced_source_owners = @splat(.{});
+    }
+
+    pub fn accountFactHistoryRequest(self: *const AccountCoordinator, fact: AccountFact, pending_id: u128) history.LookupRequest {
+        const root = self.history_root.?;
+        var bytes: [1024]u8 = undefined;
+        const value = history.hash(codec.encodeBare(&bytes, fact) catch unreachable);
+        return .{ .pending_id = pending_id, .key = .{ .origin = root.origin, .identity = .{ .coordinator_account_fact = fact.identity } }, .candidate_payload_digest = value, .original_input_digest = value, .root_digest = root.root_digest, .epoch = root.epoch, .barrier = root.barrier };
+    }
+
+    pub fn gatewayHistoryRequest(self: *const AccountCoordinator, record: GatewayRecord, pending_id: u128) history.LookupRequest {
+        const root = self.history_root.?;
+        var bytes: [1024]u8 = undefined;
+        const value = history.hash(codec.encodeBare(&bytes, record) catch unreachable);
+        return .{ .pending_id = pending_id, .key = .{ .origin = root.origin, .identity = .{ .coordinator_gateway_command = .{ .shard = @intFromEnum(record.shard_id), .command = record.command_id } } }, .candidate_payload_digest = value, .original_input_digest = value, .root_digest = root.root_digest, .epoch = root.epoch, .barrier = root.barrier };
+    }
+
+    pub fn allocationHistoryRequest(self: *const AccountCoordinator, allocation: ForcedExecutionAllocation, pending_id: u128) history.LookupRequest {
+        const root = self.history_root.?;
+        var bytes: [1024]u8 = undefined;
+        const digest_value = history.hash(codec.encodeBare(&bytes, allocation) catch unreachable);
+        return .{ .pending_id = pending_id, .key = .{ .origin = root.origin, .identity = .{ .coordinator_forced_allocation = allocation.identity } }, .candidate_payload_digest = digest_value, .original_input_digest = digest_value, .root_digest = root.root_digest, .epoch = root.epoch, .barrier = root.barrier };
+    }
 
     /// Creates one coordinator for exactly one ExchangeAccount.
     pub fn init(exchange_account: u128, account_ceiling: i128, global_ceiling: i128) AccountCoordinator {
@@ -556,6 +639,14 @@ pub const AccountCoordinator = struct {
     /// Computes a stable digest of coordination-owned state only.
     pub fn digest(self: *const AccountCoordinator) [Sha256.digest_length]u8 {
         var hasher = Sha256.init(.{});
+        hasher.update("coordinator-history-v8");
+        if (self.history_root) |root| hasher.update(&root.root_digest);
+        var gateway_bytes: [1024]u8 = undefined;
+        digestInt(&hasher, u128, self.gateway_ownership.exchange_account);
+        digestInt(&hasher, u8, self.gateway_ownership.count);
+        for (self.gateway_ownership.latest_fencing_tokens) |token| digestInt(&hasher, u64, token);
+        for (self.gateway_ownership.records[0..self.gateway_ownership.count]) |record|
+            hasher.update(codec.encodeBare(&gateway_bytes, record) catch unreachable);
         digestInt(&hasher, u128, self.exchange_account);
         digestInt(&hasher, i128, self.account_safety_ceiling_atoms);
         digestInt(&hasher, i128, self.global_ceiling_atoms);
@@ -575,6 +666,10 @@ pub const AccountCoordinator = struct {
         digestInt(&hasher, u128, self.reconciliation_break_identity);
         digestOptionalAccountFact(&hasher, self.forced_execution_source);
         for (self.forced_source_positions) |position| digestInt(&hasher, i64, position);
+        for (self.forced_source_owners) |owner| {
+            digestInt(&hasher, u128, owner.portfolio);
+            digestInt(&hasher, u128, owner.decision_domain);
+        }
         digestInt(&hasher, u8, self.forced_allocation_count);
         for (self.forced_allocations[0..self.forced_allocation_count]) |record| {
             digestInt(&hasher, u128, record.allocation.identity);
@@ -721,8 +816,10 @@ pub const AccountCoordinator = struct {
                 }
                 self.forced_allocation_count = 0;
                 self.forced_execution_source = fact;
-                for (self.summaries, 0..) |summary, index|
+                for (self.summaries, 0..) |summary, index| {
                     self.forced_source_positions[index] = if (summary.present) summary.value.swap_quantity else 0;
+                    self.forced_source_owners[index] = if (summary.present) .{ .portfolio = summary.value.virtual_portfolio, .decision_domain = summary.value.decision_domain } else .{};
+                }
                 self.suspense_forced_execution = fact;
                 self.reconciliation_break_identity = fact.identity;
                 self.margin_gate = .{ .identity = fact.identity, .open = false, .latched = true };
@@ -738,6 +835,11 @@ pub const AccountCoordinator = struct {
     }
 
     pub fn allocateForcedExecution(self: *AccountCoordinator, allocation: ForcedExecutionAllocation) ![]const Delivery {
+        if (self.history_root != null) return error.CoordinatorHistoryProofRequired;
+        return self.allocateForcedExecutionVerified(allocation);
+    }
+
+    fn allocateForcedExecutionVerified(self: *AccountCoordinator, allocation: ForcedExecutionAllocation) ![]const Delivery {
         var normalized = allocation;
         if (normalized.count <= max_shards) {
             for (normalized.slices[normalized.count..]) |*slice| slice.* = .{};
@@ -1081,6 +1183,10 @@ pub const AccountCoordinator = struct {
         const was_recovery_only = self.recovery_only;
         self.recovery_only = false;
         defer self.recovery_only = was_recovery_only;
+        try self.applyEvent(event);
+    }
+
+    fn applyEvent(self: *AccountCoordinator, event: CoordinationEvent) !void {
         switch (event) {
             .publish_summary => |publish| _ = try self.publishSummary(publish.identity, publish.summary),
             .allocate_leases => |allocation| _ = try self.allocateLeases(allocation.version, allocation.valid_through_barrier),
@@ -1090,6 +1196,68 @@ pub const AccountCoordinator = struct {
             .tighten_leases => |tightening| _ = try self.tightenLeases(tightening.valid_through_barrier, tightening.requested_limits),
             .forced_execution_allocation => |allocation| _ = try self.allocateForcedExecution(allocation),
             .forced_delivery_ack => |ack| try self.markForcedDelivered(ack.allocation_identity, ack.slice_index),
+            .forced_source_checked => |checked| {
+                const root = self.history_root orelse return error.CoordinatorHistoryProofRequired;
+                const request = self.accountFactHistoryRequest(checked.fact, checked.proof.request.pending_id);
+                switch (try history.verifyResult(request, &checked.proof, root)) {
+                    .same => {},
+                    .conflict => return error.AccountFactIdentityConflict,
+                    .expired => return error.CoordinatorHistoryExpired,
+                    .proven_first => {
+                        if (checked.fact.payload == .forced_execution and self.forced_execution_source != null)
+                            return error.ForcedSourceArchiveRequired;
+                        _ = try self.acceptAccountFact(checked.fact);
+                    },
+                }
+            },
+            .gateway_record => |input| {
+                if (input.request.exchange_account != self.exchange_account) return error.CrossAccountGatewayRequest;
+                const record = gatewayRecord(input.request);
+                if (self.history_root) |root| {
+                    const proof = input.proof orelse return error.CoordinatorHistoryProofRequired;
+                    const request = self.gatewayHistoryRequest(record, proof.request.pending_id);
+                    switch (try history.verifyResult(request, &proof, root)) {
+                        .same => return error.DuplicateCommandIdentity,
+                        .conflict => return error.GatewayOutcomeIdentityConflict,
+                        .expired => return error.CoordinatorHistoryExpired,
+                        .proven_first => {},
+                    }
+                }
+                _ = try self.gateway_ownership.record(input.request);
+            },
+            .gateway_retire => |retire| {
+                var bytes: [1024]u8 = undefined;
+                _ = &bytes;
+                const qualification = retire.qualification.digest();
+                const retired = retire.qualification.record;
+                if (retire.qualification.source_origin.account != self.exchange_account or
+                    retire.qualification.source_origin.stream.domain != .decision_log or retire.qualification.source_barrier == 0 or
+                    retire.qualification.order.order.id != retired.order_id or
+                    retire.qualification.order.order.revision < retired.revision) return error.InvalidCoordinatorHistoryOrigin;
+                if (retire.receipt.root.origin.account != self.exchange_account or retire.receipt.root.origin.stream.domain != .control)
+                    return error.InvalidCoordinatorHistoryOrigin;
+                const root = try history.verifyReceipt(retire.receipt, retire.receipt.root.origin, qualification, self.history_root);
+                var found: ?usize = null;
+                for (self.gateway_ownership.records[0..self.gateway_ownership.count], 0..) |known, index| {
+                    if (std.meta.eql(known, retired)) found = index;
+                }
+                const index = found orelse return error.UnknownGatewayCommand;
+                const records = &self.gateway_ownership.records;
+                std.mem.copyForwards(GatewayRecord, records[index .. self.gateway_ownership.count - 1], records[index + 1 .. self.gateway_ownership.count]);
+                self.gateway_ownership.count -= 1;
+                self.history_root = root;
+            },
+            .forced_history_commit => |receipt| try self.commitForcedSourceHistory(receipt),
+            .forced_history_checked => |checked| {
+                const root = self.history_root orelse return error.CoordinatorHistoryProofRequired;
+                const request = self.allocationHistoryRequest(checked.allocation, checked.proof.request.pending_id);
+                switch (try history.verifyResult(request, &checked.proof, root)) {
+                    .same => {},
+                    .conflict => return error.ForcedExecutionAllocationConflict,
+                    .expired => return error.CoordinatorHistoryExpired,
+                    .proven_first => _ = try self.allocateForcedExecutionVerified(checked.allocation),
+                }
+            },
         }
     }
 
@@ -1133,6 +1301,10 @@ pub const AccountCoordinator = struct {
         try writer.writeInt(u128, self.reconciliation_break_identity, .little);
         try writeOptionalAccountFact(&writer, self.forced_execution_source);
         for (self.forced_source_positions) |position| try writer.writeInt(i64, position, .little);
+        for (self.forced_source_owners) |owner| {
+            try writer.writeInt(u128, owner.portfolio, .little);
+            try writer.writeInt(u128, owner.decision_domain, .little);
+        }
         try writer.writeByte(self.forced_allocation_count);
         for (self.forced_allocations[0..self.forced_allocation_count]) |record| {
             try writeForcedAllocation(&writer, record.allocation);
@@ -1146,6 +1318,19 @@ pub const AccountCoordinator = struct {
         try writer.writeByte(@intFromBool(self.margin_gate.open));
         try writer.writeByte(@intFromBool(self.margin_gate.latched));
         try writer.writeByte(@intFromEnum(self.margin_reconciliation_state));
+        var root_bytes: [1024]u8 = undefined;
+        const encoded_root = try codec.encodeBare(&root_bytes, self.history_root);
+        try writer.writeInt(u16, @intCast(encoded_root.len), .little);
+        try writer.writeAll(encoded_root);
+        try writer.writeInt(u128, self.gateway_ownership.exchange_account, .little);
+        try writer.writeByte(self.gateway_ownership.count);
+        for (self.gateway_ownership.latest_fencing_tokens) |token| try writer.writeInt(u64, token, .little);
+        for (self.gateway_ownership.records[0..self.gateway_ownership.count]) |record| {
+            var record_bytes: [1024]u8 = undefined;
+            const encoded_record = try codec.encodeBare(&record_bytes, record);
+            try writer.writeInt(u16, @intCast(encoded_record.len), .little);
+            try writer.writeAll(encoded_record);
+        }
         const digest_value = self.digest();
         try writer.writeAll(&digest_value);
         return writer.buffered();
@@ -1193,6 +1378,10 @@ pub const AccountCoordinator = struct {
         result.reconciliation_break_identity = try reader.takeInt(u128, .little);
         result.forced_execution_source = try readOptionalAccountFact(&reader);
         for (&result.forced_source_positions) |*position| position.* = try reader.takeInt(i64, .little);
+        for (&result.forced_source_owners) |*owner| {
+            owner.portfolio = try reader.takeInt(u128, .little);
+            owner.decision_domain = try reader.takeInt(u128, .little);
+        }
         result.forced_allocation_count = try reader.takeByte();
         if (result.forced_allocation_count > max_shards) return error.InvalidCoordinatorSnapshot;
         for (result.forced_allocations[0..result.forced_allocation_count]) |*record| {
@@ -1214,6 +1403,26 @@ pub const AccountCoordinator = struct {
             MarginReconciliationState,
             try reader.takeByte(),
         ) orelse return error.InvalidCoordinatorSnapshot;
+        const root_len = try reader.takeInt(u16, .little);
+        result.history_root = try codec.decodeBare(try reader.take(root_len), ?history.Root);
+        if (result.history_root) |root| {
+            try history.validateRoot(root);
+            if (root.origin.account != result.exchange_account or root.origin.stream.domain != .control)
+                return error.InvalidCoordinatorSnapshot;
+        }
+        result.gateway_ownership.exchange_account = try reader.takeInt(u128, .little);
+        result.gateway_ownership.count = try reader.takeByte();
+        if (result.gateway_ownership.count > result.gateway_ownership.records.len or
+            (result.gateway_ownership.exchange_account != 0 and result.gateway_ownership.exchange_account != result.exchange_account))
+            return error.InvalidCoordinatorSnapshot;
+        for (&result.gateway_ownership.latest_fencing_tokens) |*token| token.* = try reader.takeInt(u64, .little);
+        for (result.gateway_ownership.records[0..result.gateway_ownership.count]) |*record| {
+            const record_len = try reader.takeInt(u16, .little);
+            record.* = try codec.decodeBare(try reader.take(record_len), GatewayRecord);
+            if (record.exchange_account != result.exchange_account or record.command_id == 0 or record.fencing_token == 0 or
+                record.fencing_token > result.gateway_ownership.latest_fencing_tokens[@intFromEnum(record.shard_id)])
+                return error.InvalidCoordinatorSnapshot;
+        }
         const expected = try reader.take(32);
         const encoded_digest = result.digest();
         if (reader.seek != encoded.len or !std.mem.eql(u8, expected, &encoded_digest))
@@ -1234,6 +1443,11 @@ fn coordinationEventType(event: CoordinationEvent) u16 {
         .tighten_leases => 6,
         .forced_execution_allocation => 7,
         .forced_delivery_ack => 8,
+        .forced_history_commit => 9,
+        .forced_history_checked => 10,
+        .gateway_record => 11,
+        .gateway_retire => 12,
+        .forced_source_checked => 13,
     };
 }
 
@@ -1288,6 +1502,14 @@ fn writeAccountFact(writer: *std.Io.Writer, fact: AccountFact) !void {
     try writer.writeInt(u128, fact.exchange_account, .little);
     try writer.writeInt(u64, fact.version, .little);
     try writer.writeInt(u64, fact.barrier, .little);
+    try writer.writeByte(@intFromBool(fact.times != null));
+    if (fact.times) |times| {
+        try writer.writeInt(u64, times.source, .little);
+        try writer.writeInt(u64, times.receive, .little);
+        try writer.writeInt(u64, times.monotonic, .little);
+        try writer.writeInt(u64, times.wall, .little);
+        try writer.writeByte(@bitCast(times.presence));
+    }
     switch (fact.payload) {
         .account_snapshot => |snapshot| {
             try writer.writeByte(0);
@@ -1311,6 +1533,13 @@ fn readAccountFact(reader: *std.Io.Reader) !AccountFact {
     const exchange_account = try reader.takeInt(u128, .little);
     const version = try reader.takeInt(u64, .little);
     const barrier = try reader.takeInt(u64, .little);
+    const times: ?@import("economics.zig").FundingCoreTimes = if (try readBool(reader)) .{
+        .source = try reader.takeInt(u64, .little),
+        .receive = try reader.takeInt(u64, .little),
+        .monotonic = try reader.takeInt(u64, .little),
+        .wall = try reader.takeInt(u64, .little),
+        .presence = @bitCast(try reader.takeByte()),
+    } else null;
     const payload: AccountFactPayload = switch (try reader.takeByte()) {
         0 => .{ .account_snapshot = try readPlainStruct(reader, @FieldType(AccountFactPayload, "account_snapshot")) },
         1 => .{ .forced_execution = .{
@@ -1323,7 +1552,7 @@ fn readAccountFact(reader: *std.Io.Reader) !AccountFact {
         } },
         else => return error.InvalidCoordinationTail,
     };
-    return .{ .identity = identity, .exchange_account = exchange_account, .version = version, .barrier = barrier, .payload = payload };
+    return .{ .identity = identity, .exchange_account = exchange_account, .version = version, .barrier = barrier, .times = times, .payload = payload };
 }
 
 fn encodeCoordinationEvent(destination: []u8, event: CoordinationEvent) ![]const u8 {
@@ -1349,12 +1578,17 @@ fn encodeCoordinationEvent(destination: []u8, event: CoordinationEvent) ![]const
             try writer.writeInt(u128, ack.allocation_identity, .little);
             try writer.writeByte(ack.slice_index);
         },
+        .forced_history_commit => |receipt| return codec.encodeBare(destination, receipt),
+        .forced_history_checked => |checked| return codec.encodeBare(destination, checked),
+        .gateway_record => |request| return codec.encodeBare(destination, request),
+        .gateway_retire => |retire| return codec.encodeBare(destination, retire),
+        .forced_source_checked => |checked| return codec.encodeBare(destination, checked),
     }
     return writer.buffered();
 }
 
 fn decodeCoordinationEvent(record: trading.journal.Record) !CoordinationEvent {
-    if (record.schema_version != 4 or record.flags != trading.journal.input_flag)
+    if (record.schema_version != @import("production_contract.zig").journal_schema_version or record.flags != trading.journal.input_flag)
         return error.InvalidCoordinationTail;
     var reader: std.Io.Reader = .fixed(record.payload);
     const event: CoordinationEvent = switch (record.type_id) {
@@ -1377,6 +1611,11 @@ fn decodeCoordinationEvent(record: trading.journal.Record) !CoordinationEvent {
         },
         7 => .{ .forced_execution_allocation = try readForcedAllocation(&reader) },
         8 => .{ .forced_delivery_ack = .{ .allocation_identity = try reader.takeInt(u128, .little), .slice_index = try reader.takeByte() } },
+        9 => return .{ .forced_history_commit = try codec.decodeBare(record.payload, history.Receipt) },
+        10 => return .{ .forced_history_checked = try codec.decodeBare(record.payload, @FieldType(CoordinationEvent, "forced_history_checked")) },
+        11 => return .{ .gateway_record = try codec.decodeBare(record.payload, @FieldType(CoordinationEvent, "gateway_record")) },
+        12 => return .{ .gateway_retire = try codec.decodeBare(record.payload, @FieldType(CoordinationEvent, "gateway_retire")) },
+        13 => return .{ .forced_source_checked = try codec.decodeBare(record.payload, @FieldType(CoordinationEvent, "forced_source_checked")) },
         else => return error.InvalidCoordinationTail,
     };
     if (reader.seek != record.payload.len) return error.InvalidCoordinationTail;
@@ -1519,6 +1758,14 @@ fn digestOptionalAccountFact(hasher: *Sha256, fact: ?AccountFact) void {
     digestInt(hasher, u128, value.exchange_account);
     digestInt(hasher, u64, value.version);
     digestInt(hasher, u64, value.barrier);
+    hasher.update(&.{@intFromBool(value.times != null)});
+    if (value.times) |times| {
+        digestInt(hasher, u64, times.source);
+        digestInt(hasher, u64, times.receive);
+        digestInt(hasher, u64, times.monotonic);
+        digestInt(hasher, u64, times.wall);
+        hasher.update(&.{@as(u8, @bitCast(times.presence))});
+    }
     switch (value.payload) {
         .account_snapshot => |snapshot| {
             digestInt(hasher, u8, 0);
@@ -1544,59 +1791,12 @@ fn digestOptionalMarginObservation(hasher: *Sha256, observation: ?MarginObservat
 
 fn writeOptionalAccountFact(writer: *std.Io.Writer, fact: ?AccountFact) !void {
     try writer.writeByte(@intFromBool(fact != null));
-    const value = fact orelse return;
-    try writer.writeInt(u128, value.identity, .little);
-    try writer.writeInt(u128, value.exchange_account, .little);
-    try writer.writeInt(u64, value.version, .little);
-    try writer.writeInt(u64, value.barrier, .little);
-    switch (value.payload) {
-        .account_snapshot => |snapshot| {
-            try writer.writeByte(0);
-            try writer.writeInt(i128, snapshot.cash_atoms, .little);
-            try writer.writeInt(i128, snapshot.spot_asset_atoms, .little);
-            try writer.writeInt(i64, snapshot.swap_quantity, .little);
-            try writer.writeInt(i128, snapshot.margin_atoms, .little);
-        },
-        .forced_execution => |execution| {
-            try writer.writeByte(1);
-            try writer.writeByte(@intFromBool(execution.owner != null));
-            if (execution.owner) |owner| try writer.writeByte(@intFromEnum(owner));
-            try writer.writeInt(i64, execution.quantity, .little);
-            try writer.writeInt(i64, execution.price_ticks, .little);
-            try writer.writeInt(i128, execution.realized_pnl_atoms, .little);
-            try writer.writeInt(i128, execution.fee_atoms, .little);
-            try writer.writeInt(i128, execution.penalty_atoms, .little);
-        },
-    }
+    if (fact) |value| try writeAccountFact(writer, value);
 }
 
 fn readOptionalAccountFact(reader: *std.Io.Reader) !?AccountFact {
     if (!try readBool(reader)) return null;
-    const identity = try reader.takeInt(u128, .little);
-    const exchange_account = try reader.takeInt(u128, .little);
-    const version = try reader.takeInt(u64, .little);
-    const barrier = try reader.takeInt(u64, .little);
-    const payload: AccountFactPayload = switch (try reader.takeByte()) {
-        0 => .{ .account_snapshot = .{
-            .cash_atoms = try reader.takeInt(i128, .little),
-            .spot_asset_atoms = try reader.takeInt(i128, .little),
-            .swap_quantity = try reader.takeInt(i64, .little),
-            .margin_atoms = try reader.takeInt(i128, .little),
-        } },
-        1 => .{ .forced_execution = .{
-            .owner = if (try readBool(reader))
-                std.enums.fromInt(ShardId, try reader.takeByte()) orelse return error.InvalidCoordinatorSnapshot
-            else
-                null,
-            .quantity = try reader.takeInt(i64, .little),
-            .price_ticks = try reader.takeInt(i64, .little),
-            .realized_pnl_atoms = try reader.takeInt(i128, .little),
-            .fee_atoms = try reader.takeInt(i128, .little),
-            .penalty_atoms = try reader.takeInt(i128, .little),
-        } },
-        else => return error.InvalidCoordinatorSnapshot,
-    };
-    return .{ .identity = identity, .exchange_account = exchange_account, .version = version, .barrier = barrier, .payload = payload };
+    return readAccountFact(reader) catch return error.InvalidCoordinatorSnapshot;
 }
 
 fn writeOptionalMarginObservation(writer: *std.Io.Writer, observation: ?MarginObservation) !void {
@@ -2573,4 +2773,321 @@ test "margin reconciliation covers mode buckets rounding and unknown evidence" {
     replay_beyond.venue_net_margin_atoms = 450;
     _ = try replayed.reconcileMargin(replay_beyond);
     try std.testing.expectEqualSlices(u8, &digest_at_break, &replayed.digest());
+}
+
+test "coordinator history pins incomplete forced source" {
+    var coordinator = AccountCoordinator.init(900, 1000, 1000);
+    _ = try coordinator.acceptAccountFact(.{ .identity = 1, .exchange_account = 900, .version = 1, .barrier = 1, .payload = .{ .forced_execution = .{ .owner = null, .quantity = -4, .price_ticks = 10, .fee_atoms = 4 } } });
+    try std.testing.expectError(error.ForcedSourceNotClosed, coordinator.prepareForcedSourceHistory());
+}
+
+/// Single writer around Coordinator: Store commit precedes publication of state.
+/// A failed write latches the writer; recovery is required before another input.
+pub const CoordinatorOwner = struct {
+    const bootstrap_type: u16 = 0xC008;
+    coordinator: AccountCoordinator,
+    stream: durable.StreamIdentity,
+    store: durable.Store,
+    io: std.Io,
+    sequence: u64 = 0,
+    closed: bool = false,
+
+    pub fn init(coordinator: AccountCoordinator, stream: durable.StreamIdentity, store: durable.Store, io: std.Io) !CoordinatorOwner {
+        var owner = try bind(coordinator, stream, store, io);
+        var bytes: [trading.journal.max_payload_size]u8 = undefined;
+        const payload = try coordinator.snapshot(&bytes);
+        try store.append(io, .{ .stream = stream, .record = .{
+            .type_id = bootstrap_type,
+            .schema_version = @import("production_contract.zig").journal_schema_version,
+            .flags = trading.journal.input_flag,
+            .sequence = 1,
+            .source_time = 0,
+            .receive_time = 0,
+            .monotonic_time = 0,
+            .wall_time = 0,
+            .time_presence = .{},
+            .payload = payload,
+        } });
+        try store.commit(io, stream, 1);
+        owner.sequence = 1;
+        return owner;
+    }
+
+    fn bind(coordinator: AccountCoordinator, stream: durable.StreamIdentity, store: durable.Store, io: std.Io) !CoordinatorOwner {
+        if (stream.domain != .control or stream.id == 0) return error.InvalidCoordinatorHistoryOrigin;
+        if (coordinator.history_root) |root| {
+            if (!std.meta.eql(root.origin.stream, stream)) return error.InvalidCoordinatorHistoryOrigin;
+        }
+        return .{ .coordinator = coordinator, .stream = stream, .store = store, .io = io };
+    }
+
+    pub fn apply(self: *CoordinatorOwner, event: CoordinationEvent) !void {
+        if (self.closed) return error.CoordinatorWriterClosed;
+        switch (event) {
+            .forced_delivery_ack, .gateway_retire, .forced_history_commit => return error.CoordinatorVerifiedInputRequired,
+            .account_fact => |fact| {
+                // Resident original semantics already constitute exact evidence.
+                // A retry must not require release or become a second input.
+                if (self.coordinator.last_account_fact) |known| {
+                    if (fact.identity == known.identity) {
+                        if (!std.meta.eql(fact, known)) {
+                            self.closed = true;
+                            self.coordinator.recovery_only = true;
+                            return error.AccountFactIdentityConflict;
+                        }
+                        return;
+                    }
+                }
+                if (self.coordinator.history_root != null) {
+                    self.closed = true;
+                    self.coordinator.recovery_only = true;
+                    return error.CoordinatorHistoryProofRequired;
+                }
+                if (fact.payload == .forced_execution and self.coordinator.forced_execution_source != null)
+                    return error.ForcedSourceArchiveRequired;
+            },
+            else => {},
+        }
+        return self.applyCommitted(event);
+    }
+
+    fn applyCommitted(self: *CoordinatorOwner, event: CoordinationEvent) !void {
+        if (self.closed) return error.CoordinatorWriterClosed;
+        var candidate = self.coordinator;
+        candidate.applyEvent(event) catch |err| {
+            switch (err) {
+                error.InvalidHistoryProof,
+                error.InvalidHistoryRoot,
+                error.InvalidHistoryKey,
+                error.CoordinatorHistoryExpired,
+                error.GatewayOutcomeIdentityConflict,
+                error.ForcedExecutionAllocationConflict,
+                error.AccountFactIdentityConflict,
+                error.CoordinatorHistoryProofRequired,
+                => {
+                    self.closed = true;
+                    self.coordinator.recovery_only = true;
+                },
+                else => {},
+            }
+            return err;
+        };
+        const sequence = try std.math.add(u64, self.sequence, 1);
+        var bytes: [trading.journal.max_payload_size]u8 = undefined;
+        const payload = try encodeCoordinationEvent(&bytes, event);
+        errdefer self.closed = true;
+        try self.store.append(self.io, .{ .stream = self.stream, .record = .{
+            .type_id = coordinationEventType(event),
+            .schema_version = @import("production_contract.zig").journal_schema_version,
+            .flags = trading.journal.input_flag,
+            .sequence = sequence,
+            .source_time = 0,
+            .receive_time = 0,
+            .monotonic_time = 0,
+            .wall_time = 0,
+            .time_presence = .{},
+            .payload = payload,
+        } });
+        try self.store.commit(self.io, self.stream, sequence);
+        self.coordinator = candidate;
+        self.sequence = sequence;
+    }
+
+    /// Publishes complete immutable source/slices/ACKs before a durable release.
+    pub fn archiveForcedSource(self: *CoordinatorOwner) !history.Receipt {
+        if (self.closed) return error.CoordinatorWriterClosed;
+        const source = try self.coordinator.prepareForcedSourceHistory();
+        const origin: history.Origin = .{ .stream = self.stream, .account = self.coordinator.exchange_account };
+        var source_bytes: [8192]u8 = undefined;
+        const encoded_source = try codec.encodeBare(&source_bytes, source);
+        var allocation_bytes: [max_shards][1024]u8 = undefined;
+        var records: [max_shards + 2]history.Record = undefined;
+        var entries: [max_shards + 2]history.Entry = undefined;
+        records[0] = .{ .bytes = encoded_source, .payload_digest = history.hash(encoded_source) };
+        entries[0] = .{ .key = .{ .origin = origin, .identity = .{ .coordinator_forced_source = source.source.identity } }, .record_index = 0 };
+        for (source.allocations[0..source.count], 0..) |record, index| {
+            const encoded = try codec.encodeBare(&allocation_bytes[index], record.allocation);
+            records[index + 1] = .{ .bytes = encoded, .payload_digest = history.hash(encoded) };
+            entries[index + 1] = .{ .key = .{ .origin = origin, .identity = .{ .coordinator_forced_allocation = record.allocation.identity } }, .record_index = @intCast(index + 1) };
+        }
+        var fact_bytes: [1024]u8 = undefined;
+        const encoded_fact = try codec.encodeBare(&fact_bytes, source.source);
+        records[source.count + 1] = .{ .bytes = encoded_fact, .payload_digest = history.hash(encoded_fact) };
+        entries[source.count + 1] = .{ .key = .{ .origin = origin, .identity = .{ .coordinator_account_fact = source.source.identity } }, .record_index = source.count + 1 };
+        errdefer self.closed = true;
+        const receipt = try self.store.publishOrderHistory(self.io, .{ .origin = origin, .previous_root = self.coordinator.history_root, .barrier = self.sequence + 1, .epoch = if (self.coordinator.history_root) |root| root.epoch else 1, .qualification_digest = records[0].payload_digest, .records = records[0 .. source.count + 2], .entries = entries[0 .. source.count + 2] });
+        try self.applyCommitted(.{ .forced_history_commit = receipt });
+        return receipt;
+    }
+
+    pub fn recordGateway(self: *CoordinatorOwner, request: GatewayRequest) !void {
+        if (self.closed) return error.CoordinatorWriterClosed;
+        var proof: ?history.LookupProof = null;
+        if (self.coordinator.history_root != null) {
+            const result = self.store.queryOrderHistory(self.io, self.coordinator.gatewayHistoryRequest(gatewayRecord(request), self.sequence + 1)) catch |err| {
+                self.closed = true;
+                return err;
+            };
+            proof = result.proof;
+        }
+        try self.apply(.{ .gateway_record = .{ .request = request, .proof = proof } });
+    }
+
+    /// A safe terminal OMS qualification pins Unknown and unresolved references.
+    pub fn retireGateway(self: *CoordinatorOwner, shard_id: ShardId, command_id: u64, shard_owner: *const @import("demo_authority.zig").Owner) !void {
+        const shard = try shard_owner.source();
+        const summary = self.coordinator.summaries[@intFromEnum(shard_id)];
+        if (!summary.present or summary.value.virtual_portfolio != shard.portfolio_identity) return error.CrossShardDelivery;
+        if (self.closed) return error.CoordinatorWriterClosed;
+        if (shard.exchange_account_identity != self.coordinator.exchange_account) return error.CrossAccountGatewayRequest;
+        var record: ?GatewayRecord = null;
+        for (self.coordinator.gateway_ownership.records[0..self.coordinator.gateway_ownership.count]) |known| {
+            if (known.shard_id == shard_id and known.command_id == command_id) record = known;
+        }
+        const known = record orelse return error.UnknownGatewayCommand;
+        const qualification = try shard.oms.prepareOrderArchive(known.order_id, try shard.economic_projection.appliedCanonicalFillQuantity(known.order_id), self.coordinator.exchange_account);
+        if (qualification.order.revision < known.revision) return error.GatewayOutcomeIdentityConflict;
+        var matched = false;
+        for (shard.oms.command_history[0..shard.oms.command_history_count]) |command| {
+            if (command.command_id != command_id) continue;
+            if (!std.meta.eql(known, gatewayRecord(.{ .exchange_account = self.coordinator.exchange_account, .shard_id = shard_id, .fencing_token = known.fencing_token, .command = command }))) return error.GatewayOutcomeIdentityConflict;
+            matched = true;
+        }
+        if (!matched) return error.UnknownGatewayCommand;
+        const retirement: GatewayRetirement = .{ .record = known, .source_origin = .{ .stream = shard_owner.stream, .account = shard.exchange_account_identity }, .source_barrier = shard.authoritativeBarrier(), .source_digest = shard.canonicalStateDigest(), .order = qualification };
+        var bytes: [1024]u8 = undefined;
+        const encoded = try codec.encodeBare(&bytes, known);
+        const origin: history.Origin = .{ .stream = self.stream, .account = self.coordinator.exchange_account };
+        var retirement_bytes: [history.max_record_bytes]u8 = undefined;
+        const encoded_retirement = try codec.encodeBare(&retirement_bytes, retirement);
+        const records = [_]history.Record{ .{ .bytes = encoded, .payload_digest = history.hash(encoded) }, .{ .bytes = encoded_retirement, .payload_digest = history.hash(encoded_retirement) } };
+        const entries = [_]history.Entry{
+            .{ .key = .{ .origin = origin, .identity = .{ .coordinator_gateway_command = .{ .shard = @intFromEnum(shard_id), .command = command_id } } }, .record_index = 0 },
+            .{ .key = .{ .origin = origin, .identity = .{ .coordinator_gateway_closure = .{ .shard = @intFromEnum(shard_id), .command = command_id } } }, .record_index = 1 },
+        };
+        errdefer self.closed = true;
+        const receipt = try self.store.publishOrderHistory(self.io, .{ .origin = origin, .previous_root = self.coordinator.history_root, .barrier = self.sequence + 1, .epoch = if (self.coordinator.history_root) |root| root.epoch else 1, .qualification_digest = retirement.digest(), .records = &records, .entries = &entries });
+        try self.applyCommitted(.{ .gateway_retire = .{ .qualification = retirement, .receipt = receipt } });
+    }
+
+    pub fn acceptAccountFact(self: *CoordinatorOwner, fact: AccountFact) !void {
+        if (self.closed) return error.CoordinatorWriterClosed;
+        if (self.coordinator.history_root == null) return self.apply(.{ .account_fact = fact });
+        errdefer self.closed = true;
+        const result = try self.store.queryOrderHistory(self.io, self.coordinator.accountFactHistoryRequest(fact, self.sequence + 1));
+        try self.apply(.{ .forced_source_checked = .{ .fact = fact, .proof = result.proof } });
+    }
+
+    pub fn allocateForcedExecution(self: *CoordinatorOwner, allocation: ForcedExecutionAllocation) !void {
+        if (self.coordinator.history_root == null) return self.apply(.{ .forced_execution_allocation = allocation });
+        const request = self.coordinator.allocationHistoryRequest(allocation, self.sequence + 1);
+        errdefer self.closed = true;
+        const result = try self.store.queryOrderHistory(self.io, request);
+        try self.apply(.{ .forced_history_checked = .{ .allocation = allocation, .proof = result.proof } });
+    }
+
+    pub fn ackForcedDelivery(self: *CoordinatorOwner, delivery: Delivery, shard_owner: *const @import("demo_authority.zig").Owner) !void {
+        const shard = try shard_owner.source();
+        const owner = self.coordinator.forced_source_owners[@intFromEnum(delivery.shard_id)];
+        if (owner.portfolio != shard.portfolio_identity or shard.exchange_account_identity != self.coordinator.exchange_account) return error.CrossShardDelivery;
+        var found = false;
+        for (try self.coordinator.pendingForcedDeliveries()) |pending| {
+            if (std.meta.eql(pending, delivery)) found = true;
+        }
+        if (!found or !try shardHasAppliedForced(delivery, shard)) return error.ForcedDeliveryNotCommitted;
+        try self.applyCommitted(.{ .forced_delivery_ack = .{ .allocation_identity = delivery.allocation_identity, .slice_index = delivery.slice_index } });
+    }
+
+    /// Snapshot exact committed sequence, then seal/rotate without resetting it.
+    pub fn completeRecovery(self: *CoordinatorOwner) !void {
+        if (self.closed or self.store.safetyGate() != .open) return error.CoordinatorWriterClosed;
+        // Runtime admission is never replayed as authority. A restart always
+        // requires another committed fresh margin observation.
+        try self.coordinator.completeRecovery();
+    }
+
+    pub fn checkpoint(self: *CoordinatorOwner) !void {
+        if (self.closed) return error.CoordinatorWriterClosed;
+        var state_bytes: [32768]u8 = undefined;
+        const state = try self.coordinator.snapshot(state_bytes[8..]);
+        std.mem.writeInt(u64, state_bytes[0..8], self.sequence, .little);
+        errdefer self.closed = true;
+        try self.store.seal(self.io, self.stream);
+        try self.store.publishSnapshot(self.io, self.stream, self.sequence, state_bytes[0 .. state.len + 8]);
+        try self.store.rotate(self.io, self.stream);
+    }
+
+    pub fn recover(stream: durable.StreamIdentity, store: durable.Store, io: std.Io) !CoordinatorOwner {
+        const recovered = try store.recover(io, stream);
+        var result: CoordinatorOwner = .{ .coordinator = undefined, .stream = stream, .store = store, .io = io };
+        if (recovered.snapshot.len != 0) {
+            if (recovered.snapshot.len < 8) return error.InvalidCoordinatorSnapshot;
+            result.sequence = std.mem.readInt(u64, recovered.snapshot[0..8], .little);
+            if (result.sequence != recovered.snapshot_barrier) return error.InvalidCoordinatorSnapshot;
+            result = try bind(try AccountCoordinator.restore(recovered.snapshot[8..]), stream, store, io);
+            result.sequence = recovered.snapshot_barrier;
+        }
+        const fallback = [_][]const u8{recovered.tail};
+        const tails = if (recovered.tail_count != 0) recovered.tail_segments[0..recovered.tail_count] else &fallback;
+        var has_uncommitted_suffix = false;
+        for (tails) |tail| {
+            if (tail.len == 0) continue;
+            var reader = try trading.journal.Reader.init(tail);
+            while (true) switch (try reader.next()) {
+                .record => |record| {
+                    if (record.sequence <= result.sequence) continue;
+                    if (record.sequence > recovered.committed_barrier) {
+                        has_uncommitted_suffix = true;
+                        continue;
+                    }
+                    if (record.sequence != result.sequence + 1) return error.InvalidCoordinationTail;
+                    if (result.sequence == 0) {
+                        if (record.type_id != bootstrap_type or record.schema_version != @import("production_contract.zig").journal_schema_version) return error.InvalidCoordinationTail;
+                        result = try bind(try AccountCoordinator.restore(record.payload), stream, store, io);
+                    } else try result.coordinator.applyHistoricalEvent(try decodeCoordinationEvent(record));
+                    result.sequence = record.sequence;
+                },
+                .end => |status| {
+                    // A committed prefix has no footer when a later physical
+                    // append was not committed. The Store retains that suffix;
+                    // restore only the exact committed projection and quarantine.
+                    if (status != .clean and result.sequence != recovered.committed_barrier)
+                        return error.InvalidCoordinationTail;
+                    break;
+                },
+            };
+        }
+        if (result.sequence == 0 or result.sequence != recovered.committed_barrier) return error.InvalidCoordinationTail;
+        result.closed = has_uncommitted_suffix or recovered.status != .ready or recovered.last_sequence != recovered.committed_barrier;
+        const origin: history.Origin = .{ .account = result.coordinator.exchange_account, .stream = stream };
+        if (store.recoverOrderHistory(io, origin)) |published| {
+            if (result.coordinator.history_root) |root| {
+                if (!std.meta.eql(root, published.root)) result.closed = true;
+            } else result.closed = true; // Published without a committed release.
+        } else |err| {
+            if (result.coordinator.history_root != null or err != error.OrderHistoryUnavailable) result.closed = true;
+        }
+        return result;
+    }
+};
+
+test "coordinator history durable writer rotates beyond old journal capacity and recovers exact sequence" {
+    const adapter = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(adapter);
+    adapter.* = durable.MemoryAdapter.init();
+    defer adapter.deinit();
+    var owner = try CoordinatorOwner.init(AccountCoordinator.init(900, 1000, 1000), .{ .domain = .control, .id = 900 }, adapter.interface(), undefined);
+    for (1..12001) |index| {
+        try owner.apply(.{ .publish_summary = .{ .identity = index, .summary = ShardSummary.fixture(.shard_0, index, 1) } });
+        if (index % 30 == 0) {
+            const before = owner.coordinator.digest();
+            try owner.checkpoint();
+            owner = try CoordinatorOwner.recover(owner.stream, adapter.interface(), undefined);
+            try std.testing.expectEqualDeep(before, owner.coordinator.digest());
+            try std.testing.expectEqual(@as(u64, index + 1), owner.sequence);
+            try std.testing.expect(owner.coordinator.recovery_only);
+        }
+    }
+    try std.testing.expectEqual(@as(u64, 12000), owner.coordinator.summaries[0].value.shard_sequence);
+    try std.testing.expect(adapter.archive_bytes > 10 * 192 * 1024);
 }

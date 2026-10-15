@@ -302,10 +302,12 @@ pub const Cutover = struct {
     generation: u64 = 0,
     active_release: u64 = 0,
     active_strategy_instance: u128 = 0,
-    candidate: Candidate = undefined,
+    candidate: Candidate = std.mem.zeroes(Candidate),
     quiesce_barrier: u64 = 0,
-    activations: [8]VersionActivationEvent = undefined,
+    activations: [8]VersionActivationEvent = @splat(std.mem.zeroes(VersionActivationEvent)),
     activation_count: u8 = 0,
+    active_state_schema_version: u32 = 0,
+    active_barrier: u64 = 0,
     candidate_digest: [32]u8 = @splat(0),
     candidate_barrier: u64 = 0,
     scope: CutoverScope = .decision_domain,
@@ -319,8 +321,8 @@ pub const Cutover = struct {
             return error.InvalidCutoverCandidate;
         if (candidate.transition == .rebuild and !candidate.history_complete)
             return error.CandidateWarmingUp;
-        if (candidate.transition == .keep and self.activation_count != 0 and
-            candidate.state_schema_version != self.activations[self.activation_count - 1].state_schema_version)
+        if (candidate.transition == .keep and self.generation != 0 and
+            candidate.state_schema_version != self.active_state_schema_version)
             return error.IncompatibleKeepSchema;
         self.candidate = candidate;
         self.phase = .candidate;
@@ -408,13 +410,14 @@ pub const Cutover = struct {
         activation_identity: u128,
     ) !VersionActivationEvent {
         if (self.phase != .draining) return error.InvalidCutoverTransition;
+        if (self.activation_count == self.activations.len) return error.ActivationHistoryFull;
         const digest = shard.canonicalStateDigest();
         if (self.candidate_barrier != shard.authoritativeBarrier() or !std.mem.eql(u8, &self.candidate_digest, &digest))
             return error.CandidateBehindCutoverBarrier;
         const barrier = try std.math.add(u64, shard.authoritativeBarrier(), 1);
         const event: VersionActivationEvent = .{
             .activation_identity = activation_identity,
-            .generation = self.generation + 1,
+            .generation = try std.math.add(u64, self.generation, 1),
             .old_release = self.active_release,
             .new_release = self.candidate.release,
             .old_strategy_instance = self.active_strategy_instance,
@@ -431,12 +434,7 @@ pub const Cutover = struct {
             .payload = .{ .version_activation = event },
         });
         if (stable_journal.last_sequence != barrier) return error.ActivationNotStable;
-        self.activations[self.activation_count] = event;
-        self.activation_count += 1;
-        self.generation = event.generation;
-        self.active_release = event.new_release;
-        self.active_strategy_instance = event.new_strategy_instance;
-        self.phase = .active;
+        _ = try self.replayActivation(event);
         return event;
     }
 
@@ -458,30 +456,43 @@ pub const Cutover = struct {
         self.quiesce_barrier = 0;
     }
 
-    /// Rebuilds the sole active version from stable activation facts.
+    /// Applies one already durable Core activation during recovery. Old hot duplicates
+    /// are inert; callers must authenticate cold identities before invoking this seam.
+    pub fn replayActivation(self: *Cutover, event: VersionActivationEvent) !bool {
+        for (self.activations[0..self.activation_count]) |known| {
+            if (known.activation_identity != event.activation_identity) continue;
+            if (!std.meta.eql(known, event)) return error.ActivationIdentityConflict;
+            return false;
+        }
+        if (event.activation_identity == 0 or event.new_release == 0 or event.new_strategy_instance == 0 or
+            event.generation != try std.math.add(u64, self.generation, 1) or event.barrier == 0 or
+            event.barrier < self.active_barrier or event.old_release != self.active_release or
+            event.old_strategy_instance != self.active_strategy_instance)
+            return error.InvalidActivationHistory;
+        if (self.activation_count == self.activations.len) return error.ActivationHistoryFull;
+        self.activations[self.activation_count] = event;
+        self.activation_count += 1;
+        self.generation = event.generation;
+        self.active_release = event.new_release;
+        self.active_strategy_instance = event.new_strategy_instance;
+        self.active_state_schema_version = event.state_schema_version;
+        self.active_barrier = event.barrier;
+        self.phase = .active;
+        return true;
+    }
+
+    /// Rebuilds an initial resident window. Reclaimed history resumes from the
+    /// bound Cutover history checkpoint instead of guessing a new generation.
     pub fn replayActivations(events: []const VersionActivationEvent) !Cutover {
         var replayed: Cutover = .{};
-        for (events) |event| {
-            if (replayed.activation_count == 0) {
-                if (event.generation == 0) return error.InvalidActivationHistory;
-                replayed.generation = event.generation - 1;
-                replayed.active_release = event.old_release;
-                replayed.active_strategy_instance = event.old_strategy_instance;
-            }
-            if (event.activation_identity == 0 or event.generation != replayed.generation + 1 or
-                event.barrier == 0 or (replayed.activation_count != 0 and
-                (event.old_release != replayed.active_release or
-                    event.old_strategy_instance != replayed.active_strategy_instance or
-                    event.barrier < replayed.activations[replayed.activation_count - 1].barrier)))
-                return error.InvalidActivationHistory;
-            if (replayed.activation_count == replayed.activations.len) return error.ActivationHistoryFull;
-            replayed.activations[replayed.activation_count] = event;
-            replayed.activation_count += 1;
-            replayed.generation = event.generation;
-            replayed.active_release = event.new_release;
-            replayed.active_strategy_instance = event.new_strategy_instance;
+        if (events.len != 0) {
+            const first = events[0];
+            if (first.generation == 0) return error.InvalidActivationHistory;
+            replayed.generation = first.generation - 1;
+            replayed.active_release = first.old_release;
+            replayed.active_strategy_instance = first.old_strategy_instance;
         }
-        replayed.phase = if (events.len == 0) .idle else .active;
+        for (events) |event| _ = try replayed.replayActivation(event);
         return replayed;
     }
 };
@@ -764,7 +775,8 @@ test "cutover failures and forward rollback never regress economic state or gene
         .fee_atoms = 7,
     } } } });
     var stable_journal = trading.journal.Journal.initAt(shard.authoritativeBarrier() + 1);
-    var cutover: Cutover = .{ .generation = 4, .active_release = 10, .active_strategy_instance = 20, .phase = .active };
+    // The fixture starts at an existing release; its retained schema is explicit.
+    var cutover: Cutover = .{ .generation = 4, .active_release = 10, .active_strategy_instance = 20, .active_state_schema_version = 1, .phase = .active };
     const candidate: Candidate = .{
         .release = 11,
         .strategy_instance = 21,
@@ -831,14 +843,12 @@ test "cutover failures and forward rollback never regress economic state or gene
     try std.testing.expectEqual(@as(i128, 0), (try shard.oms.activeReservations(1)).atoms);
 
     try stable_journal.seal();
-    var replay_reader = try trading.journal.Reader.init(stable_journal.bytes());
     const replayed_shard = try std.testing.allocator.create(trading.ReplayTradingShard);
     defer std.testing.allocator.destroy(replayed_shard);
     @memcpy(std.mem.asBytes(&replayed_shard.shard), std.mem.asBytes(replay_baseline));
-    while (true) switch (try replay_reader.next()) {
-        .record => |record| _ = try replayed_shard.apply(try trading.decodeStableInput(record)),
-        .end => break,
-    };
+    // Replay complete input/derived groups, including the forced open-set
+    // commitment; derived facts are evidence to verify, not new inputs.
+    try std.testing.expectEqual(trading.journal.ScanStatus.clean, try trading.recoverStableInto(&replayed_shard.shard, replay_baseline, stable_journal.bytes()));
     try std.testing.expectEqualSlices(u8, &shard.canonicalStateDigest(), &replayed_shard.canonicalStateDigest());
     try std.testing.expectEqual(shard.economic_projection.portfolio.swap.quantity, replayed_shard.shard.economic_projection.portfolio.swap.quantity);
     try std.testing.expectEqual(shard.economic_projection.ledger_count, replayed_shard.shard.economic_projection.ledger_count);

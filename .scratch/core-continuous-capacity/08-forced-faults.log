@@ -1,0 +1,4 @@
+1/1 coordinator_history_acceptance.test.08 forced archive publication Core Gateway checkpoint and query faults retain full economics and never send...FAIL (DecisionLogUnavailable)
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\5ff9b7f4461ef54822586e9f9441791b\test.exe --seed=0x646f83a2

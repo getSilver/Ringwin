@@ -1,0 +1,36 @@
+1/1 coordinator_history_acceptance.test.08 four shared account Owners preserve 320 forced sources allocations postings and acknowledgements across history recovery...forced history window 0
+thread 11668 panic: attempt to unwrap error: SnapshotTooLarge
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:5557:5: 0x7ff69e1670fa in stateDigestBorrowed (test_zcu.obj)
+    return hasher.finalResult();
+    ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:1070: 0x7ff69e0b926a in canonicalStateDigest (test_zcu.obj)
+        return stateDigestBorrowed(self);
+
+D:\github\Ringwin-core-continuous-capacity\src\control_history_batch.zig:32:116: 0x7ff69e0b926a in qualify (test_zcu.obj)
+    var result: Qualification = .{ .origin = origin, .barrier = barrier, .state_digest = shard.canonicalStateDigest() };
+                                                                                                                   ^
+D:\github\Ringwin-core-continuous-capacity\src\control_history_batch.zig:85: 0x7ff69e0cc6e5 in init (test_zcu.obj)
+        self.qualification = try qualify(shard, origin, shard.authoritativeBarrier());
+
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:798: 0x7ff69e0cc6e5 in archiveControlHistory (test_zcu.obj)
+        try builder.init(&self.shard, origin);
+
+D:\github\Ringwin-core-continuous-capacity\src\coordinator_history_acceptance.zig:119:54: 0x7ff69e0cc6e5 in test.08 four shared account Owners preserve 320 forced sources allocations postings and acknowledgements across history recovery (test_zcu.obj)
+            _ = try shard.owner.archiveControlHistory(shard.gateway);
+                                                     ^
+D:\Program Files\zig\lib\compiler\test_runner.zig:291: 0x7ff69e1b3099 in mainTerminal (test_zcu.obj)
+        if (test_fn.func()) |_| {
+
+D:\Program Files\zig\lib\compiler\test_runner.zig:73:28: 0x7ff69e1b3099 in main (test_zcu.obj)
+        return mainTerminal(init);
+                           ^
+D:\Program Files\zig\lib\std\start.zig:712: 0x7ff69e1b0789 in callMain (test_zcu.obj)
+    if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+
+D:\Program Files\zig\lib\std\start.zig:498:17: 0x7ff69e1b0789 in WinStartup (test_zcu.obj)
+        callMain(std.os.windows.peb().ProcessParameters.CommandLine.slice(), .global),
+                ^
+???:?:?: 0x7ff834bf81f3 in ??? (KERNEL32.DLL)
+???:?:?: 0x7ff83513a250 in ??? (ntdll.dll)
+error: the following test command failed with exit code 3:
+.zig-cache\o\facd619e267102bd7547c6c539a58d6d\test.exe --seed=0x4675d783

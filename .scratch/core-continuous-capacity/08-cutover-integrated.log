@@ -1,0 +1,14 @@
+src\business_history.zig:236:72: error: capture group with incompatible types
+        .coordinator_gateway_command, .coordinator_gateway_closure => |v| {
+                                                                       ^
+src\business_history.zig:236:72: note: incompatible types: 'business_history.Identity__struct_2406' and 'business_history.Identity__struct_2407'
+src\business_history.zig:236:10: note: type 'business_history.Identity__struct_2406' here
+        .coordinator_gateway_command, .coordinator_gateway_closure => |v| {
+        ~^~~~~~~~~~~~~~~~~~~~~~~~~~~
+src\business_history.zig:236:40: note: type 'business_history.Identity__struct_2407' here
+        .coordinator_gateway_command, .coordinator_gateway_closure => |v| {
+                                      ~^~~~~~~~~~~~~~~~~~~~~~~~~~~
+referenced by:
+    verifyResult: src\business_history.zig:131:30
+    recordActivation: src\cutover_history.zig:80:45
+    1 reference(s) hidden; use '-freference-trace=3' to see all references

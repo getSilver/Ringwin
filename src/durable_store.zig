@@ -594,8 +594,10 @@ pub const MemoryAdapter = struct {
             return error.NoSpaceLeft;
         }
         const owned = try self.allocator.dupe(u8, bytes);
-        errdefer self.allocator.free(owned);
+        var transferred = false;
+        errdefer if (!transferred) self.allocator.free(owned);
         try self.archive.append(self.allocator, .{ .page = page, .payload = owned });
+        transferred = true;
         self.archive_bytes += bytes.len;
         entry.archive_root = digest(&page);
         entry.archived_barrier = stream.journal.last_sequence;

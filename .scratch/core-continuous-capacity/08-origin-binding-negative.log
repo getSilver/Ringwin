@@ -1,0 +1,5 @@
+1/1 coordinator_history_acceptance.test.08 forced closure rejects a valid same account proof from another Coordinator stream...expected error.InvalidCoordinatorBinding, found error.DecisionLogUnavailable
+FAIL (TestUnexpectedError)
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\2a2982718f5246ae96538a939aebaf34\test.exe --seed=0x9e2e9d32

@@ -1,0 +1,21 @@
+---
+status: accepted
+date: 2026-10-15
+---
+
+# 已完成控制与共享账户协调历史的持久承接
+
+票08沿用ADR0011和0013的先认证历史发布、再持久提交、后释放明细。控制回收不能重新授予权限，共享账户的协调单Writer也不能借某个TradingShard的身份代表其他分片。
+
+## Decision
+
+- 单分片Operational命令、已opened且无未解决引用的gate、已resolved的latch以及不再被当前策略、Host或订单引用的fence，使用现有decision stream的typed业务历史。当前authority command及风险引用继续驻留；有效锁存、未完成operation和closed gate保持pin。回收不改变version、mode、连续性丢失或trading_authorized。
+- 命令首先验证target和expiry；认证冷重复只完成查证，不再执行动作或重新授权。内容冲突与不可查证保持新增风险关闭。gate_identity退役后不复用为新的gate；退役前同identity的合法open/closed变化仍按既有合同处理。旧策略身份的fence不能通过回收后重新激活。
+- Cutover与共享账户Coordinator各自持有明确绑定account和control stream的独立单Writer及历史根。它们不能与Core或彼此共用Writer身份。control域仅接受相应typed控制/协调业务键，不能为订单/经济键任意放宽namespace。
+- Cutover保留当前generation、release、strategy、schema及未完成切换；Coordinator保留各分片序列、lease版本、风险占用、token高水位、当前摘要、未完成分配及全部投递/ack。历史回收和checkpoint只承接连续尾部，不重置全局序列。
+- forced source只在所有归属分片真实经济应用并持久ack之后归档；完整原始source、仓位、分配slices及ack证据进入认证历史。Shard在首次forced应用前以持久Core配置绑定唯一Coordinator control stream，绑定不可重定向；释放forced经济明细还须核对该绑定根、相同账户/来源/分配/本片slice及完整闭合证明，保留当前经济结果和独立累计；未完成强制协调不因计数或ledger回收消失。
+- GatewayOwnership仅在完整终态证据与历史持久承接之后释放路由明细，保留各分片fencing token高水位。旧命令查证不等于新的路由/发送许可，Unknown仍pin且不自动重发。
+
+## Consequences
+
+Core journal/state/registry升级39/43/37，Gateway快照8；Canonical schema升级13，为exact经济窗口引用追加forced类型，原fill/funding编号不变。forced已应用数量和明细归档累计都参与完整经济覆盖，未闭合Coordinator证据的热forced事实仍pin窗口；闭合归档后的冷摘要通过原窗口证明协议验证，不能通过删除seen降低事实数量。协调与Cutover各自升级其持久身份。小规模公共测试跨旧累计上限并覆盖检查点、归档和恢复故障；不以此授予千单容量、资源、Venue或Windows/Linux生产资格，不增加Web UI或控制面CLI。

@@ -1,0 +1,22 @@
+src\demo_authority.zig:771:15: error: local constant shadows declaration of 'source'
+        const source = try @import("snapshot_codec.zig").decodeBare(result.record_bytes[0..result.record_len], @import("account_coordinator.zig").ForcedSourceHistory);
+              ^~~~~~
+src\demo_authority.zig:1030:9: note: declared here
+    pub fn source(self: *const Owner) !*const trading.TradingShard {
+    ~~~~^~
+src\demo_authority.zig:417:52: error: switch must handle all possibilities
+            const recovered_qualification_digest = switch (kind) {
+                                                   ^~~~~~
+src\trading_shard.zig:29:78: note: unhandled enumeration value: 'control'
+pub const BusinessArchiveKind = enum { order, fill, funding, reconciliation, control, forced };
+                                                                             ^~~~~~~
+src\trading_shard.zig:29:87: note: unhandled enumeration value: 'forced'
+pub const BusinessArchiveKind = enum { order, fill, funding, reconciliation, control, forced };
+                                                                                      ^~~~~~
+src\trading_shard.zig:29:33: note: enum 'trading_shard.BusinessArchiveKind' declared here
+pub const BusinessArchiveKind = enum { order, fill, funding, reconciliation, control, forced };
+                                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+referenced by:
+    test.Demo owner commits before publication and recovers only a complete barrier: src\demo_authority.zig:1187:26
+    demo: src\control_archive_acceptance.zig:4:22
+    1 reference(s) hidden; use '-freference-trace=3' to see all references

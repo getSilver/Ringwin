@@ -1,0 +1,75 @@
+//! Small economic history contract; Owner/coordinator integration lives at their public seams.
+const std = @import("std");
+const economics = @import("economics.zig");
+const history = @import("business_history.zig");
+const codec = @import("snapshot_codec.zig");
+const events = @import("trading_shard_event.zig");
+
+test "08 forced archive retains original source complete economics and all postings without changing balances" {
+    const allocator = std.testing.allocator;
+    const projection = try allocator.create(economics.Projection);
+    defer allocator.destroy(projection);
+    projection.* = .{};
+    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .product = .isolated_linear_usdt, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 4 }, .price = .{ .instrument = 1, .rules_version = 1, .ticks = 100 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1 } });
+    const forced: economics.VenueForcedExecution = .{ .identity = 5, .source_identity = 99, .side = .sell, .product = .isolated_linear_usdt, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 2 }, .price = .{ .instrument = 1, .rules_version = 1, .ticks = 110 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1, .fee = .{ .asset = 1, .atoms = 3 }, .penalty = .{ .asset = 1, .atoms = 1 }, .expected_realized_pnl_atoms = 20 };
+    const original: events.VenueForcedExecution = .{ .execution_id = 5, .source_identity = 99, .side = .sell, .quantity = 2, .price_ticks = 110, .fee_atoms = 3, .penalty_atoms = 1, .expected_realized_pnl_atoms = 20 };
+    var source: economics.ForcedSource = .{ .core_event_identity = 50, .core_times = .{ .source = 100, .receive = 101, .monotonic = 102, .wall = 103, .presence = .{ .source = true, .receive = true, .monotonic = true, .wall = true } }, .accepted_input_digest = history.hash("accepted original forced input"), .exchange_account = 7, .portfolio = 8, .strategy = 9, .instrument = 1, .rules_version = 1 };
+    source.core_payload_len = @intCast((try codec.encodeBare(&source.core_payload_bytes, original)).len);
+    try std.testing.expect(try projection.applyForcedWithSource(forced, source));
+    try std.testing.expect(!try projection.applyForcedWithSource(forced, source));
+    try std.testing.expectEqual(@as(i64, 2), projection.portfolio.swap.quantity);
+    try std.testing.expectEqual(@as(i128, 200), projection.portfolio.swap.open_cost_atoms);
+    try std.testing.expectEqual(@as(i128, 16), projection.portfolio.usdt_balance_atoms);
+    const applied = projection.applied_forced_executions[0];
+    try std.testing.expectEqualDeep(source, applied.source);
+    try std.testing.expect(!std.mem.eql(u8, &applied.source_digest, &applied.payload_digest));
+    const memory = try allocator.create(@import("durable_store.zig").MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = @import("durable_store.zig").MemoryAdapter.initWithAllocator(allocator);
+    defer memory.deinit();
+    const origin: history.Origin = .{ .stream = .{ .domain = .decision_log, .id = 9 }, .account = 7 };
+    const seed_records = [_]history.Record{.{ .bytes = "closed coordinator source", .payload_digest = history.hash("closed coordinator source") }};
+    const seed_entries = [_]history.Entry{.{ .key = .{ .origin = origin, .identity = .{ .order = 99 } }, .record_index = 0 }};
+    const coordinator = try memory.interface().publishOrderHistory(undefined, .{ .origin = origin, .previous_root = null, .barrier = 1, .epoch = 1, .qualification_digest = history.hash("coordinator closure"), .records = &seed_records, .entries = &seed_entries });
+    const closure: economics.ForcedArchiveClosure = .{ .source_identity = 99, .coordinator_root = coordinator.root, .source_record_digest = seed_records[0].payload_digest };
+    const qualification = try projection.prepareForcedArchive(5, origin, 10, closure);
+    try std.testing.expectEqual(@as(u8, 8), qualification.record.ledger_count);
+    for (qualification.record.ledger[0..qualification.record.ledger_count]) |transaction| {
+        try std.testing.expectEqual(@as(u8, 2), transaction.posting_count);
+        try std.testing.expectEqual(@as(i128, 0), transaction.postings[0].amount + transaction.postings[1].amount);
+    }
+    const before = projection.digest();
+    var bad = closure;
+    bad.source_identity += 1;
+    try std.testing.expectError(error.ForcedArchivePinned, projection.prepareForcedArchive(5, origin, 10, bad));
+    try std.testing.expectEqualSlices(u8, &before, &projection.digest());
+    const builder = try allocator.create(@import("forced_history_batch.zig").Builder);
+    defer allocator.destroy(builder);
+    builder.* = try @import("forced_history_batch.zig").build(projection, 5, origin, 10, closure);
+    const view = try builder.batch(coordinator.root, 1);
+    const receipt = try memory.interface().publishOrderHistory(undefined, view.value());
+    const request: history.LookupRequest = .{ .pending_id = 5, .key = .{ .origin = origin, .identity = .{ .forced_detail = 5 } }, .candidate_payload_digest = view.records[0].payload_digest, .original_input_digest = source.accepted_input_digest, .root_digest = receipt.root.root_digest, .epoch = 1, .barrier = 10 };
+    const stored = try memory.interface().queryOrderHistory(undefined, request);
+    try std.testing.expectEqual(history.Verdict.same, try history.verifyResult(request, &stored.proof, receipt.root));
+    try history.validateRecord(&stored);
+    const decoded = try codec.decodeBare(stored.record_bytes[0..stored.record_len], economics.ForcedArchiveQualification);
+    try std.testing.expectEqualDeep(builder.qualification.record, decoded.record);
+    try std.testing.expectEqualDeep(source, decoded.record.applied.source);
+    const portfolio = projection.portfolio;
+    const exchange = projection.exchange;
+    const summary = projection.ledger_summary;
+    var invalid = receipt;
+    invalid.qualification_digest = @splat(0);
+    try std.testing.expectError(error.InvalidHistoryReceipt, projection.commitForcedArchive(builder.qualification, invalid, coordinator.root));
+    try std.testing.expectEqualSlices(u8, &before, &projection.digest());
+    try projection.commitForcedArchive(builder.qualification, receipt, coordinator.root);
+    try std.testing.expectEqualDeep(portfolio, projection.portfolio);
+    try std.testing.expectEqualDeep(exchange, projection.exchange);
+    try std.testing.expectEqualDeep(summary, projection.ledger_summary);
+    try std.testing.expectEqual(@as(u8, 0), projection.applied_forced_execution_count);
+    try std.testing.expectEqual(@as(u64, 1), projection.cumulative_forced_count);
+    try std.testing.expectEqual(@as(u64, 1), projection.archived_forced_count);
+    for (projection.seen[0..projection.seen_count]) |known| try std.testing.expect(known.kind != .forced_execution);
+    for (projection.ledger[0..projection.ledger_count]) |transaction| try std.testing.expect(transaction.kind != .forced_execution);
+    try projection.assertClosed();
+}

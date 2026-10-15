@@ -1,0 +1,609 @@
+{
+  "recorded_utc": "2026-10-15T16:00:21.122249+00:00",
+  "source_tree_sha256": "1ac484f6586253131c2f8845821d54a6d4fc2b2edb63579d0d72dd9a41d02c71",
+  "steps": 10,
+  "native_test_counts": {
+    "releasesafe": 602,
+    "debug": 602
+  },
+  "checks": [
+    {
+      "check": "manifest unique relative paths",
+      "passed": true
+    },
+    {
+      "check": "manifest includes all Zig sources and build",
+      "passed": true
+    },
+    {
+      "check": "frozen source file hashes",
+      "passed": true
+    },
+    {
+      "check": "manifest aggregate SHA256 recomputed",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-full-releasesafe-build exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-full-releasesafe-build exact frozen source inventory",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-full-releasesafe-build native capture",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-full-releasesafe-build exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-full-releasesafe exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-full-releasesafe exact frozen source inventory",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-full-releasesafe native capture",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-full-releasesafe exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-full-debug-build exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-full-debug-build exact frozen source inventory",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-full-debug-build native capture",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-full-debug-build exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-full-debug exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-full-debug exact frozen source inventory",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-full-debug native capture",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-full-debug exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-app-build exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-app-build exact frozen source inventory",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-app-build native capture",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-app-build exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-cli-build exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-cli-build exact frozen source inventory",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-cli-build native capture",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-cli-build exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-app-offline-fixture exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-app-offline-fixture exact frozen source inventory",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-app-offline-fixture native capture",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-app-offline-fixture exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-app-windows-chain-test exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-app-windows-chain-test exact frozen source inventory",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-app-windows-chain-test native capture",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-app-windows-chain-test exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-cli-offline-fixture exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-cli-offline-fixture exact frozen source inventory",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-cli-offline-fixture native capture",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-cli-offline-fixture exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-cli-windows-chain-test exit0 same source no drift",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-cli-windows-chain-test exact frozen source inventory",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-cli-windows-chain-test native capture",
+      "passed": true
+    },
+    {
+      "check": "08-final-v3-cli-windows-chain-test exact captured log hashes",
+      "passed": true
+    },
+    {
+      "check": "full-releasesafe-build precedes full-releasesafe",
+      "passed": true
+    },
+    {
+      "check": "full-releasesafe precedes full-debug-build",
+      "passed": true
+    },
+    {
+      "check": "full-debug-build precedes full-debug",
+      "passed": true
+    },
+    {
+      "check": "full-debug precedes app-build",
+      "passed": true
+    },
+    {
+      "check": "app-build precedes cli-build",
+      "passed": true
+    },
+    {
+      "check": "cli-build precedes app-offline-fixture",
+      "passed": true
+    },
+    {
+      "check": "app-offline-fixture precedes app-windows-chain-test",
+      "passed": true
+    },
+    {
+      "check": "app-windows-chain-test precedes cli-offline-fixture",
+      "passed": true
+    },
+    {
+      "check": "cli-offline-fixture precedes cli-windows-chain-test",
+      "passed": true
+    },
+    {
+      "check": "releasesafe complete src/main build without test filter",
+      "passed": true
+    },
+    {
+      "check": "releasesafe actual full native terminal",
+      "passed": true
+    },
+    {
+      "check": "releasesafe ticket08 tests actually executed",
+      "passed": true
+    },
+    {
+      "check": "releasesafe ten actual control commands round windows",
+      "passed": true
+    },
+    {
+      "check": "releasesafe ten actual control pause/resume round windows",
+      "passed": true
+    },
+    {
+      "check": "releasesafe ten actual control gates/latches round windows",
+      "passed": true
+    },
+    {
+      "check": "releasesafe ten actual control fences round windows",
+      "passed": true
+    },
+    {
+      "check": "releasesafe ten actual forced history window windows",
+      "passed": true
+    },
+    {
+      "check": "releasesafe ten actual gateway history window windows",
+      "passed": true
+    },
+    {
+      "check": "debug complete src/main build without test filter",
+      "passed": true
+    },
+    {
+      "check": "debug actual full native terminal",
+      "passed": true
+    },
+    {
+      "check": "debug ticket08 tests actually executed",
+      "passed": true
+    },
+    {
+      "check": "debug ten actual control commands round windows",
+      "passed": true
+    },
+    {
+      "check": "debug ten actual control pause/resume round windows",
+      "passed": true
+    },
+    {
+      "check": "debug ten actual control gates/latches round windows",
+      "passed": true
+    },
+    {
+      "check": "debug ten actual control fences round windows",
+      "passed": true
+    },
+    {
+      "check": "debug ten actual forced history window windows",
+      "passed": true
+    },
+    {
+      "check": "debug ten actual gateway history window windows",
+      "passed": true
+    },
+    {
+      "check": "same actual test count across modes",
+      "passed": true
+    },
+    {
+      "check": "artifact manifest same source",
+      "passed": true
+    },
+    {
+      "check": "artifact pinned Zig",
+      "passed": true
+    },
+    {
+      "check": "exact four final artifacts",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/08-final-v3-full-releasesafe.exe artifact bytes and hash",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/08-final-v3-full-releasesafe.exe DOS signature",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/08-final-v3-full-releasesafe.exe PE signature",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/08-final-v3-full-releasesafe.exe PE type",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/08-final-v3-full-releasesafe.exe original stack contract",
+      "passed": true
+    },
+    {
+      "check": "full-releasesafe executed exact artifact",
+      "passed": true
+    },
+    {
+      "check": "full-releasesafe-build executed exact artifact",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/08-final-v3-full-debug.exe artifact bytes and hash",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/08-final-v3-full-debug.exe DOS signature",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/08-final-v3-full-debug.exe PE signature",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/08-final-v3-full-debug.exe PE type",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/08-final-v3-full-debug.exe original stack contract",
+      "passed": true
+    },
+    {
+      "check": "full-debug executed exact artifact",
+      "passed": true
+    },
+    {
+      "check": "full-debug-build executed exact artifact",
+      "passed": true
+    },
+    {
+      "check": "zig-out/bin/ringwin.exe artifact bytes and hash",
+      "passed": true
+    },
+    {
+      "check": "zig-out/bin/ringwin.exe DOS signature",
+      "passed": true
+    },
+    {
+      "check": "zig-out/bin/ringwin.exe PE signature",
+      "passed": true
+    },
+    {
+      "check": "zig-out/bin/ringwin.exe PE type",
+      "passed": true
+    },
+    {
+      "check": "zig-out/bin/ringwin.exe original stack contract",
+      "passed": true
+    },
+    {
+      "check": "app-build executed exact artifact",
+      "passed": true
+    },
+    {
+      "check": "app-offline-fixture executed exact artifact",
+      "passed": true
+    },
+    {
+      "check": "app-windows-chain-test executed exact artifact",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/08-final-v3-cli.exe artifact bytes and hash",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/08-final-v3-cli.exe DOS signature",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/08-final-v3-cli.exe PE signature",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/08-final-v3-cli.exe PE type",
+      "passed": true
+    },
+    {
+      "check": ".scratch/core-continuous-capacity/08-final-v3-cli.exe original stack contract",
+      "passed": true
+    },
+    {
+      "check": "cli-build executed exact artifact",
+      "passed": true
+    },
+    {
+      "check": "cli-offline-fixture executed exact artifact",
+      "passed": true
+    },
+    {
+      "check": "cli-windows-chain-test executed exact artifact",
+      "passed": true
+    },
+    {
+      "check": "app five recovered trajectories",
+      "passed": true
+    },
+    {
+      "check": "app Windows offline output qualifications stay false",
+      "passed": true
+    },
+    {
+      "check": "cli five recovered trajectories",
+      "passed": true
+    },
+    {
+      "check": "cli Windows offline output qualifications stay false",
+      "passed": true
+    },
+    {
+      "check": "fixture source review finalized at frozen identity",
+      "passed": true
+    },
+    {
+      "check": "fixture source inventory matches frozen source",
+      "passed": true
+    },
+    {
+      "check": "fixture review covers all test-bearing Zig files",
+      "passed": true
+    },
+    {
+      "check": "OMS four shards source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "Owner public matrices source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "Observation combinations source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "Gateway recovered checkpoint source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "Four shard isolation source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "Issue07 ten funding windows source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "Issue07 funding faults source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "Issue07 window safety source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "History qualification revisions source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "Deferred reports source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "Owner100 checkpoint rounds source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "Shard100 checkpoint rounds source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "Venue long ingress source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "Telemetry samples source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "Benchmark test isolation source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "Windows offline process source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "Coordinator pending forced ack public seed source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "Single economic commitment journal source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "08 control history source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "08 resident authorization source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "08 four shard forced source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "08 shared routing source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "08 Coordinator safety source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "08 Cutover history source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "08 forced record source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "08 Gateway outcome retention source bounds live and retained terminal <=100",
+      "passed": true
+    },
+    {
+      "check": "full fixture review conclusion",
+      "passed": true
+    },
+    {
+      "check": "releasesafe Windows native observation workload <=100",
+      "passed": true
+    },
+    {
+      "check": "releasesafe exact OMS functional four-shard test section",
+      "passed": true
+    },
+    {
+      "check": "releasesafe OMS functional four-shard native bounds",
+      "passed": true
+    },
+    {
+      "check": "releasesafe exact Owner capacity four-shard test section",
+      "passed": true
+    },
+    {
+      "check": "releasesafe Owner capacity four-shard native bounds",
+      "passed": true
+    },
+    {
+      "check": "debug Windows native observation workload <=100",
+      "passed": true
+    },
+    {
+      "check": "debug exact OMS functional four-shard test section",
+      "passed": true
+    },
+    {
+      "check": "debug OMS functional four-shard native bounds",
+      "passed": true
+    },
+    {
+      "check": "debug exact Owner capacity four-shard test section",
+      "passed": true
+    },
+    {
+      "check": "debug Owner capacity four-shard native bounds",
+      "passed": true
+    }
+  ],
+  "result": "passed",
+  "scope": "ticket08 small functional acceptance only; not capacity, resource, Venue or production qualification"
+}

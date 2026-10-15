@@ -1,0 +1,13 @@
+1/12 coordinator_safety_acceptance.test.08 coordination safety ten four-shard lease cycles require fresh recovery admission and preserve versions...OK
+2/12 coordinator_safety_acceptance.test.08 coordination safety expired lease cannot gain authority through snapshot or fresh margin...OK
+3/12 coordinator_safety_acceptance.test.08 coordination safety source commit fault preserves closure economics and recovery...OK
+4/12 coordinator_safety_acceptance.test.08 coordination safety source seal fault preserves closure economics and recovery...OK
+5/12 coordinator_safety_acceptance.test.08 coordination safety source publish fault preserves closure economics and recovery...OK
+6/12 coordinator_safety_acceptance.test.08 coordination safety source rotate fault preserves closure economics and recovery...OK
+7/12 coordinator_safety_acceptance.test.08 coordination safety source reclaim fault preserves closure economics and recovery...OK
+8/12 coordinator_safety_acceptance.test.08 coordination safety hot and cold source allocation duplicates never repeat economics...OK
+9/12 coordinator_safety_acceptance.test.08 coordination safety source conflict and missing history keep risk closed...OK
+10/12 coordinator_safety_acceptance.test.08 coordination safety invalid source and allocation proofs cannot bind another account...OK
+11/12 coordinator_safety_acceptance.test.08 coordination safety gateway missing proof and unavailable lookup provide no routing authority...OK
+12/12 coordinator_safety_acceptance.test.08 coordination safety control namespaces reject economic keys and gateway cross account owner...OK
+All 12 tests passed.

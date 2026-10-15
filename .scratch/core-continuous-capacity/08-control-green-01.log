@@ -1,0 +1,61 @@
+src\economics.zig:705:13: error: use of undeclared identifier 'validateForcedSource'
+        try validateForcedSource(forced, source);
+            ^~~~~~~~~~~~~~~~~~~~
+src\economics.zig:913:17: error: use of undeclared identifier 'validateForcedSource'
+            try validateForcedSource(applied.forced, applied.source);
+                ^~~~~~~~~~~~~~~~~~~~
+src\economics.zig:1336:45: error: use of undeclared identifier 'forcedLayerState'
+        const before = [2]ForcedLayerState{ forcedLayerState(&self.portfolio, forced.quantity.instrument), forcedLayerState(&self.exchange, forced.quantity.instrument) };
+                                            ^~~~~~~~~~~~~~~~
+src\economics.zig:1401:28: error: use of undeclared identifier 'forcedLedgerDigest'
+        const ledger = try forcedLedgerDigest(self, forced.identity);
+                           ^~~~~~~~~~~~~~~~~~
+src\order_history_batch.zig:322:9: error: switch must handle all possibilities
+        switch (entry.key.identity) {
+        ^~~~~~
+src\business_history.zig:33:5: note: unhandled enumeration value: 'operational_command'
+    operational_command: u128,
+    ^~~~~~~~~~~~~~~~~~~
+src\business_history.zig:34:5: note: unhandled enumeration value: 'retired_gate'
+    retired_gate: u128,
+    ^~~~~~~~~~~~
+src\business_history.zig:35:5: note: unhandled enumeration value: 'resolved_latch'
+    resolved_latch: u128,
+    ^~~~~~~~~~~~~~
+src\business_history.zig:36:5: note: unhandled enumeration value: 'strategy_fence'
+    strategy_fence: u128,
+    ^~~~~~~~~~~~~~
+src\business_history.zig:37:5: note: unhandled enumeration value: 'control_archive'
+    control_archive: u64,
+    ^~~~~~~~~~~~~~~
+src\business_history.zig:38:5: note: unhandled enumeration value: 'version_activation'
+    version_activation: u128,
+    ^~~~~~~~~~~~~~~~~~
+src\business_history.zig:39:5: note: unhandled enumeration value: 'coordinator_forced_source'
+    coordinator_forced_source: u128,
+    ^~~~~~~~~~~~~~~~~~~~~~~~~
+src\business_history.zig:40:5: note: unhandled enumeration value: 'coordinator_forced_allocation'
+    coordinator_forced_allocation: u128,
+    ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src\business_history.zig:41:5: note: unhandled enumeration value: 'coordinator_gateway_command'
+    coordinator_gateway_command: struct { shard: u8, command: u64 },
+    ^~~~~~~~~~~~~~~~~~~~~~~~~~~
+src\business_history.zig:42:5: note: unhandled enumeration value: 'coordinator_account_fact'
+    coordinator_account_fact: u128,
+    ^~~~~~~~~~~~~~~~~~~~~~~~
+src\business_history.zig:43:5: note: unhandled enumeration value: 'core_forced'
+    core_forced: u128,
+    ^~~~~~~~~~~
+src\business_history.zig:44:5: note: unhandled enumeration value: 'forced_detail'
+    forced_detail: u128,
+    ^~~~~~~~~~~~~
+src\business_history.zig:45:5: note: unhandled enumeration value: 'forced_economic_digest'
+    forced_economic_digest: u128,
+    ^~~~~~~~~~~~~~~~~~~~~~
+src\business_history.zig:13:22: note: enum '@typeInfo(business_history.Identity).@"union".tag_type.?' declared here
+pub const Identity = union(enum) {
+                     ^~~~~
+referenced by:
+    groupHistorySemantic: src\trading_shard.zig:681:29
+    historySemantic: src\trading_shard.zig:569:77
+    7 reference(s) hidden; use '-freference-trace=9' to see all references

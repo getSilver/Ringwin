@@ -1,0 +1,5 @@
+1/4 cutover_history.test.cutover history persists ten reclaimed windows without restoring old authority...OK
+2/4 cutover_history.test.cutover history keeps unfinished transition and schema after releasing details...OK
+3/4 cutover_history.test.cutover history publication and commit faults retain committed authority and details...OK
+4/4 cutover_history.test.cutover history checkpoint faults preserve latest committed generation...OK
+All 4 tests passed.

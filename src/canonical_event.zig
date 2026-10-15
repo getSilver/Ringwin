@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const schema_version: u16 = 12;
+pub const schema_version: u16 = 13;
 
 pub const VenueIdentity = u64;
 pub const Product = enum(u8) { spot, isolated_linear_usdt };
@@ -510,7 +510,7 @@ pub const AccountEconomicEvidence = struct {
     bill_chain_digest: [32]u8 = @splat(0),
     facts: [16]EconomicFactRef = @splat(.{ .identity = 0, .kind = .funding, .digest = @splat(0), .fee_confirmed = false }),
 };
-pub const EconomicFactRef = struct { identity: u64, kind: enum(u8) { fill, funding }, digest: [32]u8, fee_confirmed: bool };
+pub const EconomicFactRef = struct { identity: u64, kind: enum(u8) { fill, funding, forced }, digest: [32]u8, fee_confirmed: bool };
 
 pub const ExecutionReport = struct {
     identity: SourceFactIdentity,

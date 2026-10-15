@@ -24,7 +24,7 @@ const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
 pub const acceptance_schema_version: u16 = production_contract.acceptance_schema_version;
 // StateDigestV11; captured after economic and three-path recovery equality assertions.
-const expected_shared_summary = "f17479cc0902fd8aaa9adae41bb818b80bc6aa9ca92b39021b9e797e57b226e2";
+const expected_shared_summary = "4480f9fc57aa57b31890f1070188d4dfe3f3f0c2da6dca3778d635dc5b868de5";
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
     return trading.applyStable(shard, stable_journal, .{ .core = input });

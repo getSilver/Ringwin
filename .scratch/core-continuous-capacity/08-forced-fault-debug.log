@@ -1,0 +1,20 @@
+1/1 coordinator_history_acceptance.test.08 forced archive publication Core Gateway checkpoint and query faults retain full economics and never send...forced archive fault history_publish
+FAIL (DecisionLogUnavailable)
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:4707:112: 0x7ff6c8ff8407 in validateSnapshotState (test_zcu.obj)
+                        !std.mem.eql(u8, &applied.source.accepted_input_digest, &fact.accepted_input_digest))) return error.InvalidSnapshotState;
+                                                                                                               ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:1139:9: 0x7ff6c8ffdc94 in restoreSnapshotInto (test_zcu.obj)
+        try validateSnapshotState(recovered);
+        ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:1162:25: 0x7ff6c9071595 in restoreSegmentsInto (test_zcu.obj)
+        const barrier = try restoreSnapshotInto(shard, encoded);
+                        ^
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:372:119: 0x7ff6c9074238 in recoverInto (test_zcu.obj)
+            _ = trading.TradingShard.restoreSegmentsInto(recovered_shard, checkpoint_view.core_snapshot, tails) catch return error.DecisionLogUnavailable;
+                                                                                                                      ^
+D:\github\Ringwin-core-continuous-capacity\src\coordinator_history_acceptance.zig:88:9: 0x7ff6c907dba8 in test.08 forced archive publication Core Gateway checkpoint and query faults retain full economics and never send (test_zcu.obj)
+        try demo.Owner.recoverInto(restored, store, undefined, harness.stream);
+        ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\a9c753e3bef34f1d399fef53dd6fc557\test.exe --seed=0x210d2fb0

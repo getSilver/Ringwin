@@ -26,6 +26,9 @@ pub const FillArchiveCommit = struct {
 };
 
 pub const FundingArchiveCommit = struct { funding_id: u64, qualification_digest: [32]u8, receipt: history_module.Receipt };
+pub const ForcedArchiveCommit = struct { forced_id: u64, qualification_digest: [32]u8, receipt: history_module.Receipt, evidence: @import("forced_archive_proof.zig").Evidence };
+pub const VersionActivationHistoryVerified = struct { activation: VersionActivationEvent, proof: history_module.LookupProof };
+pub const ControlArchiveCommit = struct { qualification_digest: [32]u8, receipt: history_module.Receipt };
 pub const ReconciliationArchiveCommit = struct { window_id: u128, qualification_digest: [32]u8, receipt: history_module.Receipt };
 
 pub const HistorySafetyCandidateVerified = struct { pending: cold.PendingCandidate, proof: history_module.LookupProof };
@@ -116,6 +119,9 @@ pub const EventKind = enum(u16) {
     funding_archive_committed,
     reconciliation_archive_committed,
     economic_open_commitment,
+    control_archive_committed,
+    forced_archive_committed,
+    account_coordinator_bound,
 };
 
 pub const Fact = struct {
@@ -394,6 +400,10 @@ pub const PayloadTag = enum(u16) {
     history_safety_candidate_verified,
     funding_archive_committed,
     reconciliation_archive_committed,
+    control_archive_committed,
+    forced_archive_committed,
+    version_activation_history_verified,
+    account_coordinator_bound,
 };
 
 pub const ReservationModel = enum(u8) { leveraged, cash };
@@ -572,6 +582,10 @@ pub const CorePayload = union(PayloadTag) {
     history_safety_candidate_verified: HistorySafetyCandidateVerified,
     funding_archive_committed: FundingArchiveCommit,
     reconciliation_archive_committed: ReconciliationArchiveCommit,
+    control_archive_committed: ControlArchiveCommit,
+    forced_archive_committed: ForcedArchiveCommit,
+    version_activation_history_verified: VersionActivationHistoryVerified,
+    account_coordinator_bound: history_module.Origin,
 };
 
 /// Typed core-originated event carried by the authoritative CanonicalEvent.
@@ -629,6 +643,22 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             encoded.len += proof_bytes.len;
         },
         .order_archive_committed => |commit| {
+            const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], commit);
+            encoded.len += bytes.len;
+        },
+        .version_activation_history_verified => |verified| {
+            const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], verified);
+            encoded.len += bytes.len;
+        },
+        .account_coordinator_bound => |origin| {
+            const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], origin);
+            encoded.len += bytes.len;
+        },
+        .forced_archive_committed => |commit| {
+            const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], commit);
+            encoded.len += bytes.len;
+        },
+        .control_archive_committed => |commit| {
             const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], commit);
             encoded.len += bytes.len;
         },
@@ -1005,6 +1035,26 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             const commit = try snapshot_codec.decodeBare(record.payload[offset..], OrderArchiveCommit);
             offset = record.payload.len;
             break :blk .{ .order_archive_committed = commit };
+        },
+        .version_activation_history_verified => blk: {
+            const verified = try snapshot_codec.decodeBare(record.payload[offset..], VersionActivationHistoryVerified);
+            offset = record.payload.len;
+            break :blk .{ .version_activation_history_verified = verified };
+        },
+        .account_coordinator_bound => blk: {
+            const origin = try snapshot_codec.decodeBare(record.payload[offset..], history_module.Origin);
+            offset = record.payload.len;
+            break :blk .{ .account_coordinator_bound = origin };
+        },
+        .forced_archive_committed => blk: {
+            const commit = try snapshot_codec.decodeBare(record.payload[offset..], ForcedArchiveCommit);
+            offset = record.payload.len;
+            break :blk .{ .forced_archive_committed = commit };
+        },
+        .control_archive_committed => blk: {
+            const commit = try snapshot_codec.decodeBare(record.payload[offset..], ControlArchiveCommit);
+            offset = record.payload.len;
+            break :blk .{ .control_archive_committed = commit };
         },
         .funding_archive_committed => blk: {
             const commit = try snapshot_codec.decodeBare(record.payload[offset..], FundingArchiveCommit);

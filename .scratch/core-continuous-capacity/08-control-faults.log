@@ -1,0 +1,3 @@
+1/2 control_archive_acceptance.test.08 control history faults preserve authority active pins and committed roots without sending...OK
+2/2 control_archive_acceptance.test.08 control cold duplicate expiry conflict and unavailable proof never revive authority...OK
+All 2 tests passed.

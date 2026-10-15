@@ -1,0 +1,3 @@
+src\cutover_history.zig:14:21: error: use of undeclared identifier 'Owner'
+    var owner = try Owner.init(adapter.interface(), origin);
+                    ^~~~~

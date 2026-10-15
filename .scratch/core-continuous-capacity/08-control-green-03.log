@@ -1,0 +1,13 @@
+src\demo_authority.zig:414:52: error: switch must handle all possibilities
+            const recovered_qualification_digest = switch (kind) {
+                                                   ^~~~~~
+src\trading_shard.zig:29:78: note: unhandled enumeration value: 'control'
+pub const BusinessArchiveKind = enum { order, fill, funding, reconciliation, control };
+                                                                             ^~~~~~~
+src\trading_shard.zig:29:33: note: enum 'trading_shard.BusinessArchiveKind' declared here
+pub const BusinessArchiveKind = enum { order, fill, funding, reconciliation, control };
+                                ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+referenced by:
+    test.Demo owner commits before publication and recovers only a complete barrier: src\demo_authority.zig:1152:26
+    demo: src\control_archive_acceptance.zig:4:22
+    1 reference(s) hidden; use '-freference-trace=3' to see all references

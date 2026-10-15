@@ -50,13 +50,15 @@ Status: active
 12. [封存容量闭合证据并交接生产资格](issues/12-seal-capacity-closure-evidence.md) — blocked by 10, 11
 
 依赖主干：01 → 02 → 03；03 后分为 04、05 → 06 → 07、08 三支；04/07/08 → 09；09 → 10 与 11；10/11 → 12。
-01–07合同、权威屏障、检查点、观察选择及订单/发送/成交费用/资金费账本对账历史归档功能已完成；08–12尚未实现或验收，只有 blocker 全部完成的票可执行。
+01–08合同、权威屏障、检查点、观察选择及订单/发送/成交费用/资金费账本对账/控制账户协调历史归档功能已完成；09–12尚未实现或验收，只有 blocker 全部完成的票可执行。
 
 ## Frontier
 
-- [08 贯通控制与账户协调历史回收](issues/08-reclaim-control-and-account-coordination-history.md)
+- [09 贯通千单负载与安全背压](issues/09-qualify-live-order-capacity-and-backpressure.md)
 
 ## Decisions so far
+
+- 2026-10-16：08小规模功能验收完成，见[08证据](08-evidence.md)。最终107份源码1ac484f6，完整Debug/ReleaseSafe串行各602/602、应用64MiB/CLI256MiB同源码重建及各两个离线模式退出0，149项身份/日志/产物/十轮输出审计通过；独立Standards/Spec无剩余确认P1/P2。控制、策略fence、gate/latch、forced全source/ledger/ack、账户协调和路由历史持续承接，保留风险引用/锁存/未完成协调及token/generation高水位。09为唯一Frontier，仍按每类live/terminal跨全部分片各不超过100的小规模功能口径执行；千单、压力/资源、Venue和平台生产资格未取得。
 
 - 2026-10-15：07小规模功能验收完成，见[07证据](07-evidence.md)。最终96份源码a8c99fb7，完整Debug/ReleaseSafe串行各567/567，应用64MiB/CLI256MiB重建及各两个离线模式退出0，10步终态及129项身份/日志/产物审计通过；独立Standards/Spec无剩余确认P1/P2。08为唯一Frontier，09仍阻塞于08。强制执行分配/ack证据继续pin；压力、资源、Venue与平台生产资格均未取得，Windows链总资格保持blocked。
 

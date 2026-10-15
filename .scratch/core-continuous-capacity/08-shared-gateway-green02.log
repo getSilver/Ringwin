@@ -1,0 +1,12 @@
+1/1 coordination_gateway_acceptance.test.08 shared gateway retires 320 terminal routes keeps fencing high water and rejects old commands after recovery...gateway history window 0
+gateway history window 1
+gateway history window 2
+gateway history window 3
+gateway history window 4
+gateway history window 5
+gateway history window 6
+gateway history window 7
+gateway history window 8
+gateway history window 9
+OK
+All 1 tests passed.

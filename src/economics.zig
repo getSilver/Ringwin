@@ -342,6 +342,64 @@ pub const FundingArchiveQualification = struct {
     }
 };
 
+pub const ForcedSource = struct {
+    core_event_identity: u64 = 0,
+    core_times: ?FundingCoreTimes = null,
+    core_payload_len: u16 = 0,
+    core_payload_bytes: [256]u8 = @splat(0),
+    accepted_input_digest: history.Digest = @splat(0),
+    exchange_account: u128 = 0,
+    portfolio: u128 = 0,
+    strategy: u128 = 0,
+    instrument: canonical.InstrumentIdentity = 0,
+    rules_version: u64 = 0,
+};
+pub const ForcedLayerState = struct {
+    instrument_position: ?InstrumentPosition,
+    balance_atoms: i128,
+    margin_atoms: i128,
+    realized_pnl_atoms: i128,
+    unrealized_pnl_atoms: i128,
+    fee_atoms: i128,
+    penalty_atoms: i128,
+};
+pub const AppliedForcedExecution = struct {
+    forced: VenueForcedExecution,
+    portfolio_applied: bool,
+    source: ForcedSource = .{},
+    source_digest: history.Digest,
+    payload_digest: history.Digest,
+    before: [2]ForcedLayerState,
+    after: [2]ForcedLayerState,
+    ledger_digest: history.Digest,
+    ledger_count: u8,
+};
+/// The Owner independently authenticates the complete coordinator source record,
+/// exact allocation slice and every durable acknowledgement before supplying
+/// this binding. A root supplied by an arbitrary caller is not closure proof.
+pub const ForcedArchiveClosure = struct {
+    source_identity: u128,
+    coordinator_root: history.Root,
+    source_record_digest: history.Digest,
+};
+pub const ForcedArchiveRecord = struct {
+    applied: AppliedForcedExecution,
+    ledger: [max_ledger_transactions]LedgerTransaction = undefined,
+    ledger_count: u8 = 0,
+};
+pub const ForcedArchiveQualification = struct {
+    origin: history.Origin,
+    barrier: u64,
+    projection_digest: history.Digest,
+    closure: ForcedArchiveClosure,
+    record: ForcedArchiveRecord,
+
+    pub fn digest(self: *const @This()) history.Digest {
+        var bytes: [history.max_record_bytes]u8 = undefined;
+        return history.hash(codec.encodeBare(&bytes, self.*) catch unreachable);
+    }
+};
+
 pub const Projection = struct {
     treasury_native_assets: [max_native_assets]canonical.AssetAmount = @splat(.{ .asset = 0, .atoms = 0 }),
     treasury_native_asset_count: u8 = 0,
@@ -374,6 +432,10 @@ pub const Projection = struct {
     archived_funding_count: u64 = 0,
     cumulative_funding_absolute_atoms: i128 = 0,
     archived_funding_absolute_atoms: i128 = 0,
+    applied_forced_executions: [max_facts]AppliedForcedExecution = undefined,
+    applied_forced_execution_count: u8 = 0,
+    cumulative_forced_count: u64 = 0,
+    archived_forced_count: u64 = 0,
     spot_mark_price_atoms: i128 = 0,
     swap_mark_price_atoms: i128 = 0,
     spot_quantity_denominator: i64 = 0,
@@ -639,6 +701,83 @@ pub const Projection = struct {
         self.archived_funding_absolute_atoms = try std.math.add(i128, self.archived_funding_absolute_atoms, try fundingAbsoluteAmount(qualification.record.applied.funding));
     }
 
+    pub fn applyForcedWithSource(self: *Projection, forced: VenueForcedExecution, source: ForcedSource) !bool {
+        try validateForcedSource(forced, source);
+        var candidate = self.*;
+        const before_count = candidate.applied_forced_execution_count;
+        try candidate.applyForced(forced);
+        if (candidate.applied_forced_execution_count == before_count) {
+            for (candidate.applied_forced_executions[0..before_count]) |known| if (known.forced.identity == forced.identity) {
+                if (!std.meta.eql(known.source, source)) return error.ConflictingEconomicIdentity;
+            };
+            return false;
+        }
+        const applied = &candidate.applied_forced_executions[candidate.applied_forced_execution_count - 1];
+        applied.source = source;
+        applied.source_digest = forcedSourceDigest(forced, source);
+        try candidate.assertClosed();
+        self.* = candidate;
+        return true;
+    }
+
+    pub fn prepareForcedArchive(self: *const Projection, identity: u64, origin: history.Origin, barrier: u64, closure: ForcedArchiveClosure) !ForcedArchiveQualification {
+        if (identity == 0 or barrier == 0 or origin.account == 0 or origin.stream.domain != .decision_log or origin.stream.id == 0 or
+            self.reconciliation_break or self.suspense_usdt_atoms != 0 or self.suspense_native_asset_count != 0) return error.ForcedArchivePinned;
+        var applied: ?AppliedForcedExecution = null;
+        for (self.applied_forced_executions[0..self.applied_forced_execution_count]) |known| if (known.forced.identity == identity) {
+            applied = known;
+            break;
+        };
+        const known = applied orelse return error.UnknownEconomicForcedExecution;
+        const source = known.source;
+        const times = source.core_times orelse return error.ForcedArchivePinned;
+        if (!known.portfolio_applied or known.forced.source_identity == 0 or closure.source_identity != known.forced.source_identity or
+            source.core_event_identity == 0 or source.core_payload_len == 0 or std.mem.allEqual(u8, &source.accepted_input_digest, 0) or
+            !times.presence.source or !times.presence.receive or !times.presence.monotonic or times.source == 0 or times.receive == 0 or times.monotonic == 0 or
+            source.exchange_account != origin.account or source.portfolio == 0 or source.instrument == 0 or source.rules_version == 0 or
+            closure.coordinator_root.origin.account != origin.account or std.mem.allEqual(u8, &closure.source_record_digest, 0)) return error.ForcedArchivePinned;
+        try history.validateRoot(closure.coordinator_root);
+        if (closure.coordinator_root.retired) return error.ForcedArchivePinned;
+        try self.assertClosed();
+        var result: ForcedArchiveQualification = .{ .origin = origin, .barrier = barrier, .projection_digest = self.digest(), .closure = closure, .record = .{ .applied = known } };
+        result.record.ledger = std.mem.zeroes(@TypeOf(result.record.ledger));
+        for (self.ledger[0..self.ledger_count]) |transaction| if (transaction.kind == .forced_execution and transaction.source_identity == identity) {
+            result.record.ledger[result.record.ledger_count] = transaction;
+            result.record.ledger_count += 1;
+        };
+        if (result.record.ledger_count != known.ledger_count or result.record.ledger_count == 0) return error.IncompleteForcedArchive;
+        for (result.record.ledger[0..result.record.ledger_count]) |*transaction|
+            @memset(transaction.postings[transaction.posting_count..], std.mem.zeroes(LedgerPosting));
+        return result;
+    }
+
+    pub fn commitForcedArchive(self: *Projection, qualification: ForcedArchiveQualification, receipt: history.Receipt, previous_root: ?history.Root) !void {
+        const current = try self.prepareForcedArchive(qualification.record.applied.forced.identity, qualification.origin, qualification.barrier, qualification.closure);
+        if (!std.mem.eql(u8, &current.digest(), &qualification.digest()) or receipt.root.barrier != qualification.barrier) return error.InvalidForcedArchiveCommit;
+        _ = try history.verifyReceipt(receipt, qualification.origin, qualification.digest(), previous_root);
+        const archived_count = try std.math.add(u64, self.archived_forced_count, 1);
+        const identity = qualification.record.applied.forced.identity;
+        var kept: u8 = 0;
+        for (self.applied_forced_executions[0..self.applied_forced_execution_count]) |known| if (known.forced.identity != identity) {
+            self.applied_forced_executions[kept] = known;
+            kept += 1;
+        };
+        self.applied_forced_execution_count = kept;
+        kept = 0;
+        for (self.seen[0..self.seen_count]) |known| if (known.kind != .forced_execution or known.identity != identity) {
+            self.seen[kept] = known;
+            kept += 1;
+        };
+        self.seen_count = kept;
+        kept = 0;
+        for (self.ledger[0..self.ledger_count]) |transaction| if (transaction.kind != .forced_execution or transaction.source_identity != identity) {
+            self.ledger[kept] = transaction;
+            kept += 1;
+        };
+        self.ledger_count = kept;
+        self.archived_forced_count = archived_count;
+    }
+
     pub fn releaseOrderFillTotal(self: *Projection, qualification: oms.OrderArchiveQualification, receipt: history.Receipt, previous_root: ?history.Root) !void {
         _ = try history.verifyReceipt(receipt, receipt.root.origin, qualification.digest(), previous_root);
         if (receipt.root.origin.account != qualification.exchange_account or
@@ -698,6 +837,11 @@ pub const Projection = struct {
         hashInt(&hasher, u8, self.applied_funding_count);
         for (self.applied_fundings[0..self.applied_funding_count]) |known|
             hasher.update(codec.encodeBare(&fill_bytes, known) catch unreachable);
+        hashInt(&hasher, u64, self.cumulative_forced_count);
+        hashInt(&hasher, u64, self.archived_forced_count);
+        hashInt(&hasher, u8, self.applied_forced_execution_count);
+        for (self.applied_forced_executions[0..self.applied_forced_execution_count]) |known|
+            hasher.update(codec.encodeBare(&fill_bytes, known) catch unreachable);
         hashInt(&hasher, u8, self.ledger_count);
         for (self.ledger[0..self.ledger_count]) |transaction| {
             hashInt(&hasher, u64, transaction.source_identity);
@@ -748,6 +892,11 @@ pub const Projection = struct {
                 return a.funding.identity < b.funding.identity;
             }
         }.less);
+        std.mem.sort(AppliedForcedExecution, normalized.applied_forced_executions[0..normalized.applied_forced_execution_count], {}, struct {
+            fn less(_: void, a: AppliedForcedExecution, b: AppliedForcedExecution) bool {
+                return a.forced.identity < b.forced.identity;
+            }
+        }.less);
         return normalized;
     }
 
@@ -762,6 +911,36 @@ pub const Projection = struct {
     }
 
     pub fn assertClosed(self: *const Projection) !void {
+        if (self.seen_count > self.seen.len or self.ledger_count > self.ledger.len or self.applied_forced_execution_count > self.applied_forced_executions.len) return error.InvalidEconomicFact;
+        if (self.cumulative_forced_count != try std.math.add(u64, self.archived_forced_count, self.applied_forced_execution_count)) return error.InvalidEconomicFact;
+        for (self.applied_forced_executions[0..self.applied_forced_execution_count], 0..) |applied, index| {
+            for (self.applied_forced_executions[0..index]) |known| if (known.forced.identity == applied.forced.identity) return error.InvalidEconomicFact;
+            try validateForcedSource(applied.forced, applied.source);
+            if (!std.mem.eql(u8, &applied.source_digest, &forcedSourceDigest(applied.forced, applied.source)) or
+                !std.mem.eql(u8, &applied.payload_digest, &forcedEconomicDigest(applied))) return error.InvalidEconomicFact;
+            var seen = false;
+            for (self.seen[0..self.seen_count]) |known| if (known.kind == .forced_execution and known.identity == applied.forced.identity) {
+                if (known.fingerprint != fingerprintForced(applied.forced)) return error.InvalidEconomicFact;
+                seen = true;
+            };
+            if (!seen) return error.InvalidEconomicFact;
+            const ledger = try forcedLedgerDigest(self, applied.forced.identity);
+            if (ledger.count != applied.ledger_count or !std.mem.eql(u8, &ledger.digest, &applied.ledger_digest)) return error.InvalidEconomicFact;
+        }
+        for (self.seen[0..self.seen_count]) |known| if (known.kind == .forced_execution) {
+            var found = false;
+            for (self.applied_forced_executions[0..self.applied_forced_execution_count]) |applied| if (applied.forced.identity == known.identity) {
+                found = true;
+            };
+            if (!found) return error.InvalidEconomicFact;
+        };
+        for (self.ledger[0..self.ledger_count]) |transaction| if (transaction.kind == .forced_execution) {
+            var found = false;
+            for (self.applied_forced_executions[0..self.applied_forced_execution_count]) |applied| if (applied.forced.identity == transaction.source_identity) {
+                found = true;
+            };
+            if (!found) return error.InvalidEconomicFact;
+        };
         if (self.applied_fill_count > self.applied_fills.len or self.applied_fill_total_count > self.applied_fill_totals.len or self.canonical_fill_evidence_count > self.canonical_fill_evidence.len) return error.InvalidEconomicFact;
         if (self.applied_funding_count > self.applied_fundings.len) return error.InvalidEconomicFact;
         var resident_funding_absolute_atoms: i128 = 0;
@@ -1159,6 +1338,7 @@ pub const Projection = struct {
             }
         }
         const owned_position = self.portfolio.positionForInstrument(forced.quantity.instrument);
+        const before = [2]ForcedLayerState{ forcedLayerState(&self.portfolio, forced.quantity.instrument), forcedLayerState(&self.exchange, forced.quantity.instrument) };
         const closes_portfolio = owned_position.quantity != 0 and
             ((owned_position.quantity > 0 and forced.side == .sell) or (owned_position.quantity < 0 and forced.side == .buy)) and
             quantity <= abs(owned_position.quantity);
@@ -1195,6 +1375,7 @@ pub const Projection = struct {
                 try self.appendLedger(forced.identity, .forced_execution, .portfolio, .penalty_expense, -penalty);
                 try self.appendLedger(forced.identity, .forced_execution, .exchange, .penalty_expense, -penalty);
             }
+            try self.rememberForcedExecution(forced, true, before);
             return;
         }
         if (self.seen_count == max_facts) return error.EconomicFactCapacityExceeded;
@@ -1216,6 +1397,27 @@ pub const Projection = struct {
         if (self.firstInstrument(forced.product) == forced.quantity.instrument)
             self.setDenominator(forced.product, forced.quantity_denominator, forced.quantity_numerator);
         try self.openBreak(forced.identity);
+        try self.rememberForcedExecution(forced, false, before);
+    }
+
+    fn rememberForcedExecution(self: *Projection, forced: VenueForcedExecution, portfolio_applied: bool, before: [2]ForcedLayerState) !void {
+        if (self.applied_forced_execution_count == self.applied_forced_executions.len) return error.EconomicFactCapacityExceeded;
+        const cumulative = try std.math.add(u64, self.cumulative_forced_count, 1);
+        const ledger = try forcedLedgerDigest(self, forced.identity);
+        var applied: AppliedForcedExecution = .{
+            .forced = forced,
+            .portfolio_applied = portfolio_applied,
+            .source_digest = forcedSourceDigest(forced, .{}),
+            .payload_digest = undefined,
+            .before = before,
+            .after = .{ forcedLayerState(&self.portfolio, forced.quantity.instrument), forcedLayerState(&self.exchange, forced.quantity.instrument) },
+            .ledger_digest = ledger.digest,
+            .ledger_count = ledger.count,
+        };
+        applied.payload_digest = forcedEconomicDigest(applied);
+        self.applied_forced_executions[self.applied_forced_execution_count] = applied;
+        self.applied_forced_execution_count += 1;
+        self.cumulative_forced_count = cumulative;
     }
 
     fn reconcile(self: *Projection, snapshot: AccountSnapshot) !void {
@@ -1632,6 +1834,52 @@ pub fn fundingEconomicDigest(funding: FundingSettlement, portfolio_applied: bool
     const result: Result = .{ .identity = funding.identity, .asset = funding.amount.asset, .exchange_delta = funding.amount.atoms, .portfolio_delta = if (portfolio_applied) funding.amount.atoms else 0, .suspense_delta = if (portfolio_applied) 0 else funding.amount.atoms, .portfolio_applied = portfolio_applied };
     var bytes: [256]u8 = undefined;
     return history.hash(codec.encodeBare(&bytes, result) catch unreachable);
+}
+
+fn forcedLayerState(layer: *const Layer, instrument: Instrument) ForcedLayerState {
+    return .{ .instrument_position = layer.instrumentPosition(instrument), .balance_atoms = layer.usdt_balance_atoms, .margin_atoms = layer.margin_atoms, .realized_pnl_atoms = layer.realized_pnl_atoms, .unrealized_pnl_atoms = layer.unrealized_pnl_atoms, .fee_atoms = layer.fee_atoms, .penalty_atoms = layer.penalty_atoms };
+}
+
+pub fn forcedSourceDigest(forced: VenueForcedExecution, source: ForcedSource) history.Digest {
+    if (source.core_payload_len != 0) return history.hash(source.core_payload_bytes[0..source.core_payload_len]);
+    var bytes: [512]u8 = undefined;
+    return history.hash(codec.encodeBare(&bytes, forced) catch unreachable);
+}
+
+pub fn forcedEconomicDigest(applied: AppliedForcedExecution) history.Digest {
+    const Result = struct { forced: VenueForcedExecution, portfolio_applied: bool, before: [2]ForcedLayerState, after: [2]ForcedLayerState, ledger_digest: history.Digest, ledger_count: u8 };
+    var bytes: [4096]u8 = undefined;
+    return history.hash(codec.encodeBare(&bytes, Result{ .forced = applied.forced, .portfolio_applied = applied.portfolio_applied, .before = applied.before, .after = applied.after, .ledger_digest = applied.ledger_digest, .ledger_count = applied.ledger_count }) catch unreachable);
+}
+
+fn forcedLedgerDigest(projection: *const Projection, identity: u64) !struct { digest: history.Digest, count: u8 } {
+    var hasher = Sha256.init(.{});
+    hasher.update("ForcedLedgerV1\x00");
+    var count: u8 = 0;
+    for (projection.ledger[0..projection.ledger_count]) |transaction| if (transaction.kind == .forced_execution and transaction.source_identity == identity) {
+        if (transaction.posting_count > transaction.postings.len) return error.InvalidEconomicFact;
+        var normalized = transaction;
+        @memset(normalized.postings[normalized.posting_count..], std.mem.zeroes(LedgerPosting));
+        var bytes: [1024]u8 = undefined;
+        hasher.update(try codec.encodeBare(&bytes, normalized));
+        count = try std.math.add(u8, count, 1);
+    };
+    hashInt(&hasher, u8, count);
+    var digest: history.Digest = undefined;
+    hasher.final(&digest);
+    return .{ .digest = digest, .count = count };
+}
+
+fn validateForcedSource(forced: VenueForcedExecution, source: ForcedSource) !void {
+    if (forced.identity == 0 or source.core_payload_len > source.core_payload_bytes.len or !std.mem.allEqual(u8, source.core_payload_bytes[source.core_payload_len..], 0)) return error.InvalidEconomicFact;
+    if (source.core_times) |times| if (times.presence.reserved != 0 or source.core_event_identity == 0 or source.core_payload_len == 0) return error.InvalidEconomicFact;
+    if (source.instrument != 0 and (source.instrument != forced.quantity.instrument or source.rules_version != forced.quantity.rules_version)) return error.InvalidEconomicFact;
+    if (source.core_payload_len != 0) {
+        const original = try codec.decodeBare(source.core_payload_bytes[0..source.core_payload_len], @import("trading_shard_event.zig").VenueForcedExecution);
+        if (original.execution_id != forced.identity or original.source_identity != forced.source_identity or
+            @intFromEnum(original.side) != @intFromEnum(forced.side) or original.quantity != forced.quantity.lots or original.price_ticks != forced.price.ticks or
+            original.fee_atoms != forced.fee.atoms or original.penalty_atoms != forced.penalty.atoms or !std.meta.eql(original.expected_realized_pnl_atoms, forced.expected_realized_pnl_atoms)) return error.InvalidEconomicFact;
+    }
 }
 
 pub fn fundingSourceDigest(funding: FundingSettlement, source: FundingSource) !history.Digest {

@@ -1,0 +1,179 @@
+1/4 cutover_history.test.cutover history persists ten reclaimed windows without restoring old authority...OK
+2/4 cutover_history.test.cutover history keeps unfinished transition and schema after releasing details...OK
+3/4 cutover_history.test.cutover history publication and commit faults retain committed authority and details...OK
+4/4 cutover_history.test.cutover history checkpoint faults preserve latest committed generation...Segmentation fault at address 0x191c3fa0000
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\mem.zig:1897: 0x7ff6e72e9a62 in readInt (test_zcu.obj)
+    return if (endian == native_endian) value else @byteSwap(value);
+
+D:\Program Files\zig\lib\std\crypto\sha2.zig:197:35: 0x7ff6e72e9a62 in round (test_zcu.obj)
+                s[i] = mem.readInt(u32, mem.asBytes(elem), .big);
+                                  ^
+D:\Program Files\zig\lib\std\crypto\sha2.zig:128:24: 0x7ff6e72eb658 in update (test_zcu.obj)
+                d.round(b[off..][0..64]);
+                       ^
+D:\Program Files\zig\lib\std\crypto\sha2.zig:110: 0x7ff6e7308f4c in hash (test_zcu.obj)
+            d.update(b);
+
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:332: 0x7ff6e7308f4c in digest (test_zcu.obj)
+    Sha256.hash(bytes, &result, .{});
+
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:700:86: 0x7ff6e7308f4c in recoverImpl (test_zcu.obj)
+                if (!sameStream(receipt.stream, identity) or !std.mem.eql(u8, &digest(item.payload), &receipt.latest_payload_digest) or receipt.segment_count != stream.segment_index or receipt.covered_last != entry.archived_barrier) {
+                                                                                     ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:181: 0x7ff6e7297ca4 in recover (test_zcu.obj)
+        return self.vtable.recover(self.context, io, stream);
+
+D:\github\Ringwin-core-continuous-capacity\src\cutover_history.zig:172:43: 0x7ff6e7297ca4 in recover (test_zcu.obj)
+        const restored = try store.recover(io, origin.stream);
+                                          ^
+D:\github\Ringwin-core-continuous-capacity\src\cutover_history.zig:362:43: 0x7ff6e7298c17 in test.cutover history checkpoint faults preserve latest committed generation (test_zcu.obj)
+        const restored = try Owner.recover(adapter.interface(), undefined, origin);
+                                          ^
+D:\Program Files\zig\lib\compiler\test_runner.zig:291: 0x7ff6e72f22c8 in mainTerminal (test_zcu.obj)
+        if (test_fn.func()) |_| {
+
+D:\Program Files\zig\lib\compiler\test_runner.zig:73:28: 0x7ff6e72f22c8 in main (test_zcu.obj)
+        return mainTerminal(init);
+                           ^
+D:\Program Files\zig\lib\std\start.zig:712: 0x7ff6e72ef7e9 in callMain (test_zcu.obj)
+    if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+
+D:\Program Files\zig\lib\std\start.zig:498:17: 0x7ff6e72ef7e9 in WinStartup (test_zcu.obj)
+        callMain(std.os.windows.peb().ProcessParameters.CommandLine.slice(), .global),
+                ^
+???:?:?: 0x7ff834bf81f3 in ??? (KERNEL32.DLL)
+???:?:?: 0x7ff83513a250 in ??? (ntdll.dll)
+error: the following test command failed with exit code 3:
+.zig-cache\o\d447fa2994d51c5f0103efe5e1d94f08\test.exe --seed=0x5d1d802d

@@ -329,6 +329,7 @@ test "order history batch owns relocated records and archives every released sem
             .client_order_id, .dispatch_command, .dispatch_result => return error.UnexpectedClientOrderIdKey,
             .canonical_fill, .core_fill, .fill_detail, .fill_economic_digest => return error.UnexpectedFillHistoryKey,
             .canonical_funding, .core_funding, .funding_detail, .funding_economic_digest, .reconciliation_window, .canonical_account_reconciliation => return error.UnexpectedEconomicHistoryKey,
+            .operational_command, .retired_gate, .resolved_latch, .strategy_fence, .control_archive, .version_activation, .coordinator_forced_source, .coordinator_forced_allocation, .coordinator_gateway_command, .coordinator_account_fact, .core_forced, .forced_detail, .forced_economic_digest, .coordinator_gateway_closure => return error.UnexpectedControlHistoryKey,
         }
     }
     try std.testing.expectEqual(@as(u8, 1), shard.oms.order_count);

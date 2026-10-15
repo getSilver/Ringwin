@@ -230,5 +230,13 @@ test {
     _ = @import("reconciliation_archive_acceptance.zig");
     _ = @import("reconciliation_archive_safety_acceptance.zig");
     _ = @import("fill_archive_acceptance.zig");
+    _ = @import("control_archive_acceptance.zig");
+    _ = @import("control_resident_order_acceptance.zig");
+    _ = @import("control_gateway_retention_acceptance.zig");
+    _ = @import("cutover_history.zig");
+    _ = @import("coordinator_history_acceptance.zig");
+    _ = @import("coordinator_safety_acceptance.zig");
+    _ = @import("coordination_gateway_acceptance.zig");
+    _ = @import("forced_archive_acceptance.zig");
     _ = raw_ingress;
 }

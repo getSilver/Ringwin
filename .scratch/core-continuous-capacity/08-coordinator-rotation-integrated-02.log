@@ -1,0 +1,5 @@
+1/2 account_coordinator.test.coordinator history pins incomplete forced source...OK
+2/2 account_coordinator.test.coordinator history durable writer rotates beyond old journal capacity and recovers exact sequence...FAIL (SnapshotBarrierNotSealed)
+1 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\699cb790eb28caa4bf33e4be60b071b7\test.exe --seed=0xb252eb7c

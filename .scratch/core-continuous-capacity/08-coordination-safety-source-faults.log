@@ -1,0 +1,63 @@
+1/6 coordinator_safety_acceptance.test.08 coordination safety source commit fault preserves closure economics and recovery...OK
+2/6 coordinator_safety_acceptance.test.08 coordination safety source seal fault preserves closure economics and recovery...FAIL (InvalidCoordinationTail)
+D:\github\Ringwin-core-continuous-capacity\src\account_coordinator.zig:3028:43: 0x7ff61d3ce3cb in recover (test_zcu.obj)
+                    if (status != .clean) return error.InvalidCoordinationTail;
+                                          ^
+D:\github\Ringwin-core-continuous-capacity\src\coordinator_safety_acceptance.zig:100:23: 0x7ff61d3cef33 in sourceFault (test_zcu.obj)
+    const recovered = try coordination.CoordinatorOwner.recover(owner.stream, harness.backend.memory.interface(), undefined);
+                      ^
+D:\github\Ringwin-core-continuous-capacity\src\coordinator_safety_acceptance.zig:121:5: 0x7ff61d41153a in test.08 coordination safety source seal fault preserves closure economics and recovery (test_zcu.obj)
+    try sourceFault(.seal);
+    ^
+3/6 coordinator_safety_acceptance.test.08 coordination safety source publish fault preserves closure economics and recovery...FAIL (DurableStoreClosed)
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:934:33: 0x7ff61d3ed271 in recoverOrderHistoryImpl (test_zcu.obj)
+        if (self.gate != .open) return error.DurableStoreClosed;
+                                ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:161:9: 0x7ff61d3cd7eb in recoverOrderHistory (test_zcu.obj)
+        return recover_history(self.context, io, origin);
+        ^
+D:\github\Ringwin-core-continuous-capacity\src\account_coordinator.zig:3036:31: 0x7ff61d3ce699 in recover (test_zcu.obj)
+            const published = try store.recoverOrderHistory(io, root.origin);
+                              ^
+D:\github\Ringwin-core-continuous-capacity\src\coordinator_safety_acceptance.zig:100:23: 0x7ff61d3cef33 in sourceFault (test_zcu.obj)
+    const recovered = try coordination.CoordinatorOwner.recover(owner.stream, harness.backend.memory.interface(), undefined);
+                      ^
+D:\github\Ringwin-core-continuous-capacity\src\coordinator_safety_acceptance.zig:125:5: 0x7ff61d4114ea in test.08 coordination safety source publish fault preserves closure economics and recovery (test_zcu.obj)
+    try sourceFault(.publish);
+    ^
+4/6 coordinator_safety_acceptance.test.08 coordination safety source rotate fault preserves closure economics and recovery...FAIL (DurableStoreClosed)
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:934:33: 0x7ff61d3ed271 in recoverOrderHistoryImpl (test_zcu.obj)
+        if (self.gate != .open) return error.DurableStoreClosed;
+                                ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:161:9: 0x7ff61d3cd7eb in recoverOrderHistory (test_zcu.obj)
+        return recover_history(self.context, io, origin);
+        ^
+D:\github\Ringwin-core-continuous-capacity\src\account_coordinator.zig:3036:31: 0x7ff61d3ce699 in recover (test_zcu.obj)
+            const published = try store.recoverOrderHistory(io, root.origin);
+                              ^
+D:\github\Ringwin-core-continuous-capacity\src\coordinator_safety_acceptance.zig:100:23: 0x7ff61d3cef33 in sourceFault (test_zcu.obj)
+    const recovered = try coordination.CoordinatorOwner.recover(owner.stream, harness.backend.memory.interface(), undefined);
+                      ^
+D:\github\Ringwin-core-continuous-capacity\src\coordinator_safety_acceptance.zig:129:5: 0x7ff61d41149a in test.08 coordination safety source rotate fault preserves closure economics and recovery (test_zcu.obj)
+    try sourceFault(.rotate);
+    ^
+5/6 coordinator_safety_acceptance.test.08 coordination safety source reclaim fault preserves closure economics and recovery...FAIL (DurableStoreClosed)
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:934:33: 0x7ff61d3ed271 in recoverOrderHistoryImpl (test_zcu.obj)
+        if (self.gate != .open) return error.DurableStoreClosed;
+                                ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:161:9: 0x7ff61d3cd7eb in recoverOrderHistory (test_zcu.obj)
+        return recover_history(self.context, io, origin);
+        ^
+D:\github\Ringwin-core-continuous-capacity\src\account_coordinator.zig:3036:31: 0x7ff61d3ce699 in recover (test_zcu.obj)
+            const published = try store.recoverOrderHistory(io, root.origin);
+                              ^
+D:\github\Ringwin-core-continuous-capacity\src\coordinator_safety_acceptance.zig:100:23: 0x7ff61d3cef33 in sourceFault (test_zcu.obj)
+    const recovered = try coordination.CoordinatorOwner.recover(owner.stream, harness.backend.memory.interface(), undefined);
+                      ^
+D:\github\Ringwin-core-continuous-capacity\src\coordinator_safety_acceptance.zig:133:5: 0x7ff61d3cf81a in test.08 coordination safety source reclaim fault preserves closure economics and recovery (test_zcu.obj)
+    try sourceFault(.reclaim);
+    ^
+6/6 coordinator_safety_acceptance.test.08 coordination safety source conflict and missing history keep risk closed...OK
+2 passed; 0 skipped; 4 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\58a5ef232e9e5ecc215828b5147c3b29\test.exe --seed=0xb4dcdaaa

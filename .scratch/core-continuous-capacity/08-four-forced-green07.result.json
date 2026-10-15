@@ -1,0 +1,439 @@
+{
+  "files": [
+    {
+      "path": "build.zig",
+      "sha256": "44b85ccabbb703d142c88b88050b4f24af9a2cc1f4fb1f600751987ef4be62ec"
+    },
+    {
+      "path": "src/account_coordinator.zig",
+      "sha256": "5909d7c13affaa8029e1a0d985fdc03416055d9428c4ee7af1d7c24f2a6f1f8c"
+    },
+    {
+      "path": "src/account_projection.zig",
+      "sha256": "cb5479702662569e2279b163366dcf46eb904ef70e76021e50bda92d02817638"
+    },
+    {
+      "path": "src/asset_precision_file_recovery_acceptance.zig",
+      "sha256": "23d3e40fe5f06d92ee8da66d827d29eda73f9ec481ee8bc55ed28cff0f77eece"
+    },
+    {
+      "path": "src/asset_registry.zig",
+      "sha256": "14e02d99da37d3427a28e501e382e13f3f804bcd41577a61262979ada4ac394e"
+    },
+    {
+      "path": "src/binance_market_feed.zig",
+      "sha256": "87e2a8f57680bf1f2eb354e297dd9a17c1687764426a42f66f54d7b8331b7b98"
+    },
+    {
+      "path": "src/binance_order_raw.zig",
+      "sha256": "912c1fb917de14aac7c91afbb93e6f4275ed14f00f31fae3d71eb27b263d299b"
+    },
+    {
+      "path": "src/binance_private_reconciliation.zig",
+      "sha256": "8b26794fe1ef849ff5644af2db406e11a14ab8939f9063e9a4d96a6e199c022d"
+    },
+    {
+      "path": "src/binance_public_market.zig",
+      "sha256": "352797bd308bed88ea012c3b2aa8cb70bd2ab69819500daea58fa013d395748e"
+    },
+    {
+      "path": "src/binance_testnet_acceptance.zig",
+      "sha256": "9da7d39bfd5c613b60ca411e7ed45064180ac9e064501185630e94f7d7f52409"
+    },
+    {
+      "path": "src/binance_venue_adapter.zig",
+      "sha256": "8b98a0aeb6e16f0270c553bed9543c5692457161f583958dbbea36486d249c4e"
+    },
+    {
+      "path": "src/business_history.zig",
+      "sha256": "49810fa6a23d4569439511a6b165b6679dff8fee6383a9360d2b51c0e3010ee4"
+    },
+    {
+      "path": "src/bybit_market_feed.zig",
+      "sha256": "751e0fccbc07f9fc9d80161f5c4532ac6e328b298f8fbdbb4be3a9a5e215677b"
+    },
+    {
+      "path": "src/bybit_private_reconciliation.zig",
+      "sha256": "cb5ee5d202c0c11acdefc1250fb7c7e618f95eb705e3b06f0ce7d26648ce79e2"
+    },
+    {
+      "path": "src/bybit_testnet_acceptance.zig",
+      "sha256": "7cda8689f53dee1aa6f4b827dfefcffa492f66a1639e745716bea4007c28cfb6"
+    },
+    {
+      "path": "src/bybit_venue_adapter.zig",
+      "sha256": "0329bf4646bf0200ed3ae33da25948194e95ba7becca6b313f2471b69017484f"
+    },
+    {
+      "path": "src/canonical_event.zig",
+      "sha256": "66925102741d532b5f34d9e2988fb82260b40f2df83990ba603bf4d0d0872040"
+    },
+    {
+      "path": "src/canonical_event_codec.zig",
+      "sha256": "4bebd52305b90f170eb69ff876ee94d9275226c434639764d6df994f678334f0"
+    },
+    {
+      "path": "src/cold_business_candidate.zig",
+      "sha256": "bb63c5ae5c9901c810084771550b9983bb3149c3362f1bf1cdf72f9c0b53c477"
+    },
+    {
+      "path": "src/cold_core_protocol_acceptance.zig",
+      "sha256": "47b30a7ead3447f58d5182b3a758d7b605071ee300a9922c10d2cb823b6a5dcf"
+    },
+    {
+      "path": "src/control_archive_acceptance.zig",
+      "sha256": "0d0aea585d9dd787c32568bfe5a48797eb868bb9f021a8c70b208894e6dec5d9"
+    },
+    {
+      "path": "src/control_history_batch.zig",
+      "sha256": "53541f0581b7294f39f4bb692d4aabeb5faeedd8132a657a5b03f37993e7d5bd"
+    },
+    {
+      "path": "src/coordination_gateway_acceptance.zig",
+      "sha256": "efb104294db2b3184f4a73d655347dc23ec7560f20d9475ed2e9b499f94ed648"
+    },
+    {
+      "path": "src/coordinator_history_acceptance.zig",
+      "sha256": "629a05d50ba8891468ab6b87ac8498e43e956f3d583d94b3daa405008d70b08f"
+    },
+    {
+      "path": "src/core_observation_capacity_acceptance.zig",
+      "sha256": "2a4c3605394c222bb9c543c29abad71dfeb8915705d9f46959806d2f633aea86"
+    },
+    {
+      "path": "src/credential_store.zig",
+      "sha256": "bbf66e49f64ddbeebb5fc7af5517f6676eb95a753af6ddd0741b368a109351fd"
+    },
+    {
+      "path": "src/credential_store_visibility_test.zig",
+      "sha256": "fe1a7b780cf8f0bf3ac6e59696f2360a2d0993678753878d15946e0481f026d6"
+    },
+    {
+      "path": "src/cutover_history.zig",
+      "sha256": "5bda870c4b3a3478866c32a46ee94d4597c5a9c581ce1354b90e1ff9ca924dfb"
+    },
+    {
+      "path": "src/demo_authority.zig",
+      "sha256": "5e802e3dfc648117c3edaf6e149c3723633ed1ee18ca15b5320e4cb98fdc88c9"
+    },
+    {
+      "path": "src/durable_store.zig",
+      "sha256": "08a895c17983dec2ac1c9247115da940536d75b6af5687e34d69ce1943bb8784"
+    },
+    {
+      "path": "src/economics.zig",
+      "sha256": "2ef873b28a4aedf911af0376a05519455e6f96293dd7818354c87aab96eba4f5"
+    },
+    {
+      "path": "src/execution_gateway.zig",
+      "sha256": "7fcc8790c680ef2ac689fc3e69df931727e53d9668e7f82d5799b8949680279d"
+    },
+    {
+      "path": "src/failover.zig",
+      "sha256": "c798f7677eedc56eeb7f9e9eb87060f2e92e6fc0bc1d8c444281d68e17061403"
+    },
+    {
+      "path": "src/fill_archive_acceptance.zig",
+      "sha256": "6a8c35abc2ec9b533fd62df3d567490785d7feb3ce6e798b8b8dc04778600422"
+    },
+    {
+      "path": "src/fill_history_batch.zig",
+      "sha256": "7d744d237dc4fa877e2ae41fccd4ccc7aafc5b91ea2ef3c0567857d4cb055773"
+    },
+    {
+      "path": "src/forced_archive_acceptance.zig",
+      "sha256": "eefb25a18a5b5cb4a15ec95e1ff2c57c08e90f71321fa55a6ed20e43da48b44b"
+    },
+    {
+      "path": "src/forced_archive_proof.zig",
+      "sha256": "2d29d271db8004ae519a0a45b7ed67fcd1cd65fd336940640920dde6a4df607a"
+    },
+    {
+      "path": "src/forced_history_batch.zig",
+      "sha256": "fc8176362f52479df8b9e763259fee1bd1ee487b7fd792e9eefb802f8a93861a"
+    },
+    {
+      "path": "src/four_shard_acceptance.zig",
+      "sha256": "e51628b719855185bbae6d428021aa395bd951a14012acbc3ba4e82243899a11"
+    },
+    {
+      "path": "src/funding_archive_acceptance.zig",
+      "sha256": "b16b9f4a12ab29010a2ae9d46117991cf350987caeb94d8ab34d99710267d5c3"
+    },
+    {
+      "path": "src/funding_history_batch.zig",
+      "sha256": "1e2657e0ded14dd8c3fd8f5a0b81997ccd2c0f2597555f7119b19abf6a3995a6"
+    },
+    {
+      "path": "src/historical_fee_audit.zig",
+      "sha256": "ca84ec6773cc8cf359a47d795004ece429b24323d670c02435d7b56a455e96f0"
+    },
+    {
+      "path": "src/instrument_registry.zig",
+      "sha256": "868692d3e653f5dc5b280db38d111a900c362fde043d68aa3a7f4f2d7dcf06bd"
+    },
+    {
+      "path": "src/journal.zig",
+      "sha256": "9a2cdd6254e8f5e39e5567b581881d2727e5453671b4dd8ffac09a804bcff481"
+    },
+    {
+      "path": "src/main.zig",
+      "sha256": "fa84d38bd20b89415946cd160f0616c7164af15493c79d02cc315817b9d1e0d2"
+    },
+    {
+      "path": "src/market_feed_adapter.zig",
+      "sha256": "da0d852c54a62e7012a7dbcccab78a13289fc1a920020d9aa0527237dea9b68e"
+    },
+    {
+      "path": "src/market_projection.zig",
+      "sha256": "2d4d0a83cbacf8b4abf36ad0bf3bc5f40080c67e64765853154c6be68154e792"
+    },
+    {
+      "path": "src/multi_venue_testnet_acceptance.zig",
+      "sha256": "f30b2014f3a5d51d34d31e7dc67c30805c19c48506b3ad54e2816d17a5d9b19d"
+    },
+    {
+      "path": "src/native_account_continuity_acceptance.zig",
+      "sha256": "f57c656376cc583f9a7b3c57a036376d21defb276e5207f86e3162b89af71536"
+    },
+    {
+      "path": "src/native_economic_reconciliation_acceptance.zig",
+      "sha256": "94ad86858d1a7e75a5d1e4943d1fe5dd5d1281ca55c409b10680c055a235623c"
+    },
+    {
+      "path": "src/native_multi_venue_accounting_acceptance.zig",
+      "sha256": "ea9c1a8e85f16f24b9e08c0cdb9907ea0bfb2f58840bb4894d63e3d59fe9d929"
+    },
+    {
+      "path": "src/okx_curl_private_smoke.zig",
+      "sha256": "eca1e12bc1b6ce88f2fff44142c27c7edd9d3475b5ee5d40f77cfb7aff824d02"
+    },
+    {
+      "path": "src/okx_curl_public_smoke.zig",
+      "sha256": "17e9d188f17a9b050774895779dfd2f7113dec1bc77a52d14cbad411ac577ea4"
+    },
+    {
+      "path": "src/okx_curl_transport.zig",
+      "sha256": "4f2127ce36a199cb82612bd5b3e5f8601efe0c58ac6a24111f7f9aaedc1b86e5"
+    },
+    {
+      "path": "src/okx_demo_live_acceptance.zig",
+      "sha256": "fdd10d05edb32bf6a1899f394ec58235998eee08b760a339d2d504b045f26540"
+    },
+    {
+      "path": "src/okx_live_chain.zig",
+      "sha256": "ab15d8d30bd99a3cc297d28910575220e2293363f3ead2710b455b135dd3329c"
+    },
+    {
+      "path": "src/okx_market_feed.zig",
+      "sha256": "a7d7aaa7bbee7a55157a02a109bca8c36350f4e07012e4e511f4ca8274b76b55"
+    },
+    {
+      "path": "src/okx_order_entry.zig",
+      "sha256": "f927c347594391a66c53d46da8380c5e717d0591c81907770ff308a139ab14d8"
+    },
+    {
+      "path": "src/okx_private_reconciliation.zig",
+      "sha256": "97c5948d43e696736749ebe28d26e9ce934e3474f30c4b6695b216b5047aabbd"
+    },
+    {
+      "path": "src/okx_private_recovery.zig",
+      "sha256": "da95b97ad3ccf0250640cc3cebd139c342281424631bd0c3e68908a53be570ec"
+    },
+    {
+      "path": "src/okx_public_market.zig",
+      "sha256": "056f09f0894d8912398691b415c378820da66eb78c3c29e5cb7872c88d44458e"
+    },
+    {
+      "path": "src/okx_rest_auth.zig",
+      "sha256": "e481265e14028c94bc1eb9badb89d3bff73d72c7086b1acddcc24fc839439ff2"
+    },
+    {
+      "path": "src/okx_venue_adapter.zig",
+      "sha256": "ece1a790eac3e9e192f42e3004389b7c69e2927abd596448caf3b4f1bb0687de"
+    },
+    {
+      "path": "src/oms.zig",
+      "sha256": "1c74c8375c17c17aae8f4d98be9512e0e9bc8731700e7e98b45accfbe7cc9ca0"
+    },
+    {
+      "path": "src/operational.zig",
+      "sha256": "1d140eabc6f43fa8a17068a8d50860ae7146fbb1e724fba89cf2ada49286e1c7"
+    },
+    {
+      "path": "src/order_capacity_acceptance.zig",
+      "sha256": "4ac965f2010af4c76231fd55be14636d714ce1ad6752eb928fa8dfb7cda06b32"
+    },
+    {
+      "path": "src/order_dispatch_archive_acceptance.zig",
+      "sha256": "8c55fedffff9ef2fef391759e940c5a193824ab7bace42772cb0dab890ae1ea0"
+    },
+    {
+      "path": "src/order_gateway_archive_acceptance.zig",
+      "sha256": "4f5e4397c9a669a640d79e5064877c18bc64bae093d29c36c7b47c0ddd655daa"
+    },
+    {
+      "path": "src/order_history_batch.zig",
+      "sha256": "496832a61e3fc56646c0964d72a7217ece5477e02f9049703c5f77b9e09eb10f"
+    },
+    {
+      "path": "src/order_history_safety_acceptance.zig",
+      "sha256": "d3ec9119054324474c96f0dc0971e85c5af269ddfe3b7946354e3ac5490b46d1"
+    },
+    {
+      "path": "src/order_public_capacity_acceptance.zig",
+      "sha256": "92aa0cbae8fc1f2017ecba2833646204b1568fef1051a2910b2bbdb845863054"
+    },
+    {
+      "path": "src/production_contract.zig",
+      "sha256": "6a76546ee0b2506ab9d5f670916b77cbc7b80955cd2459ded8942cb6d6c716f1"
+    },
+    {
+      "path": "src/production_runtime.zig",
+      "sha256": "42fa030ce7ae8955ecad1c2d54fc2653225762551c4213c916a591b69cb9d0ab"
+    },
+    {
+      "path": "src/raw_ingress.zig",
+      "sha256": "eddbe0fc2f2a0d18476df8abc4afa11d55515f79de99ce2649195797243a5c89"
+    },
+    {
+      "path": "src/reconciliation_archive_acceptance.zig",
+      "sha256": "18a80aee97bb052d99c2dc36cb4e863e4785969847fd221aab7e349d45864143"
+    },
+    {
+      "path": "src/reconciliation_archive_safety_acceptance.zig",
+      "sha256": "158d685826b75b34e28f9581a97121dedbecf626647bfc06247b0539be3a34f2"
+    },
+    {
+      "path": "src/reconciliation_history_batch.zig",
+      "sha256": "422a12a0eee9d9c6f62e7c707db4a3779449c757ad71f5f6339f6d7c999ce6af"
+    },
+    {
+      "path": "src/recovery_cutover.zig",
+      "sha256": "dc856e7a4335237cf67d29fffe57613bf2db75fc33b688e859a07f73d4f16cd6"
+    },
+    {
+      "path": "src/risk.zig",
+      "sha256": "e61dd55486ed323333df362bf4f7c60754377d7ad089df6a29d6cd068e534e55"
+    },
+    {
+      "path": "src/simulated_lifecycle_projection.zig",
+      "sha256": "5146ece692ec50f329aee09a501a08c8b20fc95455c1ace6db457ceb13621c91"
+    },
+    {
+      "path": "src/simulated_market_feed.zig",
+      "sha256": "d10ddc504d26a95ffd668fbee03fa42e1aaa245f8a0590d09ce205febc42168f"
+    },
+    {
+      "path": "src/simulated_native_accounting_acceptance.zig",
+      "sha256": "a61a3df2427f469fa2c808e0bf0a702cf931c517ec564f745199632f6da10642"
+    },
+    {
+      "path": "src/simulated_venue.zig",
+      "sha256": "3d0b435f8cee3881bd3a84a9cfcb3f7d7c670a92aaee3df8dc86fe948387b130"
+    },
+    {
+      "path": "src/snapshot_codec.zig",
+      "sha256": "01e70001ebb2d9eec95e2fdcbbb47ce48c9da2bb5c78d4ce62586b2f438073c8"
+    },
+    {
+      "path": "src/strategy_host_capacity.zig",
+      "sha256": "b8e66a7da1a755fe13a897856b32b3a633c4a848c51d91a1a94cd16b1c983700"
+    },
+    {
+      "path": "src/strategy_host_failure_integration.zig",
+      "sha256": "fcc7777395f2130d2df17edd77f0aba1289081c6dfb26db7f870e5d40a84d09a"
+    },
+    {
+      "path": "src/strategy_host_failures.zig",
+      "sha256": "c59a73f775c3fbee7930e4b448a1194e7fae6310eb59c7ae99d9c3d0deb344be"
+    },
+    {
+      "path": "src/strategy_host_gateway.zig",
+      "sha256": "0f289f49780eb9beb05997c82d2c4a0592cc01b522c00daf85790385ff7a3f38"
+    },
+    {
+      "path": "src/strategy_host_integration.zig",
+      "sha256": "4ae39b2abefe236189a4d0860cba343ab05fc933aeca04b6562b3dab62b5b502"
+    },
+    {
+      "path": "src/strategy_host_ipc.zig",
+      "sha256": "ea3b01ada97176d2aba495b86f3f677b7176d4f950ff36cd063480dfd24a3fb2"
+    },
+    {
+      "path": "src/strategy_host_lifecycle.zig",
+      "sha256": "d82503073a3778708f88003bb1231cc319b13805b0b2b1debef06a46881f6f9f"
+    },
+    {
+      "path": "src/strategy_host_recovery.zig",
+      "sha256": "f67027c3c9a8c39a91e65e8566fa8c48733e7a4029805e039e21ce1cf4c250f4"
+    },
+    {
+      "path": "src/strategy_host_recovery_integration.zig",
+      "sha256": "f38de387b60eb5da499e90e4cb356f790a0ecfe50ae50fbf574cbdb60e9e6a00"
+    },
+    {
+      "path": "src/telemetry_qualification.zig",
+      "sha256": "bbb5d840232f980b4eac3e0621038a47fa18ab4bc06806a9d2e4f384247b6282"
+    },
+    {
+      "path": "src/trading_shard.zig",
+      "sha256": "a3628feca6859c4cccb613cb116d9f84b657c1f7df29bbb4ca03a3f65bdce899"
+    },
+    {
+      "path": "src/trading_shard_benchmark.zig",
+      "sha256": "4d3b222ed003db6fff893d8e9b255befe2343ff942cb679818778c8302fe477c"
+    },
+    {
+      "path": "src/trading_shard_event.zig",
+      "sha256": "8477098801ada01e73025b56cdd1d61792b7f6ec563c4b761088106ef51c5b87"
+    },
+    {
+      "path": "src/trading_shard_fixture.zig",
+      "sha256": "356cca7d6943d4c025cf3439b29b27273e57df5eb189327bb702cbf90aef3f7d"
+    },
+    {
+      "path": "src/trading_shard_tests.zig",
+      "sha256": "77ab41fd86dea3bfb6767b7002d5eee96c065fee7496be997d375d18d0d8139b"
+    },
+    {
+      "path": "src/venue_adapter.zig",
+      "sha256": "5dd81741b327f169b985b1157d8705c4c6f2628301473ffd1b7fd4b692e0e171"
+    },
+    {
+      "path": "src/venue_adapter_contract.zig",
+      "sha256": "30918a192d7f2c7523612e526e7ad56fbd7aed359d9f98b448a259f184d744de"
+    },
+    {
+      "path": "src/venue_fill_recovery_acceptance.zig",
+      "sha256": "a9bfd80a05fc11120c8aa1e403efc92fb643588e4229e0943a798d4c006f42d1"
+    },
+    {
+      "path": "src/windows_demo_main.zig",
+      "sha256": "3fe792783c0ff8e9cfffe428a480a533f71d2c1ddbe5eaac2f95d89d1b8c2f68"
+    },
+    {
+      "path": "src/windows_verification_runtime.zig",
+      "sha256": "7c255109686b7459970c2916cf6ec10c2f58c566444d1f151376ca5d12f0aa45"
+    }
+  ],
+  "source_tree_sha256": "52c58dd68daf49a6b25687a1ce11bbd484cf64ff51013b2cf8de77ffca93d056",
+  "command": [
+    "D:/Program Files/zig/zig.exe",
+    "test",
+    "src/coordinator_history_acceptance.zig",
+    "-O",
+    "ReleaseSafe",
+    "--stack",
+    "268435456",
+    "--test-filter",
+    "08 four shared"
+  ],
+  "started_utc": "2026-10-15T07:24:47.471650+00:00",
+  "finished_utc": "2026-10-15T07:31:44.448734+00:00",
+  "exit_code": 1,
+  "log_sha256": "aff9a5acc8c85657344ab8493bc22e2a0ce78d0f23a101a278adf1b0252edeab",
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "source_mismatches_after": 5,
+  "capture": "native direct file handles"
+}

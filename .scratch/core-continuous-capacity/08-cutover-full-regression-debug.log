@@ -1,0 +1,13 @@
+1/1 recovery_cutover.test.cutover failures and forward rollback never regress economic state or generation...FAIL (UnsupportedCanonicalEncoding)
+D:\github\Ringwin-core-continuous-capacity\src\canonical_event_codec.zig:162:54: 0x7ff64c1ec172 in decode (test_zcu.obj)
+    if (try reader.takeInt(u16) != encoding_version) return error.UnsupportedCanonicalEncoding;
+                                                     ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:5004:31: 0x7ff64c1ed4a1 in decodeStableInput (test_zcu.obj)
+        .venue => .{ .venue = try canonical_event_codec.decode(nested.payload) },
+                              ^
+D:\github\Ringwin-core-continuous-capacity\src\recovery_cutover.zig:851:58: 0x7ff64c1f2de7 in test.cutover failures and forward rollback never regress economic state or generation (test_zcu.obj)
+        .record => |record| _ = try replayed_shard.apply(try trading.decodeStableInput(record)),
+                                                         ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\51bae1bec7aa37e44cfb8f4cb9c379d9\test.exe --seed=0x3dcbd1a1

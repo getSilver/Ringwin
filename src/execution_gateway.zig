@@ -14,7 +14,7 @@ const resolution_record_type: u16 = 0x4702;
 const accepted_record_type: u16 = 0x4703;
 const archive_record_type: u16 = 0x4704;
 const economic_history_record_type: u16 = 0x4705;
-const dispatch_snapshot = "GatewayDispatchV7";
+const dispatch_snapshot = "GatewayDispatchV8";
 const namespace_size = 16;
 const snapshot_prefix_size = dispatch_snapshot.len + @sizeOf(u16);
 
@@ -88,7 +88,7 @@ pub const DispatchEvidence = struct {
 };
 const ArchiveBinding = struct { origin: DispatchOrigin, root: history.Root, last_order: ?DispatchArchiveCommit = null };
 const DispatchArchiveCommit = struct { origin: DispatchOrigin, order_id: u64, receipt: history.Receipt };
-const EconomicHistoryKind = enum { fill, funding, reconciliation_window };
+const EconomicHistoryKind = enum { fill, funding, reconciliation_window, control, forced };
 const EconomicHistoryCommit = struct { origin: DispatchOrigin, kind: EconomicHistoryKind, identity: u128, qualification_digest: history.Digest, receipt: history.Receipt };
 pub const max_routes = 4;
 pub const max_adapter_batches_per_turn: u8 = 1;
@@ -166,7 +166,7 @@ const DurableDispatch = struct {
     namespace: [namespace_size]u8,
     next_sequence: u64,
 };
-const dispatch_snapshot_version: u16 = 7;
+const dispatch_snapshot_version: u16 = 8;
 const DispatchSnapshotHeader = struct {
     version: u16 = dispatch_snapshot_version,
     stream: durable.StreamIdentity,
@@ -1096,6 +1096,16 @@ pub const Gateway = struct {
                 const commit = shard.last_fill_archive orelse return error.EconomicHistoryNotCommitted;
                 if (!std.meta.eql(root, commit.receipt.root)) return error.EconomicHistoryNotCommitted;
                 break :blk .{ .origin = origin, .kind = .fill, .identity = commit.fill_id, .qualification_digest = commit.qualification_digest, .receipt = commit.receipt };
+            },
+            .forced => blk: {
+                const commit = shard.last_forced_archive orelse return error.EconomicHistoryNotCommitted;
+                if (!std.meta.eql(root, commit.receipt.root)) return error.EconomicHistoryNotCommitted;
+                break :blk .{ .origin = origin, .kind = .forced, .identity = commit.forced_id, .qualification_digest = commit.qualification_digest, .receipt = commit.receipt };
+            },
+            .control => blk: {
+                const commit = shard.last_control_archive orelse return error.EconomicHistoryNotCommitted;
+                if (!std.meta.eql(root, commit.receipt.root)) return error.EconomicHistoryNotCommitted;
+                break :blk .{ .origin = origin, .kind = .control, .identity = root.barrier, .qualification_digest = commit.qualification_digest, .receipt = commit.receipt };
             },
             .funding => blk: {
                 const commit = shard.last_funding_archive orelse return error.EconomicHistoryNotCommitted;

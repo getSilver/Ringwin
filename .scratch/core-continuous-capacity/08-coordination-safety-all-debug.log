@@ -1,0 +1,32 @@
+1/8 coordinator_safety_acceptance.test.08 coordination safety ten four-shard lease cycles require fresh recovery admission and preserve versions...OK
+2/8 coordinator_safety_acceptance.test.08 coordination safety expired lease cannot gain authority through snapshot or fresh margin...OK
+3/8 coordinator_safety_acceptance.test.08 coordination safety full source survives commit and checkpoint fault boundaries without economic loss...FAIL (InvalidCoordinationTail)
+D:\github\Ringwin-core-continuous-capacity\src\account_coordinator.zig:3028:43: 0x7ff6c12097eb in recover (test_zcu.obj)
+                    if (status != .clean) return error.InvalidCoordinationTail;
+                                          ^
+D:\github\Ringwin-core-continuous-capacity\src\coordinator_safety_acceptance.zig:101:27: 0x7ff6c120a397 in test.08 coordination safety full source survives commit and checkpoint fault boundaries without economic loss (test_zcu.obj)
+        const recovered = try coordination.CoordinatorOwner.recover(owner.stream, harness.backend.memory.interface(), undefined);
+                          ^
+4/8 coordinator_safety_acceptance.test.08 coordination safety hot and cold source allocation duplicates never repeat economics...FAIL (ForcedSourceArchiveRequired)
+D:\github\Ringwin-core-continuous-capacity\src\account_coordinator.zig:2830:21: 0x7ff6c10b55ba in apply (test_zcu.obj)
+                    return error.ForcedSourceArchiveRequired;
+                    ^
+D:\github\Ringwin-core-continuous-capacity\src\account_coordinator.zig:2956:52: 0x7ff6c10b57af in acceptAccountFact (test_zcu.obj)
+        if (self.coordinator.history_root == null) return self.apply(.{ .account_fact = fact });
+                                                   ^
+D:\github\Ringwin-core-continuous-capacity\src\coordinator_safety_acceptance.zig:124:5: 0x7ff6c11ddd33 in test.08 coordination safety hot and cold source allocation duplicates never repeat economics (test_zcu.obj)
+    try owner.acceptAccountFact(source.source);
+    ^
+5/8 coordinator_safety_acceptance.test.08 coordination safety source conflict and missing history keep risk closed...OK
+6/8 coordinator_safety_acceptance.test.08 coordination safety invalid source and allocation proofs cannot bind another account...OK
+7/8 coordinator_safety_acceptance.test.08 coordination safety gateway missing proof and unavailable lookup provide no routing authority...FAIL (TestUnexpectedResult)
+D:\Program Files\zig\lib\std\testing.zig:615:14: 0x7ff6c1193a6f in expect (test_zcu.obj)
+    if (!ok) return error.TestUnexpectedResult;
+             ^
+D:\github\Ringwin-core-continuous-capacity\src\coordinator_safety_acceptance.zig:206:9: 0x7ff6c1193ed9 in test.08 coordination safety gateway missing proof and unavailable lookup provide no routing authority (test_zcu.obj)
+        try std.testing.expect(owner.closed);
+        ^
+8/8 coordinator_safety_acceptance.test.08 coordination safety control namespaces reject economic keys and gateway cross account owner...OK
+5 passed; 0 skipped; 3 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\57677b855e3bcb21257b8249f800a934\test.exe --seed=0xdf637d45
