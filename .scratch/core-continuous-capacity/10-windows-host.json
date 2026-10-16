@@ -1,0 +1,79 @@
+﻿{
+    "observed_utc":  "2026-10-15T23:06:22.1710746Z",
+    "scope":  "read-only native Windows host metadata; functional file evidence only",
+    "workspace":  "D:\\github\\Ringwin-core-continuous-capacity",
+    "platform_performance_qualified":  false,
+    "production_qualified":  false,
+    "os":  {
+               "Caption":  "Microsoft Windows 10 企业版 LTSC",
+               "Version":  "10.0.17763",
+               "BuildNumber":  "17763",
+               "OSArchitecture":  "64-bit"
+           },
+    "cpu":  [
+                {
+                    "Name":  "Intel(R) Core(TM) i5-4200U CPU @ 1.60GHz",
+                    "NumberOfCores":  2,
+                    "NumberOfLogicalProcessors":  4,
+                    "MaxClockSpeed":  1601
+                }
+            ],
+    "memory":  {
+                   "Manufacturer":  "Dell Inc.         ",
+                   "Model":  "Inspiron 7537",
+                   "TotalPhysicalMemory":  8483581952,
+                   "HypervisorPresent":  false
+               },
+    "volume":  {
+                   "DeviceID":  "D:",
+                   "DriveType":  3,
+                   "FileSystem":  "NTFS",
+                   "Size":  828165001216,
+                   "FreeSpace":  332782776320
+               },
+    "partition":  {
+                      "DiskNumber":  0,
+                      "PartitionNumber":  4,
+                      "Type":  "Basic",
+                      "Size":  828165004800,
+                      "Offset":  172039864320
+                  },
+    "disk":  {
+                 "Number":  0,
+                 "FriendlyName":  "CT1000MX500SSD1",
+                 "BusType":  "SATA",
+                 "PartitionStyle":  "GPT",
+                 "LogicalSectorSize":  512,
+                 "PhysicalSectorSize":  4096,
+                 "Size":  1000204886016
+             },
+    "device":  {
+                   "Index":  0,
+                   "Model":  "CT1000MX500SSD1",
+                   "InterfaceType":  "IDE",
+                   "FirmwareRevision":  "M3CR043",
+                   "Size":  1000202273280,
+                   "BytesPerSector":  512
+               },
+    "drivers":  [
+                    {
+                        "name":  "ntfs.sys",
+                        "file_version":  "10.0.17763.1 (WinBuild.160101.0800)",
+                        "bytes":  2626592
+                    },
+                    {
+                        "name":  "disk.sys",
+                        "file_version":  "10.0.17763.1 (WinBuild.160101.0800)",
+                        "bytes":  97592
+                    },
+                    {
+                        "name":  "volmgr.sys",
+                        "file_version":  "10.0.17763.1 (WinBuild.160101.0800)",
+                        "bytes":  90112
+                    }
+                ],
+    "process_permissions":  {
+                                "elevated_administrator":  false,
+                                "identity_names_and_sids":  "not_collected"
+                            }
+}

@@ -1,0 +1,17 @@
+1/1 windows_capacity_acceptance.test.Windows capacity real file seed recovery preserves public business state...windows_shared_summary_difference shard=0 stored=.{ .shard_id = .shard_0, .decision_domain = 1, .virtual_portfolio = 11, .exchange_account = 2, .shard_sequence = 1, .rules_version = 1, .lease_version = 1, .reservation_atoms = 10, .spot_quantity = 2, .spot_asset_atoms = 2, .swap_quantity = 0, .cash_atoms = 19999999998, .open_orders = 1, .unknown_orders = 0, .local_gate_closed = false, .spot_margin_atoms = 0, .exchange_margin_atoms = 0, .risk_tier = 0, .liquidation_distance_ticks = 19999999989, .margin_mode = .isolated } actual=.{ .shard_id = .shard_0, .decision_domain = 1, .virtual_portfolio = 11, .exchange_account = 2, .shard_sequence = 1, .rules_version = 1, .lease_version = 1, .reservation_atoms = 10, .spot_quantity = 2, .spot_asset_atoms = 2, .swap_quantity = 0, .cash_atoms = 19999999998, .open_orders = 1, .unknown_orders = 0, .local_gate_closed = false, .spot_margin_atoms = 0, .exchange_margin_atoms = 0, .risk_tier = 0, .liquidation_distance_ticks = 19999999977, .margin_mode = .isolated }
+FAIL (WindowsSharedAccountInvariant)
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_shared.zig:7:14: 0x7ff6a508243f in require (test_zcu.obj)
+    if (!ok) return error.WindowsSharedAccountInvariant;
+             ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_shared.zig:56:9: 0x7ff6a50ad6aa in verify (test_zcu.obj)
+        try require(restored_summary.present and std.meta.eql(restored_summary.value, summary));
+        ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_acceptance.zig:561:29: 0x7ff6a50af1ca in runProtocol (test_zcu.obj)
+    result.shared_account = try @import("windows_capacity_shared.zig").verify(allocator, io, path, virgin, summaries);
+                            ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_acceptance.zig:576:22: 0x7ff6a50b1a3e in test.Windows capacity real file seed recovery preserves public business state (test_zcu.obj)
+    const advanced = try runProtocol(std.testing.allocator, std.testing.io, "advance", path);
+                     ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\b8e27b2fdf552ecc66102a6221459c6a\test.exe --seed=0x127466b2

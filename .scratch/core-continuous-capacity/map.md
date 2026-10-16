@@ -50,14 +50,15 @@ Status: active
 12. [封存容量闭合证据并交接生产资格](issues/12-seal-capacity-closure-evidence.md) — blocked by 10, 11
 
 依赖主干：01 → 02 → 03；03 后分为 04、05 → 06 → 07、08 三支；04/07/08 → 09；09 → 10 与 11；10/11 → 12。
-01–09合同、权威屏障、检查点、观察选择、各历史归档及小规模订单/安全背压功能已完成；10–12尚未验收，只有 blocker 全部完成的票可执行。
+01–10合同、权威屏障、检查点、观察选择、各历史归档、小规模订单/安全背压及Windows文件功能已完成；11–12尚未验收，只有 blocker 全部完成的票可执行。
 
 ## Frontier
 
-- [10 验证 Windows 文件持久化与持续恢复](issues/10-verify-windows-file-recovery.md)
 - [11 验证 Linux 文件持久化与持续恢复](issues/11-verify-linux-file-recovery.md)
 
 ## Decisions so far
+
+- 2026-10-16：10小规模Windows文件功能验收完成，见[10证据](10-evidence.md)和[独立Windows交接包](10-final-v3-windows-evidence/summary.md)。最终114源码f1e1a54a，完整Debug/ReleaseSafe各624/624、实际应用64MiB/CLI256MiB重建及各两个离线模式退出0，两产物各十轮/30新进程含500组合/三类别、混合生命周期和共享账户，570项身份/日志/产物/恢复审计通过。两mode各18故障/拒绝场景及真实阶段终止，完整authority恢复与accepted/Unknown零重发；失败源码、原始失败和not_run保留。独立Standards/Spec无剩余确认P1/P2。目录flush实际error5，目录/断电耐久性未取得；容量/压力/资源预算、索引成本、实际栈峰值、dump、NodeFence及生产资格仍未测或deferred。11成为唯一Frontier，12仍等待11；本次不执行Linux或双平台总交接。
 
 - 2026-10-16：09小规模功能验收完成，见[09证据](09-evidence.md)。最终110份源码7d70c32a，完整Debug/ReleaseSafe串行各616/616、应用64MiB/CLI256MiB同源码重建及两个离线模式退出0，独立功能样本9/9与131项身份/日志/五产物审计通过；独立Standards/Spec无剩余确认P1/P2。真实三类别、四片十轮非零经济接管、共享账户ceiling、计数宽度/纯边界、安全背压及零重发完成。测试进程RSS和显式结构复制不作为预算通过，实际栈/索引成本仍未测；千单、压力、目标平台性能及生产资格deferred。10/11成为独立Frontier，本次仅关闭并提交09，没有提前执行平台任务。
 
@@ -113,9 +114,9 @@ Linux 路径沿用 [Linux 生产资格地图](../production-readiness/map.md)，
 
 ## Not yet verified
 
-- 合成负载与容量/保留预算已在 [容量合同](capacity-contract.md) 冻结，执行口径按用户最新功能验证要求更新；01–09小规模功能已完成，平台文件恢复与证据封存尚待10–12，未授予千单、压力或资源资格。
+- 合成负载与容量/保留预算已在 [容量合同](capacity-contract.md) 冻结，执行口径按用户最新功能验证要求更新；01–10小规模功能与Windows文件证据已完成，Linux文件恢复及双平台封存尚待11–12，未授予千单、压力或资源资格。
 - ADR0011已显式演进ADR0009；票02保留完整有序Trace，票03在独立恢复验收和格式身份下引入轮转与历史承接。
-- Windows/Linux各自的实际文件、性能、恢复及后续生产资格证据未取得。
+- Windows实际文件功能与进程恢复已有10的独立证据；Linux文件证据尚待11。两平台的目标负载性能、断电耐久性及后续生产资格均未取得。
 
 ## Out of scope
 

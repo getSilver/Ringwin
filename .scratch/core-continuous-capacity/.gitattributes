@@ -10,3 +10,14 @@ frontier09-*.log binary
 09-*.jsonl -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 09-*.md whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 *-09-*.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+# Frontier 10 keeps native capture bytes and producer identities unchanged.
+10-*.log binary
+10-*/**/*.log binary
+10-*.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+10-*.jsonl -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+10-*/**/*.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+10-*/**/*.jsonl -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+10-*.md whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+10-*/**/*.md whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+*-10-*.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+*-10-*.ps1 -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

@@ -1,0 +1,20 @@
+install
++- install ringwin
+   +- compile exe ringwin ReleaseSafe native 1 errors
+src\failover.zig:766:27: error: test-only fencing authority
+    if (!builtin.is_test) @compileError("test-only fencing authority");
+                          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+referenced by:
+    open: src\windows_capacity_acceptance.zig:112:54
+    runProtocol: src\windows_capacity_acceptance.zig:375:37
+    6 reference(s) hidden; use '-freference-trace=8' to see all references
+error: 1 compilation errors
+failed command: "D:\\Program Files\\zig\\zig.exe" build-exe --stack 67108864 -OReleaseSafe "-Mroot=D:\\github\\Ringwin-core-continuous-capacity\\src\\main.zig" --cache-dir ".zig-cache\\frontier10-build" --global-cache-dir "C:\\Users\\X\\AppData\\Local\\zig" --name ringwin --zig-lib-dir "D:\\Program Files\\zig\\lib\\" --listen=-
+
+Build Summary: 0/3 steps succeeded (1 failed)
+install transitive failure
++- install ringwin transitive failure
+   +- compile exe ringwin ReleaseSafe native 1 errors
+
+error: the following build command failed with exit code 1:
+.zig-cache\frontier10-build\o\41c6ba429c1cefcd37d0ea3d43fb04d1\build.exe D:\Program Files\zig\zig.exe D:\Program Files\zig\lib D:\github\Ringwin-core-continuous-capacity .zig-cache\frontier10-build C:\Users\X\AppData\Local\zig --seed 0x63b79984 -Zc107acf9c726e4de -Doptimize=ReleaseSafe

@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "D:\github\Ringwin-core-continuous-capacity\.scratch\core-continuous-capacity\run-10-file-processes.py", line 421, in <module>
+    main()
+  File "D:\github\Ringwin-core-continuous-capacity\.scratch\core-continuous-capacity\run-10-file-processes.py", line 339, in main
+    advanced = run('advance', f'advance-{round_number:02}')
+  File "D:\github\Ringwin-core-continuous-capacity\.scratch\core-continuous-capacity\run-10-file-processes.py", line 272, in run
+    raise RuntimeError(label + ' failed; original logs and dataset retained')
+RuntimeError: advance-02 failed; original logs and dataset retained

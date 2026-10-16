@@ -1642,9 +1642,24 @@ pub const LinuxFileAdapter = struct {
 
     fn recoverOrderHistoryImpl(context: *anyopaque, io: std.Io, origin: business_history.Origin) anyerror!business_history.Receipt {
         const self: *LinuxFileAdapter = @ptrCast(@alignCast(context));
-        errdefer self.gate = .closed;
         if (self.gate != .open) return error.DurableStoreClosed;
-        const file = try self.dir.openFile(io, "order-history.objects", .{ .lock = .shared, .lock_nonblocking = true });
+        const file = self.dir.openFile(io, "order-history.objects", .{ .lock = .shared, .lock_nonblocking = true }) catch |err| {
+            if (err == error.FileNotFound) {
+                // Before the first publication both sidecars are absent.
+                // Absence is not an I/O failure and must not close a writer
+                // that is recovering a valid state with no history root.
+                _ = self.dir.statFile(io, "order-history.roots", .{ .follow_symlinks = false }) catch |root_error| {
+                    if (root_error == error.FileNotFound) return error.OrderHistoryUnavailable;
+                    self.gate = .closed;
+                    return root_error;
+                };
+            }
+            // A published root without its objects, and all other file errors,
+            // still fail closed; no missing committed history is recreated.
+            self.gate = .closed;
+            return err;
+        };
+        errdefer self.gate = .closed;
         defer file.close(io);
         const heads = try self.readHistoryHeads(io);
         const index = try historyHeadIndex(&heads, origin, false);
@@ -1929,6 +1944,23 @@ fn publishHistoryTestCommand(store: Store, io: std.Io, origin: business_history.
         .records = &records,
         .entries = &entries,
     });
+}
+
+test "order history file virgin absence keeps admission open but missing published objects closes it" {
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const adapter = try std.testing.allocator.create(LinuxFileAdapter);
+    defer std.testing.allocator.destroy(adapter);
+    adapter.* = .{ .dir = temp.dir };
+    const store = adapter.interface();
+    const origin: business_history.Origin = .{ .stream = .{ .domain = .decision_log, .id = 10 }, .account = 2 };
+    try std.testing.expectError(error.OrderHistoryUnavailable, store.recoverOrderHistory(std.testing.io, origin));
+    try std.testing.expectEqual(GateState.open, store.safetyGate());
+    const published = try publishHistoryTestCommand(store, std.testing.io, origin, null, 1);
+    try std.testing.expectEqualDeep(published, try store.recoverOrderHistory(std.testing.io, origin));
+    try temp.dir.deleteFile(std.testing.io, "order-history.objects");
+    try std.testing.expectError(error.FileNotFound, store.recoverOrderHistory(std.testing.io, origin));
+    try std.testing.expectEqual(GateState.closed, store.safetyGate());
 }
 
 test "order history file missing root cannot bootstrap over existing objects" {

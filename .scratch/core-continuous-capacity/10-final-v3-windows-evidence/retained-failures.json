@@ -1,0 +1,326 @@
+[
+  {
+    "path": "10-capture-probe-spawn-failure.result.json",
+    "sha256": "03ce6e81d49eb68f2a33b31876f300b902dd628e7be382b01e93e4c677b8d7e6",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": "FileNotFoundError: [WinError 2] \u7cfb\u7edf\u627e\u4e0d\u5230\u6307\u5b9a\u7684\u6587\u4ef6\u3002",
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-capture-probe-timeout.result.json",
+    "sha256": "cc6d1b7fc6aae4b85b44d59dab44303dc965e4f9a4e45b1cc3a39ece8c905342",
+    "exit_code": 1,
+    "timed_out": true,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-dev-small-v1/seed.result.json",
+    "sha256": "136d889c24f09f71d5e8c965712ffc13a65a4b3accca3d5cbe2bc41107ebeb43",
+    "exit_code": 3,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-final-v1-app-file-processes.result.json",
+    "sha256": "b478ebd67c0f359023ff3200cc6222853f83a7c475e705f95eafebf148039dcc",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-final-v1-app-processes/advance-02.result.json",
+    "sha256": "a941c8616ee7131ef6f9f863da2406c7698787da55199b029dcf2124703e4bc2",
+    "exit_code": 3,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-final-v1-app-processes/hold-after-step.result.json",
+    "sha256": "b9f88093cb7ee4cb0a28b8c61e2da76235266f465e560a26e0456977c367e4db",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": true,
+    "scope": "expected owned-process termination"
+  },
+  {
+    "path": "10-final-v1-app-processes/hold-before-step.result.json",
+    "sha256": "d79b2057914b12fc3f4e00660debe52fb6a7a57f7e27979a1551de52c85804f5",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": true,
+    "scope": "expected owned-process termination"
+  },
+  {
+    "path": "10-final-v3-app-processes/hold-after-step.result.json",
+    "sha256": "2607e176cb278b70ddd5342f98bb63855e541a98a21f0363f2e89aa26bd55472",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": true,
+    "scope": "expected owned-process termination"
+  },
+  {
+    "path": "10-final-v3-app-processes/hold-before-step.result.json",
+    "sha256": "a8a1cad8db40757c457abdbe114880c3b66139a37759d2711ca09fd0bd95f03e",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": true,
+    "scope": "expected owned-process termination"
+  },
+  {
+    "path": "10-final-v3-cli-processes/hold-after-step.result.json",
+    "sha256": "8b844b07c382362afb54f82fa8a19e53adf38f68d3044a51ab28812d87fc5856",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": true,
+    "scope": "expected owned-process termination"
+  },
+  {
+    "path": "10-final-v3-cli-processes/hold-before-step.result.json",
+    "sha256": "39fed5894461f44bc8fbb10110ce80b2c6f0f3bc30bfd8919643272db31c7c68",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": true,
+    "scope": "expected owned-process termination"
+  },
+  {
+    "path": "10-mixed-v3-debug.result.json",
+    "sha256": "81c0f610e4a11423d413544723f9b6fee24eb8acb0fca3f0849e432c6149c152",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-mixed-v4-diagnosis.result.json",
+    "sha256": "61ba0b26138041bb909360e07b3406c5d20fb98cfc7de088e5851d0a9fda8fa9",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-mixed-v5-debug.result.json",
+    "sha256": "58269fb5a464467dbaa972015bb3623d8d26355dc3481a107ccc5f8e4ce59c7c",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-observation-file-green-debug.result.json",
+    "sha256": "ff17bd3c5fb271bd5f552ae1e8ed5fe135696ce78b96e92ecb0b81a42ba989ec",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-observation-file-red.result.json",
+    "sha256": "04d99c5ba0854d0f7ce7ba51de9f3273f9713555956d1839008af9b89cb4ba71",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-observation-file-selector-diagnosis.result.json",
+    "sha256": "188a09bf69eb64513f818ef904a8535738286bad20da2457723cc4d84e6d9e4d",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-owner-stack-green-v1/advance-02.result.json",
+    "sha256": "7b0e281d04c1f339c1643ea300a66a9f31feca35adf08491c3e3de2df01d9cb1",
+    "exit_code": 3,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-owner-stack-green-v1/hold-after-step.result.json",
+    "sha256": "9ae83912a900e56d0a054cfa3b162b19b9aa32fc7255c064789aa3d25da1ccb3",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": true,
+    "scope": "expected owned-process termination"
+  },
+  {
+    "path": "10-owner-stack-green-v1/hold-before-step.result.json",
+    "sha256": "c48ae0ba59e6ed170957136d73bc068cb5c5a90bbd0dc36550134eb7613383e0",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": true,
+    "scope": "expected owned-process termination"
+  },
+  {
+    "path": "10-owner-stack-green-v2/advance-02.result.json",
+    "sha256": "6485bdab5c3ef82fe73e6bf33ba90e2a255c252a90bddce0d5c9ebed6cfd94f5",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-owner-stack-green-v2/hold-after-step.result.json",
+    "sha256": "fd6d15ed09a7314e6742744be302d6064f12763a9e24933a2d1e55cdf6407034",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": true,
+    "scope": "expected owned-process termination"
+  },
+  {
+    "path": "10-owner-stack-green-v2/hold-before-step.result.json",
+    "sha256": "da125f345781b5686d42e33c43d730c9fffdecfb45ea8d213419d82e915f826f",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": true,
+    "scope": "expected owned-process termination"
+  },
+  {
+    "path": "10-owner-stack-red-v1/advance-02.result.json",
+    "sha256": "05da94c6cb7eecf1f81418e8e427655319ade0bac26ac3d7a94ffb29c416e0ae",
+    "exit_code": 3,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-owner-stack-red-v1/hold-after-step.result.json",
+    "sha256": "c0b2ff329702f7228e8e6cf791d77a6c2b4c494c8e6b16e4a0997ddb11c7cc33",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": true,
+    "scope": "expected owned-process termination"
+  },
+  {
+    "path": "10-owner-stack-red-v1/hold-before-step.result.json",
+    "sha256": "03fd6ee54cef67e8b4aee25f7b9976aac3cf8296c1782072fd9621198d0164eb",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": true,
+    "scope": "expected owned-process termination"
+  },
+  {
+    "path": "10-preflight-app-processes.result.json",
+    "sha256": "c5ca810c6d032552c56022c8c3f36be3e15ef65807646cc746dc44faeb5e8549",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-preflight-v2/hold-after-step.result.json",
+    "sha256": "49fca01f503fbabe9bd5e5fdb461ea37d0df8848cfc0b2038dce8512a319bc9c",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": true,
+    "scope": "expected owned-process termination"
+  },
+  {
+    "path": "10-preflight-v2/hold-before-step.result.json",
+    "sha256": "51f0225f2ab7853c7fa7215e8bf02586eb6bd015e871109b14e58ee56d125394",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": true,
+    "scope": "expected owned-process termination"
+  },
+  {
+    "path": "10-shared-nochange-exact-red.result.json",
+    "sha256": "a160f9076e2c920ecc297f7396044873f0f7b0e9223782c2941f2e3285a82665",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-shared-nochange-red-direct.result.json",
+    "sha256": "7150a7fcd57833a28a34be7ce5f2c509bcbb4f3d7545c2cd870907ffb6170c84",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-shared-nochange-red-v2.result.json",
+    "sha256": "75646b8aaeca1b8197e000417379a46629a560c19c9ba62c77e4b262a312a3fe",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-smoke-app-build.result.json",
+    "sha256": "100a3eebdffd448c25656e9f88f5ecf4a6a1bd1ef9f8f812d7fdc1d00c7992ce",
+    "exit_code": 1,
+    "timed_out": null,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-smoke-app-fresh-build.result.json",
+    "sha256": "f5923f957ed015af2cab63518aadf7a73adf27ed8c88e85a6883dbe0a181ef46",
+    "exit_code": 1,
+    "timed_out": null,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-virgin-history-green.result.json",
+    "sha256": "da3612195f45e603175bec192b34129d60214cb7bb4cb567189ca6e9eef20cce",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  },
+  {
+    "path": "10-virgin-history-red.result.json",
+    "sha256": "ddbaaad4e35102d39f91650177866b91da7b6b55a01806d441a80ebebed15ae2",
+    "exit_code": 1,
+    "timed_out": false,
+    "capture_error": null,
+    "intentional_process_interruption": false,
+    "scope": "retained development failure or explicit negative capture probe; not final qualification"
+  }
+]

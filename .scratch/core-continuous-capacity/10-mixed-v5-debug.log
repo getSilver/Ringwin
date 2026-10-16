@@ -1,0 +1,16 @@
+1/1 windows_capacity_acceptance.test.Windows capacity real file seed recovery preserves public business state...FAIL (CoordinatorWriterClosed)
+D:\github\Ringwin-core-continuous-capacity\src\account_coordinator.zig:2871:26: 0x7ff6ea9fa35e in apply (test_zcu.obj)
+        if (self.closed) return error.CoordinatorWriterClosed;
+                         ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_shared.zig:59:21: 0x7ff6eaa0d477 in verify (test_zcu.obj)
+                    try owner.apply(.{ .publish_summary = .{ .identity = owner.sequence + 1, .summary = updated } });
+                    ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_acceptance.zig:561:29: 0x7ff6eaa0f73e in runProtocol (test_zcu.obj)
+    result.shared_account = try @import("windows_capacity_shared.zig").verify(allocator, io, path, virgin, advancing, summaries);
+                            ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_acceptance.zig:576:22: 0x7ff6eaa11fae in test.Windows capacity real file seed recovery preserves public business state (test_zcu.obj)
+    const advanced = try runProtocol(std.testing.allocator, std.testing.io, "advance", path);
+                     ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\ca0b2ed882fd40745b4408470224c744\test.exe --seed=0x4bbae735

@@ -1,0 +1,5 @@
+{"elapsed_ns": 15829700, "working_set_bytes": 159744, "peak_working_set_bytes": 163840, "private_bytes": 389120, "peak_pagefile_bytes": 389120}
+{"elapsed_ns": 116534200, "working_set_bytes": 8040448, "peak_working_set_bytes": 8044544, "private_bytes": 4124672, "peak_pagefile_bytes": 4124672}
+{"elapsed_ns": 220236300, "working_set_bytes": 8839168, "peak_working_set_bytes": 8843264, "private_bytes": 4780032, "peak_pagefile_bytes": 4780032}
+{"elapsed_ns": 326245500, "working_set_bytes": 9506816, "peak_working_set_bytes": 9510912, "private_bytes": 5214208, "peak_pagefile_bytes": 5214208}
+{"elapsed_ns": 435177800, "working_set_bytes": 32768, "peak_working_set_bytes": 9519104, "private_bytes": 73728, "peak_pagefile_bytes": 5214208}

@@ -1,0 +1,42 @@
+1/2 windows_capacity_fault_acceptance.test.Windows capacity faults recover complete partial Fill economics reservations and Unknown without sends...windows_capacity_fault point=append fault=short_write apply=true skip=0 live=2 terminal=0 barrier=42 recovered_closed=false sends=2
+windows_capacity_fault point=commit fault=sync_timeout apply=true skip=0 live=2 terminal=0 barrier=42 recovered_closed=true sends=2
+windows_capacity_fault point=root_publish fault=eio apply=true skip=0 live=2 terminal=0 barrier=42 recovered_closed=false sends=2
+windows_capacity_fault point=root_publish fault=eio apply=true skip=1 live=2 terminal=0 barrier=42 recovered_closed=true sends=2
+expected error.ReadOnlyFileSystem, found error.DecisionLogUnavailable
+FAIL (TestUnexpectedError)
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:352:5: 0x7ff6d18e089f in faultError (test_zcu.obj)
+    return switch (fault) {
+    ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:1037:13: 0x7ff6d18e0921 in fail (test_zcu.obj)
+            return err;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:1058:13: 0x7ff6d18e0a33 in failAt (test_zcu.obj)
+            try self.fail(self.fault);
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:1235:9: 0x7ff6d1908388 in publishImpl (test_zcu.obj)
+        try self.failAt(.publish);
+        ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:177:9: 0x7ff6d17299e8 in publishSnapshot (test_zcu.obj)
+        return self.vtable.publish(self.context, io, stream, barrier, bytes);
+        ^
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:1028:13: 0x7ff6d172d424 in checkpointCommitted (test_zcu.obj)
+            try self.store.publishSnapshot(self.io, self.stream, barrier, snapshot);
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:930:46: 0x7ff6d1740a81 in checkpoint (test_zcu.obj)
+        self.checkpointCommitted(null) catch return error.DecisionLogUnavailable;
+                                             ^
+D:\Program Files\zig\lib\std\testing.zig:72:13: 0x7ff6d18ca33e in expectError__anon_116768 (test_zcu.obj)
+            return error.TestUnexpectedError;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_fault_acceptance.zig:160:13: 0x7ff6d18d5e32 in test.Windows capacity faults recover complete partial Fill economics reservations and Unknown without sends (test_zcu.obj)
+            try std.testing.expectError(expected_error, harness.owner.checkpoint());
+            ^
+2/2 windows_capacity_fault_acceptance.test.Windows capacity file reopen rejects missing corrupt and authenticated incompatible authority...windows_capacity_reject damage=missing_segment live_input=2 terminal_input=0 owner_closed=true sends=2
+windows_capacity_reject damage=corrupt_segment live_input=2 terminal_input=0 owner_closed=true sends=2
+windows_capacity_reject damage=corrupt_manifest live_input=2 terminal_input=0 owner_closed=true sends=2
+windows_capacity_reject damage=old_schema live_input=2 terminal_input=0 owner_closed=true sends=2
+windows_capacity_reject damage=foreign_artifact live_input=2 terminal_input=0 owner_closed=true sends=2
+OK
+1 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\1cc6ae21a1dfe84c61837617bebf6433\test.exe --seed=0xa83e8db9

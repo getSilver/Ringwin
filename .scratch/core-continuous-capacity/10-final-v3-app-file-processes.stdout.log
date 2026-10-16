@@ -1,0 +1,31 @@
+seed exit=0 pid=7220
+recover-00 exit=0 pid=7308
+step-golden exit=0 pid=5804
+step-golden-recover exit=0 pid=11872
+hold-before-step interrupted_owned_pid=1412
+hold-before-step-recover exit=0 pid=7704
+hold-after-step interrupted_owned_pid=1716
+hold-after-step-recover exit=0 pid=11032
+advance-01 exit=0 pid=3892
+recover-01 exit=0 pid=10628
+advance-02 exit=0 pid=14056
+recover-02 exit=0 pid=1276
+advance-03 exit=0 pid=11704
+recover-03 exit=0 pid=10308
+advance-04 exit=0 pid=13604
+recover-04 exit=0 pid=8956
+advance-05 exit=0 pid=7784
+recover-05 exit=0 pid=7308
+advance-06 exit=0 pid=13932
+recover-06 exit=0 pid=1052
+advance-07 exit=0 pid=3728
+recover-07 exit=0 pid=10648
+advance-08 exit=0 pid=12176
+recover-08 exit=0 pid=1896
+advance-09 exit=0 pid=1724
+recover-09 exit=0 pid=14144
+advance-10 exit=0 pid=4260
+recover-10 exit=0 pid=6676
+observation-seed exit=0 pid=3428
+observation-recover exit=0 pid=14012
+Native process recovery and authority comparison passed; fault evidence is separate

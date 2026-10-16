@@ -1,0 +1,53 @@
+Stack overflow (no address available)
+D:\Program Files\zig\lib\compiler_rt\stack_probe.zig:127: 0x7ff79aa32e96 in win_probe_stack_only (compiler_rt.lib)
+            asm volatile (
+
+D:\Program Files\zig\lib\compiler_rt\stack_probe.zig:269:5: 0x7ff79aa32e96 in ___chkstk_ms (compiler_rt.lib)
+    @call(.always_inline, win_probe_stack_only, .{});
+    ^
+???:?:?: 0x2000257 in ??? (???)
+???:?:?: 0x76b4b4e847 in ??? (???)
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:1707: 0x7ff79aa2dad5 in loadSnapshotObject (ringwin_zcu.obj)
+    fn loadSnapshotObject(self: *LinuxFileAdapter, io: std.Io, identity: StreamIdentity, index: usize, barrier: u64, expected_digest: [32]u8) !bool {
+
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:1704: 0x7ff79aa2e733 in loadSnapshot (ringwin_zcu.obj)
+        return self.loadSnapshotObject(io, identity, index, entry.snapshot_barrier, entry.snapshot_digest);
+
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:1356:44: 0x7ff79aa2e733 in recoverImpl (ringwin_zcu.obj)
+        var snapshot_ok = self.loadSnapshot(io, identity, stream, index) catch false;
+                                           ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:181: 0x7ff79a9b355c in recover (ringwin_zcu.obj)
+        return self.vtable.recover(self.context, io, stream);
+
+D:\github\Ringwin-core-continuous-capacity\src\execution_gateway.zig:319:54: 0x7ff79a9b355c in checkpointDurableDispatchWithBuffer (ringwin_zcu.obj)
+        const persisted = try committed.store.recover(committed.io, committed.stream);
+                                                     ^
+D:\github\Ringwin-core-continuous-capacity\src\execution_gateway.zig:307:56: 0x7ff79a9c17bf in checkpointDurableDispatchOnStack (ringwin_zcu.obj)
+        return self.checkpointDurableDispatchWithBuffer(&snapshot_buffer);
+                                                       ^
+D:\github\Ringwin-core-continuous-capacity\src\execution_gateway.zig:302: 0x7ff79a9b3ab2 in checkpointDurableDispatch (ringwin_zcu.obj)
+        return @call(.never_inline, Gateway.checkpointDurableDispatchOnStack, .{self});
+
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_acceptance.zig:166:51: 0x7ff79a9b3ab2 in checkpoint (ringwin_zcu.obj)
+        try self.gateway.checkpointDurableDispatch();
+                                                  ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_acceptance.zig:222: 0x7ff79a9bcad1 in seedState (ringwin_zcu.obj)
+        try self.checkpoint();
+
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_acceptance.zig:380:40: 0x7ff79a9bcad1 in runProtocol (ringwin_zcu.obj)
+        if (virgin) try cycle.seedState(shard) else if (advancing and shard != 3) try cycle.advance();
+                                       ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_acceptance.zig:335:37: 0x7ff79a9bfec7 in run (ringwin_zcu.obj)
+    const evidence = try runProtocol(init.gpa, init.io, mode, path);
+                                    ^
+D:\github\Ringwin-core-continuous-capacity\src\main.zig:134: 0x7ff79a88b621 in main (ringwin_zcu.obj)
+            return windows_capacity_acceptance.run(init, mode, path);
+
+D:\Program Files\zig\lib\std\start.zig:750: 0x7ff79a88b621 in callMain (ringwin_zcu.obj)
+    return wrapMain(root.main(.{
+
+D:\Program Files\zig\lib\std\start.zig:498:17: 0x7ff79a88b621 in WinStartup (ringwin_zcu.obj)
+        callMain(std.os.windows.peb().ProcessParameters.CommandLine.slice(), .global),
+                ^
+???:?:?: 0x7ff834bf81f3 in ??? (KERNEL32.DLL)
+???:?:?: 0x7ff83513a250 in ??? (ntdll.dll)

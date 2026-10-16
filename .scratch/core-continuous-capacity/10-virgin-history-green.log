@@ -1,0 +1,22 @@
+1/1 durable_store.test.order history file virgin absence keeps admission open but missing published objects closes it...FAIL (InvalidHistoryKey)
+D:\github\Ringwin-core-continuous-capacity\src\business_history.zig:222:64: 0x7ff6eb1630fa in encodeKey (test_zcu.obj)
+        else => if (key.origin.stream.domain != .decision_log) return error.InvalidHistoryKey,
+                                                               ^
+D:\github\Ringwin-core-continuous-capacity\src\business_history.zig:509:21: 0x7ff6eb167d50 in batchDigest (test_zcu.obj)
+        const key = try encodeKey(entry.key);
+                    ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:1589:32: 0x7ff6eb16ba5b in publishOrderHistoryImpl (test_zcu.obj)
+        const expected_batch = try business_history.batchDigest(batch);
+                               ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:151:9: 0x7ff6eb13545b in publishOrderHistory (test_zcu.obj)
+        return publish(self.context, io, batch);
+        ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:1938:5: 0x7ff6eb1357d9 in publishHistoryTestCommand (test_zcu.obj)
+    return store.publishOrderHistory(io, .{
+    ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:1959:23: 0x7ff6eb135c4b in test.order history file virgin absence keeps admission open but missing published objects closes it (test_zcu.obj)
+    const published = try publishHistoryTestCommand(store, std.testing.io, origin, null, 1);
+                      ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\fe7d6e0182acaf75e36ab09d6f7d0de3\test.exe --seed=0x98b2fe67

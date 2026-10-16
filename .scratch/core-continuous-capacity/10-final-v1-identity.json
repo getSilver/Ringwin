@@ -1,0 +1,64 @@
+{
+  "source_tree_sha256": "73532d4ae117f849e083011cde02b169d8862b457c1e8f362e40571b31492bce",
+  "commit_before_implementation_commit": "4ea4c3ee3f6bfc4a822196649fb011e3b5f0dfa2",
+  "branch": "codex/core-continuous-capacity",
+  "tracked_source_diff_sha256": "009f15cd629d7fcf0fbd498d80ea0a3e051b76022b1c6f6b1366489039dba7d1",
+  "os": "Windows-10-10.0.17763-SP0",
+  "architecture": "AMD64",
+  "logical_cpus": 4,
+  "zig": "0.17.0-dev.315+5b647b792",
+  "seed_label": "0x20261008",
+  "scope": "offline small functional fixtures; not a platform performance or production qualification",
+  "max_fixture_live_across_shards": 100,
+  "max_fixture_terminal_across_shards": 100,
+  "production_qualification": false,
+  "capacity_stress_qualification": "deferred",
+  "actual_thread_stack_peak": "not_measured",
+  "physical_index_bytes_per_identity": "not_measured",
+  "scripts": {
+    "run-07-command.py": "9a248c655a81666d0208a787868d5dd0ec28fbb8aac764643bd6898110352d14",
+    "run-10-command.py": "67232ef1c8639207199a6f6dae76b1463131934d2162e2ddc8d8792b861fe9b8",
+    "run-10-final-acceptance.py": "2f75711cf091a4f3a60be9f121eba217d913575b0ec50697dfc4ea87bc5a303d",
+    "run-10-file-processes.py": "7b3d9424e919588eac6211d783ee61abb3a3e56b77d49515dfc181721c612255",
+    "audit-10-final.py": "6e33f67b1470aff5bc698a04392095c8a0aef5653a103fc8d3e8c7eca85f4a95",
+    "collect-10-host.ps1": "7c85079d24bd1123cfa88c31871fdcb1a3567d2e49fd1bc6b9c2819f757eab7f"
+  },
+  "zig_executable_sha256": "c72f6229ba4abc2e885e1886cd0359b87198fac623b9a757b94fa6b1e47510af",
+  "schema_identity": {
+    "journal": 39,
+    "state": 43,
+    "registry": 37,
+    "release_artifact": 1
+  },
+  "host_metadata_sha256": "b27a874e2892e9765fc7c2a1ece2099826bcfb3cc195158572bb9c03ec7864fc",
+  "python_version": "3.9.18 (main, Sep 11 2023, 14:09:26) [MSC v.1916 64 bit (AMD64)]",
+  "directory_durability_qualified": false,
+  "native_file_probe": {
+    "source_sha256": "61f15cdcaf2dc3842fb4eaf89dc7d520e9e4e4b044ffa81e2f6ddb607b1be7f6",
+    "stdout_sha256": "b8b88186ad438c3d43e839ce9f48196c91ecdf2de6988a0826702a2e2297ee41",
+    "observations": [
+      {
+        "generation": 0,
+        "file_sync": "ok",
+        "file_flush_result": 1,
+        "file_flush_error": 0,
+        "rename_replace": "ok",
+        "directory_flush_result": 0,
+        "directory_flush_error": 5
+      },
+      {
+        "generation": 1,
+        "file_sync": "ok",
+        "file_flush_result": 1,
+        "file_flush_error": 0,
+        "rename_replace": "ok",
+        "directory_flush_result": 0,
+        "directory_flush_error": 5
+      },
+      {
+        "reopen_latest_body": "ok",
+        "scope": "ordinary_functional_only"
+      }
+    ]
+  }
+}

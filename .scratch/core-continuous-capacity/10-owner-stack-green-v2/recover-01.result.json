@@ -1,0 +1,2151 @@
+{
+  "label": "recover-01",
+  "mode": "recover",
+  "command": [
+    "D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\10-owner-stack-green-app-v2.exe",
+    "--windows-capacity-file",
+    "recover",
+    "D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\10-owner-stack-green-v2\\store"
+  ],
+  "pid": 3284,
+  "protocol": "--windows-capacity-file",
+  "started_utc": "2026-10-16T07:29:03.097956+00:00",
+  "finished_utc": "2026-10-16T07:29:05.438130+00:00",
+  "elapsed_ns": 2340346000,
+  "exit_code": 0,
+  "intentional_process_interruption": false,
+  "timed_out": false,
+  "kill_marker": null,
+  "stdout_sha256": "be89c77d4d26a6206b66e1fd9ec31f441575527a2d10f797b5a862b313f4d688",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "source_tree_sha256": "c29cba9ae0f97a53820b71401040ae1e0c8e0662c990e0c1a94683170c247885",
+  "artifact_sha256": "b1ab4ecf349fe54b01c3bfed7250336177f6d9e7a74a8e4e5a9c4987c7f62d3c",
+  "files_before": [
+    {
+      "path": "coordination/archive-2-1-0.ref",
+      "bytes": 32,
+      "sha256": "931cc256579026b1bd194b1aee88a297293f0d2c94101c2afee4850b9ff268b7",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "coordination/archive-2-1-1.ref",
+      "bytes": 32,
+      "sha256": "5649cb9928a8699490a1d60690a5ed9e014521850eef7c2356e51a14091e7f5d",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "coordination/archive-97df4abde41f31bbf55793289426b4912e58abd9e591ebf180eeb0acec535750.bin",
+      "bytes": 160,
+      "sha256": "97df4abde41f31bbf55793289426b4912e58abd9e591ebf180eeb0acec535750",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "coordination/archive-b88a76ea87e98a6ca39cb06197f8d43c30af75e8104def3740cb594a1de418ee.bin",
+      "bytes": 160,
+      "sha256": "b88a76ea87e98a6ca39cb06197f8d43c30af75e8104def3740cb594a1de418ee",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "coordination/manifest.bin",
+      "bytes": 272,
+      "sha256": "963db9d20bbac049f7f65cb40beb985dc7e36c664e3df20470040966cb425c39",
+      "allocated_bytes": 272,
+      "logical_bytes": 272
+    },
+    {
+      "path": "coordination/segment-2-1-0.log",
+      "bytes": 1701,
+      "sha256": "d50ea1b9948337a12393eb547e9475b800b7e0e5b17fa21689e70792584a6710",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1701
+    },
+    {
+      "path": "coordination/segment-2-1-1.log",
+      "bytes": 900,
+      "sha256": "cf6184c4d0715192f4bad1cc4821ff085eb34cb6f834a4fb01239653fce78a36",
+      "allocated_bytes": 4096,
+      "logical_bytes": 900
+    },
+    {
+      "path": "coordination/segment-2-1-2.log",
+      "bytes": 64,
+      "sha256": "4ca86952c9116bd98d597dd3a9f4e5c34c84172357787b306d2fcced5c3fcfea",
+      "allocated_bytes": 64,
+      "logical_bytes": 64
+    },
+    {
+      "path": "coordination/snapshot-2-1-6-bea1a0ed3b3531aa8ee6381163ff029a704a71af74877c60c8a69224bb563661.bin",
+      "bytes": 1653,
+      "sha256": "cb794e823dea3be0aba9c4919235b0c4e0a277037451e6bed24df7a9b43ffbe9",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1653
+    },
+    {
+      "path": "coordination/snapshot-2-1-9-7887f6cd8481fc5f6231c0af5b0e13e67cc174f81adbcc87d17f6ced92779884.bin",
+      "bytes": 1653,
+      "sha256": "7be76fa6ba963c7867f5af8b6a269fdbc4c288cc301c1469edada504fc2c65b2",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1653
+    },
+    {
+      "path": "shard-0/archive-1-100-0.ref",
+      "bytes": 32,
+      "sha256": "8f1daf8dcbf5e24aab93e46d572af4aaff4cc296f219a0ef735b9d9ec030228b",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-0/archive-1-100-1.ref",
+      "bytes": 32,
+      "sha256": "103efe909c994bd0c7e11e1fdb38d57403cb3c3a985b687d57db8a9b71275b48",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-0/archive-1-100-2.ref",
+      "bytes": 32,
+      "sha256": "42db59cd9b6c7406050f9cfd9d5fb7c07cf4b1355612773854c2e155a3dd546e",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-0/archive-2-101-0.ref",
+      "bytes": 32,
+      "sha256": "bbf5635e83051528b9c9f9377e9a45ef8b877deb0fb9ad4ca169b546a44b592c",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-0/archive-2-101-1.ref",
+      "bytes": 32,
+      "sha256": "aed20090389e76684fc49624149908a1f0c0bbf49803a15e73cdc67b14f1ed45",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-0/archive-2-101-2.ref",
+      "bytes": 32,
+      "sha256": "99dfbd81a603009ea219783e2bfd1ad080709d0f8f8b78a4849cd090bd0b2fc7",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-0/archive-29637bd4d4785f50edfec08cadfaeaa338a7ffc026adfd164fec722a82856cf6.bin",
+      "bytes": 160,
+      "sha256": "29637bd4d4785f50edfec08cadfaeaa338a7ffc026adfd164fec722a82856cf6",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-0/archive-2aa6be6cec989a3ef8252f99e32d241bbcac506be5837aeda41ede1e27eec8e1.bin",
+      "bytes": 160,
+      "sha256": "2aa6be6cec989a3ef8252f99e32d241bbcac506be5837aeda41ede1e27eec8e1",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-0/archive-2da4170fc1614644081c1948755b0da8a706169214a5108fb22b060c846cd63e.bin",
+      "bytes": 160,
+      "sha256": "2da4170fc1614644081c1948755b0da8a706169214a5108fb22b060c846cd63e",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-0/archive-35c22d46b522eacb7a90511e0c378e10fd4096b3bfdd32afb486c124c9ec797f.bin",
+      "bytes": 160,
+      "sha256": "35c22d46b522eacb7a90511e0c378e10fd4096b3bfdd32afb486c124c9ec797f",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-0/archive-53b030e8e8aa90f9e1425863f298a3a26ca869b9ec552cf081f40d3d59c1fa15.bin",
+      "bytes": 160,
+      "sha256": "53b030e8e8aa90f9e1425863f298a3a26ca869b9ec552cf081f40d3d59c1fa15",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-0/archive-a0654710028de9e2184a802a1d1404eaf30eaba074de14be03e5515a7ec28e39.bin",
+      "bytes": 160,
+      "sha256": "a0654710028de9e2184a802a1d1404eaf30eaba074de14be03e5515a7ec28e39",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-0/manifest.bin",
+      "bytes": 784,
+      "sha256": "18598a5644dca285b15f187fdc2d94735752acb546bce70631cfe473f74847dc",
+      "allocated_bytes": 4096,
+      "logical_bytes": 784
+    },
+    {
+      "path": "shard-0/order-history.objects",
+      "bytes": 8254,
+      "sha256": "40f40435666a7eb6fdd0d9f4cbc7f7f7e77ff2fecf1f3410553c1ad37109c8f1",
+      "allocated_bytes": 12288,
+      "logical_bytes": 8254
+    },
+    {
+      "path": "shard-0/order-history.roots",
+      "bytes": 382,
+      "sha256": "f49e2f690b4d8c49a6485caedd03ad85ad66caad357d57afddad6d5bb92d51a7",
+      "allocated_bytes": 384,
+      "logical_bytes": 382
+    },
+    {
+      "path": "shard-0/segment-0-102-0.log",
+      "bytes": 832,
+      "sha256": "57359de7787bfb8e22dd7934e77041b0acd1e91f3e63a764feb202635b017788",
+      "allocated_bytes": 4096,
+      "logical_bytes": 832
+    },
+    {
+      "path": "shard-0/segment-1-100-0.log",
+      "bytes": 5225,
+      "sha256": "aa407c7334e97dd5e5fc543dc364fad53aa98202aa43d40f001c842ef7d5d478",
+      "allocated_bytes": 8192,
+      "logical_bytes": 5225
+    },
+    {
+      "path": "shard-0/segment-1-100-1.log",
+      "bytes": 3801,
+      "sha256": "54e7aad087166be5ced1e9b486f76cdfaafe636c173d90ccba77d713bf3ecadf",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3801
+    },
+    {
+      "path": "shard-0/segment-1-100-2.log",
+      "bytes": 5115,
+      "sha256": "28a4d6eaa564ed20035e9b0fa60f89a9f6ccba69f35754146b1aaeb18f089760",
+      "allocated_bytes": 8192,
+      "logical_bytes": 5115
+    },
+    {
+      "path": "shard-0/segment-1-100-3.log",
+      "bytes": 405,
+      "sha256": "4403bf0037208a5cb5aa6afa60503b6d97117de34c494cbe0658e768ad70e7ee",
+      "allocated_bytes": 408,
+      "logical_bytes": 405
+    },
+    {
+      "path": "shard-0/segment-2-101-0.log",
+      "bytes": 168,
+      "sha256": "d0c1a6a8ed297d88d6d599313eac98196a139f7d870611c02c731ecf2804c670",
+      "allocated_bytes": 168,
+      "logical_bytes": 168
+    },
+    {
+      "path": "shard-0/segment-2-101-1.log",
+      "bytes": 1630,
+      "sha256": "4c04f3475252455509b1849db9b73b2bde599381e0ccea91948ed0be685063e6",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1630
+    },
+    {
+      "path": "shard-0/segment-2-101-2.log",
+      "bytes": 3612,
+      "sha256": "768de884a30baaff0064fdd6c01004a097e15256ff5440f5a95fff36c486b747",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3612
+    },
+    {
+      "path": "shard-0/segment-2-101-3.log",
+      "bytes": 64,
+      "sha256": "74a2bf28f4b6f56027a7226fb886b0dd04fa0ba2774d45f9226a1afac6540b4b",
+      "allocated_bytes": 64,
+      "logical_bytes": 64
+    },
+    {
+      "path": "shard-0/snapshot-1-100-38-ad9c9bbfe705929ad93c87fa85b3e2c12105f39bef6c86105555a83a4563a6b3.bin",
+      "bytes": 747130,
+      "sha256": "a684913beb6af187c8514112eb46e6956936b31b49146bd6e3b1efdefb6d80fc",
+      "allocated_bytes": 749568,
+      "logical_bytes": 747130
+    },
+    {
+      "path": "shard-0/snapshot-1-100-53-3a18b06664ffce47c64d16f0ca024737eb909878b44a70806ebbb8598965b92f.bin",
+      "bytes": 747738,
+      "sha256": "ff2c0e060de1e587e468978336ae220add0daf272d2f29a9f7180556b0ff9d90",
+      "allocated_bytes": 749568,
+      "logical_bytes": 747738
+    },
+    {
+      "path": "shard-0/snapshot-2-101-3-b375e583ce537fa8bb193dd5da152c404b2e199ee7d459972cfcdbd75b94bf19.bin",
+      "bytes": 887,
+      "sha256": "ffd974b1ad8162393978ee12e991769dd7eb72e49f464c4826dd2d6be66272f5",
+      "allocated_bytes": 4096,
+      "logical_bytes": 887
+    },
+    {
+      "path": "shard-0/snapshot-2-101-8-76740a0f9bb79f9d803b30b8a6ab9eeb6bbbf6c37df1f4dd13a8281f0faeda57.bin",
+      "bytes": 1540,
+      "sha256": "535f101a061135d7705cedb046065c38f12ced83bf7a55063dae6882dbc23929",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1540
+    },
+    {
+      "path": "shard-1/archive-04916c99fff77a73c82ce5352626a46d2129a20e11d8f63be042fca50854440f.bin",
+      "bytes": 160,
+      "sha256": "04916c99fff77a73c82ce5352626a46d2129a20e11d8f63be042fca50854440f",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-1/archive-06bc1d8ae596285d031ecea8ca0fc431067bf5e76b1bb9e6e157a4f41ef9a91d.bin",
+      "bytes": 160,
+      "sha256": "06bc1d8ae596285d031ecea8ca0fc431067bf5e76b1bb9e6e157a4f41ef9a91d",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-1/archive-1-110-0.ref",
+      "bytes": 32,
+      "sha256": "3929933ac19f7649226c95daff5c9956385c63433730cd7ee640da9db830c29a",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-1/archive-1-110-1.ref",
+      "bytes": 32,
+      "sha256": "94c6f358d4212c5fa230e0919331e01b91b12b38d92b38a7eef34868e756ac57",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-1/archive-1-110-2.ref",
+      "bytes": 32,
+      "sha256": "eb3363b9ca489ea6da57b7e4194e6a2565aa2a6d5eabe520a03b80985b5d84c1",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-1/archive-2-111-0.ref",
+      "bytes": 32,
+      "sha256": "3547b6f79751612de08a090731de3489baeed2411a110c828d4fc354646abb1c",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-1/archive-2-111-1.ref",
+      "bytes": 32,
+      "sha256": "7dc777cf53d29152f7a314877b5ceb1487e2314c0b9b541270887cae07e6b68e",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-1/archive-2-111-2.ref",
+      "bytes": 32,
+      "sha256": "a56f413cfd3323d085456b1e5955843854b1831fde33621eeeed6c9105315c96",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-1/archive-414146c201c76efc23441f97e476046e74a2b523ff91de79e6aa2d044302f6f6.bin",
+      "bytes": 160,
+      "sha256": "414146c201c76efc23441f97e476046e74a2b523ff91de79e6aa2d044302f6f6",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-1/archive-6ffa0ab5a9a541feda97170027b30a6e3074ae600d48c92935dada39189aa8cd.bin",
+      "bytes": 160,
+      "sha256": "6ffa0ab5a9a541feda97170027b30a6e3074ae600d48c92935dada39189aa8cd",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-1/archive-87b3bf8dc679b317fe6311d4bf3e9806507407968bf171163fa7e0b77c83fbff.bin",
+      "bytes": 160,
+      "sha256": "87b3bf8dc679b317fe6311d4bf3e9806507407968bf171163fa7e0b77c83fbff",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-1/archive-b26e92060e88e409e2f29810eeda24f531788dac148420119719570056393897.bin",
+      "bytes": 160,
+      "sha256": "b26e92060e88e409e2f29810eeda24f531788dac148420119719570056393897",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-1/manifest.bin",
+      "bytes": 784,
+      "sha256": "5271eb8880e7d044260749a43f6fad5665e8a0f07eac128ff9fd87338b98a22a",
+      "allocated_bytes": 4096,
+      "logical_bytes": 784
+    },
+    {
+      "path": "shard-1/order-history.objects",
+      "bytes": 8254,
+      "sha256": "2b6552334a1c39bf09d8bbea6a454f531ca1d199ba49df0e8acc887614ec9a11",
+      "allocated_bytes": 12288,
+      "logical_bytes": 8254
+    },
+    {
+      "path": "shard-1/order-history.roots",
+      "bytes": 382,
+      "sha256": "33e1c2b038217a03bc01f5ada801a5ad1352ab1f849241d389962819816abdf9",
+      "allocated_bytes": 384,
+      "logical_bytes": 382
+    },
+    {
+      "path": "shard-1/segment-0-112-0.log",
+      "bytes": 832,
+      "sha256": "c1247971496c97d5cdc759cf446ca91842659978cd728b45cc82864c17a8867e",
+      "allocated_bytes": 4096,
+      "logical_bytes": 832
+    },
+    {
+      "path": "shard-1/segment-1-110-0.log",
+      "bytes": 5225,
+      "sha256": "836ee9aee98b6c002bad85f20311d02c5a89e461ddcb8dd5a0944cf5e96640bd",
+      "allocated_bytes": 8192,
+      "logical_bytes": 5225
+    },
+    {
+      "path": "shard-1/segment-1-110-1.log",
+      "bytes": 3801,
+      "sha256": "b17fcac6ef79bc8ede28be31a588afec7e85adae8bad3c1726e6cd3daa44dcc0",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3801
+    },
+    {
+      "path": "shard-1/segment-1-110-2.log",
+      "bytes": 5115,
+      "sha256": "604cb0df2231fade833b951c00decf6f1dc642c4794c6dbe2ba8d8b0f102d048",
+      "allocated_bytes": 8192,
+      "logical_bytes": 5115
+    },
+    {
+      "path": "shard-1/segment-1-110-3.log",
+      "bytes": 405,
+      "sha256": "d45fe0f3994baeca9b0892be71d534934db7a68a514637088b1062b58cc54f04",
+      "allocated_bytes": 408,
+      "logical_bytes": 405
+    },
+    {
+      "path": "shard-1/segment-2-111-0.log",
+      "bytes": 168,
+      "sha256": "d0c1a6a8ed297d88d6d599313eac98196a139f7d870611c02c731ecf2804c670",
+      "allocated_bytes": 168,
+      "logical_bytes": 168
+    },
+    {
+      "path": "shard-1/segment-2-111-1.log",
+      "bytes": 1630,
+      "sha256": "0e8b0ce7cf0702ea61fac237421b38a5b511766145d063f1f69faeaaf0daa666",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1630
+    },
+    {
+      "path": "shard-1/segment-2-111-2.log",
+      "bytes": 3612,
+      "sha256": "dfb888df7d670bd74a127521fa999918eef50bb81cffc830c08167fbefa1c639",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3612
+    },
+    {
+      "path": "shard-1/segment-2-111-3.log",
+      "bytes": 64,
+      "sha256": "74a2bf28f4b6f56027a7226fb886b0dd04fa0ba2774d45f9226a1afac6540b4b",
+      "allocated_bytes": 64,
+      "logical_bytes": 64
+    },
+    {
+      "path": "shard-1/snapshot-1-110-38-9a43992e2a86fadfa44b6d02e331bab506f0a7fbd2402bcba27fc1ca51147a63.bin",
+      "bytes": 747130,
+      "sha256": "8c7dead444d5531c954122e4d15f0842c6d862f85645aee6a1476beb57d0f8a5",
+      "allocated_bytes": 749568,
+      "logical_bytes": 747130
+    },
+    {
+      "path": "shard-1/snapshot-1-110-53-2d92914bcec3a3ec6dc36679378549c2f74748f347227312497e5def8e627efe.bin",
+      "bytes": 747738,
+      "sha256": "3035b8da5e0d4f3ecc93a0c42cf2cdd17a195fcb42f68c50d46e7191d7662db6",
+      "allocated_bytes": 749568,
+      "logical_bytes": 747738
+    },
+    {
+      "path": "shard-1/snapshot-2-111-3-8b772b4abb875a75bce060d971c068bc0bbe965720501a5cd01c8c0063abba7a.bin",
+      "bytes": 887,
+      "sha256": "fb3c8dc234f82663afaedf136cc9e787ad69b9b29872128b96f964b60aeaba80",
+      "allocated_bytes": 4096,
+      "logical_bytes": 887
+    },
+    {
+      "path": "shard-1/snapshot-2-111-8-59142ded44ff47cbb7442e719cdbea976260fdab4f690aaf6c805262ab0b317f.bin",
+      "bytes": 1540,
+      "sha256": "409e421c2a47edd571cde192698c1db1278ee6ccdeaa7467e86f2c598c3b153c",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1540
+    },
+    {
+      "path": "shard-2/archive-1-120-0.ref",
+      "bytes": 32,
+      "sha256": "0ae8bff48ed0e65a9f4e89d9ee4e6ee169b011a14519450080be647bd7859e4e",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-2/archive-1-120-1.ref",
+      "bytes": 32,
+      "sha256": "8bda721ffbbc4c25ab472fd8be76d8ab69338774f092488fc38b3aa70ce497bd",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-2/archive-1-120-2.ref",
+      "bytes": 32,
+      "sha256": "9042bc0c306226ef52d619d76828f2fdc3158b486059d751f014e6e0c6cf05e0",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-2/archive-13a499bceabb3693b4fab47b346eed864517c953bcc89049f447401e4d6ac66c.bin",
+      "bytes": 160,
+      "sha256": "13a499bceabb3693b4fab47b346eed864517c953bcc89049f447401e4d6ac66c",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-2/archive-2-121-0.ref",
+      "bytes": 32,
+      "sha256": "4cfd38a2d60dd499d600d3975b5497858452edd1a74862fd4bc53dd02fd2ef81",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-2/archive-2-121-1.ref",
+      "bytes": 32,
+      "sha256": "7f5c50aaf25eb4628663afc5c6726726420d988d05b3a666171528b2a335f42b",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-2/archive-2-121-2.ref",
+      "bytes": 32,
+      "sha256": "db0961684b979cc3b8ef505db53b636a45877a5171fbe775326de84419e49d71",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-2/archive-28f935d2148f3c8c98c87781d3cbac64cb5a000090b3d022c1f1f36ea40b1efe.bin",
+      "bytes": 160,
+      "sha256": "28f935d2148f3c8c98c87781d3cbac64cb5a000090b3d022c1f1f36ea40b1efe",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-2/archive-339ce0f883f440def0ca9b0a835d34f6a09d560c6feb3d230d0b9648d3289332.bin",
+      "bytes": 160,
+      "sha256": "339ce0f883f440def0ca9b0a835d34f6a09d560c6feb3d230d0b9648d3289332",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-2/archive-6657463d651969151f80dd13e893488e85a8afa655d0eedc62b0cb60f89129d2.bin",
+      "bytes": 160,
+      "sha256": "6657463d651969151f80dd13e893488e85a8afa655d0eedc62b0cb60f89129d2",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-2/archive-7bf476dc861bde41afd2b720c96a82fada191a582b36b9fe01f9f56979070f9d.bin",
+      "bytes": 160,
+      "sha256": "7bf476dc861bde41afd2b720c96a82fada191a582b36b9fe01f9f56979070f9d",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-2/archive-bb71cea3059266ad5a1932de9a52aac4e35d85f82c64321d3a8939c54a987816.bin",
+      "bytes": 160,
+      "sha256": "bb71cea3059266ad5a1932de9a52aac4e35d85f82c64321d3a8939c54a987816",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-2/manifest.bin",
+      "bytes": 784,
+      "sha256": "2cbe96763de52f633dfbecff67a2b2857986185eb4ddb26def0c943bbfbaf393",
+      "allocated_bytes": 4096,
+      "logical_bytes": 784
+    },
+    {
+      "path": "shard-2/order-history.objects",
+      "bytes": 8254,
+      "sha256": "ed3ca9665981d361ddfa3a19fe3e78eb38c71b254d6cd33cb002ca586448fb25",
+      "allocated_bytes": 12288,
+      "logical_bytes": 8254
+    },
+    {
+      "path": "shard-2/order-history.roots",
+      "bytes": 382,
+      "sha256": "4875c3e5c2158f5896f3d06c8263bee2dcf80cf0b9f56f013a6f9e2a198f0543",
+      "allocated_bytes": 384,
+      "logical_bytes": 382
+    },
+    {
+      "path": "shard-2/segment-0-122-0.log",
+      "bytes": 832,
+      "sha256": "4a35801380b01585387f38f3a0c08930c29650a40275f75365e2e772ab92ee70",
+      "allocated_bytes": 4096,
+      "logical_bytes": 832
+    },
+    {
+      "path": "shard-2/segment-1-120-0.log",
+      "bytes": 5225,
+      "sha256": "14b8fddb4c57566ff97c564af0410758e1e5cbd0fff59ae00495af78743cd104",
+      "allocated_bytes": 8192,
+      "logical_bytes": 5225
+    },
+    {
+      "path": "shard-2/segment-1-120-1.log",
+      "bytes": 3801,
+      "sha256": "8e7ae08d2d91adc36af39940ef5b4d285e4858ac91525114150f4cfc79046442",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3801
+    },
+    {
+      "path": "shard-2/segment-1-120-2.log",
+      "bytes": 5115,
+      "sha256": "9b25cf383c96b08f4c52bfcfaaa84d305e878cc6b773dfcb861e020a29c0d958",
+      "allocated_bytes": 8192,
+      "logical_bytes": 5115
+    },
+    {
+      "path": "shard-2/segment-1-120-3.log",
+      "bytes": 405,
+      "sha256": "499f30e877324a715ec0a65a396081d008f36065e8fa3af72add0a02b5bbe935",
+      "allocated_bytes": 408,
+      "logical_bytes": 405
+    },
+    {
+      "path": "shard-2/segment-2-121-0.log",
+      "bytes": 168,
+      "sha256": "d0c1a6a8ed297d88d6d599313eac98196a139f7d870611c02c731ecf2804c670",
+      "allocated_bytes": 168,
+      "logical_bytes": 168
+    },
+    {
+      "path": "shard-2/segment-2-121-1.log",
+      "bytes": 1630,
+      "sha256": "85a7bec01f83a5a225602504aabd13dc9df6fd5433249668ba16702e5d5e3fb6",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1630
+    },
+    {
+      "path": "shard-2/segment-2-121-2.log",
+      "bytes": 3612,
+      "sha256": "f070ac3b9e6c7ce378744b36d797dd482e07ce2cab0c7101de1b8d42e5d47237",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3612
+    },
+    {
+      "path": "shard-2/segment-2-121-3.log",
+      "bytes": 64,
+      "sha256": "74a2bf28f4b6f56027a7226fb886b0dd04fa0ba2774d45f9226a1afac6540b4b",
+      "allocated_bytes": 64,
+      "logical_bytes": 64
+    },
+    {
+      "path": "shard-2/snapshot-1-120-38-7e66ff00544189462cfaafc2bdc91a274cd651f2af9d6a6569953d8297878231.bin",
+      "bytes": 747130,
+      "sha256": "04c8774a536286023652da647cc7b0549ebeed7c8fa8527615e059992e7c1011",
+      "allocated_bytes": 749568,
+      "logical_bytes": 747130
+    },
+    {
+      "path": "shard-2/snapshot-1-120-53-62f6dbdb2a932501c2e6da3b51e69d1d1d3b92e07fedc784370e33095e3e892c.bin",
+      "bytes": 747738,
+      "sha256": "83327e1b74256986ffd1b47fe7f920d48817c79976e93098f222960532beec26",
+      "allocated_bytes": 749568,
+      "logical_bytes": 747738
+    },
+    {
+      "path": "shard-2/snapshot-2-121-3-7e2e1efa84a6946c2c2a6f7ff2f21d4865d8c2a3d6a7777191b2b575805557df.bin",
+      "bytes": 887,
+      "sha256": "4f2fd99c5bdff7ca641de00afdf945084fa296f959b4b466b86b465680c4c869",
+      "allocated_bytes": 4096,
+      "logical_bytes": 887
+    },
+    {
+      "path": "shard-2/snapshot-2-121-8-85390c35d110ab8cd907fa7cce0041510272a269e23145588c9a74b8c19b694e.bin",
+      "bytes": 1540,
+      "sha256": "bfebb9ac2370f4d0c866fc0d9722b0da0710b22a89c7f8611a4361beac1581a4",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1540
+    },
+    {
+      "path": "shard-3/archive-0e99fdc630fa79070e7f703a207d07d76943908e1361bb515468fd29c43455e2.bin",
+      "bytes": 160,
+      "sha256": "0e99fdc630fa79070e7f703a207d07d76943908e1361bb515468fd29c43455e2",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-1-130-0.ref",
+      "bytes": 32,
+      "sha256": "8cf7155dd4e427e27235868360099fe70bcbf29d838575b57ffeef070763a646",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-1-130-1.ref",
+      "bytes": 32,
+      "sha256": "81ebaba4b93601383ec0d5f09aa1dddc25b4ce562ee27b2374b923052ae554b8",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-1-130-2.ref",
+      "bytes": 32,
+      "sha256": "cddf9dedc0bcb254f00e69cc370ea38bffc134f76f9e01a662e0b04f49f09067",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-1-130-3.ref",
+      "bytes": 32,
+      "sha256": "290b1398aaabb61d136e16291fd2ed7ab813dbc957a80edf0f7e99608edc1e10",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-1-130-4.ref",
+      "bytes": 32,
+      "sha256": "9562678c83a4fcc38c851aa5fc5a276097509d715b955d3cebe715b216ba3c0e",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-1-130-5.ref",
+      "bytes": 32,
+      "sha256": "2bef73d0771d060eebac4938d7d915c1f16975a49e7b329fb824624bb250b7b3",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-1-130-6.ref",
+      "bytes": 32,
+      "sha256": "bd6e224cff24eb29f3752b55062a452d35bb913227a4042bafd116e31e24bea1",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-19c40e49fc6b4d4da45666c864b8322147f6a0c8c0352219ed03cf5a25c09116.bin",
+      "bytes": 160,
+      "sha256": "19c40e49fc6b4d4da45666c864b8322147f6a0c8c0352219ed03cf5a25c09116",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-2-131-0.ref",
+      "bytes": 32,
+      "sha256": "2a331f1bf8f8df4bc31cdfc887aee3686146b78d5a20e14960d64100ba51d66f",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-2-131-1.ref",
+      "bytes": 32,
+      "sha256": "08088e5d1afea6839dc19f21ca33b1abf2c82d950f736d4bc731b182f72a006e",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-2-131-2.ref",
+      "bytes": 32,
+      "sha256": "19bd43281e458b708d99eafd235a4241e14b2bf0b7479d17c1a5d2d13ce146fe",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-2-131-3.ref",
+      "bytes": 32,
+      "sha256": "b6289e8aafa9be1aaca4aeae83d968c55cfa504190038a03c9e13d2a66209ada",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-2-131-4.ref",
+      "bytes": 32,
+      "sha256": "726cb45c8fd21e71de6988c009d3e5b80153e9a44f602a22c8fd7e66011f3946",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-2-131-5.ref",
+      "bytes": 32,
+      "sha256": "045c76904cf09b3207586ad6c683765de35a8fb531f6d5b05970b9753bdc8af9",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-2-131-6.ref",
+      "bytes": 32,
+      "sha256": "7566d30af0a0b46411159a004d92569d4b231ff8ec04bc00feb4e9bcbf5ded27",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-3d85cd463397237d3404f251feae2d29c6a019055a1e23ad148041a576ab2dbe.bin",
+      "bytes": 160,
+      "sha256": "3d85cd463397237d3404f251feae2d29c6a019055a1e23ad148041a576ab2dbe",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-69e747ba99f587171932cd6390dbe46ac39bd545112e5f94790c4e07799fb392.bin",
+      "bytes": 160,
+      "sha256": "69e747ba99f587171932cd6390dbe46ac39bd545112e5f94790c4e07799fb392",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-6a820860fb42f9a1f4fe3577ee53230c40a4e9ae47c19d555ec1ad98a7c89911.bin",
+      "bytes": 160,
+      "sha256": "6a820860fb42f9a1f4fe3577ee53230c40a4e9ae47c19d555ec1ad98a7c89911",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-6dbc6baf33fbc3656444bb8203810ddc1e5618b986a36c16115e0ad1bf295b01.bin",
+      "bytes": 160,
+      "sha256": "6dbc6baf33fbc3656444bb8203810ddc1e5618b986a36c16115e0ad1bf295b01",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-7f243018ee53114cc4b3c0d10a30157ca62cda05b9d9a021b8040372a82f6415.bin",
+      "bytes": 160,
+      "sha256": "7f243018ee53114cc4b3c0d10a30157ca62cda05b9d9a021b8040372a82f6415",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-912e0fa1cdd211d8b13dee07d4f25897b933ae7c9113487adfe9437d78cd176c.bin",
+      "bytes": 160,
+      "sha256": "912e0fa1cdd211d8b13dee07d4f25897b933ae7c9113487adfe9437d78cd176c",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-97636b1f65c9c83bed92b2f88e8c966c85ffd607191f5ef68e2b45f5727aef31.bin",
+      "bytes": 160,
+      "sha256": "97636b1f65c9c83bed92b2f88e8c966c85ffd607191f5ef68e2b45f5727aef31",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-9c3e2ab0250562dcf2c81463913f3313df809b01bfbda4defe0ebca4cf156dfe.bin",
+      "bytes": 160,
+      "sha256": "9c3e2ab0250562dcf2c81463913f3313df809b01bfbda4defe0ebca4cf156dfe",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-d6bcb76405f2b5ec9f69818a49c25bf24aaf92f9b2802b44f42d6735d9f913f3.bin",
+      "bytes": 160,
+      "sha256": "d6bcb76405f2b5ec9f69818a49c25bf24aaf92f9b2802b44f42d6735d9f913f3",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-ee518a01ae5a104d4e7c62e26e92115facafc69ab62fa1318a104f44eaf7f09a.bin",
+      "bytes": 160,
+      "sha256": "ee518a01ae5a104d4e7c62e26e92115facafc69ab62fa1318a104f44eaf7f09a",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-f5e6876ba25ccdf0ac0917acf10dd32480a4cbd75dbdda0e08976cf4bf45d16f.bin",
+      "bytes": 160,
+      "sha256": "f5e6876ba25ccdf0ac0917acf10dd32480a4cbd75dbdda0e08976cf4bf45d16f",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-f664072124734b7e714c6721497b33edfdc50b1902d04dd3acbbb6c6aa99d388.bin",
+      "bytes": 160,
+      "sha256": "f664072124734b7e714c6721497b33edfdc50b1902d04dd3acbbb6c6aa99d388",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/manifest.bin",
+      "bytes": 784,
+      "sha256": "7f9c2541cb8b8c7d515be7f65fbff527dcf7ae9befa10a9756fe47f3246c92ce",
+      "allocated_bytes": 4096,
+      "logical_bytes": 784
+    },
+    {
+      "path": "shard-3/segment-0-132-0.log",
+      "bytes": 832,
+      "sha256": "fe6cf40b5b36a7290a87e91b22f92f33c068d798b295692163496f8f60740c4c",
+      "allocated_bytes": 4096,
+      "logical_bytes": 832
+    },
+    {
+      "path": "shard-3/segment-1-130-0.log",
+      "bytes": 5225,
+      "sha256": "36c2bca3aaca9bc976632fa437c70ed4cc59f357834367e50b658cc4cd4dadf4",
+      "allocated_bytes": 8192,
+      "logical_bytes": 5225
+    },
+    {
+      "path": "shard-3/segment-1-130-1.log",
+      "bytes": 4538,
+      "sha256": "c23c2eb8fe3e40a92c655e55960f5dc7c99b9591064f0a67b9b0d826d04b50fd",
+      "allocated_bytes": 8192,
+      "logical_bytes": 4538
+    },
+    {
+      "path": "shard-3/segment-1-130-2.log",
+      "bytes": 3801,
+      "sha256": "b94bbb1219ad7234d70149d7c6a8ec6ab19cfdfe6db5317aa7d222aa4e1a9bee",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3801
+    },
+    {
+      "path": "shard-3/segment-1-130-3.log",
+      "bytes": 4359,
+      "sha256": "d1b628a5954eb4417f923304d30f54198b74810b9b29cd600710ac8f3c21b9a7",
+      "allocated_bytes": 8192,
+      "logical_bytes": 4359
+    },
+    {
+      "path": "shard-3/segment-1-130-4.log",
+      "bytes": 3801,
+      "sha256": "9d3c8f81053448c7362d192cb98ddfede4c03d4a918c22c0dc5af8339d826e3f",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3801
+    },
+    {
+      "path": "shard-3/segment-1-130-5.log",
+      "bytes": 3801,
+      "sha256": "cbbd3f1ccde334e9fd5e2a4713d4bef677807f13814417a6df78ff21ad92a394",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3801
+    },
+    {
+      "path": "shard-3/segment-1-130-6.log",
+      "bytes": 9674,
+      "sha256": "9e30c4f55119ac0e0b8a30db6f46558ef318332837c6be148c5ca53cfba17d28",
+      "allocated_bytes": 12288,
+      "logical_bytes": 9674
+    },
+    {
+      "path": "shard-3/segment-1-130-7.log",
+      "bytes": 405,
+      "sha256": "bbc350ef330e7760188febf0b2588a21b0ec2e5e054c0e98801645313a5ab5e5",
+      "allocated_bytes": 408,
+      "logical_bytes": 405
+    },
+    {
+      "path": "shard-3/segment-2-131-0.log",
+      "bytes": 168,
+      "sha256": "d0c1a6a8ed297d88d6d599313eac98196a139f7d870611c02c731ecf2804c670",
+      "allocated_bytes": 168,
+      "logical_bytes": 168
+    },
+    {
+      "path": "shard-3/segment-2-131-1.log",
+      "bytes": 1630,
+      "sha256": "7d27bc940ae457d80a465b9800fa702b732ce1f19a7501653b5edbef7741f568",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1630
+    },
+    {
+      "path": "shard-3/segment-2-131-2.log",
+      "bytes": 1630,
+      "sha256": "8bc90aadf749f85757a88024ec9b4ec03c7fa1cd5dd772929365c83a91c0b423",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1630
+    },
+    {
+      "path": "shard-3/segment-2-131-3.log",
+      "bytes": 1630,
+      "sha256": "8f3053d9bde29b82dab04313f1000fb8401a9907e4e6154747087e792e853bfd",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1630
+    },
+    {
+      "path": "shard-3/segment-2-131-4.log",
+      "bytes": 1630,
+      "sha256": "c87dc51fbb1fb6189f47f282484e63cfe6ba703ee1f7c58a939124b472f4c7db",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1630
+    },
+    {
+      "path": "shard-3/segment-2-131-5.log",
+      "bytes": 1630,
+      "sha256": "d8218f3d9727ffadfc379471bee24ee019c13635cee6254505a7140be651fb2e",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1630
+    },
+    {
+      "path": "shard-3/segment-2-131-6.log",
+      "bytes": 5465,
+      "sha256": "a639c7f29cb750794fa54aee47d7c1113a7f9b7b1ae8f30bbf1baf02dcb9fba1",
+      "allocated_bytes": 8192,
+      "logical_bytes": 5465
+    },
+    {
+      "path": "shard-3/segment-2-131-7.log",
+      "bytes": 64,
+      "sha256": "ea822527a19baff3bc1bdb1882c12849e0dada9ed8d2b4706e2d2615d03ff21a",
+      "allocated_bytes": 64,
+      "logical_bytes": 64
+    },
+    {
+      "path": "shard-3/snapshot-1-130-122-f3c5c377f356240b215dc49877259b21f13adc7ea7d8a5eb1d2c76dbfffa01ff.bin",
+      "bytes": 763549,
+      "sha256": "dad31fa2c28b079c2ed86c67206a776dcca0044d29a2930b42948728aed38aab",
+      "allocated_bytes": 765952,
+      "logical_bytes": 763549
+    },
+    {
+      "path": "shard-3/snapshot-1-130-89-319f37209d26d7322cbdb0566135be175c5f63edb0ac5a3cf8e6289b5e0d4b1a.bin",
+      "bytes": 756943,
+      "sha256": "e2af0b20365666f7f1a8a13f2909b867625c65531f57b8b818f874525e84a84f",
+      "allocated_bytes": 757760,
+      "logical_bytes": 756943
+    },
+    {
+      "path": "shard-3/snapshot-2-131-11-e2308a2ffa167cc2798620f54fdb5113c3b047570fc5d8f37f378e4f1beea6ca.bin",
+      "bytes": 3683,
+      "sha256": "7b96b42cf23a824b1c11d30e65efc94fcb28cd1538cc8c6ca0b77b6b2128880e",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3683
+    },
+    {
+      "path": "shard-3/snapshot-2-131-18-a8d88f19f4c1a0388c44bbd80121fb7657f3152c732dce36c7578da5508f24ba.bin",
+      "bytes": 6488,
+      "sha256": "4e9de4367956aea2196fbbaa34931c38e2504b470389cd87213ab3599205974f",
+      "allocated_bytes": 8192,
+      "logical_bytes": 6488
+    }
+  ],
+  "files_after": [
+    {
+      "path": "coordination/archive-2-1-0.ref",
+      "bytes": 32,
+      "sha256": "931cc256579026b1bd194b1aee88a297293f0d2c94101c2afee4850b9ff268b7",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "coordination/archive-2-1-1.ref",
+      "bytes": 32,
+      "sha256": "5649cb9928a8699490a1d60690a5ed9e014521850eef7c2356e51a14091e7f5d",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "coordination/archive-97df4abde41f31bbf55793289426b4912e58abd9e591ebf180eeb0acec535750.bin",
+      "bytes": 160,
+      "sha256": "97df4abde41f31bbf55793289426b4912e58abd9e591ebf180eeb0acec535750",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "coordination/archive-b88a76ea87e98a6ca39cb06197f8d43c30af75e8104def3740cb594a1de418ee.bin",
+      "bytes": 160,
+      "sha256": "b88a76ea87e98a6ca39cb06197f8d43c30af75e8104def3740cb594a1de418ee",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "coordination/manifest.bin",
+      "bytes": 272,
+      "sha256": "963db9d20bbac049f7f65cb40beb985dc7e36c664e3df20470040966cb425c39",
+      "allocated_bytes": 272,
+      "logical_bytes": 272
+    },
+    {
+      "path": "coordination/segment-2-1-0.log",
+      "bytes": 1701,
+      "sha256": "d50ea1b9948337a12393eb547e9475b800b7e0e5b17fa21689e70792584a6710",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1701
+    },
+    {
+      "path": "coordination/segment-2-1-1.log",
+      "bytes": 900,
+      "sha256": "cf6184c4d0715192f4bad1cc4821ff085eb34cb6f834a4fb01239653fce78a36",
+      "allocated_bytes": 4096,
+      "logical_bytes": 900
+    },
+    {
+      "path": "coordination/segment-2-1-2.log",
+      "bytes": 64,
+      "sha256": "4ca86952c9116bd98d597dd3a9f4e5c34c84172357787b306d2fcced5c3fcfea",
+      "allocated_bytes": 64,
+      "logical_bytes": 64
+    },
+    {
+      "path": "coordination/snapshot-2-1-6-bea1a0ed3b3531aa8ee6381163ff029a704a71af74877c60c8a69224bb563661.bin",
+      "bytes": 1653,
+      "sha256": "cb794e823dea3be0aba9c4919235b0c4e0a277037451e6bed24df7a9b43ffbe9",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1653
+    },
+    {
+      "path": "coordination/snapshot-2-1-9-7887f6cd8481fc5f6231c0af5b0e13e67cc174f81adbcc87d17f6ced92779884.bin",
+      "bytes": 1653,
+      "sha256": "7be76fa6ba963c7867f5af8b6a269fdbc4c288cc301c1469edada504fc2c65b2",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1653
+    },
+    {
+      "path": "shard-0/archive-1-100-0.ref",
+      "bytes": 32,
+      "sha256": "8f1daf8dcbf5e24aab93e46d572af4aaff4cc296f219a0ef735b9d9ec030228b",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-0/archive-1-100-1.ref",
+      "bytes": 32,
+      "sha256": "103efe909c994bd0c7e11e1fdb38d57403cb3c3a985b687d57db8a9b71275b48",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-0/archive-1-100-2.ref",
+      "bytes": 32,
+      "sha256": "42db59cd9b6c7406050f9cfd9d5fb7c07cf4b1355612773854c2e155a3dd546e",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-0/archive-2-101-0.ref",
+      "bytes": 32,
+      "sha256": "bbf5635e83051528b9c9f9377e9a45ef8b877deb0fb9ad4ca169b546a44b592c",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-0/archive-2-101-1.ref",
+      "bytes": 32,
+      "sha256": "aed20090389e76684fc49624149908a1f0c0bbf49803a15e73cdc67b14f1ed45",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-0/archive-2-101-2.ref",
+      "bytes": 32,
+      "sha256": "99dfbd81a603009ea219783e2bfd1ad080709d0f8f8b78a4849cd090bd0b2fc7",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-0/archive-29637bd4d4785f50edfec08cadfaeaa338a7ffc026adfd164fec722a82856cf6.bin",
+      "bytes": 160,
+      "sha256": "29637bd4d4785f50edfec08cadfaeaa338a7ffc026adfd164fec722a82856cf6",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-0/archive-2aa6be6cec989a3ef8252f99e32d241bbcac506be5837aeda41ede1e27eec8e1.bin",
+      "bytes": 160,
+      "sha256": "2aa6be6cec989a3ef8252f99e32d241bbcac506be5837aeda41ede1e27eec8e1",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-0/archive-2da4170fc1614644081c1948755b0da8a706169214a5108fb22b060c846cd63e.bin",
+      "bytes": 160,
+      "sha256": "2da4170fc1614644081c1948755b0da8a706169214a5108fb22b060c846cd63e",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-0/archive-35c22d46b522eacb7a90511e0c378e10fd4096b3bfdd32afb486c124c9ec797f.bin",
+      "bytes": 160,
+      "sha256": "35c22d46b522eacb7a90511e0c378e10fd4096b3bfdd32afb486c124c9ec797f",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-0/archive-53b030e8e8aa90f9e1425863f298a3a26ca869b9ec552cf081f40d3d59c1fa15.bin",
+      "bytes": 160,
+      "sha256": "53b030e8e8aa90f9e1425863f298a3a26ca869b9ec552cf081f40d3d59c1fa15",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-0/archive-a0654710028de9e2184a802a1d1404eaf30eaba074de14be03e5515a7ec28e39.bin",
+      "bytes": 160,
+      "sha256": "a0654710028de9e2184a802a1d1404eaf30eaba074de14be03e5515a7ec28e39",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-0/manifest.bin",
+      "bytes": 784,
+      "sha256": "18598a5644dca285b15f187fdc2d94735752acb546bce70631cfe473f74847dc",
+      "allocated_bytes": 4096,
+      "logical_bytes": 784
+    },
+    {
+      "path": "shard-0/order-history.objects",
+      "bytes": 8254,
+      "sha256": "40f40435666a7eb6fdd0d9f4cbc7f7f7e77ff2fecf1f3410553c1ad37109c8f1",
+      "allocated_bytes": 12288,
+      "logical_bytes": 8254
+    },
+    {
+      "path": "shard-0/order-history.roots",
+      "bytes": 382,
+      "sha256": "f49e2f690b4d8c49a6485caedd03ad85ad66caad357d57afddad6d5bb92d51a7",
+      "allocated_bytes": 384,
+      "logical_bytes": 382
+    },
+    {
+      "path": "shard-0/segment-0-102-0.log",
+      "bytes": 832,
+      "sha256": "57359de7787bfb8e22dd7934e77041b0acd1e91f3e63a764feb202635b017788",
+      "allocated_bytes": 4096,
+      "logical_bytes": 832
+    },
+    {
+      "path": "shard-0/segment-1-100-0.log",
+      "bytes": 5225,
+      "sha256": "aa407c7334e97dd5e5fc543dc364fad53aa98202aa43d40f001c842ef7d5d478",
+      "allocated_bytes": 8192,
+      "logical_bytes": 5225
+    },
+    {
+      "path": "shard-0/segment-1-100-1.log",
+      "bytes": 3801,
+      "sha256": "54e7aad087166be5ced1e9b486f76cdfaafe636c173d90ccba77d713bf3ecadf",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3801
+    },
+    {
+      "path": "shard-0/segment-1-100-2.log",
+      "bytes": 5115,
+      "sha256": "28a4d6eaa564ed20035e9b0fa60f89a9f6ccba69f35754146b1aaeb18f089760",
+      "allocated_bytes": 8192,
+      "logical_bytes": 5115
+    },
+    {
+      "path": "shard-0/segment-1-100-3.log",
+      "bytes": 405,
+      "sha256": "4403bf0037208a5cb5aa6afa60503b6d97117de34c494cbe0658e768ad70e7ee",
+      "allocated_bytes": 408,
+      "logical_bytes": 405
+    },
+    {
+      "path": "shard-0/segment-2-101-0.log",
+      "bytes": 168,
+      "sha256": "d0c1a6a8ed297d88d6d599313eac98196a139f7d870611c02c731ecf2804c670",
+      "allocated_bytes": 168,
+      "logical_bytes": 168
+    },
+    {
+      "path": "shard-0/segment-2-101-1.log",
+      "bytes": 1630,
+      "sha256": "4c04f3475252455509b1849db9b73b2bde599381e0ccea91948ed0be685063e6",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1630
+    },
+    {
+      "path": "shard-0/segment-2-101-2.log",
+      "bytes": 3612,
+      "sha256": "768de884a30baaff0064fdd6c01004a097e15256ff5440f5a95fff36c486b747",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3612
+    },
+    {
+      "path": "shard-0/segment-2-101-3.log",
+      "bytes": 64,
+      "sha256": "74a2bf28f4b6f56027a7226fb886b0dd04fa0ba2774d45f9226a1afac6540b4b",
+      "allocated_bytes": 64,
+      "logical_bytes": 64
+    },
+    {
+      "path": "shard-0/snapshot-1-100-38-ad9c9bbfe705929ad93c87fa85b3e2c12105f39bef6c86105555a83a4563a6b3.bin",
+      "bytes": 747130,
+      "sha256": "a684913beb6af187c8514112eb46e6956936b31b49146bd6e3b1efdefb6d80fc",
+      "allocated_bytes": 749568,
+      "logical_bytes": 747130
+    },
+    {
+      "path": "shard-0/snapshot-1-100-53-3a18b06664ffce47c64d16f0ca024737eb909878b44a70806ebbb8598965b92f.bin",
+      "bytes": 747738,
+      "sha256": "ff2c0e060de1e587e468978336ae220add0daf272d2f29a9f7180556b0ff9d90",
+      "allocated_bytes": 749568,
+      "logical_bytes": 747738
+    },
+    {
+      "path": "shard-0/snapshot-2-101-3-b375e583ce537fa8bb193dd5da152c404b2e199ee7d459972cfcdbd75b94bf19.bin",
+      "bytes": 887,
+      "sha256": "ffd974b1ad8162393978ee12e991769dd7eb72e49f464c4826dd2d6be66272f5",
+      "allocated_bytes": 4096,
+      "logical_bytes": 887
+    },
+    {
+      "path": "shard-0/snapshot-2-101-8-76740a0f9bb79f9d803b30b8a6ab9eeb6bbbf6c37df1f4dd13a8281f0faeda57.bin",
+      "bytes": 1540,
+      "sha256": "535f101a061135d7705cedb046065c38f12ced83bf7a55063dae6882dbc23929",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1540
+    },
+    {
+      "path": "shard-1/archive-04916c99fff77a73c82ce5352626a46d2129a20e11d8f63be042fca50854440f.bin",
+      "bytes": 160,
+      "sha256": "04916c99fff77a73c82ce5352626a46d2129a20e11d8f63be042fca50854440f",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-1/archive-06bc1d8ae596285d031ecea8ca0fc431067bf5e76b1bb9e6e157a4f41ef9a91d.bin",
+      "bytes": 160,
+      "sha256": "06bc1d8ae596285d031ecea8ca0fc431067bf5e76b1bb9e6e157a4f41ef9a91d",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-1/archive-1-110-0.ref",
+      "bytes": 32,
+      "sha256": "3929933ac19f7649226c95daff5c9956385c63433730cd7ee640da9db830c29a",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-1/archive-1-110-1.ref",
+      "bytes": 32,
+      "sha256": "94c6f358d4212c5fa230e0919331e01b91b12b38d92b38a7eef34868e756ac57",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-1/archive-1-110-2.ref",
+      "bytes": 32,
+      "sha256": "eb3363b9ca489ea6da57b7e4194e6a2565aa2a6d5eabe520a03b80985b5d84c1",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-1/archive-2-111-0.ref",
+      "bytes": 32,
+      "sha256": "3547b6f79751612de08a090731de3489baeed2411a110c828d4fc354646abb1c",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-1/archive-2-111-1.ref",
+      "bytes": 32,
+      "sha256": "7dc777cf53d29152f7a314877b5ceb1487e2314c0b9b541270887cae07e6b68e",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-1/archive-2-111-2.ref",
+      "bytes": 32,
+      "sha256": "a56f413cfd3323d085456b1e5955843854b1831fde33621eeeed6c9105315c96",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-1/archive-414146c201c76efc23441f97e476046e74a2b523ff91de79e6aa2d044302f6f6.bin",
+      "bytes": 160,
+      "sha256": "414146c201c76efc23441f97e476046e74a2b523ff91de79e6aa2d044302f6f6",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-1/archive-6ffa0ab5a9a541feda97170027b30a6e3074ae600d48c92935dada39189aa8cd.bin",
+      "bytes": 160,
+      "sha256": "6ffa0ab5a9a541feda97170027b30a6e3074ae600d48c92935dada39189aa8cd",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-1/archive-87b3bf8dc679b317fe6311d4bf3e9806507407968bf171163fa7e0b77c83fbff.bin",
+      "bytes": 160,
+      "sha256": "87b3bf8dc679b317fe6311d4bf3e9806507407968bf171163fa7e0b77c83fbff",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-1/archive-b26e92060e88e409e2f29810eeda24f531788dac148420119719570056393897.bin",
+      "bytes": 160,
+      "sha256": "b26e92060e88e409e2f29810eeda24f531788dac148420119719570056393897",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-1/manifest.bin",
+      "bytes": 784,
+      "sha256": "5271eb8880e7d044260749a43f6fad5665e8a0f07eac128ff9fd87338b98a22a",
+      "allocated_bytes": 4096,
+      "logical_bytes": 784
+    },
+    {
+      "path": "shard-1/order-history.objects",
+      "bytes": 8254,
+      "sha256": "2b6552334a1c39bf09d8bbea6a454f531ca1d199ba49df0e8acc887614ec9a11",
+      "allocated_bytes": 12288,
+      "logical_bytes": 8254
+    },
+    {
+      "path": "shard-1/order-history.roots",
+      "bytes": 382,
+      "sha256": "33e1c2b038217a03bc01f5ada801a5ad1352ab1f849241d389962819816abdf9",
+      "allocated_bytes": 384,
+      "logical_bytes": 382
+    },
+    {
+      "path": "shard-1/segment-0-112-0.log",
+      "bytes": 832,
+      "sha256": "c1247971496c97d5cdc759cf446ca91842659978cd728b45cc82864c17a8867e",
+      "allocated_bytes": 4096,
+      "logical_bytes": 832
+    },
+    {
+      "path": "shard-1/segment-1-110-0.log",
+      "bytes": 5225,
+      "sha256": "836ee9aee98b6c002bad85f20311d02c5a89e461ddcb8dd5a0944cf5e96640bd",
+      "allocated_bytes": 8192,
+      "logical_bytes": 5225
+    },
+    {
+      "path": "shard-1/segment-1-110-1.log",
+      "bytes": 3801,
+      "sha256": "b17fcac6ef79bc8ede28be31a588afec7e85adae8bad3c1726e6cd3daa44dcc0",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3801
+    },
+    {
+      "path": "shard-1/segment-1-110-2.log",
+      "bytes": 5115,
+      "sha256": "604cb0df2231fade833b951c00decf6f1dc642c4794c6dbe2ba8d8b0f102d048",
+      "allocated_bytes": 8192,
+      "logical_bytes": 5115
+    },
+    {
+      "path": "shard-1/segment-1-110-3.log",
+      "bytes": 405,
+      "sha256": "d45fe0f3994baeca9b0892be71d534934db7a68a514637088b1062b58cc54f04",
+      "allocated_bytes": 408,
+      "logical_bytes": 405
+    },
+    {
+      "path": "shard-1/segment-2-111-0.log",
+      "bytes": 168,
+      "sha256": "d0c1a6a8ed297d88d6d599313eac98196a139f7d870611c02c731ecf2804c670",
+      "allocated_bytes": 168,
+      "logical_bytes": 168
+    },
+    {
+      "path": "shard-1/segment-2-111-1.log",
+      "bytes": 1630,
+      "sha256": "0e8b0ce7cf0702ea61fac237421b38a5b511766145d063f1f69faeaaf0daa666",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1630
+    },
+    {
+      "path": "shard-1/segment-2-111-2.log",
+      "bytes": 3612,
+      "sha256": "dfb888df7d670bd74a127521fa999918eef50bb81cffc830c08167fbefa1c639",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3612
+    },
+    {
+      "path": "shard-1/segment-2-111-3.log",
+      "bytes": 64,
+      "sha256": "74a2bf28f4b6f56027a7226fb886b0dd04fa0ba2774d45f9226a1afac6540b4b",
+      "allocated_bytes": 64,
+      "logical_bytes": 64
+    },
+    {
+      "path": "shard-1/snapshot-1-110-38-9a43992e2a86fadfa44b6d02e331bab506f0a7fbd2402bcba27fc1ca51147a63.bin",
+      "bytes": 747130,
+      "sha256": "8c7dead444d5531c954122e4d15f0842c6d862f85645aee6a1476beb57d0f8a5",
+      "allocated_bytes": 749568,
+      "logical_bytes": 747130
+    },
+    {
+      "path": "shard-1/snapshot-1-110-53-2d92914bcec3a3ec6dc36679378549c2f74748f347227312497e5def8e627efe.bin",
+      "bytes": 747738,
+      "sha256": "3035b8da5e0d4f3ecc93a0c42cf2cdd17a195fcb42f68c50d46e7191d7662db6",
+      "allocated_bytes": 749568,
+      "logical_bytes": 747738
+    },
+    {
+      "path": "shard-1/snapshot-2-111-3-8b772b4abb875a75bce060d971c068bc0bbe965720501a5cd01c8c0063abba7a.bin",
+      "bytes": 887,
+      "sha256": "fb3c8dc234f82663afaedf136cc9e787ad69b9b29872128b96f964b60aeaba80",
+      "allocated_bytes": 4096,
+      "logical_bytes": 887
+    },
+    {
+      "path": "shard-1/snapshot-2-111-8-59142ded44ff47cbb7442e719cdbea976260fdab4f690aaf6c805262ab0b317f.bin",
+      "bytes": 1540,
+      "sha256": "409e421c2a47edd571cde192698c1db1278ee6ccdeaa7467e86f2c598c3b153c",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1540
+    },
+    {
+      "path": "shard-2/archive-1-120-0.ref",
+      "bytes": 32,
+      "sha256": "0ae8bff48ed0e65a9f4e89d9ee4e6ee169b011a14519450080be647bd7859e4e",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-2/archive-1-120-1.ref",
+      "bytes": 32,
+      "sha256": "8bda721ffbbc4c25ab472fd8be76d8ab69338774f092488fc38b3aa70ce497bd",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-2/archive-1-120-2.ref",
+      "bytes": 32,
+      "sha256": "9042bc0c306226ef52d619d76828f2fdc3158b486059d751f014e6e0c6cf05e0",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-2/archive-13a499bceabb3693b4fab47b346eed864517c953bcc89049f447401e4d6ac66c.bin",
+      "bytes": 160,
+      "sha256": "13a499bceabb3693b4fab47b346eed864517c953bcc89049f447401e4d6ac66c",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-2/archive-2-121-0.ref",
+      "bytes": 32,
+      "sha256": "4cfd38a2d60dd499d600d3975b5497858452edd1a74862fd4bc53dd02fd2ef81",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-2/archive-2-121-1.ref",
+      "bytes": 32,
+      "sha256": "7f5c50aaf25eb4628663afc5c6726726420d988d05b3a666171528b2a335f42b",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-2/archive-2-121-2.ref",
+      "bytes": 32,
+      "sha256": "db0961684b979cc3b8ef505db53b636a45877a5171fbe775326de84419e49d71",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-2/archive-28f935d2148f3c8c98c87781d3cbac64cb5a000090b3d022c1f1f36ea40b1efe.bin",
+      "bytes": 160,
+      "sha256": "28f935d2148f3c8c98c87781d3cbac64cb5a000090b3d022c1f1f36ea40b1efe",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-2/archive-339ce0f883f440def0ca9b0a835d34f6a09d560c6feb3d230d0b9648d3289332.bin",
+      "bytes": 160,
+      "sha256": "339ce0f883f440def0ca9b0a835d34f6a09d560c6feb3d230d0b9648d3289332",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-2/archive-6657463d651969151f80dd13e893488e85a8afa655d0eedc62b0cb60f89129d2.bin",
+      "bytes": 160,
+      "sha256": "6657463d651969151f80dd13e893488e85a8afa655d0eedc62b0cb60f89129d2",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-2/archive-7bf476dc861bde41afd2b720c96a82fada191a582b36b9fe01f9f56979070f9d.bin",
+      "bytes": 160,
+      "sha256": "7bf476dc861bde41afd2b720c96a82fada191a582b36b9fe01f9f56979070f9d",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-2/archive-bb71cea3059266ad5a1932de9a52aac4e35d85f82c64321d3a8939c54a987816.bin",
+      "bytes": 160,
+      "sha256": "bb71cea3059266ad5a1932de9a52aac4e35d85f82c64321d3a8939c54a987816",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-2/manifest.bin",
+      "bytes": 784,
+      "sha256": "2cbe96763de52f633dfbecff67a2b2857986185eb4ddb26def0c943bbfbaf393",
+      "allocated_bytes": 4096,
+      "logical_bytes": 784
+    },
+    {
+      "path": "shard-2/order-history.objects",
+      "bytes": 8254,
+      "sha256": "ed3ca9665981d361ddfa3a19fe3e78eb38c71b254d6cd33cb002ca586448fb25",
+      "allocated_bytes": 12288,
+      "logical_bytes": 8254
+    },
+    {
+      "path": "shard-2/order-history.roots",
+      "bytes": 382,
+      "sha256": "4875c3e5c2158f5896f3d06c8263bee2dcf80cf0b9f56f013a6f9e2a198f0543",
+      "allocated_bytes": 384,
+      "logical_bytes": 382
+    },
+    {
+      "path": "shard-2/segment-0-122-0.log",
+      "bytes": 832,
+      "sha256": "4a35801380b01585387f38f3a0c08930c29650a40275f75365e2e772ab92ee70",
+      "allocated_bytes": 4096,
+      "logical_bytes": 832
+    },
+    {
+      "path": "shard-2/segment-1-120-0.log",
+      "bytes": 5225,
+      "sha256": "14b8fddb4c57566ff97c564af0410758e1e5cbd0fff59ae00495af78743cd104",
+      "allocated_bytes": 8192,
+      "logical_bytes": 5225
+    },
+    {
+      "path": "shard-2/segment-1-120-1.log",
+      "bytes": 3801,
+      "sha256": "8e7ae08d2d91adc36af39940ef5b4d285e4858ac91525114150f4cfc79046442",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3801
+    },
+    {
+      "path": "shard-2/segment-1-120-2.log",
+      "bytes": 5115,
+      "sha256": "9b25cf383c96b08f4c52bfcfaaa84d305e878cc6b773dfcb861e020a29c0d958",
+      "allocated_bytes": 8192,
+      "logical_bytes": 5115
+    },
+    {
+      "path": "shard-2/segment-1-120-3.log",
+      "bytes": 405,
+      "sha256": "499f30e877324a715ec0a65a396081d008f36065e8fa3af72add0a02b5bbe935",
+      "allocated_bytes": 408,
+      "logical_bytes": 405
+    },
+    {
+      "path": "shard-2/segment-2-121-0.log",
+      "bytes": 168,
+      "sha256": "d0c1a6a8ed297d88d6d599313eac98196a139f7d870611c02c731ecf2804c670",
+      "allocated_bytes": 168,
+      "logical_bytes": 168
+    },
+    {
+      "path": "shard-2/segment-2-121-1.log",
+      "bytes": 1630,
+      "sha256": "85a7bec01f83a5a225602504aabd13dc9df6fd5433249668ba16702e5d5e3fb6",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1630
+    },
+    {
+      "path": "shard-2/segment-2-121-2.log",
+      "bytes": 3612,
+      "sha256": "f070ac3b9e6c7ce378744b36d797dd482e07ce2cab0c7101de1b8d42e5d47237",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3612
+    },
+    {
+      "path": "shard-2/segment-2-121-3.log",
+      "bytes": 64,
+      "sha256": "74a2bf28f4b6f56027a7226fb886b0dd04fa0ba2774d45f9226a1afac6540b4b",
+      "allocated_bytes": 64,
+      "logical_bytes": 64
+    },
+    {
+      "path": "shard-2/snapshot-1-120-38-7e66ff00544189462cfaafc2bdc91a274cd651f2af9d6a6569953d8297878231.bin",
+      "bytes": 747130,
+      "sha256": "04c8774a536286023652da647cc7b0549ebeed7c8fa8527615e059992e7c1011",
+      "allocated_bytes": 749568,
+      "logical_bytes": 747130
+    },
+    {
+      "path": "shard-2/snapshot-1-120-53-62f6dbdb2a932501c2e6da3b51e69d1d1d3b92e07fedc784370e33095e3e892c.bin",
+      "bytes": 747738,
+      "sha256": "83327e1b74256986ffd1b47fe7f920d48817c79976e93098f222960532beec26",
+      "allocated_bytes": 749568,
+      "logical_bytes": 747738
+    },
+    {
+      "path": "shard-2/snapshot-2-121-3-7e2e1efa84a6946c2c2a6f7ff2f21d4865d8c2a3d6a7777191b2b575805557df.bin",
+      "bytes": 887,
+      "sha256": "4f2fd99c5bdff7ca641de00afdf945084fa296f959b4b466b86b465680c4c869",
+      "allocated_bytes": 4096,
+      "logical_bytes": 887
+    },
+    {
+      "path": "shard-2/snapshot-2-121-8-85390c35d110ab8cd907fa7cce0041510272a269e23145588c9a74b8c19b694e.bin",
+      "bytes": 1540,
+      "sha256": "bfebb9ac2370f4d0c866fc0d9722b0da0710b22a89c7f8611a4361beac1581a4",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1540
+    },
+    {
+      "path": "shard-3/archive-0e99fdc630fa79070e7f703a207d07d76943908e1361bb515468fd29c43455e2.bin",
+      "bytes": 160,
+      "sha256": "0e99fdc630fa79070e7f703a207d07d76943908e1361bb515468fd29c43455e2",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-1-130-0.ref",
+      "bytes": 32,
+      "sha256": "8cf7155dd4e427e27235868360099fe70bcbf29d838575b57ffeef070763a646",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-1-130-1.ref",
+      "bytes": 32,
+      "sha256": "81ebaba4b93601383ec0d5f09aa1dddc25b4ce562ee27b2374b923052ae554b8",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-1-130-2.ref",
+      "bytes": 32,
+      "sha256": "cddf9dedc0bcb254f00e69cc370ea38bffc134f76f9e01a662e0b04f49f09067",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-1-130-3.ref",
+      "bytes": 32,
+      "sha256": "290b1398aaabb61d136e16291fd2ed7ab813dbc957a80edf0f7e99608edc1e10",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-1-130-4.ref",
+      "bytes": 32,
+      "sha256": "9562678c83a4fcc38c851aa5fc5a276097509d715b955d3cebe715b216ba3c0e",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-1-130-5.ref",
+      "bytes": 32,
+      "sha256": "2bef73d0771d060eebac4938d7d915c1f16975a49e7b329fb824624bb250b7b3",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-1-130-6.ref",
+      "bytes": 32,
+      "sha256": "bd6e224cff24eb29f3752b55062a452d35bb913227a4042bafd116e31e24bea1",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-19c40e49fc6b4d4da45666c864b8322147f6a0c8c0352219ed03cf5a25c09116.bin",
+      "bytes": 160,
+      "sha256": "19c40e49fc6b4d4da45666c864b8322147f6a0c8c0352219ed03cf5a25c09116",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-2-131-0.ref",
+      "bytes": 32,
+      "sha256": "2a331f1bf8f8df4bc31cdfc887aee3686146b78d5a20e14960d64100ba51d66f",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-2-131-1.ref",
+      "bytes": 32,
+      "sha256": "08088e5d1afea6839dc19f21ca33b1abf2c82d950f736d4bc731b182f72a006e",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-2-131-2.ref",
+      "bytes": 32,
+      "sha256": "19bd43281e458b708d99eafd235a4241e14b2bf0b7479d17c1a5d2d13ce146fe",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-2-131-3.ref",
+      "bytes": 32,
+      "sha256": "b6289e8aafa9be1aaca4aeae83d968c55cfa504190038a03c9e13d2a66209ada",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-2-131-4.ref",
+      "bytes": 32,
+      "sha256": "726cb45c8fd21e71de6988c009d3e5b80153e9a44f602a22c8fd7e66011f3946",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-2-131-5.ref",
+      "bytes": 32,
+      "sha256": "045c76904cf09b3207586ad6c683765de35a8fb531f6d5b05970b9753bdc8af9",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-2-131-6.ref",
+      "bytes": 32,
+      "sha256": "7566d30af0a0b46411159a004d92569d4b231ff8ec04bc00feb4e9bcbf5ded27",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-3/archive-3d85cd463397237d3404f251feae2d29c6a019055a1e23ad148041a576ab2dbe.bin",
+      "bytes": 160,
+      "sha256": "3d85cd463397237d3404f251feae2d29c6a019055a1e23ad148041a576ab2dbe",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-69e747ba99f587171932cd6390dbe46ac39bd545112e5f94790c4e07799fb392.bin",
+      "bytes": 160,
+      "sha256": "69e747ba99f587171932cd6390dbe46ac39bd545112e5f94790c4e07799fb392",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-6a820860fb42f9a1f4fe3577ee53230c40a4e9ae47c19d555ec1ad98a7c89911.bin",
+      "bytes": 160,
+      "sha256": "6a820860fb42f9a1f4fe3577ee53230c40a4e9ae47c19d555ec1ad98a7c89911",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-6dbc6baf33fbc3656444bb8203810ddc1e5618b986a36c16115e0ad1bf295b01.bin",
+      "bytes": 160,
+      "sha256": "6dbc6baf33fbc3656444bb8203810ddc1e5618b986a36c16115e0ad1bf295b01",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-7f243018ee53114cc4b3c0d10a30157ca62cda05b9d9a021b8040372a82f6415.bin",
+      "bytes": 160,
+      "sha256": "7f243018ee53114cc4b3c0d10a30157ca62cda05b9d9a021b8040372a82f6415",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-912e0fa1cdd211d8b13dee07d4f25897b933ae7c9113487adfe9437d78cd176c.bin",
+      "bytes": 160,
+      "sha256": "912e0fa1cdd211d8b13dee07d4f25897b933ae7c9113487adfe9437d78cd176c",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-97636b1f65c9c83bed92b2f88e8c966c85ffd607191f5ef68e2b45f5727aef31.bin",
+      "bytes": 160,
+      "sha256": "97636b1f65c9c83bed92b2f88e8c966c85ffd607191f5ef68e2b45f5727aef31",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-9c3e2ab0250562dcf2c81463913f3313df809b01bfbda4defe0ebca4cf156dfe.bin",
+      "bytes": 160,
+      "sha256": "9c3e2ab0250562dcf2c81463913f3313df809b01bfbda4defe0ebca4cf156dfe",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-d6bcb76405f2b5ec9f69818a49c25bf24aaf92f9b2802b44f42d6735d9f913f3.bin",
+      "bytes": 160,
+      "sha256": "d6bcb76405f2b5ec9f69818a49c25bf24aaf92f9b2802b44f42d6735d9f913f3",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-ee518a01ae5a104d4e7c62e26e92115facafc69ab62fa1318a104f44eaf7f09a.bin",
+      "bytes": 160,
+      "sha256": "ee518a01ae5a104d4e7c62e26e92115facafc69ab62fa1318a104f44eaf7f09a",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-f5e6876ba25ccdf0ac0917acf10dd32480a4cbd75dbdda0e08976cf4bf45d16f.bin",
+      "bytes": 160,
+      "sha256": "f5e6876ba25ccdf0ac0917acf10dd32480a4cbd75dbdda0e08976cf4bf45d16f",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/archive-f664072124734b7e714c6721497b33edfdc50b1902d04dd3acbbb6c6aa99d388.bin",
+      "bytes": 160,
+      "sha256": "f664072124734b7e714c6721497b33edfdc50b1902d04dd3acbbb6c6aa99d388",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-3/manifest.bin",
+      "bytes": 784,
+      "sha256": "7f9c2541cb8b8c7d515be7f65fbff527dcf7ae9befa10a9756fe47f3246c92ce",
+      "allocated_bytes": 4096,
+      "logical_bytes": 784
+    },
+    {
+      "path": "shard-3/segment-0-132-0.log",
+      "bytes": 832,
+      "sha256": "fe6cf40b5b36a7290a87e91b22f92f33c068d798b295692163496f8f60740c4c",
+      "allocated_bytes": 4096,
+      "logical_bytes": 832
+    },
+    {
+      "path": "shard-3/segment-1-130-0.log",
+      "bytes": 5225,
+      "sha256": "36c2bca3aaca9bc976632fa437c70ed4cc59f357834367e50b658cc4cd4dadf4",
+      "allocated_bytes": 8192,
+      "logical_bytes": 5225
+    },
+    {
+      "path": "shard-3/segment-1-130-1.log",
+      "bytes": 4538,
+      "sha256": "c23c2eb8fe3e40a92c655e55960f5dc7c99b9591064f0a67b9b0d826d04b50fd",
+      "allocated_bytes": 8192,
+      "logical_bytes": 4538
+    },
+    {
+      "path": "shard-3/segment-1-130-2.log",
+      "bytes": 3801,
+      "sha256": "b94bbb1219ad7234d70149d7c6a8ec6ab19cfdfe6db5317aa7d222aa4e1a9bee",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3801
+    },
+    {
+      "path": "shard-3/segment-1-130-3.log",
+      "bytes": 4359,
+      "sha256": "d1b628a5954eb4417f923304d30f54198b74810b9b29cd600710ac8f3c21b9a7",
+      "allocated_bytes": 8192,
+      "logical_bytes": 4359
+    },
+    {
+      "path": "shard-3/segment-1-130-4.log",
+      "bytes": 3801,
+      "sha256": "9d3c8f81053448c7362d192cb98ddfede4c03d4a918c22c0dc5af8339d826e3f",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3801
+    },
+    {
+      "path": "shard-3/segment-1-130-5.log",
+      "bytes": 3801,
+      "sha256": "cbbd3f1ccde334e9fd5e2a4713d4bef677807f13814417a6df78ff21ad92a394",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3801
+    },
+    {
+      "path": "shard-3/segment-1-130-6.log",
+      "bytes": 9674,
+      "sha256": "9e30c4f55119ac0e0b8a30db6f46558ef318332837c6be148c5ca53cfba17d28",
+      "allocated_bytes": 12288,
+      "logical_bytes": 9674
+    },
+    {
+      "path": "shard-3/segment-1-130-7.log",
+      "bytes": 405,
+      "sha256": "bbc350ef330e7760188febf0b2588a21b0ec2e5e054c0e98801645313a5ab5e5",
+      "allocated_bytes": 408,
+      "logical_bytes": 405
+    },
+    {
+      "path": "shard-3/segment-2-131-0.log",
+      "bytes": 168,
+      "sha256": "d0c1a6a8ed297d88d6d599313eac98196a139f7d870611c02c731ecf2804c670",
+      "allocated_bytes": 168,
+      "logical_bytes": 168
+    },
+    {
+      "path": "shard-3/segment-2-131-1.log",
+      "bytes": 1630,
+      "sha256": "7d27bc940ae457d80a465b9800fa702b732ce1f19a7501653b5edbef7741f568",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1630
+    },
+    {
+      "path": "shard-3/segment-2-131-2.log",
+      "bytes": 1630,
+      "sha256": "8bc90aadf749f85757a88024ec9b4ec03c7fa1cd5dd772929365c83a91c0b423",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1630
+    },
+    {
+      "path": "shard-3/segment-2-131-3.log",
+      "bytes": 1630,
+      "sha256": "8f3053d9bde29b82dab04313f1000fb8401a9907e4e6154747087e792e853bfd",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1630
+    },
+    {
+      "path": "shard-3/segment-2-131-4.log",
+      "bytes": 1630,
+      "sha256": "c87dc51fbb1fb6189f47f282484e63cfe6ba703ee1f7c58a939124b472f4c7db",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1630
+    },
+    {
+      "path": "shard-3/segment-2-131-5.log",
+      "bytes": 1630,
+      "sha256": "d8218f3d9727ffadfc379471bee24ee019c13635cee6254505a7140be651fb2e",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1630
+    },
+    {
+      "path": "shard-3/segment-2-131-6.log",
+      "bytes": 5465,
+      "sha256": "a639c7f29cb750794fa54aee47d7c1113a7f9b7b1ae8f30bbf1baf02dcb9fba1",
+      "allocated_bytes": 8192,
+      "logical_bytes": 5465
+    },
+    {
+      "path": "shard-3/segment-2-131-7.log",
+      "bytes": 64,
+      "sha256": "ea822527a19baff3bc1bdb1882c12849e0dada9ed8d2b4706e2d2615d03ff21a",
+      "allocated_bytes": 64,
+      "logical_bytes": 64
+    },
+    {
+      "path": "shard-3/snapshot-1-130-122-f3c5c377f356240b215dc49877259b21f13adc7ea7d8a5eb1d2c76dbfffa01ff.bin",
+      "bytes": 763549,
+      "sha256": "dad31fa2c28b079c2ed86c67206a776dcca0044d29a2930b42948728aed38aab",
+      "allocated_bytes": 765952,
+      "logical_bytes": 763549
+    },
+    {
+      "path": "shard-3/snapshot-1-130-89-319f37209d26d7322cbdb0566135be175c5f63edb0ac5a3cf8e6289b5e0d4b1a.bin",
+      "bytes": 756943,
+      "sha256": "e2af0b20365666f7f1a8a13f2909b867625c65531f57b8b818f874525e84a84f",
+      "allocated_bytes": 757760,
+      "logical_bytes": 756943
+    },
+    {
+      "path": "shard-3/snapshot-2-131-11-e2308a2ffa167cc2798620f54fdb5113c3b047570fc5d8f37f378e4f1beea6ca.bin",
+      "bytes": 3683,
+      "sha256": "7b96b42cf23a824b1c11d30e65efc94fcb28cd1538cc8c6ca0b77b6b2128880e",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3683
+    },
+    {
+      "path": "shard-3/snapshot-2-131-18-a8d88f19f4c1a0388c44bbd80121fb7657f3152c732dce36c7578da5508f24ba.bin",
+      "bytes": 6488,
+      "sha256": "4e9de4367956aea2196fbbaa34931c38e2504b470389cd87213ab3599205974f",
+      "allocated_bytes": 8192,
+      "logical_bytes": 6488
+    }
+  ],
+  "memory_samples": [
+    {
+      "elapsed_ns": 7847700,
+      "working_set_bytes": 90112,
+      "peak_working_set_bytes": 94208
+    },
+    {
+      "elapsed_ns": 108455300,
+      "working_set_bytes": 149159936,
+      "peak_working_set_bytes": 149164032
+    },
+    {
+      "elapsed_ns": 209878700,
+      "working_set_bytes": 183099392,
+      "peak_working_set_bytes": 183103488
+    },
+    {
+      "elapsed_ns": 310414400,
+      "working_set_bytes": 191483904,
+      "peak_working_set_bytes": 191488000
+    },
+    {
+      "elapsed_ns": 425102200,
+      "working_set_bytes": 255909888,
+      "peak_working_set_bytes": 259911680
+    },
+    {
+      "elapsed_ns": 526694400,
+      "working_set_bytes": 181346304,
+      "peak_working_set_bytes": 259911680
+    },
+    {
+      "elapsed_ns": 627151600,
+      "working_set_bytes": 70930432,
+      "peak_working_set_bytes": 259911680
+    },
+    {
+      "elapsed_ns": 728065700,
+      "working_set_bytes": 184283136,
+      "peak_working_set_bytes": 259911680
+    },
+    {
+      "elapsed_ns": 829052600,
+      "working_set_bytes": 184283136,
+      "peak_working_set_bytes": 259911680
+    },
+    {
+      "elapsed_ns": 930058300,
+      "working_set_bytes": 260096000,
+      "peak_working_set_bytes": 260100096
+    },
+    {
+      "elapsed_ns": 1030566700,
+      "working_set_bytes": 74657792,
+      "peak_working_set_bytes": 260100096
+    },
+    {
+      "elapsed_ns": 1131511400,
+      "working_set_bytes": 140582912,
+      "peak_working_set_bytes": 260100096
+    },
+    {
+      "elapsed_ns": 1232426300,
+      "working_set_bytes": 184283136,
+      "peak_working_set_bytes": 260100096
+    },
+    {
+      "elapsed_ns": 1333478900,
+      "working_set_bytes": 260096000,
+      "peak_working_set_bytes": 260100096
+    },
+    {
+      "elapsed_ns": 1434338000,
+      "working_set_bytes": 74657792,
+      "peak_working_set_bytes": 260100096
+    },
+    {
+      "elapsed_ns": 1535297300,
+      "working_set_bytes": 144179200,
+      "peak_working_set_bytes": 260100096
+    },
+    {
+      "elapsed_ns": 1636237000,
+      "working_set_bytes": 184283136,
+      "peak_working_set_bytes": 260100096
+    },
+    {
+      "elapsed_ns": 1745141600,
+      "working_set_bytes": 251588608,
+      "peak_working_set_bytes": 260100096
+    },
+    {
+      "elapsed_ns": 1874972900,
+      "working_set_bytes": 184295424,
+      "peak_working_set_bytes": 260100096
+    },
+    {
+      "elapsed_ns": 1975042700,
+      "working_set_bytes": 50790400,
+      "peak_working_set_bytes": 260100096
+    },
+    {
+      "elapsed_ns": 2075117000,
+      "working_set_bytes": 32768,
+      "peak_working_set_bytes": 260100096
+    }
+  ],
+  "allocated_byte_scope": "regular dataset files only; excludes directory/MFT/journal overhead"
+}

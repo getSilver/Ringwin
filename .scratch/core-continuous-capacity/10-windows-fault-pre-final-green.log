@@ -1,0 +1,18 @@
+1/2 windows_capacity_fault_acceptance.test.Windows capacity faults recover complete partial Fill economics reservations and Unknown without sends...windows_capacity_fault point=append fault=short_write apply=true skip=0 live=2 terminal=0 barrier=42 recovered_closed=false sends=2
+windows_capacity_fault point=commit fault=sync_timeout apply=true skip=0 live=2 terminal=0 barrier=42 recovered_closed=true sends=2
+windows_capacity_fault point=root_publish fault=eio apply=true skip=0 live=2 terminal=0 barrier=42 recovered_closed=false sends=2
+windows_capacity_fault point=root_publish fault=eio apply=true skip=1 live=2 terminal=0 barrier=42 recovered_closed=true sends=2
+windows_capacity_fault point=publish fault=read_only apply=false skip=0 live=2 terminal=0 barrier=46 recovered_closed=false sends=2
+windows_capacity_fault point=snapshot_sync fault=sync_timeout apply=false skip=0 live=2 terminal=0 barrier=46 recovered_closed=false sends=2
+windows_capacity_fault point=archive_sync fault=sync_timeout apply=false skip=0 live=2 terminal=0 barrier=46 recovered_closed=false sends=2
+windows_capacity_fault point=root_publish fault=eio apply=false skip=0 live=2 terminal=0 barrier=46 recovered_closed=false sends=2
+windows_capacity_fault point=reclaim fault=eio apply=false skip=0 live=2 terminal=0 barrier=46 recovered_closed=false sends=2
+OK
+2/2 windows_capacity_fault_acceptance.test.Windows capacity file reopen rejects missing corrupt and authenticated incompatible authority...windows_capacity_reject damage=missing_segment live_input=2 terminal_input=0 owner_closed=true sends=2
+windows_capacity_reject damage=corrupt_segment live_input=2 terminal_input=0 owner_closed=true sends=2
+windows_capacity_reject damage=truncate_segment live_input=2 terminal_input=0 owner_closed=true sends=2
+windows_capacity_reject damage=corrupt_manifest live_input=2 terminal_input=0 owner_closed=true sends=2
+windows_capacity_reject damage=old_schema live_input=2 terminal_input=0 owner_closed=true sends=2
+windows_capacity_reject damage=foreign_artifact live_input=2 terminal_input=0 owner_closed=true sends=2
+OK
+All 2 tests passed.

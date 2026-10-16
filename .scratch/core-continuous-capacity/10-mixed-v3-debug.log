@@ -1,0 +1,16 @@
+1/1 windows_capacity_acceptance.test.Windows capacity real file seed recovery preserves public business state...FAIL (WindowsSharedAccountInvariant)
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_shared.zig:7:14: 0x7ff648d4243f in require (test_zcu.obj)
+    if (!ok) return error.WindowsSharedAccountInvariant;
+             ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_shared.zig:55:9: 0x7ff648d6d5c5 in verify (test_zcu.obj)
+        try require(restored_summary.present and std.meta.eql(restored_summary.value, summary));
+        ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_acceptance.zig:561:29: 0x7ff648d6f0da in runProtocol (test_zcu.obj)
+    result.shared_account = try @import("windows_capacity_shared.zig").verify(allocator, io, path, virgin, summaries);
+                            ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_acceptance.zig:576:22: 0x7ff648d7194e in test.Windows capacity real file seed recovery preserves public business state (test_zcu.obj)
+    const advanced = try runProtocol(std.testing.allocator, std.testing.io, "advance", path);
+                     ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\0fc17707d4f98f23f46248c3054279a5\test.exe --seed=0x32e3b1f4

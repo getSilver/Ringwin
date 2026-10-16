@@ -10,7 +10,7 @@ const execution = @import("execution_gateway.zig");
 const fixture = @import("trading_shard_fixture.zig");
 const assets = @import("asset_registry.zig");
 const host = @import("strategy_host_gateway.zig");
-const venues = [_]canonical.VenueIdentity{ 1, 21, 42, 84 };
+pub const venues = [_]canonical.VenueIdentity{ 1, 21, 42, 84 };
 const cash: i128 = 25_000_000_000;
 
 // Keep the large in-memory archive initializer outside the acceptance frame.
@@ -18,10 +18,10 @@ noinline fn initializeStore(store: *durable.MemoryAdapter) void {
     store.* = .init();
 }
 
-fn instrument(route: usize, index: usize) u128 {
+pub fn instrument(route: usize, index: usize) u128 {
     return (@as(u128, venues[route]) << 64) | (@as(u128, if (index < 75) 1 else 2) << 32) | (1000 + index % 75);
 }
-fn selected(index: usize) bool {
+pub fn selected(index: usize) bool {
     return index < 9 or (index >= 75 and index < 91);
 }
 fn tick(index: usize) i128 {
@@ -33,7 +33,7 @@ fn askTicks(index: usize) i128 {
 fn priceStep(index: usize) i128 {
     return if (index < 75) 100_000_000 else 10_000;
 }
-fn product(index: usize) canonical.Product {
+pub fn product(index: usize) canonical.Product {
     return if (index < 75) .spot else .isolated_linear_usdt;
 }
 
@@ -65,10 +65,10 @@ const Source = struct {
     }
 };
 
-const OfflineFeed = struct {
+pub const OfflineFeed = struct {
     source: Source,
     started: bool = false,
-    fn adapter(self: *@This()) market.MarketFeedAdapter {
+    pub fn adapter(self: *@This()) market.MarketFeedAdapter {
         return .{ .ptr = self, .vtable = &.{ .start = start, .try_drain = drain, .stop = stop } };
     }
     fn start(ptr: *anyopaque, config: market.Config) market.StartError!void {
@@ -89,13 +89,13 @@ const OfflineFeed = struct {
     }
 };
 
-const RestingVenue = struct {
+pub const RestingVenue = struct {
     source: Source,
     sends: usize = 0,
     started: bool = false,
     order_clients: [64]canonical.ClientOrderId = undefined,
     order_count: u8 = 0,
-    fn adapter(self: *@This()) venue.VenueAdapter {
+    pub fn adapter(self: *@This()) venue.VenueAdapter {
         return .{ .ptr = self, .vtable = &.{ .start = start, .try_send = send, .try_drain = drain, .stop = stop } };
     }
     fn start(ptr: *anyopaque, config: venue.VenueConfig) venue.StartError!void {
@@ -198,6 +198,20 @@ fn toggle(owner: *demo.Owner, route: usize, index: usize, enabled: bool, identit
         .enabled = enabled,
     } }, identity);
 }
+fn require(ok: bool) !void {
+    if (!ok) return error.ObservationInvariant;
+}
+fn checkEqual(expected: anytype, actual: anytype) !void {
+    const T = @TypeOf(expected, actual);
+    if (!std.meta.eql(@as(T, expected), @as(T, actual))) return error.ObservationInvariant;
+}
+fn checkEqualSlices(comptime T: type, expected: []const T, actual: []const T) !void {
+    if (!std.mem.eql(T, expected, actual)) return error.ObservationInvariant;
+}
+fn checkError(expected: anyerror, result: anytype) !void {
+    if (result) |_| return error.ObservationExpectedError else |err| if (err != expected) return err;
+}
+
 fn dispatch(owner: *demo.Owner, gateway: *execution.Gateway, adapter: *RestingVenue, command: trading.OrderCommand) !void {
     const pos = owner.shard.currentNetExchangePosition(command.instrument) orelse return error.MissingAccountPosition;
     try gateway.observeAuthorityFromShard(try owner.source(), .{ .account = owner.shard.exchange_account_identity, .effective_trading_authority = owner.shard.operational_state.effectiveTradingAuthority(), .reservation_identity = command.reservation_identity, .reservation = command.reservation, .primary_lease_expires_at_monotonic_ns = std.math.maxInt(u64), .fencing_token = 1, .exchange_position = pos, .authority_barrier = owner.shard.authoritativeBarrier() });
@@ -205,7 +219,7 @@ fn dispatch(owner: *demo.Owner, gateway: *execution.Gateway, adapter: *RestingVe
         std.debug.print("observation_dispatch: instrument={d} command={d} operation={s} error={s}\n", .{ command.instrument, command.command_id, @tagName(command.operation), @errorName(err) });
         return err;
     };
-    try std.testing.expectEqual(venue.SendResult.accepted, result);
+    try checkEqual(venue.SendResult.accepted, result);
     try maintain(owner);
     try owner.applyAdapterBatch((try adapter.adapter().tryDrain()).?);
 }
@@ -230,18 +244,200 @@ fn partialFill(owner: *demo.Owner, adapter: *RestingVenue, command: trading.Orde
     try private(owner, adapter, fill);
     const economic = &owner.shard.economic_projection;
     const expected_quantity: i64 = if (index == 0) 100_000 else if (index == 75 or (route == 1 and index == 76)) -10 else 10;
-    try std.testing.expectEqual(expected_quantity, economic.portfolio.positionForInstrument(command.instrument).quantity);
-    try std.testing.expectEqual(expected_quantity, economic.exchange.positionForInstrument(command.instrument).quantity);
-    if (index < 75) try std.testing.expectEqual(@as(i128, if (index == 0) 100_000 else 10 * (1 + index % 3)), economic.portfolio.spotInventoryAtoms(1000 + index));
+    try checkEqual(expected_quantity, economic.portfolio.positionForInstrument(command.instrument).quantity);
+    try checkEqual(expected_quantity, economic.exchange.positionForInstrument(command.instrument).quantity);
+    if (index < 75) try checkEqual(@as(i128, if (index == 0) 100_000 else 10 * (1 + index % 3)), economic.portfolio.spotInventoryAtoms(1000 + index));
     if (index == 1) {
-        try std.testing.expectEqual(@as(i128, 99_999), economic.portfolio.spotInventoryAtoms(1000));
-        try std.testing.expectEqual(@as(i128, 99_999), economic.exchange.spotInventoryAtoms(1000));
+        try checkEqual(@as(i128, 99_999), economic.portfolio.spotInventoryAtoms(1000));
+        try checkEqual(@as(i128, 99_999), economic.exchange.spotInventoryAtoms(1000));
         const transactions = economic.ledger_count;
         try private(owner, adapter, fill);
-        try std.testing.expectEqual(transactions, owner.shard.economic_projection.ledger_count);
-        try std.testing.expectEqual(@as(i128, 99_999), owner.shard.economic_projection.portfolio.spotInventoryAtoms(1000));
-        try std.testing.expectEqual(@as(i64, 10), owner.shard.economic_projection.portfolio.positionForInstrument(command.instrument).quantity);
+        try checkEqual(transactions, owner.shard.economic_projection.ledger_count);
+        try checkEqual(@as(i128, 99_999), owner.shard.economic_projection.portfolio.spotInventoryAtoms(1000));
+        try checkEqual(@as(i64, 10), owner.shard.economic_projection.portfolio.positionForInstrument(command.instrument).quantity);
     }
+}
+
+pub fn initializeRoute(owner: *demo.Owner, feed: *OfflineFeed, adapter: *RestingVenue, gateway: *execution.Gateway, route: usize) !void {
+    try feed.adapter().start(.{ .venue = venues[route], .environment = .simulation, .subscription_set = 1, .config_version = 1, .session = 1, .output_capacity = 1 });
+    try adapter.adapter().start(.{ .venue = venues[route], .environment = .simulation, .exchange_account = 100 + route, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1 });
+    // Bootstrap admission is sealed early; subsequent configuration uses the same live Owner.
+    _ = try apply(owner, .{ .instrument_rules_activated = .{
+        .version = 1,
+        .instrument_identity = instrument(route, 0),
+        .quantity_denominator = 100_000_000,
+        .reservation_model = .cash,
+        .product = .spot,
+        .venue = venues[route],
+        .base_asset = 1000,
+    } }, 1);
+    try owner.sealBootstrap();
+    for (0..76) |index| {
+        var definition = assets.testDefinitions(6, 8)[if (index == 0) 0 else 1];
+        definition.asset = if (index == 0) 1 else 999 + index;
+        definition.source_identity = definition.asset;
+        definition.code_bindings = @splat(.{});
+        definition.code_binding_count = 4;
+        var code_buffer: [16]u8 = undefined;
+        const code = if (index == 0) "USDT" else try std.fmt.bufPrint(&code_buffer, "BASE{d}", .{index});
+        for (venues, 0..) |venue_id, binding| definition.code_bindings[binding] = try canonical.AssetCodeBinding.init(venue_id, code);
+        _ = try apply(owner, .{ .asset_definition_activated = definition }, index + 1);
+    }
+    for (0..125) |index| {
+        const id = instrument(route, index);
+        if (index != 0) _ = try apply(owner, .{ .instrument_rules_activated = .{
+            .version = 1,
+            .instrument_identity = id,
+            .quantity_denominator = if (index < 75) 100_000_000 else 10_000,
+            .quantity_numerator = @intCast(1 + index % 3),
+            .reservation_model = if (index < 75) .cash else .leveraged,
+            .product = product(index),
+            .venue = venues[route],
+            .base_asset = 1000 + index % 75,
+        } }, 1000 + index);
+        _ = try apply(owner, .{ .margin_rules_activated = .{ .version = 1, .instrument = id, .native_settlement_atoms = true, .price_tick_atoms = tick(index) } }, 2000 + index);
+        try snapshot(owner, feed, route, index, 1);
+        try public(owner, feed, .{ .reference_price = .{ .instrument = id, .kind = .mark, .price = .{ .instrument = id, .rules_version = 1, .ticks = askTicks(index) - priceStep(index) } } }, id);
+    }
+    for (fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 1 }, .cash)) |original| {
+        var event = original.core;
+        switch (event.payload) {
+            .instrument_rules_activated, .margin_rules_activated, .asset_definition_activated, .mark_price, .instrument_trading_authorization => continue,
+            .account_configuration => |*value| value.exchange_account_identity = 100 + route,
+            else => {},
+        }
+        _ = try apply(owner, event.payload, event.identity);
+    }
+    var bootstrap: canonical.AccountBootstrapSnapshot = .{ .identity = 1, .exchange_account = 100 + route, .scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true }, .source_stream = adapter.source.stream, .source_sequence = adapter.source.sequence + 1, .balance_count = 1, .position_count = 0, .margin_count = 0 };
+    const amount: canonical.AssetAmount = .{ .asset = 1, .atoms = cash };
+    const zero: canonical.AssetAmount = .{ .asset = 1, .atoms = 0 };
+    bootstrap.balances[0] = .{ .asset = 1, .total = amount, .available = amount, .held = zero, .cash_balance = amount, .liability = zero, .isolated_liability = zero, .cross_liability = zero };
+    try private(owner, adapter, .{ .account_bootstrap_snapshot = bootstrap });
+    for (0..75) |index| {
+        const native_zero: canonical.AssetAmount = .{ .asset = 1000 + index, .atoms = 0 };
+        try private(owner, adapter, .{ .account_observed = .{
+            .identity = adapter.source.sequence + 1,
+            .exchange_account = 100 + route,
+            .bootstrap = 1,
+            .source_stream = adapter.source.stream,
+            .source_sequence = adapter.source.sequence + 1,
+            .value = .{ .balance = .{ .asset = native_zero.asset, .value = .{
+                .asset = native_zero.asset,
+                .total = native_zero,
+                .available = native_zero,
+                .held = native_zero,
+                .cash_balance = native_zero,
+                .liability = native_zero,
+                .isolated_liability = native_zero,
+                .cross_liability = native_zero,
+            } } },
+        } });
+    }
+    for (0..125) |index| try private(owner, adapter, .{ .account_observed = .{
+        .identity = adapter.source.sequence + 1,
+        .exchange_account = 100 + route,
+        .bootstrap = 1,
+        .source_stream = adapter.source.stream,
+        .source_sequence = adapter.source.sequence + 1,
+        .value = .{ .position = .{ .instrument = instrument(route, index), .side = .net, .value = .{
+            .instrument = instrument(route, index),
+            .side = .net,
+            .quantity = .{ .instrument = instrument(route, index), .rules_version = 1, .lots = 0 },
+        } } },
+    } });
+    for (75..125) |index| try private(owner, adapter, .{ .account_observed = .{
+        .identity = adapter.source.sequence + 1,
+        .exchange_account = 100 + route,
+        .bootstrap = 1,
+        .source_stream = adapter.source.stream,
+        .source_sequence = adapter.source.sequence + 1,
+        .value = .{ .margin = .{ .instrument = instrument(route, index), .value = .{
+            .instrument = instrument(route, index),
+            .amount = zero,
+            .adjusted_equity = amount,
+            .initial_margin = zero,
+            .maintenance_margin = zero,
+            .isolated_equity = amount,
+        } } },
+    } });
+    try checkEqual(@as(u8, 76), owner.shard.canonical_account.balance_count);
+    try checkEqual(@as(u8, 125), owner.shard.canonical_account.position_count);
+    try checkEqual(@as(u8, 50), owner.shard.canonical_account.margin_count);
+    try checkEqual(@as(u8, 0), owner.shard.oms.order_count);
+    for (0..125) |index| if (selected(index)) {
+        _ = try apply(owner, .{ .capability_profile_activation = capability(route, index) }, 3000 + index);
+        const authorization: trading.CorePayload = .{ .instrument_trading_authorization = .{
+            .exchange_account = 100 + route,
+            .instrument = instrument(route, index),
+            .strategy_activation_identity = 1,
+            .config_version = 1,
+            .expected_version = owner.shard.instrument_registry.get(instrument(route, index)).?.trading_version,
+            .enabled = true,
+        } };
+        _ = try apply(owner, authorization, 3500 + index);
+        if (index == 0) {
+            const authorized_barrier = owner.shard.authoritativeBarrier();
+            const authorized_digest = owner.shard.canonicalStateDigest();
+            _ = try apply(owner, authorization, 3500 + index);
+            try checkEqual(authorized_barrier, owner.shard.authoritativeBarrier());
+            try checkEqualSlices(u8, &authorized_digest, &owner.shard.canonicalStateDigest());
+        }
+    };
+    const barrier = owner.shard.authoritativeBarrier();
+    const digest = owner.shard.canonicalStateDigest();
+    _ = try apply(owner, .{ .host_activated = .{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .session = .{ .fencing = 1, .shard = @intCast(route), .generation = 1 }, .activation_barrier = barrier, .state_digest = digest } }, 4000);
+    try gateway.add(.{ .account = 100 + route, .adapter = adapter.adapter(), .venue_identity = venues[route], .environment = .simulation, .supported_products = 3, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1, .supports_venue_reduce_only = true } });
+    try gateway.bootstrapDurableDispatch(owner.store, owner.io, .{ .domain = .control, .id = 400 + route });
+}
+
+pub fn placeSelected(owner: *demo.Owner, feed: *OfflineFeed, adapter: *RestingVenue, gateway: *execution.Gateway, route: usize) !void {
+    // A strategy intent must observe a fact after its activation. The memory
+    // scenario also has intervening book rounds; a fresh File scenario enters
+    // here directly from activation and needs the same public observation seam.
+    try public(owner, feed, .{ .reference_price = .{ .instrument = instrument(route, 0), .kind = .mark, .price = .{ .instrument = instrument(route, 0), .rules_version = 1, .ticks = askTicks(0) - priceStep(0) } } }, instrument(route, 0));
+    for (0..125) |index| if (selected(index)) {
+        const sequence = 10_000 + index;
+        const command = (try apply(owner, .{ .external_order_intent = intent(owner, route, index, sequence) }, sequence)) orelse {
+            std.debug.print("observation_selected_rejected route={d} index={d} reason={s} trace={d} barrier={d}\n", .{ route, index, @tagName(owner.shard.last_reject_reason), owner.shard.trace.len, owner.shard.authoritativeBarrier() });
+            return error.MissingSelectedOrder;
+        };
+        // Funding entry is long spot / short perpetual; the other
+        // perpetual pair is long route 0 / short route 1. Each leg must
+        // carry its own account, Venue and risk qualification.
+        if (index == 75 or (route == 1 and index == 76)) try checkEqual(trading.oms.Side.sell, command.side);
+        try checkEqual(@as(u128, 100 + route), command.authority.exchange_account);
+        try require(command.authority.complete());
+        try require(command.reservation.atoms > 0);
+        try checkEqual(instrument(route, index), command.instrument);
+        if (index == 90) {
+            try dispatch(owner, gateway, adapter, command);
+            try toggle(owner, route, index, false, 20_000);
+            try checkError(error.NotSent, gateway.sendFromShard(&owner.shard, command.command_id, 2));
+            try require((try apply(owner, .{ .external_order_intent = intent(owner, route, index, 20_001) }, 20_001)) == null);
+            try snapshot(owner, feed, route, index, 10);
+            try checkEqual(canonical.MarketDataHealth.healthy, owner.shard.canonical_market.get(command.instrument).?.health);
+            var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 20_002, .count = 1 };
+            group.members[0] = .{ .intent_sequence = 20_002, .operation = .cancel, .instrument = command.instrument, .target_order_id = command.order_id, .expected_revision = command.revision };
+            _ = try apply(owner, .{ .oms_intent_group = group }, 20_002);
+            const cancellation = owner.shard.oms.emitted()[0];
+            try dispatch(owner, gateway, adapter, cancellation);
+            try toggle(owner, route, index, true, 20_003);
+            try checkEqual(@as(u64, 1), owner.shard.instrument_registry.get(command.instrument).?.capability.?.version);
+            const fresh = (try apply(owner, .{ .external_order_intent = intent(owner, route, index, 20_004) }, 20_004)) orelse return error.MissingResumedOrder;
+            try dispatch(owner, gateway, adapter, fresh);
+            continue;
+        }
+        try dispatch(owner, gateway, adapter, command);
+        if (index == 0 or index == 1 or index == 75 or index == 76)
+            try partialFill(owner, adapter, command, route, index);
+    };
+    try checkEqual(@as(u8, 26), owner.shard.oms.order_count);
+    try checkEqual(@as(usize, 27), adapter.sends);
+    var live_orders: usize = 0;
+    for (owner.shard.oms.orders[0..owner.shard.oms.order_count]) |order| {
+        if (order.state == .live) live_orders += 1 else try checkEqual(trading.oms.OrderState.canceled, order.state);
+    }
+    try checkEqual(@as(usize, 25), live_orders);
 }
 
 test "Observation capacity public fifth instrument configuration precedes 500 combination acceptance" {
@@ -393,140 +589,7 @@ test "Observation capacity 500 combinations four continuous Owners retain 100 se
         adapters[route] = .{ .source = .{ .venue_identity = venues[route], .account = 100 + route, .stream = 300 + route } };
     }
     defer for (stores) |*store| store.deinit();
-    for (0..4) |route| {
-        const owner = &owners[route];
-        const feed = &feeds[route];
-        const adapter = &adapters[route];
-        try feed.adapter().start(.{ .venue = venues[route], .environment = .simulation, .subscription_set = 1, .config_version = 1, .session = 1, .output_capacity = 1 });
-        try adapter.adapter().start(.{ .venue = venues[route], .environment = .simulation, .exchange_account = 100 + route, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1 });
-        // Bootstrap admission is sealed early; subsequent configuration uses the same live Owner.
-        _ = try apply(owner, .{ .instrument_rules_activated = .{
-            .version = 1,
-            .instrument_identity = instrument(route, 0),
-            .quantity_denominator = 100_000_000,
-            .reservation_model = .cash,
-            .product = .spot,
-            .venue = venues[route],
-            .base_asset = 1000,
-        } }, 1);
-        try owner.sealBootstrap();
-        for (0..76) |index| {
-            var definition = assets.testDefinitions(6, 8)[if (index == 0) 0 else 1];
-            definition.asset = if (index == 0) 1 else 999 + index;
-            definition.source_identity = definition.asset;
-            definition.code_bindings = @splat(.{});
-            definition.code_binding_count = 4;
-            var code_buffer: [16]u8 = undefined;
-            const code = if (index == 0) "USDT" else try std.fmt.bufPrint(&code_buffer, "BASE{d}", .{index});
-            for (venues, 0..) |venue_id, binding| definition.code_bindings[binding] = try canonical.AssetCodeBinding.init(venue_id, code);
-            _ = try apply(owner, .{ .asset_definition_activated = definition }, index + 1);
-        }
-        for (0..125) |index| {
-            const id = instrument(route, index);
-            if (index != 0) _ = try apply(owner, .{ .instrument_rules_activated = .{
-                .version = 1,
-                .instrument_identity = id,
-                .quantity_denominator = if (index < 75) 100_000_000 else 10_000,
-                .quantity_numerator = @intCast(1 + index % 3),
-                .reservation_model = if (index < 75) .cash else .leveraged,
-                .product = product(index),
-                .venue = venues[route],
-                .base_asset = 1000 + index % 75,
-            } }, 1000 + index);
-            _ = try apply(owner, .{ .margin_rules_activated = .{ .version = 1, .instrument = id, .native_settlement_atoms = true, .price_tick_atoms = tick(index) } }, 2000 + index);
-            try snapshot(owner, feed, route, index, 1);
-            try public(owner, feed, .{ .reference_price = .{ .instrument = id, .kind = .mark, .price = .{ .instrument = id, .rules_version = 1, .ticks = askTicks(index) - priceStep(index) } } }, id);
-        }
-        for (fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 1 }, .cash)) |original| {
-            var event = original.core;
-            switch (event.payload) {
-                .instrument_rules_activated, .margin_rules_activated, .asset_definition_activated, .mark_price, .instrument_trading_authorization => continue,
-                .account_configuration => |*value| value.exchange_account_identity = 100 + route,
-                else => {},
-            }
-            _ = try apply(owner, event.payload, event.identity);
-        }
-        var bootstrap: canonical.AccountBootstrapSnapshot = .{ .identity = 1, .exchange_account = 100 + route, .scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true }, .source_stream = adapter.source.stream, .source_sequence = adapter.source.sequence + 1, .balance_count = 1, .position_count = 0, .margin_count = 0 };
-        const amount: canonical.AssetAmount = .{ .asset = 1, .atoms = cash };
-        const zero: canonical.AssetAmount = .{ .asset = 1, .atoms = 0 };
-        bootstrap.balances[0] = .{ .asset = 1, .total = amount, .available = amount, .held = zero, .cash_balance = amount, .liability = zero, .isolated_liability = zero, .cross_liability = zero };
-        try private(owner, adapter, .{ .account_bootstrap_snapshot = bootstrap });
-        for (0..75) |index| {
-            const native_zero: canonical.AssetAmount = .{ .asset = 1000 + index, .atoms = 0 };
-            try private(owner, adapter, .{ .account_observed = .{
-                .identity = adapter.source.sequence + 1,
-                .exchange_account = 100 + route,
-                .bootstrap = 1,
-                .source_stream = adapter.source.stream,
-                .source_sequence = adapter.source.sequence + 1,
-                .value = .{ .balance = .{ .asset = native_zero.asset, .value = .{
-                    .asset = native_zero.asset,
-                    .total = native_zero,
-                    .available = native_zero,
-                    .held = native_zero,
-                    .cash_balance = native_zero,
-                    .liability = native_zero,
-                    .isolated_liability = native_zero,
-                    .cross_liability = native_zero,
-                } } },
-            } });
-        }
-        for (0..125) |index| try private(owner, adapter, .{ .account_observed = .{
-            .identity = adapter.source.sequence + 1,
-            .exchange_account = 100 + route,
-            .bootstrap = 1,
-            .source_stream = adapter.source.stream,
-            .source_sequence = adapter.source.sequence + 1,
-            .value = .{ .position = .{ .instrument = instrument(route, index), .side = .net, .value = .{
-                .instrument = instrument(route, index),
-                .side = .net,
-                .quantity = .{ .instrument = instrument(route, index), .rules_version = 1, .lots = 0 },
-            } } },
-        } });
-        for (75..125) |index| try private(owner, adapter, .{ .account_observed = .{
-            .identity = adapter.source.sequence + 1,
-            .exchange_account = 100 + route,
-            .bootstrap = 1,
-            .source_stream = adapter.source.stream,
-            .source_sequence = adapter.source.sequence + 1,
-            .value = .{ .margin = .{ .instrument = instrument(route, index), .value = .{
-                .instrument = instrument(route, index),
-                .amount = zero,
-                .adjusted_equity = amount,
-                .initial_margin = zero,
-                .maintenance_margin = zero,
-                .isolated_equity = amount,
-            } } },
-        } });
-        try std.testing.expectEqual(@as(u8, 76), owner.shard.canonical_account.balance_count);
-        try std.testing.expectEqual(@as(u8, 125), owner.shard.canonical_account.position_count);
-        try std.testing.expectEqual(@as(u8, 50), owner.shard.canonical_account.margin_count);
-        try std.testing.expectEqual(@as(u8, 0), owner.shard.oms.order_count);
-        for (0..125) |index| if (selected(index)) {
-            _ = try apply(owner, .{ .capability_profile_activation = capability(route, index) }, 3000 + index);
-            const authorization: trading.CorePayload = .{ .instrument_trading_authorization = .{
-                .exchange_account = 100 + route,
-                .instrument = instrument(route, index),
-                .strategy_activation_identity = 1,
-                .config_version = 1,
-                .expected_version = owner.shard.instrument_registry.get(instrument(route, index)).?.trading_version,
-                .enabled = true,
-            } };
-            _ = try apply(owner, authorization, 3500 + index);
-            if (index == 0) {
-                const authorized_barrier = owner.shard.authoritativeBarrier();
-                const authorized_digest = owner.shard.canonicalStateDigest();
-                _ = try apply(owner, authorization, 3500 + index);
-                try std.testing.expectEqual(authorized_barrier, owner.shard.authoritativeBarrier());
-                try std.testing.expectEqualSlices(u8, &authorized_digest, &owner.shard.canonicalStateDigest());
-            }
-        };
-        const barrier = owner.shard.authoritativeBarrier();
-        const digest = owner.shard.canonicalStateDigest();
-        _ = try apply(owner, .{ .host_activated = .{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .session = .{ .fencing = 1, .shard = @intCast(route), .generation = 1 }, .activation_barrier = barrier, .state_digest = digest } }, 4000);
-        try gateways[route].add(.{ .account = 100 + route, .adapter = adapter.adapter(), .venue_identity = venues[route], .environment = .simulation, .supported_products = 3, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1, .supports_venue_reduce_only = true } });
-        try gateways[route].bootstrapDurableDispatch(stores[route].interface(), undefined, .{ .domain = .control, .id = 400 + route });
-    }
+    for (0..4) |route| try initializeRoute(&owners[route], &feeds[route], &adapters[route], &gateways[route], route);
     // Continuous zero-order observation traverses many resident windows without resetting any source sequence.
     for (2..10) |round| for (0..4) |route| {
         for (0..125) |index| try snapshot(&owners[route], &feeds[route], route, index, round);
@@ -549,46 +612,7 @@ test "Observation capacity 500 combinations four continuous Owners retain 100 se
             if (!selected(index)) try std.testing.expect(entry.capability == null);
             try std.testing.expectEqual(canonical.MarketDataHealth.healthy, owner.shard.canonical_market.get(entry.instrument).?.health);
         }
-        for (0..125) |index| if (selected(index)) {
-            const sequence = 10_000 + index;
-            const command = (try apply(owner, .{ .external_order_intent = intent(owner, route, index, sequence) }, sequence)) orelse return error.MissingSelectedOrder;
-            // Funding entry is long spot / short perpetual; the other
-            // perpetual pair is long route 0 / short route 1. Each leg must
-            // carry its own account, Venue and risk qualification.
-            if (index == 75 or (route == 1 and index == 76)) try std.testing.expectEqual(trading.oms.Side.sell, command.side);
-            try std.testing.expectEqual(@as(u128, 100 + route), command.authority.exchange_account);
-            try std.testing.expect(command.authority.complete());
-            try std.testing.expect(command.reservation.atoms > 0);
-            try std.testing.expectEqual(instrument(route, index), command.instrument);
-            if (index == 90) {
-                try dispatch(owner, &gateways[route], &adapters[route], command);
-                try toggle(owner, route, index, false, 20_000);
-                try std.testing.expectError(error.NotSent, gateways[route].sendFromShard(&owner.shard, command.command_id, 2));
-                try std.testing.expect((try apply(owner, .{ .external_order_intent = intent(owner, route, index, 20_001) }, 20_001)) == null);
-                try snapshot(owner, &feeds[route], route, index, 10);
-                try std.testing.expectEqual(canonical.MarketDataHealth.healthy, owner.shard.canonical_market.get(command.instrument).?.health);
-                var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 20_002, .count = 1 };
-                group.members[0] = .{ .intent_sequence = 20_002, .operation = .cancel, .instrument = command.instrument, .target_order_id = command.order_id, .expected_revision = command.revision };
-                _ = try apply(owner, .{ .oms_intent_group = group }, 20_002);
-                const cancellation = owner.shard.oms.emitted()[0];
-                try dispatch(owner, &gateways[route], &adapters[route], cancellation);
-                try toggle(owner, route, index, true, 20_003);
-                try std.testing.expectEqual(@as(u64, 1), owner.shard.instrument_registry.get(command.instrument).?.capability.?.version);
-                const fresh = (try apply(owner, .{ .external_order_intent = intent(owner, route, index, 20_004) }, 20_004)) orelse return error.MissingResumedOrder;
-                try dispatch(owner, &gateways[route], &adapters[route], fresh);
-                continue;
-            }
-            try dispatch(owner, &gateways[route], &adapters[route], command);
-            if (index == 0 or index == 1 or index == 75 or index == 76)
-                try partialFill(owner, &adapters[route], command, route, index);
-        };
-        try std.testing.expectEqual(@as(u8, 26), owner.shard.oms.order_count);
-        try std.testing.expectEqual(@as(usize, 27), adapters[route].sends);
-        var live_orders: usize = 0;
-        for (owner.shard.oms.orders[0..owner.shard.oms.order_count]) |order| {
-            if (order.state == .live) live_orders += 1 else try std.testing.expectEqual(trading.oms.OrderState.canceled, order.state);
-        }
-        try std.testing.expectEqual(@as(usize, 25), live_orders);
+        try placeSelected(owner, &feeds[route], &adapters[route], &gateways[route], route);
         try owner.checkpoint();
         const encoded = try owner.committedSnapshot(snapshot_bytes);
         max_encoded = @max(max_encoded, encoded.len);

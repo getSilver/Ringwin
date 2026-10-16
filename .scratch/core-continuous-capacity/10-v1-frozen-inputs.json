@@ -1,0 +1,6 @@
+{
+  "source_tree_sha256": "73532d4ae117f849e083011cde02b169d8862b457c1e8f362e40571b31492bce",
+  "archive_sha256": "ed8b895603eed4aab80ff6501b456122de72b0c113fbe6e7b862358bf1c29e96",
+  "files": 122,
+  "reason": "retained exact v1 source and producers after real 64MiB app advance-02 stack overflow; full suites green but acceptance failed"
+}

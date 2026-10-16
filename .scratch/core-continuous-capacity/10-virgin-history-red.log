@@ -1,0 +1,29 @@
+1/1 durable_store.test.order history file virgin absence keeps admission open but missing published objects closes it...expected error.OrderHistoryUnavailable, found error.FileNotFound
+FAIL (TestUnexpectedError)
+D:\Program Files\zig\lib\std\Io\Threaded.zig:1434:9: 0x7ff6a6dde4d8 in fail__anon_36758 (test_zcu.obj)
+        return err;
+        ^
+D:\Program Files\zig\lib\std\Io\Threaded.zig:5067:39: 0x7ff6a6ddb221 in dirOpenFileWtf16 (test_zcu.obj)
+            .OBJECT_NAME_NOT_FOUND => return syscall.fail(error.FileNotFound),
+                                      ^
+D:\Program Files\zig\lib\std\Io\Threaded.zig:5018:5: 0x7ff6a6e441c2 in dirOpenFileWindows (test_zcu.obj)
+    return dirOpenFileWtf16(dir_handle, sub_path_w, flags);
+    ^
+D:\Program Files\zig\lib\std\Io\Dir.zig:578:5: 0x7ff6a6d6885c in openFile (test_zcu.obj)
+    return io.vtable.dirOpenFile(io.userdata, dir, sub_path, options);
+    ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:1647:22: 0x7ff6a6ebc4dc in recoverOrderHistoryImpl (test_zcu.obj)
+        const file = try self.dir.openFile(io, "order-history.objects", .{ .lock = .shared, .lock_nonblocking = true });
+                     ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:161:9: 0x7ff6a6e951ab in recoverOrderHistory (test_zcu.obj)
+        return recover_history(self.context, io, origin);
+        ^
+D:\Program Files\zig\lib\std\testing.zig:72:13: 0x7ff6a6e952f1 in expectError__anon_69750 (test_zcu.obj)
+            return error.TestUnexpectedError;
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:1942:5: 0x7ff6a6e95ad8 in test.order history file virgin absence keeps admission open but missing published objects closes it (test_zcu.obj)
+    try std.testing.expectError(error.OrderHistoryUnavailable, store.recoverOrderHistory(std.testing.io, origin));
+    ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\6c4c9a4b559533bf17daa29c97ad5c9f\test.exe --seed=0x2c16262

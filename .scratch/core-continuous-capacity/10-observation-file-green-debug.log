@@ -1,0 +1,16 @@
+1/1 windows_observation_file_acceptance.test.Windows observation file 500 distinct combinations recover three actual synthetic categories...FAIL (MissingSelectedOrder)
+D:\github\Ringwin-core-continuous-capacity\src\core_observation_capacity_acceptance.zig:396:130: 0x7ff619b02e57 in placeSelected (test_zcu.obj)
+        const command = (try apply(owner, .{ .external_order_intent = intent(owner, route, index, sequence) }, sequence)) orelse return error.MissingSelectedOrder;
+                                                                                                                                 ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_observation_file_acceptance.zig:61:13: 0x7ff619b1668b in open (test_zcu.obj)
+            try observation.placeSelected(self.owner, &self.feed, &self.adapter, self.gateway, route);
+            ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_observation_file_acceptance.zig:227:25: 0x7ff619b1b438 in runProtocol (test_zcu.obj)
+        const context = try RouteContext.open(allocator, io, child, route, seed);
+                        ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_observation_file_acceptance.zig:266:20: 0x7ff619b1dc7e in test.Windows observation file 500 distinct combinations recover three actual synthetic categories (test_zcu.obj)
+    const seeded = try runProtocol(std.testing.allocator, std.testing.io, "seed", path);
+                   ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\d32e7d623dadfbccf379453e38bffcb2\test.exe --seed=0x97d3b368

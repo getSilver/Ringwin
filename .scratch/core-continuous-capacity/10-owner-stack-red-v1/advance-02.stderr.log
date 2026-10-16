@@ -1,0 +1,83 @@
+Stack overflow (no address available)
+D:\Program Files\zig\lib\compiler_rt\stack_probe.zig:127: 0x7ff6aff60996 in win_probe_stack_only (compiler_rt.lib)
+            asm volatile (
+
+D:\Program Files\zig\lib\compiler_rt\stack_probe.zig:269:5: 0x7ff6aff60996 in ___chkstk_ms (compiler_rt.lib)
+    @call(.always_inline, win_probe_stack_only, .{});
+    ^
+???:?:?: 0x159dca7 in ??? (???)
+???:?:?: 0xb135ee9c4f in ??? (???)
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:3340: 0x7ff6afe7cde5 in handleOmsGroup (ringwin_zcu.obj)
+    fn handleOmsGroup(self: *TradingShard, input: CoreEvent, group: oms.IntentGroup) !?OrderCommand {
+
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:4296:68: 0x7ff6afe75118 in handle (ringwin_zcu.obj)
+            .oms_intent_group => |group| return self.handleOmsGroup(input, group),
+                                                                   ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:970:36: 0x7ff6afe7c913 in applyCoreInPlace (ringwin_zcu.obj)
+        const command = self.handle(event) catch |err| {
+                                   ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:848:38: 0x7ff6afe3e764 in applyUnfinalized (ringwin_zcu.obj)
+                self.applyCoreInPlace(event),
+                                     ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:3574:49: 0x7ff6afe6fa0e in finalizeHistoryCandidate (ringwin_zcu.obj)
+        const result = try self.applyUnfinalized(original, false, null, coverage);
+                                                ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:3487: 0x7ff6afe7303d in handleHistoryVerified (ringwin_zcu.obj)
+        return self.finalizeHistoryCandidate(input);
+
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:3656:92: 0x7ff6afe7303d in handle (ringwin_zcu.obj)
+        if (input.payload == .history_candidate_verified) return self.handleHistoryVerified(input);
+                                                                                           ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:970:36: 0x7ff6afe7c913 in applyCoreInPlace (ringwin_zcu.obj)
+        const command = self.handle(event) catch |err| {
+                                   ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:957: 0x7ff6afe3e6a2 in applyCoreOnOwnedCandidate (ringwin_zcu.obj)
+        return self.applyCoreInPlace(event) catch |err| {
+
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:846:72: 0x7ff6afe3e6a2 in applyUnfinalized (ringwin_zcu.obj)
+                if (rollback) |previous| self.applyCoreOnOwnedCandidate(previous, event) else @call(.never_inline, TradingShard.applyCore, .{ self, event })
+                                                                       ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:772:45: 0x7ff6afd4b7d9 in applyCandidate (ringwin_zcu.obj)
+        const result = self.applyUnfinalized(input, true, rollback, null) catch |err| {
+                                            ^
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:747: 0x7ff6afd53b8e in applyOwnedCandidate (ringwin_zcu.obj)
+        return self.applyCandidate(previous, input, publish_on_error, previous);
+
+D:\github\Ringwin-core-continuous-capacity\src\trading_shard.zig:5086:45: 0x7ff6afd53b8e in applyStableOnCandidate (ringwin_zcu.obj)
+    const result = shard.applyOwnedCandidate(previous, input, &publish_on_error) catch |err| {
+                                            ^
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:575:55: 0x7ff6afd540b1 in apply (ringwin_zcu.obj)
+        const command = trading.applyStableOnCandidate(&candidate, &self.shard, &candidate_journal, input) catch |err| blk: {
+                                                      ^
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:686:39: 0x7ff6afe36289 in resolveHistoryCandidate (ringwin_zcu.obj)
+        const command = try self.apply(.{ .core = .{ .identity = std.math.cast(u64, pending.request.pending_id) orelse return error.HistoryPendingIdentityCapacity, .payload = .{ .history_candidate_verified = result.proof } } });
+                                      ^
+D:\github\Ringwin-core-continuous-capacity\src\demo_authority.zig:563:52: 0x7ff6afd54758 in apply (ringwin_zcu.obj)
+                return self.resolveHistoryCandidate(pending.request.pending_id);
+                                                   ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_acceptance.zig:206:33: 0x7ff6afed0f72 in submit (ringwin_zcu.obj)
+        _ = try self.owner.apply(input);
+                                ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_acceptance.zig:225: 0x7ff6afedaf29 in place (ringwin_zcu.obj)
+        return self.submit(.{ .intent_sequence = 0, .operation = .place, .instrument = 3, .quantity = 20, .limit_price = fixture.omsPrice(3, 50_000_000) }, false);
+
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_acceptance.zig:347: 0x7ff6afedaf29 in advance (ringwin_zcu.obj)
+        const order = try self.place();
+
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_acceptance.zig:547:100: 0x7ff6afedaf29 in runProtocol (ringwin_zcu.obj)
+        if (virgin) try cycle.seedState(shard) else if (advancing and shard != 3) try cycle.advance();
+                                                                                                   ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_acceptance.zig:501:37: 0x7ff6afee33a7 in run (ringwin_zcu.obj)
+    const evidence = try runProtocol(init.gpa, init.io, mode, path);
+                                    ^
+D:\github\Ringwin-core-continuous-capacity\src\main.zig:141: 0x7ff6afdab6fc in main (ringwin_zcu.obj)
+            return windows_capacity_acceptance.run(init, mode, path);
+
+D:\Program Files\zig\lib\std\start.zig:750: 0x7ff6afdab6fc in callMain (ringwin_zcu.obj)
+    return wrapMain(root.main(.{
+
+D:\Program Files\zig\lib\std\start.zig:498:17: 0x7ff6afdab6fc in WinStartup (ringwin_zcu.obj)
+        callMain(std.os.windows.peb().ProcessParameters.CommandLine.slice(), .global),
+                ^
+???:?:?: 0x7ff834bf81f3 in ??? (KERNEL32.DLL)
+???:?:?: 0x7ff83513a250 in ??? (ntdll.dll)

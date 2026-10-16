@@ -567,6 +567,13 @@ pub const Owner = struct {
             self.closeAdmission();
             return error.PrivateRecoveryCapacity;
         };
+        return self.applyCommittedCandidate(input);
+    }
+
+    // Cold-history staging can recurse through apply before a business input
+    // reaches this transaction. Keep its large unpublished candidate out of
+    // those outer policy frames and finish this frame before further staging.
+    noinline fn applyCommittedCandidate(self: *Owner, input: trading.CanonicalEvent) !?trading.OrderCommand {
         var candidate: trading.TradingShard = undefined;
         @memcpy(std.mem.asBytes(&candidate), std.mem.asBytes(&self.shard));
         var candidate_journal = self.decision_journal;

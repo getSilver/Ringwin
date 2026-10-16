@@ -1,0 +1,13 @@
+10-final-v3-app-build exit=0 source=f1e1a54a06c15f62fb9e082bfad642d1ada0165d3936ba9f93470637b885df42
+10-final-v3-cli-build exit=0 source=f1e1a54a06c15f62fb9e082bfad642d1ada0165d3936ba9f93470637b885df42
+10-final-v3-app-offline-fixture exit=0 source=f1e1a54a06c15f62fb9e082bfad642d1ada0165d3936ba9f93470637b885df42
+10-final-v3-app-windows-chain-test exit=0 source=f1e1a54a06c15f62fb9e082bfad642d1ada0165d3936ba9f93470637b885df42
+10-final-v3-cli-offline-fixture exit=0 source=f1e1a54a06c15f62fb9e082bfad642d1ada0165d3936ba9f93470637b885df42
+10-final-v3-cli-windows-chain-test exit=0 source=f1e1a54a06c15f62fb9e082bfad642d1ada0165d3936ba9f93470637b885df42
+10-final-v3-app-file-processes exit=0 source=f1e1a54a06c15f62fb9e082bfad642d1ada0165d3936ba9f93470637b885df42
+10-final-v3-cli-file-processes exit=0 source=f1e1a54a06c15f62fb9e082bfad642d1ada0165d3936ba9f93470637b885df42
+10-final-v3-full-releasesafe-build exit=0 source=f1e1a54a06c15f62fb9e082bfad642d1ada0165d3936ba9f93470637b885df42
+10-final-v3-full-releasesafe exit=0 source=f1e1a54a06c15f62fb9e082bfad642d1ada0165d3936ba9f93470637b885df42
+10-final-v3-full-debug-build exit=0 source=f1e1a54a06c15f62fb9e082bfad642d1ada0165d3936ba9f93470637b885df42
+10-final-v3-full-debug exit=0 source=f1e1a54a06c15f62fb9e082bfad642d1ada0165d3936ba9f93470637b885df42
+10 acceptance commands completed; audit and reviews required before closure

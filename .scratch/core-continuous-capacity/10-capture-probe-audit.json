@@ -1,0 +1,18 @@
+[
+  {
+    "case": "existing-prefix",
+    "passed": true,
+    "error": "Traceback (most recent call last):\n  File \"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\run-10-command.py\", line 112, in <module>\n    sys.exit(capture(name, command))\n  File \"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\run-10-command.py\", line 36, in capture\n    raise FileExistsError('Existing evidence retained: ' + name + suffix)\nFileExistsError: Existing evidence retained: 10-capture-probe-success.log\n",
+    "original_result_sha256": "92908e65415837e658118e9d9cc602b0df37d27703739b59f509dd47ff54e514"
+  },
+  {
+    "case": "bounded-capture-timeout",
+    "passed": true,
+    "result": "10-capture-probe-timeout.result.json"
+  },
+  {
+    "case": "spawn-failure-retained",
+    "passed": true,
+    "result": "10-capture-probe-spawn-failure.result.json"
+  }
+]

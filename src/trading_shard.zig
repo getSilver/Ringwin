@@ -1572,6 +1572,12 @@ pub const TradingShard = struct {
             try self.oms.discardReplacement(order_id);
             return null;
         }
+        return self.qualifyAndConfirmReplacement(order_id, replacement, now_monotonic_ns);
+    }
+
+    // Ordinary reports have no replacement; do not reserve a full shard
+    // candidate in those callers' already transactional frames.
+    noinline fn qualifyAndConfirmReplacement(self: *TradingShard, order_id: u64, replacement: oms_module.Intent, now_monotonic_ns: u64) !?i128 {
         var candidate: TradingShard = undefined;
         copyTradingState(&candidate, self);
         var group: oms_module.IntentGroup = .{ .first_intent_sequence = replacement.intent_sequence, .count = 1 };

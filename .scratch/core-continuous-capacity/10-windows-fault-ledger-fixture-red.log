@@ -1,0 +1,248 @@
+1/2 windows_capacity_fault_acceptance.test.Windows capacity faults recover complete partial Fill economics reservations and Unknown without sends...expected thread 1724 panic: invalid enum value
+D:\Program Files\zig\lib\std\Io\Writer.zig:1434:39: 0x7ff7804ff101 in printEnumExhaustive__anon_107614 (test_zcu.obj)
+    var vecs: [2][]const u8 = .{ ".", @tagName(value) };
+                                      ^
+D:\Program Files\zig\lib\std\Io\Writer.zig:1284:43: 0x7ff78063ecdf in printValue__anon_118222 (test_zcu.obj)
+                return printEnumExhaustive(w, value);
+                                          ^
+D:\Program Files\zig\lib\std\Io\Writer.zig:723:25: 0x7ff78063ef70 in print__anon_118233 (test_zcu.obj)
+        try w.printValue(
+                        ^
+D:\Program Files\zig\lib\std\debug.zig:314:39: 0x7ff78063ee48 in print__anon_118228 (test_zcu.obj)
+    stderr.file_writer.interface.print(fmt, args) catch return;
+                                      ^
+D:\Program Files\zig\lib\std\testing.zig:56:24: 0x7ff78063ed1e in print__anon_118227 (test_zcu.obj)
+        std.debug.print(fmt, args);
+                       ^
+D:\Program Files\zig\lib\std\testing.zig:775:22: 0x7ff78063ec5a in expectEqualDeepInner__anon_118058 (test_zcu.obj)
+                print("expected {any}, found {any}\n", .{ expected, actual });
+                     ^
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063cf34 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063cf34 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063cf34 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063cf34 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063cf34 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063cf34 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063cf34 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063cf34 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063cf34 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063cf34 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063cf34 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063cf34 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063cf34 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:852:32: 0x7ff78063cf34 in expectEqualDeepInner__anon_118006 (test_zcu.obj)
+                expectEqualDeep(@field(expected, field.name), @field(actual, field.name)) catch |e| {
+                               ^
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063ba86 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063ba86 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063ba86 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063ba86 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063ba86 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063ba86 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063ba86 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063ba86 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063ba86 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063ba86 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063ba86 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063ba86 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063ba86 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:826:32: 0x7ff78063ba86 in expectEqualDeepInner__anon_117898 (test_zcu.obj)
+                expectEqualDeep(expected[i], actual[i]) catch |e| {
+                               ^
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063a59c in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063a59c in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063a59c in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063a59c in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063a59c in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063a59c in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063a59c in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063a59c in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063a59c in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063a59c in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063a59c in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063a59c in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78063a59c in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:852:32: 0x7ff78063a59c in expectEqualDeepInner__anon_117761 (test_zcu.obj)
+                expectEqualDeep(@field(expected, field.name), @field(actual, field.name)) catch |e| {
+                               ^
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff7806399e7 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff7806399e7 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff7806399e7 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff7806399e7 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff7806399e7 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff7806399e7 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff7806399e7 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff7806399e7 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff7806399e7 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff7806399e7 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff7806399e7 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff7806399e7 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff7806399e7 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:808:40: 0x7ff7806399e7 in expectEqualDeepInner__anon_117034 (test_zcu.obj)
+                        expectEqualDeep(expected[i], actual[i]) catch |e| {
+                                       ^
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78062d499 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78062d499 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78062d499 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78062d499 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78062d499 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78062d499 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78062d499 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78062d499 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78062d499 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78062d499 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78062d499 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78062d499 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\Program Files\zig\lib\std\testing.zig:741: 0x7ff78062d499 in expectEqualDeep (test_zcu.obj)
+    return expectEqualDeepInner(T, expected, actual);
+
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_fault_acceptance.zig:126:36: 0x7ff78062d499 in expectState (test_zcu.obj)
+    try std.testing.expectEqualDeep(expected.economic_projection.ledger[0..expected.economic_projection.ledger_count], actual.economic_projection.ledger[0..actual.economic_projection.ledger_count]);
+                                   ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_fault_acceptance.zig:175:24: 0x7ff78063704c in test.Windows capacity faults recover complete partial Fill economics reservations and Unknown without sends (test_zcu.obj)
+        try expectState(&recovered.shard, if (recovered.shard.authoritativeBarrier() == old.authoritativeBarrier()) old else new);
+                       ^
+D:\Program Files\zig\lib\compiler\test_runner.zig:291:25: 0x7ff78039fad6 in mainTerminal (test_zcu.obj)
+        if (test_fn.func()) |_| {
+                        ^
+D:\Program Files\zig\lib\compiler\test_runner.zig:73:28: 0x7ff78039f682 in main (test_zcu.obj)
+        return mainTerminal(init);
+                           ^
+D:\Program Files\zig\lib\std\start.zig:712: 0x7ff78039d83c in callMain (test_zcu.obj)
+    if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+
+D:\Program Files\zig\lib\std\start.zig:498:17: 0x7ff78039d83c in WinStartup (test_zcu.obj)
+        callMain(std.os.windows.peb().ProcessParameters.CommandLine.slice(), .global),
+                ^
+???:?:?: 0x7ff834bf81f3 in ??? (KERNEL32.DLL)
+???:?:?: 0x7ff83513a250 in ??? (ntdll.dll)
+error: the following test command failed with exit code 3:
+.zig-cache\o\cf386b22946580c6e26d0db4547d0660\test.exe --seed=0x23fa6e80

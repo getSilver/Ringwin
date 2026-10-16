@@ -37,6 +37,10 @@ const credential_store = @import("credential_store.zig");
 const windows_verification_runtime = @import("windows_verification_runtime.zig");
 const venue_fill_recovery_acceptance = @import("venue_fill_recovery_acceptance.zig");
 const raw_ingress = @import("raw_ingress.zig");
+const windows_capacity_acceptance = @import("windows_capacity_acceptance.zig");
+const windows_capacity_fault_acceptance = @import("windows_capacity_fault_acceptance.zig");
+const windows_capacity_shared = @import("windows_capacity_shared.zig");
+const windows_observation_file_acceptance = @import("windows_observation_file_acceptance.zig");
 
 pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
@@ -124,6 +128,18 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, argument, "--windows-durable-store-test")) {
             if (args.next() != null) return error.UnknownArgument;
             return durable_store.runWindowsAcceptance(init);
+        }
+        if (std.mem.eql(u8, argument, "--windows-observation-file")) {
+            const mode = args.next() orelse return error.MissingCapacityMode;
+            const path = args.next() orelse return error.MissingStoreDirectory;
+            if (args.next() != null) return error.UnknownArgument;
+            return windows_observation_file_acceptance.run(init, mode, path);
+        }
+        if (std.mem.eql(u8, argument, "--windows-capacity-file")) {
+            const mode = args.next() orelse return error.MissingCapacityMode;
+            const path = args.next() orelse return error.MissingStoreDirectory;
+            if (args.next() != null) return error.UnknownArgument;
+            return windows_capacity_acceptance.run(init, mode, path);
         }
         if (std.mem.eql(u8, argument, "--windows-credential-store-test")) {
             if (args.next() != null) return error.UnknownArgument;
@@ -242,5 +258,9 @@ test {
     _ = @import("continuous_capacity_acceptance.zig");
     _ = @import("continuous_backpressure_acceptance.zig");
     _ = @import("continuous_account_acceptance.zig");
+    _ = windows_capacity_acceptance;
+    _ = windows_capacity_fault_acceptance;
+    _ = windows_capacity_shared;
+    _ = windows_observation_file_acceptance;
     _ = raw_ingress;
 }

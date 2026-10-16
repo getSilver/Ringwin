@@ -1,0 +1,60 @@
+[
+  {
+    "artifact_kind": "app",
+    "peak_working_set_bytes_observed": 276848640,
+    "main_dataset_initial_logical_bytes": 6107476,
+    "main_dataset_final_logical_bytes": 7920172,
+    "main_dataset_final_allocated_regular_file_bytes": 8146256,
+    "allocation_observation_complete": true,
+    "allocation_observation_missing_files": 0,
+    "normal_recovery_process_elapsed_ns": [
+      2295262600,
+      2498434500,
+      1978826200,
+      1845832700,
+      1883671700,
+      2034147400,
+      1938792900,
+      1984355400,
+      1999037500,
+      2040229600,
+      2046056200,
+      2297741900,
+      2654961200,
+      2511938800,
+      1745365200
+    ],
+    "actual_thread_stack_peak": "not_measured",
+    "physical_index_cost": "not_measured",
+    "resource_budget_qualification": "deferred"
+  },
+  {
+    "artifact_kind": "cli",
+    "peak_working_set_bytes_observed": 276844544,
+    "main_dataset_initial_logical_bytes": 6107476,
+    "main_dataset_final_logical_bytes": 7920172,
+    "main_dataset_final_allocated_regular_file_bytes": 8146256,
+    "allocation_observation_complete": true,
+    "allocation_observation_missing_files": 0,
+    "normal_recovery_process_elapsed_ns": [
+      1856531000,
+      1906307100,
+      1955949500,
+      1854629500,
+      1887310700,
+      1993656600,
+      1949803000,
+      1962335800,
+      2576240600,
+      2042180300,
+      2066897000,
+      2104221700,
+      2107573100,
+      2135757000,
+      1767144200
+    ],
+    "actual_thread_stack_peak": "not_measured",
+    "physical_index_cost": "not_measured",
+    "resource_budget_qualification": "deferred"
+  }
+]

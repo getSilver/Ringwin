@@ -1,0 +1,10 @@
+seed exit=0 pid=10788
+recover-00 exit=0 pid=14204
+step-golden exit=0 pid=10320
+step-golden-recover exit=0 pid=1164
+hold-before-step interrupted_owned_pid=9520
+hold-before-step-recover exit=0 pid=11924
+hold-after-step interrupted_owned_pid=4264
+hold-after-step-recover exit=0 pid=5460
+advance-01 exit=0 pid=11380
+recover-01 exit=0 pid=12636

@@ -1,0 +1,26 @@
+1/1 windows_capacity_shared.test.Windows shared unchanged public summaries recover without empty archive...windows_shared_unchanged_fixture=C:\Windows\Temp\ringwin-shared-nochange-1155926219720400
+FAIL (FileNotFound)
+D:\Program Files\zig\lib\std\Io\Threaded.zig:1434:9: 0x7ff7d13ce4d8 in fail__anon_36758 (test_zcu.obj)
+        return err;
+        ^
+D:\Program Files\zig\lib\std\Io\Threaded.zig:3424:35: 0x7ff7d14398bb in dirCreateDirWindows (test_zcu.obj)
+        .OBJECT_PATH_NOT_FOUND => return syscall.fail(error.FileNotFound),
+                                  ^
+D:\Program Files\zig\lib\std\Io\Dir.zig:798:5: 0x7ff7d14ea0ae in createDir (test_zcu.obj)
+    return io.vtable.dirCreateDir(io.userdata, dir, sub_path, permissions);
+    ^
+D:\Program Files\zig\lib\std\Io\Dir.zig:811:5: 0x7ff7d14ea003 in createDirAbsolute (test_zcu.obj)
+    return createDir(.cwd(), io, absolute_path, permissions);
+    ^
+D:\github\Ringwin-core-continuous-capacity\src\durable_store.zig:1002:21: 0x7ff7d148680f in initWindowsVerification (test_zcu.obj)
+            else => return err,
+                    ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_shared.zig:33:5: 0x7ff7d14c702e in verify (test_zcu.obj)
+    try file.initWindowsVerification(io, path);
+    ^
+D:\github\Ringwin-core-continuous-capacity\src\windows_capacity_shared.zig:103:20: 0x7ff7d14c945c in test.Windows shared unchanged public summaries recover without empty archive (test_zcu.obj)
+    const seeded = try verify(std.testing.allocator, io, path, true, false, summaries);
+                   ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\o\2cf77832dfb20ab720bc81e3aacc3516\test.exe --seed=0xc7b5a153

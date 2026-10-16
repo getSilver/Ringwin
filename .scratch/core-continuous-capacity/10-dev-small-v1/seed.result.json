@@ -1,0 +1,245 @@
+{
+  "label": "seed",
+  "mode": "seed",
+  "command": [
+    "D:\\github\\Ringwin-core-continuous-capacity\\zig-out\\bin\\ringwin.exe",
+    "--windows-capacity-file",
+    "seed",
+    "D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\10-dev-small-v1\\store"
+  ],
+  "pid": 12012,
+  "started_utc": "2026-10-15T23:23:29.697000+00:00",
+  "finished_utc": "2026-10-15T23:23:32.042859+00:00",
+  "elapsed_ns": 2345930900,
+  "exit_code": 3,
+  "intentional_process_interruption": false,
+  "timed_out": false,
+  "kill_marker": null,
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_sha256": "ed56112e3949a27b2065960fc1381c646d69d32917894c5c9faeb12e8e272b5a",
+  "source_tree_sha256": "ce9e2a5a273889983661e2c49f5d1b38f830c91c57fe35d21fbe1ef101364396",
+  "artifact_sha256": "ffaf34d5e713897b28dda6ea65c4866af0d5e4d6f7f12690045b60fe5ffcf38d",
+  "files_before": [],
+  "files_after": [
+    {
+      "path": "shard-0/archive-1-1-0.ref",
+      "bytes": 32,
+      "sha256": "c584b9f6c23ac5e9f0ae395210e090a2d6cd164e02f37d35a3974704af8fc5c9",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-0/archive-1-1-1.ref",
+      "bytes": 32,
+      "sha256": "4ddb845753e94e0aae5a4e993447f73c47627fcbb22c0071c4905b1cbf681681",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-0/archive-2-2-0.ref",
+      "bytes": 32,
+      "sha256": "470a16a61a9766ec93e1cf441ff5dbe16a1f249c2cfe33268c60779de777836e",
+      "allocated_bytes": 32,
+      "logical_bytes": 32
+    },
+    {
+      "path": "shard-0/archive-ba3c407df53c4e6c820ece28dba6e5349ee7e6289ca43618e8d87f44c6f6c1d2.bin",
+      "bytes": 160,
+      "sha256": "ba3c407df53c4e6c820ece28dba6e5349ee7e6289ca43618e8d87f44c6f6c1d2",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-0/archive-c3cefb7ee3eb475a004fe086fdf1e172652318706bcd80cfae0c4b0d81962f4b.bin",
+      "bytes": 160,
+      "sha256": "c3cefb7ee3eb475a004fe086fdf1e172652318706bcd80cfae0c4b0d81962f4b",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-0/archive-f90db1c0e8e989e5e8a8beecbe1f8ee7d9640324cd6ca6ee8e4a5af2e2a40771.bin",
+      "bytes": 160,
+      "sha256": "f90db1c0e8e989e5e8a8beecbe1f8ee7d9640324cd6ca6ee8e4a5af2e2a40771",
+      "allocated_bytes": 160,
+      "logical_bytes": 160
+    },
+    {
+      "path": "shard-0/manifest.bin",
+      "bytes": 784,
+      "sha256": "e7fc01a1fc28eca5618b234412c2381f2e36d8b52dc8459da73bd98aee937e3d",
+      "allocated_bytes": 4096,
+      "logical_bytes": 784
+    },
+    {
+      "path": "shard-0/segment-0-3-0.log",
+      "bytes": 832,
+      "sha256": "a356cf93883aed641c2224165a8c25e0a0b4ae211c2224e56e2fea4e3d96cc48",
+      "allocated_bytes": 4096,
+      "logical_bytes": 832
+    },
+    {
+      "path": "shard-0/segment-1-1-0.log",
+      "bytes": 5225,
+      "sha256": "a3c4fd2ec1d7eb38d7595dff6943679fd47217b2d19aaedc48b1eaa93d5641da",
+      "allocated_bytes": 8192,
+      "logical_bytes": 5225
+    },
+    {
+      "path": "shard-0/segment-1-1-1.log",
+      "bytes": 3801,
+      "sha256": "3ab60be06dfd39c268aa9c5bbd47f8fec28b45e45d3fc2049e17475dfd61c403",
+      "allocated_bytes": 4096,
+      "logical_bytes": 3801
+    },
+    {
+      "path": "shard-0/segment-1-1-2.log",
+      "bytes": 405,
+      "sha256": "0a60144a65c9a32bd7222f7c93edf8d1864b37c3db2254ae940008ca3fb2d593",
+      "allocated_bytes": 408,
+      "logical_bytes": 405
+    },
+    {
+      "path": "shard-0/segment-2-2-0.log",
+      "bytes": 168,
+      "sha256": "d0c1a6a8ed297d88d6d599313eac98196a139f7d870611c02c731ecf2804c670",
+      "allocated_bytes": 168,
+      "logical_bytes": 168
+    },
+    {
+      "path": "shard-0/segment-2-2-1.log",
+      "bytes": 1598,
+      "sha256": "c937320a33c33790f123a6474e58516c612f9f4f26838038c8d9c063448f110f",
+      "allocated_bytes": 4096,
+      "logical_bytes": 1598
+    },
+    {
+      "path": "shard-0/snapshot-1-1-26-dce33cc3a30bcbb1fda5836cc7dff44a14fc499037871bf18f2f7be76fe9ab37.bin",
+      "bytes": 744510,
+      "sha256": "fab2ea3bdb6edf5444d10b6e8051ab04664f5fcbcfdeb923b6369ffe367ebd55",
+      "allocated_bytes": 745472,
+      "logical_bytes": 744510
+    },
+    {
+      "path": "shard-0/snapshot-1-1-38-9786f41d563c2a32c00acedbc35c74265c28225ee89ffa681cc0a90db6ae7d4e.bin",
+      "bytes": 747130,
+      "sha256": "e85b9ec1a5ff18ceb33b154e089f7f597ecf939fab8c0510e58820d41b458f87",
+      "allocated_bytes": 749568,
+      "logical_bytes": 747130
+    },
+    {
+      "path": "shard-0/snapshot-2-2-1-1ba28d3bee0d072aed57a12bd067ff90af736f2ff602c55c3eed97b296c9a538.bin",
+      "bytes": 188,
+      "sha256": "f7b83606ee45436713bd228e923f8fa96d307c866fcd9aae9e6a83bd8a1c04c9",
+      "allocated_bytes": 192,
+      "logical_bytes": 188
+    }
+  ],
+  "memory_samples": [
+    {
+      "elapsed_ns": 62412200,
+      "working_set_bytes": 81920,
+      "peak_working_set_bytes": 86016
+    },
+    {
+      "elapsed_ns": 162873800,
+      "working_set_bytes": 104558592,
+      "peak_working_set_bytes": 104562688
+    },
+    {
+      "elapsed_ns": 263778500,
+      "working_set_bytes": 181030912,
+      "peak_working_set_bytes": 181035008
+    },
+    {
+      "elapsed_ns": 370932100,
+      "working_set_bytes": 197177344,
+      "peak_working_set_bytes": 197181440
+    },
+    {
+      "elapsed_ns": 493852400,
+      "working_set_bytes": 197951488,
+      "peak_working_set_bytes": 197955584
+    },
+    {
+      "elapsed_ns": 594803300,
+      "working_set_bytes": 217280512,
+      "peak_working_set_bytes": 217284608
+    },
+    {
+      "elapsed_ns": 724107800,
+      "working_set_bytes": 220049408,
+      "peak_working_set_bytes": 220053504
+    },
+    {
+      "elapsed_ns": 837029800,
+      "working_set_bytes": 220053504,
+      "peak_working_set_bytes": 220057600
+    },
+    {
+      "elapsed_ns": 940363500,
+      "working_set_bytes": 220065792,
+      "peak_working_set_bytes": 220069888
+    },
+    {
+      "elapsed_ns": 1044095500,
+      "working_set_bytes": 220082176,
+      "peak_working_set_bytes": 220086272
+    },
+    {
+      "elapsed_ns": 1149834100,
+      "working_set_bytes": 220119040,
+      "peak_working_set_bytes": 220123136
+    },
+    {
+      "elapsed_ns": 1250116600,
+      "working_set_bytes": 220205056,
+      "peak_working_set_bytes": 220209152
+    },
+    {
+      "elapsed_ns": 1356672500,
+      "working_set_bytes": 253865984,
+      "peak_working_set_bytes": 253870080
+    },
+    {
+      "elapsed_ns": 1468128100,
+      "working_set_bytes": 220368896,
+      "peak_working_set_bytes": 253870080
+    },
+    {
+      "elapsed_ns": 1592019200,
+      "working_set_bytes": 221106176,
+      "peak_working_set_bytes": 253870080
+    },
+    {
+      "elapsed_ns": 1734824500,
+      "working_set_bytes": 221294592,
+      "peak_working_set_bytes": 253870080
+    },
+    {
+      "elapsed_ns": 1897745800,
+      "working_set_bytes": 221323264,
+      "peak_working_set_bytes": 253870080
+    },
+    {
+      "elapsed_ns": 2005010400,
+      "working_set_bytes": 221323264,
+      "peak_working_set_bytes": 253870080
+    },
+    {
+      "elapsed_ns": 2106039400,
+      "working_set_bytes": 234721280,
+      "peak_working_set_bytes": 253870080
+    },
+    {
+      "elapsed_ns": 2206880100,
+      "working_set_bytes": 246042624,
+      "peak_working_set_bytes": 253870080
+    },
+    {
+      "elapsed_ns": 2307831600,
+      "working_set_bytes": 32768,
+      "peak_working_set_bytes": 253870080
+    }
+  ],
+  "allocated_byte_scope": "regular dataset files only; excludes directory/MFT/journal overhead"
+}

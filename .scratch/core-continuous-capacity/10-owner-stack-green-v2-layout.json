@@ -1,0 +1,32 @@
+{
+  "artifact": "D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\10-owner-stack-green-app-v2.exe",
+  "artifact_sha256": "b1ab4ecf349fe54b01c3bfed7250336177f6d9e7a74a8e4e5a9c4987c7f62d3c",
+  "pe_stack_reserve_bytes": 67108864,
+  "source_files": {
+    "src\\demo_authority.zig": "678bdc5f9a7bf4fdf8e2ab78638749ed623bcad9281edc9da13bc8f6a02bf6b7",
+    "src\\trading_shard.zig": "8e67bd0dedf0ab02ae96ae947ff72b9ed1de755d6dbfd6aef4bf4e4b608b6e2d"
+  },
+  "static_frames": [
+    {
+      "function": "demo_authority.Owner.apply",
+      "frame_bytes": 128896
+    },
+    {
+      "function": "demo_authority.Owner.applyCommittedCandidate",
+      "frame_bytes": 22860536
+    },
+    {
+      "function": "trading_shard.TradingShard.qualifyAndConfirmReplacement",
+      "frame_bytes": 22714328
+    },
+    {
+      "function": "trading_shard.TradingShard.confirmPendingReplacement",
+      "frame_bytes": 424
+    },
+    {
+      "function": "trading_shard.TradingShard.applyVenue",
+      "frame_bytes": 22662984
+    }
+  ],
+  "scope": "static per-function reservation only; runtime peak stack not measured"
+}
