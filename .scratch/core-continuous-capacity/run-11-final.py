@@ -36,7 +36,8 @@ def main():
     frozen = capture.source_manifest()
     dependencies = ('run-07-command.py', 'run-10-command.py', 'run-10-file-processes.py',
                     'run-11-final.py', 'audit-11-final.py', 'audit-11-processes.py',
-                    'collect-11-host.py', 'probe-11-adapter.py', '11-linux-host.json', '11-test-runner.zig', '11-test-runner-origin.json')
+                    'collect-11-host.py', 'probe-11-adapter.py', 'test-11-content-identity.py',
+                    '11-linux-host.json', '11-test-runner.zig', '11-test-runner-origin.json')
     producers = {name: capture.sha(OUT / name) for name in dependencies}
     identity = {**frozen, 'baseline_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
                 'branch': subprocess.check_output(['git', 'branch', '--show-current'], cwd=ROOT, text=True).strip(),

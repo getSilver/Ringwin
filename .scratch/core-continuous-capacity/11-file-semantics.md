@@ -24,6 +24,6 @@
 
 旧测试直接把tmpDir目录注入FileAdapter时也必须使用iterate=true；17个Store与2个Owner夹具已同步此合同，不能靠恢复BADF静默回退让它们变绿。
 
-/proc/PID/status每100ms采样直接子进程VmRSS；VmHWM在WSL1为0，按不可用保留，不冒充OS峰值。stat.st_blocks对非空文件返回0，allocated bytes记录null，另保留raw_st_blocks；logical bytes与所有文件SHA仍可检查。队列仅为命令结束时resident样本，瞬态高水位、实际栈峰值、索引成本及apply/commit p99未测。
+/proc/PID/status每100ms采样直接子进程VmRSS；VmHWM在WSL1为0，按不可用保留，不冒充OS峰值。stat.st_blocks曾对非空文件返回0，也可在内容完全不变时由非零值继续变化；逐文件保留raw_st_blocks和可用allocated bytes，缺项聚合为null。恢复内容身份仅比较路径、长度和SHA，不能把动态分配量当作内容；logical bytes与所有文件SHA仍可检查。队列仅为命令结束时resident样本，瞬态高水位、实际栈峰值、索引成本及apply/commit p99未测。
 
 每个业务夹具跨全部分片live/terminal各不超过100。千单容量、压力、RSS/资源预算、目标平台性能、磁盘掉电、转储保护、真实NodeFence和Linux生产资格均deferred或not_run。WSL结果只交接开发文件功能，不关闭production-readiness专项资格。

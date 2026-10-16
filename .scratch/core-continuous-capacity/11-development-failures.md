@@ -14,4 +14,6 @@
 
 最终v1（source2395154d）已构建应用/CLI并通过实际adapter同步探针。全量前补查旧Store测试发现其直接借用tmpDir(.{})的O_PATH句柄；公共Store指定回归实际red=DirectorySyncFailed，修复17个Store和2个Owner临时目录选项后green=1/1。v1在app第一轮恢复时因该源码变更命中漂移保护停止，原始run-state/result/log与冻结source.zip保留；ReleaseSafe/Debug完整套件均未启动。新候选source ad5437cd另以v2重新冻结，不能承接v1半程结果。
 
-本地旧binary、物理数据和原始日志不清理。目标断电、真实syscall内随机终止、真实磁盘ENOSPC/EIO、千单容量/压力、OS峰值RSS、allocated disk、实际线程栈峰值、索引成本、真实NodeFence、dump和Linux生产资格均未运行或未测。成功、失败和not_run不能合并成“全部通过”。
+最终v2（核心source ad5437cd）应用30进程全部退出成功，十轮、两次SIGKILL及500组合均通过；随后物理审计错误地把allocation观测计入内容身份而报Retained physical dataset drift。五个数据集路径/长度/SHA均一致，选中的末记录也正确；主链order-history.objects长度205348且SHA不变，allocated bytes可由229376/262144收敛到208896。见11-final-v2-allocation-diagnosis.json及11-allocation-real-regression.json。修复只涉及采集/审计：内容身份比较路径/长度/SHA，继续完整保留raw allocation。3条独立回归实际red→green，真实五数据集回放通过且同长度内容损坏仍拒绝。v2的CLI链与完整ReleaseSafe/Debug均未执行；另以v3冻结新的producer，不回写v2身份或承接其半程资格。
+
+本地旧binary、物理数据和原始日志不清理。目标断电、真实syscall内随机终止、真实磁盘ENOSPC/EIO、千单容量/压力、OS峰值RSS、完整allocated disk、实际线程栈峰值、索引成本、真实NodeFence、dump和Linux生产资格均未运行或未测。成功、失败和not_run不能合并成“全部通过”。

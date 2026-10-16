@@ -43,7 +43,7 @@ def main():
             else:
                 processes.validate(report, step['mode'], report['round'])
             if step['mode'] == 'recover':
-                assert step['files_before'] == step['files_after']
+                assert processes.same_file_content(step['files_before'], step['files_after'])
         checks.append(label)
     # Last command for each dataset is selected by recorded finish time, not filename.
     steps = sorted((json.loads(p.read_text()) for p in evidence.glob('*.result.json')),
@@ -51,7 +51,7 @@ def main():
     for step in steps:
         final_files[step['command'][-1]] = step['files_after']
     for directory, expected in final_files.items():
-        assert processes.inventory(Path(directory)) == expected, 'Retained physical dataset drift'
+        assert processes.same_file_content(processes.inventory(Path(directory)), expected), 'Retained physical dataset drift'
         checks.append('physical:' + directory)
     reports = json.loads((evidence / 'reports.json').read_text())
     assert len(reports) == 11

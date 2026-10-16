@@ -79,7 +79,7 @@ def main():
             checks.append(label + ':' + step['label'])
         rows = [json.loads(line) for line in (evidence / 'samples.jsonl').read_text().splitlines()]
         resources.append({'artifact': label, 'sampled_rss_max_bytes': max((r['working_set_sampled_max'] for r in rows if r['working_set_sampled_max'] is not None), default=None),
-                          'os_peak_rss': 'unavailable on WSL1', 'allocated_regular_file_bytes': 'unavailable: WSL1 st_blocks=0',
+                          'os_peak_rss': 'unavailable on WSL1', 'allocated_regular_file_bytes': 'partial/mutable WSL1 allocation observations; see raw samples',
                           'main_chain_seed_bytes': rows[0]['logical_dataset_bytes'],
                           'actual_stack_peak': 'not_measured', 'queue_high_water': 'not_measured; only end-of-command samples',
                           'resources_performance_qualified': False})

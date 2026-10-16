@@ -85,6 +85,14 @@ def inventory(directory):
     return result
 
 
+def same_file_content(left, right):
+    # Filesystem allocation is an observation, not durable content identity.
+    # WSL1 may finalize allocation after a writer exits without changing bytes.
+    def content(files):
+        return sorted((row['path'], row['bytes'], row['sha256']) for row in files)
+    return content(left) == content(right)
+
+
 def verify_artifact(path, expected):
     actual = sha(path)
     if actual != expected:
@@ -303,7 +311,7 @@ def main():
         if code != 0:
             raise RuntimeError(label + ' failed; original logs and dataset retained')
         report = json.loads(stem.with_suffix('.stdout.log').read_text(encoding='utf-8-sig'))
-        if mode == 'recover' and before != after:
+        if mode == 'recover' and not same_file_content(before, after):
             raise RuntimeError('Recovery changed physical dataset bytes')
         if capture.source_manifest() != frozen:
             raise RuntimeError('Source drift during command')
@@ -355,7 +363,7 @@ def main():
         verify_artifact(artifact, '0' * 64)
     except RuntimeError as error:
         assert str(error).startswith('ArtifactIdentityMismatch:')
-        assert inventory(dataset) == before_mismatch
+        assert same_file_content(inventory(dataset), before_mismatch)
         faults.append({'case': 'launcher-artifact-sha-mismatch', 'result': 'rejected_before_launch',
                        'child_launched': False, 'dataset_changed': False})
     else:
