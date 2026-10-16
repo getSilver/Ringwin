@@ -1903,7 +1903,7 @@ test "order history public store publish query verifies same conflict and covere
 test "order history public file store reopens the same authenticated root and duplicate body" {
     const h = business_history;
     const allocator = std.testing.allocator;
-    var temp = std.testing.tmpDir(.{});
+    var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
     const io = std.testing.io;
     const first = try allocator.create(LinuxFileAdapter);
@@ -1973,7 +1973,7 @@ fn publishHistoryTestCommand(store: Store, io: std.Io, origin: business_history.
 }
 
 test "order history file virgin absence keeps admission open but missing published objects closes it" {
-    var temp = std.testing.tmpDir(.{});
+    var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
     const adapter = try std.testing.allocator.create(LinuxFileAdapter);
     defer std.testing.allocator.destroy(adapter);
@@ -1990,7 +1990,7 @@ test "order history file virgin absence keeps admission open but missing publish
 }
 
 test "order history file missing root cannot bootstrap over existing objects" {
-    var temp = std.testing.tmpDir(.{});
+    var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
     const io = std.testing.io;
     const adapter = try std.testing.allocator.create(LinuxFileAdapter);
@@ -2007,7 +2007,7 @@ test "order history file missing root cannot bootstrap over existing objects" {
 
 test "order history file frozen previous root may prove duplicate but cannot prove fresh" {
     const h = business_history;
-    var temp = std.testing.tmpDir(.{});
+    var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
     const io = std.testing.io;
     const adapter = try std.testing.allocator.create(LinuxFileAdapter);
@@ -2031,7 +2031,7 @@ test "order history file publication fault boundaries reopen a complete old or n
     const io = std.testing.io;
     const points = [_]FaultPoint{ .append, .archive_sync, .snapshot_sync, .root_publish, .commit };
     for (points) |point| {
-        var temp = std.testing.tmpDir(.{});
+        var temp = std.testing.tmpDir(.{ .iterate = true });
         defer temp.cleanup();
         const adapter = try std.testing.allocator.create(LinuxFileAdapter);
         defer std.testing.allocator.destroy(adapter);
@@ -2076,7 +2076,7 @@ test "order history file physical root damage missing object and truncated page 
     const io = std.testing.io;
     const Damage = enum { root_truncated, root_corrupt, objects_missing, objects_truncated, page_corrupt, record_corrupt };
     for (std.enums.values(Damage)) |damage| {
-        var temp = std.testing.tmpDir(.{});
+        var temp = std.testing.tmpDir(.{ .iterate = true });
         defer temp.cleanup();
         const adapter = try std.testing.allocator.create(LinuxFileAdapter);
         defer std.testing.allocator.destroy(adapter);
@@ -2124,7 +2124,7 @@ test "order history file physical root damage missing object and truncated page 
 test "order history file isolates eight owner origins and rejects foreign root requests" {
     const h = business_history;
     const io = std.testing.io;
-    var temp = std.testing.tmpDir(.{});
+    var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
     const adapter = try std.testing.allocator.create(LinuxFileAdapter);
     defer std.testing.allocator.destroy(adapter);
@@ -2495,7 +2495,7 @@ const CountSegments = struct {
 };
 
 test "checkpoint store local file 100 rotations retain audit and two snapshot generations" {
-    var temp = std.testing.tmpDir(.{});
+    var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
     const io = std.testing.io;
     const stream: StreamIdentity = .{ .domain = .decision_log, .id = 900 };
@@ -2573,7 +2573,7 @@ test "checkpoint store file fault boundaries select complete old or new roots" {
     const faults = [_]Fault{ .short_write, .sync_timeout, .enospc, .eio, .corruption };
     const points = [_]FaultPoint{ .append, .commit, .seal, .publish, .rotate, .snapshot_sync, .archive_sync, .root_publish, .reclaim };
     for (faults) |fault| for (points) |point| {
-        var temp = std.testing.tmpDir(.{});
+        var temp = std.testing.tmpDir(.{ .iterate = true });
         defer temp.cleanup();
         const io = std.testing.io;
         const stream: StreamIdentity = .{ .domain = .decision_log, .id = 20 };
@@ -2655,7 +2655,7 @@ test "checkpoint store rejects overflow and conflicting snapshot identity withou
 test "checkpoint store snapshot reclaim commits references before obsolete object deletion" {
     const io = std.testing.io;
     const stream: StreamIdentity = .{ .domain = .decision_log, .id = 77 };
-    var temp = std.testing.tmpDir(.{});
+    var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
     var adapter: LinuxFileAdapter = .{ .dir = temp.dir };
     const store = adapter.interface();
@@ -2693,7 +2693,7 @@ test "checkpoint store snapshot reclaim commits references before obsolete objec
 test "checkpoint store bounded replay reads only requested horizon and rejects byte budget before delivery" {
     const io = std.testing.io;
     const stream: StreamIdentity = .{ .domain = .raw_ingress, .id = 91 };
-    var temp = std.testing.tmpDir(.{});
+    var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
     var adapter: LinuxFileAdapter = .{ .dir = temp.dir };
     const store = adapter.interface();
@@ -2742,7 +2742,7 @@ test "checkpoint store virgin committed journal remains available before first s
     memory.manifest[0].archive_root = @splat(7);
     const invalid_memory = try memory.interface().recover(undefined, stream);
     try std.testing.expectEqual(GateState.closed, invalid_memory.gate);
-    var temp = std.testing.tmpDir(.{});
+    var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
     var file: LinuxFileAdapter = .{ .dir = temp.dir };
     try checkVirginCommittedRecovery(file.interface(), std.testing.io, stream);
@@ -2770,7 +2770,7 @@ test "checkpoint store archived replay remains stable across callback writes to 
     const io = std.testing.io;
     const raw: StreamIdentity = .{ .domain = .raw_ingress, .id = 120 };
     const decision: StreamIdentity = .{ .domain = .decision_log, .id = 121 };
-    var temp = std.testing.tmpDir(.{});
+    var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
     var adapter: LinuxFileAdapter = .{ .dir = temp.dir };
     const store = adapter.interface();
@@ -2860,7 +2860,7 @@ test "checkpoint store rejects unknown journal schema despite valid frame manife
     const unknown = try memory.interface().recover(undefined, stream);
     try std.testing.expectEqual(RecoveryStatus.recovery_only, unknown.status);
     try std.testing.expectEqual(GateState.closed, unknown.gate);
-    var temp = std.testing.tmpDir(.{});
+    var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
     var file: LinuxFileAdapter = .{ .dir = temp.dir };
     try prepareSchemaRecoveryFixture(file.interface(), std.testing.io, stream);
@@ -2877,7 +2877,7 @@ test "checkpoint store publishes after fallback while preserving two valid gener
     const stream: StreamIdentity = .{ .domain = .decision_log, .id = 150 };
     var memory = MemoryAdapter.initWithAllocator(std.testing.allocator);
     defer memory.deinit();
-    var temp = std.testing.tmpDir(.{});
+    var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
     var file: LinuxFileAdapter = .{ .dir = temp.dir };
     const stores = [_]Store{ memory.interface(), file.interface() };
@@ -2932,7 +2932,7 @@ test "large resident snapshots survive memory publication and two file reopens" 
     try memory.interface().seal(undefined, stream);
     try memory.interface().publishSnapshot(undefined, stream, 1, bytes);
     try std.testing.expectEqualSlices(u8, bytes, (try memory.interface().recover(undefined, stream)).snapshot);
-    var temp = std.testing.tmpDir(.{});
+    var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
     const file = try allocator.create(LinuxFileAdapter);
     defer allocator.destroy(file);
@@ -2970,7 +2970,7 @@ test "committed recovery prefix retains physical uncommitted suffix across file 
     defer allocator.destroy(memory);
     memory.* = .initWithAllocator(allocator);
     defer memory.deinit();
-    var temp = std.testing.tmpDir(.{});
+    var temp = std.testing.tmpDir(.{ .iterate = true });
     defer temp.cleanup();
     const file = try allocator.create(LinuxFileAdapter);
     defer allocator.destroy(file);

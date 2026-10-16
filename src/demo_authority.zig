@@ -1424,7 +1424,7 @@ test "Checkpoint owner file interruptions preserve coherent Unknown fill economi
             const io = std.testing.io;
             const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 903 };
             const input = @import("trading_shard_fixture.zig").atGroup(900, .{ .identity = 900, .payload = .{ .mark_price = .{ .instrument = 3, .price_atoms = 50_000_001_000 } } });
-            var reference_temp = std.testing.tmpDir(.{});
+            var reference_temp = std.testing.tmpDir(.{ .iterate = true });
             defer reference_temp.cleanup();
             const reference = try std.testing.allocator.create(durable.LinuxFileAdapter);
             defer std.testing.allocator.destroy(reference);
@@ -1471,7 +1471,7 @@ test "Checkpoint owner file interruptions preserve coherent Unknown fill economi
             const faults = [_]durable.Fault{ .short_write, .sync_timeout, .enospc, .eio, .corruption };
             for (faults) |fault| for (cases, 0..) |case, case_index| {
                 std.debug.print("owner_file_fault: {s} case={d} point={s} skip={d}\n", .{ @tagName(fault), case_index, @tagName(case.point), case.skip });
-                var temp = std.testing.tmpDir(.{});
+                var temp = std.testing.tmpDir(.{ .iterate = true });
                 defer temp.cleanup();
                 const adapter = try std.testing.allocator.create(durable.LinuxFileAdapter);
                 defer std.testing.allocator.destroy(adapter);
