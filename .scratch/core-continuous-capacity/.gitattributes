@@ -21,3 +21,14 @@ frontier09-*.log binary
 10-*/**/*.md whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 *-10-*.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 *-10-*.ps1 -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+# Frontier 11 binds Linux/native evidence bytes and frozen harness hashes.
+11-*.log binary
+11-*/**/*.log binary
+11-*.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+11-*.jsonl -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+11-*/**/*.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+11-*/**/*.jsonl -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+11-*.md whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+11-*/**/*.md whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+*-11-*.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+11-*.zig -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
