@@ -1011,7 +1011,8 @@ pub const LinuxFileAdapter = struct {
             error.PathAlreadyExists => {},
             else => return err,
         };
-        self.dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{});
+        // Linux needs an actual directory descriptor for fsync, not O_PATH.
+        self.dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{ .iterate = builtin.os.tag == .linux });
     }
 
     fn openPath(io: std.Io, absolute_path: []const u8) !LinuxFileAdapter {
@@ -1019,7 +1020,7 @@ pub const LinuxFileAdapter = struct {
             error.PathAlreadyExists => {},
             else => return err,
         };
-        return .{ .dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{}) };
+        return .{ .dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{ .iterate = builtin.os.tag == .linux }) };
     }
 
     pub fn deinit(self: *LinuxFileAdapter) void {
@@ -1860,7 +1861,7 @@ fn syncDirectory(dir: std.Io.Dir) !void {
         // Legacy WSL1 exposes a directory handle but rejects fsync(dir).
         // Target Linux uses the branch above; the fallback keeps native WSL
         // acceptance useful without hiding a file-sync failure.
-        .INVAL, .BADF, .OPNOTSUPP => std.posix.sync(),
+        .INVAL, .OPNOTSUPP => std.posix.sync(),
         else => return error.DirectorySyncFailed,
     };
     if (builtin.os.tag == .windows) {

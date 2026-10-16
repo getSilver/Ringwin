@@ -28,7 +28,7 @@ def main():
         assert path.stat().st_size == item['bytes']
         checks.append('ELF:' + item['name'])
     captures = sorted(OUT.glob(prefix + '-*.result.json'))
-    assert len(captures) == 12, 'Expected eight orchestration captures plus four test build/run captures'
+    assert len(captures) == 13, 'Expected 13 build/probe/process/audit/test captures'
     for path in captures:
         record = json.loads(path.read_text())
         assert record['exit_code'] == 0 and not record['timed_out'] and record['capture_error'] is None, str(path)
@@ -57,6 +57,14 @@ def main():
         assert sum(f['mode'] == mode for f in faults) == 18
         checks.append('suite:' + mode)
     resources = []
+    adapter_evidence = OUT / (prefix + '-adapter-evidence')
+    adapter = json.loads((adapter_evidence / 'result.json').read_text())
+    assert adapter['passed'] and adapter['global_sync_fallbacks'] == 0 and not adapter['failed_syscalls']
+    assert adapter['source_tree_sha256'] == frozen['source_tree_sha256']
+    assert adapter['artifact_sha256'] == next(a['sha256'] for a in artifacts if a['name'] == prefix + '-app')
+    for name, digest in adapter['logs'].items():
+        assert base.sha(adapter_evidence / name) == digest
+    checks.append('actual-adapter-directory-fsync')
     for label in ('app', 'cli'):
         evidence = OUT / (prefix + '-' + label + '-evidence')
         audit = json.loads((evidence / 'audit.json').read_text())

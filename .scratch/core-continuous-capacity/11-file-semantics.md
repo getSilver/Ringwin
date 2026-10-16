@@ -8,7 +8,7 @@
 
 `LinuxFileAdapter` 保持文件同步→同目录 rename→目录同步协议，manifest/snapshot/历史根仍验证 schema、CRC、内容摘要、连续区间与已提交屏障。错误经 Store gate、Owner 和 Gateway 失败关闭；不变更 schema39/43/37 或 artifact identity1。
 
-实际探针 file fsync、same-FS replace、directory fsync 和重开均通过。代码中的 `syncDirectory` 对 IO/NOSPC/ROFS 返回错误；旧 WSL1 目录 fsync 若返回 INVAL/BADF/OPNOTSUPP，仍走原有 sync() fallback。探针成功不能证明该 fallback 的目标节点耐久性；断电、设备缓存及目标 ext4/xfs 同步资格均未取得。
+实际探针 file fsync、same-FS replace、directory fsync 和重开均通过。代码中的 `syncDirectory` 对 IO/NOSPC/ROFS 返回错误；旧 WSL1 目录 fsync 若返回 INVAL/OPNOTSUPP，仍走原有 sync() fallback。实际adapter的旧strace曾暴露O_PATH目录句柄导致EBADF。修复initPath/openPath以Linux-only iterate=true获取可同步目录fd，BADF现在直接失败关闭。普通探针不冒充adapter同步证明，最终另以实际应用seed的strace逐一验证四片及Coordinator目录fsync成功且无sync()回退。探针成功不能证明目标节点耐久性；断电、设备缓存及目标 ext4/xfs 同步资格均未取得。
 
 文件长度原先依赖标准库 statx，旧 WSL1 不支持，真实回归返回 Unexpected。历史私有同步 handle 改用 lseek(CUR/END/SET)，恢复原偏移，所有错误继续关闭；报告的独立只读 handle 同样以 lseek 观察长度。无 objects 时以 no-follow open 检查 roots 是否存在，缺两文件才报告 OrderHistoryUnavailable，已发布根缺 objects 仍关闭。没有将未知错误当作不存在。
 
