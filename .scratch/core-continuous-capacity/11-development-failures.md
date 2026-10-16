@@ -12,4 +12,6 @@
 - `11-adapter-v3`旧strace：真实adapter目录fsync返回EBADF，随后走全局sync。根因是固定标准库对不迭代的目录打开使用O_PATH；普通Python目录探针成功不能证明此路径正确。后续修复Linux目录打开为iterate=true，BADF不再静默回退，并新增真实adapter syscall审计。
 - 双轴初审Spec发现最终导出路径转换匹配了双反斜线，未正确转换Windows单反斜线路径。采用已明确的WSL_OUT拼接路径修复；在运行最终流水线之前完成。
 
+最终v1（source2395154d）已构建应用/CLI并通过实际adapter同步探针。全量前补查旧Store测试发现其直接借用tmpDir(.{})的O_PATH句柄；公共Store指定回归实际red=DirectorySyncFailed，修复17个Store和2个Owner临时目录选项后green=1/1。v1在app第一轮恢复时因该源码变更命中漂移保护停止，原始run-state/result/log与冻结source.zip保留；ReleaseSafe/Debug完整套件均未启动。新候选source ad5437cd另以v2重新冻结，不能承接v1半程结果。
+
 本地旧binary、物理数据和原始日志不清理。目标断电、真实syscall内随机终止、真实磁盘ENOSPC/EIO、千单容量/压力、OS峰值RSS、allocated disk、实际线程栈峰值、索引成本、真实NodeFence、dump和Linux生产资格均未运行或未测。成功、失败和not_run不能合并成“全部通过”。
