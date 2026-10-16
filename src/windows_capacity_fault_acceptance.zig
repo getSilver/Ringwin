@@ -1,4 +1,4 @@
-//! Ticket 10: small Windows file Owner/Gateway faults, with no network or credentials.
+//! Tickets 10/11: small native file Owner/Gateway faults, with no network or credentials.
 const std = @import("std");
 const builtin = @import("builtin");
 const durable = @import("durable_store.zig");
@@ -16,15 +16,15 @@ fn place(sequence: u64) trading.oms.IntentGroup {
     return group;
 }
 
-fn openFile(path: []const u8) !*durable.WindowsFileAdapter {
-    const adapter = try std.testing.allocator.create(durable.WindowsFileAdapter);
+fn openFile(path: []const u8) !*durable.LinuxFileAdapter {
+    const adapter = try std.testing.allocator.create(durable.LinuxFileAdapter);
     errdefer std.testing.allocator.destroy(adapter);
     @memset(std.mem.asBytes(adapter), 0);
-    try adapter.initWindowsVerification(std.testing.io, path);
+    if (builtin.os.tag == .linux) try adapter.initLinux(std.testing.io, path) else try adapter.initWindowsVerification(std.testing.io, path);
     return adapter;
 }
 
-fn closeFile(adapter: *durable.WindowsFileAdapter) void {
+fn closeFile(adapter: *durable.LinuxFileAdapter) void {
     adapter.close(std.testing.io);
     std.testing.allocator.destroy(adapter);
 }
@@ -132,8 +132,8 @@ fn expectState(actual: *const trading.TradingShard, expected: *const trading.Tra
     }
 }
 
-test "Windows capacity faults recover complete partial Fill economics reservations and Unknown without sends" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+test "Native file capacity faults recover complete partial Fill economics reservations and Unknown without sends" {
+    if (builtin.os.tag != .windows and builtin.os.tag != .linux) return error.SkipZigTest;
     const Case = struct { point: durable.FaultPoint, fault: durable.Fault, apply: bool = false, skip: usize = 0 };
     const cases = [_]Case{
         .{ .point = .append, .fault = .short_write, .apply = true },
@@ -152,7 +152,7 @@ test "Windows capacity faults recover complete partial Fill economics reservatio
         const path = path_buffer[0..try temp.dir.realPath(std.testing.io, &path_buffer)];
         var completed = false;
         defer if (completed) temp.cleanup() else std.debug.print("windows_capacity_failed_directory={s}\n", .{path});
-        var adapter: ?*durable.WindowsFileAdapter = try openFile(path);
+        var adapter: ?*durable.LinuxFileAdapter = try openFile(path);
         defer if (adapter) |value| closeFile(value);
         const harness = try FileHarness.create(adapter.?.interface(), true);
         defer harness.destroy();
@@ -204,7 +204,7 @@ test "Windows capacity faults recover complete partial Fill economics reservatio
 }
 
 fn publishIncompatible(context: *anyopaque, io: std.Io, stream: durable.StreamIdentity, barrier: u64, bytes: []const u8, comptime artifact: bool) !void {
-    const adapter: *durable.WindowsFileAdapter = @ptrCast(@alignCast(context));
+    const adapter: *durable.LinuxFileAdapter = @ptrCast(@alignCast(context));
     const changed = try std.testing.allocator.dupe(u8, bytes);
     defer std.testing.allocator.free(changed);
     // Publish through the real file Store so its object hash and root certify
@@ -227,8 +227,8 @@ fn publishForeignArtifact(context: *anyopaque, io: std.Io, stream: durable.Strea
     try publishIncompatible(context, io, stream, barrier, bytes, true);
 }
 
-test "Windows capacity file reopen rejects missing corrupt and authenticated incompatible authority" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+test "Native file capacity file reopen rejects missing corrupt and authenticated incompatible authority" {
+    if (builtin.os.tag != .windows and builtin.os.tag != .linux) return error.SkipZigTest;
     const Damage = enum { missing_segment, corrupt_segment, truncate_segment, corrupt_manifest, old_schema, foreign_artifact };
     for ([_]Damage{ .missing_segment, .corrupt_segment, .truncate_segment, .corrupt_manifest, .old_schema, .foreign_artifact }) |damage| {
         var temp = std.testing.tmpDir(.{});
@@ -236,7 +236,7 @@ test "Windows capacity file reopen rejects missing corrupt and authenticated inc
         const path = path_buffer[0..try temp.dir.realPath(std.testing.io, &path_buffer)];
         var completed = false;
         defer if (completed) temp.cleanup() else std.debug.print("windows_capacity_failed_directory={s}\n", .{path});
-        var adapter: ?*durable.WindowsFileAdapter = try openFile(path);
+        var adapter: ?*durable.LinuxFileAdapter = try openFile(path);
         defer if (adapter) |value| closeFile(value);
         const harness = try FileHarness.create(adapter.?.interface(), true);
         defer harness.destroy();
@@ -286,15 +286,15 @@ test "Windows capacity file reopen rejects missing corrupt and authenticated inc
     }
 }
 
-test "Windows capacity Gateway checkpoint faults preserve accepted proofs and never resend Unknown" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+test "Native file capacity Gateway checkpoint faults preserve accepted proofs and never resend Unknown" {
+    if (builtin.os.tag != .windows and builtin.os.tag != .linux) return error.SkipZigTest;
     for ([_]durable.FaultPoint{ .snapshot_sync, .root_publish, .reclaim }) |point| {
         var temp = std.testing.tmpDir(.{});
         var path_buffer: [1024]u8 = undefined;
         const path = path_buffer[0..try temp.dir.realPath(std.testing.io, &path_buffer)];
         var completed = false;
         defer if (completed) temp.cleanup() else std.debug.print("windows_capacity_failed_directory={s}\n", .{path});
-        var adapter: ?*durable.WindowsFileAdapter = try openFile(path);
+        var adapter: ?*durable.LinuxFileAdapter = try openFile(path);
         defer if (adapter) |value| closeFile(value);
         const harness = try FileHarness.create(adapter.?.interface(), false);
         defer harness.destroy();

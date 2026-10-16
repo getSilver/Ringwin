@@ -1,4 +1,4 @@
-"""Bounded native Windows FileAdapter scenario using fresh executable processes.
+"""Bounded native Windows/Linux FileAdapter scenario using fresh executable processes.
 
 Only creates a new task directory. Never cleans, deletes, or writes another dataset.
 The executable remains the repo application, not a separate control plane.
@@ -29,12 +29,32 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def baseline_commit():
+    command = ['git']
+    git_file = ROOT / '.git'
+    if sys.platform == 'linux' and git_file.is_file():
+        entry = git_file.read_text().strip()
+        if not entry.startswith('gitdir: '):
+            raise ValueError('Invalid worktree gitdir metadata')
+        directory = entry[len('gitdir: '):]
+        directory = directory.replace('\\', '/')
+        if len(directory) > 2 and directory[1] == ':':
+            directory = '/mnt/' + directory[0].lower() + directory[2:]
+        command.append('--git-dir=' + directory)
+    return subprocess.check_output(command + ['rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+
+
 class FileStandardInfo(ctypes.Structure):
     _fields_ = [('AllocationSize', ctypes.c_longlong), ('EndOfFile', ctypes.c_longlong),
                 ('NumberOfLinks', wintypes.DWORD), ('DeletePending', ctypes.c_ubyte), ('Directory', ctypes.c_ubyte)]
 
 
 def allocated_size(path):
+    if sys.platform == 'linux':
+        info = path.stat()
+        return {'allocated_bytes': info.st_blocks * 512 if info.st_blocks or not info.st_size else None,
+                'raw_st_blocks': info.st_blocks, 'logical_bytes': info.st_size,
+                'allocation_api': 'stat.st_blocks; WSL1 may report zero (unavailable)'}
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
     kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
                                   wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
@@ -178,34 +198,39 @@ def main():
     parser.add_argument('--expected-sha256', required=True)
     parser.add_argument('--prefix', required=True)
     parser.add_argument('--smoke', action='store_true')
+    parser.add_argument('--data-root', type=Path, help='Linux requires a new evidence directory on its own filesystem')
     args = parser.parse_args()
-    if os.name != 'nt':
-        raise RuntimeError('Native Windows required')
+    linux = sys.platform == 'linux'
+    if os.name != 'nt' and not linux:
+        raise RuntimeError('Native Windows or Linux required')
+    if linux and (args.data_root is None or not args.data_root.is_absolute()):
+        raise ValueError('Linux requires an absolute --data-root')
     if not args.prefix or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_' for c in args.prefix):
         raise ValueError('A simple new evidence prefix is required')
     artifact = args.artifact.resolve(strict=True)
     verify_artifact(artifact, args.expected_sha256)
-    evidence = OUT / args.prefix
+    evidence = (args.data_root if linux else OUT) / args.prefix
     if evidence.exists():
         raise FileExistsError('Existing evidence retained: ' + str(evidence))
     evidence.mkdir()
     dataset = evidence / 'store'
     dataset.mkdir()
     frozen = capture.source_manifest()
-    host_path = OUT / '10-windows-host.json'
+    host_path = OUT / ('11-linux-host.json' if linux else '10-windows-host.json')
     producers = {name: sha(OUT / name) for name in
                  ('run-07-command.py', 'run-10-command.py', 'run-10-file-processes.py')}
     identity = {**frozen, 'artifact': str(artifact), 'artifact_sha256': args.expected_sha256,
-                'baseline_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+                'baseline_commit': baseline_commit(),
                 'host_metadata_sha256': sha(host_path), 'producer_sha256': sha(Path(__file__)),
                 'producer_dependencies': producers,
-                'seed': '0x20261008', 'scope': 'development smoke' if args.smoke else 'small native Windows file functionality',
+                'seed': '0x20261008', 'scope': 'development smoke' if args.smoke else 'small native file functionality',
                 'native_platform': platform.platform(), 'production_qualification': False,
                 'power_loss_qualification': False, 'capacity_stress': 'deferred', 'platform_performance': 'deferred'}
     (evidence / 'identity.json').write_text(json.dumps(identity, indent=2) + '\n', encoding='utf-8')
     steps = []
 
-    def run(mode, label, target=None, kill_marker=None, flag='--windows-capacity-file'):
+    def run(mode, label, target=None, kill_marker=None, flag=None):
+        flag = flag or ('--linux-capacity-file' if linux else '--windows-capacity-file')
         target = target or dataset
         verify_artifact(artifact, args.expected_sha256)
         assert all(sha(OUT / name) == digest for name, digest in producers.items()), 'Producer drift'
@@ -217,26 +242,33 @@ def main():
         started = datetime.datetime.now(datetime.timezone.utc).isoformat()
         begin = time.perf_counter_ns()
         samples = []
-        get_memory = ctypes.WinDLL('psapi', use_last_error=True).GetProcessMemoryInfo
-        get_memory.argtypes = [wintypes.HANDLE, ctypes.POINTER(capture.ProcessMemory), wintypes.DWORD]
-        get_memory.restype = wintypes.BOOL
+        get_memory = None
+        if not linux:
+            get_memory = ctypes.WinDLL('psapi', use_last_error=True).GetProcessMemoryInfo
+            get_memory.argtypes = [wintypes.HANDLE, ctypes.POINTER(capture.ProcessMemory), wintypes.DWORD]
+            get_memory.restype = wintypes.BOOL
         with stem.with_suffix('.stdout.log').open('wb') as output, stem.with_suffix('.stderr.log').open('wb') as error:
             command = [str(artifact), flag, mode, str(target)]
             process = subprocess.Popen(command, cwd=ROOT, stdout=output, stderr=error)
             interrupted = False
             timed_out = False
             while True:
-                memory = capture.ProcessMemory()
-                memory.cb = ctypes.sizeof(memory)
-                if get_memory(int(process._handle), ctypes.byref(memory), memory.cb):
-                    samples.append({'elapsed_ns': time.perf_counter_ns() - begin,
-                                    'working_set_bytes': memory.WorkingSetSize,
-                                    'peak_working_set_bytes': memory.PeakWorkingSetSize})
+                if linux:
+                    observation = capture.linux_memory(process.pid, begin)
+                    if observation:
+                        samples.append(observation)
+                else:
+                    memory = capture.ProcessMemory()
+                    memory.cb = ctypes.sizeof(memory)
+                    if get_memory(int(process._handle), ctypes.byref(memory), memory.cb):
+                        samples.append({'elapsed_ns': time.perf_counter_ns() - begin,
+                                        'working_set_bytes': memory.WorkingSetSize,
+                                        'peak_working_set_bytes': memory.PeakWorkingSetSize})
                 code = process.poll()
                 if code is not None:
                     break
                 if kill_marker and kill_marker in stem.with_suffix('.stderr.log').read_bytes().splitlines():
-                    process.terminate()  # Windows TerminateProcess; only this owned child PID.
+                    process.kill()  # Only this owned PID; SIGKILL on Linux, TerminateProcess on Windows.
                     code = process.wait(timeout=30)
                     interrupted = True
                     break
@@ -329,8 +361,8 @@ def main():
     else:
         raise AssertionError('Artifact mismatch was accepted')
     for case in ('power-loss', 'in-syscall-termination', 'memory-dump-protection', 'external-NodeFence',
-                 'thousand-order-capacity-stress', 'Linux-platform-qualification'):
-        faults.append({'case': case, 'result': 'not_run', 'reason': 'outside authorized Windows small functional scope'})
+                 'thousand-order-capacity-stress', 'target-platform-qualification'):
+        faults.append({'case': case, 'result': 'not_run', 'reason': 'outside authorized small functional scope'})
     (evidence / 'faults.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in faults), encoding='utf-8')
     rounds = 1 if args.smoke else 10
     reports = [{'seed': seeded, 'recover': recovered}]
@@ -347,9 +379,10 @@ def main():
     (evidence / 'reports.json').write_text(json.dumps(reports, indent=2) + '\n', encoding='utf-8')
     observation_store = evidence / 'observation-store'
     observation_store.mkdir()
-    observation_seed = run('seed', 'observation-seed', observation_store, flag='--windows-observation-file')
+    observation_flag = '--linux-observation-file' if linux else '--windows-observation-file'
+    observation_seed = run('seed', 'observation-seed', observation_store, flag=observation_flag)
     validate_observation(observation_seed, 'seed')
-    observation_recovered = run('recover', 'observation-recover', observation_store, flag='--windows-observation-file')
+    observation_recovered = run('recover', 'observation-recover', observation_store, flag=observation_flag)
     validate_observation(observation_recovered, 'recover')
     same_authority(observation_seed, observation_recovered)
     (evidence / 'observation-reports.json').write_text(json.dumps(
@@ -383,9 +416,10 @@ def main():
     for step in steps:
         row = {k: step[k] for k in ('label', 'mode', 'pid', 'elapsed_ns', 'exit_code')}
         row.update(logical_dataset_bytes=sum(f['bytes'] for f in step['files_after']),
-                   allocated_regular_file_bytes=sum(f['allocated_bytes'] for f in step['files_after']
-                                                    if f['allocated_bytes'] is not None),
-                   working_set_peak_observed=max((s['peak_working_set_bytes'] for s in step['memory_samples']), default=None),
+                   allocated_regular_file_bytes=(sum(f['allocated_bytes'] for f in step['files_after'])
+                                                 if all(f['allocated_bytes'] is not None for f in step['files_after']) else None),
+                   working_set_sampled_max=max((s['working_set_bytes'] for s in step['memory_samples']), default=None),
+                   working_set_peak_observed=max((s['peak_working_set_bytes'] for s in step['memory_samples'] if s['peak_working_set_bytes'] is not None), default=None),
                    memory_sample_count=len(step['memory_samples']),
                    latency_scope='whole command including file recovery and JSON; not per-apply/commit or p99',
                    thread_stack_actual_peak='not_measured', physical_index_cost='not_measured')
@@ -402,7 +436,7 @@ def main():
         'rounds': rounds, 'steps': len(steps), 'source_tree_sha256': frozen['source_tree_sha256'],
         'production_qualification': False, 'power_loss_qualification': False}, indent=2) + '\n', encoding='utf-8')
     (evidence / 'summary.md').write_text(
-        '# Native Windows file process recovery\n\n'
+        '# Native file process recovery\n\n'
         f'{rounds} sequential archive rounds; {len(steps)} owned child processes; '
         'all ordinary recoveries preserve physical file bytes and full reported authority.\n\n'
         'Before/after durable apply termination selects complete old/new shard-0 authority; '

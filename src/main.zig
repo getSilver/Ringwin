@@ -129,13 +129,23 @@ pub fn main(init: std.process.Init) !void {
             if (args.next() != null) return error.UnknownArgument;
             return durable_store.runWindowsAcceptance(init);
         }
+        if (std.mem.eql(u8, argument, "--linux-capacity-file") or std.mem.eql(u8, argument, "--linux-observation-file")) {
+            if (@import("builtin").os.tag != .linux) return error.LinuxStoreRequired;
+            const mode = args.next() orelse return error.MissingCapacityMode;
+            const path = args.next() orelse return error.MissingStoreDirectory;
+            if (args.next() != null) return error.UnknownArgument;
+            if (std.mem.eql(u8, argument, "--linux-capacity-file")) return windows_capacity_acceptance.run(init, mode, path);
+            return windows_observation_file_acceptance.run(init, mode, path);
+        }
         if (std.mem.eql(u8, argument, "--windows-observation-file")) {
+            if (@import("builtin").os.tag != .windows) return error.WindowsRequired;
             const mode = args.next() orelse return error.MissingCapacityMode;
             const path = args.next() orelse return error.MissingStoreDirectory;
             if (args.next() != null) return error.UnknownArgument;
             return windows_observation_file_acceptance.run(init, mode, path);
         }
         if (std.mem.eql(u8, argument, "--windows-capacity-file")) {
+            if (@import("builtin").os.tag != .windows) return error.WindowsRequired;
             const mode = args.next() orelse return error.MissingCapacityMode;
             const path = args.next() orelse return error.MissingStoreDirectory;
             if (args.next() != null) return error.UnknownArgument;

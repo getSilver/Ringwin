@@ -1,0 +1,7 @@
+{
+  "stock_path": "D:\\Program Files\\zig\\lib\\compiler\\test_runner.zig",
+  "stock_sha256": "f7dab4cc58869e20881aff454d8bb6b4aaae611fdde8347bb05e1e5318c71a39",
+  "runner_sha256": "78dfdbccf9a11d89561fe41641bcacda34bc1c86d010639c8098e40ad71584d5",
+  "change": "only main wrapper; stock main body and tests unchanged",
+  "thread_stack_bytes": 268435456
+}

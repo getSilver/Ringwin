@@ -22,15 +22,15 @@ pub fn verify(allocator: std.mem.Allocator, io: std.Io, parent: []const u8, virg
     if (denied.allocateLeases(1, 1000000)) |_| return error.AccountCeilingUnexpectedlyAccepted else |err| if (err != error.AccountSafetyCeilingExceeded) return err;
     try require(denied.lease_count == 0);
     var path_buffer: [1024]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buffer, "{s}\\coordination", .{parent});
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}{s}coordination", .{ parent, std.fs.path.sep_str });
     if (!virgin) {
         var existing = try std.Io.Dir.openDirAbsolute(io, path, .{});
         existing.close(io);
     }
-    const file = try allocator.create(durable.WindowsFileAdapter);
+    const file = try allocator.create(durable.LinuxFileAdapter);
     defer allocator.destroy(file);
     @memset(std.mem.asBytes(file), 0);
-    try file.initWindowsVerification(io, path);
+    if (@import("builtin").os.tag == .linux) try file.initLinux(io, path) else try file.initWindowsVerification(io, path);
     defer file.close(io);
     var owner: coordination.CoordinatorOwner = undefined;
     if (virgin) {
@@ -80,13 +80,15 @@ pub fn verify(allocator: std.mem.Allocator, io: std.Io, parent: []const u8, virg
     return result;
 }
 
-test "Windows shared unchanged public summaries recover without empty archive" {
-    if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
+test "Native file shared unchanged public summaries recover without empty archive" {
+    if (@import("builtin").os.tag != .windows and @import("builtin").os.tag != .linux) return error.SkipZigTest;
     const io = std.testing.io;
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buffer, "C:\\Windows\\Temp\\ringwin-shared-nochange-{d}", .{std.Io.Clock.awake.now(io).nanoseconds});
+    var temp = std.testing.tmpDir(.{});
+    var completed = false;
+    defer if (completed) temp.cleanup();
+    var path_buffer: [1024]u8 = undefined;
+    const path = path_buffer[0..try temp.dir.realPath(std.testing.io, &path_buffer)];
     std.debug.print("windows_shared_unchanged_fixture={s}\n", .{path});
-    try std.Io.Dir.createDirAbsolute(io, path, .default_dir);
     var summaries: [4]coordination.ShardSummary = undefined;
     for (&summaries, 0..) |*summary, index| summary.* = .{
         .shard_id = @enumFromInt(index),
@@ -117,4 +119,5 @@ test "Windows shared unchanged public summaries recover without empty archive" {
     const changed_recovered = try verify(std.testing.allocator, io, path, false, false, summaries);
     try std.testing.expectEqualDeep(changed, changed_recovered);
     try std.Io.Dir.cwd().deleteTree(io, path);
+    completed = true;
 }

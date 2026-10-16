@@ -1,8 +1,8 @@
 # 11: 验证 Linux 文件持久化与持续恢复
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in-progress
+Assignee: Codex
 Blocked by: [09 贯通千单负载与安全背压](09-qualify-live-order-capacity-and-backpressure.md)
 Parent: [核心持续运行容量闭合](../map.md)
 

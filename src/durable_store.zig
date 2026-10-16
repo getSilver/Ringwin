@@ -997,6 +997,16 @@ pub const LinuxFileAdapter = struct {
 
     pub fn initWindowsVerification(self: *LinuxFileAdapter, io: std.Io, absolute_path: []const u8) !void {
         if (builtin.os.tag != .windows) return error.WindowsVerificationStoreRequired;
+        try self.initPath(io, absolute_path);
+    }
+
+    /// Caller owns initialized storage; avoids returning the large adapter by value.
+    pub fn initLinux(self: *LinuxFileAdapter, io: std.Io, absolute_path: []const u8) !void {
+        if (builtin.os.tag != .linux) return error.LinuxStoreRequired;
+        try self.initPath(io, absolute_path);
+    }
+
+    fn initPath(self: *LinuxFileAdapter, io: std.Io, absolute_path: []const u8) !void {
         std.Io.Dir.createDirAbsolute(io, absolute_path, .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
@@ -1540,7 +1550,7 @@ pub const LinuxFileAdapter = struct {
                 };
                 defer objects.close(io);
                 // Nonempty history without its roots cannot establish virginity.
-                if (try objects.length(io) > 8) return error.InvalidHistoryRoot;
+                if (try historyFileLength(objects, io) > 8) return error.InvalidHistoryRoot;
                 return .{};
             },
             else => return err,
@@ -1571,7 +1581,7 @@ pub const LinuxFileAdapter = struct {
     }
 
     fn checkHistoryObjects(file: std.Io.File, io: std.Io) !u64 {
-        const length = try file.length(io);
+        const length = try historyFileLength(file, io);
         var magic: [8]u8 = undefined;
         if (length < magic.len or try file.readPositionalAll(io, &magic, 0) != magic.len or
             !std.mem.eql(u8, &magic, "RWOHOB01")) return error.InvalidHistoryObject;
@@ -1595,7 +1605,7 @@ pub const LinuxFileAdapter = struct {
             }
             if (batch.previous_root == null or !std.meta.eql(batch.previous_root.?, current.root)) return error.StaleHistoryRoot;
         } else if (batch.previous_root != null) return error.StaleHistoryRoot;
-        var length = try file.length(io);
+        var length = try historyFileLength(file, io);
         if (length == 0) {
             for (heads.entries) |head| if (head.current != null) return error.InvalidHistoryObject;
             try file.writePositionalAll(io, "RWOHOB01", 0);
@@ -1648,11 +1658,12 @@ pub const LinuxFileAdapter = struct {
                 // Before the first publication both sidecars are absent.
                 // Absence is not an I/O failure and must not close a writer
                 // that is recovering a valid state with no history root.
-                _ = self.dir.statFile(io, "order-history.roots", .{ .follow_symlinks = false }) catch |root_error| {
+                const roots = self.dir.openFile(io, "order-history.roots", .{ .follow_symlinks = false }) catch |root_error| {
                     if (root_error == error.FileNotFound) return error.OrderHistoryUnavailable;
                     self.gate = .closed;
                     return root_error;
                 };
+                roots.close(io);
             }
             // A published root without its objects, and all other file errors,
             // still fail closed; no missing committed history is recreated.
@@ -1824,6 +1835,20 @@ fn writeAtomicFile(dir: std.Io.Dir, io: std.Io, name: []const u8, bytes: []const
     try writeFile(dir, io, temporary, bytes, sync);
     try dir.rename(temporary, dir, name, io);
     if (sync) try syncDirectory(dir);
+}
+
+/// History handles are privately owned by one synchronous Store operation.
+/// lseek avoids statx (unavailable on legacy WSL1), restoring the original offset.
+fn historyFileLength(file: std.Io.File, io: std.Io) !u64 {
+    if (builtin.os.tag != .linux) return file.length(io);
+    const linux = std.os.linux;
+    const previous = linux.lseek(file.handle, 0, std.posix.SEEK.CUR);
+    if (linux.errno(previous) != .SUCCESS) return error.HistoryFileLengthUnavailable;
+    const length = linux.lseek(file.handle, 0, std.posix.SEEK.END);
+    if (linux.errno(length) != .SUCCESS) return error.HistoryFileLengthUnavailable;
+    const restored = linux.lseek(file.handle, @intCast(previous), std.posix.SEEK.SET);
+    if (linux.errno(restored) != .SUCCESS) return error.HistoryFileLengthUnavailable;
+    return @intCast(length);
 }
 
 fn syncDirectory(dir: std.Io.Dir) !void {

@@ -1,4 +1,4 @@
-//! Real Windows files for the shared 500-combination synthetic workload.
+//! Shared Windows/Linux real files for the shared 500-combination synthetic workload.
 const std = @import("std");
 const builtin = @import("builtin");
 const observation = @import("core_observation_capacity_acceptance.zig");
@@ -16,7 +16,7 @@ fn require(ok: bool) !void {
 const RouteContext = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    file: *durable.WindowsFileAdapter,
+    file: *durable.LinuxFileAdapter,
     owner: *demo.Owner,
     gateway: *execution.Gateway,
     scratch: []u8,
@@ -32,14 +32,14 @@ const RouteContext = struct {
         self.recovery_ns = 0;
         self.feed = .{ .source = .{ .venue_identity = observation.venues[route], .stream = 200 + route } };
         self.adapter = .{ .source = .{ .venue_identity = observation.venues[route], .account = 100 + route, .stream = 300 + route } };
-        self.file = try allocator.create(durable.WindowsFileAdapter);
+        self.file = try allocator.create(durable.LinuxFileAdapter);
         errdefer allocator.destroy(self.file);
         @memset(std.mem.asBytes(self.file), 0);
         if (!seed) {
             const existing = try std.Io.Dir.openDirAbsolute(io, path, .{});
             existing.close(io);
         }
-        try self.file.initWindowsVerification(io, path);
+        if (builtin.os.tag == .linux) try self.file.initLinux(io, path) else try self.file.initWindowsVerification(io, path);
         errdefer self.file.close(io);
         if (seed) {
             const directory = try std.Io.Dir.openDirAbsolute(io, path, .{ .iterate = true });
@@ -190,7 +190,7 @@ fn report(context: *RouteContext, route: usize, path: []const u8) !ShardReport {
     var stored_files: u64 = 0;
     while (try iterator.next(context.io)) |entry| {
         if (entry.kind != .file) return error.UnexpectedObservationStoreEntry;
-        stored_bytes += (try dir.statFile(context.io, entry.name, .{ .follow_symlinks = false })).size;
+        stored_bytes += try @import("file_acceptance_runtime.zig").fileBytes(dir, context.io, entry.name);
         stored_files += 1;
     }
     return .{ .shard = route, .venue = observation.venues[route], .account = shard.exchange_account_identity, .live = shard.oms.liveOrderCount(), .terminal = shard.oms.retainedTerminalOrderCount(), .adapter_queue = @intFromBool(context.adapter.source.pending != null), .snapshot_bytes = encoded.len, .stored_bytes = stored_bytes, .stored_files = stored_files, .barrier = shard.authoritativeBarrier(), .recovery_ns = context.recovery_ns, .digest = std.fmt.bytesToHex(shard.canonicalStateDigest(), .lower), .economic_digest = std.fmt.bytesToHex(economic.digest(), .lower), .ledger_digest = std.fmt.bytesToHex(history.hash(ledger), .lower), .ownership_digest = std.fmt.bytesToHex(ownership_digest, .lower), .mapping_digest = std.fmt.bytesToHex(mapping_digest, .lower), .history_root = std.fmt.bytesToHex(archive.ordered_root, .lower), .history_generation = shard.checkpointGeneration(), .reservation_atoms = try shard.activeReservationAtoms(), .cash_atoms = economic.portfolio.usdt_balance_atoms, .exchange_cash_atoms = economic.exchange.usdt_balance_atoms, .inventory_atoms = economic.portfolio.spotInventoryAtoms(1000), .spot_quantity = spot_quantity, .funding_perpetual_quantity = funding_quantity, .cross_perpetual_quantity = cross_quantity, .fee_atoms = economic.portfolio.fee_atoms, .ledger_count = economic.ledger_count, .accepted = context.gateway.accepted_dispatch_count, .unknown = context.gateway.uncertain_dispatch_count, .sends = context.adapter.sends };
@@ -213,7 +213,7 @@ pub const Report = struct {
 };
 
 pub fn runProtocol(allocator: std.mem.Allocator, io: std.Io, mode: []const u8, path: []const u8) !Report {
-    if (builtin.os.tag != .windows) return error.WindowsRequired;
+    if (builtin.os.tag != .windows and builtin.os.tag != .linux) return error.NativeFilePlatformRequired;
     if (!std.fs.path.isAbsolute(path)) return error.AbsoluteDirectoryRequired;
     const seed = std.mem.eql(u8, mode, "seed");
     if (!seed and !std.mem.eql(u8, mode, "recover")) return error.InvalidWindowsObservationMode;
@@ -224,7 +224,7 @@ pub fn runProtocol(allocator: std.mem.Allocator, io: std.Io, mode: []const u8, p
     var result: Report = .{ .mode = mode, .shards = undefined };
     for (0..4) |route| {
         var child_buffer: [1024]u8 = undefined;
-        const child = try std.fmt.bufPrint(&child_buffer, "{s}\\shard-{d}", .{ path, route });
+        const child = try std.fmt.bufPrint(&child_buffer, "{s}{s}shard-{d}", .{ path, std.fs.path.sep_str, route });
         const context = try RouteContext.open(allocator, io, child, route, seed);
         defer context.close();
         result.shards[route] = try report(context, route, child);
@@ -244,6 +244,10 @@ pub fn runProtocol(allocator: std.mem.Allocator, io: std.Io, mode: []const u8, p
 }
 
 pub fn run(init: std.process.Init, mode: []const u8, path: []const u8) !void {
+    return @import("file_acceptance_runtime.zig").run(runCurrentThread, init, mode, path);
+}
+
+fn runCurrentThread(init: std.process.Init, mode: []const u8, path: []const u8) !void {
     const result = try runProtocol(init.gpa, init.io, mode, path);
     var buffer: [16 * 1024]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &buffer);
@@ -252,13 +256,13 @@ pub fn run(init: std.process.Init, mode: []const u8, path: []const u8) !void {
     try output.interface.flush();
 }
 
-test "Windows observation file protocol reuses the public 500 combination route seam" {
+test "Native file observation file protocol reuses the public 500 combination route seam" {
     _ = observation.initializeRoute;
     _ = observation.placeSelected;
 }
 
-test "Windows observation file 500 distinct combinations recover three actual synthetic categories" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
+test "Native file observation file 500 distinct combinations recover three actual synthetic categories" {
+    if (builtin.os.tag != .windows and builtin.os.tag != .linux) return error.SkipZigTest;
     var temp = std.testing.tmpDir(.{});
     var completed = false;
     defer if (completed) temp.cleanup();

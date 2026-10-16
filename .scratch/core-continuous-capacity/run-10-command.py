@@ -20,6 +20,18 @@ source_manifest = base.source_manifest
 sha = base.sha
 
 
+def linux_memory(pid, begin):
+    try:
+        fields = dict(line.split(':', 1) for line in Path('/proc/{}/status'.format(pid)).read_text().splitlines() if ':' in line)
+        rss = int(fields.get('VmRSS', '0 kB').split()[0]) * 1024
+        hwm = int(fields.get('VmHWM', '0 kB').split()[0]) * 1024
+        return {'elapsed_ns': time.perf_counter_ns() - begin, 'working_set_bytes': rss,
+                'peak_working_set_bytes': hwm or None,
+                'api': '/proc/PID/status; zero VmHWM treated as unavailable'}
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+
+
 class ProcessMemory(ctypes.Structure):
     _fields_ = [('cb', wintypes.DWORD), ('PageFaultCount', wintypes.DWORD)] + [
         (name, ctypes.c_size_t) for name in (
@@ -29,6 +41,7 @@ class ProcessMemory(ctypes.Structure):
 
 
 def capture(name, command):
+    command_cwd = Path(os.environ.get('RINGWIN_CAPTURE_CWD', str(root))).resolve(strict=True)
     if not name or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_' for c in name):
         raise ValueError('A simple new capture name is required')
     for suffix in ('.log', '.stdout.log', '.memory.jsonl', '.result.json'):
@@ -55,7 +68,7 @@ def capture(name, command):
     capture_error = None
     try:
         with log.open('wb') as err, stdout.open('wb') as output:
-            process = subprocess.Popen(command, cwd=root, stdout=output, stderr=err)
+            process = subprocess.Popen(command, cwd=command_cwd, stdout=output, stderr=err)
             while True:
                 if get_memory:
                     memory = ProcessMemory()
@@ -66,6 +79,10 @@ def capture(name, command):
                                              'peak_working_set_bytes': memory.PeakWorkingSetSize,
                                              'private_bytes': memory.PrivateUsage,
                                              'peak_pagefile_bytes': memory.PeakPagefileUsage})
+                elif sys.platform == 'linux':
+                    observation = linux_memory(process.pid, begin)
+                    if observation:
+                        observations.append(observation)
                 code = process.poll()
                 if code is not None:
                     break
@@ -84,7 +101,7 @@ def capture(name, command):
     after = source_manifest()
     samples_path = out / (name + '.memory.jsonl')
     samples_path.write_text(''.join(json.dumps(row) + '\n' for row in observations), encoding='utf-8')
-    record = {**before, 'command': command, 'started_utc': started,
+    record = {**before, 'command': command, 'cwd': str(command_cwd), 'started_utc': started,
               'finished_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
               'elapsed_ns': time.perf_counter_ns() - begin, 'exit_code': code,
               'timed_out': timed_out, 'timeout_seconds': timeout_seconds,
@@ -95,10 +112,11 @@ def capture(name, command):
               'source_mismatches_after': len({(r['path'], r['sha256']) for r in before['files']} ^
                                              {(r['path'], r['sha256']) for r in after['files']}),
               'capture': 'native direct file handles',
-              'memory': {'api': 'Windows GetProcessMemoryInfo' if get_memory else 'not measured',
+              'memory': {'api': 'Windows GetProcessMemoryInfo' if get_memory else '/proc/PID/status',
                          'scope': 'direct child process only; 100ms polling; short processes may have no sample',
                          'samples': len(observations), 'samples_sha256': sha(samples_path),
-                         'max_observed_peak_working_set_bytes': max((r['peak_working_set_bytes'] for r in observations), default=None),
+                         'max_observed_rss_bytes': max((r['working_set_bytes'] for r in observations), default=None),
+                         'max_observed_peak_working_set_bytes': max((r['peak_working_set_bytes'] for r in observations if r['peak_working_set_bytes'] is not None), default=None),
                          'latency_scope': 'whole command wall time; not per-input latency or throughput qualification'}}
     (out / (name + '.result.json')).write_text(json.dumps(record, indent=2) + '\n', encoding='utf-8')
     print(name, 'exit=' + str(code), 'source=' + before['source_tree_sha256'], flush=True)

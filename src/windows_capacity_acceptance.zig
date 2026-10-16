@@ -1,4 +1,4 @@
-//! Small real Windows file/process acceptance. Offline synthetic Venue only.
+//! Shared small Windows/Linux real file/process acceptance (legacy module name). Offline synthetic Venue only.
 const std = @import("std");
 const builtin = @import("builtin");
 const durable = @import("durable_store.zig");
@@ -72,7 +72,7 @@ const OfflineVenue = struct {
 const Cycle = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    file: *durable.WindowsFileAdapter,
+    file: *durable.LinuxFileAdapter,
     decision_stream: durable.StreamIdentity,
     dispatch_stream: durable.StreamIdentity,
     ingress_stream: durable.StreamIdentity,
@@ -101,14 +101,14 @@ const Cycle = struct {
         self.round = 0;
         self.recovery_ns = 0;
         self.recovery_send_count = 0;
-        self.file = try allocator.create(durable.WindowsFileAdapter);
+        self.file = try allocator.create(durable.LinuxFileAdapter);
         errdefer allocator.destroy(self.file);
         @memset(std.mem.asBytes(self.file), 0);
         if (!virgin) {
             var existing = try std.Io.Dir.openDirAbsolute(io, path, .{});
             existing.close(io);
         }
-        try self.file.initWindowsVerification(io, path);
+        if (builtin.os.tag == .linux) try self.file.initLinux(io, path) else try self.file.initWindowsVerification(io, path);
         errdefer self.file.close(io);
         self.owner = try allocator.create(demo.Owner);
         errdefer allocator.destroy(self.owner);
@@ -454,8 +454,7 @@ fn report(cycle: *Cycle, shard: usize) !ShardReport {
     var stored_files: u64 = 0;
     while (try entries.next(cycle.io)) |entry| {
         if (entry.kind != .file) return error.UnexpectedStoreEntry;
-        const stat = try directory.statFile(cycle.io, entry.name, .{ .follow_symlinks = false });
-        stored_bytes += stat.size;
+        stored_bytes += try @import("file_acceptance_runtime.zig").fileBytes(directory, cycle.io, entry.name);
         stored_files += 1;
     }
     const state = &cycle.owner.shard;
@@ -498,6 +497,10 @@ fn report(cycle: *Cycle, shard: usize) !ShardReport {
 }
 
 pub fn run(init: std.process.Init, mode: []const u8, path: []const u8) !void {
+    return @import("file_acceptance_runtime.zig").run(runCurrentThread, init, mode, path);
+}
+
+fn runCurrentThread(init: std.process.Init, mode: []const u8, path: []const u8) !void {
     const evidence = try runProtocol(init.gpa, init.io, mode, path);
     var output_buffer: [16384]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &output_buffer);
@@ -520,7 +523,7 @@ fn atomicStep(cycle: *Cycle) !void {
 
 const Report = struct { schema: u16 = 2, mode: []const u8, seed: u64 = seed, round: u64, shards: [4]ShardReport, shared_account: @import("windows_capacity_shared.zig").Report = undefined, send_count: u64, recovery_send_count: u64 = 0, synthetic_fencing: bool = true, production_qualification: bool = false };
 fn runProtocol(allocator: std.mem.Allocator, io: std.Io, mode: []const u8, path: []const u8) !Report {
-    if (builtin.os.tag != .windows) return error.WindowsRequired;
+    if (builtin.os.tag != .windows and builtin.os.tag != .linux) return error.NativeFilePlatformRequired;
     const virgin = std.mem.eql(u8, mode, "seed");
     const advancing = std.mem.eql(u8, mode, "advance");
     const stepping = std.mem.eql(u8, mode, "step");
@@ -541,7 +544,7 @@ fn runProtocol(allocator: std.mem.Allocator, io: std.Io, mode: []const u8, path:
     var summaries: [4]coordination.ShardSummary = undefined;
     for (0..4) |shard| {
         var child_buffer: [1024]u8 = undefined;
-        const child = try std.fmt.bufPrint(&child_buffer, "{s}\\shard-{d}", .{ path, shard });
+        const child = try std.fmt.bufPrint(&child_buffer, "{s}{s}shard-{d}", .{ path, std.fs.path.sep_str, shard });
         const cycle = try Cycle.open(allocator, io, child, virgin, shard);
         defer cycle.close();
         if (virgin) try cycle.seedState(shard) else if (advancing and shard != 3) try cycle.advance();
@@ -562,10 +565,13 @@ fn runProtocol(allocator: std.mem.Allocator, io: std.Io, mode: []const u8, path:
     return result;
 }
 
-test "Windows capacity real file seed recovery preserves public business state" {
-    if (builtin.os.tag != .windows) return error.SkipZigTest;
-    var path_buffer: [256]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buffer, "C:\\Windows\\Temp\\ringwin-capacity-tdd-{d}", .{std.Io.Clock.awake.now(std.testing.io).nanoseconds});
+test "Native file capacity real file seed recovery preserves public business state" {
+    if (builtin.os.tag != .windows and builtin.os.tag != .linux) return error.SkipZigTest;
+    var temp = std.testing.tmpDir(.{});
+    var completed = false;
+    defer if (completed) temp.cleanup();
+    var path_buffer: [1024]u8 = undefined;
+    const path = path_buffer[0..try temp.dir.realPath(std.testing.io, &path_buffer)];
     const seeded = try runProtocol(std.testing.allocator, std.testing.io, "seed", path);
     const recovered = try runProtocol(std.testing.allocator, std.testing.io, "recover", path);
     try std.testing.expectEqual(@as(u64, 0), recovered.send_count);
@@ -578,4 +584,5 @@ test "Windows capacity real file seed recovery preserves public business state" 
     try std.testing.expectEqual(@as(u64, 6), advanced.send_count);
     const twice = try runProtocol(std.testing.allocator, std.testing.io, "recover", path);
     for (advanced.shards, twice.shards) |before, after| try std.testing.expectEqualSlices(u8, &before.digest, &after.digest);
+    completed = true;
 }
