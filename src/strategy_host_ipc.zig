@@ -651,6 +651,17 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test "bounded rings and frozen bridge fail closed" {
+    if (builtin.os.tag == .linux) {
+        // Legacy WSL1 lacks memfd_create. Skip only that missing kernel capability;
+        // all mapping, sealing and bridge assertions still run on capable hosts.
+        const linux = std.os.linux;
+        const result = linux.memfd_create("qsh-test-capability", linux.MFD.ALLOW_SEALING);
+        switch (std.posix.errno(result)) {
+            .NOSYS => return error.SkipZigTest,
+            .SUCCESS => _ = linux.close(@intCast(result)),
+            else => return error.MappingCreateFailed,
+        }
+    }
     try localChecks();
 }
 

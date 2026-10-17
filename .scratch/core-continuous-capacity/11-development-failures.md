@@ -17,3 +17,11 @@
 最终v2（核心source ad5437cd）应用30进程全部退出成功，十轮、两次SIGKILL及500组合均通过；随后物理审计错误地把allocation观测计入内容身份而报Retained physical dataset drift。五个数据集路径/长度/SHA均一致，选中的末记录也正确；主链order-history.objects长度205348且SHA不变，allocated bytes可由229376/262144收敛到208896。见11-final-v2-allocation-diagnosis.json及11-allocation-real-regression.json。修复只涉及采集/审计：内容身份比较路径/长度/SHA，继续完整保留raw allocation。3条独立回归实际red→green，真实五数据集回放通过且同长度内容损坏仍拒绝。v2的CLI链与完整ReleaseSafe/Debug均未执行；另以v3冻结新的producer，不回写v2身份或承接其半程资格。
 
 本地旧binary、物理数据和原始日志不清理。目标断电、真实syscall内随机终止、真实磁盘ENOSPC/EIO、千单容量/压力、OS峰值RSS、完整allocated disk、实际线程栈峰值、索引成本、真实NodeFence、dump和Linux生产资格均未运行或未测。成功、失败和not_run不能合并成“全部通过”。
+
+最终v3（source ad5437cd）两组应用/CLI各30进程、十轮、SIGKILL、500组合、两组物理数据审计及实际目录fsync均通过。完整ReleaseSafe随后在568号旧IPC测试失败Unexpected，在616号旧OKX内存Owner测试SIGSEGV，panic诊断受缺失statx影响未退出；外层10800秒timeout终止，Debug未启动。原始log及外层result保留，内层capture未完成而无result；不能称v3全量通过。
+
+11-ipc-v2-red.trace.log以直接模块测试重现memfd_create ENOSYS。旧WSL1缺少该能力，不修补生产IPC或改成不安全映射；测试入口仅对原始memfd syscall ENOSYS返回SkipZigTest，其他错误失败且保留全部bridge断言。11-ipc-v3-capability-run明确0 passed/1 skipped/0 failed，该IPC能力仍未验证。
+
+11-owner-stack-v2-red-run直接模块测试重现SIGSEGV；将Owner.bootstrap改成现有bootstrapInto的单变量试验v3仍SIGSEGV，故撤销。仅将两个旧测试自建worker栈从64MiB改成256MiB，11-owner-stack-v4-green-run实际1/1通过；业务函数、生产栈、断言和夹具输入不变。挂起诊断进程均检查/proc对应命令后只终止本次owned PID；v2/v3结果保留exit=-9，不称自然退出。名称含final-tail-red、ipc-red和owner-stack-red的首次main.zig过滤候选只运行根main.test_0，不能作为目标用例red/green证据；实际复现使用对应模块为root。
+
+新source 6cd51582及新审计producer另以v4冻结。Linux完整套件允许且仅允许上述明确IPC skipped，该能力和目标平台资格仍未取得。用户已授权票11完成后继续12，尚未绕过11 blocker。

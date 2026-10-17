@@ -98,13 +98,14 @@ def main():
         if path.is_file() and path.suffix in ('.json', '.jsonl', '.log', '.zip', '.diff'):
             references[path.name] = sha(path)
     history = {}
-    for earlier in ('11-red', '11-green', '11-targeted-', '11-store-dir-', '11-owner-dir-', '11-preflight-', '11-final-v1', '11-final-v2', '11-adapter-v3'):
+    for earlier in ('11-red', '11-green', '11-targeted-', '11-store-dir-', '11-owner-dir-', '11-preflight-', '11-final-v1', '11-final-v2', '11-final-v3', '11-final-tail-', '11-ipc-', '11-owner-stack-', '11-windows-owner-', '11-adapter-v3', '11-content-identity', '11-allocation-'):
         for path in OUT.glob(earlier + '*'):
             paths = [path] if path.is_file() else list(path.iterdir()) if path.is_dir() and path.name.endswith('-evidence') else []
             for item in paths:
                 if item.is_file() and item.suffix in ('.json', '.jsonl', '.log', '.zip', '.diff', '.md'):
                     history[item.relative_to(OUT).as_posix()] = sha(item)
     history['11-development-failures.md'] = sha(OUT / '11-development-failures.md')
+    history['11-debug/allocation-regression.py'] = sha(OUT / '11-debug/allocation-regression.py')
     identity.update(recorded_handoff_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     host=read(OUT / '11-linux-host.json'), artifacts=artifacts,
                     runtime_audit_sha256=sha(audit_path), frozen_source_archive_sha256=sha(archive_path),
@@ -114,7 +115,10 @@ def main():
                     power_loss_qualification=False, directory_durability_qualified=False,
                     capacity_stress_resource_performance='deferred', evidence_references=references)
     identity['retained_development_references'] = history
+    license_path = OUT / '11-test-runner-LICENSE'
+    identity['stock_runner_license_sha256'] = sha(license_path)
     destination.mkdir()
+    (destination / 'stock-runner-LICENSE.txt').write_bytes(license_path.read_bytes())
     for name, data in (('identity.json', identity), ('workload.json', {'fixtures': workloads}),
                        ('resources.json', resources), ('audit.json', audit)):
         (destination / name).write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')

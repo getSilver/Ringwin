@@ -888,7 +888,7 @@ test "OKX raw private report and Fill reach the committed Demo owner" {
         }
     };
     var context = Context{};
-    const worker = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
+    const worker = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Context.run, .{&context});
     worker.join();
     if (context.failure) |err| return err;
 }
@@ -935,7 +935,7 @@ test "Windows file store reopens OKX private report and economic Fill" {
         }
     };
     var context = Context{};
-    const worker = try std.Thread.spawn(.{ .stack_size = 64 * 1024 * 1024 }, Context.run, .{&context});
+    const worker = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Context.run, .{&context});
     worker.join();
     if (context.failure) |err| return err;
 }

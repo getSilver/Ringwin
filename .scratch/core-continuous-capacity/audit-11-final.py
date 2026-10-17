@@ -49,12 +49,18 @@ def main():
         counts = {'passed': int(all_pass[1]), 'skipped': 0, 'failed': 0} if all_pass else dict(zip(('passed', 'skipped', 'failed'), map(int, mixed.groups())))
         assert counts['failed'] == 0 and counts['passed'] + counts['skipped'] >= 624
         assert not re.search(r'\d+ (tests leaked memory|errors were logged)', text)
-        suites.append({'mode': mode, **counts})
+        skipped = re.findall(r'^\d+/\d+ (.+)\.\.\.SKIP$', text, re.MULTILINE)
+        assert len(skipped) == counts['skipped']
+        assert skipped == ['strategy_host_ipc.test.bounded rings and frozen bridge fail closed'], skipped
+        suites.append({'mode': mode, **counts, 'skipped_tests': skipped,
+                       'skip_reason': 'WSL1 memfd_create ENOSYS; production IPC unchanged'})
+        faults.append({'mode': mode, 'result': 'skipped', 'case': skipped[0],
+                       'reason': 'WSL1 memfd_create ENOSYS'})
         for line in text.splitlines():
             for marker in ('windows_capacity_fault injection=', 'windows_capacity_reject injection=', 'windows_capacity_gateway_fault injection='):
                 if marker in line:
                     faults.append({'mode': mode, 'result': 'passed', 'evidence': line[line.index(marker):]})
-        assert sum(f['mode'] == mode for f in faults) == 18
+        assert sum(f['mode'] == mode and f['result'] == 'passed' for f in faults) == 18
         checks.append('suite:' + mode)
     resources = []
     adapter_evidence = OUT / (prefix + '-adapter-evidence')
