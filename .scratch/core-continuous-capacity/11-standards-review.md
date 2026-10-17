@@ -13,4 +13,3 @@
 独立核验当前源码清单、15 个运行期冻结 producer、四个 ELF SHA256、13 个成功 capture 及其 stderr/stdout/memory 文件摘要；全部零源码/producer 漂移且无 fatal。实际两套日志均为 **623 passed、1 skipped、0 failed**，唯一 skip 为 `strategy_host_ipc.test.bounded rings and frozen bridge fail closed`。应用与 CLI 各 30 个真实进程及物理审计通过，adapter fsync 证据通过。256/512 runner 差异仅线程栈和相应注释。
 
 结论仅覆盖 WSL1/lxfs 离线文件功能。sampled RSS 不等于 OS 峰值；allocated bytes 部分可变，实际栈峰值、队列高水位、资源预算、千单压力、性能、目标 Linux 文件系统、断电、NodeFence、凭证/dump 和生产资格仍未取得。未发现需报告的 baseline smell；未以本次结果关闭票 12 或授予平台生产资格。
-
