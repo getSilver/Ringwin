@@ -32,3 +32,13 @@ frontier09-*.log binary
 11-*/**/*.md whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 *-11-*.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 11-*.zig -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+# Frontier 12 preserves current-source Windows capture bytes and handoff hashes.
+12-*.log binary
+12-*/**/*.log binary
+12-*.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+12-*.jsonl -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+12-*/**/*.json -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+12-*/**/*.jsonl -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+12-*.md whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+12-*/**/*.md whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+*-12-*.py -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
