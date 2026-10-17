@@ -35,6 +35,9 @@ def main():
     assert sha(audit_script) == identity['producer_dependencies']['audit-11-final.py']
     # Revalidate original linked hashes rather than bless changed bytes after audit.
     # This checks evidence only; it does not repeat runtime or full tests.
+    if identity.get('continuation_of'):
+        audit_script = OUT / identity['continuation_audit_script']
+        assert sha(audit_script) == identity['producer_dependencies'][audit_script.name]
     subprocess.run([sys.executable, str(audit_script), prefix], check=True)
     audit = read(audit_path)
     assert audit['state'] == 'passed'
@@ -98,7 +101,7 @@ def main():
         if path.is_file() and path.suffix in ('.json', '.jsonl', '.log', '.zip', '.diff'):
             references[path.name] = sha(path)
     history = {}
-    for earlier in ('11-red', '11-green', '11-targeted-', '11-store-dir-', '11-owner-dir-', '11-preflight-', '11-final-v1', '11-final-v2', '11-final-v3', '11-final-tail-', '11-ipc-', '11-owner-stack-', '11-windows-owner-', '11-adapter-v3', '11-content-identity', '11-allocation-'):
+    for earlier in ('11-red', '11-green', '11-targeted-', '11-store-dir-', '11-owner-dir-', '11-preflight-', '11-final-v1', '11-final-v2', '11-final-v3', '11-final-v4', '11-final-tail-', '11-ipc-', '11-owner-stack-', '11-cutover-stack-', '11-windows-owner-', '11-adapter-v3', '11-content-identity', '11-allocation-'):
         for path in OUT.glob(earlier + '*'):
             paths = [path] if path.is_file() else list(path.iterdir()) if path.is_dir() and path.name.endswith('-evidence') else []
             for item in paths:
@@ -148,6 +151,13 @@ def main():
                'This seals ticket 11 evidence only; it does not execute ticket 12.\n').format(
                    identity['source_tree_sha256'], len(identity['files']), suites, len(expected),
                    audit['check_count'], json.dumps(statuses, sort_keys=True))
+    if identity.get('continuation_of'):
+        summary += ('\nContinuation of `' + identity['continuation_of'] + '`: ReleaseSafe and sixty process executions '
+                    'reuse original bytes, commands and timestamps, with individually hashed aliases. '
+                    'Only physical audits and the complete Debug run are new. ReleaseSafe used a 256 MiB '
+                    'test runner; Debug used 512 MiB. Original failed Debug and guard-page diagnosis remain '
+                    'retained. See reused_evidence and the continuation audit; no production stack or budget '
+                    'qualification is inferred.\n')
     (destination / 'summary.md').write_text(summary, encoding='utf-8')
     manifest = {path.name: sha(path) for path in destination.iterdir() if path.is_file()}
     (destination / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')

@@ -25,3 +25,9 @@
 11-owner-stack-v2-red-run直接模块测试重现SIGSEGV；将Owner.bootstrap改成现有bootstrapInto的单变量试验v3仍SIGSEGV，故撤销。仅将两个旧测试自建worker栈从64MiB改成256MiB，11-owner-stack-v4-green-run实际1/1通过；业务函数、生产栈、断言和夹具输入不变。挂起诊断进程均检查/proc对应命令后只终止本次owned PID；v2/v3结果保留exit=-9，不称自然退出。名称含final-tail-red、ipc-red和owner-stack-red的首次main.zig过滤候选只运行根main.test_0，不能作为目标用例red/green证据；实际复现使用对应模块为root。
 
 新source 6cd51582及新审计producer另以v4冻结。Linux完整套件允许且仅允许上述明确IPC skipped，该能力和目标平台资格仍未取得。用户已授权票11完成后继续12，尚未绕过11 blocker。
+
+v4同源应用/CLI各30进程、十轮、物理审计及目录探针均通过，完整ReleaseSafe实际623 passed/1 skipped/0 failed（3191.629秒，源码/producer均无漂移）。完整Debug在84号recovery_cutover测试SIGSEGV后诊断挂起。用户要求终止后，核对/proc命令仅终止自有Debug PID5；内层capture保留exit=-9、elapsed10239.429秒，后者包含挂起而非正常测试耗时；外层exit247。未覆盖或修改失败结果。
+
+直接模块Debug定向11-cutover-stack-red重现同一SIGSEGV；strace显示256MiB线程mmap基址0x7f6947210000、可写区从0x7f6947211000开始，故障地址0x7f6947210c30在guard页。只增加独立测试runner到512MiB，11-cutover-stack-green-run实际1/1通过；完整115份源码仍为6cd51582，生产逻辑和应用64MiB栈未改。原256MiB runner保留不改，新512MiB版本及来源分别记录，实际栈峰值仍未测。
+
+按用户“继续跑剩下的”，v5明确为组合续验：复用同源v4 ReleaseSafe、60个业务子进程和三份ELF，所有别名保持原始bytes/命令/时间并逐项绑定来源SHA；重新审计实际五加五数据集，只新建完整Debug512MiB构建/执行。源码archive保留原producer并追加续验脚本/runner/audit身份；不把复用记录声称为v5新执行，也不删除v4失败。无新的Core业务源码变化，不重复已通过的ReleaseSafe或60进程业务链。
