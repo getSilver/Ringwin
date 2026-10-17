@@ -219,6 +219,28 @@ fn replayCommittedFillTail(implementation: *okx.OkxVenueAdapter, raw_store: dura
     try std.testing.expect(context.reconciliation_started);
 }
 
+/// AccountProjection owns undefined spare storage. Compare every metadata field
+/// and all retained observations, without interpreting inactive tagged unions.
+fn expectAccountProjectionEqual(expected: *const @import("account_projection.zig").AccountProjection, actual: *const @import("account_projection.zig").AccountProjection) !void {
+    try std.testing.expectEqual(expected.seen_count, actual.seen_count);
+    try std.testing.expectEqual(expected.balance_count, actual.balance_count);
+    try std.testing.expectEqual(expected.position_count, actual.position_count);
+    try std.testing.expectEqual(expected.margin_count, actual.margin_count);
+    inline for (std.meta.fields(@import("account_projection.zig").AccountProjection)) |field| {
+        if (comptime std.mem.eql(u8, field.name, "seen")) {
+            try std.testing.expectEqualDeep(expected.seen[0..expected.seen_count], actual.seen[0..actual.seen_count]);
+        } else if (comptime std.mem.eql(u8, field.name, "balances")) {
+            try std.testing.expectEqualDeep(expected.balances[0..expected.balance_count], actual.balances[0..actual.balance_count]);
+        } else if (comptime std.mem.eql(u8, field.name, "positions")) {
+            try std.testing.expectEqualDeep(expected.positions[0..expected.position_count], actual.positions[0..actual.position_count]);
+        } else if (comptime std.mem.eql(u8, field.name, "margins")) {
+            try std.testing.expectEqualDeep(expected.margins[0..expected.margin_count], actual.margins[0..actual.margin_count]);
+        } else {
+            try std.testing.expectEqualDeep(@field(expected, field.name), @field(actual, field.name));
+        }
+    }
+}
+
 fn executeRawPrivateFillRecovery() !void {
     const allocator = std.heap.page_allocator;
     const memory = try allocator.create(durable.MemoryAdapter);
@@ -430,13 +452,13 @@ fn executeRawPrivateFillRecovery() !void {
     try std.testing.expect(pending_reconciliation.slice()[0].event == .account_reconciliation_started);
     try owner.applyAdapterBatch(pending_reconciliation);
     try std.testing.expect(owner.shard.accountReconciliationPending());
-    try std.testing.expect(std.meta.eql(account_before_refresh, owner.shard.canonical_account));
+    try expectAccountProjectionEqual(&account_before_refresh, &owner.shard.canonical_account);
     const pending_digest = owner.shard.canonicalStateDigest();
     const pending_recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(pending_recovered);
     try demo.Owner.recoverInto(pending_recovered, memory.interface(), undefined, stream);
     try std.testing.expect(pending_recovered.shard.accountReconciliationPending());
-    try std.testing.expect(std.meta.eql(account_before_refresh, pending_recovered.shard.canonical_account));
+    try expectAccountProjectionEqual(&account_before_refresh, &pending_recovered.shard.canonical_account);
     try std.testing.expectEqualSlices(u8, &pending_digest, &pending_recovered.shard.canonicalStateDigest());
 
     const before_duplicate = owner.shard.canonicalStateDigest();

@@ -31,3 +31,9 @@ v4同源应用/CLI各30进程、十轮、物理审计及目录探针均通过，
 直接模块Debug定向11-cutover-stack-red重现同一SIGSEGV；strace显示256MiB线程mmap基址0x7f6947210000、可写区从0x7f6947211000开始，故障地址0x7f6947210c30在guard页。只增加独立测试runner到512MiB，11-cutover-stack-green-run实际1/1通过；完整115份源码仍为6cd51582，生产逻辑和应用64MiB栈未改。原256MiB runner保留不改，新512MiB版本及来源分别记录，实际栈峰值仍未测。
 
 按用户“继续跑剩下的”，v5明确为组合续验：复用同源v4 ReleaseSafe、60个业务子进程和三份ELF，所有别名保持原始bytes/命令/时间并逐项绑定来源SHA；重新审计实际五加五数据集，只新建完整Debug512MiB构建/执行。源码archive保留原producer并追加续验脚本/runner/audit身份；不把复用记录声称为v5新执行，也不删除v4失败。无新的Core业务源码变化，不重复已通过的ReleaseSafe或60进程业务链。
+
+v5完整Debug越过原84项，在316项venue_fill_recovery_acceptance中panic: switch on corrupt value；原始日志及exit=-9/外层247均保留，未完成。14条NativeAssetCapacityExceeded是45-fill负向容量场景的预期输出，并非panic根因。直接模块11-private-fill-red重现同一panic，30秒超时保留；双轴审查共同定位旧测试433/439整对象std.meta.eql读取AccountProjection.seen有效计数之外的undefined tagged union。只改测试比较helper：核对所有元数据、四个计数与四数组有效前缀，原Owner/recovery/digest断言全部保留，不初始化生产闲置尾部掩盖读取错误。
+
+新源码244f3ae7的公共用例Debug1/1、ReleaseSafe1/1通过，整个venue-fill模块及依赖Debug实际322 passed/1 skipped/0 failed（867.177秒），包含两个private checkpoint和相同IPC能力skip；源码和producer均无漂移。相关原生账务及File故障入口另作定向预检，完成前不启动全量。用户要求整体检查后，两路独立审查没有确认第二处同类P1/P2；不据此宣称不存在其他漏洞。
+
+为避免panic的statx诊断再次挂起，采集器增加显式opt-in RINGWIN_CAPTURE_ABORT_ON_CRASH=1，命中实际thread panic或segfault标记即终止本次直接子进程，保留原始日志和fatal_diagnostic并返回失败；最终审计拒绝fatal结果。Windows和Linux各三个真实子进程探针分别验证panic、segfault快速失败及普通NativeAsset负向不误杀。生产进程、线上操作及交易行为未改变。后续新冻结使用ReleaseSafe256MiB/Debug512MiB runner，并对244f3ae7完整重验；旧6cd51582的成功不登记为新源码的通过。

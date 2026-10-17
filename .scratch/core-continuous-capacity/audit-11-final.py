@@ -32,6 +32,7 @@ def main():
     for path in captures:
         record = json.loads(path.read_text())
         assert record['exit_code'] == 0 and not record['timed_out'] and record['capture_error'] is None, str(path)
+        assert record.get('fatal_diagnostic') is None, str(path)
         assert record['source_tree_sha256'] == frozen['source_tree_sha256']
         assert record['source_mismatches_after'] == 0 and record['producer_mismatches_after'] == 0
         stem = path.name[:-len('.result.json')]

@@ -37,7 +37,8 @@ def main():
     dependencies = ('run-07-command.py', 'run-10-command.py', 'run-10-file-processes.py',
                     'run-11-final.py', 'audit-11-final.py', 'audit-11-processes.py',
                     'collect-11-host.py', 'probe-11-adapter.py', 'test-11-content-identity.py',
-                    '11-linux-host.json', '11-test-runner.zig', '11-test-runner-origin.json')
+                    '11-linux-host.json', '11-test-runner.zig', '11-test-runner-origin.json',
+                    '11-test-runner-512.zig', '11-test-runner-512-origin.json', 'test-11-crash-capture.py')
     producers = {name: capture.sha(OUT / name) for name in dependencies}
     identity = {**frozen, 'baseline_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
                 'branch': subprocess.check_output(['git', 'branch', '--show-current'], cwd=ROOT, text=True).strip(),
@@ -47,7 +48,8 @@ def main():
                 'scope': 'actual WSL1/lxfs file functionality; cross build alone is not acceptance',
                 'production_qualification': False, 'target_linux_qualification': False,
                 'seed': '0x20261008', 'schema': {'journal': 39, 'state': 43, 'registry': 37, 'release_artifact': 1},
-                'worker_stack_bytes': {'offline_file_app_and_cli': 67108864, 'stock_test_runner': 268435456},
+                'worker_stack_bytes': {'offline_file_app_and_cli': 67108864,
+                                       'stock_test_runner': {'releasesafe': 268435456, 'debug': 536870912}},
                 'actual_stack_peak': 'not_measured', 'capacity_stress_resource_performance': 'deferred',
                 'recorded_utc': datetime.datetime.now(datetime.timezone.utc).isoformat()}
     identity_path.write_text(json.dumps(identity, indent=2) + '\n')
@@ -87,6 +89,7 @@ def main():
         native = WSL_OUT + '/' + executable.name
         assert capture.sha(executable) == artifacts[executable.name], 'ELF drift'
         run(label, ['wsl.exe', '-e', 'env', 'RINGWIN_CAPTURE_CWD=' + WSL_ROOT,
+                    'RINGWIN_CAPTURE_ABORT_ON_CRASH=1',
                     'python3', WSL_OUT + '/run-10-command.py', prefix + '-native-' + label, native])
         assert capture.sha(executable) == artifacts[executable.name], 'ELF drift'
 
@@ -112,8 +115,9 @@ def main():
     for mode in ('ReleaseSafe', 'Debug'):
         label = 'full-' + mode.lower()
         artifact = OUT / (prefix + '-' + label)
+        runner = '11-test-runner-512.zig' if mode == 'Debug' else '11-test-runner.zig'
         run(label + '-build', [ZIG, 'test', 'src/main.zig', '-target', 'x86_64-linux', '-O', mode,
-            '--test-runner', '.scratch/core-continuous-capacity/11-test-runner.zig', '--test-no-exec',
+            '--test-runner', '.scratch/core-continuous-capacity/' + runner, '--test-no-exec',
             '-femit-bin=' + str(artifact)])
         artifacts[artifact.name] = capture.sha(artifact)
         wsl_capture(label, artifact)

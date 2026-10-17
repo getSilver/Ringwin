@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -66,6 +67,7 @@ def capture(name, command):
     process = None
     code = 1
     capture_error = None
+    fatal_diagnostic = None
     try:
         with log.open('wb') as err, stdout.open('wb') as output:
             process = subprocess.Popen(command, cwd=command_cwd, stdout=output, stderr=err)
@@ -86,6 +88,23 @@ def capture(name, command):
                 code = process.poll()
                 if code is not None:
                     break
+                if os.environ.get('RINGWIN_CAPTURE_ABORT_ON_CRASH') == '1':
+                    # Native Zig panic symbolization can hang on legacy WSL1.
+                    # A fatal marker already proves failure; keep raw bytes and
+                    # terminate only the direct child owned by this capture.
+                    with log.open('rb') as current_log:
+                        current_log.seek(max(0, log.stat().st_size - 8192))
+                        tail = current_log.read()
+                    match = re.search(rb'(?:^|\n)thread [0-9]+ panic:|Segmentation fault at address 0x[0-9a-fA-F]+', tail)
+                    if match:
+                        fatal_diagnostic = match.group().decode('ascii').strip()
+                        process.terminate()
+                        try:
+                            code = process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            code = process.wait(timeout=5)
+                        break
                 if time.perf_counter_ns() - begin > timeout_seconds * 1_000_000_000:
                     process.terminate()
                     code = process.wait(timeout=30)
@@ -106,6 +125,7 @@ def capture(name, command):
               'elapsed_ns': time.perf_counter_ns() - begin, 'exit_code': code,
               'timed_out': timed_out, 'timeout_seconds': timeout_seconds,
               'pid': process.pid if process else None, 'capture_error': capture_error,
+              'fatal_diagnostic': fatal_diagnostic,
               'producer_dependencies': producers,
               'producer_mismatches_after': sum(sha(out / name) != digest for name, digest in producers.items()),
               'log_sha256': sha(log), 'stdout_sha256': sha(stdout),
@@ -122,7 +142,7 @@ def capture(name, command):
     print(name, 'exit=' + str(code), 'source=' + before['source_tree_sha256'], flush=True)
     if code:
         print(log.read_text(encoding='utf-8', errors='replace')[-12000:])
-    return code if code else (124 if timed_out or record['producer_mismatches_after'] else 0)
+    return code if code else (125 if fatal_diagnostic else 124 if timed_out or record['producer_mismatches_after'] else 0)
 
 
 if __name__ == '__main__':

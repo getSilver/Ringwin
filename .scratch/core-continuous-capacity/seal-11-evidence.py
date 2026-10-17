@@ -101,7 +101,7 @@ def main():
         if path.is_file() and path.suffix in ('.json', '.jsonl', '.log', '.zip', '.diff'):
             references[path.name] = sha(path)
     history = {}
-    for earlier in ('11-red', '11-green', '11-targeted-', '11-store-dir-', '11-owner-dir-', '11-preflight-', '11-final-v1', '11-final-v2', '11-final-v3', '11-final-v4', '11-final-tail-', '11-ipc-', '11-owner-stack-', '11-cutover-stack-', '11-windows-owner-', '11-adapter-v3', '11-content-identity', '11-allocation-'):
+    for earlier in ('11-red', '11-green', '11-targeted-', '11-store-dir-', '11-owner-dir-', '11-preflight-', '11-final-v1', '11-final-v2', '11-final-v3', '11-final-v4', '11-final-v5', '11-final-tail-', '11-ipc-', '11-owner-stack-', '11-cutover-stack-', '11-private-fill-', '11-venue-family-', '11-precheck-', '11-crash-capture-', '11-windows-owner-', '11-adapter-v3', '11-content-identity', '11-allocation-'):
         for path in OUT.glob(earlier + '*'):
             paths = [path] if path.is_file() else list(path.iterdir()) if path.is_dir() and path.name.endswith('-evidence') else []
             for item in paths:
