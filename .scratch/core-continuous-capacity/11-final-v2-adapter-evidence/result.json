@@ -1,0 +1,38 @@
+{
+  "command": [
+    "strace",
+    "-f",
+    "-yy",
+    "-e",
+    "trace=fsync,sync,rename,renameat,renameat2",
+    "-o",
+    "/home/ubuntu/ringwin-frontier11/11-final-v2-adapter-probe/syscalls.log",
+    "/mnt/d/github/Ringwin-core-continuous-capacity/.scratch/core-continuous-capacity/11-final-v2-app",
+    "--linux-capacity-file",
+    "seed",
+    "/home/ubuntu/ringwin-frontier11/11-final-v2-adapter-probe/store"
+  ],
+  "exit_code": 0,
+  "source_tree_sha256": "ad5437cd40ac9534ae6d8de815237aeb4e46d0df3279748342274b070002a5cf",
+  "artifact_sha256": "08a378eb57c57c0dce0d12077c3e752d9c6e1fbc3913962bc5cc575faaa969f6",
+  "directory_fsync_successes": {
+    "/home/ubuntu/ringwin-frontier11/11-final-v2-adapter-probe/store/shard-0": 151,
+    "/home/ubuntu/ringwin-frontier11/11-final-v2-adapter-probe/store/shard-1": 151,
+    "/home/ubuntu/ringwin-frontier11/11-final-v2-adapter-probe/store/shard-2": 151,
+    "/home/ubuntu/ringwin-frontier11/11-final-v2-adapter-probe/store/shard-3": 472,
+    "/home/ubuntu/ringwin-frontier11/11-final-v2-adapter-probe/store/coordination": 26
+  },
+  "failed_syscalls": [],
+  "global_sync_fallbacks": 0,
+  "source_unchanged": true,
+  "artifact_unchanged": true,
+  "scope": "actual offline adapter syscalls on WSL1/lxfs; not power-loss or target durability",
+  "power_loss_qualification": false,
+  "production_qualification": false,
+  "logs": {
+    "syscalls.log": "e218c19f64c9cf7197c9e2f34eb4c511e0d86a79392733300a4bcea0bc8359c2",
+    "stdout.log": "094cb9a1c2f3882ebf4f48ec1996be8f5ff911e125e114a508bed1aae7b39717",
+    "stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "passed": true
+}

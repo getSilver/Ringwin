@@ -1,0 +1,1955 @@
+{
+  "label": "seed",
+  "mode": "seed",
+  "command": [
+    "/mnt/d/github/Ringwin-core-continuous-capacity/zig-out/bin/ringwin",
+    "--linux-capacity-file",
+    "seed",
+    "/home/ubuntu/ringwin-frontier11/11-preflight-v5/store"
+  ],
+  "pid": 7,
+  "protocol": "--linux-capacity-file",
+  "started_utc": "2026-10-16T17:46:09.778108+00:00",
+  "finished_utc": "2026-10-16T17:46:24.652785+00:00",
+  "elapsed_ns": 14874647600,
+  "exit_code": 0,
+  "intentional_process_interruption": false,
+  "timed_out": false,
+  "kill_marker": null,
+  "stdout_sha256": "bcc878e9ac4300bfacc826324da251e5cd0b70a18b4413116cf9b8ff9edb98bd",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "source_tree_sha256": "149411eb50203d7068589bdfbbbcaf180de7f0c99cc60e5af17b050a79ba39a4",
+  "artifact_sha256": "94996dda4d1c7161af9f401507654949cd4237a0d93d71acb9de33bf1c9fdd10",
+  "files_before": [],
+  "files_after": [
+    {
+      "path": "coordination/archive-2-1-0.ref",
+      "bytes": 32,
+      "sha256": "931cc256579026b1bd194b1aee88a297293f0d2c94101c2afee4850b9ff268b7",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "coordination/archive-97df4abde41f31bbf55793289426b4912e58abd9e591ebf180eeb0acec535750.bin",
+      "bytes": 160,
+      "sha256": "97df4abde41f31bbf55793289426b4912e58abd9e591ebf180eeb0acec535750",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "coordination/manifest.bin",
+      "bytes": 272,
+      "sha256": "90d24f948240bb128d9e903a37312c4f3dbd440b55e799ddef815f45cfb1f4ed",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 272,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "coordination/segment-2-1-0.log",
+      "bytes": 1701,
+      "sha256": "d50ea1b9948337a12393eb547e9475b800b7e0e5b17fa21689e70792584a6710",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 1701,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "coordination/segment-2-1-1.log",
+      "bytes": 64,
+      "sha256": "cb00bafbb2702c138daa7fae9eae7cf7763adff378de52ff020cd3b1acc8c383",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 64,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "coordination/snapshot-2-1-6-bea1a0ed3b3531aa8ee6381163ff029a704a71af74877c60c8a69224bb563661.bin",
+      "bytes": 1653,
+      "sha256": "cb794e823dea3be0aba9c4919235b0c4e0a277037451e6bed24df7a9b43ffbe9",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 1653,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/archive-1-100-0.ref",
+      "bytes": 32,
+      "sha256": "8f1daf8dcbf5e24aab93e46d572af4aaff4cc296f219a0ef735b9d9ec030228b",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/archive-1-100-1.ref",
+      "bytes": 32,
+      "sha256": "8bde7703dd6141408091f8c27e838a3647009b171124c5d15412d62b980c02ab",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/archive-2-101-0.ref",
+      "bytes": 32,
+      "sha256": "bbf5635e83051528b9c9f9377e9a45ef8b877deb0fb9ad4ca169b546a44b592c",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/archive-2-101-1.ref",
+      "bytes": 32,
+      "sha256": "7f9a04b3d95c748df76173d9933bf43852933fe254869fcbd565a980fef15032",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/archive-2aa6be6cec989a3ef8252f99e32d241bbcac506be5837aeda41ede1e27eec8e1.bin",
+      "bytes": 160,
+      "sha256": "2aa6be6cec989a3ef8252f99e32d241bbcac506be5837aeda41ede1e27eec8e1",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/archive-95e6bffea95b8b5cf4b194582dfd908e03416e6eeeaa01bcdae760717b2cf648.bin",
+      "bytes": 160,
+      "sha256": "95e6bffea95b8b5cf4b194582dfd908e03416e6eeeaa01bcdae760717b2cf648",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/archive-a0654710028de9e2184a802a1d1404eaf30eaba074de14be03e5515a7ec28e39.bin",
+      "bytes": 160,
+      "sha256": "a0654710028de9e2184a802a1d1404eaf30eaba074de14be03e5515a7ec28e39",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/archive-b9295dc280d29e1cb7e125a8fd80b0ec037cdbf660e7ae9bc475f50f2fe5ae45.bin",
+      "bytes": 160,
+      "sha256": "b9295dc280d29e1cb7e125a8fd80b0ec037cdbf660e7ae9bc475f50f2fe5ae45",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/manifest.bin",
+      "bytes": 784,
+      "sha256": "0280319b2f547ad5e91886d3d90e7fe65350d5fc12559ea072343e20ea630207",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 784,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/segment-0-102-0.log",
+      "bytes": 832,
+      "sha256": "4ad8793dbf54460e20f643bb9df4131af351e3f1758fbf82e583b3b9e0dffe0f",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 832,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/segment-1-100-0.log",
+      "bytes": 5225,
+      "sha256": "aa407c7334e97dd5e5fc543dc364fad53aa98202aa43d40f001c842ef7d5d478",
+      "allocated_bytes": 8192,
+      "raw_st_blocks": 16,
+      "logical_bytes": 5225,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/segment-1-100-1.log",
+      "bytes": 3801,
+      "sha256": "48804b04083380fc53e4cab45f41585579c22b37352ac03528640ad204025a75",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 3801,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/segment-1-100-2.log",
+      "bytes": 405,
+      "sha256": "fe3e2ef6ce358701110d10f40b011f270c36418d144da59826b07eccbb925ef5",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 405,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/segment-2-101-0.log",
+      "bytes": 168,
+      "sha256": "d0c1a6a8ed297d88d6d599313eac98196a139f7d870611c02c731ecf2804c670",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 168,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/segment-2-101-1.log",
+      "bytes": 1630,
+      "sha256": "60daa336e3dff9650db3a7540acb991709e22f0c6f60ea35c09db07a179e567d",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 1630,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/segment-2-101-2.log",
+      "bytes": 64,
+      "sha256": "4dfbe73e6165851f9d63a952f34334c058a8cd99bb3c8af1d60af056b6794abd",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 64,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/snapshot-1-100-26-95521a003dc65177986da52b11ab4b3330e0f71eab86c3ee71934dbcdf2790be.bin",
+      "bytes": 744510,
+      "sha256": "e203edd4fa8605c1fe83595d020e445a93014b04c77049e983f9590dca8009a4",
+      "allocated_bytes": 745472,
+      "raw_st_blocks": 1456,
+      "logical_bytes": 744510,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/snapshot-1-100-38-e5652e6e4feb58989a628476ac08e3e3f834d14116a64ec93aaa5769975bc8ae.bin",
+      "bytes": 747130,
+      "sha256": "93f88cd34f0bbc508b5367488730dbf262bccbbbb4d4d4a07fa58e3635dec7ca",
+      "allocated_bytes": 749568,
+      "raw_st_blocks": 1464,
+      "logical_bytes": 747130,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/snapshot-2-101-1-d1045545e9e66dab9068c26cb61799d8e27da39ef1c95d732a3583a659dafb9f.bin",
+      "bytes": 188,
+      "sha256": "26ea9c97bbc9cfbab0e51ea0420f1f309858c23f823ddb69375811c756f4de2c",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 188,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-0/snapshot-2-101-3-d313c068ac4c2d14698e7719189d0ef44076d51622506373081c006630b0fd43.bin",
+      "bytes": 887,
+      "sha256": "4877cdae3b0f726603b3cfa4dc308dbc8298c6a8b311dff9634674fdb1a1480b",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 887,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/archive-04916c99fff77a73c82ce5352626a46d2129a20e11d8f63be042fca50854440f.bin",
+      "bytes": 160,
+      "sha256": "04916c99fff77a73c82ce5352626a46d2129a20e11d8f63be042fca50854440f",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/archive-1-110-0.ref",
+      "bytes": 32,
+      "sha256": "3929933ac19f7649226c95daff5c9956385c63433730cd7ee640da9db830c29a",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/archive-1-110-1.ref",
+      "bytes": 32,
+      "sha256": "511ad41918e33b652cc65cdbfaae3b4f6d906a04d393c919b1358a56e1f3bfac",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/archive-2-111-0.ref",
+      "bytes": 32,
+      "sha256": "3547b6f79751612de08a090731de3489baeed2411a110c828d4fc354646abb1c",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/archive-2-111-1.ref",
+      "bytes": 32,
+      "sha256": "497f9af38eb1bc748bb4f95f9593d887e6682a410787e4fe9c7ca73f49e8a583",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/archive-21a2fc41a696fe04467c171149316076fa83c0961c079a21610136834a0856ae.bin",
+      "bytes": 160,
+      "sha256": "21a2fc41a696fe04467c171149316076fa83c0961c079a21610136834a0856ae",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/archive-3eaab066b8da3b525dc4ffb5451d43d387b2789b9eb7a69b85dfa3426c7a8a78.bin",
+      "bytes": 160,
+      "sha256": "3eaab066b8da3b525dc4ffb5451d43d387b2789b9eb7a69b85dfa3426c7a8a78",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/archive-6ffa0ab5a9a541feda97170027b30a6e3074ae600d48c92935dada39189aa8cd.bin",
+      "bytes": 160,
+      "sha256": "6ffa0ab5a9a541feda97170027b30a6e3074ae600d48c92935dada39189aa8cd",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/manifest.bin",
+      "bytes": 784,
+      "sha256": "8a04710e3e061bf1ef79208dcb3bf5cd95af437cbdb9f6dcc643cd18c85873a6",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 784,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/segment-0-112-0.log",
+      "bytes": 832,
+      "sha256": "b1eab0a4a5bd89c8c74a50eb959e5a68e5b192b51ba8ffa056bbd5f7c01d10cc",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 832,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/segment-1-110-0.log",
+      "bytes": 5225,
+      "sha256": "836ee9aee98b6c002bad85f20311d02c5a89e461ddcb8dd5a0944cf5e96640bd",
+      "allocated_bytes": 8192,
+      "raw_st_blocks": 16,
+      "logical_bytes": 5225,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/segment-1-110-1.log",
+      "bytes": 3801,
+      "sha256": "4e72aace089e5c451e5a8ad810e930ab4b425aea78656c3a140b0914bdbc9993",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 3801,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/segment-1-110-2.log",
+      "bytes": 405,
+      "sha256": "7e9f50e139aa895b6d12b6b0d80fa2fcb62c12f86f0d10f1a7f49e264c063634",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 405,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/segment-2-111-0.log",
+      "bytes": 168,
+      "sha256": "d0c1a6a8ed297d88d6d599313eac98196a139f7d870611c02c731ecf2804c670",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 168,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/segment-2-111-1.log",
+      "bytes": 1630,
+      "sha256": "8410e4cb93c305487a9b9590d4234967f8c0f8d361dfb86f6bb62e1eaf2d5680",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 1630,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/segment-2-111-2.log",
+      "bytes": 64,
+      "sha256": "4dfbe73e6165851f9d63a952f34334c058a8cd99bb3c8af1d60af056b6794abd",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 64,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/snapshot-1-110-26-a6ed026ad1ea7042934ccf300823b6642e4a8fe3fa40a436b57cb47c1126b12a.bin",
+      "bytes": 744510,
+      "sha256": "a663fda9ab747e42ad1bf01c49d91e24bde55a4740ac4102eee54a91d91eb726",
+      "allocated_bytes": 745472,
+      "raw_st_blocks": 1456,
+      "logical_bytes": 744510,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/snapshot-1-110-38-6fc26c67efa9f1ef8230534375945d62e36bc1e0bb259a9828bc225a67465438.bin",
+      "bytes": 747130,
+      "sha256": "907563f67b3ce77c96483bdd895aad68230665a979c5737d51207089a56cec15",
+      "allocated_bytes": 749568,
+      "raw_st_blocks": 1464,
+      "logical_bytes": 747130,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/snapshot-2-111-1-29dd2f6fb4364f315ad7593f8488a73952f227e83e16dabe36a2436ca255f9a7.bin",
+      "bytes": 188,
+      "sha256": "d719d3ba223afc3cc11f1ca3dc04f4353fe74cd6c830d7f11768e4c7c0ef145e",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 188,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-1/snapshot-2-111-3-fe79a5a3486b2db7dca49d19a6aec2169f4e844256b8ba73302068130ed75ddb.bin",
+      "bytes": 887,
+      "sha256": "368718b0255bb92874527bb80c9346aaec19a4c69f46b417a125bd5f9e48227a",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 887,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/archive-1-120-0.ref",
+      "bytes": 32,
+      "sha256": "0ae8bff48ed0e65a9f4e89d9ee4e6ee169b011a14519450080be647bd7859e4e",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/archive-1-120-1.ref",
+      "bytes": 32,
+      "sha256": "5943a47dc095ad0e92faf8db857104297bdaaed284aa67c312fa0040b84f8642",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/archive-11cf361012d05ad45bf95ff57dca1d038fb89ed82d8c13fb95cb703d8c5001f1.bin",
+      "bytes": 160,
+      "sha256": "11cf361012d05ad45bf95ff57dca1d038fb89ed82d8c13fb95cb703d8c5001f1",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/archive-13a499bceabb3693b4fab47b346eed864517c953bcc89049f447401e4d6ac66c.bin",
+      "bytes": 160,
+      "sha256": "13a499bceabb3693b4fab47b346eed864517c953bcc89049f447401e4d6ac66c",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/archive-2-121-0.ref",
+      "bytes": 32,
+      "sha256": "4cfd38a2d60dd499d600d3975b5497858452edd1a74862fd4bc53dd02fd2ef81",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/archive-2-121-1.ref",
+      "bytes": 32,
+      "sha256": "b3231fbcee8e11849a789ffca779c760e275306ef9744f44d2cbfc5b326a9ce5",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/archive-339ce0f883f440def0ca9b0a835d34f6a09d560c6feb3d230d0b9648d3289332.bin",
+      "bytes": 160,
+      "sha256": "339ce0f883f440def0ca9b0a835d34f6a09d560c6feb3d230d0b9648d3289332",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/archive-9e5b7167e3d6a9c7a75111136131bc6b1c08c1903aef8504d971d4e97ccd2b75.bin",
+      "bytes": 160,
+      "sha256": "9e5b7167e3d6a9c7a75111136131bc6b1c08c1903aef8504d971d4e97ccd2b75",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/manifest.bin",
+      "bytes": 784,
+      "sha256": "b8ba21849b1603314aa8c21942cd3c88c9fa65bcc47f5978b53fee469dd8c851",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 784,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/segment-0-122-0.log",
+      "bytes": 832,
+      "sha256": "62d431dd73c02b3e75a0dc2de0c8d9817eb4afb65b7cae3de08b566136bb3914",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 832,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/segment-1-120-0.log",
+      "bytes": 5225,
+      "sha256": "14b8fddb4c57566ff97c564af0410758e1e5cbd0fff59ae00495af78743cd104",
+      "allocated_bytes": 8192,
+      "raw_st_blocks": 16,
+      "logical_bytes": 5225,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/segment-1-120-1.log",
+      "bytes": 3801,
+      "sha256": "2c3fbbd1bb6479104c6a3d9c3c88cad4ed866c43a4c6cd21f34490de5830c34f",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 3801,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/segment-1-120-2.log",
+      "bytes": 405,
+      "sha256": "357da41f31be38d23ba0cb37cc2ae226c55ca0d18bb5e2af621a29a80e68f0c8",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 405,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/segment-2-121-0.log",
+      "bytes": 168,
+      "sha256": "d0c1a6a8ed297d88d6d599313eac98196a139f7d870611c02c731ecf2804c670",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 168,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/segment-2-121-1.log",
+      "bytes": 1630,
+      "sha256": "8cc31f400c3854f3f865bedbc42b994ae37ebc1cff4321b6774b581acb92cfcb",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 1630,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/segment-2-121-2.log",
+      "bytes": 64,
+      "sha256": "4dfbe73e6165851f9d63a952f34334c058a8cd99bb3c8af1d60af056b6794abd",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 64,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/snapshot-1-120-26-1c90284e7afee576abfbf85454a608c8a3fe35c0226ae971fcd22c6a122e7690.bin",
+      "bytes": 744510,
+      "sha256": "4e09696092185bfb5402d83d2cff57e756eab1b4ae8ead15fa5413fb4554ccf5",
+      "allocated_bytes": 745472,
+      "raw_st_blocks": 1456,
+      "logical_bytes": 744510,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/snapshot-1-120-38-eb739fa49359df6c514e66573408771e8b3874eddd685943acf68980fe4d4cd8.bin",
+      "bytes": 747130,
+      "sha256": "9c744a9ffb32c91a8b0deba85369178f17fdc102a4fc33619327a67a6974cc80",
+      "allocated_bytes": 749568,
+      "raw_st_blocks": 1464,
+      "logical_bytes": 747130,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/snapshot-2-121-1-2cc3e1305591fa05c7221762e7de8fe3cb32cfa3e93eb70fb497599e2a1935f2.bin",
+      "bytes": 188,
+      "sha256": "04abc64926e56c873aea92e459361a5e22b335935736bee78d5a983d7a84bbbd",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 188,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-2/snapshot-2-121-3-296833fbd7ddb0fea1821ba279c1def40bc98419dd940f33d332e29d6d73a54d.bin",
+      "bytes": 887,
+      "sha256": "e1e1b117f9313494effd0495361a25bfacdff9437320a126b91bef2f29f9a98d",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 887,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-1-130-0.ref",
+      "bytes": 32,
+      "sha256": "8cf7155dd4e427e27235868360099fe70bcbf29d838575b57ffeef070763a646",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-1-130-1.ref",
+      "bytes": 32,
+      "sha256": "e2a1c8beb25e1960c3a0a531402f14fbe1a97c57ca3f8f46d9a70bc60b6b2abc",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-1-130-2.ref",
+      "bytes": 32,
+      "sha256": "c5f2bd066e8e9a6611498913b8f401a18de21f16745ad208fb7f7c8bc09da85f",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-1-130-3.ref",
+      "bytes": 32,
+      "sha256": "17c2b3937c8f25a6f8c467a9a2a3d7407c9843d70fb8bffd73062fa7d943899d",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-1-130-4.ref",
+      "bytes": 32,
+      "sha256": "e3a10d3d66b7af16ccac58d738b28910e7e70120c1ccf13d368552da56acf3cb",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-1-130-5.ref",
+      "bytes": 32,
+      "sha256": "945c50fad048027c712ff02db527fd259bba270eea97c48d86bcd920dc42a499",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-1-130-6.ref",
+      "bytes": 32,
+      "sha256": "864576114d429fdc8acb0dd6a01754542b45a1aeea1998bdc022c12e045192d3",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-1115b7146c526b8e4e61c29324e77ee17bdea8574d9d570fd7a414ec8cd5b5b1.bin",
+      "bytes": 160,
+      "sha256": "1115b7146c526b8e4e61c29324e77ee17bdea8574d9d570fd7a414ec8cd5b5b1",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-2-131-0.ref",
+      "bytes": 32,
+      "sha256": "2a331f1bf8f8df4bc31cdfc887aee3686146b78d5a20e14960d64100ba51d66f",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-2-131-1.ref",
+      "bytes": 32,
+      "sha256": "4c27621b25cb229c933f252810ba282d4a91158bb6fabaa9d63e6682e0e4dd3a",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-2-131-2.ref",
+      "bytes": 32,
+      "sha256": "ec03382759f3d5b4c2844696798cad71dce6ff2b708ea01909e03a66ed4e4997",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-2-131-3.ref",
+      "bytes": 32,
+      "sha256": "85e7303ffe6a842849bf4b61f16a1358e4ec0e052023fe60742183f71923fae4",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-2-131-4.ref",
+      "bytes": 32,
+      "sha256": "6cfdfe2badc839cd1150637a71e36e4893bcdd6a66e0abf570e1569f17db6b16",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-2-131-5.ref",
+      "bytes": 32,
+      "sha256": "752c8ad481bea4f69257387a91cc897518b6ffc80ad9e86ce701bc121691f194",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-2-131-6.ref",
+      "bytes": 32,
+      "sha256": "035b2854e8ee5b67de726d884660edd26bcc4709e4594b0b272dc5802ab82192",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 32,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-428aac7b29220acb18443d94224973b79dd9c5818337b000fe21ce6d9b46a3aa.bin",
+      "bytes": 160,
+      "sha256": "428aac7b29220acb18443d94224973b79dd9c5818337b000fe21ce6d9b46a3aa",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-56919fd789b05347b025b08f3cca64af2f0df55ef213ef6e5427c8f63a543bd3.bin",
+      "bytes": 160,
+      "sha256": "56919fd789b05347b025b08f3cca64af2f0df55ef213ef6e5427c8f63a543bd3",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-6a820860fb42f9a1f4fe3577ee53230c40a4e9ae47c19d555ec1ad98a7c89911.bin",
+      "bytes": 160,
+      "sha256": "6a820860fb42f9a1f4fe3577ee53230c40a4e9ae47c19d555ec1ad98a7c89911",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-7f243018ee53114cc4b3c0d10a30157ca62cda05b9d9a021b8040372a82f6415.bin",
+      "bytes": 160,
+      "sha256": "7f243018ee53114cc4b3c0d10a30157ca62cda05b9d9a021b8040372a82f6415",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-974c94b9182897e7d965abea97fb07fece0c479495ed74a54ce02bacf38a07ec.bin",
+      "bytes": 160,
+      "sha256": "974c94b9182897e7d965abea97fb07fece0c479495ed74a54ce02bacf38a07ec",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-c48ad157fd002ed8348501f076d25eff6438e35267a56ac5dca51bb097cd4a94.bin",
+      "bytes": 160,
+      "sha256": "c48ad157fd002ed8348501f076d25eff6438e35267a56ac5dca51bb097cd4a94",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-c8f126b1dd28191520b79528864752163459e5d87ecad897aa6896ced66134e1.bin",
+      "bytes": 160,
+      "sha256": "c8f126b1dd28191520b79528864752163459e5d87ecad897aa6896ced66134e1",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-ca48028ccf1b9004bb6933c0cfcee5001f250afba628358d4c94c11fcf1d43e6.bin",
+      "bytes": 160,
+      "sha256": "ca48028ccf1b9004bb6933c0cfcee5001f250afba628358d4c94c11fcf1d43e6",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-ce98757010afebe415677419e943344e3ca6faa210822cd2734acc2c4f6fee41.bin",
+      "bytes": 160,
+      "sha256": "ce98757010afebe415677419e943344e3ca6faa210822cd2734acc2c4f6fee41",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-df12afc2b07b2c4de01363e80d2d8e589686c76ca7803df7ab44f7c4f2f4ba9e.bin",
+      "bytes": 160,
+      "sha256": "df12afc2b07b2c4de01363e80d2d8e589686c76ca7803df7ab44f7c4f2f4ba9e",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-e97db2ea3de883a237ef202059fac1e7f92cec410dd5778b77cfe8855fa2e53d.bin",
+      "bytes": 160,
+      "sha256": "e97db2ea3de883a237ef202059fac1e7f92cec410dd5778b77cfe8855fa2e53d",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-fb3effe55c5bfa3a510ad50868344ae65e19f95c5a06d326bb485e4237a7b4e3.bin",
+      "bytes": 160,
+      "sha256": "fb3effe55c5bfa3a510ad50868344ae65e19f95c5a06d326bb485e4237a7b4e3",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/archive-fba912b6524c1af45744e48fafe34ecd113abc8049528508e5db202afe385b46.bin",
+      "bytes": 160,
+      "sha256": "fba912b6524c1af45744e48fafe34ecd113abc8049528508e5db202afe385b46",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 160,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/manifest.bin",
+      "bytes": 784,
+      "sha256": "3176329f6809b6148f8a0d55f6d3807f488aacf8d44d4ef36d30ee55f483ce95",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 784,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/segment-0-132-0.log",
+      "bytes": 832,
+      "sha256": "17ecc57cf8e9c45588aa33b34317943a933aa5ae0aab78a8807d1798bd59c3fa",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 832,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/segment-1-130-0.log",
+      "bytes": 5225,
+      "sha256": "36c2bca3aaca9bc976632fa437c70ed4cc59f357834367e50b658cc4cd4dadf4",
+      "allocated_bytes": 8192,
+      "raw_st_blocks": 16,
+      "logical_bytes": 5225,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/segment-1-130-1.log",
+      "bytes": 4538,
+      "sha256": "cf9fb31817f4029e698a7d64f968826d26f6a26ad9cfa1eaeeef1cf0507c4712",
+      "allocated_bytes": 8192,
+      "raw_st_blocks": 16,
+      "logical_bytes": 4538,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/segment-1-130-2.log",
+      "bytes": 3801,
+      "sha256": "094c1e3df0c388fc11312b7940cb2afd0db9b5496fa9699c41fd6f192cce284f",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 3801,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/segment-1-130-3.log",
+      "bytes": 4359,
+      "sha256": "fcc13b2047bcce8f35b6c82dbadd97ee140a8c64ba1d51044ce9aafbd673cc45",
+      "allocated_bytes": 8192,
+      "raw_st_blocks": 16,
+      "logical_bytes": 4359,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/segment-1-130-4.log",
+      "bytes": 3801,
+      "sha256": "f379ac11ba675c50d81b1df1aecbacd5f588b35c07d49bf094a52a050cb44d3a",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 3801,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/segment-1-130-5.log",
+      "bytes": 3801,
+      "sha256": "f4e5e2c51b95e991d2464990dff686e4da63b20f756f434c57a22f075dce4d20",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 3801,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/segment-1-130-6.log",
+      "bytes": 9674,
+      "sha256": "5816bda95a7f13f9bb9e4a6d5a89bf61a7ae61f18d1e097ce6103db98faeb358",
+      "allocated_bytes": 12288,
+      "raw_st_blocks": 24,
+      "logical_bytes": 9674,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/segment-1-130-7.log",
+      "bytes": 405,
+      "sha256": "2709165ba3fd2ebecccb25f9f778d23ddf734715e363839e7079e58a11dcd220",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 405,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/segment-2-131-0.log",
+      "bytes": 168,
+      "sha256": "d0c1a6a8ed297d88d6d599313eac98196a139f7d870611c02c731ecf2804c670",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 168,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/segment-2-131-1.log",
+      "bytes": 1630,
+      "sha256": "fd11d1cfa13e59098fa3125a74ba20633e2f9e69535342c52636b0b66336fae7",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 1630,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/segment-2-131-2.log",
+      "bytes": 1630,
+      "sha256": "8e47430f88b76654d9bc4868a73e4fecee0366fb9ed36726e9c493c9de379516",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 1630,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/segment-2-131-3.log",
+      "bytes": 1630,
+      "sha256": "3342c2a2dca1c73a31e62bc36988f3c983b034ff42980bee56548f620471373a",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 1630,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/segment-2-131-4.log",
+      "bytes": 1630,
+      "sha256": "73bf8046e8e59381c54444e687664f18f8d187c1f1685c65da30978364e9e24b",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 1630,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/segment-2-131-5.log",
+      "bytes": 1630,
+      "sha256": "72157b04c6570c8bcb9a5c0f15f1f77ea93c785358c7db695b39c90e167202eb",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 1630,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/segment-2-131-6.log",
+      "bytes": 5465,
+      "sha256": "0d11942fa5386f7a02831798fed49de290aa74232020f263a312a6191756184f",
+      "allocated_bytes": 8192,
+      "raw_st_blocks": 16,
+      "logical_bytes": 5465,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/segment-2-131-7.log",
+      "bytes": 64,
+      "sha256": "ea822527a19baff3bc1bdb1882c12849e0dada9ed8d2b4706e2d2615d03ff21a",
+      "allocated_bytes": null,
+      "raw_st_blocks": 0,
+      "logical_bytes": 64,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/snapshot-1-130-122-319ea1b9c1f6cffc86b063e30c44fa521d1ace164b4f80acb166f1efb1c4ced3.bin",
+      "bytes": 763549,
+      "sha256": "d87e64ea48b6f7011efbbfda43bf2121d4bf73d737996a8a7436ae97b5ad52c5",
+      "allocated_bytes": 765952,
+      "raw_st_blocks": 1496,
+      "logical_bytes": 763549,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/snapshot-1-130-89-9972a0ef518aab9e8b053e7ba9d3c84ea4a06b1da7c2286e8e3227c17fbd8ffb.bin",
+      "bytes": 756943,
+      "sha256": "38d9b4a3e0d7a7fe4d2b261c8db349a2bb2185f6af908826dbddb7e6378e16fe",
+      "allocated_bytes": 757760,
+      "raw_st_blocks": 1480,
+      "logical_bytes": 756943,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/snapshot-2-131-11-86f5090fb98713ea5dc140c5065171981311bf540bd60053145083d8389bc762.bin",
+      "bytes": 3683,
+      "sha256": "ea2d40d0d1c32511f540e12646e07e99fee0c0fe1b1baf7a514869b189f43f61",
+      "allocated_bytes": 4096,
+      "raw_st_blocks": 8,
+      "logical_bytes": 3683,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    },
+    {
+      "path": "shard-3/snapshot-2-131-18-8c1435f42d145b3d791af0f07f53ae6d2f8596dc8c98a0c54bef72aaec94eaca.bin",
+      "bytes": 6488,
+      "sha256": "199d3d3df2a526a60d6002960d69d797e5e069cefd984f8a9513faebee8a63b2",
+      "allocated_bytes": 8192,
+      "raw_st_blocks": 16,
+      "logical_bytes": 6488,
+      "allocation_api": "stat.st_blocks; WSL1 may report zero (unavailable)"
+    }
+  ],
+  "memory_samples": [
+    {
+      "elapsed_ns": 22755900,
+      "working_set_bytes": 311296,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 124041600,
+      "working_set_bytes": 39829504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 224931500,
+      "working_set_bytes": 80392192,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 325866100,
+      "working_set_bytes": 121253888,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 426925800,
+      "working_set_bytes": 180547584,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 527973100,
+      "working_set_bytes": 195448832,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 628726100,
+      "working_set_bytes": 195448832,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 729784000,
+      "working_set_bytes": 196218880,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 830799200,
+      "working_set_bytes": 218304512,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 931450100,
+      "working_set_bytes": 218304512,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 1032742000,
+      "working_set_bytes": 218312704,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 1133275000,
+      "working_set_bytes": 218316800,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 1234259100,
+      "working_set_bytes": 218316800,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 1335119000,
+      "working_set_bytes": 218337280,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 1436214000,
+      "working_set_bytes": 218337280,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 1536990300,
+      "working_set_bytes": 218386432,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 1637943500,
+      "working_set_bytes": 218443776,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 1738355200,
+      "working_set_bytes": 245485568,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 1839087800,
+      "working_set_bytes": 218554368,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 1939731100,
+      "working_set_bytes": 218607616,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 2040989700,
+      "working_set_bytes": 219410432,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 2142520300,
+      "working_set_bytes": 219475968,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 2243336900,
+      "working_set_bytes": 219488256,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 2344222100,
+      "working_set_bytes": 219496448,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 2445129000,
+      "working_set_bytes": 219496448,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 2546200900,
+      "working_set_bytes": 219496448,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 2647208200,
+      "working_set_bytes": 219496448,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 2749303700,
+      "working_set_bytes": 109899776,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 2849957300,
+      "working_set_bytes": 104550400,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 2950915800,
+      "working_set_bytes": 145162240,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 3051852500,
+      "working_set_bytes": 186023936,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 3153177100,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 3254109300,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 3354610700,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 3455884100,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 3557297500,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 3658570800,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 3759971400,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 3861495400,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 3962178200,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 4063309100,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 4164975600,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 4265446300,
+      "working_set_bytes": 231124992,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 4366472600,
+      "working_set_bytes": 253079552,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 4467003400,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 4568205500,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 4668862200,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 4770440600,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 4871095600,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 4971795600,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 5072467000,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 5172956900,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 5274301600,
+      "working_set_bytes": 76419072,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 5375135100,
+      "working_set_bytes": 115142656,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 5476088000,
+      "working_set_bytes": 156393472,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 5577024600,
+      "working_set_bytes": 197607424,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 5678639800,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 5779673200,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 5881055900,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 5982165600,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 6082940800,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 6183585500,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 6284247500,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 6385312500,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 6486034100,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 6591800900,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 6692340100,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 6793112300,
+      "working_set_bytes": 227569664,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 6894315500,
+      "working_set_bytes": 253079552,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 6995138300,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 7096230100,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 7197492100,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 7298221500,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 7399649800,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 7500628700,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 7602194400,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 7703322800,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 7804052100,
+      "working_set_bytes": 109899776,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 7904652100,
+      "working_set_bytes": 104329216,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 8005590100,
+      "working_set_bytes": 145309696,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 8106528500,
+      "working_set_bytes": 186351616,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 8207654200,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 8308991300,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 8410280400,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 8511379400,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 8612438800,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 8712932400,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 8814373900,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 8915790600,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 9017000500,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 9118633900,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 9219356200,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 9320632500,
+      "working_set_bytes": 219582464,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 9421260600,
+      "working_set_bytes": 253079552,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 9522062000,
+      "working_set_bytes": 219525120,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 9623258400,
+      "working_set_bytes": 219533312,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 9723949400,
+      "working_set_bytes": 219533312,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 9825108100,
+      "working_set_bytes": 219533312,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 9925950500,
+      "working_set_bytes": 219537408,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 10026917400,
+      "working_set_bytes": 219537408,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 10127995800,
+      "working_set_bytes": 219537408,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 10229059000,
+      "working_set_bytes": 219537408,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 10330287800,
+      "working_set_bytes": 219537408,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 10430749900,
+      "working_set_bytes": 219537408,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 10531163100,
+      "working_set_bytes": 219537408,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 10632682400,
+      "working_set_bytes": 219537408,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 10733704700,
+      "working_set_bytes": 219537408,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 10835179300,
+      "working_set_bytes": 219537408,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 10936127800,
+      "working_set_bytes": 219537408,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 11036624800,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 11137838600,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 11238690400,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 11339952000,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 11441229900,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 11541627300,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 11642849200,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 11744063800,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 11845039800,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 11946231700,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 12047034700,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 12147579300,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 12248804400,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 12349840000,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 12450925400,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 12551457300,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 12652538000,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 12753731400,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 12855076900,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 12956056300,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 13057116100,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 13158000600,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 13258696500,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 13359299900,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 13460540300,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 13561530200,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 13662294100,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 13763385600,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 13864583500,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 13965171700,
+      "working_set_bytes": 219541504,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 14066626200,
+      "working_set_bytes": 219549696,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 14167762900,
+      "working_set_bytes": 219549696,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 14268910100,
+      "working_set_bytes": 219549696,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 14369891100,
+      "working_set_bytes": 219549696,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 14470977100,
+      "working_set_bytes": 219549696,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 14576468600,
+      "working_set_bytes": 75300864,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 14677696900,
+      "working_set_bytes": 86093824,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    },
+    {
+      "elapsed_ns": 14778148600,
+      "working_set_bytes": 0,
+      "peak_working_set_bytes": null,
+      "api": "/proc/PID/status; zero VmHWM treated as unavailable"
+    }
+  ],
+  "allocated_byte_scope": "regular dataset files only; excludes directory/MFT/journal overhead"
+}

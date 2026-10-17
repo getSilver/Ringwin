@@ -1,0 +1,17 @@
+8     mmap(NULL, 262223, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f6957260000
+8     rt_sigaction(SIGSEGV, {sa_handler=0x124f310, sa_mask=[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_RESETHAND|SA_SIGINFO, sa_restorer=0x1054af0}, NULL, 8) = 0
+8     rt_sigaction(SIGILL, {sa_handler=0x124f310, sa_mask=[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_RESETHAND|SA_SIGINFO, sa_restorer=0x1054af0}, NULL, 8) = 0
+8     rt_sigaction(SIGBUS, {sa_handler=0x124f310, sa_mask=[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_RESETHAND|SA_SIGINFO, sa_restorer=0x1054af0}, NULL, 8) = 0
+8     rt_sigaction(SIGFPE, {sa_handler=0x124f310, sa_mask=[], sa_flags=SA_RESTORER|SA_ONSTACK|SA_RESTART|SA_RESETHAND|SA_SIGINFO, sa_restorer=0x1054af0}, NULL, 8) = 0
+8     mmap(NULL, 268705792, PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f6947210000
+8     mprotect(0x7f6947211000, 268701696, PROT_READ|PROT_WRITE) = 0
+8     clone(child_stack=0x7f6957210ff8, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID|0x400000, parent_tid=[9], tls=0x7f6957251028, child_tidptr=0x7f6957251078) = 9
+9     mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f6947200000
+9     mmap(0x7f6946f6a000, 2711552, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f6946f6a000
+9     rt_sigaction(SIGIO, {sa_handler=0x123a5c0, sa_mask=[], sa_flags=SA_RESTORER, sa_restorer=0x1054af0}, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=SA_RESTORER, sa_restorer=0x40e075}, 8) = 0
+9     rt_sigaction(SIGPIPE, {sa_handler=0x123a5c0, sa_mask=[], sa_flags=SA_RESTORER, sa_restorer=0x1054af0}, {sa_handler=SIG_DFL, sa_mask=[], sa_flags=SA_RESTORER, sa_restorer=0x7fe389916210}, 8) = 0
+9     mmap(0x7f6946f69000, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f6946f69000
+9     mmap(0x7f69459cc000, 22663168, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0) = 0x7f69459cc000
+9     --- SIGSEGV {si_signo=SIGSEGV, si_code=SEGV_ACCERR, si_addr=0x7f6947210c30} ---
+9     +++ killed by SIGKILL +++
+8     +++ killed by SIGKILL +++

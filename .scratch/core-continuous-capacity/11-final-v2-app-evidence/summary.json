@@ -1,0 +1,8 @@
+{
+  "state": "process_recovery_passed_faults_separate",
+  "rounds": 10,
+  "steps": 30,
+  "source_tree_sha256": "ad5437cd40ac9534ae6d8de815237aeb4e46d0df3279748342274b070002a5cf",
+  "production_qualification": false,
+  "power_loss_qualification": false
+}

@@ -1,0 +1,160 @@
+11-final-v5-native-full-debug exit=-9 source=6cd51582e1838054199a17103e717f5b2c89601a9eb2560a5fd19516992733bd
+ but cannot prove fresh...OK
+266/624 durable_store.test.order history file publication fault boundaries reopen a complete old or new root...OK
+267/624 durable_store.test.order history file physical root damage missing object and truncated page fail closed...OK
+268/624 durable_store.test.order history file isolates eight owner origins and rejects foreign root requests...OK
+269/624 durable_store.test.order history public store proves sibling boundaries after interleaved root generations...OK
+270/624 durable_store.test.memory and file stores preserve sealed barrier and reject unsafe recovery...OK
+271/624 durable_store.test.memory fault injection always closes the safety gate...OK
+272/624 durable_store.test.manifest checksum covers entries as well as the header...OK
+273/624 durable_store.test.segment rotation requires a snapshot at the sealed barrier...OK
+274/624 durable_store.test.checkpoint store rotates 100 rounds without cumulative manifest exhaustion...OK
+275/624 durable_store.test.memory journal rotation counts retained business history in the shared archive quota...OK
+276/624 durable_store.test.checkpoint store local file 100 rotations retain audit and two snapshot generations...OK
+277/624 durable_store.test.checkpoint store shared seven streams reclaim active metadata and replay memory history...store_layout: stream_cache=196672, memory_adapter=18363552, file_adapter=10755408, manifest_bound=8208, archived_descriptor=192, snapshot_bound=33554432
+OK
+278/624 durable_store.test.checkpoint store file fault boundaries select complete old or new roots...OK
+279/624 durable_store.test.checkpoint store rejects overflow and conflicting snapshot identity without reclaiming roots...OK
+280/624 durable_store.test.checkpoint store snapshot reclaim commits references before obsolete object deletion...OK
+281/624 durable_store.test.checkpoint store bounded replay reads only requested horizon and rejects byte budget before delivery...OK
+282/624 durable_store.test.checkpoint store virgin committed journal remains available before first snapshot...OK
+283/624 durable_store.test.checkpoint store archived replay remains stable across callback writes to another stream...OK
+284/624 durable_store.test.checkpoint store memory receipts require current root ancestry and stream namespace...OK
+285/624 durable_store.test.checkpoint store rejects unknown journal schema despite valid frame manifest and payload checksums...OK
+286/624 durable_store.test.checkpoint store publishes after fallback while preserving two valid generations...OK
+287/624 durable_store.test.large resident snapshots survive memory publication and two file reopens...OK
+288/624 durable_store.test.committed recovery prefix retains physical uncommitted suffix across file reopen...OK
+289/624 durable_store.test.committed recovery prefix excludes a partial crash frame without modifying bytes...OK
+290/624 durable_store.test.optimization memory overflow snapshot rotation preserves borrowed buffers and inline transitions...OK
+291/624 durable_store.test.optimization memory overflow snapshot allocation failure retains previous committed generation...OK
+292/624 durable_store.test.optimization memory inline snapshot publication preserves borrowed previous input...OK
+293/624 demo_authority.test.Demo owner commits before publication and recovers only a complete barrier...OK
+294/624 demo_authority.test.Demo owner closes persistence faults at their last proven barrier...OK
+295/624 demo_authority.test.Checkpoint owner file interruptions preserve coherent Unknown fill economics and authority...owner_file_fault: short_write case=0 point=append skip=0
+owner_file_fault: short_write case=1 point=commit skip=0
+owner_file_fault: short_write case=2 point=root_publish skip=0
+owner_file_fault: short_write case=3 point=root_publish skip=1
+owner_file_fault: short_write case=4 point=seal skip=0
+owner_file_fault: short_write case=5 point=publish skip=0
+owner_file_fault: short_write case=6 point=snapshot_sync skip=0
+owner_file_fault: short_write case=7 point=rotate skip=0
+owner_file_fault: short_write case=8 point=archive_sync skip=0
+owner_file_fault: short_write case=9 point=reclaim skip=0
+owner_file_fault: short_write case=10 point=reclaim skip=1
+owner_file_fault: short_write case=11 point=root_publish skip=0
+owner_file_fault: short_write case=12 point=root_publish skip=1
+owner_file_fault: short_write case=13 point=root_publish skip=2
+owner_file_fault: short_write case=14 point=root_publish skip=3
+owner_file_fault: short_write case=15 point=root_publish skip=4
+owner_file_fault: short_write case=16 point=append skip=0
+owner_file_fault: short_write case=17 point=commit skip=0
+owner_file_fault: sync_timeout case=0 point=append skip=0
+owner_file_fault: sync_timeout case=1 point=commit skip=0
+owner_file_fault: sync_timeout case=2 point=root_publish skip=0
+owner_file_fault: sync_timeout case=3 point=root_publish skip=1
+owner_file_fault: sync_timeout case=4 point=seal skip=0
+owner_file_fault: sync_timeout case=5 point=publish skip=0
+owner_file_fault: sync_timeout case=6 point=snapshot_sync skip=0
+owner_file_fault: sync_timeout case=7 point=rotate skip=0
+owner_file_fault: sync_timeout case=8 point=archive_sync skip=0
+owner_file_fault: sync_timeout case=9 point=reclaim skip=0
+owner_file_fault: sync_timeout case=10 point=reclaim skip=1
+owner_file_fault: sync_timeout case=11 point=root_publish skip=0
+owner_file_fault: sync_timeout case=12 point=root_publish skip=1
+owner_file_fault: sync_timeout case=13 point=root_publish skip=2
+owner_file_fault: sync_timeout case=14 point=root_publish skip=3
+owner_file_fault: sync_timeout case=15 point=root_publish skip=4
+owner_file_fault: sync_timeout case=16 point=append skip=0
+owner_file_fault: sync_timeout case=17 point=commit skip=0
+owner_file_fault: enospc case=0 point=append skip=0
+owner_file_fault: enospc case=1 point=commit skip=0
+owner_file_fault: enospc case=2 point=root_publish skip=0
+owner_file_fault: enospc case=3 point=root_publish skip=1
+owner_file_fault: enospc case=4 point=seal skip=0
+owner_file_fault: enospc case=5 point=publish skip=0
+owner_file_fault: enospc case=6 point=snapshot_sync skip=0
+owner_file_fault: enospc case=7 point=rotate skip=0
+owner_file_fault: enospc case=8 point=archive_sync skip=0
+owner_file_fault: enospc case=9 point=reclaim skip=0
+owner_file_fault: enospc case=10 point=reclaim skip=1
+owner_file_fault: enospc case=11 point=root_publish skip=0
+owner_file_fault: enospc case=12 point=root_publish skip=1
+owner_file_fault: enospc case=13 point=root_publish skip=2
+owner_file_fault: enospc case=14 point=root_publish skip=3
+owner_file_fault: enospc case=15 point=root_publish skip=4
+owner_file_fault: enospc case=16 point=append skip=0
+owner_file_fault: enospc case=17 point=commit skip=0
+owner_file_fault: eio case=0 point=append skip=0
+owner_file_fault: eio case=1 point=commit skip=0
+owner_file_fault: eio case=2 point=root_publish skip=0
+owner_file_fault: eio case=3 point=root_publish skip=1
+owner_file_fault: eio case=4 point=seal skip=0
+owner_file_fault: eio case=5 point=publish skip=0
+owner_file_fault: eio case=6 point=snapshot_sync skip=0
+owner_file_fault: eio case=7 point=rotate skip=0
+owner_file_fault: eio case=8 point=archive_sync skip=0
+owner_file_fault: eio case=9 point=reclaim skip=0
+owner_file_fault: eio case=10 point=reclaim skip=1
+owner_file_fault: eio case=11 point=root_publish skip=0
+owner_file_fault: eio case=12 point=root_publish skip=1
+owner_file_fault: eio case=13 point=root_publish skip=2
+owner_file_fault: eio case=14 point=root_publish skip=3
+owner_file_fault: eio case=15 point=root_publish skip=4
+owner_file_fault: eio case=16 point=append skip=0
+owner_file_fault: eio case=17 point=commit skip=0
+owner_file_fault: corruption case=0 point=append skip=0
+owner_file_fault: corruption case=1 point=commit skip=0
+owner_file_fault: corruption case=2 point=root_publish skip=0
+owner_file_fault: corruption case=3 point=root_publish skip=1
+owner_file_fault: corruption case=4 point=seal skip=0
+owner_file_fault: corruption case=5 point=publish skip=0
+owner_file_fault: corruption case=6 point=snapshot_sync skip=0
+owner_file_fault: corruption case=7 point=rotate skip=0
+owner_file_fault: corruption case=8 point=archive_sync skip=0
+owner_file_fault: corruption case=9 point=reclaim skip=0
+owner_file_fault: corruption case=10 point=reclaim skip=1
+owner_file_fault: corruption case=11 point=root_publish skip=0
+owner_file_fault: corruption case=12 point=root_publish skip=1
+owner_file_fault: corruption case=13 point=root_publish skip=2
+owner_file_fault: corruption case=14 point=root_publish skip=3
+owner_file_fault: corruption case=15 point=root_publish skip=4
+owner_file_fault: corruption case=16 point=append skip=0
+owner_file_fault: corruption case=17 point=commit skip=0
+OK
+296/624 demo_authority.test.Checkpoint owner explicitly resumes each durable checkpoint interruption without sending...OK
+297/624 demo_authority.test.Checkpoint owner commits 100 rotations with live authority and economic state...OK
+298/624 demo_authority.test.Checkpoint owner durable private bundle owns its seed and rejects mixed metadata...OK
+299/624 demo_authority.test.Checkpoint owner rejects a valid receipt bound to a foreign decision stream...OK
+300/624 demo_authority.test.Checkpoint owner Windows file commits 100 rotations and reopens without sending...OK
+301/624 demo_authority.test.Demo policy drives buy and fault cleanup through one durable Gateway...OK
+302/624 demo_authority.test.optimization checkpoint scratch rejects short storage and owner alias before publication...OK
+303/624 demo_authority.test.caller owned virgin bootstrap retains validation and leaves failed destination closed...OK
+304/624 credential_store.test.credential metadata and secret payload are authenticated...OK
+305/624 credential_store.test.policy, lifecycle, and security failures close admission...OK
+306/624 credential_store.test.Secret exposes only read-only material and reports page protection...OK
+307/624 windows_verification_runtime.test.live Demo spot rules must match the execution adapter...OK
+308/624 windows_verification_runtime.test.Windows generation refuses corruption and advances after restart...OK
+309/624 windows_verification_runtime.test.Windows pipe rejects another process with the same user SID...OK
+310/624 windows_verification_runtime.test.verification bounded queue fails closed...OK
+311/624 windows_verification_runtime.test.Windows chain evidence cannot permit production...OK
+312/624 windows_verification_runtime.test.Demo evidence rejects a different dispatch command with reused local IDs...OK
+313/624 historical_fee_audit.test.historical fee audit preserves independent fixed values old posting scale and mirrored closure...OK
+314/624 historical_fee_audit.test.historical fee audit cannot trust incomplete mismatched or new scale joins...OK
+315/624 historical_fee_audit.test.historical fee audit selects one exact execution from a batched raw frame and rejects ambiguous joins...OK
+316/624 venue_fill_recovery_acceptance.test.OKX raw private fills traverse adapter Owner durable recovery without decoder leakage...okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+thread 12 panic: switch on corrupt value
+unexpected errno: 38
+

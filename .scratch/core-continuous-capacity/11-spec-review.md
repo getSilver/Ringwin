@@ -1,13 +1,11 @@
 # Frontier 11 Spec review
 
-审查基点：`b6df712c9d22a8c2bc260de160406e421c497042`。候选提交：`4ace2d8efaa26d4e97b523de3fc7aa70e4d04e84`；独立重新计算源码清单 SHA256 为 `ad5437cd40ac9534ae6d8de815237aeb4e46d0df3279748342274b070002a5cf`。依据票 11、模块地图和 capacity-contract，以及 CONTEXT、ADR 0004/0010 的恢复及平台资格边界，审查实现与证据采集合同。
+最终候选：冻结 HEAD `1c7e51caaaceff0b64d1463e841d39eacee5c2d8`，基点 `b6df712c9d22a8c2bc260de160406e421c497042`。源码清单 115 份、SHA256 `244f3ae77d0978357809cbf99bf850ba89282799a5902323727d54d62c91233d`。依据票 11:19–23、地图、capacity-contract、CONTEXT 及 ADR 0004/0010 审查，最终证据为 `11-final-v6-*`，不沿用 v1–v5 的未完成验收。
 
-Spec：无剩余确认 P1/P2；原导出路径 P2 已修。最终 v2 运行证据尚待执行，本结论不表示最终套件、资源预算或生产资格通过。
+Spec：无剩余确认 P1/P2；票 11 的小规模 Linux/WSL 文件功能证据满足约定范围。原导出路径、目录 fsync 句柄及测试读取未初始化尾部问题均已修复并通过最终 Debug。此结论不授予目标 Linux 或生产资格。
 
-- 票 11:19 要求真实 Linux FileAdapter、小规模公共业务链及新进程恢复。`src/main.zig:132` 的 Linux 离线入口复用原 Owner/Gateway 文件夹具；`run-10-file-processes.py:105`、`:175` 分别对业务与观察夹具检查全片 live/terminal 各不超过 100，十轮以独立应用进程执行。交叉构建仅产生 ELF，最终执行及物理数据审计另在 WSL/lxfs 完成，不能仅凭构建通过关闭任务。
-- 票 11:20 要求完整旧/新权威状态与零重发。既有共享 fault 夹具继续验证经济、账本、占用、游标、摘要及身份拒绝；`run-10-file-processes.py:150` 比较恢复权威，`:330` 起在明确持久应用前后中断自有进程并核对旧/新状态及零发送。未发现扩大业务规模或削弱断言。
-- 票 11:21、28 要求可复现身份及实际证据。原 `run-11-final.py:105` 的路径转换过度转义已由 `:107–108` 的 WSL_OUT 直接拼接修复。最终 13 个 capture 合同一致：构建 2、真实 adapter 探针 1、进程链/审计 4、两模式测试构建/外层执行 4、Linux 内层执行 2；对应 `audit-11-final.py:31`。
-- 票 11:22 要求恢复语义及检查点义务。`src/durable_store.zig:1015`、`:1023` 的 Linux 目录句柄可供 fsync，`:1864` 不再将 BADF 视为 fallback。`probe-11-adapter.py:22–39` 要求真实应用四片及 Coordinator 目录 fsync 成功且零全局 sync fallback。`4ace2d8e` 的 19 处变更仅将 17 个 Store 与 2 个 Owner 测试临时目录选项设为 iterate=true，未改变断言、故障矩阵、业务输入或预期结果。
-- 票 11:21–23 的资源与授权边界保留：不可用峰值/分配量及未测瞬态队列水位明示；小样本观察不称预算达标。WSL 文件功能不授予目标机持久化、性能或生产资格，未新增交易、凭证或目标机断电操作。
-
-最终冻结源码的两套完整回归、实际应用/CLI 进程链、探针与最终审计须以 v2 新证据填写；失败或未执行结果仍须保留。
+- 票 11:19：独立重新计算当前源码身份、检查全部冻结 producer，验证 13 个 capture 的退出状态、无 timeout/fatal/drift、原始日志及内存采样文件摘要，以及四份实际 ELF 摘要。ReleaseSafe/Debug 均为 623 passed、1 skipped、0 failed；唯一 skip 是 WSL1 memfd_create ENOSYS 对应的精确 IPC 用例。两模式均在 WSL 实际执行，交叉构建没有充当运行证据。应用与 CLI 各 30 个新进程、十轮归档/恢复；业务与 500 组合观察夹具经验证函数核对，全片 live/terminal 各不超过 100。
+- 票 11:20：独立逐项验证两套 11 对业务报告、观察报告及共享账户权威相等，覆盖余额、库存、费用、账本、占用、游标、历史根和 CanonicalStateDigest；恢复 sends 与 recovery_send_count 均为零。两套各有持久应用前/后 SIGKILL 及旧/新完整状态恢复，另各有 artifact 拒绝及六项 not_run。故障日志逐模式保留 18 项 passed，合计 36，两个 IPC skips 单列。独立在 WSL 对两套各五个保留数据集重新扫描全部文件，路径、长度、SHA256 均与末次记录相符；分配量不作为内容身份。
+- 票 11:21：独立验证源码 ZIP 全部 130 个成员及摘要。identity/workload/samples/faults/summary 和四产物记录齐全；OS、lxfs、schema、种子、命令及输入规模可追溯。最终 `11-final-v6-audit.json` 为 84 checks passed；交接包区分历史失败和当前结果，未抹除失败、skip 或未执行项。
+- 票 11:22：真实应用 strace 记录四片与 Coordinator 的成功目录 fsync，失败 syscall 为空、全局 sync fallback 为零；同步、发布及恢复继续失败关闭。样本 RSS、逻辑日志增长、恢复耗时和末端队列保留；OS 峰值不可用、分配量 partial/mutable、瞬态队列高水位及实际栈峰值未测。千单、压力、资源预算、索引成本和目标性能保持 deferred，不能称达标。
+- 票 11:23：仅自有离线数据与子进程，未进行交易、凭证或目标机断电操作。WSL1/lxfs 结果不替代目标文件系统耐久性、外部 NodeFence、转储保护或完整生产资格；独立 Linux 功能交接可以完成，票 12 另行执行。

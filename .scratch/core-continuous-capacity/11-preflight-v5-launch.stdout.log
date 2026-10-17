@@ -1,0 +1,13 @@
+seed exit=0 pid=7
+recover-00 exit=0 pid=9
+step-golden exit=0 pid=11
+step-golden-recover exit=0 pid=13
+hold-before-step interrupted_owned_pid=15
+hold-before-step-recover exit=0 pid=17
+hold-after-step interrupted_owned_pid=19
+hold-after-step-recover exit=0 pid=21
+advance-01 exit=0 pid=23
+recover-01 exit=0 pid=25
+observation-seed exit=0 pid=27
+observation-recover exit=0 pid=43
+Native process recovery and authority comparison passed; fault evidence is separate

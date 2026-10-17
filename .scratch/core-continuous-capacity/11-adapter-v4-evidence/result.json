@@ -1,0 +1,38 @@
+{
+  "command": [
+    "strace",
+    "-f",
+    "-yy",
+    "-e",
+    "trace=fsync,sync,rename,renameat,renameat2",
+    "-o",
+    "/home/ubuntu/ringwin-frontier11/11-adapter-v4-probe/syscalls.log",
+    "/mnt/d/github/Ringwin-core-continuous-capacity/zig-out/bin/ringwin",
+    "--linux-capacity-file",
+    "seed",
+    "/home/ubuntu/ringwin-frontier11/11-adapter-v4-probe/store"
+  ],
+  "exit_code": 0,
+  "source_tree_sha256": "2395154d6054a31a026c69b50ba9f6f95fb482983119f191eab48d031101e8ea",
+  "artifact_sha256": "08a378eb57c57c0dce0d12077c3e752d9c6e1fbc3913962bc5cc575faaa969f6",
+  "directory_fsync_successes": {
+    "/home/ubuntu/ringwin-frontier11/11-adapter-v4-probe/store/shard-0": 151,
+    "/home/ubuntu/ringwin-frontier11/11-adapter-v4-probe/store/shard-1": 151,
+    "/home/ubuntu/ringwin-frontier11/11-adapter-v4-probe/store/shard-2": 151,
+    "/home/ubuntu/ringwin-frontier11/11-adapter-v4-probe/store/shard-3": 472,
+    "/home/ubuntu/ringwin-frontier11/11-adapter-v4-probe/store/coordination": 26
+  },
+  "failed_syscalls": [],
+  "global_sync_fallbacks": 0,
+  "source_unchanged": true,
+  "artifact_unchanged": true,
+  "scope": "actual offline adapter syscalls on WSL1/lxfs; not power-loss or target durability",
+  "power_loss_qualification": false,
+  "production_qualification": false,
+  "logs": {
+    "syscalls.log": "d80da77e758068035f8beee0f1d1526e54e49b08a0e1348f3333171a62049ba3",
+    "stdout.log": "1aa8c24a8fa8e14812a8efddb3b987f637a648fabf1af53fc348aa1e87c86b1c",
+    "stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "passed": true
+}

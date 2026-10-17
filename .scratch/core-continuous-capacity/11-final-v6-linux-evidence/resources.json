@@ -1,0 +1,30 @@
+[
+  {
+    "artifact": "app",
+    "sampled_rss_max_bytes": 274903040,
+    "os_peak_rss_bytes": null,
+    "allocated_regular_file_bytes": null,
+    "main_seed_logical_bytes": 6107476,
+    "main_round10_logical_bytes": 7920172,
+    "recovery_whole_command_min_ns": 3239439000,
+    "recovery_whole_command_max_ns": 3807013600,
+    "latency_scope": "whole native process and file inventory; not apply/commit/p99",
+    "actual_stack_peak": "not_measured",
+    "queue_high_water": "not_measured; only final resident queue",
+    "resource_budget_qualified": false
+  },
+  {
+    "artifact": "cli",
+    "sampled_rss_max_bytes": 274907136,
+    "os_peak_rss_bytes": null,
+    "allocated_regular_file_bytes": null,
+    "main_seed_logical_bytes": 6107476,
+    "main_round10_logical_bytes": 7920172,
+    "recovery_whole_command_min_ns": 3272484700,
+    "recovery_whole_command_max_ns": 3463387000,
+    "latency_scope": "whole native process and file inventory; not apply/commit/p99",
+    "actual_stack_peak": "not_measured",
+    "queue_high_water": "not_measured; only final resident queue",
+    "resource_budget_qualified": false
+  }
+]

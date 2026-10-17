@@ -1,0 +1,35 @@
+{
+  "scope": "real captured data regression only; v2 is not qualified",
+  "results": [
+    {
+      "label": "recover-10",
+      "content_preserved": true,
+      "corruption_rejected": true,
+      "allocation_observation_changed": true
+    },
+    {
+      "label": "step-golden-recover",
+      "content_preserved": true,
+      "corruption_rejected": true,
+      "allocation_observation_changed": false
+    },
+    {
+      "label": "hold-before-step-recover",
+      "content_preserved": true,
+      "corruption_rejected": true,
+      "allocation_observation_changed": false
+    },
+    {
+      "label": "hold-after-step-recover",
+      "content_preserved": true,
+      "corruption_rejected": true,
+      "allocation_observation_changed": false
+    },
+    {
+      "label": "observation-recover",
+      "content_preserved": true,
+      "corruption_rejected": true,
+      "allocation_observation_changed": false
+    }
+  ]
+}

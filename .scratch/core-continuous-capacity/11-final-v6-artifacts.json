@@ -1,0 +1,22 @@
+[
+  {
+    "name": "11-final-v6-app",
+    "sha256": "7d59f60467740e0658495110ad8dc16ceb0279414e2da0dc3758b4197b8e40ca",
+    "bytes": 76741216
+  },
+  {
+    "name": "11-final-v6-cli",
+    "sha256": "f298ea531fe259b3cf6827adfbbb1ad961b76275278f90887144754aa99516f0",
+    "bytes": 76741200
+  },
+  {
+    "name": "11-final-v6-full-releasesafe",
+    "sha256": "b6da093240fea4489d516a5fb28ccec6a6ce4cdad4045235c3652c6d5a4981bc",
+    "bytes": 139567712
+  },
+  {
+    "name": "11-final-v6-full-debug",
+    "sha256": "98921d784ba7ada0e35496bf20eb5d5e3248028e5cf66d9783e3d79622cd0647",
+    "bytes": 1429413354
+  }
+]

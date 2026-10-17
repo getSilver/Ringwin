@@ -50,13 +50,15 @@ Status: active
 12. [封存容量闭合证据并交接生产资格](issues/12-seal-capacity-closure-evidence.md) — blocked by 10, 11
 
 依赖主干：01 → 02 → 03；03 后分为 04、05 → 06 → 07、08 三支；04/07/08 → 09；09 → 10 与 11；10/11 → 12。
-01–10合同、权威屏障、检查点、观察选择、各历史归档、小规模订单/安全背压及Windows文件功能已完成；11–12尚未验收，只有 blocker 全部完成的票可执行。
+01–11合同、权威屏障、检查点、观察选择、各历史归档、小规模订单/安全背压及Windows/Linux文件功能已完成；12尚未封存，只有 blocker 全部完成的票可执行。
 
 ## Frontier
 
-- [11 验证 Linux 文件持久化与持续恢复](issues/11-verify-linux-file-recovery.md)
+- [12 封存容量闭合证据并交接生产资格](issues/12-seal-capacity-closure-evidence.md)
 
 ## Decisions so far
+
+- 2026-10-17：11小规模Linux文件功能完成，见[11证据](11-evidence.md)及[独立Linux交接包](11-final-v6-linux-evidence/summary.md)。115源码244f3ae7，完整ReleaseSafe/Debug各623通过、1指定IPC skipped、0失败；应用/CLI各十轮30新进程、两组实际物理数据审计及两模式各18故障拒绝通过，恢复完整authority与accepted/Unknown零重发。84项审计、130项源码/producer归档与独立Standards/Spec通过；原始失败、未测/未执行项保留。WSL1/lxfs实际目录fsync951次成功、零全局sync回退，但缺memfd的IPC能力、目标磁盘/断电、容量压力/资源预算/性能、dump、外部NodeFence和生产资格均未取得。12成为唯一Frontier；用户已授权11完成后继续12。
 
 - 2026-10-16：10小规模Windows文件功能验收完成，见[10证据](10-evidence.md)和[独立Windows交接包](10-final-v3-windows-evidence/summary.md)。最终114源码f1e1a54a，完整Debug/ReleaseSafe各624/624、实际应用64MiB/CLI256MiB重建及各两个离线模式退出0，两产物各十轮/30新进程含500组合/三类别、混合生命周期和共享账户，570项身份/日志/产物/恢复审计通过。两mode各18故障/拒绝场景及真实阶段终止，完整authority恢复与accepted/Unknown零重发；失败源码、原始失败和not_run保留。独立Standards/Spec无剩余确认P1/P2。目录flush实际error5，目录/断电耐久性未取得；容量/压力/资源预算、索引成本、实际栈峰值、dump、NodeFence及生产资格仍未测或deferred。11成为唯一Frontier，12仍等待11；本次不执行Linux或双平台总交接。
 
@@ -114,9 +116,9 @@ Linux 路径沿用 [Linux 生产资格地图](../production-readiness/map.md)，
 
 ## Not yet verified
 
-- 合成负载与容量/保留预算已在 [容量合同](capacity-contract.md) 冻结，执行口径按用户最新功能验证要求更新；01–10小规模功能与Windows文件证据已完成，Linux文件恢复及双平台封存尚待11–12，未授予千单、压力或资源资格。
+- 合成负载与容量/保留预算已在 [容量合同](capacity-contract.md) 冻结，执行口径按用户最新功能验证要求更新；01–11小规模功能及独立Windows/Linux文件证据已完成，双平台封存尚待12，未授予千单、压力或资源资格。
 - ADR0011已显式演进ADR0009；票02保留完整有序Trace，票03在独立恢复验收和格式身份下引入轮转与历史承接。
-- Windows实际文件功能与进程恢复已有10的独立证据；Linux文件证据尚待11。两平台的目标负载性能、断电耐久性及后续生产资格均未取得。
+- Windows实际文件功能与进程恢复已有10的独立证据；Linux/WSL文件功能已有11的独立证据。两平台的目标负载性能、断电耐久性及后续生产资格均未取得。
 
 ## Out of scope
 

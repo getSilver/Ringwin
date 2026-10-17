@@ -1,0 +1,9 @@
+seed exit=0 pid=7
+recover-00 exit=0 pid=9
+step-golden exit=0 pid=11
+step-golden-recover exit=0 pid=13
+hold-before-step interrupted_owned_pid=15
+hold-before-step-recover exit=0 pid=21
+hold-after-step interrupted_owned_pid=23
+hold-after-step-recover exit=0 pid=25
+advance-01 exit=0 pid=27

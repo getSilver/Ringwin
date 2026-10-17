@@ -1,13 +1,16 @@
 # Frontier 11 Standards review
 
-审查基点：`b6df712c9d22a8c2bc260de160406e421c497042`。审查候选：`07058de84153b145f3f75c306586c45e6877c507` 加十九处临时目录选项修复；源码清单 SHA256 已独立核对为 `ad5437cd40ac9534ae6d8de815237aeb4e46d0df3279748342274b070002a5cf`。包含 `f007fc16`、`73b882f1` 与目录同步、真实 adapter 探针及证据导出修复。仅审查代码与采集器；实际最终验收尚待 v2，本结论不表示套件或生产资格通过。
+审查基点：`b6df712c9d22a8c2bc260de160406e421c497042`。最终验收：`11-final-v6`，冻结 HEAD `1c7e51caaaceff0b64d1463e841d39eacee5c2d8`，115 个源码/构建文件的清单 SHA256 为 `244f3ae77d0978357809cbf99bf850ba89282799a5902323727d54d62c91233d`。
 
-Standards：0 个确认问题，0 个必要建议。
+最终未发现未修复 P1/P2；Standards 0 个待处理问题。
 
-- 依据 `docs/adr/0004-durable-store-persistence-contract.md` 的唯一持久化 seam、同步发布与故障关闭合同，`src/durable_store.zig:1015` 和 `:1023` 在 Linux 获取可同步目录 fd；`:1864` 不再将 BADF 静默解释为 WSL fallback。历史长度的私有同步 handle 在 `:1843` 使用 lseek 并恢复偏移，发布与恢复继续经既有 gate 关闭路径传播错误。
-- 独立复核固定标准库 `std/testing.zig:648` 与 `std/Io/Threaded.zig:5290`：tmpDir 默认选项产生 O_PATH，直接借用其句柄的旧夹具同样需要可同步目录。`src/durable_store.zig:1906` 起十七处及 `src/demo_authority.zig:1427`、`:1474` 两处均仅将 tmpDir 选项改为 iterate=true；未改变测试断言、故障注入或业务逻辑。全 src 目录赋值检索未发现其他本轮 Linux 写入夹具遗漏。
-- 依据 ADR 0010 的独立平台证据与资格边界，`src/file_acceptance_runtime.zig:18` 的线程包装仅用于离线文件入口；`.scratch/core-continuous-capacity/11-test-runner.zig:37` 与固定 Zig 标准 runner 的差异仅为 main 线程包装，原测试遍历、Skip、错误日志与 allocator leak 检查保持。Windows/Linux 复用公共业务夹具未将 Windows 通过当作 Linux 通过。
-- `probe-11-adapter.py:22` 跟踪真实应用的 fsync/rename/sync，`:28` 要求四片及 Coordinator 目录均有成功 fsync，拒绝失败 syscall 或全局 sync 回退。`audit-11-final.py:60` 将探针源码/ELF 身份及原始日志摘要纳入最终审计。WSL1、断电、资源不可用及目标机资格边界明确保留；导出使用明确 WSL 路径。
-- 依据 ADR 0009、0011、0013–0016，变更保留完整 CanonicalStateDigest、历史承接及恢复 seam，未以经济摘要或驻留计数替代恢复权威，也未新增发送许可。未发现需报告的 baseline smell；工具可检查项不列为人工 Standards 发现。
+- 按 `AGENTS.md`、`CONTEXT.md`、`docs/agents/domain.md`、`docs/agents/issue-tracker.md` 与 ADR 0004、0009–0011、0013–0016 审查。公共 Store、Owner/Gateway 及完整恢复摘要合同保持，Unknown 不因恢复获得发送许可。
+- `src/durable_store.zig:1015`、`:1023` 为 Linux 打开可同步目录 fd，`:1864` 将 BADF 视为失败；历史长度用私有同步 handle 的 lseek 并恢复偏移。十九处直接借用临时目录的旧夹具均提供 iterate=true。实际 adapter 探针要求四片及 Coordinator 目录 fsync 成功、零全局 sync 回退，不能据此推断断电耐久性。
+- 已修复 P2：旧 `venue_fill_recovery_acceptance.zig:433`、`:439` 的整对象比较读取 AccountProjection 未初始化的 seen tagged union。现 `:224` helper 比较全部元数据、计数与四数组有效前缀，保留公共状态一致性要求；未用生产状态清零或加栈掩盖此语义错误。最终 Debug 已通过原失败用例及完整套件。
+- 两个固定 runner 保留原标准测试遍历、Skip、错误日志和泄漏检查；ReleaseSafe 测试线程 256 MiB、Debug 512 MiB，离线文件 CLI 64 MiB，均不改变生产线程预算。IPC 仅因原始 memfd_create 返回 ENOSYS 跳过；生产实现与其他断言保持。
+- 采集器区分内容身份与可变 allocation 观测，保留原始资源字段。显式启用的崩溃捕获只终止自有直接子进程并记录 fatal_diagnostic，审计拒绝此类记录。v1–v5 失败证据保留；最终 v6 为新冻结执行，未将旧结果伪装为新跑。
 
-已按 `AGENTS.md`、`CONTEXT.md`、`docs/agents/domain.md` 与 `docs/agents/issue-tracker.md` 审查。最终冻结验收结果、Spec 审查及目标 Linux 资格由各自证据另行判断。
+独立核验当前源码清单、15 个运行期冻结 producer、四个 ELF SHA256、13 个成功 capture 及其 stderr/stdout/memory 文件摘要；全部零源码/producer 漂移且无 fatal。实际两套日志均为 **623 passed、1 skipped、0 failed**，唯一 skip 为 `strategy_host_ipc.test.bounded rings and frozen bridge fail closed`。应用与 CLI 各 30 个真实进程及物理审计通过，adapter fsync 证据通过。256/512 runner 差异仅线程栈和相应注释。
+
+结论仅覆盖 WSL1/lxfs 离线文件功能。sampled RSS 不等于 OS 峰值；allocated bytes 部分可变，实际栈峰值、队列高水位、资源预算、千单压力、性能、目标 Linux 文件系统、断电、NodeFence、凭证/dump 和生产资格仍未取得。未发现需报告的 baseline smell；未以本次结果关闭票 12 或授予平台生产资格。
+
