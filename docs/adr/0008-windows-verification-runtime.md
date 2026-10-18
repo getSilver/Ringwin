@@ -5,6 +5,9 @@ date: 2026-09-17
 
 # Windows 验证运行时合同
 
+> 2026-10-08：[ADR 0010](0010-qualify-windows-and-linux-independently.md) 已取代对 Windows
+> 平台的生产排除。下文仍约束本次验证运行时和既有 Demo 证据，不限制未来独立 Windows 生产资格。
+
 Windows 是 `ProductionProcessChain` 的验证运行时，不是 ProductionPlatform，也不是 Windows
 生产兼容层。本 ADR 不取代、不重开 [ADR 0002](0002-linux-production-support-contract.md) 或
 [ADR 0003](0003-linux-production-process-chain.md)。`permitsProduction()` 在 Windows 验证成功

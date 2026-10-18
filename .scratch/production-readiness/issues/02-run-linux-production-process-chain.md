@@ -27,6 +27,8 @@ Recovering → Ready → Trading → Draining → Stopped，证明进程身份�
 - [ ] SIGTERM 已在子 role 撤销授权并完成 Draining；真实业务输出排空仍待业务链接入后验证，超时形成 ForcedStop 事实。
 - [ ] 测试协调器能因缺失 role/IPC 断开而失败关闭；常驻 HostSupervisor 尚未接入生产 role。
 - [ ] SimulatedVenue 尚未真正贯通五个 role；当前 Linux 原生测试只证明进程生命周期、授权、超时强停和 generation 重启。
+- [ ] 每个 role 的 Unix control socket 校验唯一 controller 的 peer credential；控制命令必须对应已验证的签名事实，首个可访问连接不能仅凭连通性取得授权。
+- [ ] generation 来自单调持久状态并在每次重启前递增；systemd 固定常量或进程内计数不能形成恢复资格。
 - [x] Windows 仍能运行离线单元/契约测试，但不存在 Windows 生产服务分支。
 
 ## Out of scope
@@ -53,3 +55,12 @@ NoNewPrivileges、能力集清空和系统目录保护。
 - [x] WSL Linux 原生 ELF `--production-chain-test` 通过：5 roles recovering/ready、SimulatedVenue、
   drain=5、forced_stop=1、`risk_authorized=false`、generation 3 restart、Unix IPC、bounded_queue=8。
 - [x] Linux role 交叉编译通过；systemd unit 位于 `deploy/systemd/ringwin-role@.service`。
+
+### 目标机执行（2026-09-21）
+
+- Debian 12/systemd 252 目标机以五个独立 `ringwin-*` 用户启动全部 role；Unix socket 均为各自
+  用户所有、模式 `0700`，只有 execution-gateway 拥有 Internet address family。
+- 修复监听 `accept()` 阶段 SIGTERM 无法退出后，整组 stop 均为 `inactive`、`Result=success`、
+  `ExecMainStatus=0`、`NRestarts=0`；systemd security exposure 为 4.4/4.6。
+- unit 已保持 disabled/inactive。业务 IPC、controller peer credential、签名控制事实、持久 generation、
+  HostSupervisor 与真实业务 drain 仍未实现，因此本票不关闭。

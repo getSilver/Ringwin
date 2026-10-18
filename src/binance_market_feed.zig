@@ -221,7 +221,7 @@ pub const BinanceMarketFeed = struct {
         self.next_event_sequence = std.math.add(u64, self.next_event_sequence, 1) catch return error.EventSequenceOverflow;
         try output.append(.{ .envelope = .{
             .event_type = @intFromEnum(canonical.eventType(event)),
-            .schema_version = 1,
+            .schema_version = canonical.schema_version,
             .identity = .{ .stream = config.session, .sequence = self.next_event_sequence },
             .source_fact_identity = sourceFactIdentity(evidence.sha256, kind),
             .scope = .instrument,

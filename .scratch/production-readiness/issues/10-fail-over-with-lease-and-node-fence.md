@@ -20,7 +20,7 @@ ObservationCredential 对账和 FailoverAdmission。首先用可注入的测试 
 ## Acceptance criteria
 
 - [x] fencing authority 按 ExchangeAccount + DecisionDomain 持久化严格递增且永不复用的 FencingToken。
-- [x] Gateway 每次发送前检查当前 token 和单调时钟 lease；续租失败后 1 秒内拒绝新增风险。
+- [ ] Gateway 每次发送前检查当前 token 和单调时钟 lease；当前 GatewayLeaseGuard 尚未成为 ExecutionGateway 的不可省略依赖，续租失败后的真实发送链仍待闭合。
 - [x] 热备只持 ObservationCredential 并持续应用日志/快照；超过 50 ms 或 25,000 事件进入 HADegraded。
 - [ ] 提升顺序和 read-back 状态机已实现；目标环境唯一的外部 NodeFence adapter 尚未指定和接入。
 - [x] 心跳消失、请求建立 fence 或 Venue 可达不能替代已验证 NodeFence。
@@ -56,6 +56,9 @@ ObservationCredential 对账和 FailoverAdmission。首先用可注入的测试 
 2026-09-07 修复复核：新增 Linux `LinuxFencingStore`，acquire/revoke 在返回前原子同步 token、owner
 和 durable barrier；重启加载校验后的 checkpoint，token 从上次值继续递增。目标 NodeFence 与
 生产等价三次故障资格仍未完成，因此状态恢复为 `ready-for-agent`。
+
+2026-09-09 源码复审补充：`GatewayLeaseGuard` 当前仅在 failover 模块和测试中使用，
+ExecutionGateway 的实际 send/sendOms 路径没有调用它；因此“每次发送检查 token/lease”恢复为未完成验收。
 
 定向证据：
 

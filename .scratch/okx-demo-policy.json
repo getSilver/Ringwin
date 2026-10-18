@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "startup": "virgin",
+  "exchange_account": 2,
+  "portfolio_identity": 1,
+  "strategy_identity": 40,
+  "activation_identity": 50,
+  "config_version": 1,
+  "portfolio_allocation_micros": 20000000,
+  "risk_limit_micros": 20000000,
+  "decision_stream_id": 2026092101,
+  "dispatch_stream_id": 2026092102,
+  "decision_domain": 20260921,
+  "node_identity": 431593949
+}

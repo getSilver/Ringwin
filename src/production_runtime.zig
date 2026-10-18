@@ -205,10 +205,14 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, gene
     try stdout.interface.print("production_role: role={s}, generation={d}, ipc=unix, venue=SimulatedVenue\n", .{ roleName(role), generation });
     try stdout.interface.flush();
 
-    var stream = try server.accept(init.io);
+    active_socket.store(server.socket.handle, .seq_cst);
+    defer active_socket.store(-1, .seq_cst);
+    var stream = server.accept(init.io) catch |err| {
+        if (termination_requested.load(.seq_cst)) return;
+        return err;
+    };
     defer stream.close(init.io);
     active_socket.store(stream.socket.handle, .seq_cst);
-    defer active_socket.store(-1, .seq_cst);
     try writeStatus(&stream, init.io, .hello);
     try writeStatus(&stream, init.io, .ready);
 

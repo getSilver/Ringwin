@@ -5,6 +5,9 @@ date: 2026-09-06
 
 # 冻结首个 Linux 生产支持合同
 
+> 2026-10-08：平台排他限制已由 [ADR 0010](0010-qualify-windows-and-linux-independently.md)
+> 取代。下文保留原始 Linux 基线；Windows 也可独立取得生产资格，当前实现尚未同步。
+
 首个生产基线由 `src/production_contract.zig` 唯一描述，并由运行输出和资格工具核对。生产平台
 只有 Linux；Windows 只保留开发和快速回归。
 

@@ -13,19 +13,6 @@
 
 默认路径不连接真实 Venue；独立入口只使用本机 Demo Key 连接 OKX 模拟交易。项目不接入生产账户，也不证明策略盈利。三家 Venue 的离线 canonical/adapter 契约已接入；真实 Testnet/生产资格仍是独立阶段。
 
-Windows OKX 验证分为 `zig build windows-okx-offline` 和
-`zig build windows-okx-readonly`，分别在 `.scratch/windows-process-chain-verification/`
-写入绑定源码的 JSON 报告。只有当次 SystemOwner 明确限定授权后，才能运行
-`zig build windows-okx-live -Dwindows-demo-live-authorized=true`；证据不完整时保持
-blocked/failed，Windows 结果不授予 Linux 生产或 Binance/Bybit Testnet 资格。
-历史 `windows-chain` 综合行保持 blocked；真实 OKX 假 transport 五进程链及磁盘重放通过后，
-另行输出 `windows_okx_offline=passed`。
-
-[06 封存证据](.scratch/windows-process-chain-verification/report-demolive-2026-10-03-recovered.json)
-限定执行版本 `9939110d` 的获授权 OKX Demo BTC-USDT spot 同链买卖。
-原报告解析失败保留，缺失的 wire 订单身份由同次存储恢复和权威只读查询补齐；
-采集器身份单独记录。后续运行时修改不继承该在线资格，生产资格仍为 false。
-
 ## 统一构建入口
 
 仓库统一通过 `build.zig` 执行；每个入口都会先精确验证 Zig
@@ -117,6 +104,12 @@ preflight 只报告 BTC 残余，使用 `tools\run-okx-demo-live-acceptance.ps1 
 - 仅使用 Zig 与 Python 标准库
 - 权威金额、价格、数量、费率、保证金和 PnL 使用定点整数；`f64` 不参与状态演进
 
+Windows 与 Linux 均可独立取得生产资格。当前代码仍实现 Linux-only 生产合同，Windows 生产
+准入与资格尚待实现和验收；现有 Windows Demo 验证不能授予 `production_qualified`。合同见
+[ADR 0010](docs/adr/0010-qualify-windows-and-linux-independently.md)
+与 [`.scratch/windows-process-chain-verification/map.md`](.scratch/windows-process-chain-verification/map.md)。
+Linux 生产地图仍是 [`.scratch/production-readiness/map.md`](.scratch/production-readiness/map.md)。
+
 先确认版本：
 
 ```powershell
@@ -141,11 +134,36 @@ four shards replay and isolate overload
 stable journal detects tail, corruption, and sequence gap
 ```
 
-当前离线基线（2026-09-06）由 `tools\verify-core-wave.ps1` 实际运行汇总：acceptance schema 为 `2`，
-journal/state schema 为 `8`，Debug/ReleaseSafe 均为 `193/193`，coordinator barrier 为 `17`，
-四个 shard barrier 为 `23/26/21/21`，Gateway 实时发送 `4` 次，重放发送能力为 `false`，共享摘要为：
+当前 schema 版本以 [`src/production_contract.zig`](src/production_contract.zig) 为准。
+四分片证据由 `zig build run -- --four-shard-acceptance` 输出。重放无发送能力。
+Windows 验证入口：
 
-`841e5425827f7d12ba771fd2de14303bfb4923b22a4cc6615cd7d348b8332dfe`
+```powershell
+zig build windows-durable
+zig build windows-credential
+zig build windows-chain
+zig build windows-okx-offline
+zig build windows-okx-readonly
+```
+
+当前 `windows-chain` 包含历史 SimulatedVenue 五进程生命周期回归，输出
+`historical_simulated_chain=passed` 与 `windows_process_chain_verified=blocked`。
+同一入口的 OKX 假 transport 五进程路径、磁盘重开和重放通过后，另行输出
+`windows_okx_offline=passed`；历史综合行仍保持 blocked。
+新证据须分别通过离线、
+在线只读、当次授权的 Demo 真实成交，以及 role 所有权、磁盘恢复和最终账户对账，并绑定
+源码 revision、账户、产品、策略和配置。`.env.local` 只是 Demo 凭证输入，不授权下单或清理。
+Windows 结果不能使 `permitsProduction()` 为 true，也不能关闭 Linux 生产地图票 02–11。
+离线与只读入口分别写入 `.scratch/windows-process-chain-verification/report-offline.json`
+和 `report-readonly.json`，并核对同一源码快照及 Demo 账户指纹；默认不下单。
+当次 SystemOwner 明确限定授权后，才可运行 `zig build windows-okx-live
+-Dwindows-demo-live-authorized=true`。该入口要求匹配的离线、只读报告，并写入
+`report-demolive.json`；缺项或未闭合的终态与零敞口不能授予通过结论。
+
+[06 封存证据](.scratch/windows-process-chain-verification/report-demolive-2026-10-03-recovered.json)
+限定执行版本 `9939110d` 的获授权 OKX Demo BTC-USDT spot 同链买卖。
+原报告解析失败保留，缺失的 wire 订单身份由同次存储恢复和权威只读查询补齐；
+采集器身份单独记录。后续运行时修改不继承该在线资格，生产资格仍为 false。
 
 正常轨迹实际摘要：
 
@@ -190,7 +208,7 @@ python python\verify_strategy_host.py
 ```
 
 该入口失败即停，自动完成格式检查、IPC/生命周期/Gateway/checkpoint/故障单元测试，
-构建当前平台共享内存桥，并运行四 Host 生命周期、TradingShard 交易接入、无权恢复重放、
+构建当前平台 Zig 校验匿名 pipe 桥，并运行四 Host 生命周期、TradingShard 交易接入、无权恢复重放、
 故障矩阵以及五个百万样本容量场景。最终输出：
 
 ```text
@@ -203,8 +221,8 @@ strategy_host_product_acceptance=passed
 
 ## Python StrategyHost IPC 验收
 
-首个产品化组件是 Zig 拥有的匿名共享内存与冻结 C ABI；Python 只能通过
-`ctypes` 调用桥，不能直接接触槽位或原子游标。
+首个产品化数据面是 Zig 拥有、经校验的匿名单向 pipe 帧（[ADR 0007](docs/adr/0007-use-validated-pipes-for-strategy-host-data.md)）；
+Python 只获得自有 `bytes`，不能获得共享内存句柄、映射大小或原子游标。
 
 ```powershell
 zig fmt --check src\strategy_host_ipc.zig
@@ -221,8 +239,8 @@ strategy_host_ipc: zig=0.17.0-dev.315+5b647b792, mode=ReleaseSafe,
 self_check=ok, cross_process=ok
 ```
 
-Windows 使用匿名 File Mapping；Debian 生产目标使用匿名 `memfd`，Linux 路径由
-`x86_64-linux-gnu` 交叉编译检查。实际 ring 深度和 slot capacity 留给容量资格票测量。
+Windows 与 Linux 数据面都使用 Zig 校验的匿名 pipe；Python 没有映射或游标能力。
+实际容量留给后续资格票测量。
 
 ## Python StrategyHost 生命周期验收
 
@@ -305,7 +323,7 @@ strategy_host_failures: hosts=4, strategy_fault=isolated, crash=rebuilt, hang=ki
 
 ## Python StrategyHost 容量开发回归
 
-容量程序通过产品共享内存 seam 启动四个 Host、每 Host 25 个标准库整数状态策略；
+容量程序通过产品 StrategyHostFramedBridge seam 启动四个 Host、每 Host 25 个标准库整数状态策略；
 每批 10 个 TimerEvent，每个策略/事件回调算一个决策样本。正常、GC/单策略异常、
 单 Host 变慢、Host 崩溃和恢复负载各自至少采集 100 万样本。
 
@@ -434,3 +452,4 @@ Linux 生产性能、生产账户、密钥托管和部署资格仍是独立波�
 ## License
 
 Ringwin is licensed under the [MIT License](LICENSE).
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/getSilver/Ringwin)

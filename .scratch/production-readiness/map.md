@@ -12,7 +12,8 @@ Status: active
 
 ## Definition of done
 
-- Linux 是唯一生产运行平台；Windows 只保留开发与快速回归，不存在 Windows 生产兼容层。
+- 本图负责 Linux 生产资格；Windows 依据 [ADR 0010](../../docs/adr/0010-qualify-windows-and-linux-independently.md)
+  独立取得生产资格，双方证据不互相升级。
 - 生产运行入口、真实磁盘日志与快照、CredentialStore、Linux 进程隔离、控制命令、签名发布、
   遥测、PrimaryLease、NodeFence 和一主一热备均形成可运行闭环。
 - OKX Demo、Binance Testnet、Bybit Testnet 分别留下真实在线资格证据，且生产只读影子与小资金
@@ -49,14 +50,67 @@ Status: active
 8. [通过现有 Web 控制面完成签名发布与操作生命周期](issues/08-operate-and-deploy-signed-release.md) — blocked by 02, 03, 04
 9. [发布生产遥测并生成 Linux 资格报告](issues/09-publish-telemetry-and-build-qualification-report.md) — blocked by 02, 03
 10. [以 PrimaryLease 和 NodeFence 完成主备切换](issues/10-fail-over-with-lease-and-node-fence.md) — blocked by 03, 04, 08, 09
-11. [取得 Linux 生产资格并完成小资金 Canary](issues/11-qualify-linux-production-and-canary.md) — blocked by 05, 06, 07, 08, 09, 10
+11. [取得 Linux 生产资格并完成小资金 Canary](issues/11-qualify-linux-production-and-canary.md) — blocked by 05, 06, 07, 08, 09, 10 and [main 安全与权威状态验收基线](../main-safety-remediation/issues/12-rebuild-safety-acceptance.md)
 
 ## Frontier
 
-- [启动可安全排空的 Linux 生产进程链](issues/02-run-linux-production-process-chain.md)
+- 2026-10-08：新增[核心持续运行容量闭合](../core-continuous-capacity/map.md)前置波次，目标为每分片
+  1,024 个同时存活订单；先完成合同、轮转、订单/发送归档、经济历史和容量验收，再收口生产业务链。
+  当前仅发布计划，未改实现；本波完成也不自动关闭本图任何生产资格票。
+
+- Linux 目标机资格执行已于 2026-09-21 恢复；五 role systemd、Unix socket、SIGTERM、目标 ext4
+  强制断电、`mlock`/`MADV_DONTDUMP`/core 排除和 OKX 只读在线链已取得证据。
+- 下一阻塞仍是 02 的真实业务 IPC/peer credential/persistent generation、03 的 Engine/TradingShard
+  事务恢复、04 的非环境变量凭证注入，以及 05 私有余额观察、恢复身份与 Trace 发送前容量保护修复后的
+  Linux 自动买入/清理、live/replay digest 和 QualificationReport 在线复验。
+- Binance/Bybit 无 Testnet 凭证，08 的 Web-to-Linux 发布链、09 的目标机 soak/exporter、10 的独立
+  NodeFence、11 的 72h/7d/生产账户/Canary 仍未执行，均不得提升为 production qualified。
 
 ## Decisions so far
 
+- 2026-10-08：Windows 与 Linux 均可独立取得生产资格。下方历史 Linux-only 决策已被 ADR 0010
+  取代；本图保留 Linux 专项范围，Windows 生产工作另行拆分，历史 Demo 结论不升级。
+
+- 2026-09-22：一次明确授权的 Linux Demo 在线复检在可成交价格带内全量买入 `0.00005 BTC`，
+  证明身份宽度修复生效，但终态 REST 回补因 Reconciler 未显式重启对账而返回 `invalid_field`；
+  独立受限 IOC 清理后恢复零 BTC、零负债、零仓位、零挂单。已修复 `ready` 状态下的显式稳定双读
+  重启并通过 Debug/ReleaseSafe `253/253`、Demo ReleaseSafe `63/63`，但未再次下单，票 05 保持开放。
+
+- 2026-09-22：追加授权的 v37 单次复验仍在首个终态 REST 回补返回 `invalid_field`；受限 IOC 买入
+  `0.00005 BTC` 后，应急卖出扣费后的 `0.00004995 BTC`，最终恢复零敞口。v37 未通过，票 05 与
+  production qualification 状态不变；用户停止清理指令到达后已停止全部远程写操作。
+
+- 2026-09-22：v38 已证明 ready-mode OKX 私有 WS 事实能跨 VenueAdapter canonical seam，但真实
+  filled report 后的同笔 canonical fill 在 TradingShard 被重复加入 OMS cumulative 上限检查，触发
+  `InvalidFill`。本次授权买单已成交，当前零负债、零衍生仓位、零挂单但 BTC 非零；遵照用户指令
+  不自动清理，禁止继续买入，票 05 与 production qualification 保持开放/false。
+
+- 2026-09-23：v39 前离线回归通过主套件 Debug/ReleaseSafe `264/264`、Demo ReleaseSafe
+  `111/111`，目标端账户及服务预检通过；但 private stream 就绪后的 SPOT order-history REST
+  bootstrap 因 `conflicting_fact` 在下单前失败。最终仍为零敞口且没有新订单；票 05 与 production
+  qualification 保持开放/false。
+
+- 2026-09-21：修复 OKX canonical identity 超出既有 `u64` 权威边界、终态先于余额事实导致误报，
+  并在 Demo 外部效果前预留 Trace 容量；Debug/ReleaseSafe `252/252`、Demo 独立测试 `62/62`。
+  未扩大 Trace/快照 schema，未再次执行 Demo 写入，因此票 05 与 production qualification 状态不变。
+
+- 2026-09-21：SystemOwner 提供 Debian 目标机并授权重启及 OKX Demo 写验收。目标机完成五 role
+  systemd 生命周期、ext4 强制断电恢复、secret-memory/core 排除和 OKX 只读在线链；OKX Demo
+  价格带恢复后单次受限 IOC 买单已全量成交，但内部私有余额观察返回 `BuyDidNotFillMinimum`，恢复
+  清理又暴露 `IdentityOutOfRange`，故未取得自动闭环资格；应急 IOC 清理后账户保持零 BTC、零负债、
+  零仓位、零挂单。
+  这些证据不替代尚缺的业务 IPC、真实 TradingShard 恢复、Binance/Bybit、Web 发布、soak、
+  外部 NodeFence、生产账户及 Canary。
+
+- 2026-09-17：SystemOwner 确认 Linux 线上资格、目标机断电、外部 NodeFence、生产账户与 Canary
+  暂缓。并行工作是 Windows 验证运行时，不是 Windows 生产平台，也不是 Windows 生产兼容层；
+  证据与票见 [Windows 进程链验证](../windows-process-chain-verification/map.md)。ADR 0002/0003
+  与 `permitsProduction()` 保持。Binance/Bybit 活对接因无密钥暂缓；`TestnetQualified` 保持
+  `not_run`。Windows 进程链通过不能关闭本图 02–11。
+
+- 2026-09-09：当前源码复审确认对账、ReduceOnly、算术、OMS 幂等、HostActivated 和唯一发送仍有
+  P0/P1 缺口；新增[安全修复波次](../main-safety-remediation/map.md)。最终 ProductionQualified/Canary
+  必须绑定该波次的最终验收 revision；既有票 02–10 按复审证据补回未完成条件，不复制第二套生产 tracker。
 - 2026-09-06：SystemOwner 确认按 11 张本地票落成生产资格收口计划。
 - 2026-09-06：票 01 冻结 `src/production_contract.zig`；Linux 是唯一生产平台，目标仅为 OKX、
   Binance、Bybit 的 SPOT 与 isolated linear USDT perpetual；Gate.io/Bitget 禁用；journal/state
@@ -104,6 +158,10 @@ Status: active
 - Windows 票 06 已[封存 `9939110d` 的限定 OKX Demo 证据](../windows-process-chain-verification/report-demolive-2026-10-03-recovered.json)；
   只读采集器来源单独记录。该结论不授予 Linux、本图 02–11 或生产资格。
 
+- Windows 生产专项实现与验收不在本 Linux 地图范围；Windows 平台可独立取得生产资格，
+  但不得把现有验证运行时的 Demo 证据自动升级为 `production_qualified`。
+  Windows 进程链验证是独立波次，见
+  [Windows 进程链验证](../windows-process-chain-verification/map.md)。
 - 当前 Windows 开发数据、PowerShell live 脚本或旧 schema 的生产兼容。
 - 未冻结 Venue、币本位、双向持仓、组合保证金、期权、算法单、跨 Venue 净仓或 Smart Order Routing。
 - Kubernetes、服务网格、动态插件、通用 REST/WS/auth 框架、第二套控制 UI、独立控制面 CLI 和

@@ -39,7 +39,11 @@ function Invoke-Private([string]$Method, [string]$Path, [string]$Body = '') {
         'x-simulated-trading'='1'; 'Content-Type'='application/json'
     }
     try {
-        $response = Invoke-RestMethod -Method $Method -Uri ($base + $Path) -Headers $headers -Body $Body
+        if ($Method -eq 'GET' -or [string]::IsNullOrEmpty($Body)) {
+            $response = Invoke-RestMethod -Method $Method -Uri ($base + $Path) -Headers $headers
+        } else {
+            $response = Invoke-RestMethod -Method $Method -Uri ($base + $Path) -Headers $headers -Body $Body
+        }
     } finally { $headers.Clear(); $signature=$null; $payload=$null }
     if ([string]$response.code -ne '0') { throw "OKX request rejected: $Path code=$($response.code)" }
     return $response

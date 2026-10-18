@@ -8,6 +8,7 @@ It is designed as both a practical trading-system prototype and an open-source r
 </div>
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/getSilver/Ringwin)
 
 Ringwin focuses on deterministic state transitions, fixed-point financial arithmetic, explicit risk and order-management boundaries, replayable event processing, and fault isolation.
 
@@ -163,9 +164,14 @@ The current development environment uses:
 * Zig `0.17.0-dev.315+5b647b792`
 * Python `3.9+`
 
-The first production support contract is Linux-only and uses `ReleaseSafe` by
-default. Windows is limited to development and fast regression; the exact
-support matrix and schema gate live in [`src/production_contract.zig`](src/production_contract.zig).
+Windows and Linux are eligible for independent production qualification, with
+`ReleaseSafe` as the default. This is a support-policy decision; the current code
+still implements a Linux-only production contract. Windows production admission
+and qualification remain pending. Windows Demo verification cannot grant
+`production_qualified`. See [ADR 0010](docs/adr/0010-qualify-windows-and-linux-independently.md)
+and [`.scratch/windows-process-chain-verification/map.md`](.scratch/windows-process-chain-verification/map.md).
+The Linux production map remains [`.scratch/production-readiness/map.md`](.scratch/production-readiness/map.md).
+The exact support matrix and schema gate live in [`src/production_contract.zig`](src/production_contract.zig).
 
 Check your Zig version:
 
@@ -188,18 +194,32 @@ Use the unified build entrypoint:
 zig build
 zig build test
 zig build run -- --offline-fixture
+zig build windows-durable
+zig build windows-credential
+zig build windows-chain
+zig build windows-okx-offline
+zig build windows-okx-readonly
 ```
 
-Windows OKX verification is split into `zig build windows-okx-offline` and
-`zig build windows-okx-readonly`. Each writes a source-bound JSON report under
-`.scratch/windows-process-chain-verification/`; incomplete evidence stays
-blocked or failed. Real Demo orders require fresh bounded SystemOwner
-authorization before `zig build windows-okx-live
--Dwindows-demo-live-authorized=true`. Windows evidence never grants Linux
-production or Binance/Bybit Testnet qualification.
-The historical `windows-chain` aggregate remains blocked, while its separate
-`windows_okx_offline=passed` line is emitted after the OKX fake-transport
-five-process path and disk replay succeed.
+`zig build windows-chain` includes the historical five-process
+SimulatedVenue lifecycle and reports `historical_simulated_chain=passed` with
+`windows_process_chain_verified=blocked`. Windows OKX evidence must separately pass
+offline, read-only, and explicitly authorized Demo trading, plus role ownership,
+durable recovery, and final account reconciliation, scoped to a source revision,
+account, product, strategy, and configuration. `.env.local` supplies Demo
+credentials only; it does not authorize orders or cleanup. Windows evidence
+cannot qualify Linux production or Binance/Bybit Testnet.
+The same command now emits a separate `windows_okx_offline=passed` line only after
+the OKX fake-transport five-process path and disk replay pass. The historical
+aggregate line remains blocked; qualification comes from the scoped OKX reports.
+`windows-okx-offline` writes a source-bound JSON report in
+`.scratch/windows-process-chain-verification/report-offline.json`; the read-only
+step writes its own report after matching that source snapshot and the Demo
+account fingerprint. Neither step places orders. A fresh, bounded SystemOwner
+authorization is required before `zig build windows-okx-live
+-Dwindows-demo-live-authorized=true`. The live step requires matching offline
+and read-only reports and writes `report-demolive.json`; absent any mode or a
+complete terminal and zero-exposure result, verification stays blocked or failed.
 
 [Ticket 06 sealed evidence](.scratch/windows-process-chain-verification/report-demolive-2026-10-03-recovered.json)
 qualifies execution revision `9939110d` for the authorized OKX Demo BTC-USDT spot
@@ -214,22 +234,13 @@ Run the full offline core wave:
 zig build core-wave
 ```
 
-For a Linux target from a native Linux/WSL toolchain, compile the production
-baseline with:
+Linux production roles remain a separate Linux-only dispatcher (`--production-role`,
+`--production-chain-test`, `--durable-store-test`, `--credential-store-test`).
+Windows verification uses `--verify-role` / `--windows-chain-test` and never
+replaces those flags. Cross-compiling the Linux source remains:
 
 ```console
 zig test src/main.zig -target x86_64-linux-gnu -OReleaseSafe --test-no-exec
-```
-
-The Linux production dispatcher is explicit about roles. Native Linux/WSL
-process acceptance starts five restricted roles, exercises Unix-domain IPC,
-drain, SIGTERM forced-stop, risk revocation, and generation-based restart:
-
-```console
-zig build-exe src/main.zig -target x86_64-linux-gnu -OReleaseSafe -femit-bin=ringwin
-./ringwin --production-chain-test
-./ringwin --durable-store-test
-./ringwin --credential-store-test
 ```
 
 `--credential-store-test` exercises the Linux-only encrypted `CredentialStore`: Argon2id and
@@ -260,14 +271,9 @@ contract evidence independently. Without an explicit live run, each real-run
 qualification remains `not_run`; OKX Demo evidence is never promoted to
 `TestnetQualified`.
 
-The current offline baseline uses acceptance schema `2` and journal/state schema
-`8`: Debug and ReleaseSafe each pass `193/193` tests, the four-shard coordinator
-barrier is `17`, and shard barriers are `23/26/21/21`. The offline Gateway
-contract makes `5` adapter submissions, the four-shard ownership ledger records
-`4` commands, and replay has no send capability. The shared summary is
-`841e5425827f7d12ba771fd2de14303bfb4923b22a4cc6615cd7d348b8332dfe`.
-The four shard CanonicalStateDigests and the five single-shard trajectory
-digests are recorded in the [local acceptance ticket](.scratch/trading-core-integrity-repair/issues/12-rebuild-trusted-acceptance-baseline.md).
+The current schema versions are defined in [`src/production_contract.zig`](src/production_contract.zig).
+Four-shard evidence is produced by `zig build run -- --four-shard-acceptance`.
+Replay has no send capability. Windows verification cannot set `permitsProduction()`.
 
 All build steps reject a Zig version other than `0.17.0-dev.315+5b647b792` before running tests. The existing PowerShell wave scripts remain available as their underlying acceptance implementation. Use Demo credentials only.
 
@@ -294,7 +300,9 @@ This makes deterministic behavior a testable property rather than only a design 
 
 Python strategies run outside the authoritative Zig trading state.
 
-Communication uses a Zig-owned shared-memory IPC boundary.
+Communication uses a Zig-owned, validated anonymous-pipe framing boundary
+([ADR 0007](docs/adr/0007-use-validated-pipes-for-strategy-host-data.md)).
+Python does not receive shared-memory handles, mapping sizes, or atomic cursors.
 
 A Python strategy can produce an `OrderIntent`, but that intent must still pass through Zig-side validation, risk checks, and OMS processing.
 

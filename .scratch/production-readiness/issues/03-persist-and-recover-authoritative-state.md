@@ -25,9 +25,11 @@ segment、manifest 和原子快照发布。调用者只需要 append、提交关
 - [x] 快照在同一文件系统执行临时写、文件同步、原子替换和目录同步，并绑定已 seal 的精确 barrier。
 - [x] 启动只接受完整 manifest、快照和连续日志尾；损坏、冲突、缺段或未知 schema 保持 RecoveryOnly。
 - [x] fault injector 覆盖短写、EINTR、ENOSPC、EIO、只读、同步超时、截断、重排和损坏，并验证 SafetyGate 关闭。
-- [ ] 目标文件系统上的真实 kill 与随机断电/重启试验；目标节点和文件系统仍未在 map 中指定。
+- [x] 目标 ext4 文件系统上的真实强制断电/重启试验；boot id 已变化，持久化产物哈希和恢复摘要一致。
 - [x] stable snapshot bytes、segment digest、barrier 和恢复游标在 adapter 重开后保持一致；TradingShard 继续通过现有 snapshot codec 校验 CanonicalStateDigest、订单、账本、仓位、RiskReservation、Unknown。
 - [x] 持久化延迟或错误关闭 SafetyGate，不由遥测或重试掩盖失败。
+- [ ] Engine 事务协调层已让每个权威输入、结果事实和外部发送前屏障经过同一 DurableStore；当前仅独立 adapter acceptance 不能满足此项。
+- [ ] 从 LinuxFileAdapter 恢复出的真实 TradingShard 与 live 状态具有相同订单、账本、RiskReservation、SafetyGate、barrier 和 CanonicalStateDigest。
 
 ## Out of scope
 
@@ -60,5 +62,14 @@ barrier 快照已发布后执行，因此恢复接口不会静默跳过多个未
   三个 stream，commit barrier=1，atomic snapshot，manifest 校验，关闭后重开恢复 `ready`。
 - [x] 内存适配器 fault matrix 覆盖 short write、EINTR、ENOSPC、EIO、只读、sync timeout、truncate、
   reorder 和 corruption，所有错误均使 gate 关闭。
-- [ ] 目标文件系统 kill、随机断电、RPO/RTO、真实 CanonicalStateDigest 资格和生产性能：待目标节点、
-  文件系统与磁盘清单冻结后执行。
+- [x] 目标 ext4 文件系统强制断电与重启恢复已执行；真实 TradingShard CanonicalStateDigest、完整
+  RPO/RTO 和生产性能仍由未完成的 Engine 集成项继续阻塞。
+
+### 目标机执行（2026-09-21）
+
+- 在 Debian 12、kernel 6.1、`/dev/vda1` ext4 上先同步持久化证据，再用 SysRq `b` 强制断电重启；
+  SSH 按预期中断，重连后 boot id 已变化，artifact/unit 哈希未漂移。
+- `--durable-store-test` 重启前后输出 SHA-256 均为
+  `3b04ddcb13e0daf8342359c54a9dd0689a9a0696433e753880be81f2db37d4fb`，恢复为 ready。本次证明目标文件系统
+  adapter 的断电恢复，不等价于尚未接入 Engine 事务协调层的真实 TradingShard in-flight 恢复，
+  后两项验收仍保持未完成。

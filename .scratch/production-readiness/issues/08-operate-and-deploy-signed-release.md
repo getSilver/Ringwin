@@ -33,6 +33,7 @@ CutoverBarrier 和 VersionActivationEvent；激活后只允许停单或 ForwardR
 - [x] 发布激活前失败保留当前版本；激活后故障停止新增风险，ForwardRollback 不回滚经济状态。
 - [x] OperatorRecord 不含 SecretMaterial，且不会复制订单、成交或普通读取日志。
 - [ ] Web 到 ControlCommand 再到 Linux role 的全部生命周期、超时、冲突命令、重复提交和 KillSwitch 抢占有端到端集成测试。
+- [ ] Linux control-fence 只接收来自明确 controller peer 的完整签名 ControlCommand；验证 SystemOwner/OwnerSession、签名、目标、版本和期限后才把不可变事实交给 TradingShard，不能把单字节 enable-risk 当作授权。
 - [ ] Web 网络断开、刷新、返回按钮、重复表单、过期会话和后端超时不会重复下发命令或把未知结果显示为成功。
 
 ## 当前实现与绑定（2026-09-07）
