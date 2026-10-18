@@ -30,17 +30,21 @@ Status: active
 2. [建立受保护缓冲与可清零密码学工作区](issues/02-protect-secret-and-crypto-workspaces.md) — resolved；已合入集成分支
 3. [贯通凭证存储的保护内存与安全输入](issues/03-integrate-protected-store-and-input.md) — resolved；已合入集成分支
 4. [清理认证与传输副本](issues/04-protect-auth-and-transport-copies.md) — resolved；已合入集成分支
-5. [贯通网关受控凭证注入](issues/05-bind-gateway-credential-ownership.md) — ready；03/04依赖已完成
-6. [最终冻结、回归与独立审查](issues/06-seal-offline-security-evidence.md) — blocked by 05,07
-7. [保护 AEAD 子密钥与显式工作区](issues/07-protect-aead-workspaces.md) — implementing；02依赖已完成，03调用点已可贯通
+5. [贯通网关受控凭证注入](issues/05-bind-gateway-credential-ownership.md) — implementing；原独立闭包继续，新增前后验接入等待08
+6. [最终冻结、回归与独立审查](issues/06-seal-offline-security-evidence.md) — blocked by 05
+7. [保护 AEAD 子密钥与显式工作区](issues/07-protect-aead-workspaces.md) — resolved；已合入集成分支并贯通store
+8. [保留原生 Demo 账户前后验安全门](issues/08-preserve-native-demo-account-guards.md) — implementing；最小可编译模块checkpoint已集成，完整验收待补
 
 ## Frontier
 
-- [05 网关受控凭证注入](issues/05-bind-gateway-credential-ownership.md)
-- [07 AEAD 工作区](issues/07-protect-aead-workspaces.md)
+- [08 原生 Demo 账户前后验](issues/08-preserve-native-demo-account-guards.md)；05已开始的独立输入/调用闭包继续，最后接入等待08
 
 ## Decisions so far
 
+- 2026-10-18：仅合入08明确checkpoint `f63cba83`（正常公共合成路径Windows Debug1/1、原始NotImplemented红保留），不触碰08工作树后续未提交修改。该提交提供只读guard接口供05继续实际source编译；逐类拒绝、两平台与显式空liability兼容仍由08补齐，08未resolved，05最后完整接入仍等待08最终验收。
+- 2026-10-18：05移除managed EnvFile路径时，必须保留旧pre/postflight完整账户安全门，不能删检查或永久禁用Windows Demo来冒充完成。拆出08原生只读guard，与05不同文件并行；05保持调用点/脚本所有权，新增依赖只阻塞最后guard接入。
+
+- 2026-10-18：07 `864a8521` 已快进合入；[07模块/集成证据](07-evidence.md)及三份正式清单69项带长度SHA引用核验通过，store依赖闭包11项与捕获源码完全相同。AEAD三组10/10，接入后Windows/Linux store各38/38、默认限额拒绝1/1、两OS小entry退出0；全局源码变化仅来自后续04合入，不将旧捕获 `b1df...` 重标为当前 `6805...`。v1辅助排序元数据保留并明确由v2替代。05从86de526d独立实施，须完成前合入本集成tip；当前唯一Frontier为05，06待05完成后冻结。
 - 2026-10-18：04 `c0d94d8f` 已快进合入，原实现与中断修改均保留；[04汇总](04-validation.json)及恢复/合并后清单的60项带长度SHA引用核验通过。补证11阶段退出0，Windows auth三模式及Linux ReleaseSafe各10/10、合成transport1/1、C错误矩阵通过；详见[04证据与接口](04-evidence.md)。runtime/demo/private_smoke根入口旧by-value/env接入留05，尚未宣称全入口编译或生产准入通过。05已可实施；07仍在贯通store，06仍等待05与07。
 - 2026-10-18：03 `a17d981d` 已快进合入并保留集成已有提交；[03身份清单](03-validation.json)中源码、归档、产物及日志哈希核验通过，Windows/WSL bounded ReleaseSafe各32/32，默认64KiB拒绝1/1，双方native acceptance入口退出0。详见[03证据](03-evidence.md)。AEAD内部状态保护留07接续，不将03完成扩大为此缺口已关闭；04仍在收尾，05等待04，06等待05及07。
 - 2026-10-18：03/04已在独立工作树实施。补充只读核查发现标准库 AEAD 的显式子密钥/ChaCha 工作区仍属普通局部，新增07在02接口上窄适配；06必须等待07及store调用点贯通。不将02 KDF证据扩大为AEAD证明。

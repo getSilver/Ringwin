@@ -1,0 +1,4 @@
+1/1 credential_aead.test.credential AEAD matches original XChaCha20 Poly1305 bytes...FAIL (NotImplemented)
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\credential07\o\a2e721c04e7c641505287a53cf62b3ea\test.exe --seed=0x5603d389

@@ -1,0 +1,39 @@
+1/38 credential_store.test.credential metadata and secret payload are authenticated...OK
+2/38 credential_store.test.policy, lifecycle, and security failures close admission...OK
+3/38 credential_store.test.Secret exposes only read-only material and reports page protection...OK
+4/38 credential_store.test.public lifecycle refuses restaging revoked identity and preserves revocation...OK
+5/38 credential_store.test.public stage preserves corrupt existing file and unrelated temporary file...OK
+6/38 credential_store.test.public lifecycle independent writer lock prevents stale revoke overwrite...OK
+7/38 credential_store.test.public stage concurrent first registration admits one authenticated identity...OK
+8/38 credential_store.test.public stage rejects existing encrypted identity even with another password...OK
+9/38 credential_store.test.public lifecycle reads and revokes original CRD4 v1 synthetic audit fixture...OK
+10/38 credential_store.test.public stage rejects overlong pipe password and wipes caller buffers...OK
+11/38 credential_store.test.public store rejects unterminated input and malformed material without publication...OK
+12/38 credential_store.test.public Linux store refuses a real TTY before reading and tightens private directory...OK
+13/38 credential_store.test.public admission rejects authenticated oversized decoded fields without panic...OK
+14/38 credential_store.test.public native stage refuses insufficient Linux memlock and wipes inputs...OK
+15/38 credential_kdf.test.credential KDF preserves existing OWASP Argon2id key and erases workspace...OK
+16/38 credential_kdf.test.credential KDF failure erases output and never bypasses protection...OK
+17/38 credential_kdf.test.credential KDF native locks full workspace or refuses insufficient budget...OK
+18/38 credential_kdf.test.credential Argon2id matches RFC 9106 section 5.3 vector...OK
+19/38 credential_kdf.test.credential KDF allocates crypto scratch from protected allocator and releases on OOM...OK
+20/38 production_contract.test.production contract freezes Linux scope and schema...OK
+21/38 production_contract.test.demo and testnet evidence never promotes production authority...OK
+22/38 production_contract.test.Gate.io and Bitget are explicit disabled rows...OK
+23/38 production_contract.test.Windows verification success cannot permit production...OK
+24/38 production_contract.test.required capabilities are not verified evidence...OK
+25/38 protected_memory.test.protected buffer permits sensitive writes only after native protection...OK
+26/38 protected_memory.test.protected buffer release erases full mapping before unlock and free...OK
+27/38 protected_memory.test.protected buffer rejects allocation locking dump and access failures without leaks...OK
+28/38 protected_memory.test.protected buffer cleans up cancellation and failed access transitions...OK
+29/38 credential_aead.test.credential AEAD matches original XChaCha20 Poly1305 bytes...OK
+30/38 credential_aead.test.credential AEAD matches original boundaries and supports in place decrypt...OK
+31/38 credential_aead.test.credential AEAD rejects tampering and securely clears output on every failure...OK
+32/38 credential_aead.test.credential AEAD protection failures clear caller outputs without a bypass...OK
+33/38 credential_aead.test.credential AEAD known XChaCha vector and RFC Poly1305 vector...OK
+34/38 credential_aead.test.credential AEAD native operates on protected key and plaintext owners...OK
+35/38 canonical_event.test.09 boundary Adapter batches reject full and excess counts without populating output...OK
+36/38 canonical_event.test.decimal conversion is lossless and exact...OK
+37/38 canonical_event.test.opaque venue references are bounded...OK
+38/38 canonical_event.test.bounded decimal text normalizes before accumulation and preserves signed limits...OK
+All 38 tests passed.

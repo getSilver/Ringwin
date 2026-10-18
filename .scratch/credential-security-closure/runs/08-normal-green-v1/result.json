@@ -1,0 +1,28 @@
+{
+  "label": "08-normal-green-v1",
+  "command": [
+    "D:/Program Files/zig/zig.exe",
+    "test",
+    "src/okx_demo_account_guard.zig",
+    "-O",
+    "Debug",
+    "--cache-dir",
+    ".zig-cache/credential08"
+  ],
+  "cwd": "D:\\github\\Ringwin-credential-native-account-guard",
+  "started_utc": "2026-10-18T13:34:08.847279+00:00",
+  "finished_utc": "2026-10-18T13:34:17.858567+00:00",
+  "elapsed_ns": 9010853700,
+  "pid": 6732,
+  "exit_code": 0,
+  "child_exit_code": 0,
+  "timed_out": false,
+  "fatal_diagnostic": null,
+  "capture_error": null,
+  "source_changed": false,
+  "source_tree_sha256": "d63cfe91f233b360c0c9f8506b6dec46fecbc641fc32538394b22cf6af109356",
+  "capture_sha256": "3c529c5a94057c339173c5a89611bdd1bf8cb9573fd6f2abf1d78108356ea085",
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_sha256": "be620d4e9ef1367aa2cf7611006ddd012eff2689546a530310838a9efb0b02a0",
+  "network_or_production_qualification": false
+}

@@ -1,0 +1,17 @@
+{
+  "purpose": "synthetic byte pipe inheritance only; no RingWin, credentials or network",
+  "command": [
+    "pwsh.exe",
+    "-NoLogo",
+    "-NoProfile",
+    "-File",
+    "D:\\github\\Ringwin-credential-recovery-20261018\\stdin-inheritance-probe\\inherit.ps1",
+    "-Python",
+    "D:\\Program Files\\miniconda3\\python.exe"
+  ],
+  "exit_code": 0,
+  "expected": "773 04cf294977fb6083f0ffe8dd1162e99849b950ce24a3f59af5e485d4d12d1375",
+  "actual": "773 04cf294977fb6083f0ffe8dd1162e99849b950ce24a3f59af5e485d4d12d1375",
+  "script_sha256": "0c8106d814555c6fe3e509c37a19563314d43238fed12dd6fd4a8fd7efa0daa5",
+  "passed": true
+}
