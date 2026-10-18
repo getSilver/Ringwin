@@ -28,20 +28,20 @@ Status: active
 
 1. [封闭凭证生命周期覆盖与并发回退](issues/01-close-lifecycle-overwrite.md) — resolved；已合入集成分支
 2. [建立受保护缓冲与可清零密码学工作区](issues/02-protect-secret-and-crypto-workspaces.md) — resolved；已合入集成分支
-3. [贯通凭证存储的保护内存与安全输入](issues/03-integrate-protected-store-and-input.md) — implementing
+3. [贯通凭证存储的保护内存与安全输入](issues/03-integrate-protected-store-and-input.md) — resolved；已合入集成分支
 4. [清理认证与传输副本](issues/04-protect-auth-and-transport-copies.md) — implementing
-5. [贯通网关受控凭证注入](issues/05-bind-gateway-credential-ownership.md) — blocked by 03,04
-6. [最终冻结、回归与独立审查](issues/06-seal-offline-security-evidence.md) — blocked by 05
-7. [保护 AEAD 子密钥与显式工作区](issues/07-protect-aead-workspaces.md) — ready；02依赖已完成
+5. [贯通网关受控凭证注入](issues/05-bind-gateway-credential-ownership.md) — blocked by 04
+6. [最终冻结、回归与独立审查](issues/06-seal-offline-security-evidence.md) — blocked by 05,07
+7. [保护 AEAD 子密钥与显式工作区](issues/07-protect-aead-workspaces.md) — implementing；02依赖已完成，03调用点已可贯通
 
 ## Frontier
 
-- [03 保护存储与安全输入](issues/03-integrate-protected-store-and-input.md)
 - [04 认证与传输副本](issues/04-protect-auth-and-transport-copies.md)
 - [07 AEAD 工作区](issues/07-protect-aead-workspaces.md)
 
 ## Decisions so far
 
+- 2026-10-18：03 `a17d981d` 已快进合入并保留集成已有提交；[03身份清单](03-validation.json)中源码、归档、产物及日志哈希核验通过，Windows/WSL bounded ReleaseSafe各32/32，默认64KiB拒绝1/1，双方native acceptance入口退出0。详见[03证据](03-evidence.md)。AEAD内部状态保护留07接续，不将03完成扩大为此缺口已关闭；04仍在收尾，05等待04，06等待05及07。
 - 2026-10-18：03/04已在独立工作树实施。补充只读核查发现标准库 AEAD 的显式子密钥/ChaCha 工作区仍属普通局部，新增07在02接口上窄适配；06必须等待07及store调用点贯通。不将02 KDF证据扩大为AEAD证明。
 
 - 2026-10-18：01 已以 `275620a4` 快进合入集成分支，生命周期持久 writer 锁、stage 防覆盖及旧代次拒绝完成；Windows/WSL Linux Debug、ReleaseSafe 各17/17，原审计 CRD4/v1 合成文件兼容各1/1。详见[01 实施证据](issues/01-close-lifecycle-overwrite.md#evidence)与[源码/产物/日志清单](01-validation.json)。
