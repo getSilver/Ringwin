@@ -1,0 +1,24 @@
+{
+  "label": "harness-exit0-v1",
+  "command": [
+    "D:\\Program Files\\miniconda3\\python.exe",
+    "-c",
+    "print(123)"
+  ],
+  "cwd": "D:\\github\\Ringwin-credential-security-closure",
+  "started_utc": "2026-10-18T06:59:04.731928+00:00",
+  "finished_utc": "2026-10-18T06:59:06.543702+00:00",
+  "elapsed_ns": 1811623200,
+  "pid": 4624,
+  "exit_code": 0,
+  "child_exit_code": 0,
+  "timed_out": false,
+  "fatal_diagnostic": null,
+  "capture_error": null,
+  "source_changed": false,
+  "source_tree_sha256": "2ee52bae5413bbd23b4d9ef79a82d6649e33f9d85e4875d7df79511253cb374e",
+  "capture_sha256": "bd808c913672b12cc1d7f03122f0fe11fa5e19200e33d19d295ecef1938cd731",
+  "stdout_sha256": "01f9bf4bb49ac52d7d7a7d61f79e51c2cba94c5f75e034143ea614f0d87b929c",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "network_or_production_qualification": false
+}
