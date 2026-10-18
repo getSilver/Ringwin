@@ -1,0 +1,5 @@
+1/1 credential_store.test.public stage rejects overlong pipe password and wipes caller buffers...expected error.PasswordTooLong, found void
+FAIL (TestExpectedError)
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\credential03\o\266e8a869cf317955fa320b0266c4bb2\test.exe --seed=0xdf2f550a

@@ -1,0 +1,20 @@
+1/1 credential_store.test.public admission rejects authenticated oversized decoded fields without panic...thread 4844 panic: source and destination arguments have non-equal lengths
+D:\github\Ringwin-credential-store-protection\src\credential_store.zig:1268:13: 0x7ff621786d8e in test.public admission rejects authenticated oversized decoded fields without panic (test_zcu.obj)
+    @memcpy(try fixture_password.writable(), "lifecycle-fixture-password\n");
+            ^
+D:\Program Files\zig\lib\compiler\test_runner.zig:291: 0x7ff6217e13f3 in mainTerminal (test_zcu.obj)
+        if (test_fn.func()) |_| {
+
+D:\Program Files\zig\lib\compiler\test_runner.zig:73:28: 0x7ff6217e13f3 in main (test_zcu.obj)
+        return mainTerminal(init);
+                           ^
+D:\Program Files\zig\lib\std\start.zig:712: 0x7ff6217deaa9 in callMain (test_zcu.obj)
+    if (fn_info.params[0].type.? == std.process.Init.Minimal) return wrapMain(root.main(.{
+
+D:\Program Files\zig\lib\std\start.zig:498:17: 0x7ff6217deaa9 in WinStartup (test_zcu.obj)
+        callMain(std.os.windows.peb().ProcessParameters.CommandLine.slice(), .global),
+                ^
+???:?:?: 0x7ffd791081f3 in ??? (KERNEL32.DLL)
+???:?:?: 0x7ffd7adca250 in ??? (ntdll.dll)
+error: the following test command failed with exit code 3:
+.zig-cache\credential03\o\f3d0b0354eae63d13f8d9474b93ddaf2\test.exe --seed=0xdd00776c
