@@ -27,7 +27,7 @@ Status: active
 ## Route
 
 1. [封闭凭证生命周期覆盖与并发回退](issues/01-close-lifecycle-overwrite.md) — resolved；已合入集成分支
-2. [建立受保护缓冲与可清零密码学工作区](issues/02-protect-secret-and-crypto-workspaces.md) — in-progress；blocked by 无
+2. [建立受保护缓冲与可清零密码学工作区](issues/02-protect-secret-and-crypto-workspaces.md) — resolved；已合入集成分支
 3. [贯通凭证存储的保护内存与安全输入](issues/03-integrate-protected-store-and-input.md) — blocked by 01,02
 4. [清理认证与传输副本](issues/04-protect-auth-and-transport-copies.md) — blocked by 02
 5. [贯通网关受控凭证注入](issues/05-bind-gateway-credential-ownership.md) — blocked by 03,04
@@ -35,12 +35,13 @@ Status: active
 
 ## Frontier
 
-- [02 保护内存与密码学工作区](issues/02-protect-secret-and-crypto-workspaces.md)
+- [03 保护存储与安全输入](issues/03-integrate-protected-store-and-input.md)
+- [04 认证与传输副本](issues/04-protect-auth-and-transport-copies.md)
 
 ## Decisions so far
 
 - 2026-10-18：01 已以 `275620a4` 快进合入集成分支，生命周期持久 writer 锁、stage 防覆盖及旧代次拒绝完成；Windows/WSL Linux Debug、ReleaseSafe 各17/17，原审计 CRD4/v1 合成文件兼容各1/1。详见[01 实施证据](issues/01-close-lifecycle-overwrite.md#evidence)与[源码/产物/日志清单](01-validation.json)。
-- 02 仍在实现，补齐 KDF 显式栈 scratch 保护窗口；旧阶段提交不作为完成依据，当前唯一 Frontier 为02，03/04暂不启动。
+- 2026-10-18：02 补修 `bbf39841` 已快进合入，保留集成分支已有构建依赖及嵌入fixture身份提交；KDF 显式 scratch 已迁入保护区。Windows ReleaseSafe/ReleaseFast、Linux ReleaseFast 默认限额拒绝与64MiB子进程native成功四组各9/9，详见[02 证据](02-evidence.md)与[v2身份清单](02-v2-validation.json)。首轮8/8及原始日志/清单保留为历史阶段，不能替代补修验收；03/04依赖已完成，当前 Frontier 为03与04，尚未认领。
 - 2026-10-18：用户确认直接实施及三组公共seam。复现撤销3→2回退和HMAC残留；KDF的释放后KEK恢复只在ReleaseFast复现，ReleaseSafe原allocator poison覆盖，不能混淆。
 - 初始stage改为一次性登记而非隐式覆盖/轮换；新版本轮换不借stage绕过撤销历史。本轮不新建完整轮换控制面或生产发送准入。
 

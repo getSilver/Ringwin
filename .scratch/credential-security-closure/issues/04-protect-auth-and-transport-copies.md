@@ -1,7 +1,7 @@
 # 04 清理认证与传输副本
 
 Type: task
-Status: blocked
+Status: ready-for-agent
 Assignee:
 Blocked by: [02 保护内存](02-protect-secret-and-crypto-workspaces.md)
 Parent: [凭证安全修复](../map.md)

@@ -1,7 +1,7 @@
 # 03 贯通凭证存储的保护内存与安全输入
 
 Type: task
-Status: blocked
+Status: ready-for-agent
 Assignee:
 Blocked by: [01 生命周期](01-close-lifecycle-overwrite.md), [02 保护内存](02-protect-secret-and-crypto-workspaces.md)
 Parent: [凭证安全修复](../map.md)
