@@ -1,0 +1,48 @@
+{
+  "head": "c5f73ba08ed10e6a5f42e97264f4c72e9b2f2864",
+  "synthetic_credentials_only": true,
+  "network_requests": 0,
+  "probe_sha256": "d57a7f1005d9a967260276d4724d8b65ade2d1cff4404a46211bd25667173333",
+  "runs": [
+    {
+      "mode": "ReleaseSafe",
+      "command": [
+        "D:/Program Files/zig/zig.exe",
+        "test",
+        "-O",
+        "ReleaseSafe",
+        "--cache-dir",
+        ".zig-cache/credential-review-probe-ReleaseSafe",
+        "--test-filter",
+        "review",
+        "--dep",
+        "credentials",
+        "-Mroot=.scratch/credential-security-audit-20261018/probe.zig",
+        "-Mcredentials=src/credential_store.zig"
+      ],
+      "exit_code": 0,
+      "log": "ReleaseSafe.log",
+      "log_sha256": "fe1694b829bf025cc043b36d5633deb3ae2d4bd79c9800aea7eefd46ff91ddd6"
+    },
+    {
+      "mode": "ReleaseFast",
+      "command": [
+        "D:/Program Files/zig/zig.exe",
+        "test",
+        "-O",
+        "ReleaseFast",
+        "--cache-dir",
+        ".zig-cache/credential-review-probe-ReleaseFast",
+        "--test-filter",
+        "review",
+        "--dep",
+        "credentials",
+        "-Mroot=.scratch/credential-security-audit-20261018/probe.zig",
+        "-Mcredentials=src/credential_store.zig"
+      ],
+      "exit_code": 0,
+      "log": "ReleaseFast.log",
+      "log_sha256": "436828577a0d95b4d97b021a31ae4f48fcad602d26546a5981f19196d9693be9"
+    }
+  ]
+}
