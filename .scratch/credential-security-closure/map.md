@@ -29,18 +29,19 @@ Status: active
 1. [封闭凭证生命周期覆盖与并发回退](issues/01-close-lifecycle-overwrite.md) — resolved；已合入集成分支
 2. [建立受保护缓冲与可清零密码学工作区](issues/02-protect-secret-and-crypto-workspaces.md) — resolved；已合入集成分支
 3. [贯通凭证存储的保护内存与安全输入](issues/03-integrate-protected-store-and-input.md) — resolved；已合入集成分支
-4. [清理认证与传输副本](issues/04-protect-auth-and-transport-copies.md) — implementing
-5. [贯通网关受控凭证注入](issues/05-bind-gateway-credential-ownership.md) — blocked by 04
+4. [清理认证与传输副本](issues/04-protect-auth-and-transport-copies.md) — resolved；已合入集成分支
+5. [贯通网关受控凭证注入](issues/05-bind-gateway-credential-ownership.md) — ready；03/04依赖已完成
 6. [最终冻结、回归与独立审查](issues/06-seal-offline-security-evidence.md) — blocked by 05,07
 7. [保护 AEAD 子密钥与显式工作区](issues/07-protect-aead-workspaces.md) — implementing；02依赖已完成，03调用点已可贯通
 
 ## Frontier
 
-- [04 认证与传输副本](issues/04-protect-auth-and-transport-copies.md)
+- [05 网关受控凭证注入](issues/05-bind-gateway-credential-ownership.md)
 - [07 AEAD 工作区](issues/07-protect-aead-workspaces.md)
 
 ## Decisions so far
 
+- 2026-10-18：04 `c0d94d8f` 已快进合入，原实现与中断修改均保留；[04汇总](04-validation.json)及恢复/合并后清单的60项带长度SHA引用核验通过。补证11阶段退出0，Windows auth三模式及Linux ReleaseSafe各10/10、合成transport1/1、C错误矩阵通过；详见[04证据与接口](04-evidence.md)。runtime/demo/private_smoke根入口旧by-value/env接入留05，尚未宣称全入口编译或生产准入通过。05已可实施；07仍在贯通store，06仍等待05与07。
 - 2026-10-18：03 `a17d981d` 已快进合入并保留集成已有提交；[03身份清单](03-validation.json)中源码、归档、产物及日志哈希核验通过，Windows/WSL bounded ReleaseSafe各32/32，默认64KiB拒绝1/1，双方native acceptance入口退出0。详见[03证据](03-evidence.md)。AEAD内部状态保护留07接续，不将03完成扩大为此缺口已关闭；04仍在收尾，05等待04，06等待05及07。
 - 2026-10-18：03/04已在独立工作树实施。补充只读核查发现标准库 AEAD 的显式子密钥/ChaCha 工作区仍属普通局部，新增07在02接口上窄适配；06必须等待07及store调用点贯通。不将02 KDF证据扩大为AEAD证明。
 
