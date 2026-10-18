@@ -1,4 +1,4 @@
-*.log -text
+*.log binary
 *.json -text
 *.jsonl -text
 *.py -text
