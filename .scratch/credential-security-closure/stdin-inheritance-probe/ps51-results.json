@@ -1,0 +1,35 @@
+{
+  "expected": "773 04cf294977fb6083f0ffe8dd1162e99849b950ce24a3f59af5e485d4d12d1375",
+  "rows": [
+    {
+      "command": [
+        "powershell.exe",
+        "-NoLogo",
+        "-NoProfile",
+        "-File",
+        "D:\\github\\Ringwin-credential-recovery-20261018\\stdin-inheritance-probe\\inherit-ps51.ps1",
+        "-Python",
+        "D:\\Program Files\\miniconda3\\python.exe"
+      ],
+      "script_sha256": "e487bb270c19f91645099585bf45d6e930e568b6349945b801d6752af7471142",
+      "exit_code": 0,
+      "actual": "773 04cf294977fb6083f0ffe8dd1162e99849b950ce24a3f59af5e485d4d12d1375",
+      "passed": true
+    },
+    {
+      "command": [
+        "powershell.exe",
+        "-NoLogo",
+        "-NoProfile",
+        "-File",
+        "D:\\github\\Ringwin-credential-recovery-20261018\\stdin-inheritance-probe\\direct-ps51.ps1",
+        "-Python",
+        "D:\\Program Files\\miniconda3\\python.exe"
+      ],
+      "script_sha256": "fc80caf34fbfa25d827122bf59f2215278b39891396f81e82e5790cb90f5fc02",
+      "exit_code": 0,
+      "actual": "773 04cf294977fb6083f0ffe8dd1162e99849b950ce24a3f59af5e485d4d12d1375",
+      "passed": true
+    }
+  ]
+}
