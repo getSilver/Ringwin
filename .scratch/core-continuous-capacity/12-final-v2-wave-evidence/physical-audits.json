@@ -1,0 +1,24 @@
+[
+  {
+    "artifact": "12-final-v2-app.exe",
+    "state": "passed",
+    "processes": 30,
+    "physical_datasets": 5,
+    "full_authority": true,
+    "recover_sends": 0,
+    "source_tree_sha256": "244f3ae77d0978357809cbf99bf850ba89282799a5902323727d54d62c91233d",
+    "data_and_raw_evidence": "D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\12-final-v2-app-processes",
+    "production_qualification": false
+  },
+  {
+    "artifact": "12-final-v2-cli.exe",
+    "state": "passed",
+    "processes": 30,
+    "physical_datasets": 5,
+    "full_authority": true,
+    "recover_sends": 0,
+    "source_tree_sha256": "244f3ae77d0978357809cbf99bf850ba89282799a5902323727d54d62c91233d",
+    "data_and_raw_evidence": "D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\12-final-v2-cli-processes",
+    "production_qualification": false
+  }
+]

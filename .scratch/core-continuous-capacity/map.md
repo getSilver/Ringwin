@@ -1,6 +1,6 @@
 # 核心持续运行容量闭合
 
-Status: active
+Status: closed
 
 ## Destination
 
@@ -50,13 +50,15 @@ Status: active
 12. [封存容量闭合证据并交接生产资格](issues/12-seal-capacity-closure-evidence.md) — blocked by 10, 11
 
 依赖主干：01 → 02 → 03；03 后分为 04、05 → 06 → 07、08 三支；04/07/08 → 09；09 → 10 与 11；10/11 → 12。
-01–11合同、权威屏障、检查点、观察选择、各历史归档、小规模订单/安全背压及Windows/Linux文件功能已完成；12尚未封存，只有 blocker 全部完成的票可执行。
+01–12合同、权威屏障、检查点、观察选择、各历史归档、小规模订单/安全背压、Windows/Linux文件功能及整波封存已完成。closed仅表示本轮明确的小规模功能范围，不表示原容量/性能设计目标或生产资格完成。
 
 ## Frontier
 
-- [12 封存容量闭合证据并交接生产资格](issues/12-seal-capacity-closure-evidence.md)
+无。本轮小规模功能范围全部完成；未测及后续专项见[12生产交接](12-production-handoff.md)。
 
 ## Decisions so far
+
+- 2026-10-18：12整波功能封存完成，见[12证据](12-evidence.md)、[01–11覆盖矩阵](12-coverage.md)及[整波包](12-final-v2-wave-evidence/summary.md)。共同115源码244f3ae7；Windows同源重建16阶段、333项受影响Debug检查、应用/CLI各十轮30新进程和十个实际数据目录审计通过；历史Windows完整624/624保持票10源码身份，Linux同源完整两模式各623通过/1指定IPC skip及60进程保持票11范围。3334引用、7个包文件及v1中断98项子引用哈希复核通过，独立Standards/Spec无剩余P1/P2；失败/中断/未测保留。01–12 resolved，本地图仅关闭小规模功能范围，容量/压力/资源预算/索引成本/目标性能、目标机断电/安全/真实隔离、线上Venue/soak/影子/Canary及生产资格未取得；不部署或执行真实交易。两平台后续独立推进。
 
 - 2026-10-17：11小规模Linux文件功能完成，见[11证据](11-evidence.md)及[独立Linux交接包](11-final-v6-linux-evidence/summary.md)。115源码244f3ae7，完整ReleaseSafe/Debug各623通过、1指定IPC skipped、0失败；应用/CLI各十轮30新进程、两组实际物理数据审计及两模式各18故障拒绝通过，恢复完整authority与accepted/Unknown零重发。84项审计、130项源码/producer归档与独立Standards/Spec通过；原始失败、未测/未执行项保留。WSL1/lxfs实际目录fsync951次成功、零全局sync回退，但缺memfd的IPC能力、目标磁盘/断电、容量压力/资源预算/性能、dump、外部NodeFence和生产资格均未取得。12成为唯一Frontier；用户已授权11完成后继续12。
 
