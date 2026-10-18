@@ -1,0 +1,1 @@
+check failed line 23: node && node->data == expected_headers[i]

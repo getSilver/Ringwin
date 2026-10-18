@@ -111,7 +111,8 @@ pub const Response = struct {
 
 pub const TransportOwner = struct {
     pub const Method = enum { get, post };
-    credentials: auth.Credentials,
+    // Borrowed owner must outlive this transport and every request/session.
+    credentials: *const auth.Credentials,
     proxy: ?[:0]const u8,
     source_session: u64,
     endpoint: DemoEndpointProfile,
@@ -121,12 +122,12 @@ pub const TransportOwner = struct {
     response: [market.max_raw_frame_bytes]u8 = undefined,
     ws: ?*anyopaque = null,
 
-    pub fn init(credentials: auth.Credentials, proxy: ?[:0]const u8, source_session: u64) !TransportOwner {
+    pub fn init(credentials: *const auth.Credentials, proxy: ?[:0]const u8, source_session: u64) !TransportOwner {
         return initWithEndpoint(credentials, proxy, source_session, try demoEndpointProfile("https://openapi.okx.com", "global"));
     }
 
     pub fn initWithEndpoint(
-        credentials: auth.Credentials,
+        credentials: *const auth.Credentials,
         proxy: ?[:0]const u8,
         source_session: u64,
         endpoint: DemoEndpointProfile,
@@ -137,7 +138,6 @@ pub const TransportOwner = struct {
 
     pub fn deinit(self: *RestOwner) void {
         self.wsDisconnect();
-        self.credentials.deinit();
         @memset(&self.timestamp, 0);
         @memset(&self.response, 0);
     }
@@ -171,7 +171,7 @@ pub const TransportOwner = struct {
 
     pub fn wsLogin(self: *RestOwner, timestamp_seconds: []const u8) !void {
         const session = self.ws orelse return error.NotConnected;
-        var payload = try auth.websocketLogin(&self.credentials, timestamp_seconds);
+        var payload = try auth.websocketLogin(self.credentials, timestamp_seconds);
         defer payload.clear();
         try wsResult(ringwin_ws_send_text(session, payload.slice().ptr, payload.slice().len));
     }
@@ -216,7 +216,7 @@ pub const TransportOwner = struct {
             .get => "GET",
             .post => "POST",
         };
-        var signed = auth.headers(&self.credentials, timestamp, method_text, path, body) catch
+        var signed = auth.headers(self.credentials, timestamp, method_text, path, body) catch
             return self.beforeSend();
         defer signed.clear();
         const signed_slices = signed.slices();
@@ -344,7 +344,9 @@ test "linked libcurl is exactly the resolved websocket baseline" {
 }
 
 test "REST owner fails before send until a signing time is prepared" {
-    var owner = try RestOwner.init(try auth.Credentials.init("key", "secret", "pass"), null, 1);
+    var credentials = try auth.Credentials.init("key", "secret", "pass");
+    defer credentials.deinit();
+    var owner = try RestOwner.init(&credentials, null, 1);
     defer owner.deinit();
     const result = owner.transport().submit("/api/v5/trade/order", "{}");
     try std.testing.expect(result.outcome == .proven_before_send);
