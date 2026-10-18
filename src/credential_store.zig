@@ -265,7 +265,7 @@ pub const CredentialStore = struct {
             error.PathAlreadyExists => {},
             else => return err,
         };
-        return .{ .dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{}), .allocator = allocator };
+        return .{ .dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{ .iterate = true }), .allocator = allocator };
     }
 
     pub fn close(self: *CredentialStore, io: std.Io) void {
@@ -307,7 +307,9 @@ pub const CredentialStore = struct {
         if (!self.admission_gate) return error.SecurityGateClosed;
         if (metadata.state != .staged) return error.InvalidInitialState;
         defer material.clear();
-        try self.writeEncrypted(io, metadata, material, password);
+        const writer = try self.acquireWriter(io);
+        defer writer.close(io);
+        try self.writeEncrypted(io, metadata, material, password, false);
     }
 
     fn activateWithPassword(self: *CredentialStore, io: std.Io, kind: CredentialKind, password: PasswordSource, expected: Metadata) !void {
@@ -351,13 +353,15 @@ pub const CredentialStore = struct {
             .revoked => false,
         };
         if (!allowed or expected.kind != kind) return error.InvalidCredentialTransition;
+        const writer = try self.acquireWriter(io);
+        defer writer.close(io);
         const protection: ProtectionMode = if (builtin.is_test) .test_bypass else .native;
         var lease = try self.unlock(io, kind, password, expected, protection, false);
         defer lease.deinit();
         var next_metadata = expected;
         next_metadata.state = next;
-        next_metadata.generation += 1;
-        try self.writeEncrypted(io, next_metadata, lease.secret.material(), password);
+        next_metadata.generation = std.math.add(u64, expected.generation, 1) catch return error.CredentialGenerationExhausted;
+        try self.writeEncrypted(io, next_metadata, lease.secret.material(), password, true);
     }
 
     fn unlock(self: *CredentialStore, io: std.Io, kind: CredentialKind, password: PasswordSource, expected: Metadata, protection: ProtectionMode, require_active: bool) !GatewayLease {
@@ -380,7 +384,22 @@ pub const CredentialStore = struct {
         return .{ .secret = secret, .metadata = metadata };
     }
 
-    fn writeEncrypted(self: *CredentialStore, io: std.Io, metadata: Metadata, material: *const SecretMaterial, password: PasswordSource) !void {
+    // This inode is never renamed or deleted: locking the replaced credential
+    // itself would let a second writer lock the old inode and overwrite revoke.
+    fn acquireWriter(self: *CredentialStore, io: std.Io) !std.Io.File {
+        return self.dir.createFile(io, "credential.writer.lock", .{
+            .read = true,
+            .truncate = false,
+            .lock = .exclusive,
+            .lock_nonblocking = true,
+            .permissions = if (builtin.os.tag == .linux) @enumFromInt(0o600) else .default_file,
+        }) catch |err| switch (err) {
+            error.WouldBlock => error.CredentialWriterBusy,
+            else => err,
+        };
+    }
+
+    fn writeEncrypted(self: *CredentialStore, io: std.Io, metadata: Metadata, material: *const SecretMaterial, password: PasswordSource, replace: bool) !void {
         if (password.kind == .test_only and !builtin.is_test) return error.TestPasswordSourceNotAllowed;
         if (password.bytes.len == 0 or password.bytes.len > max_password) return error.InvalidPasswordSource;
         var payload: [max_payload]u8 = undefined;
@@ -401,7 +420,7 @@ pub const CredentialStore = struct {
         var tag: [payload_tag_len]u8 = undefined;
         Aead.encrypt(bytes[header_len .. header_len + payload_len], &tag, payload[0..payload_len], bytes[0..header_len], nonce, key);
         @memcpy(bytes[header_len + payload_len ..][0..payload_tag_len], &tag);
-        try writeAtomic(self.dir, io, fileName(metadata.kind), bytes[0 .. header_len + payload_len + payload_tag_len]);
+        try writeAtomic(self.dir, io, fileName(metadata.kind), bytes[0 .. header_len + payload_len + payload_tag_len], replace);
     }
 };
 
@@ -630,27 +649,61 @@ fn readFile(dir: std.Io.Dir, io: std.Io, name: []const u8, destination: []u8) !u
     return offset;
 }
 
-fn writeAtomic(dir: std.Io.Dir, io: std.Io, name: []const u8, bytes: []const u8) !void {
-    var temp: [96]u8 = undefined;
-    const temp_name = try std.fmt.bufPrint(&temp, "{s}.tmp", .{name});
-    var file = try dir.createFile(io, temp_name, .{ .truncate = true, .permissions = if (builtin.os.tag == .linux) @enumFromInt(0o600) else .default_file });
+fn writeAtomic(dir: std.Io.Dir, io: std.Io, name: []const u8, bytes: []const u8, replace: bool) !void {
+    var temporary_buffer: [96]u8 = undefined;
+    var temporary_name: []const u8 = undefined;
+    var file: std.Io.File = undefined;
+    while (true) {
+        var random: [16]u8 = undefined;
+        io.random(&random);
+        temporary_name = try std.fmt.bufPrint(&temporary_buffer, "{s}.{s}.tmp", .{ name, std.fmt.bytesToHex(random, .lower) });
+        file = dir.createFile(io, temporary_name, .{
+            .exclusive = true,
+            .permissions = if (builtin.os.tag == .linux) @enumFromInt(0o600) else .default_file,
+        }) catch |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => return err,
+        };
+        break;
+    }
+    var file_open = true;
+    defer {
+        if (file_open) file.close(io);
+        dir.deleteFile(io, temporary_name) catch {};
+    }
     try file.writeStreamingAll(io, bytes);
     try file.sync(io);
     file.close(io);
-    try dir.rename(temp_name, dir, name, io);
+    file_open = false;
+    if (replace) {
+        try dir.rename(temporary_name, dir, name, io);
+    } else if (builtin.os.tag == .linux) {
+        // linkat creates the destination exclusively and atomically, including
+        // on Linux ABIs lacking renameat2(RENAME_NOREPLACE), such as WSL1.
+        dir.hardLink(temporary_name, dir, name, io, .{}) catch |err| switch (err) {
+            error.PathAlreadyExists => return error.CredentialAlreadyRegistered,
+            else => return err,
+        };
+        try dir.deleteFile(io, temporary_name);
+    } else {
+        dir.renamePreserve(temporary_name, dir, name, io) catch |err| switch (err) {
+            error.PathAlreadyExists => return error.CredentialAlreadyRegistered,
+            else => return err,
+        };
+    }
     syncDirectory(dir) catch return error.DirectorySyncFailed;
 }
 
 fn syncDirectory(dir: std.Io.Dir) !void {
     if (builtin.os.tag == .linux) switch (std.os.linux.errno(std.os.linux.fsync(dir.handle))) {
         .SUCCESS => {},
-        .INVAL, .BADF, .OPNOTSUPP => std.posix.sync(),
         else => return error.DirectorySyncFailed,
     };
     if (builtin.os.tag == .windows) {
         // NT directory handles reject FlushFileBuffers (INVALID_HANDLE /
         // INVALID_PARAMETER / NOT_SUPPORTED). Files in writeAtomic already
-        // called File.sync, which is FlushFileBuffers.
+        // called File.sync, which is FlushFileBuffers. This is Windows
+        // functional verification only, not directory/power-loss qualification.
         _ = windows_flush(dir.handle);
     }
 }
@@ -842,7 +895,8 @@ pub fn runWindowsAcceptance(init: std.process.Init) !void {
 
 test "credential metadata and secret payload are authenticated" {
     if (builtin.os.tag != .linux and builtin.os.tag != .windows) return;
-    const path = testStorePath("ringwin-credential-store-test");
+    var path_buffer: [256]u8 = undefined;
+    const path = try lifecycleTestPath(&path_buffer);
     var store = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
     defer store.close(std.testing.io);
     defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
@@ -867,7 +921,8 @@ test "credential metadata and secret payload are authenticated" {
 
 test "policy, lifecycle, and security failures close admission" {
     if (builtin.os.tag != .linux and builtin.os.tag != .windows) return;
-    const path = testStorePath("ringwin-credential-store-policy-test");
+    var path_buffer: [256]u8 = undefined;
+    const path = try lifecycleTestPath(&path_buffer);
     var store = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
     defer store.close(std.testing.io);
     defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
@@ -904,4 +959,233 @@ fn assertTestSecretMaterial(material: *const SecretMaterial) void {
     std.debug.assert(std.mem.eql(u8, material.api_key[0..material.api_key_len], "key"));
     std.debug.assert(std.mem.eql(u8, material.secret_key[0..material.secret_key_len], "secret"));
     std.debug.assert(std.mem.eql(u8, material.passphrase[0..material.passphrase_len], "pass"));
+}
+
+/// Real inherited pipe; public lifecycle APIs own and wipe the supplied buffer.
+fn lifecyclePasswordPipe(io: std.Io) !std.Io.File {
+    return lifecycleInputPipe(io, "lifecycle-fixture-password\n");
+}
+
+fn lifecycleInputPipe(io: std.Io, input: []const u8) !std.Io.File {
+    if (builtin.os.tag == .windows) {
+        var reader: std.os.windows.HANDLE = undefined;
+        var writer: std.os.windows.HANDLE = undefined;
+        if (windows_api.CreatePipe(&reader, &writer, null, 0) == 0) return error.PasswordPipeFailed;
+        var file: std.Io.File = .{ .handle = reader, .flags = .{ .nonblocking = false } };
+        errdefer file.close(io);
+        defer std.os.windows.CloseHandle(writer);
+        var written: u32 = 0;
+        if (windows_api.WriteFile(writer, input.ptr, @intCast(input.len), &written, null) == 0 or written != input.len)
+            return error.PasswordPipeFailed;
+        return file;
+    } else {
+        var descriptors: [2]std.posix.fd_t = undefined;
+        if (std.os.linux.errno(std.os.linux.pipe(&descriptors)) != .SUCCESS) return error.PasswordPipeFailed;
+        var file: std.Io.File = .{ .handle = descriptors[0], .flags = .{ .nonblocking = false } };
+        errdefer file.close(io);
+        defer _ = std.os.linux.close(descriptors[1]);
+        const written = std.os.linux.write(descriptors[1], input.ptr, input.len);
+        if (std.os.linux.errno(written) != .SUCCESS or written != input.len) return error.PasswordPipeFailed;
+        return file;
+    }
+}
+
+fn lifecycleStage(store: *CredentialStore, metadata: Metadata) !void {
+    var pipe = try lifecyclePasswordPipe(std.testing.io);
+    defer pipe.close(std.testing.io);
+    var password: [max_password]u8 = @splat(0xa5);
+    var material = try SecretMaterial.init("fixture-key", "fixture-secret", "fixture-pass");
+    defer {
+        std.debug.assert(material.api_key_len == 0 and material.secret_key_len == 0 and material.passphrase_len == 0);
+        for (password) |byte| std.debug.assert(byte == 0);
+    }
+    try store.stage(std.testing.io, metadata, &material, pipe, .restricted_fd, &password);
+}
+
+fn lifecycleTransition(store: *CredentialStore, expected: Metadata, next: CredentialState) !void {
+    var pipe = try lifecyclePasswordPipe(std.testing.io);
+    defer pipe.close(std.testing.io);
+    var password: [max_password]u8 = undefined;
+    switch (next) {
+        .active => try store.activate(std.testing.io, expected.kind, pipe, .restricted_fd, &password, expected),
+        .retiring => try store.retire(std.testing.io, expected.kind, pipe, .restricted_fd, &password, expected),
+        .revoked => try store.revoke(std.testing.io, expected.kind, pipe, .restricted_fd, &password, expected),
+        .staged => unreachable,
+    }
+}
+
+fn lifecycleTestPath(buffer: []u8) ![]const u8 {
+    var random: [16]u8 = undefined;
+    std.testing.io.random(&random);
+    return std.fmt.bufPrint(buffer, "{s}{x}", .{ testStorePath("ringwin-lifecycle-"), std.fmt.bytesToHex(random, .lower) });
+}
+
+test "public lifecycle refuses restaging revoked identity and preserves revocation" {
+    if (builtin.os.tag != .linux and builtin.os.tag != .windows) return;
+    var path_buffer: [256]u8 = undefined;
+    const path = try lifecycleTestPath(&path_buffer);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    var store = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
+    defer store.close(std.testing.io);
+    var metadata = try Metadata.init(.observation, 71, .production, 4_000_000_000, "revoked", "node", "203.0.113.71");
+    try lifecycleStage(&store, metadata);
+    try lifecycleTransition(&store, metadata, .active);
+    metadata.state = .active;
+    metadata.generation = 2;
+    try lifecycleTransition(&store, metadata, .revoked);
+    var before: [max_file]u8 = undefined;
+    const before_len = try readFile(store.dir, std.testing.io, "observation.credential", &before);
+    var initial = metadata;
+    initial.state = .staged;
+    initial.generation = 1;
+    try std.testing.expectError(error.CredentialAlreadyRegistered, lifecycleStage(&store, initial));
+    var after: [max_file]u8 = undefined;
+    const after_len = try readFile(store.dir, std.testing.io, "observation.credential", &after);
+    try std.testing.expectEqualSlices(u8, before[0..before_len], after[0..after_len]);
+    try std.testing.expectError(error.CredentialRevoked, lifecycleTransition(&store, metadata, .retiring));
+}
+
+test "public stage preserves corrupt existing file and unrelated temporary file" {
+    if (builtin.os.tag != .linux and builtin.os.tag != .windows) return;
+    var path_buffer: [256]u8 = undefined;
+    const path = try lifecycleTestPath(&path_buffer);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    var store = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
+    defer store.close(std.testing.io);
+    try store.dir.writeFile(std.testing.io, .{ .sub_path = "observation.credential", .data = "corrupt-original" });
+    try store.dir.writeFile(std.testing.io, .{ .sub_path = "observation.credential.tmp", .data = "another-writer-owned" });
+    const metadata = try Metadata.init(.observation, 72, .production, 4_000_000_000, "new", "node", "203.0.113.72");
+    try std.testing.expectError(error.CredentialAlreadyRegistered, lifecycleStage(&store, metadata));
+    var bytes: [max_file]u8 = undefined;
+    const len = try readFile(store.dir, std.testing.io, "observation.credential", &bytes);
+    try std.testing.expectEqualStrings("corrupt-original", bytes[0..len]);
+    const sentinel_len = try readFile(store.dir, std.testing.io, "observation.credential.tmp", &bytes);
+    try std.testing.expectEqualStrings("another-writer-owned", bytes[0..sentinel_len]);
+    var iterator = store.dir.iterate();
+    var count: usize = 0;
+    while (try iterator.next(std.testing.io)) |entry| {
+        try std.testing.expect(std.mem.eql(u8, entry.name, "observation.credential") or
+            std.mem.eql(u8, entry.name, "observation.credential.tmp") or
+            std.mem.eql(u8, entry.name, "credential.writer.lock"));
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+}
+
+test "public lifecycle independent writer lock prevents stale revoke overwrite" {
+    if (builtin.os.tag != .linux and builtin.os.tag != .windows) return;
+    var path_buffer: [256]u8 = undefined;
+    const path = try lifecycleTestPath(&path_buffer);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    var store = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
+    defer store.close(std.testing.io);
+    var other = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
+    defer other.close(std.testing.io);
+    var metadata = try Metadata.init(.observation, 73, .production, 4_000_000_000, "locked", "node", "203.0.113.73");
+    try lifecycleStage(&store, metadata);
+    {
+        // Independently opened OS lock, including across replacement of the
+        // credential path. The lock file must remain the same inode.
+        var lock = try store.dir.createFile(std.testing.io, "credential.writer.lock", .{ .read = true, .truncate = false });
+        defer lock.close(std.testing.io);
+        try lock.lock(std.testing.io, .exclusive);
+        try std.testing.expectError(error.CredentialWriterBusy, lifecycleTransition(&other, metadata, .active));
+        try std.testing.expectError(error.CredentialWriterBusy, lifecycleStage(&other, metadata));
+    }
+    try lifecycleTransition(&store, metadata, .active);
+    try std.testing.expectError(error.MetadataMismatch, lifecycleTransition(&other, metadata, .revoked));
+    metadata.state = .active;
+    metadata.generation = 2;
+    try lifecycleTransition(&store, metadata, .revoked);
+    try std.testing.expectError(error.CredentialRevoked, lifecycleTransition(&other, metadata, .retiring));
+}
+
+const LifecycleRace = struct {
+    store: *CredentialStore,
+    metadata: Metadata,
+    start: *std.atomic.Value(bool),
+    result: ?anyerror = null,
+
+    fn run(self: *LifecycleRace) void {
+        while (!self.start.load(.acquire)) std.atomic.spinLoopHint();
+        lifecycleStage(self.store, self.metadata) catch |err| {
+            self.result = err;
+        };
+    }
+};
+
+test "public stage concurrent first registration admits one authenticated identity" {
+    if (builtin.os.tag != .linux and builtin.os.tag != .windows) return;
+    var path_buffer: [256]u8 = undefined;
+    const path = try lifecycleTestPath(&path_buffer);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    var first = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
+    defer first.close(std.testing.io);
+    var second = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
+    defer second.close(std.testing.io);
+    var start = std.atomic.Value(bool).init(false);
+    var a = LifecycleRace{ .store = &first, .metadata = try Metadata.init(.observation, 74, .production, 4_000_000_000, "winner-a", "node", "203.0.113.74"), .start = &start };
+    var b = LifecycleRace{ .store = &second, .metadata = try Metadata.init(.observation, 74, .production, 4_000_000_000, "winner-b", "node", "203.0.113.74"), .start = &start };
+    const one = try std.Thread.spawn(.{}, LifecycleRace.run, .{&a});
+    const two = std.Thread.spawn(.{}, LifecycleRace.run, .{&b}) catch |err| {
+        start.store(true, .release);
+        one.join();
+        return err;
+    };
+    start.store(true, .release);
+    one.join();
+    two.join();
+    try std.testing.expect((a.result == null) != (b.result == null));
+    const rejected: anyerror = if (a.result) |err| err else b.result.?;
+    try std.testing.expect(rejected == error.CredentialWriterBusy or rejected == error.CredentialAlreadyRegistered);
+    const winner = if (a.result == null) a.metadata else b.metadata;
+    try lifecycleTransition(&first, winner, .active);
+}
+
+test "public stage rejects existing encrypted identity even with another password" {
+    if (builtin.os.tag != .linux and builtin.os.tag != .windows) return;
+    var path_buffer: [256]u8 = undefined;
+    const path = try lifecycleTestPath(&path_buffer);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    var store = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
+    defer store.close(std.testing.io);
+    const metadata = try Metadata.init(.observation, 75, .production, 4_000_000_000, "original", "node", "203.0.113.75");
+    try lifecycleStage(&store, metadata);
+    var pipe = try lifecycleInputPipe(std.testing.io, "another-password\n");
+    defer pipe.close(std.testing.io);
+    var buffer: [max_password]u8 = undefined;
+    var material = try SecretMaterial.init("replacement", "replacement", "replacement");
+    var changed = metadata;
+    changed.version = 2;
+    try std.testing.expectError(error.CredentialAlreadyRegistered, store.stage(std.testing.io, changed, &material, pipe, .restricted_fd, &buffer));
+    try lifecycleTransition(&store, metadata, .active);
+}
+
+test "public lifecycle reads and revokes original CRD4 v1 synthetic audit fixture" {
+    if (builtin.os.tag != .linux and builtin.os.tag != .windows) return;
+    var path_buffer: [256]u8 = undefined;
+    const path = try lifecycleTestPath(&path_buffer);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    var store = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
+    defer store.close(std.testing.io);
+    try store.dir.writeFile(std.testing.io, .{ .sub_path = "observation.credential", .data = @embedFile("testdata/credential-store-crd4-v1-synthetic.credential") });
+    var metadata = try Metadata.init(.observation, 7, .production, 4_000_000_000, "review-obs", "review-node", "203.0.113.7");
+    metadata.state = .active;
+    metadata.generation = 2;
+    const runtime = RuntimeContext{ .account = 7, .environment = .production, .endpoint_environment = .production, .node_id = "review-node", .egress_ip = "203.0.113.7" };
+    var password: [max_password]u8 = undefined;
+    var wrong = try lifecycleInputPipe(std.testing.io, "incorrect-password\n");
+    defer wrong.close(std.testing.io);
+    try std.testing.expectError(error.AuthenticationFailed, store.admitObservationReadOnly(std.testing.io, wrong, .restricted_fd, &password, metadata, runtime, 1, .{}));
+    var correct = try lifecycleInputPipe(std.testing.io, "synthetic-review-password\n");
+    defer correct.close(std.testing.io);
+    const admission = try store.admitObservationReadOnly(std.testing.io, correct, .restricted_fd, &password, metadata, runtime, 1, .{});
+    try std.testing.expect(admission.isReady());
+    try std.testing.expect(!admission.send_capability and !admission.trading_enabled);
+    var revoke = try lifecycleInputPipe(std.testing.io, "synthetic-review-password\n");
+    defer revoke.close(std.testing.io);
+    try store.revoke(std.testing.io, .observation, revoke, .restricted_fd, &password, metadata);
+    var stale = try lifecycleInputPipe(std.testing.io, "synthetic-review-password\n");
+    defer stale.close(std.testing.io);
+    try std.testing.expectError(error.CredentialRevoked, store.admitObservationReadOnly(std.testing.io, stale, .restricted_fd, &password, metadata, runtime, 1, .{}));
 }
