@@ -7,7 +7,8 @@ const std = @import("std");
 const production_contract = @import("production_contract.zig");
 
 const Aead = std.crypto.aead.chacha_poly.XChaCha20Poly1305;
-const argon2 = std.crypto.pwhash.argon2;
+const protected = @import("protected_memory.zig");
+const credential_kdf = @import("credential_kdf.zig");
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
@@ -123,7 +124,9 @@ const PasswordSource = struct {
 /// Reads one line from an interactive TTY or an inherited restricted fd.
 /// There is intentionally no constructor for argv/environment/file-path input.
 fn readPassword(io: std.Io, file: std.Io.File, kind: InputKind, destination: []u8) !PasswordSource {
+    errdefer std.crypto.secureZero(u8, destination);
     if (kind == .test_only) return error.TestPasswordSourceNotAllowed;
+    if (kind == .tty and builtin.os.tag != .windows) return error.TtyPasswordUnsupported;
     if (kind == .tty and !(try file.isTty(io))) return error.NotATty;
     var console_mode: u32 = 0;
     var echo_disabled = false;
@@ -153,16 +156,18 @@ fn readPassword(io: std.Io, file: std.Io.File, kind: InputKind, destination: []u
         }
     }
     var length: usize = 0;
-    while (length < destination.len) {
-        const amount = file.readStreaming(io, &.{destination[length..]}) catch |err| switch (err) {
-            error.EndOfStream => break,
+    while (true) {
+        if (length == destination.len) return error.PasswordTooLong;
+        const amount = file.readStreaming(io, &.{destination[length..][0..1]}) catch |err| switch (err) {
+            error.EndOfStream => return error.UnterminatedPassword,
             else => return err,
         };
-        if (amount == 0) break;
-        length += amount;
-        if (destination[length - 1] == '\n') break;
+        if (amount == 0) return error.UnterminatedPassword;
+        if (destination[length] == '\n') break;
+        length += 1;
+        if (length > max_password) return error.PasswordTooLong;
     }
-    while (length > 0 and (destination[length - 1] == '\n' or destination[length - 1] == '\r')) : (length -= 1) {}
+    if (length > 0 and destination[length - 1] == '\r') length -= 1;
     if (length == 0) return error.InvalidPasswordSource;
     return .{ .kind = kind, .bytes = destination[0..length] };
 }
@@ -261,11 +266,15 @@ pub const CredentialStore = struct {
 
     pub fn open(io: std.Io, allocator: Allocator, absolute_path: []const u8) !CredentialStore {
         if (builtin.os.tag != .linux and builtin.os.tag != .windows) return error.UnsupportedCredentialStorePlatform;
-        std.Io.Dir.createDirAbsolute(io, absolute_path, .default_dir) catch |err| switch (err) {
+        std.Io.Dir.createDirAbsolute(io, absolute_path, if (builtin.os.tag == .linux) @enumFromInt(0o700) else .default_dir) catch |err| switch (err) {
             error.PathAlreadyExists => {},
             else => return err,
         };
-        return .{ .dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{ .iterate = true }), .allocator = allocator };
+        var dir = try std.Io.Dir.openDirAbsolute(io, absolute_path, .{ .iterate = true, .follow_symlinks = false });
+        errdefer dir.close(io);
+        if (builtin.os.tag == .linux) try dir.setPermissions(io, @enumFromInt(0o700));
+        if (builtin.os.tag == .windows) try protected.configureNativeLockBudget(24 * 1024 * 1024);
+        return .{ .dir = dir, .allocator = allocator };
     }
 
     pub fn close(self: *CredentialStore, io: std.Io) void {
@@ -275,38 +284,53 @@ pub const CredentialStore = struct {
     pub fn stage(self: *CredentialStore, io: std.Io, metadata: Metadata, material: *SecretMaterial, file: std.Io.File, input_kind: InputKind, password_buffer: []u8) !void {
         defer material.clear();
         defer std.crypto.secureZero(u8, password_buffer);
-        const password = try readPassword(io, file, input_kind, password_buffer);
+        var password_storage = try protected.Buffer.init(max_password + 1);
+        defer password_storage.deinit();
+        const password = try readPassword(io, file, input_kind, try password_storage.writable());
+        try password_storage.freeze();
         try self.stageWithPassword(io, metadata, material, password);
     }
 
     pub fn activate(self: *CredentialStore, io: std.Io, kind: CredentialKind, file: std.Io.File, input_kind: InputKind, password_buffer: []u8, expected: Metadata) !void {
         defer std.crypto.secureZero(u8, password_buffer);
-        const password = try readPassword(io, file, input_kind, password_buffer);
+        var password_storage = try protected.Buffer.init(max_password + 1);
+        defer password_storage.deinit();
+        const password = try readPassword(io, file, input_kind, try password_storage.writable());
+        try password_storage.freeze();
         try self.activateWithPassword(io, kind, password, expected);
     }
 
     pub fn retire(self: *CredentialStore, io: std.Io, kind: CredentialKind, file: std.Io.File, input_kind: InputKind, password_buffer: []u8, expected: Metadata) !void {
         defer std.crypto.secureZero(u8, password_buffer);
-        const password = try readPassword(io, file, input_kind, password_buffer);
+        var password_storage = try protected.Buffer.init(max_password + 1);
+        defer password_storage.deinit();
+        const password = try readPassword(io, file, input_kind, try password_storage.writable());
+        try password_storage.freeze();
         try self.retireWithPassword(io, kind, password, expected);
     }
 
     pub fn revoke(self: *CredentialStore, io: std.Io, kind: CredentialKind, file: std.Io.File, input_kind: InputKind, password_buffer: []u8, expected: Metadata) !void {
         defer std.crypto.secureZero(u8, password_buffer);
-        const password = try readPassword(io, file, input_kind, password_buffer);
+        var password_storage = try protected.Buffer.init(max_password + 1);
+        defer password_storage.deinit();
+        const password = try readPassword(io, file, input_kind, try password_storage.writable());
+        try password_storage.freeze();
         try self.revokeWithPassword(io, kind, password, expected);
     }
 
     pub fn admitObservationReadOnly(self: *CredentialStore, io: std.Io, file: std.Io.File, input_kind: InputKind, password_buffer: []u8, expected: Metadata, runtime: RuntimeContext, now_unix: u64, self_check: SecuritySelfCheck) !Admission {
         defer std.crypto.secureZero(u8, password_buffer);
-        const password = try readPassword(io, file, input_kind, password_buffer);
+        var password_storage = try protected.Buffer.init(max_password + 1);
+        defer password_storage.deinit();
+        const password = try readPassword(io, file, input_kind, try password_storage.writable());
+        try password_storage.freeze();
         return self.admitObservationWithPassword(io, password, expected, runtime, now_unix, .native, self_check);
     }
 
     fn stageWithPassword(self: *CredentialStore, io: std.Io, metadata: Metadata, material: *SecretMaterial, password: PasswordSource) !void {
+        defer material.clear();
         if (!self.admission_gate) return error.SecurityGateClosed;
         if (metadata.state != .staged) return error.InvalidInitialState;
-        defer material.clear();
         const writer = try self.acquireWriter(io);
         defer writer.close(io);
         try self.writeEncrypted(io, metadata, material, password, false);
@@ -371,16 +395,16 @@ pub const CredentialStore = struct {
         var file_bytes: [max_file]u8 = undefined;
         const file_len = try readFile(self.dir, io, fileName(kind), &file_bytes);
         var metadata: Metadata = undefined;
-        var plaintext: [max_payload]u8 = undefined;
-        defer std.crypto.secureZero(u8, &plaintext);
-        const plaintext_len = try decrypt(self.allocator, io, file_bytes[0..file_len], password.bytes, &metadata, &plaintext);
+        var plaintext = try protected.Buffer.init(max_payload);
+        defer plaintext.deinit();
+        const plaintext_len = try decrypt(io, file_bytes[0..file_len], password.bytes, &metadata, try plaintext.writable());
         if (metadata.state == .revoked) return error.CredentialRevoked;
         if (!sameImmutableMetadata(metadata, expected) or metadata.state != expected.state or metadata.generation != expected.generation) return error.MetadataMismatch;
         if (require_active and metadata.state != .active) return error.CredentialNotActive;
-        var material = try decodeMaterial(plaintext[0..plaintext_len]);
-        errdefer material.clear();
-        const secret = try Secret.init(self.allocator, material, protection);
-        material.clear();
+        var secret = try Secret.empty(protection);
+        errdefer secret.deinit();
+        try decodeMaterial(plaintext.bytes()[0..plaintext_len], try secret.writableMaterial());
+        try secret.storage.freeze();
         return .{ .secret = secret, .metadata = metadata };
     }
 
@@ -402,9 +426,15 @@ pub const CredentialStore = struct {
     fn writeEncrypted(self: *CredentialStore, io: std.Io, metadata: Metadata, material: *const SecretMaterial, password: PasswordSource, replace: bool) !void {
         if (password.kind == .test_only and !builtin.is_test) return error.TestPasswordSourceNotAllowed;
         if (password.bytes.len == 0 or password.bytes.len > max_password) return error.InvalidPasswordSource;
-        var payload: [max_payload]u8 = undefined;
-        defer std.crypto.secureZero(u8, &payload);
-        const payload_len = encodeMaterial(material, &payload) catch |err| {
+        var owned_material = try Secret.init(self.allocator, material, .native);
+        defer owned_material.deinit();
+        var owned_password = try protected.Buffer.init(password.bytes.len);
+        defer owned_password.deinit();
+        @memcpy(try owned_password.writable(), password.bytes);
+        try owned_password.freeze();
+        var payload = try protected.Buffer.init(max_payload);
+        defer payload.deinit();
+        const payload_len = encodeMaterial(owned_material.material(), try payload.writable()) catch |err| {
             self.admission_gate = false;
             return err;
         };
@@ -414,11 +444,11 @@ pub const CredentialStore = struct {
         io.random(&salt);
         io.random(&nonce);
         encodeHeader(&bytes, metadata, salt, nonce, @intCast(payload_len));
-        var key: [Aead.key_length]u8 = undefined;
-        defer std.crypto.secureZero(u8, &key);
-        try deriveKey(self.allocator, io, password.bytes, &salt, &key);
+        var key = try protected.Buffer.init(Aead.key_length);
+        defer key.deinit();
+        try credential_kdf.derive(io, owned_password.bytes(), &salt, (try key.writable())[0..Aead.key_length]);
         var tag: [payload_tag_len]u8 = undefined;
-        Aead.encrypt(bytes[header_len .. header_len + payload_len], &tag, payload[0..payload_len], bytes[0..header_len], nonce, key);
+        Aead.encrypt(bytes[header_len .. header_len + payload_len], &tag, payload.bytes()[0..payload_len], bytes[0..header_len], nonce, key.bytes()[0..Aead.key_length].*);
         @memcpy(bytes[header_len + payload_len ..][0..payload_tag_len], &tag);
         try writeAtomic(self.dir, io, fileName(metadata.kind), bytes[0 .. header_len + payload_len + payload_tag_len], replace);
     }
@@ -428,48 +458,24 @@ pub const CredentialStore = struct {
 /// through `expose`; the page is read-only while the Secret is alive and is
 /// restored, wiped, unlocked, and freed by `deinit`.
 const Secret = struct {
-    allocator: Allocator,
-    storage: []align(std.heap.page_size_min) u8,
-    protection_report: ProtectionReport,
+    storage: protected.Buffer,
 
-    fn init(allocator: Allocator, secret_material: SecretMaterial, mode: ProtectionMode) !Secret {
-        var owned_material = secret_material;
-        defer owned_material.clear();
-        const storage = try allocator.alignedAlloc(u8, .fromByteUnits(std.heap.page_size_min), std.heap.page_size_min);
-        var locked = false;
-        var access_protected = false;
-        errdefer {
-            if (access_protected) std.process.protectMemory(storage, .{ .read = true, .write = true }) catch {};
-            std.crypto.secureZero(u8, storage);
-            if (locked) unlockNative(storage);
-            allocator.free(storage);
-        }
-        @memset(storage, 0);
-        @memcpy(storage[0..@sizeOf(SecretMaterial)], std.mem.asBytes(&owned_material));
-        var protection_report = ProtectionReport{ .locked = mode == .test_bypass, .dont_dump = mode == .test_bypass, .access_protected = false, .wipe_on_release = true };
-        if (mode == .native) {
-            switch (builtin.os.tag) {
-                .linux => {
-                    std.process.lockMemory(storage, .{}) catch return error.MemoryLockFailed;
-                    locked = true;
-                    std.posix.madvise(storage.ptr, storage.len, std.os.linux.MADV.DONTDUMP) catch return error.DontDumpFailed;
-                    protection_report.locked = true;
-                    protection_report.dont_dump = true;
-                },
-                .windows => {
-                    if (windows_api.VirtualLock(storage.ptr, storage.len) == 0) return error.MemoryLockFailed;
-                    locked = true;
-                    protection_report.locked = true;
-                    protection_report.dont_dump = false;
-                },
-                else => return error.UnsupportedProtectedMemory,
-            }
-        }
-        std.process.protectMemory(storage, .{ .read = true }) catch return error.MemoryProtectionFailed;
-        access_protected = true;
-        protection_report.access_protected = true;
-        if (!protectionAccepted(protection_report)) return error.SecurityGateClosed;
-        return .{ .allocator = allocator, .storage = storage, .protection_report = protection_report };
+    fn empty(mode: ProtectionMode) !Secret {
+        if (mode == .test_bypass and !builtin.is_test) return error.TestProtectionModeNotAllowed;
+        // Legacy test mode never bypasses native mapping protection.
+        return .{ .storage = try protected.Buffer.init(@sizeOf(SecretMaterial)) };
+    }
+
+    fn init(_: Allocator, secret_material: *const SecretMaterial, mode: ProtectionMode) !Secret {
+        var result = try empty(mode);
+        errdefer result.deinit();
+        @memcpy(try result.storage.writable(), std.mem.asBytes(secret_material));
+        try result.storage.freeze();
+        return result;
+    }
+
+    fn writableMaterial(self: *Secret) !*SecretMaterial {
+        return @ptrCast(@alignCast((try self.storage.writable()).ptr));
     }
 
     fn expose(self: *const Secret, comptime callback: fn (*const SecretMaterial) void) void {
@@ -477,20 +483,16 @@ const Secret = struct {
     }
 
     fn material(self: *const Secret) *const SecretMaterial {
-        return @ptrCast(@alignCast(self.storage.ptr));
+        return @ptrCast(@alignCast(self.storage.bytes().ptr));
     }
 
     fn report(self: *const Secret) ProtectionReport {
-        return self.protection_report;
+        const native = self.storage.report();
+        return .{ .locked = native.locked, .dont_dump = native.dont_dump, .access_protected = native.read_only, .wipe_on_release = true };
     }
 
     fn deinit(self: *Secret) void {
-        std.process.protectMemory(self.storage, .{ .read = true, .write = true }) catch |err|
-            std.debug.panic("credential memory protection restore failed: {s}", .{@errorName(err)});
-        std.crypto.secureZero(u8, self.storage);
-        if (self.protection_report.locked) unlockNative(self.storage);
-        self.allocator.free(self.storage);
-        self.protection_report.wipe_on_release = true;
+        self.storage.deinit();
     }
 };
 
@@ -583,13 +585,9 @@ fn decodeHeader(source: []const u8, metadata: *Metadata, salt: *[16]u8, nonce: *
     return payload_len;
 }
 
-fn deriveKey(allocator: Allocator, io: std.Io, password: []const u8, salt: []const u8, key: *[Aead.key_length]u8) !void {
-    try argon2.kdf(allocator, key[0..], password, salt, argon2.Params.owasp_2id, .argon2id, io);
-}
-
 fn encodeMaterial(material: *const SecretMaterial, destination: []u8) !usize {
     const total = 3 + @as(usize, material.api_key_len) + material.secret_key_len + material.passphrase_len;
-    if (total > destination.len or material.api_key_len == 0 or material.secret_key_len == 0 or material.passphrase_len == 0) return error.InvalidCredential;
+    if (material.api_key_len > max_secret or material.secret_key_len > max_secret or material.passphrase_len > max_secret or total > destination.len or material.api_key_len == 0 or material.secret_key_len == 0 or material.passphrase_len == 0) return error.InvalidCredential;
     destination[0] = material.api_key_len;
     destination[1] = material.secret_key_len;
     destination[2] = material.passphrase_len;
@@ -602,12 +600,13 @@ fn encodeMaterial(material: *const SecretMaterial, destination: []u8) !usize {
     return total;
 }
 
-fn decodeMaterial(source: []const u8) !SecretMaterial {
+fn decodeMaterial(source: []const u8, result: *SecretMaterial) !void {
+    errdefer result.clear();
     if (source.len < 6) return error.InvalidCredential;
     const lengths = [_]u8{ source[0], source[1], source[2] };
     const total = 3 + @as(usize, lengths[0]) + lengths[1] + lengths[2];
-    if (source.len != total or lengths[0] == 0 or lengths[1] == 0 or lengths[2] == 0) return error.InvalidCredential;
-    var result = SecretMaterial{};
+    if (lengths[0] > max_secret or lengths[1] > max_secret or lengths[2] > max_secret or source.len != total or lengths[0] == 0 or lengths[1] == 0 or lengths[2] == 0) return error.InvalidCredential;
+    result.* = .{};
     result.api_key_len = lengths[0];
     result.secret_key_len = lengths[1];
     result.passphrase_len = lengths[2];
@@ -617,19 +616,22 @@ fn decodeMaterial(source: []const u8) !SecretMaterial {
     @memcpy(result.secret_key[0..lengths[1]], source[offset..][0..lengths[1]]);
     offset += lengths[1];
     @memcpy(result.passphrase[0..lengths[2]], source[offset..][0..lengths[2]]);
-    return result;
 }
 
-fn decrypt(allocator: Allocator, io: std.Io, source: []const u8, password: []const u8, metadata: *Metadata, plaintext: []u8) !usize {
+fn decrypt(io: std.Io, source: []const u8, password: []const u8, metadata: *Metadata, plaintext: []u8) !usize {
     var salt: [16]u8 = undefined;
     var nonce: [Aead.nonce_length]u8 = undefined;
     const payload_len = try decodeHeader(source, metadata, &salt, &nonce);
-    var key: [Aead.key_length]u8 = undefined;
-    defer std.crypto.secureZero(u8, &key);
-    try deriveKey(allocator, io, password, &salt, &key);
+    var owned_password = try protected.Buffer.init(password.len);
+    defer owned_password.deinit();
+    @memcpy(try owned_password.writable(), password);
+    try owned_password.freeze();
+    var key = try protected.Buffer.init(Aead.key_length);
+    defer key.deinit();
+    try credential_kdf.derive(io, owned_password.bytes(), &salt, (try key.writable())[0..Aead.key_length]);
     const ciphertext = source[header_len .. header_len + payload_len];
     const tag: [payload_tag_len]u8 = source[header_len + payload_len ..][0..payload_tag_len].*;
-    try Aead.decrypt(plaintext[0..payload_len], ciphertext, tag, source[0..header_len], nonce, key);
+    try Aead.decrypt(plaintext[0..payload_len], ciphertext, tag, source[0..header_len], nonce, key.bytes()[0..Aead.key_length].*);
     return payload_len;
 }
 
@@ -721,21 +723,11 @@ fn testStorePath(comptime name: []const u8) []const u8 {
     return if (builtin.os.tag == .windows) "C:\\Windows\\Temp\\" ++ name else "/tmp/" ++ name;
 }
 
-fn unlockNative(storage: []align(std.heap.page_size_min) u8) void {
-    switch (builtin.os.tag) {
-        .linux => std.process.unlockMemory(storage) catch {},
-        .windows => _ = windows_api.VirtualUnlock(storage.ptr, storage.len),
-        else => {},
-    }
-}
-
 const FILE_TYPE_PIPE: u32 = 3;
 const windows_api = if (builtin.os.tag == .windows) struct {
     extern "kernel32" fn GetFileType(handle: std.os.windows.HANDLE) callconv(.winapi) u32;
     extern "kernel32" fn GetConsoleMode(handle: std.os.windows.HANDLE, mode: *u32) callconv(.winapi) i32;
     extern "kernel32" fn SetConsoleMode(handle: std.os.windows.HANDLE, mode: u32) callconv(.winapi) i32;
-    extern "kernel32" fn VirtualLock(address: *const anyopaque, size: usize) callconv(.winapi) i32;
-    extern "kernel32" fn VirtualUnlock(address: *const anyopaque, size: usize) callconv(.winapi) i32;
     extern "kernel32" fn CreatePipe(
         read_pipe: *std.os.windows.HANDLE,
         write_pipe: *std.os.windows.HANDLE,
@@ -771,11 +763,10 @@ pub const AcceptanceEvidence = struct {
 pub fn runLinuxAcceptance(init: std.process.Init) !void {
     if (builtin.os.tag != .linux) return error.LinuxCredentialStoreRequired;
     var path: [128]u8 = undefined;
-    const absolute_path = try std.fmt.bufPrint(&path, "/tmp/ringwin-credential-store-{d}", .{std.os.linux.getpid()});
-    std.Io.Dir.createDirAbsolute(init.io, absolute_path, .default_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    var random: [16]u8 = undefined;
+    init.io.random(&random);
+    const absolute_path = try std.fmt.bufPrint(&path, "/tmp/ringwin-credential-store-{s}", .{std.fmt.bytesToHex(random, .lower)});
+    try std.Io.Dir.createDirAbsolute(init.io, absolute_path, if (builtin.os.tag == .linux) @enumFromInt(0o700) else .default_dir);
     defer std.Io.Dir.cwd().deleteTree(init.io, absolute_path) catch {};
     var store = try CredentialStore.open(init.io, init.gpa, absolute_path);
     defer store.close(init.io);
@@ -814,9 +805,10 @@ pub fn runLinuxAcceptance(init: std.process.Init) !void {
     _ = std.os.linux.close(password_pipe[1]);
     if (std.os.linux.errno(write_result) != .SUCCESS or write_result != fixture_password.len)
         return error.PasswordPipeFailed;
-    var password_bytes: [max_password]u8 = undefined;
-    defer std.crypto.secureZero(u8, &password_bytes);
-    const password = try readPassword(init.io, read_file, .restricted_fd, &password_bytes);
+    var password_bytes = try protected.Buffer.init(max_password + 1);
+    defer password_bytes.deinit();
+    const password = try readPassword(init.io, read_file, .restricted_fd, try password_bytes.writable());
+    try password_bytes.freeze();
     try store.stageWithPassword(init.io, metadata, &material, password);
     try store.activateWithPassword(init.io, .observation, password, metadata);
     metadata.state = .active;
@@ -837,11 +829,10 @@ pub fn runLinuxAcceptance(init: std.process.Init) !void {
 pub fn runWindowsAcceptance(init: std.process.Init) !void {
     if (builtin.os.tag != .windows) return error.WindowsCredentialStoreRequired;
     var path: [260]u8 = undefined;
-    const absolute_path = try std.fmt.bufPrint(&path, "C:\\Windows\\Temp\\ringwin-credential-store-{d}", .{windows_api.GetCurrentProcessId()});
-    std.Io.Dir.createDirAbsolute(init.io, absolute_path, .default_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    var random: [16]u8 = undefined;
+    init.io.random(&random);
+    const absolute_path = try std.fmt.bufPrint(&path, "C:\\Windows\\Temp\\ringwin-credential-store-{s}", .{std.fmt.bytesToHex(random, .lower)});
+    try std.Io.Dir.createDirAbsolute(init.io, absolute_path, if (builtin.os.tag == .linux) @enumFromInt(0o700) else .default_dir);
     defer std.Io.Dir.cwd().deleteTree(init.io, absolute_path) catch {};
     var store = try CredentialStore.open(init.io, init.gpa, absolute_path);
     defer store.close(init.io);
@@ -870,9 +861,10 @@ pub fn runWindowsAcceptance(init: std.process.Init) !void {
     if (windows_api.WriteFile(write_handle, fixture_password.ptr, @intCast(fixture_password.len), &written, null) == 0)
         return error.PasswordPipeFailed;
     std.os.windows.CloseHandle(write_handle);
-    var password_bytes: [max_password]u8 = undefined;
-    defer std.crypto.secureZero(u8, &password_bytes);
-    const password = try readPassword(init.io, read_file, .restricted_fd, &password_bytes);
+    var password_bytes = try protected.Buffer.init(max_password + 1);
+    defer password_bytes.deinit();
+    const password = try readPassword(init.io, read_file, .restricted_fd, try password_bytes.writable());
+    try password_bytes.freeze();
     try store.stageWithPassword(init.io, metadata, &material, password);
     try store.activateWithPassword(init.io, .observation, password, metadata);
     metadata.state = .active;
@@ -948,10 +940,10 @@ test "Secret exposes only read-only material and reports page protection" {
     if (builtin.os.tag != .linux and builtin.os.tag != .windows) return;
     var material = try SecretMaterial.init("key", "secret", "pass");
     defer material.clear();
-    var secret = try Secret.init(std.testing.allocator, material, .test_bypass);
+    var secret = try Secret.init(std.testing.allocator, &material, .test_bypass);
     defer secret.deinit();
 
-    try std.testing.expect(secret.report().accepted());
+    try std.testing.expect(protectionAccepted(secret.report()));
     secret.expose(assertTestSecretMaterial);
 }
 
@@ -1188,4 +1180,123 @@ test "public lifecycle reads and revokes original CRD4 v1 synthetic audit fixtur
     var stale = try lifecycleInputPipe(std.testing.io, "synthetic-review-password\n");
     defer stale.close(std.testing.io);
     try std.testing.expectError(error.CredentialRevoked, store.admitObservationReadOnly(std.testing.io, stale, .restricted_fd, &password, metadata, runtime, 1, .{}));
+}
+
+test "public stage rejects overlong pipe password and wipes caller buffers" {
+    var path_buffer: [256]u8 = undefined;
+    const path = try lifecycleTestPath(&path_buffer);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    var store = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
+    defer store.close(std.testing.io);
+    const metadata = try Metadata.init(.observation, 81, .production, 4_000_000_000, "input", "node", "203.0.113.81");
+    var input: [max_password + 2]u8 = @splat('p');
+    input[input.len - 1] = '\n';
+    var pipe = try lifecycleInputPipe(std.testing.io, &input);
+    defer pipe.close(std.testing.io);
+    var password: [max_password]u8 = @splat(0xa5);
+    var material = try SecretMaterial.init("key", "secret", "pass");
+    try std.testing.expectError(error.PasswordTooLong, store.stage(std.testing.io, metadata, &material, pipe, .restricted_fd, &password));
+    try std.testing.expect(std.mem.allEqual(u8, &password, 0));
+    try std.testing.expectEqual(@as(u8, 0), material.api_key_len);
+}
+
+test "public store rejects unterminated input and malformed material without publication" {
+    var path_buffer: [256]u8 = undefined;
+    const path = try lifecycleTestPath(&path_buffer);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    var store = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
+    defer store.close(std.testing.io);
+    const metadata = try Metadata.init(.observation, 82, .production, 4_000_000_000, "input", "node", "203.0.113.82");
+    var pipe = try lifecycleInputPipe(std.testing.io, "no-newline");
+    defer pipe.close(std.testing.io);
+    var password: [max_password]u8 = @splat(0xa5);
+    var material = try SecretMaterial.init("key", "secret", "pass");
+    try std.testing.expectError(error.UnterminatedPassword, store.stage(std.testing.io, metadata, &material, pipe, .restricted_fd, &password));
+    try std.testing.expect(std.mem.allEqual(u8, &password, 0));
+    try std.testing.expectEqual(@as(u8, 0), material.api_key_len);
+    var malformed = try SecretMaterial.init("key", "secret", "pass");
+    malformed.api_key_len = max_secret + 1;
+    var complete = try lifecyclePasswordPipe(std.testing.io);
+    defer complete.close(std.testing.io);
+    try std.testing.expectError(error.InvalidCredential, store.stage(std.testing.io, metadata, &malformed, complete, .restricted_fd, &password));
+    try std.testing.expect(std.mem.allEqual(u8, &password, 0));
+    try std.testing.expectEqual(@as(u8, 0), malformed.api_key_len);
+    try std.testing.expectError(error.SecurityGateClosed, lifecycleStage(&store, metadata));
+}
+
+test "public Linux store refuses a real TTY before reading and tightens private directory" {
+    if (builtin.os.tag != .linux) return;
+    var path_buffer: [256]u8 = undefined;
+    const path = try lifecycleTestPath(&path_buffer);
+    try std.Io.Dir.createDirAbsolute(std.testing.io, path, @enumFromInt(0o755));
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    var store = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
+    defer store.close(std.testing.io);
+    const stat = try store.dir.stat(std.testing.io);
+    try std.testing.expectEqual(@as(u32, 0o700), @as(u32, @intFromEnum(stat.permissions)) & 0o777);
+    var tty = try std.Io.Dir.openFileAbsolute(std.testing.io, "/dev/ptmx", .{ .mode = .read_write });
+    defer tty.close(std.testing.io);
+    try std.testing.expect(try tty.isTty(std.testing.io));
+    const metadata = try Metadata.init(.observation, 83, .production, 4_000_000_000, "tty", "node", "203.0.113.83");
+    var password: [max_password]u8 = @splat(0xa5);
+    var material = try SecretMaterial.init("key", "secret", "pass");
+    try std.testing.expectError(error.TtyPasswordUnsupported, store.stage(std.testing.io, metadata, &material, tty, .tty, &password));
+    try std.testing.expect(std.mem.allEqual(u8, &password, 0));
+    try std.testing.expectEqual(@as(u8, 0), material.api_key_len);
+}
+
+test "public admission rejects authenticated oversized decoded fields without panic" {
+    var path_buffer: [256]u8 = undefined;
+    const path = try lifecycleTestPath(&path_buffer);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    var store = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
+    defer store.close(std.testing.io);
+    var metadata = try Metadata.init(.observation, 84, .production, 4_000_000_000, "decode", "node", "203.0.113.84");
+    metadata.state = .active;
+    metadata.generation = 2;
+    // Fixture construction is independent AEAD, not a call to decodeMaterial.
+    const salt: [16]u8 = @splat(0x23);
+    const nonce: [Aead.nonce_length]u8 = @splat(0x17);
+    var malformed: [134]u8 = @splat(0x61);
+    malformed[0] = 129;
+    malformed[1] = 1;
+    malformed[2] = 1;
+    var key = try protected.Buffer.init(32);
+    defer key.deinit();
+    var fixture_password = try protected.Buffer.init("lifecycle-fixture-password".len);
+    defer fixture_password.deinit();
+    @memcpy(try fixture_password.writable(), "lifecycle-fixture-password");
+    try credential_kdf.derive(std.testing.io, fixture_password.bytes(), &salt, (try key.writable())[0..32]);
+    var encoded: [header_len + malformed.len + payload_tag_len]u8 = undefined;
+    encodeHeader(&encoded, metadata, salt, nonce, malformed.len);
+    var tag: [payload_tag_len]u8 = undefined;
+    Aead.encrypt(encoded[header_len..][0..malformed.len], &tag, &malformed, encoded[0..header_len], nonce, key.bytes()[0..32].*);
+    @memcpy(encoded[header_len + malformed.len ..], &tag);
+    try store.dir.writeFile(std.testing.io, .{ .sub_path = "observation.credential", .data = &encoded });
+    var pipe = try lifecyclePasswordPipe(std.testing.io);
+    defer pipe.close(std.testing.io);
+    var password: [max_password]u8 = @splat(0xa5);
+    const runtime = RuntimeContext{ .account = 84, .environment = .production, .endpoint_environment = .production, .node_id = "node", .egress_ip = "203.0.113.84" };
+    try std.testing.expectError(error.InvalidCredential, store.admitObservationReadOnly(std.testing.io, pipe, .restricted_fd, &password, metadata, runtime, 1, .{}));
+    try std.testing.expect(std.mem.allEqual(u8, &password, 0));
+}
+
+test "public native stage refuses insufficient Linux memlock and wipes inputs" {
+    if (builtin.os.tag != .linux) return;
+    if ((try std.posix.getrlimit(.MEMLOCK)).cur >= credential_kdf.workspace_bytes + 16 * std.heap.pageSize()) return;
+    var path_buffer: [256]u8 = undefined;
+    const path = try lifecycleTestPath(&path_buffer);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    var store = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
+    defer store.close(std.testing.io);
+    const metadata = try Metadata.init(.observation, 85, .production, 4_000_000_000, "memlock", "node", "203.0.113.85");
+    var pipe = try lifecyclePasswordPipe(std.testing.io);
+    defer pipe.close(std.testing.io);
+    var password: [max_password]u8 = @splat(0xa5);
+    var material = try SecretMaterial.init("key", "secret", "pass");
+    try std.testing.expectError(error.MemoryLockFailed, store.stage(std.testing.io, metadata, &material, pipe, .restricted_fd, &password));
+    try std.testing.expect(std.mem.allEqual(u8, &password, 0));
+    try std.testing.expectEqual(@as(u8, 0), material.api_key_len);
+    try std.testing.expectError(error.FileNotFound, store.dir.openFile(std.testing.io, "observation.credential", .{}));
+    std.debug.print("public store refused insufficient native memlock and cleared caller inputs\n", .{});
 }
