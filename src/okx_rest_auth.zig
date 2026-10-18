@@ -165,6 +165,7 @@ pub fn headers(credentials: *const Credentials, timestamp: []const u8, method: [
     return result;
 }
 fn putHeader(result: *Headers, index: usize, prefix: []const u8, value: []const u8) !void {
+    for (value) |byte| if (byte == 0 or byte == '\r' or byte == '\n') return error.InvalidHeaderValue;
     const length = prefix.len + value.len;
     if (length >= 256) return error.HeaderTooLarge;
     const destination = (try result.buffer.writable())[index * 256 ..][0..256];
@@ -274,4 +275,33 @@ test "auth public owners wipe signatures request buffers and failing constructio
     var output: [44]u8 = @splat(0x5a);
     try std.testing.expectError(error.InvalidCredential, sign(&credentials, "time", "GET", "/path", "", &output));
     try std.testing.expect(std.mem.allEqual(u8, &output, 0));
+}
+
+test "auth headers reject credential and timestamp framing injection" {
+    for ([_][]const u8{ "key\r\nInjected: true", "key\x00suffix" }) |key| {
+        var credentials = try Credentials.init(key, "secret", "pass");
+        defer credentials.deinit();
+        try std.testing.expectError(error.InvalidHeaderValue, headers(&credentials, "time", "GET", "/path", ""));
+    }
+    var credentials = try Credentials.init("key", "secret", "pass\nInjected: true");
+    defer credentials.deinit();
+    try std.testing.expectError(error.InvalidHeaderValue, headers(&credentials, "time", "GET", "/path", ""));
+    var valid = try Credentials.init("key", "secret", "pass");
+    defer valid.deinit();
+    try std.testing.expectError(error.InvalidHeaderValue, headers(&valid, "time\r\nInjected: true", "GET", "/path", ""));
+}
+
+test "websocket login serialization failure erases owned request and signature mappings" {
+    var memory: TestMemory = .{};
+    var credentials = try Credentials.initEmptyForTesting(memory.backend());
+    const fields = try credentials.writableFields();
+    @memset(fields.api_key, 0);
+    @memcpy(fields.secret_key[0..6], "secret");
+    @memset(fields.passphrase, 0);
+    try credentials.sealLengths(128, 6, 128);
+    // JSON escaping expands these valid synthetic fields beyond the bounded payload.
+    try std.testing.expectError(error.WriteFailed, websocketLogin(&credentials, "1607447337"));
+    credentials.deinit();
+    try std.testing.expect(memory.clean);
+    try std.testing.expectEqual(memory.locks, memory.releases);
 }

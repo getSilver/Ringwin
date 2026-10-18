@@ -19,11 +19,23 @@ static CURLcode test_setopt(CURL *easy, CURLoption option, ...) {
   if(option == CURLOPT_HTTPHEADER) {
     struct curl_slist *node = va_arg(ap, struct curl_slist *);
     borrowed = node;
+#ifdef RINGWIN_SHIM_NO_MAIN
+    size_t count=0;
+    for(;node;node=node->next) {
+      CHECK(node->data);
+      if(count == 0) CHECK(strcmp(node->data, "OK-ACCESS-KEY: key") == 0);
+      if(count == 1) CHECK(strcmp(node->data, "OK-ACCESS-SIGN: uZ0OB9jFCN1FU9vKX6ED/rY/T+NyFw5os4M+UlJknIk=") == 0);
+      if(count == 3) CHECK(strcmp(node->data, "OK-ACCESS-PASSPHRASE: pass") == 0);
+      ++count;
+    }
+    CHECK(count == 6);
+#else
     for(size_t i=0;i<2;++i) {
       CHECK(node && node->data == expected_headers[i]);
       node = node->next;
     }
     CHECK(!node);
+#endif
   }
   va_end(ap);
   ++option_calls;
@@ -31,7 +43,10 @@ static CURLcode test_setopt(CURL *easy, CURLoption option, ...) {
 }
 static CURLcode test_perform(CURL *easy) {
   CHECK(easy == (CURL *)&fake_easy);
-  CHECK(borrowed && borrowed->data == expected_headers[0]);
+  CHECK(borrowed);
+#ifndef RINGWIN_SHIM_NO_MAIN
+  CHECK(borrowed->data == expected_headers[0]);
+#endif
   ++performed;
   return (CURLcode)perform_code;
 }
@@ -42,7 +57,7 @@ static CURLcode test_getinfo(CURL *easy, CURLINFO info, ...) {
 }
 static void test_cleanup(CURL *easy) {
   CHECK(easy == (CURL *)&fake_easy);
-  if(borrowed) CHECK(borrowed->data == expected_headers[0]);
+  if(borrowed) CHECK(borrowed->data);
   ++cleaned;
 }
 #undef curl_easy_setopt
@@ -54,6 +69,12 @@ static void test_cleanup(CURL *easy) {
 #define curl_easy_cleanup test_cleanup
 #include "okx_curl_shim.c"
 
+void ringwin_test_reset(int option_failure, int request_failure) {
+  fail_init=0; fail_option=option_failure; perform_code=request_failure;
+  cleaned=performed=option_calls=0; borrowed=NULL;
+}
+int ringwin_test_cleaned(void) { return cleaned; }
+#ifndef RINGWIN_SHIM_NO_MAIN
 static void run_case(int init_failure, int option_failure, int request_failure, int expected) {
   unsigned char response[16]; size_t length=0; long status=0; int code=0;
   fail_init=init_failure; fail_option=option_failure; perform_code=request_failure;
@@ -75,6 +96,17 @@ int main(void) {
   for(int i=1;i<=option_count;++i) run_case(0,i,0,1);
   run_case(0,0,CURLE_SEND_ERROR,2);
   run_case(0,0,CURLE_RECV_ERROR,2);
+  {
+    unsigned char output[16]; size_t length=0; long status=0; int code=0;
+    const char *too_many[17] = {0};
+    CHECK(ringwin_curl_request("https://synthetic.invalid", "GET", too_many, 17,
+      output, 0, NULL, output, sizeof(output), &length, &status, &code) == 1);
+    const char *null_header[1] = {NULL};
+    CHECK(ringwin_curl_request("https://synthetic.invalid", "GET", null_header, 1,
+      output, 0, NULL, output, sizeof(output), &length, &status, &code) == 1);
+  }
   puts("synthetic request: borrowed headers, init failure, every option failure, send/receive failures, cleanup lifetime passed; no network");
   return 0;
 }
+
+#endif
