@@ -7,6 +7,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+throw 'Retired EnvFile/managed-secret tooling. This script is outside the protected framed-stdin path and must not be used as current qualification; see docs/okx-demo-credential-input.md.'
 
 function Read-EnvFile([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Missing env file: $Path" }

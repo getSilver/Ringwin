@@ -10,6 +10,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+throw 'Retired EnvFile/managed-secret tooling. This script is outside the protected framed-stdin path and must not be used as current qualification; see docs/okx-demo-credential-input.md.'
 if (-not $SystemOwnerAuthorized) { throw 'Demo cleanup requires SystemOwner authorization' }
 if ($MarketCleanup -and $ObservedExchangeFloor -gt 0) { throw 'Market cleanup cannot use a limit price floor' }
 $preflight = & (Join-Path $PSScriptRoot 'okx-demo-preflight.ps1') -EnvFile $EnvFile | ConvertFrom-Json

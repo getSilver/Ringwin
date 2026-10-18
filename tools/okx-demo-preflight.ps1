@@ -5,6 +5,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+throw 'Retired EnvFile/managed-secret tooling. This script is outside the protected framed-stdin path and must not be used as current qualification; see docs/okx-demo-credential-input.md.'
 if ([string]::IsNullOrWhiteSpace($EnvFile)) {
     $EnvFile = Join-Path $PSScriptRoot '..\.env.local'
 }

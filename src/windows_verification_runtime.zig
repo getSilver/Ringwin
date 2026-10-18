@@ -2515,6 +2515,19 @@ fn runDemoChain(init: std.process.Init, executable: []const u8, live: bool) !voi
     if (live != write_authorized) return error.DemoAuthorizationMismatch;
     var demo_credentials = try credential_input.read(init.io, std.Io.File.stdin(), if (live) .execution else .observation, credential_input.account);
     defer demo_credentials.deinit();
+    const base_url = init.environ_map.get("RINGWIN_OKX_REST_BASE_URL") orelse return error.MissingEndpointProfile;
+    const entity = init.environ_map.get("RINGWIN_OKX_ENTITY") orelse return error.MissingEndpointProfile;
+    const endpoint = try curl.demoEndpointProfile(base_url, entity);
+    const proxy_z: ?[:0]u8 = if (init.environ_map.get("HTTPS_PROXY") orelse init.environ_map.get("ALL_PROXY")) |proxy| try init.gpa.dupeSentinel(u8, proxy, 0) else null;
+    defer if (proxy_z) |value| init.gpa.free(value);
+    var guard_runtime = try curl.Runtime.init();
+    defer guard_runtime.deinit();
+    var guard_transport = try curl.TransportOwner.initWithEndpoint(&demo_credentials, proxy_z, 1, endpoint);
+    defer guard_transport.deinit();
+    try okx_demo.accountGuard(init, &guard_transport, false);
+    std.debug.print("native_demo_preflight=passed account_identity=matched pending_orders=0 pending_algo_orders=0 open_positions=0 liabilities=0 funded_currencies_only_usdt=true\n", .{});
+    var postflight_attempted = false;
+    errdefer if (!postflight_attempted) okx_demo.accountGuard(init, &guard_transport, false) catch |err| okx_demo.reportGuardFailure(err);
     const pid = windows_api.GetCurrentProcessId();
     var root_buf: [180]u8 = undefined;
     var nonce: [16]u8 = undefined;
@@ -2577,7 +2590,6 @@ fn runDemoChain(init: std.process.Init, executable: []const u8, live: bool) !voi
         connections[index] = try connectPipe(init.io, pipe_names[index]);
         try expectStatus(connections[index], .hello);
         try expectStatus(connections[index], if (index == 0) .owner_ready else .ready);
-        if (index == 1) demo_credentials.deinit();
     }
     try checkTelemetry(connections[4]);
     try sendCommand(connections[2], .export_fence);
@@ -2641,6 +2653,9 @@ fn runDemoChain(init: std.process.Init, executable: []const u8, live: bool) !voi
     }
     for (connections) |pipe| pipe.close();
     started = 0;
+    postflight_attempted = true;
+    try okx_demo.accountGuard(init, &guard_transport, false);
+    std.debug.print("windows_demo_postflight: pending_orders=0 pending_algo_orders=0 open_positions=0 liabilities=0 funded_currencies_only_usdt=true account_identity=matched\n", .{});
     const recovered = try init.gpa.create(durable_store.WindowsFileAdapter);
     defer init.gpa.destroy(recovered);
     recovered.* = try durable_store.WindowsFileAdapter.openWindowsVerification(init.io, engine_dir);

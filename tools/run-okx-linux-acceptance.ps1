@@ -7,11 +7,12 @@ param(
     [string]$EnvFile = '',
     [Parameter(Mandatory=$true)][string]$RestBaseUrl,
     [Parameter(Mandatory=$true)][string]$Entity,
-    [string]$CurlBuildRoot = (Join-Path $PSScriptRoot '..\.scratch\build\curl-linux-openssl-3'),
-    [string]$OpenSSLRoot = (Join-Path $PSScriptRoot '..\.scratch\build\linux-deps\openssl3\root\usr'),
-    [string]$Output = (Join-Path $PSScriptRoot '..\.scratch\build\okx-demo-live-acceptance-linux'),
-    [string]$PolicyFile = (Join-Path $PSScriptRoot '..\.scratch\okx-demo-policy.json'),
-    [string]$StateDirectory = (Join-Path $PSScriptRoot '..\.scratch\okx-demo-authority'),
+    [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-f]{64}$')][string]$UidSha256,
+    [string]$CurlBuildRoot = '',
+    [string]$OpenSSLRoot = '',
+    [string]$Output = '',
+    [string]$PolicyFile = '',
+    [string]$StateDirectory = '',
     [string]$Proxy
 )
 
@@ -23,6 +24,11 @@ if ($Mode -ne 'PrepareOnly' -and -not $SystemOwnerAuthorized) {
 }
 
 $workspace = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if (-not $CurlBuildRoot) { $CurlBuildRoot = Join-Path $workspace '.scratch\build\curl-linux-openssl-3' }
+if (-not $OpenSSLRoot) { $OpenSSLRoot = Join-Path $workspace '.scratch\build\linux-deps\openssl3\root\usr' }
+if (-not $Output) { $Output = Join-Path $workspace '.scratch\build\okx-demo-live-acceptance-linux' }
+if (-not $PolicyFile) { $PolicyFile = Join-Path $workspace '.scratch\okx-demo-policy.json' }
+if (-not $StateDirectory) { $StateDirectory = Join-Path $workspace '.scratch\okx-demo-authority' }
 . (Join-Path $PSScriptRoot 'protected-demo-launch.ps1')
 Assert-ProtectedDemoInput $EnvFile
 $curlRoot = [IO.Path]::GetFullPath($CurlBuildRoot)
@@ -69,9 +75,9 @@ $policyPosix = ConvertTo-WslPath $policyPath
 $statePosix = ConvertTo-WslPath $statePath
 $opensslLibPosix = ConvertTo-WslPath (Join-Path $opensslRoot 'lib\x86_64-linux-gnu')
 $invocation = switch ($Mode) {
-    'DemoLive' { "$outputPosix --demo-live" }
-    'CleanupOnly' { "$outputPosix --cleanup-only" }
-    default { "$outputPosix --prepare-only" }
+    'DemoLive' { "$(ConvertTo-ShellLiteral $outputPosix) --demo-live" }
+    'CleanupOnly' { "$(ConvertTo-ShellLiteral $outputPosix) --cleanup-only" }
+    default { "$(ConvertTo-ShellLiteral $outputPosix) --prepare-only" }
 }
 $proxyLine = if ([string]::IsNullOrWhiteSpace($Proxy)) { '' } else {
     "export HTTPS_PROXY=$(ConvertTo-ShellLiteral $Proxy)`nexport HTTP_PROXY=$(ConvertTo-ShellLiteral $Proxy)"
@@ -81,9 +87,10 @@ set -eu
 $proxyLine
 export RINGWIN_OKX_REST_BASE_URL=$(ConvertTo-ShellLiteral $RestBaseUrl)
 export RINGWIN_OKX_ENTITY=$(ConvertTo-ShellLiteral $Entity)
-export RINGWIN_DEMO_POLICY_PATH=$policyPosix
-export RINGWIN_DEMO_STATE_DIR=$statePosix
-export LD_LIBRARY_PATH=$opensslLibPosix
+export RINGWIN_OKX_UID_SHA256=$(ConvertTo-ShellLiteral $UidSha256)
+export RINGWIN_DEMO_POLICY_PATH=$(ConvertTo-ShellLiteral $policyPosix)
+export RINGWIN_DEMO_STATE_DIR=$(ConvertTo-ShellLiteral $statePosix)
+export LD_LIBRARY_PATH=$(ConvertTo-ShellLiteral $opensslLibPosix)
 exec $invocation
 "@ -replace "`r`n", "`n"
 

@@ -2,7 +2,7 @@
 param(
     [switch]$DemoLive,
     [string]$EnvFile = '',
-    [string]$RestBaseUrl, [string]$Entity, [switch]$SystemOwnerAuthorized,
+    [string]$RestBaseUrl, [string]$Entity, [string]$UidSha256, [switch]$SystemOwnerAuthorized,
     [int]$Parallel = 4
 )
 
@@ -26,7 +26,7 @@ $curlSource = Join-Path $buildRoot 'bootstrap\curl-source'
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     throw 'OKX Demo wave acceptance must run on Windows'
 }
-$zigVersion = (& zig version).Trim()
+$zigVersion = (Invoke-EmptyInputNative (Get-Command zig -ErrorAction Stop).Source @('version') -CaptureOutput).Trim()
 if ($LASTEXITCODE -ne 0 -or $zigVersion -ne $ExpectedZig) {
     throw "Expected Zig $ExpectedZig, got $zigVersion"
 }
@@ -38,14 +38,15 @@ foreach ($optimize in @('Debug', 'ReleaseSafe', 'ReleaseFast')) {
     Invoke-Zig test (Join-Path $workspace 'src\main.zig') "-O$optimize"
     if ($LASTEXITCODE -ne 0) { throw "Core $optimize tests failed" }
 }
-Invoke-Zig run (Join-Path $workspace 'src\main.zig') -OReleaseSafe
+Invoke-Zig build-exe (Join-Path $workspace 'src\main.zig') -OReleaseSafe '--stack' '67108864' "-femit-bin=$(Join-Path $buildRoot 'wave-offline.exe')"
+Invoke-EmptyInputNative (Join-Path $buildRoot 'wave-offline.exe') @()
 if ($LASTEXITCODE -ne 0) { throw 'Deterministic core acceptance failed' }
 
 $curlLibrary = Get-ChildItem -LiteralPath $curlBuild -Recurse -File -Filter 'libcurl.a' -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $curlLibrary) {
-    & (Join-Path $PSScriptRoot 'bootstrap-libcurl.ps1') -BuildRoot $buildRoot -Parallel $Parallel | Out-Host
+    throw 'Provision pinned libcurl dependencies before a framed-input verification; no automatic bootstrap receives this stdin.'
 }
-& (Join-Path $PSScriptRoot 'test-libcurl.ps1') -BuildRoot $curlBuild
+Invoke-EmptyInputNative (Get-Process -Id $PID).Path @('-NoProfile','-File',(Join-Path $PSScriptRoot 'test-libcurl.ps1'),'-BuildRoot',$curlBuild)
 
 $include = (Get-ChildItem -LiteralPath $curlSource -Recurse -Directory -Filter include | Where-Object {
     Test-Path -LiteralPath (Join-Path $_.FullName 'curl\curl.h')
@@ -62,6 +63,7 @@ $liveArgs = @{
     EnvFile = $EnvFile
     RestBaseUrl = $RestBaseUrl
     Entity = $Entity
+    UidSha256 = $UidSha256
     SystemOwnerAuthorized = $SystemOwnerAuthorized
     BuildRoot = $curlBuild
     Optimize = 'ReleaseSafe'

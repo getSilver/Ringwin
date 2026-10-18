@@ -39,6 +39,10 @@ function Read-Schema([string]$name) {
 }
 
 function Invoke-Checked([string]$command, [string[]]$arguments) {
+    if ($command -eq 'zig') {
+        . (Join-Path $PSScriptRoot 'protected-demo-launch.ps1')
+        return ((Invoke-EmptyInputNative (Get-Command zig -ErrorAction Stop).Source $arguments -CaptureOutput) -split "`r?`n")
+    }
     $previous = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
@@ -171,7 +175,7 @@ try {
                 $lines = @(& (Join-Path $PSScriptRoot 'run-windows-demo-readonly.ps1') -DemoLive -SystemOwnerAuthorized -RestBaseUrl $RestBaseUrl -Entity $Entity -UidSha256 $UidSha256 2>&1 | ForEach-Object { "$_" })
             } finally { $ErrorActionPreference = $previous }
             if ($LASTEXITCODE -ne 0) { throw 'Authorized Windows Demo chain failed' }
-            if (-not ($lines -match 'windows_demo_live=passed rest=ok private_ws=ok public_ws=ok roles=5 terminal=ok zero_exposure=ok production_qualification=false') ) { throw 'Demo terminal or zero-exposure evidence missing' }
+            if (-not ($lines -match 'windows_demo_live=passed rest=ok private_ws=ok public_ws=ok roles=5 terminal=ok zero_exposure=ok production_qualification=false') -or -not ($lines -match 'native_demo_preflight=passed account_identity=matched pending_orders=0 pending_algo_orders=0 open_positions=0 liabilities=0 funded_currencies_only_usdt=true') -or -not ($lines -match 'windows_demo_postflight: pending_orders=0 pending_algo_orders=0 open_positions=0 liabilities=0 funded_currencies_only_usdt=true account_identity=matched')) { throw 'Demo terminal or zero-exposure evidence missing' }
             foreach ($line in $lines) {
                 if ($line -match '^windows_demo_order local_id=(\d+) client_id=([A-Z0-9]+) state=filled quantity=(\d+)$') {
                     $report.live_order_ids += [ordered]@{ local_id = $matches[1]; client_id = $matches[2]; state = 'filled'; quantity = $matches[3] }
@@ -207,7 +211,7 @@ try {
             $report.observed_roles = 5
         } else {
             $lines = Invoke-Checked (Join-Path $PSScriptRoot 'run-windows-demo-readonly.ps1') @('-RestBaseUrl',$RestBaseUrl,'-Entity',$Entity,'-UidSha256',$UidSha256)
-            if (-not ($lines -match 'windows_demo_readonly=passed.*roles=5 order_writes=0')) { throw 'Read-only role evidence missing' }
+            if (-not ($lines -match 'windows_demo_readonly=passed.*roles=5 order_writes=0') -or -not ($lines -match 'native_demo_preflight=passed account_identity=matched') -or -not ($lines -match 'windows_demo_postflight: pending_orders=0 pending_algo_orders=0 open_positions=0 liabilities=0 funded_currencies_only_usdt=true account_identity=matched')) { throw 'Read-only role evidence missing' }
             $report.read_only = 'passed'
             $report.observed_roles = 5
         }

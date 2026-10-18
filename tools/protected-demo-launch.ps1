@@ -5,21 +5,27 @@ function Assert-ProtectedDemoInput([string]$EnvFile) {
         if (Test-Path "Env:$name") { throw 'Legacy raw credential environment is rejected; remove it before launching.' }
     }
 }
-function Invoke-EmptyInputNative([string]$Executable, [string[]]$NativeArguments) {
+function Invoke-EmptyInputNative([string]$Executable, [string[]]$NativeArguments, [switch]$CaptureOutput) {
     $info = New-Object Diagnostics.ProcessStartInfo
     $info.FileName = $Executable
     $info.UseShellExecute = $false
     $info.RedirectStandardInput = $true
+    $info.RedirectStandardOutput = [bool]$CaptureOutput
     # Standard Windows argv quoting, including trailing backslashes. Arguments are nonsecret.
     $info.Arguments = (($NativeArguments | ForEach-Object { '"' + ($_ -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"' }) -join ' ')
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $info
+    $previousInputEncoding = [Console]::InputEncoding
     try {
+        # .NET Framework otherwise writes a UTF8 BOM into a fresh redirected pipe.
+        [Console]::InputEncoding = New-Object Text.UTF8Encoding($false)
         if (-not $process.Start()) { throw 'Build process did not start' }
-        $process.StandardInput.Close()
+        $process.StandardInput.BaseStream.Close()
+        $captured = if ($CaptureOutput) { $process.StandardOutput.ReadToEnd() } else { $null }
         $process.WaitForExit()
         if ($process.ExitCode -ne 0) { throw "Build process failed with exit $($process.ExitCode)" }
-    } finally { $process.Dispose() }
+        if ($CaptureOutput) { return $captured }
+    } finally { [Console]::InputEncoding = $previousInputEncoding; $process.Dispose() }
 }
 function Invoke-ProtectedDemoExecutable([string]$Executable, [string[]]$NativeArguments) {
     # Native invocation inherits the original OS handle without reading/re-encoding its bytes.

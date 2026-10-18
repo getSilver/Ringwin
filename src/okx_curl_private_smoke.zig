@@ -2,6 +2,7 @@ const std = @import("std");
 const curl = @import("okx_curl_transport.zig");
 const credential_input = @import("okx_demo_credential_input.zig");
 const private = @import("okx_private_reconciliation.zig");
+const demo = @import("okx_demo_live_acceptance.zig");
 
 pub fn main(init: std.process.Init) !void {
     try credential_input.rejectLegacy(init.environ_map);
@@ -14,6 +15,9 @@ pub fn main(init: std.process.Init) !void {
     defer runtime.deinit();
     var owner = try curl.RestOwner.init(&credentials, null, 1);
     defer owner.deinit();
+    try demo.accountGuard(init, &owner, false);
+    var postflight_attempted = false;
+    errdefer if (!postflight_attempted) demo.accountGuard(init, &owner, false) catch |err| demo.reportGuardFailure(err);
     try owner.prepare(timestamp, .{
         .receive_time_utc_ns = 1,
         .monotonic_time_ns = 1,
@@ -77,6 +81,8 @@ pub fn main(init: std.process.Init) !void {
         if (err != error.WebSocketCancelled) return err;
     }
 
+    postflight_attempted = true;
+    try demo.accountGuard(init, &owner, false);
     var out_buffer: [128]u8 = undefined;
     var out = std.Io.File.stdout().writer(init.io, &out_buffer);
     try out.interface.print("transport=zig-libcurl-multi auth=hmac-sha256 environment=demo private_rest=ok private_wss=ok raw_ingress={d} writes=0\n", .{raw.count});

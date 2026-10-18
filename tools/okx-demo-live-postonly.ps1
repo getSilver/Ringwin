@@ -7,6 +7,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+throw 'Retired EnvFile/managed-secret tooling. This script is outside the protected framed-stdin path and must not be used as current qualification; see docs/okx-demo-credential-input.md.'
 if (-not $DemoLive) { throw 'Explicit -DemoLive is required' }
 if (-not $SystemOwnerAuthorized) { throw 'DemoLive requires -SystemOwnerAuthorized' }
 & (Join-Path $PSScriptRoot 'okx-demo-preflight.ps1') -EnvFile $EnvFile | Out-Null

@@ -90,10 +90,26 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     const executable = args.next() orelse return error.MissingExecutable;
     const mode = args.next() orelse "";
-    const observation = std.mem.eql(u8, mode, "--observation") or std.mem.eql(u8, mode, "--windows-demo-readonly");
+    const observation = std.mem.eql(u8, mode, "--observation") or std.mem.eql(u8, mode, "--windows-demo-readonly") or std.mem.eql(u8, mode, "--prepare-only") or std.mem.indexOf(u8, executable, "private-smoke") != null;
+    if (std.mem.eql(u8, mode, "--no-input")) {
+        inspect(init.io, std.Io.File.stdin()) catch {
+            var bytes: [64]u8 = undefined;
+            var stdout = std.Io.File.stdout().writer(init.io, &bytes);
+            try stdout.interface.writeAll("uncredentialed_role=isolated\n");
+            try stdout.interface.flush();
+            return;
+        };
+        return error.UnexpectedCredentialStream;
+    }
     var owner = try read(init.io, std.Io.File.stdin(), if (observation) .observation else .execution, account);
     defer owner.deinit();
     if (std.mem.eql(u8, mode, "--forward")) {
+        for (0..3) |_| {
+            var isolated = try std.process.spawn(init.io, .{ .argv = &.{ executable, "--no-input" }, .stdin = .ignore, .stdout = .inherit, .stderr = .inherit, .environ_map = init.environ_map });
+            defer isolated.kill(init.io);
+            const term = try isolated.wait(init.io);
+            if (term != .exited or term.exited != 0) return error.UncredentialedRoleFailed;
+        }
         var child = try std.process.spawn(init.io, .{ .argv = &.{executable}, .stdin = .pipe, .stdout = .inherit, .stderr = .inherit, .environ_map = init.environ_map });
         defer child.kill(init.io);
         const input = child.stdin orelse return error.CredentialPipeFailed;

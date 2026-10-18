@@ -7,6 +7,7 @@ const account_projection = @import("account_projection.zig");
 const canonical = @import("canonical_event.zig");
 const auth = @import("okx_rest_auth.zig");
 const credential_input = @import("okx_demo_credential_input.zig");
+const account_guard = @import("okx_demo_account_guard.zig");
 const curl = @import("okx_curl_transport.zig");
 const live = @import("okx_live_chain.zig");
 const market = @import("okx_public_market.zig");
@@ -86,6 +87,9 @@ fn runPrepareOnly(init: std.process.Init) !void {
         endpoint,
     );
     defer owner.deinit();
+    try accountGuard(init, &owner, false);
+    var postflight_attempted = false;
+    errdefer if (!postflight_attempted) accountGuard(init, &owner, false) catch |err| reportGuardFailure(err);
     var raw: RawSink = .{};
     var reconciler: private.Reconciler = .{};
     var chain: live.Chain = .{
@@ -112,6 +116,8 @@ fn runPrepareOnly(init: std.process.Init) !void {
     const limits = try priceLimits(init, &owner);
     const buy_price_tenths = try protectedBuyPrice(prices, limits);
     try requireNotional(buy_quantity_atoms, buy_price_tenths);
+    postflight_attempted = true;
+    try accountGuard(init, &owner, false);
     try progress(init.io, "observation_only");
 }
 
@@ -197,6 +203,9 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
     defer init.gpa.destroy(transport);
     transport.* = try curl.TransportOwner.initWithEndpoint(&credentials, null, source_session, endpoint);
     defer transport.deinit();
+    try accountGuard(init, transport, mode == .cleanup_only);
+    var postflight_attempted = false;
+    errdefer if (!postflight_attempted) accountGuard(init, transport, false) catch |err| reportGuardFailure(err);
     var raw = switch (policy.startup) {
         .virgin => try raw_ingress.DurableSink.init(file_store.interface(), init.io, private_stream),
         .recover => try raw_ingress.DurableSink.recover(file_store.interface(), init.io, private_stream),
@@ -370,6 +379,8 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
         return error.CleanupUnconfirmed;
     }
     cleanup_needed = false;
+    postflight_attempted = true;
+    try accountGuard(init, transport, false);
     try progress(init.io, "authoritative_demo_cleanup");
 }
 
@@ -1504,6 +1515,27 @@ pub fn clock(io: std.Io) !Clock {
 pub fn refresh(owner: *curl.TransportOwner, io: std.Io) !void {
     const stamp = try clock(io);
     try owner.prepare(stamp.timestampSlice(), stamp.times);
+}
+
+/// Read-only account safety gate; no CanonicalEvent translation or trading authority.
+pub fn accountGuard(init: std.process.Init, owner: *curl.TransportOwner, allow_btc: bool) !void {
+    const expected = init.environ_map.get("RINGWIN_OKX_UID_SHA256") orelse return error.MissingDemoAccountIdentity;
+    var source = struct {
+        transport: *curl.TransportOwner,
+        io: std.Io,
+        pub fn get(self: *@This(), path: []const u8) ![]const u8 {
+            try refresh(self.transport, self.io);
+            const result = self.transport.request(.get, path, "");
+            if (result.outcome != .response or result.response == null) return error.DemoGuardResponseUnavailable;
+            return result.response.?;
+        }
+    }{ .transport = owner, .io = init.io };
+    const real_ns = std.math.cast(i64, std.Io.Clock.real.now(init.io).nanoseconds) orelse return error.ClockOutOfRange;
+    try account_guard.run(init.gpa, &source, @divFloor(real_ns, std.time.ns_per_ms), expected, allow_btc);
+}
+
+pub fn reportGuardFailure(err: anyerror) void {
+    std.debug.print("native_demo_postflight=failed reason={s} qualification=false\n", .{@errorName(err)});
 }
 
 const RunMode = enum { prepare_only, demo_live, cleanup_only };
