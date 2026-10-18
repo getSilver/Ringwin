@@ -1,0 +1,536 @@
+{
+  "stage": "ticket07 integrated protected AEAD in real CredentialStore",
+  "integration_tip_merged": "32ab72003b802e51bdf2e418fab030c8fe68dea8",
+  "source_tree_sha256": "b1df784e6655962b952dd071929a7ab0b18f7859b9c19e4296afa91f467bcf51",
+  "source_archive": {
+    "path": ".scratch/credential-security-closure/07-store-source.zip",
+    "bytes": 888273,
+    "sha256": "ce6c759928e4bba93b41719c02d4aee71574de53ca2569366432ee3e0d8036cc"
+  },
+  "compiler": {
+    "path": "D:\\Program Files\\zig\\zig.exe",
+    "bytes": 189566976,
+    "sha256": "c72f6229ba4abc2e885e1886cd0359b87198fac623b9a757b94fa6b1e47510af"
+  },
+  "retained_module_checkpoint_metadata": {
+    "path": ".scratch/credential-security-closure/07-validation.json",
+    "bytes": 4465,
+    "sha256": "b291bf846fb02b864c332540a220dc102bd992013e45960bd942492be3971523"
+  },
+  "retained_ticket03_metadata": {
+    "path": ".scratch/credential-security-closure/03-validation.json",
+    "bytes": 29640,
+    "sha256": "62633d8ddeba30d084d5f1d1817d71a44e0e46cfa7d5136f1d844027ede1b019"
+  },
+  "producer": [
+    {
+      "path": ".scratch/credential-security-closure/capture.py",
+      "bytes": 5208,
+      "sha256": "3c529c5a94057c339173c5a89611bdd1bf8cb9573fd6f2abf1d78108356ea085"
+    },
+    {
+      "path": ".scratch/credential-security-closure/02-linux-bounded.py",
+      "bytes": 477,
+      "sha256": "31b7ef031f451437cc329e76a3db99b3d37b4a673267c78e85f56c263d9f6e3d"
+    },
+    {
+      "path": ".scratch/credential-security-closure/03-entry.zig",
+      "bytes": 273,
+      "sha256": "ffd9bc796821626c49032cdf6b0ca78a8534aecdf23b4746a7b2721e14a75cca"
+    }
+  ],
+  "external_callsite_patch": {
+    "path": "D:\\github\\Ringwin-credential-recovery-20261018\\03-aead-integration.patch",
+    "bytes": 2577,
+    "sha256": "33841e1492698bac4dbfe8a713a67fc676210443c046a41e76b47fce13c1903d"
+  },
+  "normalized_callsite_patch": {
+    "path": ".scratch/credential-security-closure/07-aead-integration.patch",
+    "bytes": 2539,
+    "sha256": "236c5971c9dfaf98b5e95549e5c041ffec218099e230f400379ad2ce4b22e2b5"
+  },
+  "captures": [
+    {
+      "label": "07-store-windows-safe-v1",
+      "command": [
+        "D:/Program Files/zig/zig.exe",
+        "test",
+        "src/credential_store.zig",
+        "-O",
+        "ReleaseSafe",
+        "--cache-dir",
+        ".zig-cache/credential07-store",
+        "-femit-bin=.scratch/credential-security-closure/credential07-store-safe.exe"
+      ],
+      "cwd": "D:\\github\\Ringwin-credential-aead-protection",
+      "started_utc": "2026-10-18T13:06:18.097971+00:00",
+      "finished_utc": "2026-10-18T13:07:04.976351+00:00",
+      "elapsed_ns": 46878964200,
+      "pid": 4968,
+      "exit_code": 0,
+      "child_exit_code": 0,
+      "timed_out": false,
+      "fatal_diagnostic": null,
+      "capture_error": null,
+      "source_changed": false,
+      "source_tree_sha256": "b1df784e6655962b952dd071929a7ab0b18f7859b9c19e4296afa91f467bcf51",
+      "capture_sha256": "3c529c5a94057c339173c5a89611bdd1bf8cb9573fd6f2abf1d78108356ea085",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "ede245acb30c55b4822a9274468d3ad8f1bc95d2879aa8a4d63b95c7d5a7718c",
+      "network_or_production_qualification": false
+    },
+    {
+      "label": "07-store-linux-compile-v1",
+      "command": [
+        "D:/Program Files/zig/zig.exe",
+        "test",
+        "src/credential_store.zig",
+        "-O",
+        "ReleaseSafe",
+        "-target",
+        "x86_64-linux",
+        "--test-no-exec",
+        "--cache-dir",
+        ".zig-cache/credential07-store-linux",
+        "-femit-bin=.scratch/credential-security-closure/credential07-store-linux"
+      ],
+      "cwd": "D:\\github\\Ringwin-credential-aead-protection",
+      "started_utc": "2026-10-18T13:07:08.642553+00:00",
+      "finished_utc": "2026-10-18T13:07:49.596042+00:00",
+      "elapsed_ns": 40953161600,
+      "pid": 10096,
+      "exit_code": 0,
+      "child_exit_code": 0,
+      "timed_out": false,
+      "fatal_diagnostic": null,
+      "capture_error": null,
+      "source_changed": false,
+      "source_tree_sha256": "b1df784e6655962b952dd071929a7ab0b18f7859b9c19e4296afa91f467bcf51",
+      "capture_sha256": "3c529c5a94057c339173c5a89611bdd1bf8cb9573fd6f2abf1d78108356ea085",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "network_or_production_qualification": false
+    },
+    {
+      "label": "07-store-linux-bounded-v1",
+      "command": [
+        "wsl.exe",
+        "-u",
+        "root",
+        "--",
+        "python3",
+        "/mnt/d/github/Ringwin-credential-aead-protection/.scratch/credential-security-closure/02-linux-bounded.py",
+        "/mnt/d/github/Ringwin-credential-aead-protection/.scratch/credential-security-closure/credential07-store-linux"
+      ],
+      "cwd": "D:\\github\\Ringwin-credential-aead-protection",
+      "started_utc": "2026-10-18T13:08:22.074329+00:00",
+      "finished_utc": "2026-10-18T13:08:35.899612+00:00",
+      "elapsed_ns": 13825270900,
+      "pid": 7956,
+      "exit_code": 0,
+      "child_exit_code": 0,
+      "timed_out": false,
+      "fatal_diagnostic": null,
+      "capture_error": null,
+      "source_changed": false,
+      "source_tree_sha256": "b1df784e6655962b952dd071929a7ab0b18f7859b9c19e4296afa91f467bcf51",
+      "capture_sha256": "3c529c5a94057c339173c5a89611bdd1bf8cb9573fd6f2abf1d78108356ea085",
+      "stdout_sha256": "b55ac9a0e2a6560016e16fbcee2f96eca1a9b4584647224c6b483128610eb2a9",
+      "stderr_sha256": "9c687e86a26e13a150911b6d2db30b4360dec63822d1046b5fc2732c4d32de9e",
+      "network_or_production_qualification": false
+    },
+    {
+      "label": "07-store-linux-default-compile-v1",
+      "command": [
+        "D:/Program Files/zig/zig.exe",
+        "test",
+        "src/credential_store.zig",
+        "-O",
+        "ReleaseSafe",
+        "-target",
+        "x86_64-linux",
+        "--test-filter",
+        "public native stage refuses insufficient",
+        "--test-no-exec",
+        "--cache-dir",
+        ".zig-cache/credential07-store-linux",
+        "-femit-bin=.scratch/credential-security-closure/credential07-store-default-linux"
+      ],
+      "cwd": "D:\\github\\Ringwin-credential-aead-protection",
+      "started_utc": "2026-10-18T13:08:32.293310+00:00",
+      "finished_utc": "2026-10-18T13:09:05.434903+00:00",
+      "elapsed_ns": 33141302200,
+      "pid": 9828,
+      "exit_code": 0,
+      "child_exit_code": 0,
+      "timed_out": false,
+      "fatal_diagnostic": null,
+      "capture_error": null,
+      "source_changed": false,
+      "source_tree_sha256": "b1df784e6655962b952dd071929a7ab0b18f7859b9c19e4296afa91f467bcf51",
+      "capture_sha256": "3c529c5a94057c339173c5a89611bdd1bf8cb9573fd6f2abf1d78108356ea085",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "network_or_production_qualification": false
+    },
+    {
+      "label": "07-store-linux-default-v1",
+      "command": [
+        "wsl.exe",
+        "--",
+        "/mnt/d/github/Ringwin-credential-aead-protection/.scratch/credential-security-closure/credential07-store-default-linux"
+      ],
+      "cwd": "D:\\github\\Ringwin-credential-aead-protection",
+      "started_utc": "2026-10-18T13:09:40.725904+00:00",
+      "finished_utc": "2026-10-18T13:09:42.786801+00:00",
+      "elapsed_ns": 2060129800,
+      "pid": 2480,
+      "exit_code": 0,
+      "child_exit_code": 0,
+      "timed_out": false,
+      "fatal_diagnostic": null,
+      "capture_error": null,
+      "source_changed": false,
+      "source_tree_sha256": "b1df784e6655962b952dd071929a7ab0b18f7859b9c19e4296afa91f467bcf51",
+      "capture_sha256": "3c529c5a94057c339173c5a89611bdd1bf8cb9573fd6f2abf1d78108356ea085",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "537422ddf181083b25e9b4fb64d6d3e8723801b1c43f9233974b75de94c5b45c",
+      "network_or_production_qualification": false
+    },
+    {
+      "label": "07-store-entry-windows-compile-v1",
+      "command": [
+        "D:/Program Files/zig/zig.exe",
+        "build-exe",
+        "-O",
+        "ReleaseSafe",
+        "--cache-dir",
+        ".zig-cache/credential07-store",
+        "--dep",
+        "credential_store",
+        "-Mroot=.scratch/credential-security-closure/03-entry.zig",
+        "-Mcredential_store=src/credential_store.zig",
+        "-femit-bin=.scratch/credential-security-closure/credential07-entry.exe"
+      ],
+      "cwd": "D:\\github\\Ringwin-credential-aead-protection",
+      "started_utc": "2026-10-18T13:09:04.266293+00:00",
+      "finished_utc": "2026-10-18T13:09:43.290686+00:00",
+      "elapsed_ns": 39024963700,
+      "pid": 996,
+      "exit_code": 0,
+      "child_exit_code": 0,
+      "timed_out": false,
+      "fatal_diagnostic": null,
+      "capture_error": null,
+      "source_changed": false,
+      "source_tree_sha256": "b1df784e6655962b952dd071929a7ab0b18f7859b9c19e4296afa91f467bcf51",
+      "capture_sha256": "3c529c5a94057c339173c5a89611bdd1bf8cb9573fd6f2abf1d78108356ea085",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "network_or_production_qualification": false
+    },
+    {
+      "label": "07-store-entry-linux-compile-v1",
+      "command": [
+        "D:/Program Files/zig/zig.exe",
+        "build-exe",
+        "-O",
+        "ReleaseSafe",
+        "-target",
+        "x86_64-linux",
+        "--cache-dir",
+        ".zig-cache/credential07-store-linux",
+        "--dep",
+        "credential_store",
+        "-Mroot=.scratch/credential-security-closure/03-entry.zig",
+        "-Mcredential_store=src/credential_store.zig",
+        "-femit-bin=.scratch/credential-security-closure/credential07-entry-linux"
+      ],
+      "cwd": "D:\\github\\Ringwin-credential-aead-protection",
+      "started_utc": "2026-10-18T13:09:04.328886+00:00",
+      "finished_utc": "2026-10-18T13:09:53.202990+00:00",
+      "elapsed_ns": 48873578900,
+      "pid": 5416,
+      "exit_code": 0,
+      "child_exit_code": 0,
+      "timed_out": false,
+      "fatal_diagnostic": null,
+      "capture_error": null,
+      "source_changed": false,
+      "source_tree_sha256": "b1df784e6655962b952dd071929a7ab0b18f7859b9c19e4296afa91f467bcf51",
+      "capture_sha256": "3c529c5a94057c339173c5a89611bdd1bf8cb9573fd6f2abf1d78108356ea085",
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "network_or_production_qualification": false
+    },
+    {
+      "label": "07-store-entry-windows-v1",
+      "command": [
+        ".scratch/credential-security-closure/credential07-entry.exe"
+      ],
+      "cwd": "D:\\github\\Ringwin-credential-aead-protection",
+      "started_utc": "2026-10-18T13:10:40.750343+00:00",
+      "finished_utc": "2026-10-18T13:10:42.567554+00:00",
+      "elapsed_ns": 1816677100,
+      "pid": 1500,
+      "exit_code": 0,
+      "child_exit_code": 0,
+      "timed_out": false,
+      "fatal_diagnostic": null,
+      "capture_error": null,
+      "source_changed": false,
+      "source_tree_sha256": "b1df784e6655962b952dd071929a7ab0b18f7859b9c19e4296afa91f467bcf51",
+      "capture_sha256": "3c529c5a94057c339173c5a89611bdd1bf8cb9573fd6f2abf1d78108356ea085",
+      "stdout_sha256": "4f0871426815acadcf149947757c3b13c49a19164c03522f77b44d88e947bb2c",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "network_or_production_qualification": false
+    },
+    {
+      "label": "07-store-entry-linux-v1",
+      "command": [
+        "wsl.exe",
+        "-u",
+        "root",
+        "--",
+        "python3",
+        "/mnt/d/github/Ringwin-credential-aead-protection/.scratch/credential-security-closure/02-linux-bounded.py",
+        "/mnt/d/github/Ringwin-credential-aead-protection/.scratch/credential-security-closure/credential07-entry-linux"
+      ],
+      "cwd": "D:\\github\\Ringwin-credential-aead-protection",
+      "started_utc": "2026-10-18T13:10:44.622687+00:00",
+      "finished_utc": "2026-10-18T13:10:47.157554+00:00",
+      "elapsed_ns": 2534886300,
+      "pid": 2572,
+      "exit_code": 0,
+      "child_exit_code": 0,
+      "timed_out": false,
+      "fatal_diagnostic": null,
+      "capture_error": null,
+      "source_changed": false,
+      "source_tree_sha256": "b1df784e6655962b952dd071929a7ab0b18f7859b9c19e4296afa91f467bcf51",
+      "capture_sha256": "3c529c5a94057c339173c5a89611bdd1bf8cb9573fd6f2abf1d78108356ea085",
+      "stdout_sha256": "4cba7566bc6539e99c5d246892519ce04582b767354998e7262bf5629a358492",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "network_or_production_qualification": false
+    }
+  ],
+  "references": [
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-windows-safe-v1/result.json",
+      "bytes": 1065,
+      "sha256": "8b5e4dee8fefc8a939d277db04b77e747e5553f127291010d270dd036831ce4d"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-windows-safe-v1/source.json",
+      "bytes": 20806,
+      "sha256": "d8192a1a080e2d9145624099f9631c80a333467628a7820d7a04d2138a32b616"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-windows-safe-v1/stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-windows-safe-v1/stderr.log",
+      "bytes": 3846,
+      "sha256": "ede245acb30c55b4822a9274468d3ad8f1bc95d2879aa8a4d63b95c7d5a7718c"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-linux-compile-v1/result.json",
+      "bytes": 1127,
+      "sha256": "87f9368a728104b3628626eb73a80e6c68a62649c6b4c7361f735f619522df65"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-linux-compile-v1/source.json",
+      "bytes": 20806,
+      "sha256": "d8192a1a080e2d9145624099f9631c80a333467628a7820d7a04d2138a32b616"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-linux-compile-v1/stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-linux-compile-v1/stderr.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-linux-bounded-v1/result.json",
+      "bytes": 1111,
+      "sha256": "e23452aaa4cb7d522e2c19f21a8644ed334d4764b66f815f450e9f37080a234d"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-linux-bounded-v1/source.json",
+      "bytes": 20806,
+      "sha256": "d8192a1a080e2d9145624099f9631c80a333467628a7820d7a04d2138a32b616"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-linux-bounded-v1/stdout.log",
+      "bytes": 38,
+      "sha256": "b55ac9a0e2a6560016e16fbcee2f96eca1a9b4584647224c6b483128610eb2a9"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-linux-bounded-v1/stderr.log",
+      "bytes": 3846,
+      "sha256": "9c687e86a26e13a150911b6d2db30b4360dec63822d1046b5fc2732c4d32de9e"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-linux-default-compile-v1/result.json",
+      "bytes": 1211,
+      "sha256": "7512b643acc67c260a9dd9c803f61dfa87fad21d0bacde8ed3a605fbe4676d4f"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-linux-default-compile-v1/source.json",
+      "bytes": 20806,
+      "sha256": "d8192a1a080e2d9145624099f9631c80a333467628a7820d7a04d2138a32b616"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-linux-default-compile-v1/stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-linux-default-compile-v1/stderr.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-linux-default-v1/result.json",
+      "bytes": 968,
+      "sha256": "c7b05f41c59f2c52e44bb8ca4836c90bad078e9753ba7e8b05bff824084cfc29"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-linux-default-v1/source.json",
+      "bytes": 20806,
+      "sha256": "d8192a1a080e2d9145624099f9631c80a333467628a7820d7a04d2138a32b616"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-linux-default-v1/stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-linux-default-v1/stderr.log",
+      "bytes": 198,
+      "sha256": "537422ddf181083b25e9b4fb64d6d3e8723801b1c43f9233974b75de94c5b45c"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-entry-windows-compile-v1/result.json",
+      "bytes": 1193,
+      "sha256": "47c6ef414a292c7b0b361ba4d4957c7bee4697a4d07a641a93bdbc82e0c7a879"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-entry-windows-compile-v1/source.json",
+      "bytes": 20806,
+      "sha256": "d8192a1a080e2d9145624099f9631c80a333467628a7820d7a04d2138a32b616"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-entry-windows-compile-v1/stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-entry-windows-compile-v1/stderr.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-entry-linux-compile-v1/result.json",
+      "bytes": 1235,
+      "sha256": "45d383ce1994ad591713c3a0b2b62d7123389a2a6c08ef9fc7c007c35f8a8d6e"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-entry-linux-compile-v1/source.json",
+      "bytes": 20806,
+      "sha256": "d8192a1a080e2d9145624099f9631c80a333467628a7820d7a04d2138a32b616"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-entry-linux-compile-v1/stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-entry-linux-compile-v1/stderr.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-entry-windows-v1/result.json",
+      "bytes": 884,
+      "sha256": "44bda8d32c1d57de7b2dbcc280215106429290c8fbf37c7b2c85530546385f4d"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-entry-windows-v1/source.json",
+      "bytes": 20806,
+      "sha256": "d8192a1a080e2d9145624099f9631c80a333467628a7820d7a04d2138a32b616"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-entry-windows-v1/stdout.log",
+      "bytes": 163,
+      "sha256": "4f0871426815acadcf149947757c3b13c49a19164c03522f77b44d88e947bb2c"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-entry-windows-v1/stderr.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-entry-linux-v1/result.json",
+      "bytes": 1108,
+      "sha256": "eb7a708d6126dc87292289b09c023bcf9688e8acecc24c9bcf74988bc956eb46"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-entry-linux-v1/source.json",
+      "bytes": 20806,
+      "sha256": "d8192a1a080e2d9145624099f9631c80a333467628a7820d7a04d2138a32b616"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-entry-linux-v1/stdout.log",
+      "bytes": 174,
+      "sha256": "4cba7566bc6539e99c5d246892519ce04582b767354998e7262bf5629a358492"
+    },
+    {
+      "path": ".scratch/credential-security-closure/runs/07-store-entry-linux-v1/stderr.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": ".scratch/credential-security-closure/credential07-store-safe.exe",
+      "bytes": 1147392,
+      "sha256": "184db53b5c88728e37b9fcaaf07597d9ea6f5b4383bd5fcbfcf440662ce3f124"
+    },
+    {
+      "path": ".scratch/credential-security-closure/credential07-store-linux",
+      "bytes": 4782656,
+      "sha256": "5c18f85cea3f2075575658e81dc5e0dbab2308670c0a1fda6fd6f0bbd32e3811"
+    },
+    {
+      "path": ".scratch/credential-security-closure/credential07-store-default-linux",
+      "bytes": 4140520,
+      "sha256": "309c2aa402b1bc3655351614d0c930576d2896875015e23c4db76905dd6c6ebc"
+    },
+    {
+      "path": ".scratch/credential-security-closure/credential07-entry.exe",
+      "bytes": 999424,
+      "sha256": "f72aa0d107f1c6b5f80e86827caf2928090b7a09712ceedfdee0199f12b78aa4"
+    },
+    {
+      "path": ".scratch/credential-security-closure/credential07-entry-linux",
+      "bytes": 4109504,
+      "sha256": "2bc735377a4938c45c213926b9fb5790329a6fd0fea235f9030368a3131ee2d2"
+    }
+  ],
+  "tests": {
+    "Windows_ReleaseSafe_store": 38,
+    "Linux_ReleaseSafe_store": 38,
+    "Linux_default_memlock_public_refusal": 1,
+    "native_non_test_entry_read_only_ready": 2
+  },
+  "store_callsites_integrated": true,
+  "old_CRD4_v1_fixture_read_and_revoke_both_platforms": true,
+  "new_production_qualification": false,
+  "real_credentials_or_network_used": false
+}

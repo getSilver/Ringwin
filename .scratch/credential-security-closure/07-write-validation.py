@@ -6,6 +6,8 @@ import subprocess
 
 root = Path(__file__).resolve().parents[2]
 module = root/'.scratch/credential-security-closure'
+if (module/'07-validation.json').exists():
+    raise SystemExit('refusing to overwrite sealed ticket07 module evidence')
 
 def identity(path):
     data = path.read_bytes()

@@ -6,7 +6,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const production_contract = @import("production_contract.zig");
 
-const Aead = std.crypto.aead.chacha_poly.XChaCha20Poly1305;
+const Aead = @import("credential_aead.zig");
 const protected = @import("protected_memory.zig");
 const credential_kdf = @import("credential_kdf.zig");
 const Allocator = std.mem.Allocator;
@@ -448,7 +448,7 @@ pub const CredentialStore = struct {
         defer key.deinit();
         try credential_kdf.derive(io, owned_password.bytes(), &salt, (try key.writable())[0..Aead.key_length]);
         var tag: [payload_tag_len]u8 = undefined;
-        Aead.encrypt(bytes[header_len .. header_len + payload_len], &tag, payload.bytes()[0..payload_len], bytes[0..header_len], nonce, key.bytes()[0..Aead.key_length].*);
+        try Aead.encrypt(bytes[header_len .. header_len + payload_len], &tag, payload.bytes()[0..payload_len], bytes[0..header_len], nonce, key.bytes()[0..Aead.key_length]);
         @memcpy(bytes[header_len + payload_len ..][0..payload_tag_len], &tag);
         try writeAtomic(self.dir, io, fileName(metadata.kind), bytes[0 .. header_len + payload_len + payload_tag_len], replace);
     }
@@ -631,7 +631,7 @@ fn decrypt(io: std.Io, source: []const u8, password: []const u8, metadata: *Meta
     try credential_kdf.derive(io, owned_password.bytes(), &salt, (try key.writable())[0..Aead.key_length]);
     const ciphertext = source[header_len .. header_len + payload_len];
     const tag: [payload_tag_len]u8 = source[header_len + payload_len ..][0..payload_tag_len].*;
-    try Aead.decrypt(plaintext[0..payload_len], ciphertext, tag, source[0..header_len], nonce, key.bytes()[0..Aead.key_length].*);
+    try Aead.decrypt(plaintext[0..payload_len], ciphertext, tag, source[0..header_len], nonce, key.bytes()[0..Aead.key_length]);
     return payload_len;
 }
 
@@ -1276,7 +1276,7 @@ test "public admission rejects authenticated oversized decoded fields without pa
     var encoded: [header_len + malformed.len + payload_tag_len]u8 = undefined;
     encodeHeader(&encoded, metadata, salt, nonce, malformed.len);
     var tag: [payload_tag_len]u8 = undefined;
-    Aead.encrypt(encoded[header_len..][0..malformed.len], &tag, &malformed, encoded[0..header_len], nonce, key.bytes()[0..32].*);
+    std.crypto.aead.chacha_poly.XChaCha20Poly1305.encrypt(encoded[header_len..][0..malformed.len], &tag, &malformed, encoded[0..header_len], nonce, key.bytes()[0..32].*);
     @memcpy(encoded[header_len + malformed.len ..], &tag);
     try store.dir.writeFile(std.testing.io, .{ .sub_path = "observation.credential", .data = &encoded });
     var pipe = try lifecyclePasswordPipe(std.testing.io);

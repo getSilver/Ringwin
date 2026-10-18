@@ -1,0 +1,1 @@
+credential_admission: state=ready, mode=read_only, send_capability=false, trading_enabled=false, protection=windows_virtual_lock, linux_admission_equivalent=false
