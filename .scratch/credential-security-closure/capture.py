@@ -23,9 +23,10 @@ def sha(path):
 
 def source_manifest():
     paths = [ROOT / 'build.zig', ROOT / 'build.zig.zon']
-    for directory in ('src', 'tools'):
-        paths.extend(path for path in (ROOT / directory).rglob('*')
-                     if path.is_file() and path.suffix in ('.zig', '.c', '.h', '.ps1', '.sh', '.py'))
+    # Include embedded fixtures and pinned crypto licenses as well as code.
+    paths.extend(path for path in (ROOT / 'src').rglob('*') if path.is_file())
+    paths.extend(path for path in (ROOT / 'tools').rglob('*')
+                 if path.is_file() and path.suffix in ('.zig', '.c', '.h', '.ps1', '.sh', '.py'))
     rows = [{'path': path.relative_to(ROOT).as_posix(), 'sha256': sha(path)}
             for path in sorted(set(paths)) if path.is_file()]
     digest = hashlib.sha256(''.join(row['path'] + '\0' + row['sha256'] + '\n' for row in rows).encode()).hexdigest()
