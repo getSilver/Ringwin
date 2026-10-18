@@ -66,23 +66,27 @@ int ringwin_curl_request(const char *url, const char *method,
                          const char *proxy,
                          unsigned char *response_bytes, size_t response_capacity,
                          size_t *response_len, long *http_status, int *curl_code) {
-  CURL *easy = curl_easy_init();
-  struct curl_slist *list = NULL;
+  /* CURLOPT_HTTPHEADER borrows this ABI-compatible list until easy cleanup.
+   * Data points directly to caller-owned protected headers: no strdup/malloc
+   * secret copy, including the hidden curl_slist_append allocation-failure case.
+   * The caller must retain and erase headers after this synchronous call. */
+  struct curl_slist nodes[16] = {{0}};
+  struct curl_slist *list = header_count ? nodes : NULL;
   struct ringwin_response response = { response_bytes, response_capacity, 0 };
   const void *post_body = body_len ? (const void *)body : (const void *)"";
   CURLcode code;
+  CURL *easy;
   size_t index;
-  if(!easy)
+  if(header_count > 16)
     return 1;
   for(index = 0; index < header_count; ++index) {
-    struct curl_slist *next = curl_slist_append(list, headers[index]);
-    if(!next) {
-      curl_slist_free_all(list);
-      curl_easy_cleanup(easy);
-      return 1;
-    }
-    list = next;
+    if(!headers[index]) return 1;
+    nodes[index].data = (char *)headers[index]; /* libcurl treats header data as const */
+    nodes[index].next = index + 1 < header_count ? &nodes[index + 1] : NULL;
   }
+  easy = curl_easy_init();
+  if(!easy)
+    return 1;
   if(curl_easy_setopt(easy, CURLOPT_URL, url) != CURLE_OK ||
      curl_easy_setopt(easy, CURLOPT_CUSTOMREQUEST, method) != CURLE_OK ||
      curl_easy_setopt(easy, CURLOPT_PROTOCOLS_STR, "https") != CURLE_OK ||
@@ -98,7 +102,6 @@ int ringwin_curl_request(const char *url, const char *method,
      curl_easy_setopt(easy, CURLOPT_CAINFO, "/etc/ssl/certs/ca-certificates.crt") != CURLE_OK ||
 #endif
      curl_easy_setopt(easy, CURLOPT_NOSIGNAL, 1L) != CURLE_OK) {
-    curl_slist_free_all(list);
     curl_easy_cleanup(easy);
     return 1;
   }
@@ -107,7 +110,6 @@ int ringwin_curl_request(const char *url, const char *method,
   *response_len = response.length;
   if(code == CURLE_OK)
     (void)curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, http_status);
-  curl_slist_free_all(list);
   curl_easy_cleanup(easy);
   return code == CURLE_OK ? 0 : 2;
 }
