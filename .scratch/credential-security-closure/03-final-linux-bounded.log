@@ -1,0 +1,34 @@
+uid=1000 memlock=(67108864, 67108864)
+1/32 credential_store.test.credential metadata and secret payload are authenticated...OK
+2/32 credential_store.test.policy, lifecycle, and security failures close admission...OK
+3/32 credential_store.test.Secret exposes only read-only material and reports page protection...OK
+4/32 credential_store.test.public lifecycle refuses restaging revoked identity and preserves revocation...OK
+5/32 credential_store.test.public stage preserves corrupt existing file and unrelated temporary file...OK
+6/32 credential_store.test.public lifecycle independent writer lock prevents stale revoke overwrite...OK
+7/32 credential_store.test.public stage concurrent first registration admits one authenticated identity...OK
+8/32 credential_store.test.public stage rejects existing encrypted identity even with another password...OK
+9/32 credential_store.test.public lifecycle reads and revokes original CRD4 v1 synthetic audit fixture...OK
+10/32 credential_store.test.public stage rejects overlong pipe password and wipes caller buffers...OK
+11/32 credential_store.test.public store rejects unterminated input and malformed material without publication...OK
+12/32 credential_store.test.public Linux store refuses a real TTY before reading and tightens private directory...FAIL (Unexpected)
+13/32 credential_store.test.public admission rejects authenticated oversized decoded fields without panic...OK
+14/32 credential_store.test.public native stage refuses insufficient Linux memlock and wipes inputs...OK
+15/32 credential_kdf.test.credential KDF preserves existing OWASP Argon2id key and erases workspace...OK
+16/32 credential_kdf.test.credential KDF failure erases output and never bypasses protection...OK
+17/32 credential_kdf.test.credential KDF native locks full workspace or refuses insufficient budget...OK
+18/32 credential_kdf.test.credential Argon2id matches RFC 9106 section 5.3 vector...OK
+19/32 credential_kdf.test.credential KDF allocates crypto scratch from protected allocator and releases on OOM...OK
+20/32 production_contract.test.production contract freezes Linux scope and schema...OK
+21/32 production_contract.test.demo and testnet evidence never promotes production authority...OK
+22/32 production_contract.test.Gate.io and Bitget are explicit disabled rows...OK
+23/32 production_contract.test.Windows verification success cannot permit production...OK
+24/32 production_contract.test.required capabilities are not verified evidence...OK
+25/32 protected_memory.test.protected buffer permits sensitive writes only after native protection...OK
+26/32 protected_memory.test.protected buffer release erases full mapping before unlock and free...OK
+27/32 protected_memory.test.protected buffer rejects allocation locking dump and access failures without leaks...OK
+28/32 protected_memory.test.protected buffer cleans up cancellation and failed access transitions...OK
+29/32 canonical_event.test.09 boundary Adapter batches reject full and excess counts without populating output...OK
+30/32 canonical_event.test.decimal conversion is lossless and exact...OK
+31/32 canonical_event.test.opaque venue references are bounded...OK
+32/32 canonical_event.test.bounded decimal text normalizes before accumulation and preserves signed limits...OK
+31 passed; 0 skipped; 1 failed.

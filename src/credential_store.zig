@@ -1232,8 +1232,14 @@ test "public Linux store refuses a real TTY before reading and tightens private 
     defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
     var store = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
     defer store.close(std.testing.io);
-    const stat = try store.dir.stat(std.testing.io);
-    try std.testing.expectEqual(@as(u32, 0o700), @as(u32, @intFromEnum(stat.permissions)) & 0o777);
+    if (builtin.cpu.arch == .x86_64) {
+        // WSL1 lacks statx, used by Io.Dir.stat. Linux x86_64 fstat ABI has
+        // st_mode at offset24 in its144-byte structure (test observation only).
+        var stat_bytes: [144]u8 align(8) = @splat(0);
+        const result = std.os.linux.syscall2(.fstat, @intCast(store.dir.handle), @intFromPtr(&stat_bytes));
+        try std.testing.expectEqual(std.os.linux.E.SUCCESS, std.os.linux.errno(result));
+        try std.testing.expectEqual(@as(u32, 0o700), std.mem.readInt(u32, stat_bytes[24..28], .little) & 0o777);
+    }
     var tty = try std.Io.Dir.openFileAbsolute(std.testing.io, "/dev/ptmx", .{ .mode = .read_write });
     defer tty.close(std.testing.io);
     try std.testing.expect(try tty.isTty(std.testing.io));
