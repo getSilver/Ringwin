@@ -1,0 +1,10 @@
+uid=1000 memlock=(67108864, 67108864)
+1/8 credential_kdf.test.credential KDF preserves existing OWASP Argon2id key and erases workspace...OK
+2/8 credential_kdf.test.credential KDF failure erases output and never bypasses protection...OK
+3/8 credential_kdf.test.credential KDF native locks full workspace or refuses insufficient budget...OK
+4/8 credential_kdf.test.credential Argon2id matches RFC 9106 section 5.3 vector...OK
+5/8 protected_memory.test.protected buffer permits sensitive writes only after native protection...OK
+6/8 protected_memory.test.protected buffer release erases full mapping before unlock and free...OK
+7/8 protected_memory.test.protected buffer rejects allocation locking dump and access failures without leaks...OK
+8/8 protected_memory.test.protected buffer cleans up cancellation and failed access transitions...OK
+All 8 tests passed.

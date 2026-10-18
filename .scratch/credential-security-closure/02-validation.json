@@ -1,0 +1,108 @@
+{
+  "compiler": {
+    "path": "D:\\Program Files\\zig\\zig.exe",
+    "bytes": 189566976,
+    "sha256": "c72f6229ba4abc2e885e1886cd0359b87198fac623b9a757b94fa6b1e47510af"
+  },
+  "compiler_version": "0.17.0-dev.315+5b647b792",
+  "integration_tip_merged": "e7fb53c5c25ebb3c14a0da700d90319f67ab08f4",
+  "sources": [
+    {
+      "path": "src\\protected_memory.zig",
+      "bytes": 13688,
+      "sha256": "d2d51e1ffe52a17633fbe93a211eed53ddf75607fc282e66543c2a56f7def88c"
+    },
+    {
+      "path": "src\\credential_kdf.zig",
+      "bytes": 5229,
+      "sha256": "c01ad6536f4d7ef5bbea4bd1d58be6645f73ddc6bdfe0601bc811cd49a7d2464"
+    },
+    {
+      "path": "src\\credential_crypto\\argon2.zig",
+      "bytes": 17041,
+      "sha256": "e462c4d55be8f3ad86b884a83ce4eb4ea8b3ef0572ce9b14c3cb0d1f9cfb5736"
+    },
+    {
+      "path": "src\\credential_crypto\\blake2b.zig",
+      "bytes": 6835,
+      "sha256": "08bed808ece0c94700567ac698788f9f953deef27cb9adf336f8889e6398e57d"
+    },
+    {
+      "path": "src\\credential_crypto\\LICENSE",
+      "bytes": 1080,
+      "sha256": "5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177"
+    },
+    {
+      "path": "src\\credential_crypto\\README.md",
+      "bytes": 1065,
+      "sha256": "056d92614b91fe54ab1096abb88399365a5733eb25501cbdd124c7f5b7266229"
+    }
+  ],
+  "logs": [
+    {
+      "path": ".scratch\\credential-security-closure\\02-safe.log",
+      "bytes": 832,
+      "sha256": "019db8d4e2259d9fc828557c640dcda6a19ff5e4fe45a5d9578e816b341cc3fe"
+    },
+    {
+      "path": ".scratch\\credential-security-closure\\02-fast.log",
+      "bytes": 832,
+      "sha256": "019db8d4e2259d9fc828557c640dcda6a19ff5e4fe45a5d9578e816b341cc3fe"
+    },
+    {
+      "path": ".scratch\\credential-security-closure\\02-linux-default.log",
+      "bytes": 892,
+      "sha256": "b38deae174c1e60537cb8df7f88a7517e8d9dfc81bc2393480b4e703e11bea6a"
+    },
+    {
+      "path": ".scratch\\credential-security-closure\\02-linux-bounded.log",
+      "bytes": 871,
+      "sha256": "b422aebf60c383992de6bd7d0b0de444957b77c7e128f4e482d8803e99dacc0b"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": ".scratch\\credential-security-closure\\credential02-safe.exe",
+      "bytes": 1033728,
+      "sha256": "a631d7746cde8fad6eab3f0225d932ad803d8140002f34ec8e41d78143884ce2"
+    },
+    {
+      "path": ".scratch\\credential-security-closure\\credential02-fast.exe",
+      "bytes": 971776,
+      "sha256": "fdda0a98e5864481beb6bb612658dc98b7f72344f3db5d330085dfdf397fd96c"
+    },
+    {
+      "path": ".scratch\\credential-security-closure\\credential02-linux",
+      "bytes": 4520808,
+      "sha256": "3667ca863c9f3affcb731c3f36726f40fab17dce9c3f459d145b3451f15e9712"
+    }
+  ],
+  "test_counts": {
+    "Windows_ReleaseSafe": 8,
+    "Windows_ReleaseFast": 8,
+    "Linux_ReleaseFast_default_limit_refusal": 8,
+    "Linux_ReleaseFast_bounded_child_native_success": 8
+  },
+  "test_skips": 0,
+  "synthetic_only": true,
+  "qualification": {
+    "target_dump_swap": false,
+    "compiler_register_temporaries": false,
+    "tls_os_internal": false,
+    "production": false
+  },
+  "recovery": {
+    "original_auxiliary_ref_backup": {
+      "path": "D:\\github\\Ringwin-credential-recovery-20261018\\protected-memory-ORIG_HEAD-before-merge.bin",
+      "bytes": 41,
+      "sha256": "9e1736c43d19118e6ce4302118af337109491ecc52757dfb949bad6a7940b0c2"
+    },
+    "repaired_auxiliary_ref": {
+      "path": "D:\\github\\Ringwin\\.git\\worktrees\\Ringwin-credential-protected-memory\\ORIG_HEAD",
+      "bytes": 41,
+      "sha256": "c8d29e46c3844be298600af5a43149c55b1e42887b1e6bb224a13d2726c9f7be"
+    },
+    "repaired_ref_value": "4d153bdf76aa51cc8a7e035e331045816b73bbe3",
+    "restored_existing_head": "4d153bdf76aa51cc8a7e035e331045816b73bbe3"
+  }
+}
