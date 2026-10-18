@@ -1,8 +1,8 @@
 # 08 保留原生 Demo 账户前后验安全门
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in-progress
+Assignee: Codex native account guard implementer
 Blocked by: [04 保护认证与传输](04-protect-auth-and-transport-copies.md)
 Parent: [凭证安全修复](../map.md)
 
@@ -22,3 +22,5 @@ Parent: [凭证安全修复](../map.md)
 ## Answer
 
 接口与05约定：`run(allocator, source:anytype, local_ms:i64, expected_uid_hash:[]const u8, allow_btc:bool)!void`；`source.get(path)![]const u8` 借用响应只到下次get，guard必须及时解析。仅GET接口不具有订单写能力。05负责实际source的timestamp刷新、调用与生命周期/失败后验。
+
+首个公共正常路径回归：先`NotImplemented`红，随后Windows Debug1/1绿；独立合成source记录16个精确GET路径（含全部7algo和两份balance），响应复用同一buffer以检验借用寿命，每次解析在下次get前释放。UID预期SHA由独立Python hashlib固定literal给出，不拿实现自算结果当断言。证据`runs/08-normal-red-v1`、`runs/08-normal-green-v1`。当前模块正常路径已实现，逐类拒绝与Linux定向待补；05接入仍独立待办。

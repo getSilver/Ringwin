@@ -1,0 +1,10 @@
+1/1 okx_demo_account_guard.test.Demo account guard validates every public GET and both balance views...FAIL (NotImplemented)
+D:\github\Ringwin-credential-native-account-guard\src\okx_demo_account_guard.zig:8:5: 0x7ff6c8d85101 in run__anon_66786 (test_zcu.obj)
+    return error.NotImplemented;
+    ^
+D:\github\Ringwin-credential-native-account-guard\src\okx_demo_account_guard.zig:57:5: 0x7ff6c8d8528f in test.Demo account guard validates every public GET and both balance views (test_zcu.obj)
+    try run(std.testing.allocator, &source, 1700000000000, fixture_uid_hash, false);
+    ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\credential08\o\a480548a347054768898f88225e509af\test.exe --seed=0x61a707c4
