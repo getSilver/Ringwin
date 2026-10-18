@@ -3,7 +3,7 @@
 Type: task
 Status: blocked
 Assignee:
-Blocked by: [05 网关注入](05-bind-gateway-credential-ownership.md)
+Blocked by: [05 网关注入](05-bind-gateway-credential-ownership.md), [07 AEAD 工作区](07-protect-aead-workspaces.md)
 Parent: [凭证安全修复](../map.md)
 
 ## Question
@@ -12,7 +12,7 @@ Parent: [凭证安全修复](../map.md)
 
 ## Acceptance criteria
 
-- [ ] 01–05全部resolved，原问题逐项映射修复/回归入口；失败与剩余未测完整列明。
+- [ ] 01–05与07全部resolved，原问题逐项映射修复/回归入口；失败与剩余未测完整列明。
 - [ ] 最终冻结后完整Debug/ReleaseSafe及受影响应用/独立入口构建通过；Linux按实际环境分列验证/skip，不虚报。
 - [ ] 记录最终源码/工具链/构建参数/命令/产物和原始日志身份；不复用旧源码资格。
 - [ ] 独立Standards/Spec审查，无剩余确认P1/P2；修复review问题后执行所需检查。

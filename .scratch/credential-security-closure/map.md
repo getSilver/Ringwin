@@ -28,17 +28,21 @@ Status: active
 
 1. [封闭凭证生命周期覆盖与并发回退](issues/01-close-lifecycle-overwrite.md) — resolved；已合入集成分支
 2. [建立受保护缓冲与可清零密码学工作区](issues/02-protect-secret-and-crypto-workspaces.md) — resolved；已合入集成分支
-3. [贯通凭证存储的保护内存与安全输入](issues/03-integrate-protected-store-and-input.md) — blocked by 01,02
-4. [清理认证与传输副本](issues/04-protect-auth-and-transport-copies.md) — blocked by 02
+3. [贯通凭证存储的保护内存与安全输入](issues/03-integrate-protected-store-and-input.md) — implementing
+4. [清理认证与传输副本](issues/04-protect-auth-and-transport-copies.md) — implementing
 5. [贯通网关受控凭证注入](issues/05-bind-gateway-credential-ownership.md) — blocked by 03,04
 6. [最终冻结、回归与独立审查](issues/06-seal-offline-security-evidence.md) — blocked by 05
+7. [保护 AEAD 子密钥与显式工作区](issues/07-protect-aead-workspaces.md) — ready；02依赖已完成
 
 ## Frontier
 
 - [03 保护存储与安全输入](issues/03-integrate-protected-store-and-input.md)
 - [04 认证与传输副本](issues/04-protect-auth-and-transport-copies.md)
+- [07 AEAD 工作区](issues/07-protect-aead-workspaces.md)
 
 ## Decisions so far
+
+- 2026-10-18：03/04已在独立工作树实施。补充只读核查发现标准库 AEAD 的显式子密钥/ChaCha 工作区仍属普通局部，新增07在02接口上窄适配；06必须等待07及store调用点贯通。不将02 KDF证据扩大为AEAD证明。
 
 - 2026-10-18：01 已以 `275620a4` 快进合入集成分支，生命周期持久 writer 锁、stage 防覆盖及旧代次拒绝完成；Windows/WSL Linux Debug、ReleaseSafe 各17/17，原审计 CRD4/v1 合成文件兼容各1/1。详见[01 实施证据](issues/01-close-lifecycle-overwrite.md#evidence)与[源码/产物/日志清单](01-validation.json)。
 - 2026-10-18：02 补修 `bbf39841` 已快进合入，保留集成分支已有构建依赖及嵌入fixture身份提交；KDF 显式 scratch 已迁入保护区。Windows ReleaseSafe/ReleaseFast、Linux ReleaseFast 默认限额拒绝与64MiB子进程native成功四组各9/9，详见[02 证据](02-evidence.md)与[v2身份清单](02-v2-validation.json)。首轮8/8及原始日志/清单保留为历史阶段，不能替代补修验收；03/04依赖已完成，当前 Frontier 为03与04，尚未认领。
