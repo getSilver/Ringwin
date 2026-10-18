@@ -3,6 +3,7 @@
 
 const builtin = @import("builtin");
 const std = @import("std");
+const credential_input = @import("okx_demo_credential_input.zig");
 const live_transport_enabled = if (@hasDecl(@import("root"), "windows_demo_transport_enabled"))
     @import("root").windows_demo_transport_enabled
 else
@@ -1312,6 +1313,7 @@ const ExecutionOwners = struct {
     raw: raw_ingress.DurableSink,
     transport: OfflineTransport,
     live_mode: bool,
+    credential_owner: if (live_transport_enabled) ?okx_auth.Credentials else void,
     curl_runtime: if (live_transport_enabled) ?curl.Runtime else void,
     curl_transport: if (live_transport_enabled) ?*curl.TransportOwner else void,
     proxy_z: if (live_transport_enabled) ?[:0]u8 else void,
@@ -1366,10 +1368,12 @@ const ExecutionOwners = struct {
         self.fence_path = null;
         self.live_mode = live_mode;
         if (comptime live_transport_enabled) {
+            self.credential_owner = null;
             self.curl_runtime = null;
             self.curl_transport = null;
             self.proxy_z = null;
         }
+        errdefer self.releaseLive(init);
         @memset(std.mem.asBytes(&self.store), 0);
         try self.store.initWindowsVerification(init.io, store_dir);
         errdefer self.store.close(init.io);
@@ -1394,9 +1398,9 @@ const ExecutionOwners = struct {
         var adapter_transport = self.transport.interface();
         if (comptime live_transport_enabled) {
             if (live_mode) {
-                const key = init.environ_map.get("RINGWIN_OKX_KEY") orelse return error.MissingCredential;
-                const secret = init.environ_map.get("RINGWIN_OKX_SECRET") orelse return error.MissingCredential;
-                const passphrase = init.environ_map.get("RINGWIN_OKX_PASSPHRASE") orelse return error.MissingCredential;
+                try credential_input.rejectLegacy(init.environ_map);
+                const write_authorized = std.mem.eql(u8, init.environ_map.get("RINGWIN_DEMO_LIVE_AUTHORIZED") orelse "", "1");
+                self.credential_owner = try credential_input.read(init.io, std.Io.File.stdin(), if (write_authorized) .execution else .observation, credential_input.account);
                 const base_url = init.environ_map.get("RINGWIN_OKX_REST_BASE_URL") orelse return error.MissingEndpointProfile;
                 const entity = init.environ_map.get("RINGWIN_OKX_ENTITY") orelse return error.MissingEndpointProfile;
                 var endpoint = try curl.demoEndpointProfile(base_url, entity);
@@ -1406,18 +1410,15 @@ const ExecutionOwners = struct {
                     self.proxy_z = try init.gpa.allocSentinel(u8, proxy.len, 0);
                     @memcpy(self.proxy_z.?, proxy);
                 }
-                errdefer if (self.proxy_z) |value| init.gpa.free(value);
                 self.curl_runtime = try curl.Runtime.init();
-                errdefer self.curl_runtime.?.deinit();
                 const owner = try init.gpa.create(curl.TransportOwner);
                 errdefer init.gpa.destroy(owner);
                 owner.* = try curl.TransportOwner.initWithEndpoint(
-                    try okx_auth.Credentials.init(key, secret, passphrase),
+                    &self.credential_owner.?,
                     self.proxy_z,
                     1,
                     endpoint,
                 );
-                errdefer owner.deinit();
                 self.curl_transport = owner;
                 adapter_transport = owner.transport();
             }
@@ -1445,6 +1446,11 @@ const ExecutionOwners = struct {
     fn deinit(self: *ExecutionOwners, init: std.process.Init) void {
         init.gpa.free(self.dispatch_snapshot_storage);
         if (self.fence_path) |path| init.gpa.free(path);
+        self.releaseLive(init);
+        self.store.close(init.io);
+    }
+
+    fn releaseLive(self: *ExecutionOwners, init: std.process.Init) void {
         if (comptime live_transport_enabled) {
             if (self.curl_transport) |owner| {
                 owner.deinit();
@@ -1452,8 +1458,8 @@ const ExecutionOwners = struct {
             }
             if (self.curl_runtime) |*runtime| runtime.deinit();
             if (self.proxy_z) |value| init.gpa.free(value);
+            if (self.credential_owner) |*owner| owner.deinit();
         }
-        self.store.close(init.io);
     }
 
     fn preparePrivateRecovery(self: *ExecutionOwners, init: std.process.Init, snapshot: SnapshotFrame) !void {
@@ -2387,9 +2393,13 @@ fn spawnDemoExecutionRole(
     const generation_arg = try std.fmt.bufPrint(&generation_text, "{d}", .{generation});
     var controller_text: [24]u8 = undefined;
     const controller_arg = try std.fmt.bufPrint(&controller_text, "{d}", .{windows_api.GetCurrentProcessId()});
+    var child_env = try init.environ_map.clone(init.gpa);
+    defer child_env.deinit();
+    try credential_input.rejectLegacy(&child_env);
     return std.process.spawn(init.io, .{
         .argv = &.{ executable, "--verify-role", "execution_gateway", "--pipe", pipe_name, "--generation", generation_arg, "--generation-file", generation_file, "--controller-pid", controller_arg, "--store-dir", store_dir, "--demo-transport" },
-        .stdin = .ignore,
+        .stdin = .pipe,
+        .environ_map = &child_env,
         .stdout = .inherit,
         .stderr = .inherit,
     });
@@ -2500,9 +2510,16 @@ pub fn runDemoLive(init: std.process.Init, executable: []const u8) !void {
 fn runDemoChain(init: std.process.Init, executable: []const u8, live: bool) !void {
     if (comptime !live_transport_enabled) return error.DemoTransportBuildRequired;
     if (comptime builtin.os.tag != .windows) return error.WindowsVerificationRoleRequired;
+    try credential_input.rejectLegacy(init.environ_map);
+    const write_authorized = std.mem.eql(u8, init.environ_map.get("RINGWIN_DEMO_LIVE_AUTHORIZED") orelse "", "1");
+    if (live != write_authorized) return error.DemoAuthorizationMismatch;
+    var demo_credentials = try credential_input.read(init.io, std.Io.File.stdin(), if (live) .execution else .observation, credential_input.account);
+    defer demo_credentials.deinit();
     const pid = windows_api.GetCurrentProcessId();
     var root_buf: [180]u8 = undefined;
-    const root = try std.fmt.bufPrint(&root_buf, "C:\\Windows\\Temp\\ringwin-demo-{s}-{d}", .{ if (live) "live" else "readonly", pid });
+    var nonce: [16]u8 = undefined;
+    init.io.random(&nonce);
+    const root = try std.fmt.bufPrint(&root_buf, "C:\\Windows\\Temp\\ringwin-demo-{s}-{s}", .{ if (live) "live" else "readonly", std.fmt.bytesToHex(nonce, .lower) });
     if (!std.mem.startsWith(u8, root, "C:\\Windows\\Temp\\ringwin-demo-")) return error.InvalidVerificationPath;
     try std.Io.Dir.createDirAbsolute(init.io, root, .default_dir);
     defer if (!live) std.Io.Dir.cwd().deleteTree(init.io, root) catch {};
@@ -2551,9 +2568,16 @@ fn runDemoChain(init: std.process.Init, executable: []const u8, live: bool) !voi
             stdin_file.close(init.io);
             children[index].stdin = null;
         }
+        if (index == 1) {
+            const credential_pipe = children[index].stdin orelse return error.CredentialPipeFailed;
+            try credential_input.forward(init.io, credential_pipe, &demo_credentials, if (live) .execution else .observation, credential_input.account);
+            credential_pipe.close(init.io);
+            children[index].stdin = null;
+        }
         connections[index] = try connectPipe(init.io, pipe_names[index]);
         try expectStatus(connections[index], .hello);
         try expectStatus(connections[index], if (index == 0) .owner_ready else .ready);
+        if (index == 1) demo_credentials.deinit();
     }
     try checkTelemetry(connections[4]);
     try sendCommand(connections[2], .export_fence);
@@ -2865,7 +2889,9 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
 
     const pid = windows_api.GetCurrentProcessId();
     var root_buf: [160]u8 = undefined;
-    const root = try std.fmt.bufPrint(&root_buf, "C:\\Windows\\Temp\\ringwin-verify-{d}", .{pid});
+    var nonce: [16]u8 = undefined;
+    init.io.random(&nonce);
+    const root = try std.fmt.bufPrint(&root_buf, "C:\\Windows\\Temp\\ringwin-verify-{s}", .{std.fmt.bytesToHex(nonce, .lower)});
     std.Io.Dir.cwd().deleteTree(init.io, root) catch {};
     try std.Io.Dir.createDirAbsolute(init.io, root, .default_dir);
     defer std.Io.Dir.cwd().deleteTree(init.io, root) catch {};

@@ -1,21 +1,20 @@
 [CmdletBinding()]
 param(
     [switch]$DemoLive,
-    [string]$EnvFile = (Join-Path $PSScriptRoot '..\.env.local'),
+    [string]$EnvFile = '',
+    [string]$RestBaseUrl, [string]$Entity, [switch]$SystemOwnerAuthorized,
     [int]$Parallel = 4
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'protected-demo-launch.ps1')
+Assert-ProtectedDemoInput $EnvFile
+if ($DemoLive) { throw 'Use the Linux authoritative wrapper with fresh explicit authorization for Demo writes' }
 
 function Invoke-Zig {
-    $previousErrorActionPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        & zig @args
-    } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
+    Invoke-EmptyInputNative (Get-Command zig -ErrorAction Stop).Source @args
+    $global:LASTEXITCODE = 0
 }
 
 $ExpectedZig = '0.17.0-dev.315+5b647b792'
@@ -61,6 +60,9 @@ if ($LASTEXITCODE -ne 0) { throw 'Linux OKX Adapter compile check failed' }
 
 $liveArgs = @{
     EnvFile = $EnvFile
+    RestBaseUrl = $RestBaseUrl
+    Entity = $Entity
+    SystemOwnerAuthorized = $SystemOwnerAuthorized
     BuildRoot = $curlBuild
     Optimize = 'ReleaseSafe'
 }

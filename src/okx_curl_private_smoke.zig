@@ -1,18 +1,18 @@
 const std = @import("std");
 const curl = @import("okx_curl_transport.zig");
-const auth = @import("okx_rest_auth.zig");
+const credential_input = @import("okx_demo_credential_input.zig");
 const private = @import("okx_private_reconciliation.zig");
 
 pub fn main(init: std.process.Init) !void {
-    const key = init.environ_map.get("RINGWIN_OKX_KEY") orelse return error.MissingCredential;
-    const secret = init.environ_map.get("RINGWIN_OKX_SECRET") orelse return error.MissingCredential;
-    const passphrase = init.environ_map.get("RINGWIN_OKX_PASSPHRASE") orelse return error.MissingCredential;
+    try credential_input.rejectLegacy(init.environ_map);
+    var credentials = try credential_input.read(init.io, std.Io.File.stdin(), .observation, credential_input.account);
+    defer credentials.deinit();
     const timestamp = init.environ_map.get("RINGWIN_OKX_TIMESTAMP") orelse return error.MissingTimestamp;
     const timestamp_seconds = init.environ_map.get("RINGWIN_OKX_TIMESTAMP_SECONDS") orelse return error.MissingTimestamp;
 
     var runtime = try curl.Runtime.init();
     defer runtime.deinit();
-    var owner = try curl.RestOwner.init(try auth.Credentials.init(key, secret, passphrase), null, 1);
+    var owner = try curl.RestOwner.init(&credentials, null, 1);
     defer owner.deinit();
     try owner.prepare(timestamp, .{
         .receive_time_utc_ns = 1,

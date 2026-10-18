@@ -1,0 +1,4 @@
+1/1 okx_demo_credential_input.test.Demo restricted credential frame imports directly into protected owner...FAIL (NotImplemented)
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\credential05\o\2562fb11db29378e7ccbdc0c622a62a8\test.exe --seed=0xf94cdd50

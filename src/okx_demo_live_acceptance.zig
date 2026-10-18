@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 const account_projection = @import("account_projection.zig");
 const canonical = @import("canonical_event.zig");
 const auth = @import("okx_rest_auth.zig");
+const credential_input = @import("okx_demo_credential_input.zig");
 const curl = @import("okx_curl_transport.zig");
 const live = @import("okx_live_chain.zig");
 const market = @import("okx_public_market.zig");
@@ -60,9 +61,9 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn runPrepareOnly(init: std.process.Init) !void {
-    const key = init.environ_map.get("RINGWIN_OKX_KEY") orelse return error.MissingCredential;
-    const secret = init.environ_map.get("RINGWIN_OKX_SECRET") orelse return error.MissingCredential;
-    const passphrase = init.environ_map.get("RINGWIN_OKX_PASSPHRASE") orelse return error.MissingCredential;
+    try credential_input.rejectLegacy(init.environ_map);
+    var credentials = try credential_input.read(init.io, std.Io.File.stdin(), .observation, credential_input.account);
+    defer credentials.deinit();
     const rest_base_url = init.environ_map.get("RINGWIN_OKX_REST_BASE_URL") orelse return error.MissingEndpointProfile;
     const entity = init.environ_map.get("RINGWIN_OKX_ENTITY") orelse return error.MissingEndpointProfile;
     var endpoint = try curl.demoEndpointProfile(rest_base_url, entity);
@@ -79,7 +80,7 @@ fn runPrepareOnly(init: std.process.Init) !void {
     var runtime = try curl.Runtime.init();
     defer runtime.deinit();
     var owner = try curl.TransportOwner.initWithEndpoint(
-        try auth.Credentials.init(key, secret, passphrase),
+        &credentials,
         proxy_z,
         source_session,
         endpoint,
@@ -182,9 +183,9 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
         .virgin => try gateway.bootstrapDurableDispatch(file_store.interface(), init.io, dispatch_stream),
         .recover => try gateway.attachRecoveredDurableDispatch(file_store.interface(), init.io, dispatch_stream),
     }
-    const key = init.environ_map.get("RINGWIN_OKX_KEY") orelse return error.MissingCredential;
-    const secret = init.environ_map.get("RINGWIN_OKX_SECRET") orelse return error.MissingCredential;
-    const passphrase = init.environ_map.get("RINGWIN_OKX_PASSPHRASE") orelse return error.MissingCredential;
+    try credential_input.rejectLegacy(init.environ_map);
+    var credentials = try credential_input.read(init.io, std.Io.File.stdin(), .execution, credential_input.account);
+    defer credentials.deinit();
     const base_url = init.environ_map.get("RINGWIN_OKX_REST_BASE_URL") orelse return error.MissingEndpointProfile;
     const entity = init.environ_map.get("RINGWIN_OKX_ENTITY") orelse return error.MissingEndpointProfile;
     var endpoint = try curl.demoEndpointProfile(base_url, entity);
@@ -194,7 +195,7 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
     defer runtime.deinit();
     const transport = try init.gpa.create(curl.TransportOwner);
     defer init.gpa.destroy(transport);
-    transport.* = try curl.TransportOwner.initWithEndpoint(try auth.Credentials.init(key, secret, passphrase), null, source_session, endpoint);
+    transport.* = try curl.TransportOwner.initWithEndpoint(&credentials, null, source_session, endpoint);
     defer transport.deinit();
     var raw = switch (policy.startup) {
         .virgin => try raw_ingress.DurableSink.init(file_store.interface(), init.io, private_stream),
@@ -302,7 +303,7 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
         try policy.initialize(decision_owner, mark, &bootstrap_guard, now, source_session);
     }
     var public_raw: RawSink = .{};
-    try establishPublicMarket(init, key, secret, passphrase, endpoint, &public_raw, decision_owner);
+    try establishPublicMarket(init, &credentials, endpoint, &public_raw, decision_owner);
     const required_trace_capacity = if (mode == .demo_live) demo_round_trip_trace_reserve else demo_order_trace_reserve;
     if (!demoTraceCapacityAvailable(
         decision_owner.shard.trace.len,
@@ -372,12 +373,12 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
     try progress(init.io, "authoritative_demo_cleanup");
 }
 
-fn establishPublicMarket(init: std.process.Init, key: []const u8, secret: []const u8, passphrase: []const u8, endpoint: curl.DemoEndpointProfile, raw: *RawSink, owner: *demo_authority.Owner) !void {
+fn establishPublicMarket(init: std.process.Init, credentials: *const auth.Credentials, endpoint: curl.DemoEndpointProfile, raw: *RawSink, owner: *demo_authority.Owner) !void {
     var public_endpoint = endpoint;
     public_endpoint.private_ws_url = curl.demoPublicWsUrl();
     const transport = try init.gpa.create(curl.TransportOwner);
     defer init.gpa.destroy(transport);
-    transport.* = try curl.TransportOwner.initWithEndpoint(try auth.Credentials.init(key, secret, passphrase), null, source_session + 1, public_endpoint);
+    transport.* = try curl.TransportOwner.initWithEndpoint(credentials, null, source_session + 1, public_endpoint);
     defer transport.deinit();
     const feed = try init.gpa.create(okx_market_feed.OkxMarketFeed);
     defer init.gpa.destroy(feed);

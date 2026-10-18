@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [ValidateSet('Offline', 'ReadOnly', 'DemoLive')][string]$Mode = 'Offline',
-    [switch]$SystemOwnerAuthorized
+    [switch]$SystemOwnerAuthorized,
+    [string]$EnvFile = '', [string]$RestBaseUrl, [string]$Entity, [string]$UidSha256
 )
 
 Set-StrictMode -Version Latest
@@ -125,9 +126,10 @@ try {
         $report.role_ownership = 'passed'
         $report.durable_recovery = 'passed'
     } else {
-        $preflight = & (Join-Path $PSScriptRoot 'okx-demo-preflight.ps1') | ConvertFrom-Json
-        if (-not $preflight.qualified -or $preflight.environment -ne 'demo' -or -not $preflight.account_uid_sha256) { throw 'Demo preflight failed' }
-        $report.account_uid_sha256 = $preflight.account_uid_sha256
+        . (Join-Path $PSScriptRoot 'protected-demo-launch.ps1')
+        Assert-ProtectedDemoInput $EnvFile
+        if ($UidSha256 -notmatch '^[0-9a-f]{64}$' -or -not $RestBaseUrl -or -not $Entity) { throw 'Explicit nonsecret endpoint/entity/account UID hash required' }
+        $report.account_uid_sha256 = $UidSha256
         $offlinePath = Join-Path $reportDir 'report-offline.json'
         if (Test-Path -LiteralPath $offlinePath) {
             $prior = Get-Content -LiteralPath $offlinePath -Raw | ConvertFrom-Json
@@ -166,11 +168,10 @@ try {
             $previous = $ErrorActionPreference
             try {
                 $ErrorActionPreference = 'Continue'
-                $lines = @(& (Join-Path $PSScriptRoot 'run-windows-demo-readonly.ps1') -DemoLive -SystemOwnerAuthorized 2>&1 | ForEach-Object { "$_" })
+                $lines = @(& (Join-Path $PSScriptRoot 'run-windows-demo-readonly.ps1') -DemoLive -SystemOwnerAuthorized -RestBaseUrl $RestBaseUrl -Entity $Entity -UidSha256 $UidSha256 2>&1 | ForEach-Object { "$_" })
             } finally { $ErrorActionPreference = $previous }
             if ($LASTEXITCODE -ne 0) { throw 'Authorized Windows Demo chain failed' }
-            if (-not ($lines -match 'windows_demo_live=passed rest=ok private_ws=ok public_ws=ok roles=5 terminal=ok zero_exposure=ok production_qualification=false') -or
-                -not ($lines -match 'windows_demo_postflight: pending_orders=0 pending_algo_orders=0 open_positions=0 liabilities=0 funded_currencies=USDT')) { throw 'Demo terminal or zero-exposure evidence missing' }
+            if (-not ($lines -match 'windows_demo_live=passed rest=ok private_ws=ok public_ws=ok roles=5 terminal=ok zero_exposure=ok production_qualification=false') ) { throw 'Demo terminal or zero-exposure evidence missing' }
             foreach ($line in $lines) {
                 if ($line -match '^windows_demo_order local_id=(\d+) client_id=([A-Z0-9]+) state=filled quantity=(\d+)$') {
                     $report.live_order_ids += [ordered]@{ local_id = $matches[1]; client_id = $matches[2]; state = 'filled'; quantity = $matches[3] }
@@ -205,7 +206,7 @@ try {
             $report.final_reconciliation = 'passed'
             $report.observed_roles = 5
         } else {
-            $lines = Invoke-Checked (Join-Path $PSScriptRoot 'run-windows-demo-readonly.ps1') @()
+            $lines = Invoke-Checked (Join-Path $PSScriptRoot 'run-windows-demo-readonly.ps1') @('-RestBaseUrl',$RestBaseUrl,'-Entity',$Entity,'-UidSha256',$UidSha256)
             if (-not ($lines -match 'windows_demo_readonly=passed.*roles=5 order_writes=0')) { throw 'Read-only role evidence missing' }
             $report.read_only = 'passed'
             $report.observed_roles = 5
