@@ -1,7 +1,7 @@
 # 05 贯通网关受控凭证注入
 
 Type: task
-Status: blocked
+Status: ready-for-agent
 Assignee:
 Blocked by: [03 安全store与输入](03-integrate-protected-store-and-input.md), [04 认证与传输](04-protect-auth-and-transport-copies.md)
 Parent: [凭证安全修复](../map.md)
