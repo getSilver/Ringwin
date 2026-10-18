@@ -1,0 +1,113 @@
+{
+  "compiler": {
+    "path": "D:\\Program Files\\zig\\zig.exe",
+    "bytes": 189566976,
+    "sha256": "c72f6229ba4abc2e885e1886cd0359b87198fac623b9a757b94fa6b1e47510af"
+  },
+  "compiler_version": "0.17.0-dev.315+5b647b792",
+  "integration_tip_merged": "f1f5305362710517da8411f10a94ec3a3485206d",
+  "supersedes_checkpoint": "55e06e2f03680e0e20334513b835fd8c947f0662",
+  "retained_v1_metadata": {
+    "path": ".scratch\\credential-security-closure\\02-validation.json",
+    "bytes": 3747,
+    "sha256": "0fd8e86a836eb92a6eadcfc8ef07e5b6398feae470df396c80362552c0e5c97f"
+  },
+  "sources": [
+    {
+      "path": "src\\protected_memory.zig",
+      "bytes": 13688,
+      "sha256": "d2d51e1ffe52a17633fbe93a211eed53ddf75607fc282e66543c2a56f7def88c"
+    },
+    {
+      "path": "src\\credential_kdf.zig",
+      "bytes": 6117,
+      "sha256": "dde7cda1a49c4ec600a51e49480b2cd6325a59fbcd2dd817d164d2bef9d8e545"
+    },
+    {
+      "path": "src\\credential_crypto\\argon2.zig",
+      "bytes": 17127,
+      "sha256": "3ea0e33aedb8b1b6c59522c88dbda1874b314e209439643d8415b061d68604c4"
+    },
+    {
+      "path": "src\\credential_crypto\\blake2b.zig",
+      "bytes": 6851,
+      "sha256": "07d86592c8974f41d7c445e042d39a10846643b6d35aa93c2faaf19cdd53d7b9"
+    },
+    {
+      "path": "src\\credential_crypto\\LICENSE",
+      "bytes": 1080,
+      "sha256": "5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177"
+    },
+    {
+      "path": "src\\credential_crypto\\README.md",
+      "bytes": 1543,
+      "sha256": "7a7579a04cd29b67457affef7acd42804c2d644cf330ecf9b737f10249e3f1d6"
+    }
+  ],
+  "logs": [
+    {
+      "path": ".scratch\\credential-security-closure\\02-v2-safe.log",
+      "bytes": 947,
+      "sha256": "b2305aaa2bac4c4298ab4658ba59896d3d970f902ca17496e808fc36fa95e335"
+    },
+    {
+      "path": ".scratch\\credential-security-closure\\02-v2-fast.log",
+      "bytes": 947,
+      "sha256": "b2305aaa2bac4c4298ab4658ba59896d3d970f902ca17496e808fc36fa95e335"
+    },
+    {
+      "path": ".scratch\\credential-security-closure\\02-v2-linux-default.log",
+      "bytes": 1007,
+      "sha256": "d86e20fa5870f31dfcfdb790575269ffac322fceafd1aff786e7cd241d4125ab"
+    },
+    {
+      "path": ".scratch\\credential-security-closure\\02-v2-linux-bounded.log",
+      "bytes": 986,
+      "sha256": "d54c76680e7d9410c51ad16d51dac535ae765a6d7d58626a81d4b17ad36d031e"
+    }
+  ],
+  "red_green": [
+    {
+      "path": ".scratch\\credential-security-closure\\02-scratch-red.log",
+      "bytes": 356,
+      "sha256": "0009ce7cc89421f00ac8a6df933bf8d95021a1c44def71f4965b89b9158d619e"
+    },
+    {
+      "path": ".scratch\\credential-security-closure\\02-scratch-green.log",
+      "bytes": 136,
+      "sha256": "7e7524cd2cdd66c76f776172e3128870223ad9738567a3ec8e6097e577afacb6"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": ".scratch\\credential-security-closure\\credential02-v2-safe.exe",
+      "bytes": 1030144,
+      "sha256": "3db524a015046e83da5fae7f61868ed9c27aa37db2b998f8c2cbfba3acccbf00"
+    },
+    {
+      "path": ".scratch\\credential-security-closure\\credential02-v2-fast.exe",
+      "bytes": 968192,
+      "sha256": "7c6e73039d4e2e46c27b0efbafcb55ba876c92f7409906d66bb166f9368a4fbf"
+    },
+    {
+      "path": ".scratch\\credential-security-closure\\credential02-v2-linux",
+      "bytes": 4522872,
+      "sha256": "e8de28558b468b0ab6d25962cb4e9b0ff5ffd1ad79b715ecf03b5f5e8decb6ba"
+    }
+  ],
+  "test_counts": {
+    "Windows_ReleaseSafe": 9,
+    "Windows_ReleaseFast": 9,
+    "Linux_ReleaseFast_default_limit_refusal": 9,
+    "Linux_ReleaseFast_bounded_child_native_success": 9
+  },
+  "scratch_storage": "Scratch allocated in protected fixed-buffer region, includes contexts and named secret arrays; serialized lanes share one owner",
+  "test_skips": 0,
+  "synthetic_only": true,
+  "qualification": {
+    "target_dump_swap": false,
+    "compiler_register_temporaries": false,
+    "tls_os_internal": false,
+    "production": false
+  }
+}

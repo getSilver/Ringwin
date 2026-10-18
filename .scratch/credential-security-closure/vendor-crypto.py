@@ -1,6 +1,8 @@
 """One-shot provenance-preserving extraction from the pinned Zig distribution."""
 from pathlib import Path
 import hashlib
+import runpy
+import subprocess
 
 source = Path('D:/Program Files/zig')
 target = Path('src/credential_crypto')
@@ -39,5 +41,8 @@ for declaration, wipe in [
 lines = ['# Pinned crypto adaptation', '', 'Upstream Zig commit `5b647b792`, compiler `0.17.0-dev.315+5b647b792`.', '', 'Original file SHA256:']
 for name in ['lib/std/crypto/argon2.zig', 'lib/std/crypto/blake2.zig', 'LICENSE']:
     lines.append(f'- `{name}`: `{hashlib.sha256((source/name).read_bytes()).hexdigest()}`')
-lines.extend(['', 'Only the raw Argon2 KDF and Blake2b implementation are retained. No algorithm, parameter, lane scheduling, or digest changes. Added secureZero defers for owned state, intermediate blocks, Blake2b compression words and contexts; Argon2 block allocation is supplied by a protected fixed-buffer allocator in credential_kdf. PHC string encoding and unrelated algorithms/tests are excluded. MIT license is retained next to these sources.', '', 'These wipes cover explicitly owned program storage, not compiler/register temporaries, TLS or OS internals. Hash constants and index scalars are not secret-owning buffers. Preserve this narrow diff when updating the pinned compiler.'])
+lines.extend(['', 'Only the raw Argon2 KDF and Blake2b implementation are retained. Algorithms, parameters, sync-point ordering, reference indices and digests are unchanged. Lanes execute serially within each slice, preserving barriers while allowing one protected Scratch owner (production OWASP parameters already use p=1). Added secureZero defers and moved all explicitly owned secret arrays and hash contexts into protected allocator-backed Scratch. Blake2b compression words are context fields; initHash writes its destination in place and returns no H0 value. PHC string encoding and unrelated algorithms/tests are excluded. MIT license is retained next to these sources.', '', 'The caller must supply protected storage to the raw KDF; credential_kdf enforces this with a dedicated protected fixed-buffer region sized for blocks plus Scratch/alignment. Explicit storage is protected throughout its live interval and securely erased on success and failure. Compiler/register temporaries, TLS and OS internals are not proven erased. Public parameter encodings and index scalars do not own secret buffers. Preserve this narrow diff when updating the pinned compiler.'])
 (target / 'README.md').write_bytes(('\n'.join(lines) + '\n').encode())
+subprocess.run([str(source/'zig.exe'), 'fmt', str(target/'argon2.zig'), str(target/'blake2b.zig')], check=True)
+runpy.run_path(str(Path(__file__).with_name('protect-crypto-scratch.py')))
+subprocess.run([str(source/'zig.exe'), 'fmt', str(target/'argon2.zig'), str(target/'blake2b.zig')], check=True)

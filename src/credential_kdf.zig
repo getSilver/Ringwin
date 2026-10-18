@@ -5,7 +5,7 @@ const builtin = @import("builtin");
 const protected = @import("protected_memory.zig");
 const argon2 = @import("credential_crypto/argon2.zig");
 
-pub const workspace_bytes = 19 * 1024 * 1024;
+pub const workspace_bytes = 19 * 1024 * 1024 + @sizeOf(argon2.Scratch) + @alignOf(argon2.Scratch);
 
 pub fn derive(io: std.Io, password: []const u8, salt: []const u8, derived_key: *[32]u8) !void {
     errdefer std.crypto.secureZero(u8, derived_key);
@@ -82,7 +82,7 @@ test "credential Argon2id matches RFC 9106 section 5.3 vector" {
     const secret: [8]u8 = @splat(3);
     const ad: [12]u8 = @splat(4);
     var observer = protected.TestingBackend{};
-    var workspace = try protected.Buffer.initForTesting(32 * 1024, observer.backend());
+    var workspace = try protected.Buffer.initForTesting(32 * 1024 + @sizeOf(argon2.Scratch) + @alignOf(argon2.Scratch), observer.backend());
     var allocator = std.heap.FixedBufferAllocator.init(try workspace.writable());
     var result: [32]u8 = undefined;
     defer std.crypto.secureZero(u8, &result);
@@ -91,4 +91,16 @@ test "credential Argon2id matches RFC 9106 section 5.3 vector" {
     try std.testing.expectEqualSlices(u8, &expected, &result);
     workspace.deinit();
     try std.testing.expect(observer.erased);
+}
+
+test "credential KDF allocates crypto scratch from protected allocator and releases on OOM" {
+    var observer = protected.TestingBackend{};
+    var workspace = try protected.Buffer.initForTesting(64 * 1024, observer.backend());
+    defer workspace.deinit();
+    var region = std.heap.FixedBufferAllocator.init(try workspace.writable());
+    var allocator = std.testing.FailingAllocator.init(region.allocator(), .{ .fail_index = 1 });
+    var result: [32]u8 = undefined;
+    defer std.crypto.secureZero(u8, &result);
+    try std.testing.expectError(error.OutOfMemory, argon2.kdf(allocator.allocator(), &result, "synthetic", "salt-salt", .{ .t = 1, .m = 32, .p = 1 }, .argon2id, std.testing.io));
+    try std.testing.expectEqual(allocator.allocated_bytes, allocator.freed_bytes);
 }

@@ -71,11 +71,12 @@ pub fn Blake2b(comptime out_bits: usize) type {
         // Streaming cache
         buf: [128]u8,
         buf_len: u8,
+        compression_m: [16]u64,
+        compression_v: [16]u64,
 
-        pub fn init(options: Options) Self {
+        pub fn reset(d: *Self, options: Options) void {
             comptime debug.assert(8 <= out_bits and out_bits <= 512);
 
-            var d: Self = undefined;
             d.h = iv;
 
             const key_len = if (options.key) |key| key.len else 0;
@@ -97,12 +98,11 @@ pub fn Blake2b(comptime out_bits: usize) type {
                 d.update(options.key.?);
                 d.buf_len = 128;
             }
-            return d;
         }
 
-        pub fn hash(b: []const u8, out: *[digest_length]u8, options: Options) void {
-            var d = Self.init(options);
-            defer std.crypto.secureZero(u8, std.mem.asBytes(&d));
+        pub fn hash(d: *Self, b: []const u8, out: *[digest_length]u8, options: Options) void {
+            d.reset(options);
+            defer std.crypto.secureZero(u8, std.mem.asBytes(d));
             d.update(b);
             d.final(out);
         }
@@ -136,16 +136,16 @@ pub fn Blake2b(comptime out_bits: usize) type {
             d.t += d.buf_len;
             d.round(d.buf[0..], true);
             for (&d.h) |*x| x.* = mem.nativeToLittle(u64, x.*);
-            out.* = @as(*[digest_length]u8, @ptrCast(&d.h)).*;
+            @memcpy(out, std.mem.asBytes(&d.h)[0..digest_length]);
         }
 
         fn round(d: *Self, b: *const [128]u8, last: bool) void {
-            var m: [16]u64 = undefined;
-            defer std.crypto.secureZero(u64, &m);
-            var v: [16]u64 = undefined;
-            defer std.crypto.secureZero(u64, &v);
+            const m = &d.compression_m;
+            defer std.crypto.secureZero(u64, m);
+            const v = &d.compression_v;
+            defer std.crypto.secureZero(u64, v);
 
-            for (&m, 0..) |*r, i| {
+            for (m, 0..) |*r, i| {
                 r.* = mem.readInt(u64, b[8 * i ..][0..8], .little);
             }
 

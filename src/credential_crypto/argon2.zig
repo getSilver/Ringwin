@@ -3,8 +3,6 @@
 // https://github.com/golang/crypto/tree/master/argon2
 // https://github.com/P-H-C/phc-winner-argon2
 
-const builtin = @import("builtin");
-
 const std = @import("std");
 const blake2 = @import("blake2b.zig");
 const crypto = std.crypto;
@@ -104,19 +102,38 @@ pub const Params = struct {
     }
 };
 
+/// All secret-owning mutable state is allocated from the caller's protected
+/// allocator before processing password bytes. Lane segments execute serially
+/// so a single Scratch is never shared by concurrent workers.
+pub const Scratch = struct {
+    h0: H0,
+    initial_hash: Blake2b512,
+    long_hash: Blake2b512,
+    long_out: [64]u8,
+    long_in: [64]u8,
+    block_bytes: [1024]u8,
+    addresses: [block_length]u64 align(16),
+    input: [block_length]u64 align(16),
+    zero: [block_length]u64 align(16),
+    compression_t: [block_length]u64,
+    compression_buffer: [16]u64,
+    random: u64,
+};
+
 fn initHash(
+    scratch: *Scratch,
     password: []const u8,
     salt: []const u8,
     params: Params,
     dk_len: usize,
     mode: Mode,
-) H0 {
-    var h0: H0 = undefined;
-    defer crypto.secureZero(u8, &h0);
+) void {
+    const h0 = &scratch.h0;
     var parameters: [24]u8 = undefined;
     var tmp: [4]u8 = undefined;
-    var b2 = Blake2b512.init(.{});
-    defer crypto.secureZero(u8, mem.asBytes(&b2));
+    const b2 = &scratch.initial_hash;
+    b2.reset(.{});
+    defer crypto.secureZero(u8, mem.asBytes(b2));
     mem.writeInt(u32, parameters[0..4], params.p, .little);
     mem.writeInt(u32, parameters[4..8], @as(u32, @intCast(dk_len)), .little);
     mem.writeInt(u32, parameters[8..12], params.m, .little);
@@ -141,70 +158,72 @@ fn initHash(
     b2.update(&tmp);
     b2.update(ad);
     b2.final(h0[0..Blake2b512.digest_length]);
-    return h0;
 }
 
-fn blake2bLong(out: []u8, in: []const u8) void {
+fn blake2bLong(scratch: *Scratch, out: []u8, in: []const u8) void {
     const H = Blake2b512;
     var outlen_bytes: [4]u8 = undefined;
     mem.writeInt(u32, &outlen_bytes, @as(u32, @intCast(out.len)), .little);
 
-    var out_buf: [H.digest_length]u8 = undefined;
-    defer crypto.secureZero(u8, &out_buf);
+    const out_buf = &scratch.long_out;
+    defer crypto.secureZero(u8, out_buf);
 
     if (out.len <= H.digest_length) {
-        var h = H.init(.{ .expected_out_bits = out.len * 8 });
-        defer crypto.secureZero(u8, mem.asBytes(&h));
+        const h = &scratch.long_hash;
+        h.reset(.{ .expected_out_bits = out.len * 8 });
+        defer crypto.secureZero(u8, mem.asBytes(h));
         h.update(&outlen_bytes);
         h.update(in);
-        h.final(&out_buf);
+        h.final(out_buf);
         @memcpy(out, out_buf[0..out.len]);
         return;
     }
 
-    var h = H.init(.{});
-    defer crypto.secureZero(u8, mem.asBytes(&h));
+    const h = &scratch.long_hash;
+    h.reset(.{});
+    defer crypto.secureZero(u8, mem.asBytes(h));
     h.update(&outlen_bytes);
     h.update(in);
-    h.final(&out_buf);
+    h.final(out_buf);
     var out_slice = out;
     out_slice[0 .. H.digest_length / 2].* = out_buf[0 .. H.digest_length / 2].*;
     out_slice = out_slice[H.digest_length / 2 ..];
 
-    var in_buf: [H.digest_length]u8 = undefined;
-    defer crypto.secureZero(u8, &in_buf);
+    const in_buf = &scratch.long_in;
+    defer crypto.secureZero(u8, in_buf);
     while (out_slice.len > H.digest_length) {
-        in_buf = out_buf;
-        H.hash(&in_buf, &out_buf, .{});
+        @memcpy(in_buf, out_buf);
+        h.hash(in_buf, out_buf, .{});
         out_slice[0 .. H.digest_length / 2].* = out_buf[0 .. H.digest_length / 2].*;
         out_slice = out_slice[H.digest_length / 2 ..];
     }
-    in_buf = out_buf;
-    H.hash(&in_buf, &out_buf, .{ .expected_out_bits = out_slice.len * 8 });
+    @memcpy(in_buf, out_buf);
+    h.hash(in_buf, out_buf, .{ .expected_out_bits = out_slice.len * 8 });
     @memcpy(out_slice, out_buf[0..out_slice.len]);
 }
 
 fn initBlocks(
+    scratch: *Scratch,
     blocks: *Blocks,
     h0: *H0,
     memory: u32,
     threads: u24,
 ) void {
-    var block0: [1024]u8 = undefined;
-    defer crypto.secureZero(u8, &block0);
+    const block0 = &scratch.block_bytes;
+    defer crypto.secureZero(u8, block0);
     var lane: u24 = 0;
     while (lane < threads) : (lane += 1) {
         const j = lane * (memory / threads);
         mem.writeInt(u32, h0[Blake2b512.digest_length + 4 ..][0..4], lane, .little);
 
         mem.writeInt(u32, h0[Blake2b512.digest_length..][0..4], 0, .little);
-        blake2bLong(&block0, h0);
+        blake2bLong(scratch, block0, h0);
         for (&blocks.items[j + 0], 0..) |*v, i| {
             v.* = mem.readInt(u64, block0[i * 8 ..][0..8], .little);
         }
 
         mem.writeInt(u32, h0[Blake2b512.digest_length..][0..4], 1, .little);
-        blake2bLong(&block0, h0);
+        blake2bLong(scratch, block0, h0);
         for (&blocks.items[j + 1], 0..) |*v, i| {
             v.* = mem.readInt(u64, block0[i * 8 ..][0..8], .little);
         }
@@ -212,6 +231,7 @@ fn initBlocks(
 }
 
 fn processBlocks(
+    scratch: *Scratch,
     blocks: *Blocks,
     time: u32,
     memory: u32,
@@ -221,63 +241,21 @@ fn processBlocks(
 ) Io.Cancelable!void {
     const lanes = memory / threads;
     const segments = lanes / sync_points;
-
-    if (builtin.single_threaded or threads == 1) {
-        processBlocksSync(blocks, time, memory, threads, mode, lanes, segments);
-    } else {
-        try processBlocksAsync(blocks, time, memory, threads, mode, lanes, segments, io);
-    }
-}
-
-fn processBlocksSync(
-    blocks: *Blocks,
-    time: u32,
-    memory: u32,
-    threads: u24,
-    mode: Mode,
-    lanes: u32,
-    segments: u32,
-) void {
     var n: u32 = 0;
     while (n < time) : (n += 1) {
         var slice: u32 = 0;
         while (slice < sync_points) : (slice += 1) {
+            try io.checkCancel();
             var lane: u24 = 0;
             while (lane < threads) : (lane += 1) {
-                processSegment(blocks, time, memory, threads, mode, lanes, segments, n, slice, lane);
+                processSegment(scratch, blocks, time, memory, threads, mode, lanes, segments, n, slice, lane);
             }
-        }
-    }
-}
-
-fn processBlocksAsync(
-    blocks: *Blocks,
-    time: u32,
-    memory: u32,
-    threads: u24,
-    mode: Mode,
-    lanes: u32,
-    segments: u32,
-    io: Io,
-) Io.Cancelable!void {
-    var n: u32 = 0;
-    while (n < time) : (n += 1) {
-        var slice: u32 = 0;
-        while (slice < sync_points) : (slice += 1) {
-            var group: Io.Group = .init;
-            defer group.cancel(io);
-            var lane: u24 = 0;
-            while (lane < threads) : (lane += 1) {
-                group.async(io, processSegment, .{
-                    blocks, time, memory, threads, mode, lanes, segments, n, slice, lane,
-                });
-            }
-            try group.await(io);
         }
     }
 }
 
 fn processSegment(
+    scratch: *Scratch,
     blocks: *Blocks,
     passes: u32,
     memory: u32,
@@ -289,11 +267,14 @@ fn processSegment(
     slice: u32,
     lane: u24,
 ) void {
-    var addresses: [block_length]u64 align(16) = @splat(0);
-    defer crypto.secureZero(u64, &addresses);
-    var in: [block_length]u64 align(16) = @splat(0);
-    defer crypto.secureZero(u64, &in);
-    const zero: [block_length]u64 align(16) = @splat(0);
+    const addresses = &scratch.addresses;
+    @memset(addresses, 0);
+    defer crypto.secureZero(u64, addresses);
+    const in = &scratch.input;
+    @memset(in, 0);
+    defer crypto.secureZero(u64, in);
+    const zero = &scratch.zero;
+    @memset(zero, 0);
     if (mode == .argon2i or (mode == .argon2id and n == 0 and slice < sync_points / 2)) {
         in[0] = n;
         in[1] = lane;
@@ -307,12 +288,13 @@ fn processSegment(
         index = 2;
         if (mode == .argon2i or mode == .argon2id) {
             in[6] += 1;
-            processBlock(&addresses, &in, &zero);
-            processBlock(&addresses, &addresses, &zero);
+            processBlock(scratch, addresses, in, zero);
+            processBlock(scratch, addresses, addresses, zero);
         }
     }
     var offset = lane * lanes + slice * segments + index;
-    var random: u64 = 0;
+    scratch.random = 0;
+    defer crypto.secureZero(u8, mem.asBytes(&scratch.random));
     while (index < segments) : ({
         index += 1;
         offset += 1;
@@ -324,43 +306,46 @@ fn processSegment(
         if (mode == .argon2i or (mode == .argon2id and n == 0 and slice < sync_points / 2)) {
             if (index % block_length == 0) {
                 in[6] += 1;
-                processBlock(&addresses, &in, &zero);
-                processBlock(&addresses, &addresses, &zero);
+                processBlock(scratch, addresses, in, zero);
+                processBlock(scratch, addresses, addresses, zero);
             }
-            random = addresses[index % block_length];
+            scratch.random = addresses[index % block_length];
         } else {
-            random = blocks.items[prev][0];
+            scratch.random = blocks.items[prev][0];
         }
-        const new_offset = indexAlpha(random, lanes, segments, threads, n, slice, lane, index);
-        processBlockXor(&blocks.items[offset], &blocks.items[prev], &blocks.items[new_offset]);
+        const new_offset = indexAlpha(scratch.random, lanes, segments, threads, n, slice, lane, index);
+        processBlockXor(scratch, &blocks.items[offset], &blocks.items[prev], &blocks.items[new_offset]);
     }
 }
 
 fn processBlock(
+    scratch: *Scratch,
     out: *align(16) [block_length]u64,
     in1: *align(16) const [block_length]u64,
     in2: *align(16) const [block_length]u64,
 ) void {
-    processBlockGeneric(out, in1, in2, false);
+    processBlockGeneric(scratch, out, in1, in2, false);
 }
 
 fn processBlockXor(
+    scratch: *Scratch,
     out: *[block_length]u64,
     in1: *const [block_length]u64,
     in2: *const [block_length]u64,
 ) void {
-    processBlockGeneric(out, in1, in2, true);
+    processBlockGeneric(scratch, out, in1, in2, true);
 }
 
 fn processBlockGeneric(
+    scratch: *Scratch,
     out: *[block_length]u64,
     in1: *const [block_length]u64,
     in2: *const [block_length]u64,
     comptime xor: bool,
 ) void {
-    var t: [block_length]u64 = undefined;
-    defer crypto.secureZero(u64, &t);
-    for (&t, 0..) |*v, i| {
+    const t = &scratch.compression_t;
+    defer crypto.secureZero(u64, t);
+    for (t, 0..) |*v, i| {
         v.* = in1[i] ^ in2[i];
     }
     var i: usize = 0;
@@ -368,15 +353,15 @@ fn processBlockGeneric(
         blamkaGeneric(t[i..][0..16]);
     }
     i = 0;
-    var buffer: [16]u64 = undefined;
-    defer crypto.secureZero(u64, &buffer);
+    const buffer = &scratch.compression_buffer;
+    defer crypto.secureZero(u64, buffer);
     while (i < block_length / 8) : (i += 2) {
         var j: usize = 0;
         while (j < block_length / 8) : (j += 2) {
             buffer[j] = t[j * 8 + i];
             buffer[j + 1] = t[j * 8 + i + 1];
         }
-        blamkaGeneric(&buffer);
+        blamkaGeneric(buffer);
         j = 0;
         while (j < block_length / 8) : (j += 2) {
             t[j * 8 + i] = buffer[j];
@@ -429,6 +414,7 @@ fn blamkaGeneric(x: *[16]u64) void {
 }
 
 fn finalize(
+    scratch: *Scratch,
     blocks: *Blocks,
     memory: u32,
     threads: u24,
@@ -441,12 +427,12 @@ fn finalize(
             blocks.items[memory - 1][i] ^= v;
         }
     }
-    var block: [1024]u8 = undefined;
-    defer crypto.secureZero(u8, &block);
+    const block = &scratch.block_bytes;
+    defer crypto.secureZero(u8, block);
     for (blocks.items[memory - 1], 0..) |v, i| {
         mem.writeInt(u64, block[i * 8 ..][0..8], v, .little);
     }
-    blake2bLong(out, &block);
+    blake2bLong(scratch, out, block);
 }
 
 fn indexAlpha(
@@ -506,8 +492,13 @@ pub fn kdf(
     if (params.t < 1 or params.p < 1) return KdfError.WeakParameters;
     if (params.m / 8 < params.p) return KdfError.WeakParameters;
 
-    var h0 = initHash(password, salt, params, derived_key.len, mode);
-    defer crypto.secureZero(u8, &h0);
+    const scratch = try allocator.create(Scratch);
+    defer {
+        crypto.secureZero(u8, mem.asBytes(scratch));
+        allocator.destroy(scratch);
+    }
+    @memset(mem.asBytes(scratch), 0);
+    initHash(scratch, password, salt, params, derived_key.len, mode);
     const memory = @max(
         params.m / (sync_points * params.p) * (sync_points * params.p),
         2 * sync_points * params.p,
@@ -521,7 +512,7 @@ pub fn kdf(
 
     blocks.appendNTimesAssumeCapacity(@splat(0), memory);
 
-    initBlocks(&blocks, &h0, memory, params.p);
-    try processBlocks(&blocks, params.t, memory, params.p, mode, io);
-    finalize(&blocks, memory, params.p, derived_key);
+    initBlocks(scratch, &blocks, &scratch.h0, memory, params.p);
+    try processBlocks(scratch, &blocks, params.t, memory, params.p, mode, io);
+    finalize(scratch, &blocks, memory, params.p, derived_key);
 }
