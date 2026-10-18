@@ -1,0 +1,1 @@
+native memlock=0 refused before secret scratch; caller ciphertext/tag cleared

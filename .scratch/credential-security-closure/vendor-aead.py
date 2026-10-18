@@ -5,7 +5,7 @@ import hashlib
 zig = Path('D:/Program Files/zig')
 out = Path('src/credential_aead_crypto')
 out.mkdir(exist_ok=True)
-(out/'LICENSE').write_bytes((zig/'LICENSE').read_bytes())
+(out/'LICENSE').write_bytes((zig/'LICENSE').read_text().encode())
 header = '// Derived from Zig 0.17.0-dev.315+5b647b792; MIT, see LICENSE.\n'
 p = (zig/'lib/std/crypto/poly1305.zig').read_text()
 p = p[:p.index('test "rfc7439 vector1"')]
@@ -32,7 +32,6 @@ c = (zig/'lib/std/crypto/chacha20.zig').read_text()
 start = c.index('        const QuarterRound', c.index('fn ChaChaNonVecImpl'))
 end = c.index('        fn hashToBytes', start)
 core = c[start:end]
-core = core.replace('        ', '', 1) if False else core
 core = '\n'.join(line[8:] if line.startswith('        ') else line for line in core.splitlines())
 core = core.replace('fn chacha20Core(x: *BlockVec, input: BlockVec)', 'pub fn core(x: *[16]u32, input: *const [16]u32)')
 core = core.replace('    x.* = input;', '    @memcpy(x, input);')
