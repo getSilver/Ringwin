@@ -1,0 +1,27 @@
+{
+  "command": [
+    "powershell.exe",
+    "-NoLogo",
+    "-NoProfile",
+    "-File",
+    "D:\\github\\Ringwin-credential-recovery-20261018\\empty-stdin-probe\\probe-forward.ps1",
+    "-Python",
+    "D:\\Program Files\\miniconda3\\python.exe",
+    "-Mode",
+    "utf8"
+  ],
+  "exit": 0,
+  "script_sha256": "f8c9675bef7678ec27d960d228ca1b5ea63d60dc2d924f994e33d3c8fe26a53d",
+  "build_stdin_empty": true,
+  "native_frame_unchanged": true,
+  "rows": [
+    {
+      "length": 0,
+      "prefix": ""
+    },
+    {
+      "forward_length": 773,
+      "sha256": "a17359830e332babcf3d14556c7465f4642f9cbb2f6c74f4fc2877238fb7b62d"
+    }
+  ]
+}
