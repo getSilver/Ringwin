@@ -1,8 +1,8 @@
 # 07 保护 AEAD 子密钥与显式工作区
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in-progress
+Assignee: Codex AEAD implementer
 Blocked by: [02 保护内存](02-protect-secret-and-crypto-workspaces.md)
 Parent: [凭证安全修复](../map.md)
 
@@ -21,3 +21,7 @@ Parent: [凭证安全修复](../map.md)
 ## Evidence
 
 只读核查：`D:/github/Ringwin-credential-recovery-20261018/aead-state-notes.md`。Poly1305.final 已有清零，遗漏在其他显式副本与活跃期；不是已复现的 ReleaseSafe 释放后利用。原02 KDF验收保持有效，此票补齐 AEAD。
+
+稳定API已与03确认：`credential_aead.encrypt(c, *[16]tag, m, ad, [24]nonce, *const[32]key)!void`；`decrypt(m,c,[16]tag,ad,[24]nonce,*const[32]key)!void`。其余参数同原stdlib，key只借用指针；每次先保护Scratch再处理secret，无io。错误明确清空decrypt输出，encrypt错误清c/tag；调用方仍拥有并清理输入key/plaintext。`key_length=32,nonce_length=24,tag_length=16`保留。03拥有store接入，本票不并行修改store。
+
+首个public加密字节兼容回归先红NotImplemented后绿ReleaseSafe1/1；原始[红](../07-red-compat.log)、[绿](../07-green-compat.log)。仍待完整向量、边界与native/失败观测。
