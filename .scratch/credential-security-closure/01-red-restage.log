@@ -1,0 +1,11 @@
+1/1 credential_store.test.public lifecycle refuses restaging revoked identity and preserves revocation...expected error.CredentialAlreadyRegistered, found void
+FAIL (TestExpectedError)
+D:\Program Files\zig\lib\std\testing.zig:65:9: 0x7ff7d429cf6a in expectError__anon_67374 (lifecycle-red_zcu.obj)
+        return error.TestExpectedError;
+        ^
+D:\github\Ringwin-credential-lifecycle-fix\src\credential_store.zig:984:5: 0x7ff7d429fd87 in test.public lifecycle refuses restaging revoked identity and preserves revocation (lifecycle-red_zcu.obj)
+    try std.testing.expectError(error.CredentialAlreadyRegistered, lifecycleStage(&store, initial));
+    ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.\.scratch/lifecycle-red.exe --seed=0x2859bd6

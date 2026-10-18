@@ -1,0 +1,11 @@
+1/1 credential_store.test.public lifecycle independent writer lock prevents stale revoke overwrite...expected error.CredentialWriterBusy, found void
+FAIL (TestExpectedError)
+D:\Program Files\zig\lib\std\testing.zig:65:9: 0x7ff7f6e0d03a in expectError__anon_67131 (lifecycle-baseline-lock_zcu.obj)
+        return error.TestExpectedError;
+        ^
+D:\github\Ringwin-credential-lifecycle-fix\src\credential_store.zig:1037:9: 0x7ff7f6e0df13 in test.public lifecycle independent writer lock prevents stale revoke overwrite (lifecycle-baseline-lock_zcu.obj)
+        try std.testing.expectError(error.CredentialWriterBusy, lifecycleTransition(&other, metadata, .active));
+        ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.\.scratch/lifecycle-baseline-lock.exe --seed=0x50f73b01

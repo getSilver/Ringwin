@@ -1,0 +1,96 @@
+{
+  "purpose": "offline build only; no network operations",
+  "source": "existing local pinned curl cache",
+  "files": [
+    {
+      "path": ".scratch/build/bootstrap/curl-source/curl-8.21.0/include/Makefile.am",
+      "bytes": 1104,
+      "sha256": "a0c56d44032488e1bfadc348583accf2d180d32d030f2dd5f382fc9c32eea202"
+    },
+    {
+      "path": ".scratch/build/bootstrap/curl-source/curl-8.21.0/include/Makefile.in",
+      "bytes": 21952,
+      "sha256": "54a87f88fd2ca46122ed43a6d0174ad0cf15dd2dd169f95bc6aa56c133b7a62d"
+    },
+    {
+      "path": ".scratch/build/bootstrap/curl-source/curl-8.21.0/include/README.md",
+      "bytes": 585,
+      "sha256": "41db0602a2b6e0469160b9e9aee57925d98816a77960169ab5dcf2510627e3a8"
+    },
+    {
+      "path": ".scratch/build/bootstrap/curl-source/curl-8.21.0/include/curl/curl.h",
+      "bytes": 135271,
+      "sha256": "f17ab2d4b216bd96df937dbe494ecae1ea167a3f0e56b8dea83cd32a58cca18a"
+    },
+    {
+      "path": ".scratch/build/bootstrap/curl-source/curl-8.21.0/include/curl/curlver.h",
+      "bytes": 3052,
+      "sha256": "b63d97ec4f9cb84d6a6a952c39ab359df3509d7da9acd59c0b7e938160b2b2e4"
+    },
+    {
+      "path": ".scratch/build/bootstrap/curl-source/curl-8.21.0/include/curl/easy.h",
+      "bytes": 4000,
+      "sha256": "f101da02dd373151ea7b00082cb62c9d6e482361ab26b6d430ee96aab1b71565"
+    },
+    {
+      "path": ".scratch/build/bootstrap/curl-source/curl-8.21.0/include/curl/header.h",
+      "bytes": 2922,
+      "sha256": "e92525a91bb1119034dd45dd42d255ff9b6a49d964ca7105964e0107671b3395"
+    },
+    {
+      "path": ".scratch/build/bootstrap/curl-source/curl-8.21.0/include/curl/Makefile.am",
+      "bytes": 1527,
+      "sha256": "8e8a5f09adadad1f157a1b4edd8839615703279c879d24233843b7a9ff5f23c0"
+    },
+    {
+      "path": ".scratch/build/bootstrap/curl-source/curl-8.21.0/include/curl/Makefile.in",
+      "bytes": 20394,
+      "sha256": "dd0be1fa34a2c363482f349d24d60bc0ad74f249e5aa601dc98ba2e014bd0c86"
+    },
+    {
+      "path": ".scratch/build/bootstrap/curl-source/curl-8.21.0/include/curl/mprintf.h",
+      "bytes": 3078,
+      "sha256": "a79657fa15db71e732bcb58bc4645ab65bdb3222767f34be5bab56aa0d4f4cc9"
+    },
+    {
+      "path": ".scratch/build/bootstrap/curl-source/curl-8.21.0/include/curl/multi.h",
+      "bytes": 21135,
+      "sha256": "ab3278832925f69a68852e2c6b5a300884ee5f974a2291b642a7d1ef1ed49af9"
+    },
+    {
+      "path": ".scratch/build/bootstrap/curl-source/curl-8.21.0/include/curl/options.h",
+      "bytes": 2402,
+      "sha256": "32fe87f843367d25a9db91a47386652402f08c9668617b4c51295ef31d93f8b0"
+    },
+    {
+      "path": ".scratch/build/bootstrap/curl-source/curl-8.21.0/include/curl/stdcheaders.h",
+      "bytes": 1362,
+      "sha256": "d7588b86814a35ffc3766ff6242e6f6705e04401fc9c208a195caff3503af81c"
+    },
+    {
+      "path": ".scratch/build/bootstrap/curl-source/curl-8.21.0/include/curl/system.h",
+      "bytes": 14943,
+      "sha256": "edb2c507a084448a5e3c7e2b9c65c408e22ffeaca5ab0c1ee2e76d82a21113fa"
+    },
+    {
+      "path": ".scratch/build/bootstrap/curl-source/curl-8.21.0/include/curl/typecheck-gcc.h",
+      "bytes": 57755,
+      "sha256": "ed36a466c3e8c8e77e9a54d7105b466257ae75f91cdd62bac7519091cc0b9bcd"
+    },
+    {
+      "path": ".scratch/build/bootstrap/curl-source/curl-8.21.0/include/curl/urlapi.h",
+      "bytes": 5831,
+      "sha256": "4e6a8dbd7de49aa2321679c26432dc5bea6afca444975e315ef903440b34fe27"
+    },
+    {
+      "path": ".scratch/build/bootstrap/curl-source/curl-8.21.0/include/curl/websockets.h",
+      "bytes": 3197,
+      "sha256": "05b70dbce5274aa6e360703bb17d67a0390fea18bf4437745a25b08b55d6962b"
+    },
+    {
+      "path": ".scratch/build/libcurl-8.21.0-windows-x86_64-schannel/lib/libcurl.a",
+      "bytes": 8037886,
+      "sha256": "f5419be2c5b8af9a64ad077a07d0d1ae7e89c4f4426953fc6b8e376e276b7712"
+    }
+  ]
+}
