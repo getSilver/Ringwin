@@ -1,0 +1,10 @@
+Expected Zig 0.17.0-dev.315+5b647b792, got 0.17.0-dev.315+5b647b792
+At D:\github\Ringwin-credential-review-fixes\tools\verify-okx-demo-wave.ps
+1:31 char:5
++     throw "Expected Zig $ExpectedZig, got $zigVersion"
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : OperationStopped: (Expected Zig 0....v.315+ 
+   5b647b792:String) [], RuntimeException
+    + FullyQualifiedErrorId : Expected Zig 0.17.0-dev.315+5b647b792, got  
+   0.17.0-dev.315+5b647b792
+ 

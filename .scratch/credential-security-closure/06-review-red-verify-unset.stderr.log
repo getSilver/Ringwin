@@ -1,0 +1,12 @@
+D:\github\Ringwin-credential-review-fixes\tools\verify-okx-demo-wave.ps1 :
+ The variable '$LASTEXITCODE' cannot be retrieved because it has not been 
+set.
+At D:\github\Ringwin-credential-review-fixes\.scratch\credential-security-
+closure\06-review-exit-state.ps1:8 char:11
++     try { & $Verify; throw 'Expected controlled fmt stop' }
++           ~~~~~~~~~
+    + CategoryInfo          : InvalidOperation: (LASTEXITCODE:String) [ve 
+   rify-okx-demo-wave.ps1], RuntimeException
+    + FullyQualifiedErrorId : VariableIsUndefined,verify-okx-demo-wave.ps 
+   1
+ 

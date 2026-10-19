@@ -1,0 +1,15 @@
+EnvFile is retired. Supply a Demo credential frame through an inherited re
+stricted pipe; see docs/okx-demo-credential-input.md.
+At D:\github\Ringwin-credential-review-fixes\.scratch\credential-security-
+closure\06 review wrappers's path\tools\protected-demo-launch.ps1:3 char:2
+1
++ ... $EnvFile) { throw 'EnvFile is retired. Supply a Demo credential fram
+e ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~
+    + CategoryInfo          : OperationStopped: (EnvFile is reti...ntial- 
+   input.md.:String) [], RuntimeException
+    + FullyQualifiedErrorId : EnvFile is retired. Supply a Demo credentia 
+   l frame through an inherited restricted pipe; see docs/okx-demo-crede  
+  ntial-input.md.
+ 

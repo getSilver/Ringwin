@@ -1,0 +1,3 @@
+build_stdin_empty=true
+credential_input=accepted network=false
+okx_linux_acceptance=passed mode=prepareonly writes=0 qualification=current_functional_run_only production_qualification=false

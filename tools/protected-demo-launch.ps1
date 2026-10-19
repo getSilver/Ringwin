@@ -23,6 +23,9 @@ function Invoke-EmptyInputNative([string]$Executable, [string[]]$NativeArguments
         $process.StandardInput.BaseStream.Close()
         $captured = if ($CaptureOutput) { $process.StandardOutput.ReadToEnd() } else { $null }
         $process.WaitForExit()
+        # Diagnostics.Process does not update PowerShell's native exit state.
+        # Publish it before either returning captured output or throwing.
+        $global:LASTEXITCODE = $process.ExitCode
         if ($process.ExitCode -ne 0) { throw "Build process failed with exit $($process.ExitCode)" }
         if ($CaptureOutput) { return $captured }
     } finally { [Console]::InputEncoding = $previousInputEncoding; $process.Dispose() }

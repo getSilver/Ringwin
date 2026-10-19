@@ -1,0 +1,6 @@
+# Task 06 synthetic probe artifacts and copied fixture workspace.
+06-review-*.exe
+06-review-*.pdb
+06-review-linux-child
+06-review-*-fakebin/
+06 review wrappers*/
