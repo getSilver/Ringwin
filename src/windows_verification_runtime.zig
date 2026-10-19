@@ -2561,9 +2561,17 @@ fn runDemoChain(init: std.process.Init, executable: []const u8, live: bool) !voi
     var children: [5]std.process.Child = undefined;
     var connections: [5]Pipe = undefined;
     var started: usize = 0;
+    var connected: usize = 0;
     defer {
-        for (connections[0..started]) |pipe| pipe.close();
-        for (children[0..started]) |*child| child.kill(init.io);
+        // Spawn and connection acquisition have different success boundaries.
+        for (connections[0..connected]) |pipe| pipe.close();
+        for (children[0..started]) |*child| {
+            if (child.stdin) |input| {
+                input.close(init.io);
+                child.stdin = null;
+            }
+            child.kill(init.io);
+        }
     }
     for (0..5) |index| {
         children[index] = switch (index) {
@@ -2588,6 +2596,7 @@ fn runDemoChain(init: std.process.Init, executable: []const u8, live: bool) !voi
             children[index].stdin = null;
         }
         connections[index] = try connectPipe(init.io, pipe_names[index]);
+        connected += 1;
         try expectStatus(connections[index], .hello);
         try expectStatus(connections[index], if (index == 0) .owner_ready else .ready);
     }
@@ -2651,7 +2660,8 @@ fn runDemoChain(init: std.process.Init, executable: []const u8, live: bool) !voi
         const term = try child.wait(init.io);
         if (term != .exited or term.exited != 0) return error.RoleExitedUnexpectedly;
     }
-    for (connections) |pipe| pipe.close();
+    for (connections[0..connected]) |pipe| pipe.close();
+    connected = 0;
     started = 0;
     postflight_attempted = true;
     try okx_demo.accountGuard(init, &guard_transport, false);
@@ -2946,9 +2956,17 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
     var children: [roles.len]std.process.Child = undefined;
     var connections: [roles.len]Pipe = undefined;
     var started: usize = 0;
+    var connected: usize = 0;
     defer {
-        for (connections[0..started]) |pipe| pipe.close();
-        for (children[0..started]) |*child| child.kill(init.io);
+        // Spawn and connection acquisition have different success boundaries.
+        for (connections[0..connected]) |pipe| pipe.close();
+        for (children[0..started]) |*child| {
+            if (child.stdin) |input| {
+                input.close(init.io);
+                child.stdin = null;
+            }
+            child.kill(init.io);
+        }
     }
 
     for (roles, 0..) |role, index| {
@@ -2961,6 +2979,7 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
             children[index].stdin = null;
         }
         connections[index] = try connectPipe(init.io, pipe_names[index]);
+        connected += 1;
         try expectStatus(connections[index], .hello);
         try expectStatus(connections[index], if (index == 0) .owner_ready else .ready);
     }
@@ -3073,6 +3092,8 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
         const term = try child.wait(init.io);
         if (term != .exited or term.exited != 0) return error.RoleExitedUnexpectedly;
     }
+    for (connections[0..connected]) |pipe| pipe.close();
+    connected = 0;
     started = 0;
 
     // Reopen the decision store after the engine process has exited. This
