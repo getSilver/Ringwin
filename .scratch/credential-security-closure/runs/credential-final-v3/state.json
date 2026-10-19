@@ -1,0 +1,185 @@
+{
+  "wave": "credential-final-v3",
+  "controller_pid": 8100,
+  "started_utc": "2026-10-19T04:00:44.173282+00:00",
+  "plan_sha256": "519c505bd4c8d38abc42ffe2bdd4fdfcca581e2098c815635094551f6fbc09ad",
+  "status": "passed",
+  "completed": [
+    {
+      "label": "credential-final-v3-diff-check",
+      "exit_code": 0,
+      "result_sha256": "84074c792867778c70460829da25721cdfcabf369c4df6cefd8dbdeb9c337f94"
+    },
+    {
+      "label": "credential-final-v3-format",
+      "exit_code": 0,
+      "result_sha256": "a987b37fa5215a4d60f9c831e00a62f7edff8f819d4d78194b38f3d574b26ce3"
+    },
+    {
+      "label": "credential-final-v3-compile-core-debug",
+      "exit_code": 0,
+      "result_sha256": "6d88f151f8f3c33b916e9277060b2fc2e48fefdc2ce91afc45b3d2e0b266404c"
+    },
+    {
+      "label": "credential-final-v3-compile-core-releasesafe",
+      "exit_code": 0,
+      "result_sha256": "c4483b8cdf186fb88c0e19d52a8a8ab3a4e4a042b1fa59a2183d99050c4b62cb"
+    },
+    {
+      "label": "credential-final-v3-build-app",
+      "exit_code": 0,
+      "result_sha256": "32ca140f3345c2810deaeafb7fe948f842258c6f665fd307acd4d5d7286c89a0"
+    },
+    {
+      "label": "credential-final-v3-build-demo",
+      "exit_code": 0,
+      "result_sha256": "ea35edca79d7700e4f57065a4ca52243e4607687a5907c9186e8b9f1089a3cb8"
+    },
+    {
+      "label": "credential-final-v3-build-live",
+      "exit_code": 0,
+      "result_sha256": "7ebbe97d6ff292a33edfdc8def3cb845e01ea47f3263814d22fc5df6c1b0b4a8"
+    },
+    {
+      "label": "credential-final-v3-linux-check-live",
+      "exit_code": 0,
+      "result_sha256": "18906cb94e828f059b478220834ec4c211b303da9fd5f4628e80ffc96b0cfca9"
+    },
+    {
+      "label": "credential-final-v3-build-private",
+      "exit_code": 0,
+      "result_sha256": "ccee1698e5c8899e035274c9a8ff755b96d55624f58ea786e22f02121149c416"
+    },
+    {
+      "label": "credential-final-v3-linux-check-private",
+      "exit_code": 0,
+      "result_sha256": "f3184d507ca0d5891d4a1ad1bff358a0c4eb312e36150b140820f93d7b467514"
+    },
+    {
+      "label": "credential-final-v3-compile-shim",
+      "exit_code": 0,
+      "result_sha256": "731cf73a1b8c781058eccb4c3ded95511a55f22fb7a68798ff12a980ab0103b8"
+    },
+    {
+      "label": "credential-final-v3-compile-transport",
+      "exit_code": 0,
+      "result_sha256": "1874eac01aec932aee9a65f916e5f04bda8609f251b1048d48e4986df47c6d53"
+    },
+    {
+      "label": "credential-final-v3-compile-linux-store",
+      "exit_code": 0,
+      "result_sha256": "8366bcbb42defc649e83446abe6c8a958d09588bc6197ac8895c3f8cd382baae"
+    },
+    {
+      "label": "credential-final-v3-compile-linux-kdf",
+      "exit_code": 0,
+      "result_sha256": "c685b453aecde03442a3beacbcad0c2f808438107504ae3e963f6c7042d23b8d"
+    },
+    {
+      "label": "credential-final-v3-compile-linux-aead",
+      "exit_code": 0,
+      "result_sha256": "b8076baad8c5f0dcb82176cfe5fda2c8ecff6866f82da6586bda0ae970cf342f"
+    },
+    {
+      "label": "credential-final-v3-compile-linux-auth",
+      "exit_code": 0,
+      "result_sha256": "edd94dc78973ee0338fe4c32ee2209e118858cfb78c875c172eb65892326d993"
+    },
+    {
+      "label": "credential-final-v3-compile-linux-guard",
+      "exit_code": 0,
+      "result_sha256": "4fdf2b399add35a57c4927a3b3a2ea4f5cdac2343abf0b702243840017a9267d"
+    },
+    {
+      "label": "credential-final-v3-compile-linux-input",
+      "exit_code": 0,
+      "result_sha256": "f7f73a066ba0ce2ad00c6b48c5f5b8573a4f71facb43d44f962649108184988a"
+    },
+    {
+      "label": "credential-final-v3-compile-linux-default-refusal",
+      "exit_code": 0,
+      "result_sha256": "f2604de4d210eab5aac7647447d7c6cdfe664123f5bd41558ddb141f3a60eecf"
+    },
+    {
+      "label": "credential-final-v3-compile-linux-app",
+      "exit_code": 0,
+      "result_sha256": "543145d4165f72f3e0fadeba286612b46b99a9435c89b2a36b1d263b0f217705"
+    },
+    {
+      "label": "credential-final-v3-shim",
+      "exit_code": 0,
+      "result_sha256": "f8e469363b5482731d4ea2c017e2ad898ce55dc1a912d639cd4a0d351bd3a9fe"
+    },
+    {
+      "label": "credential-final-v3-transport",
+      "exit_code": 0,
+      "result_sha256": "8202249ad17f9053b9b20fceffb50e215f37a5155842a2d0917e1254700793fe"
+    },
+    {
+      "label": "credential-final-v3-linux-store",
+      "exit_code": 0,
+      "result_sha256": "8e6e9d0db01f00b1675124c5e2158b157fb0486aa33a3388039d8447a5818f11"
+    },
+    {
+      "label": "credential-final-v3-linux-kdf",
+      "exit_code": 0,
+      "result_sha256": "4018c22228adaed7e92a2772e475e9e3207499e7bcfddd3567e8471b53c028d8"
+    },
+    {
+      "label": "credential-final-v3-linux-aead",
+      "exit_code": 0,
+      "result_sha256": "20a401b2c4ae788778794df077177f93d778ae7b9cc5ee6afd39d369575350ac"
+    },
+    {
+      "label": "credential-final-v3-linux-auth",
+      "exit_code": 0,
+      "result_sha256": "1d8e4ff94b3ab6377f7afb01df1937584a15f0066286707d30bbbf9028395e4c"
+    },
+    {
+      "label": "credential-final-v3-linux-guard",
+      "exit_code": 0,
+      "result_sha256": "7eb2c1ef16364a0d38d510aa29515ef3c146f03042c2f83ddf253656beb87489"
+    },
+    {
+      "label": "credential-final-v3-linux-input",
+      "exit_code": 0,
+      "result_sha256": "b8343cffea3db77efeff161a142f9b776d7118c257b0b8a3cb8b3d63df61bfc4"
+    },
+    {
+      "label": "credential-final-v3-linux-default-refusal",
+      "exit_code": 0,
+      "result_sha256": "52705d01f85b2b761cde358094724298acf1b24974d0f50a6fc5a9a94677b7ad"
+    },
+    {
+      "label": "credential-final-v3-linux-credential-entry",
+      "exit_code": 0,
+      "result_sha256": "7fa655bcdd55590d35f68bb28f3b78a26633aeac099d6210aa96b02152d06b03"
+    },
+    {
+      "label": "credential-final-v3-windows-fixture",
+      "exit_code": 0,
+      "result_sha256": "76555dc9e4a6ccca2a4664e43c0cfddbe4bbae5303359fb3f5bd770518d4b10a"
+    },
+    {
+      "label": "credential-final-v3-windows-credential-entry",
+      "exit_code": 0,
+      "result_sha256": "3e4c679eb3a7e13036821abee206dfc9d430134f427199dfec1bad0016f10820"
+    },
+    {
+      "label": "credential-final-v3-windows-chain",
+      "exit_code": 0,
+      "result_sha256": "69d7db46f872cbe99c633ec61f54e086dfa4ffc3b8faf357dc4a0a8da3f08620"
+    },
+    {
+      "label": "credential-final-v3-full-debug",
+      "exit_code": 0,
+      "result_sha256": "47922531326ad8c132345dd6a901e9c47013710be1c8f9e895a949cb9af4cf0b"
+    },
+    {
+      "label": "credential-final-v3-full-releasesafe",
+      "exit_code": 0,
+      "result_sha256": "79f4b355a93cd59cf29cd2b2831d47dfb52bbb64851e815c9ecf2fc95bdddb1c"
+    }
+  ],
+  "finished_utc": "2026-10-19T06:42:51.628516+00:00"
+}

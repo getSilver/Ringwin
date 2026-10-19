@@ -1,0 +1,29 @@
+{
+  "captured_utc": "2026-10-19T04:30:04.630843+00:00",
+  "windows": "Windows-10-10.0.17763-SP0",
+  "python": "3.9.18 (main, Sep 11 2023, 14:09:26) [MSC v.1916 64 bit (AMD64)]",
+  "archive": {
+    "path": "D:\\github\\Ringwin-credential-worktrees-archive-20261019\\manifest.json",
+    "sha256": "18952886223a59425017345ff5f417870933d69a2a941f032f68eb765f682439",
+    "trees": 8,
+    "files": 33837,
+    "bytes": 4453649090,
+    "all_copy_hashes_verified": true
+  },
+  "linux": {
+    "uname": {
+      "system": "Linux",
+      "node": "DESKTOP-JQNU456",
+      "release": "4.4.0-17763-Microsoft",
+      "version": "#253-Microsoft Mon Dec 31 17:49:00 PST 2018",
+      "machine": "x86_64",
+      "processor": "x86_64"
+    },
+    "uid": 1000,
+    "gid": 1000,
+    "memlock": [
+      65536,
+      65536
+    ]
+  }
+}

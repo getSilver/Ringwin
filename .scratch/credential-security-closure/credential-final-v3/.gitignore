@@ -1,0 +1,21 @@
+# Generated validation binaries stay local; exact hashes are sealed in the validation manifest.
+/core-Debug.exe
+/core-Debug.pdb
+/core-ReleaseSafe.exe
+/core-ReleaseSafe.pdb
+/live.exe
+/live.pdb
+/private.exe
+/private.pdb
+/shim.exe
+/shim.pdb
+/transport.exe
+/transport.pdb
+/linux-store
+/linux-kdf
+/linux-aead
+/linux-auth
+/linux-guard
+/linux-input
+/linux-default-refusal
+/linux-app

@@ -1,0 +1,27 @@
+{
+  "label": "credential-final-v3-build-demo",
+  "command": [
+    "D:\\Program Files\\zig\\zig.exe",
+    "build",
+    "windows-demo-bin",
+    "-Doptimize=ReleaseSafe",
+    "--cache-dir",
+    ".zig-cache/credential06-demo"
+  ],
+  "cwd": "D:\\github\\Ringwin-credential-security-closure",
+  "started_utc": "2026-10-19T04:10:13.952311+00:00",
+  "finished_utc": "2026-10-19T04:13:46.011173+00:00",
+  "elapsed_ns": 212058484500,
+  "pid": 9580,
+  "exit_code": 0,
+  "child_exit_code": 0,
+  "timed_out": false,
+  "fatal_diagnostic": null,
+  "capture_error": null,
+  "source_changed": false,
+  "source_tree_sha256": "81bffb6dab6f22ad14feea2e99d520e7365b2900a60dc2b5d253228a4b7ee0ae",
+  "capture_sha256": "3c529c5a94057c339173c5a89611bdd1bf8cb9573fd6f2abf1d78108356ea085",
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "network_or_production_qualification": false
+}

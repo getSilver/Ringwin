@@ -1,0 +1,8 @@
+{
+  "pid": 8548,
+  "engine": "D:\\Program Files\\PowerShell\\7\\pwsh.exe",
+  "started_utc": "2026-10-19T09:31:49.7009664Z",
+  "first_attempt": "PowerShell5.1 missing Get-FileHash; before journal/deletion",
+  "archive": "D:\\github\\Ringwin-credential-worktrees-archive-20261019",
+  "scope": "eight completed implementer trees only"
+}

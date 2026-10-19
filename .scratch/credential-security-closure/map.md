@@ -1,6 +1,6 @@
 # 凭证保护与清零修复
 
-Status: active
+Status: closed
 
 ## Destination
 
@@ -30,16 +30,18 @@ Status: active
 2. [建立受保护缓冲与可清零密码学工作区](issues/02-protect-secret-and-crypto-workspaces.md) — resolved；已合入集成分支
 3. [贯通凭证存储的保护内存与安全输入](issues/03-integrate-protected-store-and-input.md) — resolved；已合入集成分支
 4. [清理认证与传输副本](issues/04-protect-auth-and-transport-copies.md) — resolved；已合入集成分支
-5. [贯通网关受控凭证注入](issues/05-bind-gateway-credential-ownership.md) — resolved；定向接入证据已集成，独立审查与最终验收留06
-6. [最终冻结、回归与独立审查](issues/06-seal-offline-security-evidence.md) — implementing；依赖已完成，待审查修复后冻结
+5. [贯通网关受控凭证注入](issues/05-bind-gateway-credential-ownership.md) — resolved；定向接入、06独立审查及最终验收均完成
+6. [最终冻结、回归与独立审查](issues/06-seal-offline-security-evidence.md) — resolved；同源35/35、Debug/ReleaseSafe各650/650、审查修复与归档清理完成
 7. [保护 AEAD 子密钥与显式工作区](issues/07-protect-aead-workspaces.md) — resolved；已合入集成分支并贯通store
 8. [保留原生 Demo 账户前后验安全门](issues/08-preserve-native-demo-account-guards.md) — resolved；完整只读guard及独立验收已集成
 
 ## Frontier
 
-- [06 最终冻结、回归与独立审查](issues/06-seal-offline-security-evidence.md)
+无。全部本轮修复票已resolved；不授予目标机或生产资格。
 
 ## Decisions so far
+
+- 2026-10-19：06完成。统一源码`81bffb6d...`的35/35阶段exit0，Windows完整Debug/ReleaseSafe各650/650；WSL store38/KDF9/AEAD10/auth10/guard10/input11及默认额度拒绝1/1、原生凭证入口通过。两轴共享P2由`040a21a2`修复后均独立复核关闭；无剩余确认P1/P2。33837文件、4453649090字节归档后再次核对原件/副本，八实现工作树已移除、分支提交保留。详见[最终证据](06-final-evidence.md)、[统一身份清单](credential-final-v3-validation.json)与[清理状态](06-cleanup-state.json)。main保持`c5f73ba0`，未合main/推送/部署，无生产资格。
 
 - 2026-10-19：05最终 `56b97b92` 已快进合入；[05身份清单](05-validation.json)中726项源码/依赖/producer/归档/产物/日志引用SHA核验通过。v2同源9个新阶段通过，5个v1阶段以输入闭包一致明确复用、保留原身份，不重标为当前源码；详见[05证据](05-evidence.md)。已知 `verify-okx-demo-wave.ps1` CaptureOutput后读取未设置的旧LASTEXITCODE问题保留为06单一review fixer待办，05结案不代表此工具或全任务已通过。当前唯一Frontier为06，先独立双轴审查/修复再最终冻结验收。
 - 2026-10-19：08最终 `0083de42` 已快进合入；同源 `a959...` 的Windows Debug/ReleaseSafe与WSL Linux ReleaseSafe各10/10，完整16GET/7类algo及缺失/异常拒绝覆盖，显式空字符串liability仅按既有合同解释为零。源码归档、producer、日志与产物共58项引用及编译器核验通过，47个提交blob与磁盘字节一致。详见[08证据](08-evidence.md)；旧 `f63cba83` 只属部分checkpoint，不能代表完整guard。05独立接入与最终验证仍未完成，当前唯一Frontier为05，06待05冻结后验收。

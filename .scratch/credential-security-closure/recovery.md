@@ -20,3 +20,7 @@
 - 05仍实施中，已有checkpoint`42480351`；08独立保护原有Demo账户前后验安全门。最终全量冻结/审查与实现树清理尚待06执行，main保持原基线。
 
 2026-10-19再次接续：05的后续checkpoint`9cf16b7a`及08未提交源码/捕获完整存在，未发现残留验证进程；继续前另保全225份源码/证据及两份tracked patch于 `D:/github/Ringwin-credential-recovery-20261018/resume-20261019-3ea0c99c/`，复制后SHA均一致。08 Debug/ReleaseSafe实际捕获已通过，Linux当时仅编译通过，不能误记为已执行；由接续任务补齐。此条仍是逐文件恢复记录，非最终冻结或资格证明。
+
+## 最终保全与清理
+
+2026-10-19：01–08全部修复与验收闭合，统一source `81bffb6dab6f22ad14feea2e99d520e7365b2900a60dc2b5d253228a4b7ee0ae`。八个实现工作树的全部源码/证据/产物（排除.git、.zig-cache和.scratch/build缓存）共33837文件、4453649090字节保全至 `D:/github/Ringwin-credential-worktrees-archive-20261019/`。manifest SHA256为`18952886223a59425017345ff5f417870933d69a2a941f032f68eb765f682439`。复制逐项SHA校验后，清理前再次逐项核对原件与副本、HEAD祖先与tracked clean，再移除八工作树；各分支/提交、集成树及原恢复备份均保留。main未动。完整结果见06-final-evidence.md与06-cleanup-state.json。

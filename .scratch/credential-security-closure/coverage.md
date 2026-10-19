@@ -1,6 +1,6 @@
 # 凭证保护修复覆盖清单
 
-此清单连接原始审计、实际业务入口与证据；单票通过不代表最终新源码已经完成全量冻结验收。
+此清单连接原始审计、实际业务入口与证据。最终统一源码已完成35/35阶段冻结验收；八个实现工作树归档核验及清理已完成，详见06记录。
 
 | 原问题或迁移约束 | 修复边界 | 当前记录 |
 | --- | --- | --- |
@@ -12,9 +12,9 @@
 | XChaCha子密钥、ChaCha/Poly1305显式状态 | 固定标量窄适配、保护Scratch、认证失败清输出 | 07 module/integration/native低限额拒绝 |
 | HMAC pad/context/schedule/digest及signature | 保护Credentials/SHA256/HMAC/请求owner | 04三模式签名、失败清理与长key向量 |
 | C shim复制认证头后未擦除、append隐藏失败副本 | bounded节点借用保护header，不再复制字符串 | 04无网络C故障矩阵、auth→TransportOwner→C公共链 |
-| 业务进程/独立runner仍读秘密env、重建丢owner | 受限Demo frame直接填保护页、角色隔离、父子owner生命周期 | 05定向接入完成；v2新9阶段及明确闭包复用5阶段，最终独立审查留06 |
-| 迁移EnvFile不能丢账户前后验门 | 原生GET guard保留UID/模式/权限/挂单/负债/敞口合同 | 08完整guard及05实际source/调用接入已完成定向证据；完整启动/退出顺序待06独立审查 |
-| 所有修复属于同一最终源码 | 独立双轴审查、冻结source/producer/dependency、全量及入口验收 | 06实施中，先处理review及已知LASTEXITCODE问题，再冻结长验收 |
+| 业务进程/独立runner仍读秘密env、重建丢owner | 受限Demo frame直接填保护页、角色隔离、父子owner生命周期 | 05定向接入、06独立审查和最终全量/入口验收完成；见06-final-evidence.md |
+| 迁移EnvFile不能丢账户前后验门 | 原生GET guard保留UID/模式/权限/挂单/负债/敞口合同 | 08完整guard及05实际接入通过；06 Spec独立核对正常/失败启动退出顺序，未确认额外缺口 |
+| 所有修复属于同一最终源码 | 独立双轴审查、冻结source/producer/dependency、全量及入口验收 | 06共享P2已修复并独立复核；同源完整Debug/ReleaseSafe各650/650、35阶段均通过；八工作树保全核验并清理完成 |
 
 ## 原始失败与证据边界
 
