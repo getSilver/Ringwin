@@ -1,0 +1,18 @@
+{
+  "wave": "credential-final-v2",
+  "controller_pid": 6432,
+  "started_utc": "2026-10-19T03:58:07.399177+00:00",
+  "plan_sha256": "5678114c04c9eb7beae45db8f6e50c81ae8ab5d6283ac551215e906865b26d34",
+  "status": "failed",
+  "completed": [
+    {
+      "label": "credential-final-v2-diff-check",
+      "exit_code": 2,
+      "result_sha256": "af9e048b53dfd3222c71c396eb61a9ef16dfc486f3d63950218bd7b29d717cab"
+    }
+  ],
+  "active_step": 0,
+  "active_label": "diff-check",
+  "finished_utc": "2026-10-19T03:58:13.122884+00:00",
+  "error": "RuntimeError: Offline step failed: credential-final-v2-diff-check exit=2"
+}
