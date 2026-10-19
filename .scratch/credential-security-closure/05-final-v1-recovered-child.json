@@ -1,0 +1,10 @@
+{
+  "origin": ".scratch\\credential-security-closure\\runs\\05-final-v1-windows-children\\stderr.log",
+  "origin_sha256": "5e7c3d2da48eb36d7ab862c5eb4abe0979b2b2f5e8101b445e677c90097b822b",
+  "child_case": "forward-early-exit",
+  "exit_code": 1,
+  "stderr_recovered_from_python_exception_repr": true,
+  "stdout_not_recorded": true,
+  "recovered_stderr": ".scratch\\credential-security-closure\\05-final-v1-forward-early-exit.stderr.recovered.log",
+  "sha256": "83d5d8a18bb3091261cb83d86804ad1820120524e9c14bd4356491150e5ce585"
+}

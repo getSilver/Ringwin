@@ -5,7 +5,7 @@ import capture
 ROOT=capture.ROOT
 OUT=Path(__file__).resolve().parent
 ZIG='D:/Program Files/zig/zig.exe'
-LABEL='05-final-v1'
+LABEL='05-final-v2'
 INCLUDE='.scratch/build/bootstrap/curl-source/curl-8.21.0/include'
 LIB='.scratch/build/libcurl-8.21.0-windows-x86_64-schannel/lib'
 LINK=['-lc','-L'+LIB,'-lcurl','-lws2_32','-lcrypt32','-lsecur32','-ladvapi32','-lbcrypt','-lwldap32','-lnormaliz','-liphlpapi']
@@ -19,7 +19,24 @@ def main():
  source=capture.source_manifest()
  producers=[Path(__file__).resolve(),OUT/'capture.py',OUT/'05-check-children.py',OUT/'05-check-wrappers.py',OUT/'05-empty-stdin.zig']
  producer_rows=[item(p) for p in producers]
- state=dict(label=LABEL,status='running',pid=os.getpid(),source=source,producers=producer_rows,started_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),stages=[])
+ prior_path=OUT/'05-final-v1-state.json'
+ prior=json.loads(prior_path.read_bytes())
+ old={r['path']:r['sha256'] for r in prior['source']['files']}
+ new={r['path']:r['sha256'] for r in source['files']}
+ changed=[p for p in sorted(set(old)|set(new)) if old.get(p)!=new.get(p)]
+ if changed!=['tools/run-okx-linux-acceptance.ps1']:raise RuntimeError('unexpected source change since v1 '+repr(changed))
+ closure=[r for r in source['files'] if r['path'].startswith('src/') or r['path']=='build.zig']
+ assert closure==[r for r in prior['source']['files'] if r['path'].startswith('src/') or r['path']=='build.zig']
+ prior_producers={Path(r['path']).name:r for r in prior['producers']}
+ assert item(OUT/'05-empty-stdin.zig')['sha256']==prior_producers['05-empty-stdin.zig']['sha256']
+ reused=[]
+ for record in prior['stages']:
+  if record['exit_code']!=0:continue
+  assert not record['source_changed'] and not record['fatal_diagnostic'] and not record['timed_out']
+  if 'artifact' in record:assert item(record['artifact']['path'])==record['artifact']
+  reused.append(dict(original=record,result=item(OUT/'runs'/record['label']/'result.json'),source_manifest=item(OUT/'runs'/record['label']/'source.json'),compile_input_closure_unchanged=True))
+ assert len(reused)==5
+ state=dict(label=LABEL,status='running',pid=os.getpid(),source=source,producers=producer_rows,started_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),compiler=item(ZIG),reused_stages=reused,reuse_provenance=dict(previous_state=item(prior_path),retained_source=item(OUT/'05-final-v1-retained-source.zip'),source_changed_paths=changed,unchanged_zig_and_embed_inputs=closure,unchanged_external_zig_input=item(OUT/'05-empty-stdin.zig'),old_global_source_sha256=prior['source']['source_tree_sha256'],new_global_source_sha256=source['source_tree_sha256'],compiler_identity_measured_at_continuation=True),stages=[])
  save(state_path,state)
  def run(name,command,artifact=None,timeout=900):
   for r in producer_rows:
@@ -32,11 +49,6 @@ def main():
   state['stages'].append(record);save(state_path,state)
   if code!=0:raise RuntimeError(name+' failed with '+str(code))
  try:
-  run('format',[ZIG,'fmt','--check','src/okx_demo_credential_input.zig','src/okx_demo_live_acceptance.zig','src/windows_verification_runtime.zig','src/okx_curl_private_smoke.zig'])
-  run('parser-tests',[ZIG,'test','src/okx_demo_credential_input.zig','-OReleaseSafe','--stack','67108864','--cache-dir','.zig-cache/credential05-final-parser','-femit-bin=.scratch/credential-security-closure/05-final-parser-tests.exe'],'.scratch/credential-security-closure/05-final-parser-tests.exe')
-  run('windows-child-build',[ZIG,'build-exe','src/okx_demo_credential_input.zig','-OReleaseSafe','--stack','67108864','--cache-dir','.zig-cache/credential05-final-parser','-femit-bin=.scratch/credential-security-closure/05-final-windows-child.exe'],'.scratch/credential-security-closure/05-final-windows-child.exe')
-  run('linux-child-build',[ZIG,'build-exe','src/okx_demo_credential_input.zig','-OReleaseSafe','-target','x86_64-linux','--cache-dir','.zig-cache/credential05-final-linux','-femit-bin=.scratch/credential-security-closure/05-final-linux-child'],'.scratch/credential-security-closure/05-final-linux-child')
-  run('empty-stdin-build',[ZIG,'build-exe',str(OUT/'05-empty-stdin.zig'),'-OReleaseSafe','--cache-dir','.zig-cache/credential05-empty','-femit-bin=.scratch/credential-security-closure/05-final-empty-stdin.exe'],'.scratch/credential-security-closure/05-final-empty-stdin.exe')
   run('windows-children',[sys.executable,str(OUT/'05-check-children.py'),'--final'])
   run('linux-children',['wsl.exe','--','python3','/mnt/d/github/Ringwin-credential-gateway-injection/.scratch/credential-security-closure/05-check-children.py','--linux','--final'])
   run('wrappers',[sys.executable,str(OUT/'05-check-wrappers.py')],timeout=300)
@@ -48,7 +60,7 @@ def main():
   run('transport',[ZIG,'test','src/okx_auth_transport_synthetic_test.zig','-cflags','-DRINGWIN_SHIM_NO_MAIN','--','src/okx_curl_shim_request_test.c','-I'+INCLUDE,'-OReleaseSafe','--stack','67108864','--test-filter','protected credentials survive','--test-filter','read-only account guard rejects','--cache-dir','.zig-cache/credential05-final-transport','-femit-bin=.scratch/credential-security-closure/05-final-transport.exe',*LINK],'.scratch/credential-security-closure/05-final-transport.exe')
   run('offline-chain',[str(ROOT/'zig-out/bin/ringwin.exe'),'--windows-chain-test'],timeout=900)
   for r in producer_rows:assert capture.sha(Path(r['path']))==r['sha256']
-  for record in state['stages']:
+  for record in state['stages']+[row['original'] for row in reused]:
    if 'artifact' in record:assert capture.sha(Path(record['artifact']['path']))==record['artifact']['sha256']
   assert capture.source_manifest()==source
   archive=OUT/'05-final-source.zip'

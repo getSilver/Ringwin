@@ -64,7 +64,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $include 'curl\curl.h') -PathType Le
 Invoke-EmptyInputNative $zig @('build-exe',(Join-Path $workspace 'src\okx_demo_live_acceptance.zig'),(Join-Path $workspace 'src\okx_curl_shim.c'),'-target','x86_64-linux-gnu','-OReleaseSafe',"-I$include",$curlLibrary,$sslLibrary,$cryptoLibrary,$zLibrary,'-lpthread','-ldl',"-femit-bin=$outputPath")
 
 function ConvertTo-ShellLiteral([string]$value) {
-    return "'$(($value -replace "'", "'\\''"))'"
+    return "'$(($value -replace "'", "'\''"))'"
 }
 function ConvertTo-WslPath([string]$path) {
     return '/mnt/' + $path.Substring(0, 1).ToLowerInvariant() + $path.Substring(2).Replace('\', '/')
