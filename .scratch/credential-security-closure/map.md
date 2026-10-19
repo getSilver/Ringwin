@@ -30,17 +30,18 @@ Status: active
 2. [建立受保护缓冲与可清零密码学工作区](issues/02-protect-secret-and-crypto-workspaces.md) — resolved；已合入集成分支
 3. [贯通凭证存储的保护内存与安全输入](issues/03-integrate-protected-store-and-input.md) — resolved；已合入集成分支
 4. [清理认证与传输副本](issues/04-protect-auth-and-transport-copies.md) — resolved；已合入集成分支
-5. [贯通网关受控凭证注入](issues/05-bind-gateway-credential-ownership.md) — implementing；08已完成，实际前后验接入待最终验证
-6. [最终冻结、回归与独立审查](issues/06-seal-offline-security-evidence.md) — blocked by 05
+5. [贯通网关受控凭证注入](issues/05-bind-gateway-credential-ownership.md) — resolved；定向接入证据已集成，独立审查与最终验收留06
+6. [最终冻结、回归与独立审查](issues/06-seal-offline-security-evidence.md) — implementing；依赖已完成，待审查修复后冻结
 7. [保护 AEAD 子密钥与显式工作区](issues/07-protect-aead-workspaces.md) — resolved；已合入集成分支并贯通store
 8. [保留原生 Demo 账户前后验安全门](issues/08-preserve-native-demo-account-guards.md) — resolved；完整只读guard及独立验收已集成
 
 ## Frontier
 
-- [05 网关受控凭证注入](issues/05-bind-gateway-credential-ownership.md)
+- [06 最终冻结、回归与独立审查](issues/06-seal-offline-security-evidence.md)
 
 ## Decisions so far
 
+- 2026-10-19：05最终 `56b97b92` 已快进合入；[05身份清单](05-validation.json)中726项源码/依赖/producer/归档/产物/日志引用SHA核验通过。v2同源9个新阶段通过，5个v1阶段以输入闭包一致明确复用、保留原身份，不重标为当前源码；详见[05证据](05-evidence.md)。已知 `verify-okx-demo-wave.ps1` CaptureOutput后读取未设置的旧LASTEXITCODE问题保留为06单一review fixer待办，05结案不代表此工具或全任务已通过。当前唯一Frontier为06，先独立双轴审查/修复再最终冻结验收。
 - 2026-10-19：08最终 `0083de42` 已快进合入；同源 `a959...` 的Windows Debug/ReleaseSafe与WSL Linux ReleaseSafe各10/10，完整16GET/7类algo及缺失/异常拒绝覆盖，显式空字符串liability仅按既有合同解释为零。源码归档、producer、日志与产物共58项引用及编译器核验通过，47个提交blob与磁盘字节一致。详见[08证据](08-evidence.md)；旧 `f63cba83` 只属部分checkpoint，不能代表完整guard。05独立接入与最终验证仍未完成，当前唯一Frontier为05，06待05冻结后验收。
 - 2026-10-18：仅合入08明确checkpoint `f63cba83`（正常公共合成路径Windows Debug1/1、原始NotImplemented红保留），不触碰08工作树后续未提交修改。该提交提供只读guard接口供05继续实际source编译；逐类拒绝、两平台与显式空liability兼容仍由08补齐，08未resolved，05最后完整接入仍等待08最终验收。
 - 2026-10-18：05移除managed EnvFile路径时，必须保留旧pre/postflight完整账户安全门，不能删检查或永久禁用Windows Demo来冒充完成。拆出08原生只读guard，与05不同文件并行；05保持调用点/脚本所有权，新增依赖只阻塞最后guard接入。

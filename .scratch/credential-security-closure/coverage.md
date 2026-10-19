@@ -12,9 +12,9 @@
 | XChaCha子密钥、ChaCha/Poly1305显式状态 | 固定标量窄适配、保护Scratch、认证失败清输出 | 07 module/integration/native低限额拒绝 |
 | HMAC pad/context/schedule/digest及signature | 保护Credentials/SHA256/HMAC/请求owner | 04三模式签名、失败清理与长key向量 |
 | C shim复制认证头后未擦除、append隐藏失败副本 | bounded节点借用保护header，不再复制字符串 | 04无网络C故障矩阵、auth→TransportOwner→C公共链 |
-| 业务进程/独立runner仍读秘密env、重建丢owner | 受限Demo frame直接填保护页、角色隔离、父子owner生命周期 | 05实施中，尚未最终关闭 |
-| 迁移EnvFile不能丢账户前后验门 | 原生GET guard保留UID/模式/权限/挂单/负债/敞口合同 | 08完整guard已完成，Windows Debug/ReleaseSafe与WSL Linux各10/10；05实际接入待最终验证 |
-| 所有修复属于同一最终源码 | 独立双轴审查、冻结source/producer/dependency、全量及入口验收 | 06待05完成后执行 |
+| 业务进程/独立runner仍读秘密env、重建丢owner | 受限Demo frame直接填保护页、角色隔离、父子owner生命周期 | 05定向接入完成；v2新9阶段及明确闭包复用5阶段，最终独立审查留06 |
+| 迁移EnvFile不能丢账户前后验门 | 原生GET guard保留UID/模式/权限/挂单/负债/敞口合同 | 08完整guard及05实际source/调用接入已完成定向证据；完整启动/退出顺序待06独立审查 |
+| 所有修复属于同一最终源码 | 独立双轴审查、冻结source/producer/dependency、全量及入口验收 | 06实施中，先处理review及已知LASTEXITCODE问题，再冻结长验收 |
 
 ## 原始失败与证据边界
 

@@ -1,8 +1,8 @@
 # 06 最终冻结、回归与独立审查
 
 Type: task
-Status: blocked
-Assignee:
+Status: in-progress
+Assignee: Codex
 Blocked by: [05 网关注入](05-bind-gateway-credential-ownership.md), [07 AEAD 工作区](07-protect-aead-workspaces.md)
 Parent: [凭证安全修复](../map.md)
 
