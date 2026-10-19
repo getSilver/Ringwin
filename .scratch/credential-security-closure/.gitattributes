@@ -2,3 +2,4 @@
 *.json -text
 *.jsonl -text
 *.py -text
+05-*.json whitespace=cr-at-eol

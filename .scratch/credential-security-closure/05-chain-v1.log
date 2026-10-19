@@ -1,0 +1,41 @@
+verification_role: role=engine, generation=1, ipc=named_pipe, venue=SimulatedVenue, production_qualification=false
+verification_role: role=market_feed, generation=1, ipc=named_pipe, venue=OKX, production_qualification=false
+verification_role: role=execution_gateway, generation=1, ipc=named_pipe, venue=OKX, production_qualification=false
+verification_role: role=telemetry, generation=1, ipc=named_pipe, venue=SimulatedVenue, production_qualification=false
+verification_role: role=control_fence, generation=1, ipc=named_pipe, venue=SimulatedVenue, production_qualification=false
+windows_engine: host_supervisor=handshake host_activated=python host_intent=python durable_commit=pass venue=simulated fill=1 replay_send_capability=false send_capability=false production_qualification=false
+windows_demo_host: stage=begin
+windows_demo_host: stage=abi
+windows_demo_host: stage=price
+windows_demo_host: stage=started
+windows_demo_host: stage=plan_sent
+windows_demo_host: stage=handshake
+windows_demo_host: stage=owner_activated
+windows_demo_host: stage=host_activated
+verification_role: role=engine, generation=2, ipc=named_pipe, venue=SimulatedVenue, production_qualification=false
+verification_role: role=execution_gateway, generation=2, ipc=named_pipe, venue=OKX, production_qualification=false
+error: PrivateIngressRejected
+verification_role: role=control_fence, generation=2, ipc=named_pipe, venue=SimulatedVenue, production_qualification=false
+verification_role: role=telemetry, generation=3, ipc=named_pipe, venue=SimulatedVenue, production_qualification=false
+verification_role: role=telemetry, generation=3, ipc=named_pipe, venue=SimulatedVenue, production_qualification=false
+error: InvalidControlFrame
+verification_role: role=execution_gateway, generation=3, ipc=named_pipe, venue=SimulatedVenue, production_qualification=false
+error: InvalidDecisionSnapshotFrame
+verification_role: role=execution_gateway, generation=3, ipc=named_pipe, venue=SimulatedVenue, production_qualification=false
+error: InvalidSnapshotHeader
+verification_role: role=execution_gateway, generation=3, ipc=named_pipe, venue=SimulatedVenue, production_qualification=false
+error: DecisionSnapshotMismatch
+verification_role: role=execution_gateway, generation=3, ipc=named_pipe, venue=SimulatedVenue, production_qualification=false
+error: DecisionSnapshotMismatch
+verification_role: role=execution_gateway, generation=3, ipc=named_pipe, venue=OKX, production_qualification=false
+windows_demo_send_failed=DecisionSnapshotMismatch
+error: DecisionSnapshotMismatch
+verification_role: role=execution_gateway, generation=3, ipc=named_pipe, venue=OKX, production_qualification=false
+windows_demo_send_failed=InvalidAuthorityFacts
+error: InvalidAuthorityFacts
+verification_role: role=market_feed, generation=3, ipc=named_pipe, venue=OKX, production_qualification=false
+error: InvalidBusinessFrame
+verification_role: role=telemetry, generation=3, ipc=named_pipe, venue=SimulatedVenue, production_qualification=false
+error: GenerationMismatch
+windows_okx_offline=passed venue=okx product=BTC-USDT-spot strategy_identity=40 config_version=1 roles=5 ipc=named_pipe market_raw_frames=3 private_raw_barrier=27 spot_atoms=20000 replay_digest=7856eaae7d91a975566a7cd088fb6b11af2a64cf6b3accadb6bb04e8b90ace87 replay_send_capability=false role_ownership=passed durable_recovery=passed
+windows_process_chain_verified=blocked historical_simulated_chain=passed historical_disk_recovery=passed historical_snapshot_transfer=passed okx_market_role=offline_passed okx_private_bootstrap=offline_passed okx_host_gateway_private=offline_passed windows_fencing_store=passed offline=blocked read_only=not_run demo_live=not_run production_qualification=false revision=not_recorded environment=none venue=simulated account_scope=none product=none strategy=none configuration=none roles=5 generation=4 ipc=named_pipe bounded_queue=8 power_loss_qualified=false linux_admission_equivalent=false

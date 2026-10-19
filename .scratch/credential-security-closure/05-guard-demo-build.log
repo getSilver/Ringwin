@@ -1,0 +1,23 @@
+windows-demo-bin
++- install ringwin-windows-demo
+   +- compile exe ringwin-windows-demo ReleaseSafe native 1 errors
+src\windows_verification_runtime.zig:2521:132: error: no field or member function named 'dupeZ' in 'mem.Allocator'
+    const proxy_z: ?[:0]u8 = if (init.environ_map.get("HTTPS_PROXY") orelse init.environ_map.get("ALL_PROXY")) |proxy| try init.gpa.dupeZ(u8, proxy) else null;
+                                                                                                                           ~~~~~~~~^~~~~~
+D:\Program Files\zig\lib\std\mem\Allocator.zig:1:1: note: struct declared here
+//! The standard memory allocation interface.
+^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+referenced by:
+    runDemoLive: src\windows_verification_runtime.zig:2507:24
+    main: src\main.zig:97:60
+    5 reference(s) hidden; use '-freference-trace=7' to see all references
+error: 1 compilation errors
+failed command: "D:\\Program Files\\zig\\zig.exe" build-exe --stack 67108864 "D:\\github\\Ringwin-credential-gateway-injection\\src\\okx_curl_shim.c" -lcurl -lws2_32 -lcrypt32 -lsecur32 -ladvapi32 -lbcrypt -lwldap32 -lnormaliz -liphlpapi -OReleaseSafe -I "D:\\github\\Ringwin-credential-gateway-injection\\.scratch\\build\\bootstrap\\curl-source\\curl-8.21.0\\include" -L "D:\\github\\Ringwin-credential-gateway-injection\\.scratch\\build\\libcurl-8.21.0-windows-x86_64-schannel\\lib" "-Mroot=D:\\github\\Ringwin-credential-gateway-injection\\src\\windows_demo_main.zig" -lc --cache-dir ".zig-cache\\credential05-demo" --global-cache-dir "C:\\Users\\X\\AppData\\Local\\zig" --name ringwin-windows-demo --zig-lib-dir "D:\\Program Files\\zig\\lib\\" --listen=-
+
+Build Summary: 0/3 steps succeeded (1 failed)
+windows-demo-bin transitive failure
++- install ringwin-windows-demo transitive failure
+   +- compile exe ringwin-windows-demo ReleaseSafe native 1 errors
+
+error: the following build command failed with exit code 1:
+.zig-cache\credential05-demo\o\41c6ba429c1cefcd37d0ea3d43fb04d1\build.exe D:\Program Files\zig\zig.exe D:\Program Files\zig\lib D:\github\Ringwin-credential-gateway-injection .zig-cache\credential05-demo C:\Users\X\AppData\Local\zig --seed 0xfa314568 -Z24aa999f268cb2fb windows-demo-bin -Doptimize=ReleaseSafe

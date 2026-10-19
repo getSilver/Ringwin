@@ -1,0 +1,8 @@
+D:\Program Files\zig\lib\std\process\Args.zig:39:36: error: In Windows, use initAllocator instead.
+        if (native_os == .windows) @compileError("In Windows, use initAllocator instead.");
+                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+referenced by:
+    main: src\okx_demo_credential_input.zig:88:46
+    callMain [inlined]: D:\Program Files\zig\lib\std\start.zig:750:30
+    WinStartup: D:\Program Files\zig\lib\std\start.zig:498:17
+    2 reference(s) hidden; use '-freference-trace=5' to see all references

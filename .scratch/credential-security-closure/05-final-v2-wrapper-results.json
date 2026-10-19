@@ -1,0 +1,54 @@
+[
+  {
+    "wrapper": "run-windows-demo-readonly.ps1",
+    "exit": 0,
+    "compiler_stdin_empty": true,
+    "native_frame_accepted": true,
+    "actual_network_binary": false
+  },
+  {
+    "wrapper": "run-okx-demo-live-acceptance.ps1",
+    "exit": 0,
+    "compiler_stdin_empty": true,
+    "native_frame_accepted": true,
+    "actual_network_binary": false
+  },
+  {
+    "wrapper": "test-okx-zig-private.ps1",
+    "exit": 0,
+    "compiler_stdin_empty": true,
+    "native_frame_accepted": true,
+    "actual_network_binary": false
+  },
+  {
+    "wrapper": "run-okx-linux-acceptance.ps1",
+    "exit": 0,
+    "compiler_stdin_empty": true,
+    "native_frame_accepted": true,
+    "actual_network_binary": false
+  },
+  {
+    "wrapper": "run-windows-demo-readonly.ps1",
+    "case": "retired EnvFile",
+    "exit": 1,
+    "before_build_and_network": true
+  },
+  {
+    "wrapper": "run-okx-demo-live-acceptance.ps1",
+    "case": "retired EnvFile",
+    "exit": 1,
+    "before_build_and_network": true
+  },
+  {
+    "wrapper": "test-okx-zig-private.ps1",
+    "case": "retired EnvFile",
+    "exit": 1,
+    "before_build_and_network": true
+  },
+  {
+    "wrapper": "run-okx-linux-acceptance.ps1",
+    "case": "retired EnvFile",
+    "exit": 1,
+    "before_build_and_network": true
+  }
+]

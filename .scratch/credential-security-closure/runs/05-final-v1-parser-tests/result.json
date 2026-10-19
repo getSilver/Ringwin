@@ -1,0 +1,30 @@
+{
+  "label": "05-final-v1-parser-tests",
+  "command": [
+    "D:/Program Files/zig/zig.exe",
+    "test",
+    "src/okx_demo_credential_input.zig",
+    "-OReleaseSafe",
+    "--stack",
+    "67108864",
+    "--cache-dir",
+    ".zig-cache/credential05-final-parser",
+    "-femit-bin=.scratch/credential-security-closure/05-final-parser-tests.exe"
+  ],
+  "cwd": "D:\\github\\Ringwin-credential-gateway-injection",
+  "started_utc": "2026-10-19T03:17:13.421038+00:00",
+  "finished_utc": "2026-10-19T03:17:37.204891+00:00",
+  "elapsed_ns": 23784134400,
+  "pid": 1932,
+  "exit_code": 0,
+  "child_exit_code": 0,
+  "timed_out": false,
+  "fatal_diagnostic": null,
+  "capture_error": null,
+  "source_changed": false,
+  "source_tree_sha256": "5a80c11f52e06436b3d89b2482ddea6beb1dabe6fca36ec154a439304808f69a",
+  "capture_sha256": "3c529c5a94057c339173c5a89611bdd1bf8cb9573fd6f2abf1d78108356ea085",
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_sha256": "dc89799afeee9a7eb78e18e9c3c71bd0a85079f2882a01ef03c1bb95287fb190",
+  "network_or_production_qualification": false
+}

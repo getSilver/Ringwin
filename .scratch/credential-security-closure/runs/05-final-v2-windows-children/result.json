@@ -1,0 +1,24 @@
+{
+  "label": "05-final-v2-windows-children",
+  "command": [
+    "D:\\Program Files\\miniconda3\\python.exe",
+    "D:\\github\\Ringwin-credential-gateway-injection\\.scratch\\credential-security-closure\\05-check-children.py",
+    "--final"
+  ],
+  "cwd": "D:\\github\\Ringwin-credential-gateway-injection",
+  "started_utc": "2026-10-19T03:23:09.637226+00:00",
+  "finished_utc": "2026-10-19T03:23:11.012817+00:00",
+  "elapsed_ns": 1375124300,
+  "pid": 3284,
+  "exit_code": 0,
+  "child_exit_code": 0,
+  "timed_out": false,
+  "fatal_diagnostic": null,
+  "capture_error": null,
+  "source_changed": false,
+  "source_tree_sha256": "d2b02d4498bef719f1b55b78757f495fa7500620f2d82c149fba0d2663837af3",
+  "capture_sha256": "3c529c5a94057c339173c5a89611bdd1bf8cb9573fd6f2abf1d78108356ea085",
+  "stdout_sha256": "4f846f36956d1640e106d9996a8cf75309786db2a88c6f98d338447d2f7e548e",
+  "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "network_or_production_qualification": false
+}

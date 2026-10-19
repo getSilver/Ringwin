@@ -1,0 +1,13 @@
+error: CompilerInheritedCredentialBytes
+Build process failed with exit 1
+At D:\github\Ringwin-credential-gateway-injection\.scratch\credential-secu
+rity-closure\05 wrapper fixture v1\tools\protected-demo-launch.ps1:21 char
+:40
++ ... de -ne 0) { throw "Build process failed with exit $($process.ExitCod
+e ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~
+    + CategoryInfo          : OperationStopped: (Build process failed wit 
+   h exit 1:String) [], RuntimeException
+    + FullyQualifiedErrorId : Build process failed with exit 1
+ 

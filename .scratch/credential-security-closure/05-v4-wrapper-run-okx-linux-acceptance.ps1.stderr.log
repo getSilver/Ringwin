@@ -1,0 +1,13 @@
+Join-Path : Cannot bind argument to parameter 'Path' because it is an empt
+y string.
+At D:\github\Ringwin-credential-gateway-injection\.scratch\credential-secu
+rity-closure\05 wrapper fixture v4\tools\run-okx-linux-acceptance.ps1:11 c
+har:41
++     [string]$CurlBuildRoot = (Join-Path $PSScriptRoot '..\.scratch\bu ..
+.
++                                         ~~~~~~~~~~~~~
+    + CategoryInfo          : InvalidData: (:) [Join-Path], ParentContain 
+   sErrorRecordException
+    + FullyQualifiedErrorId : ParameterArgumentValidationErrorEmptyString 
+   NotAllowed,Microsoft.PowerShell.Commands.JoinPathCommand
+ 
