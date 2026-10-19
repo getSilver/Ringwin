@@ -106,12 +106,12 @@ pub fn main(init: std.process.Init) !void {
     defer owner.deinit();
     if (std.mem.eql(u8, mode, "--forward-early-exit")) {
         var child = try std.process.spawn(init.io, .{ .argv = &.{ executable, "--exit-early" }, .stdin = .pipe, .stdout = .inherit, .stderr = .inherit, .environ_map = init.environ_map });
-        defer {
-            if (child.stdin) |input| input.close(init.io);
-            child.kill(init.io);
-        }
+        const input = child.stdin orelse return error.CredentialPipeFailed;
+        child.stdin = null;
+        defer input.close(init.io);
+        defer child.kill(init.io);
         _ = try child.wait(init.io);
-        try forward(init.io, child.stdin orelse return error.CredentialPipeFailed, &owner, .execution, account);
+        try forward(init.io, input, &owner, .execution, account);
         return error.ExpectedCredentialForwardFailure;
     }
     if (std.mem.eql(u8, mode, "--forward")) {
