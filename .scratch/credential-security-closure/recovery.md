@@ -18,3 +18,5 @@
 - 在继续修改前，将45份源码/证据与三份tracked binary patch另存于 `D:/github/Ringwin-credential-recovery-20261018/resume-20261018-210113/`，逐文件复制后SHA验证通过。此为活跃实施期逐文件保全，不是统一冻结源码身份。
 - 03完成提交`a17d981d`、04完成提交`c0d94d8f`、07完成提交`864a8521`及原先阶段checkpoint均已合入集成分支，原始失败/无效诊断记录保留分类；没有将旧证据重标为新源码验收。
 - 05仍实施中，已有checkpoint`42480351`；08独立保护原有Demo账户前后验安全门。最终全量冻结/审查与实现树清理尚待06执行，main保持原基线。
+
+2026-10-19再次接续：05的后续checkpoint`9cf16b7a`及08未提交源码/捕获完整存在，未发现残留验证进程；继续前另保全225份源码/证据及两份tracked patch于 `D:/github/Ringwin-credential-recovery-20261018/resume-20261019-3ea0c99c/`，复制后SHA均一致。08 Debug/ReleaseSafe实际捕获已通过，Linux当时仅编译通过，不能误记为已执行；由接续任务补齐。此条仍是逐文件恢复记录，非最终冻结或资格证明。

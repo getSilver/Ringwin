@@ -1,0 +1,29 @@
+{
+  "label": "08-rejections-debug-v1",
+  "command": [
+    "D:/Program Files/zig/zig.exe",
+    "test",
+    "src/okx_demo_account_guard.zig",
+    "-O",
+    "Debug",
+    "--cache-dir",
+    ".zig-cache/credential08",
+    "-femit-bin=.scratch/credential-security-closure/credential08-debug.exe"
+  ],
+  "cwd": "D:\\github\\Ringwin-credential-native-account-guard",
+  "started_utc": "2026-10-18T13:41:43.530534+00:00",
+  "finished_utc": "2026-10-18T13:41:44.942735+00:00",
+  "elapsed_ns": 1411873700,
+  "pid": 200,
+  "exit_code": 1,
+  "child_exit_code": 1,
+  "timed_out": false,
+  "fatal_diagnostic": null,
+  "capture_error": null,
+  "source_changed": false,
+  "source_tree_sha256": "9ff0a8d5d330d3c60127921704ad2ddbbc9e097fa732d8c12c39a7a1fb2b2c0c",
+  "capture_sha256": "3c529c5a94057c339173c5a89611bdd1bf8cb9573fd6f2abf1d78108356ea085",
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_sha256": "c8cba6ef520296cfcb834be297124ac18b3715209381e9cd5a797c5ac80726f3",
+  "network_or_production_qualification": false
+}

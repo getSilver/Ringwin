@@ -1,0 +1,29 @@
+{
+  "script_sha256": "7bc5a44f88d6a3f6e3f6b2f405bd4076e825aafe3dcceb9fd3a39795065c8f4a",
+  "rows": [
+    {
+      "mode": "close",
+      "exit": 0,
+      "stdout": "{\"length\": 3, \"prefix\": \"efbbbf\"}",
+      "stderr": ""
+    },
+    {
+      "mode": "base",
+      "exit": 0,
+      "stdout": "{\"length\": 3, \"prefix\": \"efbbbf\"}",
+      "stderr": ""
+    },
+    {
+      "mode": "utf8",
+      "exit": 0,
+      "stdout": "{\"length\": 0, \"prefix\": \"\"}",
+      "stderr": ""
+    },
+    {
+      "mode": "ascii",
+      "exit": 0,
+      "stdout": "{\"length\": 0, \"prefix\": \"\"}",
+      "stderr": ""
+    }
+  ]
+}

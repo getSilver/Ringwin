@@ -1,0 +1,13 @@
+1/1 okx_demo_account_guard.test.Demo account guard preserves explicit blank liability convention only...FAIL (AccountGuardRejected)
+D:\github\Ringwin-credential-native-account-guard\src\okx_demo_account_guard.zig:114:5: 0x7ff7d8d05c22 in text (test_zcu.obj)
+    return switch (try field(object, key)) {
+    ^
+D:\github\Ringwin-credential-native-account-guard\src\okx_demo_account_guard.zig:96:38: 0x7ff7d8d0a426 in run__anon_66795 (test_zcu.obj)
+                if (!try decimalZero(try text(detail, name))) return error.AccountGuardRejected;
+                                     ^
+D:\github\Ringwin-credential-native-account-guard\src\okx_demo_account_guard.zig:240:9: 0x7ff7d8d0b6cb in test.Demo account guard preserves explicit blank liability convention only (test_zcu.obj)
+        try run(std.testing.allocator, &source, 1700000000000, fixture_uid_hash, false);
+        ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\credential08\o\fe95619981a75fe4a08fa26a6de808a7\test.exe --seed=0xe5713d55

@@ -1,0 +1,3 @@
+src\okx_demo_account_guard.zig:388:38: error: binary operator '*' has whitespace on one side, but not the other
+    const tiny_nonzero = "0." ++ "0" ** 512 ++ "1";
+                                     ^
