@@ -13,8 +13,8 @@
 | HMAC pad/context/schedule/digest及signature | 保护Credentials/SHA256/HMAC/请求owner | 04三模式签名、失败清理与长key向量 |
 | C shim复制认证头后未擦除、append隐藏失败副本 | bounded节点借用保护header，不再复制字符串 | 04无网络C故障矩阵、auth→TransportOwner→C公共链 |
 | 业务进程/独立runner仍读秘密env、重建丢owner | 受限Demo frame直接填保护页、角色隔离、父子owner生命周期 | 05实施中，尚未最终关闭 |
-| 迁移EnvFile不能丢账户前后验门 | 原生GET guard保留UID/模式/权限/挂单/负债/敞口合同 | 08实施中，05接入后才能关闭 |
-| 所有修复属于同一最终源码 | 独立双轴审查、冻结source/producer/dependency、全量及入口验收 | 06待05/08完成后执行 |
+| 迁移EnvFile不能丢账户前后验门 | 原生GET guard保留UID/模式/权限/挂单/负债/敞口合同 | 08完整guard已完成，Windows Debug/ReleaseSafe与WSL Linux各10/10；05实际接入待最终验证 |
+| 所有修复属于同一最终源码 | 独立双轴审查、冻结source/producer/dependency、全量及入口验收 | 06待05完成后执行 |
 
 ## 原始失败与证据边界
 
