@@ -1,0 +1,11 @@
+# Standards review follow-up
+
+Reviewed only the increment `7d884048903b0f731a4e318f10116eff06919e12...040a21a26b0dc61abb63d3f7b5dd2e1b991832ab` in D:/github/Ringwin-credential-review-fixes. The only product change is tools/protected-demo-launch.ps1:26-28: two explanatory comments and `$global:LASTEXITCODE = $process.ExitCode` after WaitForExit and before either throw or captured-output return.
+
+The original P2 at tools/verify-okx-demo-wave.ps1:29-30 is correctly resolved. Successful helper completion now initializes or replaces stale native exit state with zero; failed child completion publishes its nonzero exit before throwing. This is consistent with the existing wrapper global exit-state convention. The assignment emits no pipeline output and does not alter capture, process/input ownership, encoding restoration or disposal. No new regression or standards breach was identified in this increment.
+
+Read 06-review-resolution.md, 06-review-validation.json, the regression/exit-state/wrapper producers, actual green result records and stdout, red stale-version stderr, and retired-EnvFile failure logs. The retained five green cases cover unset/stale success, exit41 before throw, and the actual public verify script with unset/stale initial state reaching the controlled fmt exit73. Each confirms original binary stdin preservation. Four wrapper successes confirm empty compiler stdin and accepted synthetic native frame; four retired-EnvFile cases reject before launch. These are bounded synthetic results, not a full wave, Venue run or production qualification. Independently checked 58 manifest entries (all 55 evidence/artifact entries plus helper, verify wrapper and credential_store source): bytes and SHA256 all match, with zero mismatches.
+
+The optional credential_store.zig:287-326 duplication remains explicit correct ownership, nonblocking, and unchanged; the increment contains no store edit. No refactor is required to close this P2.
+
+The original external final-standards-review.md remains byte-preserved, SHA256 a0d8696231033fa508c6be060c1a91d9a63cf9e22f816a248e5d5e9b2a2261fa. This separate follow-up records resolution without rewriting the original finding. Review performed no builds/tests, network, real-credential access or repository edits. Root retains final full-suite acceptance responsibility.
