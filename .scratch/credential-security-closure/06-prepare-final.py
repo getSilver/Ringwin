@@ -25,6 +25,7 @@ def main():
         assert sha(ROOT / row['path']) == row['sha256'], row['path']
     producers = [OUT / name for name in ('capture.py', 'final-wave.py',
                  '06-prepare-final.py', '02-linux-bounded.py')]
+    producers += [ROOT / '.gitattributes', OUT / '.gitattributes']
     producer_rows = [{'path': p.relative_to(ROOT).as_posix(), 'sha256': sha(p)} for p in producers]
     producer_rows += [{'path': str(zig), 'sha256': sha(zig)}]
     producer_rows += [{'path': row['path'], 'sha256': row['sha256']} for row in dependencies]

@@ -3,3 +3,8 @@
 *.jsonl -text
 *.py -text
 05-*.json whitespace=cr-at-eol
+06-review-*.json whitespace=cr-at-eol
+06-review-*.py whitespace=cr-at-eol
+06-review-*.md whitespace=cr-at-eol
+# Historical process experiment is an immutable producer, including one space.
+stdin-inheritance-probe/inherit-ps51.ps1 whitespace=-blank-at-eol
