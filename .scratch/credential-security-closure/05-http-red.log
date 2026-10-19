@@ -1,0 +1,5 @@
+1/1 okx_auth_transport_synthetic_test.test.read-only account guard rejects non2xx code0 without changing delivery outcome...expected error.DemoGuardHTTPStatusRejected, found { 123, 34, 99, 111, 100, 101, 34, 58, 34, 48, 34, 44, 34, 100, 97, 116, 97, 34, 58, 91, 93, 125 }
+FAIL (TestExpectedError)
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\credential05-http\o\e2bf072cae8679e2eec8f8d00d9975fd\test.exe --seed=0xa4f806f6

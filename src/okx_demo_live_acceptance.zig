@@ -1525,9 +1525,7 @@ pub fn accountGuard(init: std.process.Init, owner: *curl.TransportOwner, allow_b
         io: std.Io,
         pub fn get(self: *@This(), path: []const u8) ![]const u8 {
             try refresh(self.transport, self.io);
-            const result = self.transport.request(.get, path, "");
-            if (result.outcome != .response or result.response == null) return error.DemoGuardResponseUnavailable;
-            return result.response.?;
+            return self.transport.requestReadOnlyChecked(path);
         }
     }{ .transport = owner, .io = init.io };
     const real_ns = std.math.cast(i64, std.Io.Clock.real.now(init.io).nanoseconds) orelse return error.ClockOutOfRange;

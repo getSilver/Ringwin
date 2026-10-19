@@ -118,6 +118,7 @@ pub const TransportOwner = struct {
     endpoint: DemoEndpointProfile,
     timestamp: [25]u8 = @splat(0),
     timestamp_len: u8 = 0,
+    last_http_status: c_long = 0,
     times: market.Times = .{ .receive_time_utc_ns = 0, .monotonic_time_ns = 0, .wall_time_utc_ns = 0 },
     response: [market.max_raw_frame_bytes]u8 = undefined,
     ws: ?*anyopaque = null,
@@ -138,6 +139,7 @@ pub const TransportOwner = struct {
 
     pub fn deinit(self: *RestOwner) void {
         self.wsDisconnect();
+        self.last_http_status = 0;
         @memset(&self.timestamp, 0);
         @memset(&self.response, 0);
     }
@@ -205,6 +207,7 @@ pub const TransportOwner = struct {
     }
 
     pub fn request(self: *RestOwner, method: Method, path: []const u8, body: []const u8) live.TransportResult {
+        self.last_http_status = 0;
         if (self.timestamp_len == 0) return self.beforeSend();
         if (path.len == 0 or path[0] != '/') return self.beforeSend();
         var url_buffer: [512]u8 = @splat(0);
@@ -232,6 +235,7 @@ pub const TransportOwner = struct {
             self.proxy,
             &self.response,
         ) catch return self.beforeSend();
+        self.last_http_status = response.http_status;
         if (response.outcome != .response)
             std.debug.print("okx_transport_failure outcome={s} curl_code={d} http_status={d}\n", .{ @tagName(response.outcome), response.curl_code, response.http_status });
         return .{
@@ -244,6 +248,14 @@ pub const TransportOwner = struct {
             .source_session = self.source_session,
             .times = self.times,
         };
+    }
+
+    /// Read-only safety assertion. Delivery outcomes remain unchanged for OMS callers.
+    pub fn requestReadOnlyChecked(self: *TransportOwner, path: []const u8) ![]const u8 {
+        const result = self.request(.get, path, "");
+        if (result.outcome != .response or result.response == null) return error.DemoGuardResponseUnavailable;
+        if (self.last_http_status < 200 or self.last_http_status > 299) return error.DemoGuardHTTPStatusRejected;
+        return result.response.?;
     }
 
     fn beforeSend(self: *const RestOwner) live.TransportResult {
