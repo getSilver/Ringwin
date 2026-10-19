@@ -1,0 +1,11 @@
+1/1 okx_demo_account_guard.test.Demo account guard rejects malformed leverage rows even after a valid row...expected error.AccountGuardRejected, found void
+FAIL (TestExpectedError)
+D:\Program Files\zig\lib\std\testing.zig:65:9: 0x7ff7b2e8b4fa in expectError__anon_66807 (test_zcu.obj)
+        return error.TestExpectedError;
+        ^
+D:\github\Ringwin-credential-native-account-guard\src\okx_demo_account_guard.zig:233:5: 0x7ff7b2e8b670 in test.Demo account guard rejects malformed leverage rows even after a valid row (test_zcu.obj)
+    try std.testing.expectError(error.AccountGuardRejected, run(std.testing.allocator, &source, 1700000000000, fixture_uid_hash, false));
+    ^
+0 passed; 0 skipped; 1 failed.
+error: the following test command failed with exit code 1:
+.zig-cache\credential08\o\047ac4ca49d4125c350428de5dcfe777\test.exe --seed=0x57368075

@@ -1,0 +1,30 @@
+{
+  "label": "08-blank-liability-red-v1",
+  "command": [
+    "D:/Program Files/zig/zig.exe",
+    "test",
+    "src/okx_demo_account_guard.zig",
+    "-O",
+    "Debug",
+    "--test-filter",
+    "preserves explicit blank liability",
+    "--cache-dir",
+    ".zig-cache/credential08"
+  ],
+  "cwd": "D:\\github\\Ringwin-credential-native-account-guard",
+  "started_utc": "2026-10-18T13:38:50.613776+00:00",
+  "finished_utc": "2026-10-18T13:39:02.155666+00:00",
+  "elapsed_ns": 11541643000,
+  "pid": 3664,
+  "exit_code": 1,
+  "child_exit_code": 1,
+  "timed_out": false,
+  "fatal_diagnostic": null,
+  "capture_error": null,
+  "source_changed": false,
+  "source_tree_sha256": "8448d199e8a7137e1a98809cf0509d76e5142084c14e959cd2a10d3b3f55ac55",
+  "capture_sha256": "3c529c5a94057c339173c5a89611bdd1bf8cb9573fd6f2abf1d78108356ea085",
+  "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderr_sha256": "7d576d9185c40708eee9f5b27ba851baf19aee5f2a8d3f288aa9a695bdb71ff2",
+  "network_or_production_qualification": false
+}
