@@ -3,7 +3,7 @@
 Status: open
 
 来源：[三项核心接口交接 spec](../cross-venue-arbitrage/issues/02-core-interface-handoff.md)。
-用户于 2026-10-20 确认以下 10 张任务的拆分与依赖。本地图只发布任务，不表示实现、架构决策或运行资格已通过。
+用户于 2026-10-20 确认原 10 票拆分，并在 01 设计审查后确认 ADR0017 及 05a/05b、09a/09b 追加拆分。01 已完成；05/09 保留为汇总验收。架构确认不表示功能实现或运行资格已通过。
 
 ## Destination
 
@@ -25,34 +25,38 @@ Status: open
 - MarketFeedAdapter 拥有公共行情转换，VenueAdapter 拥有私有事件转换；核心拥有授权、资金、风险、预留、命令和唯一经济成交。
 - 每张实现票都包含公共路径、错误/容量边界及相应持久恢复验证，不能把全部测试推给最终综合票。
 - 不新增追踪止盈、追加仓位、Unknown 自动重发或延长持仓等策略权限。
-- 不修改或关闭来源 spec；当前授权为任务发布。实现、部署、真实或 Demo 交易不在本次操作范围。
+- 不修改或关闭来源 spec。01 的设计交付与架构/拆分确认已完成；其余票仍须逐票领取并验收。本地图不授权部署、真实或 Demo 交易。
 
 ## Route
 
 | 任务 | Blocked by | 归属 |
 |---|---|---|
-| [01 权威边界](issues/01-authority-boundary.md) | 无 | H2/H3 设计前置 |
+| [01 权威边界](issues/01-authority-boundary.md) | 无 | H2/H3 设计前置；resolved |
 | [02 双边深度快照](issues/02-depth-snapshot.md) | 无 | H1 |
 | [03 增量与重同步](issues/03-depth-resynchronization.md) | 02 | H1 |
 | [04 Host 完整组](issues/04-host-intent-group.md) | 无 | H2 |
-| [05 共同准入与占用](issues/05-joint-admission.md) | 01、04 | H2/H3 |
+| [05 共同准入与占用](issues/05-joint-admission.md) | 05a、05b | H2/H3 汇总验收 |
+| [05a 多账户权威表示](issues/05a-multi-account-authority.md) | 01（已完成） | H2/H3 |
+| [05b 共同准入与占用](issues/05b-joint-admission-occupancy.md) | 01（已完成）、04、05a | H2/H3 |
 | [06 双 IOC 执行](issues/06-dual-ioc-dispatch.md) | 05 | H2 |
 | [07 原生 Post-only](issues/07-native-post-only.md) | 05 | H2 |
 | [08 确定性 checkpoint](issues/08-deterministic-checkpoint.md) | 无；最终验收需确认策略 schema | H3 |
-| [09 周期恢复与激活](issues/09-cycle-recovery.md) | 05、08 | H3 |
+| [09 周期恢复与激活](issues/09-cycle-recovery.md) | 09a、09b | H3 汇总验收 |
+| [09a 核心周期闭合](issues/09a-cycle-closure-residual.md) | 05b；最终验收需残余阈值及资产规则冻结 | H3 |
+| [09b 恢复与激活](issues/09b-cycle-recovery-activation.md) | 08、09a | H3 |
 | [10 综合验收](issues/10-public-seam-acceptance.md) | 03、06、07、09；相关策略行为与参数合同冻结 | H1/H2/H3 |
 
 ## Frontier
 
-- [01 确认跨账户共同准入与周期占用的权威边界](issues/01-authority-boundary.md)：in-progress；源码核对与设计提案已形成，待架构及追加拆分确认。
-- [02 双边多档快照贯通策略输入](issues/02-depth-snapshot.md)
-- [04 Host 完整 IntentGroup 原子传输与身份校验](issues/04-host-intent-group.md)
+- [02 双边多档快照贯通策略输入](issues/02-depth-snapshot.md)：in-progress，保留既有认领。
+- [04 Host 完整 IntentGroup 原子传输与身份校验](issues/04-host-intent-group.md)：in-progress，保留既有认领。
+- [05a 多账户权威表示与持久恢复](issues/05a-multi-account-authority.md)：01 已完成，先冻结容量预算及可验证全局额度来源。
 - [08 版本化策略状态与确定性 checkpoint](issues/08-deterministic-checkpoint.md)：可开始接口核对和设计，最终验收受 schema 确认门槛约束。
 
 ## Decisions so far
 
-- 2026-10-20：01 的 [权威设计提案](authority-design.md) 与 ADR0017 已形成，均为 proposed；建议单 owner 多账户共同提交，尚未接受架构、发布追加切片或解除 05/09 阻塞。现有源码与离线测试不构成双账户共同准入证据。
-- 已批准 10 票拆分与阻塞边；01 是设计前置票，其余按可独立验证的行为交付。
+- 2026-10-20：用户确认 [权威设计](authority-design.md) 方案 A 及追加拆分，ADR0017 accepted，01 resolved。首版单 DecisionDomain / TradingShard 拥有多账户分区并共同提交，跨 shard 组拒绝；H2/H3 共用核心周期占用。05a 可领取，05b 等待 04/05a；09a 等待 05b，09b 等待 08/09a。现有源码与离线测试不构成双账户共同准入证据。
+- 保留原 10 票编号；05/09 汇总各自 a/b 子票，子票与原验收清单均通过后才关闭汇总票，06/07 → 05、10 → 09 的外部依赖不变。
 - H2 占用与 H3 恢复共用唯一权威设计，不各建一套锁表。
 - Host 完整组传输可以独立验证，但不能据此授予共同准入或发送权限。
 - Post-only 优先复用已有规范语义，核对 Host 至适配器的完整传递，不重复创造类型。
@@ -60,7 +64,8 @@ Status: open
 
 ## Not yet specified
 
-- 跨账户/shard 的最终权威边界、提交与路由方案，待 01 证明并确认。
+- 多账户实现的容量数值、完整格式身份及可验证全局预算来源，待 05a；动态租约扩容首版不开放。
+- 现货残余阈值及资产规则冻结、闭合与释放证据，待 09a；未通过前保持占用。
 - 双边深度容量、格式身份与兼容策略，待 02/03 形成证据。
 - 最终策略状态 schema、数值 codec 与支持平台的确定性证据，待 08。
 - 相关策略行为、参数合同及模型版本的冻结证据；文档成文不自动等于冻结。
