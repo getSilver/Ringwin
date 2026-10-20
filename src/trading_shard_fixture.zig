@@ -18,13 +18,13 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-pub const expected_happy_digest = "c83973959ad6f8d134493c64a776b26072a69f18cafecc638f3bb043e6476307";
+pub const expected_happy_digest = "b53066bc9a1eff72c623b093a32ec83bb88f3bb6e4dea00b2a9e6c30356e59b1";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "5050e127b1dacd455cc9298e5d2c661ed31839efbb3c8a637e504d57b5c94f53",
-    "6fc551c8fe2100940ac93283a65819e5a28e596fdcf3c106461f1659883d9694",
-    "a3359aee37ab2ca25930fcb43ba563a87939b11c5ee76fc4cba982d4bd4d5583",
-    "4bb9d718273cec1a74212d0b2dba326c67c50f2f8a8ca439372fce2b8b8cd3cb",
+    "d7fa703403a25e940d946482fe1845b5c93fae80fdbae1b0424de6a0fd7eb883",
+    "945219e70d5ddf58a0dac4af5bf784108633939b2d8ce6286ca7be02c5e40d3a",
+    "71a1559b6f42ecdc97a0daa3794344a20617459d2fcced222706a8235d180a1c",
+    "ca323f6735e4a6a2ad49b44adac032205673770c674777d40369c3b2788b6882",
 };
 pub const order_limit_price: i64 = 50_100_000_000;
 
@@ -947,4 +947,77 @@ test "snapshot restore replays only the stable journal tail without send capabil
     try std.testing.expectEqualSlices(u8, &live.canonicalStateDigest(), &recovered.canonicalStateDigest());
     var gap = journal.Journal.initAt(prefix.decision_journal.last_sequence + 2);
     try std.testing.expectError(error.SnapshotJournalGap, engine.TradingShard.restoreSegmentsInto(recovered, encoded, &.{gap.bytes()}));
+}
+
+test "02 depth survives durable snapshot and journal tail with the same Host input" {
+    const depth_module = @import("depth_snapshot.zig");
+    const run = try std.testing.allocator.create(LiveRun);
+    defer std.testing.allocator.destroy(run);
+    try healthyRunInto(run);
+    var input = snapshotAt(12, 200);
+    var book = &input.venue.event.l2_book_snapshot;
+    var depth: canonical.BookDepth = .{ .visible_at_ns = input.venue.envelope.times.receive_utc_ns.?, .bid_count = 2, .ask_count = 2 };
+    depth.bids[0] = .{ .ticks = book.best_bid.ticks, .lots = 1000 };
+    depth.bids[1] = .{ .ticks = 49_700_000_000, .lots = 500 };
+    depth.asks[0] = .{ .ticks = book.best_ask.ticks, .lots = 40 };
+    depth.asks[1] = .{ .ticks = 50_100_000_000, .lots = 60 };
+    // Unknown deeper quantity survives core persistence without becoming zero.
+    depth.ask_count = 3;
+    depth.asks[2] = .{ .ticks = 50_200_000_000, .lots = null };
+    book.depth = depth;
+    _ = try apply(run, input);
+    try run.decision_journal.seal();
+    const storage = try std.testing.allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer std.testing.allocator.free(storage);
+    const encoded = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, storage);
+    const recovered = try std.testing.allocator.create(engine.TradingShard);
+    defer std.testing.allocator.destroy(recovered);
+    _ = try engine.TradingShard.restoreSnapshotInto(recovered, encoded);
+    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &recovered.canonicalStateDigest());
+    var live_wire: [depth_module.wire_len]u8 = undefined;
+    var recovered_wire: [depth_module.wire_len]u8 = undefined;
+    const live_input = try host_gateway.depthSnapshotInput(&run.shard.canonical_market, 3, run.decision_journal.last_sequence, &live_wire, 10, 10);
+    const restored_input = try host_gateway.depthSnapshotInput(&recovered.canonical_market, 3, run.decision_journal.last_sequence, &recovered_wire, 10, 10);
+    try std.testing.expectEqualSlices(u8, live_input.payload, restored_input.payload);
+    const restored_book = try depth_module.decode(restored_input.payload);
+    try std.testing.expect(restored_book.depth.?.asks[2].lots == null);
+    try std.testing.expectError(error.InsufficientDepth, depth_module.quote(restored_book, .buy, 101, 50_200_000_000, 0, .quote));
+    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &try replayDigest(run));
+    // A stable tail changes depth and its digest, without rewriting prior input.
+    var tail = journal.Journal.initAt(run.decision_journal.last_sequence + 1);
+    var next = snapshotAt(13, 201);
+    depth.asks[1].lots = 1;
+    depth.visible_at_ns = next.venue.envelope.times.receive_utc_ns.?;
+    next.venue.event.l2_book_snapshot.depth = depth;
+    next.venue.event.l2_book_snapshot.next_ask_quantity = quantity(1);
+    _ = try engine.applyStable(&run.shard, &tail, next);
+    try tail.seal();
+    const recovery = try engine.TradingShard.restoreSegmentsInto(recovered, encoded, &.{tail.bytes()});
+    try std.testing.expectEqual(journal.ScanStatus.clean, recovery.status);
+    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &recovered.canonicalStateDigest());
+    const tail_input = try host_gateway.depthSnapshotInput(&recovered.canonical_market, 3, tail.last_sequence, &recovered_wire, 11, 11);
+    try std.testing.expect(!std.mem.eql(u8, live_input.payload, tail_input.payload));
+    var invalid_tail = journal.Journal.initAt(tail.last_sequence + 1);
+    var invalid = snapshotAt(14, 202);
+    depth.visible_at_ns = invalid.venue.envelope.times.receive_utc_ns.?;
+    depth.bids[0].lots = null;
+    invalid.venue.event.l2_book_snapshot.depth = depth;
+    invalid.venue.event.l2_book_snapshot.best_bid_quantity = null;
+    invalid.venue.event.l2_book_snapshot.next_ask_quantity = quantity(1);
+    try std.testing.expectError(error.IncompleteL2Book, engine.applyStable(&run.shard, &invalid_tail, invalid));
+    try std.testing.expect(run.shard.market_health == .gap);
+    try std.testing.expectError(error.MarketGap, host_gateway.depthSnapshotInput(&run.shard.canonical_market, 3, invalid_tail.last_sequence, &recovered_wire, 12, 12));
+    try invalid_tail.seal();
+    const invalid_recovery = try engine.TradingShard.restoreSegmentsInto(recovered, encoded, &.{ tail.bytes(), invalid_tail.bytes() });
+    try std.testing.expectEqual(journal.ScanStatus.clean, invalid_recovery.status);
+    try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &recovered.canonicalStateDigest());
+    try std.testing.expectError(error.MarketGap, host_gateway.depthSnapshotInput(&recovered.canonical_market, 3, invalid_tail.last_sequence, &recovered_wire, 12, 12));
+    // A distinct time mismatch also closes healthy depth before returning error.
+    _ = try engine.TradingShard.restoreSnapshotInto(recovered, encoded);
+    var bad_time = input;
+    bad_time.venue.envelope.identity.sequence += 1;
+    bad_time.venue.event.l2_book_snapshot.depth.?.visible_at_ns += 1;
+    var time_tail = journal.Journal.initAt(run.decision_journal.last_sequence + 1);
+    try std.testing.expectError(error.InvalidDepthTime, engine.applyStable(recovered, &time_tail, bad_time));
+    try std.testing.expectError(error.MarketGap, host_gateway.depthSnapshotInput(&recovered.canonical_market, 3, time_tail.last_sequence, &recovered_wire, 13, 13));
 }

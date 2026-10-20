@@ -190,9 +190,48 @@ def validate_batch_schema(batch):
     offset = 128
     while offset < len(batch):
         record_len, _, event_type, schema_version = struct.unpack_from("<IIHH", batch, offset)
-        if event_type not in range(1, 7) or schema_version != 1:
+        if event_type not in range(1, 8) or schema_version != 1:
             raise RecoveryNeeded(2)
+        if event_type == 7:
+            payload_len = struct.unpack_from("<I", batch, offset + 4)[0]
+            decode_depth_snapshot(batch[offset + 64:offset + 64 + payload_len])
         offset += record_len
+
+
+def decode_depth_snapshot(payload):
+    """Canonical depth v1: eight levels per side, integer ticks/lots only."""
+    if len(payload) != 704 or any(payload[44:64]) or any(x > 1 for x in payload[42:44]):
+        raise RecoveryNeeded(2)
+    instrument = int.from_bytes(payload[:16], "little")
+    rules, sequence, visible_at = struct.unpack_from("<QQQ", payload, 16)
+    counts = payload[40:42]
+    if not instrument or not rules or any(n < 1 or n > 8 for n in counts):
+        raise RecoveryNeeded(2)
+    sides = []
+    for side, count in enumerate(counts):
+        levels = []
+        for i in range(8):
+            offset = 64 + (side * 8 + i) * 40
+            ticks = int.from_bytes(payload[offset:offset + 16], "little", signed=True)
+            present = payload[offset + 16]
+            lots = int.from_bytes(payload[offset + 24:offset + 40], "little", signed=True)
+            if present > 1 or any(payload[offset + 17:offset + 24]) or (not present and lots):
+                raise RecoveryNeeded(2)
+            if i >= count:
+                if ticks or present:
+                    raise RecoveryNeeded(2)
+                continue
+            if ticks <= 0 or (present and lots < 0):
+                raise RecoveryNeeded(2)
+            if levels and (ticks >= levels[-1][0] if side == 0 else ticks <= levels[-1][0]):
+                raise RecoveryNeeded(2)
+            levels.append((ticks, lots if present else None))
+        sides.append(tuple(levels))
+    if sides[0][0][0] >= sides[1][0][0]:
+        raise RecoveryNeeded(2)
+    return {"instrument": instrument, "rules_version": rules, "sequence": sequence,
+            "visible_at_ns": visible_at, "bids": sides[0], "asks": sides[1],
+            "bids_truncated": bool(payload[42]), "asks_truncated": bool(payload[43])}
 
 
 def trade_once(args, session, zig_sequence, host_sequence):

@@ -924,6 +924,9 @@ pub const TradingShard = struct {
                 try self.bindFreshCancellations(event.envelope.times.monotonic_ns orelse 0);
                 publish = true;
             } else if (self.canonical_market.failure_generation != market_failure_generation_before) {
+                if (self.canonical_market.get(self.instrument_identity)) |market| {
+                    if (market.health == .gap) self.market_health = .gap;
+                }
                 try self.trace.append(.canonical_market_invalidated, event.envelope.identity.sequence);
                 publish = true;
             }
@@ -2529,9 +2532,18 @@ pub const TradingShard = struct {
                 try self.trace.append(.canonical_instrument_definition, fact_identity);
             },
             .l2_book_snapshot => |book_snapshot| {
+                if (book_snapshot.depth) |depth| {
+                    if (record.envelope.times.receive_utc_ns == null or depth.visible_at_ns != record.envelope.times.receive_utc_ns.?) {
+                        try self.canonical_market.invalidateBook(book_snapshot.instrument);
+                        return error.InvalidDepthTime;
+                    }
+                }
                 if (book_snapshot.best_bid_quantity == null or book_snapshot.best_ask_quantity == null or
                     ((book_snapshot.next_ask == null) != (book_snapshot.next_ask_quantity == null)))
+                {
+                    try self.canonical_market.invalidateBook(book_snapshot.instrument);
                     return error.IncompleteL2Book;
+                }
                 try self.canonical_market.apply(record.event);
                 if (book_snapshot.instrument == self.instrument_identity) {
                     self.expected_source_sequence = try std.math.add(u64, book_snapshot.sequence, 1);
@@ -5682,6 +5694,10 @@ fn digestCanonicalProjections(hasher: *Sha256, shard: *const TradingShard) void 
             digestInt(hasher, u64, book.sequence);
             digestInt(hasher, i128, book.best_bid.ticks);
             digestInt(hasher, i128, book.best_ask.ticks);
+            // Depth, coverage, quantities and visibility are decision inputs.
+            var book_bytes: [4096]u8 = undefined;
+            const encoded_book = snapshot_codec.encodeBare(&book_bytes, book) catch unreachable;
+            hasher.update(encoded_book);
         }
         digestInt(hasher, u8, @intFromEnum(market.health));
         digestBool(hasher, market.failure != null);

@@ -61,8 +61,18 @@ pub const OkxMarketFeed = struct {
 
     fn stage(self: *OkxMarketFeed, ingress: okx.IngressBatch) !void {
         var output: canonical.AdapterOutputBatch = .{};
-        for (ingress.eventSlice()) |event|
-            try self.translate(&output, event);
+        for (ingress.eventSlice()) |event| {
+            self.translate(&output, event) catch |err| {
+                if (event.payload == .l2_book_snapshot) {
+                    const instrument = event.payload.l2_book_snapshot.instrument;
+                    self.books[@intFromEnum(instrument)].ready = false;
+                    var failed: canonical.AdapterOutputBatch = .{};
+                    try self.append(&failed, event.envelope, instrumentIdentity(instrument), event.envelope.raw_evidence.stream_sequence, null, .{ .market_data_health_changed = .{ .instrument = instrumentIdentity(instrument), .health = .gap } });
+                    self.pending = failed;
+                }
+                return err;
+            };
+        }
         if (output.len != 0) self.pending = output;
     }
 
@@ -160,10 +170,32 @@ pub const OkxMarketFeed = struct {
                 const ask = try price(snapshot.instrument, rules, snapshot.asks.slice()[0].price);
                 const bid_quantity = try quantity(snapshot.instrument, rules, snapshot.bids.slice()[0].quantity);
                 const ask_quantity = try quantity(snapshot.instrument, rules, snapshot.asks.slice()[0].quantity);
+                var depth: canonical.BookDepth = .{
+                    .visible_at_ns = event.envelope.receive_time_utc_ns,
+                    .bid_count = @intCast(@min(snapshot.bids.len, canonical.max_depth_levels)),
+                    .ask_count = @intCast(@min(snapshot.asks.len, canonical.max_depth_levels)),
+                    .bids_truncated = snapshot.bids.len > canonical.max_depth_levels,
+                    .asks_truncated = snapshot.asks.len > canonical.max_depth_levels,
+                };
+                // Validate every received level, including the discarded tail.
+                for (snapshot.bids.slice(), 0..) |level, i| {
+                    const px = try price(snapshot.instrument, rules, level.price);
+                    const qty = try quantity(snapshot.instrument, rules, level.quantity);
+                    if (px.ticks <= 0 or qty.lots < 0) return error.InvalidDepthLevel;
+                    if (i > 0 and try compareDecimal(snapshot.bids.slice()[i - 1].price, level.price) != .gt) return error.InvalidDepthLevel;
+                    if (i < depth.bid_count) depth.bids[i] = .{ .ticks = px.ticks, .lots = qty.lots };
+                }
+                for (snapshot.asks.slice(), 0..) |level, i| {
+                    const px = try price(snapshot.instrument, rules, level.price);
+                    const qty = try quantity(snapshot.instrument, rules, level.quantity);
+                    if (px.ticks <= 0 or qty.lots < 0) return error.InvalidDepthLevel;
+                    if (i > 0 and try compareDecimal(snapshot.asks.slice()[i - 1].price, level.price) != .lt) return error.InvalidDepthLevel;
+                    if (i < depth.ask_count) depth.asks[i] = .{ .ticks = px.ticks, .lots = qty.lots };
+                }
                 const sequence = try sourceSequence(snapshot.source_sequence);
                 self.books[index] = .{ .bid = bid, .bid_quantity = bid_quantity, .ask = ask, .ask_quantity = ask_quantity, .ready = true };
                 try self.append(output, event.envelope, instrumentIdentity(snapshot.instrument), sequence, null, .{
-                    .l2_book_snapshot = .{ .instrument = instrumentIdentity(snapshot.instrument), .sequence = sequence, .best_bid = bid, .best_ask = ask, .best_bid_quantity = bid_quantity, .best_ask_quantity = ask_quantity },
+                    .l2_book_snapshot = .{ .instrument = instrumentIdentity(snapshot.instrument), .sequence = sequence, .depth = depth, .best_bid = bid, .best_ask = ask, .best_bid_quantity = bid_quantity, .best_ask_quantity = ask_quantity, .next_ask = if (depth.ask_count > 1) .{ .instrument = bid.instrument, .rules_version = rules.version, .ticks = depth.asks[1].ticks } else null, .next_ask_quantity = if (depth.ask_count > 1) .{ .instrument = bid.instrument, .rules_version = rules.version, .lots = depth.asks[1].lots.? } else null },
                 });
             },
             .l2_book_delta => |delta| try self.translateDelta(output, event.envelope, delta),
@@ -399,4 +431,152 @@ test "OKX implementation obeys the shared lifecycle and output backpressure cont
     try std.testing.expectError(error.OutputPending, adapter.stop(.{ .monotonic_ns = 1 }));
     _ = try adapter.tryDrain();
     try adapter.stop(.{ .monotonic_ns = 1 });
+}
+
+test "02 captured multi-level snapshot retains both sides at the public seam" {
+    var sink = TestRawSink{};
+    var feed = OkxMarketFeed.init(sink.sink());
+    const adapter = try startTest(&feed);
+    const definition_raw =
+        \\{"arg":{"channel":"instruments","instType":"SPOT"},"data":[{"instType":"SPOT","instId":"BTC-USDT","state":"live","ruleType":"normal","tickSz":"0.1","lotSz":"0.01","minSz":"0.01","maxLmtSz":"1000000","maxMktSz":"10000","maxLmtAmt":"","maxMktAmt":"","tradeQuoteCcyList":[],"upcChg":[],"ts":"1800000000000"}]}
+    ;
+    try feed.ingest(std.testing.allocator, test_times, definition_raw);
+    const definition_output = (try adapter.tryDrain()).?;
+    const snapshot_raw =
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["100.1","0.02","0","1"],["100.2","0.03","0","1"]],"bids":[["99.9","0.04","0","1"],["99.8","0.05","0","1"]],"ts":"1800000000000","seqId":"100","prevSeqId":"-1","checksum":0}]}
+    ;
+    try feed.ingest(std.testing.allocator, test_times, snapshot_raw);
+    const batch = (try adapter.tryDrain()).?;
+    var replay_sink = TestRawSink{};
+    var replay_feed = OkxMarketFeed.init(replay_sink.sink());
+    const replay_adapter = try startTest(&replay_feed);
+    const definition_evidence = definition_output.events[0].envelope.raw_evidence;
+    try replay_feed.replay(std.testing.allocator, 6, test_times, .{ .stream_sequence = definition_evidence.sequence, .sha256 = definition_evidence.digest }, definition_raw);
+    _ = try replay_adapter.tryDrain();
+    const snapshot_evidence = batch.events[0].envelope.raw_evidence;
+    try replay_feed.replay(std.testing.allocator, 6, test_times, .{ .stream_sequence = snapshot_evidence.sequence, .sha256 = snapshot_evidence.digest }, snapshot_raw);
+    const replay_output = (try replay_adapter.tryDrain()).?;
+    try std.testing.expectEqualDeep(batch.events[0], replay_output.events[0]);
+    try std.testing.expectEqual(@as(u64, 0), replay_sink.append_count);
+    const depth = batch.events[0].event.l2_book_snapshot.depth.?;
+    try std.testing.expectEqual(@as(u8, 2), depth.bid_count);
+    try std.testing.expectEqual(@as(u8, 2), depth.ask_count);
+    try std.testing.expectEqual(@as(i128, 998), depth.bids[1].ticks);
+    try std.testing.expectEqual(@as(?i128, 3), depth.asks[1].lots);
+    const projection_module = @import("market_projection.zig");
+    const host = @import("strategy_host_gateway.zig");
+    const ipc = @import("strategy_host_ipc.zig");
+    const depth_module = @import("depth_snapshot.zig");
+    const codec = @import("canonical_event_codec.zig");
+    var projection: projection_module.Projection = .{};
+    try projection.apply(.{ .instrument_definition_observed = .{ .instrument = btc_usdt_spot, .rules_version = 7 } });
+    try projection.activateRules(btc_usdt_spot, 7);
+    try projection.apply(batch.events[0].event);
+    var wire: [depth_module.wire_len]u8 = undefined;
+    const input = try host.depthSnapshotInput(&projection, btc_usdt_spot, 1, &wire, 10, 12);
+    const visible = try depth_module.decode(input.payload);
+    try std.testing.expectEqualDeep(batch.events[0].event.l2_book_snapshot, visible);
+    try std.testing.expectEqual(@as(i128, 5008), (try depth_module.quote(visible, .buy, 5, 1002, 0, .quote)).quote_tick_lots);
+    try std.testing.expectEqual(@as(i128, 4989), (try depth_module.quote(visible, .sell, 5, 998, 1000, .quote)).quote_tick_lots);
+    try std.testing.expectEqual(@as(i128, 5014), (try depth_module.quote(visible, .buy, 5, 1002, 1000, .quote)).quote_tick_lots);
+    try std.testing.expectEqual(@as(i128, 4), (try depth_module.quote(visible, .buy, 5, 1002, 1000, .base)).base_lots);
+    try std.testing.expectEqual(@as(i128, 6), (try depth_module.quote(visible, .sell, 5, 998, 1000, .base)).base_lots);
+    try std.testing.expectError(error.InsufficientDepth, depth_module.quote(visible, .buy, 6, 1002, 0, .quote));
+    try std.testing.expectError(error.InsufficientDepth, depth_module.quote(visible, .buy, 5, 1001, 0, .quote));
+    var gateway = try host.Gateway.init(.{ .schema_registry = 10, .decision_domain = 20, .session = .{ .fencing = 1, .shard = 0, .generation = 1 }, .authorization = .{ .strategy_identity = 1, .config_version = 7, .activation_identity = 1, .activation_barrier = 0 } }, &.{host.Subscription.of(1, &.{.depth_snapshot})});
+    var batch_bytes: [2048]u8 = undefined;
+    const host_batch = try gateway.encodeBatch(&batch_bytes, 1, 1, 1, 10, &.{input});
+    try std.testing.expectEqual(ipc.QshStatusV1.ok, ipc.validateBatchAt(host_batch, gateway.config.session, 1, null, 11).status);
+    try std.testing.expectEqualDeep(visible, try depth_module.decode(host_batch[192..][0..depth_module.wire_len]));
+
+    // Appendix V2, with one price tick and one quantity lot per stated unit.
+    var v2_sink = TestRawSink{};
+    var v2_feed = OkxMarketFeed.init(v2_sink.sink());
+    const v2_adapter = try startTest(&v2_feed);
+    const v2_definition_raw =
+        \\{"arg":{"channel":"instruments","instType":"SPOT"},"data":[{"instType":"SPOT","instId":"BTC-USDT","state":"live","ruleType":"normal","tickSz":"1","lotSz":"1","minSz":"0.01","maxLmtSz":"1000000","maxMktSz":"10000","maxLmtAmt":"","maxMktAmt":"","tradeQuoteCcyList":[],"upcChg":[],"ts":"1800000000000"}]}
+    ;
+    try v2_feed.ingest(std.testing.allocator, test_times, v2_definition_raw);
+    const v2_definition = (try v2_adapter.tryDrain()).?;
+    try v2_feed.ingest(std.testing.allocator, test_times,
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["100","1","0","1"],["101","2","0","1"]],"bids":[["99","1","0","1"],["98","2","0","1"]],"ts":"1800000000000","seqId":"100","prevSeqId":"-1","checksum":0}]}
+    );
+    const v2_batch = (try v2_adapter.tryDrain()).?;
+    var v2_projection: projection_module.Projection = .{};
+    try v2_projection.apply(v2_definition.events[0].event);
+    try v2_projection.activateRules(btc_usdt_spot, 7);
+    try v2_projection.apply(v2_batch.events[0].event);
+    const v2_input = try host.depthSnapshotInput(&v2_projection, btc_usdt_spot, 1, &wire, 10, 12);
+    const v2_book = try depth_module.decode(v2_input.payload);
+    try std.testing.expectEqual(@as(i128, 302), (try depth_module.quote(v2_book, .buy, 3, 101, 0, .quote)).quote_tick_lots);
+    try std.testing.expectError(error.InsufficientDepth, depth_module.quote(v2_book, .buy, 3, 100, 0, .quote));
+    try std.testing.expectEqual(@as(i128, 100), (try depth_module.quote(v2_book, .buy, 1, 100, 0, .quote)).quote_tick_lots);
+    try std.testing.expectEqual(@as(i128, 295), (try depth_module.quote(v2_book, .sell, 3, 98, 0, .quote)).quote_tick_lots);
+    try std.testing.expectError(error.InsufficientDepth, depth_module.quote(v2_book, .sell, 3, 99, 0, .quote));
+
+    // Capture encoding/replay cannot lose depth or invent tail liquidity.
+    var encoded: [codec.max_encoded_len]u8 = undefined;
+    const record = try codec.decode(try codec.encode(&encoded, batch.events[0]));
+    var old_schema = batch.events[0];
+    old_schema.envelope.schema_version = 13;
+    try std.testing.expectError(error.InvalidCanonicalEnvelope, codec.encode(&encoded, old_schema));
+    const encoded_current = try codec.encode(&encoded, batch.events[0]);
+    encoded[0] = 11;
+    try std.testing.expectError(error.UnsupportedCanonicalEncoding, codec.decode(encoded_current));
+
+    var replayed = projection;
+    replayed.entries[0].last_book = null;
+    try replayed.apply(record.event);
+    try std.testing.expectEqualDeep(projection.get(btc_usdt_spot), replayed.get(btc_usdt_spot));
+    try std.testing.expectError(error.StaleBookSnapshot, projection.apply(record.event));
+    try std.testing.expectEqualDeep(visible, projection.get(btc_usdt_spot).?.last_book.?);
+    // A late snapshot may revoke health but never replace a previous decision input.
+    try std.testing.expectError(error.MarketGap, host.depthSnapshotInput(&projection, btc_usdt_spot, 2, &wire, 11, 13));
+
+    var invalid = visible;
+    invalid.depth.?.ask_count = 9;
+    try std.testing.expectError(error.DepthCapacityExceeded, depth_module.quote(invalid, .buy, 1, 1002, 0, .quote));
+    invalid = visible;
+    invalid.depth.?.ask_count = 0;
+    try std.testing.expectError(error.IncompleteBookSnapshot, depth_module.quote(invalid, .buy, 1, 1002, 0, .quote));
+    invalid = visible;
+    invalid.depth.?.asks[1].ticks = 1000;
+    try std.testing.expectError(error.InvalidDepthLevel, depth_module.quote(invalid, .buy, 1, 1002, 0, .quote));
+    invalid = visible;
+    invalid.depth.?.asks[1].lots = null;
+    invalid.next_ask_quantity = null;
+    try std.testing.expectError(error.InsufficientDepth, depth_module.quote(invalid, .buy, 3, 1002, 0, .quote));
+    invalid.depth.?.asks[1].lots = 0;
+    invalid.next_ask_quantity = .{ .instrument = visible.instrument, .rules_version = 7, .lots = 0 };
+    try std.testing.expectError(error.InsufficientDepth, depth_module.quote(invalid, .buy, 3, 1002, 0, .quote));
+    invalid = visible;
+    invalid.complete = false;
+    try std.testing.expectError(error.IncompleteBookSnapshot, depth_module.quote(invalid, .buy, 1, 1002, 0, .quote));
+    invalid = visible;
+    invalid.depth = null;
+    try std.testing.expectError(error.MissingDepth, depth_module.quote(invalid, .buy, 1, 1002, 0, .quote));
+    var small: [32]u8 = undefined;
+    try std.testing.expectError(error.DepthCapacityExceeded, depth_module.encode(&small, visible));
+    _ = try depth_module.encode(&wire, visible);
+    wire[40] = 9;
+    try std.testing.expectError(error.DepthCapacityExceeded, depth_module.decode(&wire));
+    // Raw malformed ticks revoke the adapter book, with captured gap evidence.
+    try std.testing.expectError(error.InexactDecimal, feed.ingest(std.testing.allocator, test_times,
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["100.15","0.02","0","1"]],"bids":[["99.9","0.04","0","1"]],"ts":"1800000000000","seqId":"101","prevSeqId":"-1","checksum":0}]}
+    ));
+    const failed = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(canonical.MarketDataHealth.gap, failed.events[0].event.market_data_health_changed.health);
+    try feed.ingest(std.testing.allocator, test_times,
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["100.1","0.01","0","1"],["100.2","0.01","0","1"],["100.3","0.01","0","1"],["100.4","0.01","0","1"],["100.5","0.01","0","1"],["100.6","0.01","0","1"],["100.7","0.01","0","1"],["100.8","0.01","0","1"],["100.9","0.01","0","1"]],"bids":[["99.9","0.01","0","1"],["99.8","0.01","0","1"],["99.7","0.01","0","1"],["99.6","0.01","0","1"],["99.5","0.01","0","1"],["99.4","0.01","0","1"],["99.3","0.01","0","1"],["99.2","0.01","0","1"],["99.1","0.01","0","1"]],"ts":"1800000000000","seqId":"102","prevSeqId":"-1","checksum":0}]}
+    );
+    const bounded = (try adapter.tryDrain()).?.events[0].event.l2_book_snapshot;
+    try std.testing.expectEqual(@as(u8, 8), bounded.depth.?.bid_count);
+    try std.testing.expect(bounded.depth.?.bids_truncated and bounded.depth.?.asks_truncated);
+    try std.testing.expectError(error.InsufficientDepth, depth_module.quote(bounded, .buy, 9, 1010, 0, .quote));
+    try std.testing.expectError(error.InsufficientDepth, depth_module.quote(bounded, .sell, 9, 990, 0, .quote));
+}
+
+fn compareDecimal(a: okx.Decimal, b: okx.Decimal) !std.math.Order {
+    const scale = @max(a.scale, b.scale);
+    return std.math.order(try canonicalDecimal(a).exactAtoms(scale), try canonicalDecimal(b).exactAtoms(scale));
 }

@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const schema_version: u16 = 13;
+pub const schema_version: u16 = 14;
 
 pub const VenueIdentity = u64;
 pub const Product = enum(u8) { spot, isolated_linear_usdt };
@@ -343,10 +343,24 @@ pub const OrderDispatchResult = struct {
     reason: ?CanonicalRejectReason = null,
 };
 pub const InstrumentDefinitionObserved = struct { instrument: InstrumentIdentity, rules_version: u64 };
+pub const max_depth_levels = 8;
+pub const DepthLevel = struct { ticks: i128 = 0, lots: ?i128 = null };
+/// Prices/quantities share the enclosing snapshot Instrument and rules version.
+/// Coverage ends at the last supplied level even when truncated is false.
+pub const BookDepth = struct {
+    bids: [max_depth_levels]DepthLevel = @splat(.{}),
+    asks: [max_depth_levels]DepthLevel = @splat(.{}),
+    bid_count: u8 = 0,
+    ask_count: u8 = 0,
+    bids_truncated: bool = false,
+    asks_truncated: bool = false,
+    visible_at_ns: u64,
+};
 pub const L2BookSnapshot = struct {
     instrument: InstrumentIdentity,
     sequence: VenueSourceSequence,
     complete: bool = true,
+    depth: ?BookDepth = null,
     best_bid: InstrumentPrice,
     best_ask: InstrumentPrice,
     best_bid_quantity: ?InstrumentQuantity = null,

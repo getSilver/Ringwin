@@ -1,0 +1,7 @@
+--- a/GLOSSARY.md
++++ b/GLOSSARY.md
+@@ -676,3 +676,3 @@
+ **L2BookSnapshot**:
+-Venue 在明确来源序号上声明的某个 Instrument 完整价位级买卖盘事实，用于建立或重建权威 L2 订单簿。
++Venue 在明确来源序号及声明覆盖范围内提供的某个 Instrument 完整价位级买卖盘事实，用于建立或重建该范围的权威 L2 订单簿；范围之外及数量未知的档位不构成可证流动性。
+ _Avoid_: BBO, BookCheckpoint, local order book

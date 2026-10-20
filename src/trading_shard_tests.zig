@@ -1765,7 +1765,17 @@ test "shared canonical adapter facts enter the TradingShard state seam" {
     } });
     incomplete_book.venue.envelope.scope = .instrument;
     incomplete_book.venue.envelope.instrument = instrument;
-    try std.testing.expectError(error.IncompleteL2Book, run.shard.apply(incomplete_book));
+    // Rejecting incomplete market evidence revokes that Instrument's book.
+    // Keep this rejection scenario separate from the following fill trajectory.
+    const rejected_book = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(rejected_book);
+    rejected_book.* = run.shard;
+    const previous_book = run.shard.canonical_market.get(instrument).?.last_book;
+    try std.testing.expectError(error.IncompleteL2Book, rejected_book.apply(incomplete_book));
+    try std.testing.expect(rejected_book.market_health == .gap);
+    try std.testing.expect(rejected_book.canonical_market.get(instrument).?.health == .gap);
+    try std.testing.expectEqualDeep(previous_book, rejected_book.canonical_market.get(instrument).?.last_book);
+    try std.testing.expectEqualDeep(run.shard.economicSummary(), rejected_book.economicSummary());
     try std.testing.expectEqualSlices(u8, &accepted_digest, &run.shard.canonicalStateDigest());
     var unsupported_schema = Fixture.record(20, .{ .reconciliation_started = 20 });
     unsupported_schema.venue.envelope.schema_version = canonical.schema_version + 1;

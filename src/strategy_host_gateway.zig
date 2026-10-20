@@ -1,6 +1,8 @@
 const std = @import("std");
 const ipc = @import("strategy_host_ipc.zig");
 const trading = @import("trading_shard.zig");
+const depth_snapshot = @import("depth_snapshot.zig");
+const market_projection = @import("market_projection.zig");
 const journal = @import("journal.zig");
 
 const Crc32c = std.hash.crc.Crc32Iscsi;
@@ -21,10 +23,12 @@ pub const EventType = enum(u16) {
     timer = 4,
     account = 5,
     fill = 6,
+    depth_snapshot = 7,
 };
 
 pub const EventEnvelope = struct {
     event_type: EventType,
+    time_presence: u32 = 0x1f,
     shard_sequence: u64,
     source_time_ns: i64,
     receive_time_ns: i64,
@@ -250,6 +254,7 @@ pub const Gateway = struct {
                 return error.InvalidBatch;
             previous_sequence = event.shard_sequence;
             if (self.subscription_mask & eventBit(event.event_type) == 0) continue;
+            if (event.event_type == .depth_snapshot) _ = try depth_snapshot.decode(event.payload);
             const record_len = std.mem.alignForward(usize, event_header_len + event.payload.len, 8);
             if (destination.len -| offset < record_len) return error.BatchTooLarge;
             const record = destination[offset..][0..record_len];
@@ -258,7 +263,7 @@ pub const Gateway = struct {
             put(u32, record, 4, @intCast(event.payload.len));
             put(u16, record, 8, @intFromEnum(event.event_type));
             put(u16, record, 10, 1);
-            put(u32, record, 12, 0x1f);
+            put(u32, record, 12, event.time_presence);
             put(u64, record, 16, event.shard_sequence);
             put(i64, record, 24, event.source_time_ns);
             put(i64, record, 32, event.receive_time_ns);
@@ -611,4 +616,15 @@ test "subscription merge and intent rejection contract" {
         gateway.ingest(retried, 106).rejected.reason,
     );
     try std.testing.expectEqual(@as(u32, 1), try eventCount(next_batch));
+}
+
+/// Build Host input exclusively from the currently healthy canonical projection.
+/// The caller binds the authoritative ShardSequence and decision clocks.
+pub fn depthSnapshotInput(projection: *const market_projection.Projection, instrument: u128, shard_sequence: u64, destination: []u8, monotonic_ns: i64, wall_ns: i64) !EventEnvelope {
+    const market = projection.get(instrument) orelse return error.MissingInstrumentDefinition;
+    if (market.health != .healthy) return error.MarketGap;
+    const book = market.last_book orelse return error.MissingBookSnapshot;
+    const payload = try depth_snapshot.encode(destination, book);
+    const visible = std.math.cast(i64, book.depth.?.visible_at_ns) orelse return error.InvalidDepthTime;
+    return .{ .event_type = .depth_snapshot, .shard_sequence = shard_sequence, .time_presence = 0x1e, .source_time_ns = 0, .receive_time_ns = visible, .monotonic_time_ns = monotonic_ns, .wall_time_utc_ns = wall_ns, .payload = payload };
 }

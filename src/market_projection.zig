@@ -2,10 +2,11 @@
 
 const canonical = @import("canonical_event.zig");
 const std = @import("std");
+const depth_snapshot = @import("depth_snapshot.zig");
 
 pub const max_instruments = canonical.max_instrument_definitions;
 
-const MarketFailure = enum(u8) { missing_snapshot, sequence_gap, conflicting_delta, stale_snapshot, incomplete_snapshot, scope_mismatch };
+const MarketFailure = enum(u8) { missing_snapshot, sequence_gap, conflicting_delta, stale_snapshot, incomplete_snapshot, scope_mismatch, invalid_depth };
 
 pub const InstrumentProjection = struct {
     instrument: canonical.InstrumentIdentity,
@@ -18,6 +19,7 @@ pub const InstrumentProjection = struct {
     index: ?canonical.InstrumentPrice = null,
 
     fn applySnapshot(self: *InstrumentProjection, snapshot: canonical.L2BookSnapshot) !void {
+        if (snapshot.depth != null) depth_snapshot.validate(snapshot) catch |err| return self.gap(.invalid_depth, err);
         if (!snapshot.complete) return self.gap(.incomplete_snapshot, error.IncompleteBookSnapshot);
         if (snapshot.instrument != self.instrument or snapshot.best_bid.instrument != self.instrument or
             snapshot.best_ask.instrument != self.instrument)
@@ -25,7 +27,7 @@ pub const InstrumentProjection = struct {
         if (self.active_rules_version == null or self.active_rules_version.? != snapshot.best_bid.rules_version or
             snapshot.best_bid.rules_version != snapshot.best_ask.rules_version)
             return error.InstrumentRulesInactive;
-        if (self.last_book) |previous| if (self.health != .gap and snapshot.sequence <= previous.sequence) {
+        if (self.last_book) |previous| if (snapshot.sequence <= previous.sequence) {
             return self.gap(.stale_snapshot, error.StaleBookSnapshot);
         };
         self.last_book = snapshot;
@@ -137,6 +139,15 @@ pub const Projection = struct {
             if (entry.failure != failure_before) self.failure_generation += 1;
             return err;
         };
+    }
+
+    /// Invalid canonical snapshot evidence revokes the previous depth even
+    /// when compatibility checks reject the candidate before applySnapshot.
+    pub fn invalidateBook(self: *Projection, instrument: canonical.InstrumentIdentity) !void {
+        const entry = self.getPtr(instrument) orelse return error.MissingInstrumentDefinition;
+        if (entry.failure != .invalid_depth) self.failure_generation += 1;
+        entry.health = .gap;
+        entry.failure = .invalid_depth;
     }
 
     pub fn aggregateHealth(self: *const Projection) canonical.MarketDataHealth {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const depth_snapshot = @import("depth_snapshot.zig");
 const builtin = @import("builtin");
 
 const Crc32c = std.hash.crc.Crc32Iscsi;
@@ -398,12 +399,15 @@ pub fn validateBatchAt(
         if (record_len < event_header_len or record_len % 8 != 0 or
             record_len > bytes.len - offset or
             payload_len > record_len - event_header_len or
-            get(u16, bytes, offset + 8) < 1 or get(u16, bytes, offset + 8) > 6 or
+            get(u16, bytes, offset + 8) < 1 or get(u16, bytes, offset + 8) > 7 or
             get(u16, bytes, offset + 10) != 1 or
             get(u32, bytes, offset + 12) & ~@as(u32, 0x1f) != 0 or
             get(u64, bytes, offset + 56) != 0 or
             !allZero(bytes[offset + event_header_len + payload_len .. offset + record_len]))
             return .{ .status = .protocol_error };
+        if (get(u16, bytes, offset + 8) == 7) {
+            _ = depth_snapshot.decode(bytes[offset + event_header_len ..][0..payload_len]) catch return .{ .status = .protocol_error };
+        }
         const sequence = get(u64, bytes, offset + 16);
         if (sequence < first or sequence > last or
             (previous_sequence != null and sequence <= previous_sequence.?))

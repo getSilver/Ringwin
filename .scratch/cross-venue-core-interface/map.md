@@ -48,13 +48,14 @@ Status: open
 
 ## Frontier
 
-- [02 双边多档快照贯通策略输入](issues/02-depth-snapshot.md)：in-progress，保留既有认领。
+- [03 增量与重同步](issues/03-depth-resynchronization.md)：02 已完成，可领取；需继续证明连续深度维护与恢复。
 - [04 Host 完整 IntentGroup 原子传输与身份校验](issues/04-host-intent-group.md)：in-progress，保留既有认领。
 - [05a 多账户权威表示与持久恢复](issues/05a-multi-account-authority.md)：01 已完成，先冻结容量预算及可验证全局额度来源。
 - [08 版本化策略状态与确定性 checkpoint](issues/08-deterministic-checkpoint.md)：可开始接口核对和设计，最终验收受 schema 确认门槛约束。
 
 ## Decisions so far
 
+- 2026-10-21：02 resolved，双边每侧 8 档、显式截断和未知数量、独立 Host 深度输入及稳定恢复已完成离线验收；见 [02 验证记录](02-verification.md)。现有顶部增量撤去多档证据，连续深度归 03；不扩大 Venue、模式或线上资格。
 - 2026-10-20：用户确认 [权威设计](authority-design.md) 方案 A 及追加拆分，ADR0017 accepted，01 resolved。首版单 DecisionDomain / TradingShard 拥有多账户分区并共同提交，跨 shard 组拒绝；H2/H3 共用核心周期占用。05a 可领取，05b 等待 04/05a；09a 等待 05b，09b 等待 08/09a。现有源码与离线测试不构成双账户共同准入证据。
 - 保留原 10 票编号；05/09 汇总各自 a/b 子票，子票与原验收清单均通过后才关闭汇总票，06/07 → 05、10 → 09 的外部依赖不变。
 - H2 占用与 H3 恢复共用唯一权威设计，不各建一套锁表。
@@ -66,7 +67,7 @@ Status: open
 
 - 多账户实现的容量数值、完整格式身份及可验证全局预算来源，待 05a；动态租约扩容首版不开放。
 - 现货残余阈值及资产规则冻结、闭合与释放证据，待 09a；未通过前保持占用。
-- 双边深度容量、格式身份与兼容策略，待 02/03 形成证据。
+- 快照容量及格式兼容已由 02 声明；深度增量、重同步及连续覆盖证据仍待 03。
 - 最终策略状态 schema、数值 codec 与支持平台的确定性证据，待 08。
 - 相关策略行为、参数合同及模型版本的冻结证据；文档成文不自动等于冻结。
 - Venue 与模式运行资格、实际参数校准及线上验证授权。
