@@ -18,7 +18,7 @@ OKX `ingest/replay -> tryDrain` 完成 Venue 私有协议转换。非法转换�
 
 ## 投影、Host 与重放
 
-Projection 仅接受当前激活规则的快照；迟到或同序列快照不能替换已可见盘口。新规则激活清空旧深度。现有顶部增量会将多档证据清空，Host 在新快照前返回 `MissingDepth`；增量深度与重同步由任务 03 完成。
+Projection 仅接受当前激活规则的快照；迟到或同序列快照不能替换已可见盘口。新规则激活清空旧深度。增量及重同步遵循 [连续深度合同](depth-resynchronization-contract.md)。旧的无深度增量仍撤去多档证据，Host 返回 `MissingDepth`；只有携带合格深度 postimage 的连续增量保留该资格。
 
 TradingShard 的旧兼容字段仍要求顶部数量和成对的第二卖档价格/数量；缺失时保守拒绝，不填零。拒绝不完整快照或可见时间不匹配前，先使该 Instrument 的旧盘口失效，通过已有稳定输入与失效事实恢复路径保留 gap，防止 Host 继续使用旧的健康深度。更深档位可保存未知数量，消费到该档时返回不足。
 
@@ -48,3 +48,5 @@ Canonical schema **13 → 14**，CanonicalEventCodec **11 → 12**；journal sch
 Python 示例 accumulator 的九字节策略状态重放 schema 不消费深度事件。本票验证核心恢复后的 Host 深度输入一致，不宣称该示例策略或真实策略 checkpoint 恢复通过；策略状态恢复归任务 08/09。
 
 L2 不提供 maker 队列位置、主动成交概率、条件执行、共同准入或收益证据。本票仅覆盖 I1 的快照部分与 V2 的对称覆盖；完整策略、各 Venue 深度、增量、Demo/Testnet/生产及执行模式资格分别验收。
+
+任务 03 当前格式为 Canonical schema 15 / codec 13 / journal 42 / state 46 / registry 40；上述 02 版本记录保留为历史变更说明。

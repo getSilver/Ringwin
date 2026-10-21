@@ -15,6 +15,7 @@ pub const InstrumentProjection = struct {
     last_book: ?canonical.L2BookSnapshot = null,
     health: canonical.MarketDataHealth = .awaiting_snapshot,
     failure: ?MarketFailure = null,
+    last_delta: ?canonical.L2BookDelta = null,
     mark: ?canonical.InstrumentPrice = null,
     index: ?canonical.InstrumentPrice = null,
 
@@ -26,11 +27,12 @@ pub const InstrumentProjection = struct {
             return self.gap(.scope_mismatch, error.MarketInstrumentMismatch);
         if (self.active_rules_version == null or self.active_rules_version.? != snapshot.best_bid.rules_version or
             snapshot.best_bid.rules_version != snapshot.best_ask.rules_version)
-            return error.InstrumentRulesInactive;
+            return self.gap(.scope_mismatch, error.InstrumentRulesInactive);
         if (self.last_book) |previous| if (snapshot.sequence <= previous.sequence) {
             return self.gap(.stale_snapshot, error.StaleBookSnapshot);
         };
         self.last_book = snapshot;
+        self.last_delta = null;
         self.health = .healthy;
         self.failure = null;
     }
@@ -42,14 +44,17 @@ pub const InstrumentProjection = struct {
             return self.gap(.scope_mismatch, error.MarketInstrumentMismatch);
         if (self.health != .healthy) return error.MarketGap;
         if (delta.sequence == previous.sequence) {
-            if (delta.previous_sequence == previous.sequence - 1 and std.meta.eql(delta.best_bid, previous.best_bid) and std.meta.eql(delta.best_ask, previous.best_ask)) return;
+            if (self.last_delta) |last| if (std.meta.eql(last, delta)) return;
             return self.gap(.conflicting_delta, error.ConflictingBookDelta);
         }
         if (delta.previous_sequence != previous.sequence)
             return self.gap(.sequence_gap, error.BookSequenceGap);
-        self.last_book = .{
+        if (delta.best_bid.rules_version != self.active_rules_version or delta.best_ask.rules_version != self.active_rules_version)
+            return self.gap(.scope_mismatch, error.InstrumentRulesInactive);
+        const next: canonical.L2BookSnapshot = .{
             .instrument = delta.instrument,
             .sequence = delta.sequence,
+            .depth = delta.depth,
             .best_bid = delta.best_bid,
             .best_ask = delta.best_ask,
             .best_bid_quantity = delta.best_bid_quantity,
@@ -57,6 +62,9 @@ pub const InstrumentProjection = struct {
             .next_ask = delta.next_ask,
             .next_ask_quantity = delta.next_ask_quantity,
         };
+        if (next.depth != null) depth_snapshot.validate(next) catch |err| return self.gap(.invalid_depth, err);
+        self.last_book = next;
+        self.last_delta = delta;
     }
 
     fn gap(self: *InstrumentProjection, failure: MarketFailure, err: anyerror) anyerror!void {
@@ -88,6 +96,7 @@ pub const Projection = struct {
         if (entry.definition.rules_version != rules_version) return error.InvalidConfigurationBarrier;
         if (entry.active_rules_version != null and entry.active_rules_version.? != rules_version) {
             entry.last_book = null;
+            entry.last_delta = null;
             entry.health = .awaiting_snapshot;
             entry.failure = null;
             entry.mark = null;
@@ -221,4 +230,37 @@ test "book continuity follows the venue predecessor across non-unit sequences" {
     reset.sequence = 3;
     try projection.apply(.{ .l2_book_delta = reset });
     try std.testing.expectEqual(@as(canonical.VenueSourceSequence, 3), projection.get(10).?.last_book.?.sequence);
+}
+
+test "03 canonical depth duplicates compare all evidence and rules changes revoke it" {
+    var projection: Projection = .{};
+    try projection.apply(.{ .instrument_definition_observed = .{ .instrument = 10, .rules_version = 3 } });
+    try projection.activateRules(10, 3);
+    const bid: canonical.InstrumentPrice = .{ .instrument = 10, .rules_version = 3, .ticks = 99 };
+    const ask: canonical.InstrumentPrice = .{ .instrument = 10, .rules_version = 3, .ticks = 100 };
+    const bid_qty: canonical.InstrumentQuantity = .{ .instrument = 10, .rules_version = 3, .lots = 1 };
+    const ask_qty: canonical.InstrumentQuantity = .{ .instrument = 10, .rules_version = 3, .lots = 2 };
+    var depth: canonical.BookDepth = .{ .visible_at_ns = 1, .bid_count = 1, .ask_count = 1 };
+    depth.bids[0] = .{ .ticks = 99, .lots = 1 };
+    depth.asks[0] = .{ .ticks = 100, .lots = 2 };
+    const snapshot: canonical.L2BookSnapshot = .{ .instrument = 10, .sequence = 100, .depth = depth, .best_bid = bid, .best_ask = ask, .best_bid_quantity = bid_qty, .best_ask_quantity = ask_qty };
+    try projection.apply(.{ .l2_book_snapshot = snapshot });
+    const delta: canonical.L2BookDelta = .{ .instrument = 10, .previous_sequence = 100, .sequence = 105, .depth = depth, .best_bid = bid, .best_ask = ask, .best_bid_quantity = bid_qty, .best_ask_quantity = ask_qty };
+    try projection.apply(.{ .l2_book_delta = delta });
+    try projection.apply(.{ .l2_book_delta = delta });
+    try std.testing.expectEqual(canonical.MarketDataHealth.healthy, projection.get(10).?.health);
+    var conflict = delta;
+    conflict.best_ask_quantity.?.lots = 3;
+    conflict.depth.?.asks[0].lots = 3;
+    try std.testing.expectError(error.ConflictingBookDelta, projection.apply(.{ .l2_book_delta = conflict }));
+    try std.testing.expectEqual(@as(?i128, 2), projection.get(10).?.last_book.?.depth.?.asks[0].lots);
+    try std.testing.expectError(error.MarketGap, projection.apply(.{ .l2_book_delta = delta }));
+    var fresh = snapshot;
+    fresh.sequence = 110;
+    try projection.apply(.{ .l2_book_snapshot = fresh });
+    try projection.apply(.{ .instrument_definition_observed = .{ .instrument = 10, .rules_version = 4 } });
+    try projection.activateRules(10, 4);
+    try std.testing.expect(projection.get(10).?.last_book == null);
+    try std.testing.expectError(error.InstrumentRulesInactive, projection.apply(.{ .l2_book_snapshot = fresh }));
+    try std.testing.expectEqual(canonical.MarketDataHealth.gap, projection.get(10).?.health);
 }

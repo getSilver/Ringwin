@@ -2595,6 +2595,7 @@ pub const TradingShard = struct {
                     try self.canonical_market.invalidateBook(book_snapshot.instrument);
                     return error.IncompleteL2Book;
                 }
+                try self.validateLegacyBookRange(book_snapshot.instrument, book_snapshot.sequence, book_snapshot.best_bid, book_snapshot.best_ask, book_snapshot.best_bid_quantity.?, book_snapshot.best_ask_quantity.?, book_snapshot.next_ask, book_snapshot.next_ask_quantity);
                 try self.canonical_market.apply(record.event);
                 if (book_snapshot.instrument == self.instrument_identity) {
                     self.expected_source_sequence = try std.math.add(u64, book_snapshot.sequence, 1);
@@ -2609,9 +2610,19 @@ pub const TradingShard = struct {
                 try self.trace.append(.l2_snapshot, fact_identity);
             },
             .l2_book_delta => |delta| {
+                if (delta.depth) |depth| {
+                    if (record.envelope.times.receive_utc_ns == null or depth.visible_at_ns != record.envelope.times.receive_utc_ns.?) {
+                        try self.canonical_market.invalidateBook(delta.instrument);
+                        return error.InvalidDepthTime;
+                    }
+                }
                 if (delta.best_bid_quantity == null or delta.best_ask_quantity == null or
                     ((delta.next_ask == null) != (delta.next_ask_quantity == null)))
+                {
+                    try self.canonical_market.invalidateBook(delta.instrument);
                     return error.IncompleteL2Book;
+                }
+                try self.validateLegacyBookRange(delta.instrument, delta.sequence, delta.best_bid, delta.best_ask, delta.best_bid_quantity.?, delta.best_ask_quantity.?, delta.next_ask, delta.next_ask_quantity);
                 self.canonical_market.apply(record.event) catch |err| switch (err) {
                     error.MissingBookSnapshot, error.MarketGap, error.ConflictingBookDelta, error.BookSequenceGap => {
                         if (delta.instrument == self.instrument_identity) self.market_health = .gap;
@@ -2812,6 +2823,15 @@ pub const TradingShard = struct {
             },
         }
         return null;
+    }
+
+    fn validateLegacyBookRange(self: *TradingShard, instrument: canonical.InstrumentIdentity, sequence: u64, bid: canonical.InstrumentPrice, ask: canonical.InstrumentPrice, bid_quantity: canonical.InstrumentQuantity, ask_quantity: canonical.InstrumentQuantity, next_ask: ?canonical.InstrumentPrice, next_quantity: ?canonical.InstrumentQuantity) !void {
+        if (instrument != self.instrument_identity) return;
+        const failure: ?error{ Overflow, PriceOutOfRange, QuantityOutOfRange } = if (sequence == std.math.maxInt(u64)) error.Overflow else if (std.math.cast(i64, bid.ticks) == null or std.math.cast(i64, ask.ticks) == null or (next_ask != null and std.math.cast(i64, next_ask.?.ticks) == null)) error.PriceOutOfRange else if (std.math.cast(i64, bid_quantity.lots) == null or std.math.cast(i64, ask_quantity.lots) == null or (next_quantity != null and std.math.cast(i64, next_quantity.?.lots) == null)) error.QuantityOutOfRange else null;
+        if (failure) |err| {
+            try self.canonical_market.invalidateBook(instrument);
+            return err;
+        }
     }
 
     fn applyNativeReconciliation(self: *TradingShard, record: canonical.EventRecord, result: canonical.ReconciliationResult, evidence: canonical.AccountEconomicEvidence, coverage: ?VerifiedAccountCoverage) !void {
@@ -5751,6 +5771,11 @@ fn digestCanonicalProjections(hasher: *Sha256, shard: *const TradingShard) void 
             var book_bytes: [4096]u8 = undefined;
             const encoded_book = snapshot_codec.encodeBare(&book_bytes, book) catch unreachable;
             hasher.update(encoded_book);
+        }
+        digestBool(hasher, market.last_delta != null);
+        if (market.last_delta) |delta| {
+            var delta_bytes: [4096]u8 = undefined;
+            hasher.update(snapshot_codec.encodeBare(&delta_bytes, delta) catch unreachable);
         }
         digestInt(hasher, u8, @intFromEnum(market.health));
         digestBool(hasher, market.failure != null);

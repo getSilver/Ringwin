@@ -281,7 +281,7 @@ pub const Decoder = struct {
         times: Times,
         raw: []const u8,
     ) (RawSinkError || error{ OutOfMemory, FrameTooLarge })!IngressBatch {
-        if (raw.len > max_raw_frame_bytes or raw.len > std.math.maxInt(u32)) {
+        if (raw.len > std.math.maxInt(u32)) {
             return error.FrameTooLarge;
         }
 
@@ -302,7 +302,7 @@ pub const Decoder = struct {
     /// Reparse bytes already recovered from durable RawIngress. Recovery has
     /// no sink and cannot append the same frame a second time.
     pub fn replay(self: *Decoder, gpa: std.mem.Allocator, times: Times, raw_evidence: RawEvidenceRef, raw: []const u8) error{ FrameTooLarge, RawEvidenceMismatch }!IngressBatch {
-        if (raw.len > max_raw_frame_bytes or raw.len > std.math.maxInt(u32)) return error.FrameTooLarge;
+        if (raw.len > std.math.maxInt(u32)) return error.FrameTooLarge;
         if (raw_evidence.stream_sequence == 0) return error.RawEvidenceMismatch;
         var digest: [Sha256.digest_length]u8 = undefined;
         Sha256.hash(raw, &digest, .{});
@@ -312,8 +312,15 @@ pub const Decoder = struct {
 
     fn decodeCommitted(self: *Decoder, gpa: std.mem.Allocator, times: Times, raw: []const u8, raw_evidence: RawEvidenceRef) IngressBatch {
         var batch: IngressBatch = .{ .raw_evidence = raw_evidence };
+        // Keep the original bytes as evidence, but never parse beyond the budget.
+        if (raw.len > max_raw_frame_bytes) {
+            batch.rejection = .invalid_field;
+            self.invalidateRejected(times, raw_evidence, &batch);
+            return batch;
+        }
         const parsed = std.json.parseFromSlice(std.json.Value, gpa, raw, .{}) catch {
             batch.rejection = .malformed_json;
+            self.invalidateRejected(times, raw_evidence, &batch);
             return batch;
         };
         defer parsed.deinit();
@@ -327,7 +334,18 @@ pub const Decoder = struct {
                 else => .invalid_field,
             };
         };
+        if (batch.rejection != null and batch.eventSlice().len == 0) self.invalidateRejected(times, raw_evidence, &batch);
         return batch;
+    }
+
+    fn invalidateRejected(self: *Decoder, times: Times, evidence: RawEvidenceRef, batch: *IngressBatch) void {
+        for (self.rules_observed, 0..) |observed, index| if (observed) {
+            const instrument: Instrument = @enumFromInt(index);
+            const state = self.bookState(instrument);
+            state.health = .gap;
+            state.last_content_hash = null;
+            batch.append(healthEvent(times, null, evidence, instrument, .gap, .malformed_book_frame, state.last_sequence, null, null)) catch unreachable;
+        };
     }
 
     fn decodeValue(
@@ -493,6 +511,9 @@ pub const Decoder = struct {
                 if (state.last_content_hash) |last_hash| {
                     if (std.mem.eql(u8, &last_hash, &content_hash)) return;
                 }
+            }
+            if (state.last_sequence) |last| {
+                if (sequence <= last) return self.recordGap(instrument, .source_sequence_regression, previous, sequence, times, source_ms, raw_evidence, batch);
             }
             state.health = .healthy;
             state.last_sequence = sequence;

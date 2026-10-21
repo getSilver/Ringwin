@@ -17,12 +17,9 @@ const Rules = struct {
     lot_size: okx.Decimal,
     version: u64,
 };
-const BookTop = struct {
-    bid: canonical.InstrumentPrice,
-    bid_quantity: canonical.InstrumentQuantity,
-    ask: canonical.InstrumentPrice,
-    ask_quantity: canonical.InstrumentQuantity,
+const BookState = struct {
     ready: bool = false,
+    depth: ?canonical.BookDepth = null,
 };
 
 pub const OkxMarketFeed = struct {
@@ -33,7 +30,7 @@ pub const OkxMarketFeed = struct {
     pending: ?canonical.AdapterOutputBatch = null,
     next_event_sequence: u64 = 0,
     rules: [2]?Rules = .{ null, null },
-    books: [2]BookTop = .{ undefined, undefined },
+    books: [2]BookState = .{ undefined, undefined },
 
     pub fn init(raw_sink: okx.RawSink) OkxMarketFeed {
         return .{ .raw_sink = raw_sink };
@@ -63,8 +60,8 @@ pub const OkxMarketFeed = struct {
         var output: canonical.AdapterOutputBatch = .{};
         for (ingress.eventSlice()) |event| {
             self.translate(&output, event) catch |err| {
-                if (event.payload == .l2_book_snapshot) {
-                    const instrument = event.payload.l2_book_snapshot.instrument;
+                if (event.payload == .l2_book_snapshot or event.payload == .l2_book_delta) {
+                    const instrument = if (event.payload == .l2_book_snapshot) event.payload.l2_book_snapshot.instrument else event.payload.l2_book_delta.instrument;
                     self.books[@intFromEnum(instrument)].ready = false;
                     var failed: canonical.AdapterOutputBatch = .{};
                     try self.append(&failed, event.envelope, instrumentIdentity(instrument), event.envelope.raw_evidence.stream_sequence, null, .{ .market_data_health_changed = .{ .instrument = instrumentIdentity(instrument), .health = .gap } });
@@ -193,7 +190,8 @@ pub const OkxMarketFeed = struct {
                     if (i < depth.ask_count) depth.asks[i] = .{ .ticks = px.ticks, .lots = qty.lots };
                 }
                 const sequence = try sourceSequence(snapshot.source_sequence);
-                self.books[index] = .{ .bid = bid, .bid_quantity = bid_quantity, .ask = ask, .ask_quantity = ask_quantity, .ready = true };
+                try @import("../../market/depth_snapshot.zig").validate(.{ .instrument = instrumentIdentity(snapshot.instrument), .sequence = sequence, .depth = depth, .best_bid = bid, .best_ask = ask, .best_bid_quantity = bid_quantity, .best_ask_quantity = ask_quantity });
+                self.books[index] = .{ .ready = true, .depth = depth };
                 try self.append(output, event.envelope, instrumentIdentity(snapshot.instrument), sequence, null, .{
                     .l2_book_snapshot = .{ .instrument = instrumentIdentity(snapshot.instrument), .sequence = sequence, .depth = depth, .best_bid = bid, .best_ask = ask, .best_bid_quantity = bid_quantity, .best_ask_quantity = ask_quantity, .next_ask = if (depth.ask_count > 1) .{ .instrument = bid.instrument, .rules_version = rules.version, .ticks = depth.asks[1].ticks } else null, .next_ask_quantity = if (depth.ask_count > 1) .{ .instrument = bid.instrument, .rules_version = rules.version, .lots = depth.asks[1].lots.? } else null },
                 });
@@ -230,14 +228,29 @@ pub const OkxMarketFeed = struct {
         var book = &self.books[index];
         const sequence = try sourceSequence(delta.source_sequence);
         const previous = try sourceSequence(delta.previous_source_sequence);
-        if (!book.ready or !try applyBid(&book.bid, &book.bid_quantity, delta.bids.slice(), delta.instrument, rules) or !try applyAsk(&book.ask, &book.ask_quantity, delta.asks.slice(), delta.instrument, rules)) {
+        if (!book.ready or book.depth == null) {
             book.ready = false;
             return self.append(output, envelope, instrumentIdentity(delta.instrument), sequence, previous, .{
                 .market_data_health_changed = .{ .instrument = instrumentIdentity(delta.instrument), .health = .gap },
             });
         }
-        try self.append(output, envelope, instrumentIdentity(delta.instrument), sequence, previous, .{
-            .l2_book_delta = .{ .instrument = instrumentIdentity(delta.instrument), .previous_sequence = previous, .sequence = sequence, .best_bid = book.bid, .best_ask = book.ask, .best_bid_quantity = book.bid_quantity, .best_ask_quantity = book.ask_quantity },
+        var depth = book.depth.?;
+        if (depth.bids_truncated or depth.asks_truncated) return error.TruncatedBookRequiresSnapshot;
+        try updateSide(&depth.bids, &depth.bid_count, delta.bids.slice(), delta.instrument, rules, true);
+        try updateSide(&depth.asks, &depth.ask_count, delta.asks.slice(), delta.instrument, rules, false);
+        if (depth.bid_count == 0 or depth.ask_count == 0) return error.IncompleteBookSnapshot;
+        depth.visible_at_ns = envelope.receive_time_utc_ns;
+        const instrument = instrumentIdentity(delta.instrument);
+        const bid: canonical.InstrumentPrice = .{ .instrument = instrument, .rules_version = rules.version, .ticks = depth.bids[0].ticks };
+        const ask: canonical.InstrumentPrice = .{ .instrument = instrument, .rules_version = rules.version, .ticks = depth.asks[0].ticks };
+        const bid_quantity: canonical.InstrumentQuantity = .{ .instrument = instrument, .rules_version = rules.version, .lots = depth.bids[0].lots.? };
+        const ask_quantity: canonical.InstrumentQuantity = .{ .instrument = instrument, .rules_version = rules.version, .lots = depth.asks[0].lots.? };
+        const next_ask: ?canonical.InstrumentPrice = if (depth.ask_count > 1) .{ .instrument = instrument, .rules_version = rules.version, .ticks = depth.asks[1].ticks } else null;
+        const next_quantity: ?canonical.InstrumentQuantity = if (depth.ask_count > 1) .{ .instrument = instrument, .rules_version = rules.version, .lots = depth.asks[1].lots.? } else null;
+        try @import("../../market/depth_snapshot.zig").validate(.{ .instrument = instrument, .sequence = sequence, .depth = depth, .best_bid = bid, .best_ask = ask, .best_bid_quantity = bid_quantity, .best_ask_quantity = ask_quantity, .next_ask = next_ask, .next_ask_quantity = next_quantity });
+        book.* = .{ .depth = depth, .ready = true };
+        try self.append(output, envelope, instrument, sequence, previous, .{
+            .l2_book_delta = .{ .instrument = instrument, .previous_sequence = previous, .sequence = sequence, .depth = depth, .best_bid = bid, .best_ask = ask, .best_bid_quantity = bid_quantity, .best_ask_quantity = ask_quantity, .next_ask = next_ask, .next_ask_quantity = next_quantity },
         });
     }
 
@@ -296,28 +309,38 @@ fn health(value: okx.MarketDataHealth) canonical.MarketDataHealth {
     };
 }
 
-fn applyBid(current: *canonical.InstrumentPrice, current_quantity: *canonical.InstrumentQuantity, updates: []const okx.BookLevel, instrument: okx.Instrument, rules: Rules) !bool {
-    if (updates.len == 0) return true;
-    const update = updates[0];
-    const next = try price(instrument, rules, update.price);
-    if (update.quantity.coefficient == 0) return next.ticks != current.ticks;
-    if (next.ticks >= current.ticks) {
-        current.* = next;
-        current_quantity.* = try quantity(instrument, rules, update.quantity);
+// Apply all updates to a candidate; a failed side never publishes partial depth.
+fn updateSide(levels: *[canonical.max_depth_levels]canonical.DepthLevel, count: *u8, updates: []const okx.BookLevel, instrument: okx.Instrument, rules: Rules, bids: bool) !void {
+    for (updates, 0..) |update, update_index| {
+        const px = try price(instrument, rules, update.price);
+        const qty = try quantity(instrument, rules, update.quantity);
+        if (px.ticks <= 0 or qty.lots < 0) return error.InvalidDepthLevel;
+        for (updates[0..update_index]) |earlier| {
+            if ((try price(instrument, rules, earlier.price)).ticks == px.ticks) return error.ConflictingBookDelta;
+        }
+        var index: usize = 0;
+        while (index < count.* and (if (bids) levels[index].ticks > px.ticks else levels[index].ticks < px.ticks)) : (index += 1) {}
+        const found = index < count.* and levels[index].ticks == px.ticks;
+        if (qty.lots == 0) {
+            if (found) {
+                var i = index;
+                while (i + 1 < count.*) : (i += 1) levels[i] = levels[i + 1];
+                count.* -= 1;
+                levels[count.*] = .{};
+            }
+        } else if (found) {
+            levels[index].lots = qty.lots;
+        } else {
+            if (count.* == levels.len) return error.DepthCapacityExceeded;
+            // A bounded snapshot proves only through its last supplied price.
+            // A new worse price cannot prove the unknown intervening tail empty.
+            if (count.* == 0 or index == count.*) return error.UnprovenDepthCoverage;
+            var i: usize = count.*;
+            while (i > index) : (i -= 1) levels[i] = levels[i - 1];
+            levels[index] = .{ .ticks = px.ticks, .lots = qty.lots };
+            count.* += 1;
+        }
     }
-    return true;
-}
-
-fn applyAsk(current: *canonical.InstrumentPrice, current_quantity: *canonical.InstrumentQuantity, updates: []const okx.BookLevel, instrument: okx.Instrument, rules: Rules) !bool {
-    if (updates.len == 0) return true;
-    const update = updates[0];
-    const next = try price(instrument, rules, update.price);
-    if (update.quantity.coefficient == 0) return next.ticks != current.ticks;
-    if (next.ticks <= current.ticks) {
-        current.* = next;
-        current_quantity.* = try quantity(instrument, rules, update.quantity);
-    }
-    return true;
 }
 
 const TestRawSink = struct {
@@ -579,4 +602,233 @@ test "02 captured multi-level snapshot retains both sides at the public seam" {
 fn compareDecimal(a: okx.Decimal, b: okx.Decimal) !std.math.Order {
     const scale = @max(a.scale, b.scale);
     return std.math.order(try canonicalDecimal(a).exactAtoms(scale), try canonicalDecimal(b).exactAtoms(scale));
+}
+
+test "03 depth updates delete levels and preserve Host evidence" {
+    const projection_module = @import("../../market/market_projection.zig");
+    const host = @import("../../strategy/strategy_host_gateway.zig");
+    const depth_module = @import("../../market/depth_snapshot.zig");
+    var sink = TestRawSink{};
+    var feed = OkxMarketFeed.init(sink.sink());
+    const adapter = try startTest(&feed);
+    try feed.ingest(std.testing.allocator, test_times,
+        \\{"arg":{"channel":"instruments","instType":"SPOT"},"data":[{"instType":"SPOT","instId":"BTC-USDT","state":"live","ruleType":"normal","tickSz":"1","lotSz":"1","minSz":"1","ts":"1800000000000"}]}
+    );
+    const definition = (try adapter.tryDrain()).?;
+    var projection: projection_module.Projection = .{};
+    try projection.apply(definition.events[0].event);
+    try projection.activateRules(btc_usdt_spot, 7);
+    try feed.ingest(std.testing.allocator, test_times,
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["100","1","0","1"],["101","2","0","1"],["102","3","0","1"]],"bids":[["99","1","0","1"],["98","2","0","1"]],"ts":"1800000000000","seqId":"100","prevSeqId":"-1"}]}
+    );
+    const snapshot = (try adapter.tryDrain()).?;
+    for (snapshot.events[0..snapshot.len]) |record| try projection.apply(record.event);
+    try feed.ingest(std.testing.allocator, test_times,
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"update","data":[{"asks":[["100","0","0","1"],["102","4","0","1"]],"bids":[["98","5","0","1"]],"ts":"1800000000001","seqId":"105","prevSeqId":"100"}]}
+    );
+    const delta = (try adapter.tryDrain()).?;
+    for (delta.events[0..delta.len]) |record| try projection.apply(record.event);
+    var wire: [depth_module.wire_len]u8 = undefined;
+    const input = try host.depthSnapshotInput(&projection, btc_usdt_spot, 2, &wire, 10, 12);
+    const visible = try depth_module.decode(input.payload);
+    try std.testing.expectEqual(@as(u64, 105), visible.sequence);
+    try std.testing.expectEqual(@as(u8, 2), visible.depth.?.ask_count);
+    try std.testing.expectEqual(@as(i128, 610), (try depth_module.quote(visible, .buy, 6, 102, 0, .quote)).quote_tick_lots);
+    try std.testing.expectEqual(@as(?i128, 5), visible.depth.?.bids[1].lots);
+    // A single update beyond known coverage cannot prove the intervening tail.
+    try std.testing.expectError(error.UnprovenDepthCoverage, feed.ingest(std.testing.allocator, test_times,
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"update","data":[{"asks":[["103","1","0","1"]],"bids":[],"ts":"1800000000002","seqId":"110","prevSeqId":"105"}]}
+    ));
+    const failed = (try adapter.tryDrain()).?;
+    try projection.apply(failed.events[0].event);
+    try std.testing.expectError(error.MarketGap, host.depthSnapshotInput(&projection, btc_usdt_spot, 3, &wire, 10, 12));
+}
+
+// Each captured frame is checked at the MarketFeedAdapter and Host boundaries.
+// No test inspects decoder state or adapter-owned depth.
+test "03 depth resynchronization capture replay agrees at every failure cut" {
+    const projection_module = @import("../../market/market_projection.zig");
+    const host = @import("../../strategy/strategy_host_gateway.zig");
+    const depth_module = @import("../../market/depth_snapshot.zig");
+    const codec = @import("../../persistence/canonical_event_codec.zig");
+    const ipc = @import("../../strategy/strategy_host_ipc.zig");
+    var gateway = try host.Gateway.init(.{ .schema_registry = 10, .decision_domain = 20, .session = .{ .fencing = 1, .shard = 0, .generation = 1 }, .authorization = .{ .strategy_identity = 1, .config_version = 7, .activation_identity = 1, .activation_barrier = 0 } }, &.{host.Subscription.of(1, &.{.depth_snapshot})});
+    var sink = TestRawSink{};
+    var replay_sink = TestRawSink{};
+    var feed = OkxMarketFeed.init(sink.sink());
+    var replay_feed = OkxMarketFeed.init(replay_sink.sink());
+    const adapter = try startTest(&feed);
+    const replay_adapter = try startTest(&replay_feed);
+    var projection: projection_module.Projection = .{};
+    var replayed: projection_module.Projection = .{};
+    const definition =
+        \\{"arg":{"channel":"instruments","instType":"SPOT"},"data":[{"instType":"SPOT","instId":"BTC-USDT","state":"live","ruleType":"normal","tickSz":"1","lotSz":"1","minSz":"1","ts":"1800000000000"}]}
+    ;
+    const snapshot =
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["100","1","0","1"],["101","2","0","1"]],"bids":[["99","1","0","1"],["98","2","0","1"]],"ts":"1800000000000","seqId":"100","prevSeqId":"-1"}]}
+    ;
+    const update =
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"update","data":[{"asks":[["100","3","0","1"]],"bids":[],"ts":"1800000000001","seqId":"105","prevSeqId":"100"}]}
+    ;
+    const conflict =
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"update","data":[{"asks":[["100","4","0","1"]],"bids":[],"ts":"1800000000001","seqId":"105","prevSeqId":"100"}]}
+    ;
+    const restored =
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["100","1","0","1"],["101","2","0","1"]],"bids":[["99","1","0","1"],["98","2","0","1"]],"ts":"1800000000002","seqId":"110","prevSeqId":"-1"}]}
+    ;
+    const gap =
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"update","data":[{"asks":[],"bids":[],"ts":"1800000000003","seqId":"112","prevSeqId":"111"}]}
+    ;
+    const malformed =
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"update","data":[{"asks":[["100"]],"bids":[],"ts":"1800000000003","seqId":"111","prevSeqId":"110"}]}
+    ;
+    const frames = [_][]const u8{ definition, snapshot, update, update, conflict, update, snapshot, restored, gap, malformed, "{" };
+    const qualified = [_]bool{ false, true, true, true, false, false, false, true, false, false, false };
+    for (frames, qualified, 0..) |raw, healthy, cut| {
+        try feed.ingest(std.testing.allocator, test_times, raw);
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(raw, &hash, .{});
+        try replay_feed.replay(std.testing.allocator, 6, test_times, .{ .stream_sequence = sink.append_count, .sha256 = hash }, raw);
+        const actual = try adapter.tryDrain();
+        const recovered = try replay_adapter.tryDrain();
+        try std.testing.expectEqual(actual != null, recovered != null);
+        if (actual) |batch| {
+            try std.testing.expectEqualDeep(batch.events[0..batch.len], recovered.?.events[0..recovered.?.len]);
+            for (batch.events[0..batch.len]) |record| {
+                try projection.apply(record.event);
+                var encoded: [codec.max_encoded_len]u8 = undefined;
+                try replayed.apply((try codec.decode(try codec.encode(&encoded, record))).event);
+                if (record.event == .instrument_definition_observed) {
+                    try projection.activateRules(btc_usdt_spot, 7);
+                    try replayed.activateRules(btc_usdt_spot, 7);
+                }
+            }
+        }
+        try std.testing.expectEqualDeep(projection.get(btc_usdt_spot), replayed.get(btc_usdt_spot));
+        var live_wire: [depth_module.wire_len]u8 = undefined;
+        var replay_wire: [depth_module.wire_len]u8 = undefined;
+        var input_events: [1]host.EventEnvelope = undefined;
+        var input_count: usize = 0;
+        if (healthy) {
+            const input = try host.depthSnapshotInput(&projection, btc_usdt_spot, cut + 1, &live_wire, 10, 12);
+            const replay_input = try host.depthSnapshotInput(&replayed, btc_usdt_spot, cut + 1, &replay_wire, 10, 12);
+            try std.testing.expectEqualSlices(u8, input.payload, replay_input.payload);
+            input_events[0] = input;
+            input_count = 1;
+        } else {
+            const entry = projection.get(btc_usdt_spot).?;
+            try std.testing.expect(entry.health != .healthy);
+        }
+        var batch_bytes: [2048]u8 = undefined;
+        const batch = try gateway.encodeBatch(&batch_bytes, cut + 1, cut + 1, cut + 1, 10, input_events[0..input_count]);
+        try std.testing.expectEqual(ipc.QshStatusV1.ok, ipc.validateBatchAt(batch, gateway.config.session, cut + 1, null, 11).status);
+        try gateway.recordPublished(cut + 1, cut + 1, 10);
+        if (input_count == 1) try std.testing.expectEqualSlices(u8, input_events[0].payload, batch[192..][0..depth_module.wire_len]);
+    }
+    try std.testing.expectEqual(@as(u64, 0), replay_sink.append_count);
+}
+
+test "03 depth capacity unknown quantity and numeric overflow fail closed" {
+    // Raw cases use a fresh captured snapshot before every invalid update.
+    const definition =
+        \\{"arg":{"channel":"instruments","instType":"SPOT"},"data":[{"instType":"SPOT","instId":"BTC-USDT","state":"live","ruleType":"normal","tickSz":"1","lotSz":"1","minSz":"1","ts":"1800000000000"}]}
+    ;
+    const snapshot =
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["100","1","0","1"],["101","1","0","1"],["102","1","0","1"],["103","1","0","1"],["104","1","0","1"],["105","1","0","1"],["106","1","0","1"],["107","1","0","1"]],"bids":[["99","1","0","1"]],"ts":"1800000000000","seqId":"100","prevSeqId":"-1"}]}
+    ;
+    const updates = [_][]const u8{
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"update","data":[{"asks":[["108","1","0","1"]],"bids":[],"ts":"1800000000001","seqId":"105","prevSeqId":"100"}]}
+        ,
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"update","data":[{"asks":[["100","170141183460469231731687303715884105728","0","1"]],"bids":[],"ts":"1800000000001","seqId":"105","prevSeqId":"100"}]}
+        ,
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"update","data":[{"asks":[["100",null,"0","1"]],"bids":[],"ts":"1800000000001","seqId":"105","prevSeqId":"100"}]}
+        ,
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"update","data":[{"asks":[],"bids":[],"ts":"1800000000001","seqId":"99","prevSeqId":"100"}]}
+    };
+    for (updates) |raw| {
+        var sink = TestRawSink{};
+        var feed = OkxMarketFeed.init(sink.sink());
+        const adapter = try startTest(&feed);
+        try feed.ingest(std.testing.allocator, test_times, definition);
+        _ = try adapter.tryDrain();
+        try feed.ingest(std.testing.allocator, test_times, snapshot);
+        _ = try adapter.tryDrain();
+        feed.ingest(std.testing.allocator, test_times, raw) catch |err| {
+            try std.testing.expectEqual(error.DepthCapacityExceeded, err);
+        };
+        const failed = (try adapter.tryDrain()).?;
+        try std.testing.expectEqual(canonical.MarketDataHealth.gap, failed.events[0].event.market_data_health_changed.health);
+        var replay_sink = TestRawSink{};
+        var replay_feed = OkxMarketFeed.init(replay_sink.sink());
+        const replay_adapter = try startTest(&replay_feed);
+        for ([_][]const u8{ definition, snapshot, raw }, 0..) |captured, cut| {
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(captured, &digest, .{});
+            replay_feed.replay(std.testing.allocator, 6, test_times, .{ .stream_sequence = cut + 1, .sha256 = digest }, captured) catch |err| {
+                try std.testing.expectEqual(error.DepthCapacityExceeded, err);
+            };
+            const restored = (try replay_adapter.tryDrain()).?;
+            if (cut == 2) try std.testing.expectEqualDeep(failed.events[0..failed.len], restored.events[0..restored.len]);
+        }
+    }
+    // A truncated snapshot is bounded evidence, but cannot seed an incremental book.
+    var sink = TestRawSink{};
+    var feed = OkxMarketFeed.init(sink.sink());
+    const adapter = try startTest(&feed);
+    try feed.ingest(std.testing.allocator, test_times, definition);
+    _ = try adapter.tryDrain();
+    const truncated = try std.mem.replaceOwned(u8, std.testing.allocator, snapshot, "[\"107\",\"1\",\"0\",\"1\"]", "[\"107\",\"1\",\"0\",\"1\"],[\"108\",\"1\",\"0\",\"1\"]");
+    defer std.testing.allocator.free(truncated);
+    try feed.ingest(std.testing.allocator, test_times, truncated);
+    const bounded = (try adapter.tryDrain()).?;
+    try std.testing.expect(bounded.events[0].event.l2_book_snapshot.depth.?.asks_truncated);
+    try std.testing.expectError(error.TruncatedBookRequiresSnapshot, feed.ingest(std.testing.allocator, test_times, updates[0]));
+    try std.testing.expectEqual(canonical.MarketDataHealth.gap, (try adapter.tryDrain()).?.events[0].event.market_data_health_changed.health);
+}
+
+test "03 oversized captured frames revoke depth and replay before fresh recovery" {
+    const definition =
+        \\{"arg":{"channel":"instruments","instType":"SPOT"},"data":[{"instType":"SPOT","instId":"BTC-USDT","state":"live","ruleType":"normal","tickSz":"1","lotSz":"1","minSz":"1","ts":"1800000000000"}]}
+    ;
+    const snapshot =
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["100","1","0","1"]],"bids":[["99","1","0","1"]],"ts":"1800000000000","seqId":"100","prevSeqId":"-1"}]}
+    ;
+    const projection_module = @import("../../market/market_projection.zig");
+    const host = @import("../../strategy/strategy_host_gateway.zig");
+    const depth_module = @import("../../market/depth_snapshot.zig");
+    var sink = TestRawSink{};
+    var replay_sink = TestRawSink{};
+    var feed = OkxMarketFeed.init(sink.sink());
+    var replay_feed = OkxMarketFeed.init(replay_sink.sink());
+    const adapter = try startTest(&feed);
+    const replay_adapter = try startTest(&replay_feed);
+    var projection: projection_module.Projection = .{};
+    var replayed: projection_module.Projection = .{};
+    const oversized = try std.testing.allocator.alloc(u8, okx.max_raw_frame_bytes + 1);
+    defer std.testing.allocator.free(oversized);
+    @memset(oversized, ' ');
+    const fresh = try std.mem.replaceOwned(u8, std.testing.allocator, snapshot, "100\"", "110\"");
+    defer std.testing.allocator.free(fresh);
+    for ([_][]const u8{ definition, snapshot, oversized, fresh }, 0..) |raw, cut| {
+        try feed.ingest(std.testing.allocator, test_times, raw);
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(raw, &hash, .{});
+        try replay_feed.replay(std.testing.allocator, 6, test_times, .{ .stream_sequence = sink.append_count, .sha256 = hash }, raw);
+        const batch = (try adapter.tryDrain()).?;
+        const restored = (try replay_adapter.tryDrain()).?;
+        try std.testing.expectEqualDeep(batch.events[0..batch.len], restored.events[0..restored.len]);
+        for (batch.events[0..batch.len]) |record| {
+            try projection.apply(record.event);
+            try replayed.apply(record.event);
+            if (cut == 0) {
+                try projection.activateRules(btc_usdt_spot, 7);
+                try replayed.activateRules(btc_usdt_spot, 7);
+            }
+        }
+        var wire: [depth_module.wire_len]u8 = undefined;
+        if (cut == 2) {
+            try std.testing.expectError(error.MarketGap, host.depthSnapshotInput(&projection, btc_usdt_spot, cut + 1, &wire, 10, 12));
+        } else if (cut != 0) _ = try host.depthSnapshotInput(&projection, btc_usdt_spot, cut + 1, &wire, 10, 12);
+        try std.testing.expectEqualDeep(projection.get(btc_usdt_spot), replayed.get(btc_usdt_spot));
+    }
 }

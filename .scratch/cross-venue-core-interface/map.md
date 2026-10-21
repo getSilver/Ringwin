@@ -33,7 +33,7 @@ Status: open
 |---|---|---|
 | [01 权威边界](issues/01-authority-boundary.md) | 无 | H2/H3 设计前置；resolved |
 | [02 双边深度快照](issues/02-depth-snapshot.md) | 无 | H1 |
-| [03 增量与重同步](issues/03-depth-resynchronization.md) | 02 | H1 |
+| [03 增量与重同步](issues/03-depth-resynchronization.md) | 02 | H1；resolved |
 | [04 Host 完整组](issues/04-host-intent-group.md) | 无 | H2；resolved，完整传输与身份入口 |
 | [05 共同准入与占用](issues/05-joint-admission.md) | 05a、05b | H2/H3 汇总验收 |
 | [05a 多账户权威表示](issues/05a-multi-account-authority.md) | 01（已完成） | H2/H3 |
@@ -48,11 +48,12 @@ Status: open
 
 ## Frontier
 
-- [03 增量与重同步](issues/03-depth-resynchronization.md)：02 已完成，可领取；需继续证明连续深度维护与恢复。
 - [05a 多账户权威表示与持久恢复](issues/05a-multi-account-authority.md)：01 已完成，先冻结容量预算及可验证全局额度来源。
 - [08 版本化策略状态与确定性 checkpoint](issues/08-deterministic-checkpoint.md)：in_progress；schema/codec/容量已确认，用户收窄本轮为 checkpoint 基础设施，真实模型验收保持待定。见[实现合同](08-checkpoint-design.md)及[验证记录](08-verification.md)，不解除 09b 的整票依赖。
 
 ## Decisions so far
+
+- 2026-10-21：03 resolved，连续有界深度、缺口失效与新快照恢复、捕获重放及九个稳定恢复切点已验证；最终 ReleaseSafe 659/659、Python 5/5，双轴复审无遗留阻塞项。格式 15/13/42/46/40，Host 深度 wire 保持不变；见 [合同](../../docs/depth-resynchronization-contract.md) 与 [验证记录](03-verification.md)。I1 策略全链路和任务 10、其他 Venue 与线上资格仍分别验收。
 
 - 2026-10-21：08 schema/codec/容量获确认；用户随后指定仅完成 checkpoint 基础设施，真实模型验收保持待定。新增显式私有状态、Host 请求/响应和 DurableStore catalog 发布/恢复；ReleaseSafe 653/653、Host 产品验收 16/16 通过，双轴审查修复后无遗留发现。整票继续 in_progress，不解除 09b，见 [08 验证记录](08-verification.md)。
 
@@ -70,7 +71,7 @@ Status: open
 
 - 多账户实现的容量数值、完整格式身份及可验证全局预算来源，待 05a；动态租约扩容首版不开放。
 - 现货残余阈值及资产规则冻结、闭合与释放证据，待 09a；未通过前保持占用。
-- 快照容量及格式兼容已由 02 声明；深度增量、重同步及连续覆盖证据仍待 03。
+- 快照、连续深度及重同步已由 02/03 声明并离线验证；已知价格覆盖、8 档及截断后的保守失效限制继续适用。
 - 08 的 schema/codec/容量已确认；真实模型的版本、输入更新、不同批次/切点和支持平台运行确定性证据仍待完成。
 - 相关策略行为、参数合同及模型版本的冻结证据；文档成文不自动等于冻结。
 - Venue 与模式运行资格、实际参数校准及线上验证授权。

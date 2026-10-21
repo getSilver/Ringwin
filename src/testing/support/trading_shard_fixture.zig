@@ -19,13 +19,13 @@ const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
 // CanonicalStateDigest binds the journal schema as well as economic state.
-pub const expected_happy_digest = "cb476f56f441684373a24af31199ed97245e9fee9db5446532e2fb34c0cf630e";
+pub const expected_happy_digest = "5e58fdc44213643f721b01bfeddaa553f97e62eb0c865a20280b16d75d64f597";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "cc43a712e3ba88e35969d19e34ae30b2c8a1f6700c3ae559469d70029e4f4353",
-    "99a2a35ffb2684a67e6ff97ad3e3a8c03428afbe661fa27762675c1e4abb1f42",
-    "718b8c0a28f271adc4d7199b869f315d4236a40d3290dcafde9fdbcd27c6b665",
-    "cc2b6cf27d296be5ef187f8c808d13c2ef354ace82404e2282e399da41d39227",
+    "405a15be16d8f7dbb9679237b00a9a7bad274270b411c9b25d413f85d5baf8e9",
+    "ddf471208493bb4b01b84b94665d0cacbc618c3c6c51ae0b57e9eec72453f7c3",
+    "e98ef2e551d32b7d62446ec342224e6048fc0cc935b5ffe1dbf8206605dffde6",
+    "adb4d6616528c525712f14cb78a8e9a84982eb15a63d2b332f04399f07b2b378",
 };
 pub const order_limit_price: i64 = 50_100_000_000;
 
@@ -1019,4 +1019,108 @@ test "02 depth survives durable snapshot and journal tail with the same Host inp
     var time_tail = journal.Journal.initAt(run.decision_journal.last_sequence + 1);
     try std.testing.expectError(error.InvalidDepthTime, engine.applyStable(recovered, &time_tail, bad_time));
     try std.testing.expectError(error.MarketGap, host_gateway.depthSnapshotInput(&recovered.canonical_market, 3, time_tail.last_sequence, &recovered_wire, 13, 13));
+}
+
+test "03 depth delta snapshot and stable tails preserve qualification at every cut" {
+    const depth_module = @import("../../market/depth_snapshot.zig");
+    const run = try std.testing.allocator.create(LiveRun);
+    defer std.testing.allocator.destroy(run);
+    try healthyRunInto(run);
+    var initial = snapshotAt(12, 200);
+    const top = initial.venue.event.l2_book_snapshot;
+    var depth: canonical.BookDepth = .{ .visible_at_ns = initial.venue.envelope.times.receive_utc_ns.?, .bid_count = 1, .ask_count = 2 };
+    depth.bids[0] = .{ .ticks = top.best_bid.ticks, .lots = top.best_bid_quantity.?.lots };
+    depth.asks[0] = .{ .ticks = top.best_ask.ticks, .lots = top.best_ask_quantity.?.lots };
+    depth.asks[1] = .{ .ticks = top.next_ask.?.ticks, .lots = top.next_ask_quantity.?.lots };
+    initial.venue.event.l2_book_snapshot.depth = depth;
+    _ = try apply(run, initial);
+    const recovered = try std.testing.allocator.create(engine.TradingShard);
+    defer std.testing.allocator.destroy(recovered);
+    const storage = try std.testing.allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer std.testing.allocator.free(storage);
+    try run.decision_journal.seal();
+    var full_replay = try std.testing.allocator.create(engine.TradingShard);
+    defer std.testing.allocator.destroy(full_replay);
+    var replay_candidate = try std.testing.allocator.create(engine.TradingShard);
+    defer std.testing.allocator.destroy(replay_candidate);
+    replay_candidate.* = .{ .quantity_denominator = run.shard.quantity_denominator, .reservation_model = run.shard.reservation_model };
+    try std.testing.expectEqual(journal.ScanStatus.clean, try engine.recoverStableInto(full_replay, replay_candidate, run.decision_journal.bytes()));
+    // Healthy delta, unknown deeper quantity, conflicting duplicate, recovery,
+    // another gap and a time-invalid delta all survive every snapshot cut.
+    for (0..9) |cut| {
+        const encoded = try run.shard.snapshot(&run.decision_journal, run.decision_journal.last_sequence, storage);
+        var tail = journal.Journal.initAt(run.decision_journal.last_sequence + 1);
+        if (cut >= 6) {
+            var fresh = snapshotAt(30 + cut, 300 + cut);
+            depth.visible_at_ns = fresh.venue.envelope.times.receive_utc_ns.?;
+            fresh.venue.event.l2_book_snapshot.depth = depth;
+            fresh.venue.envelope.identity.sequence = 999 + cut * 2;
+            _ = try engine.applyStable(&run.shard, &tail, fresh);
+        }
+        var input = deltaAt(13 + cut, 200 + cut, 201 + cut, 49_800_000_000);
+        input.venue.event.l2_book_delta.previous_sequence = 200 + cut;
+        depth.visible_at_ns = input.venue.envelope.times.receive_utc_ns.?;
+        input.venue.event.l2_book_delta.depth = depth;
+        if (cut == 1) {
+            input.venue.event.l2_book_delta.depth.?.ask_count = 3;
+            input.venue.event.l2_book_delta.depth.?.asks[2] = .{ .ticks = top.next_ask.?.ticks + 1, .lots = null };
+        }
+        if (cut == 2) {
+            input.venue.event.l2_book_delta.sequence = 202;
+            input.venue.event.l2_book_delta.previous_sequence = 201;
+        }
+        if (cut == 3) {
+            input = snapshotAt(13 + cut, 201 + cut);
+            input.venue.event.l2_book_snapshot.depth = depth;
+        }
+        if (cut == 4) input.venue.event.l2_book_delta.previous_sequence += 1;
+        if (cut == 5) input.venue.event.l2_book_delta.depth.?.visible_at_ns += 1;
+        if (cut >= 6) {
+            input = deltaAt(40 + cut, 300 + cut, 400 + cut, 49_800_000_000);
+            depth.visible_at_ns = input.venue.envelope.times.receive_utc_ns.?;
+            input.venue.event.l2_book_delta.depth = depth;
+        }
+        if (cut == 6) {
+            const high: i128 = @as(i128, std.math.maxInt(i64)) + 1;
+            input.venue.event.l2_book_delta.best_bid.ticks = high;
+            input.venue.event.l2_book_delta.best_ask.ticks = high + 1;
+            input.venue.event.l2_book_delta.next_ask.?.ticks = high + 2;
+            input.venue.event.l2_book_delta.depth.?.bids[0].ticks = high;
+            input.venue.event.l2_book_delta.depth.?.asks[0].ticks = high + 1;
+            input.venue.event.l2_book_delta.depth.?.asks[1].ticks = high + 2;
+        }
+        if (cut == 7) {
+            input.venue.event.l2_book_delta.best_bid_quantity.?.lots = @as(i128, std.math.maxInt(i64)) + 1;
+            input.venue.event.l2_book_delta.depth.?.bids[0].lots = input.venue.event.l2_book_delta.best_bid_quantity.?.lots;
+        }
+        if (cut == 8) input.venue.event.l2_book_delta.sequence = std.math.maxInt(u64);
+        input.venue.envelope.identity.sequence = 1000 + cut * 2;
+        if (cut == 8) {
+            try std.testing.expectError(error.Overflow, engine.applyStable(&run.shard, &tail, input));
+        } else if (cut == 7) {
+            try std.testing.expectError(error.QuantityOutOfRange, engine.applyStable(&run.shard, &tail, input));
+        } else if (cut == 6) {
+            try std.testing.expectError(error.PriceOutOfRange, engine.applyStable(&run.shard, &tail, input));
+        } else if (cut == 5) {
+            try std.testing.expectError(error.InvalidDepthTime, engine.applyStable(&run.shard, &tail, input));
+        } else _ = try engine.applyStable(&run.shard, &tail, input);
+        try tail.seal();
+        const result = try engine.TradingShard.restoreSegmentsInto(recovered, encoded, &.{tail.bytes()});
+        try std.testing.expectEqual(journal.ScanStatus.clean, result.status);
+        try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &recovered.canonicalStateDigest());
+        var wire: [depth_module.wire_len]u8 = undefined;
+        var restored_wire: [depth_module.wire_len]u8 = undefined;
+        if (cut < 2 or cut == 3) {
+            const visible = try host_gateway.depthSnapshotInput(&run.shard.canonical_market, 3, tail.last_sequence, &wire, 20, 20);
+            const restored = try host_gateway.depthSnapshotInput(&recovered.canonical_market, 3, tail.last_sequence, &restored_wire, 20, 20);
+            try std.testing.expectEqualSlices(u8, visible.payload, restored.payload);
+        } else {
+            try std.testing.expectError(error.MarketGap, host_gateway.depthSnapshotInput(&recovered.canonical_market, 3, tail.last_sequence, &wire, 20, 20));
+        }
+        try std.testing.expectEqual(journal.ScanStatus.clean, try engine.recoverStableInto(replay_candidate, full_replay, tail.bytes()));
+        try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &replay_candidate.canonicalStateDigest());
+        std.mem.swap(*engine.TradingShard, &full_replay, &replay_candidate);
+        // Reuse the public stable journal as the next prefix.
+        run.decision_journal = tail;
+    }
 }

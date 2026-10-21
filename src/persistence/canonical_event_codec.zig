@@ -8,7 +8,7 @@ const std = @import("std");
 const canonical = @import("../model/canonical_event.zig");
 const value_codec = @import("snapshot_codec.zig");
 
-pub const encoding_version: u16 = 12;
+pub const encoding_version: u16 = 13;
 pub const max_encoded_len: usize = @import("journal.zig").max_payload_size;
 
 const BootstrapHeader = struct {

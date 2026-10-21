@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const schema_version: u16 = 14;
+pub const schema_version: u16 = 15;
 
 pub const VenueIdentity = u64;
 pub const Product = enum(u8) { spot, isolated_linear_usdt };
@@ -369,6 +369,8 @@ pub const L2BookSnapshot = struct {
     next_ask_quantity: ?InstrumentQuantity = null,
 };
 pub const L2BookDelta = struct {
+    /// Adapter-owned postimage, valid only after previous_sequence.
+    depth: ?BookDepth = null,
     instrument: InstrumentIdentity,
     previous_sequence: VenueSourceSequence,
     sequence: VenueSourceSequence,
