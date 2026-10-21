@@ -50,7 +50,7 @@ Status: open
 
 - [03 增量与重同步](issues/03-depth-resynchronization.md)：02 已完成，可领取；需继续证明连续深度维护与恢复。
 - [05a 多账户权威表示与持久恢复](issues/05a-multi-account-authority.md)：01 已完成，先冻结容量预算及可验证全局额度来源。
-- [08 版本化策略状态与确定性 checkpoint](issues/08-deterministic-checkpoint.md)：可开始接口核对和设计，最终验收受 schema 确认门槛约束。
+- [08 版本化策略状态与确定性 checkpoint](issues/08-deterministic-checkpoint.md)：in_progress；已完成当前源码核对及[合同提案](08-checkpoint-design.md)，等待 schema 范围、数值 codec 和容量确认后实施；最终验收门槛尚未通过。
 
 ## Decisions so far
 
