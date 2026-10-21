@@ -197,6 +197,7 @@ fn runFourShardAcceptanceEntry(init: std.process.Init) !void {
 }
 
 test {
+    _ = @import("strategy/strategy_checkpoint_store.zig");
     _ = trading_shard;
     _ = trading_shard_tests;
     _ = recovery_cutover;

@@ -120,6 +120,7 @@ const selected = switch (@import("entry_options").index) {
     116 => @import("trading/trading_shard.zig"),
     117 => @import("trading/trading_shard_event.zig"),
     118 => @import("market/depth_snapshot.zig"),
+    119 => @import("strategy/strategy_checkpoint_store.zig"),
     else => @compileError("unknown standalone source entry"),
 };
 

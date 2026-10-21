@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const ipc = @import("strategy_host_ipc.zig");
 const trading = @import("../trading/trading_shard.zig");
 const gateway_module = @import("strategy_host_gateway.zig");
+const checkpoint_codec = @import("strategy_host_recovery.zig");
 
 const Crc32c = std.hash.crc.Crc32Iscsi;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -24,6 +25,7 @@ const FrameType = enum(u16) {
     activate_strategy = 3,
     input_batch = 4,
     shutdown = 6,
+    request_checkpoint = 7,
     host_hello = 101,
     strategy_recovered = 102,
     strategy_faulted = 103,
@@ -31,6 +33,7 @@ const FrameType = enum(u16) {
     strategy_output = 105,
     host_heartbeat = 106,
     shutdown_ack = 107,
+    checkpoint_content = 108,
 };
 
 pub const State = enum {
@@ -518,13 +521,16 @@ fn encodeBridgeHeader(
 }
 
 fn decodeBridgeFrame(frame: []const u8) !DecodedBridgeFrame {
-    if (frame.len < bridge_header_len or frame.len > bridge_header_len + max_bridge_payload or
+    if (frame.len < bridge_header_len or frame.len > bridge_header_len + max_checkpoint_payload or
         !std.mem.eql(u8, frame[0..4], &bridge_magic) or
         get(u16, frame, 4) != protocol_version or get(u16, frame, 6) != bridge_header_len or
         get(u16, frame, 10) != 1 or get(u32, frame, 12) != 0 or
         get(u32, frame, 16) != frame.len or get(u32, frame, 20) != frame.len - bridge_header_len or
         get(u32, frame, 36) != 0 or Crc32c.hash(frame[0..60]) != get(u32, frame, 60) or
         Crc32c.hash(frame[64..]) != get(u32, frame, 56))
+        return error.InvalidBridgeFrame;
+    if (frame.len > bridge_header_len + max_bridge_payload and
+        get(u16, frame, 8) != @intFromEnum(FrameType.checkpoint_content))
         return error.InvalidBridgeFrame;
     return .{
         .message_type = std.enums.fromInt(FrameType, get(u16, frame, 8)) orelse
@@ -544,6 +550,8 @@ pub const ManagedHost = struct {
     supervisor: HostSupervisor,
     next_input_batch: u64 = 1,
     last_input_cursor: ?u64 = null,
+    checkpoint_request: ?struct { identity: u64, expected: checkpoint_codec.Metadata } = null,
+    last_checkpoint_request: u64 = 0,
 
     pub fn start(
         init: std.process.Init,
@@ -648,6 +656,43 @@ pub const ManagedHost = struct {
         var frame_storage: [bridge_header_len + 72]u8 = undefined;
         const frame = try self.supervisor.encodeActivateFrame(&frame_storage, activation);
         try writePipeFrame(self.child.stdin.?, io, frame);
+    }
+
+    /// Request an exact input boundary, never a partially updated model state.
+    pub fn requestCheckpoint(self: *ManagedHost, io: std.Io, identity: u64, expected: checkpoint_codec.Metadata) !void {
+        if (identity <= self.last_checkpoint_request) return error.StaleCheckpointRequest;
+        if (self.checkpoint_request != null or
+            (self.supervisor.state != .recovered and self.supervisor.state != .active))
+            return error.InvalidState;
+        if (expected.schema_registry != self.supervisor.plan.compatibility.schema_registry or
+            expected.next_intent_sequence == 0) return error.CheckpointMismatch;
+        var payload: [16]u8 = undefined;
+        put(u64, &payload, 0, identity);
+        put(u64, &payload, 8, expected.strategy_cursor);
+        try writePipeParts(self.child.stdin.?, io, .request_checkpoint, self.supervisor.plan.session, self.supervisor.next_zig_sequence, &payload);
+        self.supervisor.next_zig_sequence += 1;
+        self.checkpoint_request = .{ .identity = identity, .expected = expected };
+        self.last_checkpoint_request = identity;
+    }
+
+    /// Returned content borrows storage. It is validated content, not a durable
+    /// publication receipt and not permission to activate or send an intent.
+    pub fn receiveCheckpoint(self: *ManagedHost, io: std.Io, storage: []u8) ![]const u8 {
+        const pending = self.checkpoint_request orelse return error.NoCheckpointRequest;
+        errdefer self.supervisor.state = .failed;
+        const frame = try readPipeFrame(self.child.stdout.?, io, storage);
+        const decoded = try decodeBridgeFrame(frame);
+        if (decoded.message_type != .checkpoint_content or
+            !sameSession(decoded.session, self.supervisor.plan.session) or
+            decoded.sequence != self.supervisor.next_host_sequence or
+            decoded.payload.len < 8 or get(u64, decoded.payload, 0) != pending.identity or
+            !self.supervisor.validatesEnvelope(.checkpoint, decoded.session))
+            return error.InvalidCheckpointResponse;
+        const container = decoded.payload[8..];
+        _ = try checkpoint_codec.decodePayloadCheckpoint(container, pending.expected);
+        self.supervisor.next_host_sequence += 1;
+        self.checkpoint_request = null;
+        return container;
     }
 
     pub fn shutdown(self: *ManagedHost, io: std.Io, now_ns: i64) !void {

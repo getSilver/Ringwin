@@ -25,11 +25,13 @@ def main():
     )
     checks = [
         [sys.executable, "python/test_strategy_host_bridge.py"],
+        [sys.executable, "python/test_strategy_checkpoint.py"],
         [zig, "fmt", "--check", *map(str, sorted((ROOT / "src").rglob("strategy_host_*.zig")))],
         [zig, "test", "src/strategy/strategy_host_ipc.zig", "-O", "ReleaseSafe"],
         [zig, "test", "src/strategy/strategy_host_lifecycle.zig", "-O", "ReleaseSafe"],
         [zig, "test", "src/strategy/strategy_host_gateway.zig", "-O", "ReleaseSafe"],
         [zig, "test", "src/strategy/strategy_host_recovery.zig", "-O", "ReleaseSafe"],
+        [zig, "test", "src/strategy/strategy_checkpoint_store.zig", "-O", "ReleaseSafe", "--test-filter", "checkpoint publication"],
         [zig, "test", "src/strategy/strategy_host_failures.zig", "-O", "ReleaseSafe"],
         [zig, "run", "src/strategy/strategy_host_ipc.zig", "-O", "ReleaseSafe"],
         [zig, "run", "src/strategy/strategy_host_lifecycle.zig", "-O", "ReleaseSafe"],

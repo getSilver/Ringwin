@@ -31,6 +31,15 @@ pub const Checkpoint = struct {
     identity: [32]u8,
 };
 
+/// Container validation independent of a particular strategy's private schema.
+/// Payload bytes borrow the caller's container; no interpreter objects escape.
+pub const PayloadCheckpoint = struct {
+    metadata: Metadata,
+    payload: []const u8,
+    identity: [32]u8,
+    state_digest: [32]u8,
+};
+
 pub const ReplayEvent = struct {
     sequence: u64,
     delta: i64,
@@ -229,9 +238,14 @@ pub const Recovery = struct {
 };
 
 pub fn encodeCheckpoint(destination: []u8, metadata: Metadata, state: PortableState) ![]u8 {
-    if (metadata.next_intent_sequence == 0) return error.InvalidIntentSequence;
     var payload_storage: [96]u8 = undefined;
     const payload = try encodeState(&payload_storage, state);
+    return encodePayloadCheckpoint(destination, metadata, payload);
+}
+
+pub fn encodePayloadCheckpoint(destination: []u8, metadata: Metadata, payload: []const u8) ![]u8 {
+    if (metadata.next_intent_sequence == 0) return error.InvalidIntentSequence;
+    if (payload.len == 0 or payload.len > max_payload_len) return error.CheckpointTooLarge;
     const total_len = header_len + payload.len;
     if (destination.len < total_len) return error.CheckpointTooLarge;
     const container = destination[0..total_len];
@@ -263,6 +277,15 @@ pub fn encodeCheckpoint(destination: []u8, metadata: Metadata, state: PortableSt
 }
 
 pub fn decodeCheckpoint(container: []const u8, expected: Metadata) !Checkpoint {
+    const checkpoint = try decodePayloadCheckpoint(container, expected);
+    return .{
+        .metadata = checkpoint.metadata,
+        .state = try decodeState(checkpoint.payload),
+        .identity = checkpoint.identity,
+    };
+}
+
+pub fn decodePayloadCheckpoint(container: []const u8, expected: Metadata) !PayloadCheckpoint {
     if (container.len < header_len or container.len > header_len + max_payload_len or
         !std.mem.eql(u8, container[0..4], &magic) or
         get(u16, container, 4) != 1 or get(u16, container, 6) != header_len or
@@ -295,8 +318,9 @@ pub fn decodeCheckpoint(container: []const u8, expected: Metadata) !Checkpoint {
         return error.CheckpointMismatch;
     return .{
         .metadata = metadata,
-        .state = try decodeState(payload),
+        .payload = payload,
         .identity = identity,
+        .state_digest = stateDigest(metadata, payload),
     };
 }
 

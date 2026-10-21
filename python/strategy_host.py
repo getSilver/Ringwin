@@ -8,6 +8,9 @@ import os
 import struct
 import sys
 import time
+import strategy_state
+
+CROSS_VENUE_STATE_SCHEMA = strategy_state.SCHEMA
 
 MAGIC = b"QSHC"
 HEADER_LEN = 64
@@ -24,6 +27,7 @@ BEGIN_RECOVERY = 2
 ACTIVATE_STRATEGY = 3
 INPUT_BATCH = 4
 SHUTDOWN = 6
+REQUEST_CHECKPOINT = 7
 HOST_HELLO = 101
 STRATEGY_RECOVERED = 102
 STRATEGY_FAULTED = 103
@@ -31,6 +35,7 @@ RECOVERY_REQUIRED = 104
 STRATEGY_OUTPUT = 105
 HOST_HEARTBEAT = 106
 SHUTDOWN_ACK = 107
+CHECKPOINT_CONTENT = 108
 
 
 class RecoveryNeeded(RuntimeError):
@@ -340,6 +345,11 @@ def decode_checkpoint(container):
         or hashlib.sha256(container[:120] + payload).digest() != container[120:152]
     ):
         raise ValueError("invalid checkpoint content")
+    metadata = checkpoint_metadata(container)
+    if metadata["state_schema"] == CROSS_VENUE_STATE_SCHEMA:
+        if metadata["state_schema_version"] != 1:
+            raise ValueError("unsupported strategy state version")
+        return metadata, strategy_state.decode(payload, metadata["cursor"], metadata["strategy"], metadata["next_intent"])
     state = json.loads(payload)
     if (
         not isinstance(state, dict)
@@ -357,6 +367,10 @@ def decode_checkpoint(container):
     )
     if canonical != payload:
         raise ValueError("non-canonical portable state")
+    return metadata, state
+
+
+def checkpoint_metadata(container):
     metadata = {
         "schema_registry": int.from_bytes(container[16:32], "little"),
         "strategy": int.from_bytes(container[32:48], "little"),
@@ -369,11 +383,39 @@ def decode_checkpoint(container):
     }
     if metadata["next_intent"] == 0:
         raise ValueError("invalid next intent sequence")
-    return metadata, state
+    return metadata
+
+
+def state_payload(metadata, state):
+    if metadata["state_schema"] == CROSS_VENUE_STATE_SCHEMA:
+        if metadata["state_schema_version"] != 1:
+            raise ValueError("unsupported strategy state version")
+        return strategy_state.encode(state, metadata["cursor"], metadata["strategy"], metadata["next_intent"])
+    if type(state) is not dict or list(state) != ["accumulator", "event_count"]:
+        raise ValueError("invalid example state schema")
+    return f'{{"accumulator":{state["accumulator"]},"event_count":{state["event_count"]}}}'.encode()
+
+
+def encode_checkpoint(metadata, state):
+    payload = state_payload(metadata, state)
+    container = bytearray(192 + len(payload))
+    container[:4] = b"QSSC"
+    struct.pack_into("<HHII", container, 4, 1, 192, 0, len(container))
+    for offset, name in ((16, "schema_registry"), (32, "strategy"), (48, "definition"), (64, "state_schema")):
+        container[offset:offset + 16] = metadata[name].to_bytes(16, "little")
+    struct.pack_into("<IH2xQQQII", container, 80, metadata["state_schema_version"], 1,
+                     metadata["config_version"], metadata["cursor"], metadata["next_intent"],
+                     len(payload), crc32c(payload))
+    container[192:] = payload
+    container[120:152] = hashlib.sha256(container[:120] + payload).digest()
+    struct.pack_into("<I", container, 188, crc32c(container[:188]))
+    # Same boundary validation on save and restore; invalid metadata never publishes.
+    decode_checkpoint(container)
+    return bytes(container)
 
 
 def state_digest(metadata, state):
-    payload = f'{{"accumulator":{state["accumulator"]},"event_count":{state["event_count"]}}}'.encode()
+    payload = state_payload(metadata, state)
     body = bytearray(b"QSSD\x01")
     for key in ("schema_registry", "strategy", "definition", "state_schema"):
         body.extend(metadata[key].to_bytes(16, "little"))
@@ -524,6 +566,53 @@ def recovery_once(args, session, zig_sequence, control_sequence, fault_strategy)
             break
 
 
+def portable_once(args, session, zig_sequence, control_sequence):
+    """Versioned private-state transport. It never grants trading authority."""
+    kind, actual_session, sequence, payload = read_frame(sys.stdin.buffer)
+    if kind != BEGIN_RECOVERY or actual_session != session or sequence != zig_sequence[0] or len(payload) < 200:
+        raise ValueError("expected portable BeginRecovery")
+    zig_sequence[0] += 1
+    barrier = struct.unpack_from("<Q", payload)[0]
+    metadata, state = decode_checkpoint(payload[8:])
+    if (metadata["state_schema"] != CROSS_VENUE_STATE_SCHEMA or
+            metadata["schema_registry"] != SCHEMA_REGISTRY or
+            metadata["strategy"] != int(args.strategy_identity, 0) or
+            metadata["config_version"] != args.config_version or barrier < metadata["cursor"]):
+        raise ValueError("portable checkpoint identity mismatch")
+    if barrier != metadata["cursor"]:
+        raise ValueError("portable replay implementation required")
+    recovered = bytearray(96)
+    recovered[:16] = metadata["strategy"].to_bytes(16, "little")
+    struct.pack_into("<Q", recovered, 16, metadata["config_version"])
+    recovered[24:40] = metadata["state_schema"].to_bytes(16, "little")
+    struct.pack_into("<I4xQQ", recovered, 40, metadata["state_schema_version"], metadata["cursor"], metadata["next_intent"])
+    recovered[64:] = state_digest(metadata, state)
+    write_frame(sys.stdout.buffer, STRATEGY_RECOVERED, session, control_sequence[0], recovered)
+    control_sequence[0] += 1
+    last_request = 0
+    while True:
+        kind, actual_session, sequence, payload = read_frame(sys.stdin.buffer)
+        if actual_session != session or sequence != zig_sequence[0]:
+            raise ValueError("portable session or sequence mismatch")
+        zig_sequence[0] += 1
+        if kind == REQUEST_CHECKPOINT:
+            if len(payload) != 16:
+                raise ValueError("invalid checkpoint request")
+            request, cursor = struct.unpack("<QQ", payload)
+            if request <= last_request or cursor != metadata["cursor"]:
+                raise ValueError("stale checkpoint request")
+            container = encode_checkpoint(metadata, state)
+            write_frame(sys.stdout.buffer, CHECKPOINT_CONTENT, session,
+                        control_sequence[0], struct.pack("<Q", request) + container)
+            control_sequence[0] += 1
+            last_request = request
+        elif kind == SHUTDOWN:
+            write_frame(sys.stdout.buffer, SHUTDOWN_ACK, session, control_sequence[0])
+            return
+        else:
+            raise ValueError("invalid portable control message")
+
+
 def assert_no_backing_capability():
     if sys.argv[1:] != ["--mode", "hostile-capability"]:
         raise AssertionError("unexpected child capability argument")
@@ -541,7 +630,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=("normal", "crash", "hang", "hostile-capability", "trade", "recovery", "strategy-fault", "benchmark"),
+        choices=("normal", "crash", "hang", "hostile-capability", "trade", "recovery", "strategy-fault", "benchmark", "portable"),
         default="normal",
     )
     parser.add_argument("--strategy-identity")
@@ -592,7 +681,10 @@ def main():
     control_sequence = [3]
     zig_sequence = [2]
     try:
-        if args.mode == "trade":
+        if args.mode == "portable":
+            portable_once(args, session, zig_sequence, control_sequence)
+            return 0
+        elif args.mode == "trade":
             await_direct_activation(args, session, zig_sequence)
             trade_once(args, session, zig_sequence, control_sequence)
         elif args.mode in ("recovery", "strategy-fault"):

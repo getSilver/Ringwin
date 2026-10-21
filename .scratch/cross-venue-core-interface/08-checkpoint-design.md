@@ -1,6 +1,6 @@
 # 08：策略 checkpoint 实现合同提案
 
-日期：2026-10-21。状态：proposed，等待策略 schema 确认；不是功能完成或数值资格证明。
+日期：2026-10-21。状态：schema 范围、codec、容量和接缝已获用户确认；不是功能完成或数值资格证明。
 归属：[08](issues/08-deterministic-checkpoint.md)。语义依据：[S6](../cross-venue-arbitrage/state-recovery-contract.md)、[S4](../cross-venue-arbitrage/parameter-contract.md)，所有权遵守 ADR0007、ADR0017。
 
 ## 当前源码核对
@@ -93,3 +93,15 @@
 4. 运行定向测试、完整测试和 Host 产品验收；按实际平台记录 S6 向量，进行 Standards/Spec 双轴审查后提交实现。
 
 当前仅完成源码核对和可审阅提案。所有 08 完成条件仍未勾选；未有用户确认、实现、运行和审查证据前，不将本提案当作已冻结 schema，不关闭任务。
+
+## 本轮授权与基础设施持久合同
+
+用户已明确答复「批准该提案，继续实现」，随后对真实模型公式选择答复「仅完成 checkpoint 基础设施，模型验收保持待定」。因此本轮交付不实现研究模型、策略行为或交易权限；08 的真实模型与 S6-A/B/J/M 运行确定性仍为待验收，不关闭整票。上述“等待确认”的历史说明以本节为准。
+
+基础设施将私有 payload 作为显式 schema 的内容保存；Python 对完整私有字段执行语义校验，Zig 对容器、固定版本、全部预期元数据、session、请求、CRC、内容 SHA 和状态摘要进行边界校验。Zig 不把内容解释为核心余额或占用事实。
+
+持久发布复用 DurableStore 的 control stream：一个 catalog stream 加两个显式配置的内容 stream，三个身份必须非零且互异，调用者必须分配专属 namespace。checkpoint 内容只写当前未被 catalog 引用的槽；内容 marker 提交及 snapshot 发布成功后，才提交包含精确元数据、内容身份、StrategyStateDigest、槽及其 barrier 的 catalog publication record。发布 record 不嵌入私有内容。catalog 的已提交记录是基础设施发布事实，尚未联结 TradingShard 的核心周期事实，该联结继续归 09。
+
+每次 publication 的 catalog 根及内容均经既有 Store 快照/轮转维护；返回失败可能已提交 catalog record，恢复与重试必须按已提交引用查明，不能自动重发意图。只承诺当前已发布 checkpoint 保留至新引用持久提交，不开放未引用内容或旧 generation 的任意查询。恢复只读取当前已提交引用的槽和 barrier，检查所有版本及摘要；缺失或不匹配失败关闭，不用“最新文件”猜测，也不把旧备用快照自动当作新引用内容。三个 stream 用于单个实例，超出共享 Store 容量明确拒绝，不复用其他 owner 的 stream。
+
+此实现不新增持久格式的隐式兼容：catalog 私有记录有独立 magic/version 和固定长度，journal 继续使用当前仓库版本。旧示例 schema 与跨所私有 schema 的身份分开；新接口只验证内容，不授予 activation，不接受 pickle 或任意路径。

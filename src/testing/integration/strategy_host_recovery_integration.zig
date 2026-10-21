@@ -215,11 +215,93 @@ pub fn main(init: std.process.Init) !void {
     const script = args.next() orelse "python/strategy_host.py";
     if (args.next() != null) return error.UnknownArgument;
     try runCheck(init, python, script);
+    try runPortableCheckpoint(init, python, script);
     var buffer: [256]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &buffer);
     try stdout.interface.print(
         "strategy_host_recovery: zig={s}, checkpoint=validated, replay=equivalent, pre_activation_intents=0, recovered_intent=stable\n",
         .{builtin.zig_version_string},
     );
+    try stdout.interface.writeAll("cross_venue_checkpoint: host=validated, file_reopen=exact, model_replay=not_run, trading_authority=false\n");
     try stdout.interface.flush();
+}
+
+fn runPortableCheckpoint(init: std.process.Init, python: []const u8, script: []const u8) !void {
+    const plan = lifecycle.developmentPlan(0, 42, try lifecycle.discoverPythonAbi(init, python));
+    const metadata: recovery_module.Metadata = .{
+        .schema_registry = plan.compatibility.schema_registry,
+        .strategy_instance = 1,
+        .strategy_definition = 2,
+        .state_schema = 0x43565354415445000000000000000001,
+        .state_schema_version = 1,
+        .strategy_config_version = 1,
+        .strategy_cursor = 10,
+        .next_intent_sequence = 3,
+    };
+    const payload = @embedFile("../fixtures/cross_venue_state_v1.json");
+    const storage = try init.gpa.alloc(u8, 8192);
+    defer init.gpa.free(storage);
+    const checkpoint = try recovery_module.encodePayloadCheckpoint(storage, metadata, payload);
+    var host = try lifecycle.ManagedHost.start(init, python, script, plan, "portable", &.{ "--strategy-identity", "1", "--config-version", "1" });
+    defer host.deinit(init.io);
+    try host.sendPlan(init.io);
+    try expectLifecycle(.accepted, try host.receive(init.io, 1));
+    try expectLifecycle(.accepted, try host.receive(init.io, 2));
+    var frame: [8192]u8 = undefined;
+    try host.beginRecovery(init.io, 10, checkpoint, &frame);
+    try expectLifecycle(.accepted, try host.receive(init.io, 3));
+    try host.requestCheckpoint(init.io, 1, metadata);
+    const returned = try host.receiveCheckpoint(init.io, &frame);
+    try std.testing.expectEqualSlices(u8, checkpoint, returned);
+    try checkPortableFile(init, returned, metadata);
+    try std.testing.expectEqual(lifecycle.State.recovered, host.supervisor.state);
+    try std.testing.expectError(error.StaleCheckpointRequest, host.requestCheckpoint(init.io, 1, metadata));
+    try host.shutdown(init.io, 4);
+}
+
+fn checkPortableFile(init: std.process.Init, checkpoint: []const u8, metadata: recovery_module.Metadata) !void {
+    const durable = @import("../../persistence/durable_store.zig");
+    const checkpoints = @import("../../strategy/strategy_checkpoint_store.zig");
+    var cwd_buffer: [1024]u8 = undefined;
+    const cwd = cwd_buffer[0..try std.Io.Dir.cwd().realPath(init.io, &cwd_buffer)];
+    var path_buffer: [2048]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/.scratch/build/task08-store-{d}", .{ cwd, std.Io.Clock.real.now(init.io).nanoseconds });
+    const adapter = try init.gpa.create(durable.LinuxFileAdapter);
+    defer init.gpa.destroy(adapter);
+    adapter.* = .{ .dir = undefined };
+    if (builtin.os.tag == .windows) try adapter.initWindowsVerification(init.io, path) else try adapter.initLinux(init.io, path);
+    var opened = true;
+    defer if (opened) adapter.close(init.io);
+    const repository = try checkpoints.Repository.init(adapter.interface(), 800, .{ 801, 802 });
+    try repository.initialize(init.io);
+    const publication = try repository.publish(init.io, checkpoint, metadata);
+    try std.testing.expectEqual(@as(u64, 2), publication.sequence);
+    adapter.close(init.io);
+    opened = false;
+    adapter.* = .{ .dir = undefined };
+    if (builtin.os.tag == .windows) try adapter.initWindowsVerification(init.io, path) else try adapter.initLinux(init.io, path);
+    opened = true;
+    const reopened = try checkpoints.Repository.init(adapter.interface(), 800, .{ 801, 802 });
+    const restored = try reopened.restore(init.io, metadata);
+    try std.testing.expectEqualSlices(u8, checkpoint, restored);
+    var wrong = metadata;
+    wrong.strategy_config_version += 1;
+    try std.testing.expectError(error.CheckpointMismatch, reopened.restore(init.io, wrong));
+    // A complete new content object without a committed catalog reference must
+    // never replace the previously published checkpoint during reopen.
+    const original = try recovery_module.decodePayloadCheckpoint(checkpoint, metadata);
+    var next_metadata = metadata;
+    next_metadata.strategy_cursor += 1;
+    var next_storage: [8192]u8 = undefined;
+    const next = try recovery_module.encodePayloadCheckpoint(&next_storage, next_metadata, original.payload);
+    adapter.injectFaultAfter(.eio, .append, 1);
+    try std.testing.expectError(error.InputOutput, reopened.publish(init.io, next, next_metadata));
+    adapter.close(init.io);
+    opened = false;
+    adapter.* = .{ .dir = undefined };
+    if (builtin.os.tag == .windows) try adapter.initWindowsVerification(init.io, path) else try adapter.initLinux(init.io, path);
+    opened = true;
+    const after_fault = try checkpoints.Repository.init(adapter.interface(), 800, .{ 801, 802 });
+    try std.testing.expectEqualDeep(publication, (try after_fault.latest(init.io)).?);
+    try std.testing.expectEqualSlices(u8, checkpoint, try after_fault.restore(init.io, metadata));
 }
