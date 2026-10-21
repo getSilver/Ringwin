@@ -53,6 +53,8 @@ Status: open
 
 ## Decisions so far
 
+- 2026-10-21：用户要求实施 05。按当前源码核对后形成 [05a 实现合同提案](05a-implementation-contract.md)：现有单账户租约不能充当跨账户全局预算来源，业务历史仍绑定单账户。静态完整部署分配清单的信任来源、显式域级历史命名空间待确认；提案不代表架构已接受或功能已实现，05a/05b/05 保持原状态。
+
 - 2026-10-21：03 resolved，连续有界深度、缺口失效与新快照恢复、捕获重放及九个稳定恢复切点已验证；最终 ReleaseSafe 659/659、Python 5/5，双轴复审无遗留阻塞项。格式 15/13/42/46/40，Host 深度 wire 保持不变；见 [合同](../../docs/depth-resynchronization-contract.md) 与 [验证记录](03-verification.md)。I1 策略全链路和任务 10、其他 Venue 与线上资格仍分别验收。
 
 - 2026-10-21：08 schema/codec/容量获确认；用户随后指定仅完成 checkpoint 基础设施，真实模型验收保持待定。新增显式私有状态、Host 请求/响应和 DurableStore catalog 发布/恢复；ReleaseSafe 653/653、Host 产品验收 16/16 通过，双轴审查修复后无遗留发现。整票继续 in_progress，不解除 09b，见 [08 验证记录](08-verification.md)。
