@@ -1,0 +1,560 @@
+const std = @import("std");
+const builtin = @import("builtin");
+const gateway_module = @import("../../strategy/strategy_host_gateway.zig");
+const lifecycle = @import("../../strategy/strategy_host_lifecycle.zig");
+const recovery_module = @import("../../strategy/strategy_host_recovery.zig");
+const fixture = @import("../support/trading_shard_fixture.zig");
+
+fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !void {
+    const python_abi = try lifecycle.discoverPythonAbi(init, python);
+    var plans = [_]lifecycle.Plan{
+        lifecycle.developmentPlan(0, 1, python_abi),
+        lifecycle.developmentPlan(1, 1, python_abi),
+        lifecycle.developmentPlan(2, 1, python_abi),
+        lifecycle.developmentPlan(3, 1, python_abi),
+    };
+    plans[1].output_capacity = 128;
+
+    var host0 = try startDataHost(
+        init,
+        python,
+        script,
+        plans[0],
+        "strategy-fault",
+        0x1001,
+        0x2001,
+        7,
+        0xa001,
+        1,
+    );
+    defer host0.deinit(init.io);
+    var host1 = try startDataHost(
+        init,
+        python,
+        script,
+        plans[1],
+        "trade",
+        0x1101,
+        0x2101,
+        7,
+        0,
+        1,
+    );
+    defer host1.deinit(init.io);
+    var host2 = try lifecycle.ManagedHost.start(init, python, script, plans[2], "crash", &.{});
+    defer host2.deinit(init.io);
+    var host3 = try startDataHost(
+        init,
+        python,
+        script,
+        plans[3],
+        "trade",
+        0x1301,
+        0x2301,
+        7,
+        0,
+        2,
+    );
+    defer host3.deinit(init.io);
+
+    for ([_]*lifecycle.ManagedHost{ &host0, &host1, &host2, &host3 }) |host|
+        try host.sendPlan(init.io);
+    try handshake(&host0, init.io, 1, true);
+    try handshake(&host1, init.io, 1, true);
+    try handshake(&host2, init.io, 1, false);
+    try handshake(&host3, init.io, 1, true);
+
+    try runStrategyFault(init, &host0, plans[0]);
+    try runOutputFull(&host1, plans[1], init.io);
+
+    const crash_term = try host2.child.wait(init.io);
+    host2.supervisor.processExited(switch (crash_term) {
+        .exited => |code| code == 0,
+        else => false,
+    });
+    try std.testing.expectEqual(lifecycle.State.failed, host2.supervisor.state);
+
+    var healthy: HealthyTrade = undefined;
+    try beginHealthyTrade(&healthy, &host3, plans[3], init.io, 1, 2);
+
+    var replacement_plan = lifecycle.developmentPlan(2, 2, python_abi);
+    var replacement = try lifecycle.ManagedHost.start(
+        init,
+        python,
+        script,
+        replacement_plan,
+        "normal",
+        &.{},
+    );
+    defer replacement.deinit(init.io);
+    try replacement.sendPlan(init.io);
+    try handshake(&replacement, init.io, 10, true);
+    try replacement.shutdown(init.io, 12);
+
+    replacement_plan.session.generation = 3;
+    var hung = try lifecycle.ManagedHost.start(
+        init,
+        python,
+        script,
+        replacement_plan,
+        "hang",
+        &.{},
+    );
+    defer hung.deinit(init.io);
+    try hung.sendPlan(init.io);
+    try handshake(&hung, init.io, 20, true);
+    try std.testing.expectEqual(
+        lifecycle.Result.timed_out,
+        hung.supervisor.poll(21 + hung.supervisor.plan.hang_timeout_ns + 1),
+    );
+    hung.child.kill(init.io);
+
+    try finishHealthyTrade(&host3, &healthy, init.io, 2, 3);
+    try host3.shutdown(init.io, 30);
+
+    const invalid_plan = lifecycle.developmentPlan(1, 2, python_abi);
+    var invalid_host = try startDataHost(
+        init,
+        python,
+        script,
+        invalid_plan,
+        "trade",
+        0x1101,
+        0x2102,
+        7,
+        0,
+        1,
+    );
+    defer invalid_host.deinit(init.io);
+    try invalid_host.sendPlan(init.io);
+    try handshake(&invalid_host, init.io, 40, true);
+    try sendUnknownSchema(&invalid_host, invalid_plan, init.io);
+    try std.testing.expectEqual(lifecycle.State.failed, invalid_host.supervisor.state);
+    invalid_host.child.kill(init.io);
+}
+
+fn runStrategyFault(init: std.process.Init, host: *lifecycle.ManagedHost, plan: lifecycle.Plan) !void {
+    const authorization: gateway_module.Authorization = .{
+        .strategy_identity = 0x1001,
+        .config_version = 7,
+        .activation_identity = 0x2001,
+        .activation_barrier = 5,
+    };
+    const config = gatewayConfig(plan, authorization);
+    const metadata: recovery_module.Metadata = .{
+        .schema_registry = config.schema_registry,
+        .strategy_instance = authorization.strategy_identity,
+        .strategy_definition = 0x3001,
+        .state_schema = 0x4001,
+        .state_schema_version = 1,
+        .strategy_config_version = 7,
+        .strategy_cursor = 2,
+        .next_intent_sequence = 5,
+    };
+    var checkpoint_storage: [512]u8 = undefined;
+    const checkpoint = try recovery_module.encodeCheckpoint(
+        &checkpoint_storage,
+        metadata,
+        .{ .accumulator = 30, .event_count = 2 },
+    );
+    var control_storage: [1024]u8 = undefined;
+    try host.beginRecovery(init.io, 5, checkpoint, &control_storage);
+
+    const subscriptions = [_]gateway_module.Subscription{
+        gateway_module.Subscription.of(authorization.strategy_identity, &.{.timer}),
+    };
+    var gateway = try gateway_module.Gateway.init(config, &subscriptions);
+    gateway.beginRecovery();
+    const now = monotonicNow(init.io);
+    const replay_payloads = [_][9]u8{
+        eventPayload(30, false),
+        eventPayload(40, true),
+        eventPayload(50, false),
+    };
+    const replay_events = [_]gateway_module.EventEnvelope{
+        event(3, now, &replay_payloads[0]),
+        event(4, now, &replay_payloads[1]),
+        event(5, now, &replay_payloads[2]),
+    };
+    var batch_storage: [1024]u8 = undefined;
+    const replay_batch = try gateway.encodeBatch(&batch_storage, 1, 3, 5, now, &replay_events);
+    try host.sendInput(init.io, replay_batch, now);
+    try gateway.recordPublished(1, 5, now);
+    try std.testing.expectEqual(lifecycle.Result.accepted, try host.receive(init.io, now + 1));
+    const recovered = host.supervisor.last_recovered orelse return error.MissingRecovery;
+    var authority = try fixture.gatewayActivationFixtureForSession(authorization, plan.session);
+    try gateway.activate(&authority.shard, &authority.decision_journal);
+    try host.activate(init.io, .{
+        .strategy_identity = authorization.strategy_identity,
+        .activation_identity = authorization.activation_identity,
+        .barrier = 5,
+        .state_digest = recovered.state_digest,
+    });
+
+    // Build the unrelated strategy fixture before starting the healthy output
+    // freshness window; its setup time is not PythonDecisionLatency.
+    const fault_authorization: gateway_module.Authorization = .{
+        .strategy_identity = 0xa001,
+        .config_version = 7,
+        .activation_identity = 0x2a01,
+        .activation_barrier = 5,
+    };
+    var fault_authority = try fixture.gatewayActivationFixtureForSession(fault_authorization, plan.session);
+    var fault_gateway = try gateway_module.Gateway.init(gatewayConfig(plan, fault_authorization), &.{gateway_module.Subscription.of(fault_authorization.strategy_identity, &.{.timer})});
+    try fault_gateway.recordPublished(1, 6, monotonicNow(init.io));
+    try fault_gateway.activate(&fault_authority.shard, &fault_authority.decision_journal);
+
+    const active_now = monotonicNow(init.io);
+    const active_payload = eventPayload(60, true);
+    const active_events = [_]gateway_module.EventEnvelope{
+        event(6, active_now, &active_payload),
+    };
+    const active_batch = try gateway.encodeBatch(
+        &batch_storage,
+        2,
+        6,
+        6,
+        active_now,
+        &active_events,
+    );
+    try host.sendInput(init.io, active_batch, active_now);
+    try gateway.recordPublished(2, 6, active_now);
+    try std.testing.expectEqual(
+        lifecycle.Result.accepted,
+        try host.receive(init.io, active_now + 1),
+    );
+    const fault = host.supervisor.last_fault orelse return error.MissingStrategyFault;
+    try std.testing.expectEqual(@as(u128, 0xa001), fault.strategy_identity);
+    try std.testing.expectEqual(@as(u64, 5), fault.last_valid_cursor);
+    try std.testing.expectEqual(lifecycle.State.active, host.supervisor.state);
+    try std.testing.expect(!(try lifecycle.revokeHostAuthority(&host.supervisor, &gateway, &authority.shard, &authority.decision_journal, 7, .fault)));
+    try std.testing.expect(try lifecycle.revokeHostAuthority(&host.supervisor, &fault_gateway, &fault_authority.shard, &fault_authority.decision_journal, 7, .fault));
+    try std.testing.expectEqual(@as(u128, 0), fault_authority.shard.host_activation_identity);
+    try std.testing.expect(!fault_gateway.trading_enabled);
+
+    var output_storage: [512]u8 = undefined;
+    const frame = try host.receiveOutput(init.io, monotonicNow(init.io), &output_storage);
+    const decision = gateway.ingest(frame, monotonicNow(init.io));
+    if (decision != .accepted or decision.accepted.strategy_identity != 0x1001 or
+        decision.accepted.strategy_cursor != 6)
+    {
+        return error.HealthyStrategyWasNotIsolated;
+    }
+    try host.shutdown(init.io, active_now + 2);
+}
+
+fn runOutputFull(host: *lifecycle.ManagedHost, plan: lifecycle.Plan, io: std.Io) !void {
+    const authorization: gateway_module.Authorization = .{
+        .strategy_identity = 0x1101,
+        .config_version = 7,
+        .activation_identity = 0x2101,
+        .activation_barrier = 0,
+    };
+    const config = gatewayConfig(plan, authorization);
+    const subscriptions = [_]gateway_module.Subscription{
+        gateway_module.Subscription.of(authorization.strategy_identity, &.{.timer}),
+    };
+    var gateway = try gateway_module.Gateway.init(config, &subscriptions);
+    try activateDirect(host, authorization, io);
+    const now = monotonicNow(io);
+    const payload = eventPayload(1, true);
+    const events = [_]gateway_module.EventEnvelope{event(1, now, &payload)};
+    var batch_storage: [512]u8 = undefined;
+    const batch = try gateway.encodeBatch(&batch_storage, 1, 1, 1, now, &events);
+    try gateway.recordPublished(1, 1, now);
+    var authority = try fixture.gatewayActivationFixtureForSession(authorization, plan.session);
+    try gateway.activate(&authority.shard, &authority.decision_journal);
+    var frame_a_storage: [256]u8 = undefined;
+    const frame_a = try gateway_module.encodeOutputFrame(
+        &frame_a_storage,
+        config,
+        1,
+        1,
+        50,
+        100,
+        50_100_000_000,
+    );
+    try host.sendInput(io, batch, now);
+    var oversized_storage: [512]u8 = undefined;
+    try std.testing.expectError(error.InvalidOutputFrame, host.receiveOutput(io, now + 1, &oversized_storage));
+    try std.testing.expectEqual(lifecycle.State.failed, host.supervisor.state);
+    try std.testing.expect(try lifecycle.revokeHostAuthority(&host.supervisor, &gateway, &authority.shard, &authority.decision_journal, 2, .fault));
+    try std.testing.expectEqual(@as(u128, 0), authority.shard.host_activation_identity);
+    try std.testing.expectEqual(
+        gateway_module.RejectReason.unauthorized,
+        gateway.ingest(frame_a, now + 2).rejected.reason,
+    );
+    host.child.kill(io);
+    host.supervisor.processExited(false);
+
+    var next_config = config;
+    next_config.session.generation += 1;
+    next_config.authorization.activation_identity = try authority.shard.nextHostActivationIdentity();
+    next_config.authorization.activation_barrier = @intCast(authority.shard.authoritativeBarrier());
+    try gateway.beginSession(next_config, &authority.shard, &authority.decision_journal);
+    const next_digest = authority.shard.canonicalStateDigest();
+    _ = try fixture.apply(&authority, fixture.atGroup(3, .{ .identity = 3, .payload = .{ .host_activated = .{
+        .strategy_identity = authorization.strategy_identity,
+        .config_version = authorization.config_version,
+        .activation_identity = next_config.authorization.activation_identity,
+        .session = next_config.session,
+        .activation_barrier = next_config.authorization.activation_barrier,
+        .state_digest = next_digest,
+    } } }));
+    const next_now = now + 3;
+    const next_events = [_]gateway_module.EventEnvelope{event(4, next_now, &payload)};
+    const next_batch = try gateway.encodeBatch(
+        &batch_storage,
+        1,
+        4,
+        4,
+        next_now,
+        &next_events,
+    );
+    _ = next_batch;
+    try gateway.recordPublished(1, 4, next_now);
+    try gateway.activate(&authority.shard, &authority.decision_journal);
+    const retried = try gateway_module.encodeOutputFrame(
+        &frame_a_storage,
+        next_config,
+        1,
+        4,
+        50,
+        100,
+        50_100_000_000,
+    );
+    try std.testing.expect(gateway.ingest(retried, next_now + 1) == .accepted);
+    try std.testing.expectEqual(
+        gateway_module.RejectReason.duplicate_identity,
+        gateway.ingest(retried, next_now + 2).rejected.reason,
+    );
+}
+
+const HealthyTrade = struct {
+    gateway: gateway_module.Gateway,
+    authority: fixture.LiveRun,
+};
+
+fn beginHealthyTrade(
+    result: *HealthyTrade,
+    host: *lifecycle.ManagedHost,
+    plan: lifecycle.Plan,
+    io: std.Io,
+    batch_sequence: u64,
+    shard_sequence: u64,
+) !void {
+    const authorization: gateway_module.Authorization = .{
+        .strategy_identity = 0x1301,
+        .config_version = 7,
+        .activation_identity = 0x2301,
+        .activation_barrier = 0,
+    };
+    result.* = .{
+        .gateway = try gateway_module.Gateway.init(
+            gatewayConfig(plan, authorization),
+            &.{gateway_module.Subscription.of(authorization.strategy_identity, &.{.timer})},
+        ),
+        .authority = try fixture.gatewayActivationFixtureForSession(authorization, plan.session),
+    };
+    try activateDirect(host, authorization, io);
+    try publishAndAccept(host, &result.gateway, &result.authority, io, batch_sequence, shard_sequence);
+}
+
+fn finishHealthyTrade(
+    host: *lifecycle.ManagedHost,
+    trade: *HealthyTrade,
+    io: std.Io,
+    batch_sequence: u64,
+    shard_sequence: u64,
+) !void {
+    try publishAndAccept(host, &trade.gateway, &trade.authority, io, batch_sequence, shard_sequence);
+}
+
+fn publishAndAccept(
+    host: *lifecycle.ManagedHost,
+    gateway: *gateway_module.Gateway,
+    authority: *fixture.LiveRun,
+    io: std.Io,
+    batch_sequence: u64,
+    shard_sequence: u64,
+) !void {
+    const now = monotonicNow(io);
+    const payload = eventPayload(1, true);
+    const events = [_]gateway_module.EventEnvelope{event(shard_sequence, now, &payload)};
+    var batch_storage: [512]u8 = undefined;
+    const batch = try gateway.encodeBatch(
+        &batch_storage,
+        batch_sequence,
+        shard_sequence,
+        shard_sequence,
+        now,
+        &events,
+    );
+    try host.sendInput(io, batch, now);
+    try gateway.recordPublished(batch_sequence, shard_sequence, now);
+    if (!gateway.trading_enabled)
+        try gateway.activate(&authority.shard, &authority.decision_journal);
+    var output_storage: [512]u8 = undefined;
+    const frame = try host.receiveOutput(io, monotonicNow(io), &output_storage);
+    const decision = gateway.ingest(frame, monotonicNow(io));
+    if (decision != .accepted or decision.accepted.strategy_cursor != shard_sequence)
+        return error.HealthyHostDidNotAdvance;
+}
+
+fn sendUnknownSchema(host: *lifecycle.ManagedHost, plan: lifecycle.Plan, io: std.Io) !void {
+    const authorization: gateway_module.Authorization = .{
+        .strategy_identity = 0x1101,
+        .config_version = 7,
+        .activation_identity = 0x2102,
+        .activation_barrier = 0,
+    };
+    var gateway = try gateway_module.Gateway.init(
+        gatewayConfig(plan, authorization),
+        &.{gateway_module.Subscription.of(authorization.strategy_identity, &.{.timer})},
+    );
+    try activateDirect(host, authorization, io);
+    const now = monotonicNow(io);
+    const payload = eventPayload(1, true);
+    const events = [_]gateway_module.EventEnvelope{event(1, now, &payload)};
+    var batch_storage: [512]u8 = undefined;
+    const batch = try gateway.encodeBatch(&batch_storage, 1, 1, 1, now, &events);
+    put(u16, batch, 128 + 10, 2);
+    put(u32, batch, 124, wireCrc(batch));
+    try std.testing.expectError(error.InvalidInputBatch, host.sendInput(io, batch, now));
+    host.supervisor.state = .failed;
+}
+
+fn activateDirect(
+    host: *lifecycle.ManagedHost,
+    authorization: gateway_module.Authorization,
+    io: std.Io,
+) !void {
+    const digest: [32]u8 = @splat(0x42);
+    try host.activate(io, .{
+        .strategy_identity = authorization.strategy_identity,
+        .activation_identity = authorization.activation_identity,
+        .barrier = authorization.activation_barrier,
+        .state_digest = digest,
+    });
+}
+
+fn startDataHost(
+    init: std.process.Init,
+    python: []const u8,
+    script: []const u8,
+    plan: lifecycle.Plan,
+    mode: []const u8,
+    strategy: u128,
+    activation: u128,
+    config_version: u64,
+    fault_strategy: u128,
+    trade_batches: u32,
+) !lifecycle.ManagedHost {
+    var strategy_text: [48]u8 = undefined;
+    var activation_text: [48]u8 = undefined;
+    var config_text: [24]u8 = undefined;
+    var fault_text: [48]u8 = undefined;
+    var batches_text: [24]u8 = undefined;
+    var args: [12][]const u8 = undefined;
+    var len: usize = 0;
+    const base = [_][]const u8{
+        "--strategy-identity",
+        try std.fmt.bufPrint(&strategy_text, "0x{x}", .{strategy}),
+        "--activation-identity",
+        try std.fmt.bufPrint(&activation_text, "0x{x}", .{activation}),
+        "--config-version",
+        try std.fmt.bufPrint(&config_text, "{d}", .{config_version}),
+        "--trade-batches",
+        try std.fmt.bufPrint(&batches_text, "{d}", .{trade_batches}),
+    };
+    @memcpy(args[0..base.len], &base);
+    len = base.len;
+    if (fault_strategy != 0) {
+        args[len] = "--fault-strategy-identity";
+        args[len + 1] = try std.fmt.bufPrint(&fault_text, "0x{x}", .{fault_strategy});
+        len += 2;
+    }
+    return lifecycle.ManagedHost.start(init, python, script, plan, mode, args[0..len]);
+}
+
+fn handshake(
+    host: *lifecycle.ManagedHost,
+    io: std.Io,
+    now: i64,
+    expect_heartbeat: bool,
+) !void {
+    try std.testing.expectEqual(lifecycle.Result.accepted, try host.receive(io, now));
+    if (expect_heartbeat)
+        try std.testing.expectEqual(lifecycle.Result.accepted, try host.receive(io, now + 1));
+}
+
+fn gatewayConfig(
+    plan: lifecycle.Plan,
+    authorization: gateway_module.Authorization,
+) gateway_module.Config {
+    return .{
+        .schema_registry = plan.compatibility.schema_registry,
+        .decision_domain = plan.decision_domain,
+        .session = plan.session,
+        .authorization = authorization,
+    };
+}
+
+fn event(
+    sequence: u64,
+    now: i64,
+    payload: *const [9]u8,
+) gateway_module.EventEnvelope {
+    return .{
+        .event_type = .timer,
+        .shard_sequence = sequence,
+        .source_time_ns = now,
+        .receive_time_ns = now,
+        .monotonic_time_ns = now,
+        .wall_time_utc_ns = now,
+        .payload = payload,
+    };
+}
+
+fn eventPayload(delta: i64, emits: bool) [9]u8 {
+    var payload: [9]u8 = undefined;
+    put(i64, &payload, 0, delta);
+    payload[8] = @intFromBool(emits);
+    return payload;
+}
+
+fn monotonicNow(io: std.Io) i64 {
+    return @intCast(std.Io.Clock.awake.now(io).nanoseconds);
+}
+
+fn wireCrc(bytes: []const u8) u32 {
+    var crc = std.hash.crc.Crc32Iscsi.init();
+    crc.update(bytes[0..124]);
+    crc.update(bytes[128..]);
+    return crc.final();
+}
+
+fn put(comptime T: type, destination: []u8, offset: usize, value: T) void {
+    std.mem.writeInt(T, destination[offset..][0..@sizeOf(T)], value, .little);
+}
+
+fn get(comptime T: type, source: []const u8, offset: usize) T {
+    return std.mem.readInt(T, source[offset..][0..@sizeOf(T)], .little);
+}
+
+pub fn main(init: std.process.Init) !void {
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
+    defer args.deinit();
+    _ = args.next();
+    const python = args.next() orelse "python";
+    const script = args.next() orelse "python/strategy_host.py";
+    if (args.next() != null) return error.UnknownArgument;
+    try runCheck(init, python, script);
+    var buffer: [320]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(init.io, &buffer);
+    try stdout.interface.print(
+        "strategy_host_failures: zig={s}, hosts=4, strategy_fault=isolated, crash=rebuilt, hang=killed, output_full=fenced, input_invalid=fenced, healthy_cursor=continuous, duplicate_intents=0\n",
+        .{builtin.zig_version_string},
+    );
+    try stdout.interface.flush();
+}

@@ -15,6 +15,8 @@
 
 ## 统一构建入口
 
+模块归属、完整文件迁移表和独立 Zig 验收命令见[源文件目录说明](docs/source-layout.md)。
+
 仓库统一通过 `build.zig` 执行；每个入口都会先精确验证 Zig
 `0.17.0-dev.315+5b647b792`。
 
@@ -121,7 +123,7 @@ zig version
 从仓库根目录执行：
 
 ```powershell
-zig fmt --check src\main.zig src\trading_shard.zig src\oms.zig src\risk.zig src\journal.zig src\venue_adapter.zig src\okx_public_market.zig
+zig fmt --check src\main.zig src\trading\trading_shard.zig src\execution\oms.zig src\risk\risk.zig src\persistence\journal.zig src\execution\venue_adapter.zig src\adapters\okx\okx_public_market.zig
 zig test src\main.zig -O ReleaseSafe
 zig run src\main.zig -O ReleaseSafe
 ```
@@ -134,7 +136,7 @@ four shards replay and isolate overload
 stable journal detects tail, corruption, and sequence gap
 ```
 
-当前 schema 版本以 [`src/production_contract.zig`](src/production_contract.zig) 为准。
+当前 schema 版本以 [`src/runtime/production_contract.zig`](src/runtime/production_contract.zig) 为准。
 四分片证据由 `zig build run -- --four-shard-acceptance` 输出。重放无发送能力。
 Windows 验证入口：
 
@@ -225,10 +227,10 @@ strategy_host_product_acceptance=passed
 Python 只获得自有 `bytes`，不能获得共享内存句柄、映射大小或原子游标。
 
 ```powershell
-zig fmt --check src\strategy_host_ipc.zig
-zig test src\strategy_host_ipc.zig -O ReleaseSafe
-zig run src\strategy_host_ipc.zig -O ReleaseSafe
-zig build-lib src\strategy_host_ipc.zig -dynamic -O ReleaseSafe
+zig fmt --check src\strategy\strategy_host_ipc.zig
+python tools/zig-entry.py test src\strategy\strategy_host_ipc.zig -O ReleaseSafe
+python tools/zig-entry.py run src\strategy\strategy_host_ipc.zig -O ReleaseSafe
+python tools/zig-entry.py build-lib src\strategy\strategy_host_ipc.zig -dynamic -O ReleaseSafe
 ```
 
 自检覆盖双向传输、批序号、CRC32C、满/空、wrap-around、批量发布原子性、旧会话、
@@ -248,10 +250,10 @@ Windows 与 Linux 数据面都使用 Zig 校验的匿名 pipe；Python 没有映
 精确匹配后只进入 `ready_for_recovery`，此时仍没有交易权限。
 
 ```powershell
-zig fmt --check src\strategy_host_lifecycle.zig
+zig fmt --check src\strategy\strategy_host_lifecycle.zig
 python -m py_compile python\strategy_host.py
-zig test src\strategy_host_lifecycle.zig -O ReleaseSafe
-zig run src\strategy_host_lifecycle.zig -O ReleaseSafe
+python tools/zig-entry.py test src\strategy\strategy_host_lifecycle.zig -O ReleaseSafe
+python tools/zig-entry.py run src\strategy\strategy_host_lifecycle.zig -O ReleaseSafe
 ```
 
 可执行检查同时启动四个 Python Host，并覆盖正常握手/停止、协议与构建不兼容、
@@ -273,10 +275,10 @@ Python 返回的 `OrderIntentV1` 会重新校验 session、schema、activation�
 新鲜度，并与原生 intent 共用同一个定点风控、订单和事实投影入口。
 
 ```powershell
-zig build-lib src\strategy_host_ipc.zig -dynamic -O ReleaseSafe `
+python tools/zig-entry.py build-lib src\strategy\strategy_host_ipc.zig -dynamic -O ReleaseSafe `
   '-femit-bin=.scratch/build/strategy_host_ipc-current.dll'
-zig run src\strategy_host_integration.zig -O ReleaseSafe -- `
-  '.scratch/build/strategy_host_ipc-current.dll'
+python tools/zig-entry.py run src\testing\integration\strategy_host_integration.zig -O ReleaseSafe -- `
+  python python/strategy_host.py
 ```
 
 通过时输出：
@@ -292,9 +294,9 @@ strategy_host_integration: subscriptions=merged, python_intent=accepted, native_
 后才开放 Gateway。恢复期间的输出即使格式合法也会在风控前拒绝。
 
 ```powershell
-zig test src\strategy_host_recovery.zig -O ReleaseSafe
-zig run src\strategy_host_recovery_integration.zig -O ReleaseSafe -- `
-  '.scratch/build/strategy_host_ipc-current.dll'
+python tools/zig-entry.py test src\strategy\strategy_host_recovery.zig -O ReleaseSafe
+python tools/zig-entry.py run src\testing\integration\strategy_host_recovery_integration.zig -O ReleaseSafe -- `
+  python python/strategy_host.py
 ```
 
 通过时输出：
@@ -310,9 +312,9 @@ strategy_host_recovery: checkpoint=validated, replay=equivalent, pre_activation_
 健康 Host 的 cursor 继续推进，跨 session 的业务 intent 身份仍只接受一次。
 
 ```powershell
-zig test src\strategy_host_failures.zig -O ReleaseSafe
-zig run src\strategy_host_failure_integration.zig -O ReleaseSafe -- `
-  '.scratch/build/strategy_host_ipc-current.dll'
+python tools/zig-entry.py test src\strategy\strategy_host_failures.zig -O ReleaseSafe
+python tools/zig-entry.py run src\testing\integration\strategy_host_failure_integration.zig -O ReleaseSafe -- `
+  python python/strategy_host.py
 ```
 
 通过时输出：
@@ -328,10 +330,10 @@ strategy_host_failures: hosts=4, strategy_fault=isolated, crash=rebuilt, hang=ki
 单 Host 变慢、Host 崩溃和恢复负载各自至少采集 100 万样本。
 
 ```powershell
-zig build-exe src\strategy_host_capacity.zig -O ReleaseSafe `
+python tools/zig-entry.py build-exe src\testing\acceptance\capacity\strategy_host_capacity.zig -O ReleaseSafe `
   '-femit-bin=.scratch/strategy_host_capacity.exe'
 .\.scratch\strategy_host_capacity.exe `
-  '.scratch\build\strategy_host_ipc-current.dll'
+  python python/strategy_host.py
 ```
 
 Windows i5-4200U 开发回归的五个场景均满足 Python P99 `<= 50 ms`、P99.9
@@ -422,7 +424,7 @@ Windows 2C/4T 开发节点接近 `2M events/s`，但四分片合并 P99 为
 - testnet 协议资格、生产密钥、单活热备、fencing 和部署；
 - 多资产、现货、期权、组合保证金、跨分片多腿原子决策和 SOR。
 
-详细业务词汇和不变量见 [CONTEXT.md](CONTEXT.md)，架构关系见
+详细业务词汇和不变量见 [GLOSSARY.md](GLOSSARY.md)，架构关系见
 [动态架构图](docs/trading-engine-architecture.html)，当前修复波次证据见
 [交易核心完整性修复地图](.scratch/trading-core-integrity-repair/map.md)。
 

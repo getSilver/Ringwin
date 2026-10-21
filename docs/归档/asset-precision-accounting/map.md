@@ -169,7 +169,7 @@ Status: closed
 - [成交恢复合同](../venue-fill-recovery/map.md)
 - [Windows 进程链验证范围](../windows-process-chain-verification/map.md)
 - [Linux 生产资格范围](../production-readiness/map.md)
-- [领域词汇](../../CONTEXT.md)
+- [领域词汇](../../GLOSSARY.md)
 - [Venue seam 决策](../../docs/adr/0001-separate-venue-execution-and-market-feed-seams.md)
 - [DurableStore 合同](../../docs/adr/0004-durable-store-persistence-contract.md)
 - [权威安全状态 schema 决策](../../docs/adr/0006-authoritative-safety-state-schema-9.md)

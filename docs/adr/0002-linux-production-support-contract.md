@@ -8,7 +8,7 @@ date: 2026-09-06
 > 2026-10-08：平台排他限制已由 [ADR 0010](0010-qualify-windows-and-linux-independently.md)
 > 取代。下文保留原始 Linux 基线；Windows 也可独立取得生产资格，当前实现尚未同步。
 
-首个生产基线由 `src/production_contract.zig` 唯一描述，并由运行输出和资格工具核对。生产平台
+首个生产基线由 `src/runtime/production_contract.zig` 唯一描述，并由运行输出和资格工具核对。生产平台
 只有 Linux；Windows 只保留开发和快速回归。
 
 ## Decision
@@ -25,7 +25,7 @@ date: 2026-09-06
   该 schema 冻结已由 [ADR 0006](0006-authoritative-safety-state-schema-9.md) 的安全状态扩展取代。
 - 首个生产默认优化模式是 ReleaseSafe。io_uring、epoll、libcurl、专用日志线程和批量同步不是
   架构前置条件，只有目标 Linux 测量证明必要时才选择实现。
-- `Journal` 仍保留为稳定 record codec；`src/durable_store.zig` 已把它接入 Linux 文件
+- `Journal` 仍保留为稳定 record codec；`src/persistence/durable_store.zig` 已把它接入 Linux 文件
   segment、manifest、提交同步和原子快照发布。真实目标文件系统的断电、磁盘和性能资格仍属于
   后续 production-readiness 验收，不得由 WSL 或离线摘要宣称完成。
 

@@ -7,7 +7,7 @@ date: 2026-09-06
 
 ## Decision
 
-- `src/durable_store.zig` 是 RawIngress、分片决策日志和控制事实的唯一持久化 seam；调用者只提交
+- `src/persistence/durable_store.zig` 是 RawIngress、分片决策日志和控制事实的唯一持久化 seam；调用者只提交
   `StreamIdentity`、稳定 `journal.Record`、barrier 和已编码 snapshot，不接触文件名或同步 syscall。
 - `MemoryAdapter` 只用于确定性测试；Linux 生产实现使用真实 segment 文件、二进制 manifest 和
   同文件系统的临时快照、文件同步、原子 rename、目录同步。

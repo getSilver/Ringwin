@@ -11,7 +11,7 @@ TradingShard、StrategyInstance、VirtualPortfolio、ExchangeAccount、RiskLease
 
 ## Answer
 
-规范领域语言记录在 [`CONTEXT.md`](../../../CONTEXT.md)。
+规范领域语言记录在 [`GLOSSARY.md`](../../../GLOSSARY.md)。
 
 ### Canonical language
 

@@ -17,4 +17,4 @@ Parent: [产品化接入 OKX Venue Adapter](../map.md)
 - 原 `SimVenue.execute` 已规范命名为 `SimulatedVenue` 并移到 seam 后面。它使用容量 1、无分配的 pending output slot：第二次 `trySend` 返回 `backpressure`，未 drain 时 `stop` 返回 `OutputPending`，stop 后新增请求返回 `stopped`；产品场景不再直接调用模拟执行函数。
 - happy path 与 duplicate report 均经 VenueAdapter 产生原有 `order_dispatched`、ExecutionReport 与 Fill。原 31/23/18/23/33 事件轨迹、五个固定 digest、journal recovery、Unknown 对账和幂等投影保持不变。
 - 新增 seam 合同测试；Zig Debug、ReleaseSafe、ReleaseFast 均 6/6 通过，`zig run src/main.zig -O ReleaseSafe` 自检通过，Python StrategyHost 14 步功能/故障/恢复/容量验收通过。
-- [`CONTEXT.md`](../../../CONTEXT.md) 新增规范词 `VenueAdapter`；README 已记录当前能力波次和格式检查入口。OKX implementation、线程与 libcurl 生命周期留给后续票据，不进入本次 seam。
+- [`GLOSSARY.md`](../../../GLOSSARY.md) 新增规范词 `VenueAdapter`；README 已记录当前能力波次和格式检查入口。OKX implementation、线程与 libcurl 生命周期留给后续票据，不进入本次 seam。

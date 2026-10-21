@@ -68,7 +68,7 @@ Status: closed
 - [确定性交易引擎最小纵向闭环](../quant-trading-engine-vertical-slice/map.md)
 - [Python StrategyHost 产品化接入](../python-strategy-host-productization/map.md)
 - [OKX Demo Adapter 闭环证据](../okx-venue-adapter/map.md)
-- [核心领域词汇与不变量](../../CONTEXT.md)
+- [核心领域词汇与不变量](../../GLOSSARY.md)
 
 ## Not yet specified
 

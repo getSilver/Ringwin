@@ -1,3 +1,3 @@
 # Preserve already captured CRLF bytes; real trailing spaces remain errors.
-src/okx_curl_shim.c whitespace=cr-at-eol
-src/credential_crypto/README.md whitespace=cr-at-eol
+src/adapters/okx/okx_curl_shim.c whitespace=cr-at-eol
+src/security/credential_crypto/README.md whitespace=cr-at-eol

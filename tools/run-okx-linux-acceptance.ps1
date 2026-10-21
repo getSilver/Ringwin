@@ -61,7 +61,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $include 'curl\curl.h') -PathType Le
     throw "Pinned libcurl headers are missing: $include"
 }
 
-Invoke-EmptyInputNative $zig @('build-exe',(Join-Path $workspace 'src\okx_demo_live_acceptance.zig'),(Join-Path $workspace 'src\okx_curl_shim.c'),'-target','x86_64-linux-gnu','-OReleaseSafe',"-I$include",$curlLibrary,$sslLibrary,$cryptoLibrary,$zLibrary,'-lpthread','-ldl',"-femit-bin=$outputPath")
+Invoke-EmptyInputNative (Get-Command python).Source @((Join-Path $PSScriptRoot 'zig-entry.py'),'--zig',$zig,'build-exe',(Join-Path $workspace 'src\testing\acceptance\venues\okx_demo_live_acceptance.zig'),(Join-Path $workspace 'src\adapters\okx\okx_curl_shim.c'),'-target','x86_64-linux-gnu','-OReleaseSafe',"-I$include",$curlLibrary,$sslLibrary,$cryptoLibrary,$zLibrary,'-lpthread','-ldl',"-femit-bin=$outputPath")
 
 function ConvertTo-ShellLiteral([string]$value) {
     return "'$(($value -replace "'", "'\''"))'"

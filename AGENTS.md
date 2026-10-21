@@ -6,4 +6,4 @@
 
 ### Domain docs
 
-设计领域模型、修改核心模块或编写 issue/spec 前，读取根级 `CONTEXT.md` 和相关 `docs/adr/`；本仓库采用 single-context 布局。详见 `docs/agents/domain.md`。
+设计领域模型、修改核心模块或编写 issue/spec 前，读取根级 `GLOSSARY.md` 和相关 `docs/adr/`；本仓库采用 single-context 布局。详见 `docs/agents/domain.md`。

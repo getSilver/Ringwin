@@ -23,7 +23,7 @@ ADR 0003 的 Linux 实现要求继续适用于 Linux。平台可获资格不等�
 
 ## Consequences
 
-当前仅修订文档与计划，不修改实现代码。src/production_contract.zig 仍为 Linux-only，
+当前仅修订文档与计划，不修改实现代码。src/runtime/production_contract.zig 仍为 Linux-only，
 Windows 生产 dispatcher、准入与报告尚待实现和独立验收；当前无新增生产资格。
 后续实施须让平台身份进入支持矩阵、准入、ReleaseArtifact 和报告校验，保持缺证据时失败关闭。
 现有 production-readiness 地图保留为 Linux 专项；核心容量波次同时服务两个平台，Windows

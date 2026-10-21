@@ -39,6 +39,6 @@ Parent: [模块地图](../map.md)
 
 - 创建、读取、分诊、认领、阻塞和关闭均直接修改这些 Markdown 文件。
 - 每次只认领并完成一张 Frontier issue；依赖按 `Blocked by` 顺序处理。
-- issue/spec 修改前读取同模块 `map.md`、相关 issue、根级 `CONTEXT.md` 和相关 ADR。
+- issue/spec 修改前读取同模块 `map.md`、相关 issue、根级 `GLOSSARY.md` 和相关 ADR。
 - 本地 issue 编号只在所属模块内有意义，引用时使用相对 Markdown 链接，不使用裸 `#42`。
 - GitHub Issue、GitHub label 和 PR 不作为本地 tracker 的状态来源。

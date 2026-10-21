@@ -19,7 +19,7 @@ if ($DemoLive -or $CleanupOnly) { throw 'Authoritative writes require the Linux 
 if (-not $BuildRoot) { $BuildRoot = Join-Path $workspace '.scratch\build\libcurl-8.21.0-windows-x86_64-schannel' }
 $include = Join-Path $workspace '.scratch\build\bootstrap\curl-source\curl-8.21.0\include'
 $output = Join-Path $workspace '.scratch\build\okx-demo-live-acceptance.exe'
-Invoke-EmptyInputNative $zig @('build-exe',(Join-Path $workspace 'src\okx_demo_live_acceptance.zig'),(Join-Path $workspace 'src\okx_curl_shim.c'),"-I$include","-L$(Join-Path $BuildRoot 'lib')",'-lc','-lcurl','-lws2_32','-lcrypt32','-lsecur32','-ladvapi32','-lbcrypt','-lwldap32','-lnormaliz','-liphlpapi',"-O$Optimize",'--stack','67108864',"-femit-bin=$output")
+Invoke-EmptyInputNative (Get-Command python).Source @((Join-Path $PSScriptRoot 'zig-entry.py'),'--zig',$zig,'build-exe',(Join-Path $workspace 'src\testing\acceptance\venues\okx_demo_live_acceptance.zig'),(Join-Path $workspace 'src\adapters\okx\okx_curl_shim.c'),"-I$include","-L$(Join-Path $BuildRoot 'lib')",'-lc','-lcurl','-lws2_32','-lcrypt32','-lsecur32','-ladvapi32','-lbcrypt','-lwldap32','-lnormaliz','-liphlpapi',"-O$Optimize",'--stack','67108864',"-femit-bin=$output")
 $oldBase = $env:RINGWIN_OKX_REST_BASE_URL
 $oldEntity = $env:RINGWIN_OKX_ENTITY
 $oldUid = $env:RINGWIN_OKX_UID_SHA256

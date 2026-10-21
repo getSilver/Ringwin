@@ -4,7 +4,7 @@
 
 **0 项未解决 P1/P2。**
 
-按 `AGENTS.md`、`CONTEXT.md`、`docs/agents/domain.md`、`docs/agents/issue-tracker.md`、ADR0004和0010审查；仓库未另设 CODING_STANDARDS/CONTRIBUTING。未发现需要报告的 baseline smell，工具可检查项不作人工finding。
+按 `AGENTS.md`、`GLOSSARY.md`、`docs/agents/domain.md`、`docs/agents/issue-tracker.md`、ADR0004和0010审查；仓库未另设 CODING_STANDARDS/CONTRIBUTING。未发现需要报告的 baseline smell，工具可检查项不作人工finding。
 
 - 票12不修改Zig业务源码。Windows重建显式绑定共同源码、编译器、六个producer、构建参数、PE栈预留与消费SHA；应用64MiB、CLI/测试256MiB均未误报实际栈峰值或生产预算。
 - `audit-12-final.py`拒绝失败、超时、fatal及源码/producer漂移，校验原始stderr/stdout/memory摘要、归档逐文件内容和产物身份。v2审计记录16阶段退出0、333项受影响Debug通过、两产物各30个真实进程及5个实际数据目录；18条故障/拒绝记录保持其hook或物理变更范围。

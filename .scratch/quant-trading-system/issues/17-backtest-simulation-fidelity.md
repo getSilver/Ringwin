@@ -11,7 +11,7 @@ Parent: [设计生产级多策略低延迟加密量化交易系统](../map.md)
 
 ## Answer
 
-规范回测与仿真词汇记录在 [`CONTEXT.md`](../../../CONTEXT.md)。
+规范回测与仿真词汇记录在 [`GLOSSARY.md`](../../../GLOSSARY.md)。
 
 ### Fidelity levels
 

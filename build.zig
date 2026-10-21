@@ -88,7 +88,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     windows_demo.stack_size = 64 * 1024 * 1024;
-    windows_demo.root_module.addCSourceFile(.{ .file = b.path("src/okx_curl_shim.c") });
+    windows_demo.root_module.addCSourceFile(.{ .file = b.path("src/adapters/okx/okx_curl_shim.c") });
     windows_demo.root_module.addIncludePath(b.path(".scratch/build/bootstrap/curl-source/curl-8.21.0/include"));
     windows_demo.root_module.addLibraryPath(b.path(".scratch/build/libcurl-8.21.0-windows-x86_64-schannel/lib"));
     windows_demo.root_module.link_libc = true;

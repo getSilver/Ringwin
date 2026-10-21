@@ -8,12 +8,14 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'zig-entry.ps1')
 . (Join-Path $PSScriptRoot 'protected-demo-launch.ps1')
 Assert-ProtectedDemoInput $EnvFile
 if ($DemoLive) { throw 'Use the Linux authoritative wrapper with fresh explicit authorization for Demo writes' }
 
 function Invoke-Zig {
-    Invoke-EmptyInputNative (Get-Command zig -ErrorAction Stop).Source @args
+    $invocation = Get-ZigSourceInvocation $args
+    Invoke-EmptyInputNative $invocation.Executable $invocation.Arguments
     $global:LASTEXITCODE = 0
 }
 
@@ -31,7 +33,7 @@ if ($LASTEXITCODE -ne 0 -or $zigVersion -ne $ExpectedZig) {
     throw "Expected Zig $ExpectedZig, got $zigVersion"
 }
 
-$zigSources = @(Get-ChildItem (Join-Path $workspace 'src') -File -Filter '*.zig' | ForEach-Object FullName)
+$zigSources = @(Get-ChildItem (Join-Path $workspace 'src') -Recurse -File -Filter '*.zig' | ForEach-Object FullName)
 Invoke-Zig fmt --check $zigSources
 if ($LASTEXITCODE -ne 0) { throw 'Zig format check failed' }
 foreach ($optimize in @('Debug', 'ReleaseSafe', 'ReleaseFast')) {
@@ -54,8 +56,8 @@ $include = (Get-ChildItem -LiteralPath $curlSource -Recurse -Directory -Filter i
 if (-not $include) { throw 'Pinned libcurl headers are missing after bootstrap' }
 Invoke-Zig build-exe (Join-Path $workspace 'src\main.zig') -target x86_64-linux-gnu -OReleaseSafe -fno-emit-bin
 if ($LASTEXITCODE -ne 0) { throw 'Linux core cross-build failed' }
-Invoke-Zig build-obj (Join-Path $workspace 'src\okx_demo_live_acceptance.zig') `
-    (Join-Path $workspace 'src\okx_curl_shim.c') -target x86_64-linux-gnu -lc "-I$include" `
+Invoke-Zig build-obj (Join-Path $workspace 'src\testing\acceptance\venues\okx_demo_live_acceptance.zig') `
+    (Join-Path $workspace 'src\adapters\okx\okx_curl_shim.c') -target x86_64-linux-gnu -lc "-I$include" `
     "-femit-bin=$(Join-Path $buildRoot 'okx-demo-live-acceptance-linux.o')"
 if ($LASTEXITCODE -ne 0) { throw 'Linux OKX Adapter compile check failed' }
 

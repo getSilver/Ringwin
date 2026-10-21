@@ -11,7 +11,7 @@ Parent: [设计生产级多策略低延迟加密量化交易系统](../map.md)
 
 ## Answer
 
-规范研究数据词汇记录在 [`CONTEXT.md`](../../../CONTEXT.md)。
+规范研究数据词汇记录在 [`GLOSSARY.md`](../../../GLOSSARY.md)。
 
 ### Data classes and authority
 

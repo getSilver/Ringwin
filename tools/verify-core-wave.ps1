@@ -14,12 +14,15 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'zig-entry.ps1')
 
 function Invoke-Zig {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        & zig @args
+        $invocation = Get-ZigSourceInvocation $args
+        $nativeArguments = $invocation.Arguments
+        & $invocation.Executable @nativeArguments
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
@@ -30,7 +33,9 @@ function Invoke-Captured {
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $ErrorActionPreference = 'Continue'
-        $captured = @(& zig @ZigArguments 2>&1)
+        $invocation = Get-ZigSourceInvocation $ZigArguments
+        $nativeArguments = $invocation.Arguments
+        $captured = @(& $invocation.Executable @nativeArguments 2>&1)
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
@@ -90,7 +95,7 @@ if ($LASTEXITCODE -ne 0 -or $zigVersion -ne $ExpectedZig) {
 }
 
 Write-Output '== phase=format'
-$zigSources = @(Get-ChildItem (Join-Path $workspace 'src') -File -Filter '*.zig' | ForEach-Object FullName)
+$zigSources = @(Get-ChildItem (Join-Path $workspace 'src') -Recurse -File -Filter '*.zig' | ForEach-Object FullName)
 Invoke-Zig fmt --check $zigSources
 if ($LASTEXITCODE -ne 0) { throw 'Zig format check failed' }
 
@@ -98,12 +103,12 @@ Write-Output '== phase=source_contract'
 if (Test-Path -LiteralPath (Join-Path $workspace 'src\okx_spot_projection.zig')) {
     throw 'Competing OKX economic projection still exists'
 }
-Assert-SourceAbsent 'src\trading_shard.zig' '^\s*(order_state|filled_quantity|order_quantity|open_order_reservation_micros|risk_lease_remaining_micros|layered_risk_reserved_micros|last_canonical_report|last_canonical_fill)\s*:' 'legacy TradingShard authority'
-Assert-SourceAbsent 'src\trading_shard.zig' 'intent_sequence\s*=\s*1\b|RWN-00000001-01-000000000001' 'fixed timer identity'
-Assert-SourceAbsent 'src\execution_gateway.zig' '^\s*pub fn send\s*\(' 'raw public Gateway send'
-Assert-SourceAbsent 'src\okx_demo_live_acceptance.zig' 'adapter\.trySend.*order_(command|batch)' 'Demo order send bypass'
+Assert-SourceAbsent 'src\trading\trading_shard.zig' '^\s*(order_state|filled_quantity|order_quantity|open_order_reservation_micros|risk_lease_remaining_micros|layered_risk_reserved_micros|last_canonical_report|last_canonical_fill)\s*:' 'legacy TradingShard authority'
+Assert-SourceAbsent 'src\trading\trading_shard.zig' 'intent_sequence\s*=\s*1\b|RWN-00000001-01-000000000001' 'fixed timer identity'
+Assert-SourceAbsent 'src\execution\execution_gateway.zig' '^\s*pub fn send\s*\(' 'raw public Gateway send'
+Assert-SourceAbsent 'src\testing\acceptance\venues\okx_demo_live_acceptance.zig' 'adapter\.trySend.*order_(command|batch)' 'Demo order send bypass'
 Assert-SourceAbsent 'python\strategy_host.py' 'ctypes|input-mapping|output-mapping|qsh_' 'Python mapping or cursor capability'
-Assert-SourceAbsent 'src\strategy_host_lifecycle.zig' 'OwnedMapping|input_mapping|output_mapping' 'Host mapping capability transfer'
+Assert-SourceAbsent 'src\strategy\strategy_host_lifecycle.zig' 'OwnedMapping|input_mapping|output_mapping' 'Host mapping capability transfer'
 
 Write-Output '== phase=core_tests mode=Debug'
 $debugTests = Invoke-Captured @('test', (Join-Path $workspace 'src\main.zig'), '-ODebug', '--stack', '67108864')
@@ -156,8 +161,8 @@ if ($DemoLive) {
         Test-Path -LiteralPath (Join-Path $_.FullName 'curl\curl.h')
     } | Select-Object -First 1).FullName
     if (-not $include) { throw 'Pinned libcurl headers are missing after bootstrap' }
-    Invoke-Zig build-obj (Join-Path $workspace 'src\okx_demo_live_acceptance.zig') `
-        (Join-Path $workspace 'src\okx_curl_shim.c') -target x86_64-linux-gnu -lc "-I$include" `
+    Invoke-Zig build-obj (Join-Path $workspace 'src\testing\acceptance\venues\okx_demo_live_acceptance.zig') `
+        (Join-Path $workspace 'src\adapters\okx\okx_curl_shim.c') -target x86_64-linux-gnu -lc "-I$include" `
         "-femit-bin=$(Join-Path $buildRoot 'okx-demo-live-acceptance-linux.o')"
     if ($LASTEXITCODE -ne 0) { throw 'Linux OKX Adapter compile check failed' }
 

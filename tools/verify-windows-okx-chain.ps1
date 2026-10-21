@@ -7,6 +7,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'zig-entry.ps1')
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $reportDir = Join-Path $root '.scratch\windows-process-chain-verification'
 $reportPath = Join-Path $reportDir ("report-{0}.json" -f $Mode.ToLowerInvariant())
@@ -32,7 +33,7 @@ function Get-SourceIdentity {
 }
 
 function Read-Schema([string]$name) {
-    $source = Get-Content -LiteralPath (Join-Path $root 'src\production_contract.zig') -Raw
+    $source = Get-Content -LiteralPath (Join-Path $root 'src\runtime\production_contract.zig') -Raw
     $match = [regex]::Match($source, "pub const $name\s*:\s*u\d+\s*=\s*(\d+);")
     if (-not $match.Success) { throw "Schema value unavailable: $name" }
     return [int]$match.Groups[1].Value
@@ -41,7 +42,8 @@ function Read-Schema([string]$name) {
 function Invoke-Checked([string]$command, [string[]]$arguments) {
     if ($command -eq 'zig') {
         . (Join-Path $PSScriptRoot 'protected-demo-launch.ps1')
-        return ((Invoke-EmptyInputNative (Get-Command zig -ErrorAction Stop).Source $arguments -CaptureOutput) -split "`r?`n")
+        $invocation = Get-ZigSourceInvocation $arguments
+        return ((Invoke-EmptyInputNative $invocation.Executable $invocation.Arguments -CaptureOutput) -split "`r?`n")
     }
     $previous = $ErrorActionPreference
     try {
@@ -74,7 +76,7 @@ $report = [ordered]@{
     requested_strategy = 'windows_verification_python_host'
     requested_strategy_identity = 40
     observed_strategy_identity = $null
-    configuration_source = 'src/windows_verification_runtime.zig and demo_authority.Policy'
+    configuration_source = 'src/runtime/windows_verification_runtime.zig and demo_authority.Policy'
     requested_config_version = 1
     observed_config_version = $null
     account_uid_sha256 = $null
@@ -111,7 +113,7 @@ try {
         $report.windows_durable_adapter = 'passed'
         $null = Invoke-Checked 'zig' @('build', 'windows-credential')
         $report.windows_credential_adapter = 'passed'
-        $null = Invoke-Checked 'zig' @('test', (Join-Path $root 'src\okx_live_chain.zig'), '--stack', '67108864')
+        $null = Invoke-Checked 'zig' @('test', (Join-Path $root 'src\runtime\demo\okx_live_chain.zig'), '--stack', '67108864')
         $null = Invoke-Checked 'zig' @('test', (Join-Path $root 'src\main.zig'), '--stack', '67108864')
         $lines = Invoke-Checked 'zig' @('build', 'windows-chain')
         $okx = @($lines | Where-Object { $_ -match '^windows_okx_offline=passed ' })

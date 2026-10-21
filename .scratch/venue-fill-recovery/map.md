@@ -88,7 +88,7 @@ replace the canonical digest, snapshot identity, dispatch authority, or conflict
 - [Linux 生产资格收口](../production-readiness/map.md)
 - [OKX Linux 在线资格票](../production-readiness/issues/05-qualify-okx-linux-online-chain.md)
 - [主安全修复波次](../main-safety-remediation/map.md)
-- [核心领域词汇与不变量](../../CONTEXT.md)
+- [核心领域词汇与不变量](../../GLOSSARY.md)
 - [Venue seam 决策](../../docs/adr/0001-separate-venue-execution-and-market-feed-seams.md)
 - [DurableStore 持久化合同](../../docs/adr/0004-durable-store-persistence-contract.md)
 - [权威安全状态 schema 决策](../../docs/adr/0006-authoritative-safety-state-schema-9.md)

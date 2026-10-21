@@ -16,8 +16,8 @@ $include = (Get-ChildItem -LiteralPath $sourceRoot -Recurse -Directory -Filter i
 $library = (Get-ChildItem -LiteralPath $BuildRoot -Recurse -File -Filter 'libcurl.a' | Select-Object -First 1)
 if (-not $include -or -not $library) { throw 'Run tools/bootstrap-libcurl.ps1 first' }
 
-& zig test (Join-Path $PSScriptRoot '..\src\okx_curl_transport.zig') `
-    (Join-Path $PSScriptRoot '..\src\okx_curl_shim.c') `
+& python (Join-Path $PSScriptRoot 'zig-entry.py') test (Join-Path $PSScriptRoot '..\src\adapters\okx\okx_curl_transport.zig') `
+    (Join-Path $PSScriptRoot '..\src\adapters\okx\okx_curl_shim.c') `
     "-I$include" "-L$($library.DirectoryName)" -lc -lcurl `
     -lws2_32 -lcrypt32 -lsecur32 -ladvapi32 -lbcrypt -lwldap32 -lnormaliz -liphlpapi
 if ($LASTEXITCODE -ne 0) { throw 'libcurl qualification test failed' }
@@ -29,8 +29,8 @@ try {
     if ($systemProxy -and -not $systemProxy.IsBypassed($destination)) {
         $env:HTTPS_PROXY = $systemProxy.GetProxy($destination).AbsoluteUri
     }
-    & zig run (Join-Path $PSScriptRoot '..\src\okx_curl_public_smoke.zig') `
-        (Join-Path $PSScriptRoot '..\src\okx_curl_shim.c') `
+    & python (Join-Path $PSScriptRoot 'zig-entry.py') run (Join-Path $PSScriptRoot '..\src\testing\acceptance\venues\okx_curl_public_smoke.zig') `
+        (Join-Path $PSScriptRoot '..\src\adapters\okx\okx_curl_shim.c') `
         "-I$include" "-L$($library.DirectoryName)" -lc -lcurl `
         -lws2_32 -lcrypt32 -lsecur32 -ladvapi32 -lbcrypt -lwldap32 -lnormaliz -liphlpapi
     if ($LASTEXITCODE -ne 0) { throw 'libcurl public HTTPS smoke failed' }

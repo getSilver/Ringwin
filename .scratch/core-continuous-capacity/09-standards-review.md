@@ -2,7 +2,7 @@
 
 固定基线：`0779b48ec7a6f91e989f6d3c68049d0b012ff3dc`。审阅命令为 `git diff 0779b48ec7a6f91e989f6d3c68049d0b012ff3dc -- src`，另完整读取三个未跟踪的 `continuous_capacity_acceptance.zig`、`continuous_backpressure_acceptance.zig`、`continuous_account_acceptance.zig`。基线至HEAD无新增提交，review对象为当前工作树。
 
-标准来源：根AGENTS.md、CONTEXT.md、`docs/agents/domain.md`、`docs/agents/issue-tracker.md`、ADR0004及0011–0016、Zig skill。已使用`rg --files --hidden`显式搜索：不存在CODING_STANDARDS或CONTRIBUTING文件，也无额外嵌套AGENTS。按全部十二项smell baseline审阅；仓库既有模块和公共seam优先，未将工具强制的格式项重复列为发现。
+标准来源：根AGENTS.md、GLOSSARY.md、`docs/agents/domain.md`、`docs/agents/issue-tracker.md`、ADR0004及0011–0016、Zig skill。已使用`rg --files --hidden`显式搜索：不存在CODING_STANDARDS或CONTRIBUTING文件，也无额外嵌套AGENTS。按全部十二项smell baseline审阅；仓库既有模块和公共seam优先，未将工具强制的格式项重复列为发现。
 
 **无剩余确认P1/P2。**
 

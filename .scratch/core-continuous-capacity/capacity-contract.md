@@ -13,7 +13,7 @@
 - 源码身份以每次验收的完整 commit、worktree diff 和 artifact 哈希为准。本文核对的源码为 `3d130d1b9b07ecb061ccdef79a26eca9fc8b4822`（导入计划文档后的工作树）；历史 `9f47ae6f` 不代替当前身份。
 - 当前 `src/production_contract.zig` 为 journal schema **30**、state schema **34**、registry identity **28**；`src/canonical_event.zig` envelope schema 为 **10**。
 - `TradingShard.snapshot/restoreSnapshot` 当前仍将 barrier 与 `trace.len` 相等作为校验条件；`stateDigest` 的 `StateDigestV5` 包含有序 Trace 和 canonical ingress 摘要。现有小数组及 `DurableStore` 的 192 KiB segment、64 KiB snapshot、32 manifest 项不是本合同目标。
-- 遵循 [CONTEXT](../../CONTEXT.md)、[ADR 0004](../../docs/adr/0004-durable-store-persistence-contract.md)、[ADR 0009](../../docs/adr/0009-separate-semantic-authority-digest-from-audit-trace.md) 和 [ADR 0010](../../docs/adr/0010-qualify-windows-and-linux-independently.md)。
+- 遵循 [CONTEXT](../../GLOSSARY.md)、[ADR 0004](../../docs/adr/0004-durable-store-persistence-contract.md)、[ADR 0009](../../docs/adr/0009-separate-semantic-authority-digest-from-audit-trace.md) 和 [ADR 0010](../../docs/adr/0010-qualify-windows-and-linux-independently.md)。
 - 本波复用 `VenueAdapter → TradingShard → DurableStore → snapshot/replay`；核心不进行网络或历史磁盘 I/O。不实现三套策略，不新增第四家 Venue 协议，不部署、不访问真实交易账户。
 
 ## 2. 业务负载与存活订单

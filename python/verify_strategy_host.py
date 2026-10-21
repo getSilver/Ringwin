@@ -9,6 +9,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / ".scratch" / "build"
 IS_WINDOWS = sys.platform == "win32"
+# Full-state regression fixtures exceed the native default stack on Windows.
+ACCEPTANCE_STACK_BYTES = str(512 * 1024 * 1024)
 
 
 def main():
@@ -23,39 +25,39 @@ def main():
     )
     checks = [
         [sys.executable, "python/test_strategy_host_bridge.py"],
-        [zig, "fmt", "--check", *map(str, sorted((ROOT / "src").glob("strategy_host_*.zig")))],
-        [zig, "test", "src/strategy_host_ipc.zig", "-O", "ReleaseSafe"],
-        [zig, "test", "src/strategy_host_lifecycle.zig", "-O", "ReleaseSafe"],
-        [zig, "test", "src/strategy_host_gateway.zig", "-O", "ReleaseSafe"],
-        [zig, "test", "src/strategy_host_recovery.zig", "-O", "ReleaseSafe"],
-        [zig, "test", "src/strategy_host_failures.zig", "-O", "ReleaseSafe"],
-        [zig, "run", "src/strategy_host_ipc.zig", "-O", "ReleaseSafe"],
-        [zig, "run", "src/strategy_host_lifecycle.zig", "-O", "ReleaseSafe"],
+        [zig, "fmt", "--check", *map(str, sorted((ROOT / "src").rglob("strategy_host_*.zig")))],
+        [zig, "test", "src/strategy/strategy_host_ipc.zig", "-O", "ReleaseSafe"],
+        [zig, "test", "src/strategy/strategy_host_lifecycle.zig", "-O", "ReleaseSafe"],
+        [zig, "test", "src/strategy/strategy_host_gateway.zig", "-O", "ReleaseSafe"],
+        [zig, "test", "src/strategy/strategy_host_recovery.zig", "-O", "ReleaseSafe"],
+        [zig, "test", "src/strategy/strategy_host_failures.zig", "-O", "ReleaseSafe"],
+        [zig, "run", "src/strategy/strategy_host_ipc.zig", "-O", "ReleaseSafe"],
+        [zig, "run", "src/strategy/strategy_host_lifecycle.zig", "-O", "ReleaseSafe"],
         [
             zig,
             "run",
-            "src/strategy_host_integration.zig",
+            "src/testing/integration/strategy_host_integration.zig",
             "-O",
             "ReleaseSafe",
         ],
         [
             zig,
             "run",
-            "src/strategy_host_recovery_integration.zig",
+            "src/testing/integration/strategy_host_recovery_integration.zig",
             "-O",
             "ReleaseSafe",
         ],
         [
             zig,
             "run",
-            "src/strategy_host_failure_integration.zig",
+            "src/testing/integration/strategy_host_failure_integration.zig",
             "-O",
             "ReleaseSafe",
         ],
         [
             zig,
             "build-exe",
-            "src/strategy_host_capacity.zig",
+            "src/testing/acceptance/capacity/strategy_host_capacity.zig",
             "-O",
             "ReleaseSafe",
             f"-femit-bin={capacity}",
@@ -63,6 +65,11 @@ def main():
         [str(capacity), sys.executable, "python/strategy_host.py"],
     ]
     for index, command in enumerate(checks, 1):
+        if command[0] == zig and command[1] in ("test", "run", "build-exe"):
+            command = [
+                sys.executable, "tools/zig-entry.py", "--zig", zig,
+                *command[1:], "--stack", ACCEPTANCE_STACK_BYTES,
+            ]
         print(f"[{index}/{len(checks)}] {subprocess.list2cmdline(command)}", flush=True)
         result = subprocess.run(
             command,

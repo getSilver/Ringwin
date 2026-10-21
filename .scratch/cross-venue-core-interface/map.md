@@ -34,7 +34,7 @@ Status: open
 | [01 权威边界](issues/01-authority-boundary.md) | 无 | H2/H3 设计前置；resolved |
 | [02 双边深度快照](issues/02-depth-snapshot.md) | 无 | H1 |
 | [03 增量与重同步](issues/03-depth-resynchronization.md) | 02 | H1 |
-| [04 Host 完整组](issues/04-host-intent-group.md) | 无 | H2 |
+| [04 Host 完整组](issues/04-host-intent-group.md) | 无 | H2；resolved，完整传输与身份入口 |
 | [05 共同准入与占用](issues/05-joint-admission.md) | 05a、05b | H2/H3 汇总验收 |
 | [05a 多账户权威表示](issues/05a-multi-account-authority.md) | 01（已完成） | H2/H3 |
 | [05b 共同准入与占用](issues/05b-joint-admission-occupancy.md) | 01（已完成）、04、05a | H2/H3 |
@@ -49,11 +49,12 @@ Status: open
 ## Frontier
 
 - [03 增量与重同步](issues/03-depth-resynchronization.md)：02 已完成，可领取；需继续证明连续深度维护与恢复。
-- [04 Host 完整 IntentGroup 原子传输与身份校验](issues/04-host-intent-group.md)：in-progress，保留既有认领。
 - [05a 多账户权威表示与持久恢复](issues/05a-multi-account-authority.md)：01 已完成，先冻结容量预算及可验证全局额度来源。
 - [08 版本化策略状态与确定性 checkpoint](issues/08-deterministic-checkpoint.md)：可开始接口核对和设计，最终验收受 schema 确认门槛约束。
 
 ## Decisions so far
+
+- 2026-10-21：04 resolved，真实 Host 完整组传输、授权校验、原子身份消费及日志/快照/文件恢复通过；ReleaseSafe 652/652、Host 产品验收 14/14。单意图 schema 1 保留，完整组 schema 2，journal/state/registry 为 41/45/39。所有组仍以共同准入未实现整体拒绝，不开放双账户预留或发送；见 [04 合同](04-host-group-contract.md) 与 [验证记录](04-verification.md)。
 
 - 2026-10-21：02 resolved，双边每侧 8 档、显式截断和未知数量、独立 Host 深度输入及稳定恢复已完成离线验收；见 [02 验证记录](02-verification.md)。现有顶部增量撤去多档证据，连续深度归 03；不扩大 Venue、模式或线上资格。
 - 2026-10-20：用户确认 [权威设计](authority-design.md) 方案 A 及追加拆分，ADR0017 accepted，01 resolved。首版单 DecisionDomain / TradingShard 拥有多账户分区并共同提交，跨 shard 组拒绝；H2/H3 共用核心周期占用。05a 可领取，05b 等待 04/05a；09a 等待 05b，09b 等待 08/09a。现有源码与离线测试不构成双账户共同准入证据。

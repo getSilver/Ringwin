@@ -2,7 +2,7 @@
 
 Pinned scope: `git diff c5f73ba08ed10e6a5f42e97264f4c72e9b2f2864...2fb36708d4f7b6cac448eff01bce58651da32333`. The 57-commit captured context was read first. This review covers changed src/tools/build implementation and selected tests; raw evidence logs were excluded. Read-only review only: no build, test, network, real credentials, or subagents.
 
-Sources read: AGENTS.md; CONTEXT.md credential/security vocabulary; docs/agents/domain.md; docs/agents/issue-tracker.md; ADR0005; ADR0010; Zig SKILL.md and its code-review/pattern references; closure spec. No CODING_STANDARDS or CONTRIBUTING exists in the captured standards context. Repository contracts override general smell advice. The fixed scalar crypto adaptations, their mathematical variable names, and deliberately retained narrow upstream duplication are intentional and are not findings.
+Sources read: AGENTS.md; GLOSSARY.md credential/security vocabulary; docs/agents/domain.md; docs/agents/issue-tracker.md; ADR0005; ADR0010; Zig SKILL.md and its code-review/pattern references; closure spec. No CODING_STANDARDS or CONTRIBUTING exists in the captured standards context. Repository contracts override general smell advice. The fixed scalar crypto adaptations, their mathematical variable names, and deliberately retained narrow upstream duplication are intentional and are not findings.
 
 ## (a) Documented-standard breaches
 

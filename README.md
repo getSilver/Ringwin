@@ -112,7 +112,7 @@ The engine can run multiple isolated `TradingShard` instances, each with its own
 
 More detailed architecture and domain definitions are available in:
 
-* [`CONTEXT.md`](CONTEXT.md)
+* [`GLOSSARY.md`](GLOSSARY.md)
 * [`docs/trading-engine-architecture.html`](docs/trading-engine-architecture.html)
 
 ## Current Features
@@ -171,7 +171,8 @@ and qualification remain pending. Windows Demo verification cannot grant
 `production_qualified`. See [ADR 0010](docs/adr/0010-qualify-windows-and-linux-independently.md)
 and [`.scratch/windows-process-chain-verification/map.md`](.scratch/windows-process-chain-verification/map.md).
 The Linux production map remains [`.scratch/production-readiness/map.md`](.scratch/production-readiness/map.md).
-The exact support matrix and schema gate live in [`src/production_contract.zig`](src/production_contract.zig).
+The exact support matrix and schema gate live in [`src/runtime/production_contract.zig`](src/runtime/production_contract.zig).
+See [source layout](docs/source-layout.md) for module ownership, the complete file migration map, and standalone Zig checks.
 
 Check your Zig version:
 
@@ -271,7 +272,7 @@ contract evidence independently. Without an explicit live run, each real-run
 qualification remains `not_run`; OKX Demo evidence is never promoted to
 `TestnetQualified`.
 
-The current schema versions are defined in [`src/production_contract.zig`](src/production_contract.zig).
+The current schema versions are defined in [`src/runtime/production_contract.zig`](src/runtime/production_contract.zig).
 Four-shard evidence is produced by `zig build run -- --four-shard-acceptance`.
 Replay has no send capability. Windows verification cannot set `permitsProduction()`.
 

@@ -155,6 +155,19 @@ def output_frame(batch, args, session, intent_sequence=None, limit_price=None):
     return bytes(frame)
 
 
+def output_group_frame(batch, args, session, first_sequence):
+    """Schema 2 is one complete ordered group, never two output messages."""
+    first = output_frame(batch, args, session, first_sequence)
+    second = bytearray(output_frame(batch, args, session, first_sequence + 1)[128:])
+    second[32:48] = (4).to_bytes(16, "little")
+    second[2] = 2
+    frame = bytearray(first + second)
+    struct.pack_into("<I", frame, 12, len(frame))
+    struct.pack_into("<HII", frame, 98, 2, 2, 160)
+    struct.pack_into("<I", frame, 124, crc32c(frame[:124] + frame[128:]))
+    return bytes(frame)
+
+
 def benchmark_frame(batch, session, callbacks, disabled, checksum):
     payload = struct.pack("<IIIq", callbacks, disabled, 0, checksum)
     frame = bytearray(128 + len(payload))
@@ -245,7 +258,7 @@ def trade_once(args, session, zig_sequence, host_sequence):
             price = struct.unpack_from("<q", batch, 192)[0]
             if price <= 0:
                 raise RecoveryNeeded(2)
-        publish_intent(session, host_sequence, output_frame(batch, args, session, args.intent_sequence + index, price))
+        publish_intent(session, host_sequence, output_group_frame(batch, args, session, args.intent_sequence + index * 2) if args.intent_group else output_frame(batch, args, session, args.intent_sequence + index, price))
 
 
 def await_direct_activation(args, session, zig_sequence):
@@ -535,6 +548,7 @@ def main():
     parser.add_argument("--activation-identity")
     parser.add_argument("--fault-strategy-identity")
     parser.add_argument("--config-version", type=int, default=1)
+    parser.add_argument("--intent-group", action="store_true")
     parser.add_argument("--intent-sequence", type=int, default=1)
     parser.add_argument("--trade-batches", type=int, default=1)
     parser.add_argument("--quantity", type=int, default=100)

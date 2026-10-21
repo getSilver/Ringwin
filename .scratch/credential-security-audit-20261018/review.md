@@ -4,7 +4,7 @@
 原提交 `0bf8d96f` 的等价主线提交为 `549282ff`。比较入口为
 `git diff 549282ff^...HEAD -- src/credential_store.zig src/okx_rest_auth.zig src/okx_curl_transport.zig`，
 并追踪当前运行时、C shim 和固定 Zig 标准库。需求来源为 `docs/加密任务.md`、
-`CONTEXT.md`、ADR0005；ADR0010 规定平台资格独立。本文是审计报告，不是新实施规格。
+`GLOSSARY.md`、ADR0005；ADR0010 规定平台资格独立。本文是审计报告，不是新实施规格。
 
 结论：保护页本身的正常释放顺序正确，但目前不能确认端到端凭证保护与清零完整。
 以下是当前仍存的遗漏，不都由 `0bf8d96f` 引入。未修改业务源码，也未读取真实凭证或执行网络请求。

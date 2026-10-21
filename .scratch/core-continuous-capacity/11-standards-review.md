@@ -4,7 +4,7 @@
 
 最终未发现未修复 P1/P2；Standards 0 个待处理问题。
 
-- 按 `AGENTS.md`、`CONTEXT.md`、`docs/agents/domain.md`、`docs/agents/issue-tracker.md` 与 ADR 0004、0009–0011、0013–0016 审查。公共 Store、Owner/Gateway 及完整恢复摘要合同保持，Unknown 不因恢复获得发送许可。
+- 按 `AGENTS.md`、`GLOSSARY.md`、`docs/agents/domain.md`、`docs/agents/issue-tracker.md` 与 ADR 0004、0009–0011、0013–0016 审查。公共 Store、Owner/Gateway 及完整恢复摘要合同保持，Unknown 不因恢复获得发送许可。
 - `src/durable_store.zig:1015`、`:1023` 为 Linux 打开可同步目录 fd，`:1864` 将 BADF 视为失败；历史长度用私有同步 handle 的 lseek 并恢复偏移。十九处直接借用临时目录的旧夹具均提供 iterate=true。实际 adapter 探针要求四片及 Coordinator 目录 fsync 成功、零全局 sync 回退，不能据此推断断电耐久性。
 - 已修复 P2：旧 `venue_fill_recovery_acceptance.zig:433`、`:439` 的整对象比较读取 AccountProjection 未初始化的 seen tagged union。现 `:224` helper 比较全部元数据、计数与四数组有效前缀，保留公共状态一致性要求；未用生产状态清零或加栈掩盖此语义错误。最终 Debug 已通过原失败用例及完整套件。
 - 两个固定 runner 保留原标准测试遍历、Skip、错误日志和泄漏检查；ReleaseSafe 测试线程 256 MiB、Debug 512 MiB，离线文件 CLI 64 MiB，均不改变生产线程预算。IPC 仅因原始 memfd_create 返回 ENOSYS 跳过；生产实现与其他断言保持。

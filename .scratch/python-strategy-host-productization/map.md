@@ -102,7 +102,7 @@ Status: resolved
 - [Python Strategy Host throwaway prototype](../quant-trading-system/prototypes/python-strategy-host/README.md)
 - [事件 taxonomy 与 StrategyHost IPC 契约](../quant-trading-system/issues/29-event-taxonomy-and-schema-compatibility.md)
 - [状态迁移与 PortableStrategyState](../quant-trading-system/issues/25-state-migration-and-rollback.md)
-- [核心领域词汇与不变量](../../CONTEXT.md)
+- [核心领域词汇与不变量](../../GLOSSARY.md)
 
 ## Out of scope
 
