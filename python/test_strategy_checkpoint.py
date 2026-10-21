@@ -140,11 +140,36 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(restored["pairs"][0]["cycle"]["plan"]["holding_target"]["value"]["atoms"], 4)
         for mutate in (lambda s: s["pairs"][0]["cycle"]["plan"]["holding_target"]["value"].update(atoms=3),
                        lambda s: s["pairs"][0]["cycle"]["times"]["holding"].update(utc_deadline_ns=120),
-                       lambda s: s["pairs"][0]["cycle"]["intents"][0].update(sequence=3)):
+                       lambda s: s["pairs"][0]["cycle"]["intents"][0].update(sequence=3),
+                       lambda s: s["pairs"][0]["cycle"]["plan"].update(holding_target=dict(tag="pending")),
+                       lambda s: s["pairs"][0]["cycle"].update(
+                           phase="holding", first_exit=dict(tag="present", value=dict(identity=1, version=1, cursor=9)),
+                           first_exit_reason=dict(tag="present", value="deadline"))):
             invalid = copy.deepcopy(original)
             mutate(invalid)
             with self.assertRaises(ValueError):
                 host.encode_checkpoint(metadata(), invalid)
+
+    def test_schema_capacity_and_warmup_limits_reject_without_trimming(self):
+        original = state()
+        original["pairs"] = [occupied_pair()]
+        cases = []
+        warm = copy.deepcopy(original)
+        warm["pairs"][0]["model"]["warmup"] = "ready"
+        cases.append(warm)
+        labels = copy.deepcopy(original)
+        labels["pairs"][0]["predictions"] *= 257
+        cases.append(labels)
+        window = copy.deepcopy(original)
+        window["pairs"][0]["model"]["window"]["capacity"] = 3601
+        cases.append(window)
+        for invalid in cases:
+            before = copy.deepcopy(invalid)
+            with self.assertRaises(ValueError):
+                host.encode_checkpoint(metadata(), invalid)
+            self.assertEqual(invalid, before)
+        with self.assertRaises(ValueError):
+            host.decode_checkpoint(b"QSSC" + bytes(192 + 8 * 1024 * 1024))
 
     def test_noncanonical_numeric_and_contradictory_state_never_publish(self):
         cases = []

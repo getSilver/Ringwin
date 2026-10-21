@@ -205,6 +205,10 @@ def validate(state, cursor, strategy=None, next_intent=None):
             raise ValueError("window progress mismatch")
         if m["warmup"] == "ready" and len(points) < w["warmup"]:
             raise ValueError("incomplete warmup")
+        if m["tag"] == "rolling" and decode_number(m["sum_squares"]) < 0:
+            raise ValueError("negative sum of squares")
+        if m["tag"] == "ar1" and not 0 < decode_number(m["phi"]) < 1:
+            raise ValueError("invalid AR1 coefficient")
         if m["tag"] == "state_space":
             if len(m["mean"]) != 2 or len(m["covariance"]) != 4:
                 raise ValueError("matrix dimensions")
@@ -230,7 +234,8 @@ def validate(state, cursor, strategy=None, next_intent=None):
         if c["tag"] == "active":
             plan_state = c["plan"]
             holding = plan_state["holding_target"]
-            if c["phase"] == "holding" and holding["tag"] != "frozen":
+            if (c["phase"] == "holding" or
+                    (c["phase"] == "reconciling" and c["before_reconciling"] == "holding")) and holding["tag"] != "frozen":
                 raise ValueError("holding target not frozen")
             if holding["tag"] == "frozen" and (holding["freeze_cursor"] > cursor or
                     holding["matched"]["numerator"] < 0 or
@@ -254,6 +259,10 @@ def validate(state, cursor, strategy=None, next_intent=None):
                 raise ValueError("exit evidence mismatch")
             if c["phase"] == "exiting" and c["first_exit"]["tag"] == "none":
                 raise ValueError("missing exit evidence")
+            if c["first_exit"]["tag"] == "present" and not (
+                    c["phase"] in ("exiting", "completed") or
+                    (c["phase"] == "reconciling" and c["before_reconciling"] == "exiting")):
+                raise ValueError("exit state regressed")
             ordered_unique([(i["strategy"], i["sequence"]) for i in c["intents"]])
             if any((strategy is not None and i["strategy"] != strategy) or
                    (next_intent is not None and i["sequence"] >= next_intent)
@@ -263,6 +272,8 @@ def validate(state, cursor, strategy=None, next_intent=None):
                 raise ValueError("completed with unknown order")
         for reasons in (p["monitor"]["reasons"], c.get("additional_reasons", [])):
             ordered_unique(reasons)
+        if (p["monitor"]["health"] == "normal") != (len(p["monitor"]["reasons"]) == 0):
+            raise ValueError("monitor health reasons mismatch")
     r = state["research"]
     if r["tag"] == "enabled" and r["used"] > r["limit"]:
         raise ValueError("research budget")
