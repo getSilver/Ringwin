@@ -1,4 +1,7 @@
 const std = @import("std");
+test {
+    _ = @import("testing/acceptance/core/multi_account_authority_acceptance.zig");
+}
 const trading_shard = @import("trading/trading_shard.zig");
 const trading_shard_tests = @import("testing/regression/trading_shard_tests.zig");
 const recovery_cutover = @import("runtime/recovery_cutover.zig");

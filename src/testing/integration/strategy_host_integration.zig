@@ -214,6 +214,7 @@ pub fn main(init: std.process.Init) !void {
     const python = args.next() orelse "python";
     const script = args.next() orelse "python/strategy_host.py";
     if (args.next() != null) return error.UnknownArgument;
+    try runMultiAccountGroupCheck(init, python, script);
     try runGroupCheck(init, python, script);
     try runCheck(init, python, script);
     var buffer: [256]u8 = undefined;
@@ -460,4 +461,79 @@ fn refreshOutputCrc(frame: []u8) void {
     crc.update(frame[0..124]);
     crc.update(frame[128..]);
     std.mem.writeInt(u32, frame[124..128], crc.final(), .little);
+}
+
+fn runMultiAccountGroupCheck(init: std.process.Init, python: []const u8, script: []const u8) !void {
+    const demo = @import("../../runtime/demo/demo_authority.zig");
+    const durable = @import("../../persistence/durable_store.zig");
+    const multi = @import("../acceptance/core/multi_account_authority_acceptance.zig");
+    var path_buffer: [2048]u8 = undefined;
+    var cwd_buffer: [1024]u8 = undefined;
+    const cwd = cwd_buffer[0..try std.Io.Dir.cwd().realPath(init.io, &cwd_buffer)];
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/.scratch/build/task05-store-{d}", .{ cwd, std.Io.Clock.real.now(init.io).nanoseconds });
+    const adapter = try init.gpa.create(durable.LinuxFileAdapter);
+    defer init.gpa.destroy(adapter);
+    adapter.* = .{ .dir = undefined };
+    if (builtin.os.tag == .windows) try adapter.initWindowsVerification(init.io, path) else try adapter.initLinux(init.io, path);
+    defer adapter.close(init.io);
+    const owner = try init.gpa.create(demo.Owner);
+    defer init.gpa.destroy(owner);
+    try demo.Owner.bootstrapInto(owner, adapter.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
+    try multi.initializePythonOwner(owner);
+    var plan = lifecycle.developmentPlan(0, 31, try lifecycle.discoverPythonAbi(init, python));
+    plan.decision_domain = 1;
+    const authorization: gateway_module.Authorization = .{ .strategy_identity = 9, .config_version = 1, .activation_identity = 1, .activation_barrier = owner.shard.authoritativeBarrier() };
+    const config: gateway_module.Config = .{ .schema_registry = plan.compatibility.schema_registry, .decision_domain = 1, .session = plan.session, .authorization = authorization };
+    var host = try lifecycle.ManagedHost.start(init, python, script, plan, "trade", &.{
+        "--strategy-identity",  "9",                     "--activation-identity",       "1",                            "--intent-group",
+        "--portfolio-identity", "10",                    "--exchange-account-identity", "20",                           "--second-exchange-account-identity",
+        "30",                   "--instrument-identity", "101",                         "--second-instrument-identity", "102",
+        "--quantity",           "10000",                 "--limit-price",               "100",
+    });
+    defer host.deinit(init.io);
+    try host.sendPlan(init.io);
+    try expectLifecycle(.accepted, try host.receive(init.io, 1));
+    try expectLifecycle(.accepted, try host.receive(init.io, 2));
+    const activation_digest = owner.shard.canonicalStateDigest();
+    _ = try owner.apply(.{ .core = .{ .identity = owner.shard.authoritativeBarrier() + 1, .payload = .{ .host_activated = .{
+        .strategy_identity = 9,
+        .config_version = 1,
+        .activation_identity = 1,
+        .activation_barrier = authorization.activation_barrier,
+        .session = plan.session,
+        .state_digest = activation_digest,
+    } } } });
+    try host.activate(init.io, .{ .strategy_identity = 9, .activation_identity = 1, .barrier = authorization.activation_barrier, .state_digest = activation_digest });
+    var gateway = try gateway_module.Gateway.init(config, &.{gateway_module.Subscription.of(9, &.{.mark_price})});
+    const cursor = owner.shard.authoritativeBarrier() + 1;
+    const now: i64 = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
+    var batch_storage: [512]u8 = undefined;
+    const batch = try gateway.encodeBatch(&batch_storage, 1, cursor, cursor, now, &.{event(.mark_price, cursor, now, &.{1})});
+    try host.sendInput(init.io, batch, now);
+    try gateway.recordPublished(1, cursor, now);
+    try gateway.activate(&owner.shard, &owner.decision_journal);
+    var output: [512]u8 = undefined;
+    const frame = try host.receiveOutput(init.io, now, &output);
+    const decision = gateway.ingest(frame, now + 1);
+    try std.testing.expect(decision == .accepted_group);
+    _ = try owner.apply(fixture.atGroup(45, .{ .identity = cursor, .payload = .{ .external_intent_group = decision.accepted_group } }));
+    try std.testing.expectEqual(@as(usize, 2), owner.shard.oms.order_count);
+    try std.testing.expectEqual(@as(usize, 2), owner.shard.oms.command_history_count);
+    try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.count);
+    try std.testing.expectEqual(@as(u128, 20), owner.shard.oms.orders[0].exchange_account);
+    try std.testing.expectEqual(@as(u128, 30), owner.shard.oms.orders[1].exchange_account);
+    const accepted_digest = owner.shard.canonicalStateDigest();
+    _ = try owner.apply(fixture.atGroup(45, .{ .identity = cursor + 1, .payload = .{ .external_intent_group = decision.accepted_group } }));
+    try std.testing.expectEqualSlices(u8, &accepted_digest, &owner.shard.canonicalStateDigest());
+    try owner.checkpoint();
+    const digest = owner.shard.canonicalStateDigest();
+    try host.shutdown(init.io, 3);
+    adapter.close(init.io);
+    adapter.* = .{ .dir = undefined };
+    if (builtin.os.tag == .windows) try adapter.initWindowsVerification(init.io, path) else try adapter.initLinux(init.io, path);
+    const restored = try init.gpa.create(demo.Owner);
+    defer init.gpa.destroy(restored);
+    try demo.Owner.recoverInto(restored, adapter.interface(), init.io, owner.stream);
+    try std.testing.expectEqualSlices(u8, &digest, &restored.shard.canonicalStateDigest());
+    std.debug.print("host_multi_account_file_recovery: accounts=2, commands=2, cycles=1, duplicate=stable, path={s}\n", .{path});
 }

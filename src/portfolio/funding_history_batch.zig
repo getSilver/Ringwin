@@ -47,9 +47,9 @@ pub const Builder = struct {
             .qualification_digest = self.qualification.digest(),
             .records = .{ .{ .bytes = detail, .payload_digest = history.hash(detail) }, .{ .bytes = semantic, .payload_digest = history.hash(semantic) }, .{ .bytes = economic_digest, .payload_digest = history.hash(economic_digest) } },
             .entries = .{
-                .{ .key = .{ .origin = self.qualification.origin, .identity = .{ .funding_detail = self.qualification.record.applied.funding.identity } }, .record_index = 0 },
-                .{ .key = .{ .origin = self.qualification.origin, .identity = self.semantic_identity.? }, .record_index = 1 },
-                .{ .key = .{ .origin = self.qualification.origin, .identity = .{ .funding_economic_digest = self.qualification.record.applied.funding.identity } }, .record_index = 2 },
+                .{ .key = try history.scopedKey(self.qualification.origin, .{ .funding_detail = self.qualification.record.applied.funding.identity }, self.qualification.record.applied.source.exchange_account), .record_index = 0 },
+                .{ .key = try history.scopedKey(self.qualification.origin, self.semantic_identity.?, self.qualification.record.applied.source.exchange_account), .record_index = 1 },
+                .{ .key = try history.scopedKey(self.qualification.origin, .{ .funding_economic_digest = self.qualification.record.applied.funding.identity }, self.qualification.record.applied.source.exchange_account), .record_index = 2 },
             },
         };
     }

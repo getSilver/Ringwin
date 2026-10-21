@@ -647,7 +647,7 @@ pub const Projection = struct {
     }
 
     pub fn prepareFundingArchive(self: *const Projection, identity: u64, origin: history.Origin, barrier: u64) !FundingArchiveQualification {
-        if (identity == 0 or barrier == 0 or origin.account == 0 or origin.stream.domain != .decision_log or origin.stream.id == 0 or
+        if (identity == 0 or barrier == 0 or !history.validOrigin(origin) or origin.stream.domain != .decision_log or origin.stream.id == 0 or
             self.reconciliation_break or self.suspense_usdt_atoms != 0 or self.suspense_native_asset_count != 0) return error.FundingArchivePinned;
         var applied: ?AppliedFunding = null;
         for (self.applied_fundings[0..self.applied_funding_count]) |known| if (known.funding.identity == identity) {
@@ -659,7 +659,7 @@ pub const Projection = struct {
             known.source.exchange_account == 0 or known.source.portfolio == 0 or known.source.strategy == 0 or known.source.instrument == 0 or known.source.rules_version == 0 or
             (known.source.canonical_funding == null and known.source.core_payload_len == 0)) return error.FundingArchivePinned;
         if (known.source.canonical_funding == null and (known.source.core_event_identity == 0 or known.source.core_times == null)) return error.FundingArchivePinned;
-        if (known.source.exchange_account != origin.account) return error.InvalidFundingArchiveOrigin;
+        if ((origin.scope == .account and known.source.exchange_account != origin.account) or known.source.exchange_account == 0) return error.InvalidFundingArchiveOrigin;
         try self.assertClosed();
         var result: FundingArchiveQualification = .{ .origin = origin, .barrier = barrier, .projection_digest = self.digest(), .record = .{ .applied = known } };
         result.record.ledger = std.mem.zeroes(@TypeOf(result.record.ledger));

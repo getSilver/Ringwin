@@ -9,7 +9,13 @@ pub const max_record_bytes = 16 * 1024;
 pub const max_depth = 8;
 const fanout = 48;
 const key_bytes = 82;
-pub const Origin = struct { stream: durable.StreamIdentity, account: u128 };
+pub const DomainOrigin = struct { identity: u128, deployment: u128, epoch: u64, configuration_digest: Digest };
+pub const OriginScope = union(enum(u8)) { account, decision_domain: DomainOrigin };
+pub const Origin = struct {
+    stream: durable.StreamIdentity,
+    account: u128,
+    scope: OriginScope = .account,
+};
 pub const GatewayHistoryIdentity = struct { shard: u8, command: u64 };
 pub const Identity = union(enum) {
     intent: struct { strategy: u128, sequence: u64 },
@@ -45,10 +51,31 @@ pub const Identity = union(enum) {
     forced_detail: u128,
     forced_economic_digest: u128,
     coordinator_gateway_closure: GatewayHistoryIdentity,
+    cycle: u128,
+    deployment_configuration: u128,
 };
-pub const Key = struct { origin: Origin, identity: Identity };
+pub const Key = struct { origin: Origin, account: ?u128 = null, identity: Identity };
+
+pub fn scopedKey(origin: Origin, identity: Identity, account: ?u128) !Key {
+    const domain_identity = switch (identity) {
+        .intent, .group, .cycle, .deployment_configuration, .operational_command, .retired_gate, .resolved_latch, .strategy_fence, .control_archive => true,
+        else => false,
+    };
+    const key: Key = .{ .origin = origin, .identity = identity, .account = if (origin.scope == .decision_domain and !domain_identity) account else null };
+    if (origin.scope == .account and account != null and account.? != origin.account) return error.InvalidHistoryKey;
+    _ = try encodeKey(key);
+    return key;
+}
+
+pub fn validOrigin(origin: Origin) bool {
+    if ((origin.stream.domain != .decision_log and origin.stream.domain != .control) or origin.stream.id == 0) return false;
+    return switch (origin.scope) {
+        .account => origin.account != 0,
+        .decision_domain => |domain| origin.account == 0 and origin.stream.domain == .decision_log and domain.identity != 0 and domain.deployment != 0 and domain.epoch != 0 and !std.mem.allEqual(u8, &domain.configuration_digest, 0),
+    };
+}
 pub const Root = struct {
-    version: u16 = 1,
+    version: u16 = 2,
     origin: Origin,
     generation: u64,
     barrier: u64,
@@ -183,8 +210,8 @@ pub fn rootDigest(root: Root) Digest {
 }
 
 pub fn validateRoot(root: Root) !void {
-    if (root.version != 1 or (root.origin.stream.domain != .decision_log and root.origin.stream.domain != .control) or root.origin.stream.id == 0 or
-        root.origin.account == 0 or root.generation == 0 or root.barrier == 0 or root.epoch == 0 or
+    if (root.version != 2 or !validOrigin(root.origin) or
+        root.generation == 0 or root.barrier == 0 or root.epoch == 0 or
         !std.mem.eql(u8, &root.root_digest, &rootDigest(root))) return error.InvalidHistoryRoot;
 }
 
@@ -215,6 +242,18 @@ pub fn validateRecord(result: *const LookupResult) !void {
 }
 
 pub fn encodeKey(key: Key) !EncodedKey {
+    if (!validOrigin(key.origin)) return error.InvalidHistoryKey;
+    var account = key.origin.account;
+    switch (key.origin.scope) {
+        .account => if (key.account != null) return error.InvalidHistoryKey,
+        .decision_domain => switch (key.identity) {
+            .intent, .group, .cycle, .deployment_configuration, .operational_command, .retired_gate, .resolved_latch, .strategy_fence, .control_archive => if (key.account != null) return error.InvalidHistoryKey,
+            else => {
+                account = key.account orelse return error.InvalidHistoryKey;
+                if (account == 0) return error.InvalidHistoryKey;
+            },
+        },
+    }
     switch (key.identity) {
         .coordinator_forced_source, .coordinator_forced_allocation, .coordinator_gateway_command, .coordinator_gateway_closure, .coordinator_account_fact, .version_activation => {
             if (key.origin.stream.domain != .control) return error.InvalidHistoryKey;
@@ -222,7 +261,7 @@ pub fn encodeKey(key: Key) !EncodedKey {
         else => if (key.origin.stream.domain != .decision_log) return error.InvalidHistoryKey,
     }
     var result: EncodedKey = .{};
-    std.mem.writeInt(u128, result.bytes[0..16], key.origin.account, .big);
+    std.mem.writeInt(u128, result.bytes[0..16], account, .big);
     result.bytes[16] = @intFromEnum(std.meta.activeTag(key.identity));
     result.len = 17;
     switch (key.identity) {
@@ -250,7 +289,7 @@ pub fn encodeKey(key: Key) !EncodedKey {
             std.mem.writeInt(u64, result.bytes[17..25], v, .big);
             result.len = 25;
         },
-        .report, .reconciliation, .reconciliation_window, .canonical_account_reconciliation, .operational_command, .retired_gate, .resolved_latch, .strategy_fence, .version_activation, .coordinator_forced_source, .coordinator_forced_allocation, .coordinator_account_fact, .core_forced, .forced_detail, .forced_economic_digest => |v| {
+        .report, .reconciliation, .reconciliation_window, .canonical_account_reconciliation, .operational_command, .retired_gate, .resolved_latch, .strategy_fence, .version_activation, .coordinator_forced_source, .coordinator_forced_allocation, .coordinator_account_fact, .core_forced, .forced_detail, .forced_economic_digest, .cycle, .deployment_configuration => |v| {
             std.mem.writeInt(u128, result.bytes[17..33], v, .big);
             result.len = 33;
         },
@@ -519,7 +558,7 @@ pub fn batchDigest(batch: Batch) !Digest {
 }
 
 pub fn publish(objects: Objects, batch: Batch) !Receipt {
-    if ((batch.origin.stream.domain != .decision_log and batch.origin.stream.domain != .control) or batch.origin.stream.id == 0 or batch.origin.account == 0 or
+    if (!validOrigin(batch.origin) or
         batch.barrier == 0 or batch.epoch == 0 or batch.entries.len == 0 or batch.entries.len > max_batch_keys or
         batch.records.len > max_batch_keys or batch.floor > batch.barrier) return error.InvalidHistoryBatch;
     const batch_digest = try batchDigest(batch);

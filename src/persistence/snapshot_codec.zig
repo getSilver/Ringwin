@@ -136,6 +136,39 @@ pub fn encodeBare(destination: []u8, value: anytype) ![]const u8 {
     return destination[0..writer.position];
 }
 
+/// Uses the same canonical encoding path without materializing bytes.
+pub fn encodedSizeWithPolicy(value: anytype, comptime Policy: type) !usize {
+    var writer: Writer = .{ .bytes = &.{}, .measure_only = true };
+    if (comptime @typeInfo(@TypeOf(value)) == .pointer) {
+        try encodeBorrowedWithPolicy(&writer, value, Policy);
+    } else try encodeBorrowedWithPolicy(&writer, &value, Policy);
+    return try std.math.add(usize, header_len, writer.position);
+}
+
+/// Upper bound including every optional value and the largest union member.
+pub fn maxBareSize(comptime T: type) usize {
+    @setEvalBranchQuota(100000);
+    return switch (@typeInfo(T)) {
+        .void => 0,
+        .bool => 1,
+        .int => |info| if (info.bits % 8 == 0) (if (T == usize or T == isize) 8 else @sizeOf(T)) else 8,
+        .@"enum" => |info| maxBareSize(info.tag_type),
+        .array => |info| info.len * maxBareSize(info.child),
+        .optional => |info| 1 + maxBareSize(info.child),
+        .@"struct" => |info| blk: {
+            var size: usize = 0;
+            inline for (info.fields) |field| size += maxBareSize(field.type) + (if (omsArrayCount(T, field.name) != null) @as(usize, 4) else 0);
+            break :blk size;
+        },
+        .@"union" => |info| blk: {
+            var size: usize = 0;
+            inline for (info.fields) |field| size = @max(size, maxBareSize(field.type));
+            break :blk maxBareSize(info.tag_type.?) + size;
+        },
+        else => @compileError("unsupported snapshot field type: " ++ @typeName(T)),
+    };
+}
+
 /// Decodes one complete bounded value from a journal payload.
 pub fn decodeBare(encoded: []const u8, comptime T: type) !T {
     var reader: Reader = .{ .bytes = encoded };
@@ -148,10 +181,15 @@ pub fn decodeBare(encoded: []const u8, comptime T: type) !T {
 const Writer = struct {
     bytes: []u8,
     position: usize = 0,
+    measure_only: bool = false,
 
     fn put(self: *Writer, value: anytype) !void {
         const T = @TypeOf(value);
         const width = if (T == usize or T == isize) @sizeOf(u64) else @sizeOf(T);
+        if (self.measure_only) {
+            self.position = try std.math.add(usize, self.position, width);
+            return;
+        }
         if (self.position + width > self.bytes.len) return error.SnapshotTooLarge;
         if (T == usize) {
             std.mem.writeInt(u64, self.bytes[self.position..][0..width], @intCast(value), .little);
@@ -267,11 +305,16 @@ fn encodeBorrowedWithPolicy(writer: *Writer, value: anytype, comptime Policy: ty
                         const zero = Policy.zeroValue(@typeInfo(field.type).array.child);
                         const start = writer.position;
                         try encodeBorrowedWithPolicy(writer, &zero, Policy);
-                        const zero_bytes = writer.bytes[start..writer.position];
-                        for (count + 1..items.len) |_| {
-                            if (zero_bytes.len > writer.bytes.len - writer.position) return error.SnapshotTooLarge;
-                            @memcpy(writer.bytes[writer.position..][0..zero_bytes.len], zero_bytes);
-                            writer.position += zero_bytes.len;
+                        if (writer.measure_only) {
+                            const tail = try std.math.mul(usize, writer.position - start, items.len - count - 1);
+                            writer.position = try std.math.add(usize, writer.position, tail);
+                        } else {
+                            const zero_bytes = writer.bytes[start..writer.position];
+                            for (count + 1..items.len) |_| {
+                                if (zero_bytes.len > writer.bytes.len - writer.position) return error.SnapshotTooLarge;
+                                @memcpy(writer.bytes[writer.position..][0..zero_bytes.len], zero_bytes);
+                                writer.position += zero_bytes.len;
+                            }
                         }
                     }
                 } else try encodeBorrowedWithPolicy(writer, &@field(value.*, field.name), Policy);
@@ -399,6 +442,8 @@ test "in place decoding round trips nested arrays optional and union payloads" {
     };
     var bytes: [8192]u8 = undefined;
     const encoded = try encodeBare(&bytes, expected);
+    try std.testing.expectEqual(encoded.len + header_len, try encodedSizeWithPolicy(expected, IdentityEncodingPolicy));
+    try std.testing.expect(encoded.len <= maxBareSize(Payload));
     try std.testing.expectEqualDeep(expected, try decodeBare(encoded, Payload));
     try std.testing.expectError(error.InvalidSnapshotLength, decodeBare(encoded[0 .. encoded.len - 1], Payload));
     try std.testing.expectError(error.InvalidSnapshotLength, decodeBare(bytes[0 .. encoded.len + 1], Payload));

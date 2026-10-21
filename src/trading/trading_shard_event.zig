@@ -122,6 +122,10 @@ pub const EventKind = enum(u16) {
     control_archive_committed,
     forced_archive_committed,
     account_coordinator_bound,
+    deployment_configuration_staged,
+    deployment_configuration_sealed,
+    decision_domain_bound,
+    cycle_occupied,
 };
 
 pub const Fact = struct {
@@ -316,6 +320,11 @@ pub const RejectReason = enum(u8) {
     stale_canonical_source,
     joint_admission_unavailable,
     host_output_stale,
+    instrument_occupied,
+    cycle_capacity_exhausted,
+    admission_capacity_exhausted,
+    invalid_scope,
+    arithmetic_overflow,
 };
 
 pub const TimerRequest = struct {
@@ -335,7 +344,7 @@ pub const EconomicFill = struct {
     rebate_atoms: i128 = 0,
 };
 
-pub const FundingSettlement = struct { settlement_id: u64, amount_atoms: i128 };
+pub const FundingSettlement = struct { settlement_id: u64, amount_atoms: i128, instrument: u128 = 0 };
 pub const VenueForcedExecution = struct {
     execution_id: u64,
     source_identity: u128 = 0,
@@ -418,6 +427,8 @@ pub const PayloadTag = enum(u16) {
     version_activation_history_verified,
     account_coordinator_bound,
     external_intent_group,
+    deployment_configuration,
+    decision_domain_bound,
 };
 
 pub const ReservationModel = enum(u8) { leveraged, cash };
@@ -490,6 +501,7 @@ pub const HostActivationRevoked = struct {
 pub const PrimaryLease = struct { fencing_token: u64 };
 pub const MarkPrice = struct { instrument: canonical.InstrumentIdentity, price_atoms: i128 };
 pub const RiskLease = struct {
+    allocation: ?struct { configuration_digest: [32]u8, account: u128, asset: u64, domain: u128, stream: u64 } = null,
     lease_identity: u64 = 0,
     version: u64 = 1,
     valid_through_barrier: u64 = std.math.maxInt(u64),
@@ -601,11 +613,14 @@ pub const CorePayload = union(PayloadTag) {
     version_activation_history_verified: VersionActivationHistoryVerified,
     account_coordinator_bound: history_module.Origin,
     external_intent_group: host_gateway.GroupCandidate,
+    deployment_configuration: @import("deployment_allocation.zig").Input,
+    decision_domain_bound: @import("deployment_allocation.zig").DomainBinding,
 };
 
 /// Typed core-originated event carried by the authoritative CanonicalEvent.
 pub const CoreEvent = struct {
     identity: u64,
+    account_scope: ?canonical.ExchangeAccountIdentity = null,
     source_time: u64 = 0,
     receive_time: u64 = 0,
     monotonic_time: u64 = 0,
@@ -639,7 +654,17 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
     var encoded = EncodedInput.init(destination);
     try encoded.put(u64, input.identity);
     try encoded.put(u16, @intFromEnum(std.meta.activeTag(input.payload)));
+    try encoded.put(u8, @intFromBool(input.account_scope != null));
+    if (input.account_scope) |account| try encoded.put(u128, account);
     switch (input.payload) {
+        .decision_domain_bound => |value| {
+            const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], value);
+            encoded.len += bytes.len;
+        },
+        .deployment_configuration => |value| {
+            const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], value);
+            encoded.len += bytes.len;
+        },
         .external_intent_group => |value| {
             if (value.len > value.bytes.len) return error.InvalidIntentGroup;
             const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], value);
@@ -786,15 +811,8 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
         },
         .primary_lease_granted => |value| try encoded.put(u64, value.fencing_token),
         .risk_lease_granted => |value| {
-            try encoded.put(u64, value.lease_identity);
-            try encoded.put(u64, value.version);
-            try encoded.put(u64, value.valid_through_barrier);
-            try encoded.put(u8, @intFromBool(value.open));
-            try encoded.put(i128, value.amount_atoms);
-            try encoded.put(i128, value.strategy_limit_atoms);
-            try encoded.put(i128, value.portfolio_limit_atoms);
-            try encoded.put(i128, value.exchange_account_limit_atoms);
-            try encoded.put(i128, value.global_limit_atoms);
+            const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], value);
+            encoded.len += bytes.len;
         },
         .mark_price => |value| {
             try encoded.put(u128, value.instrument);
@@ -837,6 +855,7 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
                 if (member.client_order_id.len > member.client_order_id.bytes.len) return error.InvalidIntentGroup;
                 try encoded.put(u64, member.intent_sequence);
                 try encoded.put(u128, member.strategy_instance);
+                try encoded.put(u128, member.exchange_account);
                 try encoded.put(u8, @intFromEnum(member.operation));
                 try encoded.put(u128, member.instrument);
                 try encoded.put(u8, @intFromEnum(member.side));
@@ -903,6 +922,7 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
         .funding_settlement => |value| {
             try encoded.put(u64, value.settlement_id);
             try encoded.put(i128, value.amount_atoms);
+            try encoded.put(u128, value.instrument);
         },
         .venue_forced_execution => |value| {
             try encoded.put(u64, value.execution_id);
@@ -1031,7 +1051,18 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
         PayloadTag,
         try readInputValue(u16, record.payload, &offset),
     ) orelse return error.UnknownInputType;
+    const account_scope: ?u128 = if (try readInputBool(record.payload, &offset)) try readInputValue(u128, record.payload, &offset) else null;
     const payload: CorePayload = switch (tag) {
+        .decision_domain_bound => blk: {
+            const value = try snapshot_codec.decodeBare(record.payload[offset..], @import("deployment_allocation.zig").DomainBinding);
+            offset = record.payload.len;
+            break :blk .{ .decision_domain_bound = value };
+        },
+        .deployment_configuration => blk: {
+            const value = try snapshot_codec.decodeBare(record.payload[offset..], @import("deployment_allocation.zig").Input);
+            offset = record.payload.len;
+            break :blk .{ .deployment_configuration = value };
+        },
         .external_intent_group => blk: {
             const value = try snapshot_codec.decodeBare(record.payload[offset..], host_gateway.GroupCandidate);
             if (value.len > value.bytes.len) return error.InvalidIntentGroup;
@@ -1220,17 +1251,11 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
         .primary_lease_granted => .{ .primary_lease_granted = .{
             .fencing_token = try readInputValue(u64, record.payload, &offset),
         } },
-        .risk_lease_granted => .{ .risk_lease_granted = .{
-            .lease_identity = try readInputValue(u64, record.payload, &offset),
-            .version = try readInputValue(u64, record.payload, &offset),
-            .valid_through_barrier = try readInputValue(u64, record.payload, &offset),
-            .open = try readInputBool(record.payload, &offset),
-            .amount_atoms = try readInputValue(i128, record.payload, &offset),
-            .strategy_limit_atoms = try readInputValue(i128, record.payload, &offset),
-            .portfolio_limit_atoms = try readInputValue(i128, record.payload, &offset),
-            .exchange_account_limit_atoms = try readInputValue(i128, record.payload, &offset),
-            .global_limit_atoms = try readInputValue(i128, record.payload, &offset),
-        } },
+        .risk_lease_granted => blk: {
+            const value = try snapshot_codec.decodeBare(record.payload[offset..], RiskLease);
+            offset = record.payload.len;
+            break :blk .{ .risk_lease_granted = value };
+        },
         .mark_price => .{ .mark_price = .{
             .instrument = try readInputValue(u128, record.payload, &offset),
             .price_atoms = try readInputValue(i128, record.payload, &offset),
@@ -1290,6 +1315,7 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
                 member.* = .{
                     .intent_sequence = try readInputValue(u64, record.payload, &offset),
                     .strategy_instance = try readInputValue(u128, record.payload, &offset),
+                    .exchange_account = try readInputValue(u128, record.payload, &offset),
                     .operation = std.enums.fromInt(oms_module.Operation, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOmsOperation,
                     .instrument = try readInputValue(u128, record.payload, &offset),
                     .side = std.enums.fromInt(oms_module.Side, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOmsSide,
@@ -1377,6 +1403,7 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
         .funding_settlement => .{ .funding_settlement = .{
             .settlement_id = try readInputValue(u64, record.payload, &offset),
             .amount_atoms = try readInputValue(i128, record.payload, &offset),
+            .instrument = try readInputValue(u128, record.payload, &offset),
         } },
         .venue_forced_execution => .{ .venue_forced_execution = .{
             .execution_id = try readInputValue(u64, record.payload, &offset),
@@ -1492,6 +1519,7 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
     if (offset != record.payload.len) return error.TrailingInputPayload;
     return .{
         .identity = identity,
+        .account_scope = account_scope,
         .source_time = record.source_time,
         .receive_time = record.receive_time,
         .monotonic_time = record.monotonic_time,

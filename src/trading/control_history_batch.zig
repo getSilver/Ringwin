@@ -24,7 +24,7 @@ pub fn selected(mask: anytype, index: usize) bool {
     return (mask & (@as(@TypeOf(mask), 1) << @intCast(index))) != 0;
 }
 pub fn qualify(shard: *const trading.TradingShard, origin: history.Origin, barrier: u64) !Qualification {
-    if (origin.stream.domain != .decision_log or origin.account != shard.exchange_account_identity or
+    if (origin.stream.domain != .decision_log or !std.meta.eql(origin, try shard.businessOrigin()) or
         origin.stream.id != (shard.checkpoint orelse return error.OrderArchiveOriginUnavailable).stream or
         barrier != shard.authoritativeBarrier() or shard.pending_history_candidate != null or
         shard.pending_safety_history_candidate != null or shard.deferred_history_admission_count != 0)
@@ -96,7 +96,7 @@ pub const Builder = struct {
     fn add(self: *Builder, identity: history.Identity, value: anytype) !void {
         const encoded = try codec.encodeBare(&self.bytes[self.count], value);
         self.records[self.count] = .{ .bytes = encoded, .payload_digest = history.hash(encoded) };
-        self.entries[self.count] = .{ .key = .{ .origin = self.qualification.origin, .identity = identity }, .record_index = @intCast(self.count) };
+        self.entries[self.count] = .{ .key = try history.scopedKey(self.qualification.origin, identity, null), .record_index = @intCast(self.count) };
         self.count += 1;
     }
     // Build in place: slices point into this stationary caller-owned builder.

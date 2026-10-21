@@ -26,8 +26,8 @@ pub const OrderArchiveCommit = @import("trading_shard_event.zig").OrderArchiveCo
 pub const FillArchiveCommit = @import("trading_shard_event.zig").FillArchiveCommit;
 pub const FundingArchiveCommit = shard_event.FundingArchiveCommit;
 pub const ReconciliationArchiveCommit = shard_event.ReconciliationArchiveCommit;
-pub const BusinessArchiveKind = enum { order, fill, funding, reconciliation, control, forced };
-const ArchiveCommitInput = struct { identity: u64, times: StableTimes };
+pub const BusinessArchiveKind = enum { order, fill, funding, reconciliation, control, forced, deployment };
+const ArchiveCommitInput = struct { identity: u64, times: StableTimes, account_scope: ?u128 = null };
 
 pub const OpenEconomicFact = struct {
     identity: u64,
@@ -193,7 +193,15 @@ fn riskTier(notional_atoms: i128, scale: u8) !u8 {
     return error.RiskLimitExceeded;
 }
 
+const IngressScope = struct {
+    venue: u64 = 0,
+    account: ?u128 = null,
+    fn from(envelope: canonical.EventEnvelope) @This() {
+        return .{ .venue = envelope.venue, .account = envelope.exchange_account };
+    }
+};
 const CanonicalIngressCursor = struct {
+    scope: IngressScope = .{},
     identity: canonical.EventIdentity,
     event_type: canonical.EventType,
     raw_digest: [Sha256.digest_length]u8,
@@ -213,6 +221,7 @@ pub const DispatchIngressEvidence = struct {
 };
 
 const DeferredHistoryAdmission = struct {
+    scope: IngressScope = .{},
     identity: canonical.EventIdentity,
     event_type: u32,
     order_id: u64,
@@ -244,7 +253,111 @@ test "09 canonical stream and deferred admission numeric boundaries preserve the
     }
 }
 
+/// Account-local authority. The original scalar view is the primary partition;
+/// scoped transactions exchange one private view and normalize it before
+/// publishing. Trace, OMS identities and commit ownership remain singular.
+pub const AccountState = struct {
+    risk_lease_allocation: @FieldType(RiskLease, "allocation") = null,
+    risk_lease_fact_sequence: u64 = 0,
+    reconciliation_started_fact: u64 = 0,
+    reconciliation_completed_fact: u64 = 0,
+    reconciliation_archive: ?ReconciliationArchiveCommit = null,
+    reconciliation_cursor: ?ReconciliationCursor = null,
+    pending_reconciliation_window: ?ReconciliationWindow = null,
+    open_economic_facts: [16]OpenEconomicFact = undefined,
+    open_economic_fact_count: u64 = 0,
+    open_economic_commitment_sequence: u64 = 0,
+    open_economic_min_utc_ns: u64 = 0,
+    open_economic_max_utc_ns: u64 = 0,
+    open_economic_unknown_time_count: u64 = 0,
+    coordinator_history_origin: ?history.Origin = null,
+    coordinator_binding_fact: u64 = 0,
+    instrument_rules_version: u32 = 0,
+    margin_rules_version: u32 = 0,
+    account_configured: bool = false,
+    virtual_portfolio_active: bool = false,
+    expected_source_sequence: ?u64 = null,
+    market_health: MarketHealth = .initializing,
+    bid_price_ticks: i64 = 0,
+    bid_quantity: i64 = 0,
+    ask_1_price_ticks: i64 = 0,
+    ask_1_quantity: i64 = 0,
+    ask_2_price_ticks: i64 = 0,
+    ask_2_quantity: i64 = 0,
+    last_risk_required_atoms: i128 = 0,
+    last_risk_tier: u8 = 0,
+    mark_price_atoms: i128 = 0,
+    risk_lease_atoms: i128 = 0,
+    risk_lease_identity: u64 = 0,
+    risk_lease_version: u64 = 0,
+    risk_lease_valid_through_barrier: u64 = 0,
+    strategy_limit_atoms: i128 = 0,
+    portfolio_limit_atoms: i128 = 0,
+    exchange_account_limit_atoms: i128 = 0,
+    global_limit_atoms: i128 = 0,
+    price_tick_atoms: i128 = 0,
+    venue_initial_margin_ppm: i64 = 0,
+    internal_initial_margin_ppm: i64 = 0,
+    internal_maintenance_margin_ppm: i64 = 0,
+    risk_fee_ppm: i64 = 0,
+    opening_buffer_atoms: i128 = 0,
+    opening_buffer_bps: i64 = 0,
+    opening_liquidation_distance_ticks: i64 = 0,
+    warning_buffer_atoms: i128 = 0,
+    kill_buffer_atoms: i128 = 0,
+    warning_buffer_bps: i64 = 0,
+    kill_buffer_bps: i64 = 0,
+    warning_liquidation_distance_ticks: i64 = 0,
+    kill_liquidation_distance_ticks: i64 = 0,
+    portfolio_margin_buffer_atoms: i128 = 0,
+    exchange_margin_buffer_atoms: i128 = 0,
+    portfolio_buffer_bps: i64 = 0,
+    exchange_buffer_bps: i64 = 0,
+    portfolio_liquidation_distance_ticks: i64 = std.math.maxInt(i64),
+    exchange_liquidation_distance_ticks: i64 = std.math.maxInt(i64),
+    portfolio_margin_gate: risk_module.MarginGate = .healthy,
+    exchange_margin_gate: risk_module.MarginGate = .healthy,
+    quantity_denominator: i64 = contract_denominator,
+    reservation_model: ReservationModel = .leveraged,
+    instrument_identity: u128 = 0,
+    exchange_account_identity: u128 = 0,
+    portfolio_identity: u128 = 0,
+    exchange_balance_observed: bool = false,
+    exchange_positions_observed: bool = false,
+    opening_balance_observed: bool = false,
+    account_balance_utc_ns: u64 = 0,
+    economic_baseline_utc_ns: u64 = 0,
+    economic_baseline_balances: [canonical.max_account_facts]canonical.AssetAmount = @splat(.{ .asset = 0, .atoms = 0 }),
+    economic_baseline_balance_count: u8 = 0,
+    portfolio_funded: bool = false,
+    economic_projection: economics_module.Projection = .{},
+    canonical_account: account_projection.AccountProjection = .{},
+    last_funding_rate: ?canonical.FundingRatePublished = null,
+    last_venue_configuration: ?canonical.VenueAccountConfigurationSnapshot = null,
+    economic_fault_count: u64 = 0,
+    economic_fault_reason: canonical.EconomicFaultReason = .invalid_economic_fact,
+    economic_fault_evidence: canonical.RawEvidenceRef = .{ .stream = 0, .sequence = 0, .digest = @splat(0) },
+    instrument_registry: instrument_registry.Registry = .{},
+};
+const AccountPartition = struct { identity: u128 = 0, state: AccountState = .{} };
+
 pub const TradingShard = struct {
+    cycles: @import("cycle_occupancy.zig").State = .{},
+    last_business_archive_account: u128 = 0,
+    domain_binding_receipt: ?history.Receipt = null,
+    domain_binding_fact_sequence: u64 = 0,
+    risk_lease_allocation: @FieldType(RiskLease, "allocation") = null,
+    risk_lease_fact_sequence: u64 = 0,
+    reconciliation_started_fact: u64 = 0,
+    reconciliation_completed_fact: u64 = 0,
+    reconciliation_archive: ?ReconciliationArchiveCommit = null,
+    decision_domain_identity: u128 = 0,
+    decision_stream_identity: u64 = 0,
+    primary_account_identity: u128 = 0,
+    secondary_accounts: [3]AccountPartition = @splat(.{}),
+    secondary_account_count: u8 = 0,
+    account_view: u8 = 0,
+    deployment: @import("deployment_allocation.zig").Configuration = .{},
     pending_history_candidate: ?cold.PendingCandidate = null,
     pending_history_member_index: ?u8 = null,
     pending_safety_history_candidate: ?cold.PendingCandidate = null,
@@ -406,12 +519,21 @@ pub const TradingShard = struct {
     }
 
     pub fn historyCandidateFor(self: *const TradingShard, input: CanonicalEvent) !?cold.PendingCandidate {
+        if (self.account_view == 0 and self.decision_domain_identity != 0) if (self.scopedAccount(input)) |account| if (self.secondaryAccountIndex(account)) |index| return self.accountHistoryCandidateFor(input, index, false);
         return self.prepareHistoryCandidate(input, false);
     }
 
     pub fn historySafetyCandidateFor(self: *const TradingShard, input: CanonicalEvent) !?cold.PendingCandidate {
         if (self.pending_safety_history_candidate == null or input != .venue or input.venue.event != .fill) return null;
+        if (self.account_view == 0 and self.decision_domain_identity != 0) if (self.scopedAccount(input)) |account| if (self.secondaryAccountIndex(account)) |index| return self.accountHistoryCandidateFor(input, index, true);
         return self.prepareHistoryCandidate(input, true);
+    }
+
+    noinline fn accountHistoryCandidateFor(self: *const TradingShard, input: CanonicalEvent, index: usize, synchronous: bool) anyerror!?cold.PendingCandidate {
+        var view: TradingShard = undefined;
+        copyTradingState(&view, self);
+        view.exchangeAccountView(index);
+        return view.prepareHistoryCandidate(input, synchronous);
     }
 
     fn prepareHistoryCandidate(self: *const TradingShard, input: CanonicalEvent, synchronous_fill: bool) !?cold.PendingCandidate {
@@ -492,7 +614,7 @@ pub const TradingShard = struct {
         const times = stableTimes(input);
         const record: journal.Record = .{ .type_id = 0, .schema_version = schema_version, .flags = journal.input_flag, .sequence = self.authoritativeBarrier() + 1, .source_time = times.source, .receive_time = times.receive, .monotonic_time = times.monotonic, .wall_time = times.wall, .time_presence = times.presence, .payload = payload };
         if (self.next_history_pending_id == 0 or self.next_history_pending_id > std.math.maxInt(u64)) return error.HistoryPendingIdentityCapacity;
-        var pending = try cold.begin(record, .{ .pending_id = self.next_history_pending_id, .key = .{ .origin = root.origin, .identity = semantic.identity }, .candidate_payload_digest = semantic.digest, .original_input_digest = cold.inputDigest(record), .root_digest = root.root_digest, .epoch = root.epoch, .barrier = root.barrier }, root);
+        var pending = try cold.begin(record, .{ .pending_id = self.next_history_pending_id, .key = try history.scopedKey(root.origin, semantic.identity, self.scopedAccount(input)), .candidate_payload_digest = semantic.digest, .original_input_digest = cold.inputDigest(record), .root_digest = root.root_digest, .epoch = root.epoch, .barrier = root.barrier }, root);
         pending.original_was_admissible = try self.canonicalInputWasAdmissible(input, pending.request.original_input_digest);
         return pending;
     }
@@ -502,7 +624,7 @@ pub const TradingShard = struct {
         const record = input.venue;
         const payload_digest = try canonicalPayloadDigest(record.event);
         for (self.deferred_history_admissions[0..self.deferred_history_admission_count]) |admission| {
-            if (!std.meta.eql(admission.identity, record.envelope.identity)) continue;
+            if (!std.meta.eql(admission.scope, IngressScope.from(record.envelope)) or !std.meta.eql(admission.identity, record.envelope.identity)) continue;
             if (admission.event_type != record.envelope.event_type or !std.mem.eql(u8, &admission.raw_digest, &record.envelope.raw_evidence.digest) or
                 !std.mem.eql(u8, &admission.payload_digest, &payload_digest)) return error.ConflictingCanonicalIdentity;
             if (std.mem.eql(u8, &admission.original_input_digest, &input_digest)) return true;
@@ -512,7 +634,7 @@ pub const TradingShard = struct {
         }
         for (self.canonical_ingress_cursors[0..self.canonical_ingress_cursor_count]) |cursor| {
             const envelope = input.venue.envelope;
-            if (cursor.identity.stream != envelope.identity.stream) continue;
+            if (cursor.identity.stream != envelope.identity.stream or !std.meta.eql(cursor.scope, IngressScope.from(envelope))) continue;
             if (envelope.identity.sequence == cursor.identity.sequence and
                 (cursor.event_type != canonical.eventType(input.venue.event) or
                     !std.mem.eql(u8, &cursor.raw_digest, &envelope.raw_evidence.digest) or
@@ -533,7 +655,7 @@ pub const TradingShard = struct {
         const input_digest = try acceptedOriginalDigest(input);
         if (!try self.canonicalInputWasAdmissible(input, input_digest)) return error.StaleCanonicalIdentity;
         for (self.deferred_history_admissions[0..self.deferred_history_admission_count]) |admission|
-            if (std.meta.eql(admission.identity, input.venue.envelope.identity) and std.mem.eql(u8, &admission.original_input_digest, &input_digest)) return;
+            if (std.meta.eql(admission.scope, IngressScope.from(input.venue.envelope)) and std.meta.eql(admission.identity, input.venue.envelope.identity) and std.mem.eql(u8, &admission.original_input_digest, &input_digest)) return;
         if (ingressAdmissionFull(self.deferred_history_admission_count, self.deferred_history_admissions.len)) return error.HistoryAdmissionCapacity;
         var order_id = historyOrderUpdate(input) orelse 0;
         if (input.venue.event == .fill) order_id = std.math.cast(u64, input.venue.event.fill.order) orelse return error.IdentityOutOfRange;
@@ -544,14 +666,14 @@ pub const TradingShard = struct {
             }
         };
         try self.trace.append(.canonical_history_deferred, input.venue.envelope.identity.sequence);
-        self.deferred_history_admissions[self.deferred_history_admission_count] = .{ .identity = input.venue.envelope.identity, .event_type = input.venue.envelope.event_type, .order_id = order_id, .raw_digest = input.venue.envelope.raw_evidence.digest, .payload_digest = try canonicalPayloadDigest(input.venue.event), .original_input_digest = input_digest, .fact_sequence = self.authoritativeBarrier() };
+        self.deferred_history_admissions[self.deferred_history_admission_count] = .{ .scope = IngressScope.from(input.venue.envelope), .identity = input.venue.envelope.identity, .event_type = input.venue.envelope.event_type, .order_id = order_id, .raw_digest = input.venue.envelope.raw_evidence.digest, .payload_digest = try canonicalPayloadDigest(input.venue.event), .original_input_digest = input_digest, .fact_sequence = self.authoritativeBarrier() };
         self.deferred_history_admission_count += 1;
     }
 
     fn releaseDeferredHistoryAdmission(self: *TradingShard, input: CanonicalEvent) bool {
         if (input != .venue) return false;
         for (self.deferred_history_admissions[0..self.deferred_history_admission_count], 0..) |admission, index| {
-            if (!std.meta.eql(admission.identity, input.venue.envelope.identity)) continue;
+            if (!std.meta.eql(admission.scope, IngressScope.from(input.venue.envelope)) or !std.meta.eql(admission.identity, input.venue.envelope.identity)) continue;
             var move = index;
             while (move + 1 < self.deferred_history_admission_count) : (move += 1)
                 self.deferred_history_admissions[move] = self.deferred_history_admissions[move + 1];
@@ -559,6 +681,16 @@ pub const TradingShard = struct {
             return true;
         }
         return false;
+    }
+
+    pub fn businessOrigin(self: *const TradingShard) !history.Origin {
+        if (self.decision_domain_identity != 0) return (try self.deployment.bindingRecord(self.decision_domain_identity, self.decision_stream_identity)).origin();
+        return .{ .stream = .{ .domain = .decision_log, .id = (self.checkpoint orelse return error.OrderArchiveOriginUnavailable).stream }, .account = self.exchange_account_identity };
+    }
+
+    pub fn cyclePinsOrder(self: *const TradingShard, order_id: u64) bool {
+        const order = self.oms.orderById(order_id) orelse return false;
+        return self.cycles.owning(.{ .account = order.exchange_account, .instrument = order.instrument }) != null;
     }
 
     pub fn hasDeferredOrderHistory(self: *const TradingShard, order_id: u64) bool {
@@ -583,7 +715,15 @@ pub const TradingShard = struct {
 
     const HistorySemantic = struct { identity: history.Identity, digest: history.Digest };
 
+    noinline fn accountHistorySemantic(self: *const TradingShard, input: CanonicalEvent, member: ?u8, index: usize) anyerror!?HistorySemantic {
+        var view: TradingShard = undefined;
+        copyTradingState(&view, self);
+        view.exchangeAccountView(index);
+        return view.historySemantic(input, member);
+    }
+
     fn historySemantic(self: *const TradingShard, input: CanonicalEvent, member: ?u8) !?HistorySemantic {
+        if (self.account_view == 0 and self.decision_domain_identity != 0) if (self.scopedAccount(input)) |account| if (self.secondaryAccountIndex(account)) |index| return self.accountHistorySemantic(input, member, index);
         var bytes: [cold.max_original_input_size]u8 = undefined;
         switch (input) {
             .core => |event| switch (event.payload) {
@@ -750,6 +890,14 @@ pub const TradingShard = struct {
     }
 
     fn applyCandidate(self: *TradingShard, previous: *const TradingShard, input: CanonicalEvent, publish_on_error: *bool, rollback: ?*const TradingShard) !ApplyResult {
+        if (self.account_view == 0 and self.deployment.sealed) {
+            if (self.scopedAccount(input)) |account| {
+                if (account != self.primary_account_identity) {
+                    const index = self.secondaryAccountIndex(account) orelse return error.CanonicalScopeMismatch;
+                    return self.applyAccountCandidate(previous, input, publish_on_error, index);
+                }
+            }
+        }
         publish_on_error.* = false;
         if (self == previous) return error.OwnedCandidateAliasesCommittedState;
         if (self.authoritativeBarrier() != previous.authoritativeBarrier()) return error.OwnedCandidateBarrierMismatch;
@@ -779,8 +927,16 @@ pub const TradingShard = struct {
             return err;
         };
         if (input != .core or (input.core.payload != .history_candidate_verified and input.core.payload != .history_safety_candidate_verified)) try self.observeOrderArchiveTimes(previous, input);
-        if (self.open_economic_fact_count != previous.open_economic_fact_count or !std.meta.eql(self.reconciliation_cursor, previous.reconciliation_cursor)) {
-            if (self.open_economic_fact_count > previous.open_economic_fact_count and self.open_economic_fact_count <= self.open_economic_facts.len) {
+        try self.finalizeEconomicInput(previous.open_economic_fact_count, previous.reconciliation_cursor, input_digest);
+        if (self.authoritativeBarrier() != before) try self.trace.finalizeInput(before, input_digest);
+        // The original public path published before materializing its borrowed result.
+        publish_on_error.* = true;
+        return .{ .facts = try self.trace.factsAfter(before), .order_command = result.order_command, .oms_commands = self.oms.emitted() };
+    }
+
+    fn finalizeEconomicInput(self: *TradingShard, previous_count: u64, previous_cursor: ?ReconciliationCursor, input_digest: [32]u8) !void {
+        if (self.open_economic_fact_count != previous_count or !std.meta.eql(self.reconciliation_cursor, previous_cursor)) {
+            if (self.open_economic_fact_count > previous_count and self.open_economic_fact_count <= self.open_economic_facts.len) {
                 const fact = &self.open_economic_facts[@intCast(self.open_economic_fact_count - 1)];
                 fact.accepted_input_digest = input_digest;
                 // Forced source evidence binds the original economic input,
@@ -795,10 +951,6 @@ pub const TradingShard = struct {
             }
             try self.commitOpenEconomicFacts();
         }
-        if (self.authoritativeBarrier() != before) try self.trace.finalizeInput(before, input_digest);
-        // The original public path published before materializing its borrowed result.
-        publish_on_error.* = true;
-        return .{ .facts = try self.trace.factsAfter(before), .order_command = result.order_command, .oms_commands = self.oms.emitted() };
     }
 
     fn observeOrderArchiveTimes(self: *TradingShard, previous: *const TradingShard, input: CanonicalEvent) !void {
@@ -1023,6 +1175,11 @@ pub const TradingShard = struct {
 
     fn commandNeedsDispatchFacts(self: *const TradingShard, order_id: u64) bool {
         const order = self.oms.orderById(order_id) orelse return true;
+        if (self.decision_domain_identity != 0) {
+            for (self.cycles.records[0..self.cycles.count]) |cycle|
+                for (cycle.members[0..cycle.count]) |member|
+                    if (member.account == order.exchange_account and member.instrument == order.instrument) return true;
+        }
         return switch (order.state) {
             .filled, .canceled, .rejected => order.reservation_active or order.reservation.atoms != 0 or
                 order.pending_reservation != null or order.pending_previous_spec != null or
@@ -1034,12 +1191,28 @@ pub const TradingShard = struct {
     fn checkpointPins(self: *const TradingShard) !Trace {
         var target = self.trace;
         target.pinned_len = 0;
+        for (self.cycles.records[0..self.cycles.count]) |cycle| try self.pinFact(&target, cycle.fact_sequence);
+        try self.pinFact(&target, self.domain_binding_fact_sequence);
         for (self.asset_registry.entries[0..self.asset_registry.count]) |entry| try self.pinFact(&target, entry.barrier);
         for (self.instrument_registry.entries[0..self.instrument_registry.count]) |entry| {
             try self.pinFact(&target, entry.rules_barrier);
             try self.pinFact(&target, entry.margin_barrier);
             try self.pinFact(&target, entry.trading_barrier);
             try self.pinFact(&target, entry.capability_barrier);
+        }
+        for (self.secondary_accounts[0..self.secondary_account_count]) |partition| {
+            try self.pinFact(&target, partition.state.risk_lease_fact_sequence);
+            try self.pinFact(&target, partition.state.reconciliation_started_fact);
+            try self.pinFact(&target, partition.state.reconciliation_completed_fact);
+            if (partition.state.reconciliation_archive) |commit| try self.pinFact(&target, try std.math.add(u64, commit.receipt.root.barrier, 1));
+            try self.pinFact(&target, partition.state.coordinator_binding_fact);
+            try self.pinFact(&target, partition.state.open_economic_commitment_sequence);
+            for (partition.state.instrument_registry.entries[0..partition.state.instrument_registry.count]) |entry| {
+                try self.pinFact(&target, entry.rules_barrier);
+                try self.pinFact(&target, entry.margin_barrier);
+                try self.pinFact(&target, entry.trading_barrier);
+                try self.pinFact(&target, entry.capability_barrier);
+            }
         }
         try self.pinFact(&target, self.coordinator_binding_fact);
         try self.pinFact(&target, self.host_activation_fact_sequence);
@@ -1102,7 +1275,148 @@ pub const TradingShard = struct {
     }
 
     pub fn canonicalStateDigest(self: *const TradingShard) [Sha256.digest_length]u8 {
+        if (self.account_view != 0) return self.normalizedAccountDigest();
         return stateDigestBorrowed(self);
+    }
+
+    fn validateAccountScope(self: *const TradingShard, input: CoreEvent) !void {
+        switch (input.payload) {
+            .instrument_rules_activated,
+            .margin_rules_activated,
+            .account_configuration,
+            .exchange_balance,
+            .exchange_positions,
+            .opening_balance,
+            .virtual_portfolio_activated,
+            .portfolio_transfer,
+            .risk_lease_granted,
+            .mark_price,
+            .capability_profile_activation,
+            .instrument_trading_authorization,
+            .economic_fill,
+            .funding_settlement,
+            .venue_forced_execution,
+            .economic_account_snapshot,
+            .account_coordinator_bound,
+            .oms_execution_report,
+            .oms_reconciliation_result,
+            .oms_dispatch_batch,
+            .funding_archive_committed,
+            .reconciliation_archive_committed,
+            => {
+                const expected = if (self.account_view == 0) self.primary_account_identity else self.secondary_accounts[self.account_view - 1].identity;
+                if (input.account_scope != expected) return error.CanonicalScopeMismatch;
+                const account = self.deployment.account(expected) orelse return error.CanonicalScopeMismatch;
+                switch (input.payload) {
+                    .oms_execution_report => |report| try self.requireOrderAccount(report.order_id, expected),
+                    .oms_reconciliation_result => |result| try self.requireOrderAccount(result.order_id, expected),
+                    .economic_fill => |fill| try self.requireOrderAccount(fill.order_id, expected),
+                    .oms_dispatch_batch => |batch| {
+                        if (batch.count > batch.items.len) return error.InvalidDispatchBatch;
+                        for (batch.items[0..batch.count]) |item| {
+                            const command = self.oms.findCommand(item.command_id) orelse return error.UnknownCommand;
+                            if (command.authority.exchange_account != expected) return error.CanonicalScopeMismatch;
+                        }
+                    },
+                    .instrument_rules_activated => |rules| {
+                        if (rules.venue != account.venue or self.deployment.owner(expected, rules.instrument_identity) != self.decision_domain_identity) return error.CanonicalScopeMismatch;
+                    },
+                    .virtual_portfolio_activated => |activation| {
+                        if (activation.portfolio_identity != self.deployment.domain(self.decision_domain_identity).?.portfolio) return error.InvalidVirtualPortfolio;
+                    },
+                    .capability_profile_activation => |capability| {
+                        if (capability.exchange_account != expected or capability.venue != account.venue or @intFromEnum(capability.environment) != @intFromEnum(account.environment)) return error.CanonicalScopeMismatch;
+                    },
+                    else => {},
+                }
+            },
+            .oms_intent_group => |group| {
+                const expected = if (self.account_view == 0) self.primary_account_identity else self.secondary_accounts[self.account_view - 1].identity;
+                if (group.count == 0 or group.count > oms.max_group_members) return error.InvalidCycleMembers;
+                if (input.account_scope != null) {
+                    if (input.account_scope != expected) return error.CanonicalScopeMismatch;
+                    for (group.members[0..group.count]) |member| if (member.exchange_account != expected) return error.CanonicalScopeMismatch;
+                }
+            },
+            .timer, .external_order_intent => return error.JointAdmissionRequired,
+            else => if (input.account_scope != null) return error.CanonicalScopeMismatch,
+        }
+    }
+
+    fn requireOrderAccount(self: *const TradingShard, order_id: u64, account: u128) !void {
+        const order = self.oms.orderById(order_id) orelse return error.UnknownOrder;
+        if (order.exchange_account != account) return error.CanonicalScopeMismatch;
+    }
+
+    fn scopedAccount(self: *const TradingShard, input: CanonicalEvent) ?u128 {
+        return switch (input) {
+            .core => |event| event.account_scope,
+            .venue => |event| blk: {
+                if (event.envelope.exchange_account) |account| break :blk account;
+                const instrument: ?u128 = event.envelope.instrument orelse switch (event.event) {
+                    .instrument_definition_observed => |value| value.instrument,
+                    .l2_book_snapshot => |value| value.instrument,
+                    .l2_book_delta => |value| value.instrument,
+                    .reference_price => |value| value.instrument,
+                    .market_data_health_changed => |value| value.instrument,
+                    else => break :blk null,
+                };
+                for (self.deployment.ownerships[0..self.deployment.ownership_count]) |key|
+                    if (key.instrument == instrument and key.domain == self.decision_domain_identity and
+                        self.deployment.account(key.account).?.venue == event.envelope.venue) break :blk key.account;
+                break :blk null;
+            },
+        };
+    }
+
+    fn secondaryAccountIndex(self: *const TradingShard, identity: u128) ?usize {
+        for (self.secondary_accounts[0..self.secondary_account_count], 0..) |partition, index|
+            if (partition.identity == identity) return index;
+        return null;
+    }
+
+    fn exchangeAccountView(self: *TradingShard, index: usize) void {
+        const state = &self.secondary_accounts[index].state;
+        inline for (@typeInfo(AccountState).@"struct".fields) |field|
+            std.mem.swap(field.type, &@field(self, field.name), &@field(state, field.name));
+        self.account_view = if (self.account_view == 0) @intCast(index + 1) else 0;
+    }
+
+    noinline fn applyAccountCandidate(self: *TradingShard, previous: *const TradingShard, input: CanonicalEvent, publish_on_error: *bool, index: usize) anyerror!ApplyResult {
+        var previous_view: TradingShard = undefined;
+        copyTradingState(&previous_view, previous);
+        previous_view.exchangeAccountView(index);
+        self.exchangeAccountView(index);
+        defer self.exchangeAccountView(index);
+        return self.applyCandidate(&previous_view, input, publish_on_error, &previous_view);
+    }
+
+    noinline fn normalizedAccountDigest(self: *const TradingShard) [32]u8 {
+        var normalized: TradingShard = undefined;
+        copyTradingState(&normalized, self);
+        normalized.exchangeAccountView(self.account_view - 1);
+        return stateDigestBorrowed(&normalized);
+    }
+
+    pub fn accountState(self: *const TradingShard, identity: u128) ?AccountState {
+        if (identity == self.exchange_account_identity) {
+            var state: AccountState = undefined;
+            inline for (@typeInfo(AccountState).@"struct".fields) |field| @field(state, field.name) = @field(self, field.name);
+            return state;
+        }
+        const index = self.secondaryAccountIndex(identity) orelse return null;
+        return self.secondary_accounts[index].state;
+    }
+
+    pub fn copyAccountViewInto(self: *const TradingShard, destination: *TradingShard, identity: u128) !void {
+        if (self == destination) return error.InvalidAccountView;
+        copyTradingState(destination, self);
+        if (destination.account_view != 0) destination.exchangeAccountView(destination.account_view - 1);
+        if (identity != self.primary_account_identity) {
+            const index = self.secondaryAccountIndex(identity) orelse return error.CanonicalScopeMismatch;
+            destination.exchangeAccountView(index);
+        }
+        if (!destination.account_configured or destination.exchange_account_identity != identity) return error.CanonicalScopeMismatch;
     }
 
     pub fn appliedHostActivation(self: *const TradingShard, stable_journal: *const journal.Journal) !host_gateway.AppliedActivation {
@@ -1140,6 +1454,11 @@ pub const TradingShard = struct {
         for (self.fenced_strategy_instances[0..self.fenced_strategy_count]) |identity|
             if (identity == strategy_instance) return true;
         return false;
+    }
+
+    /// Exact canonical snapshot size, including the envelope.
+    pub fn snapshotEncodedSize(self: *const TradingShard) !usize {
+        return snapshot_codec.encodedSizeWithPolicy(self, CoreSnapshotEncodingPolicy);
     }
 
     /// Encodes authoritative state at the exact sealed stable-journal barrier.
@@ -1237,7 +1556,7 @@ pub const TradingShard = struct {
     }
 
     pub fn activeReservationAtoms(self: *const TradingShard) !i128 {
-        const reservation = try self.oms.activeReservations(settlement_asset);
+        const reservation = try self.oms.reservationsForAccount(settlement_asset, if (self.decision_domain_identity == 0) null else self.exchange_account_identity);
         return reservation.atoms;
     }
 
@@ -1390,7 +1709,7 @@ pub const TradingShard = struct {
 
     fn qualifyOmsGroup(self: *TradingShard, group: oms_module.IntentGroup) !QualifiedIntentGroup {
         var qualified = group;
-        var active = try self.oms.activeReservations(settlement_asset);
+        var active: canonical.AssetAmount = .{ .asset = settlement_asset, .atoms = try self.activeReservationAtoms() };
         for (qualified.members[0..qualified.count], 0..) |*intent, member_index| {
             for (self.fenced_strategy_instances[0..self.fenced_strategy_count]) |fenced|
                 if (intent.strategy_instance == fenced and intent.operation != .cancel)
@@ -1417,6 +1736,7 @@ pub const TradingShard = struct {
                 var pending_lots: i64 = intent.quantity;
                 var committed_sell_atoms: i128 = 0;
                 for (self.oms.orders[0..self.oms.order_count]) |order| {
+                    if (self.decision_domain_identity != 0 and order.exchange_account != self.exchange_account_identity) continue;
                     const ordered = self.instrumentEntry(order.instrument) orelse return error.UnknownOmsInstrument;
                     if (ordered.product != .spot or ordered.rules.base_asset != unit.asset or order.side != .sell) continue;
                     const order_unit = try self.baseAtomsPerLot(ordered);
@@ -1433,6 +1753,7 @@ pub const TradingShard = struct {
                     committed_sell_atoms = try std.math.add(i128, committed_sell_atoms, try std.math.mul(i128, remaining, order_unit.atoms));
                 }
                 for (self.oms.tombstones[0..self.oms.tombstone_count]) |archived| {
+                    if (self.decision_domain_identity != 0 and archived.exchange_account != self.exchange_account_identity) continue;
                     const archived_config = self.instrumentEntry(archived.instrument) orelse return error.UnknownOmsInstrument;
                     if (archived_config.product != .spot or archived_config.rules.base_asset != unit.asset) continue;
                     const archive_unit = try self.baseAtomsPerLot(archived_config);
@@ -1469,6 +1790,26 @@ pub const TradingShard = struct {
             if (intent.market_protection_price) |price| try self.checkAssetAmounts(price, true);
             const portfolio_position_quantity = self.economic_projection.portfolio.positionForInstrument(intent.instrument).quantity;
             const exchange_position_quantity = self.economic_projection.exchange.positionForInstrument(intent.instrument).quantity;
+            if (self.decision_domain_identity != 0 and intent.portfolio_reduce_only) {
+                var pending: i64 = intent.quantity;
+                for (self.oms.orders[0..self.oms.order_count]) |order| {
+                    if (order.exchange_account != intent.exchange_account or order.instrument != intent.instrument or order.side != intent.side) continue;
+                    const applied = try self.economic_projection.appliedCanonicalFillQuantity(order.id);
+                    const obligation = if (order.reservation_active) @max(order.quantity, @max(order.confirmed_quantity, order.pending_basis_quantity)) else order.cumulative_quantity;
+                    const remaining = @max(try std.math.sub(i64, obligation, applied), 0);
+                    if (order.id == intent.target_order_id) {
+                        pending = @max(pending, remaining);
+                    } else if (order.portfolio_reduce_only) {
+                        pending = try std.math.add(i64, pending, remaining);
+                    }
+                }
+                for (qualified.members[0..member_index]) |prior| {
+                    if (prior.operation != .cancel and prior.exchange_account == intent.exchange_account and prior.instrument == intent.instrument and prior.portfolio_reduce_only and prior.side == intent.side) {
+                        pending = try std.math.add(i64, pending, prior.quantity);
+                    }
+                }
+                if (pending > @as(i128, @intCast(@abs(portfolio_position_quantity))) or pending > @as(i128, @intCast(@abs(exchange_position_quantity)))) return error.PortfolioReduceOnlyViolation;
+            }
             const signed_delta = (if (intent.side == .buy) intent.quantity else -intent.quantity);
             const next_portfolio = try std.math.add(i64, portfolio_position_quantity, signed_delta);
             const reduces_portfolio = @abs(next_portfolio) <= @abs(portfolio_position_quantity) and
@@ -1884,7 +2225,7 @@ pub const TradingShard = struct {
 
     pub fn prepareFundingArchive(self: *const TradingShard, identity: u64, origin: history.Origin, barrier: u64) !economics_module.FundingArchiveQualification {
         if (self.unresolvedEconomicGate() or self.pending_history_candidate != null or self.pending_safety_history_candidate != null or self.deferred_history_admission_count != 0) return error.FundingArchivePinned;
-        if (barrier != self.authoritativeBarrier() or origin.account != self.exchange_account_identity or
+        if (barrier != self.authoritativeBarrier() or !std.meta.eql(origin, try self.businessOrigin()) or
             origin.stream.domain != .decision_log or origin.stream.id != (self.checkpoint orelse return error.OrderArchiveOriginUnavailable).stream) return error.InvalidFundingArchiveOrigin;
         return self.economic_projection.prepareFundingArchive(identity, origin, barrier);
     }
@@ -1896,7 +2237,7 @@ pub const TradingShard = struct {
             evidence.before_source == null or evidence.before_balance_count != evidence.balance_count or
             std.mem.allEqual(u8, &evidence.bill_chain_digest, 0)) return error.ReconciliationWindowPinned;
         if (!window.original.event.account_reconciliation_result.complete or window.original.envelope.scope != .account or
-            window.original.envelope.exchange_account != origin.account or evidence.exchange_account != origin.account or
+            window.original.envelope.exchange_account != self.exchange_account_identity or evidence.exchange_account != self.exchange_account_identity or
             !std.meta.eql(evidence.source, window.original.envelope.raw_evidence) or
             evidence.from_utc_ns != (if (self.reconciliation_cursor) |cursor| cursor.through_utc_ns else self.economic_baseline_utc_ns) or
             evidence.through_utc_ns < evidence.from_utc_ns or window.original.envelope.times.source_utc_ns != evidence.through_utc_ns or
@@ -1914,7 +2255,7 @@ pub const TradingShard = struct {
             if (!fact.fee_confirmed) return error.ReconciliationWindowPinned;
             for (evidence.facts[0..index]) |known| if (known.identity == fact.identity and known.kind == fact.kind) return error.ReconciliationWindowPinned;
         }
-        if (identity != window.identity or barrier != self.authoritativeBarrier() or origin.account != self.exchange_account_identity or
+        if (identity != window.identity or barrier != self.authoritativeBarrier() or !std.meta.eql(origin, try self.businessOrigin()) or
             origin.stream.domain != .decision_log or origin.stream.id != (self.checkpoint orelse return error.OrderArchiveOriginUnavailable).stream or
             self.pending_history_candidate != null or self.pending_safety_history_candidate != null or self.deferred_history_admission_count != 0 or
             self.economic_projection.reconciliation_break or self.economic_projection.suspense_usdt_atoms != 0 or self.economic_projection.suspense_native_asset_count != 0 or
@@ -2069,6 +2410,15 @@ pub const TradingShard = struct {
     }
 
     fn latestFact(self: *const TradingShard, kind: EventKind) ?Fact {
+        if (self.deployment.sealed and kind == .risk_lease_granted) return if (self.risk_lease_fact_sequence == 0) null else self.trace.factAt(self.risk_lease_fact_sequence);
+        if (self.decision_domain_identity != 0) {
+            const sequence = switch (kind) {
+                .canonical_account_reconciliation_started => self.reconciliation_started_fact,
+                .canonical_account_reconciliation => self.reconciliation_completed_fact,
+                else => 0,
+            };
+            if (kind == .canonical_account_reconciliation_started or kind == .canonical_account_reconciliation) return if (sequence == 0) null else self.trace.factAt(sequence);
+        }
         var latest: ?Fact = null;
         for (self.trace.pinned[0..self.trace.pinned_len]) |fact| if (fact.kind == kind) {
             latest = fact;
@@ -2090,6 +2440,8 @@ pub const TradingShard = struct {
     fn dispatchAuthorityRefs(self: *const TradingShard, instrument: canonical.InstrumentIdentity, now_monotonic_ns: u64, deadline_barrier: u64) !oms_module.DispatchAuthorityRefs {
         try self.trace.validate();
         var refs: oms_module.DispatchAuthorityRefs = .{
+            .decision_domain = self.decision_domain_identity,
+            .configuration_digest = if (self.deployment.sealed) self.deployment.header.?.expected_digest else @splat(0),
             .exchange_account = self.exchange_account_identity,
             .virtual_portfolio = self.portfolio_identity,
             .deadline_barrier = deadline_barrier,
@@ -2184,10 +2536,60 @@ pub const TradingShard = struct {
         return result;
     }
 
+    fn applySharedMark(self: *TradingShard, price: canonical.ReferencePrice, venue: canonical.VenueIdentity) !void {
+        if (self.decision_domain_identity == 0) return self.applyAccountMark(price);
+        const original_view = self.account_view;
+        if (original_view != 0) self.exchangeAccountView(original_view - 1);
+        defer {
+            if (self.account_view != 0) self.exchangeAccountView(self.account_view - 1);
+            if (original_view != 0) self.exchangeAccountView(original_view - 1);
+        }
+        for (self.deployment.accounts[0..self.deployment.account_count]) |account| {
+            if (account.venue != venue or self.deployment.owner(account.identity, price.instrument) != self.decision_domain_identity) continue;
+            if (self.account_view != 0) self.exchangeAccountView(self.account_view - 1);
+            if (account.identity != self.primary_account_identity) self.exchangeAccountView(self.secondaryAccountIndex(account.identity) orelse return error.InvalidDomainScope);
+            if (self.instrument_registry.get(price.instrument) == null) continue;
+            try self.applyAccountMark(price);
+        }
+    }
+
+    fn applyAccountMark(self: *TradingShard, price: canonical.ReferencePrice) !void {
+        const instrument = self.instrument_registry.get(price.instrument) orelse return error.UnknownInstrument;
+        if (price.price.rules_version != instrument.rules.version) return error.CanonicalRulesMismatch;
+        const mark_price = try std.math.mul(i128, price.price.ticks, instrument.margin.price_tick_atoms);
+        if (price.instrument == self.instrument_identity) self.mark_price_atoms = mark_price;
+        _ = try self.applyEconomicProjection(.{ .mark_price = .{
+            .instrument = price.instrument,
+            .product = instrument.product,
+            .price_atoms = mark_price,
+            .quantity_denominator = instrument.rules.quantity_denominator,
+            .quantity_numerator = instrument.rules.quantity_numerator,
+        } });
+    }
+
     fn bindFreshCancellations(self: *TradingShard, now_monotonic_ns: u64) !void {
         for (self.oms.emitted()) |command| {
             if (command.operation != .cancel) continue;
-            const authority = try self.dispatchAuthorityRefs(command.instrument, now_monotonic_ns, self.authoritativeBarrier());
+            const order = self.oms.orderById(command.order_id) orelse return error.UnknownOrder;
+            const starting_view = self.account_view;
+            if (self.decision_domain_identity != 0 and order.exchange_account != self.exchange_account_identity) {
+                if (starting_view != 0) self.exchangeAccountView(starting_view - 1);
+                if (order.exchange_account != self.primary_account_identity) self.exchangeAccountView(self.secondaryAccountIndex(order.exchange_account) orelse return error.CanonicalScopeMismatch);
+            }
+            defer {
+                if (self.account_view != starting_view) {
+                    if (self.account_view != 0) self.exchangeAccountView(self.account_view - 1);
+                    if (starting_view != 0) self.exchangeAccountView(starting_view - 1);
+                }
+            }
+            var authority = try self.dispatchAuthorityRefs(command.instrument, now_monotonic_ns, self.authoritativeBarrier());
+            if (self.decision_domain_identity != 0) {
+                for (self.cycles.records[0..self.cycles.count]) |cycle| {
+                    for (cycle.members[0..cycle.count]) |member| if (member.account == order.exchange_account and member.instrument == order.instrument) {
+                        authority.cycle = .{ .identity = cycle.first_sequence, .version = 1, .barrier = cycle.fact_sequence };
+                    };
+                }
+            }
             try self.oms.bindCancellationAuthority(command.command_id, authority);
         }
     }
@@ -2256,6 +2658,7 @@ pub const TradingShard = struct {
         var group: oms.IntentGroup = .{ .first_intent_sequence = parsed.members[0].intent_sequence, .count = parsed.count };
         for (parsed.members[0..parsed.count], 0..) |intent, index| {
             group.members[index] = originalHostIntentGroup(intent).members[0];
+            group.members[index].exchange_account = intent.exchange_account_identity;
             // Business identity survives renewed authorization envelopes. The
             // raw candidate separately binds that envelope in the stable input.
             group.members[index].client_order_id = try canonical.ClientOrderId.init(&parsed.business_digest);
@@ -2263,7 +2666,7 @@ pub const TradingShard = struct {
         return group;
     }
 
-    fn submitHostGroup(self: *TradingShard, candidate: host_gateway.GroupCandidate) !?OrderCommand {
+    fn submitHostGroup(self: *TradingShard, input: CoreEvent, candidate: host_gateway.GroupCandidate) !?OrderCommand {
         if (candidate.len > candidate.bytes.len) return error.InvalidIntentGroup;
         const parsed = try host_gateway.decodeIntentGroup(candidate.frame());
         const first = parsed.members[0];
@@ -2284,19 +2687,33 @@ pub const TradingShard = struct {
             },
             .fresh => {},
         }
-        const reason: RejectReason = if (candidate.rejection) |rejection| switch (rejection) {
+        if (self.decision_domain_identity != 0 and @as(usize, self.trace.len) + 1 > self.trace.events.len - 64) return error.AdmissionCapacity;
+        const reason: ?RejectReason = if (candidate.rejection) |rejection| switch (rejection) {
             .stale => .host_output_stale,
             .invalid_cursor => .invalid_cursor,
             else => return error.InvalidHostGroupRejection,
         } else if (first.strategy_cursor <= self.strategy_cursor or
             first.strategy_cursor <= self.host_activation_barrier or first.strategy_cursor <= self.host_activation_fact_sequence)
             .invalid_cursor
+        else if (self.decision_domain_identity == 0)
+            .joint_admission_unavailable
         else
-            .joint_admission_unavailable;
-        // Ticket 04 deliberately has no joint-admission authority. Remember
-        // the entire rejected identity set atomically, never create commands.
-        try self.rejectSubmittedIntent(group, .strategy_intent_rejected, reason);
-        return null;
+            null;
+        if (reason) |rejection| {
+            try self.rejectSubmittedIntent(group, .strategy_intent_rejected, rejection);
+            return null;
+        }
+        for (parsed.members[0..parsed.count]) |member| {
+            if (member.portfolio_identity != self.deployment.domain(self.decision_domain_identity).?.portfolio or
+                member.strategy_identity != self.strategy_identity or member.config_version != self.strategy_config_version or
+                member.activation_identity != self.host_activation_identity or
+                self.deployment.owner(member.exchange_account_identity, member.instrument_identity) != self.decision_domain_identity)
+            {
+                try self.rejectSubmittedIntent(group, .strategy_intent_rejected, .identity_mismatch);
+                return null;
+            }
+        }
+        return self.handleDomainGroup(input, group);
     }
 
     fn submitOrderIntent(self: *TradingShard, intent: host_gateway.OrderIntent, now_monotonic_ns: u64, cursor_floor: ?u64) !?OrderCommand {
@@ -2451,6 +2868,17 @@ pub const TradingShard = struct {
     }
 
     fn handleCanonical(self: *TradingShard, record: canonical.EventRecord, verified_original: bool, coverage: ?VerifiedAccountCoverage) !?OrderCommand {
+        if (self.decision_domain_identity != 0) {
+            const order_identity: ?u128 = switch (record.event) {
+                .execution_report => |report| report.order,
+                .fill => |fill| fill.order,
+                .order_reconciliation_result => |result| result.order,
+                else => null,
+            };
+            if (order_identity) |identity| if (self.oms.orderById(std.math.cast(u64, identity) orelse return error.IdentityOutOfRange)) |order| {
+                if (order.exchange_account != self.exchange_account_identity) return error.CanonicalScopeMismatch;
+            };
+        }
         if (record.envelope.event_type != @intFromEnum(canonical.eventType(record.event)))
             return error.CanonicalEventTypeMismatch;
         if (record.event == .account_bootstrap_snapshot or record.event == .account_observed) {
@@ -2573,7 +3001,10 @@ pub const TradingShard = struct {
             .execution_report => |report| try self.applyCanonicalReport(report, fact_identity, record.envelope.times.monotonic_ns orelse 0),
             .fill => |fill| try self.applyCanonicalFill(fill, fact_identity),
             .reconciliation_started => try self.trace.append(.canonical_reconciliation_started, fact_identity),
-            .account_reconciliation_started => try self.trace.append(.canonical_account_reconciliation_started, fact_identity),
+            .account_reconciliation_started => {
+                try self.trace.append(.canonical_account_reconciliation_started, fact_identity);
+                self.reconciliation_started_fact = self.authoritativeBarrier();
+            },
             .instrument_definition_observed => {
                 try self.canonical_market.apply(record.event);
                 const definition = record.event.instrument_definition_observed;
@@ -2649,16 +3080,7 @@ pub const TradingShard = struct {
             .reference_price => |price| {
                 try self.canonical_market.apply(record.event);
                 if (price.kind == .mark) {
-                    const instrument = self.instrument_registry.get(price.instrument) orelse return error.UnknownInstrument;
-                    const mark_price = try std.math.mul(i128, price.price.ticks, instrument.margin.price_tick_atoms);
-                    if (price.instrument == self.instrument_identity) self.mark_price_atoms = mark_price;
-                    _ = try self.applyEconomicProjection(.{ .mark_price = .{
-                        .instrument = price.instrument,
-                        .product = instrument.product,
-                        .price_atoms = mark_price,
-                        .quantity_denominator = instrument.rules.quantity_denominator,
-                        .quantity_numerator = instrument.rules.quantity_numerator,
-                    } });
+                    try self.applySharedMark(price, record.envelope.venue);
                     try self.trace.append(.mark_price, fact_identity);
                 } else try self.trace.append(.canonical_index_price, fact_identity);
             },
@@ -2820,6 +3242,7 @@ pub const TradingShard = struct {
                     .open = false,
                 });
                 try self.trace.append(.canonical_account_reconciliation, fact_identity);
+                self.reconciliation_completed_fact = self.authoritativeBarrier();
             },
         }
         return null;
@@ -2987,13 +3410,13 @@ pub const TradingShard = struct {
         const event_type = canonical.eventType(record.event);
         const payload_digest = try canonicalPayloadDigest(record.event);
         for (self.deferred_history_admissions[0..self.deferred_history_admission_count]) |admission| {
-            if (std.meta.eql(admission.identity, record.envelope.identity) and
+            if (std.meta.eql(admission.scope, IngressScope.from(record.envelope)) and std.meta.eql(admission.identity, record.envelope.identity) and
                 (admission.event_type != record.envelope.event_type or !std.mem.eql(u8, &admission.raw_digest, &record.envelope.raw_evidence.digest) or
                     !std.mem.eql(u8, &admission.payload_digest, &payload_digest))) return error.ConflictingCanonicalIdentity;
         }
         var cursor_index: ?usize = null;
         for (self.canonical_ingress_cursors[0..self.canonical_ingress_cursor_count], 0..) |known, index| {
-            if (known.identity.stream != record.envelope.identity.stream) continue;
+            if (known.identity.stream != record.envelope.identity.stream or !std.meta.eql(known.scope, IngressScope.from(record.envelope))) continue;
             if (record.envelope.identity.sequence == known.identity.sequence) {
                 if (known.event_type != event_type or
                     !std.mem.eql(u8, &known.raw_digest, &record.envelope.raw_evidence.digest) or
@@ -3022,7 +3445,8 @@ pub const TradingShard = struct {
             break :blk index;
         };
         var hasher = Sha256.init(.{});
-        hasher.update("CanonicalIngressV1\x00");
+        hasher.update("CanonicalIngressV2\x00");
+        digestBare(&hasher, IngressScope.from(record.envelope));
         hasher.update(&self.canonical_ingress_digest);
         var encoded: [@sizeOf(u128)]u8 = undefined;
         std.mem.writeInt(u128, &encoded, record.envelope.source_fact_identity, .little);
@@ -3043,6 +3467,7 @@ pub const TradingShard = struct {
         // A proof may resolve behind later safety facts without lowering the source cursor.
         if (cursor_index == null or record.envelope.identity.sequence > self.canonical_ingress_cursors[target_index].identity.sequence)
             self.canonical_ingress_cursors[target_index] = .{
+                .scope = IngressScope.from(record.envelope),
                 .identity = record.envelope.identity,
                 .event_type = event_type,
                 .raw_digest = record.envelope.raw_evidence.digest,
@@ -3077,7 +3502,7 @@ pub const TradingShard = struct {
             .order_dispatch_result => |result| blk: {
                 const body = try self.dispatchIngressBody(record);
                 for (self.dispatch_ingress_history[0..self.dispatch_ingress_history_count]) |known| {
-                    if (std.meta.eql(known.cursor.identity, record.envelope.identity) and
+                    if (known.body.account == body.account and known.body.venue == body.venue and std.meta.eql(known.cursor.identity, record.envelope.identity) and
                         (!std.mem.eql(u8, &known.cursor.raw_digest, &record.envelope.raw_evidence.digest) or
                             !std.mem.eql(u8, &known.cursor.payload_digest, &body.canonical_digest))) return error.ConflictingCanonicalIdentity;
                 }
@@ -3427,6 +3852,7 @@ pub const TradingShard = struct {
     }
 
     fn handleOmsGroup(self: *TradingShard, input: CoreEvent, group: oms.IntentGroup) !?OrderCommand {
+        if (self.decision_domain_identity != 0) return self.handleDomainGroup(input, group);
         if (!self.genesisReady()) return error.GenesisIncomplete;
         switch (try self.oms.groupIdentityStatus(group)) {
             .duplicate => return null,
@@ -3495,6 +3921,161 @@ pub const TradingShard = struct {
         copyTradingState(self, &candidate);
 
         return null;
+    }
+
+    fn handleDomainGroup(self: *TradingShard, input: CoreEvent, original: oms.IntentGroup) !?OrderCommand {
+        switch (try self.oms.groupIdentityStatus(original)) {
+            .duplicate => return null,
+            .conflict => {
+                try self.rejectIntent(.oms_intent_conflict, original.first_intent_sequence, .intent_identity_conflict);
+                self.oms.recovery_only = true;
+                return null;
+            },
+            .fresh => {},
+        }
+        // Backpressure leaves the independent safety reserve untouched.
+        const safety = historySafetyInput(.{ .core = input });
+        const reserve: usize = if (safety) 0 else 64;
+        const opening = original.members[0].operation == .place and !original.members[0].portfolio_reduce_only and !original.members[0].venue_reduce_only;
+        const facts: usize = if (original.count > 2 or (opening and original.count != 2)) 1 else 1 + 2 * @as(usize, original.count) + @intFromBool(opening);
+        if (@as(usize, self.trace.len) + facts > self.trace.events.len - reserve or
+            @as(usize, self.oms.intent_history_count) + original.count > oms.max_intent_history - reserve or
+            @as(usize, self.oms.command_history_count) + original.count > oms.max_command_history - reserve)
+            return error.AdmissionCapacity;
+        var candidate: TradingShard = undefined;
+        copyTradingState(&candidate, self);
+        const initial_view = candidate.account_view;
+        if (initial_view != 0) candidate.exchangeAccountView(initial_view - 1);
+        candidate.admitDomainGroup(input, original) catch |err| {
+            const reason = domainAdmissionRejection(err) orelse return err;
+            if (reason == .margin_safety_gate_closed) self.oms.recovery_only = true;
+            try self.rejectSubmittedIntent(original, .strategy_intent_rejected, reason);
+            return null;
+        };
+        if (initial_view != 0) candidate.exchangeAccountView(initial_view - 1);
+        copyTradingState(self, &candidate);
+        return null;
+    }
+
+    fn checkDomainEconomicCapacity(self: *const TradingShard, group: oms.IntentGroup, opening: bool) !void {
+        // Budget one worst-case Fill per outstanding order plus independent safety space.
+        // Partial-fill streams remain bounded and require reconciliation/history maintenance.
+        const projection = &self.economic_projection;
+        const reserve: usize = if (opening) 2 else 0;
+        var fills: usize = 0;
+        var ledger: usize = if (opening) 16 else 0;
+        for (group.members[0..group.count]) |intent| {
+            if (intent.operation == .cancel) continue;
+            fills += 1;
+            const entry = self.instrumentEntry(intent.instrument) orelse return error.UnknownOmsInstrument;
+            ledger += if (entry.product == .spot) @as(usize, 16) else 12;
+        }
+        for (self.oms.orders[0..self.oms.order_count]) |order| {
+            if (order.exchange_account != self.exchange_account_identity) continue;
+            const applied = try projection.appliedCanonicalFillQuantity(order.id);
+            const obligation = if (order.reservation_active) @max(order.quantity, @max(order.confirmed_quantity, order.pending_basis_quantity)) else order.cumulative_quantity;
+            if (obligation <= applied) continue;
+            fills += 1;
+            const entry = self.instrumentEntry(order.instrument) orelse return error.UnknownOmsInstrument;
+            ledger += if (entry.product == .spot) @as(usize, 16) else 12;
+        }
+        if (@as(usize, projection.seen_count) + fills + reserve > projection.seen.len or
+            @as(usize, projection.applied_fill_count) + fills + reserve > projection.applied_fills.len or
+            @as(usize, projection.canonical_fill_evidence_count) + fills + reserve > projection.canonical_fill_evidence.len or
+            @as(usize, projection.applied_fill_total_count) + fills + reserve > projection.applied_fill_totals.len or
+            @as(usize, projection.ledger_count) + ledger > projection.ledger.len or
+            self.open_economic_fact_count + fills + reserve > self.open_economic_facts.len or
+            @as(usize, projection.portfolio.native_asset_count) + reserve > projection.portfolio.native_assets.len or
+            @as(usize, projection.exchange.native_asset_count) + reserve > projection.exchange.native_assets.len or
+            @as(usize, projection.portfolio.instrument_position_count) + (if (opening) @as(usize, group.count) + 1 else 0) > projection.portfolio.instrument_positions.len or
+            @as(usize, projection.exchange.instrument_position_count) + (if (opening) @as(usize, group.count) + 1 else 0) > projection.exchange.instrument_positions.len or
+            @as(usize, self.canonical_ingress_cursor_count) + (if (opening) @as(usize, self.secondary_account_count) + 1 else 0) > self.canonical_ingress_cursors.len or
+            @as(usize, self.deferred_history_admission_count) + (if (opening) @as(usize, 4) else 0) > self.deferred_history_admissions.len)
+            return error.AdmissionCapacity;
+    }
+
+    fn admitDomainGroup(self: *TradingShard, input: CoreEvent, original: oms.IntentGroup) !void {
+        const occupancy = @import("cycle_occupancy.zig");
+        if (original.count == 0 or original.count > occupancy.max_members) return error.InvalidCycleMembers;
+        const opening = original.members[0].operation == .place and !original.members[0].portfolio_reduce_only and !original.members[0].venue_reduce_only;
+        if (opening and original.count != occupancy.max_members) return error.InvalidCycleMembers;
+        if (!input.time_presence.monotonic or input.monotonic_time == 0 or (opening and !self.strategy_active)) return error.TradingNotAuthorized;
+        if (opening and self.oms.blocksNewSend()) return error.OmsRecoveryOnly;
+        var members: [occupancy.max_members]occupancy.Member = @splat(.{});
+        var qualified = original;
+        for (original.members[0..original.count], 0..) |intent, index| {
+            const member_opening = intent.operation == .place and !intent.portfolio_reduce_only and !intent.venue_reduce_only;
+            if (member_opening != opening or intent.strategy_instance != self.strategy_identity or
+                self.deployment.owner(intent.exchange_account, intent.instrument) != self.decision_domain_identity) return error.InvalidDomainScope;
+            members[index] = .{ .account = intent.exchange_account, .instrument = intent.instrument };
+            if (!opening) {
+                const cycle = self.cycles.owning(members[index]) orelse return error.InvalidDomainScope;
+                if (cycle.strategy != intent.strategy_instance) return error.InvalidDomainScope;
+                if (intent.operation != .place) {
+                    const order = self.oms.orderById(intent.target_order_id) orelse return error.UnknownOrder;
+                    if (order.exchange_account != intent.exchange_account or order.instrument != intent.instrument or order.strategy_instance != intent.strategy_instance) return error.InvalidDomainScope;
+                }
+            }
+            qualified.members[index].client_order_id = .{};
+        }
+        if (opening) try self.cycles.checkAvailable(members[0..original.count]);
+        for (original.members[0..original.count], 0..) |member, member_index| {
+            var seen = false;
+            for (original.members[0..member_index]) |prior| if (prior.exchange_account == member.exchange_account) {
+                seen = true;
+                break;
+            };
+            if (seen) continue;
+            const account_index: ?usize = if (member.exchange_account == self.primary_account_identity) null else self.secondaryAccountIndex(member.exchange_account) orelse return error.InvalidDomainScope;
+            if (account_index) |index| self.exchangeAccountView(index);
+            {
+                defer if (account_index) |index| self.exchangeAccountView(index);
+                if (opening and (!self.genesisReady() or self.risk_lease_allocation == null or self.risk_lease_valid_through_barrier < self.authoritativeBarrier())) return error.TradingNotAuthorized;
+                var subset: oms.IntentGroup = .{ .first_intent_sequence = original.first_intent_sequence, .policy = original.policy, .count = 0 };
+                var indices: [occupancy.max_members]usize = undefined;
+                for (qualified.members[0..qualified.count], 0..) |intent, index| if (intent.exchange_account == member.exchange_account) {
+                    indices[subset.count] = index;
+                    subset.members[subset.count] = intent;
+                    if (input.payload == .external_intent_group) {
+                        const configured = self.instrumentEntry(intent.instrument) orelse return error.UnknownOmsInstrument;
+                        subset.members[subset.count].limit_price.rules_version = configured.rules.version;
+                        subset.members[subset.count].limit_price.ticks = try priceTicks(try self.abiPriceAtoms(std.math.cast(i64, intent.limit_price.ticks) orelse return error.Overflow, configured.rules.settlement_asset), configured.margin.price_tick_atoms);
+                    }
+                    subset.count += 1;
+                };
+                var creates_fill = false;
+                for (subset.members[0..subset.count]) |intent| if (intent.operation != .cancel) {
+                    creates_fill = true;
+                };
+                if (creates_fill) try self.checkDomainEconomicCapacity(subset, opening);
+                const result = try self.qualifyOmsGroup(subset);
+                for (result.group.members[0..result.group.count], 0..) |intent, index| qualified.members[indices[index]] = intent;
+            }
+        }
+        var content = Sha256.init(.{});
+        for (original.members[0..original.count]) |intent| content.update(&oms.intentFingerprint(intent, original.count));
+        var content_digest: [32]u8 = undefined;
+        content.final(&content_digest);
+        if (opening) {
+            try self.trace.append(.cycle_occupied, original.first_intent_sequence);
+            try self.cycles.establish(.{ .strategy = self.strategy_identity, .first_sequence = original.first_intent_sequence, .portfolio = self.deployment.domain(self.decision_domain_identity).?.portfolio, .configuration_digest = self.deployment.header.?.expected_digest, .content_digest = content_digest, .fact_sequence = self.authoritativeBarrier(), .members = members, .count = original.count });
+        }
+        var refs: [oms.max_group_members]oms.RiskFactRefs = @splat(.{});
+        for (qualified.members[0..qualified.count], 0..) |intent, index| {
+            const account_index: ?usize = if (intent.exchange_account == self.primary_account_identity) null else self.secondaryAccountIndex(intent.exchange_account).?;
+            if (account_index) |view| self.exchangeAccountView(view);
+            defer if (account_index) |view| self.exchangeAccountView(view);
+            try self.trace.append(.risk_accepted, intent.intent_sequence);
+            refs[index].decision = self.authoritativeBarrier();
+            try self.trace.append(.risk_reservation_created, intent.intent_sequence);
+            refs[index].reservation = self.authoritativeBarrier();
+            refs[index].authority = try self.dispatchAuthorityRefs(intent.instrument, input.monotonic_time, refs[index].decision);
+            const cycle = self.cycles.owning(members[index]).?;
+            refs[index].authority.cycle = .{ .identity = cycle.first_sequence, .version = 1, .barrier = cycle.fact_sequence };
+        }
+        try self.oms.applyQualifiedGroup(qualified, original, refs[0..qualified.count]);
+        try self.trace.append(.oms_intent_group, original.first_intent_sequence);
+        self.last_reject_reason = .none;
     }
 
     fn handleOmsDispatch(self: *TradingShard, input: CoreEvent, batch: oms.DispatchBatch) !?OrderCommand {
@@ -3578,6 +4159,10 @@ pub const TradingShard = struct {
 
     fn finalizeHistoryCandidate(self: *TradingShard, input: CoreEvent) !?OrderCommand {
         const pending = self.pending_history_candidate orelse return error.InvalidHistoryCandidate;
+        if (self.account_view == 0 and self.decision_domain_identity != 0) {
+            const original = try decodeStableInput(pending.originalRecord());
+            if (self.scopedAccount(original)) |account| if (self.secondaryAccountIndex(account)) |index| return self.finalizeAccountHistoryCandidate(input, index);
+        }
         const root = self.business_history_root orelse return error.InvalidHistoryCandidate;
         const verdict = try pending.finalize(&input.payload.history_candidate_verified, root);
         const original = try decodeStableInput(pending.originalRecord());
@@ -3666,6 +4251,16 @@ pub const TradingShard = struct {
         return result.order_command;
     }
 
+    noinline fn finalizeAccountHistoryCandidate(self: *TradingShard, input: CoreEvent, index: usize) anyerror!?OrderCommand {
+        self.exchangeAccountView(index);
+        defer self.exchangeAccountView(index);
+        const count = self.open_economic_fact_count;
+        const cursor = self.reconciliation_cursor;
+        const result = try self.finalizeHistoryCandidate(input);
+        try self.finalizeEconomicInput(count, cursor, try acceptedOriginalDigest(.{ .core = input }));
+        return result;
+    }
+
     fn applyVersionActivation(self: *TradingShard, activation: shard_event.VersionActivationEvent, identity: u64, verified: bool) !void {
         if (self.business_history_root != null and !verified) return error.ControlHistoryProofRequired;
         if (self.strategyFenced(activation.new_strategy_instance)) return error.StrategyCutoverFenced;
@@ -3691,6 +4286,7 @@ pub const TradingShard = struct {
     }
 
     fn handle(self: *TradingShard, input: CoreEvent) !?OrderCommand {
+        if (self.decision_domain_identity != 0) try self.validateAccountScope(input);
         if (input.payload == .version_activation_history_verified) {
             const verified = input.payload.version_activation_history_verified;
             var original = input;
@@ -3746,27 +4342,27 @@ pub const TradingShard = struct {
         if (input.payload == .history_candidate_verified) return self.handleHistoryVerified(input);
         if (input.payload == .forced_archive_committed) {
             const commit = input.payload.forced_archive_committed;
-            const origin: history.Origin = .{ .stream = .{ .domain = .decision_log, .id = (self.checkpoint orelse return error.OrderArchiveOriginUnavailable).stream }, .account = self.exchange_account_identity };
+            const origin = try self.businessOrigin();
             const qualification = try self.prepareForcedArchive(commit.forced_id, origin, &commit.evidence);
             if (!std.mem.eql(u8, &commit.qualification_digest, &qualification.digest())) return error.InvalidForcedArchiveCommit;
             try self.economic_projection.commitForcedArchive(qualification, commit.receipt, self.business_history_root);
             self.business_history_root = commit.receipt.root;
             self.last_forced_archive = commit;
-            self.last_forced_archive_input = .{ .identity = input.identity, .times = stableTimes(.{ .core = input }) };
+            self.last_forced_archive_input = .{ .identity = input.identity, .times = stableTimes(.{ .core = input }), .account_scope = input.account_scope };
             self.last_business_archive_kind = .forced;
             try self.trace.append(.forced_archive_committed, input.identity);
             return null;
         }
         if (input.payload == .control_archive_committed) {
             const commit = input.payload.control_archive_committed;
-            const origin: history.Origin = .{ .stream = .{ .domain = .decision_log, .id = (self.checkpoint orelse return error.OrderArchiveOriginUnavailable).stream }, .account = self.exchange_account_identity };
+            const origin = try self.businessOrigin();
             const qualification = try @import("control_history_batch.zig").qualify(self, origin, self.authoritativeBarrier());
             if (!std.mem.eql(u8, &commit.qualification_digest, &qualification.digest()) or commit.receipt.root.barrier != qualification.barrier) return error.InvalidControlArchiveCommit;
             _ = try history.verifyReceipt(commit.receipt, origin, qualification.digest(), self.business_history_root);
             try @import("control_history_batch.zig").release(self, qualification);
             self.business_history_root = commit.receipt.root;
             self.last_control_archive = commit;
-            self.last_control_archive_input = .{ .identity = input.identity, .times = stableTimes(.{ .core = input }) };
+            self.last_control_archive_input = .{ .identity = input.identity, .times = stableTimes(.{ .core = input }), .account_scope = input.account_scope };
             self.last_business_archive_kind = .control;
             try self.trace.append(.control_archive_committed, input.identity);
             return null;
@@ -3774,22 +4370,21 @@ pub const TradingShard = struct {
         if (input.payload == .funding_archive_committed) {
             const commit = input.payload.funding_archive_committed;
             if (self.pending_history_candidate != null or self.pending_safety_history_candidate != null or self.deferred_history_admission_count != 0) return error.HistoryLookupDeferred;
-            const stream = (self.checkpoint orelse return error.OrderArchiveOriginUnavailable).stream;
-            const origin: history.Origin = .{ .stream = .{ .domain = .decision_log, .id = stream }, .account = self.exchange_account_identity };
+            const origin = try self.businessOrigin();
             const qualification = try self.prepareFundingArchive(commit.funding_id, origin, self.authoritativeBarrier());
             if (!std.mem.eql(u8, &commit.qualification_digest, &qualification.digest())) return error.InvalidFundingArchiveCommit;
             try self.economic_projection.commitFundingArchive(qualification, commit.receipt, self.business_history_root);
             self.business_history_root = commit.receipt.root;
             self.last_funding_archive = commit;
-            self.last_funding_archive_input = .{ .identity = input.identity, .times = stableTimes(.{ .core = input }) };
+            self.last_funding_archive_input = .{ .identity = input.identity, .times = stableTimes(.{ .core = input }), .account_scope = input.account_scope };
             self.last_business_archive_kind = .funding;
+            self.last_business_archive_account = self.exchange_account_identity;
             try self.trace.append(.funding_archive_committed, input.identity);
             return null;
         }
         if (input.payload == .reconciliation_archive_committed) {
             const commit = input.payload.reconciliation_archive_committed;
-            const stream = (self.checkpoint orelse return error.OrderArchiveOriginUnavailable).stream;
-            const origin: history.Origin = .{ .stream = .{ .domain = .decision_log, .id = stream }, .account = self.exchange_account_identity };
+            const origin = try self.businessOrigin();
             const qualification = try self.prepareReconciliationWindowArchive(commit.window_id, origin, self.authoritativeBarrier());
             if (!std.mem.eql(u8, &commit.qualification_digest, &qualification.digest()) or commit.receipt.root.barrier != qualification.barrier) return error.InvalidReconciliationArchiveCommit;
             _ = try history.verifyReceipt(commit.receipt, origin, qualification.digest(), self.business_history_root);
@@ -3810,16 +4405,18 @@ pub const TradingShard = struct {
             self.economic_projection.seen_count = kept;
             self.business_history_root = commit.receipt.root;
             self.last_reconciliation_archive = commit;
-            self.last_reconciliation_archive_input = .{ .identity = input.identity, .times = stableTimes(.{ .core = input }) };
+            self.last_reconciliation_archive_input = .{ .identity = input.identity, .times = stableTimes(.{ .core = input }), .account_scope = input.account_scope };
             self.last_business_archive_kind = .reconciliation;
+            self.last_business_archive_account = self.exchange_account_identity;
+            self.reconciliation_archive = commit;
             try self.trace.append(.reconciliation_archive_committed, input.identity);
             return null;
         }
         if (input.payload == .fill_archive_committed) {
+            if (self.decision_domain_identity != 0 and self.cycles.count != 0) return error.FillArchivePinned;
             const commit = input.payload.fill_archive_committed;
             if (self.pending_history_candidate != null or self.pending_safety_history_candidate != null or self.deferred_history_admission_count != 0) return error.HistoryLookupDeferred;
-            const stream = (self.checkpoint orelse return error.OrderArchiveOriginUnavailable).stream;
-            const origin: history.Origin = .{ .stream = .{ .domain = .decision_log, .id = stream }, .account = self.exchange_account_identity };
+            const origin = try self.businessOrigin();
             const qualification = try self.economic_projection.prepareFillArchive(commit.fill_id, origin, self.authoritativeBarrier());
             if (!std.mem.eql(u8, &commit.qualification_digest, &qualification.digest())) return error.InvalidFillArchiveCommit;
             try self.economic_projection.commitFillArchive(qualification, commit.receipt, self.business_history_root);
@@ -3831,6 +4428,7 @@ pub const TradingShard = struct {
         }
         if (input.payload == .order_archive_committed) {
             const commit = input.payload.order_archive_committed;
+            if (self.cyclePinsOrder(commit.order_id)) return error.OrderArchivePinned;
             if (self.hasDeferredOrderHistory(commit.order_id)) return error.OrderArchivePinned;
             const qualification = try self.oms.prepareOrderArchive(commit.order_id, try self.economic_projection.appliedCanonicalFillQuantity(commit.order_id), self.exchange_account_identity);
             for (self.economic_projection.applied_fills[0..self.economic_projection.applied_fill_count]) |fill| if (fill.fill.order_id == commit.order_id) return error.OrderArchivePinned;
@@ -3891,6 +4489,47 @@ pub const TradingShard = struct {
         }
         switch (input.payload) {
             .checkpoint_committed => unreachable,
+            .deployment_configuration => |configuration| {
+                if (self.account_configured or self.strategy_active or self.oms.order_count != 0) return error.ImmutableDeploymentConfiguration;
+                try self.deployment.apply(configuration);
+                try self.trace.append(if (configuration == .seal) .deployment_configuration_sealed else .deployment_configuration_staged, input.identity);
+                return null;
+            },
+            .decision_domain_bound => |binding| {
+                if (!self.deployment.sealed or self.decision_domain_identity != 0 or input.account_scope != null or self.account_configured or self.operational_state.initialized) return error.InvalidDecisionDomain;
+                const domain = self.deployment.domain(binding.domain) orelse return error.InvalidDecisionDomain;
+                if (domain.stream != binding.stream) return error.InvalidDecisionDomain;
+                const record = try self.deployment.bindingRecord(binding.domain, binding.stream);
+                const receipt = binding.receipt orelse return error.DomainHistoryBindingRequired;
+                const proof = binding.proof orelse return error.DomainHistoryBindingRequired;
+                const root = try history.verifyReceipt(receipt, record.origin(), record.digest(), null);
+                if (root.barrier != self.authoritativeBarrier() or root.epoch != record.epoch or root.generation != 1 or self.business_history_root != null) return error.InvalidDecisionDomain;
+                const request: history.LookupRequest = .{ .pending_id = 1, .key = .{ .origin = record.origin(), .identity = .{ .deployment_configuration = record.deployment } }, .candidate_payload_digest = record.digest(), .original_input_digest = record.digest(), .root_digest = root.root_digest, .barrier = root.barrier, .epoch = root.epoch };
+                if (try history.verifyResult(request, &proof, root) != .same) return error.DomainHistoryBindingRequired;
+                self.business_history_root = root;
+                self.domain_binding_receipt = receipt;
+                self.last_business_archive_kind = .deployment;
+                self.decision_domain_identity = binding.domain;
+                self.decision_stream_identity = binding.stream;
+                self.operational_state = operational.State.init(binding.domain);
+                for (self.deployment.accounts[0..self.deployment.account_count]) |account| {
+                    var owned = false;
+                    for (self.deployment.ownerships[0..self.deployment.ownership_count]) |key| if (key.account == account.identity and key.domain == binding.domain) {
+                        owned = true;
+                        break;
+                    };
+                    if (!owned) continue;
+                    if (self.primary_account_identity == 0) self.primary_account_identity = account.identity else {
+                        if (self.secondary_account_count == self.secondary_accounts.len) return error.DeploymentCapacity;
+                        self.secondary_accounts[self.secondary_account_count].identity = account.identity;
+                        self.secondary_account_count += 1;
+                    }
+                }
+                if (self.primary_account_identity == 0) return error.InvalidDecisionDomain;
+                try self.trace.append(.decision_domain_bound, input.identity);
+                self.domain_binding_fact_sequence = self.authoritativeBarrier();
+                return null;
+            },
             .order_archive_committed, .fill_archive_committed, .funding_archive_committed, .reconciliation_archive_committed, .control_archive_committed, .forced_archive_committed, .version_activation_history_verified => unreachable,
             .history_candidate_started, .history_candidate_verified, .history_safety_candidate_verified => unreachable,
             .asset_definition_activated => |definition| return self.handleAssetDefinition(input, definition),
@@ -4121,6 +4760,7 @@ pub const TradingShard = struct {
                 self.coordinator_binding_fact = self.authoritativeBarrier();
             },
             .account_configuration => |configuration| {
+                if (self.deployment.header != null and (!self.deployment.sealed or self.decision_domain_identity == 0 or input.account_scope != configuration.exchange_account_identity)) return error.DeploymentConfigurationRequired;
                 if (self.margin_rules_version == 0 or configuration.exchange_account_identity == 0 or
                     self.account_configured)
                     return error.InvalidAccountConfiguration;
@@ -4283,6 +4923,14 @@ pub const TradingShard = struct {
                 try self.trace.append(.primary_lease_granted, input.identity);
             },
             .risk_lease_granted => |lease| {
+                if (self.decision_domain_identity != 0) {
+                    const binding = lease.allocation orelse return error.UnverifiedRiskLeaseAllocation;
+                    if (binding.account != self.exchange_account_identity or binding.asset != self.economic_projection.settlement_asset or binding.domain != self.decision_domain_identity or binding.stream != self.decision_stream_identity or
+                        !std.mem.eql(u8, &binding.configuration_digest, &self.deployment.header.?.expected_digest)) return error.UnverifiedRiskLeaseAllocation;
+                    const limit = self.deployment.sliceLimit(binding.account, binding.asset, binding.domain) orelse return error.UnverifiedRiskLeaseAllocation;
+                    if (lease.amount_atoms > limit or lease.amount_atoms < 0 or (self.risk_lease_version != 0 and lease.amount_atoms > self.risk_lease_atoms)) return error.RiskLeaseOversubscribed;
+                    if (lease.version == self.risk_lease_version and !std.meta.eql(lease.allocation, self.risk_lease_allocation)) return error.RiskLeaseIdentityConflict;
+                } else if (lease.allocation != null) return error.UnverifiedRiskLeaseAllocation;
                 const lease_identity = if (lease.lease_identity == 0) input.identity else lease.lease_identity;
                 if (self.fencing_token == 0 or lease.version == 0 or
                     lease.version < self.risk_lease_version)
@@ -4292,11 +4940,17 @@ pub const TradingShard = struct {
                         lease.valid_through_barrier != self.risk_lease_valid_through_barrier or
                         lease.amount_atoms != self.risk_lease_atoms or lease.open != (self.risk_lease_atoms > 0))
                         return error.RiskLeaseIdentityConflict;
+                    if (self.decision_domain_identity != 0 and
+                        ((if (lease.strategy_limit_atoms == 0) lease.amount_atoms else lease.strategy_limit_atoms) != self.strategy_limit_atoms or
+                            (if (lease.portfolio_limit_atoms == 0) lease.amount_atoms else lease.portfolio_limit_atoms) != self.portfolio_limit_atoms or
+                            (if (lease.exchange_account_limit_atoms == 0) lease.amount_atoms else lease.exchange_account_limit_atoms) != self.exchange_account_limit_atoms or
+                            (if (lease.global_limit_atoms == 0) lease.amount_atoms else lease.global_limit_atoms) != self.global_limit_atoms)) return error.RiskLeaseIdentityConflict;
                     return null;
                 }
                 if (lease.open and lease.amount_atoms <= 0) return error.InvalidRiskLease;
                 if (!lease.open and lease.amount_atoms != 0) return error.InvalidRiskLease;
                 self.risk_lease_identity = lease_identity;
+                self.risk_lease_allocation = lease.allocation;
                 self.risk_lease_version = lease.version;
                 self.risk_lease_valid_through_barrier = lease.valid_through_barrier;
                 self.risk_lease_atoms = lease.amount_atoms;
@@ -4320,6 +4974,7 @@ pub const TradingShard = struct {
                 try self.recalculateRisk(false);
                 try self.assertClosures();
                 try self.trace.append(.risk_lease_granted, input.identity);
+                self.risk_lease_fact_sequence = self.authoritativeBarrier();
             },
             .mark_price => |price| {
                 if (price.price_atoms <= 0) return error.InvalidMarkPrice;
@@ -4342,7 +4997,7 @@ pub const TradingShard = struct {
                 try self.assertClosures();
                 try self.trace.append(.mark_price, input.identity);
                 for (self.oms.orders[0..self.oms.order_count]) |order|
-                    if (order.state == .filled) {
+                    if (order.state == .filled and (self.decision_domain_identity == 0 or order.exchange_account == self.exchange_account_identity)) {
                         self.economic_projection.ledger_summary.projections_complete = true;
                         break;
                     };
@@ -4370,7 +5025,7 @@ pub const TradingShard = struct {
                     .limit_price_micros = request.limit_price_micros,
                 }, if (input.time_presence.monotonic) input.monotonic_time else 0, null);
             },
-            .external_intent_group => |candidate| return self.submitHostGroup(candidate),
+            .external_intent_group => |candidate| return self.submitHostGroup(input, candidate),
             .external_order_intent => |intent| {
                 const previous_cursor = self.strategy_cursor;
                 const trace_before = self.trace.len;
@@ -4451,7 +5106,8 @@ pub const TradingShard = struct {
                 }
             },
             .funding_settlement => |funding| {
-                const instrument_config = self.singleProductEntry(.isolated_linear_usdt) orelse return error.UnknownOmsInstrument;
+                const instrument_config = (if (funding.instrument != 0) self.instrumentEntry(funding.instrument) else self.singleProductEntry(.isolated_linear_usdt)) orelse return error.UnknownOmsInstrument;
+                if (instrument_config.product != .isolated_linear_usdt) return error.InvalidEconomicFact;
                 var source: economics_module.FundingSource = .{
                     .core_event_identity = input.identity,
                     .core_times = .{ .source = input.source_time, .receive = input.receive_time, .monotonic = input.monotonic_time, .wall = input.wall_time, .presence = input.time_presence },
@@ -4553,6 +5209,32 @@ fn zeroUnused(comptime T: type, storage: []T) void {
     @memset(storage, std.mem.zeroes(T));
 }
 
+fn domainAdmissionRejection(err: anyerror) ?RejectReason {
+    return switch (err) {
+        error.InvalidDomainScope, error.InvalidCycleMembers, error.UnknownOmsInstrument, error.GenesisIncomplete, error.UnknownOrder, error.OrderAccountMismatch, error.OrderNotMutable, error.StaleOrderRevision, error.InstrumentRulesInactive => .invalid_scope,
+        error.InstrumentOccupied => .instrument_occupied,
+        error.CycleCapacity => .cycle_capacity_exhausted,
+        error.AdmissionCapacity, error.OrderCapacityExceeded, error.TerminalCapacityExceeded, error.CommandCapacityExceeded, error.SafetyGateSetFull => .admission_capacity_exhausted,
+        error.IdentitySetFull => .identity_capacity_exhausted,
+        error.Overflow => .arithmetic_overflow,
+        error.UnsupportedOrderSpec, error.InvalidRiskInput, error.InvalidOrderSpec, error.AssetPrecisionUnsupported, error.QuantityOutOfRange, error.PriceOutOfRange, error.AssetAmountOutOfRange => .unsupported_order_spec,
+        error.CapabilityUnsupported => .capability_unsupported,
+        error.TradingNotAuthorized, error.DeRiskTargetViolation, error.StrategyCutoverFenced, error.UncertainOrderBlocksSend, error.OmsRecoveryOnly => .authorization_closed,
+        error.MarketDataGap, error.MissingInstrumentDefinition, error.InvalidMarkPrice => .market_data_gap,
+        error.MarginSafetyGateClosed => .margin_safety_gate_closed,
+        error.StrategyLimitExceeded => .strategy_limit_exceeded,
+        error.VirtualPortfolioLimitExceeded => .portfolio_limit_exceeded,
+        error.DecisionDomainLimitExceeded, error.RiskLeaseExceeded => .decision_domain_limit_exceeded,
+        error.ExchangeAccountLimitExceeded => .exchange_account_limit_exceeded,
+        error.GlobalLimitExceeded => .global_limit_exceeded,
+        error.PortfolioOpeningGateClosed => .portfolio_opening_gate_closed,
+        error.ExchangeOpeningGateClosed => .exchange_opening_gate_closed,
+        error.InsufficientSpotAsset => .insufficient_spot_asset,
+        error.PortfolioReduceOnlyViolation => .portfolio_reduce_only_violation,
+        else => null,
+    };
+}
+
 /// Emits precisely the old canonicalized snapshot view without copying Core
 /// or clearing arrays whose unused contents are not authoritative.
 const CoreSnapshotEncodingPolicy = struct {
@@ -4561,7 +5243,7 @@ const CoreSnapshotEncodingPolicy = struct {
     }
     pub fn counter(value: anytype, comptime name: []const u8) usize {
         if (comptime fieldIsZero(@TypeOf(value.*), name)) return 0;
-        if (comptime @TypeOf(value.*) == TradingShard and std.mem.eql(u8, name, "open_economic_fact_count")) return @intCast(@min(value.open_economic_fact_count, value.open_economic_facts.len));
+        if (comptime (@TypeOf(value.*) == TradingShard or @TypeOf(value.*) == AccountState) and std.mem.eql(u8, name, "open_economic_fact_count")) return @intCast(@min(value.open_economic_fact_count, value.open_economic_facts.len));
         return @field(value.*, name);
     }
     fn mappedTail(comptime name: []const u8, comptime mappings: anytype) ?[]const u8 {
@@ -4569,7 +5251,8 @@ const CoreSnapshotEncodingPolicy = struct {
         return null;
     }
     pub fn tailCounter(comptime T: type, comptime name: []const u8) ?[]const u8 {
-        if (T == TradingShard) return mappedTail(name, .{ .{ "fenced_strategy_instances", "fenced_strategy_count" }, .{ "canonical_ingress_cursors", "canonical_ingress_cursor_count" }, .{ "open_economic_facts", "open_economic_fact_count" }, .{ "economic_baseline_balances", "economic_baseline_balance_count" } });
+        if (T == AccountState) return mappedTail(name, .{ .{ "open_economic_facts", "open_economic_fact_count" }, .{ "economic_baseline_balances", "economic_baseline_balance_count" } });
+        if (T == TradingShard) return mappedTail(name, .{ .{ "secondary_accounts", "secondary_account_count" }, .{ "fenced_strategy_instances", "fenced_strategy_count" }, .{ "canonical_ingress_cursors", "canonical_ingress_cursor_count" }, .{ "open_economic_facts", "open_economic_fact_count" }, .{ "economic_baseline_balances", "economic_baseline_balance_count" } });
         if (T == ReconciliationCursor) return mappedTail(name, .{.{ "balances", "balance_count" }});
         if (T == @FieldType(TradingShard, "asset_registry")) return mappedTail(name, .{.{ "entries", "count" }});
         if (T == @FieldType(TradingShard, "instrument_registry")) return mappedTail(name, .{.{ "entries", "count" }});
@@ -4584,6 +5267,11 @@ const CoreSnapshotEncodingPolicy = struct {
         return null;
     }
     pub fn zeroValue(comptime T: type) T {
+        if (T == AccountPartition) {
+            var partition: AccountPartition = .{};
+            canonicalizeAccountLocalState(&partition.state);
+            return partition;
+        }
         if (T == @typeInfo(@FieldType(@FieldType(TradingShard, "canonical_account"), "seen")).array.child) return .{
             .identity = 0,
             .exchange_account = 0,
@@ -4611,13 +5299,14 @@ const CoreSnapshotEncodingPolicy = struct {
 };
 
 fn canonicalizeSnapshotState(shard: *TradingShard) void {
+    for (shard.secondary_accounts[shard.secondary_account_count..]) |*partition| partition.* = .{};
+    for (&shard.secondary_accounts) |*partition| canonicalizeAccountLocalState(&partition.state);
     inline for (.{ "pending_history_candidate", "pending_safety_history_candidate" }) |field| {
         if (@field(shard, field)) |*pending| {
             if (pending.original_len <= pending.original_bytes.len) @memset(pending.original_bytes[pending.original_len..], 0);
         }
     }
     zeroUnused(asset_registry.Entry, shard.asset_registry.entries[shard.asset_registry.count..]);
-    zeroUnused(instrument_registry.Entry, shard.instrument_registry.entries[shard.instrument_registry.count..]);
     zeroUnused(market_projection.InstrumentProjection, shard.canonical_market.entries[shard.canonical_market.count..]);
     zeroUnused(Fact, shard.trace.events[shard.trace.len..]);
     zeroUnused(Fact, shard.trace.pinned[shard.trace.pinned_len..]);
@@ -4636,6 +5325,18 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
     zeroUnused(operational.SafetyGateChange, shard.operational_state.gates[shard.operational_state.gate_count..]);
     zeroUnused(@TypeOf(shard.operational_state.command_history[0]), shard.operational_state.command_history[shard.operational_state.command_count..]);
     zeroUnused(operational.Latch, shard.operational_state.latches[shard.operational_state.latch_count..]);
+    canonicalizeAccountLocalState(shard);
+    zeroUnused(u128, shard.fenced_strategy_instances[shard.fenced_strategy_count..]);
+    for (shard.canonical_ingress_cursors[shard.canonical_ingress_cursor_count..]) |*identity| identity.* = .{
+        .identity = .{ .stream = 0, .sequence = 0 },
+        .event_type = .order_dispatch_result,
+        .raw_digest = @splat(0),
+        .payload_digest = @splat(0),
+    };
+}
+
+fn canonicalizeAccountLocalState(shard: anytype) void {
+    zeroUnused(instrument_registry.Entry, shard.instrument_registry.entries[shard.instrument_registry.count..]);
     zeroUnused(u64, shard.economic_projection.reconciliation_break_identities[shard.economic_projection.reconciliation_break_count..]);
     zeroUnused(@TypeOf(shard.economic_projection.seen[0]), shard.economic_projection.seen[shard.economic_projection.seen_count..]);
     zeroUnused(economics_module.CanonicalFactEvidence, shard.economic_projection.canonical_fill_evidence[shard.economic_projection.canonical_fill_evidence_count..]);
@@ -4658,7 +5359,6 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
     for (shard.economic_projection.ledger[0..shard.economic_projection.ledger_count]) |*transaction|
         zeroUnused(economics_module.LedgerPosting, transaction.postings[transaction.posting_count..]);
     zeroUnused(economics_module.LedgerTransaction, shard.economic_projection.ledger[shard.economic_projection.ledger_count..]);
-    zeroUnused(u128, shard.fenced_strategy_instances[shard.fenced_strategy_count..]);
     for (shard.canonical_account.seen[shard.canonical_account.seen_count..]) |*observation| observation.* = .{
         .identity = 0,
         .exchange_account = 0,
@@ -4678,12 +5378,6 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
     zeroUnused(canonical.AccountBalance, shard.canonical_account.balances[shard.canonical_account.balance_count..]);
     zeroUnused(canonical.AccountPosition, shard.canonical_account.positions[shard.canonical_account.position_count..]);
     zeroUnused(canonical.AccountMargin, shard.canonical_account.margins[shard.canonical_account.margin_count..]);
-    for (shard.canonical_ingress_cursors[shard.canonical_ingress_cursor_count..]) |*identity| identity.* = .{
-        .identity = .{ .stream = 0, .sequence = 0 },
-        .event_type = .order_dispatch_result,
-        .raw_digest = @splat(0),
-        .payload_digest = @splat(0),
-    };
 }
 
 fn validateArchiveCommitInput(shard: *const TradingShard, original: ?ArchiveCommitInput, barrier: u64, kind: EventKind, payload: CorePayload) !void {
@@ -4691,12 +5385,55 @@ fn validateArchiveCommitInput(shard: *const TradingShard, original: ?ArchiveComm
     const sequence = std.math.add(u64, barrier, 1) catch return error.InvalidSnapshotState;
     const fact = shard.trace.factAt(sequence) orelse return error.InvalidSnapshotState;
     if (fact.kind != kind or fact.identity != input.identity or !fact.input_first or input.times.presence.reserved != 0) return error.InvalidSnapshotState;
-    const reconstructed: CanonicalEvent = .{ .core = .{ .identity = input.identity, .source_time = input.times.source, .receive_time = input.times.receive, .monotonic_time = input.times.monotonic, .wall_time = input.times.wall, .time_presence = input.times.presence, .payload = payload } };
+    const reconstructed: CanonicalEvent = .{ .core = .{ .identity = input.identity, .account_scope = input.account_scope, .source_time = input.times.source, .receive_time = input.times.receive, .monotonic_time = input.times.monotonic, .wall_time = input.times.wall, .time_presence = input.times.presence, .payload = payload } };
     const digest = TradingShard.acceptedOriginalDigest(reconstructed) catch return error.InvalidSnapshotState;
     if (!std.mem.eql(u8, &digest, &fact.input_digest)) return error.InvalidSnapshotState;
 }
 
 fn validateSnapshotState(shard: *const TradingShard) !void {
+    return validateSnapshotStateInner(shard, true);
+}
+
+fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: bool) !void {
+    try shard.deployment.validateSnapshot();
+    try shard.cycles.validate();
+    for (shard.cycles.records[0..shard.cycles.count]) |cycle| {
+        const fact = shard.trace.factAt(cycle.fact_sequence) orelse return error.InvalidSnapshotState;
+        if (fact.kind != .cycle_occupied or fact.identity != cycle.first_sequence or !shard.deployment.sealed or
+            !std.mem.eql(u8, &cycle.configuration_digest, &shard.deployment.header.?.expected_digest)) return error.InvalidSnapshotState;
+        for (cycle.members[0..cycle.count]) |member|
+            if (shard.deployment.owner(member.account, member.instrument) != shard.decision_domain_identity) return error.InvalidSnapshotState;
+    }
+    if (shard.account_view != 0 or shard.secondary_account_count > shard.secondary_accounts.len) return error.InvalidSnapshotState;
+    if (validate_partitions and shard.decision_domain_identity != 0) {
+        const domain = shard.deployment.domain(shard.decision_domain_identity) orelse return error.InvalidSnapshotState;
+        if (!shard.deployment.sealed or domain.stream != shard.decision_stream_identity or shard.primary_account_identity == 0) return error.InvalidSnapshotState;
+        if (shard.account_configured and shard.exchange_account_identity != shard.primary_account_identity) return error.InvalidSnapshotState;
+        if (shard.virtual_portfolio_active and shard.portfolio_identity != domain.portfolio) return error.InvalidSnapshotState;
+        var owned_accounts: usize = 0;
+        for (shard.deployment.accounts[0..shard.deployment.account_count]) |account| {
+            for (shard.deployment.ownerships[0..shard.deployment.ownership_count]) |key| if (key.account == account.identity and key.domain == domain.identity) {
+                if (owned_accounts == 0 and account.identity != shard.primary_account_identity) return error.InvalidSnapshotState;
+                owned_accounts += 1;
+                break;
+            };
+        }
+        if (owned_accounts != @as(usize, shard.secondary_account_count) + 1) return error.InvalidSnapshotState;
+        for (shard.secondary_accounts[0..shard.secondary_account_count], 0..) |partition, index| {
+            if (partition.identity == shard.primary_account_identity or shard.deployment.account(partition.identity) == null) return error.InvalidSnapshotState;
+            if (partition.state.account_configured and partition.state.exchange_account_identity != partition.identity) return error.InvalidSnapshotState;
+            if (partition.state.virtual_portfolio_active and partition.state.portfolio_identity != domain.portfolio) return error.InvalidSnapshotState;
+            for (shard.secondary_accounts[0..index]) |prior| if (prior.identity == partition.identity) return error.InvalidSnapshotState;
+            try validateAccountPartition(shard, index);
+        }
+    }
+    if (shard.risk_lease_allocation) |binding| {
+        if (binding.account != shard.exchange_account_identity or binding.asset != shard.economic_projection.settlement_asset or binding.domain != shard.decision_domain_identity or binding.stream != shard.decision_stream_identity or !shard.deployment.sealed or
+            !std.mem.eql(u8, &binding.configuration_digest, &shard.deployment.header.?.expected_digest)) return error.InvalidSnapshotState;
+        const limit = shard.deployment.sliceLimit(binding.account, binding.asset, binding.domain) orelse return error.InvalidSnapshotState;
+        const fact = shard.trace.factAt(shard.risk_lease_fact_sequence) orelse return error.InvalidSnapshotState;
+        if (shard.risk_lease_atoms > limit or fact.kind != .risk_lease_granted) return error.InvalidSnapshotState;
+    } else if (shard.decision_domain_identity != 0 and shard.risk_lease_version != 0) return error.InvalidSnapshotState;
     if (shard.deferred_history_admission_count > shard.deferred_history_admissions.len) return error.InvalidSnapshotState;
     for (shard.deferred_history_admissions[0..shard.deferred_history_admission_count], 0..) |admission, index| {
         if (admission.identity.stream == 0 or admission.identity.sequence == 0 or admission.fact_sequence == 0 or
@@ -4708,11 +5445,12 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         if (fact.kind != .canonical_history_deferred or fact.identity != admission.identity.sequence or
             !std.mem.eql(u8, &fact.input_digest, &admission.original_input_digest) or std.mem.allEqual(u8, &admission.payload_digest, 0)) return error.InvalidSnapshotState;
         for (shard.deferred_history_admissions[0..index]) |prior|
-            if (std.meta.eql(prior.identity, admission.identity)) return error.InvalidSnapshotState;
+            if (std.meta.eql(prior.scope, admission.scope) and std.meta.eql(prior.identity, admission.identity)) return error.InvalidSnapshotState;
     }
     if (shard.dispatch_ingress_history_count > shard.dispatch_ingress_history.len) return error.InvalidSnapshotState;
     for (shard.dispatch_ingress_history[0..shard.dispatch_ingress_history_count], 0..) |entry, index| {
-        if (entry.body.command == 0 or entry.body.account != shard.exchange_account_identity or entry.cursor.identity.stream == 0 or entry.cursor.identity.sequence == 0 or
+        const account_matches = if (shard.decision_domain_identity == 0) entry.body.account == shard.exchange_account_identity else shard.deployment.account(entry.body.account) != null;
+        if (entry.body.command == 0 or !account_matches or entry.cursor.identity.stream == 0 or entry.cursor.identity.sequence == 0 or
             !std.mem.eql(u8, &entry.body.canonical_digest, &entry.cursor.payload_digest)) return error.InvalidSnapshotState;
         const expected_digest = try canonicalPayloadDigest(.{ .order_dispatch_result = .{ .command = entry.body.command, .state = entry.body.state } });
         if (!std.mem.eql(u8, &entry.body.canonical_digest, &expected_digest)) return error.InvalidSnapshotState;
@@ -4759,6 +5497,7 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         history.validateRoot(root) catch return error.InvalidSnapshotState;
         const kind = shard.last_business_archive_kind orelse return error.InvalidSnapshotState;
         const receipt = switch (kind) {
+            .deployment => shard.domain_binding_receipt orelse return error.InvalidSnapshotState,
             .order => (shard.last_order_archive orelse return error.InvalidSnapshotState).receipt,
             .fill => (shard.last_fill_archive orelse return error.InvalidSnapshotState).receipt,
             .forced => (shard.last_forced_archive orelse return error.InvalidSnapshotState).receipt,
@@ -4767,6 +5506,7 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
             .reconciliation => (shard.last_reconciliation_archive orelse return error.InvalidSnapshotState).receipt,
         };
         const qualification_digest = switch (kind) {
+            .deployment => (try shard.deployment.bindingRecord(shard.decision_domain_identity, shard.decision_stream_identity)).digest(),
             .order => shard.last_order_archive.?.qualification_digest,
             .fill => shard.last_fill_archive.?.qualification_digest,
             .forced => shard.last_forced_archive.?.qualification_digest,
@@ -4774,9 +5514,13 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
             .funding => shard.last_funding_archive.?.qualification_digest,
             .reconciliation => shard.last_reconciliation_archive.?.qualification_digest,
         };
-        const checkpoint = shard.checkpoint orelse return error.InvalidSnapshotState;
+        const stream = if (shard.checkpoint) |checkpoint| checkpoint.stream else if (kind == .deployment) shard.decision_stream_identity else return error.InvalidSnapshotState;
+        const origin_matches = if (shard.decision_domain_identity != 0)
+            std.meta.eql(root.origin, (try shard.deployment.bindingRecord(shard.decision_domain_identity, shard.decision_stream_identity)).origin())
+        else
+            root.origin.scope == .account and root.origin.account == shard.exchange_account_identity;
         if (!std.meta.eql(root, receipt.root) or root.origin.stream.domain != .decision_log or
-            root.origin.stream.id != checkpoint.stream or root.origin.account != shard.exchange_account_identity or
+            root.origin.stream.id != stream or !origin_matches or
             root.barrier >= shard.authoritativeBarrier() or
             !std.mem.eql(u8, &root.qualification_digest, &qualification_digest)) return error.InvalidSnapshotState;
         if (shard.last_order_archive) |commit| if (shard.oms.orderById(commit.order_id) != null) return error.InvalidSnapshotState;
@@ -4800,7 +5544,7 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         try validateArchiveCommitInput(shard, shard.last_reconciliation_archive_input, commit.receipt.root.barrier, .reconciliation_archive_committed, .{ .reconciliation_archive_committed = commit });
     } else if (shard.last_reconciliation_archive_input != null) return error.InvalidSnapshotState;
     if (shard.reconciliation_cursor) |cursor| {
-        const committed = shard.last_reconciliation_archive orelse return error.InvalidSnapshotState;
+        const committed = shard.reconciliation_archive orelse return error.InvalidSnapshotState;
         const total = shard.totalEconomicFactCount() catch return error.InvalidSnapshotState;
         if (cursor.identity != committed.window_id or cursor.through_utc_ns < shard.economic_baseline_utc_ns or
             cursor.balance_count == 0 or cursor.balance_count > cursor.balances.len or cursor.closed_economic_fact_count > total or
@@ -4818,7 +5562,7 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
             if (!shard.reconciliationClosingMatches(evidence)) return error.InvalidSnapshotState;
         }
     } else {
-        if (shard.last_reconciliation_archive != null or shard.open_economic_fact_count != (shard.totalEconomicFactCount() catch return error.InvalidSnapshotState))
+        if (shard.reconciliation_archive != null or shard.open_economic_fact_count != (shard.totalEconomicFactCount() catch return error.InvalidSnapshotState))
             return error.InvalidSnapshotState;
     }
     if (shard.open_economic_commitment_sequence != 0) {
@@ -4984,6 +5728,14 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
                 return error.InvalidSnapshotState;
         }
         const refs = command.authority;
+        if (shard.decision_domain_identity != 0) {
+            const order = shard.oms.orderById(command.order_id) orelse return error.InvalidSnapshotState;
+            if (order.exchange_account != refs.exchange_account or refs.decision_domain != shard.decision_domain_identity or
+                shard.deployment.owner(refs.exchange_account, command.instrument) != shard.decision_domain_identity or
+                !std.mem.eql(u8, &refs.configuration_digest, &shard.deployment.header.?.expected_digest)) return error.InvalidSnapshotState;
+            const cycle = shard.cycles.find(command.strategy_instance, std.math.cast(u64, refs.cycle.identity) orelse return error.InvalidSnapshotState) orelse return error.InvalidSnapshotState;
+            if (cycle.fact_sequence != refs.cycle.barrier or refs.cycle.version != 1 or cycle.portfolio != refs.virtual_portfolio) return error.InvalidSnapshotState;
+        }
         const typed_refs = .{
             .{ refs.trading_authorization, EventKind.control_command_applied },
             .{ refs.primary_lease, EventKind.primary_lease_granted },
@@ -5031,7 +5783,7 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
         if (refs.dispatch_deadline_monotonic_ns != 0 and
             (refs.deadline_barrier == 0 or refs.deadline_barrier > shard.authoritativeBarrier()))
             return error.InvalidSnapshotState;
-        if (refs.exchange_account != 0 and refs.exchange_account != shard.exchange_account_identity)
+        if (shard.decision_domain_identity == 0 and refs.exchange_account != 0 and refs.exchange_account != shard.exchange_account_identity)
             return error.InvalidSnapshotState;
         if (refs.virtual_portfolio != 0 and refs.virtual_portfolio != shard.portfolio_identity)
             return error.InvalidSnapshotState;
@@ -5041,6 +5793,7 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
     try shard.economic_projection.assertClosed();
     for (shard.economic_projection.applied_fill_totals[0..shard.economic_projection.applied_fill_total_count]) |total| {
         const order = shard.oms.orderById(total.order_id) orelse return error.InvalidSnapshotState;
+        if (shard.decision_domain_identity != 0 and order.exchange_account != shard.exchange_account_identity) return error.InvalidSnapshotState;
         if (total.quantity > order.quantity) return error.InvalidSnapshotState;
     }
     if (shard.asset_registry.get(shard.economic_projection.settlement_asset) != null)
@@ -5273,6 +6026,9 @@ fn digestOmsCommand(hasher: *Sha256, command: oms_module.Command) void {
     digestInt(hasher, u64, command.risk_decision_identity);
     digestInt(hasher, u64, command.reservation_identity);
     const refs = command.authority;
+    digestInt(hasher, u128, refs.decision_domain);
+    hasher.update(&refs.configuration_digest);
+    digestBare(hasher, refs.cycle);
     digestInt(hasher, u128, refs.exchange_account);
     digestInt(hasher, u128, refs.virtual_portfolio);
     inline for (.{ refs.trading_authorization, refs.primary_lease, refs.risk_lease, refs.capability, refs.instrument_rules, refs.margin_rules, refs.instrument_trading, refs.config }) |ref| {
@@ -5306,6 +6062,24 @@ fn stateDigestBorrowed(shard: *const TradingShard) [Sha256.digest_length]u8 {
     const spot_exchange_position = shard.spotExchangePosition();
     const ledger = shard.economic_projection.ledger_summary;
     hasher.update("StateDigestV11\x00");
+    digestInt(&hasher, u8, shard.cycles.count);
+    for (shard.cycles.records[0..shard.cycles.count]) |cycle| digestBare(&hasher, cycle);
+    if (shard.deployment.header != null) {
+        hasher.update("DeploymentConfigurationV1\x00");
+        hasher.update(&shard.deployment.contentDigest());
+        digestBool(&hasher, shard.deployment.sealed);
+        hasher.update(&shard.deployment.header.?.expected_digest);
+        digestInt(&hasher, u128, shard.decision_domain_identity);
+        digestInt(&hasher, u64, shard.decision_stream_identity);
+        digestInt(&hasher, u128, shard.primary_account_identity);
+        digestInt(&hasher, u8, shard.secondary_account_count);
+        digestBare(&hasher, shard.domain_binding_receipt);
+        digestInt(&hasher, u64, shard.domain_binding_fact_sequence);
+        for (shard.secondary_accounts[0..shard.secondary_account_count], 0..) |partition, index| {
+            digestInt(&hasher, u128, partition.identity);
+            hasher.update(&accountPartitionDigest(shard, index));
+        }
+    }
     digestInt(&hasher, u16, schema_version);
     digestBare(&hasher, shard.business_history_root);
     digestInt(&hasher, u128, shard.next_history_pending_id);
@@ -5395,9 +6169,11 @@ fn stateDigestBorrowed(shard: *const TradingShard) [Sha256.digest_length]u8 {
         inline for (.{ entry.margin.opening_buffer_bps, entry.margin.warning_buffer_bps, entry.margin.kill_buffer_bps, entry.margin.opening_liquidation_distance_ticks, entry.margin.warning_liquidation_distance_ticks, entry.margin.kill_liquidation_distance_ticks }) |value| digestInt(&hasher, i64, value);
     }
     if (shard.canonical_ingress_count != 0) {
-        hasher.update("CanonicalIngressV1\x00");
+        hasher.update("CanonicalIngressV2\x00");
         digestInt(&hasher, u64, shard.canonical_ingress_count);
         hasher.update(&shard.canonical_ingress_digest);
+        digestInt(&hasher, u8, shard.canonical_ingress_cursor_count);
+        for (shard.canonical_ingress_cursors[0..shard.canonical_ingress_cursor_count]) |cursor| digestBare(&hasher, cursor);
     }
     digestInt(&hasher, u32, shard.instrument_rules_version);
     digestInt(&hasher, u128, shard.instrument_identity);
@@ -5484,6 +6260,7 @@ fn stateDigestBorrowed(shard: *const TradingShard) [Sha256.digest_length]u8 {
     digestInt(&hasher, u16, shard.oms.order_count);
     for (shard.oms.orders[0..shard.oms.order_count]) |order| {
         digestInt(&hasher, u64, order.id);
+        digestInt(&hasher, u128, order.exchange_account);
         if (order.strategy_instance != 0) digestInt(&hasher, u128, order.strategy_instance);
         digestInt(&hasher, u128, order.instrument);
         digestInt(&hasher, u8, @intFromEnum(order.side));
@@ -5618,6 +6395,7 @@ fn stateDigestBorrowed(shard: *const TradingShard) [Sha256.digest_length]u8 {
     digestInt(&hasher, u16, shard.oms.tombstone_count);
     for (shard.oms.tombstones[0..shard.oms.tombstone_count]) |tombstone| {
         digestInt(&hasher, u64, tombstone.order_id);
+        digestInt(&hasher, u128, tombstone.exchange_account);
         digestInt(&hasher, u128, tombstone.strategy_instance);
         digestInt(&hasher, u128, tombstone.instrument);
         digestInt(&hasher, u32, tombstone.revision);
@@ -5683,6 +6461,12 @@ fn stateDigestBorrowed(shard: *const TradingShard) [Sha256.digest_length]u8 {
     digestInt(&hasher, u64, shard.risk_lease_identity);
     digestInt(&hasher, u64, shard.risk_lease_version);
     digestInt(&hasher, u64, shard.risk_lease_valid_through_barrier);
+    digestBare(&hasher, shard.risk_lease_allocation);
+    digestInt(&hasher, u64, shard.risk_lease_fact_sequence);
+    digestInt(&hasher, u64, shard.reconciliation_started_fact);
+    digestInt(&hasher, u64, shard.reconciliation_completed_fact);
+    digestBare(&hasher, shard.reconciliation_archive);
+    digestInt(&hasher, u128, shard.last_business_archive_account);
     digestInt(&hasher, i128, shard.strategy_limit_atoms);
     digestInt(&hasher, i128, shard.portfolio_limit_atoms);
     digestInt(&hasher, i128, shard.exchange_account_limit_atoms);
@@ -5720,6 +6504,26 @@ fn stateDigestBorrowed(shard: *const TradingShard) [Sha256.digest_length]u8 {
     hasher.update(&economics_digest);
     digestCanonicalProjections(&hasher, shard);
     return hasher.finalResult();
+}
+
+noinline fn accountPartitionDigest(shard: *const TradingShard, index: usize) [32]u8 {
+    var view: TradingShard = undefined;
+    copyTradingState(&view, shard);
+    view.exchangeAccountView(index);
+    view.account_view = 0;
+    view.secondary_account_count = 0;
+    view.decision_domain_identity = 0;
+    view.primary_account_identity = 0;
+    return stateDigestBorrowed(&view);
+}
+
+noinline fn validateAccountPartition(shard: *const TradingShard, index: usize) anyerror!void {
+    var view: TradingShard = undefined;
+    copyTradingState(&view, shard);
+    view.exchangeAccountView(index);
+    view.account_view = 0;
+    view.secondary_account_count = 0;
+    try validateSnapshotStateInner(&view, false);
 }
 
 test "state digest binds instrument trading margin and economic position authority" {
@@ -5795,11 +6599,26 @@ fn digestEconomicProjection(hasher: *Sha256, projection: economics_module.Projec
 fn semanticStateDigest(shard: *const TradingShard) [Sha256.digest_length]u8 {
     var hasher = Sha256.init(.{});
     hasher.update("SemanticAuthorityDigestV1\x00");
+    digestInt(&hasher, u128, shard.decision_domain_identity);
+    if (shard.deployment.header) |header| hasher.update(&header.expected_digest);
+    for (shard.secondary_accounts[0..shard.secondary_account_count]) |partition| {
+        digestInt(&hasher, u128, partition.identity);
+        hasher.update(&partition.state.economic_projection.semanticDigest());
+        hasher.update(&partition.state.canonical_account.semanticDigest());
+        digestInt(&hasher, i128, partition.state.risk_lease_atoms);
+    }
+    for (shard.cycles.records[0..shard.cycles.count]) |cycle| {
+        digestInt(&hasher, u128, cycle.strategy);
+        digestInt(&hasher, u64, cycle.first_sequence);
+        hasher.update(&cycle.content_digest);
+        for (cycle.members[0..cycle.count]) |member| digestBare(&hasher, member);
+    }
     digestInt(&hasher, u64, shard.economic_baseline_utc_ns);
     digestInt(&hasher, u64, shard.account_balance_utc_ns);
     digestAssetRegistry(&hasher, shard, false);
     digestInt(&hasher, u16, shard.oms.order_count);
     for (shard.oms.orders[0..shard.oms.order_count]) |order| {
+        digestInt(&hasher, u128, order.exchange_account);
         digestInt(&hasher, u64, order.id);
         digestInt(&hasher, u32, order.revision);
         digestInt(&hasher, u8, @intFromEnum(order.state));

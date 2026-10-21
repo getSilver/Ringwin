@@ -20,7 +20,7 @@ pub const Builder = struct {
             .epoch = epoch,
             .qualification_digest = self.qualification.digest(),
             .records = .{ .{ .bytes = detail, .payload_digest = history.hash(detail) }, .{ .bytes = semantic, .payload_digest = history.hash(semantic) } },
-            .entries = .{ .{ .key = .{ .origin = self.qualification.origin, .identity = .{ .reconciliation_window = self.qualification.window.identity } }, .record_index = 0 }, .{ .key = .{ .origin = self.qualification.origin, .identity = .{ .canonical_account_reconciliation = self.qualification.window.identity } }, .record_index = 1 } },
+            .entries = .{ .{ .key = try history.scopedKey(self.qualification.origin, .{ .reconciliation_window = self.qualification.window.identity }, self.qualification.window.original.envelope.exchange_account), .record_index = 0 }, .{ .key = try history.scopedKey(self.qualification.origin, .{ .canonical_account_reconciliation = self.qualification.window.identity }, self.qualification.window.original.envelope.exchange_account), .record_index = 1 } },
         };
     }
 };

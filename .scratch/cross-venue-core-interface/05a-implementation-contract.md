@@ -1,6 +1,6 @@
 # 05a 实现合同提案
 
-Status: proposed; requires architecture confirmation
+Status: accepted for implementation; qualification pending
 
 关联：[05 汇总](issues/05-joint-admission.md)、[05a](issues/05a-multi-account-authority.md)、[05b](issues/05b-joint-admission-occupancy.md)、[ADR0017](../../docs/adr/0017-own-cross-account-groups-in-one-decision-domain.md)。
 
@@ -16,7 +16,7 @@ Status: proposed; requires architecture confirmation
 | `src/execution/execution_gateway.zig`，`sendFromShard`、`sourceOrigin` | 来源和权限复核仍读取 shard 的单账户身份，尽管路由表支持多个账户 | 发送与历史证明必须从已提交命令解析账户，保留 decision stream / portfolio 绑定 |
 | `src/trading/trading_shard.zig`，`submitHostGroup` | 完整可信候选当前以 `joint_admission_unavailable` 整组持久拒绝 | 04 的 framing 和身份行为保留；05b 才替换最终业务拒绝条件 |
 
-ADR0017 已接受单 owner 多账户方向；以下两个尚未确定的合同涉及信任来源和难逆格式，需按 map 的 Rules 确认后实现。
+ADR0017 已接受单 owner 多账户方向；用户于 2026-10-21 明确确认下述决策 A 和 B。按既有依赖顺序实施，常规编码和测试无需再次确认。
 
 ## 决策 A：冻结完整部署分配清单
 
@@ -63,7 +63,11 @@ Owner、Store、核心与 Gateway 在同一规范 scope 上验证历史根连续
 | 安全事实 | 新风险不能消耗保留余量；撤单、Fill、report、对账仍按各自资源预检。独立安全查证槽与 deferred ingress 不被业务候选覆盖；不得承诺安全流无限容量 |
 | 快照 | Store 32 MiB 上限不扩大；编码先计算实际字节再提交，超过上限拒绝。满载快照的真实测量及恢复验证是 05a 验收门槛，不能用结构体大小或空状态替代 |
 
-以上数值是实现建议，未实测，不构成容量资格。独立安全空间不只涉及 trace：经济事实、账本、命令、canonical ingress 与 deferred admission 的已有边界均须纳入候选预检和满载测试；若保留现有容量无法容纳要求，先记录实测成本并修订合同，不能静默淘汰活动引用。
+2026-10-22 的实现及测量见 [05 验证记录](05-verification.md)。上述数量是各资源硬上限，不表示可同时承接全部订单的运行资格；账户经济、周期、日志与历史门槛会更早背压。独立安全空间覆盖经济事实、账本、命令、canonical ingress 与 deferred admission，活动引用不淘汰。
+
+实际采用每未承接订单一条最坏 Fill 的候选预算，spot 最多16条账本、swap最多12条；新风险另留2条经济事实与16条账本，纯撤单不产生新成交义务，减仓新单仍须有真实承接空间。有限 partial Fill 需要维护与对账，不能据此承诺无限安全流。核心实际运行前沿快照和 codec 全字段编码上界共同验证32 MiB限制。
+
+Gateway 的权限证明新增域、配置与周期引用后，原40,960条最坏行不能再装入32 MiB。发送记录总上限修订为 `min(40960, (32 MiB - 1 MiB) / (4 + maxEncodedSnapshotUnknown))`，本版为 **39,210**；accepted与uncertain共用总预算，预留1 MiB给头、历史绑定和latch。只背压新增发送，不截断历史、不增大Store上限，V9拒绝旧格式。这是按实测成本修订容量，不授予部署或吞吐资格。
 
 ## 实现和验收顺序
 
@@ -75,6 +79,6 @@ Owner、Store、核心与 Gateway 在同一规范 scope 上验证历史根连续
 
 公共测试接缝沿用已确认权威设计第 8 节和各票条件：真实 Host → 核心 apply → Owner/Store commit，以及 snapshot/restore/replay → Gateway 权限复核；不新增内部私有函数测试作为验收替身。
 
-## 待确认
+## 确认记录
 
-需确认决策 A 的“完整静态部署分配清单作为可验证预算与唯一 owner 来源”，以及决策 B 的“显式域级历史根和带账户的业务键”。容量表作为首版实施预算，在实际编码及满载测量后验证，未通过不得关闭 05a。确认后依序实施，不需要另行批准常规编码和测试；本提案不要求部署、清理、真实或 Demo 交易。
+用户明确回复“确认这两项推荐方案”。决策 A 的“完整静态部署分配清单作为可验证预算与唯一 owner 来源”和决策 B 的“显式域级历史根和带账户的业务键”均获确认。容量表作为首版实施预算，在实际编码及满载测量后验证，未通过不得关闭 05a。依序实施，不需要另行批准常规编码和测试；本合同不要求部署、清理、真实或 Demo 交易。

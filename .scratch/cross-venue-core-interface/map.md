@@ -35,9 +35,9 @@ Status: open
 | [02 双边深度快照](issues/02-depth-snapshot.md) | 无 | H1 |
 | [03 增量与重同步](issues/03-depth-resynchronization.md) | 02 | H1；resolved |
 | [04 Host 完整组](issues/04-host-intent-group.md) | 无 | H2；resolved，完整传输与身份入口 |
-| [05 共同准入与占用](issues/05-joint-admission.md) | 05a、05b | H2/H3 汇总验收 |
-| [05a 多账户权威表示](issues/05a-multi-account-authority.md) | 01（已完成） | H2/H3 |
-| [05b 共同准入与占用](issues/05b-joint-admission-occupancy.md) | 01（已完成）、04、05a | H2/H3 |
+| [05 共同准入与占用](issues/05-joint-admission.md) | 05a、05b（均已完成） | H2/H3 汇总；resolved，离线核心验收 |
+| [05a 多账户权威表示](issues/05a-multi-account-authority.md) | 01（已完成） | H2/H3；resolved |
+| [05b 共同准入与占用](issues/05b-joint-admission-occupancy.md) | 01、04、05a（均已完成） | H2/H3；resolved |
 | [06 双 IOC 执行](issues/06-dual-ioc-dispatch.md) | 05 | H2 |
 | [07 原生 Post-only](issues/07-native-post-only.md) | 05 | H2 |
 | [08 确定性 checkpoint](issues/08-deterministic-checkpoint.md) | 无；最终验收需确认策略 schema | H3 |
@@ -48,10 +48,15 @@ Status: open
 
 ## Frontier
 
-- [05a 多账户权威表示与持久恢复](issues/05a-multi-account-authority.md)：01 已完成，先冻结容量预算及可验证全局额度来源。
+- [06 双 IOC 执行](issues/06-dual-ioc-dispatch.md)、[07 原生 Post-only](issues/07-native-post-only.md)：05 核心依赖已完成；分别验收真实Venue行为，不由共同准入证据推导。
+- [09a 核心周期闭合](issues/09a-cycle-closure-residual.md)：05b已完成；终结、残余阈值及资产规则仍须冻结，当前周期与经济引用保持pin。
 - [08 版本化策略状态与确定性 checkpoint](issues/08-deterministic-checkpoint.md)：in_progress；schema/codec/容量已确认，用户收窄本轮为 checkpoint 基础设施，真实模型验收保持待定。见[实现合同](08-checkpoint-design.md)及[验证记录](08-verification.md)，不解除 09b 的整票依赖。
 
 ## Decisions so far
+
+- 2026-10-22：05a → 05b → 05 resolved。完整静态清单、四账户权威分区、显式域根/账户键、Host完整组共同准入、预算与占用、故障恢复及安全容量已离线验收；最终ReleaseSafe **683/683**、定向 **25/25**、真实Python Host文件恢复与Python **5/5**通过，双轴复审无遗留阻断。journal/state/registry为43/47/41，Gateway V9最大证据按编码预算修订为39,210条；见[实现合同](05a-implementation-contract.md)及[验证记录](05-verification.md)。现有控制面尚无完整清单/独立锚点发布合同，多账户产品入口保持关闭，deployment/production qualification=false；09a前不释放活动引用，未部署或下单。
+
+- 2026-10-21：用户明确确认 [05a 实现合同](05a-implementation-contract.md) 的静态完整部署分配清单及显式域级历史命名空间。05a 已领取，依序实施 05a → 05b → 05；确认不等于功能验收或部署授权。
 
 - 2026-10-21：用户要求实施 05。按当前源码核对后形成 [05a 实现合同提案](05a-implementation-contract.md)：现有单账户租约不能充当跨账户全局预算来源，业务历史仍绑定单账户。静态完整部署分配清单的信任来源、显式域级历史命名空间待确认；提案不代表架构已接受或功能已实现，05a/05b/05 保持原状态。
 
@@ -71,7 +76,7 @@ Status: open
 
 ## Not yet specified
 
-- 多账户实现的容量数值、完整格式身份及可验证全局预算来源，待 05a；动态租约扩容首版不开放。
+- 多账户核心容量、格式与预算来源已由05a冻结并离线验证；完整清单和独立可信锚点的产品发布接入仍缺失，入口保持关闭，动态租约扩容首版不开放。
 - 现货残余阈值及资产规则冻结、闭合与释放证据，待 09a；未通过前保持占用。
 - 快照、连续深度及重同步已由 02/03 声明并离线验证；已知价格覆盖、8 档及截断后的保守失效限制继续适用。
 - 08 的 schema/codec/容量已确认；真实模型的版本、输入更新、不同批次/切点和支持平台运行确定性证据仍待完成。

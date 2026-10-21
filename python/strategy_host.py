@@ -152,8 +152,8 @@ def output_frame(batch, args, session, intent_sequence=None, limit_price=None):
         0,
     )
     struct.pack_into("<Q", frame, 136, args.intent_sequence if intent_sequence is None else intent_sequence)
-    frame[144:160] = (1).to_bytes(16, "little")
-    frame[160:176] = (2).to_bytes(16, "little")
+    frame[144:160] = getattr(args, "portfolio_identity", 1).to_bytes(16, "little")
+    frame[160:176] = getattr(args, "exchange_account_identity", 2).to_bytes(16, "little")
     frame[176:192] = args.instrument_identity.to_bytes(16, "little")
     struct.pack_into("<qq", frame, 192, args.quantity, args.limit_price if limit_price is None else limit_price)
     struct.pack_into("<I", frame, 124, crc32c(frame[:124] + frame[128:]))
@@ -164,7 +164,8 @@ def output_group_frame(batch, args, session, first_sequence):
     """Schema 2 is one complete ordered group, never two output messages."""
     first = output_frame(batch, args, session, first_sequence)
     second = bytearray(output_frame(batch, args, session, first_sequence + 1)[128:])
-    second[32:48] = (4).to_bytes(16, "little")
+    second[32:48] = getattr(args, "second_exchange_account_identity", 4).to_bytes(16, "little")
+    second[48:64] = (getattr(args, "second_instrument_identity", None) or args.instrument_identity).to_bytes(16, "little")
     second[2] = 2
     frame = bytearray(first + second)
     struct.pack_into("<I", frame, 12, len(frame))
@@ -643,6 +644,10 @@ def main():
     parser.add_argument("--quantity", type=int, default=100)
     parser.add_argument("--limit-price", type=int, default=50_100_000_000)
     parser.add_argument("--price-from-input", action="store_true")
+    parser.add_argument("--portfolio-identity", type=int, default=1)
+    parser.add_argument("--exchange-account-identity", type=int, default=2)
+    parser.add_argument("--second-exchange-account-identity", type=int, default=4)
+    parser.add_argument("--second-instrument-identity", type=int)
     parser.add_argument("--instrument-identity", type=int, default=3)
     parser.add_argument("--side", choices=("buy", "sell"), default="buy")
     parser.add_argument("--time-in-force", choices=("gtc", "ioc"), default="gtc")

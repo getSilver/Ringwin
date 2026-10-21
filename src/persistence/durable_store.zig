@@ -14,7 +14,7 @@ const HistoryHead = struct {
     previous: ?business_history.Receipt = null,
 };
 const HistoryHeads = struct {
-    version: u16 = 1,
+    version: u16 = 2,
     entries: [8]HistoryHead = @splat(.{}),
 };
 
@@ -1559,7 +1559,7 @@ pub const LinuxFileAdapter = struct {
         if (length < 40 or !std.mem.eql(u8, bytes[0..8], "RWOHHD01") or
             !std.mem.eql(u8, bytes[length - 32 .. length], &digest(bytes[0 .. length - 32]))) return error.InvalidHistoryRoot;
         const heads = try snapshot_codec.decodeBare(bytes[8 .. length - 32], HistoryHeads);
-        if (heads.version != 1) return error.InvalidHistoryRoot;
+        if (heads.version != 2) return error.InvalidHistoryRoot;
         for (heads.entries, 0..) |head, index| {
             if (head.current) |current| {
                 _ = try business_history.verifyReceipt(current, current.root.origin, current.qualification_digest, if (head.previous) |previous| previous.root else null);

@@ -4,7 +4,7 @@ const journal = @import("../persistence/journal.zig");
 const history = @import("../persistence/business_history.zig");
 const codec = @import("../persistence/snapshot_codec.zig");
 
-pub const schema_version: u16 = 2;
+pub const schema_version: u16 = 3;
 pub const max_original_input_size = 8192;
 pub const max_encoded_size = max_original_input_size + 2048;
 
@@ -43,7 +43,7 @@ pub const PendingCandidate = struct {
             self.original.schema_version == 0 or self.original.time_presence.reserved != 0 or
             self.request.pending_id == 0 or self.request.epoch == 0 or self.request.barrier == 0 or
             self.request.key.origin.stream.domain != .decision_log or self.request.key.origin.stream.id == 0 or
-            self.request.key.origin.account == 0 or std.mem.allEqual(u8, &self.request.root_digest, 0) or
+            !history.validOrigin(self.request.key.origin) or std.mem.allEqual(u8, &self.request.root_digest, 0) or
             std.mem.allEqual(u8, &self.request.candidate_payload_digest, 0)) return error.InvalidPendingCandidate;
         _ = try history.encodeKey(self.request.key);
         if (!std.mem.allEqual(u8, self.original_bytes[self.original_len..], 0)) return error.InvalidPendingCandidate;

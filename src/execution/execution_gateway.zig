@@ -14,7 +14,7 @@ const resolution_record_type: u16 = 0x4702;
 const accepted_record_type: u16 = 0x4703;
 const archive_record_type: u16 = 0x4704;
 const economic_history_record_type: u16 = 0x4705;
-const dispatch_snapshot = "GatewayDispatchV8";
+const dispatch_snapshot = "GatewayDispatchV9";
 const namespace_size = 16;
 const snapshot_prefix_size = dispatch_snapshot.len + @sizeOf(u16);
 
@@ -88,16 +88,17 @@ pub const DispatchEvidence = struct {
 };
 const ArchiveBinding = struct { origin: DispatchOrigin, root: history.Root, last_order: ?DispatchArchiveCommit = null };
 const DispatchArchiveCommit = struct { origin: DispatchOrigin, order_id: u64, receipt: history.Receipt };
-const EconomicHistoryKind = enum { fill, funding, reconciliation_window, control, forced };
+const EconomicHistoryKind = enum { fill, funding, reconciliation_window, control, forced, deployment };
 const EconomicHistoryCommit = struct { origin: DispatchOrigin, kind: EconomicHistoryKind, identity: u128, qualification_digest: history.Digest, receipt: history.Receipt };
 pub const max_routes = 4;
 pub const max_adapter_batches_per_turn: u8 = 1;
 pub const max_authority_records = 128;
-pub const max_dispatch_records = 4 * (1024 + 4096) * 2;
+// Keep the complete worst-case dispatch checkpoint below the Store ceiling.
+pub const max_dispatch_records = @min(4 * (1024 + 4096) * 2, (durable.max_snapshot_bytes - 1024 * 1024) / (4 + snapshot_codec.maxBareSize(SnapshotUnknown)));
 pub const max_reservation_facts = 4 * 1024 * 2;
 
 fn atCapacity(count: usize, limit: usize) bool {
-    return count == limit;
+    return count >= limit;
 }
 
 fn dispatchBudgetFull(accepted: u16, uncertain: u16) bool {
@@ -105,11 +106,12 @@ fn dispatchBudgetFull(accepted: u16, uncertain: u16) bool {
 }
 
 test "Gateway production dispatch and authority limits reject their numeric boundaries without resident load" {
-    try std.testing.expect(!dispatchBudgetFull(40959, 0));
-    try std.testing.expect(!dispatchBudgetFull(40958, 1));
-    try std.testing.expect(dispatchBudgetFull(40959, 1));
-    try std.testing.expect(dispatchBudgetFull(40960, 0));
-    try std.testing.expect(dispatchBudgetFull(0, 40960));
+    try std.testing.expect(!dispatchBudgetFull(max_dispatch_records - 1, 0));
+    try std.testing.expect(!dispatchBudgetFull(max_dispatch_records - 2, 1));
+    try std.testing.expect(dispatchBudgetFull(max_dispatch_records - 1, 1));
+    try std.testing.expect(dispatchBudgetFull(max_dispatch_records, 0));
+    try std.testing.expect(dispatchBudgetFull(0, max_dispatch_records));
+    try std.testing.expect(dispatchBudgetFull(max_dispatch_records + 1, 0));
     try std.testing.expect(!atCapacity(8191, max_reservation_facts));
     try std.testing.expect(atCapacity(8192, max_reservation_facts));
     try std.testing.expect(!atCapacity(499, max_exchange_position_facts));
@@ -166,7 +168,7 @@ const DurableDispatch = struct {
     namespace: [namespace_size]u8,
     next_sequence: u64,
 };
-const dispatch_snapshot_version: u16 = 8;
+const dispatch_snapshot_version: u16 = 9;
 const DispatchSnapshotHeader = struct {
     version: u16 = dispatch_snapshot_version,
     stream: durable.StreamIdentity,
@@ -199,6 +201,23 @@ fn writeSnapshotRow(destination: []u8, position: *usize, value: anytype) !void {
     position.* += 4 + encoded.len;
 }
 pub const Gateway = struct {
+    noinline fn sendFromAccount(self: *Gateway, shard: *const trading.TradingShard, account_command: oms.Command, command_id: u64, now: u64) anyerror!venue.SendResult {
+        var view: trading.TradingShard = undefined;
+        try shard.copyAccountViewInto(&view, account_command.authority.exchange_account);
+        return self.sendFromShard(&view, command_id, now);
+    }
+
+    noinline fn reconcileAccountDispatch(self: *Gateway, shard: *const trading.TradingShard, account_command: oms.Command, command_id: u64) anyerror!void {
+        var view: trading.TradingShard = undefined;
+        try shard.copyAccountViewInto(&view, account_command.authority.exchange_account);
+        return self.reconcileRecoveredDispatch(&view, command_id);
+    }
+
+    noinline fn observeAccountAuthority(self: *Gateway, shard: *const trading.TradingShard, facts: AuthorityFacts) anyerror!void {
+        var view: trading.TradingShard = undefined;
+        try shard.copyAccountViewInto(&view, facts.account);
+        return self.observeAuthorityFromShard(&view, facts);
+    }
     routes: [max_routes]Route = undefined,
     count: u8 = 0,
     instrument_gates: [max_observed_instruments]InstrumentOpeningGate = undefined,
@@ -218,9 +237,17 @@ pub const Gateway = struct {
     uncertain_dispatches: [max_dispatch_records]UncertainDispatch = undefined,
     uncertain_dispatch_count: u16 = 0,
     durable_dispatch: ?DurableDispatch = null,
+    deployment_anchor: ?[32]u8 = null,
     // Borrowed caller-owned storage; never encoded into durable state.
     dispatch_snapshot_buffer: ?[]u8 = null,
     send_attempt_count: u64 = 0,
+
+    /// Supplied by the trusted deployment owner again after process recovery.
+    pub fn pinDeploymentDigest(self: *Gateway, digest: [32]u8) !void {
+        if (std.mem.allEqual(u8, &digest, 0)) return error.InvalidDeploymentAnchor;
+        if (self.deployment_anchor) |known| if (!std.mem.eql(u8, &known, &digest)) return error.ImmutableDeploymentConfiguration;
+        self.deployment_anchor = digest;
+    }
 
     /// Initializes caller-owned storage without materializing the large resident arrays.
     pub fn init(self: *Gateway) void {
@@ -235,6 +262,7 @@ pub const Gateway = struct {
         self.accepted_dispatch_count = 0;
         self.uncertain_dispatch_count = 0;
         self.durable_dispatch = null;
+        self.deployment_anchor = null;
         self.dispatch_snapshot_buffer = null;
         self.send_attempt_count = 0;
     }
@@ -483,6 +511,10 @@ pub const Gateway = struct {
     /// Only an OMS-applied authoritative reconciliation can close a recovered
     /// Unknown. The durable identity remains a tombstone: it can never resend.
     pub fn reconcileRecoveredDispatch(self: *Gateway, shard: *const trading.TradingShard, command_id: u64) !void {
+        if (shard.decision_domain_identity != 0 and shard.account_view == 0) {
+            const account_command = shard.oms.findCommand(command_id) orelse return error.UnknownDispatch;
+            if (account_command.authority.exchange_account != shard.primary_account_identity) return self.reconcileAccountDispatch(shard, account_command, command_id);
+        }
         const committed = self.durable_dispatch orelse return error.DurableDispatchUnavailable;
         if (committed.store.safetyGate() != .open or shard.exchange_account_identity == 0)
             return error.DurableDispatchUnavailable;
@@ -563,6 +595,7 @@ pub const Gateway = struct {
     }
 
     pub fn observeAuthorityFromShard(self: *Gateway, shard: *const trading.TradingShard, facts: AuthorityFacts) !void {
+        if (shard.decision_domain_identity != 0 and shard.account_view == 0 and facts.account != shard.primary_account_identity) return self.observeAccountAuthority(shard, facts);
         if (facts.account != shard.exchange_account_identity or
             facts.effective_trading_authority != shard.operational_state.effectiveTradingAuthority() or
             !std.meta.eql(facts.exchange_position, shard.currentNetExchangePosition(facts.exchange_position.instrument) orelse return error.InvalidAuthorityFacts)) return error.InvalidAuthorityFacts;
@@ -675,6 +708,10 @@ pub const Gateway = struct {
     /// The public order path takes an actual shard outbox identity. The caller
     /// cannot supply missing capability, rules, config, lease or deadline data.
     pub fn sendFromShard(self: *Gateway, shard: *const trading.TradingShard, command_id: u64, now_monotonic_ns: u64) !venue.SendResult {
+        if (shard.decision_domain_identity != 0 and shard.account_view == 0) {
+            const account_command = shard.oms.findCommand(command_id) orelse return error.NotSent;
+            if (account_command.authority.exchange_account != shard.primary_account_identity) return self.sendFromAccount(shard, account_command, command_id, now_monotonic_ns);
+        }
         const committed = self.durable_dispatch orelse return error.NotSent;
         if (committed.store.safetyGate() != .open or now_monotonic_ns == 0)
             return error.NotSent;
@@ -693,6 +730,22 @@ pub const Gateway = struct {
         if ((shard.economic_fault_count != 0 or shard.recovery_admission_pending or shard.oms.recovery_only or
             shard.asset_configuration_failed or !shard.settlementConsumersCompatible(oms_command.instrument)) and oms_command.operation != .cancel) return error.NotSent;
         const refs = oms_command.authority;
+        if (shard.decision_domain_identity != 0) {
+            const anchor = self.deployment_anchor orelse return error.NotSent;
+            if (!std.mem.eql(u8, &anchor, &refs.configuration_digest)) return error.NotSent;
+            if (refs.decision_domain != shard.decision_domain_identity or !std.mem.eql(u8, &refs.configuration_digest, &shard.deployment.header.?.expected_digest) or refs.cycle.version != 1) return error.NotSent;
+            const first_sequence = std.math.cast(u64, refs.cycle.identity) orelse return error.NotSent;
+            const cycle = shard.cycles.find(oms_command.strategy_instance, first_sequence) orelse return error.NotSent;
+            if (cycle.fact_sequence != refs.cycle.barrier or cycle.portfolio != refs.virtual_portfolio) return error.NotSent;
+            const fact = shard.trace.factAt(cycle.fact_sequence) orelse return error.NotSent;
+            if (fact.kind != .cycle_occupied or fact.identity != first_sequence) return error.NotSent;
+            var owns = false;
+            for (cycle.members[0..cycle.count]) |member| if (member.account == refs.exchange_account and member.instrument == oms_command.instrument) {
+                owns = true;
+                break;
+            };
+            if (!owns) return error.NotSent;
+        }
         if (!refs.complete() or refs.exchange_account != shard.exchange_account_identity or
             refs.virtual_portfolio != shard.portfolio_identity or refs.deadline_barrier > shard.authoritativeBarrier() or
             oms_command.risk_decision_identity == 0 or oms_command.reservation_identity == 0 or
@@ -704,6 +757,7 @@ pub const Gateway = struct {
             decision.identity != oms_command.intent_sequence or reservation_fact.identity != oms_command.intent_sequence)
             return error.NotSent;
         const order = shard.oms.orderById(oms_command.order_id) orelse return error.NotSent;
+        if (shard.decision_domain_identity != 0 and order.exchange_account != refs.exchange_account) return error.NotSent;
         if (order.revision != oms_command.revision or order.instrument != oms_command.instrument or
             order.predecessor_order_id != oms_command.predecessor_order_id or
             order.state != switch (oms_command.operation) {
@@ -1036,9 +1090,20 @@ pub const Gateway = struct {
     }
 
     pub fn acceptedClientOrderIdFromShard(self: *const Gateway, shard: *const trading.TradingShard, command_id: u64) ?canonical.ClientOrderId {
+        if (shard.decision_domain_identity != 0) {
+            const account = (shard.oms.findCommand(command_id) orelse return null).authority.exchange_account;
+            if (account != shard.exchange_account_identity) return self.acceptedClientOrderIdForAccount(shard, command_id, account);
+        }
         const origin = sourceOrigin(shard, true) catch return null;
-        const index = self.acceptedDispatchIndex(origin, shard.exchange_account_identity, command_id) orelse return null;
+        const account = if (shard.decision_domain_identity != 0) (shard.oms.findCommand(command_id) orelse return null).authority.exchange_account else shard.exchange_account_identity;
+        const index = self.acceptedDispatchIndex(origin, account, command_id) orelse return null;
         return self.accepted_dispatches[index].proof.command.client_order_id;
+    }
+
+    noinline fn acceptedClientOrderIdForAccount(self: *const Gateway, shard: *const trading.TradingShard, command_id: u64, account: u128) ?canonical.ClientOrderId {
+        var view: trading.TradingShard = undefined;
+        shard.copyAccountViewInto(&view, account) catch return null;
+        return self.acceptedClientOrderIdFromShard(&view, command_id);
     }
 
     pub fn exportOrderDispatchEvidence(self: *const Gateway, shard: *const trading.TradingShard, order_id: u64, destination: []DispatchEvidence) ![]const DispatchEvidence {
@@ -1088,9 +1153,13 @@ pub const Gateway = struct {
 
     /// Only the published Core economic commit can advance history without retiring dispatch evidence.
     pub fn acknowledgeEconomicHistory(self: *Gateway, shard: *const trading.TradingShard) !void {
-        const origin = try sourceOrigin(shard, false);
+        const origin: DispatchOrigin = if (shard.decision_domain_identity != 0)
+            .{ .decision_stream = shard.decision_stream_identity, .portfolio = shard.deployment.domain(shard.decision_domain_identity).?.portfolio }
+        else
+            try sourceOrigin(shard, false);
         const root = shard.business_history_root orelse return error.EconomicHistoryNotCommitted;
         const record: EconomicHistoryCommit = switch (shard.last_business_archive_kind orelse return error.EconomicHistoryNotCommitted) {
+            .deployment => .{ .origin = origin, .kind = .deployment, .identity = shard.deployment.header.?.identity, .qualification_digest = (try shard.deployment.bindingRecord(shard.decision_domain_identity, shard.decision_stream_identity)).digest(), .receipt = shard.domain_binding_receipt orelse return error.EconomicHistoryNotCommitted },
             .order => return error.EconomicHistoryNotCommitted,
             .fill => blk: {
                 const commit = shard.last_fill_archive orelse return error.EconomicHistoryNotCommitted;
@@ -1144,7 +1213,7 @@ pub const Gateway = struct {
         if (origin.decision_stream == 0 or origin.portfolio == 0 or origin.test_shard != 0 or commit.identity == 0 or
             origin.account != root.origin.account or origin.decision_stream != root.origin.stream.id or
             !std.mem.eql(u8, &commit.qualification_digest, &commit.receipt.qualification_digest)) return error.EconomicHistoryNotCommitted;
-        if (commit.kind != .reconciliation_window and commit.identity > std.math.maxInt(u64)) return error.EconomicHistoryNotCommitted;
+        if (commit.kind != .reconciliation_window and commit.kind != .deployment and commit.identity > std.math.maxInt(u64)) return error.EconomicHistoryNotCommitted;
         const previous_index = self.archiveBindingIndex(origin);
         const previous: ?history.Root = if (previous_index) |index| self.archive_bindings[index].root else null;
         if (previous != null and std.meta.eql(previous.?, root)) {
@@ -1493,8 +1562,8 @@ test "Gateway checkpoint encodes only resident dispatch evidence" {
     unknown.recovered_proof.?.command.market_protection_price = std.mem.zeroes(oms.Price);
     unknown.reconciliation_status = .found_terminal;
     const uncertain_bytes = (try snapshot_codec.encodeBare(&layout_bytes, SnapshotUnknown{ .proof = unknown.recovered_proof.?, .reconciliation_id = unknown.reconciliation_id, .reconciliation_status = unknown.reconciliation_status })).len;
-    try std.testing.expect(40960 * (4 + uncertain_bytes) + 128 * 1024 + 256 < durable.max_snapshot_bytes);
-    std.debug.print("gateway_encoded_rows: accepted={d}, resolved_unknown={d}, max_40960={d}\n", .{ accepted_bytes, uncertain_bytes, 40960 * (4 + @max(accepted_bytes, uncertain_bytes)) });
+    try std.testing.expect(max_dispatch_records * (4 + uncertain_bytes) + 128 * 1024 + 256 < durable.max_snapshot_bytes);
+    std.debug.print("gateway_encoded_rows: accepted={d}, resolved_unknown={d}, max_records={d}, max_bytes={d}\n", .{ accepted_bytes, uncertain_bytes, max_dispatch_records, max_dispatch_records * (4 + @max(accepted_bytes, uncertain_bytes)) });
     std.debug.print("gateway_layout: gateway={d}, accepted={d}, uncertain={d}, proof={d}, empty_snapshot={d}\n", .{ @sizeOf(Gateway), @sizeOf(AcceptedDispatch), @sizeOf(UncertainDispatch), @sizeOf(DispatchProof), restored.snapshot.len });
     try std.testing.expect(restored.snapshot.len < 256);
     const recovered = try std.testing.allocator.create(Gateway);

@@ -19,13 +19,13 @@ const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
 // CanonicalStateDigest binds the journal schema as well as economic state.
-pub const expected_happy_digest = "5e58fdc44213643f721b01bfeddaa553f97e62eb0c865a20280b16d75d64f597";
+pub const expected_happy_digest = "f5f3de4a9e10e5846d4c38aab974ec3f2c76158fbee7359a063e24877c308062";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "405a15be16d8f7dbb9679237b00a9a7bad274270b411c9b25d413f85d5baf8e9",
-    "ddf471208493bb4b01b84b94665d0cacbc618c3c6c51ae0b57e9eec72453f7c3",
-    "e98ef2e551d32b7d62446ec342224e6048fc0cc935b5ffe1dbf8206605dffde6",
-    "adb4d6616528c525712f14cb78a8e9a84982eb15a63d2b332f04399f07b2b378",
+    "5bb512384efb3695df4e2f3b58ed95b9fdc9ad5f4e164d8dbde94faf688d9a79",
+    "59f7b4f4f1b9f1a14cdea09c12697e6517e108299e971b460ab49939a663ae5c",
+    "ee3880d718175f239f0599e47ee51209fd16a51d488978694473116139a7b729",
+    "67c327fdc1f85f9407459a1eaed6418bc41c03f8e1c0596ee8e6761bb235f1b3",
 };
 pub const order_limit_price: i64 = 50_100_000_000;
 

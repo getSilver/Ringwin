@@ -64,6 +64,7 @@ pub const ReconciliationStatus = enum(u8) { found_live, found_terminal, confirme
 pub const TerminalState = enum(u8) { filled, canceled, rejected };
 
 pub const Intent = struct {
+    exchange_account: u128 = 0,
     intent_sequence: u64,
     strategy_instance: u128 = 0,
     operation: Operation,
@@ -108,6 +109,9 @@ pub const DispatchBatch = struct {
 pub const FactRef = struct { identity: u128 = 0, version: u64 = 0, barrier: u64 = 0 };
 /// References to source-owned facts, not a replayable authorization grant.
 pub const DispatchAuthorityRefs = struct {
+    decision_domain: u128 = 0,
+    configuration_digest: [32]u8 = @splat(0),
+    cycle: FactRef = .{},
     exchange_account: canonical.ExchangeAccountIdentity = 0,
     virtual_portfolio: u128 = 0,
     trading_authorization: FactRef = .{},
@@ -187,6 +191,7 @@ pub const Command = struct {
 };
 
 pub const Order = struct {
+    exchange_account: u128 = 0,
     id: u64,
     strategy_instance: u128,
     instrument: Instrument,
@@ -252,6 +257,7 @@ pub const OrderArchiveQualification = struct {
 };
 
 pub const Tombstone = struct {
+    exchange_account: u128 = 0,
     order_id: u64,
     strategy_instance: u128,
     instrument: Instrument,
@@ -585,8 +591,13 @@ pub const Oms = struct {
     }
 
     pub fn activeReservations(self: *const Oms, asset: canonical.AssetIdentity) !Reservation {
+        return self.reservationsForAccount(asset, null);
+    }
+
+    pub fn reservationsForAccount(self: *const Oms, asset: canonical.AssetIdentity, account: ?u128) !Reservation {
         var total: Reservation = .{ .asset = asset, .atoms = 0 };
         for (self.orders[0..self.order_count]) |order| {
+            if (account != null and order.exchange_account != account.?) continue;
             if (!order.reservation_active) continue;
             if (total.asset != order.reservation.asset) return error.MixedReservationAssets;
             total.atoms = try std.math.add(i128, total.atoms, order.reservation.atoms);
@@ -756,6 +767,7 @@ pub const Oms = struct {
                 if (!exactOrderSpec(intent.order_type, intent.time_in_force, intent.market_protection_price != null)) return error.InvalidOrderSpec;
                 if (intent.quantity <= 0 or intent.limit_price.ticks <= 0 or intent.reservation.atoms <= 0 or intent.limit_price.instrument != intent.instrument) return error.InvalidOrderSpec;
                 const order = try self.createOrder(intent.strategy_instance, intent.instrument, intent.side, intent.portfolio_reduce_only, intent.venue_reduce_only, intent.quantity, intent.limit_price, intent.reservation, intent.client_order_id, 0, intent.intent_sequence, group, policy);
+                order.exchange_account = intent.exchange_account;
                 order.order_type = intent.order_type;
                 order.time_in_force = intent.time_in_force;
                 order.market_protection_price = intent.market_protection_price;
@@ -1200,6 +1212,7 @@ pub const Oms = struct {
             return error.StaleReplacementEvidence;
         return .{
             .intent_sequence = sequence,
+            .exchange_account = order.exchange_account,
             .strategy_instance = order.strategy_instance,
             .operation = .place,
             .instrument = replacement.instrument,
@@ -1388,7 +1401,7 @@ pub const Oms = struct {
         return error.MissingTerminalAuditEvidence;
     }
 
-    fn findCommand(self: *const Oms, id: u64) ?Command {
+    pub fn findCommand(self: *const Oms, id: u64) ?Command {
         for (self.command_history[0..self.command_history_count]) |command_value| if (command_value.command_id == id) return command_value;
         return null;
     }
@@ -1425,6 +1438,7 @@ pub const Oms = struct {
 };
 
 fn validateTarget(order: *const Order, intent: Intent) !void {
+    if (order.exchange_account != intent.exchange_account) return error.OrderAccountMismatch;
     if (order.revision != intent.expected_revision or order.cumulative_quantity != intent.expected_cumulative_quantity)
         return error.StaleOrderRevision;
     switch (order.state) {
@@ -1456,6 +1470,7 @@ pub fn intentFingerprint(intent: Intent, group_count: u8) [16]u8 {
     hash.update(&.{group_count});
     hash.update(std.mem.asBytes(&intent.intent_sequence));
     hash.update(std.mem.asBytes(&intent.strategy_instance));
+    hash.update(std.mem.asBytes(&intent.exchange_account));
     hash.update(&.{@intFromEnum(intent.operation)});
     hash.update(std.mem.asBytes(&intent.instrument));
     hash.update(&.{ @intFromEnum(intent.side), @intFromBool(intent.portfolio_reduce_only), @intFromBool(intent.venue_reduce_only) });
@@ -1485,6 +1500,7 @@ fn orderFactDigest(order: Order, last_report: ?ExecutionReport, last_reconciliat
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update(std.mem.asBytes(&order.id));
     hash.update(std.mem.asBytes(&order.strategy_instance));
+    hash.update(std.mem.asBytes(&order.exchange_account));
     hash.update(std.mem.asBytes(&order.instrument));
     hash.update(std.mem.asBytes(&order.intent_sequence));
     hash.update(std.mem.asBytes(&order.group_first_sequence));
