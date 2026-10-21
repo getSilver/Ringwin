@@ -350,7 +350,7 @@ def decode_checkpoint(container):
         if metadata["state_schema_version"] != 1:
             raise ValueError("unsupported strategy state version")
         return metadata, strategy_state.decode(payload, metadata["cursor"], metadata["strategy"], metadata["next_intent"])
-    state = json.loads(payload)
+    state = json.loads(payload, parse_int=strategy_state.parse_integer)
     if (
         not isinstance(state, dict)
         or list(state) != ["accumulator", "event_count"]

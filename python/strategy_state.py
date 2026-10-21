@@ -303,6 +303,14 @@ def encode(state, cursor, strategy=None, next_intent=None):
     return payload
 
 
+def parse_integer(token):
+    # The largest declared integer is u128 (39 decimal digits). Bound parsing
+    # before Python constructs a potentially enormous arbitrary-precision int.
+    if len(token) > (40 if token.startswith("-") else 39):
+        raise ValueError("integer token capacity")
+    return int(token)
+
+
 def decode(payload, cursor, strategy=None, next_intent=None):
     if len(payload) > MAX_PAYLOAD:
         raise ValueError("state capacity")
@@ -316,7 +324,8 @@ def decode(payload, cursor, strategy=None, next_intent=None):
     def reject(_):
         raise ValueError("floating JSON forbidden")
     try:
-        state = json.loads(payload, object_pairs_hook=pairs, parse_float=reject, parse_constant=reject)
+        state = json.loads(payload, object_pairs_hook=pairs, parse_int=parse_integer,
+                           parse_float=reject, parse_constant=reject)
         if encode(state, cursor, strategy, next_intent) != payload:
             raise ValueError("non-canonical state")
     except (RecursionError, UnicodeError, OverflowError, TypeError) as error:
