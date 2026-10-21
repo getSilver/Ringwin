@@ -253,13 +253,13 @@ fn runPortableCheckpoint(init: std.process.Init, python: []const u8, script: []c
     try host.requestCheckpoint(init.io, 1, metadata);
     const returned = try host.receiveCheckpoint(init.io, &frame);
     try std.testing.expectEqualSlices(u8, checkpoint, returned);
-    try checkPortableFile(init, returned, metadata);
+    try checkPortableFile(init, python, script, returned, metadata);
     try std.testing.expectEqual(lifecycle.State.recovered, host.supervisor.state);
     try std.testing.expectError(error.StaleCheckpointRequest, host.requestCheckpoint(init.io, 1, metadata));
     try host.shutdown(init.io, 4);
 }
 
-fn checkPortableFile(init: std.process.Init, checkpoint: []const u8, metadata: recovery_module.Metadata) !void {
+fn checkPortableFile(init: std.process.Init, python: []const u8, script: []const u8, checkpoint: []const u8, metadata: recovery_module.Metadata) !void {
     const durable = @import("../../persistence/durable_store.zig");
     const checkpoints = @import("../../strategy/strategy_checkpoint_store.zig");
     var cwd_buffer: [1024]u8 = undefined;
@@ -303,5 +303,21 @@ fn checkPortableFile(init: std.process.Init, checkpoint: []const u8, metadata: r
     opened = true;
     const after_fault = try checkpoints.Repository.init(adapter.interface(), 800, .{ 801, 802 });
     try std.testing.expectEqualDeep(publication, (try after_fault.latest(init.io)).?);
-    try std.testing.expectEqualSlices(u8, checkpoint, try after_fault.restore(init.io, metadata));
+    const restored_content = try after_fault.restore(init.io, metadata);
+    try std.testing.expectEqualSlices(u8, checkpoint, restored_content);
+    const next_plan = lifecycle.developmentPlan(0, 43, try lifecycle.discoverPythonAbi(init, python));
+    var next_host = try lifecycle.ManagedHost.start(init, python, script, next_plan, "portable", &.{ "--strategy-identity", "1", "--config-version", "1" });
+    defer next_host.deinit(init.io);
+    try next_host.sendPlan(init.io);
+    try expectLifecycle(.accepted, try next_host.receive(init.io, 1));
+    try expectLifecycle(.accepted, try next_host.receive(init.io, 2));
+    var recovery_frame: [8192]u8 = undefined;
+    try next_host.beginRecovery(init.io, metadata.strategy_cursor, restored_content, &recovery_frame);
+    try expectLifecycle(.accepted, try next_host.receive(init.io, 3));
+    const restored_identity = try recovery_module.decodePayloadCheckpoint(checkpoint, metadata);
+    try std.testing.expectEqualSlices(u8, &restored_identity.state_digest, &next_host.supervisor.last_recovered.?.state_digest);
+    try next_host.requestCheckpoint(init.io, 1, metadata);
+    try std.testing.expectEqualSlices(u8, checkpoint, try next_host.receiveCheckpoint(init.io, &recovery_frame));
+    try std.testing.expectEqual(lifecycle.State.recovered, next_host.supervisor.state);
+    try next_host.shutdown(init.io, 4);
 }

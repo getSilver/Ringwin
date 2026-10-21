@@ -257,7 +257,8 @@ def validate(state, cursor, strategy=None, next_intent=None):
                     raise ValueError("holding target formula")
             if (c["first_exit"]["tag"] == "none") != (c["first_exit_reason"]["tag"] == "none"):
                 raise ValueError("exit evidence mismatch")
-            if c["phase"] == "exiting" and c["first_exit"]["tag"] == "none":
+            if (c["phase"] == "exiting" or
+                    (c["phase"] == "reconciling" and c["before_reconciling"] == "exiting")) and c["first_exit"]["tag"] == "none":
                 raise ValueError("missing exit evidence")
             if c["first_exit"]["tag"] == "present" and not (
                     c["phase"] in ("exiting", "completed") or

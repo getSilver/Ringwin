@@ -1,7 +1,6 @@
 """Portable state checks through the Host checkpoint boundary."""
 import copy
 import io
-import json
 import struct
 import subprocess
 import sys
@@ -142,6 +141,7 @@ class CheckpointTests(unittest.TestCase):
                        lambda s: s["pairs"][0]["cycle"]["times"]["holding"].update(utc_deadline_ns=120),
                        lambda s: s["pairs"][0]["cycle"]["intents"][0].update(sequence=3),
                        lambda s: s["pairs"][0]["cycle"]["plan"].update(holding_target=dict(tag="pending")),
+                       lambda s: s["pairs"][0]["cycle"].update(before_reconciling="exiting"),
                        lambda s: s["pairs"][0]["cycle"].update(
                            phase="holding", first_exit=dict(tag="present", value=dict(identity=1, version=1, cursor=9)),
                            first_exit_reason=dict(tag="present", value="deadline"))):

@@ -673,6 +673,8 @@ def main():
     if args.mode in ("trade", "recovery", "strategy-fault", "benchmark"):
         if args.mode != "benchmark" and (not args.strategy_identity or not args.activation_identity):
             raise ValueError("data mode requires strategy and activation identities")
+    if args.mode == "portable" and not args.strategy_identity:
+        raise ValueError("portable mode requires strategy identity")
     benchmark_state = prepare_benchmark(args) if args.mode == "benchmark" else None
     write_frame(sys.stdout.buffer, HOST_HEARTBEAT, session, 2, struct.pack("<QQ", 0, 0))
     if args.mode == "hang":
