@@ -1,8 +1,0 @@
-src\core_observation_capacity_acceptance.zig:555:73: error: no field named 'exchange_account' in struct 'oms.Command'
-            try std.testing.expectEqual(@as(u128, 100 + route), command.exchange_account);
-                                                                        ^~~~~~~~~~~~~~~~
-src\oms.zig:165:21: note: struct declared here
-pub const Command = struct {
-                    ^~~~~~
-referenced by:
-    test_0: src\main.zig:217:17

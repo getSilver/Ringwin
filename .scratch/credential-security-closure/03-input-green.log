@@ -1,2 +1,0 @@
-1/1 credential_store.test.public stage rejects overlong pipe password and wipes caller buffers...OK
-All 1 tests passed.

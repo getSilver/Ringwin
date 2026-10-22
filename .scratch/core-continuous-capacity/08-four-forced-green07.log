@@ -1,9 +1,0 @@
-1/1 coordinator_history_acceptance.test.08 four shared account Owners preserve 320 forced sources allocations postings and acknowledgements across history recovery...forced history window 0
-forced history window 1
-forced history window 2
-forced history window 3
-forced history window 4
-FAIL (NoSpaceLeft)
-0 passed; 0 skipped; 1 failed.
-error: the following test command failed with exit code 1:
-.zig-cache\o\92bef90c9a3a39367b181ca03758f9fe\test.exe --seed=0x2475b121

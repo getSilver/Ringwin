@@ -1,8 +1,0 @@
-{
-  "started_utc": "2026-10-14T04:30:10.7324158Z",
-  "finished_utc": "2026-10-14T04:31:16.0634730Z",
-  "exit_code": 0,
-  "command": "\"\"D:\\Program Files\\zig\\zig.exe\" test src/main.zig -O Debug --stack 268435456 --test-filter \"Gateway\" \"-femit-bin=D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-small-gateway-debug.exe\" 1>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-small-gateway-debug.stdout.log\" 2>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-small-gateway-debug.log\"\"",
-  "scope": "Gateway targeted functional tests; recovery rows100; reservations6; numeric production capacity guards",
-  "log_sha256": "0d3f577693833518a901c6310d61d8fe305ea27ea7eb0731b3ba557db97651a0"
-}

@@ -1,5 +1,0 @@
-1/1 credential_kdf.test.credential KDF allocates crypto scratch from protected allocator and releases on OOM...expected error.OutOfMemory, found void
-FAIL (TestExpectedError)
-0 passed; 0 skipped; 1 failed.
-error: the following test command failed with exit code 1:
-.zig-cache\credential02\o\c2a2d38b128c6e8d3792b3233e961366\test.exe --seed=0xe2960e72

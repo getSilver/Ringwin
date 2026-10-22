@@ -1,6 +1,0 @@
-1/2 main.test_0...OK
-2/2 windows_capacity_acceptance.test.Native file capacity real file seed recovery preserves public business state...Segmentation fault at address 0x7ffff2d1d258
-Failed to read debug info from filesystem, trace may be incomplete
-
-???:?:?: 0x2a8b664 in ??? (/mnt/d/github/Ringwin-core-continuous-capacity/.scratch/core-continuous-capacity/11-green-linux)
-Killed

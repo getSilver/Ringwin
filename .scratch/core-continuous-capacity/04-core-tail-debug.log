@@ -1,7 +1,0 @@
-1/5 main.test_0...OK
-2/5 trading_shard_tests.test.core safety invariants replay CCC intent conflict suspense and archive windows...core_safety_invariants: ccc=pass intent_conflict=pass suspense=pass tombstone_archive=pass host_activated=pass
-OK
-3/5 trading_shard_tests.test.direct core spot fill enforces native base single amount before economic commit...OK
-4/5 trading_shard_tests.test.direct core spot sells release only their uniquely applied inventory...OK
-5/5 trading_shard_tests.test.spot decreasing native amend reserves confirmed inventory until venue confirmation...OK
-All 5 tests passed.

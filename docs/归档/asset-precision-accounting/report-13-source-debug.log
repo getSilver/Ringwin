@@ -1,7 +1,0 @@
-1/4 main.test_0...OK
-2/4 binance_venue_adapter.test.Binance scoped Spot snapshots stay unresolved without combined product and bill proof through Owner recovery...OK
-3/4 bybit_private_reconciliation.test.Bybit modern wallet retains raw native cash debt and locks without inventing availability...OK
-4/4 native_multi_venue_accounting_acceptance.test.native multi Venue Bybit modern wallet scope faults persist and order report may precede unique fill...precision13 venue=bybit case=wallet_scope assets_sha256=2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21 decision_barrier=24 raw_barrier=5 canonical=9100865b814fed098b560a23125e0984967dfa1cee28364a7e9849ebdad71c9a semantic=667bcfa7170ccc37ee85bc8866a9786cce421135d0fe4bf95e472cf40b9c857a sends=0
-precision13 venue=bybit case=report_first assets_sha256=2b900edfeac212fec9353e05004af9f1167dc205c2fcfe26785fb3277e667a21 decision_barrier=27 raw_barrier=7 canonical=ac7985da59da5770b3f3792b8869da45b36b6d178204d43940b2a6bf3ff6b24f semantic=67b0a48f23295ec516dd9b40148c3a88f39d2a38f089d193d274df1eacc3bd7e sends=0
-OK
-All 4 tests passed.

@@ -1,7 +1,0 @@
-{
-  "exit_code": 0,
-  "started_utc": "2026-10-14T03:01:51.5873349Z",
-  "finished_utc": "2026-10-14T03:02:16.3112653Z",
-  "scope": "bounded Gateway rollback all Owner cases",
-  "source_tree_sha256": "3cc1586d6fabd2125ed6dad57946233582ea452a19fc9267660d1bdc5a0c4097"
-}

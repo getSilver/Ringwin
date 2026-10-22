@@ -1,7 +1,0 @@
-Captured excerpt from the actual first check before Store implementation.
-Command: zig test src/durable_store.zig --test-filter "checkpoint store rotates 100" -femit-bin=.zig-cache/store-03-red.exe --stack 67108864
-1/1 durable_store.test.checkpoint store rotates 100 rounds without cumulative manifest exhaustion...FAIL (ManifestCapacity)
-findManifest: src/durable_store.zig:227 return error.ManifestCapacity
-appendImpl: src/durable_store.zig:298 findManifest(&self.manifest, request.stream, stream.segment_index, true)
-0 passed; 0 skipped; 1 failed.
-Exit code: 1

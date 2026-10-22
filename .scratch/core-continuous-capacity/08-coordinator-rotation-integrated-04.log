@@ -1,3 +1,0 @@
-1/2 account_coordinator.test.coordinator history pins incomplete forced source...OK
-2/2 account_coordinator.test.coordinator history durable writer rotates beyond old journal capacity and recovers exact sequence...OK
-All 2 tests passed.

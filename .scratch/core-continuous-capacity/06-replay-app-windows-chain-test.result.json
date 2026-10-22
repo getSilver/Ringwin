@@ -1,8 +1,0 @@
-{
-  "started_utc": "2026-10-14T08:59:32.6040784Z",
-  "finished_utc": "2026-10-14T08:59:35.3273065Z",
-  "exit_code": 1,
-  "command": "\"\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-replay-app.exe\" --windows-chain-test 1>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-replay-app-windows-chain-test.stdout.log\" 2>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-replay-app-windows-chain-test.log\"\"",
-  "artifact_sha256": "17d44909ae4aa3bae44a54215eac7c12cf2d655e38fdfa7d30d31ba6af21f84a",
-  "scope": "functional offline only;64MiB;no live orders or remote writes"
-}

@@ -1,7 +1,0 @@
-{
-  "started_utc": "2026-10-14T09:10:15.6390551Z",
-  "finished_utc": "2026-10-14T09:11:40.4706478Z",
-  "exit_code": 0,
-  "command": "\"\"D:\\Program Files\\zig\\zig.exe\" test src/main.zig -O Debug --stack 268435456 --test-filter \"Gateway\" \"-femit-bin=D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-bootstrap-checkpoint-buffer-debug.exe\" 1>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-bootstrap-checkpoint-buffer-debug.stdout.log\" 2>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-bootstrap-checkpoint-buffer-debug.log\"\"",
-  "scope": "public Gateway functional regression after borrowed snapshot buffer;<=100 recovery rows;no pressure"
-}

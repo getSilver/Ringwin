@@ -1,7 +1,0 @@
-1/4 main.test_0...OK
-2/4 venue_fill_recovery_acceptance.test.OKX unowned terminal Fill validates native fee before skipping portfolio ownership...OK
-3/4 venue_fill_recovery_acceptance.test.OKX unowned Fill enforces a single fee limit independently of its balance limit...OK
-4/4 native_multi_venue_accounting_acceptance.test.native multi Venue unlinked fee obeys single limit separately from account balance limit...precision13 venue=binance case=single_fee assets_sha256=d554c3cb07536dd417bb6005d3cd360e37cf405985cc16652533f3c453dfb7b4 decision_barrier=24 raw_barrier=5 canonical=7e3868643dc49bce60257fe99c50a6822d8b0e7f3f60c4352321360e64481450 semantic=eefef6d12eb44adabbc33ac76b00c395c316a1185d67c0f1c9e12ad5dbc0c0be sends=0
-precision13 venue=bybit case=single_fee assets_sha256=d554c3cb07536dd417bb6005d3cd360e37cf405985cc16652533f3c453dfb7b4 decision_barrier=24 raw_barrier=5 canonical=221c8d4d94e6d541932b13bdaa85cbe48c2c3619a6142c7b74f5098e64d30c49 semantic=1f0b6fad1c9eda31e2c8745ebf41031903efc27b6e26e1899343a08b0637b46b sends=0
-OK
-All 4 tests passed.

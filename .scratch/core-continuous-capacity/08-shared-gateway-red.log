@@ -1,6 +1,0 @@
-1/1 coordination_gateway_acceptance.test.08 shared gateway retires 320 terminal routes keeps fencing high water and rejects old commands after recovery...gateway history window 0
-expected error.OrderArchivePinned, found error.OrderArchiveNotQualified
-FAIL (TestUnexpectedError)
-0 passed; 0 skipped; 1 failed.
-error: the following test command failed with exit code 1:
-.zig-cache\o\effb2f29c3f8d9591f6889bf2c90fb3c\test.exe --seed=0x93e58aea

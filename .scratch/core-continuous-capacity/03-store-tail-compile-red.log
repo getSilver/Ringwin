@@ -1,7 +1,0 @@
-src\durable_store.zig:392:321: error: expected 3 array elements; found 2
-    return .{ .status = .recovery_only, .snapshot = &.{}, .tail = tail, .committed_barrier = stream.committed_barrier, .last_sequence = stream.journal.last_sequence, .segment_index = stream.segment_index, .segment_digest = entry.digest, .active_segment = tail, .segment_sealed = stream.journal.sealed, .tail_segments = .{ tail, &.{} }, .tail_count = 1, .gate = gate };
-                                                                                                                                                                                                                                                                                                                               ~^~~~~~~~~~~~~~
-referenced by:
-    recoverImpl: src\durable_store.zig:600:41
-    memory_vtable: src\durable_store.zig:758:153
-    2 reference(s) hidden; use '-freference-trace=4' to see all references

@@ -1,8 +1,0 @@
-Traceback (most recent call last):
-  File "D:\github\Ringwin-core-continuous-capacity\.scratch\core-continuous-capacity\run-10-file-processes.py", line 419, in <module>
-    main()
-  File "D:\github\Ringwin-core-continuous-capacity\.scratch\core-continuous-capacity\run-10-file-processes.py", line 284, in main
-    same_authority(seeded, recovered)
-  File "D:\github\Ringwin-core-continuous-capacity\.scratch\core-continuous-capacity\run-10-file-processes.py", line 128, in same_authority
-    for left, right in zip(before['shards'], after['shards'], strict=True):
-TypeError: zip() takes no keyword arguments

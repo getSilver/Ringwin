@@ -1,2 +1,0 @@
-{"elapsed_ns": 22167500, "working_set_bytes": 294912, "peak_working_set_bytes": null, "api": "/proc/PID/status; zero VmHWM treated as unavailable"}
-{"elapsed_ns": 123548700, "working_set_bytes": 0, "peak_working_set_bytes": null, "api": "/proc/PID/status; zero VmHWM treated as unavailable"}

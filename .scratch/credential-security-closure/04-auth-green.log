@@ -1,7 +1,0 @@
-1/6 okx_rest_auth.test.OKX signature and Demo headers are stable and credentials are cleared...OK
-2/6 okx_rest_auth.test.credential direct protected import validates complete fields before signing...OK
-3/6 protected_memory.test.protected buffer permits sensitive writes only after native protection...OK
-4/6 protected_memory.test.protected buffer release erases full mapping before unlock and free...OK
-5/6 protected_memory.test.protected buffer rejects allocation locking dump and access failures without leaks...OK
-6/6 protected_memory.test.protected buffer cleans up cancellation and failed access transitions...OK
-All 6 tests passed.

@@ -1,8 +1,0 @@
-1/1 execution_gateway.test.Gateway public proof preserves physical binding and rechecks per instrument rules and selection...expected error.NotSent, found .accepted
-FAIL (TestExpectedError)
-D:\github\Ringwin-core-continuous-capacity\src\execution_gateway.zig:1240:32: 0x7ff77fec5199 in test.Gateway public proof preserves physical binding and rechecks per instrument rules and selection (test_zcu.obj)
-    if (context.failure) |err| return err;
-                               ^
-0 passed; 0 skipped; 1 failed.
-error: the following test command failed with exit code 1:
-.zig-cache\o\5616c677cb39e0721817c392e6770981\test.exe --seed=0x29147142

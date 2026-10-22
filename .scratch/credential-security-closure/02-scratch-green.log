@@ -1,2 +1,0 @@
-1/1 credential_kdf.test.credential KDF allocates crypto scratch from protected allocator and releases on OOM...OK
-All 1 tests passed.

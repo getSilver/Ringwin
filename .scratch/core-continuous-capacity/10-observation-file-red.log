@@ -1,6 +1,0 @@
-src\windows_observation_file_acceptance.zig:6:20: error: root source file struct 'core_observation_capacity_acceptance' has no member named 'initializeRoute'
-    _ = observation.initializeRoute;
-        ~~~~~~~~~~~^~~~~~~~~~~~~~~~
-src\core_observation_capacity_acceptance.zig:1:1: note: struct declared here
-//! Ticket 04: offline seam fixtures; these four routes do not qualify online protocols.
-^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

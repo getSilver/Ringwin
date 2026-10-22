@@ -1,9 +1,0 @@
-{
-  "stage": "06-final-v2-cli-windows-chain-test",
-  "state": "completed-stage",
-  "source_tree_sha256": "c508f89c8c6faae0c428e3e2195df957d4377a453a673ee772edec2c9d2b17b4",
-  "started_utc": "2026-10-14T10:18:09.3643958Z",
-  "parent_pid": 2628,
-  "command": "\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-final-v2-cli.exe\" --windows-chain-test",
-  "exit_code": 0
-}

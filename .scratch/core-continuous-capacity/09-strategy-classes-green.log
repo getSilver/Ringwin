@@ -1,5 +1,0 @@
-1/2 main.test_0...OK
-2/2 core_observation_capacity_acceptance.test.Observation capacity 500 combinations four continuous Owners retain 100 selected resting orders...continuous classes selected_quotes=true funding_spot_perpetual_pairs=4 cross_venue_pairs=1 independent_risk=true matched_base_quantity=true
-observation_capacity: combinations=500 selected_live=100 owners=4 max_snapshot_bytes=831817 shard_bytes=22662224
-OK
-All 2 tests passed.

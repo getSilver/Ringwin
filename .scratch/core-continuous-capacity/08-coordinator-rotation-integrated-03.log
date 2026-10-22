@@ -1,5 +1,0 @@
-1/2 account_coordinator.test.coordinator history pins incomplete forced source...OK
-2/2 account_coordinator.test.coordinator history durable writer rotates beyond old journal capacity and recovers exact sequence...FAIL (TruncatedSegmentHeader)
-1 passed; 0 skipped; 1 failed.
-error: the following test command failed with exit code 1:
-.zig-cache\o\3e8b03e2a57ca212686dd9f035e5b8ed\test.exe --seed=0x88867b38

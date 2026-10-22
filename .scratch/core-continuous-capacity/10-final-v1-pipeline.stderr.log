@@ -1,6 +1,0 @@
-Traceback (most recent call last):
-  File "D:\github\Ringwin-core-continuous-capacity\.scratch\core-continuous-capacity\run-10-final-acceptance.py", line 122, in <module>
-    run(label + '-file-processes', [sys.executable, out / 'run-10-file-processes.py',
-  File "D:\github\Ringwin-core-continuous-capacity\.scratch\core-continuous-capacity\run-10-final-acceptance.py", line 81, in run
-    assert code == 0, label + ' failed; original results retained'
-AssertionError: app-file-processes failed; original results retained

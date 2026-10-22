@@ -1,9 +1,0 @@
-{
-  "source_tree_sha256": "85c00368e0bce74b876a6934864911bb810094992434e29e95da7536d975f999",
-  "artifact_sha256": "56d8e88916277b8a49807de8bea4f6efca9011cb5de53c36a46efc80fca7570a",
-  "started_utc": "2026-10-13T15:21:42.2491676Z",
-  "finished_utc": "2026-10-13T15:21:52.7310409Z",
-  "exit_code": 0,
-  "command": "D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\05-functional-cli.exe --offline-fixture",
-  "capture": "native direct file handles"
-}

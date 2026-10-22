@@ -1,6 +1,0 @@
-1/5 control_archive_acceptance.test.08 control history faults preserve authority active pins and committed roots without sending...OK
-2/5 control_archive_acceptance.test.08 control cold duplicate expiry conflict and unavailable proof never revive authority...OK
-3/5 control_archive_acceptance.test.08 eighty committed Core cutovers continue independent activation history and retire old fences...OK
-4/5 control_archive_acceptance.test.08 archived EnableTrading never restores stopped authority and expired authorization stays rejected...OK
-5/5 control_archive_acceptance.test.08 control archive preserves an active operation and unresolved closed gate through recovery...OK
-All 5 tests passed.

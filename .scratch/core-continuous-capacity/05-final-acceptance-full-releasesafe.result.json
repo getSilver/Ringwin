@@ -1,7 +1,0 @@
-{
-  "source_tree_sha256": "ea80a6aef916f2b9c9390cda2c4265e1a0e58456d2e5c156908117d7f6d7009a",
-  "started_utc": "2026-10-13T11:17:18.5542211Z",
-  "finished_utc": "2026-10-13T13:49:52.4373241Z",
-  "exit_code": -1,
-  "command": "./.scratch/core-continuous-capacity/05-measured-quota-full-releasesafe.exe"
-}

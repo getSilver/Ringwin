@@ -1,6 +1,0 @@
-Traceback (most recent call last):
-  File "/mnt/d/github/Ringwin-core-continuous-capacity/.scratch/core-continuous-capacity/audit-11-processes.py", line 87, in <module>
-    main()
-  File "/mnt/d/github/Ringwin-core-continuous-capacity/.scratch/core-continuous-capacity/audit-11-processes.py", line 54, in main
-    assert processes.inventory(Path(directory)) == expected, 'Retained physical dataset drift'
-AssertionError: Retained physical dataset drift

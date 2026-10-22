@@ -1,8 +1,0 @@
-{
-  "source_tree_sha256": "85c00368e0bce74b876a6934864911bb810094992434e29e95da7536d975f999",
-  "started_utc": "2026-10-13T14:19:50.9356436Z",
-  "finished_utc": "2026-10-13T14:23:48.6380010Z",
-  "exit_code": 0,
-  "command": "D:\\Program Files\\zig\\zig.exe build -Doptimize=ReleaseSafe",
-  "capture": "native direct file handles"
-}

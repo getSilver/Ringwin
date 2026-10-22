@@ -1,9 +1,0 @@
-D:\github\Ringwin-credential-gateway-injection\.scratch\credential-securit
-y-closure\05 wrapper fixture v3\tools\run-windows-demo-readonly.ps1 : The 
-property 'StandardInputEncoding' cannot be found on this object. Verify th
-at the property exists and can be set.
-    + CategoryInfo          : InvalidOperation: (:) [run-windows-demo-rea 
-   donly.ps1], RuntimeException
-    + FullyQualifiedErrorId : PropertyAssignmentException,run-windows-dem 
-   o-readonly.ps1
- 

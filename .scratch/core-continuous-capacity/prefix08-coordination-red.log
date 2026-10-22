@@ -1,6 +1,0 @@
-src\account_coordinator.zig:2581:73: error: no field or member function named 'prepareForcedSourceHistory' in 'account_coordinator.AccountCoordinator'
-    try std.testing.expectError(error.ForcedSourceNotClosed, coordinator.prepareForcedSourceHistory());
-                                                             ~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~
-src\account_coordinator.zig:492:32: note: struct declared here
-pub const AccountCoordinator = struct {
-                               ^~~~~~

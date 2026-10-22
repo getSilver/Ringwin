@@ -1,6 +1,0 @@
-1/5 durable_store.test.checkpoint store local file 100 rotations retain audit and two snapshot generations...OK
-2/5 durable_store.test.checkpoint store file fault boundaries select complete old or new roots...OK
-3/5 durable_store.test.checkpoint store snapshot reclaim commits references before obsolete object deletion...OK
-4/5 durable_store.test.checkpoint store publishes after fallback while preserving two valid generations...OK
-5/5 durable_store.test.large resident snapshots survive memory publication and two file reopens...OK
-All 5 tests passed.

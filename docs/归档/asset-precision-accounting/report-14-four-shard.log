@@ -1,8 +1,0 @@
-four_shard_acceptance: schema=13, journal_schema=30, state_schema=34, shards=4, replay=equivalent, recovery_paths=3
-shard_0: barrier=27, digest=1b78ce9695cde81468a3fdd6eeadd1144ef3b021bd380cf17143cd7ab230cdc5
-shard_1: barrier=33, digest=eaceecaec57c730b72894eee861757ab089442762b760ffae97ff89756b4adf1
-shard_2: barrier=26, digest=621e3c170117c9d1246785959b71404554d00d92a8288a82305a7796005fbaf9
-shard_3: barrier=26, digest=c3ec49c9c6debff046721f57855fe1ac8f4d2724855bf4351465042174e05096
-coordinator_barrier=17, coordinator_digest=56a6be6621b1087d252d1746431af562018d631d728f0e1ae071f7194f276ffa
-shared_summary=9e949aa1c2826aa00a5b4987267b426f1f5b6de10ad3c537c04b1d722739e190
-side_effects: owned_command_count=4, replay_send_capability=false

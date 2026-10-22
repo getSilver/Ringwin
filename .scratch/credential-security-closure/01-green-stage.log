@@ -1,3 +1,0 @@
-1/2 credential_store.test.public stage preserves corrupt existing file and unrelated temporary file...OK
-2/2 credential_store.test.public stage concurrent first registration admits one authenticated identity...OK
-All 2 tests passed.

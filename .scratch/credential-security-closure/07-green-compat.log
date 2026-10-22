@@ -1,2 +1,0 @@
-1/1 credential_aead.test.credential AEAD matches original XChaCha20 Poly1305 bytes...OK
-All 1 tests passed.

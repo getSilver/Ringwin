@@ -1,3 +1,0 @@
-src\control_archive_acceptance.zig:140:113: error: expected ';' after statement
-    _ = try harness.owner.apply(.{ .core = .{ .identity = 81, .payload = .{ .version_activation = retired } } }));
-                                                                                                                ^

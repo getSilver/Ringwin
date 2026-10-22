@@ -1,8 +1,0 @@
-src\control_archive_acceptance.zig:19:34: error: no field or member function named 'archiveControlHistory' in 'demo_authority.Owner'
-            _ = try harness.owner.archiveControlHistory(&harness.gateway);
-                    ~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~
-src\demo_authority.zig:306:19: note: struct declared here
-pub const Owner = struct {
-                  ^~~~~~
-src\control_archive_acceptance.zig:19:34: note: method invocation only supports up to one level of implicit pointer dereferencing
-src\control_archive_acceptance.zig:19:34: note: use '.*' to dereference pointer

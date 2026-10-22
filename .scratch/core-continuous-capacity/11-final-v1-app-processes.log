@@ -1,8 +1,0 @@
-Traceback (most recent call last):
-  File "/mnt/d/github/Ringwin-core-continuous-capacity/.scratch/core-continuous-capacity/run-10-file-processes.py", line 455, in <module>
-    main()
-  File "/mnt/d/github/Ringwin-core-continuous-capacity/.scratch/core-continuous-capacity/run-10-file-processes.py", line 374, in main
-    recovered = run('recover', f'recover-{round_number:02}')
-  File "/mnt/d/github/Ringwin-core-continuous-capacity/.scratch/core-continuous-capacity/run-10-file-processes.py", line 309, in run
-    raise RuntimeError('Source drift during command')
-RuntimeError: Source drift during command

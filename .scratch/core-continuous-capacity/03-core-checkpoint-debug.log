@@ -1,3 +1,0 @@
-src\okx_private_recovery.zig:70:52: error: expected type expression, found 'resume'
-    boundary: ?demo.PrivateRecoveryBoundary = null,
-                                                   ^

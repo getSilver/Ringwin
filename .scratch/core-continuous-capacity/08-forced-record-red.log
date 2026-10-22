@@ -1,6 +1,0 @@
-src\forced_archive_acceptance.zig:16:26: error: root source file struct 'economics' has no member named 'ForcedSource'
-    var source: economics.ForcedSource = .{ .core_event_identity = 50, .core_times = .{ .source = 100, .receive = 101, .monotonic = 102, .wall = 103, .presence = .{ .source = true, .receive = true, .monotonic = true, .wall = true } }, .accepted_input_digest = history.hash("accepted original forced input"), .exchange_account = 7, .portfolio = 8, .strategy = 9, .instrument = 1, .rules_version = 1 };
-                ~~~~~~~~~^~~~~~~~~~~~~
-src\economics.zig:1:1: note: struct declared here
-const std = @import("std");
-^~~~~

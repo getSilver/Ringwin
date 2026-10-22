@@ -1,7 +1,0 @@
-{
-  "started_utc": "2026-10-14T03:40:46.8937505Z",
-  "finished_utc": "2026-10-14T03:41:11.5656063Z",
-  "scope": "five public Owner safety boundaries including two Fill backlog checkpoint/recovery; intermediate unfrozen candidate",
-  "command": "& 'D:\\Program Files\\zig\\zig.exe' test src/main.zig -O Debug --stack 268435456 --test-filter 'Owner synchronous safety Fill' '-femit-bin=.scratch/core-continuous-capacity/06-safety-inline-boundaries-debug.exe' 1> .scratch/core-continuous-capacity/06-safety-inline-boundaries-debug.stdout.log 2> .scratch/core-continuous-capacity/06-safety-inline-boundaries-debug.log",
-  "exit_code": 0
-}

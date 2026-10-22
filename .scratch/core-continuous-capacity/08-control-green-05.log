@@ -1,6 +1,0 @@
-src\demo_authority.zig:773:15: error: local constant shadows declaration of 'source'
-        const source = try @import("snapshot_codec.zig").decodeBare(result.record_bytes[0..result.record_len], @import("account_coordinator.zig").ForcedSourceHistory);
-              ^~~~~~
-src\demo_authority.zig:1032:9: note: declared here
-    pub fn source(self: *const Owner) !*const trading.TradingShard {
-    ~~~~^~

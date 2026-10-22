@@ -1,6 +1,0 @@
-src\durable_store.zig:719:18: error: invalid left-hand side to assignment
-        errdefer if (!consumer_failed) self.gate = .closed;
-                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-src\durable_store.zig:1216:18: error: invalid left-hand side to assignment
-        errdefer if (!consumer_failed) self.gate = .closed;
-                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

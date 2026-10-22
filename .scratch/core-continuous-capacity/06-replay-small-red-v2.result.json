@@ -1,7 +1,0 @@
-{
-  "started_utc": "2026-10-14T08:53:09.9125372Z",
-  "finished_utc": "2026-10-14T08:53:12.7700580Z",
-  "exit_code": 1,
-  "command": "\"\"D:\\Program Files\\zig\\zig.exe\" test src/main.zig -O ReleaseSafe --stack 67108864 --test-filter \"recovery retains admission fence\" \"-femit-bin=D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-replay-small-red-v2.exe\" 1>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-replay-small-red-v2.stdout.log\" 2>\"D:\\github\\Ringwin-core-continuous-capacity\\.scratch\\core-continuous-capacity\\06-replay-small-red-v2.log\"\"",
-  "scope": "public recoverStableInto regression;64MiB;zero orders;before replay fix"
-}

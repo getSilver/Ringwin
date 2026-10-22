@@ -1,6 +1,0 @@
-src\okx_rest_auth.zig:175:38: error: struct 'okx_rest_auth.Credentials' has no member named 'initEmpty'
-    var credentials = try Credentials.initEmpty();
-                          ~~~~~~~~~~~^~~~~~~~~~
-src\okx_rest_auth.zig:9:25: note: struct declared here
-pub const Credentials = struct {
-                        ^~~~~~

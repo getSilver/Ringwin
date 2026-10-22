@@ -1,8 +1,0 @@
-1/7 main.test_0...OK
-2/7 fill_archive_acceptance.test.Owner fill archive preserves Core fill economic coverage through cold proof and recovery...OK
-3/7 fill_archive_acceptance.test.Owner fill snapshot rejects inconsistent cumulative quantity and resident evidence...OK
-4/7 fill_archive_acceptance.test.Owner reclaims ten partial fill windows without losing per order quantity and recovers cold facts without sending...OK
-5/7 fill_archive_acceptance.test.07 Owner archives repeated third asset fees and rebates with complete ledger and closed window...OK
-6/7 fill_archive_acceptance.test.Owner fill archive publication and Gateway failure boundaries retain recoverable economic facts...OK
-7/7 fill_archive_acceptance.test.Owner order then fill then order archive lineage recovers old ownership without sending...OK
-All 7 tests passed.

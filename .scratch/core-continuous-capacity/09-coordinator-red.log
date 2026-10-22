@@ -1,6 +1,0 @@
-src\account_coordinator.zig:1851:36: error: type 'u8' cannot represent integer value '1024'
-    summary.open_orders = @intCast(@as(usize, 1024));
-                                   ^~~~~~~~~~~~~~~~
-referenced by:
-    account_coordinator: src\main.zig:5:37
-    test_0: src\main.zig:177:9

@@ -1,4 +1,0 @@
-1/2 main.test_0...OK
-2/2 trading_shard.test.optimization borrowed canonical snapshot matches copy canonicalization without mutating source...snapshot comparison: 3 identical encodings, legacy=372504 us borrowed=259402 us bytes=700915
-OK
-All 2 tests passed.

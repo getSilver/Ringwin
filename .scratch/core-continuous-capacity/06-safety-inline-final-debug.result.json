@@ -1,7 +1,0 @@
-{
-  "exit_code": 0,
-  "scope": "existing public two pending lanes regression, original cumulative20 preserved, highwater and tail recovery; intermediate unfrozen candidate",
-  "command": "& 'D:\\Program Files\\zig\\zig.exe' test src/main.zig -O Debug --stack 268435456 --test-filter 'Owner preserves deferred history' '-femit-bin=.scratch/core-continuous-capacity/06-safety-inline-final-debug.exe' 1> .scratch/core-continuous-capacity/06-safety-inline-final-debug.stdout.log 2> .scratch/core-continuous-capacity/06-safety-inline-final-debug.log",
-  "started_utc": "2026-10-14T03:43:03.0632835Z",
-  "finished_utc": "2026-10-14T03:43:26.1163930Z"
-}

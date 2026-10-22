@@ -1,8 +1,0 @@
-Traceback (most recent call last):
-  File "D:\github\Ringwin-credential-gateway-injection\.scratch\credential-security-closure\05-validate.py", line 63, in <module>
-    if __name__=='__main__':main()
-  File "D:\github\Ringwin-credential-gateway-injection\.scratch\credential-security-closure\05-validate.py", line 40, in main
-    run('windows-children',[sys.executable,str(OUT/'05-check-children.py'),'--final'])
-  File "D:\github\Ringwin-credential-gateway-injection\.scratch\credential-security-closure\05-validate.py", line 33, in run
-    if code!=0:raise RuntimeError(name+' failed with '+str(code))
-RuntimeError: windows-children failed with 1

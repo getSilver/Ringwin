@@ -1,7 +1,0 @@
-src\account_coordinator.zig:2174:39: error: optional type '?canonical_event.InstrumentQuantity' does not support field access
-            snapshot.best_bid_quantity.instrument = 1;
-            ~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~~
-src\account_coordinator.zig:2174:39: note: consider using '.?', 'orelse', or 'if'
-referenced by:
-    account_coordinator: src\main.zig:5:37
-    test_0: src\main.zig:177:9

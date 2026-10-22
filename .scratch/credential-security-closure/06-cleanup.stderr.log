@@ -1,7 +1,0 @@
-D:\github\Ringwin-credential-security-closure\.scratch\credential-security-closure\06-cleanup-implementers.ps1 : The te
-rm 'Get-FileHash' is not recognized as the name of a cmdlet, function, script file, or operable program. Check the spel
-ling of the name, or if a path was included, verify that the path is correct and try again.
-    + CategoryInfo          : ObjectNotFound: (Get-FileHash:String) [06-cleanup-implementers.ps1], CommandNotFoundExce 
-   ption
-    + FullyQualifiedErrorId : CommandNotFoundException,06-cleanup-implementers.ps1
- 

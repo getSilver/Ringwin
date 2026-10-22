@@ -1,6 +1,0 @@
-src\okx_auth_transport_synthetic_test.zig:19:70: error: value with comptime-only type '@EnumLiteral()' depends on runtime control flow
-        try std.testing.expectEqual(if (failure == 0) .response else if (failure > 0) .proven_before_send else .write_or_response_uncertain, result.outcome);
-                                                                     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-src\okx_auth_transport_synthetic_test.zig:19:49: note: runtime control flow here
-        try std.testing.expectEqual(if (failure == 0) .response else if (failure > 0) .proven_before_send else .write_or_response_uncertain, result.outcome);
-                                        ~~~~~~~~^~~~
