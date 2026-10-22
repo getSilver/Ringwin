@@ -1,1 +1,0 @@
-credential_admission: state=ready, mode=read_only, send_capability=false, execution_separate=true, encrypted_file=true, metadata_authenticated=true, lifecycle_persisted=true

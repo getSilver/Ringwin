@@ -1,4 +1,0 @@
-Traceback (most recent call last):
-  File "D:\github\Ringwin-credential-gateway-injection\.scratch\credential-security-closure\05-check-children.py", line 27, in <module>
-    if name=='forward-early-exit':assert r.returncode==1 and b'BrokenPipe' in r.stderr,(name,r.returncode,r.stderr)
-AssertionError: ('forward-early-exit', 1, b'error: Unexpected\n')

@@ -67,37 +67,6 @@ tools\verify-core-wave.ps1
 ```
 
 任一断言失败立即停止。成功输出由子验收实际结果汇总的 `core_wave_evidence={...}` JSON；当前离线 schema 为 2，Testnet 未运行。
-显式启用 OKX Demo 成交事实时追加 `-DemoLive`（要求 `.env.local` 中合格的 Demo Key）。
-
-## OKX Demo 整波验收
-
-默认入口只读，但仍要求本机 `.env.local` 中存在合格的 Demo Key：
-
-```powershell
-tools\verify-okx-demo-wave.ps1
-```
-
-它失败即停，验证精确 Zig/libcurl 版本、格式、Debug/ReleaseSafe/ReleaseFast 核心合同、
-确定性摘要、公共 HTTPS、Demo private WSS 与分页 REST 对账，并完成 `x86_64-linux-gnu`
-compile-only 检查。成功输出：
-
-```text
-okx_demo_wave_acceptance=passed mode=read_only qualification=not_run linux=compile_only production_qualification=false
-```
-
-只有 SystemOwner 明确允许 Demo 成交时才运行：
-
-```powershell
-tools\verify-okx-demo-wave.ps1 -DemoLive
-```
-
-它额外执行固定 BTC-USDT IOC 策略、真实 Demo 回报、反向清理、经济投影与稳定重放，
-并在结束时再次验证零挂单、零仓位、零负债及无 BTC 残余。异常后不得重复普通入口；若
-preflight 只报告 BTC 残余，使用 `tools\run-okx-demo-live-acceptance.ps1 -CleanupOnly`。
-凭证只从被 Git 忽略的 `.env.local` 临时注入，不进入命令行或输出。
-
-该入口只证明 Windows Demo 功能和 Linux 源码可交叉编译；不证明 Linux 运行时/性能、
-策略收益、生产账户或生产部署资格。
 
 ## 环境
 
@@ -428,28 +397,7 @@ Windows 2C/4T 开发节点接近 `2M events/s`，但四分片合并 P99 为
 [动态架构图](docs/trading-engine-architecture.html)，当前修复波次证据见
 [交易核心完整性修复地图](.scratch/trading-core-integrity-repair/map.md)。
 
-## 已完成能力波次与下一步
 
-SystemOwner 已确认
-[Python StrategyHost 产品化接入](.scratch/python-strategy-host-productization/map.md)和
-[OKX Venue Adapter 最小纵向接入](.scratch/okx-venue-adapter/map.md)能力波次完成。
-
-OKX 波次完成了 v5/传输研究、
-Demo 账户安全资格、首个四操作 VenueAdapter seam、OKX 公共 Instrument/L2/参考价/资金费率
-标准化、私有 ExecutionReport/Fill/账户事实和 REST 双读恢复屏障，以及完整订单 codec、受保护
-Market、原地 amend、逐项 batch 和安全优先有界调度；现有 SimulatedVenue 已只通过该 seam 接收
-OrderCommand、返回 dispatch 与 ingress。显式授权的 BTC-USDT Demo 成交/清理验收可运行
-`tools\run-okx-demo-live-acceptance.ps1 -DemoLive`；它固定使用 Demo endpoint/header、USDT-only
-零 BTC baseline、两轮 REST 稳定屏障、25 USDT 上限和最终零残余预检；固定策略已真实穿过
-Gateway、TradingShard 现金风控、OrderCommand、OKX 回报、经济投影与稳定重放。断连、L2 缺口、
-认证失败、限流、Unknown、部分成功、并发 Fill、REST 分页、迟到事实和清理失败矩阵也已闭合；
-整波自动资格、异常关机后复验与最终证据边界均已闭合。
-
-当前资格使用统一证据结构，但环境不会被抹平：OKX 的真实 Demo 整波结论为
-`DemoQualified`，Binance/Bybit 只有目标 Testnet 的真实运行才能结论为
-`TestnetQualified`。默认离线波次不会生成任一真实运行资格，也不会由布尔值或摘要自授予资格。
-Linux 生产性能、生产账户、密钥托管和部署资格仍是独立波次。当前修复波次已完成，地图中的
-最终证据与未资格化边界见 [trading-core-integrity-repair map](.scratch/trading-core-integrity-repair/map.md)。
 
 ## License
 

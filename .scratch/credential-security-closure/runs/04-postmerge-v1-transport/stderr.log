@@ -1,4 +1,0 @@
-1/1 okx_auth_transport_synthetic_test.test.protected credentials survive borrowed transport rebuild and synthetic request failures...okx_transport_failure outcome=proven_before_send curl_code=0 http_status=0
-okx_transport_failure outcome=write_or_response_uncertain curl_code=55 http_status=0
-OK
-All 1 tests passed.

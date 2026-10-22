@@ -1,3 +1,0 @@
-1/2 entry.test_0...OK
-2/2 testing.acceptance.history.fill_archive_acceptance.test.Owner reclaims ten partial fill windows without losing per order quantity and recovers cold facts without sending...OK
-All 2 tests passed.

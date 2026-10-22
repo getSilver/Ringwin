@@ -135,28 +135,6 @@ The current implementation includes:
 * multi-shard fault isolation;
 * OKX Demo Trading integration.
 
-## OKX Demo Trading
-
-Ringwin includes an integration path for **OKX Demo Trading**.
-
-The current implementation supports areas such as:
-
-* market data;
-* order placement;
-* amendments;
-* cancellations;
-* execution reports;
-* partial and full fills;
-* REST reconciliation;
-* reconnect handling;
-* unknown order state.
-
-The Demo integration is intended for testing and validation only.
-
-Its live result is recorded as `DemoQualified` in the shared venue evidence
-model. It is never promoted to `TestnetQualified` or production qualification;
-those require the matching environment and venue-specific run evidence.
-
 ## Requirements
 
 The current development environment uses:
