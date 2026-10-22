@@ -23,9 +23,9 @@ const place_fee_atoms: i128 = 400_000;
 const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
 pub const acceptance_schema_version: u16 = production_contract.acceptance_schema_version;
-// StateDigestV12 / journal44 / depth schema15 + Coordinator v10;
+// StateDigestV13 / journal45 / state49 / canonical16 / registry43 + Coordinator v10;
 // recaptured only after economics and three-path recovery equality.
-const expected_shared_summary = "1750cdd35997d0e3e6d0cf472d83e49663ceb7383523f50155008ae5fc6851ef";
+const expected_shared_summary = "92401d632b75927a387e188347da1b4116ab2c00363cac6dd5c6687966c3a221";
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
     return trading.applyStable(shard, stable_journal, .{ .core = input });
