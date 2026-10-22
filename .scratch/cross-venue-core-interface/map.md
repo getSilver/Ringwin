@@ -48,10 +48,12 @@ Status: open
 
 ## Frontier
 
-- [09a 核心周期闭合](issues/09a-cycle-closure-residual.md)：in_progress；用户已批准零残余释放、非零继续占用。零残余终结与持久恢复已实现，成功费用更正及非零承接仍待验收，整票未关闭；见[验证记录](09a-verification.md)。
+- [09a 核心周期闭合](issues/09a-cycle-closure-residual.md)：in_progress；零残余终结与持久恢复已有证据。用户追加授权实现正现货尘埃承接和独立费用调整，当前并行实施、尚未整合验收；生产残余参数和实际 Venue 更正凭证未获资格。见[实施合同](09-implementation-contract.md)和[既有验证记录](09a-verification.md)。
 - [08 版本化策略状态与确定性 checkpoint](issues/08-deterministic-checkpoint.md)：in_progress；schema/codec/容量已确认，用户收窄本轮为 checkpoint 基础设施，真实模型验收保持待定。见[实现合同](08-checkpoint-design.md)及[验证记录](08-verification.md)，不解除 09b 的整票依赖。
 
 ## Decisions so far
+
+- 2026-10-22（追加）：用户要求在本窗口由两个 GPT 6.1 Sol medium 子代理实施非零残余承接与独立费用调整，最终全量回归在主窗口整合后统一执行。沿用同一 09a 和既有公共接缝；未配置残余规则默认关闭，首版只承接 gross/OpenCost/保证金归零后不足一 lot 的正现货余额，保留原所有者和不可花费资格。费用调整追加账务，不修改原 Fill 或成交累计；实际适配器未具备明确凭证时仍拒绝推测更正。见 [ADR0018](../../docs/adr/0018-retain-spot-residuals-and-append-fee-adjustments.md)。08/09b/09 范围与依赖保持，尚不关闭 09a。
 
 - 2026-10-22：用户批准 09a 首版仅精确零残余释放，保留 08 基础设施范围，09b/09 待验收。新增核心终结事实、双账户对账覆盖核对、双键原子释放、终结身份保留、周期身份 pin 及显式账户 Fill 归档；迟到旧命令 Unknown 不得借新周期提前释放。最终 ReleaseSafe 707/707、Python 12/12、真实 Host 集成通过。journal/state/registry 为 44/48/42；活动与终结身份合计 64 个，无认证回收时达限拒绝新周期。用户明确保留 09a in_progress，后续确定费用更正身份和证据合同：费用内容变化只取得冲突失败关闭证据，成功更正入账及非零残余承接未实现；见[合同](09-implementation-contract.md)和[验证记录](09a-verification.md)。未部署、下单或取得运行资格。
 
