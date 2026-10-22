@@ -27,6 +27,7 @@ pub const Builder = struct {
 
     /// Owner may append trusted Gateway evidence before publishing this batch.
     pub fn add(self: *Builder, identity: history.Identity, value: anytype) !void {
+        if (identity == .fee_origin) return error.UnexpectedFillHistoryKey;
         const key: history.Key = .{ .origin = self.origin, .identity = identity };
         if (self.byte_count >= self.bytes.len) return error.OrderHistoryBatchCapacity;
         const end = @min(self.bytes.len, @as(usize, self.byte_count) + history.max_record_bytes);
@@ -327,7 +328,7 @@ test "order history batch owns relocated records and archives every released sem
             .report => try std.testing.expectEqualDeep(shard.oms.report_history[0], try codec.decodeBare(bytes, oms.ExecutionReport)),
             .reconciliation => try std.testing.expectEqualDeep(shard.oms.reconciliation_history[0], try codec.decodeBare(bytes, oms.ReconciliationResult)),
             .client_order_id, .dispatch_command, .dispatch_result => return error.UnexpectedClientOrderIdKey,
-            .canonical_fill, .core_fill, .fill_detail, .fill_economic_digest => return error.UnexpectedFillHistoryKey,
+            .fee_origin, .canonical_fill, .core_fill, .fill_detail, .fill_economic_digest => return error.UnexpectedFillHistoryKey,
             .canonical_funding, .core_funding, .funding_detail, .funding_economic_digest, .reconciliation_window, .canonical_account_reconciliation => return error.UnexpectedEconomicHistoryKey,
             .operational_command, .retired_gate, .resolved_latch, .strategy_fence, .control_archive, .version_activation, .coordinator_forced_source, .coordinator_forced_allocation, .coordinator_gateway_command, .coordinator_account_fact, .core_forced, .forced_detail, .forced_economic_digest, .coordinator_gateway_closure, .cycle, .deployment_configuration => return error.UnexpectedControlHistoryKey,
         }
@@ -336,6 +337,7 @@ test "order history batch owns relocated records and archives every released sem
     try std.testing.expectEqual(@as(u8, 1), shard.oms.intent_history_count);
     // Owner appends a separate CID-keyed DTO without replacing Command bytes.
     var extended = moved;
+    try std.testing.expectError(error.UnexpectedFillHistoryKey, extended.add(.{ .fee_origin = 1 }, @as(u64, 1)));
     const Evidence = struct { command_id: u64, accepted: bool };
     const evidence: Evidence = .{ .command_id = original_command.command_id, .accepted = true };
     const cid: history.Identity = .{ .client_order_id = original_command.client_order_id };
