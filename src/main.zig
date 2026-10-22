@@ -243,6 +243,7 @@ test {
     _ = @import("testing/acceptance/platform/asset_precision_file_recovery_acceptance.zig");
     _ = @import("testing/acceptance/accounting/native_account_continuity_acceptance.zig");
     _ = @import("testing/acceptance/accounting/native_economic_reconciliation_acceptance.zig");
+    _ = @import("testing/acceptance/accounting/fee_adjustment_inventory_acceptance.zig");
     _ = @import("testing/acceptance/accounting/native_multi_venue_accounting_acceptance.zig");
     _ = @import("testing/acceptance/accounting/simulated_native_accounting_acceptance.zig");
     _ = @import("runtime/demo/okx_live_chain.zig");

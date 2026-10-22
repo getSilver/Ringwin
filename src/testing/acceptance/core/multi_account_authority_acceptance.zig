@@ -1368,6 +1368,20 @@ fn exerciseFeeRevisions(owner: *demo.Owner) !void {
 }
 
 fn prepareCycleClosure(owner: *demo.Owner, scenario: Scenario) !void {
+    if (scenario == .cycle_spot_zero) {
+        var correction = feeEvent(owner, 1);
+        correction.venue.event.fee_adjustment.new_fee = .{ .asset = 0x425443, .atoms = 1 };
+        try applyAdapterInput(owner, correction);
+        correction.venue.envelope.identity.sequence = 2;
+        correction.venue.event.fee_adjustment.identity += 1;
+        correction.venue.event.fee_adjustment.source_version = 2;
+        correction.venue.event.fee_adjustment.previous_fee_version = 1;
+        correction.venue.event.fee_adjustment.new_fee.atoms = 0;
+        correction.venue.event.fee_adjustment.source.sequence = 2;
+        correction.venue.event.fee_adjustment.source.digest = history.hash("base fee refund before exit");
+        correction.venue.envelope.raw_evidence = correction.venue.event.fee_adjustment.source;
+        try applyAdapterInput(owner, correction);
+    }
     if (scenario == .cycle_fee_adjustment) try exerciseFeeRevisions(owner);
     const spot = scenario == .cycle_spot_zero or scenario == .cycle_spot_residual or carrying(scenario);
     if (!spot) for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }) |account, instrument| {

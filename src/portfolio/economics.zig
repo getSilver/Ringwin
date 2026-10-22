@@ -576,6 +576,7 @@ pub const Projection = struct {
                 native.balance_atoms = try std.math.add(i128, native.balance_atoms, delta);
                 var base = false;
                 for (layer.instrument_positions[0..layer.instrument_position_count]) |*position| if (position.instrument == instrument and position.product == .spot and position.base_asset == amount.asset) {
+                    position.spot_asset_atoms = try std.math.add(i128, position.spot_asset_atoms, delta);
                     position.base_fee_atoms = try std.math.add(i128, position.base_fee_atoms, expense);
                     base = true;
                 };
