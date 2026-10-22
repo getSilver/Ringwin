@@ -70,6 +70,11 @@ test "09a explicit spot dust carry preserves ownership and survives durable reco
     try exerciseAccountRecovery(.cycle_spot_carry);
 }
 
+test "09a retired residual fee increase and return keep ownership and recovery gates" {
+    try exerciseAccountRecovery(.cycle_spot_carry_increase);
+    try exerciseAccountRecovery(.cycle_spot_carry_return);
+}
+
 test "09a real base fee consuming carried inventory records economics and blocks new sends" {
     try exerciseAccountRecovery(.cycle_spot_carry_fee);
 }
@@ -102,10 +107,10 @@ test "05b shared account budget rejects 60 plus 50 and 70 plus 40 but accepts 70
     try exerciseAccountRecovery(.shared_budget);
 }
 
-const Scenario = enum { single, joint, shared_budget, fault_append, fault_commit, publish_fault, file_restore, safety_cancel, domain_history, shared_mark, reverse_competition, single_rejected, four_accounts, safety_reduce, capacity_load, unknown, cycle_closure, cycle_closure_file, cycle_closure_append, cycle_closure_commit, cycle_closure_publish, cycle_residual, cycle_spot_zero, cycle_spot_residual, cycle_spot_carry, cycle_spot_carry_fee, cycle_spot_carry_append, cycle_spot_carry_commit, cycle_spot_carry_publish, cycle_spot_carry_file, cycle_fee_conflict, cycle_fee_adjustment, cycle_fee_cold };
+const Scenario = enum { single, joint, shared_budget, fault_append, fault_commit, publish_fault, file_restore, safety_cancel, domain_history, shared_mark, reverse_competition, single_rejected, four_accounts, safety_reduce, capacity_load, unknown, cycle_closure, cycle_closure_file, cycle_closure_append, cycle_closure_commit, cycle_closure_publish, cycle_residual, cycle_spot_zero, cycle_spot_residual, cycle_spot_carry, cycle_spot_carry_return, cycle_spot_carry_increase, cycle_spot_carry_fee, cycle_spot_carry_append, cycle_spot_carry_commit, cycle_spot_carry_publish, cycle_spot_carry_file, cycle_fee_conflict, cycle_fee_adjustment, cycle_fee_cold };
 fn carrying(scenario: Scenario) bool {
     return switch (scenario) {
-        .cycle_spot_carry, .cycle_spot_carry_fee, .cycle_spot_carry_append, .cycle_spot_carry_commit, .cycle_spot_carry_publish, .cycle_spot_carry_file => true,
+        .cycle_spot_carry, .cycle_spot_carry_return, .cycle_spot_carry_increase, .cycle_spot_carry_fee, .cycle_spot_carry_append, .cycle_spot_carry_commit, .cycle_spot_carry_publish, .cycle_spot_carry_file => true,
         else => false,
     };
 }
@@ -264,6 +269,19 @@ fn exerciseAccountRecovery(scenario: Scenario) !void {
         try std.testing.expectEqualSlices(u8, &before, &shard.economic_projection.semanticDigest());
         try std.testing.expectEqual(@as(i128, 1), try shard.cycles.reservedAtoms(20, 10, 0x425443));
         try std.testing.expectEqual(@as(u8, 0), shard.cycles.count);
+        if (scenario == .cycle_spot_carry_return or scenario == .cycle_spot_carry_increase) {
+            var event = feeEvent(owner, 1);
+            event.venue.event.fee_adjustment.original = shard.economic_projection.feeOrigin(1);
+            event.venue.event.fee_adjustment.new_fee = .{ .asset = 0x425443, .atoms = if (scenario == .cycle_spot_carry_return) 0 else 1 };
+            event.venue.event.fee_adjustment.effective_time_utc_ns = fixture.atGroup(62, .{ .identity = 0, .payload = .recovery_completed }).core.source_time;
+            event.venue.envelope.times.source_utc_ns = event.venue.event.fee_adjustment.effective_time_utc_ns;
+            const original = shard.cycles.closed[0];
+            try applyAdapterInput(owner, event);
+            try std.testing.expectEqual(@as(i128, if (scenario == .cycle_spot_carry_return) 2 else 0), shard.economic_projection.portfolio.spotInventoryAtoms(0x425443));
+            try std.testing.expect(std.meta.eql(original, shard.cycles.closed[0]));
+            try std.testing.expectEqual(@as(u64, 3), shard.economic_projection.fee_revisions[0].adjustment.cycle_first_sequence);
+            try std.testing.expect(shard.oms.recovery_only);
+        }
         if (scenario == .cycle_spot_carry or scenario == .cycle_spot_carry_fee) try exerciseCarriedCycle(owner, scenario == .cycle_spot_carry_fee);
     }
     if (scenario == .cycle_fee_conflict) {
@@ -459,6 +477,7 @@ fn exerciseAccountRecovery(scenario: Scenario) !void {
     _ = try trading.TradingShard.restoreSnapshotInto(recovered, encoded_snapshot);
     try std.testing.expectEqualSlices(u8, &shard.canonicalStateDigest(), &recovered.canonicalStateDigest());
     try std.testing.expectEqual(@as(i128, if (scenario == .domain_history or (closing and scenario != .cycle_spot_zero)) 605 else 600), recovered.accountState(30).?.economic_projection.portfolio.usdt_balance_atoms);
+    if (scenario == .cycle_spot_carry_return or scenario == .cycle_spot_carry_increase) try std.testing.expect(recovered.oms.recovery_only);
     if (carrying(scenario)) {
         try std.testing.expectEqual(@as(i128, 1), try recovered.cycles.reservedAtoms(20, 10, 0x425443));
         const damaged = try allocator.create(trading.TradingShard);
@@ -497,6 +516,21 @@ fn exerciseCarriedCycle(owner: *demo.Owner, fee_deficit: bool) !void {
     _ = try owner.apply(fixture.atGroup(62, .{ .identity = 20001, .payload = .{ .oms_intent_group = next } }));
     try std.testing.expectEqual(@import("../../../trading/trading_shard_event.zig").RejectReason.insufficient_spot_asset, shard.last_reject_reason);
     try std.testing.expectEqual(@as(u8, 0), shard.cycles.count);
+    if (!fee_deficit) {
+        var sibling = next;
+        sibling.first_intent_sequence = 21001;
+        sibling.members[0].intent_sequence = 21001;
+        sibling.members[0].instrument = 103;
+        sibling.members[0].limit_price = .{ .instrument = 103, .rules_version = 1, .ticks = 100000000 };
+        sibling.members[1].intent_sequence = 21002;
+        sibling.members[1].side = .buy;
+        sibling.members[1].quantity = 10000;
+        try std.testing.expectEqual(@as(i128, 1), shard.economic_projection.portfolio.spotInventoryAtoms(0x425443));
+        _ = try owner.apply(fixture.atGroup(62, .{ .identity = 21001, .payload = .{ .oms_intent_group = sibling } }));
+        try std.testing.expectEqual(@import("../../../trading/trading_shard_event.zig").RejectReason.insufficient_spot_asset, shard.last_reject_reason);
+        try std.testing.expectEqual(@as(u8, 0), shard.cycles.count);
+    }
+    try owner.checkpoint();
     next.first_intent_sequence = 20003;
     for (next.members[0..2], 0..) |*member, index| {
         member.intent_sequence = 20003 + index;
@@ -733,9 +767,10 @@ fn prepareTradingForScenario(owner: *demo.Owner, scenario: Scenario) !void {
             _ = try owner.apply(fixture.atGroup(42, .{ .identity = @intCast(950 + instrument), .account_scope = account, .payload = .{ .instrument_rules_activated = .{
                 .version = 1,
                 .instrument_identity = instrument,
-                .quantity_denominator = 10000,
-                .reservation_model = .leveraged,
-                .product = .isolated_linear_usdt,
+                .quantity_denominator = if (scenario == .cycle_spot_carry and instrument == 103) 100000000 else 10000,
+                .reservation_model = if (scenario == .cycle_spot_carry and instrument == 103) .cash else .leveraged,
+                .product = if (scenario == .cycle_spot_carry and instrument == 103) .spot else .isolated_linear_usdt,
+                .base_asset = if (scenario == .cycle_spot_carry and instrument == 103) 0x425443 else 0,
                 .venue = venue,
             } } }));
             _ = try owner.apply(fixture.atGroup(42, .{ .identity = @intCast(960 + instrument), .account_scope = account, .payload = .{ .margin_rules_activated = .{ .version = 1, .instrument = instrument } } }));
@@ -745,7 +780,7 @@ fn prepareTradingForScenario(owner: *demo.Owner, scenario: Scenario) !void {
             .instrument = instrument,
             .venue = venue,
             .environment = .simulation,
-            .product = if (spot and instrument <= 102) .spot else .isolated_linear_usdt,
+            .product = if ((spot and instrument <= 102) or (scenario == .cycle_spot_carry and instrument == 103)) .spot else .isolated_linear_usdt,
             .version = 1,
             .rules_version = 1,
             .config_version = 1,
@@ -1028,7 +1063,8 @@ fn exercisePartitionOrders(owner: *demo.Owner, scenario: Scenario) !void {
             .side = .buy,
             .quantity = .{ .instrument = instrument, .rules_version = 1, .lots = if (scenario == .capacity_load) 5000 else 10000 },
             .price = .{ .instrument = instrument, .rules_version = 1, .ticks = if (spot) 10 else 100 },
-            .fee = .{ .asset = 1, .atoms = 0 },
+            .fee = if (scenario == .cycle_spot_carry_return and account == 20) .{ .asset = 0x425443, .atoms = 1 } else .{ .asset = 1, .atoms = 0 },
+            .rebate = if (scenario == .cycle_spot_carry_return and account == 20) .{ .asset = 0x425443, .atoms = 1 } else null,
             .venue_fill_time_utc_ns = fixture.atGroup(46, .{ .identity = 0, .payload = .recovery_completed }).core.source_time,
             .liquidity = .taker,
         } };

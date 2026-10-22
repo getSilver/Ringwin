@@ -3967,9 +3967,23 @@ pub const TradingShard = struct {
         const claimed = adjustment.original orelse return error.MissingFeeOrigin;
         if (!std.meta.eql(claimed, origin)) return error.InvalidFeeEvidence;
         if (origin.original.venue_trade.venue != record.envelope.venue) return error.CanonicalScopeMismatch;
+        var previous_fee = origin.original.fee orelse return error.MissingFillFee;
+        for (self.economic_projection.fee_revisions[0..self.economic_projection.fee_revision_count]) |revision|
+            if (revision.adjustment.fill_identity == adjustment.fill_identity) {
+                previous_fee = revision.adjustment.new_fee;
+            };
         try self.checkAssetAmounts(adjustment.new_fee, true);
         try self.admitEconomicTime(adjustment.effective_time_utc_ns);
         _ = try self.economic_projection.applyFeeAdjustment(adjustment, digest_value);
+        if (self.cycles.completed(adjustment.strategy, adjustment.cycle_first_sequence)) |closed| {
+            for (closed.proof.residuals) |maybe| if (maybe) |residual| {
+                if (residual.account == adjustment.exchange_account and residual.portfolio == adjustment.portfolio and
+                    ((previous_fee.asset == residual.asset and previous_fee.atoms != 0) or
+                        (adjustment.new_fee.asset == residual.asset and adjustment.new_fee.atoms != 0)))
+                    // A returned old-cycle asset still belongs to that cycle, even with sufficient backing.
+                    self.oms.recovery_only = true;
+            };
+        }
         try self.rememberEconomicTime(std.math.cast(u64, adjustment.identity) orelse return error.IdentityOutOfRange, .fee_adjustment, digest_value, adjustment.effective_time_utc_ns);
         try self.checkEconomicRanges();
         try self.recalculateRisk(false);
