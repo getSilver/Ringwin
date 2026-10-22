@@ -698,7 +698,30 @@ pub const TradingShard = struct {
         return false;
     }
 
+    fn checkResidualBacking(self: *const TradingShard) !void {
+        for (self.cycles.closed[0..self.cycles.closed_count]) |closed| for (closed.proof.residuals) |maybe| {
+            const residual = maybe orelse continue;
+            if (residual.account != self.exchange_account_identity) continue;
+            const reserved = try self.cycles.reservedAtoms(residual.account, residual.portfolio, residual.asset);
+            if (residual.portfolio != self.portfolio_identity or
+                reserved > self.economic_projection.portfolio.spotInventoryAtoms(residual.asset) or
+                reserved > self.economic_projection.exchange.spotInventoryAtoms(residual.asset) or
+                self.open_economic_fact_count != 0 or self.open_economic_unknown_time_count != 0 or self.unresolvedEconomicGate() or
+                self.economic_projection.reconciliation_break or self.economic_fault_count != 0) return error.CycleResidual;
+        };
+    }
+
     pub noinline fn qualifyCycleClosure(self: *const TradingShard, strategy: u128, first_sequence: u64) !@import("cycle_occupancy.zig").Closure {
+        return self.qualifyCycleClosureInner(strategy, first_sequence, null);
+    }
+
+    pub noinline fn qualifyCycleResidualClosure(self: *const TradingShard, strategy: u128, first_sequence: u64, now_utc_ns: u64) !@import("cycle_occupancy.zig").Closure {
+        if (now_utc_ns == 0) return error.ResidualClockUnavailable;
+        try self.cycles.checkResidualAge(now_utc_ns);
+        return self.qualifyCycleClosureInner(strategy, first_sequence, now_utc_ns);
+    }
+
+    noinline fn qualifyCycleClosureInner(self: *const TradingShard, strategy: u128, first_sequence: u64, now_utc_ns: ?u64) !@import("cycle_occupancy.zig").Closure {
         const cycle = self.cycles.find(strategy, first_sequence) orelse return error.UnknownCycle;
         if (self.cycles.closed_count == @import("cycle_occupancy.zig").max_cycles) return error.CycleClosureCapacity;
         if (self.decision_domain_identity == 0 or cycle.count != 2 or self.history_conflict_latched or self.oms.recovery_only or
@@ -723,10 +746,70 @@ pub const TradingShard = struct {
             const entry = view.instrumentEntry(member.instrument) orelse return error.CycleNotClosed;
             for ([_]*const economics.Layer{ &view.economic_projection.portfolio, &view.economic_projection.exchange }) |layer| {
                 if (layer.instrumentPosition(member.instrument)) |position| {
-                    if (position.position.quantity != 0 or position.position.open_cost_atoms != 0 or position.margin_atoms != 0 or position.spot_asset_atoms != 0)
+                    if (position.position.quantity != 0 or position.position.open_cost_atoms != 0 or position.margin_atoms != 0 or
+                        (entry.product != .spot and position.spot_asset_atoms != 0))
                         return error.CycleResidual;
+                    if (entry.product == .spot) {
+                        const all_reserved = try self.cycles.reservedAtoms(member.account, cycle.portfolio, entry.rules.base_asset);
+                        const own_reserved = try self.cycles.reservedInstrumentAtoms(member.account, cycle.portfolio, entry.rules.base_asset, member.instrument);
+                        if (try std.math.sub(i128, position.spot_asset_atoms, own_reserved) !=
+                            try std.math.sub(i128, layer.spotInventoryAtoms(entry.rules.base_asset), all_reserved)) return error.CycleResidual;
+                    }
                 }
-                if (entry.product == .spot and layer.spotInventoryAtoms(entry.rules.base_asset) != 0) return error.CycleResidual;
+                if (entry.product == .spot) {
+                    const reserved = try self.cycles.reservedAtoms(member.account, cycle.portfolio, entry.rules.base_asset);
+                    if (layer.spotInventoryAtoms(entry.rules.base_asset) < reserved) return error.CycleResidual;
+                }
+            }
+            if (entry.product == .spot) {
+                const asset = entry.rules.base_asset;
+                const reserved = try self.cycles.reservedAtoms(member.account, cycle.portfolio, asset);
+                const atoms = try std.math.sub(i128, view.economic_projection.portfolio.spotInventoryAtoms(asset), reserved);
+                if (atoms != try std.math.sub(i128, view.economic_projection.exchange.spotInventoryAtoms(asset), reserved)) return error.CycleResidual;
+                if (atoms != 0) {
+                    const now = now_utc_ns orelse return error.CycleResidual;
+                    const rule = self.cycles.residualRule(asset) orelse return error.ResidualDisabled;
+                    const definition = view.asset_registry.get(asset) orelse return error.CycleResidual;
+                    const unit = try view.baseAtomsPerLot(entry);
+                    if (atoms <= 0 or atoms >= unit.atoms or rule.asset_version != definition.definition.version or now < cursor.through_utc_ns)
+                        return error.CycleResidual;
+                    // A shared Asset's other instrument must not donate its inventory to this cycle.
+                    for (view.economic_projection.portfolio.instrument_positions[0..view.economic_projection.portfolio.instrument_position_count]) |other|
+                        if (other.instrument != member.instrument and other.base_asset == asset and
+                            (other.position.quantity != 0 or other.position.open_cost_atoms != 0 or other.margin_atoms != 0)) return error.CycleResidual;
+                    for (self.cycles.records[0..self.cycles.count]) |other| {
+                        if (other.strategy == cycle.strategy and other.first_sequence == cycle.first_sequence) continue;
+                        for (other.members[0..other.count]) |other_member| {
+                            if (other_member.account != member.account) continue;
+                            const other_entry = view.instrumentEntry(other_member.instrument) orelse return error.CycleResidual;
+                            if (other_entry.product == .spot and other_entry.rules.base_asset == asset) return error.CycleResidual;
+                        }
+                    }
+                    const residual: @import("cycle_occupancy.zig").Residual = .{
+                        .account = member.account,
+                        .portfolio = cycle.portfolio,
+                        .instrument = member.instrument,
+                        .asset = asset,
+                        .atoms = atoms,
+                        .instrument_version = entry.rules.version,
+                        .base_atoms_per_lot = unit.atoms,
+                        .rule = rule,
+                        .rule_fact_sequence = self.cycles.residualRuleBarrier(asset),
+                        .accepted_at_utc_ns = now,
+                        .economic_digest = view.economic_projection.semanticDigest(),
+                    };
+                    try self.cycles.checkResidualLimit(residual);
+                    var total = atoms;
+                    for (proof.residuals[0..index]) |prior| if (prior) |known| {
+                        if (known.asset == asset) total = try std.math.add(i128, total, known.atoms);
+                    };
+                    // The limit covers both legs and every earlier accepted cycle.
+                    for (self.cycles.closed[0..self.cycles.closed_count]) |closed| for (closed.proof.residuals) |prior| if (prior) |known| {
+                        if (known.asset == asset) total = try std.math.add(i128, total, known.atoms);
+                    };
+                    if (total > rule.max_total_atoms) return error.ResidualLimit;
+                    proof.residuals[index] = residual;
+                }
             }
             var found = false;
             for (view.oms.orders[0..view.oms.order_count]) |order| {
@@ -766,7 +849,14 @@ pub const TradingShard = struct {
             if (!std.meta.eql(known.proof, proof)) return error.ConflictingCycleClosure;
             return;
         }
-        const expected = try self.qualifyCycleClosure(proof.strategy, proof.first_sequence);
+        var carries = false;
+        for (proof.residuals) |maybe| if (maybe != null) {
+            carries = true;
+        };
+        const expected = if (carries) blk: {
+            if (!input.time_presence.source or input.source_time == 0) return error.ResidualClockUnavailable;
+            break :blk try self.qualifyCycleResidualClosure(proof.strategy, proof.first_sequence, input.source_time);
+        } else try self.qualifyCycleClosure(proof.strategy, proof.first_sequence);
         if (!std.meta.eql(expected, proof)) return error.ConflictingCycleClosure;
         try self.trace.append(.cycle_closed, proof.first_sequence);
         try self.cycles.close(proof, self.authoritativeBarrier());
@@ -1270,7 +1360,9 @@ pub const TradingShard = struct {
         for (self.cycles.closed[0..self.cycles.closed_count]) |closed| {
             try self.pinFact(&target, closed.fact_sequence);
             try self.pinFact(&target, closed.record.fact_sequence);
+            for (closed.proof.residuals) |maybe| if (maybe) |residual| try self.pinFact(&target, residual.rule_fact_sequence);
         }
+        for (self.cycles.residual_rule_barriers[0..self.cycles.residual_rule_count]) |barrier| try self.pinFact(&target, barrier);
         try self.pinFact(&target, self.domain_binding_fact_sequence);
         for (self.asset_registry.entries[0..self.asset_registry.count]) |entry| try self.pinFact(&target, entry.barrier);
         for (self.instrument_registry.entries[0..self.instrument_registry.count]) |entry| {
@@ -1861,8 +1953,9 @@ pub const TradingShard = struct {
                 }
                 group_sell_atoms = try std.math.add(i128, group_sell_atoms, try std.math.mul(i128, pending_lots, unit.atoms));
                 const required = try std.math.add(i128, committed_sell_atoms, group_sell_atoms);
-                if (required > self.economic_projection.portfolio.spotInventoryAtoms(unit.asset) or
-                    required > self.economic_projection.exchange.spotInventoryAtoms(unit.asset)) return error.InsufficientSpotAsset;
+                const residual = try self.cycles.reservedAtoms(self.exchange_account_identity, self.portfolio_identity, unit.asset);
+                if (required > try std.math.sub(i128, self.economic_projection.portfolio.spotInventoryAtoms(unit.asset), residual) or
+                    required > try std.math.sub(i128, self.economic_projection.exchange.spotInventoryAtoms(unit.asset), residual)) return error.InsufficientSpotAsset;
             }
             try validateExactOmsSpec(intent.*, instrument_config);
             try self.checkAssetAmounts(canonical.InstrumentQuantity{ .instrument = intent.instrument, .rules_version = instrument_config.rules.version, .lots = intent.quantity }, true);
@@ -2132,6 +2225,14 @@ pub const TradingShard = struct {
     }
 
     fn recalculateRisk(self: *TradingShard, fail_if_exceeded: bool) !void {
+        // Actual venue fees remain economic facts even when they consume protected inventory.
+        for (self.cycles.closed[0..self.cycles.closed_count]) |closed| for (closed.proof.residuals) |maybe| {
+            const residual = maybe orelse continue;
+            if (residual.account != self.exchange_account_identity) continue;
+            const reserved = try self.cycles.reservedAtoms(residual.account, residual.portfolio, residual.asset);
+            if (reserved > self.economic_projection.portfolio.spotInventoryAtoms(residual.asset) or
+                reserved > self.economic_projection.exchange.spotInventoryAtoms(residual.asset)) self.oms.recovery_only = true;
+        };
         // These compatibility summary fields are derived from the two
         // authoritative owners.  OMS owns all open-order reservations and the
         // economic projection owns position margin; never recompute either
@@ -4088,6 +4189,10 @@ pub const TradingShard = struct {
         if (opening and original.count != occupancy.max_members) return error.InvalidCycleMembers;
         if (!input.time_presence.monotonic or input.monotonic_time == 0 or (opening and !self.strategy_active)) return error.TradingNotAuthorized;
         if (opening and self.oms.blocksNewSend()) return error.OmsRecoveryOnly;
+        if (opening and self.cycles.hasResidual()) {
+            if (!input.time_presence.source or input.source_time == 0) return error.ResidualClockUnavailable;
+            try self.cycles.checkResidualAge(input.source_time);
+        }
         var members: [occupancy.max_members]occupancy.Member = @splat(.{});
         var qualified = original;
         for (original.members[0..original.count], 0..) |intent, index| {
@@ -4117,6 +4222,7 @@ pub const TradingShard = struct {
             if (account_index) |index| self.exchangeAccountView(index);
             {
                 defer if (account_index) |index| self.exchangeAccountView(index);
+                if (opening) try self.checkResidualBacking();
                 if (opening and (!self.genesisReady() or self.risk_lease_allocation == null or self.risk_lease_valid_through_barrier < self.authoritativeBarrier())) return error.TradingNotAuthorized;
                 var subset: oms.IntentGroup = .{ .first_intent_sequence = original.first_intent_sequence, .policy = original.policy, .count = 0 };
                 var indices: [occupancy.max_members]usize = undefined;
@@ -5128,6 +5234,12 @@ pub const TradingShard = struct {
                 try self.trace.append(.strategy_intent_rejected, rejection.intent_sequence);
             },
             .cycle_closed => |proof| try self.closeCycle(input, proof),
+            .spot_residual_rule => |rule| {
+                if (input.account_scope != null or self.decision_domain_identity == 0 or !self.deployment.sealed) return error.InvalidDomainScope;
+                const asset = self.asset_registry.get(rule.asset) orelse return error.UnknownAssetDefinition;
+                if (asset.definition.version != rule.asset_version or rule.asset == self.economic_projection.settlement_asset) return error.InvalidResidualRule;
+                if (try self.cycles.configureResidual(rule, self.authoritativeBarrier() + 1)) try self.trace.append(.spot_residual_rule, rule.version);
+            },
             .oms_intent_group => |group| return self.handleOmsGroup(input, group),
             .oms_dispatch_batch => |batch| return self.handleOmsDispatch(input, batch),
             .oms_execution_report => |report| {
@@ -5319,6 +5431,7 @@ fn domainAdmissionRejection(err: anyerror) ?RejectReason {
         error.PortfolioOpeningGateClosed => .portfolio_opening_gate_closed,
         error.ExchangeOpeningGateClosed => .exchange_opening_gate_closed,
         error.InsufficientSpotAsset => .insufficient_spot_asset,
+        error.CycleResidual, error.ResidualExpired, error.ResidualClockUnavailable => .joint_admission_unavailable,
         error.PortfolioReduceOnlyViolation => .portfolio_reduce_only_violation,
         else => null,
     };
@@ -5340,7 +5453,7 @@ const CoreSnapshotEncodingPolicy = struct {
         return null;
     }
     pub fn tailCounter(comptime T: type, comptime name: []const u8) ?[]const u8 {
-        if (T == @FieldType(TradingShard, "cycles")) return mappedTail(name, .{ .{ "records", "count" }, .{ "closed", "closed_count" } });
+        if (T == @FieldType(TradingShard, "cycles")) return mappedTail(name, .{ .{ "records", "count" }, .{ "closed", "closed_count" }, .{ "residual_rules", "residual_rule_count" }, .{ "residual_rule_barriers", "residual_rule_count" } });
         if (T == AccountState) return mappedTail(name, .{ .{ "open_economic_facts", "open_economic_fact_count" }, .{ "economic_baseline_balances", "economic_baseline_balance_count" } });
         if (T == TradingShard) return mappedTail(name, .{ .{ "secondary_accounts", "secondary_account_count" }, .{ "fenced_strategy_instances", "fenced_strategy_count" }, .{ "canonical_ingress_cursors", "canonical_ingress_cursor_count" }, .{ "open_economic_facts", "open_economic_fact_count" }, .{ "economic_baseline_balances", "economic_baseline_balance_count" } });
         if (T == ReconciliationCursor) return mappedTail(name, .{.{ "balances", "balance_count" }});
@@ -5487,6 +5600,10 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
 fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: bool) !void {
     try shard.deployment.validateSnapshot();
     try shard.cycles.validate();
+    for (shard.cycles.residual_rules[0..shard.cycles.residual_rule_count], 0..) |rule, index| {
+        const fact = shard.trace.factAt(shard.cycles.residual_rule_barriers[index]) orelse return error.InvalidSnapshotState;
+        if (fact.kind != .spot_residual_rule or fact.identity != rule.version) return error.InvalidSnapshotState;
+    }
     for (shard.cycles.closed[0..shard.cycles.closed_count]) |closed| {
         const fact = shard.trace.factAt(closed.fact_sequence) orelse return error.InvalidSnapshotState;
         const occupied = shard.trace.factAt(closed.record.fact_sequence) orelse return error.InvalidSnapshotState;
@@ -5495,6 +5612,17 @@ fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: b
             !std.mem.eql(u8, &closed.record.configuration_digest, &shard.deployment.header.?.expected_digest)) return error.InvalidSnapshotState;
         for (closed.record.members[0..closed.record.count]) |member|
             if (shard.deployment.owner(member.account, member.instrument) != shard.decision_domain_identity) return error.InvalidSnapshotState;
+        if (validate_partitions) for (closed.proof.residuals) |maybe| if (maybe) |residual| {
+            const rule_fact = shard.trace.factAt(residual.rule_fact_sequence) orelse return error.InvalidSnapshotState;
+            if (rule_fact.kind != .spot_residual_rule or rule_fact.identity != residual.rule.version) return error.InvalidSnapshotState;
+            const account = shard.accountState(residual.account) orelse return error.InvalidSnapshotState;
+            const entry = account.instrument_registry.get(residual.instrument) orelse return error.InvalidSnapshotState;
+            const asset = shard.asset_registry.get(residual.asset) orelse return error.InvalidSnapshotState;
+            if (entry.product != .spot or entry.rules.base_asset != residual.asset or asset.definition.version < residual.rule.asset_version or
+                entry.rules.version < residual.instrument_version or residual.portfolio != closed.record.portfolio or
+                (entry.rules.version == residual.instrument_version and (try shard.baseAtomsPerLot(entry)).atoms != residual.base_atoms_per_lot))
+                return error.InvalidSnapshotState;
+        };
     }
     for (shard.cycles.records[0..shard.cycles.count]) |cycle| {
         const fact = shard.trace.factAt(cycle.fact_sequence) orelse return error.InvalidSnapshotState;
@@ -6055,6 +6183,7 @@ pub fn applyStableOnCandidate(
         if (input == .core and input.core.payload == .checkpoint_committed) return null;
         if (input == .core and input.core.payload == .account_coordinator_bound) return null;
         if (input == .core and input.core.payload == .cycle_closed) return null;
+        if (input == .core and input.core.payload == .spot_residual_rule) return null;
         if (input == .core and input.core.payload == .instrument_trading_authorization) return null;
         if (input == .core and (input.core.payload == .external_order_intent or input.core.payload == .external_intent_group)) return null;
         if (input == .core and input.core.payload == .oms_intent_group and
@@ -6163,9 +6292,12 @@ fn stateDigestBorrowed(shard: *const TradingShard) [Sha256.digest_length]u8 {
     const spot_portfolio_position = shard.spotPortfolioPosition();
     const spot_exchange_position = shard.spotExchangePosition();
     const ledger = shard.economic_projection.ledger_summary;
-    hasher.update("StateDigestV12\x00");
+    hasher.update("StateDigestV13\x00");
     digestInt(&hasher, u8, shard.cycles.count);
     for (shard.cycles.records[0..shard.cycles.count]) |cycle| digestBare(&hasher, cycle);
+    digestInt(&hasher, u8, shard.cycles.residual_rule_count);
+    for (shard.cycles.residual_rules[0..shard.cycles.residual_rule_count]) |rule| digestBare(&hasher, rule);
+    for (shard.cycles.residual_rule_barriers[0..shard.cycles.residual_rule_count]) |barrier| digestInt(&hasher, u64, barrier);
     digestInt(&hasher, u8, shard.cycles.closed_count);
     for (shard.cycles.closed[0..shard.cycles.closed_count]) |closed| digestBare(&hasher, closed);
     if (shard.deployment.header != null) {
@@ -6702,7 +6834,7 @@ fn digestEconomicProjection(hasher: *Sha256, projection: economics_module.Projec
 
 fn semanticStateDigest(shard: *const TradingShard) [Sha256.digest_length]u8 {
     var hasher = Sha256.init(.{});
-    hasher.update("SemanticAuthorityDigestV2\x00");
+    hasher.update("SemanticAuthorityDigestV3\x00");
     digestInt(&hasher, u128, shard.decision_domain_identity);
     if (shard.deployment.header) |header| hasher.update(&header.expected_digest);
     for (shard.secondary_accounts[0..shard.secondary_account_count]) |partition| {
@@ -6717,6 +6849,9 @@ fn semanticStateDigest(shard: *const TradingShard) [Sha256.digest_length]u8 {
         hasher.update(&cycle.content_digest);
         for (cycle.members[0..cycle.count]) |member| digestBare(&hasher, member);
     }
+    digestInt(&hasher, u8, shard.cycles.residual_rule_count);
+    for (shard.cycles.residual_rules[0..shard.cycles.residual_rule_count]) |rule| digestBare(&hasher, rule);
+    for (shard.cycles.residual_rule_barriers[0..shard.cycles.residual_rule_count]) |barrier| digestInt(&hasher, u64, barrier);
     digestInt(&hasher, u8, shard.cycles.closed_count);
     for (shard.cycles.closed[0..shard.cycles.closed_count]) |closed| digestBare(&hasher, closed);
     digestInt(&hasher, u64, shard.economic_baseline_utc_ns);

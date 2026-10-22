@@ -1,6 +1,33 @@
 const std = @import("std");
 pub const max_cycles = 64;
 pub const max_members = 2;
+pub const max_residual_rules = 16;
+pub const ResidualRule = struct {
+    asset: u64,
+    asset_version: u64,
+    version: u64,
+    max_atoms: i128,
+    max_total_atoms: i128,
+    max_age_ns: u64,
+
+    pub fn validate(self: ResidualRule) !void {
+        if (self.asset == 0 or self.asset_version == 0 or self.version == 0 or self.max_atoms <= 0 or
+            self.max_total_atoms < self.max_atoms or self.max_age_ns == 0) return error.InvalidResidualRule;
+    }
+};
+pub const Residual = struct {
+    account: u128,
+    portfolio: u128,
+    instrument: u128,
+    asset: u64,
+    atoms: i128,
+    instrument_version: u32,
+    base_atoms_per_lot: i128,
+    rule: ResidualRule,
+    rule_fact_sequence: u64,
+    accepted_at_utc_ns: u64,
+    economic_digest: [32]u8,
+};
 pub const Member = struct { account: u128 = 0, instrument: u128 = 0 };
 pub const Record = struct {
     strategy: u128 = 0,
@@ -17,6 +44,7 @@ pub const Closure = struct {
     first_sequence: u64,
     content_digest: [32]u8,
     reconciliation_roots: [max_members][32]u8,
+    residuals: [max_members]?Residual = @splat(null),
 };
 pub const Closed = struct {
     record: Record,
@@ -29,6 +57,81 @@ pub const State = struct {
     // shortcut: completed identities remain resident; add authenticated archival before exceeding 64 closures.
     closed: [max_cycles]Closed = @splat(std.mem.zeroes(Closed)),
     closed_count: u8 = 0,
+    residual_rules: [max_residual_rules]ResidualRule = @splat(std.mem.zeroes(ResidualRule)),
+    residual_rule_barriers: [max_residual_rules]u64 = @splat(0),
+    residual_rule_count: u8 = 0,
+
+    pub fn configureResidual(self: *State, rule: ResidualRule, barrier: u64) !bool {
+        try rule.validate();
+        if (barrier == 0) return error.InvalidResidualRule;
+        for (self.residual_rules[0..self.residual_rule_count], 0..) |*known, index| {
+            if (known.asset != rule.asset) continue;
+            if (std.meta.eql(known.*, rule)) return false;
+            if (rule.version <= known.version or rule.asset_version < known.asset_version) return error.ResidualRuleConflict;
+            known.* = rule;
+            self.residual_rule_barriers[index] = barrier;
+            return true;
+        }
+        if (self.residual_rule_count == max_residual_rules) return error.ResidualRuleCapacity;
+        self.residual_rules[self.residual_rule_count] = rule;
+        self.residual_rule_barriers[self.residual_rule_count] = barrier;
+        self.residual_rule_count += 1;
+        return true;
+    }
+
+    pub fn residualRule(self: *const State, asset: u64) ?ResidualRule {
+        for (self.residual_rules[0..self.residual_rule_count]) |rule| if (rule.asset == asset) return rule;
+        return null;
+    }
+
+    pub fn residualRuleBarrier(self: *const State, asset: u64) u64 {
+        for (self.residual_rules[0..self.residual_rule_count], 0..) |rule, index| if (rule.asset == asset) return self.residual_rule_barriers[index];
+        return 0;
+    }
+
+    pub fn reservedAtoms(self: *const State, account: u128, portfolio: u128, asset: u64) !i128 {
+        var atoms: i128 = 0;
+        for (self.closed[0..self.closed_count]) |closed| for (closed.proof.residuals) |maybe| {
+            const residual = maybe orelse continue;
+            if (residual.account == account and residual.portfolio == portfolio and residual.asset == asset)
+                atoms = try std.math.add(i128, atoms, residual.atoms);
+        };
+        return atoms;
+    }
+
+    pub fn hasResidual(self: *const State) bool {
+        for (self.closed[0..self.closed_count]) |closed| for (closed.proof.residuals) |maybe| if (maybe != null) return true;
+        return false;
+    }
+
+    pub fn reservedInstrumentAtoms(self: *const State, account: u128, portfolio: u128, asset: u64, instrument: u128) !i128 {
+        var atoms: i128 = 0;
+        for (self.closed[0..self.closed_count]) |closed| for (closed.proof.residuals) |maybe| {
+            const residual = maybe orelse continue;
+            if (residual.account == account and residual.portfolio == portfolio and residual.asset == asset and residual.instrument == instrument)
+                atoms = try std.math.add(i128, atoms, residual.atoms);
+        };
+        return atoms;
+    }
+
+    pub fn checkResidualAge(self: *const State, now_utc_ns: u64) !void {
+        for (self.closed[0..self.closed_count]) |closed| for (closed.proof.residuals) |maybe| {
+            const residual = maybe orelse continue;
+            if (now_utc_ns < residual.accepted_at_utc_ns or
+                now_utc_ns - residual.accepted_at_utc_ns >= residual.rule.max_age_ns) return error.ResidualExpired;
+        };
+    }
+
+    pub fn checkResidualLimit(self: *const State, proposed: Residual) !void {
+        try self.checkResidualAge(proposed.accepted_at_utc_ns);
+        var total: i128 = proposed.atoms;
+        for (self.closed[0..self.closed_count]) |closed| for (closed.proof.residuals) |maybe| {
+            const residual = maybe orelse continue;
+            if (residual.asset == proposed.asset) total = try std.math.add(i128, total, residual.atoms);
+        };
+        if (proposed.atoms <= 0 or proposed.atoms > proposed.rule.max_atoms or total > proposed.rule.max_total_atoms)
+            return error.ResidualLimit;
+    }
 
     pub fn completed(self: *const State, strategy: u128, first_sequence: u64) ?Closed {
         for (self.closed[0..self.closed_count]) |entry|
@@ -91,6 +194,12 @@ pub const State = struct {
 
     pub fn validate(self: *const State) !void {
         if (@as(usize, self.count) + self.closed_count > max_cycles) return error.InvalidCycle;
+        if (self.residual_rule_count > max_residual_rules) return error.InvalidCycle;
+        for (self.residual_rules[0..self.residual_rule_count], 0..) |rule, index| {
+            try rule.validate();
+            if (self.residual_rule_barriers[index] == 0) return error.InvalidCycle;
+            for (self.residual_rules[0..index]) |prior| if (prior.asset == rule.asset) return error.InvalidCycle;
+        }
         var previous: State = .{};
         for (self.records[0..self.count]) |record| try previous.establish(record);
         for (self.closed[0..self.closed_count], 0..) |entry, index| {
@@ -101,6 +210,29 @@ pub const State = struct {
                 entry.proof.first_sequence != entry.record.first_sequence or
                 !std.mem.eql(u8, &entry.proof.content_digest, &entry.record.content_digest)) return error.InvalidCycle;
             for (entry.proof.reconciliation_roots) |root| if (std.mem.allEqual(u8, &root, 0)) return error.InvalidCycle;
+            for (entry.proof.residuals, 0..) |maybe, member_index| if (maybe) |residual| {
+                try residual.rule.validate();
+                if (residual.account != entry.record.members[member_index].account or residual.instrument != entry.record.members[member_index].instrument or
+                    residual.portfolio != entry.record.portfolio or residual.asset != residual.rule.asset or residual.atoms <= 0 or
+                    residual.atoms > residual.rule.max_atoms or residual.atoms >= residual.base_atoms_per_lot or
+                    residual.accepted_at_utc_ns == 0 or residual.instrument_version == 0 or residual.rule_fact_sequence == 0 or
+                    residual.rule_fact_sequence >= entry.fact_sequence or
+                    std.mem.allEqual(u8, &residual.economic_digest, 0)) return error.InvalidCycle;
+                const active_rule = self.residualRule(residual.asset) orelse return error.InvalidCycle;
+                if (active_rule.version < residual.rule.version or active_rule.asset_version < residual.rule.asset_version or
+                    (active_rule.version == residual.rule.version and !std.meta.eql(active_rule, residual.rule))) return error.InvalidCycle;
+                var total: i128 = residual.atoms;
+                for (self.closed[0..index]) |prior| for (prior.proof.residuals) |prior_maybe| if (prior_maybe) |known| {
+                    if (residual.accepted_at_utc_ns < known.accepted_at_utc_ns or
+                        residual.accepted_at_utc_ns - known.accepted_at_utc_ns >= known.rule.max_age_ns) return error.InvalidCycle;
+                    if (known.asset == residual.asset) total = try std.math.add(i128, total, known.atoms);
+                };
+                for (entry.proof.residuals[0..member_index]) |prior_maybe| if (prior_maybe) |known| {
+                    if (known.accepted_at_utc_ns != residual.accepted_at_utc_ns) return error.InvalidCycle;
+                    if (known.asset == residual.asset) total = try std.math.add(i128, total, known.atoms);
+                };
+                if (total > residual.rule.max_total_atoms) return error.InvalidCycle;
+            };
             if (self.find(entry.proof.strategy, entry.proof.first_sequence) != null) return error.InvalidCycle;
             for (self.closed[0..index]) |prior|
                 if (prior.proof.strategy == entry.proof.strategy and prior.proof.first_sequence == entry.proof.first_sequence) return error.InvalidCycle;
@@ -136,4 +268,25 @@ test "09a cycle capacity reserves terminal identities and never evicts occupied 
     var conflict = state.closed[0].proof;
     conflict.reconciliation_roots[0][0] ^= 1;
     try std.testing.expectError(error.ConflictingCycleClosure, state.close(conflict, 200));
+}
+
+test "09a residual rules are bounded and changed versions cannot replace equal identities" {
+    var state: State = .{};
+    for (0..max_residual_rules) |index| try std.testing.expect(try state.configureResidual(.{
+        .asset = index + 1,
+        .asset_version = 1,
+        .version = 1,
+        .max_atoms = 1,
+        .max_total_atoms = 2,
+        .max_age_ns = 10,
+    }, index + 1));
+    var rule = state.residual_rules[0];
+    try std.testing.expect(!try state.configureResidual(rule, 100));
+    rule.max_atoms = 2;
+    try std.testing.expectError(error.ResidualRuleConflict, state.configureResidual(rule, 100));
+    rule.version = 2;
+    try std.testing.expect(try state.configureResidual(rule, 100));
+    rule.asset = max_residual_rules + 1;
+    try std.testing.expectError(error.ResidualRuleCapacity, state.configureResidual(rule, 100));
+    try state.validate();
 }
