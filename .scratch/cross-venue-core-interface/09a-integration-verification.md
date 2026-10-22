@@ -1,6 +1,6 @@
 # 09a 费用更正与残余整合验证
 
-2026-10-23；主工作树。残余提交 `e72ef437`，费用提交 cherry-pick 后为 `4ab18aab`。冲突仅在公共 acceptance 文件，保留双方 Scenario、spot 判定与费用更正测试；未改 map/issue。
+2026-10-23；主工作树。残余提交 `e72ef437`，费用提交 cherry-pick 后为 `4ab18aab`。冲突仅在公共 acceptance 文件，保留双方 Scenario、spot 判定与费用更正测试；本记录首次交付时未改 map/issue；本次仅同步共享合同与tracker的已确认状态。
 
 `applyCanonicalFeeAdjustment` 在原有完整身份/费用版本/证据校验及成功入账后，检查原周期已完成的残余。原费用或新费用存在该残余 Asset 的非零金额时，锁存当前账户 OMS recovery-only。费用退款也不能自动成为新周期资金；原残余及原周期身份保持不变。不回滚真实账务，不锁存其他 Asset 的无关费用更正。
 
@@ -20,4 +20,8 @@ CanonicalStateDigest 包含经济投影 digest（含 fee origins/revisions）与
 
 测试文件保留 HEAD 原有 CRLF 风格。两修改文件规范化 LF 后通过 `zig fmt --stdin` 输出逐字节相等检查；`git -c core.whitespace=cr-at-eol diff --check` 通过（沿用仓库文件 CRLF）。新增共享 Asset 组拒绝后复用 Owner.checkpoint 维护原有 journal 容量，未扩大容量、未放松经济或恢复断言。
 
-未跑全量、未更新冻结轨迹摘要、未部署或下单。生产参数默认未配置、承接仅限正 sub-lot；没有已承接残余清理权限。全量与最终双轴审查由主窗口统一执行。
+## 当前统一验收状态（2026-10-23）
+
+两个实现代理均使用 GPT 6.1 Sol medium。P2 `af2c8a80` 修复费用更正遗漏 Instrument 原币库存变动；扣费/退款/现货退出与原周期闭合定向各2/2（fee-inventory-green.log、fee-inventory-cycle.log）。`292bd8f4` 让订单历史拒绝 fee_origin typed key，保留其独立 Fill 归档来源；该补丁不以旧的失败日志冒称验收完成。
+
+主窗口已确认 Python12/12、真实Host集成exit0；统一全量 session25024 **pending**，本记录不声明通过。09a保持in_progress；生产Asset阈值未冻结、真实Venue凭证未获运行资格，08/09b/09范围与依赖不变。未部署或下单；承接默认无规则关闭，仅限正sub-lot，没有已承接残余清理权限。冻结摘要与最终双轴审查由主窗口统一处理。

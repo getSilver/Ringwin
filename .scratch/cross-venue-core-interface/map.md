@@ -48,10 +48,12 @@ Status: open
 
 ## Frontier
 
-- [09a 核心周期闭合](issues/09a-cycle-closure-residual.md)：in_progress；零残余终结与持久恢复已有证据。用户追加授权实现正现货尘埃承接和独立费用调整，当前并行实施、尚未整合验收；生产残余参数和实际 Venue 更正凭证未获资格。见[实施合同](09-implementation-contract.md)和[既有验证记录](09a-verification.md)。
+- [09a 核心周期闭合](issues/09a-cycle-closure-residual.md)：in_progress；正 sub-lot 显式承接、独立费用调整、旧残余相关费用锁存及共享 Asset 支用保护已整合，定向通过；Python 12/12、真实 Host exit 0，主窗口统一全量 pending。生产 Asset 阈值/真实 Venue 凭证未获资格，无已承接残余处置权限。见[当前合同](09-implementation-contract.md)和[整合记录](09a-integration-verification.md)。
 - [08 版本化策略状态与确定性 checkpoint](issues/08-deterministic-checkpoint.md)：in_progress；schema/codec/容量已确认，用户收窄本轮为 checkpoint 基础设施，真实模型验收保持待定。见[实现合同](08-checkpoint-design.md)及[验证记录](08-verification.md)，不解除 09b 的整票依赖。
 
 ## Decisions so far
+
+- 2026-10-23：两个 GPT 6.1 Sol medium 子代理完成残余/费用实现并在主窗口整合；旧已承接周期相关 Asset 费用增减合法入账后持久锁 OMS，P2 修复费用调整遗漏 Instrument 库存投影并限制订单历史 typed key。格式45/49/43、canonical16、digest13/3；交叉 ReleaseSafe3/3、库存/退出定向各2/2，Python12/12及真实Host exit0。统一全量仍 pending；09a in_progress，生产参数/真实Venue凭证和残余处置授权未取得，08/09b/09范围不变。见[整合记录](09a-integration-verification.md)。
 
 - 2026-10-22（追加）：用户要求在本窗口由两个 GPT 6.1 Sol medium 子代理实施非零残余承接与独立费用调整，最终全量回归在主窗口整合后统一执行。沿用同一 09a 和既有公共接缝；未配置残余规则默认关闭，首版只承接 gross/OpenCost/保证金归零后不足一 lot 的正现货余额，保留原所有者和不可花费资格。费用调整追加账务，不修改原 Fill 或成交累计；实际适配器未具备明确凭证时仍拒绝推测更正。见 [ADR0018](../../docs/adr/0018-retain-spot-residuals-and-append-fee-adjustments.md)。08/09b/09 范围与依赖保持，尚不关闭 09a。
 
@@ -84,7 +86,7 @@ Status: open
 ## Not yet specified
 
 - 多账户核心容量、格式与预算来源已由05a冻结并离线验证；完整清单和独立可信锚点的产品发布接入仍缺失，入口保持关闭，动态租约扩容首版不开放。
-- 09a 已冻结零残余释放政策；非零现货残余继续占用。成功费用更正及非零承接事实、终结身份认证回收与连续运行容量仍待验收，09a 整票未关闭。
+- 09a 当前支持显式规则下正 sub-lot 承接及独立费用调整；生产 Asset 阈值/真实 Venue 凭证、已承接残余处置权限、终结身份认证回收及连续运行容量仍未获资格。统一全量 pending，09a 整票未关闭。
 - 快照、连续深度及重同步已由 02/03 声明并离线验证；已知价格覆盖、8 档及截断后的保守失效限制继续适用。
 - 08 的 schema/codec/容量已确认；真实模型的版本、输入更新、不同批次/切点和支持平台运行确定性证据仍待完成。
 - 相关策略行为、参数合同及模型版本的冻结证据；文档成文不自动等于冻结。
