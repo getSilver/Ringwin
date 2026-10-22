@@ -214,7 +214,8 @@ pub fn main(init: std.process.Init) !void {
     const python = args.next() orelse "python";
     const script = args.next() orelse "python/strategy_host.py";
     if (args.next() != null) return error.UnknownArgument;
-    try runMultiAccountGroupCheck(init, python, script);
+    try runMultiAccountGroupCheck(init, python, script, false);
+    try runMultiAccountGroupCheck(init, python, script, true);
     try runGroupCheck(init, python, script);
     try runCheck(init, python, script);
     var buffer: [256]u8 = undefined;
@@ -463,7 +464,8 @@ fn refreshOutputCrc(frame: []u8) void {
     std.mem.writeInt(u32, frame[124..128], crc.final(), .little);
 }
 
-fn runMultiAccountGroupCheck(init: std.process.Init, python: []const u8, script: []const u8) !void {
+fn runMultiAccountGroupCheck(init: std.process.Init, python: []const u8, script: []const u8, post_only: bool) !void {
+    const engine = @import("../../trading/trading_shard.zig");
     const demo = @import("../../runtime/demo/demo_authority.zig");
     const durable = @import("../../persistence/durable_store.zig");
     const multi = @import("../acceptance/core/multi_account_authority_acceptance.zig");
@@ -480,6 +482,14 @@ fn runMultiAccountGroupCheck(init: std.process.Init, python: []const u8, script:
     defer init.gpa.destroy(owner);
     try demo.Owner.bootstrapInto(owner, adapter.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
     try multi.initializePythonOwner(owner);
+    if (post_only) for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }) |account, instrument| {
+        var view: engine.TradingShard = undefined;
+        try owner.shard.copyAccountViewInto(&view, account);
+        var profile = view.registryInstrument(instrument).?.capability.?;
+        profile.version = 2;
+        profile.supports_post_only = true;
+        _ = try owner.apply(fixture.atGroup(44, .{ .identity = @intCast(2000 + instrument), .account_scope = account, .payload = .{ .capability_profile_activation = profile } }));
+    };
     var plan = lifecycle.developmentPlan(0, 31, try lifecycle.discoverPythonAbi(init, python));
     plan.decision_domain = 1;
     const authorization: gateway_module.Authorization = .{ .strategy_identity = 9, .config_version = 1, .activation_identity = 1, .activation_barrier = owner.shard.authoritativeBarrier() };
@@ -488,7 +498,7 @@ fn runMultiAccountGroupCheck(init: std.process.Init, python: []const u8, script:
         "--strategy-identity",  "9",                     "--activation-identity",       "1",                            "--intent-group",
         "--portfolio-identity", "10",                    "--exchange-account-identity", "20",                           "--second-exchange-account-identity",
         "30",                   "--instrument-identity", "101",                         "--second-instrument-identity", "102",
-        "--quantity",           "10000",                 "--limit-price",               "100",
+        "--quantity",           "10000",                 "--limit-price",               "100",                          if (post_only) "--time-in-force=post-only" else "--time-in-force=gtc",
     });
     defer host.deinit(init.io);
     try host.sendPlan(init.io);
@@ -522,6 +532,11 @@ fn runMultiAccountGroupCheck(init: std.process.Init, python: []const u8, script:
     try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.count);
     try std.testing.expectEqual(@as(u128, 20), owner.shard.oms.orders[0].exchange_account);
     try std.testing.expectEqual(@as(u128, 30), owner.shard.oms.orders[1].exchange_account);
+    for (owner.shard.oms.command_history[0..owner.shard.oms.command_history_count]) |command| {
+        try std.testing.expectEqual(if (post_only) engine.canonical.OrderType.post_only else .limit, command.order_type);
+        try std.testing.expectEqual(if (post_only) engine.canonical.TimeInForce.post_only else .good_til_canceled, command.time_in_force);
+        try std.testing.expectEqual(@as(u64, if (post_only) 2 else 1), command.authority.capability.version);
+    }
     const accepted_digest = owner.shard.canonicalStateDigest();
     _ = try owner.apply(fixture.atGroup(45, .{ .identity = cursor + 1, .payload = .{ .external_intent_group = decision.accepted_group } }));
     try std.testing.expectEqualSlices(u8, &accepted_digest, &owner.shard.canonicalStateDigest());
@@ -535,5 +550,6 @@ fn runMultiAccountGroupCheck(init: std.process.Init, python: []const u8, script:
     defer init.gpa.destroy(restored);
     try demo.Owner.recoverInto(restored, adapter.interface(), init.io, owner.stream);
     try std.testing.expectEqualSlices(u8, &digest, &restored.shard.canonicalStateDigest());
-    std.debug.print("host_multi_account_file_recovery: accounts=2, commands=2, cycles=1, duplicate=stable, path={s}\n", .{path});
+    try std.testing.expectEqualDeep(owner.shard.oms.findCommand(1).?, restored.shard.oms.findCommand(1).?);
+    std.debug.print("host_multi_account_file_recovery: accounts=2, commands=2, cycles=1, native_post_only={}, duplicate=stable, path={s}\n", .{ post_only, path });
 }

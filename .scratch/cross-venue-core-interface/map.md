@@ -39,7 +39,7 @@ Status: open
 | [05a 多账户权威表示](issues/05a-multi-account-authority.md) | 01（已完成） | H2/H3；resolved |
 | [05b 共同准入与占用](issues/05b-joint-admission-occupancy.md) | 01、04、05a（均已完成） | H2/H3；resolved |
 | [06 双 IOC 执行](issues/06-dual-ioc-dispatch.md) | 05 | H2；resolved，离线执行接缝验收 |
-| [07 原生 Post-only](issues/07-native-post-only.md) | 05 | H2 |
+| [07 原生 Post-only](issues/07-native-post-only.md) | 05 | H2；resolved，离线原生 Post-only 接缝验收 |
 | [08 确定性 checkpoint](issues/08-deterministic-checkpoint.md) | 无；最终验收需确认策略 schema | H3 |
 | [09 周期恢复与激活](issues/09-cycle-recovery.md) | 09a、09b | H3 汇总验收 |
 | [09a 核心周期闭合](issues/09a-cycle-closure-residual.md) | 05b；最终验收需残余阈值及资产规则冻结 | H3 |
@@ -48,11 +48,12 @@ Status: open
 
 ## Frontier
 
-- [07 原生 Post-only](issues/07-native-post-only.md)：05 核心依赖已完成；06已完成离线执行接缝验收，真实Venue各模式资格仍分别记录，不由共同准入证据推导。
 - [09a 核心周期闭合](issues/09a-cycle-closure-residual.md)：05b已完成；终结、残余阈值及资产规则仍须冻结，当前周期与经济引用保持pin。
 - [08 版本化策略状态与确定性 checkpoint](issues/08-deterministic-checkpoint.md)：in_progress；schema/codec/容量已确认，用户收窄本轮为 checkpoint 基础设施，真实模型验收保持待定。见[实现合同](08-checkpoint-design.md)及[验证记录](08-verification.md)，不解除 09b 的整票依赖。
 
 ## Decisions so far
+
+- 2026-10-22：07 resolved，Host原生Post-only、共同准入/发送能力复核、GTC错配拒绝、能力撤销后的安全撤单及journal/checkpoint/文件恢复已离线验收。最终ReleaseSafe **699/699**，修正场景定向 **3/3**、真实Python Host的GTC/Post-only两种多账户文件恢复及既有路径通过，Python **5/5**和**7/7**通过，双轴复审无遗留发现。用户明确选择沿用版本、规则、会话失效及命令期限，不增加独立TTL；长期未更新的能力声明不会自行到期。见[验证记录](07-verification.md)。实际Venue/模式及完整Maker–Taker资格仍未取得，未部署或下单；journal/state/registry保持43/47/41，活动周期释放仍归09a。
 
 - 2026-10-22：06 resolved，双IOC在回报前独立发送、第二腿部分失败、8个发送持久边界、Unknown不重发与可能量、迟到/重复/撤单途中Fill、显式修复及减仓义务均离线验收。复用现有实现，新增公共接缝与经济消费者证明；最终ReleaseSafe **688/688**、核心定向 **6/6**、真实OKX私有WS及归档恢复各 **2/2**，双轴复审无遗留发现。见[验证记录](06-verification.md)。真实Venue联合网络执行、native maker、完整策略与checkpoint联结仍分别归后续资格/07/09/10；活动周期继续pin，产品多账户入口及deployment/production qualification保持关闭，未部署或下单。
 

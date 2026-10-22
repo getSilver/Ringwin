@@ -2642,10 +2642,14 @@ pub const TradingShard = struct {
                 .rules_version = 0,
                 .ticks = intent.limit_price_micros,
             },
-            .order_type = .limit,
+            .order_type = switch (intent.order_type) {
+                .limit => .limit,
+                .post_only => .post_only,
+            },
             .time_in_force = switch (intent.time_in_force) {
                 .good_til_canceled => .good_til_canceled,
                 .immediate_or_cancel => .immediate_or_cancel,
+                .post_only => .post_only,
             },
         };
         group.members[0].client_order_id = hostIntentIdentityToken(intent);
@@ -2732,10 +2736,14 @@ pub const TradingShard = struct {
                 .rules_version = 0,
                 .ticks = intent.limit_price_micros,
             },
-            .order_type = .limit,
+            .order_type = switch (intent.order_type) {
+                .limit => .limit,
+                .post_only => .post_only,
+            },
             .time_in_force = switch (intent.time_in_force) {
                 .good_til_canceled => .good_til_canceled,
                 .immediate_or_cancel => .immediate_or_cancel,
+                .post_only => .post_only,
             },
         };
         var original_group = group;
@@ -2779,8 +2787,7 @@ pub const TradingShard = struct {
         }
         const instrument_config = self.instrumentEntry(intent.instrument_identity).?;
         group.members[0].limit_price.rules_version = instrument_config.rules.version;
-        if (intent.order_type != .limit or
-            (intent.time_in_force != .good_til_canceled and intent.time_in_force != .immediate_or_cancel) or
+        if (!oms_module.exactOrderSpec(group.members[0].order_type, group.members[0].time_in_force, false) or
             intent.quantity <= 0 or intent.limit_price_micros <= 0)
         {
             try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, .unsupported_order_spec);

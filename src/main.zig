@@ -2,6 +2,7 @@ const std = @import("std");
 test {
     _ = @import("testing/acceptance/core/multi_account_authority_acceptance.zig");
     _ = @import("testing/acceptance/core/dual_ioc_dispatch_acceptance.zig");
+    _ = @import("testing/acceptance/core/native_post_only_acceptance.zig");
 }
 const trading_shard = @import("trading/trading_shard.zig");
 const trading_shard_tests = @import("testing/regression/trading_shard_tests.zig");

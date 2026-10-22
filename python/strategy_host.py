@@ -139,14 +139,14 @@ def output_frame(batch, args, session, intent_sequence=None, limit_price=None):
     struct.pack_into("<QQHHII", frame, 80, strategy_cursor, args.config_version, 1, 1, 1, 80)
     frame[108:124] = activation_identity.to_bytes(16, "little")
     side = 1 if args.side == "buy" else 2
-    time_in_force = 1 if args.time_in_force == "gtc" else 2
+    time_in_force = {"gtc": 1, "ioc": 2, "post-only": 3}[args.time_in_force]
     struct.pack_into(
         "<HBBBBH",
         frame,
         128,
         1,
         side,
-        1,
+        2 if args.time_in_force == "post-only" else 1,
         time_in_force,
         int(args.portfolio_reduce_only),
         0,
@@ -650,7 +650,7 @@ def main():
     parser.add_argument("--second-instrument-identity", type=int)
     parser.add_argument("--instrument-identity", type=int, default=3)
     parser.add_argument("--side", choices=("buy", "sell"), default="buy")
-    parser.add_argument("--time-in-force", choices=("gtc", "ioc"), default="gtc")
+    parser.add_argument("--time-in-force", choices=("gtc", "ioc", "post-only"), default="gtc")
     parser.add_argument("--portfolio-reduce-only", action="store_true")
     parser.add_argument("--benchmark-strategies", type=int, default=25)
     parser.add_argument("--benchmark-batches", type=int, default=10_500)

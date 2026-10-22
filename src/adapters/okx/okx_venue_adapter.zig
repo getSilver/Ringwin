@@ -1677,14 +1677,16 @@ const TestRawSink = struct {
 
 const TestTransport = struct {
     calls: u64 = 0,
+    expected_native: ?[]const u8 = null,
     outcome: order.TransportOutcome = .response,
     response: ?[]const u8 = "{\"code\":\"0\",\"data\":[{\"sCode\":\"0\",\"ordId\":\"1\"}]}",
     fn interface(self: *TestTransport) live.Transport {
         return .{ .ptr = self, .submit_fn = submit };
     }
-    fn submit(ptr: *anyopaque, _: []const u8, _: []const u8) live.TransportResult {
+    fn submit(ptr: *anyopaque, _: []const u8, body: []const u8) live.TransportResult {
         const self: *TestTransport = @ptrCast(@alignCast(ptr));
         self.calls += 1;
+        if (self.expected_native) |expected| std.debug.assert(std.mem.indexOf(u8, body, expected) != null);
         return .{ .outcome = self.outcome, .response = self.response, .source_session = 5, .times = .{ .receive_time_utc_ns = 2, .monotonic_time_ns = 3, .wall_time_utc_ns = 4 } };
     }
 };
@@ -2180,6 +2182,28 @@ test "OKX venue adapter translates canonical commands and itemizes a batch" {
     try std.testing.expectEqual(@as(u64, 1), transport.calls);
     try std.testing.expectEqual(@as(u64, 1), raw.calls);
     try adapter.stop(.{ .monotonic_ns = 1 });
+}
+
+test "07 OKX native maker sends post_only and missing capability never reaches transport" {
+    for ([_]bool{ false, true }) |supported| {
+        var raw: TestRawSink = .{};
+        var transport: TestTransport = .{ .expected_native = "\"ordType\":\"post_only\"" };
+        var chain: live.Chain = .{ .mode = .demo_live, .qualification = qualification(), .raw_sink = raw.interface(), .transport = transport.interface() };
+        var clock: TestClock = .{};
+        var profile = testProfile();
+        profile.native_post_only = supported;
+        var implementation = OkxVenueAdapter.init(std.testing.allocator, &chain, clock.interface(), profile, testRules());
+        const adapter = implementation.adapter();
+        try startTest(adapter);
+        var command = try testCommand(1);
+        command.order_type = .post_only;
+        command.time_in_force = .post_only;
+        _ = try adapter.trySend(.{ .order_command = command });
+        const result = (try adapter.tryDrain()).?.events[0].event.order_dispatch_result;
+        try std.testing.expectEqual(if (supported) canonical.DispatchState.submitted else .not_sent, result.state);
+        if (!supported) try std.testing.expectEqual(canonical.CanonicalRejectReason.capability_unsupported, result.reason.?);
+        try std.testing.expectEqual(@as(u64, if (supported) 1 else 0), transport.calls);
+    }
 }
 
 test "OKX adapter preserves canonical order semantics at the execution seam" {

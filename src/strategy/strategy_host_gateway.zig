@@ -69,14 +69,15 @@ pub const Config = struct {
 };
 
 pub const Side = enum(u8) { buy = 1, sell = 2 };
-pub const OrderType = enum(u8) { limit = 1 };
-pub const TimeInForce = enum(u8) { good_til_canceled = 1, immediate_or_cancel = 2 };
+pub const OrderType = enum(u8) { limit = 1, post_only = 2 };
+pub const TimeInForce = enum(u8) { good_til_canceled = 1, immediate_or_cancel = 2, post_only = 3 };
 
 pub const OutputOrder = struct {
     portfolio_identity: u128 = 1,
     exchange_account_identity: u128 = 2,
     instrument_identity: u128 = 3,
     side: Side = .buy,
+    order_type: OrderType = .limit,
     time_in_force: TimeInForce = .good_til_canceled,
     portfolio_reduce_only: bool = false,
     quantity: i64,
@@ -579,7 +580,7 @@ pub fn encodeOutputOrderFrame(
     const payload = frame[128..];
     put(u16, payload, 0, 1);
     payload[2] = @intFromEnum(order.side);
-    payload[3] = @intFromEnum(OrderType.limit);
+    payload[3] = @intFromEnum(order.order_type);
     payload[4] = @intFromEnum(order.time_in_force);
     payload[5] = @intFromBool(order.portfolio_reduce_only);
     put(u64, payload, 8, intent_sequence);
@@ -650,6 +651,29 @@ fn put(comptime T: type, destination: []u8, offset: usize, value: T) void {
 
 fn get(comptime T: type, source: []const u8, offset: usize) T {
     return std.mem.readInt(T, source[offset..][0..@sizeOf(T)], .little);
+}
+
+test "07 Host native post-only wire values survive complete group decoding" {
+    const config: Config = .{
+        .schema_registry = 10,
+        .decision_domain = 20,
+        .session = .{ .fencing = 30, .shard = 1, .generation = 2 },
+        .authorization = .{ .strategy_identity = 40, .config_version = 3, .activation_identity = 50, .activation_barrier = 9 },
+    };
+    var storage: [448]u8 = undefined;
+    const frame = try encodeOutputGroupFrame(&storage, config, 1, 12, 1, &.{
+        .{ .quantity = 100, .limit_price_micros = 100 },
+        .{ .quantity = 100, .limit_price_micros = 100 },
+    });
+    // Independent Host wire values: order type 2, TIF 3; existing limit/IOC remain 1/2.
+    frame[131] = 2;
+    frame[132] = 3;
+    put(u32, frame, 124, wireCrc(frame));
+    const parsed = try decodeIntentGroup(frame);
+    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(parsed.members[0].order_type));
+    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(parsed.members[0].time_in_force));
+    try std.testing.expectEqual(OrderType.limit, parsed.members[1].order_type);
+    try std.testing.expectEqual(TimeInForce.good_til_canceled, parsed.members[1].time_in_force);
 }
 
 test "subscription merge and intent rejection contract" {

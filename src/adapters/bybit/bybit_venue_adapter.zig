@@ -231,7 +231,7 @@ pub const BybitVenueAdapter = struct {
         const rules = self.rulesFor(command.instrument) orelse return .unsupported_instrument;
         if (command.operation == .amend and !self.profile.native_amend) return .capability_unsupported;
         if (command.operation != .place and (command.venue_order == null or command.venue_order.?.venue != binding.venue)) return .unsupported_value;
-        if (command.order_type == .post_only and !self.profile.native_post_only) return .capability_unsupported;
+        if (command.operation != .cancel and command.order_type == .post_only and !self.profile.native_post_only) return .capability_unsupported;
         if (command.venue_reduce_only and (command.instrument != private.btc_usdt_linear or !self.profile.venue_reduce_only_linear)) return .capability_unsupported;
         if (command.operation != .cancel) {
             const quantity = command.quantity orelse return .unsupported_value;
@@ -488,6 +488,7 @@ const TestRaw = struct {
 };
 const TestTransport = struct {
     calls: u64 = 0,
+    expected_native: ?[]const u8 = null,
     outcome: TransportOutcome = .response,
     response: ?[]const u8 = "{\"retCode\":0}",
     fn interface(self: *TestTransport) Transport {
@@ -496,6 +497,7 @@ const TestTransport = struct {
     fn submit(ptr: *anyopaque, request: SignedRequest) TransportResult {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         self.calls += 1;
+        if (self.expected_native) |expected| std.debug.assert(std.mem.indexOf(u8, request.body, expected) != null);
         std.debug.assert(request.body.len > 0 and request.signature[0] == 1);
         return .{ .outcome = self.outcome, .response = self.response, .source_session = 6, .times = .{ .receive_time_utc_ns = 1, .monotonic_time_ns = 2, .wall_time_utc_ns = 3 } };
     }
@@ -522,6 +524,37 @@ fn testCommand() !canonical.OrderCommand {
 fn testAdapter(clock: *TestClock, auth: *TestAuth, raw: *TestRaw, transport: *TestTransport) BybitVenueAdapter {
     return BybitVenueAdapter.init(clock.interface(), testProfile(), auth.interface(), raw.sink(), transport.interface());
 }
+test "07 Bybit native maker sends PostOnly and missing capability never reaches transport" {
+    for ([_]bool{ false, true }) |supported| {
+        var clock = TestClock{};
+        var auth = TestAuth{};
+        var raw = TestRaw{};
+        var transport: TestTransport = .{ .expected_native = "\"timeInForce\":\"PostOnly\"" };
+        var profile = testProfile();
+        profile.native_post_only = supported;
+        var implementation = BybitVenueAdapter.init(clock.interface(), profile, auth.interface(), raw.sink(), transport.interface());
+        const adapter = implementation.adapter();
+        try adapter.start(.{ .venue = 1, .asset_definitions = try contract.activatedTestAssets(), .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
+        var command = try testCommand();
+        command.order_type = .post_only;
+        command.time_in_force = .post_only;
+        _ = try adapter.trySend(.{ .order_command = command });
+        const result = (try adapter.tryDrain()).?.events[0].event.order_dispatch_result;
+        try std.testing.expectEqual(if (supported) canonical.DispatchState.submitted else .not_sent, result.state);
+        if (!supported) try std.testing.expectEqual(canonical.CanonicalRejectReason.capability_unsupported, result.reason.?);
+        try std.testing.expectEqual(@as(u64, if (supported) 1 else 0), transport.calls);
+        if (!supported) {
+            transport.expected_native = null;
+            command.identity += 1;
+            command.operation = .cancel;
+            command.venue_order = try canonical.VenueOrderRef.init(1, "existing-maker");
+            _ = try adapter.trySend(.{ .order_command = command });
+            try std.testing.expectEqual(canonical.DispatchState.submitted, (try adapter.tryDrain()).?.events[0].event.order_dispatch_result.state);
+            try std.testing.expectEqual(@as(u64, 1), transport.calls);
+        }
+    }
+}
+
 test "Bybit sends canonical commands only after response raw commit" {
     var clock = TestClock{};
     var auth = TestAuth{};

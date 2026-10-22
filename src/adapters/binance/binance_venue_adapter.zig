@@ -273,7 +273,7 @@ pub const BinanceVenueAdapter = struct {
         }
         if (command.operation == .amend and !self.profile.native_amend) return .capability_unsupported;
         if (command.operation != .place and (command.venue_order == null or command.venue_order.?.venue != binding.venue)) return .unsupported_value;
-        if (command.order_type == .post_only and !self.profile.native_post_only) return .capability_unsupported;
+        if (command.operation != .cancel and command.order_type == .post_only and !self.profile.native_post_only) return .capability_unsupported;
         if (command.venue_reduce_only and (command.instrument != btc_usdt_linear or !self.profile.venue_reduce_only_linear)) return .capability_unsupported;
         if (command.operation == .place) {
             if (!self.profile.testnet_admission.permitsPlace()) return .venue_unavailable;
@@ -607,6 +607,7 @@ const TestRaw = struct {
 };
 const TestTransport = struct {
     calls: u64 = 0,
+    expected_native: ?[]const u8 = null,
     outcome: TransportOutcome = .response,
     response: ?[]const u8 = "{\"code\":0,\"orderId\":\"1\"}",
     fn interface(self: *TestTransport) Transport {
@@ -615,6 +616,7 @@ const TestTransport = struct {
     fn submit(ptr: *anyopaque, request: SignedRequest) TransportResult {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         self.calls += 1;
+        if (self.expected_native) |expected| std.debug.assert(std.mem.indexOf(u8, request.body, expected) != null);
         std.debug.assert(request.signature[0] == 1 and request.body.len > 0);
         std.debug.assert(std.mem.indexOf(u8, request.body, "operation") == null);
         if (request.method == .post and std.mem.eql(u8, request.path, "/api/v3/order"))
@@ -775,6 +777,27 @@ test "Binance Testnet sends require explicit no-withdraw admission and bounded n
     try adapter.stop(.{ .monotonic_ns = 1 });
 }
 
+test "07 Binance native maker uses LIMIT_MAKER for spot and GTX for linear" {
+    for ([_]u128{ btc_usdt_spot, btc_usdt_linear }) |instrument| {
+        var clock = TestClock{};
+        var auth = TestAuth{};
+        var sink = TestRaw{};
+        var transport: TestTransport = .{ .expected_native = if (instrument == btc_usdt_spot) "type=LIMIT_MAKER" else "timeInForce=GTX" };
+        var implementation = BinanceVenueAdapter.init(clock.interface(), testProfile(), auth.interface(), sink.interface(), transport.interface());
+        const adapter = implementation.adapter();
+        try startTest(adapter);
+        var command = try testCommand(1);
+        command.instrument = instrument;
+        command.quantity.?.instrument = instrument;
+        command.limit_price.?.instrument = instrument;
+        command.order_type = .post_only;
+        command.time_in_force = .post_only;
+        try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .order_command = command }));
+        try std.testing.expectEqual(canonical.DispatchState.submitted, (try adapter.tryDrain()).?.events[0].event.order_dispatch_result.state);
+        try std.testing.expectEqual(@as(u64, 1), transport.calls);
+    }
+}
+
 test "Binance validates TIF, post-only, reduce-only, amend, and deadline before transport" {
     var clock = TestClock{};
     var auth = TestAuth{};
@@ -799,6 +822,13 @@ test "Binance validates TIF, post-only, reduce-only, amend, and deadline before 
     _ = try adapter.trySend(.{ .order_command = expired });
     try std.testing.expectEqual(canonical.CanonicalRejectReason.deadline_expired, (try adapter.tryDrain()).?.events[0].event.order_dispatch_result.reason.?);
     try std.testing.expectEqual(@as(u64, 0), transport.calls);
+    var cancellation = post;
+    cancellation.identity = 4;
+    cancellation.operation = .cancel;
+    cancellation.venue_order = try canonical.VenueOrderRef.init(21, "existing-maker");
+    _ = try adapter.trySend(.{ .order_command = cancellation });
+    try std.testing.expectEqual(canonical.DispatchState.submitted, (try adapter.tryDrain()).?.events[0].event.order_dispatch_result.state);
+    try std.testing.expectEqual(@as(u64, 1), transport.calls);
 }
 test "Binance required capabilities stay unverified without Testnet evidence" {
     const profile = testProfile();
