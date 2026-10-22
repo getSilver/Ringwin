@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const schema_version: u16 = 15;
+pub const schema_version: u16 = 16;
 
 pub const VenueIdentity = u64;
 pub const Product = enum(u8) { spot, isolated_linear_usdt };
@@ -526,7 +526,7 @@ pub const AccountEconomicEvidence = struct {
     bill_chain_digest: [32]u8 = @splat(0),
     facts: [16]EconomicFactRef = @splat(.{ .identity = 0, .kind = .funding, .digest = @splat(0), .fee_confirmed = false }),
 };
-pub const EconomicFactRef = struct { identity: u64, kind: enum(u8) { fill, funding, forced }, digest: [32]u8, fee_confirmed: bool };
+pub const EconomicFactRef = struct { identity: u64, kind: enum(u8) { fill, funding, forced, fee_adjustment }, digest: [32]u8, fee_confirmed: bool };
 
 pub const ExecutionReport = struct {
     identity: SourceFactIdentity,
@@ -574,6 +574,23 @@ pub const Fill = struct {
     venue_fill_time_utc_ns: ?u64 = null,
 };
 
+/// VenueAdapter supplies an explicit fee revision; rebates are independent.
+pub const FeeOrigin = struct { original: Fill, portfolio: u128, strategy: u128, cycle_first_sequence: u64 };
+pub const FeeAdjustment = struct {
+    original: ?FeeOrigin = null,
+    identity: SourceFactIdentity,
+    fill_identity: SourceFactIdentity,
+    exchange_account: ExchangeAccountIdentity,
+    portfolio: u128,
+    strategy: u128,
+    cycle_first_sequence: u64,
+    source_version: u64,
+    previous_fee_version: u64,
+    new_fee: AssetAmount,
+    source: RawEvidenceRef,
+    effective_time_utc_ns: u64,
+};
+
 pub const VenueAccountConfigurationSnapshot = struct {
     identity: SourceFactIdentity,
     exchange_account: ExchangeAccountIdentity,
@@ -613,6 +630,7 @@ pub const Payload = union(enum) {
     order_dispatch_result: OrderDispatchResult,
     execution_report: ExecutionReport,
     fill: Fill,
+    fee_adjustment: FeeAdjustment,
     reconciliation_started: u128,
     account_reconciliation_started: u128,
     instrument_definition_observed: InstrumentDefinitionObserved,
@@ -635,6 +653,7 @@ pub const EventType = enum(u32) {
     order_dispatch_result = 1,
     execution_report = 3,
     fill = 4,
+    fee_adjustment = 24,
     reconciliation_started = 5,
     account_reconciliation_started = 6,
     account_bootstrap_snapshot = 11,
@@ -659,6 +678,7 @@ pub fn eventType(event: Payload) EventType {
         .order_dispatch_result => .order_dispatch_result,
         .execution_report => .execution_report,
         .fill => .fill,
+        .fee_adjustment => .fee_adjustment,
         .reconciliation_started => .reconciliation_started,
         .account_reconciliation_started => .account_reconciliation_started,
         .account_bootstrap_snapshot => .account_bootstrap_snapshot,
