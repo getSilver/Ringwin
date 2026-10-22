@@ -2,6 +2,7 @@
 const std = @import("std");
 const economics = @import("economics.zig");
 const history = @import("../persistence/business_history.zig");
+const canonicalFeeOrigin = @import("../model/canonical_event.zig").FeeOrigin;
 const codec = @import("../persistence/snapshot_codec.zig");
 
 pub const Builder = struct {
@@ -9,6 +10,8 @@ pub const Builder = struct {
     bytes: [2 * history.max_record_bytes]u8 = undefined,
     detail_len: u32 = 0,
     semantic_len: u32 = 0,
+    origin_len: u32 = 0,
+    origin_bytes: [4096]u8 = undefined,
     semantic_identity: ?history.Identity = null,
 
     pub fn addSemantic(self: *Builder, identity: history.Identity, value: anytype) !void {
@@ -39,14 +42,16 @@ pub const Builder = struct {
         const detail = self.bytes[0..self.detail_len];
         const semantic = self.bytes[self.detail_len..][0..self.semantic_len];
         const economic_digest = &self.qualification.record.applied.payload_digest;
+        const fee_origin = self.origin_bytes[0..self.origin_len];
         return .{
             .origin = self.qualification.origin,
             .previous_root = previous_root,
             .barrier = self.qualification.barrier,
             .epoch = epoch,
             .qualification_digest = self.qualification.digest(),
-            .records = .{ .{ .bytes = detail, .payload_digest = history.hash(detail) }, .{ .bytes = semantic, .payload_digest = history.hash(semantic) }, .{ .bytes = economic_digest, .payload_digest = history.hash(economic_digest) } },
+            .records = .{ .{ .bytes = detail, .payload_digest = history.hash(detail) }, .{ .bytes = semantic, .payload_digest = history.hash(semantic) }, .{ .bytes = economic_digest, .payload_digest = history.hash(economic_digest) }, .{ .bytes = fee_origin, .payload_digest = history.hash(fee_origin) } },
             .entries = .{
+                .{ .key = try history.scopedKey(self.qualification.origin, .{ .fee_origin = self.qualification.record.applied.fill.identity }, if (self.qualification.origin.scope == .decision_domain) self.qualification.record.applied.source.exchange_account else null), .record_index = 3 },
                 .{ .key = try history.scopedKey(self.qualification.origin, .{ .fill_detail = self.qualification.record.applied.fill.identity }, if (self.qualification.origin.scope == .decision_domain) self.qualification.record.applied.source.exchange_account else null), .record_index = 0 },
                 .{ .key = try history.scopedKey(self.qualification.origin, self.semantic_identity.?, if (self.qualification.origin.scope == .decision_domain) self.qualification.record.applied.source.exchange_account else null), .record_index = 1 },
                 .{ .key = try history.scopedKey(self.qualification.origin, .{ .fill_economic_digest = self.qualification.record.applied.fill.identity }, if (self.qualification.origin.scope == .decision_domain) self.qualification.record.applied.source.exchange_account else null), .record_index = 2 },
@@ -61,8 +66,8 @@ pub const BatchView = struct {
     barrier: u64,
     epoch: u64,
     qualification_digest: history.Digest,
-    records: [3]history.Record,
-    entries: [3]history.Entry,
+    records: [4]history.Record,
+    entries: [4]history.Entry,
 
     pub fn value(self: *const BatchView) history.Batch {
         return .{ .origin = self.origin, .previous_root = self.previous_root, .barrier = self.barrier, .epoch = self.epoch, .qualification_digest = self.qualification_digest, .records = &self.records, .entries = &self.entries };
@@ -80,6 +85,10 @@ pub fn build(projection: *const economics.Projection, identity: u64, origin: his
         const source = &result.qualification.record.applied.source;
         try result.addSemanticBytes(.{ .core_fill = identity }, source.core_payload_bytes[0..source.core_payload_len]);
     }
+    // Core-only fills publish an explicit empty provenance record and cannot authorize canonical fee adjustments.
+    const source = result.qualification.record.applied.source;
+    const fee_provenance: ?canonicalFeeOrigin = if (source.canonical_fill) |fill| .{ .original = fill, .portfolio = source.portfolio, .strategy = source.strategy, .cycle_first_sequence = source.cycle_first_sequence } else null;
+    result.origin_len = @intCast((try codec.encodeBare(&result.origin_bytes, fee_provenance)).len);
     return result;
 }
 

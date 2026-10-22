@@ -28,7 +28,10 @@ pub const StopError = error{ NotStarted, OutputPending };
 
 /// The shared execution seam binds exactly one Venue, environment, and
 /// ExchangeAccount. Implementations own transport and codec; callers only see
-/// canonical requests and bounded canonical event batches.
+/// canonical requests and bounded canonical event batches. Fee adjustments require
+/// an explicit source revision and immutable original Fill provenance; balance
+/// differences or the latest order fee cannot authorize a revision. Current live
+/// adapters do not claim this capability.
 pub const VenueAdapter = struct {
     ptr: *anyopaque,
     vtable: *const VTable,

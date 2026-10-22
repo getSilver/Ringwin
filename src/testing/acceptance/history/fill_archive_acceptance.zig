@@ -204,7 +204,7 @@ fn privateInput(sequence: u64, payload: canonical.Payload) trading.CanonicalEven
     return input;
 }
 
-test "Owner reclaims ten partial fill windows without losing per order quantity and recovers cold facts without sending" {
+test "Owner reclaims eighteen partial fill windows without losing per order quantity and recovers cold facts without sending" {
     const allocator = std.testing.allocator;
     const harness = try acceptance.ArchiveHarness.createBase(allocator, 1600);
     defer harness.destroy();
@@ -224,7 +224,7 @@ test "Owner reclaims ten partial fill windows without losing per order quantity 
     try std.testing.expectEqual(@as(u64, 2), simulator.sends);
     var source_sequence: u64 = 1;
     var first_fill: ?trading.CanonicalEvent = null;
-    for (0..10) |window| {
+    for (0..18) |window| {
         for (commands, 0..) |command, index| {
             // Two lots make one settlement atom at this fixture's price and denominator.
             const cumulative: i64 = @intCast(2 * (window + 1));
@@ -293,12 +293,12 @@ test "Owner reclaims ten partial fill windows without losing per order quantity 
         }
     }
     // The bounded detail view retains sixteen entries while the complete
-    // authoritative high-water count still covers all twenty archived fills.
-    try std.testing.expectEqual(@as(u64, 20), harness.owner.shard.open_economic_fact_count);
+    // authoritative high-water count still covers all thirty-six archived fills.
+    try std.testing.expectEqual(@as(u64, 36), harness.owner.shard.open_economic_fact_count);
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
     try demo.Owner.recoverInto(recovered, harness.backend.interface(), undefined, harness.stream);
-    try std.testing.expectEqual(@as(u64, 20), recovered.shard.open_economic_fact_count);
+    try std.testing.expectEqual(@as(u64, 36), recovered.shard.open_economic_fact_count);
     const gateway = try allocator.create(execution.Gateway);
     defer allocator.destroy(gateway);
     gateway.init();
@@ -307,8 +307,8 @@ test "Owner reclaims ten partial fill windows without losing per order quantity 
     try std.testing.expectEqualSlices(u8, &harness.owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
     try recovered.resumeFillArchive(gateway);
     for (commands) |command| {
-        try std.testing.expectEqual(@as(i64, 20), try recovered.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
-        try std.testing.expectEqual(@as(i64, 20), recovered.shard.oms.orderById(command.order_id).?.cumulative_quantity);
+        try std.testing.expectEqual(@as(i64, 36), try recovered.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
+        try std.testing.expectEqual(@as(i64, 36), recovered.shard.oms.orderById(command.order_id).?.cumulative_quantity);
         try std.testing.expectEqual(harness.gateway.acceptedClientOrderIdFromShard(&harness.owner.shard, command.command_id), gateway.acceptedClientOrderIdFromShard(&recovered.shard, command.command_id));
     }
     const economics = recovered.shard.economic_projection.semanticDigest();
@@ -318,8 +318,8 @@ test "Owner reclaims ten partial fill windows without losing per order quantity 
     _ = try recovered.apply(first_fill.?);
     for (&consumers, commands) |*consumer, command| {
         try consumer.observe(&recovered.shard, 2, command.order_id);
-        try std.testing.expectEqual(@as(usize, 10), consumer.proposals);
-        try std.testing.expectEqual(@as(i64, 20), consumer.possible_quantity);
+        try std.testing.expectEqual(@as(usize, 18), consumer.proposals);
+        try std.testing.expectEqual(@as(i64, 4), consumer.possible_quantity);
     }
     try std.testing.expectEqualSlices(u8, &economics, &recovered.shard.economic_projection.semanticDigest());
     try std.testing.expect(!recovered.shard.history_conflict_latched);

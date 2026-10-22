@@ -35,7 +35,7 @@ pub const max_ledger_transactions = 64;
 pub const Instrument = canonical.InstrumentIdentity;
 const settlement_asset: canonical.AssetIdentity = 1;
 pub const Side = enum(u8) { buy, sell };
-pub const FactKind = enum(u8) { fill, funding, forced_execution, account_snapshot };
+pub const FactKind = enum(u8) { fill, funding, forced_execution, account_snapshot, fee_adjustment };
 pub const LedgerLayer = enum(u8) { portfolio, exchange };
 pub const LedgerUnit = enum(u8) { settlement_atoms, base_atoms, swap_quantity, native_asset_atoms };
 pub const LedgerAccount = enum(u8) { cash, spot_asset, swap_position, trade, fee_expense, rebate_income, funding_pnl, penalty_expense };
@@ -262,7 +262,11 @@ pub const CanonicalFactEvidence = struct {
     digest: [Sha256.digest_length]u8,
 };
 
+pub const FeeOrigin = canonical.FeeOrigin;
+pub const FeeRevision = struct { adjustment: canonical.FeeAdjustment, digest: history.Digest };
+
 pub const FillSource = struct {
+    cycle_first_sequence: u64 = 0,
     canonical_fill: ?canonical.Fill = null,
     core_payload_len: u16 = 0,
     core_payload_bytes: [256]u8 = @splat(0),
@@ -417,6 +421,11 @@ pub const Projection = struct {
     reconciliation_break_count: u8 = 0,
     seen: [max_facts]SeenFact = undefined,
     seen_count: u8 = 0,
+    // shortcut: adjusted Fill provenance and revisions remain resident; add authenticated retirement before 32 revisions.
+    fee_origins: [max_facts]FeeOrigin = @splat(std.mem.zeroes(FeeOrigin)),
+    fee_origin_count: u8 = 0,
+    fee_revisions: [max_facts]FeeRevision = @splat(std.mem.zeroes(FeeRevision)),
+    fee_revision_count: u8 = 0,
     canonical_fill_evidence: [max_facts]CanonicalFactEvidence = undefined,
     canonical_fill_evidence_count: u8 = 0,
     ledger: [max_ledger_transactions]LedgerTransaction = undefined,
@@ -501,6 +510,82 @@ pub const Projection = struct {
             return .duplicate;
         }
         return .unknown;
+    }
+
+    pub fn feeOrigin(self: *const Projection, identity: u128) ?FeeOrigin {
+        for (self.applied_fills[0..self.applied_fill_count]) |applied| if (applied.source.canonical_fill) |original| {
+            if (original.identity == identity) return .{ .original = original, .portfolio = applied.source.portfolio, .strategy = applied.source.strategy, .cycle_first_sequence = applied.source.cycle_first_sequence };
+        };
+        for (self.fee_origins[0..self.fee_origin_count]) |origin| if (origin.original.identity == identity) return origin;
+        return null;
+    }
+
+    pub fn lookupFeeRevision(self: *const Projection, identity: u128, digest_value: history.Digest) !bool {
+        for (self.fee_revisions[0..self.fee_revision_count]) |revision| if (revision.adjustment.identity == identity) {
+            if (!std.mem.eql(u8, &revision.digest, &digest_value)) return error.ConflictingEconomicIdentity;
+            return true;
+        };
+        return false;
+    }
+
+    pub fn applyFeeAdjustment(self: *Projection, adjustment: canonical.FeeAdjustment, digest_value: history.Digest) !bool {
+        if (try self.lookupFeeRevision(adjustment.identity, digest_value)) return false;
+        for (self.fee_revisions[0..self.fee_revision_count]) |revision| if (revision.adjustment.source.stream == adjustment.source.stream and revision.adjustment.source.sequence == adjustment.source.sequence) return error.ConflictingEconomicIdentity;
+        const origin = self.feeOrigin(adjustment.fill_identity) orelse return error.MissingFeeOrigin;
+        if (adjustment.identity == 0 or adjustment.source_version == 0 or adjustment.new_fee.atoms < 0 or
+            adjustment.new_fee.asset == 0 or adjustment.exchange_account != origin.original.exchange_account or
+            adjustment.portfolio != origin.portfolio or adjustment.strategy != origin.strategy or
+            adjustment.cycle_first_sequence != origin.cycle_first_sequence) return error.InvalidEconomicFact;
+        var version: u64 = 0;
+        var previous_fee = origin.original.fee orelse return error.MissingFillFee;
+        for (self.fee_revisions[0..self.fee_revision_count]) |revision| if (revision.adjustment.fill_identity == adjustment.fill_identity) {
+            version = revision.adjustment.source_version;
+            previous_fee = revision.adjustment.new_fee;
+        };
+        if (adjustment.previous_fee_version != version or adjustment.source_version != try std.math.add(u64, version, 1)) return error.InvalidFeeVersion;
+        if (self.fee_revision_count == max_facts) return error.EconomicFactCapacityExceeded;
+        var retained = false;
+        for (self.fee_origins[0..self.fee_origin_count]) |known| if (known.original.identity == origin.original.identity) {
+            retained = true;
+        };
+        if (!retained) {
+            if (self.fee_origin_count == max_facts) return error.EconomicFactCapacityExceeded;
+            self.fee_origins[self.fee_origin_count] = origin;
+            self.fee_origin_count += 1;
+        }
+        const identity = std.math.cast(u64, adjustment.identity) orelse return error.IdentityOutOfRange;
+        try self.adjustFeeCharge(identity, origin.original.instrument, previous_fee, false);
+        try self.adjustFeeCharge(identity, origin.original.instrument, adjustment.new_fee, true);
+        self.fee_revisions[self.fee_revision_count] = .{ .adjustment = adjustment, .digest = digest_value };
+        self.fee_revision_count += 1;
+        try self.assertClosed();
+        return true;
+    }
+
+    fn adjustFeeCharge(self: *Projection, identity: u64, instrument: Instrument, amount: canonical.AssetAmount, debit: bool) !void {
+        if (amount.atoms == 0) return;
+        const expense = if (debit) amount.atoms else try std.math.sub(i128, 0, amount.atoms);
+        const delta = try std.math.sub(i128, 0, expense);
+        for ([_]*Layer{ &self.portfolio, &self.exchange }, [_]LedgerLayer{ .portfolio, .exchange }) |layer, label| {
+            if (amount.asset == self.settlement_asset) {
+                layer.usdt_balance_atoms = try std.math.add(i128, layer.usdt_balance_atoms, delta);
+                layer.fee_atoms = try std.math.add(i128, layer.fee_atoms, expense);
+                try self.appendLedger(identity, .fee_adjustment, label, .fee_expense, delta);
+            } else {
+                const native = try layer.nativeAssetMutable(amount.asset);
+                native.balance_atoms = try std.math.add(i128, native.balance_atoms, delta);
+                var base = false;
+                for (layer.instrument_positions[0..layer.instrument_position_count]) |*position| if (position.instrument == instrument and position.product == .spot and position.base_asset == amount.asset) {
+                    position.base_fee_atoms = try std.math.add(i128, position.base_fee_atoms, expense);
+                    base = true;
+                };
+                if (base) try self.appendSpotChargeLedger(identity, .fee_adjustment, label, .fee_expense, amount.asset, delta) else {
+                    native.fee_atoms = try std.math.add(i128, native.fee_atoms, expense);
+                    try self.appendNativeChargeLedger(identity, .fee_adjustment, label, .fee_expense, amount.asset, delta);
+                }
+            }
+            try layer.refreshPositions();
+        }
     }
 
     pub fn appliedCanonicalFillQuantity(self: *const Projection, order_id: u64) !i64 {
@@ -806,6 +891,16 @@ pub const Projection = struct {
         hashInt(&hasher, u64, self.reconciliation_break_identity);
         hashInt(&hasher, u8, self.reconciliation_break_count);
         for (self.reconciliation_break_identities[0..self.reconciliation_break_count]) |identity| hashInt(&hasher, u64, identity);
+        hashInt(&hasher, u8, self.fee_origin_count);
+        for (self.fee_origins[0..self.fee_origin_count]) |origin| {
+            var bytes: [4096]u8 = undefined;
+            hasher.update(codec.encodeBare(&bytes, origin) catch unreachable);
+        }
+        hashInt(&hasher, u8, self.fee_revision_count);
+        for (self.fee_revisions[0..self.fee_revision_count]) |revision| {
+            var bytes: [4096]u8 = undefined;
+            hasher.update(codec.encodeBare(&bytes, revision) catch unreachable);
+        }
         hashInt(&hasher, u8, self.seen_count);
         for (self.seen[0..self.seen_count]) |seen| {
             hashInt(&hasher, u64, seen.identity);
@@ -876,6 +971,16 @@ pub const Projection = struct {
 
     pub fn normalizedForSemanticDigest(self: *const Projection) Projection {
         var normalized = self.*;
+        std.mem.sort(FeeOrigin, normalized.fee_origins[0..normalized.fee_origin_count], {}, struct {
+            fn less(_: void, a: FeeOrigin, b: FeeOrigin) bool {
+                return a.original.identity < b.original.identity;
+            }
+        }.less);
+        std.mem.sort(FeeRevision, normalized.fee_revisions[0..normalized.fee_revision_count], {}, struct {
+            fn less(_: void, a: FeeRevision, b: FeeRevision) bool {
+                return if (a.adjustment.fill_identity == b.adjustment.fill_identity) a.adjustment.source_version < b.adjustment.source_version else a.adjustment.fill_identity < b.adjustment.fill_identity;
+            }
+        }.less);
         sortCanonicalEvidence(normalized.canonical_fill_evidence[0..normalized.canonical_fill_evidence_count]);
         sortLedger(normalized.ledger[0..normalized.ledger_count]);
         std.mem.sort(OrderFillTotal, normalized.applied_fill_totals[0..normalized.applied_fill_total_count], {}, struct {
@@ -943,6 +1048,37 @@ pub const Projection = struct {
             if (!found) return error.InvalidEconomicFact;
         };
         if (self.applied_fill_count > self.applied_fills.len or self.applied_fill_total_count > self.applied_fill_totals.len or self.canonical_fill_evidence_count > self.canonical_fill_evidence.len) return error.InvalidEconomicFact;
+        if (self.fee_origin_count > max_facts or self.fee_revision_count > max_facts) return error.InvalidEconomicFact;
+        for (self.fee_origins[0..self.fee_origin_count], 0..) |origin, index| {
+            if (origin.original.identity == 0 or origin.original.fee == null or origin.original.fee.?.atoms < 0) return error.InvalidEconomicFact;
+            for (self.fee_origins[0..index]) |prior| if (prior.original.identity == origin.original.identity) return error.InvalidEconomicFact;
+            var revised = false;
+            for (self.fee_revisions[0..self.fee_revision_count]) |revision| if (revision.adjustment.fill_identity == origin.original.identity) {
+                revised = true;
+            };
+            if (!revised) return error.InvalidEconomicFact;
+            for (self.applied_fills[0..self.applied_fill_count]) |applied| if (applied.source.canonical_fill) |original| {
+                if (original.identity == origin.original.identity and (!std.meta.eql(original, origin.original) or applied.source.portfolio != origin.portfolio or applied.source.strategy != origin.strategy or applied.source.cycle_first_sequence != origin.cycle_first_sequence)) return error.InvalidEconomicFact;
+            };
+        }
+        for (self.fee_revisions[0..self.fee_revision_count], 0..) |revision, index| {
+            const adjustment = revision.adjustment;
+            const origin = self.feeOrigin(adjustment.fill_identity) orelse return error.InvalidEconomicFact;
+            if (adjustment.original == null or !std.meta.eql(adjustment.original.?, origin)) return error.InvalidEconomicFact;
+            if (adjustment.identity == 0 or adjustment.new_fee.atoms < 0 or adjustment.new_fee.asset == 0 or
+                adjustment.exchange_account != origin.original.exchange_account or adjustment.portfolio != origin.portfolio or
+                adjustment.strategy != origin.strategy or adjustment.cycle_first_sequence != origin.cycle_first_sequence or
+                adjustment.source.stream == 0 or adjustment.source.sequence == 0 or std.mem.allEqual(u8, &adjustment.source.digest, 0) or adjustment.effective_time_utc_ns == 0) return error.InvalidEconomicFact;
+            var version: u64 = 0;
+            for (self.fee_revisions[0..index]) |prior| {
+                if (prior.adjustment.identity == adjustment.identity or (prior.adjustment.source.stream == adjustment.source.stream and prior.adjustment.source.sequence == adjustment.source.sequence)) return error.InvalidEconomicFact;
+                if (prior.adjustment.fill_identity == adjustment.fill_identity) version = prior.adjustment.source_version;
+            }
+            if (adjustment.previous_fee_version != version or adjustment.source_version != try std.math.add(u64, version, 1)) return error.InvalidEconomicFact;
+            var bytes: [4096]u8 = undefined;
+            const payload = try @import("../persistence/canonical_event_codec.zig").encodePayload(&bytes, .{ .fee_adjustment = adjustment });
+            if (!std.mem.eql(u8, &history.hash(payload), &revision.digest)) return error.InvalidEconomicFact;
+        }
         if (self.applied_funding_count > self.applied_fundings.len) return error.InvalidEconomicFact;
         var resident_funding_absolute_atoms: i128 = 0;
         for (self.applied_fundings[0..self.applied_funding_count], 0..) |applied, index| {

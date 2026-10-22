@@ -53,6 +53,7 @@ pub const Identity = union(enum) {
     coordinator_gateway_closure: GatewayHistoryIdentity,
     cycle: u128,
     deployment_configuration: u128,
+    fee_origin: u64,
 };
 pub const Key = struct { origin: Origin, account: ?u128 = null, identity: Identity };
 
@@ -285,7 +286,7 @@ pub fn encodeKey(key: Key) !EncodedKey {
             result.bytes[25] = @intFromEnum(v.state);
             result.len = 26;
         },
-        .order, .command, .dispatch_command, .canonical_fill, .core_fill, .fill_detail, .fill_economic_digest, .canonical_funding, .core_funding, .funding_detail, .funding_economic_digest, .control_archive => |v| {
+        .order, .command, .dispatch_command, .fee_origin, .canonical_fill, .core_fill, .fill_detail, .fill_economic_digest, .canonical_funding, .core_funding, .funding_detail, .funding_economic_digest, .control_archive => |v| {
             std.mem.writeInt(u64, result.bytes[17..25], v, .big);
             result.len = 25;
         },

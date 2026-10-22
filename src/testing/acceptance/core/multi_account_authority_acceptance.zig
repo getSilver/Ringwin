@@ -54,6 +54,14 @@ test "09a spot round trip releases exact zero but retains a one atom base rebate
     try exerciseAccountRecovery(.cycle_spot_residual);
 }
 
+test "09a fee adjustment after archived Fill and closed cycle authenticates original ownership" {
+    try exerciseAccountRecovery(.cycle_fee_cold);
+}
+
+test "09a fee adjustment applies independent canonical evidence and closes" {
+    try exerciseAccountRecovery(.cycle_fee_adjustment);
+}
+
 test "09a conflicting fee correction keeps original economics and blocks closure" {
     try exerciseAccountRecovery(.cycle_fee_conflict);
 }
@@ -94,7 +102,7 @@ test "05b shared account budget rejects 60 plus 50 and 70 plus 40 but accepts 70
     try exerciseAccountRecovery(.shared_budget);
 }
 
-const Scenario = enum { single, joint, shared_budget, fault_append, fault_commit, publish_fault, file_restore, safety_cancel, domain_history, shared_mark, reverse_competition, single_rejected, four_accounts, safety_reduce, capacity_load, unknown, cycle_closure, cycle_closure_file, cycle_closure_append, cycle_closure_commit, cycle_closure_publish, cycle_residual, cycle_spot_zero, cycle_spot_residual, cycle_spot_carry, cycle_spot_carry_fee, cycle_spot_carry_append, cycle_spot_carry_commit, cycle_spot_carry_publish, cycle_spot_carry_file, cycle_fee_conflict };
+const Scenario = enum { single, joint, shared_budget, fault_append, fault_commit, publish_fault, file_restore, safety_cancel, domain_history, shared_mark, reverse_competition, single_rejected, four_accounts, safety_reduce, capacity_load, unknown, cycle_closure, cycle_closure_file, cycle_closure_append, cycle_closure_commit, cycle_closure_publish, cycle_residual, cycle_spot_zero, cycle_spot_residual, cycle_spot_carry, cycle_spot_carry_fee, cycle_spot_carry_append, cycle_spot_carry_commit, cycle_spot_carry_publish, cycle_spot_carry_file, cycle_fee_conflict, cycle_fee_adjustment, cycle_fee_cold };
 fn carrying(scenario: Scenario) bool {
     return switch (scenario) {
         .cycle_spot_carry, .cycle_spot_carry_fee, .cycle_spot_carry_append, .cycle_spot_carry_commit, .cycle_spot_carry_publish, .cycle_spot_carry_file => true,
@@ -270,7 +278,7 @@ fn exerciseAccountRecovery(scenario: Scenario) !void {
         try std.testing.expectError(error.CycleNotClosed, owner.shard.qualifyCycleClosure(9, 3));
         try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.count);
     }
-    const closing = scenario == .cycle_closure or scenario == .cycle_closure_file or scenario == .cycle_closure_append or scenario == .cycle_closure_commit or scenario == .cycle_closure_publish or scenario == .cycle_spot_zero;
+    const closing = scenario == .cycle_fee_cold or scenario == .cycle_fee_adjustment or scenario == .cycle_closure or scenario == .cycle_closure_file or scenario == .cycle_closure_append or scenario == .cycle_closure_commit or scenario == .cycle_closure_publish or scenario == .cycle_spot_zero;
     if (scenario == .cycle_spot_residual) {
         try prepareCycleClosure(owner, scenario);
         try std.testing.expectError(error.CycleResidual, owner.shard.qualifyCycleClosure(9, 3));
@@ -313,6 +321,25 @@ fn exerciseAccountRecovery(scenario: Scenario) !void {
         try std.testing.expect(!owner.shard.cyclePinsOrder(1));
         try std.testing.expect(!owner.shard.cyclePinsOrder(2));
         try exerciseDispatch(owner, 1);
+        if (scenario == .cycle_fee_cold) {
+            var event = feeEvent(owner, 1);
+            const original = event.venue.event.fee_adjustment.original.?;
+            const gateway = try allocator.create(@import("../../../execution/execution_gateway.zig").Gateway);
+            defer allocator.destroy(gateway);
+            gateway.init();
+            try gateway.attachRecoveredDurableDispatch(store, io, .{ .domain = .control, .id = 92 });
+            _ = try owner.archiveFillHistory(1, gateway);
+            try std.testing.expect(owner.shard.economic_projection.feeOrigin(1) == null);
+            event.venue.event.fee_adjustment.original = original;
+            event.venue.event.fee_adjustment.effective_time_utc_ns = fixture.atGroup(62, .{ .identity = 0, .payload = .recovery_completed }).core.source_time;
+            event.venue.envelope.times = fixture.canonicalAt(62, 1, event.venue.event).venue.envelope.times;
+            try applyAdapterInput(owner, event);
+            try std.testing.expectEqual(@as(i128, 2), owner.shard.economic_projection.portfolio.fee_atoms);
+            try std.testing.expectEqual(@as(u8, 1), owner.shard.economic_projection.fee_revision_count);
+            try std.testing.expectEqual(@as(u64, 3), owner.shard.economic_projection.fee_origins[0].cycle_first_sequence);
+            try std.testing.expectEqual(@as(u8, 0), owner.shard.cycles.count);
+            try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.closed_count);
+        }
         if (scenario == .cycle_closure) {
             try exerciseClosedHistory(owner);
             try owner.checkpoint();
@@ -1115,7 +1142,197 @@ fn exerciseReductions(owner: *demo.Owner) !void {
     try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.count);
 }
 
+test "09a fee adjustment reverses currency independently and preserves original Fill" {
+    const allocator = std.testing.allocator;
+    const memory = try allocator.create(durable.MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .init();
+    defer memory.deinit();
+    const owner = try allocator.create(demo.Owner);
+    defer allocator.destroy(owner);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 91 });
+    try initializeForScenario(owner, .cycle_spot_zero);
+    try exercisePartitionOrders(owner, .cycle_spot_zero);
+    var event = feeEvent(owner, 1);
+    const original = owner.shard.economic_projection.applied_fills[0];
+    const cash = owner.shard.economic_projection.portfolio.usdt_balance_atoms;
+    const base = owner.shard.economic_projection.portfolio.spotInventoryAtoms(0x425443);
+    try applyAdapterInput(owner, event);
+    event.venue.envelope.identity.sequence = 2;
+    event.venue.event.fee_adjustment.identity = 9901;
+    event.venue.event.fee_adjustment.source_version = 2;
+    event.venue.event.fee_adjustment.previous_fee_version = 1;
+    event.venue.event.fee_adjustment.new_fee = .{ .asset = 0x425443, .atoms = 1 };
+    event.venue.event.fee_adjustment.source.sequence = 2;
+    event.venue.event.fee_adjustment.source.digest = history.hash("base fee correction");
+    event.venue.envelope.raw_evidence = event.venue.event.fee_adjustment.source;
+    try applyAdapterInput(owner, event);
+    try std.testing.expectEqual(cash, owner.shard.economic_projection.portfolio.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 0), owner.shard.economic_projection.portfolio.fee_atoms);
+    try std.testing.expectEqual(base - 1, owner.shard.economic_projection.portfolio.spotInventoryAtoms(0x425443));
+    try std.testing.expectEqual(@as(i128, 1), owner.shard.economic_projection.portfolio.base_fee_atoms);
+    try std.testing.expectEqualDeep(original, owner.shard.economic_projection.applied_fills[0]);
+    try owner.checkpoint();
+    const recovered = try allocator.create(demo.Owner);
+    defer allocator.destroy(recovered);
+    try demo.Owner.recoverInto(recovered, memory.interface(), undefined, owner.stream);
+    try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
+}
+
+test "09a fee adjustment every append commit and checkpoint failure recovers complete economics" {
+    const allocator = std.testing.allocator;
+    // One fee fact plus one open-economics commitment; each record append is injected separately.
+    for (0..4) |cut| {
+        const memory = try allocator.create(durable.MemoryAdapter);
+        defer allocator.destroy(memory);
+        memory.* = .init();
+        defer memory.deinit();
+        const owner = try allocator.create(demo.Owner);
+        defer allocator.destroy(owner);
+        const store = memory.interface();
+        try demo.Owner.bootstrapInto(owner, store, undefined, .{ .domain = .decision_log, .id = 91 });
+        try initializeForScenario(owner, .joint);
+        try exercisePartitionOrders(owner, .joint);
+        try owner.checkpoint();
+        const before = owner.shard.canonicalStateDigest();
+        var failing = store.vtable.*;
+        fault_remaining = if (cut < 2) cut + 1 else 1;
+        if (cut < 2) failing.append = failNthAppend else if (cut == 2) failing.commit = failNthCommit else failing.publish = failPublish;
+        if (cut == 3) {
+            const barrier = owner.shard.authoritativeBarrier();
+            try applyAdapterInput(owner, feeEvent(owner, 1));
+            try std.testing.expectEqual(@as(u64, 2), owner.shard.authoritativeBarrier() - barrier);
+        }
+        owner.store = .{ .context = store.context, .vtable = &failing };
+        if (cut == 3) try std.testing.expectError(error.DecisionLogUnavailable, owner.checkpoint()) else try std.testing.expectError(error.DecisionLogUnavailable, owner.apply(feeEvent(owner, 1)));
+        owner.store = store;
+        try std.testing.expect(owner.closed);
+        if (cut != 3) try std.testing.expectEqualSlices(u8, &before, &owner.shard.canonicalStateDigest());
+        const recovered = try allocator.create(demo.Owner);
+        defer allocator.destroy(recovered);
+        try demo.Owner.recoverInto(recovered, store, undefined, owner.stream);
+        try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
+        try std.testing.expectEqual(@as(u8, if (cut == 3) 1 else 0), recovered.shard.economic_projection.fee_revision_count);
+        try std.testing.expectEqual(@as(i128, if (cut == 3) 2 else 0), recovered.shard.economic_projection.portfolio.fee_atoms);
+    }
+}
+
+fn feeEvent(owner: *demo.Owner, sequence: u64) trading.CanonicalEvent {
+    const adjustment: trading.canonical.Payload = .{ .fee_adjustment = .{
+        .original = owner.shard.economic_projection.feeOrigin(1),
+        .identity = 9900,
+        .fill_identity = 1,
+        .exchange_account = 20,
+        .portfolio = 10,
+        .strategy = 9,
+        .cycle_first_sequence = 3,
+        .source_version = 1,
+        .previous_fee_version = 0,
+        .new_fee = .{ .asset = 1, .atoms = 2 },
+        .source = .{ .stream = 99, .sequence = 1, .digest = history.hash("fee adjustment evidence") },
+        .effective_time_utc_ns = fixture.atGroup(47, .{ .identity = 0, .payload = .recovery_completed }).core.source_time,
+    } };
+    var event = fixture.canonicalAt(47, sequence, adjustment);
+    event.venue.envelope.exchange_account = 20;
+    event.venue.envelope.raw_evidence = adjustment.fee_adjustment.source;
+    event.venue.envelope.identity.stream = 99;
+    event.venue.envelope.source_stream = 99;
+    return event;
+}
+
+fn exerciseFeeRevisions(owner: *demo.Owner) !void {
+    var event = feeEvent(owner, 1);
+    const original_fill = owner.shard.economic_projection.applied_fills[0];
+    const account_b = owner.shard.accountState(30).?.economic_projection.semanticDigest();
+    const original_oms_quantity = owner.shard.oms.orderById(1).?.cumulative_quantity;
+    const isolated = try std.testing.allocator.create(trading.TradingShard);
+    defer std.testing.allocator.destroy(isolated);
+    // Missing predecessors, ownership and source evidence each fail closed without changing money.
+    for (0..7) |variant| {
+        isolated.* = owner.shard;
+        var invalid = event;
+        switch (variant) {
+            0 => invalid.venue.event.fee_adjustment.source_version = 2,
+            1 => invalid.venue.event.fee_adjustment.previous_fee_version = 1,
+            2 => invalid.venue.event.fee_adjustment.new_fee.atoms = -1,
+            3 => invalid.venue.event.fee_adjustment.portfolio = 11,
+            4 => invalid.venue.event.fee_adjustment.exchange_account = 30,
+            5 => invalid.venue.envelope.raw_evidence.digest = history.hash("wrong raw source"),
+            6 => invalid.venue.event.fee_adjustment.fill_identity = 999,
+            else => unreachable,
+        }
+        const before = isolated.economic_projection.semanticDigest();
+        var failed = false;
+        _ = isolated.apply(invalid) catch {
+            failed = true;
+        };
+        try std.testing.expect(failed);
+        try std.testing.expectEqualSlices(u8, &before, &isolated.economic_projection.semanticDigest());
+        try std.testing.expectEqual(@as(u64, 1), isolated.economic_fault_count);
+        try std.testing.expect(isolated.oms.recovery_only);
+    }
+    // A valid revision is no authority to clear an already persisted economic fault.
+    var after_fault = event;
+    after_fault.venue.envelope.identity.sequence = 2;
+    _ = try isolated.apply(after_fault);
+    try std.testing.expectEqual(@as(u64, 1), isolated.economic_fault_count);
+    try std.testing.expect(isolated.oms.recovery_only);
+    try applyAdapterInput(owner, event);
+    try std.testing.expectEqual(@as(i128, 2), owner.shard.economic_projection.portfolio.fee_atoms);
+    const first = event;
+    event.venue.envelope.identity.sequence = 2;
+    event.venue.event.fee_adjustment.identity = 9901;
+    event.venue.event.fee_adjustment.source_version = 2;
+    event.venue.event.fee_adjustment.previous_fee_version = 1;
+    event.venue.event.fee_adjustment.new_fee.atoms = 1;
+    event.venue.event.fee_adjustment.source.sequence = 2;
+    event.venue.event.fee_adjustment.source.digest = history.hash("fee revision two");
+    event.venue.envelope.raw_evidence = event.venue.event.fee_adjustment.source;
+    try applyAdapterInput(owner, event);
+    const corrected = owner.shard.economic_projection.semanticDigest();
+    var duplicate = first;
+    duplicate.venue.envelope.identity.sequence = 3;
+    try applyAdapterInput(owner, duplicate);
+    try std.testing.expectEqualSlices(u8, &corrected, &owner.shard.economic_projection.semanticDigest());
+    var original = fixture.canonicalAt(46, 2, .{ .fill = original_fill.source.canonical_fill.? });
+    original.venue.envelope.exchange_account = 20;
+    try applyAdapterInput(owner, original);
+    try std.testing.expectEqualSlices(u8, &corrected, &owner.shard.economic_projection.semanticDigest());
+    try std.testing.expectEqual(@as(i128, 1), owner.shard.economic_projection.portfolio.fee_atoms);
+    try std.testing.expectEqualDeep(original_fill, owner.shard.economic_projection.applied_fills[0]);
+    try std.testing.expectEqual(@as(i64, 10000), try owner.shard.economic_projection.appliedCanonicalFillQuantity(1));
+    try std.testing.expectEqual(original_oms_quantity, owner.shard.oms.orderById(1).?.cumulative_quantity);
+    try std.testing.expectEqualSlices(u8, &account_b, &owner.shard.accountState(30).?.economic_projection.semanticDigest());
+    for (0..3) |variant| {
+        isolated.* = owner.shard;
+        var conflict = event;
+        conflict.venue.envelope.identity.sequence = 4;
+        switch (variant) {
+            0 => conflict.venue.event.fee_adjustment.new_fee.atoms = 3,
+            1 => {
+                conflict.venue.event.fee_adjustment.identity = 9902;
+                conflict.venue.event.fee_adjustment.fill_identity = 3;
+            },
+            2 => {
+                conflict.venue.event.fee_adjustment.identity = 9902;
+                conflict.venue.event.fee_adjustment.source_version = 1;
+                conflict.venue.event.fee_adjustment.source.sequence = 3;
+                conflict.venue.envelope.raw_evidence = conflict.venue.event.fee_adjustment.source;
+            },
+            else => unreachable,
+        }
+        var failed = false;
+        _ = isolated.apply(conflict) catch {
+            failed = true;
+        };
+        try std.testing.expect(failed);
+        try std.testing.expectEqualSlices(u8, &corrected, &isolated.economic_projection.semanticDigest());
+        try std.testing.expectEqual(@as(u64, 1), isolated.economic_fault_count);
+    }
+}
+
 fn prepareCycleClosure(owner: *demo.Owner, scenario: Scenario) !void {
+    if (scenario == .cycle_fee_adjustment) try exerciseFeeRevisions(owner);
     const spot = scenario == .cycle_spot_zero or scenario == .cycle_spot_residual or carrying(scenario);
     if (!spot) for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }) |account, instrument| {
         _ = try owner.apply(fixture.atGroup(47, .{ .identity = 9000, .account_scope = account, .payload = .{ .funding_settlement = .{ .settlement_id = 9000, .amount_atoms = 5, .instrument = instrument } } }));
