@@ -38,7 +38,7 @@ Status: open
 | [05 共同准入与占用](issues/05-joint-admission.md) | 05a、05b（均已完成） | H2/H3 汇总；resolved，离线核心验收 |
 | [05a 多账户权威表示](issues/05a-multi-account-authority.md) | 01（已完成） | H2/H3；resolved |
 | [05b 共同准入与占用](issues/05b-joint-admission-occupancy.md) | 01、04、05a（均已完成） | H2/H3；resolved |
-| [06 双 IOC 执行](issues/06-dual-ioc-dispatch.md) | 05 | H2 |
+| [06 双 IOC 执行](issues/06-dual-ioc-dispatch.md) | 05 | H2；resolved，离线执行接缝验收 |
 | [07 原生 Post-only](issues/07-native-post-only.md) | 05 | H2 |
 | [08 确定性 checkpoint](issues/08-deterministic-checkpoint.md) | 无；最终验收需确认策略 schema | H3 |
 | [09 周期恢复与激活](issues/09-cycle-recovery.md) | 09a、09b | H3 汇总验收 |
@@ -48,11 +48,13 @@ Status: open
 
 ## Frontier
 
-- [06 双 IOC 执行](issues/06-dual-ioc-dispatch.md)、[07 原生 Post-only](issues/07-native-post-only.md)：05 核心依赖已完成；分别验收真实Venue行为，不由共同准入证据推导。
+- [07 原生 Post-only](issues/07-native-post-only.md)：05 核心依赖已完成；06已完成离线执行接缝验收，真实Venue各模式资格仍分别记录，不由共同准入证据推导。
 - [09a 核心周期闭合](issues/09a-cycle-closure-residual.md)：05b已完成；终结、残余阈值及资产规则仍须冻结，当前周期与经济引用保持pin。
 - [08 版本化策略状态与确定性 checkpoint](issues/08-deterministic-checkpoint.md)：in_progress；schema/codec/容量已确认，用户收窄本轮为 checkpoint 基础设施，真实模型验收保持待定。见[实现合同](08-checkpoint-design.md)及[验证记录](08-verification.md)，不解除 09b 的整票依赖。
 
 ## Decisions so far
+
+- 2026-10-22：06 resolved，双IOC在回报前独立发送、第二腿部分失败、8个发送持久边界、Unknown不重发与可能量、迟到/重复/撤单途中Fill、显式修复及减仓义务均离线验收。复用现有实现，新增公共接缝与经济消费者证明；最终ReleaseSafe **688/688**、核心定向 **6/6**、真实OKX私有WS及归档恢复各 **2/2**，双轴复审无遗留发现。见[验证记录](06-verification.md)。真实Venue联合网络执行、native maker、完整策略与checkpoint联结仍分别归后续资格/07/09/10；活动周期继续pin，产品多账户入口及deployment/production qualification保持关闭，未部署或下单。
 
 - 2026-10-22：05a → 05b → 05 resolved。完整静态清单、四账户权威分区、显式域根/账户键、Host完整组共同准入、预算与占用、故障恢复及安全容量已离线验收；最终ReleaseSafe **683/683**、定向 **25/25**、真实Python Host文件恢复与Python **5/5**通过，双轴复审无遗留阻断。journal/state/registry为43/47/41，Gateway V9最大证据按编码预算修订为39,210条；见[实现合同](05a-implementation-contract.md)及[验证记录](05-verification.md)。现有控制面尚无完整清单/独立锚点发布合同，多账户产品入口保持关闭，deployment/production qualification=false；09a前不释放活动引用，未部署或下单。
 

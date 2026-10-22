@@ -211,6 +211,7 @@ test "Owner reclaims ten partial fill windows without losing per order quantity 
     var simulator: acceptance.RestingSimulator = .{};
     try harness.bindAdapter(simulator.adapter());
     var commands: [2]trading.oms.Command = undefined;
+    var consumers: [2]@import("../../support/execution_fact_consumer.zig").FillConsumer = @splat(.{});
     for (&commands, 0..) |*command, index| {
         const identity: u64 = 101 + index;
         var group: trading.oms.IntentGroup = .{ .first_intent_sequence = identity, .count = 1 };
@@ -266,6 +267,8 @@ test "Owner reclaims ten partial fill windows without losing per order quantity 
             const fill_input = privateInput(source_sequence, fill_payload);
             source_sequence += 1;
             _ = try harness.owner.apply(fill_input);
+            try consumers[index].observe(&harness.owner.shard, 2, command.order_id);
+            try std.testing.expectEqual(window + 1, consumers[index].proposals);
             if (first_fill == null) first_fill = fill_input;
             try std.testing.expectEqual(cumulative, try harness.owner.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
             if (window % 2 != 0) {
@@ -313,6 +316,11 @@ test "Owner reclaims ten partial fill windows without losing per order quantity 
     const next_command = recovered.shard.oms.next_command_id;
     const command_history_count = recovered.shard.oms.command_history_count;
     _ = try recovered.apply(first_fill.?);
+    for (&consumers, commands) |*consumer, command| {
+        try consumer.observe(&recovered.shard, 2, command.order_id);
+        try std.testing.expectEqual(@as(usize, 10), consumer.proposals);
+        try std.testing.expectEqual(@as(i64, 20), consumer.possible_quantity);
+    }
     try std.testing.expectEqualSlices(u8, &economics, &recovered.shard.economic_projection.semanticDigest());
     try std.testing.expect(!recovered.shard.history_conflict_latched);
     try std.testing.expectEqual(next_order, recovered.shard.oms.next_order_id);

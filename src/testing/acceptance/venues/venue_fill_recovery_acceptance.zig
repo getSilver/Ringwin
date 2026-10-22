@@ -322,7 +322,11 @@ fn executeRawPrivateFillRecovery() !void {
     try std.testing.expectEqual(@as(usize, 2), first_batch.slice().len);
     try std.testing.expect(first_batch.slice()[0].event == .execution_report);
     try std.testing.expect(first_batch.slice()[1].event == .fill);
+    var consumer: @import("../../support/execution_fact_consumer.zig").FillConsumer = .{};
     _ = try owner.apply(.{ .venue = first_batch.slice()[0] });
+    try consumer.observe(&owner.shard, 2, command.order_id);
+    try std.testing.expectEqual(@as(usize, 0), consumer.proposals);
+    try std.testing.expectEqual(@as(i64, 20_000), consumer.possible_quantity);
     // The interrupted recovery branch owns a separate copy of the committed
     // store; two live Owners must not append through stale journal cursors.
     const tail_memory = try allocator.create(durable.MemoryAdapter);
@@ -409,6 +413,9 @@ fn executeRawPrivateFillRecovery() !void {
     // The recovered Owner remains behind its process admission fence. Continue
     // the live Owner after committing the same missing Fill independently.
     try owner.applyAdapterBatch(fill_tail);
+    try consumer.observe(&owner.shard, 2, command.order_id);
+    try std.testing.expectEqual(@as(usize, 1), consumer.proposals);
+    try std.testing.expectEqual(@as(i64, 10_000), consumer.possible_quantity);
     try std.testing.expectEqualSlices(u8, &fill_digest, &owner.shard.canonicalStateDigest());
     const second = try std.fmt.bufPrint(&frame,
         \\{{"arg":{{"channel":"orders"}},"data":[{{"instId":"BTC-USDT","ordId":"1001","clOrdId":"{s}","side":"buy","ordType":"limit","state":"filled","tdMode":"cash","posSide":"net","reduceOnly":"false","sz":"0.0002","px":"50000","accFillSz":"0.0002","avgPx":"50000","uTime":"1800000000200","tradeId":"2002","fillSz":"0.0001","fillPx":"50000","fillFee":"-0.01","fillFeeCcy":"USDT","rebate":"0.001","rebateCcy":"USDT","fillTime":"1800000000200","execType":"T"}}]}}
@@ -427,6 +434,9 @@ fn executeRawPrivateFillRecovery() !void {
     }
     if (!saw_reconciliation) return error.MissingReconciliationResult;
     try owner.applyAdapterBatch(reconciled_batch);
+    try consumer.observe(&owner.shard, 2, command.order_id);
+    try std.testing.expectEqual(@as(usize, 2), consumer.proposals);
+    try std.testing.expectEqual(@as(i64, 0), consumer.possible_quantity);
     const reconciled_digest = owner.shard.canonicalStateDigest();
     const reconciled_owner = try allocator.create(demo.Owner);
     defer allocator.destroy(reconciled_owner);
@@ -474,6 +484,8 @@ fn executeRawPrivateFillRecovery() !void {
     try std.testing.expect(equivalent_ingress.rejection == null);
     try std.testing.expect(!try applyDrain(owner, adapter));
     try std.testing.expectEqualSlices(u8, &before_duplicate, &owner.shard.canonicalStateDigest());
+    try consumer.observe(&owner.shard, 2, command.order_id);
+    try std.testing.expectEqual(@as(usize, 2), consumer.proposals);
     var recovered_raw = try raw_ingress.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = 2 });
     var recovered_chain: live.Chain = .{ .mode = .demo_live, .qualification = qualification(), .raw_sink = recovered_raw.interface(), .transport = transport.interface() };
     var recovered_clock = Clock{};

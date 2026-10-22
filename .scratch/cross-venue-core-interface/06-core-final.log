@@ -1,0 +1,7 @@
+1/6 entry.test_0...OK
+2/6 testing.acceptance.core.dual_ioc_dispatch_acceptance.test.06 dual IOC sends both accounts before any private report or Fill...OK
+3/6 testing.acceptance.core.dual_ioc_dispatch_acceptance.test.06 second IOC transport failure preserves first send and both reservations...OK
+4/6 testing.acceptance.core.dual_ioc_dispatch_acceptance.test.06 Unknown and late dual IOC fills preserve possible quantity and unique strategy proposals...OK
+5/6 testing.acceptance.core.dual_ioc_dispatch_acceptance.test.06 cancel in flight and Unknown restart retain late fills without a second hedge...OK
+6/6 testing.acceptance.core.dual_ioc_dispatch_acceptance.test.06 dual IOC every dispatch intent and outcome append or commit boundary fails closed...OK
+All 6 tests passed.
