@@ -541,6 +541,14 @@ _Avoid_: Transaction cost, cost-basis adjustment
 Venue 因某个 Fill 实际返还的收入，按返还 Asset 独立归属于该 Fill 的 VirtualPortfolio；它不作为负手续费修改原始 TradingFee。
 _Avoid_: Negative fee, cost-basis adjustment
 
+**FeeAdjustment**:
+Venue 以独立证据确认、引用原 Fill 及前一费用版本的 TradingFee 更正事实；更正保留原经济归属，以原币调整账务，不改变原成交数量、价格、AverageCost 或 TradingRebate。
+_Avoid_: Replacement Fill, mutable fee, inferred balance correction
+
+**SpotResidual**:
+交易周期退出后保留在原 ExchangeAccount 与 VirtualPortfolio 的正现货残余资产；经版本化规则显式承接后可不再占用原周期的品种键，但仍计入原所有者资产且不可供新周期花费。
+_Avoid_: Zero balance, Treasury transfer, free inventory
+
 **FundingSettlement**:
 Venue 在某个永续合约资金费结算时点对 ExchangeAccount 确认的实际应付或应收经济事实。
 _Avoid_: Funding rate, estimated funding
