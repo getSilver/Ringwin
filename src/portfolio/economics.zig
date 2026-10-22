@@ -566,7 +566,7 @@ pub const Projection = struct {
     }
 
     pub fn prepareFillArchive(self: *const Projection, identity: u64, origin: history.Origin, barrier: u64) !FillArchiveQualification {
-        if (identity == 0 or barrier == 0 or origin.account == 0 or origin.stream.domain != .decision_log or origin.stream.id == 0 or
+        if (identity == 0 or barrier == 0 or !history.validOrigin(origin) or origin.stream.domain != .decision_log or origin.stream.id == 0 or
             self.reconciliation_break or self.suspense_usdt_atoms != 0 or self.suspense_native_asset_count != 0) return error.FillArchivePinned;
         var applied: ?AppliedFill = null;
         for (self.applied_fills[0..self.applied_fill_count]) |known| if (known.fill.identity == identity) {
@@ -574,7 +574,8 @@ pub const Projection = struct {
             break;
         };
         const known = applied orelse return error.UnknownEconomicFill;
-        if (known.source.exchange_account != 0 and known.source.exchange_account != origin.account) return error.InvalidFillArchiveOrigin;
+        if ((origin.scope == .account and known.source.exchange_account != 0 and known.source.exchange_account != origin.account) or
+            (origin.scope == .decision_domain and known.source.exchange_account == 0)) return error.InvalidFillArchiveOrigin;
         var result: FillArchiveQualification = .{ .origin = origin, .barrier = barrier, .projection_digest = self.digest(), .record = .{ .applied = known } };
         // Zero unused entries because the bare record codec includes the full bounded array.
         result.record.ledger = std.mem.zeroes(@TypeOf(result.record.ledger));

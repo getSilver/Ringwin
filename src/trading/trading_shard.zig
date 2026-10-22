@@ -690,7 +690,86 @@ pub const TradingShard = struct {
 
     pub fn cyclePinsOrder(self: *const TradingShard, order_id: u64) bool {
         const order = self.oms.orderById(order_id) orelse return false;
-        return self.cycles.owning(.{ .account = order.exchange_account, .instrument = order.instrument }) != null;
+        for (self.oms.command_history[0..self.oms.command_history_count]) |command| {
+            if (command.order_id != order_id) continue;
+            const first_sequence = std.math.cast(u64, command.authority.cycle.identity) orelse continue;
+            if (self.cycles.find(order.strategy_instance, first_sequence) != null) return true;
+        }
+        return false;
+    }
+
+    pub noinline fn qualifyCycleClosure(self: *const TradingShard, strategy: u128, first_sequence: u64) !@import("cycle_occupancy.zig").Closure {
+        const cycle = self.cycles.find(strategy, first_sequence) orelse return error.UnknownCycle;
+        if (self.cycles.closed_count == @import("cycle_occupancy.zig").max_cycles) return error.CycleClosureCapacity;
+        if (self.decision_domain_identity == 0 or cycle.count != 2 or self.history_conflict_latched or self.oms.recovery_only or
+            self.pending_history_candidate != null or self.pending_safety_history_candidate != null or self.deferred_history_admission_count != 0)
+            return error.CycleNotClosed;
+        var proof: @import("cycle_occupancy.zig").Closure = .{ .strategy = strategy, .first_sequence = first_sequence, .content_digest = cycle.content_digest, .reconciliation_roots = undefined };
+        var view: TradingShard = undefined;
+        copyTradingState(&view, self);
+        for (cycle.members[0..cycle.count], 0..) |member, index| {
+            const partition = if (member.account == self.primary_account_identity) null else self.secondaryAccountIndex(member.account) orelse return error.CycleNotClosed;
+            if (partition) |account_index| view.exchangeAccountView(account_index);
+            defer if (partition) |account_index| view.exchangeAccountView(account_index);
+            const cursor = view.reconciliation_cursor orelse return error.CycleNotClosed;
+            const archive = view.reconciliation_archive orelse return error.CycleNotClosed;
+            if (archive.receipt.root.barrier < cycle.fact_sequence or view.pending_reconciliation_window != null or
+                view.open_economic_fact_count != 0 or view.open_economic_unknown_time_count != 0 or
+                cursor.closed_economic_fact_count != try view.totalEconomicFactCount() or
+                view.economic_fault_count != 0 or view.unresolvedEconomicGate() or
+                view.economic_projection.reconciliation_break or view.economic_projection.suspense_usdt_atoms != 0 or
+                view.economic_projection.suspense_native_asset_count != 0) return error.CycleNotClosed;
+            try view.economic_projection.assertClosed();
+            const entry = view.instrumentEntry(member.instrument) orelse return error.CycleNotClosed;
+            for ([_]*const economics.Layer{ &view.economic_projection.portfolio, &view.economic_projection.exchange }) |layer| {
+                if (layer.instrumentPosition(member.instrument)) |position| {
+                    if (position.position.quantity != 0 or position.position.open_cost_atoms != 0 or position.margin_atoms != 0 or position.spot_asset_atoms != 0)
+                        return error.CycleResidual;
+                }
+                if (entry.product == .spot and layer.spotInventoryAtoms(entry.rules.base_asset) != 0) return error.CycleResidual;
+            }
+            var found = false;
+            for (view.oms.orders[0..view.oms.order_count]) |order| {
+                if (order.exchange_account != member.account or order.instrument != member.instrument) continue;
+                if ((order.state != .filled and order.state != .canceled and order.state != .rejected) or
+                    order.reservation_active or order.reservation.atoms != 0 or order.pending_reservation != null or order.pending_previous_spec != null or
+                    order.pending_basis_quantity != 0 or order.replacement != null or
+                    order.terminal_observed_at_utc_ns == 0 or order.terminal_observed_at_utc_ns > cursor.through_utc_ns or
+                    order.cumulative_quantity != try view.economic_projection.appliedCanonicalFillQuantity(order.id)) return error.CycleNotClosed;
+                var belongs = false;
+                var completed = false;
+                for (view.oms.command_history[0..view.oms.command_history_count]) |command| {
+                    if (command.order_id != order.id) continue;
+                    const original = std.math.cast(u64, command.authority.cycle.identity) orelse return error.CycleNotClosed;
+                    if (command.strategy_instance == strategy and original == first_sequence) {
+                        belongs = true;
+                    } else if (view.cycles.completed(command.strategy_instance, original) != null) {
+                        completed = true;
+                    } else return error.CycleNotClosed;
+                }
+                if (!belongs) {
+                    if (!completed) return error.CycleNotClosed;
+                    continue;
+                }
+                found = true;
+                if (order.strategy_instance != strategy) return error.CycleNotClosed;
+            }
+            if (!found) return error.CycleNotClosed;
+            proof.reconciliation_roots[index] = cursor.root_digest;
+        }
+        return proof;
+    }
+
+    noinline fn closeCycle(self: *TradingShard, input: CoreEvent, proof: @import("cycle_occupancy.zig").Closure) !void {
+        if (input.account_scope != null) return error.InvalidDomainScope;
+        if (self.cycles.completed(proof.strategy, proof.first_sequence)) |known| {
+            if (!std.meta.eql(known.proof, proof)) return error.ConflictingCycleClosure;
+            return;
+        }
+        const expected = try self.qualifyCycleClosure(proof.strategy, proof.first_sequence);
+        if (!std.meta.eql(expected, proof)) return error.ConflictingCycleClosure;
+        try self.trace.append(.cycle_closed, proof.first_sequence);
+        try self.cycles.close(proof, self.authoritativeBarrier());
     }
 
     pub fn hasDeferredOrderHistory(self: *const TradingShard, order_id: u64) bool {
@@ -1175,11 +1254,7 @@ pub const TradingShard = struct {
 
     fn commandNeedsDispatchFacts(self: *const TradingShard, order_id: u64) bool {
         const order = self.oms.orderById(order_id) orelse return true;
-        if (self.decision_domain_identity != 0) {
-            for (self.cycles.records[0..self.cycles.count]) |cycle|
-                for (cycle.members[0..cycle.count]) |member|
-                    if (member.account == order.exchange_account and member.instrument == order.instrument) return true;
-        }
+        if (self.decision_domain_identity != 0 and self.cyclePinsOrder(order_id)) return true;
         return switch (order.state) {
             .filled, .canceled, .rejected => order.reservation_active or order.reservation.atoms != 0 or
                 order.pending_reservation != null or order.pending_previous_spec != null or
@@ -1192,6 +1267,10 @@ pub const TradingShard = struct {
         var target = self.trace;
         target.pinned_len = 0;
         for (self.cycles.records[0..self.cycles.count]) |cycle| try self.pinFact(&target, cycle.fact_sequence);
+        for (self.cycles.closed[0..self.cycles.closed_count]) |closed| {
+            try self.pinFact(&target, closed.fact_sequence);
+            try self.pinFact(&target, closed.record.fact_sequence);
+        }
         try self.pinFact(&target, self.domain_binding_fact_sequence);
         for (self.asset_registry.entries[0..self.asset_registry.count]) |entry| try self.pinFact(&target, entry.barrier);
         for (self.instrument_registry.entries[0..self.instrument_registry.count]) |entry| {
@@ -1302,6 +1381,7 @@ pub const TradingShard = struct {
             .oms_reconciliation_result,
             .oms_dispatch_batch,
             .funding_archive_committed,
+            .fill_archive_committed,
             .reconciliation_archive_committed,
             => {
                 const expected = if (self.account_view == 0) self.primary_account_identity else self.secondary_accounts[self.account_view - 1].identity;
@@ -4430,6 +4510,7 @@ pub const TradingShard = struct {
             self.business_history_root = commit.receipt.root;
             self.last_fill_archive = commit;
             self.last_business_archive_kind = .fill;
+            self.last_business_archive_account = self.exchange_account_identity;
             try self.trace.append(.fill_archive_committed, input.identity);
             return null;
         }
@@ -5046,6 +5127,7 @@ pub const TradingShard = struct {
             .strategy_intent_rejected => |rejection| {
                 try self.trace.append(.strategy_intent_rejected, rejection.intent_sequence);
             },
+            .cycle_closed => |proof| try self.closeCycle(input, proof),
             .oms_intent_group => |group| return self.handleOmsGroup(input, group),
             .oms_dispatch_batch => |batch| return self.handleOmsDispatch(input, batch),
             .oms_execution_report => |report| {
@@ -5258,6 +5340,7 @@ const CoreSnapshotEncodingPolicy = struct {
         return null;
     }
     pub fn tailCounter(comptime T: type, comptime name: []const u8) ?[]const u8 {
+        if (T == @FieldType(TradingShard, "cycles")) return mappedTail(name, .{ .{ "records", "count" }, .{ "closed", "closed_count" } });
         if (T == AccountState) return mappedTail(name, .{ .{ "open_economic_facts", "open_economic_fact_count" }, .{ "economic_baseline_balances", "economic_baseline_balance_count" } });
         if (T == TradingShard) return mappedTail(name, .{ .{ "secondary_accounts", "secondary_account_count" }, .{ "fenced_strategy_instances", "fenced_strategy_count" }, .{ "canonical_ingress_cursors", "canonical_ingress_cursor_count" }, .{ "open_economic_facts", "open_economic_fact_count" }, .{ "economic_baseline_balances", "economic_baseline_balance_count" } });
         if (T == ReconciliationCursor) return mappedTail(name, .{.{ "balances", "balance_count" }});
@@ -5404,6 +5487,15 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
 fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: bool) !void {
     try shard.deployment.validateSnapshot();
     try shard.cycles.validate();
+    for (shard.cycles.closed[0..shard.cycles.closed_count]) |closed| {
+        const fact = shard.trace.factAt(closed.fact_sequence) orelse return error.InvalidSnapshotState;
+        const occupied = shard.trace.factAt(closed.record.fact_sequence) orelse return error.InvalidSnapshotState;
+        if (shard.decision_domain_identity == 0 or !shard.deployment.sealed or fact.kind != .cycle_closed or fact.identity != closed.proof.first_sequence or
+            occupied.kind != .cycle_occupied or occupied.identity != closed.proof.first_sequence or
+            !std.mem.eql(u8, &closed.record.configuration_digest, &shard.deployment.header.?.expected_digest)) return error.InvalidSnapshotState;
+        for (closed.record.members[0..closed.record.count]) |member|
+            if (shard.deployment.owner(member.account, member.instrument) != shard.decision_domain_identity) return error.InvalidSnapshotState;
+    }
     for (shard.cycles.records[0..shard.cycles.count]) |cycle| {
         const fact = shard.trace.factAt(cycle.fact_sequence) orelse return error.InvalidSnapshotState;
         if (fact.kind != .cycle_occupied or fact.identity != cycle.first_sequence or !shard.deployment.sealed or
@@ -5740,7 +5832,9 @@ fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: b
             if (order.exchange_account != refs.exchange_account or refs.decision_domain != shard.decision_domain_identity or
                 shard.deployment.owner(refs.exchange_account, command.instrument) != shard.decision_domain_identity or
                 !std.mem.eql(u8, &refs.configuration_digest, &shard.deployment.header.?.expected_digest)) return error.InvalidSnapshotState;
-            const cycle = shard.cycles.find(command.strategy_instance, std.math.cast(u64, refs.cycle.identity) orelse return error.InvalidSnapshotState) orelse return error.InvalidSnapshotState;
+            const first_sequence = std.math.cast(u64, refs.cycle.identity) orelse return error.InvalidSnapshotState;
+            const cycle = shard.cycles.find(command.strategy_instance, first_sequence) orelse
+                (shard.cycles.completed(command.strategy_instance, first_sequence) orelse return error.InvalidSnapshotState).record;
             if (cycle.fact_sequence != refs.cycle.barrier or refs.cycle.version != 1 or cycle.portfolio != refs.virtual_portfolio) return error.InvalidSnapshotState;
         }
         const typed_refs = .{
@@ -5960,6 +6054,7 @@ pub fn applyStableOnCandidate(
         if (input == .core and input.core.payload == .asset_definition_activated) return null;
         if (input == .core and input.core.payload == .checkpoint_committed) return null;
         if (input == .core and input.core.payload == .account_coordinator_bound) return null;
+        if (input == .core and input.core.payload == .cycle_closed) return null;
         if (input == .core and input.core.payload == .instrument_trading_authorization) return null;
         if (input == .core and (input.core.payload == .external_order_intent or input.core.payload == .external_intent_group)) return null;
         if (input == .core and input.core.payload == .oms_intent_group and
@@ -6068,9 +6163,11 @@ fn stateDigestBorrowed(shard: *const TradingShard) [Sha256.digest_length]u8 {
     const spot_portfolio_position = shard.spotPortfolioPosition();
     const spot_exchange_position = shard.spotExchangePosition();
     const ledger = shard.economic_projection.ledger_summary;
-    hasher.update("StateDigestV11\x00");
+    hasher.update("StateDigestV12\x00");
     digestInt(&hasher, u8, shard.cycles.count);
     for (shard.cycles.records[0..shard.cycles.count]) |cycle| digestBare(&hasher, cycle);
+    digestInt(&hasher, u8, shard.cycles.closed_count);
+    for (shard.cycles.closed[0..shard.cycles.closed_count]) |closed| digestBare(&hasher, closed);
     if (shard.deployment.header != null) {
         hasher.update("DeploymentConfigurationV1\x00");
         hasher.update(&shard.deployment.contentDigest());
@@ -6605,7 +6702,7 @@ fn digestEconomicProjection(hasher: *Sha256, projection: economics_module.Projec
 
 fn semanticStateDigest(shard: *const TradingShard) [Sha256.digest_length]u8 {
     var hasher = Sha256.init(.{});
-    hasher.update("SemanticAuthorityDigestV1\x00");
+    hasher.update("SemanticAuthorityDigestV2\x00");
     digestInt(&hasher, u128, shard.decision_domain_identity);
     if (shard.deployment.header) |header| hasher.update(&header.expected_digest);
     for (shard.secondary_accounts[0..shard.secondary_account_count]) |partition| {
@@ -6620,6 +6717,8 @@ fn semanticStateDigest(shard: *const TradingShard) [Sha256.digest_length]u8 {
         hasher.update(&cycle.content_digest);
         for (cycle.members[0..cycle.count]) |member| digestBare(&hasher, member);
     }
+    digestInt(&hasher, u8, shard.cycles.closed_count);
+    for (shard.cycles.closed[0..shard.cycles.closed_count]) |closed| digestBare(&hasher, closed);
     digestInt(&hasher, u64, shard.economic_baseline_utc_ns);
     digestInt(&hasher, u64, shard.account_balance_utc_ns);
     digestAssetRegistry(&hasher, shard, false);

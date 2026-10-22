@@ -880,7 +880,16 @@ pub const Owner = struct {
     }
 
     pub fn archiveFillHistory(self: *Owner, fill_id: u64, gateway: *execution.Gateway) !history.Root {
+        return self.archiveFillHistoryForAccount(self.shard.exchange_account_identity, fill_id, gateway);
+    }
+
+    pub noinline fn archiveFillHistoryForAccount(self: *Owner, account: u128, fill_id: u64, gateway: *execution.Gateway) !history.Root {
         if (self.shard.decision_domain_identity != 0 and self.shard.cycles.count != 0) return error.FillArchivePinned;
+        var account_view: trading.TradingShard = undefined;
+        if (self.shard.decision_domain_identity != 0) try self.shard.copyAccountViewInto(&account_view, account) else {
+            if (account != self.shard.exchange_account_identity) return error.CanonicalScopeMismatch;
+            @memcpy(std.mem.asBytes(&account_view), std.mem.asBytes(&self.shard));
+        }
         if (!self.ready or self.closed or self.checkpoint_pending or self.committing_order_archive) return error.DecisionLogUnavailable;
         if (self.shard.pending_history_candidate != null or self.shard.pending_safety_history_candidate != null or self.shard.deferred_history_admission_count != 0) return error.HistoryLookupDeferred;
         gateway.completePreviousOrderArchive(&self.shard) catch |err| {
@@ -889,7 +898,7 @@ pub const Owner = struct {
         };
         if (self.shard.last_business_archive_kind != null and self.shard.last_business_archive_kind != .order) try gateway.acknowledgeEconomicHistory(&self.shard);
         const origin = try self.shard.businessOrigin();
-        var builder = try @import("../../portfolio/fill_history_batch.zig").build(&self.shard.economic_projection, fill_id, origin, self.shard.authoritativeBarrier());
+        var builder = try @import("../../portfolio/fill_history_batch.zig").build(&account_view.economic_projection, fill_id, origin, self.shard.authoritativeBarrier());
         const previous = self.shard.business_history_root;
         var view = try builder.batch(previous, if (previous) |root| root.epoch else 1);
         const qualification_digest = builder.qualification.digest();
@@ -898,7 +907,7 @@ pub const Owner = struct {
         errdefer self.closeAdmission();
         const receipt = try self.store.publishOrderHistory(self.io, view.value());
         _ = try history.verifyReceipt(receipt, origin, qualification_digest, previous);
-        _ = try self.apply(.{ .core = .{ .identity = fill_id, .payload = .{ .fill_archive_committed = .{ .fill_id = fill_id, .qualification_digest = qualification_digest, .receipt = receipt } } } });
+        _ = try self.apply(.{ .core = .{ .identity = fill_id, .account_scope = if (self.shard.decision_domain_identity != 0) account else null, .payload = .{ .fill_archive_committed = .{ .fill_id = fill_id, .qualification_digest = qualification_digest, .receipt = receipt } } } });
         try gateway.acknowledgeEconomicHistory(&self.shard);
         return receipt.root;
     }

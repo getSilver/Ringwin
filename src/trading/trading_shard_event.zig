@@ -126,6 +126,7 @@ pub const EventKind = enum(u16) {
     deployment_configuration_sealed,
     decision_domain_bound,
     cycle_occupied,
+    cycle_closed,
 };
 
 pub const Fact = struct {
@@ -429,6 +430,7 @@ pub const PayloadTag = enum(u16) {
     external_intent_group,
     deployment_configuration,
     decision_domain_bound,
+    cycle_closed,
 };
 
 pub const ReservationModel = enum(u8) { leveraged, cash };
@@ -615,6 +617,7 @@ pub const CorePayload = union(PayloadTag) {
     external_intent_group: host_gateway.GroupCandidate,
     deployment_configuration: @import("deployment_allocation.zig").Input,
     decision_domain_bound: @import("deployment_allocation.zig").DomainBinding,
+    cycle_closed: @import("cycle_occupancy.zig").Closure,
 };
 
 /// Typed core-originated event carried by the authoritative CanonicalEvent.
@@ -657,6 +660,10 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
     try encoded.put(u8, @intFromBool(input.account_scope != null));
     if (input.account_scope) |account| try encoded.put(u128, account);
     switch (input.payload) {
+        .cycle_closed => |value| {
+            const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], value);
+            encoded.len += bytes.len;
+        },
         .decision_domain_bound => |value| {
             const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], value);
             encoded.len += bytes.len;
@@ -1053,6 +1060,11 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
     ) orelse return error.UnknownInputType;
     const account_scope: ?u128 = if (try readInputBool(record.payload, &offset)) try readInputValue(u128, record.payload, &offset) else null;
     const payload: CorePayload = switch (tag) {
+        .cycle_closed => blk: {
+            const value = try snapshot_codec.decodeBare(record.payload[offset..], @import("cycle_occupancy.zig").Closure);
+            offset = record.payload.len;
+            break :blk .{ .cycle_closed = value };
+        },
         .decision_domain_bound => blk: {
             const value = try snapshot_codec.decodeBare(record.payload[offset..], @import("deployment_allocation.zig").DomainBinding);
             offset = record.payload.len;

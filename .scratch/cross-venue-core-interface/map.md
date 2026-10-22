@@ -48,10 +48,12 @@ Status: open
 
 ## Frontier
 
-- [09a 核心周期闭合](issues/09a-cycle-closure-residual.md)：05b已完成；终结、残余阈值及资产规则仍须冻结，当前周期与经济引用保持pin。
+- [09a 核心周期闭合](issues/09a-cycle-closure-residual.md)：in_progress；用户已批准零残余释放、非零继续占用。零残余终结与持久恢复已实现，成功费用更正及非零承接仍待验收，整票未关闭；见[验证记录](09a-verification.md)。
 - [08 版本化策略状态与确定性 checkpoint](issues/08-deterministic-checkpoint.md)：in_progress；schema/codec/容量已确认，用户收窄本轮为 checkpoint 基础设施，真实模型验收保持待定。见[实现合同](08-checkpoint-design.md)及[验证记录](08-verification.md)，不解除 09b 的整票依赖。
 
 ## Decisions so far
+
+- 2026-10-22：用户批准 09a 首版仅精确零残余释放，保留 08 基础设施范围，09b/09 待验收。新增核心终结事实、双账户对账覆盖核对、双键原子释放、终结身份保留、周期身份 pin 及显式账户 Fill 归档；迟到旧命令 Unknown 不得借新周期提前释放。最终 ReleaseSafe 707/707、Python 12/12、真实 Host 集成通过。journal/state/registry 为 44/48/42；活动与终结身份合计 64 个，无认证回收时达限拒绝新周期。用户明确保留 09a in_progress，后续确定费用更正身份和证据合同：费用内容变化只取得冲突失败关闭证据，成功更正入账及非零残余承接未实现；见[合同](09-implementation-contract.md)和[验证记录](09a-verification.md)。未部署、下单或取得运行资格。
 
 - 2026-10-22：07 resolved，Host原生Post-only、共同准入/发送能力复核、GTC错配拒绝、能力撤销后的安全撤单及journal/checkpoint/文件恢复已离线验收。最终ReleaseSafe **699/699**，修正场景定向 **3/3**、真实Python Host的GTC/Post-only两种多账户文件恢复及既有路径通过，Python **5/5**和**7/7**通过，双轴复审无遗留发现。用户明确选择沿用版本、规则、会话失效及命令期限，不增加独立TTL；长期未更新的能力声明不会自行到期。见[验证记录](07-verification.md)。实际Venue/模式及完整Maker–Taker资格仍未取得，未部署或下单；journal/state/registry保持43/47/41，活动周期释放仍归09a。
 
@@ -80,7 +82,7 @@ Status: open
 ## Not yet specified
 
 - 多账户核心容量、格式与预算来源已由05a冻结并离线验证；完整清单和独立可信锚点的产品发布接入仍缺失，入口保持关闭，动态租约扩容首版不开放。
-- 现货残余阈值及资产规则冻结、闭合与释放证据，待 09a；未通过前保持占用。
+- 09a 已冻结零残余释放政策；非零现货残余继续占用。成功费用更正及非零承接事实、终结身份认证回收与连续运行容量仍待验收，09a 整票未关闭。
 - 快照、连续深度及重同步已由 02/03 声明并离线验证；已知价格覆盖、8 档及截断后的保守失效限制继续适用。
 - 08 的 schema/codec/容量已确认；真实模型的版本、输入更新、不同批次/切点和支持平台运行确定性证据仍待完成。
 - 相关策略行为、参数合同及模型版本的冻结证据；文档成文不自动等于冻结。

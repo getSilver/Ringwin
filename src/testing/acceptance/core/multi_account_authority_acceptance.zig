@@ -37,11 +37,45 @@ test "05b complete domain group commits both accounts through snapshot restore" 
     try exerciseAccountRecovery(.joint);
 }
 
+test "09a zero residual closure releases both members and survives durable recovery" {
+    try exerciseAccountRecovery(.cycle_closure);
+}
+
+test "09a committed closure survives file store close and reopen" {
+    try exerciseAccountRecovery(.cycle_closure_file);
+}
+
+test "09a complete account reconciliation cannot release a perpetual residual" {
+    try exerciseAccountRecovery(.cycle_residual);
+}
+
+test "09a spot round trip releases exact zero but retains a one atom base rebate" {
+    try exerciseAccountRecovery(.cycle_spot_zero);
+    try exerciseAccountRecovery(.cycle_spot_residual);
+}
+
+test "09a conflicting fee correction keeps original economics and blocks closure" {
+    try exerciseAccountRecovery(.cycle_fee_conflict);
+}
+
+test "09a every closure append and commit fault retains the complete old occupancy" {
+    for (1..2) |index| {
+        fault_remaining = index;
+        try exerciseAccountRecovery(.cycle_closure_append);
+    }
+    fault_remaining = 1;
+    try exerciseAccountRecovery(.cycle_closure_commit);
+}
+
+test "09a checkpoint publication failure recovers the complete committed closure" {
+    try exerciseAccountRecovery(.cycle_closure_publish);
+}
+
 test "05b shared account budget rejects 60 plus 50 and 70 plus 40 but accepts 70 plus 30" {
     try exerciseAccountRecovery(.shared_budget);
 }
 
-const Scenario = enum { single, joint, shared_budget, fault_append, fault_commit, publish_fault, file_restore, safety_cancel, domain_history, shared_mark, reverse_competition, single_rejected, four_accounts, safety_reduce, capacity_load, unknown };
+const Scenario = enum { single, joint, shared_budget, fault_append, fault_commit, publish_fault, file_restore, safety_cancel, domain_history, shared_mark, reverse_competition, single_rejected, four_accounts, safety_reduce, capacity_load, unknown, cycle_closure, cycle_closure_file, cycle_closure_append, cycle_closure_commit, cycle_closure_publish, cycle_residual, cycle_spot_zero, cycle_spot_residual, cycle_fee_conflict };
 var fault_remaining: usize = 0;
 
 test "05b Unknown commands retain both occupied members through Owner recovery without resend" {
@@ -113,7 +147,7 @@ fn exerciseAccountRecovery(scenario: Scenario) !void {
     memory.* = .init();
     defer memory.deinit();
     var store = memory.interface();
-    const io: std.Io = if (scenario == .file_restore) std.testing.io else undefined;
+    const io: std.Io = if (scenario == .file_restore or scenario == .cycle_closure_file) std.testing.io else undefined;
     var temp: ?std.testing.TmpDir = null;
     defer if (temp) |*directory| directory.cleanup();
     var path_buffer: [1024]u8 = undefined;
@@ -123,7 +157,7 @@ fn exerciseAccountRecovery(scenario: Scenario) !void {
         adapter.close(io);
         allocator.destroy(adapter);
     };
-    if (scenario == .file_restore) {
+    if (scenario == .file_restore or scenario == .cycle_closure_file) {
         temp = std.testing.tmpDir(.{});
         path = path_buffer[0..try temp.?.dir.realPath(io, &path_buffer)];
         const adapter = try allocator.create(durable.LinuxFileAdapter);
@@ -139,8 +173,147 @@ fn exerciseAccountRecovery(scenario: Scenario) !void {
     const log = &owner.decision_journal;
     try initializeForScenario(owner, scenario);
     try exercisePartitionOrders(owner, scenario);
+    if (scenario == .cycle_fee_conflict) {
+        var correction = fixture.canonicalAt(47, 9, .{ .fill = owner.shard.economic_projection.applied_fills[0].source.canonical_fill.? });
+        correction.venue.envelope.exchange_account = 20;
+        correction.venue.event.fill.fee.?.atoms = 1;
+        const before = owner.shard.economic_projection.semanticDigest();
+        try std.testing.expectError(error.ConflictingFillIdentity, applyAdapterInput(owner, correction));
+        try std.testing.expectEqualSlices(u8, &before, &owner.shard.economic_projection.semanticDigest());
+        try std.testing.expectEqual(@as(u64, 1), owner.shard.economic_fault_count);
+        try std.testing.expect(owner.shard.oms.recovery_only);
+        try std.testing.expectError(error.CycleNotClosed, owner.shard.qualifyCycleClosure(9, 3));
+        try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.count);
+    }
+    const closing = scenario == .cycle_closure or scenario == .cycle_closure_file or scenario == .cycle_closure_append or scenario == .cycle_closure_commit or scenario == .cycle_closure_publish or scenario == .cycle_spot_zero;
+    if (scenario == .cycle_spot_residual) {
+        try prepareCycleClosure(owner, scenario);
+        try std.testing.expectError(error.CycleResidual, owner.shard.qualifyCycleClosure(9, 3));
+        try std.testing.expectEqual(@as(i64, 0), owner.shard.accountState(20).?.economic_projection.portfolio.positionForInstrument(101).quantity);
+        try std.testing.expectEqual(@as(i128, 1), owner.shard.accountState(20).?.economic_projection.portfolio.spotInventoryAtoms(0x425443));
+        try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.count);
+    }
+    if (closing) {
+        try prepareCycleClosure(owner, scenario);
+        const proof = try owner.shard.qualifyCycleClosure(9, 3);
+        const closure = fixture.atGroup(61, .{ .identity = 20000, .payload = .{ .cycle_closed = proof } });
+        if (scenario == .cycle_closure_append or scenario == .cycle_closure_commit) {
+            const before = owner.shard.canonicalStateDigest();
+            var failing = store.vtable.*;
+            if (scenario == .cycle_closure_append) failing.append = failNthAppend else failing.commit = failNthCommit;
+            owner.store = .{ .context = store.context, .vtable = &failing };
+            try std.testing.expectError(error.DecisionLogUnavailable, owner.apply(closure));
+            owner.store = store;
+            try std.testing.expect(owner.closed);
+            try std.testing.expectEqualSlices(u8, &before, &owner.shard.canonicalStateDigest());
+            const recovered = try allocator.create(demo.Owner);
+            defer allocator.destroy(recovered);
+            try demo.Owner.recoverInto(recovered, store, io, owner.stream);
+            try std.testing.expectEqualSlices(u8, &before, &recovered.shard.canonicalStateDigest());
+            try std.testing.expectEqual(@as(u8, 1), recovered.shard.cycles.count);
+            try std.testing.expectEqual(@as(u8, 0), recovered.shard.cycles.closed_count);
+            return;
+        }
+        var conflicting = closure;
+        conflicting.core.payload.cycle_closed.content_digest[0] ^= 1;
+        const before = owner.shard.canonicalStateDigest();
+        try std.testing.expectError(error.ConflictingCycleClosure, owner.shard.apply(conflicting));
+        try std.testing.expectEqualSlices(u8, &before, &owner.shard.canonicalStateDigest());
+        _ = try owner.apply(closure);
+        try std.testing.expectEqual(@as(u8, 0), owner.shard.cycles.count);
+        try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.closed_count);
+        _ = try owner.apply(closure);
+        try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.closed_count);
+        try std.testing.expectError(error.ConflictingCycleClosure, owner.shard.apply(conflicting));
+        try std.testing.expect(!owner.shard.cyclePinsOrder(1));
+        try std.testing.expect(!owner.shard.cyclePinsOrder(2));
+        try exerciseDispatch(owner, 1);
+        if (scenario == .cycle_closure) {
+            try exerciseClosedHistory(owner);
+            try owner.checkpoint();
+            var next: trading.oms.IntentGroup = .{ .first_intent_sequence = 20001, .count = 2 };
+            for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, 0..) |account, instrument, index| next.members[index] = .{
+                .intent_sequence = 20001 + index,
+                .strategy_instance = 9,
+                .exchange_account = account,
+                .operation = .place,
+                .instrument = instrument,
+                .quantity = 10000,
+                .limit_price = .{ .instrument = instrument, .rules_version = 1, .ticks = 100 },
+            };
+            _ = try owner.apply(fixture.atGroup(62, .{ .identity = 20001, .payload = .{ .oms_intent_group = next } }));
+            try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.count);
+            try std.testing.expectEqual(@as(u16, 6), owner.shard.oms.order_count);
+            try std.testing.expect(!owner.shard.cyclePinsOrder(1));
+            try std.testing.expect(owner.shard.cyclePinsOrder(5));
+            for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, 0..) |account, instrument, index| {
+                const order = owner.shard.oms.orderById(5 + index).?;
+                var terminal = fixture.canonicalAt(63, 6, .{ .execution_report = .{
+                    .identity = 6,
+                    .order = order.id,
+                    .client_order_id = order.client_order_id,
+                    .instrument = instrument,
+                    .exchange_account = account,
+                    .revision = 1,
+                    .status = .rejected,
+                    .cumulative_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = 0 },
+                    .remaining_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = 10000 },
+                } });
+                terminal.venue.envelope.exchange_account = account;
+                terminal.venue.envelope.venue = if (account == 20) 1 else 21;
+                try applyAdapterInput(owner, terminal);
+            }
+            const gateway = try allocator.create(@import("../../../execution/execution_gateway.zig").Gateway);
+            defer allocator.destroy(gateway);
+            gateway.init();
+            try gateway.attachRecoveredDurableDispatch(store, io, .{ .domain = .control, .id = 92 });
+            for ([_]u128{ 20, 30 }) |account| try reconcileDomainAccount(owner, account, gateway);
+            const prepared = try owner.shard.qualifyCycleClosure(9, 20001);
+            var late: trading.oms.DispatchBatch = .{ .count = 1 };
+            late.items[0] = .{ .command_id = 1, .state = .unknown };
+            _ = try owner.apply(fixture.atGroup(71, .{ .identity = 20005, .account_scope = 20, .payload = .{ .oms_dispatch_batch = late } }));
+            const before_unknown = owner.shard.canonicalStateDigest();
+            try std.testing.expectError(error.CycleNotClosed, owner.shard.apply(fixture.atGroup(71, .{ .identity = 20004, .payload = .{ .cycle_closed = prepared } })));
+            try std.testing.expectEqualSlices(u8, &before_unknown, &owner.shard.canonicalStateDigest());
+            try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.count);
+            var evidence = fixture.reconciliationEvidence(71, 7, 1, 101, 1);
+            evidence.scope.exchange_account = 20;
+            evidence.scope.from_utc_ns = owner.shard.oms.orderById(1).?.created_at_utc_ns;
+            var resolved = fixture.canonicalAt(71, 7, .{ .order_reconciliation_result = .{
+                .identity = 7,
+                .order = 1,
+                .revision = 1,
+                .complete = true,
+                .status = .found_terminal,
+                .terminal_status = .filled,
+                .rules_version = 1,
+                .evidence = evidence,
+                .cumulative_quantity = .{ .instrument = 101, .rules_version = 1, .lots = 10000 },
+                .remaining_quantity = .{ .instrument = 101, .rules_version = 1, .lots = 0 },
+            } });
+            resolved.venue.envelope.exchange_account = 20;
+            resolved.venue.envelope.raw_evidence = evidence.source;
+            try applyAdapterInput(owner, resolved);
+            try std.testing.expectEqual(trading.oms.OrderState.filled, owner.shard.oms.orderById(1).?.state);
+            try reconcileDomainAccount(owner, 20, gateway);
+            _ = try owner.apply(fixture.atGroup(81, .{ .identity = 20004, .payload = .{ .cycle_closed = try owner.shard.qualifyCycleClosure(9, 20001) } }));
+            try std.testing.expectEqual(@as(u8, 0), owner.shard.cycles.count);
+            try std.testing.expectEqual(@as(u8, 2), owner.shard.cycles.closed_count);
+        }
+    }
+    if (scenario == .cycle_residual) {
+        const gateway = try allocator.create(@import("../../../execution/execution_gateway.zig").Gateway);
+        defer allocator.destroy(gateway);
+        gateway.init();
+        try gateway.bootstrapDurableDispatch(store, io, .{ .domain = .control, .id = 92 });
+        for ([_]u128{ 20, 30 }) |account| try reconcileDomainAccount(owner, account, gateway);
+        const before = owner.shard.canonicalStateDigest();
+        try std.testing.expectError(error.CycleResidual, owner.shard.qualifyCycleClosure(9, 3));
+        try std.testing.expectEqualSlices(u8, &before, &owner.shard.canonicalStateDigest());
+        try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.count);
+    }
     if (scenario == .fault_append or scenario == .fault_commit) return;
-    if (scenario == .publish_fault) {
+    if (scenario == .publish_fault or scenario == .cycle_closure_publish) {
         var failing = store.vtable.*;
         failing.publish = failPublish;
         owner.store = .{ .context = store.context, .vtable = &failing };
@@ -159,6 +332,7 @@ fn exerciseAccountRecovery(scenario: Scenario) !void {
     try demo.Owner.recoverInto(recovered_owner, store, io, owner.stream);
     try std.testing.expectEqualSlices(u8, &shard.canonicalStateDigest(), &recovered_owner.shard.canonicalStateDigest());
     if (scenario == .unknown) {
+        try std.testing.expectError(error.CycleNotClosed, owner.shard.qualifyCycleClosure(9, 3));
         try std.testing.expectEqual(@as(u8, 1), recovered_owner.shard.cycles.count);
         for ([_]u64{ 1, 2 }) |id| try std.testing.expectEqual(trading.oms.OrderState.unknown, recovered_owner.shard.oms.orderById(id).?.state);
         try exerciseDispatch(recovered_owner, 1);
@@ -172,7 +346,7 @@ fn exerciseAccountRecovery(scenario: Scenario) !void {
     try std.testing.expectEqual(encoded_snapshot.len, try shard.snapshotEncodedSize());
     _ = try trading.TradingShard.restoreSnapshotInto(recovered, encoded_snapshot);
     try std.testing.expectEqualSlices(u8, &shard.canonicalStateDigest(), &recovered.canonicalStateDigest());
-    try std.testing.expectEqual(@as(i128, if (scenario == .domain_history) 605 else 600), recovered.accountState(30).?.economic_projection.portfolio.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i128, if (scenario == .domain_history or (closing and scenario != .cycle_spot_zero)) 605 else 600), recovered.accountState(30).?.economic_projection.portfolio.usdt_balance_atoms);
 }
 
 pub fn initializePythonOwner(owner: *demo.Owner) !void {
@@ -181,6 +355,7 @@ pub fn initializePythonOwner(owner: *demo.Owner) !void {
 }
 
 fn initializeForScenario(owner: *demo.Owner, scenario: Scenario) !void {
+    const spot = scenario == .cycle_spot_zero or scenario == .cycle_spot_residual;
     const shard = &owner.shard;
     var rows = try configurationRows();
     if (scenario == .shared_budget) {
@@ -243,7 +418,7 @@ fn initializeForScenario(owner: *demo.Owner, scenario: Scenario) !void {
     const transfers = [_]i128{ 400, 600, 800, 1000 };
     for (accounts[0..account_count], instruments[0..account_count], venues[0..account_count], balances[0..account_count], transfers[0..account_count]) |account, instrument, venue, balance, transfer| {
         const payloads = [_]trading.CorePayload{
-            .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = instrument, .quantity_denominator = 10000, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = venue } },
+            .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = instrument, .quantity_denominator = 10000, .reservation_model = if (spot) .cash else .leveraged, .product = if (spot) .spot else .isolated_linear_usdt, .venue = venue, .base_asset = if (spot) 0x425443 else 0 } },
             .{ .margin_rules_activated = .{ .version = 1, .instrument = instrument } },
             .{ .account_configuration = .{ .exchange_account_identity = account } },
             .{ .exchange_balance = .{ .cash_atoms = balance } },
@@ -314,6 +489,7 @@ fn initializeForScenario(owner: *demo.Owner, scenario: Scenario) !void {
 }
 
 fn prepareTradingForScenario(owner: *demo.Owner, scenario: Scenario) !void {
+    const spot = scenario == .cycle_spot_zero or scenario == .cycle_spot_residual;
     const controls = [_]trading.CorePayload{
         .{ .control_command = .{ .command_identity = 900, .content_hash = 900, .target_identity = 1, .expected_version = 0, .expires_at = std.math.maxInt(u64), .kind = .start_recovery } },
         .recovery_completed,
@@ -342,7 +518,7 @@ fn prepareTradingForScenario(owner: *demo.Owner, scenario: Scenario) !void {
             .instrument = instrument,
             .venue = venue,
             .environment = .simulation,
-            .product = .isolated_linear_usdt,
+            .product = if (spot and instrument <= 102) .spot else .isolated_linear_usdt,
             .version = 1,
             .rules_version = 1,
             .config_version = 1,
@@ -358,8 +534,8 @@ fn prepareTradingForScenario(owner: *demo.Owner, scenario: Scenario) !void {
         var book = fixture.canonicalAt(43, 1, .{ .l2_book_snapshot = .{
             .instrument = instrument,
             .sequence = 1,
-            .best_bid = .{ .instrument = instrument, .rules_version = 1, .ticks = 99 },
-            .best_ask = .{ .instrument = instrument, .rules_version = 1, .ticks = 100 },
+            .best_bid = .{ .instrument = instrument, .rules_version = 1, .ticks = if (spot and instrument <= 102) 9 else 99 },
+            .best_ask = .{ .instrument = instrument, .rules_version = 1, .ticks = if (spot and instrument <= 102) 10 else 100 },
             .best_bid_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = 100000 },
             .best_ask_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = 100000 },
         } });
@@ -370,11 +546,12 @@ fn prepareTradingForScenario(owner: *demo.Owner, scenario: Scenario) !void {
         book.venue.envelope.identity.stream = 1000 + instrument;
         book.venue.envelope.source_stream = @intCast(1000 + instrument);
         _ = try owner.apply(book);
-        _ = try owner.apply(fixture.atGroup(44, .{ .identity = @intCast(1100 + instrument), .account_scope = account, .payload = .{ .mark_price = .{ .instrument = instrument, .price_atoms = 100 } } }));
+        _ = try owner.apply(fixture.atGroup(44, .{ .identity = @intCast(1100 + instrument), .account_scope = account, .payload = .{ .mark_price = .{ .instrument = instrument, .price_atoms = if (spot and instrument <= 102) 10 else 100 } } }));
     }
 }
 
 fn exercisePartitionOrders(owner: *demo.Owner, scenario: Scenario) !void {
+    const spot = scenario == .cycle_spot_zero or scenario == .cycle_spot_residual;
     const joint = scenario != .single and scenario != .shared_budget;
     try prepareTradingForScenario(owner, scenario);
     if (scenario == .shared_mark) {
@@ -434,8 +611,8 @@ fn exercisePartitionOrders(owner: *demo.Owner, scenario: Scenario) !void {
             .state_digest = owner.shard.canonicalStateDigest(),
         } } }));
         const orders = [_]host.OutputOrder{
-            .{ .portfolio_identity = 10, .exchange_account_identity = 20, .instrument_identity = 101, .quantity = 10000, .limit_price_micros = 100 },
-            .{ .portfolio_identity = 10, .exchange_account_identity = 30, .instrument_identity = if (scenario == .reverse_competition) 104 else 102, .quantity = 10000, .limit_price_micros = 100 },
+            .{ .portfolio_identity = 10, .exchange_account_identity = 20, .instrument_identity = 101, .quantity = 10000, .limit_price_micros = if (spot) 10 else 100 },
+            .{ .portfolio_identity = 10, .exchange_account_identity = 30, .instrument_identity = if (scenario == .reverse_competition) 104 else 102, .quantity = 10000, .limit_price_micros = if (spot) 10 else 100 },
         };
         var storage: [host.max_group_frame_len]u8 = undefined;
         const frame = try host.encodeOutputGroupFrame(&storage, config, 1, owner.shard.authoritativeBarrier() + 1, 3, &orders);
@@ -623,7 +800,7 @@ fn exercisePartitionOrders(owner: *demo.Owner, scenario: Scenario) !void {
             .exchange_account = account,
             .side = .buy,
             .quantity = .{ .instrument = instrument, .rules_version = 1, .lots = if (scenario == .capacity_load) 5000 else 10000 },
-            .price = .{ .instrument = instrument, .rules_version = 1, .ticks = 100 },
+            .price = .{ .instrument = instrument, .rules_version = 1, .ticks = if (spot) 10 else 100 },
             .fee = .{ .asset = 1, .atoms = 0 },
             .venue_fill_time_utc_ns = fixture.atGroup(46, .{ .identity = 0, .payload = .recovery_completed }).core.source_time,
             .liquidity = .taker,
@@ -634,7 +811,7 @@ fn exercisePartitionOrders(owner: *demo.Owner, scenario: Scenario) !void {
             var event = fixture.canonicalAt(46, index + (if (scenario == .capacity_load) @as(usize, 3) else 2), payload);
             event.venue.envelope.exchange_account = account;
             event.venue.envelope.venue = venue;
-            _ = try owner.apply(event);
+            try applyAdapterInput(owner, event);
         }
         const state = owner.shard.accountState(account).?;
         try std.testing.expectEqual(@as(i64, 10000), try state.economic_projection.appliedCanonicalFillQuantity(order.id));
@@ -738,6 +915,91 @@ fn exerciseReductions(owner: *demo.Owner) !void {
     try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.count);
 }
 
+fn prepareCycleClosure(owner: *demo.Owner, scenario: Scenario) !void {
+    const spot = scenario == .cycle_spot_zero or scenario == .cycle_spot_residual;
+    if (!spot) for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }) |account, instrument| {
+        _ = try owner.apply(fixture.atGroup(47, .{ .identity = 9000, .account_scope = account, .payload = .{ .funding_settlement = .{ .settlement_id = 9000, .amount_atoms = 5, .instrument = instrument } } }));
+    };
+    try std.testing.expectError(error.CycleNotClosed, owner.shard.qualifyCycleClosure(9, 3));
+    var reduction: trading.oms.IntentGroup = .{ .first_intent_sequence = 1001, .count = 2 };
+    for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, 0..) |account, instrument, index| reduction.members[index] = .{
+        .intent_sequence = 1001 + index,
+        .strategy_instance = 9,
+        .exchange_account = account,
+        .operation = .place,
+        .instrument = instrument,
+        .side = .sell,
+        .portfolio_reduce_only = true,
+        .quantity = 10000,
+        .limit_price = .{ .instrument = instrument, .rules_version = 1, .ticks = if (spot) 10 else 100 },
+    };
+    _ = try owner.apply(fixture.atGroup(48, .{ .identity = 5000, .payload = .{ .oms_intent_group = reduction } }));
+    try std.testing.expectEqual(@as(u16, 4), owner.shard.oms.order_count);
+    for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, [_]u64{ 1, 21 }, 0..) |account, instrument, venue, index| {
+        const order = owner.shard.oms.orderById(3 + index).?;
+        const fill: trading.canonical.Payload = .{ .fill = .{
+            .identity = 3,
+            .order = order.id,
+            .client_order_id = order.client_order_id,
+            .venue_order = try trading.canonical.VenueOrderRef.init(venue, "domain-exit"),
+            .venue_trade = try trading.canonical.VenueTradeRef.init(venue, "domain-exit-fill"),
+            .instrument = instrument,
+            .exchange_account = account,
+            .side = .sell,
+            .quantity = .{ .instrument = instrument, .rules_version = 1, .lots = 10000 },
+            .price = .{ .instrument = instrument, .rules_version = 1, .ticks = if (spot) 10 else 100 },
+            .fee = .{ .asset = 1, .atoms = 0 },
+            .liquidity = .taker,
+            .rebate = if (scenario == .cycle_spot_residual) .{ .asset = 0x425443, .atoms = 1 } else null,
+            .venue_fill_time_utc_ns = fixture.atGroup(49, .{ .identity = 0, .payload = .recovery_completed }).core.source_time,
+        } };
+        const report: trading.canonical.Payload = .{ .execution_report = .{
+            .identity = 4,
+            .order = order.id,
+            .client_order_id = order.client_order_id,
+            .instrument = instrument,
+            .exchange_account = account,
+            .revision = 1,
+            .status = .filled,
+            .cumulative_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = 10000 },
+            .remaining_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = 0 },
+        } };
+        const events: [2]trading.canonical.Payload = if (index == 0) .{ report, fill } else .{ fill, report };
+        for (events, 0..) |payload, offset| {
+            var event = fixture.canonicalAt(49, 4 + offset, payload);
+            event.venue.envelope.exchange_account = account;
+            event.venue.envelope.venue = venue;
+            try applyAdapterInput(owner, event);
+        }
+    }
+    try std.testing.expectError(error.CycleNotClosed, owner.shard.qualifyCycleClosure(9, 3));
+    const gateway = try std.testing.allocator.create(@import("../../../execution/execution_gateway.zig").Gateway);
+    defer std.testing.allocator.destroy(gateway);
+    gateway.init();
+    try gateway.bootstrapDurableDispatch(owner.store, owner.io, .{ .domain = .control, .id = 92 });
+    for ([_]u128{ 20, 30 }) |account| try reconcileDomainAccount(owner, account, gateway);
+}
+
+fn exerciseClosedHistory(owner: *demo.Owner) !void {
+    const allocator = std.testing.allocator;
+    const gateway = try allocator.create(@import("../../../execution/execution_gateway.zig").Gateway);
+    defer allocator.destroy(gateway);
+    gateway.init();
+    try gateway.attachRecoveredDurableDispatch(owner.store, owner.io, .{ .domain = .control, .id = 92 });
+    const fill = owner.shard.economic_projection.applied_fills[0].source.canonical_fill.?;
+    const portfolio = owner.shard.economic_projection.portfolio;
+    const exchange = owner.shard.economic_projection.exchange;
+    _ = try owner.archiveFillHistory(1, gateway);
+    try std.testing.expect(std.meta.eql(portfolio, owner.shard.economic_projection.portfolio));
+    try std.testing.expect(std.meta.eql(exchange, owner.shard.economic_projection.exchange));
+    const before = owner.shard.economic_projection.semanticDigest();
+    var duplicate = fixture.canonicalAt(46, 2, .{ .fill = fill });
+    duplicate.venue.envelope.exchange_account = 20;
+    _ = try owner.apply(duplicate);
+    try std.testing.expectEqualSlices(u8, &before, &owner.shard.economic_projection.semanticDigest());
+    try std.testing.expectEqual(@as(i64, 10000), try owner.shard.economic_projection.appliedCanonicalFillQuantity(1));
+}
+
 fn verifyScopeRejections(shard: *trading.TradingShard) !void {
     const before = shard.canonicalStateDigest();
     const wrong_venue: trading.CorePayload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 101, .quantity_denominator = 10000, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = 21 } };
@@ -787,42 +1049,55 @@ fn exerciseDomainHistory(owner: *demo.Owner) !void {
 
 fn reconcileDomainAccount(owner: *demo.Owner, account: u128, gateway: *@import("../../../execution/execution_gateway.zig").Gateway) !void {
     const state = owner.shard.accountState(account).?;
+    const cursor = state.reconciliation_cursor;
+    const window_id: u128 = if (cursor) |prior| prior.identity + 1 else 10000;
+    const round: u64 = @intCast(window_id - 10000);
+    const source_sequence = 10 + round * 3;
     var evidence: trading.canonical.AccountEconomicEvidence = .{
         .exchange_account = account,
         .scope = .spot_and_isolated_linear_usdt,
-        .from_utc_ns = state.economic_baseline_utc_ns,
+        .from_utc_ns = if (cursor) |prior| prior.through_utc_ns else state.economic_baseline_utc_ns,
         .through_utc_ns = 1,
-        .source = .{ .stream = 7, .sequence = 10, .digest = history.hash("complete account after") },
-        .before_source = .{ .stream = 7, .sequence = 8, .digest = history.hash("complete account before") },
-        .balance_count = state.economic_baseline_balance_count,
-        .before_balance_count = state.economic_baseline_balance_count,
-        .before_balances = state.economic_baseline_balances,
+        .source = .{ .stream = 7, .sequence = source_sequence, .digest = history.hash("complete account after") },
+        .before_source = .{ .stream = 7, .sequence = source_sequence - 2, .digest = history.hash("complete account before") },
+        .balance_count = if (cursor) |prior| prior.balance_count else state.economic_baseline_balance_count,
+        .before_balance_count = if (cursor) |prior| prior.balance_count else state.economic_baseline_balance_count,
+        .before_balances = if (cursor) |prior| prior.balances else state.economic_baseline_balances,
         .covered_economic_fact_count = @intCast(state.open_economic_fact_count),
         .query_count = 1,
         .bills_complete = true,
         .bill_chain_digest = history.hash("all bills in exact interval"),
     };
-    for (state.economic_baseline_balances[0..state.economic_baseline_balance_count], 0..) |balance, index| {
-        evidence.balances[index] = .{ .asset = balance.asset, .atoms = if (balance.asset == 1) state.economic_projection.exchange.usdt_balance_atoms else 0 };
+    for (evidence.before_balances[0..evidence.before_balance_count], 0..) |balance, index| {
+        evidence.balances[index] = .{ .asset = balance.asset, .atoms = if (balance.asset == 1) state.economic_projection.exchange.usdt_balance_atoms else if (state.economic_projection.exchange.nativeAsset(balance.asset)) |native| native.balance_atoms else 0 };
         evidence.asset_versions[index] = 1;
+    }
+    if (state.economic_projection.base_asset != 0 and cursor == null) {
+        const base = state.economic_projection.base_asset;
+        const index = evidence.balance_count;
+        evidence.before_balances[index] = .{ .asset = base, .atoms = 0 };
+        evidence.balances[index] = .{ .asset = base, .atoms = state.economic_projection.exchange.spotInventoryAtoms(base) };
+        evidence.asset_versions[index] = 1;
+        evidence.balance_count += 1;
+        evidence.before_balance_count += 1;
     }
     for (state.open_economic_facts[0..@intCast(state.open_economic_fact_count)], 0..) |fact, index|
         evidence.facts[index] = .{ .identity = fact.identity, .kind = fact.kind, .digest = fact.digest, .fee_confirmed = true };
-    evidence.query_sources[0] = .{ .stream = 7, .sequence = 9, .digest = history.hash("complete account bills") };
-    var window = fixture.canonicalAt(60, 10, .{ .account_reconciliation_result = .{ .identity = 10000, .complete = true, .account_economics = evidence } });
+    evidence.query_sources[0] = .{ .stream = 7, .sequence = source_sequence - 1, .digest = history.hash("complete account bills") };
+    var window = fixture.canonicalAt(60 + round * 10, source_sequence, .{ .account_reconciliation_result = .{ .identity = window_id, .complete = true, .account_economics = evidence } });
     window.venue.envelope.identity.stream = 7;
     window.venue.envelope.source_stream = 7;
     window.venue.envelope.exchange_account = account;
     window.venue.envelope.venue = if (account == 20) 1 else 21;
     window.venue.envelope.raw_evidence = evidence.source;
     window.venue.event.account_reconciliation_result.account_economics.?.through_utc_ns = window.venue.envelope.times.source_utc_ns.?;
-    _ = try owner.apply(window);
+    try applyAdapterInput(owner, window);
     const after = owner.shard.accountState(account).?;
     try std.testing.expectEqual(@as(u64, 0), after.economic_fault_count);
     try std.testing.expect(after.pending_reconciliation_window != null);
     try std.testing.expect(!owner.shard.history_conflict_latched);
     try std.testing.expectEqual(@as(u64, 0), after.open_economic_unknown_time_count);
-    _ = try owner.archiveReconciliationWindowHistoryForAccount(account, 10000, gateway);
+    _ = try owner.archiveReconciliationWindowHistoryForAccount(account, window_id, gateway);
     try std.testing.expectEqual(@as(u64, 0), owner.shard.accountState(account).?.open_economic_fact_count);
 }
 
@@ -862,6 +1137,7 @@ fn exerciseFailedGroup(owner: *demo.Owner, input: trading.CanonicalEvent, at_com
 const CountingAdapter = struct {
     sends: usize = 0,
     account: u128,
+    pending: ?trading.canonical.AdapterOutputBatch = null,
     fn adapter(self: *@This()) @import("../../../execution/venue_adapter.zig").VenueAdapter {
         return .{ .ptr = self, .vtable = &.{ .start = start, .try_send = send, .try_drain = drain, .stop = stop } };
     }
@@ -872,11 +1148,23 @@ const CountingAdapter = struct {
         self.sends += 1;
         return .accepted;
     }
-    fn drain(_: *anyopaque) @import("../../../execution/venue_adapter.zig").DrainError!?trading.canonical.AdapterOutputBatch {
-        return null;
+    fn drain(ptr: *anyopaque) @import("../../../execution/venue_adapter.zig").DrainError!?trading.canonical.AdapterOutputBatch {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        const output = self.pending;
+        self.pending = null;
+        return output;
     }
     fn stop(_: *anyopaque, _: @import("../../../execution/venue_adapter.zig").DrainDeadline) @import("../../../execution/venue_adapter.zig").StopError!void {}
 };
+
+fn applyAdapterInput(owner: *demo.Owner, input: trading.CanonicalEvent) !void {
+    var batch: trading.canonical.AdapterOutputBatch = .{};
+    try batch.append(input.venue);
+    var implementation: CountingAdapter = .{ .account = input.venue.envelope.exchange_account.?, .pending = batch };
+    var adapter = implementation.adapter();
+    try owner.applyAdapterBatch((try adapter.tryDrain()).?);
+    try std.testing.expect((try adapter.tryDrain()) == null);
+}
 
 fn exerciseDispatch(owner: *demo.Owner, first_command: u64) !void {
     const gateway_module = @import("../../../execution/execution_gateway.zig");
@@ -896,7 +1184,7 @@ fn exerciseDispatch(owner: *demo.Owner, first_command: u64) !void {
         .adapter = adapter.adapter(),
         .venue_identity = configured.venue,
         .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 },
-        .supported_products = gateway_module.productMask(.isolated_linear_usdt),
+        .supported_products = gateway_module.productMask(.isolated_linear_usdt) | gateway_module.productMask(.spot),
     });
     for (owner.shard.oms.command_history[0..owner.shard.oms.command_history_count]) |command| {
         var view: trading.TradingShard = undefined;
@@ -913,11 +1201,13 @@ fn exerciseDispatch(owner: *demo.Owner, first_command: u64) !void {
         });
     }
     const now = owner.shard.oms.findCommand(first_command).?.authority.dispatch_deadline_monotonic_ns - std.time.ns_per_s;
+    const original = owner.shard.oms.findCommand(first_command).?;
+    const closed_cycle = owner.shard.cycles.completed(original.strategy_instance, @intCast(original.authority.cycle.identity)) != null;
     try std.testing.expectError(error.NotSent, gateway.sendFromShard(&owner.shard, first_command, now));
     try gateway.pinDeploymentDigest(owner.shard.deployment.header.?.expected_digest);
     try std.testing.expectError(error.ImmutableDeploymentConfiguration, gateway.pinDeploymentDigest(@splat(99)));
     for ([_]u64{ first_command, first_command + 1 }) |command_id| {
-        if (owner.shard.oms.orderById(owner.shard.oms.findCommand(command_id).?.order_id).?.state == .unknown) {
+        if (closed_cycle or owner.shard.oms.orderById(owner.shard.oms.findCommand(command_id).?.order_id).?.state == .unknown) {
             try std.testing.expectError(error.NotSent, gateway.sendFromShard(&owner.shard, command_id, now));
         } else {
             try std.testing.expectEqual(@import("../../../execution/venue_adapter.zig").SendResult.accepted, try gateway.sendFromShard(&owner.shard, command_id, now));
@@ -927,7 +1217,7 @@ fn exerciseDispatch(owner: *demo.Owner, first_command: u64) !void {
     for (adapters[0..selected_accounts.len]) |adapter| {
         var expected: usize = 0;
         for ([_]u64{ first_command, first_command + 1 }) |command_id|
-            if (owner.shard.oms.findCommand(command_id).?.authority.exchange_account == adapter.account and owner.shard.oms.orderById(owner.shard.oms.findCommand(command_id).?.order_id).?.state != .unknown) {
+            if (!closed_cycle and owner.shard.oms.findCommand(command_id).?.authority.exchange_account == adapter.account and owner.shard.oms.orderById(owner.shard.oms.findCommand(command_id).?.order_id).?.state != .unknown) {
                 expected += 1;
             };
         try std.testing.expectEqual(expected, adapter.sends);

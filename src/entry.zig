@@ -123,6 +123,7 @@ const selected = switch (@import("entry_options").index) {
     119 => @import("strategy/strategy_checkpoint_store.zig"),
     120 => @import("testing/acceptance/core/dual_ioc_dispatch_acceptance.zig"),
     121 => @import("testing/acceptance/core/native_post_only_acceptance.zig"),
+    122 => @import("testing/acceptance/core/multi_account_authority_acceptance.zig"),
     else => @compileError("unknown standalone source entry"),
 };
 
