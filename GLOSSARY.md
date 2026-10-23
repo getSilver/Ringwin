@@ -546,8 +546,8 @@ Venue 以独立证据确认、引用原 Fill 及前一费用版本的 TradingFee
 _Avoid_: Replacement Fill, mutable fee, inferred balance correction
 
 **SpotResidual**:
-交易周期退出后保留在原 ExchangeAccount 与 VirtualPortfolio 的正现货残余资产；经版本化规则显式承接后可不再占用原周期的品种键，但仍计入原所有者资产且不可供新周期花费。
-_Avoid_: Zero balance, Treasury transfer, free inventory
+交易周期退出后保留在原 ExchangeAccount 与 VirtualPortfolio 的正现货残余资产；承接历史保留原周期归属，尚未冻结的当前剩余数量可由同一所有者的新周期使用，人工冻结和解除冻结不改变资产所有权。
+_Avoid_: Zero balance, Treasury transfer, expired asset
 
 **FundingSettlement**:
 Venue 在某个永续合约资金费结算时点对 ExchangeAccount 确认的实际应付或应收经济事实。
