@@ -48,6 +48,8 @@ Status: open
 
 ## Frontier
 
+当前 09a 追加方向正在实施：用户取消残余期限及永久不可花费限制；残余默认可由同账户/VirtualPortfolio 新周期使用，保留原历史并维护当前剩余、消费、人工冻结/解冻记录。单笔仍 sub-lot，累计风险额度针对未消费余额，可配置至处置门槛；具体 Asset 限额尚待冻结。其余安全闭合条件不变。见 [ADR0019](../../docs/adr/0019-allow-owned-residual-reuse-with-explicit-freezes.md)。下列 717/717 是此前政策基线，不代表新方向已验收。
+
 - [09a 核心周期闭合](issues/09a-cycle-closure-residual.md)：in_progress；正 sub-lot 显式承接、独立费用调整、旧残余相关费用锁存及共享 Asset 支用保护已整合，定向通过；Python 12/12、真实 Host exit 0，主窗口统一全量 ReleaseSafe 717/717 通过（退出 0）。生产 Asset 阈值/真实 Venue 凭证未获资格，无已承接残余处置权限。见[当前合同](09-implementation-contract.md)和[整合记录](09a-integration-verification.md)。
 - [08 版本化策略状态与确定性 checkpoint](issues/08-deterministic-checkpoint.md)：in_progress；schema/codec/容量已确认，用户收窄本轮为 checkpoint 基础设施，真实模型验收保持待定。见[实现合同](08-checkpoint-design.md)及[验证记录](08-verification.md)，不解除 09b 的整票依赖。
 
