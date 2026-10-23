@@ -24,4 +24,4 @@ CanonicalStateDigest 包含经济投影 digest（含 fee origins/revisions）与
 
 两个实现代理均使用 GPT 6.1 Sol medium。P2 `af2c8a80` 修复费用更正遗漏 Instrument 原币库存变动；扣费/退款/现货退出与原周期闭合定向各2/2（fee-inventory-green.log、fee-inventory-cycle.log）。`292bd8f4` 让订单历史拒绝 fee_origin typed key，保留其独立 Fill 归档来源；该补丁不以旧的失败日志冒称验收完成。
 
-主窗口已确认 Python12/12、真实Host集成exit0；统一全量 session25024 **pending**，本记录不声明通过。09a保持in_progress；生产Asset阈值未冻结、真实Venue凭证未获运行资格，08/09b/09范围与依赖不变。未部署或下单；承接默认无规则关闭，仅限正sub-lot，没有已承接残余清理权限。冻结摘要与最终双轴审查由主窗口统一处理。
+主窗口已确认 Python12/12、真实Host集成exit0；最终独立后台全量 ReleaseSafe **717/717，通过，退出 0**，日志 `.scratch/build/09a-final-full.log`、退出码 `.scratch/build/09a-final-full.exit`。先前 session25024 被聊天中断终止，不作完整结果使用。09a保持in_progress；生产Asset阈值未冻结、真实Venue凭证未获运行资格，08/09b/09范围与依赖不变。未部署或下单；承接默认无规则关闭，仅限正sub-lot，没有已承接残余清理权限。主窗口在经济断言和恢复比较通过后更新六个冻结摘要（154da80f），保留全部断言；最终全量已核对新值。Spec 轴无确认发现；Standards 轴唯一 P2 已修复并复查通过。18 个变更 Zig 文件规范化 LF 后与 zig fmt 输出相等；CRLF-aware diff 检查通过。

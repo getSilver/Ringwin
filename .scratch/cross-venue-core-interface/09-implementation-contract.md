@@ -1,6 +1,6 @@
 # 09 实施合同：待确认项与公共验收路径
 
-更新：2026-10-23。状态：残余承接与独立费用调整已整合，定向及主窗口 Python/Host 检查通过；统一全量 pending，09a 仍 in_progress，09b/09 保留待验收。
+更新：2026-10-23。状态：残余承接与独立费用调整已整合，定向及主窗口 Python/Host 检查通过；统一全量 ReleaseSafe 717/717 通过（退出 0），09a 仍 in_progress，09b/09 保留待验收。
 归属：[09 汇总验收](issues/09-cycle-recovery.md)。依据：[权威设计](authority-design.md)第 5–9 节、ADR0017、[S6 恢复合同](../cross-venue-arbitrage/state-recovery-contract.md)。
 
 ## 2026-10-23 当前整合状态
@@ -9,8 +9,8 @@
 
 - 仅 gross lots、OpenCost、margin 精确零且 `0 < atoms < baseAtomsPerLot` 的正现货余额可显式承接。按 Asset 版本化规则提供单次/累计上限和最大存续时间，默认未配置即关闭；规则事实 pin、原规则截止时间、同次两腿累计及有界容量均核对。原账户/VirtualPortfolio/周期/Asset、精确余额和费用账务不变，不转 Treasury、不重复估值、不供同品种或同账户共享 Asset 的新周期花费。永续、负资产、Unknown、未闭合经济/对账/历史证据仍拒绝终结。
 - 独立 FeeAdjustment 校验原 Fill/归属、连续费用版本及来源证据，按原币追加差额，跨币种分别冲回/记入；不更改原 Fill、成交累计或 TradingRebate。归档原成交须由 typed fee_origin 认证。旧已承接周期的相关 Asset 费用增减均在合法入账后锁存 OMS recovery-only；退款也不能自动归新周期。真实 Fill 吞掉已保留库存同样先入账、再锁存，原残余记录不改写。
-- P2 `af2c8a80` 同步费用更正对 Instrument 现货库存投影的变动，避免 native 总额已变但品种库存仍旧；基础币扣费、退费及随后退出闭合的定向均 2/2。`292bd8f4` 收紧订单历史入口，拒绝只应由 Fill 历史承接的 fee_origin typed key。该入口补丁的最终统一结果仍待主窗口全量核对。
-- 已确认定向：残余 ReleaseSafe 4/4、容量模块 2/2；费用 ReleaseSafe 5/5、18窗口/36 Fill 归档 2/2及连续资金费窗口 2/2；主树交叉 hook/共享 Asset 两场景加入口 **3/3**。主窗口已确认 Python **12/12**、真实 Host 集成 **exit 0**。统一全量 **pending**（主窗口 session 25024），不声明通过、不据此关闭票。
+- P2 `af2c8a80` 同步费用更正对 Instrument 现货库存投影的变动，避免 native 总额已变但品种库存仍旧；基础币扣费、退费及随后退出闭合的定向均 2/2。`292bd8f4` 收紧订单历史入口，拒绝只应由 Fill 历史承接的 fee_origin typed key。该入口补丁已由最终统一 717/717 回归覆盖。
+- 已确认定向：残余 ReleaseSafe 4/4、容量模块 2/2；费用 ReleaseSafe 5/5、18窗口/36 Fill 归档 2/2及连续资金费窗口 2/2；主树交叉 hook/共享 Asset 两场景加入口 **3/3**。主窗口已确认 Python **12/12**、真实 Host 集成 **exit 0**。统一全量 ReleaseSafe **717/717，通过，退出 0**；不据此授予生产资格或关闭票。
 
 详见[残余记录](09a-residual-verification.md)、[费用记录](09a-fee-verification.md)、[整合记录](09a-integration-verification.md)。生产 Asset 阈值未冻结、真实 Venue 独立更正凭证尚未取得运行资格；普通 Fill 改 fee 仍是冲突，不能冒充 FeeAdjustment。未建模的 Venue 最小名义额/gross 非零尘埃仍不能承接。已承接 sub-lot **没有人工清理交易或解除保留权限**；不补买、不自动归集。到期保留资产风险并阻止新承接/新周期，不能称自动清理。
 
