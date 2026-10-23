@@ -66,16 +66,136 @@ test "09a conflicting fee correction keeps original economics and blocks closure
     try exerciseAccountRecovery(.cycle_fee_conflict);
 }
 
+test "09a residual snapshot authenticates consumption source and amount" {
+    const allocator = std.testing.allocator;
+    const memory = try allocator.create(durable.MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .init();
+    defer memory.deinit();
+    const owner = try allocator.create(demo.Owner);
+    defer allocator.destroy(owner);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 91 });
+    try initializeResidualEconomicsOwner(owner);
+    var event = feeEvent(owner, 1);
+    event.venue.event.fee_adjustment.new_fee = .{ .asset = 0x425443, .atoms = 1 };
+    event.venue.event.fee_adjustment.effective_time_utc_ns = fixture.atGroup(62, .{ .identity = 0, .payload = .recovery_completed }).core.source_time;
+    event.venue.envelope.times.source_utc_ns = event.venue.event.fee_adjustment.effective_time_utc_ns;
+    try applyAdapterInput(owner, event);
+    try std.testing.expectEqual(@as(u16, 1), owner.shard.cycles.residual_lifecycle.receipt_count);
+    try owner.checkpoint();
+    try owner.decision_journal.seal();
+    const damaged = try allocator.create(trading.TradingShard);
+    defer allocator.destroy(damaged);
+    const restored = try allocator.create(trading.TradingShard);
+    defer allocator.destroy(restored);
+    const bytes = try allocator.alloc(u8, 32 * 1024 * 1024);
+    defer allocator.free(bytes);
+    for (0..2) |cut| {
+        damaged.* = owner.shard;
+        if (cut == 0) damaged.cycles.residual_lifecycle.receipts[0].source.digest[0] ^= 1 else {
+            damaged.cycles.residual_lifecycle.receipts[0].allocations[0] = 0;
+            damaged.cycles.residual_lifecycle.live[0].remaining = 1;
+        }
+        const snapshot = try damaged.snapshot(&owner.decision_journal, owner.decision_journal.last_sequence, bytes);
+        try std.testing.expectError(error.InvalidSnapshotState, trading.TradingShard.restoreSnapshotInto(restored, snapshot));
+    }
+}
+
+test "09a owned residual manual freeze release persists without expiry" {
+    try exerciseManualFreeze(false, false);
+}
+test "09a manual residual freeze Owner append and commit faults retain old state" {
+    try exerciseManualFreeze(true, false);
+    try exerciseManualFreeze(false, true);
+}
+fn exerciseManualFreeze(append_fault: bool, commit_fault: bool) !void {
+    const allocator = std.testing.allocator;
+    const memory = try allocator.create(durable.MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .init();
+    defer memory.deinit();
+    const owner = try allocator.create(demo.Owner);
+    defer allocator.destroy(owner);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 91 });
+    try initializeResidualEconomicsOwner(owner);
+    try std.testing.expectEqual(@as(i128, 0), try owner.shard.cycles.reservedAtoms(20, 10, 0x425443));
+    const live = owner.shard.cycles.residual_lifecycle.find(9, 3, 0).?;
+    var command: trading.operational.ControlCommand = .{
+        .command_identity = 83001,
+        .content_hash = 83001,
+        .target_identity = owner.shard.operational_state.target_identity,
+        .expected_version = owner.shard.operational_state.version,
+        .expires_at = std.math.maxInt(u64),
+        .kind = .freeze_residual,
+        .residual = .{ .strategy = 9, .first_sequence = 3, .member = 0, .expected_version = live.version, .original_fact = live.original_fact, .atoms = 1 },
+    };
+    const freeze = fixture.atGroup(62, .{ .identity = 83001, .payload = .{ .control_command = command } });
+    if (append_fault or commit_fault) {
+        var failing = memory.interface().vtable.*;
+        if (append_fault) failing.append = failNthAppend else failing.commit = failNthCommit;
+        fault_remaining = 1;
+        owner.store = .{ .context = memory, .vtable = &failing };
+        try std.testing.expectError(error.DecisionLogUnavailable, owner.apply(freeze));
+        const recovered_fault = try allocator.create(demo.Owner);
+        defer allocator.destroy(recovered_fault);
+        try demo.Owner.recoverInto(recovered_fault, memory.interface(), undefined, owner.stream);
+        try std.testing.expectEqual(@as(i128, 0), try recovered_fault.shard.cycles.reservedAtoms(20, 10, 0x425443));
+        try std.testing.expectEqual(@as(i128, 1), try recovered_fault.shard.cycles.outstandingAtoms(20, 10, 0x425443));
+        return;
+    }
+    _ = try owner.apply(freeze);
+    const before = owner.shard.canonicalStateDigest();
+    _ = try owner.apply(freeze);
+    try std.testing.expectEqualSlices(u8, &before, &owner.shard.canonicalStateDigest());
+    var conflict = freeze;
+    conflict.core.payload.control_command.residual.?.atoms = 2;
+    try std.testing.expectError(error.ControlCommandIdentityConflict, owner.shard.apply(conflict));
+    try std.testing.expectEqual(@as(i128, 1), try owner.shard.cycles.reservedAtoms(20, 10, 0x425443));
+    try owner.checkpoint();
+    const gateway = try allocator.create(@import("../../../execution/execution_gateway.zig").Gateway);
+    defer allocator.destroy(gateway);
+    gateway.init();
+    try gateway.attachRecoveredDurableDispatch(owner.store, owner.io, .{ .domain = .control, .id = 92 });
+    _ = try owner.archiveControlHistory(gateway);
+    for (owner.shard.operational_state.command_history[0..owner.shard.operational_state.command_count]) |record| try std.testing.expect(record.command.command_identity != command.command_identity);
+    _ = try owner.apply(freeze);
+    try std.testing.expectEqual(@as(i128, 1), try owner.shard.cycles.reservedAtoms(20, 10, 0x425443));
+    try owner.checkpoint();
+    const recovered = try allocator.create(demo.Owner);
+    defer allocator.destroy(recovered);
+    try demo.Owner.recoverInto(recovered, memory.interface(), undefined, owner.stream);
+    try std.testing.expectEqual(@as(i128, 1), try recovered.shard.cycles.reservedAtoms(20, 10, 0x425443));
+    command.command_identity += 1;
+    command.content_hash += 1;
+    command.expected_version = owner.shard.operational_state.version;
+    command.kind = .unfreeze_residual;
+    command.residual.?.expected_version = owner.shard.cycles.residual_lifecycle.find(9, 3, 0).?.version;
+    _ = try owner.apply(fixture.atGroup(2_000_000, .{ .identity = 83002, .payload = .{ .control_command = command } }));
+    try std.testing.expectEqual(@as(i128, 0), try owner.shard.cycles.reservedAtoms(20, 10, 0x425443));
+    try std.testing.expectEqual(@as(i128, 1), try owner.shard.cycles.outstandingAtoms(20, 10, 0x425443));
+    var sell: trading.oms.IntentGroup = .{ .first_intent_sequence = 84001, .count = 2 };
+    sell.members[0] = .{ .intent_sequence = 84001, .strategy_instance = 9, .exchange_account = 20, .instrument = 103, .side = .sell, .quantity = 1, .operation = .place, .limit_price = .{ .instrument = 103, .rules_version = 1, .ticks = 100000000 } };
+    sell.members[1] = .{ .intent_sequence = 84002, .strategy_instance = 9, .exchange_account = 30, .instrument = 102, .side = .buy, .quantity = 10000, .operation = .place, .limit_price = .{ .instrument = 102, .rules_version = 1, .ticks = 10 } };
+    _ = try owner.apply(fixture.atGroup(2_000_001, .{ .identity = 84001, .payload = .{ .oms_intent_group = sell } }));
+    try std.testing.expectEqual(@as(u16, 6), owner.shard.oms.order_count);
+    command.command_identity += 1;
+    command.content_hash += 1;
+    command.expected_version = owner.shard.operational_state.version;
+    command.kind = .freeze_residual;
+    command.residual.?.expected_version = owner.shard.cycles.residual_lifecycle.find(9, 3, 0).?.version;
+    try std.testing.expectError(error.ResidualFreezeInFlight, owner.apply(fixture.atGroup(2_000_002, .{ .identity = 83003, .payload = .{ .control_command = command } })));
+}
+
 test "09a explicit spot dust carry preserves ownership and survives durable recovery" {
     try exerciseAccountRecovery(.cycle_spot_carry);
 }
 
-test "09a retired residual fee increase and return keep ownership and recovery gates" {
+test "09a retired residual fee increase and return keep ownership without automatic freezes" {
     try exerciseAccountRecovery(.cycle_spot_carry_increase);
     try exerciseAccountRecovery(.cycle_spot_carry_return);
 }
 
-test "09a real base fee consuming carried inventory records economics and blocks new sends" {
+test "09a real base fee consuming unfrozen carried inventory records normal owned consumption" {
     try exerciseAccountRecovery(.cycle_spot_carry_fee);
 }
 
@@ -216,7 +336,7 @@ fn exerciseAccountRecovery(scenario: Scenario) !void {
         try std.testing.expectError(error.CycleResidual, shard.qualifyCycleClosure(9, 3));
         const accepted_at = fixture.atGroup(61, .{ .identity = 0, .payload = .recovery_completed }).core.source_time;
         try std.testing.expectError(error.ResidualDisabled, shard.qualifyCycleResidualClosure(9, 3, accepted_at));
-        var rule_input = fixture.atGroup(60, .{ .identity = 19999, .payload = .{ .spot_residual_rule = .{ .asset = 0x425443, .asset_version = 1, .version = 1, .max_atoms = 1, .max_total_atoms = 1, .max_age_ns = 100_000_000 } } });
+        var rule_input = fixture.atGroup(60, .{ .identity = 19999, .payload = .{ .spot_residual_rule = .{ .asset = 0x425443, .asset_version = 1, .version = 1, .max_atoms = 1, .max_total_atoms = 1 } } });
         var invalid_rule = rule_input;
         invalid_rule.core.payload.spot_residual_rule.max_atoms = 0;
         try std.testing.expectError(error.InvalidResidualRule, shard.apply(invalid_rule));
@@ -258,7 +378,7 @@ fn exerciseAccountRecovery(scenario: Scenario) !void {
             defer allocator.destroy(recovered);
             try demo.Owner.recoverInto(recovered, store, io, owner.stream);
             try std.testing.expectEqualSlices(u8, &old, &recovered.shard.canonicalStateDigest());
-            try std.testing.expectEqual(@as(i128, 0), try recovered.shard.cycles.reservedAtoms(20, 10, 0x425443));
+            try std.testing.expectEqual(@as(i128, 0), try recovered.shard.cycles.outstandingAtoms(20, 10, 0x425443));
             try std.testing.expectEqual(@as(u8, 1), recovered.shard.cycles.count);
             return;
         }
@@ -267,7 +387,7 @@ fn exerciseAccountRecovery(scenario: Scenario) !void {
         _ = try owner.apply(closure);
         try std.testing.expectEqualSlices(u8, &closed_digest, &shard.canonicalStateDigest());
         try std.testing.expectEqualSlices(u8, &before, &shard.economic_projection.semanticDigest());
-        try std.testing.expectEqual(@as(i128, 1), try shard.cycles.reservedAtoms(20, 10, 0x425443));
+        try std.testing.expectEqual(@as(i128, 1), try shard.cycles.outstandingAtoms(20, 10, 0x425443));
         try std.testing.expectEqual(@as(u8, 0), shard.cycles.count);
         if (scenario == .cycle_spot_carry_return or scenario == .cycle_spot_carry_increase) {
             var event = feeEvent(owner, 1);
@@ -280,7 +400,7 @@ fn exerciseAccountRecovery(scenario: Scenario) !void {
             try std.testing.expectEqual(@as(i128, if (scenario == .cycle_spot_carry_return) 2 else 0), shard.economic_projection.portfolio.spotInventoryAtoms(0x425443));
             try std.testing.expect(std.meta.eql(original, shard.cycles.closed[0]));
             try std.testing.expectEqual(@as(u64, 3), shard.economic_projection.fee_revisions[0].adjustment.cycle_first_sequence);
-            try std.testing.expect(shard.oms.recovery_only);
+            try std.testing.expect(!shard.oms.recovery_only);
         }
         if (scenario == .cycle_spot_carry or scenario == .cycle_spot_carry_fee) try exerciseCarriedCycle(owner, scenario == .cycle_spot_carry_fee);
     }
@@ -477,9 +597,9 @@ fn exerciseAccountRecovery(scenario: Scenario) !void {
     _ = try trading.TradingShard.restoreSnapshotInto(recovered, encoded_snapshot);
     try std.testing.expectEqualSlices(u8, &shard.canonicalStateDigest(), &recovered.canonicalStateDigest());
     try std.testing.expectEqual(@as(i128, if (scenario == .domain_history or (closing and scenario != .cycle_spot_zero)) 605 else 600), recovered.accountState(30).?.economic_projection.portfolio.usdt_balance_atoms);
-    if (scenario == .cycle_spot_carry_return or scenario == .cycle_spot_carry_increase) try std.testing.expect(recovered.oms.recovery_only);
+    if (scenario == .cycle_spot_carry_increase) try std.testing.expect(!recovered.oms.recovery_only);
     if (carrying(scenario)) {
-        try std.testing.expectEqual(@as(i128, 1), try recovered.cycles.reservedAtoms(20, 10, 0x425443));
+        try std.testing.expectEqual(@as(i128, if (scenario == .cycle_spot_carry_increase or scenario == .cycle_spot_carry_fee) 0 else if (scenario == .cycle_spot_carry_return) 2 else 1), try recovered.cycles.outstandingAtoms(20, 10, 0x425443));
         const damaged = try allocator.create(trading.TradingShard);
         defer allocator.destroy(damaged);
         damaged.* = shard.*;
@@ -487,12 +607,32 @@ fn exerciseAccountRecovery(scenario: Scenario) !void {
         const invalid = try damaged.snapshot(log, log.last_sequence, bytes);
         try std.testing.expectError(error.InvalidCycle, trading.TradingShard.restoreSnapshotInto(recovered, invalid));
         damaged.* = shard.*;
-        for (&damaged.cycles.closed[0].proof.residuals) |*maybe| if (maybe.*) |*residual| {
-            residual.rule.max_total_atoms = 1;
-        };
+        damaged.cycles.residual_lifecycle.live[0].credited_atoms += 1;
         const over_limit = try damaged.snapshot(log, log.last_sequence, bytes);
-        try std.testing.expectError(error.InvalidCycle, trading.TradingShard.restoreSnapshotInto(recovered, over_limit));
+        try std.testing.expectError(error.InvalidResidual, trading.TradingShard.restoreSnapshotInto(recovered, over_limit));
     }
+}
+
+pub fn initializeResidualEconomicsOwner(owner: *demo.Owner) !void {
+    try initializeResidualOwnerScenario(owner, .cycle_spot_carry);
+}
+pub fn initializeResidualCreditEconomicsOwner(owner: *demo.Owner) !void {
+    try initializeResidualOwnerScenario(owner, .cycle_spot_carry_return);
+}
+fn initializeResidualOwnerScenario(owner: *demo.Owner, scenario: Scenario) !void {
+    try initializeForScenario(owner, scenario);
+    try exercisePartitionOrders(owner, scenario);
+    try prepareCycleClosure(owner, scenario);
+    _ = try owner.apply(fixture.atGroup(60, .{ .identity = 19999, .payload = .{ .spot_residual_rule = .{
+        .asset = 0x425443,
+        .asset_version = 1,
+        .version = 1,
+        .max_atoms = 1,
+        .max_total_atoms = 2,
+    } } }));
+    const proof = try owner.shard.qualifyCycleResidualClosure(9, 3, fixture.atGroup(61, .{ .identity = 0, .payload = .recovery_completed }).core.source_time);
+    _ = try owner.apply(fixture.atGroup(61, .{ .identity = 20000, .payload = .{ .cycle_closed = proof } }));
+    try owner.checkpoint();
 }
 
 pub fn initializePythonOwner(owner: *demo.Owner) !void {
@@ -516,20 +656,6 @@ fn exerciseCarriedCycle(owner: *demo.Owner, fee_deficit: bool) !void {
     _ = try owner.apply(fixture.atGroup(62, .{ .identity = 20001, .payload = .{ .oms_intent_group = next } }));
     try std.testing.expectEqual(@import("../../../trading/trading_shard_event.zig").RejectReason.insufficient_spot_asset, shard.last_reject_reason);
     try std.testing.expectEqual(@as(u8, 0), shard.cycles.count);
-    if (!fee_deficit) {
-        var sibling = next;
-        sibling.first_intent_sequence = 21001;
-        sibling.members[0].intent_sequence = 21001;
-        sibling.members[0].instrument = 103;
-        sibling.members[0].limit_price = .{ .instrument = 103, .rules_version = 1, .ticks = 100000000 };
-        sibling.members[1].intent_sequence = 21002;
-        sibling.members[1].side = .buy;
-        sibling.members[1].quantity = 10000;
-        try std.testing.expectEqual(@as(i128, 1), shard.economic_projection.portfolio.spotInventoryAtoms(0x425443));
-        _ = try owner.apply(fixture.atGroup(62, .{ .identity = 21001, .payload = .{ .oms_intent_group = sibling } }));
-        try std.testing.expectEqual(@import("../../../trading/trading_shard_event.zig").RejectReason.insufficient_spot_asset, shard.last_reject_reason);
-        try std.testing.expectEqual(@as(u8, 0), shard.cycles.count);
-    }
     try owner.checkpoint();
     next.first_intent_sequence = 20003;
     for (next.members[0..2], 0..) |*member, index| {
@@ -540,7 +666,7 @@ fn exerciseCarriedCycle(owner: *demo.Owner, fee_deficit: bool) !void {
     _ = try owner.apply(fixture.atGroup(62, .{ .identity = 20003, .payload = .{ .oms_intent_group = next } }));
     try std.testing.expectEqual(@as(u8, 1), shard.cycles.count);
     try std.testing.expectEqual(@as(u16, 6), shard.oms.order_count);
-    try std.testing.expectEqual(@as(i128, 1), try shard.cycles.reservedAtoms(20, 10, 0x425443));
+    try std.testing.expectEqual(@as(i128, 1), try shard.cycles.outstandingAtoms(20, 10, 0x425443));
     if (fee_deficit) {
         const order = shard.oms.orderById(5).?;
         const entry = shard.registryInstrument(101).?;
@@ -566,8 +692,8 @@ fn exerciseCarriedCycle(owner: *demo.Owner, fee_deficit: bool) !void {
         try applyAdapterInput(owner, fill);
         try std.testing.expectEqual(@as(i128, 0), shard.economic_projection.portfolio.spotInventoryAtoms(0x425443));
         try std.testing.expectEqual(@as(i64, 10000), try shard.economic_projection.appliedCanonicalFillQuantity(5));
-        try std.testing.expectEqual(@as(i128, 1), try shard.cycles.reservedAtoms(20, 10, 0x425443));
-        try std.testing.expect(shard.oms.recovery_only);
+        try std.testing.expectEqual(@as(i128, 0), try shard.cycles.outstandingAtoms(20, 10, 0x425443));
+        try std.testing.expect(!shard.oms.recovery_only);
         try std.testing.expectError(error.CycleNotClosed, shard.qualifyCycleClosure(9, 20003));
         return;
     }
@@ -600,18 +726,17 @@ fn exerciseCarriedCycle(owner: *demo.Owner, fee_deficit: bool) !void {
     try std.testing.expectEqual(@as(u8, 0), shard.cycles.count);
     try std.testing.expectEqual(@as(u8, 2), shard.cycles.closed_count);
     try owner.checkpoint();
-    // A newer rule cannot extend the original residual's deadline.
+    // Rule updates do not create an expiry; a later cycle may reuse owned inventory.
     var rule = shard.cycles.residualRule(0x425443).?;
     rule.version += 1;
-    rule.max_age_ns = 1_000_000_000;
     _ = try owner.apply(fixture.atGroup(71, .{ .identity = 20006, .payload = .{ .spot_residual_rule = rule } }));
     const now = fixture.atGroup(71, .{ .identity = 0, .payload = .recovery_completed }).core.source_time;
-    try std.testing.expectError(error.ResidualExpired, shard.qualifyCycleResidualClosure(9, 20003, now));
+    _ = now;
     next.first_intent_sequence = 20007;
     for (next.members[0..2], 0..) |*member, index| member.intent_sequence = 20007 + index;
     _ = try owner.apply(fixture.atGroup(71, .{ .identity = 20007, .payload = .{ .oms_intent_group = next } }));
-    try std.testing.expectEqual(@import("../../../trading/trading_shard_event.zig").RejectReason.joint_admission_unavailable, shard.last_reject_reason);
-    try std.testing.expectEqual(@as(u8, 0), shard.cycles.count);
+    try std.testing.expectEqual(@import("../../../trading/trading_shard_event.zig").RejectReason.none, shard.last_reject_reason);
+    try std.testing.expectEqual(@as(u8, 1), shard.cycles.count);
     try std.testing.expectEqual(@as(i128, 1), shard.economic_projection.portfolio.spotInventoryAtoms(0x425443));
 }
 

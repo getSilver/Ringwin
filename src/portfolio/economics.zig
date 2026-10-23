@@ -180,6 +180,8 @@ pub const LedgerSummary = struct {
 };
 
 pub const Fill = struct {
+    /// Derived by TradingShard only after authenticated owned-residual consumption.
+    inventory_only_lots: i64 = 0,
     identity: u64,
     order_id: u64 = 0,
     side: Side,
@@ -593,6 +595,22 @@ pub const Projection = struct {
         for (self.applied_fill_totals[0..self.applied_fill_total_count]) |known|
             if (known.order_id == order_id) return known.quantity;
         return 0;
+    }
+
+    /// Reattributes existing owned inventory; native balances and historical fills do not change.
+    pub fn transferSpotInventory(self: *Projection, from: Instrument, to: ?Instrument, asset: u64, atoms: i128) !void {
+        if (atoms == 0 or (to != null and to.? == from)) return;
+        for ([_]*Layer{ &self.portfolio, &self.exchange }) |layer| {
+            const source = try layer.instrumentMutable(from, .spot);
+            if (source.base_asset != asset) return error.InvalidEconomicFact;
+            source.spot_asset_atoms = try std.math.sub(i128, source.spot_asset_atoms, atoms);
+            if (to) |target| {
+                const destination = try layer.instrumentMutable(target, .spot);
+                if (destination.base_asset != 0 and destination.base_asset != asset) return error.InvalidEconomicFact;
+                destination.spot_asset_atoms = try std.math.add(i128, destination.spot_asset_atoms, atoms);
+            }
+            try layer.refreshPositions();
+        }
     }
 
     pub fn applyCanonicalFill(self: *Projection, fill: Fill, payload_digest: [Sha256.digest_length]u8) !bool {
@@ -1268,7 +1286,9 @@ pub const Projection = struct {
     }
 
     fn applyMirroredFill(self: *Projection, fill: Fill, kind: FactKind) !void {
-        if (fill.quantity.instrument == 0 or fill.quantity.lots <= 0 or fill.price.ticks <= 0 or fill.quantity.instrument != fill.price.instrument or
+        if (fill.inventory_only_lots < 0 or fill.inventory_only_lots > fill.quantity.lots or
+            (fill.inventory_only_lots != 0 and (fill.product != .spot or fill.side != .sell)) or
+            fill.quantity.instrument == 0 or fill.quantity.lots <= 0 or fill.price.ticks <= 0 or fill.quantity.instrument != fill.price.instrument or
             fill.price_tick_value.asset != self.settlement_asset or fill.price_tick_value.atoms <= 0 or
             fill.quantity.rules_version != fill.price.rules_version or fill.quantity_denominator <= 0 or
             fill.quantity_numerator <= 0 or fill.portfolio_margin_ppm < 0 or fill.exchange_margin_ppm < 0 or
@@ -1894,7 +1914,11 @@ fn applyFillToLayer(layer: *Layer, fill: Fill, margin_ppm: i64) !i128 {
         const delta = try std.math.add(i128, native_delta, try std.math.sub(i128, fill.base_rebate.atoms, fill.base_fee.atoms));
         const next_asset = try std.math.add(i128, inventory.balance_atoms, delta);
         if (next_asset < 0) return error.InsufficientSpotAsset;
-        const realized = try updatePosition(&entry.position, direction, quantity, notional);
+        const gross_quantity = try std.math.sub(i64, quantity, fill.inventory_only_lots);
+        // The integer tail belongs to inventory-only proceeds, preserving the exact total price.
+        const gross_notional = @divFloor(try std.math.mul(i128, notional, gross_quantity), quantity);
+        const realized_gross = if (gross_quantity == 0) @as(i128, 0) else try updatePosition(&entry.position, direction, gross_quantity, gross_notional);
+        const realized = try std.math.add(i128, realized_gross, try std.math.sub(i128, notional, gross_notional));
         inventory.balance_atoms = next_asset;
         entry.base_asset = fill.base_atom_value.asset;
         entry.base_atoms_per_lot = fill.base_atom_value.atoms;
@@ -2071,6 +2095,7 @@ fn fingerprintFill(fill: Fill) u64 {
 }
 
 fn hashFill(hash: anytype, fill: Fill) void {
+    hash.update(std.mem.asBytes(&fill.inventory_only_lots));
     hash.update(std.mem.asBytes(&fill.identity));
     hash.update(std.mem.asBytes(&fill.order_id));
     hash.update(std.mem.asBytes(&fill.quantity.instrument));

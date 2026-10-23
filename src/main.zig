@@ -280,4 +280,5 @@ test {
     _ = windows_capacity_shared;
     _ = windows_observation_file_acceptance;
     _ = raw_ingress;
+    _ = @import("testing/acceptance/accounting/owned_residual_economics_acceptance.zig");
 }

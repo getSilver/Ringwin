@@ -128,6 +128,8 @@ pub const EventKind = enum(u16) {
     cycle_occupied,
     cycle_closed,
     spot_residual_rule,
+    residual_consumed,
+    residual_state_committed,
 };
 
 pub const Fact = struct {
@@ -210,13 +212,13 @@ pub const Trace = struct {
         var inputs = self.base_input_head;
         for (self.events[0..self.len], 0..) |fact, index| {
             if (fact.sequence != try std.math.add(u64, self.base_sequence, @as(u64, @intCast(index)) + 1)) return error.InvalidTrace;
-            if ((fact.kind == .economic_open_commitment) != (fact.economic_open_digest != null)) return error.InvalidTrace;
+            if (((fact.kind == .economic_open_commitment or fact.kind == .residual_state_committed)) != (fact.economic_open_digest != null)) return error.InvalidTrace;
             history = factHead(history, fact);
             if (fact.input_first) inputs = inputHead(inputs, fact);
         }
         if (!std.mem.eql(u8, &history, &self.history_head) or !std.mem.eql(u8, &inputs, &self.input_head)) return error.InvalidTrace;
         for (self.pinned[0..self.pinned_len], 0..) |fact, index| {
-            if ((fact.kind == .economic_open_commitment) != (fact.economic_open_digest != null)) return error.InvalidTrace;
+            if (((fact.kind == .economic_open_commitment or fact.kind == .residual_state_committed)) != (fact.economic_open_digest != null)) return error.InvalidTrace;
             if (fact.sequence == 0 or fact.sequence > self.base_sequence or
                 (index > 0 and self.pinned[index - 1].sequence >= fact.sequence)) return error.InvalidTrace;
         }
@@ -266,12 +268,16 @@ pub const Trace = struct {
         try self.appendFact(kind, identity, reason, null);
     }
 
+    pub fn appendResidualCommitment(self: *Trace, identity: u64, digest: [32]u8) !void {
+        try self.appendFact(.residual_state_committed, identity, .none, digest);
+    }
+
     pub fn appendEconomicCommitment(self: *Trace, identity: u64, digest: [32]u8) !void {
         try self.appendFact(.economic_open_commitment, identity, .none, digest);
     }
 
     fn appendFact(self: *Trace, kind: EventKind, identity: u64, reason: RejectReason, economic_digest: ?[32]u8) !void {
-        if ((kind == .economic_open_commitment) != (economic_digest != null)) return error.InvalidTrace;
+        if (((kind == .economic_open_commitment or kind == .residual_state_committed)) != (economic_digest != null)) return error.InvalidTrace;
         const sequence = try std.math.add(u64, self.last_sequence, 1);
         try self.validate();
         if (traceCapacityReached(self.len)) return error.TraceFull;
@@ -967,6 +973,8 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u128, value.referenced_latch_identity);
             try encoded.put(u8, @intFromBool(value.risk_warning_acknowledged));
             try encoded.put(u128, value.risk_warning_identity);
+            const residual_bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], value.residual);
+            encoded.len += residual_bytes.len;
         },
         .recovery_completed => {},
         .safety_gate_change => |value| {
@@ -1461,6 +1469,11 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             .referenced_latch_identity = try readInputValue(u128, record.payload, &offset),
             .risk_warning_acknowledged = (try readInputValue(u8, record.payload, &offset)) == 1,
             .risk_warning_identity = try readInputValue(u128, record.payload, &offset),
+            .residual = blk: {
+                const value = try snapshot_codec.decodeBare(record.payload[offset..], ?@import("residual_lifecycle.zig").Freeze);
+                offset = record.payload.len;
+                break :blk value;
+            },
         } },
         .recovery_completed => .recovery_completed,
         .safety_gate_change => .{ .safety_gate_change = .{

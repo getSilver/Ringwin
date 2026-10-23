@@ -16,6 +16,8 @@ pub const CommandKind = enum(u8) {
     stop_keep_positions,
     de_risk,
     resolve_latch,
+    freeze_residual,
+    unfreeze_residual,
 };
 /// Recovery semantics for one safety gate.
 pub const GateKind = enum(u8) { self_recovering, latched, warning };
@@ -45,6 +47,7 @@ pub const ControlCommand = struct {
     referenced_latch_identity: u128 = 0,
     risk_warning_acknowledged: bool = false,
     risk_warning_identity: u128 = 0,
+    residual: ?@import("residual_lifecycle.zig").Freeze = null,
 };
 
 /// Immutable observation of one independently identified safety gate.
@@ -134,6 +137,7 @@ pub const State = struct {
             return error.ControlCommandWrongTarget;
         if (command.command_identity == 0 or command.content_hash == 0)
             return error.InvalidControlCommand;
+        if (command.residual != null and command.kind != .freeze_residual and command.kind != .unfreeze_residual) return error.InvalidControlCommand;
         if (now > command.expires_at) return error.ControlCommandExpired;
         if (self.findCommand(command.command_identity)) |record| {
             if (!std.meta.eql(record.command, command)) return error.ControlCommandIdentityConflict;
@@ -144,6 +148,9 @@ pub const State = struct {
 
         var action: Action = .{ .changed = true };
         switch (command.kind) {
+            .freeze_residual, .unfreeze_residual => {
+                if (command.residual == null) return error.InvalidControlCommand;
+            },
             .start_recovery => {
                 if (self.mode != .stopped) return error.InvalidOperationalTransition;
                 self.mode = .recovering;
