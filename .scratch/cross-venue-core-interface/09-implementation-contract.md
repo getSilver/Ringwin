@@ -5,6 +5,12 @@
 
 ## 2026-10-23 当前整合状态
 
+### 首版范围冻结（2026-10-23）
+
+用户要求冻结首版范围及 Asset 参数。范围现冻结为：只承接 gross lots、OpenCost、margin 精确归零后的正 sub-lot 现货余额；保留原归属且禁止新周期花费；永续、负资产、Unknown 及经济证据缺口继续占用。费用更正采用已验证的独立 FeeAdjustment 合同，不覆盖原 Fill；本票不包含真实 Venue 更正协议资格、已承接残余处置/解锁权限或连续运行认证回收。
+
+Asset 数值尚待用户提供允许资产、单笔上限、累计上限及最大存续时间，不能将开发夹具参数视为用户确认值。累计按同一 DecisionDomain 内相同 Asset 跨账户合计；未列资产默认禁止承接。收到数值后绑定实际 AssetDefinition 身份/版本换算原子数量，并冻结规则版本；在此之前不宣布参数冻结或关闭 09a。
+
 两个实现子任务均由 **GPT 6.1 Sol、medium** 子代理在独立工作树完成，主窗口整合及统一验收；没有把子代理定向结果当作全量或生产资格。当前 journal/state/registry 为 **45/49/43**，canonical **16**，StateDigestV13 / SemanticAuthorityDigestV3；下文 44/48/42、707/707 等属于先前零残余首版历史证据。
 
 - 仅 gross lots、OpenCost、margin 精确零且 `0 < atoms < baseAtomsPerLot` 的正现货余额可显式承接。按 Asset 版本化规则提供单次/累计上限和最大存续时间，默认未配置即关闭；规则事实 pin、原规则截止时间、同次两腿累计及有界容量均核对。原账户/VirtualPortfolio/周期/Asset、精确余额和费用账务不变，不转 Treasury、不重复估值、不供同品种或同账户共享 Asset 的新周期花费。永续、负资产、Unknown、未闭合经济/对账/历史证据仍拒绝终结。
