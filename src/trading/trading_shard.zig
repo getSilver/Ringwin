@@ -5718,6 +5718,14 @@ const CoreSnapshotEncodingPolicy = struct {
 };
 
 fn canonicalizeSnapshotState(shard: *TradingShard) void {
+    zeroUnused(@TypeOf(shard.cycles.records[0]), shard.cycles.records[shard.cycles.count..]);
+    zeroUnused(@TypeOf(shard.cycles.closed[0]), shard.cycles.closed[shard.cycles.closed_count..]);
+    zeroUnused(@TypeOf(shard.cycles.residual_rules[0]), shard.cycles.residual_rules[shard.cycles.residual_rule_count..]);
+    zeroUnused(u64, shard.cycles.residual_rule_barriers[shard.cycles.residual_rule_count..]);
+    const lifecycle = &shard.cycles.residual_lifecycle;
+    zeroUnused(@TypeOf(lifecycle.live[0]), lifecycle.live[lifecycle.live_count..]);
+    zeroUnused(@TypeOf(lifecycle.receipts[0]), lifecycle.receipts[lifecycle.receipt_count..]);
+    zeroUnused(@TypeOf(lifecycle.credits[0]), lifecycle.credits[lifecycle.credit_count..]);
     for (shard.secondary_accounts[shard.secondary_account_count..]) |*partition| partition.* = .{};
     for (&shard.secondary_accounts) |*partition| canonicalizeAccountLocalState(&partition.state);
     inline for (.{ "pending_history_candidate", "pending_safety_history_candidate" }) |field| {
@@ -7627,6 +7635,10 @@ test "optimization borrowed canonical snapshot matches copy canonicalization wit
     source.fenced_strategy_instances[1] = 91;
     source.asset_registry.entries[0].definition.asset = 77;
     source.trace.events[0].identity = 42;
+    source.cycles.records[0].strategy = 19;
+    source.cycles.residual_lifecycle.live[0].remaining = 23;
+    source.cycles.residual_lifecycle.receipts[0].source.identity = 29;
+    source.cycles.residual_lifecycle.credits[0].atoms = 31;
     source.canonical_account.seen[0].identity = 123;
     source.canonical_ingress_cursors[0].identity.sequence = 321;
     source.oms.command_count = 1;

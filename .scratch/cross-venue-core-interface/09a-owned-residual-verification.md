@@ -30,3 +30,7 @@ Closed proof 保持不可变；新增有界 Live 投影保留原策略/周期/�
 容量在112个消费来源时阻止依赖残余的新风险，保留16个有界在途槽；达到128后不造消费证据、不清空或重复入账。除新周期opening外，卖出及改单资格也累计同Instrument已有未应用卖出、同组前项及目标改单承诺，只有需要残余时才用容量门槛，纯gross减仓不一概阻断。State测试经公开add/consume接口实际达到112/128并覆盖聚合卖单判断；Owner另有更早活动周期/Fill/修订/账本容量限制，本记录不声称128来源Owner端到端已验收，也不承诺任意partial Fill无限可入账。耗尽后无足够消费证明的gross-zero实际成交保留原Canonical输入及经济故障，待证未应用，而非声称已经投影。
 
 只运行定向，主窗口统一全量、冻结摘要与双轴复审；未部署、下单或改用户规划。
+
+## Copy / borrowed快照等价回归
+
+主窗口新全量暴露旧copy oracle未规范cycles/lifecycle未用尾部；新Live默认version=1与生产borrowed编码的zero尾部不同。canonicalizeSnapshotState仅该优化test调用，生产writeWithPolicy及摘要常量无需改变。增强同一test污染未用record/live/receipt/credit后，`09a-borrowed-tail-red.log/.exit`实际复现退出1；修复将copy尾部清理与已有borrowed policy对齐，保持逐字节等价和源状态不变断言。`09a-borrowed-tail-green.log/.exit`：同一ReleaseSafe定向 **2/2，退出0**（entry及目标test），三次重复编码均相同，2,342,783字节；未重跑全量或更新冻结摘要。
