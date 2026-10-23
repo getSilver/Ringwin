@@ -1065,7 +1065,7 @@ pub const TradingShard = struct {
         var candidate: TradingShard = undefined;
         copyTradingState(&candidate, self);
         var publish_on_error = false;
-        const result = candidate.applyCandidate(self, input, &publish_on_error, null) catch |err| {
+        const result = candidate.applyCandidate(self, input, &publish_on_error, self) catch |err| {
             if (publish_on_error) copyTradingState(self, &candidate);
             return err;
         };
@@ -4468,34 +4468,33 @@ pub const TradingShard = struct {
     }
 
     fn handleOmsDispatch(self: *TradingShard, input: CoreEvent, batch: oms.DispatchBatch) !?OrderCommand {
-        var candidate: TradingShard = undefined;
-        copyTradingState(&candidate, self);
-        const previous_reservation = try candidate.activeReservationAtoms();
-        try candidate.oms.applyDispatch(batch);
-        try candidate.adjustMarginBuffersForReservationChange(previous_reservation);
-        try candidate.trace.append(.oms_dispatch_batch, input.identity);
-        copyTradingState(self, &candidate);
-
+        // The outer apply transaction owns rollback of this candidate.
+        const previous_reservation = try self.activeReservationAtoms();
+        try self.oms.applyDispatch(batch);
+        try self.adjustMarginBuffersForReservationChange(previous_reservation);
+        try self.trace.append(.oms_dispatch_batch, input.identity);
         return null;
     }
 
     fn handleAssetDefinition(self: *TradingShard, input: CoreEvent, definition: canonical.AssetDefinition) !?OrderCommand {
         const previous = self.asset_registry.get(definition.asset);
-        var configured: TradingShard = undefined;
-        copyTradingState(&configured, self);
-        if (!try configured.asset_registry.activate(definition, try std.math.add(u64, self.authoritativeBarrier(), 1))) return null;
-        if (configured.asset_registry.get(configured.economic_projection.settlement_asset) != null)
-            try configured.checkEconomicRanges();
-        // Partial virgin activation has no complete monetary namespace yet.
-        if (configured.asset_registry.consumerCompatible(true)) {
-            for (configured.canonical_account.balances[0..configured.canonical_account.balance_count]) |balance|
-                try configured.checkAssetAmounts(balance, false);
-            for (configured.canonical_account.positions[0..configured.canonical_account.position_count]) |position|
-                try configured.checkAssetAmounts(position, false);
-            for (configured.canonical_account.margins[0..configured.canonical_account.margin_count]) |margin|
-                try configured.checkAssetAmounts(margin, false);
+        {
+            const previous_registry = self.asset_registry;
+            // Rejection is published by applyCore, but the rejected registry is not.
+            errdefer self.asset_registry = previous_registry;
+            if (!try self.asset_registry.activate(definition, try std.math.add(u64, self.authoritativeBarrier(), 1))) return null;
+            if (self.asset_registry.get(self.economic_projection.settlement_asset) != null)
+                try self.checkEconomicRanges();
+            // Partial virgin activation has no complete monetary namespace yet.
+            if (self.asset_registry.consumerCompatible(true)) {
+                for (self.canonical_account.balances[0..self.canonical_account.balance_count]) |balance|
+                    try self.checkAssetAmounts(balance, false);
+                for (self.canonical_account.positions[0..self.canonical_account.position_count]) |position|
+                    try self.checkAssetAmounts(position, false);
+                for (self.canonical_account.margins[0..self.canonical_account.margin_count]) |margin|
+                    try self.checkAssetAmounts(margin, false);
+            }
         }
-        self.asset_registry = configured.asset_registry;
         try self.trace.append(.asset_definition_activated, input.identity);
         if (previous != null and previous.?.definition.version != definition.version) self.oms.recovery_only = true;
         return null;
@@ -5337,7 +5336,8 @@ pub const TradingShard = struct {
                     if (binding.account != self.exchange_account_identity or binding.asset != self.economic_projection.settlement_asset or binding.domain != self.decision_domain_identity or binding.stream != self.decision_stream_identity or
                         !std.mem.eql(u8, &binding.configuration_digest, &self.deployment.header.?.expected_digest)) return error.UnverifiedRiskLeaseAllocation;
                     const limit = self.deployment.sliceLimit(binding.account, binding.asset, binding.domain) orelse return error.UnverifiedRiskLeaseAllocation;
-                    if (lease.amount_atoms > limit or lease.amount_atoms < 0 or (self.risk_lease_version != 0 and lease.amount_atoms > self.risk_lease_atoms)) return error.RiskLeaseOversubscribed;
+                    if (lease.amount_atoms > limit or lease.amount_atoms < 0 or
+                        (self.risk_lease_version != 0 and self.risk_lease_atoms > 0 and lease.amount_atoms > self.risk_lease_atoms)) return error.RiskLeaseOversubscribed;
                     if (lease.version == self.risk_lease_version and !std.meta.eql(lease.allocation, self.risk_lease_allocation)) return error.RiskLeaseIdentityConflict;
                 } else if (lease.allocation != null) return error.UnverifiedRiskLeaseAllocation;
                 const lease_identity = if (lease.lease_identity == 0) input.identity else lease.lease_identity;
@@ -6401,7 +6401,8 @@ fn appendStableFactGroup(
     }
 }
 
-pub fn applyStable(
+// Keep transaction scratch out of callers' later replay frames.
+pub noinline fn applyStable(
     shard: *TradingShard,
     decision_journal: *journal.Journal,
     input: CanonicalEvent,
@@ -6457,6 +6458,7 @@ pub fn applyStableOnCandidate(
         // duplicate; replay never needs to append the same source fact twice.
         if (input == .venue) return null;
         if (input == .core and input.core.payload == .asset_definition_activated) return null;
+        if (input == .core and input.core.payload == .risk_lease_granted) return null;
         if (input == .core and input.core.payload == .checkpoint_committed) return null;
         if (input == .core and input.core.payload == .account_coordinator_bound) return null;
         if (input == .core and input.core.payload == .cycle_closed) return null;
@@ -7774,12 +7776,23 @@ test "optimization owned Core and Venue rollback matches nested public candidate
     const candidate = try allocator.create(TradingShard);
     defer allocator.destroy(candidate);
     const Check = struct {
+        // Keep the pre-optimization nested transaction as an independent oracle.
+        fn nestedApply(shard: *TradingShard, input: CanonicalEvent) !void {
+            const scratch = try std.testing.allocator.create(TradingShard);
+            defer std.testing.allocator.destroy(scratch);
+            copyTradingState(scratch, shard);
+            var publish = false;
+            _ = scratch.applyCandidate(shard, input, &publish, null) catch |err| {
+                if (publish) copyTradingState(shard, scratch);
+                return err;
+            };
+            copyTradingState(shard, scratch);
+        }
         fn step(old: *TradingShard, current: *TradingShard, work: *TradingShard, input: CanonicalEvent) !void {
             work.* = current.*;
             var expected_error: ?anyerror = null;
-            _ = old.apply(input) catch |err| blk: {
+            _ = nestedApply(old, input) catch |err| {
                 expected_error = err;
-                break :blk ApplyResult{ .facts = &.{}, .order_command = null, .oms_commands = &.{} };
             };
             var publish = false;
             var actual_error: ?anyerror = null;

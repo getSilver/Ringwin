@@ -126,6 +126,7 @@ const selected = switch (@import("entry_options").index) {
     122 => @import("testing/acceptance/core/multi_account_authority_acceptance.zig"),
     123 => @import("testing/acceptance/accounting/fee_adjustment_inventory_acceptance.zig"),
     124 => @import("testing/acceptance/accounting/owned_residual_economics_acceptance.zig"),
+    125 => @import("testing/acceptance/core/risk_lease_delivery_acceptance.zig"),
     else => @compileError("unknown standalone source entry"),
 };
 

@@ -269,6 +269,7 @@ test {
     _ = @import("runtime/cutover_history.zig");
     _ = @import("testing/acceptance/history/coordinator_history_acceptance.zig");
     _ = @import("testing/acceptance/core/coordinator_safety_acceptance.zig");
+    _ = @import("testing/acceptance/core/risk_lease_delivery_acceptance.zig");
     _ = @import("testing/acceptance/core/coordination_gateway_acceptance.zig");
     _ = @import("testing/acceptance/history/forced_archive_acceptance.zig");
     _ = @import("trading/trading_shard_event.zig");

@@ -428,6 +428,17 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         .price_ticks = fill_price_ticks,
         .fee_atoms = place_fee_atoms,
     } } });
+    try world.apply(0, .{ .identity = 36, .payload = .{ .oms_execution_report = .{
+        .report_id = 46,
+        .order_id = world.commands[0].order_id,
+        .revision = 1,
+        .status = .filled,
+        .cumulative_quantity = order_quantity,
+        .remaining_quantity = 0,
+    } } });
+    try std.testing.expectEqual(@as(i128, 0), try world.shards[0].activeReservationAtoms());
+    // 100/10,000 lots at 49,900,000,000 atoms, with a 22,000 ppm internal margin.
+    try std.testing.expectEqual(@as(i128, 10_978_000), world.shards[0].economicSummary().portfolio.margin_atoms);
     try assertLedgersClosed(world);
     try std.testing.expectEqual(order_quantity, world.shards[0].economicSummary().portfolio.swap.quantity);
     try std.testing.expectEqual(@as(i64, 40), world.shards[1].economicSummary().exchange.swap.quantity);
@@ -435,6 +446,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     try std.testing.expectEqual(@as(i64, -40), world.shards[3].economicSummary().exchange.swap.quantity);
 
     for (0..max_shards) |index| try world.publishDerivedSummary(index);
+    try std.testing.expectEqual(@as(i128, 10_978_000), world.coordinator.summaries[0].value.reservation_atoms);
     const allocated_version: u64 = 2;
     const valid_through: u64 = world.coordinator.barrier + 50;
     const leases = try world.coordinator.allocateLeases(allocated_version, valid_through);
@@ -447,6 +459,11 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         used_total = try std.math.add(i128, used_total, lease.used_atoms);
         try std.testing.expect(lease.open);
         try std.testing.expect(lease.used_atoms <= lease.limit_atoms);
+        const index = @intFromEnum(lease.shard_id);
+        try coordination.applyRiskLeaseStable(lease, lease.shard_id, &world.shards[index], &world.journals[index]);
+        try std.testing.expectEqual(lease.version, world.shards[index].risk_lease_version);
+        try std.testing.expectEqual(lease.limit_atoms, world.shards[index].risk_lease_atoms);
+        try std.testing.expectEqual(lease.shard_valid_through_barrier, world.shards[index].risk_lease_valid_through_barrier);
     }
     try std.testing.expectEqual(used_total, gross);
     try std.testing.expect(gross <= ceiling_atoms);

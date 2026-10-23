@@ -28,7 +28,6 @@ Status: open
 
 ## Frontier
 
-- [02 — 按 GrossPortfolioMargin 分配 RiskLease](issues/02-allocate-risk-leases-from-gross-portfolio-margin.md)
 - [03 — 确定性扇出共享账户与 Venue 事实](issues/03-fan-out-authoritative-account-and-venue-facts.md)
 - [05 — 共享 Execution Gateway 并保持订单唯一归属](issues/05-share-execution-gateway-with-unique-order-ownership.md)
 
@@ -37,6 +36,8 @@ Status: open
 - 2026-10-23：按当前源码逐票核对，摘要发布版本与真实 ShardSequence 必须分离；未完成验证不得标为 resolved。
 
 - 2026-10-24：01 已按原条件完成；双轴审查发现的持久故障隔离及测试夹具问题已修复，协调器文件 180/180，通过后续显式重新取得资格前不恢复摘要故障账户的租约授权。
+
+- 2026-10-24：02 已完成：毛额包含持仓保证金与 OMS 预留，明确两种屏障，持久租约生命周期与四份新摘要重新取得资格；配置账户及四片公开验收 8/8、协调器 184/184，双轴复审无剩余问题。
 
 ## Not yet specified
 

@@ -3,7 +3,7 @@ const durable = @import("../persistence/durable_store.zig");
 const trading = @import("../trading/trading_shard.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const snapshot_magic: u64 = 0x54434341574e4952;
-const coordinator_snapshot_version: u16 = 12;
+const coordinator_snapshot_version: u16 = 13;
 const history = @import("../persistence/business_history.zig");
 const codec = @import("../persistence/snapshot_codec.zig");
 const account_margin_gate_identity: u128 = 0x414343544d415247;
@@ -92,6 +92,7 @@ pub const RiskLease = struct {
     decision_domain: u128,
     version: u64,
     valid_through_barrier: u64,
+    shard_valid_through_barrier: u64,
     limit_atoms: i128,
     used_atoms: i128,
     open: bool,
@@ -176,6 +177,9 @@ const SummaryPublication = struct { identity: u128, summary: ShardSummary };
 pub const CoordinationEvent = union(enum) {
     publish_summary: SummaryPublication,
     summary_protocol_fault: SummaryPublication,
+    expire_leases: u64,
+    revoke_leases: u64,
+    requalify_summaries,
     allocate_leases: struct { version: u64, valid_through_barrier: u64 },
     account_fact: AccountFact,
     margin_observation: MarginObservation,
@@ -271,7 +275,7 @@ pub fn riskLeaseEvent(lease: RiskLease) !trading.CoreEvent {
     return .{ .identity = identity, .payload = .{ .risk_lease_granted = .{
         .lease_identity = identity,
         .version = lease.version,
-        .valid_through_barrier = lease.valid_through_barrier,
+        .valid_through_barrier = lease.shard_valid_through_barrier,
         .open = lease.open,
         .amount_atoms = if (lease.open) lease.limit_atoms else 0,
         .strategy_limit_atoms = if (lease.open) lease.limit_atoms else 0,
@@ -279,6 +283,43 @@ pub fn riskLeaseEvent(lease: RiskLease) !trading.CoreEvent {
         .exchange_account_limit_atoms = if (lease.open) lease.limit_atoms else 0,
         .global_limit_atoms = if (lease.open) lease.limit_atoms else 0,
     } } };
+}
+
+/// Validates the target registration and supplies the installed domain allocation proof.
+pub fn riskLeaseEventForShard(lease: RiskLease, target_shard_id: ShardId, shard: *const trading.TradingShard) !trading.CoreEvent {
+    if (lease.shard_id != target_shard_id) return error.CrossShardDelivery;
+    var settlement_asset = shard.economic_projection.settlement_asset;
+    if (lease.exchange_account != shard.exchange_account_identity) {
+        var found = false;
+        for (shard.secondary_accounts[0..shard.secondary_account_count]) |*partition| {
+            if (partition.identity != lease.exchange_account) continue;
+            settlement_asset = partition.state.economic_projection.settlement_asset;
+            found = true;
+            break;
+        }
+        if (!found) return error.CrossAccountDelivery;
+    }
+    var event = try riskLeaseEvent(lease);
+    if (shard.decision_domain_identity != 0) {
+        if (!shard.deployment.sealed or shard.decision_domain_identity != lease.decision_domain) return error.UnverifiedRiskLeaseAllocation;
+        const domain = shard.deployment.domain(lease.decision_domain) orelse return error.UnverifiedRiskLeaseAllocation;
+        if (domain.portfolio != shard.portfolio_identity) return error.UnverifiedRiskLeaseAllocation;
+        if (shard.deployment.account(lease.exchange_account) == null or
+            shard.deployment.sliceLimit(lease.exchange_account, settlement_asset, lease.decision_domain) == null) return error.UnverifiedRiskLeaseAllocation;
+        event.account_scope = lease.exchange_account;
+        event.payload.risk_lease_granted.allocation = .{
+            .configuration_digest = shard.deployment.header.?.expected_digest,
+            .account = lease.exchange_account,
+            .asset = settlement_asset,
+            .domain = lease.decision_domain,
+            .stream = shard.decision_stream_identity,
+        };
+    } else if (lease.decision_domain != @as(u128, @intFromEnum(target_shard_id)) + 1) return error.CrossShardDelivery;
+    return event;
+}
+
+pub fn applyRiskLeaseStable(lease: RiskLease, target_shard_id: ShardId, shard: *trading.TradingShard, stable_journal: *trading.journal.Journal) !void {
+    _ = try applyCoreStable(shard, stable_journal, try riskLeaseEventForShard(lease, target_shard_id, shard));
 }
 
 /// Converts one account-wide restriction into a shard-local stable gate fact.
@@ -315,14 +356,14 @@ pub fn applyForcedDeliveryStable(coordinator: *AccountCoordinator, coordination_
     coordinator.* = candidate;
 }
 
-fn shardHasAppliedForced(delivery: Delivery, shard: *const trading.TradingShard) !bool {
+noinline fn shardHasAppliedForced(delivery: Delivery, shard: *const trading.TradingShard) !bool {
     var candidate = shard.*;
     const before = candidate.trace.len;
     _ = try candidate.apply(.{ .core = try accountFactEvent(delivery) });
     return candidate.trace.len == before;
 }
 
-fn forcedTailExplainsSummaryChange(coordinator: *AccountCoordinator, shard_id: ShardId, snapshot: []const u8, tail: []const u8, summary: ShardSummary) !bool {
+noinline fn forcedTailExplainsSummaryChange(coordinator: *AccountCoordinator, shard_id: ShardId, snapshot: []const u8, tail: []const u8, summary: ShardSummary) !bool {
     var before = (try trading.TradingShard.restoreSnapshot(snapshot)).shard;
     before.operational_state.trading_authorized = false;
     before.operational_state.mode = .recovering;
@@ -388,7 +429,7 @@ pub fn shardSummaryFromShard(
         .shard_sequence = shard.authoritativeBarrier(),
         .rules_version = rules_version,
         .lease_version = shard.risk_lease_version,
-        .reservation_atoms = try shard.activeReservationAtoms(),
+        .reservation_atoms = try std.math.add(i128, economics_summary.portfolio.margin_atoms, try shard.activeReservationAtoms()),
         .spot_quantity = economics_summary.portfolio.spot.quantity,
         .spot_asset_atoms = economics_summary.portfolio.spot_asset_atoms,
         .swap_quantity = economics_summary.portfolio.swap.quantity,
@@ -548,6 +589,10 @@ pub const AccountCoordinator = struct {
     margin_reconciliation_state: MarginReconciliationState = .unknown,
     gate_deliveries: [max_shards]GateDelivery = undefined,
     summary_protocol_fault: bool = false,
+    granted_publications: [max_shards]u64 = @splat(0),
+    last_allocation_version: u64 = 0,
+    last_allocation_deadline: u64 = 0,
+    fault_publications: [max_shards]u64 = @splat(0),
     recovery_only: bool = false,
     recovery_margin_identity: u128 = 0,
     suspense_forced_execution: ?AccountFact = null,
@@ -623,7 +668,7 @@ pub const AccountCoordinator = struct {
 
     /// Publishes one semantic shard summary, accepting exact duplicates as no-op.
     pub fn publishSummary(self: *AccountCoordinator, identity: u128, summary: ShardSummary) !bool {
-        errdefer self.summary_protocol_fault = true;
+        errdefer self.latchSummaryFault();
         if (identity == 0 or summary.decision_domain == 0 or summary.virtual_portfolio == 0 or
             summary.exchange_account != self.exchange_account or summary.publication_version == 0 or summary.shard_sequence == 0 or
             summary.rules_version == 0 or summary.reservation_atoms < 0 or
@@ -670,7 +715,7 @@ pub const AccountCoordinator = struct {
     /// Computes a stable digest of coordination-owned state only.
     pub fn digest(self: *const AccountCoordinator) [Sha256.digest_length]u8 {
         var hasher = Sha256.init(.{});
-        hasher.update("coordinator-history-v11");
+        hasher.update("coordinator-history-v12");
         if (self.history_root) |root| hasher.update(&root.root_digest);
         var gateway_bytes: [1024]u8 = undefined;
         digestInt(&hasher, u128, self.gateway_ownership.exchange_account);
@@ -683,6 +728,10 @@ pub const AccountCoordinator = struct {
         digestInt(&hasher, i128, self.global_ceiling_atoms);
         digestInt(&hasher, u64, self.barrier);
         digestInt(&hasher, u8, @intFromBool(self.summary_protocol_fault));
+        digestInt(&hasher, u64, self.last_allocation_version);
+        digestInt(&hasher, u64, self.last_allocation_deadline);
+        for (self.granted_publications) |v| digestInt(&hasher, u64, v);
+        for (self.fault_publications) |v| digestInt(&hasher, u64, v);
         for (self.summaries) |record| {
             hasher.update(&.{@intFromBool(record.present)});
             if (record.present) {
@@ -734,6 +783,20 @@ pub const AccountCoordinator = struct {
         return total;
     }
 
+    fn latchSummaryFault(self: *AccountCoordinator) void {
+        self.summary_protocol_fault = true;
+        for (self.summaries, 0..) |record, i| self.fault_publications[i] = if (record.present) record.value.publication_version else 0;
+    }
+
+    /// Fresh publications requalify only the summary protocol, never other safety gates.
+    pub fn requalifySummaries(self: *AccountCoordinator) !void {
+        if (!self.summary_protocol_fault) return;
+        for (self.summaries, 0..) |record, i| {
+            if (!record.present or record.value.publication_version <= self.fault_publications[i]) return error.FreshShardSummariesRequired;
+        }
+        self.summary_protocol_fault = false;
+    }
+
     /// Allocates deterministic leases without turning account netting into buying power.
     pub fn allocateLeases(self: *AccountCoordinator, version: u64, valid_through_barrier: u64) ![]const RiskLease {
         if (self.summary_protocol_fault) return error.SummaryProtocolFault;
@@ -742,6 +805,19 @@ pub const AccountCoordinator = struct {
             return error.MarginReconciliationRequired;
         if (version == 0 or valid_through_barrier < self.barrier) return error.InvalidRiskLease;
         for (self.summaries) |record| if (!record.present) return error.IncompleteShardSummaries;
+        var duplicate = self.lease_count == max_shards and version == self.last_allocation_version and valid_through_barrier == self.last_allocation_deadline;
+        for (self.leases[0..self.lease_count]) |lease| {
+            if (version < lease.version) return error.StaleRiskLease;
+            duplicate = duplicate and version == lease.version and valid_through_barrier == lease.valid_through_barrier;
+        }
+        if (duplicate) {
+            for (self.summaries, 0..) |record, i| if (record.value.publication_version != self.granted_publications[i]) return error.RiskLeaseIdentityConflict;
+            return self.leases[0..self.lease_count];
+        }
+        for (self.summaries, 0..) |record, i| {
+            if (self.lease_count != 0 and version <= self.leases[i].version) return error.StaleRiskLease;
+            if (record.value.publication_version <= self.granted_publications[i]) return error.FreshShardSummariesRequired;
+        }
         const gross = try self.grossPortfolioMargin();
         const ceiling = @min(self.account_safety_ceiling_atoms, self.global_ceiling_atoms);
         if (gross > ceiling or ceiling <= 0) return error.AccountSafetyCeilingExceeded;
@@ -761,29 +837,36 @@ pub const AccountCoordinator = struct {
                 .decision_domain = summary.decision_domain,
                 .version = version,
                 .valid_through_barrier = valid_through_barrier,
+                .shard_valid_through_barrier = try std.math.add(u64, summary.shard_sequence, valid_through_barrier - self.barrier),
                 .limit_atoms = limit,
                 .used_atoms = summary.reservation_atoms,
-                .open = true,
+                .open = limit > 0,
             };
-        }
-        if (self.lease_count != 0) {
-            if (version < self.leases[0].version) return error.StaleRiskLease;
-            if (version == self.leases[0].version) {
-                if (!std.meta.eql(candidate, self.leases)) return error.RiskLeaseIdentityConflict;
-                return self.leases[0..self.lease_count];
-            }
         }
         self.leases = candidate;
         self.lease_count = max_shards;
+        self.last_allocation_version = version;
+        self.last_allocation_deadline = valid_through_barrier;
+        for (self.summaries, 0..) |record, i| self.granted_publications[i] = record.value.publication_version;
         return self.leases[0..self.lease_count];
+    }
+
+    /// Explicit revocation retains the economic reservation after authority closes.
+    pub fn revokeLeases(self: *AccountCoordinator, barrier: u64) !bool {
+        return self.closeLeases(barrier, true);
     }
 
     /// Closes every lease whose durable coordination barrier has expired.
     pub fn expireLeases(self: *AccountCoordinator, barrier: u64) !bool {
+        return self.closeLeases(barrier, false);
+    }
+
+    fn closeLeases(self: *AccountCoordinator, barrier: u64, revoke: bool) !bool {
+        if (barrier < self.barrier) return error.StaleRiskLease;
         var candidate = self.leases;
         var changed = false;
         for (candidate[0..self.lease_count], 0..) |*lease, index| {
-            if (lease.open and barrier > lease.valid_through_barrier) {
+            if (lease.open and (revoke or barrier > lease.valid_through_barrier)) {
                 lease.version = try std.math.add(u64, lease.version, 1);
                 lease.identity = try std.math.add(
                     u128,
@@ -792,12 +875,13 @@ pub const AccountCoordinator = struct {
                 );
                 lease.valid_through_barrier = barrier;
                 lease.limit_atoms = 0;
-                lease.used_atoms = 0;
+                lease.used_atoms = self.summaries[index].value.reservation_atoms;
                 lease.open = false;
                 changed = true;
             }
         }
         if (changed) self.leases = candidate;
+        self.barrier = barrier;
         return changed;
     }
 
@@ -1140,14 +1224,19 @@ pub const AccountCoordinator = struct {
 
     /// Caps every open lease at its used reservation so no shard keeps new risk headroom.
     fn revokeNewRiskHeadroom(self: *AccountCoordinator) !void {
-        for (self.leases[0..self.lease_count], 0..) |*lease, index| {
+        var candidate = self.leases;
+        for (candidate[0..self.lease_count], 0..) |*lease, index| {
             if (!lease.open) continue;
-            const capped = @min(lease.limit_atoms, lease.used_atoms);
-            if (capped == lease.limit_atoms) continue;
+            const used = self.summaries[index].value.reservation_atoms;
+            const capped = @min(lease.limit_atoms, used);
+            if (capped == lease.limit_atoms and used == lease.used_atoms) continue;
             lease.limit_atoms = capped;
+            lease.used_atoms = used;
+            lease.open = capped > 0;
             lease.version = try std.math.add(u64, lease.version, 1);
             lease.identity = try leaseIdentity(lease.version, index);
         }
+        self.leases = candidate;
     }
 
     /// Deterministically lowers open leases to the requested caps without ever adding headroom.
@@ -1165,9 +1254,14 @@ pub const AccountCoordinator = struct {
             if (requested_limits[index] < 0) return error.InvalidRiskLease;
             if (!lease.open) continue;
             const target = @min(requested_limits[index], lease.limit_atoms);
-            if (target == lease.limit_atoms and valid_through_barrier <= lease.valid_through_barrier) continue;
+            if (target == lease.limit_atoms and valid_through_barrier >= lease.valid_through_barrier and lease.used_atoms == self.summaries[index].value.reservation_atoms) continue;
             lease.limit_atoms = target;
-            if (valid_through_barrier > lease.valid_through_barrier) lease.valid_through_barrier = valid_through_barrier;
+            lease.open = target > 0;
+            lease.used_atoms = self.summaries[index].value.reservation_atoms;
+            if (valid_through_barrier < lease.valid_through_barrier) {
+                lease.valid_through_barrier = valid_through_barrier;
+                lease.shard_valid_through_barrier = @min(lease.shard_valid_through_barrier, try std.math.add(u64, self.summaries[index].value.shard_sequence, valid_through_barrier - self.barrier));
+            }
             lease.version = try std.math.add(u64, lease.version, 1);
             lease.identity = try leaseIdentity(lease.version, index);
             changed = true;
@@ -1187,7 +1281,7 @@ pub const AccountCoordinator = struct {
     pub fn leaseOverTightened(self: *const AccountCoordinator, shard_id: ShardId) bool {
         if (self.lease_count != max_shards) return false;
         const lease = self.leases[@intFromEnum(shard_id)];
-        return lease.open and lease.used_atoms > lease.limit_atoms;
+        return self.summaries[@intFromEnum(shard_id)].value.reservation_atoms > lease.limit_atoms;
     }
 
     /// Produces a stable fan-out plan for an account-level authority restriction.
@@ -1224,10 +1318,13 @@ pub const AccountCoordinator = struct {
         switch (event) {
             .publish_summary => |publish| _ = try self.publishSummary(publish.identity, publish.summary),
             .summary_protocol_fault => {
-                self.summary_protocol_fault = true;
+                self.latchSummaryFault();
                 self.barrier = try std.math.add(u64, self.barrier, 1);
             },
             .allocate_leases => |allocation| _ = try self.allocateLeases(allocation.version, allocation.valid_through_barrier),
+            .expire_leases => |barrier| _ = try self.expireLeases(barrier),
+            .revoke_leases => |barrier| _ = try self.revokeLeases(barrier),
+            .requalify_summaries => try self.requalifySummaries(),
             .account_fact => |fact| _ = try self.acceptAccountFact(fact),
             .margin_observation => |observation| _ = try self.reconcileMargin(observation),
             .resolve_margin_gate => |identity| _ = try self.resolveMarginGate(identity),
@@ -1334,6 +1431,10 @@ pub const AccountCoordinator = struct {
         };
         try writer.writeInt(i128, self.account_netting_benefit_atoms, .little);
         try writer.writeByte(@intFromBool(self.summary_protocol_fault));
+        try writer.writeInt(u64, self.last_allocation_version, .little);
+        try writer.writeInt(u64, self.last_allocation_deadline, .little);
+        for (self.granted_publications) |v| try writer.writeInt(u64, v, .little);
+        for (self.fault_publications) |v| try writer.writeInt(u64, v, .little);
         try writer.writeByte(@intFromBool(self.recovery_only));
         try writeOptionalAccountFact(&writer, self.last_account_fact);
         try writeOptionalAccountFact(&writer, self.suspense_forced_execution);
@@ -1413,6 +1514,10 @@ pub const AccountCoordinator = struct {
         };
         result.account_netting_benefit_atoms = try reader.takeInt(i128, .little);
         result.summary_protocol_fault = try readBool(&reader);
+        result.last_allocation_version = try reader.takeInt(u64, .little);
+        result.last_allocation_deadline = try reader.takeInt(u64, .little);
+        for (&result.granted_publications) |*v| v.* = try reader.takeInt(u64, .little);
+        for (&result.fault_publications) |*v| v.* = try reader.takeInt(u64, .little);
         result.recovery_only = try readBool(&reader);
         result.last_account_fact = try readOptionalAccountFact(&reader);
         result.suspense_forced_execution = try readOptionalAccountFact(&reader);
@@ -1479,6 +1584,9 @@ fn coordinationEventType(event: CoordinationEvent) u16 {
         // Type 1 carried u8 counts and is retired, never guessed as this layout.
         .publish_summary => 14,
         .summary_protocol_fault => 15,
+        .expire_leases => 16,
+        .revoke_leases => 17,
+        .requalify_summaries => 18,
         .allocate_leases => 2,
         .account_fact => 3,
         .margin_observation => 4,
@@ -1609,6 +1717,8 @@ fn encodeCoordinationEvent(destination: []u8, event: CoordinationEvent) ![]const
             try writer.writeInt(u64, allocation.version, .little);
             try writer.writeInt(u64, allocation.valid_through_barrier, .little);
         },
+        .expire_leases, .revoke_leases => |barrier| try writer.writeInt(u64, barrier, .little),
+        .requalify_summaries => {},
         .account_fact => |fact| try writeAccountFact(&writer, fact),
         .margin_observation => |observation| try writePlainStruct(&writer, MarginObservation, observation),
         .resolve_margin_gate => |identity| try writer.writeInt(u128, identity, .little),
@@ -1635,6 +1745,9 @@ fn decodeCoordinationEvent(record: trading.journal.Record) !CoordinationEvent {
         return error.InvalidCoordinationTail;
     var reader: std.Io.Reader = .fixed(record.payload);
     const event: CoordinationEvent = switch (record.type_id) {
+        16 => .{ .expire_leases = try reader.takeInt(u64, .little) },
+        17 => .{ .revoke_leases = try reader.takeInt(u64, .little) },
+        18 => .requalify_summaries,
         15 => .{ .summary_protocol_fault = .{
             .identity = try reader.takeInt(u128, .little),
             .summary = try readPlainStruct(&reader, ShardSummary),
@@ -2611,6 +2724,11 @@ test "shard summaries derive from authoritative state and coordinate four real s
     try std.testing.expect(advanced.shard_sequence > initial[3].shard_sequence);
     try std.testing.expect(try coordinator.publishSummary(203, advanced));
     try std.testing.expectEqual(@as(i64, 0), try coordinator.grossPortfolioMargin());
+    for (0..3) |i| {
+        var refreshed = initial[i];
+        refreshed.publication_version = 2;
+        _ = try coordinator.publishSummary(204 + i, refreshed);
+    }
     const renewed = try coordinator.allocateLeases(2, 20);
     try std.testing.expectEqual(@as(i64, 0), renewed[3].used_atoms);
     try std.testing.expectEqual(@as(i64, 1_000), renewed[3].limit_atoms);
@@ -2639,6 +2757,11 @@ test "shard summaries derive from authoritative state and coordinate four real s
     for (0..max_shards) |index| _ = try replayed.publishSummary(index + 100, initial[index]);
     _ = try replayed.allocateLeases(1, 10);
     _ = try replayed.publishSummary(203, try shardSummaryFromShard(&shards[3], .shard_3, 2, 4));
+    for (0..3) |i| {
+        var refreshed = initial[i];
+        refreshed.publication_version = 2;
+        _ = try replayed.publishSummary(204 + i, refreshed);
+    }
     _ = try replayed.allocateLeases(2, 20);
     _ = try replayed.reconcileMargin(.{
         .identity = 300,
@@ -2684,8 +2807,9 @@ test "explicit lease tightening is a replayable deterministic fact" {
     var grown = ShardSummary.fixture(.shard_1, 2, 201);
     grown.exchange_account = 900;
     _ = try coordinator.publishSummary(51, grown);
+    for ([_]usize{ 0, 2, 3 }, 0..) |i, j| _ = try coordinator.publishSummary(52 + j, ShardSummary.fixture(@enumFromInt(i), 2, 100));
     const digest_before_renewal = coordinator.digest();
-    try std.testing.expectError(error.RiskLeaseOversubscribed, coordinator.allocateLeases(2, 20));
+    try std.testing.expectError(error.RiskLeaseOversubscribed, coordinator.allocateLeases(3, 20));
     try std.testing.expectEqualSlices(u8, &digest_before_renewal, &coordinator.digest());
     try std.testing.expectError(error.MarginReconciliationRequired, blk: {
         var gated = coordinator;
@@ -2712,7 +2836,8 @@ test "explicit lease tightening is a replayable deterministic fact" {
     var replay_grown = ShardSummary.fixture(.shard_1, 2, 201);
     replay_grown.exchange_account = 900;
     _ = try replayed.publishSummary(51, replay_grown);
-    try std.testing.expectError(error.RiskLeaseOversubscribed, replayed.allocateLeases(2, 20));
+    for ([_]usize{ 0, 2, 3 }, 0..) |i, j| _ = try replayed.publishSummary(52 + j, ShardSummary.fixture(@enumFromInt(i), 2, 100));
+    try std.testing.expectError(error.RiskLeaseOversubscribed, replayed.allocateLeases(3, 20));
     try std.testing.expectEqualSlices(u8, &coordinator.digest(), &replayed.digest());
 }
 
@@ -2939,7 +3064,7 @@ pub const CoordinatorOwner = struct {
         var candidate = self.coordinator;
         candidate.applyEvent(event) catch |err| {
             if (event == .publish_summary) {
-                self.coordinator.summary_protocol_fault = true;
+                self.coordinator.latchSummaryFault();
                 self.applyCommitted(.{ .summary_protocol_fault = .{ .identity = event.publish_summary.identity, .summary = event.publish_summary.summary } }) catch |persist_err| {
                     self.closed = true;
                     return persist_err;
@@ -3262,4 +3387,79 @@ test "01 rejected summaries fence cached leases durably" {
     try recovered.checkpoint();
     var again = try CoordinatorOwner.recover(stream, memory.interface(), undefined);
     try std.testing.expectError(error.SummaryProtocolFault, again.completeRecovery());
+}
+
+test "02 renewal requires four fresh summary publications" {
+    var coordinator = AccountCoordinator.init(900, 1000, 1000);
+    for (0..max_shards) |i| _ = try coordinator.publishSummary(i + 1, ShardSummary.fixture(@enumFromInt(i), 1, 100));
+    _ = try coordinator.allocateLeases(1, 20);
+    try std.testing.expectError(error.FreshShardSummariesRequired, coordinator.allocateLeases(2, 30));
+    for (0..max_shards) |i| _ = try coordinator.publishSummary(i + 5, ShardSummary.fixture(@enumFromInt(i), 2, 100));
+    const leases = try coordinator.allocateLeases(2, 30);
+    try std.testing.expectEqual(@as(u64, 2), leases[3].version);
+}
+
+test "02 expiry revocation and requalification are durable inputs" {
+    const adapter = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(adapter);
+    adapter.* = durable.MemoryAdapter.init();
+    defer adapter.deinit();
+    var c = AccountCoordinator.init(900, 1000, 1000);
+    for (0..max_shards) |i| _ = try c.publishSummary(i + 1, ShardSummary.fixture(@enumFromInt(i), 1, 100));
+    _ = try c.allocateLeases(1, 20);
+    var owner = try CoordinatorOwner.init(c, .{ .domain = .control, .id = 900 }, adapter.interface(), undefined);
+    try owner.apply(.{ .expire_leases = 21 });
+    try std.testing.expect(!owner.coordinator.leases[0].open);
+    try std.testing.expectEqual(@as(i128, 100), owner.coordinator.leases[0].used_atoms);
+    try owner.apply(.{ .expire_leases = 21 });
+    for (0..max_shards) |i| try owner.apply(.{ .publish_summary = .{ .identity = i + 5, .summary = ShardSummary.fixture(@enumFromInt(i), 2, 100) } });
+    try owner.apply(.{ .allocate_leases = .{ .version = 3, .valid_through_barrier = 40 } });
+    try owner.apply(.{ .revoke_leases = 30 });
+    try owner.apply(.requalify_summaries);
+    const expected = owner.coordinator.digest();
+    var recovered = try CoordinatorOwner.recover(owner.stream, adapter.interface(), undefined);
+    try std.testing.expectEqualSlices(u8, &expected, &recovered.coordinator.digest());
+    try std.testing.expect(!recovered.coordinator.leases[0].open);
+    try std.testing.expectEqual(@as(u64, 4), recovered.coordinator.leases[0].version);
+    try std.testing.expectEqual(@as(i128, 100), recovered.coordinator.leases[0].used_atoms);
+    try owner.checkpoint();
+    recovered = try CoordinatorOwner.recover(owner.stream, adapter.interface(), undefined);
+    try std.testing.expectEqualSlices(u8, &expected, &recovered.coordinator.digest());
+    try std.testing.expect(recovered.coordinator.recovery_only);
+}
+
+test "02 requalification requires four publications after the latest fault" {
+    var c = AccountCoordinator.init(900, 1000, 1000);
+    for (0..max_shards) |i| _ = try c.publishSummary(i + 1, ShardSummary.fixture(@enumFromInt(i), 1, 100));
+    const adapter = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(adapter);
+    adapter.* = durable.MemoryAdapter.init();
+    defer adapter.deinit();
+    var owner = try CoordinatorOwner.init(c, .{ .domain = .control, .id = 900 }, adapter.interface(), undefined);
+    var invalid = ShardSummary.fixture(.shard_0, 1, 100);
+    invalid.exchange_account = 901;
+    try std.testing.expectError(error.InvalidShardSummary, owner.apply(.{ .publish_summary = .{ .identity = 10, .summary = invalid } }));
+    try std.testing.expectError(error.FreshShardSummariesRequired, owner.apply(.requalify_summaries));
+    for (0..3) |i| try owner.apply(.{ .publish_summary = .{ .identity = i + 5, .summary = ShardSummary.fixture(@enumFromInt(i), 2, 100) } });
+    try std.testing.expectError(error.FreshShardSummariesRequired, owner.apply(.requalify_summaries));
+    try owner.apply(.{ .publish_summary = .{ .identity = 8, .summary = ShardSummary.fixture(.shard_3, 2, 100) } });
+    try owner.apply(.{ .margin_observation = .{ .identity = 1, .barrier = owner.coordinator.barrier, .venue_net_margin_atoms = 1001, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 } });
+    try owner.apply(.requalify_summaries);
+    try std.testing.expect(!owner.coordinator.summary_protocol_fault);
+    try std.testing.expectError(error.MarginReconciliationRequired, owner.coordinator.allocateLeases(1, 20));
+    var storage: [16384]u8 = undefined;
+    const restored = try AccountCoordinator.restore(try owner.coordinator.snapshot(&storage));
+    try std.testing.expectEqualSlices(u8, &owner.coordinator.digest(), &restored.digest());
+}
+
+test "02 zero quota is closed and only exact grant requests are duplicate" {
+    var c = AccountCoordinator.init(900, 1, 1);
+    for (0..max_shards) |i| _ = try c.publishSummary(i + 1, ShardSummary.fixture(@enumFromInt(i), 1, 0));
+    const leases = try c.allocateLeases(1, 20);
+    try std.testing.expect(leases[0].open);
+    try std.testing.expect(!leases[1].open);
+    try std.testing.expectEqual(@as(i128, 0), (try riskLeaseEvent(leases[1])).payload.risk_lease_granted.amount_atoms);
+    _ = try c.allocateLeases(1, 20);
+    _ = try c.expireLeases(21);
+    try std.testing.expectError(error.StaleRiskLease, c.allocateLeases(2, 21));
 }
