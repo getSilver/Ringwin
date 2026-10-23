@@ -34,3 +34,14 @@ Closed proof 保持不可变；新增有界 Live 投影保留原策略/周期/�
 ## Copy / borrowed快照等价回归
 
 主窗口新全量暴露旧copy oracle未规范cycles/lifecycle未用尾部；新Live默认version=1与生产borrowed编码的zero尾部不同。canonicalizeSnapshotState仅该优化test调用，生产writeWithPolicy及摘要常量无需改变。增强同一test污染未用record/live/receipt/credit后，`09a-borrowed-tail-red.log/.exit`实际复现退出1；修复将copy尾部清理与已有borrowed policy对齐，保持逐字节等价和源状态不变断言。`09a-borrowed-tail-green.log/.exit`：同一ReleaseSafe定向 **2/2，退出0**（entry及目标test），三次重复编码均相同，2,342,783字节；未重跑全量或更新冻结摘要。
+
+
+## 主窗口最终统一验收（2026-10-23）
+
+联合源码 `88b17505`，冻结摘要 `5810f3dc`；首次统一724项发现测试copy快照规范化遗漏新增尾部，已按用户要求停止旧进程，`.scratch/build/09a-reuse-full.stopped` 标明不完整结果，不作验收。修复 `a3e11e72` 保留生产borrowed编码及所有等价断言，独立ReleaseSafe2/2通过。
+
+修复后主窗口独立后台全量：`zig test src/main.zig -O ReleaseSafe --stack 536870912`，**724/724通过，退出0**。日志 `.scratch/build/09a-reuse-fixed-full.log`、退出码 `.scratch/build/09a-reuse-fixed-full.exit`。Python12/12、真实Host集成退出0，见 `09a-reuse-python.log/.exit`、`09a-reuse-host.log/.exit`。
+
+冻结值只在五条轨迹经济/封闭/恢复比较及四分片三路径比较先通过后更新，最终全量已核对新值。15个变更Zig文件规范化换行后与zig fmt输出一致；CRLF-aware diff检查通过。Standards两项恢复认证问题、Spec组合卖单容量绕过均已修复并经静态复查撤回。
+
+当前不设置残余最大存续时间；未冻结残余可供原所有者新周期使用，人工核心控制/查询已验证。Web到真实Owner的签名及投影接线、生产Asset累计数值冻结、真实Venue资格仍未完成。未部署、下单、执行实际冻结/解冻或修改用户另一模块规划。

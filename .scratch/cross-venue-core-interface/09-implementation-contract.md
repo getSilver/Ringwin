@@ -5,7 +5,7 @@
 
 ## 2026-10-23 当前整合状态
 
-### 用户最新方向：无期限、同所有者复用及人工冻结（源码已提交，统一验收待完成）
+### 用户最新方向：无期限、同所有者复用及人工冻结（源码与统一回归已完成）
 
 用户明确取消残余最大存续时间，允许新周期花费原账户/VirtualPortfolio/Asset 的未冻结残余，由人工决定冻结及解除冻结。单笔仍限正 sub-lot；累计风险限额允许在受控额度内积累到处置门槛，针对当前未消耗余额而非历史承接总和，具体数值尚未给定。其余周期闭合、Unknown、永续、负资产、费用证据、对账及持久恢复条件保持。见 [ADR0019](../../docs/adr/0019-allow-owned-residual-reuse-with-explicit-freezes.md)。
 
@@ -17,7 +17,7 @@
 - 真实Fill/费用驱动FIFO消费；更细lot卖出旧零gross残余以认证分配转移原Instrument库存归属，不重复余额/成交或造空仓。退款逆序恢复原费用消费，承接前已付费的退款仅凭唯一原slot建立原周期credit。正常复用及相关费用变化不自动永久锁；真实冻结消费、余额不足、证据缺口与其他安全门槛仍失败关闭。
 - 人工freeze/unfreeze沿既有CorePayload.control_command身份/版本/原事实/数量合同；query为residualState。已消费数量不能再冻结，未决卖出、Unknown或费用风险不明拒绝冻结；解除只减少frozen，不删除资产/历史或解除其他门槛。真实Web签名控制到Owner未接线，没有新CLI、自动补买或清理权限。
 - 每次生命周期变化追加并pin完整投影承诺，snapshot/replay认证来源、分配、remaining/frozen/version/credit。冻结控制归档后仍可恢复；外层snapshot摘要重算不能掩盖来源/分配篡改。112来源门槛预留16个有界在途槽，覆盖opening及需要残余的聚合sell/amend，纯gross减仓不一概阻断。128边界由State公开接口验证，非Owner128来源端到端或无限partial资格；耗尽后无证明的gross-zero事实保留Canonical及故障，待证未应用。
-- 最后聚合卖单资格修补后ReleaseSafe **6/6、退出0**，State模块 **1/1、退出0**；完整09a **22/22**与经济 **6/6**均在完整承诺补强后、最后资格修补前通过。新Python **12/12**已确认；Host、固定轨迹及统一全量由主窗口执行，当前 **pending**。详见[生命周期验证](09a-owned-residual-verification.md)及[经济验证](09a-owned-residual-economics-verification.md)。
+- 最后聚合卖单资格修补后ReleaseSafe **6/6、退出0**，State模块 **1/1、退出0**；完整09a **22/22**与经济 **6/6**均在完整承诺补强后、最后资格修补前通过。新Python **12/12**已确认；Host退出0、固定轨迹冻结值核对完成，主窗口统一全量ReleaseSafe **724/724、退出0**。详见[生命周期验证](09a-owned-residual-verification.md)及[经济验证](09a-owned-residual-economics-verification.md)。
 
 09a保持 **in_progress**；生产Asset数值、真实Venue费用凭证与连续运行/认证回收资格未取得，08/09b/09范围和依赖不变。未部署或下单。
 
