@@ -42,20 +42,20 @@ Status: open
 | [07 原生 Post-only](issues/07-native-post-only.md) | 05 | H2；resolved，离线原生 Post-only 接缝验收 |
 | [08 确定性 checkpoint](issues/08-deterministic-checkpoint.md) | 无；最终验收需确认策略 schema | H3 |
 | [09 周期恢复与激活](issues/09-cycle-recovery.md) | 09a、09b | H3 汇总验收 |
-| [09a 核心周期闭合](issues/09a-cycle-closure-residual.md) | 05b；最终验收需残余阈值及资产规则冻结 | H3 |
+| [09a 核心周期闭合](issues/09a-cycle-closure-residual.md) | 05b（已完成） | H3；resolved，显式配置/默认关闭的核心能力 |
 | [09b 恢复与激活](issues/09b-cycle-recovery-activation.md) | 08、09a | H3 |
 | [10 综合验收](issues/10-public-seam-acceptance.md) | 03、06、07、09；相关策略行为与参数合同冻结 | H1/H2/H3 |
 
 ## Frontier
 
-当前 09a 新政策源码已提交 `88b17505`：无残余 TTL，未冻结残余可由同账户/VirtualPortfolio/Asset 新周期使用，保留不可变承接历史并维护当前剩余、真实 FIFO 消费、原周期退款 credit、人工冻结/解冻。单笔仍 sub-lot，累计风险额度针对当前未消费余额（含冻结及 credit）；生产 Asset 数值尚未冻结，规则未配置默认关闭。见 [ADR0019](../../docs/adr/0019-allow-owned-residual-reuse-with-explicit-freezes.md)。旧 717/717 仅为此前政策历史基线。
 
-- [09a 核心周期闭合](issues/09a-cycle-closure-residual.md)：in_progress；当前46/50/44、canonical16、digest14/4。最终资格修补后 ReleaseSafe 6/6、State容量模块1/1通过；较早22/22在最后聚合卖单资格补丁前通过。新 Python12/12已确认；Host退出0、固定轨迹冻结值核对完成，主窗口全量ReleaseSafe 724/724通过、退出0。核心已有人工control/query，真实Web到Owner签名接线未完成；生产Asset数值及真实Venue凭证未获资格。见[当前合同](09-implementation-contract.md)、[生命周期验证](09a-owned-residual-verification.md)和[经济验证](09a-owned-residual-economics-verification.md)。
 - [08 版本化策略状态与确定性 checkpoint](issues/08-deterministic-checkpoint.md)：in_progress；schema/codec/容量已确认，用户收窄本轮为 checkpoint 基础设施，真实模型验收保持待定。见[实现合同](08-checkpoint-design.md)及[验证记录](08-verification.md)，不解除 09b 的整票依赖。
 
 ## Decisions so far
 
-- 2026-10-23（最新）：两个 GPT 6.1 Sol medium 子代理在主树联合交付 `88b17505`，落实ADR0019无TTL/同所有者未冻结复用及人工冻结政策。完整残余投影承诺认证来源、消费分配、remaining/frozen/version/credit；冻结命令归档后仍恢复，容量门槛覆盖聚合卖单与改单。最终定向6/6、模块1/1 ReleaseSafe退出0；较早22/22边界及有界容量限制见专用记录。新全量ReleaseSafe 724/724通过（退出0），09a继续in_progress，08/09b/09范围不变。
+- 2026-10-23（关闭）：用户将09a明确限定为“支持显式配置、未配置默认关闭的核心能力”，09a设为resolved并移出Frontier。最新策略无TTL、同所有者未冻结残余可复用、人工核心冻结/解冻；最终ReleaseSafe724/724、Python12/12、真实Host退出0。生产Asset额度、Web签名Owner接线、真实Venue资格及连续运行容量保留后续，不启用生产配置。09b仍被08阻塞，09汇总仍open。
+
+- 2026-10-23（最新）：两个 GPT 6.1 Sol medium 子代理在主树联合交付 `88b17505`，落实ADR0019无TTL/同所有者未冻结复用及人工冻结政策。完整残余投影承诺认证来源、消费分配、remaining/frozen/version/credit；冻结命令归档后仍恢复，容量门槛覆盖聚合卖单与改单。最终定向6/6、模块1/1 ReleaseSafe退出0；较早22/22边界及有界容量限制见专用记录。新全量ReleaseSafe 724/724通过（退出0）；当时09a仍in_progress，08/09b/09范围不变。
 
 - 2026-10-23（此前政策历史）：两个 GPT 6.1 Sol medium 子代理完成残余/费用实现并在主窗口整合；旧已承接周期相关 Asset 费用增减合法入账后持久锁 OMS，P2 修复费用调整遗漏 Instrument 库存投影并限制订单历史 typed key。格式45/49/43、canonical16、digest13/3；交叉 ReleaseSafe3/3、库存/退出定向各2/2，Python12/12及真实Host exit0。统一全量 ReleaseSafe 717/717 通过（退出 0）；09a in_progress，生产参数/真实Venue凭证和残余处置授权未取得，08/09b/09范围不变。见[整合记录](09a-integration-verification.md)。
 
@@ -90,7 +90,7 @@ Status: open
 ## Not yet specified
 
 - 多账户核心容量、格式与预算来源已由05a冻结并离线验证；完整清单和独立可信锚点的产品发布接入仍缺失，入口保持关闭，动态租约扩容首版不开放。
-- 09a 当前支持显式规则下正sub-lot承接、独立费用调整及同所有者未冻结残余复用，核心人工冻结/解冻不等于Web接线或自动清理权限。生产Asset数值、真实Venue凭证、终结身份认证回收及连续运行容量仍未获资格；新全量ReleaseSafe 724/724通过（退出0），09a整票未关闭。
+- 09a 当前支持显式规则下正sub-lot承接、独立费用调整及同所有者未冻结残余复用，核心人工冻结/解冻不等于Web接线或自动清理权限。生产Asset数值、真实Venue凭证、终结身份认证回收及连续运行容量仍未获资格；新全量ReleaseSafe 724/724通过（退出0）；核心票已按用户限定范围关闭，后续配置与资格仍未完成。
 - 快照、连续深度及重同步已由 02/03 声明并离线验证；已知价格覆盖、8 档及截断后的保守失效限制继续适用。
 - 08 的 schema/codec/容量已确认；真实模型的版本、输入更新、不同批次/切点和支持平台运行确定性证据仍待完成。
 - 相关策略行为、参数合同及模型版本的冻结证据；文档成文不自动等于冻结。

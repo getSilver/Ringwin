@@ -3,7 +3,7 @@
 Type: task
 Status: ready-for-agent
 Assignee:
-Blocked by: [08 确定性 checkpoint](08-deterministic-checkpoint.md)、[09a 核心周期闭合](09a-cycle-closure-residual.md)
+Blocked by: [08 确定性 checkpoint](08-deterministic-checkpoint.md)、[09a 核心周期闭合](09a-cycle-closure-residual.md)（已完成）
 Parent: [模块地图](../map.md)
 
 ## Question
