@@ -1,23 +1,33 @@
 # 09 实施合同：待确认项与公共验收路径
 
-更新：2026-10-23。状态：残余承接与独立费用调整已整合，定向及主窗口 Python/Host 检查通过；统一全量 ReleaseSafe 717/717 通过（退出 0），09a 仍 in_progress，09b/09 保留待验收。
+更新：2026-10-23。状态：用户新政策为无期限、未冻结残余同所有者复用、人工冻结/解冻；核心改动正在最终验收。旧政策 717/717 仅为历史基线，09a 仍 in_progress，09b/09 保留待验收。
 归属：[09 汇总验收](issues/09-cycle-recovery.md)。依据：[权威设计](authority-design.md)第 5–9 节、ADR0017、[S6 恢复合同](../cross-venue-arbitrage/state-recovery-contract.md)。
 
 ## 2026-10-23 当前整合状态
 
-### 用户最新方向：无期限、同所有者复用及人工冻结（实施中）
+### 用户最新方向：无期限、同所有者复用及人工冻结（源码已提交，统一验收待完成）
 
 用户明确取消残余最大存续时间，允许新周期花费原账户/VirtualPortfolio/Asset 的未冻结残余，由人工决定冻结及解除冻结。单笔仍限正 sub-lot；累计风险限额允许在受控额度内积累到处置门槛，针对当前未消耗余额而非历史承接总和，具体数值尚未给定。其余周期闭合、Unknown、永续、负资产、费用证据、对账及持久恢复条件保持。见 [ADR0019](../../docs/adr/0019-allow-owned-residual-reuse-with-explicit-freezes.md)。
 
-下文“最大存续时间”“禁止新周期花费”“无解除保留权限”和旧相关锁存是此前政策基线，不再作为新方向的验收要求。当前源码仍在调整；717/717 属于旧政策证据，不替代新行为验收。新验收应覆盖当前剩余/冻结/消费记录、订单在途约束、累计额度复用、无到期停开、人工控制身份版本幂等及故障恢复；不得只删除库存扣除导致重复承接。
+下文“最大存续时间”“禁止新周期花费”“无解除保留权限”和旧相关锁存是此前政策基线，不再作为新方向的验收要求。联合源码 `88b17505` 已提交，717/717仅属于旧政策证据，不替代新行为验收。
 
-### 首版范围冻结（2026-10-23）
+两个 **GPT 6.1 Sol medium** 子代理在主树协作完成当前实现。journal/state/registry **46/50/44**，canonical **16**，StateDigestV14 / SemanticAuthorityDigestV4；旧格式失败关闭，不隐式迁移。
+
+- Closed proof不可变；独立remaining/frozen/消费/credit投影保留原周期、账户、VirtualPortfolio、Asset和Instrument证据。无TTL；未冻结部分默认可由同账户/组合/Asset复用，不跨owner。单笔初次承接仍要求gross/OpenCost/margin精确零且正sub-lot，累计风险额度求当前未消费量（含冻结和credit），不是历史总额。生产Asset列表/数值未批准，显式规则未配置默认关闭，开发夹具不是生产阈值。
+- 真实Fill/费用驱动FIFO消费；更细lot卖出旧零gross残余以认证分配转移原Instrument库存归属，不重复余额/成交或造空仓。退款逆序恢复原费用消费，承接前已付费的退款仅凭唯一原slot建立原周期credit。正常复用及相关费用变化不自动永久锁；真实冻结消费、余额不足、证据缺口与其他安全门槛仍失败关闭。
+- 人工freeze/unfreeze沿既有CorePayload.control_command身份/版本/原事实/数量合同；query为residualState。已消费数量不能再冻结，未决卖出、Unknown或费用风险不明拒绝冻结；解除只减少frozen，不删除资产/历史或解除其他门槛。真实Web签名控制到Owner未接线，没有新CLI、自动补买或清理权限。
+- 每次生命周期变化追加并pin完整投影承诺，snapshot/replay认证来源、分配、remaining/frozen/version/credit。冻结控制归档后仍可恢复；外层snapshot摘要重算不能掩盖来源/分配篡改。112来源门槛预留16个有界在途槽，覆盖opening及需要残余的聚合sell/amend，纯gross减仓不一概阻断。128边界由State公开接口验证，非Owner128来源端到端或无限partial资格；耗尽后无证明的gross-zero事实保留Canonical及故障，待证未应用。
+- 最后聚合卖单资格修补后ReleaseSafe **6/6、退出0**，State模块 **1/1、退出0**；完整09a **22/22**与经济 **6/6**均在完整承诺补强后、最后资格修补前通过。新Python **12/12**已确认；Host、固定轨迹及统一全量由主窗口执行，当前 **pending**。详见[生命周期验证](09a-owned-residual-verification.md)及[经济验证](09a-owned-residual-economics-verification.md)。
+
+09a保持 **in_progress**；生产Asset数值、真实Venue费用凭证与连续运行/认证回收资格未取得，08/09b/09范围和依赖不变。未部署或下单。
+
+### 此前首版范围冻结（已被用户最新方向取代，保留历史）
 
 用户要求冻结首版范围及 Asset 参数。范围现冻结为：只承接 gross lots、OpenCost、margin 精确归零后的正 sub-lot 现货余额；保留原归属且禁止新周期花费；永续、负资产、Unknown 及经济证据缺口继续占用。费用更正采用已验证的独立 FeeAdjustment 合同，不覆盖原 Fill；本票不包含真实 Venue 更正协议资格、已承接残余处置/解锁权限或连续运行认证回收。
 
 Asset 数值尚待用户提供允许资产、单笔上限、累计上限及最大存续时间，不能将开发夹具参数视为用户确认值。累计按同一 DecisionDomain 内相同 Asset 跨账户合计；未列资产默认禁止承接。收到数值后绑定实际 AssetDefinition 身份/版本换算原子数量，并冻结规则版本；在此之前不宣布参数冻结或关闭 09a。
 
-两个实现子任务均由 **GPT 6.1 Sol、medium** 子代理在独立工作树完成，主窗口整合及统一验收；没有把子代理定向结果当作全量或生产资格。当前 journal/state/registry 为 **45/49/43**，canonical **16**，StateDigestV13 / SemanticAuthorityDigestV3；下文 44/48/42、707/707 等属于先前零残余首版历史证据。
+此前两个实现子任务均由 **GPT 6.1 Sol、medium** 子代理在独立工作树完成，主窗口整合及统一验收；没有把子代理定向结果当作全量或生产资格。当时 journal/state/registry 为 **45/49/43**，canonical **16**，StateDigestV13 / SemanticAuthorityDigestV3；下文 44/48/42、707/707 等属于更早零残余首版历史证据。
 
 - 仅 gross lots、OpenCost、margin 精确零且 `0 < atoms < baseAtomsPerLot` 的正现货余额可显式承接。按 Asset 版本化规则提供单次/累计上限和最大存续时间，默认未配置即关闭；规则事实 pin、原规则截止时间、同次两腿累计及有界容量均核对。原账户/VirtualPortfolio/周期/Asset、精确余额和费用账务不变，不转 Treasury、不重复估值、不供同品种或同账户共享 Asset 的新周期花费。永续、负资产、Unknown、未闭合经济/对账/历史证据仍拒绝终结。
 - 独立 FeeAdjustment 校验原 Fill/归属、连续费用版本及来源证据，按原币追加差额，跨币种分别冲回/记入；不更改原 Fill、成交累计或 TradingRebate。归档原成交须由 typed fee_origin 认证。旧已承接周期的相关 Asset 费用增减均在合法入账后锁存 OMS recovery-only；退款也不能自动归新周期。真实 Fill 吞掉已保留库存同样先入账、再锁存，原残余记录不改写。
