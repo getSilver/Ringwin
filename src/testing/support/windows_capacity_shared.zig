@@ -54,9 +54,9 @@ pub fn verify(allocator: std.mem.Allocator, io: std.Io, parent: []const u8, virg
             const before_publication = owner.sequence;
             for (summaries, 0..) |summary, index| {
                 var updated = summary;
-                updated.shard_sequence = owner.coordinator.summaries[index].value.shard_sequence;
+                updated.publication_version = owner.coordinator.summaries[index].value.publication_version;
                 if (!std.meta.eql(updated, owner.coordinator.summaries[index].value)) {
-                    updated.shard_sequence += 1;
+                    updated.publication_version += 1;
                     try owner.apply(.{ .publish_summary = .{ .identity = owner.sequence + 1, .summary = updated } });
                 }
             }
@@ -71,7 +71,7 @@ pub fn verify(allocator: std.mem.Allocator, io: std.Io, parent: []const u8, virg
     for (summaries, 0..) |summary, index| {
         const restored_summary = owner.coordinator.summaries[index];
         var expected = summary;
-        expected.shard_sequence = restored_summary.value.shard_sequence;
+        expected.publication_version = restored_summary.value.publication_version;
         try require(restored_summary.present and std.meta.eql(restored_summary.value, expected));
         const lease = owner.coordinator.leases[index];
         try require(@intFromEnum(lease.shard_id) == index and lease.exchange_account == summary.exchange_account and lease.decision_domain == summary.decision_domain and lease.used_atoms == summary.reservation_atoms);
@@ -95,6 +95,7 @@ test "Native file shared unchanged public summaries recover without empty archiv
         .decision_domain = index + 1,
         .virtual_portfolio = index + 11,
         .exchange_account = 2,
+        .publication_version = 1,
         .shard_sequence = 1,
         .rules_version = 1,
         .lease_version = 1,
@@ -108,12 +109,14 @@ test "Native file shared unchanged public summaries recover without empty archiv
     };
     _ = try verify(std.testing.allocator, io, path, true, false, summaries);
     summaries[0].cash_atoms += 1;
+    summaries[0].shard_sequence += 1;
     const first_update = try verify(std.testing.allocator, io, path, false, true, summaries);
     const unchanged = try verify(std.testing.allocator, io, path, false, true, summaries);
     try std.testing.expectEqualDeep(first_update, unchanged);
     const recovered = try verify(std.testing.allocator, io, path, false, false, summaries);
     try std.testing.expectEqualDeep(unchanged, recovered);
     summaries[0].cash_atoms += 1;
+    summaries[0].shard_sequence += 1;
     const changed = try verify(std.testing.allocator, io, path, false, true, summaries);
     try std.testing.expect(changed.coordinator_barrier > unchanged.coordinator_barrier);
     const changed_recovered = try verify(std.testing.allocator, io, path, false, false, summaries);

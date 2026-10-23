@@ -7,7 +7,7 @@ const codec = @import("../../../persistence/snapshot_codec.zig");
 const helpers = @import("../history/coordinator_history_acceptance.zig");
 
 fn summary(index: usize, sequence: u64) coordination.ShardSummary {
-    return .{ .shard_id = @enumFromInt(index), .decision_domain = index + 1, .virtual_portfolio = index + 11, .exchange_account = 900, .shard_sequence = sequence, .rules_version = 1, .lease_version = 1, .reservation_atoms = 10, .spot_quantity = 0, .swap_quantity = 0, .cash_atoms = 1000, .open_orders = 0, .unknown_orders = 0, .local_gate_closed = false };
+    return .{ .shard_id = @enumFromInt(index), .decision_domain = index + 1, .virtual_portfolio = index + 11, .exchange_account = 900, .publication_version = sequence, .shard_sequence = sequence, .rules_version = 1, .lease_version = 1, .reservation_atoms = 10, .spot_quantity = 0, .swap_quantity = 0, .cash_atoms = 1000, .open_orders = 0, .unknown_orders = 0, .local_gate_closed = false };
 }
 fn healthy(identity: u128, barrier: u64) coordination.CoordinationEvent {
     return .{ .margin_observation = .{ .identity = identity, .barrier = barrier, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 } };
@@ -329,7 +329,7 @@ test "08 coordination safety first checkpoint absent retains only committed pref
     var recovered = try coordination.CoordinatorOwner.recover(owner.stream, memory.interface(), undefined);
     try std.testing.expectEqualDeep(before, recovered.coordinator.digest());
     try std.testing.expectEqual(sequence, recovered.sequence);
-    try std.testing.expectEqual(@as(u64, 1), recovered.coordinator.summaries[0].value.shard_sequence);
+    try std.testing.expectEqual(@as(u64, 1), recovered.coordinator.summaries[0].value.publication_version);
     try std.testing.expect(recovered.closed);
     try std.testing.expect(recovered.coordinator.recovery_only);
     try std.testing.expectError(error.CoordinatorWriterClosed, recovered.apply(.{ .publish_summary = .{ .identity = 3, .summary = summary(0, 2) } }));

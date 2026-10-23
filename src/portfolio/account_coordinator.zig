@@ -3,7 +3,7 @@ const durable = @import("../persistence/durable_store.zig");
 const trading = @import("../trading/trading_shard.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const snapshot_magic: u64 = 0x54434341574e4952;
-const coordinator_snapshot_version: u16 = 10;
+const coordinator_snapshot_version: u16 = 12;
 const history = @import("../persistence/business_history.zig");
 const codec = @import("../persistence/snapshot_codec.zig");
 const account_margin_gate_identity: u128 = 0x414343544d415247;
@@ -36,6 +36,7 @@ pub const ShardSummary = struct {
     decision_domain: u128,
     virtual_portfolio: u128,
     exchange_account: u128,
+    publication_version: u64,
     shard_sequence: u64,
     rules_version: u32,
     lease_version: u64,
@@ -59,6 +60,7 @@ pub const ShardSummary = struct {
             .decision_domain = @intFromEnum(shard_id) + 1,
             .virtual_portfolio = @intFromEnum(shard_id) + 11,
             .exchange_account = 900,
+            .publication_version = sequence,
             .shard_sequence = sequence,
             .rules_version = 1,
             .lease_version = 1,
@@ -74,6 +76,7 @@ pub const ShardSummary = struct {
 
     fn withSequence(self: ShardSummary, sequence: u64) ShardSummary {
         var result = self;
+        result.publication_version = sequence;
         result.shard_sequence = sequence;
         return result;
     }
@@ -168,8 +171,11 @@ pub const AccountGate = struct { identity: u128, open: bool, latched: bool };
 pub const GateDelivery = struct { shard_id: ShardId, gate: AccountGate };
 
 /// One durable coordinator input that can be replayed after a coordinator snapshot.
+const SummaryPublication = struct { identity: u128, summary: ShardSummary };
+
 pub const CoordinationEvent = union(enum) {
-    publish_summary: struct { identity: u128, summary: ShardSummary },
+    publish_summary: SummaryPublication,
+    summary_protocol_fault: SummaryPublication,
     allocate_leases: struct { version: u64, valid_through_barrier: u64 },
     account_fact: AccountFact,
     margin_observation: MarginObservation,
@@ -320,7 +326,7 @@ fn forcedTailExplainsSummaryChange(coordinator: *AccountCoordinator, shard_id: S
     var before = (try trading.TradingShard.restoreSnapshot(snapshot)).shard;
     before.operational_state.trading_authorized = false;
     before.operational_state.mode = .recovering;
-    const baseline = try shardSummaryFromShard(&before, shard_id, summary.shard_sequence, summary.decision_domain);
+    const baseline = try shardSummaryFromShard(&before, shard_id, summary.publication_version, summary.decision_domain);
     if (!std.meta.eql(baseline, summary)) return false;
     var reader = try trading.journal.Reader.init(tail);
     var forced_count: usize = 0;
@@ -354,10 +360,11 @@ pub fn applyAccountGateStable(delivery: GateDelivery, target_shard_id: ShardId, 
 pub fn shardSummaryFromShard(
     shard: *const trading.TradingShard,
     shard_id: ShardId,
-    shard_sequence: u64,
+    publication_version: u64,
     decision_domain: u128,
 ) !ShardSummary {
-    if (decision_domain == 0 or shard_sequence == 0 or
+    if (decision_domain == 0 or publication_version == 0 or
+        (shard.decision_domain_identity != 0 and decision_domain != shard.decision_domain_identity) or
         !shard.account_configured or shard.exchange_account_identity == 0)
         return error.InvalidShardSummary;
     const rules_version = @min(shard.instrument_rules_version, shard.margin_rules_version);
@@ -377,7 +384,8 @@ pub fn shardSummaryFromShard(
         .decision_domain = decision_domain,
         .virtual_portfolio = shard.portfolio_identity,
         .exchange_account = shard.exchange_account_identity,
-        .shard_sequence = shard_sequence,
+        .publication_version = publication_version,
+        .shard_sequence = shard.authoritativeBarrier(),
         .rules_version = rules_version,
         .lease_version = shard.risk_lease_version,
         .reservation_atoms = try shard.activeReservationAtoms(),
@@ -539,6 +547,7 @@ pub const AccountCoordinator = struct {
     margin_gate: AccountGate = .{ .identity = 0, .open = false, .latched = false },
     margin_reconciliation_state: MarginReconciliationState = .unknown,
     gate_deliveries: [max_shards]GateDelivery = undefined,
+    summary_protocol_fault: bool = false,
     recovery_only: bool = false,
     recovery_margin_identity: u128 = 0,
     suspense_forced_execution: ?AccountFact = null,
@@ -614,8 +623,9 @@ pub const AccountCoordinator = struct {
 
     /// Publishes one semantic shard summary, accepting exact duplicates as no-op.
     pub fn publishSummary(self: *AccountCoordinator, identity: u128, summary: ShardSummary) !bool {
+        errdefer self.summary_protocol_fault = true;
         if (identity == 0 or summary.decision_domain == 0 or summary.virtual_portfolio == 0 or
-            summary.exchange_account != self.exchange_account or summary.shard_sequence == 0 or
+            summary.exchange_account != self.exchange_account or summary.publication_version == 0 or summary.shard_sequence == 0 or
             summary.rules_version == 0 or summary.reservation_atoms < 0 or
             !summaryOrderCountsValid(summary.open_orders, summary.unknown_orders))
             return error.InvalidShardSummary;
@@ -626,14 +636,30 @@ pub const AccountCoordinator = struct {
                 if (!std.meta.eql(known.value, summary)) return error.SummaryIdentityConflict;
                 return false;
             }
-            if (summary.shard_sequence <= known.value.shard_sequence) return error.StaleShardSummary;
-            if (summary.shard_sequence != known.value.shard_sequence + 1) return error.ShardSequenceGap;
+            if (summary.publication_version <= known.value.publication_version or
+                summary.shard_sequence < known.value.shard_sequence or
+                summary.rules_version < known.value.rules_version or summary.lease_version < known.value.lease_version) return error.StaleShardSummary;
+            if (summary.publication_version != try std.math.add(u64, known.value.publication_version, 1)) return error.ShardSequenceGap;
             if (summary.decision_domain != known.value.decision_domain or
                 summary.virtual_portfolio != known.value.virtual_portfolio or
                 summary.exchange_account != known.value.exchange_account)
                 return error.ShardIdentityDrift;
-        } else if (summary.shard_sequence != 1) {
+        } else if (summary.publication_version != 1) {
             return error.ShardSequenceGap;
+        }
+        for (self.summaries, 0..) |other, other_index| {
+            if (other_index != index and other.present and
+                (other.value.decision_domain == summary.decision_domain or
+                    other.value.virtual_portfolio == summary.virtual_portfolio or other.identity == identity))
+                return error.ShardIdentityDrift;
+        }
+        // Retained current slots preserve the global publication identity high-water.
+        for (self.summaries) |other| if (other.present and identity <= other.identity)
+            return error.SummaryIdentityRetired;
+        if (known.present and summary.shard_sequence == known.value.shard_sequence) {
+            var previous = known.value;
+            previous.publication_version = summary.publication_version;
+            if (!std.meta.eql(previous, summary)) return error.SummaryBarrierConflict;
         }
         const next_barrier = try std.math.add(u64, self.barrier, 1);
         known.* = .{ .identity = identity, .value = summary, .present = true };
@@ -644,7 +670,7 @@ pub const AccountCoordinator = struct {
     /// Computes a stable digest of coordination-owned state only.
     pub fn digest(self: *const AccountCoordinator) [Sha256.digest_length]u8 {
         var hasher = Sha256.init(.{});
-        hasher.update("coordinator-history-v9");
+        hasher.update("coordinator-history-v11");
         if (self.history_root) |root| hasher.update(&root.root_digest);
         var gateway_bytes: [1024]u8 = undefined;
         digestInt(&hasher, u128, self.gateway_ownership.exchange_account);
@@ -656,6 +682,7 @@ pub const AccountCoordinator = struct {
         digestInt(&hasher, i128, self.account_safety_ceiling_atoms);
         digestInt(&hasher, i128, self.global_ceiling_atoms);
         digestInt(&hasher, u64, self.barrier);
+        digestInt(&hasher, u8, @intFromBool(self.summary_protocol_fault));
         for (self.summaries) |record| {
             hasher.update(&.{@intFromBool(record.present)});
             if (record.present) {
@@ -709,6 +736,7 @@ pub const AccountCoordinator = struct {
 
     /// Allocates deterministic leases without turning account netting into buying power.
     pub fn allocateLeases(self: *AccountCoordinator, version: u64, valid_through_barrier: u64) ![]const RiskLease {
+        if (self.summary_protocol_fault) return error.SummaryProtocolFault;
         if (self.recovery_only) return error.CoordinatorRecoveryOnly;
         if (self.margin_gate.latched or self.margin_reconciliation_state == .broken)
             return error.MarginReconciliationRequired;
@@ -1171,6 +1199,7 @@ pub const AccountCoordinator = struct {
 
     /// Leaves RecoveryOnly only after current leases and account reconciliation are healthy.
     pub fn completeRecovery(self: *AccountCoordinator) !void {
+        if (self.summary_protocol_fault) return error.SummaryProtocolFault;
         if (!self.recovery_only) return error.CoordinatorNotRecovering;
         if (self.suspense_forced_execution != null) return error.ForcedExecutionReconciliationBreak;
         if (self.recovery_margin_identity == 0) return error.FreshMarginObservationRequired;
@@ -1194,6 +1223,10 @@ pub const AccountCoordinator = struct {
     fn applyEvent(self: *AccountCoordinator, event: CoordinationEvent) !void {
         switch (event) {
             .publish_summary => |publish| _ = try self.publishSummary(publish.identity, publish.summary),
+            .summary_protocol_fault => {
+                self.summary_protocol_fault = true;
+                self.barrier = try std.math.add(u64, self.barrier, 1);
+            },
             .allocate_leases => |allocation| _ = try self.allocateLeases(allocation.version, allocation.valid_through_barrier),
             .account_fact => |fact| _ = try self.acceptAccountFact(fact),
             .margin_observation => |observation| _ = try self.reconcileMargin(observation),
@@ -1300,6 +1333,7 @@ pub const AccountCoordinator = struct {
                 try writer.writeInt(field.type, value, .little);
         };
         try writer.writeInt(i128, self.account_netting_benefit_atoms, .little);
+        try writer.writeByte(@intFromBool(self.summary_protocol_fault));
         try writer.writeByte(@intFromBool(self.recovery_only));
         try writeOptionalAccountFact(&writer, self.last_account_fact);
         try writeOptionalAccountFact(&writer, self.suspense_forced_execution);
@@ -1378,6 +1412,7 @@ pub const AccountCoordinator = struct {
                 try reader.takeInt(field.type, .little);
         };
         result.account_netting_benefit_atoms = try reader.takeInt(i128, .little);
+        result.summary_protocol_fault = try readBool(&reader);
         result.recovery_only = try readBool(&reader);
         result.last_account_fact = try readOptionalAccountFact(&reader);
         result.suspense_forced_execution = try readOptionalAccountFact(&reader);
@@ -1443,6 +1478,7 @@ fn coordinationEventType(event: CoordinationEvent) u16 {
     return switch (event) {
         // Type 1 carried u8 counts and is retired, never guessed as this layout.
         .publish_summary => 14,
+        .summary_protocol_fault => 15,
         .allocate_leases => 2,
         .account_fact => 3,
         .margin_observation => 4,
@@ -1565,7 +1601,7 @@ fn readAccountFact(reader: *std.Io.Reader) !AccountFact {
 fn encodeCoordinationEvent(destination: []u8, event: CoordinationEvent) ![]const u8 {
     var writer: std.Io.Writer = .fixed(destination);
     switch (event) {
-        .publish_summary => |publish| {
+        .publish_summary, .summary_protocol_fault => |publish| {
             try writer.writeInt(u128, publish.identity, .little);
             try writePlainStruct(&writer, ShardSummary, publish.summary);
         },
@@ -1599,6 +1635,10 @@ fn decodeCoordinationEvent(record: trading.journal.Record) !CoordinationEvent {
         return error.InvalidCoordinationTail;
     var reader: std.Io.Reader = .fixed(record.payload);
     const event: CoordinationEvent = switch (record.type_id) {
+        15 => .{ .summary_protocol_fault = .{
+            .identity = try reader.takeInt(u128, .little),
+            .summary = try readPlainStruct(&reader, ShardSummary),
+        } },
         14 => .{ .publish_summary = .{
             .identity = try reader.takeInt(u128, .little),
             .summary = try readPlainStruct(&reader, ShardSummary),
@@ -1691,7 +1731,7 @@ pub const AccountRecovery = struct {
             const derived = try shardSummaryFromShard(
                 &result.shards[index],
                 @enumFromInt(index),
-                summary.value.shard_sequence,
+                summary.value.publication_version,
                 summary.value.decision_domain,
             );
             if (!std.meta.eql(derived, summary.value)) {
@@ -1720,7 +1760,7 @@ pub const AccountRecovery = struct {
             const derived = try shardSummaryFromShard(
                 &self.shards[index],
                 @enumFromInt(index),
-                summary.value.shard_sequence,
+                summary.value.publication_version,
                 summary.value.decision_domain,
             );
             if (!std.meta.eql(derived, summary.value)) return error.FreshShardSummaryRequired;
@@ -1857,11 +1897,12 @@ test "09 coordinator summary count domain admits 1024 and rejects impossible tot
     var summary = ShardSummary.fixture(.shard_0, 1, 100);
     summary.open_orders = @intCast(@as(usize, 1024));
     _ = try coordinator.publishSummary(1, summary);
-    summary.shard_sequence = 2;
+    summary.publication_version = 2;
     summary.unknown_orders = 1;
-    const before = coordinator.digest();
+    const before = coordinator.summaries[0];
     try std.testing.expectError(error.InvalidShardSummary, coordinator.publishSummary(2, summary));
-    try std.testing.expectEqualSlices(u8, &before, &coordinator.digest());
+    try std.testing.expectEqualDeep(before, coordinator.summaries[0]);
+    try std.testing.expect(coordinator.summary_protocol_fault);
 }
 
 test "09 coordinator widened summary round trips new snapshot and tail and refuses retired formats" {
@@ -1876,7 +1917,7 @@ test "09 coordinator widened summary round trips new snapshot and tail and refus
     try std.testing.expectEqualDeep(summary, recovered.summaries[0].value);
     // Restore fences authorization; compare the retained summary, not authority mode.
     var tail = CoordinationJournal.initAt(1);
-    summary.shard_sequence = 2;
+    summary.publication_version = 2;
     try tail.append(.{ .publish_summary = .{ .identity = 2, .summary = summary } });
     try tail.seal();
     try replayCoordinationTail(&recovered, tail.bytes());
@@ -1940,7 +1981,8 @@ test "summary barrier and lease expiry fail atomically on overflow" {
     try std.testing.expectError(error.Overflow, coordinator.publishSummary(1, ShardSummary.fixture(.shard_0, 1, 100)));
     try std.testing.expect(!coordinator.summaries[0].present);
 
-    coordinator.barrier = 0;
+    try std.testing.expect(coordinator.summary_protocol_fault);
+    coordinator = AccountCoordinator.init(900, 1_000, 1_000);
     for (0..max_shards) |index| _ = try coordinator.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, 100));
     _ = try coordinator.allocateLeases(1, 20);
     coordinator.leases[2].version = std.math.maxInt(u64);
@@ -2354,7 +2396,7 @@ test "account recovery restores four matching shard tails under fresh evidence f
     var coordinator_tail = CoordinationJournal.initAt(1);
     for (0..max_shards) |index| {
         var summary = coordinator.summaries[index].value;
-        summary.shard_sequence += 1;
+        summary.publication_version += 1;
         const event: CoordinationEvent = .{ .publish_summary = .{ .identity = 1_000 + index, .summary = summary } };
         try coordinator_tail.append(event);
         _ = try coordinator.publishSummary(event.publish_summary.identity, event.publish_summary.summary);
@@ -2549,6 +2591,10 @@ test "shard summaries derive from authoritative state and coordinate four real s
     var initial: [max_shards]ShardSummary = undefined;
     for (0..max_shards) |index| {
         initial[index] = try shardSummaryFromShard(&shards[index], @enumFromInt(index), 1, @intCast(index + 1));
+        try std.testing.expectEqual(shards[index].authoritativeBarrier(), initial[index].shard_sequence);
+        const republished = try shardSummaryFromShard(&shards[index], @enumFromInt(index), 2, @intCast(index + 1));
+        try std.testing.expectEqual(initial[index].shard_sequence, republished.shard_sequence);
+        try std.testing.expectEqual(@as(u64, 2), republished.publication_version);
         try std.testing.expect(try coordinator.publishSummary(index + 100, initial[index]));
     }
     try std.testing.expectEqual(@as(i64, 0), try coordinator.grossPortfolioMargin());
@@ -2558,24 +2604,15 @@ test "shard summaries derive from authoritative state and coordinate four real s
         try std.testing.expectEqual(@as(i64, 1_000), lease.limit_atoms);
     }
 
-    var reservation_group: trading.oms.IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
-    reservation_group.members[0] = .{
-        .intent_sequence = 1,
-        .operation = .place,
-        .instrument = 1,
-        .quantity = 1,
-        .limit_price = .{ .instrument = 1, .rules_version = 1, .ticks = 1 },
-        .reservation = .{ .asset = 1, .atoms = 500 },
-    };
-    try shards[3].oms.applyGroup(reservation_group);
-    shards[3].last_risk_tier = 2;
+    try applyAccountGateStable(.{ .shard_id = .shard_3, .gate = .{ .identity = 200, .open = false, .latched = true } }, .shard_3, &shards[3], &journals[3]);
     const advanced = try shardSummaryFromShard(&shards[3], .shard_3, 2, 4);
-    try std.testing.expectEqual(@as(i64, 500), advanced.reservation_atoms);
-    try std.testing.expect(!advanced.local_gate_closed);
+    try std.testing.expectEqual(@as(i64, 0), advanced.reservation_atoms);
+    try std.testing.expect(advanced.local_gate_closed);
+    try std.testing.expect(advanced.shard_sequence > initial[3].shard_sequence);
     try std.testing.expect(try coordinator.publishSummary(203, advanced));
-    try std.testing.expectEqual(@as(i64, 500), try coordinator.grossPortfolioMargin());
+    try std.testing.expectEqual(@as(i64, 0), try coordinator.grossPortfolioMargin());
     const renewed = try coordinator.allocateLeases(2, 20);
-    try std.testing.expectEqual(@as(i64, 500), renewed[3].used_atoms);
+    try std.testing.expectEqual(@as(i64, 0), renewed[3].used_atoms);
     try std.testing.expectEqual(@as(i64, 1_000), renewed[3].limit_atoms);
     _ = try coordinator.reconcileMargin(.{
         .identity = 300,
@@ -2585,11 +2622,11 @@ test "shard summaries derive from authoritative state and coordinate four real s
         .venue_swap_quantity = 0,
         .margin_mode = .isolated,
         .rules_version = 1,
-        .venue_risk_tier = 2,
+        .venue_risk_tier = 0,
         .venue_liquidation_distance_ticks = std.math.maxInt(i64),
     });
     try std.testing.expect(coordinator.margin_gate.open);
-    try std.testing.expectEqual(@as(i64, 500), coordinator.account_netting_benefit_atoms);
+    try std.testing.expectEqual(@as(i64, 0), coordinator.account_netting_benefit_atoms);
 
     const gated_shard = try std.testing.allocator.create(trading.TradingShard);
     defer std.testing.allocator.destroy(gated_shard);
@@ -2611,7 +2648,7 @@ test "shard summaries derive from authoritative state and coordinate four real s
         .venue_swap_quantity = 0,
         .margin_mode = .isolated,
         .rules_version = 1,
-        .venue_risk_tier = 2,
+        .venue_risk_tier = 0,
         .venue_liquidation_distance_ticks = std.math.maxInt(i64),
     });
     try std.testing.expectEqualSlices(u8, &coordinator.digest(), &replayed.digest());
@@ -2901,6 +2938,14 @@ pub const CoordinatorOwner = struct {
         if (self.closed) return error.CoordinatorWriterClosed;
         var candidate = self.coordinator;
         candidate.applyEvent(event) catch |err| {
+            if (event == .publish_summary) {
+                self.coordinator.summary_protocol_fault = true;
+                self.applyCommitted(.{ .summary_protocol_fault = .{ .identity = event.publish_summary.identity, .summary = event.publish_summary.summary } }) catch |persist_err| {
+                    self.closed = true;
+                    return persist_err;
+                };
+                return err;
+            }
             switch (err) {
                 error.InvalidHistoryProof,
                 error.InvalidHistoryRoot,
@@ -3136,4 +3181,85 @@ test "coordinator history durable writer rotates beyond old journal capacity and
     }
     try std.testing.expectEqual(@as(u64, 12000), owner.coordinator.summaries[0].value.shard_sequence);
     try std.testing.expect(adapter.archive_bytes > 10 * 192 * 1024);
+}
+
+test "01 summary publication version is separate from authoritative shard progress" {
+    var coordinator = AccountCoordinator.init(900, 4000, 4000);
+    var first = ShardSummary.fixture(.shard_0, 1, 100);
+    first.shard_sequence = 50;
+    try std.testing.expect(try coordinator.publishSummary(1, first));
+    try std.testing.expect(!try coordinator.publishSummary(1, first));
+    var next = first;
+    next.publication_version = 2;
+    next.shard_sequence = 75;
+    try std.testing.expect(try coordinator.publishSummary(2, next));
+    var stale = next;
+    stale.publication_version = 3;
+    stale.shard_sequence = 74;
+    try std.testing.expectError(error.StaleShardSummary, coordinator.publishSummary(3, stale));
+    var repeated = next;
+    repeated.publication_version = 3;
+    try std.testing.expect(try coordinator.publishSummary(3, repeated));
+    const unchanged = coordinator.digest();
+    try std.testing.expect(!try coordinator.publishSummary(3, repeated));
+    try std.testing.expectEqualSlices(u8, &unchanged, &coordinator.digest());
+    var regressed = repeated;
+    regressed.publication_version = 4;
+    regressed.rules_version = 0;
+    try std.testing.expectError(error.InvalidShardSummary, coordinator.publishSummary(4, regressed));
+    regressed.rules_version = 1;
+    regressed.lease_version = 0;
+    try std.testing.expectError(error.StaleShardSummary, coordinator.publishSummary(4, regressed));
+    const alias = ShardSummary.fixture(.shard_1, 1, 100);
+    try std.testing.expectError(error.ShardIdentityDrift, coordinator.publishSummary(3, alias));
+    var storage: [4096]u8 = undefined;
+    const restored = try AccountCoordinator.restore(try coordinator.snapshot(&storage));
+    try std.testing.expectEqual(@as(u64, 75), restored.summaries[0].value.shard_sequence);
+    try std.testing.expectEqual(@as(u64, 3), restored.summaries[0].value.publication_version);
+    var reuse = repeated;
+    reuse.publication_version = 4;
+    reuse.shard_sequence = 76;
+    try std.testing.expectError(error.SummaryIdentityRetired, coordinator.publishSummary(1, reuse));
+    reuse.shard_sequence = repeated.shard_sequence;
+    reuse.reservation_atoms = 101;
+    try std.testing.expectError(error.SummaryBarrierConflict, coordinator.publishSummary(4, reuse));
+    var foreign = ShardSummary.fixture(.shard_1, 1, 100);
+    foreign.virtual_portfolio = first.virtual_portfolio;
+    try std.testing.expectError(error.ShardIdentityDrift, coordinator.publishSummary(4, foreign));
+}
+
+test "01 rejected summaries fence cached leases durably" {
+    for (0..4) |kind| {
+        var coordinator = AccountCoordinator.init(900, 4000, 4000);
+        for (0..4) |index| _ = try coordinator.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, 100));
+        _ = try coordinator.allocateLeases(1, 100);
+        var bad = ShardSummary.fixture(.shard_0, 1, 100);
+        const identity: u128 = if (kind == 0) 1 else 5;
+        if (kind == 0) bad.cash_atoms += 1;
+        if (kind == 2) bad.publication_version = 3;
+        if (kind == 3) bad.exchange_account = 901;
+        if (coordinator.publishSummary(identity, bad)) |_| return error.InvalidSummaryAccepted else |_| {}
+        try std.testing.expectError(error.SummaryProtocolFault, coordinator.allocateLeases(2, 100));
+    }
+    const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(memory);
+    memory.* = .initWithAllocator(std.testing.allocator);
+    defer memory.deinit();
+    const stream: durable.StreamIdentity = .{ .domain = .control, .id = 99007 };
+    var owner = try CoordinatorOwner.init(.init(900, 4000, 4000), stream, memory.interface(), undefined);
+    for (0..4) |index| try owner.apply(.{ .publish_summary = .{ .identity = index + 1, .summary = ShardSummary.fixture(@enumFromInt(index), 1, 100) } });
+    try owner.checkpoint();
+    var bad = ShardSummary.fixture(.shard_0, 1, 100);
+    bad.cash_atoms += 1;
+    try std.testing.expectError(error.SummaryIdentityConflict, owner.apply(.{ .publish_summary = .{ .identity = 1, .summary = bad } }));
+    try std.testing.expectError(error.SummaryProtocolFault, owner.coordinator.allocateLeases(1, 100));
+    try std.testing.expectError(error.SummaryIdentityConflict, owner.apply(.{ .publish_summary = .{ .identity = 1, .summary = bad } }));
+    try owner.apply(.{ .publish_summary = .{ .identity = 5, .summary = ShardSummary.fixture(.shard_0, 2, 100) } });
+    try std.testing.expectError(error.SummaryProtocolFault, owner.coordinator.allocateLeases(1, 100));
+    var recovered = try CoordinatorOwner.recover(stream, memory.interface(), undefined);
+    try std.testing.expectError(error.SummaryProtocolFault, recovered.coordinator.allocateLeases(1, 100));
+    try std.testing.expectError(error.SummaryProtocolFault, recovered.completeRecovery());
+    try recovered.checkpoint();
+    var again = try CoordinatorOwner.recover(stream, memory.interface(), undefined);
+    try std.testing.expectError(error.SummaryProtocolFault, again.completeRecovery());
 }
