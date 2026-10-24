@@ -354,6 +354,9 @@ pub const EconomicFill = struct {
 
 pub const FundingSettlement = struct { settlement_id: u64, amount_atoms: i128, instrument: u128 = 0 };
 pub const VenueForcedExecution = struct {
+    instrument: u128 = 0,
+    rules_version: u64 = 0,
+    canonical_source: ?canonical.ForcedExecutionSource = null,
     execution_id: u64,
     source_identity: u128 = 0,
     side: oms_module.Side,
@@ -945,15 +948,8 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u128, value.instrument);
         },
         .venue_forced_execution => |value| {
-            try encoded.put(u64, value.execution_id);
-            try encoded.put(u128, value.source_identity);
-            try encoded.put(u8, @intFromEnum(value.side));
-            try encoded.put(i64, value.quantity);
-            try encoded.put(i64, value.price_ticks);
-            try encoded.put(i128, value.fee_atoms);
-            try encoded.put(i128, value.penalty_atoms);
-            try encoded.put(u8, @intFromBool(value.expected_realized_pnl_atoms != null));
-            if (value.expected_realized_pnl_atoms) |pnl| try encoded.put(i128, pnl);
+            const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], value);
+            encoded.len += bytes.len;
         },
         .economic_account_snapshot => |value| {
             try encoded.put(u64, value.snapshot_id);
@@ -1437,20 +1433,11 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             .amount_atoms = try readInputValue(i128, record.payload, &offset),
             .instrument = try readInputValue(u128, record.payload, &offset),
         } },
-        .venue_forced_execution => .{ .venue_forced_execution = .{
-            .execution_id = try readInputValue(u64, record.payload, &offset),
-            .source_identity = try readInputValue(u128, record.payload, &offset),
-            .side = std.enums.fromInt(oms_module.Side, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOmsSide,
-            .quantity = try readInputValue(i64, record.payload, &offset),
-            .price_ticks = try readInputValue(i64, record.payload, &offset),
-            .fee_atoms = try readInputValue(i128, record.payload, &offset),
-            .penalty_atoms = try readInputValue(i128, record.payload, &offset),
-            .expected_realized_pnl_atoms = switch (try readInputValue(u8, record.payload, &offset)) {
-                0 => null,
-                1 => try readInputValue(i128, record.payload, &offset),
-                else => return error.InvalidForcedExecutionPnlEvidence,
-            },
-        } },
+        .venue_forced_execution => blk: {
+            const value = try snapshot_codec.decodeBare(record.payload[offset..], VenueForcedExecution);
+            offset = record.payload.len;
+            break :blk .{ .venue_forced_execution = value };
+        },
         .economic_account_snapshot => .{ .economic_account_snapshot = .{
             .snapshot_id = try readInputValue(u64, record.payload, &offset),
             .usdt_balance_atoms = try readInputValue(i128, record.payload, &offset),

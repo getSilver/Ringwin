@@ -54,6 +54,8 @@ pub const Identity = union(enum) {
     cycle: u128,
     deployment_configuration: u128,
     fee_origin: u64,
+    coordinator_venue_fact: struct { kind: u32, identity: u128 },
+    coordinator_venue_spool: u64,
 };
 pub const Key = struct { origin: Origin, account: ?u128 = null, identity: Identity };
 
@@ -256,7 +258,7 @@ pub fn encodeKey(key: Key) !EncodedKey {
         },
     }
     switch (key.identity) {
-        .coordinator_forced_source, .coordinator_forced_allocation, .coordinator_gateway_command, .coordinator_gateway_closure, .coordinator_account_fact, .version_activation => {
+        .coordinator_forced_source, .coordinator_forced_allocation, .coordinator_gateway_command, .coordinator_gateway_closure, .coordinator_account_fact, .version_activation, .coordinator_venue_fact, .coordinator_venue_spool => {
             if (key.origin.stream.domain != .control) return error.InvalidHistoryKey;
         },
         else => if (key.origin.stream.domain != .decision_log) return error.InvalidHistoryKey,
@@ -281,12 +283,17 @@ pub fn encodeKey(key: Key) !EncodedKey {
             std.mem.writeInt(u64, result.bytes[18..26], v.command, .big);
             result.len = 26;
         },
+        .coordinator_venue_fact => |v| {
+            std.mem.writeInt(u32, result.bytes[17..21], v.kind, .big);
+            std.mem.writeInt(u128, result.bytes[21..37], v.identity, .big);
+            result.len = 37;
+        },
         .dispatch_result => |v| {
             std.mem.writeInt(u64, result.bytes[17..25], v.command, .big);
             result.bytes[25] = @intFromEnum(v.state);
             result.len = 26;
         },
-        .order, .command, .dispatch_command, .fee_origin, .canonical_fill, .core_fill, .fill_detail, .fill_economic_digest, .canonical_funding, .core_funding, .funding_detail, .funding_economic_digest, .control_archive => |v| {
+        .order, .command, .dispatch_command, .fee_origin, .canonical_fill, .core_fill, .fill_detail, .fill_economic_digest, .canonical_funding, .core_funding, .funding_detail, .funding_economic_digest, .control_archive, .coordinator_venue_spool => |v| {
             std.mem.writeInt(u64, result.bytes[17..25], v, .big);
             result.len = 25;
         },

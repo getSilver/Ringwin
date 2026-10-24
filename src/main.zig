@@ -270,6 +270,10 @@ test {
     _ = @import("testing/acceptance/history/coordinator_history_acceptance.zig");
     _ = @import("testing/acceptance/core/coordinator_safety_acceptance.zig");
     _ = @import("testing/acceptance/core/risk_lease_delivery_acceptance.zig");
+    _ = @import("testing/acceptance/core/shared_venue_delivery_acceptance.zig");
+    _ = @import("testing/acceptance/core/shared_gateway_venue_acceptance.zig");
+    _ = @import("testing/acceptance/core/shared_forced_execution_acceptance.zig");
+    _ = @import("testing/acceptance/core/shared_fee_history_acceptance.zig");
     _ = @import("testing/acceptance/core/coordination_gateway_acceptance.zig");
     _ = @import("testing/acceptance/history/forced_archive_acceptance.zig");
     _ = @import("trading/trading_shard_event.zig");

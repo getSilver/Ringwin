@@ -28,7 +28,7 @@ Status: open
 
 ## Frontier
 
-- [03 — 确定性扇出共享账户与 Venue 事实](issues/03-fan-out-authoritative-account-and-venue-facts.md)
+- [04 — 闭合 GrossPortfolioMargin 与 VenueNetMargin 对账](issues/04-reconcile-gross-portfolio-and-venue-net-margin.md)
 - [05 — 共享 Execution Gateway 并保持订单唯一归属](issues/05-share-execution-gateway-with-unique-order-ownership.md)
 
 ## Decisions so far
@@ -38,6 +38,8 @@ Status: open
 - 2026-10-24：01 已按原条件完成；双轴审查发现的持久故障隔离及测试夹具问题已修复，协调器文件 180/180，通过后续显式重新取得资格前不恢复摘要故障账户的租约授权。
 
 - 2026-10-24：02 已完成：毛额包含持仓保证金与 OMS 预留，明确两种屏障，持久租约生命周期与四份新摘要重新取得资格；配置账户及四片公开验收 8/8、协调器 184/184，双轴复审无剩余问题。
+
+- 2026-10-24：03 已按原五条条件完成：持久原文 spool、唯一 wire 归属、部署 funding 证明、冷 fee 历史、逐品种 forced 来源与分配/ACK/归档/恢复；未知事实与源故障独立失败关闭，健康 margin 不可越过。协调器 40/40、扩展场景 23/23、双账户冷 fee 2/2 及最后的 forced Owner 真恢复 2/2 ReleaseSafe；双轴复审无剩余问题。完整套件与冻结摘要由 07 收口。
 
 ## Not yet specified
 

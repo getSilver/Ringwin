@@ -120,7 +120,7 @@ test "Owner preserves deferred history while canonical fills progress and both p
     _ = try harness.owner.archiveTerminalOrder(harness.command.order_id, harness.gateway);
     try std.testing.expectEqual(@as(u16, 0), harness.owner.shard.dispatch_ingress_history_count);
     const old_high_water = harness.owner.shard.oms.next_command_id;
-    _ = try harness.owner.apply(fixture.canonicalAt(22, 900, .{ .order_dispatch_result = .{ .command = old_dispatch.command, .state = old_dispatch.state } }));
+    _ = try harness.owner.apply(fixture.canonicalAt(22, 900, .{ .order_dispatch_result = .{ .command = old_dispatch.command, .client_order_id = old_dispatch.client_order_id, .state = old_dispatch.state, .reason = old_dispatch.reason } }));
     try std.testing.expectEqual(old_high_water, harness.owner.shard.oms.next_command_id);
     try std.testing.expectEqual(@as(u64, 1), harness.simulator.sends);
     _ = try harness.owner.apply(fixture.atGroup(22, .{ .identity = 102, .payload = .{ .oms_intent_group = place(102) } }));

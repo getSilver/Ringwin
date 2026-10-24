@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const schema_version: u16 = 16;
+pub const schema_version: u16 = 17;
 
 pub const VenueIdentity = u64;
 pub const Product = enum(u8) { spot, isolated_linear_usdt };
@@ -17,6 +17,7 @@ pub const OrderIdentity = u128;
 pub const ClientOrderId = OpaqueRef(64);
 pub const VenueOrderRef = VenueScopedRef(64);
 pub const VenueTradeRef = VenueScopedRef(64);
+pub const VenueBillRef = VenueScopedRef(64);
 pub const AdapterSessionIdentity = u128;
 pub const BootstrapSnapshotIdentity = u128;
 pub const StreamIdentity = u128;
@@ -339,6 +340,7 @@ pub const AdapterRequest = union(enum) {
 
 pub const OrderDispatchResult = struct {
     command: OrderIdentity,
+    client_order_id: ClientOrderId = .{},
     state: DispatchState,
     reason: ?CanonicalRejectReason = null,
 };
@@ -625,7 +627,48 @@ pub const FundingSettlement = struct {
     settlement_time_utc_ns: u64,
 };
 
+pub const ForcedExecution = struct {
+    identity: SourceFactIdentity,
+    exchange_account: ExchangeAccountIdentity,
+    instrument: InstrumentIdentity,
+    rules_version: u64,
+    kind: enum(u8) { liquidation, partial_liquidation, adl },
+    venue_order: ?VenueOrderRef = null,
+    venue_execution: VenueTradeRef,
+    venue_bill: ?VenueBillRef = null,
+    quantity: InstrumentQuantity,
+    side: OrderSide,
+    price: InstrumentPrice,
+    realized_pnl: ?AssetAmount = null,
+    fee: ?AssetAmount = null,
+    penalty: ?AssetAmount = null,
+    execution_time_utc_ns: u64,
+};
+pub const ForcedExecutionSource = struct {
+    execution: ForcedExecution,
+    envelope: EventEnvelope,
+
+    pub fn validate(self: @This()) !void {
+        const value = self.execution;
+        const source = self.envelope;
+        if (value.identity == 0 or value.exchange_account == 0 or value.instrument == 0 or value.rules_version == 0 or
+            value.quantity.instrument != value.instrument or value.quantity.rules_version != value.rules_version or value.quantity.lots <= 0 or
+            value.price.instrument != value.instrument or value.price.rules_version != value.rules_version or value.price.ticks <= 0 or
+            value.execution_time_utc_ns == 0 or value.venue_execution.value.len == 0 or value.venue_execution.venue != source.venue or
+            source.venue == 0 or source.exchange_account != value.exchange_account or source.instrument != value.instrument or
+            source.scope != .account or source.schema_version != schema_version or source.event_type != @intFromEnum(EventType.forced_execution) or
+            source.source_fact_identity != value.identity or source.identity.stream == 0 or source.identity.sequence == 0 or
+            source.source_stream == 0 or source.source_sequence == 0) return error.InvalidEconomicFact;
+        if (value.venue_order) |reference| if (reference.value.len == 0 or reference.venue != source.venue) return error.InvalidEconomicFact;
+        if (value.venue_bill) |reference| if (reference.value.len == 0 or reference.venue != source.venue) return error.InvalidEconomicFact;
+        if (value.fee) |fee| if (fee.asset == 0 or fee.atoms < 0) return error.InvalidEconomicFact;
+        if (value.penalty) |penalty| if (penalty.asset == 0 or penalty.atoms < 0) return error.InvalidEconomicFact;
+        if (value.realized_pnl) |pnl| if (pnl.asset == 0) return error.InvalidEconomicFact;
+    }
+};
+
 pub const Payload = union(enum) {
+    forced_execution: ForcedExecution,
     economic_fault: EconomicFault,
     order_dispatch_result: OrderDispatchResult,
     execution_report: ExecutionReport,
@@ -648,6 +691,7 @@ pub const Payload = union(enum) {
 };
 
 pub const EventType = enum(u32) {
+    forced_execution = 25,
     economic_fault = 22,
     funding_settlement = 23,
     order_dispatch_result = 1,
@@ -673,6 +717,7 @@ pub const TimeInForce = enum(u8) { good_til_canceled, immediate_or_cancel, fill_
 
 pub fn eventType(event: Payload) EventType {
     return switch (event) {
+        .forced_execution => .forced_execution,
         .economic_fault => .economic_fault,
         .funding_settlement => .funding_settlement,
         .order_dispatch_result => .order_dispatch_result,

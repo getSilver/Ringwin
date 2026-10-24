@@ -53,6 +53,7 @@ pub const MarginMode = enum(u8) { isolated };
 pub const OrderType = enum(u8) { market, limit, post_only, fok, ioc };
 pub const ExecutionStatus = enum(u8) { live, partially_filled, filled, canceled };
 pub const Liquidity = enum(u8) { maker, taker };
+pub const ForcedExecutionKind = enum(u8) { liquidation, partial_liquidation, adl };
 
 pub const ExecutionReport = struct {
     venue_order_id: VenueOrderId,
@@ -77,6 +78,7 @@ pub const ExecutionReport = struct {
 };
 
 pub const Fill = struct {
+    forced_kind: ?ForcedExecutionKind = null,
     venue_trade_id: VenueTradeId,
     venue_bill_id: ?VenueBillId,
     venue_order_id: VenueOrderId,
@@ -345,7 +347,7 @@ const WsSnapshotState = struct {
 };
 
 pub const ResumeCheckpoint = struct {
-    schema: u16 = 1,
+    schema: u16 = 2,
     session: u64,
     subscriptions: [3]bool,
     rest: [required_rest_count]EndpointState,
@@ -417,7 +419,7 @@ pub const Reconciler = struct {
     }
 
     fn validateResumeCheckpoint(checkpoint: ResumeCheckpoint) !void {
-        if (checkpoint.schema != 1 or checkpoint.session == 0 or checkpoint.last_raw_sequence == 0 or
+        if (checkpoint.schema != 2 or checkpoint.session == 0 or checkpoint.last_raw_sequence == 0 or
             checkpoint.bootstrap_watermark > checkpoint.last_raw_sequence or checkpoint.seen_count > max_seen_facts)
             return error.InvalidPrivateResumeCheckpoint;
         for (checkpoint.subscriptions) |subscribed| if (!subscribed) return error.InvalidPrivateResumeCheckpoint;
@@ -911,6 +913,7 @@ pub const Reconciler = struct {
         try validateSourceInstrument(source, instrument);
         const venue_order_id = try idField(VenueOrderId, row, "ordId");
         const client_order_id = try ClientOrderId.init(try stringField(row, "clOrdId"));
+        const forced_kind = try optionalForcedKind(row);
         const update_time = try millisField(row, "uTime");
         const report: ExecutionReport = .{
             .venue_order_id = venue_order_id,
@@ -936,9 +939,9 @@ pub const Reconciler = struct {
                 null,
             .venue_create_time_utc_ns = try optionalMillisField(row, "cTime"),
             .venue_update_time_utc_ns = update_time,
-            .owned_by_ringwin = isOwnedClientId(client_order_id.slice()),
+            .owned_by_ringwin = forced_kind == null and isOwnedClientId(client_order_id.slice()),
         };
-        if (!report.owned_by_ringwin and
+        if (forced_kind == null and !report.owned_by_ringwin and
             (report.status == .live or report.status == .partially_filled))
             self.unattributed_fact_seen = true;
         batch.oldest_cursor = minCursor(batch.oldest_cursor, @intFromEnum(venue_order_id));
@@ -963,6 +966,7 @@ pub const Reconciler = struct {
         const fee_ccy = (try optionalStringField(row, "fillFeeCcy")) orelse return error.MissingAsset;
         if (fee_ccy.len == 0) return error.MissingAsset;
         const fill: Fill = .{
+            .forced_kind = forced_kind,
             .venue_trade_id = try parseId(VenueTradeId, trade_text),
             .venue_bill_id = null,
             .venue_order_id = venue_order_id,
@@ -1001,6 +1005,7 @@ pub const Reconciler = struct {
         const fee_ccy = (try optionalStringField(row, "feeCcy")) orelse return error.MissingAsset;
         if (fee_ccy.len == 0) return error.MissingAsset;
         const fill: Fill = .{
+            .forced_kind = try optionalForcedKind(row),
             .venue_trade_id = try idField(VenueTradeId, row, "tradeId"),
             .venue_bill_id = try idField(VenueBillId, row, "billId"),
             .venue_order_id = try idField(VenueOrderId, row, "ordId"),
@@ -1554,6 +1559,14 @@ fn optionalLiquidity(object: std.json.ObjectMap) !?Liquidity {
     return error.UnsupportedValue;
 }
 
+fn optionalForcedKind(object: std.json.ObjectMap) !?ForcedExecutionKind {
+    const category = (try optionalStringField(object, "category")) orelse return null;
+    if (std.mem.eql(u8, category, "full_liquidation")) return .liquidation;
+    if (std.mem.eql(u8, category, "partial_liquidation")) return .partial_liquidation;
+    if (std.mem.eql(u8, category, "adl")) return .adl;
+    return null;
+}
+
 fn parseContractIsolatedMode(text: []const u8) !ContractIsolatedMode {
     if (std.mem.eql(u8, text, "automatic")) return .automatic;
     if (std.mem.eql(u8, text, "autonomy")) return .autonomy;
@@ -1680,6 +1693,7 @@ fn hashReport(report: *const ExecutionReport) [32]u8 {
 
 fn hashFill(fill: *const Fill) [32]u8 {
     var hasher = Sha256.init(.{});
+    if (fill.forced_kind) |kind| hasher.update(&.{ 1, @intFromEnum(kind) }) else hasher.update(&.{0});
     hashI64(&hasher, @intFromEnum(fill.venue_trade_id));
     hashU64(&hasher, @intFromEnum(fill.venue_order_id));
     hasher.update(fill.client_order_id.slice());
@@ -1983,6 +1997,36 @@ test "ready funding bills retain signed native settlement and independent bill i
     const repeated = try ingestTest(&reconciler, &sink, .rest_account_bills, .{ .final = true }, frame);
     try std.testing.expect(repeated.rejection == null);
     try std.testing.expectEqual(@as(usize, 0), repeated.event_count);
+}
+
+test "03 explicit liquidation keeps signed trade identity without maker taker classification" {
+    var reconciler: Reconciler = .{};
+    var sink: TestRawSink = .{};
+    try establishPrivateStream(&reconciler, &sink);
+    try reconciler.beginReconciliation(sink.append_count);
+    try ingestRestRound(&reconciler, &sink);
+    _ = try reconciler.tryComplete();
+    try ingestRestRound(&reconciler, &sink);
+    _ = try reconciler.tryComplete();
+    while (reconciler.drainReconciled()) |_| {}
+    const frame =
+        \\{"code":"0","data":[{"instId":"BTC-USDT-SWAP","tradeId":"-9001","billId":"9002","ordId":"9003","clOrdId":"","category":"partial_liquidation","side":"sell","fillSz":"0.01","fillPx":"50000","fee":"-0.000001","feeCcy":"USDT","fillPnl":"-0.000002","execType":"","fillTime":"1800000000200"}]}
+    ;
+    const batch = try ingestTest(&reconciler, &sink, .rest_fills_history_swap, .{ .final = true }, frame);
+    try std.testing.expectEqual(@as(?RejectReason, null), batch.rejection);
+    try std.testing.expectEqual(@as(usize, 1), batch.event_count);
+    const fill = batch.eventSlice()[0].payload.fill;
+    try std.testing.expectEqual(@as(?ForcedExecutionKind, .partial_liquidation), fill.forced_kind);
+    try std.testing.expectEqual(@as(i64, -9001), @intFromEnum(fill.venue_trade_id));
+    try std.testing.expect(fill.liquidity == null);
+    const duplicate = try ingestTest(&reconciler, &sink, .rest_fills_history_swap, .{ .final = true }, frame);
+    try std.testing.expect(duplicate.rejection == null);
+    try std.testing.expectEqual(@as(usize, 0), duplicate.event_count);
+    var changed: [1024]u8 = undefined;
+    const count = std.mem.replace(u8, frame, "partial_liquidation", "full_liquidation", &changed);
+    try std.testing.expectEqual(@as(usize, 1), count);
+    const conflict = try ingestTest(&reconciler, &sink, .rest_fills_history_swap, .{ .final = true }, changed[0 .. frame.len - "partial_liquidation".len + "full_liquidation".len]);
+    try std.testing.expectEqual(RejectReason.conflicting_fact, conflict.rejection.?);
 }
 
 test "raw evidence precedes private decode failure" {

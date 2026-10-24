@@ -33,7 +33,26 @@ pub const SimulatedVenue = struct {
             .try_send = send,
             .try_drain = drain,
             .stop = stop,
+            .prepare_client_order_id = prepareClientOrderId,
         } };
+    }
+
+    fn prepareClientOrderId(_: *anyopaque, namespace: [16]u8, account: canonical.ExchangeAccountIdentity, order_id: u64, _: canonical.ClientOrderId) !canonical.ClientOrderId {
+        if (account == 0 or order_id == 0) return error.InvalidOrderIdentity;
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hash.update("Ringwin Simulated clOrdId v1");
+        hash.update(&namespace);
+        var identity: [64]u8 = undefined;
+        hash.update(try std.fmt.bufPrint(&identity, "{x}:{x}", .{ account, order_id }));
+        var digest: [32]u8 = undefined;
+        hash.final(&digest);
+        var prefix: [14]u8 = undefined;
+        @memcpy(&prefix, digest[0..14]);
+        const hex = std.fmt.bytesToHex(prefix, .upper);
+        var text: [32]u8 = undefined;
+        @memcpy(text[0..4], "SIM1");
+        @memcpy(text[4..], &hex);
+        return canonical.ClientOrderId.init(&text);
     }
 
     fn start(ptr: *anyopaque, config: venue.VenueConfig) venue.StartError!void {
@@ -142,6 +161,7 @@ pub const SimulatedVenue = struct {
     }
 
     fn emitOrderCommand(self: *SimulatedVenue, batch: *canonical.AdapterOutputBatch, binding: Binding, command: canonical.OrderCommand) !void {
+        const source_order_identity = self.next_event_identity;
         const dispatch_state: canonical.DispatchState = if (self.unknown_order != null and command.operation != .cancel)
             .not_sent
         else if (command.dispatch_deadline_monotonic_ns == 0)
@@ -150,8 +170,9 @@ pub const SimulatedVenue = struct {
             .not_sent
         else
             .submitted;
-        try self.append(batch, binding, command.identity, .{ .order_dispatch_result = .{
+        try self.append(batch, binding, self.next_event_identity, .{ .order_dispatch_result = .{
             .command = command.identity,
+            .client_order_id = command.client_order_id,
             .state = dispatch_state,
         } });
         if (dispatch_state == .unknown) self.unknown_order = command.identity;
@@ -164,11 +185,11 @@ pub const SimulatedVenue = struct {
             .rules_version = command.rules_version,
             .lots = 0,
         };
-        const venue_order = try venueOrder(binding.venue, command.identity);
+        const venue_order = command.venue_order orelse try venueOrder(binding.venue, source_order_identity);
         switch (command.operation) {
             .place => {
-                try self.append(batch, binding, command.identity + 1, .{ .execution_report = .{
-                    .identity = command.identity + 1,
+                try self.append(batch, binding, self.next_event_identity, .{ .execution_report = .{
+                    .identity = self.next_event_identity,
                     .order = command.identity,
                     .client_order_id = command.client_order_id,
                     .venue_order = venue_order,
@@ -186,12 +207,12 @@ pub const SimulatedVenue = struct {
                 const first_rebate = if (split) @divTrunc(command.rebate_atoms, 2) else command.rebate_atoms;
                 const first_realized_pnl = if (split) @divTrunc(command.realized_pnl_atoms, 2) else command.realized_pnl_atoms;
                 const first = canonical.InstrumentQuantity{ .instrument = quantity.instrument, .rules_version = quantity.rules_version, .lots = if (split) first_quantity else quantity.lots };
-                try self.append(batch, binding, command.identity + 2, .{ .fill = .{
-                    .identity = command.identity + 2,
+                try self.append(batch, binding, self.next_event_identity, .{ .fill = .{
+                    .identity = self.next_event_identity,
                     .order = command.identity,
                     .client_order_id = command.client_order_id,
                     .venue_order = venue_order,
-                    .venue_trade = try venueTrade(binding.venue, command.identity, 1),
+                    .venue_trade = try venueTrade(binding.venue, self.next_event_identity, 1),
                     .instrument = command.instrument,
                     .exchange_account = command.exchange_account,
                     .side = command.side,
@@ -204,8 +225,8 @@ pub const SimulatedVenue = struct {
                 } });
                 if (split) {
                     const remaining = canonical.InstrumentQuantity{ .instrument = quantity.instrument, .rules_version = quantity.rules_version, .lots = quantity.lots - first_quantity };
-                    try self.append(batch, binding, command.identity + 3, .{ .execution_report = .{
-                        .identity = command.identity + 3,
+                    try self.append(batch, binding, self.next_event_identity, .{ .execution_report = .{
+                        .identity = self.next_event_identity,
                         .order = command.identity,
                         .client_order_id = command.client_order_id,
                         .venue_order = venue_order,
@@ -217,12 +238,12 @@ pub const SimulatedVenue = struct {
                         .cumulative_quantity = first,
                         .remaining_quantity = remaining,
                     } });
-                    try self.append(batch, binding, command.identity + 4, .{ .fill = .{
-                        .identity = command.identity + 4,
+                    try self.append(batch, binding, self.next_event_identity, .{ .fill = .{
+                        .identity = self.next_event_identity,
                         .order = command.identity,
                         .client_order_id = command.client_order_id,
                         .venue_order = venue_order,
-                        .venue_trade = try venueTrade(binding.venue, command.identity, 2),
+                        .venue_trade = try venueTrade(binding.venue, self.next_event_identity, 2),
                         .instrument = command.instrument,
                         .exchange_account = command.exchange_account,
                         .side = command.side,
@@ -234,9 +255,8 @@ pub const SimulatedVenue = struct {
                         .liquidity = command.liquidity,
                     } });
                 }
-                const final_offset: u128 = if (split) 5 else 3;
-                try self.append(batch, binding, command.identity + final_offset, .{ .execution_report = .{
-                    .identity = command.identity + final_offset,
+                try self.append(batch, binding, self.next_event_identity, .{ .execution_report = .{
+                    .identity = self.next_event_identity,
                     .order = command.identity,
                     .client_order_id = command.client_order_id,
                     .venue_order = venue_order,
@@ -249,8 +269,8 @@ pub const SimulatedVenue = struct {
                     .remaining_quantity = zero_quantity,
                 } });
             },
-            .amend, .cancel => try self.append(batch, binding, command.identity + 1, .{ .execution_report = .{
-                .identity = command.identity + 1,
+            .amend, .cancel => try self.append(batch, binding, self.next_event_identity, .{ .execution_report = .{
+                .identity = self.next_event_identity,
                 .order = command.identity,
                 .client_order_id = command.client_order_id,
                 .venue_order = venue_order,

@@ -307,7 +307,15 @@ pub const FundingCoreTimes = struct {
     wall: u64,
     presence: @import("../persistence/journal.zig").TimePresence,
 };
+pub const FundingOwnership = struct {
+    binding: @import("../trading/deployment_allocation.zig").BindingRecord,
+    account: u128,
+    instrument: u128,
+    source_identity: u128,
+    source_digest: [32]u8,
+};
 pub const FundingSource = struct {
+    ownership: ?FundingOwnership = null,
     canonical_funding: ?canonical.FundingSettlement = null,
     canonical_envelope: ?canonical.EventEnvelope = null,
     core_event_identity: u64 = 0,
@@ -352,7 +360,7 @@ pub const ForcedSource = struct {
     core_event_identity: u64 = 0,
     core_times: ?FundingCoreTimes = null,
     core_payload_len: u16 = 0,
-    core_payload_bytes: [256]u8 = @splat(0),
+    core_payload_bytes: [2048]u8 = @splat(0),
     accepted_input_digest: history.Digest = @splat(0),
     exchange_account: u128 = 0,
     portfolio: u128 = 0,
@@ -736,7 +744,7 @@ pub const Projection = struct {
         try validateFundingSource(funding, source);
         var candidate = self.*;
         const before_count = candidate.applied_funding_count;
-        try candidate.applyFunding(funding);
+        try candidate.applyFunding(funding, source.ownership != null);
         if (candidate.applied_funding_count == before_count) {
             for (candidate.applied_fundings[0..candidate.applied_funding_count]) |known| if (known.funding.identity == funding.identity) {
                 if (!std.meta.eql(known.source, source)) return error.ConflictingEconomicIdentity;
@@ -761,7 +769,7 @@ pub const Projection = struct {
         };
         const known = applied orelse return error.UnknownEconomicFunding;
         if (!known.funding.portfolio_ownership_proven or !known.portfolio_applied or known.source.received_time_utc_ns == 0 or known.source.received_monotonic_ns == 0 or known.source.exchange_time_utc_ns == null or known.source.exchange_time_utc_ns.? == 0 or
-            known.source.exchange_account == 0 or known.source.portfolio == 0 or known.source.strategy == 0 or known.source.instrument == 0 or known.source.rules_version == 0 or
+            known.source.exchange_account == 0 or known.source.portfolio == 0 or (known.source.strategy == 0 and known.source.ownership == null) or known.source.instrument == 0 or known.source.rules_version == 0 or
             (known.source.canonical_funding == null and known.source.core_payload_len == 0)) return error.FundingArchivePinned;
         if (known.source.canonical_funding == null and (known.source.core_event_identity == 0 or known.source.core_times == null)) return error.FundingArchivePinned;
         if ((origin.scope == .account and known.source.exchange_account != origin.account) or known.source.exchange_account == 0) return error.InvalidFundingArchiveOrigin;
@@ -1028,7 +1036,7 @@ pub const Projection = struct {
     fn applyEvent(self: *Projection, event: Event) !void {
         switch (event) {
             .fill => |fill| try self.applyMirroredFill(fill, .fill),
-            .funding_settlement => |funding| try self.applyFunding(funding),
+            .funding_settlement => |funding| try self.applyFunding(funding, false),
             .venue_forced_execution => |forced| try self.applyForced(forced),
             .account_snapshot => |snapshot| try self.reconcile(snapshot),
             .mark_price => |price| try self.valueAt(price),
@@ -1434,7 +1442,7 @@ pub const Projection = struct {
         return true;
     }
 
-    fn applyFunding(self: *Projection, funding: FundingSettlement) !void {
+    fn applyFunding(self: *Projection, funding: FundingSettlement, deployment_owned: bool) !void {
         if (funding.amount.asset != self.settlement_asset) return error.InvalidEconomicFact;
         if (funding.canonical_digest) |digest_value| if (try self.lookupCanonicalFunding(funding.identity, digest_value)) return;
         const amount = funding.amount.atoms;
@@ -1442,11 +1450,12 @@ pub const Projection = struct {
         if (try self.remember(funding.identity, .funding, fingerprint)) return;
         self.seen[self.seen_count - 1].canonical_digest = funding.canonical_digest;
         if (self.applied_funding_count == self.applied_fundings.len) return error.EconomicFactCapacityExceeded;
-        const portfolio_applied = funding.portfolio_ownership_proven and self.portfolio.swap.quantity != 0;
+        // A proven historical bill remains owned after the position has closed.
+        const portfolio_applied = funding.portfolio_ownership_proven and (deployment_owned or self.portfolio.swap.quantity != 0);
         self.applied_fundings[self.applied_funding_count] = .{ .funding = funding, .portfolio_applied = portfolio_applied, .source_digest = try fundingSourceDigest(funding, .{}), .payload_digest = fundingEconomicDigest(funding, portfolio_applied) };
         self.applied_funding_count += 1;
         self.cumulative_funding_absolute_atoms = try std.math.add(i128, self.cumulative_funding_absolute_atoms, try fundingAbsoluteAmount(funding));
-        if (!funding.portfolio_ownership_proven or self.portfolio.swap.quantity == 0) {
+        if (!portfolio_applied) {
             self.exchange.usdt_balance_atoms = try std.math.add(i128, self.exchange.usdt_balance_atoms, amount);
             self.exchange.funding_atoms = try std.math.add(i128, self.exchange.funding_atoms, amount);
             self.suspense_usdt_atoms = try std.math.add(i128, self.suspense_usdt_atoms, amount);
@@ -2038,7 +2047,19 @@ fn validateForcedSource(forced: VenueForcedExecution, source: ForcedSource) !voi
     if (source.instrument != 0 and (source.instrument != forced.quantity.instrument or source.rules_version != forced.quantity.rules_version)) return error.InvalidEconomicFact;
     if (source.core_payload_len != 0) {
         const original = try codec.decodeBare(source.core_payload_bytes[0..source.core_payload_len], @import("../trading/trading_shard_event.zig").VenueForcedExecution);
-        if (original.execution_id != forced.identity or original.source_identity != forced.source_identity or
+        if (original.canonical_source) |origin| {
+            try origin.validate();
+            const execution = origin.execution;
+            if (execution.identity != forced.source_identity or execution.exchange_account != source.exchange_account or
+                execution.instrument != source.instrument or execution.rules_version != source.rules_version or
+                execution.quantity.lots < forced.quantity.lots or execution.price.ticks != forced.price.ticks or
+                @intFromEnum(execution.side) != @intFromEnum(forced.side) or
+                execution.fee == null or execution.penalty == null or execution.realized_pnl == null or
+                execution.fee.?.asset != forced.fee.asset or execution.penalty.?.asset != forced.penalty.asset or
+                execution.realized_pnl.?.asset != forced.fee.asset or
+                execution.fee.?.atoms < forced.fee.atoms or execution.penalty.?.atoms < forced.penalty.atoms) return error.InvalidEconomicFact;
+        }
+        if ((original.instrument != 0 and (original.instrument != forced.quantity.instrument or original.rules_version != forced.quantity.rules_version)) or original.execution_id != forced.identity or original.source_identity != forced.source_identity or
             @intFromEnum(original.side) != @intFromEnum(forced.side) or original.quantity != forced.quantity.lots or original.price_ticks != forced.price.ticks or
             original.fee_atoms != forced.fee.atoms or original.penalty_atoms != forced.penalty.atoms or !std.meta.eql(original.expected_realized_pnl_atoms, forced.expected_realized_pnl_atoms)) return error.InvalidEconomicFact;
     }
@@ -2073,8 +2094,15 @@ fn validateFundingSource(funding: FundingSettlement, source: FundingSource) !voi
     if (source.canonical_funding) |original| {
         if (original.identity != funding.identity or original.exchange_account != source.exchange_account or
             original.instrument != source.instrument or original.rules_version != source.rules_version or
+            source.exchange_time_utc_ns != original.settlement_time_utc_ns or
             !std.meta.eql(original.amount, funding.amount) or funding.canonical_digest == null or
-            funding.portfolio_ownership_proven or !std.mem.eql(u8, &funding.canonical_digest.?, &try fundingSourceDigest(funding, source))) return error.InvalidEconomicFact;
+            (funding.portfolio_ownership_proven != (source.ownership != null)) or !std.mem.eql(u8, &funding.canonical_digest.?, &try fundingSourceDigest(funding, source))) return error.InvalidEconomicFact;
+    }
+    if (source.ownership) |proof| {
+        if (source.canonical_funding == null or proof.account != source.exchange_account or proof.instrument != source.instrument or
+            proof.source_identity != funding.identity or proof.binding.portfolio == 0 or proof.binding.portfolio != source.portfolio or
+            proof.binding.domain == 0 or proof.binding.stream == 0 or proof.binding.deployment == 0 or proof.binding.epoch == 0 or
+            !std.mem.eql(u8, &proof.source_digest, &try fundingSourceDigest(funding, source))) return error.InvalidEconomicFact;
     }
     if (source.core_payload_len != 0) {
         const original = try codec.decodeBare(source.core_payload_bytes[0..source.core_payload_len], @import("../trading/trading_shard_event.zig").FundingSettlement);

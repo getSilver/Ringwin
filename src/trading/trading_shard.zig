@@ -210,7 +210,9 @@ const CanonicalIngressCursor = struct {
 
 pub const DispatchIngressBody = struct {
     command: u64,
+    client_order_id: canonical.ClientOrderId = .{},
     state: canonical.DispatchState,
+    reason: ?canonical.CanonicalRejectReason = null,
     venue: canonical.VenueIdentity,
     account: canonical.ExchangeAccountIdentity,
     canonical_digest: [32]u8,
@@ -1524,7 +1526,8 @@ pub const TradingShard = struct {
                         }
                     },
                     .instrument_rules_activated => |rules| {
-                        if (rules.venue != account.venue or self.deployment.owner(expected, rules.instrument_identity) != self.decision_domain_identity) return error.CanonicalScopeMismatch;
+                        // Shared physical account observations need every deployed instrument's validation rules.
+                        if (rules.venue != account.venue or self.deployment.owner(expected, rules.instrument_identity) == null) return error.CanonicalScopeMismatch;
                     },
                     .virtual_portfolio_activated => |activation| {
                         if (activation.portfolio_identity != self.deployment.domain(self.decision_domain_identity).?.portfolio) return error.InvalidVirtualPortfolio;
@@ -3161,6 +3164,7 @@ pub const TradingShard = struct {
         }
         const fact_identity = record.envelope.identity.sequence;
         switch (record.event) {
+            .forced_execution => return error.ForcedAllocationRequired,
             .economic_fault => |fault| {
                 if (record.envelope.scope != .account or record.envelope.exchange_account != self.exchange_account_identity)
                     return error.CanonicalScopeMismatch;
@@ -3181,8 +3185,18 @@ pub const TradingShard = struct {
                     return error.UnresolvedSettlementBoundary;
                 try self.checkAssetAmounts(settlement.amount, true);
                 const identity = std.math.cast(u64, settlement.identity) orelse return error.IdentityOutOfRange;
-                // A historical bill does not prove portfolio holdings at its settlement time.
-                const changed = try self.applyFundingProjection(.{ .identity = identity, .amount = settlement.amount, .canonical_digest = try canonicalPayloadDigest(record.event) }, .{
+                // Only immutable deployment ownership can attribute a historical bill.
+                const canonical_digest = try canonicalPayloadDigest(record.event);
+                const funding_ownership: ?economics_module.FundingOwnership = if (self.deployment.owner(settlement.exchange_account, settlement.instrument) == self.decision_domain_identity and self.decision_domain_identity != 0) .{
+                    .binding = try self.deployment.bindingRecord(self.decision_domain_identity, self.decision_stream_identity),
+                    .account = settlement.exchange_account,
+                    .instrument = settlement.instrument,
+                    .source_identity = settlement.identity,
+                    .source_digest = canonical_digest,
+                } else null;
+                const changed = try self.applyFundingProjection(.{ .identity = identity, .amount = settlement.amount, .canonical_digest = canonical_digest, .portfolio_ownership_proven = funding_ownership != null }, .{
+                    .ownership = funding_ownership,
+                    .portfolio = if (funding_ownership != null) self.portfolio_identity else 0,
                     .canonical_funding = settlement,
                     .canonical_envelope = record.envelope,
                     .audit_time_utc_ns = record.envelope.times.audit_utc_ns,
@@ -3737,7 +3751,7 @@ pub const TradingShard = struct {
                 try self.validateHistoryEnvelope(record, command.instrument);
                 break;
             };
-        return .{ .command = command_id, .state = record.event.order_dispatch_result.state, .venue = record.envelope.venue, .account = self.exchange_account_identity, .canonical_digest = try canonicalPayloadDigest(record.event) };
+        return .{ .command = command_id, .client_order_id = record.event.order_dispatch_result.client_order_id, .state = record.event.order_dispatch_result.state, .reason = record.event.order_dispatch_result.reason, .venue = record.envelope.venue, .account = self.exchange_account_identity, .canonical_digest = try canonicalPayloadDigest(record.event) };
     }
 
     fn semanticDuplicate(self: *TradingShard, record: canonical.EventRecord) !bool {
@@ -5552,7 +5566,23 @@ pub const TradingShard = struct {
                 }
             },
             .venue_forced_execution => |forced| {
-                const instrument_config = self.singleProductEntry(.isolated_linear_usdt) orelse return error.UnknownOmsInstrument;
+                const instrument_config = (if (forced.instrument != 0) self.instrumentEntry(forced.instrument) else self.singleProductEntry(.isolated_linear_usdt)) orelse return error.UnknownOmsInstrument;
+                if (forced.instrument != 0 and forced.rules_version != instrument_config.rules.version) return error.StaleInstrumentRules;
+                if (forced.canonical_source) |origin| {
+                    try origin.validate();
+                    const execution = origin.execution;
+                    if (forced.instrument == 0 or execution.exchange_account != self.exchange_account_identity or
+                        origin.envelope.exchange_account != self.exchange_account_identity or origin.envelope.instrument != forced.instrument or
+                        origin.envelope.venue != instrument_config.venue or execution.instrument != forced.instrument or execution.rules_version != forced.rules_version or
+                        execution.identity != forced.source_identity or execution.fee == null or execution.penalty == null or execution.realized_pnl == null or
+                        execution.quantity.instrument != forced.instrument or execution.quantity.rules_version != forced.rules_version or execution.quantity.lots < forced.quantity or
+                        execution.price.instrument != forced.instrument or execution.price.rules_version != forced.rules_version or execution.price.ticks != forced.price_ticks or
+                        @intFromEnum(execution.side) != @intFromEnum(forced.side) or
+                        execution.fee.?.asset != instrument_config.rules.settlement_asset or execution.penalty.?.asset != instrument_config.rules.settlement_asset or
+                        execution.realized_pnl.?.asset != instrument_config.rules.settlement_asset or
+                        execution.fee.?.atoms < forced.fee_atoms or execution.penalty.?.atoms < forced.penalty_atoms)
+                        return error.InvalidEconomicFact;
+                }
                 if (!self.settlementConsumersCompatible(instrument_config.instrument)) return error.AssetPrecisionUnsupported;
                 var source: economics_module.ForcedSource = .{
                     .core_event_identity = input.identity,
@@ -5948,7 +5978,7 @@ fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: b
         const account_matches = if (shard.decision_domain_identity == 0) entry.body.account == shard.exchange_account_identity else shard.deployment.account(entry.body.account) != null;
         if (entry.body.command == 0 or !account_matches or entry.cursor.identity.stream == 0 or entry.cursor.identity.sequence == 0 or
             !std.mem.eql(u8, &entry.body.canonical_digest, &entry.cursor.payload_digest)) return error.InvalidSnapshotState;
-        const expected_digest = try canonicalPayloadDigest(.{ .order_dispatch_result = .{ .command = entry.body.command, .state = entry.body.state } });
+        const expected_digest = try canonicalPayloadDigest(.{ .order_dispatch_result = .{ .command = entry.body.command, .client_order_id = entry.body.client_order_id, .state = entry.body.state, .reason = entry.body.reason } });
         if (!std.mem.eql(u8, &entry.body.canonical_digest, &expected_digest)) return error.InvalidSnapshotState;
         var retained = false;
         for (shard.oms.command_history[0..shard.oms.command_history_count]) |command| if (command.command_id == entry.body.command) {
@@ -5962,6 +5992,16 @@ fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: b
             if (prior.body.command == entry.body.command and prior.body.state == entry.body.state) return error.InvalidSnapshotState;
     }
 
+    if (shard.economic_projection.applied_funding_count > shard.economic_projection.applied_fundings.len) return error.InvalidSnapshotState;
+    for (shard.economic_projection.applied_fundings[0..shard.economic_projection.applied_funding_count]) |applied| {
+        if (applied.source.ownership) |proof| {
+            if (shard.deployment.owner(proof.account, proof.instrument) != shard.decision_domain_identity or
+                proof.binding.portfolio != shard.portfolio_identity or proof.account != shard.exchange_account_identity)
+                return error.InvalidSnapshotState;
+            const binding = shard.deployment.bindingRecord(shard.decision_domain_identity, shard.decision_stream_identity) catch return error.InvalidSnapshotState;
+            if (!std.meta.eql(binding, proof.binding)) return error.InvalidSnapshotState;
+        }
+    }
     shard.trace.validate() catch return error.InvalidSnapshotState;
     if (shard.next_history_pending_id == 0) return error.InvalidSnapshotState;
     inline for (.{ .{ "pending_history_candidate", "pending_history_member_index" }, .{ "pending_safety_history_candidate", "pending_safety_history_member_index" } }) |fields| {
@@ -7827,4 +7867,54 @@ test "optimization owned Core and Venue rollback matches nested public candidate
         .cumulative_quantity = .{ .instrument = 3, .rules_version = 1, .lots = 0 },
         .remaining_quantity = .{ .instrument = 3, .rules_version = 1, .lots = 20 },
     } }));
+}
+
+test "03 canonical funding snapshot rejects forged deployment ownership evidence" {
+    const demo = @import("../runtime/demo/demo_authority.zig");
+    const durable = @import("../persistence/durable_store.zig");
+    const fixture = @import("../testing/support/trading_shard_fixture.zig");
+    const setup = @import("../testing/acceptance/core/shared_venue_delivery_acceptance.zig");
+    const allocator = std.testing.allocator;
+    const memory = try allocator.create(durable.MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .initWithAllocator(allocator);
+    defer memory.deinit();
+    const owner = try allocator.create(demo.Owner);
+    defer allocator.destroy(owner);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 9101 });
+    try setup.initialize(owner, 0);
+    var event = fixture.canonicalAt(30, 1, .{ .funding_settlement = .{
+        .identity = 500,
+        .exchange_account = 2,
+        .instrument = 1,
+        .rules_version = 1,
+        .venue_bill_id = 500,
+        .amount = .{ .asset = 1, .atoms = -3 },
+        .settlement_time_utc_ns = fixture.atGroup(30, .{ .identity = 0, .payload = .recovery_completed }).core.source_time,
+    } });
+    event.venue.envelope.instrument = 1;
+    event.venue.envelope.asset = 1;
+    _ = try owner.apply(event);
+    const original = owner.shard.economic_projection.applied_fundings[0].source.ownership.?;
+    const qualification = try owner.shard.economic_projection.prepareFundingArchive(500, original.binding.origin(), owner.shard.authoritativeBarrier());
+    try std.testing.expectEqualDeep(original, qualification.record.applied.source.ownership.?);
+    const bytes = try allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer allocator.free(bytes);
+    const restored = try allocator.create(TradingShard);
+    defer allocator.destroy(restored);
+    _ = try TradingShard.restoreSnapshotInto(restored, try owner.committedSnapshot(bytes));
+    for (0..4) |variant| {
+        var forged = original;
+        switch (variant) {
+            0 => forged.account = 3,
+            1 => forged.instrument = 2,
+            2 => forged.binding.domain = 2,
+            3 => forged.binding.configuration_digest[0] ^= 1,
+            else => unreachable,
+        }
+        owner.shard.economic_projection.applied_fundings[0].source.ownership = forged;
+        try std.testing.expectError(error.InvalidSnapshotState, TradingShard.restoreSnapshotInto(restored, try owner.committedSnapshot(bytes)));
+    }
+    owner.shard.economic_projection.applied_fundings[0].source.ownership = original;
+    try std.testing.expectEqual(@as(i128, 22), owner.shard.economic_projection.portfolio.usdt_balance_atoms);
 }

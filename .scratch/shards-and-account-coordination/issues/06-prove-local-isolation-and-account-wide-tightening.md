@@ -11,3 +11,8 @@
 - [ ] 一个过载 shard 不阻塞其他 shard 消费共享市场/账户事实或提交合格命令；共享外围容量耗尽时产生逐项、可归属的稳定 backpressure 事实。
 - [ ] 上级账户 gate 恢复只移除该上级限制，不清除 shard 内 LatchedSafetyGate，也不自动恢复 TradingAuthorization；各 shard 独立完成原因解决和人工 resume。
 - [ ] 局部与账户级故障交错、重复、冲突和恢复轨迹在 live/replay 中保持相同 per-shard 状态、共享协调状态、撤单结果和摘要。
+
+
+## Handoff from 03 — unresolved account gate lifecycle
+
+The new Venue ingress keeps its broken flag sticky after unknown facts or source faults. A complete forced source also first enters the immutable targets-zero spool before typed allocation, so its economic allocation/ack can close while that ingress flag still holds currentLeaseEvents closed. This must be covered by the original account-gate recovery clauses here: distinguish unresolved/protocol faults from fully proved forced closure; require fresh authoritative evidence and explicit resolution; never clear a shard latch or restore TradingAuthorization as a side effect. Preserve the source/contribution/slice/ack history proof and reject a conflicting or unavailable closure. The current code is fail-closed; 03 does not claim account-wide reauthorization.

@@ -3,10 +3,27 @@ const durable = @import("../persistence/durable_store.zig");
 const trading = @import("../trading/trading_shard.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const snapshot_magic: u64 = 0x54434341574e4952;
-const coordinator_snapshot_version: u16 = 13;
+const coordinator_snapshot_version: u16 = 16;
+const ingress = @import("shared_venue_ingress.zig");
+const canonical = @import("../model/canonical_event.zig");
 const history = @import("../persistence/business_history.zig");
 const codec = @import("../persistence/snapshot_codec.zig");
 const account_margin_gate_identity: u128 = 0x414343544d415247;
+
+const VenueAccountView = struct {
+    economics: *const @import("economics.zig").Projection,
+    instruments: *const @import("../trading/instrument_registry.zig").Registry,
+};
+
+fn venueAccountView(shard: *const trading.TradingShard, account: u128) ?VenueAccountView {
+    if (shard.exchange_account_identity == account and shard.account_configured)
+        return .{ .economics = &shard.economic_projection, .instruments = &shard.instrument_registry };
+    for (shard.secondary_accounts[0..shard.secondary_account_count]) |*partition| {
+        if (partition.identity == account and partition.state.account_configured)
+            return .{ .economics = &partition.state.economic_projection, .instruments = &partition.state.instrument_registry };
+    }
+    return null;
+}
 
 fn summaryOrderCountsValid(open: u16, unknown: u16) bool {
     return @as(u32, open) + unknown <= trading.oms.max_live_orders;
@@ -101,11 +118,20 @@ pub const RiskLease = struct {
 /// Account-wide observations normalized once before deterministic fan-out.
 pub const AccountFactPayload = union(enum) {
     account_snapshot: struct { cash_atoms: i128, spot_asset_atoms: i128 = 0, swap_quantity: i64, margin_atoms: i128 },
-    forced_execution: struct { owner: ?ShardId, quantity: i64, price_ticks: i64, realized_pnl_atoms: i128 = 0, fee_atoms: i128, penalty_atoms: i128 = 0 },
+    forced_execution: struct { instrument: u128 = 0, rules_version: u64 = 0, owner: ?ShardId, quantity: i64, price_ticks: i64, realized_pnl_atoms: i128 = 0, fee_atoms: i128, penalty_atoms: i128 = 0 },
 };
 
 /// Account-wide observations normalized once before deterministic fan-out.
+pub const ForcedContributionBasis = struct {
+    positions: [max_shards]i64,
+    owners: [max_shards]ForcedOwner,
+    barriers: [max_shards]u64,
+    digests: [max_shards][32]u8,
+    configuration_digest: [32]u8,
+};
 pub const AccountFact = struct {
+    canonical_source: ?canonical.ForcedExecutionSource = null,
+    contributions: ?ForcedContributionBasis = null,
     times: ?@import("economics.zig").FundingCoreTimes = null,
     identity: u128,
     exchange_account: u128,
@@ -174,7 +200,16 @@ pub const GateDelivery = struct { shard_id: ShardId, gate: AccountGate };
 /// One durable coordinator input that can be replayed after a coordinator snapshot.
 const SummaryPublication = struct { identity: u128, summary: ShardSummary };
 
+const VenueSpool = struct { record: canonical.EventRecord, targets: u4 };
+const ArchivedVenue = struct { fact: VenueSpool, receipt: history.Receipt };
+const DuplicateVenue = struct { record: canonical.EventRecord, proof: history.LookupProof };
+
 pub const CoordinationEvent = union(enum) {
+    venue_archived: ArchivedVenue,
+    venue_duplicate: DuplicateVenue,
+    venue_fact: struct { record: canonical.EventRecord, targets: u4 },
+    venue_ack: struct { barrier: u64, shard: u2 },
+    venue_fault: u128,
     publish_summary: SummaryPublication,
     summary_protocol_fault: SummaryPublication,
     expire_leases: u64,
@@ -239,6 +274,7 @@ pub fn accountFactEvent(delivery: Delivery) !trading.CoreEvent {
         (delivery.allocation_identity == 0 or delivery.source_identity == 0)) return error.UnallocatedForcedExecution;
     return .{
         .identity = identity,
+        .account_scope = if (delivery.fact.canonical_source != null) delivery.fact.exchange_account else null,
         .source_time = if (delivery.fact.times) |times| times.source else 0,
         .receive_time = if (delivery.fact.times) |times| times.receive else 0,
         .monotonic_time = if (delivery.fact.times) |times| times.monotonic else 0,
@@ -254,6 +290,9 @@ pub fn accountFactEvent(delivery: Delivery) !trading.CoreEvent {
             } },
             .forced_execution => |execution| .{ .venue_forced_execution = .{
                 .execution_id = identity,
+                .instrument = execution.instrument,
+                .rules_version = execution.rules_version,
+                .canonical_source = delivery.fact.canonical_source,
                 .source_identity = delivery.source_identity,
                 .side = if (execution.quantity < 0) .sell else .buy,
                 .quantity = if (execution.quantity == std.math.minInt(i64))
@@ -574,6 +613,7 @@ fn commandFixture(command_id: u64, order_id: u64) trading.oms.Command {
 
 /// Fixed-capacity owner of cross-shard leases and account reconciliation only.
 pub const AccountCoordinator = struct {
+    venue_ingress: ingress.State = .{},
     exchange_account: u128,
     account_safety_ceiling_atoms: i128,
     global_ceiling_atoms: i128,
@@ -638,9 +678,14 @@ pub const AccountCoordinator = struct {
 
     pub fn accountFactHistoryRequest(self: *const AccountCoordinator, fact: AccountFact, pending_id: u128) history.LookupRequest {
         const root = self.history_root.?;
-        var bytes: [1024]u8 = undefined;
+        var bytes: [4096]u8 = undefined;
         const value = history.hash(codec.encodeBare(&bytes, fact) catch unreachable);
         return .{ .pending_id = pending_id, .key = .{ .origin = root.origin, .identity = .{ .coordinator_account_fact = fact.identity } }, .candidate_payload_digest = value, .original_input_digest = value, .root_digest = root.root_digest, .epoch = root.epoch, .barrier = root.barrier };
+    }
+
+    fn venueHistoryRequest(self: *const AccountCoordinator, record: canonical.EventRecord, pending_id: u128) !history.LookupRequest {
+        const digest_value = history.hash(&try ingress.semanticDigest(record));
+        return venueLookupRequest(self.history_root.?, .{ .coordinator_venue_fact = .{ .kind = record.envelope.event_type, .identity = record.envelope.source_fact_identity } }, digest_value, pending_id);
     }
 
     pub fn gatewayHistoryRequest(self: *const AccountCoordinator, record: GatewayRecord, pending_id: u128) history.LookupRequest {
@@ -715,7 +760,11 @@ pub const AccountCoordinator = struct {
     /// Computes a stable digest of coordination-owned state only.
     pub fn digest(self: *const AccountCoordinator) [Sha256.digest_length]u8 {
         var hasher = Sha256.init(.{});
-        hasher.update("coordinator-history-v12");
+        hasher.update("coordinator-history-v15");
+        var ingress_bytes: [80000]u8 = undefined;
+        var ingress_writer: std.Io.Writer = .fixed(&ingress_bytes);
+        self.venue_ingress.write(&ingress_writer) catch unreachable;
+        hasher.update(ingress_writer.buffered());
         if (self.history_root) |root| hasher.update(&root.root_digest);
         var gateway_bytes: [1024]u8 = undefined;
         digestInt(&hasher, u128, self.gateway_ownership.exchange_account);
@@ -801,6 +850,7 @@ pub const AccountCoordinator = struct {
     pub fn allocateLeases(self: *AccountCoordinator, version: u64, valid_through_barrier: u64) ![]const RiskLease {
         if (self.summary_protocol_fault) return error.SummaryProtocolFault;
         if (self.recovery_only) return error.CoordinatorRecoveryOnly;
+        if (self.venue_ingress.broken) return error.AccountGateClosed;
         if (self.margin_gate.latched or self.margin_reconciliation_state == .broken)
             return error.MarginReconciliationRequired;
         if (version == 0 or valid_through_barrier < self.barrier) return error.InvalidRiskLease;
@@ -934,8 +984,8 @@ pub const AccountCoordinator = struct {
                 self.forced_allocation_count = 0;
                 self.forced_execution_source = fact;
                 for (self.summaries, 0..) |summary, index| {
-                    self.forced_source_positions[index] = if (summary.present) summary.value.swap_quantity else 0;
-                    self.forced_source_owners[index] = if (summary.present) .{ .portfolio = summary.value.virtual_portfolio, .decision_domain = summary.value.decision_domain } else .{};
+                    self.forced_source_positions[index] = if (fact.contributions) |basis| basis.positions[index] else if (summary.present) summary.value.swap_quantity else 0;
+                    self.forced_source_owners[index] = if (fact.contributions) |basis| basis.owners[index] else if (summary.present) .{ .portfolio = summary.value.virtual_portfolio, .decision_domain = summary.value.decision_domain } else .{};
                 }
                 self.suspense_forced_execution = fact;
                 self.reconciliation_break_identity = fact.identity;
@@ -1048,6 +1098,8 @@ pub const AccountCoordinator = struct {
                 var fact = source;
                 fact.identity = try std.math.add(u64, try std.math.mul(u64, @intCast(record.allocation.identity), max_shards), @intCast(index + 1));
                 fact.payload.forced_execution = .{
+                    .instrument = source.payload.forced_execution.instrument,
+                    .rules_version = source.payload.forced_execution.rules_version,
                     .owner = slice.owner,
                     .quantity = slice.quantity,
                     .price_ticks = source.payload.forced_execution.price_ticks,
@@ -1168,6 +1220,7 @@ pub const AccountCoordinator = struct {
     /// Clears the account margin latch only after healthy evidence and explicit resolution.
     pub fn resolveMarginGate(self: *AccountCoordinator, observation_identity: u128) !AccountGate {
         if (self.suspense_forced_execution != null) return error.ForcedExecutionReconciliationBreak;
+        if (self.venue_ingress.broken) return error.AccountGateClosed;
         const observation = self.last_margin_observation orelse return error.MarginObservationRequired;
         if (observation.identity != observation_identity) return error.MarginObservationIdentityConflict;
         const projected = try self.projectAccounts();
@@ -1272,6 +1325,7 @@ pub const AccountCoordinator = struct {
 
     /// Returns stable events carrying every current lease to its owning shard.
     pub fn currentLeaseEvents(self: *const AccountCoordinator, events: *[max_shards]trading.CoreEvent) ![]const trading.CoreEvent {
+        if (self.venue_ingress.broken) return error.AccountGateClosed;
         for (self.leases[0..self.lease_count], 0..) |lease, index|
             events[index] = try riskLeaseEvent(lease);
         return events[0..self.lease_count];
@@ -1294,6 +1348,7 @@ pub const AccountCoordinator = struct {
     /// Leaves RecoveryOnly only after current leases and account reconciliation are healthy.
     pub fn completeRecovery(self: *AccountCoordinator) !void {
         if (self.summary_protocol_fault) return error.SummaryProtocolFault;
+        if (self.venue_ingress.broken) return error.AccountGateClosed;
         if (!self.recovery_only) return error.CoordinatorNotRecovering;
         if (self.suspense_forced_execution != null) return error.ForcedExecutionReconciliationBreak;
         if (self.recovery_margin_identity == 0) return error.FreshMarginObservationRequired;
@@ -1316,6 +1371,42 @@ pub const AccountCoordinator = struct {
 
     fn applyEvent(self: *AccountCoordinator, event: CoordinationEvent) !void {
         switch (event) {
+            .venue_archived => |archived| {
+                var bytes: [history.max_record_bytes]u8 = undefined;
+                const qualification = history.hash(try codec.encodeBare(&bytes, archived.fact));
+                const origin: history.Origin = .{ .stream = archived.receipt.root.origin.stream, .account = self.exchange_account };
+                if (origin.stream.domain != .control) return error.InvalidCoordinatorHistoryOrigin;
+                const root = try history.verifyReceipt(archived.receipt, origin, qualification, self.history_root);
+                try self.venue_ingress.acceptArchived(archived.fact.record, archived.fact.targets, false);
+                self.history_root = root;
+                if (archived.fact.record.event == .economic_fault) self.venue_ingress.broken = true;
+                if (self.venue_ingress.broken) {
+                    self.recovery_only = true;
+                    self.reconciliation_break_identity = archived.fact.record.envelope.source_fact_identity;
+                    self.margin_gate = .{ .identity = archived.fact.record.envelope.source_fact_identity, .open = false, .latched = true };
+                }
+            },
+            .venue_duplicate => |duplicate| {
+                const request = try self.venueHistoryRequest(duplicate.record, duplicate.proof.request.pending_id);
+                if (try history.verifyResult(request, &duplicate.proof, self.history_root.?) != .same) return error.VenueFactIdentityConflict;
+                try self.venue_ingress.acceptArchived(duplicate.record, 0, true);
+            },
+            .venue_fact => |fact| {
+                _ = try self.venue_ingress.accept(fact.record, fact.targets);
+                if (fact.record.event == .economic_fault) self.venue_ingress.broken = true;
+                if (self.venue_ingress.broken) {
+                    self.recovery_only = true;
+                    self.reconciliation_break_identity = fact.record.envelope.source_fact_identity;
+                    self.margin_gate = .{ .identity = fact.record.envelope.source_fact_identity, .open = false, .latched = true };
+                }
+            },
+            .venue_fault => |identity| {
+                self.venue_ingress.broken = true;
+                self.recovery_only = true;
+                self.reconciliation_break_identity = identity;
+                self.margin_gate = .{ .identity = identity, .open = false, .latched = true };
+            },
+            .venue_ack => |ack| try self.venue_ingress.acknowledge(ack.barrier, ack.shard),
             .publish_summary => |publish| _ = try self.publishSummary(publish.identity, publish.summary),
             .summary_protocol_fault => {
                 self.latchSummaryFault();
@@ -1471,6 +1562,7 @@ pub const AccountCoordinator = struct {
             try writer.writeInt(u16, @intCast(encoded_record.len), .little);
             try writer.writeAll(encoded_record);
         }
+        try self.venue_ingress.write(&writer);
         const digest_value = self.digest();
         try writer.writeAll(&digest_value);
         return writer.buffered();
@@ -1569,6 +1661,7 @@ pub const AccountCoordinator = struct {
                 record.fencing_token > result.gateway_ownership.latest_fencing_tokens[@intFromEnum(record.shard_id)])
                 return error.InvalidCoordinatorSnapshot;
         }
+        result.venue_ingress = try ingress.State.read(&reader);
         const expected = try reader.take(32);
         const encoded_digest = result.digest();
         if (reader.seek != encoded.len or !std.mem.eql(u8, expected, &encoded_digest))
@@ -1581,6 +1674,11 @@ pub const AccountCoordinator = struct {
 
 fn coordinationEventType(event: CoordinationEvent) u16 {
     return switch (event) {
+        .venue_archived => 22,
+        .venue_duplicate => 23,
+        .venue_fact => 19,
+        .venue_ack => 20,
+        .venue_fault => 21,
         // Type 1 carried u8 counts and is retired, never guessed as this layout.
         .publish_summary => 14,
         .summary_protocol_fault => 15,
@@ -1668,6 +1766,8 @@ fn writeAccountFact(writer: *std.Io.Writer, fact: AccountFact) !void {
         },
         .forced_execution => |execution| {
             try writer.writeByte(1);
+            try writer.writeInt(u128, execution.instrument, .little);
+            try writer.writeInt(u64, execution.rules_version, .little);
             try writer.writeByte(@intFromBool(execution.owner != null));
             if (execution.owner) |owner| try writeScalar(writer, ShardId, owner);
             try writer.writeInt(i64, execution.quantity, .little);
@@ -1677,6 +1777,10 @@ fn writeAccountFact(writer: *std.Io.Writer, fact: AccountFact) !void {
             try writer.writeInt(i128, execution.penalty_atoms, .little);
         },
     }
+    var source_bytes: [4096]u8 = undefined;
+    const source_encoded = try codec.encodeBare(&source_bytes, .{ fact.canonical_source, fact.contributions });
+    try writer.writeInt(u16, @intCast(source_encoded.len), .little);
+    try writer.writeAll(source_encoded);
 }
 
 fn readAccountFact(reader: *std.Io.Reader) !AccountFact {
@@ -1694,6 +1798,8 @@ fn readAccountFact(reader: *std.Io.Reader) !AccountFact {
     const payload: AccountFactPayload = switch (try reader.takeByte()) {
         0 => .{ .account_snapshot = try readPlainStruct(reader, @FieldType(AccountFactPayload, "account_snapshot")) },
         1 => .{ .forced_execution = .{
+            .instrument = try reader.takeInt(u128, .little),
+            .rules_version = try reader.takeInt(u64, .little),
             .owner = if (try readBool(reader)) try readScalar(reader, ShardId) else null,
             .quantity = try reader.takeInt(i64, .little),
             .price_ticks = try reader.takeInt(i64, .little),
@@ -1703,12 +1809,19 @@ fn readAccountFact(reader: *std.Io.Reader) !AccountFact {
         } },
         else => return error.InvalidCoordinationTail,
     };
-    return .{ .identity = identity, .exchange_account = exchange_account, .version = version, .barrier = barrier, .times = times, .payload = payload };
+    const evidence_len = try reader.takeInt(u16, .little);
+    const evidence = try codec.decodeBare(try reader.take(evidence_len), struct { ?canonical.ForcedExecutionSource, ?ForcedContributionBasis });
+    return .{ .identity = identity, .exchange_account = exchange_account, .version = version, .barrier = barrier, .times = times, .payload = payload, .canonical_source = evidence[0], .contributions = evidence[1] };
 }
 
 fn encodeCoordinationEvent(destination: []u8, event: CoordinationEvent) ![]const u8 {
     var writer: std.Io.Writer = .fixed(destination);
     switch (event) {
+        .venue_archived => |fact| return codec.encodeBare(destination, fact),
+        .venue_duplicate => |fact| return codec.encodeBare(destination, fact),
+        .venue_fact => |fact| return codec.encodeBare(destination, fact),
+        .venue_fault => |identity| return codec.encodeBare(destination, identity),
+        .venue_ack => |ack| return codec.encodeBare(destination, ack),
         .publish_summary, .summary_protocol_fault => |publish| {
             try writer.writeInt(u128, publish.identity, .little);
             try writePlainStruct(&writer, ShardSummary, publish.summary);
@@ -1745,6 +1858,11 @@ fn decodeCoordinationEvent(record: trading.journal.Record) !CoordinationEvent {
         return error.InvalidCoordinationTail;
     var reader: std.Io.Reader = .fixed(record.payload);
     const event: CoordinationEvent = switch (record.type_id) {
+        21 => return .{ .venue_fault = try codec.decodeBare(record.payload, u128) },
+        22 => return .{ .venue_archived = try codec.decodeBare(record.payload, ArchivedVenue) },
+        23 => return .{ .venue_duplicate = try codec.decodeBare(record.payload, DuplicateVenue) },
+        19 => return .{ .venue_fact = try codec.decodeBare(record.payload, @FieldType(CoordinationEvent, "venue_fact")) },
+        20 => return .{ .venue_ack = try codec.decodeBare(record.payload, @FieldType(CoordinationEvent, "venue_ack")) },
         16 => .{ .expire_leases = try reader.takeInt(u64, .little) },
         17 => .{ .revoke_leases = try reader.takeInt(u64, .little) },
         18 => .requalify_summaries,
@@ -1912,6 +2030,10 @@ fn digestStruct(hasher: *Sha256, comptime T: type, value: T) void {
 }
 
 fn digestOptionalAccountFact(hasher: *Sha256, fact: ?AccountFact) void {
+    if (fact) |value| {
+        var bytes: [4096]u8 = undefined;
+        hasher.update(codec.encodeBare(&bytes, .{ value.canonical_source, value.contributions }) catch unreachable);
+    }
     hasher.update(&.{@intFromBool(fact != null)});
     const value = fact orelse return;
     digestInt(hasher, u128, value.identity);
@@ -1935,6 +2057,8 @@ fn digestOptionalAccountFact(hasher: *Sha256, fact: ?AccountFact) void {
             digestInt(hasher, u8, 1);
             hasher.update(&.{@intFromBool(execution.owner != null)});
             if (execution.owner) |owner| digestInt(hasher, u8, @intFromEnum(owner));
+            digestInt(hasher, u128, execution.instrument);
+            digestInt(hasher, u64, execution.rules_version);
             digestInt(hasher, i64, execution.quantity);
             digestInt(hasher, i64, execution.price_ticks);
             digestInt(hasher, i128, execution.realized_pnl_atoms);
@@ -3032,7 +3156,7 @@ pub const CoordinatorOwner = struct {
     pub fn apply(self: *CoordinatorOwner, event: CoordinationEvent) !void {
         if (self.closed) return error.CoordinatorWriterClosed;
         switch (event) {
-            .forced_delivery_ack, .gateway_retire, .forced_history_commit => return error.CoordinatorVerifiedInputRequired,
+            .forced_delivery_ack, .venue_fact, .venue_ack, .venue_fault, .venue_archived, .venue_duplicate, .gateway_retire, .forced_history_commit => return error.CoordinatorVerifiedInputRequired,
             .account_fact => |fact| {
                 // Resident original semantics already constitute exact evidence.
                 // A retry must not require release or become a second input.
@@ -3126,7 +3250,7 @@ pub const CoordinatorOwner = struct {
             records[index + 1] = .{ .bytes = encoded, .payload_digest = history.hash(encoded) };
             entries[index + 1] = .{ .key = .{ .origin = origin, .identity = .{ .coordinator_forced_allocation = record.allocation.identity } }, .record_index = @intCast(index + 1) };
         }
-        var fact_bytes: [1024]u8 = undefined;
+        var fact_bytes: [4096]u8 = undefined;
         const encoded_fact = try codec.encodeBare(&fact_bytes, source.source);
         records[source.count + 1] = .{ .bytes = encoded_fact, .payload_digest = history.hash(encoded_fact) };
         entries[source.count + 1] = .{ .key = .{ .origin = origin, .identity = .{ .coordinator_account_fact = source.source.identity } }, .record_index = source.count + 1 };
@@ -3186,7 +3310,354 @@ pub const CoordinatorOwner = struct {
         try self.applyCommitted(.{ .gateway_retire = .{ .qualification = retirement, .receipt = receipt } });
     }
 
+    /// Unattributed facts stay in account-level SuspenseAccount evidence, never a guessed portfolio ledger.
+    pub fn venueSuspense(self: *const CoordinatorOwner, destination: []canonical.EventRecord) ![]const canonical.EventRecord {
+        var count: usize = 0;
+        var cursor: u64 = 0;
+        while (cursor < self.coordinator.venue_ingress.barrier) {
+            cursor += 1;
+            const fact = try self.venueSpoolRecord(cursor);
+            if (fact.targets != 0) continue;
+            if (fact.record.event == .forced_execution and try self.forcedSourceClosed(fact.record.event.forced_execution)) continue;
+            if (count == destination.len) return error.SuspenseAccountCapacityExceeded;
+            destination[count] = fact.record;
+            count += 1;
+        }
+        return destination[0..count];
+    }
+
+    /// Commit through the target single writer before acknowledging this delivery.
+    /// Retry consumes the same immutable record; no transport method is called.
+    pub fn deliverVenueFact(self: *CoordinatorOwner, shard_id: ShardId, owner: *@import("../runtime/demo/demo_authority.zig").Owner) !bool {
+        if (self.closed) return error.CoordinatorWriterClosed;
+        const shard = try owner.source();
+        const index = @intFromEnum(shard_id);
+        const summary = self.coordinator.summaries[index];
+        if (!summary.present or summary.value.virtual_portfolio != shard.portfolio_identity or
+            summary.value.decision_domain != shard.decision_domain_identity or
+            venueAccountView(shard, self.coordinator.exchange_account) == null) return error.CrossShardDelivery;
+        if (self.coordinator.venue_ingress.broken) {
+            _ = try owner.apply(.{ .core = try accountGateEvent(.{ .shard_id = shard_id, .gate = self.coordinator.margin_gate }, shard.operational_state.target_identity) });
+        }
+        const pending = self.pendingVenueDelivery(shard_id) catch |err| {
+            self.closeVenueHistoryAdmission(@max(self.coordinator.venue_ingress.barrier, 1));
+            return err;
+        } orelse return false;
+        const record = pending.fact.record;
+        const barrier = pending.barrier;
+        _ = try owner.apply(.{ .venue = record });
+        try self.applyCommitted(.{ .venue_ack = .{ .barrier = barrier, .shard = @intCast(index) } });
+        return true;
+    }
+
+    /// Freeze instrument-specific contributions before the existing explicit allocation protocol.
+    pub fn acceptForcedVenueFact(self: *CoordinatorOwner, record: canonical.EventRecord, owners: [max_shards]*const @import("../runtime/demo/demo_authority.zig").Owner) !void {
+        if (record.event != .forced_execution) return error.InvalidVenueFact;
+        const execution = record.event.forced_execution;
+        try (canonical.ForcedExecutionSource{ .execution = execution, .envelope = record.envelope }).validate();
+        if (execution.exchange_account != self.coordinator.exchange_account) return error.InvalidVenueFact;
+        // The account source remains durable Suspense until an explicit allocation closes it.
+        try self.acceptVenueFactTargets(record, 0);
+        if (execution.fee == null or execution.penalty == null or execution.realized_pnl == null) return;
+        if (self.coordinator.forced_execution_source) |known| if (known.identity == execution.identity) return;
+        const archived = self.forcedSourceArchived(execution) catch |err| {
+            self.closeVenueHistoryAdmission(execution.identity);
+            return err;
+        };
+        if (archived) return;
+        if (self.coordinator.forced_execution_source != null) return error.ForcedSourceArchiveRequired;
+        var basis: ForcedContributionBasis = .{ .positions = @splat(0), .owners = @splat(.{}), .barriers = @splat(0), .digests = @splat(@splat(0)), .configuration_digest = @splat(0) };
+        for (owners, 0..) |owner, index| {
+            // Capture only a cut after every earlier routed economic input committed.
+            if (try self.pendingBeforeForcedSource(@enumFromInt(index), execution.identity)) return error.ForcedContributionBarrierPending;
+            const shard = try owner.source();
+            const view = venueAccountView(shard, execution.exchange_account) orelse return error.CrossShardDelivery;
+            const summary = self.coordinator.summaries[index];
+            if (!summary.present or shard.portfolio_identity != summary.value.virtual_portfolio or
+                shard.decision_domain_identity != summary.value.decision_domain or !shard.deployment.sealed) return error.CrossShardDelivery;
+            const header = shard.deployment.header orelse return error.InvalidVenueOwnership;
+            if (index == 0) basis.configuration_digest = header.expected_digest else if (!std.mem.eql(u8, &basis.configuration_digest, &header.expected_digest)) return error.InvalidVenueOwnership;
+            const configured = view.instruments.get(execution.instrument) orelse return error.UnknownOmsInstrument;
+            if (configured.rules.version != execution.rules_version or configured.rules.settlement_asset != execution.fee.?.asset or
+                execution.penalty.?.asset != execution.fee.?.asset or execution.realized_pnl.?.asset != execution.fee.?.asset) return error.InvalidEconomicFact;
+            if (view.economics.portfolio.instrumentPosition(execution.instrument)) |position| basis.positions[index] = position.position.quantity;
+            basis.owners[index] = .{ .portfolio = shard.portfolio_identity, .decision_domain = shard.decision_domain_identity };
+            basis.barriers[index] = shard.authoritativeBarrier();
+            basis.digests[index] = shard.canonicalStateDigest();
+        }
+        const quantity = std.math.cast(i64, execution.quantity.lots) orelse return error.QuantityOutOfRange;
+        const fact: AccountFact = .{
+            .identity = execution.identity,
+            .exchange_account = execution.exchange_account,
+            .version = execution.rules_version,
+            .barrier = if (self.coordinator.last_account_fact) |last| try std.math.add(u64, last.barrier, 1) else 1,
+            .canonical_source = .{ .execution = execution, .envelope = record.envelope },
+            .contributions = basis,
+            .times = .{ .source = record.envelope.times.source_utc_ns orelse 0, .receive = record.envelope.times.receive_utc_ns orelse 0, .monotonic = record.envelope.times.monotonic_ns orelse 0, .wall = record.envelope.times.audit_utc_ns orelse 0, .presence = .{ .source = record.envelope.times.source_utc_ns != null, .receive = record.envelope.times.receive_utc_ns != null, .monotonic = record.envelope.times.monotonic_ns != null, .wall = record.envelope.times.audit_utc_ns != null } },
+            .payload = .{ .forced_execution = .{ .instrument = execution.instrument, .rules_version = execution.rules_version, .owner = null, .quantity = if (execution.side == .sell) -quantity else quantity, .price_ticks = std.math.cast(i64, execution.price.ticks) orelse return error.PriceOutOfRange, .realized_pnl_atoms = execution.realized_pnl.?.atoms, .fee_atoms = execution.fee.?.atoms, .penalty_atoms = execution.penalty.?.atoms } },
+        };
+        try self.acceptAccountFactVerified(fact);
+    }
+
+    fn forcedSourceClosed(self: *const CoordinatorOwner, execution: canonical.ForcedExecution) !bool {
+        if (self.coordinator.forced_execution_source) |current| if (current.identity == execution.identity)
+            return self.coordinator.suspense_forced_execution == null;
+        return self.forcedSourceArchived(execution);
+    }
+
+    fn forcedSourceArchived(self: *const CoordinatorOwner, execution: canonical.ForcedExecution) !bool {
+        const root = self.coordinator.history_root orelse return false;
+        // Discover immutable prior contribution evidence; current positions cannot reconstruct it.
+        const request = venueLookupRequest(root, .{ .coordinator_account_fact = execution.identity }, @splat(0), self.sequence + 1);
+        const result = try self.store.queryOrderHistory(self.io, request);
+        switch (try history.verifyResult(request, &result.proof, root)) {
+            .proven_first => return false,
+            .expired => return error.CoordinatorHistoryExpired,
+            .same, .conflict => {
+                try history.validateRecord(&result);
+                const original = try codec.decodeBare(result.record_bytes[0..result.record_len], AccountFact);
+                const source = original.canonical_source orelse return error.AccountFactIdentityConflict;
+                if (original.identity != execution.identity or original.exchange_account != execution.exchange_account or
+                    !std.meta.eql(source.execution, execution)) return error.AccountFactIdentityConflict;
+                return true;
+            },
+        }
+    }
+
+    pub fn acceptVenueFactFromOwners(self: *CoordinatorOwner, record: canonical.EventRecord, owners: [max_shards]*const @import("../runtime/demo/demo_authority.zig").Owner) !void {
+        if (record.event == .forced_execution) return self.acceptForcedVenueFact(record, owners);
+        if (record.event == .fee_adjustment) {
+            var target: ?u2 = null;
+            const fee = record.event.fee_adjustment;
+            for (owners, 0..) |owner, index| {
+                const summary = self.coordinator.summaries[index];
+                if (!summary.present or summary.value.virtual_portfolio != fee.portfolio) continue;
+                const shard = try owner.source();
+                if (shard.portfolio_identity != summary.value.virtual_portfolio or
+                    venueAccountView(shard, self.coordinator.exchange_account) == null or
+                    shard.decision_domain_identity != summary.value.decision_domain) return error.CrossShardDelivery;
+                const verified = feeOriginVerified(owner, record) catch |err| {
+                    self.closeVenueHistoryAdmission(record.envelope.source_fact_identity);
+                    return err;
+                };
+                if (!verified) continue;
+                if (target != null) return error.AmbiguousVenueOwnership;
+                target = @intCast(index);
+            }
+            return self.acceptVenueFactTargets(record, if (target) |index| @as(u4, 1) << index else 0);
+        }
+        if (record.event != .funding_settlement) return self.acceptVenueFact(record);
+        const settlement = record.event.funding_settlement;
+        var target: ?u2 = null;
+        var configuration: ?[32]u8 = null;
+        for (owners, 0..) |owner, index| {
+            const shard = try owner.source();
+            if (!shard.deployment.sealed) return self.acceptVenueFactTargets(record, 0);
+            const header = shard.deployment.header orelse return error.InvalidVenueOwnership;
+            if (configuration) |digest| {
+                if (!std.mem.eql(u8, &digest, &header.expected_digest)) return error.InvalidVenueOwnership;
+            } else configuration = header.expected_digest;
+            if (shard.deployment.owner(settlement.exchange_account, settlement.instrument) == shard.decision_domain_identity) {
+                const summary = self.coordinator.summaries[index];
+                if (!summary.present or summary.value.virtual_portfolio != shard.portfolio_identity or summary.value.decision_domain != shard.decision_domain_identity) return error.CrossShardDelivery;
+                if (target != null) return error.AmbiguousVenueOwnership;
+                target = @intCast(index);
+            }
+        }
+        try self.acceptVenueFactTargets(record, if (target) |index| @as(u4, 1) << index else 0);
+    }
+
+    fn feeOriginVerified(owner: *const @import("../runtime/demo/demo_authority.zig").Owner, record: canonical.EventRecord) !bool {
+        const shard = try owner.source();
+        const fee = record.event.fee_adjustment;
+        const view = venueAccountView(shard, fee.exchange_account) orelse return false;
+        const claimed = fee.original orelse return false;
+        if (claimed.portfolio != shard.portfolio_identity or claimed.portfolio != fee.portfolio or
+            claimed.strategy != fee.strategy or claimed.cycle_first_sequence != fee.cycle_first_sequence or
+            claimed.original.identity != fee.fill_identity or claimed.original.exchange_account != fee.exchange_account or
+            claimed.original.venue_trade.venue != record.envelope.venue) return false;
+        if (view.economics.feeOrigin(fee.fill_identity)) |resident| return std.meta.eql(resident, claimed);
+        const candidate = try shard.historyCandidateFor(.{ .venue = record }) orelse return false;
+        const result = try owner.store.queryOrderHistory(owner.io, candidate.request);
+        if (try candidate.finalize(&result.proof, result.proof.root) != .same) return false;
+        try history.validateRecord(&result);
+        return true;
+    }
+
+    /// Resolve order events from Gateway's already durable, origin-qualified wire ID.
+    /// No raw OMS client ID or shard-local order number is ownership evidence.
+    pub fn acceptVenueFactFromGateway(self: *CoordinatorOwner, record: canonical.EventRecord, gateway: *const @import("../execution/execution_gateway.zig").Gateway, owners: [max_shards]*const @import("../runtime/demo/demo_authority.zig").Owner) !void {
+        const client = switch (record.event) {
+            .order_dispatch_result => |result| result.client_order_id,
+            .fill => |fill| fill.client_order_id,
+            .execution_report => |report| report.client_order_id,
+            else => return self.acceptVenueFactFromOwners(record, owners),
+        };
+        var target: ?u2 = null;
+        for (self.coordinator.gateway_ownership.records[0..self.coordinator.gateway_ownership.count]) |binding| {
+            const index = @intFromEnum(binding.shard_id);
+            const shard = try owners[index].source();
+            const summary = self.coordinator.summaries[index];
+            if (!summary.present or summary.value.virtual_portfolio != shard.portfolio_identity or
+                summary.value.decision_domain != shard.decision_domain_identity or
+                venueAccountView(shard, self.coordinator.exchange_account) == null) return error.CrossShardDelivery;
+            const wire = gateway.acceptedClientOrderIdFromShard(shard, binding.command_id) orelse continue;
+            if (!std.meta.eql(client, wire)) continue;
+            const matches = switch (record.event) {
+                .order_dispatch_result => |result| result.command == binding.command_id,
+                .fill => |fill| fill.order == binding.order_id,
+                .execution_report => |report| report.order == binding.order_id,
+                else => unreachable,
+            };
+            if (!matches) continue;
+            if (target != null and target.? != index) {
+                try self.applyCommitted(.{ .venue_fault = record.envelope.source_fact_identity });
+                return error.AmbiguousVenueOwnership;
+            }
+            target = @intCast(index);
+        }
+        return self.acceptVenueFactTargets(record, if (target) |index| @as(u4, 1) << index else 0);
+    }
+
+    /// Consume one normalized input from the account's sole VenueAdapter.
+    pub fn acceptVenueFact(self: *CoordinatorOwner, raw: canonical.EventRecord) !void {
+        const record = try canonical.normalizedForStorage(raw);
+        if (record.envelope.exchange_account != self.coordinator.exchange_account or
+            record.envelope.schema_version != canonical.schema_version or
+            record.envelope.event_type != @intFromEnum(canonical.eventType(record.event))) return error.InvalidVenueFact;
+        const targets: u4 = switch (record.event) {
+            .account_bootstrap_snapshot, .account_observed, .venue_account_configuration_snapshot, .account_reconciliation_started, .account_reconciliation_result, .economic_fault => 15,
+            else => 0,
+        };
+        return self.acceptVenueFactTargets(record, targets);
+    }
+
+    fn acceptVenueFactTargets(self: *CoordinatorOwner, raw: canonical.EventRecord, targets: u4) !void {
+        const record = try canonical.normalizedForStorage(raw);
+        if (record.envelope.exchange_account != self.coordinator.exchange_account or record.envelope.source_fact_identity == 0 or
+            record.envelope.schema_version != canonical.schema_version or record.envelope.event_type != @intFromEnum(canonical.eventType(record.event))) return error.InvalidVenueFact;
+        if (self.closed) return error.CoordinatorWriterClosed;
+        const state = &self.coordinator.venue_ingress;
+        state.validateSource(record) catch |err| {
+            try self.applyCommitted(.{ .venue_fault = record.envelope.source_fact_identity });
+            return err;
+        };
+        if (record.envelope.identity.sequence > state.sequence and record.envelope.identity.sequence != try std.math.add(u64, state.sequence, 1)) {
+            try self.applyCommitted(.{ .venue_fault = record.envelope.source_fact_identity });
+            return error.VenueSequenceGap;
+        }
+        if (self.coordinator.history_root != null) {
+            const request = try self.coordinator.venueHistoryRequest(record, self.sequence + 1);
+            const result = self.store.queryOrderHistory(self.io, request) catch |err| {
+                self.closeVenueHistoryAdmission(record.envelope.source_fact_identity);
+                return err;
+            };
+            const verdict = history.verifyResult(request, &result.proof, self.coordinator.history_root.?) catch |err| {
+                self.closeVenueHistoryAdmission(record.envelope.source_fact_identity);
+                return err;
+            };
+            switch (verdict) {
+                .same => {
+                    history.validateRecord(&result) catch |err| {
+                        self.closeVenueHistoryAdmission(record.envelope.source_fact_identity);
+                        return err;
+                    };
+                    if (record.envelope.identity.sequence <= state.sequence) return;
+                    return self.applyCommitted(.{ .venue_duplicate = .{ .record = record, .proof = result.proof } });
+                },
+                .conflict => {
+                    try self.applyCommitted(.{ .venue_fault = record.envelope.source_fact_identity });
+                    return error.VenueFactIdentityConflict;
+                },
+                .expired => {
+                    self.closeVenueHistoryAdmission(record.envelope.source_fact_identity);
+                    return error.VenueHistoryProofRequired;
+                },
+                .proven_first => {},
+            }
+        }
+        if (record.envelope.identity.sequence != try std.math.add(u64, state.sequence, 1)) {
+            try self.applyCommitted(.{ .venue_fault = record.envelope.source_fact_identity });
+            return error.VenueSequenceGap;
+        }
+        const fact: VenueSpool = .{ .record = record, .targets = targets };
+        var bytes: [history.max_record_bytes]u8 = undefined;
+        const encoded = try codec.encodeBare(&bytes, fact);
+        const semantic = try ingress.semanticDigest(record);
+        const origin: history.Origin = .{ .stream = self.stream, .account = self.coordinator.exchange_account };
+        const records = [_]history.Record{ .{ .bytes = &semantic, .payload_digest = history.hash(&semantic) }, .{ .bytes = encoded, .payload_digest = history.hash(encoded) } };
+        const entries = [_]history.Entry{
+            .{ .key = .{ .origin = origin, .identity = .{ .coordinator_venue_fact = .{ .kind = record.envelope.event_type, .identity = record.envelope.source_fact_identity } } }, .record_index = 0 },
+            .{ .key = .{ .origin = origin, .identity = .{ .coordinator_venue_spool = try std.math.add(u64, state.barrier, 1) } }, .record_index = 1 },
+        };
+        errdefer self.closed = true;
+        const receipt = try self.store.publishOrderHistory(self.io, .{ .origin = origin, .previous_root = self.coordinator.history_root, .barrier = self.sequence + 1, .epoch = if (self.coordinator.history_root) |root| root.epoch else 1, .qualification_digest = history.hash(encoded), .records = &records, .entries = &entries });
+        try self.applyCommitted(.{ .venue_archived = .{ .fact = fact, .receipt = receipt } });
+    }
+
+    fn closeVenueHistoryAdmission(self: *CoordinatorOwner, identity: u128) void {
+        self.coordinator.recovery_only = true;
+        self.applyCommitted(.{ .venue_fault = identity }) catch {};
+        self.closed = true;
+    }
+
+    const PendingVenue = struct { fact: VenueSpool, barrier: u64 };
+
+    fn pendingBeforeForcedSource(self: *const CoordinatorOwner, shard_id: ShardId, identity: u128) !bool {
+        const index = @intFromEnum(shard_id);
+        var cursor: u64 = 0;
+        while (cursor < self.coordinator.venue_ingress.barrier) {
+            cursor += 1;
+            const fact = try self.venueSpoolRecord(cursor);
+            if (fact.record.event == .forced_execution) {
+                if (fact.record.event.forced_execution.identity == identity) return false;
+                if (!try self.forcedSourceClosed(fact.record.event.forced_execution)) return true;
+            }
+            if (cursor > self.coordinator.venue_ingress.acknowledged[index] and
+                fact.targets & (@as(u4, 1) << @as(u2, @intCast(index))) != 0) return true;
+        }
+        return error.VenueHistoryProofRequired;
+    }
+
+    fn pendingVenueDelivery(self: *const CoordinatorOwner, shard_id: ShardId) !?PendingVenue {
+        const state = &self.coordinator.venue_ingress;
+        const index = @intFromEnum(shard_id);
+        var cursor = state.acknowledged[index];
+        var forced_pending = false;
+        while (cursor < state.barrier) {
+            cursor += 1;
+            const fact = try self.venueSpoolRecord(cursor);
+            if (fact.record.event == .forced_execution and !try self.forcedSourceClosed(fact.record.event.forced_execution)) forced_pending = true;
+            if (fact.targets & (@as(u4, 1) << @as(u2, @intCast(index))) != 0) {
+                if (forced_pending) return null;
+                return .{ .fact = fact, .barrier = cursor };
+            }
+        }
+        return null;
+    }
+
+    fn venueSpoolRecord(self: *const CoordinatorOwner, barrier: u64) !VenueSpool {
+        const root = self.coordinator.history_root orelse return error.VenueHistoryProofRequired;
+        const request = venueLookupRequest(root, .{ .coordinator_venue_spool = barrier }, @splat(0), barrier);
+        const result = try self.store.queryOrderHistory(self.io, request);
+        switch (try history.verifyResult(request, &result.proof, root)) {
+            .same, .conflict => try history.validateRecord(&result),
+            else => return error.VenueHistoryProofRequired,
+        }
+        return codec.decodeBare(result.record_bytes[0..result.record_len], VenueSpool);
+    }
+
+    pub fn pendingVenueFact(self: *const CoordinatorOwner, shard_id: ShardId) !?canonical.EventRecord {
+        const pending = try self.pendingVenueDelivery(shard_id) orelse return null;
+        return pending.fact.record;
+    }
+
     pub fn acceptAccountFact(self: *CoordinatorOwner, fact: AccountFact) !void {
+        if (fact.canonical_source != null or fact.contributions != null) return error.CoordinatorVerifiedInputRequired;
+        return self.acceptAccountFactVerified(fact);
+    }
+
+    fn acceptAccountFactVerified(self: *CoordinatorOwner, fact: AccountFact) !void {
         if (self.closed) return error.CoordinatorWriterClosed;
         if (self.coordinator.history_root == null) return self.apply(.{ .account_fact = fact });
         errdefer self.closed = true;
@@ -3205,7 +3676,8 @@ pub const CoordinatorOwner = struct {
     pub fn ackForcedDelivery(self: *CoordinatorOwner, delivery: Delivery, shard_owner: *const @import("../runtime/demo/demo_authority.zig").Owner) !void {
         const shard = try shard_owner.source();
         const owner = self.coordinator.forced_source_owners[@intFromEnum(delivery.shard_id)];
-        if (owner.portfolio != shard.portfolio_identity or shard.exchange_account_identity != self.coordinator.exchange_account) return error.CrossShardDelivery;
+        if (owner.portfolio != shard.portfolio_identity or owner.decision_domain != shard.decision_domain_identity or
+            venueAccountView(shard, self.coordinator.exchange_account) == null) return error.CrossShardDelivery;
         var found = false;
         for (try self.coordinator.pendingForcedDeliveries()) |pending| {
             if (std.meta.eql(pending, delivery)) found = true;
@@ -3224,7 +3696,7 @@ pub const CoordinatorOwner = struct {
 
     pub fn checkpoint(self: *CoordinatorOwner) !void {
         if (self.closed) return error.CoordinatorWriterClosed;
-        var state_bytes: [32768]u8 = undefined;
+        var state_bytes: [131072]u8 = undefined;
         const state = try self.coordinator.snapshot(state_bytes[8..]);
         std.mem.writeInt(u64, state_bytes[0..8], self.sequence, .little);
         errdefer self.closed = true;
@@ -3233,6 +3705,7 @@ pub const CoordinatorOwner = struct {
         try self.store.rotate(self.io, self.stream);
     }
 
+    /// A bootstrap-only replay remains closed; publish a checkpoint before crash-resumable ingestion.
     pub fn recover(stream: durable.StreamIdentity, store: durable.Store, io: std.Io) !CoordinatorOwner {
         const recovered = try store.recover(io, stream);
         var result: CoordinatorOwner = .{ .coordinator = undefined, .stream = stream, .store = store, .io = io };
@@ -3462,4 +3935,186 @@ test "02 zero quota is closed and only exact grant requests are duplicate" {
     _ = try c.allocateLeases(1, 20);
     _ = try c.expireLeases(21);
     try std.testing.expectError(error.StaleRiskLease, c.allocateLeases(2, 21));
+}
+test "03 shared canonical fanout survives durable acknowledgement replay" {
+    const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(memory);
+    memory.* = durable.MemoryAdapter.init();
+    defer memory.deinit();
+    var owner = try CoordinatorOwner.init(AccountCoordinator.init(900, 1000, 1000), .{ .domain = .control, .id = 903 }, memory.interface(), undefined);
+    const fact: canonical.EventRecord = .{ .envelope = .{ .event_type = @intFromEnum(canonical.EventType.economic_fault), .schema_version = canonical.schema_version, .identity = .{ .stream = 77, .sequence = 1 }, .source_fact_identity = 1, .scope = .account, .venue = 1, .exchange_account = 900, .source_stream = 88, .source_sequence = 1, .times = .{}, .raw_evidence = .{ .stream = 88, .sequence = 1, .digest = @splat(0) } }, .event = .{ .economic_fault = .{ .reason = .decoder_rejected } } };
+    try owner.checkpoint();
+    try owner.acceptVenueFact(fact);
+    const pending = owner.coordinator.venue_ingress.pendingFor(0).?;
+    try std.testing.expectEqual(@as(u128, 1), pending.envelope.source_fact_identity);
+    var recovered = try CoordinatorOwner.recover(owner.stream, memory.interface(), undefined);
+    try std.testing.expectEqualDeep(fact, recovered.coordinator.venue_ingress.pendingFor(0).?);
+    try std.testing.expectEqualSlices(u8, &owner.coordinator.digest(), &recovered.coordinator.digest());
+    try recovered.acceptVenueFact(fact);
+    try std.testing.expectEqual(@as(u8, 1), recovered.coordinator.venue_ingress.count);
+}
+test "03 shared canonical identity conflict and gaps retain durable closed gate" {
+    const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(memory);
+    memory.* = durable.MemoryAdapter.init();
+    defer memory.deinit();
+    var owner = try CoordinatorOwner.init(AccountCoordinator.init(900, 1000, 1000), .{ .domain = .control, .id = 904 }, memory.interface(), undefined);
+    var fact: canonical.EventRecord = .{ .envelope = .{ .event_type = @intFromEnum(canonical.EventType.economic_fault), .schema_version = canonical.schema_version, .identity = .{ .stream = 77, .sequence = 1 }, .source_fact_identity = 1, .scope = .account, .venue = 1, .exchange_account = 900, .source_stream = 88, .source_sequence = 1, .times = .{}, .raw_evidence = .{ .stream = 88, .sequence = 1, .digest = @splat(0) } }, .event = .{ .economic_fault = .{ .reason = .decoder_rejected } } };
+    try owner.acceptVenueFact(fact);
+    fact.event.economic_fault.reason = .capacity_exhausted;
+    try std.testing.expectError(error.VenueFactIdentityConflict, owner.acceptVenueFact(fact));
+    const recovered = try CoordinatorOwner.recover(owner.stream, memory.interface(), undefined);
+    try std.testing.expect(recovered.coordinator.venue_ingress.broken);
+    try std.testing.expect(!recovered.coordinator.margin_gate.open);
+    fact.envelope.source_fact_identity = 3;
+    fact.envelope.identity.sequence = 3;
+    try std.testing.expectError(error.VenueSequenceGap, owner.acceptVenueFact(fact));
+    try std.testing.expectEqual(@as(u64, 1), recovered.coordinator.venue_ingress.sequence);
+}
+test "03 bounded venue fanout checkpoints a full pending queue" {
+    const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(memory);
+    memory.* = durable.MemoryAdapter.init();
+    defer memory.deinit();
+    var owner = try CoordinatorOwner.init(AccountCoordinator.init(900, 1000, 1000), .{ .domain = .control, .id = 905 }, memory.interface(), undefined);
+    var fact: canonical.EventRecord = .{ .envelope = .{ .event_type = @intFromEnum(canonical.EventType.economic_fault), .schema_version = canonical.schema_version, .identity = .{ .stream = 77, .sequence = 1 }, .source_fact_identity = 1, .scope = .account, .venue = 1, .exchange_account = 900, .source_stream = 88, .source_sequence = 1, .times = .{}, .raw_evidence = .{ .stream = 88, .sequence = 1, .digest = @splat(0) } }, .event = .{ .economic_fault = .{ .reason = .decoder_rejected } } };
+    for (0..ingress.capacity) |i| {
+        fact.envelope.source_fact_identity = i + 1;
+        fact.envelope.identity.sequence = i + 1;
+        try owner.acceptVenueFact(fact);
+    }
+    fact.envelope.source_fact_identity = 9;
+    fact.envelope.identity.sequence = 9;
+    try owner.acceptVenueFact(fact);
+    try std.testing.expectEqual(@as(u64, 9), owner.coordinator.venue_ingress.barrier);
+    try owner.checkpoint();
+    const restored = try CoordinatorOwner.recover(owner.stream, memory.interface(), undefined);
+    try std.testing.expectEqual(@as(u8, 8), restored.coordinator.venue_ingress.count);
+    try std.testing.expectEqualSlices(u8, &owner.coordinator.digest(), &restored.coordinator.digest());
+    try std.testing.expect(restored.coordinator.venue_ingress.broken);
+}
+
+test "03 cold venue identities and pending spool survive checkpoint" {
+    const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(memory);
+    memory.* = durable.MemoryAdapter.initWithAllocator(std.testing.allocator);
+    defer memory.deinit();
+    var owner = try CoordinatorOwner.init(AccountCoordinator.init(900, 1000, 1000), .{ .domain = .control, .id = 906 }, memory.interface(), undefined);
+    var fact: canonical.EventRecord = .{ .envelope = .{ .event_type = @intFromEnum(canonical.EventType.economic_fault), .schema_version = canonical.schema_version, .identity = .{ .stream = 77, .sequence = 1 }, .source_fact_identity = 1, .scope = .account, .venue = 1, .exchange_account = 900, .source_stream = 88, .source_sequence = 1, .times = .{}, .raw_evidence = .{ .stream = 88, .sequence = 1, .digest = @splat(0) } }, .event = .{ .economic_fault = .{ .reason = .decoder_rejected } } };
+    for (0..40) |i| {
+        fact.envelope.source_fact_identity = i + 1;
+        fact.envelope.identity.sequence = i + 1;
+        try owner.acceptVenueFact(fact);
+    }
+    fact.envelope.source_fact_identity = 1;
+    fact.envelope.identity.sequence = 41;
+    try owner.acceptVenueFact(fact);
+    try std.testing.expectEqual(@as(u64, 41), owner.coordinator.venue_ingress.sequence);
+    try std.testing.expectEqual(@as(u64, 40), owner.coordinator.venue_ingress.barrier);
+    try owner.checkpoint();
+    var restored = try CoordinatorOwner.recover(owner.stream, memory.interface(), undefined);
+    try std.testing.expectEqualDeep(owner.coordinator.digest(), restored.coordinator.digest());
+    try std.testing.expectError(error.CoordinatorVerifiedInputRequired, restored.apply(.{ .venue_ack = .{ .barrier = 1, .shard = 0 } }));
+    try std.testing.expectError(error.CoordinatorVerifiedInputRequired, restored.apply(.{ .venue_fact = .{ .record = fact, .targets = 1 } }));
+    fact.envelope.identity.sequence = 42;
+    fact.event.economic_fault.reason = .missing_amount;
+    try std.testing.expectError(error.VenueFactIdentityConflict, restored.acceptVenueFact(fact));
+    try std.testing.expectEqual(@as(u64, 41), restored.coordinator.venue_ingress.sequence);
+    try std.testing.expect(restored.coordinator.venue_ingress.broken);
+}
+
+fn venueLookupRequest(root: history.Root, identity: history.Identity, digest_value: history.Digest, pending_id: u128) history.LookupRequest {
+    return .{ .pending_id = pending_id, .key = .{ .origin = root.origin, .identity = identity }, .candidate_payload_digest = digest_value, .original_input_digest = digest_value, .root_digest = root.root_digest, .epoch = root.epoch, .barrier = root.barrier };
+}
+
+test "03 venue history read failure closes authority and persists its gate" {
+    const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(memory);
+    memory.* = durable.MemoryAdapter.initWithAllocator(std.testing.allocator);
+    defer memory.deinit();
+    var owner = try CoordinatorOwner.init(AccountCoordinator.init(900, 1000, 1000), .{ .domain = .control, .id = 907 }, memory.interface(), undefined);
+    var fact: canonical.EventRecord = .{ .envelope = .{ .event_type = @intFromEnum(canonical.EventType.economic_fault), .schema_version = canonical.schema_version, .identity = .{ .stream = 77, .sequence = 1 }, .source_fact_identity = 1, .scope = .account, .venue = 1, .exchange_account = 900, .source_stream = 88, .source_sequence = 1, .times = .{}, .raw_evidence = .{ .stream = 88, .sequence = 1, .digest = @splat(0) } }, .event = .{ .economic_fault = .{ .reason = .decoder_rejected } } };
+    try owner.acceptVenueFact(fact);
+    var faults = memory.interface().vtable.*;
+    faults.query_order_history = struct {
+        fn fail(_: *anyopaque, _: std.Io, _: history.LookupRequest) anyerror!history.LookupResult {
+            return error.OrderHistoryUnavailable;
+        }
+    }.fail;
+    owner.store = .{ .context = memory, .vtable = &faults };
+    fact.envelope.identity.sequence = 2;
+    fact.envelope.source_fact_identity = 2;
+    try std.testing.expectError(error.OrderHistoryUnavailable, owner.acceptVenueFact(fact));
+    try std.testing.expect(owner.closed);
+    try std.testing.expect(owner.coordinator.recovery_only);
+    try std.testing.expectError(error.CoordinatorRecoveryOnly, owner.coordinator.allocateLeases(2, 100));
+    try std.testing.expectError(error.CoordinatorWriterClosed, owner.acceptVenueFact(fact));
+    const recovered = try CoordinatorOwner.recover(owner.stream, memory.interface(), undefined);
+    try std.testing.expect(recovered.coordinator.venue_ingress.broken);
+    try std.testing.expect(recovered.coordinator.margin_gate.latched);
+}
+
+test "03 unproven raw fee and broadcast economic fault close account authority" {
+    const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(memory);
+    memory.* = durable.MemoryAdapter.initWithAllocator(std.testing.allocator);
+    defer memory.deinit();
+    for (0..2) |kind| {
+        var coordinator = AccountCoordinator.init(900, 1000, 1000);
+        for (0..4) |index| _ = try coordinator.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, 100));
+        _ = try coordinator.allocateLeases(1, 100);
+        var owner = try CoordinatorOwner.init(coordinator, .{ .domain = .control, .id = 908 + kind }, memory.interface(), undefined);
+        var fact: canonical.EventRecord = .{ .envelope = .{ .event_type = @intFromEnum(canonical.EventType.economic_fault), .schema_version = canonical.schema_version, .identity = .{ .stream = 77, .sequence = 1 }, .source_fact_identity = 1, .scope = .account, .venue = 1, .exchange_account = 900, .source_stream = 88, .source_sequence = 1, .times = .{}, .raw_evidence = .{ .stream = 88, .sequence = 1, .digest = @splat(1) } }, .event = .{ .economic_fault = .{ .reason = .decoder_rejected } } };
+        if (kind == 0) {
+            fact.envelope.event_type = @intFromEnum(canonical.EventType.fee_adjustment);
+            fact.event = .{ .fee_adjustment = .{ .identity = 1, .fill_identity = 99, .exchange_account = 900, .portfolio = 11, .strategy = 1, .cycle_first_sequence = 0, .source_version = 2, .previous_fee_version = 1, .new_fee = .{ .asset = 1, .atoms = 1 }, .source = fact.envelope.raw_evidence, .effective_time_utc_ns = 1 } };
+        }
+        try owner.acceptVenueFact(fact);
+        if (kind == 0) {
+            var suspense: [1]canonical.EventRecord = undefined;
+            try std.testing.expectEqual(@as(usize, 1), (try owner.venueSuspense(&suspense)).len);
+            try std.testing.expectEqualDeep(fact, suspense[0]);
+        }
+        try std.testing.expect(owner.coordinator.venue_ingress.broken);
+        try std.testing.expect(owner.coordinator.margin_gate.latched);
+        try std.testing.expectEqualDeep(coordinator.leases, owner.coordinator.leases);
+        var lease_events: [max_shards]trading.CoreEvent = undefined;
+        try std.testing.expectError(error.AccountGateClosed, owner.coordinator.currentLeaseEvents(&lease_events));
+        try std.testing.expectError(error.CoordinatorRecoveryOnly, owner.coordinator.allocateLeases(2, 100));
+        try owner.apply(.{ .margin_observation = .{ .identity = 100, .barrier = owner.coordinator.barrier + 1, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 } });
+        try std.testing.expectEqual(MarginReconciliationState.healthy, owner.coordinator.margin_reconciliation_state);
+        try std.testing.expectError(error.AccountGateClosed, owner.coordinator.resolveMarginGate(100));
+        try std.testing.expectError(error.AccountGateClosed, owner.coordinator.completeRecovery());
+        try owner.checkpoint();
+        const restored = try CoordinatorOwner.recover(owner.stream, memory.interface(), undefined);
+        try std.testing.expect(restored.coordinator.margin_gate.latched);
+        try std.testing.expectEqualDeep(owner.coordinator.digest(), restored.coordinator.digest());
+    }
+}
+
+test "03 malformed initial venue stream cannot bind a source or retain account authority" {
+    const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(memory);
+    memory.* = durable.MemoryAdapter.initWithAllocator(std.testing.allocator);
+    defer memory.deinit();
+    for (0..2) |kind| {
+        var coordinator = AccountCoordinator.init(900, 1000, 1000);
+        for (0..4) |index| _ = try coordinator.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, 100));
+        _ = try coordinator.allocateLeases(1, 100);
+        var owner = try CoordinatorOwner.init(coordinator, .{ .domain = .control, .id = 918 + kind }, memory.interface(), undefined);
+        try owner.checkpoint();
+        var record: canonical.EventRecord = .{ .envelope = .{ .event_type = @intFromEnum(canonical.EventType.economic_fault), .schema_version = canonical.schema_version, .identity = .{ .stream = if (kind == 0) 0 else 77, .sequence = 1 }, .source_fact_identity = 1, .scope = .account, .venue = 1, .exchange_account = 900, .source_stream = if (kind == 1) 0 else 88, .source_sequence = 1, .times = .{}, .raw_evidence = .{ .stream = 88, .sequence = 1, .digest = @splat(1) } }, .event = .{ .economic_fault = .{ .reason = .decoder_rejected } } };
+        try std.testing.expectError(error.InvalidVenueFact, owner.acceptVenueFact(record));
+        try std.testing.expectEqual(@as(u128, 0), owner.coordinator.venue_ingress.stream);
+        try std.testing.expect(owner.coordinator.margin_gate.latched);
+        var events: [max_shards]trading.CoreEvent = undefined;
+        try std.testing.expectError(error.AccountGateClosed, owner.coordinator.currentLeaseEvents(&events));
+        const recovered = try CoordinatorOwner.recover(owner.stream, memory.interface(), undefined);
+        try std.testing.expect(recovered.coordinator.venue_ingress.broken);
+        record.envelope.identity.stream = 77;
+        record.envelope.source_stream = 88;
+        try owner.acceptVenueFact(record);
+        try std.testing.expectEqual(@as(u128, 77), owner.coordinator.venue_ingress.stream);
+        try std.testing.expect(owner.coordinator.venue_ingress.broken);
+    }
 }

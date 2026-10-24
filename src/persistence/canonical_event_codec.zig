@@ -117,6 +117,7 @@ fn decodeBootstrap(reader: *Reader) !canonical.AccountBootstrapSnapshot {
 
 fn encodeEvent(cursor: *Cursor, event: canonical.Payload) !void {
     switch (event) {
+        .forced_execution => |value| try putValue(cursor, value),
         .economic_fault => |value| try putValue(cursor, value),
         .account_bootstrap_snapshot => |snapshot| try encodeBootstrap(cursor, snapshot),
         .order_dispatch_result => |value| try putValue(cursor, value),
@@ -164,6 +165,7 @@ pub fn decode(encoded: []const u8) !canonical.EventRecord {
     const envelope = try takeValue(&reader, canonical.EventEnvelope);
     const event_type = std.enums.fromInt(canonical.EventType, envelope.event_type) orelse return error.InvalidCanonicalEnvelope;
     const event: canonical.Payload = switch (event_type) {
+        .forced_execution => .{ .forced_execution = try takeValue(&reader, canonical.ForcedExecution) },
         .economic_fault => .{ .economic_fault = try takeValue(&reader, canonical.EconomicFault) },
         .account_bootstrap_snapshot => .{ .account_bootstrap_snapshot = try decodeBootstrap(&reader) },
         .order_dispatch_result => .{ .order_dispatch_result = try takeValue(&reader, canonical.OrderDispatchResult) },
