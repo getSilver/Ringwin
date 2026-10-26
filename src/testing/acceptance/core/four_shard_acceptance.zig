@@ -167,7 +167,7 @@ fn genesisEvents(index: usize) [15]trading.CoreEvent {
         .{ .identity = 1, .payload = .exchange_positions },
         .{ .identity = 1, .payload = .{ .opening_balance = .{ .cash_atoms = initial_cash } } },
         .{ .identity = 1, .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = index + 11 } } },
-        .{ .identity = 1, .payload = .{ .portfolio_transfer = .{ .amount_atoms = allocation } } },
+        .{ .identity = 1, .payload = .{ .portfolio_transfer = .{ .amount_atoms = allocation, .portfolio_identity = index + 11 } } },
         .{ .identity = 1, .payload = .{ .strategy_activated = .{
             .strategy_identity = target,
             .config_version = 1,

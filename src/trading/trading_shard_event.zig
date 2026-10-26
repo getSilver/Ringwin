@@ -354,6 +354,7 @@ pub const EconomicFill = struct {
 
 pub const FundingSettlement = struct { settlement_id: u64, amount_atoms: i128, instrument: u128 = 0 };
 pub const VenueForcedExecution = struct {
+    portfolio_identity: u128 = 0,
     instrument: u128 = 0,
     rules_version: u64 = 0,
     canonical_source: ?canonical.ForcedExecutionSource = null,
@@ -462,6 +463,7 @@ pub const InstrumentRules = struct {
 };
 
 pub const MarginRules = struct {
+    native: ?@import("../portfolio/native_margin_reconciliation.zig").Rules = null,
     version: u32,
     native_settlement_atoms: bool = false,
     instrument: canonical.InstrumentIdentity = 0,
@@ -488,8 +490,9 @@ pub const OpeningBalance = struct {
     native_balance_count: u8 = 0,
 };
 pub const VirtualPortfolioActivation = struct { portfolio_identity: u128 };
-pub const PortfolioTransfer = struct { amount_atoms: i128 };
+pub const PortfolioTransfer = struct { amount_atoms: i128, portfolio_identity: u128 = 0 };
 pub const StrategyActivation = struct {
+    portfolio_identity: u128 = 0,
     strategy_identity: u128,
     config_version: u64,
     activation_identity: u128,
@@ -507,6 +510,7 @@ pub const HostActivated = struct {
 };
 pub const HostRevocationReason = enum(u8) { fault, control, session_replaced };
 pub const HostActivationRevoked = struct {
+    session: ?@import("../strategy/strategy_host_ipc.zig").Session = null,
     strategy_identity: u128,
     activation_identity: u128,
     reason: HostRevocationReason,
@@ -568,6 +572,7 @@ pub const CapabilityProfileActivation = struct {
 };
 
 pub const InstrumentTradingAuthorization = struct {
+    strategy_identity: u128 = 0,
     exchange_account: canonical.ExchangeAccountIdentity,
     instrument: canonical.InstrumentIdentity,
     strategy_activation_identity: u128,
@@ -811,11 +816,15 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             }
         },
         .virtual_portfolio_activated => |value| try encoded.put(u128, value.portfolio_identity),
-        .portfolio_transfer => |value| try encoded.put(i128, value.amount_atoms),
+        .portfolio_transfer => |value| {
+            try encoded.put(i128, value.amount_atoms);
+            try encoded.put(u128, value.portfolio_identity);
+        },
         .strategy_activated => |value| {
             try encoded.put(u128, value.strategy_identity);
             try encoded.put(u64, value.config_version);
             try encoded.put(u128, value.activation_identity);
+            try encoded.put(u128, value.portfolio_identity);
         },
         .host_activated => |value| {
             try encoded.put(u128, value.strategy_identity);
@@ -828,9 +837,8 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             for (value.state_digest) |byte| try encoded.put(u8, byte);
         },
         .host_activation_revoked => |value| {
-            try encoded.put(u128, value.strategy_identity);
-            try encoded.put(u128, value.activation_identity);
-            try encoded.put(u8, @intFromEnum(value.reason));
+            const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], value);
+            encoded.len += bytes.len;
         },
         .primary_lease_granted => |value| try encoded.put(u64, value.fencing_token),
         .risk_lease_granted => |value| {
@@ -879,6 +887,7 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
                 try encoded.put(u64, member.intent_sequence);
                 try encoded.put(u128, member.strategy_instance);
                 try encoded.put(u128, member.exchange_account);
+                try encoded.put(u128, member.portfolio);
                 try encoded.put(u8, @intFromEnum(member.operation));
                 try encoded.put(u128, member.instrument);
                 try encoded.put(u8, @intFromEnum(member.side));
@@ -1034,6 +1043,7 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u8, @intFromBool(value.supports_market_protection));
         },
         .instrument_trading_authorization => |value| {
+            try encoded.put(u128, value.strategy_identity);
             try encoded.put(u128, value.exchange_account);
             try encoded.put(u128, value.instrument);
             try encoded.put(u128, value.strategy_activation_identity);
@@ -1249,11 +1259,13 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
         } },
         .portfolio_transfer => .{ .portfolio_transfer = .{
             .amount_atoms = try readInputValue(i128, record.payload, &offset),
+            .portfolio_identity = try readInputValue(u128, record.payload, &offset),
         } },
         .strategy_activated => .{ .strategy_activated = .{
             .strategy_identity = try readInputValue(u128, record.payload, &offset),
             .config_version = try readInputValue(u64, record.payload, &offset),
             .activation_identity = try readInputValue(u128, record.payload, &offset),
+            .portfolio_identity = try readInputValue(u128, record.payload, &offset),
         } },
         .host_activated => .{ .host_activated = .{
             .strategy_identity = try readInputValue(u128, record.payload, &offset),
@@ -1271,11 +1283,11 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
                 break :blk digest;
             },
         } },
-        .host_activation_revoked => .{ .host_activation_revoked = .{
-            .strategy_identity = try readInputValue(u128, record.payload, &offset),
-            .activation_identity = try readInputValue(u128, record.payload, &offset),
-            .reason = std.enums.fromInt(HostRevocationReason, try readInputValue(u8, record.payload, &offset)) orelse return error.InvalidHostRevocationReason,
-        } },
+        .host_activation_revoked => blk: {
+            const value = try snapshot_codec.decodeBare(record.payload[offset..], HostActivationRevoked);
+            offset = record.payload.len;
+            break :blk .{ .host_activation_revoked = value };
+        },
         .primary_lease_granted => .{ .primary_lease_granted = .{
             .fencing_token = try readInputValue(u64, record.payload, &offset),
         } },
@@ -1344,6 +1356,7 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
                     .intent_sequence = try readInputValue(u64, record.payload, &offset),
                     .strategy_instance = try readInputValue(u128, record.payload, &offset),
                     .exchange_account = try readInputValue(u128, record.payload, &offset),
+                    .portfolio = try readInputValue(u128, record.payload, &offset),
                     .operation = std.enums.fromInt(oms_module.Operation, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOmsOperation,
                     .instrument = try readInputValue(u128, record.payload, &offset),
                     .side = std.enums.fromInt(oms_module.Side, try readInputValue(u8, record.payload, &offset)) orelse return error.UnknownOmsSide,
@@ -1532,6 +1545,7 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             .supports_market_protection = try readInputBool(record.payload, &offset),
         } },
         .instrument_trading_authorization => .{ .instrument_trading_authorization = .{
+            .strategy_identity = try readInputValue(u128, record.payload, &offset),
             .exchange_account = try readInputValue(u128, record.payload, &offset),
             .instrument = try readInputValue(u128, record.payload, &offset),
             .strategy_activation_identity = try readInputValue(u128, record.payload, &offset),

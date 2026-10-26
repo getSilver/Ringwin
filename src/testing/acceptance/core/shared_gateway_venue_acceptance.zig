@@ -26,9 +26,13 @@ fn failHistoryQuery(_: *anyopaque, _: std.Io, _: history.LookupRequest) anyerror
 }
 
 pub fn admit(owner: *demo.Owner, index: usize) !void {
+    return admitWithQuantum(owner, index, 1);
+}
+
+pub fn prepareTrading(owner: *demo.Owner, index: usize, quantum: i128) !void {
     const domain = index + 1;
     const controls = [_]trading.CorePayload{
-        .{ .strategy_activated = .{ .strategy_identity = domain, .config_version = 1, .activation_identity = 1 } },
+        .{ .strategy_activated = .{ .portfolio_identity = index + 11, .strategy_identity = domain, .config_version = 1, .activation_identity = 1 } },
         .{ .primary_lease_granted = .{ .fencing_token = domain } },
         .{ .risk_lease_granted = .{ .amount_atoms = 25 } },
         .{ .control_command = .{ .command_identity = 900, .content_hash = 900, .target_identity = domain, .expected_version = 0, .expires_at = std.math.maxInt(u64), .kind = .start_recovery } },
@@ -49,8 +53,19 @@ pub fn admit(owner: *demo.Owner, index: usize) !void {
         }
         _ = try owner.apply(input);
     }
+    try prepareInstruments(owner, index, quantum);
+}
+
+pub fn prepareInstruments(owner: *demo.Owner, index: usize, quantum: i128) !void {
+    const domain = index + 1;
     for ([_]u128{ domain, domain + 4 }) |instrument| {
-        _ = try owner.apply(fixture.atGroup(42, .{ .identity = @intCast(1000 + instrument), .account_scope = 2, .payload = .{ .margin_rules_activated = .{ .version = 2, .instrument = instrument } } }));
+        var margin: @import("../../../trading/trading_shard_event.zig").MarginRules = .{ .version = 2, .instrument = instrument };
+        if (quantum != 1 and instrument == domain) {
+            margin.fee_ppm = 0;
+            margin.native_settlement_atoms = true;
+            margin.native = .{ .model = .isolated_linear_usdt_v1, .tier_identity = 1, .notional_lower_atoms = 0, .notional_upper_atoms = 100000, .initial_margin_ppm = 20000, .maintenance_ppm = 11000, .maintenance_deduction_atoms = 0, .close_fee_ppm = 0, .margin_rounding_atoms = quantum, .price_rounding_ticks = 1 };
+        }
+        _ = try owner.apply(fixture.atGroup(42, .{ .identity = @intCast(1000 + instrument), .account_scope = 2, .payload = .{ .margin_rules_activated = margin } }));
         _ = try owner.apply(fixture.atGroup(42, .{ .identity = @intCast(1100 + instrument), .account_scope = 2, .payload = .{ .capability_profile_activation = .{
             .exchange_account = 2,
             .instrument = instrument,
@@ -85,6 +100,11 @@ pub fn admit(owner: *demo.Owner, index: usize) !void {
         _ = try owner.apply(book);
         _ = try owner.apply(fixture.atGroup(44, .{ .identity = @intCast(1200 + instrument), .account_scope = 2, .payload = .{ .mark_price = .{ .instrument = instrument, .price_atoms = 10 } } }));
     }
+}
+
+pub fn admitWithQuantum(owner: *demo.Owner, index: usize, quantum: i128) !void {
+    try prepareTrading(owner, index, quantum);
+    const domain = index + 1;
     const barrier = owner.shard.authoritativeBarrier();
     const config: host.Config = .{
         .schema_registry = trading.schema_registry_identity,
@@ -179,7 +199,7 @@ pub fn observe(gateway: *execution.Gateway, owner: *const demo.Owner, command_id
     return command.authority.dispatch_deadline_monotonic_ns - 1;
 }
 
-test "03 actual shared Gateway routes colliding local orders through one VenueAdapter" {
+test "03 actual shared Gateway routes colliding local orders through one VenueAdapter and 04 native margin" {
     const allocator = std.testing.allocator;
     const memory = try allocator.create(durable.MemoryAdapter);
     defer allocator.destroy(memory);
@@ -323,6 +343,7 @@ test "03 actual shared Gateway routes colliding local orders through one VenueAd
         try std.testing.expectEqualDeep(wire[index], recovered_gateway.acceptedClientOrderIdFromShard(&owner.shard, 1).?);
     try std.testing.expectEqual(@as(u64, 25), simulator.next_event_identity);
     try std.testing.expect((try adapter.tryDrain()) == null);
+    try @import("native_margin_acceptance.zig").verify(owners, memory.interface());
     var forged = batches[0].events[2];
     try std.testing.expect(forged.event == .fill);
     forged.envelope.identity.sequence = 26;

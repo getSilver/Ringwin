@@ -7,6 +7,13 @@ const std = @import("std");
 
 pub const max_entries = canonical.max_instrument_definitions;
 
+pub const TradingAuthorization = struct {
+    strategy: u128 = 0,
+    enabled: bool = false,
+    version: u64 = 0,
+    barrier: u64 = 0,
+};
+
 pub const Entry = struct {
     instrument: canonical.InstrumentIdentity,
     venue: canonical.VenueIdentity,
@@ -21,6 +28,34 @@ pub const Entry = struct {
     trading_enabled: bool = false,
     trading_version: u64 = 0,
     trading_barrier: u64 = 0,
+    unscoped_trading_authorization: bool = true,
+    strategy_authorizations: [16]TradingAuthorization = @splat(.{}),
+    strategy_authorization_count: u8 = 0,
+
+    pub fn tradingAuthorization(self: Entry, strategy: u128) TradingAuthorization {
+        for (self.strategy_authorizations[0..self.strategy_authorization_count]) |authorization|
+            if (authorization.strategy == strategy) return authorization;
+        if (!self.unscoped_trading_authorization) return .{ .strategy = strategy, .version = if (self.trading_version == 0) 0 else 1, .barrier = self.capability_barrier };
+        return .{ .strategy = strategy, .enabled = self.trading_enabled and self.unscoped_trading_authorization, .version = self.trading_version, .barrier = self.trading_barrier };
+    }
+
+    pub fn setTradingAuthorization(self: *Entry, authorization: TradingAuthorization) !void {
+        for (self.strategy_authorizations[0..self.strategy_authorization_count]) |*existing| {
+            if (existing.strategy == authorization.strategy) {
+                existing.* = authorization;
+                return;
+            }
+        }
+        if (self.strategy_authorization_count == self.strategy_authorizations.len) return error.StrategyCapacity;
+        self.strategy_authorizations[self.strategy_authorization_count] = authorization;
+        self.strategy_authorization_count += 1;
+    }
+
+    pub fn initializeTradingAuthorization(self: *Entry, strategy: u128) !void {
+        for (self.strategy_authorizations[0..self.strategy_authorization_count]) |existing|
+            if (existing.strategy == strategy) return;
+        try self.setTradingAuthorization(.{ .strategy = strategy, .enabled = true, .version = 1, .barrier = self.trading_barrier });
+    }
 };
 
 pub const Registry = struct {
@@ -113,12 +148,19 @@ pub const Registry = struct {
     pub fn validate(self: *const Registry) !void {
         if (self.count > self.entries.len) return error.InvalidInstrumentRegistry;
         for (self.entries[0..self.count], 0..) |entry, index| {
+            if (entry.strategy_authorization_count > entry.strategy_authorizations.len) return error.InvalidInstrumentRegistry;
+            for (entry.strategy_authorizations[0..entry.strategy_authorization_count], 0..) |authorization, authorization_index| {
+                if (authorization.strategy == 0 or authorization.version == 0 or authorization.barrier == 0) return error.InvalidInstrumentRegistry;
+                for (entry.strategy_authorizations[0..authorization_index]) |prior|
+                    if (prior.strategy == authorization.strategy) return error.InvalidInstrumentRegistry;
+            }
             if (entry.instrument == 0 or entry.rules.version == 0 or
                 entry.rules.instrument_identity != entry.instrument or
                 entry.rules.quantity_denominator <= 0 or entry.rules.quantity_numerator <= 0 or
                 entry.rules.product != entry.product or
                 (entry.product == .spot and entry.rules.base_asset != 0 and entry.rules.base_asset == entry.rules.settlement_asset) or
                 (entry.capability != null and (entry.capability.?.instrument != entry.instrument or
+                    entry.capability.?.config_version == 0 or
                     entry.capability.?.venue != entry.venue or entry.capability.?.product != entry.rules.product or
                     entry.capability.?.rules_version != entry.rules.version or entry.capability_barrier == 0)) or
                 (entry.capability == null and entry.capability_barrier != 0) or
@@ -137,6 +179,12 @@ pub const Registry = struct {
 };
 
 pub fn validMargin(margin: shard_event.MarginRules) bool {
+    if (margin.native) |rules| {
+        rules.validate() catch return false;
+        if (rules.initial_margin_ppm != margin.venue_initial_margin_ppm or
+            margin.internal_maintenance_margin_ppm < rules.maintenance_ppm or
+            margin.fee_ppm < rules.close_fee_ppm) return false;
+    }
     return margin.version != 0 and margin.price_tick_atoms > 0 and
         margin.venue_initial_margin_ppm > 0 and
         margin.internal_initial_margin_ppm >= margin.venue_initial_margin_ppm and

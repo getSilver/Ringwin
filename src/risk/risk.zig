@@ -26,6 +26,7 @@ pub const Rules = struct {
     internal_initial_margin_ppm: i64,
     internal_maintenance_margin_ppm: i64,
     fee_ppm: i64,
+    margin_rounding_atoms: i128 = 1,
     opening_buffer: canonical.AssetAmount,
     opening_buffer_bps: i64 = 0,
     opening_liquidation_distance_ticks: i64 = 0,
@@ -43,6 +44,7 @@ pub const State = struct {
     portfolio_position: canonical.InstrumentQuantity,
     exchange_position: canonical.InstrumentQuantity,
     active_order_reservations: canonical.AssetAmount,
+    portfolio_active_order_reservations: ?canonical.AssetAmount = null,
     replaced_order_reservation: canonical.AssetAmount,
     mark_price: canonical.InstrumentPrice,
 };
@@ -88,7 +90,7 @@ pub fn assess(rules: Rules, limits: Limits, state: State, request: Request) !Ass
         rules.opening_buffer.asset != asset or rules.warning_buffer.asset != asset or rules.kill_buffer.asset != asset or
         rules.venue_initial_margin_ppm <= 0 or
         rules.internal_initial_margin_ppm < rules.venue_initial_margin_ppm or
-        rules.internal_maintenance_margin_ppm <= 0 or rules.fee_ppm < 0 or
+        rules.internal_maintenance_margin_ppm <= 0 or rules.fee_ppm < 0 or rules.margin_rounding_atoms <= 0 or
         rules.opening_buffer.atoms < rules.warning_buffer.atoms or
         rules.warning_buffer.atoms < rules.kill_buffer.atoms or
         rules.kill_buffer.atoms < 0 or
@@ -111,13 +113,13 @@ pub fn assess(rules: Rules, limits: Limits, state: State, request: Request) !Ass
         return error.InsufficientSpotAsset;
 
     const notional = try notionalAtoms(request.quantity.lots, request.risk_price.ticks, rules.price_tick_value.atoms, rules.quantity_numerator, rules.quantity_denominator);
-    const fee = try rateAtoms(notional, rules.fee_ppm);
+    const fee = try rateAtoms(notional, rules.fee_ppm, rules.margin_rounding_atoms);
     const venue_initial = if (request.product == .isolated_linear_usdt and !venue_reduces)
-        try rateAtoms(notional, rules.venue_initial_margin_ppm)
+        try rateAtoms(notional, rules.venue_initial_margin_ppm, rules.margin_rounding_atoms)
     else
         0;
     const internal_initial = if (request.product == .isolated_linear_usdt and !portfolio_reduces)
-        try rateAtoms(notional, rules.internal_initial_margin_ppm)
+        try rateAtoms(notional, rules.internal_initial_margin_ppm, rules.margin_rounding_atoms)
     else
         0;
     const reservation = switch (request.product) {
@@ -129,7 +131,10 @@ pub fn assess(rules: Rules, limits: Limits, state: State, request: Request) !Ass
     if (base < 0) return error.InvalidRiskInput;
     const replacement_reservation = @max(state.replaced_order_reservation.atoms, reservation);
     const total = try std.math.add(i128, base, replacement_reservation);
-    try checkLimits(limits, total);
+    const portfolio_active = state.portfolio_active_order_reservations orelse state.active_order_reservations;
+    if (portfolio_active.asset != asset or portfolio_active.atoms < state.replaced_order_reservation.atoms) return error.InvalidRiskInput;
+    const portfolio_total = try std.math.add(i128, try std.math.sub(i128, portfolio_active.atoms, state.replaced_order_reservation.atoms), replacement_reservation);
+    try checkLimits(limits, portfolio_total, total);
 
     const portfolio_maintenance = if (request.product == .isolated_linear_usdt)
         try maintenanceWithCloseFee(rules, portfolio_after, state.mark_price.ticks)
@@ -139,7 +144,7 @@ pub fn assess(rules: Rules, limits: Limits, state: State, request: Request) !Ass
         try maintenanceWithCloseFee(rules, exchange_after, state.mark_price.ticks)
     else
         0;
-    const portfolio_buffer = try std.math.sub(i128, try std.math.sub(i128, state.portfolio_cash.atoms, total), portfolio_maintenance);
+    const portfolio_buffer = try std.math.sub(i128, try std.math.sub(i128, state.portfolio_cash.atoms, portfolio_total), portfolio_maintenance);
     const exchange_buffer = try std.math.sub(i128, try std.math.sub(i128, state.exchange_cash.atoms, total), exchange_maintenance);
     const portfolio_after_notional = try notionalAtoms(try abs128(portfolio_after), state.mark_price.ticks, rules.price_tick_value.atoms, rules.quantity_numerator, rules.quantity_denominator);
     const exchange_after_notional = try notionalAtoms(try abs128(exchange_after), state.mark_price.ticks, rules.price_tick_value.atoms, rules.quantity_numerator, rules.quantity_denominator);
@@ -178,7 +183,7 @@ fn opens(rules: Rules, buffer: i128, buffer_bps: i64, distance_ticks: i64) bool 
 
 fn maintenanceWithCloseFee(rules: Rules, quantity: i128, price_ticks: i128) !i128 {
     const notional = try notionalAtoms(try abs128(quantity), price_ticks, rules.price_tick_value.atoms, rules.quantity_numerator, rules.quantity_denominator);
-    return std.math.add(i128, try rateAtoms(notional, rules.internal_maintenance_margin_ppm), try rateAtoms(notional, rules.fee_ppm));
+    return std.math.add(i128, try rateAtoms(notional, rules.internal_maintenance_margin_ppm, rules.margin_rounding_atoms), try rateAtoms(notional, rules.fee_ppm, rules.margin_rounding_atoms));
 }
 
 fn marginGate(rules: Rules, buffer: i128, buffer_bps: i64, distance_ticks: i64) MarginGate {
@@ -203,9 +208,9 @@ fn liquidationDistanceTicks(buffer: i128, quantity: i128, denominator: i64, tick
     return std.math.cast(i64, @divFloor(@as(i128, buffer), per_tick_loss)) orelse error.Overflow;
 }
 
-fn checkLimits(limits: Limits, required: i128) !void {
-    if (limits.strategy.atoms <= 0 or required > limits.strategy.atoms) return error.StrategyLimitExceeded;
-    if (limits.portfolio.atoms <= 0 or required > limits.portfolio.atoms) return error.VirtualPortfolioLimitExceeded;
+fn checkLimits(limits: Limits, portfolio_required: i128, required: i128) !void {
+    if (limits.strategy.atoms <= 0 or portfolio_required > limits.strategy.atoms) return error.StrategyLimitExceeded;
+    if (limits.portfolio.atoms <= 0 or portfolio_required > limits.portfolio.atoms) return error.VirtualPortfolioLimitExceeded;
     if (limits.decision_domain.atoms <= 0 or required > limits.decision_domain.atoms) return error.DecisionDomainLimitExceeded;
     if (limits.exchange_account.atoms <= 0 or required > limits.exchange_account.atoms) return error.ExchangeAccountLimitExceeded;
     if (limits.global.atoms <= 0 or required > limits.global.atoms) return error.GlobalLimitExceeded;
@@ -226,8 +231,8 @@ fn notionalAtoms(quantity: i128, price_ticks: i128, tick_atoms: i128, quantity_n
     return ceilPositive(try std.math.mul(i128, try std.math.mul(i128, try std.math.mul(i128, quantity, price_ticks), tick_atoms), quantity_numerator), denominator);
 }
 
-fn rateAtoms(notional: i128, ppm: i64) !i128 {
-    return ceilPositive(try std.math.mul(i128, notional, ppm), ppm_scale);
+fn rateAtoms(notional: i128, ppm: i64, quantum: i128) !i128 {
+    return std.math.mul(i128, try ceilPositive(try std.math.mul(i128, notional, ppm), try std.math.mul(i128, ppm_scale, quantum)), quantum);
 }
 
 fn ceilPositive(numerator: i128, denominator: i128) !i128 {

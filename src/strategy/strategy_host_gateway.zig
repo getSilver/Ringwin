@@ -260,20 +260,21 @@ pub const Gateway = struct {
             self.activation_floor = @max(self.activation_floor, self.config.authorization.activation_identity);
         self.trading_enabled = false;
         if (stable_journal.last_sequence != shard.authoritativeBarrier() or
-            shard.strategy_identity != self.config.authorization.strategy_identity)
+            shard.strategyAuthority(self.config.authorization.strategy_identity).strategy_identity != self.config.authorization.strategy_identity)
             return error.UnstableHostAuthority;
-        if (shard.host_activation_identity != 0 and
-            config.authorization.activation_identity == shard.host_activation_identity)
+        if (shard.strategyAuthority(self.config.authorization.strategy_identity).host_activation_identity != 0 and
+            config.authorization.activation_identity == shard.strategyAuthority(self.config.authorization.strategy_identity).host_activation_identity)
             return error.StaleHostActivation;
-        if (shard.host_activation_identity != 0) {
-            self.activation_floor = @max(self.activation_floor, shard.host_activation_identity);
+        if (shard.hasHostAuthorityForSession(self.config.session)) {
+            self.activation_floor = @max(self.activation_floor, shard.strategyAuthority(self.config.authorization.strategy_identity).host_activation_identity);
             const fact_identity = try std.math.add(u64, stable_journal.last_sequence, 1);
             _ = try trading.applyStable(shard, stable_journal, .{ .core = .{
                 .identity = fact_identity,
                 .payload = .{ .host_activation_revoked = .{
-                    .strategy_identity = shard.strategy_identity,
-                    .activation_identity = shard.host_activation_identity,
+                    .strategy_identity = shard.strategyAuthority(self.config.authorization.strategy_identity).strategy_identity,
+                    .activation_identity = shard.strategyAuthority(self.config.authorization.strategy_identity).host_activation_identity,
                     .reason = .session_replaced,
+                    .session = self.config.session,
                 } },
             } });
         }
@@ -285,7 +286,7 @@ pub const Gateway = struct {
     }
 
     pub fn activate(self: *Gateway, shard: *trading.TradingShard, stable_journal: *journal.Journal) !void {
-        const applied = try shard.appliedHostActivation(stable_journal);
+        const applied = try shard.appliedHostActivationForStrategy(stable_journal, self.config.authorization.strategy_identity);
         const authorization = applied.authorization;
         if (authorization.strategy_identity == 0 or authorization.activation_identity == 0 or
             applied.session.generation == 0 or self.config.session.generation == 0 or
@@ -402,8 +403,8 @@ pub const Gateway = struct {
 
     pub fn ingest(self: *Gateway, frame: []const u8, now_ns: i64) Decision {
         if (self.trading_enabled and (self.authority_shard == null or self.authority_journal == null or
-            self.authority_shard.?.host_activation_identity != self.config.authorization.activation_identity or
-            self.authority_shard.?.host_activation_fact_sequence != self.activation_sequence or
+            self.authority_shard.?.strategyAuthority(self.config.authorization.strategy_identity).host_activation_identity != self.config.authorization.activation_identity or
+            self.authority_shard.?.strategyAuthority(self.config.authorization.strategy_identity).host_activation_fact_sequence != self.activation_sequence or
             self.authority_journal.?.last_sequence != self.authority_shard.?.authoritativeBarrier()))
             self.beginRecovery();
         if (frame.len >= output_header_len and get(u16, frame, 98) == 2)
@@ -485,8 +486,8 @@ pub const Gateway = struct {
             return error.UnknownSchema;
         if (!self.trading_enabled or
             self.authority_shard == null or self.authority_journal == null or
-            self.authority_shard.?.host_activation_identity != self.config.authorization.activation_identity or
-            self.authority_shard.?.host_activation_fact_sequence != self.activation_sequence or
+            self.authority_shard.?.strategyAuthority(self.config.authorization.strategy_identity).host_activation_identity != self.config.authorization.activation_identity or
+            self.authority_shard.?.strategyAuthority(self.config.authorization.strategy_identity).host_activation_fact_sequence != self.activation_sequence or
             self.authority_journal.?.last_sequence != self.authority_shard.?.authoritativeBarrier() or
             get(u128, frame, 64) != self.config.authorization.strategy_identity or
             get(u64, frame, 88) != self.config.authorization.config_version or
@@ -507,6 +508,7 @@ pub const Gateway = struct {
             return error.Stale;
 
         const payload = frame[128..];
+        if (self.authority_shard.?.strategyAuthority(self.config.authorization.strategy_identity).portfolio_identity != get(u128, payload, 16)) return error.Unauthorized;
         if (get(u16, payload, 0) != 1 or
             std.enums.fromInt(Side, payload[2]) == null or
             std.enums.fromInt(OrderType, payload[3]) == null or

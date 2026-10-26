@@ -174,8 +174,8 @@ fn exerciseManualFreeze(append_fault: bool, commit_fault: bool) !void {
     try std.testing.expectEqual(@as(i128, 0), try owner.shard.cycles.reservedAtoms(20, 10, 0x425443));
     try std.testing.expectEqual(@as(i128, 1), try owner.shard.cycles.outstandingAtoms(20, 10, 0x425443));
     var sell: trading.oms.IntentGroup = .{ .first_intent_sequence = 84001, .count = 2 };
-    sell.members[0] = .{ .intent_sequence = 84001, .strategy_instance = 9, .exchange_account = 20, .instrument = 103, .side = .sell, .quantity = 1, .operation = .place, .limit_price = .{ .instrument = 103, .rules_version = 1, .ticks = 100000000 } };
-    sell.members[1] = .{ .intent_sequence = 84002, .strategy_instance = 9, .exchange_account = 30, .instrument = 102, .side = .buy, .quantity = 10000, .operation = .place, .limit_price = .{ .instrument = 102, .rules_version = 1, .ticks = 10 } };
+    sell.members[0] = .{ .intent_sequence = 84001, .strategy_instance = 9, .portfolio = 10, .exchange_account = 20, .instrument = 103, .side = .sell, .quantity = 1, .operation = .place, .limit_price = .{ .instrument = 103, .rules_version = 1, .ticks = 100000000 } };
+    sell.members[1] = .{ .intent_sequence = 84002, .strategy_instance = 9, .portfolio = 10, .exchange_account = 30, .instrument = 102, .side = .buy, .quantity = 10000, .operation = .place, .limit_price = .{ .instrument = 102, .rules_version = 1, .ticks = 10 } };
     _ = try owner.apply(fixture.atGroup(2_000_001, .{ .identity = 84001, .payload = .{ .oms_intent_group = sell } }));
     try std.testing.expectEqual(@as(u16, 6), owner.shard.oms.order_count);
     command.command_identity += 1;
@@ -485,6 +485,7 @@ fn exerciseAccountRecovery(scenario: Scenario) !void {
             for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, 0..) |account, instrument, index| next.members[index] = .{
                 .intent_sequence = 20001 + index,
                 .strategy_instance = 9,
+                .portfolio = 10,
                 .exchange_account = account,
                 .operation = .place,
                 .instrument = instrument,
@@ -646,6 +647,7 @@ fn exerciseCarriedCycle(owner: *demo.Owner, fee_deficit: bool) !void {
     for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, 0..) |account, instrument, index| next.members[index] = .{
         .intent_sequence = 20001 + index,
         .strategy_instance = 9,
+        .portfolio = 10,
         .exchange_account = account,
         .operation = .place,
         .instrument = instrument,
@@ -740,7 +742,21 @@ fn exerciseCarriedCycle(owner: *demo.Owner, fee_deficit: bool) !void {
     try std.testing.expectEqual(@as(i128, 1), shard.economic_projection.portfolio.spotInventoryAtoms(0x425443));
 }
 
+pub fn initializePythonOwnerForConfiguration(owner: *demo.Owner, manifest: *const allocation.Configuration) !void {
+    try initializeForScenarioWithConfiguration(owner, .joint, manifest);
+    try prepareTradingForScenario(owner, .joint);
+}
+
+pub fn initializeSpotOwnerForConfiguration(owner: *demo.Owner, manifest: *const allocation.Configuration) !void {
+    try initializeForScenarioWithConfiguration(owner, .cycle_spot_zero, manifest);
+    try prepareTradingForScenario(owner, .cycle_spot_zero);
+}
+
 fn initializeForScenario(owner: *demo.Owner, scenario: Scenario) !void {
+    return initializeForScenarioWithConfiguration(owner, scenario, null);
+}
+
+fn initializeForScenarioWithConfiguration(owner: *demo.Owner, scenario: Scenario, manifest: ?*const allocation.Configuration) !void {
     const spot = scenario == .cycle_spot_zero or scenario == .cycle_spot_residual or carrying(scenario);
     const shard = &owner.shard;
     var rows = try configurationRows();
@@ -760,9 +776,13 @@ fn initializeForScenario(owner: *demo.Owner, scenario: Scenario) !void {
         for (rows[0 .. rows.len - 1]) |row| try configuration.apply(row);
         rows[0].begin.expected_digest = configuration.contentDigest();
     }
+    if (manifest) |configured| rows[0].begin.expected_digest = configured.header.?.expected_digest;
     if (scenario != .four_accounts) try owner.pinDeploymentDigest(rows[0].begin.expected_digest);
     var identity: u64 = 1;
-    if (scenario == .four_accounts) {
+    if (manifest) |configured| {
+        try owner.installDeployment(configured);
+        identity = owner.shard.authoritativeBarrier() + 1;
+    } else if (scenario == .four_accounts) {
         rows[0].begin.account_count = 4;
         rows[0].begin.account_limit_count = 4;
         rows[0].begin.slice_count = 4;
@@ -811,7 +831,7 @@ fn initializeForScenario(owner: *demo.Owner, scenario: Scenario) !void {
             .exchange_positions,
             .{ .opening_balance = .{ .cash_atoms = balance } },
             .{ .virtual_portfolio_activated = .{ .portfolio_identity = 10 } },
-            .{ .portfolio_transfer = .{ .amount_atoms = transfer } },
+            .{ .portfolio_transfer = .{ .portfolio_identity = 10, .amount_atoms = transfer } },
         };
         for (payloads) |payload| {
             _ = try owner.apply(fixture.atGroup(10, .{ .identity = identity, .account_scope = account, .payload = payload }));
@@ -959,7 +979,7 @@ fn exercisePartitionOrders(owner: *demo.Owner, scenario: Scenario) !void {
     }
     if (scenario == .single_rejected) {
         var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 1, .count = 1 };
-        group.members[0] = .{ .intent_sequence = 1, .strategy_instance = 9, .exchange_account = 20, .operation = .place, .instrument = 101, .quantity = 10000, .limit_price = .{ .instrument = 101, .rules_version = 1, .ticks = 100 } };
+        group.members[0] = .{ .intent_sequence = 1, .strategy_instance = 9, .portfolio = 10, .exchange_account = 20, .operation = .place, .instrument = 101, .quantity = 10000, .limit_price = .{ .instrument = 101, .rules_version = 1, .ticks = 100 } };
         _ = try owner.apply(fixture.atGroup(45, .{ .identity = 1199, .account_scope = 20, .payload = .{ .oms_intent_group = group } }));
         try std.testing.expectEqual(@import("../../../trading/trading_shard_event.zig").RejectReason.invalid_scope, owner.shard.last_reject_reason);
         try std.testing.expectEqual(@as(u16, 0), owner.shard.oms.order_count);
@@ -975,6 +995,7 @@ fn exercisePartitionOrders(owner: *demo.Owner, scenario: Scenario) !void {
             for ([_]u128{ 101, 103 }, 0..) |instrument, index| excessive.members[index] = .{
                 .intent_sequence = index + 1,
                 .strategy_instance = 9,
+                .portfolio = 10,
                 .exchange_account = 20,
                 .operation = .place,
                 .instrument = instrument,
@@ -1019,6 +1040,7 @@ fn exercisePartitionOrders(owner: *demo.Owner, scenario: Scenario) !void {
             for ([_]u128{ if (scenario == .four_accounts and attempt == 1) 40 else 20, 30 }, instruments, 0..) |account, instrument, index| competing.members[index] = .{
                 .intent_sequence = competing.first_intent_sequence + index,
                 .strategy_instance = 9,
+                .portfolio = 10,
                 .exchange_account = account,
                 .operation = .place,
                 .instrument = instrument,
@@ -1038,6 +1060,7 @@ fn exercisePartitionOrders(owner: *demo.Owner, scenario: Scenario) !void {
         for ([_]u128{ 40, 50 }, [_]u128{ 103, 105 }, 0..) |account, instrument, index| cd.members[index] = .{
             .intent_sequence = 1001 + index,
             .strategy_instance = 9,
+            .portfolio = 10,
             .exchange_account = account,
             .operation = .place,
             .instrument = instrument,
@@ -1081,7 +1104,7 @@ fn exercisePartitionOrders(owner: *demo.Owner, scenario: Scenario) !void {
             report.venue.envelope.exchange_account = account;
             report.venue.envelope.venue = venue;
             _ = try owner.apply(report);
-            cancellation.members[index] = .{ .intent_sequence = 10001 + index, .strategy_instance = 9, .exchange_account = account, .operation = .cancel, .instrument = instrument, .target_order_id = order.id, .expected_revision = 1 };
+            cancellation.members[index] = .{ .intent_sequence = 10001 + index, .strategy_instance = 9, .portfolio = 10, .exchange_account = account, .operation = .cancel, .instrument = instrument, .target_order_id = order.id, .expected_revision = 1 };
         }
         try owner.checkpoint();
         var rejected: usize = 0;
@@ -1090,6 +1113,7 @@ fn exercisePartitionOrders(owner: *demo.Owner, scenario: Scenario) !void {
             for ([_]u128{ 20, 30 }, [_]u128{ 103, 104 }, 0..) |account, instrument, index| risk_group.members[index] = .{
                 .intent_sequence = risk_group.first_intent_sequence + index,
                 .strategy_instance = 9,
+                .portfolio = 10,
                 .exchange_account = account,
                 .operation = .place,
                 .instrument = instrument,
@@ -1119,6 +1143,7 @@ fn exercisePartitionOrders(owner: *demo.Owner, scenario: Scenario) !void {
         for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, 0..) |account, instrument, index| group.members[index] = .{
             .intent_sequence = index + 1,
             .strategy_instance = 9,
+            .portfolio = 10,
             .exchange_account = account,
             .operation = .place,
             .instrument = instrument,
@@ -1162,6 +1187,7 @@ fn exercisePartitionOrders(owner: *demo.Owner, scenario: Scenario) !void {
         for ([_]u128{ 20, 30 }, [_]u128{ 103, 104 }, 0..) |account, instrument, index| candidate.members[index] = .{
             .intent_sequence = 5001 + index,
             .strategy_instance = 9,
+            .portfolio = 10,
             .exchange_account = account,
             .instrument = instrument,
             .operation = .place,
@@ -1208,7 +1234,7 @@ fn exercisePartitionOrders(owner: *demo.Owner, scenario: Scenario) !void {
     try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.count);
     try owner.checkpoint();
     var reopened: trading.oms.IntentGroup = .{ .first_intent_sequence = 99, .count = 2 };
-    reopened.members[0] = .{ .intent_sequence = 99, .strategy_instance = 9, .exchange_account = 20, .operation = .place, .instrument = 101, .quantity = 10000, .limit_price = .{ .instrument = 101, .rules_version = 1, .ticks = 100 } };
+    reopened.members[0] = .{ .intent_sequence = 99, .strategy_instance = 9, .portfolio = 10, .exchange_account = 20, .operation = .place, .instrument = 101, .quantity = 10000, .limit_price = .{ .instrument = 101, .rules_version = 1, .ticks = 100 } };
     reopened.members[1] = reopened.members[0];
     reopened.members[1].intent_sequence = 100;
     reopened.members[1].exchange_account = 30;
@@ -1228,6 +1254,7 @@ fn exercisePartitionOrders(owner: *demo.Owner, scenario: Scenario) !void {
         for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, 0..) |account, instrument, index| reduction.members[index] = .{
             .intent_sequence = 5901 + index,
             .strategy_instance = 9,
+            .portfolio = 10,
             .exchange_account = account,
             .instrument = instrument,
             .operation = .place,
@@ -1247,6 +1274,7 @@ fn exercisePartitionOrders(owner: *demo.Owner, scenario: Scenario) !void {
             for ([_]u128{ 20, 30 }, [_]u128{ 103, 104 }, 0..) |account, instrument, index| group.members[index] = .{
                 .intent_sequence = group.first_intent_sequence + index,
                 .strategy_instance = 9,
+                .portfolio = 10,
                 .exchange_account = account,
                 .instrument = instrument,
                 .operation = .place,
@@ -1275,6 +1303,7 @@ fn exerciseReductions(owner: *demo.Owner) !void {
     for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, 0..) |account, instrument, index| group.members[index] = .{
         .intent_sequence = 1001 + index,
         .strategy_instance = 9,
+        .portfolio = 10,
         .exchange_account = account,
         .operation = .place,
         .instrument = instrument,
@@ -1517,6 +1546,7 @@ fn prepareCycleClosure(owner: *demo.Owner, scenario: Scenario) !void {
     for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, 0..) |account, instrument, index| reduction.members[index] = .{
         .intent_sequence = 1001 + index,
         .strategy_instance = 9,
+        .portfolio = 10,
         .exchange_account = account,
         .operation = .place,
         .instrument = instrument,
@@ -1639,7 +1669,7 @@ fn exerciseDomainHistory(owner: *demo.Owner) !void {
     try std.testing.expect(owner.shard.business_history_root.?.generation > root.generation);
 }
 
-fn reconcileDomainAccount(owner: *demo.Owner, account: u128, gateway: *@import("../../../execution/execution_gateway.zig").Gateway) !void {
+pub fn reconcileDomainAccount(owner: *demo.Owner, account: u128, gateway: *@import("../../../execution/execution_gateway.zig").Gateway) !void {
     const state = owner.shard.accountState(account).?;
     const cursor = state.reconciliation_cursor;
     const window_id: u128 = if (cursor) |prior| prior.identity + 1 else 10000;
@@ -1832,6 +1862,7 @@ fn exerciseSharedBudget(owner: *demo.Owner) !void {
     for ([_]u128{ 101, 103 }, [_]i64{ 6000, 5000 }, 0..) |instrument, quantity, index| group.members[index] = .{
         .intent_sequence = index + 1,
         .strategy_instance = 9,
+        .portfolio = 10,
         .exchange_account = 20,
         .operation = .place,
         .instrument = instrument,

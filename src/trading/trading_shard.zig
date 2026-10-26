@@ -343,6 +343,21 @@ pub const AccountState = struct {
 };
 const AccountPartition = struct { identity: u128 = 0, state: AccountState = .{} };
 
+pub const PortfolioAuthority = struct {
+    portfolio_identity: u128 = 0,
+    strategy_active: bool = false,
+    strategy_identity: u128 = 0,
+    strategy_config_version: u64 = 0,
+    strategy_activation_identity: u128 = 0,
+    strategy_activation_fact_sequence: u64 = 0,
+    host_activation_identity: u128 = 0,
+    host_activation_barrier: u64 = 0,
+    host_activation_session: @import("../strategy/strategy_host_ipc.zig").Session = .{ .fencing = 0, .shard = 0, .generation = 0 },
+    host_activation_fact_sequence: u64 = 0,
+    host_activation_state_digest: [32]u8 = @splat(0),
+    host_activation_seen: bool = false,
+};
+
 pub const TradingShard = struct {
     cycles: @import("cycle_occupancy.zig").State = .{},
     last_business_archive_account: u128 = 0,
@@ -403,6 +418,8 @@ pub const TradingShard = struct {
     account_configured: bool = false,
     virtual_portfolio_active: bool = false,
     strategy_active: bool = false,
+    portfolio_authorities: [16]PortfolioAuthority = @splat(.{}),
+    portfolio_authority_count: u8 = 0,
     fencing_token: u64 = 0,
     expected_source_sequence: ?u64 = null,
     market_health: MarketHealth = .initializing,
@@ -459,6 +476,7 @@ pub const TradingShard = struct {
     strategy_config_version: u64 = 0,
     authority_control_barrier: u64 = 0,
     strategy_activation_identity: u128 = 0,
+    strategy_activation_fact_sequence: u64 = 0,
     host_activation_identity: u128 = 0,
     host_activation_barrier: u64 = 0,
     host_activation_session: @import("../strategy/strategy_host_ipc.zig").Session = .{ .fencing = 0, .shard = 0, .generation = 0 },
@@ -714,14 +732,14 @@ pub const TradingShard = struct {
             const residual = maybe orelse continue;
             if (residual.account != self.exchange_account_identity) continue;
             const reserved = try self.cycles.reservedAtoms(residual.account, residual.portfolio, residual.asset);
+            const owned = self.economic_projection.portfolioLayer(residual.portfolio) orelse return error.CycleResidual;
             const rule = self.cycles.residualRule(residual.asset) orelse return error.ResidualDisabled;
             var total: i128 = 0;
             for (self.cycles.residual_lifecycle.live[0..self.cycles.residual_lifecycle.live_count]) |live| if (live.asset == residual.asset) {
                 total = try std.math.add(i128, total, live.remaining);
             };
             if (total > rule.max_total_atoms) return error.ResidualLimit;
-            if (residual.portfolio != self.portfolio_identity or
-                reserved > self.economic_projection.portfolio.spotInventoryAtoms(residual.asset) or
+            if (reserved > owned.spotInventoryAtoms(residual.asset) or
                 reserved > self.economic_projection.exchange.spotInventoryAtoms(residual.asset) or
                 self.open_economic_fact_count != 0 or self.open_economic_unknown_time_count != 0 or self.unresolvedEconomicGate() or
                 self.economic_projection.reconciliation_break or self.economic_fault_count != 0) return error.CycleResidual;
@@ -760,7 +778,9 @@ pub const TradingShard = struct {
                 view.economic_projection.suspense_native_asset_count != 0) return error.CycleNotClosed;
             try view.economic_projection.assertClosed();
             const entry = view.instrumentEntry(member.instrument) orelse return error.CycleNotClosed;
-            for ([_]*const economics.Layer{ &view.economic_projection.portfolio, &view.economic_projection.exchange }) |layer| {
+            const owned = view.economic_projection.portfolioLayer(cycle.portfolio) orelse return error.CycleNotClosed;
+            {
+                const layer = owned;
                 if (layer.instrumentPosition(member.instrument)) |position| {
                     if (position.position.quantity != 0 or position.position.open_cost_atoms != 0 or position.margin_atoms != 0 or
                         (entry.product != .spot and position.spot_asset_atoms != 0))
@@ -780,8 +800,7 @@ pub const TradingShard = struct {
             if (entry.product == .spot) {
                 const asset = entry.rules.base_asset;
                 const reserved = try self.cycles.outstandingAtoms(member.account, cycle.portfolio, asset);
-                const atoms = try std.math.sub(i128, view.economic_projection.portfolio.spotInventoryAtoms(asset), reserved);
-                if (atoms != try std.math.sub(i128, view.economic_projection.exchange.spotInventoryAtoms(asset), reserved)) return error.CycleResidual;
+                const atoms = try std.math.sub(i128, owned.spotInventoryAtoms(asset), reserved);
                 if (atoms != 0) {
                     const now = now_utc_ns orelse return error.CycleResidual;
                     const rule = self.cycles.residualRule(asset) orelse return error.ResidualDisabled;
@@ -790,10 +809,11 @@ pub const TradingShard = struct {
                     if (atoms <= 0 or atoms >= unit.atoms or rule.asset_version != definition.definition.version or now < cursor.through_utc_ns)
                         return error.CycleResidual;
                     // A shared Asset's other instrument must not donate its inventory to this cycle.
-                    for (view.economic_projection.portfolio.instrument_positions[0..view.economic_projection.portfolio.instrument_position_count]) |other|
+                    for (owned.instrument_positions[0..owned.instrument_position_count]) |other|
                         if (other.instrument != member.instrument and other.base_asset == asset and
                             (other.position.quantity != 0 or other.position.open_cost_atoms != 0 or other.margin_atoms != 0)) return error.CycleResidual;
                     for (self.cycles.records[0..self.cycles.count]) |other| {
+                        if (other.portfolio != cycle.portfolio) continue;
                         if (other.strategy == cycle.strategy and other.first_sequence == cycle.first_sequence) continue;
                         for (other.members[0..other.count]) |other_member| {
                             if (other_member.account != member.account) continue;
@@ -829,7 +849,7 @@ pub const TradingShard = struct {
             }
             var found = false;
             for (view.oms.orders[0..view.oms.order_count]) |order| {
-                if (order.exchange_account != member.account or order.instrument != member.instrument) continue;
+                if (order.exchange_account != member.account or order.portfolio != cycle.portfolio or order.instrument != member.instrument) continue;
                 if ((order.state != .filled and order.state != .canceled and order.state != .rejected) or
                     order.reservation_active or order.reservation.atoms != 0 or order.pending_reservation != null or order.pending_previous_spec != null or
                     order.pending_basis_quantity != 0 or order.replacement != null or
@@ -1404,6 +1424,7 @@ pub const TradingShard = struct {
             try self.pinFact(&target, entry.rules_barrier);
             try self.pinFact(&target, entry.margin_barrier);
             try self.pinFact(&target, entry.trading_barrier);
+            for (entry.strategy_authorizations[0..entry.strategy_authorization_count]) |authorization| try self.pinFact(&target, authorization.barrier);
             try self.pinFact(&target, entry.capability_barrier);
         }
         for (self.secondary_accounts[0..self.secondary_account_count]) |partition| {
@@ -1417,11 +1438,17 @@ pub const TradingShard = struct {
                 try self.pinFact(&target, entry.rules_barrier);
                 try self.pinFact(&target, entry.margin_barrier);
                 try self.pinFact(&target, entry.trading_barrier);
+                for (entry.strategy_authorizations[0..entry.strategy_authorization_count]) |authorization| try self.pinFact(&target, authorization.barrier);
                 try self.pinFact(&target, entry.capability_barrier);
             }
         }
         try self.pinFact(&target, self.coordinator_binding_fact);
         try self.pinFact(&target, self.host_activation_fact_sequence);
+        try self.pinFact(&target, self.strategy_activation_fact_sequence);
+        for (self.portfolio_authorities[0..self.portfolio_authority_count]) |authority| {
+            try self.pinFact(&target, authority.host_activation_fact_sequence);
+            try self.pinFact(&target, authority.strategy_activation_fact_sequence);
+        }
         try self.pinFact(&target, self.authority_control_barrier);
         for (self.control_fact_sequences[0..self.operational_state.command_count]) |sequence| try self.pinFact(&target, sequence);
         for ([_]EventKind{ .primary_lease_granted, .risk_lease_granted, .strategy_activated, .canonical_account_reconciliation_started, .canonical_account_reconciliation }) |kind| {
@@ -1509,6 +1536,8 @@ pub const TradingShard = struct {
             .oms_dispatch_batch,
             .funding_archive_committed,
             .fill_archive_committed,
+            .order_archive_committed,
+            .forced_archive_committed,
             .reconciliation_archive_committed,
             => {
                 const expected = if (self.account_view == 0) self.primary_account_identity else self.secondary_accounts[self.account_view - 1].identity;
@@ -1518,6 +1547,7 @@ pub const TradingShard = struct {
                     .oms_execution_report => |report| try self.requireOrderAccount(report.order_id, expected),
                     .oms_reconciliation_result => |result| try self.requireOrderAccount(result.order_id, expected),
                     .economic_fill => |fill| try self.requireOrderAccount(fill.order_id, expected),
+                    .order_archive_committed => |commit| try self.requireOrderAccount(commit.order_id, expected),
                     .oms_dispatch_batch => |batch| {
                         if (batch.count > batch.items.len) return error.InvalidDispatchBatch;
                         for (batch.items[0..batch.count]) |item| {
@@ -1530,7 +1560,7 @@ pub const TradingShard = struct {
                         if (rules.venue != account.venue or self.deployment.owner(expected, rules.instrument_identity) == null) return error.CanonicalScopeMismatch;
                     },
                     .virtual_portfolio_activated => |activation| {
-                        if (activation.portfolio_identity != self.deployment.domain(self.decision_domain_identity).?.portfolio) return error.InvalidVirtualPortfolio;
+                        if (!self.deployment.ownsPortfolio(self.decision_domain_identity, activation.portfolio_identity)) return error.InvalidVirtualPortfolio;
                     },
                     .capability_profile_activation => |capability| {
                         if (capability.exchange_account != expected or capability.venue != account.venue or @intFromEnum(capability.environment) != @intFromEnum(account.environment)) return error.CanonicalScopeMismatch;
@@ -1625,6 +1655,73 @@ pub const TradingShard = struct {
             destination.exchangeAccountView(index);
         }
         if (!destination.account_configured or destination.exchange_account_identity != identity) return error.CanonicalScopeMismatch;
+    }
+
+    pub fn hasHostAuthorityForSession(self: *const TradingShard, session: @import("../strategy/strategy_host_ipc.zig").Session) bool {
+        if (self.host_activation_identity != 0 and std.meta.eql(self.host_activation_session, session)) return true;
+        for (self.portfolio_authorities[0..self.portfolio_authority_count]) |authority|
+            if (authority.host_activation_identity != 0 and std.meta.eql(authority.host_activation_session, session)) return true;
+        return false;
+    }
+
+    pub fn strategyAuthority(self: *const TradingShard, identity: u128) PortfolioAuthority {
+        if (identity == self.strategy_identity or (identity == 0 and !self.deployment.sealed)) return .{
+            .portfolio_identity = self.portfolio_identity,
+            .strategy_active = self.strategy_active,
+            .strategy_identity = self.strategy_identity,
+            .strategy_config_version = self.strategy_config_version,
+            .strategy_activation_identity = self.strategy_activation_identity,
+            .strategy_activation_fact_sequence = self.strategy_activation_fact_sequence,
+            .host_activation_identity = self.host_activation_identity,
+            .host_activation_barrier = self.host_activation_barrier,
+            .host_activation_session = self.host_activation_session,
+            .host_activation_fact_sequence = self.host_activation_fact_sequence,
+            .host_activation_state_digest = self.host_activation_state_digest,
+            .host_activation_seen = self.host_activation_seen,
+        };
+        for (self.portfolio_authorities[0..self.portfolio_authority_count]) |authority| if (authority.strategy_identity == identity) return authority;
+        return .{};
+    }
+
+    fn storeStrategyAuthority(self: *TradingShard, authority: PortfolioAuthority) !void {
+        if (authority.strategy_identity == self.strategy_identity or
+            (self.strategy_identity == 0 and authority.portfolio_identity == self.portfolio_identity))
+        {
+            self.strategy_active = authority.strategy_active;
+            self.strategy_identity = authority.strategy_identity;
+            self.strategy_config_version = authority.strategy_config_version;
+            self.strategy_activation_identity = authority.strategy_activation_identity;
+            self.strategy_activation_fact_sequence = authority.strategy_activation_fact_sequence;
+            self.host_activation_identity = authority.host_activation_identity;
+            self.host_activation_barrier = authority.host_activation_barrier;
+            self.host_activation_session = authority.host_activation_session;
+            self.host_activation_fact_sequence = authority.host_activation_fact_sequence;
+            self.host_activation_state_digest = authority.host_activation_state_digest;
+            self.host_activation_seen = authority.host_activation_seen;
+            return;
+        }
+        for (self.portfolio_authorities[0..self.portfolio_authority_count]) |*existing| {
+            if (existing.strategy_identity == authority.strategy_identity) {
+                existing.* = authority;
+                return;
+            }
+        }
+        if (self.portfolio_authority_count == self.portfolio_authorities.len) return error.StrategyCapacity;
+        self.portfolio_authorities[self.portfolio_authority_count] = authority;
+        self.portfolio_authority_count += 1;
+    }
+
+    pub fn appliedHostActivationForStrategy(self: *const TradingShard, stable_journal: *const journal.Journal, identity: u128) !host_gateway.AppliedActivation {
+        const authority = self.strategyAuthority(identity);
+        try self.trace.validate();
+        if (authority.host_activation_identity == 0 or authority.host_activation_fact_sequence == 0 or stable_journal.last_sequence != self.authoritativeBarrier() or stable_journal.last_sequence < authority.host_activation_fact_sequence) return error.HostNotActivated;
+        return .{ .authorization = .{ .strategy_identity = identity, .config_version = authority.strategy_config_version, .activation_identity = authority.host_activation_identity, .activation_barrier = authority.host_activation_barrier }, .session = authority.host_activation_session, .fact_sequence = authority.host_activation_fact_sequence, .state_digest = authority.host_activation_state_digest };
+    }
+
+    pub fn nextHostActivationIdentityForStrategy(self: *const TradingShard, identity: u128) !u128 {
+        const authority = self.strategyAuthority(identity);
+        if (!authority.host_activation_seen or authority.host_activation_identity != 0) return error.HostNotRevoked;
+        return std.math.add(u128, authority.strategy_activation_identity, 1);
     }
 
     pub fn appliedHostActivation(self: *const TradingShard, stable_journal: *const journal.Journal) !host_gateway.AppliedActivation {
@@ -1759,8 +1856,14 @@ pub const TradingShard = struct {
         return std.math.sub(
             i128,
             self.risk_lease_atoms,
-            try std.math.add(i128, self.economic_projection.portfolio.margin_atoms, try self.activeReservationAtoms()),
+            try std.math.add(i128, try self.grossPortfolioMarginAtoms(), try self.activeReservationAtoms()),
         );
+    }
+
+    fn grossPortfolioMarginAtoms(self: *const TradingShard) !i128 {
+        var total = self.economic_projection.portfolio.margin_atoms;
+        for (self.economic_projection.extra_portfolios[0..self.economic_projection.extra_portfolio_count]) |entry| total = try std.math.add(i128, total, entry.layer.margin_atoms);
+        return total;
     }
 
     pub fn activeReservationAtoms(self: *const TradingShard) !i128 {
@@ -1802,6 +1905,12 @@ pub const TradingShard = struct {
     }
 
     pub fn genesisReady(self: *const TradingShard) bool {
+        if (self.deployment.sealed) {
+            if (self.genesisReadyForPortfolio(self.portfolio_identity)) return true;
+            for (self.portfolio_authorities[0..self.portfolio_authority_count]) |authority|
+                if (self.genesisReadyForPortfolio(authority.portfolio_identity)) return true;
+            return false;
+        }
         self.requireSettlementConsumers() catch return false;
         return !self.asset_configuration_failed and self.instrument_registry.count != 0 and self.instrument_rules_version != 0 and self.margin_rules_version != 0 and
             self.account_configured and self.exchange_balance_observed and
@@ -1810,8 +1919,62 @@ pub const TradingShard = struct {
             self.fencing_token != 0 and self.risk_lease_atoms > 0;
     }
 
+    fn activeStrategyForPortfolio(self: *const TradingShard, portfolio: u128) bool {
+        if (self.strategy_active and self.portfolio_identity == portfolio and !self.strategyFenced(self.strategy_identity)) return true;
+        for (self.portfolio_authorities[0..self.portfolio_authority_count]) |authority|
+            if (authority.strategy_active and authority.portfolio_identity == portfolio and !self.strategyFenced(authority.strategy_identity)) return true;
+        return false;
+    }
+
+    fn portfolioFundedInDomain(self: *const TradingShard, portfolio: u128) bool {
+        for (0..@as(usize, self.secondary_account_count) + 1) |account_index| {
+            const projection = if (account_index == 0) &self.economic_projection else &self.secondary_accounts[account_index - 1].state.economic_projection;
+            if (projection.portfolioLayer(portfolio)) |layer|
+                if (layer.active and layer.funded) return true;
+        }
+        return false;
+    }
+
+    fn hasFundedActiveStrategy(self: *const TradingShard) bool {
+        if (!self.deployment.sealed) return self.strategy_active;
+        if (self.activeStrategyForPortfolio(self.portfolio_identity) and self.portfolioFundedInDomain(self.portfolio_identity)) return true;
+        for (self.portfolio_authorities[0..self.portfolio_authority_count]) |authority|
+            if (self.activeStrategyForPortfolio(authority.portfolio_identity) and self.portfolioFundedInDomain(authority.portfolio_identity)) return true;
+        return false;
+    }
+
+    pub fn genesisReadyForPortfolio(self: *const TradingShard, portfolio: u128) bool {
+        if (!self.deployment.sealed) return self.genesisReady();
+        self.requireSettlementConsumers() catch return false;
+        const layer = self.economic_projection.portfolioLayer(portfolio) orelse return false;
+        return !self.asset_configuration_failed and self.instrument_registry.count != 0 and self.instrument_rules_version != 0 and self.margin_rules_version != 0 and
+            self.account_configured and self.exchange_balance_observed and self.exchange_positions_observed and self.opening_balance_observed and
+            layer.active and layer.funded and self.activeStrategyForPortfolio(portfolio) and self.fencing_token != 0 and self.risk_lease_atoms > 0;
+    }
+
     fn portfolioPosition(self: *const TradingShard) Position {
         return .{ .quantity = self.economic_projection.portfolio.swap.quantity, .open_cost_atoms = self.economic_projection.portfolio.swap.open_cost_atoms };
+    }
+
+    // A nonzero scalar target proves one primary swap; zero requires every portfolio flat.
+    fn lifecycleDeRiskTargetProven(self: *const TradingShard, target: i64) bool {
+        if (!self.deployment.sealed) return true;
+        var represented = false;
+        for (0..@as(usize, self.secondary_account_count) + 1) |account_index| {
+            const projection = if (account_index == 0) &self.economic_projection else &self.secondary_accounts[account_index - 1].state.economic_projection;
+            if (projection.reconciliation_break) return false;
+            for (0..@as(usize, projection.extra_portfolio_count) + 1) |portfolio_index| {
+                const layer = if (portfolio_index == 0) &projection.portfolio else &projection.extra_portfolios[portfolio_index - 1].layer;
+                if (layer.instrument_position_count == 0 and (layer.swap.quantity != 0 or layer.spot.quantity != 0)) return false;
+                for (layer.instrument_positions[0..layer.instrument_position_count]) |position| {
+                    if (position.position.quantity == 0) continue;
+                    if (target == 0 or account_index != 0 or portfolio_index != 0 or represented or
+                        position.product != .isolated_linear_usdt or position.position.quantity != target) return false;
+                    represented = true;
+                }
+            }
+        }
+        return target == 0 or represented;
     }
 
     fn exchangePosition(self: *const TradingShard) Position {
@@ -1877,6 +2040,7 @@ pub const TradingShard = struct {
             .internal_initial_margin_ppm = margin.internal_initial_margin_ppm,
             .internal_maintenance_margin_ppm = margin.internal_maintenance_margin_ppm,
             .fee_ppm = margin.fee_ppm,
+            .margin_rounding_atoms = if (margin.native) |native| native.margin_rounding_atoms else 1,
             .opening_buffer = .{ .asset = if (registered) |entry| entry.rules.settlement_asset else settlement_asset, .atoms = margin.opening_buffer_atoms },
             .opening_buffer_bps = margin.opening_buffer_bps,
             .opening_liquidation_distance_ticks = margin.opening_liquidation_distance_ticks,
@@ -1923,6 +2087,10 @@ pub const TradingShard = struct {
                 if (intent.strategy_instance == fenced and intent.operation != .cancel)
                     return error.StrategyCutoverFenced;
             if (intent.operation == .cancel) continue;
+            const portfolio_id = if (intent.portfolio != 0) intent.portfolio else if (!self.deployment.sealed) self.portfolio_identity else return error.DeploymentBindingMismatch;
+            const portfolio_layer = self.economic_projection.portfolioLayer(portfolio_id) orelse return error.InvalidVirtualPortfolio;
+            const strategy_authority = self.strategyAuthority(intent.strategy_instance);
+            if (self.deployment.sealed and (!strategy_authority.strategy_active or strategy_authority.portfolio_identity != portfolio_id)) return error.TradingNotAuthorized;
             if (!self.settlementConsumersCompatible(intent.instrument)) return error.AssetPrecisionUnsupported;
             var replaced: canonical.AssetAmount = .{ .asset = settlement_asset, .atoms = 0 };
             if (intent.operation == .amend) {
@@ -1931,7 +2099,7 @@ pub const TradingShard = struct {
             }
             const instrument_config = self.instrumentEntry(intent.instrument) orelse return error.UnknownOmsInstrument;
             if (!instrument_config.margin_configured) return error.InstrumentRulesInactive;
-            if (!instrument_config.trading_enabled) return error.TradingNotAuthorized;
+            if (!instrument_config.tradingAuthorization(intent.strategy_instance).enabled) return error.TradingNotAuthorized;
             const market_state = self.canonical_market.get(intent.instrument) orelse return error.MissingInstrumentDefinition;
             if (market_state.health != .healthy) return error.MarketDataGap;
             const observed_exchange_cash = try self.currentNativeRiskCash(intent.instrument);
@@ -1940,77 +2108,86 @@ pub const TradingShard = struct {
                 try self.asset_registry.checkAmount(.{ .asset = unit.asset, .atoms = try std.math.mul(i128, intent.quantity, unit.atoms) }, true);
             }
             if (instrument_config.product == .spot and intent.side == .sell) {
-                const gross = @min(self.economic_projection.portfolio.positionForInstrument(intent.instrument).quantity, self.economic_projection.exchange.positionForInstrument(intent.instrument).quantity);
-                const unit = try self.baseAtomsPerLot(instrument_config);
-                var pending_lots: i64 = intent.quantity;
-                var committed_sell_atoms: i128 = 0;
-                var committed_instrument_lots: i64 = 0;
-                for (self.oms.orders[0..self.oms.order_count]) |order| {
-                    if (self.decision_domain_identity != 0 and order.exchange_account != self.exchange_account_identity) continue;
-                    const ordered = self.instrumentEntry(order.instrument) orelse return error.UnknownOmsInstrument;
-                    if (ordered.product != .spot or ordered.rules.base_asset != unit.asset or order.side != .sell) continue;
-                    const order_unit = try self.baseAtomsPerLot(ordered);
-                    // Reports describe executed lots; only unique applied fills
-                    // have debited the native inventory backing those lots.
-                    const applied = try self.economic_projection.appliedCanonicalFillQuantity(order.id);
-                    const obligation = if (order.reservation_active) @max(order.confirmed_quantity, @max(order.quantity, order.pending_basis_quantity)) else order.cumulative_quantity;
-                    const remaining = @max(try std.math.sub(i64, obligation, applied), 0);
-                    if (intent.operation == .amend and order.id == intent.target_order_id) {
-                        const prospective = try std.math.add(i64, intent.quantity, @max(try std.math.sub(i64, order.cumulative_quantity, applied), 0));
-                        pending_lots = @max(prospective, remaining);
-                        continue;
+                for ([_]*const economics_module.Layer{ portfolio_layer, &self.economic_projection.exchange }, 0..) |sell_layer, scope| {
+                    const gross = sell_layer.positionForInstrument(intent.instrument).quantity;
+                    const unit = try self.baseAtomsPerLot(instrument_config);
+                    var pending_lots: i64 = intent.quantity;
+                    var committed_sell_atoms: i128 = 0;
+                    var committed_instrument_lots: i64 = 0;
+                    for (self.oms.orders[0..self.oms.order_count]) |order| {
+                        if (self.decision_domain_identity != 0 and order.exchange_account != self.exchange_account_identity) continue;
+                        if (scope == 0 and order.portfolio != portfolio_id and self.deployment.sealed) continue;
+                        const ordered = self.instrumentEntry(order.instrument) orelse return error.UnknownOmsInstrument;
+                        if (ordered.product != .spot or ordered.rules.base_asset != unit.asset or order.side != .sell) continue;
+                        const order_unit = try self.baseAtomsPerLot(ordered);
+                        // Reports describe executed lots; only unique applied fills
+                        // have debited the native inventory backing those lots.
+                        const applied = try self.economic_projection.appliedCanonicalFillQuantity(order.id);
+                        const obligation = if (order.reservation_active) @max(order.confirmed_quantity, @max(order.quantity, order.pending_basis_quantity)) else order.cumulative_quantity;
+                        const remaining = @max(try std.math.sub(i64, obligation, applied), 0);
+                        if (intent.operation == .amend and order.id == intent.target_order_id) {
+                            const prospective = try std.math.add(i64, intent.quantity, @max(try std.math.sub(i64, order.cumulative_quantity, applied), 0));
+                            pending_lots = @max(prospective, remaining);
+                            continue;
+                        }
+                        if (order.instrument == intent.instrument) committed_instrument_lots = try std.math.add(i64, committed_instrument_lots, remaining);
+                        committed_sell_atoms = try std.math.add(i128, committed_sell_atoms, try std.math.mul(i128, remaining, order_unit.atoms));
                     }
-                    if (order.instrument == intent.instrument) committed_instrument_lots = try std.math.add(i64, committed_instrument_lots, remaining);
-                    committed_sell_atoms = try std.math.add(i128, committed_sell_atoms, try std.math.mul(i128, remaining, order_unit.atoms));
-                }
-                for (self.oms.tombstones[0..self.oms.tombstone_count]) |archived| {
-                    if (self.decision_domain_identity != 0 and archived.exchange_account != self.exchange_account_identity) continue;
-                    const archived_config = self.instrumentEntry(archived.instrument) orelse return error.UnknownOmsInstrument;
-                    if (archived_config.product != .spot or archived_config.rules.base_asset != unit.asset) continue;
-                    const archive_unit = try self.baseAtomsPerLot(archived_config);
-                    const applied = try self.economic_projection.appliedCanonicalFillQuantity(archived.order_id);
-                    const remaining = @max(try std.math.sub(i64, archived.cumulative_quantity, applied), 0);
-                    if (remaining == 0) continue;
-                    var side: ?oms_module.Side = null;
-                    for (self.oms.command_history[0..self.oms.command_history_count]) |command| {
-                        if (command.order_id == archived.order_id) {
-                            side = command.side;
-                            break;
+                    for (self.oms.tombstones[0..self.oms.tombstone_count]) |archived| {
+                        if (self.decision_domain_identity != 0 and archived.exchange_account != self.exchange_account_identity) continue;
+                        const archived_config = self.instrumentEntry(archived.instrument) orelse return error.UnknownOmsInstrument;
+                        if (archived_config.product != .spot or archived_config.rules.base_asset != unit.asset) continue;
+                        const archive_unit = try self.baseAtomsPerLot(archived_config);
+                        const applied = try self.economic_projection.appliedCanonicalFillQuantity(archived.order_id);
+                        const remaining = @max(try std.math.sub(i64, archived.cumulative_quantity, applied), 0);
+                        if (remaining == 0) continue;
+                        var side: ?oms_module.Side = null;
+                        var archived_portfolio: u128 = 0;
+                        for (self.oms.command_history[0..self.oms.command_history_count]) |command| {
+                            if (command.order_id == archived.order_id) {
+                                side = command.side;
+                                archived_portfolio = command.portfolio;
+                                break;
+                            }
+                        }
+                        if (side == null) return error.IncompleteReconciliationEvidence;
+                        if (scope == 0 and archived_portfolio != portfolio_id and self.deployment.sealed) continue;
+                        if (side.? == .sell) {
+                            if (archived.instrument == intent.instrument) committed_instrument_lots = try std.math.add(i64, committed_instrument_lots, remaining);
+                            committed_sell_atoms = try std.math.add(i128, committed_sell_atoms, try std.math.mul(i128, remaining, archive_unit.atoms));
                         }
                     }
-                    if (side == null) return error.IncompleteReconciliationEvidence;
-                    if (side.? == .sell) {
-                        if (archived.instrument == intent.instrument) committed_instrument_lots = try std.math.add(i64, committed_instrument_lots, remaining);
-                        committed_sell_atoms = try std.math.add(i128, committed_sell_atoms, try std.math.mul(i128, remaining, archive_unit.atoms));
+                    var group_sell_atoms: i128 = 0;
+                    var group_instrument_lots: i64 = 0;
+                    for (qualified.members[0..member_index]) |prior| {
+                        if (prior.operation == .cancel or prior.side != .sell) continue;
+                        if (scope == 0 and prior.portfolio != portfolio_id and self.deployment.sealed) continue;
+                        const prior_entry = self.instrumentEntry(prior.instrument) orelse return error.UnknownOmsInstrument;
+                        if (prior_entry.product != .spot or prior_entry.rules.base_asset != unit.asset) continue;
+                        if (prior.instrument == intent.instrument) group_instrument_lots = try std.math.add(i64, group_instrument_lots, prior.quantity);
+                        const prior_unit = try self.baseAtomsPerLot(prior_entry);
+                        group_sell_atoms = try std.math.add(i128, group_sell_atoms, try std.math.mul(i128, prior.quantity, prior_unit.atoms));
                     }
+                    group_sell_atoms = try std.math.add(i128, group_sell_atoms, try std.math.mul(i128, pending_lots, unit.atoms));
+                    const required = try std.math.add(i128, committed_sell_atoms, group_sell_atoms);
+                    try self.cycles.residual_lifecycle.checkSellCapacity(gross, pending_lots, committed_instrument_lots, group_instrument_lots);
+                    var residual = try self.cycles.reservedAtoms(self.exchange_account_identity, if (scope == 0) portfolio_id else self.portfolio_identity, unit.asset);
+                    if (scope == 1) for (self.economic_projection.extra_portfolios[0..self.economic_projection.extra_portfolio_count]) |entry| {
+                        residual = try std.math.add(i128, residual, try self.cycles.reservedAtoms(self.exchange_account_identity, entry.identity, unit.asset));
+                    };
+                    if (required > try std.math.sub(i128, sell_layer.spotInventoryAtoms(unit.asset), residual)) return error.InsufficientSpotAsset;
                 }
-                var group_sell_atoms: i128 = 0;
-                var group_instrument_lots: i64 = 0;
-                for (qualified.members[0..member_index]) |prior| {
-                    if (prior.operation == .cancel or prior.side != .sell) continue;
-                    const prior_entry = self.instrumentEntry(prior.instrument) orelse return error.UnknownOmsInstrument;
-                    if (prior_entry.product != .spot or prior_entry.rules.base_asset != unit.asset) continue;
-                    if (prior.instrument == intent.instrument) group_instrument_lots = try std.math.add(i64, group_instrument_lots, prior.quantity);
-                    const prior_unit = try self.baseAtomsPerLot(prior_entry);
-                    group_sell_atoms = try std.math.add(i128, group_sell_atoms, try std.math.mul(i128, prior.quantity, prior_unit.atoms));
-                }
-                group_sell_atoms = try std.math.add(i128, group_sell_atoms, try std.math.mul(i128, pending_lots, unit.atoms));
-                const required = try std.math.add(i128, committed_sell_atoms, group_sell_atoms);
-                try self.cycles.residual_lifecycle.checkSellCapacity(gross, pending_lots, committed_instrument_lots, group_instrument_lots);
-                const residual = try self.cycles.reservedAtoms(self.exchange_account_identity, self.portfolio_identity, unit.asset);
-                if (required > try std.math.sub(i128, self.economic_projection.portfolio.spotInventoryAtoms(unit.asset), residual) or
-                    required > try std.math.sub(i128, self.economic_projection.exchange.spotInventoryAtoms(unit.asset), residual)) return error.InsufficientSpotAsset;
             }
             try validateExactOmsSpec(intent.*, instrument_config);
             try self.checkAssetAmounts(canonical.InstrumentQuantity{ .instrument = intent.instrument, .rules_version = instrument_config.rules.version, .lots = intent.quantity }, true);
             try self.checkAssetAmounts(intent.limit_price, true);
             if (intent.market_protection_price) |price| try self.checkAssetAmounts(price, true);
-            const portfolio_position_quantity = self.economic_projection.portfolio.positionForInstrument(intent.instrument).quantity;
+            const portfolio_position_quantity = portfolio_layer.positionForInstrument(intent.instrument).quantity;
             const exchange_position_quantity = self.economic_projection.exchange.positionForInstrument(intent.instrument).quantity;
             if (self.decision_domain_identity != 0 and intent.portfolio_reduce_only) {
                 var pending: i64 = intent.quantity;
                 for (self.oms.orders[0..self.oms.order_count]) |order| {
-                    if (order.exchange_account != intent.exchange_account or order.instrument != intent.instrument or order.side != intent.side) continue;
+                    if (order.exchange_account != intent.exchange_account or order.portfolio != portfolio_id or order.instrument != intent.instrument or order.side != intent.side) continue;
                     const applied = try self.economic_projection.appliedCanonicalFillQuantity(order.id);
                     const obligation = if (order.reservation_active) @max(order.quantity, @max(order.confirmed_quantity, order.pending_basis_quantity)) else order.cumulative_quantity;
                     const remaining = @max(try std.math.sub(i64, obligation, applied), 0);
@@ -2021,11 +2198,11 @@ pub const TradingShard = struct {
                     }
                 }
                 for (qualified.members[0..member_index]) |prior| {
-                    if (prior.operation != .cancel and prior.exchange_account == intent.exchange_account and prior.instrument == intent.instrument and prior.portfolio_reduce_only and prior.side == intent.side) {
+                    if (prior.operation != .cancel and prior.exchange_account == intent.exchange_account and prior.portfolio == portfolio_id and prior.instrument == intent.instrument and prior.portfolio_reduce_only and prior.side == intent.side) {
                         pending = try std.math.add(i64, pending, prior.quantity);
                     }
                 }
-                if (pending > @as(i128, @intCast(@abs(portfolio_position_quantity))) or pending > @as(i128, @intCast(@abs(exchange_position_quantity)))) return error.PortfolioReduceOnlyViolation;
+                if (pending > @as(i128, @intCast(@abs(portfolio_position_quantity)))) return error.PortfolioReduceOnlyViolation;
             }
             const signed_delta = (if (intent.side == .buy) intent.quantity else -intent.quantity);
             const next_portfolio = try std.math.add(i64, portfolio_position_quantity, signed_delta);
@@ -2037,6 +2214,9 @@ pub const TradingShard = struct {
                 !(exchange_position_quantity != 0 and next_exchange != 0 and
                     (exchange_position_quantity < 0) != (next_exchange < 0));
             const reduces_only = reduces_portfolio and reduces_exchange;
+            if (self.decision_domain_identity != 0 and !reduces_only and
+                (!self.genesisReadyForPortfolio(portfolio_id) or self.risk_lease_allocation == null or
+                    self.risk_lease_valid_through_barrier < self.authoritativeBarrier())) return error.TradingNotAuthorized;
             if (self.operational_state.mode == .draining and
                 self.operational_state.active_operation_kind == .de_risk)
             {
@@ -2060,16 +2240,24 @@ pub const TradingShard = struct {
             var risk_exchange_quantity = exchange_position_quantity;
             if (instrument_config.product == .spot and intent.side == .sell) {
                 const unit = try self.baseAtomsPerLot(instrument_config);
-                const frozen = try self.cycles.reservedAtoms(self.exchange_account_identity, self.portfolio_identity, unit.asset);
-                risk_portfolio_quantity = std.math.cast(i64, @divTrunc(self.economic_projection.portfolio.spotInventoryAtoms(unit.asset) - frozen, unit.atoms)) orelse return error.QuantityOutOfRange;
+                const frozen = try self.cycles.reservedAtoms(self.exchange_account_identity, portfolio_id, unit.asset);
+                risk_portfolio_quantity = std.math.cast(i64, @divTrunc(portfolio_layer.spotInventoryAtoms(unit.asset) - frozen, unit.atoms)) orelse return error.QuantityOutOfRange;
                 risk_exchange_quantity = std.math.cast(i64, @divTrunc(self.economic_projection.exchange.spotInventoryAtoms(unit.asset) - frozen, unit.atoms)) orelse return error.QuantityOutOfRange;
             }
-            const assessment = try risk_module.assess(self.riskRules(intent.instrument), self.riskLimits(), .{
-                .portfolio_cash = .{ .asset = settlement_asset, .atoms = self.portfolioCash() },
+            var limits = self.riskLimits();
+            var portfolio_active = try self.oms.reservationsForPortfolio(self.exchange_account_identity, portfolio_id, settlement_asset);
+            if (!self.deployment.sealed) portfolio_active.atoms = active.atoms;
+            if (self.deployment.sealed) for (qualified.members[0..member_index]) |prior| {
+                if (prior.operation != .cancel and prior.portfolio == portfolio_id) portfolio_active.atoms = try std.math.add(i128, portfolio_active.atoms, prior.reservation.atoms);
+            };
+            if (self.deployment.sealed) limits.portfolio.atoms = self.risk_lease_atoms;
+            const assessment = try risk_module.assess(self.riskRules(intent.instrument), limits, .{
+                .portfolio_cash = .{ .asset = settlement_asset, .atoms = portfolio_layer.usdt_balance_atoms },
                 .exchange_cash = .{ .asset = settlement_asset, .atoms = observed_exchange_cash },
                 .portfolio_position = .{ .instrument = intent.instrument, .rules_version = instrument_config.rules.version, .lots = risk_portfolio_quantity },
                 .exchange_position = .{ .instrument = intent.instrument, .rules_version = instrument_config.rules.version, .lots = risk_exchange_quantity },
                 .active_order_reservations = active,
+                .portfolio_active_order_reservations = portfolio_active,
                 .replaced_order_reservation = replaced,
                 .mark_price = mark,
             }, .{
@@ -2080,6 +2268,12 @@ pub const TradingShard = struct {
                 .portfolio_reduce_only = intent.portfolio_reduce_only,
             });
             intent.reservation = assessment.order_reservation;
+            if (self.deployment.sealed) {
+                const portfolio_limit = self.deployment.portfolioSliceLimit(self.exchange_account_identity, settlement_asset, portfolio_id) orelse return error.VirtualPortfolioLimitExceeded;
+                const pending = try std.math.add(i128, try std.math.sub(i128, portfolio_active.atoms, replaced.atoms), @max(replaced.atoms, assessment.order_reservation.atoms));
+                const gross = try std.math.add(i128, portfolio_layer.margin_atoms, pending);
+                if (gross > portfolio_limit) return error.VirtualPortfolioLimitExceeded;
+            }
             intent.portfolio_reduce_only = assessment.portfolio_reduce_only;
             if (intent.venue_reduce_only and !assessment.venue_reduce_only) return error.UnsupportedOrderSpec;
             intent.venue_reduce_only = assessment.venue_reduce_only and
@@ -2180,7 +2374,7 @@ pub const TradingShard = struct {
         try candidate.oms.confirmReplacement(order_id, intent.reservation, intent.portfolio_reduce_only, intent.venue_reduce_only, intent.intent_sequence, .{
             .decision = decision_barrier,
             .reservation = candidate.authoritativeBarrier(),
-            .authority = try candidate.dispatchAuthorityRefs(intent.instrument, now_monotonic_ns, decision_barrier),
+            .authority = try candidate.dispatchAuthorityRefsForStrategy(intent.instrument, now_monotonic_ns, decision_barrier, intent.strategy_instance),
         });
         copyTradingState(self, &candidate);
         return qualified.reservation_atoms;
@@ -2282,7 +2476,8 @@ pub const TradingShard = struct {
             const residual = maybe orelse continue;
             if (residual.account != self.exchange_account_identity) continue;
             const reserved = try self.cycles.reservedAtoms(residual.account, residual.portfolio, residual.asset);
-            if (reserved > self.economic_projection.portfolio.spotInventoryAtoms(residual.asset) or
+            const owned = self.economic_projection.portfolioLayer(residual.portfolio) orelse return error.InvalidVirtualPortfolio;
+            if (reserved > owned.spotInventoryAtoms(residual.asset) or
                 reserved > self.economic_projection.exchange.spotInventoryAtoms(residual.asset)) self.oms.recovery_only = true;
         };
         // These compatibility summary fields are derived from the two
@@ -2291,7 +2486,7 @@ pub const TradingShard = struct {
         // from the legacy single-order scalars.
         const used = try std.math.add(
             i128,
-            self.economic_projection.portfolio.margin_atoms,
+            try self.grossPortfolioMarginAtoms(),
             try self.activeReservationAtoms(),
         );
         const remaining = try std.math.sub(i128, self.risk_lease_atoms, used);
@@ -2299,20 +2494,23 @@ pub const TradingShard = struct {
     }
 
     pub fn assertClosures(self: *const TradingShard) !void {
-        const portfolio_position = self.portfolioPosition();
-        const exchange_position = self.exchangePosition();
-        if (portfolio_position.quantity != exchange_position.quantity or
-            portfolio_position.open_cost_atoms != exchange_position.open_cost_atoms)
-            return error.PositionLayerMismatch;
-        if (try std.math.add(
-            i128,
-            self.portfolioCash(),
-            try std.math.add(i128, self.treasuryCash(), self.economic_projection.suspense_usdt_atoms),
-        ) != self.exchangeCash())
-            return error.CashLayerMismatch;
-        if (self.portfolioFee() != self.exchangeFee() or
-            self.totalFees() != self.portfolioFee())
-            return error.FeeLayerMismatch;
+        try self.economic_projection.assertClosed();
+        if (self.economic_projection.extra_portfolio_count == 0) {
+            const portfolio_position = self.portfolioPosition();
+            const exchange_position = self.exchangePosition();
+            if (portfolio_position.quantity != exchange_position.quantity or
+                portfolio_position.open_cost_atoms != exchange_position.open_cost_atoms)
+                return error.PositionLayerMismatch;
+            if (try std.math.add(
+                i128,
+                self.portfolioCash(),
+                try std.math.add(i128, self.treasuryCash(), self.economic_projection.suspense_usdt_atoms),
+            ) != self.exchangeCash())
+                return error.CashLayerMismatch;
+            if (self.portfolioFee() != self.exchangeFee() or
+                self.totalFees() != self.portfolioFee())
+                return error.FeeLayerMismatch;
+        }
         const ledger = self.economic_projection.ledger_summary;
         if (ledger.portfolio_debits_atoms != ledger.portfolio_credits_atoms or
             ledger.exchange_debits_atoms != ledger.exchange_credits_atoms)
@@ -2320,7 +2518,7 @@ pub const TradingShard = struct {
         if (try std.math.add(i128, try self.riskLeaseRemainingAtoms(), try std.math.add(
             i128,
             try self.activeReservationAtoms(),
-            self.economic_projection.portfolio.margin_atoms,
+            try self.grossPortfolioMarginAtoms(),
         )) != self.risk_lease_atoms)
             return error.RiskLeaseDoesNotClose;
     }
@@ -2445,7 +2643,7 @@ pub const TradingShard = struct {
     }
 
     pub fn prepareForcedArchive(self: *const TradingShard, identity: u64, origin: history.Origin, evidence: *const @import("../portfolio/forced_archive_proof.zig").Evidence) !economics_module.ForcedArchiveQualification {
-        if (origin.account != self.exchange_account_identity or origin.stream.id != (self.checkpoint orelse return error.OrderArchiveOriginUnavailable).stream or
+        if (!std.meta.eql(origin, try self.businessOrigin()) or origin.stream.id != (self.checkpoint orelse return error.OrderArchiveOriginUnavailable).stream or
             self.pending_history_candidate != null or self.pending_safety_history_candidate != null or self.deferred_history_admission_count != 0) return error.ForcedArchivePinned;
         const coordinator_origin = self.coordinator_history_origin orelse return error.ForcedArchivePinned;
         if (!std.meta.eql(coordinator_origin, evidence.proof.root.origin)) return error.InvalidForcedClosure;
@@ -2611,13 +2809,17 @@ pub const TradingShard = struct {
             if (traded_atoms > base.definition.max_cumulative_atoms) return error.AssetAmountOutOfRange;
         }
         if (self.economic_projection.cumulative_funding_absolute_atoms > quote.definition.max_cumulative_atoms) return error.AssetAmountOutOfRange;
-        for ([_]i128{ self.economic_projection.treasury_usdt_atoms, self.economic_projection.suspense_usdt_atoms }) |amount|
+        for ([_]i128{ self.economic_projection.treasury_usdt_atoms, self.economic_projection.suspense_usdt_atoms, self.economic_projection.netting_settlement_atoms }) |amount|
             try self.asset_registry.checkAmount(.{ .asset = quote.definition.asset, .atoms = amount }, false);
         for (self.economic_projection.treasury_native_assets[0..self.economic_projection.treasury_native_asset_count]) |amount|
             try self.asset_registry.checkAmount(amount, false);
         for (self.economic_projection.suspense_native_assets[0..self.economic_projection.suspense_native_asset_count]) |amount|
             try self.asset_registry.checkAmount(amount, false);
-        for ([_]economics_module.Layer{ self.economic_projection.portfolio, self.economic_projection.exchange }) |layer| {
+        var layers: [5]*const economics_module.Layer = undefined;
+        layers[0] = &self.economic_projection.portfolio;
+        layers[1] = &self.economic_projection.exchange;
+        for (self.economic_projection.extra_portfolios[0..self.economic_projection.extra_portfolio_count], 2..) |*owned, index| layers[index] = &owned.layer;
+        for (layers[0 .. 2 + self.economic_projection.extra_portfolio_count]) |layer| {
             for (layer.native_assets[0..layer.native_asset_count]) |native| {
                 const definition = self.asset_registry.get(native.asset) orelse return error.UnknownAssetDefinition;
                 try self.asset_registry.checkAmount(.{ .asset = native.asset, .atoms = native.balance_atoms }, false);
@@ -2671,12 +2873,17 @@ pub const TradingShard = struct {
     }
 
     fn dispatchAuthorityRefs(self: *const TradingShard, instrument: canonical.InstrumentIdentity, now_monotonic_ns: u64, deadline_barrier: u64) !oms_module.DispatchAuthorityRefs {
+        return self.dispatchAuthorityRefsForStrategy(instrument, now_monotonic_ns, deadline_barrier, self.strategy_identity);
+    }
+
+    fn dispatchAuthorityRefsForStrategy(self: *const TradingShard, instrument: canonical.InstrumentIdentity, now_monotonic_ns: u64, deadline_barrier: u64, strategy: u128) !oms_module.DispatchAuthorityRefs {
+        const authority = self.strategyAuthority(strategy);
         try self.trace.validate();
         var refs: oms_module.DispatchAuthorityRefs = .{
             .decision_domain = self.decision_domain_identity,
             .configuration_digest = if (self.deployment.sealed) self.deployment.header.?.expected_digest else @splat(0),
             .exchange_account = self.exchange_account_identity,
-            .virtual_portfolio = self.portfolio_identity,
+            .virtual_portfolio = authority.portfolio_identity,
             .deadline_barrier = deadline_barrier,
         };
         if (self.authority_control_barrier != 0) {
@@ -2688,16 +2895,17 @@ pub const TradingShard = struct {
             refs.primary_lease = .{ .identity = self.fencing_token, .version = self.fencing_token, .barrier = fact.sequence };
         if (self.latestFact(.risk_lease_granted)) |fact|
             refs.risk_lease = .{ .identity = self.risk_lease_identity, .version = self.risk_lease_version, .barrier = fact.sequence };
-        if (self.latestFact(.strategy_activated)) |fact|
-            refs.config = .{ .identity = self.strategy_activation_identity, .version = self.strategy_config_version, .barrier = fact.sequence };
+        if (authority.strategy_activation_fact_sequence != 0)
+            refs.config = .{ .identity = authority.strategy_activation_identity, .version = authority.strategy_config_version, .barrier = authority.strategy_activation_fact_sequence };
         if (self.instrument_registry.get(instrument)) |entry| {
             if (entry.margin_barrier != 0) {
                 const fact = self.trace.factAt(entry.margin_barrier) orelse return error.InvalidControlAuthority;
                 refs.margin_rules = .{ .identity = fact.identity, .version = entry.margin.version, .barrier = entry.margin_barrier };
             }
-            if (entry.trading_barrier != 0) {
-                const fact = self.trace.factAt(entry.trading_barrier) orelse return error.InvalidControlAuthority;
-                refs.instrument_trading = .{ .identity = fact.identity, .version = entry.trading_version, .barrier = entry.trading_barrier };
+            const trading_authorization = entry.tradingAuthorization(strategy);
+            if (trading_authorization.barrier != 0) {
+                const fact = self.trace.factAt(trading_authorization.barrier) orelse return error.InvalidControlAuthority;
+                refs.instrument_trading = .{ .identity = fact.identity, .version = trading_authorization.version, .barrier = trading_authorization.barrier };
             }
             if (entry.rules_barrier != 0) {
                 const fact = self.trace.factAt(entry.rules_barrier) orelse return error.InvalidControlAuthority;
@@ -2716,6 +2924,10 @@ pub const TradingShard = struct {
 
     /// Current source-owned versions for Gateway recheck; no deadline or send
     /// permission is reconstructed from a replayed shard.
+    pub fn currentDispatchAuthorityRefsForStrategy(self: *const TradingShard, instrument: canonical.InstrumentIdentity, strategy: u128) !oms_module.DispatchAuthorityRefs {
+        return self.dispatchAuthorityRefsForStrategy(instrument, 0, 0, strategy);
+    }
+
     pub fn currentDispatchAuthorityRefs(self: *const TradingShard, instrument: canonical.InstrumentIdentity) !oms_module.DispatchAuthorityRefs {
         return self.dispatchAuthorityRefs(instrument, 0, 0);
     }
@@ -2815,9 +3027,10 @@ pub const TradingShard = struct {
                     if (starting_view != 0) self.exchangeAccountView(starting_view - 1);
                 }
             }
-            var authority = try self.dispatchAuthorityRefs(command.instrument, now_monotonic_ns, self.authoritativeBarrier());
+            var authority = try self.dispatchAuthorityRefsForStrategy(command.instrument, now_monotonic_ns, self.authoritativeBarrier(), command.strategy_instance);
             if (self.decision_domain_identity != 0) {
                 for (self.cycles.records[0..self.cycles.count]) |cycle| {
+                    if (cycle.portfolio != order.portfolio or cycle.strategy != order.strategy_instance) continue;
                     for (cycle.members[0..cycle.count]) |member| if (member.account == order.exchange_account and member.instrument == order.instrument) {
                         authority.cycle = .{ .identity = cycle.first_sequence, .version = 1, .barrier = cycle.fact_sequence };
                     };
@@ -2865,6 +3078,7 @@ pub const TradingShard = struct {
         group.members[0] = .{
             .intent_sequence = intent.intent_sequence,
             .strategy_instance = intent.strategy_identity,
+            .portfolio = intent.portfolio_identity,
             .operation = .place,
             .instrument = intent.instrument_identity,
             .side = if (intent.side == .buy) .buy else .sell,
@@ -2907,10 +3121,11 @@ pub const TradingShard = struct {
         if (candidate.len > candidate.bytes.len) return error.InvalidIntentGroup;
         const parsed = try host_gateway.decodeIntentGroup(candidate.frame());
         const first = parsed.members[0];
-        if (!self.strategy_active or self.host_activation_identity == 0 or
-            !std.meta.eql(parsed.session, self.host_activation_session) or
-            first.strategy_identity != self.strategy_identity or first.config_version != self.strategy_config_version or
-            first.activation_identity != self.host_activation_identity)
+        const authority = self.strategyAuthority(first.strategy_identity);
+        if (!authority.strategy_active or authority.host_activation_identity == 0 or
+            !std.meta.eql(parsed.session, authority.host_activation_session) or
+            first.strategy_identity != authority.strategy_identity or first.config_version != authority.strategy_config_version or
+            first.activation_identity != authority.host_activation_identity)
         {
             try self.rejectIntent(.strategy_intent_rejected, first.intent_sequence, .identity_mismatch);
             return null;
@@ -2930,7 +3145,7 @@ pub const TradingShard = struct {
             .invalid_cursor => .invalid_cursor,
             else => return error.InvalidHostGroupRejection,
         } else if (first.strategy_cursor <= self.strategy_cursor or
-            first.strategy_cursor <= self.host_activation_barrier or first.strategy_cursor <= self.host_activation_fact_sequence)
+            first.strategy_cursor <= authority.host_activation_barrier or first.strategy_cursor <= authority.host_activation_fact_sequence)
             .invalid_cursor
         else if (self.decision_domain_identity == 0)
             .joint_admission_unavailable
@@ -2941,9 +3156,9 @@ pub const TradingShard = struct {
             return null;
         }
         for (parsed.members[0..parsed.count]) |member| {
-            if (member.portfolio_identity != self.deployment.domain(self.decision_domain_identity).?.portfolio or
-                member.strategy_identity != self.strategy_identity or member.config_version != self.strategy_config_version or
-                member.activation_identity != self.host_activation_identity or
+            if (member.portfolio_identity != authority.portfolio_identity or
+                member.strategy_identity != authority.strategy_identity or member.config_version != authority.strategy_config_version or
+                member.activation_identity != authority.host_activation_identity or
                 self.deployment.owner(member.exchange_account_identity, member.instrument_identity) != self.decision_domain_identity)
             {
                 try self.rejectSubmittedIntent(group, .strategy_intent_rejected, .identity_mismatch);
@@ -2954,11 +3169,13 @@ pub const TradingShard = struct {
     }
 
     fn submitOrderIntent(self: *TradingShard, intent: host_gateway.OrderIntent, now_monotonic_ns: u64, cursor_floor: ?u64) !?OrderCommand {
-        if (!self.genesisReady()) return error.GenesisIncomplete;
+        const authority = self.strategyAuthority(intent.strategy_identity);
+        if (!self.genesisReadyForPortfolio(intent.portfolio_identity)) return error.GenesisIncomplete;
         var group: oms_module.IntentGroup = .{ .first_intent_sequence = intent.intent_sequence, .count = 1 };
         group.members[0] = .{
             .intent_sequence = intent.intent_sequence,
             .strategy_instance = intent.strategy_identity,
+            .portfolio = intent.portfolio_identity,
             .operation = .place,
             .instrument = intent.instrument_identity,
             .side = if (intent.side == .buy) .buy else .sell,
@@ -2993,14 +3210,14 @@ pub const TradingShard = struct {
             try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, .invalid_cursor);
             return null;
         };
-        if (!self.strategy_active or self.host_activation_identity == 0 or
-            intent.strategy_cursor <= self.host_activation_barrier or
-            intent.strategy_cursor <= self.host_activation_fact_sequence)
+        if (!authority.strategy_active or authority.host_activation_identity == 0 or
+            intent.strategy_cursor <= authority.host_activation_barrier or
+            intent.strategy_cursor <= authority.host_activation_fact_sequence)
         {
             try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, .host_not_activated);
             return null;
         }
-        if (self.host_activation_identity != intent.activation_identity) {
+        if (authority.host_activation_identity != intent.activation_identity) {
             try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, .identity_mismatch);
             return null;
         }
@@ -3008,10 +3225,10 @@ pub const TradingShard = struct {
             try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, .authorization_closed);
             return null;
         }
-        if (intent.strategy_identity != self.strategy_identity or
-            intent.config_version != self.strategy_config_version or
-            intent.activation_identity != self.strategy_activation_identity or
-            intent.portfolio_identity != self.portfolio_identity or
+        if (intent.strategy_identity != authority.strategy_identity or
+            intent.config_version != authority.strategy_config_version or
+            intent.activation_identity != authority.strategy_activation_identity or
+            intent.portfolio_identity != authority.portfolio_identity or
             intent.exchange_account_identity != self.exchange_account_identity or
             self.instrumentEntry(intent.instrument_identity) == null)
         {
@@ -3097,7 +3314,7 @@ pub const TradingShard = struct {
         try self.trace.append(.risk_accepted, intent.intent_sequence);
         const decision_barrier: u64 = self.authoritativeBarrier();
         try self.trace.append(.risk_reservation_created, intent.intent_sequence);
-        const refs = [_]oms_module.RiskFactRefs{.{ .decision = decision_barrier, .reservation = self.authoritativeBarrier(), .authority = try self.dispatchAuthorityRefs(intent.instrument_identity, now_monotonic_ns, decision_barrier) }};
+        const refs = [_]oms_module.RiskFactRefs{.{ .decision = decision_barrier, .reservation = self.authoritativeBarrier(), .authority = try self.dispatchAuthorityRefsForStrategy(intent.instrument_identity, now_monotonic_ns, decision_barrier, intent.strategy_identity) }};
         try self.oms.applyQualifiedGroup(qualified.group, original_group, &refs);
         try self.adjustMarginBuffersForReservationChange(qualified.reservation_atoms);
         const oms_command = self.oms.emitted()[0];
@@ -3187,7 +3404,11 @@ pub const TradingShard = struct {
                 const identity = std.math.cast(u64, settlement.identity) orelse return error.IdentityOutOfRange;
                 // Only immutable deployment ownership can attribute a historical bill.
                 const canonical_digest = try canonicalPayloadDigest(record.event);
-                const funding_ownership: ?economics_module.FundingOwnership = if (self.deployment.owner(settlement.exchange_account, settlement.instrument) == self.decision_domain_identity and self.decision_domain_identity != 0) .{
+                var multiple_portfolios = false;
+                for (self.deployment.portfolios[0..self.deployment.portfolio_count]) |membership| if (membership.domain == self.decision_domain_identity) {
+                    multiple_portfolios = true;
+                };
+                const funding_ownership: ?economics_module.FundingOwnership = if (!multiple_portfolios and self.deployment.owner(settlement.exchange_account, settlement.instrument) == self.decision_domain_identity and self.decision_domain_identity != 0) .{
                     .binding = try self.deployment.bindingRecord(self.decision_domain_identity, self.decision_stream_identity),
                     .account = settlement.exchange_account,
                     .instrument = settlement.instrument,
@@ -3371,6 +3592,7 @@ pub const TradingShard = struct {
                 try self.trace.append(.canonical_account_observed, fact_identity);
             },
             .venue_account_configuration_snapshot => |configuration| {
+                try self.canonical_account.apply(record.event);
                 self.last_venue_configuration = configuration;
                 try self.trace.append(.canonical_venue_configuration, fact_identity);
             },
@@ -4000,13 +4222,13 @@ pub const TradingShard = struct {
         }
     }
 
-    fn consumeResidualAtoms(self: *TradingShard, kind: @FieldType(@import("residual_lifecycle.zig").ConsumptionSource, "kind"), identity: u128, strategy: u128, cycle: u64, instrument: u128, asset: u64, atoms: i128, digest: [32]u8) !i128 {
-        if (atoms == 0 or try self.cycles.residual_lifecycle.outstandingAtoms(self.exchange_account_identity, self.portfolio_identity, asset) == 0) return 0;
+    fn consumeResidualAtoms(self: *TradingShard, kind: @FieldType(@import("residual_lifecycle.zig").ConsumptionSource, "kind"), identity: u128, portfolio: u128, strategy: u128, cycle: u64, instrument: u128, asset: u64, atoms: i128, digest: [32]u8) !i128 {
+        if (atoms == 0 or try self.cycles.residual_lifecycle.outstandingAtoms(self.exchange_account_identity, portfolio, asset) == 0) return 0;
         const source: @import("residual_lifecycle.zig").ConsumptionSource = .{
             .kind = kind,
             .identity = identity,
             .account = self.exchange_account_identity,
-            .portfolio = self.portfolio_identity,
+            .portfolio = portfolio,
             .asset = asset,
             .strategy = strategy,
             .cycle_first_sequence = cycle,
@@ -4025,18 +4247,18 @@ pub const TradingShard = struct {
         const entry = self.instrumentEntry(instrument) orelse return error.UnknownOmsInstrument;
         const target: ?u128 = if (entry.product == .spot and entry.rules.base_asset == asset) instrument else null;
         for (self.cycles.residual_lifecycle.live[0..self.cycles.residual_lifecycle.live_count], 0..) |live, index| {
-            if (receipt.allocations[index] != 0) try self.economic_projection.transferSpotInventory(live.instrument, target, asset, receipt.allocations[index]);
+            if (receipt.allocations[index] != 0) try self.economic_projection.transferSpotInventoryForPortfolio(portfolio, live.instrument, target, asset, receipt.allocations[index]);
         }
         if (consumed.frozen_consumed_atoms != 0) self.oms.recovery_only = true;
         try self.trace.append(.residual_consumed, std.math.cast(u64, identity) orelse return error.IdentityOutOfRange);
         return consumed.consumed_atoms;
     }
 
-    fn restoreResidualCharge(self: *TradingShard, kind: @FieldType(@import("residual_lifecycle.zig").ConsumptionSource, "kind"), identity: u128, instrument: u128, amount: canonical.AssetAmount, adjustment_identity: u64) !i128 {
+    fn restoreResidualCharge(self: *TradingShard, kind: @FieldType(@import("residual_lifecycle.zig").ConsumptionSource, "kind"), identity: u128, portfolio: u128, instrument: u128, amount: canonical.AssetAmount, adjustment_identity: u64) !i128 {
         if (amount.atoms == 0) return 0;
         var found: ?@import("residual_lifecycle.zig").Receipt = null;
         for (self.cycles.residual_lifecycle.receipts[0..self.cycles.residual_lifecycle.receipt_count]) |receipt| {
-            if (receipt.source.kind == kind and receipt.source.identity == identity and receipt.source.account == self.exchange_account_identity and receipt.source.portfolio == self.portfolio_identity and receipt.source.asset == amount.asset) {
+            if (receipt.source.kind == kind and receipt.source.identity == identity and receipt.source.account == self.exchange_account_identity and receipt.source.portfolio == portfolio and receipt.source.asset == amount.asset) {
                 found = receipt;
                 break;
             }
@@ -4049,14 +4271,14 @@ pub const TradingShard = struct {
         const target: ?u128 = if (entry.product == .spot and entry.rules.base_asset == amount.asset) instrument else null;
         for (self.cycles.residual_lifecycle.live[0..self.cycles.residual_lifecycle.live_count], 0..) |live, index| {
             const restored = try std.math.sub(i128, before.allocations[index], after.allocations[index]);
-            if (restored != 0) try self.economic_projection.transferSpotInventory(live.instrument, target, amount.asset, -restored);
+            if (restored != 0) try self.economic_projection.transferSpotInventoryForPortfolio(portfolio, live.instrument, target, amount.asset, -restored);
         }
         try self.trace.append(.residual_consumed, adjustment_identity);
         return restored_atoms;
     }
 
     fn applyCanonicalFeeAdjustment(self: *TradingShard, record: canonical.EventRecord, adjustment: canonical.FeeAdjustment, fact_identity: u64, verified_origin: bool) !void {
-        if (adjustment.exchange_account != self.exchange_account_identity or adjustment.portfolio != self.portfolio_identity or
+        if (adjustment.exchange_account != self.exchange_account_identity or self.economic_projection.portfolioLayer(adjustment.portfolio) == null or
             record.envelope.scope != .account or !std.meta.eql(record.envelope.raw_evidence, adjustment.source) or
             adjustment.source.stream == 0 or adjustment.source.sequence == 0 or std.mem.allEqual(u8, &adjustment.source.digest, 0) or
             adjustment.effective_time_utc_ns == 0) return error.InvalidFeeEvidence;
@@ -4088,11 +4310,11 @@ pub const TradingShard = struct {
             cursor -= 1;
             const revision = self.economic_projection.fee_revisions[cursor].adjustment;
             if (revision.fill_identity != adjustment.fill_identity) continue;
-            refund -= try self.restoreResidualCharge(.fee_adjustment, revision.identity, origin.original.instrument, .{ .asset = previous_fee.asset, .atoms = refund }, fact_identity);
+            refund -= try self.restoreResidualCharge(.fee_adjustment, revision.identity, origin.portfolio, origin.original.instrument, .{ .asset = previous_fee.asset, .atoms = refund }, fact_identity);
         }
         const initial_fee = origin.original.fee.?;
         if (refund > 0 and initial_fee.asset == previous_fee.asset)
-            refund -= try self.restoreResidualCharge(.fill, adjustment.fill_identity, origin.original.instrument, .{ .asset = previous_fee.asset, .atoms = @min(refund, initial_fee.atoms) }, fact_identity);
+            refund -= try self.restoreResidualCharge(.fill, adjustment.fill_identity, origin.portfolio, origin.original.instrument, .{ .asset = previous_fee.asset, .atoms = @min(refund, initial_fee.atoms) }, fact_identity);
         if (refund > 0 and adjustment.cycle_first_sequence != 0 and previous_fee.asset != self.economic_projection.settlement_asset) {
             const source: @import("residual_lifecycle.zig").ConsumptionSource = .{
                 .kind = .fee_adjustment,
@@ -4108,7 +4330,7 @@ pub const TradingShard = struct {
             const credited = self.cycles.residual_lifecycle.creditOwned(source, refund) catch 0;
             if (credited != 0) try self.trace.append(.residual_consumed, std.math.cast(u64, adjustment.identity) orelse return error.IdentityOutOfRange) else if (self.cycles.completed(adjustment.strategy, adjustment.cycle_first_sequence) != null) self.oms.recovery_only = true;
         }
-        _ = try self.consumeResidualAtoms(.fee_adjustment, adjustment.identity, adjustment.strategy, adjustment.cycle_first_sequence, origin.original.instrument, adjustment.new_fee.asset, charge, digest_value);
+        _ = try self.consumeResidualAtoms(.fee_adjustment, adjustment.identity, origin.portfolio, adjustment.strategy, adjustment.cycle_first_sequence, origin.original.instrument, adjustment.new_fee.asset, charge, digest_value);
         _ = try self.economic_projection.applyFeeAdjustment(adjustment, digest_value);
         try self.rememberEconomicTime(std.math.cast(u64, adjustment.identity) orelse return error.IdentityOutOfRange, .fee_adjustment, digest_value, adjustment.effective_time_utc_ns);
         try self.checkEconomicRanges();
@@ -4187,14 +4409,15 @@ pub const TradingShard = struct {
         if (instrument_config.product == .spot) {
             const unit = try self.baseAtomsPerLot(instrument_config);
             const traded = if (fill.side == .sell) try std.math.mul(i128, quantity, unit.atoms) else 0;
-            const consumed = try self.consumeResidualAtoms(.fill, fill.identity, order.strategy_instance, original_cycle, fill.instrument, unit.asset, try std.math.add(i128, traded, base_fee.atoms), payload_digest);
+            const consumed = try self.consumeResidualAtoms(.fill, fill.identity, order.portfolio, order.strategy_instance, original_cycle, fill.instrument, unit.asset, try std.math.add(i128, traded, base_fee.atoms), payload_digest);
             if (fill.side == .sell) {
-                const gross = @max(0, self.economic_projection.portfolio.positionForInstrument(fill.instrument).quantity);
+                const portfolio = self.economic_projection.portfolioLayer(order.portfolio) orelse return error.InvalidVirtualPortfolio;
+                const gross = @max(0, portfolio.positionForInstrument(fill.instrument).quantity);
                 inventory_only_lots = try std.math.sub(i64, quantity, @min(quantity, gross));
                 if (try std.math.mul(i128, inventory_only_lots, unit.atoms) > consumed) return error.MissingResidualConsumption;
             }
         }
-        if (native_fee) |charge| _ = try self.consumeResidualAtoms(.fill, fill.identity, order.strategy_instance, original_cycle, fill.instrument, charge.asset, charge.atoms, payload_digest);
+        if (native_fee) |charge| _ = try self.consumeResidualAtoms(.fill, fill.identity, order.portfolio, order.strategy_instance, original_cycle, fill.instrument, charge.asset, charge.atoms, payload_digest);
         const changed = try self.economic_projection.applyCanonicalFillWithSource(.{
             .inventory_only_lots = inventory_only_lots,
             .identity = fill_id,
@@ -4217,8 +4440,9 @@ pub const TradingShard = struct {
             .native_rebate = native_rebate,
             .portfolio_margin_ppm = if (instrument_config.margin_configured) instrument_config.margin.internal_initial_margin_ppm else self.internal_initial_margin_ppm,
             .exchange_margin_ppm = if (instrument_config.margin_configured) instrument_config.margin.venue_initial_margin_ppm else self.venue_initial_margin_ppm,
+            .margin_rounding_atoms = if (instrument_config.margin.native) |native| native.margin_rounding_atoms else 1,
             .product = instrument_config.product,
-        }, payload_digest, .{ .canonical_fill = fill, .exchange_account = self.exchange_account_identity, .portfolio = self.portfolio_identity, .strategy = order.strategy_instance, .cycle_first_sequence = original_cycle });
+        }, payload_digest, .{ .canonical_fill = fill, .exchange_account = self.exchange_account_identity, .portfolio = if (order.portfolio != 0) order.portfolio else if (!self.deployment.sealed) self.portfolio_identity else return error.DeploymentBindingMismatch, .strategy = order.strategy_instance, .cycle_first_sequence = original_cycle });
         if (!changed) return;
         try self.rememberEconomicTime(fill_id, .fill, payload_digest, fill.venue_fill_time_utc_ns);
         try self.checkEconomicRanges();
@@ -4229,14 +4453,23 @@ pub const TradingShard = struct {
         try self.trace.append(.risk_reservation_rebalanced, fact_identity);
     }
 
-    fn revokeHostActivation(self: *TradingShard, identity: u128, fact_identity: u64) !void {
-        std.debug.assert(self.host_activation_identity == identity);
+    fn revokeHostActivations(self: *TradingShard, fact_identity: u64) !void {
+        var revoked = self.host_activation_identity != 0;
         self.host_activation_identity = 0;
         self.host_activation_barrier = 0;
         self.host_activation_session = .{ .fencing = 0, .shard = 0, .generation = 0 };
         self.host_activation_fact_sequence = 0;
         self.host_activation_state_digest = @splat(0);
-        try self.trace.append(.host_activation_revoked, fact_identity);
+        for (self.portfolio_authorities[0..self.portfolio_authority_count]) |*authority| {
+            if (authority.host_activation_identity == 0) continue;
+            authority.host_activation_identity = 0;
+            authority.host_activation_barrier = 0;
+            authority.host_activation_fact_sequence = 0;
+            authority.host_activation_session = .{ .fencing = 0, .shard = 0, .generation = 0 };
+            authority.host_activation_state_digest = @splat(0);
+            revoked = true;
+        }
+        if (revoked) try self.trace.append(.host_activation_revoked, fact_identity);
     }
 
     fn rejectColdCandidate(self: *TradingShard, identity: u64) !?OrderCommand {
@@ -4311,7 +4544,7 @@ pub const TradingShard = struct {
             refs[index].decision = candidate.authoritativeBarrier();
             try candidate.trace.append(.risk_reservation_created, intent.intent_sequence);
             refs[index].reservation = candidate.authoritativeBarrier();
-            refs[index].authority = try candidate.dispatchAuthorityRefs(intent.instrument, if (input.time_presence.monotonic) input.monotonic_time else 0, refs[index].decision);
+            refs[index].authority = try candidate.dispatchAuthorityRefsForStrategy(intent.instrument, if (input.time_presence.monotonic) input.monotonic_time else 0, refs[index].decision, intent.strategy_instance);
         }
         try candidate.oms.applyQualifiedGroup(qualified.group, group, refs[0..qualified.group.count]);
         try candidate.adjustMarginBuffersForReservationChange(qualified.reservation_atoms);
@@ -4395,9 +4628,10 @@ pub const TradingShard = struct {
     fn admitDomainGroup(self: *TradingShard, input: CoreEvent, original: oms.IntentGroup) !void {
         const occupancy = @import("cycle_occupancy.zig");
         if (original.count == 0 or original.count > occupancy.max_members) return error.InvalidCycleMembers;
+        const authority = self.strategyAuthority(original.members[0].strategy_instance);
         const opening = original.members[0].operation == .place and !original.members[0].portfolio_reduce_only and !original.members[0].venue_reduce_only;
         if (opening and original.count != occupancy.max_members) return error.InvalidCycleMembers;
-        if (!input.time_presence.monotonic or input.monotonic_time == 0 or (opening and !self.strategy_active)) return error.TradingNotAuthorized;
+        if (!input.time_presence.monotonic or input.monotonic_time == 0 or (opening and !authority.strategy_active)) return error.TradingNotAuthorized;
         if (opening and self.oms.blocksNewSend()) return error.OmsRecoveryOnly;
         if (opening) try self.cycles.residual_lifecycle.checkNewRiskCapacity();
         if (opening and self.cycles.hasResidual()) {
@@ -4407,11 +4641,11 @@ pub const TradingShard = struct {
         var qualified = original;
         for (original.members[0..original.count], 0..) |intent, index| {
             const member_opening = intent.operation == .place and !intent.portfolio_reduce_only and !intent.venue_reduce_only;
-            if (member_opening != opening or intent.strategy_instance != self.strategy_identity or
+            if (member_opening != opening or intent.strategy_instance != authority.strategy_identity or intent.portfolio != authority.portfolio_identity or
                 self.deployment.owner(intent.exchange_account, intent.instrument) != self.decision_domain_identity) return error.InvalidDomainScope;
             members[index] = .{ .account = intent.exchange_account, .instrument = intent.instrument };
             if (!opening) {
-                const cycle = self.cycles.owning(members[index]) orelse return error.InvalidDomainScope;
+                const cycle = self.cycles.owningForPortfolio(members[index], authority.portfolio_identity) orelse return error.InvalidDomainScope;
                 if (cycle.strategy != intent.strategy_instance) return error.InvalidDomainScope;
                 if (intent.operation != .place) {
                     const order = self.oms.orderById(intent.target_order_id) orelse return error.UnknownOrder;
@@ -4420,7 +4654,7 @@ pub const TradingShard = struct {
             }
             qualified.members[index].client_order_id = .{};
         }
-        if (opening) try self.cycles.checkAvailable(members[0..original.count]);
+        if (opening) try self.cycles.checkAvailableForPortfolio(members[0..original.count], authority.portfolio_identity);
         for (original.members[0..original.count], 0..) |member, member_index| {
             var seen = false;
             for (original.members[0..member_index]) |prior| if (prior.exchange_account == member.exchange_account) {
@@ -4433,7 +4667,7 @@ pub const TradingShard = struct {
             {
                 defer if (account_index) |index| self.exchangeAccountView(index);
                 if (opening) try self.checkResidualBacking();
-                if (opening and (!self.genesisReady() or self.risk_lease_allocation == null or self.risk_lease_valid_through_barrier < self.authoritativeBarrier())) return error.TradingNotAuthorized;
+                if (opening and (!self.genesisReadyForPortfolio(original.members[0].portfolio) or self.risk_lease_allocation == null or self.risk_lease_valid_through_barrier < self.authoritativeBarrier())) return error.TradingNotAuthorized;
                 var subset: oms.IntentGroup = .{ .first_intent_sequence = original.first_intent_sequence, .policy = original.policy, .count = 0 };
                 var indices: [occupancy.max_members]usize = undefined;
                 for (qualified.members[0..qualified.count], 0..) |intent, index| if (intent.exchange_account == member.exchange_account) {
@@ -4461,7 +4695,7 @@ pub const TradingShard = struct {
         content.final(&content_digest);
         if (opening) {
             try self.trace.append(.cycle_occupied, original.first_intent_sequence);
-            try self.cycles.establish(.{ .strategy = self.strategy_identity, .first_sequence = original.first_intent_sequence, .portfolio = self.deployment.domain(self.decision_domain_identity).?.portfolio, .configuration_digest = self.deployment.header.?.expected_digest, .content_digest = content_digest, .fact_sequence = self.authoritativeBarrier(), .members = members, .count = original.count });
+            try self.cycles.establish(.{ .strategy = authority.strategy_identity, .first_sequence = original.first_intent_sequence, .portfolio = authority.portfolio_identity, .configuration_digest = self.deployment.header.?.expected_digest, .content_digest = content_digest, .fact_sequence = self.authoritativeBarrier(), .members = members, .count = original.count });
         }
         var refs: [oms.max_group_members]oms.RiskFactRefs = @splat(.{});
         for (qualified.members[0..qualified.count], 0..) |intent, index| {
@@ -4472,8 +4706,8 @@ pub const TradingShard = struct {
             refs[index].decision = self.authoritativeBarrier();
             try self.trace.append(.risk_reservation_created, intent.intent_sequence);
             refs[index].reservation = self.authoritativeBarrier();
-            refs[index].authority = try self.dispatchAuthorityRefs(intent.instrument, input.monotonic_time, refs[index].decision);
-            const cycle = self.cycles.owning(members[index]).?;
+            refs[index].authority = try self.dispatchAuthorityRefsForStrategy(intent.instrument, input.monotonic_time, refs[index].decision, intent.strategy_instance);
+            const cycle = self.cycles.owningForPortfolio(members[index], authority.portfolio_identity).?;
             refs[index].authority.cycle = .{ .identity = cycle.first_sequence, .version = 1, .barrier = cycle.fact_sequence };
         }
         try self.oms.applyQualifiedGroup(qualified, original, refs[0..qualified.count]);
@@ -4754,6 +4988,7 @@ pub const TradingShard = struct {
             self.last_forced_archive = commit;
             self.last_forced_archive_input = .{ .identity = input.identity, .times = stableTimes(.{ .core = input }), .account_scope = input.account_scope };
             self.last_business_archive_kind = .forced;
+            self.last_business_archive_account = self.exchange_account_identity;
             try self.trace.append(.forced_archive_committed, input.identity);
             return null;
         }
@@ -4817,11 +5052,11 @@ pub const TradingShard = struct {
             return null;
         }
         if (input.payload == .fill_archive_committed) {
-            if (self.decision_domain_identity != 0 and self.cycles.count != 0) return error.FillArchivePinned;
             const commit = input.payload.fill_archive_committed;
             if (self.pending_history_candidate != null or self.pending_safety_history_candidate != null or self.deferred_history_admission_count != 0) return error.HistoryLookupDeferred;
             const origin = try self.businessOrigin();
             const qualification = try self.economic_projection.prepareFillArchive(commit.fill_id, origin, self.authoritativeBarrier());
+            if (self.decision_domain_identity != 0 and self.cyclePinsOrder(qualification.record.applied.fill.order_id)) return error.FillArchivePinned;
             if (!std.mem.eql(u8, &commit.qualification_digest, &qualification.digest())) return error.InvalidFillArchiveCommit;
             try self.economic_projection.commitFillArchive(qualification, commit.receipt, self.business_history_root);
             self.business_history_root = commit.receipt.root;
@@ -4841,7 +5076,7 @@ pub const TradingShard = struct {
             if (commit.applied_fill_quantity != qualification.applied_fill_quantity or
                 !std.mem.eql(u8, &commit.qualification_digest, &qualification.digest()) or
                 commit.receipt.root.origin.stream.domain != .decision_log or commit.receipt.root.origin.stream.id != stream or
-                commit.receipt.root.origin.account != self.exchange_account_identity or
+                !std.meta.eql(commit.receipt.root.origin, try self.businessOrigin()) or
                 commit.receipt.root.barrier != self.authoritativeBarrier() or
                 !std.mem.eql(u8, &commit.receipt.qualification_digest, &commit.qualification_digest)) return error.InvalidOrderArchiveCommit;
             _ = try history.verifyReceipt(commit.receipt, commit.receipt.root.origin, commit.qualification_digest, self.business_history_root);
@@ -4870,6 +5105,7 @@ pub const TradingShard = struct {
             self.business_history_root = commit.receipt.root;
             self.last_order_archive = commit;
             self.last_business_archive_kind = .order;
+            self.last_business_archive_account = self.exchange_account_identity;
             try self.trace.append(.order_archive_committed, input.identity);
             return null;
         }
@@ -4950,11 +5186,16 @@ pub const TradingShard = struct {
                     const request = command.residual orelse return error.InvalidControlCommand;
                     const live = self.cycles.residual_lifecycle.find(request.strategy, request.first_sequence, request.member) orelse return error.UnknownResidual;
                     const account = self.accountState(live.account) orelse return error.InvalidResidualFreeze;
-                    if (live.portfolio != account.portfolio_identity or !input.time_presence.wall or input.wall_time == 0) return error.InvalidResidualFreeze;
+                    const portfolio_owned = if (self.deployment.sealed)
+                        self.deployment.ownsPortfolio(self.decision_domain_identity, live.portfolio)
+                    else
+                        live.portfolio == account.portfolio_identity;
+                    const portfolio = account.economic_projection.portfolioLayer(live.portfolio) orelse return error.InvalidResidualFreeze;
+                    if (!portfolio_owned or !input.time_presence.wall or input.wall_time == 0) return error.InvalidResidualFreeze;
                     if (command.kind == .freeze_residual) {
                         const frozen = try self.cycles.reservedAtoms(live.account, live.portfolio, live.asset);
                         if (self.oms.recovery_only or account.open_economic_fact_count != 0 or account.economic_fault_count != 0 or account.economic_projection.reconciliation_break or
-                            request.atoms > account.economic_projection.portfolio.spotInventoryAtoms(live.asset) - frozen or
+                            request.atoms > portfolio.spotInventoryAtoms(live.asset) - frozen or
                             request.atoms > account.economic_projection.exchange.spotInventoryAtoms(live.asset) - frozen) return error.ResidualFreezeInFlight;
                         for (self.oms.orders[0..self.oms.order_count]) |order| {
                             if (order.exchange_account != live.account) continue;
@@ -4983,8 +5224,8 @@ pub const TradingShard = struct {
                 }
                 if (action.cancel_open_orders)
                     try self.oms.cancelOpenOrders(action.cancel_increasing_only);
-                if (!self.operational_state.trading_authorized and self.host_activation_identity != 0)
-                    try self.revokeHostActivation(self.host_activation_identity, input.identity);
+                if (!self.operational_state.trading_authorized)
+                    try self.revokeHostActivations(input.identity);
                 if (keep_positions) {
                     if (action.cancel_increasing_only or
                         self.operational_state.mode != .stopped or
@@ -5011,12 +5252,12 @@ pub const TradingShard = struct {
             .lifecycle_progress => |progress| {
                 if (progress.position_quantity != self.portfolioPosition().quantity or
                     progress.open_orders_closed != self.oms.openOrdersClosed() or
-                    progress.reconciliation_complete != !self.economic_projection.reconciliation_break or
-                    self.portfolioPosition().quantity != self.exchangePosition().quantity or
-                    try std.math.add(i128, self.portfolioCash(), self.treasuryCash()) != self.exchangeCash())
+                    progress.reconciliation_complete != !self.economic_projection.reconciliation_break)
                     return error.InvalidLifecycleProgress;
                 try self.assertClosures();
-                try self.operational_state.applyProgress(progress);
+                if (self.operational_state.active_operation_kind != .de_risk or
+                    self.lifecycleDeRiskTargetProven(self.operational_state.target_position))
+                    try self.operational_state.applyProgress(progress);
                 try self.trace.append(.lifecycle_progressed, input.identity);
             },
             .risk_warning => |warning| {
@@ -5085,7 +5326,7 @@ pub const TradingShard = struct {
                 if (input.identity == 0 or profile.exchange_account != self.exchange_account_identity or
                     profile.venue != entry.venue or profile.product != entry.rules.product or
                     profile.rules_version != entry.rules.version or
-                    profile.config_version != self.strategy_config_version or
+                    profile.config_version == 0 or
                     profile.version == 0 or profile.adapter_session == 0 or
                     profile.max_dispatch_age_ns == 0 or !profile.supports_place or !profile.supports_cancel)
                     return error.InvalidCapabilityProfile;
@@ -5097,33 +5338,65 @@ pub const TradingShard = struct {
                     }
                 }
                 entry.capability = profile;
+                if (self.deployment.sealed) entry.unscoped_trading_authorization = false;
                 try self.trace.append(.capability_profile_activated, input.identity);
                 entry.capability_barrier = self.authoritativeBarrier();
                 if (entry.trading_version == 0) {
                     entry.trading_enabled = true;
                     entry.trading_version = 1;
                     entry.trading_barrier = entry.capability_barrier;
+                    if (self.deployment.sealed) {
+                        entry.trading_enabled = false;
+                        if (self.strategy_active and !self.strategyFenced(self.strategy_identity)) {
+                            if (self.economic_projection.portfolioLayer(self.portfolio_identity)) |layer| {
+                                if (layer.active and layer.funded) {
+                                    try entry.initializeTradingAuthorization(self.strategy_identity);
+                                    entry.trading_enabled = entry.tradingAuthorization(self.strategy_identity).enabled;
+                                }
+                            }
+                        }
+                        for (self.portfolio_authorities[0..self.portfolio_authority_count]) |authority| {
+                            if (!authority.strategy_active or self.strategyFenced(authority.strategy_identity)) continue;
+                            if (self.economic_projection.portfolioLayer(authority.portfolio_identity)) |layer|
+                                if (layer.active and layer.funded) try entry.initializeTradingAuthorization(authority.strategy_identity);
+                        }
+                    }
                 }
             },
             .instrument_trading_authorization => |authorization| {
                 const entry = self.instrument_registry.getPtr(authorization.instrument) orelse return error.UnknownInstrument;
+                const strategy = if (authorization.strategy_identity == 0) self.strategy_identity else authorization.strategy_identity;
+                const authority = self.strategyAuthority(strategy);
+                var current = entry.tradingAuthorization(strategy);
                 if (authorization.expected_version != std.math.maxInt(u64) and
-                    entry.trading_version == authorization.expected_version + 1 and entry.trading_enabled == authorization.enabled)
+                    current.version == authorization.expected_version + 1 and current.enabled == authorization.enabled)
                 {
-                    const prior = self.trace.factAt(entry.trading_barrier) orelse return error.InvalidControlAuthority;
+                    const prior = self.trace.factAt(current.barrier) orelse return error.InvalidControlAuthority;
                     if (prior.kind == .instrument_trading_authorized and prior.identity == input.identity and
                         authorization.exchange_account == self.exchange_account_identity and
-                        authorization.strategy_activation_identity == self.strategy_activation_identity and
-                        authorization.config_version == self.strategy_config_version) return null;
+                        authorization.strategy_activation_identity == authority.strategy_activation_identity and
+                        authorization.config_version == authority.strategy_config_version) return null;
                 }
                 if (input.identity == 0 or authorization.exchange_account != self.exchange_account_identity or
-                    authorization.strategy_activation_identity != self.strategy_activation_identity or
-                    authorization.config_version != self.strategy_config_version or !entry.margin_configured or
-                    authorization.expected_version != entry.trading_version) return error.InvalidControlAuthority;
-                entry.trading_version = try std.math.add(u64, entry.trading_version, 1);
-                entry.trading_enabled = authorization.enabled;
+                    !authority.strategy_active or authorization.strategy_activation_identity != authority.strategy_activation_identity or
+                    authorization.config_version != authority.strategy_config_version or !entry.margin_configured or
+                    authorization.expected_version != current.version) return error.InvalidControlAuthority;
+                current.version = try std.math.add(u64, current.version, 1);
+                current.enabled = authorization.enabled;
                 try self.trace.append(.instrument_trading_authorized, input.identity);
-                entry.trading_barrier = self.authoritativeBarrier();
+                current.barrier = self.authoritativeBarrier();
+                if (authorization.strategy_identity == 0 and !self.deployment.sealed) {
+                    entry.trading_version = current.version;
+                    entry.trading_enabled = current.enabled;
+                    entry.trading_barrier = current.barrier;
+                } else {
+                    try entry.setTradingAuthorization(current);
+                    if (strategy == self.strategy_identity) {
+                        entry.trading_version = current.version;
+                        entry.trading_enabled = current.enabled;
+                        entry.trading_barrier = current.barrier;
+                    }
+                }
             },
             .margin_rules_activated => |rules| {
                 const instrument_id = if (rules.instrument != 0) rules.instrument else self.instrument_identity;
@@ -5149,6 +5422,7 @@ pub const TradingShard = struct {
                 try self.validateTickRange(instrument_id, rules);
                 const configured = try self.instrument_registry.configureMargin(instrument_id, rules);
                 if (!configured) return null;
+                try self.economic_projection.repriceMargin(instrument_id, rules.internal_initial_margin_ppm, rules.venue_initial_margin_ppm, if (rules.native) |native| native.margin_rounding_atoms else 1);
                 if (instrument_id == self.instrument_identity) {
                     self.margin_rules_version = rules.version;
                     self.price_tick_atoms = rules.price_tick_atoms;
@@ -5188,6 +5462,11 @@ pub const TradingShard = struct {
                     return error.InvalidAccountConfiguration;
                 self.account_configured = true;
                 self.exchange_account_identity = configuration.exchange_account_identity;
+                if (self.deployment.sealed) {
+                    const domain = self.deployment.domain(self.decision_domain_identity) orelse return error.InvalidDecisionDomain;
+                    self.portfolio_identity = domain.portfolio;
+                    try self.economic_projection.registerPortfolio(domain.portfolio);
+                }
                 try self.trace.append(.account_configuration, input.identity);
             },
             .exchange_balance => |balance| {
@@ -5244,28 +5523,27 @@ pub const TradingShard = struct {
                 try self.trace.append(.opening_balance, input.identity);
             },
             .virtual_portfolio_activated => |activation| {
-                if (!self.opening_balance_observed or activation.portfolio_identity == 0 or
-                    self.virtual_portfolio_active)
+                if (!self.opening_balance_observed or activation.portfolio_identity == 0)
                     return error.InvalidVirtualPortfolio;
-                self.virtual_portfolio_active = true;
-                self.portfolio_identity = activation.portfolio_identity;
+                if (self.deployment.sealed and !self.deployment.ownsPortfolio(self.decision_domain_identity, activation.portfolio_identity)) return error.InvalidVirtualPortfolio;
+                if (!self.deployment.sealed and self.virtual_portfolio_active) return error.InvalidVirtualPortfolio;
+                if (self.portfolio_identity != 0) try self.economic_projection.registerPortfolio(self.portfolio_identity);
+                try self.economic_projection.registerPortfolio(activation.portfolio_identity);
+                const layer = try self.economic_projection.portfolioLayerMutable(activation.portfolio_identity);
+                if (layer.active) return error.InvalidVirtualPortfolio;
+                layer.active = true;
+                if (self.portfolio_identity == 0) self.portfolio_identity = activation.portfolio_identity;
+                if (self.portfolio_identity == activation.portfolio_identity) self.virtual_portfolio_active = true;
                 try self.trace.append(.virtual_portfolio_activated, input.identity);
             },
             .portfolio_transfer => |transfer| {
+                const portfolio = if (transfer.portfolio_identity != 0) transfer.portfolio_identity else if (!self.deployment.sealed) self.portfolio_identity else return error.InvalidPortfolioTransfer;
+                const layer = try self.economic_projection.portfolioLayerMutable(portfolio);
                 try self.asset_registry.checkAmount(.{ .asset = self.economic_projection.settlement_asset, .atoms = transfer.amount_atoms }, true);
-                if (!self.virtual_portfolio_active or transfer.amount_atoms <= 0 or
-                    transfer.amount_atoms > self.treasuryCash() or self.portfolio_funded)
+                if (!layer.active or transfer.amount_atoms <= 0 or
+                    transfer.amount_atoms > self.treasuryCash() or layer.funded)
                     return error.InvalidPortfolioTransfer;
-                self.economic_projection.treasury_usdt_atoms = try std.math.sub(
-                    i128,
-                    self.treasuryCash(),
-                    transfer.amount_atoms,
-                );
-                self.economic_projection.portfolio.usdt_balance_atoms = try std.math.add(
-                    i128,
-                    self.portfolioCash(),
-                    transfer.amount_atoms,
-                );
+                try self.economic_projection.transferForPortfolio(portfolio, transfer.amount_atoms);
                 self.economic_projection.ledger_summary.portfolio_debits_atoms = try std.math.add(
                     i128,
                     self.economic_projection.ledger_summary.portfolio_debits_atoms,
@@ -5276,61 +5554,103 @@ pub const TradingShard = struct {
                     self.economic_projection.ledger_summary.portfolio_credits_atoms,
                     transfer.amount_atoms,
                 );
-                self.economic_projection.ledger_summary.portfolio_transfer_count = 1;
-                self.portfolio_funded = true;
+                self.economic_projection.ledger_summary.portfolio_transfer_count += 1;
+                layer.funded = true;
+                if (portfolio == self.portfolio_identity) self.portfolio_funded = true;
                 try self.trace.append(.portfolio_transfer, input.identity);
             },
             .strategy_activated => |activation| {
+                var authority = self.strategyAuthority(activation.strategy_identity);
                 if (self.strategyFenced(activation.strategy_identity)) return error.StrategyCutoverFenced;
-                if (!self.portfolio_funded or activation.strategy_identity == 0 or
+                const portfolio = if (activation.portfolio_identity == 0) self.portfolio_identity else activation.portfolio_identity;
+                const funded = if (self.deployment.sealed) self.portfolioFundedInDomain(portfolio) else self.portfolio_funded;
+                if (!funded or activation.strategy_identity == 0 or
                     activation.config_version == 0 or activation.activation_identity == 0 or
-                    self.strategy_active)
+                    authority.strategy_active)
                     return error.InvalidStrategyActivation;
-                self.strategy_active = true;
-                self.strategy_identity = activation.strategy_identity;
-                self.strategy_config_version = activation.config_version;
-                self.strategy_activation_identity = activation.activation_identity;
+                if (self.strategy_active and self.portfolio_identity == portfolio and !self.strategyFenced(self.strategy_identity))
+                    return error.InvalidStrategyActivation;
+                for (self.portfolio_authorities[0..self.portfolio_authority_count]) |existing|
+                    if (existing.strategy_active and existing.portfolio_identity == portfolio and !self.strategyFenced(existing.strategy_identity))
+                        return error.InvalidStrategyActivation;
+                authority.portfolio_identity = if (activation.portfolio_identity == 0) self.portfolio_identity else activation.portfolio_identity;
+                if (self.decision_domain_identity != 0 and !self.deployment.ownsPortfolio(self.decision_domain_identity, authority.portfolio_identity)) return error.InvalidVirtualPortfolio;
+                authority.strategy_active = true;
+                authority.strategy_identity = activation.strategy_identity;
+                authority.strategy_config_version = activation.config_version;
+                authority.strategy_activation_identity = activation.activation_identity;
                 try self.trace.append(.strategy_activated, input.identity);
+                authority.strategy_activation_fact_sequence = self.authoritativeBarrier();
+                try self.storeStrategyAuthority(authority);
             },
             .host_activated => |activation| {
-                if (activation.strategy_identity != self.strategy_identity or
-                    activation.config_version != self.strategy_config_version)
+                var authority = self.strategyAuthority(activation.strategy_identity);
+                if (activation.strategy_identity != authority.strategy_identity or
+                    activation.config_version != authority.strategy_config_version)
                     return error.InvalidHostActivation;
-                if (self.host_activation_identity != 0) {
-                    if (self.host_activation_identity != activation.activation_identity or
-                        !std.meta.eql(self.host_activation_session, activation.session) or
-                        self.host_activation_barrier != activation.activation_barrier or
-                        !std.mem.eql(u8, &self.host_activation_state_digest, &activation.state_digest))
+                if (authority.host_activation_identity != 0) {
+                    if (authority.host_activation_identity != activation.activation_identity or
+                        !std.meta.eql(authority.host_activation_session, activation.session) or
+                        authority.host_activation_barrier != activation.activation_barrier or
+                        !std.mem.eql(u8, &authority.host_activation_state_digest, &activation.state_digest))
                         return error.HostActivationConflict;
                     return null;
                 }
-                if (!self.strategy_active or
+                if (!authority.strategy_active or
                     activation.activation_identity == 0 or
                     activation.session.generation == 0 or
-                    (!self.host_activation_seen and activation.activation_identity != self.strategy_activation_identity) or
+                    (!authority.host_activation_seen and activation.activation_identity != authority.strategy_activation_identity) or
                     activation.activation_barrier == std.math.maxInt(u64) or
                     !std.mem.eql(u8, &activation.state_digest, &self.canonicalStateDigest()))
                     return error.InvalidHostActivation;
-                if (self.host_activation_seen and activation.activation_identity != (self.nextHostActivationIdentity() catch return error.StaleHostActivation))
+                if (authority.host_activation_seen and activation.activation_identity != (self.nextHostActivationIdentityForStrategy(activation.strategy_identity) catch return error.StaleHostActivation))
                     return error.StaleHostActivation;
-                self.host_activation_seen = true;
-                self.strategy_activation_identity = activation.activation_identity;
-                self.host_activation_identity = activation.activation_identity;
-                self.host_activation_barrier = activation.activation_barrier;
-                self.host_activation_session = activation.session;
-                self.host_activation_state_digest = activation.state_digest;
+                authority.host_activation_seen = true;
+                authority.strategy_activation_identity = activation.activation_identity;
+                authority.host_activation_identity = activation.activation_identity;
+                authority.host_activation_barrier = activation.activation_barrier;
+                authority.host_activation_session = activation.session;
+                authority.host_activation_state_digest = activation.state_digest;
                 try self.trace.append(.host_activated, input.identity);
-                self.host_activation_fact_sequence = self.authoritativeBarrier();
+                authority.host_activation_fact_sequence = self.authoritativeBarrier();
+                try self.storeStrategyAuthority(authority);
             },
             .host_activation_revoked => |revocation| {
-                if (revocation.strategy_identity != self.strategy_identity or
-                    revocation.activation_identity == 0 or
-                    revocation.activation_identity != self.host_activation_identity)
-                    return error.InvalidHostRevocation;
-                try self.revokeHostActivation(revocation.activation_identity, input.identity);
+                if (revocation.session) |session| {
+                    var matched = false;
+                    if (self.host_activation_identity != 0 and std.meta.eql(self.host_activation_session, session)) {
+                        self.host_activation_identity = 0;
+                        self.host_activation_barrier = 0;
+                        self.host_activation_fact_sequence = 0;
+                        self.host_activation_session = .{ .fencing = 0, .shard = 0, .generation = 0 };
+                        self.host_activation_state_digest = @splat(0);
+                        matched = true;
+                    }
+                    for (self.portfolio_authorities[0..self.portfolio_authority_count]) |*authority| {
+                        if (authority.host_activation_identity == 0 or !std.meta.eql(authority.host_activation_session, session)) continue;
+                        authority.host_activation_identity = 0;
+                        authority.host_activation_barrier = 0;
+                        authority.host_activation_fact_sequence = 0;
+                        authority.host_activation_session = .{ .fencing = 0, .shard = 0, .generation = 0 };
+                        authority.host_activation_state_digest = @splat(0);
+                        matched = true;
+                    }
+                    if (!matched) return error.InvalidHostRevocation;
+                    try self.trace.append(.host_activation_revoked, input.identity);
+                    return null;
+                }
+                var authority = self.strategyAuthority(revocation.strategy_identity);
+                if (revocation.activation_identity == 0 or revocation.activation_identity != authority.host_activation_identity) return error.InvalidHostRevocation;
+                authority.host_activation_identity = 0;
+                authority.host_activation_barrier = 0;
+                authority.host_activation_session = .{ .fencing = 0, .shard = 0, .generation = 0 };
+                authority.host_activation_fact_sequence = 0;
+                authority.host_activation_state_digest = @splat(0);
+                try self.trace.append(.host_activation_revoked, input.identity);
+                try self.storeStrategyAuthority(authority);
             },
             .primary_lease_granted => |lease| {
-                if (!self.strategy_active or lease.fencing_token == 0 or
+                if (!self.hasFundedActiveStrategy() or lease.fencing_token == 0 or
                     (self.fencing_token != 0 and lease.fencing_token <= self.fencing_token))
                     return error.InvalidPrimaryLease;
                 self.fencing_token = lease.fencing_token;
@@ -5508,7 +5828,7 @@ pub const TradingShard = struct {
                 const instrument = order.instrument;
                 const instrument_config = self.instrumentEntry(instrument) orelse return error.UnknownOmsInstrument;
                 if (!self.settlementConsumersCompatible(instrument)) return error.AssetPrecisionUnsupported;
-                var source: economics_module.FillSource = .{ .exchange_account = self.exchange_account_identity, .portfolio = self.portfolio_identity, .strategy = order.strategy_instance };
+                var source: economics_module.FillSource = .{ .exchange_account = self.exchange_account_identity, .portfolio = if (order.portfolio != 0) order.portfolio else if (!self.deployment.sealed) self.portfolio_identity else return error.DeploymentBindingMismatch, .strategy = order.strategy_instance };
                 source.core_payload_len = @intCast((try snapshot_codec.encodeBare(&source.core_payload_bytes, fill)).len);
                 const changed = try self.applyEconomicProjectionWithSource(.{ .fill = .{
                     .identity = fill.fill_id,
@@ -5524,6 +5844,7 @@ pub const TradingShard = struct {
                     .rebate = .{ .asset = self.economic_projection.settlement_asset, .atoms = fill.rebate_atoms },
                     .portfolio_margin_ppm = instrument_config.margin.internal_initial_margin_ppm,
                     .exchange_margin_ppm = instrument_config.margin.venue_initial_margin_ppm,
+                    .margin_rounding_atoms = if (instrument_config.margin.native) |native| native.margin_rounding_atoms else 1,
                     .product = instrument_config.product,
                 } }, source);
                 if (changed) {
@@ -5538,13 +5859,18 @@ pub const TradingShard = struct {
             .funding_settlement => |funding| {
                 const instrument_config = (if (funding.instrument != 0) self.instrumentEntry(funding.instrument) else self.singleProductEntry(.isolated_linear_usdt)) orelse return error.UnknownOmsInstrument;
                 if (instrument_config.product != .isolated_linear_usdt) return error.InvalidEconomicFact;
+                // A configured portfolio counts even before activation.
+                var unique_portfolio = true;
+                for (self.deployment.portfolios[0..self.deployment.portfolio_count]) |membership| if (membership.domain == self.decision_domain_identity) {
+                    unique_portfolio = false;
+                };
                 var source: economics_module.FundingSource = .{
                     .core_event_identity = input.identity,
                     .core_times = .{ .source = input.source_time, .receive = input.receive_time, .monotonic = input.monotonic_time, .wall = input.wall_time, .presence = input.time_presence },
                     .audit_time_utc_ns = if (input.time_presence.wall) input.wall_time else null,
                     .exchange_account = self.exchange_account_identity,
-                    .portfolio = self.portfolio_identity,
-                    .strategy = self.strategy_identity,
+                    .portfolio = if (unique_portfolio) self.portfolio_identity else 0,
+                    .strategy = if (unique_portfolio) self.strategy_identity else 0,
                     .instrument = instrument_config.instrument,
                     .rules_version = instrument_config.rules.version,
                     .exchange_time_utc_ns = if (input.time_presence.source) input.source_time else null,
@@ -5552,7 +5878,7 @@ pub const TradingShard = struct {
                     .received_monotonic_ns = if (input.time_presence.monotonic) input.monotonic_time else 0,
                 };
                 source.core_payload_len = @intCast((try snapshot_codec.encodeBare(&source.core_payload_bytes, funding)).len);
-                const changed = try self.applyFundingProjection(.{ .identity = funding.settlement_id, .portfolio_ownership_proven = true, .amount = .{ .asset = self.economic_projection.settlement_asset, .atoms = funding.amount_atoms } }, source);
+                const changed = try self.applyFundingProjection(.{ .identity = funding.settlement_id, .portfolio_ownership_proven = unique_portfolio, .amount = .{ .asset = self.economic_projection.settlement_asset, .atoms = funding.amount_atoms } }, source);
                 if (changed) {
                     try self.recalculateRisk(false);
                     if (self.economic_projection.reconciliation_break and self.operational_state.initialized) try self.applyOperationalGate(.{
@@ -5566,6 +5892,17 @@ pub const TradingShard = struct {
                 }
             },
             .venue_forced_execution => |forced| {
+                const portfolio = if (forced.portfolio_identity != 0) forced.portfolio_identity else if (!self.deployment.sealed) self.portfolio_identity else return error.DeploymentBindingMismatch;
+                var strategy: u128 = 0;
+                if (self.portfolio_identity == portfolio and self.strategy_active and !self.strategyFenced(self.strategy_identity)) strategy = self.strategy_identity;
+                for (self.portfolio_authorities[0..self.portfolio_authority_count]) |authority|
+                    if (authority.portfolio_identity == portfolio and authority.strategy_active and !self.strategyFenced(authority.strategy_identity)) {
+                        strategy = authority.strategy_identity;
+                    };
+                for (self.economic_projection.applied_forced_executions[0..self.economic_projection.applied_forced_execution_count]) |known| if (known.forced.identity == forced.execution_id) {
+                    strategy = known.source.strategy;
+                    break;
+                };
                 const instrument_config = (if (forced.instrument != 0) self.instrumentEntry(forced.instrument) else self.singleProductEntry(.isolated_linear_usdt)) orelse return error.UnknownOmsInstrument;
                 if (forced.instrument != 0 and forced.rules_version != instrument_config.rules.version) return error.StaleInstrumentRules;
                 if (forced.canonical_source) |origin| {
@@ -5589,8 +5926,8 @@ pub const TradingShard = struct {
                     .core_times = .{ .source = input.source_time, .receive = input.receive_time, .monotonic = input.monotonic_time, .wall = input.wall_time, .presence = input.time_presence },
                     .accepted_input_digest = try acceptedOriginalDigest(.{ .core = input }),
                     .exchange_account = self.exchange_account_identity,
-                    .portfolio = self.portfolio_identity,
-                    .strategy = self.strategy_identity,
+                    .portfolio = portfolio,
+                    .strategy = strategy,
                     .instrument = instrument_config.instrument,
                     .rules_version = instrument_config.rules.version,
                 };
@@ -5609,6 +5946,7 @@ pub const TradingShard = struct {
                     .expected_realized_pnl_atoms = forced.expected_realized_pnl_atoms,
                     .portfolio_margin_ppm = instrument_config.margin.internal_initial_margin_ppm,
                     .exchange_margin_ppm = instrument_config.margin.venue_initial_margin_ppm,
+                    .margin_rounding_atoms = if (instrument_config.margin.native) |native| native.margin_rounding_atoms else 1,
                     .product = instrument_config.product,
                 }, source);
                 if (changed) {
@@ -5655,6 +5993,11 @@ fn zeroUnused(comptime T: type, storage: []T) void {
     @memset(storage, std.mem.zeroes(T));
 }
 
+fn normalizeEconomicLayer(layer: *economics_module.Layer) void {
+    zeroUnused(economics_module.NativeAssetState, layer.native_assets[layer.native_asset_count..]);
+    zeroUnused(economics_module.InstrumentPosition, layer.instrument_positions[layer.instrument_position_count..]);
+}
+
 fn domainAdmissionRejection(err: anyerror) ?RejectReason {
     return switch (err) {
         error.InvalidDomainScope, error.InvalidCycleMembers, error.UnknownOmsInstrument, error.GenesisIncomplete, error.UnknownOrder, error.OrderAccountMismatch, error.OrderNotMutable, error.StaleOrderRevision, error.InstrumentRulesInactive => .invalid_scope,
@@ -5698,6 +6041,10 @@ const CoreSnapshotEncodingPolicy = struct {
         return null;
     }
     pub fn tailCounter(comptime T: type, comptime name: []const u8) ?[]const u8 {
+        if (T == TradingShard and std.mem.eql(u8, name, "portfolio_authorities")) return "portfolio_authority_count";
+        if (T == instrument_registry.Entry and std.mem.eql(u8, name, "strategy_authorizations")) return "strategy_authorization_count";
+        if (T == economics_module.Projection and std.mem.eql(u8, name, "extra_portfolios")) return "extra_portfolio_count";
+        if (T == @import("deployment_allocation.zig").Configuration) return mappedTail(name, .{ .{ "domains", "domain_count" }, .{ "accounts", "account_count" }, .{ "asset_limits", "asset_count" }, .{ "account_limits", "account_limit_count" }, .{ "ownerships", "ownership_count" }, .{ "slices", "slice_count" }, .{ "portfolios", "portfolio_count" }, .{ "portfolio_slices", "portfolio_slice_count" } });
         if (T == @FieldType(TradingShard, "cycles")) return mappedTail(name, .{ .{ "records", "count" }, .{ "closed", "closed_count" }, .{ "residual_rules", "residual_rule_count" }, .{ "residual_rule_barriers", "residual_rule_count" } });
         if (T == @import("residual_lifecycle.zig").State) return mappedTail(name, .{ .{ "live", "live_count" }, .{ "receipts", "receipt_count" }, .{ "credits", "credit_count" } });
         if (T == AccountState) return mappedTail(name, .{ .{ "open_economic_facts", "open_economic_fact_count" }, .{ "economic_baseline_balances", "economic_baseline_balance_count" } });
@@ -5711,11 +6058,16 @@ const CoreSnapshotEncodingPolicy = struct {
         if (T == @FieldType(TradingShard, "economic_projection")) return mappedTail(name, .{ .{ "reconciliation_break_identities", "reconciliation_break_count" }, .{ "seen", "seen_count" }, .{ "canonical_fill_evidence", "canonical_fill_evidence_count" }, .{ "fee_origins", "fee_origin_count" }, .{ "fee_revisions", "fee_revision_count" }, .{ "applied_fills", "applied_fill_count" }, .{ "applied_fundings", "applied_funding_count" }, .{ "applied_forced_executions", "applied_forced_execution_count" }, .{ "applied_fill_totals", "applied_fill_total_count" }, .{ "treasury_native_assets", "treasury_native_asset_count" }, .{ "suspense_native_assets", "suspense_native_asset_count" }, .{ "ledger", "ledger_count" } });
         if (T == economics_module.Layer) return mappedTail(name, .{ .{ "native_assets", "native_asset_count" }, .{ "instrument_positions", "instrument_position_count" } });
         if (T == economics_module.LedgerTransaction) return mappedTail(name, .{.{ "postings", "posting_count" }});
-        if (T == @FieldType(TradingShard, "canonical_account")) return mappedTail(name, .{ .{ "seen", "seen_count" }, .{ "balances", "balance_count" }, .{ "positions", "position_count" }, .{ "margins", "margin_count" } });
+        if (T == @FieldType(TradingShard, "canonical_account")) return mappedTail(name, .{ .{ "configurations", "configuration_count" }, .{ "seen", "seen_count" }, .{ "balances", "balance_count" }, .{ "positions", "position_count" }, .{ "margins", "margin_count" } });
         if (T == cold.PendingCandidate) return mappedTail(name, .{.{ "original_bytes", "original_len" }});
         return null;
     }
     pub fn zeroValue(comptime T: type) T {
+        if (T == canonical.VenueAccountConfigurationSnapshot) return .{
+            .identity = 0,
+            .exchange_account = 0,
+            .value = .{ .account = std.mem.zeroes(@FieldType(@FieldType(canonical.VenueAccountConfigurationSnapshot, "value"), "account")) },
+        };
         if (T == AccountPartition) {
             var partition: AccountPartition = .{};
             canonicalizeAccountLocalState(&partition.state);
@@ -5748,6 +6100,7 @@ const CoreSnapshotEncodingPolicy = struct {
 };
 
 fn canonicalizeSnapshotState(shard: *TradingShard) void {
+    zeroUnused(PortfolioAuthority, shard.portfolio_authorities[shard.portfolio_authority_count..]);
     zeroUnused(@TypeOf(shard.cycles.records[0]), shard.cycles.records[shard.cycles.count..]);
     zeroUnused(@TypeOf(shard.cycles.closed[0]), shard.cycles.closed[shard.cycles.closed_count..]);
     zeroUnused(@TypeOf(shard.cycles.residual_rules[0]), shard.cycles.residual_rules[shard.cycles.residual_rule_count..]);
@@ -5794,6 +6147,8 @@ fn canonicalizeSnapshotState(shard: *TradingShard) void {
 
 fn canonicalizeAccountLocalState(shard: anytype) void {
     zeroUnused(instrument_registry.Entry, shard.instrument_registry.entries[shard.instrument_registry.count..]);
+    for (shard.instrument_registry.entries[0..shard.instrument_registry.count]) |*entry|
+        zeroUnused(instrument_registry.TradingAuthorization, entry.strategy_authorizations[entry.strategy_authorization_count..]);
     zeroUnused(u64, shard.economic_projection.reconciliation_break_identities[shard.economic_projection.reconciliation_break_count..]);
     zeroUnused(@TypeOf(shard.economic_projection.seen[0]), shard.economic_projection.seen[shard.economic_projection.seen_count..]);
     zeroUnused(economics_module.FeeOrigin, shard.economic_projection.fee_origins[shard.economic_projection.fee_origin_count..]);
@@ -5809,10 +6164,10 @@ fn canonicalizeAccountLocalState(shard: anytype) void {
     }
     zeroUnused(economics_module.AppliedFill, shard.economic_projection.applied_fills[shard.economic_projection.applied_fill_count..]);
     zeroUnused(economics_module.OrderFillTotal, shard.economic_projection.applied_fill_totals[shard.economic_projection.applied_fill_total_count..]);
-    zeroUnused(economics_module.NativeAssetState, shard.economic_projection.portfolio.native_assets[shard.economic_projection.portfolio.native_asset_count..]);
-    zeroUnused(economics_module.NativeAssetState, shard.economic_projection.exchange.native_assets[shard.economic_projection.exchange.native_asset_count..]);
-    zeroUnused(economics_module.InstrumentPosition, shard.economic_projection.portfolio.instrument_positions[shard.economic_projection.portfolio.instrument_position_count..]);
-    zeroUnused(economics_module.InstrumentPosition, shard.economic_projection.exchange.instrument_positions[shard.economic_projection.exchange.instrument_position_count..]);
+    normalizeEconomicLayer(&shard.economic_projection.portfolio);
+    normalizeEconomicLayer(&shard.economic_projection.exchange);
+    for (shard.economic_projection.extra_portfolios[0..shard.economic_projection.extra_portfolio_count]) |*owned| normalizeEconomicLayer(&owned.layer);
+    zeroUnused(economics_module.PortfolioLayer, shard.economic_projection.extra_portfolios[shard.economic_projection.extra_portfolio_count..]);
     zeroUnused(canonical.AssetAmount, shard.economic_projection.treasury_native_assets[shard.economic_projection.treasury_native_asset_count..]);
     zeroUnused(canonical.AssetAmount, shard.economic_projection.suspense_native_assets[shard.economic_projection.suspense_native_asset_count..]);
     for (shard.economic_projection.ledger[0..shard.economic_projection.ledger_count]) |*transaction|
@@ -5834,6 +6189,8 @@ fn canonicalizeAccountLocalState(shard: anytype) void {
             },
         } },
     };
+    for (shard.canonical_account.configurations[shard.canonical_account.configuration_count..]) |*configuration|
+        configuration.* = CoreSnapshotEncodingPolicy.zeroValue(canonical.VenueAccountConfigurationSnapshot);
     zeroUnused(canonical.AccountBalance, shard.canonical_account.balances[shard.canonical_account.balance_count..]);
     zeroUnused(canonical.AccountPosition, shard.canonical_account.positions[shard.canonical_account.position_count..]);
     zeroUnused(canonical.AccountMargin, shard.canonical_account.margins[shard.canonical_account.margin_count..]);
@@ -5855,6 +6212,34 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
 
 fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: bool) !void {
     try shard.deployment.validateSnapshot();
+    if (shard.deployment.sealed) {
+        for (shard.oms.orders[0..shard.oms.order_count]) |order| {
+            if (order.portfolio == 0 or !shard.deployment.ownsPortfolio(shard.decision_domain_identity, order.portfolio) or shard.strategyAuthority(order.strategy_instance).portfolio_identity != order.portfolio) return error.InvalidSnapshotState;
+        }
+        for (shard.oms.command_history[0..shard.oms.command_history_count]) |command| {
+            const order = shard.oms.orderById(command.order_id) orelse continue;
+            if (command.portfolio != order.portfolio or (command.authority.virtual_portfolio != 0 and command.authority.virtual_portfolio != order.portfolio)) return error.InvalidSnapshotState;
+        }
+    }
+
+    if (shard.portfolio_authority_count > shard.portfolio_authorities.len) return error.InvalidSnapshotState;
+    for (shard.portfolio_authorities[0..shard.portfolio_authority_count], 0..) |authority, index| {
+        if (!authority.strategy_active or authority.strategy_identity == 0 or authority.strategy_identity == shard.strategy_identity or authority.strategy_config_version == 0 or authority.strategy_activation_identity == 0) return error.InvalidSnapshotState;
+        if (shard.decision_domain_identity != 0 and !shard.deployment.ownsPortfolio(shard.decision_domain_identity, authority.portfolio_identity)) return error.InvalidSnapshotState;
+        if (!shard.strategyFenced(authority.strategy_identity)) {
+            if (shard.strategy_active and !shard.strategyFenced(shard.strategy_identity) and authority.portfolio_identity == shard.portfolio_identity)
+                return error.InvalidSnapshotState;
+            for (shard.portfolio_authorities[0..index]) |prior|
+                if (prior.strategy_active and !shard.strategyFenced(prior.strategy_identity) and prior.portfolio_identity == authority.portfolio_identity)
+                    return error.InvalidSnapshotState;
+        }
+        for (shard.portfolio_authorities[0..index]) |prior| if (prior.strategy_identity == authority.strategy_identity) return error.InvalidSnapshotState;
+        if (authority.host_activation_identity != 0) {
+            const fact = shard.trace.factAt(authority.host_activation_fact_sequence) orelse return error.InvalidSnapshotState;
+            if (fact.kind != .host_activated or authority.host_activation_session.generation == 0) return error.InvalidSnapshotState;
+        } else if (authority.host_activation_fact_sequence != 0) return error.InvalidSnapshotState;
+    }
+
     try shard.cycles.validate();
     if (shard.cycles.residual_lifecycle.live_count != 0) {
         const commitment = shard.trace.factAt(shard.cycles.residual_commitment_fact) orelse return error.InvalidSnapshotState;
@@ -5931,6 +6316,19 @@ fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: b
             if (shard.deployment.owner(member.account, member.instrument) != shard.decision_domain_identity) return error.InvalidSnapshotState;
     }
     if (shard.account_view != 0 or shard.secondary_account_count > shard.secondary_accounts.len) return error.InvalidSnapshotState;
+    if (shard.deployment.sealed) {
+        if (shard.economic_projection.extra_portfolio_count > shard.economic_projection.extra_portfolios.len) return error.InvalidSnapshotState;
+        if (shard.account_configured) {
+            const domain = shard.deployment.domain(shard.decision_domain_identity) orelse return error.InvalidSnapshotState;
+            if (shard.economic_projection.primary_portfolio_identity != domain.portfolio or
+                shard.economic_projection.portfolio.active != shard.virtual_portfolio_active or
+                shard.economic_projection.portfolio.funded != shard.portfolio_funded or
+                (shard.economic_projection.portfolio.funded and !shard.economic_projection.portfolio.active)) return error.InvalidSnapshotState;
+        }
+        for (shard.economic_projection.extra_portfolios[0..shard.economic_projection.extra_portfolio_count]) |entry| {
+            if (!shard.deployment.ownsPortfolio(shard.decision_domain_identity, entry.identity) or (entry.layer.funded and !entry.layer.active)) return error.InvalidSnapshotState;
+        }
+    }
     if (validate_partitions and shard.decision_domain_identity != 0) {
         const domain = shard.deployment.domain(shard.decision_domain_identity) orelse return error.InvalidSnapshotState;
         if (!shard.deployment.sealed or domain.stream != shard.decision_stream_identity or shard.primary_account_identity == 0) return error.InvalidSnapshotState;
@@ -5982,8 +6380,11 @@ fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: b
         if (!std.mem.eql(u8, &entry.body.canonical_digest, &expected_digest)) return error.InvalidSnapshotState;
         var retained = false;
         for (shard.oms.command_history[0..shard.oms.command_history_count]) |command| if (command.command_id == entry.body.command) {
-            const instrument = shard.instrumentEntry(command.instrument) orelse return error.InvalidSnapshotState;
-            if (instrument.venue != entry.body.venue) return error.InvalidSnapshotState;
+            if (command.authority.exchange_account != 0 and command.authority.exchange_account != entry.body.account) return error.InvalidSnapshotState;
+            if (entry.body.account == shard.exchange_account_identity) {
+                const instrument = shard.instrumentEntry(command.instrument) orelse return error.InvalidSnapshotState;
+                if (instrument.venue != entry.body.venue) return error.InvalidSnapshotState;
+            }
             retained = true;
             break;
         };
@@ -5993,7 +6394,12 @@ fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: b
     }
 
     if (shard.economic_projection.applied_funding_count > shard.economic_projection.applied_fundings.len) return error.InvalidSnapshotState;
+    var multiple_funding_portfolios = false;
+    for (shard.deployment.portfolios[0..shard.deployment.portfolio_count]) |membership| if (membership.domain == shard.decision_domain_identity) {
+        multiple_funding_portfolios = true;
+    };
     for (shard.economic_projection.applied_fundings[0..shard.economic_projection.applied_funding_count]) |applied| {
+        if (multiple_funding_portfolios and (applied.funding.portfolio_ownership_proven or applied.source.portfolio != 0 or applied.source.strategy != 0)) return error.InvalidSnapshotState;
         if (applied.source.ownership) |proof| {
             if (shard.deployment.owner(proof.account, proof.instrument) != shard.decision_domain_identity or
                 proof.binding.portfolio != shard.portfolio_identity or proof.account != shard.exchange_account_identity)
@@ -6065,8 +6471,14 @@ fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: b
         if (origin.account != shard.exchange_account_identity or origin.stream.domain != .control or origin.stream.id == 0 or shard.coordinator_binding_fact == 0) return error.InvalidSnapshotState;
         const fact = shard.trace.factAt(shard.coordinator_binding_fact) orelse return error.InvalidSnapshotState;
         if (fact.kind != .account_coordinator_bound or fact.identity != origin.stream.id) return error.InvalidSnapshotState;
-    } else if (shard.coordinator_binding_fact != 0 or shard.last_forced_archive != null) return error.InvalidSnapshotState;
+    } else if (shard.coordinator_binding_fact != 0) return error.InvalidSnapshotState;
     if (shard.last_forced_archive) |commit| {
+        if (validate_partitions) {
+            const input = shard.last_forced_archive_input orelse return error.InvalidSnapshotState;
+            const account = input.account_scope orelse shard.primary_account_identity;
+            const binding = if (shard.decision_domain_identity == 0) shard.coordinator_history_origin else (shard.accountState(account) orelse return error.InvalidSnapshotState).coordinator_history_origin;
+            if (!std.meta.eql(binding orelse return error.InvalidSnapshotState, commit.evidence.proof.root.origin)) return error.InvalidSnapshotState;
+        }
         try validateArchiveCommitInput(shard, shard.last_forced_archive_input, commit.receipt.root.barrier, .forced_archive_committed, .{ .forced_archive_committed = commit });
     } else if (shard.last_forced_archive_input != null) return error.InvalidSnapshotState;
     if (shard.last_control_archive) |commit| {
@@ -6237,6 +6649,7 @@ fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: b
             (shard.trace.factAt(entry.rules_barrier) orelse return error.InvalidSnapshotState).kind != .instrument_rules_activated)
             return error.InvalidSnapshotState;
         if (entry.capability) |profile| {
+            if (shard.deployment.sealed and entry.unscoped_trading_authorization) return error.InvalidSnapshotState;
             if (entry.capability_barrier == 0 or entry.capability_barrier > shard.authoritativeBarrier() or
                 (shard.trace.factAt(entry.capability_barrier) orelse return error.InvalidSnapshotState).kind != .capability_profile_activated or
                 profile.exchange_account != shard.exchange_account_identity)
@@ -6250,6 +6663,12 @@ fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: b
             if (entry.trading_barrier > shard.authoritativeBarrier() or
                 (fact.kind != .instrument_trading_authorized and fact.kind != .capability_profile_activated) or
                 (fact.kind == .capability_profile_activated and entry.trading_version != 1)) return error.InvalidSnapshotState;
+        }
+        for (entry.strategy_authorizations[0..entry.strategy_authorization_count]) |authorization| {
+            const fact = shard.trace.factAt(authorization.barrier) orelse return error.InvalidSnapshotState;
+            if (authorization.barrier > shard.authoritativeBarrier() or
+                (fact.kind != .instrument_trading_authorized and (fact.kind != .capability_profile_activated or authorization.version != 1 or !authorization.enabled)) or
+                shard.strategyAuthority(authorization.strategy).strategy_identity == 0) return error.InvalidSnapshotState;
         }
     }
     for (shard.oms.orders[0..shard.oms.order_count], 0..) |order, index| {
@@ -6331,12 +6750,22 @@ fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: b
             return error.InvalidSnapshotState;
         if (shard.decision_domain_identity == 0 and refs.exchange_account != 0 and refs.exchange_account != shard.exchange_account_identity)
             return error.InvalidSnapshotState;
-        if (refs.virtual_portfolio != 0 and refs.virtual_portfolio != shard.portfolio_identity)
+        if (refs.virtual_portfolio != 0 and refs.virtual_portfolio != shard.strategyAuthority(command.strategy_instance).portfolio_identity)
             return error.InvalidSnapshotState;
     }
     for (shard.economic_projection.ledger[0..shard.economic_projection.ledger_count]) |transaction|
         if (transaction.posting_count > transaction.postings.len) return error.InvalidSnapshotState;
+    if (shard.deployment.sealed) for (shard.economic_projection.applied_forced_executions[0..shard.economic_projection.applied_forced_execution_count]) |applied| {
+        if (applied.source.exchange_account != shard.exchange_account_identity or !shard.deployment.ownsPortfolio(shard.decision_domain_identity, applied.source.portfolio) or
+            (applied.source.strategy != 0 and shard.strategyAuthority(applied.source.strategy).portfolio_identity != applied.source.portfolio)) return error.InvalidSnapshotState;
+    };
     try shard.economic_projection.assertClosed();
+    for (shard.economic_projection.applied_fills[0..shard.economic_projection.applied_fill_count]) |applied| {
+        if (!applied.canonical_accounted) continue;
+        const order = shard.oms.orderById(applied.fill.order_id) orelse return error.InvalidSnapshotState;
+        const portfolio = if (order.portfolio != 0) order.portfolio else if (!shard.deployment.sealed) shard.portfolio_identity else return error.InvalidSnapshotState;
+        if (applied.source.portfolio != portfolio or applied.source.strategy != order.strategy_instance) return error.InvalidSnapshotState;
+    }
     for (shard.economic_projection.applied_fill_totals[0..shard.economic_projection.applied_fill_total_count]) |total| {
         const order = shard.oms.orderById(total.order_id) orelse return error.InvalidSnapshotState;
         if (shard.decision_domain_identity != 0 and order.exchange_account != shard.exchange_account_identity) return error.InvalidSnapshotState;
@@ -6547,6 +6976,7 @@ fn digestBool(hasher: *Sha256, value: bool) void {
 }
 
 fn digestOmsCommand(hasher: *Sha256, command: oms_module.Command) void {
+    digestInt(hasher, u128, command.portfolio);
     digestInt(hasher, u64, command.command_id);
     digestInt(hasher, u64, command.order_id);
     digestInt(hasher, u128, command.strategy_instance);
@@ -6706,8 +7136,16 @@ fn stateDigestBorrowed(shard: *const TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, u64, entry.rules_barrier);
         digestInt(&hasher, u64, entry.capability_barrier);
         digestBool(&hasher, entry.trading_enabled);
+        digestBool(&hasher, entry.unscoped_trading_authorization);
         digestInt(&hasher, u64, entry.trading_version);
         digestInt(&hasher, u64, entry.trading_barrier);
+        digestInt(&hasher, u8, entry.strategy_authorization_count);
+        for (entry.strategy_authorizations[0..entry.strategy_authorization_count]) |authorization| {
+            digestInt(&hasher, u128, authorization.strategy);
+            digestBool(&hasher, authorization.enabled);
+            digestInt(&hasher, u64, authorization.version);
+            digestInt(&hasher, u64, authorization.barrier);
+        }
         digestBool(&hasher, entry.capability != null);
         if (entry.capability) |capability| {
             digestInt(&hasher, u128, capability.exchange_account);
@@ -6732,6 +7170,7 @@ fn stateDigestBorrowed(shard: *const TradingShard) [Sha256.digest_length]u8 {
         digestInt(&hasher, u32, entry.margin.version);
         digestInt(&hasher, i128, entry.margin.price_tick_atoms);
         digestBool(&hasher, entry.margin.native_settlement_atoms);
+        digestBare(&hasher, entry.margin.native);
         digestInt(&hasher, i64, entry.margin.venue_initial_margin_ppm);
         digestInt(&hasher, i64, entry.margin.internal_initial_margin_ppm);
         digestInt(&hasher, i64, entry.margin.internal_maintenance_margin_ppm);
@@ -6766,6 +7205,7 @@ fn stateDigestBorrowed(shard: *const TradingShard) [Sha256.digest_length]u8 {
     digestInt(&hasher, u64, shard.strategy_config_version);
     digestInt(&hasher, u64, shard.authority_control_barrier);
     digestInt(&hasher, u128, shard.strategy_activation_identity);
+    digestInt(&hasher, u64, shard.strategy_activation_fact_sequence);
     digestInt(&hasher, u128, shard.host_activation_identity);
     digestInt(&hasher, u64, shard.host_activation_barrier);
     digestInt(&hasher, u64, shard.host_activation_session.fencing);
@@ -6774,6 +7214,12 @@ fn stateDigestBorrowed(shard: *const TradingShard) [Sha256.digest_length]u8 {
     digestInt(&hasher, u64, shard.host_activation_fact_sequence);
     hasher.update(&shard.host_activation_state_digest);
     digestBool(&hasher, shard.host_activation_seen);
+    digestInt(&hasher, u8, shard.portfolio_authority_count);
+    for (shard.portfolio_authorities[0..shard.portfolio_authority_count]) |authority| {
+        var bytes: [256]u8 = undefined;
+        hasher.update(snapshot_codec.encodeBare(&bytes, authority) catch unreachable);
+    }
+
     digestBool(&hasher, shard.operational_state.initialized);
     digestInt(&hasher, u128, shard.operational_state.target_identity);
     digestInt(&hasher, u64, shard.operational_state.version);
@@ -6833,6 +7279,7 @@ fn stateDigestBorrowed(shard: *const TradingShard) [Sha256.digest_length]u8 {
     for (shard.oms.orders[0..shard.oms.order_count]) |order| {
         digestInt(&hasher, u64, order.id);
         digestInt(&hasher, u128, order.exchange_account);
+        digestInt(&hasher, u128, order.portfolio);
         if (order.strategy_instance != 0) digestInt(&hasher, u128, order.strategy_instance);
         digestInt(&hasher, u128, order.instrument);
         digestInt(&hasher, u8, @intFromEnum(order.side));

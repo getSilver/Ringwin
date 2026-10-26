@@ -3,11 +3,13 @@ const durable = @import("../persistence/durable_store.zig");
 const trading = @import("../trading/trading_shard.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const snapshot_magic: u64 = 0x54434341574e4952;
-const coordinator_snapshot_version: u16 = 16;
+const coordinator_snapshot_version: u16 = 17;
+const NativeAccountProjection = @import("account_projection.zig").AccountProjection;
 const ingress = @import("shared_venue_ingress.zig");
 const canonical = @import("../model/canonical_event.zig");
 const history = @import("../persistence/business_history.zig");
 const codec = @import("../persistence/snapshot_codec.zig");
+const InstrumentRegistry = @import("../trading/instrument_registry.zig");
 const account_margin_gate_identity: u128 = 0x414343544d415247;
 
 const VenueAccountView = struct {
@@ -23,6 +25,11 @@ fn venueAccountView(shard: *const trading.TradingShard, account: u128) ?VenueAcc
             return .{ .economics = &partition.state.economic_projection, .instruments = &partition.state.instrument_registry };
     }
     return null;
+}
+
+fn nativeRuleDigest(entry: InstrumentRegistry.Entry) [32]u8 {
+    var bytes: [codec.maxBareSize(InstrumentRegistry.Entry)]u8 = undefined;
+    return history.hash(codec.encodeBare(&bytes, .{ entry.rules, entry.margin }) catch unreachable);
 }
 
 fn summaryOrderCountsValid(open: u16, unknown: u16) bool {
@@ -47,6 +54,15 @@ const unknown_liquidation_distance: i64 = std.math.maxInt(i64);
 /// Stable identity of one of the four single-writer shards.
 pub const ShardId = enum(u8) { shard_0, shard_1, shard_2, shard_3 };
 
+pub const InstrumentContribution = struct {
+    instrument: u128 = 0,
+    rules_version: u32 = 0,
+    margin_rules_version: u32 = 0,
+    configuration_digest: [32]u8 = @splat(0),
+    quantity: i64 = 0,
+    margin_atoms: i128 = 0,
+};
+
 /// Versioned publication containing only cross-account coordination inputs.
 pub const ShardSummary = struct {
     shard_id: ShardId,
@@ -58,6 +74,9 @@ pub const ShardSummary = struct {
     rules_version: u32,
     lease_version: u64,
     reservation_atoms: i128,
+    requires_native_margin: bool = false,
+    contribution_count: u8 = 0,
+    contributions: [canonical.max_instrument_definitions]InstrumentContribution = @splat(.{}),
     spot_quantity: i64,
     spot_asset_atoms: i128 = 0,
     swap_quantity: i64,
@@ -128,7 +147,49 @@ pub const ForcedContributionBasis = struct {
     barriers: [max_shards]u64,
     digests: [max_shards][32]u8,
     configuration_digest: [32]u8,
+    portfolio_count: u8 = 0,
+    portfolios: [max_shards * 4]ForcedPortfolioContribution = @splat(.{}),
 };
+pub const ForcedPortfolioContribution = struct {
+    shard: ShardId = .shard_0,
+    portfolio: u128 = 0,
+    quantity: i64 = 0,
+    open_cost_atoms: i128 = 0,
+};
+
+pub fn validateForcedContributions(basis: ForcedContributionBasis) !void {
+    if (basis.portfolio_count > basis.portfolios.len) return error.InvalidAccountFact;
+    var quantities: [max_shards]i128 = @splat(0);
+    for (basis.portfolios[0..basis.portfolio_count], 0..) |entry, index| {
+        if (entry.portfolio == 0 or entry.quantity == std.math.minInt(i64) or entry.open_cost_atoms < 0 or
+            (entry.quantity == 0 and entry.open_cost_atoms != 0)) return error.InvalidAccountFact;
+        for (basis.portfolios[0..index]) |prior| if (prior.portfolio == entry.portfolio) return error.InvalidAccountFact;
+        quantities[@intFromEnum(entry.shard)] += entry.quantity;
+    }
+    for (basis.portfolios[basis.portfolio_count..]) |entry| if (!std.meta.eql(entry, ForcedPortfolioContribution{})) return error.InvalidAccountFact;
+    if (basis.portfolio_count != 0) {
+        for (quantities, basis.positions) |actual, expected| if (actual != expected) return error.InvalidAccountFact;
+    }
+}
+
+pub fn resolveForcedPortfolio(source: AccountFact, owners: [max_shards]ForcedOwner, positions: [max_shards]i64, slice: ForcedExecutionSlice) !ForcedPortfolioContribution {
+    if (source.contributions) |basis| {
+        try validateForcedContributions(basis);
+        if (basis.portfolio_count != 0) {
+            var found: ?ForcedPortfolioContribution = null;
+            for (basis.portfolios[0..basis.portfolio_count]) |entry| {
+                if (entry.shard != slice.owner or (slice.portfolio != 0 and entry.portfolio != slice.portfolio)) continue;
+                if (found != null) return error.ForcedExecutionOwnerMismatch;
+                found = entry;
+            }
+            return found orelse error.ForcedExecutionOwnerMismatch;
+        }
+    }
+    const index = @intFromEnum(slice.owner);
+    const portfolio = owners[index].portfolio;
+    if (slice.portfolio != 0 and slice.portfolio != portfolio) return error.ForcedExecutionOwnerMismatch;
+    return .{ .shard = slice.owner, .portfolio = portfolio, .quantity = positions[index] };
+}
 pub const AccountFact = struct {
     canonical_source: ?canonical.ForcedExecutionSource = null,
     contributions: ?ForcedContributionBasis = null,
@@ -141,10 +202,11 @@ pub const AccountFact = struct {
 };
 
 /// One target assignment; the target shard still applies the canonical fact.
-pub const Delivery = struct { shard_id: ShardId, fact: AccountFact, allocation_identity: u128 = 0, slice_index: u8 = 0, source_identity: u128 = 0 };
+pub const Delivery = struct { shard_id: ShardId, fact: AccountFact, portfolio: u128 = 0, allocation_identity: u128 = 0, slice_index: u8 = 0, source_identity: u128 = 0 };
 
 pub const ForcedExecutionSlice = struct {
     owner: ShardId = .shard_0,
+    portfolio: u128 = 0,
     quantity: i64 = 0,
     position_delta: i64 = 0,
     realized_pnl_atoms: i128 = 0,
@@ -205,6 +267,7 @@ const ArchivedVenue = struct { fact: VenueSpool, receipt: history.Receipt };
 const DuplicateVenue = struct { record: canonical.EventRecord, proof: history.LookupProof };
 
 pub const CoordinationEvent = union(enum) {
+    native_margin_configuration: InstrumentRegistry.Entry,
     venue_archived: ArchivedVenue,
     venue_duplicate: DuplicateVenue,
     venue_fact: struct { record: canonical.EventRecord, targets: u4 },
@@ -289,6 +352,7 @@ pub fn accountFactEvent(delivery: Delivery) !trading.CoreEvent {
                 .margin_atoms = snapshot.margin_atoms,
             } },
             .forced_execution => |execution| .{ .venue_forced_execution = .{
+                .portfolio_identity = delivery.portfolio,
                 .execution_id = identity,
                 .instrument = execution.instrument,
                 .rules_version = execution.rules_version,
@@ -406,7 +470,7 @@ noinline fn forcedTailExplainsSummaryChange(coordinator: *AccountCoordinator, sh
     var before = (try trading.TradingShard.restoreSnapshot(snapshot)).shard;
     before.operational_state.trading_authorized = false;
     before.operational_state.mode = .recovering;
-    const baseline = try shardSummaryFromShard(&before, shard_id, summary.publication_version, summary.decision_domain);
+    const baseline = try shardSummaryFromShardForAccount(&before, coordinator.exchange_account, shard_id, summary.publication_version, summary.decision_domain);
     if (!std.meta.eql(baseline, summary)) return false;
     var reader = try trading.journal.Reader.init(tail);
     var forced_count: usize = 0;
@@ -443,43 +507,111 @@ pub fn shardSummaryFromShard(
     publication_version: u64,
     decision_domain: u128,
 ) !ShardSummary {
+    return shardSummaryFromShardForAccount(shard, shard.exchange_account_identity, shard_id, publication_version, decision_domain);
+}
+
+/// Reads the selected account partition without copying or exchanging shard authority.
+pub fn shardSummaryFromShardForAccount(
+    shard: *const trading.TradingShard,
+    account: u128,
+    shard_id: ShardId,
+    publication_version: u64,
+    decision_domain: u128,
+) !ShardSummary {
+    if (account == 0) return error.InvalidShardSummary;
+    if (account == shard.exchange_account_identity)
+        return summaryFromAccountView(shard, shard, account, shard_id, publication_version, decision_domain);
+    for (shard.secondary_accounts[0..shard.secondary_account_count]) |*partition| {
+        if (partition.identity == account)
+            return summaryFromAccountView(shard, &partition.state, account, shard_id, publication_version, decision_domain);
+    }
+    return error.InvalidShardSummary;
+}
+
+fn summaryFromAccountView(
+    shard: *const trading.TradingShard,
+    view: anytype,
+    account: u128,
+    shard_id: ShardId,
+    publication_version: u64,
+    decision_domain: u128,
+) !ShardSummary {
     if (decision_domain == 0 or publication_version == 0 or
         (shard.decision_domain_identity != 0 and decision_domain != shard.decision_domain_identity) or
-        !shard.account_configured or shard.exchange_account_identity == 0)
+        !view.account_configured or view.exchange_account_identity != account)
         return error.InvalidShardSummary;
-    const rules_version = @min(shard.instrument_rules_version, shard.margin_rules_version);
-    if (rules_version == 0 or shard.portfolio_identity == 0) return error.InvalidShardSummary;
+    const rules_version = @min(view.instrument_rules_version, view.margin_rules_version);
+    if (rules_version == 0 or view.portfolio_identity == 0) return error.InvalidShardSummary;
     var open_orders: u16 = 0;
     var unknown_orders: u16 = 0;
-    for (shard.oms.orders[0..shard.oms.order_count]) |order| switch (order.state) {
-        .unknown => unknown_orders += 1,
-        .filled, .canceled, .rejected => {},
-        else => open_orders += 1,
-    };
-    const economics_summary = shard.economicSummary();
-    const portfolio_distance = shard.portfolio_liquidation_distance_ticks;
-    const exchange_distance = shard.exchange_liquidation_distance_ticks;
+    for (shard.oms.orders[0..shard.oms.order_count]) |order| {
+        if (shard.decision_domain_identity != 0 and order.exchange_account != account) continue;
+        switch (order.state) {
+            .unknown => unknown_orders += 1,
+            .filled, .canceled, .rejected => {},
+            else => open_orders += 1,
+        }
+    }
+    const reservation = try shard.oms.reservationsForAccount(1, if (shard.decision_domain_identity == 0) null else account);
+    const portfolio_distance = view.portfolio_liquidation_distance_ticks;
+    const exchange_distance = view.exchange_liquidation_distance_ticks;
+    var contributions: [canonical.max_instrument_definitions]InstrumentContribution = @splat(.{});
+    var contribution_count: u8 = 0;
+    var layers: [4]*const @import("economics.zig").Layer = undefined;
+    layers[0] = &view.economic_projection.portfolio;
+    for (view.economic_projection.extra_portfolios[0..view.economic_projection.extra_portfolio_count], 1..) |*owned, index| layers[index] = &owned.layer;
+    var margin_atoms: i128 = 0;
+    var cash_atoms: i128 = 0;
+    var spot_quantity: i64 = 0;
+    var swap_quantity: i64 = 0;
+    var spot_asset_atoms: i128 = 0;
+    for (layers[0 .. 1 + view.economic_projection.extra_portfolio_count]) |owned| {
+        margin_atoms = try std.math.add(i128, margin_atoms, owned.margin_atoms);
+        cash_atoms = try std.math.add(i128, cash_atoms, owned.usdt_balance_atoms);
+        spot_quantity = try std.math.add(i64, spot_quantity, owned.spot.quantity);
+        swap_quantity = try std.math.add(i64, swap_quantity, owned.swap.quantity);
+        spot_asset_atoms = try std.math.add(i128, spot_asset_atoms, owned.spot_asset_atoms);
+        for (owned.instrument_positions[0..owned.instrument_position_count]) |position| {
+            const entry = view.instrument_registry.get(position.instrument) orelse return error.InvalidShardSummary;
+            var target: ?*InstrumentContribution = null;
+            for (contributions[0..contribution_count]) |*existing| if (existing.instrument == position.instrument) {
+                target = existing;
+                break;
+            };
+            if (target == null) {
+                if (contribution_count == contributions.len) return error.InvalidShardSummary;
+                target = &contributions[contribution_count];
+                contribution_count += 1;
+                target.?.* = .{ .instrument = position.instrument, .rules_version = entry.rules.version, .margin_rules_version = entry.margin.version, .configuration_digest = nativeRuleDigest(entry) };
+            }
+            target.?.quantity = try std.math.add(i64, target.?.quantity, position.position.quantity);
+            target.?.margin_atoms = try std.math.add(i128, target.?.margin_atoms, position.margin_atoms);
+        }
+    }
     return .{
         .shard_id = shard_id,
         .decision_domain = decision_domain,
-        .virtual_portfolio = shard.portfolio_identity,
-        .exchange_account = shard.exchange_account_identity,
+        .virtual_portfolio = view.portfolio_identity,
+        .exchange_account = account,
         .publication_version = publication_version,
         .shard_sequence = shard.authoritativeBarrier(),
         .rules_version = rules_version,
-        .lease_version = shard.risk_lease_version,
-        .reservation_atoms = try std.math.add(i128, economics_summary.portfolio.margin_atoms, try shard.activeReservationAtoms()),
-        .spot_quantity = economics_summary.portfolio.spot.quantity,
-        .spot_asset_atoms = economics_summary.portfolio.spot_asset_atoms,
-        .swap_quantity = economics_summary.portfolio.swap.quantity,
-        .cash_atoms = economics_summary.portfolio.usdt_balance_atoms,
+        .lease_version = view.risk_lease_version,
+        .reservation_atoms = try std.math.add(i128, margin_atoms, reservation.atoms),
+        .requires_native_margin = shard.deployment.sealed,
+        .contribution_count = contribution_count,
+        .contributions = contributions,
+        .spot_quantity = spot_quantity,
+        .spot_asset_atoms = spot_asset_atoms,
+        .swap_quantity = swap_quantity,
+        .cash_atoms = cash_atoms,
         .open_orders = open_orders,
         .unknown_orders = unknown_orders,
         .local_gate_closed = shard.operational_state.latch_count > 0 or
-            shard.portfolio_margin_gate != .healthy or
-            shard.exchange_margin_gate != .healthy,
-        .exchange_margin_atoms = economics_summary.exchange.margin_atoms,
-        .risk_tier = shard.last_risk_tier,
+            view.portfolio_margin_gate != .healthy or
+            view.exchange_margin_gate != .healthy,
+        .exchange_margin_atoms = view.economic_projection.exchange.margin_atoms,
+        .risk_tier = view.last_risk_tier,
         .liquidation_distance_ticks = @min(portfolio_distance, exchange_distance),
     };
 }
@@ -613,6 +745,8 @@ fn commandFixture(command_id: u64, order_id: u64) trading.oms.Command {
 
 /// Fixed-capacity owner of cross-shard leases and account reconciliation only.
 pub const AccountCoordinator = struct {
+    native_account: NativeAccountProjection = .{},
+    native_rules: InstrumentRegistry.Registry = .{},
     venue_ingress: ingress.State = .{},
     exchange_account: u128,
     account_safety_ceiling_atoms: i128,
@@ -635,6 +769,8 @@ pub const AccountCoordinator = struct {
     fault_publications: [max_shards]u64 = @splat(0),
     recovery_only: bool = false,
     recovery_margin_identity: u128 = 0,
+    // Runtime recovery evidence is never inherited from snapshots or historical replay.
+    recovery_native_bootstrap_seen: bool = false,
     suspense_forced_execution: ?AccountFact = null,
     reconciliation_break_identity: u128 = 0,
     forced_execution_source: ?AccountFact = null,
@@ -719,6 +855,12 @@ pub const AccountCoordinator = struct {
             summary.rules_version == 0 or summary.reservation_atoms < 0 or
             !summaryOrderCountsValid(summary.open_orders, summary.unknown_orders))
             return error.InvalidShardSummary;
+        if (summary.contribution_count > summary.contributions.len) return error.InvalidShardSummary;
+        for (summary.contributions[0..summary.contribution_count], 0..) |item, contribution_index| {
+            if (item.instrument == 0 or item.rules_version == 0 or item.margin_rules_version == 0 or item.margin_atoms < 0) return error.InvalidShardSummary;
+            for (summary.contributions[0..contribution_index]) |known_item| if (known_item.instrument == item.instrument) return error.InvalidShardSummary;
+        }
+        for (summary.contributions[summary.contribution_count..]) |item| if (!std.meta.eql(item, InstrumentContribution{})) return error.InvalidShardSummary;
         const index: usize = @intFromEnum(summary.shard_id);
         const known = &self.summaries[index];
         if (known.present) {
@@ -754,13 +896,17 @@ pub const AccountCoordinator = struct {
         const next_barrier = try std.math.add(u64, self.barrier, 1);
         known.* = .{ .identity = identity, .value = summary, .present = true };
         self.barrier = next_barrier;
+        if (self.nativeMarginRequired()) {
+            self.margin_reconciliation_state = .unknown;
+            if (!self.margin_gate.latched) self.margin_gate.open = false;
+        }
         return true;
     }
 
     /// Computes a stable digest of coordination-owned state only.
     pub fn digest(self: *const AccountCoordinator) [Sha256.digest_length]u8 {
         var hasher = Sha256.init(.{});
-        hasher.update("coordinator-history-v15");
+        hasher.update("coordinator-history-v16");
         var ingress_bytes: [80000]u8 = undefined;
         var ingress_writer: std.Io.Writer = .fixed(&ingress_bytes);
         self.venue_ingress.write(&ingress_writer) catch unreachable;
@@ -815,6 +961,12 @@ pub const AccountCoordinator = struct {
             digestInt(&hasher, u8, allocation.count);
             for (allocation.slices[0..allocation.count]) |slice| digestStruct(&hasher, ForcedExecutionSlice, slice);
         }
+        hasher.update(&self.native_account.digest());
+        digestInt(&hasher, u8, self.native_rules.count);
+        for (self.native_rules.entries[0..self.native_rules.count]) |entry| {
+            var rule_bytes: [codec.maxBareSize(InstrumentRegistry.Entry)]u8 = undefined;
+            hasher.update(codec.encodeBare(&rule_bytes, entry) catch unreachable);
+        }
         digestOptionalMarginObservation(&hasher, self.last_margin_observation);
         digestStruct(&hasher, AccountGate, self.margin_gate);
         digestInt(&hasher, u8, @intFromEnum(self.margin_reconciliation_state));
@@ -851,7 +1003,9 @@ pub const AccountCoordinator = struct {
         if (self.summary_protocol_fault) return error.SummaryProtocolFault;
         if (self.recovery_only) return error.CoordinatorRecoveryOnly;
         if (self.venue_ingress.broken) return error.AccountGateClosed;
-        if (self.margin_gate.latched or self.margin_reconciliation_state == .broken)
+        if (self.margin_gate.latched or self.margin_reconciliation_state == .broken or
+            (self.margin_gate.identity != 0 and !self.margin_gate.open) or
+            (self.nativeMarginRequired() and (self.margin_reconciliation_state != .healthy or !self.margin_gate.open)))
             return error.MarginReconciliationRequired;
         if (version == 0 or valid_through_barrier < self.barrier) return error.InvalidRiskLease;
         for (self.summaries) |record| if (!record.present) return error.IncompleteShardSummaries;
@@ -950,6 +1104,7 @@ pub const AccountCoordinator = struct {
     pub fn acceptAccountFact(self: *AccountCoordinator, fact: AccountFact) ![]const Delivery {
         if (fact.identity == 0 or fact.exchange_account != self.exchange_account or fact.version == 0 or fact.barrier == 0)
             return error.InvalidAccountFact;
+        if (fact.contributions) |basis| try validateForcedContributions(basis);
         if (self.last_account_fact) |known| {
             if (fact.identity == known.identity) {
                 if (!std.meta.eql(known, fact)) return error.AccountFactIdentityConflict;
@@ -1006,6 +1161,11 @@ pub const AccountCoordinator = struct {
         return self.allocateForcedExecutionVerified(allocation);
     }
 
+    fn forcedPortfolio(self: *const AccountCoordinator, slice: ForcedExecutionSlice) !ForcedPortfolioContribution {
+        const source = self.forced_execution_source orelse return error.UnknownForcedExecution;
+        return resolveForcedPortfolio(source, self.forced_source_owners, self.forced_source_positions, slice);
+    }
+
     fn allocateForcedExecutionVerified(self: *AccountCoordinator, allocation: ForcedExecutionAllocation) ![]const Delivery {
         var normalized = allocation;
         if (normalized.count <= max_shards) {
@@ -1033,25 +1193,33 @@ pub const AccountCoordinator = struct {
         var pnl: i128 = 0;
         var fee: i128 = 0;
         var penalty: i128 = 0;
-        var owner_quantity: [max_shards]i128 = @splat(0);
         for (self.forced_allocations[0..self.forced_allocation_count]) |known| {
             for (known.allocation.slices[0..known.allocation.count]) |slice| {
                 quantity += slice.quantity;
                 pnl = try std.math.add(i128, pnl, slice.realized_pnl_atoms);
                 fee = try std.math.add(i128, fee, slice.fee_atoms);
                 penalty = try std.math.add(i128, penalty, slice.penalty_atoms);
-                owner_quantity[@intFromEnum(slice.owner)] += slice.quantity;
             }
         }
-        for (normalized.slices[0..normalized.count]) |slice| {
+        for (normalized.slices[0..normalized.count], 0..) |slice, slice_index| {
             if (slice.quantity == 0 or slice.quantity == std.math.minInt(i64) or
                 slice.position_delta != slice.quantity or slice.fee_atoms < 0 or slice.penalty_atoms < 0)
                 return error.InvalidForcedExecutionAllocation;
-            const index = @intFromEnum(slice.owner);
-            const position = self.forced_source_positions[index];
+            const owned = try self.forcedPortfolio(slice);
+            const position = owned.quantity;
             if (position == 0 or (position > 0) == (slice.quantity > 0)) return error.ForcedExecutionOwnerMismatch;
-            owner_quantity[index] += slice.quantity;
-            if (@abs(owner_quantity[index]) > @abs(@as(i128, position))) return error.ForcedExecutionOwnerMismatch;
+            var owner_quantity: i128 = slice.quantity;
+            for (self.forced_allocations[0..self.forced_allocation_count]) |known| {
+                for (known.allocation.slices[0..known.allocation.count]) |previous| {
+                    const previous_owner = try self.forcedPortfolio(previous);
+                    if (previous_owner.shard == owned.shard and previous_owner.portfolio == owned.portfolio) owner_quantity += previous.quantity;
+                }
+            }
+            for (normalized.slices[0..slice_index]) |previous| {
+                const previous_owner = try self.forcedPortfolio(previous);
+                if (previous_owner.shard == owned.shard and previous_owner.portfolio == owned.portfolio) owner_quantity += previous.quantity;
+            }
+            if (@abs(owner_quantity) > @abs(@as(i128, position))) return error.ForcedExecutionOwnerMismatch;
             quantity += slice.quantity;
             pnl = try std.math.add(i128, pnl, slice.realized_pnl_atoms);
             fee = try std.math.add(i128, fee, slice.fee_atoms);
@@ -1107,7 +1275,8 @@ pub const AccountCoordinator = struct {
                     .fee_atoms = slice.fee_atoms,
                     .penalty_atoms = slice.penalty_atoms,
                 };
-                self.forced_deliveries[count] = .{ .shard_id = slice.owner, .fact = fact, .allocation_identity = record.allocation.identity, .slice_index = @intCast(index), .source_identity = source.identity };
+                const owned = try self.forcedPortfolio(slice);
+                self.forced_deliveries[count] = .{ .shard_id = slice.owner, .fact = fact, .portfolio = owned.portfolio, .allocation_identity = record.allocation.identity, .slice_index = @intCast(index), .source_identity = source.identity };
                 count += 1;
             }
         }
@@ -1187,6 +1356,12 @@ pub const AccountCoordinator = struct {
         }
     }
 
+    fn nativeMarginRequired(self: *const AccountCoordinator) bool {
+        if (self.native_account.bootstrap != null or self.native_rules.count != 0) return true;
+        for (self.summaries) |summary| if (summary.present and summary.value.requires_native_margin) return true;
+        return false;
+    }
+
     /// Reconciles gross portfolio state with Venue net margin without allocating the difference.
     pub fn reconcileMargin(self: *AccountCoordinator, observation: MarginObservation) !AccountGate {
         if (observation.identity == 0 or observation.barrier < self.barrier or
@@ -1200,12 +1375,16 @@ pub const AccountCoordinator = struct {
             }
             if (observation.barrier <= known.barrier) return error.StaleMarginObservation;
         }
-        const projected = try self.projectAccounts();
         const gross = try self.grossPortfolioMargin();
-        self.account_netting_benefit_atoms = @max(gross - observation.venue_net_margin_atoms, 0);
+        const native = if (self.nativeMarginRequired()) try self.reconcileNative() else null;
+        self.account_netting_benefit_atoms = if (native) |result| if (result.state == .healthy) @max(gross - result.net_atoms, 0) else 0 else @max(gross - observation.venue_net_margin_atoms, 0);
         self.last_margin_observation = observation;
-        self.margin_reconciliation_state = classifyObservation(projected, gross, observation);
-        if (self.recovery_only) self.recovery_margin_identity = observation.identity;
+        // Native account evidence requires per-instrument native rules before it can grant authority.
+        self.margin_reconciliation_state = if (native) |result|
+            result.state
+        else
+            classifyObservation(try self.projectAccounts(), gross, observation);
+        if (self.recovery_only and (!self.nativeMarginRequired() or self.recovery_native_bootstrap_seen)) self.recovery_margin_identity = observation.identity;
         if (!self.margin_gate.latched) switch (self.margin_reconciliation_state) {
             .unknown => self.margin_gate = .{ .identity = account_margin_gate_identity, .open = false, .latched = false },
             .healthy => self.margin_gate = .{ .identity = account_margin_gate_identity, .open = true, .latched = false },
@@ -1223,12 +1402,133 @@ pub const AccountCoordinator = struct {
         if (self.venue_ingress.broken) return error.AccountGateClosed;
         const observation = self.last_margin_observation orelse return error.MarginObservationRequired;
         if (observation.identity != observation_identity) return error.MarginObservationIdentityConflict;
+        if (self.nativeMarginRequired()) {
+            if ((try self.reconcileNative()).state != .healthy) return error.MarginReconciliationStillBroken;
+            self.margin_reconciliation_state = .healthy;
+            self.margin_gate = .{ .identity = account_margin_gate_identity, .open = true, .latched = false };
+            return self.margin_gate;
+        }
         const projected = try self.projectAccounts();
         if (classifyObservation(projected, try self.grossPortfolioMargin(), observation) != .healthy)
             return error.MarginReconciliationStillBroken;
         self.margin_reconciliation_state = .healthy;
         self.margin_gate = .{ .identity = account_margin_gate_identity, .open = true, .latched = false };
         return self.margin_gate;
+    }
+
+    const NativeReconciliation = struct { state: MarginReconciliationState, net_atoms: i128 = 0 };
+    fn reconcileNative(self: *const AccountCoordinator) !NativeReconciliation {
+        const observed = &self.native_account;
+        if (!observed.valid or observed.exchange_account != self.exchange_account or self.native_rules.count == 0) return .{ .state = .unknown };
+        var account_mode_known = false;
+        for (observed.configurations[0..observed.configuration_count]) |configuration| if (configuration.value == .account) {
+            account_mode_known = true;
+            if (!configuration.value.account.position_mode_net or !configuration.value.account.contract_isolated_autonomy) return .{ .state = .broken };
+        };
+        if (!account_mode_known) return .{ .state = .unknown };
+        var net_atoms: i128 = 0;
+        var settlement_asset: ?canonical.AssetIdentity = null;
+        for (self.native_rules.entries[0..self.native_rules.count]) |entry| {
+            if (self.venue_ingress.venue == 0 or entry.venue == 0 or entry.rules.venue == 0) return .{ .state = .unknown };
+            if (entry.venue != self.venue_ingress.venue or entry.rules.venue != self.venue_ingress.venue) return .{ .state = .broken };
+            const rules = entry.margin.native orelse return .{ .state = .unknown };
+            if (settlement_asset) |asset| {
+                if (asset != entry.rules.settlement_asset) return .{ .state = .unknown };
+            } else settlement_asset = entry.rules.settlement_asset;
+            if (entry.product != .isolated_linear_usdt or !entry.margin.native_settlement_atoms or entry.rules.settlement_asset != 1) return .{ .state = .unknown };
+            var quantity: i64 = 0;
+            for (self.summaries) |summary| {
+                if (!summary.present) return .{ .state = .unknown };
+                for (summary.value.contributions[0..summary.value.contribution_count]) |contribution| {
+                    if (contribution.instrument != entry.instrument) continue;
+                    if (contribution.rules_version != entry.rules.version or contribution.margin_rules_version != entry.margin.version or !std.mem.eql(u8, &contribution.configuration_digest, &nativeRuleDigest(entry))) return .{ .state = .unknown };
+                    quantity = try std.math.add(i64, quantity, contribution.quantity);
+                }
+            }
+            var leverage_known = false;
+            var configured_leverage: ?canonical.Decimal = null;
+            for (observed.configurations[0..observed.configuration_count]) |configuration| if (configuration.value == .isolated_leverage and configuration.value.isolated_leverage.instrument == entry.instrument) {
+                leverage_known = true;
+                configured_leverage = configuration.value.isolated_leverage.leverage;
+                if (!configuration.value.isolated_leverage.position_mode_net or !configuration.value.isolated_leverage.margin_mode_isolated) return .{ .state = .broken };
+            };
+            if (!leverage_known) return .{ .state = .unknown };
+            var position: ?canonical.AccountPosition = null;
+            for (observed.positions[0..observed.position_count]) |candidate| if (candidate.instrument == entry.instrument) {
+                if (position != null) return .{ .state = .broken };
+                position = candidate;
+            };
+            if (position == null) {
+                if (quantity != 0) return .{ .state = .broken };
+                for (observed.margins[0..observed.margin_count]) |margin| if (margin.instrument == entry.instrument) {
+                    if (margin.initial_margin == null or margin.maintenance_margin == null) return .{ .state = .unknown };
+                    if (margin.initial_margin.?.asset != entry.rules.settlement_asset or margin.maintenance_margin.?.asset != entry.rules.settlement_asset) return .{ .state = .unknown };
+                    if (margin.initial_margin.?.atoms != 0 or margin.maintenance_margin.?.atoms != 0) return .{ .state = .broken };
+                };
+                continue;
+            }
+            const native_position = position.?;
+            const absolute_quantity = std.math.cast(i64, native_position.quantity.lots) orelse return .{ .state = .unknown };
+            const native_quantity = if (native_position.side == .short) try std.math.negate(absolute_quantity) else absolute_quantity;
+            if (native_position.quantity.rules_version != entry.rules.version) return .{ .state = .unknown };
+            if (native_quantity != quantity) return .{ .state = .broken };
+            if (quantity == 0) {
+                for (observed.margins[0..observed.margin_count]) |margin| if (margin.instrument == entry.instrument) {
+                    if (margin.initial_margin == null or margin.maintenance_margin == null) return .{ .state = .unknown };
+                    if (margin.initial_margin.?.asset != entry.rules.settlement_asset or margin.maintenance_margin.?.asset != entry.rules.settlement_asset) return .{ .state = .unknown };
+                    if (margin.initial_margin.?.atoms != 0 or margin.maintenance_margin.?.atoms != 0) return .{ .state = .broken };
+                };
+                continue;
+            }
+            if (native_position.risk_tier == null or native_position.risk_tier.? == 0) return .{ .state = .unknown };
+            if (native_position.risk_tier.? != rules.tier_identity) return .{ .state = .broken };
+            var bucket: ?canonical.AccountMargin = null;
+            for (observed.margins[0..observed.margin_count]) |candidate| if (candidate.instrument == entry.instrument) {
+                bucket = candidate;
+            };
+            if (bucket == null) return .{ .state = .unknown };
+            const margin = bucket.?;
+            const initial = margin.initial_margin orelse return .{ .state = .unknown };
+            const maintenance = margin.maintenance_margin orelse return .{ .state = .unknown };
+            const collateral = margin.isolated_equity orelse return .{ .state = .unknown };
+            if (native_position.maintenance_margin) |position_maintenance| {
+                if (position_maintenance.asset != maintenance.asset) return .{ .state = .unknown };
+                if (position_maintenance.atoms != maintenance.atoms) return .{ .state = .broken };
+            }
+            if (initial.asset != entry.rules.settlement_asset or maintenance.asset != initial.asset or collateral.asset != initial.asset) return .{ .state = .unknown };
+            const average = native_position.average_price orelse return .{ .state = .unknown };
+            const mark = native_position.mark_price orelse return .{ .state = .unknown };
+            const position_leverage = native_position.leverage orelse return .{ .state = .unknown };
+            if (position_leverage.coefficient <= 0 or configured_leverage.?.coefficient <= 0) return .{ .state = .unknown };
+            const leverage_scale = @max(position_leverage.scale, configured_leverage.?.scale);
+            if (try position_leverage.exactAtoms(leverage_scale) != try configured_leverage.?.exactAtoms(leverage_scale)) return .{ .state = .broken };
+            const pnl = native_position.unrealized_pnl orelse return .{ .state = .unknown };
+            if (pnl.asset != initial.asset) return .{ .state = .unknown };
+            const price_change = try std.math.sub(i128, mark.ticks, average.ticks);
+            const pnl_numerator = try std.math.mul(i128, try std.math.mul(i128, try std.math.mul(i128, quantity, entry.rules.quantity_numerator), entry.margin.price_tick_atoms), price_change);
+            const expected_pnl = @divFloor(pnl_numerator, entry.rules.quantity_denominator);
+            if (pnl.atoms != expected_pnl) return .{ .state = .broken };
+            const principal = try std.math.sub(i128, collateral.atoms, pnl.atoms);
+            const native_principal = margin.amount orelse return .{ .state = .unknown };
+            if (native_principal.asset != initial.asset) return .{ .state = .unknown };
+            if (native_principal.atoms != principal) return .{ .state = .broken };
+            const assessed = (@import("native_margin_reconciliation.zig").calculate(rules, quantity, entry.rules.quantity_numerator, entry.rules.quantity_denominator, entry.margin.price_tick_atoms, average.ticks, mark.ticks, principal) catch return .{ .state = .unknown }) orelse return .{ .state = .unknown };
+            if (initial.atoms != assessed.initial_margin_atoms or maintenance.atoms != assessed.maintenance_atoms) return .{ .state = .broken };
+            if (assessed.liquidation_price_ticks) |threshold| {
+                const liquidation = native_position.liquidation_price orelse return .{ .state = .unknown };
+                if (liquidation.ticks != threshold) return .{ .state = .broken };
+            }
+            net_atoms = try std.math.add(i128, net_atoms, initial.atoms);
+        }
+        for (self.summaries) |summary| for (summary.value.contributions[0..summary.value.contribution_count]) |contribution| {
+            if (self.native_rules.get(contribution.instrument) == null) return .{ .state = .unknown };
+        };
+        for (observed.positions[0..observed.position_count]) |position| if (self.native_rules.get(position.instrument) == null) return .{ .state = .unknown };
+        for (observed.margins[0..observed.margin_count]) |margin| {
+            const instrument = margin.instrument orelse return .{ .state = .unknown };
+            if (self.native_rules.get(instrument) == null) return .{ .state = .unknown };
+        }
+        return .{ .state = .healthy, .net_atoms = net_atoms };
     }
 
     const AccountProjection = struct {
@@ -1258,6 +1558,10 @@ pub const AccountCoordinator = struct {
 
     fn classifyObservation(projected: AccountProjection, gross: i128, observation: MarginObservation) MarginReconciliationState {
         var inputs_known = true;
+        if (projected.risk_tier == 0 or observation.venue_risk_tier == 0) return .unknown;
+        if (projected.swap_quantity != 0 and
+            (projected.liquidation_distance_ticks == unknown_liquidation_distance or
+                observation.venue_liquidation_distance_ticks == unknown_liquidation_distance)) return .unknown;
         if ((projected.liquidation_distance_ticks == unknown_liquidation_distance) !=
             (observation.venue_liquidation_distance_ticks == unknown_liquidation_distance)) inputs_known = false;
         if ((projected.risk_tier == 0) != (observation.venue_risk_tier == 0)) inputs_known = false;
@@ -1325,7 +1629,10 @@ pub const AccountCoordinator = struct {
 
     /// Returns stable events carrying every current lease to its owning shard.
     pub fn currentLeaseEvents(self: *const AccountCoordinator, events: *[max_shards]trading.CoreEvent) ![]const trading.CoreEvent {
-        if (self.venue_ingress.broken) return error.AccountGateClosed;
+        if (self.venue_ingress.broken or (self.margin_gate.identity != 0 and !self.margin_gate.open) or (self.nativeMarginRequired() and (self.margin_reconciliation_state != .healthy or !self.margin_gate.open))) return error.AccountGateClosed;
+        if (self.recovery_only) {
+            for (self.leases[0..self.lease_count]) |lease| if (lease.open) return error.CoordinatorRecoveryOnly;
+        }
         for (self.leases[0..self.lease_count], 0..) |lease, index|
             events[index] = try riskLeaseEvent(lease);
         return events[0..self.lease_count];
@@ -1351,6 +1658,7 @@ pub const AccountCoordinator = struct {
         if (self.venue_ingress.broken) return error.AccountGateClosed;
         if (!self.recovery_only) return error.CoordinatorNotRecovering;
         if (self.suspense_forced_execution != null) return error.ForcedExecutionReconciliationBreak;
+        if (self.nativeMarginRequired() and !self.recovery_native_bootstrap_seen) return error.FreshNativeBootstrapRequired;
         if (self.recovery_margin_identity == 0) return error.FreshMarginObservationRequired;
         if (!self.margin_gate.open or self.margin_gate.latched) return error.MarginReconciliationRequired;
         if (self.lease_count != max_shards) return error.IncompleteRiskLeases;
@@ -1359,6 +1667,7 @@ pub const AccountCoordinator = struct {
             if (lease.valid_through_barrier < self.barrier) return error.RiskLeaseExpired;
         }
         self.recovery_only = false;
+        self.recovery_native_bootstrap_seen = false;
     }
 
     /// Replays a durable pre-crash coordinator input without treating it as fresh recovery evidence.
@@ -1371,6 +1680,14 @@ pub const AccountCoordinator = struct {
 
     fn applyEvent(self: *AccountCoordinator, event: CoordinationEvent) !void {
         switch (event) {
+            .native_margin_configuration => |entry| {
+                const instrument_changed = try self.native_rules.register(entry);
+                const margin_changed = try self.native_rules.configureMargin(entry.instrument, entry.margin);
+                if ((instrument_changed or margin_changed) and self.nativeMarginRequired()) {
+                    self.margin_reconciliation_state = .unknown;
+                    if (!self.margin_gate.latched) self.margin_gate.open = false;
+                }
+            },
             .venue_archived => |archived| {
                 var bytes: [history.max_record_bytes]u8 = undefined;
                 const qualification = history.hash(try codec.encodeBare(&bytes, archived.fact));
@@ -1379,6 +1696,16 @@ pub const AccountCoordinator = struct {
                 const root = try history.verifyReceipt(archived.receipt, origin, qualification, self.history_root);
                 try self.venue_ingress.acceptArchived(archived.fact.record, archived.fact.targets, false);
                 self.history_root = root;
+                const previous_native_bootstrap = self.native_account.bootstrap;
+                try self.native_account.apply(archived.fact.record.event);
+                if (self.recovery_only and archived.fact.record.event == .account_bootstrap_snapshot and previous_native_bootstrap != self.native_account.bootstrap) {
+                    self.recovery_native_bootstrap_seen = true;
+                    self.recovery_margin_identity = 0;
+                }
+                if (self.nativeMarginRequired() and (archived.fact.record.event == .account_bootstrap_snapshot or archived.fact.record.event == .account_observed or archived.fact.record.event == .venue_account_configuration_snapshot)) {
+                    self.margin_reconciliation_state = .unknown;
+                    if (!self.margin_gate.latched) self.margin_gate.open = false;
+                }
                 if (archived.fact.record.event == .economic_fault) self.venue_ingress.broken = true;
                 if (self.venue_ingress.broken) {
                     self.recovery_only = true;
@@ -1392,7 +1719,20 @@ pub const AccountCoordinator = struct {
                 try self.venue_ingress.acceptArchived(duplicate.record, 0, true);
             },
             .venue_fact => |fact| {
+                const previous_barrier = self.venue_ingress.barrier;
                 _ = try self.venue_ingress.accept(fact.record, fact.targets);
+                if (self.venue_ingress.barrier != previous_barrier) {
+                    const previous_native_bootstrap = self.native_account.bootstrap;
+                    try self.native_account.apply(fact.record.event);
+                    if (self.recovery_only and fact.record.event == .account_bootstrap_snapshot and previous_native_bootstrap != self.native_account.bootstrap) {
+                        self.recovery_native_bootstrap_seen = true;
+                        self.recovery_margin_identity = 0;
+                    }
+                    if (self.nativeMarginRequired() and (fact.record.event == .account_bootstrap_snapshot or fact.record.event == .account_observed or fact.record.event == .venue_account_configuration_snapshot)) {
+                        self.margin_reconciliation_state = .unknown;
+                        if (!self.margin_gate.latched) self.margin_gate.open = false;
+                    }
+                }
                 if (fact.record.event == .economic_fault) self.venue_ingress.broken = true;
                 if (self.venue_ingress.broken) {
                     self.recovery_only = true;
@@ -1500,15 +1840,7 @@ pub const AccountCoordinator = struct {
             try writer.writeByte(@intFromBool(record.present));
             if (!record.present) continue;
             try writer.writeInt(u128, record.identity, .little);
-            inline for (@typeInfo(ShardSummary).@"struct".fields) |field| {
-                const value = @field(record.value, field.name);
-                if (field.type == bool)
-                    try writer.writeByte(@intFromBool(value))
-                else if (@typeInfo(field.type) == .@"enum")
-                    try writer.writeInt(@typeInfo(field.type).@"enum".tag_type, @intFromEnum(value), .little)
-                else
-                    try writer.writeInt(field.type, value, .little);
-            }
+            try writePlainStruct(&writer, ShardSummary, record.value);
         }
         try writer.writeInt(u8, self.lease_count, .little);
         for (self.leases[0..self.lease_count]) |lease| inline for (@typeInfo(RiskLease).@"struct".fields) |field| {
@@ -1544,6 +1876,9 @@ pub const AccountCoordinator = struct {
         try writer.writeByte(self.completed_forced_allocation_count);
         for (self.completed_forced_allocations[0..self.completed_forced_allocation_count]) |allocation|
             try writeForcedAllocation(&writer, allocation);
+        try writer.writeByte(self.native_rules.count);
+        for (self.native_rules.entries[0..self.native_rules.count]) |entry| try writeNativeValue(&writer, entry);
+        try writeNativeAccount(&writer, &self.native_account);
         try writeOptionalMarginObservation(&writer, self.last_margin_observation);
         try writer.writeInt(u128, self.margin_gate.identity, .little);
         try writer.writeByte(@intFromBool(self.margin_gate.open));
@@ -1584,15 +1919,7 @@ pub const AccountCoordinator = struct {
             record.present = try readBool(&reader);
             if (!record.present) continue;
             record.identity = try reader.takeInt(u128, .little);
-            inline for (@typeInfo(ShardSummary).@"struct".fields) |field| {
-                @field(record.value, field.name) = if (field.type == bool)
-                    try readBool(&reader)
-                else if (@typeInfo(field.type) == .@"enum")
-                    std.enums.fromInt(field.type, try reader.takeInt(@typeInfo(field.type).@"enum".tag_type, .little)) orelse return error.InvalidCoordinatorSnapshot
-                else
-                    try reader.takeInt(field.type, .little);
-            }
-            if (!summaryOrderCountsValid(record.value.open_orders, record.value.unknown_orders)) return error.InvalidCoordinatorSnapshot;
+            record.value = try readPlainStruct(&reader, ShardSummary);
         }
         result.lease_count = try reader.takeInt(u8, .little);
         if (result.lease_count > result.leases.len) return error.InvalidCoordinatorSnapshot;
@@ -1631,6 +1958,14 @@ pub const AccountCoordinator = struct {
         if (result.completed_forced_allocation_count > max_completed_forced_allocations) return error.InvalidCoordinatorSnapshot;
         for (result.completed_forced_allocations[0..result.completed_forced_allocation_count]) |*allocation|
             allocation.* = try readForcedAllocation(&reader);
+        const rule_count = try reader.takeByte();
+        if (rule_count > canonical.max_instrument_definitions) return error.InvalidCoordinatorSnapshot;
+        for (0..rule_count) |_| {
+            const entry = try readNativeValue(&reader, InstrumentRegistry.Entry);
+            _ = try result.native_rules.register(entry);
+            _ = try result.native_rules.configureMargin(entry.instrument, entry.margin);
+        }
+        result.native_account = try readNativeAccount(&reader);
         result.last_margin_observation = try readOptionalMarginObservation(&reader);
         result.margin_gate = .{
             .identity = try reader.takeInt(u128, .little),
@@ -1668,12 +2003,14 @@ pub const AccountCoordinator = struct {
             return error.InvalidCoordinatorSnapshot;
         result.recovery_only = true;
         result.recovery_margin_identity = 0;
+        result.recovery_native_bootstrap_seen = false;
         return result;
     }
 };
 
 fn coordinationEventType(event: CoordinationEvent) u16 {
     return switch (event) {
+        .native_margin_configuration => 24,
         .venue_archived => 22,
         .venue_duplicate => 23,
         .venue_fact => 19,
@@ -1701,7 +2038,9 @@ fn coordinationEventType(event: CoordinationEvent) u16 {
 }
 
 fn writeScalar(writer: *std.Io.Writer, comptime T: type, value: T) !void {
-    if (T == bool)
+    if (comptime @typeInfo(T) == .array) {
+        try writeNativeValue(writer, value);
+    } else if (T == bool)
         try writer.writeByte(@intFromBool(value))
     else if (@typeInfo(T) == .@"enum")
         try writer.writeInt(@typeInfo(T).@"enum".tag_type, @intFromEnum(value), .little)
@@ -1710,21 +2049,71 @@ fn writeScalar(writer: *std.Io.Writer, comptime T: type, value: T) !void {
 }
 
 fn readScalar(reader: *std.Io.Reader, comptime T: type) !T {
+    if (comptime @typeInfo(T) == .array) return readNativeValue(reader, T);
     if (T == bool) return readBool(reader);
     if (@typeInfo(T) == .@"enum")
         return std.enums.fromInt(T, try reader.takeInt(@typeInfo(T).@"enum".tag_type, .little)) orelse error.InvalidCoordinationTail;
     return reader.takeInt(T, .little);
 }
 
+fn nativeCountField(comptime name: []const u8) []const u8 {
+    return if (std.mem.eql(u8, name, "seen")) "seen_count" else name[0 .. name.len - 1] ++ "_count";
+}
+fn writeNativeAccount(writer: *std.Io.Writer, projection: *const NativeAccountProjection) !void {
+    inline for (@typeInfo(NativeAccountProjection).@"struct".fields) |field| {
+        const value = @field(projection, field.name);
+        if (comptime @typeInfo(field.type) == .array) {
+            const count = @field(projection, nativeCountField(field.name));
+            try writer.writeInt(u16, count, .little);
+            for (value[0..count]) |item| try writeNativeValue(writer, item);
+        } else try writeNativeValue(writer, value);
+    }
+}
+fn writeNativeValue(writer: *std.Io.Writer, value: anytype) !void {
+    var bytes: [codec.maxBareSize(@TypeOf(value))]u8 = undefined;
+    const encoded = try codec.encodeBare(&bytes, value);
+    try writer.writeInt(u32, @intCast(encoded.len), .little);
+    try writer.writeAll(encoded);
+}
+fn readNativeAccount(reader: *std.Io.Reader) !NativeAccountProjection {
+    var result: NativeAccountProjection = .{};
+    inline for (@typeInfo(NativeAccountProjection).@"struct".fields) |field| {
+        if (comptime @typeInfo(field.type) == .array) {
+            const count = try reader.takeInt(u16, .little);
+            if (count > @field(result, field.name).len) return error.InvalidCoordinatorSnapshot;
+            for (@field(result, field.name)[0..count]) |*item| item.* = try readNativeValue(reader, @typeInfo(field.type).array.child);
+            @field(result, nativeCountField(field.name)) = @intCast(count);
+        } else {
+            const value = try readNativeValue(reader, field.type);
+            if (comptime std.mem.endsWith(u8, field.name, "_count")) {
+                if (@field(result, field.name) != value) return error.InvalidCoordinatorSnapshot;
+            } else @field(result, field.name) = value;
+        }
+    }
+    try result.validate();
+    return result;
+}
+fn readNativeValue(reader: *std.Io.Reader, comptime T: type) !T {
+    const len = try reader.takeInt(u32, .little);
+    return codec.decodeBare(try reader.take(len), T);
+}
+
 fn writePlainStruct(writer: *std.Io.Writer, comptime T: type, value: T) !void {
-    inline for (@typeInfo(T).@"struct".fields) |field|
-        try writeScalar(writer, field.type, @field(value, field.name));
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        if (comptime T == ShardSummary and std.mem.eql(u8, field.name, "contributions")) {
+            for (value.contributions[0..value.contribution_count]) |item| try writePlainStruct(writer, InstrumentContribution, item);
+        } else try writeScalar(writer, field.type, @field(value, field.name));
+    }
 }
 
 fn readPlainStruct(reader: *std.Io.Reader, comptime T: type) !T {
-    var value: T = undefined;
-    inline for (@typeInfo(T).@"struct".fields) |field|
-        @field(value, field.name) = try readScalar(reader, field.type);
+    var value: T = std.mem.zeroes(T);
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        if (comptime T == ShardSummary and std.mem.eql(u8, field.name, "contributions")) {
+            if (value.contribution_count > value.contributions.len) return error.InvalidShardSummary;
+            for (value.contributions[0..value.contribution_count]) |*item| item.* = try readPlainStruct(reader, InstrumentContribution);
+        } else @field(value, field.name) = try readScalar(reader, field.type);
+    }
     return value;
 }
 
@@ -1811,12 +2200,14 @@ fn readAccountFact(reader: *std.Io.Reader) !AccountFact {
     };
     const evidence_len = try reader.takeInt(u16, .little);
     const evidence = try codec.decodeBare(try reader.take(evidence_len), struct { ?canonical.ForcedExecutionSource, ?ForcedContributionBasis });
+    if (evidence[1]) |basis| try validateForcedContributions(basis);
     return .{ .identity = identity, .exchange_account = exchange_account, .version = version, .barrier = barrier, .times = times, .payload = payload, .canonical_source = evidence[0], .contributions = evidence[1] };
 }
 
 fn encodeCoordinationEvent(destination: []u8, event: CoordinationEvent) ![]const u8 {
     var writer: std.Io.Writer = .fixed(destination);
     switch (event) {
+        .native_margin_configuration => |entry| return codec.encodeBare(destination, entry),
         .venue_archived => |fact| return codec.encodeBare(destination, fact),
         .venue_duplicate => |fact| return codec.encodeBare(destination, fact),
         .venue_fact => |fact| return codec.encodeBare(destination, fact),
@@ -1858,6 +2249,7 @@ fn decodeCoordinationEvent(record: trading.journal.Record) !CoordinationEvent {
         return error.InvalidCoordinationTail;
     var reader: std.Io.Reader = .fixed(record.payload);
     const event: CoordinationEvent = switch (record.type_id) {
+        24 => return .{ .native_margin_configuration = try codec.decodeBare(record.payload, InstrumentRegistry.Entry) },
         21 => return .{ .venue_fault = try codec.decodeBare(record.payload, u128) },
         22 => return .{ .venue_archived = try codec.decodeBare(record.payload, ArchivedVenue) },
         23 => return .{ .venue_duplicate = try codec.decodeBare(record.payload, DuplicateVenue) },
@@ -1959,8 +2351,9 @@ pub const AccountRecovery = struct {
             result.shard_barriers[index] = recovered.barrier;
             const summary = result.coordinator.summaries[index];
             if (!summary.present) return error.AccountRecoveryBarrierMismatch;
-            const derived = try shardSummaryFromShard(
+            const derived = try shardSummaryFromShardForAccount(
                 &result.shards[index],
+                result.coordinator.exchange_account,
                 @enumFromInt(index),
                 summary.value.publication_version,
                 summary.value.decision_domain,
@@ -1988,8 +2381,9 @@ pub const AccountRecovery = struct {
             if (self.summary_refresh_mask & (@as(u8, 1) << @intCast(index)) == 0) continue;
             const summary = self.coordinator.summaries[index];
             if (!summary.present) return error.AccountRecoveryBarrierMismatch;
-            const derived = try shardSummaryFromShard(
+            const derived = try shardSummaryFromShardForAccount(
                 &self.shards[index],
+                self.coordinator.exchange_account,
                 @enumFromInt(index),
                 summary.value.publication_version,
                 summary.value.decision_domain,
@@ -2020,7 +2414,11 @@ fn digestInt(hasher: *Sha256, comptime T: type, value: T) void {
 fn digestStruct(hasher: *Sha256, comptime T: type, value: T) void {
     inline for (@typeInfo(T).@"struct".fields) |field| {
         const item = @field(value, field.name);
-        if (field.type == bool)
+        if (comptime T == ShardSummary and std.mem.eql(u8, field.name, "contributions")) {
+            for (value.contributions[0..value.contribution_count]) |contribution| digestStruct(hasher, InstrumentContribution, contribution);
+        } else if (comptime @typeInfo(field.type) == .array) {
+            hasher.update(&item);
+        } else if (field.type == bool)
             hasher.update(&.{@intFromBool(item)})
         else if (@typeInfo(field.type) == .@"enum")
             digestInt(hasher, @typeInfo(field.type).@"enum".tag_type, @intFromEnum(item))
@@ -2248,27 +2646,42 @@ test "account facts fan out once in stable shard order" {
     })).len);
 }
 
+test "04 absent tier and liquidation evidence remains unknown" {
+    var coordinator = try fourBucketSummaries();
+    for (&coordinator.summaries) |*summary| {
+        summary.value.risk_tier = 0;
+        summary.value.liquidation_distance_ticks = unknown_liquidation_distance;
+    }
+    var observation = bucketObservation(30, 50);
+    observation.venue_risk_tier = 0;
+    observation.venue_liquidation_distance_ticks = unknown_liquidation_distance;
+    const gate = try coordinator.reconcileMargin(observation);
+    try std.testing.expectEqual(MarginReconciliationState.unknown, coordinator.margin_reconciliation_state);
+    try std.testing.expect(!gate.open);
+}
+
 test "margin reconciliation preserves netting benefit but latches unexplained differences" {
     var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
     for (0..max_shards) |index| {
         var summary = ShardSummary.fixture(@enumFromInt(index), 1, 100);
+        summary.risk_tier = 1;
         summary.exchange_margin_atoms = if (index < 2) 63 else 62;
         _ = try coordinator.publishSummary(index + 1, summary);
     }
-    const healthy = try coordinator.reconcileMargin(.{ .identity = 20, .barrier = 5, .venue_net_margin_atoms = 250, .venue_swap_margin_atoms = 250, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 });
+    const healthy = try coordinator.reconcileMargin(.{ .identity = 20, .barrier = 5, .venue_net_margin_atoms = 250, .venue_swap_margin_atoms = 250, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1, .venue_risk_tier = 1 });
     try std.testing.expect(healthy.open);
     try std.testing.expectEqual(@as(i64, 150), coordinator.account_netting_benefit_atoms);
     try std.testing.expectEqual(@as(i64, 400), try coordinator.grossPortfolioMargin());
-    const broken = try coordinator.reconcileMargin(.{ .identity = 21, .barrier = 6, .venue_net_margin_atoms = 250, .venue_swap_margin_atoms = 250, .venue_swap_quantity = 1, .margin_mode = .isolated, .rules_version = 1 });
+    const broken = try coordinator.reconcileMargin(.{ .identity = 21, .barrier = 6, .venue_net_margin_atoms = 250, .venue_swap_margin_atoms = 250, .venue_swap_quantity = 1, .margin_mode = .isolated, .rules_version = 1, .venue_risk_tier = 1 });
     try std.testing.expect(!broken.open);
     try std.testing.expect(broken.latched);
-    const still_latched = try coordinator.reconcileMargin(.{ .identity = 22, .barrier = 7, .venue_net_margin_atoms = 250, .venue_swap_margin_atoms = 250, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 });
+    const still_latched = try coordinator.reconcileMargin(.{ .identity = 22, .barrier = 7, .venue_net_margin_atoms = 250, .venue_swap_margin_atoms = 250, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1, .venue_risk_tier = 1 });
     try std.testing.expect(still_latched.latched);
     const resolved = try coordinator.resolveMarginGate(22);
     try std.testing.expect(resolved.open);
     try std.testing.expect(!resolved.latched);
     _ = try coordinator.acceptAccountFact(.{ .identity = 30, .exchange_account = 900, .version = 1, .barrier = 1, .payload = .{ .forced_execution = .{ .owner = null, .quantity = -1, .price_ticks = 100, .fee_atoms = 0 } } });
-    const held = try coordinator.reconcileMargin(.{ .identity = 23, .barrier = 8, .venue_net_margin_atoms = 250, .venue_swap_margin_atoms = 250, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 });
+    const held = try coordinator.reconcileMargin(.{ .identity = 23, .barrier = 8, .venue_net_margin_atoms = 250, .venue_swap_margin_atoms = 250, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1, .venue_risk_tier = 1 });
     try std.testing.expect(held.latched);
     try std.testing.expectError(error.ForcedExecutionReconciliationBreak, coordinator.resolveMarginGate(23));
     try std.testing.expectError(error.ForcedExecutionReconciliationBreak, coordinator.completeRecovery());
@@ -2376,6 +2789,41 @@ test "completed forced allocation survives the next source and snapshot" {
     var restored = try AccountCoordinator.restore(try coordinator.snapshot(&storage));
     try std.testing.expectEqual(@as(usize, 0), (try restored.allocateForcedExecution(old)).len);
     try std.testing.expectEqualSlices(u8, &coordinator.digest(), &restored.digest());
+}
+
+test "04 forced allocation validates portfolio direction inside one domain" {
+    var coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    var summary = ShardSummary.fixture(.shard_0, 1, 100);
+    summary.swap_quantity = 1;
+    _ = try coordinator.publishSummary(1, summary);
+    var basis: ForcedContributionBasis = .{ .positions = .{ 1, 0, 0, 0 }, .owners = @splat(.{}), .barriers = .{ 1, 0, 0, 0 }, .digests = @splat(@splat(0)), .configuration_digest = @splat(1) };
+    basis.owners[0] = .{ .portfolio = 11, .decision_domain = 1 };
+    basis.portfolio_count = 2;
+    basis.portfolios[0] = .{ .shard = .shard_0, .portfolio = 11, .quantity = 3, .open_cost_atoms = 300 };
+    basis.portfolios[1] = .{ .shard = .shard_0, .portfolio = 22, .quantity = -2, .open_cost_atoms = 200 };
+    _ = try coordinator.acceptAccountFact(.{ .identity = 33, .exchange_account = 900, .version = 1, .barrier = 1, .contributions = basis, .payload = .{ .forced_execution = .{ .owner = null, .quantity = -1, .price_ticks = 100, .fee_atoms = 0 } } });
+    var allocation: ForcedExecutionAllocation = .{ .identity = 34, .forced_execution_identity = 33, .count = 1 };
+    allocation.slices[0] = .{ .owner = .shard_0, .portfolio = 22, .quantity = -1, .position_delta = -1 };
+    const before = coordinator.digest();
+    try std.testing.expectError(error.ForcedExecutionOwnerMismatch, coordinator.allocateForcedExecution(allocation));
+    try std.testing.expectEqualSlices(u8, &before, &coordinator.digest());
+    allocation.slices[0].portfolio = 0;
+    try std.testing.expectError(error.ForcedExecutionOwnerMismatch, coordinator.allocateForcedExecution(allocation));
+    allocation.slices[0].portfolio = 999;
+    try std.testing.expectError(error.ForcedExecutionOwnerMismatch, coordinator.allocateForcedExecution(allocation));
+    allocation.slices[0].portfolio = 11;
+    const deliveries = try coordinator.allocateForcedExecution(allocation);
+    try std.testing.expectEqual(@as(usize, 1), deliveries.len);
+    try std.testing.expectEqual(@as(u128, 11), deliveries[0].portfolio);
+    try std.testing.expectEqual(@as(u128, 11), (try accountFactEvent(deliveries[0])).payload.venue_forced_execution.portfolio_identity);
+    var storage: [16384]u8 = undefined;
+    var recovered = try AccountCoordinator.restore(try coordinator.snapshot(&storage));
+    try std.testing.expectEqualSlices(u8, &coordinator.digest(), &recovered.digest());
+    try std.testing.expectEqual(@as(u128, 11), (try recovered.pendingForcedDeliveries())[0].portfolio);
+    var wrong = allocation;
+    wrong.identity += 1;
+    wrong.slices[0].portfolio = 22;
+    try std.testing.expectError(error.ForcedExecutionOwnerMismatch, recovered.allocateForcedExecution(wrong));
 }
 
 test "multi-owner forced allocation survives newer account facts and delivery replay" {
@@ -2674,7 +3122,7 @@ test "account recovery retains a forced shard commit awaiting coordinator ack" {
             // One owned order and Fill establish the position through the same
             // public journal/recovery path used by the subsequent forced delivery.
             const fixture = @import("../testing/support/trading_shard_fixture.zig");
-            _ = try trading.applyStable(shard, &journal, fixture.atGroup(8, .{ .identity = 8, .payload = .{ .portfolio_transfer = .{ .amount_atoms = 1_000 } } }));
+            _ = try trading.applyStable(shard, &journal, fixture.atGroup(8, .{ .identity = 8, .payload = .{ .portfolio_transfer = .{ .amount_atoms = 1_000, .portfolio_identity = index + 11 } } }));
             const genesis = fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged);
             for (genesis[14..], 14..) |original, genesis_index| {
                 if (genesis_index == 20) continue; // This fixture owns only the perpetual instrument.
@@ -2867,7 +3315,8 @@ test "shard summaries derive from authoritative state and coordinate four real s
         .venue_risk_tier = 0,
         .venue_liquidation_distance_ticks = std.math.maxInt(i64),
     });
-    try std.testing.expect(coordinator.margin_gate.open);
+    try std.testing.expect(!coordinator.margin_gate.open);
+    try std.testing.expectEqual(MarginReconciliationState.unknown, coordinator.margin_reconciliation_state);
     try std.testing.expectEqual(@as(i64, 0), coordinator.account_netting_benefit_atoms);
 
     const gated_shard = try std.testing.allocator.create(trading.TradingShard);
@@ -3380,7 +3829,27 @@ pub const CoordinatorOwner = struct {
             const configured = view.instruments.get(execution.instrument) orelse return error.UnknownOmsInstrument;
             if (configured.rules.version != execution.rules_version or configured.rules.settlement_asset != execution.fee.?.asset or
                 execution.penalty.?.asset != execution.fee.?.asset or execution.realized_pnl.?.asset != execution.fee.?.asset) return error.InvalidEconomicFact;
-            if (view.economics.portfolio.instrumentPosition(execution.instrument)) |position| basis.positions[index] = position.position.quantity;
+            const primary_position = view.economics.portfolio.instrumentPosition(execution.instrument);
+            basis.portfolios[basis.portfolio_count] = .{
+                .shard = @enumFromInt(index),
+                .portfolio = shard.portfolio_identity,
+                .quantity = if (primary_position) |position| position.position.quantity else 0,
+                .open_cost_atoms = if (primary_position) |position| position.position.open_cost_atoms else 0,
+            };
+            basis.portfolio_count += 1;
+            basis.positions[index] = if (primary_position) |position| position.position.quantity else 0;
+            for (view.economics.extra_portfolios[0..view.economics.extra_portfolio_count]) |owned| {
+                if (!shard.deployment.ownsPortfolio(shard.decision_domain_identity, owned.identity)) return error.InvalidVenueOwnership;
+                const position = owned.layer.instrumentPosition(execution.instrument);
+                basis.portfolios[basis.portfolio_count] = .{
+                    .shard = @enumFromInt(index),
+                    .portfolio = owned.identity,
+                    .quantity = if (position) |value| value.position.quantity else 0,
+                    .open_cost_atoms = if (position) |value| value.position.open_cost_atoms else 0,
+                };
+                basis.portfolio_count += 1;
+                basis.positions[index] = try std.math.add(i64, basis.positions[index], if (position) |value| value.position.quantity else 0);
+            }
             basis.owners[index] = .{ .portfolio = shard.portfolio_identity, .decision_domain = shard.decision_domain_identity };
             basis.barriers[index] = shard.authoritativeBarrier();
             basis.digests[index] = shard.canonicalStateDigest();
@@ -3431,8 +3900,9 @@ pub const CoordinatorOwner = struct {
             const fee = record.event.fee_adjustment;
             for (owners, 0..) |owner, index| {
                 const summary = self.coordinator.summaries[index];
-                if (!summary.present or summary.value.virtual_portfolio != fee.portfolio) continue;
+                if (!summary.present) continue;
                 const shard = try owner.source();
+                if (if (shard.deployment.sealed) !shard.deployment.ownsPortfolio(shard.decision_domain_identity, fee.portfolio) else shard.portfolio_identity != fee.portfolio) continue;
                 if (shard.portfolio_identity != summary.value.virtual_portfolio or
                     venueAccountView(shard, self.coordinator.exchange_account) == null or
                     shard.decision_domain_identity != summary.value.decision_domain) return error.CrossShardDelivery;
@@ -3472,7 +3942,7 @@ pub const CoordinatorOwner = struct {
         const fee = record.event.fee_adjustment;
         const view = venueAccountView(shard, fee.exchange_account) orelse return false;
         const claimed = fee.original orelse return false;
-        if (claimed.portfolio != shard.portfolio_identity or claimed.portfolio != fee.portfolio or
+        if ((if (shard.deployment.sealed) !shard.deployment.ownsPortfolio(shard.decision_domain_identity, claimed.portfolio) else claimed.portfolio != shard.portfolio_identity) or claimed.portfolio != fee.portfolio or
             claimed.strategy != fee.strategy or claimed.cycle_first_sequence != fee.cycle_first_sequence or
             claimed.original.identity != fee.fill_identity or claimed.original.exchange_account != fee.exchange_account or
             claimed.original.venue_trade.venue != record.envelope.venue) return false;
@@ -3676,7 +4146,8 @@ pub const CoordinatorOwner = struct {
     pub fn ackForcedDelivery(self: *CoordinatorOwner, delivery: Delivery, shard_owner: *const @import("../runtime/demo/demo_authority.zig").Owner) !void {
         const shard = try shard_owner.source();
         const owner = self.coordinator.forced_source_owners[@intFromEnum(delivery.shard_id)];
-        if (owner.portfolio != shard.portfolio_identity or owner.decision_domain != shard.decision_domain_identity or
+        if (owner.portfolio != shard.portfolio_identity or (shard.decision_domain_identity != 0 and owner.decision_domain != shard.decision_domain_identity) or
+            (delivery.portfolio != 0 and (if (shard.deployment.sealed) !shard.deployment.ownsPortfolio(shard.decision_domain_identity, delivery.portfolio) else delivery.portfolio != shard.portfolio_identity)) or
             venueAccountView(shard, self.coordinator.exchange_account) == null) return error.CrossShardDelivery;
         var found = false;
         for (try self.coordinator.pendingForcedDeliveries()) |pending| {
@@ -3696,7 +4167,8 @@ pub const CoordinatorOwner = struct {
 
     pub fn checkpoint(self: *CoordinatorOwner) !void {
         if (self.closed) return error.CoordinatorWriterClosed;
-        var state_bytes: [131072]u8 = undefined;
+        const state_bytes = try std.heap.page_allocator.alloc(u8, codec.maxBareSize(AccountCoordinator) + 64 * 1024);
+        defer std.heap.page_allocator.free(state_bytes);
         const state = try self.coordinator.snapshot(state_bytes[8..]);
         std.mem.writeInt(u64, state_bytes[0..8], self.sequence, .little);
         errdefer self.closed = true;
@@ -4061,7 +4533,11 @@ test "03 unproven raw fee and broadcast economic fault close account authority" 
     defer memory.deinit();
     for (0..2) |kind| {
         var coordinator = AccountCoordinator.init(900, 1000, 1000);
-        for (0..4) |index| _ = try coordinator.publishSummary(index + 1, ShardSummary.fixture(@enumFromInt(index), 1, 100));
+        for (0..4) |index| {
+            var summary = ShardSummary.fixture(@enumFromInt(index), 1, 100);
+            summary.risk_tier = 1;
+            _ = try coordinator.publishSummary(index + 1, summary);
+        }
         _ = try coordinator.allocateLeases(1, 100);
         var owner = try CoordinatorOwner.init(coordinator, .{ .domain = .control, .id = 908 + kind }, memory.interface(), undefined);
         var fact: canonical.EventRecord = .{ .envelope = .{ .event_type = @intFromEnum(canonical.EventType.economic_fault), .schema_version = canonical.schema_version, .identity = .{ .stream = 77, .sequence = 1 }, .source_fact_identity = 1, .scope = .account, .venue = 1, .exchange_account = 900, .source_stream = 88, .source_sequence = 1, .times = .{}, .raw_evidence = .{ .stream = 88, .sequence = 1, .digest = @splat(1) } }, .event = .{ .economic_fault = .{ .reason = .decoder_rejected } } };
@@ -4081,7 +4557,7 @@ test "03 unproven raw fee and broadcast economic fault close account authority" 
         var lease_events: [max_shards]trading.CoreEvent = undefined;
         try std.testing.expectError(error.AccountGateClosed, owner.coordinator.currentLeaseEvents(&lease_events));
         try std.testing.expectError(error.CoordinatorRecoveryOnly, owner.coordinator.allocateLeases(2, 100));
-        try owner.apply(.{ .margin_observation = .{ .identity = 100, .barrier = owner.coordinator.barrier + 1, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 } });
+        try owner.apply(.{ .margin_observation = .{ .identity = 100, .barrier = owner.coordinator.barrier + 1, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1, .venue_risk_tier = 1 } });
         try std.testing.expectEqual(MarginReconciliationState.healthy, owner.coordinator.margin_reconciliation_state);
         try std.testing.expectError(error.AccountGateClosed, owner.coordinator.resolveMarginGate(100));
         try std.testing.expectError(error.AccountGateClosed, owner.coordinator.completeRecovery());
@@ -4116,5 +4592,232 @@ test "03 malformed initial venue stream cannot bind a source or retain account a
         try owner.acceptVenueFact(record);
         try std.testing.expectEqual(@as(u128, 77), owner.coordinator.venue_ingress.stream);
         try std.testing.expect(owner.coordinator.venue_ingress.broken);
+    }
+}
+test "04 account scoped summaries keep secondary economics and OMS reservations separate" {
+    const DemoOwner = @import("../runtime/demo/demo_authority.zig").Owner;
+    const allocator = std.testing.allocator;
+    const memory = try allocator.create(durable.MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .initWithAllocator(allocator);
+    defer memory.deinit();
+    const owner = try allocator.create(DemoOwner);
+    defer allocator.destroy(owner);
+    try DemoOwner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 91 });
+    try @import("../testing/acceptance/core/multi_account_authority_acceptance.zig").initializePythonOwner(owner);
+    var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 1001, .count = 2 };
+    for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, 0..) |account, instrument, index| group.members[index] = .{
+        .intent_sequence = 1001 + index,
+        .strategy_instance = 9,
+        .portfolio = 10,
+        .exchange_account = account,
+        .operation = .place,
+        .instrument = instrument,
+        .quantity = 10000,
+        .limit_price = .{ .instrument = instrument, .rules_version = 1, .ticks = 100 },
+    };
+    _ = try owner.apply(@import("../testing/support/trading_shard_fixture.zig").atGroup(45, .{ .identity = 1200, .payload = .{ .oms_intent_group = group } }));
+    const before = owner.shard.canonicalStateDigest();
+    const primary = try shardSummaryFromShardForAccount(&owner.shard, 20, .shard_0, 1, 1);
+    const secondary = try shardSummaryFromShardForAccount(&owner.shard, 30, .shard_0, 1, 1);
+    try std.testing.expectEqual(@as(u128, 20), primary.exchange_account);
+    try std.testing.expectEqual(@as(u128, 30), secondary.exchange_account);
+    try std.testing.expectEqual(@as(i128, 400), primary.cash_atoms);
+    try std.testing.expectEqual(@as(i128, 600), secondary.cash_atoms);
+    try std.testing.expectEqual(@as(u16, 1), primary.open_orders);
+    try std.testing.expectEqual(@as(u16, 1), secondary.open_orders);
+    try std.testing.expectEqual(@as(i128, 4), primary.reservation_atoms);
+    try std.testing.expectEqual(@as(i128, 4), secondary.reservation_atoms);
+    try std.testing.expectEqualDeep(primary, try shardSummaryFromShard(&owner.shard, .shard_0, 1, 1));
+    try std.testing.expectError(error.InvalidShardSummary, shardSummaryFromShardForAccount(&owner.shard, 99, .shard_0, 1, 1));
+    try std.testing.expectEqualDeep(before, owner.shard.canonicalStateDigest());
+}
+
+test "04 native account evidence is retained once across owner recovery" {
+    const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(memory);
+    memory.* = durable.MemoryAdapter.initWithAllocator(std.testing.allocator);
+    defer memory.deinit();
+    var owner = try CoordinatorOwner.init(AccountCoordinator.init(900, 1000, 1000), .{ .domain = .control, .id = 940 }, memory.interface(), undefined);
+    const record: canonical.EventRecord = .{
+        .envelope = .{ .event_type = @intFromEnum(canonical.EventType.account_bootstrap_snapshot), .schema_version = canonical.schema_version, .identity = .{ .stream = 77, .sequence = 1 }, .source_fact_identity = 1, .scope = .account, .venue = 1, .exchange_account = 900, .source_stream = 88, .source_sequence = 1, .times = .{}, .raw_evidence = .{ .stream = 88, .sequence = 1, .digest = @splat(1) } },
+        .event = .{ .account_bootstrap_snapshot = .{ .identity = 1, .exchange_account = 900, .scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true }, .source_stream = 88, .source_sequence = 1, .balance_count = 0, .position_count = 0, .margin_count = 0 } },
+    };
+    try owner.acceptVenueFact(record);
+    try std.testing.expect(owner.coordinator.native_account.valid);
+    const expected = owner.coordinator.native_account.digest();
+    try owner.acceptVenueFact(record);
+    try std.testing.expectEqualDeep(expected, owner.coordinator.native_account.digest());
+    const replayed = try CoordinatorOwner.recover(owner.stream, memory.interface(), undefined);
+    try std.testing.expectEqualDeep(expected, replayed.coordinator.native_account.digest());
+    try std.testing.expectEqualDeep(owner.coordinator.digest(), replayed.coordinator.digest());
+    try owner.checkpoint();
+    const restored = try CoordinatorOwner.recover(owner.stream, memory.interface(), undefined);
+    try std.testing.expectEqualDeep(expected, restored.coordinator.native_account.digest());
+    var checked = restored.coordinator;
+    for (0..max_shards) |index| {
+        var summary = ShardSummary.fixture(@enumFromInt(index), 1, 100);
+        summary.risk_tier = 1;
+        _ = try checked.publishSummary(index + 1, summary);
+    }
+    const gate = try checked.reconcileMargin(.{ .identity = 100, .barrier = checked.barrier + 1, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1, .venue_risk_tier = 1 });
+    try std.testing.expect(!gate.open);
+    try std.testing.expectEqual(MarginReconciliationState.unknown, checked.margin_reconciliation_state);
+    try std.testing.expectEqual(@as(i128, 0), checked.account_netting_benefit_atoms);
+    try std.testing.expectError(error.MarginReconciliationStillBroken, checked.resolveMarginGate(100));
+    try std.testing.expectEqualDeep(owner.coordinator.digest(), restored.coordinator.digest());
+}
+test "04 instrument contribution units survive coordinator replay independently" {
+    const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(memory);
+    memory.* = durable.MemoryAdapter.initWithAllocator(std.testing.allocator);
+    defer memory.deinit();
+    var owner = try CoordinatorOwner.init(AccountCoordinator.init(900, 1000, 1000), .{ .domain = .control, .id = 941 }, memory.interface(), undefined);
+    var summary = ShardSummary.fixture(.shard_0, 1, 100);
+    summary.contribution_count = 2;
+    summary.contributions[0] = .{ .instrument = 10, .rules_version = 1, .margin_rules_version = 1, .quantity = 3, .margin_atoms = 20 };
+    summary.contributions[1] = .{ .instrument = 20, .rules_version = 1, .margin_rules_version = 1, .quantity = -7, .margin_atoms = 30 };
+    try owner.apply(.{ .publish_summary = .{ .identity = 1, .summary = summary } });
+    const replayed = try CoordinatorOwner.recover(owner.stream, memory.interface(), undefined);
+    try std.testing.expectEqualDeep(summary, replayed.coordinator.summaries[0].value);
+    try owner.checkpoint();
+    const restored = try CoordinatorOwner.recover(owner.stream, memory.interface(), undefined);
+    try std.testing.expectEqualDeep(summary, restored.coordinator.summaries[0].value);
+    try std.testing.expectEqualDeep(owner.coordinator.digest(), restored.coordinator.digest());
+}
+test "04 native isolated rules reconcile independent venue margin and literal liquidation" {
+    for ([_]u64{ 1, 2 }) |rules_venue| {
+        const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+        defer std.testing.allocator.destroy(memory);
+        memory.* = durable.MemoryAdapter.initWithAllocator(std.testing.allocator);
+        defer memory.deinit();
+        var owner = try CoordinatorOwner.init(AccountCoordinator.init(900, 4000, 4000), .{ .domain = .control, .id = 942 }, memory.interface(), undefined);
+        const entry: InstrumentRegistry.Entry = .{ .instrument = 10, .venue = rules_venue, .product = .isolated_linear_usdt, .rules = .{ .version = 1, .instrument_identity = 10, .quantity_denominator = 1, .reservation_model = .leveraged, .venue = rules_venue }, .margin = .{ .version = 1, .instrument = 10, .native_settlement_atoms = true, .venue_initial_margin_ppm = 200000, .internal_initial_margin_ppm = 220000, .internal_maintenance_margin_ppm = 110000, .native = .{ .model = .isolated_linear_usdt_v1, .tier_identity = 1, .notional_lower_atoms = 0, .notional_upper_atoms = 100000, .initial_margin_ppm = 200000, .maintenance_ppm = 100000, .maintenance_deduction_atoms = 0, .close_fee_ppm = 0, .margin_rounding_atoms = 1, .price_rounding_ticks = 1 } } };
+        for (0..3) |invalid_case| {
+            var inconsistent = entry;
+            switch (invalid_case) {
+                0 => inconsistent.margin.venue_initial_margin_ppm = 20000,
+                1 => inconsistent.margin.internal_maintenance_margin_ppm = 99999,
+                2 => inconsistent.margin.native.?.close_fee_ppm = 1000,
+                else => unreachable,
+            }
+            try std.testing.expectError(error.InvalidMarginRules, owner.apply(.{ .native_margin_configuration = inconsistent }));
+        }
+        for (0..max_shards) |index| {
+            var summary = ShardSummary.fixture(@enumFromInt(index), 1, 500);
+            if (index == 0) {
+                summary.contribution_count = 1;
+                summary.contributions[0] = .{ .instrument = 10, .rules_version = 1, .margin_rules_version = 1, .configuration_digest = nativeRuleDigest(entry), .quantity = 10, .margin_atoms = 242 };
+            }
+            try owner.apply(.{ .publish_summary = .{ .identity = index + 1, .summary = summary } });
+        }
+        try owner.apply(.{ .allocate_leases = .{ .version = 1, .valid_through_barrier = 100 } });
+        const leases = owner.coordinator.leases;
+        try owner.apply(.{ .native_margin_configuration = entry });
+        var pre_bootstrap_events: [max_shards]trading.CoreEvent = undefined;
+        try std.testing.expectError(error.AccountGateClosed, owner.coordinator.currentLeaseEvents(&pre_bootstrap_events));
+        try std.testing.expectError(error.MarginReconciliationRequired, owner.coordinator.allocateLeases(2, 100));
+        var snapshot: canonical.AccountBootstrapSnapshot = .{ .identity = 1, .exchange_account = 900, .scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true }, .source_stream = 88, .source_sequence = 1, .balance_count = 0, .position_count = 1, .margin_count = 1 };
+        snapshot.positions[0] = .{ .instrument = 10, .side = .long, .quantity = .{ .instrument = 10, .rules_version = 1, .lots = 10 }, .average_price = .{ .instrument = 10, .rules_version = 1, .ticks = 100 }, .mark_price = .{ .instrument = 10, .rules_version = 1, .ticks = 110 }, .liquidation_price = .{ .instrument = 10, .rules_version = 1, .ticks = 88 }, .risk_tier = 1, .leverage = .{ .coefficient = 5, .scale = 0 }, .unrealized_pnl = .{ .asset = 1, .atoms = 100 } };
+        snapshot.margins[0] = .{ .instrument = 10, .amount = .{ .asset = 1, .atoms = 200 }, .initial_margin = .{ .asset = 1, .atoms = 220 }, .maintenance_margin = .{ .asset = 1, .atoms = 110 }, .isolated_equity = .{ .asset = 1, .atoms = 300 } };
+        const send = struct {
+            fn fact(target: *CoordinatorOwner, sequence: u64, payload: canonical.Payload) !void {
+                try target.acceptVenueFact(.{ .envelope = .{ .event_type = @intFromEnum(canonical.eventType(payload)), .schema_version = canonical.schema_version, .identity = .{ .stream = 77, .sequence = sequence }, .source_fact_identity = sequence, .scope = .account, .venue = 1, .exchange_account = 900, .source_stream = 88, .source_sequence = sequence, .times = .{}, .raw_evidence = .{ .stream = 88, .sequence = sequence, .digest = @splat(1) } }, .event = payload });
+            }
+        }.fact;
+        try send(&owner, 1, .{ .account_bootstrap_snapshot = snapshot });
+        try send(&owner, 2, .{ .venue_account_configuration_snapshot = .{ .identity = 2, .exchange_account = 900, .value = .{ .account = .{ .position_mode_net = true, .contract_isolated_autonomy = true, .auto_loan = false, .spot_borrow_enabled = false, .can_read = true, .can_trade = true, .can_withdraw = false } } } });
+        try send(&owner, 3, .{ .venue_account_configuration_snapshot = .{ .identity = 3, .exchange_account = 900, .value = .{ .isolated_leverage = .{ .instrument = 10, .position_mode_net = true, .margin_mode_isolated = true, .leverage = .{ .coefficient = 5, .scale = 0 } } } } });
+        try owner.apply(.{ .margin_observation = .{ .identity = 10, .barrier = owner.coordinator.barrier + 1, .venue_net_margin_atoms = 999, .venue_swap_quantity = -999, .margin_mode = .cross, .rules_version = 1, .bucket_rounding_atoms = 999 } });
+        if (rules_venue != 1) {
+            try std.testing.expectEqual(MarginReconciliationState.broken, owner.coordinator.margin_reconciliation_state);
+            try std.testing.expect(owner.coordinator.margin_gate.latched);
+            continue;
+        }
+        try std.testing.expectEqual(MarginReconciliationState.healthy, owner.coordinator.margin_reconciliation_state);
+        try std.testing.expectEqual(@as(i128, 1780), owner.coordinator.account_netting_benefit_atoms);
+        try std.testing.expectEqualDeep(leases, owner.coordinator.leases);
+        try owner.apply(.{ .native_margin_configuration = entry });
+        try std.testing.expectEqual(MarginReconciliationState.healthy, owner.coordinator.margin_reconciliation_state);
+        try std.testing.expect(owner.coordinator.margin_gate.open);
+        try owner.checkpoint();
+        const restored = try CoordinatorOwner.recover(owner.stream, memory.interface(), undefined);
+        try std.testing.expectEqualDeep(owner.coordinator.digest(), restored.coordinator.digest());
+        var recovered_authority = restored.coordinator;
+        try std.testing.expectError(error.CoordinatorRecoveryOnly, recovered_authority.currentLeaseEvents(&pre_bootstrap_events));
+        _ = try recovered_authority.revokeLeases(recovered_authority.barrier);
+        for (try recovered_authority.currentLeaseEvents(&pre_bootstrap_events)) |event| try std.testing.expectEqual(@as(i128, 0), event.payload.risk_lease_granted.amount_atoms);
+        _ = try recovered_authority.reconcileMargin(.{ .identity = 1000, .barrier = @max(recovered_authority.barrier, recovered_authority.last_margin_observation.?.barrier) + 1, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 });
+        try std.testing.expectError(error.FreshNativeBootstrapRequired, recovered_authority.completeRecovery());
+
+        snapshot.identity = 4;
+        snapshot.positions[0].risk_tier = null;
+        try send(&owner, 4, .{ .account_bootstrap_snapshot = snapshot });
+        var lease_events: [max_shards]trading.CoreEvent = undefined;
+        try std.testing.expectError(error.AccountGateClosed, owner.coordinator.currentLeaseEvents(&lease_events));
+        try std.testing.expectError(error.MarginReconciliationRequired, owner.coordinator.allocateLeases(2, 100));
+        try owner.apply(.{ .margin_observation = .{ .identity = 11, .barrier = @max(owner.coordinator.barrier, owner.coordinator.last_margin_observation.?.barrier) + 1, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 } });
+        try std.testing.expectEqual(MarginReconciliationState.unknown, owner.coordinator.margin_reconciliation_state);
+        snapshot.identity = 5;
+        snapshot.positions[0].risk_tier = 2;
+        try send(&owner, 5, .{ .account_bootstrap_snapshot = snapshot });
+        try owner.apply(.{ .margin_observation = .{ .identity = 12, .barrier = @max(owner.coordinator.barrier, owner.coordinator.last_margin_observation.?.barrier) + 1, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 } });
+        try std.testing.expect(owner.coordinator.margin_gate.latched);
+        snapshot.identity = 6;
+        snapshot.positions[0].risk_tier = 1;
+        try send(&owner, 6, .{ .account_bootstrap_snapshot = snapshot });
+        try owner.apply(.{ .margin_observation = .{ .identity = 13, .barrier = @max(owner.coordinator.barrier, owner.coordinator.last_margin_observation.?.barrier) + 1, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 } });
+        try std.testing.expect(owner.coordinator.margin_gate.latched);
+        try owner.apply(.{ .resolve_margin_gate = 13 });
+        try std.testing.expect(owner.coordinator.margin_gate.open);
+        var flat = owner.coordinator.summaries[0].value.withSequence(2);
+        flat.contributions[0].quantity = 0;
+        flat.contributions[0].margin_atoms = 0;
+        try owner.apply(.{ .publish_summary = .{ .identity = 20, .summary = flat } });
+        snapshot.identity = 7;
+        snapshot.positions[0] = .{ .instrument = 10, .side = .net, .quantity = .{ .instrument = 10, .rules_version = 1, .lots = 0 } };
+        snapshot.margins[0] = .{ .instrument = 10, .initial_margin = .{ .asset = 1, .atoms = 0 }, .maintenance_margin = .{ .asset = 1, .atoms = 0 }, .amount = .{ .asset = 1, .atoms = 0 } };
+        try send(&owner, 7, .{ .account_bootstrap_snapshot = snapshot });
+        try owner.apply(.{ .margin_observation = .{ .identity = 14, .barrier = @max(owner.coordinator.barrier, owner.coordinator.last_margin_observation.?.barrier) + 1, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 } });
+        try std.testing.expectEqual(MarginReconciliationState.healthy, owner.coordinator.margin_reconciliation_state);
+        try owner.checkpoint();
+        const final_replay = try CoordinatorOwner.recover(owner.stream, memory.interface(), undefined);
+        try std.testing.expectEqualDeep(owner.coordinator.digest(), final_replay.coordinator.digest());
+        var reopened = flat.withSequence(3);
+        reopened.contributions[0].quantity = 10;
+        reopened.contributions[0].margin_atoms = 242;
+        try owner.apply(.{ .publish_summary = .{ .identity = 21, .summary = reopened } });
+        snapshot.identity = 8;
+        snapshot.positions[0] = .{ .instrument = 10, .side = .long, .quantity = .{ .instrument = 10, .rules_version = 1, .lots = 10 }, .average_price = .{ .instrument = 10, .rules_version = 1, .ticks = 100 }, .mark_price = .{ .instrument = 10, .rules_version = 1, .ticks = 110 }, .liquidation_price = .{ .instrument = 10, .rules_version = 1, .ticks = 88 }, .risk_tier = 1, .leverage = .{ .coefficient = 5, .scale = 0 }, .unrealized_pnl = .{ .asset = 1, .atoms = 100 } };
+        snapshot.margins[0] = .{ .instrument = 10, .amount = .{ .asset = 1, .atoms = 200 }, .initial_margin = .{ .asset = 1, .atoms = 219 }, .maintenance_margin = .{ .asset = 1, .atoms = 110 }, .isolated_equity = .{ .asset = 1, .atoms = 300 } };
+        try send(&owner, 8, .{ .account_bootstrap_snapshot = snapshot });
+        try owner.apply(.{ .margin_observation = .{ .identity = 15, .barrier = @max(owner.coordinator.barrier, owner.coordinator.last_margin_observation.?.barrier) + 1, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 } });
+        try std.testing.expect(owner.coordinator.margin_gate.latched);
+        snapshot.identity = 9;
+        snapshot.margins[0].initial_margin.?.atoms = 220;
+        snapshot.margins[0].amount.?.atoms = 201;
+        try send(&owner, 9, .{ .account_bootstrap_snapshot = snapshot });
+        try owner.apply(.{ .margin_observation = .{ .identity = 16, .barrier = @max(owner.coordinator.barrier, owner.coordinator.last_margin_observation.?.barrier) + 1, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 } });
+        try std.testing.expectEqual(MarginReconciliationState.broken, owner.coordinator.margin_reconciliation_state);
+        try owner.checkpoint();
+        var recovering = try CoordinatorOwner.recover(owner.stream, memory.interface(), undefined);
+        try send(&recovering, 9, .{ .account_bootstrap_snapshot = snapshot });
+        try std.testing.expectError(error.FreshNativeBootstrapRequired, recovering.coordinator.completeRecovery());
+        snapshot.identity = 10;
+        snapshot.margins[0].amount.?.atoms = 200;
+        try send(&recovering, 10, .{ .account_bootstrap_snapshot = snapshot });
+        try std.testing.expectError(error.FreshMarginObservationRequired, recovering.coordinator.completeRecovery());
+        try recovering.apply(.{ .margin_observation = .{ .identity = 1003, .barrier = @max(recovering.coordinator.barrier, recovering.coordinator.last_margin_observation.?.barrier) + 1, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 } });
+        try recovering.apply(.{ .resolve_margin_gate = 1003 });
+        try recovering.coordinator.completeRecovery();
+        try std.testing.expect(!recovering.coordinator.recovery_only);
+        var tail_recovered = try CoordinatorOwner.recover(owner.stream, memory.interface(), undefined);
+        try std.testing.expectError(error.FreshNativeBootstrapRequired, tail_recovered.coordinator.completeRecovery());
+        try send(&tail_recovered, 10, .{ .account_bootstrap_snapshot = snapshot });
+        try std.testing.expectError(error.FreshNativeBootstrapRequired, tail_recovered.coordinator.completeRecovery());
+        try recovering.checkpoint();
+        var next_crash = try CoordinatorOwner.recover(owner.stream, memory.interface(), undefined);
+        _ = try next_crash.coordinator.reconcileMargin(.{ .identity = 1004, .barrier = @max(next_crash.coordinator.barrier, next_crash.coordinator.last_margin_observation.?.barrier) + 1, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 });
+        try std.testing.expectError(error.FreshNativeBootstrapRequired, next_crash.coordinator.completeRecovery());
     }
 }

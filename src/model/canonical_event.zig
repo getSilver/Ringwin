@@ -6,7 +6,7 @@
 
 const std = @import("std");
 
-pub const schema_version: u16 = 17;
+pub const schema_version: u16 = 18;
 
 pub const VenueIdentity = u64;
 pub const Product = enum(u8) { spot, isolated_linear_usdt };
@@ -401,6 +401,8 @@ pub const AccountBalance = struct {
     cross_liability: ?AssetAmount = null,
 };
 pub const AccountPosition = struct {
+    risk_tier: ?u64 = null,
+    maintenance_margin: ?AssetAmount = null,
     instrument: InstrumentIdentity,
     side: PositionSide,
     quantity: InstrumentQuantity,

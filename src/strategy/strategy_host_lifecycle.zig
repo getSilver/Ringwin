@@ -420,18 +420,21 @@ pub fn revokeHostAuthority(
     reason: @import("../trading/trading_shard_event.zig").HostRevocationReason,
 ) !bool {
     if (reason == .fault and supervisor.state != .failed and
-        (supervisor.last_fault == null or supervisor.last_fault.?.strategy_identity != shard.strategy_identity))
+        (supervisor.last_fault == null or supervisor.last_fault.?.strategy_identity != shard.strategyAuthority(gateway.config.authorization.strategy_identity).strategy_identity))
         return false;
     gateway.beginRecovery();
-    if (shard.host_activation_identity == 0) return false;
-    if (shard.strategy_identity != gateway.config.authorization.strategy_identity)
+    if (supervisor.state == .failed) {
+        if (!shard.hasHostAuthorityForSession(gateway.config.session)) return false;
+    } else if (shard.strategyAuthority(gateway.config.authorization.strategy_identity).host_activation_identity == 0) return false;
+    if (shard.strategyAuthority(gateway.config.authorization.strategy_identity).strategy_identity != gateway.config.authorization.strategy_identity)
         return error.HostAuthorityMismatch;
     _ = try trading.applyStable(shard, stable_journal, .{ .core = .{
         .identity = fact_identity,
         .payload = .{ .host_activation_revoked = .{
-            .strategy_identity = shard.strategy_identity,
-            .activation_identity = shard.host_activation_identity,
+            .strategy_identity = shard.strategyAuthority(gateway.config.authorization.strategy_identity).strategy_identity,
+            .activation_identity = shard.strategyAuthority(gateway.config.authorization.strategy_identity).host_activation_identity,
             .reason = reason,
+            .session = if (supervisor.state == .failed) gateway.config.session else null,
         } },
     } });
     return true;

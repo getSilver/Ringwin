@@ -208,6 +208,9 @@ test {
     _ = recovery_cutover;
     _ = account_coordinator;
     _ = four_shard_acceptance;
+    _ = @import("testing/acceptance/core/native_rounding_acceptance.zig");
+    _ = @import("testing/acceptance/core/multi_portfolio_authority_acceptance.zig");
+    _ = @import("testing/acceptance/core/multi_portfolio_netting_acceptance.zig");
     _ = canonical_event;
     _ = canonical_event_codec;
     _ = market_feed_adapter;

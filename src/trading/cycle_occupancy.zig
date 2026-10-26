@@ -173,19 +173,33 @@ pub const State = struct {
     }
 
     pub fn owning(self: *const State, member: Member) ?Record {
-        for (self.records[0..self.count]) |record| for (record.members[0..record.count]) |occupied|
-            if (std.meta.eql(occupied, member)) return record;
+        return self.owningForPortfolio(member, 0);
+    }
+
+    pub fn owningForPortfolio(self: *const State, member: Member, portfolio: u128) ?Record {
+        for (self.records[0..self.count]) |record| {
+            if (portfolio != 0 and record.portfolio != portfolio) continue;
+            for (record.members[0..record.count]) |occupied|
+                if (std.meta.eql(occupied, member)) return record;
+        }
         return null;
     }
 
     pub fn checkAvailable(self: *const State, members: []const Member) !void {
+        return self.checkAvailableForPortfolio(members, 0);
+    }
+
+    pub fn checkAvailableForPortfolio(self: *const State, members: []const Member, portfolio: u128) !void {
         if (members.len == 0 or members.len > max_members) return error.InvalidCycleMembers;
         if (@as(usize, self.count) + self.closed_count >= max_cycles) return error.CycleCapacity;
         for (members, 0..) |member, index| {
             if (member.account == 0 or member.instrument == 0) return error.InvalidCycleMembers;
             for (members[0..index]) |prior| if (std.meta.eql(prior, member)) return error.InvalidCycleMembers;
-            for (self.records[0..self.count]) |record| for (record.members[0..record.count]) |occupied|
-                if (std.meta.eql(occupied, member)) return error.InstrumentOccupied;
+            for (self.records[0..self.count]) |record| {
+                if (portfolio != 0 and record.portfolio != portfolio) continue;
+                for (record.members[0..record.count]) |occupied|
+                    if (std.meta.eql(occupied, member)) return error.InstrumentOccupied;
+            }
         }
     }
 
@@ -194,7 +208,7 @@ pub const State = struct {
             std.mem.allEqual(u8, &record.configuration_digest, 0) or std.mem.allEqual(u8, &record.content_digest, 0)) return error.InvalidCycle;
         if (self.find(record.strategy, record.first_sequence) != null) return error.ConflictingCycle;
         if (self.completed(record.strategy, record.first_sequence) != null) return error.ConflictingCycle;
-        try self.checkAvailable(record.members[0..record.count]);
+        try self.checkAvailableForPortfolio(record.members[0..record.count], record.portfolio);
         self.records[self.count] = record;
         self.count += 1;
     }

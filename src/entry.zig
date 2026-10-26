@@ -131,6 +131,9 @@ const selected = switch (@import("entry_options").index) {
     127 => @import("testing/acceptance/core/shared_gateway_venue_acceptance.zig"),
     128 => @import("testing/acceptance/core/shared_forced_execution_acceptance.zig"),
     129 => @import("testing/acceptance/core/shared_fee_history_acceptance.zig"),
+    130 => @import("testing/acceptance/core/native_rounding_acceptance.zig"),
+    131 => @import("testing/acceptance/core/multi_portfolio_authority_acceptance.zig"),
+    132 => @import("testing/acceptance/core/multi_portfolio_netting_acceptance.zig"),
     else => @compileError("unknown standalone source entry"),
 };
 

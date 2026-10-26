@@ -28,10 +28,13 @@ Status: open
 
 ## Frontier
 
-- [04 — 闭合 GrossPortfolioMargin 与 VenueNetMargin 对账](issues/04-reconcile-gross-portfolio-and-venue-net-margin.md)
 - [05 — 共享 Execution Gateway 并保持订单唯一归属](issues/05-share-execution-gateway-with-unique-order-ownership.md)
 
 ## Decisions so far
+
+- 2026-10-26：04 原五条离线功能条件已完成：域内多 VirtualPortfolio、独立经济/历史归属与原生对账，实际成交方向抵消 gross8/native4/benefit4 且不扩张 lease；总专项 123/123、quantum 10/10、订单归档 5/5、forced 历史 3/3、资金费 2/2、500 组合 4/4，双轴复审无剩余功能问题。生产 64 MiB 栈检查失败，完整套件/冻结摘要/栈资格仍由 07 收口，详见 [04 验证报告](04-validation-2026-10-26.md)。05–07 保持未完成。
+
+- 2026-10-24：用户确认本轮补齐同一 DecisionDomain 内多个独立 VirtualPortfolio，再完成原 04/07 的真实方向抵消验收；保留同账户同品种唯一决策域和单写者，详见 [ADR0020](../../docs/adr/0020-own-multiple-portfolios-in-one-decision-domain.md)。04 在经济归属、毛额占用及恢复验收完成前保持未完成。
 
 - 2026-10-23：按当前源码逐票核对，摘要发布版本与真实 ShardSequence 必须分离；未完成验证不得标为 resolved。
 

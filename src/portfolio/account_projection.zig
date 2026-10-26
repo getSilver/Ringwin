@@ -9,6 +9,9 @@ const max_seen = max_balances + max_positions + max_margins;
 
 pub const AccountProjection = struct {
     pub const Failure = enum(u8) { invalid_snapshot, incomplete_snapshot, sequence_gap, identity_conflict, capacity_exhausted, invalid_bootstrap };
+
+    configurations: [max_positions + 1]canonical.VenueAccountConfigurationSnapshot = @splat(.{ .identity = 0, .exchange_account = 0, .value = .{ .account = .{ .position_mode_net = false, .contract_isolated_autonomy = false, .auto_loan = false, .spot_borrow_enabled = false, .can_read = false, .can_trade = false, .can_withdraw = false } } }),
+    configuration_count: u8 = 0,
     bootstrap: ?canonical.BootstrapSnapshotIdentity = null,
     bootstrap_digest: ?[32]u8 = null,
     exchange_account: ?canonical.ExchangeAccountIdentity = null,
@@ -29,6 +32,27 @@ pub const AccountProjection = struct {
 
     pub fn apply(self: *AccountProjection, event: canonical.Payload) !void {
         switch (event) {
+            .venue_account_configuration_snapshot => |configuration| {
+                if (configuration.exchange_account == 0 or configuration.identity == 0 or
+                    (self.exchange_account != null and self.exchange_account.? != configuration.exchange_account)) return error.InvalidBootstrap;
+                for (self.configurations[0..self.configuration_count]) |*known| {
+                    if (known.identity == configuration.identity) {
+                        if (!std.meta.eql(known.*, configuration)) return error.ConflictingObservationIdentity;
+                        return;
+                    }
+                    const same_key = switch (configuration.value) {
+                        .account => known.value == .account,
+                        .isolated_leverage => |leverage| known.value == .isolated_leverage and known.value.isolated_leverage.instrument == leverage.instrument,
+                    };
+                    if (same_key) {
+                        known.* = configuration;
+                        return;
+                    }
+                }
+                if (self.configuration_count == self.configurations.len) return error.ObservationCapacityExceeded;
+                self.configurations[self.configuration_count] = configuration;
+                self.configuration_count += 1;
+            },
             .account_bootstrap_snapshot => |snapshot| {
                 if (snapshot.balance_count > canonical.max_account_facts or snapshot.position_count > canonical.max_account_facts or snapshot.margin_count > canonical.max_account_facts)
                     return self.invalidate(.invalid_snapshot, error.InvalidSnapshot);
@@ -64,7 +88,10 @@ pub const AccountProjection = struct {
                     if (self.source_stream == snapshot.source_stream and snapshot.source_sequence < self.last_sequence)
                         return self.invalidate(.sequence_gap, error.StaleBootstrap);
                 }
-                self.* = .{ .bootstrap = snapshot.identity, .bootstrap_digest = snapshot_digest, .exchange_account = snapshot.exchange_account, .source_stream = snapshot.source_stream, .last_sequence = snapshot.source_sequence, .valid = true, .failure = null };
+                const retained_configurations = self.configurations;
+                const retained_configuration_count = self.configuration_count;
+                for (retained_configurations[0..retained_configuration_count]) |configuration| if (configuration.exchange_account != snapshot.exchange_account) return error.InvalidBootstrap;
+                self.* = .{ .configurations = retained_configurations, .configuration_count = retained_configuration_count, .bootstrap = snapshot.identity, .bootstrap_digest = snapshot_digest, .exchange_account = snapshot.exchange_account, .source_stream = snapshot.source_stream, .last_sequence = snapshot.source_sequence, .valid = true, .failure = null };
                 @memcpy(self.balances[0..snapshot.balance_count], snapshot.balances[0..snapshot.balance_count]);
                 @memcpy(self.positions[0..snapshot.position_count], snapshot.positions[0..snapshot.position_count]);
                 @memcpy(self.margins[0..snapshot.margin_count], snapshot.margins[0..snapshot.margin_count]);
@@ -177,7 +204,8 @@ pub const AccountProjection = struct {
     }
 
     fn validPosition(position: canonical.AccountPosition) bool {
-        if (position.instrument == 0 or position.quantity.instrument != position.instrument) return false;
+        if (position.instrument == 0 or position.quantity.instrument != position.instrument or (position.side != .net and position.quantity.lots < 0)) return false;
+        if (position.maintenance_margin) |maintenance| if (position.margin) |margin| if (maintenance.asset != margin.asset) return false;
         for ([_]?canonical.InstrumentPrice{ position.average_price, position.mark_price, position.liquidation_price }) |value|
             if (value) |price| if (price.instrument != position.instrument or price.rules_version != position.quantity.rules_version) return false;
         if (position.margin) |margin| if (position.unrealized_pnl) |pnl| if (margin.asset != pnl.asset) return false;
@@ -193,6 +221,8 @@ pub const AccountProjection = struct {
     }
 
     pub fn validate(self: *const AccountProjection) !void {
+        if (self.configuration_count > self.configurations.len) return error.InvalidAccountFactCount;
+        for (self.configurations[0..self.configuration_count]) |configuration| if (configuration.identity == 0 or configuration.exchange_account == 0 or (self.exchange_account != null and self.exchange_account.? != configuration.exchange_account)) return error.InvalidProjection;
         if (self.balance_count > self.balances.len or self.position_count > self.positions.len or self.margin_count > self.margins.len or self.seen_count > self.seen.len) return error.InvalidAccountFactCount;
         if (self.valid and (self.bootstrap == null or self.bootstrap_digest == null or self.exchange_account == null or self.source_stream == null or self.failure != null)) return error.InvalidProjection;
         for (self.balances[0..self.balance_count], 0..) |balance, index| {
@@ -218,6 +248,8 @@ pub const AccountProjection = struct {
 
     pub fn digest(self: *const AccountProjection) [32]u8 {
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hashValue(&hasher, self.configuration_count);
+        for (self.configurations[0..self.configuration_count]) |value| hashValue(&hasher, value);
         hashValue(&hasher, .{ self.bootstrap, self.bootstrap_digest, self.exchange_account, self.source_stream, self.last_sequence, self.valid, self.failure, self.seen_count, self.balance_count, self.position_count, self.margin_count });
         for (self.seen[0..self.seen_count]) |value| hashValue(&hasher, value);
         for (self.balances[0..self.balance_count]) |value| hashValue(&hasher, value);
@@ -228,6 +260,17 @@ pub const AccountProjection = struct {
 
     pub fn semanticDigest(self: *const AccountProjection) [32]u8 {
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hashValue(&hasher, self.configuration_count);
+        var configurations: [max_positions + 1]canonical.VenueAccountConfigurationSnapshot = undefined;
+        @memcpy(configurations[0..self.configuration_count], self.configurations[0..self.configuration_count]);
+        std.mem.sort(canonical.VenueAccountConfigurationSnapshot, configurations[0..self.configuration_count], {}, struct {
+            fn less(_: void, a: canonical.VenueAccountConfigurationSnapshot, b: canonical.VenueAccountConfigurationSnapshot) bool {
+                if (a.value == .account) return b.value != .account;
+                if (b.value == .account) return false;
+                return a.value.isolated_leverage.instrument < b.value.isolated_leverage.instrument;
+            }
+        }.less);
+        for (configurations[0..self.configuration_count]) |configuration| hashValue(&hasher, configuration);
         hashValue(&hasher, .{ self.exchange_account, self.valid, self.failure, self.balance_count, self.position_count, self.margin_count });
         var balances: [max_balances]canonical.AccountBalance = undefined;
         var positions: [max_positions]canonical.AccountPosition = undefined;

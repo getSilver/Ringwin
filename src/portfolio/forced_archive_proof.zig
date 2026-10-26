@@ -33,7 +33,11 @@ pub fn validate(evidence: *const Evidence, applied: economics.AppliedForcedExecu
             record.delivered_mask != (@as(u8, 1) << @intCast(allocation.count)) - 1) return error.InvalidForcedClosure;
         for (source.allocations[0..record_index]) |prior| if (prior.allocation.identity == allocation.identity) return error.InvalidForcedClosure;
         for (allocation.slices[0..allocation.count], 0..) |slice, index| {
-            for (allocation.slices[0..index]) |prior| if (prior.owner == slice.owner) return error.InvalidForcedClosure;
+            const contribution = try coordinator.resolveForcedPortfolio(source.source, source.owners, source.positions, slice);
+            for (allocation.slices[0..index]) |prior| {
+                const prior_contribution = try coordinator.resolveForcedPortfolio(source.source, source.owners, source.positions, prior);
+                if (prior.owner == slice.owner and prior_contribution.portfolio == contribution.portfolio) return error.InvalidForcedClosure;
+            }
             quantity = try std.math.add(i128, quantity, slice.position_delta);
             fees = try std.math.add(i128, fees, slice.fee_atoms);
             penalties = try std.math.add(i128, penalties, slice.penalty_atoms);
@@ -41,7 +45,7 @@ pub fn validate(evidence: *const Evidence, applied: economics.AppliedForcedExecu
             const identity = try std.math.add(u64, try std.math.mul(u64, std.math.cast(u64, allocation.identity) orelse return error.InvalidForcedClosure, coordinator.max_shards), index + 1);
             if (identity != applied.forced.identity) continue;
             const owner = source.owners[@intFromEnum(slice.owner)];
-            if (owner.portfolio != applied.source.portfolio or owner.decision_domain == 0) return error.InvalidForcedClosure;
+            if (contribution.portfolio != applied.source.portfolio or owner.decision_domain == 0) return error.InvalidForcedClosure;
             var fact = source.source;
             fact.identity = identity;
             fact.payload.forced_execution.owner = slice.owner;
@@ -49,7 +53,7 @@ pub fn validate(evidence: *const Evidence, applied: economics.AppliedForcedExecu
             fact.payload.forced_execution.realized_pnl_atoms = slice.realized_pnl_atoms;
             fact.payload.forced_execution.fee_atoms = slice.fee_atoms;
             fact.payload.forced_execution.penalty_atoms = slice.penalty_atoms;
-            const expected = try coordinator.accountFactEvent(.{ .shard_id = slice.owner, .fact = fact, .allocation_identity = allocation.identity, .slice_index = @intCast(index), .source_identity = source.source.identity });
+            const expected = try coordinator.accountFactEvent(.{ .shard_id = slice.owner, .fact = fact, .portfolio = contribution.portfolio, .allocation_identity = allocation.identity, .slice_index = @intCast(index), .source_identity = source.source.identity });
             if (!std.meta.eql(expected.payload.venue_forced_execution, original) or expected.identity != applied.source.core_event_identity or
                 !std.meta.eql(source.source.times, applied.source.core_times)) return error.InvalidForcedClosure;
             matched = true;

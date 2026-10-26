@@ -11,6 +11,8 @@ pub const max_assets = 128;
 pub const max_ownerships = 500;
 pub const max_account_limits = max_accounts * max_assets;
 pub const max_slices = max_account_limits * max_domains;
+pub const max_extra_portfolios = max_domains * 3;
+pub const max_portfolio_slices = max_slices * 4;
 pub const Environment = enum(u8) { simulation, demo, testnet, production };
 
 pub const Header = struct {
@@ -22,6 +24,9 @@ pub const Header = struct {
     account_limit_count: u16,
     ownership_count: u16,
     slice_count: u16,
+    // Additional memberships; Domain.portfolio remains the fixed primary identity.
+    portfolio_count: u8 = 0,
+    portfolio_slice_count: u16 = 0,
     expected_digest: Digest,
 };
 pub const Domain = struct { identity: u128 = 0, stream: u64 = 0, portfolio: u128 = 0 };
@@ -30,6 +35,8 @@ pub const AssetLimit = struct { asset: u64 = 0, atoms: i128 = 0 };
 pub const AccountLimit = struct { account: u128 = 0, asset: u64 = 0, atoms: i128 = 0 };
 pub const Ownership = struct { account: u128 = 0, instrument: u128 = 0, domain: u128 = 0 };
 pub const Slice = struct { account: u128 = 0, asset: u64 = 0, domain: u128 = 0, atoms: i128 = 0 };
+pub const Portfolio = struct { identity: u128 = 0, domain: u128 = 0 };
+pub const PortfolioSlice = struct { account: u128 = 0, asset: u64 = 0, portfolio: u128 = 0, atoms: i128 = 0 };
 pub const Input = union(enum(u8)) {
     begin: Header,
     domain: Domain,
@@ -39,6 +46,8 @@ pub const Input = union(enum(u8)) {
     ownership: Ownership,
     slice: Slice,
     seal,
+    portfolio: Portfolio,
+    portfolio_slice: PortfolioSlice,
 };
 
 pub const DomainBinding = struct { domain: u128, stream: u64, receipt: ?history.Receipt = null, proof: ?history.LookupProof = null };
@@ -72,6 +81,10 @@ pub const Configuration = struct {
     ownership_count: u16 = 0,
     slices: [max_slices]Slice = @splat(.{}),
     slice_count: u16 = 0,
+    portfolios: [max_extra_portfolios]Portfolio = @splat(.{}),
+    portfolio_count: u8 = 0,
+    portfolio_slices: [max_portfolio_slices]PortfolioSlice = @splat(.{}),
+    portfolio_slice_count: u16 = 0,
     sealed: bool = false,
 
     pub fn apply(self: *Configuration, input: Input) !void {
@@ -91,6 +104,8 @@ pub const Configuration = struct {
             .account_limit => |value| try append(AccountLimit, &self.account_limits, &self.account_limit_count, header.account_limit_count, value),
             .ownership => |value| try append(Ownership, &self.ownerships, &self.ownership_count, header.ownership_count, value),
             .slice => |value| try append(Slice, &self.slices, &self.slice_count, header.slice_count, value),
+            .portfolio => |value| try append(Portfolio, &self.portfolios, &self.portfolio_count, header.portfolio_count, value),
+            .portfolio_slice => |value| try append(PortfolioSlice, &self.portfolio_slices, &self.portfolio_slice_count, header.portfolio_slice_count, value),
             .seal => {
                 try self.validateComplete();
                 if (!std.mem.eql(u8, &header.expected_digest, &self.contentDigest())) return error.DeploymentDigestMismatch;
@@ -113,6 +128,22 @@ pub const Configuration = struct {
     pub fn domain(self: *const Configuration, identity: u128) ?Domain {
         for (self.domains[0..self.domain_count]) |entry| if (entry.identity == identity) return entry;
         return null;
+    }
+    pub fn portfolioDomain(self: *const Configuration, identity: u128) ?u128 {
+        for (self.domains[0..self.domain_count]) |entry| if (entry.portfolio == identity) return entry.identity;
+        for (self.portfolios[0..self.portfolio_count]) |entry| if (entry.identity == identity) return entry.domain;
+        return null;
+    }
+    pub fn ownsPortfolio(self: *const Configuration, domain_id: u128, identity: u128) bool {
+        return self.portfolioDomain(identity) == domain_id;
+    }
+    pub fn portfolioSliceLimit(self: *const Configuration, account_id: u128, asset: u64, identity: u128) ?i128 {
+        if (!self.sealed) return null;
+        for (self.portfolio_slices[0..self.portfolio_slice_count]) |entry|
+            if (entry.account == account_id and entry.asset == asset and entry.portfolio == identity) return entry.atoms;
+        const domain_id = self.portfolioDomain(identity) orelse return null;
+        for (self.portfolios[0..self.portfolio_count]) |entry| if (entry.domain == domain_id) return null;
+        return self.sliceLimit(account_id, asset, domain_id);
     }
     pub fn owner(self: *const Configuration, account_id: u128, instrument: u128) ?u128 {
         if (!self.sealed) return null;
@@ -140,6 +171,43 @@ pub const Configuration = struct {
         for (self.accounts[0..self.account_count], 0..) |entry, index| {
             if (entry.identity == 0 or entry.venue == 0) return error.InvalidDeploymentAccount;
             for (self.accounts[0..index]) |prior| if (prior.identity == entry.identity) return error.DuplicateDeploymentAccount;
+        }
+        if (self.portfolio_count != header.portfolio_count or self.portfolio_slice_count != header.portfolio_slice_count) return error.IncompleteDeploymentConfiguration;
+        for (self.portfolios[0..self.portfolio_count], 0..) |entry, index| {
+            if (entry.identity == 0 or self.domain(entry.domain) == null) return error.InvalidDeploymentPortfolio;
+            var count: usize = 1;
+            for (self.domains[0..self.domain_count]) |primary| if (primary.portfolio == entry.identity) return error.DuplicateDeploymentPortfolio;
+            for (self.portfolios[0..index]) |prior| if (prior.identity == entry.identity) return error.DuplicateDeploymentPortfolio;
+            for (self.portfolios[0..self.portfolio_count]) |other| {
+                if (other.domain == entry.domain) count += 1;
+            }
+            if (count > 4) return error.InvalidDeploymentCapacity;
+        }
+        for (self.portfolio_slices[0..self.portfolio_slice_count], 0..) |entry, index| {
+            const domain_id = self.portfolioDomain(entry.portfolio) orelse return error.InvalidDeploymentPortfolio;
+            if (entry.atoms <= 0) return error.InvalidDeploymentBudget;
+            for (self.portfolio_slices[0..index]) |prior|
+                if (prior.account == entry.account and prior.asset == entry.asset and prior.portfolio == entry.portfolio) return error.DuplicateDeploymentSlice;
+            var limit: ?i128 = null;
+            for (self.slices[0..self.slice_count]) |slice| {
+                if (slice.account == entry.account and slice.asset == entry.asset and slice.domain == domain_id) limit = slice.atoms;
+            }
+            var total: i128 = 0;
+            for (self.portfolio_slices[0..self.portfolio_slice_count]) |other| {
+                if (other.account == entry.account and other.asset == entry.asset and self.portfolioDomain(other.portfolio) == domain_id)
+                    total = try std.math.add(i128, total, other.atoms);
+            }
+            if (total > (limit orelse return error.InvalidDeploymentSlice)) return error.PortfolioBudgetOversubscribed;
+        }
+        for (self.portfolios[0..self.portfolio_count]) |entry| {
+            const primary = self.domain(entry.domain).?.portfolio;
+            var primary_slice = false;
+            var extra_slice = false;
+            for (self.portfolio_slices[0..self.portfolio_slice_count]) |slice| {
+                if (slice.portfolio == primary) primary_slice = true;
+                if (slice.portfolio == entry.identity) extra_slice = true;
+            }
+            if (!primary_slice or !extra_slice) return error.InvalidDeploymentSlice;
         }
         for (self.asset_limits[0..self.asset_count], 0..) |entry, index| {
             if (entry.asset == 0 or entry.atoms <= 0) return error.InvalidDeploymentBudget;
@@ -190,7 +258,7 @@ pub const Configuration = struct {
     /// expected digest itself is excluded, preventing circular self-attestation.
     pub fn contentDigest(self: *const Configuration) Digest {
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        hasher.update("DeploymentAllocationV1\x00");
+        hasher.update("DeploymentAllocationV2\x00");
         if (self.header) |value| {
             var header = value;
             header.expected_digest = @splat(0);
@@ -201,22 +269,28 @@ pub const Configuration = struct {
             for (@field(self, fields[0])[0..@field(self, fields[1])]) |value| hashValue(&hasher, value);
         }
         var result: Digest = undefined;
+        hashValue(&hasher, self.portfolio_count);
+        for (self.portfolios[0..self.portfolio_count]) |value| hashValue(&hasher, value);
+        hashValue(&hasher, self.portfolio_slice_count);
+        for (self.portfolio_slices[0..self.portfolio_slice_count]) |value| hashValue(&hasher, value);
         hasher.final(&result);
         return result;
     }
 
     pub fn validateSnapshot(self: *const Configuration) !void {
+        if (self.portfolio_count > max_extra_portfolios or self.portfolio_slice_count > max_portfolio_slices) return error.InvalidDeploymentCapacity;
         if (self.domain_count > max_domains or self.account_count > max_accounts or self.asset_count > max_assets or
             self.account_limit_count > max_account_limits or self.ownership_count > max_ownerships or self.slice_count > max_slices) return error.InvalidDeploymentCapacity;
         if (self.header) |header| {
             try validateHeader(header);
+            if (self.portfolio_count > header.portfolio_count or self.portfolio_slice_count > header.portfolio_slice_count) return error.InvalidDeploymentCapacity;
             inline for (.{ "domain_count", "account_count", "asset_count", "account_limit_count", "ownership_count", "slice_count" }) |field|
                 if (@field(self, field) > @field(header, field)) return error.InvalidDeploymentCapacity;
             if (self.sealed) {
                 try self.validateComplete();
                 if (!std.mem.eql(u8, &header.expected_digest, &self.contentDigest())) return error.DeploymentDigestMismatch;
             }
-        } else if (self.sealed or self.domain_count != 0 or self.account_count != 0 or self.asset_count != 0 or self.account_limit_count != 0 or self.ownership_count != 0 or self.slice_count != 0) return error.InvalidDeploymentConfiguration;
+        } else if (self.sealed or self.domain_count != 0 or self.account_count != 0 or self.asset_count != 0 or self.account_limit_count != 0 or self.ownership_count != 0 or self.slice_count != 0 or self.portfolio_count != 0 or self.portfolio_slice_count != 0) return error.InvalidDeploymentConfiguration;
     }
 };
 
@@ -226,6 +300,7 @@ fn append(comptime T: type, storage: []T, count: anytype, expected: usize, value
     count.* += 1;
 }
 fn validateHeader(header: Header) !void {
+    if (header.portfolio_count > max_extra_portfolios or header.portfolio_slice_count > max_portfolio_slices) return error.InvalidDeploymentCapacity;
     if (header.identity == 0 or header.epoch == 0 or std.mem.allEqual(u8, &header.expected_digest, 0)) return error.InvalidDeploymentConfiguration;
     if (header.domain_count == 0 or header.domain_count > max_domains or header.account_count == 0 or header.account_count > max_accounts or
         header.asset_count == 0 or header.asset_count > max_assets or header.account_limit_count == 0 or header.account_limit_count > max_account_limits or

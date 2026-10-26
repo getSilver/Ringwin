@@ -11,11 +11,78 @@ fn failCommit(_: *anyopaque, _: std.Io, _: durable.StreamIdentity, _: u64) anyer
     return error.InjectedEio;
 }
 
+test "04 Owner retains native configuration and semantic authority ignores independent configuration arrival order" {
+    const canonical = @import("../../../model/canonical_event.zig");
+    const allocator = std.testing.allocator;
+    const memories = try allocator.alloc(durable.MemoryAdapter, 2);
+    defer allocator.free(memories);
+    for (memories) |*memory| memory.* = .initWithAllocator(allocator);
+    defer for (memories) |*memory| memory.deinit();
+    const owners = try allocator.alloc(demo.Owner, 2);
+    defer allocator.free(owners);
+    const configurations = [_]canonical.VenueAccountConfigurationSnapshot{
+        .{ .identity = 700, .exchange_account = 2, .value = .{ .account = .{
+            .position_mode_net = true,
+            .contract_isolated_autonomy = true,
+            .auto_loan = false,
+            .spot_borrow_enabled = false,
+            .can_read = true,
+            .can_trade = true,
+            .can_withdraw = false,
+        } } },
+        .{ .identity = 701, .exchange_account = 2, .value = .{ .isolated_leverage = .{
+            .instrument = 1,
+            .position_mode_net = true,
+            .margin_mode_isolated = true,
+            .leverage = .{ .coefficient = 10, .scale = 0 },
+        } } },
+        .{ .identity = 705, .exchange_account = 2, .value = .{ .isolated_leverage = .{
+            .instrument = 5,
+            .position_mode_net = true,
+            .margin_mode_isolated = true,
+            .leverage = .{ .coefficient = 5, .scale = 0 },
+        } } },
+    };
+    for (owners, memories, 0..) |*owner, *memory, index| {
+        try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 9101 });
+        try initialize(owner, 0);
+        const order = if (index == 0) [_]usize{ 0, 1, 2 } else [_]usize{ 0, 2, 1 };
+        for (order, 0..) |configuration_index, position| {
+            const configuration = configurations[configuration_index];
+            var input = fixture.canonicalAt(40 + position, position + 1, .{ .venue_account_configuration_snapshot = configuration });
+            input.venue.envelope.identity.stream = 70;
+            input.venue.envelope.source_stream = 70;
+            input.venue.envelope.source_fact_identity = configuration.identity;
+            input.venue.envelope.raw_evidence.stream = 70;
+            _ = try owner.apply(input);
+        }
+        try std.testing.expectEqual(@as(u8, 3), owner.shard.canonical_account.configuration_count);
+        try owner.checkpoint();
+        const checkpoint_digest = owner.shard.canonicalStateDigest();
+        const restored = try allocator.create(demo.Owner);
+        defer allocator.destroy(restored);
+        try demo.Owner.recoverInto(restored, memory.interface(), undefined, owner.stream);
+        try std.testing.expectEqual(@as(u8, 3), restored.shard.canonical_account.configuration_count);
+        try std.testing.expectEqualDeep(checkpoint_digest, restored.shard.canonicalStateDigest());
+    }
+    try std.testing.expectEqualDeep(owners[0].shard.semanticAuthorityDigest(), owners[1].shard.semanticAuthorityDigest());
+    try std.testing.expect(!std.mem.eql(u8, &owners[0].shard.canonicalStateDigest(), &owners[1].shard.canonicalStateDigest()));
+}
+
 pub fn initialize(owner: *demo.Owner, index: usize) !void {
+    return initializeOwner(owner, index, false);
+}
+
+pub fn initializeMultiPortfolio(owner: *demo.Owner, index: usize) !void {
+    return initializeOwner(owner, index, true);
+}
+
+fn initializeOwner(owner: *demo.Owner, index: usize, multiple_portfolios: bool) !void {
     const domain = index + 1;
     const stream = index + 9101;
     const portfolio = index + 11;
-    var rows: [21]allocation.Input = undefined;
+    var storage: [24]allocation.Input = undefined;
+    const rows = storage[0..if (multiple_portfolios) @as(usize, 24) else 21];
     rows[0] = .{ .begin = .{ .identity = 7, .epoch = 1, .domain_count = 4, .account_count = 1, .asset_count = 1, .account_limit_count = 1, .ownership_count = 8, .slice_count = 4, .expected_digest = @splat(1) } };
     for (0..4) |n| {
         rows[1 + n] = .{ .domain = .{ .identity = n + 1, .stream = n + 9101, .portfolio = n + 11 } };
@@ -26,14 +93,21 @@ pub fn initialize(owner: *demo.Owner, index: usize) !void {
     rows[5] = .{ .account = .{ .identity = 2, .venue = 1 } };
     rows[6] = .{ .asset_limit = .{ .asset = 1, .atoms = 100 } };
     rows[7] = .{ .account_limit = .{ .account = 2, .asset = 1, .atoms = 100 } };
-    rows[20] = .seal;
+    if (multiple_portfolios) {
+        rows[0].begin.portfolio_count = 1;
+        rows[0].begin.portfolio_slice_count = 2;
+        rows[20] = .{ .portfolio = .{ .identity = 15, .domain = 1 } };
+        rows[21] = .{ .portfolio_slice = .{ .account = 2, .asset = 1, .portfolio = 11, .atoms = 18 } };
+        rows[22] = .{ .portfolio_slice = .{ .account = 2, .asset = 1, .portfolio = 15, .atoms = 7 } };
+    }
+    rows[rows.len - 1] = .seal;
     var configuration: allocation.Configuration = .{};
     for (rows[0 .. rows.len - 1]) |row| try configuration.apply(row);
     rows[0].begin.expected_digest = configuration.contentDigest();
     try owner.pinDeploymentDigest(rows[0].begin.expected_digest);
     for (rows, 0..) |row, position|
         _ = try owner.apply(.{ .core = .{ .identity = position + 1, .payload = .{ .deployment_configuration = row } } });
-    _ = try owner.apply(.{ .core = .{ .identity = 22, .payload = .{ .decision_domain_bound = .{ .domain = domain, .stream = stream } } } });
+    _ = try owner.apply(.{ .core = .{ .identity = rows.len + 1, .payload = .{ .decision_domain_bound = .{ .domain = domain, .stream = stream } } } });
     for (@import("../../../trading/asset_registry.zig").testDefinitions(6, 8)) |definition|
         _ = try owner.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
     const payloads = [_]trading.CorePayload{
@@ -44,10 +118,14 @@ pub fn initialize(owner: *demo.Owner, index: usize) !void {
         .exchange_positions,
         .{ .opening_balance = .{ .cash_atoms = 25 } },
         .{ .virtual_portfolio_activated = .{ .portfolio_identity = portfolio } },
-        .{ .portfolio_transfer = .{ .amount_atoms = 25 } },
+        .{ .portfolio_transfer = .{ .amount_atoms = if (multiple_portfolios and index == 0) 18 else 25, .portfolio_identity = portfolio } },
     };
     for (payloads, 0..) |payload, position|
         _ = try owner.apply(fixture.atGroup(10, .{ .identity = position + 20, .account_scope = 2, .payload = payload }));
+    if (multiple_portfolios and index == 0) {
+        _ = try owner.apply(fixture.atGroup(10, .{ .identity = 80, .account_scope = 2, .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = 15 } } }));
+        _ = try owner.apply(fixture.atGroup(10, .{ .identity = 81, .account_scope = 2, .payload = .{ .portfolio_transfer = .{ .portfolio_identity = 15, .amount_atoms = 7 } } }));
+    }
     // Account observations include instruments owned by the other domains.
     for (1..9) |instrument| {
         if (instrument == domain) continue;

@@ -28,7 +28,7 @@ pub const Builder = struct {
     /// Owner may append trusted Gateway evidence before publishing this batch.
     pub fn add(self: *Builder, identity: history.Identity, value: anytype) !void {
         if (identity == .fee_origin) return error.UnexpectedFillHistoryKey;
-        const key: history.Key = .{ .origin = self.origin, .identity = identity };
+        const key = try history.scopedKey(self.origin, identity, self.qualification.exchange_account);
         if (self.byte_count >= self.bytes.len) return error.OrderHistoryBatchCapacity;
         const end = @min(self.bytes.len, @as(usize, self.byte_count) + history.max_record_bytes);
         const encoded = codec.encodeBare(self.bytes[self.byte_count..end], value) catch return error.OrderHistoryBatchCapacity;
@@ -87,11 +87,11 @@ pub fn build(shard: *const trading.TradingShard, order_id: u64, origin: history.
     if (shard.hasDeferredOrderHistory(order_id)) return error.OrderArchivePinned;
     for (shard.economic_projection.applied_fills[0..shard.economic_projection.applied_fill_count]) |fill| if (fill.fill.order_id == order_id) return error.OrderArchivePinned;
     const checkpoint = shard.checkpoint orelse return error.InvalidOrderHistoryOrigin;
-    if (origin.stream.domain != .decision_log or origin.stream.id == 0 or origin.account == 0 or
-        origin.account != shard.exchange_account_identity or checkpoint.stream != origin.stream.id)
+    if (origin.stream.domain != .decision_log or origin.stream.id == 0 or
+        !std.meta.eql(origin, try shard.businessOrigin()) or checkpoint.stream != origin.stream.id)
         return error.InvalidOrderHistoryOrigin;
     const applied_fill = try shard.economic_projection.appliedCanonicalFillQuantity(order_id);
-    const qualification = try shard.oms.prepareOrderArchive(order_id, applied_fill, origin.account);
+    const qualification = try shard.oms.prepareOrderArchive(order_id, applied_fill, shard.exchange_account_identity);
     // Derive the release set through the public OMS operation, so retaining
     // another member's references cannot silently diverge from this builder.
     var released = shard.oms;

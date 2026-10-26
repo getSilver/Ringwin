@@ -28,9 +28,9 @@ pub const Builder = struct {
             .qualification_digest = self.qualification.digest(),
             .records = .{ .{ .bytes = detail, .payload_digest = history.hash(detail) }, .{ .bytes = semantic, .payload_digest = history.hash(semantic) }, .{ .bytes = &applied.payload_digest, .payload_digest = history.hash(&applied.payload_digest) } },
             .entries = .{
-                .{ .key = .{ .origin = self.qualification.origin, .identity = .{ .forced_detail = applied.forced.identity } }, .record_index = 0 },
-                .{ .key = .{ .origin = self.qualification.origin, .identity = .{ .core_forced = applied.forced.identity } }, .record_index = 1 },
-                .{ .key = .{ .origin = self.qualification.origin, .identity = .{ .forced_economic_digest = applied.forced.identity } }, .record_index = 2 },
+                .{ .key = try history.scopedKey(self.qualification.origin, .{ .forced_detail = applied.forced.identity }, if (self.qualification.origin.scope == .decision_domain) applied.source.exchange_account else null), .record_index = 0 },
+                .{ .key = try history.scopedKey(self.qualification.origin, .{ .core_forced = applied.forced.identity }, if (self.qualification.origin.scope == .decision_domain) applied.source.exchange_account else null), .record_index = 1 },
+                .{ .key = try history.scopedKey(self.qualification.origin, .{ .forced_economic_digest = applied.forced.identity }, if (self.qualification.origin.scope == .decision_domain) applied.source.exchange_account else null), .record_index = 2 },
             },
         };
     }

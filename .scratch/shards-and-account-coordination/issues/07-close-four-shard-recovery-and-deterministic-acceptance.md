@@ -17,3 +17,7 @@
 Removed redundant full-shard copies from existing owned transactions, retained asset-registry rejection rollback, and bounded inlining at the stable apply and recovery helper boundaries. PE unwind measurements identified overlapping frames of approximately 27, 27 and 29 MiB; the configured application reserve remains 64 MiB. No stack budget was enlarged. Independent nested-transaction oracle 2/2, forced retry 2/2 and asset validation/recovery 3/3 passed; Standards and Spec reviews found no issues in the scoped prerequisite.
 
 Application run3839 at 64 MiB completed the earlier recovery/barrier/digest-equality assertions and stopped at the final frozen digest mismatch. Subsequent ticket02 caller changes also completed those assertions and its new literal position-margin/actual-lease-delivery assertions, with final digest drift still expected. Keep all original checkboxes open: final frozen evidence and the complete original recovery/fault acceptance require tickets03-06 and the final core suite.
+
+## Ticket 04 stack requalification required — 2026-10-26
+
+本票的栈前置条件仍未闭合：Ticket 04 新增四 Owner、多 VirtualPortfolio 实际链在 64 MiB 下分别出现 Debug 初始化栈溢出及 ReleaseSafe 冷历史/Host 完整组路径 `TradingShard.handleDomainGroup` 栈溢出。256 MiB 测试栈上的功能与恢复通过不能替代生产栈资格，也不能沿用上一节更早源码的栈结果。生产配置仍为 64 MiB；本票须修复并重新运行当前实际链，再执行完整套件与冻结验收。命令、功能范围和证据边界见 [Ticket 04 验证报告](../04-validation-2026-10-26.md)。本节不勾选原始完成条件。

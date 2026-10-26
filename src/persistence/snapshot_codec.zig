@@ -221,6 +221,8 @@ const Reader = struct {
 };
 
 fn omsArrayCount(comptime T: type, comptime name: []const u8) ?[]const u8 {
+    @setEvalBranchQuota(4000);
+    if (@hasField(T, "portfolio_authority_count") and comptime std.mem.eql(u8, name, "portfolio_authorities")) return "portfolio_authority_count";
     if (@hasField(T, "applied_fill_total_count") and comptime std.mem.eql(u8, name, "applied_fill_totals")) return "applied_fill_total_count";
     if (@hasField(T, "applied_fill_count") and comptime std.mem.eql(u8, name, "applied_fills")) return "applied_fill_count";
     if (@hasField(T, "deferred_history_admission_count") and comptime std.mem.eql(u8, name, "deferred_history_admissions")) return "deferred_history_admission_count";

@@ -519,17 +519,11 @@ pub const Gateway = struct {
         if (committed.store.safetyGate() != .open or shard.exchange_account_identity == 0)
             return error.DurableDispatchUnavailable;
         const route = self.routeFor(shard.exchange_account_identity) orelse return error.UnknownDispatch;
-        const origin = try sourceOrigin(shard, route.environment == .simulation);
+        const oms_command = shard.oms.findCommand(command_id) orelse return error.UnknownDispatch;
+        const origin = try commandOrigin(shard, oms_command, route.environment == .simulation);
         const index = self.uncertainIndex(origin, shard.exchange_account_identity, command_id) orelse return error.UnknownDispatch;
-        var command_value: ?oms.Command = null;
-        for (shard.oms.command_history[0..shard.oms.command_history_count]) |known|
-            if (known.command_id == command_id) {
-                command_value = known;
-                break;
-            };
-        const oms_command = command_value orelse return error.UnknownDispatch;
         if (oms_command.authority.exchange_account != shard.exchange_account_identity or
-            oms_command.authority.virtual_portfolio != shard.portfolio_identity)
+            oms_command.authority.virtual_portfolio != orderPortfolio(shard, oms_command.order_id))
             return error.UnknownDispatch;
         const order = shard.oms.orderById(oms_command.order_id) orelse return error.UnreconciledDispatch;
         if (order.last_reconciliation_id <= self.uncertain_dispatches[index].prior_reconciliation_id or
@@ -600,7 +594,18 @@ pub const Gateway = struct {
             facts.effective_trading_authority != shard.operational_state.effectiveTradingAuthority() or
             !std.meta.eql(facts.exchange_position, shard.currentNetExchangePosition(facts.exchange_position.instrument) orelse return error.InvalidAuthorityFacts)) return error.InvalidAuthorityFacts;
         const route = self.routeFor(facts.account) orelse return error.UnknownAccount;
-        const origin = try sourceOrigin(shard, route.environment == .simulation);
+        var observed_command: ?oms.Command = null;
+        for (shard.oms.command_history[0..shard.oms.command_history_count]) |command_value| {
+            if (command_value.reservation_identity != facts.reservation_identity or command_value.instrument != facts.exchange_position.instrument) continue;
+            if (observed_command) |known| if (known.authority.virtual_portfolio != command_value.authority.virtual_portfolio) return error.InvalidAuthorityFacts;
+            observed_command = command_value;
+        }
+        const origin = if (observed_command) |command_value|
+            try commandOrigin(shard, command_value, route.environment == .simulation)
+        else if (shard.decision_domain_identity == 0)
+            try sourceOrigin(shard, route.environment == .simulation)
+        else
+            return error.InvalidAuthorityFacts;
         if (self.originAuthorityIndex(origin)) |index| {
             const current = self.origin_authority[index].authority;
             if (shard.authoritativeBarrier() < self.origin_authority[index].source_barrier or facts.authority_barrier < current.authority_barrier or facts.fencing_token < current.fencing_token) return error.StaleAuthorityFacts;
@@ -747,7 +752,7 @@ pub const Gateway = struct {
             if (!owns) return error.NotSent;
         }
         if (!refs.complete() or refs.exchange_account != shard.exchange_account_identity or
-            refs.virtual_portfolio != shard.portfolio_identity or refs.deadline_barrier > shard.authoritativeBarrier() or
+            refs.virtual_portfolio != orderPortfolio(shard, oms_command.order_id) or refs.deadline_barrier > shard.authoritativeBarrier() or
             oms_command.risk_decision_identity == 0 or oms_command.reservation_identity == 0 or
             oms_command.risk_decision_identity >= oms_command.reservation_identity or oms_command.reservation_identity > shard.authoritativeBarrier())
             return error.NotSent;
@@ -768,7 +773,7 @@ pub const Gateway = struct {
             (oms_command.operation != .cancel and (!order.reservation_active or
                 !std.meta.eql(order.reservation, oms_command.reservation))))
             return error.NotSent;
-        const latest = shard.currentDispatchAuthorityRefs(oms_command.instrument) catch return error.NotSent;
+        const latest = shard.currentDispatchAuthorityRefsForStrategy(oms_command.instrument, oms_command.strategy_instance) catch return error.NotSent;
         if (!std.meta.eql(refs.trading_authorization, latest.trading_authorization) or
             !std.meta.eql(refs.primary_lease, latest.primary_lease) or
             !std.meta.eql(refs.risk_lease, latest.risk_lease) or
@@ -789,7 +794,7 @@ pub const Gateway = struct {
             if (market.health != .healthy) return error.NotSent;
         }
         if (oms_command.operation != .cancel) {
-            if (!instrument.trading_enabled) return error.NotSent;
+            if (!instrument.tradingAuthorization(oms_command.strategy_instance).enabled) return error.NotSent;
             const native_cash = shard.currentNativeRiskCash(oms_command.instrument) catch return error.NotSent;
             const committed_requirement = std.math.add(i128, shard.activeReservationAtoms() catch return error.NotSent, shard.economic_projection.exchange.margin_atoms) catch return error.NotSent;
             if (native_cash < @max(committed_requirement, oms_command.reservation.atoms)) return error.NotSent;
@@ -807,8 +812,8 @@ pub const Gateway = struct {
             (profile.supports_post_only and !route.capability.supports_post_only) or
             (profile.supports_market_protection and !route.capability.supports_market_protection))
             return error.NotSent;
-        const origin = sourceOrigin(shard, route.environment == .simulation) catch return error.NotSent;
-        if (self.archiveBindingIndex(origin)) |binding_index| {
+        const origin = commandOrigin(shard, oms_command, route.environment == .simulation) catch return error.NotSent;
+        if (self.archiveBindingIndex(historyBindingOrigin(shard, route.environment == .simulation) catch return error.NotSent)) |binding_index| {
             const current_root = shard.business_history_root orelse return error.NotSent;
             const bound = self.archive_bindings[binding_index].root;
             if (!std.meta.eql(current_root.origin, bound.origin) or current_root.generation < bound.generation or
@@ -944,7 +949,8 @@ pub const Gateway = struct {
             .client_order_id = command_value.client_order_id,
             .capability_version = context.capability_version,
             .rules_version = context.rules_version,
-            .config_version = context.config_version,
+            // The wire binds the adapter configuration; the proof retains the strategy version.
+            .config_version = route.capability.config_version,
             .adapter_session = context.adapter_session,
             .dispatch_deadline_monotonic_ns = context.dispatch_deadline_monotonic_ns,
             .operation = switch (command_value.operation) {
@@ -1090,11 +1096,28 @@ pub const Gateway = struct {
     }
 
     pub fn acceptedClientOrderIdFromShard(self: *const Gateway, shard: *const trading.TradingShard, command_id: u64) ?canonical.ClientOrderId {
+        if (shard.oms.findCommand(command_id) == null) {
+            const archived = shard.last_order_archive orelse return null;
+            const binding = historyBindingOrigin(shard, true) catch return null;
+            var found: ?canonical.ClientOrderId = null;
+            for (self.accepted_dispatches[0..self.accepted_dispatch_count]) |entry| {
+                if (entry.command_id != command_id or entry.proof.command.order_id != archived.order_id or !sharesHistoryOrigin(entry.origin, binding)) continue;
+                if (shard.decision_domain_identity != 0 and
+                    (!shard.deployment.ownsPortfolio(shard.decision_domain_identity, entry.origin.portfolio) or
+                        shard.deployment.owner(entry.account, entry.proof.command.instrument) != shard.decision_domain_identity)) continue;
+                if (found != null) return null;
+                found = entry.proof.command.client_order_id;
+            }
+            return found;
+        }
         if (shard.decision_domain_identity != 0) {
             const account = (shard.oms.findCommand(command_id) orelse return null).authority.exchange_account;
             if (account != shard.exchange_account_identity) return self.acceptedClientOrderIdForAccount(shard, command_id, account);
         }
-        const origin = sourceOrigin(shard, true) catch return null;
+        const origin = if (shard.oms.findCommand(command_id)) |command_value|
+            commandOrigin(shard, command_value, true) catch return null
+        else
+            return null;
         const account = if (shard.decision_domain_identity != 0) (shard.oms.findCommand(command_id) orelse return null).authority.exchange_account else shard.exchange_account_identity;
         const index = self.acceptedDispatchIndex(origin, account, command_id) orelse return null;
         return self.accepted_dispatches[index].proof.command.client_order_id;
@@ -1107,7 +1130,11 @@ pub const Gateway = struct {
     }
 
     pub fn exportOrderDispatchEvidence(self: *const Gateway, shard: *const trading.TradingShard, order_id: u64, destination: []DispatchEvidence) ![]const DispatchEvidence {
-        const origin = try sourceOrigin(shard, false);
+        if (shard.decision_domain_identity != 0) {
+            const account = (shard.oms.orderById(order_id) orelse return error.UnknownOrder).exchange_account;
+            if (account != shard.exchange_account_identity) return self.exportOrderDispatchEvidenceForAccount(shard, order_id, destination, account);
+        }
+        const origin = try portfolioOrigin(shard, orderPortfolio(shard, order_id), false);
         _ = try shard.oms.prepareOrderArchive(order_id, try shard.economic_projection.appliedCanonicalFillQuantity(order_id), shard.exchange_account_identity);
         var count: usize = 0;
         for (self.accepted_dispatches[0..self.accepted_dispatch_count]) |entry| {
@@ -1128,10 +1155,16 @@ pub const Gateway = struct {
         return destination[0..count];
     }
 
+    noinline fn exportOrderDispatchEvidenceForAccount(self: *const Gateway, shard: *const trading.TradingShard, order_id: u64, destination: []DispatchEvidence, account: u128) anyerror![]const DispatchEvidence {
+        var view: trading.TradingShard = undefined;
+        try shard.copyAccountViewInto(&view, account);
+        return self.exportOrderDispatchEvidence(&view, order_id, destination);
+    }
+
     /// Complete the preceding root before Owner can replace its recovery receipt.
     pub fn completePreviousOrderArchive(self: *Gateway, shard: *const trading.TradingShard) !void {
         const archived = shard.last_order_archive orelse return;
-        const origin = try sourceOrigin(shard, false);
+        const origin = try historyBindingOrigin(shard, false);
         if (self.archiveBindingIndex(origin)) |index| {
             if (self.archive_bindings[index].last_order) |completed| {
                 if (completed.order_id == archived.order_id and std.meta.eql(completed.origin, origin) and
@@ -1153,10 +1186,7 @@ pub const Gateway = struct {
 
     /// Only the published Core economic commit can advance history without retiring dispatch evidence.
     pub fn acknowledgeEconomicHistory(self: *Gateway, shard: *const trading.TradingShard) !void {
-        const origin: DispatchOrigin = if (shard.decision_domain_identity != 0)
-            .{ .decision_stream = shard.decision_stream_identity, .portfolio = shard.deployment.domain(shard.decision_domain_identity).?.portfolio }
-        else
-            try sourceOrigin(shard, false);
+        const origin = try historyBindingOrigin(shard, false);
         const root = shard.business_history_root orelse return error.EconomicHistoryNotCommitted;
         const record: EconomicHistoryCommit = switch (shard.last_business_archive_kind orelse return error.EconomicHistoryNotCommitted) {
             .deployment => .{ .origin = origin, .kind = .deployment, .identity = shard.deployment.header.?.identity, .qualification_digest = (try shard.deployment.bindingRecord(shard.decision_domain_identity, shard.decision_stream_identity)).digest(), .receipt = shard.domain_binding_receipt orelse return error.EconomicHistoryNotCommitted },
@@ -1232,11 +1262,11 @@ pub const Gateway = struct {
     }
 
     pub fn reclaimOrderDispatchEvidence(self: *Gateway, shard: *const trading.TradingShard, order_id: u64) !void {
-        const origin = try sourceOrigin(shard, false);
+        const origin = try historyBindingOrigin(shard, false);
         const commit = shard.last_order_archive orelse return error.DispatchArchiveNotCommitted;
         const root = shard.business_history_root orelse return error.DispatchArchiveNotCommitted;
         if (commit.order_id != order_id or !std.meta.eql(commit.receipt.root, root) or
-            root.origin.stream.id != origin.decision_stream or root.origin.account != origin.account or
+            !std.meta.eql(root.origin, try shard.businessOrigin()) or
             !std.mem.eql(u8, &commit.qualification_digest, &commit.receipt.qualification_digest) or
             !std.mem.eql(u8, &commit.qualification_digest, &root.qualification_digest)) return error.DispatchArchiveNotCommitted;
         try history.validateRoot(root);
@@ -1277,7 +1307,7 @@ pub const Gateway = struct {
         var index: usize = 0;
         while (index < self.uncertain_dispatch_count) {
             const entry = self.uncertain_dispatches[index];
-            if (!std.meta.eql(entry.origin, origin)) {
+            if (!sharesHistoryOrigin(entry.origin, origin)) {
                 index += 1;
                 continue;
             }
@@ -1287,35 +1317,35 @@ pub const Gateway = struct {
                 continue;
             }
             if (entry.reconciliation_id == 0 or entry.reconciliation_status == null or entry.reconciliation_status == .unresolved) return error.DispatchArchivePinned;
-            self.removeReservation(origin, proof.command.reservation_identity);
+            self.removeReservation(entry.origin, proof.command.reservation_identity);
             self.uncertain_dispatch_count -= 1;
             std.mem.copyForwards(UncertainDispatch, self.uncertain_dispatches[index..self.uncertain_dispatch_count], self.uncertain_dispatches[index + 1 .. self.uncertain_dispatch_count + 1]);
         }
         index = 0;
         while (index < self.accepted_dispatch_count) {
             const entry = self.accepted_dispatches[index];
-            if (!std.meta.eql(entry.origin, origin) or entry.proof.command.order_id != order_id) {
+            if (!sharesHistoryOrigin(entry.origin, origin) or entry.proof.command.order_id != order_id) {
                 index += 1;
                 continue;
             }
-            self.removeReservation(origin, entry.proof.command.reservation_identity);
+            self.removeReservation(entry.origin, entry.proof.command.reservation_identity);
             self.accepted_dispatch_count -= 1;
             std.mem.copyForwards(AcceptedDispatch, self.accepted_dispatches[index..self.accepted_dispatch_count], self.accepted_dispatches[index + 1 .. self.accepted_dispatch_count + 1]);
         }
         var referenced = false;
-        for (self.reservations[0..self.reservation_count]) |entry| if (std.meta.eql(entry.origin, origin)) {
+        for (self.reservations[0..self.reservation_count]) |entry| if (sharesHistoryOrigin(entry.origin, origin)) {
             referenced = true;
         };
-        for (self.accepted_dispatches[0..self.accepted_dispatch_count]) |entry| if (std.meta.eql(entry.origin, origin)) {
+        for (self.accepted_dispatches[0..self.accepted_dispatch_count]) |entry| if (sharesHistoryOrigin(entry.origin, origin)) {
             referenced = true;
         };
-        for (self.uncertain_dispatches[0..self.uncertain_dispatch_count]) |entry| if (std.meta.eql(entry.origin, origin)) {
+        for (self.uncertain_dispatches[0..self.uncertain_dispatch_count]) |entry| if (sharesHistoryOrigin(entry.origin, origin)) {
             referenced = true;
         };
         if (!referenced) {
             index = 0;
             while (index < self.exchange_position_count) {
-                if (!std.meta.eql(self.exchange_positions[index].origin, origin)) {
+                if (!sharesHistoryOrigin(self.exchange_positions[index].origin, origin)) {
                     index += 1;
                     continue;
                 }
@@ -1337,16 +1367,21 @@ pub const Gateway = struct {
     }
 
     pub fn retryArchivedDispatch(self: *Gateway, shard: *const trading.TradingShard, request: history.LookupRequest, result: *const history.LookupResult) !venue.SendResult {
-        const origin = sourceOrigin(shard, false) catch return error.NotSent;
+        const origin = historyBindingOrigin(shard, false) catch return error.NotSent;
         const root = shard.business_history_root orelse return error.NotSent;
         const command_key = request.key.identity == .dispatch_command;
-        if ((request.key.identity != .client_order_id and !command_key) or request.key.origin.stream.id != origin.decision_stream or request.key.origin.account != origin.account) return error.NotSent;
+        if ((request.key.identity != .client_order_id and !command_key) or !std.meta.eql(request.key.origin, shard.businessOrigin() catch return error.NotSent)) return error.NotSent;
+        const account = if (request.key.origin.scope == .decision_domain) request.key.account orelse return error.NotSent else request.key.origin.account;
+        if (shard.decision_domain_identity != 0 and shard.accountState(account) == null) return error.NotSent;
         const verdict = history.verifyResult(request, &result.proof, root) catch return error.NotSent;
-        if (verdict == .conflict) self.latchAccount(origin.account);
+        if (verdict == .conflict) self.latchAccount(account);
         if (verdict != .same) return error.NotSent;
         history.validateRecord(result) catch return error.NotSent;
         const evidence = snapshot_codec.decodeBare(result.record_bytes[0..result.record_len], DispatchEvidence) catch return error.NotSent;
-        if (!validPersistedProof(evidence.proof) or !std.meta.eql(evidence.proof.origin, origin)) return error.NotSent;
+        if (!validPersistedProof(evidence.proof) or evidence.proof.origin.account != account or !sharesHistoryOrigin(evidence.proof.origin, origin)) return error.NotSent;
+        if (shard.decision_domain_identity != 0 and
+            (!shard.deployment.ownsPortfolio(shard.decision_domain_identity, evidence.proof.origin.portfolio) or
+                shard.deployment.owner(evidence.proof.origin.account, evidence.proof.command.instrument) != shard.decision_domain_identity)) return error.NotSent;
         if (request.key.identity == .client_order_id) {
             if (!std.meta.eql(request.key.identity.client_order_id, evidence.proof.command.client_order_id)) return error.NotSent;
         } else {
@@ -1469,6 +1504,44 @@ fn sourceOrigin(shard: *const trading.TradingShard, simulation: bool) !DispatchO
     }
     if (!simulation) return error.InvalidDispatchOrigin;
     return .{ .account = shard.exchange_account_identity, .portfolio = shard.portfolio_identity, .test_shard = shard.host_activation_session.shard };
+}
+
+fn orderPortfolio(shard: *const trading.TradingShard, order_id: u64) u128 {
+    const order = shard.oms.orderById(order_id) orelse return 0;
+    return if (order.portfolio != 0) order.portfolio else if (shard.decision_domain_identity == 0) shard.portfolio_identity else 0;
+}
+
+fn historyBindingOrigin(shard: *const trading.TradingShard, simulation: bool) !DispatchOrigin {
+    if (shard.decision_domain_identity == 0) return sourceOrigin(shard, simulation);
+    const domain = shard.deployment.domain(shard.decision_domain_identity) orelse return error.InvalidDispatchOrigin;
+    if (!shard.deployment.sealed or domain.stream != shard.decision_stream_identity) return error.InvalidDispatchOrigin;
+    return .{ .decision_stream = domain.stream, .portfolio = domain.portfolio };
+}
+
+fn sharesHistoryOrigin(origin: DispatchOrigin, binding: DispatchOrigin) bool {
+    return if (binding.account == 0)
+        origin.account != 0 and origin.decision_stream == binding.decision_stream and origin.test_shard == binding.test_shard
+    else
+        std.meta.eql(origin, binding);
+}
+
+fn portfolioOrigin(shard: *const trading.TradingShard, portfolio: u128, simulation: bool) !DispatchOrigin {
+    if (portfolio == 0 or (if (shard.decision_domain_identity != 0)
+        !shard.deployment.ownsPortfolio(shard.decision_domain_identity, portfolio)
+    else
+        portfolio != shard.portfolio_identity)) return error.InvalidDispatchOrigin;
+    var origin = try sourceOrigin(shard, simulation);
+    origin.portfolio = portfolio;
+    return origin;
+}
+
+fn commandOrigin(shard: *const trading.TradingShard, command_value: oms.Command, simulation: bool) !DispatchOrigin {
+    const portfolio = orderPortfolio(shard, command_value.order_id);
+    const order = shard.oms.orderById(command_value.order_id) orelse return error.InvalidDispatchOrigin;
+    if (command_value.authority.virtual_portfolio != portfolio or
+        (command_value.portfolio != 0 and command_value.portfolio != portfolio) or
+        command_value.strategy_instance != order.strategy_instance) return error.InvalidDispatchOrigin;
+    return portfolioOrigin(shard, portfolio, simulation);
 }
 
 fn originNamespace(namespace: [namespace_size]u8, origin: DispatchOrigin) [namespace_size]u8 {

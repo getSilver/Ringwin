@@ -86,7 +86,7 @@ _Avoid_: Strategy account, subaccount
 _Avoid_: SuspenseAccount, house strategy
 
 **DecisionDomain**:
-必须在同一确定顺序下完成决策的一组策略经济状态；每个 VirtualPortfolio 同一时刻只属于一个 DecisionDomain。
+必须在同一确定顺序下完成决策的一组策略经济状态，可以包含多个保持独立经济归属的 VirtualPortfolio；每个 VirtualPortfolio 同一时刻只属于一个 DecisionDomain。
 _Avoid_: TradingShard, strategy group
 
 ## Account Ownership
@@ -564,6 +564,10 @@ _Avoid_: Cash flow, additional ledger credit
 **UnrealizedPnL**:
 使用当前持仓、AverageCost 与可追溯市场价格计算的估值结果；它只属于 ValuationSnapshot，不进入权威账本。
 _Avoid_: Accrued profit, mark-to-market posting
+
+**NettingSettlement**:
+同一 ExchangeAccount 的净仓位与各 VirtualPortfolio 独立毛仓位在不同时间实现损益所形成的有符号结算差额；它保持账户与投资组合的现金及权益守恒，不归属 TreasuryPortfolio，不构成可分配资金或新增风险额度。
+_Avoid_: AccountNettingBenefit, TreasuryPortfolio, SuspenseAccount
 
 **ExternalTransfer**:
 由真实资金进入、离开或跨越 ExchangeAccount 边界产生的资产划转，必须由相应的 Venue 或外部托管事实支撑。

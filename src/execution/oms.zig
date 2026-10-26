@@ -65,6 +65,7 @@ pub const TerminalState = enum(u8) { filled, canceled, rejected };
 
 pub const Intent = struct {
     exchange_account: u128 = 0,
+    portfolio: u128 = 0,
     intent_sequence: u64,
     strategy_instance: u128 = 0,
     operation: Operation,
@@ -168,6 +169,7 @@ pub const ReconciliationResult = struct {
 
 pub const Command = struct {
     command_id: u64,
+    portfolio: u128 = 0,
     order_id: u64,
     strategy_instance: u128,
     revision: u32,
@@ -192,6 +194,7 @@ pub const Command = struct {
 
 pub const Order = struct {
     exchange_account: u128 = 0,
+    portfolio: u128 = 0,
     id: u64,
     strategy_instance: u128,
     instrument: Instrument,
@@ -595,9 +598,18 @@ pub const Oms = struct {
     }
 
     pub fn reservationsForAccount(self: *const Oms, asset: canonical.AssetIdentity, account: ?u128) !Reservation {
+        return self.reservationsForOwner(asset, account, null);
+    }
+
+    pub fn reservationsForPortfolio(self: *const Oms, account: u128, portfolio: u128, asset: canonical.AssetIdentity) !Reservation {
+        return self.reservationsForOwner(asset, account, portfolio);
+    }
+
+    fn reservationsForOwner(self: *const Oms, asset: canonical.AssetIdentity, account: ?u128, portfolio: ?u128) !Reservation {
         var total: Reservation = .{ .asset = asset, .atoms = 0 };
         for (self.orders[0..self.order_count]) |order| {
             if (account != null and order.exchange_account != account.?) continue;
+            if (portfolio != null and order.portfolio != portfolio.?) continue;
             if (!order.reservation_active) continue;
             if (total.asset != order.reservation.asset) return error.MixedReservationAssets;
             total.atoms = try std.math.add(i128, total.atoms, order.reservation.atoms);
@@ -768,6 +780,7 @@ pub const Oms = struct {
                 if (intent.quantity <= 0 or intent.limit_price.ticks <= 0 or intent.reservation.atoms <= 0 or intent.limit_price.instrument != intent.instrument) return error.InvalidOrderSpec;
                 const order = try self.createOrder(intent.strategy_instance, intent.instrument, intent.side, intent.portfolio_reduce_only, intent.venue_reduce_only, intent.quantity, intent.limit_price, intent.reservation, intent.client_order_id, 0, intent.intent_sequence, group, policy);
                 order.exchange_account = intent.exchange_account;
+                order.portfolio = intent.portfolio;
                 order.order_type = intent.order_type;
                 order.time_in_force = intent.time_in_force;
                 order.market_protection_price = intent.market_protection_price;
@@ -1213,6 +1226,7 @@ pub const Oms = struct {
         return .{
             .intent_sequence = sequence,
             .exchange_account = order.exchange_account,
+            .portfolio = order.portfolio,
             .strategy_instance = order.strategy_instance,
             .operation = .place,
             .instrument = replacement.instrument,
@@ -1283,7 +1297,7 @@ pub const Oms = struct {
             self.recovery_only = true;
             return error.CommandCapacityExceeded;
         }
-        const command_value: Command = .{ .command_id = self.next_command_id, .order_id = order.id, .strategy_instance = order.strategy_instance, .revision = order.revision, .operation = operation, .instrument = order.instrument, .side = order.side, .portfolio_reduce_only = order.portfolio_reduce_only, .venue_reduce_only = order.venue_reduce_only, .quantity = try std.math.sub(i64, order.quantity, order.cumulative_quantity), .limit_price = order.limit_price, .predecessor_order_id = order.predecessor_order_id, .reservation = order.reservation, .order_type = order.order_type, .time_in_force = order.time_in_force, .market_protection_price = order.market_protection_price, .client_order_id = order.client_order_id, .intent_sequence = intent_sequence, .risk_decision_identity = refs.decision, .reservation_identity = refs.reservation, .authority = refs.authority };
+        const command_value: Command = .{ .command_id = self.next_command_id, .order_id = order.id, .portfolio = order.portfolio, .strategy_instance = order.strategy_instance, .revision = order.revision, .operation = operation, .instrument = order.instrument, .side = order.side, .portfolio_reduce_only = order.portfolio_reduce_only, .venue_reduce_only = order.venue_reduce_only, .quantity = try std.math.sub(i64, order.quantity, order.cumulative_quantity), .limit_price = order.limit_price, .predecessor_order_id = order.predecessor_order_id, .reservation = order.reservation, .order_type = order.order_type, .time_in_force = order.time_in_force, .market_protection_price = order.market_protection_price, .client_order_id = order.client_order_id, .intent_sequence = intent_sequence, .risk_decision_identity = refs.decision, .reservation_identity = refs.reservation, .authority = refs.authority };
         self.commands[self.command_count] = command_value;
         self.command_count += 1;
         self.command_history[self.command_history_count] = command_value;
@@ -1312,6 +1326,8 @@ pub const Oms = struct {
         const replacement = predecessor.replacement.?;
         predecessor.replacement = null;
         const next = try self.createOrder(predecessor.strategy_instance, replacement.instrument, replacement.side, replacement.portfolio_reduce_only, replacement.venue_reduce_only, replacement.quantity, replacement.limit_price, replacement.reservation, replacement.client_order_id, predecessor.id, intent_sequence, predecessor.group_first_sequence, predecessor.group_policy);
+        next.exchange_account = predecessor.exchange_account;
+        next.portfolio = predecessor.portfolio;
         next.order_type = replacement.order_type;
         next.time_in_force = replacement.time_in_force;
         next.market_protection_price = replacement.market_protection_price;
@@ -1439,6 +1455,7 @@ pub const Oms = struct {
 
 fn validateTarget(order: *const Order, intent: Intent) !void {
     if (order.exchange_account != intent.exchange_account) return error.OrderAccountMismatch;
+    if (intent.portfolio != 0 and order.portfolio != intent.portfolio) return error.OrderPortfolioMismatch;
     if (order.revision != intent.expected_revision or order.cumulative_quantity != intent.expected_cumulative_quantity)
         return error.StaleOrderRevision;
     switch (order.state) {
@@ -1471,6 +1488,7 @@ pub fn intentFingerprint(intent: Intent, group_count: u8) [16]u8 {
     hash.update(std.mem.asBytes(&intent.intent_sequence));
     hash.update(std.mem.asBytes(&intent.strategy_instance));
     hash.update(std.mem.asBytes(&intent.exchange_account));
+    hash.update(std.mem.asBytes(&intent.portfolio));
     hash.update(&.{@intFromEnum(intent.operation)});
     hash.update(std.mem.asBytes(&intent.instrument));
     hash.update(&.{ @intFromEnum(intent.side), @intFromBool(intent.portfolio_reduce_only), @intFromBool(intent.venue_reduce_only) });
@@ -1501,6 +1519,7 @@ fn orderFactDigest(order: Order, last_report: ?ExecutionReport, last_reconciliat
     hash.update(std.mem.asBytes(&order.id));
     hash.update(std.mem.asBytes(&order.strategy_instance));
     hash.update(std.mem.asBytes(&order.exchange_account));
+    hash.update(std.mem.asBytes(&order.portfolio));
     hash.update(std.mem.asBytes(&order.instrument));
     hash.update(std.mem.asBytes(&order.intent_sequence));
     hash.update(std.mem.asBytes(&order.group_first_sequence));

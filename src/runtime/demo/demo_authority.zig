@@ -228,7 +228,7 @@ pub const Policy = struct {
         try core(owner, 5, .exchange_positions);
         try core(owner, 6, .{ .opening_balance = opening });
         try core(owner, 7, .{ .virtual_portfolio_activated = .{ .portfolio_identity = self.portfolio_identity } });
-        try core(owner, 8, .{ .portfolio_transfer = .{ .amount_atoms = self.portfolio_allocation_atoms } });
+        try core(owner, 8, .{ .portfolio_transfer = .{ .amount_atoms = self.portfolio_allocation_atoms, .portfolio_identity = self.portfolio_identity } });
         try core(owner, 9, .{ .strategy_activated = .{
             .strategy_identity = self.strategy_identity,
             .config_version = self.config_version,
@@ -371,7 +371,7 @@ pub const Owner = struct {
         if (self.shard.deployment.header) |existing| {
             if (!std.meta.eql(existing, header)) return error.ImmutableDeploymentConfiguration;
         } else _ = try self.apply(.{ .core = .{ .identity = try std.math.add(u64, self.shard.authoritativeBarrier(), 1), .payload = .{ .deployment_configuration = .{ .begin = header } } } });
-        inline for (.{ .{ "domains", "domain_count", "domain" }, .{ "accounts", "account_count", "account" }, .{ "asset_limits", "asset_count", "asset_limit" }, .{ "account_limits", "account_limit_count", "account_limit" }, .{ "ownerships", "ownership_count", "ownership" }, .{ "slices", "slice_count", "slice" } }) |fields| {
+        inline for (.{ .{ "domains", "domain_count", "domain" }, .{ "accounts", "account_count", "account" }, .{ "asset_limits", "asset_count", "asset_limit" }, .{ "account_limits", "account_limit_count", "account_limit" }, .{ "ownerships", "ownership_count", "ownership" }, .{ "slices", "slice_count", "slice" }, .{ "portfolios", "portfolio_count", "portfolio" }, .{ "portfolio_slices", "portfolio_slice_count", "portfolio_slice" } }) |fields| {
             const existing_count = @field(self.shard.deployment, fields[1]);
             const expected_count = @field(configuration, fields[1]);
             if (existing_count > expected_count) return error.ImmutableDeploymentConfiguration;
@@ -828,20 +828,27 @@ pub const Owner = struct {
     /// Archive evidence first, commit its root in the decision stream, then
     /// release the execution cache. Any interrupted publication retains the
     /// old hot order or the durable root needed to finish cache reclamation.
-    pub fn archiveTerminalOrder(self: *Owner, order_id: u64, gateway: *execution.Gateway) !history.Root {
+    pub noinline fn archiveTerminalOrder(self: *Owner, order_id: u64, gateway: *execution.Gateway) !history.Root {
         if (self.shard.cyclePinsOrder(order_id)) return error.OrderArchivePinned;
         if (!self.ready or self.closed or self.checkpoint_pending or self.committing_order_archive)
             return error.DecisionLogUnavailable;
         if (self.shard.pending_history_candidate != null or self.shard.pending_safety_history_candidate != null) return error.HistoryLookupDeferred;
+        const order = self.shard.oms.orderById(order_id) orelse return error.UnknownOrder;
+        const account = if (self.shard.decision_domain_identity != 0) order.exchange_account else self.shard.exchange_account_identity;
+        var account_view: trading.TradingShard = undefined;
+        const archive_shard: *const trading.TradingShard = if (account != self.shard.exchange_account_identity) blk: {
+            try self.shard.copyAccountViewInto(&account_view, account);
+            break :blk &account_view;
+        } else &self.shard;
         gateway.completePreviousOrderArchive(&self.shard) catch |err| {
             self.closeAdmission();
             return err;
         };
         if (self.shard.last_business_archive_kind != null and self.shard.last_business_archive_kind != .order) try gateway.acknowledgeEconomicHistory(&self.shard);
         const origin = try self.shard.businessOrigin();
-        var builder = try @import("../../execution/order_history_batch.zig").build(&self.shard, order_id, origin);
+        var builder = try @import("../../execution/order_history_batch.zig").build(archive_shard, order_id, origin);
         var evidence_buffer: [64]execution.DispatchEvidence = undefined;
-        const dispatches = try gateway.exportOrderDispatchEvidence(&self.shard, order_id, &evidence_buffer);
+        const dispatches = try gateway.exportOrderDispatchEvidence(archive_shard, order_id, &evidence_buffer);
         if (builder.qualification.order.dispatch_submitted and dispatches.len == 0) return error.DispatchArchiveEvidenceMissing;
         for (dispatches) |dispatch| {
             if (dispatch.proof.command.client_order_id.len == 0) return error.DispatchArchiveEvidenceMissing;
@@ -863,7 +870,7 @@ pub const Owner = struct {
         errdefer self.closeAdmission();
         const receipt = try self.store.publishOrderHistory(self.io, view.value());
         _ = try history.verifyReceipt(receipt, origin, qualification_digest, previous);
-        _ = try self.apply(.{ .core = .{ .identity = order_id, .payload = .{ .order_archive_committed = .{
+        _ = try self.apply(.{ .core = .{ .identity = order_id, .account_scope = if (self.shard.decision_domain_identity != 0) account else null, .payload = .{ .order_archive_committed = .{
             .order_id = order_id,
             .applied_fill_quantity = builder.qualification.applied_fill_quantity,
             .qualification_digest = qualification_digest,
@@ -884,7 +891,6 @@ pub const Owner = struct {
     }
 
     pub noinline fn archiveFillHistoryForAccount(self: *Owner, account: u128, fill_id: u64, gateway: *execution.Gateway) !history.Root {
-        if (self.shard.decision_domain_identity != 0 and self.shard.cycles.count != 0) return error.FillArchivePinned;
         var account_view: trading.TradingShard = undefined;
         if (self.shard.decision_domain_identity != 0) try self.shard.copyAccountViewInto(&account_view, account) else {
             if (account != self.shard.exchange_account_identity) return error.CanonicalScopeMismatch;
@@ -899,6 +905,7 @@ pub const Owner = struct {
         if (self.shard.last_business_archive_kind != null and self.shard.last_business_archive_kind != .order) try gateway.acknowledgeEconomicHistory(&self.shard);
         const origin = try self.shard.businessOrigin();
         var builder = try @import("../../portfolio/fill_history_batch.zig").build(&account_view.economic_projection, fill_id, origin, self.shard.authoritativeBarrier());
+        if (self.shard.decision_domain_identity != 0 and self.shard.cyclePinsOrder(builder.qualification.record.applied.fill.order_id)) return error.FillArchivePinned;
         const previous = self.shard.business_history_root;
         var view = try builder.batch(previous, if (previous) |root| root.epoch else 1);
         const qualification_digest = builder.qualification.digest();
@@ -923,14 +930,20 @@ pub const Owner = struct {
         _ = try self.apply(.{ .core = .{ .identity = coordinator.stream.id, .account_scope = if (self.shard.decision_domain_identity != 0) coordinator.coordinator.exchange_account else null, .payload = .{ .account_coordinator_bound = .{ .account = coordinator.coordinator.exchange_account, .stream = coordinator.stream } } } });
     }
 
-    pub fn archiveForcedExecutionHistory(self: *Owner, forced_id: u64, coordinator: *const @import("../../portfolio/account_coordinator.zig").CoordinatorOwner, gateway: *execution.Gateway) !history.Root {
+    pub noinline fn archiveForcedExecutionHistory(self: *Owner, forced_id: u64, coordinator: *const @import("../../portfolio/account_coordinator.zig").CoordinatorOwner, gateway: *execution.Gateway) !history.Root {
         if (!self.ready or self.closed or self.checkpoint_pending or self.committing_order_archive or coordinator.closed) return error.DecisionLogUnavailable;
-        const expected_origin = self.shard.coordinator_history_origin orelse return error.ForcedArchivePinned;
+        const account = coordinator.coordinator.exchange_account;
+        var account_view: trading.TradingShard = undefined;
+        const archive_shard: *const trading.TradingShard = if (account != self.shard.exchange_account_identity) blk: {
+            try self.shard.copyAccountViewInto(&account_view, account);
+            break :blk &account_view;
+        } else &self.shard;
+        const expected_origin = archive_shard.coordinator_history_origin orelse return error.ForcedArchivePinned;
         if (!std.meta.eql(expected_origin, history.Origin{ .account = coordinator.coordinator.exchange_account, .stream = coordinator.stream })) return error.InvalidCoordinatorBinding;
         try gateway.completePreviousOrderArchive(&self.shard);
         if (self.shard.last_business_archive_kind != null and self.shard.last_business_archive_kind != .order) try gateway.acknowledgeEconomicHistory(&self.shard);
         var source_identity: u128 = 0;
-        for (self.shard.economic_projection.applied_forced_executions[0..self.shard.economic_projection.applied_forced_execution_count]) |known|
+        for (archive_shard.economic_projection.applied_forced_executions[0..archive_shard.economic_projection.applied_forced_execution_count]) |known|
             if (known.forced.identity == forced_id) {
                 source_identity = known.forced.source_identity;
             };
@@ -947,13 +960,13 @@ pub const Owner = struct {
         const verified = try coordinator.store.queryOrderHistory(coordinator.io, exact);
         evidence.proof = verified.proof;
         const origin = try self.shard.businessOrigin();
-        const qualification = try self.shard.prepareForcedArchive(forced_id, origin, &evidence);
-        var builder = try @import("../../portfolio/forced_history_batch.zig").build(&self.shard.economic_projection, forced_id, origin, self.shard.authoritativeBarrier(), qualification.closure);
+        const qualification = try archive_shard.prepareForcedArchive(forced_id, origin, &evidence);
+        var builder = try @import("../../portfolio/forced_history_batch.zig").build(&archive_shard.economic_projection, forced_id, origin, self.shard.authoritativeBarrier(), qualification.closure);
         var view = try builder.batch(self.shard.business_history_root, if (self.shard.business_history_root) |previous| previous.epoch else 1);
         self.committing_order_archive = true;
         defer self.committing_order_archive = false;
         const receipt = try self.store.publishOrderHistory(self.io, view.value());
-        _ = try self.apply(.{ .core = .{ .identity = forced_id, .payload = .{ .forced_archive_committed = .{ .forced_id = forced_id, .qualification_digest = qualification.digest(), .receipt = receipt, .evidence = evidence } } } });
+        _ = try self.apply(.{ .core = .{ .identity = forced_id, .account_scope = if (self.shard.decision_domain_identity != 0) account else null, .payload = .{ .forced_archive_committed = .{ .forced_id = forced_id, .qualification_digest = qualification.digest(), .receipt = receipt, .evidence = evidence } } } });
         try gateway.acknowledgeEconomicHistory(&self.shard);
         return receipt.root;
     }
