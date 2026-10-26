@@ -166,7 +166,7 @@ pub const SimulatedVenue = struct {
             .not_sent
         else if (command.dispatch_deadline_monotonic_ns == 0)
             .unknown
-        else if (!validOrderCommand(command))
+        else if (command.operation != .cancel and !validOrderCommand(command))
             .not_sent
         else
             .submitted;
@@ -175,22 +175,22 @@ pub const SimulatedVenue = struct {
             .client_order_id = command.client_order_id,
             .state = dispatch_state,
         } });
-        if (dispatch_state == .unknown) self.unknown_order = command.identity;
+        if (dispatch_state == .unknown) self.unknown_order = command.orderIdentity();
         if (dispatch_state != .submitted) return;
 
-        const quantity = command.quantity.?;
-        const price = command.limit_price.?;
         const zero_quantity = canonical.InstrumentQuantity{
             .instrument = command.instrument,
             .rules_version = command.rules_version,
             .lots = 0,
         };
+        const quantity = command.quantity orelse zero_quantity;
+        const price = command.limit_price orelse canonical.InstrumentPrice{ .instrument = command.instrument, .rules_version = command.rules_version, .ticks = 0 };
         const venue_order = command.venue_order orelse try venueOrder(binding.venue, source_order_identity);
         switch (command.operation) {
             .place => {
                 try self.append(batch, binding, self.next_event_identity, .{ .execution_report = .{
                     .identity = self.next_event_identity,
-                    .order = command.identity,
+                    .order = command.orderIdentity(),
                     .client_order_id = command.client_order_id,
                     .venue_order = venue_order,
                     .instrument = command.instrument,
@@ -209,7 +209,7 @@ pub const SimulatedVenue = struct {
                 const first = canonical.InstrumentQuantity{ .instrument = quantity.instrument, .rules_version = quantity.rules_version, .lots = if (split) first_quantity else quantity.lots };
                 try self.append(batch, binding, self.next_event_identity, .{ .fill = .{
                     .identity = self.next_event_identity,
-                    .order = command.identity,
+                    .order = command.orderIdentity(),
                     .client_order_id = command.client_order_id,
                     .venue_order = venue_order,
                     .venue_trade = try venueTrade(binding.venue, self.next_event_identity, 1),
@@ -227,7 +227,7 @@ pub const SimulatedVenue = struct {
                     const remaining = canonical.InstrumentQuantity{ .instrument = quantity.instrument, .rules_version = quantity.rules_version, .lots = quantity.lots - first_quantity };
                     try self.append(batch, binding, self.next_event_identity, .{ .execution_report = .{
                         .identity = self.next_event_identity,
-                        .order = command.identity,
+                        .order = command.orderIdentity(),
                         .client_order_id = command.client_order_id,
                         .venue_order = venue_order,
                         .instrument = command.instrument,
@@ -240,7 +240,7 @@ pub const SimulatedVenue = struct {
                     } });
                     try self.append(batch, binding, self.next_event_identity, .{ .fill = .{
                         .identity = self.next_event_identity,
-                        .order = command.identity,
+                        .order = command.orderIdentity(),
                         .client_order_id = command.client_order_id,
                         .venue_order = venue_order,
                         .venue_trade = try venueTrade(binding.venue, self.next_event_identity, 2),
@@ -257,7 +257,7 @@ pub const SimulatedVenue = struct {
                 }
                 try self.append(batch, binding, self.next_event_identity, .{ .execution_report = .{
                     .identity = self.next_event_identity,
-                    .order = command.identity,
+                    .order = command.orderIdentity(),
                     .client_order_id = command.client_order_id,
                     .venue_order = venue_order,
                     .instrument = command.instrument,
@@ -271,7 +271,7 @@ pub const SimulatedVenue = struct {
             },
             .amend, .cancel => try self.append(batch, binding, self.next_event_identity, .{ .execution_report = .{
                 .identity = self.next_event_identity,
-                .order = command.identity,
+                .order = command.orderIdentity(),
                 .client_order_id = command.client_order_id,
                 .venue_order = venue_order,
                 .instrument = command.instrument,

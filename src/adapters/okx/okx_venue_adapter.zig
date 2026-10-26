@@ -1383,7 +1383,7 @@ pub const OkxVenueAdapter = struct {
 
     fn rememberOrder(self: *OkxVenueAdapter, command: canonical.OrderCommand) !void {
         const quantity = command.quantity orelse return error.InvalidOrderLink;
-        try self.rememberLink(.{ .order = command.identity, .client_order_id = command.client_order_id, .portfolio_reduce_only = command.portfolio_reduce_only, .quantity = quantity, .revision = command.revision });
+        try self.rememberLink(.{ .order = command.orderIdentity(), .client_order_id = command.client_order_id, .portfolio_reduce_only = command.portfolio_reduce_only, .quantity = quantity, .revision = command.revision });
     }
 
     fn rememberLink(self: *OkxVenueAdapter, incoming: OrderLink) !void {

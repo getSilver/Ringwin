@@ -28,9 +28,11 @@ Status: open
 
 ## Frontier
 
-- [05 — 共享 Execution Gateway 并保持订单唯一归属](issues/05-share-execution-gateway-with-unique-order-ownership.md)
+- [06 — 证明局部故障隔离与账户级向下收紧](issues/06-prove-local-isolation-and-account-wide-tightening.md)
 
 ## Decisions so far
+
+- 2026-10-26：05 原五条离线条件已完成：共享有界批次、逐项结果与唯一 order/command 归属、安全优先级及恢复不重发；最终 Coordinator/Gateway/四 Adapter/四 Owner 矩阵 135/135，双轴复审无剩余必修项。完整套件前 86 项通过，第 87/800 项 cutover 栈溢出；栈与完整资格仍由 07 收口。Frontier 推进到 06，06、07 保持未完成，详见 [05 验证报告](05-validation-2026-10-26.md)。
 
 - 2026-10-26：04 原五条离线功能条件已完成：域内多 VirtualPortfolio、独立经济/历史归属与原生对账，实际成交方向抵消 gross8/native4/benefit4 且不扩张 lease；总专项 123/123、quantum 10/10、订单归档 5/5、forced 历史 3/3、资金费 2/2、500 组合 4/4，双轴复审无剩余功能问题。生产 64 MiB 栈检查失败，完整套件/冻结摘要/栈资格仍由 07 收口，详见 [04 验证报告](04-validation-2026-10-26.md)。05–07 保持未完成。
 

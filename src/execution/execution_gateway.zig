@@ -200,11 +200,17 @@ fn writeSnapshotRow(destination: []u8, position: *usize, value: anytype) !void {
     std.mem.writeInt(u32, destination[position.*..][0..4], @intCast(encoded.len), .little);
     position.* += 4 + encoded.len;
 }
+pub const ShardDispatch = struct {
+    shard: *const trading.TradingShard,
+    command_id: u64,
+    now_monotonic_ns: u64,
+};
+
 pub const Gateway = struct {
-    noinline fn sendFromAccount(self: *Gateway, shard: *const trading.TradingShard, account_command: oms.Command, command_id: u64, now: u64) anyerror!venue.SendResult {
+    noinline fn prepareFromAccount(self: *Gateway, shard: *const trading.TradingShard, account_command: oms.Command, command_id: u64, now: u64) anyerror!DispatchProof {
         var view: trading.TradingShard = undefined;
         try shard.copyAccountViewInto(&view, account_command.authority.exchange_account);
-        return self.sendFromShard(&view, command_id, now);
+        return self.prepareDispatch(&view, command_id, now);
     }
 
     noinline fn reconcileAccountDispatch(self: *Gateway, shard: *const trading.TradingShard, account_command: oms.Command, command_id: u64) anyerror!void {
@@ -713,9 +719,106 @@ pub const Gateway = struct {
     /// The public order path takes an actual shard outbox identity. The caller
     /// cannot supply missing capability, rules, config, lease or deadline data.
     pub fn sendFromShard(self: *Gateway, shard: *const trading.TradingShard, command_id: u64, now_monotonic_ns: u64) !venue.SendResult {
+        return self.sendPrepared(try self.prepareDispatch(shard, command_id, now_monotonic_ns));
+    }
+
+    /// One bounded turn, with results indexed by the original requests. Callers
+    /// retain retry decisions; Venue facts still enter each owner's apply seam.
+    pub fn sendShardBatch(self: *Gateway, requests: []const ShardDispatch) ![canonical.max_order_commands_per_batch]canonical.DispatchState {
+        if (requests.len == 0 or requests.len > canonical.max_order_commands_per_batch) return error.InvalidDispatchBatch;
+        for (requests, 0..) |request, index| {
+            const origin = sourceOrigin(request.shard, true) catch continue;
+            for (requests[0..index]) |previous| {
+                if (request.command_id != previous.command_id) continue;
+                const previous_origin = sourceOrigin(previous.shard, true) catch continue;
+                if (std.meta.eql(origin, previous_origin) or
+                    (origin.decision_stream != 0 and origin.decision_stream == previous_origin.decision_stream)) return error.DuplicateCommandIdentity;
+            }
+        }
+        var results: [canonical.max_order_commands_per_batch]canonical.DispatchState = @splat(.not_sent);
+        var proofs: [canonical.max_order_commands_per_batch]DispatchProof = undefined;
+        var indices: [canonical.max_order_commands_per_batch]usize = undefined;
+        var batch: canonical.OrderCommandBatch = .{};
+        var account: canonical.ExchangeAccountIdentity = 0;
+        // Cancellation (including KillSwitch cleanup), then Reduce-only, then
+        // opening risk. A shard gets at most one item in this transport turn.
+        for (0..3) |priority| for (requests, 0..) |request, index| {
+            const item_command = request.shard.oms.findCommand(request.command_id) orelse continue;
+            const command_priority: usize = if (item_command.operation == .cancel) 0 else if (item_command.portfolio_reduce_only or item_command.venue_reduce_only) 1 else 2;
+            if (priority != command_priority) continue;
+            const proof = self.prepareDispatch(request.shard, request.command_id, request.now_monotonic_ns) catch continue;
+            if (account != 0 and account != proof.context.account) continue;
+            var occupied = false;
+            for (proofs[0..batch.len]) |other| {
+                if (other.origin.decision_stream == proof.origin.decision_stream and other.origin.test_shard == proof.origin.test_shard) occupied = true;
+            }
+            if (occupied) continue;
+            if (self.acceptedDispatchIndex(proof.origin, proof.context.account, item_command.command_id)) |known| {
+                if (std.meta.eql(self.accepted_dispatches[known].proof, proof)) results[index] = .submitted;
+                continue;
+            }
+            if (self.uncertainIndex(proof.origin, proof.context.account, item_command.command_id) != null) {
+                results[index] = .unknown;
+                continue;
+            }
+            if (dispatchBudgetFull(self.accepted_dispatch_count, self.uncertain_dispatch_count)) continue;
+            self.validateProof(proof) catch continue;
+            const wire = self.omsRequest(proof.context, proof.command) catch continue;
+            var bytes: [trading.journal.max_payload_size]u8 = undefined;
+            const payload = snapshot_codec.encodeBare(&bytes, proof) catch continue;
+            self.commitDispatchRecord(dispatch_record_type, proof.now_monotonic_ns, payload) catch {
+                self.latchAccount(proof.context.account);
+                try self.markUncertain(proof);
+                continue;
+            };
+            // A committed attempt remains Unknown across any crash before its
+            // accepted marker. Never reconstruct a resend queue during recovery.
+            try self.markUncertain(proof);
+            account = proof.context.account;
+            proofs[batch.len] = proof;
+            indices[batch.len] = index;
+            try batch.append(wire);
+        };
+        if (batch.len == 0) return results;
+        if (self.durable_dispatch.?.store.safetyGate() != .open) return results;
+        const route = self.routeFor(account).?;
+        var eligible: canonical.OrderCommandBatch = .{};
+        var count: u8 = 0;
+        for (proofs[0..batch.len], indices[0..batch.len], batch.slice()) |proof, index, wire| {
+            self.validateProof(proof) catch continue;
+            proofs[count] = proof;
+            indices[count] = index;
+            try eligible.append(wire);
+            count += 1;
+        }
+        batch = eligible;
+        if (batch.len == 0) return results;
+        const sent = self.sendRequestForRoute(route, .{ .order_batch = batch }) catch {
+            for (indices[0..batch.len]) |index| results[index] = .unknown;
+            return results;
+        };
+        for (proofs[0..batch.len], indices[0..batch.len]) |proof, index| {
+            if (sent != .accepted) continue;
+            var bytes: [trading.journal.max_payload_size]u8 = undefined;
+            const payload = try snapshot_codec.encodeBare(&bytes, proof);
+            self.commitDispatchRecord(accepted_record_type, proof.now_monotonic_ns, payload) catch {
+                self.latchAccount(account);
+                results[index] = .unknown;
+                continue;
+            };
+            const uncertain = self.uncertainIndex(proof.origin, account, proof.command.command_id).?;
+            self.uncertain_dispatch_count -= 1;
+            std.mem.copyForwards(UncertainDispatch, self.uncertain_dispatches[uncertain..self.uncertain_dispatch_count], self.uncertain_dispatches[uncertain + 1 .. self.uncertain_dispatch_count + 1]);
+            try self.restoreAcceptedDispatch(proof);
+            results[index] = .submitted;
+        }
+        return results;
+    }
+
+    fn prepareDispatch(self: *Gateway, shard: *const trading.TradingShard, command_id: u64, now_monotonic_ns: u64) !DispatchProof {
         if (shard.decision_domain_identity != 0 and shard.account_view == 0) {
             const account_command = shard.oms.findCommand(command_id) orelse return error.NotSent;
-            if (account_command.authority.exchange_account != shard.primary_account_identity) return self.sendFromAccount(shard, account_command, command_id, now_monotonic_ns);
+            if (account_command.authority.exchange_account != shard.primary_account_identity) return self.prepareFromAccount(shard, account_command, command_id, now_monotonic_ns);
         }
         const committed = self.durable_dispatch orelse return error.NotSent;
         if (committed.store.safetyGate() != .open or now_monotonic_ns == 0)
@@ -868,6 +971,15 @@ pub const Gateway = struct {
             oms_command.client_order_id,
         ) catch return error.NotSent;
         if (proof.command.client_order_id.len == 0) return error.NotSent;
+        return proof;
+    }
+
+    fn sendPrepared(self: *Gateway, proof: DispatchProof) !venue.SendResult {
+        const origin = proof.origin;
+        const refs = proof.command.authority;
+        const command_id = proof.command.command_id;
+        const now_monotonic_ns = proof.now_monotonic_ns;
+        const committed = self.durable_dispatch orelse return error.NotSent;
         if (self.acceptedDispatchIndex(origin, refs.exchange_account, command_id) != null) return self.sendProofInternal(proof);
         for (self.uncertain_dispatches[0..self.uncertain_dispatch_count]) |uncertain|
             if (std.meta.eql(uncertain.origin, origin) and uncertain.account == refs.exchange_account and uncertain.command_id == command_id) return error.NotSent;
@@ -941,9 +1053,15 @@ pub const Gateway = struct {
     /// Converts a qualified OMS outbox item once at the execution boundary.
     fn sendOms(self: *Gateway, context: OmsDispatchContext, command_value: oms.Command) !venue.SendResult {
         const route = self.routeFor(context.account) orelse return error.UnknownAccount;
+        return self.sendRequestForRoute(route, .{ .order_command = try self.omsRequest(context, command_value) });
+    }
+
+    fn omsRequest(self: *Gateway, context: OmsDispatchContext, command_value: oms.Command) !canonical.OrderCommand {
+        const route = self.routeFor(context.account) orelse return error.UnknownAccount;
         if (command_value.limit_price.rules_version != context.rules_version) return error.Rejected;
         const request: canonical.OrderCommand = .{
             .identity = command_value.command_id,
+            .order = command_value.order_id,
             .exchange_account = context.account,
             .instrument = command_value.instrument,
             .client_order_id = command_value.client_order_id,
@@ -973,7 +1091,7 @@ pub const Gateway = struct {
             .fee_atoms = 0,
         };
         try self.validateOrder(route, request, true);
-        return self.sendRequestForRoute(route, .{ .order_command = request });
+        return request;
     }
 
     /// The sole business-order boundary. Every mutable authority dependency is
@@ -994,6 +1112,17 @@ pub const Gateway = struct {
             return .accepted;
         }
         if (dispatchBudgetFull(self.accepted_dispatch_count, self.uncertain_dispatch_count)) return error.NotSent;
+        try self.validateProof(proof);
+        const result = self.sendOms(proof.context, command_value) catch return error.NotSent;
+        if (result == .accepted) {
+            self.accepted_dispatches[self.accepted_dispatch_count] = .{ .origin = proof.origin, .account = proof.context.account, .command_id = command_value.command_id, .proof = proof };
+            self.accepted_dispatch_count += 1;
+        }
+        return result;
+    }
+
+    fn validateProof(self: *Gateway, proof: DispatchProof) !void {
+        const command_value = proof.command;
         const route_index = self.routeIndex(proof.context.account) orelse return error.NotSent;
         const authority = if (proof.origin.account == 0) self.account_authority[route_index] else self.origin_authority[self.originAuthorityIndex(proof.origin) orelse return error.NotSent].authority;
         const reservation_index = self.reservationIndex(proof.origin, proof.context.account, command_value.reservation_identity) orelse return error.NotSent;
@@ -1027,12 +1156,6 @@ pub const Gateway = struct {
         if (command_value.operation != .cancel and
             (reservation.asset != command_value.reservation.asset or reservation.atoms != command_value.reservation.atoms or reservation.atoms <= 0))
             return error.NotSent;
-        const result = self.sendOms(proof.context, command_value) catch return error.NotSent;
-        if (result == .accepted) {
-            self.accepted_dispatches[self.accepted_dispatch_count] = .{ .origin = proof.origin, .account = proof.context.account, .command_id = command_value.command_id, .proof = proof };
-            self.accepted_dispatch_count += 1;
-        }
-        return result;
     }
 
     /// Sends a non-order request through the same account-owned route.  Only
@@ -1093,6 +1216,25 @@ pub const Gateway = struct {
             found = entry.proof.command.client_order_id;
         };
         return found;
+    }
+
+    /// Unknown attempts also retain the wire identity needed to reconcile and
+    /// route late facts. This lookup grants no permission to send.
+    pub fn dispatchClientOrderIdFromShard(self: *const Gateway, shard: *const trading.TradingShard, command_id: u64) ?canonical.ClientOrderId {
+        if (self.acceptedClientOrderIdFromShard(shard, command_id)) |wire| return wire;
+        const item_command = shard.oms.findCommand(command_id) orelse return null;
+        const account = item_command.authority.exchange_account;
+        if (shard.decision_domain_identity != 0 and account != shard.exchange_account_identity)
+            return self.uncertainClientOrderIdForAccount(shard, command_id, account);
+        const origin = commandOrigin(shard, item_command, true) catch return null;
+        const index = self.uncertainIndex(origin, account, command_id) orelse return null;
+        return self.uncertain_dispatches[index].client_order_id;
+    }
+
+    noinline fn uncertainClientOrderIdForAccount(self: *const Gateway, shard: *const trading.TradingShard, command_id: u64, account: u128) ?canonical.ClientOrderId {
+        var view: trading.TradingShard = undefined;
+        shard.copyAccountViewInto(&view, account) catch return null;
+        return self.dispatchClientOrderIdFromShard(&view, command_id);
     }
 
     pub fn acceptedClientOrderIdFromShard(self: *const Gateway, shard: *const trading.TradingShard, command_id: u64) ?canonical.ClientOrderId {

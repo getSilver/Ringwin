@@ -116,7 +116,7 @@ pub const BinanceVenueAdapter = struct {
         return .{ .clock = clock, .profile = capability_profile, .auth = auth, .raw_sink = raw_sink, .transport = transport };
     }
     pub fn adapter(self: *BinanceVenueAdapter) venue.VenueAdapter {
-        return .{ .ptr = self, .vtable = &.{ .start = start, .try_send = send, .try_drain = drain, .stop = stop } };
+        return .{ .ptr = self, .vtable = &.{ .start = start, .try_send = send, .try_drain = drain, .stop = stop, .prepare_client_order_id = venue.prepareNamespacedClientOrderId } };
     }
     /// The transport remains private; callers can only retrieve the resulting
     /// CanonicalEvent records through the shared adapter drain seam.
@@ -324,7 +324,7 @@ pub const BinanceVenueAdapter = struct {
     }
     fn dispatchOne(self: *BinanceVenueAdapter, output: *canonical.AdapterOutputBatch, command: canonical.OrderCommand) void {
         if (command.operation == .place) if (self.private_reconciler) |reconciler|
-            reconciler.registerOrder(command.identity, command.client_order_id, command.portfolio_reduce_only) catch {
+            reconciler.registerOrder(command.orderIdentity(), command.client_order_id, command.portfolio_reduce_only) catch {
                 self.append(output, command, .not_sent, .adapter_backpressure, null);
                 return;
             };
@@ -339,11 +339,11 @@ pub const BinanceVenueAdapter = struct {
         const response = self.transport.submit(.{ .method = encoded.method, .path = encoded.path, .body = encoded.body(), .timestamp_ns = encoded.timestamp_ns, .signature = signature });
         const evidence = self.commitResponse(response) catch {
             self.append(output, command, .unknown, null, null);
-            self.markUnknown(command.identity);
+            self.markUnknown(command.orderIdentity());
             return;
         };
         const result = classify(response.outcome, response.response);
-        if (result == .unknown) self.markUnknown(command.identity);
+        if (result == .unknown) self.markUnknown(command.orderIdentity());
         self.append(output, command, result, if (result == .not_sent) .other_venue_reject else null, evidence);
     }
     fn reconcileOrder(self: *BinanceVenueAdapter, request: canonical.OrderReconciliationRequest) venue.SendError!venue.SendResult {
@@ -495,7 +495,7 @@ pub const BinanceVenueAdapter = struct {
         const binding = self.binding orelse return;
         const sequence = self.next_event_sequence;
         self.next_event_sequence +%= 1;
-        output.append(.{ .envelope = .{ .event_type = @intFromEnum(canonical.EventType.order_dispatch_result), .schema_version = canonical.schema_version, .identity = .{ .stream = binding.session, .sequence = sequence }, .source_fact_identity = command.identity, .scope = .account, .venue = binding.venue, .exchange_account = binding.account, .instrument = command.instrument, .source_stream = binding.session, .source_sequence = sequence, .adapter_session = binding.session, .times = .{ .monotonic_ns = self.clock.now() }, .raw_evidence = if (evidence) |value| .{ .stream = binding.session, .sequence = value.stream_sequence, .digest = value.sha256 } else .{ .stream = binding.session, .sequence = sequence, .digest = @splat(0) } }, .event = .{ .order_dispatch_result = .{ .command = command.identity, .state = state, .reason = reason } } }) catch return;
+        output.append(.{ .envelope = .{ .event_type = @intFromEnum(canonical.EventType.order_dispatch_result), .schema_version = canonical.schema_version, .identity = .{ .stream = binding.session, .sequence = sequence }, .source_fact_identity = command.identity, .scope = .account, .venue = binding.venue, .exchange_account = binding.account, .instrument = command.instrument, .source_stream = binding.session, .source_sequence = sequence, .adapter_session = binding.session, .times = .{ .monotonic_ns = self.clock.now() }, .raw_evidence = if (evidence) |value| .{ .stream = binding.session, .sequence = value.stream_sequence, .digest = value.sha256 } else .{ .stream = binding.session, .sequence = sequence, .digest = @splat(0) } }, .event = .{ .order_dispatch_result = .{ .command = command.identity, .client_order_id = command.client_order_id, .state = state, .reason = reason } } }) catch return;
     }
     fn appendEvent(self: *BinanceVenueAdapter, output: *canonical.AdapterOutputBatch, source_fact_identity: u128, event: canonical.Payload) void {
         const binding = self.binding orelse return;
@@ -650,7 +650,12 @@ test "Binance canonical commands authenticate, raw-commit, and dispatch independ
     const adapter = implementation.adapter();
     try startTest(adapter);
     var batch: canonical.OrderCommandBatch = .{};
-    try batch.append(try testCommand(1));
+    var first = try testCommand(1);
+    first.order = 77;
+    first.client_order_id = try adapter.prepareClientOrderId(@splat(1), 2, 77, first.client_order_id);
+    const other_origin = try adapter.prepareClientOrderId(@splat(2), 2, 77, first.client_order_id);
+    try std.testing.expect(!std.meta.eql(first.client_order_id, other_origin));
+    try batch.append(first);
     var second = try testCommand(2);
     second.operation = .cancel;
     second.venue_order = try canonical.VenueOrderRef.init(21, "order-2");
@@ -658,6 +663,8 @@ test "Binance canonical commands authenticate, raw-commit, and dispatch independ
     try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .order_batch = batch }));
     const output = (try adapter.tryDrain()).?;
     try std.testing.expectEqual(@as(u8, 2), output.len);
+    try std.testing.expectEqual(@as(u128, 1), output.events[0].event.order_dispatch_result.command);
+    try std.testing.expectEqualDeep(first.client_order_id, output.events[0].event.order_dispatch_result.client_order_id);
     try std.testing.expectEqual(canonical.DispatchState.submitted, output.events[0].event.order_dispatch_result.state);
     try std.testing.expectEqual(@as(u64, 2), sink.calls);
     try std.testing.expectEqual(@as(u64, 2), transport.calls);

@@ -3722,6 +3722,38 @@ pub const CoordinatorOwner = struct {
         try self.apply(.{ .gateway_record = .{ .request = request, .proof = proof } });
     }
 
+    /// Local transport outcomes use the same durable shard apply boundary as
+    /// Venue facts; the coordinator only checks the immutable owner binding.
+    pub fn applyGatewayOutcome(self: *const CoordinatorOwner, outcome: GatewayOutcome, owner: *@import("../runtime/demo/demo_authority.zig").Owner) !void {
+        _ = try self.coordinator.gateway_ownership.complete(outcome);
+        const summary = self.coordinator.summaries[@intFromEnum(outcome.shard_id)];
+        const shard = try owner.source();
+        if (!summary.present or summary.value.virtual_portfolio != shard.portfolio_identity or
+            summary.value.decision_domain != shard.decision_domain_identity or
+            venueAccountView(shard, outcome.exchange_account) == null) return error.CrossShardDelivery;
+        const item_command = shard.oms.findCommand(outcome.command_id) orelse return error.UnknownGatewayCommand;
+        const actual = gatewayRecord(.{ .exchange_account = outcome.exchange_account, .shard_id = outcome.shard_id, .fencing_token = outcome.fencing_token, .command = item_command });
+        for (self.coordinator.gateway_ownership.records[0..self.coordinator.gateway_ownership.count]) |known| {
+            if (known.shard_id != outcome.shard_id or known.command_id != outcome.command_id) continue;
+            if (!std.meta.eql(known, actual)) return error.GatewayOutcomeIdentityConflict;
+            const order = shard.oms.orderById(outcome.order_id) orelse return error.UnknownGatewayCommand;
+            if (order.revision != outcome.revision) return error.GatewayOutcomeIdentityConflict;
+            if ((item_command.operation == .place and outcome.state == .submitted and order.dispatch_submitted) or
+                (outcome.state == .unknown and order.state == .unknown) or
+                (outcome.state == .not_sent and order.state == .rejected)) return;
+            if (order.state != switch (item_command.operation) {
+                .place => trading.oms.OrderState.pending_submit,
+                .amend => trading.oms.OrderState.pending_amend,
+                .cancel => trading.oms.OrderState.pending_cancel,
+            } or (item_command.operation == .place and outcome.state == .not_sent and order.dispatch_submitted)) return error.StaleGatewayOutcome;
+            var input = try self.coordinator.gateway_ownership.outcomeEvent(outcome);
+            input.account_scope = outcome.exchange_account;
+            _ = try owner.apply(.{ .core = input });
+            return;
+        }
+        return error.UnknownGatewayCommand;
+    }
+
     /// A safe terminal OMS qualification pins Unknown and unresolved references.
     pub fn retireGateway(self: *CoordinatorOwner, shard_id: ShardId, command_id: u64, shard_owner: *const @import("../runtime/demo/demo_authority.zig").Owner) !void {
         const shard = try shard_owner.source();
@@ -3971,7 +4003,7 @@ pub const CoordinatorOwner = struct {
             if (!summary.present or summary.value.virtual_portfolio != shard.portfolio_identity or
                 summary.value.decision_domain != shard.decision_domain_identity or
                 venueAccountView(shard, self.coordinator.exchange_account) == null) return error.CrossShardDelivery;
-            const wire = gateway.acceptedClientOrderIdFromShard(shard, binding.command_id) orelse continue;
+            const wire = gateway.dispatchClientOrderIdFromShard(shard, binding.command_id) orelse continue;
             if (!std.meta.eql(client, wire)) continue;
             const matches = switch (record.event) {
                 .order_dispatch_result => |result| result.command == binding.command_id,

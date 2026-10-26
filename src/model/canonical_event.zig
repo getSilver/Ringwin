@@ -272,6 +272,8 @@ pub const ExecutionReportStatus = enum(u8) { accepted, partially_filled, filled,
 
 pub const OrderCommand = struct {
     identity: OrderIdentity,
+    /// Direct adapter callers may use one identity for both; Gateway is explicit.
+    order: ?OrderIdentity = null,
     exchange_account: ExchangeAccountIdentity,
     instrument: InstrumentIdentity,
     client_order_id: ClientOrderId,
@@ -298,6 +300,10 @@ pub const OrderCommand = struct {
     realized_pnl_asset: ?AssetIdentity = null,
     realized_pnl_atoms: i128 = 0,
     liquidity: LiquidityRole = .taker,
+
+    pub fn orderIdentity(self: OrderCommand) OrderIdentity {
+        return self.order orelse self.identity;
+    }
 };
 
 pub const max_order_commands_per_batch = 4;

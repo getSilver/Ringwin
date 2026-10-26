@@ -105,7 +105,7 @@ pub const BybitVenueAdapter = struct {
         return .{ .clock = clock, .profile = profile, .auth = auth, .raw_sink = raw_sink, .transport = transport };
     }
     pub fn adapter(self: *BybitVenueAdapter) venue.VenueAdapter {
-        return .{ .ptr = self, .vtable = &.{ .start = start, .try_send = send, .try_drain = drain, .stop = stop } };
+        return .{ .ptr = self, .vtable = &.{ .start = start, .try_send = send, .try_drain = drain, .stop = stop, .prepare_client_order_id = venue.prepareNamespacedClientOrderId } };
     }
     pub fn attachPrivateReconciler(self: *BybitVenueAdapter, reconciler: *private.Reconciler) void {
         self.reconciler = reconciler;
@@ -279,7 +279,7 @@ pub const BybitVenueAdapter = struct {
         return true;
     }
     fn dispatch(self: *BybitVenueAdapter, output: *canonical.AdapterOutputBatch, command: canonical.OrderCommand) void {
-        if (command.operation == .place) if (self.reconciler) |value| value.registerOrder(command.identity, command.client_order_id, command.portfolio_reduce_only) catch {
+        if (command.operation == .place) if (self.reconciler) |value| value.registerOrder(command.orderIdentity(), command.client_order_id, command.portfolio_reduce_only) catch {
             self.appendDispatch(output, command, .not_sent, .adapter_backpressure, null);
             return;
         };
@@ -294,12 +294,12 @@ pub const BybitVenueAdapter = struct {
         };
         const response = self.transport.submit(.{ .path = encoded.path, .body = encoded.body(), .timestamp_ns = timestamp, .signature = signature });
         const evidence = self.commitResponse(response) catch {
-            self.markUnknown(command.identity);
+            self.markUnknown(command.orderIdentity());
             self.appendDispatch(output, command, .unknown, null, null);
             return;
         };
         const state = classify(response.outcome, response.response);
-        if (state == .unknown) self.markUnknown(command.identity);
+        if (state == .unknown) self.markUnknown(command.orderIdentity());
         self.appendDispatch(output, command, state, if (state == .not_sent) .other_venue_reject else null, evidence);
     }
     fn reconcileOrder(self: *BybitVenueAdapter, request: canonical.OrderReconciliationRequest) venue.SendError!venue.SendResult {
@@ -393,7 +393,7 @@ pub const BybitVenueAdapter = struct {
         if (now -| self.rate.window_start >= self.profile.window_ns) self.rate = .{ .window_start = now, .count = 1 } else self.rate.count += 1;
     }
     fn appendDispatch(self: *BybitVenueAdapter, output: *canonical.AdapterOutputBatch, command: canonical.OrderCommand, state: canonical.DispatchState, reason: ?canonical.CanonicalRejectReason, evidence: ?private.RawEvidenceRef) void {
-        self.append(output, command.identity, command.instrument, .{ .order_dispatch_result = .{ .command = command.identity, .state = state, .reason = reason } }, evidence);
+        self.append(output, command.identity, command.instrument, .{ .order_dispatch_result = .{ .command = command.identity, .client_order_id = command.client_order_id, .state = state, .reason = reason } }, evidence);
     }
     fn appendEvent(self: *BybitVenueAdapter, output: *canonical.AdapterOutputBatch, source: u128, event: canonical.Payload) void {
         self.append(output, source, null, event, null);
@@ -563,10 +563,17 @@ test "Bybit sends canonical commands only after response raw commit" {
     var adapter = testAdapter(&clock, &auth, &raw, &transport);
     const venue_adapter = adapter.adapter();
     try venue_adapter.start(.{ .venue = 1, .asset_definitions = try contract.activatedTestAssets(), .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 1, .output_capacity = 4 });
-    try std.testing.expectEqual(venue.SendResult.accepted, try venue_adapter.trySend(.{ .order_command = try testCommand() }));
+    var command = try testCommand();
+    command.order = 77;
+    command.client_order_id = try venue_adapter.prepareClientOrderId(@splat(1), 2, 77, command.client_order_id);
+    const other_origin = try venue_adapter.prepareClientOrderId(@splat(2), 2, 77, command.client_order_id);
+    try std.testing.expect(!std.meta.eql(command.client_order_id, other_origin));
+    try std.testing.expectEqual(venue.SendResult.accepted, try venue_adapter.trySend(.{ .order_command = command }));
     const output = (try adapter.adapter().tryDrain()).?;
     try std.testing.expectEqual(canonical.DispatchState.submitted, output.slice()[0].event.order_dispatch_result.state);
     try std.testing.expectEqual(@as(u64, 1), raw.calls);
+    try std.testing.expectEqual(@as(u128, 7), output.events[0].event.order_dispatch_result.command);
+    try std.testing.expectEqualDeep(command.client_order_id, output.events[0].event.order_dispatch_result.client_order_id);
 }
 
 test "Bybit parses response JSON instead of matching formatting" {

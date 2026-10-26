@@ -1,4 +1,24 @@
 const canonical = @import("../model/canonical_event.zig");
+const std = @import("std");
+
+/// Both REST adapters accept this 32-character alphanumeric wire identity.
+pub fn prepareNamespacedClientOrderId(_: *anyopaque, namespace: [16]u8, account: canonical.ExchangeAccountIdentity, order: u64, _: canonical.ClientOrderId) !canonical.ClientOrderId {
+    if (account == 0 or order == 0) return error.InvalidOrderIdentity;
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update("Ringwin canonical client order v1");
+    hash.update(&namespace);
+    var identity: [24]u8 = undefined;
+    std.mem.writeInt(u128, identity[0..16], account, .little);
+    std.mem.writeInt(u64, identity[16..24], order, .little);
+    hash.update(&identity);
+    var digest: [32]u8 = undefined;
+    hash.final(&digest);
+    const hex = std.fmt.bytesToHex(digest[0..14].*, .upper);
+    var encoded: [32]u8 = undefined;
+    @memcpy(encoded[0..4], "RW01");
+    @memcpy(encoded[4..], &hex);
+    return canonical.ClientOrderId.init(&encoded);
+}
 
 pub const Environment = enum { simulation, demo };
 
