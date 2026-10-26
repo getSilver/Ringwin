@@ -1200,7 +1200,10 @@ test "active Host exit and timeout journal revocation blocks direct trade" {
         var gateway = try host_gateway.Gateway.init(config, &subscriptions);
         try gateway.recordPublished(1, run.shard.authoritativeBarrier() + 1, 100);
         try gateway.activate(&run.shard, &run.decision_journal);
-        var supervisor = try host_lifecycle.HostSupervisor.init(host_lifecycle.developmentPlan(0, 1, 0x0003_0900), 0);
+        var plan = host_lifecycle.developmentPlan(0, 1, 0x0003_0900);
+        plan.decision_domain = config.decision_domain;
+        plan.session = config.session;
+        var supervisor = try host_lifecycle.HostSupervisor.init(plan, 0);
         supervisor.state = .active;
         if (timeout) {
             try std.testing.expectEqual(host_lifecycle.Result.timed_out, supervisor.poll(supervisor.plan.hang_timeout_ns + 1));
@@ -1472,6 +1475,13 @@ test "keep positions stops through shard seam preserving economics" {
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(21, .{ .identity = 121, .payload = .recovery_completed }));
     try std.testing.expectEqual(operational.OperationalMode.ready, run.shard.operational_state.mode);
     try std.testing.expectError(error.TradingSafetyGateClosed, run.shard.apply(lifecycleCommand(43, 6, .enable_trading)));
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(21, .{ .identity = 122, .payload = .{ .safety_gate_change = .{
+        .gate_identity = 77,
+        .target_identity = 1,
+        .kind = .latched,
+        .reason = .uncertain_order,
+        .open = true,
+    } } }));
     _ = try applyLive(&run.shard, &run.decision_journal, resolveLatchCommand(49, 6, 77));
     _ = try applyLive(&run.shard, &run.decision_journal, resolveLatchCommand(50, 7, primary_lease_gate_identity));
     _ = try applyLive(&run.shard, &run.decision_journal, resolveLatchCommand(51, 8, risk_lease_gate_identity));
@@ -1650,6 +1660,13 @@ test "full lifecycle trajectories authorize only prescribed risk cancel and redu
     try std.testing.expect(run.shard.operational_state.mayReduceOnly());
     try std.testing.expectError(error.TradingSafetyGateClosed, run.shard.apply(lifecycleCommand(12, 17, .enable_trading)));
     try std.testing.expectError(error.UnknownLatchIdentity, run.shard.apply(resolveLatchCommand(13, 17, 999)));
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(34, .{ .identity = 121, .payload = .{ .safety_gate_change = .{
+        .gate_identity = margin_kill_gate_identity,
+        .target_identity = 1,
+        .kind = .latched,
+        .reason = .margin_kill,
+        .open = true,
+    } } }));
     _ = try applyLive(&run.shard, &run.decision_journal, resolveLatchCommand(13, 17, margin_kill_gate_identity));
     try std.testing.expectEqual(operational.OperationalMode.ready, run.shard.operational_state.mode);
     try std.testing.expect(!run.shard.operational_state.trading_authorized);

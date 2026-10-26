@@ -5636,18 +5636,24 @@ pub const TradingShard = struct {
                         matched = true;
                     }
                     if (!matched) return error.InvalidHostRevocation;
-                    try self.trace.append(.host_activation_revoked, input.identity);
-                    return null;
+                } else {
+                    var authority = self.strategyAuthority(revocation.strategy_identity);
+                    if (revocation.activation_identity == 0 or revocation.activation_identity != authority.host_activation_identity) return error.InvalidHostRevocation;
+                    authority.host_activation_identity = 0;
+                    authority.host_activation_barrier = 0;
+                    authority.host_activation_session = .{ .fencing = 0, .shard = 0, .generation = 0 };
+                    authority.host_activation_fact_sequence = 0;
+                    authority.host_activation_state_digest = @splat(0);
+                    try self.storeStrategyAuthority(authority);
                 }
-                var authority = self.strategyAuthority(revocation.strategy_identity);
-                if (revocation.activation_identity == 0 or revocation.activation_identity != authority.host_activation_identity) return error.InvalidHostRevocation;
-                authority.host_activation_identity = 0;
-                authority.host_activation_barrier = 0;
-                authority.host_activation_session = .{ .fencing = 0, .shard = 0, .generation = 0 };
-                authority.host_activation_fact_sequence = 0;
-                authority.host_activation_state_digest = @splat(0);
+                if (revocation.reason == .fault and self.operational_state.initialized) try self.applyOperationalGate(.{
+                    .gate_identity = 0x484f53544641554c + @as(u128, self.authoritativeBarrier()),
+                    .target_identity = self.operational_state.target_identity,
+                    .kind = .latched,
+                    .reason = .observability,
+                    .open = false,
+                });
                 try self.trace.append(.host_activation_revoked, input.identity);
-                try self.storeStrategyAuthority(authority);
             },
             .primary_lease_granted => |lease| {
                 if (!self.hasFundedActiveStrategy() or lease.fencing_token == 0 or

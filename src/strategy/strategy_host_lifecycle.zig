@@ -419,16 +419,52 @@ pub fn revokeHostAuthority(
     fact_identity: u64,
     reason: @import("../trading/trading_shard_event.zig").HostRevocationReason,
 ) !bool {
+    const event = try prepareHostRevocation(supervisor, gateway, shard, fact_identity, reason) orelse return false;
+    _ = try trading.applyStable(shard, stable_journal, .{ .core = event });
+    return true;
+}
+
+/// The durable Owner variant shares the exact supervisor/session qualification.
+pub fn revokeHostOwnerAuthority(
+    supervisor: *const HostSupervisor,
+    gateway: *gateway_module.Gateway,
+    owner: *@import("../runtime/demo/demo_authority.zig").Owner,
+    fact_identity: u64,
+    now_monotonic_ns: u64,
+) !bool {
+    if (now_monotonic_ns == 0) return error.InvalidSafetyTime;
+    var event = try prepareHostRevocation(supervisor, gateway, try owner.source(), fact_identity, .fault) orelse return false;
+    event.monotonic_time = now_monotonic_ns;
+    event.time_presence.monotonic = true;
+    _ = try owner.apply(.{ .core = event });
+    return true;
+}
+
+/// Bounded Host ingress failure reaches the same durable revocation boundary.
+pub fn observeHostInputStatus(supervisor: *HostSupervisor, status: ipc.QshStatusV1, gateway: *gateway_module.Gateway, owner: *@import("../runtime/demo/demo_authority.zig").Owner, fact_identity: u64, now_monotonic_ns: u64) !bool {
+    if (status != .full) return false;
+    supervisor.state = .failed;
+    return revokeHostOwnerAuthority(supervisor, gateway, owner, fact_identity, now_monotonic_ns);
+}
+
+fn prepareHostRevocation(
+    supervisor: *const HostSupervisor,
+    gateway: *gateway_module.Gateway,
+    shard: *const trading.TradingShard,
+    fact_identity: u64,
+    reason: @import("../trading/trading_shard_event.zig").HostRevocationReason,
+) !?trading.CoreEvent {
+    if (!std.meta.eql(supervisor.plan.session, gateway.config.session) or supervisor.plan.decision_domain != gateway.config.decision_domain) return error.HostAuthorityMismatch;
     if (reason == .fault and supervisor.state != .failed and
         (supervisor.last_fault == null or supervisor.last_fault.?.strategy_identity != shard.strategyAuthority(gateway.config.authorization.strategy_identity).strategy_identity))
-        return false;
+        return null;
     gateway.beginRecovery();
     if (supervisor.state == .failed) {
-        if (!shard.hasHostAuthorityForSession(gateway.config.session)) return false;
-    } else if (shard.strategyAuthority(gateway.config.authorization.strategy_identity).host_activation_identity == 0) return false;
+        if (!shard.hasHostAuthorityForSession(gateway.config.session)) return null;
+    } else if (shard.strategyAuthority(gateway.config.authorization.strategy_identity).host_activation_identity == 0) return null;
     if (shard.strategyAuthority(gateway.config.authorization.strategy_identity).strategy_identity != gateway.config.authorization.strategy_identity)
         return error.HostAuthorityMismatch;
-    _ = try trading.applyStable(shard, stable_journal, .{ .core = .{
+    return .{
         .identity = fact_identity,
         .payload = .{ .host_activation_revoked = .{
             .strategy_identity = shard.strategyAuthority(gateway.config.authorization.strategy_identity).strategy_identity,
@@ -436,8 +472,7 @@ pub fn revokeHostAuthority(
             .reason = reason,
             .session = if (supervisor.state == .failed) gateway.config.session else null,
         } },
-    } });
-    return true;
+    };
 }
 
 const DecodedBridgeFrame = struct {

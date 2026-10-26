@@ -28,9 +28,11 @@ Status: open
 
 ## Frontier
 
-- [06 — 证明局部故障隔离与账户级向下收紧](issues/06-prove-local-isolation-and-account-wide-tightening.md)
+- [07 — 闭合四分片恢复与确定性验收](issues/07-close-four-shard-recovery-and-deterministic-acceptance.md)
 
 ## Decisions so far
+
+- 2026-10-26：06 原五条离线条件完成，当前源码专项 118/118、双轴复审无剩余必修项；局部故障隔离、账户原因独立收紧、实际共享撤单、完整 forced 证据显式解除、漏收恢复/人工 resume/归档后再次故障及四 Owner replay 均已覆盖。Core 50/54/48、Coordinator 快照 18 拒绝旧格式。完整套件尝试在既有 cutover 第 87/812 项栈溢出，完整套件、冻结摘要和生产栈资格继续由 07 收口，详见 [06 验证报告](06-validation-2026-10-26.md)。Frontier 推进到 07，模块保持 open。
 
 - 2026-10-26：05 原五条离线条件已完成：共享有界批次、逐项结果与唯一 order/command 归属、安全优先级及恢复不重发；最终 Coordinator/Gateway/四 Adapter/四 Owner 矩阵 135/135，双轴复审无剩余必修项。完整套件前 86 项通过，第 87/800 项 cutover 栈溢出；栈与完整资格仍由 07 收口。Frontier 推进到 06，06、07 保持未完成，详见 [05 验证报告](05-validation-2026-10-26.md)。
 

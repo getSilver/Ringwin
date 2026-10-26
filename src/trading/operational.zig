@@ -33,6 +33,7 @@ pub const GateReason = enum(u8) {
     uncertain_order,
     identity,
     observability,
+    account_safety,
 };
 
 /// Signed, versioned request accepted at the TradingShard event seam.
@@ -187,6 +188,9 @@ pub const State = struct {
                 action.cancel_increasing_only = true;
             },
             .resolve_latch => {
+                for (self.gates[0..self.gate_count]) |gate|
+                    if (gate.gate_identity == command.referenced_latch_identity and !gate.open)
+                        return error.SafetyGateCauseUnresolved;
                 const latch_record = self.findLatch(command.referenced_latch_identity) orelse
                     return error.UnknownLatchIdentity;
                 if (latch_record.resolved) return error.LatchAlreadyResolved;
@@ -236,6 +240,14 @@ pub const State = struct {
         switch (change.kind) {
             .warning => {},
             .self_recovering => {
+                if (!change.open and (change.reason == .risk_lease or change.reason == .primary_lease)) {
+                    try self.latch(change.gate_identity, change.reason);
+                    self.trading_authorized = false;
+                    self.continuity_intact = false;
+                    if (self.mode == .trading) self.mode = .ready;
+                    action.cancel_open_orders = true;
+                    action.cancel_increasing_only = true;
+                }
                 if (change.open) {
                     if (!change.continuity_proven) {
                         try self.latch(change.gate_identity, change.reason);
@@ -318,6 +330,7 @@ pub const State = struct {
     fn latch(self: *State, identity: u128, reason: GateReason) !void {
         if (self.findLatch(identity)) |existing| {
             if (existing.reason != reason) return error.LatchIdentityConflict;
+            existing.resolved = false;
             return;
         }
         if (self.latch_count == max_latches) return error.LatchHistoryFull;
@@ -334,6 +347,7 @@ test "control authorization and latched recovery remain orthogonal" {
     try std.testing.expect(state.effectiveTradingAuthority());
     _ = try state.applyGate(.{ .gate_identity = 9, .target_identity = 7, .kind = .latched, .reason = .reconciliation_break, .open = false });
     try std.testing.expect(!state.effectiveTradingAuthority());
+    _ = try state.applyGate(.{ .gate_identity = 9, .target_identity = 7, .kind = .latched, .reason = .reconciliation_break, .open = true });
     _ = try state.applyCommand(.{ .command_identity = 3, .content_hash = 3, .target_identity = 7, .expected_version = 3, .expires_at = 10, .kind = .resolve_latch, .referenced_latch_identity = 9 }, 1);
     try std.testing.expectEqual(OperationalMode.ready, state.mode);
     try std.testing.expect(!state.trading_authorized);

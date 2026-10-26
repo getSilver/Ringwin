@@ -272,6 +272,7 @@ test {
     _ = @import("runtime/cutover_history.zig");
     _ = @import("testing/acceptance/history/coordinator_history_acceptance.zig");
     _ = @import("testing/acceptance/core/coordinator_safety_acceptance.zig");
+    _ = @import("testing/acceptance/core/account_isolation_acceptance.zig");
     _ = @import("testing/acceptance/core/risk_lease_delivery_acceptance.zig");
     _ = @import("testing/acceptance/core/shared_venue_delivery_acceptance.zig");
     _ = @import("testing/acceptance/core/shared_gateway_venue_acceptance.zig");

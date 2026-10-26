@@ -364,7 +364,30 @@ test "03 actual shared Gateway routes colliding local orders through one VenueAd
         try std.testing.expectEqualDeep(before_forgery[index], owner.shard.canonicalStateDigest());
 }
 
-const BatchScenario = enum { submitted, isolated, partial, unknown, backpressure, marker_failure, safety, duplicate, reduce, safety_accepted };
+const BatchScenario = enum { submitted, isolated, partial, unknown, backpressure, marker_failure, safety, duplicate, reduce, safety_accepted, local_gap, inbox_full, host_fault, host_stale, host_overload, local_reconciliation, account_fault };
+
+test "06 account restriction blocks all opening commands and sends four qualified cancellations" {
+    try exerciseSharedBatch(.account_fault);
+}
+test "06 stale Host heartbeat isolates only its Owner" {
+    try exerciseSharedBatch(.host_stale);
+}
+test "06 overloaded Host ring isolates only its Owner" {
+    try exerciseSharedBatch(.host_overload);
+}
+
+test "06 market gap isolates four Owners and healthy shards still send and consume shared facts" {
+    try exerciseSharedBatch(.local_gap);
+}
+test "06 full shard inbox durably freezes only its Owner while siblings send and consume" {
+    try exerciseSharedBatch(.inbox_full);
+}
+test "06 faulted Host revokes only its domain while siblings send and consume" {
+    try exerciseSharedBatch(.host_fault);
+}
+test "06 local order reconciliation break isolates only its Owner" {
+    try exerciseSharedBatch(.local_reconciliation);
+}
 
 test "05 four shard TransportBatch sends once through one Adapter and routes exact owners" {
     try exerciseSharedBatch(.submitted);
@@ -545,11 +568,140 @@ fn exerciseSharedBatch(scenario: BatchScenario) !void {
         requests[3].now_monotonic_ns = try observe(gateway, &owners[3], cleanup.command_id);
     }
     if (scenario == .isolated) requests[0].command_id = 999;
+    if (scenario == .account_fault) {
+        for (owners, 0..) |*owner, index| {
+            try coordinator.applyGatewayOutcome(.{ .exchange_account = 2, .shard_id = @enumFromInt(index), .command_id = 1, .order_id = 1, .revision = 1, .fencing_token = index + 1, .state = .submitted }, owner);
+            _ = try owner.apply(fixture.atGroup(46, .{ .identity = 8700, .account_scope = 2, .payload = .{ .oms_execution_report = .{
+                .report_id = 8700,
+                .order_id = 1,
+                .revision = 1,
+                .status = .accepted,
+                .cumulative_quantity = 0,
+                .remaining_quantity = 10000,
+            } } }));
+        }
+        try coordinator.apply(.{ .shared_safety = .{ .source = .credential, .version = 1, .open = false } });
+        for (try coordinator.deliverAccountSafety(.{ &owners[0], &owners[1], &owners[2], &owners[3] }, 1_460_000_000)) |failure| try std.testing.expect(failure == null);
+        for (try gateway.sendShardBatch(&requests)) |state| try std.testing.expectEqual(canonical.DispatchState.not_sent, state);
+        try std.testing.expectEqual(@as(u64, 0), gateway.send_attempt_count);
+        for (owners, 0..) |*owner, index| {
+            const cancel = owner.shard.oms.findCommand(3).?;
+            try std.testing.expect(cancel.operation == .cancel);
+            try std.testing.expectEqual(.pending_cancel, owner.shard.oms.orderById(1).?.state);
+            try coordinator.recordGateway(.{ .exchange_account = 2, .shard_id = @enumFromInt(index), .fencing_token = index + 1, .command = cancel });
+            requests[index].command_id = cancel.command_id;
+            requests[index].now_monotonic_ns = try observe(gateway, owner, cancel.command_id);
+        }
+    }
+    const local_fault = scenario == .local_gap or scenario == .inbox_full or scenario == .host_fault or scenario == .host_stale or scenario == .host_overload or scenario == .local_reconciliation;
+    if (local_fault) {
+        var siblings: [3][32]u8 = undefined;
+        for (owners[1..], 0..) |*owner, index| siblings[index] = owner.shard.canonicalStateDigest();
+        const coordination_before = coordinator.coordinator.digest();
+        if (scenario == .inbox_full) {
+            const inbox = try allocator.create(@import("../../../runtime/shard_inbox.zig").Inbox);
+            defer allocator.destroy(inbox);
+            inbox.* = .{};
+            const input = fixture.atGroup(46, .{ .identity = 8800, .account_scope = 2, .payload = .{ .mark_price = .{ .instrument = 1, .price_atoms = 10 } } });
+            for (0..@TypeOf(inbox.*).capacity) |_| try inbox.push(&owners[0], input, 1_460_000_000);
+            try std.testing.expectError(error.ShardInboxFull, inbox.push(&owners[0], input, 1_460_000_000));
+            try std.testing.expectEqual(@as(usize, 4), inbox.len);
+            try std.testing.expectError(error.CrossShardDelivery, inbox.drainOne(&owners[1]));
+            while (try inbox.drainOne(&owners[0])) {}
+            try std.testing.expect(!owners[0].shard.operational_state.trading_authorized);
+        } else if (scenario == .host_fault or scenario == .host_stale or scenario == .host_overload) {
+            const lifecycle = @import("../../../strategy/strategy_host_lifecycle.zig");
+            var supervisor = try lifecycle.HostSupervisor.init(.{
+                .decision_domain = 1,
+                .session = owners[0].shard.host_activation_session,
+                .compatibility = .{ .protocol = 1, .schema_registry = trading.schema_registry_identity, .host_build = 1, .python_abi = 1, .strategy_manifest = @splat(1), .checkpoint_manifest = @splat(1) },
+                .input_slots = 2,
+                .input_capacity = 512,
+                .output_slots = 2,
+                .output_capacity = 512,
+                .heartbeat_interval_ns = 1,
+                .startup_timeout_ns = 10,
+                .hang_timeout_ns = 10,
+                .shutdown_grace_ns = 10,
+            }, 0);
+            var host_gateway = try host.Gateway.init(.{
+                .schema_registry = trading.schema_registry_identity,
+                .decision_domain = 1,
+                .session = owners[0].shard.host_activation_session,
+                .authorization = .{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = owners[0].shard.host_activation_barrier },
+            }, &.{.{ .strategy_identity = 1, .event_mask = std.math.maxInt(u64) }});
+            supervisor.state = .active;
+            if (scenario == .host_stale) {
+                try std.testing.expectEqual(lifecycle.Result.timed_out, supervisor.poll(11));
+                try std.testing.expect(try lifecycle.revokeHostOwnerAuthority(&supervisor, &host_gateway, &owners[0], 8800, 1_460_000_000));
+            } else if (scenario == .host_overload) {
+                const ipc = @import("../../../strategy/strategy_host_ipc.zig");
+                var mapping = try ipc.OwnedMapping.create(.input, owners[0].shard.host_activation_session, 2, 512);
+                defer mapping.deinit();
+                const ring = try mapping.ring(.input, owners[0].shard.host_activation_session);
+                const frames = [_][]const u8{ "one", "two" };
+                try std.testing.expectEqual(ipc.QshStatusV1.ok, ring.tryPublishMany(&frames));
+                try std.testing.expect(try lifecycle.observeHostInputStatus(&supervisor, ring.tryPublishMany(&frames), &host_gateway, &owners[0], 8800, 1_460_000_000));
+            } else {
+                supervisor.processExited(false);
+                try std.testing.expect(try lifecycle.revokeHostOwnerAuthority(&supervisor, &host_gateway, &owners[0], 8800, 1_460_000_000));
+            }
+        } else if (scenario == .local_gap) {
+            var gap = fixture.canonicalAt(46, 2, .{ .l2_book_delta = .{
+                .instrument = 1,
+                .previous_sequence = 3,
+                .sequence = 4,
+                .best_bid = .{ .instrument = 1, .rules_version = 1, .ticks = 9 },
+                .best_ask = .{ .instrument = 1, .rules_version = 1, .ticks = 10 },
+                .best_bid_quantity = .{ .instrument = 1, .rules_version = 1, .lots = 100000 },
+                .best_ask_quantity = .{ .instrument = 1, .rules_version = 1, .lots = 100000 },
+            } });
+            gap.venue.envelope.scope = .instrument;
+            gap.venue.envelope.exchange_account = null;
+            gap.venue.envelope.instrument = 1;
+            gap.venue.envelope.identity.stream = 1001;
+            gap.venue.envelope.source_stream = 1001;
+            _ = try owners[0].apply(gap);
+        } else {
+            _ = try owners[0].apply(fixture.atGroup(46, .{ .identity = 8800, .account_scope = 2, .payload = .{ .oms_reconciliation_result = .{
+                .reconciliation_id = 8800,
+                .order_id = 1,
+                .revision = 1,
+                .status = .unresolved,
+                .cumulative_quantity = 0,
+                .remaining_quantity = 10000,
+            } } }));
+        }
+        for (owners[1..], 0..) |*owner, index| try std.testing.expectEqualDeep(siblings[index], owner.shard.canonicalStateDigest());
+        try std.testing.expectEqualDeep(coordination_before, coordinator.coordinator.digest());
+    }
     const results = try gateway.sendShardBatch(&requests);
     try std.testing.expectEqual(@as(u64, 1), gateway.send_attempt_count);
     const expected: canonical.DispatchState = if (scenario == .unknown or scenario == .marker_failure) .unknown else if (scenario == .backpressure or scenario == .safety) .not_sent else .submitted;
     for (results, 0..) |result, index| {
-        try std.testing.expectEqual(if (scenario == .isolated and index == 0) .not_sent else expected, result);
+        try std.testing.expectEqual(if ((scenario == .isolated or local_fault) and index == 0) .not_sent else expected, result);
+    }
+    if (local_fault) {
+        const local_digest = owners[0].shard.canonicalStateDigest();
+        for (owners[1..], 2..) |*owner, instrument| {
+            var market = fixture.canonicalAt(46, 2, .{ .l2_book_delta = .{
+                .instrument = instrument,
+                .previous_sequence = 1,
+                .sequence = 2,
+                .best_bid = .{ .instrument = instrument, .rules_version = 1, .ticks = 9 },
+                .best_ask = .{ .instrument = instrument, .rules_version = 1, .ticks = 10 },
+                .best_bid_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = 100000 },
+                .best_ask_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = 100000 },
+            } });
+            market.venue.envelope.scope = .instrument;
+            market.venue.envelope.exchange_account = null;
+            market.venue.envelope.instrument = instrument;
+            market.venue.envelope.identity.stream = 1000 + instrument;
+            market.venue.envelope.source_stream = 1000 + instrument;
+            _ = try owner.apply(market);
+            try std.testing.expectEqual(@as(u64, 2), owner.shard.canonical_market.get(instrument).?.last_book.?.sequence);
+        }
+        try std.testing.expectEqualDeep(local_digest, owners[0].shard.canonicalStateDigest());
     }
     if (scenario == .marker_failure) {
         try std.testing.expectEqual(@as(u16, 4), gateway.uncertain_dispatch_count);
@@ -626,11 +778,11 @@ fn exerciseSharedBatch(scenario: BatchScenario) !void {
         try std.testing.expectEqualDeep(after, coordinator.coordinator.digest());
     }
     for (owners, 0..) |*owner, index| {
-        if ((scenario == .isolated and index == 0) or (scenario == .partial and index < 3)) {
+        if (((scenario == .isolated or local_fault) and index == 0) or (scenario == .partial and index < 3)) {
             try std.testing.expectEqual(@as(i64, 0), try owner.shard.economic_projection.appliedCanonicalFillQuantity(1));
         } else {
-            try std.testing.expectEqual(@as(i64, 10000), try owner.shard.economic_projection.appliedCanonicalFillQuantity(1));
-            try std.testing.expect(owner.shard.oms.orderById(1).?.state == .filled);
+            try std.testing.expectEqual(@as(i64, if (scenario == .account_fault) 0 else 10000), try owner.shard.economic_projection.appliedCanonicalFillQuantity(1));
+            try std.testing.expectEqual(if (scenario == .account_fault) @import("../../../execution/oms.zig").OrderState.canceled else .filled, owner.shard.oms.orderById(1).?.state);
         }
     }
     if (scenario == .reduce) {

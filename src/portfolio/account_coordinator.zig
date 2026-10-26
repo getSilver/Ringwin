@@ -3,14 +3,28 @@ const durable = @import("../persistence/durable_store.zig");
 const trading = @import("../trading/trading_shard.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const snapshot_magic: u64 = 0x54434341574e4952;
-const coordinator_snapshot_version: u16 = 17;
+const coordinator_snapshot_version: u16 = 18;
 const NativeAccountProjection = @import("account_projection.zig").AccountProjection;
 const ingress = @import("shared_venue_ingress.zig");
 const canonical = @import("../model/canonical_event.zig");
 const history = @import("../persistence/business_history.zig");
 const codec = @import("../persistence/snapshot_codec.zig");
 const InstrumentRegistry = @import("../trading/instrument_registry.zig");
-const account_margin_gate_identity: u128 = 0x414343544d415247;
+fn accountSafetyIdentity(account: u128, source: u8) u128 {
+    var bytes: [17]u8 = undefined;
+    std.mem.writeInt(u128, bytes[0..16], account, .little);
+    bytes[16] = source;
+    var hasher = Sha256.init(.{});
+    hasher.update("AccountSafetyGateV1");
+    hasher.update(&bytes);
+    const digest = hasher.finalResult();
+    return std.mem.readInt(u128, digest[0..16], .little) | 1;
+}
+
+pub const SharedSafetySource = enum(u8) { credential, gateway };
+pub const SharedSafety = struct { version: u64 = 0, open: bool = true, identity: u128 = 0 };
+pub const SharedSafetyChange = struct { source: SharedSafetySource, version: u64, open: bool };
+const VenueResolution = struct { barrier: u64, root: history.Digest, bootstrap: u128, margin: u128 };
 
 const VenueAccountView = struct {
     economics: *const @import("economics.zig").Projection,
@@ -267,6 +281,8 @@ const ArchivedVenue = struct { fact: VenueSpool, receipt: history.Receipt };
 const DuplicateVenue = struct { record: canonical.EventRecord, proof: history.LookupProof };
 
 pub const CoordinationEvent = union(enum) {
+    shared_safety: SharedSafetyChange,
+    venue_resolved: VenueResolution,
     native_margin_configuration: InstrumentRegistry.Entry,
     venue_archived: ArchivedVenue,
     venue_duplicate: DuplicateVenue,
@@ -427,12 +443,12 @@ pub fn applyRiskLeaseStable(lease: RiskLease, target_shard_id: ShardId, shard: *
 
 /// Converts one account-wide restriction into a shard-local stable gate fact.
 pub fn accountGateEvent(delivery: GateDelivery, target_identity: u128) !trading.CoreEvent {
-    const identity = std.math.cast(u64, delivery.gate.identity) orelse return error.IdentityOutOfRange;
+    const identity: u64 = @truncate(delivery.gate.identity);
     return .{ .identity = identity, .payload = .{ .safety_gate_change = .{
         .gate_identity = delivery.gate.identity,
         .target_identity = target_identity,
         .kind = .latched,
-        .reason = .reconciliation_break,
+        .reason = .account_safety,
         .open = delivery.gate.open,
     } } };
 }
@@ -745,6 +761,8 @@ fn commandFixture(command_id: u64, order_id: u64) trading.oms.Command {
 
 /// Fixed-capacity owner of cross-shard leases and account reconciliation only.
 pub const AccountCoordinator = struct {
+    shared_safety: [2]SharedSafety = @splat(.{}),
+    venue_protocol_fault: bool = false,
     native_account: NativeAccountProjection = .{},
     native_rules: InstrumentRegistry.Registry = .{},
     venue_ingress: ingress.State = .{},
@@ -906,7 +924,13 @@ pub const AccountCoordinator = struct {
     /// Computes a stable digest of coordination-owned state only.
     pub fn digest(self: *const AccountCoordinator) [Sha256.digest_length]u8 {
         var hasher = Sha256.init(.{});
-        hasher.update("coordinator-history-v16");
+        hasher.update("coordinator-history-v18");
+        digestInt(&hasher, u8, @intFromBool(self.venue_protocol_fault));
+        for (self.shared_safety) |gate| {
+            digestInt(&hasher, u64, gate.version);
+            digestInt(&hasher, u8, @intFromBool(gate.open));
+            digestInt(&hasher, u128, gate.identity);
+        }
         var ingress_bytes: [80000]u8 = undefined;
         var ingress_writer: std.Io.Writer = .fixed(&ingress_bytes);
         self.venue_ingress.write(&ingress_writer) catch unreachable;
@@ -1000,6 +1024,7 @@ pub const AccountCoordinator = struct {
 
     /// Allocates deterministic leases without turning account netting into buying power.
     pub fn allocateLeases(self: *AccountCoordinator, version: u64, valid_through_barrier: u64) ![]const RiskLease {
+        for (self.shared_safety) |gate| if (!gate.open) return error.AccountGateClosed;
         if (self.summary_protocol_fault) return error.SummaryProtocolFault;
         if (self.recovery_only) return error.CoordinatorRecoveryOnly;
         if (self.venue_ingress.broken) return error.AccountGateClosed;
@@ -1144,7 +1169,7 @@ pub const AccountCoordinator = struct {
                 }
                 self.suspense_forced_execution = fact;
                 self.reconciliation_break_identity = fact.identity;
-                self.margin_gate = .{ .identity = fact.identity, .open = false, .latched = true };
+                self.margin_gate = .{ .identity = accountSafetyIdentity(self.exchange_account, 0), .open = false, .latched = true };
                 self.recovery_only = true;
                 for (self.leases[0..self.lease_count]) |*lease| lease.used_atoms = lease.limit_atoms;
             },
@@ -1386,10 +1411,10 @@ pub const AccountCoordinator = struct {
             classifyObservation(try self.projectAccounts(), gross, observation);
         if (self.recovery_only and (!self.nativeMarginRequired() or self.recovery_native_bootstrap_seen)) self.recovery_margin_identity = observation.identity;
         if (!self.margin_gate.latched) switch (self.margin_reconciliation_state) {
-            .unknown => self.margin_gate = .{ .identity = account_margin_gate_identity, .open = false, .latched = false },
-            .healthy => self.margin_gate = .{ .identity = account_margin_gate_identity, .open = true, .latched = false },
+            .unknown => self.margin_gate = .{ .identity = accountSafetyIdentity(self.exchange_account, 0), .open = false, .latched = false },
+            .healthy => self.margin_gate = .{ .identity = accountSafetyIdentity(self.exchange_account, 0), .open = true, .latched = false },
             .broken => {
-                self.margin_gate = .{ .identity = account_margin_gate_identity, .open = false, .latched = true };
+                self.margin_gate = .{ .identity = accountSafetyIdentity(self.exchange_account, 0), .open = false, .latched = true };
                 try self.revokeNewRiskHeadroom();
             },
         };
@@ -1405,14 +1430,14 @@ pub const AccountCoordinator = struct {
         if (self.nativeMarginRequired()) {
             if ((try self.reconcileNative()).state != .healthy) return error.MarginReconciliationStillBroken;
             self.margin_reconciliation_state = .healthy;
-            self.margin_gate = .{ .identity = account_margin_gate_identity, .open = true, .latched = false };
+            self.margin_gate = .{ .identity = accountSafetyIdentity(self.exchange_account, 0), .open = true, .latched = false };
             return self.margin_gate;
         }
         const projected = try self.projectAccounts();
         if (classifyObservation(projected, try self.grossPortfolioMargin(), observation) != .healthy)
             return error.MarginReconciliationStillBroken;
         self.margin_reconciliation_state = .healthy;
-        self.margin_gate = .{ .identity = account_margin_gate_identity, .open = true, .latched = false };
+        self.margin_gate = .{ .identity = accountSafetyIdentity(self.exchange_account, 0), .open = true, .latched = false };
         return self.margin_gate;
     }
 
@@ -1629,6 +1654,7 @@ pub const AccountCoordinator = struct {
 
     /// Returns stable events carrying every current lease to its owning shard.
     pub fn currentLeaseEvents(self: *const AccountCoordinator, events: *[max_shards]trading.CoreEvent) ![]const trading.CoreEvent {
+        for (self.shared_safety) |gate| if (!gate.open) return error.AccountGateClosed;
         if (self.venue_ingress.broken or (self.margin_gate.identity != 0 and !self.margin_gate.open) or (self.nativeMarginRequired() and (self.margin_reconciliation_state != .healthy or !self.margin_gate.open))) return error.AccountGateClosed;
         if (self.recovery_only) {
             for (self.leases[0..self.lease_count]) |lease| if (lease.open) return error.CoordinatorRecoveryOnly;
@@ -1654,6 +1680,7 @@ pub const AccountCoordinator = struct {
 
     /// Leaves RecoveryOnly only after current leases and account reconciliation are healthy.
     pub fn completeRecovery(self: *AccountCoordinator) !void {
+        for (self.shared_safety) |gate| if (!gate.open) return error.AccountGateClosed;
         if (self.summary_protocol_fault) return error.SummaryProtocolFault;
         if (self.venue_ingress.broken) return error.AccountGateClosed;
         if (!self.recovery_only) return error.CoordinatorNotRecovering;
@@ -1680,6 +1707,30 @@ pub const AccountCoordinator = struct {
 
     fn applyEvent(self: *AccountCoordinator, event: CoordinationEvent) !void {
         switch (event) {
+            .venue_resolved => |resolution| {
+                const root = self.history_root orelse return error.VenueHistoryProofRequired;
+                const observation = self.last_margin_observation orelse return error.MarginObservationRequired;
+                if (self.venue_protocol_fault or self.suspense_forced_execution != null) return error.AccountGateClosed;
+                if (resolution.barrier != self.venue_ingress.barrier or !std.mem.eql(u8, &resolution.root, &root.root_digest) or
+                    resolution.bootstrap != self.native_account.bootstrap or resolution.margin != observation.identity or
+                    observation.barrier != self.barrier or !self.native_account.valid or
+                    self.margin_reconciliation_state != .healthy) return error.FreshAccountResolutionRequired;
+                self.venue_ingress.broken = false;
+            },
+            .shared_safety => |change| {
+                const gate = &self.shared_safety[@intFromEnum(change.source)];
+                if (change.version == 0 or change.version < gate.version) return error.StaleSharedSafety;
+                if (change.version == gate.version) {
+                    if (change.open != gate.open) return error.SharedSafetyIdentityConflict;
+                    return;
+                }
+                const identity = if (!change.open and gate.open)
+                    accountSafetyIdentity(self.exchange_account, @intFromEnum(change.source) + 1)
+                else
+                    gate.identity;
+                gate.* = .{ .version = change.version, .open = change.open, .identity = identity };
+                if (!change.open) try self.revokeNewRiskHeadroom();
+            },
             .native_margin_configuration => |entry| {
                 const instrument_changed = try self.native_rules.register(entry);
                 const margin_changed = try self.native_rules.configureMargin(entry.instrument, entry.margin);
@@ -1706,11 +1757,14 @@ pub const AccountCoordinator = struct {
                     self.margin_reconciliation_state = .unknown;
                     if (!self.margin_gate.latched) self.margin_gate.open = false;
                 }
-                if (archived.fact.record.event == .economic_fault) self.venue_ingress.broken = true;
+                if (archived.fact.record.event == .economic_fault) {
+                    self.venue_ingress.broken = true;
+                    self.venue_protocol_fault = true;
+                }
                 if (self.venue_ingress.broken) {
                     self.recovery_only = true;
                     self.reconciliation_break_identity = archived.fact.record.envelope.source_fact_identity;
-                    self.margin_gate = .{ .identity = archived.fact.record.envelope.source_fact_identity, .open = false, .latched = true };
+                    self.margin_gate = .{ .identity = accountSafetyIdentity(self.exchange_account, 0), .open = false, .latched = true };
                 }
             },
             .venue_duplicate => |duplicate| {
@@ -1733,18 +1787,22 @@ pub const AccountCoordinator = struct {
                         if (!self.margin_gate.latched) self.margin_gate.open = false;
                     }
                 }
-                if (fact.record.event == .economic_fault) self.venue_ingress.broken = true;
+                if (fact.record.event == .economic_fault) {
+                    self.venue_ingress.broken = true;
+                    self.venue_protocol_fault = true;
+                }
                 if (self.venue_ingress.broken) {
                     self.recovery_only = true;
                     self.reconciliation_break_identity = fact.record.envelope.source_fact_identity;
-                    self.margin_gate = .{ .identity = fact.record.envelope.source_fact_identity, .open = false, .latched = true };
+                    self.margin_gate = .{ .identity = accountSafetyIdentity(self.exchange_account, 0), .open = false, .latched = true };
                 }
             },
             .venue_fault => |identity| {
+                self.venue_protocol_fault = true;
                 self.venue_ingress.broken = true;
                 self.recovery_only = true;
                 self.reconciliation_break_identity = identity;
-                self.margin_gate = .{ .identity = identity, .open = false, .latched = true };
+                self.margin_gate = .{ .identity = accountSafetyIdentity(self.exchange_account, 0), .open = false, .latched = true };
             },
             .venue_ack => |ack| try self.venue_ingress.acknowledge(ack.barrier, ack.shard),
             .publish_summary => |publish| _ = try self.publishSummary(publish.identity, publish.summary),
@@ -1832,6 +1890,12 @@ pub const AccountCoordinator = struct {
         var writer: std.Io.Writer = .fixed(destination);
         try writer.writeInt(u64, snapshot_magic, .little);
         try writer.writeInt(u16, coordinator_snapshot_version, .little);
+        try writer.writeByte(@intFromBool(self.venue_protocol_fault));
+        for (self.shared_safety) |gate| {
+            try writer.writeInt(u64, gate.version, .little);
+            try writer.writeByte(@intFromBool(gate.open));
+            try writer.writeInt(u128, gate.identity, .little);
+        }
         try writer.writeInt(u128, self.exchange_account, .little);
         try writer.writeInt(i128, self.account_safety_ceiling_atoms, .little);
         try writer.writeInt(i128, self.global_ceiling_atoms, .little);
@@ -1909,11 +1973,16 @@ pub const AccountCoordinator = struct {
         if (try reader.takeInt(u64, .little) != snapshot_magic or
             try reader.takeInt(u16, .little) != coordinator_snapshot_version)
             return error.InvalidCoordinatorSnapshot;
+        const venue_protocol_fault = try readBool(&reader);
+        var shared_safety: [2]SharedSafety = undefined;
+        for (&shared_safety) |*gate| gate.* = .{ .version = try reader.takeInt(u64, .little), .open = try readBool(&reader), .identity = try reader.takeInt(u128, .little) };
         var result = AccountCoordinator.init(
             try reader.takeInt(u128, .little),
             try reader.takeInt(i128, .little),
             try reader.takeInt(i128, .little),
         );
+        result.shared_safety = shared_safety;
+        result.venue_protocol_fault = venue_protocol_fault;
         result.barrier = try reader.takeInt(u64, .little);
         for (&result.summaries) |*record| {
             record.present = try readBool(&reader);
@@ -2010,6 +2079,8 @@ pub const AccountCoordinator = struct {
 
 fn coordinationEventType(event: CoordinationEvent) u16 {
     return switch (event) {
+        .shared_safety => 25,
+        .venue_resolved => 26,
         .native_margin_configuration => 24,
         .venue_archived => 22,
         .venue_duplicate => 23,
@@ -2207,6 +2278,8 @@ fn readAccountFact(reader: *std.Io.Reader) !AccountFact {
 fn encodeCoordinationEvent(destination: []u8, event: CoordinationEvent) ![]const u8 {
     var writer: std.Io.Writer = .fixed(destination);
     switch (event) {
+        .shared_safety => |change| return codec.encodeBare(destination, change),
+        .venue_resolved => |resolution| return codec.encodeBare(destination, resolution),
         .native_margin_configuration => |entry| return codec.encodeBare(destination, entry),
         .venue_archived => |fact| return codec.encodeBare(destination, fact),
         .venue_duplicate => |fact| return codec.encodeBare(destination, fact),
@@ -2249,6 +2322,8 @@ fn decodeCoordinationEvent(record: trading.journal.Record) !CoordinationEvent {
         return error.InvalidCoordinationTail;
     var reader: std.Io.Reader = .fixed(record.payload);
     const event: CoordinationEvent = switch (record.type_id) {
+        25 => return .{ .shared_safety = try codec.decodeBare(record.payload, SharedSafetyChange) },
+        26 => return .{ .venue_resolved = try codec.decodeBare(record.payload, VenueResolution) },
         24 => return .{ .native_margin_configuration = try codec.decodeBare(record.payload, InstrumentRegistry.Entry) },
         21 => return .{ .venue_fault = try codec.decodeBare(record.payload, u128) },
         22 => return .{ .venue_archived = try codec.decodeBare(record.payload, ArchivedVenue) },
@@ -3605,7 +3680,7 @@ pub const CoordinatorOwner = struct {
     pub fn apply(self: *CoordinatorOwner, event: CoordinationEvent) !void {
         if (self.closed) return error.CoordinatorWriterClosed;
         switch (event) {
-            .forced_delivery_ack, .venue_fact, .venue_ack, .venue_fault, .venue_archived, .venue_duplicate, .gateway_retire, .forced_history_commit => return error.CoordinatorVerifiedInputRequired,
+            .venue_resolved, .forced_delivery_ack, .venue_fact, .venue_ack, .venue_fault, .venue_archived, .venue_duplicate, .gateway_retire, .forced_history_commit => return error.CoordinatorVerifiedInputRequired,
             .account_fact => |fact| {
                 // Resident original semantics already constitute exact evidence.
                 // A retry must not require release or become a second input.
@@ -3831,6 +3906,49 @@ pub const CoordinatorOwner = struct {
         return true;
     }
 
+    /// Fixed shard order; a failed writer cannot prevent sibling safety delivery.
+    pub fn deliverAccountSafety(self: *const CoordinatorOwner, owners: [max_shards]*@import("../runtime/demo/demo_authority.zig").Owner, now_monotonic_ns: u64) ![max_shards]?anyerror {
+        if (now_monotonic_ns == 0) return error.InvalidSafetyTime;
+        for (owners, 0..) |owner, index| {
+            const summary = self.coordinator.summaries[index];
+            if (!summary.present or summary.value.decision_domain != owner.shard.decision_domain_identity or
+                summary.value.virtual_portfolio != owner.shard.portfolio_identity or
+                venueAccountView(&owner.shard, self.coordinator.exchange_account) == null) return error.CrossShardDelivery;
+        }
+        var failures: [max_shards]?anyerror = @splat(null);
+        for (owners, 0..) |owner, index|
+            self.deliverShardSafety(@enumFromInt(index), owner, now_monotonic_ns) catch |err| {
+                failures[index] = err;
+            };
+        return failures;
+    }
+
+    fn deliverShardSafety(self: *const CoordinatorOwner, shard_id: ShardId, owner: *@import("../runtime/demo/demo_authority.zig").Owner, now_monotonic_ns: u64) !void {
+        const target = owner.shard.operational_state.target_identity;
+        if (self.coordinator.margin_gate.identity != 0)
+            try applySafety(owner, try accountGateEvent(.{ .shard_id = shard_id, .gate = self.coordinator.margin_gate }, target), now_monotonic_ns);
+        const index = @intFromEnum(shard_id);
+        if (index < self.coordinator.lease_count and !self.coordinator.leases[index].open)
+            try applySafety(owner, try riskLeaseEventForShard(self.coordinator.leases[index], shard_id, &owner.shard), now_monotonic_ns);
+        for (self.coordinator.shared_safety) |gate| {
+            if (gate.identity == 0) continue;
+            try applySafety(owner, .{ .identity = @truncate(gate.identity), .payload = .{ .safety_gate_change = .{
+                .gate_identity = gate.identity,
+                .target_identity = target,
+                .kind = .latched,
+                .reason = .account_safety,
+                .open = gate.open,
+            } } }, now_monotonic_ns);
+        }
+    }
+
+    fn applySafety(owner: *@import("../runtime/demo/demo_authority.zig").Owner, input: trading.CoreEvent, now_monotonic_ns: u64) !void {
+        var event = input;
+        event.monotonic_time = now_monotonic_ns;
+        event.time_presence.monotonic = true;
+        _ = try owner.apply(.{ .core = event });
+    }
+
     /// Freeze instrument-specific contributions before the existing explicit allocation protocol.
     pub fn acceptForcedVenueFact(self: *CoordinatorOwner, record: canonical.EventRecord, owners: [max_shards]*const @import("../runtime/demo/demo_authority.zig").Owner) !void {
         if (record.event != .forced_execution) return error.InvalidVenueFact;
@@ -3904,6 +4022,36 @@ pub const CoordinatorOwner = struct {
         if (self.coordinator.forced_execution_source) |current| if (current.identity == execution.identity)
             return self.coordinator.suspense_forced_execution == null;
         return self.forcedSourceArchived(execution);
+    }
+
+    /// Explicitly resolves proved forced ingress closure; protocol/unknown faults stay closed.
+    pub fn resolveVenueGate(self: *CoordinatorOwner, margin_identity: u128) !void {
+        if (self.closed) return error.CoordinatorWriterClosed;
+        if (self.coordinator.venue_protocol_fault) return error.AccountGateClosed;
+        var last_forced: u64 = 0;
+        var fresh_bootstrap: u64 = 0;
+        var cursor: u64 = 0;
+        while (cursor < self.coordinator.venue_ingress.barrier) {
+            cursor += 1;
+            const fact = try self.venueSpoolRecord(cursor);
+            if (fact.targets == 0) {
+                if (fact.record.event != .forced_execution or !try self.forcedSourceClosed(fact.record.event.forced_execution)) return error.AccountGateClosed;
+                last_forced = cursor;
+            }
+            if (fact.record.event == .account_bootstrap_snapshot and
+                fact.record.event.account_bootstrap_snapshot.identity == self.coordinator.native_account.bootstrap) fresh_bootstrap = cursor;
+            for (0..max_shards) |index| {
+                if (fact.targets & (@as(u4, 1) << @as(u2, @intCast(index))) != 0 and
+                    self.coordinator.venue_ingress.acknowledged[index] < cursor) return error.AccountDeliveryPending;
+            }
+        }
+        if (last_forced == 0 or fresh_bootstrap <= last_forced) return error.FreshAccountResolutionRequired;
+        try self.applyCommitted(.{ .venue_resolved = .{
+            .barrier = self.coordinator.venue_ingress.barrier,
+            .root = self.coordinator.history_root.?.root_digest,
+            .bootstrap = self.coordinator.native_account.bootstrap orelse return error.FreshAccountResolutionRequired,
+            .margin = margin_identity,
+        } });
     }
 
     fn forcedSourceArchived(self: *const CoordinatorOwner, execution: canonical.ForcedExecution) !bool {

@@ -7,10 +7,10 @@ const codec = @import("../../../persistence/snapshot_codec.zig");
 const helpers = @import("../history/coordinator_history_acceptance.zig");
 
 fn summary(index: usize, sequence: u64) coordination.ShardSummary {
-    return .{ .shard_id = @enumFromInt(index), .decision_domain = index + 1, .virtual_portfolio = index + 11, .exchange_account = 900, .publication_version = sequence, .shard_sequence = sequence, .rules_version = 1, .lease_version = 1, .reservation_atoms = 10, .spot_quantity = 0, .swap_quantity = 0, .cash_atoms = 1000, .open_orders = 0, .unknown_orders = 0, .local_gate_closed = false };
+    return .{ .shard_id = @enumFromInt(index), .decision_domain = index + 1, .virtual_portfolio = index + 11, .exchange_account = 900, .publication_version = sequence, .shard_sequence = sequence, .rules_version = 1, .lease_version = 1, .reservation_atoms = 10, .spot_quantity = 0, .swap_quantity = 0, .cash_atoms = 1000, .open_orders = 0, .unknown_orders = 0, .local_gate_closed = false, .risk_tier = 1 };
 }
 fn healthy(identity: u128, barrier: u64) coordination.CoordinationEvent {
-    return .{ .margin_observation = .{ .identity = identity, .barrier = barrier, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 } };
+    return .{ .margin_observation = .{ .identity = identity, .barrier = barrier, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1, .venue_risk_tier = 1 } };
 }
 fn publishFour(owner: *coordination.CoordinatorOwner, sequence: u64) !void {
     for (0..4) |index| try owner.apply(.{ .publish_summary = .{ .identity = sequence * 4 + index, .summary = summary(index, sequence) } });

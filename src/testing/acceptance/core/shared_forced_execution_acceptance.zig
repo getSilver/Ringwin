@@ -174,4 +174,69 @@ test "03 complete forced source closes only its instrument through typed allocat
     try std.testing.expectEqualDeep(closed, recovered.coordinator.digest());
     try std.testing.expectEqualDeep(after, owners[0].shard.canonicalStateDigest());
     try std.testing.expectEqualDeep(later, (try recovered.pendingVenueFact(.shard_0)).?);
+    try proveForcedGateRecovery(&recovered, owners, record.envelope.identity.sequence + 2);
+}
+
+fn broadcastRecovery(coordinator: *coordination.CoordinatorOwner, owners: []demo.Owner, sequence: u64, payload: canonical.Payload) !void {
+    var record = fixture.canonicalAt(60, sequence, payload).venue;
+    record.envelope.scope = .account;
+    record.envelope.instrument = null;
+    record.envelope.asset = null;
+    try coordinator.acceptVenueFact(record);
+    for (owners, 0..) |*owner, index| try std.testing.expect(try coordinator.deliverVenueFact(@enumFromInt(index), owner));
+}
+
+fn proveForcedGateRecovery(coordinator: *coordination.CoordinatorOwner, owners: []demo.Owner, first_sequence: u64) !void {
+    // The archived forced source alone cannot reopen the ingress gate.
+    try std.testing.expectError(error.AccountDeliveryPending, coordinator.resolveVenueGate(9000));
+    for (owners, 0..) |*owner, index| try std.testing.expect(try coordinator.deliverVenueFact(@enumFromInt(index), owner));
+    try std.testing.expectError(error.FreshAccountResolutionRequired, coordinator.resolveVenueGate(9000));
+    for (owners, 0..) |*owner, index| {
+        for ([_]u128{ index + 1, index + 5 }) |instrument| {
+            var margin = owner.shard.instrument_registry.get(instrument).?.margin;
+            margin.version = 3;
+            margin.instrument = instrument;
+            margin.native_settlement_atoms = true;
+            margin.native = .{ .model = .isolated_linear_usdt_v1, .tier_identity = 1, .notional_lower_atoms = 0, .notional_upper_atoms = 100000, .initial_margin_ppm = 20000, .maintenance_ppm = 11000, .maintenance_deduction_atoms = 0, .close_fee_ppm = 0, .margin_rounding_atoms = 1, .price_rounding_ticks = 1 };
+            _ = try owner.apply(fixture.atGroup(59, .{ .identity = @intCast(6000 + instrument), .account_scope = 2, .payload = .{ .margin_rules_activated = margin } }));
+            try coordinator.apply(.{ .native_margin_configuration = owner.shard.instrument_registry.get(instrument).? });
+        }
+        try coordinator.apply(.{ .publish_summary = .{ .identity = index + 9000, .summary = try coordination.shardSummaryFromShard(&owner.shard, @enumFromInt(index), 2, index + 1) } });
+    }
+    var snapshot: canonical.AccountBootstrapSnapshot = .{ .identity = 9000, .exchange_account = 2, .scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true }, .source_stream = 1, .source_sequence = first_sequence, .balance_count = 1, .position_count = 1, .margin_count = 8 };
+    const zero: canonical.AssetAmount = .{ .asset = 1, .atoms = 0 };
+    const cash: canonical.AssetAmount = .{ .asset = 1, .atoms = 97 };
+    snapshot.balances[0] = .{ .asset = 1, .total = cash, .available = cash, .held = zero, .cash_balance = cash, .liability = zero, .isolated_liability = zero, .cross_liability = zero };
+    snapshot.positions[0] = .{ .instrument = 1, .side = .long, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 10000 }, .average_price = .{ .instrument = 1, .rules_version = 1, .ticks = 10 }, .mark_price = .{ .instrument = 1, .rules_version = 1, .ticks = 10 }, .liquidation_price = .{ .instrument = 1, .rules_version = 1, .ticks = 8 }, .leverage = .{ .coefficient = 50, .scale = 0 }, .unrealized_pnl = zero, .risk_tier = 1 };
+    for (snapshot.margins[0..8], 1..) |*margin, instrument| margin.* = .{ .instrument = instrument, .amount = if (instrument == 1) .{ .asset = 1, .atoms = 2 } else zero, .initial_margin = if (instrument == 1) .{ .asset = 1, .atoms = 1 } else zero, .maintenance_margin = if (instrument == 1) .{ .asset = 1, .atoms = 1 } else zero, .isolated_equity = if (instrument == 1) .{ .asset = 1, .atoms = 2 } else zero };
+    try broadcastRecovery(coordinator, owners, first_sequence, .{ .account_bootstrap_snapshot = snapshot });
+    try broadcastRecovery(coordinator, owners, first_sequence + 1, .{ .venue_account_configuration_snapshot = .{ .identity = 9001, .exchange_account = 2, .value = .{ .account = .{ .position_mode_net = true, .contract_isolated_autonomy = true, .auto_loan = false, .spot_borrow_enabled = false, .can_read = true, .can_trade = true, .can_withdraw = false } } } });
+    for (1..9) |instrument| try broadcastRecovery(coordinator, owners, first_sequence + instrument + 1, .{ .venue_account_configuration_snapshot = .{ .identity = 9001 + instrument, .exchange_account = 2, .value = .{ .isolated_leverage = .{ .instrument = instrument, .position_mode_net = true, .margin_mode_isolated = true, .leverage = .{ .coefficient = 50, .scale = 0 } } } } });
+    try coordinator.apply(.{ .margin_observation = .{ .identity = 9000, .barrier = coordinator.coordinator.barrier, .venue_net_margin_atoms = 1, .venue_swap_quantity = 10000, .margin_mode = .isolated, .rules_version = 1 } });
+    try std.testing.expectEqual(coordination.MarginReconciliationState.healthy, coordinator.coordinator.margin_reconciliation_state);
+    const economic = owners[0].shard.economicSummary();
+    try std.testing.expectError(error.FreshAccountResolutionRequired, coordinator.resolveVenueGate(8999));
+    const store = coordinator.store;
+    var unavailable = store.vtable.*;
+    unavailable.query_order_history = unavailableClosure;
+    coordinator.store = .{ .context = store.context, .vtable = &unavailable };
+    try std.testing.expectError(error.ClosureHistoryUnavailable, coordinator.resolveVenueGate(9000));
+    try std.testing.expect(coordinator.coordinator.venue_ingress.broken);
+    coordinator.store = store;
+    try coordinator.resolveVenueGate(9000);
+    try std.testing.expect(!coordinator.coordinator.venue_ingress.broken);
+    try std.testing.expect(coordinator.coordinator.margin_gate.latched);
+    try coordinator.apply(.{ .resolve_margin_gate = 9000 });
+    try std.testing.expect(coordinator.coordinator.margin_gate.open);
+    try std.testing.expect(!owners[0].shard.operational_state.trading_authorized);
+    try std.testing.expectEqualDeep(economic, owners[0].shard.economicSummary());
+    const digest = coordinator.coordinator.digest();
+    try coordinator.checkpoint();
+    const recovered = try coordination.CoordinatorOwner.recover(coordinator.stream, coordinator.store, coordinator.io);
+    try std.testing.expectEqualDeep(digest, recovered.coordinator.digest());
+    try std.testing.expect(!recovered.coordinator.venue_ingress.broken);
+}
+
+fn unavailableClosure(_: *anyopaque, _: std.Io, _: @import("../../../persistence/business_history.zig").LookupRequest) anyerror!@import("../../../persistence/business_history.zig").LookupResult {
+    return error.ClosureHistoryUnavailable;
 }

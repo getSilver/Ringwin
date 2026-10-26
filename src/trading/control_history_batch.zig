@@ -52,6 +52,13 @@ pub fn qualify(shard: *const trading.TradingShard, origin: history.Origin, barri
     }
     for (state.latches[0..state.latch_count], 0..) |latch, i| {
         if (!latch.resolved) continue;
+        var current_gate = false;
+        for (state.gates[0..state.gate_count]) |gate| if (gate.gate_identity == latch.identity and
+            (gate.reason == .account_safety or gate.reason == .primary_lease or gate.reason == .risk_lease))
+        {
+            current_gate = true;
+        };
+        if (current_gate) continue;
         var referenced = false;
         for (state.command_history[0..state.command_count], 0..) |record, j|
             if (!selected(result.command_mask, j) and record.command.referenced_latch_identity == latch.identity) {
@@ -62,8 +69,8 @@ pub fn qualify(shard: *const trading.TradingShard, origin: history.Origin, barri
         result.count += 1;
     }
     for (state.gates[0..state.gate_count], 0..) |gate, i| {
-        // Lease gates are current authority, not retired observations.
-        if (!gate.open or gate.reason == .primary_lease or gate.reason == .risk_lease) continue;
+        // Account and lease gates remain current authority across fault episodes.
+        if (!gate.open or gate.reason == .primary_lease or gate.reason == .risk_lease or gate.reason == .account_safety) continue;
         var pinned = false;
         for (state.latches[0..state.latch_count], 0..) |latch, j|
             if (latch.identity == gate.gate_identity and !selected(result.latch_mask, j)) {
