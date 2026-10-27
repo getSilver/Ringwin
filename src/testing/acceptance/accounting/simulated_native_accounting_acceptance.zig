@@ -20,7 +20,7 @@ fn exercise(case: Case) !void {
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
-    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
     const assets = @import("../../../trading/asset_registry.zig").testDefinitions(12, 9);
     for (assets) |definition| _ = try owner.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
     var third = assets[0];
@@ -62,7 +62,7 @@ fn exercise(case: Case) !void {
     book.venue.envelope.source_stream = 999;
     _ = try owner.apply(book);
     var group: @import("../../../execution/oms.zig").IntentGroup = .{ .first_intent_sequence = 90, .count = 1 };
-    group.members[0] = .{ .intent_sequence = 90, .operation = .place, .instrument = 3, .side = .buy, .quantity = 4, .limit_price = .{ .instrument = 3, .rules_version = 1, .ticks = 200_000 } };
+    group.members[0] = .{ .portfolio = owner.shard.portfolio_identity, .intent_sequence = 90, .operation = .place, .instrument = 3, .side = .buy, .quantity = 4, .limit_price = .{ .instrument = 3, .rules_version = 1, .ticks = 200_000 } };
     _ = try owner.apply(.{ .core = .{ .identity = 90, .payload = .{ .oms_intent_group = group } } });
     try std.testing.expectEqual(@as(u8, 1), owner.shard.oms.command_history_count);
     const command = owner.shard.oms.command_history[0];
@@ -116,12 +116,20 @@ fn exercise(case: Case) !void {
         }
         try std.testing.expectEqualSlices(u8, &once, &owner.shard.canonicalStateDigest());
         if (case == .conflict) {
+            var original_fill: ?canonical.Fill = null;
+            for (batch.slice()) |record| if (record.event == .fill) {
+                original_fill = record.event.fill;
+                break;
+            };
             request.order_command.fee_atoms = 5;
             try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(request));
             const conflicting = (try adapter.tryDrain()).?;
             for (conflicting.slice()) |record| {
                 if (record.event != .fill) continue;
-                try std.testing.expectError(error.ConflictingFillIdentity, owner.apply(.{ .venue = record }));
+                var conflict = record;
+                conflict.event = .{ .fill = original_fill orelse return error.MissingCanonicalFill };
+                conflict.event.fill.fee.?.atoms = 5;
+                try std.testing.expectError(error.ConflictingFillIdentity, owner.apply(.{ .venue = conflict }));
                 break;
             }
             try std.testing.expectEqualDeep(summary, owner.shard.economicSummary());

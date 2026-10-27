@@ -20,7 +20,7 @@ test "fee adjustment keeps instrument inventory aligned through base charge refu
     var original: ?canonical.Fill = null;
     for (0..2) |leg| {
         var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 101 + leg, .count = 1 };
-        group.members[0] = .{ .intent_sequence = 101 + leg, .operation = .place, .instrument = 3, .quantity = 20, .side = if (leg == 0) .buy else .sell, .limit_price = fixture.omsPrice(3, 50_000_000) };
+        group.members[0] = .{ .portfolio = harness.owner.shard.portfolio_identity, .intent_sequence = 101 + leg, .operation = .place, .instrument = 3, .quantity = 20, .side = if (leg == 0) .buy else .sell, .limit_price = fixture.omsPrice(3, 50_000_000) };
         _ = try harness.owner.apply(fixture.atGroup(20 + leg, .{ .identity = 101 + leg, .payload = .{ .oms_intent_group = group } }));
         const command = harness.owner.shard.oms.emitted()[0];
         const fill: canonical.Fill = .{

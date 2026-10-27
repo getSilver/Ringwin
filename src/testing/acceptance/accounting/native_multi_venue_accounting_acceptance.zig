@@ -75,7 +75,7 @@ fn exercise(comptime kind: Kind, case: Case) ![32]u8 {
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
-    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
     const definitions = @import("../../../trading/asset_registry.zig").testDefinitions(12, 9);
     for (definitions) |definition| _ = try owner.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
     var extra = definitions[0];

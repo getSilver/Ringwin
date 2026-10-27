@@ -49,7 +49,7 @@ fn exercise(comptime kind: Kind) !void {
     var raw = try raw_ingress.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = venue_id });
     const owner = try gpa.create(demo.Owner);
     defer gpa.destroy(owner);
-    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
     try @import("../../contracts/venue_adapter_contract.zig").activateTestAssets(owner);
     const profile: AdapterModule.CapabilityProfile = .{
         .version = 1,

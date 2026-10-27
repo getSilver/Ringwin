@@ -340,7 +340,7 @@ test "07 capability activation rejects wrong account product venue rules config 
             1 => profile.product = .spot,
             2 => profile.venue = 21,
             3 => profile.rules_version = 2,
-            4 => profile.config_version = 2,
+            4 => profile.config_version = 0,
             5 => profile.version = 1,
             6 => profile.environment = .testnet,
             else => unreachable,
@@ -376,7 +376,7 @@ test "07 native maker capability revocation still permits an explicit safety can
     profile.supports_post_only = false;
     _ = try h.owner.apply(fixture.atGroup(47, .{ .identity = 5000, .account_scope = 20, .payload = .{ .capability_profile_activation = profile } }));
     var cancellation: trading.oms.IntentGroup = .{ .first_intent_sequence = 3, .count = 1 };
-    cancellation.members[0] = .{ .intent_sequence = 3, .strategy_instance = 9, .exchange_account = 20, .operation = .cancel, .instrument = 101, .target_order_id = 1, .expected_revision = 1 };
+    cancellation.members[0] = .{ .portfolio = order.portfolio, .intent_sequence = 3, .strategy_instance = 9, .exchange_account = 20, .operation = .cancel, .instrument = 101, .target_order_id = 1, .expected_revision = 1 };
     _ = try h.owner.apply(fixture.atGroup(48, .{ .identity = 5001, .payload = .{ .oms_intent_group = cancellation } }));
     const command = h.owner.shard.oms.findCommand(3).?;
     try std.testing.expectEqual(trading.oms.Operation.cancel, command.operation);

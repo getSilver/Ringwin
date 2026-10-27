@@ -60,54 +60,19 @@ pub const RecoveryCoordinator = struct {
     last_evidence: VenueEvidence = undefined,
 
     /// Fences restored authority immediately; restart never inherits a live authorization.
-    pub fn begin(restored: trading.TradingShard, barrier: u64) RecoveryCoordinator {
-        var coordinator: RecoveryCoordinator = .{ .shard = restored, .barrier = barrier };
+    pub fn beginInto(coordinator: *RecoveryCoordinator, restored: *const trading.TradingShard, barrier: u64) void {
+        if (&coordinator.shard != restored)
+            @memcpy(std.mem.asBytes(&coordinator.shard), std.mem.asBytes(restored));
+        coordinator.barrier = barrier;
+        coordinator.phase = .recovery_only;
+        coordinator.last_reconciliation_identity = 0;
         coordinator.shard.operational_state.trading_authorized = false;
         coordinator.shard.operational_state.mode = .recovering;
-        return coordinator;
     }
 
     /// Derives the exact economic and order evidence the Venue must corroborate.
     pub fn expectedVenueEvidence(self: *const RecoveryCoordinator) VenueEvidence {
-        const economic = self.shard.economicSummary();
-        var evidence: VenueEvidence = .{
-            .open_orders_closed = self.shard.oms.openOrdersClosed(),
-            .portfolio_quantity = economic.portfolio.swap.quantity,
-            .exchange_quantity = economic.exchange.swap.quantity,
-            .portfolio_spot_asset_atoms = economic.portfolio.spot_asset_atoms,
-            .exchange_spot_asset_atoms = economic.exchange.spot_asset_atoms,
-            .portfolio_open_cost_atoms = economic.portfolio.swap.open_cost_atoms,
-            .exchange_open_cost_atoms = economic.exchange.swap.open_cost_atoms,
-            .portfolio_spot_open_cost_atoms = economic.portfolio.spot.open_cost_atoms,
-            .exchange_spot_open_cost_atoms = economic.exchange.spot.open_cost_atoms,
-            .portfolio_cash_atoms = economic.portfolio.usdt_balance_atoms,
-            .exchange_cash_atoms = economic.exchange.usdt_balance_atoms,
-            .portfolio_fee_atoms = economic.portfolio.fee_atoms,
-            .exchange_fee_atoms = economic.exchange.fee_atoms,
-            .suspense_atoms = economic.suspense_usdt_atoms,
-            .active_reservations_atoms = blk: {
-                const reservations = self.shard.oms.activeReservations(settlement_asset) catch break :blk std.math.maxInt(i128);
-                break :blk reservations.atoms;
-            },
-            .margin_atoms = self.shard.economic_projection.portfolio.margin_atoms,
-            .ledger_closed = self.shard.economic_projection.ledger_summary.portfolio_debits_atoms == self.shard.economic_projection.ledger_summary.portfolio_credits_atoms and
-                self.shard.economic_projection.ledger_summary.exchange_debits_atoms == self.shard.economic_projection.ledger_summary.exchange_credits_atoms,
-            .reconciliation_break = economic.reconciliation_break,
-        };
-        for (self.shard.oms.orders[0..self.shard.oms.order_count]) |order| {
-            evidence.orders[evidence.order_count] = .{
-                .order_id = order.id,
-                .status = switch (order.state) {
-                    .filled, .canceled, .rejected => .found_terminal,
-                    else => .found_live,
-                },
-                .revision = order.revision,
-                .cumulative_quantity = order.cumulative_quantity,
-                .remaining_quantity = order.quantity - order.cumulative_quantity,
-            };
-            evidence.order_count += 1;
-        }
-        return evidence;
+        return expectedVenueEvidenceFor(&self.shard);
     }
 
     /// Accepts one semantic reconciliation identity and enters Ready only on exact closure.
@@ -118,7 +83,7 @@ pub const RecoveryCoordinator = struct {
             return;
         }
         if (identity < self.last_reconciliation_identity) return error.StaleReconciliationIdentity;
-        if (!venueEvidenceCloses(self.shard, evidence)) return error.VenueReconciliationMismatch;
+        if (!venueEvidenceCloses(&self.shard, evidence)) return error.VenueReconciliationMismatch;
         self.last_reconciliation_identity = identity;
         self.last_evidence = evidence;
         self.phase = .ready;
@@ -151,9 +116,50 @@ pub const RecoveryCoordinator = struct {
     }
 };
 
-fn venueEvidenceCloses(shard: trading.TradingShard, evidence: VenueEvidence) bool {
-    const coordinator: RecoveryCoordinator = .{ .shard = shard, .barrier = 1 };
-    const expected = coordinator.expectedVenueEvidence();
+fn expectedVenueEvidenceFor(shard: *const trading.TradingShard) VenueEvidence {
+    const economic = shard.economicSummary();
+    var evidence: VenueEvidence = .{
+        .open_orders_closed = shard.oms.openOrdersClosed(),
+        .portfolio_quantity = economic.portfolio.swap.quantity,
+        .exchange_quantity = economic.exchange.swap.quantity,
+        .portfolio_spot_asset_atoms = economic.portfolio.spot_asset_atoms,
+        .exchange_spot_asset_atoms = economic.exchange.spot_asset_atoms,
+        .portfolio_open_cost_atoms = economic.portfolio.swap.open_cost_atoms,
+        .exchange_open_cost_atoms = economic.exchange.swap.open_cost_atoms,
+        .portfolio_spot_open_cost_atoms = economic.portfolio.spot.open_cost_atoms,
+        .exchange_spot_open_cost_atoms = economic.exchange.spot.open_cost_atoms,
+        .portfolio_cash_atoms = economic.portfolio.usdt_balance_atoms,
+        .exchange_cash_atoms = economic.exchange.usdt_balance_atoms,
+        .portfolio_fee_atoms = economic.portfolio.fee_atoms,
+        .exchange_fee_atoms = economic.exchange.fee_atoms,
+        .suspense_atoms = economic.suspense_usdt_atoms,
+        .active_reservations_atoms = blk: {
+            const reservations = shard.oms.activeReservations(settlement_asset) catch break :blk std.math.maxInt(i128);
+            break :blk reservations.atoms;
+        },
+        .margin_atoms = shard.economic_projection.portfolio.margin_atoms,
+        .ledger_closed = shard.economic_projection.ledger_summary.portfolio_debits_atoms == shard.economic_projection.ledger_summary.portfolio_credits_atoms and
+            shard.economic_projection.ledger_summary.exchange_debits_atoms == shard.economic_projection.ledger_summary.exchange_credits_atoms,
+        .reconciliation_break = economic.reconciliation_break,
+    };
+    for (shard.oms.orders[0..shard.oms.order_count]) |order| {
+        evidence.orders[evidence.order_count] = .{
+            .order_id = order.id,
+            .status = switch (order.state) {
+                .filled, .canceled, .rejected => .found_terminal,
+                else => .found_live,
+            },
+            .revision = order.revision,
+            .cumulative_quantity = order.cumulative_quantity,
+            .remaining_quantity = order.quantity - order.cumulative_quantity,
+        };
+        evidence.order_count += 1;
+    }
+    return evidence;
+}
+
+fn venueEvidenceCloses(shard: *const trading.TradingShard, evidence: VenueEvidence) bool {
+    const expected = expectedVenueEvidenceFor(shard);
     if (evidence.order_count != shard.oms.order_count or
         evidence.portfolio_quantity != expected.portfolio_quantity or
         evidence.exchange_quantity != expected.exchange_quantity or
@@ -214,7 +220,7 @@ fn sameVenueEvidence(left: VenueEvidence, right: VenueEvidence) bool {
         left.ledger_closed == right.ledger_closed and left.reconciliation_break == right.reconciliation_break;
 }
 
-fn strategyOrdersClosed(shard: trading.TradingShard, strategy_instance: u128) bool {
+fn strategyOrdersClosed(shard: *const trading.TradingShard, strategy_instance: u128) bool {
     for (shard.oms.orders[0..shard.oms.order_count]) |order| {
         if (order.strategy_instance != strategy_instance) continue;
         switch (order.state) {
@@ -335,7 +341,7 @@ pub const Cutover = struct {
     }
 
     /// Records that the candidate consumed authoritative facts through the final barrier.
-    pub fn catchUpCandidate(self: *Cutover, authoritative: trading.TradingShard, candidate: trading.TradingShard) !void {
+    pub fn catchUpCandidate(self: *Cutover, authoritative: *const trading.TradingShard, candidate: *const trading.TradingShard) !void {
         if (self.phase != .draining) return error.InvalidCutoverTransition;
         if (candidate.authoritativeBarrier() != authoritative.authoritativeBarrier() or
             !std.mem.eql(u8, &candidate.canonicalStateDigest(), &authoritative.canonicalStateDigest()))
@@ -397,7 +403,7 @@ pub const Cutover = struct {
     }
 
     /// Proves CutoverDrain through authoritative order and Venue evidence.
-    pub fn drain(self: *Cutover, shard: trading.TradingShard, evidence: VenueEvidence) !void {
+    pub fn drain(self: *Cutover, shard: *const trading.TradingShard, evidence: VenueEvidence) !void {
         if (self.phase != .quiescing) return error.InvalidCutoverTransition;
         const orders_closed = switch (self.scope) {
             .decision_domain => shard.oms.openOrdersClosed(),
@@ -504,7 +510,7 @@ pub const Cutover = struct {
 };
 
 fn beginRecoveryFixtureInto(coordinator: *RecoveryCoordinator, restored: *const trading.TradingShard, barrier: u64) void {
-    coordinator.* = RecoveryCoordinator.begin(restored.*, barrier);
+    RecoveryCoordinator.beginInto(coordinator, restored, barrier);
 }
 
 test "restart recovery remains fenced until exact venue evidence closes" {
@@ -663,8 +669,8 @@ test "cutover drain activates exactly one version at a stable barrier" {
     var evidence: VenueEvidence = std.mem.zeroes(VenueEvidence);
     evidence.open_orders_closed = true;
     evidence.ledger_closed = true;
-    try cutover.drain(shard.*, evidence);
-    try cutover.catchUpCandidate(shard.*, shard.*);
+    try cutover.drain(shard, evidence);
+    try cutover.catchUpCandidate(shard, shard);
     const event = try cutover.activateStable(shard, &stable_journal, 40);
     try std.testing.expectEqual(@as(u64, 11), cutover.active_release);
     try std.testing.expectEqual(@as(u128, 21), cutover.active_strategy_instance);
@@ -693,8 +699,8 @@ test "cutover activation is a stable canonical fact before authority switches" {
     var evidence: VenueEvidence = std.mem.zeroes(VenueEvidence);
     evidence.open_orders_closed = true;
     evidence.ledger_closed = true;
-    try cutover.drain(shard.*, evidence);
-    try cutover.catchUpCandidate(shard.*, shard.*);
+    try cutover.drain(shard, evidence);
+    try cutover.catchUpCandidate(shard, shard);
     const activation = try cutover.activateStable(shard, &stable_journal, 40);
     try std.testing.expectEqual(@as(u64, 1), stable_journal.last_sequence);
     try std.testing.expectEqual(@as(u64, 11), shard.active_release);
@@ -742,7 +748,7 @@ test "strategy cutover persists a scoped fence and leaves unrelated orders live"
     defer std.testing.allocator.destroy(evidence_coordinator);
     beginRecoveryFixtureInto(evidence_coordinator, shard, 1);
     const evidence = evidence_coordinator.expectedVenueEvidence();
-    try cutover.drain(shard.*, evidence);
+    try cutover.drain(shard, evidence);
     try std.testing.expectEqual(@as(usize, 0), (try recovered_cutover.recoverCancelOutbox(shard, &outbox)).len);
 }
 
@@ -806,15 +812,15 @@ test "cutover failures and forward rollback never regress economic state or gene
     defer std.testing.allocator.destroy(evidence_coordinator);
     beginRecoveryFixtureInto(evidence_coordinator, shard, 1);
     const evidence = evidence_coordinator.expectedVenueEvidence();
-    try cutover.drain(shard.*, evidence);
+    try cutover.drain(shard, evidence);
     try cutover.failBeforeActivation();
     try std.testing.expectEqual(@as(u64, 10), cutover.active_release);
 
     cutover.phase = .active;
     try cutover.prepare(candidate);
     try cutover.quiesce(102);
-    try cutover.drain(shard.*, evidence);
-    try cutover.catchUpCandidate(shard.*, shard.*);
+    try cutover.drain(shard, evidence);
+    try cutover.catchUpCandidate(shard, shard);
     const replay_baseline = try std.testing.allocator.create(trading.TradingShard);
     defer std.testing.allocator.destroy(replay_baseline);
     @memcpy(std.mem.asBytes(replay_baseline), std.mem.asBytes(shard));
@@ -836,8 +842,8 @@ test "cutover failures and forward rollback never regress economic state or gene
     try cutover.quiesce(104);
     beginRecoveryFixtureInto(evidence_coordinator, shard, 1);
     const rollback_evidence = evidence_coordinator.expectedVenueEvidence();
-    try cutover.drain(shard.*, rollback_evidence);
-    try cutover.catchUpCandidate(shard.*, shard.*);
+    try cutover.drain(shard, rollback_evidence);
+    try cutover.catchUpCandidate(shard, shard);
     const rolled_back = try cutover.activateStable(shard, &stable_journal, 42);
     try std.testing.expectEqual(activated.generation + 1, rolled_back.generation);
     try std.testing.expectEqual(@as(u64, 10), rolled_back.new_release);

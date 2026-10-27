@@ -198,6 +198,7 @@ const Cycle = struct {
         var group: trading.oms.IntentGroup = .{ .first_intent_sequence = identity, .count = 1 };
         group.members[0] = intent;
         group.members[0].intent_sequence = identity;
+        group.members[0].portfolio = self.owner.shard.portfolio_identity;
         const input = fixture.atGroup(identity, .{ .identity = identity, .payload = .{ .oms_intent_group = group } });
         const when = input.core.monotonic_time + std.time.ns_per_ms;
         try self.authority.renew(&self.lease, when);
@@ -255,6 +256,7 @@ const Cycle = struct {
         var group: trading.oms.IntentGroup = .{ .first_intent_sequence = identity, .count = 1 };
         group.members[0] = intent;
         group.members[0].intent_sequence = identity;
+        group.members[0].portfolio = self.owner.shard.portfolio_identity;
         _ = try self.owner.apply(fixture.atGroup(identity, .{ .identity = identity, .payload = .{ .oms_intent_group = group } }));
         try require(self.owner.shard.oms.emitted().len == 1);
         return self.owner.shard.oms.emitted()[0];

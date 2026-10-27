@@ -64,6 +64,7 @@ const Harness = struct {
         for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, 0..) |account, instrument, index| group.members[index] = .{
             .intent_sequence = index + 1,
             .strategy_instance = 9,
+            .portfolio = 10,
             .exchange_account = account,
             .operation = .place,
             .instrument = instrument,
@@ -365,6 +366,7 @@ fn reductionGroup(sequence: u64, left: i64, right: i64) trading.oms.IntentGroup 
     for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, [_]i64{ left, right }, 0..) |account, instrument, quantity, index| group.members[index] = .{
         .intent_sequence = sequence + index,
         .strategy_instance = 9,
+        .portfolio = 10,
         .exchange_account = account,
         .operation = .place,
         .instrument = instrument,

@@ -165,10 +165,10 @@ fn runLinuxAuthoritative(init: std.process.Init, mode: RunMode) !void {
     const private_stream: durable.StreamIdentity = .{ .domain = .raw_ingress, .id = 93 };
     const decision_owner = try init.gpa.create(demo_authority.Owner);
     defer init.gpa.destroy(decision_owner);
-    decision_owner.* = switch (policy.startup) {
-        .virgin => try demo_authority.Owner.bootstrap(file_store.interface(), init.io, decision_stream),
-        .recover => try demo_authority.Owner.recoverWithIngress(file_store.interface(), init.io, decision_stream, private_stream),
-    };
+    switch (policy.startup) {
+        .virgin => try demo_authority.Owner.bootstrapInto(decision_owner, file_store.interface(), init.io, decision_stream),
+        .recover => try demo_authority.Owner.recoverWithIngressInto(decision_owner, file_store.interface(), init.io, decision_stream, private_stream),
+    }
     try policy.activateAssets(decision_owner);
     if (policy.startup == .recover and
         (decision_owner.shard.exchange_account_identity != policy.exchange_account or
@@ -697,7 +697,7 @@ fn checkOkxRawPrivateOwner(store: durable.Store, io: std.Io) !RawOwnerResult {
     defer parsed.deinit();
     const owner = try std.testing.allocator.create(demo_authority.Owner);
     defer std.testing.allocator.destroy(owner);
-    owner.* = try demo_authority.Owner.bootstrap(store, io, .{ .domain = .decision_log, .id = 91 });
+    try demo_authority.Owner.bootstrapInto(owner, store, io, .{ .domain = .decision_log, .id = 91 });
     try @import("../../contracts/venue_adapter_contract.zig").activateTestAssets(owner);
     var raw = try raw_ingress.DurableSink.init(store, io, .{ .domain = .raw_ingress, .id = 93 });
     var transport: OfflineTransport = .{};

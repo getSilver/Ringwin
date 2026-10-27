@@ -12,7 +12,7 @@ test "Order archive terminal reconciliation cannot close the window before uniqu
     defer memory.deinit();
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
-    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, .{ .domain = .decision_log, .id = 505 });
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 505 });
     const genesis = fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged);
     for (genesis) |event| _ = try owner.apply(event);
     _ = try owner.apply(fixture.atGroup(11, .{ .identity = 3, .payload = .{ .host_activated = .{

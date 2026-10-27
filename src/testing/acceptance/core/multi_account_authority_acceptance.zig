@@ -1670,7 +1670,14 @@ fn exerciseDomainHistory(owner: *demo.Owner) !void {
 }
 
 pub fn reconcileDomainAccount(owner: *demo.Owner, account: u128, gateway: *@import("../../../execution/execution_gateway.zig").Gateway) !void {
-    const state = owner.shard.accountState(account).?;
+    if (account == owner.shard.exchange_account_identity) return reconcileAccountView(owner, account, gateway, &owner.shard);
+    for (owner.shard.secondary_accounts[0..owner.shard.secondary_account_count]) |*partition| {
+        if (partition.identity == account) return reconcileAccountView(owner, account, gateway, &partition.state);
+    }
+    return error.InvalidAccountView;
+}
+
+noinline fn reconcileAccountView(owner: *demo.Owner, account: u128, gateway: *@import("../../../execution/execution_gateway.zig").Gateway, state: anytype) !void {
     const cursor = state.reconciliation_cursor;
     const window_id: u128 = if (cursor) |prior| prior.identity + 1 else 10000;
     const round: u64 = @intCast(window_id - 10000);
@@ -1714,13 +1721,13 @@ pub fn reconcileDomainAccount(owner: *demo.Owner, account: u128, gateway: *@impo
     window.venue.envelope.raw_evidence = evidence.source;
     window.venue.event.account_reconciliation_result.account_economics.?.through_utc_ns = window.venue.envelope.times.source_utc_ns.?;
     try applyAdapterInput(owner, window);
-    const after = owner.shard.accountState(account).?;
+    const after = state;
     try std.testing.expectEqual(@as(u64, 0), after.economic_fault_count);
     try std.testing.expect(after.pending_reconciliation_window != null);
     try std.testing.expect(!owner.shard.history_conflict_latched);
     try std.testing.expectEqual(@as(u64, 0), after.open_economic_unknown_time_count);
     _ = try owner.archiveReconciliationWindowHistoryForAccount(account, window_id, gateway);
-    try std.testing.expectEqual(@as(u64, 0), owner.shard.accountState(account).?.open_economic_fact_count);
+    try std.testing.expectEqual(@as(u64, 0), state.open_economic_fact_count);
 }
 
 fn failNthAppend(context: *anyopaque, io: std.Io, request: durable.Append) anyerror!void {
@@ -1808,9 +1815,10 @@ fn exerciseDispatch(owner: *demo.Owner, first_command: u64) !void {
         .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 },
         .supported_products = gateway_module.productMask(.isolated_linear_usdt) | gateway_module.productMask(.spot),
     });
+    const view = try allocator.create(trading.TradingShard);
+    defer allocator.destroy(view);
     for (owner.shard.oms.command_history[0..owner.shard.oms.command_history_count]) |command| {
-        var view: trading.TradingShard = undefined;
-        try owner.shard.copyAccountViewInto(&view, command.authority.exchange_account);
+        try owner.shard.copyAccountViewInto(view, command.authority.exchange_account);
         try gateway.observeAuthorityFromShard(&owner.shard, .{
             .account = command.authority.exchange_account,
             .effective_trading_authority = view.operational_state.effectiveTradingAuthority(),

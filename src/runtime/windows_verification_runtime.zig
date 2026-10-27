@@ -2673,12 +2673,14 @@ fn runDemoChain(init: std.process.Init, executable: []const u8, live: bool) !voi
     defer init.gpa.destroy(recovered);
     recovered.* = try durable_store.WindowsFileAdapter.openWindowsVerification(init.io, engine_dir);
     defer recovered.close(init.io);
-    const decision = try demo_authority.Owner.recover(recovered.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
+    const decision = try init.gpa.create(demo_authority.Owner);
+    defer init.gpa.destroy(decision);
+    try demo_authority.Owner.recoverInto(decision, recovered.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
     if (!decision.shard.canonical_account.valid) return error.PrivateAccountNotReady;
     var stdout_buf: [160]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &stdout_buf);
     if (live) {
-        try writeDemoEconomics(init, &decision, execution_dir, &stdout.interface);
+        try writeDemoEconomics(init, decision, execution_dir, &stdout.interface);
         try stdout.interface.writeAll("windows_demo_live=passed rest=ok private_ws=ok public_ws=ok roles=5 terminal=ok zero_exposure=ok production_qualification=false\n");
     } else try stdout.interface.writeAll("windows_demo_readonly=passed rest=ok private_ws=ok public_ws=ok roles=5 order_writes=0 production_qualification=false\n");
     try stdout.interface.flush();
@@ -2773,10 +2775,12 @@ pub fn exportDemoEvidence(init: std.process.Init, engine_dir: []const u8, execut
     defer init.gpa.destroy(store);
     store.* = .{ .dir = try std.Io.Dir.openDirAbsolute(init.io, engine_dir, .{}) };
     defer store.close(init.io);
-    const decision = try demo_authority.Owner.recover(store.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
+    const decision = try init.gpa.create(demo_authority.Owner);
+    defer init.gpa.destroy(decision);
+    try demo_authority.Owner.recoverInto(decision, store.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
     var buffer: [512]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &buffer);
-    try writeDemoEconomics(init, &decision, execution_dir, &output.interface);
+    try writeDemoEconomics(init, decision, execution_dir, &output.interface);
     try output.interface.print("windows_demo_recovered=passed replay_send_capability=false durable_dispatches={d}\n", .{decision.shard.oms.order_count});
     try output.interface.flush();
 }

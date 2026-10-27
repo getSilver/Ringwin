@@ -108,6 +108,7 @@ const Cycle = struct {
         var group: trading.oms.IntentGroup = .{ .first_intent_sequence = sequence, .count = 1 };
         group.members[0] = intent;
         group.members[0].intent_sequence = sequence;
+        group.members[0].portfolio = self.harness.owner.shard.portfolio_identity;
         const input = fixture.atGroup(sequence, .{ .identity = sequence, .payload = .{ .oms_intent_group = group } });
         const dispatch_time = input.core.monotonic_time + std.time.ns_per_ms;
         try self.harness.authority.renew(&self.harness.lease, dispatch_time);
@@ -276,7 +277,7 @@ fn runContinuous() !void {
                 id.* = try cycle.place();
                 if (round == 0) {
                     old_group[shard] = .{ .first_intent_sequence = sequence, .count = 1 };
-                    old_group[shard].members[0] = .{ .intent_sequence = sequence, .operation = .place, .instrument = 3, .quantity = 20, .limit_price = fixture.omsPrice(3, 50_000_000) };
+                    old_group[shard].members[0] = .{ .portfolio = cycle.harness.owner.shard.portfolio_identity, .intent_sequence = sequence, .operation = .place, .instrument = 3, .quantity = 20, .limit_price = fixture.omsPrice(3, 50_000_000) };
                 }
                 try cycle.terminal(id.*);
             }
@@ -369,6 +370,7 @@ fn unsent(cycle: *Cycle, intent: trading.oms.Intent) !trading.oms.Command {
     var group: trading.oms.IntentGroup = .{ .first_intent_sequence = sequence, .count = 1 };
     group.members[0] = intent;
     group.members[0].intent_sequence = sequence;
+    group.members[0].portfolio = cycle.harness.owner.shard.portfolio_identity;
     _ = try cycle.harness.owner.apply(fixture.atGroup(sequence, .{ .identity = sequence, .payload = .{ .oms_intent_group = group } }));
     try std.testing.expectEqual(@as(usize, 1), cycle.harness.owner.shard.oms.emitted().len);
     return cycle.harness.owner.shard.oms.emitted()[0];

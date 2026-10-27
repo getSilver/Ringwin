@@ -185,9 +185,10 @@ test "08 four shared account Owners preserve 320 forced sources allocations post
                 for (transaction.postings[0..transaction.posting_count]) |posting| sum += posting.amount;
                 try std.testing.expectEqual(@as(i128, 0), sum);
             }
+            _ = try shard.owner.apply(.{ .core = .{ .identity = id, .payload = .{ .safety_gate_change = .{ .gate_identity = id, .target_identity = 1, .kind = .latched, .reason = .venue_forced_execution, .open = true } } } });
+            try std.testing.expect(!shard.owner.shard.operational_state.effectiveTradingAuthority());
             const resolve = fixture.resolveLatchCommand(30000 + round * 4 + index, shard.owner.shard.operational_state.version, id);
             _ = try shard.owner.apply(resolve);
-            _ = try shard.owner.apply(.{ .core = .{ .identity = id, .payload = .{ .safety_gate_change = .{ .gate_identity = id, .target_identity = 1, .kind = .latched, .reason = .venue_forced_execution, .open = true } } } });
             _ = try shard.owner.apply(fixture.lifecycleCommand(40000 + round * 4 + index, shard.owner.shard.operational_state.version, .stop_keep_positions));
             _ = try shard.owner.archiveControlHistory(shard.gateway);
             var facts: [2]canonical.EconomicFactRef = undefined;

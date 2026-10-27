@@ -93,8 +93,8 @@ test "owned residual finer lot sale keeps real Fill quantity without creating gr
     try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 91 });
     try fixtures.initializeResidualEconomicsOwner(owner);
     var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 21001, .count = 2 };
-    group.members[0] = .{ .intent_sequence = 21001, .strategy_instance = 9, .exchange_account = 20, .instrument = 103, .operation = .place, .side = .sell, .quantity = 1, .limit_price = .{ .instrument = 103, .rules_version = 1, .ticks = 100000000 } };
-    group.members[1] = .{ .intent_sequence = 21002, .strategy_instance = 9, .exchange_account = 30, .instrument = 102, .operation = .place, .quantity = 10000, .limit_price = .{ .instrument = 102, .rules_version = 1, .ticks = 10 } };
+    group.members[0] = .{ .portfolio = 10, .intent_sequence = 21001, .strategy_instance = 9, .exchange_account = 20, .instrument = 103, .operation = .place, .side = .sell, .quantity = 1, .limit_price = .{ .instrument = 103, .rules_version = 1, .ticks = 100000000 } };
+    group.members[1] = .{ .portfolio = 10, .intent_sequence = 21002, .strategy_instance = 9, .exchange_account = 30, .instrument = 102, .operation = .place, .quantity = 10000, .limit_price = .{ .instrument = 102, .rules_version = 1, .ticks = 10 } };
     _ = try owner.apply(fixture.atGroup(62, .{ .identity = 21001, .payload = .{ .oms_intent_group = group } }));
     try std.testing.expectEqual(@import("../../../trading/trading_shard_event.zig").RejectReason.none, owner.shard.last_reject_reason);
     try std.testing.expectEqual(@as(u16, 6), owner.shard.oms.order_count);

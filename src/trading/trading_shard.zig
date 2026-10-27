@@ -1082,7 +1082,7 @@ pub const TradingShard = struct {
         if (event.envelope.venue != configured.venue) return error.CanonicalScopeMismatch;
     }
 
-    pub fn apply(self: *TradingShard, input: CanonicalEvent) !ApplyResult {
+    pub noinline fn apply(self: *TradingShard, input: CanonicalEvent) !ApplyResult {
         const before = self.authoritativeBarrier();
         var candidate: TradingShard = undefined;
         copyTradingState(&candidate, self);
@@ -1131,6 +1131,8 @@ pub const TradingShard = struct {
         var input_digest: [32]u8 = undefined;
         hasher.final(&input_digest);
         const before = self.authoritativeBarrier();
+        const previous_count = self.open_economic_fact_count;
+        const previous_cursor = self.reconciliation_cursor;
         const result = self.applyUnfinalized(input, true, rollback, null) catch |err| {
             if (self.authoritativeBarrier() != before) {
                 try self.trace.finalizeInput(before, input_digest);
@@ -1148,7 +1150,7 @@ pub const TradingShard = struct {
             try self.trace.appendResidualCommitment(self.cycles.residual_lifecycle.live_count, residual_digest);
             self.cycles.residual_commitment_fact = self.authoritativeBarrier();
         }
-        try self.finalizeEconomicInput(previous.open_economic_fact_count, previous.reconciliation_cursor, input_digest);
+        try self.finalizeEconomicInput(previous_count, previous_cursor, input_digest);
         if (self.authoritativeBarrier() != before) try self.trace.finalizeInput(before, input_digest);
         // The original public path published before materializing its borrowed result.
         publish_on_error.* = true;
@@ -1193,16 +1195,21 @@ pub const TradingShard = struct {
         }
     }
 
-    fn applyUnfinalized(self: *TradingShard, input: CanonicalEvent, allow_cold_staging: bool, rollback: ?*const TradingShard, coverage: ?VerifiedAccountCoverage) anyerror!ApplyResult {
-        if ((self.deferred_history_admission_count != 0 or (allow_cold_staging and (self.pending_history_candidate != null or self.pending_safety_history_candidate != null))) and !historySafetyInput(input))
-            return error.HistoryLookupPending;
-        if (allow_cold_staging) if (self.historyCandidateFor(input) catch |err| {
+    noinline fn stageHistoryInput(self: *TradingShard, input: CanonicalEvent, rollback: ?*const TradingShard) anyerror!?ApplyResult {
+        if (self.historyCandidateFor(input) catch |err| {
             if (err == error.HistorySafetyCapacity and input == .venue) try self.retainDeferredHistoryAdmission(input);
             return err;
         }) |pending| {
             const staged: CoreEvent = .{ .identity = std.math.cast(u64, pending.request.pending_id) orelse return error.HistoryPendingIdentityCapacity, .payload = .{ .history_candidate_started = pending } };
-            return if (rollback) |previous| self.applyCoreOnOwnedCandidate(previous, staged) else self.applyCore(staged);
-        };
+            return if (rollback) |previous| try self.applyCoreOnOwnedCandidate(previous, staged) else try self.applyCore(staged);
+        }
+        return null;
+    }
+
+    fn applyUnfinalized(self: *TradingShard, input: CanonicalEvent, allow_cold_staging: bool, rollback: ?*const TradingShard, coverage: ?VerifiedAccountCoverage) anyerror!ApplyResult {
+        if ((self.deferred_history_admission_count != 0 or (allow_cold_staging and (self.pending_history_candidate != null or self.pending_safety_history_candidate != null))) and !historySafetyInput(input))
+            return error.HistoryLookupPending;
+        if (allow_cold_staging) if (try self.stageHistoryInput(input, rollback)) |result| return result;
 
         // Process admission cannot emit durable rejection facts: restart
         // replay reconstructs committed facts independently of this fence.
@@ -1239,7 +1246,7 @@ pub const TradingShard = struct {
 
     fn applyVenueOnOwnedCandidate(self: *TradingShard, previous: *const TradingShard, event: canonical.EventRecord, verified_original: bool, coverage: ?VerifiedAccountCoverage) !ApplyResult {
         var publish = false;
-        defer if (!publish) copyTradingState(self, previous);
+        defer if (!publish) restoreTradingView(self, previous);
         const account_failure_before = self.canonical_account.failure;
         const market_failure_generation_before = self.canonical_market.failure_generation;
         const before = self.authoritativeBarrier();
@@ -1268,7 +1275,7 @@ pub const TradingShard = struct {
             } else if ((event.event == .fill or event.event == .fee_adjustment or event.event == .funding_settlement or
                 (event.event == .account_reconciliation_result and event.event.account_reconciliation_result.account_economics != null)) and event.envelope.exchange_account == self.exchange_account_identity)
             {
-                copyTradingState(self, previous);
+                restoreTradingView(self, previous);
                 self.oms.begin();
                 if (event.event == .account_reconciliation_result) {
                     if (std.math.cast(u64, event.event.account_reconciliation_result.identity)) |identity| {
@@ -1290,7 +1297,7 @@ pub const TradingShard = struct {
             } else if ((event.event == .account_bootstrap_snapshot or event.event == .account_observed) and
                 (err == error.UnknownAssetDefinition or err == error.AssetAmountOutOfRange))
             {
-                copyTradingState(self, previous);
+                restoreTradingView(self, previous);
                 self.oms.begin();
                 try self.latchEconomicFault(event, if (err == error.UnknownAssetDefinition) .unknown_asset else .overflow);
                 publish = true;
@@ -1335,8 +1342,8 @@ pub const TradingShard = struct {
         return self.applyCoreInPlace(event) catch |err| {
             if (event.payload != .asset_definition_activated and err != error.TombstoneFactConflict and
                 err != error.ArchivedFactOutsideRetention and err != error.TerminalFactConflict and err != error.LateEconomicFact and err != error.UnresolvedSettlementBoundary and err != error.ConflictingEconomicIdentity and
-                !((event.payload == .history_candidate_verified or event.payload == .history_safety_candidate_verified) and self.economic_fault_count > previous.economic_fault_count))
-                copyTradingState(self, previous);
+                !((event.payload == .history_candidate_verified or event.payload == .history_safety_candidate_verified) and self.economic_fault_count > (if (self.account_view != previous.account_view and self.account_view != 0) previous.secondary_accounts[self.account_view - 1].state.economic_fault_count else previous.economic_fault_count)))
+                restoreTradingView(self, previous);
             return err;
         };
     }
@@ -1405,79 +1412,78 @@ pub const TradingShard = struct {
         };
     }
 
-    fn checkpointPins(self: *const TradingShard) !Trace {
-        var target = self.trace;
+    fn checkpointPinsInto(self: *const TradingShard, target: *Trace) !void {
+        @memcpy(std.mem.asBytes(target), std.mem.asBytes(&self.trace));
         target.pinned_len = 0;
-        for (self.cycles.records[0..self.cycles.count]) |cycle| try self.pinFact(&target, cycle.fact_sequence);
+        for (self.cycles.records[0..self.cycles.count]) |cycle| try self.pinFact(target, cycle.fact_sequence);
         for (self.cycles.closed[0..self.cycles.closed_count]) |closed| {
-            try self.pinFact(&target, closed.fact_sequence);
-            try self.pinFact(&target, closed.record.fact_sequence);
-            for (closed.proof.residuals) |maybe| if (maybe) |residual| try self.pinFact(&target, residual.rule_fact_sequence);
+            try self.pinFact(target, closed.fact_sequence);
+            try self.pinFact(target, closed.record.fact_sequence);
+            for (closed.proof.residuals) |maybe| if (maybe) |residual| try self.pinFact(target, residual.rule_fact_sequence);
         }
-        if (self.cycles.residual_commitment_fact != 0) try self.pinFact(&target, self.cycles.residual_commitment_fact);
-        for (self.cycles.residual_rule_barriers[0..self.cycles.residual_rule_count]) |barrier| try self.pinFact(&target, barrier);
-        for (self.cycles.residual_lifecycle.receipts[0..self.cycles.residual_lifecycle.receipt_count]) |receipt| try self.pinFact(&target, receipt.source.fact_sequence);
-        for (self.cycles.residual_lifecycle.credits[0..self.cycles.residual_lifecycle.credit_count]) |credit| try self.pinFact(&target, credit.source.fact_sequence);
-        try self.pinFact(&target, self.domain_binding_fact_sequence);
-        for (self.asset_registry.entries[0..self.asset_registry.count]) |entry| try self.pinFact(&target, entry.barrier);
+        if (self.cycles.residual_commitment_fact != 0) try self.pinFact(target, self.cycles.residual_commitment_fact);
+        for (self.cycles.residual_rule_barriers[0..self.cycles.residual_rule_count]) |barrier| try self.pinFact(target, barrier);
+        for (self.cycles.residual_lifecycle.receipts[0..self.cycles.residual_lifecycle.receipt_count]) |receipt| try self.pinFact(target, receipt.source.fact_sequence);
+        for (self.cycles.residual_lifecycle.credits[0..self.cycles.residual_lifecycle.credit_count]) |credit| try self.pinFact(target, credit.source.fact_sequence);
+        try self.pinFact(target, self.domain_binding_fact_sequence);
+        for (self.asset_registry.entries[0..self.asset_registry.count]) |entry| try self.pinFact(target, entry.barrier);
         for (self.instrument_registry.entries[0..self.instrument_registry.count]) |entry| {
-            try self.pinFact(&target, entry.rules_barrier);
-            try self.pinFact(&target, entry.margin_barrier);
-            try self.pinFact(&target, entry.trading_barrier);
-            for (entry.strategy_authorizations[0..entry.strategy_authorization_count]) |authorization| try self.pinFact(&target, authorization.barrier);
-            try self.pinFact(&target, entry.capability_barrier);
+            try self.pinFact(target, entry.rules_barrier);
+            try self.pinFact(target, entry.margin_barrier);
+            try self.pinFact(target, entry.trading_barrier);
+            for (entry.strategy_authorizations[0..entry.strategy_authorization_count]) |authorization| try self.pinFact(target, authorization.barrier);
+            try self.pinFact(target, entry.capability_barrier);
         }
         for (self.secondary_accounts[0..self.secondary_account_count]) |partition| {
-            try self.pinFact(&target, partition.state.risk_lease_fact_sequence);
-            try self.pinFact(&target, partition.state.reconciliation_started_fact);
-            try self.pinFact(&target, partition.state.reconciliation_completed_fact);
-            if (partition.state.reconciliation_archive) |commit| try self.pinFact(&target, try std.math.add(u64, commit.receipt.root.barrier, 1));
-            try self.pinFact(&target, partition.state.coordinator_binding_fact);
-            try self.pinFact(&target, partition.state.open_economic_commitment_sequence);
+            try self.pinFact(target, partition.state.risk_lease_fact_sequence);
+            try self.pinFact(target, partition.state.reconciliation_started_fact);
+            try self.pinFact(target, partition.state.reconciliation_completed_fact);
+            if (partition.state.reconciliation_archive) |commit| try self.pinFact(target, try std.math.add(u64, commit.receipt.root.barrier, 1));
+            try self.pinFact(target, partition.state.coordinator_binding_fact);
+            try self.pinFact(target, partition.state.open_economic_commitment_sequence);
             for (partition.state.instrument_registry.entries[0..partition.state.instrument_registry.count]) |entry| {
-                try self.pinFact(&target, entry.rules_barrier);
-                try self.pinFact(&target, entry.margin_barrier);
-                try self.pinFact(&target, entry.trading_barrier);
-                for (entry.strategy_authorizations[0..entry.strategy_authorization_count]) |authorization| try self.pinFact(&target, authorization.barrier);
-                try self.pinFact(&target, entry.capability_barrier);
+                try self.pinFact(target, entry.rules_barrier);
+                try self.pinFact(target, entry.margin_barrier);
+                try self.pinFact(target, entry.trading_barrier);
+                for (entry.strategy_authorizations[0..entry.strategy_authorization_count]) |authorization| try self.pinFact(target, authorization.barrier);
+                try self.pinFact(target, entry.capability_barrier);
             }
         }
-        try self.pinFact(&target, self.coordinator_binding_fact);
-        try self.pinFact(&target, self.host_activation_fact_sequence);
-        try self.pinFact(&target, self.strategy_activation_fact_sequence);
+        try self.pinFact(target, self.coordinator_binding_fact);
+        try self.pinFact(target, self.host_activation_fact_sequence);
+        try self.pinFact(target, self.strategy_activation_fact_sequence);
         for (self.portfolio_authorities[0..self.portfolio_authority_count]) |authority| {
-            try self.pinFact(&target, authority.host_activation_fact_sequence);
-            try self.pinFact(&target, authority.strategy_activation_fact_sequence);
+            try self.pinFact(target, authority.host_activation_fact_sequence);
+            try self.pinFact(target, authority.strategy_activation_fact_sequence);
         }
-        try self.pinFact(&target, self.authority_control_barrier);
-        for (self.control_fact_sequences[0..self.operational_state.command_count]) |sequence| try self.pinFact(&target, sequence);
+        try self.pinFact(target, self.authority_control_barrier);
+        for (self.control_fact_sequences[0..self.operational_state.command_count]) |sequence| try self.pinFact(target, sequence);
         for ([_]EventKind{ .primary_lease_granted, .risk_lease_granted, .strategy_activated, .canonical_account_reconciliation_started, .canonical_account_reconciliation }) |kind| {
-            if (self.latestFact(kind)) |fact| try self.pinFact(&target, fact.sequence);
+            if (self.latestFact(kind)) |fact| try self.pinFact(target, fact.sequence);
         }
         for (self.oms.command_history[0..self.oms.command_history_count]) |command| {
             if (!self.commandNeedsDispatchFacts(command.order_id)) continue;
-            try self.pinFact(&target, command.risk_decision_identity);
-            try self.pinFact(&target, command.reservation_identity);
+            try self.pinFact(target, command.risk_decision_identity);
+            try self.pinFact(target, command.reservation_identity);
             const refs = command.authority;
-            for ([_]u64{ refs.trading_authorization.barrier, refs.primary_lease.barrier, refs.risk_lease.barrier, refs.capability.barrier, refs.instrument_rules.barrier, refs.margin_rules.barrier, refs.instrument_trading.barrier, refs.config.barrier, refs.deadline_barrier }) |sequence| try self.pinFact(&target, sequence);
+            for ([_]u64{ refs.trading_authorization.barrier, refs.primary_lease.barrier, refs.risk_lease.barrier, refs.capability.barrier, refs.instrument_rules.barrier, refs.margin_rules.barrier, refs.instrument_trading.barrier, refs.config.barrier, refs.deadline_barrier }) |sequence| try self.pinFact(target, sequence);
         }
-        if (self.last_order_archive) |commit| try self.pinFact(&target, try std.math.add(u64, commit.receipt.root.barrier, 1));
-        if (self.last_fill_archive) |commit| try self.pinFact(&target, try std.math.add(u64, commit.receipt.root.barrier, 1));
-        if (self.last_forced_archive) |commit| try self.pinFact(&target, try std.math.add(u64, commit.receipt.root.barrier, 1));
-        if (self.last_control_archive) |commit| try self.pinFact(&target, try std.math.add(u64, commit.receipt.root.barrier, 1));
-        if (self.last_funding_archive) |commit| try self.pinFact(&target, try std.math.add(u64, commit.receipt.root.barrier, 1));
-        if (self.last_reconciliation_archive) |commit| try self.pinFact(&target, try std.math.add(u64, commit.receipt.root.barrier, 1));
-        if (self.open_economic_commitment_sequence != 0) try self.pinFact(&target, self.open_economic_commitment_sequence);
-        for (self.deferred_history_admissions[0..self.deferred_history_admission_count]) |admission| try self.pinFact(&target, admission.fact_sequence);
-        if (self.pending_history_candidate) |pending| try self.pinFact(&target, pending.original.sequence);
-        if (self.pending_safety_history_candidate) |pending| try self.pinFact(&target, pending.original.sequence);
+        if (self.last_order_archive) |commit| try self.pinFact(target, try std.math.add(u64, commit.receipt.root.barrier, 1));
+        if (self.last_fill_archive) |commit| try self.pinFact(target, try std.math.add(u64, commit.receipt.root.barrier, 1));
+        if (self.last_forced_archive) |commit| try self.pinFact(target, try std.math.add(u64, commit.receipt.root.barrier, 1));
+        if (self.last_control_archive) |commit| try self.pinFact(target, try std.math.add(u64, commit.receipt.root.barrier, 1));
+        if (self.last_funding_archive) |commit| try self.pinFact(target, try std.math.add(u64, commit.receipt.root.barrier, 1));
+        if (self.last_reconciliation_archive) |commit| try self.pinFact(target, try std.math.add(u64, commit.receipt.root.barrier, 1));
+        if (self.open_economic_commitment_sequence != 0) try self.pinFact(target, self.open_economic_commitment_sequence);
+        for (self.deferred_history_admissions[0..self.deferred_history_admission_count]) |admission| try self.pinFact(target, admission.fact_sequence);
+        if (self.pending_history_candidate) |pending| try self.pinFact(target, pending.original.sequence);
+        if (self.pending_safety_history_candidate) |pending| try self.pinFact(target, pending.original.sequence);
         std.mem.sort(Fact, target.pinned[0..target.pinned_len], {}, struct {
             fn less(_: void, a: Fact, b: Fact) bool {
                 return a.sequence < b.sequence;
             }
         }.less);
         target.pinned_root = target.pinnedDigest();
-        return target;
     }
 
     pub fn checkpointReceipt(self: *const TradingShard, stream: u64, generation: u64, archive_root: [32]u8) !CheckpointReceipt {
@@ -1485,7 +1491,8 @@ pub const TradingShard = struct {
         if (stream == 0 or self.trace.len == 0 or std.mem.allEqual(u8, &archive_root, 0) or
             generation != try std.math.add(u64, self.checkpointGeneration(), 1) or
             (self.checkpoint != null and self.checkpoint.?.stream != stream)) return error.InvalidCheckpointReceipt;
-        const pins = try self.checkpointPins();
+        var pins: Trace = undefined;
+        try self.checkpointPinsInto(&pins);
         var receipt: CheckpointReceipt = .{
             .stream = stream,
             .generation = generation,
@@ -1608,7 +1615,7 @@ pub const TradingShard = struct {
     }
 
     fn secondaryAccountIndex(self: *const TradingShard, identity: u128) ?usize {
-        for (self.secondary_accounts[0..self.secondary_account_count], 0..) |partition, index|
+        for (self.secondary_accounts[0..self.secondary_account_count], 0..) |*partition, index|
             if (partition.identity == identity) return index;
         return null;
     }
@@ -1621,12 +1628,9 @@ pub const TradingShard = struct {
     }
 
     noinline fn applyAccountCandidate(self: *TradingShard, previous: *const TradingShard, input: CanonicalEvent, publish_on_error: *bool, index: usize) anyerror!ApplyResult {
-        var previous_view: TradingShard = undefined;
-        copyTradingState(&previous_view, previous);
-        previous_view.exchangeAccountView(index);
         self.exchangeAccountView(index);
         defer self.exchangeAccountView(index);
-        return self.applyCandidate(&previous_view, input, publish_on_error, &previous_view);
+        return self.applyCandidate(previous, input, publish_on_error, previous);
     }
 
     noinline fn normalizedAccountDigest(self: *const TradingShard) [32]u8 {
@@ -1814,13 +1818,20 @@ pub const TradingShard = struct {
     }
 
     /// Publishes only complete verified fact groups into caller-owned recovery storage.
-    pub fn restoreSegmentsInto(shard: *TradingShard, encoded: []const u8, stable_tails: []const []const u8) !RestoreMetadata {
+    pub noinline fn restoreSegmentsInto(shard: *TradingShard, encoded: []const u8, stable_tails: []const []const u8) !RestoreMetadata {
+        var scratch: TradingShard = undefined;
+        return restoreSegmentsWithScratchInto(shard, encoded, stable_tails, &scratch);
+    }
+
+    /// Scratch is unpublished transaction storage distinct from the restored state.
+    pub fn restoreSegmentsWithScratchInto(shard: *TradingShard, encoded: []const u8, stable_tails: []const []const u8, scratch: *TradingShard) !RestoreMetadata {
+        std.debug.assert(shard != scratch);
         const barrier = try restoreSnapshotInto(shard, encoded);
         var status: journal.ScanStatus = .clean;
         for (stable_tails, 0..) |tail, index| {
             var reader = try journal.Reader.init(tail);
             if (reader.next_sequence != try std.math.add(u64, shard.authoritativeBarrier(), 1)) return error.SnapshotJournalGap;
-            status = try replayReaderInto(&reader, shard);
+            status = try replayReaderWithScratchInto(&reader, shard, scratch);
             if (status == .truncated_tail and index + 1 != stable_tails.len) return error.SnapshotJournalGap;
         }
         return .{ .barrier = barrier, .status = status };
@@ -4482,8 +4493,51 @@ pub const TradingShard = struct {
         return null;
     }
 
-    fn handleOmsGroup(self: *TradingShard, input: CoreEvent, group: oms.IntentGroup) !?OrderCommand {
+    const IntentGroupUndo = struct {
+        const margin_fields = .{ "portfolio_margin_buffer_atoms", "exchange_margin_buffer_atoms", "portfolio_buffer_bps", "exchange_buffer_bps", "portfolio_liquidation_distance_ticks", "exchange_liquidation_distance_ticks", "portfolio_margin_gate", "exchange_margin_gate" };
+        const Margin = struct {
+            portfolio_margin_buffer_atoms: i128,
+            exchange_margin_buffer_atoms: i128,
+            portfolio_buffer_bps: i64,
+            exchange_buffer_bps: i64,
+            portfolio_liquidation_distance_ticks: i64,
+            exchange_liquidation_distance_ticks: i64,
+            portfolio_margin_gate: risk_module.MarginGate,
+            exchange_margin_gate: risk_module.MarginGate,
+        };
+        oms: oms.Oms,
+        trace: Trace,
+        operational_state: operational.State,
+        cycles: @FieldType(TradingShard, "cycles"),
+        margins: [4]Margin,
+
+        fn capture(undo: *IntentGroupUndo, shard: *const TradingShard) void {
+            inline for (.{ "oms", "trace", "operational_state", "cycles" }) |name|
+                @memcpy(std.mem.asBytes(&@field(undo, name)), std.mem.asBytes(&@field(shard, name)));
+            inline for (margin_fields) |name| @field(undo.margins[0], name) = @field(shard, name);
+            for (shard.secondary_accounts[0..shard.secondary_account_count], 1..) |*account, index|
+                inline for (margin_fields) |name| {
+                    @field(undo.margins[index], name) = @field(account.state, name);
+                };
+        }
+
+        fn restore(undo: *const IntentGroupUndo, shard: *TradingShard) void {
+            inline for (.{ "oms", "trace", "operational_state", "cycles" }) |name|
+                @memcpy(std.mem.asBytes(&@field(shard, name)), std.mem.asBytes(&@field(undo, name)));
+            inline for (margin_fields) |name| @field(shard, name) = @field(undo.margins[0], name);
+            for (shard.secondary_accounts[0..shard.secondary_account_count], 1..) |*account, index|
+                inline for (margin_fields) |name| {
+                    @field(account.state, name) = @field(undo.margins[index], name);
+                };
+        }
+    };
+
+    noinline fn handleOmsGroup(self: *TradingShard, input: CoreEvent, group: oms.IntentGroup) !?OrderCommand {
         if (self.decision_domain_identity != 0) return self.handleDomainGroup(input, group);
+        return self.handleLegacyOmsGroup(input, group);
+    }
+
+    noinline fn handleLegacyOmsGroup(self: *TradingShard, input: CoreEvent, group: oms.IntentGroup) !?OrderCommand {
         if (!self.genesisReady()) return error.GenesisIncomplete;
         switch (try self.oms.groupIdentityStatus(group)) {
             .duplicate => return null,
@@ -4493,15 +4547,15 @@ pub const TradingShard = struct {
             },
             .fresh => {},
         }
-        var candidate: TradingShard = undefined;
-        copyTradingState(&candidate, self);
-        const qualified = candidate.qualifyOmsGroup(group) catch |err| switch (err) {
+        var undo: IntentGroupUndo = undefined;
+        undo.capture(self);
+        const qualified = self.qualifyOmsGroup(group) catch |err| switch (err) {
             error.MarginSafetyGateClosed => {
-                try candidate.rejectSubmittedIntent(group, .strategy_intent_rejected, .margin_safety_gate_closed);
-                copyTradingState(self, &candidate);
+                try self.rejectSubmittedIntent(group, .strategy_intent_rejected, .margin_safety_gate_closed);
                 return null;
             },
             error.UnsupportedOrderSpec, error.CapabilityUnsupported => {
+                undo.restore(self);
                 try self.rejectSubmittedIntent(group, .strategy_intent_rejected, if (err == error.CapabilityUnsupported) .capability_unsupported else .unsupported_order_spec);
                 return null;
             },
@@ -4533,6 +4587,7 @@ pub const TradingShard = struct {
                     error.TradingNotAuthorized, error.DeRiskTargetViolation, error.StrategyCutoverFenced => .authorization_closed,
                     else => unreachable,
                 };
+                undo.restore(self);
                 try self.rejectSubmittedIntent(group, if (reason == .authorization_closed) .strategy_intent_rejected else .risk_rejected_lease, reason);
                 return null;
             },
@@ -4540,21 +4595,19 @@ pub const TradingShard = struct {
         };
         var refs: [oms_module.max_group_members]oms_module.RiskFactRefs = undefined;
         for (qualified.group.members[0..qualified.group.count], 0..) |intent, index| {
-            try candidate.trace.append(.risk_accepted, intent.intent_sequence);
-            refs[index].decision = candidate.authoritativeBarrier();
-            try candidate.trace.append(.risk_reservation_created, intent.intent_sequence);
-            refs[index].reservation = candidate.authoritativeBarrier();
-            refs[index].authority = try candidate.dispatchAuthorityRefsForStrategy(intent.instrument, if (input.time_presence.monotonic) input.monotonic_time else 0, refs[index].decision, intent.strategy_instance);
+            try self.trace.append(.risk_accepted, intent.intent_sequence);
+            refs[index].decision = self.authoritativeBarrier();
+            try self.trace.append(.risk_reservation_created, intent.intent_sequence);
+            refs[index].reservation = self.authoritativeBarrier();
+            refs[index].authority = try self.dispatchAuthorityRefsForStrategy(intent.instrument, if (input.time_presence.monotonic) input.monotonic_time else 0, refs[index].decision, intent.strategy_instance);
         }
-        try candidate.oms.applyQualifiedGroup(qualified.group, group, refs[0..qualified.group.count]);
-        try candidate.adjustMarginBuffersForReservationChange(qualified.reservation_atoms);
-        try candidate.trace.append(.oms_intent_group, group.first_intent_sequence);
-        copyTradingState(self, &candidate);
-
+        try self.oms.applyQualifiedGroup(qualified.group, group, refs[0..qualified.group.count]);
+        try self.adjustMarginBuffersForReservationChange(qualified.reservation_atoms);
+        try self.trace.append(.oms_intent_group, group.first_intent_sequence);
         return null;
     }
 
-    fn handleDomainGroup(self: *TradingShard, input: CoreEvent, original: oms.IntentGroup) !?OrderCommand {
+    noinline fn handleDomainGroup(self: *TradingShard, input: CoreEvent, original: oms.IntentGroup) !?OrderCommand {
         switch (try self.oms.groupIdentityStatus(original)) {
             .duplicate => return null,
             .conflict => {
@@ -4573,18 +4626,18 @@ pub const TradingShard = struct {
             @as(usize, self.oms.intent_history_count) + original.count > oms.max_intent_history - reserve or
             @as(usize, self.oms.command_history_count) + original.count > oms.max_command_history - reserve)
             return error.AdmissionCapacity;
-        var candidate: TradingShard = undefined;
-        copyTradingState(&candidate, self);
-        const initial_view = candidate.account_view;
-        if (initial_view != 0) candidate.exchangeAccountView(initial_view - 1);
-        candidate.admitDomainGroup(input, original) catch |err| {
+        const initial_view = self.account_view;
+        if (initial_view != 0) self.exchangeAccountView(initial_view - 1);
+        defer if (initial_view != 0) self.exchangeAccountView(initial_view - 1);
+        var undo: IntentGroupUndo = undefined;
+        undo.capture(self);
+        self.admitDomainGroup(input, original) catch |err| {
             const reason = domainAdmissionRejection(err) orelse return err;
+            undo.restore(self);
             if (reason == .margin_safety_gate_closed) self.oms.recovery_only = true;
             try self.rejectSubmittedIntent(original, .strategy_intent_rejected, reason);
             return null;
         };
-        if (initial_view != 0) candidate.exchangeAccountView(initial_view - 1);
-        copyTradingState(self, &candidate);
         return null;
     }
 
@@ -4774,7 +4827,7 @@ pub const TradingShard = struct {
         };
     }
 
-    fn handleHistoryVerified(self: *TradingShard, input: CoreEvent) !?OrderCommand {
+    noinline fn handleHistoryVerified(self: *TradingShard, input: CoreEvent) !?OrderCommand {
         if (self.pending_safety_history_candidate) |pending| if (pending.request.pending_id == input.payload.history_candidate_verified.request.pending_id) {
             const main = self.pending_history_candidate;
             const main_member = self.pending_history_member_index;
@@ -4923,8 +4976,80 @@ pub const TradingShard = struct {
         return .{ .pending_id = activation.activation_identity, .key = .{ .origin = root.origin, .identity = .{ .strategy_fence = activation.new_strategy_instance } }, .candidate_payload_digest = history.hash(try snapshot_codec.encodeBare(&bytes, StrategyCutoverFence{ .strategy_instance = activation.new_strategy_instance })), .original_input_digest = try acceptedOriginalDigest(.{ .core = original }), .root_digest = root.root_digest, .epoch = root.epoch, .barrier = root.barrier };
     }
 
+    noinline fn handleControlCommand(self: *TradingShard, input: CoreEvent, command: operational.ControlCommand) !?OrderCommand {
+        const keep_positions = command.kind == .stop_keep_positions;
+        const preserved = if (keep_positions)
+            self.captureLifecycleEconomics()
+        else
+            LifecycleEconomics{};
+        const action = try self.operational_state.applyCommand(command, input.wall_time);
+        if (!action.changed) return null;
+        if (command.kind == .freeze_residual or command.kind == .unfreeze_residual) {
+            const request = command.residual orelse return error.InvalidControlCommand;
+            const live = self.cycles.residual_lifecycle.find(request.strategy, request.first_sequence, request.member) orelse return error.UnknownResidual;
+            const account = self.accountState(live.account) orelse return error.InvalidResidualFreeze;
+            const portfolio_owned = if (self.deployment.sealed)
+                self.deployment.ownsPortfolio(self.decision_domain_identity, live.portfolio)
+            else
+                live.portfolio == account.portfolio_identity;
+            const portfolio = account.economic_projection.portfolioLayer(live.portfolio) orelse return error.InvalidResidualFreeze;
+            if (!portfolio_owned or !input.time_presence.wall or input.wall_time == 0) return error.InvalidResidualFreeze;
+            if (command.kind == .freeze_residual) {
+                const frozen = try self.cycles.reservedAtoms(live.account, live.portfolio, live.asset);
+                if (self.oms.recovery_only or account.open_economic_fact_count != 0 or account.economic_fault_count != 0 or account.economic_projection.reconciliation_break or
+                    request.atoms > portfolio.spotInventoryAtoms(live.asset) - frozen or
+                    request.atoms > account.economic_projection.exchange.spotInventoryAtoms(live.asset) - frozen) return error.ResidualFreezeInFlight;
+                for (self.oms.orders[0..self.oms.order_count]) |order| {
+                    if (order.exchange_account != live.account) continue;
+                    if (order.state == .unknown or (order.side == .sell and (order.cumulative_quantity > try account.economic_projection.appliedCanonicalFillQuantity(order.id) or order.reservation_active or (order.state != .filled and order.state != .canceled and order.state != .rejected)))) return error.ResidualFreezeInFlight;
+                }
+            }
+            try self.cycles.residual_lifecycle.freeze(request, command.kind == .unfreeze_residual);
+        }
+        if (command.kind == .start_recovery) {
+            try self.applyOperationalGate(.{
+                .gate_identity = primary_lease_gate_identity,
+                .target_identity = command.target_identity,
+                .kind = .self_recovering,
+                .reason = .primary_lease,
+                .open = self.fencing_token != 0,
+                .continuity_proven = self.fencing_token != 0,
+            });
+            try self.applyOperationalGate(.{
+                .gate_identity = risk_lease_gate_identity,
+                .target_identity = command.target_identity,
+                .kind = .self_recovering,
+                .reason = .risk_lease,
+                .open = self.risk_lease_atoms > 0,
+                .continuity_proven = self.risk_lease_atoms > 0,
+            });
+        }
+        if (action.cancel_open_orders)
+            try self.oms.cancelOpenOrders(action.cancel_increasing_only);
+        if (!self.operational_state.trading_authorized)
+            try self.revokeHostActivations(input.identity);
+        if (keep_positions) {
+            if (action.cancel_increasing_only or
+                self.operational_state.mode != .stopped or
+                preserved.de_risk_target_position != self.operational_state.target_position)
+                return error.KeepPositionsMisreadAsDeRisk;
+            try self.assertLifecycleEconomicsPreserved(preserved);
+            try self.assertClosures();
+        }
+        try self.trace.append(.control_command_applied, input.identity);
+        self.control_fact_sequences[self.operational_state.command_count - 1] = self.authoritativeBarrier();
+        if (changesTradingAuthorization(command.kind))
+            self.authority_control_barrier = self.authoritativeBarrier();
+        return null;
+    }
+
     fn handle(self: *TradingShard, input: CoreEvent) !?OrderCommand {
         if (self.decision_domain_identity != 0) try self.validateAccountScope(input);
+        if (input.payload == .history_candidate_verified) return self.handleHistoryVerified(input);
+        return self.handleOther(input);
+    }
+
+    noinline fn handleOther(self: *TradingShard, input: CoreEvent) !?OrderCommand {
         if (input.payload == .version_activation_history_verified) {
             const verified = input.payload.version_activation_history_verified;
             var original = input;
@@ -4977,7 +5102,6 @@ pub const TradingShard = struct {
             if (!pending.original_was_admissible) self.trace.events[self.trace.len - 1].reject_reason = .stale_canonical_source;
             return null;
         }
-        if (input.payload == .history_candidate_verified) return self.handleHistoryVerified(input);
         if (input.payload == .forced_archive_committed) {
             const commit = input.payload.forced_archive_committed;
             const origin = try self.businessOrigin();
@@ -5114,7 +5238,8 @@ pub const TradingShard = struct {
             if (self.checkpoint) |previous| if (std.meta.eql(previous, receipt)) return null;
             const expected = try self.checkpointReceipt(receipt.stream, receipt.generation, receipt.archive_root);
             if (!std.meta.eql(expected, receipt)) return error.InvalidCheckpointReceipt;
-            var retained = try self.checkpointPins();
+            var retained: Trace = undefined;
+            try self.checkpointPinsInto(&retained);
             retained.base_sequence = receipt.barrier;
             retained.base_history_head = receipt.history_head;
             retained.base_input_head = receipt.input_head;
@@ -5174,71 +5299,7 @@ pub const TradingShard = struct {
             .order_archive_committed, .fill_archive_committed, .funding_archive_committed, .reconciliation_archive_committed, .control_archive_committed, .forced_archive_committed, .version_activation_history_verified => unreachable,
             .history_candidate_started, .history_candidate_verified, .history_safety_candidate_verified => unreachable,
             .asset_definition_activated => |definition| return self.handleAssetDefinition(input, definition),
-            .control_command => |command| {
-                const keep_positions = command.kind == .stop_keep_positions;
-                const preserved = if (keep_positions)
-                    self.captureLifecycleEconomics()
-                else
-                    LifecycleEconomics{};
-                const action = try self.operational_state.applyCommand(command, input.wall_time);
-                if (!action.changed) return null;
-                if (command.kind == .freeze_residual or command.kind == .unfreeze_residual) {
-                    const request = command.residual orelse return error.InvalidControlCommand;
-                    const live = self.cycles.residual_lifecycle.find(request.strategy, request.first_sequence, request.member) orelse return error.UnknownResidual;
-                    const account = self.accountState(live.account) orelse return error.InvalidResidualFreeze;
-                    const portfolio_owned = if (self.deployment.sealed)
-                        self.deployment.ownsPortfolio(self.decision_domain_identity, live.portfolio)
-                    else
-                        live.portfolio == account.portfolio_identity;
-                    const portfolio = account.economic_projection.portfolioLayer(live.portfolio) orelse return error.InvalidResidualFreeze;
-                    if (!portfolio_owned or !input.time_presence.wall or input.wall_time == 0) return error.InvalidResidualFreeze;
-                    if (command.kind == .freeze_residual) {
-                        const frozen = try self.cycles.reservedAtoms(live.account, live.portfolio, live.asset);
-                        if (self.oms.recovery_only or account.open_economic_fact_count != 0 or account.economic_fault_count != 0 or account.economic_projection.reconciliation_break or
-                            request.atoms > portfolio.spotInventoryAtoms(live.asset) - frozen or
-                            request.atoms > account.economic_projection.exchange.spotInventoryAtoms(live.asset) - frozen) return error.ResidualFreezeInFlight;
-                        for (self.oms.orders[0..self.oms.order_count]) |order| {
-                            if (order.exchange_account != live.account) continue;
-                            if (order.state == .unknown or (order.side == .sell and (order.cumulative_quantity > try account.economic_projection.appliedCanonicalFillQuantity(order.id) or order.reservation_active or (order.state != .filled and order.state != .canceled and order.state != .rejected)))) return error.ResidualFreezeInFlight;
-                        }
-                    }
-                    try self.cycles.residual_lifecycle.freeze(request, command.kind == .unfreeze_residual);
-                }
-                if (command.kind == .start_recovery) {
-                    try self.applyOperationalGate(.{
-                        .gate_identity = primary_lease_gate_identity,
-                        .target_identity = command.target_identity,
-                        .kind = .self_recovering,
-                        .reason = .primary_lease,
-                        .open = self.fencing_token != 0,
-                        .continuity_proven = self.fencing_token != 0,
-                    });
-                    try self.applyOperationalGate(.{
-                        .gate_identity = risk_lease_gate_identity,
-                        .target_identity = command.target_identity,
-                        .kind = .self_recovering,
-                        .reason = .risk_lease,
-                        .open = self.risk_lease_atoms > 0,
-                        .continuity_proven = self.risk_lease_atoms > 0,
-                    });
-                }
-                if (action.cancel_open_orders)
-                    try self.oms.cancelOpenOrders(action.cancel_increasing_only);
-                if (!self.operational_state.trading_authorized)
-                    try self.revokeHostActivations(input.identity);
-                if (keep_positions) {
-                    if (action.cancel_increasing_only or
-                        self.operational_state.mode != .stopped or
-                        preserved.de_risk_target_position != self.operational_state.target_position)
-                        return error.KeepPositionsMisreadAsDeRisk;
-                    try self.assertLifecycleEconomicsPreserved(preserved);
-                    try self.assertClosures();
-                }
-                try self.trace.append(.control_command_applied, input.identity);
-                self.control_fact_sequences[self.operational_state.command_count - 1] = self.authoritativeBarrier();
-                if (changesTradingAuthorization(command.kind))
-                    self.authority_control_barrier = self.authoritativeBarrier();
-            },
+            .control_command => |command| return self.handleControlCommand(input, command),
             .recovery_completed => {
                 try self.operational_state.recoveryCompleted();
                 try self.trace.append(.recovery_completed, input.identity);
@@ -7780,7 +7841,10 @@ pub fn recoverStableInto(destination: *TradingShard, initial: *const TradingShar
 
 fn replayReaderInto(reader: *journal.Reader, shard: *TradingShard) !journal.ScanStatus {
     var candidate: TradingShard = undefined;
+    return replayReaderWithScratchInto(reader, shard, &candidate);
+}
 
+fn replayReaderWithScratchInto(reader: *journal.Reader, shard: *TradingShard, candidate: *TradingShard) !journal.ScanStatus {
     while (true) {
         const next = try reader.next();
         const first_record = switch (next) {
@@ -7788,7 +7852,7 @@ fn replayReaderInto(reader: *journal.Reader, shard: *TradingShard) !journal.Scan
             .record => |record| record,
         };
         if (first_record.flags & 0xff != journal.input_flag) return error.OrphanDerivedFact;
-        @memcpy(std.mem.asBytes(&candidate), std.mem.asBytes(shard));
+        @memcpy(std.mem.asBytes(candidate), std.mem.asBytes(shard));
         const input = try decodeStableInput(first_record);
         const before = candidate.authoritativeBarrier();
         var replay_error: ?anyerror = null;
@@ -7800,7 +7864,7 @@ fn replayReaderInto(reader: *journal.Reader, shard: *TradingShard) !journal.Scan
         // the public apply transaction and another full TradingShard copy.
         var publish_on_error = false;
         _ = candidate.applyOwnedCandidate(shard, input, &publish_on_error) catch |err| {
-            if (!publish_on_error) copyTradingState(&candidate, shard);
+            if (!publish_on_error) copyTradingState(candidate, shard);
             replay_error = err;
         };
         candidate.recovery_admission_pending = admission_pending;
@@ -7830,7 +7894,7 @@ fn replayReaderInto(reader: *journal.Reader, shard: *TradingShard) !journal.Scan
             };
             try validateReplayRecord(record, expected, input, index == 0);
         }
-        @memcpy(std.mem.asBytes(shard), std.mem.asBytes(&candidate));
+        @memcpy(std.mem.asBytes(shard), std.mem.asBytes(candidate));
     }
 }
 
@@ -7926,21 +7990,26 @@ test "recovery retains admission fence and durable rejection without publishing 
 }
 
 test "asset definition activation rejects rescaling and survives snapshot" {
-    var shard = TradingShard{};
+    const shard = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(shard);
+    shard.* = .{};
     var log = journal.Journal.init();
     const definition: canonical.AssetDefinition = .{ .asset = 1, .atomic_scale = 12, .version = 1, .source_identity = 9, .source_digest = @splat(7), .source_kind = .test_fixture, .max_single_atoms = 1_000_000_000_000, .max_balance_atoms = 10_000_000_000_000, .max_cumulative_atoms = 100_000_000_000_000, .max_quantity_lots = 1000, .max_price_ticks = 1000, .max_rescale_power = 12, .max_postings = 4 };
-    _ = try applyStable(&shard, &log, .{ .core = .{ .identity = 1, .payload = .{ .asset_definition_activated = definition } } });
+    _ = try applyStable(shard, &log, .{ .core = .{ .identity = 1, .payload = .{ .asset_definition_activated = definition } } });
     try std.testing.expectEqual(@as(u8, 12), shard.activatedAssets().get(1).?.definition.atomic_scale);
     try std.testing.expect(!shard.genesisReady());
     var changed = definition;
     changed.version = 2;
     changed.atomic_scale = 6;
-    try std.testing.expectError(error.AssetPrecisionChange, applyStable(&shard, &log, .{ .core = .{ .identity = 2, .payload = .{ .asset_definition_activated = changed } } }));
+    try std.testing.expectError(error.AssetPrecisionChange, applyStable(shard, &log, .{ .core = .{ .identity = 2, .payload = .{ .asset_definition_activated = changed } } }));
     try std.testing.expectEqual(@as(u8, 12), shard.activatedAssets().get(1).?.definition.atomic_scale);
     try log.seal();
-    var bytes: [@import("../persistence/durable_store.zig").max_snapshot_bytes]u8 = undefined;
-    const restored = try TradingShard.restoreSnapshot(try shard.snapshot(&log, shard.authoritativeBarrier(), &bytes));
-    try std.testing.expectEqualDeep(shard.activatedAssets(), restored.shard.activatedAssets());
+    const bytes = try std.testing.allocator.alloc(u8, @import("../persistence/durable_store.zig").max_snapshot_bytes);
+    defer std.testing.allocator.free(bytes);
+    const restored = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(restored);
+    _ = try TradingShard.restoreSnapshotInto(restored, try shard.snapshot(&log, shard.authoritativeBarrier(), bytes));
+    try std.testing.expectEqualDeep(shard.activatedAssets(), restored.activatedAssets());
 }
 
 test "asset definition idempotence conflicts regression and invalid ranges are durable" {
@@ -8116,6 +8185,12 @@ fn coldCoreTestRoot() history.Root {
 }
 
 // Avoid Debug's full-state assignment temporaries; the transaction still owns exactly one candidate copy.
+fn restoreTradingView(destination: *TradingShard, previous: *const TradingShard) void {
+    const view = destination.account_view;
+    copyTradingState(destination, previous);
+    if (view != previous.account_view) destination.exchangeAccountView(view - 1);
+}
+
 fn copyTradingState(destination: *TradingShard, source: *const TradingShard) void {
     @memcpy(std.mem.asBytes(destination), std.mem.asBytes(source));
 }

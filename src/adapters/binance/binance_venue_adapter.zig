@@ -1095,7 +1095,7 @@ test "Binance scoped Spot snapshots stay unresolved without combined product and
         const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
         const owner = try allocator.create(demo.Owner);
         defer allocator.destroy(owner);
-        owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+        try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
         const assets = @import("../../trading/asset_registry.zig").testDefinitions(12, 9);
         for (assets) |definition| _ = try owner.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
         for (fixture.genesisEvents(.{ .strategy_identity = 40, .config_version = 1, .activation_identity = 50, .activation_barrier = 1 }, .cash)) |original| {

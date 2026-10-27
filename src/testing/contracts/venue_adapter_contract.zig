@@ -36,7 +36,7 @@ pub fn exerciseEconomicFaultRecovery(batch: canonical.AdapterOutputBatch) !void 
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
-    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
     try activateTestAssets(owner);
     _ = try owner.apply(.{ .core = .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 3, .quantity_denominator = 10_000, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = batch.events[0].envelope.venue } } } });
     _ = try owner.apply(.{ .core = .{ .identity = 2, .payload = .{ .margin_rules_activated = .{ .version = 1 } } } });

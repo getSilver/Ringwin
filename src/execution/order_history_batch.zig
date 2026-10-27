@@ -473,6 +473,7 @@ test "order history batch rejects partial shared action group release under one 
 
 test "order history batch stores one dispatch body under command and CID identities" {
     var builder: Builder = .{ .origin = .{ .stream = .{ .domain = .decision_log, .id = 804 }, .account = 2 }, .qualification = undefined };
+    builder.qualification.exchange_account = 2;
     const body = [_]u8{ 8, 11, 17, 31 };
     try builder.add(.{ .dispatch_command = 31 }, body);
     const client = try @import("../model/canonical_event.zig").ClientOrderId.init("shared-command-cid");

@@ -313,6 +313,8 @@ pub const Owner = struct {
     io: std.Io,
     stream: durable.StreamIdentity,
     shard: trading.TradingShard = .{},
+    // Single-writer transaction scratch avoids nesting a full shard on the production stack.
+    transaction_scratch: trading.TradingShard = undefined,
     decision_journal: journal.Journal = journal.Journal.init(),
     ready: bool = false,
     closed: bool = false,
@@ -429,7 +431,7 @@ pub const Owner = struct {
         } else {
             const tails = if (recovered.tail_count != 0) recovered.tail_segments[0..recovered.tail_count] else &.{recovered.tail};
             // Store verifies continuity; replay publishes only complete verified fact groups.
-            _ = trading.TradingShard.restoreSegmentsInto(recovered_shard, checkpoint_view.core_snapshot, tails) catch return error.DecisionLogUnavailable;
+            _ = trading.TradingShard.restoreSegmentsWithScratchInto(recovered_shard, checkpoint_view.core_snapshot, tails, &owner.transaction_scratch) catch return error.DecisionLogUnavailable;
         }
         if (recovered_shard.authoritativeBarrier() != recovered.committed_barrier) return error.DecisionLogUnavailable;
         if (recovered_shard.decision_stream_identity != 0 and recovered_shard.decision_stream_identity != stream.id) return error.DecisionLogUnavailable;
@@ -695,16 +697,14 @@ pub const Owner = struct {
         return self.apply(.{ .core = committed });
     }
 
-    // Cold-history staging can recurse through apply before a business input
-    // reaches this transaction. Keep its large unpublished candidate out of
-    // those outer policy frames and finish this frame before further staging.
+    // History staging finishes before this single-writer scratch is reused.
     noinline fn applyCommittedCandidate(self: *Owner, input: trading.CanonicalEvent) !?trading.OrderCommand {
-        var candidate: trading.TradingShard = undefined;
-        @memcpy(std.mem.asBytes(&candidate), std.mem.asBytes(&self.shard));
+        const candidate = &self.transaction_scratch;
+        @memcpy(std.mem.asBytes(candidate), std.mem.asBytes(&self.shard));
         var candidate_journal = self.decision_journal;
         const before = candidate_journal.last_sequence;
         var rejected: ?anyerror = null;
-        const command = trading.applyStableOnCandidate(&candidate, &self.shard, &candidate_journal, input) catch |err| blk: {
+        const command = trading.applyStableOnCandidate(candidate, &self.shard, &candidate_journal, input) catch |err| blk: {
             if (err == error.RecoveryAdmissionPending) return err;
             rejected = err;
             break :blk null;
@@ -739,7 +739,7 @@ pub const Owner = struct {
             self.closeAdmission();
             return error.DecisionLogUnavailable;
         };
-        @memcpy(std.mem.asBytes(&self.shard), std.mem.asBytes(&candidate));
+        @memcpy(std.mem.asBytes(&self.shard), std.mem.asBytes(candidate));
         self.decision_journal = candidate_journal;
         if (rejected) |err| return err;
         return command;
@@ -835,10 +835,10 @@ pub const Owner = struct {
         if (self.shard.pending_history_candidate != null or self.shard.pending_safety_history_candidate != null) return error.HistoryLookupDeferred;
         const order = self.shard.oms.orderById(order_id) orelse return error.UnknownOrder;
         const account = if (self.shard.decision_domain_identity != 0) order.exchange_account else self.shard.exchange_account_identity;
-        var account_view: trading.TradingShard = undefined;
+        const account_view = &self.transaction_scratch;
         const archive_shard: *const trading.TradingShard = if (account != self.shard.exchange_account_identity) blk: {
-            try self.shard.copyAccountViewInto(&account_view, account);
-            break :blk &account_view;
+            try self.shard.copyAccountViewInto(account_view, account);
+            break :blk account_view;
         } else &self.shard;
         gateway.completePreviousOrderArchive(&self.shard) catch |err| {
             self.closeAdmission();
@@ -891,10 +891,10 @@ pub const Owner = struct {
     }
 
     pub noinline fn archiveFillHistoryForAccount(self: *Owner, account: u128, fill_id: u64, gateway: *execution.Gateway) !history.Root {
-        var account_view: trading.TradingShard = undefined;
-        if (self.shard.decision_domain_identity != 0) try self.shard.copyAccountViewInto(&account_view, account) else {
+        const account_view = &self.transaction_scratch;
+        if (self.shard.decision_domain_identity != 0) try self.shard.copyAccountViewInto(account_view, account) else {
             if (account != self.shard.exchange_account_identity) return error.CanonicalScopeMismatch;
-            @memcpy(std.mem.asBytes(&account_view), std.mem.asBytes(&self.shard));
+            @memcpy(std.mem.asBytes(account_view), std.mem.asBytes(&self.shard));
         }
         if (!self.ready or self.closed or self.checkpoint_pending or self.committing_order_archive) return error.DecisionLogUnavailable;
         if (self.shard.pending_history_candidate != null or self.shard.pending_safety_history_candidate != null or self.shard.deferred_history_admission_count != 0) return error.HistoryLookupDeferred;
@@ -933,10 +933,10 @@ pub const Owner = struct {
     pub noinline fn archiveForcedExecutionHistory(self: *Owner, forced_id: u64, coordinator: *const @import("../../portfolio/account_coordinator.zig").CoordinatorOwner, gateway: *execution.Gateway) !history.Root {
         if (!self.ready or self.closed or self.checkpoint_pending or self.committing_order_archive or coordinator.closed) return error.DecisionLogUnavailable;
         const account = coordinator.coordinator.exchange_account;
-        var account_view: trading.TradingShard = undefined;
+        const account_view = &self.transaction_scratch;
         const archive_shard: *const trading.TradingShard = if (account != self.shard.exchange_account_identity) blk: {
-            try self.shard.copyAccountViewInto(&account_view, account);
-            break :blk &account_view;
+            try self.shard.copyAccountViewInto(account_view, account);
+            break :blk account_view;
         } else &self.shard;
         const expected_origin = archive_shard.coordinator_history_origin orelse return error.ForcedArchivePinned;
         if (!std.meta.eql(expected_origin, history.Origin{ .account = coordinator.coordinator.exchange_account, .stream = coordinator.stream })) return error.InvalidCoordinatorBinding;
@@ -995,10 +995,10 @@ pub const Owner = struct {
     }
 
     pub noinline fn archiveFundingHistoryForAccount(self: *Owner, account: u128, funding_id: u64, gateway: *execution.Gateway) !history.Root {
-        var account_view: trading.TradingShard = undefined;
-        if (self.shard.decision_domain_identity != 0) try self.shard.copyAccountViewInto(&account_view, account) else {
+        const account_view = &self.transaction_scratch;
+        if (self.shard.decision_domain_identity != 0) try self.shard.copyAccountViewInto(account_view, account) else {
             if (account != self.shard.exchange_account_identity) return error.CanonicalScopeMismatch;
-            @memcpy(std.mem.asBytes(&account_view), std.mem.asBytes(&self.shard));
+            @memcpy(std.mem.asBytes(account_view), std.mem.asBytes(&self.shard));
         }
 
         if (!self.ready or self.closed or self.checkpoint_pending or self.committing_order_archive) return error.DecisionLogUnavailable;
@@ -1033,10 +1033,10 @@ pub const Owner = struct {
     }
 
     pub noinline fn archiveReconciliationWindowHistoryForAccount(self: *Owner, account: u128, window_id: u128, gateway: *execution.Gateway) !history.Root {
-        var account_view: trading.TradingShard = undefined;
-        if (self.shard.decision_domain_identity != 0) try self.shard.copyAccountViewInto(&account_view, account) else {
+        const account_view = &self.transaction_scratch;
+        if (self.shard.decision_domain_identity != 0) try self.shard.copyAccountViewInto(account_view, account) else {
             if (account != self.shard.exchange_account_identity) return error.CanonicalScopeMismatch;
-            @memcpy(std.mem.asBytes(&account_view), std.mem.asBytes(&self.shard));
+            @memcpy(std.mem.asBytes(account_view), std.mem.asBytes(&self.shard));
         }
 
         if (!self.ready or self.closed or self.checkpoint_pending or self.committing_order_archive) return error.DecisionLogUnavailable;
@@ -1047,7 +1047,7 @@ pub const Owner = struct {
         };
         if (self.shard.last_business_archive_kind != null and self.shard.last_business_archive_kind != .order) try gateway.acknowledgeEconomicHistory(&self.shard);
         const origin = try self.shard.businessOrigin();
-        var builder = try @import("../../portfolio/reconciliation_history_batch.zig").build(&account_view, window_id, origin, self.shard.authoritativeBarrier());
+        var builder = try @import("../../portfolio/reconciliation_history_batch.zig").build(account_view, window_id, origin, self.shard.authoritativeBarrier());
         const previous = self.shard.business_history_root;
         var view = try builder.batch(previous, if (previous) |root| root.epoch else 1);
         const qualification_digest = builder.qualification.digest();
@@ -1371,7 +1371,7 @@ test "Demo owner commits before publication and recovers only a complete barrier
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try std.testing.allocator.create(Owner);
     defer std.testing.allocator.destroy(owner);
-    owner.* = try Owner.bootstrap(memory.interface(), undefined, stream);
+    try Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
     try std.testing.expectError(error.DecisionLogUnavailable, owner.source());
     const gateway = try std.testing.allocator.create(execution.Gateway);
     defer std.testing.allocator.destroy(gateway);
@@ -1469,7 +1469,9 @@ test "Demo owner closes persistence faults at their last proven barrier" {
     for (cases) |case| {
         var memory = durable.MemoryAdapter.init();
         defer memory.deinit();
-        var owner = try Owner.bootstrap(memory.interface(), undefined, stream);
+        const owner = try std.testing.allocator.create(Owner);
+        defer std.testing.allocator.destroy(owner);
+        try Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
         if (case.seal) {
             _ = try owner.apply(genesis[0]);
             memory.injectFaultAt(.eio, case.point);
@@ -1482,7 +1484,7 @@ test "Demo owner closes persistence faults at their last proven barrier" {
         try std.testing.expectEqual(durable.GateState.closed, memory.interface().safetyGate());
         try std.testing.expectEqual(case.expected_last, recovered.last_sequence);
         try std.testing.expectEqual(case.expected_barrier, recovered.committed_barrier);
-        try std.testing.expectError(error.DecisionLogUnavailable, Owner.recover(memory.interface(), undefined, stream));
+        try std.testing.expectError(error.DecisionLogUnavailable, Owner.recoverInto(owner, memory.interface(), undefined, stream));
     }
 }
 
@@ -1517,7 +1519,7 @@ fn checkOwnerCheckpointRounds(store: durable.Store, io: std.Io) ![32]u8 {
     const allocator = std.testing.allocator;
     const owner = try allocator.create(Owner);
     defer allocator.destroy(owner);
-    owner.* = try Owner.bootstrap(store, io, stream);
+    try Owner.bootstrapInto(owner, store, io, stream);
     const recovered = try allocator.create(Owner);
     defer allocator.destroy(recovered);
     const restored = try allocator.create(trading.TradingShard);
@@ -1606,7 +1608,7 @@ test "Checkpoint owner file interruptions preserve coherent Unknown fill economi
             @call(.never_inline, initializeFileAdapterInto, .{ reference, reference_temp.dir });
             const clean = try std.testing.allocator.create(Owner);
             defer std.testing.allocator.destroy(clean);
-            clean.* = try Owner.bootstrap(reference.interface(), io, stream);
+            try Owner.bootstrapInto(clean, reference.interface(), io, stream);
             _ = try setupOwnerCheckpointFixture(clean);
             try clean.checkpoint();
             const old = try std.testing.allocator.create(trading.TradingShard);
@@ -1653,7 +1655,7 @@ test "Checkpoint owner file interruptions preserve coherent Unknown fill economi
                 @call(.never_inline, initializeFileAdapterInto, .{ adapter, temp.dir });
                 const owner = try std.testing.allocator.create(Owner);
                 defer std.testing.allocator.destroy(owner);
-                owner.* = try Owner.bootstrap(adapter.interface(), io, stream);
+                try Owner.bootstrapInto(owner, adapter.interface(), io, stream);
                 _ = try setupOwnerCheckpointFixture(owner);
                 try owner.checkpoint();
                 if (!case.apply_input) _ = try owner.apply(input);
@@ -1722,7 +1724,7 @@ test "Checkpoint owner explicitly resumes each durable checkpoint interruption w
         const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 904 };
         const owner = try std.testing.allocator.create(Owner);
         defer std.testing.allocator.destroy(owner);
-        owner.* = try Owner.bootstrap(memory.interface(), undefined, stream);
+        try Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
         for (fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged)) |event|
             _ = try owner.apply(event);
         try owner.sealBootstrap();
@@ -1801,7 +1803,7 @@ test "Checkpoint owner durable private bundle owns its seed and rejects mixed me
             const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 990 };
             const owner = try std.testing.allocator.create(Owner);
             defer std.testing.allocator.destroy(owner);
-            owner.* = try Owner.bootstrap(memory.interface(), undefined, stream);
+            try Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
             const fixture = @import("../../testing/support/trading_shard_fixture.zig");
             const genesis = fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged);
             _ = try owner.apply(genesis[0]);
@@ -1887,7 +1889,7 @@ test "Checkpoint owner rejects a valid receipt bound to a foreign decision strea
             const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 994 };
             const owner = try std.testing.allocator.create(Owner);
             defer std.testing.allocator.destroy(owner);
-            owner.* = try Owner.bootstrap(memory.interface(), undefined, stream);
+            try Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
             const genesis = @import("../../testing/support/trading_shard_fixture.zig").genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged);
             _ = try owner.apply(genesis[0]);
             var sealed = owner.decision_journal;
@@ -1982,7 +1984,7 @@ fn checkDemoPolicyGateway(fail_persistence: bool) !void {
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try std.testing.allocator.create(Owner);
     defer std.testing.allocator.destroy(owner);
-    owner.* = try Owner.bootstrap(memory.interface(), undefined, stream);
+    try Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
     const definitions = @import("../../trading/asset_registry.zig").testDefinitions(6, 8);
     parsed.value.asset_definitions = &definitions;
     try parsed.value.activateAssetsForOfflineValidation(owner);
@@ -2384,7 +2386,7 @@ test "optimization checkpoint scratch rejects short storage and owner alias befo
         const storage = try allocator.create(Storage);
         defer allocator.destroy(storage);
         const owner = &storage.owner;
-        owner.* = try Owner.bootstrap(memory.interface(), undefined, stream);
+        try Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
         for (fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged)) |event|
             _ = try owner.apply(event);
         try owner.sealBootstrap();

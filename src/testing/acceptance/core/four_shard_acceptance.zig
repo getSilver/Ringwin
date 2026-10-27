@@ -23,9 +23,9 @@ const place_fee_atoms: i128 = 400_000;
 const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
 pub const acceptance_schema_version: u16 = production_contract.acceptance_schema_version;
-// StateDigestV14 / SemanticAuthorityDigestV4 / journal46 / state50 / canonical16 / registry44 + Coordinator v10;
+// journal50 / state54 / registry48 / Coordinator v18;
 // recaptured only after economics and three-path recovery equality.
-const expected_shared_summary = "de2aa92c369803c21202e1f30c8ad73632fa736779679e1e94018830b8ddb31c";
+const expected_shared_summary = "e72fa7ccbb7ad47d5d7fe3998f779802d58690d46e8831544726bd195d5ad423";
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
     return trading.applyStable(shard, stable_journal, .{ .core = input });
@@ -242,7 +242,7 @@ fn sharedSummary(
     var encoded_barrier: [8]u8 = undefined;
     std.mem.writeInt(u64, &encoded_barrier, barrier, .little);
     hasher.update(&encoded_barrier);
-    for (shards) |shard| hasher.update(&shard.canonicalStateDigest());
+    for (shards) |*shard| hasher.update(&shard.canonicalStateDigest());
     hasher.update(coordinator_digest);
     var result: [Sha256.digest_length]u8 = undefined;
     hasher.final(&result);
@@ -276,9 +276,77 @@ pub const FourShardEvidence = struct {
     shard_digests: [max_shards][Sha256.digest_length]u8,
     coordinator_digest: [Sha256.digest_length]u8,
     shared_summary: [Sha256.digest_length]u8,
+    healthy_shared_summary: [Sha256.digest_length]u8,
     owned_command_count: u8,
     replay_send_capability: bool,
 };
+
+// Exercise successful admission separately from the later unresolved forced-execution trajectory.
+noinline fn proveHealthyRecovery(world: *World, allocator: std.mem.Allocator) ![Sha256.digest_length]u8 {
+    var snapshots: [max_shards][]const u8 = undefined;
+    var tails: [max_shards][]const u8 = undefined;
+    for (0..max_shards) |index| {
+        try world.publishDerivedSummary(index);
+        var sealed = world.journals[index];
+        try sealed.seal();
+        snapshots[index] = try world.shards[index].snapshot(&sealed, world.shards[index].authoritativeBarrier(), &shard_snapshot_storage[index]);
+        tail_journals[index] = trading.journal.Journal.initAt(world.shards[index].authoritativeBarrier() + 1);
+        try tail_journals[index].seal();
+        tails[index] = tail_journals[index].bytes();
+    }
+    const encoded = try world.coordinator.snapshot(&coordinator_snapshot_storage);
+    var empty = coordination.CoordinationJournal.initAt(1);
+    try empty.seal();
+    const recovered = try allocator.create(coordination.AccountRecovery);
+    defer allocator.destroy(recovered);
+    try coordination.AccountRecovery.beginWithCoordinatorTailInto(recovered, encoded, empty.bytes(), snapshots, tails);
+    try std.testing.expectError(error.FreshMarginObservationRequired, recovered.completeCoordinatorRecovery());
+    const observation = try world.projectedObservation(8001);
+    _ = try recovered.coordinator.reconcileMargin(observation);
+    // A crash after reconciliation must discard process admission and demand fresh evidence again.
+    const mid_snapshot = try allocator.alloc(u8, 64 * 1024);
+    defer allocator.free(mid_snapshot);
+    const mid = try recovered.coordinator.snapshot(mid_snapshot);
+    const restarted = try allocator.create(coordination.AccountRecovery);
+    defer allocator.destroy(restarted);
+    try coordination.AccountRecovery.beginWithCoordinatorTailInto(restarted, mid, empty.bytes(), snapshots, tails);
+    try std.testing.expectError(error.FreshMarginObservationRequired, restarted.completeCoordinatorRecovery());
+    var fresh = observation;
+    fresh.identity = 8002;
+    fresh.barrier += 1;
+    _ = try recovered.coordinator.reconcileMargin(fresh);
+    _ = try restarted.coordinator.reconcileMargin(fresh);
+    var genesis = try replayCoordination(world);
+    _ = try genesis.reconcileMargin(observation);
+    _ = try genesis.reconcileMargin(fresh);
+    try std.testing.expectEqualDeep(genesis.digest(), recovered.coordinator.digest());
+    try std.testing.expectEqualDeep(recovered.coordinator.digest(), restarted.coordinator.digest());
+    try recovered.completeCoordinatorRecovery();
+    try restarted.completeCoordinatorRecovery();
+    try std.testing.expect(!recovered.coordinator.recovery_only);
+    try std.testing.expect(!restarted.coordinator.recovery_only);
+    const replayed = try allocator.create(trading.TradingShard);
+    defer allocator.destroy(replayed);
+    const initial = try allocator.create(trading.TradingShard);
+    defer allocator.destroy(initial);
+    for (0..max_shards) |index| {
+        initial.* = .{};
+        var sealed = world.journals[index];
+        try sealed.seal();
+        try replayShardFromJournalInto(replayed, initial, sealed.bytes());
+        fence(replayed);
+        try std.testing.expectEqualDeep(replayed.canonicalStateDigest(), recovered.shards[index].canonicalStateDigest());
+        try std.testing.expectEqualDeep(recovered.shards[index].canonicalStateDigest(), restarted.shards[index].canonicalStateDigest());
+        try std.testing.expectEqual(world.shards[index].risk_lease_version, recovered.shards[index].risk_lease_version);
+        try std.testing.expectEqual(try world.shards[index].activeReservationAtoms(), try recovered.shards[index].activeReservationAtoms());
+        try std.testing.expectEqual(@as(usize, 0), recovered.shards[index].oms.emitted().len);
+        try std.testing.expectEqual(trading.operational.OperationalMode.recovering, recovered.shards[index].operational_state.mode);
+        try std.testing.expect(!recovered.shards[index].operational_state.effectiveTradingAuthority());
+    }
+    const shared = sharedSummary(recovered.coordinator.barrier, &recovered.shards, &recovered.coordinator.digest());
+    try std.testing.expectEqualDeep(shared, sharedSummary(restarted.coordinator.barrier, &restarted.shards, &restarted.coordinator.digest()));
+    return shared;
+}
 
 /// Runs the fail-fast four-shard live, replay, snapshot-tail, and recovery fixture.
 pub fn runFourShardAcceptance() !FourShardEvidence {
@@ -320,24 +388,27 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
 
     for (0..max_shards) |index| {
         try world.apply(index, .{ .identity = 5, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = mark_price_atoms } } });
-        var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 10, .count = 1 };
-        group.members[0] = .{
-            .intent_sequence = 10,
-            .operation = .place,
-            .instrument = swap_instrument,
-            .side = if (index == max_shards - 1) .sell else .buy,
-            .quantity = order_quantity,
-            .limit_price = .{ .instrument = swap_instrument, .rules_version = 1, .ticks = order_price_ticks },
-            .reservation = .{ .asset = settlement_asset, .atoms = 11_400_000 },
-        };
         const placed = try applyCoreStable(&world.shards[index], &world.journals[index], .{
             .identity = 6,
-            .payload = .{ .oms_intent_group = group },
+            .payload = .{ .external_order_intent = .{
+                .strategy_identity = index + 1,
+                .config_version = 1,
+                .activation_identity = index + 1,
+                .portfolio_identity = index + 11,
+                .exchange_account_identity = exchange_account,
+                .instrument_identity = swap_instrument,
+                .intent_sequence = 10,
+                .strategy_cursor = world.shards[index].authoritativeBarrier() + 1,
+                .side = if (index == max_shards - 1) .sell else .buy,
+                .order_type = .limit,
+                .time_in_force = .good_til_canceled,
+                .portfolio_reduce_only = false,
+                .quantity = order_quantity,
+                .limit_price_micros = order_price_ticks,
+            } },
         });
-        try std.testing.expect(placed == null);
-        const emitted = world.shards[index].oms.emitted();
-        try std.testing.expectEqual(@as(usize, 1), emitted.len);
-        world.commands[index] = emitted[0];
+        world.commands[index] = placed orelse return error.MissingQualifiedOrder;
+        try std.testing.expectEqual(@as(usize, 0), world.shards[index].oms.emitted().len);
     }
 
     for (0..max_shards) |index| {
@@ -468,6 +539,8 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
     try std.testing.expectEqual(used_total, gross);
     try std.testing.expect(gross <= ceiling_atoms);
     try std.testing.expect(limit_total <= ceiling_atoms);
+
+    const healthy_shared_summary = try proveHealthyRecovery(world, allocator);
 
     const snapshot_fact: coordination.AccountFact = .{
         .identity = world.nextId(),
@@ -789,6 +862,7 @@ pub fn runFourShardAcceptance() !FourShardEvidence {
         .shard_digests = shard_digests,
         .coordinator_digest = evidence_coordinator.digest(),
         .shared_summary = shared_a,
+        .healthy_shared_summary = healthy_shared_summary,
         .owned_command_count = world.ownership.count,
         .replay_send_capability = replay_send_capability,
     };

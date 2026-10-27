@@ -583,7 +583,7 @@ test "Observation capacity 500 combinations four continuous Owners retain 100 se
     var max_encoded: usize = 0;
     for (0..4) |route| {
         initializeStore(&stores[route]);
-        owners[route] = try demo.Owner.bootstrap(stores[route].interface(), undefined, .{ .domain = .decision_log, .id = 100 + route });
+        try demo.Owner.bootstrapInto(&owners[route], stores[route].interface(), undefined, .{ .domain = .decision_log, .id = 100 + route });
         gateways[route] = .{};
         feeds[route] = .{ .source = .{ .venue_identity = venues[route], .stream = 200 + route } };
         adapters[route] = .{ .source = .{ .venue_identity = venues[route], .account = 100 + route, .stream = 300 + route } };
@@ -618,7 +618,7 @@ test "Observation capacity 500 combinations four continuous Owners retain 100 se
         max_encoded = @max(max_encoded, encoded.len);
         const restored = try allocator.create(demo.Owner);
         defer allocator.destroy(restored);
-        restored.* = try demo.Owner.recover(stores[route].interface(), undefined, owner.stream);
+        try demo.Owner.recoverInto(restored, stores[route].interface(), undefined, owner.stream);
         try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
         try std.testing.expectEqual(@as(u8, 125), restored.shard.instrument_registry.count);
         try std.testing.expectEqual(@as(u8, 76), restored.shard.canonical_account.balance_count);

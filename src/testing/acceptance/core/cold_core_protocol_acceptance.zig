@@ -17,7 +17,7 @@ const Run = struct {
         errdefer memory.deinit();
         const owner = try std.testing.allocator.create(demo.Owner);
         errdefer std.testing.allocator.destroy(owner);
-        owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, .{ .domain = .decision_log, .id = 785 });
+        try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 785 });
         try @import("../history/order_gateway_archive_acceptance.zig").initializeOwner(owner);
         return .{ .owner = owner, .memory = memory };
     }

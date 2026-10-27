@@ -65,7 +65,9 @@ test "09 four actual Owners enforce one shared account ceiling and retain shard 
         defer allocator.destroy(restored);
         try demo.Owner.recoverInto(restored, owners[index].backend.interface(), undefined, owners[index].stream);
         try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &restored.shard.canonicalStateDigest());
-        try std.testing.expectEqual(summaries[index].reservation_atoms, try restored.shard.activeReservationAtoms());
+        try std.testing.expectEqual(try owner.shard.activeReservationAtoms(), try restored.shard.activeReservationAtoms());
+        const restored_summary = try coordination.shardSummaryFromShard(&restored.shard, @enumFromInt(index), 1, index + 1);
+        try std.testing.expectEqual(summaries[index].reservation_atoms, restored_summary.reservation_atoms);
         try std.testing.expectEqual(@as(u64, 0), owners[index].gateway.send_attempt_count);
     }
     std.debug.print("continuous shared account owners=4 live=4 terminal=0 sdk_sends=0 gross={d} ceiling_reject=preserved recovered=equal\n", .{gross});

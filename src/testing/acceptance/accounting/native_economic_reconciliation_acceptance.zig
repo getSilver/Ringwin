@@ -133,7 +133,7 @@ fn exerciseStored(mode: Case, supplied_store: ?durable.Store, io: std.Io) !void 
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
-    owner.* = try demo.Owner.bootstrap(store, io, stream);
+    try demo.Owner.bootstrapInto(owner, store, io, stream);
     const pair = @import("../../../trading/asset_registry.zig").testDefinitions(12, 9);
     var definitions = [_]canonical.AssetDefinition{ pair[0], pair[1], pair[0] };
     const third: canonical.AssetIdentity = 0x424e42;
@@ -525,7 +525,7 @@ fn checkEconomicSweep(owner: *demo.Owner, original: *okx.OkxVenueAdapter, store:
         const after = try store.recover(io, raw_stream);
         try std.testing.expectEqual(boundary.committed_barrier, after.committed_barrier);
         try std.testing.expectEqual(@as(u64, boundary.last_sequence + 1), sink.next_sequence);
-        owner.* = recovered.*;
+        @memcpy(std.mem.asBytes(owner), std.mem.asBytes(recovered));
     }
     try std.testing.expectEqual(@as(usize, 0), transport.sends);
     try std.testing.expectEqual(@as(u64, 1), chain.next_attempt_id);

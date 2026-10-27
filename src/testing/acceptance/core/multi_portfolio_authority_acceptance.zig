@@ -1003,6 +1003,18 @@ fn exercisePortfolioCycleClosure(comptime scenario: enum { perpetual, residual, 
             lease.version = 3;
             lease.valid_through_barrier = std.math.maxInt(u64);
             try applyHostCore(owner, 20, .{ .risk_lease_granted = lease });
+            try std.testing.expect(!owner.shard.operational_state.effectiveTradingAuthority());
+            for ([_]@import("../../../trading/operational.zig").CommandKind{ .resolve_latch, .enable_trading }, 0..) |kind, index| {
+                try applyHostCore(owner, null, .{ .control_command = .{
+                    .command_identity = 46001 + index,
+                    .content_hash = 46001 + index,
+                    .target_identity = 1,
+                    .expected_version = owner.shard.operational_state.version,
+                    .expires_at = std.math.maxInt(u64),
+                    .kind = kind,
+                    .referenced_latch_identity = 0x5249534b4c45415345,
+                } });
+            }
             group.first_intent_sequence += 2;
             for (group.members[0..2]) |*member| member.intent_sequence += 2;
         }

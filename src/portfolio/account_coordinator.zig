@@ -476,14 +476,17 @@ pub fn applyForcedDeliveryStable(coordinator: *AccountCoordinator, coordination_
 }
 
 noinline fn shardHasAppliedForced(delivery: Delivery, shard: *const trading.TradingShard) !bool {
-    var candidate = shard.*;
+    var candidate: trading.TradingShard = undefined;
+    @memcpy(std.mem.asBytes(&candidate), std.mem.asBytes(shard));
     const before = candidate.trace.len;
-    _ = try candidate.apply(.{ .core = try accountFactEvent(delivery) });
+    var publish_on_error = false;
+    _ = try candidate.applyOwnedCandidate(shard, .{ .core = try accountFactEvent(delivery) }, &publish_on_error);
     return candidate.trace.len == before;
 }
 
 noinline fn forcedTailExplainsSummaryChange(coordinator: *AccountCoordinator, shard_id: ShardId, snapshot: []const u8, tail: []const u8, summary: ShardSummary) !bool {
-    var before = (try trading.TradingShard.restoreSnapshot(snapshot)).shard;
+    var before: trading.TradingShard = undefined;
+    _ = try trading.TradingShard.restoreSnapshotInto(&before, snapshot);
     before.operational_state.trading_authorized = false;
     before.operational_state.mode = .recovering;
     const baseline = try shardSummaryFromShardForAccount(&before, coordinator.exchange_account, shard_id, summary.publication_version, summary.decision_domain);
@@ -1968,7 +1971,13 @@ pub const AccountCoordinator = struct {
     }
 
     /// Restores a validated coordination snapshot into RecoveryOnly account authority.
-    pub fn restore(encoded: []const u8) !AccountCoordinator {
+    pub noinline fn restore(encoded: []const u8) !AccountCoordinator {
+        var result: AccountCoordinator = undefined;
+        try restoreInto(&result, encoded);
+        return result;
+    }
+
+    pub noinline fn restoreInto(destination: *AccountCoordinator, encoded: []const u8) !void {
         var reader: std.Io.Reader = .fixed(encoded);
         if (try reader.takeInt(u64, .little) != snapshot_magic or
             try reader.takeInt(u16, .little) != coordinator_snapshot_version)
@@ -2073,7 +2082,7 @@ pub const AccountCoordinator = struct {
         result.recovery_only = true;
         result.recovery_margin_identity = 0;
         result.recovery_native_bootstrap_seen = false;
-        return result;
+        destination.* = result;
     }
 };
 
@@ -2416,7 +2425,7 @@ pub const AccountRecovery = struct {
         shard_snapshots: [max_shards][]const u8,
         shard_tails: [max_shards][]const u8,
     ) !void {
-        result.coordinator = try AccountCoordinator.restore(coordinator_snapshot);
+        try AccountCoordinator.restoreInto(&result.coordinator, coordinator_snapshot);
         result.summary_refresh_mask = 0;
         try replayCoordinationTail(&result.coordinator, coordinator_tail);
         for (0..max_shards) |index| {
@@ -2465,9 +2474,9 @@ pub const AccountRecovery = struct {
             );
             if (!std.meta.eql(derived, summary.value)) return error.FreshShardSummaryRequired;
         }
-        try self.coordinator.completeRecovery();
-        for (self.shards) |shard| if (shard.operational_state.mode != .recovering)
+        for (&self.shards) |*shard| if (shard.operational_state.mode != .recovering or shard.operational_state.trading_authorized)
             return error.ShardRecoveryFenceLost;
+        try self.coordinator.completeRecovery();
     }
 };
 
@@ -5000,4 +5009,31 @@ test "04 native isolated rules reconcile independent venue margin and literal li
         _ = try next_crash.coordinator.reconcileMargin(.{ .identity = 1004, .barrier = @max(next_crash.coordinator.barrier, next_crash.coordinator.last_margin_observation.?.barrier) + 1, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 });
         try std.testing.expectError(error.FreshNativeBootstrapRequired, next_crash.coordinator.completeRecovery());
     }
+}
+
+test "07 recovery fence loss cannot release coordinator authority" {
+    const recovery = try std.testing.allocator.create(AccountRecovery);
+    defer std.testing.allocator.destroy(recovery);
+    recovery.coordinator = AccountCoordinator.init(900, 1_000, 1_000);
+    recovery.summary_refresh_mask = 0;
+    for (&recovery.shards, 0..) |*shard, index| {
+        shard.* = .{};
+        shard.operational_state.mode = .recovering;
+        var summary = ShardSummary.fixture(@enumFromInt(index), 1, 0);
+        summary.risk_tier = 1;
+        _ = try recovery.coordinator.publishSummary(index + 1, summary);
+    }
+    _ = try recovery.coordinator.allocateLeases(1, 100);
+    recovery.coordinator.recovery_only = true;
+    _ = try recovery.coordinator.reconcileMargin(.{ .identity = 20, .barrier = 5, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1, .venue_risk_tier = 1 });
+    recovery.shards[2].operational_state.mode = .ready;
+    try std.testing.expectError(error.ShardRecoveryFenceLost, recovery.completeCoordinatorRecovery());
+    try std.testing.expect(recovery.coordinator.recovery_only);
+    recovery.shards[2].operational_state.mode = .recovering;
+    recovery.shards[2].operational_state.trading_authorized = true;
+    try std.testing.expectError(error.ShardRecoveryFenceLost, recovery.completeCoordinatorRecovery());
+    try std.testing.expect(recovery.coordinator.recovery_only);
+    recovery.shards[2].operational_state.trading_authorized = false;
+    try recovery.completeCoordinatorRecovery();
+    try std.testing.expect(!recovery.coordinator.recovery_only);
 }

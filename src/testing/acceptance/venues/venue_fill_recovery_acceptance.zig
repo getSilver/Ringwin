@@ -259,7 +259,7 @@ fn executeRawPrivateFillRecovery() !void {
     const adapter = implementation.adapter();
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
-    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
     try @import("../../contracts/venue_adapter_contract.zig").activateTestAssets(owner);
     try adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = owner.shard.activatedAssets(), .instrument_definitions = owner.shard.instrument_registry });
     try implementation.beginPrivateSession();
@@ -584,7 +584,7 @@ fn checkReadyEconomicFault(fee: ?[]const u8, asset: []const u8, expected: canoni
     const adapter = implementation.adapter();
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
-    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
     for (@import("../../../trading/asset_registry.zig").testDefinitions(6, 8)) |original_definition| {
         var definition = original_definition;
         if (ownership == .external_single_limit and definition.asset == 0x425443) definition.max_single_atoms = 40000;
@@ -820,7 +820,7 @@ test "OKX activated high precision account facts survive Owner replay without ol
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
-    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
     for (@import("../../../trading/asset_registry.zig").testDefinitions(12, 9)) |definition|
         _ = try owner.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
     const economics_before = owner.shard.economicSummary();
@@ -944,7 +944,7 @@ fn runNativeSettlementFees(case: NativeSettlementCase, arrival: NativeArrival, w
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
-    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
     var definitions = @import("../../../trading/asset_registry.zig").testDefinitions(if (inexact) 6 else if (wide) 18 else 12, if (with_rest) 9 else 8);
     if (wide) {
         definitions[0].max_single_atoms = 100_000_000_000_000_000_000;
@@ -1243,7 +1243,7 @@ fn checkNativeBaseFees(nonunit: bool, mode: enum { normal, legacy_precision, con
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
-    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
     const wide = mode == .wide;
     const cumulative = mode == .cumulative;
     var definitions = @import("../../../trading/asset_registry.zig").testDefinitions(if (wide) 14 else 12, if (wide) 18 else if (mode == .legacy_precision) 8 else 9);
@@ -1601,7 +1601,7 @@ test "activated balance limits reject cumulative Suspense growth before Owner co
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
-    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
     var definitions = @import("../../../trading/asset_registry.zig").testDefinitions(6, 8);
     for (&definitions) |*definition| {
         definition.max_single_atoms = 100;
@@ -1696,7 +1696,7 @@ fn checkNativeThirdFees(mode: enum { normal, wide, unknown, inexact, conflict, c
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
-    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
     const pair = @import("../../../trading/asset_registry.zig").testDefinitions(12, 9);
     var definitions: [3]canonical.AssetDefinition = .{ pair[0], pair[1], pair[0] };
     const third: canonical.AssetIdentity = 0x424e42;
@@ -1929,7 +1929,7 @@ fn checkNativeFundingBills(mode: enum { normal, unknown, inexact, range, conflic
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
-    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
     const definitions = @import("../../../trading/asset_registry.zig").testDefinitions(12, 9);
     const policy: demo.Policy = .{ .schema = 3, .startup = .virgin, .asset_definitions = &definitions, .lot_size = .{ .coefficient = 1, .scale = 7 }, .exchange_account = 2, .portfolio_identity = 1, .strategy_identity = 40, .activation_identity = 50, .config_version = 1, .portfolio_allocation_atoms = 90_000_000_000_000, .risk_limit_atoms = 80_000_000_000_000, .price_tick_atoms = 250_000_000_000, .native_settlement_atoms = true, .decision_stream_id = 91, .dispatch_stream_id = 92, .decision_domain = 1, .node_identity = 1 };
     try policy.activateAssetsForOfflineValidation(owner);
@@ -2144,7 +2144,7 @@ fn checkPrivateCheckpointHorizon() !void {
     const raw_stream: durable.StreamIdentity = .{ .domain = .raw_ingress, .id = 942 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
-    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
     var definitions = @import("../../../trading/asset_registry.zig").testDefinitions(12, 8);
     const policy: demo.Policy = .{
         .schema = 3,
@@ -2255,7 +2255,7 @@ fn checkPrivateCheckpointPartialFrame() !void {
     const raw_stream: durable.StreamIdentity = .{ .domain = .raw_ingress, .id = 942 };
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
-    owner.* = try demo.Owner.bootstrap(memory.interface(), undefined, stream);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
     var definitions = @import("../../../trading/asset_registry.zig").testDefinitions(12, 8);
     const policy: demo.Policy = .{
         .schema = 3,

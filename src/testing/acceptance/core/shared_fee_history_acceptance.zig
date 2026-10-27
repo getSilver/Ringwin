@@ -7,6 +7,15 @@ const execution = @import("../../../execution/execution_gateway.zig");
 const history = @import("../../../persistence/business_history.zig");
 const fixture = @import("../../support/trading_shard_fixture.zig");
 const closed_cycle = @import("multi_account_authority_acceptance.zig");
+const trading = @import("../../../trading/trading_shard.zig");
+
+fn accountEconomics(shard: *const trading.TradingShard, account: u128) *const trading.economics.Projection {
+    if (account == shard.exchange_account_identity) return &shard.economic_projection;
+    for (shard.secondary_accounts[0..shard.secondary_account_count]) |*partition| {
+        if (partition.identity == account) return &partition.state.economic_projection;
+    }
+    unreachable;
+}
 
 fn failQuery(_: *anyopaque, _: std.Io, _: history.LookupRequest) anyerror!history.LookupResult {
     return error.InjectedHistoryEio;
@@ -28,18 +37,18 @@ fn exerciseColdFee(account: u128) !void {
     try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 91 });
     try closed_cycle.initializeResidualEconomicsOwner(owner);
     try std.testing.expectEqual(@as(u8, 0), owner.shard.cycles.count);
-    const original = owner.shard.accountState(account).?.economic_projection.feeOrigin(1).?;
+    const original = accountEconomics(&owner.shard, account).feeOrigin(1).?;
     const gateway = try allocator.create(execution.Gateway);
     defer allocator.destroy(gateway);
     gateway.init();
     try gateway.attachRecoveredDurableDispatch(memory.interface(), undefined, .{ .domain = .control, .id = 92 });
     _ = try owner.archiveFillHistoryForAccount(account, 1, gateway);
-    try std.testing.expect(owner.shard.accountState(account).?.economic_projection.feeOrigin(1) == null);
+    try std.testing.expect(accountEconomics(&owner.shard, account).feeOrigin(1) == null);
     try owner.checkpoint();
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
     try demo.Owner.recoverInto(recovered, memory.interface(), undefined, owner.stream);
-    try std.testing.expect(recovered.shard.accountState(account).?.economic_projection.feeOrigin(1) == null);
+    try std.testing.expect(accountEconomics(&recovered.shard, account).feeOrigin(1) == null);
     var record = fixture.canonicalAt(80, 1, .{ .fee_adjustment = .{
         .identity = 800,
         .original = original,
@@ -62,10 +71,10 @@ fn exerciseColdFee(account: u128) !void {
     record.envelope.asset = original.original.fee.?.asset;
     record.envelope.source_fact_identity = 800;
     record.envelope.raw_evidence = record.event.fee_adjustment.source;
-    const before = recovered.shard.accountState(account).?.economic_projection.semanticDigest();
-    const before_cash = recovered.shard.accountState(account).?.economic_projection.portfolio.usdt_balance_atoms;
+    const before = accountEconomics(&recovered.shard, account).semanticDigest();
+    const before_cash = accountEconomics(&recovered.shard, account).portfolio.usdt_balance_atoms;
     const other_account: u128 = if (account == 20) 30 else 20;
-    const untouched = recovered.shard.accountState(other_account).?.economic_projection.semanticDigest();
+    const untouched = accountEconomics(&recovered.shard, other_account).semanticDigest();
     const view = try allocator.create(@import("../../../trading/trading_shard.zig").TradingShard);
     defer allocator.destroy(view);
     try recovered.shard.copyAccountViewInto(view, account);
@@ -94,15 +103,15 @@ fn exerciseColdFee(account: u128) !void {
         }
         var restored = try coordination.CoordinatorOwner.recover(coordinator.stream, memory.interface(), undefined);
         if (mode == .same) try std.testing.expectEqualDeep(candidate, (try restored.pendingVenueFact(.shard_0)).?) else try std.testing.expect(restored.coordinator.margin_gate.latched);
-        try std.testing.expectEqualDeep(before, recovered.shard.accountState(account).?.economic_projection.semanticDigest());
+        try std.testing.expectEqualDeep(before, accountEconomics(&recovered.shard, account).semanticDigest());
         if (mode == .same) {
             try std.testing.expect(try restored.deliverVenueFact(.shard_0, recovered));
-            try std.testing.expectEqual(before_cash - 1, recovered.shard.accountState(account).?.economic_projection.portfolio.usdt_balance_atoms);
+            try std.testing.expectEqual(before_cash - 1, accountEconomics(&recovered.shard, account).portfolio.usdt_balance_atoms);
             const applied = recovered.shard.canonicalStateDigest();
             try restored.acceptVenueFactFromOwners(candidate, .{ recovered, recovered, recovered, recovered });
             try std.testing.expect(!try restored.deliverVenueFact(.shard_0, recovered));
             try std.testing.expectEqualDeep(applied, recovered.shard.canonicalStateDigest());
-            try std.testing.expectEqualDeep(untouched, recovered.shard.accountState(other_account).?.economic_projection.semanticDigest());
+            try std.testing.expectEqualDeep(untouched, accountEconomics(&recovered.shard, other_account).semanticDigest());
         }
     }
 }

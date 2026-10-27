@@ -1,6 +1,6 @@
 # 四分片共享账户协调
 
-Status: open
+Status: closed
 
 ## Destination
 
@@ -28,9 +28,11 @@ Status: open
 
 ## Frontier
 
-- [07 — 闭合四分片恢复与确定性验收](issues/07-close-four-shard-recovery-and-deterministic-acceptance.md)
+无；01–07 均已完成原始离线条件。
 
 ## Decisions so far
+
+- 2026-10-27：07 原五项离线条件完成；最终源码 Debug 与 ReleaseSafe 全套各 814/814，统一入口两组各 100/100，ReleaseSafe 实际矩阵与独立应用均在 64 MiB 下通过，PE reserve 已核对。协调 barrier 21、四片 digest 及冻结共享摘要在三条恢复路径中等价；实际四 Owner 原生恢复要求新账户与 margin 证据，重放不重发命令。双项复审无剩余必修项，源码清单结束复核无漂移。运行时内存/调用边界改动与夹具修复分开记录；完整套件 256 MiB 测试栈不冒充应用栈资格。不继承 Venue、Linux 运行、目标容量或生产资格。模块关闭，详见 [07 验证报告](07-validation-2026-10-26.md)。
 
 - 2026-10-26：06 原五条离线条件完成，当前源码专项 118/118、双轴复审无剩余必修项；局部故障隔离、账户原因独立收紧、实际共享撤单、完整 forced 证据显式解除、漏收恢复/人工 resume/归档后再次故障及四 Owner replay 均已覆盖。Core 50/54/48、Coordinator 快照 18 拒绝旧格式。完整套件尝试在既有 cutover 第 87/812 项栈溢出，完整套件、冻结摘要和生产栈资格继续由 07 收口，详见 [06 验证报告](06-validation-2026-10-26.md)。Frontier 推进到 07，模块保持 open。
 

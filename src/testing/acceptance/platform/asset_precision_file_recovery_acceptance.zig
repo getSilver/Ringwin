@@ -258,7 +258,7 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
     implementation.attachPrivateReconciler(&reconciler);
     const owner = try allocator.create(demo.Owner);
     defer allocator.destroy(owner);
-    owner.* = try demo.Owner.bootstrap(store, io, stream);
+    try demo.Owner.bootstrapInto(owner, store, io, stream);
     var definitions = @import("../../../trading/asset_registry.zig").testDefinitions(12, 9);
     definitions[0].max_single_atoms = 30_000_000_000_000_000_000;
     definitions[0].max_balance_atoms = 30_000_000_000_000_000_000;

@@ -200,7 +200,10 @@ test "02 four shard lease lifecycle retains reservations gates and replay author
         try run.decision_journal.seal();
         _ = try trading.recoverStableInto(replayed, initial, run.decision_journal.bytes());
         try std.testing.expectEqualDeep(run.shard.canonicalStateDigest(), replayed.canonicalStateDigest());
-        try std.testing.expectEqualDeep(run.shard.operational_state, replayed.operational_state);
+        try std.testing.expectEqual(run.shard.operational_state.mode, replayed.operational_state.mode);
+        try std.testing.expectEqual(run.shard.operational_state.trading_authorized, replayed.operational_state.trading_authorized);
+        try std.testing.expectEqualDeep(run.shard.operational_state.gates[0..run.shard.operational_state.gate_count], replayed.operational_state.gates[0..replayed.operational_state.gate_count]);
+        try std.testing.expectEqualDeep(run.shard.operational_state.latches[0..run.shard.operational_state.latch_count], replayed.operational_state.latches[0..replayed.operational_state.latch_count]);
         try std.testing.expectEqual(@as(u64, 6), replayed.risk_lease_version);
         try std.testing.expectEqual(@as(i128, 0), replayed.risk_lease_atoms);
         try std.testing.expectEqualDeep(

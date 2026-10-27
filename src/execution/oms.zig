@@ -733,7 +733,8 @@ pub const Oms = struct {
     }
 
     fn applyGroupWithRefsCopy(self: *Oms, group: IntentGroup, original: IntentGroup, refs: []const RiskFactRefs) !void {
-        var candidate = self.*;
+        var candidate: Oms = undefined;
+        @memcpy(std.mem.asBytes(&candidate), std.mem.asBytes(self));
         candidate.applyGroupInPlace(group, original, refs) catch |err| {
             // Capacity exhaustion is an authoritative safety transition even
             // though the rejected intent group itself is not committed.
@@ -741,7 +742,7 @@ pub const Oms = struct {
             if (candidate.capacity_pressure) self.capacity_pressure = true;
             return err;
         };
-        self.* = candidate;
+        @memcpy(std.mem.asBytes(self), std.mem.asBytes(&candidate));
     }
 
     fn applyGroupInPlace(self: *Oms, group: IntentGroup, original: IntentGroup, refs: []const RiskFactRefs) !void {
@@ -843,10 +844,11 @@ pub const Oms = struct {
     }
 
     fn applyDispatchCopy(self: *Oms, batch: DispatchBatch) !void {
-        var candidate = self.*;
+        var candidate: Oms = undefined;
+        @memcpy(std.mem.asBytes(&candidate), std.mem.asBytes(self));
         try candidate.applyDispatchInPlace(batch);
         candidate.retainCapacityPressure();
-        self.* = candidate;
+        @memcpy(std.mem.asBytes(self), std.mem.asBytes(&candidate));
     }
 
     fn applyDispatchInPlace(self: *Oms, batch: DispatchBatch) !void {

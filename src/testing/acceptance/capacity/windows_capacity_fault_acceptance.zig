@@ -10,9 +10,9 @@ const failover = @import("../../../runtime/failover.zig");
 const fixture = @import("../../support/trading_shard_fixture.zig");
 const acceptance = @import("../history/order_gateway_archive_acceptance.zig");
 
-fn place(sequence: u64) trading.oms.IntentGroup {
+fn place(sequence: u64, portfolio: u128) trading.oms.IntentGroup {
     var group: trading.oms.IntentGroup = .{ .first_intent_sequence = sequence, .count = 1 };
-    group.members[0] = .{ .intent_sequence = sequence, .operation = .place, .instrument = 3, .quantity = 20, .limit_price = fixture.omsPrice(3, 50_000_000) };
+    group.members[0] = .{ .portfolio = portfolio, .intent_sequence = sequence, .operation = .place, .instrument = 3, .quantity = 20, .limit_price = fixture.omsPrice(3, 50_000_000) };
     return group;
 }
 
@@ -71,7 +71,7 @@ const FileHarness = struct {
         self.route = .{ .account = 2, .adapter = adapter, .venue_identity = 1, .lease_guard = &self.guard, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } };
         try self.gateway.add(self.route);
         try self.gateway.bootstrapDurableDispatch(store, std.testing.io, self.dispatch);
-        _ = try self.owner.apply(fixture.atGroup(20, .{ .identity = 101, .payload = .{ .oms_intent_group = place(101) } }));
+        _ = try self.owner.apply(fixture.atGroup(20, .{ .identity = 101, .payload = .{ .oms_intent_group = place(101, self.owner.shard.portfolio_identity) } }));
         self.first = self.owner.shard.oms.emitted()[0];
         try std.testing.expectEqual(@import("../../../execution/venue_adapter.zig").SendResult.accepted, try self.owner.send(self.gateway, &self.guard, self.first.command_id, 2 * std.time.ns_per_s));
         var batch = (try adapter.tryDrain()).?;
@@ -80,7 +80,7 @@ const FileHarness = struct {
         for (batch.slice()[0..4]) |record| _ = try self.owner.apply(.{ .venue = record });
         self.next_fill = batch.events[4];
         self.next_fill.event.fill.fee.?.atoms = 19;
-        _ = try self.owner.apply(fixture.atGroup(21, .{ .identity = 102, .payload = .{ .oms_intent_group = place(102) } }));
+        _ = try self.owner.apply(fixture.atGroup(21, .{ .identity = 102, .payload = .{ .oms_intent_group = place(102, self.owner.shard.portfolio_identity) } }));
         self.unknown = self.owner.shard.oms.emitted()[0];
         try std.testing.expectEqual(@import("../../../execution/venue_adapter.zig").SendResult.accepted, try self.owner.send(self.gateway, &self.guard, self.unknown.command_id, 2 * std.time.ns_per_s));
         var uncertain = (try adapter.tryDrain()).?.events[0];

@@ -31,7 +31,7 @@ fn apply(owner: *demo.Owner, account: ?u128, payload: trading.CorePayload) !void
     _ = try owner.apply(fixture.atGroup(45, .{ .identity = owner.shard.authoritativeBarrier() + 10_000, .account_scope = account, .payload = payload }));
 }
 
-fn placeGroups(owner: *demo.Owner, comptime forced_case: bool) !void {
+noinline fn placeGroups(owner: *demo.Owner, comptime forced_case: bool) !void {
     try gateway_fixture.prepareTrading(owner, 0, 1);
     for ([_]u128{ 1, 5 }) |instrument| {
         const entry = owner.shard.registryInstrument(instrument) orelse return error.TestMissingInstrument;
@@ -110,7 +110,7 @@ fn broadcast(coordinator: *coordination.CoordinatorOwner, owners: []demo.Owner, 
     return record;
 }
 
-fn verifyNativeMargin(coordinator: *coordination.CoordinatorOwner, owners: []demo.Owner) !void {
+noinline fn verifyNativeMargin(coordinator: *coordination.CoordinatorOwner, owners: []demo.Owner, comptime recovery_case: bool) !void {
     const lease = owners[0].shard.risk_lease_atoms;
     const remaining = try owners[0].shard.riskLeaseRemainingAtoms();
     const template = owners[0].shard.registryInstrument(1) orelse return error.TestMissingNativeInstrument;
@@ -162,6 +162,17 @@ fn verifyNativeMargin(coordinator: *coordination.CoordinatorOwner, owners: []dem
     try coordinator.acceptVenueFact(original);
     try std.testing.expectEqual(@as(i128, 4), coordinator.coordinator.account_netting_benefit_atoms);
     try std.testing.expectEqual(@as(i128, 0), try owners[0].shard.activeReservationAtoms());
+    if (recovery_case) {
+        try coordinator.apply(.{ .allocate_leases = .{ .version = 2, .valid_through_barrier = coordinator.coordinator.barrier + 1_000 } });
+        var total: i128 = 0;
+        for (coordinator.coordinator.leases) |grant| {
+            const index = @intFromEnum(grant.shard_id);
+            _ = try owners[index].apply(.{ .core = try coordination.riskLeaseEventForShard(grant, grant.shard_id, &owners[index].shard) });
+            try std.testing.expectEqual(@as(i128, 25), owners[index].shard.risk_lease_atoms);
+            total += grant.limit_atoms;
+        }
+        try std.testing.expectEqual(@as(i128, 100), total);
+    }
     try coordinator.checkpoint();
     const restored = try coordination.CoordinatorOwner.recover(coordinator.stream, coordinator.store, undefined);
     try std.testing.expectEqualDeep(coordinator.coordinator.digest(), restored.coordinator.digest());
@@ -172,9 +183,56 @@ fn verifyNativeMargin(coordinator: *coordination.CoordinatorOwner, owners: []dem
         try demo.Owner.recoverInto(recovered, owner.store, undefined, owner.stream);
         try std.testing.expectEqualDeep(owner.shard.canonicalStateDigest(), recovered.shard.canonicalStateDigest());
     }
+    if (recovery_case) try proveNativeOwnerRecovery(coordinator, owners, original);
 }
 
-fn verifySecondaryFee(coordinator: *coordination.CoordinatorOwner, owners: []demo.Owner) !void {
+noinline fn proveNativeOwnerRecovery(coordinator: *coordination.CoordinatorOwner, owners: []demo.Owner, original: canonical.EventRecord) !void {
+    const allocator = std.testing.allocator;
+    const restored = try allocator.create(coordination.CoordinatorOwner);
+    defer allocator.destroy(restored);
+    try recoverCoordinatorInto(restored, coordinator);
+    const recovered = try allocator.alloc(demo.Owner, 4);
+    defer allocator.free(recovered);
+    for (recovered, owners) |*owner, *live| {
+        try demo.Owner.recoverInto(owner, live.store, undefined, live.stream);
+        try std.testing.expectEqualDeep(live.shard.economicSummary(), owner.shard.economicSummary());
+        try std.testing.expectEqual(@as(u64, 2), owner.shard.risk_lease_version);
+        try std.testing.expectEqual(@as(usize, 0), owner.shard.oms.emitted().len);
+        owner.shard.operational_state.trading_authorized = false;
+        owner.shard.operational_state.mode = .recovering;
+    }
+    try std.testing.expectError(error.FreshNativeBootstrapRequired, restored.completeRecovery());
+    try restored.acceptVenueFact(original);
+    try std.testing.expectError(error.FreshNativeBootstrapRequired, restored.completeRecovery());
+    var fresh = original.event.account_bootstrap_snapshot;
+    fresh.identity = 30_050;
+    _ = try broadcast(restored, recovered, .{ .account_bootstrap_snapshot = fresh });
+    try std.testing.expectError(error.FreshMarginObservationRequired, restored.completeRecovery());
+    for (recovered, 0..) |*owner, index| try restored.apply(.{ .publish_summary = .{
+        .identity = 1_000 + index,
+        .summary = try coordination.shardSummaryFromShard(&owner.shard, @enumFromInt(index), 3, index + 1),
+    } });
+    try restored.apply(.{ .margin_observation = .{ .identity = 30_101, .barrier = restored.coordinator.barrier + 1, .venue_net_margin_atoms = 0, .venue_swap_quantity = 0, .margin_mode = .isolated, .rules_version = 1 } });
+    try restored.completeRecovery();
+    try std.testing.expect(!restored.coordinator.recovery_only);
+    try std.testing.expectEqual(@as(i128, 8), try restored.coordinator.grossPortfolioMargin());
+    try std.testing.expectEqual(@as(i128, 4), restored.coordinator.account_netting_benefit_atoms);
+    for (recovered) |*owner| {
+        try std.testing.expectEqual(trading.operational.OperationalMode.recovering, owner.shard.operational_state.mode);
+        try std.testing.expect(!owner.shard.operational_state.trading_authorized);
+        try std.testing.expectEqual(@as(i128, 0), try owner.shard.activeReservationAtoms());
+        try std.testing.expectEqual(@as(usize, 0), owner.shard.oms.emitted().len);
+    }
+    try restored.checkpoint();
+    try recoverCoordinatorInto(restored, coordinator);
+    try std.testing.expectError(error.FreshNativeBootstrapRequired, restored.completeRecovery());
+}
+
+noinline fn recoverCoordinatorInto(destination: *coordination.CoordinatorOwner, previous: *const coordination.CoordinatorOwner) !void {
+    destination.* = try coordination.CoordinatorOwner.recover(previous.stream, previous.store, undefined);
+}
+
+noinline fn verifySecondaryFee(coordinator: *coordination.CoordinatorOwner, owners: []demo.Owner) !void {
     const projection = &owners[0].shard.economic_projection;
     var origin: ?canonical.FeeOrigin = null;
     for (projection.applied_fills[0..projection.applied_fill_count]) |applied| {
@@ -221,14 +279,14 @@ fn verifySecondaryFee(coordinator: *coordination.CoordinatorOwner, owners: []dem
 }
 
 test "04 four Owners retain real opposing portfolio fills and gross margin" {
-    try exercisePortfolioFills(false);
+    try exercisePortfolioFills(false, false);
 }
 
 test "04 four Owners archive portfolio B forced native PnL independently" {
-    try exercisePortfolioFills(true);
+    try exercisePortfolioFills(true, false);
 }
 
-fn exercisePortfolioFills(comptime forced_case: bool) !void {
+fn exercisePortfolioFills(comptime forced_case: bool, comptime recovery_case: bool) !void {
     const allocator = std.testing.allocator;
     const memory = try allocator.create(durable.MemoryAdapter);
     defer allocator.destroy(memory);
@@ -258,22 +316,36 @@ fn exercisePortfolioFills(comptime forced_case: bool) !void {
     baseline_record.venue.envelope.identity.stream = 999;
     baseline_record.venue.envelope.source_stream = 999;
     for (owners) |*owner| _ = try owner.apply(baseline_record);
+    if (recovery_case) for (owners[1..], 1..) |*owner, index| try gateway_fixture.prepareTrading(owner, index, 1);
     try placeGroups(&owners[0], forced_case);
+    if (recovery_case) for (owners[1..], 1..) |*owner, index| {
+        for ([_]u128{ index + 1, index + 5 }) |instrument| {
+            var margin = owners[0].shard.registryInstrument(1).?.margin;
+            margin.instrument = instrument;
+            try apply(owner, 2, .{ .margin_rules_activated = margin });
+        }
+    };
     try std.testing.expect(owners[0].shard.economic_projection.portfolioLayer(15) != null);
     for (owners[0].shard.oms.orders[0..4], 0..) |order, index| {
         try std.testing.expectEqual(@as(u128, if (index < 2) 11 else 15), order.portfolio);
     }
     const gateway = try allocator.create(execution.Gateway);
     defer allocator.destroy(gateway);
-    gateway.init();
+    const dispatch_storage = try allocator.alloc(u8, durable.max_snapshot_bytes);
+    defer allocator.free(dispatch_storage);
+    gateway.initWithDispatchSnapshotBuffer(dispatch_storage);
     try gateway.bootstrapDurableDispatch(memory.interface(), undefined, .{ .domain = .control, .id = 9700 });
     try gateway.pinDeploymentDigest(owners[0].shard.deployment.header.?.expected_digest);
     const when = fixture.atGroup(46, .{ .identity = 0, .payload = .recovery_completed }).core;
-    var simulator: simulated.SimulatedVenue = .{ .receipt_times = .{ .source_utc_ns = when.source_time, .receive_utc_ns = when.receive_time, .monotonic_ns = when.monotonic_time, .audit_utc_ns = when.wall_time } };
+    const simulator = try allocator.create(simulated.SimulatedVenue);
+    defer allocator.destroy(simulator);
+    initializeSimulatorInto(simulator, .{ .source_utc_ns = when.source_time, .receive_utc_ns = when.receive_time, .monotonic_ns = when.monotonic_time, .audit_utc_ns = when.wall_time });
     var adapter = simulator.adapter();
     try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1, .asset_definitions = owners[0].shard.asset_registry, .instrument_definitions = owners[0].shard.instrument_registry });
     try gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .supported_products = execution.productMask(.isolated_linear_usdt), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
-    var coordinator = try coordination.CoordinatorOwner.init(.init(2, 100, 100), .{ .domain = .control, .id = 9701 }, memory.interface(), undefined);
+    const coordinator = try allocator.create(coordination.CoordinatorOwner);
+    defer allocator.destroy(coordinator);
+    try initializeCoordinatorInto(coordinator, memory.interface());
     for (owners, 0..) |*owner, index| try coordinator.apply(.{ .publish_summary = .{ .identity = index + 1, .summary = try coordination.shardSummaryFromShard(&owner.shard, @enumFromInt(index), 1, index + 1) } });
     for (1..5) |command_id| {
         const command = owners[0].shard.oms.findCommand(command_id) orelse return error.TestMissingCommand;
@@ -300,12 +372,12 @@ fn exercisePortfolioFills(comptime forced_case: bool) !void {
         try std.testing.expect(owner.shard.economic_projection.portfolioLayer(15) == null);
         try std.testing.expectEqual(@as(i64, 0), owner.shard.economic_projection.exchange.positionForInstrument(1).quantity);
     }
-    if (forced_case) return verifyPortfolioForced(&coordinator, owners, gateway);
-    try verifyNativeMargin(&coordinator, owners);
-    try verifySecondaryFee(&coordinator, owners);
+    if (forced_case) return verifyPortfolioForced(coordinator, owners, gateway);
+    try verifyNativeMargin(coordinator, owners, recovery_case);
+    if (!recovery_case) try verifySecondaryFee(coordinator, owners);
 }
 
-fn verifyPortfolioForced(coordinator: *coordination.CoordinatorOwner, owners: []demo.Owner, gateway: *execution.Gateway) !void {
+noinline fn verifyPortfolioForced(coordinator: *coordination.CoordinatorOwner, owners: []demo.Owner, gateway: *execution.Gateway) !void {
     try owners[0].bindAccountCoordinator(coordinator);
     const before_a = owners[0].shard.economic_projection.portfolioLayer(11).?.*;
     const before_b = owners[0].shard.economic_projection.portfolioLayer(15).?.usdt_balance_atoms;
@@ -374,4 +446,16 @@ fn verifyPortfolioForced(coordinator: *coordination.CoordinatorOwner, owners: []
     try std.testing.expect(recovered_owner.shard.history_conflict_latched);
     try std.testing.expectEqualDeep(economic_after, recovered_owner.shard.economic_projection.digest());
     try std.testing.expectEqual(sends_after, gateway.send_attempt_count);
+}
+
+noinline fn initializeCoordinatorInto(coordinator: *coordination.CoordinatorOwner, store: durable.Store) !void {
+    coordinator.* = try coordination.CoordinatorOwner.init(.init(2, 100, 100), .{ .domain = .control, .id = 9701 }, store, undefined);
+}
+
+noinline fn initializeSimulatorInto(simulator: *simulated.SimulatedVenue, times: @FieldType(simulated.SimulatedVenue, "receipt_times")) void {
+    simulator.* = .{ .receipt_times = times };
+}
+
+test "07 four recovered Owners require fresh native account and margin evidence without sending" {
+    try exercisePortfolioFills(false, true);
 }

@@ -42,7 +42,7 @@ const applyHealthyPrelude = fixture.applyHealthyPrelude;
 const atGroup = fixture.atGroup;
 
 fn bootstrapOwnerInto(owner: *@import("../../runtime/demo/demo_authority.zig").Owner, store: @import("../../persistence/durable_store.zig").Store, stream: @import("../../persistence/durable_store.zig").StreamIdentity) !void {
-    owner.* = try @import("../../runtime/demo/demo_authority.zig").Owner.bootstrap(store, undefined, stream);
+    try @import("../../runtime/demo/demo_authority.zig").Owner.bootstrapInto(owner, store, undefined, stream);
 }
 
 fn createScenario() !*LiveRun {
@@ -1028,7 +1028,7 @@ test "host fault revokes the old activation before a replacement can trade" {
     try std.testing.expectError(error.HostNotActivated, gateway.activate(&run.shard, &run.decision_journal));
     try std.testing.expectError(error.HostNotActivated, run.shard.appliedHostActivation(&run.decision_journal));
     try std.testing.expectEqual(@as(u128, 0), run.shard.host_activation_identity);
-    try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
+    try std.testing.expect(!run.shard.operational_state.effectiveTradingAuthority());
     try std.testing.expectError(error.InvalidHostActivation, run.shard.apply(atGroup(13, .{ .identity = 81, .payload = .{ .host_activated = .{
         .strategy_identity = 1,
         .config_version = 1,
@@ -1063,6 +1063,24 @@ test "host fault revokes the old activation before a replacement can trade" {
         .activation_barrier = 0,
         .state_digest = digest,
     } } })));
+    var recovered_gate = run.shard.operational_state.gates[run.shard.operational_state.gate_count - 1];
+    try std.testing.expectEqual(operational.GateReason.observability, recovered_gate.reason);
+    recovered_gate.open = true;
+    recovered_gate.continuity_proven = true;
+    _ = try applyLive(&run.shard, &run.decision_journal, atGroup(14, .{ .identity = 8000, .payload = .{ .safety_gate_change = recovered_gate } }));
+    for ([_]operational.CommandKind{ .resolve_latch, .enable_trading }, 0..) |kind, index| {
+        _ = try applyLive(&run.shard, &run.decision_journal, atGroup(14, .{ .identity = 8001 + index, .payload = .{ .control_command = .{
+            .command_identity = 8001 + index,
+            .content_hash = 8001 + index,
+            .target_identity = 1,
+            .expected_version = run.shard.operational_state.version,
+            .expires_at = std.math.maxInt(u64),
+            .kind = kind,
+            .referenced_latch_identity = recovered_gate.gate_identity,
+        } } }));
+    }
+    try std.testing.expect(run.shard.operational_state.effectiveTradingAuthority());
+    const replacement_digest = run.shard.canonicalStateDigest();
     const new_barrier: u64 = run.shard.authoritativeBarrier();
     var next_config = config;
     next_config.session.generation += 1;
@@ -1075,7 +1093,7 @@ test "host fault revokes the old activation before a replacement can trade" {
         .activation_identity = 2,
         .session = next_config.session,
         .activation_barrier = new_barrier,
-        .state_digest = digest,
+        .state_digest = replacement_digest,
     } } }));
     try std.testing.expectEqual(@as(u128, 2), run.shard.host_activation_identity);
     const new_proof = try run.shard.appliedHostActivation(&run.decision_journal);
@@ -1107,7 +1125,7 @@ test "host fault revokes the old activation before a replacement can trade" {
         .command_identity = 85,
         .content_hash = 85,
         .target_identity = 1,
-        .expected_version = 3,
+        .expected_version = run.shard.operational_state.version,
         .expires_at = std.math.maxInt(u64),
         .kind = .trading_pause,
     } } }));

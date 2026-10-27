@@ -18,14 +18,14 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-// StateDigestV14 / SemanticAuthorityDigestV4 / journal46 / state50 / canonical16 / registry44; recaptured after economic and stable replay assertions.
-pub const expected_happy_digest = "c6b9ab2c9ae6c09fc05e024f48a987e5830948f218bdad7da1fc55abb2ffad79";
+// StateDigestV14 / SemanticAuthorityDigestV4 / journal50 / state54 / canonical16 / registry48; recaptured after economic and stable replay assertions.
+pub const expected_happy_digest = "1be43b386c07805c062d48c88c9a01358c64b99279a200e20035365cb78eea21";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "7d68a4a0bb49f5cafd82829c3f1f332a6afe526ad180d894d179fc7a5af2e99a",
-    "571925c1ef467c1e56073c896b5d92b828e6a4d77e22cf673577b9e5beb80db8",
-    "36c1b84eaa0e40be11e996b73abbde630734367d03eb9593eeaa493cbbd08934",
-    "92bf9fe17f3fc281498788709615b19ccfebec9b7fec980519e9430602f65bf1",
+    "430cb28a908922d20d9313fa2be493aae517f54f143830ac5b8834fa4429f1fc",
+    "94da83bc055586e458ee438dff9d63ab873185f4ff3e8690f82d388900f3f69d",
+    "94acc83d6e87e92eb606fca8696566a000bf3619837e5a62c034191bd4b0fbe9",
+    "627ae0d2083e2beea8f32c0b1cbec6a0848a4cabd310af24a696e54ef9e94275",
 };
 pub const order_limit_price: i64 = 50_100_000_000;
 
@@ -342,6 +342,7 @@ pub fn gatewayActivationFixtureForSession(authorization: host_gateway.Authorizat
 pub fn gatewayActivationFixtureForSessionInto(run: *LiveRun, authorization: host_gateway.Authorization, session: @import("../../strategy/strategy_host_ipc.zig").Session) !void {
     run.* = .{
         .shard = .{
+            .portfolio_identity = 1,
             .strategy_active = true,
             .strategy_identity = authorization.strategy_identity,
             .strategy_config_version = authorization.config_version,

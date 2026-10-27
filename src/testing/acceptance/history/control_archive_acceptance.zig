@@ -224,10 +224,11 @@ test "Owner control history crosses command gate latch and strategy fence bounds
             const id: u64 = 10000 + round * 16 + offset;
             _ = try harness.owner.apply(.{ .core = .{ .identity = id, .payload = .{ .safety_gate_change = .{ .gate_identity = id, .target_identity = 1, .kind = .latched, .reason = .reconciliation_break, .open = false } } } });
             try std.testing.expect(!harness.owner.shard.operational_state.effectiveTradingAuthority());
+            _ = try harness.owner.apply(.{ .core = .{ .identity = id, .payload = .{ .safety_gate_change = .{ .gate_identity = id, .target_identity = 1, .kind = .latched, .reason = .reconciliation_break, .open = true } } } });
+            try std.testing.expect(!harness.owner.shard.operational_state.effectiveTradingAuthority());
             var resolve = fixture.lifecycleCommand(id + 10000, harness.owner.shard.operational_state.version, .resolve_latch);
             resolve.core.payload.control_command.referenced_latch_identity = id;
             _ = try harness.owner.apply(resolve);
-            _ = try harness.owner.apply(.{ .core = .{ .identity = id, .payload = .{ .safety_gate_change = .{ .gate_identity = id, .target_identity = 1, .kind = .latched, .reason = .reconciliation_break, .open = true } } } });
             // Explicit reauthorization replaces the resolving command's authority reference.
             _ = try harness.owner.apply(fixture.lifecycleCommand(id + 20000, harness.owner.shard.operational_state.version, .enable_trading));
             _ = try harness.owner.archiveControlHistory(harness.gateway);
