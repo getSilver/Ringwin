@@ -24,6 +24,7 @@ Status: open
 - 2026-10-23 用户确认 Python 策略的13张任务拆分及本地发布；当前仅发布计划，不开始实现、部署或交易。
 - 2026-10-27 用户明确授权以Python实施03，建立独立策略分支，不在main施工；本次仅认领03，不授权部署或交易。
 - 2026-10-27 用户继续授权处理04，使用独立分支 `strategy/04-python-baseline`；仍不部署或交易。
+- 2026-10-27 用户授权先认领并完成05，再处理06；分支 `strategy/05-06-python-model-evaluation`，依次完成，不部署或交易。
 - 使用根级 GLOSSARY.md 和相关 ADR 的规范领域语言。
 - 用户已确认的约束与建议、待决问题分开记录。
 - 按 Blocked by 领取 Frontier，每次只认领一张；ready-for-agent 不取消依赖。三项核心接口能力由其他会话处理，复用当前实现及验收证据；原规格票不因拆票自动关闭。
@@ -49,7 +50,7 @@ Status: open
 
 ## Frontier
 
-- [05 状态空间挑战模型回放](issues/05-state-space-model.md)：依赖04已完成，ready-for-agent，尚未认领。
+- [05 状态空间挑战模型回放](issues/05-state-space-model.md)：依赖04已完成，in_progress，Codex已认领。
 - [06 固定目标与概率双门槛评估](issues/06-target-probability.md)：依赖03/04已完成，ready-for-agent，尚未认领。
 - 原01/02为来源规格，保持原状态；其他会话施工及资格见核心接口地图。其余新票按各自 Blocked by 推进。
 
@@ -147,4 +148,4 @@ Status: open
 ## Out of scope
 
 - 具体交易所、账户、币种名单和部署资金数值的选择。
-- 03/04以外策略实现不在本次授权范围；不部署、不执行真实或 Demo 交易、不同步 GitHub。
+- 03–06以外策略实现不在本次授权范围；不部署、不执行真实或 Demo 交易、不同步 GitHub。

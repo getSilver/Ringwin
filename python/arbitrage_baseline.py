@@ -118,7 +118,7 @@ class Prediction:
 
     def __post_init__(self):
         uint(self.model_version, 1)
-        if (self.model_kind not in ("ar1", "rolling") or type(self.model_hash) is not str
+        if (self.model_kind not in ("ar1", "rolling", "state_space") or type(self.model_hash) is not str
                 or len(self.model_hash) != 64 or any(x not in "0123456789abcdef" for x in self.model_hash)):
             raise Rejected("model_identity")
         if not isinstance(self.source, Point) or self.source.value is None:

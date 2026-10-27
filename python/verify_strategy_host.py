@@ -24,6 +24,7 @@ def main():
         else "strategy_host_capacity-current"
     )
     checks = [
+        [sys.executable, "python/test_arbitrage_state_space.py"],
         [sys.executable, "python/test_arbitrage_baseline.py"],
         [sys.executable, "python/test_arbitrage_economics.py"],
         [sys.executable, "python/test_strategy_host_bridge.py"],

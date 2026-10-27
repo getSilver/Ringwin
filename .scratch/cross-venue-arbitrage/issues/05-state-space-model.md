@@ -1,8 +1,8 @@
 # 05：状态空间挑战模型回放
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in_progress
+Assignee: Codex (strategy/05-06-python-model-evaluation)
 Blocked by: [04 滚动统计与 AR(1) 预测回放](04-baseline-prediction.md)
 Parent: [模块地图](../map.md)
 
