@@ -1,8 +1,8 @@
 # 04：滚动统计与 AR(1) 预测回放
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in_progress
+Assignee: Codex (strategy/04-python-baseline)
 Blocked by: None (can start immediately)
 Parent: [模块地图](../map.md)
 
