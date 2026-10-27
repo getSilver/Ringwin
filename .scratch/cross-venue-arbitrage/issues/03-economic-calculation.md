@@ -1,8 +1,8 @@
 # 03：完整周期经济计算与精确数量
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in_progress
+Assignee: Codex (strategy/03-python-economics)
 Blocked by: None (can start immediately)
 Parent: [模块地图](../map.md)
 

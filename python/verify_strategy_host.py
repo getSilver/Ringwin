@@ -24,6 +24,7 @@ def main():
         else "strategy_host_capacity-current"
     )
     checks = [
+        [sys.executable, "python/test_arbitrage_economics.py"],
         [sys.executable, "python/test_strategy_host_bridge.py"],
         [sys.executable, "python/test_strategy_checkpoint.py"],
         [zig, "fmt", "--check", *map(str, sorted((ROOT / "src").rglob("strategy_host_*.zig")))],
