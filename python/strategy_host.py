@@ -253,6 +253,38 @@ def decode_depth_snapshot(payload):
             "bids_truncated": bool(payload[42]), "asks_truncated": bool(payload[43])}
 
 
+def encode_depth_snapshot(book):
+    """Canonical depth inverse for offline joint-path replay; same validated wire."""
+    if type(book) is not dict or set(book) != {"instrument", "rules_version", "sequence", "visible_at_ns",
+                                             "bids", "asks", "bids_truncated", "asks_truncated"}:
+        raise ValueError("invalid depth fields")
+    payload = bytearray(704)
+    for name, offset, size in (("instrument", 0, 16), ("rules_version", 16, 8),
+                                ("sequence", 24, 8), ("visible_at_ns", 32, 8)):
+        if type(book[name]) is not int:
+            raise ValueError("invalid depth integer")
+        payload[offset:offset+size] = book[name].to_bytes(size, "little")
+    for side, name in enumerate(("bids", "asks")):
+        levels = book[name]
+        if type(levels) is not tuple or not 1 <= len(levels) <= 8 or type(book[name+"_truncated"]) is not bool:
+            raise ValueError("invalid depth side")
+        payload[40+side] = len(levels)
+        payload[42+side] = book[name+"_truncated"]
+        for index, level in enumerate(levels):
+            if type(level) is not tuple or len(level) != 2:
+                raise ValueError("invalid depth level")
+            ticks, lots = level
+            if type(ticks) is not int or (lots is not None and type(lots) is not int):
+                raise ValueError("invalid depth integer")
+            offset = 64+(side*8+index)*40
+            payload[offset:offset+16] = ticks.to_bytes(16, "little", signed=True)
+            payload[offset+16] = lots is not None
+            payload[offset+24:offset+40] = (0 if lots is None else lots).to_bytes(16, "little", signed=True)
+    encoded = bytes(payload)
+    decode_depth_snapshot(encoded)
+    return encoded
+
+
 def trade_once(args, session, zig_sequence, host_sequence):
     for index in range(args.trade_batches):
         batch = read_input(session, zig_sequence)

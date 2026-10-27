@@ -44,6 +44,14 @@ class DepthSnapshotTests(unittest.TestCase):
         self.assertTrue(decoded["bids_truncated"])
         self.assertFalse(decoded["asks_truncated"])
 
+    def test_depth_encoder_reuses_canonical_wire_and_rejects_bad_units(self):
+        decoded = host.decode_depth_snapshot(self.wire())
+        self.assertEqual(host.encode_depth_snapshot(decoded), bytes(self.wire()))
+        missing = dict(decoded, asks=((1001, 0), (1002, None)))
+        self.assertEqual(host.decode_depth_snapshot(host.encode_depth_snapshot(missing)), missing)
+        with self.assertRaises(ValueError):
+            host.encode_depth_snapshot(dict(decoded, instrument=True))
+
     def test_absent_quantity_is_distinct_from_zero(self):
         payload = self.wire()
         offset = 64 + 9 * 40
