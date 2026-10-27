@@ -265,8 +265,13 @@ def fit(points, starts, *, training_end_ns, version, policy):
     b.uint(version, 1)
     if not isinstance(policy, FitPolicy) or type(starts) is not tuple or not 2 <= len(starts) <= 16:
         raise b.Rejected("multistart_policy")
-    if any(not isinstance(p, Parameters) for p in starts) or len({p.content_hash for p in starts}) != len(starts):
+    if any(not isinstance(p, Parameters) for p in starts):
+        raise b.Rejected("model_parameters")
+    if len({(p.phi, *p.q, p.r, *p.prior_mean, *p.prior_covariance) for p in starts}) != len(starts):
         raise b.Rejected("distinct_starts_required")
+    if len({(p.warmup, p.min_reversion, p.max_covariance, p.min_abs_deviation, p.covariance_tolerance)
+            for p in starts}) != 1:
+        raise b.Rejected("fit_policy_scope")
     training = tuple(p for p in b.ordered_points(points) if p.grid_ns < training_end_ns)
     if sum(p.value is not None for p in training) < policy.min_points:
         raise b.Rejected("insufficient_samples")

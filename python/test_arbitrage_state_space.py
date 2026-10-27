@@ -129,6 +129,17 @@ def fit_policy(**changes):
 
 
 class FittingTests(unittest.TestCase):
+    def test_metadata_aliases_cannot_masquerade_as_distinct_statistical_starts(self):
+        points, _ = synthetic(count=40)
+        first = parameters()
+        for alias in (replace(first, version=2), replace(first, trained_until_ns=123)):
+            with self.assertRaisesRegex(b.Rejected, "distinct_starts_required"):
+                s.fit(points, (first, alias), training_end_ns=40*b.SECOND,
+                      version=3, policy=fit_policy(iterations=1))
+        with self.assertRaisesRegex(b.Rejected, "fit_policy_scope"):
+            s.fit(points, (first, replace(first, phi=.8, max_covariance=200.)),
+                  training_end_ns=40*b.SECOND, version=3, policy=fit_policy(iterations=1))
+
     def test_multistart_fit_is_frozen_reproducible_and_reports_ambiguity(self):
         points, _ = synthetic(count=60)
         first = parameters(phi=.7, q=(1e-6, 0., 0., .0004), r=.000025,

@@ -79,9 +79,9 @@ Windows PowerShell，Python3.9.18，无新增依赖：
 
 ```powershell
 python -m unittest discover -s python -p test_arbitrage_state_space.py
-# 11 tests, OK
+# 12 tests, OK
 python -m unittest discover -s python -p 'test_*.py'
-# 73 tests, OK
+# 74 tests, OK
 python -m py_compile python/arbitrage_state_space.py python/test_arbitrage_state_space.py
 # exit 0
 python -c "import sys; sys.path.insert(0,'python'); import test_arbitrage_state_space as t; print(t.synthetic_report())"
@@ -93,4 +93,11 @@ git diff --check
 mypy仍未安装，未记静态类型检查通过。未运行Zig全套、真实Host接线、
 checkpoint恢复/跨平台位级数值资格、市场校准、影子或任何Demo/真实交易。
 这些由10、12/13及独立集成验收继续负责，不以本票测试代替。
-两轴复核及关闭证据在05 Answer和本记录收尾补充。
+标准轴0项；规格轴发现仅修改version/trained_until也能冒充不同起点，已按实际统计向量去重，
+并要求各起点资格政策完全一致。回归先失败后通过，两轴复验无剩余项，规格复核者运行12项通过。
+最终公开12/12、Python全量74/74。初始实现提交c73a2b2d，最终修复与关闭在随后提交。
+
+```text
+python/arbitrage_state_space.py 959DE720FE95F3B574DAE4D13FBBFEBE822BEF8E249B0360D084894B57948402
+python/test_arbitrage_state_space.py 417866557C9D722909730FA7234A5C1A00AD2AE81CD6372344597137CE1153E1
+```

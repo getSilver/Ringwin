@@ -50,11 +50,12 @@ Status: open
 
 ## Frontier
 
-- [05 状态空间挑战模型回放](issues/05-state-space-model.md)：依赖04已完成，in_progress，Codex已认领。
 - [06 固定目标与概率双门槛评估](issues/06-target-probability.md)：依赖03/04已完成，ready-for-agent，尚未认领。
 - 原01/02为来源规格，保持原状态；其他会话施工及资格见核心接口地图。其余新票按各自 Blocked by 推进。
 
 ## Decisions so far
+
+- 2026-10-27：[05](issues/05-state-space-model.md)完成状态空间/Joseph过滤、有界多起点拟合与可识别性诊断；公开12项、Python全量74项通过。重复起点元数据漏洞修复后两轴无剩余项，见[05证据](state-space-evidence.md)。仅关闭数学/离线范围；依用户顺序下一步处理06。
 
 - 2026-10-27：[04](issues/04-baseline-prediction.md)在 `strategy/04-python-baseline` 完成Python一秒网格、滚动分桶/AR(1)基线及成熟标签回放；24项公开测试、62项Python全量回归通过。两轴复核问题修复后无剩余项，详见[基线证据](baseline-prediction-evidence.md)。仅关闭数学及离线回放范围，不授予经济/运行资格；05/06进入Frontier，本次不继续认领。
 
