@@ -1,6 +1,6 @@
 # 跨所套利策略规格
 
-Status: drafting
+Status: open
 
 阅读入口：[策略合同草案](strategy-contract.md)。访谈保留决策来由，合同整理当前行为及待验证的公式细化。
 
@@ -16,27 +16,47 @@ Status: drafting
 
 - 交易范围、资金与数量、费用、资产身份、执行失败、库存和恢复均有明确规则。
 - 每项规则有正常及异常场景的可检查结果。
-- 用户确认共同理解后，才能进入实现规划。
+- 03–11通过Python公开接口、数学验证及离线合同回放后，可标记策略开发完成。
+- 12/13经济资格、14/15运行资格及[独立集成验收](integration-acceptance.md)分别记录，不阻塞策略开发完成；整个地图须全部范围完成才关闭。
 
 ## Rules
 
-- 当前授权为讨论和文档记录，不包含策略实现或交易。
+- 2026-10-23 用户确认 Python 策略的13张任务拆分及本地发布；当前仅发布计划，不开始实现、部署或交易。
 - 使用根级 GLOSSARY.md 和相关 ADR 的规范领域语言。
 - 用户已确认的约束与建议、待决问题分开记录。
-- 一次讨论一个关键决策；策略实现任务拆分待规格收敛后进行。用户已要求将三项项目接口能力形成交接规格，交由其他会话处理。
+- 按 Blocked by 领取 Frontier，每次只认领一张；ready-for-agent 不取消依赖。三项核心接口能力由其他会话处理，复用当前实现及验收证据；原规格票不因拆票自动关闭。
 - 交易所选择属于部署配置，不作为策略访谈问题。具体账户、币种名单和资金数值由运行配置提供；策略规格定义输入语义、约束及校验，不要求先选择部署实例。
 
 ## Route
 
 1. [策略设计访谈与规格](issues/01-strategy-spec.md)
-2. [三项核心接口能力交接](issues/02-core-interface-handoff.md)（其他会话；需求交接，尚未实现）
+2. [三项核心接口能力交接](issues/02-core-interface-handoff.md)（其他会话；当前进度见[核心接口地图](../cross-venue-core-interface/map.md)，不沿用旧缺口描述）
+3. [完整周期经济计算与精确数量](issues/03-economic-calculation.md)
+4. [滚动统计与 AR(1) 预测回放](issues/04-baseline-prediction.md)
+5. [状态空间挑战模型回放](issues/05-state-space-model.md)
+6. [固定目标与概率双门槛评估](issues/06-target-probability.md)
+7. [只读机会扫描与候选展示](issues/07-opportunity-scanner.md)
+8. [白名单准入、多机会分配与信号重评](issues/08-whitelist-allocation.md)
+9. [双 IOC 完整交易周期](issues/09-dual-ioc-cycle.md)
+10. [真实策略状态 checkpoint 与恢复](issues/10-strategy-recovery.md)
+11. [Maker–Taker 完整交易周期](issues/11-maker-taker-cycle.md)
+12. [双 IOC 样本外校准与资格判定](issues/12-taker-calibration.md)
+13. [Maker–Taker 独立校准与资格判定](issues/13-maker-calibration.md)
+14. [双 IOC 只读影子验收](issues/14-taker-shadow.md)
+15. [Maker–Taker 只读影子验收](issues/15-maker-shadow.md)
 
 ## Frontier
 
-- 本会话：[策略设计访谈与规格](issues/01-strategy-spec.md)，S1–S6已成文并完成文档级一致性核对；保持in_progress，等待用户共同理解确认。实际校准、实现和运行验收尚未完成，不继续扩展为默认已授权实施。
-- 其他会话：[三项核心接口交接](issues/02-core-interface-handoff.md)，可开始现状核对及设计；最终状态字段和策略集成依赖规格收敛。
+- [03 完整周期经济计算与精确数量](issues/03-economic-calculation.md)：无 blocker，ready-for-agent，尚未认领。
+- [04 滚动统计与 AR(1) 预测回放](issues/04-baseline-prediction.md)：无 blocker，ready-for-agent，尚未认领。
+- 原01/02为来源规格，保持原状态；其他会话施工及资格见核心接口地图。其余新票按各自 Blocked by 推进。
 
 ## Decisions so far
+
+- 2026-10-23：用户确认13张 Python 策略票（03–15）；原提案第5票拆为只读扫描与白名单准入。扫描可独立只读运行，发现白名单外机会；沿用现有 Web 控制面显式批准配对、方向和模式后，交易策略重新检查最新条件。加入白名单不补发过期机会，禁用保留存量退出及对账责任。
+- 扫描和交易共用经济/预测评估实现；数学验收包含独立精确基准、边界与不变量、递推交叉核验、时间隔离校准、有效样本及恢复决策一致性。模拟次数不充当市场独立样本，手工向量不替代统计或运行证据。
+- 原提案与文件编号映射：1–4→03–06，5a/5b→07/08，6–12→09–15。双IOC与Maker校准、影子资格独立；无实际数据不能关闭校准票。
+- 2026-10-23追加：用户要求其他模块不阻塞策略完成。03–11仅保留策略内部阻塞边；Web、核心、Host、Venue实际接入移交独立集成验收，策略10按现有合同独立交付模型编码及恢复。12–15保持独立资格票。
 
 - S5：同次信号内允许未成功预留且未发单时有界重评，每次重查完整门槛，固定期限不延期。结果未知先查证，成功预留即消费信号；到期/次数耗尽或信号资格失效后重新重置及触发。[S5合同](signal-monitoring.md)补齐迟滞、冷却、监测窗口、预警/失效转换和恢复原因隔离。
 
