@@ -7,7 +7,7 @@ import arbitrage_probability as p
 import arbitrage_baseline as b
 
 
-def calibration(stage="entry", calibrated=F(3, 4), margin=F(6, 100), blocks=500, scope="fixture", model_hash="11"*32):
+def calibration(stage="entry", calibrated=F(3, 4), margin=F(6, 100), blocks=500, scope="fixture", model_hash="11"*32, simulation_hash="22"*32):
     records = tuple(p.Block(str(i), 210+i*10, 220+i*10, F(4, 5),
                             tuple(j < calibrated.numerator for j in range(calibrated.denominator)))
                     for i in range(blocks))
@@ -16,14 +16,14 @@ def calibration(stage="entry", calibrated=F(3, 4), margin=F(6, 100), blocks=500,
                        label_span_ns=10, valid_from_ns=220+blocks*10, valid_until_ns=1_000_000,
                        bin_edges=(F(0), F(1)), min_blocks=100, min_labels=100,
                        confidence_error=F(1, 20), declared_margin=margin,
-                       independence_ref="fixture-independent-blocks", covers_mc=False)
+                       independence_ref="fixture-independent-blocks", covers_mc=False, simulation_hash=simulation_hash)
 
 
 class ProbabilityTests(unittest.TestCase):
     def test_s3c_raw_calibrated_and_error_sources_are_distinct(self):
         artifact = calibration()
         result = p.assess(F(4, 5), artifact, stage="entry", mode="taker_taker", scope="fixture",
-                          model_hash="11"*32, at_ns=10_000, min_probability=F(7, 10),
+                          model_hash="11"*32, simulation_hash="22"*32, at_ns=10_000, min_probability=F(7, 10),
                           mc=p.SimulationError("sampled", 5000, F(1, 20), F(2, 100), "fixture-mc"))
         self.assertEqual((result.raw, result.calibrated, result.lower_ppm), (F(4, 5), F(3, 4), 670_000))
         self.assertFalse(result.passed)
@@ -31,7 +31,7 @@ class ProbabilityTests(unittest.TestCase):
 
     def assess(self, artifact, **changes):
         values = dict(stage="entry", mode="taker_taker", scope="fixture", model_hash="11"*32,
-                      at_ns=10_000, min_probability=F(65, 100),
+                      simulation_hash="22"*32, at_ns=10_000, min_probability=F(65, 100),
                       mc=p.SimulationError("exact_enumeration", 0, F(0), F(0), "exact-fixture"))
         values.update(changes)
         return p.assess(F(4, 5), artifact, **values)
@@ -50,6 +50,7 @@ class ProbabilityTests(unittest.TestCase):
         artifact = calibration()
         for changes, reason in ((dict(stage="hold"), "calibration_scope"),
                                 (dict(scope="different-quantity-or-deadline"), "calibration_scope"),
+                                (dict(simulation_hash="33"*32), "calibration_scope"),
                                 (dict(at_ns=artifact.valid_until_ns), "calibration_expired")):
             self.assertEqual(self.assess(artifact, **changes).reason, reason)
         small = self.assess(calibration(blocks=2),
@@ -65,7 +66,7 @@ class ProbabilityTests(unittest.TestCase):
         kwargs = dict(version=1, stage="entry", mode="taker_taker", scope="fixture", model_hash="11"*32,
                       training_end_ns=0, embargo_ns=10, label_span_ns=10, valid_from_ns=100,
                       valid_until_ns=1000, bin_edges=(F(0), F(1)), min_blocks=1, min_labels=1,
-                      confidence_error=F(1, 20), declared_margin=F(1), independence_ref="source", covers_mc=False)
+                      confidence_error=F(1, 20), declared_margin=F(1), independence_ref="source", covers_mc=False, simulation_hash="22"*32)
         artifact = p.calibrate((block,), **kwargs)
         self.assertEqual((artifact.bins[0].blocks, artifact.bins[0].mature_labels, artifact.bins[0].missing_labels), (0, 1, 1))
         for blocks in ((block, replace(block, start_ns=20, end_ns=30)),

@@ -50,10 +50,12 @@ Status: open
 
 ## Frontier
 
-- [06 固定目标与概率双门槛评估](issues/06-target-probability.md)：依赖03/04已完成，ready-for-agent，尚未认领。
+- [07 只读机会扫描与候选展示](issues/07-opportunity-scanner.md)：依赖06已完成，ready-for-agent；本次授权止于06，未认领07。
 - 原01/02为来源规格，保持原状态；其他会话施工及资格见核心接口地图。其余新票按各自 Blocked by 推进。
 
 ## Decisions so far
+
+- 2026-10-27：[06](issues/06-target-probability.md)完成联合场景、一次固定目标、实际计划收益及概率双门槛，包含无未来泄漏的冻结条件生成器；公开评估25项/概率5项、Python全量105项通过。两轴复核修复后无剩余项，见[06证据](target-probability-evidence.md)。05→06授权已完成，仅关闭数学/离线范围，下一Frontier为07，未继续认领。
 
 - 2026-10-27：[05](issues/05-state-space-model.md)完成状态空间/Joseph过滤、有界多起点拟合与可识别性诊断；公开12项、Python全量74项通过。重复起点元数据漏洞修复后两轴无剩余项，见[05证据](state-space-evidence.md)。仅关闭数学/离线范围；依用户顺序下一步处理06。
 

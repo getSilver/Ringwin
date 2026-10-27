@@ -98,6 +98,24 @@ class ValuationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             v.FundingCost("income-is-not-an-outflow", 1, T, -1)
 
+    def test_residual_cap_cannot_close_legal_unsold_spot_inventory(self):
+        position = v.Entry("matched", (leg(0, kind="spot"), leg(1)), (), T, True, (), ())
+        frame = market(0, 1000)
+        frame = replace(frame, books=(wire(1, T, 1000, 1001, 0), frame.books[1]))
+        result = v.value_exit(position, frame, policy(residual_cap_base=F(1), residual_haircut=F(1)), normal=True)
+        self.assertFalse(result.closed)
+        self.assertIsNone(result.net_atoms)
+        self.assertEqual(result.remaining_base[0], 1)
+
+    def test_intrinsically_unaffordable_base_fee_makes_bounded_spot_dust(self):
+        spot = leg(0, kind="spot")
+        spot = replace(spot, exit_fee=e.FeeRule(1, 1, 2, 1000, 1000, 0, 1_000_000))
+        position = v.Entry("matched", (spot, leg(1)), (), T, True, (), ())
+        result = v.value_exit(position, market(0, 1000), policy(residual_cap_base=F(1), residual_haircut=F(1)), normal=True)
+        self.assertTrue(result.closed)
+        self.assertEqual(result.remaining_base, (F(1), F(0)))
+        self.assertEqual(result.net_atoms, 10_000_000)
+
 
 EXACT = p.SimulationError("exact_enumeration", 0, F(0), F(0), "frozen-support")
 LIMITS = v.Limits(256, 100_000, 256)
@@ -139,14 +157,16 @@ def estimator_for(scenarios, plan, original_target=8_000_000, margin=F(7, 100)):
         rows.append(v.ConditionalRow(context.scope, (continuation,), artifact, EXACT,
                                     v.RebaseBounds(F(9, 10), F(11, 10), .01, F(1, 2), F(2), F(2))))
         seen.add(context.scope)
-    return v.Estimator(MODEL, 200, tuple(rows))
+    estimator = v.Estimator(MODEL, 200, tuple(rows))
+    simulation_hash = estimator.probability_model_hash(plan)
+    return replace(estimator, rows=tuple(replace(row, calibration=replace(row.calibration, simulation_hash=simulation_hash)) for row in rows))
 
 
 def run(scenarios, plan=None, *, original_target=8_000_000, entry_margin=F(7, 100), hold_margin=F(7, 100)):
     plan = policy() if plan is None else plan
     estimator = estimator_for(scenarios, plan, original_target, hold_margin)
     artifact = calibration(scope=v.probability_scope(plan, original_target, plan.original_base, plan.at_ns),
-                           margin=entry_margin, model_hash=plan.model_hash)
+                           margin=entry_margin, model_hash=plan.model_hash, simulation_hash=estimator.probability_model_hash(plan))
     return v.evaluate(scenarios, plan, estimator, artifact, EXACT, LIMITS)
 
 
@@ -217,6 +237,16 @@ class EvaluationTests(unittest.TestCase):
         self.assertFalse(result.plan_paths[0].actual_target_met)
         self.assertEqual(result.entry_probability.raw, 1)
         self.assertEqual(result.actual_target_probability, 0)
+
+    def test_v6_first_legal_profit_trigger_and_v13_absolute_partial_floor(self):
+        scenario = path("fixed-plan")
+        scenario = replace(scenario, markets=(scenario.markets[0], market(1, 1070), market(6, 1018))+scenario.markets[3:])
+        result = run((scenario,))
+        self.assertEqual((result.reference_atoms, result.entry_target_atoms), (10_000_000, 8_000_000))
+        self.assertEqual(v.value_exit(scenario.entry, scenario.markets[1], policy(), normal=True).net_atoms, 3_000_000)
+        self.assertEqual((result.plan_paths[0].trigger_ns, result.plan_paths[0].closed_at_ns), (T+6, T+11))
+        floor = run((path("ten-percent"),), policy(original_base=F(10)))
+        self.assertEqual((floor.entry_target_atoms, floor.plan_paths[0].target_atoms), (8_000_000, 2_000_000))
 
     def test_s2c_comparison_uses_plan_returns_even_when_reference_order_is_reversed(self):
         first = run((path("a1", F(1, 2), 1020), path("a2", F(1, 2), 1060)))
@@ -300,6 +330,27 @@ class EvaluationTests(unittest.TestCase):
 
 
 class HoldingTests(unittest.TestCase):
+    def test_calibration_cannot_be_reused_after_generator_or_execution_policy_changes(self):
+        scenario, plan = path("binding"), policy()
+        estimator = estimator_for((scenario,), plan)
+        context = v.Context(scenario.entry, scenario.markets[0], 8_000_000, plan)
+        self.assertEqual(v.assess_holding(context, estimator, LIMITS, phase="entering").action, "hold")
+        row = estimator.rows[0]
+        changed_support = replace(row.scenarios[0], exit_delays_ns=(0, 4))
+        replacement = replace(estimator, rows=(replace(row, scenarios=(changed_support,)),))
+        changed_bounds = replace(estimator, rows=(replace(row, bounds=replace(row.bounds, max_depth_factor=F(3))),))
+        for frozen in (replacement, changed_bounds):
+            decision = v.assess_holding(context, frozen, LIMITS, phase="entering")
+            self.assertEqual((decision.action, decision.reason), ("exit", "calibration_scope"))
+        changed_plan = replace(plan, normal_limits=(999, 10_000))
+        self.assertEqual(v.assess_holding(replace(context, policy=changed_plan), estimator, LIMITS,
+                                         phase="entering").reason, "calibration_scope")
+        artifact = calibration(scope=v.probability_scope(plan, 8_000_000, F(1), T),
+            model_hash=plan.model_hash, simulation_hash=estimator.probability_model_hash(plan))
+        result = v.evaluate((scenario,), plan, replacement, artifact, EXACT, LIMITS)
+        self.assertEqual(result.entry_probability.reason, "calibration_scope")
+        self.assertFalse(result.allowed)
+
     def test_conditional_ar1_mean_uses_grid_point_and_preserves_joint_residual(self):
         second = b.SECOND
         model = replace(MODEL, trained_until_ns=200*second)
@@ -328,7 +379,8 @@ class HoldingTests(unittest.TestCase):
             valid_from_ns=720*second, valid_until_ns=horizon_end)
         row = v.ConditionalRow(context.scope, (source,), artifact, EXACT,
                               v.RebaseBounds(F(9, 10), F(11, 10), .01, F(1, 2), F(2), F(2)))
-        projected = v.Estimator(model, 200*second, (row,)).generate(context)[0]
+        frozen = v.Estimator(model, 200*second, (row,))
+        projected = frozen.generate(context)[0]
         with localcontext() as arithmetic:
             arithmetic.prec = 60
             for original, conditioned in zip(source.markets[1:], projected.markets[1:]):
@@ -340,6 +392,9 @@ class HoldingTests(unittest.TestCase):
                 self.assertEqual(v.decode_depth_snapshot(conditioned.books[1])["asks"][0][0], expected)
                 self.assertEqual(v.decode_depth_snapshot(conditioned.books[0])["asks"],
                                  v.decode_depth_snapshot(original.books[0])["asks"])
+        extreme = replace(context, entry=replace(context.entry, model_point=b.Point(now, 3, -1e308)))
+        with self.assertRaisesRegex(b.Rejected, "conditional_numeric"):
+            frozen.generate(extreme)
 
     def test_frozen_joint_estimator_reuses_visible_prefix_at_new_time_and_price(self):
         original, plan = path("source"), policy()
@@ -360,6 +415,10 @@ class HoldingTests(unittest.TestCase):
         self.assertNotEqual(generated[0].markets[1].books, original.markets[1].books)
         self.assertEqual(estimator.content_hash, digest)
         self.assertEqual(v.assess_holding(context, estimator, LIMITS, phase="entering").action, "hold")
+        thinner = replace(frame, books=(wire(1, new_time, 1001, 1002, 50), wire(2, new_time, 1100, 1101, 50)))
+        thin_paths = estimator.generate(replace(context, market=thinner))
+        self.assertEqual(v.decode_depth_snapshot(thin_paths[0].markets[1].books[0])["bids"][0][1], 50)
+        self.assertEqual(v.decode_depth_snapshot(thin_paths[0].markets[1].books[1])["asks"][0][1], 50)
         for unsupported in (replace(frame, books=(wire(1, new_time, 2000, 2001), wire(2, new_time, 2200, 2201))),
                             replace(frame, books=(wire(1, new_time, 1001, 1002, 1), frame.books[1]))):
             decision = v.assess_holding(replace(context, market=unsupported), estimator, LIMITS, phase="entering")

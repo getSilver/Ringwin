@@ -362,7 +362,17 @@ def _close_leg(leg, market, index, policy, normal):
     if remaining < 0:
         raise b.Rejected("exit_increases_exposure")
     if leg.kind == "spot":
-        closed = remaining <= policy.residual_cap_base
+        bid = book["bids"][0][0]
+        cleanup_lots = max(leg.rules.min_lots, e.ceil_atoms(e.exact(
+            leg.rules.min_notional_atoms/leg.rules.notional(bid, 1))))
+        cleanup_base = e.exact(cleanup_lots*leg.rules.base_atoms_per_lot)
+        if leg.exit_fee.fee_asset == leg.rules.base_asset:
+            cleanup_fee = e.estimate_fee(leg.rules, leg.exit_fee, ticks=bid, lots=cleanup_lots, role="taker",
+                now_ns=market.at_ns, quote_atoms_per_fee_atom=bid*leg.rules.tick_quote_atoms_per_base_atom,
+                available_fee_atoms=market.fee_balances[index])
+            cleanup_base += cleanup_fee.base_atoms
+        legal_cleanup = remaining >= cleanup_base
+        closed = remaining <= policy.residual_cap_base and not legal_cleanup
         if not closed:
             return None, remaining, False
         residual_value = e.exact(remaining*book["bids"][0][0]*leg.rules.tick_quote_atoms_per_base_atom*policy.residual_haircut)
@@ -573,13 +583,30 @@ class Estimator:
 
     @property
     def content_hash(self):
-        return b.fingerprint("conditional_estimator_v1", [self.model_hash, self.training_end_ns,
-            [[r.scope, _scenarios_digest(r.scenarios), r.calibration.content_hash,
+        return b.fingerprint("conditional_estimator_v1", [self.simulation_hash, [r.calibration.content_hash for r in self.rows]])
+
+    @property
+    def simulation_hash(self):
+        return b.fingerprint("joint_residual_generator_v1", [self.model_hash, self.training_end_ns,
+            [[r.scope, _scenarios_digest(r.scenarios),
               r.simulation_error.method, r.simulation_error.draws, _ratio(r.simulation_error.confidence_error),
               _ratio(r.simulation_error.margin), r.simulation_error.source_ref,
               _ratio(r.bounds.min_price_factor), _ratio(r.bounds.max_price_factor),
               b.encode_number(float(r.bounds.max_log_spread_shift)), _ratio(r.bounds.min_depth_factor),
               _ratio(r.bounds.max_depth_factor), _ratio(r.bounds.max_top_spread_factor)] for r in self.rows]])
+
+    def probability_model_hash(self, policy):
+        """Calibration binds the generator AND the fixed economic execution policy."""
+        return b.fingerprint("fixed_target_execution_v1", [self.simulation_hash, policy.version,
+            policy.scope, policy.model_hash, policy.mode, policy.direction, policy.base_asset, policy.quote_asset,
+            _ratio(policy.original_base), policy.reference_notional_atoms,
+            policy.prediction_end_ns-policy.at_ns, policy.risk_deadline_ns-policy.at_ns,
+            policy.reference_exit_ns-policy.at_ns, _ratio(policy.alpha), policy.absolute_minimum_atoms,
+            policy.min_profit_atoms, _ratio(policy.min_edge_bp), _ratio(policy.min_entry_probability),
+            _ratio(policy.min_hold_probability), list(policy.normal_limits), list(policy.risk_limits),
+            policy.max_book_age_ns, _ratio(policy.residual_cap_base), _ratio(policy.residual_haircut),
+            [[[c.name, _ratio(c.atoms), c.treatment] for c in costs] for costs in (policy.reference_buffers, policy.plan_buffers)],
+            policy.reference_policy_ref, policy.plan_policy_ref])
 
     def generate(self, context):
         if (not isinstance(context, Context) or context.entry.state != "matched"
@@ -588,19 +615,23 @@ class Estimator:
         row = next((r for r in self.rows if r.scope == context.scope), None)
         if row is None:
             raise b.Rejected("conditional_scope")
-        return _condition(row, context, self.forecast)
+        try:
+            return _condition(row, context, self.forecast)
+        except (OverflowError, ZeroDivisionError) as error:
+            raise b.Rejected("conditional_numeric") from error
 
 
 def _mid(book, rule):
     return e.positive(e.exact(Fraction(book["bids"][0][0]+book["asks"][0][0], 2)*rule.tick_quote_atoms_per_base_atom))
 
 
-def _scaled_book(payload, factor, time_shift):
+def _scaled_book(payload, factor, time_shift, depth_factors):
     book = decode_depth_snapshot(payload)
     book["visible_at_ns"] = b.uint(book["visible_at_ns"]+time_shift)
     for side in ("bids", "asks"):
         levels = []
         for ticks, lots in book[side]:
+            lots = None if lots is None else e.floor_atoms(lots*depth_factors[side])
             scaled = e.exact(ticks*factor)
             price = e.floor_atoms(scaled) if side == "bids" else e.ceil_atoms(scaled)
             if price <= 0:
@@ -643,14 +674,18 @@ def _condition(row, context, forecast):
         if (any(not row.bounds.min_price_factor <= x <= row.bounds.max_price_factor for x in factors)
                 or abs(current_s-source_s) > row.bounds.max_log_spread_shift):
             raise b.Rejected("conditional_market_scope")
-        for current, historical, leg in zip(current_books, first_books, context.entry.legs):
-            side = "bids" if leg.direction == 1 else "asks"
-            if any(size is None for _, size in current[side]+historical[side]):
-                raise b.Rejected("conditional_liquidity_scope")
-            old_depth = sum(size for _, size in historical[side])
-            depth = sum(size for _, size in current[side])
-            if old_depth <= 0 or not row.bounds.min_depth_factor <= Fraction(depth, old_depth) <= row.bounds.max_depth_factor:
-                raise b.Rejected("conditional_liquidity_scope")
+        depth_factors = []
+        for current, historical in zip(current_books, first_books):
+            ratios = {}
+            for side in ("bids", "asks"):
+                if any(size is None for _, size in current[side]+historical[side]):
+                    raise b.Rejected("conditional_liquidity_scope")
+                old_depth = sum(size for _, size in historical[side])
+                depth = sum(size for _, size in current[side])
+                if old_depth <= 0 or not row.bounds.min_depth_factor <= Fraction(depth, old_depth) <= row.bounds.max_depth_factor:
+                    raise b.Rejected("conditional_liquidity_scope")
+                ratios[side] = Fraction(depth, old_depth)
+            depth_factors.append(ratios)
             old_spread = historical["asks"][0][0]-historical["bids"][0][0]
             spread = current["asks"][0][0]-current["bids"][0][0]
             if Fraction(spread, old_spread) > row.bounds.max_top_spread_factor:
@@ -669,7 +704,7 @@ def _condition(row, context, forecast):
                                   -mean_change(source.entry.model_point, first.at_ns, frame.at_ns))
             adjusted = e.positive(Fraction.from_float(b.positive(math.exp(correction))))
             scaled_factors = (factors[0], e.exact(factors[1]*adjusted))
-            books = tuple(_scaled_book(payload, factor, shift) for payload, factor in zip(frame.books, scaled_factors))
+            books = tuple(_scaled_book(payload, factor, shift, depth) for payload, factor, depth in zip(frame.books, scaled_factors, depth_factors))
             valuations = tuple(e.exact(now*later/before) for now, later, before in
                                zip(context.market.fee_valuations, frame.fee_valuations, first.fee_valuations))
             balances = tuple(min(now, max(0, now+later-before)) for now, later, before in
@@ -833,7 +868,7 @@ def _holding_probability(context, estimator, work):
         return None, "unresolved_conditional_risk"
     _simulation_weights(conditioned, row.simulation_error)
     result = p.assess(raw, row.calibration, stage="hold", mode=context.policy.mode, scope=context.scope,
-                      model_hash=context.policy.model_hash, at_ns=context.market.at_ns,
+                      model_hash=context.policy.model_hash, simulation_hash=estimator.probability_model_hash(context.policy), at_ns=context.market.at_ns,
                       min_probability=context.policy.min_hold_probability, mc=row.simulation_error)
     return result, "" if result.passed else result.reason
 
@@ -991,6 +1026,7 @@ def evaluate(scenarios, policy, estimator, entry_calibration, simulation_error, 
     if raw is not None:
         entry_probability = p.assess(raw, entry_calibration, stage="entry", mode=policy.mode,
             scope=probability_scope(policy, target, policy.original_base, policy.at_ns), model_hash=policy.model_hash,
+            simulation_hash=estimator.probability_model_hash(policy),
             at_ns=policy.at_ns, min_probability=policy.min_entry_probability, mc=simulation_error)
     # Future gate failure costs stay in Y; missing qualification cannot be repaired by p_cal.
     evidence_failures = {"conditional_evidence", "conditional_scope", "conditional_prefix_mismatch",

@@ -102,6 +102,7 @@ class Calibration:
     covers_mc: bool
     bins: Tuple[Bin, ...]
     source_digest: str
+    simulation_hash: str
 
     def __post_init__(self):
         b.uint(self.version, 1)
@@ -110,6 +111,7 @@ class Calibration:
         reference(self.independence_ref)
         validate_hash(self.model_hash)
         validate_hash(self.source_digest)
+        validate_hash(self.simulation_hash)
         b.uint(self.training_end_ns)
         if not self.training_end_ns <= self.calibration_start_ns < self.calibration_end_ns <= self.valid_from_ns < self.valid_until_ns:
             raise b.Rejected("calibration_time_partition")
@@ -143,14 +145,14 @@ class Calibration:
             self.scope, self.model_hash, self.training_end_ns, self.calibration_start_ns,
             self.calibration_end_ns, self.valid_from_ns, self.valid_until_ns, self.min_blocks,
             self.min_labels, ratio(self.confidence_error), ratio(self.margin), self.independence_ref,
-            self.covers_mc, self.source_digest,
+            self.covers_mc, self.source_digest, self.simulation_hash,
             [[ratio(r.lower), ratio(r.upper), None if r.calibrated is None else ratio(r.calibrated),
               r.blocks, r.mature_labels, r.missing_labels] for r in self.bins]])
 
 
 def calibrate(blocks, *, version, stage, mode, scope, model_hash, training_end_ns,
               embargo_ns, label_span_ns, valid_from_ns, valid_until_ns, bin_edges,
-              min_blocks, min_labels, confidence_error, declared_margin, independence_ref, covers_mc):
+              min_blocks, min_labels, confidence_error, declared_margin, independence_ref, covers_mc, simulation_hash):
     """Equal-weight complete block frequencies; raw labels never impersonate blocks.
 
     Each block occupies a declared dependency interval. Any missing queried-bin
@@ -189,7 +191,7 @@ def calibrate(blocks, *, version, stage, mode, scope, model_hash, training_end_n
         [x.identity, x.start_ns, x.end_ns, ratio(x.raw), list(x.outcomes)] for x in blocks])
     return Calibration(version, stage, mode, scope, model_hash, training_end_ns, blocks[0].start_ns,
                        blocks[-1].end_ns, valid_from_ns, valid_until_ns, min_blocks, min_labels,
-                       confidence_error, declared_margin, independence_ref, covers_mc, tuple(rows), source_digest)
+                       confidence_error, declared_margin, independence_ref, covers_mc, tuple(rows), source_digest, simulation_hash)
 
 
 @dataclass(frozen=True)
@@ -228,7 +230,7 @@ class ProbabilityResult:
     calibration_hash: str
 
 
-def assess(raw, artifact, *, stage, mode, scope, model_hash, at_ns, min_probability, mc):
+def assess(raw, artifact, *, stage, mode, scope, model_hash, simulation_hash, at_ns, min_probability, mc):
     raw, threshold = probability(raw), probability(min_probability)
     if threshold <= 0 or not isinstance(artifact, Calibration) or not isinstance(mc, SimulationError):
         raise b.Rejected("probability_evidence")
@@ -236,7 +238,7 @@ def assess(raw, artifact, *, stage, mode, scope, model_hash, at_ns, min_probabil
     threshold_ppm = e.ceil_atoms(threshold*PPM)
     row = next(r for r in artifact.bins if r.lower <= raw < r.upper or raw == r.upper == 1)
     reason = ""
-    if (stage, mode, scope, model_hash) != (artifact.stage, artifact.mode, artifact.scope, artifact.model_hash):
+    if (stage, mode, scope, model_hash, simulation_hash) != (artifact.stage, artifact.mode, artifact.scope, artifact.model_hash, artifact.simulation_hash):
         reason = "calibration_scope"
     elif not artifact.valid_from_ns <= at_ns < artifact.valid_until_ns:
         reason = "calibration_expired"
