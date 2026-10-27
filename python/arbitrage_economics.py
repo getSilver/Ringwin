@@ -212,8 +212,8 @@ class FeeRule:
     instrument: int
     rules_version: int
     fee_asset: int
-    taker_ppm: int
-    maker_ppm: int
+    taker_ppm: Fraction
+    maker_ppm: Fraction
     valid_from_ns: int
     valid_until_ns: int
 
@@ -221,7 +221,7 @@ class FeeRule:
         for x in (self.instrument, self.rules_version, self.fee_asset):
             integer(x, 1)
         for rate in (self.taker_ppm, self.maker_ppm):
-            if integer(rate) > 1_000_000:
+            if not 0 <= exact(rate) <= 1_000_000:
                 raise ValueError("unsupported fee rate")
         integer(self.valid_from_ns)
         integer(self.valid_until_ns, self.valid_from_ns+1)

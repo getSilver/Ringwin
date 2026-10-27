@@ -21,7 +21,8 @@
 - `InstrumentRules.notional` / `linear_pnl`：价格tick乘每基础币原子的报价原子价值，
   数量lots乘每lot的基础币原子数。线性USDT合约乘数包含在后者中；不适用于反向或跨报价币合约。
 - `estimate_fee`：逐Fill按有效规则、角色、扣费Asset及原子舍入计算。未知角色按taker；
-  第三币必须有正估值及足额可支付余额。maker返佣不改善准入；已确认返佣单独传入 `evaluate_cycle`。
+  第三币必须有正估值及足额可支付余额。费率支持Fraction形式的有理ppm，不限整数ppm；
+  maker返佣不改善准入；已确认返佣单独传入 `evaluate_cycle`。
 - `match_quantity`：现货gross基础币减基础币费用，再向下投影到对冲lot，分别返回匹配量与残余。
 - `spot_liquidation`：现金流加净残余库存估值一次；基础币费用已进入现金/库存变化，
   只为费用归因加回gross后统一展示费用，避免再次计损。未变现残余不是购买力。
@@ -85,9 +86,9 @@ AssetDefinition原子精度与规则换算必须来自核心，不从本地小�
 
 ```powershell
 python -m unittest discover -s python -p test_arbitrage_economics.py
-# 25 tests, OK
+# 26 tests, OK
 python -m unittest discover -s python -p 'test_*.py' -v
-# 37 tests, OK（含真实Host子进程checkpoint的既有回归）
+# 38 tests, OK（含真实Host子进程checkpoint的既有回归）
 python -m py_compile python/arbitrage_economics.py python/test_arbitrage_economics.py python/verify_strategy_host.py
 # exit 0
 git diff --check
@@ -101,3 +102,15 @@ python -m mypy --version
 未运行Zig全套/跨语言Host验收脚本、行情数据校准、影子、Demo或真实交易；
 本次没有Zig产品改动。数学正确性、经济统计有效性、跨模块集成及运行资格分开；
 后几项未因此取得资格。复核结果与最终关闭状态见本票Answer。
+
+code-review基点为上述开工SHA，首个实现提交为 `beafbefc`，复核也包含随后Fraction ppm修复。
+标准轴：0项，未发现违反仓库文档标准或需处理的baseline smell。
+规格轴：0项，未发现本票范围内的缺项、越界或错误算法；复核者另运行26项经济测试通过。
+证据计数已按最终结果更新。两轴均未运行统计或交易验收。
+
+最终实现/测试输入的SHA256（便于复跑定位）：
+
+```text
+python/arbitrage_economics.py 13C7975173BDC41E40C3284E183E2C705555F208C0813413DF3D4870FC2F6C1E
+python/test_arbitrage_economics.py D344E84FBAF101DC291DC18BF44F1E12B8B792F9A1BAFE1564DD291993DDF344
+```

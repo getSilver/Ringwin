@@ -111,6 +111,12 @@ class DepthTests(unittest.TestCase):
 
 
 class FeeTests(unittest.TestCase):
+    def test_fractional_ppm_fee_rates_stay_exact(self):
+        fee = e.estimate_fee(rules(), e.FeeRule(1, 1, 1, F(1, 3), 0, 0, 100),
+                             ticks=3_000_000, lots=1, role="taker", now_ns=10,
+                             quote_atoms_per_fee_atom=1)
+        self.assertEqual(fee.asset_atoms, 1)
+
     def test_v7_base_fee_matching_and_cash_pnl_do_not_double_count(self):
         spot = rules(base_atoms_per_lot=F(100), tick_quote_atoms_per_base_atom=F(1))
         fee_rule = e.FeeRule(1, 1, 2, 1000, 500, 0, 100)
