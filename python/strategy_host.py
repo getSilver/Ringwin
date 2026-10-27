@@ -160,13 +160,14 @@ def output_frame(batch, args, session, intent_sequence=None, limit_price=None):
     return bytes(frame)
 
 
-def output_group_frame(batch, args, session, first_sequence):
+def output_group_frame(batch, args, session, first_sequence, second_args=None):
     """Schema 2 is one complete ordered group, never two output messages."""
     first = output_frame(batch, args, session, first_sequence)
-    second = bytearray(output_frame(batch, args, session, first_sequence + 1)[128:])
-    second[32:48] = getattr(args, "second_exchange_account_identity", 4).to_bytes(16, "little")
-    second[48:64] = (getattr(args, "second_instrument_identity", None) or args.instrument_identity).to_bytes(16, "little")
-    second[2] = 2
+    second = bytearray(output_frame(batch, second_args or args, session, first_sequence + 1)[128:])
+    if second_args is None:
+        second[32:48] = getattr(args, "second_exchange_account_identity", 4).to_bytes(16, "little")
+        second[48:64] = (getattr(args, "second_instrument_identity", None) or args.instrument_identity).to_bytes(16, "little")
+        second[2] = 2
     frame = bytearray(first + second)
     struct.pack_into("<I", frame, 12, len(frame))
     struct.pack_into("<HII", frame, 98, 2, 2, 160)
