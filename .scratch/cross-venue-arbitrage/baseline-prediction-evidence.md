@@ -76,6 +76,9 @@ Venue序号允许非单位增量和有效重置，不能用“sequence必须+1�
 - phi=.9和.999999999999，各300/900/3600步，以60位Decimal逐步递推及独立Decimal ln核对；
   均值绝对容差1e-14，方差1e-12，半衰期比值误差1e-14。测试的极近单位根政策阈值1e-15
   仅是数值测试输入，不是已批准的活动模型参数。
+- 动态范围回归：center1/current1e16及center1e-18/current.01，phi=.5、h300，
+  加权均值保留center而不被消去为0；创新方差1e-323、phi=.999999999999时，
+  条件方差与60位Decimal递推误差不超过1ULP，不因先乘小分子而下溢为0。
 - 手工训练0,1,2,2,3：独立OLS答案phi=8/11、center=4、创新方差3/11；
   训练终点之后注入极端值不改变参数；缺口不凑相邻对；预测循环不改变参数hash。
 - 1,2,3滚动样本：mean2、variance1、Z1；跳秒、缺失及网格间已恢复缺口均重新预热。
@@ -108,17 +111,37 @@ rmse                 0.03678764127653949
 
 ```powershell
 python -m unittest discover -s python -p test_arbitrage_baseline.py
+# 24 tests, OK
 python -m unittest discover -s python -p 'test_*.py'
+# 62 tests, OK
 python -m py_compile python/arbitrage_baseline.py python/test_arbitrage_baseline.py python/verify_strategy_host.py
+# exit 0
 git diff --check
+# exit 0
 python -c "import sys; sys.path.insert(0, 'python'); import test_arbitrage_baseline as t; print(t.synthetic_report())"
 python -m mypy --version
 # No module named mypy；静态类型检查未执行，不记passed
 ```
 
 已运行先失败后实现的公开接口测试，包含标签因果检查先失败后修复。
-最终测试计数与两轴复核结果在04 Answer及本记录收尾处填写。
+最终测试计数：公开24/24、Python全量62/62，合成报告复跑一致。
 未执行Zig全套、真实Host行情/Timer接线、checkpoint恢复/跨平台数值资格、
 市场训练/独立样本外校准、影子或任何Demo/真实交易。
 现有codec被复用不等于产品链路已接通；模型私有状态到现有checkpoint schema的实际接入归10与独立集成验收。
 binary64按固定顺序计算，只报告本机资格，不声称跨平台位级收敛。
+
+## 两轴复核及最终版本
+
+code-review固定基点为上述03完成SHA，初始实现提交 `fa4c457d`。
+标准轴发现Point.evidence可接收list、间接修改已返回预测证据，已改为只接受tuple并有公开回归。
+规格轴发现AR1长期均值消去及极小创新方差下溢，已改为fsum的两项加权均值、
+先算方差倍率再乘创新方差；独立数值回归已先失败后通过。
+修复纳入工作树后两轴复验均无剩余项，规格复核者另运行24项公开测试通过。
+代码复核与全量回归不替代市场或运行资格。
+
+最终代码/测试SHA256：
+
+```text
+python/arbitrage_baseline.py EAF5F0605E51F31ACA44684218D97A82908F1AA95D9641739CA7D8498C225252
+python/test_arbitrage_baseline.py A0EBD6925179E50E787A5C9AF0FE91310D7BC3184238FB5B4A2E6BFB85523AA8
+```

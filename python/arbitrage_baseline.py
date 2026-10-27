@@ -97,6 +97,8 @@ class Point:
             raise Rejected("contradictory_point")
         else:
             finite(self.value)
+        if type(self.evidence) is not tuple:
+            raise Rejected("mutable_evidence")
         for value in materialized(self.evidence, 16):
             if type(value) is not int or not 0 <= value < (1 << 128):
                 raise Rejected("evidence_identity")
@@ -189,8 +191,10 @@ class AR1:
         if type(horizon_seconds) is not int or horizon_seconds not in HORIZONS:
             raise Rejected("horizon_seconds")
         log_phi = math.log1p(self.phi-1) if self.phi > .5 else math.log(self.phi)
-        mean = point.value + (self.center-point.value)*(-math.expm1(horizon_seconds*log_phi))
-        variance = self.innovation_variance*(-math.expm1(2*horizon_seconds*log_phi))/(-math.expm1(2*log_phi))
+        mean = sum_finite((point.value*math.exp(horizon_seconds*log_phi),
+                           self.center*(-math.expm1(horizon_seconds*log_phi))))
+        variance_multiplier = (-math.expm1(2*horizon_seconds*log_phi))/(-math.expm1(2*log_phi))
+        variance = self.innovation_variance*variance_multiplier
         return Prediction("ar1", self.version, self.content_hash, point, horizon_seconds, direction,
                           finite(mean), finite(variance), math.log(.5)/log_phi)
 

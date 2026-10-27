@@ -144,6 +144,22 @@ class AR1Tests(unittest.TestCase):
                 self.assertAlmostEqual(result.variance, float(variance), delta=1e-12)
                 self.assertAlmostEqual(result.half_life_seconds/float(expected_half), 1., delta=1e-14)
 
+    def test_moments_avoid_cancellation_and_subnormal_noise_underflow(self):
+        for center, current in ((1., 1e16), (1e-18, .01)):
+            model = b.AR1(1, 0, center, .5, .75, 1e-15, 1e-20, 0.)
+            self.assertEqual(model.predict(b.Point(0, 1, current), 300, 1).mean, center)
+        model = b.AR1(1, 0, .01, .999999999999, 1e-323, 1e-15, 5e-324, 0.)
+        with localcontext() as ctx:
+            ctx.prec = 60
+            phi, noise = Decimal.from_float(model.phi), Decimal.from_float(model.innovation_variance)
+            variance = Decimal(0)
+            for _ in range(300):
+                variance = phi*phi*variance+noise
+        expected = float(variance)
+        result = model.predict(b.Point(0, 1, .03), 300, 1)
+        self.assertGreater(result.variance, 0.)
+        self.assertLessEqual(abs(result.variance-expected), math.ulp(expected))
+
     def test_fit_uses_only_contiguous_training_pairs_and_freezes_parameters(self):
         points = tuple(b.Point(i*b.SECOND, i+1, float(x)) for i, x in enumerate((0, 1, 2, 2, 3)))
         kwargs = dict(version=1, training_end_ns=5*b.SECOND, min_pairs=4,
@@ -307,6 +323,15 @@ class ReplayTests(unittest.TestCase):
 class BoundaryTests(unittest.TestCase):
     def model(self):
         return b.AR1(1, 0, 0., .8, .01, 1e-12, 1e-15, 0.)
+
+    def test_point_evidence_is_immutable_through_prediction_lifetime(self):
+        with self.assertRaisesRegex(b.Rejected, "mutable_evidence"):
+            b.Point(0, 1, .1, evidence=[1])
+        point = b.Point(0, 1, .1, evidence=(1, 2))
+        forecast = self.model().predict(point, 300, 1)
+        self.assertEqual(forecast.source.evidence, (1, 2))
+        with self.assertRaises(FrozenInstanceError):
+            point.evidence = (3,)
 
     def test_invalid_phi_variance_near_center_and_nonfinite_reject_without_clipping(self):
         model = self.model()
