@@ -286,7 +286,7 @@ class Cycle:
         self.reasons = {}
         self.before_reconciling = None
         self.last_economic_ref = None
-        self.last_facts = None
+        self.last_facts_digest = None
         self.matched_base = None
 
     @classmethod
@@ -344,6 +344,7 @@ class Cycle:
         if self.first_exit is None:
             self.first_exit = (reason, cursor)
         self.phase = "exiting"
+        self.before_reconciling = None
 
     def apply(self, facts, *, estimator=None, limits=None):
         if not isinstance(facts, Facts) or self.phase == "idle":
@@ -351,7 +352,8 @@ class Cycle:
         if facts.cursor < self.cursor:
             return Action(self.plan, self.cursor, "stale_cursor")
         if facts.cursor == self.cursor:
-            if self.last_facts != facts:
+            from arbitrage_checkpoint import content
+            if self.last_facts_digest != content(facts):
                 raise b.Rejected("cursor_content_conflict")
             return Action(self.plan, self.cursor, "duplicate_cursor")
         if facts.at_ns < self.last_at_ns:
@@ -392,7 +394,8 @@ class Cycle:
                 raise b.Rejected("residual_closure_evidence")
         adjusted = e.exact(facts.nav_atoms-facts.external_allocation_atoms)
         self.cursor, self.last_at_ns = facts.cursor, facts.at_ns
-        self.last_facts = facts
+        from arbitrage_checkpoint import content
+        self.last_facts_digest = content(facts)
         self.cycle_ref, self.reservation_ref = facts.cycle_ref, facts.reservation_ref
         self.last_economic_ref = facts.economic_ref
         for cause, ref in facts.risk_causes:

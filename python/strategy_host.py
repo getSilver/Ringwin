@@ -381,6 +381,8 @@ def decode_checkpoint(container):
         raise ValueError("invalid checkpoint content")
     metadata = checkpoint_metadata(container)
     if metadata["state_schema"] == CROSS_VENUE_STATE_SCHEMA:
+        if metadata["state_schema_version"] == 2:
+            return metadata, strategy_state.decode(payload, metadata["cursor"], metadata["strategy"], metadata["next_intent"], version=2)
         if metadata["state_schema_version"] != 1:
             raise ValueError("unsupported strategy state version")
         return metadata, strategy_state.decode(payload, metadata["cursor"], metadata["strategy"], metadata["next_intent"])
@@ -422,6 +424,8 @@ def checkpoint_metadata(container):
 
 def state_payload(metadata, state):
     if metadata["state_schema"] == CROSS_VENUE_STATE_SCHEMA:
+        if metadata["state_schema_version"] == 2:
+            return strategy_state.encode(state, metadata["cursor"], metadata["strategy"], metadata["next_intent"], version=2)
         if metadata["state_schema_version"] != 1:
             raise ValueError("unsupported strategy state version")
         return strategy_state.encode(state, metadata["cursor"], metadata["strategy"], metadata["next_intent"])

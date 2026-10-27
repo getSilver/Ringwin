@@ -23,6 +23,7 @@
   - 09调用方须认证完整原周期 `Facts`：`applied_lots`来自包括归档在内的唯一经济应用量，`economic_complete`绑定报告/成交覆盖；不能将OMS累计或驻留明细求和代入。Unknown需投影原序号/可能量和预留，查询指令接原身份对账；策略主动选择零新增交易动作，超时只升级，不等于取消成功。
 - [ ] Maker原生Post-only及取消/迟到成交公共接缝；关联[核心07](../cross-venue-core-interface/issues/07-native-post-only.md)。
 - [ ] I6/I7、S6-A–P：真实Python Host、checkpoint、日志尾、会话及激活屏障；关联[核心08](../cross-venue-core-interface/issues/08-deterministic-checkpoint.md)、[核心09b](../cross-venue-core-interface/issues/09b-cycle-recovery-activation.md)。
+  - 2026-10-28：10交付真实模型/标签/Signal/Monitor/Admission/Cycle的严格v2 checkpoint与恢复；v1兼容保留。Python Host子进程可搬运由实际对象生成的包，但portable模式尚不接受cursor之后的日志尾，明确失败关闭。核心仍须接纳schema version2、验证当前definition/config/依赖、投影连续日志到实际Python接口、无权重放推进序号并抑制输出、核对恢复digest/激活屏障和显式新开仓恢复。机会正式入口须传原 `(strategy_instance,pair_ref,direction)` 与实际触发ShardSequence，不能把grid当ShardSequence。Maker私有进度由11实现后扩展同codec；真实旧输出拒绝、持久预留/经济结果、Keep/Migrate/Rebuild及Successor切换仍未运行，详见[10证据](strategy-recovery-evidence.md)。
 - [ ] I8：周期终结、残余承接、费用更正、资金流及风险锁存与真实权威状态一致；关联[核心09a](../cross-venue-core-interface/issues/09a-cycle-closure-residual.md)。
   - 09的 `safe_reduce_lots` 须由当前核心经济状态投影，扣除在途授权及基础币费用；`economic_entry`须携带已完成净收益、当前成本与费用更正。NAV/外部资金流/峰值须同口径，策略的原因锁存须接现有核心安全事实及Signal锁存。`closed_ref`认证当前完整经济/订单覆盖，迟到事实使旧闭合失效时不得复用；现货不足一lot残余须显式承接且保留真实余额/成本，永续余量保持占用。实际核心状态、公共接缝及运行资格尚未运行。
 - [ ] 实际模式、平台及Venue资格逐项留证。现有核心离线证据可以复用，不能当成策略集成已通过。

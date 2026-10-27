@@ -53,10 +53,12 @@ Status: open
 
 ## Frontier
 
-- [10 真实策略状态 checkpoint 与恢复](issues/10-strategy-recovery.md)：依赖09策略侧已完成，ready-for-agent；按2026-10-28授权顺序等待下一独立代理认领。
+- [11 Maker–Taker 完整交易周期](issues/11-maker-taker-cycle.md)：依赖10策略侧已完成，ready-for-agent；按2026-10-28授权顺序等待下一独立代理认领。
 - 原01/02为来源规格，保持原状态；其他会话施工及资格见核心接口地图。其余新票按各自 Blocked by 推进。
 
 ## Decisions so far
+
+- 2026-10-28：[10](issues/10-strategy-recovery.md)完成真实Python模型/标签/Signal/Monitor/Admission/双IOC Cycle的v2严格checkpoint和恢复，保留v1兼容及核心事实引用边界；18项恢复回归、Python全量172项通过。双轴初审3项P2及补审1项P2均有公开失败回归并修复，最终两轴无剩余发现，详见[10证据](strategy-recovery-evidence.md)。真实日志尾/激活/核心权威及统计运行资格保持pending，Maker状态由11扩展；Frontier为11，本代理未继续认领。
 
 - 2026-10-28：[09](issues/09-dual-ioc-cycle.md)完成Python双IOC完整组、已应用经济投影驱动、有限修复/Unknown、Holding一次冻结、风险及止盈退出和核心闭合响应；21项新公开测试、Python全量154项通过。两轴复核1项Spec规则绑定P2已修复并补审通过，Standards无剩余项，详见[09证据](dual-ioc-cycle-evidence.md)。只关闭Python离线范围，真实接线/经济及运行资格保持pending；Frontier为10，09代理未继续认领。
 

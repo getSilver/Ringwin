@@ -295,8 +295,14 @@ def validate(state, cursor, strategy=None, next_intent=None):
     evidence(state)
 
 
-def encode(state, cursor, strategy=None, next_intent=None):
-    validate(state, cursor, strategy, next_intent)
+def encode(state, cursor, strategy=None, next_intent=None, *, version=1):
+    if version == 2:
+        from arbitrage_checkpoint import validate as validate_components
+        validate_components(state, cursor, strategy, next_intent)
+    elif version == 1:
+        validate(state, cursor, strategy, next_intent)
+    else:
+        raise ValueError("unsupported strategy state version")
     payload = json.dumps(state, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("ascii")
     if len(payload) > MAX_PAYLOAD:
         raise ValueError("state capacity")
@@ -311,7 +317,7 @@ def parse_integer(token):
     return int(token)
 
 
-def decode(payload, cursor, strategy=None, next_intent=None):
+def decode(payload, cursor, strategy=None, next_intent=None, *, version=1):
     if len(payload) > MAX_PAYLOAD:
         raise ValueError("state capacity")
     def pairs(values):
@@ -326,7 +332,7 @@ def decode(payload, cursor, strategy=None, next_intent=None):
     try:
         state = json.loads(payload, object_pairs_hook=pairs, parse_int=parse_integer,
                            parse_float=reject, parse_constant=reject)
-        if encode(state, cursor, strategy, next_intent) != payload:
+        if encode(state, cursor, strategy, next_intent, version=version) != payload:
             raise ValueError("non-canonical state")
     except (RecursionError, UnicodeError, OverflowError, TypeError) as error:
         raise ValueError("invalid portable state") from error

@@ -96,7 +96,8 @@ class Point:
         elif self.reason:
             raise Rejected("contradictory_point")
         else:
-            finite(self.value)
+            # Model observations have binary64 semantics on both live and restored paths.
+            object.__setattr__(self, "value", finite(self.value))
         if type(self.evidence) is not tuple:
             raise Rejected("mutable_evidence")
         for value in materialized(self.evidence, 16):

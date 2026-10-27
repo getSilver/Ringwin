@@ -85,6 +85,8 @@ class Parameters:
             raise b.Rejected("mean_shape")
         for value in self.prior_mean:
             b.finite(value)
+        object.__setattr__(self, "prior_mean", tuple(b.finite(v) for v in self.prior_mean))
+        object.__setattr__(self, "prior_covariance", tuple(b.finite(v) for v in self.prior_covariance))
         if b.uint(self.warmup, 2) > b.MAX_WINDOW:
             raise b.Rejected("warmup_capacity")
 

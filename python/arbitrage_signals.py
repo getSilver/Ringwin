@@ -36,11 +36,17 @@ class SignalPolicy:
 
 
 class Signal:
-    def __init__(self, scope, policy):
+    def __init__(self, scope, policy, *, identity=None):
         p.reference(scope)
         if not isinstance(policy, SignalPolicy):
             raise b.Rejected("signal_policy")
         self.scope, self.policy = scope, policy
+        if identity is not None:
+            if (type(identity) is not tuple or len(identity) != 3 or
+                    any(type(v) is not int or not 0 < v < 1 << 128 for v in identity[:2]) or
+                    type(identity[2]) is not int or identity[2] not in (-1, 1)):
+                raise b.Rejected("signal_identity")
+        self.identity = identity
         self.last_grid = self.last_at_ns = self.previous = None
         self.reset_count = self.entry_count = 0
         self.armed = False
@@ -54,6 +60,9 @@ class Signal:
         self.activation_ref = None
         self.enabled_at_ns = 0
         self.trigger_ns = None
+        self.trigger_cursor = self.trigger_grid = None
+        self.opportunity_key = None
+        self.last_cursor = self.last_input_hash = None
 
     def activate(self, activation_ref, at_ns):
         p.reference(activation_ref)
@@ -84,19 +93,27 @@ class Signal:
         del self.reasons[reason]
         self.invalidate()
 
-    def observe(self, grid, at_ns, score, *, qualified):
+    def observe(self, grid, at_ns, score, *, qualified, cursor=None):
         b.uint(grid)
         b.uint(at_ns)
         score = e.exact(score)
+        if cursor is not None:
+            b.uint(cursor, 1)
         if type(qualified) is not bool:
             raise b.Rejected("signal_evidence")
+        event_hash = b.fingerprint("signal_input", (grid, at_ns, str(score), qualified, cursor))
         if self.last_grid is not None and grid <= self.last_grid:
+            if cursor is not None and grid == self.last_grid and (cursor != self.last_cursor or event_hash != self.last_input_hash):
+                raise b.Rejected("signal_input_conflict")
             return  # Late/repeated information cannot rewrite an old grid.
+        if cursor is not None and self.last_cursor is not None and cursor <= self.last_cursor:
+            raise b.Rejected("signal_cursor")
         if self.last_at_ns is not None and at_ns <= self.last_at_ns:
             raise b.Rejected("signal_time")
         if self.last_grid is not None and grid != self.last_grid+1:
             self.invalidate()
         self.last_grid, self.last_at_ns = grid, at_ns
+        self.last_cursor, self.last_input_hash = cursor, event_hash if cursor is not None else None
         if (not qualified or self.reasons or self.pending or self.active
                 or at_ns < max(self.cooldown_until_ns, self.enabled_at_ns)):
             self.invalidate()
@@ -116,8 +133,12 @@ class Signal:
         elif self.entry_count or (self.previous is not None and self.previous < self.policy.entry):
             self.entry_count += 1
             if self.entry_count >= self.policy.entry_points:
-                self.opportunity = b.fingerprint("opportunity", (self.scope, self.policy.version,
-                    self.policy.score_ref, grid))
+                # Legacy offline callers omit cursor; persisted opportunities require it.
+                self.trigger_cursor, self.trigger_grid = cursor, grid
+                self.opportunity_key = None if cursor is None or self.identity is None else (
+                    *self.identity, self.policy.version, cursor)
+                self.opportunity = b.fingerprint("opportunity", self.opportunity_key if self.opportunity_key is not None else (
+                    self.scope, self.policy.version, self.policy.score_ref, grid if cursor is None else cursor))
                 self.deadline_ns = b.uint(at_ns+self.policy.opportunity_ttl_ns)
                 self.trigger_ns = at_ns
                 self.evaluations_used, self.last_evaluation_ns = 0, None
