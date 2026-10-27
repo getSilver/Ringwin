@@ -25,6 +25,7 @@ Status: open
 - 2026-10-27 用户明确授权以Python实施03，建立独立策略分支，不在main施工；本次仅认领03，不授权部署或交易。
 - 2026-10-27 用户继续授权处理04，使用独立分支 `strategy/04-python-baseline`；仍不部署或交易。
 - 2026-10-27 用户授权先认领并完成05，再处理06；分支 `strategy/05-06-python-model-evaluation`，依次完成，不部署或交易。
+- 2026-10-28 用户授权在当前分支 `spread-arbitrage-strategy-python` 完成07；仅Python策略及离线展示合同，不部署或交易。
 - 2026-10-28 用户授权在当前分支 `spread-arbitrage-strategy-python` 完成08；仅Python准入及离线合同，不部署或交易。
 - 使用根级 GLOSSARY.md 和相关 ADR 的规范领域语言。
 - 用户已确认的约束与建议、待决问题分开记录。
@@ -57,6 +58,8 @@ Status: open
 ## Decisions so far
 
 - 2026-10-28：[08](issues/08-whitelist-allocation.md)完成显式批准输入、最新条件重评、有限数量选择、精确Score分配、原身份Unknown和S5信号/监测合同；公开17/17、Python全量133/133通过。两轴复核问题已修复，详见[08证据](whitelist-allocation-evidence.md)。仅关闭Python离线范围；实际接线和统计/运行资格保持pending，下一Frontier为09，未认领。
+
+- 2026-10-28：[07](issues/07-opportunity-scanner.md)在用户指定分支 `spread-arbitrage-strategy-python` 完成只读扫描、稳定配对/方向/模式/maker腿身份、共享06评估及离线展示合同；扫描11/11、Python全量116/116通过，详见[07证据](opportunity-scanner-evidence.md)。仅关闭策略侧范围，实际Web/Host/Venue接线和统计/运行资格保持未完成；下一Frontier为08，本次未认领。
 
 - 2026-10-27：[06](issues/06-target-probability.md)完成联合场景、一次固定目标、实际计划收益及概率双门槛，包含无未来泄漏的冻结条件生成器；公开评估25项/概率5项、Python全量105项通过。两轴复核修复后无剩余项，见[06证据](target-probability-evidence.md)。05→06授权已完成，仅关闭数学/离线范围，下一Frontier为07，未继续认领。
 

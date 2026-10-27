@@ -14,6 +14,7 @@
 
 - [ ] 07/08候选展示与显式白名单操作接入现有Web控制面；启用、撤销、版本及过期语义端到端一致。
   - 2026-10-28：08新增 `arbitrage_admission` / `arbitrage_signals` 离线公开合同。调用方须从既有Web ConfigEvent/激活事实投影 `Approval`，按配对方向调用 `Signal.activate` 后重新收集信号；刷新 `Facts` 的分账户资金、总/配对/基础资产/Venue剩余额度与账户品种占用。`Request`只是策略准入建议，尚非Host OrderIntent；真实IntentGroup身份/原子预留映射、Unknown按原身份查证、独立模式资格引用、实时模型与风险原因投影及发送前TTL复核仍须端到端验收。详见[08证据](whitelist-allocation-evidence.md)。
+  - 2026-10-28：07已交付 `python/arbitrage_scanner.py` 的完整替换快照及 `display_json` 离线合同，11项公开测试通过；未接入真实Web。已核对 `D:/github/Ringwin-control-plane/python/control_plane_web.py` 的OwnerSession授权、`projection_provider.views()`与 `/api/projection`；现有返回为核心 `ok/shards`，尚无候选schema/路由。继续沿现有Web读模型接入，补齐Host外候选传输、版本/会话、失败撤销与无行情到期刷新，不把候选当权威journal或OrderIntent。详见[07交接](opportunity-scanner-evidence.md)。
 - [ ] I1：真实规范行情、深度/规则投影及Host输入一致；关联[核心03](../cross-venue-core-interface/issues/03-depth-resynchronization.md)。
 - [ ] I2/I3：Host完整组、共同准入、竞争资金及周期占用；关联[核心04](../cross-venue-core-interface/issues/04-host-intent-group.md)、[核心05](../cross-venue-core-interface/issues/05-joint-admission.md)。
 - [ ] I4/I5：真实VenueAdapter规范化、唯一经济Fill、双IOC及Unknown安全响应；关联[核心06](../cross-venue-core-interface/issues/06-dual-ioc-dispatch.md)。

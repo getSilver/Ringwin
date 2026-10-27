@@ -25,6 +25,7 @@ def main():
     )
     checks = [
         [sys.executable, "python/test_arbitrage_admission.py"],
+        [sys.executable, "python/test_arbitrage_scanner.py"],
         [sys.executable, "python/test_arbitrage_probability.py"],
         [sys.executable, "python/test_arbitrage_evaluation.py"],
         [sys.executable, "python/test_arbitrage_state_space.py"],
