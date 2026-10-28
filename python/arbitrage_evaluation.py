@@ -996,7 +996,7 @@ def _expected(paths, buffers):
     return e.evaluate_cycle(mean, buffers).plan_atoms
 
 
-def evaluate(scenarios, policy, estimator, entry_calibration, simulation_error, limits):
+def evaluate(scenarios, policy, estimator, entry_calibration, simulation_error, limits, *, fixed_target=None):
     """Reference policy -> one target -> actual plan, on independent replay state.
 
     Only frozen estimator rows keyed by the current visible prefix reach the
@@ -1017,7 +1017,8 @@ def evaluate(scenarios, policy, estimator, entry_calibration, simulation_error, 
         return Evaluation(policy, digest, estimator_digest, reference_profit, None, None, None,
                           reference_paths, (), None, Fraction(0), False,
                           "unresolved_reference" if reference_profit is None else "reference_profit", work.steps, work.nested)
-    target = e.entry_target(reference_profit, policy.alpha, policy.absolute_minimum_atoms)
+    target = (e.entry_target(reference_profit, policy.alpha, policy.absolute_minimum_atoms)
+              if fixed_target is None else e.integer(fixed_target, policy.absolute_minimum_atoms))
     paths = tuple(_simulate(x, policy, target, "actual", estimator, work) for x in scenarios)
     plan_profit = _expected(paths, policy.plan_buffers)
     unresolved = e.exact(sum((x.weight for x in paths if x.net_atoms is None), Fraction(0)))

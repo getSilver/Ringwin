@@ -1,8 +1,8 @@
 # 11：Maker–Taker 完整交易周期
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in_progress
+Assignee: Codex issue11
 Blocked by: [10 真实策略状态 checkpoint 与恢复](10-strategy-recovery.md)
 Parent: [模块地图](../map.md)
 

@@ -76,7 +76,7 @@ class Plan:
         p.reference(self.request_ref)
         p.validate_hash(self.config_hash)
         p.validate_hash(self.execution_hash)
-        if not isinstance(self.policy, v.Policy) or self.policy.mode != "taker_taker":
+        if not isinstance(self.policy, v.Policy):
             raise b.Rejected("ioc_policy")
         a, z = _pair(self.legs)
         if any(not isinstance(x, LegSpec) for x in self.legs):
@@ -117,6 +117,7 @@ class Intent:
     lots: int
     limit_ticks: int
     reducing: bool
+    time_in_force: str = "ioc"
 
 
 @dataclass(frozen=True)
@@ -241,6 +242,7 @@ class Action:
     queries: tuple = ()
     reconcile: bool = False
     escalate: bool = False
+    cancels: tuple = ()
 
     def encode(self, batch, session, *, activation):
         """Use the existing Host output codec; the core still validates admission.
@@ -249,6 +251,8 @@ class Action:
         identity and per-leg parameters. Follow-up requests retain cycle via the
         caller's core cycle association; wire association must be integrated.
         """
+        if self.cancels:
+            raise b.Rejected("cancel_projection_requires_core_mapping")
         if not self.intents:
             raise b.Rejected("no_output")
         _identity(activation)
@@ -259,7 +263,7 @@ class Action:
             direction = -leg.direction if intent.reducing else leg.direction
             return SimpleNamespace(strategy_identity=str(self.plan.strategy), activation_identity=str(activation),
                 config_version=self.plan.config_version, side="buy" if direction == 1 else "sell",
-                time_in_force="ioc", portfolio_reduce_only=intent.reducing, intent_sequence=intent.sequence,
+                time_in_force=intent.time_in_force, portfolio_reduce_only=intent.reducing, intent_sequence=intent.sequence,
                 portfolio_identity=self.plan.portfolio, exchange_account_identity=leg.account,
                 instrument_identity=leg.rules.instrument, quantity=intent.lots, limit_price=intent.limit_ticks)
         first = args(self.intents[0])
@@ -270,7 +274,7 @@ class Action:
 
 class Cycle:
     def __init__(self, plan):
-        if not isinstance(plan, Plan):
+        if not isinstance(plan, Plan) or type(self) is Cycle and plan.policy.mode != "taker_taker":
             raise b.Rejected("cycle_plan")
         self.plan = plan
         self.phase = "idle"
@@ -346,7 +350,7 @@ class Cycle:
         self.phase = "exiting"
         self.before_reconciling = None
 
-    def apply(self, facts, *, estimator=None, limits=None):
+    def _observe(self, facts):
         if not isinstance(facts, Facts) or self.phase == "idle":
             raise b.Rejected("cycle_facts")
         if facts.cursor < self.cursor:
@@ -411,6 +415,17 @@ class Cycle:
             if reason != "deadline":
                 self.reasons.setdefault(reason, facts.economic_ref)
             self._exit(reason, facts.cursor)
+        return None
+
+    def apply(self, facts, *, estimator=None, limits=None):
+        observed = self._observe(facts)
+        if observed is not None:
+            return observed
+        return self._advance(facts, estimator, limits)
+
+    def _advance(self, facts, estimator, limits):
+        issued = {x.sequence: x for x in self.issued}
+        orders = {x.sequence: x for x in facts.orders}
         unknown = tuple(x.sequence for x in facts.orders if x.status == "unknown")
         if unknown or facts.admission == "unknown" or facts.market.unknown:
             if self.phase != "reconciling":

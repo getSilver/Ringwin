@@ -16,6 +16,7 @@ import arbitrage_state_space as ss
 import arbitrage_signals as signals
 import arbitrage_admission as admission
 import arbitrage_cycle as cycle
+import arbitrage_maker as maker
 import arbitrage_evaluation as evaluation
 import arbitrage_probability as probability
 import strategy_state as s
@@ -196,16 +197,23 @@ SPECS = {
         last_facts_digest=optional(H), matched_base=optional(Q), entry_cursor=optional(U),
         entry_valid_until_ns=optional(U)),
 }
+# A separate component tag preserves the existing IOC v2 intent encoding.
+SPECS["maker_cycle"] = dict(SPECS["cycle"],
+    issued=sequence(structure(dict(sequence=I, leg=scalar(s.integer(0, 1)), lots=I,
+        limit_ticks=I, reducing=B, time_in_force=scalar(s.choice("ioc", "post-only"))), cycle.Intent), 256),
+    maker_sequence=optional(I), quote_started_ns=optional(U), last_quote_ns=optional(U),
+    requotes_used=U, quote_score=optional(scalar(s.atoms)), cancel_requested=B,
+    replacing=B, tail_started_ns=optional(U), entry_finished=B)
 TYPES = {b.RollingWindow: "rolling", b.AR1: "ar1", b.RollingBaseline: "rolling_baseline",
          evaluation.Estimator: "estimator", probability.Calibration: "calibration",
          ss.Filter: "filter", b.LabelTracker: "labels", signals.Signal: "signal",
-         signals.Monitor: "monitor", admission.Admission: "admission", cycle.Cycle: "cycle"}
+         signals.Monitor: "monitor", admission.Admission: "admission", cycle.Cycle: "cycle", maker.Cycle: "maker_cycle"}
 CONFIG_FIELDS = {
     "rolling": {"spec"}, "ar1": set(), "rolling_baseline": set(), "filter": {"parameters"},
     "labels": {"capacity"}, "signal": {"scope", "policy", "identity"},
     "monitor": {"metrics", "warn_windows", "fail_windows", "clear_windows"},
     "admission": {"config", "pending_signal"}, "cycle": {"plan"},
-    "estimator": set(), "calibration": set(),
+    "estimator": set(), "calibration": set(), "maker_cycle": {"plan"},
 }
 
 
@@ -224,7 +232,7 @@ def dependency(obj):
         return obj.metrics, obj.warn_windows, obj.fail_windows, obj.clear_windows
     if type(obj) is admission.Admission:
         return obj.config
-    if type(obj) is cycle.Cycle:
+    if type(obj) in (cycle.Cycle, maker.Cycle):
         return obj.plan
     raise ValueError("unknown component")
 
@@ -239,7 +247,7 @@ def progress(obj, tag):
         required = set(SPECS[tag])
         if tag == "admission":
             required.remove("pending_scope")
-        if tag == "cycle":
+        if tag in ("cycle", "maker_cycle"):
             required -= {"entry_cursor", "entry_valid_until_ns"}
         if required-set(vars(obj)):
             raise ValueError("missing component field")
@@ -248,7 +256,7 @@ def progress(obj, tag):
         values["pending_scope"] = obj.pending_signal.scope if obj.pending_signal is not None else None
         values["evaluated"] = [dict(scope=k[0], opportunity=k[1], revision=v)
                                for k, v in sorted(obj.evaluated.items())]
-    if tag == "cycle" and obj.first_exit is not None:
+    if tag in ("cycle", "maker_cycle") and obj.first_exit is not None:
         values["first_exit"] = dict(reason=obj.first_exit[0], cursor=obj.first_exit[1])
     return structure(SPECS[tag])[0](values)
 
@@ -320,7 +328,7 @@ def validate(state, cursor, strategy=None, next_intent=None):
             s.ordered_unique(keys)
             if any(x["revision"] > values["reservation_revision"] for x in values["evaluated"]):
                 raise ValueError("future reservation revision")
-        if tag == "cycle":
+        if tag in ("cycle", "maker_cycle"):
             intents = values["issued"]
             seqs = tuple(x.sequence for x in intents)
             if seqs and (seqs != tuple(range(seqs[0], values["next_sequence"])) or
@@ -455,7 +463,7 @@ def validate_configured(obj, tag, values, metadata):
         req = values["pending"]
         if req is not None and req.config_hash != obj.config.content_hash:
             raise ValueError("request config")
-    if tag == "cycle":
+    if tag in ("cycle", "maker_cycle"):
         p = obj.plan
         if p.strategy != metadata["strategy"] or p.config_version != metadata["config_version"]:
             raise ValueError("cycle identity")
@@ -464,9 +472,35 @@ def validate_configured(obj, tag, values, metadata):
         intents = values["issued"]
         if values["next_sequence"] != p.first_sequence+len(intents):
             raise ValueError("intent origin")
-        if intents and (len(intents) < 2 or tuple((i.leg, i.lots, i.limit_ticks, i.reducing) for i in intents[:2]) !=
+        if tag == "cycle" and intents and (len(intents) < 2 or tuple((i.leg, i.lots, i.limit_ticks, i.reducing) for i in intents[:2]) !=
                         tuple((j, leg.target_lots, p.entry_limits[j], False) for j, leg in enumerate(p.legs))):
             raise ValueError("original entry group")
+        if tag == "maker_cycle":
+            maker_intents = tuple(i for i in intents if not i.reducing and i.leg == p.maker_leg)
+            hedge_intents = tuple(i for i in intents if not i.reducing and i.leg != p.maker_leg)
+            if (values["requotes_used"] > p.max_requotes or len(maker_intents) !=
+                    (1+values["requotes_used"] if intents else 0)
+                    or len(hedge_intents) > values["repair_used"]
+                    or len(intents) > 1+p.max_requotes+p.repair_attempts+2*p.exit_attempts):
+                raise ValueError("maker budget")
+            if any(i.time_in_force != ("post-only" if i in maker_intents else "ioc") for i in intents):
+                raise ValueError("maker native order type")
+            if (bool(intents) != (values["maker_sequence"] is not None)
+                    or maker_intents and (values["maker_sequence"] != maker_intents[-1].sequence
+                    or intents[0] != maker_intents[0] or maker_intents[0].lots != p.legs[p.maker_leg].target_lots)):
+                raise ValueError("maker identity")
+            if intents:
+                if (values["quote_started_ns"] is None or values["last_quote_ns"] is None
+                        or not p.policy.at_ns <= values["quote_started_ns"] <= values["last_quote_ns"] <= values["last_at_ns"]
+                        or values["quote_score"] is None):
+                    raise ValueError("maker quote progress")
+            elif any(values[k] is not None for k in ("quote_started_ns", "last_quote_ns", "quote_score", "tail_started_ns")):
+                raise ValueError("idle maker evidence")
+            if (values["replacing"] and (not values["cancel_requested"] or values["entry_finished"])
+                    or values["tail_started_ns"] is not None and not p.policy.at_ns <= values["tail_started_ns"] <= values["last_at_ns"]):
+                raise ValueError("maker cancel or tail progress")
+            if any(i.reducing and not values["entry_finished"] for i in intents):
+                raise ValueError("maker exit before entry drain")
         if values["last_at_ns"] < p.policy.at_ns:
             raise ValueError("cycle time")
         if values["target_atoms"] is not None:
@@ -518,7 +552,7 @@ def restore(container, templates, *, expected=None):
         if tag == "admission":
             obj._pending_scope = values.pop("pending_scope")
             values["evaluated"] = {(x["scope"], x["opportunity"]): x["revision"] for x in values["evaluated"]}
-        if tag == "cycle":
+        if tag in ("cycle", "maker_cycle"):
             first = values["first_exit"]
             values["first_exit"] = None if first is None else (first["reason"], first["cursor"])
             for name in ("entry_cursor", "entry_valid_until_ns"):
