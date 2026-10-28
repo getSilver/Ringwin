@@ -51,6 +51,7 @@ class Protocol:
 
 @dataclass(frozen=True)
 class Frame:
+    MODE = "taker_taker"
     observations: tuple
     options: tuple
     approvals: tuple
@@ -72,7 +73,7 @@ class Frame:
                            (self.approvals, admission.Approval), (self.windows, signals.Window)):
             if any(not isinstance(x, cls) for x in items):
                 raise b.Rejected("shadow_frame")
-        if any(x.plan.policy.mode != "taker_taker" for x in self.options):
+        if any(x.plan.policy.mode != self.MODE for x in self.options):
             raise b.Rejected("shadow_mode")
         for score in self.scores:
             if type(score) is not tuple or len(score) != 4 or type(score[3]) is not bool:
@@ -87,6 +88,9 @@ def _json(value):
 
 
 class Session:
+    MODE = "taker_taker"
+    SCHEMA = SCHEMA
+
     def __init__(self, protocol, config, signal_states, monitor, metadata):
         if (not isinstance(protocol, Protocol) or not isinstance(config, admission.Config)
                 or not isinstance(monitor, signals.Monitor) or type(signal_states) is not tuple
@@ -99,15 +103,24 @@ class Session:
             "signal"+str(i): state for i, state in enumerate(signal_states)}))
         self._metadata = copy.deepcopy(metadata)
         checkpoint.checkpoint(metadata, self._components)
-        self._initial = checkpoint.content((protocol, config, self._metadata,
-            tuple((name, checkpoint.dependency(obj), checkpoint.progress(obj, checkpoint.TYPES[type(obj)]))
-                  for name, obj in sorted(self._components.items()))))
+        self._initial = self._initial_identity()
         self._records = []
         self._last_cursor, self._last_time = metadata["cursor"], 0
         self._stopped = False
 
+    def _initial_identity(self):
+        return checkpoint.content((self.protocol, self.config, self._metadata,
+            tuple((name, checkpoint.dependency(obj), checkpoint.progress(obj, checkpoint.TYPES[type(obj)]))
+                  for name, obj in sorted(self._components.items()))))
+
+    def _restart_metadata(self, components):
+        return dict(self._metadata, cursor=self._last_cursor)
+
+    def _extend_decision(self, frame, components, decision, request, healthy):
+        pass
+
     def step(self, frame):
-        if not isinstance(frame, Frame):
+        if not isinstance(frame, Frame) or frame.MODE != self.MODE:
             raise b.Rejected("shadow_frame")
         if self._stopped or len(self._records) >= self.protocol.max_frames:
             self._stopped = True
@@ -123,9 +136,11 @@ class Session:
         decision = dict(cursor=facts.cursor, at_ns=facts.at_ns, trading_qualified=False,
                         candidates=[], suggestion=None, rejections=[], monitor_actions=[], error="")
         ages = []
+        request = None
+        healthy = False
         try:
             if frame.restart:
-                metadata = dict(self._metadata, cursor=self._last_cursor)
+                metadata = self._restart_metadata(components)
                 _, components = checkpoint.restore(checkpoint.checkpoint(metadata, components), components)
                 monitor = components["monitor"]
                 states = tuple(v for v in components.values() if isinstance(v, signals.Signal))
@@ -134,7 +149,7 @@ class Session:
             snapshot = scanner.scan(frame.observations, tuple(x.plan for x in frame.options),
                 at_ns=facts.at_ns, cursor=facts.cursor, max_age_ns=self.config.max_book_age_ns,
                 max_skew_ns=self.config.max_leg_skew_ns)
-            decision["candidates"] = [row for row in snapshot["candidates"] if row["mode"] == "taker_taker"]
+            decision["candidates"] = [row for row in snapshot["candidates"] if row["mode"] == self.MODE]
             ages = [facts.at_ns-decode_depth_snapshot(x.book)["visible_at_ns"] for x in frame.observations]
             healthy = (bool(ages) and all(x.continuous and x.rules.valid_from_ns <= facts.at_ns < x.rules.valid_until_ns
                        for x in frame.observations) and max(ages) < self.config.max_book_age_ns
@@ -173,6 +188,13 @@ class Session:
                 state.invalidate()
             # Input rejection blocks entry; it is not evidence of model failure.
             decision["monitor_actions"] = list(dict.fromkeys(("stop_new_cycles", *monitor.actions(phase="Scanning"))))
+        try:
+            self._extend_decision(frame, components, decision, request, healthy)
+        except (ValueError, TypeError, KeyError) as error:
+            decision.update(error=str(error), suggestion=None)
+            for state in states:
+                state.invalidate()
+            decision["monitor_actions"] = list(dict.fromkeys(("stop_new_cycles", *decision["monitor_actions"])))
         decision["state"] = checkpoint.content(tuple((name, checkpoint.progress(obj, checkpoint.TYPES[type(obj)]))
                                                    for name, obj in sorted(components.items())))
         decision["monitor_state"] = monitor.state
@@ -190,7 +212,7 @@ class Session:
                       compute_ns=b.MAX_U64)
         # Bound the complete artifact before committing any progress; never truncate.
         # Reserve every u64 timing field so capacity is independent of machine speed.
-        candidate = dict(schema=SCHEMA, initial=self._initial, protocol=asdict(self.protocol),
+        candidate = dict(schema=self.SCHEMA, initial=self._initial, protocol=asdict(self.protocol),
                          records=[dict(row, compute_ns=b.MAX_U64) for row in self._records+[record]])
         result = copy.deepcopy(decision)
         if len(_json(candidate).encode()) > self.protocol.max_capture_bytes:
@@ -203,7 +225,7 @@ class Session:
         return result
 
     def capture_json(self):
-        return _json(dict(schema=SCHEMA, initial=self._initial, protocol=asdict(self.protocol), records=self._records))
+        return _json(dict(schema=self.SCHEMA, initial=self._initial, protocol=asdict(self.protocol), records=self._records))
 
     def report(self):
         records = self._records
@@ -220,7 +242,7 @@ class Session:
                any(x[1] == "model_health" for x in r["decision"]["rejections"]) for r in records):
             reasons.append("monitor_health")
         if self._stopped: reasons.append("capture_capacity")
-        return dict(schema=SCHEMA, mode="taker_taker", qualification=False, evidence="offline_unqualified",
+        return dict(schema=self.SCHEMA, mode=self.MODE, qualification=False, evidence="offline_unqualified",
                     real_host="not_run", real_market="not_run", calibration_ref=self.protocol.calibration_ref,
                     frames=len(records), duration_ns=elapsed, operational_gates_met=not reasons, reasons=reasons,
                     max_options=max((r["options"] for r in records), default=0),
@@ -247,10 +269,12 @@ def replay(capture, frames, session_factory):
         return result
     saved = json.loads(capture, object_pairs_hook=unique)
     if (type(saved) is not dict or set(saved) != {"schema", "initial", "protocol", "records"}
-            or saved["schema"] != SCHEMA or type(frames) is not tuple
+            or type(frames) is not tuple
             or type(saved["records"]) is not list or len(saved["records"]) != len(frames)):
         raise b.Rejected("shadow_capture_shape")
     session = session_factory()
+    if saved["schema"] != session.SCHEMA:
+        raise b.Rejected("shadow_mode")
     if saved["initial"] != session._initial or _json(saved["protocol"]) != _json(asdict(session.protocol)):
         raise b.Rejected("shadow_dependency")
     for i, (record, frame) in enumerate(zip(saved["records"], frames)):

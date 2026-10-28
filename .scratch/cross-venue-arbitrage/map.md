@@ -56,10 +56,14 @@ Status: open
 
 - [12 双 IOC 样本外校准与资格判定](issues/12-taker-calibration.md)：依赖05/10已完成，离线研究工具已开发，真实研究输入不足，in_progress，经济资格pending；见[12证据](taker-calibration-evidence.md)。
 - [13 Maker–Taker 独立校准与资格判定](issues/13-maker-calibration.md)：依赖05/11已完成，独立Maker离线研究工具已开发，in_progress，真实经济资格pending；见[13证据](maker-calibration-evidence.md)。
-- 14真实验收阻塞于12、15真实验收阻塞于13，尚非真实资格Frontier；用户2026-10-28已授权本轮按12→13→14→15推进可开发离线范围，开发次序不取消真实验收依赖。14离线工具已开发、运行资格pending，见[14证据](taker-shadow-evidence.md)；15尚未认领，真实跨模块集成清单仍pending。
+- 14真实验收阻塞于12、15真实验收阻塞于13，尚非真实资格Frontier；用户2026-10-28已授权本轮按12→13→14→15推进可开发离线范围，开发次序不取消真实验收依赖。14离线工具已开发、运行资格pending，见[14证据](taker-shadow-evidence.md)；15离线工具已开发、运行资格pending，见[15证据](maker-shadow-evidence.md)；真实跨模块集成清单仍pending。
 - 原01/02为来源规格，保持原状态；其他会话施工及资格见核心接口地图。其余新票按各自 Blocked by 推进。
 
 ## Decisions so far
+
+- 2026-10-28：本轮12→13→14→15可开发离线工具范围均已交付；真实经济/运行资格分别pending，12–15仍in_progress，跨模块集成仍pending；模块保持open，不将合成回归或工具交付视为真实资格。
+
+- 2026-10-28：[15](issues/15-maker-shadow.md)交付Maker独立只读影子工具，复用14采集/预算/容量/实际重放及11的真实Cycle与maker checkpoint，私有副本输出纯数据模拟报价/撤换/对冲建议；无发送/订单/预留副作用。公开19/19（Maker9+原14十项）、Python全量230/230通过；Spec初审P2已修并补审通过，Standards无硬违例、可选P3重复检查建议保留。真实13资格依赖保留，观察样本/Host/Venue缺失，运行资格pending，票仍in_progress；见[15证据](maker-shadow-evidence.md)。
 
 - 2026-10-28：[14](issues/14-taker-shadow.md)交付离线只读Session，复用真实scanner/Admission/Signal/Monitor与Host深度/checkpoint codec，完整记录规范深度、输入指纹、候选/复核/拒绝、监测及私有状态。捕获JSON须与原始Frame归档共同重放；逐帧实际重新计算并定位差异，不比较本机耗时。显式门槛覆盖时长/样本/计算/负载/新鲜度/缺口/容量，公开10/10、Python全量221/221通过，Spec初审计算计时P2修复后两轴无剩余发现。任何合成结果均不授资格；真实参数/Host/市场未运行，12验收依赖保留，14为in_progress；见[14证据](taker-shadow-evidence.md)。
 

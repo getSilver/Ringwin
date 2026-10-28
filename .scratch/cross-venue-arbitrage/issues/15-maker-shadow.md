@@ -1,8 +1,8 @@
 # 15：Maker–Taker 只读影子验收
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in_progress
+Assignee: Codex
 Blocked by: [13 Maker–Taker 独立校准与资格判定](13-maker-calibration.md)
 Parent: [模块地图](../map.md)
 
@@ -28,5 +28,9 @@ Parent: [模块地图](../map.md)
 
 ## Answer
 
-未实施；数学、公共接缝、校准及运行验收均以实际证据为准。
+2026-10-28：用户明确无真实数据/真实市场，授权完成可开发离线范围。已实现独立Maker只读影子工具，复用14捕获、预算、容量和实际重放；私有副本运行11 Cycle/报价及真实maker checkpoint，不返回可编码Action或Intent，不调用资金/预留/发送。
+
+开发公开回归覆盖候选/白名单、原生Post-only模拟建议、正常撤换终态约束、增量对冲与Unknown恢复、健康/缺口/版本撤销和原对象不变。所有虚拟成交/对冲均为counterfactual_simulation，真实排队、实际Fill及PnL未观察。详见[15证据](../maker-shadow-evidence.md)。
+
+仅工具开发完成；上方真实观察验收条件保持未勾选。13真实经济资格依赖保留，本票in_progress，运行资格pending。
 
