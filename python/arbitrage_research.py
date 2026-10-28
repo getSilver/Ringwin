@@ -36,9 +36,18 @@ class Protocol:
     max_tail_loss_atoms: int
     coverage_ppm: int
     min_profit_atoms: int
+    mode: str = "taker_taker"
+    maker_scopes: tuple = ()
 
     def __post_init__(self):
         p.reference(self.version)
+        if self.mode not in ("taker_taker", "maker_taker"):
+            raise b.Rejected("research_mode")
+        if self.mode == "maker_taker":
+            from arbitrage_maker_research import validate_scopes
+            validate_scopes(self.maker_scopes)
+        elif self.maker_scopes != ():
+            raise b.Rejected("research_mode_scope")
         p.reference(self.dependency_ref)
         p.validate_hash(self.data_hash)
         p.validate_hash(self.code_hash)
@@ -71,7 +80,9 @@ class Protocol:
 
     @property
     def content_hash(self):
-        return b.fingerprint("taker_research_v1", list(self.__dict__.values()))
+        # Keep pre-Maker taker journals addressable after this additive extension.
+        values = list(self.__dict__.values())
+        return b.fingerprint("taker_research_v1", values[:-2]) if self.mode == "taker_taker" else b.fingerprint("maker_research_v1", values)
 
     def partition(self, start_ns, end_ns, observed_at_ns):
         """Same wall-clock partition for every pair; incomplete labels never enter."""
@@ -167,9 +178,10 @@ class Report:
     occupancy_upper_ns: Optional[int]
     failures: tuple
     economic_qualified: bool = False
+    maker: object = None
 
 
-def summarize(protocol, stage, candidate, *, equity, cycles, source_kind="synthetic"):
+def summarize(protocol, stage, candidate, *, equity, cycles, source_kind="synthetic", maker_samples=()):
     """Retain the whole curve and all cycles, including rejected/unclosed tails.
 
     Frequencies, means and occupancy quantiles are diagnostics, not calibrated
@@ -182,6 +194,13 @@ def summarize(protocol, stage, candidate, *, equity, cycles, source_kind="synthe
         raise b.Rejected("research_source")
     equity = tuple(b.materialized(equity, b.MAX_POINTS))
     cycles = tuple(b.materialized(cycles, b.MAX_POINTS))
+    if protocol.mode == "maker_taker":
+        from arbitrage_maker_research import summarize_maker
+        maker = summarize_maker(protocol, stage, cycles, maker_samples)
+    else:
+        if maker_samples != ():
+            raise b.Rejected("research_mode_scope")
+        maker = None
     start, end = protocol.intervals[STAGES.index(stage)]
     if (len(equity) < 2 or any(not isinstance(x, Equity) for x in equity)
             or equity[0].at_ns != start or equity[-1].at_ns != end-1
@@ -212,6 +231,8 @@ def summarize(protocol, stage, candidate, *, equity, cycles, source_kind="synthe
     index = (len(durations)*protocol.coverage_ppm+p.PPM-1)//p.PPM-1
     occupancy = durations[index] if durations and not unresolved else None
     failures = ["external_qualification_required"]
+    if maker is not None and maker.missing_scopes:
+        failures.append("maker_scope_coverage")
     if source_kind == "synthetic":
         failures.append("synthetic_input")
     if len(complete) < protocol.min_cycles:
@@ -229,7 +250,8 @@ def summarize(protocol, stage, candidate, *, equity, cycles, source_kind="synthe
     return Report(protocol.content_hash, candidate, stage, source_kind, equity, cycles,
                   adjusted[-1]-adjusted[0], drawdown, tail, len(complete), blocks,
                   unresolved, sum(x.rejected for x in cycles), sum(x.stopped for x in cycles),
-                  error, reference, frequency("entry_hit"), frequency("hold_hit"), occupancy, tuple(failures))
+                  error, reference, frequency("entry_hit"), frequency("hold_hit"), occupancy, tuple(failures),
+                  maker=maker)
 
 
 def _json(value):

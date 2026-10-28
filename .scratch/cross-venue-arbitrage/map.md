@@ -55,11 +55,13 @@ Status: open
 ## Frontier
 
 - [12 双 IOC 样本外校准与资格判定](issues/12-taker-calibration.md)：依赖05/10已完成，离线研究工具已开发，真实研究输入不足，in_progress，经济资格pending；见[12证据](taker-calibration-evidence.md)。
-- [13 Maker–Taker 独立校准与资格判定](issues/13-maker-calibration.md)：依赖05/11已完成，ready-for-agent；按本轮授权后续单独认领。
+- [13 Maker–Taker 独立校准与资格判定](issues/13-maker-calibration.md)：依赖05/11已完成，独立Maker离线研究工具已开发，in_progress，真实经济资格pending；见[13证据](maker-calibration-evidence.md)。
 - 14阻塞于12、15阻塞于13，尚非Frontier；真实跨模块集成清单仍pending。
 - 原01/02为来源规格，保持原状态；其他会话施工及资格见核心接口地图。其余新票按各自 Blocked by 推进。
 
 ## Decisions so far
+
+- 2026-10-28：[13](issues/13-maker-calibration.md)复用12时间分区与持久journal，独立Maker模式与预登记适用域，从Maker Cycle/Facts提取真实公开组件的合成回归观察，提供等待删失×Unknown×成交×对冲联合诊断及阶段/参考/计划误差。公开9/9、Python全量211/211通过，Spec初审P2修复后两轴无剩余发现。真实研究输入仍缺，不继承12结论，不把压力权重或模拟数当经验概率/有效历史块；经济资格pending，本票in_progress，15真实验收仍阻塞；见[13证据](maker-calibration-evidence.md)。
 
 - 2026-10-28：[12](issues/12-taker-calibration.md)交付Python离线时间隔离、完整周期/NAV报告及持久试验/保留集使用工具；公开10/10、Python全量202/202通过，两轴补审无剩余发现。仓库数据核查仅见容量/故障、旧Demo与安全产物及夹具，未发现足够的真实双IOC研究输入。工具与合成回归不授经济资格，本票保持in_progress，14真实影子验收仍阻塞；见[12证据](taker-calibration-evidence.md)。
 
