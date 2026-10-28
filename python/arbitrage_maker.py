@@ -270,6 +270,12 @@ class Cycle(c.Cycle):
         self.cancel_requested = self.replacing = False
         return self._emit(cursor, "maker_quote", ((self.plan.maker_leg, lots, q.ticks, False, "post-only"),))
 
+    def _protected(self, facts, index, lots, reducing, limit):
+        # Maker mode never becomes an IOC chase; overhedging trims the hedge leg.
+        if not reducing and index == self.plan.maker_leg:
+            return None
+        return super()._protected(facts, index, lots, reducing, limit)
+
     def apply(self, facts, *, quotes=(), estimator=None, limits=None):
         observed = self._observe(facts)
         if observed is not None:
@@ -357,6 +363,10 @@ class Cycle(c.Cycle):
             return c.Action(plan, facts.cursor, "cancel_maker" if cancels else "maker_pending",
                             queries=(self.maker_sequence,), cancels=cancels, reconcile=bool(cancels),
                             escalate=facts.at_ns >= plan.exit_deadline_ns)
+        uncovered = tuple(i.sequence for i in maker_intents if i.sequence not in orders
+            or orders[i.sequence].status not in ("terminal", "rejected") or not orders[i.sequence].economic_complete)
+        if uncovered:
+            return c.Action(plan, facts.cursor, "maker_history_pending", queries=uncovered, reconcile=True)
         outstanding = tuple(i.sequence for i in hedge_intents if i.sequence not in orders
             or orders[i.sequence].status not in ("terminal", "rejected") or not orders[i.sequence].economic_complete)
         if outstanding:

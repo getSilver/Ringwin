@@ -292,6 +292,15 @@ class MakerTests(unittest.TestCase):
         self.assertTrue(action.escalate)
         self.assertEqual((action.cancels, action.intents, clone.first_exit), ((1,), (), ("deadline", 3)))
 
+    def test_fee_correction_overhedge_trims_hedge_without_switching_maker_to_ioc(self):
+        cycle = self.running()
+        cycle.apply(facts(orders=(done(1, 0, 3),), positions=(F(3), F(0)), safe_reduce_lots=(3, 0)))
+        action = cycle.apply(facts(3, orders=(done(1, 0, 3), done(2, 1, 3)),
+            positions=(F(2), F(3)), safe_reduce_lots=(2, 3)))
+        self.assertEqual([(i.leg, i.lots, i.reducing, i.time_in_force) for i in action.intents],
+                         [(1, 1, True, "ioc")])
+        recovery.checkpoint(meta(3, 4), {"maker": cycle})
+
 
 if __name__ == "__main__":
     unittest.main()
