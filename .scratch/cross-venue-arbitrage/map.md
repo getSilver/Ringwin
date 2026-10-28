@@ -53,10 +53,14 @@ Status: open
 
 ## Frontier
 
-- [11 Maker–Taker 完整交易周期](issues/11-maker-taker-cycle.md)：依赖10策略侧已完成，ready-for-agent；按2026-10-28授权顺序等待下一独立代理认领。
+- [12 双 IOC 样本外校准与资格判定](issues/12-taker-calibration.md)：依赖05/10已完成，ready-for-agent；不在本次09–11授权范围，未认领。
+- [13 Maker–Taker 独立校准与资格判定](issues/13-maker-calibration.md)：依赖05/11已完成，ready-for-agent；不在本次09–11授权范围，未认领。
+- 14阻塞于12、15阻塞于13，尚非Frontier；真实跨模块集成清单仍pending。
 - 原01/02为来源规格，保持原状态；其他会话施工及资格见核心接口地图。其余新票按各自 Blocked by 推进。
 
 ## Decisions so far
+
+- 2026-10-28：[11](issues/11-maker-taker-cycle.md)完成Python原生Post-only报价/撤换建议、已应用净增量扣在途hedge、Unknown/尾差、独立队列与联合压力、真实Maker v2 checkpoint和固定目标退出；20项Maker公开测试、Python全量192项通过。Standards无发现，Spec初审1项P2（在途减仓敞口区间）已修复，最终两轴无剩余发现，详见[11证据](maker-taker-cycle-evidence.md)。只关闭策略离线范围，Host取消/核心/Venue真实接线及经济/运行资格保持pending；本次09→10→11授权完成，未认领12以后，模块仍open。
 
 - 2026-10-28：[10](issues/10-strategy-recovery.md)完成真实Python模型/标签/Signal/Monitor/Admission/双IOC Cycle的v2严格checkpoint和恢复，保留v1兼容及核心事实引用边界；18项恢复回归、Python全量172项通过。双轴初审3项P2及补审1项P2均有公开失败回归并修复，最终两轴无剩余发现，详见[10证据](strategy-recovery-evidence.md)。真实日志尾/激活/核心权威及统计运行资格保持pending，Maker状态由11扩展；Frontier为11，本代理未继续认领。
 
@@ -157,7 +161,7 @@ Status: open
 - 所有时限、金额/比例阈值、保证金压力情景和模型验证窗口的配置与校准方案。
 - 周期/残余引用、持久恢复需求、PnL/日损失/回撤及资金流口径已有文档；核心承接、参数数值与运行证据未完成。
 - 行情缺口、重新触发、恢复授权语义及验收向量已有文档；具体控制面接线与公共接缝运行验收未完成。
-- 当前规范盘口缺完整双边深度，Host 输出仅单意图，checkpoint 示例缺策略状态；跨账户共同准入、周期独占和残余归属尚未证明。具体架构选择若形成新权威边界，须先访谈确认再记录领域决策。
+- Python侧已复用深度/完整组/Post-only codec并实现真实策略checkpoint；实际规范行情与Host接线、跨账户共同准入、周期独占和残余归属仍须按[独立集成验收](integration-acceptance.md)取得公共路径证据，不沿用早期单意图/示例checkpoint描述替代当前源码核对。具体架构选择若形成新权威边界，须先访谈确认再记录领域决策。
 
 ## Out of scope
 
