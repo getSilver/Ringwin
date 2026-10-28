@@ -37,7 +37,7 @@ v2新增严格 `maker_cycle` component tag，保留已有IOC的 `cycle` tag及�
 - `python -m unittest discover -s python -p test_arbitrage_maker.py`：20项通过，exit 0。
 - `python -m unittest discover -s python -p 'test_*.py'`：最终192项通过，21.847s，exit 0；覆盖至代码提交 `0965de85`。此前首版189项通过，18.412s，exit 0。
 - `python -m compileall -q python`：exit 0，仅语法/字节码编译验证；仓库没有独立类型检查配置，不称typecheck。
-- `git diff --check`：exit 0。
+- 实现阶段 `git diff --check` 的工作树检查为exit 0；该检查不覆盖已提交内容。父代理最终范围审计 `git diff --check 4d6f5be2..HEAD` 发现新增 `test_arbitrage_maker.py` 的338行CRLF在提交blob中被判为尾随空白。随后只将该文件换行为LF，断言其余字节完全相同，不改逻辑或Git whitespace配置；最终提交后对完整09–11范围重新执行同一命令，exit 0。其余授权范围文件没有同类告警。
 - `python/verify_strategy_host.py` 已加入09 Cycle、10 checkpoint和11 Maker三测试入口；未运行其整套Zig/产品链，也未执行无关Zig全套。
 
 20项Maker测试覆盖两种maker腿、native wire、唯一增量/缺回报/经济未覆盖、撤中Fill、Unknown与原身份恢复、取消终态及经济覆盖、部分成交换价原成本前缀/剩余量、次数/间隔/总寿命、深度丢失、尾差最小量/期限、数量/预算边界、队列独立压力、联合失败损失、模式保持、固定Holding目标/TP/退出Unknown/闭合全阶段checkpoint及损坏状态拒绝。
