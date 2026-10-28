@@ -36,6 +36,7 @@ v2新增严格 `maker_cycle` component tag，保留已有IOC的 `cycle` tag及�
 - TDD：首个native Post-only用例先因模块不存在失败；逐笔增量用例先返回无hedge失败；Unknown恢复先因未注册真实component失败；终态hedge经济未覆盖回归先重复对冲失败；超额hedge修复先错误请求makerIOC失败；Spec发现的退出敞口回归先得到 `[0,0]` 失败，随后逐项修复通过。
 - `python -m unittest discover -s python -p test_arbitrage_maker.py`：20项通过，exit 0。
 - `python -m unittest discover -s python -p 'test_*.py'`：最终192项通过，21.847s，exit 0；覆盖至代码提交 `0965de85`。此前首版189项通过，18.412s，exit 0。
+- 父代理独立复验同一全量命令：192项通过，22.166s，tests_exit 0；独立compileall退出0。父代理同时核对09/10/11 resolved、12/13未认领、14/15依赖及真实集成pending。换行修正仅格式变化，未重复执行逻辑测试。
 - `python -m compileall -q python`：exit 0，仅语法/字节码编译验证；仓库没有独立类型检查配置，不称typecheck。
 - 实现阶段 `git diff --check` 的工作树检查为exit 0；该检查不覆盖已提交内容。父代理最终范围审计 `git diff --check 4d6f5be2..HEAD` 发现新增 `test_arbitrage_maker.py` 的338行CRLF在提交blob中被判为尾随空白。随后只将该文件换行为LF，断言其余字节完全相同，不改逻辑或Git whitespace配置；最终提交后对完整09–11范围重新执行同一命令，exit 0。其余授权范围文件没有同类告警。
 - `python/verify_strategy_host.py` 已加入09 Cycle、10 checkpoint和11 Maker三测试入口；未运行其整套Zig/产品链，也未执行无关Zig全套。
