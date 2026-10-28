@@ -392,10 +392,11 @@ class Cycle(c.Cycle):
             return (e.exact(facts.possible_base[maker][0]-facts.possible_base[hedge][1]),
                     e.exact(facts.possible_base[maker][1]-facts.possible_base[hedge][0]))
         orders = {o.sequence: o for o in facts.orders}
-        possible = [e.exact(0), e.exact(0)]
+        low, high = list(facts.positions), list(facts.positions)
         for i in self.issued:
-            if not i.reducing:
-                lots = _possible(i, orders)
-                possible[i.leg] += lots*self.plan.legs[i.leg].rules.base_atoms_per_lot
-        net = facts.positions[maker]-facts.positions[hedge]
-        return e.exact(net-possible[hedge]), e.exact(net+possible[maker])
+            possible = _possible(i, orders)*self.plan.legs[i.leg].rules.base_atoms_per_lot
+            if i.reducing:
+                low[i.leg] = max(0, low[i.leg]-possible)
+            else:
+                high[i.leg] += possible
+        return e.exact(low[maker]-high[hedge]), e.exact(high[maker]-low[hedge])

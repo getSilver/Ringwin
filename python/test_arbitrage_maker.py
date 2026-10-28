@@ -301,6 +301,38 @@ class MakerTests(unittest.TestCase):
                          [(1, 1, True, "ioc")])
         recovery.checkpoint(meta(3, 4), {"maker": cycle})
 
+    def test_independent_pending_exits_and_hedge_trims_expand_exposure_interval(self):
+        cycle = self.running()
+        cycle.apply(facts(2, at_ns=T, market=market(0, 1100), orders=(done(1, 0, 10),),
+                          positions=(F(10), F(0)), safe_reduce_lots=(10, 0)))
+        base = facts(3, orders=(done(1, 0, 10), done(2, 1, 10)), positions=(F(10), F(10)),
+                     safe_reduce_lots=(10, 10), market=market(3, 1100, risk=True))
+        cycle.apply(base)
+        pending = replace(base, cursor=4, orders=base.orders+(
+            done(3, 0, 0, status="sent", possible_lots=10), done(4, 1, 0, status="sent", possible_lots=10)))
+        self.assertEqual(cycle.exposure_bounds(pending), (F(-10), F(10)))
+        one_filled = replace(pending, orders=base.orders+(done(3, 0, 10),
+            done(4, 1, 0, status="sent", possible_lots=10)), positions=(F(0), F(10)), safe_reduce_lots=(0, 0))
+        self.assertEqual(cycle.exposure_bounds(one_filled), (F(-10), F(0)))
+
+    def test_sell_maker_role_and_reprice_interval_and_count_are_independent(self):
+        p = maker_plan(maker_leg=1)
+        cycle = m.Cycle(p)
+        action = cycle.start(cursor=1, at_ns=T, market=market(0, 1100), quotes=(quote(p, ticks=1100),))
+        self.assertEqual([(i.leg, i.limit_ticks, i.time_in_force) for i in action.intents], [(1, 1100, "post-only")])
+        action = cycle.apply(facts(orders=(done(1, 1, 3, status="sent", possible_lots=7),),
+                                  positions=(F(0), F(3)), safe_reduce_lots=(0, 3)))
+        self.assertEqual([(i.leg, i.lots, i.limit_ticks) for i in action.intents], [(0, 3, 1001)])
+        for cap in (0, 2):
+            p = maker_plan(max_requotes=cap)
+            cycle = self.running(p)
+            f = facts(2, orders=(done(1, 0, 0, status="sent", possible_lots=10),),
+                      market=market(2, 1100, bid_a=999))
+            self.assertFalse(cycle.apply(f, quotes=(quote(p, ticks=999, at=2, bid=999, economic_ref=f.economic_ref),)).cancels)
+            f = replace(f, cursor=3, at_ns=T+3, market=market(3, 1100, bid_a=999))
+            action = cycle.apply(f, quotes=(quote(p, ticks=999, at=3, bid=999, economic_ref=f.economic_ref),))
+            self.assertEqual(action.cancels, (1,) if cap else ())
+
 
 if __name__ == "__main__":
     unittest.main()
