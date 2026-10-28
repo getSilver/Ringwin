@@ -29,6 +29,7 @@ Status: open
 - 2026-10-28 用户授权在当前分支 `spread-arbitrage-strategy-python` 完成08；仅Python准入及离线合同，不部署或交易。
 - 使用根级 GLOSSARY.md 和相关 ADR 的规范领域语言。
 - 2026-10-28 用户授权当前分支按09→10→11逐票完成Python策略及离线合同，每次仅认领当前票；不部署、不执行真实或Demo交易、不同步GitHub。
+- 2026-10-28 用户继续授权按12→13→14→15逐票完成可开发离线范围，并明确目前没有真实数据和真实市场；工具及合成行为回归可完成，经济/运行资格保持pending。14/15离线工具开发不表示越过12/13真实资格的验收依赖；不部署、不执行真实或Demo交易、不同步GitHub。
 - 用户已确认的约束与建议、待决问题分开记录。
 - 按 Blocked by 领取 Frontier，每次只认领一张；ready-for-agent 不取消依赖。三项核心接口能力由其他会话处理，复用当前实现及验收证据；原规格票不因拆票自动关闭。
 - 交易所选择属于部署配置，不作为策略访谈问题。具体账户、币种名单和资金数值由运行配置提供；策略规格定义输入语义、约束及校验，不要求先选择部署实例。
@@ -53,12 +54,14 @@ Status: open
 
 ## Frontier
 
-- [12 双 IOC 样本外校准与资格判定](issues/12-taker-calibration.md)：依赖05/10已完成，ready-for-agent；不在本次09–11授权范围，未认领。
-- [13 Maker–Taker 独立校准与资格判定](issues/13-maker-calibration.md)：依赖05/11已完成，ready-for-agent；不在本次09–11授权范围，未认领。
+- [12 双 IOC 样本外校准与资格判定](issues/12-taker-calibration.md)：依赖05/10已完成，离线研究工具已开发，真实研究输入不足，in_progress，经济资格pending；见[12证据](taker-calibration-evidence.md)。
+- [13 Maker–Taker 独立校准与资格判定](issues/13-maker-calibration.md)：依赖05/11已完成，ready-for-agent；按本轮授权后续单独认领。
 - 14阻塞于12、15阻塞于13，尚非Frontier；真实跨模块集成清单仍pending。
 - 原01/02为来源规格，保持原状态；其他会话施工及资格见核心接口地图。其余新票按各自 Blocked by 推进。
 
 ## Decisions so far
+
+- 2026-10-28：[12](issues/12-taker-calibration.md)交付Python离线时间隔离、完整周期/NAV报告及持久试验/保留集使用工具；公开10/10、Python全量202/202通过，两轴补审无剩余发现。仓库数据核查仅见容量/故障、旧Demo与安全产物及夹具，未发现足够的真实双IOC研究输入。工具与合成回归不授经济资格，本票保持in_progress，14真实影子验收仍阻塞；见[12证据](taker-calibration-evidence.md)。
 
 - 2026-10-28：[11](issues/11-maker-taker-cycle.md)完成Python原生Post-only报价/撤换建议、已应用净增量扣在途hedge、Unknown/尾差、独立队列与联合压力、真实Maker v2 checkpoint和固定目标退出；20项Maker公开测试、Python全量192项通过。Standards无发现，Spec初审1项P2（在途减仓敞口区间）已修复，最终两轴无剩余发现，详见[11证据](maker-taker-cycle-evidence.md)。只关闭策略离线范围，Host取消/核心/Venue真实接线及经济/运行资格保持pending；本次09→10→11授权完成，未认领12以后，模块仍open。
 
@@ -166,4 +169,4 @@ Status: open
 ## Out of scope
 
 - 具体交易所、账户、币种名单和部署资金数值的选择。
-- 12及以后策略实现不在本次授权范围；不部署、不执行真实或 Demo 交易、不同步 GitHub。
+- 部署、真实或 Demo 交易、GitHub同步；12–15本轮仅完成可开发离线工具，真实经济/运行资格仍须实际证据。
