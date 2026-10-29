@@ -1,8 +1,8 @@
 # 10：H1–H3 公共接缝综合验收
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in_progress
+Assignee: Codex
 Blocked by: [03 增量与重同步](03-depth-resynchronization.md)、[06 双 IOC 执行](06-dual-ioc-dispatch.md)、[07 原生 Post-only](07-native-post-only.md)、[09 周期恢复与激活](09-cycle-recovery.md)；相关策略行为与参数合同冻结
 Parent: [模块地图](../map.md)
 

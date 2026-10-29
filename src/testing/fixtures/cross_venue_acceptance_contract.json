@@ -1,0 +1,23 @@
+{
+  "scope": "windows_offline_test_values_only",
+  "base_commit": "477fc43699be357e41120137bfe72b42cdfdec70",
+  "state_schema_version": 2,
+  "modes": {
+    "taker_taker": {
+      "cycle": "8aa00b3e5f857350d253fd69764683155c3b40ef566c22878a90803b54feb12f",
+      "signal": "b8a8ba72891bdc72d7dc072c5b6e7f11eadc65bc8fee883fa89c5967ea6875e8",
+      "admission": "3c357dc91741383151f67c15d6f15b027b3faf67a73060d47769b2ac12be4488",
+      "filter": "8b93cd7662bf28abb32bcfeb7124b4a19e804084d1ff7f96c570ceffe2a62e89",
+      "budget": "d2638a7572404a48e8b8fae5bcc5949ddd53cc249476e01ca251499bbb4ba923",
+      "monitor": "85c414e779e3438e2ce21002017fb1ca5acb2c800c500acd1bea8309176c018c"
+    },
+    "maker_taker": {
+      "cycle": "c8b25217c2e5fbac4abf37419d8c384d93492c51281714fdf5fe3753aa0f5d8a",
+      "signal": "b8a8ba72891bdc72d7dc072c5b6e7f11eadc65bc8fee883fa89c5967ea6875e8",
+      "admission": "3c357dc91741383151f67c15d6f15b027b3faf67a73060d47769b2ac12be4488",
+      "filter": "8b93cd7662bf28abb32bcfeb7124b4a19e804084d1ff7f96c570ceffe2a62e89",
+      "budget": "d2638a7572404a48e8b8fae5bcc5949ddd53cc249476e01ca251499bbb4ba923",
+      "monitor": "85c414e779e3438e2ce21002017fb1ca5acb2c800c500acd1bea8309176c018c"
+    }
+  }
+}

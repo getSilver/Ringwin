@@ -10,7 +10,7 @@ const fixture = @import("../../support/trading_shard_fixture.zig");
 const accounts = @import("multi_account_authority_acceptance.zig");
 const FillConsumer = @import("../../support/execution_fact_consumer.zig").FillConsumer;
 
-const Adapter = struct {
+pub const Adapter = struct {
     account: u128,
     sends: usize = 0,
     result: venue.SendResult = .accepted,
@@ -18,7 +18,7 @@ const Adapter = struct {
     command: ?canonical.OrderCommand = null,
     pending: ?canonical.AdapterOutputBatch = null,
 
-    fn interface(self: *@This()) venue.VenueAdapter {
+    pub fn interface(self: *@This()) venue.VenueAdapter {
         return .{ .ptr = self, .vtable = &.{ .start = start, .try_send = send, .try_drain = drain, .stop = stop } };
     }
     fn start(_: *anyopaque, _: venue.VenueConfig) venue.StartError!void {}
@@ -112,7 +112,7 @@ const Harness = struct {
     }
 };
 
-fn observe(gateway: *execution.Gateway, shard: *const trading.TradingShard) !void {
+pub fn observe(gateway: *execution.Gateway, shard: *const trading.TradingShard) !void {
     for (shard.oms.command_history[0..shard.oms.command_history_count]) |command| {
         var view: trading.TradingShard = undefined;
         try shard.copyAccountViewInto(&view, command.authority.exchange_account);

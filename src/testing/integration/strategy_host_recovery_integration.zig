@@ -214,6 +214,7 @@ pub fn main(init: std.process.Init) !void {
     const python = args.next() orelse "python";
     const script = args.next() orelse "python/strategy_host.py";
     if (args.next() != null) return error.UnknownArgument;
+    try runCycleRecovery(init, python, .holding, .keep, .public_depth);
     try runCheck(init, python, script);
     try runPortableCheckpoint(init, python, script);
     try runRealCheckpoint(init, python);
@@ -440,7 +441,135 @@ const CyclePhase = enum { entering, repairing, holding, exiting, reconciling };
 
 const CycleTransition = enum { keep, migrate, rebuild };
 
-const CycleScenario = enum { normal, downtime, loss, maker, risk };
+const CycleScenario = enum { normal, downtime, loss, maker, risk, public_depth };
+
+// Offline canonical feed: protocol normalization is qualified separately by the OKX tests.
+const ContractFeed = struct {
+    pending: ?@import("../../model/canonical_event.zig").AdapterOutputBatch = null,
+    fn adapter(self: *@This()) @import("../../market/market_feed_adapter.zig").MarketFeedAdapter {
+        return .{ .ptr = self, .vtable = &.{ .start = start, .try_drain = drain, .stop = stop } };
+    }
+    fn start(_: *anyopaque, _: @import("../../market/market_feed_adapter.zig").Config) @import("../../market/market_feed_adapter.zig").StartError!void {}
+    fn drain(ptr: *anyopaque) @import("../../market/market_feed_adapter.zig").DrainError!?@import("../../model/canonical_event.zig").AdapterOutputBatch {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        const result = self.pending;
+        self.pending = null;
+        return result;
+    }
+    fn stop(_: *anyopaque, _: @import("../../market/market_feed_adapter.zig").DrainDeadline) @import("../../market/market_feed_adapter.zig").StopError!void {}
+};
+
+const PublicStart = struct {
+    candidate: gateway_module.GroupCandidate,
+    checkpoint: []u8,
+    depth_wires: [2][@import("../../market/depth_snapshot.zig").wire_len]u8,
+};
+
+fn publicDepthStart(init: std.process.Init, python: []const u8, input: *CycleIngress, plan: lifecycle.Plan) !PublicStart {
+    const canonical = @import("../../model/canonical_event.zig");
+    const depth = @import("../../market/depth_snapshot.zig");
+    const owner = input.owner;
+    var feed: ContractFeed = .{};
+    const adapter = feed.adapter();
+    try adapter.start(.{ .venue = 1, .environment = .simulation, .subscription_set = 1, .config_version = 1, .session = 1, .output_capacity = 2 });
+    defer adapter.stop(.{ .monotonic_ns = 0 }) catch {};
+    var events: [2]gateway_module.EventEnvelope = undefined;
+    var wires: [2][depth.wire_len]u8 = undefined;
+    for ([_]u128{ 101, 102 }, [_]u64{ 1, 21 }, 0..) |instrument, venue, index| {
+        const bid: i128 = if (index == 0) 100 else 109;
+        var levels: canonical.BookDepth = .{ .visible_at_ns = 1_767_225_600_450_000_000, .bid_count = 1, .ask_count = 1 };
+        levels.bids[0] = .{ .ticks = bid, .lots = 10000 };
+        levels.asks[0] = .{ .ticks = bid + 1, .lots = 10000 };
+        var record = fixture.canonicalAt(45, 2, .{ .l2_book_snapshot = .{
+            .instrument = instrument,
+            .sequence = 1_767_225_600_450_000_000,
+            .depth = levels,
+            .best_bid = .{ .instrument = instrument, .rules_version = 1, .ticks = bid },
+            .best_ask = .{ .instrument = instrument, .rules_version = 1, .ticks = bid + 1 },
+            .best_bid_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = 10000 },
+            .best_ask_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = 10000 },
+        } });
+        record.venue.envelope.scope = .instrument;
+        record.venue.envelope.times.receive_utc_ns = levels.visible_at_ns;
+        record.venue.envelope.exchange_account = null;
+        record.venue.envelope.instrument = instrument;
+        record.venue.envelope.venue = venue;
+        record.venue.envelope.identity.stream = 1000 + instrument;
+        record.venue.envelope.source_stream = @intCast(1000 + instrument);
+        var batch: canonical.AdapterOutputBatch = .{};
+        try batch.append(record.venue);
+        feed.pending = batch;
+        const drained = (try adapter.tryDrain()).?;
+        for (drained.events[0..drained.len]) |event_record| _ = try input.apply(.{ .venue = event_record });
+        events[index] = try gateway_module.depthSnapshotInput(&owner.shard.canonical_market, instrument, owner.shard.authoritativeBarrier(), &wires[index], 0, 1_767_225_600_450_000_000);
+    }
+    var metadata: recovery_module.Metadata = .{
+        .schema_registry = plan.compatibility.schema_registry,
+        .strategy_instance = 9,
+        .strategy_definition = 2,
+        .state_schema = 0x43565354415445000000000000000001,
+        .state_schema_version = 2,
+        .strategy_config_version = 1,
+        .strategy_cursor = 0,
+        .next_intent_sequence = 1,
+    };
+    var frame: [8192]u8 = undefined;
+    var initial_storage: [4096]u8 = undefined;
+    const initial = try recovery_module.encodePayloadCheckpoint(&initial_storage, metadata, @embedFile("../fixtures/strategy_cycle_recovery_v2.json"));
+    var host = try lifecycle.ManagedHost.start(init, python, "python/test_strategy_cycle_recovery.py", plan, "portable", &.{ "--core", "--strategy-identity", "9", "--activation-identity", "1", "--public-books" });
+    defer host.deinit(init.io);
+    try host.sendPlan(init.io);
+    try expectLifecycle(.accepted, try host.receive(init.io, 1));
+    try expectLifecycle(.accepted, try host.receive(init.io, 2));
+    metadata.strategy_cursor = owner.shard.authoritativeBarrier();
+    try host.beginRecovery(init.io, metadata.strategy_cursor, initial, &frame);
+    var gateway = try gateway_module.Gateway.init(.{
+        .schema_registry = plan.compatibility.schema_registry,
+        .decision_domain = plan.decision_domain,
+        .session = plan.session,
+        .authorization = .{ .strategy_identity = 9, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 },
+    }, &.{gateway_module.Subscription.of(9, &.{ .depth_snapshot, .timer })});
+    var batch_storage: [4096]u8 = undefined;
+    var now: i64 = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
+    try host.sendInput(init.io, try gateway.encodeBatch(&batch_storage, 1, 1, metadata.strategy_cursor, now, &events), now);
+    try gateway.recordPublished(1, metadata.strategy_cursor, now);
+    try expectLifecycle(.accepted, try host.receive(init.io, 3));
+    try host.requestCheckpoint(init.io, 1, metadata);
+    const before = try recovery_module.decodePayloadCheckpoint(try host.receiveCheckpoint(init.io, &frame), metadata);
+    const activation: lifecycle.Activation = .{ .strategy_identity = 9, .activation_identity = 1, .barrier = metadata.strategy_cursor + 1, .state_digest = before.state_digest };
+    _ = try input.apply(fixture.atGroup(45, .{ .identity = 9000, .payload = .{ .host_activated = .{
+        .strategy_identity = 9,
+        .config_version = 1,
+        .activation_identity = 1,
+        .session = plan.session,
+        .activation_barrier = activation.barrier,
+        .state_digest = owner.shard.canonicalStateDigest(),
+    } } }));
+    try host.activate(init.io, activation);
+    gateway.config.authorization.activation_barrier = activation.barrier;
+    now = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
+    try host.sendInput(init.io, try gateway.encodeBatch(&batch_storage, 2, activation.barrier, activation.barrier, now, &.{}), now);
+    try gateway.recordPublished(2, activation.barrier, now);
+    try gateway.activate(&owner.shard, &owner.decision_journal);
+    _ = try input.apply(fixture.atGroup(45, .{ .identity = 9001, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
+    metadata.strategy_cursor = owner.shard.authoritativeBarrier();
+    const start: gateway_module.EventEnvelope = .{ .event_type = .timer, .shard_sequence = metadata.strategy_cursor, .source_time_ns = 0, .receive_time_ns = 0, .monotonic_time_ns = 0, .wall_time_utc_ns = 0, .payload = "start" };
+    now = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
+    try host.sendInput(init.io, try gateway.encodeBatch(&batch_storage, 3, metadata.strategy_cursor, metadata.strategy_cursor, now, &.{start}), now);
+    try gateway.recordPublished(3, metadata.strategy_cursor, now);
+    const output = try host.receiveOutput(init.io, now, &frame);
+    const decision = gateway.ingest(output, now + 1);
+    try std.testing.expect(decision == .accepted_group);
+    const group = try gateway_module.decodeIntentGroup(decision.accepted_group.frame());
+    try std.testing.expectEqual(@as(u8, 2), group.count);
+    try std.testing.expectEqual(@as(u128, 20), group.members[0].exchange_account_identity);
+    try std.testing.expectEqual(@as(u128, 30), group.members[1].exchange_account_identity);
+    metadata.next_intent_sequence = 3;
+    try host.requestCheckpoint(init.io, 2, metadata);
+    const saved = try init.gpa.dupe(u8, try host.receiveCheckpoint(init.io, &frame));
+    std.debug.print("10 public depth: input_sha256={s}/{s} output=complete_group members=2 next_intent=3 start_cursor={d}\n", .{ std.fmt.bytesToHex(@import("../../persistence/business_history.zig").hash(&wires[0]), .lower), std.fmt.bytesToHex(@import("../../persistence/business_history.zig").hash(&wires[1]), .lower), metadata.strategy_cursor });
+    return .{ .candidate = decision.accepted_group, .checkpoint = saved, .depth_wires = wires };
+}
 
 fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhase, transition: CycleTransition, scenario: CycleScenario) !void {
     const expired = scenario == .downtime;
@@ -480,7 +609,8 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     var old_plan = lifecycle.developmentPlan(0, 70, try lifecycle.discoverPythonAbi(init, python));
     old_plan.session.fencing = owner.shard.fencing_token;
     old_plan.decision_domain = 1;
-    _ = try input.apply(fixture.atGroup(44, .{ .identity = 9000, .payload = .{ .host_activated = .{
+    if (scenario == .public_depth) old_plan.input_capacity = 4096;
+    if (scenario != .public_depth) _ = try input.apply(fixture.atGroup(44, .{ .identity = 9000, .payload = .{ .host_activated = .{
         .strategy_identity = 9,
         .config_version = 1,
         .activation_identity = 1,
@@ -488,8 +618,10 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
         .activation_barrier = owner.shard.authoritativeBarrier() + 1,
         .state_digest = owner.shard.canonicalStateDigest(),
     } } }));
-    const start_sequence = owner.shard.authoritativeBarrier() + 1;
-    _ = try input.apply(fixture.atGroup(45, .{ .identity = 9001, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
+    const public_start = if (scenario == .public_depth) try publicDepthStart(init, python, &input, old_plan) else null;
+    defer if (public_start) |started| init.gpa.free(started.checkpoint);
+    const start_sequence = if (public_start != null) owner.shard.authoritativeBarrier() else owner.shard.authoritativeBarrier() + 1;
+    if (public_start == null) _ = try input.apply(fixture.atGroup(45, .{ .identity = 9001, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
     var metadata: recovery_module.Metadata = .{
         .schema_registry = old_plan.compatibility.schema_registry,
         .strategy_instance = 9,
@@ -523,6 +655,7 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     try old_host.requestCheckpoint(init.io, 1, metadata);
     var old_content = try init.gpa.dupe(u8, try old_host.receiveCheckpoint(init.io, &frame));
     defer init.gpa.free(old_content);
+    if (public_start) |started| try std.testing.expectEqualSlices(u8, old_content, started.checkpoint);
     const repository = try checkpoints.Repository.init(adapter.interface(), 800, .{ 801, 802 });
     try repository.initialize(init.io);
 
@@ -540,8 +673,28 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
         .order_type = if (maker_mode and index == 0) .post_only else .limit,
         .time_in_force = if (maker_mode and index == 0) .post_only else .immediate_or_cancel,
     };
-    _ = try input.apply(fixture.atGroup(45, .{ .identity = 9002, .payload = .{ .oms_intent_group = group } }));
+    _ = try input.apply(fixture.atGroup(45, .{ .identity = 9002, .payload = if (public_start) |started| .{ .external_intent_group = started.candidate } else .{ .oms_intent_group = group } }));
     try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.count);
+    if (public_start != null) {
+        const dual = @import("../acceptance/core/dual_ioc_dispatch_acceptance.zig");
+        var adapters = [_]dual.Adapter{ .{ .account = 20 }, .{ .account = 30 } };
+        const dispatcher = try init.gpa.create(execution.Gateway);
+        defer init.gpa.destroy(dispatcher);
+        dispatcher.init();
+        try dispatcher.bootstrapDurableDispatch(adapter.interface(), init.io, .{ .domain = .control, .id = 92 });
+        for (&adapters, [_]u64{ 1, 21 }) |*target, venue| try dispatcher.add(.{
+            .account = target.account,
+            .adapter = target.interface(),
+            .venue_identity = venue,
+            .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 },
+            .supported_products = execution.productMask(.isolated_linear_usdt),
+        });
+        try dispatcher.pinDeploymentDigest(owner.shard.deployment.header.?.expected_digest);
+        try dual.observe(dispatcher, &owner.shard);
+        const dispatch_now = owner.shard.oms.findCommand(1).?.authority.dispatch_deadline_monotonic_ns - std.time.ns_per_s;
+        for ([_]u64{ 1, 2 }) |command| try std.testing.expectEqual(@import("../../execution/venue_adapter.zig").SendResult.accepted, try dispatcher.sendFromShard(&owner.shard, command, dispatch_now));
+        for (adapters) |target| try std.testing.expectEqual(@as(usize, 1), target.sends);
+    }
     for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, [_]u64{ 1, 21 }, 0..) |account, instrument, venue, index| {
         const order = owner.shard.oms.orderById(index + 1).?;
         var report = fixture.canonicalAt(46, 2, .{ .execution_report = .{
@@ -563,6 +716,7 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
         for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, [_]u64{ 1, 21 }, 0..) |account, instrument, venue, index| {
             const order = owner.shard.oms.orderById(index + 1).?;
             const filled: i64 = if (maker_mode) (if (index == 0) 3000 else 0) else if (loss) (if (index == 0) 10000 else 5000) else if (phase == .repairing) (if (index == 0) 10000 else 6000) else if (phase == .reconciling and index == 1) 0 else 5000;
+            var pending_fill: ?engine.CanonicalEvent = null;
             if (filled != 0) {
                 var fill = fixture.canonicalAt(46, 3, .{ .fill = .{
                     .identity = 1,
@@ -581,7 +735,7 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
                 } });
                 fill.venue.envelope.exchange_account = account;
                 fill.venue.envelope.venue = venue;
-                _ = try input.apply(fill);
+                if (public_start != null) pending_fill = fill else _ = try input.apply(fill);
             }
             var terminal = fixture.canonicalAt(46, 4, .{ .execution_report = .{
                 .identity = 2,
@@ -596,7 +750,26 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
             } });
             terminal.venue.envelope.exchange_account = account;
             terminal.venue.envelope.venue = venue;
+            if (public_start != null) {
+                terminal.venue.envelope.identity.sequence = 3;
+                terminal.venue.envelope.source_sequence = 3;
+            }
             _ = try input.apply(terminal);
+            if (pending_fill) |*fill| {
+                var before_fill: [176]u8 = undefined;
+                try cycleProjection(owner, 1_767_225_600_460_000_000, &before_fill);
+                try std.testing.expectEqual(@as(u64, 0), get(u64, &before_fill, 8 + 16 * index));
+                try std.testing.expectEqual(@as(u64, 5000), get(u64, &before_fill, 16 + 16 * index));
+                try std.testing.expectEqual(@as(u64, 2), get(u64, &before_fill, 64 + 8 * index));
+                fill.venue.envelope.identity.sequence = 4;
+                fill.venue.envelope.source_sequence = 4;
+                _ = try input.apply(fill.*);
+                fill.venue.envelope.identity.sequence = 5;
+                fill.venue.envelope.source_sequence = 5;
+                _ = try input.apply(fill.*);
+                try cycleProjection(owner, 1_767_225_600_460_000_000, &before_fill);
+                try std.testing.expectEqual(@as(u64, 5000), get(u64, &before_fill, 8 + 16 * index));
+            }
         }
         if (phase == .reconciling and !maker_mode) {
             var dispatch: engine.oms.DispatchBatch = .{ .count = 1 };
@@ -779,10 +952,19 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     } } }));
     try owner.checkpoint();
     const original_cycle = owner.shard.cycles.find(9, 1).?;
+    const persisted_core_digest = owner.shard.canonicalStateDigest();
     adapter.close(init.io);
     adapter.* = .{ .dir = undefined };
     if (builtin.os.tag == .windows) try adapter.initWindowsVerification(init.io, path) else try adapter.initLinux(init.io, path);
     try demo.Owner.recoverInto(owner, adapter.interface(), init.io, owner.stream);
+    if (public_start) |started| {
+        try std.testing.expectEqualSlices(u8, &persisted_core_digest, &owner.shard.canonicalStateDigest());
+        for ([_]u128{ 101, 102 }, started.depth_wires) |instrument, wire| {
+            var storage: [@import("../../market/depth_snapshot.zig").wire_len]u8 = undefined;
+            const restored_depth = try gateway_module.depthSnapshotInput(&owner.shard.canonical_market, instrument, owner.shard.authoritativeBarrier(), &storage, 0, 0);
+            try std.testing.expectEqualSlices(u8, &wire, restored_depth.payload);
+        }
+    }
     const configuration_rows = try multi.configurationRows();
     try owner.pinDeploymentDigest(configuration_rows[0].begin.expected_digest);
     try std.testing.expectError(error.CoreRecoveryIncomplete, recovery.Recovery.begin(init.gpa, owner, 9, .{ .fencing = owner.shard.fencing_token, .shard = 0, .generation = 71 }));
@@ -797,7 +979,19 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     const execution_gateway = try init.gpa.create(execution.Gateway);
     defer init.gpa.destroy(execution_gateway);
     execution_gateway.init();
-    try execution_gateway.bootstrapDurableDispatch(adapter.interface(), init.io, .{ .domain = .control, .id = 92 });
+    var recovered_adapters = [_]@import("../acceptance/core/dual_ioc_dispatch_acceptance.zig").Adapter{ .{ .account = 20 }, .{ .account = 30 } };
+    if (public_start != null) {
+        for (&recovered_adapters, [_]u64{ 1, 21 }) |*target, venue| try execution_gateway.add(.{
+            .account = target.account,
+            .adapter = target.interface(),
+            .venue_identity = venue,
+            .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 },
+            .supported_products = execution.productMask(.isolated_linear_usdt),
+        });
+        try execution_gateway.attachRecoveredDurableDispatch(adapter.interface(), init.io, .{ .domain = .control, .id = 92 });
+        try std.testing.expectEqual(@as(usize, 2), execution_gateway.accepted_dispatch_count);
+        for (recovered_adapters) |target| try std.testing.expectEqual(@as(usize, 0), target.sends);
+    } else try execution_gateway.bootstrapDurableDispatch(adapter.interface(), init.io, .{ .domain = .control, .id = 92 });
     for ([_]u128{ 20, 30 }) |account| try multi.reconcileDomainAccount(owner, account, execution_gateway);
     if (expired) _ = try input.apply(fixture.atGroup(2000, .{ .identity = 9012, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
     const reopened = try checkpoints.Repository.init(adapter.interface(), 800, .{ 801, 802 });
@@ -1124,14 +1318,17 @@ fn cycleProjection(owner: *const @import("../../runtime/demo/demo_authority.zig"
     for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, 0..) |account, instrument, index| {
         const order = owner.shard.oms.orderById(index + 1).?;
         const terminal = order.state == .filled or order.state == .canceled or order.state == .rejected;
-        std.mem.writeInt(u64, projection[8 + 16 * index ..][0..8], @intCast(order.cumulative_quantity), .little);
-        std.mem.writeInt(u64, projection[16 + 16 * index ..][0..8], if (terminal) 0 else @intCast(order.quantity - order.cumulative_quantity), .little);
-        const portfolio = owner.shard.accountState(account).?.economic_projection.portfolioLayer(10).?;
+        const economics = &owner.shard.accountState(account).?.economic_projection;
+        const applied = try economics.appliedCanonicalFillQuantity(order.id);
+        const possible = @max(0, (if (terminal) order.cumulative_quantity else order.quantity) - applied);
+        std.mem.writeInt(u64, projection[8 + 16 * index ..][0..8], @intCast(applied), .little);
+        std.mem.writeInt(u64, projection[16 + 16 * index ..][0..8], @intCast(possible), .little);
+        const portfolio = economics.portfolioLayer(10).?;
         nav += portfolio.usdt_balance_atoms;
         realized += portfolio.realized_pnl_atoms;
         const quantity = portfolio.positionForInstrument(instrument).quantity;
         std.mem.writeInt(u64, projection[48 + 8 * index ..][0..8], @intCast(@abs(quantity)), .little);
-        std.mem.writeInt(u64, projection[64 + 8 * index ..][0..8], if (order.state == .unknown) 2 else if (terminal) 1 else 0, .little);
+        std.mem.writeInt(u64, projection[64 + 8 * index ..][0..8], if (order.state == .unknown or (terminal and possible != 0)) 2 else if (terminal) 1 else 0, .little);
     }
     std.mem.writeInt(u64, projection[40..48], @intCast(nav), .little);
     std.mem.writeInt(u64, projection[88..96], @intCast(@max(0, -realized)), .little);
@@ -1141,12 +1338,14 @@ fn cycleProjection(owner: *const @import("../../runtime/demo/demo_authority.zig"
         if (additional == 2) return error.ProjectionCapacity;
         const order = owner.shard.oms.orderById(command.order_id).?;
         const terminal = order.state == .filled or order.state == .canceled or order.state == .rejected;
+        const applied = try owner.shard.accountState(order.exchange_account).?.economic_projection.appliedCanonicalFillQuantity(order.id);
+        const possible = @max(0, (if (terminal) order.cumulative_quantity else order.quantity) - applied);
         const offset = 96 + 40 * additional;
         std.mem.writeInt(u64, projection[offset..][0..8], command.intent_sequence, .little);
         std.mem.writeInt(u64, projection[offset + 8 ..][0..8], if (order.exchange_account == 20) 0 else 1, .little);
-        std.mem.writeInt(u64, projection[offset + 16 ..][0..8], @intCast(order.cumulative_quantity), .little);
-        std.mem.writeInt(u64, projection[offset + 24 ..][0..8], if (terminal) 0 else @intCast(order.quantity - order.cumulative_quantity), .little);
-        std.mem.writeInt(u64, projection[offset + 32 ..][0..8], if (order.state == .unknown) 2 else if (terminal) 1 else 0, .little);
+        std.mem.writeInt(u64, projection[offset + 16 ..][0..8], @intCast(applied), .little);
+        std.mem.writeInt(u64, projection[offset + 24 ..][0..8], @intCast(possible), .little);
+        std.mem.writeInt(u64, projection[offset + 32 ..][0..8], if (order.state == .unknown or (terminal and possible != 0)) 2 else if (terminal) 1 else 0, .little);
         additional += 1;
     }
     for (owner.shard.operational_state.gates[0..owner.shard.operational_state.gate_count]) |gate| {

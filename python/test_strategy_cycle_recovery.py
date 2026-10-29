@@ -20,6 +20,8 @@ import arbitrage_baseline as baseline
 import arbitrage_economics as economics
 import math
 import base64
+import json
+from pathlib import Path
 import arbitrage_admission as admission
 import arbitrage_signals as signals
 import arbitrage_scanner as scanner
@@ -64,12 +66,14 @@ def core_plan(maker_mode=False):
     return frozen
 
 
-def core_admission_prefix(maker_mode=False):
+def core_admission_prefix(maker_mode=False, books=None):
     frozen = core_plan(maker_mode)
     now = CORE_UTC
     position = core_position(frozen, (10000, 10000), now)
     frames = (core_book(now, 111 if maker_mode else 110), core_book(now+1, 102), core_book(now+6, 102),
               core_book(frozen.policy.deadline_ns, 100), core_book(frozen.policy.deadline_ns+5, 100))
+    if books is not None:
+        frames = (replace(frames[0], books=tuple(books)),) + frames[1:]
     scenario = valuation.Scenario("core-entry", F(1), position, frames, (0, 5), ("filled", "filled"), ("entry:a", "entry:b"))
     observations = tuple(scanner.Observation(venue, leg.account, leg.kind, leg.rules, book, True)
         for venue, leg, book in zip((1, 21), position.legs, frames[0].books))
@@ -142,11 +146,19 @@ def core_estimator(position, book, frozen):
         simulation_hash=estimator.probability_model_hash(frozen.policy))),))
 
 
-def core_runtime(container, definition=2, maker_mode=False):
+def core_runtime(container, definition=2, maker_mode=False, public_books=False):
+    visible_books = {}
     def apply(objects, record):
         current = objects["cycle"]
+        if public_books and record.event_type == 7:
+            book = host.decode_depth_snapshot(record.payload)
+            if book["instrument"] not in (101, 102):
+                raise ValueError("unexpected public instrument")
+            visible_books[book["instrument"]] = record.payload
+            return
         if record.event_type == 4 and record.payload in (b"start", b"start-risk"):
-            _, state, pending, request, quoted = core_admission_prefix(maker_mode)
+            books = tuple(visible_books[key] for key in (101, 102)) if public_books else None
+            _, state, pending, request, quoted = core_admission_prefix(maker_mode, books)
             objects["filter"].push(baseline.Point(CORE_UTC//baseline.SECOND*baseline.SECOND, record.shard_sequence, .1))
             objects["signal"], objects["admission"] = state, pending
             if record.payload == b"start-risk":
@@ -302,6 +314,22 @@ def exchange(saved, *, activation_digest=None, consume_activation=True, activati
 
 
 class CycleRecoveryTests(unittest.TestCase):
+    def test_public_acceptance_contract_keeps_frozen_test_dependencies(self):
+        contract = json.loads((Path(__file__).resolve().parents[1] /
+            "src/testing/fixtures/cross_venue_acceptance_contract.json").read_text(encoding="utf-8"))
+        for mode, maker_mode in (("taker_taker", False), ("maker_taker", True)):
+            actual = {name: recovery.content(recovery.dependency(obj))
+                      for name, obj in core_templates(maker_mode).items()}
+            self.assertEqual(actual, contract["modes"][mode])
+
+    def test_public_depth_is_used_by_admission_without_replacing_unknown_liquidity(self):
+        books = core_book(CORE_UTC).books
+        self.assertIsNotNone(core_admission_prefix(books=books)[3])
+        missing = host.decode_depth_snapshot(books[0])
+        missing["asks"] = tuple((price, None) for price, _ in missing["asks"])
+        with self.assertRaises((AssertionError, ValueError)):
+            core_admission_prefix(books=(host.encode_depth_snapshot(missing), books[1]))
+
     def test_declared_model_migration_and_rebuild_keep_cycle_and_unresolved_private_evidence(self):
         source = fixture.runtime_factory(recovery.checkpoint(fixture.meta(), fixture.components()))
         source.apply_batch(fixture.batch(fixture.events()), (1, 0, 1))
@@ -429,11 +457,14 @@ if __name__ == "__main__":
         maker_mode = "--core-maker" in sys.argv
         if maker_mode:
             sys.argv.remove("--core-maker")
+        public_books = "--public-books" in sys.argv
+        if public_books:
+            sys.argv.remove("--public-books")
         if "--core-definition" in sys.argv:
             index = sys.argv.index("--core-definition")
             definition = int(sys.argv[index+1])
             del sys.argv[index:index+2]
-        raise SystemExit(host.main(runtime_factory=lambda raw: core_runtime(raw, definition, maker_mode)))
+        raise SystemExit(host.main(runtime_factory=lambda raw: core_runtime(raw, definition, maker_mode, public_books)))
     if "--phase" in sys.argv:
         index = sys.argv.index("--phase")
         phase = sys.argv[index+1]

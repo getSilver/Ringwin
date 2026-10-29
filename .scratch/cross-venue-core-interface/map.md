@@ -49,9 +49,11 @@ Status: open
 ## Frontier
 
 
-- [09 周期恢复、经济承接与激活屏障](issues/09-cycle-recovery.md)：open；09a、09b均已resolved，待逐项汇总证据验收；10仍依赖本票。
+- [10 H1–H3 公共接缝综合验收](issues/10-public-seam-acceptance.md)：in_progress；09 汇总已按 Windows 本机离线范围验收，用户确认冻结既有行为/schema/模型与明确标注的测试参数；生产校准和 Venue 资格独立未取得。
 
 ## Decisions so far
+
+- 2026-10-29：本次用户确认第10票按离线范围完成，冻结既有策略行为/schema v2/模型和明确测试值，部署/校准参数与 Venue 资格另列。当前主树477fc436复跑恢复公共程序exit0，09八项证据汇总通过并resolved；见[09汇总](issues/09-cycle-recovery.md)。开始10，不修改来源spec或授权交易。
 
 - 2026-10-29：09b 在用户指定 `codex/08-real-strategy-checkpoint` 完成，实现 `00438d84`、`1c4f169e`、`9d0272ea`。真实双账户核心、文件 checkpoint、Host 追赶与持久激活保留原周期/期限/风险，恢复不授权开仓；Python243/243、ReleaseSafe819/819、Host产品28/28均exit0，两轴复审无遗留阻断。按Windows本机离线范围resolved，见[验证记录](09b-verification.md)。09汇总、10和来源spec不关闭；无Venue/生产资格、部署或交易，未合并主目录。
 
