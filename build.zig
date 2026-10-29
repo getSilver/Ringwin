@@ -61,6 +61,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    // Existing core state copies exceed the platform's default test stack.
+    tests.stack_size = 512 * 1024 * 1024;
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run the offline Zig regression suite");
     test_step.dependOn(&run_tests.step);
