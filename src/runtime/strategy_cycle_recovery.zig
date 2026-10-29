@@ -5,6 +5,7 @@ const trading = @import("../trading/trading_shard.zig");
 const owner_module = @import("demo/demo_authority.zig");
 const codec = @import("../strategy/strategy_host_recovery.zig");
 const lifecycle = @import("../strategy/strategy_host_lifecycle.zig");
+const history = @import("../persistence/business_history.zig");
 
 pub const Clock = enum { unverified, utc };
 
@@ -18,9 +19,50 @@ pub const Binding = struct {
     holding_deadline_utc_ns: u64,
     repair_deadline_utc_ns: u64,
     exit_deadline_utc_ns: u64,
+    legs: [2]Leg,
 };
 
-pub const Recovery = struct {
+pub const Leg = struct {
+    account: u128,
+    instrument: u128,
+    direction: trading.oms.Side,
+    rules_version: u64,
+    base_atomic_scale: u8,
+};
+
+pub const Recovery = opaque {
+    pub fn begin(gpa: std.mem.Allocator, owner: *owner_module.Owner, strategy: u128, session: @import("../strategy/strategy_host_ipc.zig").Session) !*Recovery {
+        const state = try gpa.create(State);
+        errdefer gpa.destroy(state);
+        state.* = try State.begin(owner, strategy, session);
+        state.allocator = gpa;
+        return @ptrCast(state);
+    }
+
+    pub fn deinit(self: *Recovery) void {
+        const state = self.internal();
+        state.allocator.destroy(state);
+    }
+
+    pub fn currentUtc(self: *Recovery, owner: *const owner_module.Owner) !u64 {
+        return self.internal().currentUtc(owner);
+    }
+
+    pub fn qualify(self: *Recovery, gpa: std.mem.Allocator, owner: *const owner_module.Owner, container: []const u8, expected: codec.Metadata, bindings: []const Binding, clock: Clock) !Ticket {
+        return self.internal().qualify(gpa, owner, container, expected, bindings, clock);
+    }
+
+    pub fn activate(self: *Recovery, owner: *owner_module.Owner) !lifecycle.Activation {
+        return self.internal().activate(owner);
+    }
+
+    fn internal(self: *Recovery) *State {
+        return @ptrCast(@alignCast(self));
+    }
+};
+
+const State = struct {
+    allocator: std.mem.Allocator = undefined,
     strategy: u128,
     session: @import("../strategy/strategy_host_ipc.zig").Session,
     fence: u64,
@@ -28,16 +70,25 @@ pub const Recovery = struct {
     consumed: bool = false,
     ticket: ?Ticket = null,
 
-    pub fn currentUtc(self: *const Recovery, owner: *const owner_module.Owner) !u64 {
+    pub fn currentUtc(self: *const State, owner: *const owner_module.Owner) !u64 {
         try stable(owner);
         const now = try latestUtc(owner);
+        var reader = try trading.journal.Reader.init(owner.decision_journal.bytes());
+        var previous = self.minimum_utc_ns;
+        while (true) switch (try reader.next()) {
+            .record => |record| if (record.sequence > self.fence and record.flags & trading.journal.input_flag != 0 and record.time_presence.wall) {
+                if (record.wall_time < previous) return error.RecoveryClockUnavailable;
+                previous = record.wall_time;
+            },
+            .end => break,
+        };
         if (now < self.minimum_utc_ns) return error.RecoveryClockUnavailable;
         return now;
     }
 
     /// The caller first restores Owner and withdraws opening authorization.
     /// Revocation itself is committed through Owner before any new Host starts.
-    pub fn begin(owner: *owner_module.Owner, strategy: u128, session: @import("../strategy/strategy_host_ipc.zig").Session) !Recovery {
+    pub fn begin(owner: *owner_module.Owner, strategy: u128, session: @import("../strategy/strategy_host_ipc.zig").Session) !State {
         try stable(owner);
         const authority = owner.shard.strategyAuthority(strategy);
         if (!authority.strategy_active or session.generation == 0 or session.fencing == 0 or
@@ -59,7 +110,7 @@ pub const Recovery = struct {
 
     /// Validate the exact checkpoint returned by the recovered Host. All active
     /// core cycles must be represented; private Completed cannot release a key.
-    pub fn qualify(self: *Recovery, gpa: std.mem.Allocator, owner: *const owner_module.Owner, container: []const u8, expected: codec.Metadata, bindings: []const Binding, clock: Clock) !Ticket {
+    pub fn qualify(self: *State, gpa: std.mem.Allocator, owner: *const owner_module.Owner, container: []const u8, expected: codec.Metadata, bindings: []const Binding, clock: Clock) !Ticket {
         self.ticket = null;
         try stable(owner);
         if (!owner.shard.strategyAuthority(self.strategy).strategy_active or owner.shard.strategyFenced(self.strategy)) return error.StrategyCutoverFenced;
@@ -79,6 +130,7 @@ pub const Recovery = struct {
         try verifyAccount(owner, owner.shard.exchange_account_identity, self.fence, expected.next_intent_sequence, self.strategy);
         for (owner.shard.secondary_accounts[0..owner.shard.secondary_account_count]) |account|
             try verifyAccount(owner, account.identity, self.fence, expected.next_intent_sequence, self.strategy);
+        if (owner.shard.business_history_root) |root| try verifyArchivedSequence(owner, root, self.strategy, expected.next_intent_sequence);
         const parsed = try std.json.parseFromSlice(std.json.Value, gpa, decoded.payload, .{ .max_value_len = 128, .parse_numbers = false });
         defer parsed.deinit();
         const rows = try field(parsed.value, "components");
@@ -129,13 +181,36 @@ pub const Recovery = struct {
                 return error.StrategyTimeNotCaughtUp;
             const before = try optional(try field(state, "before_reconciling"));
             const holding = std.mem.eql(u8, phase, "holding") or (before == .string and std.mem.eql(u8, before.string, "holding"));
+            if (completed == null) try verifyIssued(owner, self.strategy, record, binding, state);
             if (holding or std.mem.eql(u8, phase, "repairing")) {
                 var exposed: usize = 0;
-                for (record.members[0..record.count]) |member| {
+                for (record.members[0..record.count], 0..) |member, leg_index| {
+                    const leg = binding.legs[leg_index];
+                    if (leg.account != member.account or leg.instrument != member.instrument) return error.CycleOwnershipMismatch;
                     const account = owner.shard.accountState(member.account) orelse return error.UnknownRecoveryAccount;
                     const portfolio = account.economic_projection.portfolioLayer(record.portfolio) orelse return error.CycleOwnershipMismatch;
                     if (portfolio.instrumentPosition(member.instrument)) |position| {
-                        if (position.position.quantity != 0 or position.spot_asset_atoms != 0) exposed += 1;
+                        if (position.position.quantity == 0 and position.spot_asset_atoms == 0) continue;
+                        if (position.rules_version != leg.rules_version) return error.FrozenPlanMismatch;
+                        var numerator: i128 = 0;
+                        var denominator: i128 = 1;
+                        if (position.product == .spot) {
+                            if (leg.direction != .buy) return error.CycleEconomicMismatch;
+                            numerator = try std.math.sub(i128, position.spot_asset_atoms, try owner.shard.cycles.reservedInstrumentAtoms(member.account, record.portfolio, position.base_asset, member.instrument));
+                        } else {
+                            if ((position.position.quantity > 0 and leg.direction != .buy) or (position.position.quantity < 0 and leg.direction != .sell)) return error.CycleEconomicMismatch;
+                            const unit = try (trading.canonical.Decimal{ .coefficient = position.quantity_numerator, .scale = 0 }).exactAtoms(leg.base_atomic_scale);
+                            numerator = try std.math.mul(i128, @intCast(@abs(position.position.quantity)), unit);
+                            denominator = position.quantity_denominator;
+                        }
+                        if (numerator < 0 or denominator <= 0) return error.CycleEconomicMismatch;
+                        if (numerator != 0) exposed += 1;
+                        if (holding) {
+                            const matched_base = try optional(try field(state, "matched_base"));
+                            const n = try unsigned(try field(matched_base, "numerator"));
+                            const d = try unsigned(try field(matched_base, "denominator"));
+                            if (n == 0 or d == 0 or try std.math.mul(i128, numerator, d) != try std.math.mul(i128, denominator, n)) return error.CycleEconomicMismatch;
+                        }
                     }
                 }
                 if ((holding and exposed != record.count) or exposed == 0) return error.CycleEconomicMismatch;
@@ -168,7 +243,7 @@ pub const Recovery = struct {
 
     /// Stable core activation is committed before an IPC activation can be sent.
     /// Neither this method nor replay resumes opening authorization.
-    pub fn activate(self: *Recovery, owner: *owner_module.Owner) !lifecycle.Activation {
+    pub fn activate(self: *State, owner: *owner_module.Owner) !lifecycle.Activation {
         const ticket = self.ticket orelse return error.RecoveryNotQualified;
         try stable(owner);
         if (!owner.shard.strategyAuthority(self.strategy).strategy_active or owner.shard.strategyFenced(self.strategy)) return error.StrategyCutoverFenced;
@@ -214,7 +289,7 @@ fn latestUtc(owner: *const owner_module.Owner) !u64 {
     var now: ?u64 = null;
     while (true) switch (try reader.next()) {
         .record => |record| if (record.flags & trading.journal.input_flag != 0 and record.time_presence.wall) {
-            now = record.wall_time;
+            now = @max(now orelse 0, record.wall_time);
         },
         .end => break,
     };
@@ -243,6 +318,73 @@ fn verifyAccount(owner: *const owner_module.Owner, account: u128, fence: u64, ne
     for (owner.shard.oms.intent_history[0..owner.shard.oms.intent_history_count]) |intent| if (intent.strategy_instance == strategy and intent.intent_sequence >= next_intent) return error.IntentSequenceRegression;
 }
 
+fn verifyArchivedSequence(owner: *const owner_module.Owner, root: history.Root, strategy: u128, next: u64) !void {
+    const request: history.LookupRequest = .{
+        .pending_id = 1,
+        .key = .{ .origin = root.origin, .identity = .{ .intent = .{ .strategy = strategy, .sequence = next } } },
+        .candidate_payload_digest = @splat(0),
+        .original_input_digest = history.hash("strategy recovery sequence boundary"),
+        .root_digest = root.root_digest,
+        .epoch = root.epoch,
+        .barrier = root.barrier,
+    };
+    const result = try owner.store.queryOrderHistory(owner.io, request);
+    try history.verifyFreshIntentSequence(request, &result.proof, root);
+}
+
+test "09b cold sequence boundary covers multiple leaves and proof failures" {
+    const durable = @import("../persistence/durable_store.zig");
+    const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+    defer std.testing.allocator.destroy(memory);
+    memory.* = .init();
+    defer memory.deinit();
+    const origin: history.Origin = .{ .stream = .{ .domain = .decision_log, .id = 972 }, .account = 20 };
+    var entries: [61]history.Entry = undefined;
+    for (&entries, 0..) |*entry, index| entry.* = .{ .key = .{ .origin = origin, .identity = .{ .intent = .{ .strategy = if (index == 60) 10 else 9, .sequence = if (index == 60) 1 else 2 * index } } }, .record_index = 0 };
+    const records = [_]history.Record{.{ .bytes = "authenticated archived intent", .payload_digest = history.hash("authenticated archived intent") }};
+    const receipt = try memory.interface().publishOrderHistory(undefined, .{ .origin = origin, .barrier = 1, .epoch = 1, .qualification_digest = history.hash("archived sequence boundary"), .entries = &entries, .records = &records });
+    for ([_]u64{ 93, 94, 119 }) |sequence| {
+        const request: history.LookupRequest = .{ .pending_id = 1, .key = .{ .origin = origin, .identity = .{ .intent = .{ .strategy = 9, .sequence = sequence } } }, .candidate_payload_digest = @splat(0), .original_input_digest = history.hash("recover"), .root_digest = receipt.root.root_digest, .epoch = 1, .barrier = 1 };
+        const result = try memory.interface().queryOrderHistory(undefined, request);
+        try std.testing.expect(result.proof.path_len > 0);
+        if (sequence < 119) {
+            try std.testing.expectError(error.IntentSequenceRegression, history.verifyFreshIntentSequence(request, &result.proof, receipt.root));
+        } else try history.verifyFreshIntentSequence(request, &result.proof, receipt.root);
+        var corrupted = result.proof;
+        corrupted.path[0].item.digest[0] ^= 1;
+        try std.testing.expectError(error.InvalidHistoryProof, history.verifyFreshIntentSequence(request, &corrupted, receipt.root));
+    }
+}
+
+fn verifyIssued(owner: *const owner_module.Owner, strategy: u128, record: @import("../trading/cycle_occupancy.zig").Record, binding: Binding, state: std.json.Value) !void {
+    const issued = try field(state, "issued");
+    if (issued != .array or issued.array.items.len > 256) return error.InvalidCycleCheckpoint;
+    for (issued.array.items) |intent| {
+        const sequence = try unsigned(try field(intent, "sequence"));
+        const index = try unsigned(try field(intent, "leg"));
+        if (index >= record.count) return error.CycleOwnershipMismatch;
+        const leg = binding.legs[index];
+        if (leg.account != record.members[index].account or leg.instrument != record.members[index].instrument) return error.CycleOwnershipMismatch;
+        const reducing = try field(intent, "reducing");
+        if (reducing != .bool) return error.InvalidCycleCheckpoint;
+        const timing = if (intent.object.get("time_in_force")) |value| try string(value) else "ioc";
+        const tif: trading.canonical.TimeInForce = if (std.mem.eql(u8, timing, "ioc")) .immediate_or_cancel else if (std.mem.eql(u8, timing, "post-only")) .post_only else return error.InvalidCycleCheckpoint;
+        const direction: trading.oms.Side = if (reducing.bool) (if (leg.direction == .buy) .sell else .buy) else leg.direction;
+        var found = false;
+        for (owner.shard.oms.command_history[0..owner.shard.oms.command_history_count]) |command| {
+            if (command.strategy_instance != strategy or command.intent_sequence != sequence or command.operation != .place) continue;
+            const order = owner.shard.oms.orderById(command.order_id) orelse return error.UnresolvedPrivateIntent;
+            if (command.authority.cycle.identity != record.first_sequence or order.exchange_account != leg.account or
+                command.portfolio != record.portfolio or command.instrument != leg.instrument or command.side != direction or
+                command.quantity != try unsigned(try field(intent, "lots")) or command.limit_price.ticks != try unsigned(try field(intent, "limit_ticks")) or
+                command.limit_price.rules_version != leg.rules_version or command.portfolio_reduce_only != reducing.bool or command.time_in_force != tif)
+                return error.PrivateIntentMismatch;
+            found = true;
+        }
+        if (!found) return error.UnresolvedPrivateIntent;
+    }
+}
+
 fn field(value: std.json.Value, name: []const u8) !std.json.Value {
     if (value != .object) return error.InvalidCycleCheckpoint;
     return value.object.get(name) orelse error.InvalidCycleCheckpoint;
@@ -264,6 +406,7 @@ fn optional(value: std.json.Value) !std.json.Value {
 }
 
 test "09b recovery requires withdrawn opening authority and every committed account root" {
+    try std.testing.expect(@typeInfo(Recovery) == .@"opaque");
     try exerciseCoreRecovery(null);
 }
 
@@ -286,7 +429,7 @@ fn exerciseCoreRecovery(fault: ?@import("../persistence/durable_store.zig").Faul
     try owner_module.Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 91 });
     try multi.initializePythonOwner(owner);
     const session: @import("../strategy/strategy_host_ipc.zig").Session = .{ .fencing = owner.shard.fencing_token, .shard = 0, .generation = 2 };
-    try std.testing.expectError(error.CoreRecoveryIncomplete, Recovery.begin(owner, 9, session));
+    try std.testing.expectError(error.CoreRecoveryIncomplete, Recovery.begin(gpa, owner, 9, session));
     _ = try owner.apply(fixture.atGroup(45, .{ .identity = 2000, .payload = .{ .control_command = .{
         .command_identity = 2000,
         .content_hash = 2000,
@@ -295,7 +438,8 @@ fn exerciseCoreRecovery(fault: ?@import("../persistence/durable_store.zig").Faul
         .expires_at = std.math.maxInt(u64),
         .kind = .trading_pause,
     } } }));
-    var recovered = try Recovery.begin(owner, 9, session);
+    const recovered = try Recovery.begin(gpa, owner, 9, session);
+    defer recovered.deinit();
     var metadata: codec.Metadata = .{
         .schema_registry = 0x0102030405060708090a0b0c0d0e0f10,
         .strategy_instance = 9,
@@ -338,7 +482,6 @@ fn exerciseCoreRecovery(fault: ?@import("../persistence/durable_store.zig").Faul
         }
         try std.testing.expectEqualSlices(u8, &digest, &owner.shard.canonicalStateDigest());
         try std.testing.expectEqual(@as(u128, 0), owner.shard.strategyAuthority(9).host_activation_identity);
-        try std.testing.expect(!recovered.consumed);
         try std.testing.expectError(error.CoreRecoveryIncomplete, recovered.activate(owner));
         return;
     }
@@ -348,4 +491,8 @@ fn exerciseCoreRecovery(fault: ?@import("../persistence/durable_store.zig").Faul
     try std.testing.expectEqual(applied.authorization.activation_identity, activation.activation_identity);
     try std.testing.expect(!owner.shard.operational_state.trading_authorized);
     try std.testing.expectError(error.StaleRecoveryQualification, recovered.activate(owner));
+    _ = try owner.apply(fixture.atGroup(63, .{ .identity = 2002, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
+    _ = try recovered.currentUtc(owner);
+    _ = try owner.apply(fixture.atGroup(62, .{ .identity = 2003, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
+    try std.testing.expectError(error.RecoveryClockUnavailable, recovered.currentUtc(owner));
 }

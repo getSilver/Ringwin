@@ -14,7 +14,12 @@ import arbitrage_checkpoint as recovery
 import test_arbitrage_host as fixture
 import arbitrage_cycle as cycle
 from test_arbitrage_cycle import plan as cycle_plan, facts, done, T, entry, market, estimator_for, path, LIMITS
-from test_arbitrage_evaluation import wire
+from test_arbitrage_evaluation import wire, MODEL, EXACT
+from test_arbitrage_probability import calibration
+import arbitrage_baseline as baseline
+import arbitrage_economics as economics
+import math
+import base64
 import arbitrage_evaluation as valuation
 import arbitrage_state_space as ss
 from test_arbitrage_state_space import parameters
@@ -40,40 +45,75 @@ def core_templates():
     frozen = cycle_plan()
     deadline = CORE_UTC+10_000_000_000
     policy = replace(frozen.policy, original_base=F(10000), at_ns=CORE_UTC,
+        absolute_minimum_atoms=1, min_profit_atoms=1, normal_limits=(90,120), risk_limits=(90,120),
         prediction_end_ns=deadline, risk_deadline_ns=deadline, reference_exit_ns=deadline)
     legs = tuple(replace(leg, account=account, target_lots=10000,
-        rules=replace(leg.rules, instrument=instrument, valid_until_ns=deadline+1000))
+        rules=replace(leg.rules, instrument=instrument, tick_quote_atoms_per_base_atom=F(1,10000), valid_until_ns=deadline+1000))
         for leg, account, instrument in zip(frozen.legs, (20, 30), (101, 102)))
-    frozen = replace(frozen, portfolio=10, policy=policy, legs=legs, entry_limits=(100, 100),
+    frozen = replace(frozen, portfolio=10, policy=policy, legs=legs, entry_limits=(100, 110), target_atoms=8,
                      repair_deadline_ns=deadline-1, exit_deadline_ns=deadline+1000)
     return {"cycle": cycle.Cycle(frozen)}
 
 
-def core_runtime(container):
+def core_book(now, closing_b=110):
+    return valuation.Market(now, (wire(101, now, 100, 101, 10000), wire(102, now, closing_b-1, closing_b, 10000)),
+                            (F(1), F(1)), (0, 0), (), True, False, False, False)
+
+
+def core_estimator(position, book, frozen):
+    context = valuation.Context(position, book, economics.holding_target(frozen.target_atoms,
+        position.matched_base/frozen.policy.original_base, frozen.policy.absolute_minimum_atoms), frozen.policy)
+    historical = replace(position, holding_at_ns=0,
+        legs=tuple(replace(leg, entries=tuple(replace(trade, at_ns=0) for trade in leg.entries)) for leg in position.legs))
+    scenario = valuation.Scenario("committed-core-support", F(1), historical,
+        (core_book(0), core_book(1, 102), core_book(6, 102), core_book(100, 100), core_book(105, 100)),
+        (0, 5), ("filled", "filled"), ("support:a", "support:b"))
+    artifact = replace(calibration(stage="hold", scope=context.scope, model_hash=frozen.policy.model_hash),
+                       valid_until_ns=frozen.exit_deadline_ns+1000)
+    row = valuation.ConditionalRow(context.scope, (scenario,), artifact, EXACT,
+        valuation.RebaseBounds(F(9, 10), F(11, 10), .01, F(1, 2), F(2), F(2)))
+    estimator = valuation.Estimator(MODEL, 200, (row,))
+    return replace(estimator, rows=(replace(row, calibration=replace(artifact,
+        simulation_hash=estimator.probability_model_hash(frozen.policy))),))
+
+
+def core_runtime(container, definition=2):
     def apply(objects, record):
         current = objects["cycle"]
         if record.event_type == 4 and record.payload == b"start":
             return current.start(cursor=record.shard_sequence, at_ns=CORE_UTC)
-        if record.event_type != 5 or len(record.payload) != 48:
+        if record.event_type != 5 or len(record.payload) != 88:
             raise ValueError("core projection codec")
-        now, applied_a, possible_a, applied_b, possible_b, nav = struct.unpack("<QQQQQQ", record.payload)
+        now, applied_a, possible_a, applied_b, possible_b, nav, base_a, base_b, status_a, status_b, risk = struct.unpack("<11Q", record.payload)
         if not record.time_presence & 0x10 or record.wall_time_utc_ns != now:
             raise ValueError("core projection clock")
-        books = tuple(wire(instrument, now, 100, 101, 10000) for instrument in (101, 102))
-        book = valuation.Market(now, books, (F(1), F(1)), (0, 0), (), True, False, False, False)
+        book = core_book(now)
+        position = None
+        if base_a == base_b and base_a:
+            position = valuation.Entry("matched", tuple(valuation.Leg(spec.account, spec.rules, spec.kind, spec.direction,
+                (valuation.Trade("fill:"+str(index), current.plan.entry_limits[index], applied,
+                    economics.Fee(1, 0, F(0), 0), CORE_UTC),),
+                economics.FeeRule(spec.rules.instrument, 1, 1, 0, 0, 0, current.plan.exit_deadline_ns))
+                for index, (spec, applied) in enumerate(zip(current.plan.legs, (applied_a, applied_b)))),
+                (), now, True, (), (), baseline.Point(0, 1, math.log(1.1)))
         projection = cycle.Facts(cursor=record.shard_sequence, at_ns=now,
             cycle_ref="cycle:9:1", reservation_ref="reservation:9:1", admission="accepted",
-            orders=tuple(cycle.OrderFact(sequence, leg, "sent", applied, possible, True, "order:"+str(sequence))
-                         for sequence, leg, applied, possible in ((1, 0, applied_a, possible_a), (2, 1, applied_b, possible_b))),
-            positions=(F(0), F(0)), safe_reduce_lots=(0, 0), market=book, economic_entry=None,
+            orders=tuple(cycle.OrderFact(sequence, leg, ("sent", "terminal", "unknown")[status], applied, possible,
+                         status != 2, "order:"+str(sequence))
+                         for sequence, leg, applied, possible, status in ((1, 0, applied_a, possible_a, status_a),
+                                                                         (2, 1, applied_b, possible_b, status_b))),
+            positions=(F(base_a), F(base_b)), safe_reduce_lots=(base_a, base_b), market=book, economic_entry=position,
             economic_ref="economic:"+str(record.shard_sequence)+":"+hashlib.sha256(record.payload).hexdigest(),
-            opening_allowed=False, reducing_allowed=True, risk_causes=(), model_warning=False,
+            opening_allowed=False, reducing_allowed=False, risk_causes=(("manual", "core-freeze"),) if risk else (), model_warning=False,
             nav_atoms=nav, day_start_nav_atoms=nav, external_allocation_atoms=0,
             flow_adjusted_peak_atoms=nav, repair_loss_atoms=0, repair_cost_atoms=0,
-            closed_ref=None, residual_refs=())
-        return current.apply(projection)
+            closed_ref=None, residual_refs=(),
+            possible_base=((F(base_a), F(base_a+possible_a)), (F(base_b), F(base_b+possible_b)))
+                if 2 in (status_a, status_b) else ())
+        estimator = core_estimator(position, book, current.plan) if position is not None else None
+        return current.apply(projection, estimator=estimator, limits=LIMITS)
     return recovery.ComponentRuntime(container, core_templates(), apply,
-        expected={k: fixture.meta()[k] for k in ("schema_registry", "strategy", "definition", "config_version",
+        expected={k: dict(fixture.meta(), definition=definition)[k] for k in ("schema_registry", "strategy", "definition", "config_version",
                                                "state_schema", "state_schema_version")})
 
 
@@ -272,6 +312,14 @@ class CycleRecoveryTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    if "--convert" in sys.argv:
+        mode, encoded = sys.argv[2:]
+        saved = base64.b64decode(encoded, validate=True)
+        metadata, _ = host.decode_checkpoint(saved)
+        converted = recovery.transition_checkpoint(saved, core_templates(), core_templates(), expected=metadata,
+            target_metadata=dict(metadata, definition=3), transition=mode, migrate=lambda name, tag, state: state)
+        sys.stdout.buffer.write(converted)
+        raise SystemExit(0)
     if "--profile" in sys.argv:
         index = sys.argv.index("--profile")
         if sys.argv[index+1] != "target":
@@ -280,7 +328,12 @@ if __name__ == "__main__":
         raise SystemExit(host.main(runtime_factory=target_runtime))
     if "--core" in sys.argv:
         sys.argv.remove("--core")
-        raise SystemExit(host.main(runtime_factory=core_runtime))
+        definition = 2
+        if "--core-definition" in sys.argv:
+            index = sys.argv.index("--core-definition")
+            definition = int(sys.argv[index+1])
+            del sys.argv[index:index+2]
+        raise SystemExit(host.main(runtime_factory=lambda raw: core_runtime(raw, definition)))
     if "--phase" in sys.argv:
         index = sys.argv.index("--phase")
         phase = sys.argv[index+1]

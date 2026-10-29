@@ -212,6 +212,22 @@ pub fn rootDigest(root: Root) Digest {
     return hash(codec.encodeBare(&bytes, copy) catch unreachable);
 }
 
+/// Exact absence alone does not exclude a larger consumed sequence.
+pub fn verifyFreshIntentSequence(request: LookupRequest, proof: *const LookupProof, root: Root) !void {
+    if (request.key.identity != .intent) return error.InvalidHistoryKey;
+    switch (try verifyResult(request, proof, root)) {
+        .same, .conflict => return error.IntentSequenceRegression,
+        .expired => return error.IntentHistoryIncomplete,
+        .proven_first => {},
+    }
+    if (proof.upper) |upper| {
+        const key = try encodeKey(request.key);
+        const prefix_len = key.len - @sizeOf(u64);
+        if (upper.item.upper.len == key.len and std.mem.eql(u8, key.bytes[0..prefix_len], upper.item.upper.bytes[0..prefix_len]))
+            return error.IntentSequenceRegression;
+    }
+}
+
 pub fn validateRoot(root: Root) !void {
     if (root.version != 2 or !validOrigin(root.origin) or
         root.generation == 0 or root.barrier == 0 or root.epoch == 0 or
