@@ -67,22 +67,26 @@ const State = struct {
     session: @import("../strategy/strategy_host_ipc.zig").Session,
     fence: u64,
     minimum_utc_ns: u64,
+    clock_barrier: u64,
     consumed: bool = false,
     ticket: ?Ticket = null,
 
-    pub fn currentUtc(self: *const State, owner: *const owner_module.Owner) !u64 {
+    pub fn currentUtc(self: *State, owner: *const owner_module.Owner) !u64 {
         try stable(owner);
         const now = try latestUtc(owner);
         var reader = try trading.journal.Reader.init(owner.decision_journal.bytes());
+        if (reader.next_sequence - 1 > self.clock_barrier) return error.RecoveryClockUnavailable;
         var previous = self.minimum_utc_ns;
         while (true) switch (try reader.next()) {
-            .record => |record| if (record.sequence > self.fence and record.flags & trading.journal.input_flag != 0 and record.time_presence.wall) {
+            .record => |record| if (record.sequence > self.clock_barrier and record.flags & trading.journal.input_flag != 0 and record.time_presence.wall) {
                 if (record.wall_time < previous) return error.RecoveryClockUnavailable;
                 previous = record.wall_time;
             },
             .end => break,
         };
         if (now < self.minimum_utc_ns) return error.RecoveryClockUnavailable;
+        self.minimum_utc_ns = now;
+        self.clock_barrier = owner.shard.authoritativeBarrier();
         return now;
     }
 
@@ -96,7 +100,7 @@ const State = struct {
             return error.CoreRecoveryIncomplete;
         if (authority.host_activation_identity != 0) {
             if (std.meta.eql(authority.host_activation_session, session)) return error.OldHostSession;
-            _ = try owner.apply(.{ .core = .{ .identity = owner.shard.authoritativeBarrier() + 1, .payload = .{ .host_activation_revoked = .{
+            _ = try owner.apply(.{ .core = .{ .identity = try std.math.add(u64, owner.shard.authoritativeBarrier(), 1), .payload = .{ .host_activation_revoked = .{
                 .strategy_identity = strategy,
                 .activation_identity = authority.host_activation_identity,
                 .reason = .session_replaced,
@@ -105,7 +109,7 @@ const State = struct {
         } else if (authority.host_activation_seen and std.meta.eql(authority.host_activation_session, session)) {
             return error.OldHostSession;
         }
-        return .{ .strategy = strategy, .session = session, .fence = owner.shard.authoritativeBarrier(), .minimum_utc_ns = try latestUtc(owner) };
+        return .{ .strategy = strategy, .session = session, .fence = owner.shard.authoritativeBarrier(), .clock_barrier = owner.shard.authoritativeBarrier(), .minimum_utc_ns = try latestUtc(owner) };
     }
 
     /// Validate the exact checkpoint returned by the recovered Host. All active
@@ -207,9 +211,9 @@ const State = struct {
                         if (numerator != 0) exposed += 1;
                         if (holding) {
                             const matched_base = try optional(try field(state, "matched_base"));
-                            const n = try unsigned(try field(matched_base, "numerator"));
-                            const d = try unsigned(try field(matched_base, "denominator"));
-                            if (n == 0 or d == 0 or try std.math.mul(i128, numerator, d) != try std.math.mul(i128, denominator, n)) return error.CycleEconomicMismatch;
+                            const n = try integer(i128, try field(matched_base, "numerator"));
+                            const d = try integer(u128, try field(matched_base, "denominator"));
+                            if (n <= 0 or d == 0 or try std.math.mul(u256, @intCast(numerator), d) != try std.math.mul(u256, @intCast(denominator), @intCast(n))) return error.CycleEconomicMismatch;
                         }
                     }
                 }
@@ -277,7 +281,7 @@ pub const Ticket = struct {
 };
 
 fn stable(owner: *const owner_module.Owner) !void {
-    if (!owner.ready or owner.closed or owner.store.safetyGate() != .open or owner.decision_journal.last_sequence != owner.shard.authoritativeBarrier()) return error.CoreRecoveryIncomplete;
+    if (!owner.ready or owner.closed or owner.shard.recovery_admission_pending or owner.store.safetyGate() != .open or owner.decision_journal.last_sequence != owner.shard.authoritativeBarrier()) return error.CoreRecoveryIncomplete;
     if (owner.shard.deployment.sealed) {
         const anchor = owner.deployment_anchor orelse return error.DeploymentAnchorRequired;
         if (!std.mem.eql(u8, &anchor, &owner.shard.deployment.header.?.expected_digest)) return error.DeploymentDigestMismatch;
@@ -293,10 +297,9 @@ fn latestUtc(owner: *const owner_module.Owner) !u64 {
         },
         .end => break,
     };
-    if (now) |value| return value;
     // A rotated journal can be empty; committed account cursors retain UTC
     // evidence, never a machine-local monotonic timestamp from another boot.
-    if (owner.shard.reconciliation_cursor) |cursor| now = cursor.through_utc_ns;
+    if (owner.shard.reconciliation_cursor) |cursor| now = @max(now orelse 0, cursor.through_utc_ns);
     for (owner.shard.secondary_accounts[0..owner.shard.secondary_account_count]) |account| {
         if (account.state.reconciliation_cursor) |cursor| now = @max(now orelse 0, cursor.through_utc_ns);
     }
@@ -318,16 +321,20 @@ fn verifyAccount(owner: *const owner_module.Owner, account: u128, fence: u64, ne
     for (owner.shard.oms.intent_history[0..owner.shard.oms.intent_history_count]) |intent| if (intent.strategy_instance == strategy and intent.intent_sequence >= next_intent) return error.IntentSequenceRegression;
 }
 
-fn verifyArchivedSequence(owner: *const owner_module.Owner, root: history.Root, strategy: u128, next: u64) !void {
-    const request: history.LookupRequest = .{
+fn intentHistoryRequest(root: history.Root, strategy: u128, sequence: u64) history.LookupRequest {
+    return .{
         .pending_id = 1,
-        .key = .{ .origin = root.origin, .identity = .{ .intent = .{ .strategy = strategy, .sequence = next } } },
+        .key = .{ .origin = root.origin, .identity = .{ .intent = .{ .strategy = strategy, .sequence = sequence } } },
         .candidate_payload_digest = @splat(0),
         .original_input_digest = history.hash("strategy recovery sequence boundary"),
         .root_digest = root.root_digest,
         .epoch = root.epoch,
         .barrier = root.barrier,
     };
+}
+
+fn verifyArchivedSequence(owner: *const owner_module.Owner, root: history.Root, strategy: u128, next: u64) !void {
+    const request = intentHistoryRequest(root, strategy, next);
     const result = try owner.store.queryOrderHistory(owner.io, request);
     try history.verifyFreshIntentSequence(request, &result.proof, root);
 }
@@ -358,7 +365,8 @@ test "09b cold sequence boundary covers multiple leaves and proof failures" {
 
 fn verifyIssued(owner: *const owner_module.Owner, strategy: u128, record: @import("../trading/cycle_occupancy.zig").Record, binding: Binding, state: std.json.Value) !void {
     const issued = try field(state, "issued");
-    if (issued != .array or issued.array.items.len > 256) return error.InvalidCycleCheckpoint;
+    const pending = try field(state, "pending");
+    if (issued != .array or issued.array.items.len > 256 or pending != .array or pending.array.items.len > 256) return error.InvalidCycleCheckpoint;
     for (issued.array.items) |intent| {
         const sequence = try unsigned(try field(intent, "sequence"));
         const index = try unsigned(try field(intent, "leg"));
@@ -381,7 +389,31 @@ fn verifyIssued(owner: *const owner_module.Owner, strategy: u128, record: @impor
                 return error.PrivateIntentMismatch;
             found = true;
         }
-        if (!found) return error.UnresolvedPrivateIntent;
+        if (!found) {
+            // Active cycles pin accepted commands; a known identity without one
+            // is a rejected proposal, never an unobserved order to resend.
+            for (pending.array.items) |sequence_value| if (try unsigned(sequence_value) == sequence) return error.UnresolvedPrivateIntent;
+            var known: ?trading.oms.SeenIntent = null;
+            for (owner.shard.oms.intent_history[0..owner.shard.oms.intent_history_count]) |seen| {
+                if (seen.strategy_instance == strategy and seen.intent_sequence == sequence) known = seen;
+            }
+            const rejected = known orelse return error.UnresolvedPrivateIntent;
+            if (rejected.group < record.first_sequence) return error.PrivateIntentMismatch;
+            for (owner.shard.oms.command_history[0..owner.shard.oms.command_history_count]) |command| {
+                if (command.strategy_instance == strategy and command.intent_sequence == sequence) return error.PrivateIntentMismatch;
+            }
+            // Partial group archival can retain SeenIntent after its command is
+            // cold. Prove it was not archived before interpreting it as rejection.
+            if (owner.shard.business_history_root) |root| {
+                const request = intentHistoryRequest(root, strategy, sequence);
+                const result = try owner.store.queryOrderHistory(owner.io, request);
+                switch (try history.verifyResult(request, &result.proof, root)) {
+                    .proven_first => {},
+                    .expired => return error.IntentHistoryIncomplete,
+                    .same, .conflict => return error.PrivateIntentMismatch,
+                }
+            }
+        }
     }
 }
 
@@ -394,8 +426,11 @@ fn string(value: std.json.Value) ![]const u8 {
     return value.string;
 }
 fn unsigned(value: std.json.Value) !u64 {
+    return integer(u64, value);
+}
+fn integer(comptime T: type, value: std.json.Value) !T {
     if (value != .number_string) return error.InvalidCycleCheckpoint;
-    return std.fmt.parseInt(u64, value.number_string, 10) catch error.InvalidCycleCheckpoint;
+    return std.fmt.parseInt(T, value.number_string, 10) catch error.InvalidCycleCheckpoint;
 }
 
 fn optional(value: std.json.Value) !std.json.Value {
@@ -413,6 +448,71 @@ test "09b recovery requires withdrawn opening authority and every committed acco
 test "09b activation append and commit failures never publish Host authority" {
     try exerciseCoreRecovery(.append);
     try exerciseCoreRecovery(.commit);
+}
+
+test "09b known rejected proposals retain identity without requiring an accepted command" {
+    const durable = @import("../persistence/durable_store.zig");
+    const fixture = @import("../testing/support/trading_shard_fixture.zig");
+    const multi = @import("../testing/acceptance/core/multi_account_authority_acceptance.zig");
+    const gpa = std.testing.allocator;
+    const memory = try gpa.create(durable.MemoryAdapter);
+    defer gpa.destroy(memory);
+    memory.* = .init();
+    defer memory.deinit();
+    const owner = try gpa.create(owner_module.Owner);
+    defer gpa.destroy(owner);
+    try owner_module.Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 91 });
+    try multi.initializePythonOwner(owner);
+    var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 1, .count = 2 };
+    for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, 0..) |account, instrument, index| group.members[index] = .{
+        .strategy_instance = 9,
+        .intent_sequence = 1 + index,
+        .portfolio = 10,
+        .exchange_account = account,
+        .operation = .place,
+        .instrument = instrument,
+        .side = if (index == 0) .buy else .sell,
+        .quantity = 10000,
+        .limit_price = .{ .instrument = instrument, .rules_version = 1, .ticks = 100 },
+        .time_in_force = .immediate_or_cancel,
+    };
+    _ = try owner.apply(fixture.atGroup(45, .{ .identity = 9000, .payload = .{ .oms_intent_group = group } }));
+    group.first_intent_sequence = 3;
+    group.count = 1;
+    group.members[0].intent_sequence = 3;
+    group.members[0].quantity = 1;
+    _ = try owner.apply(fixture.atGroup(46, .{ .identity = 9001, .payload = .{ .oms_intent_group = group } }));
+    try std.testing.expectEqual(@as(u16, 2), owner.shard.oms.order_count);
+    try std.testing.expectEqual(@as(u16, 3), owner.shard.oms.intent_history_count);
+    const binding: Binding = .{
+        .component = "cycle",
+        .first_sequence = 1,
+        .dependency = @splat(0),
+        .group_digest = @splat(0),
+        .projection_digest = @splat(0),
+        .holding_deadline_utc_ns = 1,
+        .repair_deadline_utc_ns = 1,
+        .exit_deadline_utc_ns = 1,
+        .legs = .{ .{ .account = 20, .instrument = 101, .direction = .buy, .rules_version = 1, .base_atomic_scale = 4 }, .{ .account = 30, .instrument = 102, .direction = .sell, .rules_version = 1, .base_atomic_scale = 4 } },
+    };
+    const record = owner.shard.cycles.find(9, 1).?;
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa,
+        \\{"issued":[{"sequence":3,"leg":0,"lots":1,"limit_ticks":100,"reducing":false}],"pending":[]}
+    , .{ .parse_numbers = false });
+    defer parsed.deinit();
+    try verifyIssued(owner, 9, record, binding, parsed.value);
+    const unobserved = try std.json.parseFromSlice(std.json.Value, gpa,
+        \\{"issued":[{"sequence":3,"leg":0,"lots":1,"limit_ticks":100,"reducing":false}],"pending":[3]}
+    , .{ .parse_numbers = false });
+    defer unobserved.deinit();
+    try std.testing.expectError(error.UnresolvedPrivateIntent, verifyIssued(owner, 9, record, binding, unobserved.value));
+    const altered = try std.json.parseFromSlice(std.json.Value, gpa,
+        \\{"issued":[{"sequence":4,"leg":0,"lots":2,"limit_ticks":100,"reducing":false}],"pending":[]}
+    , .{ .parse_numbers = false });
+    defer altered.deinit();
+    try std.testing.expectError(error.UnresolvedPrivateIntent, verifyIssued(owner, 9, record, binding, altered.value));
+    try std.testing.expectEqual(@as(i128, 1) << 80, try integer(i128, .{ .number_string = "1208925819614629174706176" }));
+    try std.testing.expectEqual(@as(u128, 1) << 100, try integer(u128, .{ .number_string = "1267650600228229401496703205376" }));
 }
 
 fn exerciseCoreRecovery(fault: ?@import("../persistence/durable_store.zig").FaultPoint) !void {
@@ -493,6 +593,7 @@ fn exerciseCoreRecovery(fault: ?@import("../persistence/durable_store.zig").Faul
     try std.testing.expectError(error.StaleRecoveryQualification, recovered.activate(owner));
     _ = try owner.apply(fixture.atGroup(63, .{ .identity = 2002, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
     _ = try recovered.currentUtc(owner);
+    try owner.checkpoint();
     _ = try owner.apply(fixture.atGroup(62, .{ .identity = 2003, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
     try std.testing.expectError(error.RecoveryClockUnavailable, recovered.currentUtc(owner));
 }

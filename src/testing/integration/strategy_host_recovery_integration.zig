@@ -217,10 +217,13 @@ pub fn main(init: std.process.Init) !void {
     try runCheck(init, python, script);
     try runPortableCheckpoint(init, python, script);
     try runRealCheckpoint(init, python);
-    for (std.enums.values(CyclePhase)) |phase| try runCycleRecovery(init, python, phase, .keep, false);
-    try runCycleRecovery(init, python, .holding, .migrate, false);
-    try runCycleRecovery(init, python, .holding, .rebuild, false);
-    try runCycleRecovery(init, python, .holding, .keep, true);
+    for (std.enums.values(CyclePhase)) |phase| try runCycleRecovery(init, python, phase, .keep, .normal);
+    try runCycleRecovery(init, python, .holding, .migrate, .normal);
+    try runCycleRecovery(init, python, .holding, .rebuild, .normal);
+    try runCycleRecovery(init, python, .holding, .keep, .downtime);
+    try runCycleRecovery(init, python, .holding, .keep, .loss);
+    try runCycleRecovery(init, python, .reconciling, .keep, .maker);
+    try runCycleRecovery(init, python, .exiting, .keep, .risk);
     var buffer: [256]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &buffer);
     try stdout.interface.print(
@@ -437,7 +440,12 @@ const CyclePhase = enum { entering, repairing, holding, exiting, reconciling };
 
 const CycleTransition = enum { keep, migrate, rebuild };
 
-fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhase, transition: CycleTransition, expired: bool) !void {
+const CycleScenario = enum { normal, downtime, loss, maker, risk };
+
+fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhase, transition: CycleTransition, scenario: CycleScenario) !void {
+    const expired = scenario == .downtime;
+    const loss = scenario == .loss;
+    const maker_mode = scenario == .maker;
     const durable = @import("../../persistence/durable_store.zig");
     const demo = @import("../../runtime/demo/demo_authority.zig");
     const multi = @import("../acceptance/core/multi_account_authority_acceptance.zig");
@@ -459,10 +467,20 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     defer init.gpa.destroy(owner);
     try demo.Owner.bootstrapInto(owner, adapter.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
     try multi.initializePythonOwner(owner);
+    var input: CycleIngress = .{ .owner = owner, .sink = try @import("../../persistence/raw_ingress.zig").DurableSink.init(adapter.interface(), init.io, .{ .domain = .raw_ingress, .id = 93 }) };
+    if (maker_mode) {
+        const view = try init.gpa.create(engine.TradingShard);
+        defer init.gpa.destroy(view);
+        try owner.shard.copyAccountViewInto(view, 20);
+        var profile = view.registryInstrument(101).?.capability.?;
+        profile.version = 2;
+        profile.supports_post_only = true;
+        _ = try input.apply(fixture.atGroup(44, .{ .identity = 9090, .account_scope = 20, .payload = .{ .capability_profile_activation = profile } }));
+    }
     var old_plan = lifecycle.developmentPlan(0, 70, try lifecycle.discoverPythonAbi(init, python));
     old_plan.session.fencing = owner.shard.fencing_token;
     old_plan.decision_domain = 1;
-    _ = try owner.apply(fixture.atGroup(44, .{ .identity = 9000, .payload = .{ .host_activated = .{
+    _ = try input.apply(fixture.atGroup(44, .{ .identity = 9000, .payload = .{ .host_activated = .{
         .strategy_identity = 9,
         .config_version = 1,
         .activation_identity = 1,
@@ -471,7 +489,7 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
         .state_digest = owner.shard.canonicalStateDigest(),
     } } }));
     const start_sequence = owner.shard.authoritativeBarrier() + 1;
-    _ = try owner.apply(fixture.atGroup(45, .{ .identity = 9001, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
+    _ = try input.apply(fixture.atGroup(45, .{ .identity = 9001, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
     var metadata: recovery_module.Metadata = .{
         .schema_registry = old_plan.compatibility.schema_registry,
         .strategy_instance = 9,
@@ -483,9 +501,10 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
         .next_intent_sequence = 1,
     };
     var initial_storage: [4096]u8 = undefined;
-    const payload = @embedFile("../fixtures/strategy_cycle_recovery_v2.json");
+    const payload: []const u8 = if (maker_mode) @embedFile("../fixtures/strategy_maker_recovery_v2.json") else @embedFile("../fixtures/strategy_cycle_recovery_v2.json");
     const initial = try recovery_module.encodePayloadCheckpoint(&initial_storage, metadata, payload);
-    var old_host = try lifecycle.ManagedHost.start(init, python, script, old_plan, "portable", &.{ "--core", "--strategy-identity", "9" });
+    const old_args: []const []const u8 = if (maker_mode) &.{ "--core", "--strategy-identity", "9", "--core-maker" } else &.{ "--core", "--strategy-identity", "9" };
+    var old_host = try lifecycle.ManagedHost.start(init, python, script, old_plan, "portable", old_args);
     defer old_host.deinit(init.io);
     try old_host.sendPlan(init.io);
     try expectLifecycle(.accepted, try old_host.receive(init.io, 1));
@@ -496,11 +515,11 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     var old_gateway = try realGateway(old_plan);
     var batch_storage: [4096]u8 = undefined;
     var now: i64 = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
-    const start_event: gateway_module.EventEnvelope = .{ .event_type = .timer, .shard_sequence = start_sequence, .source_time_ns = 0, .receive_time_ns = 0, .monotonic_time_ns = 0, .wall_time_utc_ns = 0, .payload = "start" };
+    const start_event: gateway_module.EventEnvelope = .{ .event_type = .timer, .shard_sequence = start_sequence, .source_time_ns = 0, .receive_time_ns = 0, .monotonic_time_ns = 0, .wall_time_utc_ns = 0, .payload = if (scenario == .risk) "start-risk" else "start" };
     try old_host.sendInput(init.io, try old_gateway.encodeBatch(&batch_storage, 1, 1, metadata.strategy_cursor, now, &.{start_event}), now);
     try old_gateway.recordPublished(1, metadata.strategy_cursor, now);
     try expectLifecycle(.accepted, try old_host.receive(init.io, 3));
-    metadata.next_intent_sequence = 3;
+    metadata.next_intent_sequence = if (maker_mode) 2 else 3;
     try old_host.requestCheckpoint(init.io, 1, metadata);
     var old_content = try init.gpa.dupe(u8, try old_host.receiveCheckpoint(init.io, &frame));
     defer init.gpa.free(old_content);
@@ -516,11 +535,12 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
         .operation = .place,
         .instrument = instrument,
         .side = if (index == 0) .buy else .sell,
-        .quantity = 10000,
+        .quantity = if (maker_mode and index == 1) 3000 else 10000,
         .limit_price = .{ .instrument = instrument, .rules_version = 1, .ticks = if (index == 0) 100 else 110 },
-        .time_in_force = .immediate_or_cancel,
+        .order_type = if (maker_mode and index == 0) .post_only else .limit,
+        .time_in_force = if (maker_mode and index == 0) .post_only else .immediate_or_cancel,
     };
-    _ = try owner.apply(fixture.atGroup(45, .{ .identity = 9002, .payload = .{ .oms_intent_group = group } }));
+    _ = try input.apply(fixture.atGroup(45, .{ .identity = 9002, .payload = .{ .oms_intent_group = group } }));
     try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.count);
     for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, [_]u64{ 1, 21 }, 0..) |account, instrument, venue, index| {
         const order = owner.shard.oms.orderById(index + 1).?;
@@ -533,16 +553,16 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
             .revision = 1,
             .status = .accepted,
             .cumulative_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = 0 },
-            .remaining_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = 10000 },
+            .remaining_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = order.quantity },
         } });
         report.venue.envelope.exchange_account = account;
         report.venue.envelope.venue = venue;
-        _ = try owner.apply(report);
+        _ = try input.apply(report);
     }
     if (phase != .entering) {
         for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, [_]u64{ 1, 21 }, 0..) |account, instrument, venue, index| {
             const order = owner.shard.oms.orderById(index + 1).?;
-            const filled: i64 = if (phase == .repairing) (if (index == 0) 10000 else 6000) else if (phase == .reconciling and index == 1) 0 else 5000;
+            const filled: i64 = if (maker_mode) (if (index == 0) 3000 else 0) else if (loss) (if (index == 0) 10000 else 5000) else if (phase == .repairing) (if (index == 0) 10000 else 6000) else if (phase == .reconciling and index == 1) 0 else 5000;
             if (filled != 0) {
                 var fill = fixture.canonicalAt(46, 3, .{ .fill = .{
                     .identity = 1,
@@ -561,7 +581,7 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
                 } });
                 fill.venue.envelope.exchange_account = account;
                 fill.venue.envelope.venue = venue;
-                _ = try owner.apply(fill);
+                _ = try input.apply(fill);
             }
             var terminal = fixture.canonicalAt(46, 4, .{ .execution_report = .{
                 .identity = 2,
@@ -570,34 +590,142 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
                 .instrument = instrument,
                 .exchange_account = account,
                 .revision = 1,
-                .status = if (phase == .reconciling and index == 1) .accepted else .canceled,
+                .status = if (maker_mode or (phase == .reconciling and index == 1)) .accepted else .canceled,
                 .cumulative_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = filled },
-                .remaining_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = 10000 - filled },
+                .remaining_quantity = .{ .instrument = instrument, .rules_version = 1, .lots = order.quantity - filled },
             } });
             terminal.venue.envelope.exchange_account = account;
             terminal.venue.envelope.venue = venue;
-            _ = try owner.apply(terminal);
+            _ = try input.apply(terminal);
         }
-        if (phase == .reconciling) {
+        if (phase == .reconciling and !maker_mode) {
             var dispatch: engine.oms.DispatchBatch = .{ .count = 1 };
             dispatch.items[0] = .{ .command_id = 2, .state = .unknown };
-            _ = try owner.apply(fixture.atGroup(46, .{ .identity = 9010, .account_scope = 30, .payload = .{ .oms_dispatch_batch = dispatch } }));
+            _ = try input.apply(fixture.atGroup(46, .{ .identity = 9010, .account_scope = 30, .payload = .{ .oms_dispatch_batch = dispatch } }));
         }
         const old_cursor = metadata.strategy_cursor;
         metadata.strategy_cursor = owner.shard.authoritativeBarrier();
-        var before_projection: [88]u8 = undefined;
+        var before_projection: [176]u8 = undefined;
         const before_utc = fixture.atGroup(46, .{ .identity = 0, .payload = .recovery_completed }).core.wall_time;
         try cycleProjection(owner, before_utc, &before_projection);
+        if (loss or maker_mode) std.mem.writeInt(u64, before_projection[80..88], if (loss) 2 else 16, .little);
         const phase_event: gateway_module.EventEnvelope = .{ .event_type = .account, .time_presence = 0x11, .shard_sequence = metadata.strategy_cursor, .source_time_ns = @intCast(before_utc), .receive_time_ns = 0, .monotonic_time_ns = 0, .wall_time_utc_ns = @intCast(before_utc), .payload = &before_projection };
         now = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
         try old_host.sendInput(init.io, try old_gateway.encodeBatch(&batch_storage, 2, old_cursor + 1, metadata.strategy_cursor, now, &.{phase_event}), now);
         try old_gateway.recordPublished(2, metadata.strategy_cursor, now);
+        if (loss or maker_mode) metadata.next_intent_sequence = if (loss) 4 else 3;
         try old_host.requestCheckpoint(init.io, 2, metadata);
         const updated_content = try init.gpa.dupe(u8, try old_host.receiveCheckpoint(init.io, &frame));
         init.gpa.free(old_content);
         old_content = updated_content;
-        if (phase == .exiting or phase == .reconciling) {
-            _ = try owner.apply(fixture.atGroup(46, .{ .identity = 9011, .payload = .{ .safety_gate_change = .{
+        if (loss) {
+            var reduction: engine.oms.IntentGroup = .{ .first_intent_sequence = 3, .count = 1 };
+            reduction.members[0] = .{ .strategy_instance = 9, .intent_sequence = 3, .portfolio = 10, .exchange_account = 20, .instrument = 101, .operation = .place, .side = .sell, .portfolio_reduce_only = true, .quantity = 5000, .limit_price = .{ .instrument = 101, .rules_version = 1, .ticks = 90 }, .time_in_force = .immediate_or_cancel };
+            _ = try input.apply(fixture.atGroup(46, .{ .identity = 9016, .payload = .{ .oms_intent_group = reduction } }));
+            const reducing_order = owner.shard.oms.orderById(3).?;
+            var trim_fill = fixture.canonicalAt(46, 5, .{ .fill = .{
+                .identity = 2,
+                .order = 3,
+                .client_order_id = reducing_order.client_order_id,
+                .venue_order = try engine.canonical.VenueOrderRef.init(1, "repair-trim"),
+                .venue_trade = try engine.canonical.VenueTradeRef.init(1, "repair-trim-loss"),
+                .instrument = 101,
+                .exchange_account = 20,
+                .side = .sell,
+                .quantity = .{ .instrument = 101, .rules_version = 1, .lots = 5000 },
+                .price = .{ .instrument = 101, .rules_version = 1, .ticks = 98 },
+                .fee = .{ .asset = 1, .atoms = 0 },
+                .liquidity = .taker,
+                .venue_fill_time_utc_ns = fixture.atGroup(46, .{ .identity = 0, .payload = .recovery_completed }).core.source_time,
+            } });
+            trim_fill.venue.envelope.exchange_account = 20;
+            _ = try input.apply(trim_fill);
+            var trim_report = fixture.canonicalAt(46, 6, .{ .execution_report = .{
+                .identity = 3,
+                .order = 3,
+                .client_order_id = reducing_order.client_order_id,
+                .instrument = 101,
+                .exchange_account = 20,
+                .revision = 1,
+                .status = .filled,
+                .cumulative_quantity = .{ .instrument = 101, .rules_version = 1, .lots = 5000 },
+                .remaining_quantity = .{ .instrument = 101, .rules_version = 1, .lots = 0 },
+            } });
+            trim_report.venue.envelope.exchange_account = 20;
+            _ = try input.apply(trim_report);
+            try std.testing.expectEqual(@as(i128, -1), owner.shard.accountState(20).?.economic_projection.portfolioLayer(10).?.realized_pnl_atoms);
+            const previous = metadata.strategy_cursor;
+            metadata.strategy_cursor = owner.shard.authoritativeBarrier();
+            try cycleProjection(owner, before_utc, &before_projection);
+            var held_event = phase_event;
+            held_event.shard_sequence = metadata.strategy_cursor;
+            now = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
+            try old_host.sendInput(init.io, try old_gateway.encodeBatch(&batch_storage, 3, previous + 1, metadata.strategy_cursor, now, &.{held_event}), now);
+            try old_gateway.recordPublished(3, metadata.strategy_cursor, now);
+            try old_host.requestCheckpoint(init.io, 3, metadata);
+            const held_content = try init.gpa.dupe(u8, try old_host.receiveCheckpoint(init.io, &frame));
+            init.gpa.free(old_content);
+            old_content = held_content;
+        }
+        if (maker_mode) {
+            var dispatch: engine.oms.DispatchBatch = .{ .count = 1 };
+            dispatch.items[0] = .{ .command_id = 2, .state = .unknown };
+            _ = try input.apply(fixture.atGroup(46, .{ .identity = 9091, .account_scope = 30, .payload = .{ .oms_dispatch_batch = dispatch } }));
+            _ = try input.apply(fixture.atGroup(46, .{ .identity = 9092, .payload = .{ .control_command = .{
+                .command_identity = 9092,
+                .content_hash = 9092,
+                .target_identity = owner.shard.operational_state.target_identity,
+                .expected_version = owner.shard.operational_state.version,
+                .expires_at = std.math.maxInt(u64),
+                .kind = .cancel_open_orders,
+            } } }));
+            const maker_order = owner.shard.oms.orderById(1).?;
+            try std.testing.expectEqual(engine.oms.OrderState.pending_cancel, maker_order.state);
+            var cancel_fill = fixture.canonicalAt(46, 5, .{ .fill = .{
+                .identity = 2,
+                .order = 1,
+                .client_order_id = maker_order.client_order_id,
+                .venue_order = try engine.canonical.VenueOrderRef.init(1, "maker-original"),
+                .venue_trade = try engine.canonical.VenueTradeRef.init(1, "maker-cancel-fill"),
+                .instrument = 101,
+                .exchange_account = 20,
+                .side = .buy,
+                .quantity = .{ .instrument = 101, .rules_version = 1, .lots = 2000 },
+                .price = .{ .instrument = 101, .rules_version = 1, .ticks = 100 },
+                .fee = .{ .asset = 1, .atoms = 0 },
+                .liquidity = .maker,
+                .venue_fill_time_utc_ns = fixture.atGroup(46, .{ .identity = 0, .payload = .recovery_completed }).core.source_time,
+            } });
+            cancel_fill.venue.envelope.exchange_account = 20;
+            _ = try input.apply(cancel_fill);
+            var cancel_report = fixture.canonicalAt(46, 6, .{ .execution_report = .{
+                .identity = 3,
+                .order = 1,
+                .client_order_id = maker_order.client_order_id,
+                .instrument = 101,
+                .exchange_account = 20,
+                .revision = 1,
+                .status = .partially_filled,
+                .cumulative_quantity = .{ .instrument = 101, .rules_version = 1, .lots = 5000 },
+                .remaining_quantity = .{ .instrument = 101, .rules_version = 1, .lots = 5000 },
+            } });
+            cancel_report.venue.envelope.exchange_account = 20;
+            _ = try input.apply(cancel_report);
+            const previous = metadata.strategy_cursor;
+            metadata.strategy_cursor = owner.shard.authoritativeBarrier();
+            try cycleProjection(owner, before_utc, &before_projection);
+            var unknown_event = phase_event;
+            unknown_event.shard_sequence = metadata.strategy_cursor;
+            now = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
+            try old_host.sendInput(init.io, try old_gateway.encodeBatch(&batch_storage, 3, previous + 1, metadata.strategy_cursor, now, &.{unknown_event}), now);
+            try old_gateway.recordPublished(3, metadata.strategy_cursor, now);
+            try old_host.requestCheckpoint(init.io, 3, metadata);
+            const unknown_content = try init.gpa.dupe(u8, try old_host.receiveCheckpoint(init.io, &frame));
+            init.gpa.free(old_content);
+            old_content = unknown_content;
+        }
+        if ((phase == .exiting or phase == .reconciling) and !maker_mode) {
+            _ = try input.apply(fixture.atGroup(46, .{ .identity = 9011, .payload = .{ .safety_gate_change = .{
                 .gate_identity = 9011,
                 .target_identity = owner.shard.operational_state.target_identity,
                 .kind = .latched,
@@ -619,9 +747,9 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
         }
     }
     const old_decoded = try recovery_module.decodePayloadCheckpoint(old_content, metadata);
-    const old_json = try std.json.parseFromSlice(std.json.Value, init.gpa, old_decoded.payload, .{});
+    const old_json = try std.json.parseFromSlice(std.json.Value, init.gpa, old_decoded.payload, .{ .allocate = .alloc_always });
     defer old_json.deinit();
-    const old_phase = old_json.value.object.get("components").?.array.items[0].object.get("state").?.object.get("phase").?.string;
+    const old_phase = (try privateComponent(old_json.value, "cycle")).object.get("state").?.object.get("phase").?.string;
     try std.testing.expectEqualStrings(@tagName(phase), old_phase);
     if (transition != .keep) {
         const encoded = try init.gpa.alloc(u8, std.base64.standard.Encoder.calcSize(old_content.len));
@@ -640,8 +768,8 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
         metadata.strategy_definition = 3;
     }
     _ = try repository.publish(init.io, old_content, metadata);
-    var old_batch_number: u64 = if (phase == .entering) 1 else if (phase == .exiting or phase == .reconciling) 3 else 2;
-    _ = try owner.apply(fixture.atGroup(47, .{ .identity = 9003, .payload = .{ .control_command = .{
+    var old_batch_number: u64 = if (phase == .entering) 1 else if (phase == .exiting or phase == .reconciling or loss) 3 else 2;
+    _ = try input.apply(fixture.atGroup(47, .{ .identity = 9003, .payload = .{ .control_command = .{
         .command_identity = 9003,
         .content_hash = 9003,
         .target_identity = owner.shard.operational_state.target_identity,
@@ -657,7 +785,11 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     try demo.Owner.recoverInto(owner, adapter.interface(), init.io, owner.stream);
     const configuration_rows = try multi.configurationRows();
     try owner.pinDeploymentDigest(configuration_rows[0].begin.expected_digest);
-    _ = try owner.apply(fixture.atGroup(48, .{ .identity = 9004, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
+    try std.testing.expectError(error.CoreRecoveryIncomplete, recovery.Recovery.begin(init.gpa, owner, 9, .{ .fencing = owner.shard.fencing_token, .shard = 0, .generation = 71 }));
+    const recovered_digest = owner.shard.canonicalStateDigest();
+    try input.replay();
+    try std.testing.expectEqualSlices(u8, &recovered_digest, &owner.shard.canonicalStateDigest());
+    _ = try input.apply(fixture.atGroup(48, .{ .identity = 9004, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
     var plan = old_plan;
     plan.session.generation += 1;
     const coordinator = try recovery.Recovery.begin(init.gpa, owner, 9, plan.session);
@@ -667,12 +799,13 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     execution_gateway.init();
     try execution_gateway.bootstrapDurableDispatch(adapter.interface(), init.io, .{ .domain = .control, .id = 92 });
     for ([_]u128{ 20, 30 }) |account| try multi.reconcileDomainAccount(owner, account, execution_gateway);
-    if (expired) _ = try owner.apply(fixture.atGroup(2000, .{ .identity = 9012, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
+    if (expired) _ = try input.apply(fixture.atGroup(2000, .{ .identity = 9012, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
     const reopened = try checkpoints.Repository.init(adapter.interface(), 800, .{ 801, 802 });
     const restored = try init.gpa.dupe(u8, try reopened.restore(init.io, metadata));
     defer init.gpa.free(restored);
     try std.testing.expectEqualSlices(u8, old_content, restored);
-    var host = try lifecycle.ManagedHost.start(init, python, script, plan, "portable", &.{ "--core", "--strategy-identity", "9", "--activation-identity", "2", "--core-definition", if (transition == .keep) "2" else "3" });
+    const recovered_args: []const []const u8 = if (maker_mode) &.{ "--core", "--strategy-identity", "9", "--activation-identity", "2", "--core-maker" } else &.{ "--core", "--strategy-identity", "9", "--activation-identity", "2", "--core-definition", if (transition == .keep) "2" else "3" };
+    var host = try lifecycle.ManagedHost.start(init, python, script, plan, "portable", recovered_args);
     defer host.deinit(init.io);
     try host.sendPlan(init.io);
     try expectLifecycle(.accepted, try host.receive(init.io, 1));
@@ -681,7 +814,7 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     metadata.strategy_cursor = owner.shard.authoritativeBarrier();
     try host.beginRecovery(init.io, metadata.strategy_cursor, restored, &frame);
     const utc = try coordinator.currentUtc(owner);
-    var projection: [88]u8 = undefined;
+    var projection: [176]u8 = undefined;
     try cycleProjection(owner, utc, &projection);
     const projected: gateway_module.EventEnvelope = .{ .event_type = .account, .time_presence = 0x11, .shard_sequence = metadata.strategy_cursor, .source_time_ns = @intCast(utc), .receive_time_ns = 0, .monotonic_time_ns = 0, .wall_time_utc_ns = @intCast(utc), .payload = &projection };
     var gateway = try realGateway(plan);
@@ -703,13 +836,35 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     continuous_metadata.strategy_definition = 2;
     try old_host.requestCheckpoint(init.io, 4, continuous_metadata);
     const continuous = try old_host.receiveCheckpoint(init.io, &frame);
-    try std.testing.expectEqualSlices(u8, (try recovery_module.decodePayloadCheckpoint(retained_content, metadata)).payload, (try recovery_module.decodePayloadCheckpoint(continuous, continuous_metadata)).payload);
+    const recovered_payload = (try recovery_module.decodePayloadCheckpoint(retained_content, metadata)).payload;
+    const continuous_payload = (try recovery_module.decodePayloadCheckpoint(continuous, continuous_metadata)).payload;
+    if (transition != .keep) {
+        const recovered_json = try std.json.parseFromSlice(std.json.Value, init.gpa, recovered_payload, .{});
+        defer recovered_json.deinit();
+        const continuous_json = try std.json.parseFromSlice(std.json.Value, init.gpa, continuous_payload, .{});
+        defer continuous_json.deinit();
+        const recovered_cycle = try std.json.Stringify.valueAlloc(init.gpa, try privateComponent(recovered_json.value, "cycle"), .{});
+        defer init.gpa.free(recovered_cycle);
+        const continuous_cycle = try std.json.Stringify.valueAlloc(init.gpa, try privateComponent(continuous_json.value, "cycle"), .{});
+        defer init.gpa.free(continuous_cycle);
+        try std.testing.expectEqualSlices(u8, recovered_cycle, continuous_cycle);
+        const recovered_filter = try privateComponent(recovered_json.value, "filter");
+        const continuous_filter = try privateComponent(continuous_json.value, "filter");
+        try std.testing.expect(!std.mem.eql(u8, recovered_filter.object.get("dependency").?.string, continuous_filter.object.get("dependency").?.string));
+        if (transition == .migrate) {
+            const recovered_model = try std.json.Stringify.valueAlloc(init.gpa, recovered_filter.object.get("state").?, .{});
+            defer init.gpa.free(recovered_model);
+            const continuous_model = try std.json.Stringify.valueAlloc(init.gpa, continuous_filter.object.get("state").?, .{});
+            defer init.gpa.free(continuous_model);
+            try std.testing.expectEqualSlices(u8, recovered_model, continuous_model);
+        }
+    } else try std.testing.expectEqualSlices(u8, recovered_payload, continuous_payload);
     content = retained_content;
 
     var dependency: [32]u8 = undefined;
     const parsed = try std.json.parseFromSlice(std.json.Value, init.gpa, payload, .{});
     defer parsed.deinit();
-    _ = try std.fmt.hexToBytes(&dependency, parsed.value.object.get("components").?.array.items[0].object.get("dependency").?.string);
+    _ = try std.fmt.hexToBytes(&dependency, (try privateComponent(parsed.value, "cycle")).object.get("dependency").?.string);
     var projection_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(&projection, &projection_digest, .{});
     var binding: recovery.Binding = .{
@@ -723,6 +878,26 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
         .repair_deadline_utc_ns = 1_767_225_610_449_999_999,
         .exit_deadline_utc_ns = 1_767_225_610_450_001_000,
     };
+    if (maker_mode) {
+        try std.testing.expectError(error.UnresolvedRecoveryOrder, coordinator.qualify(init.gpa, owner, content, metadata, &.{binding}, .utc));
+        try std.testing.expectError(error.RecoveryNotQualified, coordinator.activate(owner));
+        const maker_json = try std.json.parseFromSlice(std.json.Value, init.gpa, (try recovery_module.decodePayloadCheckpoint(content, metadata)).payload, .{});
+        defer maker_json.deinit();
+        const state = (try privateComponent(maker_json.value, "cycle")).object.get("state").?.object;
+        try std.testing.expect(state.get("cancel_requested").?.bool);
+        try std.testing.expectEqual(@as(i64, 1), state.get("repair_used").?.integer);
+        try std.testing.expectEqual(@as(i64, 3), state.get("next_sequence").?.integer);
+        try std.testing.expectEqual(@as(i64, 1_767_225_600_450_000_000), state.get("quote_started_ns").?.object.get("value").?.integer);
+        try std.testing.expectEqual(@as(i64, 5000), owner.shard.accountState(20).?.economic_projection.portfolioLayer(10).?.positionForInstrument(101).quantity);
+        try std.testing.expectEqual(engine.oms.OrderState.pending_cancel, owner.shard.oms.orderById(1).?.state);
+        try std.testing.expectEqual(engine.oms.OrderState.unknown, owner.shard.oms.orderById(2).?.state);
+        try std.testing.expectEqual(@as(u16, 2), owner.shard.oms.order_count);
+        try std.testing.expectEqual(@as(u128, 0), owner.shard.strategyAuthority(9).host_activation_identity);
+        try old_host.shutdown(init.io, 4);
+        try host.shutdown(init.io, 4);
+        std.debug.print("09b maker cancel-fill + Unknown hedge: continuous == recovered, original identities, activation refused, no blind hedge; cut={d} recovery_barrier={d} projection_sha256={s} recovered_private_sha256={s}\n", .{ old_decoded.metadata.strategy_cursor, metadata.strategy_cursor, std.fmt.bytesToHex(binding.projection_digest, .lower), std.fmt.bytesToHex((try recovery_module.decodePayloadCheckpoint(content, metadata)).state_digest, .lower) });
+        return;
+    }
     if (phase == .reconciling) {
         try std.testing.expectError(error.UnresolvedRecoveryOrder, coordinator.qualify(init.gpa, owner, content, metadata, &.{binding}, .utc));
         try std.testing.expectError(error.RecoveryNotQualified, coordinator.activate(owner));
@@ -740,7 +915,7 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
         } });
         resolved.venue.envelope.exchange_account = 30;
         resolved.venue.envelope.venue = 21;
-        _ = try owner.apply(resolved);
+        _ = try input.apply(resolved);
         const previous = metadata.strategy_cursor;
         metadata.strategy_cursor = owner.shard.authoritativeBarrier();
         const resolved_utc = try coordinator.currentUtc(owner);
@@ -776,10 +951,34 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     invalid_binding.projection_digest = @splat(1);
     try std.testing.expectError(error.EconomicProjectionMismatch, coordinator.qualify(init.gpa, owner, content, metadata, &.{invalid_binding}, .utc));
     const decoded_content = try recovery_module.decodePayloadCheckpoint(content, metadata);
+    const linked_json = try std.json.parseFromSlice(std.json.Value, init.gpa, decoded_content.payload, .{});
+    defer linked_json.deinit();
+    const linked_budget = (try privateComponent(linked_json.value, "budget")).object.get("state").?.object;
+    try std.testing.expectEqual(@as(i64, 2), linked_budget.get("evaluations_used").?.integer);
+    try std.testing.expectEqual(@as(i64, 1_767_225_600_450_000_010), linked_budget.get("deadline_ns").?.object.get("value").?.integer);
+    try std.testing.expectEqualStrings("none", linked_budget.get("opportunity").?.object.get("tag").?.string);
+    const linked_signal = (try privateComponent(linked_json.value, "signal")).object.get("state").?.object;
+    const original_signal = (try privateComponent(old_json.value, "signal")).object.get("state").?.object;
+    const original_association = if (phase == .entering) original_signal.get("pending").? else original_signal.get("active").?;
+    try std.testing.expectEqualStrings(original_association.object.get("value").?.string, linked_signal.get("active").?.object.get("value").?.string);
+    try std.testing.expectEqualStrings("none", linked_signal.get("pending").?.object.get("tag").?.string);
+    var daily_loss_preserved = false;
+    for (linked_signal.get("reasons").?.array.items) |reason| {
+        const key = reason.object.get("key").?.string;
+        if (std.mem.eql(u8, key, "daily_loss")) daily_loss_preserved = true;
+        try std.testing.expect(!std.mem.eql(u8, key, "restart"));
+    }
+    try std.testing.expectEqual(scenario == .risk, daily_loss_preserved);
+    const linked_monitor = (try privateComponent(linked_json.value, "monitor")).object.get("state").?.object;
+    try std.testing.expectEqualStrings(if (scenario == .risk) "InvalidLatched" else "Normal", linked_monitor.get("state").?.string);
+    try std.testing.expectEqual(@as(i64, 2), linked_monitor.get("sequences").?.array.items[0].object.get("value").?.integer);
+    const linked_filter = (try privateComponent(linked_json.value, "filter")).object.get("state").?.object.get("_state").?.object;
+    try std.testing.expectEqual(@as(i64, if (transition == .rebuild) 0 else 1), linked_filter.get("count").?.integer);
+
     if (expired) {
         const expired_json = try std.json.parseFromSlice(std.json.Value, init.gpa, decoded_content.payload, .{});
         defer expired_json.deinit();
-        const state = expired_json.value.object.get("components").?.array.items[0].object.get("state").?.object;
+        const state = (try privateComponent(expired_json.value, "cycle")).object.get("state").?.object;
         try std.testing.expectEqualStrings("exiting", state.get("phase").?.string);
         try std.testing.expectEqualStrings("deadline", state.get("first_exit").?.object.get("value").?.object.get("reason").?.string);
         try std.testing.expectEqual(@as(i64, 4), state.get("target_atoms").?.object.get("value").?.integer);
@@ -790,11 +989,11 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     var invalid_storage: [8192]u8 = undefined;
     const regressed = try recovery_module.encodePayloadCheckpoint(&invalid_storage, invalid_metadata, decoded_content.payload);
     try std.testing.expectError(error.IntentSequenceRegression, coordinator.qualify(init.gpa, owner, regressed, invalid_metadata, &.{binding}, .utc));
-    const unadmitted_payload = try std.mem.replaceOwned(u8, init.gpa, decoded_content.payload, "\"sequence\":2", "\"sequence\":3");
+    const unadmitted_payload = try std.mem.replaceOwned(u8, init.gpa, decoded_content.payload, "\"sequence\":2", "\"sequence\":99");
     defer init.gpa.free(unadmitted_payload);
     invalid_metadata = metadata;
-    invalid_metadata.next_intent_sequence = 4;
-    const unadmitted_progress = try std.mem.replaceOwned(u8, init.gpa, unadmitted_payload, "\"next_sequence\":3", "\"next_sequence\":4");
+    invalid_metadata.next_intent_sequence = 100;
+    const unadmitted_progress = try std.mem.replaceOwned(u8, init.gpa, unadmitted_payload, if (loss) "\"next_sequence\":4" else "\"next_sequence\":3", "\"next_sequence\":100");
     defer init.gpa.free(unadmitted_progress);
     const unadmitted = try recovery_module.encodePayloadCheckpoint(&invalid_storage, invalid_metadata, unadmitted_progress);
     try std.testing.expectError(error.UnresolvedPrivateIntent, coordinator.qualify(init.gpa, owner, unadmitted, invalid_metadata, &.{binding}, .utc));
@@ -816,7 +1015,7 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
         try std.testing.expectError(error.CycleEconomicMismatch, coordinator.qualify(init.gpa, owner, false_holding, metadata, &.{binding}, .utc));
     }
     try std.testing.expectError(error.RecoveryNotQualified, coordinator.activate(owner));
-    _ = try coordinator.qualify(init.gpa, owner, content, metadata, &.{binding}, .utc);
+    const qualification = try coordinator.qualify(init.gpa, owner, content, metadata, &.{binding}, .utc);
     const activation = try coordinator.activate(owner);
     try std.testing.expectEqual(@as(u128, 2), activation.activation_identity);
     try host.activate(init.io, activation);
@@ -829,8 +1028,53 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     try host.requestCheckpoint(init.io, 3, metadata);
     _ = try host.receiveCheckpoint(init.io, &frame);
     try std.testing.expectEqualDeep(original_cycle, owner.shard.cycles.find(9, 1).?);
-    try std.testing.expectEqual(@as(usize, 2), owner.shard.oms.intent_history_count);
+    try std.testing.expectEqual(@as(usize, if (loss) 3 else 2), owner.shard.oms.intent_history_count);
     try std.testing.expect(!owner.shard.operational_state.trading_authorized);
+    if ((phase == .exiting and scenario != .risk) or loss) {
+        const steps: usize = if (loss) 2 else 1;
+        const original_order_count = owner.shard.oms.order_count;
+        for (0..steps) |step| {
+            _ = try input.apply(fixture.atGroup(61 + step, .{ .identity = 9020 + step, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
+            const previous = metadata.strategy_cursor;
+            metadata.strategy_cursor = owner.shard.authoritativeBarrier();
+            const safe_utc = try coordinator.currentUtc(owner);
+            try cycleProjection(owner, safe_utc, &projection);
+            const flags = std.mem.readInt(u64, projection[80..88], .little) | 2 | (if (loss) @as(u64, if (step == 0) 4 else 8) else 0);
+            std.mem.writeInt(u64, projection[80..88], flags, .little);
+            const safe_event: gateway_module.EventEnvelope = .{ .event_type = .account, .time_presence = 0x11, .shard_sequence = metadata.strategy_cursor, .source_time_ns = @intCast(safe_utc), .receive_time_ns = 0, .monotonic_time_ns = 0, .wall_time_utc_ns = @intCast(safe_utc), .payload = &projection };
+            now = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
+            try host.sendInput(init.io, try gateway.encodeBatch(&batch_storage, 3 + step, previous + 1, metadata.strategy_cursor, now, &.{safe_event}), now);
+            try gateway.recordPublished(3 + step, metadata.strategy_cursor, now);
+            if (!(loss and step == 0)) {
+                var safe_output: [1024]u8 = undefined;
+                const safe_frame = try host.receiveOutput(init.io, now, &safe_output);
+                const decision = gateway.ingest(safe_frame, now + 1);
+                try std.testing.expect(decision == .accepted_group);
+                const proposals = try gateway_module.decodeIntentGroup(decision.accepted_group.frame());
+                try std.testing.expectEqual(metadata.next_intent_sequence, proposals.members[0].intent_sequence);
+                for (proposals.members[0..proposals.count]) |intent| try std.testing.expect(intent.portfolio_reduce_only);
+                _ = try input.apply(fixture.atGroup(61 + step, .{ .identity = 9030 + step, .payload = decision.corePayload() }));
+                try std.testing.expectEqual(original_order_count + 2, owner.shard.oms.order_count);
+                try std.testing.expectEqualDeep(original_cycle, owner.shard.cycles.find(9, 1).?);
+                try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.count);
+                metadata.next_intent_sequence += 2;
+            }
+            try host.requestCheckpoint(init.io, 4 + step, metadata);
+            const safe_checkpoint = try host.receiveCheckpoint(init.io, &frame);
+            const safe_body = (try recovery_module.decodePayloadCheckpoint(safe_checkpoint, metadata)).payload;
+            const safe_json = try std.json.parseFromSlice(std.json.Value, init.gpa, safe_body, .{});
+            defer safe_json.deinit();
+            const safe_state = (try privateComponent(safe_json.value, "cycle")).object.get("state").?.object;
+            if (loss and step == 0) {
+                try std.testing.expectEqualStrings("holding", safe_state.get("phase").?.string);
+                try std.testing.expectEqual(original_order_count, owner.shard.oms.order_count);
+            } else {
+                try std.testing.expectEqualStrings("exiting", safe_state.get("phase").?.string);
+                try std.testing.expectEqualStrings(if (loss) "take_profit" else "manual", safe_state.get("first_exit").?.object.get("value").?.object.get("reason").?.string);
+            }
+            try std.testing.expectEqual(@as(i64, 4), safe_state.get("target_atoms").?.object.get("value").?.integer);
+        }
+    }
     var old_config = gateway.config;
     old_config.session = old_plan.session;
     old_config.authorization.activation_identity = 1;
@@ -845,8 +1089,8 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     if (phase == .exiting) {
         const a_economics = owner.shard.accountState(20).?.economic_projection.semanticDigest();
         const b_economics = owner.shard.accountState(30).?.economic_projection.semanticDigest();
-        _ = try owner.apply(.{ .core = .{ .identity = 9013, .payload = .{ .strategy_cutover_fence = .{ .strategy_instance = 9 } } } });
-        _ = try owner.apply(.{ .core = .{ .identity = 9014, .payload = .{ .version_activation = .{
+        _ = try input.apply(.{ .core = .{ .identity = 9013, .payload = .{ .strategy_cutover_fence = .{ .strategy_instance = 9 } } } });
+        _ = try input.apply(.{ .core = .{ .identity = 9014, .payload = .{ .version_activation = .{
             .activation_identity = 9014,
             .generation = owner.shard.release_generation + 1,
             .old_release = owner.shard.active_release,
@@ -869,13 +1113,14 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
         try std.testing.expectEqualSlices(u8, &b_economics, &owner.shard.accountState(30).?.economic_projection.semanticDigest());
         try std.testing.expect(owner.shard.strategyFenced(9));
     }
-    std.debug.print("09b real core phase {s}/{s}: continuous == recovered, original cycle, committed activation, downtime={any}\n", .{ @tagName(phase), @tagName(transition), expired });
+    std.debug.print("09b real core phase {s}/{s}/{s}: cycle=equivalent, committed activation, cut={d} activation_barrier={d} next_intent={d} orders={d} cycles={d} opening=false; projection_sha256={s} checkpoint_private_sha256={s} qualified_private_sha256={s} qualified_core_sha256={s}\n", .{ @tagName(phase), @tagName(transition), @tagName(scenario), old_decoded.metadata.strategy_cursor, activation.barrier, metadata.next_intent_sequence, owner.shard.oms.order_count, owner.shard.cycles.count, std.fmt.bytesToHex(binding.projection_digest, .lower), std.fmt.bytesToHex(old_decoded.state_digest, .lower), std.fmt.bytesToHex(qualification.private_digest, .lower), std.fmt.bytesToHex(qualification.core_digest, .lower) });
 }
 
-fn cycleProjection(owner: *const @import("../../runtime/demo/demo_authority.zig").Owner, utc: u64, projection: *[88]u8) !void {
+fn cycleProjection(owner: *const @import("../../runtime/demo/demo_authority.zig").Owner, utc: u64, projection: *[176]u8) !void {
     @memset(projection, 0);
     std.mem.writeInt(u64, projection[0..8], utc, .little);
     var nav: i128 = 0;
+    var realized: i128 = 0;
     for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, 0..) |account, instrument, index| {
         const order = owner.shard.oms.orderById(index + 1).?;
         const terminal = order.state == .filled or order.state == .canceled or order.state == .rejected;
@@ -883,12 +1128,65 @@ fn cycleProjection(owner: *const @import("../../runtime/demo/demo_authority.zig"
         std.mem.writeInt(u64, projection[16 + 16 * index ..][0..8], if (terminal) 0 else @intCast(order.quantity - order.cumulative_quantity), .little);
         const portfolio = owner.shard.accountState(account).?.economic_projection.portfolioLayer(10).?;
         nav += portfolio.usdt_balance_atoms;
+        realized += portfolio.realized_pnl_atoms;
         const quantity = portfolio.positionForInstrument(instrument).quantity;
         std.mem.writeInt(u64, projection[48 + 8 * index ..][0..8], @intCast(@abs(quantity)), .little);
         std.mem.writeInt(u64, projection[64 + 8 * index ..][0..8], if (order.state == .unknown) 2 else if (terminal) 1 else 0, .little);
     }
     std.mem.writeInt(u64, projection[40..48], @intCast(nav), .little);
+    std.mem.writeInt(u64, projection[88..96], @intCast(@max(0, -realized)), .little);
+    var additional: usize = 0;
+    for (owner.shard.oms.command_history[0..owner.shard.oms.command_history_count]) |command| {
+        if (command.operation != .place or command.intent_sequence <= 2) continue;
+        if (additional == 2) return error.ProjectionCapacity;
+        const order = owner.shard.oms.orderById(command.order_id).?;
+        const terminal = order.state == .filled or order.state == .canceled or order.state == .rejected;
+        const offset = 96 + 40 * additional;
+        std.mem.writeInt(u64, projection[offset..][0..8], command.intent_sequence, .little);
+        std.mem.writeInt(u64, projection[offset + 8 ..][0..8], if (order.exchange_account == 20) 0 else 1, .little);
+        std.mem.writeInt(u64, projection[offset + 16 ..][0..8], @intCast(order.cumulative_quantity), .little);
+        std.mem.writeInt(u64, projection[offset + 24 ..][0..8], if (terminal) 0 else @intCast(order.quantity - order.cumulative_quantity), .little);
+        std.mem.writeInt(u64, projection[offset + 32 ..][0..8], if (order.state == .unknown) 2 else if (terminal) 1 else 0, .little);
+        additional += 1;
+    }
     for (owner.shard.operational_state.gates[0..owner.shard.operational_state.gate_count]) |gate| {
         if (!gate.open and gate.reason == .margin_kill) std.mem.writeInt(u64, projection[80..88], 1, .little);
     }
 }
+
+fn privateComponent(value: std.json.Value, name: []const u8) !std.json.Value {
+    for (value.object.get("components").?.array.items) |row| {
+        if (std.mem.eql(u8, row.object.get("name").?.string, name)) return row;
+    }
+    return error.MissingPrivateComponent;
+}
+
+const CycleIngress = struct {
+    owner: *@import("../../runtime/demo/demo_authority.zig").Owner,
+    sink: @import("../../persistence/raw_ingress.zig").DurableSink,
+
+    fn apply(self: *@This(), canonical: @import("../../trading/trading_shard.zig").CanonicalEvent) !?@import("../../trading/trading_shard.zig").OrderCommand {
+        if (canonical == .venue) {
+            var buffer: [16384]u8 = undefined;
+            const bytes = try @import("../../persistence/snapshot_codec.zig").encodeBare(&buffer, canonical);
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+            const times = canonical.venue.envelope.times;
+            _ = try self.sink.interface().append(.{ .origin = 0x09b, .source_session = std.math.cast(u64, canonical.venue.envelope.adapter_session orelse return error.InvalidFixtureIngress) orelse return error.InvalidFixtureIngress, .receive_time_utc_ns = times.receive_utc_ns.?, .monotonic_time_ns = times.monotonic_ns.?, .wall_time_utc_ns = times.audit_utc_ns.?, .byte_len = @intCast(bytes.len), .sha256 = digest }, bytes);
+        }
+        return self.owner.apply(canonical);
+    }
+
+    fn replay(self: *@This()) !void {
+        try self.owner.bindRecoveryIngress(self.sink.store, self.sink.stream);
+        try self.owner.replayCommittedIngress(self.sink.stream, .{ .ptr = self, .consume_fn = consume });
+    }
+
+    fn consume(context: *anyopaque, _: u64, record: @import("../../adapters/okx/okx_public_market.zig").RawIngressRecord, bytes: []const u8) !void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (record.origin != 0x09b) return error.InvalidFixtureIngress;
+        const canonical = try @import("../../persistence/snapshot_codec.zig").decodeBare(bytes, @import("../../trading/trading_shard.zig").CanonicalEvent);
+        if (canonical != .venue) return error.InvalidFixtureIngress;
+        _ = try self.owner.apply(canonical);
+    }
+};
