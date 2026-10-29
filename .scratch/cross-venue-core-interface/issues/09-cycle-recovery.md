@@ -3,7 +3,7 @@
 Type: task
 Status: open
 Assignee:
-Blocked by: [09a 核心周期闭合](09a-cycle-closure-residual.md)（已完成）、[09b 恢复与激活](09b-cycle-recovery-activation.md)
+Blocked by: [09a 核心周期闭合](09a-cycle-closure-residual.md)、[09b 恢复与激活](09b-cycle-recovery-activation.md)（均已完成）
 Parent: [模块地图](../map.md)
 
 ## Question
