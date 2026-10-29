@@ -8,6 +8,10 @@
 不可变且带版本的交易算法及其参数结构，可以产生多个运行实例。
 _Avoid_: Strategy code, strategy template
 
+**StrategyPackage**:
+一个 StrategyDefinition 版本的不可变交付单元，绑定算法、参数及状态合同、兼容范围与验收证据；它由 ReleaseArtifact 承载，不包含运行实例的交易授权。
+_Avoid_: StrategyInstance, loose strategy script
+
 **StrategyInstance**:
 某个 StrategyDefinition 的一次运行实例；同一 VirtualPortfolio 同一时刻至多有一个 StrategyInstance 获得交易授权。
 _Avoid_: Strategy process, strategy thread
