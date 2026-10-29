@@ -469,13 +469,13 @@ fn publicDepthStart(init: std.process.Init, python: []const u8, input: *CycleIng
     const canonical = @import("../../model/canonical_event.zig");
     const depth = @import("../../market/depth_snapshot.zig");
     const owner = input.owner;
-    var feed: ContractFeed = .{};
-    const adapter = feed.adapter();
-    try adapter.start(.{ .venue = 1, .environment = .simulation, .subscription_set = 1, .config_version = 1, .session = 1, .output_capacity = 2 });
-    defer adapter.stop(.{ .monotonic_ns = 0 }) catch {};
     var events: [2]gateway_module.EventEnvelope = undefined;
     var wires: [2][depth.wire_len]u8 = undefined;
     for ([_]u128{ 101, 102 }, [_]u64{ 1, 21 }, 0..) |instrument, venue, index| {
+        var feed: ContractFeed = .{};
+        const adapter = feed.adapter();
+        try adapter.start(.{ .venue = venue, .environment = .simulation, .subscription_set = 1, .config_version = 1, .session = 1, .output_capacity = 2 });
+        defer adapter.stop(.{ .monotonic_ns = 0 }) catch {};
         const bid: i128 = if (index == 0) 100 else 109;
         var levels: canonical.BookDepth = .{ .visible_at_ns = 1_767_225_600_450_000_000, .bid_count = 1, .ask_count = 1 };
         levels.bids[0] = .{ .ticks = bid, .lots = 10000 };
