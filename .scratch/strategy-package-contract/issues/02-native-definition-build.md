@@ -1,7 +1,7 @@
 # 02：原生 StrategyDefinition 静态注册与构建验收
 
 Type: task
-Status: in-progress
+Status: resolved
 Assignee: Codex
 Blocked by:
 Parent: [模块地图](../map.md)
@@ -27,7 +27,8 @@ Parent: [模块地图](../map.md)
 
 2026-10-30：在独立 worktree `D:/github/Ringwin-strategy-package-02`、分支
 `codex/strategy-package-02` 实施，基于 `1b77d655`，实现提交 `8ba7d5ed`。
-最终全量回归仍在运行，故本票暂保持 in-progress；以下为已完成的构建证据。
+构建验收、Debug与ReleaseFast全量回归均已通过，本票完成；地图仍保持open。
+以下为实现及离线验收证据。
 
 - [原生构建合同 v1](../../../docs/native-strategy-contract.md) 定义不可变身份、静态入口、
   参数/状态schema、精确兼容元组及ReleaseArtifact绑定，说明Python共用/不同边界。
@@ -52,12 +53,15 @@ Parent: [模块地图](../map.md)
 - TDD首个正向用例先因缺失 `native-contract` 构建入口失败；增加入口后通过。
   重复注册用例先揭示错误被归为MissingRegistration，调整检查次序后明确为DuplicateDefinition。
 - `zig fmt --check`（全部变更Zig文件）、`git diff --check`通过。
-- code-review基于 `1b77d655...8ba7d5ed`：Standards 0项、Spec 0项发现。
+- code-review基于 `1b77d655...8ba7d5ed`：Standards 0项、Spec 0项发现；
+  测试栈修正 `8ba7d5ed...4de76486` 的两项复审也均为0项发现。
 - 默认测试栈问题已定位：初次Debug全量304/820通过、516项栈溢出；
   ReleaseFast全量343/820通过、477项以253退出。独立基线worktree `1b77d655`
   的 `state digest binds instrument trading margin and economic position authority`
-  在64 MiB测试栈下同样明确报Stack overflow；当前代码在512 MiB下3/3定向测试通过。
-  `build.zig`因此只将测试可执行文件的栈设为512 MiB；修正后的两种模式全量回归待返回。
+  在64 MiB测试栈下同样明确报Stack overflow；基线与当前代码在512 MiB下均3/3定向测试通过。
+  `build.zig`因此只将测试可执行文件的栈设为512 MiB（提交 `4de76486`）。
+  修正后 `zig build test --summary all`（Debug）及
+  `zig build -Doptimize=ReleaseFast test --summary all` 均全量820/820通过。
   未修改交易核心或生产二进制栈，也未将此结果宣称为旧core-wave脚本整体通过。
 - 本次Debug构建的SHA-256：
   - `ringwin.exe`：`02883baa8992ea03ef864c9ee262ce6406077e600167fa5c87f573a69845bfb4`

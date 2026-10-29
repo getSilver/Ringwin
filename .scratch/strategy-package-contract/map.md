@@ -4,7 +4,7 @@ Status: open
 
 ## Destination
 
-建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，后续工作已拆为02–11票；原生合同细化、加载器和发布接线尚未执行。
+建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，02票的原生构建合同、静态注册与构建清单已交付并通过离线验收；03–11票的加载器、Host及发布接线仍待实施。
 
 ## Definition of done
 
@@ -38,13 +38,13 @@ Status: open
 
 ## Frontier
 
-- [02 原生StrategyDefinition静态注册与构建验收](issues/02-native-definition-build.md)：Codex 已认领，在独立 worktree 实施。
 - [03 通过DeployRelease安装并登记Python StrategyPackage](issues/03-install-python-package.md)：无未完成blocker，尚未认领。
 
-每次只认领一张Frontier票。02–11的ready-for-agent表示票已可供接手，仍须满足各票Blocked by；其余票在依赖完成前不属于Frontier。
+每次只认领一张Frontier票。尚未实施票的ready-for-agent表示票已可供接手，仍须满足各票Blocked by；其余票在依赖完成前不属于Frontier。
 
 ## Decisions so far
 
+- 2026-10-30：02票在独立 worktree `D:/github/Ringwin-strategy-package-02`、分支 `codex/strategy-package-02` 完成。交付原生静态注册、独立构建清单和最小观察策略；构建验收8/8（12个正反向向量），Debug与ReleaseFast全量均820/820通过，Standards/Spec及测试栈修正复审均0项发现。原生发布与激活仍由09票接通；未执行Demo、部署或Linux运行资格验收。02移出Frontier，03尚未认领，地图保持open。
 - 2026-10-29：用户批准并发布02–11十张纵向实施票，首批Frontier为02/03。依赖为04←03、05←04、06←05、07←06、08←06、09←02/03/06/08、10←05/06/08、11←07/09/10；各票Blocked by以相对链接为准。保留01合同票，地图保持open；不新增横向预重构、隔离系统或恢复协议。
 - 2026-10-29：补充收窄后的评审建议：最终包资格证据外置绑定；Keep复用现有API，同实例Rebuild不可表达时拒绝；激活前validate检查预热。Host加载/资源计量和既有恢复接线在实现票中明确，不新增隔离或恢复系统，也不阻塞后续拆票。地图仍为open，01的resolved仍仅表示文档交付。
 - 2026-10-28：纠正将合同定义完成直接标为地图closed的状态；地图恢复open。01的resolved只记录该票文档定义交付，不关闭后续原生合同、实现或验收工作。
@@ -56,7 +56,7 @@ Status: open
 
 ## Not yet specified
 
-- 原生策略完整合同由02票细化；Host加载组织、内存计量和聚合摘要由10票落实。工期和部署实例尚未指定；任务已拆分不等于实现或验收完成。
+- 原生构建合同见02票；统一发布与激活由09票接通，Host加载组织、内存计量和聚合摘要由10票落实。工期和部署实例尚未指定；合同或构建交付不等于运行资格完成。
 
 ## Out of scope
 
