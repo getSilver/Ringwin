@@ -1,7 +1,7 @@
 # 08：版本化策略状态与确定性 checkpoint
 
 Type: task
-Status: in_progress
+Status: resolved
 Assignee: Codex
 Blocked by:
 Parent: [模块地图](../map.md)
@@ -19,13 +19,15 @@ Parent: [模块地图](../map.md)
 - [x] 状态覆盖冻结计划、阶段/退出原因、经济引用、计时引用、信号、监测、模型窗口/协方差、待成熟标签及下一 IntentSequence。
 - [x] 核心余额、订单、风险与占用仅保存引用或可验证缓存，不成为第二套可写权威。
 - [x] 遵守 PortableStrategyStateJsonV1、StrategyStateDigest 与 StrategyCursor；数值 codec、字段容量、舍入和兼容版本显式定义，禁止 pickle 和任意浮点 JSON。
-- [ ] 经 Host 输入与 checkpoint 发布/恢复公共路径比较连续执行、不同批次及不同 checkpoint 切点；规范状态、摘要与意图一致。
-- [ ] 边界数值不得因恢复改变方向、数量、目标、阈值判断或身份；非法数值、字段矛盾、损坏内容及容量越界明确拒绝。
-- [ ] 验证模型预热、窗口、待成熟标签及随机材料连续性；不能为恢复一致性清空状态或更换 seed。
-- [ ] 覆盖 S6-A/B/J/M 及 L/O 的编码部分；按实际支持平台记录数值资格，不以序列化往返代替运行确定性。
+- [x] 经 Host 输入与 checkpoint 发布/恢复公共路径比较连续执行、不同批次及不同 checkpoint 切点；规范状态、摘要与意图一致。
+- [x] 边界数值不得因恢复改变方向、数量、目标、阈值判断或身份；非法数值、字段矛盾、损坏内容及容量越界明确拒绝。
+- [x] 验证模型预热、窗口、待成熟标签及随机材料连续性；不能为恢复一致性清空状态或更换 seed。
+- [x] 覆盖 S6-A/B/J/M 及 L/O 的编码部分；按实际支持平台记录数值资格，不以序列化往返代替运行确定性。
 - [x] 记录 schema 确认依据；未冻结字段明确列为验收门槛，核心占用联结交由 09。
 
 ## Answer
+
+2026-10-29：用户指定 `spread-arbitrage-strategy-python` 分支的真实策略，要求完成08剩余任务。沿用其真实组件schema v2，完成Host输入更新/追赶、15个切点及不同分批、实际预热/标签与重复监测窗口、ppm/tick/target atoms边界，以及ManagedHost→DurableStore→文件重开→新Host继续重放。最终Python238/238、ReleaseSafe814/814、Host产品27/27均exit0；双轴复审无遗留发现。实现`9502e649`、审查修复`7f471ecf`，详见[运行合同](../08-real-strategy-contract.md)和[最终验证](../08-real-strategy-verification.md)。按实际Windows本机离线范围resolved，解除09b的08依赖；09b核心占用/对账/激活、跨平台及生产资格仍独立未通过。下面的基础设施范围与未完成描述保留为历史记录，不再代表当前08状态。
 
 2026-10-21：用户明确答复「批准该提案，继续实现」，确认[实现合同](../08-checkpoint-design.md)的 schema 范围、codec、容量及公共接缝；随后明确收窄为「仅完成 checkpoint 基础设施，模型验收保持待定」。本轮不实现或启用研究模型，不以序列化往返关闭运行确定性验收，整票保持 in_progress。
 

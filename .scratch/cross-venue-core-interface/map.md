@@ -40,7 +40,7 @@ Status: open
 | [05b 共同准入与占用](issues/05b-joint-admission-occupancy.md) | 01、04、05a（均已完成） | H2/H3；resolved |
 | [06 双 IOC 执行](issues/06-dual-ioc-dispatch.md) | 05 | H2；resolved，离线执行接缝验收 |
 | [07 原生 Post-only](issues/07-native-post-only.md) | 05 | H2；resolved，离线原生 Post-only 接缝验收 |
-| [08 确定性 checkpoint](issues/08-deterministic-checkpoint.md) | 无；最终验收需确认策略 schema | H3 |
+| [08 确定性 checkpoint](issues/08-deterministic-checkpoint.md) | 无；真实策略schema v2已确认 | H3；resolved，Windows本机离线确定性验收 |
 | [09 周期恢复与激活](issues/09-cycle-recovery.md) | 09a、09b | H3 汇总验收 |
 | [09a 核心周期闭合](issues/09a-cycle-closure-residual.md) | 05b（已完成） | H3；resolved，显式配置/默认关闭的核心能力 |
 | [09b 恢复与激活](issues/09b-cycle-recovery-activation.md) | 08、09a | H3 |
@@ -49,9 +49,11 @@ Status: open
 ## Frontier
 
 
-- [08 版本化策略状态与确定性 checkpoint](issues/08-deterministic-checkpoint.md)：in_progress；schema/codec/容量已确认，用户收窄本轮为 checkpoint 基础设施，真实模型验收保持待定。见[实现合同](08-checkpoint-design.md)及[验证记录](08-verification.md)，不解除 09b 的整票依赖。
+- [09b 策略恢复与核心占用联结](issues/09b-cycle-recovery-activation.md)：ready-for-agent；08与09a均已resolved，尚未领取或完成核心对账/恢复激活验收。
 
 ## Decisions so far
+
+- 2026-10-29：用户指定真实策略分支继续08；实现`9502e649`、修复`7f471ecf`完成真实组件Host追赶、切点/分批、预热/标签/重复监测窗口、精确数值边界及文件发布恢复。最终Python238/238、ReleaseSafe814/814、Host产品27/27均exit0；双轴复审无遗留发现。08按Windows本机离线范围resolved，解除09b依赖；见[最终验证](08-real-strategy-verification.md)。09b/09/10及来源策略spec不关闭，不代表生产canonical日志、跨平台、核心激活或Venue资格；无部署或交易。改动位于独立`codex/08-real-strategy-checkpoint`，未合并到主目录。
 
 - 2026-10-23（关闭）：用户将09a明确限定为“支持显式配置、未配置默认关闭的核心能力”，09a设为resolved并移出Frontier。最新策略无TTL、同所有者未冻结残余可复用、人工核心冻结/解冻；最终ReleaseSafe724/724、Python12/12、真实Host退出0。生产Asset额度、Web签名Owner接线、真实Venue资格及连续运行容量保留后续，不启用生产配置。09b仍被08阻塞，09汇总仍open。
 
