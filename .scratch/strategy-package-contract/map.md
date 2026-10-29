@@ -38,7 +38,7 @@ Status: open
 
 ## Frontier
 
-- [02 原生StrategyDefinition静态注册与构建验收](issues/02-native-definition-build.md)：无未完成blocker，尚未认领。
+- [02 原生StrategyDefinition静态注册与构建验收](issues/02-native-definition-build.md)：Codex 已认领，在独立 worktree 实施。
 - [03 通过DeployRelease安装并登记Python StrategyPackage](issues/03-install-python-package.md)：无未完成blocker，尚未认领。
 
 每次只认领一张Frontier票。02–11的ready-for-agent表示票已可供接手，仍须满足各票Blocked by；其余票在依赖完成前不属于Frontier。

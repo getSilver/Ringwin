@@ -1,12 +1,41 @@
 const std = @import("std");
 
 const expected_zig_version = "0.17.0-dev.315+5b647b792";
+const native_registry = @import("src/strategy/native_registry.zig");
+const native_manifest = @import("src/strategy/native_manifest.zig");
 
 pub fn build(b: *std.Build) void {
     requirePinnedZig(b);
 
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    native_registry.validate() catch |err| std.debug.panic("native strategy build rejected: {s}", .{@errorName(err)});
+    const native_json = std.json.Stringify.valueAlloc(b.allocator, .{
+        .format_version = 1,
+        .runtime = "native_static",
+        .zig_version = expected_zig_version,
+        .target = target.result.zigTriple(b.allocator) catch @panic("out of memory"),
+        .optimize = @tagName(optimize),
+        .binary_path = if (target.result.os.tag == .windows) "bin/ringwin.exe" else "bin/ringwin",
+        .definitions = native_manifest.definitions,
+    }, .{ .whitespace = .indent_2 }) catch @panic("out of memory");
+    const native_files = b.addWriteFiles();
+    const native_json_path = native_files.add("native-strategies.json", native_json);
+    b.getInstallStep().dependOn(&b.addInstallFile(native_json_path, "share/ringwin/native-strategies.json").step);
+    for ([_][]const u8{ "native_observer_config.json", "native_observer_state.json" }) |file| {
+        b.getInstallStep().dependOn(&b.addInstallFile(b.path(b.fmt("src/strategy/{s}", .{file})), b.fmt("share/ringwin/contracts/{s}", .{file})).step);
+    }
+
+    const native_acceptance = b.addExecutable(.{
+        .name = "native-contract",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/native_contract_main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const native_step = b.step("native-contract", "Verify native static registration and the minimal definition offline");
+    native_step.dependOn(&b.addRunArtifact(native_acceptance).step);
     const main_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,

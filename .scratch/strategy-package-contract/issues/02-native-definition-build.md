@@ -1,8 +1,8 @@
 # 02：原生 StrategyDefinition 静态注册与构建验收
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in-progress
+Assignee: Codex
 Blocked by:
 Parent: [模块地图](../map.md)
 

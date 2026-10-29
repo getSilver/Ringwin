@@ -1,0 +1,1 @@
+{"fields":[{"name":"instrument","type":"u128","minimum":1},{"name":"max_observations","type":"u64","minimum":1}],"unknown_fields":"reject"}

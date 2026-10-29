@@ -1,5 +1,6 @@
 const std = @import("std");
 test {
+    _ = @import("native_contract_main.zig");
     _ = @import("runtime/strategy_cycle_recovery.zig");
     _ = @import("testing/acceptance/core/multi_account_authority_acceptance.zig");
     _ = @import("testing/acceptance/core/dual_ioc_dispatch_acceptance.zig");
@@ -53,6 +54,10 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     const executable = args.next() orelse return error.MissingExecutable;
     if (args.next()) |argument| {
+        if (std.mem.eql(u8, argument, "--native-strategy-build-test")) {
+            if (args.next() != null) return error.UnknownArgument;
+            return @import("native_contract_main.zig").main();
+        }
         if (std.mem.eql(u8, argument, "--production-role")) {
             const role = try production_runtime.parseRole(args.next() orelse return error.MissingRole);
             if (!std.mem.eql(u8, args.next() orelse return error.MissingSocketFlag, "--socket")) return error.MissingSocketFlag;

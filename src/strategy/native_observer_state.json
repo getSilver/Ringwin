@@ -1,0 +1,1 @@
+{"fields":[{"name":"cursor","type":"u64"},{"name":"observations","type":"u64"}],"invariants":["observations<=max_observations","(observations==0)==(cursor==0)"],"unknown_fields":"reject"}

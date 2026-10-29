@@ -359,6 +359,7 @@ pub const PortfolioAuthority = struct {
 };
 
 pub const TradingShard = struct {
+    pub const native_definitions = @import("../strategy/native_registry.zig");
     cycles: @import("cycle_occupancy.zig").State = .{},
     last_business_archive_account: u128 = 0,
     domain_binding_receipt: ?history.Receipt = null,
