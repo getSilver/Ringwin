@@ -375,13 +375,16 @@ fn runRealCheckpoint(init: std.process.Init, python: []const u8) !void {
     for (parsed.value.array.items, 0..) |row, i| {
         const values = row.array.items;
         const payload = try std.fmt.hexToBytes(&payloads[i], values[2].string);
+        const sample = values[0].integer == 1;
+        const sample_time: i64 = if (sample) @intCast(get(u64, payload, 0) * 1_000_000_000) else 0;
         events[i] = .{
             .event_type = @enumFromInt(values[0].integer),
+            .time_presence = if (sample) 0x1f else 0,
             .shard_sequence = @intCast(values[1].integer),
-            .source_time_ns = 0,
-            .receive_time_ns = 0,
-            .monotonic_time_ns = 0,
-            .wall_time_utc_ns = 0,
+            .source_time_ns = sample_time,
+            .receive_time_ns = if (sample) sample_time + 1 else 0,
+            .monotonic_time_ns = if (sample) sample_time + 2 else 0,
+            .wall_time_utc_ns = sample_time,
             .payload = payload,
         };
     }

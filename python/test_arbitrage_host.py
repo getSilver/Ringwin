@@ -73,12 +73,16 @@ def economic_inputs(version=1):
     return {recovery.content(value).encode("ascii"): value for value in result}
 
 
-def apply_event(objects, event_type, cursor, payload):
+def apply_event(objects, record):
     """Test-only input codec: samples or authenticated immutable Facts references."""
+    event_type, cursor, payload = record.event_type, record.shard_sequence, record.payload
     if event_type == 1:
         if len(payload) != 16:
             raise ValueError("sample length")
         grid, value = struct.unpack("<Qd", payload)
+        if (record.time_presence & 1 and record.source_time_ns != grid*b.SECOND) or (
+                record.time_presence & 0x10 and record.wall_time_utc_ns != grid*b.SECOND):
+            raise ValueError("fixture clock evidence")
         point = b.Point(grid*b.SECOND, cursor, value)
         objects["window"].push(point)
         try:
@@ -110,6 +114,12 @@ def apply_event(objects, event_type, cursor, payload):
                                      objects["boundary_calibration"], EXACT, LIMITS)
         if actual.allowed != (policy.min_entry_probability <= F(680_000, 1_000_000)):
             raise AssertionError("probability ppm equality boundary")
+    elif event_type == 4 and payload in (b"monitor-duplicate", b"monitor-missing"):
+        monitor = objects["monitor"]
+        previous = monitor.windows["error"]
+        window = previous if payload == b"monitor-duplicate" else signals.Window(
+            "error", previous.sequence+1, previous.cutoff_ns+1, None, 0, False)
+        monitor.update((window,), at_ns=window.cutoff_ns, independent_evidence=True)
     elif event_type == 5:
         archived = economic_inputs(objects["cycle"].plan.config_version)
         if payload not in archived:
@@ -142,6 +152,10 @@ def batch(items, session=(1, 0, 1), number=1, first=None, last=None):
     for kind, cursor, payload in items:
         record = bytearray((64+len(payload)+7)//8*8)
         struct.pack_into("<IIHHIQ", record, 0, len(record), len(payload), kind, 1, 0, cursor)
+        if kind == 1:
+            grid = struct.unpack_from("<Q", payload)[0]*b.SECOND
+            struct.pack_into("<I", record, 12, 0x1f)
+            struct.pack_into("<qqqq", record, 24, grid, grid+1, grid+2, grid)
         record[64:64+len(payload)] = payload
         data.extend(record)
     data[:4] = b"QSHB"
@@ -186,6 +200,42 @@ def returned(result):
 
 
 class HostReplayTests(unittest.TestCase):
+    def test_original_clock_evidence_survives_batch_decode_and_host_recovery(self):
+        initial = recovery.checkpoint(meta(), components())
+        seen = []
+        def observe(objects, record):
+            seen.append(record)
+            apply_event(objects, record)
+        runtime = recovery.ComponentRuntime(initial, components(), observe,
+            expected={k: meta()[k] for k in ("schema_registry", "strategy", "definition", "config_version",
+                                            "state_schema", "state_schema_version")})
+        source = batch(events()[:1])
+        runtime.apply_batch(source, (1, 0, 1))
+        time = 305*b.SECOND
+        self.assertEqual(seen[0], host.InputRecord(1, 1, 0x1f, 1, time, time+1, time+2, time,
+                                                  events()[0][2]))
+        self.assertEqual(returned(run_host(initial, [source], 1)), runtime.checkpoint())
+        broken = bytearray(source)
+        struct.pack_into("<q", broken, 128+24, time-1)
+        struct.pack_into("<I", broken, 124, host.crc32c(broken[:124]+broken[128:]))
+        self.assertNotEqual(run_host(initial, [bytes(broken)], 1).returncode, 0)
+
+    def test_duplicate_and_missing_monitoring_windows_across_host_checkpoint_do_not_add_health(self):
+        initial = recovery.checkpoint(meta(), components())
+        saved = returned(run_host(initial, [batch(events())], 14))
+        _, before = host.decode_checkpoint(saved)
+        state = lambda value: next(x["state"] for x in value["components"] if x["name"] == "monitor")
+        for generation in (2, 3):
+            session = (1, 0, generation)
+            cursor = 15+generation-2
+            saved = returned(run_host(saved, [batch([(4, cursor, b"monitor-duplicate")], session)], cursor, session=session))
+            self.assertEqual(state(host.decode_checkpoint(saved)[1]), state(before))
+        missing = returned(run_host(saved, [batch([(4, 17, b"monitor-missing")])], 17))
+        after = state(host.decode_checkpoint(missing)[1])
+        self.assertFalse(after["qualified"])
+        self.assertEqual(after["good_windows"], 0)
+        self.assertEqual(after["state"], state(before)["state"])
+
     def test_ppm_tick_and_target_atom_boundary_decisions_match_across_host_recovery(self):
         for version in range(2, 11):
             with self.subTest(version=version):

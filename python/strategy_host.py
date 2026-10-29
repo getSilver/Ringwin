@@ -8,6 +8,7 @@ import os
 import struct
 import sys
 import time
+from typing import NamedTuple
 import strategy_state
 
 CROSS_VENUE_STATE_SCHEMA = strategy_state.SCHEMA
@@ -604,6 +605,18 @@ def recovery_once(args, session, zig_sequence, control_sequence, fault_strategy)
             break
 
 
+class InputRecord(NamedTuple):
+    event_type: int
+    schema_version: int
+    time_presence: int
+    shard_sequence: int
+    source_time_ns: int
+    receive_time_ns: int
+    monotonic_time_ns: int
+    wall_time_utc_ns: int
+    payload: bytes
+
+
 def decode_component_batch(batch, session, number, cursor):
     """Validate bounded QSHB framing before invoking package-owned callbacks."""
     if (len(batch) < 128 or len(batch) > 1_048_576 or batch[:4] != b"QSHB" or
@@ -632,7 +645,8 @@ def decode_component_batch(batch, session, number, cursor):
             decode_depth_snapshot(payload)
         if len(records) >= count:
             raise ValueError("component record count")
-        records.append((kind, sequence, payload))
+        times = struct.unpack_from("<qqqq", batch, offset+24)
+        records.append(InputRecord(kind, version, flags, sequence, *times, payload))
         previous = sequence
         offset += length
     if len(records) != count:

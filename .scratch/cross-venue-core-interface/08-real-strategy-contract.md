@@ -12,7 +12,7 @@
 
 策略包入口可调用 `strategy_host.main(runtime_factory=...)`。factory 从包内已认证且可解析的冻结模板创建 `ComponentRuntime`，必须独立指定 registry、实例、定义、配置、schema 及其版本的预期身份；IPC 不能指定模块名、方法名或反序列化任意 Python 对象。缺 factory 时只保留原有静态 checkpoint 行为，不能假称已追赶。
 
-`ComponentRuntime` 使用现有组件 `restore`，把每个已准入输入记录的类型、ShardSequence 和自有 bytes 交给包内确定性回调。回调只能更新策略私有组件；不接收批次边界。窗口/模型/经济计算仍调用真实策略公开方法，Host 不实现替代公式。整个批次的边界、CRC、会话、批序、记录顺序/数量/版本/容量先校验，再运行回调；不能跨过指定恢复屏障。空订阅覆盖可以推进 cursor，但不能制造观测。
+`ComponentRuntime` 使用现有组件 `restore`，把每个已准入输入记录的类型、schema、ShardSequence、time_presence、四种原始时间及自有 bytes 完整交给包内确定性回调。回调只能更新策略私有组件；不接收批次边界。窗口/模型/经济计算仍调用真实策略公开方法，Host 不实现替代公式。整个批次的边界、CRC、会话、批序、记录顺序/数量/版本/容量先校验，再运行回调；不能跨过指定恢复屏障。空订阅覆盖可以推进 cursor，但不能制造观测。
 
 每条记录完成后验证私有状态及下一意图序号；失败会毒化整个 runtime，禁止从部分更新状态保存或重试。checkpoint 仍在完整 batch cursor 上请求/返回。BeginRecovery 期间输出关闭，恢复报告后也只允许继续输入及保存状态；此入口不接受 ActivateStrategy、不发布交易意图。实际 Cycle 已决定的意图及序号在 checkpoint 中逐字段比较，不能把无输出误称为未作决定。
 

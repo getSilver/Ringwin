@@ -606,8 +606,9 @@ class ComponentRuntime:
                                                     self.metadata["cursor"])
         if barrier is not None and last > barrier:
             raise ValueError("batch crosses recovery barrier")
-        for kind, cursor, payload in records:
-            self.apply_event(self.components, kind, cursor, payload)
+        for record in records:
+            cursor = record.shard_sequence
+            self.apply_event(self.components, record)
             self.metadata["cursor"] = cursor
             sequences = {obj.next_sequence for obj in self.components.values()
                          if type(obj) in (cycle.Cycle, maker.Cycle)}
