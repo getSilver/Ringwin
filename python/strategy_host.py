@@ -604,7 +604,43 @@ def recovery_once(args, session, zig_sequence, control_sequence, fault_strategy)
             break
 
 
-def portable_once(args, session, zig_sequence, control_sequence):
+def decode_component_batch(batch, session, number, cursor):
+    """Validate bounded QSHB framing before invoking package-owned callbacks."""
+    if (len(batch) < 128 or len(batch) > 1_048_576 or batch[:4] != b"QSHB" or
+            struct.unpack_from("<HHII", batch, 4) != (1, 128, 0, len(batch)) or
+            int.from_bytes(batch[16:32], "little") != SCHEMA_REGISTRY or
+            struct.unpack_from("<QI", batch, 48) != session[:2] or any(batch[60:64]) or
+            struct.unpack_from("<QQ", batch, 64) != (session[2], number) or
+            any(batch[112:124]) or crc32c(batch[:124]+batch[128:]) != struct.unpack_from("<I", batch, 124)[0]):
+        raise ValueError("invalid component batch")
+    first, last, published, count, size = struct.unpack_from("<QQqII", batch, 80)
+    if first != cursor+1 or last < first or published < 0 or count > 4096 or size != len(batch)-128:
+        raise ValueError("component batch coverage")
+    records = []
+    offset, previous = 128, first-1
+    while offset < len(batch):
+        if len(batch)-offset < 64:
+            raise ValueError("short component record")
+        length, size, kind, version, flags, sequence = struct.unpack_from("<IIHHIQ", batch, offset)
+        if (length < 64 or length % 8 or length > len(batch)-offset or size > length-64 or
+                kind not in range(1, 8) or version != 1 or flags & ~0x1f or
+                any(batch[offset+56:offset+64]) or not previous < sequence <= last or
+                any(batch[offset+64+size:offset+length])):
+            raise ValueError("invalid component record")
+        payload = batch[offset+64:offset+64+size]
+        if kind == 7:
+            decode_depth_snapshot(payload)
+        if len(records) >= count:
+            raise ValueError("component record count")
+        records.append((kind, sequence, payload))
+        previous = sequence
+        offset += length
+    if len(records) != count:
+        raise ValueError("component record count")
+    return records, last
+
+
+def portable_once(args, session, zig_sequence, control_sequence, runtime_factory=None):
     """Versioned private-state transport. It never grants trading authority."""
     kind, actual_session, sequence, payload = read_frame(sys.stdin.buffer)
     if kind != BEGIN_RECOVERY or actual_session != session or sequence != zig_sequence[0] or len(payload) < 200:
@@ -617,7 +653,14 @@ def portable_once(args, session, zig_sequence, control_sequence):
             metadata["strategy"] != int(args.strategy_identity, 0) or
             metadata["config_version"] != args.config_version or barrier < metadata["cursor"]):
         raise ValueError("portable checkpoint identity mismatch")
-    if barrier != metadata["cursor"]:
+    runtime = runtime_factory(payload[8:]) if runtime_factory is not None else None
+    if runtime is not None:
+        if metadata["state_schema_version"] != 2 or runtime.metadata != metadata:
+            raise ValueError("runtime checkpoint mismatch")
+        while runtime.metadata["cursor"] < barrier:
+            runtime.apply_batch(read_input(session, zig_sequence), session, barrier=barrier)
+        metadata, state = decode_checkpoint(runtime.checkpoint())
+    elif barrier != metadata["cursor"]:
         raise ValueError("portable replay implementation required")
     recovered = bytearray(96)
     recovered[:16] = metadata["strategy"].to_bytes(16, "little")
@@ -639,11 +682,14 @@ def portable_once(args, session, zig_sequence, control_sequence):
             request, cursor = struct.unpack("<QQ", payload)
             if request <= last_request or cursor != metadata["cursor"]:
                 raise ValueError("stale checkpoint request")
-            container = encode_checkpoint(metadata, state)
+            container = runtime.checkpoint() if runtime is not None else encode_checkpoint(metadata, state)
             write_frame(sys.stdout.buffer, CHECKPOINT_CONTENT, session,
                         control_sequence[0], struct.pack("<Q", request) + container)
             control_sequence[0] += 1
             last_request = request
+        elif kind == INPUT_BATCH and runtime is not None:
+            runtime.apply_batch(payload, session)
+            metadata = runtime.metadata
         elif kind == SHUTDOWN:
             write_frame(sys.stdout.buffer, SHUTDOWN_ACK, session, control_sequence[0])
             return
@@ -664,7 +710,7 @@ def assert_no_backing_capability():
                 raise AssertionError("strategy child inherited ring backing")
 
 
-def main():
+def main(runtime_factory=None):
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
@@ -726,7 +772,7 @@ def main():
     zig_sequence = [2]
     try:
         if args.mode == "portable":
-            portable_once(args, session, zig_sequence, control_sequence)
+            portable_once(args, session, zig_sequence, control_sequence, runtime_factory)
             return 0
         elif args.mode == "trade":
             await_direct_activation(args, session, zig_sequence)

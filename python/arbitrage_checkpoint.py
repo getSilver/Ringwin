@@ -576,3 +576,52 @@ def restore(container, templates, *, expected=None):
     # Validate save as well as restore using the same canonical boundary.
     snapshot(restored, metadata["cursor"], metadata["strategy"], metadata["next_intent"])
     return metadata, restored
+
+
+class ComponentRuntime:
+    """Replay private components using a package-owned deterministic input callback.
+
+    The callback consumes one admitted record, never the transport batch. Frozen
+    templates and input interpretation belong to the strategy package, not IPC.
+    This runtime cannot activate or publish an OrderIntent.
+    """
+    def __init__(self, container, templates, apply_event, *, expected):
+        required = {"schema_registry", "strategy", "definition", "config_version",
+                    "state_schema", "state_schema_version"}
+        if set(expected) != required or not callable(apply_event):
+            raise ValueError("runtime dependency contract")
+        self.metadata, self.components = restore(container, templates, expected=expected)
+        self.apply_event = apply_event
+        self.last_batch = 0
+        self.failed = False
+
+    def apply_batch(self, batch, session, *, barrier=None):
+        import strategy_host as host
+        if self.failed:
+            raise ValueError("failed runtime")
+        # Any callback/validation failure poisons this Host; partially applied
+        # private state must never be checkpointed or retried in this session.
+        self.failed = True
+        records, last = host.decode_component_batch(batch, session, self.last_batch+1,
+                                                    self.metadata["cursor"])
+        if barrier is not None and last > barrier:
+            raise ValueError("batch crosses recovery barrier")
+        for kind, cursor, payload in records:
+            self.apply_event(self.components, kind, cursor, payload)
+            self.metadata["cursor"] = cursor
+            sequences = {obj.next_sequence for obj in self.components.values()
+                         if type(obj) in (cycle.Cycle, maker.Cycle)}
+            if len(sequences) > 1:
+                raise ValueError("conflicting intent sequence owners")
+            if sequences:
+                self.metadata["next_intent"] = sequences.pop()
+            # The same semantic/capacity checks apply while running and saving.
+            snapshot(self.components, cursor, self.metadata["strategy"], self.metadata["next_intent"])
+        self.metadata["cursor"] = last
+        self.last_batch += 1
+        self.failed = False
+
+    def checkpoint(self):
+        if self.failed:
+            raise ValueError("failed runtime")
+        return checkpoint(self.metadata, self.components)

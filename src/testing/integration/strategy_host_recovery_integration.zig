@@ -216,6 +216,7 @@ pub fn main(init: std.process.Init) !void {
     if (args.next() != null) return error.UnknownArgument;
     try runCheck(init, python, script);
     try runPortableCheckpoint(init, python, script);
+    try runRealCheckpoint(init, python);
     var buffer: [256]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &buffer);
     try stdout.interface.print(
@@ -223,6 +224,7 @@ pub fn main(init: std.process.Init) !void {
         .{builtin.zig_version_string},
     );
     try stdout.interface.writeAll("cross_venue_checkpoint: host=validated, file_reopen=exact, model_replay=not_run, trading_authority=false\n");
+    try stdout.interface.writeAll("real_strategy_checkpoint: schema=2, model_replay=exact, published_cut=7, barrier=14, file_reopen=exact, intent_sequence=5, trading_authority=false\n");
     try stdout.interface.flush();
 }
 
@@ -253,13 +255,19 @@ fn runPortableCheckpoint(init: std.process.Init, python: []const u8, script: []c
     try host.requestCheckpoint(init.io, 1, metadata);
     const returned = try host.receiveCheckpoint(init.io, &frame);
     try std.testing.expectEqualSlices(u8, checkpoint, returned);
-    try checkPortableFile(init, python, script, returned, metadata);
+    try checkPortableFile(init, python, script, returned, metadata, null);
     try std.testing.expectEqual(lifecycle.State.recovered, host.supervisor.state);
     try std.testing.expectError(error.StaleCheckpointRequest, host.requestCheckpoint(init.io, 1, metadata));
     try host.shutdown(init.io, 4);
 }
 
-fn checkPortableFile(init: std.process.Init, python: []const u8, script: []const u8, checkpoint: []const u8, metadata: recovery_module.Metadata) !void {
+const Continuation = struct {
+    events: []const gateway_module.EventEnvelope,
+    metadata: recovery_module.Metadata,
+    checkpoint: []const u8,
+};
+
+fn checkPortableFile(init: std.process.Init, python: []const u8, script: []const u8, checkpoint: []const u8, metadata: recovery_module.Metadata, continuation: ?Continuation) !void {
     const durable = @import("../../persistence/durable_store.zig");
     const checkpoints = @import("../../strategy/strategy_checkpoint_store.zig");
     var cwd_buffer: [1024]u8 = undefined;
@@ -305,8 +313,11 @@ fn checkPortableFile(init: std.process.Init, python: []const u8, script: []const
     try std.testing.expectEqualDeep(publication, (try after_fault.latest(init.io)).?);
     const restored_content = try after_fault.restore(init.io, metadata);
     try std.testing.expectEqualSlices(u8, checkpoint, restored_content);
-    const next_plan = lifecycle.developmentPlan(0, 43, try lifecycle.discoverPythonAbi(init, python));
-    var next_host = try lifecycle.ManagedHost.start(init, python, script, next_plan, "portable", &.{ "--strategy-identity", "1", "--config-version", "1" });
+    var next_plan = lifecycle.developmentPlan(0, 43, try lifecycle.discoverPythonAbi(init, python));
+    if (continuation != null) next_plan.input_capacity = 4096;
+    var strategy_buffer: [48]u8 = undefined;
+    const strategy_text = try std.fmt.bufPrint(&strategy_buffer, "{d}", .{metadata.strategy_instance});
+    var next_host = try lifecycle.ManagedHost.start(init, python, script, next_plan, "portable", &.{ "--strategy-identity", strategy_text, "--config-version", "1" });
     defer next_host.deinit(init.io);
     try next_host.sendPlan(init.io);
     try expectLifecycle(.accepted, try next_host.receive(init.io, 1));
@@ -319,5 +330,97 @@ fn checkPortableFile(init: std.process.Init, python: []const u8, script: []const
     try next_host.requestCheckpoint(init.io, 1, metadata);
     try std.testing.expectEqualSlices(u8, checkpoint, try next_host.receiveCheckpoint(init.io, &recovery_frame));
     try std.testing.expectEqual(lifecycle.State.recovered, next_host.supervisor.state);
+    if (continuation) |tail| {
+        const now: i64 = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
+        var gateway = try realGateway(next_plan);
+        var input: [4096]u8 = undefined;
+        const batch = try gateway.encodeBatch(&input, 1, metadata.strategy_cursor + 1, tail.metadata.strategy_cursor, now, tail.events);
+        try next_host.sendInput(init.io, batch, now);
+        try next_host.requestCheckpoint(init.io, 2, tail.metadata);
+        try std.testing.expectEqualSlices(u8, tail.checkpoint, try next_host.receiveCheckpoint(init.io, &recovery_frame));
+        try std.testing.expectEqual(lifecycle.State.recovered, next_host.supervisor.state);
+    }
     try next_host.shutdown(init.io, 4);
+}
+
+fn realGateway(plan: lifecycle.Plan) !gateway_module.Gateway {
+    return gateway_module.Gateway.init(.{
+        .schema_registry = plan.compatibility.schema_registry,
+        .decision_domain = plan.decision_domain,
+        .session = plan.session,
+        .authorization = .{ .strategy_identity = 9, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 },
+    }, &.{gateway_module.Subscription.of(9, &.{ .mark_price, .timer, .account })});
+}
+
+fn runRealCheckpoint(init: std.process.Init, python: []const u8) !void {
+    const script = "python/test_arbitrage_host.py";
+    var plan = lifecycle.developmentPlan(0, 44, try lifecycle.discoverPythonAbi(init, python));
+    plan.input_capacity = 4096;
+    const metadata: recovery_module.Metadata = .{
+        .schema_registry = plan.compatibility.schema_registry,
+        .strategy_instance = 9,
+        .strategy_definition = 2,
+        .state_schema = 0x43565354415445000000000000000001,
+        .state_schema_version = 2,
+        .strategy_config_version = 1,
+        .strategy_cursor = 0,
+        .next_intent_sequence = 1,
+    };
+    var initial_storage: [8192]u8 = undefined;
+    const initial = try recovery_module.encodePayloadCheckpoint(&initial_storage, metadata, @embedFile("../fixtures/arbitrage_host_state_v2.json"));
+    const parsed = try std.json.parseFromSlice(std.json.Value, init.gpa, @embedFile("../fixtures/arbitrage_host_inputs_v1.json"), .{});
+    defer parsed.deinit();
+    var payloads: [14][64]u8 = undefined;
+    var events: [14]gateway_module.EventEnvelope = undefined;
+    for (parsed.value.array.items, 0..) |row, i| {
+        const values = row.array.items;
+        const payload = try std.fmt.hexToBytes(&payloads[i], values[2].string);
+        events[i] = .{
+            .event_type = @enumFromInt(values[0].integer),
+            .shard_sequence = @intCast(values[1].integer),
+            .source_time_ns = 0,
+            .receive_time_ns = 0,
+            .monotonic_time_ns = 0,
+            .wall_time_utc_ns = 0,
+            .payload = payload,
+        };
+    }
+    var final_metadata = metadata;
+    final_metadata.strategy_cursor = 14;
+    final_metadata.next_intent_sequence = 5;
+    var final_storage: [8192]u8 = undefined;
+    for ([_]u64{ 14, 7 }, 0..) |barrier, index| {
+        var current_plan = plan;
+        current_plan.session.generation += index;
+        var host = try lifecycle.ManagedHost.start(init, python, script, current_plan, "portable", &.{ "--strategy-identity", "9", "--config-version", "1" });
+        defer host.deinit(init.io);
+        try host.sendPlan(init.io);
+        try expectLifecycle(.accepted, try host.receive(init.io, 1));
+        try expectLifecycle(.accepted, try host.receive(init.io, 2));
+        var frame: [8192]u8 = undefined;
+        try host.beginRecovery(init.io, barrier, initial, &frame);
+        var gateway = try realGateway(current_plan);
+        var input: [4096]u8 = undefined;
+        const now: i64 = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
+        const batch = try gateway.encodeBatch(&input, 1, 1, barrier, now, events[0..@intCast(barrier)]);
+        try host.sendInput(init.io, batch, now);
+        try expectLifecycle(.accepted, try host.receive(init.io, 3));
+        var expected = metadata;
+        expected.strategy_cursor = barrier;
+        if (barrier == 14) expected.next_intent_sequence = 5;
+        try host.requestCheckpoint(init.io, 1, expected);
+        const checkpoint = try host.receiveCheckpoint(init.io, &frame);
+        if (index == 0) {
+            @memcpy(final_storage[0..checkpoint.len], checkpoint);
+        } else {
+            const final_len = get(u32, &final_storage, 12);
+            try checkPortableFile(init, python, script, checkpoint, expected, .{
+                .events = events[7..],
+                .metadata = final_metadata,
+                .checkpoint = final_storage[0..final_len],
+            });
+        }
+        try std.testing.expectEqual(lifecycle.State.recovered, host.supervisor.state);
+        try host.shutdown(init.io, 4);
+    }
 }
