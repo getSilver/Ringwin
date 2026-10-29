@@ -384,6 +384,29 @@ pub const ArchiveHarness = struct {
     }
 };
 
+test "09b archived identities constrain the next strategy intent sequence" {
+    const harness = try ArchiveHarness.create(std.testing.allocator, 970);
+    defer harness.destroy();
+    try archiveOrderFills(harness.owner, harness.gateway, harness.command.order_id);
+    const root = try harness.owner.archiveTerminalOrder(harness.command.order_id, harness.gateway);
+    try std.testing.expectEqual(@as(u16, 0), harness.owner.shard.oms.intent_history_count);
+    for ([_]u64{ 100, 101, 102 }) |sequence| {
+        const request: history.LookupRequest = .{
+            .pending_id = 1,
+            .key = .{ .origin = root.origin, .identity = .{ .intent = .{ .strategy = harness.command.strategy_instance, .sequence = sequence } } },
+            .candidate_payload_digest = @splat(0),
+            .original_input_digest = history.hash("recovery after real order archive"),
+            .root_digest = root.root_digest,
+            .epoch = root.epoch,
+            .barrier = root.barrier,
+        };
+        const result = try harness.owner.store.queryOrderHistory(harness.owner.io, request);
+        if (sequence <= 101) {
+            try std.testing.expectError(error.IntentSequenceRegression, history.verifyFreshIntentSequence(request, &result.proof, root));
+        } else try history.verifyFreshIntentSequence(request, &result.proof, root);
+    }
+}
+
 test "Owner Gateway archive failure boundaries preserve committed evidence on recovery" {
     for ([_]@TypeOf(@as(ArchiveFaultMemory, undefined).stage){ .history_publish, .decision_commit, .gateway_checkpoint }, 0..) |stage, index| {
         const harness = try ArchiveHarness.create(std.testing.allocator, 940 + 2 * index);

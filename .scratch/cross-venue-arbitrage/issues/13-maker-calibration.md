@@ -1,8 +1,8 @@
 # 13：Maker–Taker 独立校准与资格判定
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in_progress
+Assignee: Codex
 Blocked by: [05 状态空间挑战模型回放](05-state-space-model.md)；[11 Maker–Taker 完整交易周期](11-maker-taker-cycle.md)
 Parent: [模块地图](../map.md)
 
@@ -29,5 +29,7 @@ Parent: [模块地图](../map.md)
 
 ## Answer
 
-未实施；数学、公共接缝、校准及运行验收均以实际证据为准。
+2026-10-28：用户明确目前没有真实数据和真实市场，授权完成可开发离线范围。已完成独立Maker研究协议、公共Cycle/Facts观察、联合等待/成交/对冲诊断、模式/阶段/数量/报价适用域及持久研究journal复用；证据见[Maker校准开发记录](../maker-calibration-evidence.md)。
+
+离线工具与合成回归完成不勾选上述真实经济资格条件。本票保持in_progress；真实来源、块独立性、删失/尾部及保守误差校准、一次真实保留研究与完整收益风险资格均pending。15真实运行资格仍阻塞；本票没有部署或发真实/Demo订单。
 

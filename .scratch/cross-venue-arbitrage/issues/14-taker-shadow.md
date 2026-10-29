@@ -1,8 +1,8 @@
 # 14：双 IOC 只读影子验收
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in_progress
+Assignee: Codex
 Blocked by: [12 双 IOC 样本外校准与资格判定](12-taker-calibration.md)
 Parent: [模块地图](../map.md)
 
@@ -29,5 +29,11 @@ Parent: [模块地图](../map.md)
 
 ## Answer
 
-未实施；数学、公共接缝、校准及运行验收均以实际证据为准。
+2026-10-28：按用户“目前没有真实数据和真实市场，现在是开发阶段；把能做的做了”的澄清，已实现可开发的离线只读驱动、捕获/原始输入归档联合重放、显式运行门槛及监测/真实checkpoint恢复回归。见[14实施证据](../taker-shadow-evidence.md)。
+
+公开入口为 `python/arbitrage_shadow.py` 的 `Protocol/Frame/Session/replay`，复用真实 scanner、Admission、Signal、Monitor 及 Host checkpoint/depth codec；没有发送、预留回调、Intent编码或执行周期入口，不另造核心权威。建议只是不可发送的JSON摘要，合成结果始终 `qualification=false`。
+
+JSON捕获保存规范深度及输入指纹，不单独承载完整研究场景；重放还须提供全部原始不可变Frame归档与相同冻结依赖，再次运行扫描/准入并逐帧核对决定及私有状态。非确定的本机计算耗时不参与决定相等比较。
+
+以上是离线工具完成，不勾选真实验收条件。12冻结合格参数及实际Host/市场输入、预登记真实时长/样本/负载运行、捕获和实测资格均未取得；Blocked by 保留，运行资格pending，本票不关闭。未部署、未真实/Demo交易、未同步GitHub。
 

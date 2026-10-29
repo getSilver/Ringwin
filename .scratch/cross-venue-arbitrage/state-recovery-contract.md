@@ -1,6 +1,6 @@
 # S6 策略私有状态与恢复验收合同
 
-状态：语义字段、恢复顺序和验收要求已成文；序列化实现、数值资格与运行验收未执行。
+状态：语义字段、恢复顺序和验收要求已成文；2026-10-28 Python真实组件的v2序列化及策略侧恢复证据见[10证据](strategy-recovery-evidence.md)。真实日志尾/激活、跨平台数值资格及运行验收仍未执行。
 
 归属：[策略规格](issues/01-strategy-spec.md)。依据：[主合同](strategy-contract.md)、[S1–S3](strategy-refinement.md)、[参数合同](parameter-contract.md)、[信号与监测](signal-monitoring.md)。核心接口施工仍归[H3交接](issues/02-core-interface-handoff.md)；本文不选择新的存储架构或核心权威所有者。
 
@@ -130,7 +130,7 @@ Migrate需证明既有经济关联、冻结目标/期限、锁存和next IntentS
 
 测试应从Host输入/输出与核心规范事件、checkpoint发布/恢复接缝驱动；仅测试序列化往返或直接改私有字段不足以通过。证据输出至少包含版本哈希、输入摘要、崩溃切点、恢复屏障、前后状态摘要、意图/拒绝记录及核心占用/经济结果。
 
-本轮只定义验收输入与预期，S6-A至S6-P全部未执行。当前源码PortableState仍为accumulator/event_count示例；不能将本文视为接口已实现。
+原规格编写时只定义验收输入与预期，S6-A至S6-P全部未执行。2026-10-28 Python策略侧实现及各向量范围以[10证据](strategy-recovery-evidence.md)为准；真实跨模块公共接缝仍pending，不能据此声称完整运行验收通过。
 
 ## 9. S1–S6一致性与剩余交付
 

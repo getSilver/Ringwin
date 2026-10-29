@@ -22,7 +22,14 @@ Status: open
 ## Rules
 
 - 2026-10-23 用户确认 Python 策略的13张任务拆分及本地发布；当前仅发布计划，不开始实现、部署或交易。
+- 2026-10-27 用户明确授权以Python实施03，建立独立策略分支，不在main施工；本次仅认领03，不授权部署或交易。
+- 2026-10-27 用户继续授权处理04，使用独立分支 `strategy/04-python-baseline`；仍不部署或交易。
+- 2026-10-27 用户授权先认领并完成05，再处理06；分支 `strategy/05-06-python-model-evaluation`，依次完成，不部署或交易。
+- 2026-10-28 用户授权在当前分支 `spread-arbitrage-strategy-python` 完成07；仅Python策略及离线展示合同，不部署或交易。
+- 2026-10-28 用户授权在当前分支 `spread-arbitrage-strategy-python` 完成08；仅Python准入及离线合同，不部署或交易。
 - 使用根级 GLOSSARY.md 和相关 ADR 的规范领域语言。
+- 2026-10-28 用户授权当前分支按09→10→11逐票完成Python策略及离线合同，每次仅认领当前票；不部署、不执行真实或Demo交易、不同步GitHub。
+- 2026-10-28 用户继续授权按12→13→14→15逐票完成可开发离线范围，并明确目前没有真实数据和真实市场；工具及合成行为回归可完成，经济/运行资格保持pending。14/15离线工具开发不表示越过12/13真实资格的验收依赖；不部署、不执行真实或Demo交易、不同步GitHub。
 - 用户已确认的约束与建议、待决问题分开记录。
 - 按 Blocked by 领取 Frontier，每次只认领一张；ready-for-agent 不取消依赖。三项核心接口能力由其他会话处理，复用当前实现及验收证据；原规格票不因拆票自动关闭。
 - 交易所选择属于部署配置，不作为策略访谈问题。具体账户、币种名单和资金数值由运行配置提供；策略规格定义输入语义、约束及校验，不要求先选择部署实例。
@@ -47,11 +54,40 @@ Status: open
 
 ## Frontier
 
-- [03 完整周期经济计算与精确数量](issues/03-economic-calculation.md)：无 blocker，ready-for-agent，尚未认领。
-- [04 滚动统计与 AR(1) 预测回放](issues/04-baseline-prediction.md)：无 blocker，ready-for-agent，尚未认领。
+- [12 双 IOC 样本外校准与资格判定](issues/12-taker-calibration.md)：依赖05/10已完成，离线研究工具已开发，真实研究输入不足，in_progress，经济资格pending；见[12证据](taker-calibration-evidence.md)。
+- [13 Maker–Taker 独立校准与资格判定](issues/13-maker-calibration.md)：依赖05/11已完成，独立Maker离线研究工具已开发，in_progress，真实经济资格pending；见[13证据](maker-calibration-evidence.md)。
+- 14真实验收阻塞于12、15真实验收阻塞于13，尚非真实资格Frontier；用户2026-10-28已授权本轮按12→13→14→15推进可开发离线范围，开发次序不取消真实验收依赖。14离线工具已开发、运行资格pending，见[14证据](taker-shadow-evidence.md)；15离线工具已开发、运行资格pending，见[15证据](maker-shadow-evidence.md)；真实跨模块集成清单仍pending。
 - 原01/02为来源规格，保持原状态；其他会话施工及资格见核心接口地图。其余新票按各自 Blocked by 推进。
 
 ## Decisions so far
+
+- 2026-10-28：本轮12→13→14→15可开发离线工具范围均已交付；真实经济/运行资格分别pending，12–15仍in_progress，跨模块集成仍pending；模块保持open，不将合成回归或工具交付视为真实资格。
+
+- 2026-10-28：[15](issues/15-maker-shadow.md)交付Maker独立只读影子工具，复用14采集/预算/容量/实际重放及11的真实Cycle与maker checkpoint，私有副本输出纯数据模拟报价/撤换/对冲建议；无发送/订单/预留副作用。公开19/19（Maker9+原14十项）、Python全量230/230通过；Spec初审P2已修并补审通过，Standards无硬违例、可选P3重复检查建议保留。真实13资格依赖保留，观察样本/Host/Venue缺失，运行资格pending，票仍in_progress；见[15证据](maker-shadow-evidence.md)。
+
+- 2026-10-28：[14](issues/14-taker-shadow.md)交付离线只读Session，复用真实scanner/Admission/Signal/Monitor与Host深度/checkpoint codec，完整记录规范深度、输入指纹、候选/复核/拒绝、监测及私有状态。捕获JSON须与原始Frame归档共同重放；逐帧实际重新计算并定位差异，不比较本机耗时。显式门槛覆盖时长/样本/计算/负载/新鲜度/缺口/容量，公开10/10、Python全量221/221通过，Spec初审计算计时P2修复后两轴无剩余发现。任何合成结果均不授资格；真实参数/Host/市场未运行，12验收依赖保留，14为in_progress；见[14证据](taker-shadow-evidence.md)。
+
+- 2026-10-28：[13](issues/13-maker-calibration.md)复用12时间分区与持久journal，独立Maker模式与预登记适用域，从Maker Cycle/Facts提取真实公开组件的合成回归观察，提供等待删失×Unknown×成交×对冲联合诊断及阶段/参考/计划误差。公开9/9、Python全量211/211通过，Spec初审P2修复后两轴无剩余发现。真实研究输入仍缺，不继承12结论，不把压力权重或模拟数当经验概率/有效历史块；经济资格pending，本票in_progress，15真实验收仍阻塞；见[13证据](maker-calibration-evidence.md)。
+
+- 2026-10-28：[12](issues/12-taker-calibration.md)交付Python离线时间隔离、完整周期/NAV报告及持久试验/保留集使用工具；公开10/10、Python全量202/202通过，两轴补审无剩余发现。仓库数据核查仅见容量/故障、旧Demo与安全产物及夹具，未发现足够的真实双IOC研究输入。工具与合成回归不授经济资格，本票保持in_progress，14真实影子验收仍阻塞；见[12证据](taker-calibration-evidence.md)。
+
+- 2026-10-28：[11](issues/11-maker-taker-cycle.md)完成Python原生Post-only报价/撤换建议、已应用净增量扣在途hedge、Unknown/尾差、独立队列与联合压力、真实Maker v2 checkpoint和固定目标退出；20项Maker公开测试、Python全量192项通过。Standards无发现，Spec初审1项P2（在途减仓敞口区间）已修复，最终两轴无剩余发现，详见[11证据](maker-taker-cycle-evidence.md)。只关闭策略离线范围，Host取消/核心/Venue真实接线及经济/运行资格保持pending；本次09→10→11授权完成，未认领12以后，模块仍open。
+
+- 2026-10-28：[10](issues/10-strategy-recovery.md)完成真实Python模型/标签/Signal/Monitor/Admission/双IOC Cycle的v2严格checkpoint和恢复，保留v1兼容及核心事实引用边界；18项恢复回归、Python全量172项通过。双轴初审3项P2及补审1项P2均有公开失败回归并修复，最终两轴无剩余发现，详见[10证据](strategy-recovery-evidence.md)。真实日志尾/激活/核心权威及统计运行资格保持pending，Maker状态由11扩展；Frontier为11，本代理未继续认领。
+
+- 2026-10-28：[09](issues/09-dual-ioc-cycle.md)完成Python双IOC完整组、已应用经济投影驱动、有限修复/Unknown、Holding一次冻结、风险及止盈退出和核心闭合响应；21项新公开测试、Python全量154项通过。两轴复核1项Spec规则绑定P2已修复并补审通过，Standards无剩余项，详见[09证据](dual-ioc-cycle-evidence.md)。只关闭Python离线范围，真实接线/经济及运行资格保持pending；Frontier为10，09代理未继续认领。
+
+- 2026-10-28：[08](issues/08-whitelist-allocation.md)完成显式批准输入、最新条件重评、有限数量选择、精确Score分配、原身份Unknown和S5信号/监测合同；公开17/17、Python全量133/133通过。两轴复核问题已修复，详见[08证据](whitelist-allocation-evidence.md)。仅关闭Python离线范围；实际接线和统计/运行资格保持pending，下一Frontier为09，未认领。
+
+- 2026-10-28：[07](issues/07-opportunity-scanner.md)在用户指定分支 `spread-arbitrage-strategy-python` 完成只读扫描、稳定配对/方向/模式/maker腿身份、共享06评估及离线展示合同；扫描11/11、Python全量116/116通过，详见[07证据](opportunity-scanner-evidence.md)。仅关闭策略侧范围，实际Web/Host/Venue接线和统计/运行资格保持未完成；下一Frontier为08，本次未认领。
+
+- 2026-10-27：[06](issues/06-target-probability.md)完成联合场景、一次固定目标、实际计划收益及概率双门槛，包含无未来泄漏的冻结条件生成器；公开评估25项/概率5项、Python全量105项通过。两轴复核修复后无剩余项，见[06证据](target-probability-evidence.md)。05→06授权已完成，仅关闭数学/离线范围，下一Frontier为07，未继续认领。
+
+- 2026-10-27：[05](issues/05-state-space-model.md)完成状态空间/Joseph过滤、有界多起点拟合与可识别性诊断；公开12项、Python全量74项通过。重复起点元数据漏洞修复后两轴无剩余项，见[05证据](state-space-evidence.md)。仅关闭数学/离线范围；依用户顺序下一步处理06。
+
+- 2026-10-27：[04](issues/04-baseline-prediction.md)在 `strategy/04-python-baseline` 完成Python一秒网格、滚动分桶/AR(1)基线及成熟标签回放；24项公开测试、62项Python全量回归通过。两轴复核问题修复后无剩余项，详见[基线证据](baseline-prediction-evidence.md)。仅关闭数学及离线回放范围，不授予经济/运行资格；05/06进入Frontier，本次不继续认领。
+
+- 2026-10-27：[03](issues/03-economic-calculation.md)在 `strategy/03-python-economics` 完成Python经济计算、26项公开测试及38项Python全量回归，两轴复核无待修复发现。证据见[经济计算记录](economic-calculation-evidence.md)；仅关闭策略侧数学/离线合同范围，模型/目标状态机、统计资格、真实集成及运行资格仍按后续票独立验收。下一Frontier为04，本次不继续认领。
 
 - 2026-10-23：用户确认13张 Python 策略票（03–15）；原提案第5票拆为只读扫描与白名单准入。扫描可独立只读运行，发现白名单外机会；沿用现有 Web 控制面显式批准配对、方向和模式后，交易策略重新检查最新条件。加入白名单不补发过期机会，禁用保留存量退出及对账责任。
 - 扫描和交易共用经济/预测评估实现；数学验收包含独立精确基准、边界与不变量、递推交叉核验、时间隔离校准、有效样本及恢复决策一致性。模拟次数不充当市场独立样本，手工向量不替代统计或运行证据。
@@ -136,9 +172,9 @@ Status: open
 - 所有时限、金额/比例阈值、保证金压力情景和模型验证窗口的配置与校准方案。
 - 周期/残余引用、持久恢复需求、PnL/日损失/回撤及资金流口径已有文档；核心承接、参数数值与运行证据未完成。
 - 行情缺口、重新触发、恢复授权语义及验收向量已有文档；具体控制面接线与公共接缝运行验收未完成。
-- 当前规范盘口缺完整双边深度，Host 输出仅单意图，checkpoint 示例缺策略状态；跨账户共同准入、周期独占和残余归属尚未证明。具体架构选择若形成新权威边界，须先访谈确认再记录领域决策。
+- Python侧已复用深度/完整组/Post-only codec并实现真实策略checkpoint；实际规范行情与Host接线、跨账户共同准入、周期独占和残余归属仍须按[独立集成验收](integration-acceptance.md)取得公共路径证据，不沿用早期单意图/示例checkpoint描述替代当前源码核对。具体架构选择若形成新权威边界，须先访谈确认再记录领域决策。
 
 ## Out of scope
 
 - 具体交易所、账户、币种名单和部署资金数值的选择。
-- 本轮不实现策略、不部署、不执行真实或 Demo 交易、不同步 GitHub。
+- 部署、真实或 Demo 交易、GitHub同步；12–15本轮仅完成可开发离线工具，真实经济/运行资格仍须实际证据。

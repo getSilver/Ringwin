@@ -8,6 +8,7 @@ import os
 import struct
 import sys
 import time
+from typing import NamedTuple
 import strategy_state
 
 CROSS_VENUE_STATE_SCHEMA = strategy_state.SCHEMA
@@ -160,13 +161,14 @@ def output_frame(batch, args, session, intent_sequence=None, limit_price=None):
     return bytes(frame)
 
 
-def output_group_frame(batch, args, session, first_sequence):
+def output_group_frame(batch, args, session, first_sequence, second_args=None):
     """Schema 2 is one complete ordered group, never two output messages."""
     first = output_frame(batch, args, session, first_sequence)
-    second = bytearray(output_frame(batch, args, session, first_sequence + 1)[128:])
-    second[32:48] = getattr(args, "second_exchange_account_identity", 4).to_bytes(16, "little")
-    second[48:64] = (getattr(args, "second_instrument_identity", None) or args.instrument_identity).to_bytes(16, "little")
-    second[2] = 2
+    second = bytearray(output_frame(batch, second_args or args, session, first_sequence + 1)[128:])
+    if second_args is None:
+        second[32:48] = getattr(args, "second_exchange_account_identity", 4).to_bytes(16, "little")
+        second[48:64] = (getattr(args, "second_instrument_identity", None) or args.instrument_identity).to_bytes(16, "little")
+        second[2] = 2
     frame = bytearray(first + second)
     struct.pack_into("<I", frame, 12, len(frame))
     struct.pack_into("<HII", frame, 98, 2, 2, 160)
@@ -251,6 +253,38 @@ def decode_depth_snapshot(payload):
     return {"instrument": instrument, "rules_version": rules, "sequence": sequence,
             "visible_at_ns": visible_at, "bids": sides[0], "asks": sides[1],
             "bids_truncated": bool(payload[42]), "asks_truncated": bool(payload[43])}
+
+
+def encode_depth_snapshot(book):
+    """Canonical depth inverse for offline joint-path replay; same validated wire."""
+    if type(book) is not dict or set(book) != {"instrument", "rules_version", "sequence", "visible_at_ns",
+                                             "bids", "asks", "bids_truncated", "asks_truncated"}:
+        raise ValueError("invalid depth fields")
+    payload = bytearray(704)
+    for name, offset, size in (("instrument", 0, 16), ("rules_version", 16, 8),
+                                ("sequence", 24, 8), ("visible_at_ns", 32, 8)):
+        if type(book[name]) is not int:
+            raise ValueError("invalid depth integer")
+        payload[offset:offset+size] = book[name].to_bytes(size, "little")
+    for side, name in enumerate(("bids", "asks")):
+        levels = book[name]
+        if type(levels) is not tuple or not 1 <= len(levels) <= 8 or type(book[name+"_truncated"]) is not bool:
+            raise ValueError("invalid depth side")
+        payload[40+side] = len(levels)
+        payload[42+side] = book[name+"_truncated"]
+        for index, level in enumerate(levels):
+            if type(level) is not tuple or len(level) != 2:
+                raise ValueError("invalid depth level")
+            ticks, lots = level
+            if type(ticks) is not int or (lots is not None and type(lots) is not int):
+                raise ValueError("invalid depth integer")
+            offset = 64+(side*8+index)*40
+            payload[offset:offset+16] = ticks.to_bytes(16, "little", signed=True)
+            payload[offset+16] = lots is not None
+            payload[offset+24:offset+40] = (0 if lots is None else lots).to_bytes(16, "little", signed=True)
+    encoded = bytes(payload)
+    decode_depth_snapshot(encoded)
+    return encoded
 
 
 def trade_once(args, session, zig_sequence, host_sequence):
@@ -348,6 +382,8 @@ def decode_checkpoint(container):
         raise ValueError("invalid checkpoint content")
     metadata = checkpoint_metadata(container)
     if metadata["state_schema"] == CROSS_VENUE_STATE_SCHEMA:
+        if metadata["state_schema_version"] == 2:
+            return metadata, strategy_state.decode(payload, metadata["cursor"], metadata["strategy"], metadata["next_intent"], version=2)
         if metadata["state_schema_version"] != 1:
             raise ValueError("unsupported strategy state version")
         return metadata, strategy_state.decode(payload, metadata["cursor"], metadata["strategy"], metadata["next_intent"])
@@ -389,6 +425,8 @@ def checkpoint_metadata(container):
 
 def state_payload(metadata, state):
     if metadata["state_schema"] == CROSS_VENUE_STATE_SCHEMA:
+        if metadata["state_schema_version"] == 2:
+            return strategy_state.encode(state, metadata["cursor"], metadata["strategy"], metadata["next_intent"], version=2)
         if metadata["state_schema_version"] != 1:
             raise ValueError("unsupported strategy state version")
         return strategy_state.encode(state, metadata["cursor"], metadata["strategy"], metadata["next_intent"])
@@ -567,7 +605,56 @@ def recovery_once(args, session, zig_sequence, control_sequence, fault_strategy)
             break
 
 
-def portable_once(args, session, zig_sequence, control_sequence):
+class InputRecord(NamedTuple):
+    event_type: int
+    schema_version: int
+    time_presence: int
+    shard_sequence: int
+    source_time_ns: int
+    receive_time_ns: int
+    monotonic_time_ns: int
+    wall_time_utc_ns: int
+    payload: bytes
+
+
+def decode_component_batch(batch, session, number, cursor):
+    """Validate bounded QSHB framing before invoking package-owned callbacks."""
+    if (len(batch) < 128 or len(batch) > 1_048_576 or batch[:4] != b"QSHB" or
+            struct.unpack_from("<HHII", batch, 4) != (1, 128, 0, len(batch)) or
+            int.from_bytes(batch[16:32], "little") != SCHEMA_REGISTRY or
+            struct.unpack_from("<QI", batch, 48) != session[:2] or any(batch[60:64]) or
+            struct.unpack_from("<QQ", batch, 64) != (session[2], number) or
+            any(batch[112:124]) or crc32c(batch[:124]+batch[128:]) != struct.unpack_from("<I", batch, 124)[0]):
+        raise ValueError("invalid component batch")
+    first, last, published, count, size = struct.unpack_from("<QQqII", batch, 80)
+    if first != cursor+1 or last < first or published < 0 or count > 4096 or size != len(batch)-128:
+        raise ValueError("component batch coverage")
+    records = []
+    offset, previous = 128, first-1
+    while offset < len(batch):
+        if len(batch)-offset < 64:
+            raise ValueError("short component record")
+        length, size, kind, version, flags, sequence = struct.unpack_from("<IIHHIQ", batch, offset)
+        if (length < 64 or length % 8 or length > len(batch)-offset or size > length-64 or
+                kind not in range(1, 8) or version != 1 or flags & ~0x1f or
+                any(batch[offset+56:offset+64]) or not previous < sequence <= last or
+                any(batch[offset+64+size:offset+length])):
+            raise ValueError("invalid component record")
+        payload = batch[offset+64:offset+64+size]
+        if kind == 7:
+            decode_depth_snapshot(payload)
+        if len(records) >= count:
+            raise ValueError("component record count")
+        times = struct.unpack_from("<qqqq", batch, offset+24)
+        records.append(InputRecord(kind, version, flags, sequence, *times, payload))
+        previous = sequence
+        offset += length
+    if len(records) != count:
+        raise ValueError("component record count")
+    return records, last
+
+
+def portable_once(args, session, zig_sequence, control_sequence, runtime_factory=None):
     """Versioned private-state transport. It never grants trading authority."""
     kind, actual_session, sequence, payload = read_frame(sys.stdin.buffer)
     if kind != BEGIN_RECOVERY or actual_session != session or sequence != zig_sequence[0] or len(payload) < 200:
@@ -580,7 +667,14 @@ def portable_once(args, session, zig_sequence, control_sequence):
             metadata["strategy"] != int(args.strategy_identity, 0) or
             metadata["config_version"] != args.config_version or barrier < metadata["cursor"]):
         raise ValueError("portable checkpoint identity mismatch")
-    if barrier != metadata["cursor"]:
+    runtime = runtime_factory(payload[8:]) if runtime_factory is not None else None
+    if runtime is not None:
+        if metadata["state_schema_version"] != 2 or runtime.metadata != metadata:
+            raise ValueError("runtime checkpoint mismatch")
+        while runtime.metadata["cursor"] < barrier:
+            runtime.apply_batch(read_input(session, zig_sequence), session, barrier=barrier)
+        metadata, state = decode_checkpoint(runtime.checkpoint())
+    elif barrier != metadata["cursor"]:
         raise ValueError("portable replay implementation required")
     recovered = bytearray(96)
     recovered[:16] = metadata["strategy"].to_bytes(16, "little")
@@ -591,6 +685,7 @@ def portable_once(args, session, zig_sequence, control_sequence):
     write_frame(sys.stdout.buffer, STRATEGY_RECOVERED, session, control_sequence[0], recovered)
     control_sequence[0] += 1
     last_request = 0
+    activation = None
     while True:
         kind, actual_session, sequence, payload = read_frame(sys.stdin.buffer)
         if actual_session != session or sequence != zig_sequence[0]:
@@ -602,11 +697,34 @@ def portable_once(args, session, zig_sequence, control_sequence):
             request, cursor = struct.unpack("<QQ", payload)
             if request <= last_request or cursor != metadata["cursor"]:
                 raise ValueError("stale checkpoint request")
-            container = encode_checkpoint(metadata, state)
+            container = runtime.checkpoint() if runtime is not None else encode_checkpoint(metadata, state)
             write_frame(sys.stdout.buffer, CHECKPOINT_CONTENT, session,
                         control_sequence[0], struct.pack("<Q", request) + container)
             control_sequence[0] += 1
             last_request = request
+        elif kind == INPUT_BATCH and runtime is not None:
+            actions = runtime.apply_batch(payload, session)
+            metadata = runtime.metadata
+            if activation is not None:
+                identity, activation_barrier = activation
+                for action in actions:
+                    if action.cursor <= activation_barrier:
+                        continue
+                    boundary = bytearray(payload)
+                    struct.pack_into("<Q", boundary, 88, action.cursor)
+                    publish_intent(session, control_sequence, action.encode(bytes(boundary), session, activation=identity))
+        elif kind == ACTIVATE_STRATEGY and runtime is not None:
+            if activation is not None or len(payload) != 72:
+                raise ValueError("invalid portable activation")
+            identity = int.from_bytes(payload[16:32], "little")
+            activation_barrier = struct.unpack_from("<Q", payload, 32)[0]
+            current_metadata, current_state = decode_checkpoint(runtime.checkpoint())
+            if (int.from_bytes(payload[:16], "little") != metadata["strategy"] or not identity or
+                    not args.activation_identity or identity != int(args.activation_identity, 0) or
+                    activation_barrier != metadata["cursor"]+1 or
+                    payload[40:] != state_digest(current_metadata, current_state)):
+                raise ValueError("portable activation mismatch")
+            activation = identity, activation_barrier
         elif kind == SHUTDOWN:
             write_frame(sys.stdout.buffer, SHUTDOWN_ACK, session, control_sequence[0])
             return
@@ -627,7 +745,7 @@ def assert_no_backing_capability():
                 raise AssertionError("strategy child inherited ring backing")
 
 
-def main():
+def main(runtime_factory=None):
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
@@ -689,7 +807,7 @@ def main():
     zig_sequence = [2]
     try:
         if args.mode == "portable":
-            portable_once(args, session, zig_sequence, control_sequence)
+            portable_once(args, session, zig_sequence, control_sequence, runtime_factory)
             return 0
         elif args.mode == "trade":
             await_direct_activation(args, session, zig_sequence)
