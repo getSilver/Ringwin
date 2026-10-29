@@ -107,7 +107,7 @@ def apply_event(objects, record):
                 at_ns=point.grid_ns, independent_evidence=True)
         objects["signal"].observe(grid, grid, F(value), qualified=True, cursor=cursor)
     elif event_type == 4 and payload == b"start":
-        objects["cycle"].start(cursor=cursor, at_ns=T)
+        return objects["cycle"].start(cursor=cursor, at_ns=T)
     elif event_type == 4 and payload == b"probability":
         policy = replace(evaluation_policy(), min_entry_probability=objects["cycle"].plan.policy.min_entry_probability)
         actual = evaluation.evaluate((path("boundary"),), policy, objects["boundary_estimator"],
@@ -127,7 +127,7 @@ def apply_event(objects, record):
         current, kwargs = archived[payload]
         if current.cursor != cursor:
             raise ValueError("economic cursor")
-        objects["cycle"].apply(current, **kwargs)
+        return objects["cycle"].apply(current, **kwargs)
     else:
         raise ValueError("unsupported fixture input")
 
@@ -168,7 +168,7 @@ def batch(items, session=(1, 0, 1), number=1, first=None, last=None):
     return bytes(data)
 
 
-def run_host(saved, batches, barrier, *, session=(1, 0, 1), expected_cursor=None):
+def run_host(saved, batches, barrier, *, session=(1, 0, 1), expected_cursor=None, script=None, extra_args=()):
     wire = io.BytesIO()
     plan_bytes = bytearray(176)
     struct.pack_into("<QI4xQ", plan_bytes, 48, *session)
@@ -182,8 +182,8 @@ def run_host(saved, batches, barrier, *, session=(1, 0, 1), expected_cursor=None
     host.write_frame(wire, host.REQUEST_CHECKPOINT, session, sequence, struct.pack("<QQ", 1, cursor))
     host.write_frame(wire, host.SHUTDOWN, session, sequence+1)
     version = struct.unpack_from("<Q", saved, 88)[0]
-    result = subprocess.run([sys.executable, __file__, "--mode", "portable", "--strategy-identity", "9",
-                            "--config-version", str(version)],
+    result = subprocess.run([sys.executable, script or __file__, "--mode", "portable", "--strategy-identity", "9",
+                            "--config-version", str(version), *extra_args],
                             input=wire.getvalue(), capture_output=True, timeout=30)
     return result
 

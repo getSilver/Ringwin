@@ -606,9 +606,12 @@ class ComponentRuntime:
                                                     self.metadata["cursor"])
         if barrier is not None and last > barrier:
             raise ValueError("batch crosses recovery barrier")
+        actions = []
         for record in records:
             cursor = record.shard_sequence
-            self.apply_event(self.components, record)
+            action = self.apply_event(self.components, record)
+            if action is not None and action.intents:
+                actions.append(action)
             self.metadata["cursor"] = cursor
             sequences = {obj.next_sequence for obj in self.components.values()
                          if type(obj) in (cycle.Cycle, maker.Cycle)}
@@ -621,8 +624,62 @@ class ComponentRuntime:
         self.metadata["cursor"] = last
         self.last_batch += 1
         self.failed = False
+        return actions
 
     def checkpoint(self):
         if self.failed:
             raise ValueError("failed runtime")
         return checkpoint(self.metadata, self.components)
+
+
+def transition_checkpoint(container, source_templates, target_templates, *, expected, target_metadata,
+                          transition, migrate=None):
+    """Package-owned, explicit Keep/Migrate/Rebuild; never an IPC callback name.
+
+    Model changes cannot rewrite a frozen cycle, outstanding label, request,
+    risk latch, deadline, or intent sequence. Successors start their own state.
+    """
+    import strategy_host as host
+    metadata, original = restore(container, source_templates, expected=expected)
+    if transition not in ("keep", "migrate", "rebuild"):
+        raise ValueError("unknown transition")
+    for key in ("schema_registry", "strategy", "state_schema", "state_schema_version", "cursor", "next_intent"):
+        if metadata[key] != target_metadata[key]:
+            raise ValueError("transition identity or progress")
+    if set(source_templates) != set(target_templates):
+        raise ValueError("transition component scope")
+    if transition == "keep":
+        if metadata != target_metadata:
+            raise ValueError("Keep metadata mismatch")
+        restore(container, target_templates, expected=expected)
+        return container
+    if transition == "migrate" and not callable(migrate):
+        raise ValueError("explicit model migration required")
+    state = snapshot(original, metadata["cursor"], metadata["strategy"], metadata["next_intent"])
+    # Closed labels, cycle plans and economic references keep their old versions.
+    models = {"rolling", "rolling_baseline", "ar1", "filter", "estimator", "calibration"}
+    for row in state["components"]:
+        name, tag = row["name"], row["tag"]
+        target = target_templates[name]
+        if TYPES.get(type(target)) != tag:
+            raise ValueError("transition component type")
+        digest = content(dependency(target))
+        if tag not in models:
+            if digest != row["dependency"]:
+                raise ValueError("frozen non-model dependency")
+            continue
+        if transition == "rebuild" and tag in ("rolling", "filter"):
+            row["state"] = progress(target, tag)
+        elif transition == "migrate":
+            row["state"] = migrate(name, tag, copy.deepcopy(row["state"]))
+        row["dependency"] = digest
+    migrated = host.encode_checkpoint(target_metadata, state)
+    _, result = restore(migrated, target_templates, expected=target_metadata)
+    if transition == "rebuild":
+        for obj in result.values():
+            if type(obj) is signals.Signal:
+                obj.lock("rebuild", "definition:"+str(target_metadata["definition"]))
+            elif type(obj) is signals.Monitor:
+                obj.qualified = False
+                obj.good_windows = 0
+    return checkpoint(target_metadata, result)

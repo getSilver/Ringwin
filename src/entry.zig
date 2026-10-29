@@ -134,6 +134,7 @@ const selected = switch (@import("entry_options").index) {
     130 => @import("testing/acceptance/core/native_rounding_acceptance.zig"),
     131 => @import("testing/acceptance/core/multi_portfolio_authority_acceptance.zig"),
     132 => @import("testing/acceptance/core/multi_portfolio_netting_acceptance.zig"),
+    133 => @import("runtime/strategy_cycle_recovery.zig"),
     else => @compileError("unknown standalone source entry"),
 };
 

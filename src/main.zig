@@ -1,5 +1,6 @@
 const std = @import("std");
 test {
+    _ = @import("runtime/strategy_cycle_recovery.zig");
     _ = @import("testing/acceptance/core/multi_account_authority_acceptance.zig");
     _ = @import("testing/acceptance/core/dual_ioc_dispatch_acceptance.zig");
     _ = @import("testing/acceptance/core/native_post_only_acceptance.zig");

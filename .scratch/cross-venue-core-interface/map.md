@@ -49,7 +49,7 @@ Status: open
 ## Frontier
 
 
-- [09b 策略恢复与核心占用联结](issues/09b-cycle-recovery-activation.md)：ready-for-agent；08与09a均已resolved，尚未领取或完成核心对账/恢复激活验收。
+- [09b 策略恢复与核心占用联结](issues/09b-cycle-recovery-activation.md)：in_progress，Codex；08与09a均已resolved，正在既有worktree实施核心对账/恢复激活验收。
 
 ## Decisions so far
 

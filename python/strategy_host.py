@@ -685,6 +685,7 @@ def portable_once(args, session, zig_sequence, control_sequence, runtime_factory
     write_frame(sys.stdout.buffer, STRATEGY_RECOVERED, session, control_sequence[0], recovered)
     control_sequence[0] += 1
     last_request = 0
+    activation = None
     while True:
         kind, actual_session, sequence, payload = read_frame(sys.stdin.buffer)
         if actual_session != session or sequence != zig_sequence[0]:
@@ -702,8 +703,28 @@ def portable_once(args, session, zig_sequence, control_sequence, runtime_factory
             control_sequence[0] += 1
             last_request = request
         elif kind == INPUT_BATCH and runtime is not None:
-            runtime.apply_batch(payload, session)
+            actions = runtime.apply_batch(payload, session)
             metadata = runtime.metadata
+            if activation is not None:
+                identity, activation_barrier = activation
+                for action in actions:
+                    if action.cursor <= activation_barrier:
+                        continue
+                    boundary = bytearray(payload)
+                    struct.pack_into("<Q", boundary, 88, action.cursor)
+                    publish_intent(session, control_sequence, action.encode(bytes(boundary), session, activation=identity))
+        elif kind == ACTIVATE_STRATEGY and runtime is not None:
+            if activation is not None or len(payload) != 72:
+                raise ValueError("invalid portable activation")
+            identity = int.from_bytes(payload[16:32], "little")
+            activation_barrier = struct.unpack_from("<Q", payload, 32)[0]
+            current_metadata, current_state = decode_checkpoint(runtime.checkpoint())
+            if (int.from_bytes(payload[:16], "little") != metadata["strategy"] or not identity or
+                    not args.activation_identity or identity != int(args.activation_identity, 0) or
+                    activation_barrier != metadata["cursor"]+1 or
+                    payload[40:] != state_digest(current_metadata, current_state)):
+                raise ValueError("portable activation mismatch")
+            activation = identity, activation_barrier
         elif kind == SHUTDOWN:
             write_frame(sys.stdout.buffer, SHUTDOWN_ACK, session, control_sequence[0])
             return
