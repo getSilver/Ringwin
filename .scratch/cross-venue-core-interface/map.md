@@ -1,6 +1,6 @@
 # 跨所策略核心接口任务
 
-Status: open
+Status: closed
 
 来源：[三项核心接口交接 spec](../cross-venue-arbitrage/issues/02-core-interface-handoff.md)。
 用户于 2026-10-20 确认原 10 票拆分，并在 01 设计审查后确认 ADR0017 及 05a/05b、09a/09b 追加拆分。01 已完成；05/09 保留为汇总验收。架构确认不表示功能实现或运行资格已通过。
@@ -41,17 +41,19 @@ Status: open
 | [06 双 IOC 执行](issues/06-dual-ioc-dispatch.md) | 05 | H2；resolved，离线执行接缝验收 |
 | [07 原生 Post-only](issues/07-native-post-only.md) | 05 | H2；resolved，离线原生 Post-only 接缝验收 |
 | [08 确定性 checkpoint](issues/08-deterministic-checkpoint.md) | 无；真实策略schema v2已确认 | H3；resolved，Windows本机离线确定性验收 |
-| [09 周期恢复与激活](issues/09-cycle-recovery.md) | 09a、09b（均已完成） | H3 汇总验收 |
+| [09 周期恢复与激活](issues/09-cycle-recovery.md) | 09a、09b（均已完成） | H3；resolved，Windows本机离线汇总验收 |
 | [09a 核心周期闭合](issues/09a-cycle-closure-residual.md) | 05b（已完成） | H3；resolved，显式配置/默认关闭的核心能力 |
 | [09b 恢复与激活](issues/09b-cycle-recovery-activation.md) | 08、09a（均已完成） | H3；resolved，Windows本机离线恢复/激活接缝验收 |
-| [10 综合验收](issues/10-public-seam-acceptance.md) | 03、06、07、09；相关策略行为与参数合同冻结 | H1/H2/H3 |
+| [10 综合验收](issues/10-public-seam-acceptance.md) | 03、06、07、09；相关策略行为与参数合同冻结 | H1/H2/H3；resolved，Windows本机离线综合验收 |
 
 ## Frontier
 
 
-- [10 H1–H3 公共接缝综合验收](issues/10-public-seam-acceptance.md)：in_progress；09 汇总已按 Windows 本机离线范围验收，用户确认冻结既有行为/schema/模型与明确标注的测试参数；生产校准和 Venue 资格独立未取得。
+无。01–10及追加子票均已在各自明确范围resolved；本模块按用户确认的Windows本机离线交付范围closed。生产校准、Venue/模式及其他平台资格独立未取得，不由本模块完成替代。
 
 ## Decisions so far
+
+- 2026-10-30：10按确认的Windows本机离线范围resolved，模块closed。实现`bec1ad4c`、审查修订`1b77d655`；最终Python245/245、ReleaseSafe819/819、Host产品28/28均exit0，两轴复审无遗留发现。公共深度、真实Host双腿、共同准入/发送、报告先到/重复Fill、文件重开及持久激活联合通过；见[合同](10-acceptance-contract.md)和[逐项证据](10-verification.md)。来源spec、生产校准、真实Venue/完整Maker模式和跨平台资格不关闭，无部署或交易。
 
 - 2026-10-29：本次用户确认第10票按离线范围完成，冻结既有策略行为/schema v2/模型和明确测试值，部署/校准参数与 Venue 资格另列。当前主树477fc436复跑恢复公共程序exit0，09八项证据汇总通过并resolved；见[09汇总](issues/09-cycle-recovery.md)。开始10，不修改来源spec或授权交易。
 
@@ -98,8 +100,8 @@ Status: open
 - 多账户核心容量、格式与预算来源已由05a冻结并离线验证；完整清单和独立可信锚点的产品发布接入仍缺失，入口保持关闭，动态租约扩容首版不开放。
 - 09a 当前支持显式规则下正sub-lot承接、独立费用调整及同所有者未冻结残余复用，核心人工冻结/解冻不等于Web接线或自动清理权限。生产Asset数值、真实Venue凭证、终结身份认证回收及连续运行容量仍未获资格；新全量ReleaseSafe 724/724通过（退出0）；核心票已按用户限定范围关闭，后续配置与资格仍未完成。
 - 快照、连续深度及重同步已由 02/03 声明并离线验证；已知价格覆盖、8 档及截断后的保守失效限制继续适用。
-- 08 的 schema/codec/容量已确认；真实模型的版本、输入更新、不同批次/切点和支持平台运行确定性证据仍待完成。
-- 相关策略行为、参数合同及模型版本的冻结证据；文档成文不自动等于冻结。
+- 08 的真实模型、输入更新及不同批次/切点已按Windows本机范围resolved，见其最终验证；其他平台/真实canonical日志的资格仍未取得。
+- 本次用户确认冻结既有策略行为、schema v2、模型和明确测试值，见[10合同](10-acceptance-contract.md)；部署/校准参数及模型研究资格仍未取得，测试值不成为生产配置。
 - Venue 与模式运行资格、实际参数校准及线上验证授权。
 
 ## Out of scope
