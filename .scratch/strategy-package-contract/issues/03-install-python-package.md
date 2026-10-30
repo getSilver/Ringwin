@@ -55,3 +55,17 @@ Parent: [模块地图](../map.md)
 - 未执行真实Host/解释器、浏览器自动化、Demo、生产部署或运行资格验收；本票不创建实例或授予交易权限。真实加载与Ready由04负责；系统断电及目标文件系统资格仍需独立证据。
 - 测试产生的夹具修改已清理；原控制面worktree既有工作区文件删除及文档修改保留。未合并主线、推送或同步GitHub。
 
+### 02/03工作树合并补充（2026-10-30）
+
+用户要求统一工作树与分支。合并提交 `5e7defb5` 位于
+`D:/github/Ringwin-strategy-package-03` / `codex/strategy-package-03`，完整保留
+02分支及03控制面实现分支的历史。先前分支说明为各票实施时的历史记录，后续使用此统一入口。
+
+- 保留当前核心源码布局，不恢复旧根级TradingShard；控制面探针复用当前规范genesis、CanonicalEvent.core及权威回放。KillSwitch推进权限事实屏障并撤销Host activation；核心成功空操作由适配层按权威屏障识别为重复投递。
+- 当前残余冻结/解冻编号7/8不变，KillSwitch追加为9；Python与Zig信封同步v2，拒绝旧v1，通道两端必须同时使用本版本。旧控制面夹具日志不迁移到当前核心schema。
+- 旧Web投影保留主品种及micros字段，结算scale非6或额外组合明确degraded，不跨单位汇总；详细边界见仓库内 `docs/strategy-package-release.md`。
+- 原生 `zig build native-contract -Doptimize=ReleaseSafe` 通过；控制通道专项4/4、真实TCP/紧急目录、投影与损坏日志、Web发布、页面脚本，以及Web Pause → EnableTrading → KillSwitch → 回放/操作记录验收通过。
+- 合并后Python全量260项：Windows Python3.9.18为247通过、13项按平台跳过；WSL Python3.8.10为259通过、1项环境错误（既有数值测试使用3.8缺失的 `math.ulp`；仓库要求Python3.9+，相关源码与合并前一致）。WSL中的12项包发布和3项认证测试均通过，既有非致命socket ResourceWarning仍在。
+- 当前核心 `zig build test -Doptimize=ReleaseSafe --summary all` 编译成功并进入全量运行；额外运行近半小时后主动停止，**未获得全量通过结论**，不沿用02或旧控制面分支的测试计数。合并适配以已通过的原生合同、签名通道、真实Web操作及回放专项为证据。首次扩展通道运行发现的重复投递计数问题修复后，最终专项4/4通过；被替代的旧扩展运行已停止。
+- 双轴合并审查及重复投递适配复审：Standards 0项、Spec 0项。未实现04、未执行Demo、生产部署或浏览器自动化；旧普通命令默认expiry幂等缺陷继续单列，不声称旧整波通过。
+

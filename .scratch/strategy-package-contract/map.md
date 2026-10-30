@@ -44,6 +44,7 @@ Status: open
 
 ## Decisions so far
 
+- 2026-10-30：按用户要求，将02、03及既有控制面依赖统一到 worktree `D:/github/Ringwin-strategy-package-03`、分支 `codex/strategy-package-03`，合并提交 `5e7defb5`；两个源分支均为该提交祖先，后续以此统一入口继续。适配当前核心目录、CanonicalEvent、规范genesis与回放；保留残余冻结命令7/8，追加KillSwitch为9，控制通道两端同步为v2并拒绝v1。历史工作树保留，原有未提交改动未动；04尚未认领，地图保持open。合并验收补充见03票末尾。
 - 2026-10-30：03完成。实现分支 `codex/strategy-package-03-control-plane` 提交 `0f558022`、`d8774609`；票据分支 `codex/strategy-package-03` 保留02及main文档。交付签名Python包验证、原子安装/登记、Web结果和外置资格证据绑定；Python全量15/15、旧控制面Zig108/108及发布/认证回归通过，双轴复审0项。旧整波测试因基线已有普通命令默认过期时间导致的幂等缺陷失败，具体复现与边界见03；不能声称整波或真实运行资格通过。未导入策略、创建实例或授予权限。03移出Frontier，04可接手但未认领，地图保持open。
 - 2026-10-30：02票在独立 worktree `D:/github/Ringwin-strategy-package-02`、分支 `codex/strategy-package-02` 完成。交付原生静态注册、独立构建清单和最小观察策略；构建验收8/8（12个正反向向量），Debug与ReleaseFast全量均820/820通过，Standards/Spec及测试栈修正复审均0项发现。原生发布与激活仍由09票接通；未执行Demo、部署或Linux运行资格验收。02移出Frontier，03尚未认领，地图保持open。
 - 2026-10-29：用户批准并发布02–11十张纵向实施票，首批Frontier为02/03。依赖为04←03、05←04、06←05、07←06、08←06、09←02/03/06/08、10←05/06/08、11←07/09/10；各票Blocked by以相对链接为准。保留01合同票，地图保持open；不新增横向预重构、隔离系统或恢复协议。
