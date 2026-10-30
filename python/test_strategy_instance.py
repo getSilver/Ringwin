@@ -271,12 +271,21 @@ assert all("unapproved-path" not in p for p in sys.path)
         self.assertEqual(status, 400, body)
         self.assertEqual(self.instances._hosts, {})
 
-    def test_network_actions_are_rejected_inside_candidate(self):
-        self.install(b"import socket\nsocket.socket()\n" + OBSERVER)
+    def test_external_actions_are_rejected_inside_candidate(self):
+        code = b'''import socket, os
+for action in (socket.socket, lambda: os.system("true")):
+    try:
+        action()
+    except PermissionError:
+        pass
+    else:
+        raise ValueError("candidate external action was allowed")
+''' + OBSERVER
+        self.install(code)
         status, body = self.create()
         self.assertEqual(status, 200, body)
-        self.assertEqual(body["result"]["status"], "Stopped", body)
-        self.assertIn("external action forbidden", body["result"]["reason"])
+        self.assertEqual(body["result"]["status"], "Ready", body)
+        self.assertFalse(body["result"]["trading_authorized"])
 
     def test_undeclared_transitive_import_file_is_rejected_before_launch(self):
         self.install(OBSERVER.replace(b"import json", b"import json, helper"))

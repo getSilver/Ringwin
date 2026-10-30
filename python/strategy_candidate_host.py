@@ -18,12 +18,14 @@ import strategy_package as package
 
 
 def restrict(event, args):
-    if event.startswith(("socket.", "subprocess.", "os.exec", "os.spawn", "ctypes.dlopen")):
+    if event.startswith(("socket.", "subprocess.", "os.exec", "os.spawn", "os.posix_spawn",
+                         "os.fork", "os.system", "os.startfile", "ctypes.dlopen")):
         raise PermissionError("candidate external action forbidden")
     if event == "open" and (isinstance(args[1], str) and any(c in args[1] for c in "wax+")
                             or args[2] & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC)):
         raise PermissionError("candidate filesystem is read-only")
-    if event in ("os.remove", "os.rename", "os.rmdir", "os.mkdir", "os.chmod", "os.link", "os.symlink"):
+    if event in ("os.remove", "os.rename", "os.rmdir", "os.mkdir", "os.chmod", "os.chown", "os.utime",
+                 "os.link", "os.symlink", "os.truncate", "os.setxattr", "os.removexattr"):
         raise PermissionError("candidate filesystem is read-only")
 
 
