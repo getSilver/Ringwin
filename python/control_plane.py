@@ -5,6 +5,8 @@ localhost TCP pull channel. The envelope format is frozen in
 src/control_channel.zig; both sides must stay byte-compatible.
 """
 
+from __future__ import annotations
+
 import hashlib
 import hmac
 import socket

@@ -14,6 +14,8 @@
 成功输出: control_plane_wave_acceptance=passed
 """
 
+from __future__ import annotations
+
 import http.client
 import json
 import os
@@ -276,8 +278,6 @@ def phase_replay(client_last: list[dict], bins: dict) -> None:
 
 
 def main() -> None:
-    subprocess.run(["taskkill", "/IM", "control_plane_node.exe", "/F"],
-                   capture_output=True)
     bins = build()
     shutil.rmtree(RUNTIME, ignore_errors=True)
     shutil.rmtree(WORKDIR, ignore_errors=True)

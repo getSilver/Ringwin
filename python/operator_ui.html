@@ -191,6 +191,7 @@ function pageOps(){
         <button class="danger" onclick="submitLifecycle('failover',${s.target_identity})">Failover*</button>
       </div></div>`).join("") +
     `<p class="dim">* = 需要 RiskWarning 确认</p>
+     <div class="panel"><h2>策略包登记与发布结果</h2><div id="packages">加载中…</div></div>
      <div class="panel"><h2>事实流 (最新在前)</h2><div id="feed">— 等待事件 —</div></div>`;
 }
 function pageRecords(){
@@ -207,7 +208,7 @@ let feedLines = [];
 function render(){
   drawNav();
   document.getElementById("main").innerHTML = RENDERERS[currentPage]();
-  if (currentPage === 4) renderFeed();
+  if (currentPage === 4) { renderFeed(); loadPackages(); }
   if (currentPage === 5) loadRecords();
 }
 async function loadRecords(){
@@ -217,10 +218,30 @@ async function loadRecords(){
     body.records.map(r=>`<tr><td>${new Date(r.recorded_at*1000).toTimeString().slice(0,8)}</td>
       <td>${r.kind}</td><td>@${r.target_identity}</td><td>${r.risk_warning_identity??"—"}</td></tr>`).join("") + "</table>";
 }
+function escaped(value){
+  const el = document.createElement("span");
+  el.textContent = String(value ?? "");
+  return el.innerHTML;
+}
+async function loadPackages(){
+  const el = document.getElementById("packages"); if (!el) return;
+  try {
+    const [status, body] = await api("GET", "/api/releases");
+    if (status !== 200) { el.textContent = body.error || "登记查询失败"; return; }
+    const packages = body.strategy_packages || [];
+    el.innerHTML = `<p>当前发布：${escaped(body.active_artifact || "未确认")}；安装不授予交易权限。</p>` +
+      (packages.length ? `<table><tr><th>定义 / 包摘要</th><th>发布 / 验证</th><th>资格范围</th></tr>` +
+        packages.map(p=>`<tr><td>${escaped(p.name)}<br>${escaped(p.definition_identity)}<br>${escaped(p.package_manifest_sha256)}</td>
+          <td>${escaped(p.release_artifact)}${p.active_release ? "（当前发布）" : "（已登记）"}<br>${escaped(p.validation)}；无交易授权</td>
+          <td>${p.qualifications.length ? p.qualifications.map(q=>`${escaped(q.status)}<br>${escaped(JSON.stringify(q.scope))}`).join("<br>") : "资格待取得"}</td></tr>`).join("") + `</table>` : "尚无策略包登记。") +
+      (body.qualification_rejections || []).map(r=>`<p>资格报告拒绝：${escaped(r.reason)}</p>`).join("") +
+      (body.release_records || []).slice(-10).reverse().map(r=>`<p>${escaped(r.artifact_id || "候选发布")}：${escaped(r.result.status)} ${escaped(r.result.reason || "")}</p>`).join("");
+  } catch (error) { el.textContent = "登记查询失败，请重试。"; }
+}
 function renderFeed(){
   const el = document.getElementById("feed");
   if (el) el.innerHTML = feedLines.length
-    ? feedLines.map(l=>`<div>· ${l}</div>`).join("") : "— 暂无新事实 —";
+    ? feedLines.map(l=>`<div>· ${escaped(l)}</div>`).join("") : "— 暂无新事实 —";
 }
 
 // ---------- 命令流 ----------
@@ -254,6 +275,9 @@ async function submitLifecycle(kind, target){
   if (kind === "deploy_release" || kind === "forward_rollback") {
     command.manifest_path = prompt("请输入已批准 ReleaseArtifact manifest 路径:");
     if (!command.manifest_path) return;
+    const digest = prompt("已批准制品清单 SHA-256（旧单二进制发布可留空）:");
+    if (digest === null) return;
+    if (digest) command.manifest_sha256 = digest;
     command.expected_active = prompt("当前 active artifact（留空表示首次发布）:") || null;
   } else if (kind === "credential_rotate") {
     const version = prompt("请输入凭证版本号:");
@@ -268,10 +292,12 @@ async function submitLifecycle(kind, target){
     command.risk_warning_identity = warning.warning_identity;
   }
   const [status, body] = await api("POST","/lifecycle",command);
-  toast(status===200 ? `${kind} 已提交` : `✗ ${body.error}`,
-        status===200?"ok":"bad");
+  const result = body.result || {};
+  const accepted = status === 200 && ["activated", "queued"].includes(result.status);
+  const outcome = status === 200 ? `${result.status || "unknown"} ${result.reason || ""}` : body.error;
+  toast(`${kind}：${outcome}`, accepted ? "ok" : "bad");
   feedLines.unshift(`${new Date().toTimeString().slice(0,8)} ${kind}` +
-                    (status===200 ? " 已签名提交" : " 被拒绝"));
+                    ` ${outcome}`);
   render();
 }
 function expectedVersion(target){

@@ -86,8 +86,6 @@ class Client:
 
 def main() -> None:
     # A stray node from a crashed run would steal polled commands; clear it.
-    subprocess.run(["taskkill", "/IM", "control_plane_node.exe", "/F"],
-                   capture_output=True)
     bins = build()
     shutil.rmtree(RUNTIME, ignore_errors=True)
     shutil.rmtree(WORKDIR, ignore_errors=True)

@@ -8,6 +8,8 @@ Security baseline (standard library only):
   - login attempts are rate limited per source address.
 """
 
+from __future__ import annotations
+
 import hashlib
 import hmac
 import json
@@ -383,10 +385,12 @@ class ControlPlaneApp:
         try:
             if kind == "deploy_release":
                 result = self.release_manager.deploy(
-                    command_identity, command["manifest_path"], command.get("expected_active"))
+                    command_identity, command["manifest_path"], command.get("expected_active"),
+                    command.get("manifest_sha256"))
             elif kind == "forward_rollback":
                 result = self.release_manager.forward_rollback(
-                    command_identity, command["manifest_path"], command.get("expected_active"))
+                    command_identity, command["manifest_path"], command.get("expected_active"),
+                    command.get("manifest_sha256"))
             else:
                 result = self.lifecycle_outbox.submit(
                     command_identity, kind, command.get("target", "global"),
@@ -432,12 +436,13 @@ class ControlPlaneApp:
             return status, body
         if self.release_manager is None:
             return 503, {"ok": False, "error": "release backend unavailable"}
-        root = self.release_manager.release_root
-        manifests = [os.path.join(root, name) for name in sorted(os.listdir(root))
-                     if name.endswith(".json")]
-        return 200, {"ok": True,
-                     "active_artifact": self.release_manager.active_artifact(),
-                     "manifests": manifests}
+        try:
+            root = self.release_manager.release_root
+            manifests = [os.path.join(root, name) for name in sorted(os.listdir(root))
+                         if name.endswith(".json")]
+            return 200, {"ok": True, **self.release_manager.release_view(), "manifests": manifests}
+        except (release_lifecycle.ReleaseError, OSError) as error:
+            return 503, {"ok": False, "error": str(error)}
 
     def ui_page(self) -> tuple[int, bytes, str]:
         if self.ui_path is None or not os.path.exists(self.ui_path):
