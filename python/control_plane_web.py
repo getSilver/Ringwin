@@ -463,7 +463,12 @@ class ControlPlaneApp:
         try:
             if binding is None:
                 return 200, {"ok": True, "instances": self.instance_manager.view()}
-            result = self.instance_manager.create(binding)
+            if type(binding) is dict and binding.get("operation") == "recover":
+                if binding.keys() != {"operation", "strategy_identity"}:
+                    raise ValueError("unexpected recovery fields")
+                result = self.instance_manager.recover(binding["strategy_identity"])
+            else:
+                result = self.instance_manager.create(binding)
             return 200, {"ok": result["status"] == "Ready", "result": result}
         except (ValueError, OSError, release_lifecycle.ReleaseError) as error:
             return 400, {"ok": False, "error": str(error)}

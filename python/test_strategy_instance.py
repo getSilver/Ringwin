@@ -1,6 +1,7 @@
 """Real candidate Host acceptance through the authenticated Web boundary."""
 
 import hashlib
+import concurrent.futures
 import functools
 import io
 import json
@@ -84,6 +85,35 @@ def create(context, config):
 '''
 
 
+DECISION_OBSERVER = OBSERVER + b'''
+class DecisionObserver(Observer):
+    def __init__(self, context, config):
+        super().__init__(context, config)
+        self.decisions = []
+    def on_event(self, event):
+        self.events += 1
+        intent = OrderIntent(self.next_intent_sequence, 1, 2, 3, "buy", "gtc", False, event.sequence, 100)
+        self.next_intent_sequence += 1
+        self.decisions.append(list(intent))
+        return (intent,)
+    def snapshot(self):
+        return json.dumps(dict(events=self.events, next_intent_sequence=self.next_intent_sequence,
+                               decisions=self.decisions), sort_keys=True, separators=(",", ":")).encode()
+    def restore(self, data):
+        state = json.loads(data)
+        if set(state) != {"events", "next_intent_sequence", "decisions"}:
+            raise ValueError("invalid decision trace state")
+        decisions = state.pop("decisions")
+        super().restore(json.dumps(state).encode())
+        if len(decisions) != self.events or any(len(d) != 9 for d in decisions):
+            raise ValueError("invalid decision trace")
+        self.decisions = decisions
+
+def create(context, config):
+    return DecisionObserver(context, config)
+'''
+
+
 def depth_batch(sequence=1):
     payload = strategy_host.encode_depth_snapshot(dict(instrument=3, rules_version=1, sequence=sequence,
         visible_at_ns=1, bids=((99, 1),), asks=((101, 1),), bids_truncated=False, asks_truncated=False))
@@ -120,7 +150,7 @@ class WebInstanceTests(unittest.TestCase):
         self.addCleanup(self.instances.close)
         self.app.instance_manager = self.instances
 
-    def install(self, code=OBSERVER, limit_changes=None):
+    def install(self, code=OBSERVER, limit_changes=None, state_fields=()):
         files, policy = bundle_files()
         runtime = {"ringwin": b"synthetic engine; this acceptance executes only the real candidate adapter and Host",
                    strategy_instance.CANDIDATE_PATH: self.engine.read_bytes()}
@@ -150,7 +180,8 @@ class WebInstanceTests(unittest.TestCase):
             unknown_fields="reject", missing_fields="reject", encoding="canonical_json"))
         files[f"strategies/{DEFINITION}/contracts/state.json"] = canonical(dict(
             fields=[dict(name="events", type="u64", unit="canonical_events", minimum=0, maximum=2**64 - 1),
-                    dict(name="next_intent_sequence", type="u64", unit="intent_sequence", minimum=1, maximum=2**64 - 1)],
+                    dict(name="next_intent_sequence", type="u64", unit="intent_sequence", minimum=1, maximum=2**64 - 1),
+                    *state_fields],
             unknown_fields="reject", missing_fields="reject", encoding="portable_json_v1"))
         manifest["files"] = [descriptor(p[ len(f'strategies/{DEFINITION}/'):], b) for p, b in sorted(files.items())
                              if p.startswith(f"strategies/{DEFINITION}/") and p != name]
@@ -205,6 +236,225 @@ class WebInstanceTests(unittest.TestCase):
         self.assertEqual(self.create()[0], 403)
         self.client.csrf = csrf
         self.assertEqual(self.instances.view(), [])
+
+    def test_checkpoint_restart_replays_nonempty_tail_without_authority(self):
+        self.install(DECISION_OBSERVER, state_fields=[dict(name="decisions", type="bounded_array", maximum=100,
+                                                         items="OrderIntent_v1")])
+        first = self.create()[1]["result"]
+        self.assertEqual(first["status"], "Ready", first)
+        self.assertIn("checkpoint", first)
+        self.instances.close()
+        # Node-owned log bytes survive the Host/manager; only its nonempty tail is supplied.
+        tail = self.root / "canonical-tail.qshb"
+        tail.write_bytes(depth_batch(2) + depth_batch(3))
+        data = tail.read_bytes()
+        length = len(depth_batch(2))
+        self.source.batches = (data[:length], data[length:])
+        restarted = strategy_instance.InstanceManager(self.root / "instances", self.manager, self.source)
+        self.addCleanup(restarted.close)
+        self.app.instance_manager = restarted
+        status, body = self.client.call("POST", "/api/strategy-instances",
+            dict(operation="recover", strategy_identity=self.binding["strategy_identity"]))
+        self.assertEqual(status, 200, body)
+        recovered = body["result"]
+        self.assertEqual(recovered["status"], "Ready", recovered)
+        self.assertEqual(recovered["binding"], first["binding"])
+        self.assertGreater(recovered["evidence"]["host_generation"], first["evidence"]["host_generation"])
+        self.assertEqual(recovered["evidence"]["cursor"], 3)
+        self.assertEqual(recovered["evidence"]["next_intent_sequence"], 4)
+        self.assertFalse(recovered["trading_authorized"])
+        self.assertEqual(len(self.command_server._pending), 0)
+        restarted.close()
+        # Independently initialize the same identity in an isolated catalog for convergence.
+        combined = bytearray(depth_batch() + depth_batch(2)[128:] + depth_batch(3)[128:])
+        struct.pack_into("<I", combined, 12, len(combined))
+        struct.pack_into("<Q", combined, 88, 3)
+        struct.pack_into("<II", combined, 104, 3, len(combined) - 128)
+        struct.pack_into("<I", combined, 124, strategy_host.crc32c(combined[:124] + combined[128:]))
+        self.source.batches = (bytes(combined),)
+        direct_manager = strategy_instance.InstanceManager(self.root / "direct", self.manager, self.source)
+        self.addCleanup(direct_manager.close)
+        self.app.instance_manager = direct_manager
+        direct = self.create()[1]["result"]
+        self.assertEqual(direct["status"], "Ready", direct)
+        self.assertEqual(direct["evidence"]["state_digest"], recovered["evidence"]["state_digest"])
+        self.assertEqual(direct["checkpoint"]["content_identity"], recovered["checkpoint"]["content_identity"])
+        store = self.root / "direct" / (self.binding["strategy_identity"] + "-checkpoints")
+        for path in store.iterdir():
+            data = path.read_bytes()
+            offset = data.find(b"QSSC")
+            if offset >= 0:
+                length = int.from_bytes(data[offset + 12:offset + 16], "little")
+                _, payload = strategy_host.decode_payload_checkpoint(data[offset:offset + length])
+                decisions = json.loads(payload)["decisions"]
+                self.assertEqual(decisions, [[1, 1, 2, 3, "buy", "gtc", False, 1, 100],
+                                             [2, 1, 2, 3, "buy", "gtc", False, 2, 100],
+                                             [3, 1, 2, 3, "buy", "gtc", False, 3, 100]])
+                break
+        else:
+            self.fail("committed decision trace absent")
+        print("checkpoint_tail_recovery=" + json.dumps(dict(checkpoint=first["checkpoint"],
+              recovered=recovered["evidence"], converged=direct["checkpoint"]), sort_keys=True))
+
+    def recover(self):
+        return self.client.call("POST", "/api/strategy-instances",
+            dict(operation="recover", strategy_identity=self.binding["strategy_identity"]))
+
+    def test_recovery_resolves_committed_publication_before_web_acknowledgment(self):
+        self.install()
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        for barrier in (2, 3, 4):
+            self.instances.close()
+            # Keep exactly the durable prefix preceding Web's Ready acknowledgment.
+            records = [json.loads(line) for line in self.instances.path.read_bytes().splitlines()]
+            cutoff = max(i for i, r in enumerate(records) if r["status"] == "Recovering")
+            self.instances.path.write_bytes(b"".join(canonical(r) + b"\n" for r in records[:cutoff + 1]))
+            self.source.batches = (tuple(depth_batch(n) for n in range(1, barrier + 1))
+                                   if barrier == 3 else (depth_batch(barrier),))
+            restarted = strategy_instance.InstanceManager(self.root / "instances", self.manager, self.source)
+            self.addCleanup(restarted.close)
+            self.instances = restarted
+            self.app.instance_manager = restarted
+            status, body = self.recover()
+            self.assertEqual(status, 200, body)
+            self.assertEqual(body["result"]["status"], "Ready", body)
+            self.assertEqual(body["result"]["evidence"]["cursor"], barrier)
+            # Observer's state counts each event once, including across the uncertain publication.
+            expected = strategy_host.payload_state_digest(dict(schema_registry=strategy_host.SCHEMA_REGISTRY,
+                strategy=int(self.binding["strategy_identity"], 16), definition=int(DEFINITION, 16),
+                state_schema=int("22222222222222222222222222222222", 16), state_schema_version=1,
+                config_version=1, cursor=barrier, next_intent=1),
+                canonical(dict(events=barrier, next_intent_sequence=1))).hex()
+            self.assertEqual(body["result"]["evidence"]["state_digest"], expected)
+            self.assertEqual(body["result"]["evidence"]["host_generation"], barrier)
+
+    def test_new_identity_does_not_reuse_shared_host_generation(self):
+        self.install()
+        first = self.create()[1]["result"]
+        self.assertEqual(first["status"], "Ready", first)
+        self.instances.close()
+        second = self.create(strategy_identity="0" * 30 + "11")[1]["result"]
+        self.assertEqual(second["status"], "Ready", second)
+        self.assertGreater(second["evidence"]["host_generation"], first["evidence"]["host_generation"])
+
+    def test_native_reopen_rejects_incompatible_checkpoint_schema(self):
+        self.install()
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        host = self.instances._hosts[self.binding["strategy_identity"]]
+        request = json.loads((Path(host["temporary"].name) / "request.json").read_bytes())
+        self.instances.close()
+        request.update(recover=True, checkpoint_cursor=1, generation=2)
+        request["manifest"]["state_schema"]["version"] += 1
+        path = self.root / "incompatible-reopen.json"
+        path.write_bytes(canonical(request))
+        result = subprocess.run([str(self.engine), str(path)], capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"CheckpointMismatch", result.stderr)
+        self.assertNotIn(b'"trading_authorized":true', result.stdout)
+
+    def test_large_private_checkpoint_is_persisted_and_restored(self):
+        code = OBSERVER.replace(b'{"events": self.events,', b'{"padding": "x" * 70000, "events": self.events,')
+        code = code.replace(b'state = json.loads(data)',
+                            b'state = json.loads(data)\n        if state.pop("padding") != "x" * 70000: raise ValueError("padding mismatch")')
+        self.install(code, {"max_private_state_bytes": 131072, "max_callback_ns": 5000000000,
+                            "max_warmup_ns": 30000000000},
+                     state_fields=[dict(name="padding", type="string", maximum=70000)])
+        # Exercise the public loader directly: this signed budget exceeds HTTP fixture's 10s timeout.
+        first = self.instances.create(self.binding)
+        self.assertEqual(first["status"], "Ready", first)
+        self.instances.close()
+        self.source.batches = (depth_batch(2),)
+        result = self.instances.recover(self.binding["strategy_identity"])
+        self.assertEqual(result["status"], "Ready", result)
+        self.assertEqual(result["evidence"]["cursor"], 2)
+
+    def test_missing_checkpoint_and_tail_gap_refuse_empty_restart(self):
+        self.install()
+        first = self.create()[1]["result"]
+        self.assertEqual(first["status"], "Ready", first)
+        self.instances.close()
+        self.source.batches = (depth_batch(3),)
+        status, failed = self.recover()
+        self.assertEqual(status, 200, failed)
+        self.assertEqual(failed["result"]["status"], "Stopped", failed)
+        self.assertEqual(failed["result"]["checkpoint"], first["checkpoint"])
+        self.assertTrue(failed["result"]["reason"])
+        self.source.batches = (depth_batch(2),)
+        store = self.root / "instances" / (self.binding["strategy_identity"] + "-checkpoints")
+        store.rename(store.with_suffix(".unavailable"))
+        status, failed = self.recover()
+        self.assertEqual(status, 200, failed)
+        self.assertEqual(failed["result"]["status"], "Stopped", failed)
+        self.assertTrue(failed["result"]["reason"])
+        self.assertEqual(self.create()[1]["result"]["status"], "Stopped")
+        self.assertEqual(self.instances._hosts, {})
+
+    def test_recovery_exception_keeps_only_previously_verified_checkpoint(self):
+        code = OBSERVER.replace(b"self.events += 1", b'''self.events += 1
+        if self.events == 2:
+            raise ValueError("suspect recovery state")''')
+        self.install(code)
+        first = self.create()[1]["result"]
+        self.assertEqual(first["status"], "Ready", first)
+        self.instances.close()
+        store = self.root / "instances" / (self.binding["strategy_identity"] + "-checkpoints")
+        before = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in store.iterdir() if p.is_file()}
+        self.source.batches = (depth_batch(2),)
+        status, failed = self.recover()
+        self.assertEqual(status, 200, failed)
+        self.assertEqual(failed["result"]["status"], "Stopped", failed)
+        self.assertIn("suspect recovery state", failed["result"]["reason"])
+        self.assertEqual(failed["result"]["checkpoint"], first["checkpoint"])
+        self.assertEqual(before, {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                                  for p in store.iterdir() if p.is_file()})
+        self.assertFalse(failed["result"]["trading_authorized"])
+        self.assertEqual(len(self.command_server._pending), 0)
+
+    def test_committed_checkpoint_corruption_is_rejected(self):
+        self.install()
+        first = self.create()[1]["result"]
+        self.assertEqual(first["status"], "Ready", first)
+        self.instances.close()
+        store = self.root / "instances" / (self.binding["strategy_identity"] + "-checkpoints")
+        objects = [p for p in store.iterdir() if p.is_file() and b"QSSC" in p.read_bytes()]
+        self.assertTrue(objects)
+        for path in objects:
+            data = bytearray(path.read_bytes())
+            data[data.index(b"QSSC") + 192] ^= 1
+            path.write_bytes(data)
+        self.source.batches = (depth_batch(2),)
+        status, failed = self.recover()
+        self.assertEqual(status, 200, failed)
+        self.assertEqual(failed["result"]["status"], "Stopped", failed)
+        self.assertTrue(failed["result"]["reason"])
+        self.assertEqual(failed["result"]["checkpoint"], first["checkpoint"])
+        self.assertEqual(self.instances._hosts, {})
+
+    def test_web_exposes_recovering_progress_before_ready(self):
+        code = OBSERVER.replace(b"self.events += 1", b'''self.events += 1
+        if self.events == 2:
+            import time
+            time.sleep(0.5)''')
+        self.install(code)
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        self.instances.close()
+        self.source.batches = (depth_batch(2),)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(self.recover)
+            seen = None
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not pending.done():
+                records = self.client.call("GET", "/api/strategy-instances")[1]["instances"]
+                if records[0]["status"] == "Recovering":
+                    seen = records[0]
+                    break
+                time.sleep(0.01)
+            status, result = pending.result(timeout=10)
+        self.assertIsNotNone(seen)
+        self.assertEqual(seen["recovery"], dict(cursor=1, barrier=2))
+        self.assertFalse(seen["trading_authorized"])
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["result"]["status"], "Ready", result)
 
     def test_warmup_insufficient_is_a_visible_failure(self):
         self.install()

@@ -2,6 +2,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const lifecycle = @import("strategy_host_lifecycle.zig");
+const checkpoints = @import("strategy_checkpoint_store.zig");
+const codec = @import("strategy_host_recovery.zig");
+const durable = @import("../persistence/durable_store.zig");
 
 extern "kernel32" fn GetProcessId(std.os.windows.HANDLE) callconv(.winapi) std.os.windows.DWORD;
 
@@ -12,6 +15,9 @@ const Request = struct {
     shard: u32,
     barrier: u64,
     batches: []const []const u8,
+    checkpoint_directory: []const u8,
+    recover: bool,
+    checkpoint_cursor: u64,
     binding: struct {
         strategy_identity: []const u8,
         definition_identity: []const u8,
@@ -28,7 +34,7 @@ const Request = struct {
             host_protocol: u16,
         },
         state_schema: struct { identity: []const u8, version: u32 },
-        limits: struct { max_callback_ns: u64, max_warmup_ns: u64 },
+        limits: struct { max_callback_ns: u64, max_warmup_ns: u64, max_private_state_bytes: usize },
     },
 };
 
@@ -61,6 +67,37 @@ pub fn run(init: std.process.Init, request_path: []const u8) !void {
     const parsed = try std.json.parseFromSlice(Request, init.gpa, data, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
     const request = parsed.value;
+    const adapter = try init.gpa.create(durable.LinuxFileAdapter);
+    defer init.gpa.destroy(adapter);
+    adapter.* = .{ .dir = undefined };
+    if (builtin.os.tag == .windows) {
+        try adapter.initWindowsVerification(init.io, request.checkpoint_directory);
+    } else {
+        try adapter.initLinux(init.io, request.checkpoint_directory);
+    }
+    defer adapter.close(init.io);
+    const repository = try checkpoints.Repository.init(adapter.interface(), 800, .{ 801, 802 });
+    if (!request.recover) try repository.initialize(init.io);
+    var expected: codec.Metadata = .{
+        .schema_registry = try hexIdentity(request.manifest.compatibility.schema_registry),
+        .strategy_instance = try hexIdentity(request.binding.strategy_identity),
+        .strategy_definition = try hexIdentity(request.binding.definition_identity),
+        .state_schema = try hexIdentity(request.manifest.state_schema.identity),
+        .state_schema_version = request.manifest.state_schema.version,
+        .strategy_config_version = request.binding.config_version,
+        .strategy_cursor = request.checkpoint_cursor,
+        .next_intent_sequence = 1,
+    };
+    var checkpoint: []const u8 = &.{};
+    if (request.recover) {
+        const published = (try repository.latest(init.io)) orelse return error.NoPublishedCheckpoint;
+        if (published.metadata.strategy_cursor < request.checkpoint_cursor or
+            published.metadata.strategy_cursor > request.barrier) return error.CheckpointBarrierMismatch;
+        expected.strategy_cursor = published.metadata.strategy_cursor;
+        expected.next_intent_sequence = published.metadata.next_intent_sequence;
+        checkpoint = try repository.restore(init.io, expected);
+        if (checkpoint.len > 192 + request.manifest.limits.max_private_state_bytes) return error.CheckpointTooLarge;
+    }
     var output_buffer: [512]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &output_buffer);
     var plan = lifecycle.developmentPlan(request.shard, request.generation, request.manifest.compatibility.python_abi);
@@ -77,20 +114,34 @@ pub fn run(init: std.process.Init, request_path: []const u8) !void {
     defer host.deinit(init.io);
     try host.sendPlan(init.io);
     if (try host.receive(init.io, now(init.io)) != .accepted) return error.CandidateHandshakeFailed;
-    var frame: [72]u8 = undefined;
-    try output.interface.writeAll("{\"phase\":\"initialize\"}\n");
+    const frame = try init.gpa.alloc(u8, 72 + checkpoint.len);
+    defer init.gpa.free(frame);
+    try output.interface.print("{{\"phase\":\"initialize\",\"cursor\":{d}}}\n", .{expected.strategy_cursor});
     try output.interface.flush();
     const initialization_started = now(init.io);
-    // Empty state is explicit initialization of a new identity, never recovery.
-    try host.beginRecovery(init.io, request.barrier, &.{}, &frame);
+    try host.beginRecovery(init.io, request.barrier, checkpoint, frame);
+    host.last_input_cursor = expected.strategy_cursor;
     if (try host.receive(init.io, now(init.io)) != .accepted or host.supervisor.state != .recovering)
         return error.CandidateInitializationFailed;
     if (now(init.io) - initialization_started > request.manifest.limits.max_callback_ns) return error.CallbackBudgetExhausted;
     for (request.batches) |encoded| {
         if (encoded.len > 2 * plan.input_capacity or encoded.len < 256) return error.InvalidCandidateBatch;
-        const batch = try init.gpa.alloc(u8, encoded.len / 2);
-        defer init.gpa.free(batch);
-        _ = try std.fmt.hexToBytes(batch, encoded);
+        const batch_storage = try init.gpa.alloc(u8, encoded.len / 2);
+        defer init.gpa.free(batch_storage);
+        _ = try std.fmt.hexToBytes(batch_storage, encoded);
+        var batch = batch_storage;
+        if (std.mem.readInt(u64, batch[88..96], .little) <= expected.strategy_cursor) continue;
+        if (std.mem.readInt(u64, batch[80..88], .little) <= expected.strategy_cursor) {
+            std.mem.writeInt(u64, batch[80..88], expected.strategy_cursor + 1, .little);
+            if (std.mem.readInt(u32, batch[104..108], .little) == 1 and
+                batch.len >= 192 and std.mem.readInt(u64, batch[144..152], .little) <= expected.strategy_cursor)
+            {
+                batch = batch_storage[0..128];
+                std.mem.writeInt(u32, batch[12..16], 128, .little);
+                std.mem.writeInt(u32, batch[104..108], 0, .little);
+                std.mem.writeInt(u32, batch[108..112], 0, .little);
+            }
+        }
         std.mem.writeInt(u128, batch[16..32], plan.compatibility.schema_registry, .little);
         std.mem.writeInt(u128, batch[32..48], plan.decision_domain, .little);
         std.mem.writeInt(u64, batch[48..56], plan.session.fencing, .little);
@@ -111,6 +162,8 @@ pub fn run(init: std.process.Init, request_path: []const u8) !void {
         if (try host.receive(init.io, now(init.io)) != .accepted or host.supervisor.state != .recovering)
             return error.CandidateCallbackFailed;
         if (now(init.io) - callback_started > request.manifest.limits.max_callback_ns) return error.CallbackBudgetExhausted;
+        try output.interface.print("{{\"phase\":\"replay\",\"cursor\":{d}}}\n", .{host.last_input_cursor.?});
+        try output.interface.flush();
     }
     const validation_started = now(init.io);
     try output.interface.writeAll("{\"phase\":\"validate\"}\n");
@@ -124,10 +177,22 @@ pub fn run(init: std.process.Init, request_path: []const u8) !void {
         ready.config_version != request.binding.config_version or ready.cursor != request.barrier or
         ready.state_schema_identity != try hexIdentity(request.manifest.state_schema.identity) or
         ready.state_schema_version != request.manifest.state_schema.version) return error.CandidateIdentityMismatch;
+    expected.strategy_cursor = ready.cursor;
+    expected.next_intent_sequence = ready.next_intent_sequence;
+    try output.interface.writeAll("{\"phase\":\"checkpoint\"}\n");
+    try output.interface.flush();
+    try host.requestCheckpoint(init.io, 1, expected);
+    const storage = try init.gpa.alloc(u8, 64 + 8 + 192 + request.manifest.limits.max_private_state_bytes);
+    defer init.gpa.free(storage);
+    const container = try host.receiveCheckpoint(init.io, storage);
+    const decoded = try codec.decodePayloadCheckpoint(container, expected);
+    if (!std.mem.eql(u8, &decoded.state_digest, &ready.state_digest)) return error.CheckpointDigestMismatch;
+    const published = try repository.publish(init.io, container, expected);
+    const content_identity = std.fmt.bytesToHex(published.content_identity, .lower);
     const digest = std.fmt.bytesToHex(ready.state_digest, .lower);
     const host_pid: u64 = if (builtin.os.tag == .windows) GetProcessId(host.child.id.?) else @intCast(host.child.id.?);
     if (host_pid == 0) return error.InvalidHostProcessId;
-    try output.interface.print("{{\"cursor\":{d},\"next_intent_sequence\":{d},\"host_generation\":{d},\"host_pid\":{d},\"state_digest\":\"{s}\",\"trading_authorized\":false}}\n", .{ ready.cursor, ready.next_intent_sequence, plan.session.generation, host_pid, digest });
+    try output.interface.print("{{\"cursor\":{d},\"next_intent_sequence\":{d},\"host_generation\":{d},\"host_pid\":{d},\"state_digest\":\"{s}\",\"trading_authorized\":false,\"checkpoint\":{{\"cursor\":{d},\"publication\":{d},\"content_identity\":\"{s}\"}}}}\n", .{ ready.cursor, ready.next_intent_sequence, plan.session.generation, host_pid, digest, ready.cursor, published.sequence, content_identity });
     try output.interface.flush();
     const Event = union(enum) { stop: anyerror!void, exited: anyerror!void };
     var events: [2]Event = undefined;

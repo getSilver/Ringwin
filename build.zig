@@ -57,7 +57,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    candidate.stack_size = 16 * 1024 * 1024;
+    candidate.stack_size = 64 * 1024 * 1024;
     b.installArtifact(candidate);
 
     const run = b.addRunArtifact(exe);

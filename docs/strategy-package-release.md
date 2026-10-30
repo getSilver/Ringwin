@@ -192,8 +192,11 @@ are passed to the Host.
 
 The fixed API calls validate_config/create, bounded on_event callbacks and final
 validate/snapshot. A fresh instance must restore the snapshot, agree on IntentSequence,
-reproduce the same canonical payload and pass validate before Ready. This is an
-in-memory private-state roundtrip, not checkpoint publication or restart recovery.
+reproduce the same canonical payload and pass validate before Ready. Zig then
+requests a checkpoint at that exact cursor, verifies its metadata, content identity,
+private-state digest and next IntentSequence, and publishes it through the existing
+DurableStore checkpoint Repository before returning Ready. Content storage commits
+before its immutable catalog reference; Python supplies no storage path or commit proof.
 Immutable Context/Event/OrderIntent/IntentGroup values carry
 only the contract fields. Output checks cover exact types, declared kinds, complete
 2–4-member groups, codec capacities, ownership, positive integer quantities/prices,
@@ -222,11 +225,31 @@ Data insufficiency, invalid config/state, exceptions, unsupported input, output
 errors and exceeded budgets stay Stopped with a reason. A successful Host stays
 resident, unauthorized, at Ready until the manager closes or the process exits.
 Durable bindings and outcomes survive Web restart; Ready is never reconstructed
-from disk without a Host. Restart reports Stopped/recovery-required. Checkpoint
-publication/recovery and multiple resident instances belong to tasks 05 and 10.
+from disk without a Host. Restart reports Stopped/recovery-required. Multiple
+resident instances belong to task 10.
 Windows runs its own Ready/resource acceptance and does not depend on Linux passing,
 as required by ADR 0010. Legacy WSL1 still rejects loading because its kernel ignores
 RLIMIT_AS; Linux resource acceptance remains pending on a genuinely enforcing kernel.
+
+To recover a stopped instance, use the Web recovery button or authenticated
+`POST /api/strategy-instances` with only
+`{"operation":"recover","strategy_identity":"00000000000000000000000000000010"}`.
+The backend keeps its immutable binding and reserves a higher Host generation in
+the shared candidate namespace before launch. A running Host must first stop;
+neither replay nor Ready restores trading authority. GET returns Recovering with
+cursor/barrier progress, Ready with checkpoint evidence, or Stopped with a reason.
+
+Recovery opens the committed checkpoint catalog and validates the referenced
+content against the instance, definition, state schema and configuration version.
+The node-owned input source may retain the full stream or supply only its tail;
+replay must continuously cover the checkpoint cursor through the requested barrier.
+An already committed publication is discoverable even if Web crashed before
+recording its Ready acknowledgment. Missing/corrupt content, incompatible schema,
+tail gaps, restore/validation failures and budget exhaustion refuse recovery;
+they never initialize empty state or publish suspect callback state. The original
+binding cannot be reused to bypass recovery. Windows uses the existing verification
+file adapter; these functional checks do not establish power-loss durability or
+production qualification on either platform.
 
 Run `python3 -m unittest discover -s python -p test_strategy_instance.py -v` on
 Linux after building its adapter, or `python -m unittest discover -s python

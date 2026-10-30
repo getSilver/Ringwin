@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import secrets
 import queue
 import shutil
 import signal
@@ -136,7 +135,7 @@ class CandidateSource:
             portfolio_identity=portfolio_identity, scopes=scopes, risk_budget=risk_budget)))
         self.batches = tuple(batches)
 
-    def prepare(self, binding):
+    def prepare(self, binding, checkpoint_cursor=0, *, recover=False):
         package.require(all(binding[k] == v for k, v in self.scope.items()), "deployment ownership or budget mismatch")
         package.require(all(type(b) is bytes and 128 <= len(b) <= 1048576 for b in self.batches),
                         "invalid canonical input snapshot")
@@ -145,25 +144,40 @@ class CandidateSource:
         # Normalize transport batching before the externally timed callbacks.
         # Coverage gaps from subscription filtering stay attached to the record.
         normalized, cursor = [], 0
-        for number, batch in enumerate(self.batches, 1):
+        first_batch = 1
+        if self.batches and recover:
+            # Preserve actual coverage; native Repository.latest resolves unacknowledged publications.
+            cursor = int.from_bytes(self.batches[0][80:88], "little") - 1
+            first_batch = int.from_bytes(self.batches[0][72:80], "little")
+        replay_cursor = max(cursor, checkpoint_cursor)
+        for number, batch in enumerate(self.batches, first_batch):
             session = (int.from_bytes(batch[48:56], "little"), int.from_bytes(batch[56:60], "little"),
                        int.from_bytes(batch[64:72], "little"))
             records, last = bridge.decode_component_batch(batch, session, number, cursor)
-            if not records:
-                normalized.append(batch)
+            if not records and last > checkpoint_cursor:
+                part = bytearray(batch)
+                struct.pack_into("<Q", part, 72, len(normalized) + 1)
+                struct.pack_into("<Q", part, 80, replay_cursor + 1)
+                struct.pack_into("<I", part, 124, bridge.crc32c(part[:124] + part[128:]))
+                normalized.append(bytes(part))
+                replay_cursor = last
             offset = 128
             for index, record in enumerate(records):
                 length = int.from_bytes(batch[offset:offset + 4], "little")
-                part = bytearray(batch[:128] + batch[offset:offset + length])
                 end = last if index == len(records) - 1 else record.shard_sequence
+                if end <= checkpoint_cursor:
+                    offset += length
+                    continue
+                part = bytearray(batch[:128] + (batch[offset:offset + length] if record.shard_sequence > checkpoint_cursor else b""))
                 struct.pack_into("<I", part, 12, len(part))
                 struct.pack_into("<Q", part, 72, len(normalized) + 1)
-                struct.pack_into("<QQ", part, 80, cursor + 1, end)
-                struct.pack_into("<II", part, 104, 1, length)
+                struct.pack_into("<QQ", part, 80, replay_cursor + 1, end)
+                struct.pack_into("<II", part, 104, int(record.shard_sequence > checkpoint_cursor), len(part) - 128)
                 struct.pack_into("<I", part, 124, bridge.crc32c(part[:124] + part[128:]))
                 normalized.append(bytes(part))
-                cursor, offset = end, offset + length
+                replay_cursor, offset = end, offset + length
             cursor = last
+        package.require(cursor >= checkpoint_cursor, "canonical input does not reach checkpoint cursor")
         return self.shard, cursor, tuple(normalized)
 
 
@@ -201,16 +215,20 @@ class InstanceManager:
             handle.write(package.canonical(record) + b"\n")
             handle.flush()
             os.fsync(handle.fileno())
-        self._records[record["binding"]["strategy_identity"]] = record
+        self._records[record["binding"]["strategy_identity"]] = json.loads(package.canonical(record))
 
     def view(self):
-        with self._lock:
+        if not self._lock.acquire(blocking=False):
+            return json.loads(package.canonical(list(self._records.values())))
+        try:
             for identity, host in list(self._hosts.items()):
                 if host["process"].poll() is not None:
                     record = dict(self._records[identity], status="Stopped", reason="candidate Host exited")
                     self._stop(identity)
                     self._save(record)
             return json.loads(package.canonical(list(self._records.values())))
+        finally:
+            self._lock.release()
 
     def create(self, binding):
         with self._lock, self.releases._lock:
@@ -235,77 +253,109 @@ class InstanceManager:
             if previous:
                 package.require(previous["binding"] == binding, "instance identity or ConfigVersion content conflict")
                 return previous
-            package.require(not self._hosts, "single candidate Host capacity; multiple instances require ticket 10")
-            shard, barrier, batches = self.source.prepare(binding)
-            root, manifest, lock = self._approved_package(binding)
-            package.require(all(int.from_bytes(b[16:32], "little") == int(manifest["compatibility"]["schema_registry"], 16)
-                                for b in batches), "canonical input schema registry mismatch")
-            package.require(memory_enforcement_available(str(root / lock["python_path"])),
-                            "candidate hard address-space limit enforcement is unavailable or unverified; loading is unavailable")
-            record = dict(binding=binding, status="Recovering", reason="", trading_authorized=False)
-            self._save(record)
-            process, temporary, job = None, None, None
+            return self._run(binding)
+
+    def recover(self, identity):
+        package.identity(identity)
+        with self._lock, self.releases._lock:
+            self.view()
+            package.require(identity in self._records, "unknown strategy instance")
+            previous = self._records[identity]
+            package.require(identity not in self._hosts, "stop the existing Host before recovery")
             try:
-                temporary = tempfile.TemporaryDirectory(prefix="candidate-", dir=self.directory)
-                work = Path(temporary.name)
-                request = dict(binding=binding, manifest=manifest, package_root=str(root / "strategies" / binding["definition_identity"]),
-                               python=str(root / lock["python_path"]), host=str(root / lock["host_path"]),
-                               generation=secrets.randbits(63) + 1, shard=shard, barrier=barrier,
-                               batches=[batch.hex() for batch in batches])
-                data = package.canonical(request)
-                package.require(len(data) <= package.MAX_JSON_BYTES, "candidate request capacity exceeded")
-                (work / "request.json").write_bytes(data)
-                limits = manifest["limits"]
-                started = time.monotonic_ns()
-                argv = [str(root / CANDIDATE_PATH), str(work / "request.json")]
-                options = dict(stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               cwd=work, env=windows.environment() if os.name == "nt" else {"LANG": "C", "LC_ALL": "C"},
-                               close_fds=True)
-                if os.name == "nt":
-                    job = windows.Job(limits["max_memory_bytes"])
-                    process = job.start(argv, **options)
-                else:
-                    process = subprocess.Popen([shutil.which("prlimit"), "--as=" + str(limits["max_memory_bytes"]),
-                                                "--fsize=65536", "--", *argv], start_new_session=True, **options)
-                self._hosts[identity] = dict(process=process, temporary=temporary, job=job)
-                pipes = CandidatePipes(process, lambda: self._terminate(process, job))
-                self._hosts[identity]["pipes"] = pipes
-                phase_budget = limits["max_warmup_ns"]
-                phase_started = started
-                pending = b""
-                while True:
-                    now = time.monotonic_ns()
-                    remaining = min(phase_budget - (now - phase_started), limits["max_warmup_ns"] - (now - started))
-                    package.require(remaining > 0, "candidate callback or warmup budget exhausted")
-                    chunk = pipes.read(remaining / 1e9)
-                    if not chunk:
-                        pipes.threads[1].join(timeout=0.1)
-                        reason = pipes.errors.decode("utf-8", "replace")
-                        raise package.PackageError(f"candidate Host failed (exit {process.poll()}): " + reason)
-                    pending += chunk
-                    package.require(len(pending) <= 2048, "candidate result capacity exceeded")
-                    while b"\n" in pending:
-                        line, pending = pending.split(b"\n", 1)
-                        result = json.loads(line)
-                        if "phase" in result:
-                            phase_budget, phase_started = limits["max_callback_ns"], time.monotonic_ns()
-                            continue
-                        package.require(result["trading_authorized"] is False
-                                        and result["cursor"] == barrier, "invalid Ready evidence")
-                        record.update(status="Ready", evidence=result, reason="")
-                        self._save(record)
-                        return record
-            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
-                if process is not None:
-                    self._stop(identity)
-                else:
-                    if job is not None:
-                        job.close()
-                    if temporary is not None:
-                        temporary.cleanup()
-                record.update(status="Stopped", reason=str(error)[:2048])
+                return self._run(previous["binding"], previous)
+            except (OSError, ValueError) as error:
+                record = dict(previous, status="Stopped", reason=str(error)[:2048], trading_authorized=False)
                 self._save(record)
                 return record
+
+    def _run(self, binding, previous=None):
+        identity = binding["strategy_identity"]
+        package.require(not self._hosts, "single candidate Host capacity; multiple instances require ticket 10")
+        cursor = previous.get("checkpoint", {}).get("cursor", 0) if previous else 0
+        shard, barrier, batches = self.source.prepare(binding, cursor, recover=previous is not None)
+        root, manifest, lock = self._approved_package(binding)
+        package.require(all(int.from_bytes(b[16:32], "little") == int(manifest["compatibility"]["schema_registry"], 16)
+                            for b in batches), "canonical input schema registry mismatch")
+        package.require(memory_enforcement_available(str(root / lock["python_path"])),
+                        "candidate hard address-space limit enforcement is unavailable or unverified; loading is unavailable")
+        generation = max((r.get("host_generation", r.get("evidence", {}).get("host_generation", 0))
+                          for r in self._records.values()), default=0) + 1
+        package.uint(generation)
+        record = dict(binding=binding, status="Recovering", reason="", trading_authorized=False,
+                      host_generation=generation, recovery=dict(cursor=cursor, barrier=barrier))
+        if previous and "checkpoint" in previous:
+            record["checkpoint"] = previous["checkpoint"]
+        self._save(record)
+        process, temporary, job = None, None, None
+        try:
+            temporary = tempfile.TemporaryDirectory(prefix="candidate-", dir=self.directory)
+            work = Path(temporary.name)
+            request = dict(binding=binding, manifest=manifest, package_root=str(root / "strategies" / binding["definition_identity"]),
+                           python=str(root / lock["python_path"]), host=str(root / lock["host_path"]),
+                           generation=generation, shard=shard, barrier=barrier,
+                           checkpoint_directory=str((self.directory / (identity + "-checkpoints")).resolve()),
+                           recover=previous is not None, checkpoint_cursor=cursor,
+                           batches=[batch.hex() for batch in batches])
+            data = package.canonical(request)
+            package.require(len(data) <= package.MAX_JSON_BYTES, "candidate request capacity exceeded")
+            (work / "request.json").write_bytes(data)
+            limits = manifest["limits"]
+            started = time.monotonic_ns()
+            argv = [str(root / CANDIDATE_PATH), str(work / "request.json")]
+            options = dict(stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           cwd=work, env=windows.environment() if os.name == "nt" else {"LANG": "C", "LC_ALL": "C"},
+                           close_fds=True)
+            if os.name == "nt":
+                job = windows.Job(limits["max_memory_bytes"])
+                process = job.start(argv, **options)
+            else:
+                process = subprocess.Popen([shutil.which("prlimit"), "--as=" + str(limits["max_memory_bytes"]),
+                                            "--fsize=" + str(max(262144, limits["max_private_state_bytes"] + 4096)),
+                                            "--", *argv], start_new_session=True, **options)
+            self._hosts[identity] = dict(process=process, temporary=temporary, job=job)
+            pipes = CandidatePipes(process, lambda: self._terminate(process, job))
+            self._hosts[identity]["pipes"] = pipes
+            phase_budget = limits["max_warmup_ns"]
+            phase_started = started
+            pending = b""
+            while True:
+                now = time.monotonic_ns()
+                remaining = min(phase_budget - (now - phase_started), limits["max_warmup_ns"] - (now - started))
+                package.require(remaining > 0, "candidate callback or warmup budget exhausted")
+                chunk = pipes.read(remaining / 1e9)
+                if not chunk:
+                    pipes.threads[1].join(timeout=0.1)
+                    reason = pipes.errors.decode("utf-8", "replace")
+                    raise package.PackageError(f"candidate Host failed (exit {process.poll()}): " + reason)
+                pending += chunk
+                package.require(len(pending) <= 2048, "candidate result capacity exceeded")
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    result = json.loads(line)
+                    if "phase" in result:
+                        phase_budget, phase_started = limits["max_callback_ns"], time.monotonic_ns()
+                        if "cursor" in result:
+                            record["recovery"]["cursor"] = result["cursor"]
+                            self._records[identity] = json.loads(package.canonical(record))
+                        continue
+                    package.require(result["trading_authorized"] is False
+                                    and result["cursor"] == barrier, "invalid Ready evidence")
+                    record.update(status="Ready", evidence=result, checkpoint=result.pop("checkpoint"), reason="")
+                    record["recovery"]["cursor"] = barrier
+                    self._save(record)
+                    return record
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            if process is not None:
+                self._stop(identity)
+            else:
+                if job is not None:
+                    job.close()
+                if temporary is not None:
+                    temporary.cleanup()
+            record.update(status="Stopped", reason=str(error)[:2048])
+            self._save(record)
+            return record
 
     def _approved_package(self, binding):
         releases = self.releases

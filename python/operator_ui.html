@@ -255,8 +255,23 @@ async function loadInstances(){
     el.innerHTML = body.instances.map(r=>`<p>${escaped(r.binding.strategy_identity)}：
       ${escaped(r.status)} ${escaped(r.reason)}；无交易授权<br>
       ${escaped(r.binding.definition_identity)} / ${escaped(r.binding.config_sha256)}<br>
-      ${escaped(JSON.stringify(r.evidence || {}))}</p>`).join("") || "尚无实例。";
+      ${escaped(JSON.stringify(r.recovery || {}))}<br>
+      ${escaped(JSON.stringify(r.evidence || {}))}<br>
+      ${escaped(JSON.stringify(r.checkpoint || {}))}
+      ${r.status === "Stopped" ? `<button onclick="recoverStrategyInstance('${escaped(r.binding.strategy_identity)}')">从 checkpoint 无权恢复</button>` : ""}</p>`).join("") || "尚无实例。";
   } catch (error) { el.textContent = "实例查询失败，请重试。"; }
+}
+async function recoverStrategyInstance(identity){
+  try {
+    const pending = api("POST", "/api/strategy-instances", {operation:"recover", strategy_identity:identity});
+    const timer = setInterval(loadInstances, 500);
+    let status, body;
+    try { [status, body] = await pending; } finally { clearInterval(timer); }
+    const result = body.result || {};
+    const ready = status === 200 && result.status === "Ready";
+    toast(ready ? "恢复至 Ready；无交易授权" : `恢复失败：${result.reason || body.error || "未知结果"}`, ready ? "ok" : "bad");
+    await loadInstances();
+  } catch (error) { toast("恢复请求失败，请查询实例状态。", "bad"); }
 }
 async function createStrategyInstance(){
   const raw = prompt("粘贴已核对的运行绑定 JSON（定义/包摘要、配置内容及SHA-256、实例、VirtualPortfolio、DecisionDomain、账户品种范围与预算）：");

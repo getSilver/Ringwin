@@ -1,4 +1,4 @@
-"""Approved new-instance Host. This process has no activation or output path."""
+"""Approved candidate Host. This process has no activation or output path."""
 
 import os
 import sys
@@ -59,19 +59,35 @@ def run(request_path):
     package.require(hello_session == session, "plan session mismatch")
     bridge.write_frame(sys.stdout.buffer, bridge.HOST_HELLO, session, 1, hello)
     kind, actual, sequence, payload = bridge.read_frame(sys.stdin.buffer)
-    # Empty BeginRecovery is only new-instance initialization, never fallback
-    # from a missing checkpoint. Existing-instance recovery is ticket 05.
     package.require(kind == bridge.BEGIN_RECOVERY and actual == session and sequence == 2
-                    and len(payload) == 8, "expected new-instance initialization")
-    barrier = struct.unpack("<Q", payload)[0]
+                    and len(payload) >= 8, "expected initialization or checkpoint recovery")
+    barrier = struct.unpack_from("<Q", payload)[0]
     package.require(module.validate_config(config) is None, "validate_config must return None")
     instance = module.create(context, config)
     for name in ("on_event", "snapshot", "restore", "validate"):
         package.require(callable(getattr(instance, name, None)), "missing fixed API: " + name)
-    package.require(instance.next_intent_sequence == 1 and type(instance.next_intent_sequence) is int,
-                    "new instance must start IntentSequence at one")
-    bridge.write_frame(sys.stdout.buffer, bridge.HOST_HEARTBEAT, session, 2, bytes(16))
-    cursor, batch, incoming, outgoing, callbacks, suppressed = 0, 1, 3, 3, 0, 0
+    cursor = 0
+    if request["recover"]:
+        container = payload[8:]
+        metadata, state = bridge.decode_payload_checkpoint(container)
+        package.require(len(container) >= 192 and metadata == dict(
+            schema_registry=bridge.SCHEMA_REGISTRY, strategy=int(context.strategy_identity, 16),
+            definition=int(context.definition_identity, 16), state_schema=int(context.state_schema_identity, 16),
+            state_schema_version=context.state_schema_version, config_version=context.config_version,
+            cursor=metadata["cursor"], next_intent=metadata["next_intent"])
+                        and metadata["cursor"] >= request["checkpoint_cursor"], "checkpoint identity mismatch")
+        package.require(len(state) <= manifest["limits"]["max_private_state_bytes"], "private state capacity")
+        package.parse_json(state)
+        package.require(instance.restore(state) is None and instance.snapshot() == state
+                        and type(instance.next_intent_sequence) is int
+                        and instance.next_intent_sequence == metadata["next_intent"], "checkpoint restore mismatch")
+        cursor = metadata["cursor"]
+    else:
+        package.require(len(payload) == 8 and instance.next_intent_sequence == 1
+                        and type(instance.next_intent_sequence) is int, "new instance must start IntentSequence at one")
+    package.require(cursor <= barrier, "checkpoint exceeds recovery barrier")
+    bridge.write_frame(sys.stdout.buffer, bridge.HOST_HEARTBEAT, session, 2, struct.pack("<QQ", cursor, 0))
+    batch, incoming, outgoing, callbacks, suppressed = 1, 3, 3, 0, 0
     subscriptions = {(s["event_type"], s["schema_version"]) for s in manifest["subscriptions"]}
     while cursor < barrier:
         kind, actual, sequence, payload = bridge.read_frame(sys.stdin.buffer)
@@ -111,7 +127,7 @@ def run(request_path):
     package.require(restored.snapshot() == state and restored.next_intent_sequence == expected_next,
                     "private state restore roundtrip mismatch")
     instance = restored
-    # Use the existing StrategyStateDigest domain without publishing a checkpoint.
+    # Use the existing StrategyStateDigest domain for the verified private bytes.
     recovered = bytearray(96)
     recovered[:16] = int(context.strategy_identity, 16).to_bytes(16, "little")
     struct.pack_into("<Q", recovered, 16, context.config_version)
@@ -123,10 +139,25 @@ def run(request_path):
         state_schema_version=context.state_schema_version, config_version=context.config_version,
         cursor=cursor, next_intent=instance.next_intent_sequence), state)
     bridge.write_frame(sys.stdout.buffer, bridge.STRATEGY_RECOVERED, session, outgoing, recovered)
+    outgoing += 1
+    kind, actual, sequence, payload = bridge.read_frame(sys.stdin.buffer)
+    package.require(kind == bridge.REQUEST_CHECKPOINT and actual == session and sequence == incoming
+                    and len(payload) == 16, "expected checkpoint request")
+    checkpoint_request, checkpoint_cursor = struct.unpack("<QQ", payload)
+    package.require(checkpoint_request > 0 and checkpoint_cursor == cursor, "checkpoint cursor mismatch")
+    # The validated roundtrip above owns these exact bytes and sequence.
+    container = bridge.encode_payload_checkpoint(dict(
+        schema_registry=bridge.SCHEMA_REGISTRY, strategy=int(context.strategy_identity, 16),
+        definition=int(context.definition_identity, 16), state_schema=int(context.state_schema_identity, 16),
+        state_schema_version=context.state_schema_version, config_version=context.config_version,
+        cursor=cursor, next_intent=expected_next), state)
+    bridge.write_frame(sys.stdout.buffer, bridge.CHECKPOINT_CONTENT, session, outgoing,
+                       struct.pack("<Q", checkpoint_request) + container)
+    incoming, outgoing = incoming + 1, outgoing + 1
     kind, actual, sequence, payload = bridge.read_frame(sys.stdin.buffer)
     package.require(kind == bridge.SHUTDOWN and actual == session and sequence == incoming,
                     "candidate accepts only shutdown after Ready")
-    bridge.write_frame(sys.stdout.buffer, bridge.SHUTDOWN_ACK, session, outgoing + 1)
+    bridge.write_frame(sys.stdout.buffer, bridge.SHUTDOWN_ACK, session, outgoing)
 
 
 if __name__ == "__main__":

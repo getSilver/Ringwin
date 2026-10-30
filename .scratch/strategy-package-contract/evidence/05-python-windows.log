@@ -1,0 +1,12 @@
+.................................................................................................................................................................................................................................s...D:\Program Files\miniconda3\lib\copy.py:229: ResourceWarning: unclosed <socket.socket fd=664, family=AddressFamily.AF_INET, type=SocketKind.SOCK_STREAM, proto=0, laddr=('127.0.0.1', 62580)>
+  for key, value in x.items():
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+....................s.............................ssssssssssss...
+----------------------------------------------------------------------
+Ran 294 tests in 482.682s
+
+OK (skipped=14)
+checkpoint_tail_recovery={"checkpoint": {"content_identity": "3e9281ddd80addc92c20b2fbfa6e99a9a2bef3af46abdc6f9a6a09bad2b33289", "cursor": 1, "publication": 2}, "converged": {"content_identity": "4cd653879a4192ef512943dc2bfbeebd1f3684e0faf2f7fd9eb0820aa58b9238", "cursor": 3, "publication": 2}, "recovered": {"cursor": 3, "host_generation": 2, "host_pid": 204, "next_intent_sequence": 4, "state_digest": "8aeace84a1fc7ac396b2c7987c3e07237dff0a46a8e904c62ac14edde8ffabee", "trading_authorized": false}}
+windows_backend_death=Host terminated; restart=Stopped; trading_authorized=false
+real_candidate_ready={"config_sha256": "aba2b68cc1238a14b9409dfc4fbabc04a93ee5e9126cac85c885285dbfb32610", "evidence": {"cursor": 1, "host_generation": 1, "host_pid": 3084, "next_intent_sequence": 1, "state_digest": "7ecf4a316effc1272ef559c6b61c61db089219514c0a56b585255c2f263c4a53", "trading_authorized": false}, "package_manifest_sha256": "0f1312964ff758648065169ce1633ad26f3c950804680a4cf149832d3844d06d", "python_abi": 198912, "scope": "offline signed bundle + real win32 Host; synthetic canonical depth input"}
+windows_backend_death_during_create=created process terminated by kernel job ownership

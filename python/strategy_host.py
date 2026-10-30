@@ -362,7 +362,7 @@ def benchmark_once(args, session, zig_sequence, host_sequence, prepared):
         )
 
 
-def decode_checkpoint(container):
+def decode_payload_checkpoint(container):
     if (
         len(container) < 192
         or len(container) > 192 + 8 * 1024 * 1024
@@ -380,7 +380,11 @@ def decode_checkpoint(container):
         or hashlib.sha256(container[:120] + payload).digest() != container[120:152]
     ):
         raise ValueError("invalid checkpoint content")
-    metadata = checkpoint_metadata(container)
+    return checkpoint_metadata(container), payload
+
+
+def decode_checkpoint(container):
+    metadata, payload = decode_payload_checkpoint(container)
     if metadata["state_schema"] == CROSS_VENUE_STATE_SCHEMA:
         if metadata["state_schema_version"] == 2:
             return metadata, strategy_state.decode(payload, metadata["cursor"], metadata["strategy"], metadata["next_intent"], version=2)
@@ -435,8 +439,7 @@ def state_payload(metadata, state):
     return f'{{"accumulator":{state["accumulator"]},"event_count":{state["event_count"]}}}'.encode()
 
 
-def encode_checkpoint(metadata, state):
-    payload = state_payload(metadata, state)
+def encode_payload_checkpoint(metadata, payload):
     container = bytearray(192 + len(payload))
     container[:4] = b"QSSC"
     struct.pack_into("<HHII", container, 4, 1, 192, 0, len(container))
@@ -449,8 +452,14 @@ def encode_checkpoint(metadata, state):
     container[120:152] = hashlib.sha256(container[:120] + payload).digest()
     struct.pack_into("<I", container, 188, crc32c(container[:188]))
     # Same boundary validation on save and restore; invalid metadata never publishes.
-    decode_checkpoint(container)
+    decode_payload_checkpoint(container)
     return bytes(container)
+
+
+def encode_checkpoint(metadata, state):
+    container = encode_payload_checkpoint(metadata, state_payload(metadata, state))
+    decode_checkpoint(container)
+    return container
 
 
 def state_digest(metadata, state):

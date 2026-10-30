@@ -4,7 +4,7 @@ Status: open
 
 ## Destination
 
-建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，02票的原生构建合同、静态注册与构建清单及03票的Python包安装登记已交付并通过各自离线验收；04的Windows无权加载及Host资源路径已独立验收，05可基于Windows接手，05–11仍待实施。Linux Host资源验收单独保留缺口。
+建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，02票的原生构建合同、静态注册与构建清单及03票的Python包安装登记已交付并通过各自离线验收；04的Windows无权加载及Host资源路径已独立验收，05的Windows checkpoint持久发布与无权重启恢复已完成，06–11仍待实施。Linux Host资源验收单独保留缺口。
 
 ## Definition of done
 
@@ -38,11 +38,13 @@ Status: open
 
 ## Frontier
 
-- [05 Python实例checkpoint与重启恢复](issues/05-python-checkpoint-recovery.md)：未认领；04的Windows路径已验收，可基于Windows接手。Windows不依赖Linux通过，Linux资源缺口不由本轮结果替代。
+- [06 显式 EnableTrading 接通策略输出与核心准入](issues/06-enable-trading.md)：未认领；05的Windows恢复路径已验收，可基于Windows接手。Linux资源缺口保持单列，不由本轮结果替代。
 
 每次只认领一张Frontier票。尚未实施票的ready-for-agent表示票已可供接手，仍须满足各票Blocked by；其余票在依赖完成前不属于Frontier。
 
 ## Decisions so far
+
+- 2026-10-31：05完成Windows checkpoint持久发布、同实例重启、非空尾日志无权恢复及Web进度/失败接线。保留原绑定和意图历史，共享Host generation持久递增；覆盖首次/后续未确认发布的仅尾日志恢复、完整决定一致性、损坏/schema/缺口拒绝及70 KiB私有状态。Python最终299项285通过14平台skip；已有核心测试二进制821/821、checkpoint专项ReleaseSafe84/84、最终构建9/9。首次整波命令exit1且无详细诊断的日志保留，不作为通过；后续完整二进制运行及源归属见05验证说明。双轴修正复审0项剩余发现。05 resolved并移出Frontier，06可接手但未认领；地图保持open，Linux资源、生产/交易/部署资格未扩张。
 
 - 2026-10-30（Windows补齐验收）：用户要求“补齐并验收04的Windows路径；满足条件后即可开放05”。按ADR0010独立验收，撤销此前把Linux通过作为Windows后续门槛的说明。`10713655` / `275d700c` 补齐签名Windows安装、只读ACL/junction校验、Job硬内存预算、匿名pipe外部时限及创建期/Ready后后端死亡回收。Windows Host最终27项26通过1Linux专项skip，Python全量288项274通过14平台skip，Windows签名发布3/3，原生ReleaseSafe9/9；Linux发布回归12通过3Windows专项skip，仅属发布回归。双轴复审的启动孤儿窗口已原子入组修正，复审0阻塞。04 resolved并移出Frontier，05可接手但尚未认领/实施；地图保持open。Windows结果不代替Linux资源验收，也不授予生产、交易或部署资格。
 

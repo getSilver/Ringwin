@@ -1,0 +1,2 @@
+error: the following build command failed with exit code 1:
+.zig-cache\o\cd8d0522fb931e7c762df5d76a7fa1f8\build.exe D:\Program Files\zig\zig.exe D:\Program Files\zig\lib D:\github\Ringwin-strategy-package-03 .zig-cache C:\Users\X\AppData\Local\zig --seed 0x93b3ac06 -Z8903096f3986a6ee test --summary all

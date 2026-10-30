@@ -1,0 +1,10 @@
+Build Summary: 9/9 steps succeeded
+install cached
++- install generated to share/ringwin/native-strategies.json cached
+|  +- WriteFile native-strategies.json cached
++- install src/strategy/native_observer_config.json to share/ringwin/contracts/native_observer_config.json cached
++- install src/strategy/native_observer_state.json to share/ringwin/contracts/native_observer_state.json cached
++- install ringwin cached
+|  +- compile exe ringwin ReleaseSafe native cached 760ms MaxRSS:16M
++- install ringwin-strategy-candidate cached
+   +- compile exe ringwin-strategy-candidate ReleaseSafe native cached 577ms MaxRSS:16M

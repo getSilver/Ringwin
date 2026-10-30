@@ -1,0 +1,86 @@
+1/84 entry.test_0...OK
+2/84 strategy.strategy_checkpoint_store.test.checkpoint publication keeps current content through staging failure and deduplicates committed identity...OK
+3/84 persistence.durable_store.test.09 boundary Store directory guards reject full and excess counts without populating slots...OK
+4/84 persistence.durable_store.test.order history public store publish query verifies same conflict and covered first...OK
+5/84 persistence.durable_store.test.order history public file store reopens the same authenticated root and duplicate body...OK
+6/84 persistence.durable_store.test.order history file virgin absence keeps admission open but missing published objects closes it...OK
+7/84 persistence.durable_store.test.order history file missing root cannot bootstrap over existing objects...OK
+8/84 persistence.durable_store.test.order history file frozen previous root may prove duplicate but cannot prove fresh...OK
+9/84 persistence.durable_store.test.order history file publication fault boundaries reopen a complete old or new root...OK
+10/84 persistence.durable_store.test.order history file physical root damage missing object and truncated page fail closed...OK
+11/84 persistence.durable_store.test.order history file isolates eight owner origins and rejects foreign root requests...OK
+12/84 persistence.durable_store.test.order history public store proves sibling boundaries after interleaved root generations...OK
+13/84 persistence.durable_store.test.memory and file stores preserve sealed barrier and reject unsafe recovery...OK
+14/84 persistence.durable_store.test.memory fault injection always closes the safety gate...OK
+15/84 persistence.durable_store.test.manifest checksum covers entries as well as the header...OK
+16/84 persistence.durable_store.test.segment rotation requires a snapshot at the sealed barrier...OK
+17/84 persistence.durable_store.test.checkpoint store rotates 100 rounds without cumulative manifest exhaustion...OK
+18/84 persistence.durable_store.test.memory journal rotation counts retained business history in the shared archive quota...OK
+19/84 persistence.durable_store.test.checkpoint store local file 100 rotations retain audit and two snapshot generations...OK
+20/84 persistence.durable_store.test.checkpoint store shared seven streams reclaim active metadata and replay memory history...store_layout: stream_cache=196672, memory_adapter=18365088, file_adapter=10755416, manifest_bound=8208, archived_descriptor=192, snapshot_bound=33554432
+OK
+21/84 persistence.durable_store.test.checkpoint store file fault boundaries select complete old or new roots...OK
+22/84 persistence.durable_store.test.checkpoint store rejects overflow and conflicting snapshot identity without reclaiming roots...OK
+23/84 persistence.durable_store.test.checkpoint store snapshot reclaim commits references before obsolete object deletion...OK
+24/84 persistence.durable_store.test.checkpoint store bounded replay reads only requested horizon and rejects byte budget before delivery...OK
+25/84 persistence.durable_store.test.checkpoint store virgin committed journal remains available before first snapshot...OK
+26/84 persistence.durable_store.test.checkpoint store archived replay remains stable across callback writes to another stream...OK
+27/84 persistence.durable_store.test.checkpoint store memory receipts require current root ancestry and stream namespace...OK
+28/84 persistence.durable_store.test.checkpoint store rejects unknown journal schema despite valid frame manifest and payload checksums...OK
+29/84 persistence.durable_store.test.checkpoint store publishes after fallback while preserving two valid generations...OK
+30/84 persistence.durable_store.test.large resident snapshots survive memory publication and two file reopens...OK
+31/84 persistence.durable_store.test.committed recovery prefix retains physical uncommitted suffix across file reopen...OK
+32/84 persistence.durable_store.test.committed recovery prefix excludes a partial crash frame without modifying bytes...OK
+33/84 persistence.durable_store.test.optimization memory overflow snapshot rotation preserves borrowed buffers and inline transitions...OK
+34/84 persistence.durable_store.test.optimization memory overflow snapshot allocation failure retains previous committed generation...OK
+35/84 persistence.durable_store.test.optimization memory inline snapshot publication preserves borrowed previous input...OK
+36/84 persistence.journal.test.stable journal detects tail, corruption, and sequence gap...OK
+37/84 runtime.production_contract.test.production contract freezes Linux scope and schema...OK
+38/84 runtime.production_contract.test.demo and testnet evidence never promotes production authority...OK
+39/84 runtime.production_contract.test.Gate.io and Bitget are explicit disabled rows...OK
+40/84 runtime.production_contract.test.Windows verification success cannot permit production...OK
+41/84 runtime.production_contract.test.required capabilities are not verified evidence...OK
+42/84 strategy.strategy_host_recovery.test.checkpoint replay is deterministic and fenced until cutover...OK
+43/84 model.canonical_event.test.09 boundary Adapter batches reject full and excess counts without populating output...OK
+44/84 model.canonical_event.test.decimal conversion is lossless and exact...OK
+45/84 model.canonical_event.test.opaque venue references are bounded...OK
+46/84 model.canonical_event.test.bounded decimal text normalizes before accumulation and preserves signed limits...OK
+47/84 persistence.snapshot_codec.test.snapshot codec rejects truncation CRC corruption and invalid enum values...OK
+48/84 persistence.snapshot_codec.test.in place decoding round trips nested arrays optional and union payloads...OK
+49/84 persistence.snapshot_codec.test.OMS snapshot encodes active records without reserving unused terminal capacity...OK
+50/84 execution.oms.test.OMS order capacity guard checks numeric boundaries without order population...OK
+51/84 execution.oms.test.optimization OMS late group report and replacement failures restore resident authority...OK
+52/84 execution.oms.test.optimization OMS dispatch rolls back cross strategy group cancellation at small and large scope...OK
+53/84 execution.oms.test.unknown order rejects a later place without changing identity...OK
+54/84 execution.oms.test.OMS commands retain each member intent identity...OK
+55/84 execution.oms.test.OMS commands bind distinct risk and reservation fact barriers...OK
+56/84 execution.oms.test.OMS command keeps each exact order type and safety field...OK
+57/84 execution.oms.test.pending cancel outbox is reconstructed after replay...OK
+58/84 execution.oms.test.OMS rejects a price for another instrument and preserves reservation assets...OK
+59/84 execution.oms.test.OMS rejects overflowing authoritative quantities...OK
+60/84 execution.oms.test.pending amend keeps old and new remaining exposure through fills and rejection...OK
+61/84 execution.oms.test.pending amend confirmation, Unknown and replay keep conservative reservations...OK
+62/84 execution.oms.test.ConfirmedAbsent cannot become a fill and releases reservation...OK
+63/84 execution.oms.test.an earlier live reconciliation forbids later absence for the same place...OK
+64/84 execution.oms.test.FoundTerminal requires an explicit terminal category...OK
+65/84 execution.oms.test.canonical report digest is part of report identity...OK
+66/84 execution.oms.test.canonical report identities do not order cumulative execution state...OK
+67/84 execution.oms.test.canonical late accepted report retains the historical quantity after decreasing amend...OK
+68/84 execution.oms.test.hot terminal facts reject semantic changes and invalid filled quantities...OK
+69/84 execution.oms.test.OrderIntentIdentity is idempotent and conflicts fail closed...OK
+70/84 execution.oms.test.explicit terminal archive preserves unrelated active orders and monotonic identities...OK
+71/84 execution.oms.test.order lookup and report updates preserve identity across an archived middle slot...OK
+72/84 execution.oms.test.group archive retains member identities until all active references close...OK
+73/84 execution.oms.test.explicit archive frees repeated lifecycles without spending tombstone capacity...OK
+74/84 execution.oms.test.canceled orders without archive window stay hot under an injected pressure latch...OK
+75/84 execution.oms.test.live unknown and pending_cancel orders never compact...OK
+76/84 execution.oms.test.ccc predecessor stays hot while successor is live...OK
+77/84 execution.oms.test.archive commit refuses mutated intent evidence without evicting hot state...OK
+78/84 execution.oms.test.OMS terminal archive requires complete coverage and applied fills...OK
+79/84 execution.oms.test.OMS explicit archive commit frees hot evidence and rejects a stale qualification...OK
+80/84 execution.oms.test.OMS functional admission never substitutes implicit compaction for durable archive commit...OK
+81/84 execution.oms.test.OMS archive coverage rejects incomplete or early queries without replacing valid evidence...OK
+82/84 execution.oms.test.OMS terminal conflict blocks archive qualification and preserves hot evidence...OK
+83/84 execution.oms.test.OMS later complete terminal reconciliation preserves first terminal observation...OK
+84/84 execution.oms.test.OMS archive qualification rejects every unfinished reservation branch...OK
+All 84 tests passed.
