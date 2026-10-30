@@ -1,8 +1,8 @@
 # 04：创建 Python StrategyInstance 并无权运行至 Ready
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in-progress
+Assignee: Codex
 Blocked by: [03 通过 DeployRelease 安装并登记 Python StrategyPackage](03-install-python-package.md)
 Parent: [模块地图](../map.md)
 

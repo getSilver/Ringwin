@@ -252,7 +252,7 @@ pub const HostSupervisor = struct {
         barrier: u64,
         checkpoint: []const u8,
     ) ![]u8 {
-        if (self.state != .ready_for_recovery or checkpoint.len == 0 or
+        if (self.state != .ready_for_recovery or
             checkpoint.len + 8 > max_checkpoint_payload)
             return error.InvalidState;
         const total_len = bridge_header_len + 8 + checkpoint.len;
@@ -599,17 +599,18 @@ pub const ManagedHost = struct {
         mode: []const u8,
         extra_args: []const []const u8,
     ) !ManagedHost {
-        var argv: [24][]const u8 = undefined;
-        if (4 + extra_args.len > argv.len) return error.TooManyHostArguments;
-        argv[0..4].* = .{
-            python,
-            script,
-            "--mode",
-            mode,
-        };
-        @memcpy(argv[4..][0..extra_args.len], extra_args);
+        var argv: [28][]const u8 = undefined;
+        const isolated = std.mem.eql(u8, mode, "candidate");
+        const prefix: usize = if (isolated) 7 else 4;
+        if (prefix + extra_args.len > argv.len) return error.TooManyHostArguments;
+        if (isolated) {
+            argv[0..7].* = .{ python, "-I", "-S", "-B", script, "--mode", mode };
+        } else {
+            argv[0..4].* = .{ python, script, "--mode", mode };
+        }
+        @memcpy(argv[prefix..][0..extra_args.len], extra_args);
         const child = try std.process.spawn(init.io, .{
-            .argv = argv[0 .. 4 + extra_args.len],
+            .argv = argv[0 .. prefix + extra_args.len],
             .stdin = .pipe,
             .stdout = .pipe,
             .stderr = .inherit,

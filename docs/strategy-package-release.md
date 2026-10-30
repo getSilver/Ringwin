@@ -134,3 +134,77 @@ they are never executed. Windows skips these Linux-applier cases.
 classification through HTTP/DOM adapters; it is not a browser automation run.
 The existing binary release, authentication and control-plane regression entries
 remain available. No Demo credentials or real systemd calls are used by acceptance.
+
+## New Python instances (task 04)
+
+The operations page creates an unauthorized instance via authenticated, CSRF-protected
+`POST /api/strategy-instances`; `GET` on the same path reports Ready or a concrete
+failure. The request has exactly these fields:
+
+```json
+{"release_artifact":"approved-release","definition_identity":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","package_manifest_sha256":"<64 lowercase hex>","strategy_identity":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","portfolio_identity":"cccccccccccccccccccccccccccccccc","decision_domain":"dddddddddddddddddddddddddddddddd","config_version":1,"config_json":"{\"warmup_events\":1}","config_sha256":"<SHA-256 of config_json ASCII bytes>","scopes":[{"venue":"okx","exchange_account":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","instrument":"ffffffffffffffffffffffffffffffff"}],"risk_budget":100,"initialization":"new"}
+```
+
+This is a binding example, not a trading configuration. The node embedding
+`ControlPlaneApp` must supply `instance_source=CandidateSource(...)` built from its
+sealed deployment ownership, approved integer risk budget and canonical QSHB input
+snapshot. The source declares its actual shard, DecisionDomain, VirtualPortfolio,
+sorted account/instrument scopes and budget. Every binding must match these values;
+HTTP cannot supply input events or ownership policy. Missing source returns 503.
+Input domain/registry, framing, coverage, record schema and depth payloads are
+checked before callbacks. Supply one record per batch (empty coverage batches are
+allowed for filtered input); the source covers sequence 1 through its declared last
+barrier for explicit new-instance initialization. Existing identities cannot be
+reinitialized or rebound. Binding bytes have a 64 KiB ceiling; the complete internal
+candidate request, including input snapshot, has a 256 KiB ceiling.
+
+The signed runtime inventory must include `runtime/ringwin-strategy-candidate`,
+the internal Zig adapter built as `bin/ringwin-strategy-candidate`, plus the locked
+Python Host and its API/codec modules. This optional known runtime path receives
+execute permission during installation. It is invoked by the backend, and has no
+control commands, Gateway or trading admission path. The approved lock's `host_path`
+points to `strategy_candidate_host.py`; its directory includes `strategy_api.py`,
+`strategy_host.py`, `strategy_package.py` and `strategy_state.py` as locked files.
+Before launch the backend reauthenticates the approved active release and compares
+all installed bytes to that signed inventory. Keep the release manifests/payloads
+available; registration alone cannot authorize execution of unverified disk files.
+
+The adapter owns the existing Zig ManagedHost/HostSupervisor and anonymous framed
+pipes. Empty BeginRecovery state denotes **only explicit initialization of a new
+identity**; other Host modes continue to require valid checkpoints. No existing
+instance failure falls back to initialization. Python starts with `-I -S -B`, a
+clean environment, only approved runtime/package import roots and the standard
+library. Its audit policy denies network/child-process actions and filesystem writes;
+this remains trusted signed Python, not a hostile-code sandbox. Dependencies are
+delivered offline. No credentials, sockets, activation identity or core capability
+are passed to the Host.
+
+The fixed API calls validate_config/create, bounded on_event callbacks and final
+validate/snapshot. Immutable Context/Event/OrderIntent/IntentGroup values carry
+only the contract fields. Output checks cover exact types, declared kinds, complete
+2–4-member groups, codec capacities, ownership, positive integer quantities/prices,
+and continuous IntentSequence advancement including empty output and overflow.
+Candidate outputs are counted and discarded. Ready never submits EnableTrading,
+HostActivated or a candidate intent to the core.
+
+Linux `prlimit` enforces the signed memory ceiling (address space of each of the
+adapter and child processes) and a 64 KiB diagnostic-file ceiling. The backend
+monitors callback phases and total warmup deadlines outside Python, killing the
+entire process group on exhaustion; Zig also checks elapsed callback/warmup time.
+Data insufficiency, invalid config/state, exceptions, unsupported input, output
+errors and exceeded budgets stay Stopped with a reason. A successful Host stays
+resident, unauthorized, at Ready until the manager closes or the process exits.
+Durable bindings and outcomes survive Web restart; Ready is never reconstructed
+from disk without a Host. Restart reports Stopped/recovery-required. Checkpoint
+publication/recovery and multiple resident instances belong to tasks 05 and 10.
+Windows currently rejects candidate loading because this OS budget adapter is
+unimplemented; this is not an assertion that Windows is permanently unsupported.
+
+Run `python3 -m unittest discover -s python -p test_strategy_instance.py -v` on
+Linux/WSL after building the Linux adapter. Its default path is
+`.scratch/build/candidate-linux/bin/ringwin-strategy-candidate`; the optional
+`RINGWIN_CANDIDATE_ENGINE` test environment variable selects another build of that
+adapter. The fixture signs and installs the **real adapter, Python interpreter and
+Host**, then drives authenticated HTTP. The engine payload and canonical depth
+input are explicitly synthetic. It proves offline unauthorized loading, not live
+node integration, economic qualification, OS/runtime qualification or deployment.

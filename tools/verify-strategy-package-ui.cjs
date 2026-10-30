@@ -19,17 +19,27 @@ const packageRecord = {
 };
 const prompts = ["/approved.json", "b".repeat(64), ""];
 let outcome = "rejected";
+let instanceStatus = "Ready";
+let submittedBinding;
 const context = vm.createContext({
   console, setTimeout() {}, location: {reload() {}},
   crypto: {randomUUID: () => "11111111-1111-4111-8111-111111111111"},
   prompt: () => prompts.shift() ?? "", window: {confirm: () => true},
   document: {createElement: element, body: {appendChild: el => toasts.push(el)},
     getElementById(id) { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); }},
-  fetch: async url => ({status: url === "/api/projection" ? 401 : 200, json: async () => {
+  fetch: async (url, options) => ({status: url === "/api/projection" ? 401 : 200, json: async () => {
     if (url === "/api/releases") return {active_artifact: "bundle-a", strategy_packages: [packageRecord],
       qualification_rejections: [{reason: "bad signature <unsafe>"}],
       release_records: [{artifact_id: "bundle-b", result: {status: "rejected", reason: "digest mismatch"}}]};
     if (url === "/risk-warning") return {warning_identity: "1", consequence: "offline test"};
+    if (url === "/api/strategy-instances") {
+      if (options.method === "POST") {
+        submittedBinding = JSON.parse(options.body);
+        return {result: {status: instanceStatus, reason: "warmup <insufficient>"}};
+      }
+      return {instances: [{binding: {strategy_identity: "<unsafe>", definition_identity: "definition",
+        config_sha256: "c".repeat(64)}, status: "Stopped", reason: "warmup <insufficient>"}]};
+    }
     return {result: {status: outcome, reason: "digest mismatch"}};
   }})
 });
@@ -51,6 +61,17 @@ vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], context);
     await vm.runInContext("submitLifecycle('deploy_release',1)", context);
     assert.ok(toasts.at(-1).textContent.includes(status));
     assert.ok(toasts.at(-1).style.cssText.includes("var(--bad)"));
+  }
+  await vm.runInContext("loadInstances()", context);
+  assert.ok(elements.get("instances").innerHTML.includes("&lt;unsafe&gt;"));
+  assert.ok(elements.get("instances").innerHTML.includes("warmup &lt;insufficient&gt;"));
+  for (const status of ["Ready", "Stopped"]) {
+    instanceStatus = status;
+    prompts.length = 0;
+    prompts.push(JSON.stringify({strategy_identity: "1".repeat(32), config_json: "{}"}));
+    await vm.runInContext("createStrategyInstance()", context);
+    assert.equal(submittedBinding.strategy_identity, "1".repeat(32));
+    assert.ok(toasts.at(-1).style.cssText.includes(status === "Ready" ? "var(--ok)" : "var(--bad)"));
   }
   console.log("strategy_package_ui=passed");
 })().catch(error => { console.error(error); process.exitCode = 1; });

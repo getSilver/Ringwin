@@ -24,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import control_plane
 import owner_session
 import release_lifecycle
+import strategy_instance
 
 SESSION_COOKIE = "owner_session"
 CSRF_HEADER = "X-Owner-CSRF"
@@ -185,7 +186,7 @@ class ControlPlaneApp:
     def __init__(self, directory: str, server: control_plane.CommandServer,
                  clock=lambda: int(time.time()),
                  projection_provider=None, ui_path=None, release_manager=None,
-                 lifecycle_outbox=None):
+                 lifecycle_outbox=None, instance_source=None):
         self.directory = directory
         self.clock = clock
         self.passphrases = owner_session.PassphraseStore(directory)
@@ -199,6 +200,8 @@ class ControlPlaneApp:
         self.ui_path = ui_path
         self.csrf_by_token_hash: dict[str, str] = {}
         self.release_manager = release_manager
+        self.instance_manager = (strategy_instance.InstanceManager(directory, release_manager, instance_source)
+                                 if release_manager is not None and instance_source is not None else None)
         self.lifecycle_outbox = lifecycle_outbox
         self._command_results: dict[int, tuple[str, dict]] = {}
         self._lifecycle_results: dict[int, tuple[str, dict]] = {}
@@ -451,6 +454,20 @@ class ControlPlaneApp:
             html = handle.read()
         return 200, html, "text/html; charset=utf-8"
 
+    def strategy_instances(self, headers, binding=None):
+        status, body = self.authorize(headers)
+        if status != 200:
+            return status, body
+        if self.instance_manager is None:
+            return 503, {"ok": False, "error": "approved node ownership/input source unavailable"}
+        try:
+            if binding is None:
+                return 200, {"ok": True, "instances": self.instance_manager.view()}
+            result = self.instance_manager.create(binding)
+            return 200, {"ok": result["status"] == "Ready", "result": result}
+        except (ValueError, OSError, release_lifecycle.ReleaseError) as error:
+            return 400, {"ok": False, "error": str(error)}
+
 
 def subprocess_error():
     import subprocess
@@ -551,6 +568,8 @@ def make_handler(app: ControlPlaneApp):
                     lambda body: app.submit_command(dict(self.headers), body)),
                 "/lifecycle": lambda: self._post(
                     lambda body: app.lifecycle(dict(self.headers), body)),
+                "/api/strategy-instances": lambda: self._post(
+                    lambda body: app.strategy_instances(dict(self.headers), body)),
             }
             handler = routes.get(self.path)
             if handler is None:
@@ -571,6 +590,7 @@ def make_handler(app: ControlPlaneApp):
                 "/operator-records": lambda: self._get(app.operator_records),
                 "/api/projection": lambda: self._get(app.projection),
                 "/api/releases": lambda: self._get(app.releases),
+                "/api/strategy-instances": lambda: self._get(app.strategy_instances),
             }
             handler = routes.get(self.path)
             if handler is None:

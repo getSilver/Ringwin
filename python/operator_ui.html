@@ -192,6 +192,9 @@ function pageOps(){
       </div></div>`).join("") +
     `<p class="dim">* = 需要 RiskWarning 确认</p>
      <div class="panel"><h2>策略包登记与发布结果</h2><div id="packages">加载中…</div></div>
+     <div class="panel"><h2>Python 实例（无交易授权）</h2>
+       <button onclick="createStrategyInstance()">创建并预热新实例</button>
+       <div id="instances">加载中…</div></div>
      <div class="panel"><h2>事实流 (最新在前)</h2><div id="feed">— 等待事件 —</div></div>`;
 }
 function pageRecords(){
@@ -208,7 +211,7 @@ let feedLines = [];
 function render(){
   drawNav();
   document.getElementById("main").innerHTML = RENDERERS[currentPage]();
-  if (currentPage === 4) { renderFeed(); loadPackages(); }
+  if (currentPage === 4) { renderFeed(); loadPackages(); loadInstances(); }
   if (currentPage === 5) loadRecords();
 }
 async function loadRecords(){
@@ -242,6 +245,29 @@ function renderFeed(){
   const el = document.getElementById("feed");
   if (el) el.innerHTML = feedLines.length
     ? feedLines.map(l=>`<div>· ${escaped(l)}</div>`).join("") : "— 暂无新事实 —";
+}
+
+async function loadInstances(){
+  const el = document.getElementById("instances"); if (!el) return;
+  try {
+    const [status, body] = await api("GET", "/api/strategy-instances");
+    if (status !== 200) { el.textContent = body.error || "实例查询失败"; return; }
+    el.innerHTML = body.instances.map(r=>`<p>${escaped(r.binding.strategy_identity)}：
+      ${escaped(r.status)} ${escaped(r.reason)}；无交易授权<br>
+      ${escaped(r.binding.definition_identity)} / ${escaped(r.binding.config_sha256)}<br>
+      ${escaped(JSON.stringify(r.evidence || {}))}</p>`).join("") || "尚无实例。";
+  } catch (error) { el.textContent = "实例查询失败，请重试。"; }
+}
+async function createStrategyInstance(){
+  const raw = prompt("粘贴已核对的运行绑定 JSON（定义/包摘要、配置内容及SHA-256、实例、VirtualPortfolio、DecisionDomain、账户品种范围与预算）：");
+  if (!raw) return;
+  try {
+    const [status, body] = await api("POST", "/api/strategy-instances", JSON.parse(raw));
+    const result = body.result || {};
+    const ready = status === 200 && result.status === "Ready";
+    toast(ready ? "Ready；无交易授权" : `加载失败：${result.reason || body.error || "未知结果"}`, ready ? "ok" : "bad");
+    await loadInstances();
+  } catch (error) { toast("绑定必须是有效 JSON；请求失败时请查询实例状态。", "bad"); }
 }
 
 // ---------- 命令流 ----------

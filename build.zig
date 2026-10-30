@@ -49,6 +49,17 @@ pub fn build(b: *std.Build) void {
     exe.stack_size = 64 * 1024 * 1024;
     b.installArtifact(exe);
 
+    const candidate = b.addExecutable(.{
+        .name = "ringwin-strategy-candidate",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/strategy_candidate_main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    candidate.stack_size = 16 * 1024 * 1024;
+    b.installArtifact(candidate);
+
     const run = b.addRunArtifact(exe);
     if (b.args) |args| run.addArgs(args);
     const run_step = b.step("run", "Run the deterministic acceptance fixture");
