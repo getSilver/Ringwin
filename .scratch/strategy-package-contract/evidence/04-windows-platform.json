@@ -1,0 +1,19 @@
+{
+  "architecture": "AMD64",
+  "candidate_sha256": "8fac54caf3b4dfe437568356ace18c6db9fe4566d2b54b78ba91416f85ab58ae",
+  "fixture_filesystem": "NTFS (C: temporary installation and D: worktree, Get-Volume verified)",
+  "linux_host_resource_acceptance": "pending: WSL1 ignores RLIMIT_AS; not replaced by Windows",
+  "memory_probe": {
+    "attempted_allocation_bytes": 268435456,
+    "limit_bytes": 134217728,
+    "memory_error_exit_77": true,
+    "metric": "per-process committed memory"
+  },
+  "os_build": "10.0.17763",
+  "platform": "win32",
+  "production_qualified": false,
+  "python": "3.9.18 (main, Sep 11 2023, 14:09:26) [MSC v.1916 64 bit (AMD64)]",
+  "python_abi": 198912,
+  "scope": "offline Windows candidate Host acceptance; synthetic engine/depth; no trading or service deployment",
+  "zig": "0.17.0-dev.315+5b647b792"
+}

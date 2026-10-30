@@ -26,5 +26,5 @@ Parent: [模块地图](../map.md)
 
 ## Answer / 实现证据
 
-待实施。
+2026-10-30：04 已在 Windows 路径完成独立无权 Ready、硬内存预算与 Host 生命周期验收，本票进入 Frontier，可基于 Windows 接手；未认领、未实施。依据 ADR0010，Windows 不以 Linux 通过为前提，Linux Host 资源验收缺口继续单列，不由 Windows 证据替代。
 

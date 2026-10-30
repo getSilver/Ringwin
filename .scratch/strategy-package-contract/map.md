@@ -4,7 +4,7 @@ Status: open
 
 ## Destination
 
-建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，02票的原生构建合同、静态注册与构建清单及03票的Python包安装登记已交付并通过各自离线验收；04已实现，待真正实施硬内存限制的Linux完成最终Host资源验收，05–11票仍待实施。
+建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，02票的原生构建合同、静态注册与构建清单及03票的Python包安装登记已交付并通过各自离线验收；04的Windows无权加载及Host资源路径已独立验收，05可基于Windows接手，05–11仍待实施。Linux Host资源验收单独保留缺口。
 
 ## Definition of done
 
@@ -38,11 +38,13 @@ Status: open
 
 ## Frontier
 
-- [04 创建Python StrategyInstance并无权运行至Ready](issues/04-python-instance-ready.md)：Codex实施中；实现已交付，当前WSL1不实施硬内存限制，最终Linux资源验收未完成，05不得提前接手。
+- [05 Python实例checkpoint与重启恢复](issues/05-python-checkpoint-recovery.md)：未认领；04的Windows路径已验收，可基于Windows接手。Windows不依赖Linux通过，Linux资源缺口不由本轮结果替代。
 
 每次只认领一张Frontier票。尚未实施票的ready-for-agent表示票已可供接手，仍须满足各票Blocked by；其余票在依赖完成前不属于Frontier。
 
 ## Decisions so far
+
+- 2026-10-30（Windows补齐验收）：用户要求“补齐并验收04的Windows路径；满足条件后即可开放05”。按ADR0010独立验收，撤销此前把Linux通过作为Windows后续门槛的说明。`10713655` / `275d700c` 补齐签名Windows安装、只读ACL/junction校验、Job硬内存预算、匿名pipe外部时限及创建期/Ready后后端死亡回收。Windows Host最终27项26通过1Linux专项skip，Python全量288项274通过14平台skip，Windows签名发布3/3，原生ReleaseSafe9/9；Linux发布回归12通过3Windows专项skip，仅属发布回归。双轴复审的启动孤儿窗口已原子入组修正，复审0阻塞。04 resolved并移出Frontier，05可接手但尚未认领/实施；地图保持open。Windows结果不代替Linux资源验收，也不授予生产、交易或部署资格。
 
 - 2026-10-30：04在统一worktree完成Web绑定、签名runtime候选加载、固定API、无权预热、批次无关、私有状态往返与Host死亡/停止接线，初始提交 `1e05071d`，修正至 `a15d016f`。旧WSL1的真实Host功能验证发现内存反向向量失败；最终增加实际RLIMIT_AS分配探测，当前平台在启动策略前拒绝。用户确认先提交实现、04保持未验收；完整Host资源向量须在真正实施硬限制的Linux补齐，04维持in-progress，地图open，05不开放。详细通过、失败及平台skip边界见04，未取得交易/部署或生产资格。
 
@@ -60,7 +62,7 @@ Status: open
 
 ## Not yet specified
 
-- 原生构建合同见02票；统一发布与激活由09票接通，Host加载组织、内存计量和聚合摘要由10票落实。工期和部署实例尚未指定；合同或构建交付不等于运行资格完成。
+- 原生构建合同见02票；统一发布与激活由09票接通，多实例Host加载组织、预算映射和聚合摘要由10票落实。Linux Host资源验收仍需真正实施RLIMIT_AS的内核；当前WSL1保持拒绝。工期和部署实例尚未指定；合同或构建交付不等于运行资格完成。
 
 ## Out of scope
 
