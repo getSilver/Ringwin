@@ -99,13 +99,24 @@ def run(request_path):
     package.parse_json(state)
     package.require(type(instance.next_intent_sequence) is int and instance.next_intent_sequence == expected_next,
                     "validate/snapshot changed IntentSequence")
-    # No checkpoint is published; this digest binds the Ready observation only.
+    restored = module.create(context, config)
+    package.require(restored.restore(state) is None and restored.validate() is None
+                    and type(restored.next_intent_sequence) is int
+                    and restored.next_intent_sequence == expected_next, "snapshot IntentSequence mismatch")
+    package.require(restored.snapshot() == state and restored.next_intent_sequence == expected_next,
+                    "private state restore roundtrip mismatch")
+    instance = restored
+    # Use the existing StrategyStateDigest domain without publishing a checkpoint.
     recovered = bytearray(96)
     recovered[:16] = int(context.strategy_identity, 16).to_bytes(16, "little")
     struct.pack_into("<Q", recovered, 16, context.config_version)
     recovered[24:40] = int(context.state_schema_identity, 16).to_bytes(16, "little")
     struct.pack_into("<I4xQQ", recovered, 40, context.state_schema_version, cursor, instance.next_intent_sequence)
-    recovered[64:] = hashlib.sha256(state).digest()
+    recovered[64:] = bridge.payload_state_digest(dict(
+        schema_registry=bridge.SCHEMA_REGISTRY, strategy=int(context.strategy_identity, 16),
+        definition=int(context.definition_identity, 16), state_schema=int(context.state_schema_identity, 16),
+        state_schema_version=context.state_schema_version, config_version=context.config_version,
+        cursor=cursor, next_intent=instance.next_intent_sequence), state)
     bridge.write_frame(sys.stdout.buffer, bridge.STRATEGY_RECOVERED, session, outgoing, recovered)
     kind, actual, sequence, payload = bridge.read_frame(sys.stdin.buffer)
     package.require(kind == bridge.SHUTDOWN and actual == session and sequence == incoming,

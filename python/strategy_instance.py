@@ -10,18 +10,37 @@ import secrets
 import selectors
 import shutil
 import signal
+import struct
 import subprocess
 import tempfile
 import threading
 import time
 
 import release_lifecycle
+import strategy_host as bridge
 import strategy_package as package
 
 
 BINDING_FIELDS = {"release_artifact", "definition_identity", "package_manifest_sha256",
                   "strategy_identity", "portfolio_identity", "decision_domain", "config_version",
                   "config_sha256", "config_json", "scopes", "risk_budget", "initialization"}
+
+
+def memory_enforcement_available(python):
+    """Probe actual kernel enforcement, not merely successful setrlimit calls."""
+    if os.name != "posix" or shutil.which("prlimit") is None:
+        return False
+    probe = ("import resource\n"
+             "resource.setrlimit(resource.RLIMIT_AS, (1048576, 1048576))\n"
+             "try:\n bytearray(2097152)\n"
+             "except MemoryError:\n raise SystemExit(77)\n")
+    try:
+        result = subprocess.run([python, "-I", "-S", "-c", probe],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                env={"LANG": "C", "LC_ALL": "C"}, close_fds=True, timeout=3)
+        return result.returncode == 77
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 class CandidateSource:
@@ -48,8 +67,29 @@ class CandidateSource:
                         "invalid canonical input snapshot")
         package.require(all(int.from_bytes(b[32:48], "little") == int(self.scope["decision_domain"], 16)
                             for b in self.batches), "canonical input DecisionDomain mismatch")
-        barrier = int.from_bytes(self.batches[-1][88:96], "little") if self.batches else 0
-        return self.shard, barrier, self.batches
+        # Normalize transport batching before the externally timed callbacks.
+        # Coverage gaps from subscription filtering stay attached to the record.
+        normalized, cursor = [], 0
+        for number, batch in enumerate(self.batches, 1):
+            session = (int.from_bytes(batch[48:56], "little"), int.from_bytes(batch[56:60], "little"),
+                       int.from_bytes(batch[64:72], "little"))
+            records, last = bridge.decode_component_batch(batch, session, number, cursor)
+            if not records:
+                normalized.append(batch)
+            offset = 128
+            for index, record in enumerate(records):
+                length = int.from_bytes(batch[offset:offset + 4], "little")
+                part = bytearray(batch[:128] + batch[offset:offset + length])
+                end = last if index == len(records) - 1 else record.shard_sequence
+                struct.pack_into("<I", part, 12, len(part))
+                struct.pack_into("<Q", part, 72, len(normalized) + 1)
+                struct.pack_into("<QQ", part, 80, cursor + 1, end)
+                struct.pack_into("<II", part, 104, 1, length)
+                struct.pack_into("<I", part, 124, bridge.crc32c(part[:124] + part[128:]))
+                normalized.append(bytes(part))
+                cursor, offset = end, offset + length
+            cursor = last
+        return self.shard, cursor, tuple(normalized)
 
 
 def validate_scopes(scopes):
@@ -125,20 +165,20 @@ class InstanceManager:
             root, manifest, lock = self._approved_package(binding)
             package.require(all(int.from_bytes(b[16:32], "little") == int(manifest["compatibility"]["schema_registry"], 16)
                                 for b in batches), "canonical input schema registry mismatch")
-            package.require(os.name == "posix" and shutil.which("prlimit") is not None,
-                            "candidate OS memory enforcement unavailable")
+            package.require(memory_enforcement_available(str(root / lock["python_path"])),
+                            "candidate hard address-space limit enforcement is unavailable or unverified; loading is unavailable")
             record = dict(binding=binding, status="Recovering", reason="", trading_authorized=False)
             self._save(record)
-            temporary = tempfile.TemporaryDirectory(prefix="candidate-", dir=self.directory)
-            work = Path(temporary.name)
-            request = dict(binding=binding, manifest=manifest, package_root=str(root / "strategies" / binding["definition_identity"]),
-                           python=str(root / lock["python_path"]), host=str(root / lock["host_path"]),
-                           generation=secrets.randbits(63) + 1, shard=shard, barrier=barrier,
-                           batches=[batch.hex() for batch in batches])
-            data = package.canonical(request)
-            process = None
-            errors = (work / "host-errors.txt").open("w+b")
+            process, temporary, errors = None, None, None
             try:
+                temporary = tempfile.TemporaryDirectory(prefix="candidate-", dir=self.directory)
+                work = Path(temporary.name)
+                request = dict(binding=binding, manifest=manifest, package_root=str(root / "strategies" / binding["definition_identity"]),
+                               python=str(root / lock["python_path"]), host=str(root / lock["host_path"]),
+                               generation=secrets.randbits(63) + 1, shard=shard, barrier=barrier,
+                               batches=[batch.hex() for batch in batches])
+                data = package.canonical(request)
+                errors = (work / "host-errors.txt").open("w+b")
                 package.require(len(data) <= package.MAX_JSON_BYTES, "candidate request capacity exceeded")
                 (work / "request.json").write_bytes(data)
                 limits = manifest["limits"]
@@ -159,10 +199,9 @@ class InstanceManager:
                                         "candidate callback or warmup budget exhausted")
                         chunk = os.read(process.stdout.fileno(), 1024)
                         if not chunk:
-                            process.wait(timeout=5)
                             errors.seek(0)
                             reason = errors.read(2048).decode("utf-8", "replace")
-                            raise package.PackageError(f"candidate Host failed (exit {process.returncode}): " + reason)
+                            raise package.PackageError(f"candidate Host failed (exit {process.poll()}): " + reason)
                         pending += chunk
                         package.require(len(pending) <= 2048, "candidate result capacity exceeded")
                         while b"\n" in pending:
@@ -180,8 +219,10 @@ class InstanceManager:
                 if process is not None:
                     self._stop(identity)
                 else:
-                    errors.close()
-                    temporary.cleanup()
+                    if errors is not None:
+                        errors.close()
+                    if temporary is not None:
+                        temporary.cleanup()
                 record.update(status="Stopped", reason=str(error)[:2048])
                 self._save(record)
                 return record
@@ -214,10 +255,24 @@ class InstanceManager:
                         "approved candidate runtime adapter unavailable")
         root = Path(releases.version_root) / active
         package.require(not root.is_symlink(), "installed release must not be a symlink")
+        expected = set(artifact.bundle.files) | {"strategy-registry.json", "manifest.sha256"}
+        actual = set()
+        for directory, directories, files in os.walk(root):
+            package.require(not Path(directory).stat().st_mode & 0o222, "installed release is writable")
+            package.require(not any((Path(directory) / name).is_symlink() for name in directories + files),
+                            "installed release contains a symlink")
+            for name in files:
+                actual.add((Path(directory) / name).relative_to(root).as_posix())
+                package.require(len(actual) <= len(expected), "undeclared installed file")
+        package.require(actual == expected, "undeclared or missing installed file")
+        package.require((root / "manifest.sha256").read_bytes() == (artifact.manifest_sha256 + "\n").encode("ascii"),
+                        "installed release manifest identity differs")
+        registry = package.canonical([dict(p, release_artifact=active) for p in artifact.bundle.packages])
+        package.require((root / "strategy-registry.json").read_bytes() == registry, "installed registry differs from approved release")
         for name, content in artifact.bundle.files.items():
             path = root / name
             package.require(not any(p.is_symlink() for p in (path, *path.parents) if p != root.parent)
-                            and path.is_file() and path.stat().st_size == len(content)
+                            and path.is_file() and not path.stat().st_mode & 0o222 and path.stat().st_size == len(content)
                             and path.read_bytes() == content, "installed release differs from approved bytes")
         manifest = package.parse_json(artifact.bundle.files[f"strategies/{binding['definition_identity']}/manifest.json"])
         lock = package.parse_json(artifact.bundle.files["runtime-lock.json"])
@@ -243,3 +298,4 @@ class InstanceManager:
         with self._lock:
             for identity in list(self._hosts):
                 self._stop(identity)
+                self._save(dict(self._records[identity], status="Stopped", reason="candidate Host closed"))

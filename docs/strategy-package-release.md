@@ -152,8 +152,9 @@ snapshot. The source declares its actual shard, DecisionDomain, VirtualPortfolio
 sorted account/instrument scopes and budget. Every binding must match these values;
 HTTP cannot supply input events or ownership policy. Missing source returns 503.
 Input domain/registry, framing, coverage, record schema and depth payloads are
-checked before callbacks. Supply one record per batch (empty coverage batches are
-allowed for filtered input); the source covers sequence 1 through its declared last
+checked before callbacks. The backend normalizes transport batches into independently
+supervised callbacks, retaining complete sequence coverage and filtering gaps;
+batch boundaries do not change strategy events or state. The source covers sequence 1 through its declared last
 barrier for explicit new-instance initialization. Existing identities cannot be
 reinitialized or rebound. Binding bytes have a 64 KiB ceiling; the complete internal
 candidate request, including input snapshot, has a 256 KiB ceiling.
@@ -180,14 +181,19 @@ delivered offline. No credentials, sockets, activation identity or core capabili
 are passed to the Host.
 
 The fixed API calls validate_config/create, bounded on_event callbacks and final
-validate/snapshot. Immutable Context/Event/OrderIntent/IntentGroup values carry
+validate/snapshot. A fresh instance must restore the snapshot, agree on IntentSequence,
+reproduce the same canonical payload and pass validate before Ready. This is an
+in-memory private-state roundtrip, not checkpoint publication or restart recovery.
+Immutable Context/Event/OrderIntent/IntentGroup values carry
 only the contract fields. Output checks cover exact types, declared kinds, complete
 2–4-member groups, codec capacities, ownership, positive integer quantities/prices,
 and continuous IntentSequence advancement including empty output and overflow.
 Candidate outputs are counted and discarded. Ready never submits EnableTrading,
 HostActivated or a candidate intent to the core.
 
-Linux `prlimit` enforces the signed memory ceiling (address space of each of the
+The backend first probes actual RLIMIT_AS enforcement in the approved interpreter;
+a kernel that accepts the API but ignores the allocation limit is rejected before
+any strategy code is imported. Linux `prlimit` then enforces the signed memory ceiling (address space of each of the
 adapter and child processes) and a 64 KiB diagnostic-file ceiling. The backend
 monitors callback phases and total warmup deadlines outside Python, killing the
 entire process group on exhaustion; Zig also checks elapsed callback/warmup time.
@@ -198,7 +204,9 @@ Durable bindings and outcomes survive Web restart; Ready is never reconstructed
 from disk without a Host. Restart reports Stopped/recovery-required. Checkpoint
 publication/recovery and multiple resident instances belong to tasks 05 and 10.
 Windows currently rejects candidate loading because this OS budget adapter is
-unimplemented; this is not an assertion that Windows is permanently unsupported.
+unimplemented. Legacy WSL1 also rejects it because its kernel ignores RLIMIT_AS;
+neither outcome is a permanent platform exclusion. A genuine enforcing Linux
+kernel is required to run the complete Ready/resource acceptance suite.
 
 Run `python3 -m unittest discover -s python -p test_strategy_instance.py -v` on
 Linux/WSL after building the Linux adapter. Its default path is

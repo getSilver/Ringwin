@@ -1,5 +1,6 @@
 //! Internal Web candidate adapter. Reuses HostSupervisor; never constructs a Gateway.
 const std = @import("std");
+const builtin = @import("builtin");
 const lifecycle = @import("strategy_host_lifecycle.zig");
 
 const Request = struct {
@@ -38,6 +39,18 @@ fn hexIdentity(value: []const u8) !u128 {
     const result = try std.fmt.parseInt(u128, value, 16);
     if (result == 0) return error.InvalidIdentity;
     return result;
+}
+
+fn awaitStop(io: std.Io) !void {
+    var stop: [1]u8 = undefined;
+    const buffers = [_][]u8{&stop};
+    _ = try std.Io.File.stdin().readStreaming(io, &buffers);
+}
+
+fn awaitHostExit(io: std.Io, stdout: std.Io.File) !void {
+    var unexpected: [1]u8 = undefined;
+    const buffers = [_][]u8{&unexpected};
+    if (try stdout.readStreaming(io, &buffers) != 0) return error.UnexpectedCandidateOutput;
 }
 
 pub fn run(init: std.process.Init, request_path: []const u8) !void {
@@ -109,10 +122,24 @@ pub fn run(init: std.process.Init, request_path: []const u8) !void {
         ready.config_version != request.binding.config_version or ready.cursor != request.barrier or
         ready.state_schema_identity != try hexIdentity(request.manifest.state_schema.identity) or
         ready.state_schema_version != request.manifest.state_schema.version) return error.CandidateIdentityMismatch;
-    try output.interface.print("{{\"cursor\":{d},\"next_intent_sequence\":{d},\"host_generation\":{d},\"trading_authorized\":false}}\n", .{ ready.cursor, ready.next_intent_sequence, plan.session.generation });
+    const digest = std.fmt.bytesToHex(ready.state_digest, .lower);
+    const host_pid: u64 = if (builtin.os.tag == .windows) @intFromPtr(host.child.id.?) else @intCast(host.child.id.?);
+    try output.interface.print("{{\"cursor\":{d},\"next_intent_sequence\":{d},\"host_generation\":{d},\"host_pid\":{d},\"state_digest\":\"{s}\",\"trading_authorized\":false}}\n", .{ ready.cursor, ready.next_intent_sequence, plan.session.generation, host_pid, digest });
     try output.interface.flush();
-    var stop: [1]u8 = undefined;
-    const buffers = [_][]u8{&stop};
-    _ = try std.Io.File.stdin().readStreaming(init.io, &buffers);
+    const Event = union(enum) { stop: anyerror!void, exited: anyerror!void };
+    var events: [2]Event = undefined;
+    var select = std.Io.Select(Event).init(init.io, &events);
+    defer select.cancelDiscard();
+    // Canceling Child.wait destroys its ownership in the pinned Zig runtime.
+    // Observe EOF without consuming the process handle needed for cleanup.
+    try select.concurrent(.exited, awaitHostExit, .{ init.io, host.child.stdout.? });
+    try select.concurrent(.stop, awaitStop, .{init.io});
+    const event = try select.await();
+    select.cancelDiscard();
+    switch (event) {
+        .exited => return error.CandidateHostExited,
+        .stop => |result| try result,
+    }
+    if (host.child.id == null) return error.CandidateHostExited;
     try host.shutdown(init.io, now(init.io));
 }

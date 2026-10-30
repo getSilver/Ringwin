@@ -454,7 +454,11 @@ def encode_checkpoint(metadata, state):
 
 
 def state_digest(metadata, state):
-    payload = state_payload(metadata, state)
+    return payload_state_digest(metadata, state_payload(metadata, state))
+
+
+def payload_state_digest(metadata, payload):
+    """Existing QSSD identity over already validated schema-owned payload bytes."""
     body = bytearray(b"QSSD\x01")
     for key in ("schema_registry", "strategy", "definition", "state_schema"):
         body.extend(metadata[key].to_bytes(16, "little"))

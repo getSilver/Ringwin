@@ -5,7 +5,9 @@ import json
 import os
 from pathlib import Path
 import struct
+import signal
 import sys
+import time
 import unittest
 
 import strategy_host
@@ -15,6 +17,7 @@ from test_strategy_package_release import DEFINITION, bundle_files, canonical, d
 
 
 ROOT = Path(__file__).resolve().parents[1]
+MEMORY_ENFORCED = strategy_instance.memory_enforcement_available(sys.executable)
 
 
 OBSERVER = b'''import json
@@ -39,7 +42,13 @@ class Observer:
     def snapshot(self):
         return json.dumps({"events": self.events, "next_intent_sequence": self.next_intent_sequence}, sort_keys=True, separators=(",", ":")).encode()
     def restore(self, data):
-        raise ValueError("new instance only")
+        state = json.loads(data)
+        if (set(state) != {"events", "next_intent_sequence"}
+                or any(type(v) is not int or not 0 <= v < 2**64 for v in state.values())
+                or state["next_intent_sequence"] == 0):
+            raise ValueError("invalid private state")
+        self.events = state["events"]
+        self.next_intent_sequence = state["next_intent_sequence"]
 
 def create(context, config):
     return Observer(context, config)
@@ -54,13 +63,15 @@ def depth_batch(sequence=1):
     struct.pack_into("<HHII", batch, 4, 1, 128, 0, len(batch))
     batch[16:32] = strategy_host.SCHEMA_REGISTRY.to_bytes(16, "little")
     batch[32:48] = (4).to_bytes(16, "little")
+    struct.pack_into("<Q", batch, 72, sequence)
     struct.pack_into("<QQqII", batch, 80, sequence, sequence, 0, 1, len(batch) - 128)
     struct.pack_into("<IIHHIQ", batch, 128, len(batch) - 128, len(payload), 7, 1, 0, sequence)
     batch[192:] = payload
+    struct.pack_into("<I", batch, 124, strategy_host.crc32c(batch[:124] + batch[128:]))
     return bytes(batch)
 
 
-@unittest.skipIf(os.name == "nt", "candidate Linux memory adapter is independently verified under WSL/Linux")
+@unittest.skipUnless(MEMORY_ENFORCED, "actual OS hard-memory enforcement unavailable; functional tests cannot establish qualification")
 class WebInstanceTests(unittest.TestCase):
     deploy = package_release.PackageReleaseTests.deploy
 
@@ -100,6 +111,13 @@ class WebInstanceTests(unittest.TestCase):
         manifest["subscriptions"] = [{"event_type": 7, "schema_version": 1}]
         manifest["output_kinds"] = ["intent_group", "order_intent"]
         files[f"strategies/{DEFINITION}/code/observer.py"] = code
+        files[f"strategies/{DEFINITION}/contracts/config.json"] = canonical(dict(
+            fields=[dict(name="warmup_events", type="u64", unit="canonical_events", minimum=1, maximum=100)],
+            unknown_fields="reject", missing_fields="reject", encoding="canonical_json"))
+        files[f"strategies/{DEFINITION}/contracts/state.json"] = canonical(dict(
+            fields=[dict(name="events", type="u64", unit="canonical_events", minimum=0, maximum=2**64 - 1),
+                    dict(name="next_intent_sequence", type="u64", unit="intent_sequence", minimum=1, maximum=2**64 - 1)],
+            unknown_fields="reject", missing_fields="reject", encoding="portable_json_v1"))
         manifest["files"] = [descriptor(p[ len(f'strategies/{DEFINITION}/'):], b) for p, b in sorted(files.items())
                              if p.startswith(f"strategies/{DEFINITION}/") and p != name]
         files[name] = canonical(manifest)
@@ -127,6 +145,8 @@ class WebInstanceTests(unittest.TestCase):
         self.assertEqual(body["result"]["status"], "Ready", body)
         self.assertEqual(body["result"]["evidence"]["cursor"], 1)
         self.assertEqual(body["result"]["evidence"]["next_intent_sequence"], 1)
+        self.assertEqual(body["result"]["evidence"]["state_digest"],
+                         "7ecf4a316effc1272ef559c6b61c61db089219514c0a56b585255c2f263c4a53")
         self.assertFalse(body["result"]["trading_authorized"])
         self.assertEqual(self.create()[1], body)
         self.assertEqual(len(self.command_server._pending), 0)
@@ -225,6 +245,141 @@ assert all("unapproved-path" not in p for p in sys.path)
         status, body = self.create()
         self.assertEqual(status, 400, body)
         self.assertIn("differs from approved bytes", body["error"])
+        self.assertEqual(self.instances._hosts, {})
+
+    def test_warmup_event_budget_exhaustion_is_not_ready(self):
+        self.install(limit_changes={"max_warmup_events": 1})
+        self.source.batches = (depth_batch(1), depth_batch(2))
+        status, body = self.create()
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["result"]["status"], "Stopped", body)
+        self.assertIn("warmup event budget exhausted", body["result"]["reason"])
+
+    def test_memory_budget_exhaustion_is_not_ready(self):
+        self.install(limit_changes={"max_memory_bytes": 1048576})
+        status, body = self.create()
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["result"]["status"], "Stopped", body)
+        self.assertEqual(self.instances._hosts, {})
+
+    def test_invalid_canonical_schema_is_not_ready(self):
+        self.install()
+        invalid = bytearray(depth_batch())
+        struct.pack_into("<H", invalid, 138, 2)
+        self.source.batches = (bytes(invalid),)
+        status, body = self.create()
+        self.assertEqual(status, 400, body)
+        self.assertEqual(self.instances._hosts, {})
+
+    def test_network_actions_are_rejected_inside_candidate(self):
+        self.install(b"import socket\nsocket.socket()\n" + OBSERVER)
+        status, body = self.create()
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["result"]["status"], "Stopped", body)
+        self.assertIn("external action forbidden", body["result"]["reason"])
+
+    def test_undeclared_transitive_import_file_is_rejected_before_launch(self):
+        self.install(OBSERVER.replace(b"import json", b"import json, helper"))
+        code = self.root / "versions" / "candidate-a" / "strategies" / DEFINITION / "code"
+        code.chmod(0o750)
+        (code / "helper.py").write_bytes(b"UNSIGNED = True\n")
+        (code / "helper.py").chmod(0o440)
+        code.chmod(0o550)
+        status, body = self.create()
+        self.assertEqual(status, 400, body)
+        self.assertIn("undeclared", body["error"])
+        self.assertEqual(self.instances._hosts, {})
+
+    def test_same_canonical_stream_in_different_batches_has_same_ready_digest(self):
+        self.install()
+        first, second = depth_batch(1), depth_batch(2)
+        self.source.batches = (first, second)
+        status, split = self.create()
+        self.assertEqual(status, 200, split)
+        self.assertEqual(split["result"]["status"], "Ready", split)
+        self.instances.close()
+        combined = bytearray(first + second[128:])
+        struct.pack_into("<I", combined, 12, len(combined))
+        struct.pack_into("<Q", combined, 88, 2)
+        struct.pack_into("<II", combined, 104, 2, len(combined) - 128)
+        struct.pack_into("<I", combined, 124, strategy_host.crc32c(combined[:124] + combined[128:]))
+        self.source.batches = (bytes(combined),)
+        # An independent deployment/store, with identical signed package and binding.
+        self.instances = strategy_instance.InstanceManager(self.root / "independent-instance-store", self.manager, self.source)
+        self.addCleanup(self.instances.close)
+        self.app.instance_manager = self.instances
+        status, grouped = self.create()
+        self.assertEqual(status, 200, grouped)
+        self.assertEqual(grouped["result"]["status"], "Ready", grouped)
+        for field in ("cursor", "next_intent_sequence", "state_digest"):
+            self.assertEqual(split["result"]["evidence"][field], grouped["result"]["evidence"][field])
+
+    def test_snapshot_progress_must_match_live_intent_sequence(self):
+        code = OBSERVER.replace(b"return ()", b'''intent = OrderIntent(self.next_intent_sequence, 1, 2, 3, "buy", "gtc", False, 1, 100)
+        self.next_intent_sequence += 1
+        return (intent,)''').replace(b'"next_intent_sequence": self.next_intent_sequence', b'"next_intent_sequence": 1')
+        self.install(code)
+        status, body = self.create()
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["result"]["status"], "Stopped", body)
+        self.assertIn("snapshot IntentSequence mismatch", body["result"]["reason"])
+
+    def test_host_death_after_ready_is_visible_as_stopped(self):
+        self.install()
+        status, body = self.create()
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["result"]["status"], "Ready", body)
+        os.kill(body["result"]["evidence"]["host_pid"], signal.SIGKILL)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            status, view = self.client.call("GET", "/api/strategy-instances")
+            if view["instances"][0]["status"] == "Stopped":
+                break
+            time.sleep(0.01)
+        self.assertEqual(status, 200, view)
+        self.assertEqual(view["instances"][0]["status"], "Stopped", view)
+        self.assertFalse(view["instances"][0]["trading_authorized"])
+
+    def test_restore_validation_cannot_mutate_intent_sequence(self):
+        code = OBSERVER.replace(b"self.events = state[\"events\"]", b"self.events = state[\"events\"]\n        self.restored = True")
+        code = code.replace(b"if self.events < self.required:", b"if getattr(self, 'restored', False):\n            self.next_intent_sequence += 1\n        if self.events < self.required:")
+        self.install(code)
+        status, body = self.create()
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["result"]["status"], "Stopped", body)
+        self.assertIn("snapshot IntentSequence mismatch", body["result"]["reason"])
+
+    def test_backend_pipe_eof_stops_and_reaps_python_host(self):
+        self.install()
+        status, body = self.create()
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["result"]["status"], "Ready", body)
+        pid = body["result"]["evidence"]["host_pid"]
+        self.instances._hosts[self.binding["strategy_identity"]]["process"].stdin.close()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            status, view = self.client.call("GET", "/api/strategy-instances")
+            if view["instances"][0]["status"] == "Stopped":
+                break
+            time.sleep(0.01)
+        self.assertEqual(view["instances"][0]["status"], "Stopped", view)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+
+@unittest.skipIf(os.name == "nt" or MEMORY_ENFORCED, "requires an installed Linux adapter on a kernel that ignores RLIMIT_AS")
+class UnsupportedMemoryKernelTests(unittest.TestCase):
+    setUp = WebInstanceTests.setUp
+    install = WebInstanceTests.install
+    deploy = WebInstanceTests.deploy
+    create = WebInstanceTests.create
+
+    def test_signed_package_cannot_load_when_the_kernel_ignores_the_memory_limit(self):
+        self.install()
+        status, body = self.create()
+        self.assertEqual(status, 400, body)
+        self.assertIn("hard address-space limit enforcement is unavailable or unverified", body["error"])
+        self.assertEqual(self.instances.view(), [])
         self.assertEqual(self.instances._hosts, {})
 
 
