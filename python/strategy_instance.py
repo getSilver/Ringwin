@@ -36,8 +36,16 @@ class CandidatePipes:
         self.errors = bytearray()
         self.threads = [threading.Thread(target=self._stdout, daemon=True),
                         threading.Thread(target=self._stderr, daemon=True)]
-        for thread in self.threads:
-            thread.start()
+        try:
+            for thread in self.threads:
+                thread.start()
+        except RuntimeError:
+            self.stopped.set()
+            self.terminate()
+            for thread in self.threads:
+                if thread.ident is not None:
+                    thread.join(timeout=5)
+            raise
 
     def _stdout(self):
         try:
@@ -287,7 +295,7 @@ class InstanceManager:
                         record.update(status="Ready", evidence=result, reason="")
                         self._save(record)
                         return record
-            except (OSError, ValueError, subprocess.SubprocessError) as error:
+            except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
                 if process is not None:
                     self._stop(identity)
                 else:
@@ -369,7 +377,13 @@ class InstanceManager:
         process.wait(timeout=5)
         if host["job"] is not None:
             host["job"].close()
-        host["pipes"].close()
+        if "pipes" in host:
+            host["pipes"].close()
+        else:
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                pipe.close()
+        if os.name == "nt":
+            process.close()
         host["temporary"].cleanup()
 
     def close(self):

@@ -10,6 +10,7 @@ import struct
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 import zipfile
@@ -310,6 +311,16 @@ assert all("unapproved-path" not in p for p in sys.path)
         self.assertIn("MemoryError", body["result"]["reason"])
         self.assertEqual(self.instances._hosts, {})
 
+    def test_excessive_diagnostics_are_bounded_and_stop_the_host(self):
+        code = OBSERVER.replace(b"import json", b"import json, sys").replace(
+            b"self.events += 1", b"sys.stderr.write('x' * 70000)\n        sys.stderr.flush()\n        self.events += 1")
+        self.install(code)
+        status, body = self.create()
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["result"]["status"], "Stopped", body)
+        self.assertLessEqual(len(body["result"]["reason"]), 2048)
+        self.assertEqual(self.instances._hosts, {})
+
     def test_invalid_canonical_schema_is_not_ready(self):
         self.install()
         invalid = bytearray(depth_batch())
@@ -532,6 +543,55 @@ class InstanceContractTests(unittest.TestCase):
                              {"portfolio_identity": "0" * 31 + "1", "scopes": [
                                  {"venue": "okx", "exchange_account": "0" * 31 + "2",
                                   "instrument": "0" * 31 + "3"}]})
+
+
+@unittest.skipUnless(os.name == "nt", "Windows atomic job assignment")
+class WindowsProcessOwnershipTests(unittest.TestCase):
+    def test_backend_death_during_creation_reaps_the_suspended_process(self):
+        w = strategy_instance.windows
+        with tempfile.TemporaryDirectory(prefix="ringwin-suspended-") as directory:
+            evidence = Path(directory) / "suspended-pid.json"
+            worker = f'''
+import sys, time
+sys.path.insert(0, {str(ROOT / 'python')!r})
+import strategy_windows as w
+create_process = w.create_process
+def pause(*args):
+    w.checked(create_process(*args))
+    info = w.c.cast(args[-1], w.c.POINTER(w.ProcessInfo)).contents
+    with open({str(evidence)!r}, 'w') as handle:
+        handle.write(str(info.pid))
+    while True:
+        time.sleep(1)
+w.create_process = pause
+job = w.Job(128 * 1024 * 1024)
+job.start([sys.executable, '-I', '-S', '-c', 'import time; time.sleep(60)'],
+    stdin=w.subprocess.DEVNULL, stdout=w.subprocess.DEVNULL, stderr=w.subprocess.DEVNULL,
+    env=w.environment(), close_fds=True)
+'''
+            backend = subprocess.Popen([sys.executable, "-I", "-S", "-c", worker],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=w.environment(), creationflags=subprocess.CREATE_NO_WINDOW, close_fds=True)
+            handle = None
+            try:
+                deadline = time.monotonic() + 10
+                while (not evidence.exists() or not evidence.stat().st_size) and backend.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(evidence.exists(), "backend did not reach suspended process creation")
+                pid = int(evidence.read_text())
+                open_process = w.api(w.kernel, "OpenProcess", w.w.HANDLE, w.w.DWORD, w.w.BOOL, w.w.DWORD)
+                handle = w.checked(open_process(0x100000, False, pid))
+                self.assertEqual(w.wait_process(handle, 0), 258, "child should still be suspended")
+                backend.kill()
+                backend.wait(timeout=5)
+                self.assertEqual(w.wait_process(handle, 5000), 0, "startup left an unowned suspended process")
+                print("windows_backend_death_during_create=created process terminated by kernel job ownership")
+            finally:
+                if backend.poll() is None:
+                    backend.kill()
+                backend.wait(timeout=5)
+                if handle:
+                    w.close_handle(handle)
 
 
 if __name__ == "__main__":

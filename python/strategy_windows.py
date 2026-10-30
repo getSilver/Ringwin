@@ -3,6 +3,8 @@
 import ctypes as c
 from ctypes import wintypes as w
 import os
+import math
+import msvcrt
 import subprocess
 import threading
 
@@ -20,13 +22,18 @@ def api(dll, name, result, *arguments):
 close_handle = api(kernel, "CloseHandle", w.BOOL, w.HANDLE)
 create_job = api(kernel, "CreateJobObjectW", w.HANDLE, w.LPVOID, w.LPCWSTR)
 set_job = api(kernel, "SetInformationJobObject", w.BOOL, w.HANDLE, c.c_int, w.LPVOID, w.DWORD)
-assign_job = api(kernel, "AssignProcessToJobObject", w.BOOL, w.HANDLE, w.HANDLE)
 terminate_job = api(kernel, "TerminateJobObject", w.BOOL, w.HANDLE, w.UINT)
-snapshot_threads = api(kernel, "CreateToolhelp32Snapshot", w.HANDLE, w.DWORD, w.DWORD)
-thread_first = api(kernel, "Thread32First", w.BOOL, w.HANDLE, w.LPVOID)
-thread_next = api(kernel, "Thread32Next", w.BOOL, w.HANDLE, w.LPVOID)
-open_thread = api(kernel, "OpenThread", w.HANDLE, w.DWORD, w.BOOL, w.DWORD)
 resume_thread = api(kernel, "ResumeThread", w.DWORD, w.HANDLE)
+initialize_attributes = api(kernel, "InitializeProcThreadAttributeList", w.BOOL,
+                            w.LPVOID, w.DWORD, w.DWORD, c.POINTER(c.c_size_t))
+update_attribute = api(kernel, "UpdateProcThreadAttribute", w.BOOL, w.LPVOID, w.DWORD,
+                       c.c_size_t, w.LPVOID, c.c_size_t, w.LPVOID, w.LPVOID)
+delete_attributes = api(kernel, "DeleteProcThreadAttributeList", None, w.LPVOID)
+create_process = api(kernel, "CreateProcessW", w.BOOL, w.LPCWSTR, w.LPWSTR, w.LPVOID,
+                     w.LPVOID, w.BOOL, w.DWORD, w.LPVOID, w.LPCWSTR, w.LPVOID, w.LPVOID)
+wait_process = api(kernel, "WaitForSingleObject", w.DWORD, w.HANDLE, w.DWORD)
+exit_code = api(kernel, "GetExitCodeProcess", w.BOOL, w.HANDLE, c.POINTER(w.DWORD))
+kill_process = api(kernel, "TerminateProcess", w.BOOL, w.HANDLE, w.UINT)
 
 
 def checked(result):
@@ -58,10 +65,62 @@ class ExtendedLimits(c.Structure):
                 ("peak_process_memory", c.c_size_t), ("peak_job_memory", c.c_size_t)]
 
 
-class ThreadEntry(c.Structure):
-    _fields_ = [("size", w.DWORD), ("usage", w.DWORD), ("thread", w.DWORD),
-                ("owner", w.DWORD), ("base_priority", w.LONG),
-                ("delta_priority", w.LONG), ("flags", w.DWORD)]
+class StartupInfo(c.Structure):
+    _fields_ = [("size", w.DWORD), ("reserved", w.LPWSTR), ("desktop", w.LPWSTR),
+                ("title", w.LPWSTR), ("x", w.DWORD), ("y", w.DWORD),
+                ("width", w.DWORD), ("height", w.DWORD), ("columns", w.DWORD),
+                ("rows", w.DWORD), ("fill", w.DWORD), ("flags", w.DWORD),
+                ("show", w.WORD), ("reserved_size", w.WORD), ("reserved_data", w.LPVOID),
+                ("stdin", w.HANDLE), ("stdout", w.HANDLE), ("stderr", w.HANDLE)]
+
+
+class StartupInfoEx(c.Structure):
+    _fields_ = [("startup", StartupInfo), ("attributes", w.LPVOID)]
+
+
+class ProcessInfo(c.Structure):
+    _fields_ = [("process", w.HANDLE), ("thread", w.HANDLE),
+                ("pid", w.DWORD), ("tid", w.DWORD)]
+
+
+class Process:
+    """Only the pipe/poll/wait operations used by the candidate backend."""
+
+    def __init__(self, argv):
+        self.args, self.handle, self.pid, self.returncode = argv, None, None, None
+        self.stdin = self.stdout = self.stderr = None
+
+    def poll(self):
+        try:
+            return self.wait(timeout=0)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def wait(self, timeout=None):
+        if self.returncode is not None:
+            return self.returncode
+        milliseconds = 0xffffffff if timeout is None else min(0xfffffffe, math.ceil(max(0, timeout) * 1000))
+        status = wait_process(self.handle, milliseconds)
+        if status == 258:
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        if status != 0:
+            raise c.WinError(c.get_last_error())
+        code = w.DWORD()
+        checked(exit_code(self.handle, c.byref(code)))
+        self.returncode = code.value
+        return self.returncode
+
+    def kill(self):
+        if self.poll() is None:
+            checked(kill_process(self.handle, 1))
+
+    def close(self):
+        for pipe in (self.stdin, self.stdout, self.stderr):
+            if pipe is not None:
+                pipe.close()
+        if self.handle:
+            close_handle(self.handle)
+            self.handle = None
 
 
 class Job:
@@ -78,35 +137,65 @@ class Job:
             self.close()
             raise
 
-    def start(self, argv, **options):
-        process = subprocess.Popen(argv, creationflags=0x4 | subprocess.CREATE_NO_WINDOW, **options)
+    def start(self, argv, *, stdin, stdout, stderr, env, close_fds, cwd=None):
+        if not close_fds:
+            raise ValueError("candidate requires an explicit inherited handle list")
+        process, child_fds, handles = Process(argv), [], []
+        attributes = None
         try:
-            checked(assign_job(self.handle, int(process._handle)))
-            snapshot = snapshot_threads(0x4, 0)
-            if snapshot == c.c_void_p(-1).value:
-                raise c.WinError(c.get_last_error())
+            for name, value in (("stdin", stdin), ("stdout", stdout), ("stderr", stderr)):
+                if value == subprocess.PIPE:
+                    read_fd, write_fd = os.pipe()
+                    child_fd, parent_fd = (read_fd, write_fd) if name == "stdin" else (write_fd, read_fd)
+                    child_fds.append(child_fd)
+                    setattr(process, name, os.fdopen(parent_fd, "wb" if name == "stdin" else "rb", buffering=0))
+                elif value == subprocess.DEVNULL:
+                    child_fd = os.open(os.devnull, os.O_RDONLY if name == "stdin" else os.O_WRONLY)
+                    child_fds.append(child_fd)
+                else:
+                    raise ValueError("candidate stdio must use a pipe or DEVNULL")
+                handle = msvcrt.get_osfhandle(child_fd)
+                os.set_handle_inheritable(handle, True)
+                handles.append(handle)
+            size = c.c_size_t()
+            initialize_attributes(None, 2, 0, c.byref(size))
+            storage = c.create_string_buffer(size.value)
+            checked(initialize_attributes(storage, 2, 0, c.byref(size)))
+            attributes = storage
+            job_list = (w.HANDLE * 1)(self.handle)
+            handle_list = (w.HANDLE * 3)(*handles)
+            # PROC_THREAD_ATTRIBUTE_JOB_LIST binds ownership inside CreateProcess.
+            checked(update_attribute(attributes, 0, 0x2000d, job_list, c.sizeof(job_list), None, None))
+            checked(update_attribute(attributes, 0, 0x20002, handle_list, c.sizeof(handle_list), None, None))
+            startup = StartupInfoEx()
+            startup.startup.size, startup.startup.flags = c.sizeof(startup), 0x100
+            startup.startup.stdin, startup.startup.stdout, startup.startup.stderr = handles
+            startup.attributes = c.cast(attributes, w.LPVOID)
+            command = c.create_unicode_buffer(subprocess.list2cmdline(argv))
+            environment_block = c.create_unicode_buffer("\0".join(f"{key}={value}" for key, value in sorted(env.items())) + "\0\0")
+            info = ProcessInfo()
+            flags = 0x4 | 0x400 | 0x80000 | subprocess.CREATE_NO_WINDOW
+            checked(create_process(argv[0], command, None, None, True, flags,
+                                   environment_block, str(cwd) if cwd is not None else None,
+                                   c.byref(startup), c.byref(info)))
+            process.handle, process.pid = info.process, info.pid
             try:
-                entry = ThreadEntry(size=c.sizeof(ThreadEntry))
-                found = thread_first(snapshot, c.byref(entry))
-                while found and entry.owner != process.pid:
-                    found = thread_next(snapshot, c.byref(entry))
-                checked(found)
-                thread = checked(open_thread(0x2, False, entry.thread))
-                try:
-                    if resume_thread(thread) != 1:
-                        raise OSError("candidate primary thread did not resume from suspension")
-                finally:
-                    close_handle(thread)
+                if resume_thread(info.thread) != 1:
+                    raise OSError("candidate primary thread did not resume from suspension")
             finally:
-                close_handle(snapshot)
+                close_handle(info.thread)
             return process
         except BaseException:
-            process.kill()
-            process.wait(timeout=5)
-            for pipe in (process.stdin, process.stdout, process.stderr):
-                if pipe:
-                    pipe.close()
+            if process.handle:
+                self.terminate()
+                process.wait(timeout=5)
+            process.close()
             raise
+        finally:
+            if attributes is not None:
+                delete_attributes(attributes)
+            for descriptor in child_fds:
+                os.close(descriptor)
 
     def terminate(self):
         with self._lock:
@@ -136,6 +225,7 @@ def memory_enforced(python):
         job.close()
         if process is not None:
             process.wait(timeout=5)
+            process.close()
 
 
 local_free = api(kernel, "LocalFree", w.HANDLE, w.HANDLE)

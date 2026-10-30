@@ -205,8 +205,8 @@ The backend first probes actual allocation failure in the approved interpreter;
 an unavailable or ineffective hard limit is rejected before any strategy code is
 imported. Linux `prlimit` enforces the signed memory ceiling as address space for
 each adapter/child process. Windows Job Objects enforce the ceiling as committed
-memory per process. The Windows adapter starts suspended, is assigned to the job,
-and is resumed only after assignment; child membership is inherited, breakaway is
+memory per process. Windows creates the suspended adapter atomically in the job
+using `PROC_THREAD_ATTRIBUTE_JOB_LIST`, then resumes it; child membership is inherited, breakaway is
 disabled, and closing the backend's non-inherited job handle kills the whole tree.
 The probe uses a 128 MiB job and requires MemoryError from a 256 MiB allocation;
 startup failure is not accepted as enforcement evidence. Acceptance also attempts
