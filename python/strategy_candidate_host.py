@@ -94,15 +94,18 @@ def run(request_path):
                            struct.pack("<QQ", cursor, suppressed))
         outgoing += 1
     expected_next = instance.next_intent_sequence
-    package.require(instance.validate() is None, "validate must return None")
     state = instance.snapshot()
     package.require(type(state) is bytes and len(state) <= manifest["limits"]["max_private_state_bytes"],
                     "private state capacity or type")
     package.parse_json(state)
+    package.require(instance.validate() is None and instance.snapshot() == state,
+                    "validate changed private state")
     package.require(type(instance.next_intent_sequence) is int and instance.next_intent_sequence == expected_next,
                     "validate/snapshot changed IntentSequence")
     restored = module.create(context, config)
-    package.require(restored.restore(state) is None and restored.validate() is None
+    package.require(restored.restore(state) is None and restored.snapshot() == state,
+                    "private state restore roundtrip mismatch")
+    package.require(restored.validate() is None
                     and type(restored.next_intent_sequence) is int
                     and restored.next_intent_sequence == expected_next, "snapshot IntentSequence mismatch")
     package.require(restored.snapshot() == state and restored.next_intent_sequence == expected_next,

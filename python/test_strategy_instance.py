@@ -358,6 +358,15 @@ for action in (socket.socket, lambda: os.system("true")):
         self.assertEqual(body["result"]["status"], "Stopped", body)
         self.assertIn("snapshot IntentSequence mismatch", body["result"]["reason"])
 
+    def test_validate_cannot_repair_incomplete_warmup_state(self):
+        code = OBSERVER.replace(b"if self.events < self.required:", b"self.events = self.required\n        if self.events < self.required:")
+        self.install(code)
+        config = '{"warmup_events":2}'
+        status, body = self.create(config_json=config, config_sha256=hashlib.sha256(config.encode()).hexdigest())
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["result"]["status"], "Stopped", body)
+        self.assertIn("validate changed private state", body["result"]["reason"])
+
     def test_backend_pipe_eof_stops_and_reaps_python_host(self):
         self.install()
         status, body = self.create()
