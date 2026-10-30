@@ -64,4 +64,17 @@ H1为有界双边深度/重同步与Host输入，H2为完整组/共同准入/独
 
 ## 最终运行与复审
 
-待最终命令完成后填写实际数量、退出码与提交版本；此句存在时不得据此关闭10。
+实现 `bec1ad4c`；Standards建议的每Venue独立feed修订为`1b77d655`。固定基线至实现和上述修订均已进行Standards/Spec独立只读审查；两轴无遗留发现。审查代理未运行测试，运行结果由主代理独立收取。
+
+| 验证 | 实际结果 | 日志及独立退出码 |
+|---|---|---|
+| Python全量 | 245/245，171.892秒，exit0 | `.scratch/build/10-python-full.log`、`.exit` |
+| Debug公共集成 | 12个核心场景及既有checkpoint场景通过，exit0；此运行在每Venue夹具修订前完成，最终源码以ReleaseSafe产品运行为准 | `.scratch/build/10-joint-debug-complete.log`、`.exit` |
+| ReleaseSafe全量 | 819/819，exit0；所测模块在每Venue夹具修订中未改变 | `.scratch/build/10-zig-full.log`、`.exit` |
+| Host产品 | 28/28，exit0，`strategy_host_product_acceptance=passed`；第25项在最终`1b77d655`源码上执行完整ReleaseSafe恢复程序 | `.scratch/build/10-host-product.log`、`.exit` |
+
+回归先验证失败：新增Python场景在缺少真实深度接线时失败；`10-projection-red-debug2.log`在报告先到时得到5000而非预期0，exit1。随后修正两处经济投影，Debug场景验证0→5000、重复仍5000及原可能量。初次联合夹具接线中的时间/帧容量、激活摘要/屏障和Gateway恢复顺序错误已修正，早期失败运行不作为通过证据。
+
+最终ReleaseSafe联合场景：start_cursor=69、published_cut=99、activation_barrier=112、next_intent=3、orders=2、cycles=1、opening=false。两份深度输入SHA256为`a462d48a45c6a8cfbeba1da6a69822d2c717af3d57fdaea913e0d2ebc7b184f1`及`948026781e2c868d071b618f84ee36d75a0f5f0271d787d15479152560bbd813`；同场日志保留投影、checkpoint私有、恢复后私有和核心摘要。最终产品运行包含全部12个核心恢复场景。
+
+2026-10-30收取并逐一核对三份全量退出码均为0，日志完整结束，无残留Zig/Python进程。最终文档收尾只同步本模块证据与状态，不改变已验证源码，不重复执行全量；相对链接、Zig格式及CRLF-aware差异检查另行核对。10按用户确认的Windows本机离线范围resolved，模块closed；来源spec及上文未执行资格保持独立未完成。
