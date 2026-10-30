@@ -4,7 +4,7 @@ Status: open
 
 ## Destination
 
-建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，02票的原生构建合同、静态注册与构建清单已交付并通过离线验收；03–11票的加载器、Host及发布接线仍待实施。
+建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，02票的原生构建合同、静态注册与构建清单及03票的Python包安装登记已交付并通过各自离线验收；04–11票的实例加载、Host及后续发布接线仍待实施。
 
 ## Definition of done
 
@@ -38,12 +38,13 @@ Status: open
 
 ## Frontier
 
-- [03 通过DeployRelease安装并登记Python StrategyPackage](issues/03-install-python-package.md)：无未完成blocker，尚未认领。
+- [04 创建Python StrategyInstance并无权运行至Ready](issues/04-python-instance-ready.md)：03已完成，尚未认领。
 
 每次只认领一张Frontier票。尚未实施票的ready-for-agent表示票已可供接手，仍须满足各票Blocked by；其余票在依赖完成前不属于Frontier。
 
 ## Decisions so far
 
+- 2026-10-30：03完成。实现分支 `codex/strategy-package-03-control-plane` 提交 `0f558022`、`d8774609`；票据分支 `codex/strategy-package-03` 保留02及main文档。交付签名Python包验证、原子安装/登记、Web结果和外置资格证据绑定；Python全量15/15、旧控制面Zig108/108及发布/认证回归通过，双轴复审0项。旧整波测试因基线已有普通命令默认过期时间导致的幂等缺陷失败，具体复现与边界见03；不能声称整波或真实运行资格通过。未导入策略、创建实例或授予权限。03移出Frontier，04可接手但未认领，地图保持open。
 - 2026-10-30：02票在独立 worktree `D:/github/Ringwin-strategy-package-02`、分支 `codex/strategy-package-02` 完成。交付原生静态注册、独立构建清单和最小观察策略；构建验收8/8（12个正反向向量），Debug与ReleaseFast全量均820/820通过，Standards/Spec及测试栈修正复审均0项发现。原生发布与激活仍由09票接通；未执行Demo、部署或Linux运行资格验收。02移出Frontier，03尚未认领，地图保持open。
 - 2026-10-29：用户批准并发布02–11十张纵向实施票，首批Frontier为02/03。依赖为04←03、05←04、06←05、07←06、08←06、09←02/03/06/08、10←05/06/08、11←07/09/10；各票Blocked by以相对链接为准。保留01合同票，地图保持open；不新增横向预重构、隔离系统或恢复协议。
 - 2026-10-29：补充收窄后的评审建议：最终包资格证据外置绑定；Keep复用现有API，同实例Rebuild不可表达时拒绝；激活前validate检查预热。Host加载/资源计量和既有恢复接线在实现票中明确，不新增隔离或恢复系统，也不阻塞后续拆票。地图仍为open，01的resolved仍仅表示文档交付。
