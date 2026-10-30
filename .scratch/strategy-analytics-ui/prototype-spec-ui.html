@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<!-- =====================================================================
+PROTOTYPE（定稿视觉基准） - 策略分析界面·规格渲染原型
+依据：spec.md v1。数据全部为确定性假数据，仅用于视觉对齐，非生产代码。
+图表：uPlot 1.6.32 本地文件；K线为手绘 canvas。
+本文件经与 SystemOwner 逐屏确认，作为未来「实现波次」的视觉基准。
+====================================================================== -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>[原型] 策略分析界面 · 规格渲染</title>
+<link rel="stylesheet" href="uPlot.min.css">
+<style>
+  :root { --bg:#111418; --panel:#1a1f26; --line:#2a313b; --txt:#c9d2dc; --dim:#7d8a99;
+          --acc:#4da3ff; --up:#2ecc8f; --dn:#ff5d5d; --warn:#e8b84b; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--txt); font:14px/1.5 "Segoe UI",system-ui,sans-serif; }
+  h1 { font-size:17px; } h2 { font-size:14px; margin-bottom:8px; }
+  h3 { font-size:13px; color:var(--dim); margin:14px 0 6px; }
+  .proto-tag { position:fixed; top:6px; right:10px; z-index:99; background:#5b2d00; color:#ffc46b;
+               padding:2px 10px; border-radius:4px; font-size:11px; letter-spacing:1px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:12px; }
+  .num { font-variant-numeric:tabular-nums; }
+  .up { color:var(--up); } .dn { color:var(--dn); } .dim { color:var(--dim); }
+  .grid2 { display:grid; grid-template-columns:2fr 1fr; gap:12px; align-items:start; }
+  .kpis { display:flex; gap:18px; flex-wrap:wrap; }
+  .kpi .lbl { font-size:11px; color:var(--dim); white-space:nowrap; }
+  .kpi .val { font-size:17px; font-weight:600; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th { text-align:left; color:var(--dim); font-weight:normal; border-bottom:1px solid var(--line);
+       padding:4px 8px; white-space:nowrap; }
+  td { padding:4px 8px; border-bottom:1px solid #20262e; }
+  tr.grp td { background:#141920; color:var(--dim); font-size:12px; letter-spacing:.5px; }
+  .pill { display:inline-block; padding:0 8px; border-radius:9px; font-size:11px; line-height:18px; }
+  .pill.ok { background:#0e2e22; color:var(--up); } .pill.rej { background:#33161a; color:var(--dn); }
+  .pill.opt { background:#22262c; color:var(--dim); } .pill.warn { background:#332a12; color:var(--warn); }
+  .va { display:flex; min-height:100vh; }
+  .va aside { width:190px; background:#0d1014; border-right:1px solid var(--line); padding:14px 10px;
+              position:sticky; top:0; height:100vh; }
+  .va aside a { display:block; padding:8px 12px; border-radius:6px; color:var(--txt); margin-bottom:2px; cursor:pointer; }
+  .va aside a.on { background:#20304a; color:#fff; }
+  .va main { flex:1; padding:16px 20px; max-width:1280px; }
+  .hm { display:grid; grid-template-columns:52px repeat(12,1fr); gap:3px; font-size:11px; }
+  .hm .hd { color:var(--dim); text-align:center; padding:3px 0; }
+  .hm .yl { color:var(--dim); padding:3px 4px; }
+  .hm .cell { border-radius:4px; text-align:center; padding:6px 0; min-height:26px; background:#161b21; color:var(--dim); }
+  .snap { display:flex; gap:10px; align-items:center; padding:8px 4px; border-bottom:1px solid #20262e; flex-wrap:wrap; }
+  .snap code { font-size:12px; color:var(--acc); }
+  .tl { list-style:none; padding-left:18px; border-left:2px solid var(--line); }
+  .tl li { position:relative; padding:6px 0 14px 16px; }
+  .tl li::before { content:""; position:absolute; left:-23px; top:12px; width:10px; height:10px;
+                   border-radius:50%; background:var(--dim); }
+  .tl li.ok::before { background:var(--up); } .tl li.rej::before { background:var(--dn); }
+</style>
+</head>
+<body>
+<div class="proto-tag">PROTOTYPE · 假数据</div>
+<div class="va">
+  <aside><h1 style="margin-bottom:12px">📊 分析台</h1><nav id="nav"></nav>
+    <p class="dim" style="font-size:11px;margin-top:20px;padding:0 12px">只读 · 与操作台分离<br>spec.md v1 渲染</p></aside>
+  <main id="main"></main>
+</div>
+
+<script src="uPlot.iife.min.js"></script>
+<script>
+"use strict";
+/* ================= 确定性假数据 ================= */
+const DAY=86400e3, T0=Date.UTC(2026,4,1);
+const days=Array.from({length:90},(_,i)=>T0+i*DAY);
+let seed=42; const rnd=()=>(seed=(seed*1103515245+12345)%2147483648)/2147483648;
+function walk(s,d,v){let x=s;return days.map(()=>{x*=1+d+(rnd()-.5)*v;return x;});}
+
+const eqCta=walk(80000,.0012,.022), eqFund=walk(45000,.0006,.004);
+const TREAS=25000;
+const totalEq=days.map((_,i)=>eqCta[i]+eqFund[i]+TREAS);
+function ddSeries(s){let m=s[0];return s.map(v=>{m=Math.max(m,v);return(v/m-1)*100;});}
+const ddTotal=ddSeries(totalEq);
+
+// 双口径与基准（DS9）
+function cum(f){let s=0;return days.map(()=>s+=f());}
+const feesDaily=cum(()=>rnd()*40);
+const rawDaily=days.map(()=>(rnd()-.42)*900+(rnd()-.35)*260);
+const grossCum=[],netCum=[];{let g=0,n=0;for(let i=0;i<90;i++){g+=rawDaily[i];n+=rawDaily[i]-feesDaily[i];grossCum.push(g);netCum.push(n);}}
+const btcMark=walk(71000,.0009,.02);
+const NAV0=totalEq[0];
+const benchEq=btcMark.map(p=>NAV0*p/btcMark[0]);
+const fundOnly=cum(()=>rnd()*210);
+// 按策略堆叠（预累加）
+const pnlCta=cum(()=> (rnd()-.42)*900);
+const pnlFund=cum(()=> (rnd()-.35)*260);
+
+// 日收益率与绩效指标（DS6）
+const rets=[];for(let i=1;i<90;i++)rets.push(totalEq[i]/totalEq[i-1]-1);
+const mean=rets.reduce((a,b)=>a+b,0)/rets.length;
+const sd=Math.sqrt(rets.reduce((a,b)=>a+(b-mean)**2,0)/rets.length);
+const downs=rets.filter(r=>r<0);
+const sdd=Math.sqrt(downs.reduce((a,b)=>a+b*b,0)/downs.length)||1e-9;
+// α/β（CAPM，基准=BTC mark_price 归一化序列，rf=0）
+const benchRets=[];for(let i=1;i<90;i++)benchRets.push(btcMark[i]/btcMark[i-1]-1);
+const mb=benchRets.reduce((a,b)=>a+b,0)/benchRets.length;
+const vb=benchRets.reduce((a,b)=>a+(b-mb)**2,0)/benchRets.length||1e-12;
+const cov=rets.reduce((a,r,i)=>a+(r-mean)*(benchRets[i]-mb),0)/rets.length;
+const BETA=cov/vb;
+const ALPHA=(mean-BETA*mb)*365; // 年化超额
+
+// round-trip 交易（DS3）
+const STRATS=["cta-trend-v3","funding-arb-v2"],INSTS=["BTC-USDT-SWAP","ETH-USDT-SWAP"];
+const trades=Array.from({length:64},(_,i)=>{
+  const win=rnd()<.56;
+  return { i, day:(rnd()*89)|0,
+    strat:STRATS[rnd()<.62?0:1], inst:INSTS[rnd()<.7?0:1],
+    dir:rnd()<.5?"long":"short",
+    qty:+(0.05+rnd()*0.6).toFixed(2),
+    pnl:+((win?1:-1)*(20+rnd()*380)).toFixed(2) };
+});
+const winsArr=trades.filter(t=>t.pnl>0);
+const grossWin=winsArr.reduce((a,t)=>a+t.pnl,0);
+const grossLoss=Math.abs(trades.filter(t=>t.pnl<=0).reduce((a,t)=>a+t.pnl,0))||1;
+const avgWin=grossWin/winsArr.length;
+const avgLoss=grossLoss/(trades.length-winsArr.length)||1;
+let mcl=0,cl=0;trades.forEach(t=>{if(t.pnl<=0){cl++;mcl=Math.max(mcl,cl);}else cl=0;});
+
+// 回撤区间表（演示行）
+const ddPeriods=[
+  ["2026-06-03 → 06-21","06-11",-7.2,"已恢复"],
+  ["2026-05-12 → 05-19","05-16",-4.8,"已恢复"],
+  ["2026-07-08 → 07-15","07-12",-3.1,"已恢复"],
+  ["2026-08-14 → 进行中","08-19",-2.4,"进行中"]];
+
+// 月度收益（热力图）
+const mIdx={};
+days.forEach((ts,i)=>{const d=new Date(ts),k=d.getUTCFullYear()+"/"+d.getUTCMonth();(mIdx[k]=mIdx[k]||[]).push(i);});
+const monthReturns=[];
+for(const k in mIdx){const idx=mIdx[k];
+  const base=idx[0]>0?totalEq[idx[0]-1]:totalEq[0];
+  const r=(totalEq[idx[idx.length-1]]/base-1)*100;
+  monthReturns.push({year:+k.split("/")[0],month:+k.split("/")[1],pct:r});}
+
+// OHLC bars（DS7，1m×120 根）与 fills
+let px=71000;const bars=[];
+for(let i=0;i<120;i++){const o=px,h=o*(1+rnd()*.002),l=o*(1-rnd()*.002),
+  c=o*(1+(rnd()-.5)*.003);bars.push({o,h,l,c});px=c;}
+const fillBars=[12,25,26,47,61,88,102].map(b=>({bar:b,side:rnd()<.5?"buy":"sell",qty:+(0.05+rnd()*.4).toFixed(2)}));
+
+// 决策链
+const chain=[
+  {t:"09:32:01.204",k:"intent",st:["通过","ok"],d:"OrderIntent · BTC-USDT-SWAP buy 0.5 @ limit 71,240",ref:"intent#42 · cta-trend-v3 · group IG-17"},
+  {t:"09:32:01.388",k:"risk",st:["接受","ok"],d:"RiskDecision 接受 · RiskReservation RR-208 占用 $420",ref:"lease RL-9 v4"},
+  {t:"09:32:01.512",k:"cmd",st:["已发送","ok"],d:"OrderCommand place · post-only · reduce-only=false",ref:"client id OKX-DEMO-BTC-IOC-0042"},
+  {t:"09:32:02.947",k:"fill",st:["部分成交","ok"],d:"Fill 成交 0.25 @ 71,238 · fee $0.89 USDT",ref:"venue ord-88121 · partial"},
+  {t:"09:33:10.101",k:"recon",st:["终态确认","ok"],d:"ExecutionReport live→done · 剩余量撤销确认",ref:"ConfirmedAbsent"}];
+const STAGE={intent:"Intent",risk:"风控",cmd:"命令",fill:"成交",recon:"对账"};
+const rejects=[
+  {t:"09:41:22.077",id:"intent#43",why:"OpeningGate 拒绝：清算距离不足 180bps < 阈值 250bps",strat:"cta-trend-v3"},
+  {t:"10:02:55.310",id:"intent#44",why:"stale frame：cursor 落后屏障 2 个序号",strat:"funding-arb-v2"}];
+
+// 快照（结果管理）
+const snapshots=[
+  {name:"20260824-0930-baseline",cutoff:"2026-08-24T01:30Z",cursor:"shard seq 4812",hash:"a3f1…9c",
+   note:"控制面波次收尾基线",nav:totalEq[89],sharpe:mean/sd*Math.sqrt(365),maxDD:-7.2,alpha:ALPHA*100,beta:BETA},
+  {name:"20260820-1400-midmonth",cutoff:"2026-08-20T06:00Z",cursor:"shard seq 4551",hash:"77bd…e2",
+   note:"",nav:totalEq[81],sharpe:(mean/sd*Math.sqrt(365))-0.18,maxDD:-7.2,alpha:ALPHA*100-1.8,beta:BETA+0.05},
+  {name:"20260810-1000-fundarb-on",cutoff:"2026-08-10T02:00Z",cursor:"shard seq 4207",hash:"c04e…51",
+   note:"funding-arb-v2 上线后首快照",nav:totalEq[71],sharpe:(mean/sd*Math.sqrt(365))-0.42,maxDD:-6.8,alpha:ALPHA*100-3.1,beta:BETA+0.11}];
+
+/* ================= 汇总统计 ================= */
+const WINRATE=winsArr.length/trades.length*100;
+const PAYOFF=avgWin/avgLoss;
+const EXPECTANCY=WINRATE/100*avgWin-(1-WINRATE/100)*avgLoss;
+const VOL_ANN=sd*Math.sqrt(365)*100;
+const STATS={
+  nav:totalEq[89], navPrev:totalEq[88], nav30:totalEq[59],
+  maxDD:Math.min(...ddTotal),
+  sharpe:mean/sd*Math.sqrt(365),
+  sortino:mean/sdd*Math.sqrt(365),
+  winRate:WINRATE,
+  profitFactor:grossWin/grossLoss,
+  payoff:PAYOFF,                              // 盈亏比 = 均盈/均亏
+  expectancy:EXPECTANCY,                      // 期望值 $/笔
+  tradesN:trades.length, maxConsecLoss:mcl,
+  volAnn:VOL_ANN,
+  alpha:ALPHA*100, beta:BETA,
+  cagr:(Math.pow(totalEq[89]/totalEq[0],365/90)-1)*100,
+  fees:feesDaily[89]};
+STATS.calmar=STATS.cagr/100/Math.abs(STATS.maxDD);
+const fmtU=v=>"$"+Math.round(v).toLocaleString("en-US");
+const fmtP=(v,d)=>(v>=0?"+":"")+v.toFixed(d===undefined?2:d)+"%";
+/* ================= 图表工具 ================= */
+const css=getComputedStyle(document.documentElement);
+const C=n=>css.getPropertyValue(n).trim();
+function uplot(el,series,data,h,extra){
+  const o={width:el.clientWidth||900,height:h||220,
+    scales:{x:{time:true}},
+    axes:[{stroke:C("--dim"),grid:{stroke:"#20262e"}},{stroke:C("--dim"),grid:{stroke:"#20262e"},
+      values:(u,vs)=>vs.map(v=>Math.abs(v)>=1000?(v/1000)+"k":v)}],
+    series:[{},...series],legend:{show:series.some(s=>s.label)},cursor:{points:{show:false}}};
+  if(extra)Object.assign(o,extra);
+  return new uPlot(o,data,el);
+}
+function candles(canvas,bars,fills){
+  const W=canvas.clientWidth||900,H=260;canvas.width=W;canvas.height=H;
+  const g=canvas.getContext("2d");
+  if(!g||typeof g.fillRect!=="function")return; // DOM桩保护
+  const hi=Math.max(...bars.map(b=>b.h)),lo=Math.min(...bars.map(b=>b.l));
+  const Y=v=>10+(hi-v)/(hi-lo||1)*(H-30);
+  const bw=W/bars.length;
+  g.strokeStyle="#2a313b";g.beginPath();
+  for(let i=0;i<=bars.length;i+=20){g.moveTo(i*bw,5);g.lineTo(i*bw,H-18);}
+  g.stroke();
+  bars.forEach((b,i)=>{
+    const x=i*bw+bw/2,col=b.c>=b.o?C("--up"):C("--dn");
+    g.strokeStyle=col;g.fillStyle=col;
+    g.beginPath();g.moveTo(x,Y(b.h));g.lineTo(x,Y(b.l));g.stroke();
+    const top=Y(Math.max(b.o,b.c)),hgt=Math.max(1.5,Math.abs(Y(b.o)-Y(b.c)));
+    g.fillRect(x-bw*0.32,top,bw*0.64,hgt);
+  });
+  (fills||[]).forEach(f=>{
+    const x=f.bar*bw+bw/2,y=Y(bars[f.bar].c);
+    g.fillStyle=f.side==="buy"?C("--up"):C("--dn");
+    g.beginPath();g.arc(x,f.side==="buy"?y+12:y-12,5,0,7);g.fill();
+    g.fillStyle="#fff";g.font="9px sans-serif";g.textAlign="center";
+    g.fillText(f.side==="buy"?"B":"S",x,(f.side==="buy"?y+15:y-9));
+  });
+}
+
+/* ================= 视图：总览 ================= */
+function kpi(lbl,val,cls){return `<div class="kpi"><div class="lbl">${lbl}</div>
+  <div class="val num ${cls||""}">${val}</div></div>`;}
+function viewOverview(el){
+  el.innerHTML=`
+  <div class="card"><div class="kpis">
+    ${kpi("总净值",fmtU(STATS.nav))}
+    ${kpi("当日",fmtP((STATS.nav/STATS.navPrev-1)*100),STATS.nav>=STATS.navPrev?"up":"dn")}
+    ${kpi("近30日",fmtP((STATS.nav/STATS.nav30-1)*100),"up")}
+    ${kpi("最大回撤",STATS.maxDD.toFixed(1)+"%","dn")}
+    ${kpi("Sharpe",STATS.sharpe.toFixed(2))}
+    ${kpi("Sortino",STATS.sortino.toFixed(2))}
+    ${kpi("Calmar",STATS.calmar.toFixed(2))}
+    ${kpi("Alpha(年化)",fmtP(STATS.alpha),STATS.alpha>=0?"up":"dn")}
+    ${kpi("Beta",STATS.beta.toFixed(2),"dim")}
+    ${kpi("年化波动",STATS.volAnn.toFixed(1)+"%","dim")}
+  </div>
+  <div class="kpis" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line)">
+    ${kpi("交易笔数",STATS.tradesN)}
+    ${kpi("胜率",STATS.winRate.toFixed(0)+"%",STATS.winRate>=50?"up":"dn")}
+    ${kpi("盈亏比(均盈/均亏)",STATS.payoff.toFixed(2),STATS.payoff>=1?"up":"dn")}
+    ${kpi("Profit factor",STATS.profitFactor.toFixed(2))}
+    ${kpi("期望值 $/笔",(STATS.expectancy>=0?"+":"")+STATS.expectancy.toFixed(1),STATS.expectancy>=0?"up":"dn")}
+    ${kpi("最大连亏",STATS.maxConsecLoss+" 笔",STATS.maxConsecLoss>=5?"dn":"dim")}
+    ${kpi("CAGR(年化)",fmtP(STATS.cagr))}
+    ${kpi("费用累计",fmtU(STATS.fees),"dim")}
+  </div></div>
+  <div class="grid2">
+    <div><div class="card"><h2>组合权益 / 回撤 underwater <span class="dim" style="font-size:11px">(90d)</span></h2><div id="chEq"></div></div>
+    <div class="card"><h2>回撤区间 Top-N</h2>
+      <table><tr><th>区间</th><th>谷底</th><th>深度</th><th>状态</th></tr>
+      ${ddPeriods.map(p=>`<tr><td>${p[0]}</td><td>${p[1]}</td>
+        <td class="num dn">${p[2].toFixed(1)}%</td>
+        <td>${p[3]==="进行中"?'<span class="pill warn">进行中</span>':'<span class="pill opt">已恢复</span>'}</td></tr>`).join("")}
+      </table></div></div>
+    <div>      <div class="card"><h2>策略组</h2>
+      <table>
+      <tr class="grp"><td colspan="3">运行中</td></tr>
+      <tr><td>cta-trend-v3</td><td class="num">${fmtU(eqCta[89])}</td><td class="num up">+${((eqCta[89]/eqCta[0]-1)*100).toFixed(1)}%</td></tr>
+      <tr><td>funding-arb-v2</td><td class="num">${fmtU(eqFund[89])}</td><td class="num up">+${((eqFund[89]/eqFund[0]-1)*100).toFixed(1)}%</td></tr>
+      <tr class="grp"><td colspan="3">占位</td></tr>
+      <tr><td colspan="3"><span class="pill opt">options · 占位 · 无数据（核心首版仅现货永续）</span></td></tr>
+      </table></div></div>
+  </div>`;
+  uplot(document.getElementById("chEq"),
+    [{stroke:C("--acc"),width:2,fill:"rgba(77,163,255,.12)",label:"权益"}],
+    [days,totalEq],230);
+  const ddEl=document.createElement("div");document.getElementById("chEq").appendChild(ddEl);
+  uplot(ddEl,[{stroke:C("--dn"),width:1.5,fill:"rgba(255,93,93,.25)",fillTo:0}],
+    [days,ddTotal],100,
+    {axes:[{stroke:C("--dim"),grid:{stroke:"#20262e"}},
+      {stroke:C("--dim"),grid:{show:false},values:(u,vs)=>vs.map(v=>v.toFixed(0)+"%")}],
+     legend:{show:false}});
+}
+
+/* ================= 视图：收益归因 ================= */
+function monthCell(m){
+  if(!m)return `<div class="cell">–</div>`;
+  const v=m.pct,a=Math.min(.75,Math.abs(v)/6);
+  const bg=v>=0?`rgba(46,204,143,${a})`:`rgba(255,93,93,${a})`;
+  return `<div class="cell" style="background:${bg};color:${a>.4?"#fff":"var(--txt)"}">${v.toFixed(1)}%</div>`;}
+function pivotTable(){
+  const map={};
+  trades.forEach(t=>{const k=t.strat+"|"+t.inst+"|"+t.dir;
+    (map[k]=map[k]||{n:0,pnl:0,w:0});const r=map[k];r.n++;r.pnl+=t.pnl;if(t.pnl>0)r.w++;});
+  return `<table><tr><th>策略 × 品种 × 方向</th><th>笔数</th><th>胜率</th><th>净盈亏</th></tr>
+  ${Object.keys(map).sort().map(k=>{const r=map[k];
+    return `<tr><td>${k.replace(/\|/g," · ")}</td><td class="num">${r.n}</td>
+    <td class="num">${(r.w/r.n*100).toFixed(0)}%</td>
+    <td class="num ${r.pnl>=0?"up":"dn"}">${fmtU(r.pnl)}</td></tr>`;}).join("")}</table>`;}
+function viewAttribution(el){
+  el.innerHTML=`
+  <div class="card"><h2>双口径累计盈亏 + benchmark <span class="dim" style="font-size:11px">(DS9 · 扣费前/后 · BTC 归一化)</span></h2><div id="chDual"></div></div>
+  <div class="card"><h2>按策略堆叠累计已实现盈亏 + 资金费贡献</h2><div id="chStack"></div>
+    <p class="dim" style="font-size:11px;margin-top:6px">归因口径：VirtualPortfolio × strategy_activated 授权映射；一 portfolio 多策略时显式降级为"混合归属"。</p></div>
+  <div class="grid2">
+    <div class="card"><h2>月度收益热力图 / 年度柱状</h2>
+      <div class="hm"><div class="hd"></div>${["1月","2月","3月","4月","5月","6月","7月","8月","9月","10月","11月","12月"].map(m=>`<div class="hd">${m}</div>`).join("")}
+      ${[2026].map(y=>`<div class="yl">${y}</div>`+Array.from({length:12},(_,m)=>{
+        const mr=monthReturns.find(x=>x.year===y&&x.month===m);return monthCell(mr);}).join("")).join("")}
+      </div><div id="chYear" style="margin-top:10px"></div></div>
+    <div class="card"><h2>逐笔盈亏分布</h2><div id="chHist"></div><div id="chSeq" style="margin-top:8px"></div></div>
+  </div>
+  <div class="card"><h2>交易透视表（round-trip 分组）</h2>${pivotTable()}</div>`;
+  uplot(document.getElementById("chDual"),
+    [{stroke:C("--acc"),width:2,label:"扣费前",value:(_,v)=>fmtU(v)},
+     {stroke:C("--up"),width:2,label:"扣费后",value:(_,v)=>fmtU(v)},
+     {stroke:C("--warn"),width:1.5,dash:[4,3],label:"BTC基准",value:(_,v)=>fmtU(v)}],
+    [days,grossCum,netCum,benchEq],240);
+  const both=days.map((_,i)=>pnlCta[i]+pnlFund[i]);
+  uplot(document.getElementById("chStack"),
+    [{stroke:"#6ea8fe",width:2,fill:"rgba(110,168,254,.35)",label:"合计",value:(_,v)=>fmtU(v)},
+     {stroke:C("--up"),width:1.5,fill:"rgba(46,204,143,.30)",label:"CTA",value:(_,v)=>fmtU(v)},
+     {stroke:C("--warn"),width:1.5,fill:"rgba(232,184,75,.30)",label:"资金费套利",value:(_,v)=>fmtU(v)}],
+    [days,both,pnlCta,pnlFund],240);
+  // 资金费副图
+  const fEl=document.createElement("div");document.getElementById("chStack").appendChild(fEl);
+  uplot(fEl,[{stroke:C("--warn"),width:1.5,label:"资金费累计",value:(_,v)=>fmtU(v)}],
+    [days,fundOnly],110,{legend:{show:true}});
+  // 年度柱状
+  const yr=[monthReturns.reduce((a,m)=>({pct:a.pct*(1+m.pct/100)},1),{pct:1})];
+  let ypc=(yr[0].pct-1)*100;
+  uplot(document.getElementById("chYear"),
+    [{paths:uPlot.paths.bars({size:[.5,100]}),stroke:C("--acc"),fill:"rgba(77,163,255,.4)",
+      label:"2026 累计",value:()=>fmtP(ypc)}],
+    [[2026],[ypc]],110,{scales:{x:{time:false}},legend:{show:true},
+     axes:[{stroke:C("--dim"),grid:{show:false}},{stroke:C("--dim"),grid:{stroke:"#20262e"},values:(u,vs)=>vs.map(v=>v.toFixed(0)+"%")}]});
+  // 盈亏直方图
+  const bins={},BS=50;
+  trades.forEach(t=>{const b=Math.floor(t.pnl/BS)*BS;bins[b]=(bins[b]||0)+1;});
+  const bk=Object.keys(bins).map(Number).sort((a,b)=>a-b);
+  uplot(document.getElementById("chHist"),
+    [{paths:uPlot.paths.bars({size:[.8,100]}),
+      stroke:bk.map(v=>v>=0?C("--up"):C("--dn")),
+      fill:bk.map(v=>v>=0?"rgba(46,204,143,.45)":"rgba(255,93,93,.45)")}],
+    [bk,bk.map(v=>bins[v])],140,
+    {scales:{x:{time:false}},legend:{show:false},
+     axes:[{stroke:C("--dim"),grid:{show:false}},{stroke:C("--dim"),grid:{stroke:"#20262e"}}]});
+  // 按序条形
+  const seq=trades.slice().sort((a,b)=>a.day-b.day);
+  uplot(document.getElementById("chSeq"),
+    [{paths:uPlot.paths.bars({size:[.9,100]}),
+      stroke:seq.map(t=>t.pnl>=0?C("--up"):C("--dn")),
+      fill:seq.map(t=>t.pnl>=0?"rgba(46,204,143,.45)":"rgba(255,93,93,.45)")}],
+    [seq.map(t=>t.i),seq.map(t=>t.pnl)],140,
+    {scales:{x:{time:false}},legend:{show:false},
+     axes:[{stroke:C("--dim"),grid:{show:false}},{stroke:C("--dim"),grid:{stroke:"#20262e"},values:(u,vs)=>vs.map(v=>v.toFixed(0))}]});
+}
+
+/* ================= 视图：决策链日志 ================= */
+function viewChain(el){
+  el.innerHTML=`
+  <div class="card"><h2>K线回放 + fills 叠加 <span class="dim" style="font-size:11px">(mark_price 1m 聚合 · B/S 为本系统成交)</span></h2>
+    <canvas id="cvK" style="width:100%;height:260px"></canvas></div>
+  <div class="grid2">
+    <div class="card"><h2>近期风控拒绝</h2>
+      <table><tr><th>时间</th><th>Intent</th><th>策略</th><th>结果</th><th>原因（CanonicalRejectReason）</th></tr>
+      ${rejects.map(r=>`<tr><td class="num dim">${r.t}</td><td>${r.id}</td><td>${r.strat}</td>
+        <td><span class="pill rej">拒绝</span></td><td>${r.why}</td></tr>`).join("")}</table></div>
+    <div class="card"><h2>决策链 · intent#42 关联视图（时间线）</h2>
+      <ul class="tl">${chain.map(c=>`<li class="${c.k==="fill"?"ok":""}">
+        <span class="pill opt">${STAGE[c.k]}</span><span class="pill ${c.st[1]}">${c.st[0]}</span>
+        <b class="num"> ${c.t}</b><br>${c.d}<br><span class="dim" style="font-size:12px">${c.ref}</span></li>`).join("")}</ul></div>
+  </div>`;
+  candles(document.getElementById("cvK"),bars,fillBars);
+}
+
+/* ================= 视图：跨账户汇总 ================= */
+function accountsTable(){
+  return `<table>
+    <tr class="grp"><td colspan="3">ExchangeAccount · OKX 主账户 (900)</td></tr>
+    <tr><td>PF-1 · cta-trend-v3</td><td class="num">${fmtU(eqCta[89])}</td><td class="num up">+${((eqCta[89]/eqCta[88]-1)*100).toFixed(2)}%</td></tr>
+    <tr><td>PF-2 · funding-arb-v2</td><td class="num">${fmtU(eqFund[89])}</td><td class="num up">+${((eqFund[89]/eqFund[88]-1)*100).toFixed(2)}%</td></tr>
+    <tr><td>TreasuryPortfolio</td><td class="num">${fmtU(TREAS)}</td><td class="num dim">—</td></tr>
+    <tr class="grp"><td colspan="3">第二个 ExchangeAccount</td></tr>
+    <tr><td colspan="3" class="dim" style="font-style:italic">数据模型含账户维度；首版 fixture 单账户。</td></tr>
+  </table>`;}
+function viewAccounts(el){
+  el.innerHTML=`<div class="card"><h2>跨账户汇总</h2>${accountsTable()}</div>
+  <div class="card"><h2>NAV 估值状态</h2>
+    <p>当前 <span class="pill ok">valuation = ok</span>　<span class="dim" style="font-size:12px">mark_price 健康源存在。缺价时此处置灰显示"无法估值"，禁止显示 $0（spec §4.2）。</span></p></div>`;
+}
+
+/* ================= 视图：结果管理 ================= */
+let cmp=[];
+function viewSnapshots(el){
+  el.innerHTML=`
+  <div class="card"><h2>分析快照（版本化目录 + manifest）</h2>
+    ${snapshots.map((s,i)=>`<div class="snap">
+      <input type="checkbox" data-i="${i}" onchange="toggleCmp(${i})" ${cmp.includes(i)?"checked":""}>
+      <code>${s.name}/</code>
+      <span class="dim" style="font-size:12px">cutoff ${s.cutoff} · 游标 ${s.cursor} · hash ${s.hash}</span>
+      ${s.note?`<span class="pill opt">${s.note}</span>`:""}
+      <button onclick="alert('此处打开快照详情视图')">查看</button></div>`).join("")}
+    <p class="dim" style="font-size:12px;margin-top:8px">勾选两个快照做对比。manifest 含生成器版本与各数据集内容哈希，凭来源游标可复现。</p></div>
+  <div class="card" id="cmpPanel">${cmpPanel()}</div>`;
+  window.toggleCmp=i=>{const p=cmp.indexOf(i);
+    if(p>=0)cmp.splice(p,1);else{cmp.push(i);if(cmp.length>2)cmp.shift();}
+    viewSnapshots(el);};
+}
+function cmpPanel(){
+  if(cmp.length!==2)return `<h2>对比</h2><p class="dim">请勾选两个快照。</p>`;
+  const[a,b]=cmp.map(i=>snapshots[i]);
+  const row=(l,x,y,u)=>`<tr><td>${l}</td><td class="num">${x}${u||""}</td><td class="num">${y}${u||""}</td>
+    <td class="num ${(x-y)>=0?"up":"dn"}">${(x-y>=0?"+":"")+(x-y).toFixed(2)}${u||""}</td></tr>`;
+  return `<h2>对比：${a.name} ↔ ${b.name}</h2>
+  <table><tr><th>指标</th><th>${a.name.slice(0,13)}</th><th>${b.name.slice(0,13)}</th><th>Δ</th></tr>
+  ${row("净值",a.nav,b.nav," $")}${row("Sharpe",a.sharpe,b.sharpe)}
+  ${row("最大回撤 %",a.maxDD,b.maxDD)}${row("Alpha 年化 %",a.alpha,b.alpha)}${row("Beta",a.beta,b.beta)}</table>`;}
+
+/* ================= 导航与挂载 ================= */
+const VIEWS=[
+  ["总览",viewOverview],["收益归因",viewAttribution],["决策链日志",viewChain],
+  ["跨账户汇总",viewAccounts],["结果管理",viewSnapshots]];
+let cur=0;
+function render(){
+  document.getElementById("nav").innerHTML=
+    VIEWS.map((v,i)=>`<a class="${i===cur?"on":""}" data-v="${i}">${v[0]}</a>`).join("");
+  [...document.querySelectorAll("#nav a")].forEach(a=>
+    a.onclick=()=>{cur=+a.dataset.v;render();});
+  const main=document.getElementById("main");
+  main.innerHTML="";
+  VIEWS[cur][1](main);
+}
+render();
+</script>
+</body>
+</html>

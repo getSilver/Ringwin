@@ -290,6 +290,15 @@ pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_mode
     };
 }
 
+/// Shares the canonical fixture with control-plane installation probes.
+pub fn applyCanonicalGenesis(shard: *engine.TradingShard, decision_journal: *journal.Journal, authorization: host_gateway.Authorization, reservation_model: engine.ReservationModel, target_identity: u128) !void {
+    for (genesisEvents(authorization, reservation_model)) |event| {
+        var configured = event;
+        if (configured == .core and configured.core.payload == .control_command) configured.core.payload.control_command.target_identity = target_identity;
+        if (try engine.applyStable(shard, decision_journal, configured) != null) return error.UnexpectedCommand;
+    }
+}
+
 pub fn startScenarioAuthorized(authorization: host_gateway.Authorization, reservation_model: engine.ReservationModel) !LiveRun {
     var run: LiveRun = undefined;
     try startScenarioInto(&run, authorization, reservation_model, .{ .fencing = 1, .shard = 0, .generation = 1 });

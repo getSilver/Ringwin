@@ -181,7 +181,7 @@ fn priceTicks(price_atoms: i128, tick_atoms: i128) !i128 {
 
 fn changesTradingAuthorization(kind: operational.CommandKind) bool {
     return switch (kind) {
-        .enable_trading, .trading_pause, .stop_keep_positions, .de_risk, .resolve_latch => true,
+        .enable_trading, .trading_pause, .stop_keep_positions, .de_risk, .resolve_latch, .kill_switch => true,
         .start_recovery, .cancel_open_orders, .freeze_residual, .unfreeze_residual => false,
     };
 }
@@ -7813,6 +7813,11 @@ fn replayConfigured(bytes: []const u8, quantity_denominator: i64, reservation_mo
     }, .status = undefined };
     recovered.status = try replayReaderInto(&reader, &recovered.shard);
     return recovered;
+}
+
+/// Read-only projections share the authoritative recovery replay path.
+pub fn replayForProjection(bytes: []const u8, quantity_denominator: i64, reservation_model: ReservationModel) !ReplayResult {
+    return replayConfigured(bytes, quantity_denominator, reservation_model);
 }
 
 /// Replays a stable journal and reports only its externally comparable digest.
