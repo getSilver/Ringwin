@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 import secrets
-import selectors
+import queue
 import shutil
 import signal
 import struct
@@ -20,6 +20,68 @@ import release_lifecycle
 import strategy_host as bridge
 import strategy_package as package
 
+if os.name == "nt":
+    import strategy_windows as windows
+
+
+CANDIDATE_PATH = "runtime/ringwin-strategy-candidate" + (".exe" if os.name == "nt" else "")
+
+
+class CandidatePipes:
+    """Bounded pipe readers, including Windows anonymous pipes without select()."""
+
+    def __init__(self, process, terminate):
+        self.process, self.terminate = process, terminate
+        self.output, self.stopped = queue.Queue(maxsize=4), threading.Event()
+        self.errors = bytearray()
+        self.threads = [threading.Thread(target=self._stdout, daemon=True),
+                        threading.Thread(target=self._stderr, daemon=True)]
+        for thread in self.threads:
+            thread.start()
+
+    def _stdout(self):
+        try:
+            while not self.stopped.is_set():
+                chunk = os.read(self.process.stdout.fileno(), 1024)
+                while not self.stopped.is_set():
+                    try:
+                        self.output.put(chunk, timeout=0.05)
+                        break
+                    except queue.Full:
+                        pass
+                if not chunk:
+                    break
+        except OSError:
+            pass
+
+    def _stderr(self):
+        total = 0
+        try:
+            while not self.stopped.is_set():
+                chunk = os.read(self.process.stderr.fileno(), 1024)
+                if not chunk:
+                    break
+                self.errors.extend(chunk[:max(0, 2048 - len(self.errors))])
+                total += len(chunk)
+                if total > 65536:
+                    self.terminate()
+                    break
+        except OSError:
+            pass
+
+    def read(self, timeout):
+        try:
+            return self.output.get(timeout=timeout)
+        except queue.Empty:
+            raise package.PackageError("candidate callback or warmup budget exhausted") from None
+
+    def close(self):
+        self.stopped.set()
+        for thread in self.threads:
+            thread.join(timeout=5)
+        for pipe in (self.process.stdin, self.process.stdout, self.process.stderr):
+            pipe.close()
+
 
 BINDING_FIELDS = {"release_artifact", "definition_identity", "package_manifest_sha256",
                   "strategy_identity", "portfolio_identity", "decision_domain", "config_version",
@@ -28,6 +90,11 @@ BINDING_FIELDS = {"release_artifact", "definition_identity", "package_manifest_s
 
 def memory_enforcement_available(python):
     """Probe actual kernel enforcement, not merely successful setrlimit calls."""
+    if os.name == "nt":
+        try:
+            return windows.memory_enforced(python)
+        except (OSError, subprocess.SubprocessError):
+            return False
     if os.name != "posix" or shutil.which("prlimit") is None:
         return False
     probe = ("import resource\n"
@@ -169,7 +236,7 @@ class InstanceManager:
                             "candidate hard address-space limit enforcement is unavailable or unverified; loading is unavailable")
             record = dict(binding=binding, status="Recovering", reason="", trading_authorized=False)
             self._save(record)
-            process, temporary, errors = None, None, None
+            process, temporary, job = None, None, None
             try:
                 temporary = tempfile.TemporaryDirectory(prefix="candidate-", dir=self.directory)
                 work = Path(temporary.name)
@@ -178,49 +245,54 @@ class InstanceManager:
                                generation=secrets.randbits(63) + 1, shard=shard, barrier=barrier,
                                batches=[batch.hex() for batch in batches])
                 data = package.canonical(request)
-                errors = (work / "host-errors.txt").open("w+b")
                 package.require(len(data) <= package.MAX_JSON_BYTES, "candidate request capacity exceeded")
                 (work / "request.json").write_bytes(data)
                 limits = manifest["limits"]
                 started = time.monotonic_ns()
-                process = subprocess.Popen([
-                    shutil.which("prlimit"), "--as=" + str(limits["max_memory_bytes"]), "--fsize=65536", "--",
-                    str(root / "runtime/ringwin-strategy-candidate"), str(work / "request.json")],
-                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors, cwd=work,
-                    env={"LANG": "C", "LC_ALL": "C"}, close_fds=True, start_new_session=True)
-                self._hosts[identity] = dict(process=process, temporary=temporary, errors=errors)
+                argv = [str(root / CANDIDATE_PATH), str(work / "request.json")]
+                options = dict(stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               cwd=work, env=windows.environment() if os.name == "nt" else {"LANG": "C", "LC_ALL": "C"},
+                               close_fds=True)
+                if os.name == "nt":
+                    job = windows.Job(limits["max_memory_bytes"])
+                    process = job.start(argv, **options)
+                else:
+                    process = subprocess.Popen([shutil.which("prlimit"), "--as=" + str(limits["max_memory_bytes"]),
+                                                "--fsize=65536", "--", *argv], start_new_session=True, **options)
+                self._hosts[identity] = dict(process=process, temporary=temporary, job=job)
+                pipes = CandidatePipes(process, lambda: self._terminate(process, job))
+                self._hosts[identity]["pipes"] = pipes
                 phase_budget = limits["max_warmup_ns"]
+                phase_started = started
                 pending = b""
-                with selectors.DefaultSelector() as selector:
-                    selector.register(process.stdout, selectors.EVENT_READ)
-                    while True:
-                        remaining = min(phase_budget, limits["max_warmup_ns"] - (time.monotonic_ns() - started))
-                        package.require(remaining > 0 and selector.select(remaining / 1e9),
-                                        "candidate callback or warmup budget exhausted")
-                        chunk = os.read(process.stdout.fileno(), 1024)
-                        if not chunk:
-                            errors.seek(0)
-                            reason = errors.read(2048).decode("utf-8", "replace")
-                            raise package.PackageError(f"candidate Host failed (exit {process.poll()}): " + reason)
-                        pending += chunk
-                        package.require(len(pending) <= 2048, "candidate result capacity exceeded")
-                        while b"\n" in pending:
-                            line, pending = pending.split(b"\n", 1)
-                            result = json.loads(line)
-                            if "phase" in result:
-                                phase_budget = limits["max_callback_ns"]
-                                continue
-                            package.require(result["trading_authorized"] is False
-                                            and result["cursor"] == barrier, "invalid Ready evidence")
-                            record.update(status="Ready", evidence=result, reason="")
-                            self._save(record)
-                            return record
+                while True:
+                    now = time.monotonic_ns()
+                    remaining = min(phase_budget - (now - phase_started), limits["max_warmup_ns"] - (now - started))
+                    package.require(remaining > 0, "candidate callback or warmup budget exhausted")
+                    chunk = pipes.read(remaining / 1e9)
+                    if not chunk:
+                        pipes.threads[1].join(timeout=0.1)
+                        reason = pipes.errors.decode("utf-8", "replace")
+                        raise package.PackageError(f"candidate Host failed (exit {process.poll()}): " + reason)
+                    pending += chunk
+                    package.require(len(pending) <= 2048, "candidate result capacity exceeded")
+                    while b"\n" in pending:
+                        line, pending = pending.split(b"\n", 1)
+                        result = json.loads(line)
+                        if "phase" in result:
+                            phase_budget, phase_started = limits["max_callback_ns"], time.monotonic_ns()
+                            continue
+                        package.require(result["trading_authorized"] is False
+                                        and result["cursor"] == barrier, "invalid Ready evidence")
+                        record.update(status="Ready", evidence=result, reason="")
+                        self._save(record)
+                        return record
             except (OSError, ValueError, subprocess.SubprocessError) as error:
                 if process is not None:
                     self._stop(identity)
                 else:
-                    if errors is not None:
-                        errors.close()
+                    if job is not None:
+                        job.close()
                     if temporary is not None:
                         temporary.cleanup()
                 record.update(status="Stopped", reason=str(error)[:2048])
@@ -251,16 +323,16 @@ class InstanceManager:
             except (OSError, ValueError):
                 continue
         package.require(artifact is not None, "authenticated approved release bytes unavailable")
-        package.require("runtime/ringwin-strategy-candidate" in artifact.bundle.files,
+        package.require(CANDIDATE_PATH in artifact.bundle.files,
                         "approved candidate runtime adapter unavailable")
         root = Path(releases.version_root) / active
-        package.require(not root.is_symlink(), "installed release must not be a symlink")
+        package.require(not root.is_symlink() and sealed(root), "installed release must be immutable")
         expected = set(artifact.bundle.files) | {"strategy-registry.json", "manifest.sha256"}
         actual = set()
         for directory, directories, files in os.walk(root):
-            package.require(not Path(directory).stat().st_mode & 0o222, "installed release is writable")
-            package.require(not any((Path(directory) / name).is_symlink() for name in directories + files),
-                            "installed release contains a symlink")
+            package.require(sealed(Path(directory)), "installed release is writable")
+            package.require(all(sealed(Path(directory) / name) for name in directories + files),
+                            "installed release contains a writable file or link")
             for name in files:
                 actual.add((Path(directory) / name).relative_to(root).as_posix())
                 package.require(len(actual) <= len(expected), "undeclared installed file")
@@ -272,26 +344,32 @@ class InstanceManager:
         for name, content in artifact.bundle.files.items():
             path = root / name
             package.require(not any(p.is_symlink() for p in (path, *path.parents) if p != root.parent)
-                            and path.is_file() and not path.stat().st_mode & 0o222 and path.stat().st_size == len(content)
+                            and path.is_file() and sealed(path) and path.stat().st_size == len(content)
                             and path.read_bytes() == content, "installed release differs from approved bytes")
         manifest = package.parse_json(artifact.bundle.files[f"strategies/{binding['definition_identity']}/manifest.json"])
         lock = package.parse_json(artifact.bundle.files["runtime-lock.json"])
         return root, manifest, lock
+
+    @staticmethod
+    def _terminate(process, job):
+        if job is not None:
+            job.terminate()
+            return
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
     def _stop(self, identity):
         host = self._hosts.pop(identity, None)
         if host is None:
             return
         process = host["process"]
-        # The process group contains the Zig supervisor and its Python child.
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        self._terminate(process, host["job"])
         process.wait(timeout=5)
-        process.stdin.close()
-        process.stdout.close()
-        host["errors"].close()
+        if host["job"] is not None:
+            host["job"].close()
+        host["pipes"].close()
         host["temporary"].cleanup()
 
     def close(self):
@@ -299,3 +377,9 @@ class InstanceManager:
             for identity in list(self._hosts):
                 self._stop(identity)
                 self._save(dict(self._records[identity], status="Stopped", reason="candidate Host closed"))
+
+
+def sealed(path):
+    if os.name == "nt":
+        return windows.is_sealed(path)
+    return not path.is_symlink() and not path.stat().st_mode & 0o222

@@ -226,17 +226,20 @@ class FilesystemApplier:
             finally:
                 os.close(descriptor)
 
+    def _is_link(self, path):
+        return os.path.islink(path) or (os.name == "nt" and bool(os.lstat(path).st_file_attributes & 0x400))
+
     def current_artifact(self) -> Optional[str]:
         pointer = os.path.join(self.version_root, "current")
         if not os.path.lexists(pointer):
             return None
-        if not os.path.islink(pointer):
+        if not self._is_link(pointer):
             raise ReleaseError("current version pointer is not a symlink")
         target = os.readlink(pointer)
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", target):
             raise ReleaseError("current version pointer escapes the version root")
         directory = os.path.join(self.version_root, target)
-        if os.path.islink(directory) or not os.path.isdir(directory):
+        if self._is_link(directory) or not os.path.isdir(directory):
             raise ReleaseError("current version directory is invalid")
         return target
 
@@ -248,7 +251,7 @@ class FilesystemApplier:
         if not os.path.lexists(path):
             return []
         try:
-            if os.path.islink(path) or not os.path.isfile(path):
+            if self._is_link(path) or not os.path.isfile(path):
                 raise ReleaseError("installed strategy registry is not a regular file")
             with open(path, "rb") as handle:
                 data = handle.read(8 * 1024 * 1024 + 1)
@@ -271,7 +274,7 @@ class FilesystemApplier:
             return
         if (os.path.dirname(os.path.realpath(directory)) != self.version_root
                 or not os.path.basename(directory).startswith(".")
-                or not directory.endswith(".tmp") or os.path.islink(directory)):
+                or not directory.endswith(".tmp") or self._is_link(directory)):
             raise ReleaseError("invalid staging cleanup path")
         for root, _, _ in os.walk(directory):
             os.chmod(root, 0o750)
@@ -302,18 +305,20 @@ class FilesystemApplier:
                 "activation failed with no previous runtime to restore")
         try:
             self._publish_pointer(previous_target)
-            self.systemd_runner(
-                ["systemctl", "reload-or-restart", "ringwin-role.target"])
+            self._restart()
         except Exception as rollback_error:
             raise ActivationStateUnknown(
                 "previous runtime could not be restored") from rollback_error
+
+    def _restart(self):
+        self.systemd_runner(["systemctl", "reload-or-restart", "ringwin-role.target"])
 
     def activate(self, artifact: ReleaseArtifact) -> None:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", artifact.artifact_id):
             raise ReleaseError("release artifact identity is unsafe for a version directory")
         os.makedirs(self.version_root, mode=0o750, exist_ok=True)
         final_dir = os.path.join(self.version_root, artifact.artifact_id)
-        if os.path.lexists(final_dir) and (os.path.islink(final_dir) or not os.path.isdir(final_dir)):
+        if os.path.lexists(final_dir) and (self._is_link(final_dir) or not os.path.isdir(final_dir)):
             raise ReleaseError("existing version is not a regular version directory")
         temporary_dir = os.path.join(
             self.version_root,
@@ -363,7 +368,7 @@ class FilesystemApplier:
                 for root, directories, filenames in os.walk(final_dir):
                     for name in directories + filenames:
                         deployed = os.path.join(root, name)
-                        if os.path.islink(deployed):
+                        if self._is_link(deployed):
                             raise ReleaseError("installed payload contains a link")
                     for name in filenames:
                         deployed = os.path.join(root, name)
@@ -377,7 +382,7 @@ class FilesystemApplier:
                     current_path = final_dir
                     for component in name.split("/"):
                         current_path = os.path.join(current_path, component)
-                        if os.path.islink(current_path):
+                        if self._is_link(current_path):
                             raise ReleaseError("installed payload contains a link")
                     with open(deployed_payload, "rb") as handle:
                         deployed_hash = hashlib.sha256(handle.read(len(content) + 1)).digest()
@@ -402,22 +407,87 @@ class FilesystemApplier:
                 os.replace(temporary_dir, final_dir)
                 self._sync_root()
 
-            previous_target = None
-            if os.path.islink(pointer):
-                previous_target = os.readlink(pointer)
-            elif os.path.lexists(pointer):
-                raise ReleaseError("current version pointer is not a symlink")
+            previous_target = self.current_artifact()
 
             try:
                 self._publish_pointer(artifact.artifact_id)
-                self.systemd_runner(
-                    ["systemctl", "reload-or-restart", "ringwin-role.target"])
+                self._restart()
             except Exception as activation_error:
                 self._restore_previous(pointer, previous_target)
                 raise activation_error
         except Exception:
             self._discard_staging(temporary_dir)
             raise
+
+
+class WindowsFilesystemApplier(FilesystemApplier):
+    """Same signed installation, with an atomic file pointer and Windows ACLs.
+
+    The embedding Windows node supplies its existing runtime restart adapter.
+    This does not qualify service management or power-loss durability.
+    """
+
+    def __init__(self, version_root, runtime_runner):
+        if os.name != "nt" or not callable(runtime_runner):
+            raise ReleaseError("Windows activation requires a Windows runtime adapter")
+        self.version_root = os.path.realpath(version_root)
+        self.runtime_runner = runtime_runner
+
+    def _restart(self):
+        self.runtime_runner()
+
+    def current_artifact(self):
+        pointer = os.path.join(self.version_root, "current")
+        if not os.path.lexists(pointer):
+            return None
+        if os.lstat(pointer).st_file_attributes & 0x400 or not os.path.isfile(pointer):
+            raise ReleaseError("current version pointer is not a regular file")
+        with open(pointer, "rb") as handle:
+            content = handle.read(130)
+        if not re.fullmatch(rb"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\n", content):
+            raise ReleaseError("current version pointer escapes the version root")
+        target = content[:-1].decode("ascii")
+        directory = os.path.join(self.version_root, target)
+        if not os.path.isdir(directory) or os.lstat(directory).st_file_attributes & 0x400:
+            raise ReleaseError("current version directory is invalid")
+        return target
+
+    def _discard_staging(self, directory):
+        # Validate the owned staging path before changing any attributes.
+        if os.path.exists(directory):
+            if (os.path.dirname(os.path.realpath(directory)) != self.version_root
+                    or not os.path.basename(directory).startswith(".")
+                    or not directory.endswith(".tmp") or self._is_link(directory)):
+                raise ReleaseError("invalid staging cleanup path")
+            for root, _, files in os.walk(directory):
+                for name in files:
+                    os.chmod(os.path.join(root, name), 0o600)
+        super()._discard_staging(directory)
+
+    def _publish_pointer(self, target):
+        import strategy_windows as windows
+        directory = os.path.join(self.version_root, target)
+        for root, directories, files in os.walk(directory):
+            if any(os.lstat(path).st_file_attributes & 0x400
+                   for path in [root] + [os.path.join(root, name) for name in directories + files]):
+                raise ReleaseError("installed payload contains a reparse point")
+        for root, directories, files in os.walk(directory, topdown=False):
+            for name in files:
+                path = os.path.join(root, name)
+                windows.set_permissions(path)
+            windows.set_permissions(root)
+        temporary = os.path.join(self.version_root, f".current.{secrets.token_hex(8)}.tmp")
+        try:
+            with open(temporary, "xb") as handle:
+                handle.write((target + "\n").encode("ascii"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            move = windows.api(windows.kernel, "MoveFileExW", windows.w.BOOL,
+                               windows.w.LPCWSTR, windows.w.LPCWSTR, windows.w.DWORD)
+            windows.checked(move(temporary, os.path.join(self.version_root, "current"), 0x1 | 0x8))
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
 
 
 class ReleaseManager:

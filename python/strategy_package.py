@@ -326,6 +326,7 @@ def validate_bundle(data, policy):
     require(identifiers == sorted(set(identifiers)), "index identities must be sorted and unique")
     require(set(files) == expected, "undeclared bundle file")
     executables = ("ringwin", lock["python_path"])
-    if "runtime/ringwin-strategy-candidate" in files:
-        executables += ("runtime/ringwin-strategy-candidate",)
+    for candidate in ("runtime/ringwin-strategy-candidate", "runtime/ringwin-strategy-candidate.exe"):
+        if candidate in files:
+            executables += (candidate,)
     return Bundle(MappingProxyType(files), tuple(packages), executables)

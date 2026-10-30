@@ -78,11 +78,18 @@ one command identity is a conflict; omitting it or supplying the wrong digest fo
 a bundle rejects the command. Legacy binary commands may omit it.
 
 `ReleaseManager(..., strategy_policy=approved_policy)` validates all signed bytes
-before calling the existing FilesystemApplier. The applier writes and fsyncs an
+before calling FilesystemApplier (Linux) or WindowsFilesystemApplier. Both write and fsync an
 isolated version directory, including the complete generated
 `strategy-registry.json`; bundle files and directories become read-only. Only
 then does it rename the directory and atomically publish `current`, using the
-existing systemd adapter and restoration behavior. Existing version directories
+platform runtime adapter and restoration behavior. Linux uses its existing systemd
+adapter and symlink pointer. Windows uses a flushed, atomically replaced ASCII
+`current` file containing the artifact identity and a newline; the embedding node
+supplies `runtime_runner` for its existing runtime manager. Windows seals files and
+directories with a protected DACL granting the current service identity read/execute
+and permission maintenance, without data/attribute writes. Reparse points (including
+junctions) are rejected. This implements signed candidate installation; it does not
+qualify Windows service management or power-loss recovery. Existing version directories
 are verified against the complete signed inventory, file bytes, manifest and
 generated registration before reuse.
 
@@ -129,7 +136,9 @@ package-wide production-qualified boolean and no report can enable trading.
 `python -m unittest discover -s python -p test_strategy_package_release.py -v`
 uses real authenticated HTTP and temporary version directories on Linux/WSL.
 The bundled engine/interpreter/Host are labelled synthetic, hash-bound fixtures;
-they are never executed. Windows skips these Linux-applier cases.
+they are never executed. Windows skips these Linux-applier cases and separately
+runs `WindowsPackageReleaseTests` for signed publication, restart rollback, unknown
+first activation and junction rejection.
 `node tools/verify-strategy-package-ui.cjs` checks shipped UI rendering and failure
 classification through HTTP/DOM adapters; it is not a browser automation run.
 The existing binary release, authentication and control-plane regression entries
@@ -159,8 +168,9 @@ barrier for explicit new-instance initialization. Existing identities cannot be
 reinitialized or rebound. Binding bytes have a 64 KiB ceiling; the complete internal
 candidate request, including input snapshot, has a 256 KiB ceiling.
 
-The signed runtime inventory must include `runtime/ringwin-strategy-candidate`,
-the internal Zig adapter built as `bin/ringwin-strategy-candidate`, plus the locked
+The signed runtime inventory must include `runtime/ringwin-strategy-candidate`
+on Linux or `runtime/ringwin-strategy-candidate.exe` on Windows,
+the internal Zig adapter built under `bin/`, plus the locked
 Python Host and its API/codec modules. This optional known runtime path receives
 execute permission during installation. It is invoked by the backend, and has no
 control commands, Gateway or trading admission path. The approved lock's `host_path`
@@ -191,26 +201,38 @@ and continuous IntentSequence advancement including empty output and overflow.
 Candidate outputs are counted and discarded. Ready never submits EnableTrading,
 HostActivated or a candidate intent to the core.
 
-The backend first probes actual RLIMIT_AS enforcement in the approved interpreter;
-a kernel that accepts the API but ignores the allocation limit is rejected before
-any strategy code is imported. Linux `prlimit` then enforces the signed memory ceiling (address space of each of the
-adapter and child processes) and a 64 KiB diagnostic-file ceiling. The backend
-monitors callback phases and total warmup deadlines outside Python, killing the
-entire process group on exhaustion; Zig also checks elapsed callback/warmup time.
+The backend first probes actual allocation failure in the approved interpreter;
+an unavailable or ineffective hard limit is rejected before any strategy code is
+imported. Linux `prlimit` enforces the signed memory ceiling as address space for
+each adapter/child process. Windows Job Objects enforce the ceiling as committed
+memory per process. The Windows adapter starts suspended, is assigned to the job,
+and is resumed only after assignment; child membership is inherited, breakaway is
+disabled, and closing the backend's non-inherited job handle kills the whole tree.
+The probe uses a 128 MiB job and requires MemoryError from a 256 MiB allocation;
+startup failure is not accepted as enforcement evidence. Acceptance also attempts
+a real 512 MiB allocation inside a candidate callback with a 256 MiB limit.
+Bounded pipe readers support both platforms; diagnostic output is capped at 64 KiB
+and retained reasons at 2 KiB. The backend monitors callback phases and absolute
+total warmup deadlines outside Python, terminating the entire process group/job on
+exhaustion; Zig also checks elapsed callback/warmup time. Windows inherits only the
+OS-reported SystemRoot needed by Python's random source, with all Python dependencies
+delivered offline in the signed inventory. Its fixture uses an isolated `_pth` file,
+stdlib ZIP and declared DLLs/extensions, excluding user and site packages.
 Data insufficiency, invalid config/state, exceptions, unsupported input, output
 errors and exceeded budgets stay Stopped with a reason. A successful Host stays
 resident, unauthorized, at Ready until the manager closes or the process exits.
 Durable bindings and outcomes survive Web restart; Ready is never reconstructed
 from disk without a Host. Restart reports Stopped/recovery-required. Checkpoint
 publication/recovery and multiple resident instances belong to tasks 05 and 10.
-Windows currently rejects candidate loading because this OS budget adapter is
-unimplemented. Legacy WSL1 also rejects it because its kernel ignores RLIMIT_AS;
-neither outcome is a permanent platform exclusion. A genuine enforcing Linux
-kernel is required to run the complete Ready/resource acceptance suite.
+Windows runs its own Ready/resource acceptance and does not depend on Linux passing,
+as required by ADR 0010. Legacy WSL1 still rejects loading because its kernel ignores
+RLIMIT_AS; Linux resource acceptance remains pending on a genuinely enforcing kernel.
 
 Run `python3 -m unittest discover -s python -p test_strategy_instance.py -v` on
-Linux/WSL after building the Linux adapter. Its default path is
-`.scratch/build/candidate-linux/bin/ringwin-strategy-candidate`; the optional
+Linux after building its adapter, or `python -m unittest discover -s python
+-p test_strategy_instance.py -v` on Windows after `zig build -Doptimize=ReleaseSafe`.
+The defaults are `.scratch/build/candidate-linux/bin/ringwin-strategy-candidate`
+and `zig-out/bin/ringwin-strategy-candidate.exe` respectively; the optional
 `RINGWIN_CANDIDATE_ENGINE` test environment variable selects another build of that
 adapter. The fixture signs and installs the **real adapter, Python interpreter and
 Host**, then drives authenticated HTTP. The engine payload and canonical depth

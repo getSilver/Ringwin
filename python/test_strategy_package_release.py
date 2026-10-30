@@ -98,13 +98,17 @@ class PackageReleaseTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="ringwin-package-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        if os.name == "nt":
+            self.addCleanup(self._windows_cleanup)
         self.files, self.policy = bundle_files()
         self.restarts = []
         self.manager = release_lifecycle.ReleaseManager(
             str(self.root), str(self.root / "versions"), str(self.root / "records.jsonl"),
             KEY, candidate_check=lambda artifact: True,
-            applier=release_lifecycle.FilesystemApplier(
-                str(self.root / "versions"), systemd_runner=self.restarts.append),
+            applier=(release_lifecycle.WindowsFilesystemApplier(
+                str(self.root / "versions"), runtime_runner=lambda: self.restarts.append("restart"))
+                if os.name == "nt" else release_lifecycle.FilesystemApplier(
+                str(self.root / "versions"), systemd_runner=self.restarts.append)),
             strategy_policy=self.policy)
         self.command_server = control_plane.CommandServer(KEY)
         self.addCleanup(self.command_server.close)
@@ -127,6 +131,13 @@ class PackageReleaseTests(unittest.TestCase):
             "code": owner_session.totp_at(setup["totp_secret"], 1700000000)})
         self.assertEqual(status, 200)
         self.client.csrf = login["csrf_token"]
+
+    def _windows_cleanup(self):
+        import strategy_windows
+        for root, directories, files in os.walk(self.root):
+            strategy_windows.set_permissions(root, writable=True)
+            for name in files:
+                strategy_windows.set_permissions(Path(root) / name, writable=True)
 
     def deploy(self, manifest, identity="1001", expected=None, **overrides):
         command = {"kind": "deploy_release", "command_identity": identity,
@@ -414,6 +425,57 @@ class PackageReleaseTests(unittest.TestCase):
         self.assertEqual(result["status"], "rejected")
         self.assertIn("schema", result["reason"])
         self.assertEqual(os.readlink(self.root / "versions" / "current"), "bundle-a")
+
+
+@unittest.skipUnless(os.name == "nt", "Windows signed publication adapter")
+class WindowsPackageReleaseTests(unittest.TestCase):
+    setUp = PackageReleaseTests.setUp
+    deploy = PackageReleaseTests.deploy
+    _windows_cleanup = PackageReleaseTests._windows_cleanup
+
+    def test_failed_restart_restores_previous_file_pointer(self):
+        self.assertEqual(self.deploy(write_bundle(self.root, "bundle-a", self.files))["status"], "activated")
+        calls = []
+
+        def restart():
+            calls.append(True)
+            if len(calls) == 1:
+                raise OSError("injected Windows runtime restart failure")
+
+        self.manager.applier.runtime_runner = restart
+        result = self.deploy(write_bundle(self.root, "bundle-b", self.files), "1002", "bundle-a")
+        self.assertEqual(result["status"], "rejected", result)
+        self.assertEqual(self.manager.applier.current_artifact(), "bundle-a")
+        self.assertEqual((self.root / "versions/current").read_bytes(), b"bundle-a\n")
+        self.assertEqual(len(calls), 2)
+        self.assertFalse(list((self.root / "versions").glob("*.tmp")))
+
+    def test_failed_first_restart_leaves_publication_unknown(self):
+        def restart():
+            raise OSError("injected Windows runtime restart failure")
+
+        self.manager.applier.runtime_runner = restart
+        result = self.deploy(write_bundle(self.root, "bundle-a", self.files))
+        self.assertEqual(result["status"], "unknown", result)
+        self.assertIsNone(self.manager.applier.current_artifact())
+        self.assertEqual(self.manager._registrations(), [])
+
+    def test_existing_version_junction_is_rejected_without_touching_target(self):
+        import _winapi
+        foreign = self.root / "foreign"
+        foreign.mkdir()
+        marker = foreign / "marker"
+        marker.write_bytes(b"must remain writable")
+        versions = self.root / "versions"
+        versions.mkdir()
+        junction = versions / "bundle-a"
+        _winapi.CreateJunction(str(foreign), str(junction))
+        self.addCleanup(os.rmdir, junction)
+        result = self.deploy(write_bundle(self.root, "bundle-a", self.files))
+        self.assertEqual(result["status"], "rejected", result)
+        self.assertIn("regular version directory", result["reason"])
+        marker.write_bytes(b"still writable")
+        self.assertIsNone(self.manager.applier.current_artifact())
 
 
 if __name__ == "__main__":

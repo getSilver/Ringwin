@@ -1,14 +1,18 @@
 """Real candidate Host acceptance through the authenticated Web boundary."""
 
 import hashlib
+import functools
+import io
 import json
 import os
 from pathlib import Path
 import struct
 import signal
+import subprocess
 import sys
 import time
 import unittest
+import zipfile
 
 import strategy_host
 import strategy_instance
@@ -18,6 +22,30 @@ from test_strategy_package_release import DEFINITION, bundle_files, canonical, d
 
 ROOT = Path(__file__).resolve().parents[1]
 MEMORY_ENFORCED = strategy_instance.memory_enforcement_available(sys.executable)
+
+
+@functools.lru_cache(maxsize=1)
+def windows_runtime():
+    """Offline, self-contained interpreter fixture; no inherited conda/site path."""
+    prefix = Path(sys.base_prefix)
+    files = {"runtime/" + path.name: path.read_bytes() for path in prefix.glob("*.dll")}
+    files["runtime/python.exe"] = Path(sys.executable).read_bytes()
+    for path in (prefix / "DLLs").iterdir():
+        if path.suffix in (".pyd", ".dll"):
+            files["runtime/DLLs/" + path.name] = path.read_bytes()
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w", compression=zipfile.ZIP_STORED) as archive:
+        for root, directories, names in os.walk(prefix / "Lib"):
+            directories[:] = sorted(d for d in directories if d not in (
+                "site-packages", "__pycache__", "test", "tests", "idlelib", "tkinter", "ensurepip"))
+            for name in sorted(names):
+                path = Path(root) / name
+                if path.suffix == ".py":
+                    archive.writestr(zipfile.ZipInfo(path.relative_to(prefix / "Lib").as_posix()), path.read_bytes())
+    version = f"python{sys.version_info.major}{sys.version_info.minor}"
+    files[f"runtime/{version}.zip"] = data.getvalue()
+    files[f"runtime/{version}._pth"] = f"{version}.zip\n.\nDLLs\n".encode("ascii")
+    return files
 
 
 OBSERVER = b'''import json
@@ -74,11 +102,14 @@ def depth_batch(sequence=1):
 @unittest.skipUnless(MEMORY_ENFORCED, "actual OS hard-memory enforcement unavailable; functional tests cannot establish qualification")
 class WebInstanceTests(unittest.TestCase):
     deploy = package_release.PackageReleaseTests.deploy
+    _windows_cleanup = package_release.PackageReleaseTests._windows_cleanup
 
     def setUp(self):
         package_release.PackageReleaseTests.setUp(self)
-        self.engine = Path(os.environ.get("RINGWIN_CANDIDATE_ENGINE", ROOT / ".scratch/build/candidate-linux/bin/ringwin-strategy-candidate"))
-        self.assertTrue(self.engine.is_file(), "build the Linux candidate engine before running this acceptance")
+        default = ROOT / ("zig-out/bin/ringwin-strategy-candidate.exe" if os.name == "nt"
+                          else ".scratch/build/candidate-linux/bin/ringwin-strategy-candidate")
+        self.engine = Path(os.environ.get("RINGWIN_CANDIDATE_ENGINE", default))
+        self.assertTrue(self.engine.is_file(), "build the native candidate engine before running this acceptance")
         self.assertGreater(self.engine.stat().st_size, 0)
         self.source = strategy_instance.CandidateSource(shard=1, decision_domain="0" * 31 + "4",
             portfolio_identity="0" * 31 + "1", scopes=[dict(venue="okx", exchange_account="0" * 31 + "2",
@@ -91,15 +122,17 @@ class WebInstanceTests(unittest.TestCase):
     def install(self, code=OBSERVER, limit_changes=None):
         files, policy = bundle_files()
         runtime = {"ringwin": b"synthetic engine; this acceptance executes only the real candidate adapter and Host",
-                   "runtime/ringwin-strategy-candidate": self.engine.read_bytes(),
-                   "runtime/python": Path(sys.executable).resolve().read_bytes()}
+                   strategy_instance.CANDIDATE_PATH: self.engine.read_bytes()}
+        runtime.update(windows_runtime() if os.name == "nt" else
+                       {"runtime/python": Path(sys.executable).resolve().read_bytes()})
         for name in ("strategy_candidate_host.py", "strategy_api.py", "strategy_host.py", "strategy_package.py", "strategy_state.py"):
             runtime["runtime/" + name] = (ROOT / "python" / name).read_bytes()
         compatibility = dict(policy["compatibility"])
         compatibility.pop("runtime_lock_sha256")
         compatibility["python_abi"] = strategy_host.PYTHON_ABI
         lock = canonical(dict(format_version=1, compatibility=compatibility,
-                              python_path="runtime/python", host_path="runtime/strategy_candidate_host.py",
+                              python_path="runtime/python.exe" if os.name == "nt" else "runtime/python",
+                              host_path="runtime/strategy_candidate_host.py",
                               files=[descriptor(p, b) for p, b in sorted(runtime.items())]))
         compatibility = dict(compatibility, runtime_lock_sha256=hashlib.sha256(lock).hexdigest())
         name = f"strategies/{DEFINITION}/manifest.json"
@@ -128,7 +161,8 @@ class WebInstanceTests(unittest.TestCase):
         files.update(runtime)
         files["runtime-lock.json"] = lock
         self.manager.strategy_policy = dict(compatibility=compatibility, limits=manifest["limits"], subscriptions=manifest["subscriptions"])
-        self.assertEqual(self.deploy(write_bundle(self.root, "candidate-a", files))["status"], "activated")
+        deployed = self.deploy(write_bundle(self.root, "candidate-a", files))
+        self.assertEqual(deployed["status"], "activated", deployed)
         config = '{"warmup_events":1}'
         self.binding = dict(release_artifact="candidate-a", definition_identity=DEFINITION,
             package_manifest_sha256=digest, strategy_identity="0" * 30 + "10", initialization="new",
@@ -159,7 +193,7 @@ class WebInstanceTests(unittest.TestCase):
             package_manifest_sha256=self.binding["package_manifest_sha256"],
             config_sha256=self.binding["config_sha256"],
             evidence=body["result"]["evidence"], python_abi=strategy_host.PYTHON_ABI,
-            scope="offline signed bundle + real Linux Host; synthetic canonical depth input"), sort_keys=True))
+            scope=f"offline signed bundle + real {sys.platform} Host; synthetic canonical depth input"), sort_keys=True))
 
     def test_backend_rejects_unowned_scope_and_missing_csrf_before_launch(self):
         self.install()
@@ -240,8 +274,14 @@ assert all("unapproved-path" not in p for p in sys.path)
     def test_installed_runtime_tampering_is_rejected_before_launch(self):
         self.install()
         runtime = self.root / "versions" / "candidate-a" / "runtime/strategy_api.py"
+        if os.name == "nt":
+            with self.assertRaises(PermissionError):
+                runtime.write_bytes(b"unapproved")
+            strategy_instance.windows.set_permissions(runtime, writable=True)
         runtime.chmod(0o640)
         runtime.write_bytes(b"raise RuntimeError('unapproved')")
+        if os.name == "nt":
+            strategy_instance.windows.set_permissions(runtime)
         status, body = self.create()
         self.assertEqual(status, 400, body)
         self.assertIn("differs from approved bytes", body["error"])
@@ -260,6 +300,14 @@ assert all("unapproved-path" not in p for p in sys.path)
         status, body = self.create()
         self.assertEqual(status, 200, body)
         self.assertEqual(body["result"]["status"], "Stopped", body)
+        self.assertEqual(self.instances._hosts, {})
+
+    def test_callback_allocation_over_the_hard_limit_stops_the_real_host(self):
+        self.install(OBSERVER.replace(b"self.events += 1", b"self.events += 1\n        self.allocation = bytearray(512 * 1024 * 1024)"))
+        status, body = self.create()
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["result"]["status"], "Stopped", body)
+        self.assertIn("MemoryError", body["result"]["reason"])
         self.assertEqual(self.instances._hosts, {})
 
     def test_invalid_canonical_schema_is_not_ready(self):
@@ -290,10 +338,17 @@ for action in (socket.socket, lambda: os.system("true")):
     def test_undeclared_transitive_import_file_is_rejected_before_launch(self):
         self.install(OBSERVER.replace(b"import json", b"import json, helper"))
         code = self.root / "versions" / "candidate-a" / "strategies" / DEFINITION / "code"
+        if os.name == "nt":
+            with self.assertRaises(PermissionError):
+                (code / "helper.py").write_bytes(b"unsigned")
+            strategy_instance.windows.set_permissions(code, writable=True)
         code.chmod(0o750)
         (code / "helper.py").write_bytes(b"UNSIGNED = True\n")
         (code / "helper.py").chmod(0o440)
         code.chmod(0o550)
+        if os.name == "nt":
+            strategy_instance.windows.set_permissions(code / "helper.py")
+            strategy_instance.windows.set_permissions(code)
         status, body = self.create()
         self.assertEqual(status, 400, body)
         self.assertIn("undeclared", body["error"])
@@ -338,7 +393,7 @@ for action in (socket.socket, lambda: os.system("true")):
         status, body = self.create()
         self.assertEqual(status, 200, body)
         self.assertEqual(body["result"]["status"], "Ready", body)
-        os.kill(body["result"]["evidence"]["host_pid"], signal.SIGKILL)
+        os.kill(body["result"]["evidence"]["host_pid"], signal.SIGTERM if os.name == "nt" else signal.SIGKILL)
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             status, view = self.client.call("GET", "/api/strategy-instances")
@@ -381,8 +436,73 @@ for action in (socket.socket, lambda: os.system("true")):
                 break
             time.sleep(0.01)
         self.assertEqual(view["instances"][0]["status"], "Stopped", view)
-        with self.assertRaises(ProcessLookupError):
-            os.kill(pid, 0)
+        if os.name == "nt":
+            import ctypes
+            w = strategy_instance.windows
+            open_process = w.api(w.kernel, "OpenProcess", w.w.HANDLE, w.w.DWORD, w.w.BOOL, w.w.DWORD)
+            handle = open_process(0x100000, False, pid)
+            if handle:
+                wait = w.api(w.kernel, "WaitForSingleObject", w.w.DWORD, w.w.HANDLE, w.w.DWORD)
+                try:
+                    self.assertEqual(wait(handle, 5000), 0)
+                finally:
+                    w.close_handle(handle)
+            else:
+                self.assertEqual(ctypes.get_last_error(), 87)
+        else:
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
+
+    @unittest.skipUnless(os.name == "nt", "Windows kernel job handle ownership")
+    def test_real_backend_death_closes_job_and_reaps_host(self):
+        evidence = self.root / "backend-ready.json"
+        worker = f'''
+import sys, tempfile, time
+sys.path.insert(0, {str(ROOT / 'python')!r})
+tempfile.tempdir = {str(self.root)!r}
+import test_strategy_instance as acceptance
+test = acceptance.WebInstanceTests()
+test.setUp()
+test.install()
+status, result = test.create()
+assert status == 200 and result['result']['status'] == 'Ready', result
+acceptance.Path({str(evidence)!r}).write_text(acceptance.json.dumps(dict(
+    root=str(test.root), result=result['result'])), encoding='utf-8')
+while True:
+    time.sleep(1)
+'''
+        w = strategy_instance.windows
+        handle = None
+        with (self.root / "backend-errors.log").open("w+b") as diagnostic:
+            backend = subprocess.Popen([sys.executable, "-I", "-S", "-c", worker],
+                stdin=subprocess.DEVNULL, stdout=diagnostic, stderr=diagnostic,
+                env=dict(w.environment(), RINGWIN_CANDIDATE_ENGINE=str(self.engine)),
+                creationflags=subprocess.CREATE_NO_WINDOW, close_fds=True)
+            try:
+                deadline = time.monotonic() + 60
+                while not evidence.exists() and backend.poll() is None and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                if not evidence.exists():
+                    diagnostic.seek(0)
+                    self.fail(diagnostic.read(4096).decode('utf-8', 'replace'))
+                ready = json.loads(evidence.read_text(encoding="utf-8"))
+                pid = ready["result"]["evidence"]["host_pid"]
+                open_process = w.api(w.kernel, "OpenProcess", w.w.HANDLE, w.w.DWORD, w.w.BOOL, w.w.DWORD)
+                handle = w.checked(open_process(0x100000, False, pid))
+                backend.kill()
+                backend.wait(timeout=5)
+                wait = w.api(w.kernel, "WaitForSingleObject", w.w.DWORD, w.w.HANDLE, w.w.DWORD)
+                self.assertEqual(wait(handle, 5000), 0, "backend death left the Python Host alive")
+                restarted = strategy_instance.InstanceManager(Path(ready["root"]) / "instances", self.manager, self.source)
+                self.assertEqual(restarted.view()[0]["status"], "Stopped")
+                self.assertFalse(restarted.view()[0]["trading_authorized"])
+                print("windows_backend_death=Host terminated; restart=Stopped; trading_authorized=false")
+            finally:
+                if backend.poll() is None:
+                    backend.kill()
+                backend.wait(timeout=5)
+                if handle:
+                    w.close_handle(handle)
 
 
 @unittest.skipIf(os.name == "nt" or MEMORY_ENFORCED, "requires an installed Linux adapter on a kernel that ignores RLIMIT_AS")

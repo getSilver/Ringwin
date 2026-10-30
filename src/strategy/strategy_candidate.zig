@@ -3,6 +3,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const lifecycle = @import("strategy_host_lifecycle.zig");
 
+extern "kernel32" fn GetProcessId(std.os.windows.HANDLE) callconv(.winapi) std.os.windows.DWORD;
+
 const Request = struct {
     python: []const u8,
     host: []const u8,
@@ -123,7 +125,8 @@ pub fn run(init: std.process.Init, request_path: []const u8) !void {
         ready.state_schema_identity != try hexIdentity(request.manifest.state_schema.identity) or
         ready.state_schema_version != request.manifest.state_schema.version) return error.CandidateIdentityMismatch;
     const digest = std.fmt.bytesToHex(ready.state_digest, .lower);
-    const host_pid: u64 = if (builtin.os.tag == .windows) @intFromPtr(host.child.id.?) else @intCast(host.child.id.?);
+    const host_pid: u64 = if (builtin.os.tag == .windows) GetProcessId(host.child.id.?) else @intCast(host.child.id.?);
+    if (host_pid == 0) return error.InvalidHostProcessId;
     try output.interface.print("{{\"cursor\":{d},\"next_intent_sequence\":{d},\"host_generation\":{d},\"host_pid\":{d},\"state_digest\":\"{s}\",\"trading_authorized\":false}}\n", .{ ready.cursor, ready.next_intent_sequence, plan.session.generation, host_pid, digest });
     try output.interface.flush();
     const Event = union(enum) { stop: anyerror!void, exited: anyerror!void };
