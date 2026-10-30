@@ -320,6 +320,8 @@ def validate_bundle(data, policy):
                   "compatibility", "config_schema", "state_schema", "subscriptions", "output_kinds", "limits")}
         record.update(manifest_path=manifest_path, package_manifest_sha256=entry["package_manifest_sha256"],
                       validation="passed", trading_authorized=False, qualifications=[])
+        for kind in ("config_schema", "state_schema"):
+            record[kind + "_sha256"] = hashlib.sha256(files[prefix + manifest[kind]["path"]]).hexdigest()
         packages.append(record)
     require(identifiers == sorted(set(identifiers)), "index identities must be sorted and unique")
     require(set(files) == expected, "undeclared bundle file")

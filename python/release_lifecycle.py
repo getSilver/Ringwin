@@ -576,6 +576,14 @@ class ReleaseManager:
             if "strategy_packages" in artifact.test_results:
                 raise ReleaseError("qualification evidence is not a deployable runtime")
             if artifact.bundle:
+                schema_contents = {}
+                for package in self._registrations() + list(artifact.bundle.packages):
+                    for kind in ("config_schema", "state_schema"):
+                        schema = package[kind]
+                        key = (schema["identity"], schema["version"])
+                        digest = package.get(kind + "_sha256")
+                        if digest is None or schema_contents.setdefault(key, digest) != digest:
+                            raise ReleaseError("schema identity and version already names different content")
                 for package in artifact.bundle.packages:
                     previous = registered.get(package["definition_identity"])
                     if previous is not None and previous != package["package_manifest_sha256"]:

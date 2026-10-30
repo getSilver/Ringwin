@@ -85,6 +85,8 @@ record. Missing or inconsistent publication history makes the operation `unknown
 and blocks new publication until reconciliation. It does not manufacture a success
 or trading permission. Same-command retries use the existing persisted results;
 active-version conflicts and same-definition/different-content conflicts reject.
+Config/state schema identity and version also retain complete content digests;
+another definition cannot redefine a published schema under the same identity/version.
 
 Authenticated `/api/releases` returns a consistent release/registry snapshot,
 including full definition and manifest identities, validation, active-release

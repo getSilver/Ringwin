@@ -394,6 +394,27 @@ class PackageReleaseTests(unittest.TestCase):
         self.assertEqual(self.deploy(manifest, "9001")["status"], "unknown")
         self.assertEqual(len(self.restarts), 1)
 
+    def test_new_definition_cannot_redefine_a_published_schema_identity_and_version(self):
+        self.deploy(write_bundle(self.root, "bundle-a", self.files))
+        new_identity = "a21994db11534bf5b193c5aa89000011"
+        old_prefix, new_prefix = f"strategies/{DEFINITION}/", f"strategies/{new_identity}/"
+        files = {p.replace(old_prefix, new_prefix, 1): data for p, data in self.files.items()}
+        manifest = json.loads(files[new_prefix + "manifest.json"])
+        manifest["definition_identity"] = new_identity
+        content = b'{"fields":[{"name":"new-semantic-field"}]}'
+        files[new_prefix + "contracts/config.json"] = content
+        for item in manifest["files"]:
+            if item["path"] == "contracts/config.json":
+                item.update(size_bytes=len(content), sha256=hashlib.sha256(content).hexdigest())
+        files[new_prefix + "manifest.json"] = canonical(manifest)
+        files["strategy-index.json"] = canonical({"format_version": 1, "strategies": [{
+            "definition_identity": new_identity, "manifest_path": new_prefix + "manifest.json",
+            "package_manifest_sha256": hashlib.sha256(files[new_prefix + "manifest.json"]).hexdigest()}]})
+        result = self.deploy(write_bundle(self.root, "bundle-b", files), "10001", "bundle-a")
+        self.assertEqual(result["status"], "rejected")
+        self.assertIn("schema", result["reason"])
+        self.assertEqual(os.readlink(self.root / "versions" / "current"), "bundle-a")
+
 
 if __name__ == "__main__":
     unittest.main()
