@@ -4,7 +4,7 @@ Status: open
 
 ## Destination
 
-建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，02票的原生构建合同、静态注册与构建清单及03票的Python包安装登记已交付并通过各自离线验收；04–11票的实例加载、Host及后续发布接线仍待实施。
+建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，02票的原生构建合同、静态注册与构建清单及03票的Python包安装登记已交付并通过各自离线验收；04已实现，待真正实施硬内存限制的Linux完成最终Host资源验收，05–11票仍待实施。
 
 ## Definition of done
 
@@ -38,11 +38,13 @@ Status: open
 
 ## Frontier
 
-- [04 创建Python StrategyInstance并无权运行至Ready](issues/04-python-instance-ready.md)：03已完成，尚未认领。
+- [04 创建Python StrategyInstance并无权运行至Ready](issues/04-python-instance-ready.md)：Codex实施中；实现已交付，当前WSL1不实施硬内存限制，最终Linux资源验收未完成，05不得提前接手。
 
 每次只认领一张Frontier票。尚未实施票的ready-for-agent表示票已可供接手，仍须满足各票Blocked by；其余票在依赖完成前不属于Frontier。
 
 ## Decisions so far
+
+- 2026-10-30：04在统一worktree完成Web绑定、签名runtime候选加载、固定API、无权预热、批次无关、私有状态往返与Host死亡/停止接线，初始提交 `1e05071d`，修正至 `a15d016f`。旧WSL1的真实Host功能验证发现内存反向向量失败；最终增加实际RLIMIT_AS分配探测，当前平台在启动策略前拒绝。用户确认先提交实现、04保持未验收；完整Host资源向量须在真正实施硬限制的Linux补齐，04维持in-progress，地图open，05不开放。详细通过、失败及平台skip边界见04，未取得交易/部署或生产资格。
 
 - 2026-10-30：按用户要求，将02、03及既有控制面依赖统一到 worktree `D:/github/Ringwin-strategy-package-03`、分支 `codex/strategy-package-03`，合并提交 `5e7defb5`；两个源分支均为该提交祖先，后续以此统一入口继续。适配当前核心目录、CanonicalEvent、规范genesis与回放；保留残余冻结命令7/8，追加KillSwitch为9，控制通道两端同步为v2并拒绝v1。历史工作树保留，原有未提交改动未动；04尚未认领，地图保持open。合并验收补充见03票末尾。
 - 2026-10-30：03完成。实现分支 `codex/strategy-package-03-control-plane` 提交 `0f558022`、`d8774609`；票据分支 `codex/strategy-package-03` 保留02及main文档。交付签名Python包验证、原子安装/登记、Web结果和外置资格证据绑定；Python全量15/15、旧控制面Zig108/108及发布/认证回归通过，双轴复审0项。旧整波测试因基线已有普通命令默认过期时间导致的幂等缺陷失败，具体复现与边界见03；不能声称整波或真实运行资格通过。未导入策略、创建实例或授予权限。03移出Frontier，04可接手但未认领，地图保持open。

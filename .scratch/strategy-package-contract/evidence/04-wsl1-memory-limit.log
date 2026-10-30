@@ -1,0 +1,1 @@
+{"allocated_bytes": 10000000, "hard_limit_enforcement": false, "kernel": "4.4.0-17763-Microsoft", "python": "3.8.10", "rlimit_as": [1048576, 1048576], "rlimit_data": [1048576, 1048576]}
