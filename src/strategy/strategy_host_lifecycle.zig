@@ -635,6 +635,17 @@ pub const ManagedHost = struct {
         return self.supervisor.acceptHostFrame(frame, now_ns);
     }
 
+    pub fn receiveBatchAck(self: *ManagedHost, io: std.Io, now_ns: i64, max_outputs: u64) !u64 {
+        var storage: [bridge_header_len + 16]u8 = undefined;
+        const frame = try readPipeFrame(self.child.stdout.?, io, &storage);
+        const decoded = try decodeBridgeFrame(frame);
+        if (decoded.message_type != .host_heartbeat or decoded.payload.len != 16 or
+            self.supervisor.acceptHostFrame(frame, now_ns) != .accepted or
+            get(u64, decoded.payload, 0) != self.last_input_cursor or
+            get(u64, decoded.payload, 8) > max_outputs) return error.InvalidBatchAck;
+        return get(u64, decoded.payload, 8);
+    }
+
     pub fn sendInput(self: *ManagedHost, io: std.Io, batch: []const u8, now_ns: i64) !void {
         if (batch.len > self.supervisor.plan.input_capacity) return error.InputFrameTooLarge;
         if (ipc.validateBatchAt(batch, self.supervisor.plan.session, self.next_input_batch, self.last_input_cursor, now_ns).status != .ok)

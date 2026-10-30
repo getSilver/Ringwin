@@ -114,7 +114,7 @@ def _commands_match(a: dict, b: dict) -> bool:
     if not all(int(a.get(field, 0) or 0) == int(b.get(field, 0) or 0)
                for field in integer_fields):
         return False
-    exact_fields = ("target", "manifest_path", "expected_active", "details")
+    exact_fields = ("target", "manifest_path", "expected_active", "details", "strategy_identity")
     return all(a.get(field) == b.get(field) for field in exact_fields)
 
 
@@ -264,7 +264,8 @@ class ControlPlaneApp:
         provided_csrf = headers.get(CSRF_HEADER, "")
         if not expected_csrf or not hmac.compare_digest(expected_csrf, provided_csrf):
             return 403, {"ok": False, "error": "csrf check failed"}
-        self.sessions.renew(token, clock)
+        if not self.sessions.renew(token, clock):
+            return 401, {"ok": False, "error": "session revoked"}
         return 200, {"ok": True, "token_hash": token_hash}
 
     def logout(self, headers: dict) -> tuple[int, dict]:
@@ -332,7 +333,17 @@ class ControlPlaneApp:
         import sys as _sys
         print(f"[enqueue {id(self.command_server):x}] {command['kind']} -> pending will be {len(self.command_server._pending) + 1}",
               file=_sys.stderr, flush=True)
-        self.command_server.enqueue(_normalized_command(command))
+        instance_result = None
+        if "strategy_identity" in command:
+            if self.instance_manager is None or kind not in ("enable_trading", "trading_pause", "stop_keep_positions", "kill_switch"):
+                return 400, {"ok": False, "error": "strategy instance command unavailable"}
+            try:
+                instance_result = self.instance_manager.control(command["strategy_identity"],
+                    _normalized_command(command), self.command_server.key)
+            except (OSError, ValueError) as error:
+                return 400, {"ok": False, "error": str(error)}
+        else:
+            self.command_server.enqueue(_normalized_command(command))
         self.records.append({
             "recorded_at": self.clock(),
             "kind": kind,
@@ -345,6 +356,8 @@ class ControlPlaneApp:
             "operator": "SystemOwner",
         })
         response = {"ok": True, "queued": kind}
+        if instance_result is not None:
+            response = {"ok": True, "result": instance_result}
         self._command_results[command_identity] = (fingerprint, response)
         return 200, response
 

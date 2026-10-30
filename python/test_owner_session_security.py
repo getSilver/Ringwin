@@ -1,6 +1,7 @@
 """Security regression tests for owner authentication persistence."""
 
 import http.client
+import concurrent.futures
 import json
 import os
 import stat
@@ -16,6 +17,50 @@ import owner_session  # noqa: E402
 
 
 class OwnerSessionSecurityTests(unittest.TestCase):
+    def test_parallel_validation_and_renewal_preserve_the_active_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sessions = owner_session.SessionManager(directory)
+            clock = lambda: 1700000000
+            token = sessions.issue(clock)
+            start = threading.Barrier(8)
+            def renew():
+                start.wait()
+                for _ in range(30):
+                    self.assertTrue(sessions.validate(token, clock))
+                    self.assertTrue(sessions.renew(token, clock))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                for future in [executor.submit(renew) for _ in range(8)]:
+                    future.result()
+            self.assertTrue(sessions.validate(token, clock))
+
+    def test_revocation_during_renewal_cannot_resurrect_the_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sessions = owner_session.SessionManager(directory)
+            token = sessions.issue(lambda: 1700000000)
+            staged, release, revoked = threading.Event(), threading.Event(), threading.Event()
+            calls = 0
+            def clock():
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    staged.set()
+                    release.wait(2)
+                return 1700000000
+            def revoke():
+                sessions.revoke()
+                revoked.set()
+            renewal = threading.Thread(target=lambda: sessions.renew(token, clock))
+            renewal.start()
+            self.assertTrue(staged.wait(2))
+            revocation = threading.Thread(target=revoke)
+            revocation.start()
+            revoked.wait(0.1)
+            release.set()
+            renewal.join(2)
+            revocation.join(2)
+            self.assertFalse(renewal.is_alive() or revocation.is_alive())
+            self.assertFalse(sessions.validate(token, lambda: 1700000000))
+
     def test_totp_code_is_consumed_once_under_concurrency(self):
         with tempfile.TemporaryDirectory() as directory:
             store = owner_session.TotpStore(directory)

@@ -1,0 +1,7 @@
+{
+  "src/strategy/strategy_candidate.zig": "c859d9a1b8bbc6f90f7e73cc5764e7c781961002c143bff6f503a47cb334353a",
+  "src/strategy/strategy_package_authority.zig": "78abc35e72eb0ed2af57e5b000c6bc8572ab115f9eb7ddaea5ac3a1733182885",
+  "src/strategy_authority_probe.zig": "2934b22f8ce2e949248bdfaed23ceed39786fd52f0c6c20ea0cd6397868c49ed",
+  "zig-out/bin/ringwin-strategy-authority-probe.exe": "a7b1a914fcb750a6f5dd0d68656a454c6447c1fa897378ff49cc43afe1b34505",
+  "zig-out/bin/ringwin-strategy-candidate.exe": "b3b42664737db49eb70bf2d130c28887a5105d50f09bbe8f3183c895f20276b2"
+}

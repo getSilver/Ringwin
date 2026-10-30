@@ -253,13 +253,30 @@ async function loadInstances(){
     const [status, body] = await api("GET", "/api/strategy-instances");
     if (status !== 200) { el.textContent = body.error || "实例查询失败"; return; }
     el.innerHTML = body.instances.map(r=>`<p>${escaped(r.binding.strategy_identity)}：
-      ${escaped(r.status)} ${escaped(r.reason)}；无交易授权<br>
+      ${escaped(r.status)} ${escaped(r.reason)}；${r.trading_authorized ? "核心已授权交易" : "无交易授权"}<br>
       ${escaped(r.binding.definition_identity)} / ${escaped(r.binding.config_sha256)}<br>
       ${escaped(JSON.stringify(r.recovery || {}))}<br>
       ${escaped(JSON.stringify(r.evidence || {}))}<br>
       ${escaped(JSON.stringify(r.checkpoint || {}))}
+      ${escaped(JSON.stringify(r.authority || {}))}
+      ${r.status === "Ready" ? `<button onclick="controlStrategyInstance('enable_trading','${escaped(r.binding.strategy_identity)}','${BigInt('0x'+r.binding.decision_domain)}')">EnableTrading</button>` : ""}
+      ${r.status === "Trading" ? `<button onclick="controlStrategyInstance('trading_pause','${escaped(r.binding.strategy_identity)}','${BigInt('0x'+r.binding.decision_domain)}')">停用交易</button>` : ""}
       ${r.status === "Stopped" ? `<button onclick="recoverStrategyInstance('${escaped(r.binding.strategy_identity)}')">从 checkpoint 无权恢复</button>` : ""}</p>`).join("") || "尚无实例。";
   } catch (error) { el.textContent = "实例查询失败，请重试。"; }
+}
+async function controlStrategyInstance(kind, identity, target){
+  const command = {kind, strategy_identity:identity, target_identity:target,
+    command_identity:newIdentity(), expected_version:expectedVersion(target)};
+  if (HIGH_RISK.includes(kind)) {
+    const [status, warning] = await api("POST", "/risk-warning", command);
+    if (status !== 200) return toast(warning.error, "bad");
+    if (!confirmRiskDialog(warning)) return;
+    command.risk_warning_acknowledged = true;
+    command.risk_warning_identity = warning.warning_identity;
+  }
+  const [status, body] = await api("POST", "/command", command);
+  toast(status === 200 ? `${kind}：${body.result?.status || "已处理"}` : body.error, status === 200 ? "ok" : "bad");
+  await loadInstances();
 }
 async function recoverStrategyInstance(identity){
   try {

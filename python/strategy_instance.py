@@ -1,4 +1,4 @@
-"""Web-owned, single-instance candidate loading; no trading command capability."""
+"""Web package loading and a bounded bridge to the node's native authority."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ import time
 import release_lifecycle
 import strategy_host as bridge
 import strategy_package as package
+import control_plane
 
 if os.name == "nt":
     import strategy_windows as windows
@@ -82,18 +83,88 @@ class CandidatePipes:
         except queue.Empty:
             raise package.PackageError("candidate callback or warmup budget exhausted") from None
 
+    def write(self, data, timeout):
+        finished, errors = threading.Event(), []
+        def send():
+            try:
+                self.process.stdin.write(data)
+                self.process.stdin.flush()
+            except (OSError, ValueError) as error:
+                errors.append(error)
+            finally:
+                finished.set()
+        threading.Thread(target=send, daemon=True).start()
+        if not finished.wait(max(0, timeout)):
+            self.terminate()
+            raise package.PackageError("pipe write budget exhausted")
+        if errors:
+            raise errors[0]
+
     def close(self):
         self.stopped.set()
         for thread in self.threads:
             thread.join(timeout=5)
         for pipe in (self.process.stdin, self.process.stdout, self.process.stderr):
-            pipe.close()
+            try:
+                pipe.close()
+            except OSError:
+                pass  # A terminated peer can leave a buffered writer with a broken pipe.
 
 
 BINDING_FIELDS = {"release_artifact", "definition_identity", "package_manifest_sha256",
                   "strategy_identity", "portfolio_identity", "decision_domain", "config_version",
                   "config_sha256", "config_json", "scopes", "risk_budget", "initialization"}
 
+
+class NativeAuthority:
+    """Bounded private stdio connection supplied by the embedding native node.
+
+    The node owns the process, its authenticated control key and the single
+    durable Writer. Neither a package nor HTTP can choose this connection.
+    """
+
+    def __init__(self, process, *, timeout=3):
+        self.process, self.timeout = process, timeout
+        self.pipes = CandidatePipes(process, process.kill)
+        self.lock = threading.Lock()
+        self.failed = False
+
+    def request(self, request):
+        with self.lock:
+            package.require(not self.failed, "native node connection failed; recovery required")
+            try:
+                result = self._exchange(request)
+            except (OSError, ValueError):
+                self.failed = True
+                try:
+                    self.process.stdin.close()
+                except OSError:
+                    pass
+                raise
+            package.require("error" not in result, result.get("error", "native node rejected request"))
+            return result
+
+    def _exchange(self, request):
+        data = package.canonical(request)
+        package.require(len(data) <= 256 * 1024, "node request capacity exceeded")
+        pending = b""
+        deadline = time.monotonic() + self.timeout
+        self.pipes.write(struct.pack("<I", len(data)) + data, self.timeout)
+        while b"\n" not in pending:
+            remaining = deadline - time.monotonic()
+            package.require(remaining > 0, "native node timeout")
+            chunk = self.pipes.read(remaining)
+            if not chunk:
+                self.pipes.threads[1].join(timeout=0.1)
+                raise package.PackageError("native node disconnected: " + self.pipes.errors.decode("utf-8", "replace"))
+            pending += chunk
+            package.require(len(pending) <= 256 * 1024, "node response capacity exceeded")
+        package.require(pending.endswith(b"\n") and pending.count(b"\n") == 1, "invalid node response framing")
+        result = json.loads(pending[:-1])
+        package.require(type(result) is dict, "invalid native response")
+        package.require("trading_authorized" not in result or type(result["trading_authorized"]) is bool,
+                        "invalid native authority state")
+        return result
 
 def memory_enforcement_available(python):
     """Probe actual kernel enforcement, not merely successful setrlimit calls."""
@@ -124,33 +195,37 @@ class CandidateSource:
     batches. No HTTP field can supply or override either authority.
     """
 
-    def __init__(self, *, shard, decision_domain, portfolio_identity, scopes, risk_budget, batches):
+    def __init__(self, *, shard, decision_domain, portfolio_identity, scopes, risk_budget, batches, authority=None, fencing=77):
         package.uint(shard, 32, positive=False)
         package.identity(decision_domain)
         package.identity(portfolio_identity)
         validate_scopes(scopes)
         package.uint(risk_budget)
         self.shard = shard
+        package.uint(fencing)
+        self.fencing = fencing
         self.scope = json.loads(package.canonical(dict(decision_domain=decision_domain,
             portfolio_identity=portfolio_identity, scopes=scopes, risk_budget=risk_budget)))
         self.batches = tuple(batches)
+        self.authority = authority
 
-    def prepare(self, binding, checkpoint_cursor=0, *, recover=False):
+    def prepare(self, binding, checkpoint_cursor=0, *, recover=False, batches=None):
+        batches = self.batches if batches is None else batches
         package.require(all(binding[k] == v for k, v in self.scope.items()), "deployment ownership or budget mismatch")
-        package.require(all(type(b) is bytes and 128 <= len(b) <= 1048576 for b in self.batches),
+        package.require(all(type(b) is bytes and 128 <= len(b) <= 1048576 for b in batches),
                         "invalid canonical input snapshot")
         package.require(all(int.from_bytes(b[32:48], "little") == int(self.scope["decision_domain"], 16)
-                            for b in self.batches), "canonical input DecisionDomain mismatch")
+                            for b in batches), "canonical input DecisionDomain mismatch")
         # Normalize transport batching before the externally timed callbacks.
         # Coverage gaps from subscription filtering stay attached to the record.
         normalized, cursor = [], 0
         first_batch = 1
-        if self.batches and recover:
+        if batches and recover:
             # Preserve actual coverage; native Repository.latest resolves unacknowledged publications.
-            cursor = int.from_bytes(self.batches[0][80:88], "little") - 1
-            first_batch = int.from_bytes(self.batches[0][72:80], "little")
+            cursor = int.from_bytes(batches[0][80:88], "little") - 1
+            first_batch = int.from_bytes(batches[0][72:80], "little")
         replay_cursor = max(cursor, checkpoint_cursor)
-        for number, batch in enumerate(self.batches, first_batch):
+        for number, batch in enumerate(batches, first_batch):
             session = (int.from_bytes(batch[48:56], "little"), int.from_bytes(batch[56:60], "little"),
                        int.from_bytes(batch[64:72], "little"))
             records, last = bridge.decode_component_batch(batch, session, number, cursor)
@@ -201,14 +276,16 @@ class InstanceManager:
         self.releases, self.source = releases, source
         self._lock = threading.RLock()
         self._records, self._hosts = {}, {}
+        self._monitor_stop = threading.Event()
+        self._monitor = None
         if self.path.exists():
             for line in self.path.read_bytes().splitlines():
                 record = package.parse_json(line)
                 self._records[record["binding"]["strategy_identity"]] = record
         # Loading a record cannot restore a process or reuse Ready authority.
         for record in self._records.values():
-            if record["status"] in ("Ready", "Recovering"):
-                record.update(status="Stopped", reason="Host absent; checkpoint recovery required")
+            if record["status"] in ("Ready", "Recovering", "Trading"):
+                record.update(status="Stopped", reason="Host absent; checkpoint recovery required", trading_authorized=False)
 
     def _save(self, record):
         with self.path.open("ab") as handle:
@@ -223,12 +300,126 @@ class InstanceManager:
         try:
             for identity, host in list(self._hosts.items()):
                 if host["process"].poll() is not None:
-                    record = dict(self._records[identity], status="Stopped", reason="candidate Host exited")
-                    self._stop(identity)
-                    self._save(record)
+                    self._fail(identity, self._records[identity], "candidate Host exited")
+                elif self._records[identity]["status"] == "Trading":
+                    try:
+                        authority = self.source.authority.request(dict(operation="status", strategy_identity=identity))
+                        if not authority["trading_authorized"]:
+                            self._fail(identity, self._records[identity], "native authority revoked; recovery and explicit enable required")
+                        else:
+                            self._records[identity]["authority"] = authority
+                    except (ValueError, OSError, KeyError) as error:
+                        self._fail(identity, self._records[identity], str(error))
             return json.loads(package.canonical(list(self._records.values())))
         finally:
             self._lock.release()
+
+    def _revoke(self, identity):
+        if self.source.authority is not None:
+            self.source.authority.request(dict(operation="fault", strategy_identity=identity))
+
+    def _fail(self, identity, record, reason):
+        try:
+            self._revoke(identity)
+        except (OSError, ValueError) as error:
+            reason += "; native revocation unconfirmed: " + str(error)
+        finally:
+            self._stop(identity)
+            self._save(dict(record, status="Stopped", trading_authorized=False, reason=reason[:2048]))
+
+    def _watch(self):
+        while not self._monitor_stop.wait(0.1):
+            self.view()
+
+    def _exchange(self, identity, command):
+        host = self._hosts[identity]
+        data = package.canonical(command)
+        package.require(len(data) <= 256 * 1024, "runtime command capacity exceeded")
+        deadline = time.monotonic() + host["callback_timeout"]
+        host["pipes"].write(struct.pack("<I", len(data)) + data, host["callback_timeout"])
+        pending, frames = b"", []
+        while True:
+            remaining = deadline - time.monotonic()
+            package.require(remaining > 0, "runtime callback budget exhausted")
+            chunk = host["pipes"].read(remaining)
+            if not chunk:
+                host["pipes"].threads[1].join(timeout=0.1)
+                raise package.PackageError("runtime Host exited: " + host["pipes"].errors.decode("utf-8", "replace"))
+            pending += chunk
+            package.require(len(pending) <= 4096, "runtime response capacity exceeded")
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                response = json.loads(line)
+                package.require(type(response) is dict, "invalid runtime response")
+                if "output" in response:
+                    package.require(len(frames) < command["max_outputs"], "runtime output capacity exceeded")
+                    frames.append(response["output"])
+                else:
+                    package.require(not pending and response["outputs"] == len(frames), "runtime response mismatch")
+                    host["cursor"] = response["cursor"]
+                    host["next_input_batch"] += 1
+                    return response, frames
+
+    def control(self, identity, command, key):
+        package.identity(identity)
+        with self._lock:
+            self.view()
+            package.require(self.source.authority is not None, "native node authority unavailable")
+            package.require(identity in self._hosts, "instance is not running")
+            record = self._records[identity]
+            package.require(command["target_identity"] == int(record["binding"]["decision_domain"], 16), "command target mismatch")
+            enabling = command["kind"] == "enable_trading"
+            package.require(not enabling or record["status"] == "Ready", "instance is not Ready")
+            # Web deadlines use UTC seconds; canonical core events use UTC nanoseconds.
+            command = dict(command, expires_at=command["expires_at"] * 1_000_000_000)
+            package.uint(command["expires_at"])
+            try:
+                result = self.source.authority.request(dict(operation="control", strategy_identity=identity,
+                    envelope=control_plane.sign_command(command, key).hex(), evidence=dict(record["evidence"],
+                        cursor=self._hosts[identity]["cursor"], next_input_batch=self._hosts[identity]["next_input_batch"])))
+                if enabling:
+                    ack, outputs = self._exchange(identity, result["host_command"])
+                    package.require(not outputs, "activation barrier produced output")
+                    result = self.source.authority.request(dict(operation="applied", strategy_identity=identity,
+                        cursor=ack["cursor"]))
+                    package.require(result["trading_authorized"] is True, "native activation was not applied")
+                    record = dict(record, status="Trading", trading_authorized=True, authority=result, reason="")
+                    if self._monitor is None:
+                        self._monitor_stop.clear()
+                        self._monitor = threading.Thread(target=self._watch, daemon=True)
+                        self._monitor.start()
+                else:
+                    self._stop(identity)
+                    record = dict(record, status="Stopped", trading_authorized=False, authority=result, reason="explicitly disabled; checkpoint recovery required")
+                self._save(record)
+                return record
+            except (OSError, ValueError, KeyError, RuntimeError) as error:
+                if str(error) == "ReadyBarrierMismatch":
+                    self._save(dict(record, reason="Ready requires node-owned input catch-up before enabling"))
+                    raise
+                self._fail(identity, record, str(error))
+                raise
+
+    def deliver(self, identity, batch):
+        """Node-owned input turn; HTTP requests cannot supply canonical input."""
+        with self._lock:
+            package.require(identity in self._hosts and self._records[identity]["status"] in ("Ready", "Trading"), "instance is not Ready or Trading")
+            try:
+                record, host = self._records[identity], self._hosts[identity]
+                _, _, parts = self.source.prepare(record["binding"], host["cursor"], recover=True, batches=(batch,))
+                results = []
+                for part in parts:
+                    command = self.source.authority.request(dict(operation="publish", strategy_identity=identity, batch=part.hex(),
+                        evidence=dict(record["evidence"], cursor=host["cursor"], next_input_batch=host["next_input_batch"])))
+                    _, frames = self._exchange(identity, command["host_command"])
+                    package.require(record["status"] == "Trading" or not frames, "unauthorized catch-up produced output")
+                    results.extend(self.source.authority.request(dict(operation="output", strategy_identity=identity, frame=frame)) for frame in frames)
+                self._save(dict(record, runtime_cursor=host["cursor"], reason="",
+                    authority=self.source.authority.request(dict(operation="status", strategy_identity=identity))))
+                return results
+            except (OSError, ValueError, KeyError):
+                self._fail(identity, self._records[identity], "runtime input/output failed")
+                raise
 
     def create(self, binding):
         with self._lock, self.releases._lock:
@@ -293,7 +484,7 @@ class InstanceManager:
             work = Path(temporary.name)
             request = dict(binding=binding, manifest=manifest, package_root=str(root / "strategies" / binding["definition_identity"]),
                            python=str(root / lock["python_path"]), host=str(root / lock["host_path"]),
-                           generation=generation, shard=shard, barrier=barrier,
+                           generation=generation, shard=shard, fencing=self.source.fencing, barrier=barrier,
                            checkpoint_directory=str((self.directory / (identity + "-checkpoints")).resolve()),
                            recover=previous is not None, checkpoint_cursor=cursor,
                            batches=[batch.hex() for batch in batches])
@@ -313,7 +504,8 @@ class InstanceManager:
                 process = subprocess.Popen([shutil.which("prlimit"), "--as=" + str(limits["max_memory_bytes"]),
                                             "--fsize=" + str(max(262144, limits["max_private_state_bytes"] + 4096)),
                                             "--", *argv], start_new_session=True, **options)
-            self._hosts[identity] = dict(process=process, temporary=temporary, job=job)
+            self._hosts[identity] = dict(process=process, temporary=temporary, job=job,
+                                        callback_timeout=limits["max_callback_ns"] / 1e9)
             pipes = CandidatePipes(process, lambda: self._terminate(process, job))
             self._hosts[identity]["pipes"] = pipes
             phase_budget = limits["max_warmup_ns"]
@@ -339,9 +531,13 @@ class InstanceManager:
                             record["recovery"]["cursor"] = result["cursor"]
                             self._records[identity] = json.loads(package.canonical(record))
                         continue
+                    package.require(type(result) is dict and "next_input_batch" in result,
+                                    "approved runtime lacks current input evidence")
+                    package.uint(result["next_input_batch"])
                     package.require(result["trading_authorized"] is False
                                     and result["cursor"] == barrier, "invalid Ready evidence")
                     record.update(status="Ready", evidence=result, checkpoint=result.pop("checkpoint"), reason="")
+                    self._hosts[identity].update(cursor=barrier, next_input_batch=result["next_input_batch"])
                     record["recovery"]["cursor"] = barrier
                     self._save(record)
                     return record
@@ -437,10 +633,13 @@ class InstanceManager:
         host["temporary"].cleanup()
 
     def close(self):
+        self._monitor_stop.set()
         with self._lock:
             for identity in list(self._hosts):
-                self._stop(identity)
-                self._save(dict(self._records[identity], status="Stopped", reason="candidate Host closed"))
+                self._fail(identity, self._records[identity], "candidate Host closed")
+        if self._monitor is not None:
+            self._monitor.join(timeout=5)
+            self._monitor = None
 
 
 def sealed(path):

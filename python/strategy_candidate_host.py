@@ -1,4 +1,4 @@
-"""Approved candidate Host. This process has no activation or output path."""
+"""Approved package Host; authority envelopes belong to the runtime adapter."""
 
 import os
 import sys
@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import hashlib
 import importlib
 import struct
+from types import SimpleNamespace
 from pathlib import Path
 
 import strategy_api as api
@@ -27,6 +28,19 @@ def restrict(event, args):
     if event in ("os.remove", "os.rename", "os.rmdir", "os.mkdir", "os.chmod", "os.chown", "os.utime",
                  "os.link", "os.symlink", "os.truncate", "os.setxattr", "os.removexattr"):
         raise PermissionError("candidate filesystem is read-only")
+
+
+def validated_snapshot(instance, manifest):
+    expected_next = instance.next_intent_sequence
+    state = instance.snapshot()
+    package.require(type(state) is bytes and len(state) <= manifest["limits"]["max_private_state_bytes"],
+                    "private state capacity or type")
+    package.parse_json(state)
+    package.require(instance.validate() is None and instance.snapshot() == state,
+                    "validate changed private state")
+    package.require(type(instance.next_intent_sequence) is int and instance.next_intent_sequence == expected_next,
+                    "validate/snapshot changed IntentSequence")
+    return state
 
 
 def run(request_path):
@@ -110,14 +124,7 @@ def run(request_path):
                            struct.pack("<QQ", cursor, suppressed))
         outgoing += 1
     expected_next = instance.next_intent_sequence
-    state = instance.snapshot()
-    package.require(type(state) is bytes and len(state) <= manifest["limits"]["max_private_state_bytes"],
-                    "private state capacity or type")
-    package.parse_json(state)
-    package.require(instance.validate() is None and instance.snapshot() == state,
-                    "validate changed private state")
-    package.require(type(instance.next_intent_sequence) is int and instance.next_intent_sequence == expected_next,
-                    "validate/snapshot changed IntentSequence")
+    state = validated_snapshot(instance, manifest)
     restored = module.create(context, config)
     package.require(restored.restore(state) is None and restored.snapshot() == state,
                     "private state restore roundtrip mismatch")
@@ -154,10 +161,63 @@ def run(request_path):
     bridge.write_frame(sys.stdout.buffer, bridge.CHECKPOINT_CONTENT, session, outgoing,
                        struct.pack("<Q", checkpoint_request) + container)
     incoming, outgoing = incoming + 1, outgoing + 1
-    kind, actual, sequence, payload = bridge.read_frame(sys.stdin.buffer)
-    package.require(kind == bridge.SHUTDOWN and actual == session and sequence == incoming,
-                    "candidate accepts only shutdown after Ready")
-    bridge.write_frame(sys.stdout.buffer, bridge.SHUTDOWN_ACK, session, outgoing)
+    activation, activation_barrier = 0, None
+    while True:
+        kind, actual, sequence, payload = bridge.read_frame(sys.stdin.buffer)
+        package.require(actual == session and sequence == incoming, "invalid runtime session or sequence")
+        incoming += 1
+        if kind == bridge.SHUTDOWN:
+            bridge.write_frame(sys.stdout.buffer, bridge.SHUTDOWN_ACK, session, outgoing)
+            return
+        if kind == bridge.ACTIVATE_STRATEGY:
+            package.require(activation == 0 and len(payload) == 72
+                            and int.from_bytes(payload[:16], "little") == int(context.strategy_identity, 16)
+                            and int.from_bytes(payload[16:32], "little") > 0 and any(payload[40:]),
+                            "invalid activation")
+            activation = int.from_bytes(payload[16:32], "little")
+            activation_barrier = struct.unpack_from("<Q", payload, 32)[0]
+            package.require(activation_barrier > cursor, "activation barrier must follow Ready")
+            continue
+        package.require(kind == bridge.INPUT_BATCH, "invalid runtime input")
+        records, last = bridge.decode_component_batch(payload, session, batch, cursor)
+        package.require(len(records) <= 1, "runtime requires bounded single-event batches")
+        frames = []
+        for record in records:
+            package.require(len(record.payload) <= manifest["limits"]["max_input_record_bytes"], "input capacity exceeded")
+            if (record.event_type, record.schema_version) not in subscriptions:
+                continue
+            before = instance.next_intent_sequence
+            outputs = instance.on_event(api.Event(record.shard_sequence, record.event_type,
+                                                  record.schema_version, record.payload))
+            api.validate_outputs(outputs, before, instance.next_intent_sequence, manifest, binding)
+            if activation == 0 or record.shard_sequence <= activation_barrier:
+                continue
+            for output in outputs:
+                members = (output,) if type(output) is api.OrderIntent else output.members
+                encoded = []
+                for member in members:
+                    args = SimpleNamespace(strategy_identity=str(int(context.strategy_identity, 16)),
+                        activation_identity=str(activation), config_version=context.config_version,
+                        intent_sequence=member.intent_sequence, portfolio_identity=member.portfolio_identity,
+                        exchange_account_identity=member.exchange_account_identity,
+                        instrument_identity=member.instrument_identity, side=member.side,
+                        time_in_force=member.time_in_force, portfolio_reduce_only=member.portfolio_reduce_only,
+                        quantity=member.quantity, limit_price=member.limit_price)
+                    encoded.append(bridge.output_frame(payload, args, session))
+                frame = bytearray(encoded[0][:128] + b"".join(e[128:] for e in encoded))
+                struct.pack_into("<I", frame, 12, len(frame))
+                struct.pack_into("<HII", frame, 98, 1 if len(members) == 1 else 2, len(members), 80 * len(members))
+                struct.pack_into("<I", frame, 124, bridge.crc32c(frame[:124] + frame[128:]))
+                frames.append(bytes(frame))
+        cursor, batch = last, batch + 1
+        if activation == 0:
+            validated_snapshot(instance, manifest)
+        bridge.write_frame(sys.stdout.buffer, bridge.HOST_HEARTBEAT, session, outgoing,
+                           struct.pack("<QQ", cursor, len(frames)))
+        outgoing += 1
+        for frame in frames:
+            bridge.write_frame(sys.stdout.buffer, bridge.STRATEGY_OUTPUT, session, outgoing, frame)
+            outgoing += 1
 
 
 if __name__ == "__main__":

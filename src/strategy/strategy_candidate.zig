@@ -13,6 +13,7 @@ const Request = struct {
     host: []const u8,
     generation: u64,
     shard: u32,
+    fencing: u64,
     barrier: u64,
     batches: []const []const u8,
     checkpoint_directory: []const u8,
@@ -49,10 +50,17 @@ fn hexIdentity(value: []const u8) !u128 {
     return result;
 }
 
-fn awaitStop(io: std.Io) !void {
-    var stop: [1]u8 = undefined;
-    const buffers = [_][]u8{&stop};
-    _ = try std.Io.File.stdin().readStreaming(io, &buffers);
+fn awaitCommand(io: std.Io, storage: []u8) ![]const u8 {
+    var header: [4]u8 = undefined;
+    var reader = std.Io.File.stdin().reader(io, &.{});
+    reader.interface.readSliceAll(&header) catch |err| switch (err) {
+        error.EndOfStream => return &.{},
+        else => return err,
+    };
+    const len = std.mem.readInt(u32, &header, .little);
+    if (len == 0 or len > storage.len) return error.InvalidRuntimeCommand;
+    try reader.interface.readSliceAll(storage[0..len]);
+    return storage[0..len];
 }
 
 fn awaitHostExit(io: std.Io, stdout: std.Io.File) !void {
@@ -101,6 +109,8 @@ pub fn run(init: std.process.Init, request_path: []const u8) !void {
     var output_buffer: [512]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &output_buffer);
     var plan = lifecycle.developmentPlan(request.shard, request.generation, request.manifest.compatibility.python_abi);
+    if (request.fencing == 0) return error.InvalidFencingToken;
+    plan.session.fencing = request.fencing;
     plan.decision_domain = try hexIdentity(request.binding.decision_domain);
     plan.compatibility.host_build = try hexIdentity(request.manifest.compatibility.host_build);
     plan.compatibility.schema_registry = try hexIdentity(request.manifest.compatibility.schema_registry);
@@ -192,21 +202,55 @@ pub fn run(init: std.process.Init, request_path: []const u8) !void {
     const digest = std.fmt.bytesToHex(ready.state_digest, .lower);
     const host_pid: u64 = if (builtin.os.tag == .windows) GetProcessId(host.child.id.?) else @intCast(host.child.id.?);
     if (host_pid == 0) return error.InvalidHostProcessId;
-    try output.interface.print("{{\"cursor\":{d},\"next_intent_sequence\":{d},\"host_generation\":{d},\"host_pid\":{d},\"state_digest\":\"{s}\",\"trading_authorized\":false,\"checkpoint\":{{\"cursor\":{d},\"publication\":{d},\"content_identity\":\"{s}\"}}}}\n", .{ ready.cursor, ready.next_intent_sequence, plan.session.generation, host_pid, digest, ready.cursor, published.sequence, content_identity });
+    try output.interface.print("{{\"cursor\":{d},\"next_intent_sequence\":{d},\"next_input_batch\":{d},\"host_generation\":{d},\"host_pid\":{d},\"state_digest\":\"{s}\",\"trading_authorized\":false,\"checkpoint\":{{\"cursor\":{d},\"publication\":{d},\"content_identity\":\"{s}\"}}}}\n", .{ ready.cursor, ready.next_intent_sequence, host.next_input_batch, plan.session.generation, host_pid, digest, ready.cursor, published.sequence, content_identity });
     try output.interface.flush();
-    const Event = union(enum) { stop: anyerror!void, exited: anyerror!void };
-    var events: [2]Event = undefined;
-    var select = std.Io.Select(Event).init(init.io, &events);
-    defer select.cancelDiscard();
-    // Canceling Child.wait destroys its ownership in the pinned Zig runtime.
-    // Observe EOF without consuming the process handle needed for cleanup.
-    try select.concurrent(.exited, awaitHostExit, .{ init.io, host.child.stdout.? });
-    try select.concurrent(.stop, awaitStop, .{init.io});
-    const event = try select.await();
-    select.cancelDiscard();
-    switch (event) {
-        .exited => return error.CandidateHostExited,
-        .stop => |result| try result,
+    const Event = union(enum) { command: anyerror![]const u8, exited: anyerror!void };
+    const command_storage = try init.gpa.alloc(u8, 256 * 1024);
+    defer init.gpa.free(command_storage);
+    while (true) {
+        var events: [2]Event = undefined;
+        var select = std.Io.Select(Event).init(init.io, &events);
+        defer select.cancelDiscard();
+        // Canceling Child.wait destroys its ownership in the pinned Zig runtime.
+        // Observe EOF without consuming the process handle needed for cleanup.
+        try select.concurrent(.exited, awaitHostExit, .{ init.io, host.child.stdout.? });
+        try select.concurrent(.command, awaitCommand, .{ init.io, command_storage });
+        const event = try select.await();
+        select.cancelDiscard();
+        switch (event) {
+            .exited => return error.CandidateHostExited,
+            .command => |result| {
+                const command_bytes = try result;
+                if (command_bytes.len == 0) break;
+                const Command = struct {
+                    activation: ?struct { identity: []const u8, barrier: u64, state_digest: []const u8 } = null,
+                    batch: []const u8,
+                    max_outputs: u64,
+                };
+                const command = try std.json.parseFromSlice(Command, init.gpa, command_bytes, .{});
+                defer command.deinit();
+                const value = command.value;
+                if (value.activation) |activation| {
+                    var activation_digest: [32]u8 = undefined;
+                    _ = try std.fmt.hexToBytes(&activation_digest, activation.state_digest);
+                    try host.activate(init.io, .{ .strategy_identity = ready.strategy_identity, .activation_identity = try hexIdentity(activation.identity), .barrier = activation.barrier, .state_digest = activation_digest });
+                }
+                if (value.batch.len > 2 * plan.input_capacity or value.batch.len < 256) return error.InvalidRuntimeBatch;
+                const batch = try init.gpa.alloc(u8, value.batch.len / 2);
+                defer init.gpa.free(batch);
+                _ = try std.fmt.hexToBytes(batch, value.batch);
+                try host.sendInput(init.io, batch, now(init.io));
+                const count = try host.receiveBatchAck(init.io, now(init.io), value.max_outputs);
+                var frame_buffer: [512]u8 = undefined;
+                for (0..count) |_| {
+                    const payload = try host.receiveOutput(init.io, now(init.io), &frame_buffer);
+                    try output.interface.print("{{\"output\":\"{x}\"}}\n", .{payload});
+                    try output.interface.flush();
+                }
+                try output.interface.print("{{\"cursor\":{d},\"outputs\":{d}}}\n", .{ host.last_input_cursor.?, count });
+                try output.interface.flush();
+            },
+        }
     }
     if (host.child.id == null) return error.CandidateHostExited;
     try host.shutdown(init.io, now(init.io));

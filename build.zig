@@ -60,6 +60,18 @@ pub fn build(b: *std.Build) void {
     candidate.stack_size = 64 * 1024 * 1024;
     b.installArtifact(candidate);
 
+    const authority_probe = b.addExecutable(.{
+        .name = "ringwin-strategy-authority-probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/strategy_authority_probe.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    authority_probe.stack_size = 512 * 1024 * 1024;
+    const authority_step = b.step("strategy-authority-probe", "Build the offline package activation acceptance node");
+    authority_step.dependOn(&b.addInstallArtifact(authority_probe, .{}).step);
+
     const run = b.addRunArtifact(exe);
     if (b.args) |args| run.addArgs(args);
     const run_step = b.step("run", "Run the deterministic acceptance fixture");

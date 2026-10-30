@@ -4,7 +4,7 @@ Status: open
 
 ## Destination
 
-建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，02票的原生构建合同、静态注册与构建清单及03票的Python包安装登记已交付并通过各自离线验收；04的Windows无权加载及Host资源路径已独立验收，05的Windows checkpoint持久发布与无权重启恢复已完成，06–11仍待实施。Linux Host资源验收单独保留缺口。
+建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，02票的原生构建合同、静态注册与构建清单及03票的Python包安装登记已交付并通过各自离线验收；04的Windows无权加载及Host资源路径已独立验收，05的Windows checkpoint持久发布与无权重启恢复、06的显式启停与核心/Gateway准入已完成Windows离线验收，07–11仍待实施。Linux Host资源验收单独保留缺口。
 
 ## Definition of done
 
@@ -38,11 +38,14 @@ Status: open
 
 ## Frontier
 
-- [06 显式 EnableTrading 接通策略输出与核心准入](issues/06-enable-trading.md)：未认领；05的Windows恢复路径已验收，可基于Windows接手。Linux资源缺口保持单列，不由本轮结果替代。
+- [07 同实例参数更新与 Keep/Rebuild](issues/07-config-transition.md)：06已完成，可接手；尚未认领或实施。
+- [08 代码替换与 ForwardRollback 创建 StrategySuccessor](issues/08-successor-rollback.md)：06已完成，可接手；尚未认领或实施。
 
 每次只认领一张Frontier票。尚未实施票的ready-for-agent表示票已可供接手，仍须满足各票Blocked by；其余票在依赖完成前不属于Frontier。
 
 ## Decisions so far
+
+- 2026-10-31：06完成现有Web显式授权、HostActivated实际应用ACK、真实单笔/完整组输出与核心/Gateway准入，以及无权追赶、停用、安全门关闭和迟到输出拒绝。Windows Python最终306项292通过14平台skip；ReleaseSafe核心821/821、正常构建9/9、原生验收节点构建3/3，UI/静态检查通过，双轴复审0剩余发现。验收与中间失败修正见06验证说明。06 resolved并移出Frontier，07/08可接手但未认领；地图保持open，Linux资源、实际Venue、生产与部署资格不扩张。
 
 - 2026-10-31：05完成Windows checkpoint持久发布、同实例重启、非空尾日志无权恢复及Web进度/失败接线。保留原绑定和意图历史，共享Host generation持久递增；覆盖首次/后续未确认发布的仅尾日志恢复、完整决定一致性、损坏/schema/缺口拒绝及70 KiB私有状态。Python最终299项285通过14平台skip；已有核心测试二进制821/821、checkpoint专项ReleaseSafe84/84、最终构建9/9。首次整波命令exit1且无详细诊断的日志保留，不作为通过；后续完整二进制运行及源归属见05验证说明。双轴修正复审0项剩余发现。05 resolved并移出Frontier，06可接手但未认领；地图保持open，Linux资源、生产/交易/部署资格未扩张。
 

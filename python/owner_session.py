@@ -183,36 +183,41 @@ class SessionManager:
     def __init__(self, directory: str, ttl_seconds: int = SESSION_TTL_SECONDS):
         self.path = os.path.join(directory, "session.json")
         self.ttl_seconds = ttl_seconds
+        self._lock = threading.RLock()
 
     def issue(self, clock=default_clock) -> str:
-        token = secrets.token_urlsafe(32)
-        payload = {"token_hash": hashlib.sha256(token.encode()).hexdigest(),
-                   "expires_at": clock() + self.ttl_seconds}
-        _write_private_atomic(self.path, json.dumps(payload))
-        return token
+        with self._lock:
+            token = secrets.token_urlsafe(32)
+            payload = {"token_hash": hashlib.sha256(token.encode()).hexdigest(),
+                       "expires_at": clock() + self.ttl_seconds}
+            _write_private_atomic(self.path, json.dumps(payload))
+            return token
 
     def validate(self, token: str, clock=default_clock) -> bool:
-        if not token or not os.path.exists(self.path):
-            return False
-        with open(self.path) as handle:
-            payload = json.load(handle)
-        if clock() >= payload["expires_at"]:
-            return False
-        return hmac.compare_digest(
-            hashlib.sha256(token.encode()).hexdigest(), payload["token_hash"])
+        with self._lock:
+            if not token or not os.path.exists(self.path):
+                return False
+            with open(self.path) as handle:
+                payload = json.load(handle)
+            if clock() >= payload["expires_at"]:
+                return False
+            return hmac.compare_digest(
+                hashlib.sha256(token.encode()).hexdigest(), payload["token_hash"])
 
     def renew(self, token: str, clock=default_clock) -> bool:
-        if not self.validate(token, clock):
-            return False
-        with open(self.path) as handle:
-            payload = json.load(handle)
-        payload["expires_at"] = clock() + self.ttl_seconds
-        _write_private_atomic(self.path, json.dumps(payload))
-        return True
+        with self._lock:
+            if not self.validate(token, clock):
+                return False
+            with open(self.path) as handle:
+                payload = json.load(handle)
+            payload["expires_at"] = clock() + self.ttl_seconds
+            _write_private_atomic(self.path, json.dumps(payload))
+            return True
 
     def revoke(self) -> None:
-        if os.path.exists(self.path):
-            os.remove(self.path)
+        with self._lock:
+            if os.path.exists(self.path):
+                os.remove(self.path)
 
 
 class RateLimiter:

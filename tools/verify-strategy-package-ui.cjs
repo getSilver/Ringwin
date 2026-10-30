@@ -21,6 +21,8 @@ const prompts = ["/approved.json", "b".repeat(64), ""];
 let outcome = "rejected";
 let instanceStatus = "Ready";
 let submittedBinding;
+let renderedStatus = "Stopped";
+const instanceCommands = [];
 const context = vm.createContext({
   console, setTimeout() {}, location: {reload() {}},
   crypto: {randomUUID: () => "11111111-1111-4111-8111-111111111111"},
@@ -32,13 +34,18 @@ const context = vm.createContext({
       qualification_rejections: [{reason: "bad signature <unsafe>"}],
       release_records: [{artifact_id: "bundle-b", result: {status: "rejected", reason: "digest mismatch"}}]};
     if (url === "/risk-warning") return {warning_identity: "1", consequence: "offline test"};
+    if (url === "/command") {
+      instanceCommands.push(JSON.parse(options.body));
+      return {result: {status: renderedStatus}};
+    }
     if (url === "/api/strategy-instances") {
       if (options.method === "POST") {
         submittedBinding = JSON.parse(options.body);
         return {result: {status: instanceStatus, reason: "warmup <insufficient>"}};
       }
       return {instances: [{binding: {strategy_identity: "<unsafe>", definition_identity: "definition",
-        config_sha256: "c".repeat(64)}, status: "Stopped", reason: "warmup <insufficient>"}]};
+        decision_domain: "0".repeat(31) + "1", config_sha256: "c".repeat(64)},
+        status: renderedStatus, trading_authorized: renderedStatus === "Trading", reason: "warmup <insufficient>"}]};
     }
     return {result: {status: outcome, reason: "digest mismatch"}};
   }})
@@ -65,6 +72,14 @@ vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], context);
   await vm.runInContext("loadInstances()", context);
   assert.ok(elements.get("instances").innerHTML.includes("&lt;unsafe&gt;"));
   assert.ok(elements.get("instances").innerHTML.includes("warmup &lt;insufficient&gt;"));
+  for (const state of ["Ready", "Trading"]) {
+    renderedStatus = state;
+    await vm.runInContext("loadInstances()", context);
+    assert.ok(elements.get("instances").innerHTML.includes(state === "Trading" ? "核心已授权交易" : "EnableTrading"));
+  }
+  await vm.runInContext("controlStrategyInstance('enable_trading','11111111111111111111111111111111','1')", context);
+  assert.equal(instanceCommands.at(-1).strategy_identity, "1".repeat(32));
+  assert.equal(instanceCommands.at(-1).risk_warning_acknowledged, true);
   for (const status of ["Ready", "Stopped"]) {
     instanceStatus = status;
     prompts.length = 0;

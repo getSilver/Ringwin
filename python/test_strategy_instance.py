@@ -113,6 +113,34 @@ def create(context, config):
     return DecisionObserver(context, config)
 '''
 
+TRADER = OBSERVER.replace(b'return ()', b'''intent = OrderIntent(self.next_intent_sequence, 1, 2, 3, "buy", "gtc", False, 100, 50100000000)
+        self.next_intent_sequence += 1
+        return (intent,)''')
+
+GROUP_TRADER = OBSERVER.replace(b'return ()', b'''first = OrderIntent(self.next_intent_sequence, 10, 20, 101, "buy", "gtc", False, 10, 10)
+        second = first._replace(intent_sequence=self.next_intent_sequence + 1, exchange_account_identity=30, instrument_identity=102)
+        self.next_intent_sequence += 2
+        return (IntentGroup((first, second)),)''')
+
+
+class NativeAuthorityTransportTests(unittest.TestCase):
+    def test_stalled_reader_cannot_hold_native_pipe_beyond_write_deadline(self):
+        process = subprocess.Popen([sys.executable, "-I", "-S", "-c", "import time; time.sleep(30)"],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        authority = strategy_instance.NativeAuthority(process, timeout=0.1)
+        try:
+            started = time.monotonic()
+            with self.assertRaisesRegex(ValueError, "write budget exhausted"):
+                authority.request(dict(operation="unread", batch="a" * 200000))
+            self.assertLess(time.monotonic() - started, 3)
+            self.assertTrue(authority.failed)
+            with self.assertRaisesRegex(ValueError, "connection failed"):
+                authority.request(dict(operation="fault"))
+        finally:
+            process.kill()
+            process.wait(timeout=5)
+            authority.pipes.close()
+
 
 def depth_batch(sequence=1):
     payload = strategy_host.encode_depth_snapshot(dict(instrument=3, rules_version=1, sequence=sequence,
@@ -203,6 +231,181 @@ class WebInstanceTests(unittest.TestCase):
 
     def create(self, **changes):
         return self.client.call("POST", "/api/strategy-instances", dict(self.binding, **changes))
+
+    def native_authority(self, *, group=False):
+        self.app.clock = lambda: 1767225601
+        status, login = self.client.call("POST", "/login", {
+            "passphrase": "correct horse battery staple",
+            "code": package_release.owner_session.totp_at(self.totp_secret, self.app.clock())})
+        self.assertEqual(status, 200, login)
+        self.client.csrf = login["csrf_token"]
+        probe = self.engine.with_name("ringwin-strategy-authority-probe" + (".exe" if os.name == "nt" else ""))
+        self.assertTrue(probe.is_file(), "zig build strategy-authority-probe is required")
+        key = self.root / "node-control.key"
+        key.write_bytes(self.command_server.key)
+        process = subprocess.Popen([str(probe), str(key), *(["group"] if group else [])], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # This first response includes cold fixture bootstrap, before node readiness.
+        authority = strategy_instance.NativeAuthority(process, timeout=30)
+        self.native_frames = []
+        request = authority.request
+        def capture(value):
+            if value["operation"] == "output":
+                self.native_frames.append(value["frame"])
+            return request(value)
+        authority.request = capture
+        def close():
+            process.kill()
+            process.wait(timeout=5)
+            authority.pipes.close()
+        self.addCleanup(close)
+        self.source.authority = authority
+        self.source.fencing = 1
+        self.source.scope["decision_domain"] = "0" * 31 + "1"
+        if group:
+            self.source.scope.update(portfolio_identity=f"{10:032x}", scopes=[
+                dict(venue="bybit", exchange_account=f"{30:032x}", instrument=f"{102:032x}"),
+                dict(venue="okx", exchange_account=f"{20:032x}", instrument=f"{101:032x}")])
+        state = authority.request(dict(operation="status", strategy_identity=f"{9 if group else 16:032x}"))
+        authority.timeout = 3
+        self.source.batches = (self.node_batch(state["cursor"], 1),)
+        return authority
+
+    @staticmethod
+    def node_batch(cursor, first):
+        batch = bytearray(depth_batch(cursor))
+        batch[32:48] = (1).to_bytes(16, "little")
+        struct.pack_into("<Q", batch, 72, 1)
+        struct.pack_into("<Q", batch, 80, first)
+        struct.pack_into("<I", batch, 124, strategy_host.crc32c(batch[:124] + batch[128:]))
+        return bytes(batch)
+
+    def instance_command(self, kind, **changes):
+        identity = self.binding["strategy_identity"]
+        state = self.source.authority.request(dict(operation="status", strategy_identity=identity))
+        command = dict(kind=kind, strategy_identity=identity, target_identity=1,
+                       expected_version=state["operational_version"], command_identity=time.time_ns() % 2**62,
+                       **changes)
+        if kind == "enable_trading":
+            status, warning = self.client.call("POST", "/risk-warning", command)
+            self.assertEqual(status, 200, warning)
+            command.update(risk_warning_acknowledged=True, risk_warning_identity=warning["warning_identity"])
+        return self.client.call("POST", "/command", command)
+
+    def test_native_first_unauthorized_batch_starts_at_one_without_publication_history(self):
+        authority = self.native_authority()
+        identity = "0" * 30 + "10"
+        cursor = authority.request(dict(operation="status", strategy_identity=identity))["cursor"]
+        command = authority.request(dict(operation="publish", strategy_identity=identity,
+            evidence=dict(host_generation=1, cursor=0, next_input_batch=1), batch=self.node_batch(cursor, 1).hex()))
+        batch = bytes.fromhex(command["host_command"]["batch"])
+        self.assertEqual(int.from_bytes(batch[72:80], "little"), 1)
+        self.assertFalse(authority.request(dict(operation="status", strategy_identity=identity))["trading_authorized"])
+
+    def test_enable_applies_real_barrier_then_actual_package_output_reaches_native_core_and_pause_revokes(self):
+        authority = self.native_authority()
+        self.install(TRADER)
+        ready = self.create()[1]["result"]
+        self.assertEqual(ready["status"], "Ready", ready)
+        self.assertFalse(ready["trading_authorized"])
+        identity = self.binding["strategy_identity"]
+        before = authority.request(dict(operation="status", strategy_identity=identity))
+        self.assertEqual(before["orders"], 0)
+        self.assertEqual(self.client.call("POST", "/command", dict(kind="enable_trading", strategy_identity=identity,
+            target_identity=1, command_identity=999, expected_version=before["operational_version"]))[0], 403)
+        catchup = authority.request(dict(operation="advance"))["cursor"]
+        self.assertEqual(self.instance_command("enable_trading")[0], 400)
+        self.assertEqual(self.instances.view()[0]["status"], "Ready")
+        self.assertEqual(self.instances.deliver(identity, self.node_batch(catchup, ready["evidence"]["cursor"] + 1)), [])
+        self.assertFalse(authority.request(dict(operation="status", strategy_identity=identity))["trading_authorized"])
+        status, enabled = self.instance_command("enable_trading")
+        self.assertEqual(status, 200, enabled)
+        self.assertTrue(enabled["result"]["trading_authorized"])
+        self.assertEqual(enabled["result"]["authority"]["orders"], 0)
+        first = enabled["result"]["authority"]["cursor"] + 1
+        cursor = authority.request(dict(operation="advance"))["cursor"]
+        results = self.instances.deliver(identity, self.node_batch(cursor, first))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["orders"], 1, results)
+        self.assertEqual(results[0]["commands"], 1, results)
+        frame = bytes.fromhex(self.native_frames[0])
+        self.assertEqual(int.from_bytes(frame[136:144], "little"), 3)
+        for offset, value in ((48, 0), (108, 999)):
+            with self.subTest(offset=offset):
+                old = bytearray(frame)
+                old[offset:offset + (8 if offset == 48 else 16)] = value.to_bytes(8 if offset == 48 else 16, "little")
+                struct.pack_into("<I", old, 124, strategy_host.crc32c(old[:124] + old[128:]))
+                result = authority.request(dict(operation="output", strategy_identity=identity, frame=old.hex()))
+                self.assertEqual(result["orders"], 1)
+        status, paused = self.instance_command("trading_pause")
+        self.assertEqual(status, 200, paused)
+        self.assertFalse(paused["result"]["trading_authorized"])
+        self.assertFalse(authority.request(dict(operation="status", strategy_identity=identity))["trading_authorized"])
+        dispatch = authority.request(dict(operation="dispatch"))
+        self.assertEqual(dispatch, dict(dispatch="NotSent", attempts=0), dispatch)
+        with self.assertRaisesRegex(ValueError, "not Ready or Trading"):
+            self.instances.deliver(identity, self.node_batch(cursor, first))
+
+    def test_complete_group_is_one_actual_frame_and_gateway_accepts_it_before_safety_revokes(self):
+        authority = self.native_authority(group=True)
+        self.install(GROUP_TRADER)
+        self.binding["strategy_identity"] = f"{9:032x}"
+        ready = self.create()[1]["result"]
+        self.assertEqual(ready["status"], "Ready", ready)
+        identity = self.binding["strategy_identity"]
+        with self.assertRaisesRegex(ValueError, "NoHostActivation"):
+            authority.request(dict(operation="applied", strategy_identity=identity, cursor=ready["evidence"]["cursor"]))
+        status, enabled = self.instance_command("enable_trading")
+        self.assertEqual(status, 200, enabled)
+        first = enabled["result"]["authority"]["cursor"] + 1
+        cursor = authority.request(dict(operation="advance"))["cursor"]
+        results = self.instances.deliver(identity, self.node_batch(cursor, first))
+        self.assertEqual(len(self.native_frames), 1)
+        self.assertEqual(len(bytes.fromhex(self.native_frames[0])), 288)
+        self.assertEqual(results[0]["orders"], 2, results)
+        self.assertEqual(results[0]["commands"], 2, results)
+        dispatch = authority.request(dict(operation="dispatch"))
+        self.assertEqual(dispatch, dict(dispatch="accepted", attempts=1), dispatch)
+        first_cursor = authority.request(dict(operation="advance"))["cursor"]
+        last_cursor = authority.request(dict(operation="advance"))["cursor"]
+        first_batch = self.node_batch(first_cursor, cursor + 1)
+        second_batch = self.node_batch(last_cursor, first_cursor + 1)
+        merged = bytearray(first_batch + second_batch[128:])
+        struct.pack_into("<I", merged, 12, len(merged))
+        struct.pack_into("<Q", merged, 88, last_cursor)
+        struct.pack_into("<II", merged, 104, 2, len(merged) - 128)
+        struct.pack_into("<I", merged, 124, strategy_host.crc32c(merged[:124] + merged[128:]))
+        self.assertEqual(len(self.instances.deliver(identity, bytes(merged))), 2)
+        self.assertEqual([int.from_bytes(bytes.fromhex(f)[136:144], "little") for f in self.native_frames], [3, 5, 7])
+        authority.request(dict(operation="gate"))
+        deadline = time.monotonic() + 3
+        while True:
+            record = self.instances.view()[0]
+            if not record["trading_authorized"] or time.monotonic() >= deadline:
+                break
+            time.sleep(0.02)
+        self.assertFalse(record["trading_authorized"])
+        self.assertEqual(record["status"], "Stopped")
+        self.assertIn("revoked", record["reason"])
+        self.assertEqual(authority.request(dict(operation="dispatch")), dict(dispatch="NotSent", attempts=1))
+        late = authority.request(dict(operation="output", strategy_identity=identity, frame=self.native_frames[0]))
+        self.assertEqual(late["orders"], 2)
+
+    def test_risk_warning_is_bound_to_instance_and_second_instance_cannot_gain_authority(self):
+        self.native_authority()
+        self.install(TRADER)
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        identity = self.binding["strategy_identity"]
+        state = self.source.authority.request(dict(operation="status", strategy_identity=identity))
+        command = dict(kind="enable_trading", strategy_identity=identity, target_identity=1,
+                       command_identity=888, expected_version=state["operational_version"])
+        status, warning = self.client.call("POST", "/risk-warning", command)
+        self.assertEqual(status, 200, warning)
+        command.update(strategy_identity="0" * 30 + "11", risk_warning_acknowledged=True,
+                       risk_warning_identity=warning["warning_identity"])
+        self.assertEqual(self.client.call("POST", "/command", command)[0], 403)
+        self.assertEqual(self.create(strategy_identity="0" * 30 + "11")[0], 400)
+        self.assertFalse(self.source.authority.request(dict(operation="status", strategy_identity=identity))["trading_authorized"])
 
     def test_real_host_reaches_ready_without_authority_and_restart_does_not_recreate_it(self):
         self.install()

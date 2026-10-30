@@ -1,0 +1,20 @@
+test_stalled_reader_cannot_hold_native_pipe_beyond_write_deadline (test_strategy_instance.NativeAuthorityTransportTests) ... ok
+test_enable_applies_real_barrier_then_actual_package_output_reaches_native_core_and_pause_revokes (test_strategy_instance.WebInstanceTests) ... [enqueue 2acf3ce5c40] enable_trading -> pending will be 1
+[enqueue 2acf3ce5c40] enable_trading -> pending will be 1
+[enqueue 2acf3ce5c40] trading_pause -> pending will be 1
+ok
+test_complete_group_is_one_actual_frame_and_gateway_accepts_it_before_safety_revokes (test_strategy_instance.WebInstanceTests) ... [enqueue 2acf3d08af0] enable_trading -> pending will be 1
+FAIL
+
+======================================================================
+FAIL: test_complete_group_is_one_actual_frame_and_gateway_accepts_it_before_safety_revokes (test_strategy_instance.WebInstanceTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\github\Ringwin-strategy-package-03\python\test_strategy_instance.py", line 380, in test_complete_group_is_one_actual_frame_and_gateway_accepts_it_before_safety_revokes
+    self.assertFalse(record["trading_authorized"])
+AssertionError: True is not false
+
+----------------------------------------------------------------------
+Ran 3 tests in 22.059s
+
+FAILED (failures=1)

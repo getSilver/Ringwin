@@ -261,3 +261,53 @@ adapter. The fixture signs and installs the **real adapter, Python interpreter a
 Host**, then drives authenticated HTTP. The engine payload and canonical depth
 input are explicitly synthetic. It proves offline unauthorized loading, not live
 node integration, economic qualification, OS/runtime qualification or deployment.
+
+Ready instances can now use the existing `/risk-warning` and `/command` Web flow
+with `kind=enable_trading` and their `strategy_identity`. The confirmation binds
+the instance as well as the DecisionDomain and operational version. Instance
+deadlines are converted from Web UTC seconds to canonical UTC nanoseconds before
+signing. A package, successful release, or healthy process cannot enable itself.
+
+The embedding node supplies `CandidateSource.authority`, a `NativeAuthority`
+connection to its private native admission adapter, and its current fencing token.
+`strategy_package_authority.Authority` borrows the existing Writer's shard and
+journal; its `commit` callback must apply and durably commit through that same
+owner before returning. It never bootstraps trading state or grants a budget.
+The node owns this connection and must revoke on its EOF or failure. The adapter
+checks the signed command, current Ready cursor, binding, SafetyGates and committed
+barrier. It records HostActivated, supplies the actual session and batch, then
+enables the Host gateway only after the runtime receives an exact cursor ACK.
+An absent node adapter leaves EnableTrading unavailable.
+
+The node calls `InstanceManager.deliver` with its committed canonical input;
+there is no HTTP input/frame injection endpoint. The locked Host wrapper creates
+the existing QSHO envelope around fixed API OrderIntent or complete IntentGroup
+values. Native Host ingress checks session, activation, published batch, cursor
+and freshness, then commits through core ownership/risk/account/instrument
+admission. The existing execution Gateway still rechecks each committed command
+before sending. Native status and refusal reasons appear in the instance view.
+The existing bounded Host gateway capacities fail closed on exhaustion.
+Ready Hosts also consume this input without publishing output, advancing private
+IntentSequence by the same callback path. Their current ACK cursor is tracked
+separately from the published checkpoint evidence. A stale Ready enable stays
+Ready for node-owned catch-up and a fresh explicit command. Runtime batches are
+split through the same source normalizer as recovery, so transport batching is
+invisible to package callbacks. Both pipe writes and reads share one deadline;
+an unresponsive reader cannot keep the manager lock indefinitely.
+
+TradingPause/StopKeepPositions/KillSwitch can use the same instance command
+route. Core revocation precedes stopping the Host; the monitor also checks Host
+death and native authority withdrawal. Faults revoke and latch through the core;
+an unavailable revocation acknowledgment is explicitly reported. Restart and
+replay remain unauthorized and require a fresh explicit enable. Stopping retains
+the last published checkpoint and authoritative intent history. Only one resident
+package Host is supported until task 10.
+
+For task 06 acceptance also build `zig build strategy-authority-probe
+-Doptimize=ReleaseSafe` alongside the candidate. This optional test executable
+embeds the same native adapter with the existing single-account and multi-account
+fixtures and a simulated Venue. Authenticated Web tests install the signed real
+package runtime, apply the activation barrier, admit actual single/group Python
+outputs and exercise Gateway sending/withdrawal. This is controlled offline
+integration evidence, not a live node launcher or real Venue/deployment authority.
+Windows and Linux qualification remain independent under ADR 0010.

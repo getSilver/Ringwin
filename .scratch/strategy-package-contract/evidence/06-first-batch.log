@@ -1,0 +1,6 @@
+test_native_first_unauthorized_batch_starts_at_one_without_publication_history (test_strategy_instance.WebInstanceTests) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 2.353s
+
+OK
