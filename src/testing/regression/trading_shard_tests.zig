@@ -47,11 +47,7 @@ test "same instance parameter activation preserves economics and latches through
         .expires_at = std.math.maxInt(u64),
         .kind = .trading_pause,
     } } }));
-    _ = try fixture.apply(run, fixture.atGroup(17, .{ .identity = 7002, .payload = .{ .host_activation_revoked = .{
-        .strategy_identity = authorization.strategy_identity,
-        .activation_identity = authorization.host_activation_identity,
-        .reason = .control,
-    } } }));
+    try std.testing.expectEqual(@as(u128, 0), run.shard.strategyAuthority(authorization.strategy_identity).host_activation_identity);
     _ = try fixture.apply(run, fixture.atGroup(18, .{ .identity = 7003, .payload = .{ .safety_gate_change = .{
         .gate_identity = 0x7711,
         .target_identity = run.shard.operational_state.target_identity,

@@ -505,12 +505,15 @@ class InstanceManager:
             previous = dict(previous, config_versions=versions, config_transition=progress)
             # Reserve candidate session generations before a child can start.
             previous["host_generation"] = max(r.get("host_generation", 0) for r in self._records.values()) + 1
+            package.uint(previous["host_generation"])
             self._save(previous)
             candidate = InstanceManager(self.directory / (identity + "-config-" + str(binding["config_version"]) + "-" + operation[:16]),
                                         self.releases, self.source)
             begun = False
+            snapshot_ok = False
             try:
                 snapshot, _ = self._exchange(identity, dict(checkpoint=True))
+                snapshot_ok = True
                 previous = dict(previous, checkpoint=snapshot["checkpoint"])
                 self._save(previous)
                 result = candidate._run(binding, previous, transition=request["transition"], generation=previous["host_generation"])
@@ -526,8 +529,14 @@ class InstanceManager:
                     self._save(dict(previous, config_transition=progress))
                     host = candidate._hosts[identity]
                     begun = True
-                    response = self.source.authority.request(dict(native, operation=op, evidence=dict(
-                        host_generation=result["host_generation"], cursor=host["cursor"], next_input_batch=host["next_input_batch"])))
+                    try:
+                        response = self.source.authority.request(dict(native, operation=op, evidence=dict(
+                            host_generation=result["host_generation"], cursor=host["cursor"], next_input_batch=host["next_input_batch"])))
+                    except package.PackageError as error:
+                        # These native guards precede the first durable pause.
+                        if op == "begin_config" and str(error) in ("ReadyBarrierMismatch", "VenueReconciliationUnavailable", "InvalidConfigTransition"):
+                            begun = False
+                        raise
                     _, outputs = candidate._exchange(identity, response["host_command"])
                     package.require(not outputs, "config catch-up produced unauthorized output")
                 snapshot, _ = candidate._exchange(identity, dict(checkpoint=True))
@@ -543,7 +552,7 @@ class InstanceManager:
                 return result
             except (OSError, ValueError, KeyError, RuntimeError) as error:
                 progress = dict(progress, status="unknown" if begun else "rejected", reason=str(error)[:2048])
-                if begun:
+                if begun or not snapshot_ok:
                     self._fail(identity, dict(previous, config_transition=progress), str(error))
                 else:
                     self._save(dict(previous, config_transition=progress))

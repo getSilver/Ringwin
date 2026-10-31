@@ -205,6 +205,8 @@ class WebInstanceTests(unittest.TestCase):
 
     def setUp(self):
         package_release.PackageReleaseTests.setUp(self)
+        # Bundle verification and up to two Host warmups precede the HTTP result.
+        self.client.timeout = 30
         default = ROOT / ("zig-out/bin/ringwin-strategy-candidate.exe" if os.name == "nt"
                           else ".scratch/build/candidate-linux/bin/ringwin-strategy-candidate")
         self.engine = Path(os.environ.get("RINGWIN_CANDIDATE_ENGINE", default))
@@ -536,6 +538,41 @@ class WebInstanceTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(body["instances"][0]["config_transition"]["status"], "unknown")
         self.assertEqual(self.recover()[0], 400)
+
+    def test_stale_candidate_barrier_does_not_revoke_the_active_host(self):
+        authority = self.native_authority()
+        self.install(transitions={"Keep": {"mutable_config_fields": ["warmup_events"], "rebuild_state_fields": []}})
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        self.assertEqual(self.instance_command("enable_trading")[0], 200)
+        identity = self.binding["strategy_identity"]
+        old_cursor = authority.request(dict(operation="status", strategy_identity=identity))["cursor"]
+        self.source.batches = (self.node_batch(old_cursor, 1),)
+        authority.request(dict(operation="advance"))
+        status, body = self.update_config()
+        self.assertEqual(status, 200, body)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["result"]["status"], "Trading", body)
+        self.assertEqual(body["result"]["config_transition"]["status"], "rejected")
+        self.assertTrue(authority.request(dict(operation="status", strategy_identity=identity))["trading_authorized"])
+
+    def test_current_host_checkpoint_failure_revokes_instead_of_preserving_trading(self):
+        authority = self.native_authority()
+        code = OBSERVER.replace(b'    def snapshot(self):', b'''    def snapshot(self):
+        if self.events > 1:
+            raise ValueError("checkpoint callback failed")''')
+        self.install(code, transitions={"Keep": {"mutable_config_fields": ["warmup_events"], "rebuild_state_fields": []}})
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        self.assertEqual(self.instance_command("enable_trading")[0], 200)
+        identity = self.binding["strategy_identity"]
+        first = authority.request(dict(operation="status", strategy_identity=identity))["cursor"] + 1
+        cursor = authority.request(dict(operation="advance"))["cursor"]
+        self.instances.deliver(identity, self.node_batch(cursor, first))
+        self.source.batches = (self.node_batch(cursor, 1),)
+        status, body = self.update_config()
+        self.assertEqual(status, 200, body)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["result"]["status"], "Stopped", body)
+        self.assertFalse(authority.request(dict(operation="status", strategy_identity=identity))["trading_authorized"])
 
     def test_enable_applies_real_barrier_then_actual_package_output_reaches_native_core_and_pause_revokes(self):
         authority = self.native_authority()

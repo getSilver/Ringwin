@@ -58,11 +58,12 @@ def build() -> dict:
 class Client:
     def __init__(self, port: int):
         self.port = port
+        self.timeout = 10
         self.token = None
         self.csrf = ""
 
     def call(self, method: str, path: str, body=None) -> tuple:
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=self.timeout)
         headers = {"Content-Type": "application/json"}
         if self.token:
             headers["Cookie"] = f"{control_plane_web.SESSION_COOKIE}={self.token}"
