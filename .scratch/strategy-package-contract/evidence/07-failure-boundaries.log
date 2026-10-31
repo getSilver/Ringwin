@@ -1,0 +1,72 @@
+test_stale_candidate_barrier_does_not_revoke_the_active_host (test_strategy_instance.WebInstanceTests) ... ERROR
+D:\Program Files\miniconda3\lib\unittest\case.py:614: ResourceWarning: unclosed <socket.socket fd=868, family=AddressFamily.AF_INET, type=SocketKind.SOCK_STREAM, proto=0, laddr=('127.0.0.1', 56144), raddr=('127.0.0.1', 56132)>
+  outcome.errors.clear()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 56144)
+Traceback (most recent call last):
+  File "D:\Program Files\miniconda3\lib\socketserver.py", line 683, in process_request_thread
+    self.finish_request(request, client_address)
+  File "D:\Program Files\miniconda3\lib\socketserver.py", line 360, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "D:\Program Files\miniconda3\lib\socketserver.py", line 747, in __init__
+    self.handle()
+  File "D:\Program Files\miniconda3\lib\http\server.py", line 435, in handle
+    self.handle_one_request()
+  File "D:\Program Files\miniconda3\lib\http\server.py", line 401, in handle_one_request
+    self.raw_requestline = self.rfile.readline(65537)
+  File "D:\Program Files\miniconda3\lib\socket.py", line 704, in readinto
+    return self._sock.recv_into(b)
+ConnectionResetError: [WinError 10054] 远程主机强迫关闭了一个现有的连接。
+----------------------------------------
+test_current_host_checkpoint_failure_revokes_instead_of_preserving_trading (test_strategy_instance.WebInstanceTests) ... ERROR
+D:\Program Files\miniconda3\lib\unittest\case.py:614: ResourceWarning: unclosed <socket.socket fd=640, family=AddressFamily.AF_INET, type=SocketKind.SOCK_STREAM, proto=0, laddr=('127.0.0.1', 56167), raddr=('127.0.0.1', 56157)>
+  outcome.errors.clear()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+----------------------------------------
+
+Exception occurred during processing of request from ('127.0.0.1', 56167)
+======================================================================
+ERROR: test_stale_candidate_barrier_does_not_revoke_the_active_host (test_strategy_instance.WebInstanceTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\github\Ringwin-strategy-package-03\python\test_strategy_instance.py", line 543, in test_stale_candidate_barrier_does_not_revoke_the_active_host
+    self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+  File "D:\github\Ringwin-strategy-package-03\python\test_strategy_instance.py", line 277, in create
+    return self.client.call("POST", "/api/strategy-instances", dict(self.binding, **changes))
+  File "D:\github\Ringwin-strategy-package-03\python\verify_control_plane_wave.py", line 72, in call
+    response = conn.getresponse()
+  File "D:\Program Files\miniconda3\lib\http\client.py", line 1377, in getresponse
+    response.begin()
+  File "D:\Program Files\miniconda3\lib\http\client.py", line 320, in begin
+    version, status, reason = self._read_status()
+  File "D:\Program Files\miniconda3\lib\http\client.py", line 281, in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+  File "D:\Program Files\miniconda3\lib\socket.py", line 704, in readinto
+    return self._sock.recv_into(b)
+socket.timeout: timed out
+
+======================================================================
+ERROR: test_current_host_checkpoint_failure_revokes_instead_of_preserving_trading (test_strategy_instance.WebInstanceTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\github\Ringwin-strategy-package-03\python\test_strategy_instance.py", line 562, in test_current_host_checkpoint_failure_revokes_instead_of_preserving_trading
+    self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+  File "D:\github\Ringwin-strategy-package-03\python\test_strategy_instance.py", line 277, in create
+    return self.client.call("POST", "/api/strategy-instances", dict(self.binding, **changes))
+  File "D:\github\Ringwin-strategy-package-03\python\verify_control_plane_wave.py", line 72, in call
+    response = conn.getresponse()
+  File "D:\Program Files\miniconda3\lib\http\client.py", line 1377, in getresponse
+    response.begin()
+  File "D:\Program Files\miniconda3\lib\http\client.py", line 320, in begin
+    version, status, reason = self._read_status()
+  File "D:\Program Files\miniconda3\lib\http\client.py", line 281, in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+  File "D:\Program Files\miniconda3\lib\socket.py", line 704, in readinto
+    return self._sock.recv_into(b)
+socket.timeout: timed out
+
+----------------------------------------------------------------------
+Ran 2 tests in 45.521s
+
+FAILED (errors=2)

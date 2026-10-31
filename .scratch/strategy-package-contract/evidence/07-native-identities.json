@@ -1,0 +1,67 @@
+{
+  "observed_source_commit": "e500d76e2bf50dc49ec750b54a2e48056ea6caec",
+  "zig": "0.17.0-dev.315+5b647b792",
+  "files": {
+    "python/strategy_instance.py": {
+      "sha256": "e4236fb0d7732496351d5100bf80b415150f34a360972b0806eff2536e67254d",
+      "bytes": 42801
+    },
+    "python/strategy_candidate_host.py": {
+      "sha256": "afd5be3e2541b23b1380b54f23fdab649dc3f1fe25375385a7043c17c9dde48e",
+      "bytes": 18892
+    },
+    "python/strategy_api.py": {
+      "sha256": "49ee162298046aa13323bf00f9adcfd0c5e29830237c7fefe8ce666b46b7a234",
+      "bytes": 2754
+    },
+    "python/strategy_host.py": {
+      "sha256": "a8b3d3c213f5c1c027a65fde7332294688bf831879fee2472ed451908ac3ed65",
+      "bytes": 39194
+    },
+    "python/control_plane_web.py": {
+      "sha256": "cbd940e812ec9ceda6cdeaa101ac4df79f4f6543e8ae0151bb0392403061f74f",
+      "bytes": 29500
+    },
+    "src/strategy/strategy_candidate.zig": {
+      "sha256": "95deec44cf6b949b349938be92aef5bf6453925fcaf9ad939e6101025f75c528",
+      "bytes": 17282
+    },
+    "src/strategy/strategy_package_authority.zig": {
+      "sha256": "977455cfa88592c5982b05fdd85b03f3f67cb926b4e0c2d258bf4a33165f6d31",
+      "bytes": 17622
+    },
+    "src/strategy/strategy_host_lifecycle.zig": {
+      "sha256": "abd65a597f717cd60fb0a93d127b770b97e696cc43acfac1dcc478686dd9115c",
+      "bytes": 44492
+    },
+    "src/strategy_authority_probe.zig": {
+      "sha256": "5f2b25ac3aef70aa6077c0e7ad25a19fe491eeeb320e23a4827cc6057c2b12a9",
+      "bytes": 9062
+    },
+    "src/trading/trading_shard.zig": {
+      "sha256": "ba351dcf35bf2de0826dbc65501c48187aa7819de76fbd2963bbe8a721858255",
+      "bytes": 571511
+    },
+    "src/testing/regression/trading_shard_tests.zig": {
+      "sha256": "96bf6725d6629b877c8d759dd98c9c0b6c285f4c2948fddedb1d966aef4cb88e",
+      "bytes": 236047
+    },
+    "zig-out/bin/ringwin-strategy-candidate.exe": {
+      "sha256": "6abb8beff5b1e54c40ea76d23bacb14b73f6bfc304fa3abb82cd79121781ab4d",
+      "bytes": 3403264
+    },
+    "zig-out/bin/ringwin-strategy-authority-probe.exe": {
+      "sha256": "da7f92c45c95e055267f7cb1664482f150b84f109d47bd7206d3bef075f83e2d",
+      "bytes": 40811008
+    },
+    "zig-out/bin/ringwin.exe": {
+      "sha256": "acff8e5ec1422498f85575ad182fb5f8185d9c6c05938b813eb6ad87cbed967a",
+      "bytes": 89166848
+    }
+  },
+  "core_test_binary": {
+    "path": ".zig-cache/o/a6c92da2d3b2946479554b5694a488ea/test.exe",
+    "sha256": "aa21a205feeebab6f61eede927042aa97b032bd7e6b206a1258ab8f8d5e4221f",
+    "bytes": 154286592
+  }
+}

@@ -1,0 +1,12 @@
+test_web_keep_updates_same_instance_and_requires_explicit_enable (test_strategy_instance.WebInstanceTests) ... [enqueue 1f95d87eb20] enable_trading -> pending will be 1
+[enqueue 1f95d87eb20] enable_trading -> pending will be 1
+ok
+test_rebuild_retains_sequence_cycle_deadline_and_latch_and_recovers_new_config (test_strategy_instance.WebInstanceTests) ... ok
+test_new_config_validate_rejects_insufficient_warmup_without_revocation (test_strategy_instance.WebInstanceTests) ... ok
+test_rebuild_cannot_clear_retained_management_latch (test_strategy_instance.WebInstanceTests) ... ok
+test_interrupted_cutover_cannot_recover_the_old_config_as_current (test_strategy_instance.WebInstanceTests) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 55.101s
+
+OK

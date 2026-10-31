@@ -1,0 +1,19 @@
+test_config_rejections_preserve_active_host_and_bind_version_content (test_strategy_instance.WebInstanceTests) ... [enqueue 2d81365fa00] enable_trading -> pending will be 1
+ok
+test_new_config_validate_rejects_insufficient_warmup_without_revocation (test_strategy_instance.WebInstanceTests) ... FAIL
+test_rebuild_cannot_reset_intent_sequence (test_strategy_instance.WebInstanceTests) ... ok
+test_live_order_blocks_cutover_and_revokes_without_clearing_history (test_strategy_instance.WebInstanceTests) ... [enqueue 2d814b3eb20] enable_trading -> pending will be 1
+ok
+
+======================================================================
+FAIL: test_new_config_validate_rejects_insufficient_warmup_without_revocation (test_strategy_instance.WebInstanceTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\github\Ringwin-strategy-package-03\python\test_strategy_instance.py", line 472, in test_new_config_validate_rejects_insufficient_warmup_without_revocation
+    self.assertIn("CandidateNotReady", body["result"]["config_transition"]["reason"])
+AssertionError: 'CandidateNotReady' not found in 'candidate Host failed (exit None): ValueError: warmup data insufficient\r\nerror: EndOfStream\n'
+
+----------------------------------------------------------------------
+Ran 4 tests in 56.580s
+
+FAILED (failures=1)

@@ -1,7 +1,7 @@
 # 07：同实例参数更新与 Keep/Rebuild
 
 Type: task
-Status: in-progress
+Status: resolved
 Assignee: Codex
 Blocked by: [06 显式 EnableTrading 接通策略输出与核心准入](06-enable-trading.md)
 Parent: [模块地图](../map.md)
@@ -18,11 +18,11 @@ Parent: [模块地图](../map.md)
 
 ## 完成条件
 
-- [ ] 新ConfigVersion绑定认证配置字节及完整摘要；相同版本不同内容拒绝，实例与定义身份不变。
-- [ ] Keep按声明兼容规则验证新旧依赖，使用新配置create、旧payload restore、无权追赶和validate；恢复不能覆盖新配置。
-- [ ] 同实例Rebuild仅支持在策略合同中可通过现有API表达的保留与重建规则；不能保留意图序号和管理进度时明确拒绝。
-- [ ] 成功切换保留原意图序号空间、存量管理进度和风险锁存，不放宽原周期目标或期限；切换后停在Ready等待显式启用。
-- [ ] 验收兼容Keep、受支持Rebuild及不支持转换的拒绝路径，Web展示转换方式和结果；v1拒绝Migrate。
+- [x] 新ConfigVersion绑定认证配置字节及完整摘要；相同版本不同内容拒绝，实例与定义身份不变。
+- [x] Keep按声明兼容规则验证新旧依赖，使用新配置create、旧payload restore、无权追赶和validate；恢复不能覆盖新配置。
+- [x] 同实例Rebuild仅支持在策略合同中可通过现有API表达的保留与重建规则；不能保留意图序号和管理进度时明确拒绝。
+- [x] 成功切换保留原意图序号空间、存量管理进度和风险锁存，不放宽原周期目标或期限；切换后停在Ready等待显式启用。
+- [x] 验收兼容Keep、受支持Rebuild及不支持转换的拒绝路径，Web展示转换方式和结果；v1拒绝Migrate。
 
 ## Answer / 实现证据
 
@@ -36,5 +36,9 @@ Parent: [模块地图](../map.md)
 - 原生单 Writer 提交既有 VersionActivationEvent，在该权威事实内更新同实例配置权限。核心经济状态、序号历史与安全锁存不重置；旧配置的品种交易权限不被自动继承为新配置授权。候选实际应用切换事实并持久发布新配置 checkpoint 后停在 Ready；必须另行 EnableTrading，仍受既有全部安全条件约束。
 - Web 展示转换方式、进度、结果和失败原因。未知或失败结果不展示成功；中断于排空/提交阶段的记录在重启时保持 unknown，必须先确认原生实际版本，不能猜测回滚或复权。
 
-验证结果与最终状态在完成全量测试及双轴复审后补齐。此票不执行凭证访问、真实 Venue/Demo 下单、发布或部署；Windows 离线证据不授予 Linux 或生产资格。
+### 2026-10-31 验收与边界
+
+Windows Python 最终全量316项：302通过、14平台skip，exit 0；ReleaseSafe核心822/822、3/3步骤成功，exit 0。核心专项2/2、正常构建9/9、原生验收节点构建3/3，UI与静态检查通过；Standards与Spec双轴复审均0项剩余发现。实现提交 `cc81feee`、`a32761af`，测试封口修正 `e500d76e`。详见[验证说明](../evidence/07-validation.md)，保留客户端超时、测试夹具修正和中断的整波证据，不将其冒充通过。
+
+07 resolved并移出Frontier，08仍可接手但未认领，地图保持open。此票未访问真实凭证、执行真实 Venue/Demo 下单或实际部署；Windows离线证据不授予Linux资源、断电耐久性或生产资格。当前排空仍影响整个DecisionDomain；未知切换结果保持无权，须先确认原生实际版本。
 
