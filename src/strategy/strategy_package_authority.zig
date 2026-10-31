@@ -5,6 +5,7 @@ const trading = @import("../trading/trading_shard.zig");
 const gateway = @import("strategy_host_gateway.zig");
 const ipc = @import("strategy_host_ipc.zig");
 const channel = @import("../control_channel.zig");
+const cutover = @import("../runtime/recovery_cutover.zig");
 
 pub const Authority = struct {
     shard: *trading.TradingShard,
@@ -21,6 +22,7 @@ pub const Authority = struct {
     bridge: ?gateway.Gateway = null,
     applied: bool = false,
     last_cursor: u64 = 0,
+    reconciliation: ?*const fn (*anyopaque) anyerror!cutover.VenueEvidence = null,
 
     const Request = struct {
         operation: []const u8,
@@ -29,6 +31,11 @@ pub const Authority = struct {
         batch: []const u8 = "",
         frame: []const u8 = "",
         cursor: u64 = 0,
+        config_version: u64 = 0,
+        definition_identity: []const u8 = "",
+        state_schema_version: u32 = 0,
+        transition: []const u8 = "",
+        operation_identity: []const u8 = "",
         evidence: ?struct { host_generation: u64, cursor: u64, next_input_batch: u64 } = null,
     };
 
@@ -42,7 +49,60 @@ pub const Authority = struct {
         if (value.strategy_identity.len != 32 or try std.fmt.parseInt(u128, value.strategy_identity, 16) != self.strategy)
             return error.StrategyIdentityMismatch;
         const op = value.operation;
-        if (std.mem.eql(u8, op, "control")) {
+        if (std.mem.eql(u8, op, "begin_config") or std.mem.eql(u8, op, "commit_config")) {
+            if (value.config_version <= self.config_version or value.state_schema_version == 0 or
+                (!std.mem.eql(u8, value.transition, "Keep") and !std.mem.eql(u8, value.transition, "Rebuild"))) return error.InvalidConfigTransition;
+            const evidence = value.evidence orelse return error.ReadyEvidenceRequired;
+            if (evidence.host_generation == 0 or evidence.next_input_batch == 0 or evidence.cursor != self.shard.authoritativeBarrier()) return error.ReadyBarrierMismatch;
+            const reconcile = self.reconciliation orelse return error.VenueReconciliationUnavailable;
+            if (value.operation_identity.len != 32 or value.definition_identity.len != 32) return error.InvalidConfigTransition;
+            const identity = try std.fmt.parseInt(u128, value.operation_identity, 16);
+            const definition = try std.fmt.parseInt(u128, value.definition_identity, 16);
+            if (identity == 0 or definition == 0) return error.InvalidConfigTransition;
+            if (std.mem.eql(u8, op, "begin_config")) {
+                try self.commit(self.context, .{ .control_command = .{
+                    .command_identity = identity,
+                    .content_hash = identity,
+                    .target_identity = self.decision_domain,
+                    .expected_version = self.shard.operational_state.version,
+                    .expires_at = std.math.maxInt(u64),
+                    .kind = .trading_pause,
+                } });
+                try self.revokeFor(.control);
+            }
+            if (self.applied or self.shard.strategyAuthority(self.strategy).host_activation_identity != 0 or
+                self.shard.operational_state.effectiveTradingAuthority()) return error.ConfigTransitionNotQuiesced;
+            var drain: cutover.Cutover = .{ .phase = .quiescing };
+            const venue = try reconcile(self.context);
+            try drain.drain(self.shard, venue);
+            if (std.mem.eql(u8, op, "begin_config")) {
+                try self.commit(self.context, .{ .lifecycle_progress = .{
+                    .operation_identity = identity,
+                    .target_identity = self.decision_domain,
+                    .open_orders_closed = true,
+                    .reconciliation_complete = true,
+                    .position_quantity = venue.portfolio_quantity,
+                } });
+            }
+            if (std.mem.eql(u8, op, "commit_config")) {
+                try self.commit(self.context, .{ .version_activation = .{
+                    .activation_identity = identity,
+                    .generation = self.shard.release_generation + 1,
+                    .old_release = self.shard.active_release,
+                    .new_release = if (self.shard.active_release == 0) 1 else self.shard.active_release,
+                    .old_strategy_instance = self.shard.active_strategy_instance,
+                    .new_strategy_instance = self.strategy,
+                    .strategy_definition = definition,
+                    .parameter_version = value.config_version,
+                    .state_schema_version = value.state_schema_version,
+                    .transition = if (std.mem.eql(u8, value.transition, "Keep")) .keep else .rebuild,
+                    .barrier = self.shard.authoritativeBarrier() + 1,
+                    .canonical_state_digest = self.shard.canonicalStateDigest(),
+                } });
+                self.config_version = value.config_version;
+            }
+            return self.configBatch(gpa, evidence.host_generation, evidence.next_input_batch, evidence.cursor, io);
+        } else if (std.mem.eql(u8, op, "control")) {
             var envelope: [channel.envelope_len]u8 = undefined;
             if (value.envelope.len != envelope.len * 2) return error.InvalidEnvelope;
             _ = try std.fmt.hexToBytes(&envelope, value.envelope);
@@ -162,14 +222,33 @@ pub const Authority = struct {
     }
 
     pub fn revoke(self: *Authority) !void {
+        try self.revokeFor(.fault);
+    }
+
+    fn revokeFor(self: *Authority, reason: @import("../trading/trading_shard_event.zig").HostRevocationReason) !void {
         const authority = self.shard.strategyAuthority(self.strategy);
         if (authority.host_activation_identity != 0) try self.commit(self.context, .{ .host_activation_revoked = .{
             .strategy_identity = self.strategy,
             .activation_identity = authority.host_activation_identity,
-            .reason = .fault,
+            .reason = reason,
         } });
         if (self.bridge) |*bridge| bridge.beginRecovery();
         self.applied = false;
+    }
+
+    fn configBatch(self: *Authority, gpa: std.mem.Allocator, generation: u64, number: u64, cursor: u64, io: std.Io) ![]u8 {
+        self.bridge = try gateway.Gateway.init(.{
+            .schema_registry = self.schema_registry,
+            .decision_domain = self.decision_domain,
+            .session = .{ .fencing = self.fencing, .shard = self.shard_id, .generation = generation },
+            .authorization = .{ .strategy_identity = self.strategy, .config_version = self.config_version, .activation_identity = 0, .activation_barrier = 0 },
+        }, &.{gateway.Subscription.of(self.strategy, &.{ .mark_price, .l2_snapshot, .l2_delta, .timer, .account, .fill, .depth_snapshot })});
+        var storage: [128]u8 = undefined;
+        if (number > 1) try self.bridge.?.recordPublished(number - 1, cursor, @intCast(std.Io.Clock.awake.now(io).nanoseconds));
+        const batch = try self.bridge.?.encodeBatch(&storage, number, cursor + 1, self.shard.authoritativeBarrier(), @intCast(std.Io.Clock.awake.now(io).nanoseconds), &.{});
+        const hex = try std.fmt.allocPrint(gpa, "{x}", .{batch});
+        defer gpa.free(hex);
+        return std.json.Stringify.valueAlloc(gpa, .{ .host_command = .{ .batch = hex, .max_outputs = self.max_outputs } }, .{});
     }
 
     fn status(self: *Authority, gpa: std.mem.Allocator) ![]u8 {
@@ -181,6 +260,7 @@ pub const Authority = struct {
             .orders = self.shard.oms.order_count,
             .commands = self.shard.oms.command_history_count,
             .last_rejection = @tagName(self.shard.last_reject_reason),
+            .config_version = authority.strategy_config_version,
         }, .{});
     }
 };

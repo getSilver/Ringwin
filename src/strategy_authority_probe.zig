@@ -18,6 +18,15 @@ const Node = struct {
     fn journal(self: *Node) *trading.journal.Journal {
         return if (self.joint) |owner| &owner.decision_journal else &self.run.decision_journal;
     }
+    fn reconcile(context: *anyopaque) !@import("runtime/recovery_cutover.zig").VenueEvidence {
+        const self: *Node = @ptrCast(@alignCast(context));
+        // Offline fixture observation only; production must supply actual Venue evidence.
+        const Recovery = @import("runtime/recovery_cutover.zig").RecoveryCoordinator;
+        const recovery = try std.heap.page_allocator.create(Recovery);
+        defer std.heap.page_allocator.destroy(recovery);
+        Recovery.beginInto(recovery, self.shard(), self.shard().authoritativeBarrier());
+        return recovery.expectedVenueEvidence();
+    }
     fn commit(context: *anyopaque, payload: trading.CorePayload) !void {
         const self: *Node = @ptrCast(@alignCast(context));
         var input = fixture.atGroup(if (self.joint != null) 45 else 15, .{ .identity = self.shard().authoritativeBarrier() + 1, .payload = payload });
@@ -77,6 +86,7 @@ pub fn main(init: std.process.Init) !void {
         .fencing = 1,
         .shard_id = 1,
         .max_outputs = 4,
+        .reconciliation = Node.reconcile,
     };
     defer authority.revoke() catch {};
     const venue = try init.gpa.create(simulated.SimulatedVenue);

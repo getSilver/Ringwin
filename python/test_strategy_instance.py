@@ -122,6 +122,46 @@ GROUP_TRADER = OBSERVER.replace(b'return ()', b'''first = OrderIntent(self.next_
         self.next_intent_sequence += 2
         return (IntentGroup((first, second)),)''')
 
+MANAGED_TRADER = OBSERVER + b'''
+class Managed(Observer):
+    def __init__(self, context, config):
+        super().__init__(context, config)
+        self.window = []
+        self.cycle_target = 100
+        self.deadline = 50
+        self.risk_latched = True
+    def on_event(self, event):
+        self.events += 1
+        self.window = (self.window + [event.sequence])[-self.required:]
+        intent = OrderIntent(self.next_intent_sequence, 1, 2, 3, "buy", "gtc", False, 100, 50100000000)
+        self.next_intent_sequence += 1
+        return (intent,)
+    def snapshot(self):
+        return json.dumps(dict(events=self.events, next_intent_sequence=self.next_intent_sequence,
+            window=self.window, cycle_target=self.cycle_target, deadline=self.deadline,
+            risk_latched=self.risk_latched), sort_keys=True, separators=(",", ":")).encode()
+    def restore(self, data):
+        state = json.loads(data)
+        self.events = state["events"]
+        self.next_intent_sequence = state["next_intent_sequence"]
+        self.cycle_target = state["cycle_target"]
+        self.deadline = state["deadline"]
+        self.risk_latched = state["risk_latched"]
+        self.window = state["window"][-self.required:]
+    def validate(self):
+        super().validate()
+        if len(self.window) > self.required:
+            raise ValueError("restored configuration overwritten")
+
+def create(context, config):
+    return Managed(context, config)
+'''
+
+MANAGED_FIELDS = [dict(name="window", type="bounded_array", maximum=100, items="u64", rebuildable=True),
+                  dict(name="cycle_target", type="u64", unit="quantity", minimum=1, maximum=100),
+                  dict(name="deadline", type="u64", unit="canonical_events", minimum=1, maximum=50),
+                  dict(name="risk_latched", type="bool", unit="latch")]
+
 
 class NativeAuthorityTransportTests(unittest.TestCase):
     def test_stalled_reader_cannot_hold_native_pipe_beyond_write_deadline(self):
@@ -178,7 +218,7 @@ class WebInstanceTests(unittest.TestCase):
         self.addCleanup(self.instances.close)
         self.app.instance_manager = self.instances
 
-    def install(self, code=OBSERVER, limit_changes=None, state_fields=()):
+    def install(self, code=OBSERVER, limit_changes=None, state_fields=(), transitions=None):
         files, policy = bundle_files()
         runtime = {"ringwin": b"synthetic engine; this acceptance executes only the real candidate adapter and Host",
                    strategy_instance.CANDIDATE_PATH: self.engine.read_bytes()}
@@ -206,6 +246,10 @@ class WebInstanceTests(unittest.TestCase):
         files[f"strategies/{DEFINITION}/contracts/config.json"] = canonical(dict(
             fields=[dict(name="warmup_events", type="u64", unit="canonical_events", minimum=1, maximum=100)],
             unknown_fields="reject", missing_fields="reject", encoding="canonical_json"))
+        if transitions is not None:
+            contract = json.loads(files[f"strategies/{DEFINITION}/contracts/config.json"])
+            contract["transitions"] = transitions
+            files[f"strategies/{DEFINITION}/contracts/config.json"] = canonical(contract)
         files[f"strategies/{DEFINITION}/contracts/state.json"] = canonical(dict(
             fields=[dict(name="events", type="u64", unit="canonical_events", minimum=0, maximum=2**64 - 1),
                     dict(name="next_intent_sequence", type="u64", unit="intent_sequence", minimum=1, maximum=2**64 - 1),
@@ -301,6 +345,197 @@ class WebInstanceTests(unittest.TestCase):
         batch = bytes.fromhex(command["host_command"]["batch"])
         self.assertEqual(int.from_bytes(batch[72:80], "little"), 1)
         self.assertFalse(authority.request(dict(operation="status", strategy_identity=identity))["trading_authorized"])
+
+    def test_web_keep_updates_same_instance_and_requires_explicit_enable(self):
+        authority = self.native_authority()
+        self.install(transitions={"Keep": {"mutable_config_fields": ["warmup_events"],
+                                           "rebuild_state_fields": []}})
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        identity = self.binding["strategy_identity"]
+        self.assertEqual(self.instance_command("enable_trading")[0], 200)
+        first = authority.request(dict(operation="status", strategy_identity=identity))["cursor"] + 1
+        cursor = authority.request(dict(operation="advance"))["cursor"]
+        self.instances.deliver(identity, self.node_batch(cursor, first))
+        # The node owns complete authoritative coverage, including activation facts.
+        cursor = authority.request(dict(operation="status", strategy_identity=identity))["cursor"]
+        self.source.batches = (self.node_batch(cursor, 1),)
+        config = '{"warmup_events":2}'
+        request = dict(operation="update_config", strategy_identity=identity, expected_config_version=1,
+                       config_version=2, config_json=config,
+                       config_sha256=hashlib.sha256(config.encode()).hexdigest(), transition="Keep")
+        status, body = self.client.call("POST", "/api/strategy-instances", request)
+        self.assertEqual(status, 200, body)
+        result = body["result"]
+        self.assertEqual(result["status"], "Ready", result)
+        self.assertFalse(result["trading_authorized"])
+        self.assertEqual(result["binding"]["strategy_identity"], identity)
+        self.assertEqual(result["binding"]["definition_identity"], DEFINITION)
+        self.assertEqual(result["binding"]["config_version"], 2)
+        self.assertEqual(result["evidence"]["next_intent_sequence"], 1)
+        self.assertEqual(result["config_transition"]["status"], "completed")
+        state = authority.request(dict(operation="status", strategy_identity=identity))
+        self.assertEqual(state["config_version"], 2)
+        self.assertFalse(state["trading_authorized"])
+        self.assertEqual(self.client.call("POST", "/api/strategy-instances", request), (200, body))
+        self.assertEqual(self.instance_command("enable_trading")[0], 200)
+
+    def update_config(self, version=2, config='{"warmup_events":1}', method="Keep", expected=1):
+        return self.client.call("POST", "/api/strategy-instances", dict(operation="update_config",
+            strategy_identity=self.binding["strategy_identity"], expected_config_version=expected,
+            config_version=version, config_json=config, config_sha256=hashlib.sha256(config.encode()).hexdigest(),
+            transition=method))
+
+    @staticmethod
+    def checkpoint_state(record):
+        for path in Path(record["checkpoint_directory"]).iterdir():
+            if path.is_file():
+                content = path.read_bytes()
+                offset = content.find(b"QSSC")
+                while offset >= 0:
+                    size = int.from_bytes(content[offset + 12:offset + 16], "little")
+                    container = content[offset:offset + size]
+                    offset = content.find(b"QSSC", offset + 4)
+                    if len(container) < 192:
+                        continue
+                    try:
+                        metadata, payload = strategy_host.decode_payload_checkpoint(container)
+                    except ValueError:
+                        continue
+                    if (metadata["config_version"] == record["binding"]["config_version"]
+                            and metadata["cursor"] == record["checkpoint"]["cursor"]):
+                        return json.loads(payload)
+        raise AssertionError("published private state absent")
+
+    def test_rebuild_retains_sequence_cycle_deadline_and_latch_and_recovers_new_config(self):
+        authority = self.native_authority()
+        self.install(MANAGED_TRADER, state_fields=MANAGED_FIELDS,
+            transitions={"Rebuild": {"mutable_config_fields": ["warmup_events"], "rebuild_state_fields": ["window"]}})
+        config = '{"warmup_events":3}'
+        cursor = authority.request(dict(operation="status", strategy_identity=self.binding["strategy_identity"]))["cursor"]
+        parts = []
+        for n, sequence in enumerate(range(cursor - 2, cursor + 1), 1):
+            part = bytearray(self.node_batch(sequence, 1 if n == 1 else sequence))
+            struct.pack_into("<Q", part, 72, n)
+            struct.pack_into("<I", part, 124, strategy_host.crc32c(part[:124] + part[128:]))
+            parts.append(bytes(part))
+        self.source.batches = tuple(parts)
+        initial = self.create(config_json=config, config_sha256=hashlib.sha256(config.encode()).hexdigest())[1]["result"]
+        self.assertEqual(initial["status"], "Ready", initial)
+        self.assertEqual(initial["evidence"]["next_intent_sequence"], 4)
+        status, body = self.update_config(method="Rebuild")
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["ok"], body)
+        result = body["result"]
+        self.assertEqual(result["evidence"]["next_intent_sequence"], 4)
+        state = self.checkpoint_state(result)
+        self.assertEqual(state, dict(events=3, next_intent_sequence=4, window=[cursor], cycle_target=100,
+                                     deadline=50, risk_latched=True))
+        self.assertFalse(authority.request(dict(operation="status", strategy_identity=self.binding["strategy_identity"]))["trading_authorized"])
+        self.instances.close()
+        self.source.batches = (self.node_batch(result["evidence"]["cursor"], 1),)
+        self.instances = strategy_instance.InstanceManager(self.root / "instances", self.manager, self.source)
+        self.addCleanup(self.instances.close)
+        self.app.instance_manager = self.instances
+        recovered = self.recover()[1]["result"]
+        self.assertEqual(recovered["status"], "Ready", recovered)
+        self.assertEqual(recovered["binding"]["config_version"], 2)
+        self.assertEqual(recovered["evidence"]["next_intent_sequence"], 4)
+
+    def test_config_rejections_preserve_active_host_and_bind_version_content(self):
+        authority = self.native_authority()
+        self.install(transitions={"Keep": {"mutable_config_fields": [], "rebuild_state_fields": []}})
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        self.assertEqual(self.instance_command("enable_trading")[0], 200)
+        identity = self.binding["strategy_identity"]
+        cursor = authority.request(dict(operation="status", strategy_identity=identity))["cursor"]
+        self.source.batches = (self.node_batch(cursor, 1),)
+        for method in ("Migrate", "bogus"):
+            self.assertEqual(self.update_config(method=method)[0], 400)
+        for method, config in (("Keep", '{"warmup_events":2}'), ("Rebuild", '{"warmup_events":1}')):
+            status, body = self.update_config(version=2 if method == "Keep" else 3, config=config, method=method)
+            self.assertEqual(status, 200, body)
+            self.assertFalse(body["ok"], body)
+            self.assertEqual(body["result"]["status"], "Trading", body)
+            self.assertEqual(body["result"]["binding"]["config_version"], 1)
+            self.assertEqual(body["result"]["config_transition"]["status"], "rejected")
+            self.assertTrue(authority.request(dict(operation="status", strategy_identity=identity))["trading_authorized"])
+        self.assertEqual(self.update_config(version=2, config='{"warmup_events":3}')[0], 400)
+
+    def test_new_config_validate_rejects_insufficient_warmup_without_revocation(self):
+        authority = self.native_authority()
+        self.install(transitions={"Keep": {"mutable_config_fields": ["warmup_events"], "rebuild_state_fields": []}})
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        status, body = self.update_config(config='{"warmup_events":2}')
+        self.assertEqual(status, 200, body)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["result"]["status"], "Ready")
+        self.assertIn("warmup data insufficient", body["result"]["config_transition"]["reason"])
+        self.assertEqual(authority.request(dict(operation="status", strategy_identity=self.binding["strategy_identity"]))["config_version"], 1)
+
+    def test_rebuild_cannot_reset_intent_sequence(self):
+        self.native_authority()
+        self.install(MANAGED_TRADER.replace(b'self.next_intent_sequence = state["next_intent_sequence"]',
+            b'self.next_intent_sequence = 1 if self.required == 2 else state["next_intent_sequence"]'),
+            state_fields=MANAGED_FIELDS,
+            transitions={"Rebuild": {"mutable_config_fields": ["warmup_events"], "rebuild_state_fields": ["window"]}})
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        status, body = self.update_config(config='{"warmup_events":2}', method="Rebuild")
+        self.assertEqual(status, 200, body)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["result"]["status"], "Ready")
+        self.assertEqual(body["result"]["binding"]["config_version"], 1)
+
+    def test_live_order_blocks_cutover_and_revokes_without_clearing_history(self):
+        authority = self.native_authority()
+        self.install(TRADER, transitions={"Keep": {"mutable_config_fields": ["warmup_events"], "rebuild_state_fields": []}})
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        self.assertEqual(self.instance_command("enable_trading")[0], 200)
+        identity = self.binding["strategy_identity"]
+        first = authority.request(dict(operation="status", strategy_identity=identity))["cursor"] + 1
+        cursor = authority.request(dict(operation="advance"))["cursor"]
+        self.assertEqual(self.instances.deliver(identity, self.node_batch(cursor, first))[0]["orders"], 1)
+        cursor = authority.request(dict(operation="status", strategy_identity=identity))["cursor"]
+        self.source.batches = (self.node_batch(cursor, 1),)
+        status, body = self.update_config()
+        self.assertEqual(status, 200, body)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["result"]["status"], "Stopped", body)
+        self.assertIn("CutoverDrainIncomplete", body["result"]["reason"])
+        native = authority.request(dict(operation="status", strategy_identity=identity))
+        self.assertFalse(native["trading_authorized"])
+        self.assertEqual(native["config_version"], 1)
+        self.assertEqual(native["orders"], 1)
+        self.assertEqual(self.recover()[0], 400)
+
+    def test_rebuild_cannot_clear_retained_management_latch(self):
+        self.native_authority()
+        self.install(MANAGED_TRADER.replace(b'self.risk_latched = state["risk_latched"]',
+            b'self.risk_latched = False if self.required == 2 else state["risk_latched"]'),
+            state_fields=MANAGED_FIELDS,
+            transitions={"Rebuild": {"mutable_config_fields": ["warmup_events"], "rebuild_state_fields": ["window"]}})
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        status, body = self.update_config(config='{"warmup_events":2}', method="Rebuild")
+        self.assertEqual(status, 200, body)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["result"]["status"], "Ready")
+        self.assertIn("Rebuild lost management progress", body["result"]["config_transition"]["reason"])
+
+    def test_interrupted_cutover_cannot_recover_the_old_config_as_current(self):
+        self.native_authority()
+        self.install()
+        original = self.create()[1]["result"]
+        self.assertEqual(original["status"], "Ready")
+        self.instances.close()
+        interrupted = dict(original, config_transition=dict(status="committing", to_version=2))
+        with self.instances.path.open("ab") as handle:
+            handle.write(canonical(interrupted) + b"\n")
+        self.instances = strategy_instance.InstanceManager(self.root / "instances", self.manager, self.source)
+        self.addCleanup(self.instances.close)
+        self.app.instance_manager = self.instances
+        status, body = self.client.call("GET", "/api/strategy-instances")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["instances"][0]["config_transition"]["status"], "unknown")
+        self.assertEqual(self.recover()[0], 400)
 
     def test_enable_applies_real_barrier_then_actual_package_output_reaches_native_core_and_pause_revokes(self):
         authority = self.native_authority()

@@ -38,7 +38,7 @@ Status: open
 
 ## Frontier
 
-- [07 同实例参数更新与 Keep/Rebuild](issues/07-config-transition.md)：06已完成，可接手；尚未认领或实施。
+- [07 同实例参数更新与 Keep/Rebuild](issues/07-config-transition.md)：Codex在指定统一工作树实施中；验收完成前保持未关闭。
 - [08 代码替换与 ForwardRollback 创建 StrategySuccessor](issues/08-successor-rollback.md)：06已完成，可接手；尚未认领或实施。
 
 每次只认领一张Frontier票。尚未实施票的ready-for-agent表示票已可供接手，仍须满足各票Blocked by；其余票在依赖完成前不属于Frontier。

@@ -43,6 +43,33 @@ def validated_snapshot(instance, manifest):
     return state
 
 
+def config_transition(root, manifest, old_binding, binding, method):
+    """Only signed, explicit same-definition rules can authorize state reuse."""
+    package.require(method in ("Keep", "Rebuild"), "unsupported transition; v1 rejects Migrate")
+    contract = package.parse_json((root / manifest["config_schema"]["path"]).read_bytes())
+    rules = contract.get("transitions", {}).get(method)
+    package.fields(rules, {"mutable_config_fields", "rebuild_state_fields"})
+    old = package.parse_json(old_binding["config_json"].encode("ascii"))
+    new = package.parse_json(binding["config_json"].encode("ascii"))
+    declared = {f["name"] for f in contract["fields"]}
+    mutable, rebuilt = rules["mutable_config_fields"], rules["rebuild_state_fields"]
+    package.require(type(mutable) is list and all(type(k) is str for k in mutable)
+                    and len(set(mutable)) == len(mutable) and set(mutable) <= declared,
+                    "invalid transition config dependency rules")
+    package.require(type(old) is dict and type(new) is dict and old.keys() == new.keys() == declared,
+                    "transition config dependencies mismatch")
+    package.require(all(old[k] == new[k] for k in declared - set(mutable)), "incompatible config dependencies")
+    state_contract = package.parse_json((root / manifest["state_schema"]["path"]).read_bytes())
+    state_fields = {f["name"] for f in state_contract["fields"]}
+    package.require(type(rebuilt) is list and all(type(k) is str for k in rebuilt)
+                    and len(set(rebuilt)) == len(rebuilt) and set(rebuilt) <= state_fields,
+                    "invalid rebuild state rules")
+    package.require(set(rebuilt) <= {f["name"] for f in state_contract["fields"] if f.get("rebuildable") is True},
+                    "Rebuild may change only explicitly rebuildable state")
+    package.require(method != "Keep" or not rebuilt, "Keep cannot rebuild state")
+    return state_fields, set(rebuilt)
+
+
 def run(request_path):
     request = package.parse_json(Path(request_path).read_bytes())
     binding, manifest = request["binding"], request["manifest"]
@@ -81,20 +108,34 @@ def run(request_path):
     for name in ("on_event", "snapshot", "restore", "validate"):
         package.require(callable(getattr(instance, name, None)), "missing fixed API: " + name)
     cursor = 0
+    transition = request.get("transition")
+    state_fields, rebuilt = (set(), set())
+    if transition:
+        state_fields, rebuilt = config_transition(root, manifest, request["previous_binding"], binding, transition)
     if request["recover"]:
         container = payload[8:]
         metadata, state = bridge.decode_payload_checkpoint(container)
         package.require(len(container) >= 192 and metadata == dict(
             schema_registry=bridge.SCHEMA_REGISTRY, strategy=int(context.strategy_identity, 16),
             definition=int(context.definition_identity, 16), state_schema=int(context.state_schema_identity, 16),
-            state_schema_version=context.state_schema_version, config_version=context.config_version,
+            state_schema_version=context.state_schema_version,
+            config_version=request["previous_binding"]["config_version"] if transition else context.config_version,
             cursor=metadata["cursor"], next_intent=metadata["next_intent"])
                         and metadata["cursor"] >= request["checkpoint_cursor"], "checkpoint identity mismatch")
         package.require(len(state) <= manifest["limits"]["max_private_state_bytes"], "private state capacity")
         package.parse_json(state)
-        package.require(instance.restore(state) is None and instance.snapshot() == state
-                        and type(instance.next_intent_sequence) is int
+        package.require(instance.restore(state) is None and type(instance.next_intent_sequence) is int
                         and instance.next_intent_sequence == metadata["next_intent"], "checkpoint restore mismatch")
+        restored_state = instance.snapshot()
+        if transition == "Rebuild":
+            old_state, new_state = package.parse_json(state), package.parse_json(restored_state)
+            package.require(type(old_state) is dict and type(new_state) is dict
+                            and old_state.keys() == new_state.keys() == state_fields,
+                            "Rebuild state contract mismatch")
+            package.require(all(old_state[k] == new_state[k] for k in state_fields - rebuilt),
+                            "Rebuild lost management progress")
+        else:
+            package.require(restored_state == state, "checkpoint restore mismatch")
         cursor = metadata["cursor"]
     else:
         package.require(len(payload) == 8 and instance.next_intent_sequence == 1
@@ -166,6 +207,20 @@ def run(request_path):
         kind, actual, sequence, payload = bridge.read_frame(sys.stdin.buffer)
         package.require(actual == session and sequence == incoming, "invalid runtime session or sequence")
         incoming += 1
+        if kind == bridge.REQUEST_CHECKPOINT:
+            package.require(len(payload) == 16, "invalid checkpoint request")
+            checkpoint_request, checkpoint_cursor = struct.unpack("<QQ", payload)
+            package.require(checkpoint_request > 0 and checkpoint_cursor == cursor, "checkpoint cursor mismatch")
+            state = validated_snapshot(instance, manifest)
+            container = bridge.encode_payload_checkpoint(dict(
+                schema_registry=bridge.SCHEMA_REGISTRY, strategy=int(context.strategy_identity, 16),
+                definition=int(context.definition_identity, 16), state_schema=int(context.state_schema_identity, 16),
+                state_schema_version=context.state_schema_version, config_version=context.config_version,
+                cursor=cursor, next_intent=instance.next_intent_sequence), state)
+            bridge.write_frame(sys.stdout.buffer, bridge.CHECKPOINT_CONTENT, session, outgoing,
+                               struct.pack("<Q", checkpoint_request) + container)
+            outgoing += 1
+            continue
         if kind == bridge.SHUTDOWN:
             bridge.write_frame(sys.stdout.buffer, bridge.SHUTDOWN_ACK, session, outgoing)
             return

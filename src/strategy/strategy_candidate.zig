@@ -19,6 +19,8 @@ const Request = struct {
     checkpoint_directory: []const u8,
     recover: bool,
     checkpoint_cursor: u64,
+    source_checkpoint_directory: ?[]const u8 = null,
+    source_config_version: ?u64 = null,
     binding: struct {
         strategy_identity: []const u8,
         definition_identity: []const u8,
@@ -85,7 +87,7 @@ pub fn run(init: std.process.Init, request_path: []const u8) !void {
     }
     defer adapter.close(init.io);
     const repository = try checkpoints.Repository.init(adapter.interface(), 800, .{ 801, 802 });
-    if (!request.recover) try repository.initialize(init.io);
+    if (!request.recover or request.source_checkpoint_directory != null) try repository.initialize(init.io);
     var expected: codec.Metadata = .{
         .schema_registry = try hexIdentity(request.manifest.compatibility.schema_registry),
         .strategy_instance = try hexIdentity(request.binding.strategy_identity),
@@ -97,13 +99,25 @@ pub fn run(init: std.process.Init, request_path: []const u8) !void {
         .next_intent_sequence = 1,
     };
     var checkpoint: []const u8 = &.{};
+    const source_adapter = try init.gpa.create(durable.LinuxFileAdapter);
+    defer init.gpa.destroy(source_adapter);
+    source_adapter.* = .{ .dir = undefined };
+    var source_open = false;
+    defer if (source_open) source_adapter.close(init.io);
     if (request.recover) {
-        const published = (try repository.latest(init.io)) orelse return error.NoPublishedCheckpoint;
+        const source_repository = if (request.source_checkpoint_directory) |directory| blk: {
+            if (builtin.os.tag == .windows) try source_adapter.initWindowsVerification(init.io, directory) else try source_adapter.initLinux(init.io, directory);
+            source_open = true;
+            break :blk try checkpoints.Repository.init(source_adapter.interface(), 800, .{ 801, 802 });
+        } else repository;
+        const published = (try source_repository.latest(init.io)) orelse return error.NoPublishedCheckpoint;
         if (published.metadata.strategy_cursor < request.checkpoint_cursor or
             published.metadata.strategy_cursor > request.barrier) return error.CheckpointBarrierMismatch;
         expected.strategy_cursor = published.metadata.strategy_cursor;
         expected.next_intent_sequence = published.metadata.next_intent_sequence;
-        checkpoint = try repository.restore(init.io, expected);
+        var source_expected = expected;
+        source_expected.strategy_config_version = request.source_config_version orelse expected.strategy_config_version;
+        checkpoint = try source_repository.restore(init.io, source_expected);
         if (checkpoint.len > 192 + request.manifest.limits.max_private_state_bytes) return error.CheckpointTooLarge;
     }
     var output_buffer: [512]u8 = undefined;
@@ -224,12 +238,27 @@ pub fn run(init: std.process.Init, request_path: []const u8) !void {
                 if (command_bytes.len == 0) break;
                 const Command = struct {
                     activation: ?struct { identity: []const u8, barrier: u64, state_digest: []const u8 } = null,
-                    batch: []const u8,
-                    max_outputs: u64,
+                    batch: []const u8 = "",
+                    max_outputs: u64 = 0,
+                    checkpoint: bool = false,
                 };
                 const command = try std.json.parseFromSlice(Command, init.gpa, command_bytes, .{});
                 defer command.deinit();
                 const value = command.value;
+                if (value.checkpoint) {
+                    expected.strategy_cursor = host.last_input_cursor.?;
+                    const checkpoint_request = host.last_checkpoint_request + 1;
+                    try host.requestCurrentCheckpoint(init.io, checkpoint_request, expected);
+                    const current = try host.receiveCheckpoint(init.io, storage);
+                    expected.next_intent_sequence = std.mem.readInt(u64, current[104..112], .little);
+                    const validated = try codec.decodePayloadCheckpoint(current, expected);
+                    const saved = try repository.publish(init.io, current, expected);
+                    const content = std.fmt.bytesToHex(saved.content_identity, .lower);
+                    const state_digest = std.fmt.bytesToHex(validated.state_digest, .lower);
+                    try output.interface.print("{{\"cursor\":{d},\"outputs\":0,\"next_intent_sequence\":{d},\"state_digest\":\"{s}\",\"checkpoint\":{{\"cursor\":{d},\"publication\":{d},\"content_identity\":\"{s}\"}}}}\n", .{ expected.strategy_cursor, expected.next_intent_sequence, state_digest, expected.strategy_cursor, saved.sequence, content });
+                    try output.interface.flush();
+                    continue;
+                }
                 if (value.activation) |activation| {
                     var activation_digest: [32]u8 = undefined;
                     _ = try std.fmt.hexToBytes(&activation_digest, activation.state_digest);

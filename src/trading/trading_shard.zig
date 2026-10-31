@@ -4963,6 +4963,16 @@ pub const TradingShard = struct {
             activation.barrier != try std.math.add(u64, self.authoritativeBarrier(), 1) or
             !std.mem.eql(u8, &activation.canonical_state_digest, &self.canonicalStateDigest()))
             return error.InvalidVersionActivation;
+        var strategy = self.strategyAuthority(activation.new_strategy_instance);
+        if (strategy.strategy_active and activation.parameter_version != strategy.strategy_config_version) {
+            if (activation.parameter_version <= strategy.strategy_config_version or
+                activation.transition == .migrate or strategy.host_activation_identity != 0 or
+                self.operational_state.effectiveTradingAuthority() or !self.oms.openOrdersClosed())
+                return error.InvalidConfigTransition;
+            strategy.strategy_config_version = activation.parameter_version;
+            strategy.strategy_activation_fact_sequence = activation.barrier;
+            try self.storeStrategyAuthority(strategy);
+        }
         self.release_generation = activation.generation;
         self.active_release = activation.new_release;
         self.active_strategy_instance = activation.new_strategy_instance;

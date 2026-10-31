@@ -33,6 +33,54 @@ const resolveLatchCommand = fixture.resolveLatchCommand;
 const startScenario = fixture.startScenario;
 const startScenarioAuthorized = fixture.startScenarioAuthorized;
 const applyLive = engine.applyStable;
+
+test "same instance parameter activation preserves economics and latches through stable replay" {
+    const run = try std.testing.allocator.create(LiveRun);
+    defer std.testing.allocator.destroy(run);
+    try fixture.initializedBenchmarkRunInto(run);
+    const authorization = run.shard.strategyAuthority(run.shard.strategy_identity);
+    _ = try fixture.apply(run, fixture.atGroup(16, .{ .identity = 7001, .payload = .{ .control_command = .{
+        .command_identity = 7001,
+        .content_hash = 7001,
+        .target_identity = run.shard.operational_state.target_identity,
+        .expected_version = run.shard.operational_state.version,
+        .expires_at = std.math.maxInt(u64),
+        .kind = .trading_pause,
+    } } }));
+    _ = try fixture.apply(run, fixture.atGroup(17, .{ .identity = 7002, .payload = .{ .host_activation_revoked = .{
+        .strategy_identity = authorization.strategy_identity,
+        .activation_identity = authorization.host_activation_identity,
+        .reason = .control,
+    } } }));
+    _ = try fixture.apply(run, fixture.atGroup(18, .{ .identity = 7003, .payload = .{ .safety_gate_change = .{
+        .gate_identity = 0x7711,
+        .target_identity = run.shard.operational_state.target_identity,
+        .kind = .latched,
+        .reason = .observability,
+        .open = false,
+    } } }));
+    const economics = run.shard.captureLifecycleEconomics();
+    const operational_before = run.shard.operational_state;
+    _ = try fixture.apply(run, fixture.atGroup(19, .{ .identity = 7004, .payload = .{ .version_activation = .{
+        .activation_identity = 7004,
+        .generation = 1,
+        .old_release = 0,
+        .new_release = 1,
+        .old_strategy_instance = 0,
+        .new_strategy_instance = authorization.strategy_identity,
+        .strategy_definition = 3,
+        .parameter_version = 2,
+        .state_schema_version = 1,
+        .transition = .keep,
+        .barrier = run.shard.authoritativeBarrier() + 1,
+        .canonical_state_digest = run.shard.canonicalStateDigest(),
+    } } }));
+    try std.testing.expectEqual(@as(u64, 2), run.shard.strategyAuthority(authorization.strategy_identity).strategy_config_version);
+    try std.testing.expectEqualDeep(operational_before, run.shard.operational_state);
+    try std.testing.expectEqualDeep(economics, run.shard.captureLifecycleEconomics());
+    try std.testing.expect(!run.shard.operational_state.effectiveTradingAuthority());
+    _ = try fixture.assertReplayEquivalent(run);
+}
 const happyPathVenueFacts = fixture.happyVenueFacts;
 const snapshotAt = fixture.snapshotAt;
 const deltaAt = fixture.deltaAt;

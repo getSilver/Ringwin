@@ -588,7 +588,7 @@ pub const ManagedHost = struct {
     supervisor: HostSupervisor,
     next_input_batch: u64 = 1,
     last_input_cursor: ?u64 = null,
-    checkpoint_request: ?struct { identity: u64, expected: checkpoint_codec.Metadata } = null,
+    checkpoint_request: ?struct { identity: u64, expected: checkpoint_codec.Metadata, advanced: bool = false } = null,
     last_checkpoint_request: u64 = 0,
 
     pub fn start(
@@ -710,6 +710,16 @@ pub const ManagedHost = struct {
 
     /// Request an exact input boundary, never a partially updated model state.
     pub fn requestCheckpoint(self: *ManagedHost, io: std.Io, identity: u64, expected: checkpoint_codec.Metadata) !void {
+        return self.requestCheckpointBounded(io, identity, expected, false);
+    }
+
+    /// Runtime callbacks validate contiguous allocation; checkpoint may advance
+    /// beyond the last published next sequence, but may never regress it.
+    pub fn requestCurrentCheckpoint(self: *ManagedHost, io: std.Io, identity: u64, minimum: checkpoint_codec.Metadata) !void {
+        return self.requestCheckpointBounded(io, identity, minimum, true);
+    }
+
+    fn requestCheckpointBounded(self: *ManagedHost, io: std.Io, identity: u64, expected: checkpoint_codec.Metadata, advanced: bool) !void {
         if (identity <= self.last_checkpoint_request) return error.StaleCheckpointRequest;
         if (self.checkpoint_request != null or
             (self.supervisor.state != .recovered and self.supervisor.state != .active))
@@ -721,7 +731,7 @@ pub const ManagedHost = struct {
         put(u64, &payload, 8, expected.strategy_cursor);
         try writePipeParts(self.child.stdin.?, io, .request_checkpoint, self.supervisor.plan.session, self.supervisor.next_zig_sequence, &payload);
         self.supervisor.next_zig_sequence += 1;
-        self.checkpoint_request = .{ .identity = identity, .expected = expected };
+        self.checkpoint_request = .{ .identity = identity, .expected = expected, .advanced = advanced };
         self.last_checkpoint_request = identity;
     }
 
@@ -739,7 +749,14 @@ pub const ManagedHost = struct {
             !self.supervisor.validatesEnvelope(.checkpoint, decoded.session))
             return error.InvalidCheckpointResponse;
         const container = decoded.payload[8..];
-        _ = try checkpoint_codec.decodePayloadCheckpoint(container, pending.expected);
+        var expected = pending.expected;
+        if (pending.advanced) {
+            if (container.len < 192) return error.InvalidCheckpoint;
+            const next = get(u64, container, 104);
+            if (next < expected.next_intent_sequence) return error.CheckpointMismatch;
+            expected.next_intent_sequence = next;
+        }
+        _ = try checkpoint_codec.decodePayloadCheckpoint(container, expected);
         self.supervisor.next_host_sequence += 1;
         self.checkpoint_request = null;
         return container;

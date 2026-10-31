@@ -284,6 +284,8 @@ class InstanceManager:
                 self._records[record["binding"]["strategy_identity"]] = record
         # Loading a record cannot restore a process or reuse Ready authority.
         for record in self._records.values():
+            if record.get("config_transition", {}).get("status") in ("draining", "committing"):
+                record["config_transition"].update(status="unknown", reason="interrupted cutover; reconcile native version before recovery")
             if record["status"] in ("Ready", "Recovering", "Trading"):
                 record.update(status="Stopped", reason="Host absent; checkpoint recovery required", trading_authorized=False)
 
@@ -357,7 +359,8 @@ class InstanceManager:
                 else:
                     package.require(not pending and response["outputs"] == len(frames), "runtime response mismatch")
                     host["cursor"] = response["cursor"]
-                    host["next_input_batch"] += 1
+                    if not command.get("checkpoint"):
+                        host["next_input_batch"] += 1
                     return response, frames
 
     def control(self, identity, command, key):
@@ -452,6 +455,8 @@ class InstanceManager:
             self.view()
             package.require(identity in self._records, "unknown strategy instance")
             previous = self._records[identity]
+            package.require(previous.get("config_transition", {}).get("status") != "unknown",
+                            "config cutover result unknown; reconcile native version before recovery")
             package.require(identity not in self._hosts, "stop the existing Host before recovery")
             try:
                 return self._run(previous["binding"], previous)
@@ -460,7 +465,95 @@ class InstanceManager:
                 self._save(record)
                 return record
 
-    def _run(self, binding, previous=None):
+    def update_config(self, request):
+        package.fields(request, {"operation", "strategy_identity", "expected_config_version", "config_version",
+                                 "config_json", "config_sha256", "transition"})
+        package.identity(request["strategy_identity"])
+        package.uint(request["expected_config_version"])
+        package.uint(request["config_version"])
+        package.digest(request["config_sha256"])
+        package.require(request["transition"] in ("Keep", "Rebuild"), "unsupported transition; v1 rejects Migrate")
+        package.require(type(request["config_json"]) is str, "configuration must contain canonical JSON bytes")
+        config = request["config_json"].encode("ascii")
+        package.parse_json(config)
+        package.require(len(config) <= 64 * 1024 and hashlib.sha256(config).hexdigest() == request["config_sha256"],
+                        "config digest or capacity mismatch")
+        identity = request["strategy_identity"]
+        operation = hashlib.sha256(package.canonical(request)).hexdigest()
+        with self._lock, self.releases._lock:
+            self.view()
+            package.require(identity in self._records, "unknown strategy instance")
+            previous = self._records[identity]
+            if previous.get("config_transition", {}).get("request_sha256") == operation:
+                return previous
+            old = previous["binding"]
+            versions = dict(previous.get("config_versions", {}))
+            versions[str(old["config_version"])] = old["config_sha256"]
+            known = versions.get(str(request["config_version"]))
+            package.require(known is not None or len(versions) < 1024, "ConfigVersion history capacity exceeded")
+            package.require(known is None or known == request["config_sha256"], "ConfigVersion content conflict")
+            package.require(request["expected_config_version"] == old["config_version"], "current ConfigVersion conflict")
+            package.require(request["config_version"] > old["config_version"], "ConfigVersion must advance")
+            package.require(identity in self._hosts and previous["status"] in ("Ready", "Trading"), "instance must be Ready or Trading")
+            package.require(self.source.authority is not None, "native node authority unavailable")
+            binding = dict(old, **{k: request[k] for k in ("config_version", "config_json", "config_sha256")})
+            package.require(len(package.canonical(binding)) <= 64 * 1024, "binding capacity exceeded")
+            versions[str(request["config_version"])] = request["config_sha256"]
+            progress = dict(method=request["transition"], request_sha256=operation, status="validating",
+                            from_version=old["config_version"], to_version=binding["config_version"],
+                            affected_scope="DecisionDomain", reason="")
+            previous = dict(previous, config_versions=versions, config_transition=progress)
+            # Reserve candidate session generations before a child can start.
+            previous["host_generation"] = max(r.get("host_generation", 0) for r in self._records.values()) + 1
+            self._save(previous)
+            candidate = InstanceManager(self.directory / (identity + "-config-" + str(binding["config_version"]) + "-" + operation[:16]),
+                                        self.releases, self.source)
+            begun = False
+            try:
+                snapshot, _ = self._exchange(identity, dict(checkpoint=True))
+                previous = dict(previous, checkpoint=snapshot["checkpoint"])
+                self._save(previous)
+                result = candidate._run(binding, previous, transition=request["transition"], generation=previous["host_generation"])
+                previous["host_generation"] = result["host_generation"]
+                self._save(previous)
+                package.require(result["status"] == "Ready", result["reason"])
+                native = dict(strategy_identity=identity, config_version=binding["config_version"],
+                              definition_identity=binding["definition_identity"],
+                              state_schema_version=result["state_schema_version"], transition=request["transition"],
+                              operation_identity=operation[:32])
+                for op in ("begin_config", "commit_config"):
+                    progress = dict(progress, status="draining" if op == "begin_config" else "committing")
+                    self._save(dict(previous, config_transition=progress))
+                    host = candidate._hosts[identity]
+                    begun = True
+                    response = self.source.authority.request(dict(native, operation=op, evidence=dict(
+                        host_generation=result["host_generation"], cursor=host["cursor"], next_input_batch=host["next_input_batch"])))
+                    _, outputs = candidate._exchange(identity, response["host_command"])
+                    package.require(not outputs, "config catch-up produced unauthorized output")
+                snapshot, _ = candidate._exchange(identity, dict(checkpoint=True))
+                self._stop(identity)
+                self._hosts[identity] = candidate._hosts.pop(identity)
+                result.update(checkpoint=snapshot["checkpoint"], config_versions=versions,
+                              config_transition=dict(progress, status="completed"))
+                result["evidence"].update(cursor=snapshot["cursor"], next_intent_sequence=snapshot["next_intent_sequence"],
+                                          state_digest=snapshot["state_digest"],
+                                          next_input_batch=self._hosts[identity]["next_input_batch"])
+                result["recovery"].update(cursor=snapshot["cursor"], barrier=snapshot["cursor"])
+                self._save(result)
+                return result
+            except (OSError, ValueError, KeyError, RuntimeError) as error:
+                progress = dict(progress, status="unknown" if begun else "rejected", reason=str(error)[:2048])
+                if begun:
+                    self._fail(identity, dict(previous, config_transition=progress), str(error))
+                else:
+                    self._save(dict(previous, config_transition=progress))
+                return self._records[identity]
+            finally:
+                # Uncommitted candidates never touch the old Host's native authority.
+                for candidate_identity in list(candidate._hosts):
+                    candidate._stop(candidate_identity)
+
+    def _run(self, binding, previous=None, *, transition=None, generation=None):
         identity = binding["strategy_identity"]
         package.require(not self._hosts, "single candidate Host capacity; multiple instances require ticket 10")
         cursor = previous.get("checkpoint", {}).get("cursor", 0) if previous else 0
@@ -470,11 +563,18 @@ class InstanceManager:
                             for b in batches), "canonical input schema registry mismatch")
         package.require(memory_enforcement_available(str(root / lock["python_path"])),
                         "candidate hard address-space limit enforcement is unavailable or unverified; loading is unavailable")
-        generation = max((r.get("host_generation", r.get("evidence", {}).get("host_generation", 0))
-                          for r in self._records.values()), default=0) + 1
+        if generation is None:
+            generation = max([r.get("host_generation", r.get("evidence", {}).get("host_generation", 0))
+                              for r in self._records.values()] + [previous.get("host_generation", 0) if previous else 0]) + 1
         package.uint(generation)
         record = dict(binding=binding, status="Recovering", reason="", trading_authorized=False,
-                      host_generation=generation, recovery=dict(cursor=cursor, barrier=barrier))
+                      host_generation=generation, recovery=dict(cursor=cursor, barrier=barrier),
+                      checkpoint_directory=str((self.directory / (identity + "-checkpoints")).resolve()),
+                      state_schema_version=manifest["state_schema"]["version"])
+        if previous and not transition:
+            for key in ("checkpoint_directory", "config_versions", "config_transition"):
+                if key in previous:
+                    record[key] = previous[key]
         if previous and "checkpoint" in previous:
             record["checkpoint"] = previous["checkpoint"]
         self._save(record)
@@ -485,9 +585,14 @@ class InstanceManager:
             request = dict(binding=binding, manifest=manifest, package_root=str(root / "strategies" / binding["definition_identity"]),
                            python=str(root / lock["python_path"]), host=str(root / lock["host_path"]),
                            generation=generation, shard=shard, fencing=self.source.fencing, barrier=barrier,
-                           checkpoint_directory=str((self.directory / (identity + "-checkpoints")).resolve()),
+                           checkpoint_directory=record["checkpoint_directory"],
                            recover=previous is not None, checkpoint_cursor=cursor,
                            batches=[batch.hex() for batch in batches])
+            if transition:
+                request.update(transition=transition, previous_binding=previous["binding"],
+                               source_config_version=previous["binding"]["config_version"],
+                               source_checkpoint_directory=previous.get("checkpoint_directory",
+                                   str((self.directory.parent / (identity + "-checkpoints")).resolve())))
             data = package.canonical(request)
             package.require(len(data) <= package.MAX_JSON_BYTES, "candidate request capacity exceeded")
             (work / "request.json").write_bytes(data)
