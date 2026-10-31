@@ -75,6 +75,7 @@ test "same instance parameter activation preserves economics and latches through
     try std.testing.expectEqualDeep(operational_before, run.shard.operational_state);
     try std.testing.expectEqualDeep(economics, run.shard.captureLifecycleEconomics());
     try std.testing.expect(!run.shard.operational_state.effectiveTradingAuthority());
+    try run.decision_journal.seal();
     _ = try fixture.assertReplayEquivalent(run);
 }
 const happyPathVenueFacts = fixture.happyVenueFacts;
