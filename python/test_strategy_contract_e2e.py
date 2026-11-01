@@ -47,7 +47,10 @@ class PythonLifecycleTests(unittest.TestCase):
     def test_python_install_recover_enable_keep_replace_and_forward_rollback(self):
         authority = self.native_authority()
         transitions = {'Keep': dict(mutable_config_fields=['warmup_events'], rebuild_state_fields=[])}
-        self.install(transitions=transitions)
+        # Lifecycle smoke includes durable checkpoint I/O; timing limits have separate fault tests.
+        budgets = dict(max_callback_ns=5_000_000_000, max_warmup_ns=30_000_000_000)
+        self.client.timeout = 45
+        self.install(transitions=transitions, limit_changes=budgets)
         packages = self.client.call('GET', '/api/releases')[1]['strategy_packages']
         self.assertEqual(len(packages), 1)
         self.assertEqual(packages[0]['qualifications'], [])
@@ -96,7 +99,7 @@ class PythonLifecycleTests(unittest.TestCase):
             cursor = authority.request(dict(operation='status', strategy_identity=old['strategy_identity']))['cursor']
             self.source.batches = (self.node_batch(cursor, 1),)
             if operation == 'replace':
-                self.install(definition=definition, artifact=artifact, transitions=transitions)
+                self.install(definition=definition, artifact=artifact, transitions=transitions, limit_changes=budgets)
             else:
                 rollback = self.deploy(self.root / 'candidate-a.json', identity='11002',
                                        expected='candidate-b', kind='forward_rollback')
