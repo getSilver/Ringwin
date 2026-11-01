@@ -1,0 +1,33 @@
+test_native_install_recover_enable_config_refusal_replace_and_forward_rollback (test_strategy_contract_e2e.NativeLifecycleTests) ... [enqueue 2a773a9f8b0] enable_trading -> pending will be 1
+[enqueue 2a773a9f8b0] trading_pause -> pending will be 1
+[enqueue 2a773a9f8b0] enable_trading -> pending will be 1
+FAIL
+test_python_install_recover_enable_keep_replace_and_forward_rollback (test_strategy_contract_e2e.PythonLifecycleTests) ... [enqueue 2a773a9fca0] enable_trading -> pending will be 1
+[enqueue 2a773a9fca0] enable_trading -> pending will be 1
+FAIL
+
+======================================================================
+FAIL: test_native_install_recover_enable_config_refusal_replace_and_forward_rollback (test_strategy_contract_e2e.NativeLifecycleTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\github\Ringwin-strategy-package-03\python\test_strategy_contract_e2e.py", line 147, in test_native_install_recover_enable_config_refusal_replace_and_forward_rollback
+    self.assertIn('native parameter transitions are not supported', body['error'])
+AssertionError: 400 != 200
+
+======================================================================
+FAIL: test_python_install_recover_enable_keep_replace_and_forward_rollback (test_strategy_contract_e2e.PythonLifecycleTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\github\Ringwin-strategy-package-03\python\test_strategy_contract_e2e.py", line 83, in test_python_install_recover_enable_keep_replace_and_forward_rollback
+    cursor = authority.request(dict(operation='advance'))['cursor']
+  File "D:\github\Ringwin-strategy-package-03\python\test_strategy_instance.py", line 312, in install
+    self.assertEqual(deployed["status"], "activated", deployed)
+AssertionError: 'rejected' != 'activated'
+- rejected
++ activated
+ : {'status': 'rejected', 'reason': 'schema identity and version already names different content', 'active_artifact': 'candidate-a'}
+
+----------------------------------------------------------------------
+Ran 2 tests in 172.326s
+
+FAILED (failures=2)

@@ -1,0 +1,22 @@
+test_bundle_requires_the_exact_manifest_digest_confirmed_by_the_owner (test_strategy_contract_e2e.WindowsPublicationTests) ... ok
+test_invalid_signed_packages_do_not_install_or_register (test_strategy_contract_e2e.WindowsPublicationTests) ... ok
+test_missing_result_history_keeps_complete_registry_and_blocks_new_publication (test_strategy_contract_e2e.WindowsPublicationTests) ... ok
+test_new_definition_cannot_redefine_a_published_schema_identity_and_version (test_strategy_contract_e2e.WindowsPublicationTests) ... ERROR
+test_release_registry_identity_must_match_the_approved_bundle_runtime (test_strategy_contract_e2e.WindowsPublicationTests) ... ok
+test_result_storage_fault_reports_unknown_without_partial_registration (test_strategy_contract_e2e.WindowsPublicationTests) ... ok
+test_signed_release_tampering_and_missing_index_fail_before_install (test_strategy_contract_e2e.WindowsPublicationTests) ... ok
+test_strategy_binaries_and_cache_are_not_runtime_dependencies (test_strategy_contract_e2e.WindowsPublicationTests) ... ok
+test_web_restart_retries_once_and_reports_version_and_identity_conflicts (test_strategy_contract_e2e.WindowsPublicationTests) ... ok
+
+======================================================================
+ERROR: test_new_definition_cannot_redefine_a_published_schema_identity_and_version (test_strategy_contract_e2e.WindowsPublicationTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\github\Ringwin-strategy-package-03\python\test_strategy_package_release.py", line 427, in test_new_definition_cannot_redefine_a_published_schema_identity_and_version
+    self.assertEqual(os.readlink(self.root / "versions" / "current"), "bundle-a")
+OSError: [WinError 4390] 此文件或目录不是一个重分析点。: 'C:\\Users\\X\\AppData\\Local\\Temp\\ringwin-package-7y6j7zrg\\versions\\current'
+
+----------------------------------------------------------------------
+Ran 9 tests in 20.486s
+
+FAILED (errors=1)

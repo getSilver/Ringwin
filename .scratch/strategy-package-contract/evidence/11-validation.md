@@ -2,7 +2,10 @@
 
 验收工作树 `D:/github/Ringwin-strategy-package-03`，分支 `codex/strategy-package-03`。
 实施基线 `1b096a51c2a390bfab3e0223d766265ade482c6f`；冻结被测提交
-`c1911755d691f500b3181eef8182106e43488361`。后续证据提交不改变被测执行源码。
+`906b8d8fe74a7e4c5fcfe07b9bad007128db92a4`。初始冻结
+`c1911755d691f500b3181eef8182106e43488361` 的身份另存
+[11-freeze-initial.json](11-freeze-initial.json)；最终测试配置显式增加连续链的有界时限，
+产品执行源码不变。后续证据提交不改变最终被测执行源码。
 
 ## 身份与复核入口
 
@@ -65,7 +68,7 @@ node tools/verify-strategy-package-ui.cjs
 | 缺 checkpoint/缺口/schema/不兼容 Keep | W `test_missing_checkpoint_and_tail_gap_refuse_empty_restart`、`test_native_reopen_rejects_incompatible_checkpoint_schema`、`test_config_rejections_preserve_active_host_and_bind_version_content` | 05/07；不回退为空状态 |
 | 预热不足/超预算 | W `test_warmup_insufficient_is_a_visible_failure`、`test_warmup_event_budget_exhaustion_is_not_ready`、`test_new_config_validate_rejects_insufficient_warmup_without_revocation` | 04/07 |
 | Migrate/跳号/重复/checkpoint进度 | W config-rejections、`test_discontinuous_sequence_fails_closed`、`test_snapshot_progress_must_match_live_intent_sequence`；核心 supervisor/gateway 序列拒绝 | 04/05/07；不新增 Migrate ABI |
-| 同组合第二获权实例/跨域组 | W `test_risk_warning_and_node_placement_still_reject_unbound_instance_authority`；既有核心授权/组归属检查 | 06/10；跨域组的独立命名反向向量仍须核对，不能仅由成功的域内组推断 |
+| 同组合第二获权实例/跨域组 | W `test_risk_warning_and_node_placement_still_reject_unbound_instance_authority` 实际拒绝额外身份获权；跨域原子组反向运行证据 **not_run** | 06/10；`TradingShard.admitDomainGroup` 的 InvalidDomainScope 检查是源码证据，未找到对应反向运行测试，不由成功的域内组推断通过 |
 | callback异常/超时/输出/内存超限 | W `test_callback_hang_is_killed_by_external_budget`、`test_excessive_diagnostics_are_bounded_and_stop_the_host`、`test_callback_allocation_over_the_hard_limit_stops_the_real_host`、`test_shared_memory_failure_stops_all_members_and_leaves_other_host_ready` | 04/10；Windows Job；Linux资源未取得证据 |
 | 切换后旧会话/旧激活迟到 | W `test_enable_applies_real_barrier_then_actual_package_output_reaches_native_core_and_pause_revokes`、`test_shared_members_emit_their_own_complete_groups_and_late_output_is_rejected` | 06/08/10；实际输出 frame |
 | Unknown/未完成订单/周期不能承接 | W `test_live_order_blocks_cutover_and_revokes_without_clearing_history`、`test_successor_live_order_rejection_does_not_close_or_clear_the_order`、`test_rebuild_retains_sequence_cycle_deadline_and_latch_and_recovers_new_config`；cycle-recovery 五阶段回归 | 07/08；不自动平仓 |
@@ -95,11 +98,23 @@ ADR 0004 的 DurableStore 与原生 checkpoint Repository 仍负责持久化；�
 
 - 发布测试：[11-release-tests.log](11-release-tests.log)，15 项，14 通过、1 POSIX skip，
   [exit 0](11-release-tests-exit.txt)。
-- 连续链：[11-lifecycle-final.log](11-lifecycle-final.log)，2/2 通过，
-  [exit 0](11-lifecycle-final-exit.txt)。
-- 完整冻结 Python 套件：[11-python-windows-full.log](11-python-windows-full.log)，结果待完成；
+- 初始冻结连续链：[11-lifecycle-final.log](11-lifecycle-final.log)，2/2 通过，
+  [exit 0](11-lifecycle-final-exit.txt)；最终预算配置的两条链由最终全量重新执行。
+- 首次完整 Python 套件：[11-python-windows-full.log](11-python-windows-full.log)，343 项，
+  339 通过、1 失败、3 skip，1116.353 秒，[exit 1](11-python-full-exit.txt)，不作为通过。
+- 最终冻结 Python 套件：[11-python-windows-final.log](11-python-windows-final.log)，
+  **343 项，340 通过、3 平台 skip，1095.045 秒，exit 0**，
+  [独立退出码](11-python-final-exit.txt)；
   最终身份/包配置以该日志中的两条 CONTRACT_E2E 为准。
-- UI：[11-ui-check.log](11-ui-check.log)，[exit 0](11-ui-exit.txt)。Python py_compile 通过。
+- UI：[11-ui-check.log](11-ui-check.log)，[exit 0](11-ui-exit.txt)。两个变更测试文件的
+  Python py_compile 及全 python 目录 compileall 通过，[compileall exit 0](11-compile-exit.txt)。
+- 三项 skip 分别是 OwnerSession POSIX 权限位、忽略 RLIMIT_AS 的 Linux 内核反向路径，
+  以及 POSIX current symlink/mode 检查。Windows 实际生命周期/ACL 和 Job 预算由其他
+  已运行用例覆盖；skip 不等于 Linux 通过。
+- 最终日志保留一个 loopback socket ResourceWarning，分配来源未捕获，没有抑制。
+  因此功能通过不构成长时 socket/进程寿命资格。首次全量也保留原始 warning。
+- 全量结束后重新核对 268 个冻结文件全部匹配；两条最终 CONTRACT_E2E JSON 均可解析，
+  Python 11 个步骤、原生 7 个步骤，四个实际签名发布的安装身份完整，最终实例均已撤权。
 - 核心**复用** 10 的 [825/825 原始日志](10-core-tests.log) 与 [exit 0](10-core-exit.txt)，
   本轮没有重跑核心全量。11-freeze 重新哈希核对了确切 test.exe，SHA-256 为
   `582e837e161cfa7098eb622deef55ec818955f189afc22a95f848df9e5c88865`；
@@ -123,13 +138,20 @@ ADR 0004 的 DurableStore 与原生 checkpoint Repository 仍负责持久化；�
 - `11-publication-final`：将 Linux 用例移到 Windows 后，最后一个 POSIX readlink
   断言报 WinError 4390；发布拒绝断言已通过。改用公共 applier 查询后发布全量通过。
   `11-publication-initial` 是先前三个借用用例通过记录，不是最终冻结测试集合。
+- 首次全量的 Python 连续链在首次创建时返回 Stopped，原因是
+  `candidate callback or warmup budget exhausted`，已到 cursor/barrier 28，具体延迟来源
+  未捕获。其余 339 项通过，3 项 skip；同一初始冻结的
+  [独立复跑](11-python-failure-isolated.log)通过，[exit 0](11-python-failure-isolated-exit.txt)。
+  `906b8d8f` 仅把连续链签名夹具配置为 5 秒回调、30 秒预热、45 秒 HTTP；
+  原产品时限校验和专门的超时反向测试不变。此链不作为 1 秒回调或性能资格证明。
 
 ## 审查与结论
 
-Standards / Spec 双轴审查及最终完整套件尚在执行，不提前声明通过。
-11 只交付冻结版本的证据收口；地图在必需实现/验收仍有缺口时保持 open。
+独立 Standards / Spec 双轴审查及预算调整复审均为 0 项可操作发现，原报告见
+[11-review.md](11-review.md)。审查不执行测试；最终完整套件和身份复核已完成。
+11 resolved，仅表示冻结版本的证据收口完成；地图在必需实现/验收仍有缺口时保持 open。
 
-Linux singleton 的实际 RLIMIT_AS 资源验收及共享 Host 总预算实现仍缺失；Windows 结果
+跨域原子组反向运行证据、Linux singleton 的实际 RLIMIT_AS 资源验收及共享 Host 总预算实现仍缺失；Windows 结果
 不代替 Linux。原生观察策略完整日志重建、共享 Host 最多 16 成员及既有有界历史仍是范围
 限制。实际 Venue、Demo/Testnet、节点进程重启/断电/热备耐久、常驻部署、soak、经济与
 production qualification 均为本轮 not_run；未访问凭证、发真实交易或执行生产部署。

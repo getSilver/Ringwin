@@ -4,7 +4,7 @@ Status: open
 
 ## Destination
 
-建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，02票的原生构建合同、静态注册与构建清单及03票的Python包安装登记已交付并通过各自离线验收；04的Windows无权加载及Host资源路径已独立验收，05的Windows checkpoint持久发布与无权重启恢复、06的显式启停与核心/Gateway准入、07的同实例参数更新与Keep/Rebuild、08的代码替换与ForwardRollback创建StrategySuccessor已完成Windows离线验收，09原生统一发布与激活、10多个Python实例与共享Host生命周期已完成Windows离线验收，11仍待实施。Linux Host资源及共享总预算路径单独保留缺口。
+建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，02票的原生构建合同、静态注册与构建清单及03票的Python包安装登记已交付并通过各自离线验收；04的Windows无权加载及Host资源路径已独立验收，05的Windows checkpoint持久发布与无权重启恢复、06的显式启停与核心/Gateway准入、07的同实例参数更新与Keep/Rebuild、08的代码替换与ForwardRollback创建StrategySuccessor已完成Windows离线验收，09原生统一发布与激活、10多个Python实例与共享Host生命周期已完成Windows离线验收，11已完成冻结Windows版本的端到端证据收口。跨DecisionDomain原子组反向运行证据、Linux Host资源及共享总预算路径仍有缺口，地图保持open。
 
 ## Definition of done
 
@@ -38,11 +38,13 @@ Status: open
 
 ## Frontier
 
-- [11 冻结合同落地的端到端验收证据](issues/11-end-to-end-evidence.md)：07/09/10已完成，Codex正在冻结版本、串联生命周期并核对合同证据。
+当前02–11均已resolved，无待认领Frontier。11完成证据收口不关闭跨DecisionDomain原子组反向运行验收与Linux资源实现/验收缺口，地图保持open；缺口详见[11验证说明](evidence/11-validation.md)。
 
 每次只认领一张Frontier票。尚未实施票的ready-for-agent表示票已可供接手，仍须满足各票Blocked by；其余票在依赖完成前不属于Frontier。
 
 ## Decisions so far
+
+- 2026-11-01：11完成冻结版本的端到端证据收口，最终源码 `906b8d8f`，实施 `c1911755`。两条真实Web/node生命周期链与四个签名发布身份、268个源码/测试/工具文件冻结；17类合同向量逐项映射。补齐既有发布测试的Windows执行，最终Python343项340通过3平台skip、exit0，发布专项14通过1skip，UI/静态检查通过，双轴及预算调整复审0项。核心825/825明确复用10的原始全量，源码与确切二进制重新核对一致；本轮未重跑。首次全量的预算失败、全部中间失败与socket warning保留；仅生命周期签名夹具配置为有界5秒回调/30秒预热，不改变产品及超时故障测试限制。详见[11验证说明](evidence/11-validation.md)。11 resolved并移出Frontier；跨DecisionDomain原子组反向运行证据not_run、Linux单实例资源验收及共享总预算实现仍缺失，地图保持open。实际Venue、Demo、节点断电/热备、部署、soak及生产资格不扩张。
 
 - 2026-11-01：10完成Windows多实例共享解释器、按包模块表、独立checkpoint与会话、完整集合SHA-256和Job总提交内存预算；Web展示实际成员与域内切换范围。同节点两个策略绑定分别显式启用、完整IntentGroup输出及迟到拒绝、目标参数/代码替换与其他成员原仓库恢复均有验收。复审发现并修正双管理写死锁、慢候选持父锁与并发停用状态覆盖，三个有界真实Web回归通过。实施 `3dabcab2`、修正 `95c0c043`；最终Python341项327通过14平台skip、ReleaseSafe核心825/825、发布9/9、节点3/3，双轴最终0项；首次失败、日志警告及真实退出码原样保留，详见[10验证说明](evidence/10-validation.md)。10 resolved并移出Frontier，11可接手但未认领；地图保持open。Linux共享总预算路径尚未实现且明确拒绝，不扩张既有Linux资源、真实Venue、部署或生产资格。
 
@@ -74,7 +76,7 @@ Status: open
 
 ## Not yet specified
 
-- 原生构建合同见02票；09已接通统一发布与激活，10已落实Windows多实例Host加载组织、预算映射和聚合摘要，冻结版本的完整端到端证据由11票汇总。Linux共享总预算路径尚未实现，单实例资源验收仍需真正实施RLIMIT_AS的内核，当前WSL1保持拒绝。工期和部署实例尚未指定；合同或构建交付不等于运行资格完成。
+- 原生构建合同见02票；09已接通统一发布与激活，10已落实Windows多实例Host加载组织、预算映射和聚合摘要，11已汇总冻结版本的Windows端到端证据。跨DecisionDomain原子组反向运行证据尚缺。Linux共享总预算路径尚未实现，单实例资源验收仍需真正实施RLIMIT_AS的内核，当前WSL1保持拒绝。工期和部署实例尚未指定；合同或构建交付不等于运行资格完成。
 
 ## Out of scope
 

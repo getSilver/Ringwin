@@ -1,0 +1,20 @@
+test_bundle_requires_the_exact_manifest_digest_confirmed_by_the_owner (test_strategy_package_release.PackageReleaseTests) ... ok
+test_external_signed_scope_evidence_does_not_rewrite_the_package (test_strategy_package_release.PackageReleaseTests) ... ok
+test_invalid_signed_packages_do_not_install_or_register (test_strategy_package_release.PackageReleaseTests) ... ok
+test_missing_result_history_keeps_complete_registry_and_blocks_new_publication (test_strategy_package_release.PackageReleaseTests) ... ok
+test_new_definition_cannot_redefine_a_published_schema_identity_and_version (test_strategy_package_release.PackageReleaseTests) ... ok
+test_release_registry_identity_must_match_the_approved_bundle_runtime (test_strategy_package_release.PackageReleaseTests) ... ok
+test_result_storage_fault_reports_unknown_without_partial_registration (test_strategy_package_release.PackageReleaseTests) ... ok
+test_same_identity_cannot_bind_new_content_and_install_fault_keeps_current (test_strategy_package_release.PackageReleaseTests) ... ok
+test_signed_bundle_installs_and_web_lists_the_registered_definition (test_strategy_package_release.PackageReleaseTests) ... skipped 'POSIX current symlink and mode bits; Windows lifecycle/ACL checks are separate'
+test_signed_release_tampering_and_missing_index_fail_before_install (test_strategy_package_release.PackageReleaseTests) ... ok
+test_strategy_binaries_and_cache_are_not_runtime_dependencies (test_strategy_package_release.PackageReleaseTests) ... ok
+test_web_restart_retries_once_and_reports_version_and_identity_conflicts (test_strategy_package_release.PackageReleaseTests) ... ok
+test_existing_version_junction_is_rejected_without_touching_target (test_strategy_package_release.WindowsPackageReleaseTests) ... ok
+test_failed_first_restart_leaves_publication_unknown (test_strategy_package_release.WindowsPackageReleaseTests) ... ok
+test_failed_restart_restores_previous_file_pointer (test_strategy_package_release.WindowsPackageReleaseTests) ... ok
+
+----------------------------------------------------------------------
+Ran 15 tests in 24.972s
+
+OK (skipped=1)

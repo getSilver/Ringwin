@@ -1,0 +1,21 @@
+test_python_install_recover_enable_keep_replace_and_forward_rollback (test_strategy_contract_e2e.PythonLifecycleTests) ... [enqueue 22be1b471c0] enable_trading -> pending will be 1
+[enqueue 22be1b471c0] enable_trading -> pending will be 1
+FAIL
+
+======================================================================
+FAIL: test_python_install_recover_enable_keep_replace_and_forward_rollback (test_strategy_contract_e2e.PythonLifecycleTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\github\Ringwin-strategy-package-03\python\test_strategy_contract_e2e.py", line 106, in test_python_install_recover_enable_keep_replace_and_forward_rollback
+    successor = ready(response)
+  File "D:\github\Ringwin-strategy-package-03\python\test_strategy_contract_e2e.py", line 65, in ready
+    self.assertEqual(result['status'], 'Ready', result)
+AssertionError: 'Trading' != 'Ready'
+- Trading
++ Ready
+ : {'authority': {'commands': 0, 'config_version': 2, 'cursor': 37, 'last_rejection': 'none', 'operational_version': 9, 'orders': 0, 'trading_authorized': True}, 'binding': {'config_json': '{"warmup_events":2}', 'config_sha256': '6769a672a0822255d1c88a1f1afb328a56c46f31c174cbcc86c3af5368f8f770', 'config_version': 2, 'decision_domain': '00000000000000000000000000000001', 'definition_identity': 'a21994db11534bf5b193c5aa89000010', 'initialization': 'new', 'package_manifest_sha256': 'e496d2675288bca85ec2ca5bbd771c8172899baa2d02e5a4cfe62e6a6ffdbfb4', 'portfolio_identity': '00000000000000000000000000000001', 'release_artifact': 'candidate-a', 'risk_budget': 100, 'scopes': [{'exchange_account': '00000000000000000000000000000002', 'instrument': '00000000000000000000000000000003', 'venue': 'okx'}], 'strategy_identity': '00000000000000000000000000000010'}, 'checkpoint': {'content_identity': '2b45c811fc9049ba09c4d126175d521202597888f162d7c65db4302c0314caae', 'cursor': 35, 'publication': 3}, 'checkpoint_directory': 'C:\\Users\\X\\AppData\\Local\\Temp\\ringwin-package-e5rkckis\\instances\\00000000000000000000000000000010-config-2-df3000f06f37b30b\\00000000000000000000000000000010-checkpoints', 'config_transition': {'affected_instances': ['00000000000000000000000000000010'], 'affected_scope': 'DecisionDomain', 'from_version': 1, 'method': 'Keep', 'reason': '', 'request_sha256': 'df3000f06f37b30b54268809562ce0aed4fb079555b5156bbaa853143be8fb0a', 'status': 'completed', 'to_version': 2}, 'config_versions': {'1': 'aba2b68cc1238a14b9409dfc4fbabc04a93ee5e9126cac85c885285dbfb32610', '2': '6769a672a0822255d1c88a1f1afb328a56c46f31c174cbcc86c3af5368f8f770'}, 'evidence': {'cursor': 35, 'host_generation': 3, 'host_pid': 24156, 'next_input_batch': 3, 'next_intent_sequence': 1, 'state_digest': 'a03f482296d2eb9e7f032bc12d4fba8887e956cbcf3c49d0070e44cc36ac07e7', 'strategy_identity': '00000000000000000000000000000010', 'trading_authorized': False}, 'host_generation': 4, 'host_placement': {'checkpoint_manifest': '8c6601511d5490e1c724bdcd498e5bdc072bf38533f19201326c1e0cf42e6ac0', 'members': ['00000000000000000000000000000010'], 'memory_budget_bytes': 268435456, 'memory_metric': 'process_committed_bytes', 'strategy_manifest': '30cc142455cba2ab9eef5f04103102f45ae8e5d2b512d91f34dfbac1ba63628e'}, 'reason': '', 'recovery': {'barrier': 35, 'cursor': 35}, 'release_identity': 5739175599207962016, 'state_schema_version': 1, 'status': 'Trading', 'successor_transition': {'affected_instances': ['00000000000000000000000000000010'], 'affected_scope': 'DecisionDomain', 'from_definition': 'a21994db11534bf5b193c5aa89000010', 'from_instance': '00000000000000000000000000000010', 'kind': 'replace', 'method': 'Rebuild', 'operation_identity': '000000000000000018e3eb974253a1d0', 'reason': 'candidate Host failed (exit None): ValueError: warmup data insufficient\r\nerror: EndOfStream\n', 'request_sha256': 'a5432b0029807ea2402b47c89f65a6e44e2b2249e671875119a1cd711e028ee6', 'status': 'rejected', 'to_definition': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'to_instance': '73ee903b5d2dd6dda7d860d2629d2471'}, 'trading_authorized': True}
+
+----------------------------------------------------------------------
+Ran 1 test in 21.436s
+
+FAILED (failures=1)
