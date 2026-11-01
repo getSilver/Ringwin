@@ -1,0 +1,1182 @@
+{
+  "source_commit": "c1911755d691f500b3181eef8182106e43488361",
+  "git_tree": "05cba69a0eb1c263d71681fd0458452b026dc27d",
+  "captured_utc": "2026-11-01T12:34:16.245420+00:00",
+  "branch": "codex/strategy-package-03",
+  "platform": "Windows-10-10.0.17763-SP0",
+  "windows": [
+    "10",
+    "10.0.17763",
+    "SP0",
+    "Multiprocessor Free"
+  ],
+  "python": "3.9.18 (main, Sep 11 2023, 14:09:26) [MSC v.1916 64 bit (AMD64)]",
+  "interpreter": {
+    "path": "D:\\Program Files\\miniconda3\\python.exe",
+    "sha256": "04afb7c3318a92ecaa3b95c8a619404c133fcc7aa18a784eff323b811cb21876"
+  },
+  "zig": "0.17.0-dev.315+5b647b792",
+  "node": "v24.16.0",
+  "executable_source_and_test_files": [
+    {
+      "path": "build.zig",
+      "sha256": "323a579b61dea3e4f50f8c5145a57f8b14587cece8bae4de3757e568609e84b3"
+    },
+    {
+      "path": "python/arbitrage_admission.py",
+      "sha256": "05fdc84b0651b1b825ba075102fc2f4c9f1d78fe182ec5622a9802584e978379"
+    },
+    {
+      "path": "python/arbitrage_baseline.py",
+      "sha256": "54ab14513b4ba262d5ce1af299137e35f380368c047cbb399fbc9a31738fc466"
+    },
+    {
+      "path": "python/arbitrage_checkpoint.py",
+      "sha256": "ee7ae1966896812938a399de98a334f5c9b78d1ac8830a15eecf0f0fe95477b4"
+    },
+    {
+      "path": "python/arbitrage_cycle.py",
+      "sha256": "144e3fb61ead1bad6364f59fc3a0b297415c8c2b50862d4ce8490be285a7b991"
+    },
+    {
+      "path": "python/arbitrage_economics.py",
+      "sha256": "13c7975173bdc41e40c3284e183e2c705555f208c0813413df3d4870fc2f6c1e"
+    },
+    {
+      "path": "python/arbitrage_evaluation.py",
+      "sha256": "5afdf5e0f2ad654caa82f084eb78d1fbb1183d956db3368cd55c3a9a4b8c5872"
+    },
+    {
+      "path": "python/arbitrage_maker.py",
+      "sha256": "b2010d9758426f63741f9ed5adcc192562f08eac595bc3188d8a17b763ce9afa"
+    },
+    {
+      "path": "python/arbitrage_maker_research.py",
+      "sha256": "a48ef71dcc1435a34aca8e725bd9c18e0f24504aa07418b6bd414aa203e50071"
+    },
+    {
+      "path": "python/arbitrage_maker_shadow.py",
+      "sha256": "87780023b79a8dfb51e72ed27e75771a964c77b7572b4c3c889557d20c326be9"
+    },
+    {
+      "path": "python/arbitrage_probability.py",
+      "sha256": "d5d92e60506accc9e02150f0314b7a8d7bf6f393a01cd5284c33a5c681336a3b"
+    },
+    {
+      "path": "python/arbitrage_research.py",
+      "sha256": "f6451d2eda9753b4d5242bc1ed3afe4d499bf6888fab208e96d0d23bcf42cd13"
+    },
+    {
+      "path": "python/arbitrage_scanner.py",
+      "sha256": "f73c61e0b9ba78e05493ac8ca4c76c8b422e569afcb713d3c875921f38d4f49d"
+    },
+    {
+      "path": "python/arbitrage_shadow.py",
+      "sha256": "af07b2bf35011cf2cb552cb434ac8b94ead7588186ce6bd7dc23c01b475b9ffd"
+    },
+    {
+      "path": "python/arbitrage_signals.py",
+      "sha256": "c0dbd3a96b6edb722da955139afe4f7ff06b2f9f617acc326e72c08cd1fc7a43"
+    },
+    {
+      "path": "python/arbitrage_state_space.py",
+      "sha256": "c0c3ea290ab2c41da8cd52c2774ee38d983432171bb31b30cf7af719f77c7f35"
+    },
+    {
+      "path": "python/control_plane.py",
+      "sha256": "16cef70b3afa6f2a84213e7e114e3bc7bf1532f18c4ccf60f89dc777b1359157"
+    },
+    {
+      "path": "python/control_plane_web.py",
+      "sha256": "348ad809fbbbebfa97fef0753ece345e8dc3e9adb0bb347024819afd027edd21"
+    },
+    {
+      "path": "python/control_projection.py",
+      "sha256": "ec7b796a30dd7840eda5cc84390691f6987bff6529db8376b51b465690610398"
+    },
+    {
+      "path": "python/emergency_kill_switch.py",
+      "sha256": "bba3bfeee6653a23c189ddc2d6fdb2bb2a92f5e39ee3842c5875b43751deb187"
+    },
+    {
+      "path": "python/operator_ui.html",
+      "sha256": "cbf28ac3d15986caf5b8a875a31e4ef5e77b445b196be9ffe630df5fb926f99d"
+    },
+    {
+      "path": "python/owner_session.py",
+      "sha256": "a3cd43907c3e95ce72885ffd66dd47b09a771890867e3214407a300a849b1d7a"
+    },
+    {
+      "path": "python/release_lifecycle.py",
+      "sha256": "74a21f18ea5ae2e7516a09c098607883aa82dbd638d8304c6c1da9aa135a354a"
+    },
+    {
+      "path": "python/strategy_api.py",
+      "sha256": "49ee162298046aa13323bf00f9adcfd0c5e29830237c7fefe8ce666b46b7a234"
+    },
+    {
+      "path": "python/strategy_candidate_host.py",
+      "sha256": "83c6bf716339cb660936545c5c6daf4bb99bb0a589f7fee270d982bc0cb208f7"
+    },
+    {
+      "path": "python/strategy_host.py",
+      "sha256": "a8b3d3c213f5c1c027a65fde7332294688bf831879fee2472ed451908ac3ed65"
+    },
+    {
+      "path": "python/strategy_instance.py",
+      "sha256": "cf77e858dfb68163b8cb4c287e96f32362b90791ff8b09d73be34a35e977db75"
+    },
+    {
+      "path": "python/strategy_package.py",
+      "sha256": "698ce44134d235e32eb2a321bdcf8215a39175f4083c5b9d1af16194b6682534"
+    },
+    {
+      "path": "python/strategy_state.py",
+      "sha256": "13b6112c9bd9161f829a563d409a0ad2499350b2a7d4ee3458fdb4b1e5232db6"
+    },
+    {
+      "path": "python/strategy_windows.py",
+      "sha256": "14745860e3fc7b8ff2a46ee692c28ebe7054ac8cf53514015d5dec18a781cfb7"
+    },
+    {
+      "path": "python/test_arbitrage_admission.py",
+      "sha256": "3df6948e08c041060b245c56050c750caef80c7e4cced673acec689870c9e5e7"
+    },
+    {
+      "path": "python/test_arbitrage_baseline.py",
+      "sha256": "a0ebd6925179e50e787a5c9af0fe91310d7bc3184238fb5b4a2e6bfb85523aa8"
+    },
+    {
+      "path": "python/test_arbitrage_checkpoint.py",
+      "sha256": "107c94142ec125dd324d2536b5f9a83c6f4d52b700cb7890e8b6827561265ade"
+    },
+    {
+      "path": "python/test_arbitrage_cycle.py",
+      "sha256": "8816755713125ca7bc432e1211f36ab4c3c9dd321bc4fdb1157f7d3df8416cb2"
+    },
+    {
+      "path": "python/test_arbitrage_economics.py",
+      "sha256": "d344e84fbaf101dc291dc18bf44f1e12b8b792f9a1bafe1564dd291993ddf344"
+    },
+    {
+      "path": "python/test_arbitrage_evaluation.py",
+      "sha256": "a9d0902e6eb89d0c8d82e1ffc10e8bb626c43b65b3579ade24bddf63f22762ae"
+    },
+    {
+      "path": "python/test_arbitrage_host.py",
+      "sha256": "84d4c9fb689b8449cca05d52211c00fcd70a2b672c271ff5360d1478a3e2c977"
+    },
+    {
+      "path": "python/test_arbitrage_maker.py",
+      "sha256": "b957cb00550272b2e9b872d74edf6aaaae187962ddc767050f59791dd5acf09b"
+    },
+    {
+      "path": "python/test_arbitrage_maker_research.py",
+      "sha256": "4c634c59e1dde874a5bcc10047ea920507adf2801fdc9dde1aa14f13130fe96a"
+    },
+    {
+      "path": "python/test_arbitrage_maker_shadow.py",
+      "sha256": "5dfc44fcebda28ea8536d5cde254fbabbc8d284bbc7cefdf846118704af190d0"
+    },
+    {
+      "path": "python/test_arbitrage_probability.py",
+      "sha256": "3b54639cfa62cf94558c4f3239b1cfd478f0fa2bdc73e383f523f5850f8a64f7"
+    },
+    {
+      "path": "python/test_arbitrage_research.py",
+      "sha256": "da8abe90769057c4a44bc8a56adec1afda8e4a759a6ef08e0c1a764d0d2059b6"
+    },
+    {
+      "path": "python/test_arbitrage_scanner.py",
+      "sha256": "e12aa5df04f2623524362b13ae52ddea358b2f957b2d6346378e1f03c3a2b916"
+    },
+    {
+      "path": "python/test_arbitrage_shadow.py",
+      "sha256": "942ba5691044eecbdda7023f8a7b5e8c3160e7c95990fe777501fd83be209435"
+    },
+    {
+      "path": "python/test_arbitrage_state_space.py",
+      "sha256": "417866557c9d722909730fa7234a5c1a00ad2ae81cd6372344597137ce1153e1"
+    },
+    {
+      "path": "python/test_native_strategy_instance.py",
+      "sha256": "51ca27a8592bc0f6a67a3a3ea77a7cb5fff0328377b3bb244297d07ae4f4d8f1"
+    },
+    {
+      "path": "python/test_native_strategy_package.py",
+      "sha256": "bf8a4d473abf210301de1c6c1ffb1a3b107abda85f3794798b09faa6b9a526eb"
+    },
+    {
+      "path": "python/test_owner_session_security.py",
+      "sha256": "e80a75da78ac56f43d5f8d760a5e0ba62722d32e1a0db058c42839b08f2c7578"
+    },
+    {
+      "path": "python/test_strategy_checkpoint.py",
+      "sha256": "9eaeee38f2337c7fe2b0b98aebf575bf70fc184946655c7a91486027fc1c4d7e"
+    },
+    {
+      "path": "python/test_strategy_contract_e2e.py",
+      "sha256": "093a5fa97b95ba10855a536a2e31ff5976c27e4ffee07a80541fa5fec0cbc663"
+    },
+    {
+      "path": "python/test_strategy_cycle_recovery.py",
+      "sha256": "b90aab8c972c8ad30d3787809e69e78d2c2d66103800287be586ba6c90e96385"
+    },
+    {
+      "path": "python/test_strategy_host_bridge.py",
+      "sha256": "eb107358acc15400be3da99546d1bbc2072e348837186fa1ca8f770a154718ad"
+    },
+    {
+      "path": "python/test_strategy_instance.py",
+      "sha256": "31c2a4ffb63ee2437e85d6d0a9f8ffc55f8f23c2197eb4d5119921929724e43c"
+    },
+    {
+      "path": "python/test_strategy_package_release.py",
+      "sha256": "c902d04d5f5c580f7b453269a8ed92de7ada3640f200a57be0172a1321b94d3e"
+    },
+    {
+      "path": "python/verify_control_plane.py",
+      "sha256": "202e9d55876b12980fd7c25027a73f8b8b2c834019003775578b85a4439484c5"
+    },
+    {
+      "path": "python/verify_control_plane_release.py",
+      "sha256": "36a52a4f82919183ccaebe0d337758c0c6165ee6760f5bbcb53e1b527c46e145"
+    },
+    {
+      "path": "python/verify_control_plane_wave.py",
+      "sha256": "0d09977ae0589f1efef3e59a0cedb89f95c6e94fe806ceac0a580c81870d0ce0"
+    },
+    {
+      "path": "python/verify_control_projection.py",
+      "sha256": "80f2fb07de35b287121bede7be36e373d68a35ada54e9057db9a19f573186092"
+    },
+    {
+      "path": "python/verify_operator_ui.py",
+      "sha256": "c1ab988cc636d5da134b6b8fe6046108416404faea4e33b6ddb347e4eec868ea"
+    },
+    {
+      "path": "python/verify_owner_session.py",
+      "sha256": "fb703d14889cedb867dabe9f659d0a85d2cc9e9d73dd78f5641722b3147284c5"
+    },
+    {
+      "path": "python/verify_release_lifecycle.py",
+      "sha256": "cc96bc5e1b91cb2f5971ee618f0510e2255d7534521b94126a03a5fba37c8f3c"
+    },
+    {
+      "path": "python/verify_strategy_host.py",
+      "sha256": "cff5105ce5a241bb85e50ecab1db6200a20fc6b3ad723f9c9e79240e5becc6b1"
+    },
+    {
+      "path": "src/adapters/binance/binance_market_feed.zig",
+      "sha256": "93bae69b952aaf65f27c9543802e46d9fbddf634079c5fa3eddfbb79fd226ff4"
+    },
+    {
+      "path": "src/adapters/binance/binance_order_raw.zig",
+      "sha256": "912c1fb917de14aac7c91afbb93e6f4275ed14f00f31fae3d71eb27b263d299b"
+    },
+    {
+      "path": "src/adapters/binance/binance_private_reconciliation.zig",
+      "sha256": "7e16c61b27b9360e8d4d10738ff502bf8623ac9e7386120f74ef235d2129261b"
+    },
+    {
+      "path": "src/adapters/binance/binance_public_market.zig",
+      "sha256": "352797bd308bed88ea012c3b2aa8cb70bd2ab69819500daea58fa013d395748e"
+    },
+    {
+      "path": "src/adapters/binance/binance_venue_adapter.zig",
+      "sha256": "76f845e997212dcbc02fc10530c36e99e13e8bed5bcb18b593ed0924497ec1f1"
+    },
+    {
+      "path": "src/adapters/bybit/bybit_market_feed.zig",
+      "sha256": "684af0d7e5d545ecaab7badfdb7ae48d3b3d9f7e700d4dcf0dc44e08cd6e1f45"
+    },
+    {
+      "path": "src/adapters/bybit/bybit_private_reconciliation.zig",
+      "sha256": "e5f27e5f6c0141172e840a8a3ddd37a7047df1a0544467a30c8b2c21234e9b03"
+    },
+    {
+      "path": "src/adapters/bybit/bybit_venue_adapter.zig",
+      "sha256": "424f12683f72f20768d8764fda2bc432249e4d9ae656a9a59d705dd3967214e1"
+    },
+    {
+      "path": "src/adapters/okx/okx_curl_shim.c",
+      "sha256": "4941b857559c17613019aa153fb0f454af796b850ab649897f29a089a6ee8e9f"
+    },
+    {
+      "path": "src/adapters/okx/okx_curl_transport.zig",
+      "sha256": "783ddae273917a2eebd8476f3cc5bd0e867e3f80937feb74ea03f34cac42b20b"
+    },
+    {
+      "path": "src/adapters/okx/okx_market_feed.zig",
+      "sha256": "2deeb219ec4a71ed4d30af974a2bf043e5e47e1c3a00755159c1d80a936ee1ff"
+    },
+    {
+      "path": "src/adapters/okx/okx_order_entry.zig",
+      "sha256": "f927c347594391a66c53d46da8380c5e717d0591c81907770ff308a139ab14d8"
+    },
+    {
+      "path": "src/adapters/okx/okx_private_reconciliation.zig",
+      "sha256": "5e2f97c59a086061b0ec5373dcd1b07082b5420e52109d4f0f868eb150181420"
+    },
+    {
+      "path": "src/adapters/okx/okx_private_recovery.zig",
+      "sha256": "1775c2c0c1ff12c9e656387258bbdb0d04db9e7e5139d2af71e2ffc63a593821"
+    },
+    {
+      "path": "src/adapters/okx/okx_public_market.zig",
+      "sha256": "8ee58125ee2131217ca96ea1722ff3c1b4b3c541ac7dbb5d30941439d8cf6706"
+    },
+    {
+      "path": "src/adapters/okx/okx_rest_auth.zig",
+      "sha256": "8834109dd357a45f78d0a6f03553ea8e085a732e1da7de411a25bd8779511735"
+    },
+    {
+      "path": "src/adapters/okx/okx_venue_adapter.zig",
+      "sha256": "a15671df36c1c9a86c4de84a91655156b867777b691fc400bcca759185d3ee71"
+    },
+    {
+      "path": "src/adapters/simulated/simulated_market_feed.zig",
+      "sha256": "6194e880261f24b649c0cecdb5c1cc6225bdafd47ad3ddd27f8c2a18587bd598"
+    },
+    {
+      "path": "src/adapters/simulated/simulated_venue.zig",
+      "sha256": "4967ecc4f09f5238596a60322012549347ead48031cc0480ce5d0d97d4f7da5c"
+    },
+    {
+      "path": "src/benchmarks/trading_shard_benchmark.zig",
+      "sha256": "a538486efc0f71db03b72bce4418bb90bf430c6a99191b260f549408723747a3"
+    },
+    {
+      "path": "src/control_channel.zig",
+      "sha256": "c04c690dfcde53d9fc1b308ae0a3a7163f0e511b855bbe4ecbf07666b382f0ab"
+    },
+    {
+      "path": "src/control_plane_node.zig",
+      "sha256": "c8868ceeb917211d7d693ceb68b996fb816ddb8a1ca6b634449f1705b08f7309"
+    },
+    {
+      "path": "src/control_plane_probe.zig",
+      "sha256": "9a57e3d7becac157b964b0df2c0d08b9f923e5e58b5cd7b3565bc16ee46aa330"
+    },
+    {
+      "path": "src/control_projection.zig",
+      "sha256": "6c0742ea7c80407b632ac81236b655eb44629433c29824dd36223e1513e2b861"
+    },
+    {
+      "path": "src/control_projection_probe.zig",
+      "sha256": "48e1d3583f027d546aa549caf63c6b9f4127dfdb6f792eee3e6a69823fd0b1dc"
+    },
+    {
+      "path": "src/debug_verify_tmp.zig",
+      "sha256": "5eb877a16646b4889a95d17aed47506a7811070fbfb26ef8b10a9ba6a9e56a5d"
+    },
+    {
+      "path": "src/entry.zig",
+      "sha256": "0d89a6b3e564f5f48e30f35d1fb51761912e61b46b766fdb47b585f833c9574b"
+    },
+    {
+      "path": "src/execution/execution_gateway.zig",
+      "sha256": "68fcc1f97199d28ae076a8668b725258ed3ef59258e0708d67076e54beee13d5"
+    },
+    {
+      "path": "src/execution/oms.zig",
+      "sha256": "ed51bf254b8b91456f68b08c33cbcd551369796b581e89eb5b62560357643cbd"
+    },
+    {
+      "path": "src/execution/order_history_batch.zig",
+      "sha256": "60a865362a5aae2c25f5cf9fdac41cf4341af348bd34822a8db9f705b72a87a4"
+    },
+    {
+      "path": "src/execution/venue_adapter.zig",
+      "sha256": "17a952b56e43a06bcd89637066bbb833678e8dfaf0899def2e7267ed204e1627"
+    },
+    {
+      "path": "src/main.zig",
+      "sha256": "9e939c097f2b637c9bd1fd2103135e692d0eb9df107b07c500cf66ad3b7a16c4"
+    },
+    {
+      "path": "src/market/depth_snapshot.zig",
+      "sha256": "f6d7938292e26630b047488e5820dcfd76f463469f76cee9a86e1b5f191af9a3"
+    },
+    {
+      "path": "src/market/market_feed_adapter.zig",
+      "sha256": "8392c7cbe7868bbfe3ba6205cb0805dff2c600f71175ea403348a066af0f6324"
+    },
+    {
+      "path": "src/market/market_projection.zig",
+      "sha256": "da650b0ca17dd99d33d707084c09f12b0cfaf304ea6832ef3c92a8fa502a89e9"
+    },
+    {
+      "path": "src/model/canonical_event.zig",
+      "sha256": "34a281e5670dd352cb3b80c2e5d21110970157a159a322c654597a3dd13fe1a5"
+    },
+    {
+      "path": "src/native_contract_main.zig",
+      "sha256": "749482cfcbbfcb51dd139bc6c2fc6b96978677d1ed2c84d2075b78a9c340bbb8"
+    },
+    {
+      "path": "src/persistence/business_history.zig",
+      "sha256": "3e2be150cbe2e5d06d72739c5850c5c49b54e97c575de08ba2e62b71f885d9e6"
+    },
+    {
+      "path": "src/persistence/canonical_event_codec.zig",
+      "sha256": "6ffa881c205759aac39397297382a87a370d371bf48959198b1d2aa685a06042"
+    },
+    {
+      "path": "src/persistence/durable_store.zig",
+      "sha256": "2ea70eae0752df11e9f7e061f1eeefbf69532730b5b4954f0c5d8f2796724524"
+    },
+    {
+      "path": "src/persistence/journal.zig",
+      "sha256": "9a2cdd6254e8f5e39e5567b581881d2727e5453671b4dd8ffac09a804bcff481"
+    },
+    {
+      "path": "src/persistence/raw_ingress.zig",
+      "sha256": "3045ef7a0b4433067f12de054621a257ba1dce8c9b62607bf0d1f4ebb03e7089"
+    },
+    {
+      "path": "src/persistence/snapshot_codec.zig",
+      "sha256": "840f1f56980ba4bcaf51115e3c6fb3ce96e369dc039457cb3ecec21f387ddfb1"
+    },
+    {
+      "path": "src/portfolio/account_coordinator.zig",
+      "sha256": "69882bd871375c6d19b2c2ce38760379e0c2b06274bb629f8e59f5bc8e7d8390"
+    },
+    {
+      "path": "src/portfolio/account_projection.zig",
+      "sha256": "9d249c309aa60e2eb9242a79a7a258649a89473ed31db5961b97a3e4e104d2f5"
+    },
+    {
+      "path": "src/portfolio/economics.zig",
+      "sha256": "0305a8efb1ac2302e01163e9b08bcb7f991abf71657843ad82f20ba9e7883ed2"
+    },
+    {
+      "path": "src/portfolio/fill_history_batch.zig",
+      "sha256": "91c12c6bea0f94519c3783a0bc9e722623473ae920b5e665dcc6f57adde647c1"
+    },
+    {
+      "path": "src/portfolio/forced_archive_proof.zig",
+      "sha256": "327621f6a291dd41ac16407f715caba5dc61de9940908c366dec5b7b5910125d"
+    },
+    {
+      "path": "src/portfolio/forced_history_batch.zig",
+      "sha256": "10aebe3a911c6577906256918ac33392c5aa8614e4a117541fe888053cacbc3f"
+    },
+    {
+      "path": "src/portfolio/funding_history_batch.zig",
+      "sha256": "e6d0575f8d5857832298878a9baed7d9f449b4de61bc0e1c90904ddd49e0456c"
+    },
+    {
+      "path": "src/portfolio/native_margin_reconciliation.zig",
+      "sha256": "c4e74cfcdc0ff6ab4d5b59724d18397998dc72957e0d0a54b5221ed6dd126468"
+    },
+    {
+      "path": "src/portfolio/reconciliation_history_batch.zig",
+      "sha256": "0f7f2079ccb256793aefa38c380b83886877b53a273fe1230d95aa29b9d8a929"
+    },
+    {
+      "path": "src/portfolio/shared_venue_ingress.zig",
+      "sha256": "6420e3566e5b0220023856a64edd9e1818673b1baa3179e3dd713b0dbc86b7e1"
+    },
+    {
+      "path": "src/risk/risk.zig",
+      "sha256": "8d58a624f2193d6d655381b67fdf779ca56c7e441eb9faf53ddc9711b306f0a1"
+    },
+    {
+      "path": "src/runtime/cutover_history.zig",
+      "sha256": "1f17037d30233b1fb36c5986d695a87907db031307d2a7debc211405c16bb633"
+    },
+    {
+      "path": "src/runtime/demo/demo_authority.zig",
+      "sha256": "23927ec240f11db95f3fef51d1c3b34b9e9f94bd2e6d18623483ff6a9ec9f358"
+    },
+    {
+      "path": "src/runtime/demo/okx_demo_account_guard.zig",
+      "sha256": "96fefc27d47d2c997e76b4015760a5b21f78107d75f19de3fa73258ab0470d45"
+    },
+    {
+      "path": "src/runtime/demo/okx_demo_credential_input.zig",
+      "sha256": "c8c8dcb070247c813776836c6c2c51f937b4ce2131012574e83328dbe045340c"
+    },
+    {
+      "path": "src/runtime/demo/okx_live_chain.zig",
+      "sha256": "34231dbe2babc6e81b36be565bc63d97fd0d52566f7ac89bbf738075d2f52f6c"
+    },
+    {
+      "path": "src/runtime/failover.zig",
+      "sha256": "c798f7677eedc56eeb7f9e9eb87060f2e92e6fc0bc1d8c444281d68e17061403"
+    },
+    {
+      "path": "src/runtime/production_contract.zig",
+      "sha256": "aaba606a7928524675a78686bcf588cf6b56425e380ddeeff7c9d3c0ea501653"
+    },
+    {
+      "path": "src/runtime/production_runtime.zig",
+      "sha256": "3c8029a3f820d169a39ee006f9992ccdedf81c55dfe08e037372a2178506d20e"
+    },
+    {
+      "path": "src/runtime/recovery_cutover.zig",
+      "sha256": "7247728b754703bd226bbe22a22ee929d6cc4939e7346f6de21469f6d6378b0d"
+    },
+    {
+      "path": "src/runtime/shard_inbox.zig",
+      "sha256": "1512a84ae19f72f055fc3fed2998eb16926db5e8ffa1ac897022326acab61d39"
+    },
+    {
+      "path": "src/runtime/strategy_cycle_recovery.zig",
+      "sha256": "0ce8386aa02d76a756c0533b8bdeba1057cbe24329eb6dbec01518e7cca1094a"
+    },
+    {
+      "path": "src/runtime/telemetry_qualification.zig",
+      "sha256": "4d4aa4285744563a90140d723f6f4ea545bf3e31bcdc1b04a8f94ee18cfe7c3c"
+    },
+    {
+      "path": "src/runtime/windows_verification_runtime.zig",
+      "sha256": "d534341b3ac719f49586044f55c7747f6fbbd01e57f1ea2edf4052e22cad1159"
+    },
+    {
+      "path": "src/security/credential_aead.zig",
+      "sha256": "f6cba8eab81fdfb703b486df863971726ac1f2879662dc047d557b1e5ea746ad"
+    },
+    {
+      "path": "src/security/credential_aead_crypto/LICENSE",
+      "sha256": "5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177"
+    },
+    {
+      "path": "src/security/credential_aead_crypto/README.md",
+      "sha256": "ad5d895d9c07f35abcfa4de3aa35b3f1469dc7508cad564443529c7c57ca95fa"
+    },
+    {
+      "path": "src/security/credential_aead_crypto/chacha20_core.zig",
+      "sha256": "6de7dd6b3137f4a36b10d094e8b11a88ff66ad5bdb2153aef560b084edce0628"
+    },
+    {
+      "path": "src/security/credential_aead_crypto/poly1305.zig",
+      "sha256": "6503e9d149e5f4de9595914a62e3baa00c185d6b6625413afd733de835617c07"
+    },
+    {
+      "path": "src/security/credential_crypto/LICENSE",
+      "sha256": "5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177"
+    },
+    {
+      "path": "src/security/credential_crypto/README.md",
+      "sha256": "b2dcb2738a05f5878a0e2676d9225c4698b47abf219bcb0bacbc25cfb827fff2"
+    },
+    {
+      "path": "src/security/credential_crypto/argon2.zig",
+      "sha256": "3ea0e33aedb8b1b6c59522c88dbda1874b314e209439643d8415b061d68604c4"
+    },
+    {
+      "path": "src/security/credential_crypto/blake2b.zig",
+      "sha256": "07d86592c8974f41d7c445e042d39a10846643b6d35aa93c2faaf19cdd53d7b9"
+    },
+    {
+      "path": "src/security/credential_crypto/sha256.zig",
+      "sha256": "88308dc4c62acffcd4038df63965c54960f820b9bb2beb39bb8967e989e9ba29"
+    },
+    {
+      "path": "src/security/credential_kdf.zig",
+      "sha256": "dde7cda1a49c4ec600a51e49480b2cd6325a59fbcd2dd817d164d2bef9d8e545"
+    },
+    {
+      "path": "src/security/credential_store.zig",
+      "sha256": "4ee85ccbc19bcbeb1409f68e7957ac3726c0e2465f7eed7bed0a6be1cc44060b"
+    },
+    {
+      "path": "src/security/protected_memory.zig",
+      "sha256": "d2d51e1ffe52a17633fbe93a211eed53ddf75607fc282e66543c2a56f7def88c"
+    },
+    {
+      "path": "src/security/testdata/credential-store-crd4-v1-synthetic.credential",
+      "sha256": "7ecc52d7803b544c928d34edd93546b482557649001fe78d6b03934b53cad9b9"
+    },
+    {
+      "path": "src/strategy/native_definition.zig",
+      "sha256": "3fcef614e3ee98cbdfe44fd50a2533ec93c49ea503b22a4313511c80c8370da4"
+    },
+    {
+      "path": "src/strategy/native_instance.zig",
+      "sha256": "95c1fcd3a6222aba6458fbad4913ae02ade5de072627f343e4e345b22e0283e8"
+    },
+    {
+      "path": "src/strategy/native_manifest.zig",
+      "sha256": "4dd036cf18982001ed8257b0dece40a92950d86b13872ff40db1404921b1aa73"
+    },
+    {
+      "path": "src/strategy/native_observer.zig",
+      "sha256": "e457372e519b84dcadaf4680a6a5aaf659bdfdfecb073ed9751e676ddda27c3c"
+    },
+    {
+      "path": "src/strategy/native_observer_config.json",
+      "sha256": "6cc78d28697631286be8a0d9726e5d7506f40cb734e79da39b183190003ac207"
+    },
+    {
+      "path": "src/strategy/native_observer_state.json",
+      "sha256": "4902395836bd3917c1944b0c80be1b4a61e33cff2fe1b5e5aefbaef3fe6ed23d"
+    },
+    {
+      "path": "src/strategy/native_registry.zig",
+      "sha256": "8ec9cd58a78c705a0058897c2c98f0c64c83d73b0dcfa7801db05fc6de7a58fc"
+    },
+    {
+      "path": "src/strategy/strategy_candidate.zig",
+      "sha256": "c62b5fbd2121fcc808a6b34ceed596a792f6dbe23984c0ced08be40be0dd8d6e"
+    },
+    {
+      "path": "src/strategy/strategy_checkpoint_store.zig",
+      "sha256": "24a4017ba4e8de1164eb93c1b31ff46b13a3e79266e25f7c4caa22ba86d9b824"
+    },
+    {
+      "path": "src/strategy/strategy_host_failures.zig",
+      "sha256": "c59a73f775c3fbee7930e4b448a1194e7fae6310eb59c7ae99d9c3d0deb344be"
+    },
+    {
+      "path": "src/strategy/strategy_host_gateway.zig",
+      "sha256": "fb930124bfdc87fc6038c31ca5e06d8d0c9914a9faa6bf7c08a2cfa1d350d96f"
+    },
+    {
+      "path": "src/strategy/strategy_host_ipc.zig",
+      "sha256": "e6cacacf50b53002f513f3cc86de3a68acc533c66f63ef8b68c8dbce5c2bb10b"
+    },
+    {
+      "path": "src/strategy/strategy_host_lifecycle.zig",
+      "sha256": "abd65a597f717cd60fb0a93d127b770b97e696cc43acfac1dcc478686dd9115c"
+    },
+    {
+      "path": "src/strategy/strategy_host_recovery.zig",
+      "sha256": "a68f34d8430fb0f278f057461edf445335b3b3269d846e76c6bc28e01b45bb5a"
+    },
+    {
+      "path": "src/strategy/strategy_package_authority.zig",
+      "sha256": "1b475a7bd0e352ad03e57d1b8d094125f7165f66ca722e3cec708ba11b2caafe"
+    },
+    {
+      "path": "src/strategy_authority_probe.zig",
+      "sha256": "ebdec4d826a8c8f2e46f588b5ed255a39ed202f57b875eb26ed0de5508f290d4"
+    },
+    {
+      "path": "src/strategy_candidate_main.zig",
+      "sha256": "e125e53f5031f92bcc68e8f474a4d1bab497e8e57038050211a218a06eb5034e"
+    },
+    {
+      "path": "src/testing/acceptance/accounting/continuous_account_acceptance.zig",
+      "sha256": "7ce2da94061d44ff4711297102c835885fc999682a4c0b77590158f4d5941556"
+    },
+    {
+      "path": "src/testing/acceptance/accounting/fee_adjustment_inventory_acceptance.zig",
+      "sha256": "31ef93433d946c7adb6b1eb78190b95c038055a647b256b8dbf4e6f196c2e150"
+    },
+    {
+      "path": "src/testing/acceptance/accounting/native_account_continuity_acceptance.zig",
+      "sha256": "b3e31510c8434d0c61b5714b8a2ef6179709174319a977ec6b7ecbce614af87a"
+    },
+    {
+      "path": "src/testing/acceptance/accounting/native_economic_reconciliation_acceptance.zig",
+      "sha256": "9725eca21eae4f80aeee43ebb0f748babe4bcee9d312c5c2ac69c8dac7c24c47"
+    },
+    {
+      "path": "src/testing/acceptance/accounting/native_multi_venue_accounting_acceptance.zig",
+      "sha256": "92374dc57c0dd7c7209ef668ab754aaeef9d7d7caec63b9e27ae888cd970ab1e"
+    },
+    {
+      "path": "src/testing/acceptance/accounting/owned_residual_economics_acceptance.zig",
+      "sha256": "5a2938773b3763112d8c3b311c19ec4a20033863a4047ceb3ecb8a733e2cd546"
+    },
+    {
+      "path": "src/testing/acceptance/accounting/simulated_native_accounting_acceptance.zig",
+      "sha256": "853977ad6e6c89c94dbf9baa3760fe996f6eeea452604a578196239d8080a969"
+    },
+    {
+      "path": "src/testing/acceptance/capacity/continuous_backpressure_acceptance.zig",
+      "sha256": "f262bf3767232112f4f10fa8944a48d62c73e54282a94bc74b98ee592b88626f"
+    },
+    {
+      "path": "src/testing/acceptance/capacity/continuous_capacity_acceptance.zig",
+      "sha256": "cabca6028c629a8a1a938116ea377b5c8656c4c212de7c6e590ad634617330be"
+    },
+    {
+      "path": "src/testing/acceptance/capacity/core_observation_capacity_acceptance.zig",
+      "sha256": "15484ce199b044a7458b5b40169bdc436e20139cf11fbea025e75c8a8b7eb101"
+    },
+    {
+      "path": "src/testing/acceptance/capacity/order_capacity_acceptance.zig",
+      "sha256": "ce93f8c47c2189221f4ffa7292f8e1d97af0575fca71ae4473d229f82ddd1cc9"
+    },
+    {
+      "path": "src/testing/acceptance/capacity/order_public_capacity_acceptance.zig",
+      "sha256": "4462deef541ccc351ce11be3eebff3604d518eaf4d3d177a5dad0d83e086e259"
+    },
+    {
+      "path": "src/testing/acceptance/capacity/strategy_host_capacity.zig",
+      "sha256": "90dacb47f59add19febe61d6610355c58e19ad89e9e42c47ad8f6e82addbbe06"
+    },
+    {
+      "path": "src/testing/acceptance/capacity/windows_capacity_acceptance.zig",
+      "sha256": "044d90ac934fcab3178ff1212a1ce3ed89fa8e6d5710c11dda7e22fcd8108be6"
+    },
+    {
+      "path": "src/testing/acceptance/capacity/windows_capacity_fault_acceptance.zig",
+      "sha256": "567ed1b7d8ce0e7860db4654456f7465fedac3cd35aded1607f3bbf4a6358349"
+    },
+    {
+      "path": "src/testing/acceptance/core/account_isolation_acceptance.zig",
+      "sha256": "239c4ec8b8ca5f0ce5cee8e3ce2d223d3f36823794ea8d93469d2cc734f27451"
+    },
+    {
+      "path": "src/testing/acceptance/core/cold_core_protocol_acceptance.zig",
+      "sha256": "edcef5e7e240f6a4c6663c7b3640a4d3a1baeba6d6c91fdd663c92c285af259f"
+    },
+    {
+      "path": "src/testing/acceptance/core/control_resident_order_acceptance.zig",
+      "sha256": "fc8807e1560507a7f6f1688d5cdcffd0df7be180d44d319290c667a41f99ced2"
+    },
+    {
+      "path": "src/testing/acceptance/core/coordination_gateway_acceptance.zig",
+      "sha256": "8a4bbee331e494ae288d011d51337ff454cc741259e0330b3c01fdb5fc90172c"
+    },
+    {
+      "path": "src/testing/acceptance/core/coordinator_safety_acceptance.zig",
+      "sha256": "47910e026874a48d10a71fa744cd4566b42a56c95d654a573c4da4a2218e766d"
+    },
+    {
+      "path": "src/testing/acceptance/core/dual_ioc_dispatch_acceptance.zig",
+      "sha256": "90bbde1eb331ea10386a9ace5a839d58e36c826d9553d61996f84309ce6ba411"
+    },
+    {
+      "path": "src/testing/acceptance/core/four_shard_acceptance.zig",
+      "sha256": "40789e53ef2cfd05af763cc8675ecbd9ace0cd177930280d01202acdb0fdbe9e"
+    },
+    {
+      "path": "src/testing/acceptance/core/multi_account_authority_acceptance.zig",
+      "sha256": "d83f9ad7bb6971b3d55db837868281023429c429e23c3ee6ae502dac8657625b"
+    },
+    {
+      "path": "src/testing/acceptance/core/multi_portfolio_authority_acceptance.zig",
+      "sha256": "8e283bff9c5fcd051f87930e7163c49dd516997940e0d72a4ce51d3a4bc647f7"
+    },
+    {
+      "path": "src/testing/acceptance/core/multi_portfolio_netting_acceptance.zig",
+      "sha256": "536ebeb4bbe033b5a7f7cae1a5f5187920c5326eb99de64ccc98ea10508b0409"
+    },
+    {
+      "path": "src/testing/acceptance/core/native_margin_acceptance.zig",
+      "sha256": "ca2641c8f2f21dddeaa2822f674ef337f21e87af16884cf78e382830a21016c5"
+    },
+    {
+      "path": "src/testing/acceptance/core/native_post_only_acceptance.zig",
+      "sha256": "2b050df766e40d0099718f6c803a41a2f64a05a9ec7e3cdb2d349e7ab838e234"
+    },
+    {
+      "path": "src/testing/acceptance/core/native_rounding_acceptance.zig",
+      "sha256": "9f23f709f044d3ee771a311912281008c20d3ccf4631a3b7d9fc13ddefd780ad"
+    },
+    {
+      "path": "src/testing/acceptance/core/risk_lease_delivery_acceptance.zig",
+      "sha256": "bc2be9f58ebc3282139ed0fe325b8caf17854f702ff8fef7be86ac1c8de44667"
+    },
+    {
+      "path": "src/testing/acceptance/core/shared_fee_history_acceptance.zig",
+      "sha256": "73b325139f3ea5d2207d678798cf2ae4715f90a74b4ece793213926db5a91962"
+    },
+    {
+      "path": "src/testing/acceptance/core/shared_forced_execution_acceptance.zig",
+      "sha256": "1fed2ae1cb0c81a2f3d70eccfd973bcefecdb545b75d7933876fc95a1ded939a"
+    },
+    {
+      "path": "src/testing/acceptance/core/shared_gateway_venue_acceptance.zig",
+      "sha256": "abaaae2919b28220c1538fc20c179a900ecf6901c10b6c936ae554e5cf6f4652"
+    },
+    {
+      "path": "src/testing/acceptance/core/shared_venue_delivery_acceptance.zig",
+      "sha256": "29213eb2115d53475c11035ab77d74a4c92fe4214dd0559ea4b7901958357cd3"
+    },
+    {
+      "path": "src/testing/acceptance/history/control_archive_acceptance.zig",
+      "sha256": "e0655081498bb088da966e0eecc13dd1d5d547927c73a020ee1d9bac748aa4ab"
+    },
+    {
+      "path": "src/testing/acceptance/history/control_gateway_retention_acceptance.zig",
+      "sha256": "1bd8ebf193762ca27623dd84307068bb7416621a8fb0600e52a88b014bdf8571"
+    },
+    {
+      "path": "src/testing/acceptance/history/coordinator_history_acceptance.zig",
+      "sha256": "960e6a319ae7014345784c7d48b921384903c28dd2e514f797ddfd602b1403c1"
+    },
+    {
+      "path": "src/testing/acceptance/history/fill_archive_acceptance.zig",
+      "sha256": "a77d1b68b3426493b0fe134cf9e8f2ac3dbe992f9b1e1e2466246cefb150b27a"
+    },
+    {
+      "path": "src/testing/acceptance/history/forced_archive_acceptance.zig",
+      "sha256": "c6dbbcac7b23262089f2b35752a98209daa5426acad6dd6dac0f8f26be280d8e"
+    },
+    {
+      "path": "src/testing/acceptance/history/funding_archive_acceptance.zig",
+      "sha256": "4409331d216f5f959526da0a6554eac32ae483d31fd4e3f0d5161b221e98c2f5"
+    },
+    {
+      "path": "src/testing/acceptance/history/order_dispatch_archive_acceptance.zig",
+      "sha256": "2777a5367a59a89187c3e986769b0fdf52419e142a13e8c7a262db7b2f3fbd30"
+    },
+    {
+      "path": "src/testing/acceptance/history/order_gateway_archive_acceptance.zig",
+      "sha256": "7ed5aa76667c01499e703645ce7df4b5f424303c21e9f1ebef9c9c02e1f04c94"
+    },
+    {
+      "path": "src/testing/acceptance/history/order_history_safety_acceptance.zig",
+      "sha256": "d4a0e61e32ca151a200e9d8cafa228048ccdb80de93757c03ee4f1efc78fbde0"
+    },
+    {
+      "path": "src/testing/acceptance/history/reconciliation_archive_acceptance.zig",
+      "sha256": "975eb751539332737c102f6926e9153dedc11340789953e745170521aa912b8b"
+    },
+    {
+      "path": "src/testing/acceptance/history/reconciliation_archive_safety_acceptance.zig",
+      "sha256": "1f0a58748b1ce0f273eac1b9760cb884fc6747a9e90fea8e15d12adfd0f83480"
+    },
+    {
+      "path": "src/testing/acceptance/platform/asset_precision_file_recovery_acceptance.zig",
+      "sha256": "2ab31106e58100f5f74963d24dd057d392e3be6fd49eb1ef956af369ece6728a"
+    },
+    {
+      "path": "src/testing/acceptance/platform/windows_observation_file_acceptance.zig",
+      "sha256": "d32aece5b7a5192d2cd51f98ed0e723b2ab452e143c4ebee5255fdc969b2c5cd"
+    },
+    {
+      "path": "src/testing/acceptance/venues/binance_testnet_acceptance.zig",
+      "sha256": "9da7d39bfd5c613b60ca411e7ed45064180ac9e064501185630e94f7d7f52409"
+    },
+    {
+      "path": "src/testing/acceptance/venues/bybit_testnet_acceptance.zig",
+      "sha256": "7cda8689f53dee1aa6f4b827dfefcffa492f66a1639e745716bea4007c28cfb6"
+    },
+    {
+      "path": "src/testing/acceptance/venues/multi_venue_testnet_acceptance.zig",
+      "sha256": "f30b2014f3a5d51d34d31e7dc67c30805c19c48506b3ad54e2816d17a5d9b19d"
+    },
+    {
+      "path": "src/testing/acceptance/venues/okx_curl_private_smoke.zig",
+      "sha256": "3179bcb342057a89e47c72759e25147f39ec16f46b641a0531bde7c6f6bce65d"
+    },
+    {
+      "path": "src/testing/acceptance/venues/okx_curl_public_smoke.zig",
+      "sha256": "2e009c4c22299df48df577bdc10f74d9213f36d1078bbfcb626c83805cbb4149"
+    },
+    {
+      "path": "src/testing/acceptance/venues/okx_demo_live_acceptance.zig",
+      "sha256": "df11afd2cd576da8b92009e7b26bdc09418a9b5568b84f7600d12a0580e9d252"
+    },
+    {
+      "path": "src/testing/acceptance/venues/venue_fill_recovery_acceptance.zig",
+      "sha256": "8d8005bd088d1ad88309d0b729c1bab27cc7fc3d9db25691ef946e8d0c3b8009"
+    },
+    {
+      "path": "src/testing/audit/historical_fee_audit.zig",
+      "sha256": "56873a77b3518eccb53660e2d75796403a188217886b38c53b86ad0a3a51f56e"
+    },
+    {
+      "path": "src/testing/audit/historical_fee_audit_samples.json",
+      "sha256": "0413365ccc5461ab9fa5a4271e743ac428054ac1fa42e8cb67b1704e1bca6e59"
+    },
+    {
+      "path": "src/testing/contracts/venue_adapter_contract.zig",
+      "sha256": "605b205325edd0f960e850ece64c0b28235f7b385fdd966e5c56285def37c715"
+    },
+    {
+      "path": "src/testing/fixtures/arbitrage_host_inputs_v1.json",
+      "sha256": "1758fb7e0c6256ea8dc4f890e5635e096ed4a7ba1787d84871bdc2edd8e77555"
+    },
+    {
+      "path": "src/testing/fixtures/arbitrage_host_state_v2.json",
+      "sha256": "58be0a030463d14f4a4890d405c6e98a54f2068bc7e5b55a93c753aa95b745b9"
+    },
+    {
+      "path": "src/testing/fixtures/cross_venue_acceptance_contract.json",
+      "sha256": "556aae1e64fd355c3344c07691ad031932a1b0eef94909664bfda323d2ca93c5"
+    },
+    {
+      "path": "src/testing/fixtures/cross_venue_state_v1.json",
+      "sha256": "a05ac377b917e31f9630825dc0e4ea7f2d0f9ccb4f58bb9ea49f9057471a5145"
+    },
+    {
+      "path": "src/testing/fixtures/strategy_cycle_recovery_v2.json",
+      "sha256": "c24acf4aa3b673e3f88c2f36c5d9da3418e9dc2124239ebc17201b7c7f8c6ddf"
+    },
+    {
+      "path": "src/testing/fixtures/strategy_maker_recovery_v2.json",
+      "sha256": "f240c59e73d3c1e906853a85ab6c43e4292d42af9525d2b3ef8d6df44a33ac04"
+    },
+    {
+      "path": "src/testing/integration/strategy_host_failure_integration.zig",
+      "sha256": "affbf7ec9b900da6a54df349b20918a1af776efb6da02497ee448ebaf3f13ff8"
+    },
+    {
+      "path": "src/testing/integration/strategy_host_integration.zig",
+      "sha256": "d92c4cbd745ee98d184a7562d5dc3a4c9e6d96e40a5bcef1df32e06ca6c00c89"
+    },
+    {
+      "path": "src/testing/integration/strategy_host_recovery_integration.zig",
+      "sha256": "9e38f550cf0133d02fafcb3c6b6b95044fbcb275798fb5ca13c383631d198bc8"
+    },
+    {
+      "path": "src/testing/regression/credential_store_visibility_test.zig",
+      "sha256": "54d57bd1ed23bd07a90375a39fc91a5bb85f1d7bab3e8417a8e4af7cb430972c"
+    },
+    {
+      "path": "src/testing/regression/okx_auth_transport_synthetic_test.zig",
+      "sha256": "f1c99b4e2cfd48399fbd620dfbe9a97e00478e1acb534137778581c0b439a9bc"
+    },
+    {
+      "path": "src/testing/regression/okx_curl_shim_request_test.c",
+      "sha256": "14df47d6cd9020c1b0345b015acb7001b0bb8e8ac8629092da3235fde0f8a271"
+    },
+    {
+      "path": "src/testing/regression/trading_shard_tests.zig",
+      "sha256": "f68629557bd66e7dee72e7cf7f491cc6c491a1d8ad35456a76ed78d5f173b492"
+    },
+    {
+      "path": "src/testing/support/execution_fact_consumer.zig",
+      "sha256": "5a523ad27b8cdd6529b5c4c4cdeb0dbda1e856c2942b41451417428ed951c6e7"
+    },
+    {
+      "path": "src/testing/support/file_acceptance_runtime.zig",
+      "sha256": "b6fda58077b29e8b796aa6a05a417bb4464a43105cf5986e97ff8bd15cdfe477"
+    },
+    {
+      "path": "src/testing/support/simulated_lifecycle_projection.zig",
+      "sha256": "5c0d307dc0582a7ae69f44b6b62843fb8ae4d18f98cdd0c2fcce5afbf7033a64"
+    },
+    {
+      "path": "src/testing/support/trading_shard_fixture.zig",
+      "sha256": "f5430bf4409bd558ce98a13857da7f448ca101c06aea16a90e469cdcd9e1543f"
+    },
+    {
+      "path": "src/testing/support/windows_capacity_shared.zig",
+      "sha256": "7caca1b6c28c8e320f8f9b1d93cf4a64b8f3a9e0fb355e5a98f747ab473df060"
+    },
+    {
+      "path": "src/trading/asset_registry.zig",
+      "sha256": "886cd2234be1e19772fb8fc5fb21cb0824f9ebd85857f1d923305cbec84723b9"
+    },
+    {
+      "path": "src/trading/cold_business_candidate.zig",
+      "sha256": "892a08a017ba8eccd3e333912eac7f1f68a665a375a993ca7a5be4292f0757c9"
+    },
+    {
+      "path": "src/trading/control_history_batch.zig",
+      "sha256": "9f6bd5ab5700b2cd7571eb313837464607df53eda20382fc7eb284cb7c3af3c9"
+    },
+    {
+      "path": "src/trading/cycle_occupancy.zig",
+      "sha256": "af21eca3f3d519a021752d4e0172ae1cd98132df7d064cba1e55d0eef44c6c13"
+    },
+    {
+      "path": "src/trading/deployment_allocation.zig",
+      "sha256": "bff25149f6ea0f29e0694a19f1cf016d959f0d67a75a929359298c60df952d26"
+    },
+    {
+      "path": "src/trading/instrument_registry.zig",
+      "sha256": "dd801c7cb309779a377d1f3e48d1873ad015283ba81f8ae64ee131e6b94e4996"
+    },
+    {
+      "path": "src/trading/operational.zig",
+      "sha256": "0acb9070a3fba2ea40a36562a8ddf4e06b3d9cbb864928e6e9a1abeb81af76dd"
+    },
+    {
+      "path": "src/trading/residual_lifecycle.zig",
+      "sha256": "8f27128b4367307a246cbfbc6a29f1e54fc14cf1cd142d0753ed265aca0e8d62"
+    },
+    {
+      "path": "src/trading/trading_shard.zig",
+      "sha256": "d7e20e15f07f308607ac518fb7e9245edc323751404a5f4968f238b17c0507d8"
+    },
+    {
+      "path": "src/trading/trading_shard_event.zig",
+      "sha256": "a496d64209bebca92b56e52f84d6a5191bbeb7ea33770b49e541e36e3f8d7bc3"
+    },
+    {
+      "path": "src/windows_demo_main.zig",
+      "sha256": "3fe792783c0ff8e9cfffe428a480a533f71d2c1ddbe5eaac2f95d89d1b8c2f68"
+    },
+    {
+      "path": "tools/bootstrap-libcurl.ps1",
+      "sha256": "78b08b185953186ff24e8906d036853f9aec5c502adb838e61a1a91de58f869a"
+    },
+    {
+      "path": "tools/okx-demo-live-postonly.ps1",
+      "sha256": "12db5a2340c4eaf80c58b3ed9b09645c1736550d732683cb5f73e800b5c207e2"
+    },
+    {
+      "path": "tools/okx-demo-preflight.ps1",
+      "sha256": "daf28a569e7a06aabcc0ba4a05263a07f5a432385581cd403ca8bb4ae3daf4bd"
+    },
+    {
+      "path": "tools/okx-demo-private-readonly.ps1",
+      "sha256": "9384eac9d32ecf0726f5127d5dee81fc8c5d0d6c08c5aa30f75ca9d653427a8c"
+    },
+    {
+      "path": "tools/okx-demo-public-ws-preflight.ps1",
+      "sha256": "c5982bd5e384a4df6bc8d385cb8e1b8055a9203286f600d615d7068460638a89"
+    },
+    {
+      "path": "tools/okx-demo-residual-cleanup.ps1",
+      "sha256": "dd06b6e1b7a725adfe2803082a8ae6912f12711134c31b8ebf90f9bb2e0a4c07"
+    },
+    {
+      "path": "tools/protected-demo-launch.ps1",
+      "sha256": "bf6a553f238487dd9cae3f3a1fbf1e64c6abb9f9ed91773a276a5fa48f3a45eb"
+    },
+    {
+      "path": "tools/run-okx-demo-live-acceptance.ps1",
+      "sha256": "bb6c366f047e3e0c7dba6741ad8c29300ee1d79db8fdb4491908fb4ca6cabb55"
+    },
+    {
+      "path": "tools/run-okx-linux-acceptance.ps1",
+      "sha256": "016dee9f8b52873bad9d82a287221f725a81518dbe9bb0662c352b480cf1e2f4"
+    },
+    {
+      "path": "tools/run-windows-demo-readonly.ps1",
+      "sha256": "8a9294266522b8ee76cf11beb007b6bd2bdfbcc1cc6d8a6b87542a51b9bc076d"
+    },
+    {
+      "path": "tools/test-libcurl.ps1",
+      "sha256": "810ce145787e97b3fb2a11d11dab584a29db02fce64101c8bcc85db13726c9d7"
+    },
+    {
+      "path": "tools/test-native-strategy-build.py",
+      "sha256": "606a2b14e1453f6fd44eb50b71ec1fd37b67b657e909270e75f7dea4272ad233"
+    },
+    {
+      "path": "tools/test-okx-zig-private.ps1",
+      "sha256": "aa78e26e387b3eefa75087b1954d80a3b633b66abff38d0d70c228f4a3a3d019"
+    },
+    {
+      "path": "tools/verify-control-plane-wave.ps1",
+      "sha256": "26e01ae1122fb2bd78f28e1de63def2ef3feab525d7c3e96a4e531358888b7d7"
+    },
+    {
+      "path": "tools/verify-core-wave.ps1",
+      "sha256": "1f3331148ada003108d228f113e87b81b13fdbfbdacf5e08c013a54430e10201"
+    },
+    {
+      "path": "tools/verify-four-shard.ps1",
+      "sha256": "4ec39ac43b9c92819d6e97a7280fe281026d7a4c30b42bc39002a9aa5d106523"
+    },
+    {
+      "path": "tools/verify-okx-demo-wave.ps1",
+      "sha256": "74a3ea8bedb548674a329e34225fa858bda4a439af73639738e34db0091cad06"
+    },
+    {
+      "path": "tools/verify-strategy-package-ui.cjs",
+      "sha256": "ee0a6cbc5a8d38d4995e654b05b1f4be56cfc6de959cc1460b9e363dd4345658"
+    },
+    {
+      "path": "tools/verify-windows-okx-chain.ps1",
+      "sha256": "d63f314858452fd418389afe3ee54205560c3ac173a19732f8b430b812ec985e"
+    },
+    {
+      "path": "tools/zig-ar.cmd",
+      "sha256": "1cd1ca57156a24c64f9e8b05a88dcb4b31599593f6bb4b4fd38358aed7f26a80"
+    },
+    {
+      "path": "tools/zig-entry.ps1",
+      "sha256": "ade31f36c64c8dccc7eb065b729afd15857c4fe2a687e602b1b81fb707da6357"
+    },
+    {
+      "path": "tools/zig-entry.py",
+      "sha256": "c4b5d87f0b712f7855c24c56c906b67299530555fc2663df26e783a291b2c4d8"
+    },
+    {
+      "path": "tools/zig-ranlib.cmd",
+      "sha256": "4ca4b4339591d53b0be8aa2a3c9f322db8d6a9b050ccaeb81327e8a369453edc"
+    }
+  ],
+  "file_list_sha256": "54df3b4d49c26cb76db25254bf1e7d88b409d202ee5633577066c1c8e9895d33",
+  "task10_identity_comparison": [
+    {
+      "path": "python/operator_ui.html",
+      "sha256": "cbf28ac3d15986caf5b8a875a31e4ef5e77b445b196be9ffe630df5fb926f99d",
+      "matches": true
+    },
+    {
+      "path": "python/strategy_candidate_host.py",
+      "sha256": "83c6bf716339cb660936545c5c6daf4bb99bb0a589f7fee270d982bc0cb208f7",
+      "matches": true
+    },
+    {
+      "path": "python/strategy_instance.py",
+      "sha256": "cf77e858dfb68163b8cb4c287e96f32362b90791ff8b09d73be34a35e977db75",
+      "matches": true
+    },
+    {
+      "path": "python/strategy_package.py",
+      "sha256": "698ce44134d235e32eb2a321bdcf8215a39175f4083c5b9d1af16194b6682534",
+      "matches": true
+    },
+    {
+      "path": "python/strategy_windows.py",
+      "sha256": "14745860e3fc7b8ff2a46ee692c28ebe7054ac8cf53514015d5dec18a781cfb7",
+      "matches": true
+    },
+    {
+      "path": "python/test_strategy_instance.py",
+      "sha256": "31c2a4ffb63ee2437e85d6d0a9f8ffc55f8f23c2197eb4d5119921929724e43c",
+      "matches": true
+    },
+    {
+      "path": "src/strategy/strategy_candidate.zig",
+      "sha256": "c62b5fbd2121fcc808a6b34ceed596a792f6dbe23984c0ced08be40be0dd8d6e",
+      "matches": true
+    },
+    {
+      "path": "src/strategy/strategy_package_authority.zig",
+      "sha256": "1b475a7bd0e352ad03e57d1b8d094125f7165f66ca722e3cec708ba11b2caafe",
+      "matches": true
+    },
+    {
+      "path": "src/strategy_authority_probe.zig",
+      "sha256": "ebdec4d826a8c8f2e46f588b5ed255a39ed202f57b875eb26ed0de5508f290d4",
+      "matches": true
+    },
+    {
+      "path": "src/trading/operational.zig",
+      "sha256": "0acb9070a3fba2ea40a36562a8ddf4e06b3d9cbb864928e6e9a1abeb81af76dd",
+      "matches": true
+    },
+    {
+      "path": "build.zig",
+      "sha256": "323a579b61dea3e4f50f8c5145a57f8b14587cece8bae4de3757e568609e84b3",
+      "matches": true
+    },
+    {
+      "path": "tools/verify-strategy-package-ui.cjs",
+      "sha256": "ee0a6cbc5a8d38d4995e654b05b1f4be56cfc6de959cc1460b9e363dd4345658",
+      "matches": true
+    },
+    {
+      "path": "zig-out/bin/ringwin.exe",
+      "sha256": "6dbbed7e60a044e41eb85542f735b9558789e2544dfdeda1057f10632776dd7b",
+      "matches": true
+    },
+    {
+      "path": "zig-out/bin/ringwin-strategy-candidate.exe",
+      "sha256": "4a3a923533ce3bc700da5bdf55a1df79ab9ef7a938e547804eef91b4831e5220",
+      "matches": true
+    },
+    {
+      "path": "zig-out/bin/ringwin-strategy-authority-probe.exe",
+      "sha256": "f9e8e7038c067b141c4c0975fa18682d22a14b20a0345051bc522d0a6c9bd01e",
+      "matches": true
+    }
+  ],
+  "unchanged_core_binary": {
+    "core_executable": "D:\\github\\Ringwin-strategy-package-03\\.zig-cache\\o\\c40cd4821500d1180c2aecdbf70bbc3b\\test.exe",
+    "sha256": "582e837e161cfa7098eb622deef55ec818955f189afc22a95f848df9e5c88865"
+  },
+  "core_build_input_diff": "",
+  "absent_dependency_manifests": [
+    "build.zig.zon",
+    "python/requirements.txt",
+    "package-lock.json"
+  ]
+}
