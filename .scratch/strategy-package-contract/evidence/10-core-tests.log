@@ -1,0 +1,495 @@
+test
++- run test w
+snapshot comparison: 3 identical encodings, legacy=157199 us borrowed=103723 us bytes=3746367
+checkpoint core: 100 rounds, barrier=931, encoded_snapshot_max=3748413, shard_bytes=31439408, pins_max=16/8192, window=256
+core_input_rejection: product_model=IncompatibleProductReservationModel
+core_input_rejection: l2=IncompleteL2Book fill_fee=MissingFillFee
+core_safety_invariants: dispatch_persist=pass replay_no_send=pass reduce_only_fencing=pass
+core_safety_invariants: ccc=pass intent_conflict=pass suspense=pass unclosed_archive_window=pass host_activated=pass
+gateway_encoded_rows: accepted=791, resolved_unknown=841, max_records=38468, max_bytes=32505460
+gateway_layout: gateway=78676704, accepted=960, uncertain=1056, proof=880, empty_snapshot=64
+gateway checkpoint: bytes=887, accepted=1, tail_barrier=3
+execution_gateway_acceptance: adapter_submissions=5
+private resume DTO bytes=193089
+okx_translate_order_failed=StaleVersion
+[DEBUG-okx-adapter] dispatch_error=SideEffectsDisabled
+[DEBUG-okx-adapter] dispatch_error=SideEffectsDisabled
+[DEBUG-okx-adapter] dispatch_error=DemoNotQualified
+validated trajectory 0: barrier=45, digest=1be43b386c07805c062d48c88c9a01358c64b99279a200e20035365cb78eea21
+validated trajectory 1: barrier=34, digest=430cb28a908922d20d9313fa2be493aae517f54f143830ac5b8834fa4429f1fc
+validated trajectory 2: barrier=30, digest=94da83bc055586e458ee438dff9d63ab873185f4ff3e8690f82d388900f3f69d
+validated trajectory 3: barrier=35, digest=94acc83d6e87e92eb606fca8696566a000bf3619837e5a62c034191bd4b0fbe9
+validated trajectory 4: barrier=45, digest=627ae0d2083e2beea8f32c0b1cbec6a0848a4cabd310af24a696e54ef9e94275
+store_layout: stream_cache=196672, memory_adapter=18365088, file_adapter=10755416, manifest_bound=8208, archived_descriptor=192, snapshot_bound=33554432
+owner_file_fault: short_write case=0 point=append skip=0
+owner_file_fault: short_write case=1 point=commit skip=0
+owner_file_fault: short_write case=2 point=root_publish skip=0
+owner_file_fault: short_write case=3 point=root_publish skip=1
+owner_file_fault: short_write case=4 point=seal skip=0
+owner_file_fault: short_write case=5 point=publish skip=0
+owner_file_fault: short_write case=6 point=snapshot_sync skip=0
+owner_file_fault: short_write case=7 point=rotate skip=0
+owner_file_fault: short_write case=8 point=archive_sync skip=0
+owner_file_fault: short_write case=9 point=reclaim skip=0
+owner_file_fault: short_write case=10 point=reclaim skip=1
+owner_file_fault: short_write case=11 point=root_publish skip=0
+owner_file_fault: short_write case=12 point=root_publish skip=1
+owner_file_fault: short_write case=13 point=root_publish skip=2
+owner_file_fault: short_write case=14 point=root_publish skip=3
+owner_file_fault: short_write case=15 point=root_publish skip=4
+owner_file_fault: short_write case=16 point=append skip=0
+owner_file_fault: short_write case=17 point=commit skip=0
+owner_file_fault: sync_timeout case=0 point=append skip=0
+owner_file_fault: sync_timeout case=1 point=commit skip=0
+owner_file_fault: sync_timeout case=2 point=root_publish skip=0
+owner_file_fault: sync_timeout case=3 point=root_publish skip=1
+owner_file_fault: sync_timeout case=4 point=seal skip=0
+owner_file_fault: sync_timeout case=5 point=publish skip=0
+owner_file_fault: sync_timeout case=6 point=snapshot_sync skip=0
+owner_file_fault: sync_timeout case=7 point=rotate skip=0
+owner_file_fault: sync_timeout case=8 point=archive_sync skip=0
+owner_file_fault: sync_timeout case=9 point=reclaim skip=0
+owner_file_fault: sync_timeout case=10 point=reclaim skip=1
+owner_file_fault: sync_timeout case=11 point=root_publish skip=0
+owner_file_fault: sync_timeout case=12 point=root_publish skip=1
+owner_file_fault: sync_timeout case=13 point=root_publish skip=2
+owner_file_fault: sync_timeout case=14 point=root_publish skip=3
+owner_file_fault: sync_timeout case=15 point=root_publish skip=4
+owner_file_fault: sync_timeout case=16 point=append skip=0
+owner_file_fault: sync_timeout case=17 point=commit skip=0
+owner_file_fault: enospc case=0 point=append skip=0
+owner_file_fault: enospc case=1 point=commit skip=0
+owner_file_fault: enospc case=2 point=root_publish skip=0
+owner_file_fault: enospc case=3 point=root_publish skip=1
+owner_file_fault: enospc case=4 point=seal skip=0
+owner_file_fault: enospc case=5 point=publish skip=0
+owner_file_fault: enospc case=6 point=snapshot_sync skip=0
+owner_file_fault: enospc case=7 point=rotate skip=0
+owner_file_fault: enospc case=8 point=archive_sync skip=0
+owner_file_fault: enospc case=9 point=reclaim skip=0
+owner_file_fault: enospc case=10 point=reclaim skip=1
+owner_file_fault: enospc case=11 point=root_publish skip=0
+owner_file_fault: enospc case=12 point=root_publish skip=1
+owner_file_fault: enospc case=13 point=root_publish skip=2
+owner_file_fault: enospc case=14 point=root_publish skip=3
+owner_file_fault: enospc case=15 point=root_publish skip=4
+owner_file_fault: enospc case=16 point=append skip=0
+owner_file_fault: enospc case=17 point=commit skip=0
+owner_file_fault: eio case=0 point=append skip=0
+owner_file_fault: eio case=1 point=commit skip=0
+owner_file_fault: eio case=2 point=root_publish skip=0
+owner_file_fault: eio case=3 point=root_publish skip=1
+owner_file_fault: eio case=4 point=seal skip=0
+owner_file_fault: eio case=5 point=publish skip=0
+owner_file_fault: eio case=6 point=snapshot_sync skip=0
+owner_file_fault: eio case=7 point=rotate skip=0
+owner_file_fault: eio case=8 point=archive_sync skip=0
+owner_file_fault: eio case=9 point=reclaim skip=0
+owner_file_fault: eio case=10 point=reclaim skip=1
+owner_file_fault: eio case=11 point=root_publish skip=0
+owner_file_fault: eio case=12 point=root_publish skip=1
+owner_file_fault: eio case=13 point=root_publish skip=2
+owner_file_fault: eio case=14 point=root_publish skip=3
+owner_file_fault: eio case=15 point=root_publish skip=4
+owner_file_fault: eio case=16 point=append skip=0
+owner_file_fault: eio case=17 point=commit skip=0
+owner_file_fault: corruption case=0 point=append skip=0
+owner_file_fault: corruption case=1 point=commit skip=0
+owner_file_fault: corruption case=2 point=root_publish skip=0
+owner_file_fault: corruption case=3 point=root_publish skip=1
+owner_file_fault: corruption case=4 point=seal skip=0
+owner_file_fault: corruption case=5 point=publish skip=0
+owner_file_fault: corruption case=6 point=snapshot_sync skip=0
+owner_file_fault: corruption case=7 point=rotate skip=0
+owner_file_fault: corruption case=8 point=archive_sync skip=0
+owner_file_fault: corruption case=9 point=reclaim skip=0
+owner_file_fault: corruption case=10 point=reclaim skip=1
+owner_file_fault: corruption case=11 point=root_publish skip=0
+owner_file_fault: corruption case=12 point=root_publish skip=1
+owner_file_fault: corruption case=13 point=root_publish skip=2
+owner_file_fault: corruption case=14 point=root_publish skip=3
+owner_file_fault: corruption case=15 point=root_publish skip=4
+owner_file_fault: corruption case=16 point=append skip=0
+owner_file_fault: corruption case=17 point=commit skip=0
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+okx_private_translate_failed=NativeAssetCapacityExceeded
+private checkpoint horizon: epochs=8 raw_updates=1152 canonical_account_inputs=2304
+precision13 venue=binance case=quote assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=6 canonical=05cbff45d2a63dfb964823377bdedabd739cc38f7cf55e9977d1c9b4e719dec7 semantic=290a1df14bb2f4aa59caaba0e6b7d269ba2b8f90f5c90352401ef7e1d4b055b4 sends=0
+precision13 venue=bybit case=quote assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=7 canonical=bb5a6c6e1230eeb98f44109ee4f565d6a44d78690fb50fc1c2147f94146f5c61 semantic=7893b841f02248ba5d1946df1002dd04004cfaba33d16b82ea5f61f30dd3bee2 sends=0
+precision13 venue=bybit case=extra_fees assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=7d0ab4a41321df8212b137b096252d62397857ea837630356fa2919c80b78f9c semantic=4c83b0e07b7ade9ecc854e25029f08a79a09e06dd320e73b86e36c8dd9ff8461 sends=0
+precision13 venue=binance case=base assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=6 canonical=84b2846f30d056475ade418d0b3a1559e02ef0aca13ae4213f1fc3b31d13509d semantic=7ba81224c2da530a7df7990749751eac8a563a9153b8c9698ec2870aa153013e sends=0
+precision13 venue=binance case=quote_rebate assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=6 canonical=75eeb98091f4645361462bbbce75485fe39a047fd8abb8721fa7393cb6601324 semantic=f938bf59b2cccd5abeb10f2cfb4aa68bd339a34cab05c47feebf872e9d8fa7fa sends=0
+precision13 venue=binance case=base_rebate assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=6 canonical=a1965398aff3001542a0d10199cb4ddb7b2e61bc2caca73df4d470eb3aec2d34 semantic=4ae4842843060c23af8cc6bd7adc69985f7f95382f788caeef0872f51e473699 sends=0
+precision13 venue=binance case=third_fee assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=31 raw_barrier=6 canonical=eca35702d06adc9ce25215a7c5e31d89e7bf050bd49b5b0cf4d44b9d5a4f3ba1 semantic=efe9b74c0d1af4bc2cf79bad4567af1b80ac96a0da77fd163e0d490de5173731 sends=0
+precision13 venue=binance case=third_rebate assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=31 raw_barrier=6 canonical=900eb3c4019022f23124118082af1d03c9582c704bd5368222c737de88a9739d semantic=deb16da5af074a2bd32c83738758445a0cf72fb6771ddb99fb2c31e45029925d sends=0
+precision13 venue=binance case=zero assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=6 canonical=5f17a48cb181ce1cf28849a171efef2771b89a1543943a83ce54a7f04e84d188 semantic=f09be5906260620ac22c9dec89cb0aef29cb0d5b0ca673b3d788f532bb8575a8 sends=0
+precision13 venue=binance case=long_tail assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=6 canonical=ff5283bd962123ab4b151f80e0fd74ec39c93ab7f91d9a86cff242da117af4e9 semantic=290a1df14bb2f4aa59caaba0e6b7d269ba2b8f90f5c90352401ef7e1d4b055b4 sends=0
+precision13 venue=bybit case=base assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=7 canonical=2ed6b1b5e87d32cd337f38262d7c62d365aef201ad2ca95d00b90d278a7e28ad semantic=68221ad42d3ce6e15e02d1c81acfff1383ae865375082e4d39ef467833752cc6 sends=0
+precision13 venue=bybit case=quote_rebate assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=7 canonical=0b1a03c9a1c6544d87c9a8416ffb546ff9cecb44135ce3220d60463284616a25 semantic=dd5cda4b690ce8b31b4109887467be4fc9f9e696f1a530c48963cd0502af4f92 sends=0
+precision13 venue=bybit case=base_rebate assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=7 canonical=790f302604db4775f3127f7f4b245c86566a6525698fa706b6a682535992f059 semantic=6e5acb4b1e3efc0f877609be991d98ff7459130b4046bc3a27df64da296e5a47 sends=0
+precision13 venue=bybit case=third_fee assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=31 raw_barrier=7 canonical=2ff1cb7ea1ff9bdfdd703a60252252c3ea63e24730865ea4446cd3147888f06e semantic=a85e3b22ec212db840a6015cf06235c0364d9ce7f199e31c18f4d74b06a497e3 sends=0
+precision13 venue=bybit case=third_rebate assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=31 raw_barrier=7 canonical=a92e823a2cb4a86d77cce3e3a689fb4d1fd7f4ac95e2460f35787b61933fc7f0 semantic=5a0d4127c176c90c13bc9794092324c48a4d29aec82b034625c5a9fa97e82db7 sends=0
+precision13 venue=bybit case=zero assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=7 canonical=50fa6e3c0affa6e68b3d2402f37dd9e5061e846f1e7b94eca4c4ad1bdebeb9af semantic=56b17c29160a44382b5cc57e6746b51907cee3750b7addb49ac733c357869fad sends=0
+precision13 venue=bybit case=long_tail assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=7 canonical=46054c3f4e252f482309a17b8572b5e9d506e1fed91513eb8a68151d65595650 semantic=7893b841f02248ba5d1946df1002dd04004cfaba33d16b82ea5f61f30dd3bee2 sends=0
+precision13 venue=binance case=unknown assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=5d91b46e8380c6c5932ead8edcbc252b3010ea58ef9f5b617cb7e79e83fb8792 semantic=c5a66320d9885acad8c00a930935db99502da77909417ed0e365a5d72bfe4e4b sends=0
+precision13 venue=binance case=unknown_no_pending assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=5d91b46e8380c6c5932ead8edcbc252b3010ea58ef9f5b617cb7e79e83fb8792 semantic=c5a66320d9885acad8c00a930935db99502da77909417ed0e365a5d72bfe4e4b sends=0
+precision13 venue=binance case=inexact assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=7493209dd517f3a5725602b11718f883bc1c31f7b1edf711c8f3a7e64bad78d3 semantic=993eeaf7eb6d508d771b68420928342f8a0114abfcea7d62e13e6e651289a6bd sends=0
+precision13 venue=binance case=overflow assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=9616ba76516e2a3c2fdf33416c33c8068aa5e2f9a8db31129789c3899680af17 semantic=af976318b4ca3e45f230b9339621e400f8e8967bb39d9b3ad2c969e8334f7517 sends=0
+precision13 venue=bybit case=unknown assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=a2727dc37038cf7f6f8bb4593bc99884dc4dc551bf00450958af5ad6bdb41681 semantic=e0c4cff33aebf2e51ae60c3b244b8fee97cd327383221c6ac459e035b8ebd172 sends=0
+precision13 venue=bybit case=unknown_no_pending assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=a2727dc37038cf7f6f8bb4593bc99884dc4dc551bf00450958af5ad6bdb41681 semantic=e0c4cff33aebf2e51ae60c3b244b8fee97cd327383221c6ac459e035b8ebd172 sends=0
+precision13 venue=bybit case=inexact assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=a8812878a88de8e7752f8959f02e359819d236ec9b035c94884e30b963fc435a semantic=27c34edf40d9fa6ad1a7a832d9c028e19e24adacb434a8cb7bfba6062102dc38 sends=0
+precision13 venue=bybit case=overflow assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=687bf78c649f12b31fd9e80872b7aaa7afd8f82d3f821491314143fcccf9eacd semantic=c185a96b0f61b364a3a45486b3cdf60a982375e5c4ff45abecae881acd7e3193 sends=0
+precision13 venue=bybit case=wallet_scope assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=bf548ea392d6a5d6f56ddfb44f2c88c449d6dbe556f70819a4cddcedf145bfc5 semantic=1f6876650e7f456aed96c70168234fab504fc7942b8245d095f05ba4f4b81a0b sends=0
+precision13 venue=bybit case=quote assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=7 canonical=bb5a6c6e1230eeb98f44109ee4f565d6a44d78690fb50fc1c2147f94146f5c61 semantic=7893b841f02248ba5d1946df1002dd04004cfaba33d16b82ea5f61f30dd3bee2 sends=0
+precision13 venue=bybit case=report_first assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=30 raw_barrier=7 canonical=5172d39eed428cf25109bba37e2e110edaeda1f9aa06836c0587367e7ec90e7d semantic=7893b841f02248ba5d1946df1002dd04004cfaba33d16b82ea5f61f30dd3bee2 sends=0
+precision13 venue=binance case=conflict assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=31 raw_barrier=7 canonical=a9d09890fec9eb2102d5c006d37df062be82196438f3bab8f1e2180aee24f672 semantic=3e68b283965d843f1cda60d0156f109927b84f25e1db4b30873eb20740ad6c3c sends=0
+precision13 venue=bybit case=conflict assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=31 raw_barrier=8 canonical=dc34309bd3b045bdb0cfb26308eecf84c3fa8dffc72fff7cca8daa6b34883383 semantic=d5d0c4faf17aa9ac06ec22cf66cb5ca1a7c3927e1820cfa842a7bdf21ddb1ea7 sends=0
+precision13 venue=binance case=malformed_ws assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=926ce2415078d6c436aca862144aafe244813509b312876916a5c075a4b3ec1c semantic=6f8c3e2bf0e731e3b8914b5ff004e2635734a2ecf6b2bc6a526186a9eb47e90e sends=0
+precision13 venue=bybit case=malformed_ws assets_sha256=4c79c774824db8b7693209db63431d856daf3c0cf93b1f5f407cf24e475fbe8a decision_barrier=26 raw_barrier=5 canonical=d8c33b91c46a3115cf376a5f00d8cb0eab16cf0291b099e960e169caba94587b semantic=a3b14d45916fd2e569cc4165895a3b59dc9e7bcaa3ee0695b28fde5d788814f9 sends=0
+precision13 venue=binance case=single_fee assets_sha256=273bc6ff45e8c64a324e1def01e9f032b35a6f0b4050486008d2b58822f97618 decision_barrier=26 raw_barrier=5 canonical=d2272c11486a8115d0c4903ac7815c286429fc7d7f590d386a56a407b8a75eaf semantic=d61a91e1ea02386d351ce1a3444a35771b256ef18511f952d81f85ca7fc8029a sends=0
+precision13 venue=bybit case=single_fee assets_sha256=273bc6ff45e8c64a324e1def01e9f032b35a6f0b4050486008d2b58822f97618 decision_barrier=26 raw_barrier=5 canonical=07bf001264b48d55446ee66c943b31d8bfd8e60bf990a36ebf603fb78f8d4f65 semantic=a4703ffb286b93ff86ed99619ce6e996cbdaa8096a5e58184d461f4a4e772fbc sends=0
+continuous classes selected_quotes=true funding_spot_perpetual_pairs=4 cross_venue_pairs=1 independent_risk=true matched_base_quantity=true
+observation_capacity: combinations=500 selected_live=100 owners=4 max_snapshot_bytes=3838550 shard_bytes=31439408
+archive fault history_publish: status=ready gate=open last=45 committed=45 tails=1 snapshot=26
+archive fault decision_commit: status=ready gate=open last=46 committed=45 tails=1 snapshot=26
+archive fault gateway_checkpoint: status=ready gate=open last=46 committed=46 tails=1 snapshot=26
+OMS capacity bytes: Oms=16636448, Order=1216x5120, Command=736x10240, Report=72x15360, Reconciliation=72x15360, SeenIntent=64x10240, Qualification=1440, align=16
+OMS functional shard 0: live=25, retained=25, completed=25
+OMS functional shard 1: live=25, retained=25, completed=25
+OMS functional shard 2: live=25, retained=25, completed=25
+OMS functional shard 3: live=25, retained=25, completed=25
+OMS functional shard 0: round=1, live=25, retained=0, completed=30
+OMS functional shard 1: round=1, live=25, retained=0, completed=30
+OMS functional shard 2: round=1, live=25, retained=0, completed=30
+OMS functional shard 3: round=1, live=25, retained=0, completed=30
+OMS functional shard 0: round=2, live=25, retained=0, completed=35
+OMS functional shard 1: round=2, live=25, retained=0, completed=35
+OMS functional shard 2: round=2, live=25, retained=0, completed=35
+OMS functional shard 3: round=2, live=25, retained=0, completed=35
+OMS functional shard 0: round=3, live=25, retained=0, completed=40
+OMS functional shard 1: round=3, live=25, retained=0, completed=40
+OMS functional shard 2: round=3, live=25, retained=0, completed=40
+OMS functional shard 3: round=3, live=25, retained=0, completed=40
+OMS functional shard 0: round=4, live=25, retained=0, completed=45
+OMS functional shard 1: round=4, live=25, retained=0, completed=45
+OMS functional shard 2: round=4, live=25, retained=0, completed=45
+OMS functional shard 3: round=4, live=25, retained=0, completed=45
+OMS functional shard 0: round=5, live=25, retained=0, completed=50
+OMS functional shard 1: round=5, live=25, retained=0, completed=50
+OMS functional shard 2: round=5, live=25, retained=0, completed=50
+OMS functional shard 3: round=5, live=25, retained=0, completed=50
+OMS functional shard 0: round=6, live=25, retained=0, completed=55
+OMS functional shard 1: round=6, live=25, retained=0, completed=55
+OMS functional shard 2: round=6, live=25, retained=0, completed=55
+OMS functional shard 3: round=6, live=25, retained=0, completed=55
+OMS functional shard 0: round=7, live=25, retained=0, completed=60
+OMS functional shard 1: round=7, live=25, retained=0, completed=60
+OMS functional shard 2: round=7, live=25, retained=0, completed=60
+OMS functional shard 3: round=7, live=25, retained=0, completed=60
+OMS functional shard 0: round=8, live=25, retained=0, completed=65
+OMS functional shard 1: round=8, live=25, retained=0, completed=65
+OMS functional shard 2: round=8, live=25, retained=0, completed=65
+OMS functional shard 3: round=8, live=25, retained=0, completed=65
+OMS functional shard 0: round=9, live=25, retained=0, completed=70
+OMS functional shard 1: round=9, live=25, retained=0, completed=70
+OMS functional shard 2: round=9, live=25, retained=0, completed=70
+OMS functional shard 3: round=9, live=25, retained=0, completed=70
+OMS functional shard 0: round=10, live=25, retained=0, completed=75
+OMS functional shard 1: round=10, live=25, retained=0, completed=75
+OMS functional shard 2: round=10, live=25, retained=0, completed=75
+OMS functional shard 3: round=10, live=25, retained=0, completed=75
+Owner capacity shard 0: live=2, terminal=2, adapter_sends=6
+Owner capacity shard 0: archived_terminal=2 journal_bytes=29853 history_bytes=17616 quota=1073741824
+Owner capacity all 1 shards: round=1, live_each=2, cumulative_terminal_each=3
+Owner capacity all 1 shards: round=2, live_each=2, cumulative_terminal_each=4
+Owner capacity shard 0: live=25, terminal=25, adapter_sends=75
+Owner capacity shard 1: live=25, terminal=25, adapter_sends=75
+Owner capacity shard 2: live=25, terminal=25, adapter_sends=75
+Owner capacity shard 3: live=25, terminal=25, adapter_sends=75
+Owner capacity shard 0: archived_terminal=25 journal_bytes=298550 history_bytes=1133608 quota=1073741824
+Owner capacity shard 1: archived_terminal=25 journal_bytes=298550 history_bytes=1133608 quota=1073741824
+Owner capacity shard 2: archived_terminal=25 journal_bytes=298550 history_bytes=1133608 quota=1073741824
+Owner capacity shard 3: archived_terminal=25 journal_bytes=298550 history_bytes=1133608 quota=1073741824
+Owner capacity all 4 shards: round=1, live_each=25, cumulative_terminal_each=30
+Owner capacity all 4 shards: round=2, live_each=25, cumulative_terminal_each=35
+Owner capacity all 4 shards: round=3, live_each=25, cumulative_terminal_each=40
+Owner capacity all 4 shards: round=4, live_each=25, cumulative_terminal_each=45
+Owner capacity all 4 shards: round=5, live_each=25, cumulative_terminal_each=50
+Owner capacity all 4 shards: round=6, live_each=25, cumulative_terminal_each=55
+Owner capacity all 4 shards: round=7, live_each=25, cumulative_terminal_each=60
+Owner capacity all 4 shards: round=8, live_each=25, cumulative_terminal_each=65
+Owner capacity all 4 shards: round=9, live_each=25, cumulative_terminal_each=70
+Owner capacity all 4 shards: round=10, live_each=25, cumulative_terminal_each=75
+Owner capacity shard 0: live=32, terminal=16, adapter_sends=64
+Owner capacity shard 0: archived_terminal=16 journal_bytes=247127 history_bytes=460416 quota=1073741824
+Owner capacity all 1 shards: round=1, live_each=32, cumulative_terminal_each=20
+Owner capacity all 1 shards: round=2, live_each=32, cumulative_terminal_each=24
+control commands round 0
+control commands round 1
+control commands round 2
+control commands round 3
+control commands round 4
+control commands round 5
+control commands round 6
+control commands round 7
+control commands round 8
+control commands round 9
+control pause/resume round 0
+control pause/resume round 1
+control pause/resume round 2
+control pause/resume round 3
+control pause/resume round 4
+control pause/resume round 5
+control pause/resume round 6
+control pause/resume round 7
+control pause/resume round 8
+control pause/resume round 9
+control gates/latches round 0
+control gates/latches round 1
+control gates/latches round 2
+control gates/latches round 3
+control gates/latches round 4
+control gates/latches round 5
+control gates/latches round 6
+control gates/latches round 7
+control gates/latches round 8
+control gates/latches round 9
+control fences round 0
+control fences round 1
+control fences round 2
+control fences round 3
+control fences round 4
+control fences round 5
+control fences round 6
+control fences round 7
+control fences round 8
+control fences round 9
+forced archive fault history_publish
+forced archive fault decision_commit
+forced archive fault gateway_append
+forced archive fault gateway_checkpoint
+forced history window 0
+forced history window 1
+forced history window 2
+forced history window 3
+forced history window 4
+forced history window 5
+forced history window 6
+forced history window 7
+forced history window 8
+forced history window 9
+gateway history window 0
+gateway history window 1
+gateway history window 2
+gateway history window 3
+gateway history window 4
+gateway history window 5
+gateway history window 6
+gateway history window 7
+gateway history window 8
+gateway history window 9
+continuous layout owner=63272448 shard=31439408 oms=16636448 gateway=78676704 adapter_batch=363536 canonical_record=11360 command=736 fixture=1101024
+continuous backlog round=1 shard=0 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=1 shard=0 live=1 terminal=1
+continuous storage round=1 shard=0 archive_journal_bytes=98229 history_object_bytes=8808 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=1 shard=0 live=1 terminal=0 trace=1 ingress=137 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=302 snapshot_bytes=3775276 history_generation=1 history_root=faa6ad2c3b4a1524f4e8dc8a30d6e83d4f71bddc74077cf1ae68c89fc15c1161 sends=3 submit_samples=3 submit_total_ns=324044500
+continuous backlog round=1 shard=1 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=1 shard=1 live=1 terminal=1
+continuous storage round=1 shard=1 archive_journal_bytes=98229 history_object_bytes=8808 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=1 shard=1 live=1 terminal=0 trace=1 ingress=137 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=302 snapshot_bytes=3775276 history_generation=1 history_root=9ea1c2a7fc831d2b600ebc9c1b92511855ad1f7333bcb3638f1ce105d3f6c3be sends=3 submit_samples=3 submit_total_ns=327125300
+continuous backlog round=1 shard=2 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=1 shard=2 live=1 terminal=1
+continuous storage round=1 shard=2 archive_journal_bytes=98229 history_object_bytes=8808 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=1 shard=2 live=1 terminal=0 trace=1 ingress=137 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=302 snapshot_bytes=3775276 history_generation=1 history_root=9db253acde54923fa4781673b2e8d02846f8071570c129666e618eaf6c8be598 sends=3 submit_samples=3 submit_total_ns=325028200
+continuous backlog round=1 shard=3 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=1 shard=3 live=1 terminal=1
+continuous storage round=1 shard=3 archive_journal_bytes=98229 history_object_bytes=8808 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=1 shard=3 live=1 terminal=0 trace=1 ingress=137 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=302 snapshot_bytes=3775276 history_generation=1 history_root=3cbdbf5fadf89d8e0901e22fa87804388b5eb5c2bc5b5a9dfb9aa52bb77322f1 sends=3 submit_samples=3 submit_total_ns=325475200
+continuous backlog round=2 shard=0 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=2 shard=0 live=1 terminal=1
+continuous storage round=2 shard=0 archive_journal_bytes=146073 history_object_bytes=17616 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=2 shard=0 live=1 terminal=0 trace=1 ingress=143 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=334 snapshot_bytes=3775276 history_generation=2 history_root=74f0f9f2b39799d987a74c101b47f7983deefa61c1431e7ee7737672afc38fa6 sends=5 submit_samples=5 submit_total_ns=756167700
+continuous backlog round=2 shard=1 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=2 shard=1 live=1 terminal=1
+continuous storage round=2 shard=1 archive_journal_bytes=146073 history_object_bytes=17616 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=2 shard=1 live=1 terminal=0 trace=1 ingress=143 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=334 snapshot_bytes=3775276 history_generation=2 history_root=30bf6318f0890d205a056b18f620cfc60b70337955018b5aee7d7c2e49447e8c sends=5 submit_samples=5 submit_total_ns=759976600
+continuous backlog round=2 shard=2 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=2 shard=2 live=1 terminal=1
+continuous storage round=2 shard=2 archive_journal_bytes=146073 history_object_bytes=17616 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=2 shard=2 live=1 terminal=0 trace=1 ingress=143 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=334 snapshot_bytes=3775276 history_generation=2 history_root=5aeabefb04ded1a68fac97748a10c9fec91f0756b039e8cf5b4442d4c8fd5829 sends=5 submit_samples=5 submit_total_ns=757217500
+continuous backlog round=2 shard=3 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=2 shard=3 live=1 terminal=1
+continuous storage round=2 shard=3 archive_journal_bytes=146073 history_object_bytes=17616 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=2 shard=3 live=1 terminal=0 trace=1 ingress=143 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=334 snapshot_bytes=3775276 history_generation=2 history_root=c0ac1727b2d3204d2999f1581a470808baf9196867d0270e04f5fbdf41ebcefe sends=5 submit_samples=5 submit_total_ns=762107700
+continuous backlog round=3 shard=0 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=3 shard=0 live=1 terminal=1
+continuous storage round=3 shard=0 archive_journal_bytes=192920 history_object_bytes=26424 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=3 shard=0 live=1 terminal=0 trace=1 ingress=148 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=364 snapshot_bytes=3775276 history_generation=3 history_root=f61b8199bf5d0f2c5dee99d77b53c7ebb3f2a74895ab755e931e50d0a37d8bdb sends=7 submit_samples=7 submit_total_ns=1182363100
+continuous backlog round=3 shard=1 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=3 shard=1 live=1 terminal=1
+continuous storage round=3 shard=1 archive_journal_bytes=192920 history_object_bytes=26424 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=3 shard=1 live=1 terminal=0 trace=1 ingress=148 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=364 snapshot_bytes=3775276 history_generation=3 history_root=8bd6eec24c4f2527cf9f095ed2c688a772ec40c7cd226f29adc7980c5a986822 sends=7 submit_samples=7 submit_total_ns=1182957200
+continuous backlog round=3 shard=2 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=3 shard=2 live=1 terminal=1
+continuous storage round=3 shard=2 archive_journal_bytes=192920 history_object_bytes=26424 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=3 shard=2 live=1 terminal=0 trace=1 ingress=148 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=364 snapshot_bytes=3775276 history_generation=3 history_root=f34c7b28b05b00ff5a7e5bb11e3dbb3715561770b4c2e26e7fbf8e61292b3073 sends=7 submit_samples=7 submit_total_ns=1183058400
+continuous backlog round=3 shard=3 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=3 shard=3 live=1 terminal=1
+continuous storage round=3 shard=3 archive_journal_bytes=192920 history_object_bytes=26424 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=3 shard=3 live=1 terminal=0 trace=1 ingress=148 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=364 snapshot_bytes=3775276 history_generation=3 history_root=1305faaabf5b2d9a8e2ddf2ae761d9b7c7ca861f265691952fc8e9ef9cecb05c sends=7 submit_samples=7 submit_total_ns=1185483200
+continuous backlog round=4 shard=0 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=4 shard=0 live=1 terminal=1
+continuous storage round=4 shard=0 archive_journal_bytes=240205 history_object_bytes=43424 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=4 shard=0 live=1 terminal=0 trace=1 ingress=153 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=395 snapshot_bytes=3775276 history_generation=4 history_root=b03693cd6e0be6cdb348631612d3ed5383b8b62717a7dceedb610a9ab9e9d0e3 sends=9 submit_samples=9 submit_total_ns=1607310500
+continuous backlog round=4 shard=1 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=4 shard=1 live=1 terminal=1
+continuous storage round=4 shard=1 archive_journal_bytes=240205 history_object_bytes=43424 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=4 shard=1 live=1 terminal=0 trace=1 ingress=153 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=395 snapshot_bytes=3775276 history_generation=4 history_root=6651fe3ef90c03b6559bd3ac4a294f8cccf317699b7ff530cfb5cff626980bed sends=9 submit_samples=9 submit_total_ns=1612127000
+continuous backlog round=4 shard=2 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=4 shard=2 live=1 terminal=1
+continuous storage round=4 shard=2 archive_journal_bytes=240205 history_object_bytes=43424 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=4 shard=2 live=1 terminal=0 trace=1 ingress=153 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=395 snapshot_bytes=3775276 history_generation=4 history_root=b07fb4b04c4b65ced581fd906a36c23bfd40218d120ffbe1545a7cdab90aa672 sends=9 submit_samples=9 submit_total_ns=1609343900
+continuous backlog round=4 shard=3 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=4 shard=3 live=1 terminal=1
+continuous storage round=4 shard=3 archive_journal_bytes=240205 history_object_bytes=43424 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=4 shard=3 live=1 terminal=0 trace=1 ingress=153 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=395 snapshot_bytes=3775276 history_generation=4 history_root=0b026e4444a76a715a994889c454ebdd5d9733eb45aadabbc07886537e9f821e sends=9 submit_samples=9 submit_total_ns=1613493200
+continuous backlog round=5 shard=0 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=5 shard=0 live=1 terminal=1
+continuous storage round=5 shard=0 archive_journal_bytes=287052 history_object_bytes=64520 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=5 shard=0 live=1 terminal=0 trace=1 ingress=158 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=425 snapshot_bytes=3775276 history_generation=5 history_root=2672c573c426f732647252d450b5d7af893e0c5e84797926d90275cf94b553da sends=11 submit_samples=11 submit_total_ns=1927404500
+continuous backlog round=5 shard=1 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=5 shard=1 live=1 terminal=1
+continuous storage round=5 shard=1 archive_journal_bytes=287052 history_object_bytes=64520 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=5 shard=1 live=1 terminal=0 trace=1 ingress=158 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=425 snapshot_bytes=3775276 history_generation=5 history_root=122e09a803f9820480c9de75038ae6fff6f8e7770f777e08bec45757d256bb9c sends=11 submit_samples=11 submit_total_ns=1929031300
+continuous backlog round=5 shard=2 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=5 shard=2 live=1 terminal=1
+continuous storage round=5 shard=2 archive_journal_bytes=287052 history_object_bytes=64520 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=5 shard=2 live=1 terminal=0 trace=1 ingress=158 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=425 snapshot_bytes=3775276 history_generation=5 history_root=20d747213cbf873ac00b591538004ea800f304848ad8a7de472d6633fbe72d09 sends=11 submit_samples=11 submit_total_ns=1922627700
+continuous backlog round=5 shard=3 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=5 shard=3 live=1 terminal=1
+continuous storage round=5 shard=3 archive_journal_bytes=287052 history_object_bytes=64520 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=5 shard=3 live=1 terminal=0 trace=1 ingress=158 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=425 snapshot_bytes=3775276 history_generation=5 history_root=8514251fc923e95e7dd5b4cf18159964f6ce8241bb92f5c015b22b17b00e3be7 sends=11 submit_samples=11 submit_total_ns=1934021300
+continuous backlog round=6 shard=0 live=1 terminal=3 batch_highwater=2 deferred=0
+continuous coexist round=6 shard=0 live=1 terminal=3
+continuous storage round=6 shard=0 archive_journal_bytes=418340 history_object_bytes=152384 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=6 shard=0 live=1 terminal=0 trace=1 ingress=174 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=511 snapshot_bytes=3775276 history_generation=8 history_root=cddc7f76b9cbd5f77a1e26656c4b3d427f30901335077e06a4d976ee29f085d0 sends=17 submit_samples=17 submit_total_ns=3209609400
+continuous backlog round=6 shard=1 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=6 shard=1 live=1 terminal=1
+continuous storage round=6 shard=1 archive_journal_bytes=334896 history_object_bytes=89712 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=6 shard=1 live=1 terminal=0 trace=1 ingress=164 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=457 snapshot_bytes=3775276 history_generation=6 history_root=dd861bd8f904c555de7155271f6d14cef9744ead5db7363205b3f80d890436f4 sends=13 submit_samples=13 submit_total_ns=2365894800
+continuous backlog round=6 shard=2 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=6 shard=2 live=1 terminal=1
+continuous storage round=6 shard=2 archive_journal_bytes=334896 history_object_bytes=89712 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=6 shard=2 live=1 terminal=0 trace=1 ingress=164 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=457 snapshot_bytes=3775276 history_generation=6 history_root=25395467174bfb76acfcfae52e65478d8ef202a4781e8be0b33dc5b8be74fe42 sends=13 submit_samples=13 submit_total_ns=2361910700
+continuous backlog round=6 shard=3 live=1 terminal=0 batch_highwater=2 deferred=0
+continuous coexist round=6 shard=3 live=1 terminal=0
+continuous storage round=6 shard=3 archive_journal_bytes=292177 history_object_bytes=64520 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=6 shard=3 live=1 terminal=0 trace=1 ingress=158 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=428 snapshot_bytes=3775276 history_generation=5 history_root=8514251fc923e95e7dd5b4cf18159964f6ce8241bb92f5c015b22b17b00e3be7 sends=11 submit_samples=11 submit_total_ns=1934021300
+continuous backlog round=7 shard=0 live=1 terminal=3 batch_highwater=2 deferred=0
+continuous coexist round=7 shard=0 live=1 terminal=3
+continuous storage round=7 shard=0 archive_journal_bytes=550162 history_object_bytes=244344 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=7 shard=0 live=1 terminal=0 trace=1 ingress=190 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=598 snapshot_bytes=3775276 history_generation=11 history_root=7d1f8079ed425615372a6c7c011a9b732abed0d4965cb46bcc4d903eec4d4096 sends=23 submit_samples=23 submit_total_ns=4379145100
+continuous backlog round=7 shard=1 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=7 shard=1 live=1 terminal=1
+continuous storage round=7 shard=1 archive_journal_bytes=381743 history_object_bytes=119000 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=7 shard=1 live=1 terminal=0 trace=1 ingress=169 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=487 snapshot_bytes=3775276 history_generation=7 history_root=f0f8186f35159a35cfff1028b49ead1efd1c7e9accc19d855febe7de66006062 sends=15 submit_samples=15 submit_total_ns=2681690400
+continuous backlog round=7 shard=2 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=7 shard=2 live=1 terminal=1
+continuous storage round=7 shard=2 archive_journal_bytes=381743 history_object_bytes=119000 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=7 shard=2 live=1 terminal=0 trace=1 ingress=169 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=487 snapshot_bytes=3775276 history_generation=7 history_root=c0cb8e54bc26a85488c7e9e92e82f1cb5aa263d93a9ff4141b9b81dc2a11bfa6 sends=15 submit_samples=15 submit_total_ns=2676309300
+continuous backlog round=7 shard=3 live=1 terminal=0 batch_highwater=2 deferred=0
+continuous coexist round=7 shard=3 live=1 terminal=0
+continuous storage round=7 shard=3 archive_journal_bytes=297302 history_object_bytes=64520 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=7 shard=3 live=1 terminal=0 trace=1 ingress=158 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=431 snapshot_bytes=3775276 history_generation=5 history_root=8514251fc923e95e7dd5b4cf18159964f6ce8241bb92f5c015b22b17b00e3be7 sends=11 submit_samples=11 submit_total_ns=1934021300
+continuous backlog round=8 shard=0 live=1 terminal=3 batch_highwater=2 deferred=0
+continuous coexist round=8 shard=0 live=1 terminal=3
+continuous storage round=8 shard=0 archive_journal_bytes=681450 history_object_bytes=356784 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=8 shard=0 live=1 terminal=0 trace=1 ingress=206 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=684 snapshot_bytes=3775276 history_generation=14 history_root=2755d8e4e0e61c7e541a281a129df01f63c46a334fd4d402f28afe70ccf1f183 sends=29 submit_samples=29 submit_total_ns=5456760200
+continuous backlog round=8 shard=1 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=8 shard=1 live=1 terminal=1
+continuous storage round=8 shard=1 archive_journal_bytes=428590 history_object_bytes=152384 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=8 shard=1 live=1 terminal=0 trace=1 ingress=174 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=517 snapshot_bytes=3775276 history_generation=8 history_root=a82ec82849d2dca039f5be6c68629bf08dd6c2c2692312907e40f990e1589eef sends=17 submit_samples=17 submit_total_ns=3106201000
+continuous backlog round=8 shard=2 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=8 shard=2 live=1 terminal=1
+continuous storage round=8 shard=2 archive_journal_bytes=428590 history_object_bytes=152384 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=8 shard=2 live=1 terminal=0 trace=1 ingress=174 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=517 snapshot_bytes=3775276 history_generation=8 history_root=2b038ef5416809eb481fe6cfed846252dde6eb15aba4b6c707efc49cafc771aa sends=17 submit_samples=17 submit_total_ns=3107196700
+continuous backlog round=8 shard=3 live=1 terminal=0 batch_highwater=2 deferred=0
+continuous coexist round=8 shard=3 live=1 terminal=0
+continuous storage round=8 shard=3 archive_journal_bytes=302427 history_object_bytes=64520 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=8 shard=3 live=1 terminal=0 trace=1 ingress=158 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=434 snapshot_bytes=3775276 history_generation=5 history_root=8514251fc923e95e7dd5b4cf18159964f6ce8241bb92f5c015b22b17b00e3be7 sends=11 submit_samples=11 submit_total_ns=1934021300
+continuous backlog round=9 shard=0 live=1 terminal=3 batch_highwater=2 deferred=0
+continuous coexist round=9 shard=0 live=1 terminal=3
+continuous storage round=9 shard=0 archive_journal_bytes=812179 history_object_bytes=514280 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=9 shard=0 live=1 terminal=0 trace=1 ingress=221 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=769 snapshot_bytes=3775276 history_generation=17 history_root=51970f734bd35c8dabfe68e396e3f68a58e1337192c022d40264f1582a6a699f sends=35 submit_samples=35 submit_total_ns=6763903000
+continuous backlog round=9 shard=1 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=9 shard=1 live=1 terminal=1
+continuous storage round=9 shard=1 archive_journal_bytes=475875 history_object_bytes=181672 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=9 shard=1 live=1 terminal=0 trace=1 ingress=179 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=548 snapshot_bytes=3775276 history_generation=9 history_root=8e30ee2e7c013021c7286aba8e957af6a1182a4ab51b5d59e6e710f9b2eb7bbb sends=19 submit_samples=19 submit_total_ns=3527900200
+continuous backlog round=9 shard=2 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=9 shard=2 live=1 terminal=1
+continuous storage round=9 shard=2 archive_journal_bytes=475875 history_object_bytes=181672 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=9 shard=2 live=1 terminal=0 trace=1 ingress=179 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=548 snapshot_bytes=3775276 history_generation=9 history_root=3e597ae8dae6d2837ecbfaef091d0f102600a9bc926d3004daa5cbd87b5d32bb sends=19 submit_samples=19 submit_total_ns=3526048100
+continuous backlog round=9 shard=3 live=1 terminal=0 batch_highwater=2 deferred=0
+continuous coexist round=9 shard=3 live=1 terminal=0
+continuous storage round=9 shard=3 archive_journal_bytes=307552 history_object_bytes=64520 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=9 shard=3 live=1 terminal=0 trace=1 ingress=158 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=437 snapshot_bytes=3775276 history_generation=5 history_root=8514251fc923e95e7dd5b4cf18159964f6ce8241bb92f5c015b22b17b00e3be7 sends=11 submit_samples=11 submit_total_ns=1934021300
+continuous backlog round=10 shard=0 live=1 terminal=3 batch_highwater=2 deferred=0
+continuous coexist round=10 shard=0 live=1 terminal=3
+continuous storage round=10 shard=0 archive_journal_bytes=943467 history_object_bytes=716832 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=10 shard=0 live=1 terminal=0 trace=1 ingress=237 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=855 snapshot_bytes=3775276 history_generation=20 history_root=f4b70ae74ddcb905ee5c3b73c8049abb8b187d11c5d943b19360c6406ecd241c sends=41 submit_samples=41 submit_total_ns=8066538400
+continuous backlog round=10 shard=1 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=10 shard=1 live=1 terminal=1
+continuous storage round=10 shard=1 archive_journal_bytes=523281 history_object_bytes=210960 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=10 shard=1 live=1 terminal=0 trace=1 ingress=185 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=579 snapshot_bytes=3775276 history_generation=10 history_root=87c1adf27c3e7864f62942b386b1b4f7c9a219ff97e250b229dea8a03b1e7af5 sends=21 submit_samples=21 submit_total_ns=3973712500
+continuous backlog round=10 shard=2 live=1 terminal=1 batch_highwater=2 deferred=0
+continuous coexist round=10 shard=2 live=1 terminal=1
+continuous storage round=10 shard=2 archive_journal_bytes=523281 history_object_bytes=210960 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=10 shard=2 live=1 terminal=0 trace=1 ingress=185 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=579 snapshot_bytes=3775276 history_generation=10 history_root=6fb134b3321633dc45793a043e4562d68715e85c79f9a5a41e3cf717e6a7138c sends=21 submit_samples=21 submit_total_ns=3973318200
+continuous backlog round=10 shard=3 live=1 terminal=0 batch_highwater=2 deferred=0
+continuous coexist round=10 shard=3 live=1 terminal=0
+continuous storage round=10 shard=3 archive_journal_bytes=312677 history_object_bytes=64520 quota_bytes=1073741824 tail_records=1 tail_bytes=406
+continuous seed=0x20261008 round=10 shard=3 live=1 terminal=0 trace=1 ingress=158 ledger=4 fills=1 accepted=1 unknown=0 adapter_queue=0 barrier=440 snapshot_bytes=3775276 history_generation=5 history_root=8514251fc923e95e7dd5b4cf18159964f6ce8241bb92f5c015b22b17b00e3be7 sends=11 submit_samples=11 submit_total_ns=1934021300
+continuous mixed seed=0x20261008 live=5 terminal=3 ledger=20 fills=5 sends=7 unknown_zero_resend=true
+continuous shared account owners=4 live=4 terminal=0 sdk_sends=0 gross=185100 ceiling_reject=preserved recovered=equal
+windows_capacity_fault injection=adapter_hook point=append fault=short_write public_error=DecisionLogUnavailable apply=true skip=0 live=2 terminal=0 barrier=42 recovered_closed=false sends=2 schema=54 artifact=1 old_digest=2d448c74857c2bb4c941621dbf4859ddcc90642eecc3b40572abf755143ad250 new_digest=fbfe8e35b1773f8b2dc36652b0cd8c982742a4306917306d1efd7a50c0cc08e7 recovered_digest=2d448c74857c2bb4c941621dbf4859ddcc90642eecc3b40572abf755143ad250 economics=8b722abc11eeae2758ffae53992adfdd3852b8c68dbee0b2fa62cc7bf5abc321
+windows_capacity_fault injection=adapter_hook point=commit fault=sync_timeout public_error=DecisionLogUnavailable apply=true skip=0 live=2 terminal=0 barrier=42 recovered_closed=true sends=2 schema=54 artifact=1 old_digest=2d448c74857c2bb4c941621dbf4859ddcc90642eecc3b40572abf755143ad250 new_digest=fbfe8e35b1773f8b2dc36652b0cd8c982742a4306917306d1efd7a50c0cc08e7 recovered_digest=2d448c74857c2bb4c941621dbf4859ddcc90642eecc3b40572abf755143ad250 economics=8b722abc11eeae2758ffae53992adfdd3852b8c68dbee0b2fa62cc7bf5abc321
+windows_capacity_fault injection=adapter_hook point=root_publish fault=eio public_error=DecisionLogUnavailable apply=true skip=0 live=2 terminal=0 barrier=42 recovered_closed=false sends=2 schema=54 artifact=1 old_digest=2d448c74857c2bb4c941621dbf4859ddcc90642eecc3b40572abf755143ad250 new_digest=fbfe8e35b1773f8b2dc36652b0cd8c982742a4306917306d1efd7a50c0cc08e7 recovered_digest=2d448c74857c2bb4c941621dbf4859ddcc90642eecc3b40572abf755143ad250 economics=8b722abc11eeae2758ffae53992adfdd3852b8c68dbee0b2fa62cc7bf5abc321
+windows_capacity_fault injection=adapter_hook point=root_publish fault=eio public_error=DecisionLogUnavailable apply=true skip=1 live=2 terminal=0 barrier=42 recovered_closed=true sends=2 schema=54 artifact=1 old_digest=2d448c74857c2bb4c941621dbf4859ddcc90642eecc3b40572abf755143ad250 new_digest=fbfe8e35b1773f8b2dc36652b0cd8c982742a4306917306d1efd7a50c0cc08e7 recovered_digest=2d448c74857c2bb4c941621dbf4859ddcc90642eecc3b40572abf755143ad250 economics=8b722abc11eeae2758ffae53992adfdd3852b8c68dbee0b2fa62cc7bf5abc321
+windows_capacity_fault injection=adapter_hook point=publish fault=read_only public_error=DecisionLogUnavailable apply=false skip=0 live=2 terminal=0 barrier=46 recovered_closed=false sends=2 schema=54 artifact=1 old_digest=2d448c74857c2bb4c941621dbf4859ddcc90642eecc3b40572abf755143ad250 new_digest=fbfe8e35b1773f8b2dc36652b0cd8c982742a4306917306d1efd7a50c0cc08e7 recovered_digest=fbfe8e35b1773f8b2dc36652b0cd8c982742a4306917306d1efd7a50c0cc08e7 economics=eda73f4e76269185900a6cc9e7e99f4cad0e28656f56d7aef207cba70964aa62
+windows_capacity_fault injection=adapter_hook point=snapshot_sync fault=sync_timeout public_error=DecisionLogUnavailable apply=false skip=0 live=2 terminal=0 barrier=46 recovered_closed=false sends=2 schema=54 artifact=1 old_digest=2d448c74857c2bb4c941621dbf4859ddcc90642eecc3b40572abf755143ad250 new_digest=fbfe8e35b1773f8b2dc36652b0cd8c982742a4306917306d1efd7a50c0cc08e7 recovered_digest=fbfe8e35b1773f8b2dc36652b0cd8c982742a4306917306d1efd7a50c0cc08e7 economics=eda73f4e76269185900a6cc9e7e99f4cad0e28656f56d7aef207cba70964aa62
+windows_capacity_fault injection=adapter_hook point=archive_sync fault=sync_timeout public_error=DecisionLogUnavailable apply=false skip=0 live=2 terminal=0 barrier=46 recovered_closed=false sends=2 schema=54 artifact=1 old_digest=2d448c74857c2bb4c941621dbf4859ddcc90642eecc3b40572abf755143ad250 new_digest=fbfe8e35b1773f8b2dc36652b0cd8c982742a4306917306d1efd7a50c0cc08e7 recovered_digest=fbfe8e35b1773f8b2dc36652b0cd8c982742a4306917306d1efd7a50c0cc08e7 economics=eda73f4e76269185900a6cc9e7e99f4cad0e28656f56d7aef207cba70964aa62
+windows_capacity_fault injection=adapter_hook point=root_publish fault=eio public_error=DecisionLogUnavailable apply=false skip=0 live=2 terminal=0 barrier=46 recovered_closed=false sends=2 schema=54 artifact=1 old_digest=2d448c74857c2bb4c941621dbf4859ddcc90642eecc3b40572abf755143ad250 new_digest=fbfe8e35b1773f8b2dc36652b0cd8c982742a4306917306d1efd7a50c0cc08e7 recovered_digest=fbfe8e35b1773f8b2dc36652b0cd8c982742a4306917306d1efd7a50c0cc08e7 economics=eda73f4e76269185900a6cc9e7e99f4cad0e28656f56d7aef207cba70964aa62
+windows_capacity_fault injection=adapter_hook point=reclaim fault=eio public_error=DecisionLogUnavailable apply=false skip=0 live=2 terminal=0 barrier=46 recovered_closed=false sends=2 schema=54 artifact=1 old_digest=2d448c74857c2bb4c941621dbf4859ddcc90642eecc3b40572abf755143ad250 new_digest=fbfe8e35b1773f8b2dc36652b0cd8c982742a4306917306d1efd7a50c0cc08e7 recovered_digest=fbfe8e35b1773f8b2dc36652b0cd8c982742a4306917306d1efd7a50c0cc08e7 economics=eda73f4e76269185900a6cc9e7e99f4cad0e28656f56d7aef207cba70964aa62
+windows_capacity_reject injection=task_owned_file_mutation damage=missing_segment live_input=2 terminal_input=0 store_physical_ready=false core_error=DecisionLogUnavailable owner_closed=true sends=2 expected_schema=54 published_schema=54 expected_artifact=1 published_artifact=1
+windows_capacity_reject injection=task_owned_file_mutation damage=corrupt_segment live_input=2 terminal_input=0 store_physical_ready=false core_error=DecisionLogUnavailable owner_closed=true sends=2 expected_schema=54 published_schema=54 expected_artifact=1 published_artifact=1
+windows_capacity_reject injection=task_owned_file_mutation damage=truncate_segment live_input=2 terminal_input=0 store_physical_ready=false core_error=DecisionLogUnavailable owner_closed=true sends=2 expected_schema=54 published_schema=54 expected_artifact=1 published_artifact=1
+windows_capacity_reject injection=task_owned_file_mutation damage=corrupt_manifest live_input=2 terminal_input=0 store_physical_ready=false core_error=DecisionLogUnavailable owner_closed=true sends=2 expected_schema=54 published_schema=54 expected_artifact=1 published_artifact=1
+windows_capacity_reject injection=authenticated_snapshot_publish damage=old_schema live_input=2 terminal_input=0 store_physical_ready=true core_error=DecisionLogUnavailable owner_closed=true sends=2 expected_schema=54 published_schema=53 expected_artifact=1 published_artifact=1
+windows_capacity_reject injection=authenticated_snapshot_publish damage=foreign_artifact live_input=2 terminal_input=0 store_physical_ready=true core_error=DecisionLogUnavailable owner_closed=true sends=2 expected_schema=54 published_schema=54 expected_artifact=1 published_artifact=2
+windows_capacity_gateway_fault injection=adapter_hook point=snapshot_sync fault=eio public_error=InputOutput live=2 terminal=0 accepted=2 unknown_orders=1 sends=2 recovered_digest=2d448c74857c2bb4c941621dbf4859ddcc90642eecc3b40572abf755143ad250
+windows_capacity_gateway_fault injection=adapter_hook point=root_publish fault=eio public_error=InputOutput live=2 terminal=0 accepted=2 unknown_orders=1 sends=2 recovered_digest=2d448c74857c2bb4c941621dbf4859ddcc90642eecc3b40572abf755143ad250
+windows_capacity_gateway_fault injection=adapter_hook point=reclaim fault=eio public_error=InputOutput live=2 terminal=0 accepted=2 unknown_orders=1 sends=2 recovered_digest=2d448c74857c2bb4c941621dbf4859ddcc90642eecc3b40572abf755143ad250
+windows_shared_unchanged_fixture=D:\github\Ringwin-strategy-package-03\.zig-cache\tmp\3gvWCPRTqI5vWaeD
+05a all-fields encoding upper_bound_bytes=27583296 store_ceiling_bytes=33554432
+05a operational-frontier snapshot_bytes=3759596 rejected_groups=6 orders=2 commands=2 pinned=29
+05a maximum-manifest snapshot_bytes=3746694 checkpoint_generation=17
+native_contract=passed definition=a21994db11534bf5b193c5aa89000001 observations=1 output=none
+failed command: ".\\.zig-cache\\o\\c40cd4821500d1180c2aecdbf70bbc3b\\test.exe" "--cache-dir=.\\.zig-cache" --seed=0xedb8d09f --listen=-
+
+Build Summary: 3/3 steps succeeded; 825/825 tests passed
+test success
++- run test 825 pass (825 total) 62m MaxRSS:1G
+   +- compile test ReleaseSafe native success 8m MaxRSS:3G
+

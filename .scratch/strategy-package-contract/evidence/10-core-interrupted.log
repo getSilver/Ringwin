@@ -1,0 +1,2 @@
+error: the following build command failed with exit code 255:
+.zig-cache\o\769206a548d71f1cec5e241dd0f24ad0\build.exe D:\Program Files\zig\zig.exe D:\Program Files\zig\lib D:\github\Ringwin-strategy-package-03 .zig-cache C:\Users\X\AppData\Local\zig --seed 0xb9576c86 -Za556d86263493ba2 test -Doptimize=ReleaseSafe --summary all

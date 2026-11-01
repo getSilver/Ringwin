@@ -4,7 +4,7 @@ Status: open
 
 ## Destination
 
-建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，02票的原生构建合同、静态注册与构建清单及03票的Python包安装登记已交付并通过各自离线验收；04的Windows无权加载及Host资源路径已独立验收，05的Windows checkpoint持久发布与无权重启恢复、06的显式启停与核心/Gateway准入、07的同实例参数更新与Keep/Rebuild、08的代码替换与ForwardRollback创建StrategySuccessor已完成Windows离线验收，09原生统一发布与激活已完成Windows离线验收，10–11仍待实施。Linux Host资源验收单独保留缺口。
+建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，02票的原生构建合同、静态注册与构建清单及03票的Python包安装登记已交付并通过各自离线验收；04的Windows无权加载及Host资源路径已独立验收，05的Windows checkpoint持久发布与无权重启恢复、06的显式启停与核心/Gateway准入、07的同实例参数更新与Keep/Rebuild、08的代码替换与ForwardRollback创建StrategySuccessor已完成Windows离线验收，09原生统一发布与激活、10多个Python实例与共享Host生命周期已完成Windows离线验收，11仍待实施。Linux Host资源及共享总预算路径单独保留缺口。
 
 ## Definition of done
 
@@ -38,11 +38,13 @@ Status: open
 
 ## Frontier
 
-- [10 多个 Python 实例共存与共享 Host 生命周期](issues/10-multiple-python-instances.md)：05/06/08已完成，Codex 已认领，实施中。
+- [11 冻结合同落地的端到端验收证据](issues/11-end-to-end-evidence.md)：07/09/10已完成，可接手；尚未认领或实施。
 
 每次只认领一张Frontier票。尚未实施票的ready-for-agent表示票已可供接手，仍须满足各票Blocked by；其余票在依赖完成前不属于Frontier。
 
 ## Decisions so far
+
+- 2026-11-01：10完成Windows多实例共享解释器、按包模块表、独立checkpoint与会话、完整集合SHA-256和Job总提交内存预算；Web展示实际成员与域内切换范围。同节点两个策略绑定分别显式启用、完整IntentGroup输出及迟到拒绝、目标参数/代码替换与其他成员原仓库恢复均有验收。复审发现并修正双管理写死锁、慢候选持父锁与并发停用状态覆盖，三个有界真实Web回归通过。实施 `3dabcab2`、修正 `95c0c043`；最终Python341项327通过14平台skip、ReleaseSafe核心825/825、发布9/9、节点3/3，双轴最终0项；首次失败、日志警告及真实退出码原样保留，详见[10验证说明](evidence/10-validation.md)。10 resolved并移出Frontier，11可接手但未认领；地图保持open。Linux共享总预算路径尚未实现且明确拒绝，不扩张既有Linux资源、真实Venue、部署或生产资格。
 
 - 2026-11-01：09完成原生v2签名发布/共同索引、Web绑定、实际运行二进制与静态清单核对、节点内观察入口及共同显式启用。替换与签名ForwardRollback使用Successor、责任闭合和持久激活回调，未知ACK禁止恢复旧身份。补齐现有role服务的根级ringwin入口，两个安装路径均来自相同签名字节。最终Windows Python327项313通过14平台skip、ReleaseSafe核心824/824、发布9/9、节点3/3、原生构建回归8/8，最终双轴复审0项。详见[09验证说明](evidence/09-validation.md)，保留核心日志异常文字与真实退出0。09 resolved并移出Frontier，10可接手但未认领；完整日志恢复、单实例和观察输出合同不扩张，节点重启、磁盘/热备、Linux、实际Venue及部署/生产资格未取得，地图保持open。
 
@@ -72,7 +74,7 @@ Status: open
 
 ## Not yet specified
 
-- 原生构建合同见02票；统一发布与激活由09票接通，多实例Host加载组织、预算映射和聚合摘要由10票落实。Linux Host资源验收仍需真正实施RLIMIT_AS的内核；当前WSL1保持拒绝。工期和部署实例尚未指定；合同或构建交付不等于运行资格完成。
+- 原生构建合同见02票；09已接通统一发布与激活，10已落实Windows多实例Host加载组织、预算映射和聚合摘要，冻结版本的完整端到端证据由11票汇总。Linux共享总预算路径尚未实现，单实例资源验收仍需真正实施RLIMIT_AS的内核，当前WSL1保持拒绝。工期和部署实例尚未指定；合同或构建交付不等于运行资格完成。
 
 ## Out of scope
 

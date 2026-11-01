@@ -1,0 +1,7 @@
+[enqueue 19c85430640] enable_trading -> pending will be 1
+[enqueue 19c85430640] enable_trading -> pending will be 1
+....
+----------------------------------------------------------------------
+Ran 4 tests in 148.486s
+
+OK

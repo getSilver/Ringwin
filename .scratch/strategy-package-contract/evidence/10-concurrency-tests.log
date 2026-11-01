@@ -1,0 +1,40 @@
+.EE
+======================================================================
+ERROR: test_other_host_delivers_input_while_replacement_candidate_times_out (test_strategy_instance.WebInstanceTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\github\Ringwin-strategy-package-03\python\test_strategy_package_release.py", line 140, in _windows_cleanup
+    strategy_windows.set_permissions(Path(root) / name, writable=True)
+  File "D:\github\Ringwin-strategy-package-03\python\strategy_windows.py", line 281, in set_permissions
+    checked(set_security(str(path), 0x80000004, descriptor))
+  File "D:\github\Ringwin-strategy-package-03\python\strategy_windows.py", line 41, in checked
+    raise c.WinError(c.get_last_error())
+OSError: [WinError 123] 文件名、目录名或卷标语法不正确。
+
+======================================================================
+ERROR: test_other_host_delivers_input_while_replacement_candidate_times_out (test_strategy_instance.WebInstanceTests)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "D:\Program Files\miniconda3\lib\tempfile.py", line 834, in cleanup
+    self._rmtree(self.name)
+  File "D:\Program Files\miniconda3\lib\tempfile.py", line 816, in _rmtree
+    _shutil.rmtree(name, onerror=onerror)
+  File "D:\Program Files\miniconda3\lib\shutil.py", line 759, in rmtree
+    return _rmtree_unsafe(path, onerror)
+  File "D:\Program Files\miniconda3\lib\shutil.py", line 624, in _rmtree_unsafe
+    _rmtree_unsafe(fullname, onerror)
+  File "D:\Program Files\miniconda3\lib\shutil.py", line 624, in _rmtree_unsafe
+    _rmtree_unsafe(fullname, onerror)
+  File "D:\Program Files\miniconda3\lib\shutil.py", line 624, in _rmtree_unsafe
+    _rmtree_unsafe(fullname, onerror)
+  [Previous line repeated 1 more time]
+  File "D:\Program Files\miniconda3\lib\shutil.py", line 633, in _rmtree_unsafe
+    onerror(os.rmdir, path, sys.exc_info())
+  File "D:\Program Files\miniconda3\lib\shutil.py", line 631, in _rmtree_unsafe
+    os.rmdir(path)
+OSError: [WinError 145] 目录不是空的。: 'C:\\Users\\X\\AppData\\Local\\Temp\\ringwin-package-xppw49b9\\ringwin-package-_ixsg4ui\\instances\\4260bfc5090d8cd0c3aa11431c67b972-candidate\\4260bfc5090d8cd0c3aa11431c67b972-checkpoints'
+
+----------------------------------------------------------------------
+Ran 2 tests in 39.927s
+
+FAILED (errors=2)
