@@ -280,12 +280,13 @@ def validate_scopes(scopes):
 
 
 class InstanceManager:
-    def __init__(self, directory, releases, source):
+    def __init__(self, directory, releases, source, *, lock=None):
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = self.directory / "strategy-instances.jsonl"
         self.releases, self.source = releases, source
-        self._lock = threading.RLock()
+        self._lock = lock if lock is not None else threading.RLock()
+        self._candidate = lock is not None
         self._records, self._hosts, self._successor_commands = {}, {}, {}
         self._monitor_stop = threading.Event()
         self._monitor = None
@@ -380,9 +381,12 @@ class InstanceManager:
         finally:
             host["pipes"].busy = False
 
-    def _require_idle(self, identity):
+    def _require_idle(self, identity, *, allow_transition=False):
         host = self._hosts.get(identity)
         package.require(host is None or host.get("native") or not host["pipes"].busy, "Host callback in progress")
+        record = self._records.get(identity, {})
+        package.require(allow_transition or not any(record.get(k, {}).get("status") in ("draining", "committing")
+            for k in ("config_transition", "successor_transition")), "instance transition in progress")
 
     def _affected_instances(self, identity):
         domain = self._records[identity]["binding"]["decision_domain"]
@@ -441,7 +445,7 @@ class InstanceManager:
             self.view()
             package.require(self.source.authority is not None, "native node authority unavailable")
             package.require(identity in self._hosts, "instance is not running")
-            self._require_idle(identity)
+            self._require_idle(identity, allow_transition=command["kind"] == "kill_switch")
             record = self._records[identity]
             package.require(command["target_identity"] == int(record["binding"]["decision_domain"], 16), "command target mismatch")
             enabling = command["kind"] == "enable_trading"
@@ -467,6 +471,9 @@ class InstanceManager:
                 else:
                     self._stop(identity)
                     record = dict(record, status="Stopped", trading_authorized=False, authority=result, reason="explicitly disabled; checkpoint recovery required")
+                    for field in ("config_transition", "successor_transition"):
+                        if record.get(field, {}).get("status") in ("draining", "committing"):
+                            record[field] = dict(record[field], status="unknown", reason="operator kill during cutover; reconcile native version before recovery")
                 self._save(record)
                 return record
             except (OSError, ValueError, KeyError, RuntimeError) as error:
@@ -504,7 +511,7 @@ class InstanceManager:
                 raise
 
     def create(self, binding):
-        with self._lock, self.releases._lock:
+        with self.releases._lock, self._lock:
             package.fields(binding, BINDING_FIELDS)
             binding = json.loads(package.canonical(binding))
             for key in ("definition_identity", "strategy_identity", "portfolio_identity", "decision_domain"):
@@ -530,7 +537,7 @@ class InstanceManager:
 
     def recover(self, identity):
         package.identity(identity)
-        with self._lock, self.releases._lock:
+        with self.releases._lock, self._lock:
             self.view()
             package.require(identity in self._records, "unknown strategy instance")
             previous = self._records[identity]
@@ -559,7 +566,7 @@ class InstanceManager:
         package.digest(request["package_manifest_sha256"])
         identity = request["strategy_identity"]
         operation = hashlib.sha256(package.canonical(request)).hexdigest()
-        with self._lock, self.releases._lock:
+        with self.releases._lock, self._lock:
             self.view()
             known = self._successor_commands.get(request["operation_identity"])
             if known:
@@ -578,6 +585,7 @@ class InstanceManager:
             package.require(request["definition_identity"] != old["definition_identity"], "code replacement requires a different StrategyDefinition")
             package.require(identity in self._hosts and previous["status"] in ("Ready", "Trading"), "instance must be Ready or Trading")
             self._require_idle(identity)
+            original_host = self._hosts[identity]
             package.require(self.source.authority is not None, "native node authority unavailable")
             if request["operation"] == "forward_rollback":
                 package.require(any(r["binding"]["definition_identity"] == request["definition_identity"]
@@ -597,11 +605,12 @@ class InstanceManager:
             package.uint(generation)
             previous = dict(previous, successor_transition=progress, host_generation=generation)
             self._save(previous)
-            candidate = InstanceManager(self.directory / (successor + "-candidate"), self.releases, self.source)
+            candidate = InstanceManager(self.directory / (successor + "-candidate"), self.releases, self.source, lock=self._lock)
             begun = False
             try:
                 result = candidate._run(binding, generation=generation)
                 package.require(result["status"] == "Ready", result["reason"])
+                package.require(self._hosts.get(identity) is original_host, "target Host changed during candidate validation")
                 native = dict(strategy_identity=identity, successor_identity=successor,
                               current_definition_identity=old["definition_identity"],
                               current_release_identity=previous["release_identity"], current_state_schema_version=previous["state_schema_version"],
@@ -610,7 +619,7 @@ class InstanceManager:
                               transition="Rebuild", operation_identity=request["operation_identity"])
                 for op in ("begin_successor", "commit_successor"):
                     progress = dict(progress, status="draining" if op == "begin_successor" else "committing")
-                    self._save(dict(previous, successor_transition=progress))
+                    self._save(dict(self._records[identity], successor_transition=progress))
                     host = candidate._hosts[successor]
                     begun = True
                     try:
@@ -621,9 +630,12 @@ class InstanceManager:
                                 "InvalidSuccessorTransition", "SuccessorResponsibilityOpen"):
                             begun = False
                         raise
+                    self._save(dict(self._records[identity], status="Recovering", trading_authorized=False))
                     _, outputs = candidate._exchange(successor, response["host_command"])
                     package.require(not outputs, "successor catch-up produced unauthorized output")
+                    package.require(self._records[identity]["status"] == "Recovering", "target stopped during successor cutover")
                 snapshot, _ = candidate._exchange(successor, dict(checkpoint=True))
+                package.require(self._records[identity]["status"] == "Recovering", "target stopped during successor checkpoint")
                 self._stop(identity)
                 progress = dict(progress, status="completed")
                 self._save(dict(previous, status="Stopped", trading_authorized=False, superseded_by=successor,
@@ -640,7 +652,7 @@ class InstanceManager:
                 if begun:
                     self._fail(identity, dict(previous, successor_transition=progress), str(error))
                 else:
-                    self._save(dict(previous, successor_transition=progress))
+                    self._save(dict(self._records[identity], successor_transition=progress))
                 return self._records[identity]
             finally:
                 for candidate_identity in list(candidate._hosts):
@@ -661,7 +673,7 @@ class InstanceManager:
                         "config digest or capacity mismatch")
         identity = request["strategy_identity"]
         operation = hashlib.sha256(package.canonical(request)).hexdigest()
-        with self._lock, self.releases._lock:
+        with self.releases._lock, self._lock:
             self.view()
             package.require(identity in self._records, "unknown strategy instance")
             previous = self._records[identity]
@@ -678,6 +690,7 @@ class InstanceManager:
             package.require(request["config_version"] > old["config_version"], "ConfigVersion must advance")
             package.require(identity in self._hosts and previous["status"] in ("Ready", "Trading"), "instance must be Ready or Trading")
             self._require_idle(identity)
+            original_host = self._hosts[identity]
             package.require(self.source.authority is not None, "native node authority unavailable")
             binding = dict(old, **{k: request[k] for k in ("config_version", "config_json", "config_sha256")})
             package.require(len(package.canonical(binding)) <= 64 * 1024, "binding capacity exceeded")
@@ -691,7 +704,7 @@ class InstanceManager:
             package.uint(previous["host_generation"])
             self._save(previous)
             candidate = InstanceManager(self.directory / (identity + "-config-" + str(binding["config_version"]) + "-" + operation[:16]),
-                                        self.releases, self.source)
+                                        self.releases, self.source, lock=self._lock)
             begun = False
             snapshot_ok = False
             try:
@@ -700,9 +713,8 @@ class InstanceManager:
                 previous = dict(previous, checkpoint=snapshot["checkpoint"])
                 self._save(previous)
                 result = candidate._run(binding, previous, transition=request["transition"], generation=previous["host_generation"])
-                previous["host_generation"] = result["host_generation"]
-                self._save(previous)
                 package.require(result["status"] == "Ready", result["reason"])
+                package.require(self._hosts.get(identity) is original_host, "target Host changed during candidate validation")
                 native = dict(strategy_identity=identity, config_version=binding["config_version"],
                               current_definition_identity=old["definition_identity"],
                               current_release_identity=previous["release_identity"], current_state_schema_version=previous["state_schema_version"],
@@ -711,7 +723,7 @@ class InstanceManager:
                               operation_identity=operation[:32])
                 for op in ("begin_config", "commit_config"):
                     progress = dict(progress, status="draining" if op == "begin_config" else "committing")
-                    self._save(dict(previous, config_transition=progress))
+                    self._save(dict(self._records[identity], config_transition=progress))
                     host = candidate._hosts[identity]
                     begun = True
                     try:
@@ -722,9 +734,12 @@ class InstanceManager:
                         if op == "begin_config" and str(error) in ("ReadyBarrierMismatch", "VenueReconciliationUnavailable", "InvalidConfigTransition"):
                             begun = False
                         raise
+                    self._save(dict(self._records[identity], status="Recovering", trading_authorized=False))
                     _, outputs = candidate._exchange(identity, response["host_command"])
                     package.require(not outputs, "config catch-up produced unauthorized output")
+                    package.require(self._records[identity]["status"] == "Recovering", "target stopped during config cutover")
                 snapshot, _ = candidate._exchange(identity, dict(checkpoint=True))
+                package.require(self._records[identity]["status"] == "Recovering", "target stopped during config checkpoint")
                 self._stop(identity)
                 self._hosts[identity] = candidate._hosts.pop(identity)
                 result.update(checkpoint=snapshot["checkpoint"], config_versions=versions,
@@ -740,7 +755,7 @@ class InstanceManager:
                 if begun or not snapshot_ok:
                     self._fail(identity, dict(previous, config_transition=progress), str(error))
                 else:
-                    self._save(dict(previous, config_transition=progress))
+                    self._save(dict(self._records[identity], config_transition=progress))
                 return self._records[identity]
             finally:
                 # Uncommitted candidates never touch the old Host's native authority.
@@ -878,6 +893,8 @@ class InstanceManager:
             return record
 
     def _ensure_monitor(self):
+        if self._candidate:
+            return
         if self._monitor is None:
             self._monitor_stop.clear()
             self._monitor = threading.Thread(target=self._watch, daemon=True)

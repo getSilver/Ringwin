@@ -12,6 +12,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import unittest
 import zipfile
@@ -240,7 +241,7 @@ class WebInstanceTests(unittest.TestCase):
         self.app.instance_manager = self.instances
 
     def install(self, code=OBSERVER, limit_changes=None, state_fields=(), transitions=None, definition=DEFINITION, artifact="candidate-a",
-                extra_definitions=None):
+                extra_definitions=None, runtime_marker=b""):
         files, policy = bundle_files()
         if definition != DEFINITION:
             files = {p.replace(DEFINITION, definition): b for p, b in files.items()}
@@ -250,6 +251,7 @@ class WebInstanceTests(unittest.TestCase):
                        {"runtime/python": Path(sys.executable).resolve().read_bytes()})
         for name in ("strategy_candidate_host.py", "strategy_api.py", "strategy_host.py", "strategy_package.py", "strategy_state.py"):
             runtime["runtime/" + name] = (ROOT / "python" / name).read_bytes()
+        runtime["runtime/strategy_api.py"] += runtime_marker
         compatibility = dict(policy["compatibility"])
         compatibility.pop("runtime_lock_sha256")
         compatibility["python_abi"] = strategy_host.PYTHON_ABI
@@ -470,6 +472,121 @@ class WebInstanceTests(unittest.TestCase):
         authority.timeout = 3
         self.source.batches = (self.node_batch(state["cursor"], 1),)
         return authority
+
+    def bounded_instance_worker(self, body):
+        worker = f'''import sys
+sys.path.insert(0, {str(ROOT / 'python')!r})
+import test_strategy_instance as acceptance
+test = acceptance.WebInstanceTests()
+test.setUp()
+try:
+{textwrap.indent(textwrap.dedent(body), '    ')}
+finally:
+    test.doCleanups()
+'''
+        result = subprocess.run([sys.executable, "-I", "-S", "-c", worker], capture_output=True, timeout=60,
+            env=dict(strategy_instance.windows.environment(), RINGWIN_CANDIDATE_ENGINE=str(self.engine)))
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode("utf-8", "replace"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows bounded concurrent Host regression")
+    def test_two_management_writes_during_checkpoint_wait_finish_without_deadlock(self):
+        self.bounded_instance_worker('''
+            import concurrent.futures, time
+            code = acceptance.OBSERVER.replace(b"def snapshot(self):", b"def snapshot(self):\\n        self.snapshot_calls = getattr(self, 'snapshot_calls', 0) + 1\\n        if self.snapshot_calls > 2:\\n            while True: pass")
+            test.install(code)
+            assert test.create()[1]["ok"]
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                first = executor.submit(test.create, strategy_identity=f"{17:032x}")
+                deadline = time.monotonic() + 10
+                while len(test.instances.view()) < 2 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                second = executor.submit(test.create, strategy_identity=f"{18:032x}")
+                assert first.result(timeout=10)[0] == 400
+                status, body = second.result(timeout=15)
+                assert status == 200 and body["ok"], body
+        ''')
+
+    @unittest.skipUnless(os.name == "nt", "Windows bounded concurrent Host regression")
+    def test_other_host_delivers_input_while_replacement_candidate_times_out(self):
+        self.bounded_instance_worker('''
+            import concurrent.futures, time
+            authority = test.native_authority(multiple=True)
+            scope = dict(test.source.scope, portfolio_identity=f"{11:032x}")
+            test.source.placements = (scope,)
+            test.install()
+            test.binding["strategy_identity"] = f"{9:032x}"
+            old = dict(test.binding)
+            assert test.create()[1]["ok"]
+            test.install(definition="b" * 32, artifact="candidate-b", runtime_marker=b"\\n# runtime B\\n")
+            peer = test.create(strategy_identity=f"{19:032x}", **scope)[1]["result"]
+            assert peer["status"] == "Ready", peer
+            test.binding = peer["binding"]
+            assert test.instance_command("enable_trading")[1]["ok"]
+            state = authority.request(dict(operation="status", strategy_identity=f"{19:032x}"))
+            test.source.batches = (test.node_batch(state["cursor"], 1),)
+            hanging = acceptance.OBSERVER.replace(b"self.events += 1", b"while True: pass\\n        self.events += 1")
+            test.install(hanging, definition="c" * 32, artifact="candidate-c", runtime_marker=b"\\n# runtime B\\n",
+                         limit_changes=dict(max_callback_ns=4_000_000_000))
+            request = test.replacement(old)
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                pending = executor.submit(test.client.call, "POST", "/api/strategy-instances", request)
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    record = next(r for r in test.instances.view() if r["binding"]["strategy_identity"] == old["strategy_identity"])
+                    if record.get("successor_transition", {}).get("status") == "validating":
+                        break
+                    time.sleep(0.01)
+                assert not pending.done(), "candidate wait held the parent manager lock"
+                state = authority.request(dict(operation="advance"))
+                host = test.instances._hosts[f"{19:032x}"]
+                assert test.instances.deliver(f"{19:032x}", test.node_batch(state["cursor"], host["cursor"] + 1)) == []
+                assert not pending.done(), "other Host waited for the failed candidate"
+                status, failed = pending.result(timeout=15)
+            assert status == 200 and not failed["ok"], failed
+            assert "budget exhausted" in failed["result"]["successor_transition"]["reason"], failed
+            assert authority.request(dict(operation="status", strategy_identity=f"{19:032x}"))["trading_authorized"]
+        ''')
+
+    @unittest.skipUnless(os.name == "nt", "Windows bounded concurrent Host regression")
+    def test_disable_during_config_candidate_wait_cannot_restore_old_trading_projection(self):
+        self.bounded_instance_worker('''
+            import concurrent.futures, time
+            authority = test.native_authority()
+            code = acceptance.OBSERVER.replace(b"    config = json.loads(data)",
+                b"    config = json.loads(data)\\n    if config['warmup_events'] == 2:\\n        while True: pass", 1)
+            test.install(code, transitions={"Keep": {"mutable_config_fields": ["warmup_events"], "rebuild_state_fields": []}},
+                         limit_changes=dict(max_callback_ns=4_000_000_000))
+            assert test.create()[1]["ok"]
+            assert test.instance_command("enable_trading")[1]["ok"]
+            identity = test.binding["strategy_identity"]
+            state = authority.request(dict(operation="status", strategy_identity=identity))
+            test.source.batches = (test.node_batch(state["cursor"], 1),)
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                pending = executor.submit(test.update_config, config='{"warmup_events":2}')
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    record = test.instances.view()[0]
+                    if record.get("config_transition", {}).get("status") == "validating":
+                        break
+                    time.sleep(0.01)
+                assert not pending.done()
+                deadline = time.monotonic() + 2
+                while True:
+                    status, stopped = test.instance_command("trading_pause")
+                    if status == 200 or time.monotonic() >= deadline:
+                        break
+                    assert stopped["error"] == "Host callback in progress", stopped
+                    time.sleep(0.02)
+                assert status == 200 and stopped["ok"], stopped
+                status, failed = pending.result(timeout=15)
+            assert status == 200 and not failed["ok"], failed
+            record = test.instances.view()[0]
+            assert record["status"] == "Stopped" and not record["trading_authorized"], record
+            assert identity not in test.instances._hosts
+            reopened = acceptance.strategy_instance.InstanceManager(test.instances.directory, test.manager, test.source)
+            assert reopened.view()[0]["status"] == "Stopped"
+            reopened.close()
+        ''')
 
     @staticmethod
     def node_batch(cursor, first):

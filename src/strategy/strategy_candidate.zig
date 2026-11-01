@@ -275,7 +275,11 @@ const Instance = struct {
         const batch = try init.gpa.alloc(u8, value.batch.len / 2);
         defer init.gpa.free(batch);
         _ = try std.fmt.hexToBytes(batch, value.batch);
-        try host.sendInput(init.io, batch, now(init.io));
+        host.sendInput(init.io, batch, now(init.io)) catch |err| {
+            const validation = @import("strategy_host_ipc.zig").validateBatchAt(batch, host.supervisor.plan.session, host.next_input_batch, host.last_input_cursor, now(init.io));
+            std.log.err("runtime input rejected: {s}, expected_batch={d}, last_cursor={?d}", .{ @tagName(validation.status), host.next_input_batch, host.last_input_cursor });
+            return err;
+        };
         const count = try host.receiveBatchAck(init.io, now(init.io), value.max_outputs);
         var frame_buffer: [512]u8 = undefined;
         for (0..count) |_| {
