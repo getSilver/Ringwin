@@ -6,6 +6,7 @@ const gateway = @import("strategy_host_gateway.zig");
 const ipc = @import("strategy_host_ipc.zig");
 const channel = @import("../control_channel.zig");
 const cutover = @import("../runtime/recovery_cutover.zig");
+const native = @import("native_instance.zig");
 
 pub const Authority = struct {
     shard: *trading.TradingShard,
@@ -23,6 +24,12 @@ pub const Authority = struct {
     applied: bool = false,
     last_cursor: u64 = 0,
     reconciliation: ?*const fn (*anyopaque) anyerror!cutover.VenueEvidence = null,
+    running_binary_sha256: ?[64]u8 = null,
+    native_instance: ?native.Instance = null,
+    native_candidate: ?native.Instance = null,
+    native_candidate_strategy: u128 = 0,
+    native_candidate_release: u64 = 0,
+    native_candidate_config: u64 = 0,
 
     const Request = struct {
         operation: []const u8,
@@ -38,6 +45,9 @@ pub const Authority = struct {
         operation_identity: []const u8 = "",
         successor_identity: []const u8 = "",
         release_identity: u64 = 0,
+        build_inventory: []const u8 = "",
+        binary_sha256: []const u8 = "",
+        config_json: []const u8 = "",
         evidence: ?struct { host_generation: u64, cursor: u64, next_input_batch: u64 } = null,
     };
 
@@ -48,11 +58,93 @@ pub const Authority = struct {
         const parsed = try std.json.parseFromSlice(Request, gpa, bytes, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
         const value = parsed.value;
+        if (std.mem.eql(u8, value.operation, "native_prepare")) {
+            const binary = self.running_binary_sha256 orelse return error.NativeRunningIdentityUnavailable;
+            if (!std.mem.eql(u8, &binary, value.binary_sha256)) return error.NativeRunningBinaryMismatch;
+            try native.verifyBuild(gpa, value.build_inventory);
+            const definition = try @import("native_definition.zig").identity(value.definition_identity);
+            const strategy = try @import("native_definition.zig").identity(value.strategy_identity);
+            if (value.release_identity == 0 or value.config_version == 0 or self.shard.strategyFenced(strategy)) return error.StrategyBindingMismatch;
+            var instance = try native.Instance.create(gpa, definition, value.config_json);
+            if (self.shard.registryInstrument(instance.config.instrument) == null) return error.StrategyBindingMismatch;
+            try instance.catchUp(self.journal, self.shard.authoritativeBarrier());
+            if (strategy == self.strategy) {
+                if (self.applied or value.config_version != self.config_version) return error.StrategyBindingMismatch;
+                if (self.shard.active_release != 0 and self.shard.active_release != value.release_identity) return error.StrategyBindingMismatch;
+                const binding = self.shard.strategyAuthority(strategy);
+                if (!binding.strategy_active or binding.strategy_config_version != value.config_version or
+                    binding.host_activation_identity != 0 or self.shard.operational_state.effectiveTradingAuthority()) return error.StrategyBindingMismatch;
+                if (self.native_instance) |current| {
+                    if (current.definition != definition or !std.meta.eql(current.config, instance.config)) return error.StrategyBindingMismatch;
+                }
+                if (self.shard.active_release == 0) {
+                    try self.commit(self.context, .{ .version_activation = .{
+                        .activation_identity = value.release_identity,
+                        .generation = self.shard.release_generation + 1,
+                        .old_release = 0,
+                        .new_release = value.release_identity,
+                        .old_strategy_instance = self.shard.active_strategy_instance,
+                        .new_strategy_instance = strategy,
+                        .strategy_definition = definition,
+                        .parameter_version = value.config_version,
+                        .state_schema_version = (@import("native_registry.zig").find(definition) orelse return error.NativeDefinitionNotRegistered).state_schema.version,
+                        .transition = .rebuild,
+                        .barrier = self.shard.authoritativeBarrier() + 1,
+                        .canonical_state_digest = self.shard.canonicalStateDigest(),
+                    } });
+                    try instance.catchUp(self.journal, self.shard.authoritativeBarrier());
+                } else {
+                    var reader = try trading.journal.Reader.init(self.journal.bytes());
+                    var matched = false;
+                    while (true) switch (try reader.next()) {
+                        .record => |record| {
+                            if (record.flags & trading.journal.input_flag == 0) continue;
+                            const input = try trading.decodeStableInput(record);
+                            if (input == .core and input.core.payload == .version_activation) {
+                                const activation = input.core.payload.version_activation;
+                                matched = activation.new_strategy_instance == strategy and activation.strategy_definition == definition and
+                                    activation.new_release == value.release_identity and activation.parameter_version == value.config_version;
+                            }
+                        },
+                        .end => break,
+                    };
+                    if (!matched) return error.StrategyBindingMismatch;
+                }
+                self.native_instance = instance;
+            } else {
+                if (self.shard.strategyAuthority(strategy).strategy_active) return error.StrategyBindingMismatch;
+                self.native_candidate = instance;
+                self.native_candidate_strategy = strategy;
+                self.native_candidate_release = value.release_identity;
+                self.native_candidate_config = value.config_version;
+            }
+            return self.nativeSnapshot(gpa, instance);
+        }
+        if (std.mem.eql(u8, value.operation, "native_catchup")) {
+            const strategy = try @import("native_definition.zig").identity(value.strategy_identity);
+            const instance = if (strategy == self.strategy) current: {
+                break :current if (self.native_instance) |*n| n else return error.NativeNotReady;
+            } else candidate: {
+                if (strategy != self.native_candidate_strategy) return error.StrategyIdentityMismatch;
+                break :candidate if (self.native_candidate) |*n| n else return error.NativeNotReady;
+            };
+            try instance.catchUp(self.journal, self.shard.authoritativeBarrier());
+            return self.nativeSnapshot(gpa, instance.*);
+        }
         if (value.strategy_identity.len != 32 or try std.fmt.parseInt(u128, value.strategy_identity, 16) != self.strategy)
             return error.StrategyIdentityMismatch;
         const op = value.operation;
         const successor = std.mem.eql(u8, op, "begin_successor") or std.mem.eql(u8, op, "commit_successor");
         if (successor or std.mem.eql(u8, op, "begin_config") or std.mem.eql(u8, op, "commit_config")) {
+            if (self.native_instance != null and !successor) return error.UnsupportedNativeConfigTransition;
+            if (self.native_instance != null) {
+                const candidate = self.native_candidate orelse return error.NativeNotReady;
+                if (value.successor_identity.len != 32 or try std.fmt.parseInt(u128, value.successor_identity, 16) != self.native_candidate_strategy or
+                    value.release_identity != self.native_candidate_release or value.config_version != self.native_candidate_config or
+                    value.state_schema_version != (@import("native_registry.zig").find(candidate.definition) orelse return error.NativeDefinitionNotRegistered).state_schema.version or
+                    try std.fmt.parseInt(u128, value.definition_identity, 16) != candidate.definition)
+                    return error.NativeBuildMismatch;
+            }
             if ((!successor and value.config_version <= self.config_version) or value.config_version == 0 or value.state_schema_version == 0 or
                 (!std.mem.eql(u8, value.transition, "Keep") and !std.mem.eql(u8, value.transition, "Rebuild"))) return error.InvalidConfigTransition;
             const next_strategy = if (successor) blk: {
@@ -113,6 +205,11 @@ pub const Authority = struct {
                 self.config_version = value.config_version;
                 self.strategy = next_strategy;
                 self.bridge = null;
+                if (self.native_candidate_strategy == next_strategy) {
+                    self.native_instance = self.native_candidate;
+                    self.native_candidate = null;
+                    self.native_candidate_strategy = 0;
+                }
             }
             return self.configBatch(gpa, evidence.host_generation, evidence.next_input_batch, evidence.cursor, io);
         } else if (std.mem.eql(u8, op, "control")) {
@@ -222,6 +319,7 @@ pub const Authority = struct {
             defer gpa.free(hex);
             return std.json.Stringify.valueAlloc(gpa, .{ .host_command = .{ .batch = hex, .max_outputs = self.max_outputs } }, .{});
         } else if (std.mem.eql(u8, op, "output")) {
+            if (self.native_instance != null) return error.UnsupportedNativeOutput;
             const bridge = if (self.bridge) |*b| b else return error.NoHostActivation;
             if (value.frame.len > 2 * gateway.max_group_frame_len or value.frame.len < 256) return error.InvalidOutputFrame;
             var storage: [gateway.max_group_frame_len]u8 = undefined;
@@ -274,6 +372,23 @@ pub const Authority = struct {
             .commands = self.shard.oms.command_history_count,
             .last_rejection = @tagName(self.shard.last_reject_reason),
             .config_version = authority.strategy_config_version,
+        }, .{});
+    }
+
+    fn nativeSnapshot(self: *Authority, gpa: std.mem.Allocator, instance: native.Instance) ![]u8 {
+        _ = self;
+        const state = try std.json.Stringify.valueAlloc(gpa, instance.state, .{});
+        defer gpa.free(state);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(state, &digest, .{});
+        const digest_text = std.fmt.bytesToHex(digest, .lower);
+        return std.json.Stringify.valueAlloc(gpa, .{
+            .cursor = instance.cursor,
+            .next_input_batch = 1,
+            .next_intent_sequence = 1,
+            .state_digest = digest_text[0..],
+            .trading_authorized = false,
+            .checkpoint = .{ .cursor = instance.cursor, .state = instance.state, .encoding = "native_observer_v1" },
         }, .{});
     }
 };

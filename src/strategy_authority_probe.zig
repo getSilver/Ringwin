@@ -41,6 +41,12 @@ pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer args.deinit();
     _ = args.next();
+    const executable_path = try std.process.executablePathAlloc(init.io, init.gpa);
+    defer init.gpa.free(executable_path);
+    const executable = try std.Io.Dir.cwd().readFileAlloc(init.io, if (@import("builtin").os.tag == .linux) "/proc/self/exe" else executable_path, init.gpa, .limited(256 * 1024 * 1024));
+    defer init.gpa.free(executable);
+    var binary_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(executable, &binary_digest, .{});
     const key_path = args.next() orelse return error.KeyFileRequired;
     const group = args.next() != null;
     const key = try std.Io.Dir.cwd().readFileAlloc(init.io, key_path, init.gpa, .limited(33));
@@ -87,6 +93,7 @@ pub fn main(init: std.process.Init) !void {
         .shard_id = 1,
         .max_outputs = 4,
         .reconciliation = Node.reconcile,
+        .running_binary_sha256 = std.fmt.bytesToHex(binary_digest, .lower),
     };
     defer authority.revoke() catch {};
     const venue = try init.gpa.create(simulated.SimulatedVenue);
@@ -136,6 +143,21 @@ pub fn main(init: std.process.Init) !void {
                 continue;
             };
             try output.interface.print("{{\"dispatch\":\"{s}\",\"attempts\":{d}}}\n", .{ @tagName(result), gateway.send_attempt_count });
+        } else if (std.mem.eql(u8, request.value.operation, "native_reference")) {
+            if (group) return error.UnsupportedNativeFixture;
+            const sequence = node.shard().authoritativeBarrier() + 1_000;
+            var price_input = fixture.canonicalAt(15, sequence, .{ .reference_price = .{
+                .instrument = 3,
+                .kind = .index,
+                .price = .{ .instrument = 3, .rules_version = 1, .ticks = 42 },
+            } });
+            price_input.venue.envelope.scope = .instrument;
+            price_input.venue.envelope.exchange_account = null;
+            price_input.venue.envelope.instrument = 3;
+            price_input.venue.envelope.identity.stream = 9000;
+            price_input.venue.envelope.source_stream = 9000;
+            _ = try trading.applyStable(node.shard(), node.journal(), price_input);
+            try output.interface.print("{{\"cursor\":{d}}}\n", .{node.shard().authoritativeBarrier()});
         } else if (std.mem.eql(u8, request.value.operation, "advance")) {
             try Node.commit(node, .{ .mark_price = .{ .instrument = if (group) 101 else 3, .price_atoms = if (group) 10 else 50_000_000_000 } });
             try output.interface.print("{{\"cursor\":{d}}}\n", .{node.shard().authoritativeBarrier()});

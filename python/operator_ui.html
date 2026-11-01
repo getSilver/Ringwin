@@ -226,15 +226,17 @@ function escaped(value){
   el.textContent = String(value ?? "");
   return el.innerHTML;
 }
+let strategyPackageChoices = [];
 async function loadPackages(){
   const el = document.getElementById("packages"); if (!el) return;
   try {
     const [status, body] = await api("GET", "/api/releases");
     if (status !== 200) { el.textContent = body.error || "登记查询失败"; return; }
     const packages = body.strategy_packages || [];
+    strategyPackageChoices = packages;
     el.innerHTML = `<p>当前发布：${escaped(body.active_artifact || "未确认")}；安装不授予交易权限。</p>` +
       (packages.length ? `<table><tr><th>定义 / 包摘要</th><th>发布 / 验证</th><th>资格范围</th></tr>` +
-        packages.map(p=>`<tr><td>${escaped(p.name)}<br>${escaped(p.definition_identity)}<br>${escaped(p.package_manifest_sha256)}</td>
+        packages.map((p,index)=>`<tr><td>${escaped(p.name)} (${escaped(p.runtime || "python")})<br>${escaped(p.definition_identity)}<br>${escaped(p.package_manifest_sha256)}${p.active_release ? `<br><button onclick="selectStrategyPackage(${index})">选择定义并绑定实例</button>` : ""}</td>
           <td>${escaped(p.release_artifact)}${p.active_release ? "（当前发布）" : "（已登记）"}<br>${escaped(p.validation)}；无交易授权</td>
           <td>${p.qualifications.length ? p.qualifications.map(q=>`${escaped(q.status)}<br>${escaped(JSON.stringify(q.scope))}`).join("<br>") : "资格待取得"}</td></tr>`).join("") + `</table>` : "尚无策略包登记。") +
       (body.qualification_rejections || []).map(r=>`<p>资格报告拒绝：${escaped(r.reason)}</p>`).join("") +
@@ -315,8 +317,14 @@ async function replaceStrategyInstance(identity, definition, operation){
     await loadInstances();
   } catch (error) { toast("接替请求失败，请查询实际身份。", "bad"); }
 }
-async function createStrategyInstance(){
-  const raw = prompt("粘贴已核对的运行绑定 JSON（定义/包摘要、配置内容及SHA-256、实例、VirtualPortfolio、DecisionDomain、账户品种范围与预算）：");
+async function selectStrategyPackage(index){
+  const selected = strategyPackageChoices[index];
+  if (!selected?.active_release) { toast("定义发布已变化，请刷新后重试。", "bad"); return; }
+  await createStrategyInstance({definition_identity:selected.definition_identity, release_artifact:selected.release_artifact,
+    package_manifest_sha256:selected.package_manifest_sha256, initialization:"new"});
+}
+async function createStrategyInstance(selection){
+  const raw = prompt("补齐并核对运行绑定 JSON（定义/包摘要、配置内容及SHA-256、实例、VirtualPortfolio、DecisionDomain、账户品种范围与预算）：", selection ? JSON.stringify(selection) : "");
   if (!raw) return;
   try {
     const [status, body] = await api("POST", "/api/strategy-instances", JSON.parse(raw));

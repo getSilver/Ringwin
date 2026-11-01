@@ -1,0 +1,13 @@
+test_changed_algorithm_or_schema_bytes_reject_build (__main__.NativeStrategyBuild) ... ok
+test_duplicate_identity_rejects_build (__main__.NativeStrategyBuild) ... ok
+test_duplicate_manifest_identity_rejects_build (__main__.NativeStrategyBuild) ... ok
+test_installed_manifest_locates_actual_binary_and_contracts (__main__.NativeStrategyBuild) ... ok
+test_manifest_mismatches_reject_build (__main__.NativeStrategyBuild) ... ok
+test_missing_registration_rejects_build (__main__.NativeStrategyBuild) ... ok
+test_registered_definition_builds_and_runs (__main__.NativeStrategyBuild) ... ok
+test_zero_definition_identity_rejects_build (__main__.NativeStrategyBuild) ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in 154.092s
+
+OK

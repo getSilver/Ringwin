@@ -13,6 +13,7 @@ function element() {
 const elements = new Map();
 const toasts = [];
 const packageRecord = {
+  runtime: "native_static",
   name: "<img src=x onerror=attack()>", definition_identity: "a21994db11534bf5b193c5aa89000010",
   package_manifest_sha256: "a".repeat(64), release_artifact: "bundle-a", active_release: true,
   validation: "passed", qualifications: [], trading_authorized: false
@@ -21,12 +22,13 @@ const prompts = ["/approved.json", "b".repeat(64), ""];
 let outcome = "rejected";
 let instanceStatus = "Ready";
 let submittedBinding;
+let promptedDefault;
 let renderedStatus = "Stopped";
 const instanceCommands = [];
 const context = vm.createContext({
   console, setTimeout() {}, location: {reload() {}},
   crypto: {randomUUID: () => "11111111-1111-4111-8111-111111111111"},
-  prompt: () => prompts.shift() ?? "", window: {confirm: () => true},
+  prompt: (message, initial) => { promptedDefault = initial; return prompts.shift() ?? ""; }, window: {confirm: () => true},
   document: {createElement: element, body: {appendChild: el => toasts.push(el)},
     getElementById(id) { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); }},
   fetch: async (url, options) => ({status: url === "/api/projection" ? 401 : 200, json: async () => {
@@ -88,5 +90,11 @@ vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], context);
     assert.equal(submittedBinding.strategy_identity, "1".repeat(32));
     assert.ok(toasts.at(-1).style.cssText.includes(status === "Ready" ? "var(--ok)" : "var(--bad)"));
   }
+  assert.ok(rendered.includes("native_static"));
+  assert.ok(rendered.includes("选择定义并绑定实例"));
+  prompts.push("");
+  await vm.runInContext("selectStrategyPackage(0)", context);
+  assert.deepEqual(JSON.parse(promptedDefault), {definition_identity: packageRecord.definition_identity,
+    release_artifact: "bundle-a", package_manifest_sha256: "a".repeat(64), initialization: "new"});
   console.log("strategy_package_ui=passed");
 })().catch(error => { console.error(error); process.exitCode = 1; });

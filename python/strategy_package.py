@@ -154,7 +154,10 @@ def schema(value, names, state=False):
 def validate_qualification(report):
     fields(report, {"package_manifest_sha256", "compatibility", "scope", "qualified"})
     digest(report["package_manifest_sha256"])
-    compatibility(report["compatibility"])
+    if type(report["compatibility"]) is dict and "native_api" in report["compatibility"]:
+        native_compatibility(report["compatibility"])
+    else:
+        compatibility(report["compatibility"])
     require(type(report["qualified"]) is bool, "qualification verdict must be boolean")
     scope = report["scope"]
     fields(scope, {"platform", "os_build", "node_identity", "environment", "mode",
@@ -186,14 +189,18 @@ class Bundle:
     executable_paths: tuple[str, ...]
 
 
-def validate_bundle(data, policy):
+def validate_bundle(data, policy, version=1):
     require(policy is not None, "approved strategy runtime policy is required")
-    fields(policy, {"compatibility", "limits", "subscriptions"})
-    compatibility(policy["compatibility"])
-    fields(policy["limits"], LIMITS)
-    for maximum in policy["limits"].values():
-        uint(maximum)
-    subscriptions(policy["subscriptions"])
+    if version == 1:
+        fields(policy, {"compatibility", "limits", "subscriptions"})
+        compatibility(policy["compatibility"])
+        fields(policy["limits"], LIMITS)
+        for maximum in policy["limits"].values():
+            uint(maximum)
+        subscriptions(policy["subscriptions"])
+    else:
+        require(version == 2, "unsupported bundle version")
+        fields(policy, {"native_build"})
     require(len(data) <= MAX_BUNDLE_BYTES, "bundle capacity exceeded")
     files, folded, total = {}, set(), 0
     try:
@@ -212,7 +219,8 @@ def validate_bundle(data, policy):
                     "archive links and non-regular entries are forbidden")
             require(name.casefold() not in folded, "duplicate or case-colliding archive path")
             folded.add(name.casefold())
-            require(len(files) < 16384 and 0 <= member.size <= MAX_FILE_BYTES,
+            file_limit = 256 * 1024 * 1024 if version == 2 and name in ("bin/ringwin", "bin/ringwin.exe") else MAX_FILE_BYTES
+            require(len(files) < 16384 and 0 <= member.size <= file_limit,
                     "archive capacity exceeded")
             total += member.size
             require(total <= MAX_BUNDLE_BYTES, "expanded archive capacity exceeded")
@@ -227,6 +235,8 @@ def validate_bundle(data, policy):
         require(not any("/".join(pieces[:n]).casefold() in folded
                         for n in range(1, len(pieces))), "file and directory path conflict")
 
+    if version == 2:
+        return validate_native_bundle(files, policy)
     require("runtime-lock.json" in files and "strategy-index.json" in files,
             "bundle runtime lock or strategy index missing")
     lock_bytes = files["runtime-lock.json"]
@@ -330,3 +340,72 @@ def validate_bundle(data, policy):
         if candidate in files:
             executables += (candidate,)
     return Bundle(MappingProxyType(files), tuple(packages), executables)
+
+
+def native_compatibility(value):
+    fields(value, {"native_api", "canonical_schema", "schema_registry", "journal_schema", "core_state_schema"})
+    for v in value.values():
+        uint(v, 64)
+    require(value["native_api"] == 1, "unsupported native API")
+
+
+def validate_native_bundle(files, policy):
+    inventory = "share/ringwin/native-strategies.json"
+    require(inventory in files and "strategy-index.json" in files, "native build inventory or index missing")
+    build = parse_json(files[inventory])
+    fields(build, {"format_version", "runtime", "zig_version", "target", "optimize", "binary_path", "definitions"})
+    require(type(build["format_version"]) is int and build["format_version"] == 1
+            and build["runtime"] == "native_static", "unsupported native build format")
+    require(build == policy["native_build"], "native approved build mismatch")
+    for key in ("zig_version", "target", "optimize"):
+        require(type(build[key]) is str and 0 < len(build[key]) <= 128, "invalid native build identity")
+    binary = path(build["binary_path"])
+    require(binary in ("bin/ringwin", "bin/ringwin.exe") and binary in files and files[binary],
+            "native binary missing")
+    definitions = build["definitions"]
+    require(type(definitions) is list and 0 < len(definitions) <= 1024, "invalid native definition inventory")
+    index = parse_json(files["strategy-index.json"])
+    fields(index, {"format_version", "strategies"})
+    require(type(index["format_version"]) is int and index["format_version"] == 2,
+            "unsupported native strategy index format")
+    require(type(index["strategies"]) is list and len(index["strategies"]) == len(definitions), "native index mismatch")
+    expected, identifiers, records = {inventory, binary, "strategy-index.json"}, [], []
+    for definition, entry in zip(definitions, index["strategies"]):
+        fields(definition, {"definition_identity", "name", "entrypoint", "algorithm_path", "algorithm_sha256",
+                            "config_schema", "state_schema", "compatibility", "subscription", "output"})
+        identity(definition["definition_identity"])
+        identifiers.append(definition["definition_identity"])
+        for key in ("name", "entrypoint"):
+            require(type(definition[key]) is str and re.fullmatch(r"[a-zA-Z_][a-zA-Z_0-9]{0,63}", definition[key]),
+                    "invalid native entrypoint or name")
+        path(definition["algorithm_path"])
+        digest(definition["algorithm_sha256"])
+        native_compatibility(definition["compatibility"])
+        require(definition["subscription"] == 19 and type(definition["subscription"]) is int
+                and definition["output"] == "none", "unsupported native callback or output contract")
+        for kind in ("config_schema", "state_schema"):
+            contract = definition[kind]
+            fields(contract, {"identity", "version", "path", "sha256"})
+            identity(contract["identity"])
+            uint(contract["version"], 32)
+            name = path(contract["path"])
+            require(name.startswith("share/ringwin/contracts/") and name in files, "native schema missing")
+            digest(contract["sha256"])
+            require(hashlib.sha256(files[name]).hexdigest() == contract["sha256"], "native schema digest mismatch")
+            expected.add(name)
+        descriptor = dict(build={k: v for k, v in build.items() if k != "definitions"}, definition=definition)
+        manifest_hash = hashlib.sha256(canonical(descriptor)).hexdigest()
+        fields(entry, {"definition_identity", "manifest_path", "package_manifest_sha256"})
+        require(entry == dict(definition_identity=definition["definition_identity"], manifest_path=inventory,
+                              package_manifest_sha256=manifest_hash), "native index identity or digest mismatch")
+        record = dict(definition, runtime="native_static", manifest_path=inventory,
+                      package_manifest_sha256=manifest_hash, validation="passed", trading_authorized=False,
+                      qualifications=[], subscriptions=[dict(event_type=19, schema_version=1)], output_kinds=[])
+        for kind in ("config_schema", "state_schema"):
+            record[kind + "_sha256"] = definition[kind]["sha256"]
+        records.append(record)
+    require(identifiers == sorted(set(identifiers)), "native identities must be sorted and unique")
+    require(set(files) == expected, "undeclared native bundle file")
+    # The existing role service executes current/ringwin; both names use signed bytes.
+    installed = dict(files, ringwin=files[binary])
+    return Bundle(MappingProxyType(installed), tuple(records), (binary, "ringwin"))

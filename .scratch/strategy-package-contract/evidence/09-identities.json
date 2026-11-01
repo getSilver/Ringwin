@@ -1,0 +1,62 @@
+[
+  {
+    "sha256": "1e0c2d48f5b33d12e2ea9670b662c6bff2fe77aa9f9293cc0c28f2645a6cbdae",
+    "path": "python/operator_ui.html"
+  },
+  {
+    "sha256": "74a21f18ea5ae2e7516a09c098607883aa82dbd638d8304c6c1da9aa135a354a",
+    "path": "python/release_lifecycle.py"
+  },
+  {
+    "sha256": "d9e7c743b51b8ad68ae219292f59008afb953d924933317f30c19058fbc1f33d",
+    "path": "python/strategy_instance.py"
+  },
+  {
+    "sha256": "7c7d1c5d311e1508c501db6e9a1f62fa39c0a5382fd1bc32bad4edde37927193",
+    "path": "python/strategy_package.py"
+  },
+  {
+    "sha256": "8ec9cd58a78c705a0058897c2c98f0c64c83d73b0dcfa7801db05fc6de7a58fc",
+    "path": "src/strategy/native_registry.zig"
+  },
+  {
+    "sha256": "e5340dbfc1937bfd15bf2e85a734016885152b1c44b5af0f8b9101c82914f931",
+    "path": "src/strategy/strategy_package_authority.zig"
+  },
+  {
+    "sha256": "da630d97050d755e47488e7720d62f1e241b4797c138a025ca6da0c4c6975ca6",
+    "path": "src/strategy_authority_probe.zig"
+  },
+  {
+    "sha256": "ee0a6cbc5a8d38d4995e654b05b1f4be56cfc6de959cc1460b9e363dd4345658",
+    "path": "tools/verify-strategy-package-ui.cjs"
+  },
+  {
+    "sha256": "51ca27a8592bc0f6a67a3a3ea77a7cb5fff0328377b3bb244297d07ae4f4d8f1",
+    "path": "python/test_native_strategy_instance.py"
+  },
+  {
+    "sha256": "bf8a4d473abf210301de1c6c1ffb1a3b107abda85f3794798b09faa6b9a526eb",
+    "path": "python/test_native_strategy_package.py"
+  },
+  {
+    "sha256": "95c1fcd3a6222aba6458fbad4913ae02ade5de072627f343e4e345b22e0283e8",
+    "path": "src/strategy/native_instance.zig"
+  },
+  {
+    "sha256": "20246f13394cdb8f9d2e7e8be304500c1cd0f894226451de9395e2b4c6de18dc",
+    "path": "zig-out/bin/ringwin.exe"
+  },
+  {
+    "sha256": "5296f402857de452ca241a1f17ec23bc19e53d8b12ffa02def39009f5c531136",
+    "path": "zig-out/bin/ringwin-strategy-candidate.exe"
+  },
+  {
+    "sha256": "9d030082cedca76bd256c57cc55226842e4c4628fc5d512647d21531a8222e97",
+    "path": "zig-out/bin/ringwin-strategy-authority-probe.exe"
+  },
+  {
+    "sha256": "e1b3922861d832a314e6d93d715b47464509986e202cb2f23e3ece78ef27f5bf",
+    "path": "zig-out/share/ringwin/native-strategies.json"
+  }
+]

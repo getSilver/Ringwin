@@ -91,6 +91,7 @@ comptime {
 }
 
 pub fn find(identity: u128) ?contract.Definition {
+    @setEvalBranchQuota(10_000);
     inline for (registrations) |registration| {
         if (identity == comptime (contract.identity(registration.definition.definition_identity) catch unreachable)) return registration.definition;
     }

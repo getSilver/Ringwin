@@ -172,14 +172,19 @@ class ReleaseArtifact:
         if not isinstance(manifest["artifact_id"], str) or not manifest["artifact_id"]:
             raise ReleaseError("release artifact identity is invalid")
         payload_format = manifest.get("payload_format", "binary")
-        if payload_format not in ("binary", "strategy_bundle_v1"):
+        if payload_format not in ("binary", "strategy_bundle_v1", "strategy_bundle_v2"):
             raise ReleaseError("unsupported release payload format")
         try:
-            bundle = (strategy_package.validate_bundle(payload_bytes, strategy_policy)
-                      if payload_format == "strategy_bundle_v1" else None)
-            if bundle and manifest["schema_registry"] != int(
-                    strategy_policy["compatibility"]["schema_registry"], 16):
+            bundle = (strategy_package.validate_bundle(payload_bytes, strategy_policy,
+                      version=2 if payload_format == "strategy_bundle_v2" else 1)
+                      if payload_format != "binary" else None)
+            registry = (bundle.packages[0]["compatibility"]["schema_registry"]
+                        if payload_format == "strategy_bundle_v2" else
+                        int(strategy_policy["compatibility"]["schema_registry"], 16) if bundle else None)
+            if bundle and manifest["schema_registry"] != registry:
                 raise ReleaseError("release schema registry differs from the approved runtime")
+            if payload_format == "strategy_bundle_v2" and manifest["zig_version"] != strategy_policy["native_build"]["zig_version"]:
+                raise ReleaseError("release compiler differs from the approved native build")
         except (ValueError, TypeError, KeyError, RecursionError) as error:
             raise ReleaseError(str(error)) from error
         return cls(
@@ -562,8 +567,8 @@ class ReleaseManager:
                     strategy_package.require(package is not None, "qualification package digest is not registered")
                     strategy_package.require(report["compatibility"] == package["compatibility"],
                                              "qualification runtime compatibility mismatch")
-                    strategy_package.require(artifact.schema_registry == int(
-                        report["compatibility"]["schema_registry"], 16),
+                    registry = report["compatibility"]["schema_registry"]
+                    strategy_package.require(artifact.schema_registry == (int(registry, 16) if type(registry) is str else registry),
                         "qualification artifact registry mismatch")
                     validated.append((package, {
                         "report_artifact": artifact.artifact_id,

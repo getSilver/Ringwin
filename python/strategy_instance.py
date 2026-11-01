@@ -321,7 +321,7 @@ class InstanceManager:
             return json.loads(package.canonical(list(self._records.values())))
         try:
             for identity, host in list(self._hosts.items()):
-                if host["process"].poll() is not None:
+                if not host.get("native") and host["process"].poll() is not None:
                     self._fail(identity, self._records[identity], "candidate Host exited")
                 elif self._records[identity]["status"] == "Trading":
                     try:
@@ -355,6 +355,10 @@ class InstanceManager:
 
     def _exchange(self, identity, command):
         host = self._hosts[identity]
+        if host.get("native"):
+            response = self.source.authority.request(dict(operation="native_catchup", strategy_identity=identity))
+            host["cursor"] = response["cursor"]
+            return response, []
         data = package.canonical(command)
         package.require(len(data) <= 256 * 1024, "runtime command capacity exceeded")
         deadline = time.monotonic() + host["callback_timeout"]
@@ -429,6 +433,11 @@ class InstanceManager:
             package.require(identity in self._hosts and self._records[identity]["status"] in ("Ready", "Trading"), "instance is not Ready or Trading")
             try:
                 record, host = self._records[identity], self._hosts[identity]
+                if host.get("native"):
+                    self._exchange(identity, {})
+                    self._save(dict(record, runtime_cursor=host["cursor"], reason="",
+                        authority=self.source.authority.request(dict(operation="status", strategy_identity=identity))))
+                    return []
                 _, _, parts = self.source.prepare(record["binding"], host["cursor"], recover=True, batches=(batch,))
                 results = []
                 for part in parts:
@@ -602,6 +611,7 @@ class InstanceManager:
             self.view()
             package.require(identity in self._records, "unknown strategy instance")
             previous = self._records[identity]
+            package.require(previous.get("runtime") != "native_static", "native parameter transitions are not supported by this definition")
             if previous.get("config_transition", {}).get("request_sha256") == operation:
                 return previous
             old = previous["binding"]
@@ -683,9 +693,12 @@ class InstanceManager:
     def _run(self, binding, previous=None, *, transition=None, generation=None):
         identity = binding["strategy_identity"]
         package.require(not self._hosts, "single candidate Host capacity; multiple instances require ticket 10")
+        root, manifest, lock = self._approved_package(binding)
+        if manifest.get("runtime") == "native_static":
+            self.source.prepare(binding, batches=())
+            return self._run_native(binding, root, manifest, lock, previous, generation)
         cursor = previous.get("checkpoint", {}).get("cursor", 0) if previous else 0
         shard, barrier, batches = self.source.prepare(binding, cursor, recover=previous is not None)
-        root, manifest, lock = self._approved_package(binding)
         release_identity = int((root / "manifest.sha256").read_text("ascii")[:16], 16)
         package.require(release_identity != 0, "invalid native release identity")
         package.require(all(int.from_bytes(b[16:32], "little") == int(manifest["compatibility"]["schema_registry"], 16)
@@ -812,8 +825,12 @@ class InstanceManager:
             except (OSError, ValueError):
                 continue
         package.require(artifact is not None, "authenticated approved release bytes unavailable")
-        package.require(CANDIDATE_PATH in artifact.bundle.files,
-                        "approved candidate runtime adapter unavailable")
+        registration = next((p for p in artifact.bundle.packages if p["definition_identity"] == binding["definition_identity"]), None)
+        package.require(registration is not None and registration["package_manifest_sha256"] == binding["package_manifest_sha256"],
+                        "authenticated package binding mismatch")
+        if registration["runtime"] == "python":
+            package.require(CANDIDATE_PATH in artifact.bundle.files,
+                            "approved candidate runtime adapter unavailable")
         root = Path(releases.version_root) / active
         package.require(not root.is_symlink() and sealed(root), "installed release must be immutable")
         expected = set(artifact.bundle.files) | {"strategy-registry.json", "manifest.sha256"}
@@ -835,9 +852,33 @@ class InstanceManager:
             package.require(not any(p.is_symlink() for p in (path, *path.parents) if p != root.parent)
                             and path.is_file() and sealed(path) and path.stat().st_size == len(content)
                             and path.read_bytes() == content, "installed release differs from approved bytes")
+        if registration["runtime"] == "native_static":
+            build_bytes = artifact.bundle.files[registration["manifest_path"]]
+            build = package.parse_json(build_bytes)
+            return root, registration, dict(build_inventory=build_bytes.decode("ascii"),
+                binary_sha256=hashlib.sha256(artifact.bundle.files[build["binary_path"]]).hexdigest())
         manifest = package.parse_json(artifact.bundle.files[f"strategies/{binding['definition_identity']}/manifest.json"])
         lock = package.parse_json(artifact.bundle.files["runtime-lock.json"])
         return root, manifest, lock
+
+    def _run_native(self, binding, root, manifest, build, previous, generation):
+        package.require(self.source.authority is not None, "native node authority unavailable")
+        package.require(not previous or not previous.get("superseded_by"), "predecessor cannot restart")
+        identity = binding["strategy_identity"]
+        generation = generation or max([r.get("host_generation", 0) for r in self._records.values()] + [0]) + 1
+        release_identity = int((root / "manifest.sha256").read_text("ascii")[:16], 16)
+        if previous:
+            self._revoke(identity)
+        result = self.source.authority.request(dict(operation="native_prepare", strategy_identity=identity,
+            definition_identity=binding["definition_identity"], config_json=binding["config_json"],
+            config_version=binding["config_version"], release_identity=release_identity, **build))
+        result["host_generation"] = generation
+        self._hosts[identity] = dict(native=True, cursor=result["cursor"], next_input_batch=1)
+        record = dict(binding=binding, runtime="native_static", status="Ready", reason="", trading_authorized=False,
+            host_generation=generation, release_identity=release_identity, state_schema_version=manifest["state_schema"]["version"],
+            recovery=dict(cursor=result["cursor"], barrier=result["cursor"]), checkpoint=result.pop("checkpoint"), evidence=result)
+        self._save(record)
+        return record
 
     @staticmethod
     def _terminate(process, job):
@@ -852,6 +893,8 @@ class InstanceManager:
     def _stop(self, identity):
         host = self._hosts.pop(identity, None)
         if host is None:
+            return
+        if host.get("native"):
             return
         process = host["process"]
         self._terminate(process, host["job"])
