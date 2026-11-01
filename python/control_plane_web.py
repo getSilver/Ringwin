@@ -482,11 +482,15 @@ class ControlPlaneApp:
                 result = self.instance_manager.recover(binding["strategy_identity"])
             elif type(binding) is dict and binding.get("operation") == "update_config":
                 result = self.instance_manager.update_config(binding)
+            elif type(binding) is dict and binding.get("operation") in ("replace", "forward_rollback"):
+                result = self.instance_manager.replace(binding)
             else:
                 result = self.instance_manager.create(binding)
             success = result["status"] == "Ready"
             if type(binding) is dict and binding.get("operation") == "update_config":
                 success = result.get("config_transition", {}).get("status") == "completed"
+            if type(binding) is dict and binding.get("operation") in ("replace", "forward_rollback"):
+                success = result.get("successor_transition", {}).get("status") == "completed"
             return 200, {"ok": success, "result": result}
         except (ValueError, OSError, release_lifecycle.ReleaseError) as error:
             return 400, {"ok": False, "error": str(error)}

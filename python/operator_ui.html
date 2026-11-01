@@ -260,6 +260,8 @@ async function loadInstances(){
       ${escaped(JSON.stringify(r.checkpoint || {}))}
       ${escaped(JSON.stringify(r.authority || {}))}
       ${escaped(JSON.stringify(r.config_transition || {}))}
+      ${escaped(JSON.stringify(r.successor_transition || {}))}
+      ${r.status === "Ready" || r.status === "Trading" ? `<button onclick="replaceStrategyInstance('${escaped(r.binding.strategy_identity)}','${escaped(r.binding.definition_identity)}','replace')">替换代码 Rebuild</button><button onclick="replaceStrategyInstance('${escaped(r.binding.strategy_identity)}','${escaped(r.binding.definition_identity)}','forward_rollback')">ForwardRollback</button>` : ""}
       ${r.status === "Ready" || r.status === "Trading" ? `<button onclick="updateStrategyConfig('${escaped(r.binding.strategy_identity)}',${r.binding.config_version})">更新参数 Keep/Rebuild</button>` : ""}
       ${r.status === "Ready" ? `<button onclick="controlStrategyInstance('enable_trading','${escaped(r.binding.strategy_identity)}','${BigInt('0x'+r.binding.decision_domain)}')">EnableTrading</button>` : ""}
       ${r.status === "Trading" ? `<button onclick="controlStrategyInstance('trading_pause','${escaped(r.binding.strategy_identity)}','${BigInt('0x'+r.binding.decision_domain)}')">停用交易</button>` : ""}
@@ -302,6 +304,16 @@ async function updateStrategyConfig(identity, version){
     toast(status === 200 && body.ok ? `${progress.method} 完成；Ready，无交易授权` : `参数更新失败：${progress.reason || body.error || "请查询实际状态"}`, status === 200 && body.ok ? "ok" : "bad");
     await loadInstances();
   } catch (error) { toast("参数请求失败，请查询实例状态。", "bad"); }
+}
+async function replaceStrategyInstance(identity, definition, operation){
+  const raw = prompt("先通过 DeployRelease / ForwardRollback 安装目标签名发布，再提交目标 JSON：release_artifact、definition_identity、package_manifest_sha256。创建新 Successor，延续原 VirtualPortfolio；要求旧责任闭合，排空整个 DecisionDomain，成功后 Ready 并须显式启用。");
+  if (!raw) return;
+  try {
+    const [status, body] = await api("POST", "/api/strategy-instances", {...JSON.parse(raw), operation, operation_identity:BigInt(newIdentity()).toString(16).padStart(32,'0'), strategy_identity:identity, expected_definition_identity:definition});
+    const progress = body.result?.successor_transition || {};
+    toast(status === 200 && body.ok ? `Successor ${progress.to_instance}：Ready，无交易授权` : `接替失败：${progress.reason || body.error || "请查询实际身份"}`, status === 200 && body.ok ? "ok" : "bad");
+    await loadInstances();
+  } catch (error) { toast("接替请求失败，请查询实际身份。", "bad"); }
 }
 async function createStrategyInstance(){
   const raw = prompt("粘贴已核对的运行绑定 JSON（定义/包摘要、配置内容及SHA-256、实例、VirtualPortfolio、DecisionDomain、账户品种范围与预算）：");

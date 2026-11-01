@@ -220,8 +220,10 @@ class WebInstanceTests(unittest.TestCase):
         self.addCleanup(self.instances.close)
         self.app.instance_manager = self.instances
 
-    def install(self, code=OBSERVER, limit_changes=None, state_fields=(), transitions=None):
+    def install(self, code=OBSERVER, limit_changes=None, state_fields=(), transitions=None, definition=DEFINITION, artifact="candidate-a"):
         files, policy = bundle_files()
+        if definition != DEFINITION:
+            files = {p.replace(DEFINITION, definition): b for p, b in files.items()}
         runtime = {"ringwin": b"synthetic engine; this acceptance executes only the real candidate adapter and Host",
                    strategy_instance.CANDIDATE_PATH: self.engine.read_bytes()}
         runtime.update(windows_runtime() if os.name == "nt" else
@@ -236,41 +238,42 @@ class WebInstanceTests(unittest.TestCase):
                               host_path="runtime/strategy_candidate_host.py",
                               files=[descriptor(p, b) for p, b in sorted(runtime.items())]))
         compatibility = dict(compatibility, runtime_lock_sha256=hashlib.sha256(lock).hexdigest())
-        name = f"strategies/{DEFINITION}/manifest.json"
+        name = f"strategies/{definition}/manifest.json"
         manifest = json.loads(files[name])
+        manifest["definition_identity"] = definition
         manifest["compatibility"] = compatibility
         manifest["limits"].update(max_callback_ns=1000000000, max_warmup_ns=10000000000,
                                   max_input_record_bytes=1024, max_memory_bytes=268435456)
         manifest["limits"].update(limit_changes or {})
         manifest["subscriptions"] = [{"event_type": 7, "schema_version": 1}]
         manifest["output_kinds"] = ["intent_group", "order_intent"]
-        files[f"strategies/{DEFINITION}/code/observer.py"] = code
-        files[f"strategies/{DEFINITION}/contracts/config.json"] = canonical(dict(
+        files[f"strategies/{definition}/code/observer.py"] = code
+        files[f"strategies/{definition}/contracts/config.json"] = canonical(dict(
             fields=[dict(name="warmup_events", type="u64", unit="canonical_events", minimum=1, maximum=100)],
             unknown_fields="reject", missing_fields="reject", encoding="canonical_json"))
         if transitions is not None:
-            contract = json.loads(files[f"strategies/{DEFINITION}/contracts/config.json"])
+            contract = json.loads(files[f"strategies/{definition}/contracts/config.json"])
             contract["transitions"] = transitions
-            files[f"strategies/{DEFINITION}/contracts/config.json"] = canonical(contract)
-        files[f"strategies/{DEFINITION}/contracts/state.json"] = canonical(dict(
+            files[f"strategies/{definition}/contracts/config.json"] = canonical(contract)
+        files[f"strategies/{definition}/contracts/state.json"] = canonical(dict(
             fields=[dict(name="events", type="u64", unit="canonical_events", minimum=0, maximum=2**64 - 1),
                     dict(name="next_intent_sequence", type="u64", unit="intent_sequence", minimum=1, maximum=2**64 - 1),
                     *state_fields],
             unknown_fields="reject", missing_fields="reject", encoding="portable_json_v1"))
-        manifest["files"] = [descriptor(p[ len(f'strategies/{DEFINITION}/'):], b) for p, b in sorted(files.items())
-                             if p.startswith(f"strategies/{DEFINITION}/") and p != name]
+        manifest["files"] = [descriptor(p[ len(f'strategies/{definition}/'):], b) for p, b in sorted(files.items())
+                             if p.startswith(f"strategies/{definition}/") and p != name]
         files[name] = canonical(manifest)
         digest = hashlib.sha256(files[name]).hexdigest()
         files["strategy-index.json"] = canonical(dict(format_version=1, strategies=[dict(
-            definition_identity=DEFINITION, manifest_path=name, package_manifest_sha256=digest)]))
+            definition_identity=definition, manifest_path=name, package_manifest_sha256=digest)]))
         files = {p: b for p, b in files.items() if not p.startswith("runtime/") and p != "ringwin"}
         files.update(runtime)
         files["runtime-lock.json"] = lock
         self.manager.strategy_policy = dict(compatibility=compatibility, limits=manifest["limits"], subscriptions=manifest["subscriptions"])
-        deployed = self.deploy(write_bundle(self.root, "candidate-a", files))
+        deployed = self.deploy(write_bundle(self.root, artifact, files), identity=str(time.time_ns() % 2**62), expected=self.manager.active_artifact())
         self.assertEqual(deployed["status"], "activated", deployed)
         config = '{"warmup_events":1}'
-        self.binding = dict(release_artifact="candidate-a", definition_identity=DEFINITION,
+        self.binding = dict(release_artifact=artifact, definition_identity=definition,
             package_manifest_sha256=digest, strategy_identity="0" * 30 + "10", initialization="new",
             config_version=1, config_json=config, config_sha256=hashlib.sha256(config.encode()).hexdigest(),
             **self.source.scope)
@@ -380,6 +383,132 @@ class WebInstanceTests(unittest.TestCase):
         self.assertFalse(state["trading_authorized"])
         self.assertEqual(self.client.call("POST", "/api/strategy-instances", request), (200, body))
         self.assertEqual(self.instance_command("enable_trading")[0], 200)
+
+    def replacement(self, old, operation="replace"):
+        return dict(operation=operation, operation_identity=f"{time.time_ns():032x}", strategy_identity=old["strategy_identity"],
+                    expected_definition_identity=old["definition_identity"], **{k: self.binding[k] for k in
+                    ("release_artifact", "definition_identity", "package_manifest_sha256")})
+
+    def test_successor_rejects_candidate_failure_without_revoking_current_host(self):
+        authority = self.native_authority()
+        self.install()
+        old = dict(self.binding)
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        self.assertEqual(self.instance_command("enable_trading")[0], 200)
+        cursor = authority.request(dict(operation="status", strategy_identity=old["strategy_identity"]))["cursor"]
+        self.source.batches = (self.node_batch(cursor, 1),)
+        self.install(OBSERVER.replace(b'return Observer(context, config)', b'raise ValueError("bad successor")'),
+                     definition="b" * 32, artifact="candidate-b")
+        status, body = self.client.call("POST", "/api/strategy-instances", self.replacement(old))
+        self.assertEqual(status, 200, body)
+        self.assertFalse(body["ok"], body)
+        self.assertEqual(body["result"]["successor_transition"]["status"], "rejected")
+        self.assertTrue(authority.request(dict(operation="status", strategy_identity=old["strategy_identity"]))["trading_authorized"])
+
+    def test_successor_live_order_rejection_does_not_close_or_clear_the_order(self):
+        authority = self.native_authority()
+        self.install(TRADER)
+        old = dict(self.binding)
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        self.assertEqual(self.instance_command("enable_trading")[0], 200)
+        first = authority.request(dict(operation="status", strategy_identity=old["strategy_identity"]))["cursor"] + 1
+        cursor = authority.request(dict(operation="advance"))["cursor"]
+        self.instances.deliver(old["strategy_identity"], self.node_batch(cursor, first))
+        before = authority.request(dict(operation="status", strategy_identity=old["strategy_identity"]))
+        self.source.batches = (self.node_batch(before["cursor"], 1),)
+        self.install(definition="b" * 32, artifact="candidate-b")
+        status, body = self.client.call("POST", "/api/strategy-instances", self.replacement(old))
+        self.assertEqual(status, 200, body)
+        self.assertFalse(body["ok"], body)
+        self.assertEqual(body["result"]["successor_transition"]["status"], "rejected")
+        self.assertIn("SuccessorResponsibilityOpen", body["result"]["successor_transition"]["reason"])
+        after = authority.request(dict(operation="status", strategy_identity=old["strategy_identity"]))
+        self.assertEqual(after["orders"], before["orders"])
+        self.assertEqual(after["commands"], before["commands"])
+
+    def test_replacement_and_forward_rollback_create_fresh_successors_and_recover_without_authority(self):
+        authority = self.native_authority()
+        self.install()
+        original = dict(self.binding)
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        self.assertEqual(self.instance_command("enable_trading")[0], 200)
+        cursor = authority.request(dict(operation="status", strategy_identity=original["strategy_identity"]))["cursor"]
+        self.source.batches = (self.node_batch(cursor, 1),)
+        self.install(OBSERVER + b'\n# replacement definition\n', definition="b" * 32, artifact="candidate-b")
+        request = self.replacement(original)
+        status, body = self.client.call("POST", "/api/strategy-instances", request)
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["ok"], body)
+        result = body["result"]
+        successor = result["binding"]["strategy_identity"]
+        self.assertNotEqual(successor, original["strategy_identity"])
+        self.assertEqual(result["binding"]["portfolio_identity"], original["portfolio_identity"])
+        self.assertEqual(result["status"], "Ready")
+        self.assertEqual(result["evidence"]["next_intent_sequence"], 1)
+        self.assertFalse(authority.request(dict(operation="status", strategy_identity=successor))["trading_authorized"])
+        self.assertEqual(self.client.call("POST", "/api/strategy-instances", request), (200, body))
+        self.assertEqual(self.client.call("POST", "/api/strategy-instances", dict(request, definition_identity="c" * 32))[0], 400)
+        self.assertEqual(self.client.call("POST", "/api/strategy-instances", dict(operation="recover", strategy_identity=original["strategy_identity"]))[0], 400)
+        with self.assertRaisesRegex(ValueError, "StrategyIdentityMismatch"):
+            authority.request(dict(operation="status", strategy_identity=original["strategy_identity"]))
+        self.binding = result["binding"]
+        self.assertEqual(self.instance_command("enable_trading")[0], 200)
+        old = result["binding"]
+        cursor = authority.request(dict(operation="status", strategy_identity=successor))["cursor"]
+        self.source.batches = (self.node_batch(cursor, 1),)
+        # Existing signed release rollback installs old content; the instance still advances.
+        manifest = self.root / "candidate-a.json"
+        rollback = self.deploy(manifest, identity=str(time.time_ns() % 2**62), expected="candidate-b", kind="forward_rollback")
+        self.assertEqual(rollback["status"], "activated")
+        self.binding = original
+        status, body = self.client.call("POST", "/api/strategy-instances", self.replacement(old, "forward_rollback"))
+        self.assertTrue(body["ok"], body)
+        restored = body["result"]
+        self.assertNotIn(restored["binding"]["strategy_identity"], (successor, original["strategy_identity"]))
+        self.assertEqual(restored["binding"]["definition_identity"], original["definition_identity"])
+        self.assertEqual(restored["evidence"]["next_intent_sequence"], 1)
+        self.instances._stop(restored["binding"]["strategy_identity"])
+        self.source.batches = (self.node_batch(restored["evidence"]["cursor"], 1),)
+        recovered = self.instances.recover(restored["binding"]["strategy_identity"])
+        self.assertEqual(recovered["status"], "Ready", recovered)
+        self.assertEqual(recovered["binding"], restored["binding"])
+        self.assertFalse(recovered["trading_authorized"])
+        reopened = strategy_instance.InstanceManager(self.instances.directory, self.manager, self.source)
+        self.addCleanup(reopened.close)
+        self.assertEqual(reopened.replace(request), result)
+
+    def test_successor_lost_commit_ack_stops_and_reopen_cannot_restore_predecessor(self):
+        authority = self.native_authority()
+        self.install()
+        old = dict(self.binding)
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        self.assertEqual(self.instance_command("enable_trading")[0], 200)
+        cursor = authority.request(dict(operation="status", strategy_identity=old["strategy_identity"]))["cursor"]
+        self.source.batches = (self.node_batch(cursor, 1),)
+        self.install(definition="b" * 32, artifact="candidate-b")
+        request = self.replacement(old)
+        exchange = authority.request
+        def lose_ack(value):
+            response = exchange(value)
+            if value["operation"] == "commit_successor":
+                raise OSError("commit ACK lost")
+            return response
+        authority.request = lose_ack
+        status, body = self.client.call("POST", "/api/strategy-instances", request)
+        self.assertEqual(status, 200, body)
+        self.assertFalse(body["ok"], body)
+        progress = body["result"]["successor_transition"]
+        self.assertEqual(progress["status"], "unknown")
+        self.assertEqual(body["result"]["status"], "Stopped")
+        self.assertFalse(self.instances._hosts)
+        self.assertFalse(exchange(dict(operation="status", strategy_identity=progress["to_instance"]))["trading_authorized"])
+        reopened = strategy_instance.InstanceManager(self.instances.directory, self.manager, self.source)
+        self.addCleanup(reopened.close)
+        with self.assertRaisesRegex(ValueError, "successor cutover"):
+            reopened.recover(old["strategy_identity"])
+        retry = reopened.replace(request)
+        self.assertEqual(retry["successor_transition"]["status"], "unknown")
+        self.assertFalse(reopened._hosts)
 
     def update_config(self, version=2, config='{"warmup_events":1}', method="Keep", expected=1):
         return self.client.call("POST", "/api/strategy-instances", dict(operation="update_config",

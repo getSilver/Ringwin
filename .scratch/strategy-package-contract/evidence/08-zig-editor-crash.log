@@ -1,0 +1,170 @@
+1/824 main.test_0...OK
+2/824 main.test_1...OK
+3/824 strategy.strategy_checkpoint_store.test.checkpoint publication keeps current content through staging failure and deduplicates committed identity...OK
+4/824 trading.trading_shard.test.09 canonical stream and deferred admission numeric boundaries preserve the final free slot...OK
+5/824 trading.trading_shard.test.state digest binds instrument trading margin and economic position authority...OK
+6/824 trading.trading_shard.test.recovery retains admission fence and durable rejection without publishing truncated input...OK
+7/824 trading.trading_shard.test.asset definition activation rejects rescaling and survives snapshot...OK
+8/824 trading.trading_shard.test.asset definition idempotence conflicts regression and invalid ranges are durable...OK
+9/824 trading.trading_shard.test.cold account reconciliation proves every archived Fill before applying and rejects incomplete coverage...OK
+10/824 trading.trading_shard.test.cold core staging preserves candidate and blocks fresh risk before proof...OK
+11/824 trading.trading_shard.test.optimization borrowed canonical snapshot matches copy canonicalization without mutating source...snapshot comparison: 3 identical encodings, legacy=254422 us borrowed=171643 us bytes=3746367
+OK
+12/824 trading.trading_shard.test.optimization owned stable candidate preserves public commits rejects duplicates and journal rollback...OK
+13/824 trading.trading_shard.test.optimization owned Core and Venue rollback matches nested public candidates...OK
+14/824 trading.trading_shard.test.03 canonical funding snapshot rejects forged deployment ownership evidence...OK
+15/824 testing.regression.trading_shard_tests.test.successor and forward rollback preserve economics and latches through stable replay...OK
+16/824 testing.regression.trading_shard_tests.test.successor refuses active cycles unknown work late facts positions and residuals...OK
+17/824 testing.regression.trading_shard_tests.test.same instance parameter activation preserves economics and latches through stable replay...OK
+18/824 testing.regression.trading_shard_tests.test.checkpoint maintenance carries ordered inputs and live authority through one hundred windows...checkpoint core: 100 rounds, barrier=931, encoded_snapshot_max=3748413, shard_bytes=31439408, pins_max=16/8192, window=256
+OK
+19/824 testing.regression.trading_shard_tests.test.ordered checkpoint history binds core input prices before final state convergence...OK
+20/824 testing.regression.trading_shard_tests.test.global shard barrier rejects checksummed sequence tampering before restore...OK
+21/824 testing.regression.trading_shard_tests.test.global shard barrier continues snapshot tail replay and preserves failed append...OK
+22/824 testing.regression.trading_shard_tests.test.Owner native settlements retain partial cost remainder reversal and classified cash exactly once...OK
+23/824 testing.regression.trading_shard_tests.test.Owner rejects tighter native bounds without losing committed registry or recoverable holdings...OK
+24/824 testing.regression.trading_shard_tests.test.OMS command binds scoped capability and source-owned authority barriers...OK
+25/824 testing.regression.trading_shard_tests.test.CancelOpenOrders preserves the actual TradingAuthorization grant...OK
+26/824 testing.regression.trading_shard_tests.test.unsupported OMS order semantics reject as replayable exact-only facts...OK
+27/824 testing.regression.trading_shard_tests.test.inexact direct price keeps a stable reject without an OMS command...OK
+28/824 testing.regression.trading_shard_tests.test.core mark micros become canonical ticks at the active venue tick...OK
+29/824 testing.regression.trading_shard_tests.test.market gap rejects a native intent with a replayable reason...OK
+30/824 testing.regression.trading_shard_tests.test.risk lease limit rejects a native intent with a replayable reason...OK
+31/824 testing.regression.trading_shard_tests.test.stable CanonicalEvent decoder rejects malformed envelopes without state change...OK
+32/824 testing.regression.trading_shard_tests.test.configurable Genesis fails closed until authority is complete...core_input_rejection: product_model=IncompatibleProductReservationModel
+OK
+33/824 testing.regression.trading_shard_tests.test.native and Python intents cross the same authority and risk seam...OK
+34/824 testing.regression.trading_shard_tests.test.host fault revokes the old activation before a replacement can trade...OK
+35/824 testing.regression.trading_shard_tests.test.new HostSession revokes the old direct-trade identity...OK
+36/824 testing.regression.trading_shard_tests.test.fresh Gateway revokes a replayed old Host activation before restart...OK
+37/824 testing.regression.trading_shard_tests.test.active Host exit and timeout journal revocation blocks direct trade...OK
+38/824 testing.regression.trading_shard_tests.test.control commands authorize pause cancel and replay lifecycle deterministically...OK
+39/824 testing.regression.trading_shard_tests.test.layered gates latch kill while warning and self recovery stay narrow...OK
+40/824 testing.regression.trading_shard_tests.test.de risk locks target and flatten requires warning...OK
+41/824 testing.regression.trading_shard_tests.test.keep positions stops through shard seam preserving economics...OK
+42/824 testing.regression.trading_shard_tests.test.full lifecycle trajectories authorize only prescribed risk cancel and reduce behavior...OK
+43/824 testing.regression.trading_shard_tests.test.venue facts and replay use apply without replay send capability...OK
+44/824 testing.regression.trading_shard_tests.test.shared canonical adapter facts enter the TradingShard state seam...core_input_rejection: l2=IncompleteL2Book fill_fee=MissingFillFee
+OK
+45/824 testing.regression.trading_shard_tests.test.legal private fact permutations preserve semantic authority while retaining audit order...OK
+46/824 testing.regression.trading_shard_tests.test.fixed-seed private fact fuzz retains the table-driven permutation invariant...OK
+47/824 testing.regression.trading_shard_tests.test.cancel reconciliation accepts one late Fill without duplicate economics...OK
+48/824 testing.regression.trading_shard_tests.test.account bootstrap snapshot is normalized before stable journal replay...OK
+49/824 testing.regression.trading_shard_tests.test.an existing account failure does not commit an unrelated rejected event...OK
+50/824 testing.regression.trading_shard_tests.test.canonical not-sent is terminal without entering the legacy shard schema...OK
+51/824 testing.regression.trading_shard_tests.test.bounded multi instrument OMS closes lifecycle and partial policy...OK
+52/824 testing.regression.trading_shard_tests.test.SPOT and linear instruments close economics and replay independently...OK
+53/824 testing.regression.trading_shard_tests.test.OMS outbox crosses the sole Gateway and SimulatedVenue seam...core_safety_invariants: dispatch_persist=pass replay_no_send=pass reduce_only_fencing=pass
+OK
+54/824 testing.regression.trading_shard_tests.test.CancelConfirmCreate discards stale replacement after an intervening fill...OK
+55/824 testing.regression.trading_shard_tests.test.OMS group identity is checked before new risk and conflict survives replay...OK
+56/824 testing.regression.trading_shard_tests.test.partial fill keeps another PendingCancel blocking CCC...OK
+57/824 testing.regression.trading_shard_tests.test.IntentGroup batch results remain itemized...OK
+58/824 testing.regression.trading_shard_tests.test.layered risk retains unknown reservations until authoritative terminal evidence...OK
+59/824 testing.regression.trading_shard_tests.test.unknown OMS dispatch blocks a later place until the order is resolved...OK
+60/824 testing.regression.trading_shard_tests.test.TradingShard preserves maintenance margin in the projected buffer...OK
+61/824 testing.regression.trading_shard_tests.test.rejected IntentGroup leaves authoritative state unchanged...OK
+62/824 testing.regression.trading_shard_tests.test.rejected dispatch batch leaves authoritative state unchanged...OK
+63/824 testing.regression.trading_shard_tests.test.rejected execution report leaves authoritative state unchanged...OK
+64/824 testing.regression.trading_shard_tests.test.authoritative reconciliation cannot regress a terminal order...OK
+65/824 testing.regression.trading_shard_tests.test.CancelConfirmCreate re-risks replacement against latest facts...OK
+66/824 testing.regression.trading_shard_tests.test.CancelConfirmCreate cannot recreate a fenced strategy...OK
+67/824 testing.regression.trading_shard_tests.test.forced position divergence blocks new qualification...OK
+68/824 testing.regression.trading_shard_tests.test.SPOT asset risk is isolated from SWAP positions...OK
+69/824 testing.regression.trading_shard_tests.test.economic fills derive ownership from OMS and close Portfolio Exchange ledgers...OK
+70/824 testing.regression.trading_shard_tests.test.funding forced execution and snapshots preserve auditable local economics...OK
+71/824 testing.regression.trading_shard_tests.test.duplicate economic facts are no-op at the TradingShard seam...OK
+72/824 testing.regression.trading_shard_tests.test.CancelConfirmCreate accepts authoritative reconciliation as confirmation...OK
+73/824 testing.regression.trading_shard_tests.test.canonical absence without source proof preserves the unknown order and reservation...OK
+74/824 testing.regression.trading_shard_tests.test.complete canonical absence closes only an unknown place and rejects late venue facts...OK
+75/824 testing.regression.trading_shard_tests.test.canonical terminal reconciliation confirms a CCC replacement...OK
+76/824 testing.regression.trading_shard_tests.test.canonical cancel report confirms a CCC replacement...OK
+77/824 testing.regression.trading_shard_tests.test.older reconciliation identity still rejects semantic conflict...OK
+78/824 testing.regression.trading_shard_tests.test.multiple SPOT and SWAP orders independently close place amend and cancel...OK
+79/824 testing.regression.trading_shard_tests.test.core safety invariants replay CCC intent conflict suspense and archive windows...core_safety_invariants: ccc=pass intent_conflict=pass suspense=pass unclosed_archive_window=pass host_activated=pass
+OK
+80/824 testing.regression.trading_shard_tests.test.direct core spot fill enforces native base single amount before economic commit...OK
+81/824 testing.regression.trading_shard_tests.test.direct core spot sells release only their uniquely applied inventory...OK
+82/824 testing.regression.trading_shard_tests.test.spot decreasing native amend reserves confirmed inventory until venue confirmation...OK
+83/824 runtime.recovery_cutover.test.09 recovery order evidence count represents the full resident domain without population...OK
+84/824 runtime.recovery_cutover.test.restart recovery remains fenced until exact venue evidence closes...OK
+85/824 runtime.recovery_cutover.test.strategy checkpoint catches up to the core barrier without publishing intents...OK
+86/824 runtime.recovery_cutover.test.strategy recovery falls back from a damaged newest published checkpoint...OK
+87/824 runtime.recovery_cutover.test.cutover drain activates exactly one version at a stable barrier...OK
+88/824 runtime.recovery_cutover.test.cutover activation is a stable canonical fact before authority switches...OK
+89/824 runtime.recovery_cutover.test.strategy cutover persists a scoped fence and leaves unrelated orders live...OK
+90/824 runtime.recovery_cutover.test.cutover failures and forward rollback never regress economic state or generation...OK
+91/824 portfolio.account_coordinator.test.09 coordinator summary count domain admits 1024 and rejects impossible totals without orders...OK
+92/824 portfolio.account_coordinator.test.09 coordinator widened summary round trips new snapshot and tail and refuses retired formats...OK
+93/824 portfolio.account_coordinator.test.shared account protocol rejects conflicting shard summaries...OK
+94/824 portfolio.account_coordinator.test.risk leases allocate from gross reservations without netting benefit...OK
+95/824 portfolio.account_coordinator.test.failed risk lease allocation is atomic and gross overflow fails closed...OK
+96/824 portfolio.account_coordinator.test.summary barrier and lease expiry fail atomically on overflow...OK
+97/824 portfolio.account_coordinator.test.account facts fan out once in stable shard order...OK
+98/824 portfolio.account_coordinator.test.04 absent tier and liquidation evidence remains unknown...OK
+99/824 portfolio.account_coordinator.test.margin reconciliation preserves netting benefit but latches unexplained differences...OK
+100/824 portfolio.account_coordinator.test.unowned economics stay in suspense until an immutable allocation...OK
+101/824 portfolio.account_coordinator.test.caller owner cannot directly route forced execution...OK
+102/824 portfolio.account_coordinator.test.completed forced allocation survives the next source and snapshot...OK
+103/824 portfolio.account_coordinator.test.04 forced allocation validates portfolio direction inside one domain...OK
+104/824 portfolio.account_coordinator.test.multi-owner forced allocation survives newer account facts and delivery replay...OK
+105/824 portfolio.account_coordinator.test.partial forced attribution retains exact suspense until remaining slices are delivered...OK
+106/824 portfolio.account_coordinator.test.opposing positions can be attributed in separate forced allocations...OK
+107/824 portfolio.account_coordinator.test.forced delivery retry after shard commit does not charge penalty twice...OK
+108/824 portfolio.account_coordinator.test.shared gateway routes itemized outcomes to the unique owning shard...OK
+109/824 portfolio.account_coordinator.test.protocol rejects sequence gaps identity drift and cross shard delivery...OK
+110/824 portfolio.account_coordinator.test.local faults stay local while account gates tighten every shard...OK
+111/824 portfolio.account_coordinator.test.four shard coordinator snapshot restores deterministic authority...OK
+112/824 portfolio.account_coordinator.test.account recovery restores four matching shard tails under fresh evidence fence...OK
+113/824 portfolio.account_coordinator.test.account recovery retains a forced shard commit awaiting coordinator ack...OK
+114/824 portfolio.account_coordinator.test.shard summaries derive from authoritative state and coordinate four real shards...OK
+115/824 portfolio.account_coordinator.test.explicit lease tightening is a replayable deterministic fact...OK
+116/824 portfolio.account_coordinator.test.margin reconciliation covers mode buckets rounding and unknown evidence...OK
+117/824 portfolio.account_coordinator.test.coordinator history pins incomplete forced source...OK
+118/824 portfolio.account_coordinator.test.coordinator history durable writer rotates beyond old journal capacity and recovers exact sequence...OK
+119/824 portfolio.account_coordinator.test.01 summary publication version is separate from authoritative shard progress...OK
+120/824 portfolio.account_coordinator.test.01 rejected summaries fence cached leases durably...OK
+121/824 portfolio.account_coordinator.test.02 renewal requires four fresh summary publications...OK
+122/824 portfolio.account_coordinator.test.02 expiry revocation and requalification are durable inputs...OK
+123/824 portfolio.account_coordinator.test.02 requalification requires four publications after the latest fault...OK
+124/824 portfolio.account_coordinator.test.02 zero quota is closed and only exact grant requests are duplicate...OK
+125/824 portfolio.account_coordinator.test.03 shared canonical fanout survives durable acknowledgement replay...OK
+126/824 portfolio.account_coordinator.test.03 shared canonical identity conflict and gaps retain durable closed gate...OK
+127/824 portfolio.account_coordinator.test.03 bounded venue fanout checkpoints a full pending queue...OK
+128/824 portfolio.account_coordinator.test.03 cold venue identities and pending spool survive checkpoint...OK
+129/824 portfolio.account_coordinator.test.03 venue history read failure closes authority and persists its gate...OK
+130/824 portfolio.account_coordinator.test.03 unproven raw fee and broadcast economic fault close account authority...OK
+131/824 portfolio.account_coordinator.test.03 malformed initial venue stream cannot bind a source or retain account authority...OK
+132/824 portfolio.account_coordinator.test.04 account scoped summaries keep secondary economics and OMS reservations separate...OK
+133/824 portfolio.account_coordinator.test.04 native account evidence is retained once across owner recovery...OK
+134/824 portfolio.account_coordinator.test.04 instrument contribution units survive coordinator replay independently...OK
+135/824 portfolio.account_coordinator.test.04 native isolated rules reconcile independent venue margin and literal liquidation...OK
+136/824 portfolio.account_coordinator.test.07 recovery fence loss cannot release coordinator authority...OK
+137/824 testing.acceptance.core.four_shard_acceptance.test.four-shard acceptance entry stops at the first broken assertion...OK
+138/824 testing.acceptance.core.native_rounding_acceptance.test.04 native quantum reserves ten atoms per place through four real Owners...OK
+139/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 forced secondary portfolio preserves strategy provenance through recovery...OK
+140/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 forced snapshot rejects a substituted portfolio source...OK
+141/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 forced native PnL keeps portfolio cost difference in netting settlement...OK
+142/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 TradingShard public intent freezes portfolio on order and command...OK
+143/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 secondary portfolio Gateway evidence archives and cold retries without sending...OK
+144/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 secondary account portfolio Gateway evidence archives and recovers without sending...OK
+145/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 Owner activates and funds independent portfolio layers through Core snapshot...OK
+146/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 three portfolio economics have canonical identity order across activation and recovery...OK
+147/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 configured Owner preserves two portfolio memberships and independent budgets...OK
+148/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 two portfolio Host authorities share session and revoke independently...OK
+149/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 physical capability configuration is independent of portfolio strategy versions...OK
+150/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 global control closure revokes every portfolio Host activation...OK
+151/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 lifecycle progress preserves every funded portfolio when flat...OK
+152/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 startup lets portfolio B submit a complete Host group before the primary strategy exists...OK
+153/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 startup denies a later strategy implicit capability authorization...OK
+154/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 startup activates a strategy funded only in a secondary account...OK
+155/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 lifecycle progress cannot complete DeRisk while only portfolio B has positions...OK
+156/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 complete groups in two portfolios keep independent cycle ownership...OK
+157/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 portfolio B closes its cycle while portfolio A keeps positions on both accounts...OK
+158/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 portfolio B residual backs a new cycle while portfolio A keeps spot inventory...OK
+159/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 a portfolio reduction cannot increase an account with unknown dispatch...OK
+160/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 manual freeze selects portfolio B residual and its native inventory...OK
+161/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 canonical spot fills select portfolio B position before residual inventory...OK
+162/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 spot sells reserve each portfolio inventory and the physical account independently...OK
+163/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 another portfolio reservation does not consume a small portfolios cash buffer...OK
+164/824 testing.acceptance.core.multi_portfolio_authority_acceptance.test.04 Core funding preserves a unique portfolio and suspends an unactivated multi portfolio domain...OK

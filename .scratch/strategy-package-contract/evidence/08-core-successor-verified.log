@@ -1,0 +1,5 @@
+1/4 entry.test_0...OK
+2/4 testing.regression.trading_shard_tests.test.successor and forward rollback preserve economics and latches through stable replay...OK
+3/4 testing.regression.trading_shard_tests.test.successor refuses active cycles unknown work late facts positions and residuals...OK
+4/4 execution.oms.test.ccc predecessor stays hot while successor is live...OK
+All 4 tests passed.

@@ -4953,6 +4953,42 @@ pub const TradingShard = struct {
         return result;
     }
 
+    /// V1 replacement cannot inherit unresolved management or economic work.
+    pub fn requireSuccessorClosure(self: *const TradingShard, strategy: u128) !void {
+        if (!self.oms.openOrdersClosed() or self.oms.recovery_only or self.pending_history_candidate != null or
+            self.pending_safety_history_candidate != null or self.deferred_history_admission_count != 0)
+            return error.SuccessorResponsibilityOpen;
+        for (self.cycles.records[0..self.cycles.count]) |cycle|
+            if (cycle.strategy == strategy) return error.SuccessorResponsibilityOpen;
+        for (self.cycles.residual_lifecycle.live[0..self.cycles.residual_lifecycle.live_count]) |residual|
+            if (residual.strategy == strategy) return error.SuccessorResponsibilityOpen;
+        const portfolio = self.strategyAuthority(strategy).portfolio_identity;
+        const accounts = [_]u128{self.exchange_account_identity} ++ blk: {
+            var ids: [3]u128 = @splat(0);
+            for (self.secondary_accounts[0..self.secondary_account_count], 0..) |account, index| ids[index] = account.state.exchange_account_identity;
+            break :blk ids;
+        };
+        for (accounts) |account| {
+            if (account == 0) continue;
+            const state = self.accountState(account) orelse return error.SuccessorResponsibilityOpen;
+            if (state.open_economic_fact_count != 0 or state.open_economic_unknown_time_count != 0 or
+                state.economic_fault_count != 0 or state.pending_reconciliation_window != null or
+                state.economic_projection.reconciliation_break) return error.SuccessorResponsibilityOpen;
+            for (self.oms.orders[0..self.oms.order_count]) |order| {
+                if (order.exchange_account == account and order.cumulative_quantity != try state.economic_projection.appliedCanonicalFillQuantity(order.id))
+                    return error.SuccessorResponsibilityOpen;
+            }
+            if (state.economic_projection.portfolioLayer(portfolio)) |layer| {
+                if (layer.spot.quantity != 0 or layer.swap.quantity != 0 or layer.spot_asset_atoms != 0 or layer.margin_atoms != 0)
+                    return error.SuccessorResponsibilityOpen;
+                for (layer.instrument_positions[0..layer.instrument_position_count]) |position|
+                    if (position.position.quantity != 0 or position.position.open_cost_atoms != 0 or position.spot_asset_atoms != 0 or position.margin_atoms != 0)
+                        return error.SuccessorResponsibilityOpen;
+            }
+            try state.economic_projection.assertClosed();
+        }
+    }
+
     fn applyVersionActivation(self: *TradingShard, activation: shard_event.VersionActivationEvent, identity: u64, verified: bool) !void {
         if (self.business_history_root != null and !verified) return error.ControlHistoryProofRequired;
         if (self.strategyFenced(activation.new_strategy_instance)) return error.StrategyCutoverFenced;
@@ -4964,6 +5000,30 @@ pub const TradingShard = struct {
             !std.mem.eql(u8, &activation.canonical_state_digest, &self.canonicalStateDigest()))
             return error.InvalidVersionActivation;
         var strategy = self.strategyAuthority(activation.new_strategy_instance);
+        const predecessor = self.strategyAuthority(if (self.active_strategy_instance == 0) self.strategy_identity else self.active_strategy_instance);
+        if (activation.transition == .rebuild and predecessor.strategy_active and predecessor.strategy_identity != activation.new_strategy_instance) {
+            if (strategy.strategy_active or activation.parameter_version == 0 or
+                activation.strategy_definition == 0 or activation.state_schema_version == 0 or
+                predecessor.host_activation_identity != 0 or self.operational_state.effectiveTradingAuthority())
+                return error.InvalidSuccessorTransition;
+            try self.requireSuccessorClosure(predecessor.strategy_identity);
+            const already_fenced = self.strategyFenced(predecessor.strategy_identity);
+            if (!already_fenced and self.fenced_strategy_count == self.fenced_strategy_instances.len) return error.StrategyFenceCapacityExceeded;
+            if (self.portfolio_authority_count == self.portfolio_authorities.len) return error.StrategyCapacity;
+            if (!already_fenced) {
+                self.fenced_strategy_instances[self.fenced_strategy_count] = predecessor.strategy_identity;
+                self.fenced_strategy_count += 1;
+            }
+            strategy = .{
+                .portfolio_identity = predecessor.portfolio_identity,
+                .strategy_active = true,
+                .strategy_identity = activation.new_strategy_instance,
+                .strategy_config_version = activation.parameter_version,
+                .strategy_activation_identity = activation.activation_identity,
+                .strategy_activation_fact_sequence = activation.barrier,
+            };
+            try self.storeStrategyAuthority(strategy);
+        }
         if (strategy.strategy_active and activation.parameter_version != strategy.strategy_config_version) {
             if (activation.parameter_version <= strategy.strategy_config_version or
                 activation.transition == .migrate or strategy.host_activation_identity != 0 or

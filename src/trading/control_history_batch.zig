@@ -81,7 +81,7 @@ pub fn qualify(shard: *const trading.TradingShard, origin: history.Origin, barri
         result.count += 1;
     }
     for (shard.fenced_strategy_instances[0..shard.fenced_strategy_count], 0..) |id, i| {
-        if (id == shard.active_strategy_instance or id == shard.strategy_identity or
+        if (shard.strategyAuthority(id).strategy_active or id == shard.active_strategy_instance or id == shard.strategy_identity or
             (shard.host_activation_identity != 0 and id == shard.strategy_identity)) continue;
         var referenced = false;
         for (shard.oms.orders[0..shard.oms.order_count]) |order| if (order.strategy_instance == id) {

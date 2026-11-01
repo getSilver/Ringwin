@@ -9,6 +9,7 @@ from pathlib import Path
 import queue
 import shutil
 import signal
+import secrets
 import struct
 import subprocess
 import tempfile
@@ -275,19 +276,26 @@ class InstanceManager:
         self.path = self.directory / "strategy-instances.jsonl"
         self.releases, self.source = releases, source
         self._lock = threading.RLock()
-        self._records, self._hosts = {}, {}
+        self._records, self._hosts, self._successor_commands = {}, {}, {}
         self._monitor_stop = threading.Event()
         self._monitor = None
         if self.path.exists():
             for line in self.path.read_bytes().splitlines():
                 record = package.parse_json(line)
                 self._records[record["binding"]["strategy_identity"]] = record
+                self._index_successor(record)
         # Loading a record cannot restore a process or reuse Ready authority.
         for record in self._records.values():
+            if record.get("successor_transition", {}).get("status") in ("draining", "committing"):
+                record["successor_transition"].update(status="unknown", reason="interrupted successor cutover; reconcile native version before recovery")
+            progress = record.get("successor_transition", {})
+            if progress.get("status") == "completed" and progress["to_instance"] not in self._records:
+                progress.update(status="unknown", reason="successor record publication incomplete")
             if record.get("config_transition", {}).get("status") in ("draining", "committing"):
                 record["config_transition"].update(status="unknown", reason="interrupted cutover; reconcile native version before recovery")
             if record["status"] in ("Ready", "Recovering", "Trading"):
                 record.update(status="Stopped", reason="Host absent; checkpoint recovery required", trading_authorized=False)
+            self._index_successor(record)
 
     def _save(self, record):
         with self.path.open("ab") as handle:
@@ -295,6 +303,18 @@ class InstanceManager:
             handle.flush()
             os.fsync(handle.fileno())
         self._records[record["binding"]["strategy_identity"]] = json.loads(package.canonical(record))
+        self._index_successor(record)
+
+    def _index_successor(self, record):
+        progress = record.get("successor_transition", {})
+        if "operation_identity" in progress:
+            known = self._successor_commands.get(progress["operation_identity"])
+            if known:
+                previous = known["successor_transition"]
+                if previous["status"] in ("rejected", "unknown") or (
+                        previous["status"] == "completed" and known["binding"]["strategy_identity"] == previous["to_instance"]):
+                    return
+            self._successor_commands[progress["operation_identity"]] = json.loads(package.canonical(record))
 
     def view(self):
         if not self._lock.acquire(blocking=False):
@@ -455,6 +475,12 @@ class InstanceManager:
             self.view()
             package.require(identity in self._records, "unknown strategy instance")
             previous = self._records[identity]
+            package.require(not previous.get("superseded_by") and previous.get("successor_transition", {}).get("status") != "unknown",
+                            "successor cutover forbids predecessor recovery")
+            if previous.get("predecessor"):
+                predecessor = self._records[previous["predecessor"]]
+                package.require(predecessor.get("successor_transition", {}).get("status") == "completed",
+                                "successor cutover unresolved; reconcile native version before recovery")
             package.require(previous.get("config_transition", {}).get("status") != "unknown",
                             "config cutover result unknown; reconcile native version before recovery")
             package.require(identity not in self._hosts, "stop the existing Host before recovery")
@@ -464,6 +490,98 @@ class InstanceManager:
                 record = dict(previous, status="Stopped", reason=str(error)[:2048], trading_authorized=False)
                 self._save(record)
                 return record
+
+    def replace(self, request):
+        package.fields(request, {"operation", "strategy_identity", "expected_definition_identity",
+                                 "release_artifact", "definition_identity", "package_manifest_sha256", "operation_identity"})
+        package.require(request["operation"] in ("replace", "forward_rollback"), "unsupported successor operation")
+        for key in ("strategy_identity", "expected_definition_identity", "definition_identity", "operation_identity"):
+            package.identity(request[key])
+        package.digest(request["package_manifest_sha256"])
+        identity = request["strategy_identity"]
+        operation = hashlib.sha256(package.canonical(request)).hexdigest()
+        with self._lock, self.releases._lock:
+            self.view()
+            known = self._successor_commands.get(request["operation_identity"])
+            if known:
+                progress = known["successor_transition"]
+                package.require(progress["request_sha256"] == operation, "successor command identity content conflict")
+                if progress["status"] in ("validating", "draining", "committing"):
+                    known["successor_transition"].update(status="unknown", reason="interrupted successor command; reconcile native version")
+                return known
+            package.require(len(self._successor_commands) < 1024, "successor command history capacity exceeded")
+            package.require(identity in self._records, "unknown strategy instance")
+            previous = self._records[identity]
+            progress = previous.get("successor_transition", {})
+            package.require(not previous.get("superseded_by") and progress.get("status") != "unknown", "successor cutover unresolved or already completed")
+            old = previous["binding"]
+            package.require(request["expected_definition_identity"] == old["definition_identity"], "current StrategyDefinition conflict")
+            package.require(request["definition_identity"] != old["definition_identity"], "code replacement requires a different StrategyDefinition")
+            package.require(identity in self._hosts and previous["status"] in ("Ready", "Trading"), "instance must be Ready or Trading")
+            package.require(self.source.authority is not None, "native node authority unavailable")
+            if request["operation"] == "forward_rollback":
+                package.require(any(r["binding"]["definition_identity"] == request["definition_identity"]
+                                    and r["binding"]["package_manifest_sha256"] == request["package_manifest_sha256"]
+                                    and r["binding"]["portfolio_identity"] == old["portfolio_identity"]
+                                    for r in self._records.values()), "ForwardRollback requires a previously used definition content")
+            successor = secrets.token_hex(16)
+            package.identity(successor)
+            package.require(successor not in self._records, "successor identity collision")
+            binding = dict(old, strategy_identity=successor, **{k: request[k] for k in
+                ("release_artifact", "definition_identity", "package_manifest_sha256")})
+            progress = dict(method="Rebuild", kind=request["operation"], operation_identity=request["operation_identity"], request_sha256=operation, status="validating",
+                            from_instance=identity, to_instance=successor, from_definition=old["definition_identity"],
+                            to_definition=binding["definition_identity"], affected_scope="DecisionDomain", reason="")
+            generation = max(r.get("host_generation", 0) for r in self._records.values()) + 1
+            package.uint(generation)
+            previous = dict(previous, successor_transition=progress, host_generation=generation)
+            self._save(previous)
+            candidate = InstanceManager(self.directory / (successor + "-candidate"), self.releases, self.source)
+            begun = False
+            try:
+                result = candidate._run(binding, generation=generation)
+                package.require(result["status"] == "Ready", result["reason"])
+                native = dict(strategy_identity=identity, successor_identity=successor,
+                              config_version=binding["config_version"], definition_identity=binding["definition_identity"],
+                              release_identity=result["release_identity"], state_schema_version=result["state_schema_version"],
+                              transition="Rebuild", operation_identity=request["operation_identity"])
+                for op in ("begin_successor", "commit_successor"):
+                    progress = dict(progress, status="draining" if op == "begin_successor" else "committing")
+                    self._save(dict(previous, successor_transition=progress))
+                    host = candidate._hosts[successor]
+                    begun = True
+                    try:
+                        response = self.source.authority.request(dict(native, operation=op, evidence=dict(
+                            host_generation=generation, cursor=host["cursor"], next_input_batch=host["next_input_batch"])))
+                    except package.PackageError as error:
+                        if op == "begin_successor" and str(error) in ("ReadyBarrierMismatch", "VenueReconciliationUnavailable",
+                                "InvalidSuccessorTransition", "SuccessorResponsibilityOpen"):
+                            begun = False
+                        raise
+                    _, outputs = candidate._exchange(successor, response["host_command"])
+                    package.require(not outputs, "successor catch-up produced unauthorized output")
+                snapshot, _ = candidate._exchange(successor, dict(checkpoint=True))
+                self._stop(identity)
+                progress = dict(progress, status="completed")
+                self._save(dict(previous, status="Stopped", trading_authorized=False, superseded_by=successor,
+                                reason="replaced by StrategySuccessor", successor_transition=progress))
+                result.update(checkpoint=snapshot["checkpoint"], predecessor=identity, successor_transition=progress)
+                result["evidence"].update(cursor=snapshot["cursor"], next_intent_sequence=snapshot["next_intent_sequence"],
+                                          state_digest=snapshot["state_digest"], next_input_batch=candidate._hosts[successor]["next_input_batch"])
+                result["recovery"].update(cursor=snapshot["cursor"], barrier=snapshot["cursor"])
+                self._save(result)
+                self._hosts[successor] = candidate._hosts.pop(successor)
+                return result
+            except (OSError, ValueError, KeyError, RuntimeError) as error:
+                progress = dict(progress, status="unknown" if begun else "rejected", reason=str(error)[:2048])
+                if begun:
+                    self._fail(identity, dict(previous, successor_transition=progress), str(error))
+                else:
+                    self._save(dict(previous, successor_transition=progress))
+                return self._records[identity]
+            finally:
+                for candidate_identity in list(candidate._hosts):
+                    candidate._stop(candidate_identity)
 
     def update_config(self, request):
         package.fields(request, {"operation", "strategy_identity", "expected_config_version", "config_version",
@@ -568,6 +686,8 @@ class InstanceManager:
         cursor = previous.get("checkpoint", {}).get("cursor", 0) if previous else 0
         shard, barrier, batches = self.source.prepare(binding, cursor, recover=previous is not None)
         root, manifest, lock = self._approved_package(binding)
+        release_identity = int((root / "manifest.sha256").read_text("ascii")[:16], 16)
+        package.require(release_identity != 0, "invalid native release identity")
         package.require(all(int.from_bytes(b[16:32], "little") == int(manifest["compatibility"]["schema_registry"], 16)
                             for b in batches), "canonical input schema registry mismatch")
         package.require(memory_enforcement_available(str(root / lock["python_path"])),
@@ -579,9 +699,10 @@ class InstanceManager:
         record = dict(binding=binding, status="Recovering", reason="", trading_authorized=False,
                       host_generation=generation, recovery=dict(cursor=cursor, barrier=barrier),
                       checkpoint_directory=str((self.directory / (identity + "-checkpoints")).resolve()),
+                      release_identity=release_identity,
                       state_schema_version=manifest["state_schema"]["version"])
         if previous and not transition:
-            for key in ("checkpoint_directory", "config_versions", "config_transition"):
+            for key in ("checkpoint_directory", "config_versions", "config_transition", "predecessor", "successor_transition"):
                 if key in previous:
                     record[key] = previous[key]
         if previous and "checkpoint" in previous:

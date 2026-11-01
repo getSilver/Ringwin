@@ -4,7 +4,7 @@ Status: open
 
 ## Destination
 
-建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，02票的原生构建合同、静态注册与构建清单及03票的Python包安装登记已交付并通过各自离线验收；04的Windows无权加载及Host资源路径已独立验收，05的Windows checkpoint持久发布与无权重启恢复、06的显式启停与核心/Gateway准入、07的同实例参数更新与Keep/Rebuild已完成Windows离线验收，08–11仍待实施。Linux Host资源验收单独保留缺口。
+建立新增策略共用的交付、加载和激活合同，并跟踪其实现与验收。Python合同已定义，02票的原生构建合同、静态注册与构建清单及03票的Python包安装登记已交付并通过各自离线验收；04的Windows无权加载及Host资源路径已独立验收，05的Windows checkpoint持久发布与无权重启恢复、06的显式启停与核心/Gateway准入、07的同实例参数更新与Keep/Rebuild、08的代码替换与ForwardRollback创建StrategySuccessor已完成Windows离线验收，09–11仍待实施。Linux Host资源验收单独保留缺口。
 
 ## Definition of done
 
@@ -38,11 +38,14 @@ Status: open
 
 ## Frontier
 
-- [08 代码替换与 ForwardRollback 创建 StrategySuccessor](issues/08-successor-rollback.md)：06已完成，可接手；尚未认领或实施。
+- [09 原生策略接入统一发布与激活路径](issues/09-native-release-activation.md)：02/03/06/08已完成，可接手；尚未认领或实施。
+- [10 多个 Python 实例共存与共享 Host 生命周期](issues/10-multiple-python-instances.md)：05/06/08已完成，可接手；尚未认领或实施。
 
 每次只认领一张Frontier票。尚未实施票的ready-for-agent表示票已可供接手，仍须满足各票Blocked by；其余票在依赖完成前不属于Frontier。
 
 ## Decisions so far
+
+- 2026-11-01：08完成Web代码接替、旧定义ForwardRollback、新Successor无权Rebuild及原生责任闭合/版本激活。保持原组合、资金、历史与风险约束；旧身份封住，成功后Ready等待显式启用，排空后未知结果禁止旧实例恢复。Windows Python最终320项306通过14平台skip；ReleaseSafe核心824/824、原生构建9/9、最终验收节点3/3、核心专项4/4，UI/静态检查及双轴修正复审通过。编辑器崩溃中断不计通过，源码/二进制身份核对后重跑的两套全量均退出0；详见[08验证说明](evidence/08-validation.md)。08 resolved并移出Frontier，09/10可接手但未认领；地图保持open，单Host/DecisionDomain排空及有界身份容量保留，Linux资源、实际Venue、部署与生产资格不扩张。
 
 - 2026-10-31：07完成Web参数提交、签名合同兼容校验、独立候选checkpoint、同实例Keep/受支持Rebuild、排空与原生版本激活，成功后停Ready等待显式启用。保留意图序号、管理进度、周期目标/期限及风险锁存；拒绝Migrate、配置换绑、不支持转换与未完成订单，未知切换不按旧配置恢复。Windows Python最终316项302通过14平台skip；ReleaseSafe核心822/822、正常构建9/9、原生验收节点构建3/3、核心专项2/2，UI/静态检查及双轴复审通过。实现提交 `cc81feee`、`a32761af`、`e500d76e`；验收与中间失败见[07验证说明](evidence/07-validation.md)。07 resolved并移出Frontier，08未认领；地图保持open，单Host排空仍覆盖DecisionDomain，不扩大Linux资源、真实Venue、部署或生产资格。
 

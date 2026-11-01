@@ -34,6 +34,94 @@ const startScenario = fixture.startScenario;
 const startScenarioAuthorized = fixture.startScenarioAuthorized;
 const applyLive = engine.applyStable;
 
+test "successor and forward rollback preserve economics and latches through stable replay" {
+    const run = try std.testing.allocator.create(LiveRun);
+    defer std.testing.allocator.destroy(run);
+    try fixture.initializedBenchmarkRunInto(run);
+    const original = run.shard.strategy_identity;
+    _ = try fixture.apply(run, fixture.atGroup(16, .{ .identity = 7101, .payload = .{ .control_command = .{
+        .command_identity = 7101,
+        .content_hash = 7101,
+        .target_identity = run.shard.operational_state.target_identity,
+        .expected_version = run.shard.operational_state.version,
+        .expires_at = std.math.maxInt(u64),
+        .kind = .trading_pause,
+    } } }));
+    const economics = run.shard.captureLifecycleEconomics();
+    const operational_before = run.shard.operational_state;
+    for ([_]u128{ 222, 333 }, 0..) |successor, index| {
+        const predecessor = if (index == 0) original else 222;
+        _ = try fixture.apply(run, fixture.atGroup(18, .{ .identity = 7102 + index, .payload = .{ .version_activation = .{
+            .activation_identity = 7102 + index,
+            .generation = index + 1,
+            .old_release = run.shard.active_release,
+            .new_release = if (index == 0) 2 else 1,
+            .old_strategy_instance = run.shard.active_strategy_instance,
+            .new_strategy_instance = successor,
+            .strategy_definition = if (index == 0) 3 else 1,
+            .parameter_version = 1,
+            .state_schema_version = 1,
+            .transition = .rebuild,
+            .barrier = run.shard.authoritativeBarrier() + 1,
+            .canonical_state_digest = run.shard.canonicalStateDigest(),
+        } } }));
+        try std.testing.expect(run.shard.strategyFenced(predecessor));
+        try std.testing.expectEqual(run.shard.portfolio_identity, run.shard.strategyAuthority(successor).portfolio_identity);
+        try std.testing.expectEqual(@as(u128, 0), run.shard.strategyAuthority(successor).host_activation_identity);
+        try std.testing.expectEqualDeep(operational_before, run.shard.operational_state);
+        try std.testing.expectEqualDeep(economics, run.shard.captureLifecycleEconomics());
+    }
+    try run.decision_journal.seal();
+    _ = try fixture.assertReplayEquivalent(run);
+}
+
+test "successor refuses active cycles unknown work late facts positions and residuals" {
+    const run = try std.testing.allocator.create(LiveRun);
+    defer std.testing.allocator.destroy(run);
+    const Blocker = enum { cycle, unknown, late_fact, position, residual };
+    inline for (std.meta.tags(Blocker)) |blocker| {
+        try fixture.initializedBenchmarkRunInto(run);
+        _ = try fixture.apply(run, fixture.atGroup(16, .{ .identity = 7201, .payload = .{ .control_command = .{
+            .command_identity = 7201,
+            .content_hash = 7201,
+            .target_identity = run.shard.operational_state.target_identity,
+            .expected_version = run.shard.operational_state.version,
+            .expires_at = std.math.maxInt(u64),
+            .kind = .trading_pause,
+        } } }));
+        switch (blocker) {
+            .cycle => {
+                run.shard.cycles.records[0] = .{ .strategy = run.shard.strategy_identity, .first_sequence = 1 };
+                run.shard.cycles.count = 1;
+            },
+            .unknown => run.shard.oms.recovery_only = true,
+            .late_fact => run.shard.open_economic_fact_count = 1,
+            .position => run.shard.economic_projection.portfolio.swap.quantity = 1,
+            .residual => {
+                run.shard.cycles.residual_lifecycle.live[0] = .{ .strategy = run.shard.strategy_identity, .remaining = 1 };
+                run.shard.cycles.residual_lifecycle.live_count = 1;
+            },
+        }
+        const digest = run.shard.canonicalStateDigest();
+        try std.testing.expectError(error.SuccessorResponsibilityOpen, fixture.apply(run, fixture.atGroup(18, .{ .identity = 7202, .payload = .{ .version_activation = .{
+            .activation_identity = 7202,
+            .generation = 1,
+            .old_release = 0,
+            .new_release = 2,
+            .old_strategy_instance = 0,
+            .new_strategy_instance = 222,
+            .strategy_definition = 3,
+            .parameter_version = 1,
+            .state_schema_version = 1,
+            .transition = .rebuild,
+            .barrier = run.shard.authoritativeBarrier() + 1,
+            .canonical_state_digest = digest,
+        } } })));
+        try std.testing.expectEqual(@as(u64, 0), run.shard.release_generation);
+        try std.testing.expect(!run.shard.strategyAuthority(222).strategy_active);
+    }
+}
+
 test "same instance parameter activation preserves economics and latches through stable replay" {
     const run = try std.testing.allocator.create(LiveRun);
     defer std.testing.allocator.destroy(run);

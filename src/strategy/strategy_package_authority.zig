@@ -36,6 +36,8 @@ pub const Authority = struct {
         state_schema_version: u32 = 0,
         transition: []const u8 = "",
         operation_identity: []const u8 = "",
+        successor_identity: []const u8 = "",
+        release_identity: u64 = 0,
         evidence: ?struct { host_generation: u64, cursor: u64, next_input_batch: u64 } = null,
     };
 
@@ -49,9 +51,17 @@ pub const Authority = struct {
         if (value.strategy_identity.len != 32 or try std.fmt.parseInt(u128, value.strategy_identity, 16) != self.strategy)
             return error.StrategyIdentityMismatch;
         const op = value.operation;
-        if (std.mem.eql(u8, op, "begin_config") or std.mem.eql(u8, op, "commit_config")) {
-            if (value.config_version <= self.config_version or value.state_schema_version == 0 or
+        const successor = std.mem.eql(u8, op, "begin_successor") or std.mem.eql(u8, op, "commit_successor");
+        if (successor or std.mem.eql(u8, op, "begin_config") or std.mem.eql(u8, op, "commit_config")) {
+            if ((!successor and value.config_version <= self.config_version) or value.config_version == 0 or value.state_schema_version == 0 or
                 (!std.mem.eql(u8, value.transition, "Keep") and !std.mem.eql(u8, value.transition, "Rebuild"))) return error.InvalidConfigTransition;
+            const next_strategy = if (successor) blk: {
+                if (value.successor_identity.len != 32 or value.release_identity == 0 or !std.mem.eql(u8, value.transition, "Rebuild")) return error.InvalidSuccessorTransition;
+                const next = try std.fmt.parseInt(u128, value.successor_identity, 16);
+                if (next == 0 or next == self.strategy or self.shard.strategyAuthority(next).strategy_active or self.shard.strategyFenced(next)) return error.InvalidSuccessorTransition;
+                try self.shard.requireSuccessorClosure(self.strategy);
+                break :blk next;
+            } else self.strategy;
             const evidence = value.evidence orelse return error.ReadyEvidenceRequired;
             if (evidence.host_generation == 0 or evidence.next_input_batch == 0 or evidence.cursor != self.shard.authoritativeBarrier()) return error.ReadyBarrierMismatch;
             const reconcile = self.reconciliation orelse return error.VenueReconciliationUnavailable;
@@ -59,7 +69,8 @@ pub const Authority = struct {
             const identity = try std.fmt.parseInt(u128, value.operation_identity, 16);
             const definition = try std.fmt.parseInt(u128, value.definition_identity, 16);
             if (identity == 0 or definition == 0) return error.InvalidConfigTransition;
-            if (std.mem.eql(u8, op, "begin_config")) {
+            const beginning = std.mem.eql(u8, op, "begin_config") or std.mem.eql(u8, op, "begin_successor");
+            if (beginning) {
                 try self.commit(self.context, .{ .control_command = .{
                     .command_identity = identity,
                     .content_hash = identity,
@@ -75,7 +86,7 @@ pub const Authority = struct {
             var drain: cutover.Cutover = .{ .phase = .quiescing };
             const venue = try reconcile(self.context);
             try drain.drain(self.shard, venue);
-            if (std.mem.eql(u8, op, "begin_config")) {
+            if (beginning) {
                 try self.commit(self.context, .{ .lifecycle_progress = .{
                     .operation_identity = identity,
                     .target_identity = self.decision_domain,
@@ -84,14 +95,14 @@ pub const Authority = struct {
                     .position_quantity = venue.portfolio_quantity,
                 } });
             }
-            if (std.mem.eql(u8, op, "commit_config")) {
+            if (!beginning) {
                 try self.commit(self.context, .{ .version_activation = .{
                     .activation_identity = identity,
                     .generation = self.shard.release_generation + 1,
                     .old_release = self.shard.active_release,
-                    .new_release = if (self.shard.active_release == 0) 1 else self.shard.active_release,
+                    .new_release = if (successor) value.release_identity else if (self.shard.active_release == 0) 1 else self.shard.active_release,
                     .old_strategy_instance = self.shard.active_strategy_instance,
-                    .new_strategy_instance = self.strategy,
+                    .new_strategy_instance = next_strategy,
                     .strategy_definition = definition,
                     .parameter_version = value.config_version,
                     .state_schema_version = value.state_schema_version,
@@ -100,6 +111,8 @@ pub const Authority = struct {
                     .canonical_state_digest = self.shard.canonicalStateDigest(),
                 } });
                 self.config_version = value.config_version;
+                self.strategy = next_strategy;
+                self.bridge = null;
             }
             return self.configBatch(gpa, evidence.host_generation, evidence.next_input_batch, evidence.cursor, io);
         } else if (std.mem.eql(u8, op, "control")) {
