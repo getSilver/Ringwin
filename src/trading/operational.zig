@@ -161,7 +161,7 @@ pub const State = struct {
                 self.mode = .recovering;
             },
             .enable_trading => {
-                if (self.mode != .ready or self.self_recovering_closed or self.hasUnresolvedLatch())
+                if ((self.mode != .ready and self.mode != .trading) or self.self_recovering_closed or self.hasUnresolvedLatch())
                     return error.TradingSafetyGateClosed;
                 self.trading_authorized = true;
                 self.mode = .trading;
@@ -352,6 +352,18 @@ pub const State = struct {
         self.latch_count += 1;
     }
 };
+
+test "explicit enable for another instance preserves domain trading and checks safety gates" {
+    var state = State.init(7);
+    _ = try state.applyCommand(.{ .command_identity = 1, .content_hash = 1, .target_identity = 7, .expected_version = 0, .expires_at = 10, .kind = .start_recovery }, 1);
+    try state.recoveryCompleted();
+    for ([_]u128{ 2, 3 }) |identity| {
+        _ = try state.applyCommand(.{ .command_identity = identity, .content_hash = identity, .target_identity = 7, .expected_version = state.version, .expires_at = 10, .kind = .enable_trading }, 1);
+        try std.testing.expect(state.effectiveTradingAuthority());
+    }
+    _ = try state.applyGate(.{ .gate_identity = 9, .target_identity = 7, .kind = .latched, .reason = .observability, .open = false });
+    try std.testing.expectError(error.TradingSafetyGateClosed, state.applyCommand(.{ .command_identity = 4, .content_hash = 4, .target_identity = 7, .expected_version = state.version, .expires_at = 10, .kind = .enable_trading }, 1));
+}
 
 test "control authorization and latched recovery remain orthogonal" {
     var state = State.init(7);

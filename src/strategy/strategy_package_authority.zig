@@ -8,6 +8,47 @@ const channel = @import("../control_channel.zig");
 const cutover = @import("../runtime/recovery_cutover.zig");
 const native = @import("native_instance.zig");
 
+/// The node supplies these bindings from its sealed deployment, never from Web input.
+pub const AuthoritySet = struct {
+    members: []*Authority,
+
+    pub fn request(self: AuthoritySet, gpa: std.mem.Allocator, bytes: []const u8, key: *const [32]u8, io: std.Io) ![]u8 {
+        if (self.members.len == 0 or self.members.len > 16) return error.InvalidAuthorityPlacement;
+        for (self.members, 0..) |member, index| {
+            for (self.members[0..index]) |previous| {
+                if (member.strategy == previous.strategy) return error.InvalidAuthorityPlacement;
+            }
+        }
+        const parsed = try std.json.parseFromSlice(Authority.Request, gpa, bytes, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        const identity = try nativeIdentity(parsed.value.strategy_identity);
+        for (self.members) |member| {
+            if (member.strategy != identity and member.native_candidate_strategy != identity) continue;
+            const result = try member.request(gpa, bytes, key, io);
+            const beginning = std.mem.eql(u8, parsed.value.operation, "begin_config") or std.mem.eql(u8, parsed.value.operation, "begin_successor");
+            if (beginning) {
+                defer gpa.free(result);
+                for (self.members) |peer| {
+                    if (peer != member and peer.shard == member.shard) try peer.revokeFor(.control);
+                }
+                const evidence = parsed.value.evidence orelse return error.ReadyEvidenceRequired;
+                return member.configBatch(gpa, evidence.host_generation, evidence.next_input_batch, evidence.cursor, io);
+            }
+            return result;
+        }
+        // The existing successor validator owns new native candidates.
+        if (self.members.len == 1) return self.members[0].request(gpa, bytes, key, io);
+        return error.StrategyIdentityMismatch;
+    }
+
+    fn nativeIdentity(value: []const u8) !u128 {
+        if (value.len != 32) return error.StrategyIdentityMismatch;
+        const identity = try std.fmt.parseInt(u128, value, 16);
+        if (identity == 0) return error.StrategyIdentityMismatch;
+        return identity;
+    }
+};
+
 pub const Authority = struct {
     shard: *trading.TradingShard,
     journal: *trading.journal.Journal,
@@ -45,6 +86,9 @@ pub const Authority = struct {
         operation_identity: []const u8 = "",
         successor_identity: []const u8 = "",
         release_identity: u64 = 0,
+        current_release_identity: u64 = 0,
+        current_definition_identity: []const u8 = "",
+        current_state_schema_version: u32 = 0,
         build_inventory: []const u8 = "",
         binary_sha256: []const u8 = "",
         config_json: []const u8 = "",
@@ -188,6 +232,34 @@ pub const Authority = struct {
                 } });
             }
             if (!beginning) {
+                const selected = if (self.shard.active_strategy_instance == 0) self.shard.strategy_identity else self.shard.active_strategy_instance;
+                if (selected != self.strategy) {
+                    if (value.current_release_identity == 0 or value.current_state_schema_version == 0)
+                        return error.StrategyBindingMismatch;
+                    const current_definition = try AuthoritySet.nativeIdentity(value.current_definition_identity);
+                    var operation_bytes: [16]u8 = undefined;
+                    std.mem.writeInt(u128, &operation_bytes, identity, .little);
+                    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+                    hash.update("RingWin/StrategyTargetSelection/v1\x00");
+                    hash.update(&operation_bytes);
+                    var digest: [32]u8 = undefined;
+                    hash.final(&digest);
+                    // Keep selects the target without fencing or changing any other instance.
+                    try self.commit(self.context, .{ .version_activation = .{
+                        .activation_identity = std.mem.readInt(u128, digest[0..16], .little),
+                        .generation = self.shard.release_generation + 1,
+                        .old_release = self.shard.active_release,
+                        .new_release = if (self.shard.active_release == 0) value.current_release_identity else self.shard.active_release,
+                        .old_strategy_instance = self.shard.active_strategy_instance,
+                        .new_strategy_instance = self.strategy,
+                        .strategy_definition = current_definition,
+                        .parameter_version = self.config_version,
+                        .state_schema_version = value.current_state_schema_version,
+                        .transition = .keep,
+                        .barrier = self.shard.authoritativeBarrier() + 1,
+                        .canonical_state_digest = self.shard.canonicalStateDigest(),
+                    } });
+                }
                 try self.commit(self.context, .{ .version_activation = .{
                     .activation_identity = identity,
                     .generation = self.shard.release_generation + 1,
@@ -328,6 +400,8 @@ pub const Authority = struct {
             try self.commit(self.context, decision.corePayload());
         } else if (std.mem.eql(u8, op, "fault")) {
             try self.revoke();
+        } else if (std.mem.eql(u8, op, "restart")) {
+            try self.revokeFor(.control);
         } else if (!std.mem.eql(u8, op, "status")) return error.UnknownOperation;
         return self.status(gpa);
     }

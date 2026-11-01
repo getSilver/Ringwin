@@ -70,8 +70,7 @@ def config_transition(root, manifest, old_binding, binding, method):
     return state_fields, set(rebuilt)
 
 
-def run(request_path):
-    request = package.parse_json(Path(request_path).read_bytes())
+def instance_frames(request):
     binding, manifest = request["binding"], request["manifest"]
     root = Path(request["package_root"]).resolve()
     config = binding["config_json"].encode("ascii")
@@ -82,8 +81,6 @@ def run(request_path):
                     and int(compatibility["host_build"], 16) == bridge.HOST_BUILD
                     and int(compatibility["schema_registry"], 16) == bridge.SCHEMA_REGISTRY
                     and compatibility["host_protocol"] == bridge.PROTOCOL, "runtime compatibility mismatch")
-    sys.path.insert(0, str(root / "code"))
-    sys.addaudithook(restrict)
     module = importlib.import_module(manifest["entrypoint"].split(":")[0])
     package.require(os.path.commonpath((str(Path(module.__file__).resolve()), str(root / "code"))) == str(root / "code"),
                     "entrypoint resolved outside approved package")
@@ -92,14 +89,14 @@ def run(request_path):
                           manifest["state_schema"]["identity"], manifest["state_schema"]["version"])
     for name in ("validate_config", "create"):
         package.require(callable(getattr(module, name, None)), "missing fixed API: " + name)
-    kind, session, sequence, plan = bridge.read_frame(sys.stdin.buffer)
+    kind, session, sequence, plan = yield
     package.require(kind == bridge.SESSION_PLAN and sequence == 1 and len(plan) == 176, "expected session plan")
-    bridge.STRATEGY_MANIFEST = bytes.fromhex(binding["package_manifest_sha256"])
-    bridge.CHECKPOINT_MANIFEST = bytes.fromhex(binding["config_sha256"])
+    bridge.STRATEGY_MANIFEST = bytes.fromhex(request["strategy_manifest"])
+    bridge.CHECKPOINT_MANIFEST = bytes.fromhex(request["checkpoint_manifest"])
     hello_session, hello = bridge.hello_payload(plan)
     package.require(hello_session == session, "plan session mismatch")
     bridge.write_frame(sys.stdout.buffer, bridge.HOST_HELLO, session, 1, hello)
-    kind, actual, sequence, payload = bridge.read_frame(sys.stdin.buffer)
+    kind, actual, sequence, payload = yield
     package.require(kind == bridge.BEGIN_RECOVERY and actual == session and sequence == 2
                     and len(payload) >= 8, "expected initialization or checkpoint recovery")
     barrier = struct.unpack_from("<Q", payload)[0]
@@ -145,7 +142,7 @@ def run(request_path):
     batch, incoming, outgoing, callbacks, suppressed = 1, 3, 3, 0, 0
     subscriptions = {(s["event_type"], s["schema_version"]) for s in manifest["subscriptions"]}
     while cursor < barrier:
-        kind, actual, sequence, payload = bridge.read_frame(sys.stdin.buffer)
+        kind, actual, sequence, payload = yield
         package.require(kind == bridge.INPUT_BATCH and actual == session and sequence == incoming,
                         "invalid candidate input")
         records, last = bridge.decode_component_batch(payload, session, batch, cursor)
@@ -188,7 +185,7 @@ def run(request_path):
         cursor=cursor, next_intent=instance.next_intent_sequence), state)
     bridge.write_frame(sys.stdout.buffer, bridge.STRATEGY_RECOVERED, session, outgoing, recovered)
     outgoing += 1
-    kind, actual, sequence, payload = bridge.read_frame(sys.stdin.buffer)
+    kind, actual, sequence, payload = yield
     package.require(kind == bridge.REQUEST_CHECKPOINT and actual == session and sequence == incoming
                     and len(payload) == 16, "expected checkpoint request")
     checkpoint_request, checkpoint_cursor = struct.unpack("<QQ", payload)
@@ -204,7 +201,7 @@ def run(request_path):
     incoming, outgoing = incoming + 1, outgoing + 1
     activation, activation_barrier = 0, None
     while True:
-        kind, actual, sequence, payload = bridge.read_frame(sys.stdin.buffer)
+        kind, actual, sequence, payload = yield
         package.require(actual == session and sequence == incoming, "invalid runtime session or sequence")
         incoming += 1
         if kind == bridge.REQUEST_CHECKPOINT:
@@ -273,6 +270,42 @@ def run(request_path):
         for frame in frames:
             bridge.write_frame(sys.stdout.buffer, bridge.STRATEGY_OUTPUT, session, outgoing, frame)
             outgoing += 1
+
+
+def run(request_path):
+    request = package.parse_json(Path(request_path).read_bytes())
+    requests = request.get("instances", [request])
+    package.require(1 <= len(requests) <= 16, "Host instance capacity exceeded")
+    strategy_manifest, checkpoint_manifest = package.host_manifests(requests)
+    # Package-local module tables are switched with the callback, including lazy imports.
+    # This is trusted-code organization, not a hostile-plugin security boundary.
+    baseline = dict(sys.modules)
+    runtime_path = list(sys.path)
+    sessions = {}
+    sys.addaudithook(restrict)
+    for item in requests:
+        package.require(item["strategy_manifest"] == strategy_manifest
+                        and item["checkpoint_manifest"] == checkpoint_manifest, "Host aggregate manifest mismatch")
+        session = (item["fencing"], item["shard"], item["generation"])
+        package.require(session not in sessions, "duplicate Host session")
+        sessions[session] = (instance_frames(item), {}, item)
+    while sessions:
+        frame = bridge.read_frame(sys.stdin.buffer)
+        package.require(frame[1] in sessions, "unknown Host session")
+        coroutine, modules, item = sessions[frame[1]]
+        for name in set(sys.modules) - baseline.keys():
+            del sys.modules[name]
+        sys.modules.update(modules)
+        sys.path[:] = [str(Path(item["package_root"]) / "code"), *runtime_path]
+        try:
+            if frame[0] == bridge.SESSION_PLAN:
+                package.require(not modules, "duplicate session plan")
+                next(coroutine)
+            coroutine.send(frame)
+        except StopIteration:
+            del sessions[frame[1]]
+        finally:
+            modules.update((k, v) for k, v in sys.modules.items() if k not in baseline)
 
 
 if __name__ == "__main__":

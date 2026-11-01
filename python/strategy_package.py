@@ -29,6 +29,24 @@ class PackageError(ValueError):
     pass
 
 
+def host_manifests(requests):
+    """v1: domain-separated SHA-256 of identity-sorted canonical JSON arrays."""
+    require(1 <= len(requests) <= 16, "Host instance capacity exceeded")
+    ordered = sorted(requests, key=lambda r: r["binding"]["strategy_identity"])
+    identities = [r["binding"]["strategy_identity"] for r in ordered]
+    require(len(set(identities)) == len(identities), "duplicate Host member")
+    strategies, checkpoints = [], []
+    for request in ordered:
+        binding, manifest = request["binding"], request["manifest"]
+        strategies.append({k: binding[k] for k in ("strategy_identity", "definition_identity",
+            "package_manifest_sha256", "config_version", "config_sha256")})
+        checkpoints.append(dict(strategy_identity=binding["strategy_identity"],
+            definition_identity=binding["definition_identity"], state_schema=manifest["state_schema"],
+            config_version=binding["config_version"], checkpoint=request.get("checkpoint")))
+    return (hashlib.sha256(b"RingWin/StrategyHost/strategies/v1\0" + canonical(strategies)).hexdigest(),
+            hashlib.sha256(b"RingWin/StrategyHost/checkpoints/v1\0" + canonical(checkpoints)).hexdigest())
+
+
 def require(condition, reason):
     if not condition:
         raise PackageError(reason)

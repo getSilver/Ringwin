@@ -48,7 +48,9 @@ pub fn main(init: std.process.Init) !void {
     var binary_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(executable, &binary_digest, .{});
     const key_path = args.next() orelse return error.KeyFileRequired;
-    const group = args.next() != null;
+    const mode = args.next();
+    const group = mode != null;
+    const multiple = if (mode) |value| std.mem.eql(u8, value, "multiple") else false;
     const key = try std.Io.Dir.cwd().readFileAlloc(init.io, key_path, init.gpa, .limited(33));
     defer init.gpa.free(key);
     if (key.len != 32) return error.InvalidKey;
@@ -63,7 +65,18 @@ pub fn main(init: std.process.Init) !void {
     defer init.gpa.destroy(joint);
     if (group) {
         try demo.Owner.bootstrapInto(joint, core_store.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
-        try @import("testing/acceptance/core/multi_account_authority_acceptance.zig").initializePythonOwner(joint);
+        if (multiple) {
+            const manifest = try @import("testing/acceptance/core/multi_portfolio_authority_acceptance.zig").cycleConfiguration();
+            try @import("testing/acceptance/core/multi_account_authority_acceptance.zig").initializePythonOwnerForConfiguration(joint, &manifest);
+            for ([_]u128{ 20, 30 }) |account| {
+                _ = try joint.apply(fixture.atGroup(45, .{ .identity = joint.shard.authoritativeBarrier() + 1, .account_scope = account, .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = 11 } } }));
+                _ = try joint.apply(fixture.atGroup(45, .{ .identity = joint.shard.authoritativeBarrier() + 1, .account_scope = account, .payload = .{ .portfolio_transfer = .{ .portfolio_identity = 11, .amount_atoms = 100 } } }));
+            }
+            _ = try joint.apply(fixture.atGroup(45, .{ .identity = joint.shard.authoritativeBarrier() + 1, .payload = .{ .strategy_activated = .{ .portfolio_identity = 11, .strategy_identity = 19, .config_version = 1, .activation_identity = 1 } } }));
+            for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }) |account, instrument| {
+                _ = try joint.apply(fixture.atGroup(45, .{ .identity = joint.shard.authoritativeBarrier() + 1, .account_scope = account, .payload = .{ .instrument_trading_authorization = .{ .strategy_identity = 19, .exchange_account = account, .instrument = instrument, .strategy_activation_identity = 1, .config_version = 1, .expected_version = 1, .enabled = true } } }));
+            }
+        } else try @import("testing/acceptance/core/multi_account_authority_acceptance.zig").initializePythonOwner(joint);
         node.joint = joint;
     } else {
         try fixture.applyCanonicalGenesis(&node.run.shard, &node.run.decision_journal, .{ .strategy_identity = 16, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged, 1);
@@ -96,6 +109,11 @@ pub fn main(init: std.process.Init) !void {
         .running_binary_sha256 = std.fmt.bytesToHex(binary_digest, .lower),
     };
     defer authority.revoke() catch {};
+    var secondary = authority;
+    secondary.strategy = 19;
+    defer if (multiple) secondary.revoke() catch {};
+    var bindings = [_]*package.Authority{ &authority, &secondary };
+    const authorities: package.AuthoritySet = .{ .members = bindings[0..if (multiple) 2 else 1] };
     const venue = try init.gpa.create(simulated.SimulatedVenue);
     defer init.gpa.destroy(venue);
     venue.* = .{};
@@ -165,7 +183,7 @@ pub fn main(init: std.process.Init) !void {
             try Node.commit(node, .{ .safety_gate_change = .{ .gate_identity = 0x1234, .target_identity = 1, .kind = .self_recovering, .reason = .primary_lease, .open = false } });
             try output.interface.writeAll("{}\n");
         } else {
-            const result = authority.request(init.gpa, bytes, key[0..32], init.io) catch |err| {
+            const result = authorities.request(init.gpa, bytes, key[0..32], init.io) catch |err| {
                 try output.interface.print("{{\"error\":\"{s}\"}}\n", .{@errorName(err)});
                 try output.interface.flush();
                 continue;

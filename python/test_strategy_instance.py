@@ -18,12 +18,31 @@ import zipfile
 
 import strategy_host
 import strategy_instance
+import strategy_package
 import test_strategy_package_release as package_release
 from test_strategy_package_release import DEFINITION, bundle_files, canonical, descriptor, write_bundle
 
 
 ROOT = Path(__file__).resolve().parents[1]
 MEMORY_ENFORCED = strategy_instance.memory_enforcement_available(sys.executable)
+
+
+class HostManifestTests(unittest.TestCase):
+    def test_aggregate_binds_complete_digests_and_exact_member_set(self):
+        first = dict(binding=dict(strategy_identity="1" * 32, definition_identity="2" * 32,
+            package_manifest_sha256="a" * 64, config_sha256="b" * 64, config_version=1),
+            manifest=dict(state_schema=dict(identity="3" * 32, version=1)), checkpoint=None)
+        second = json.loads(canonical(first))
+        second["binding"]["strategy_identity"] = "4" * 32
+        original = strategy_package.host_manifests([first, second])
+        self.assertEqual(original, strategy_package.host_manifests([second, first]))
+        self.assertNotEqual(original, strategy_package.host_manifests([first]))
+        second["binding"]["package_manifest_sha256"] = "a" * 63 + "b"
+        self.assertNotEqual(original[0], strategy_package.host_manifests([first, second])[0])
+        second["checkpoint"] = dict(cursor=7, publication=2, content_identity="c" * 64)
+        self.assertNotEqual(original[1], strategy_package.host_manifests([first, second])[1])
+        with self.assertRaisesRegex(ValueError, "duplicate Host member"):
+            strategy_package.host_manifests([first, first])
 
 
 @functools.lru_cache(maxsize=1)
@@ -220,7 +239,8 @@ class WebInstanceTests(unittest.TestCase):
         self.addCleanup(self.instances.close)
         self.app.instance_manager = self.instances
 
-    def install(self, code=OBSERVER, limit_changes=None, state_fields=(), transitions=None, definition=DEFINITION, artifact="candidate-a"):
+    def install(self, code=OBSERVER, limit_changes=None, state_fields=(), transitions=None, definition=DEFINITION, artifact="candidate-a",
+                extra_definitions=None):
         files, policy = bundle_files()
         if definition != DEFINITION:
             files = {p.replace(DEFINITION, definition): b for p, b in files.items()}
@@ -266,6 +286,22 @@ class WebInstanceTests(unittest.TestCase):
         digest = hashlib.sha256(files[name]).hexdigest()
         files["strategy-index.json"] = canonical(dict(format_version=1, strategies=[dict(
             definition_identity=definition, manifest_path=name, package_manifest_sha256=digest)]))
+        if extra_definitions:
+            index = json.loads(files["strategy-index.json"])
+            for extra, extra_code in sorted(extra_definitions.items()):
+                prefix = f"strategies/{extra}/"
+                for path, content in list(files.items()):
+                    if path.startswith(f"strategies/{definition}/"):
+                        files[path.replace(definition, extra)] = content
+                extra_manifest = dict(manifest, definition_identity=extra)
+                files[prefix + "code/observer.py"] = extra_code
+                extra_manifest["files"] = [descriptor(path[len(prefix):], content)
+                    for path, content in sorted(files.items()) if path.startswith(prefix) and path != prefix + "manifest.json"]
+                files[prefix + "manifest.json"] = canonical(extra_manifest)
+                index["strategies"].append(dict(definition_identity=extra, manifest_path=prefix + "manifest.json",
+                    package_manifest_sha256=hashlib.sha256(files[prefix + "manifest.json"]).hexdigest()))
+            index["strategies"].sort(key=lambda r: r["definition_identity"])
+            files["strategy-index.json"] = canonical(index)
         files = {p: b for p, b in files.items() if not p.startswith("runtime/") and p != "ringwin"}
         files.update(runtime)
         files["runtime-lock.json"] = lock
@@ -281,7 +317,122 @@ class WebInstanceTests(unittest.TestCase):
     def create(self, **changes):
         return self.client.call("POST", "/api/strategy-instances", dict(self.binding, **changes))
 
-    def native_authority(self, *, group=False):
+    @unittest.skipUnless(os.name == "nt", "shared aggregate Job memory qualification is Windows-specific")
+    def test_two_instances_share_host_and_recover_without_authority(self):
+        self.install()
+        self.source.batches = (depth_batch(), depth_batch(2))
+        status, first = self.create()
+        self.assertEqual(status, 200, first)
+        config = '{"warmup_events":2}'
+        status, second = self.create(strategy_identity="0" * 30 + "11", config_json=config,
+                                    config_sha256=hashlib.sha256(config.encode()).hexdigest())
+        self.assertEqual(status, 200, second)
+        records = {r["binding"]["strategy_identity"]: r for r in self.instances.view()}
+        self.assertEqual([r["status"] for r in records.values()], ["Ready", "Ready"], records)
+        self.assertEqual(len({r["evidence"]["host_pid"] for r in records.values()}), 1)
+        self.assertEqual(len({r["checkpoint_directory"] for r in records.values()}), 2)
+        self.assertTrue(all(not r["trading_authorized"] for r in records.values()))
+        self.assertEqual(records[second["result"]["binding"]["strategy_identity"]]["binding"]["config_json"], config)
+        placement = records[self.binding["strategy_identity"]]["host_placement"]
+        self.assertEqual(placement["members"], sorted(records))
+        self.assertEqual(placement["memory_budget_bytes"], 2 * 268435456)
+        self.assertEqual(len(placement["strategy_manifest"]), 64)
+        self.assertNotEqual(placement["strategy_manifest"], self.binding["package_manifest_sha256"])
+        before = {i: r["evidence"]["next_intent_sequence"] for i, r in records.items()}
+        host = self.instances._hosts[self.binding["strategy_identity"]]
+        host["job"].terminate()
+        deadline = time.monotonic() + 5
+        while any(r["status"] != "Stopped" for r in self.instances.view()) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(all(r["status"] == "Stopped" and not r["trading_authorized"] for r in self.instances.view()))
+        for i in sorted(records):
+            self.assertEqual(self.instances.recover(i)["status"], "Ready")
+        recovered = self.instances.view()
+        self.assertEqual(len({r["evidence"]["host_pid"] for r in recovered}), 1)
+        for r in recovered:
+            self.assertEqual(r["evidence"]["next_intent_sequence"], before[r["binding"]["strategy_identity"]])
+            self.assertGreater(r["host_generation"], records[r["binding"]["strategy_identity"]]["host_generation"])
+            self.assertFalse(r["trading_authorized"])
+
+    @unittest.skipUnless(os.name == "nt", "shared aggregate Job memory qualification is Windows-specific")
+    def test_shared_host_keeps_same_module_names_in_different_packages_separate(self):
+        other = "b" * 32
+        self.install(extra_definitions={other: OBSERVER.replace(b"self.events += 1", b"self.events += 10")})
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        registration = next(r for r in self.manager._registrations() if r["definition_identity"] == other)
+        status, body = self.create(strategy_identity="0" * 30 + "11", definition_identity=other,
+                                  package_manifest_sha256=registration["package_manifest_sha256"])
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["ok"], body)
+        records = self.instances.view()
+        self.assertEqual(len({r["evidence"]["host_pid"] for r in records}), 1)
+        self.assertEqual(len({r["evidence"]["state_digest"] for r in records}), 2)
+        for r in records:
+            snapshot, _ = self.instances._exchange(r["binding"]["strategy_identity"], dict(checkpoint=True))
+            self.assertEqual(snapshot["state_digest"], r["evidence"]["state_digest"])
+
+    def create_other_domain(self, definition):
+        scope = dict(self.source.scope, decision_domain=f"{5:032x}")
+        self.source.placements += (scope,)
+        batch = bytearray(depth_batch())
+        batch[32:48] = (5).to_bytes(16, "little")
+        struct.pack_into("<I", batch, 124, strategy_host.crc32c(batch[:124] + batch[128:]))
+        previous = self.source.batches
+        self.source.batches = (bytes(batch),)
+        try:
+            registration = next(r for r in self.manager._registrations() if r["definition_identity"] == definition)
+            status, body = self.create(strategy_identity=f"{99:032x}", definition_identity=definition,
+                package_manifest_sha256=registration["package_manifest_sha256"], **scope)
+            self.assertEqual(status, 200, body)
+            self.assertTrue(body["ok"], body)
+            return body["result"]
+        finally:
+            self.source.batches = previous
+
+    @unittest.skipUnless(os.name == "nt", "shared aggregate Job memory qualification is Windows-specific")
+    def test_shared_memory_failure_stops_all_members_and_leaves_other_host_ready(self):
+        code = OBSERVER.replace(b"self.events += 1", b"self.events += 1\n        if self.events > 1: self.allocation = bytearray(1024 * 1024 * 1024)")
+        self.install(code, extra_definitions={"b" * 32: OBSERVER})
+        self.assertTrue(self.create()[1]["ok"])
+        self.assertTrue(self.create(strategy_identity=f"{17:032x}")[1]["ok"])
+        independent = self.create_other_domain("b" * 32)
+        self.source.batches = (depth_batch(), depth_batch(2))
+        status, body = self.create(strategy_identity=f"{18:032x}")
+        self.assertEqual(status, 200, body)
+        self.assertFalse(body["ok"], body)
+        records = {r["binding"]["strategy_identity"]: r for r in self.instances.view()}
+        for identity in (16, 17, 18):
+            self.assertEqual(records[f"{identity:032x}"]["status"], "Stopped", records)
+            self.assertFalse(records[f"{identity:032x}"]["trading_authorized"])
+        self.assertIn("MemoryError", body["result"]["reason"])
+        self.assertEqual(records[f"{99:032x}"]["status"], "Ready")
+        self.assertEqual(records[f"{99:032x}"]["evidence"]["host_pid"], independent["evidence"]["host_pid"])
+
+    @unittest.skipUnless(os.name == "nt", "shared aggregate Job memory qualification is Windows-specific")
+    def test_callback_timeout_does_not_hold_other_hosts_or_web_view(self):
+        code = OBSERVER.replace(b"def snapshot(self):", b"def snapshot(self):\n        self.snapshot_calls = getattr(self, 'snapshot_calls', 0) + 1\n        if self.snapshot_calls > 2:\n            while True: pass")
+        self.install(code, extra_definitions={"b" * 32: OBSERVER})
+        self.assertTrue(self.create()[1]["ok"])
+        independent = self.create_other_domain("b" * 32)
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            pending = executor.submit(self.create, strategy_identity=f"{17:032x}")
+            deadline = time.monotonic() + 0.7
+            while not pending.done() and time.monotonic() < deadline:
+                status, body = self.client.call("GET", "/api/strategy-instances")
+                self.assertEqual(status, 200, body)
+                if any(r["binding"]["strategy_identity"] == f"{17:032x}" for r in body["instances"]):
+                    break
+                time.sleep(0.01)
+            self.assertFalse(pending.done(), "view was blocked until callback timeout")
+            healthy = next(r for r in body["instances"] if r["binding"]["strategy_identity"] == f"{99:032x}")
+            self.assertEqual(healthy["status"], "Ready")
+            self.assertEqual(healthy["evidence"]["host_pid"], independent["evidence"]["host_pid"])
+            status, failed = pending.result(timeout=5)
+        self.assertEqual(status, 400, failed)
+        self.assertIn("budget exhausted", failed["error"])
+
+    def native_authority(self, *, group=False, multiple=False):
+        group = group or multiple
         self.app.clock = lambda: 1767225601
         status, login = self.client.call("POST", "/login", {
             "passphrase": "correct horse battery staple",
@@ -292,7 +443,7 @@ class WebInstanceTests(unittest.TestCase):
         self.assertTrue(probe.is_file(), "zig build strategy-authority-probe is required")
         key = self.root / "node-control.key"
         key.write_bytes(self.command_server.key)
-        process = subprocess.Popen([str(probe), str(key), *(["group"] if group else [])], stdin=subprocess.PIPE,
+        process = subprocess.Popen([str(probe), str(key), *(["multiple" if multiple else "group"] if group else [])], stdin=subprocess.PIPE,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         # This first response includes cold fixture bootstrap, before node readiness.
         authority = strategy_instance.NativeAuthority(process, timeout=30)
@@ -341,6 +492,128 @@ class WebInstanceTests(unittest.TestCase):
             command.update(risk_warning_acknowledged=True, risk_warning_identity=warning["warning_identity"])
         return self.client.call("POST", "/command", command)
 
+    @unittest.skipUnless(os.name == "nt", "shared aggregate Job memory qualification is Windows-specific")
+    def test_shared_host_two_node_bindings_enable_independently_and_fault_together(self):
+        authority = self.native_authority(multiple=True)
+        second_scope = dict(self.source.scope, portfolio_identity=f"{11:032x}")
+        self.source.placements = (second_scope,)
+        self.install()
+        self.binding["strategy_identity"] = f"{9:032x}"
+        self.assertEqual(self.create()[1]["result"]["status"], "Ready")
+        status, body = self.create(strategy_identity=f"{19:032x}", **second_scope)
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["ok"], body)
+        for identity in (9, 19):
+            self.binding["strategy_identity"] = f"{identity:032x}"
+            current = authority.request(dict(operation="status", strategy_identity=self.binding["strategy_identity"]))
+            host = self.instances._hosts[self.binding["strategy_identity"]]
+            if current["cursor"] > host["cursor"]:
+                self.instances.deliver(self.binding["strategy_identity"], self.node_batch(current["cursor"], host["cursor"] + 1))
+            status, body = self.instance_command("enable_trading")
+            self.assertEqual(status, 200, body)
+            self.assertTrue(body["ok"], body)
+        records = self.instances.view()
+        self.assertTrue(all(r["trading_authorized"] for r in records), records)
+        self.assertEqual(len({r["evidence"]["host_pid"] for r in records}), 1)
+        self.instances._hosts[f"{9:032x}"]["job"].terminate()
+        deadline = time.monotonic() + 5
+        while any(r["status"] != "Stopped" for r in self.instances.view()) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        for identity in (9, 19):
+            state = authority.request(dict(operation="status", strategy_identity=f"{identity:032x}"))
+            self.assertFalse(state["trading_authorized"], state)
+        self.source.batches = (self.node_batch(state["cursor"], 1),)
+        for identity in (9, 19):
+            recovered = self.instances.recover(f"{identity:032x}")
+            self.assertEqual(recovered["status"], "Ready", recovered)
+            self.assertFalse(recovered["trading_authorized"])
+
+    @unittest.skipUnless(os.name == "nt", "shared aggregate Job memory qualification is Windows-specific")
+    def test_secondary_member_successor_preserves_primary_node_binding(self):
+        authority = self.native_authority(multiple=True)
+        secondary_scope = dict(self.source.scope, portfolio_identity=f"{11:032x}")
+        self.source.placements = (secondary_scope,)
+        self.install()
+        self.binding["strategy_identity"] = f"{9:032x}"
+        primary = self.create()[1]["result"]
+        secondary = self.create(strategy_identity=f"{19:032x}", **secondary_scope)[1]["result"]
+        self.assertEqual(secondary["status"], "Ready", secondary)
+        self.install(definition="b" * 32, artifact="candidate-b")
+        status, body = self.client.call("POST", "/api/strategy-instances", self.replacement(secondary["binding"]))
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["ok"], body)
+        successor = body["result"]
+        self.assertEqual(successor["binding"]["portfolio_identity"], f"{11:032x}")
+        records = {r["binding"]["strategy_identity"]: r for r in self.instances.view()}
+        self.assertEqual(records[f"{9:032x}"]["binding"], primary["binding"])
+        self.assertFalse(authority.request(dict(operation="status", strategy_identity=f"{9:032x}"))["trading_authorized"])
+        self.assertEqual(authority.request(dict(operation="status", strategy_identity=f"{9:032x}"))["config_version"], 1)
+        self.assertFalse(authority.request(dict(operation="status", strategy_identity=successor["binding"]["strategy_identity"]))["trading_authorized"])
+
+    @unittest.skipUnless(os.name == "nt", "shared aggregate Job memory qualification is Windows-specific")
+    def test_shared_members_emit_their_own_complete_groups_and_late_output_is_rejected(self):
+        authority = self.native_authority(multiple=True)
+        scope = dict(self.source.scope, portfolio_identity=f"{11:032x}")
+        self.source.placements = (scope,)
+        code = GROUP_TRADER.replace(b"self.required =", b"self.portfolio = 11 if int(context.strategy_identity, 16) == 19 else 10\n        self.required =")
+        code = code.replace(b"self.next_intent_sequence, 10, 20", b"self.next_intent_sequence, self.portfolio, 20")
+        self.install(code)
+        self.binding["strategy_identity"] = f"{9:032x}"
+        self.assertTrue(self.create()[1]["ok"])
+        self.assertTrue(self.create(strategy_identity=f"{19:032x}", **scope)[1]["ok"])
+        for identity in (9, 19):
+            self.binding["strategy_identity"] = f"{identity:032x}"
+            state = authority.request(dict(operation="status", strategy_identity=self.binding["strategy_identity"]))
+            host = self.instances._hosts[self.binding["strategy_identity"]]
+            if state["cursor"] > host["cursor"]:
+                self.instances.deliver(self.binding["strategy_identity"], self.node_batch(state["cursor"], host["cursor"] + 1))
+            status, enabled = self.instance_command("enable_trading")
+            self.assertEqual(status, 200, enabled)
+            self.assertTrue(enabled["ok"], enabled)
+        authority.request(dict(operation="advance"))
+        for identity, orders in ((9, 2), (19, 4)):
+            name = f"{identity:032x}"
+            state = authority.request(dict(operation="status", strategy_identity=name))
+            host = self.instances._hosts[name]
+            result = self.instances.deliver(name, self.node_batch(state["cursor"], host["cursor"] + 1))
+            self.assertEqual(result[0]["orders"], orders, result)
+            self.assertEqual(int.from_bytes(bytes.fromhex(self.native_frames[-1])[64:80], "little"), identity)
+        self.instances._hosts[f"{9:032x}"]["job"].terminate()
+        deadline = time.monotonic() + 5
+        while any(r["trading_authorized"] for r in self.instances.view()) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        late = authority.request(dict(operation="output", strategy_identity=f"{19:032x}", frame=self.native_frames[-1]))
+        self.assertEqual(late["orders"], 4)
+        self.assertFalse(late["trading_authorized"])
+
+    @unittest.skipUnless(os.name == "nt", "shared aggregate Job memory qualification is Windows-specific")
+    def test_secondary_config_keep_changes_only_target_and_peers_recover_from_original_repositories(self):
+        authority = self.native_authority(multiple=True)
+        scope = dict(self.source.scope, portfolio_identity=f"{11:032x}")
+        self.source.placements = (scope,)
+        self.install(transitions={"Keep": {"mutable_config_fields": ["warmup_events"], "rebuild_state_fields": []}})
+        self.binding["strategy_identity"] = f"{9:032x}"
+        self.assertTrue(self.create()[1]["ok"])
+        primary_binding = dict(self.binding)
+        secondary = self.create(strategy_identity=f"{19:032x}", **scope)[1]["result"]
+        self.assertEqual(secondary["status"], "Ready", secondary)
+        self.binding = secondary["binding"]
+        status, body = self.update_config()
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["ok"], body)
+        self.assertEqual(body["result"]["binding"]["strategy_identity"], f"{19:032x}")
+        for identity, version in ((9, 1), (19, 2)):
+            state = authority.request(dict(operation="status", strategy_identity=f"{identity:032x}"))
+            self.assertEqual(state["config_version"], version)
+            self.assertFalse(state["trading_authorized"])
+        self.source.batches = (self.node_batch(state["cursor"], 1),)
+        primary = self.instances.recover(f"{9:032x}")
+        self.assertEqual(primary["status"], "Ready", primary)
+        self.assertEqual(primary["binding"], primary_binding)
+        records = self.instances.view()
+        self.assertTrue(all(r["status"] == "Ready" for r in records), records)
+        self.assertEqual(len({r["evidence"]["host_pid"] for r in records}), 1)
+
     def test_native_first_unauthorized_batch_starts_at_one_without_publication_history(self):
         authority = self.native_authority()
         identity = "0" * 30 + "10"
@@ -388,6 +661,33 @@ class WebInstanceTests(unittest.TestCase):
         return dict(operation=operation, operation_identity=f"{time.time_ns():032x}", strategy_identity=old["strategy_identity"],
                     expected_definition_identity=old["definition_identity"], **{k: self.binding[k] for k in
                     ("release_artifact", "definition_identity", "package_manifest_sha256")})
+
+    @unittest.skipUnless(os.name == "nt", "shared aggregate Job memory qualification is Windows-specific")
+    def test_replacing_one_shared_member_preserves_other_binding_and_reports_restart_scope(self):
+        authority = self.native_authority()
+        self.install()
+        old = dict(self.binding)
+        first = self.create()[1]["result"]
+        self.assertEqual(first["status"], "Ready", first)
+        peer = self.create(strategy_identity=f"{17:032x}")[1]["result"]
+        self.assertEqual(peer["status"], "Ready", peer)
+        peer_binding = dict(peer["binding"])
+        self.install(definition="b" * 32, artifact="candidate-b")
+        status, body = self.client.call("POST", "/api/strategy-instances", self.replacement(old))
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["ok"], body)
+        result = body["result"]
+        self.assertEqual(result["successor_transition"]["affected_instances"], sorted([old["strategy_identity"], peer_binding["strategy_identity"]]))
+        records = {r["binding"]["strategy_identity"]: r for r in self.instances.view()}
+        self.assertEqual(records[peer_binding["strategy_identity"]]["binding"], peer_binding)
+        self.assertEqual(records[peer_binding["strategy_identity"]]["status"], "Stopped")
+        self.assertFalse(records[peer_binding["strategy_identity"]]["trading_authorized"])
+        cursor = authority.request(dict(operation="status", strategy_identity=result["binding"]["strategy_identity"]))["cursor"]
+        self.source.batches = (self.node_batch(cursor, 1),)
+        recovered = self.instances.recover(peer_binding["strategy_identity"])
+        self.assertEqual(recovered["status"], "Ready", recovered)
+        self.assertEqual(recovered["binding"], peer_binding)
+        self.assertFalse(recovered["trading_authorized"])
 
     def test_successor_rejects_candidate_failure_without_revoking_current_host(self):
         authority = self.native_authority()
@@ -792,7 +1092,7 @@ class WebInstanceTests(unittest.TestCase):
         late = authority.request(dict(operation="output", strategy_identity=identity, frame=self.native_frames[0]))
         self.assertEqual(late["orders"], 2)
 
-    def test_risk_warning_is_bound_to_instance_and_second_instance_cannot_gain_authority(self):
+    def test_risk_warning_and_node_placement_still_reject_unbound_instance_authority(self):
         self.native_authority()
         self.install(TRADER)
         self.assertEqual(self.create()[1]["result"]["status"], "Ready")
@@ -805,7 +1105,15 @@ class WebInstanceTests(unittest.TestCase):
         command.update(strategy_identity="0" * 30 + "11", risk_warning_acknowledged=True,
                        risk_warning_identity=warning["warning_identity"])
         self.assertEqual(self.client.call("POST", "/command", command)[0], 403)
-        self.assertEqual(self.create(strategy_identity="0" * 30 + "11")[0], 400)
+        status, body = self.create(strategy_identity="0" * 30 + "11")
+        if os.name == "nt":
+            self.assertEqual(status, 200, body)
+            self.assertEqual(body["result"]["status"], "Ready", body)
+            self.binding["strategy_identity"] = "0" * 30 + "11"
+            with self.assertRaisesRegex(ValueError, "StrategyIdentityMismatch"):
+                self.instance_command("enable_trading")
+        else:
+            self.assertEqual(status, 400, body)
         self.assertFalse(self.source.authority.request(dict(operation="status", strategy_identity=identity))["trading_authorized"])
 
     def test_real_host_reaches_ready_without_authority_and_restart_does_not_recreate_it(self):
@@ -1401,6 +1709,31 @@ class InstanceContractTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "Windows atomic job assignment")
 class WindowsProcessOwnershipTests(unittest.TestCase):
+    def test_aggregate_job_limit_counts_all_member_processes(self):
+        w = strategy_instance.windows
+        job = w.Job(128 * 1024 * 1024, aggregate=True)
+        processes = []
+        try:
+            for index in range(2):
+                process = job.start([sys.executable, "-I", "-S", "-c",
+                    "import sys\ntry:\n allocation=bytearray(80*1024*1024)\nexcept MemoryError:\n raise SystemExit(77)\nprint('allocated',flush=True)\nsys.stdin.read(1)"],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env=w.environment(), close_fds=True)
+                processes.append(process)
+                if index == 0:
+                    pipes = strategy_instance.CandidatePipes(process, job.terminate)
+                    self.assertEqual(pipes.read(5), b"allocated\r\n")
+                else:
+                    self.assertEqual(process.wait(timeout=5), 77)
+        finally:
+            job.close()
+            for process in processes:
+                process.wait(timeout=5)
+            if processes:
+                pipes.close()
+            for process in processes:
+                process.close()
+
     def test_backend_death_during_creation_reaps_the_suspended_process(self):
         w = strategy_instance.windows
         with tempfile.TemporaryDirectory(prefix="ringwin-suspended-") as directory:

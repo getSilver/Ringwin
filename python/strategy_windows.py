@@ -124,13 +124,16 @@ class Process:
 
 
 class Job:
-    def __init__(self, memory_bytes):
+    def __init__(self, memory_bytes, *, aggregate=False):
         self._lock = threading.Lock()
         self.handle = checked(create_job(None, None))
         limits = ExtendedLimits()
         # Hard committed-memory limit, inherited membership, kill on backend death.
-        limits.basic.flags = 0x100 | 0x2000
-        limits.process_memory = memory_bytes
+        limits.basic.flags = (0x200 if aggregate else 0x100) | 0x2000
+        if aggregate:
+            limits.job_memory = memory_bytes
+        else:
+            limits.process_memory = memory_bytes
         try:
             checked(set_job(self.handle, 9, c.byref(limits), c.sizeof(limits)))
         except BaseException:

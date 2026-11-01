@@ -38,7 +38,7 @@ Status: open
 
 ## Frontier
 
-- [10 多个 Python 实例共存与共享 Host 生命周期](issues/10-multiple-python-instances.md)：05/06/08已完成，可接手；尚未认领或实施。
+- [10 多个 Python 实例共存与共享 Host 生命周期](issues/10-multiple-python-instances.md)：05/06/08已完成，Codex 已认领，实施中。
 
 每次只认领一张Frontier票。尚未实施票的ready-for-agent表示票已可供接手，仍须满足各票Blocked by；其余票在依赖完成前不属于Frontier。
 

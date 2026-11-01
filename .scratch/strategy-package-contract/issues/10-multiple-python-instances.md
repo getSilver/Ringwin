@@ -1,8 +1,8 @@
 # 10：多个 Python 实例共存与共享 Host 生命周期
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in-progress
+Assignee: Codex
 Blocked by: [05 Python 实例 checkpoint 与重启恢复](05-python-checkpoint-recovery.md)、[06 显式 EnableTrading 接通策略输出与核心准入](06-enable-trading.md)、[08 代码替换与 ForwardRollback 创建 StrategySuccessor](08-successor-rollback.md)
 Parent: [模块地图](../map.md)
 

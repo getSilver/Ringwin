@@ -34,6 +34,7 @@ class CandidatePipes:
     def __init__(self, process, terminate):
         self.process, self.terminate = process, terminate
         self.output, self.stopped = queue.Queue(maxsize=4), threading.Event()
+        self.busy = False
         self.errors = bytearray()
         self.threads = [threading.Thread(target=self._stdout, daemon=True),
                         threading.Thread(target=self._stderr, daemon=True)]
@@ -196,7 +197,8 @@ class CandidateSource:
     batches. No HTTP field can supply or override either authority.
     """
 
-    def __init__(self, *, shard, decision_domain, portfolio_identity, scopes, risk_budget, batches, authority=None, fencing=77):
+    def __init__(self, *, shard, decision_domain, portfolio_identity, scopes, risk_budget, batches, authority=None, fencing=77,
+                 placements=()):
         package.uint(shard, 32, positive=False)
         package.identity(decision_domain)
         package.identity(portfolio_identity)
@@ -209,13 +211,21 @@ class CandidateSource:
             portfolio_identity=portfolio_identity, scopes=scopes, risk_budget=risk_budget)))
         self.batches = tuple(batches)
         self.authority = authority
+        self.placements = tuple(json.loads(package.canonical(p)) for p in placements)
+        for placement in self.placements:
+            package.fields(placement, set(self.scope))
+            package.identity(placement["decision_domain"])
+            package.identity(placement["portfolio_identity"])
+            validate_scopes(placement["scopes"])
+            package.uint(placement["risk_budget"])
 
     def prepare(self, binding, checkpoint_cursor=0, *, recover=False, batches=None):
         batches = self.batches if batches is None else batches
-        package.require(all(binding[k] == v for k, v in self.scope.items()), "deployment ownership or budget mismatch")
+        package.require(any(all(binding[k] == v for k, v in scope.items()) for scope in (self.scope, *self.placements)),
+                        "deployment ownership or budget mismatch")
         package.require(all(type(b) is bytes and 128 <= len(b) <= 1048576 for b in batches),
                         "invalid canonical input snapshot")
-        package.require(all(int.from_bytes(b[32:48], "little") == int(self.scope["decision_domain"], 16)
+        package.require(all(int.from_bytes(b[32:48], "little") == int(binding["decision_domain"], 16)
                             for b in batches), "canonical input DecisionDomain mismatch")
         # Normalize transport batching before the externally timed callbacks.
         # Coverage gaps from subscription filtering stay attached to the record.
@@ -298,7 +308,7 @@ class InstanceManager:
             self._index_successor(record)
 
     def _save(self, record):
-        with self.path.open("ab") as handle:
+        with self._lock, self.path.open("ab") as handle:
             handle.write(package.canonical(record) + b"\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -321,6 +331,8 @@ class InstanceManager:
             return json.loads(package.canonical(list(self._records.values())))
         try:
             for identity, host in list(self._hosts.items()):
+                if identity not in self._hosts:
+                    continue
                 if not host.get("native") and host["process"].poll() is not None:
                     self._fail(identity, self._records[identity], "candidate Host exited")
                 elif self._records[identity]["status"] == "Trading":
@@ -336,13 +348,13 @@ class InstanceManager:
         finally:
             self._lock.release()
 
-    def _revoke(self, identity):
+    def _revoke(self, identity, *, planned=False):
         if self.source.authority is not None:
-            self.source.authority.request(dict(operation="fault", strategy_identity=identity))
+            self.source.authority.request(dict(operation="restart" if planned else "fault", strategy_identity=identity))
 
-    def _fail(self, identity, record, reason):
+    def _fail(self, identity, record, reason, *, planned=False):
         try:
-            self._revoke(identity)
+            self._revoke(identity, planned=planned)
         except (OSError, ValueError) as error:
             reason += "; native revocation unconfirmed: " + str(error)
         finally:
@@ -359,7 +371,43 @@ class InstanceManager:
             response = self.source.authority.request(dict(operation="native_catchup", strategy_identity=identity))
             host["cursor"] = response["cursor"]
             return response, []
-        data = package.canonical(command)
+        self._require_idle(identity)
+        host["pipes"].busy = True
+        try:
+            result = self._outside_lock(lambda: self._exchange_io(host, identity, command))
+            package.require(self._hosts.get(identity) is host, "Host session invalidated during callback")
+            return result
+        finally:
+            host["pipes"].busy = False
+
+    def _require_idle(self, identity):
+        host = self._hosts.get(identity)
+        package.require(host is None or host.get("native") or not host["pipes"].busy, "Host callback in progress")
+
+    def _affected_instances(self, identity):
+        domain = self._records[identity]["binding"]["decision_domain"]
+        return sorted(i for i in self._hosts if self._records[i]["binding"]["decision_domain"] == domain)
+
+    def _outside_lock(self, function):
+        """A slow pipe may suspend this operation, never the manager's other Hosts."""
+        condition, result = threading.Condition(self._lock), []
+        def execute():
+            try:
+                value = (True, function())
+            except Exception as error:
+                value = (False, error)
+            with condition:
+                result.append(value)
+                condition.notify()
+        with condition:
+            threading.Thread(target=execute, daemon=True).start()
+            condition.wait_for(lambda: result)
+        if not result[0][0]:
+            raise result[0][1]
+        return result[0][1]
+
+    def _exchange_io(self, host, identity, command):
+        data = package.canonical(dict(command, strategy_identity=identity))
         package.require(len(data) <= 256 * 1024, "runtime command capacity exceeded")
         deadline = time.monotonic() + host["callback_timeout"]
         host["pipes"].write(struct.pack("<I", len(data)) + data, host["callback_timeout"])
@@ -393,6 +441,7 @@ class InstanceManager:
             self.view()
             package.require(self.source.authority is not None, "native node authority unavailable")
             package.require(identity in self._hosts, "instance is not running")
+            self._require_idle(identity)
             record = self._records[identity]
             package.require(command["target_identity"] == int(record["binding"]["decision_domain"], 16), "command target mismatch")
             enabling = command["kind"] == "enable_trading"
@@ -431,6 +480,7 @@ class InstanceManager:
         """Node-owned input turn; HTTP requests cannot supply canonical input."""
         with self._lock:
             package.require(identity in self._hosts and self._records[identity]["status"] in ("Ready", "Trading"), "instance is not Ready or Trading")
+            self._require_idle(identity)
             try:
                 record, host = self._records[identity], self._hosts[identity]
                 if host.get("native"):
@@ -527,6 +577,7 @@ class InstanceManager:
             package.require(request["expected_definition_identity"] == old["definition_identity"], "current StrategyDefinition conflict")
             package.require(request["definition_identity"] != old["definition_identity"], "code replacement requires a different StrategyDefinition")
             package.require(identity in self._hosts and previous["status"] in ("Ready", "Trading"), "instance must be Ready or Trading")
+            self._require_idle(identity)
             package.require(self.source.authority is not None, "native node authority unavailable")
             if request["operation"] == "forward_rollback":
                 package.require(any(r["binding"]["definition_identity"] == request["definition_identity"]
@@ -540,7 +591,8 @@ class InstanceManager:
                 ("release_artifact", "definition_identity", "package_manifest_sha256")})
             progress = dict(method="Rebuild", kind=request["operation"], operation_identity=request["operation_identity"], request_sha256=operation, status="validating",
                             from_instance=identity, to_instance=successor, from_definition=old["definition_identity"],
-                            to_definition=binding["definition_identity"], affected_scope="DecisionDomain", reason="")
+                            to_definition=binding["definition_identity"], affected_scope="DecisionDomain",
+                            affected_instances=self._affected_instances(identity), reason="")
             generation = max(r.get("host_generation", 0) for r in self._records.values()) + 1
             package.uint(generation)
             previous = dict(previous, successor_transition=progress, host_generation=generation)
@@ -551,6 +603,8 @@ class InstanceManager:
                 result = candidate._run(binding, generation=generation)
                 package.require(result["status"] == "Ready", result["reason"])
                 native = dict(strategy_identity=identity, successor_identity=successor,
+                              current_definition_identity=old["definition_identity"],
+                              current_release_identity=previous["release_identity"], current_state_schema_version=previous["state_schema_version"],
                               config_version=binding["config_version"], definition_identity=binding["definition_identity"],
                               release_identity=result["release_identity"], state_schema_version=result["state_schema_version"],
                               transition="Rebuild", operation_identity=request["operation_identity"])
@@ -623,13 +677,14 @@ class InstanceManager:
             package.require(request["expected_config_version"] == old["config_version"], "current ConfigVersion conflict")
             package.require(request["config_version"] > old["config_version"], "ConfigVersion must advance")
             package.require(identity in self._hosts and previous["status"] in ("Ready", "Trading"), "instance must be Ready or Trading")
+            self._require_idle(identity)
             package.require(self.source.authority is not None, "native node authority unavailable")
             binding = dict(old, **{k: request[k] for k in ("config_version", "config_json", "config_sha256")})
             package.require(len(package.canonical(binding)) <= 64 * 1024, "binding capacity exceeded")
             versions[str(request["config_version"])] = request["config_sha256"]
             progress = dict(method=request["transition"], request_sha256=operation, status="validating",
                             from_version=old["config_version"], to_version=binding["config_version"],
-                            affected_scope="DecisionDomain", reason="")
+                            affected_scope="DecisionDomain", affected_instances=self._affected_instances(identity), reason="")
             previous = dict(previous, config_versions=versions, config_transition=progress)
             # Reserve candidate session generations before a child can start.
             previous["host_generation"] = max(r.get("host_generation", 0) for r in self._records.values()) + 1
@@ -649,6 +704,8 @@ class InstanceManager:
                 self._save(previous)
                 package.require(result["status"] == "Ready", result["reason"])
                 native = dict(strategy_identity=identity, config_version=binding["config_version"],
+                              current_definition_identity=old["definition_identity"],
+                              current_release_identity=previous["release_identity"], current_state_schema_version=previous["state_schema_version"],
                               definition_identity=binding["definition_identity"],
                               state_schema_version=result["state_schema_version"], transition=request["transition"],
                               operation_identity=operation[:32])
@@ -692,11 +749,22 @@ class InstanceManager:
 
     def _run(self, binding, previous=None, *, transition=None, generation=None):
         identity = binding["strategy_identity"]
-        package.require(not self._hosts, "single candidate Host capacity; multiple instances require ticket 10")
-        root, manifest, lock = self._approved_package(binding)
+        root, manifest, lock = self._approved_package(binding, retained=previous is not None and transition is None)
         if manifest.get("runtime") == "native_static":
             self.source.prepare(binding, batches=())
             return self._run_native(binding, root, manifest, lock, previous, generation)
+        if not transition:
+            peers = [i for i, h in self._hosts.items() if not h.get("native")
+                     and h["request"]["binding"]["decision_domain"] == binding["decision_domain"]
+                     and h["request"]["manifest"]["compatibility"] == manifest["compatibility"]]
+            if peers:
+                try:
+                    return self._run_shared(binding, previous, root, manifest, lock, peers)
+                except (OSError, ValueError, KeyError, RuntimeError) as error:
+                    record = self._records.get(identity)
+                    if record is not None and identity not in self._hosts:
+                        self._save(dict(record, status="Stopped", trading_authorized=False, reason=str(error)[:2048]))
+                    raise
         cursor = previous.get("checkpoint", {}).get("cursor", 0) if previous else 0
         shard, barrier, batches = self.source.prepare(binding, cursor, recover=previous is not None)
         release_identity = int((root / "manifest.sha256").read_text("ascii")[:16], 16)
@@ -736,6 +804,11 @@ class InstanceManager:
                                source_config_version=previous["binding"]["config_version"],
                                source_checkpoint_directory=previous.get("checkpoint_directory",
                                    str((self.directory.parent / (identity + "-checkpoints")).resolve())))
+            request["checkpoint"] = record.get("checkpoint")
+            request["strategy_manifest"], request["checkpoint_manifest"] = package.host_manifests([request])
+            record["host_placement"] = dict(members=[identity], memory_metric="process_committed_bytes" if os.name == "nt" else "process_address_space_bytes",
+                memory_budget_bytes=manifest["limits"]["max_memory_bytes"],
+                strategy_manifest=request["strategy_manifest"], checkpoint_manifest=request["checkpoint_manifest"])
             data = package.canonical(request)
             package.require(len(data) <= package.MAX_JSON_BYTES, "candidate request capacity exceeded")
             (work / "request.json").write_bytes(data)
@@ -753,8 +826,9 @@ class InstanceManager:
                                             "--fsize=" + str(max(262144, limits["max_private_state_bytes"] + 4096)),
                                             "--", *argv], start_new_session=True, **options)
             self._hosts[identity] = dict(process=process, temporary=temporary, job=job,
-                                        callback_timeout=limits["max_callback_ns"] / 1e9)
+                                        callback_timeout=limits["max_callback_ns"] / 1e9, request=request)
             pipes = CandidatePipes(process, lambda: self._terminate(process, job))
+            pipes.busy = True
             self._hosts[identity]["pipes"] = pipes
             phase_budget = limits["max_warmup_ns"]
             phase_started = started
@@ -763,7 +837,7 @@ class InstanceManager:
                 now = time.monotonic_ns()
                 remaining = min(phase_budget - (now - phase_started), limits["max_warmup_ns"] - (now - started))
                 package.require(remaining > 0, "candidate callback or warmup budget exhausted")
-                chunk = pipes.read(remaining / 1e9)
+                chunk = self._outside_lock(lambda: pipes.read(remaining / 1e9))
                 if not chunk:
                     pipes.threads[1].join(timeout=0.1)
                     reason = pipes.errors.decode("utf-8", "replace")
@@ -786,8 +860,10 @@ class InstanceManager:
                                     and result["cursor"] == barrier, "invalid Ready evidence")
                     record.update(status="Ready", evidence=result, checkpoint=result.pop("checkpoint"), reason="")
                     self._hosts[identity].update(cursor=barrier, next_input_batch=result["next_input_batch"])
+                    pipes.busy = False
                     record["recovery"]["cursor"] = barrier
                     self._save(record)
+                    self._ensure_monitor()
                     return record
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
             if process is not None:
@@ -801,15 +877,166 @@ class InstanceManager:
             self._save(record)
             return record
 
-    def _approved_package(self, binding):
+    def _ensure_monitor(self):
+        if self._monitor is None:
+            self._monitor_stop.clear()
+            self._monitor = threading.Thread(target=self._watch, daemon=True)
+            self._monitor.start()
+
+    def _run_shared(self, binding, previous, root, manifest, lock, peers):
+        """One approved interpreter, separate logical sessions and durable repositories."""
+        identity = binding["strategy_identity"]
+        package.require(os.name == "nt", "shared Host aggregate hard-memory enforcement unavailable on this platform")
+        package.require(len(peers) < 16, "shared Host instance capacity exceeded")
+        for member in peers:
+            self._require_idle(member)
+        requests, records = [], {}
+        # Validate all placement before touching a running member.
+        shard, barrier, batches = self.source.prepare(binding,
+            previous.get("checkpoint", {}).get("cursor", 0) if previous else 0, recover=previous is not None)
+        base = max([r.get("host_generation", 0) for r in self._records.values()] + [0]) + 1
+        for offset, member in enumerate(sorted([*peers, identity])):
+            generation = base + offset
+            package.uint(generation)
+            if member == identity:
+                record = dict(previous or {}, binding=binding, status="Recovering", reason="", trading_authorized=False,
+                    host_generation=generation, recovery=dict(cursor=previous.get("checkpoint", {}).get("cursor", 0) if previous else 0, barrier=barrier),
+                    checkpoint_directory=previous["checkpoint_directory"] if previous else str((self.directory / (identity + "-checkpoints")).resolve()),
+                    release_identity=int((root / "manifest.sha256").read_text("ascii")[:16], 16),
+                    state_schema_version=manifest["state_schema"]["version"])
+                request = dict(binding=binding, manifest=manifest,
+                    package_root=str(root / "strategies" / binding["definition_identity"]),
+                    python=str(root / lock["python_path"]), host=str(root / lock["host_path"]),
+                    generation=generation, shard=shard, fencing=self.source.fencing, barrier=barrier,
+                    checkpoint_directory=record["checkpoint_directory"], recover=previous is not None,
+                    checkpoint_cursor=previous.get("checkpoint", {}).get("cursor", 0) if previous else 0,
+                    batches=[b.hex() for b in batches])
+            else:
+                record = dict(self._records[member])
+                self._approved_package(record["binding"], retained=True)
+                request = dict(self._hosts[member]["request"], generation=generation, recover=True)
+                request.pop("transition", None)
+                request.pop("previous_binding", None)
+                request.pop("source_config_version", None)
+                request.pop("source_checkpoint_directory", None)
+            records[member] = record
+            record["host_generation"] = generation
+            requests.append(request)
+        for record in records.values():
+            self._save(record)
+        # Commit a fresh checkpoint before shared-process restart, never copy private state.
+        try:
+            for member in peers:
+                snapshot, _ = self._exchange(member, dict(checkpoint=True))
+                records[member]["checkpoint"] = snapshot["checkpoint"]
+                self._save(records[member])
+                request = next(r for r in requests if r["binding"]["strategy_identity"] == member)
+                _, current_barrier, tail = self.source.prepare(records[member]["binding"], snapshot["cursor"], recover=True)
+                request.update(checkpoint_cursor=snapshot["cursor"], barrier=current_barrier, batches=[b.hex() for b in tail])
+        except (OSError, ValueError, KeyError, RuntimeError) as error:
+            self._fail(member, self._records[member], "shared Host checkpoint failed: " + str(error))
+            raise
+        members = sorted(records)
+        for request in requests:
+            request["checkpoint"] = records[request["binding"]["strategy_identity"]].get("checkpoint")
+        strategy_digest, checkpoint_digest = package.host_manifests(requests)
+        budget = sum(r["manifest"]["limits"]["max_memory_bytes"] for r in requests)
+        package.uint(budget)
+        # Windows Job committed bytes cover the adapter and interpreter together.
+        placement = dict(members=members, memory_metric="job_committed_bytes", memory_budget_bytes=budget,
+                         strategy_manifest=strategy_digest, checkpoint_manifest=checkpoint_digest)
+        for request in requests:
+            request.update(python=requests[0]["python"], host=requests[0]["host"],
+                           strategy_manifest=strategy_digest, checkpoint_manifest=checkpoint_digest)
+        data = package.canonical(dict(instances=requests))
+        package.require(len(data) <= package.MAX_JSON_BYTES, "shared Host request capacity exceeded")
+        for member in peers:
+            if member in self._hosts:
+                self._fail(member, self._records[member], "shared Host membership changed; explicit enable required", planned=True)
+        temporary = tempfile.TemporaryDirectory(prefix="shared-host-", dir=self.directory)
+        process, job, pipes = None, None, None
+        try:
+            work = Path(temporary.name)
+            (work / "request.json").write_bytes(data)
+            for request in requests:
+                member = request["binding"]["strategy_identity"]
+                records[member].update(status="Recovering", trading_authorized=False,
+                    host_generation=request["generation"], host_placement=placement, reason="shared Host restart")
+                self._save(records[member])
+            job = windows.Job(budget, aggregate=True)
+            process = job.start([str(root / CANDIDATE_PATH), str(work / "request.json")],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                cwd=work, env=windows.environment(), close_fds=True)
+            pipes = CandidatePipes(process, job.terminate)
+            pipes.busy = True
+            for request in requests:
+                member = request["binding"]["strategy_identity"]
+                self._hosts[member] = dict(process=process, temporary=temporary, job=job, pipes=pipes,
+                    request=request, callback_timeout=request["manifest"]["limits"]["max_callback_ns"] / 1e9)
+            pending = b""
+            for request in requests:
+                member = request["binding"]["strategy_identity"]
+                limits = request["manifest"]["limits"]
+                deadline = time.monotonic() + limits["max_warmup_ns"] / 1e9
+                phase_deadline = deadline
+                while True:
+                    remaining = min(deadline, phase_deadline) - time.monotonic()
+                    package.require(remaining > 0, "shared Host callback or warmup budget exhausted")
+                    if b"\n" not in pending:
+                        chunk = self._outside_lock(lambda: pipes.read(remaining))
+                        if not chunk:
+                            pipes.threads[1].join(timeout=0.1)
+                            raise package.PackageError("shared Host exited: " + pipes.errors.decode("utf-8", "replace"))
+                        pending += chunk
+                        package.require(len(pending) <= 8192, "shared Host response capacity exceeded")
+                        continue
+                    line, pending = pending.split(b"\n", 1)
+                    result = json.loads(line)
+                    if "phase" in result:
+                        phase_deadline = time.monotonic() + limits["max_callback_ns"] / 1e9
+                        continue
+                    package.require(result["strategy_identity"] == member and not result["trading_authorized"]
+                                    and result["cursor"] == request["barrier"], "invalid shared Host Ready evidence")
+                    record = records[member]
+                    record.update(status="Ready", reason="", checkpoint=result.pop("checkpoint"), evidence=result,
+                        recovery=dict(cursor=result["cursor"], barrier=result["cursor"]))
+                    self._hosts[member].update(cursor=result["cursor"], next_input_batch=result["next_input_batch"])
+                    self._save(record)
+                    break
+            pipes.busy = False
+            self._ensure_monitor()
+            return self._records[identity]
+        except (OSError, ValueError, RuntimeError, KeyError) as error:
+            for member in members:
+                if member in self._hosts:
+                    self._fail(member, self._records[member], str(error))
+            if job is not None:
+                job.close()
+            if process is not None:
+                process.wait(timeout=5)
+                process.close()
+            if pipes is not None:
+                pipes.close()
+            temporary.cleanup()
+            for member in members:
+                self._save(dict(self._records[member], status="Stopped", trading_authorized=False, reason=str(error)[:2048]))
+            return self._records[identity]
+
+    def _approved_package(self, binding, *, retained=False):
         releases = self.releases
         package.require(not releases._publication_unknown, "release publication is unknown")
         package.require(isinstance(releases.applier, release_lifecycle.FilesystemApplier), "installed release backend required")
-        active = releases.active_artifact()
-        package.require(type(binding["release_artifact"]) is str and binding["release_artifact"] == active
-                        and releases.applier.current_artifact() == active, "release is not current")
+        active = binding["release_artifact"]
+        package.require(type(active) is str, "release identity must be a string")
+        if retained:
+            known = self._records.get(binding["strategy_identity"])
+            package.require(known is not None and known["binding"] == binding and not known.get("superseded_by"),
+                            "retained package requires an existing instance binding")
+        else:
+            package.require(active == releases.active_artifact()
+                            and releases.applier.current_artifact() == active, "release is not current")
         registrations = releases._registrations()
-        package.require(any(p["definition_identity"] == binding["definition_identity"]
+        package.require(retained or any(p["definition_identity"] == binding["definition_identity"]
                             and p["package_manifest_sha256"] == binding["package_manifest_sha256"]
                             and p["release_artifact"] == active for p in registrations), "package is not registered")
         approved = {r["manifest_sha256"] for r in releases.records()
@@ -897,6 +1124,16 @@ class InstanceManager:
         if host.get("native"):
             return
         process = host["process"]
+        for peer, other in list(self._hosts.items()):
+            if other.get("process") is not process:
+                continue
+            reason = "shared Host stopped; recovery and explicit enable required"
+            try:
+                self._revoke(peer, planned=True)
+            except (OSError, ValueError) as error:
+                reason += "; native revocation unconfirmed: " + str(error)
+            self._hosts.pop(peer)
+            self._save(dict(self._records[peer], status="Stopped", trading_authorized=False, reason=reason[:2048]))
         self._terminate(process, host["job"])
         process.wait(timeout=5)
         if host["job"] is not None:

@@ -263,6 +263,7 @@ async function loadInstances(){
       ${escaped(JSON.stringify(r.authority || {}))}
       ${escaped(JSON.stringify(r.config_transition || {}))}
       ${escaped(JSON.stringify(r.successor_transition || {}))}
+      <br>Host 放置 / 重启影响：${escaped(JSON.stringify(r.host_placement || {members:[r.binding.strategy_identity]}))}
       ${r.status === "Ready" || r.status === "Trading" ? `<button onclick="replaceStrategyInstance('${escaped(r.binding.strategy_identity)}','${escaped(r.binding.definition_identity)}','replace')">替换代码 Rebuild</button><button onclick="replaceStrategyInstance('${escaped(r.binding.strategy_identity)}','${escaped(r.binding.definition_identity)}','forward_rollback')">ForwardRollback</button>` : ""}
       ${r.status === "Ready" || r.status === "Trading" ? `<button onclick="updateStrategyConfig('${escaped(r.binding.strategy_identity)}',${r.binding.config_version})">更新参数 Keep/Rebuild</button>` : ""}
       ${r.status === "Ready" ? `<button onclick="controlStrategyInstance('enable_trading','${escaped(r.binding.strategy_identity)}','${BigInt('0x'+r.binding.decision_domain)}')">EnableTrading</button>` : ""}
