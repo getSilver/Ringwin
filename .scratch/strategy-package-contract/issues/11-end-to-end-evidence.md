@@ -1,8 +1,8 @@
 # 11：冻结合同落地的端到端验收证据
 
 Type: task
-Status: ready-for-agent
-Assignee:
+Status: in-progress
+Assignee: Codex
 Blocked by: [07 同实例参数更新与 Keep/Rebuild](07-config-transition.md)、[09 原生策略接入统一发布与激活路径](09-native-release-activation.md)、[10 多个 Python 实例共存与共享 Host 生命周期](10-multiple-python-instances.md)
 Parent: [模块地图](../map.md)
 

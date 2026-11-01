@@ -38,7 +38,7 @@ Status: open
 
 ## Frontier
 
-- [11 冻结合同落地的端到端验收证据](issues/11-end-to-end-evidence.md)：07/09/10已完成，可接手；尚未认领或实施。
+- [11 冻结合同落地的端到端验收证据](issues/11-end-to-end-evidence.md)：07/09/10已完成，Codex正在冻结版本、串联生命周期并核对合同证据。
 
 每次只认领一张Frontier票。尚未实施票的ready-for-agent表示票已可供接手，仍须满足各票Blocked by；其余票在依赖完成前不属于Frontier。
 

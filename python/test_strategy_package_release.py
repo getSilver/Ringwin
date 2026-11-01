@@ -92,7 +92,6 @@ def write_bundle(root, name, files, extra=()):
                           payload_format="strategy_bundle_v1")
 
 
-@unittest.skipIf(os.name == "nt", "existing FilesystemApplier is a Linux adapter")
 class PackageReleaseTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="ringwin-package-")
@@ -154,6 +153,7 @@ class PackageReleaseTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         return body["result"]
 
+    @unittest.skipIf(os.name == "nt", "POSIX current symlink and mode bits; Windows lifecycle/ACL checks are separate")
     def test_signed_bundle_installs_and_web_lists_the_registered_definition(self):
         manifest = write_bundle(self.root, "bundle-a", self.files)
         result = self.deploy(manifest)
@@ -242,7 +242,7 @@ class PackageReleaseTests(unittest.TestCase):
         (self.root / "versions" / "bundle-fault").write_bytes(b"not a version directory")
         failed = self.deploy(write_bundle(self.root, "bundle-fault", self.files), "3002", "bundle-a")
         self.assertEqual(failed["status"], "rejected")
-        self.assertEqual(os.readlink(self.root / "versions" / "current"), "bundle-a")
+        self.assertEqual(self.manager.applier.current_artifact(), "bundle-a")
         self.assertEqual(len(self.restarts), 1)
         self.assertEqual(self.client.call("GET", "/api/releases")[1]["strategy_packages"][0]["release_artifact"], "bundle-a")
         self.assertFalse(list((self.root / "versions").glob(".*.tmp")))
@@ -275,8 +275,9 @@ class PackageReleaseTests(unittest.TestCase):
         package = self.client.call("GET", "/api/releases")[1]["strategy_packages"][0]
         self.assertEqual(package["qualifications"][0]["status"], "qualified")
         self.assertFalse(package["trading_authorized"])
+        self.assertEqual(self.manager.applier.current_artifact(), "bundle-a")
         for path, content in self.files.items():
-            self.assertEqual((self.root / "versions" / "current" / path).read_bytes(), content)
+            self.assertEqual((self.root / "versions" / "bundle-a" / path).read_bytes(), content)
         for label, change in (
                 ("wrong package", lambda r: r.update(package_manifest_sha256="b" * 64)),
                 ("wrong runtime", lambda r: r["compatibility"].update(host_protocol=2)),
@@ -424,7 +425,7 @@ class PackageReleaseTests(unittest.TestCase):
         result = self.deploy(write_bundle(self.root, "bundle-b", files), "10001", "bundle-a")
         self.assertEqual(result["status"], "rejected")
         self.assertIn("schema", result["reason"])
-        self.assertEqual(os.readlink(self.root / "versions" / "current"), "bundle-a")
+        self.assertEqual(self.manager.applier.current_artifact(), "bundle-a")
 
 
 @unittest.skipUnless(os.name == "nt", "Windows signed publication adapter")
