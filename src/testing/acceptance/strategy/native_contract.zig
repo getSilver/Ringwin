@@ -1,6 +1,6 @@
 //! Explicit offline build acceptance, without release or trading authority.
 const std = @import("std");
-const registry = @import("trading/trading_shard.zig").TradingShard.native_definitions;
+const registry = @import("../../../trading/trading_shard.zig").TradingShard.native_definitions;
 
 pub fn main() !void {
     try registry.validate();

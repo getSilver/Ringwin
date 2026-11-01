@@ -11,8 +11,8 @@
 //! the end-of-poll terminator.
 
 const std = @import("std");
-const trading_fixture = @import("testing/support/trading_shard_fixture.zig");
-const operational = @import("trading/operational.zig");
+const trading_fixture = @import("../testing/support/trading_shard_fixture.zig");
+const operational = @import("../trading/operational.zig");
 
 pub const ControlCommand = operational.ControlCommand;
 pub const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
@@ -274,7 +274,7 @@ pub fn drainDropDirectory(
     }
 }
 
-const trading = @import("trading/trading_shard.zig");
+const trading = @import("../trading/trading_shard.zig");
 
 const test_key: [key_len]u8 = blk: {
     var key_bytes: [key_len]u8 = undefined;

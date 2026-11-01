@@ -29,11 +29,14 @@ pub fn build(b: *std.Build) void {
     const native_acceptance = b.addExecutable(.{
         .name = "native-contract",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/native_contract_main.zig"),
+            .root_source_file = b.path("src/entry.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
+    const native_options = b.addOptions();
+    native_options.addOption(usize, "index", 139);
+    native_acceptance.root_module.addOptions("entry_options", native_options);
     const native_step = b.step("native-contract", "Verify native static registration and the minimal definition offline");
     native_step.dependOn(&b.addRunArtifact(native_acceptance).step);
     const main_module = b.createModule(.{
@@ -63,11 +66,14 @@ pub fn build(b: *std.Build) void {
     const authority_probe = b.addExecutable(.{
         .name = "ringwin-strategy-authority-probe",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/strategy_authority_probe.zig"),
+            .root_source_file = b.path("src/entry.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
+    const authority_options = b.addOptions();
+    authority_options.addOption(usize, "index", 140);
+    authority_probe.root_module.addOptions("entry_options", authority_options);
     authority_probe.stack_size = 512 * 1024 * 1024;
     const authority_step = b.step("strategy-authority-probe", "Build the offline package activation acceptance node");
     authority_step.dependOn(&b.addInstallArtifact(authority_probe, .{}).step);

@@ -3,10 +3,10 @@
 //! segment) and prints the read-only JSON views consumed by the control plane.
 
 const std = @import("std");
-const trading_fixture = @import("testing/support/trading_shard_fixture.zig");
-const trading = @import("trading/trading_shard.zig");
-const operational = @import("trading/operational.zig");
-const projection = @import("control_projection.zig");
+const trading_fixture = @import("../support/trading_shard_fixture.zig");
+const trading = @import("../../trading/trading_shard.zig");
+const operational = @import("../../trading/operational.zig");
+const projection = @import("../../runtime/control_projection.zig");
 
 const fixture_time_base: u64 = 1_000_000;
 
@@ -28,7 +28,7 @@ fn appendControlCommand(
 }
 
 fn runDemo(writer: anytype) !void {
-    const authorization: @import("strategy/strategy_host_gateway.zig").Authorization = .{
+    const authorization: @import("../../strategy/strategy_host_gateway.zig").Authorization = .{
         .strategy_identity = 1,
         .config_version = 1,
         .activation_identity = 1,
@@ -108,7 +108,7 @@ pub fn main(init: std.process.Init) !void {
         try runDemo(out);
     } else if (std.mem.eql(u8, mode, "dump")) {
         // Prints the fixture journal hex so consumers can exercise `project`.
-        const authorization: @import("strategy/strategy_host_gateway.zig").Authorization = .{
+        const authorization: @import("../../strategy/strategy_host_gateway.zig").Authorization = .{
             .strategy_identity = 1,
             .config_version = 1,
             .activation_identity = 1,

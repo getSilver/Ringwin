@@ -4,7 +4,7 @@ const std = @import("std");
 const trading = @import("../trading/trading_shard.zig");
 const gateway = @import("strategy_host_gateway.zig");
 const ipc = @import("strategy_host_ipc.zig");
-const channel = @import("../control_channel.zig");
+const channel = @import("../runtime/control_channel.zig");
 const cutover = @import("../runtime/recovery_cutover.zig");
 const native = @import("native_instance.zig");
 

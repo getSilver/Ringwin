@@ -135,6 +135,13 @@ const selected = switch (@import("entry_options").index) {
     131 => @import("testing/acceptance/core/multi_portfolio_authority_acceptance.zig"),
     132 => @import("testing/acceptance/core/multi_portfolio_netting_acceptance.zig"),
     133 => @import("runtime/strategy_cycle_recovery.zig"),
+    134 => @import("runtime/control_channel.zig"),
+    135 => @import("runtime/control_projection.zig"),
+    136 => @import("testing/integration/control_plane_node.zig"),
+    137 => @import("testing/integration/control_plane_probe.zig"),
+    138 => @import("testing/integration/control_projection_probe.zig"),
+    139 => @import("testing/acceptance/strategy/native_contract.zig"),
+    140 => @import("testing/acceptance/strategy/strategy_authority_probe.zig"),
     else => @compileError("unknown standalone source entry"),
 };
 

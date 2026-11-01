@@ -4,9 +4,9 @@
 //! through each shard's authoritative journal, and prints a stable summary.
 
 const std = @import("std");
-const trading_fixture = @import("testing/support/trading_shard_fixture.zig");
-const trading = @import("trading/trading_shard.zig");
-const channel = @import("control_channel.zig");
+const trading_fixture = @import("../support/trading_shard_fixture.zig");
+const trading = @import("../../trading/trading_shard.zig");
+const channel = @import("../../runtime/control_channel.zig");
 
 const fixture_time_base: u64 = 1_000_000;
 

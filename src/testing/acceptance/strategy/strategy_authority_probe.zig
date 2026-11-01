@@ -1,13 +1,13 @@
 //! Offline Web/Host/core acceptance node. No Venue transport or credentials.
 const std = @import("std");
-const fixture = @import("testing/support/trading_shard_fixture.zig");
-const trading = @import("trading/trading_shard.zig");
-const package = @import("strategy/strategy_package_authority.zig");
-const lifecycle = @import("strategy/strategy_host_lifecycle.zig");
-const execution = @import("execution/execution_gateway.zig");
-const durable = @import("persistence/durable_store.zig");
-const demo = @import("runtime/demo/demo_authority.zig");
-const simulated = @import("adapters/simulated/simulated_venue.zig");
+const fixture = @import("../../support/trading_shard_fixture.zig");
+const trading = @import("../../../trading/trading_shard.zig");
+const package = @import("../../../strategy/strategy_package_authority.zig");
+const lifecycle = @import("../../../strategy/strategy_host_lifecycle.zig");
+const execution = @import("../../../execution/execution_gateway.zig");
+const durable = @import("../../../persistence/durable_store.zig");
+const demo = @import("../../../runtime/demo/demo_authority.zig");
+const simulated = @import("../../../adapters/simulated/simulated_venue.zig");
 
 const Node = struct {
     run: fixture.LiveRun,
@@ -18,10 +18,10 @@ const Node = struct {
     fn journal(self: *Node) *trading.journal.Journal {
         return if (self.joint) |owner| &owner.decision_journal else &self.run.decision_journal;
     }
-    fn reconcile(context: *anyopaque) !@import("runtime/recovery_cutover.zig").VenueEvidence {
+    fn reconcile(context: *anyopaque) !@import("../../../runtime/recovery_cutover.zig").VenueEvidence {
         const self: *Node = @ptrCast(@alignCast(context));
         // Offline fixture observation only; production must supply actual Venue evidence.
-        const Recovery = @import("runtime/recovery_cutover.zig").RecoveryCoordinator;
+        const Recovery = @import("../../../runtime/recovery_cutover.zig").RecoveryCoordinator;
         const recovery = try std.heap.page_allocator.create(Recovery);
         defer std.heap.page_allocator.destroy(recovery);
         Recovery.beginInto(recovery, self.shard(), self.shard().authoritativeBarrier());
@@ -66,8 +66,8 @@ pub fn main(init: std.process.Init) !void {
     if (group) {
         try demo.Owner.bootstrapInto(joint, core_store.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
         if (multiple) {
-            const manifest = try @import("testing/acceptance/core/multi_portfolio_authority_acceptance.zig").cycleConfiguration();
-            try @import("testing/acceptance/core/multi_account_authority_acceptance.zig").initializePythonOwnerForConfiguration(joint, &manifest);
+            const manifest = try @import("../core/multi_portfolio_authority_acceptance.zig").cycleConfiguration();
+            try @import("../core/multi_account_authority_acceptance.zig").initializePythonOwnerForConfiguration(joint, &manifest);
             for ([_]u128{ 20, 30 }) |account| {
                 _ = try joint.apply(fixture.atGroup(45, .{ .identity = joint.shard.authoritativeBarrier() + 1, .account_scope = account, .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = 11 } } }));
                 _ = try joint.apply(fixture.atGroup(45, .{ .identity = joint.shard.authoritativeBarrier() + 1, .account_scope = account, .payload = .{ .portfolio_transfer = .{ .portfolio_identity = 11, .amount_atoms = 100 } } }));
@@ -76,13 +76,13 @@ pub fn main(init: std.process.Init) !void {
             for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }) |account, instrument| {
                 _ = try joint.apply(fixture.atGroup(45, .{ .identity = joint.shard.authoritativeBarrier() + 1, .account_scope = account, .payload = .{ .instrument_trading_authorization = .{ .strategy_identity = 19, .exchange_account = account, .instrument = instrument, .strategy_activation_identity = 1, .config_version = 1, .expected_version = 1, .enabled = true } } }));
             }
-        } else try @import("testing/acceptance/core/multi_account_authority_acceptance.zig").initializePythonOwner(joint);
+        } else try @import("../core/multi_account_authority_acceptance.zig").initializePythonOwner(joint);
         node.joint = joint;
     } else {
         try fixture.applyCanonicalGenesis(&node.run.shard, &node.run.decision_journal, .{ .strategy_identity = 16, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged, 1);
         try fixture.applyHealthyPrelude(&node.run);
     }
-    const pause = @import("control_channel.zig").ControlCommand{
+    const pause = @import("../../../runtime/control_channel.zig").ControlCommand{
         .command_identity = 7001,
         .content_hash = 7001,
         .kind = .trading_pause,

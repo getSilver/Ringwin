@@ -22,8 +22,8 @@ NOW = 1_000_000 + 5
 
 def build_probe() -> None:
     subprocess.run(
-        ["zig", "build-exe",
-         os.path.join(ROOT, "src", "control_plane_probe.zig"),
+        [sys.executable, os.path.join(ROOT, "tools", "zig-entry.py"), "build-exe",
+         os.path.join(ROOT, "src", "testing", "integration", "control_plane_probe.zig"),
          "-O", "ReleaseSafe", "--stack", "536870912", f"-femit-bin={PROBE}"],
         check=True, cwd=ROOT)
 

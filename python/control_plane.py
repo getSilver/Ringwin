@@ -2,7 +2,7 @@
 
 Signs ControlCommand envelopes and serves them to the Zig host over a
 localhost TCP pull channel. The envelope format is frozen in
-src/control_channel.zig; both sides must stay byte-compatible.
+src/runtime/control_channel.zig; both sides must stay byte-compatible.
 """
 
 from __future__ import annotations

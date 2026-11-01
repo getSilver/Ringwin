@@ -8,11 +8,11 @@
 //!   serve <runtime_dir> <port> [ms]  pull/apply loop (default 500 ms)
 
 const std = @import("std");
-const trading_fixture = @import("testing/support/trading_shard_fixture.zig");
-const trading = @import("trading/trading_shard.zig");
-const journal = @import("persistence/journal.zig");
-const operational = @import("trading/operational.zig");
-const channel = @import("control_channel.zig");
+const trading_fixture = @import("../support/trading_shard_fixture.zig");
+const trading = @import("../../trading/trading_shard.zig");
+const journal = @import("../../persistence/journal.zig");
+const operational = @import("../../trading/operational.zig");
+const channel = @import("../../runtime/control_channel.zig");
 
 const fixture_time_base: u64 = 1_000_000;
 const contract_denominator: i64 = 10_000;
@@ -65,7 +65,7 @@ fn setup(io: std.Io, runtime_dir: []const u8) !void {
         else => return err,
     };
     defer dir.close(io);
-    const authorization: @import("strategy/strategy_host_gateway.zig").Authorization = .{
+    const authorization: @import("../../strategy/strategy_host_gateway.zig").Authorization = .{
         .strategy_identity = 1,
         .config_version = 1,
         .activation_identity = 1,

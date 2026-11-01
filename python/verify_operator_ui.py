@@ -32,8 +32,8 @@ def build() -> dict:
     bins = {}
     for name in ("control_plane_node", "control_projection_probe"):
         out = os.path.join(ROOT, ".scratch", "build", f"{name}.exe")
-        subprocess.run(["zig", "build-exe",
-                        os.path.join(ROOT, "src", f"{name}.zig"),
+        subprocess.run([sys.executable, os.path.join(ROOT, "tools", "zig-entry.py"), "build-exe",
+                        os.path.join(ROOT, "src", "testing", "integration", f"{name}.zig"),
                         "-O", "ReleaseSafe", "--stack", "536870912", f"-femit-bin={out}"],
                        check=True, cwd=ROOT)
         bins[name] = out

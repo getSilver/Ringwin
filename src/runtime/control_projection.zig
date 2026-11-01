@@ -5,9 +5,9 @@
 //! stale data.
 
 const std = @import("std");
-const trading = @import("trading/trading_shard.zig");
-const journal = @import("persistence/journal.zig");
-const operational = @import("trading/operational.zig");
+const trading = @import("../trading/trading_shard.zig");
+const journal = @import("../persistence/journal.zig");
+const operational = @import("../trading/operational.zig");
 
 pub const max_gates = operational.max_gates;
 

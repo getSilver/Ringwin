@@ -8,6 +8,7 @@ itself: there is exactly one journal parser, and it lives in Zig.
 import json
 import os
 import subprocess
+import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROBE = os.path.join(ROOT, ".scratch", "build", "control_projection_probe.exe")
@@ -15,8 +16,8 @@ PROBE = os.path.join(ROOT, ".scratch", "build", "control_projection_probe.exe")
 
 def build_probe() -> None:
     subprocess.run(
-        ["zig", "build-exe",
-         os.path.join(ROOT, "src", "control_projection_probe.zig"),
+        [sys.executable, os.path.join(ROOT, "tools", "zig-entry.py"), "build-exe",
+         os.path.join(ROOT, "src", "testing", "integration", "control_projection_probe.zig"),
          "-O", "ReleaseSafe", "--stack", "536870912",
          f"-femit-bin={PROBE}"],
         check=True, cwd=ROOT)
