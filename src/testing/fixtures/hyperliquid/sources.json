@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "scope": "protocol evidence only; no credentials, private account reads or exchange actions",
+  "entries": [
+    {
+      "file": "src/testing/fixtures/hyperliquid/meta.json",
+      "url": "https://api.hyperliquid-testnet.xyz/info",
+      "request": {
+        "type": "meta"
+      },
+      "queried_at_utc": "2026-11-02T05:31:08.828659+00:00",
+      "sha256": "7427e4738f1722b6217d9ed0e11f7eac3a009aa68d2d41bd08ac6e4df6b58efd",
+      "kind": "public_read_only_response",
+      "version": "unversioned; content identified by SHA-256"
+    },
+    {
+      "file": "src/testing/fixtures/hyperliquid/spot-meta.json",
+      "url": "https://api.hyperliquid-testnet.xyz/info",
+      "request": {
+        "type": "spotMeta"
+      },
+      "queried_at_utc": "2026-11-02T05:31:09.479039+00:00",
+      "sha256": "4fdfaaf05e465a23408276aa53896697f4071314c370822144a27e71e2216b6e",
+      "kind": "public_read_only_response",
+      "version": "unversioned; content identified by SHA-256"
+    },
+    {
+      "file": "src/testing/fixtures/hyperliquid/btc-book.json",
+      "url": "https://api.hyperliquid-testnet.xyz/info",
+      "request": {
+        "type": "l2Book",
+        "coin": "BTC"
+      },
+      "queried_at_utc": "2026-11-02T05:31:09.736631+00:00",
+      "sha256": "cf7ebca2424dc756d6d98e968cc5c1660a5a3af7abbc95b48722d97c36b60b0b",
+      "kind": "public_read_only_response",
+      "version": "unversioned; content identified by SHA-256"
+    },
+    {
+      "file": "src/testing/fixtures/hyperliquid/eth-book.json",
+      "url": "https://api.hyperliquid-testnet.xyz/info",
+      "request": {
+        "type": "l2Book",
+        "coin": "ETH"
+      },
+      "queried_at_utc": "2026-11-02T05:31:10.036282+00:00",
+      "sha256": "929edd9fbe2ddd8674e0bdcdbc1d849f33906162883845dd895565bc4bc0c358",
+      "kind": "public_read_only_response",
+      "version": "unversioned; content identified by SHA-256"
+    },
+    {
+      "url": "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/websocket/subscriptions.md",
+      "request": null,
+      "queried_at_utc": "2026-11-02T05:31:15.656485+00:00",
+      "sha256": "a2d5cc74efc59d0df2e65c77a769bdc06696fd73cb9ad0e6446913e682c0e136",
+      "kind": "source_reference",
+      "version": "unversioned; content identified by SHA-256",
+      "temporary_capture": ".scratch/build/hl-ws.md"
+    },
+    {
+      "url": "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint.md",
+      "request": null,
+      "queried_at_utc": "2026-11-02T05:31:20.496847+00:00",
+      "sha256": "f4228fc7734af5dbf420e5bdf2b25c248a5b5287035ab2d8a645dc14ce64f0bd",
+      "kind": "source_reference",
+      "version": "unversioned; content identified by SHA-256",
+      "temporary_capture": ".scratch/build/hl-info.md"
+    },
+    {
+      "url": "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/perpetuals.md",
+      "request": null,
+      "queried_at_utc": "2026-11-02T05:31:25.396514+00:00",
+      "sha256": "1b9d14665c030b68d257a29f365489be3074bb3a0e57a83069966174cbe790ae",
+      "kind": "source_reference",
+      "version": "unversioned; content identified by SHA-256",
+      "temporary_capture": ".scratch/build/hl-perps.md"
+    },
+    {
+      "url": "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/spot.md",
+      "request": null,
+      "queried_at_utc": "2026-11-02T05:31:30.229017+00:00",
+      "sha256": "00dab3bd591fd7d2492c71b44beea3280643b585ec2fef61b720ea30bb763e28",
+      "kind": "source_reference",
+      "version": "unversioned; content identified by SHA-256",
+      "temporary_capture": ".scratch/build/hl-spot.md"
+    },
+    {
+      "url": "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint.md",
+      "request": null,
+      "queried_at_utc": "2026-11-02T05:31:35.230888+00:00",
+      "sha256": "87cca079cdf4bd68848995198cb1ffee57d55f576b08c341ebed27e23e7cfcd0",
+      "kind": "source_reference",
+      "version": "unversioned; content identified by SHA-256",
+      "temporary_capture": ".scratch/build/hl-exchange.md"
+    },
+    {
+      "file": "D:\\github\\nautilus_trader\\docs\\integrations\\hyperliquid.md",
+      "sha256": "106f60f010a4def19f20ddf0fcd2c0cfe53deb1db0869562f7e1a959165fc802",
+      "kind": "user_supplied_reference",
+      "version": "local working-tree bytes",
+      "queried_at_utc": "2026-11-02T05:31:35.231396+00:00"
+    },
+    {
+      "url": "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/tick-and-lot-size.md",
+      "queried_at_utc": "2026-11-02T05:35:29.438781+00:00",
+      "sha256": "1114a12bc134c7d0e004002e67a3103bb7835f13ec34329d5409c1f895830a10",
+      "kind": "source_reference",
+      "version": "unversioned; content identified by SHA-256"
+    },
+    {
+      "url": "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets.md",
+      "queried_at_utc": "2026-11-02T05:35:34.605618+00:00",
+      "sha256": "e63b1672b6d05dddc9b61e327c16e769024140e32482d5627f037c1eafe9b6c2",
+      "kind": "source_reference",
+      "version": "unversioned; content identified by SHA-256"
+    },
+    {
+      "url": "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/signing.md",
+      "queried_at_utc": "2026-11-02T05:35:39.784721+00:00",
+      "sha256": "c81b9086c339402ca552ce2ecfba62eeaccf432e58cd110947bcf8d7c4ddcbec",
+      "kind": "source_reference",
+      "version": "unversioned; content identified by SHA-256"
+    },
+    {
+      "url": "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits.md",
+      "queried_at_utc": "2026-11-02T05:35:44.755352+00:00",
+      "sha256": "14e9a98783cda1e61e9a5656871b7420b9a7f46d205a3573fb2bf6dd3e5da947",
+      "kind": "source_reference",
+      "version": "unversioned; content identified by SHA-256"
+    },
+    {
+      "file": "src/testing/fixtures/hyperliquid/private-synthetic.json",
+      "kind": "synthetic",
+      "version": 1,
+      "created_at_utc": "2026-11-02T05:35:44.755352+00:00",
+      "source": "protocol contract and official WS/info field definitions; no observed account data",
+      "sha256": "cf3bd08ba132cf0d2c85a65c172eb4bc903ee56a9919b48d4ee27e65c0a018de"
+    }
+  ]
+}

@@ -26,8 +26,9 @@
 | OKX | 私有 `orders`、`fills`、`balance_and_position`；`public/instruments?instType=SPOT` | 私有 `orders`、`fills`、`positions`、`balance_and_position`；`public/instruments?instType=SWAP` | [orders](https://www.okx.com/docs-v5/en/#web3-dex-solana-trading-websocket-private-channel-order-channel)、[account/positions](https://www.okx.com/docs-v5/en/#trading-account-rest-api-get-positions)、[instruments](https://www.okx.com/docs-v5/en/#public-data-rest-api-get-instruments) |
 | Binance | User Data Stream `executionReport`、`outboundAccountPosition`、`balanceUpdate`；`exchangeInfo`；public depth | USD-M User Data Stream `ORDER_TRADE_UPDATE`、`ACCOUNT_UPDATE`；`exchangeInfo`；public depth / mark price | [Spot user stream](https://developers.binance.com/docs/binance-spot-api-docs/user-data-stream)、[Spot exchange info](https://developers.binance.com/docs/binance-spot-api-docs/rest-api/general-endpoints#exchange-information)、[Spot depth](https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams#diff-depth-stream)、[USD-M user stream](https://developers.binance.com/docs/derivatives/usds-margined-futures/user-data-streams/Event-Order-Update)、[USD-M exchange info](https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Exchange-Information)、[USD-M market streams](https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Mark-Price-Stream) |
 | Bybit | v5 private `order`、`execution`、`wallet`；`instruments-info?category=spot`；public orderbook | v5 private `order`、`execution`、`position`、`wallet`；`instruments-info?category=linear`；public orderbook/ticker | [order](https://bybit-exchange.github.io/docs/v5/websocket/private/order)、[execution](https://bybit-exchange.github.io/docs/v5/websocket/private/execution)、[wallet](https://bybit-exchange.github.io/docs/v5/websocket/private/wallet)、[position](https://bybit-exchange.github.io/docs/v5/websocket/private/position)、[instruments](https://bybit-exchange.github.io/docs/v5/market/instrument)、[orderbook](https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook)、[ticker](https://bybit-exchange.github.io/docs/v5/websocket/public/ticker) |
+| Hyperliquid（合同候选，未实现） | `spotMeta`、`spotClearinghouseState`/`spotState`、订单/成交、公共快照/交易 | 标准逐仓 `meta`、`clearinghouseState`、订单/成交/资金费/强平、公共快照/参考价 | [01 协议依据与样本](research/2026-11-02-hyperliquid-protocol-contract.md)；本表 §3.8；不是已激活 Profile |
 
-仅限 `SPOT`、`SWAP` / USD-M、Bybit `spot` / `linear`。期权、交割合约、组合保证金和
+既有实现仅限 `SPOT`、`SWAP` / USD-M、Bybit `spot` / `linear`；Hyperliquid 候选另限标准 USDC 逐仓和现货。期权、交割合约、组合保证金和
 算法订单不在产品范围；它们出现的字段仍在本表中标明拒绝原因，不能被忽略。
 
 ### 1.2 处置和明确拒绝规则
@@ -62,7 +63,7 @@
 |---|---|---|---|---|
 | C1 | `EventEnvelope.venue` | `VenueIdentity` | 全部 Venue 事实 | 拒绝输入 `unsupported_value`。 |
 | C2 | `EventEnvelope.adapter_session` | `AdapterSessionIdentity` | 全部私有事实 | 关闭该账户输入并重建 session。 |
-| C3 | `EventEnvelope.source` / `source_sequence` | stream identity + `u64` | 每个 REST/WS 来源 | 生成 Adapter local sequence；断档使投影无效。 |
+| C3 | `EventEnvelope.source_stream` / `source_sequence` | stream identity + `u64` | 每个 REST/WS 来源 | 无 Venue 序号时只生成 capture sequence，不证明交易所连续性；无法表示的证据先补共享合同，不能填造 previous sequence。 |
 | C4 | `EventEnvelope.times` | source/receive/monotonic/audit UTC ns | receive/monotonic/audit 必填；source 条件 | 保留 source 缺失位，禁止以 wall time 伪造 source time。 |
 | C5 | `EventEnvelope.raw_evidence` | `RawEvidenceRef` | 全部外部输入 | RawIngress 不可写即失败关闭。 |
 | C6 | `InstrumentDefinitionObserved`：产品、base/quote/settle Asset、线性合约、状态 | identities + enums | 产品资料响应 | 未注册或非目标产品用 `U:product`。 |
@@ -166,11 +167,75 @@
 | public ticker 其它字段 | `lastPrice`, `bid1Price`, `ask1Price`, `openInterest`, `volume24h`, `deliveryTime`, pre-listing / futures 字段 | `RE:market-detail`；`U:product`（非目标产品） | 不用展示值替代 L2、mark、index 或 funding 事实。 |
 | subscribe acknowledgement / reconnect | `success`, `op`, `req_id`, `retCode`, `retMsg` 与新的订阅边界 | `AI:session/C5` 与 `MarketDataHealthChanged.awaiting_snapshot` | control frame 先写 RawIngress；新订阅前不得用旧 delta 恢复健康。 |
 
+### 3.8 Hyperliquid：首期协议合同
+
+范围、单位、身份、消息入口、样本来源及必须补查项统一见
+[协议合同](research/2026-11-02-hyperliquid-protocol-contract.md)，签名/分页细节见
+[固定 SDK 与历史依据](research/2026-11-02-hyperliquid-signing-history.md)。
+以下是 **02–06 的目标映射**，不是当前 decoder 已接受字段的声明。
+表中逗号分隔字段逐个适用处置；括号内对象只是容器，下面列全所用成员。
+没有值、null、未知 enum 均不自动变成零/false/USDC。所有输入保留 C5 原文；
+新增未知字段留 RE，改变经济/风险语义则停用该范围并对账。
+
+| 目标消息 | 字段 | 处置 | 单位、身份与缺失处理 |
+|---|---|---|---|
+| REST/WS 请求/包络 | `type`, `method`, `subscription`, `channel`, `data`, `user`, `coin`, `dex`, `id` | AI:route/session；C1/C2；C6（coin 解析） | 显式固定 Venue/环境/资金账户；dex 只接受标准空 dex；私有 user 不回退到 agent；容器类型与关联不符拒绝 |
+| WS 订阅 | `nSigFigs`, `mantissa`, `isSnapshot` | AI:subscription/coverage | 首期 l2Book 不请求聚合精度；isSnapshot 不等于全历史覆盖；缺标记不可声称 bootstrap 完成 |
+| REST 请求范围 | `startTime`, `endTime`, `aggregateByTime`, `oid`, `tokenId` | AI:query/identity | inclusive ms 窗口；成交不聚合；保留每页边界与截断证据；oid 可为原 oid/CLOID |
+| REST response/WS 控制 | `status`, `response.type`, `response.data.statuses`, `error` | AI:protocol；C14（transport 结果另生成） | 先逐项验证响应关联；错误不冒充空事实；开始写入后缺响应=Unknown |
+| `meta` | `universe`, `marginTables`, `collateralToken` | AI:container；C6/C7/C12（成员） | 完整 metadata scope，collateralToken 必须解析实际 Asset |
+| `meta.universe[]` | `name`, `szDecimals`, `maxLeverage`, `marginTableId`, `onlyIsolated`, `marginMode`, `isDelisted` | C6/C7（name/szDecimals/isDelisted）；C12/C13（margin 字段） | name+下标绑定产品；数量十进制位；maxLeverage 是上限非实际杠杆；缺账户模式不推定逐仓 |
+| `meta.marginTables[]` | `[id, table]`, `table.description`, `table.marginTiers`, `marginTiers[].lowerBound`, `marginTiers[].maxLeverage` | AI:rule-join（id）；RE:rule-label（description）；C12（tiers） | lowerBound 为结算名义金额；档位/规则需完整且版本化；不拿最大杠杆推断完整维持保证金规则 |
+| `spotMeta` | `tokens`, `universe` | AI:container | 完整产品/资产范围；未知 token 不自动注册成 BTC/ETH |
+| `spotMeta.tokens[]` | `name`, `index`, `tokenId`, `szDecimals`, `weiDecimals`, `isCanonical`, `evmContract`, `fullName`, `deployerLabel`, `deployerTradingFeeShare` | C6/C7（name/index/tokenId/szDecimals）；RE:asset-evidence（其余） | weiDecimals 不自动激活账本单位；显示/部署者字段不证明经济等价；deployer share 不是另加实际 Fill 费用 |
+| `tokens[].evmContract` | `address`, `evm_extra_wei_decimals` | RE:asset-evidence | 地址/链证据，不按符号归并；null 不填造桥接身份 |
+| `spotMeta.universe[]` | `name`, `tokens[]`, `index`, `isCanonical` | C6/C7（name/tokens/index）；RE:asset-evidence（isCanonical） | tokens 按 base/quote 顺序，action asset=10000+pair index；不等于 token index |
+| `tokenDetails` | `name`, `maxSupply`, `totalSupply`, `circulatingSupply`, `szDecimals`, `weiDecimals`, `midPx`, `markPx`, `prevDayPx`, `genesis`, `deployer`, `deployGas`, `deployTime`, `seededUsdc`, `nonCirculatingUserBalances`, `futureEmissions`, `fullName`, `evmContract`, `deployerTradingFeeShare` | RE:asset-due-diligence | 只作资产核查，不递归解码 genesis/分配为权威事实；请求 tokenId 外绑；不能据供应/显示价格授予规则或包装资产资格 |
+| `tokenDetails` nested | `genesis.userBalances[][address,amount]`, `genesis.existingTokenBalances[]`, `nonCirculatingUserBalances[][address,amount]` | RE:asset-due-diligence | 全部只留证据，不形成账户快照；existingTokenBalances 内部结构未用于本期能力，后续消费前补合同 |
+| `l2Book` REST/WS | `coin`, `time`, `levels`, `levels[][i].px`, `levels[][i].sz`, `levels[][i].n` | C6/C4/C5；C: L2BookSnapshot（px/sz）；RE:order-count（n） | ms、quote/base、base；买/卖双数组；最多每侧8档及截断；无源序号，只替换覆盖范围；坏/空边不能补造 BBO |
+| `trades` / `recentTrades` | `coin`, `side`, `px`, `sz`, `hash`, `time`, `tid`, `users[]` | C: MarketTrade（coin/side/px/sz/time/tid）；RE:trade-evidence（hash/users） | B=buy/A=sell；键(time,coin,tid)，非账户 Fill；未知方向拒绝，users 不作策略归属 |
+| `activeAssetCtx` | `coin`, `ctx`, `ctx.markPx`, `ctx.oraclePx`, `ctx.funding`, `ctx.openInterest`, `ctx.dayNtlVlm`, `ctx.prevDayPx`, `ctx.midPx`, `ctx.premium`, `ctx.impactPxs`, `ctx.dayBaseVlm` | C: ReferencePrice（markPx/oraclePx）；C: FundingRatePublished 候选（funding）；RE:market-detail（其余） | mark/index 分离；funding 不是资金流水；缺费率时间/不能精确 ppm 表示则 pending，不填0；mid 不作 mark/index 回退 |
+| `fundingHistory` | `coin`, `fundingRate`, `premium`, `time` | C: FundingRatePublished（coin/fundingRate/time）；RE:market-detail（premium） | 费率为比例，不是百分数或付款；time ms；精度不足交02 |
+| 下单 action | `type`, `orders`, `grouping`, `builder` | AI:codec（type/orders）；U:attached-algo（非na grouping）；U:builder（builder） | 首期不含 builder 或归因审批；只接受 grouping=na，不复制参考项目默认 |
+| `orders[]` | `a`, `b`, `p`, `s`, `r`, `t`, `c`, `t.limit.tif` | AI:transport/C8 | asset index、isBuy bool、精确价格/数量文本、reduceOnly bool、CLOID；tif仅Gtc/Ioc/Alo；r仅支持永续；trigger/其它TIF拒绝 |
+| 撤单 action | `type`, `cancels`, `cancels[].a`, `cancels[].o`, `cancels[].asset`, `cancels[].cloid` | AI:transport/C8 | cancel 用a/o；cancelByCloid 用asset/cloid；固定账户及原订单身份；未知结果不换号重发 |
+| 签名包络 | `nonce`, `vaultAddress`, `expiresAfter`, `signature.r`, `signature.s`, `signature.v` | AI:signing（不入 RawIngress/fixture 的签名材料）；U:product（vault） | nonce/expiry ms、u64；固定 SDK 序列化；主账户 vaultAddress=null；子账户显式绑定另验；真实私钥/签名不落盘 |
+| action statuses[] | `resting.oid`, `resting.cloid`, `filled.oid`, `filled.cloid`, `filled.totalSz`, `filled.avgPx`, `error`, `success`（撤单字符串） | C8/AI:response | filled aggregate 只证明报告量/均价，不能代替 C9；逐项 error 不改为全批拒绝；success 撤单仍核对迟到成交 |
+| `orderStatus` | `status`, `order.order`, `order.status`, `order.statusTimestamp` | AI:lookup（外status）；C8/C4（内订单） | status=unknownOid 保持 unresolved；已知内status白名单见签名/历史依据，未知停止映射 |
+| `orderUpdates` / `historicalOrders` / `openOrders` / `frontendOpenOrders` 的 order | `coin`, `side`, `limitPx`, `sz`, `oid`, `timestamp`, `origSz`, `cloid`, `status`, `statusTimestamp`, `orderType`, `reduceOnly`, `isPositionTpsl`, `isTrigger`, `triggerCondition`, `triggerPx`, `tif`, `children` | C8/C4（普通订单及时间）；U:attached-algo（trigger/positionTpsl/children）；RE:order-detail（非触发条件文本） | origSz/剩余sz可精确相减才形成报告累计；openOrders简化行缺origSz时只作存在证据；缺cloid需已持久oid绑定；不猜订单类型 |
+| `userFills` / `userFillsByTime` / `userEvents.fills[]` | `coin`, `px`, `sz`, `side`, `time`, `startPosition`, `dir`, `closedPnl`, `hash`, `oid`, `crossed`, `fee`, `tid`, `feeToken`, `builderFee`, `cloid`, `twapId` | C9/C4（交易/费用/身份/时间）；RE:fill-evidence（startPosition/hash/builderFee）；AI:order-binding（cloid）；U:order-kind（twapId非null）；C: forced 候选（dir） | 同账户产品下(time,tid,oid)复合身份；fee负数返佣；crossed为taker；builderFee已含fee；未知feeToken拒绝，不从累计量/余额差造Fill |
+| fill `liquidation` | `method`, `markPx`, `liquidatedUser` | C: VenueForcedExecution 候选（完整执行时）；RE:liquidation-evidence | method market/backstop；不据backstop独自断定ADL；markPx不是实际成交价；归属/金额不足保持break |
+| `userEvents.liquidation` | `lid`, `liquidator`, `liquidated_user`, `liquidated_ntl_pos`, `liquidated_account_value` | RE:liquidation-evidence；AI:reconciliation | 账户级摘要不构造订单/Fill；nt l/account value为金额而非成交数量；启动配置/经济核对 |
+| `userEvents.nonUserCancel[]` | `coin`, `oid` | AI:reconciliation；C8候选 | 仅触发原身份查询，不臆造终态累计成交量 |
+| `userFundings` / `userFills` / `userNonFundingLedgerUpdates` | `isSnapshot`, `user`, `fundings`, `fills`, `nonFundingLedgerUpdates` | AI:scope/bootstrap（包络）；成员独立映射 | 初始集不是无界历史；缺user或账户不符拒绝；空集不能证明旧Unknown不存在 |
+| `userFunding` / `userEvents.funding` / `fundings[]` | `time`, `hash`, `delta.type`, `delta.coin`, `delta.usdc`, `delta.szi`, `delta.fundingRate`, `delta.nSamples`；WS直接`coin`, `usdc`, `szi`, `fundingRate` | C: FundingSettlement（coin/usdc/time及可证明身份）；RE:funding-evidence（hash/szi/rate/nSamples）；AI:kind（type） | USDC有符号金额；复合时间/品种/账户身份及修订待06核实；不能把hash硬截断为venue_bill_id或按rate推造款项 |
+| `userNonFundingLedgerUpdates` 行 | `time`, `hash`, `delta.type`, `delta` | C4；RE:ledger-evidence；AI:reconciliation | 未实现transfer/deposit/withdraw等delta逐项经济映射前保持Unsupported/安全锁存；未知variant不静默忽略、不把它当Fill |
+| ledger `deposit` / `withdraw` | `usdc`；withdraw 的 `nonce`, `fee` | RE:ledger-evidence；AI:reconciliation | USDC金额及费用/动作关联；当前不开放资金动作，但实际外部变化必须核对 |
+| ledger `internalTransfer` / `subAccountTransfer` | `usdc`, `user`, `destination`；internal 的 `fee` | RE:ledger-evidence；AI:reconciliation | 资金地址和金额，不推断 VirtualPortfolio 所有权 |
+| ledger `liquidation` | `accountValue`, `leverageType`, `liquidatedPositions`, `liquidatedPositions[].coin`, `liquidatedPositions[].szi` | RE:liquidation-evidence；AI:reconciliation | isolated accountValue是逐仓范围；无成交价/费用不生成ForcedExecution；Cross模式撤资格 |
+| ledger `vaultCreate` / `vaultDeposit` / `vaultDistribution` | `vault`, `usdc` | RE:ledger-evidence；U:product | 非支持资金范围；保留证据并锁存 |
+| ledger `vaultWithdraw` | `vault`, `user`, `requestedUsd`, `commission`, `closingCost`, `basis`, `netWithdrawnUsd` | RE:ledger-evidence；U:product | 不自动入本期经济账；不能忽略账户实际变化 |
+| ledger `vaultLeaderCommission` | `user`, `usdc` | RE:ledger-evidence；U:product | 同上 |
+| ledger `spotTransfer` | `token`, `amount`, `usdcValue`, `user`, `destination`, `fee` | RE:ledger-evidence；AI:reconciliation | token金额与USD估值分离，外部动作需核对；不创造Fill |
+| ledger `accountClassTransfer` / `spotGenesis` / `rewardsClaim` | accountClass 的 `usdc`, `toPerp`；spotGenesis 的 `token`, `amount`；rewardsClaim 的 `amount` | RE:ledger-evidence；AI:reconciliation | 不以账户类间转移代替策略资金划拨；缺真实Asset/身份保持缺口 |
+| `clearinghouseState` REST/WS | `user`, `dex`, `clearinghouseState`, `assetPositions`, `marginSummary`, `crossMarginSummary`, `crossMaintenanceMarginUsed`, `withdrawable`, `time` | C4/C10/C11/C12（有scope成员）；AI:container（user/dex/wrapper）；U:margin-mode（实际cross） | REST顶层和WS包络分别拆解；withdrawable不等于spot可用余额；缺真实逐仓范围不伪装完整快照 |
+| margin summary | `accountValue`, `totalNtlPos`, `totalRawUsd`, `totalMarginUsed` | C12候选；RE:account-summary | USDC金额但有账户汇总scope；不据差额推导单portfolio/单逐仓可用资金 |
+| `assetPositions[]` | `type`, `position`, `position.coin`, `position.szi`, `position.entryPx`, `position.positionValue`, `position.unrealizedPnl`, `position.returnOnEquity`, `position.liquidationPx`, `position.marginUsed`, `position.maxLeverage`, `position.cumFunding.allTime`, `position.cumFunding.sinceOpen`, `position.cumFunding.sinceChange` | C11/C12（coin/szi/entryPx/unrealizedPnl/liquidationPx/marginUsed）；C13（type）；RE:position-detail（其余） | szi有符号base数量；entry/liquidation null=未知；cumFunding累计非独立资金流水，不重复入账；type只接受oneWay |
+| position/activeAssetData `leverage` | `type`, `value`, `rawUsd` | C13（type/value）；C12候选（rawUsd） | type=isolated才符合首期；rawUsd原scope保留，缺失不能补0；value倍数不是风险模型 |
+| `activeAssetData` | `user`, `coin`, `maxTradeSzs[]`, `availableToTrade[]`, `markPx` | AI:scope；RE:account-capacity；C:ReferencePrice候选（REST markPx） | Venue方向性容量观察，不替代本地风控/真实资产余额；上列leverage单独映射；markPx缺失不回退 |
+| `spotClearinghouseState` / `spotState` | `user`, `spotState`, `balances`, `balances[].coin`, `balances[].token`, `balances[].hold`, `balances[].total`, `balances[].entryNtl` | AI:scope/container；C10（coin/token/hold/total）；RE:cost-display（entryNtl） | 实际token Asset金额，total-hold仅在完整普通spot scope中计算available；不与perp USDC汇总/回退，不重建虚假现货仓位 |
+| `userAbstraction` / `userRole` | 模式字符串；`role`, `data.user`, `data.master` | C13候选；AI:authority-evidence | 仅default/disabled候选且仍须实际逐仓核对；unifiedAccount/portfolioMargin/dexAbstraction及未知模式拒绝；role区分user/agent/subAccount，不等于权限证明；can_withdraw=false不能凭默认bool伪造 |
+| `userRateLimit` | `cumVlm`, `nRequestsUsed`, `nRequestsCap`, `nRequestsSurplus` | AI:limit | Venue账户额度观察，不覆盖同IP聚合/其它进程；缺失不设置无限额度 |
+| 非首期请求/字段 | `modify`, `batchModify`, `trigger`, `twapOrder`, `scheduleCancel`, HIP-3/HIP-4、vault、bridge/transfer/withdraw 签名动作、builder审批 | U:order-kind/product/authority | 不编码、不发送；意外观察真实外部资金/模式变化时保留RawEvidence并锁存安全问题，不能因为不支持而丢掉变化 |
+
 ## 4. CapabilityProfile 证据登记
 
 Profile 是一项不可变配置事实，键为
 `Venue + Environment + ExchangeAccount + ProductScope + CapabilityVersion + RulesVersion + ConfigVersion`。
 同一个 Venue 的现货、线性、Demo/Testnet 和生产账户不能互相继承资格。
+
+Hyperliquid 当前只有本节前的协议合同及样本，没有运行时 Profile、签名/发送实现或 Testnet
+资格；02–08 的实现与验收完成前不加入已实现能力表。
 
 | Profile candidate | 精确范围 | 文档证据 | 实现/资格证据 | 允许状态 |
 |---|---|---|---|---|

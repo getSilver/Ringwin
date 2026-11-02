@@ -15,7 +15,7 @@ Status: open
 
 ## Rules
 
-- 2026-11-02 用户确认整体设计与八个切片，授权发布本地实施票；本次只发布计划，未开始实现或授权在线写入。
+- 2026-11-02 用户确认整体设计与八个切片，授权发布本地实施票；当次仅发布计划。随后用户明确要求新建 Adapter 分支完成 01，已授权该票离线实施；未授权在线写入。
 - 参考用户提供的 Nautilus Hyperliquid 文档；其实现选择与验收结果不作为 Ringwin 合同或资格。
 - 遵循根级 GLOSSARY、ADR 0001/0012/0017 和 docs/adapter-onboarding.md。
 - 复用现有跨所策略与核心合同；真实共享缺口单列前置任务。
@@ -23,7 +23,7 @@ Status: open
 
 ## Route
 
-以下八张实施票已按用户确认发布，均为 open、未认领；按依赖逐票推进。
+以下八张实施票已按用户确认发布；01 已在 `feat/hyperliquid-adapter` 完成协议合同与样本并 resolved，其余 open、未认领，按依赖逐票推进。
 
 | 切片 | 交付与验收 | 前置 |
 |---|---|---|
@@ -42,10 +42,12 @@ Status: open
 
 ## Frontier
 
-- [01 协议与字段合同](issues/01-protocol-field-contract.md)：open，无前置阻塞，尚未认领。
+- [02 USDC 逐仓与必要共享合同](issues/02-shared-domain-contracts.md)：open，01 已完成，无未完成前置，尚未认领。
+- [03 API 钱包凭证与签名](issues/03-api-wallet-signing.md)：open，01 已完成，无未完成前置，尚未认领。
 
 ## Decisions so far
 
+- 2026-11-02：用户要求新建分支完成 01；`feat/hyperliquid-adapter` 已交付[协议合同](../../docs/research/2026-11-02-hyperliquid-protocol-contract.md)、字段矩阵、固定 SDK/公开 hash 向量及有来源身份的公开/合成样本。样本哈希/链接检查与 Standards/Spec 双轴审查通过，01 resolved；`zig build test` 运行一次但在 30 分钟预算内未完成并主动停止，未取得全套回归通过结论。无运行时代码或持久格式变更，未取得签名、Adapter、Testnet 交易或生产资格；02/03 仍 open，未自动开始。
 - 2026-11-02：用户最终确认整体理解与八个切片，已发布 01–08 本地实施票并保持既定依赖；发布不表示实现完成、在线授权或资格通过。
 - 2026-11-02：用户确定首期覆盖永续、现货，BTC、ETH 为验收目标。
 - 2026-11-02：用户接受 Testnet 完整闭环作为第一阶段完成目标。
@@ -75,8 +77,8 @@ Status: open
 
 - BTC/ETH 现货对应的实际 token、包装/桥接资产及 Testnet 可用性。
 - 现有跨所策略规格限定 USDT，需扩展到同结算资产的 USDC—USDC 组合；不引入跨币种组合。
-- agent signer 的凭证、nonce 及主备生命周期合同。
-- 订单、行情、签名、nonce、限流、Unknown 与补回合同。
+- 01 已固定上游签名/nonce 协议；agent signer 的凭证、nonce 持久生命周期及主备 fencing 仍由 03 实现验证。
+- 01 已交付订单、行情、限流、Unknown 与补回的[协议合同](../../docs/research/2026-11-02-hyperliquid-protocol-contract.md)；02–06 仍须完成共享表达、Adapter 和完整性证据，资金费/ADL 身份等未证明项保持 pending。
 - 跨所验收对手 Venue、产品组合与资金配置。
 
 ## Testnet 只读元数据核查

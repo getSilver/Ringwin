@@ -1,0 +1,400 @@
+{
+  "schema_version": 1,
+  "kind": "synthetic",
+  "environment": "offline",
+  "source": "manually constructed from referenced field tables; not observed private traffic",
+  "cases": [
+    {
+      "id": "partial_order",
+      "route": "orderUpdates",
+      "payload": {
+        "channel": "orderUpdates",
+        "data": [
+          {
+            "order": {
+              "coin": "BTC",
+              "side": "B",
+              "limitPx": "70000",
+              "sz": "0.001",
+              "oid": 123,
+              "timestamp": 1700000000000,
+              "origSz": "0.002",
+              "cloid": "0x22222222222222222222222222222222"
+            },
+            "status": "open",
+            "statusTimestamp": 1700000000001
+          }
+        ]
+      },
+      "expected": "report cumulative=0.001, remaining=0.001; no economic Fill"
+    },
+    {
+      "id": "unique_fill",
+      "route": "userFills",
+      "payload": {
+        "channel": "userFills",
+        "data": {
+          "isSnapshot": false,
+          "user": "0x1111111111111111111111111111111111111111",
+          "fills": [
+            {
+              "coin": "BTC",
+              "px": "70000",
+              "sz": "0.001",
+              "side": "B",
+              "time": 1700000000001,
+              "startPosition": "0",
+              "dir": "Open Long",
+              "closedPnl": "0",
+              "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+              "oid": 123,
+              "crossed": true,
+              "fee": "0.035",
+              "tid": 456,
+              "feeToken": "USDC",
+              "builderFee": "0"
+            }
+          ]
+        }
+      },
+      "expected": "one economic Fill with USDC fee; report/fill arrival order independent"
+    },
+    {
+      "id": "duplicate_fill",
+      "route": "userFillsByTime",
+      "payload": [
+        {
+          "coin": "BTC",
+          "px": "70000",
+          "sz": "0.001",
+          "side": "B",
+          "time": 1700000000001,
+          "startPosition": "0",
+          "dir": "Open Long",
+          "closedPnl": "0",
+          "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+          "oid": 123,
+          "crossed": true,
+          "fee": "0.035",
+          "tid": 456,
+          "feeToken": "USDC",
+          "builderFee": "0"
+        }
+      ],
+      "expected": "same composite identity as unique_fill; no second application"
+    },
+    {
+      "id": "conflicting_fill",
+      "route": "userFillsByTime",
+      "payload": [
+        {
+          "coin": "BTC",
+          "px": "70000",
+          "sz": "0.001",
+          "side": "B",
+          "time": 1700000000001,
+          "startPosition": "0",
+          "dir": "Open Long",
+          "closedPnl": "0",
+          "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+          "oid": 123,
+          "crossed": true,
+          "fee": "0.036",
+          "tid": 456,
+          "feeToken": "USDC",
+          "builderFee": "0"
+        }
+      ],
+      "expected": "same identity with conflicting fee; fail closed"
+    },
+    {
+      "id": "rebate",
+      "route": "userFills",
+      "payload": {
+        "channel": "userFills",
+        "data": {
+          "user": "0x1111111111111111111111111111111111111111",
+          "fills": [
+            {
+              "coin": "BTC",
+              "px": "70000",
+              "sz": "0.001",
+              "side": "B",
+              "time": 1700000000001,
+              "startPosition": "0",
+              "dir": "Open Long",
+              "closedPnl": "0",
+              "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+              "oid": 124,
+              "crossed": false,
+              "fee": "-0.001",
+              "tid": 457,
+              "feeToken": "USDC",
+              "builderFee": "0"
+            }
+          ]
+        }
+      },
+      "expected": "maker rebate=0.001 USDC; no quote-asset fallback"
+    },
+    {
+      "id": "unknown_fee_asset",
+      "route": "userFillsByTime",
+      "payload": [
+        {
+          "coin": "BTC",
+          "px": "70000",
+          "sz": "0.001",
+          "side": "B",
+          "time": 1700000000001,
+          "startPosition": "0",
+          "dir": "Open Long",
+          "closedPnl": "0",
+          "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+          "oid": 123,
+          "crossed": true,
+          "fee": "0",
+          "tid": 456,
+          "feeToken": "UNREGISTERED",
+          "builderFee": "0"
+        }
+      ],
+      "expected": "reject economic mapping despite zero amount"
+    },
+    {
+      "id": "unknown_oid",
+      "route": "orderStatus",
+      "payload": {
+        "status": "unknownOid"
+      },
+      "expected": "unresolved; no ConfirmedAbsent or resubmission"
+    },
+    {
+      "id": "ioc_zero",
+      "route": "exchange_response",
+      "payload": {
+        "status": "ok",
+        "response": {
+          "type": "order",
+          "data": {
+            "statuses": [
+              {
+                "error": "Order could not immediately match against any resting orders."
+              }
+            ]
+          }
+        }
+      },
+      "expected": "explicit zero-fill rejection; no synthetic Fill"
+    },
+    {
+      "id": "ioc_partial",
+      "route": "exchange_response",
+      "payload": {
+        "status": "ok",
+        "response": {
+          "type": "order",
+          "data": {
+            "statuses": [
+              {
+                "filled": {
+                  "totalSz": "0.001",
+                  "avgPx": "70000",
+                  "oid": 123
+                }
+              }
+            ]
+          }
+        }
+      },
+      "expected": "aggregate report only; remaining cancellation needs protocol/status evidence"
+    },
+    {
+      "id": "funding",
+      "route": "userFundings",
+      "payload": {
+        "channel": "userFundings",
+        "data": {
+          "isSnapshot": true,
+          "user": "0x1111111111111111111111111111111111111111",
+          "fundings": [
+            {
+              "time": 1700000000000,
+              "coin": "BTC",
+              "usdc": "-0.01",
+              "szi": "0.001",
+              "fundingRate": "0.0000125"
+            }
+          ]
+        }
+      },
+      "expected": "payment -0.01 USDC; subscription snapshot is not unbounded history; fractional ppm gap"
+    },
+    {
+      "id": "liquidation_summary",
+      "route": "userEvents",
+      "payload": {
+        "channel": "user",
+        "data": {
+          "liquidation": {
+            "lid": 7,
+            "liquidator": "0x4444444444444444444444444444444444444444",
+            "liquidated_user": "0x1111111111111111111111111111111111111111",
+            "liquidated_ntl_pos": "70",
+            "liquidated_account_value": "2"
+          }
+        }
+      },
+      "expected": "reconciliation evidence; insufficient to manufacture forced execution quantity/fee"
+    },
+    {
+      "id": "adl_candidate",
+      "route": "userFillsByTime",
+      "payload": [
+        {
+          "coin": "BTC",
+          "px": "70000",
+          "sz": "0.001",
+          "side": "B",
+          "time": 1700000000001,
+          "startPosition": "0",
+          "dir": "Auto-Deleveraging",
+          "closedPnl": "0",
+          "hash": "0x3333333333333333333333333333333333333333333333333333333333333333",
+          "oid": 123,
+          "crossed": true,
+          "fee": "0.035",
+          "tid": 456,
+          "feeToken": "USDC",
+          "builderFee": "0",
+          "liquidation": {
+            "method": "backstop",
+            "markPx": 70000,
+            "liquidatedUser": "0x1111111111111111111111111111111111111111"
+          }
+        }
+      ],
+      "expected": "ADL classification pending official discriminator evidence; do not silently treat as ordinary owned Fill"
+    },
+    {
+      "id": "spot_balance",
+      "route": "spotClearinghouseState",
+      "payload": {
+        "balances": [
+          {
+            "coin": "USDC",
+            "token": 0,
+            "hold": "1",
+            "total": "10",
+            "entryNtl": "0"
+          }
+        ]
+      },
+      "expected": "spot total=10, held=1, available=9 USDC in verified ordinary spot mode; no perp fallback"
+    },
+    {
+      "id": "isolated_position",
+      "route": "clearinghouseState",
+      "payload": {
+        "assetPositions": [
+          {
+            "type": "oneWay",
+            "position": {
+              "coin": "BTC",
+              "szi": "0.001",
+              "entryPx": "70000",
+              "positionValue": "70",
+              "unrealizedPnl": "0",
+              "returnOnEquity": "0",
+              "liquidationPx": null,
+              "marginUsed": "7",
+              "maxLeverage": 40,
+              "leverage": {
+                "type": "isolated",
+                "value": 10,
+                "rawUsd": "7"
+              },
+              "cumFunding": {
+                "allTime": "0",
+                "sinceOpen": "0",
+                "sinceChange": "0"
+              }
+            }
+          }
+        ],
+        "marginSummary": {
+          "accountValue": "10",
+          "totalNtlPos": "70",
+          "totalRawUsd": "10",
+          "totalMarginUsed": "7"
+        },
+        "crossMarginSummary": {
+          "accountValue": "0",
+          "totalNtlPos": "0",
+          "totalRawUsd": "0",
+          "totalMarginUsed": "0"
+        },
+        "crossMaintenanceMarginUsed": "0",
+        "withdrawable": "3",
+        "time": 1700000000000
+      },
+      "expected": "scoped real-account observations; null liquidation price stays unknown; account summary not isolated free balance"
+    },
+    {
+      "id": "unknown_order_status",
+      "route": "orderUpdates",
+      "payload": {
+        "channel": "orderUpdates",
+        "data": [
+          {
+            "order": {
+              "coin": "BTC",
+              "side": "B",
+              "limitPx": "70000",
+              "sz": "0.001",
+              "oid": 123,
+              "timestamp": 1700000000000,
+              "origSz": "0.002",
+              "cloid": "0x22222222222222222222222222222222"
+            },
+            "status": "futureStatus",
+            "statusTimestamp": 1700000000001
+          }
+        ]
+      },
+      "expected": "stop mapping and reconcile; no default success"
+    }
+  ],
+  "numeric_vectors": [
+    {
+      "product": "perp",
+      "szDecimals": 1,
+      "price": "123456",
+      "valid": true
+    },
+    {
+      "product": "perp",
+      "szDecimals": 1,
+      "price": "12345.6",
+      "valid": false
+    },
+    {
+      "product": "perp",
+      "szDecimals": 1,
+      "price": "0.01234",
+      "valid": true
+    },
+    {
+      "product": "perp",
+      "szDecimals": 1,
+      "price": "0.012345",
+      "valid": false
+    },
+    {
+      "product": "spot",
+      "szDecimals": 2,
+      "price": "0.0001234",
+      "valid": false
+    }
+  ]
+}
