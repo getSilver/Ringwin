@@ -1,6 +1,6 @@
 # Quantitative Trading
 
-面向中心化加密交易所现货与永续合约的多策略交易领域。本文只定义系统中的规范领域语言及其不变量。
+面向加密交易场所现货与永续合约的多策略交易领域。本文只定义系统中的规范领域语言及其不变量。
 
 ## Strategy Ownership
 
@@ -128,7 +128,7 @@ _Avoid_: PortfolioMarginReservation, strategy collateral
 _Avoid_: StrategyLimit, leverage setting
 
 **MarginModel**:
-保证金计算与抵押品边界的版本化模型身份；首版唯一支持 IsolatedLinearUsdtV1，其他模型不得用兼容字段静默混入。
+保证金计算与抵押品边界的版本化模型身份；模型类型与结算 Asset 分别确定。使用相同模型不表示不同结算资产可互换、合并余额或交叉抵押；逐仓、全仓与组合保证金不得静默混用。
 _Avoid_: Account mode string, MarginRules version
 
 **VenueInitialMargin**:
@@ -642,7 +642,7 @@ _Avoid_: Not Found response, missing open order, retry permission without eviden
 ## Markets
 
 **Venue**:
-提供交易、账户及市场事实的中心化交易所。
+提供交易、账户及市场事实的交易场所，可以采用中心化或去中心化的运营与结算机制。
 _Avoid_: Exchange name, market
 
 **VenueAdapter**:
