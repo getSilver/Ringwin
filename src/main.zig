@@ -248,6 +248,7 @@ test {
     _ = durable_store;
     _ = demo_authority;
     _ = credential_store;
+    _ = @import("adapters/hyperliquid/hyperliquid_signer.zig");
     _ = windows_verification_runtime;
     _ = @import("testing/audit/historical_fee_audit.zig");
     _ = venue_fill_recovery_acceptance;

@@ -1,5 +1,6 @@
 //! Manually unlocked, file-backed credentials for the Linux production seam.
-//! The module deliberately exposes only a read-only admission in this ticket.
+//! Observation admission never grants execution. Wallet signing is a separate
+//! short-lived GatewayLease operation and does not grant trading authority.
 //! Plain secret bytes never appear in metadata, evidence, logs, or argv/env APIs.
 
 const builtin = @import("builtin");
@@ -77,7 +78,7 @@ pub const Metadata = struct {
     }
 };
 
-pub const SecretMaterial = struct {
+pub const ApiCredentials = struct {
     api_key: [max_secret]u8 = @splat(0),
     api_key_len: u8 = 0,
     secret_key: [max_secret]u8 = @splat(0),
@@ -85,8 +86,8 @@ pub const SecretMaterial = struct {
     passphrase: [max_secret]u8 = @splat(0),
     passphrase_len: u8 = 0,
 
-    pub fn init(api_key: []const u8, secret_key: []const u8, passphrase: []const u8) !SecretMaterial {
-        var result = SecretMaterial{};
+    pub fn init(api_key: []const u8, secret_key: []const u8, passphrase: []const u8) !ApiCredentials {
+        var result = ApiCredentials{};
         errdefer result.clear();
         result.api_key_len = try copyText(&result.api_key, api_key);
         result.secret_key_len = try copyText(&result.secret_key, secret_key);
@@ -94,13 +95,40 @@ pub const SecretMaterial = struct {
         return result;
     }
 
-    pub fn clear(self: *SecretMaterial) void {
+    pub fn clear(self: *ApiCredentials) void {
         std.crypto.secureZero(u8, self.api_key[0..]);
         std.crypto.secureZero(u8, self.secret_key[0..]);
         std.crypto.secureZero(u8, self.passphrase[0..]);
         self.api_key_len = 0;
         self.secret_key_len = 0;
         self.passphrase_len = 0;
+    }
+};
+
+pub const ApiWallet = struct {
+    private_key: [32]u8,
+    signer: [20]u8,
+    funding_account: [20]u8,
+};
+
+pub const SecretMaterial = union(enum) {
+    api_credentials: ApiCredentials,
+    api_wallet: ApiWallet,
+
+    pub fn init(api_key: []const u8, secret_key: []const u8, passphrase: []const u8) !SecretMaterial {
+        return .{ .api_credentials = try ApiCredentials.init(api_key, secret_key, passphrase) };
+    }
+
+    pub fn initWallet(key: *const [32]u8, signer: [20]u8, funding: [20]u8) !SecretMaterial {
+        const derived = try @import("wallet_crypto.zig").address(key);
+        if (!std.mem.eql(u8, &derived, &signer)) return error.SignerAddressMismatch;
+        if (std.mem.allEqual(u8, &funding, 0)) return error.InvalidFundingAccount;
+        return .{ .api_wallet = .{ .private_key = key.*, .signer = signer, .funding_account = funding } };
+    }
+
+    pub fn clear(self: *SecretMaterial) void {
+        std.crypto.secureZero(u8, std.mem.asBytes(self));
+        self.* = .{ .api_credentials = .{} };
     }
 };
 
@@ -217,7 +245,21 @@ pub const GatewayLease = struct {
     }
 
     pub fn withReadOnlyMaterial(self: *GatewayLease, comptime callback: fn (*const SecretMaterial) void) void {
+        if (self.secret.material().* == .api_wallet) return;
         self.secret.expose(callback);
+    }
+
+    pub fn signWalletDigest(self: *GatewayLease, digest: [32]u8, signer: [20]u8, funding: [20]u8) !@import("wallet_crypto.zig").Signature {
+        try self.checkWalletBinding(signer, funding);
+        return @import("wallet_crypto.zig").sign(&self.secret.material().api_wallet.private_key, digest);
+    }
+
+    pub fn checkWalletBinding(self: *GatewayLease, signer: [20]u8, funding: [20]u8) !void {
+        const wallet = switch (self.secret.material().*) {
+            .api_wallet => |*value| value,
+            else => return error.WalletCredentialRequired,
+        };
+        if (!std.mem.eql(u8, &wallet.signer, &signer) or !std.mem.eql(u8, &wallet.funding_account, &funding)) return error.WalletBindingMismatch;
     }
 };
 
@@ -331,9 +373,11 @@ pub const CredentialStore = struct {
         defer material.clear();
         if (!self.admission_gate) return error.SecurityGateClosed;
         if (metadata.state != .staged) return error.InvalidInitialState;
+        if (material.* == .api_wallet and (metadata.kind != .execution or !metadata.can_trade or metadata.can_withdraw or metadata.environment == .demo or metadata.environment != metadata.endpoint_environment)) return error.WalletPolicyViolation;
         const writer = try self.acquireWriter(io);
         defer writer.close(io);
         try self.writeEncrypted(io, metadata, material, password, false);
+        if (material.* == .api_wallet) try @import("../persistence/signer_nonce.zig").provision(self.dir, io, material.api_wallet.signer);
     }
 
     fn activateWithPassword(self: *CredentialStore, io: std.Io, kind: CredentialKind, password: PasswordSource, expected: Metadata) !void {
@@ -366,6 +410,28 @@ pub const CredentialStore = struct {
     /// cannot turn them into a send-capable gateway.
     pub fn admitExecution(_: *CredentialStore) !Admission {
         return error.ExecutionAdmissionOutOfScope;
+    }
+
+    /// A short-lived signing lease is consumed under the same writer lock as
+    /// revocation. It never grants trading authority or escapes this callback.
+    pub fn withWallet(self: *CredentialStore, io: std.Io, file: std.Io.File, input_kind: InputKind, password_buffer: []u8, expected: Metadata, runtime: RuntimeContext, now_unix: u64, context: anytype) !void {
+        defer std.crypto.secureZero(u8, password_buffer);
+        if (!self.admission_gate) return error.SecurityGateClosed;
+        if (expected.credential_id_len == 0 or expected.credential_id_len > 32 or expected.node_id_len > max_text or expected.egress_ip_len > max_text or expected.account == 0 or expected.version == 0 or expected.generation == 0) return error.InvalidCredentialMetadata;
+        if (expected.kind != .execution or expected.state != .active or !expected.can_trade or expected.can_withdraw) return error.WalletPolicyViolation;
+        if (expected.environment != expected.endpoint_environment or !matchesRuntime(expected, runtime)) return error.RuntimeContextMismatch;
+        if (expected.expires_at_unix <= now_unix) return error.CredentialExpired;
+        var password_storage = try protected.Buffer.init(max_password + 1);
+        defer password_storage.deinit();
+        const password = try readPassword(io, file, input_kind, try password_storage.writable());
+        try password_storage.freeze();
+        const writer = try self.acquireWriter(io);
+        defer writer.close(io);
+        var lease = try self.unlock(io, .execution, password, expected, .native, true);
+        defer lease.deinit();
+        if (!protectionAccepted(lease.report())) return error.SecurityGateClosed;
+        if (lease.secret.material().* != .api_wallet) return error.WalletCredentialRequired;
+        try context.consume(&lease, self.dir);
     }
 
     fn transition(self: *CredentialStore, io: std.Io, kind: CredentialKind, password: PasswordSource, expected: Metadata, next: CredentialState) !void {
@@ -585,7 +651,34 @@ fn decodeHeader(source: []const u8, metadata: *Metadata, salt: *[16]u8, nonce: *
     return payload_len;
 }
 
+// Payload v1 is the unchanged API triple. Prefix 0 cannot be a valid v1
+// api_key length; 0,2 identifies the wallet payload without weakening old readers.
 fn encodeMaterial(material: *const SecretMaterial, destination: []u8) !usize {
+    switch (material.*) {
+        .api_credentials => |*api| return encodeApiCredentials(api, destination),
+        .api_wallet => |*wallet| {
+            if (destination.len < 74) return error.InvalidCredential;
+            const derived = try @import("wallet_crypto.zig").address(&wallet.private_key);
+            if (!std.mem.eql(u8, &derived, &wallet.signer) or std.mem.allEqual(u8, &wallet.funding_account, 0)) return error.InvalidCredential;
+            destination[0..2].* = .{ 0, 2 };
+            @memcpy(destination[2..34], &wallet.private_key);
+            @memcpy(destination[34..54], &wallet.signer);
+            @memcpy(destination[54..74], &wallet.funding_account);
+            return 74;
+        },
+    }
+}
+
+fn decodeMaterial(source: []const u8, result: *SecretMaterial) !void {
+    result.* = .{ .api_credentials = .{} };
+    errdefer result.clear();
+    if (source.len != 0 and source[0] == 0) {
+        if (source.len != 74 or source[1] != 2) return error.InvalidCredential;
+        result.* = try SecretMaterial.initWallet(source[2..34], source[34..54].*, source[54..74].*);
+    } else try decodeApiCredentials(source, &result.api_credentials);
+}
+
+fn encodeApiCredentials(material: *const ApiCredentials, destination: []u8) !usize {
     const total = 3 + @as(usize, material.api_key_len) + material.secret_key_len + material.passphrase_len;
     if (material.api_key_len > max_secret or material.secret_key_len > max_secret or material.passphrase_len > max_secret or total > destination.len or material.api_key_len == 0 or material.secret_key_len == 0 or material.passphrase_len == 0) return error.InvalidCredential;
     destination[0] = material.api_key_len;
@@ -600,7 +693,7 @@ fn encodeMaterial(material: *const SecretMaterial, destination: []u8) !usize {
     return total;
 }
 
-fn decodeMaterial(source: []const u8, result: *SecretMaterial) !void {
+fn decodeApiCredentials(source: []const u8, result: *ApiCredentials) !void {
     errdefer result.clear();
     if (source.len < 6) return error.InvalidCredential;
     const lengths = [_]u8{ source[0], source[1], source[2] };
@@ -785,7 +878,7 @@ pub fn runLinuxAcceptance(init: std.process.Init) !void {
         else => return err,
     };
     if (!restricted_rejected) return error.RegularPasswordFileAccepted;
-    if (rejected_material.api_key_len != 0 or rejected_material.secret_key_len != 0 or rejected_material.passphrase_len != 0)
+    if (rejected_material.api_credentials.api_key_len != 0 or rejected_material.api_credentials.secret_key_len != 0 or rejected_material.api_credentials.passphrase_len != 0)
         return error.RejectedSecretNotCleared;
     for (rejected_password) |byte| if (byte != 0) return error.RejectedPasswordNotCleared;
     var password_pipe: [2]std.posix.fd_t = undefined;
@@ -948,9 +1041,9 @@ test "Secret exposes only read-only material and reports page protection" {
 }
 
 fn assertTestSecretMaterial(material: *const SecretMaterial) void {
-    std.debug.assert(std.mem.eql(u8, material.api_key[0..material.api_key_len], "key"));
-    std.debug.assert(std.mem.eql(u8, material.secret_key[0..material.secret_key_len], "secret"));
-    std.debug.assert(std.mem.eql(u8, material.passphrase[0..material.passphrase_len], "pass"));
+    std.debug.assert(std.mem.eql(u8, material.api_credentials.api_key[0..material.api_credentials.api_key_len], "key"));
+    std.debug.assert(std.mem.eql(u8, material.api_credentials.secret_key[0..material.api_credentials.secret_key_len], "secret"));
+    std.debug.assert(std.mem.eql(u8, material.api_credentials.passphrase[0..material.api_credentials.passphrase_len], "pass"));
 }
 
 /// Real inherited pipe; public lifecycle APIs own and wipe the supplied buffer.
@@ -988,7 +1081,7 @@ fn lifecycleStage(store: *CredentialStore, metadata: Metadata) !void {
     var password: [max_password]u8 = @splat(0xa5);
     var material = try SecretMaterial.init("fixture-key", "fixture-secret", "fixture-pass");
     defer {
-        std.debug.assert(material.api_key_len == 0 and material.secret_key_len == 0 and material.passphrase_len == 0);
+        std.debug.assert(material.api_credentials.api_key_len == 0 and material.api_credentials.secret_key_len == 0 and material.api_credentials.passphrase_len == 0);
         for (password) |byte| std.debug.assert(byte == 0);
     }
     try store.stage(std.testing.io, metadata, &material, pipe, .restricted_fd, &password);
@@ -1197,7 +1290,7 @@ test "public stage rejects overlong pipe password and wipes caller buffers" {
     var material = try SecretMaterial.init("key", "secret", "pass");
     try std.testing.expectError(error.PasswordTooLong, store.stage(std.testing.io, metadata, &material, pipe, .restricted_fd, &password));
     try std.testing.expect(std.mem.allEqual(u8, &password, 0));
-    try std.testing.expectEqual(@as(u8, 0), material.api_key_len);
+    try std.testing.expectEqual(@as(u8, 0), material.api_credentials.api_key_len);
 }
 
 test "public store rejects unterminated input and malformed material without publication" {
@@ -1213,14 +1306,14 @@ test "public store rejects unterminated input and malformed material without pub
     var material = try SecretMaterial.init("key", "secret", "pass");
     try std.testing.expectError(error.UnterminatedPassword, store.stage(std.testing.io, metadata, &material, pipe, .restricted_fd, &password));
     try std.testing.expect(std.mem.allEqual(u8, &password, 0));
-    try std.testing.expectEqual(@as(u8, 0), material.api_key_len);
+    try std.testing.expectEqual(@as(u8, 0), material.api_credentials.api_key_len);
     var malformed = try SecretMaterial.init("key", "secret", "pass");
-    malformed.api_key_len = max_secret + 1;
+    malformed.api_credentials.api_key_len = max_secret + 1;
     var complete = try lifecyclePasswordPipe(std.testing.io);
     defer complete.close(std.testing.io);
     try std.testing.expectError(error.InvalidCredential, store.stage(std.testing.io, metadata, &malformed, complete, .restricted_fd, &password));
     try std.testing.expect(std.mem.allEqual(u8, &password, 0));
-    try std.testing.expectEqual(@as(u8, 0), malformed.api_key_len);
+    try std.testing.expectEqual(@as(u8, 0), malformed.api_credentials.api_key_len);
     try std.testing.expectError(error.SecurityGateClosed, lifecycleStage(&store, metadata));
 }
 
@@ -1248,7 +1341,7 @@ test "public Linux store refuses a real TTY before reading and tightens private 
     var material = try SecretMaterial.init("key", "secret", "pass");
     try std.testing.expectError(error.TtyPasswordUnsupported, store.stage(std.testing.io, metadata, &material, tty, .tty, &password));
     try std.testing.expect(std.mem.allEqual(u8, &password, 0));
-    try std.testing.expectEqual(@as(u8, 0), material.api_key_len);
+    try std.testing.expectEqual(@as(u8, 0), material.api_credentials.api_key_len);
 }
 
 test "public admission rejects authenticated oversized decoded fields without panic" {
@@ -1302,7 +1395,206 @@ test "public native stage refuses insufficient Linux memlock and wipes inputs" {
     var material = try SecretMaterial.init("key", "secret", "pass");
     try std.testing.expectError(error.MemoryLockFailed, store.stage(std.testing.io, metadata, &material, pipe, .restricted_fd, &password));
     try std.testing.expect(std.mem.allEqual(u8, &password, 0));
-    try std.testing.expectEqual(@as(u8, 0), material.api_key_len);
+    try std.testing.expectEqual(@as(u8, 0), material.api_credentials.api_key_len);
     try std.testing.expectError(error.FileNotFound, store.dir.openFile(std.testing.io, "observation.credential", .{}));
     std.debug.print("public store refused insufficient native memlock and cleared caller inputs\n", .{});
+}
+
+test "API wallet material rejects invalid keys and binds separate signer and funds" {
+    var key: [32]u8 = @splat(0);
+    defer std.crypto.secureZero(u8, &key);
+    try std.testing.expectError(error.InvalidPrivateKey, SecretMaterial.initWallet(&key, @splat(1), @splat(2)));
+    key[31] = 1; // Public synthetic secp256k1 scalar, never a deployed wallet.
+    const signer = try @import("wallet_crypto.zig").address(&key);
+    var material = try SecretMaterial.initWallet(&key, signer, @splat(2));
+    defer material.clear();
+    try std.testing.expectEqual(signer, material.api_wallet.signer);
+    try std.testing.expectError(error.SignerAddressMismatch, SecretMaterial.initWallet(&key, @splat(1), @splat(2)));
+    @memset(&key, 255);
+    try std.testing.expectError(error.InvalidPrivateKey, SecretMaterial.initWallet(&key, signer, @splat(2)));
+}
+
+test "wallet credential public lifecycle preserves binding and revokes signing access" {
+    var path_buffer: [256]u8 = undefined;
+    const path = try lifecycleTestPath(&path_buffer);
+    var store = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
+    defer store.close(std.testing.io);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    var metadata = try Metadata.init(.execution, 7, .testnet, 4_000_000_000, "wallet", "node", "203.0.113.7");
+    metadata.can_trade = true;
+    var key: [32]u8 = @splat(0);
+    defer std.crypto.secureZero(u8, &key);
+    key[31] = 1;
+    const signer = try @import("wallet_crypto.zig").address(&key);
+    var material = try SecretMaterial.initWallet(&key, signer, @splat(2));
+    var pipe = try lifecyclePasswordPipe(std.testing.io);
+    defer pipe.close(std.testing.io);
+    var password: [max_password]u8 = undefined;
+    try store.stage(std.testing.io, metadata, &material, pipe, .restricted_fd, &password);
+    try lifecycleTransition(&store, metadata, .active);
+    metadata.state = .active;
+    metadata.generation += 1;
+    var context = WalletTestContext{ .signer = signer };
+    var invalid = metadata;
+    invalid.can_withdraw = true;
+    try std.testing.expectError(error.WalletPolicyViolation, walletTestUse(&store, invalid, &context));
+    invalid = metadata;
+    invalid.expires_at_unix = 1;
+    try std.testing.expectError(error.CredentialExpired, walletTestUse(&store, invalid, &context));
+    invalid = metadata;
+    invalid.account = 8;
+    try std.testing.expectError(error.RuntimeContextMismatch, walletTestUse(&store, invalid, &context));
+    invalid = metadata;
+    invalid.credential_id_len = max_text + 1;
+    try std.testing.expectError(error.InvalidCredentialMetadata, walletTestUse(&store, invalid, &context));
+    try walletTestUse(&store, metadata, &context);
+    try std.testing.expect(context.used);
+    try lifecycleTransition(&store, metadata, .revoked);
+    try std.testing.expectError(error.CredentialRevoked, walletTestUse(&store, metadata, &context));
+}
+
+const WalletTestContext = struct {
+    signer: [20]u8,
+    used: bool = false,
+    pub fn consume(self: *@This(), lease: *GatewayLease, _: std.Io.Dir) !void {
+        const signature = try lease.signWalletDigest(@splat(3), self.signer, @splat(2));
+        try std.testing.expectEqual(self.signer, try @import("wallet_crypto.zig").recover(@splat(3), signature));
+        self.used = true;
+        var digest: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&digest, "eb995f6f09994a13de522ce0cc454871e81500e01de770e09d9fa6f5d2742601");
+        const vector = try lease.signWalletDigest(digest, self.signer, @splat(2));
+        var signature_hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(&(vector.r ++ vector.s ++ [_]u8{vector.v}), &signature_hash, .{});
+        // Independent Python/eth-account recovery of pinned Zig's deterministic
+        // nonce scheme; only a hash is retained, never a signature fixture.
+        var expected: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&expected, "8537574bf81d6034180dcf40b45dca81b9c372de6b75bca34c57573f315fe30f");
+        try std.testing.expectEqual(expected, signature_hash);
+    }
+};
+
+fn walletTestUse(store: *CredentialStore, metadata: Metadata, context: *WalletTestContext) !void {
+    var pipe = try lifecyclePasswordPipe(std.testing.io);
+    defer pipe.close(std.testing.io);
+    var password: [max_password]u8 = undefined;
+    try store.withWallet(std.testing.io, pipe, .restricted_fd, &password, metadata, .{
+        .account = 7,
+        .environment = .testnet,
+        .endpoint_environment = .testnet,
+        .node_id = "node",
+        .egress_ip = "203.0.113.7",
+    }, 1, context);
+}
+
+test "Hyperliquid signer consumes Unknown across restart and fences old owner" {
+    const signing = @import("../adapters/hyperliquid/hyperliquid_signer.zig");
+    const failover = @import("../runtime/failover.zig");
+    var path_buffer: [256]u8 = undefined;
+    const path = try lifecycleTestPath(&path_buffer);
+    var store = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
+    defer store.close(std.testing.io);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    var metadata = try Metadata.init(.execution, 7, .testnet, 4_000_000_000, "wallet", "node", "203.0.113.7");
+    metadata.can_trade = true;
+    var key: [32]u8 = @splat(0);
+    defer std.crypto.secureZero(u8, &key);
+    key[31] = 1;
+    const address = try @import("wallet_crypto.zig").address(&key);
+    var material = try SecretMaterial.initWallet(&key, address, @splat(2));
+    var pipe = try lifecyclePasswordPipe(std.testing.io);
+    defer pipe.close(std.testing.io);
+    var password: [max_password]u8 = undefined;
+    try store.stage(std.testing.io, metadata, &material, pipe, .restricted_fd, &password);
+    try lifecycleTransition(&store, metadata, .active);
+    metadata.state = .active;
+    metadata.generation += 1;
+    var authority = failover.FencingAuthority{ .durable = true };
+    var lease = try authority.acquire(.{ .exchange_account = 7, .decision_domain = 1 }, 1, 0);
+    var guard = failover.GatewayLeaseGuard{ .authority = &authority, .lease = &lease };
+    const signer = try signing.Signer.init(metadata, address, @splat(2), .master, lease.token);
+    var request = signing.Request{ .command_identity = 1, .session = signer.session(), .environment = .testnet, .action = "\x81\xa4type\xa5order", .now_ms = 1000000, .now_monotonic_ns = 1, .fencing_token = lease.token };
+    const runtime = RuntimeContext{ .account = 7, .environment = .testnet, .endpoint_environment = .testnet, .node_id = "node", .egress_ip = "203.0.113.7" };
+    var invalid_input = try lifecyclePasswordPipe(std.testing.io);
+    defer invalid_input.close(std.testing.io);
+    request.environment = .production;
+    try std.testing.expectError(error.EnvironmentMismatch, signer.sign(&store, std.testing.io, invalid_input, .restricted_fd, &password, runtime, &guard, request));
+    request.environment = .testnet;
+    request.session += 1;
+    try std.testing.expectError(error.StaleSignerSession, signer.sign(&store, std.testing.io, invalid_input, .restricted_fd, &password, runtime, &guard, request));
+    request.session = signer.session();
+    const wrong_binding = try signing.Signer.init(metadata, address, @splat(3), .master, lease.token);
+    var wrong_request = request;
+    wrong_request.session = wrong_binding.session();
+    try std.testing.expectError(error.WalletBindingMismatch, wrong_binding.sign(&store, std.testing.io, invalid_input, .restricted_fd, &password, runtime, &guard, wrong_request));
+    var input = try lifecyclePasswordPipe(std.testing.io);
+    defer input.close(std.testing.io);
+    const first = try signer.sign(&store, std.testing.io, input, .restricted_fd, &password, runtime, &guard, request);
+    try std.testing.expectEqual(@as(u64, 1000000), first.nonce);
+    try std.testing.expectEqual(address, try @import("wallet_crypto.zig").recover(first.digest, first.signature));
+    // A new store object and later timestamp do not make an Unknown retry safe.
+    var reopened = try CredentialStore.open(std.testing.io, std.testing.allocator, path);
+    defer reopened.close(std.testing.io);
+    var retry = try lifecyclePasswordPipe(std.testing.io);
+    defer retry.close(std.testing.io);
+    request.now_ms += 1;
+    try std.testing.expectError(error.RequestAlreadyConsumed, signer.sign(&reopened, std.testing.io, retry, .restricted_fd, &password, runtime, &guard, request));
+    var next = try lifecyclePasswordPipe(std.testing.io);
+    defer next.close(std.testing.io);
+    request.command_identity = 2;
+    request.now_ms -= 10; // Clock rollback advances the persisted high-water mark.
+    const second = try signer.sign(&reopened, std.testing.io, next, .restricted_fd, &password, runtime, &guard, request);
+    try std.testing.expectEqual(first.nonce + 1, second.nonce);
+    request.command_identity = 3;
+    // Inject competition at the OS lock boundary, as another signer process.
+    const writer = try store.dir.createFile(std.testing.io, "credential.writer.lock", .{ .truncate = false, .lock = .exclusive, .lock_nonblocking = true });
+    var competing = try lifecyclePasswordPipe(std.testing.io);
+    defer competing.close(std.testing.io);
+    const competition = signer.sign(&reopened, std.testing.io, competing, .restricted_fd, &password, runtime, &guard, request);
+    writer.close(std.testing.io);
+    try std.testing.expectError(error.CredentialWriterBusy, competition);
+    var skewed = try lifecyclePasswordPipe(std.testing.io);
+    defer skewed.close(std.testing.io);
+    // The actual skew here is below the one-hour limit, so move the persisted
+    // high-water forward first, then refuse an excessive rollback.
+    request.now_ms = 10000000;
+    _ = try signer.sign(&reopened, std.testing.io, skewed, .restricted_fd, &password, runtime, &guard, request);
+    request.command_identity = 4;
+    request.now_ms = 1;
+    var rollback = try lifecyclePasswordPipe(std.testing.io);
+    defer rollback.close(std.testing.io);
+    try std.testing.expectError(error.NonceClockSkew, signer.sign(&reopened, std.testing.io, rollback, .restricted_fd, &password, runtime, &guard, request));
+    request.now_ms = 10000000;
+    request.now_monotonic_ns = lease.expires_at_ns;
+    var expired = try lifecyclePasswordPipe(std.testing.io);
+    defer expired.close(std.testing.io);
+    try std.testing.expectError(error.PrimaryLeaseExpired, signer.sign(&store, std.testing.io, expired, .restricted_fd, &password, runtime, &guard, request));
+    request.now_monotonic_ns = 1;
+    try authority.revoke(&lease);
+    var replacement = try authority.acquire(.{ .exchange_account = 7, .decision_domain = 1 }, 2, 2);
+    var stale = try lifecyclePasswordPipe(std.testing.io);
+    defer stale.close(std.testing.io);
+    request.command_identity = 3;
+    try std.testing.expectError(error.StaleFencingToken, signer.sign(&store, std.testing.io, stale, .restricted_fd, &password, runtime, &guard, request));
+    const new_signer = try signing.Signer.init(metadata, address, @splat(2), .master, replacement.token);
+    var new_guard = failover.GatewayLeaseGuard{ .authority = &authority, .lease = &replacement };
+    request.session = new_signer.session();
+    request.fencing_token = replacement.token;
+    request.now_monotonic_ns = 3;
+    var old_unknown = try lifecyclePasswordPipe(std.testing.io);
+    defer old_unknown.close(std.testing.io);
+    request.command_identity = 1;
+    try std.testing.expectError(error.RequestAlreadyConsumed, new_signer.sign(&reopened, std.testing.io, old_unknown, .restricted_fd, &password, runtime, &new_guard, request));
+    const ledger_name = std.fmt.bytesToHex(address, .lower) ++ ".signer-nonces".*;
+    var ledger = try store.dir.openFile(std.testing.io, &ledger_name, .{ .mode = .read_write });
+    // A torn tail cannot be trimmed or reset to mint a fresh nonce.
+    try ledger.writePositionalAll(std.testing.io, &.{0}, (try ledger.stat(std.testing.io)).size);
+    ledger.close(std.testing.io);
+    var corrupt = try lifecyclePasswordPipe(std.testing.io);
+    defer corrupt.close(std.testing.io);
+    request.command_identity = 5;
+    try std.testing.expectError(error.CorruptNonceLedger, new_signer.sign(&reopened, std.testing.io, corrupt, .restricted_fd, &password, runtime, &new_guard, request));
+    try store.dir.deleteFile(std.testing.io, &ledger_name);
+    var missing = try lifecyclePasswordPipe(std.testing.io);
+    defer missing.close(std.testing.io);
+    try std.testing.expectError(error.FileNotFound, new_signer.sign(&reopened, std.testing.io, missing, .restricted_fd, &password, runtime, &new_guard, request));
 }

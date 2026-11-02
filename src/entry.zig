@@ -142,6 +142,7 @@ const selected = switch (@import("entry_options").index) {
     138 => @import("testing/integration/control_projection_probe.zig"),
     139 => @import("testing/acceptance/strategy/native_contract.zig"),
     140 => @import("testing/acceptance/strategy/strategy_authority_probe.zig"),
+    141 => @import("adapters/hyperliquid/hyperliquid_signer.zig"),
     else => @compileError("unknown standalone source entry"),
 };
 

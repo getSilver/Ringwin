@@ -1,8 +1,8 @@
 # 03：Hyperliquid API 钱包凭证与签名
 
 Type: task
-Status: open
-Assignee:
+Status: in_progress
+Assignee: Codex
 Blocked by: [01 协议与字段合同](01-protocol-field-contract.md)
 Parent: [模块地图](../map.md)
 
