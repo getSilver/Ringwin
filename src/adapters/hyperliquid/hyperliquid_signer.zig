@@ -5,7 +5,6 @@ pub const Environment = @import("../../runtime/production_contract.zig").Environ
 const credentials = @import("../../security/credential_store.zig");
 const crypto = @import("../../security/wallet_crypto.zig");
 const failover = @import("../../runtime/failover.zig");
-const nonces = @import("../../persistence/signer_nonce.zig");
 
 pub const AccountKind = enum { master, subaccount };
 pub const Request = struct {
@@ -53,23 +52,7 @@ pub const Signer = struct {
     }
 
     pub fn session(self: Signer) u64 {
-        var hash = Keccak.init(.{});
-        hash.update("HyperliquidSignerSessionV1");
-        hash.update(&self.signer_address);
-        hash.update(&self.funding_account);
-        hash.update(&.{ @intFromEnum(self.account_kind), @intFromEnum(self.metadata.environment) });
-        for ([_][]const u8{ self.metadata.credentialId(), self.metadata.node(), self.metadata.ip() }) |text| {
-            hash.update(&.{@intCast(text.len)});
-            hash.update(text);
-        }
-        for ([_]u64{ self.metadata.account, self.metadata.version, self.metadata.generation, self.metadata.expires_at_unix, self.owner_token }) |value| {
-            var encoded: [8]u8 = undefined;
-            std.mem.writeInt(u64, &encoded, value, .big);
-            hash.update(&encoded);
-        }
-        var digest: [32]u8 = undefined;
-        hash.final(&digest);
-        return @max(1, std.mem.readInt(u64, digest[0..8], .big));
+        return credentials.walletSession(self.metadata, self.signer_address, self.funding_account, @intFromEnum(self.account_kind), self.owner_token) catch unreachable;
     }
 
     fn check(self: Signer, guard: *failover.GatewayLeaseGuard, request: Request) !void {
@@ -84,29 +67,28 @@ pub const Signer = struct {
         try self.check(guard, request);
         if (request.action.len == 0 or request.action.len > 65536 or request.command_identity == 0 or request.now_ms == 0) return error.InvalidSigningRequest;
         if (request.expires_after) |expiry| if (expiry <= request.now_ms) return error.SignatureExpired;
-        var context = SigningContext{ .signer = self, .io = io, .request = request, .guard = guard };
-        try store.withWallet(io, password_file, input_kind, password_buffer, self.metadata, runtime, request.now_ms / 1000, &context);
-        return context.result.?;
+        var context = DigestContext{ .signer = self, .request = request };
+        const result = try store.signWallet(io, password_file, input_kind, password_buffer, self.metadata, runtime, .{
+            .signer = self.signer_address,
+            .funding = self.funding_account,
+            .scope = @intFromEnum(self.account_kind),
+            .session = request.session,
+            .owner_token = request.fencing_token,
+            .guard = guard,
+            .command_identity = request.command_identity,
+            .now_ms = request.now_ms,
+            .now_monotonic_ns = request.now_monotonic_ns,
+        }, &context);
+        return .{ .nonce = result.nonce, .digest = result.digest, .signature = result.signature, .session = self.session(), .funding_account = self.funding_account, .subaccount = if (self.account_kind == .subaccount) self.funding_account else null };
     }
 };
 
-const SigningContext = struct {
+const DigestContext = struct {
     signer: Signer,
-    io: std.Io,
     request: Request,
-    guard: *failover.GatewayLeaseGuard,
-    result: ?SignedAction = null,
-
-    pub fn consume(self: *@This(), lease: *credentials.GatewayLease, dir: std.Io.Dir) !void {
-        // Binding validation precedes durable consumption and any signature.
-        try lease.checkWalletBinding(self.signer.signer_address, self.signer.funding_account);
-        try self.signer.check(self.guard, self.request);
-        const nonce = try nonces.reserve(dir, self.io, self.signer.signer_address, self.signer.metadata.account, self.request.command_identity, self.request.now_ms);
+    pub fn digest(self: *@This(), nonce: u64) ![32]u8 {
         const subaccount: ?[20]u8 = if (self.signer.account_kind == .subaccount) self.signer.funding_account else null;
-        const digest = try typedDigest(actionHash(self.request.action, nonce, subaccount, self.request.expires_after), self.request.environment);
-        const signature = try lease.signWalletDigest(digest, self.signer.signer_address, self.signer.funding_account);
-        try self.signer.check(self.guard, self.request);
-        self.result = .{ .nonce = nonce, .digest = digest, .signature = signature, .session = self.signer.session(), .funding_account = self.signer.funding_account, .subaccount = subaccount };
+        return typedDigest(actionHash(self.request.action, nonce, subaccount, self.request.expires_after), self.request.environment);
     }
 };
 

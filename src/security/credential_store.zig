@@ -119,11 +119,16 @@ pub const SecretMaterial = union(enum) {
         return .{ .api_credentials = try ApiCredentials.init(api_key, secret_key, passphrase) };
     }
 
-    pub fn initWallet(key: *const [32]u8, signer: [20]u8, funding: [20]u8) !SecretMaterial {
+    pub fn initWallet(result: *SecretMaterial, key: *const [32]u8, signer: [20]u8, funding: [20]u8) !void {
+        result.clear();
+        errdefer result.clear();
         const derived = try @import("wallet_crypto.zig").address(key);
         if (!std.mem.eql(u8, &derived, &signer)) return error.SignerAddressMismatch;
         if (std.mem.allEqual(u8, &funding, 0)) return error.InvalidFundingAccount;
-        return .{ .api_wallet = .{ .private_key = key.*, .signer = signer, .funding_account = funding } };
+        result.* = .{ .api_wallet = undefined };
+        @memcpy(&result.api_wallet.private_key, key);
+        result.api_wallet.signer = signer;
+        result.api_wallet.funding_account = funding;
     }
 
     pub fn clear(self: *SecretMaterial) void {
@@ -214,6 +219,61 @@ pub const RuntimeContext = struct {
     egress_ip: []const u8,
 };
 
+fn validateWalletMetadata(metadata: Metadata) !void {
+    if (metadata.credential_id_len == 0 or metadata.credential_id_len > 32 or metadata.node_id_len > max_text or metadata.egress_ip_len > max_text or metadata.account == 0 or metadata.version == 0 or metadata.generation == 0) return error.InvalidCredentialMetadata;
+}
+
+pub fn walletSession(metadata: Metadata, signer: [20]u8, funding: [20]u8, scope: u8, owner_token: u64) !u64 {
+    try validateWalletMetadata(metadata);
+    var hash = std.crypto.hash.sha3.Keccak256.init(.{});
+    hash.update("WalletSignerSessionV1");
+    hash.update(&signer);
+    hash.update(&funding);
+    hash.update(&.{ scope, @intFromEnum(metadata.environment), @intFromEnum(metadata.endpoint_environment) });
+    for ([_][]const u8{ metadata.credentialId(), metadata.node(), metadata.ip() }) |text| {
+        hash.update(&.{@intCast(text.len)});
+        hash.update(text);
+    }
+    for ([_]u64{ metadata.account, metadata.version, metadata.generation, metadata.expires_at_unix, owner_token }) |value| {
+        var encoded: [8]u8 = undefined;
+        std.mem.writeInt(u64, &encoded, value, .big);
+        hash.update(&encoded);
+    }
+    var digest: [32]u8 = undefined;
+    hash.final(&digest);
+    return @max(1, std.mem.readInt(u64, digest[0..8], .big));
+}
+
+pub const WalletSignature = struct { nonce: u64, digest: [32]u8, signature: @import("wallet_crypto.zig").Signature };
+pub const WalletSigningRequest = struct {
+    signer: [20]u8,
+    funding: [20]u8,
+    scope: u8,
+    session: u64,
+    owner_token: u64,
+    guard: *@import("../runtime/failover.zig").GatewayLeaseGuard,
+    command_identity: u128,
+    now_ms: u64,
+    now_monotonic_ns: u64,
+
+    fn check(self: WalletSigningRequest, metadata: Metadata) !void {
+        if (self.command_identity == 0 or self.now_ms == 0) return error.InvalidSigningRequest;
+        if (self.owner_token == 0 or self.guard.lease.key.exchange_account != metadata.account) return error.StaleFencingToken;
+        if (self.session != try walletSession(metadata, self.signer, self.funding, self.scope, self.owner_token)) return error.StaleSignerSession;
+        try self.guard.check(self.now_monotonic_ns, self.owner_token, true);
+    }
+
+    fn checkElapsed(self: WalletSigningRequest, metadata: Metadata, io: std.Io, started_ns: i96) !void {
+        const elapsed = std.Io.Clock.awake.now(io).nanoseconds - started_ns;
+        if (elapsed < 0 or elapsed > std.math.maxInt(u64)) return error.SigningClockInvalid;
+        var current = self;
+        current.now_monotonic_ns = std.math.add(u64, self.now_monotonic_ns, @intCast(elapsed)) catch return error.PrimaryLeaseExpired;
+        current.now_ms = std.math.add(u64, self.now_ms, @intCast(@divTrunc(elapsed, std.time.ns_per_ms))) catch return error.CredentialExpired;
+        if (metadata.expires_at_unix <= current.now_ms / 1000) return error.CredentialExpired;
+        try current.check(metadata);
+    }
+};
+
 pub const ProtectionReport = struct {
     locked: bool,
     dont_dump: bool,
@@ -249,12 +309,12 @@ pub const GatewayLease = struct {
         self.secret.expose(callback);
     }
 
-    pub fn signWalletDigest(self: *GatewayLease, digest: [32]u8, signer: [20]u8, funding: [20]u8) !@import("wallet_crypto.zig").Signature {
+    fn signWalletDigest(self: *GatewayLease, digest: [32]u8, signer: [20]u8, funding: [20]u8) !@import("wallet_crypto.zig").Signature {
         try self.checkWalletBinding(signer, funding);
         return @import("wallet_crypto.zig").sign(&self.secret.material().api_wallet.private_key, digest);
     }
 
-    pub fn checkWalletBinding(self: *GatewayLease, signer: [20]u8, funding: [20]u8) !void {
+    fn checkWalletBinding(self: *GatewayLease, signer: [20]u8, funding: [20]u8) !void {
         const wallet = switch (self.secret.material().*) {
             .api_wallet => |*value| value,
             else => return error.WalletCredentialRequired,
@@ -412,15 +472,17 @@ pub const CredentialStore = struct {
         return error.ExecutionAdmissionOutOfScope;
     }
 
-    /// A short-lived signing lease is consumed under the same writer lock as
-    /// revocation. It never grants trading authority or escapes this callback.
-    pub fn withWallet(self: *CredentialStore, io: std.Io, file: std.Io.File, input_kind: InputKind, password_buffer: []u8, expected: Metadata, runtime: RuntimeContext, now_unix: u64, context: anytype) !void {
+    /// Only this operation can consume a wallet lease: fencing, session and
+    /// durable request consumption cannot be skipped by a digest callback.
+    pub fn signWallet(self: *CredentialStore, io: std.Io, file: std.Io.File, input_kind: InputKind, password_buffer: []u8, expected: Metadata, runtime: RuntimeContext, request: WalletSigningRequest, digest_context: anytype) !WalletSignature {
         defer std.crypto.secureZero(u8, password_buffer);
         if (!self.admission_gate) return error.SecurityGateClosed;
-        if (expected.credential_id_len == 0 or expected.credential_id_len > 32 or expected.node_id_len > max_text or expected.egress_ip_len > max_text or expected.account == 0 or expected.version == 0 or expected.generation == 0) return error.InvalidCredentialMetadata;
+        try validateWalletMetadata(expected);
         if (expected.kind != .execution or expected.state != .active or !expected.can_trade or expected.can_withdraw) return error.WalletPolicyViolation;
         if (expected.environment != expected.endpoint_environment or !matchesRuntime(expected, runtime)) return error.RuntimeContextMismatch;
-        if (expected.expires_at_unix <= now_unix) return error.CredentialExpired;
+        if (expected.expires_at_unix <= request.now_ms / 1000) return error.CredentialExpired;
+        try request.check(expected);
+        const started_ns = std.Io.Clock.awake.now(io).nanoseconds;
         var password_storage = try protected.Buffer.init(max_password + 1);
         defer password_storage.deinit();
         const password = try readPassword(io, file, input_kind, try password_storage.writable());
@@ -430,8 +492,13 @@ pub const CredentialStore = struct {
         var lease = try self.unlock(io, .execution, password, expected, .native, true);
         defer lease.deinit();
         if (!protectionAccepted(lease.report())) return error.SecurityGateClosed;
-        if (lease.secret.material().* != .api_wallet) return error.WalletCredentialRequired;
-        try context.consume(&lease, self.dir);
+        try lease.checkWalletBinding(request.signer, request.funding);
+        try request.checkElapsed(expected, io, started_ns);
+        const nonce = try @import("../persistence/signer_nonce.zig").reserve(self.dir, io, request.signer, expected.account, request.command_identity, request.now_ms);
+        const digest = try digest_context.digest(nonce);
+        const signature = try lease.signWalletDigest(digest, request.signer, request.funding);
+        try request.checkElapsed(expected, io, started_ns);
+        return .{ .nonce = nonce, .digest = digest, .signature = signature };
     }
 
     fn transition(self: *CredentialStore, io: std.Io, kind: CredentialKind, password: PasswordSource, expected: Metadata, next: CredentialState) !void {
@@ -674,7 +741,7 @@ fn decodeMaterial(source: []const u8, result: *SecretMaterial) !void {
     errdefer result.clear();
     if (source.len != 0 and source[0] == 0) {
         if (source.len != 74 or source[1] != 2) return error.InvalidCredential;
-        result.* = try SecretMaterial.initWallet(source[2..34], source[34..54].*, source[54..74].*);
+        try result.initWallet(source[2..34], source[34..54].*, source[54..74].*);
     } else try decodeApiCredentials(source, &result.api_credentials);
 }
 
@@ -1403,15 +1470,16 @@ test "public native stage refuses insufficient Linux memlock and wipes inputs" {
 test "API wallet material rejects invalid keys and binds separate signer and funds" {
     var key: [32]u8 = @splat(0);
     defer std.crypto.secureZero(u8, &key);
-    try std.testing.expectError(error.InvalidPrivateKey, SecretMaterial.initWallet(&key, @splat(1), @splat(2)));
+    var material: SecretMaterial = undefined;
+    try std.testing.expectError(error.InvalidPrivateKey, material.initWallet(&key, @splat(1), @splat(2)));
     key[31] = 1; // Public synthetic secp256k1 scalar, never a deployed wallet.
     const signer = try @import("wallet_crypto.zig").address(&key);
-    var material = try SecretMaterial.initWallet(&key, signer, @splat(2));
+    try material.initWallet(&key, signer, @splat(2));
     defer material.clear();
     try std.testing.expectEqual(signer, material.api_wallet.signer);
-    try std.testing.expectError(error.SignerAddressMismatch, SecretMaterial.initWallet(&key, @splat(1), @splat(2)));
+    try std.testing.expectError(error.SignerAddressMismatch, material.initWallet(&key, @splat(1), @splat(2)));
     @memset(&key, 255);
-    try std.testing.expectError(error.InvalidPrivateKey, SecretMaterial.initWallet(&key, signer, @splat(2)));
+    try std.testing.expectError(error.InvalidPrivateKey, material.initWallet(&key, signer, @splat(2)));
 }
 
 test "wallet credential public lifecycle preserves binding and revokes signing access" {
@@ -1426,7 +1494,8 @@ test "wallet credential public lifecycle preserves binding and revokes signing a
     defer std.crypto.secureZero(u8, &key);
     key[31] = 1;
     const signer = try @import("wallet_crypto.zig").address(&key);
-    var material = try SecretMaterial.initWallet(&key, signer, @splat(2));
+    var material: SecretMaterial = undefined;
+    try material.initWallet(&key, signer, @splat(2));
     var pipe = try lifecyclePasswordPipe(std.testing.io);
     defer pipe.close(std.testing.io);
     var password: [max_password]u8 = undefined;
@@ -1449,6 +1518,11 @@ test "wallet credential public lifecycle preserves binding and revokes signing a
     try std.testing.expectError(error.InvalidCredentialMetadata, walletTestUse(&store, invalid, &context));
     try walletTestUse(&store, metadata, &context);
     try std.testing.expect(context.used);
+    context.command_identity = 2;
+    context.expire_during_digest = true;
+    try std.testing.expectError(error.PrimaryLeaseExpired, walletTestUse(&store, metadata, &context));
+    context.expire_during_digest = false;
+    try std.testing.expectError(error.RequestAlreadyConsumed, walletTestUse(&store, metadata, &context));
     try lifecycleTransition(&store, metadata, .revoked);
     try std.testing.expectError(error.CredentialRevoked, walletTestUse(&store, metadata, &context));
 }
@@ -1456,20 +1530,15 @@ test "wallet credential public lifecycle preserves binding and revokes signing a
 const WalletTestContext = struct {
     signer: [20]u8,
     used: bool = false,
-    pub fn consume(self: *@This(), lease: *GatewayLease, _: std.Io.Dir) !void {
-        const signature = try lease.signWalletDigest(@splat(3), self.signer, @splat(2));
-        try std.testing.expectEqual(self.signer, try @import("wallet_crypto.zig").recover(@splat(3), signature));
+    command_identity: u128 = 1,
+    expire_during_digest: bool = false,
+    guard: ?*@import("../runtime/failover.zig").GatewayLeaseGuard = null,
+    pub fn digest(self: *@This(), _: u64) ![32]u8 {
         self.used = true;
-        var digest: [32]u8 = undefined;
-        _ = try std.fmt.hexToBytes(&digest, "eb995f6f09994a13de522ce0cc454871e81500e01de770e09d9fa6f5d2742601");
-        const vector = try lease.signWalletDigest(digest, self.signer, @splat(2));
-        var signature_hash: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(&(vector.r ++ vector.s ++ [_]u8{vector.v}), &signature_hash, .{});
-        // Independent Python/eth-account recovery of pinned Zig's deterministic
-        // nonce scheme; only a hash is retained, never a signature fixture.
-        var expected: [32]u8 = undefined;
-        _ = try std.fmt.hexToBytes(&expected, "8537574bf81d6034180dcf40b45dca81b9c372de6b75bca34c57573f315fe30f");
-        try std.testing.expectEqual(expected, signature_hash);
+        if (self.expire_during_digest) self.guard.?.lease.expires_at_ns = 0;
+        var result: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&result, "eb995f6f09994a13de522ce0cc454871e81500e01de770e09d9fa6f5d2742601");
+        return result;
     }
 };
 
@@ -1477,13 +1546,27 @@ fn walletTestUse(store: *CredentialStore, metadata: Metadata, context: *WalletTe
     var pipe = try lifecyclePasswordPipe(std.testing.io);
     defer pipe.close(std.testing.io);
     var password: [max_password]u8 = undefined;
-    try store.withWallet(std.testing.io, pipe, .restricted_fd, &password, metadata, .{
+    const failover = @import("../runtime/failover.zig");
+    var authority = failover.FencingAuthority{ .durable = true };
+    var lease = try authority.acquire(.{ .exchange_account = 7, .decision_domain = 1 }, 1, 0);
+    lease.expires_at_ns = std.time.ns_per_hour;
+    var guard = failover.GatewayLeaseGuard{ .authority = &authority, .lease = &lease };
+    context.guard = &guard;
+    defer context.guard = null;
+    const session_id = try walletSession(metadata, context.signer, @splat(2), 0, lease.token);
+    const result = try store.signWallet(std.testing.io, pipe, .restricted_fd, &password, metadata, .{
         .account = 7,
         .environment = .testnet,
         .endpoint_environment = .testnet,
         .node_id = "node",
         .egress_ip = "203.0.113.7",
-    }, 1, context);
+    }, .{ .signer = context.signer, .funding = @splat(2), .scope = 0, .session = session_id, .owner_token = lease.token, .guard = &guard, .command_identity = context.command_identity, .now_ms = 1000, .now_monotonic_ns = 1 }, context);
+    try std.testing.expectEqual(context.signer, try @import("wallet_crypto.zig").recover(result.digest, result.signature));
+    var signature_hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(&(result.signature.r ++ result.signature.s ++ [_]u8{result.signature.v}), &signature_hash, .{});
+    var expected: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected, "5149cc2ecf929663bdeeaf9a1287d5220ca2bf0be091fcb662d9488aff1eb156");
+    try std.testing.expectEqual(expected, signature_hash);
 }
 
 test "Hyperliquid signer consumes Unknown across restart and fences old owner" {
@@ -1500,7 +1583,8 @@ test "Hyperliquid signer consumes Unknown across restart and fences old owner" {
     defer std.crypto.secureZero(u8, &key);
     key[31] = 1;
     const address = try @import("wallet_crypto.zig").address(&key);
-    var material = try SecretMaterial.initWallet(&key, address, @splat(2));
+    var material: SecretMaterial = undefined;
+    try material.initWallet(&key, address, @splat(2));
     var pipe = try lifecyclePasswordPipe(std.testing.io);
     defer pipe.close(std.testing.io);
     var password: [max_password]u8 = undefined;
@@ -1510,6 +1594,7 @@ test "Hyperliquid signer consumes Unknown across restart and fences old owner" {
     metadata.generation += 1;
     var authority = failover.FencingAuthority{ .durable = true };
     var lease = try authority.acquire(.{ .exchange_account = 7, .decision_domain = 1 }, 1, 0);
+    lease.expires_at_ns = std.time.ns_per_hour;
     var guard = failover.GatewayLeaseGuard{ .authority = &authority, .lease = &lease };
     const signer = try signing.Signer.init(metadata, address, @splat(2), .master, lease.token);
     var request = signing.Request{ .command_identity = 1, .session = signer.session(), .environment = .testnet, .action = "\x81\xa4type\xa5order", .now_ms = 1000000, .now_monotonic_ns = 1, .fencing_token = lease.token };
@@ -1571,6 +1656,7 @@ test "Hyperliquid signer consumes Unknown across restart and fences old owner" {
     request.now_monotonic_ns = 1;
     try authority.revoke(&lease);
     var replacement = try authority.acquire(.{ .exchange_account = 7, .decision_domain = 1 }, 2, 2);
+    replacement.expires_at_ns = std.time.ns_per_hour;
     var stale = try lifecyclePasswordPipe(std.testing.io);
     defer stale.close(std.testing.io);
     request.command_identity = 3;

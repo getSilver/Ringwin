@@ -26,12 +26,13 @@ Activation, retirement and revocation use the existing state machine. There is
 no new CLI, control plane, wallet registration or execution admission. Existing
 `admitExecution` still fails closed; observation admission grants no send ability.
 
-`CredentialStore.withWallet` takes the existing restricted password stream,
+`CredentialStore.signWallet` takes the existing restricted password stream,
 revalidates active metadata, runtime account/environment/node/egress and expiry,
 and consumes a short-lived `GatewayLease` under the existing stable writer lock.
 Revocation uses that same lock. Private wallet material is not exposed by the
-legacy read-only material callback. Only public binding checks and digest signing
-are added to the lease; a signing lease must not escape its callback.
+legacy read-only material callback. The public operation always checks session/fencing and consumes a durable request
+before signing. Its digest callback receives only the reserved nonce, never a
+lease or private key; binding/signing methods on the lease remain private.
 
 `Signer.queryAccount()` always returns the explicitly bound funding address.
 Master signing omits `vaultAddress`; subaccount signing puts that funding address
@@ -39,12 +40,14 @@ in the protocol's `vaultAddress` field. This does not enable vault trading. A
 master agent's chain-side authorization is inferred by Hyperliquid, not encoded
 as a master address in the L1 hash; local binding cannot prove remote approval.
 
-The signer session fingerprints signer, funding address, account kind, real
+The security-owned wallet session fingerprints signer, funding address, signing scope, real
 account identity, environment, credential identity/version/generation/expiry,
 node, egress and owner fencing token. Variable text is length-prefixed. Changes
 produce a different session; stale request sessions and endpoint environments are
-rejected. Signing checks the existing `GatewayLeaseGuard`, account and owner token
-before consuming a nonce and again before returning output. Even cancel/reduce
+rejected. The security entry checks the existing `GatewayLeaseGuard`, account and owner token
+before consuming a nonce and again before returning output. Actual elapsed awake
+time across password input, KDF and signing advances the supplied monotonic
+reference, so blocking unlock work cannot preserve an expired lease. Even cancel/reduce
 signing conservatively requires a live primary lease in this first version.
 
 ## Nonce, crash and Unknown boundary
@@ -91,17 +94,25 @@ evidence, not directory/power-loss qualification.
 The exact ordered MessagePack action from the pinned official public hash test
 is checked against `0fcbeda5...ac2908`. Fixed Testnet/Mainnet EIP-712 digests and
 the subaccount plus expiry variant are independently reproduced using the pinned
-SDK. The signing primitive uses Zig dev.315's secp256k1 ECDSA, normalizes low-s,
-and determines Ethereum recovery parity by recovering the expected public address.
+SDK. The signing primitive uses RFC6979 HMAC-SHA256 with pinned Zig secp256k1
+field/curve formulas, normalizes low-s and derives Ethereum recovery parity
+from the public nonce point. The rare unsupported recovery-ID 2/3 case advances
+RFC6979 state rather than returning an unrepresentable signature.
 Keccak-256, network source `a`/`b`, Exchange/1 domain, chain 1337 and zero verifying
 contract match the fixed upstream source. Administrative user-signed actions use
 a different domain and are not exposed here.
 
-Zig's deterministic ECDSA nonce derivation includes a 32-byte zero noise prefix;
-its signature bytes need not equal eth-account's RFC6979 result. The independent
-Python oracle reproduces this derivation and verifies recovery with eth-account;
-the Zig public lease regression retains only its SHA-256 signature hash. Tests
-use the publicly known synthetic scalar 1 and expired timestamps, never a real
+Private scalar, nonce, RFC6979 state, HMAC pads, SHA-256 schedule and owned
+working points live in one protected workspace. Existing hardened SHA-256 is
+reused; no stdlib ECDSA Signer or HMAC frame copies raw key arrays. Key bytes are
+borrowed for fixed-schedule scalar conversion and base multiplication, using
+constant-time selection and existing field/curve formulas. Wallet decoding writes
+directly into its protected destination instead of returning key material by value.
+
+The independent Python oracle verifies all network/account/digest variants with
+the pinned SDK. The public CredentialStore regression compares the resulting
+RFC6979 signature hash with the SDK and recovers the expected public address.
+Tests use publicly known synthetic scalar 1 and expired timestamps, never a real
 wallet. No private key file or signature fixture is created.
 
 Reproduce the oracle in a disposable environment with `msgpack==1.1.2`,
@@ -111,18 +122,20 @@ Reproduce the oracle in a disposable environment with `msgpack==1.1.2`,
 python python/hyperliquid_signing_vectors.py <pinned-sdk-signing.py>
 python tools/zig-entry.py test src/security/credential_store.zig
 python tools/zig-entry.py test src/adapters/hyperliquid/hyperliquid_signer.zig -O ReleaseSafe
-zig build test
+zig build test -Doptimize=ReleaseSafe
 ```
 
 The oracle verifies the original SDK file SHA-256 before selecting its functions;
 it prints only success and never prints keys or signatures. These Python packages
 are offline oracle dependencies, not Ringwin runtime dependencies.
 
-Owned credential, password, plaintext and signing key-pair buffers use existing
+Owned credential, password, plaintext and signing workspace buffers use existing
 protected memory and wipe-on-release. Windows native locking/protection and the
-existing protection failure/erase tests are exercised. The standard-library curve
-and ECDSA routines create transient scalar/key copies; this change **does not
-prove protected/zeroized stack or register temporaries**. Linux target behavior,
+existing protection failure/erase tests are exercised, including direct workspace
+erase observation on signing success and injected lock failure. By-value field
+and curve arithmetic still creates transient scalar/point values; this change
+**does not prove protected/zeroized arithmetic stack or register temporaries**.
+Linux target behavior,
 dump resistance for those temporaries, power-loss persistence, real external
 node fencing, remote agent authorization and Testnet trading remain unqualified.
 Do not treat offline completion as secret-memory or production qualification.

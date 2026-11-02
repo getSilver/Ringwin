@@ -5,14 +5,12 @@ msgpack==1.1.2, eth-account==0.13.7, eth-keys==0.7.0, eth-utils==5.3.1.
 """
 import ast
 import hashlib
-import hmac
 import sys
 from pathlib import Path
 
 import msgpack
 from eth_account import Account
 from eth_account.messages import encode_typed_data
-from eth_keys.backends.native.ecdsa import G, N, fast_multiply
 from eth_utils import keccak, to_hex
 
 
@@ -57,28 +55,13 @@ def main():
         signature = sdk["sign_l1_action"](wallet, action, account, 1677777606040, expiry, mainnet)
         assert sdk["recover_agent_or_user_from_l1_action"](
             action, signature, account, 1677777606040, expiry, mainnet) == wallet.address
-    # Zig dev.315 deterministicScalar adds a zero noise prefix before the key.
-    # Verify its result independently and recover it with eth-account.
-    digest = bytes.fromhex(vectors[0][4])
-    def mac(k, value):
-        return hmac.new(k, value, hashlib.sha256).digest()
-    k, v = bytes(32), b"\x01" * 32
-    for separator in (b"\x00", b"\x01"):
-        k = mac(k, v + separator + bytes(32) + key + digest)
-        v = mac(k, v)
-    nonce = int.from_bytes(mac(k, v), "big")
-    assert 0 < nonce < N
-    x, y = fast_multiply(G, nonce)
-    r = x % N
-    s = (pow(nonce, -1, N) * (int.from_bytes(digest, "big") + r)) % N
-    v = 27 + y % 2
-    if s > N // 2:
-        s, v = N - s, 27 + ((v - 27) ^ 1)
-    assert Account._recover_hash(digest, vrs=(v, r, s)) == wallet.address
-    assert hashlib.sha256(r.to_bytes(32, "big") + s.to_bytes(32, "big") + bytes([v])).hexdigest() == (
-        "8537574bf81d6034180dcf40b45dca81b9c372de6b75bca34c57573f315fe30f"
-    )
-    print("3 pinned SDK hash/digest/recovery vectors and Zig signature oracle passed")
+        if not mainnet and account is None:
+            encoded = int(signature["r"], 16).to_bytes(32, "big") + int(signature["s"], 16).to_bytes(32, "big") + bytes([signature["v"]])
+            assert hashlib.sha256(encoded).hexdigest() == (
+                "5149cc2ecf929663bdeeaf9a1287d5220ca2bf0be091fcb662d9488aff1eb156"
+            )
+    print("3 pinned SDK hash/digest/recovery vectors and RFC6979 signature oracle passed")
+
 
 
 if __name__ == "__main__":
