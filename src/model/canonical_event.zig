@@ -6,10 +6,41 @@
 
 const std = @import("std");
 
-pub const schema_version: u16 = 18;
+test "price constraints preserve integer exception and exact significant digits" {
+    const rules: PriceConstraints = .{ .max_significant_digits = 5, .max_decimal_places = 2, .integer_exception = true };
+    try rules.validate(12345600, 1, 2);
+    try rules.validate(123450, 1, 2);
+    try std.testing.expectError(error.InvalidOrderPrice, rules.validate(123456, 1, 2));
+    try std.testing.expectError(error.InvalidOrderPrice, rules.validate(123451, 1, 3));
+    try std.testing.expectError(error.Overflow, rules.validate(std.math.maxInt(i128), 2, 2));
+}
+
+pub const schema_version: u16 = 19;
 
 pub const VenueIdentity = u64;
-pub const Product = enum(u8) { spot, isolated_linear_usdt };
+pub const Product = enum(u8) { spot, isolated_linear };
+
+/// Constraints apply to the exact decimal price, never to a rounded substitute.
+pub const PriceConstraints = struct {
+    max_significant_digits: u8 = 0,
+    max_decimal_places: u8 = Decimal.max_scale,
+    integer_exception: bool = false,
+
+    pub fn validate(self: PriceConstraints, ticks: i128, tick_atoms: i128, atomic_scale: u8) !void {
+        if (ticks <= 0 or tick_atoms <= 0 or atomic_scale > Decimal.max_scale or
+            self.max_decimal_places > Decimal.max_scale or self.max_significant_digits > 38)
+            return error.InvalidOrderPrice;
+        var coefficient = try std.math.mul(i128, ticks, tick_atoms);
+        var scale = atomic_scale;
+        while (scale > 0 and @rem(coefficient, 10) == 0) : (scale -= 1) coefficient = @divTrunc(coefficient, 10);
+        if (scale > self.max_decimal_places) return error.InvalidOrderPrice;
+        if (scale == 0 and self.integer_exception) return;
+        while (@rem(coefficient, 10) == 0) coefficient = @divTrunc(coefficient, 10);
+        var digits: u8 = 0;
+        while (coefficient > 0) : (digits += 1) coefficient = @divTrunc(coefficient, 10);
+        if (self.max_significant_digits != 0 and digits > self.max_significant_digits) return error.InvalidOrderPrice;
+    }
+};
 pub const AssetIdentity = u64;
 pub const ExchangeAccountIdentity = u128;
 pub const InstrumentIdentity = u128;
@@ -364,9 +395,13 @@ pub const BookDepth = struct {
     asks_truncated: bool = false,
     visible_at_ns: u64,
 };
+pub const BookSequenceKind = enum(u8) { venue, capture };
 pub const L2BookSnapshot = struct {
+    /// Capture order is scoped by a monotonically increasing feed incarnation.
+    sequence_kind: BookSequenceKind = .venue,
+    capture_epoch: u64 = 0,
     instrument: InstrumentIdentity,
-    sequence: VenueSourceSequence,
+    sequence: u64,
     complete: bool = true,
     depth: ?BookDepth = null,
     best_bid: InstrumentPrice,
@@ -375,6 +410,11 @@ pub const L2BookSnapshot = struct {
     best_ask_quantity: ?InstrumentQuantity = null,
     next_ask: ?InstrumentPrice = null,
     next_ask_quantity: ?InstrumentQuantity = null,
+
+    pub fn validateSequence(self: L2BookSnapshot) !void {
+        if ((self.sequence_kind == .capture and (self.capture_epoch == 0 or self.sequence == 0)) or
+            (self.sequence_kind == .venue and self.capture_epoch != 0)) return error.InvalidCaptureEpoch;
+    }
 };
 pub const L2BookDelta = struct {
     /// Adapter-owned postimage, valid only after previous_sequence.
@@ -519,7 +559,7 @@ pub const ReconciliationResult = struct {
 /// an economic interval. Receipt/Adapter sequences do not certify economics.
 pub const AccountEconomicEvidence = struct {
     exchange_account: ExchangeAccountIdentity,
-    scope: enum(u8) { spot_and_isolated_linear_usdt },
+    scope: enum(u8) { spot_and_isolated_linear },
     from_utc_ns: u64,
     through_utc_ns: u64,
     source: RawEvidenceRef,

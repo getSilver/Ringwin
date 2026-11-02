@@ -23,9 +23,9 @@ const place_fee_atoms: i128 = 400_000;
 const exchange_account: u128 = 900;
 /// Frozen schema version for emitted four-shard acceptance evidence.
 pub const acceptance_schema_version: u16 = production_contract.acceptance_schema_version;
-// journal50 / state54 / registry48 / Coordinator v18;
+// journal51 / state55 / registry49 / Coordinator v19;
 // recaptured only after economics and three-path recovery equality.
-const expected_shared_summary = "e72fa7ccbb7ad47d5d7fe3998f779802d58690d46e8831544726bd195d5ad423";
+const expected_shared_summary = "bef175b318bc3c9718004574243fc83d44c8474fe6fec8e15ef4ae5c78bd6d59";
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
     return trading.applyStable(shard, stable_journal, .{ .core = input });
@@ -253,10 +253,10 @@ fn assertLedgersClosed(world: *const World) !void {
     for (0..max_shards) |index| {
         const shard = &world.shards[index];
         try std.testing.expectEqual(
-            shard.economicSummary().portfolio.usdt_balance_atoms +
-                shard.economicSummary().treasury_usdt_atoms +
-                shard.economicSummary().suspense_usdt_atoms,
-            shard.economicSummary().exchange.usdt_balance_atoms,
+            shard.economicSummary().portfolio.settlement_balance_atoms +
+                shard.economicSummary().treasury_settlement_atoms +
+                shard.economicSummary().suspense_settlement_atoms,
+            shard.economicSummary().exchange.settlement_balance_atoms,
         );
         try std.testing.expectEqual(
             shard.economicSummary().portfolio.swap.quantity,

@@ -58,7 +58,7 @@ fn createFundingHarnessOptions(id: u64, simulator: ?*acceptance.RestingSimulator
         _ = try harness.owner.apply(input);
     }
     _ = try harness.owner.apply(fixture.atGroup(12, .{ .identity = 3, .payload = .{ .host_activated = .{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .session = .{ .fencing = 1, .shard = 0, .generation = 1 }, .activation_barrier = 0, .state_digest = harness.owner.shard.canonicalStateDigest() } } }));
-    _ = try harness.owner.apply(fixture.atGroup(13, .{ .identity = 4, .payload = .{ .capability_profile_activation = .{ .exchange_account = 2, .instrument = 3, .venue = 1, .environment = .simulation, .product = .isolated_linear_usdt, .version = 1, .rules_version = 1, .config_version = 1, .adapter_session = 1, .max_dispatch_age_ns = 10 * std.time.ns_per_s, .supports_place = true, .supports_cancel = true, .supports_native_amend = false, .supports_venue_reduce_only = false, .supports_post_only = false, .supports_market_protection = false } } }));
+    _ = try harness.owner.apply(fixture.atGroup(13, .{ .identity = 4, .payload = .{ .capability_profile_activation = .{ .exchange_account = 2, .instrument = 3, .venue = 1, .environment = .simulation, .product = .isolated_linear, .version = 1, .rules_version = 1, .config_version = 1, .adapter_session = 1, .max_dispatch_age_ns = 10 * std.time.ns_per_s, .supports_place = true, .supports_cancel = true, .supports_native_amend = false, .supports_venue_reduce_only = false, .supports_post_only = false, .supports_market_protection = false } } }));
     if (!native_fees) try acceptance.bootstrapArchiveAccountFor(harness.owner, &.{}, 3);
     var book = fixture.snapshotAt(15, 2);
     book.venue.envelope.identity.stream = 7;
@@ -228,7 +228,7 @@ test "07 Owner pins missing funding source time and unknown canonical settlement
             input.venue.envelope.instrument = 3;
             input.venue.envelope.asset = 1;
             _ = try harness.owner.apply(input);
-            try std.testing.expectEqual(@as(i128, -7), harness.owner.shard.economic_projection.suspense_usdt_atoms);
+            try std.testing.expectEqual(@as(i128, -7), harness.owner.shard.economic_projection.suspense_settlement_atoms);
             try std.testing.expectEqual(@as(i128, 0), harness.owner.shard.economic_projection.portfolio.funding_atoms);
             try std.testing.expectEqual(@as(u128, 0), harness.owner.shard.economic_projection.applied_fundings[0].source.portfolio);
         }

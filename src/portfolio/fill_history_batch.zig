@@ -97,7 +97,7 @@ test "Fill archive validated store receipt preserves unique cumulative and compl
     const projection = try allocator.create(economics.Projection);
     defer allocator.destroy(projection);
     projection.* = .{};
-    const fill: economics.Fill = .{ .identity = 1, .order_id = 2, .side = .buy, .product = .isolated_linear_usdt, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 3 }, .price = .{ .instrument = 1, .rules_version = 1, .ticks = 100 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1, .fee = .{ .asset = 1, .atoms = 2 } };
+    const fill: economics.Fill = .{ .identity = 1, .order_id = 2, .side = .buy, .product = .isolated_linear, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 3 }, .price = .{ .instrument = 1, .rules_version = 1, .ticks = 100 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1, .fee = .{ .asset = 1, .atoms = 2 } };
     _ = try projection.applyCanonicalFill(fill, economics.coreFillDigest(fill));
     const before_portfolio = projection.portfolio;
     const before_exchange = projection.exchange;

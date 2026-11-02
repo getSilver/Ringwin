@@ -977,7 +977,7 @@ fn runNativeSettlementFees(case: NativeSettlementCase, arrival: NativeArrival, w
     };
     try policy.activateAssetsForOfflineValidation(owner);
     if (swap_capacity) {
-        _ = try owner.apply(.{ .core = .{ .identity = 100, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = instrument, .quantity_denominator = 100000000, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = 1, .settlement_asset = okx.usdt } } } });
+        _ = try owner.apply(.{ .core = .{ .identity = 100, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = instrument, .quantity_denominator = 100000000, .reservation_model = .leveraged, .product = .isolated_linear, .venue = 1, .settlement_asset = okx.usdt } } } });
         _ = try owner.apply(.{ .core = .{ .identity = 101, .payload = .{ .margin_rules_activated = .{ .version = 1, .instrument = instrument, .price_tick_atoms = 100000000000, .native_settlement_atoms = true } } } });
     }
     var raw = try raw_ingress.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = 1 });
@@ -1019,7 +1019,7 @@ fn runNativeSettlementFees(case: NativeSettlementCase, arrival: NativeArrival, w
             .instrument = instrument,
             .venue = 1,
             .environment = .demo,
-            .product = .isolated_linear_usdt,
+            .product = .isolated_linear,
             .version = 1,
             .rules_version = 1,
             .config_version = 1,
@@ -1128,13 +1128,13 @@ fn runNativeSettlementFees(case: NativeSettlementCase, arrival: NativeArrival, w
         try std.testing.expectEqual(@as(i64, 32), try owner.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
         try std.testing.expectEqual(@as(i128, 0), economic.portfolio.fee_atoms);
         try std.testing.expectEqual(@as(i128, 16000000000), economic.portfolio.swap.open_cost_atoms);
-        try std.testing.expectEqual(@as(i128, 90000000000000), economic.portfolio.usdt_balance_atoms);
-        try std.testing.expectEqual(@as(i128, 100000000000000), economic.exchange.usdt_balance_atoms);
+        try std.testing.expectEqual(@as(i128, 90000000000000), economic.portfolio.settlement_balance_atoms);
+        try std.testing.expectEqual(@as(i128, 100000000000000), economic.exchange.settlement_balance_atoms);
     } else {
         try std.testing.expectEqual(if (malformed) @as(i128, 4_198_632_165) else if (inexact) @as(i128, 0) else if (overflow) @as(i128, 60_000_000_000_000) else if (wide) @as(i128, if (tiny) 1_000_000_000_000 else 8_435_870_685_000_000) else if (tiny) @as(i128, 1_000_000) else 8_435_870_685, economic.portfolio.fee_atoms);
         try std.testing.expectEqual(if (malformed or inexact or overflow or tiny) @as(i128, 0) else if (wide) @as(i128, 100_000_000_000) else 100_000, economic.portfolio.rebate_atoms);
-        try std.testing.expectEqual(if (malformed) @as(i128, 84_995_801_367_835) else if (inexact) @as(i128, 90_000_000) else if (overflow) @as(i128, 25_000_000_000_000) else if (wide) @as(i128, if (tiny) 39_999_999_000_000_000_000 else 69_991_564_229_315_000_000) else if (tiny) @as(i128, 39_999_999_000_000) else 69_991_564_229_315, economic.portfolio.usdt_balance_atoms);
-        try std.testing.expectEqual(if (malformed) @as(i128, 94_995_801_367_835) else if (inexact) @as(i128, 100_000_000) else if (overflow) @as(i128, 35_000_000_000_000) else if (wide) @as(i128, if (tiny) 49_999_999_000_000_000_000 else 79_991_564_229_315_000_000) else if (tiny) @as(i128, 49_999_999_000_000) else 79_991_564_229_315, economic.exchange.usdt_balance_atoms);
+        try std.testing.expectEqual(if (malformed) @as(i128, 84_995_801_367_835) else if (inexact) @as(i128, 90_000_000) else if (overflow) @as(i128, 25_000_000_000_000) else if (wide) @as(i128, if (tiny) 39_999_999_000_000_000_000 else 69_991_564_229_315_000_000) else if (tiny) @as(i128, 39_999_999_000_000) else 69_991_564_229_315, economic.portfolio.settlement_balance_atoms);
+        try std.testing.expectEqual(if (malformed) @as(i128, 94_995_801_367_835) else if (inexact) @as(i128, 100_000_000) else if (overflow) @as(i128, 35_000_000_000_000) else if (wide) @as(i128, if (tiny) 49_999_999_000_000_000_000 else 79_991_564_229_315_000_000) else if (tiny) @as(i128, 49_999_999_000_000) else 79_991_564_229_315, economic.exchange.settlement_balance_atoms);
         try std.testing.expectEqual(@as(i64, if (inexact) 1 else @intCast(count * 10_000)), owner.shard.oms.orderById(command.order_id).?.cumulative_quantity);
         try std.testing.expectEqual(@as(i64, if (inexact) 0 else if (overflow) 10_000 else @intCast(count * 10_000)), try owner.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
         for ([_]@import("../../../portfolio/economics.zig").LedgerLayer{ .portfolio, .exchange }) |layer| {
@@ -1511,8 +1511,8 @@ fn checkNativeBaseFees(nonunit: bool, mode: enum { normal, legacy_precision, con
     }
     if (!fault and !account_case) {
         const economic = owner.shard.economicSummary();
-        try std.testing.expectEqual(@as(i128, if (wide) 80_000_000_000_000_000_000 else if (cumulative) 89_990_000_000_000 else if (nonunit) 89_987_500_000_000 else 89_995_000_000_000), economic.portfolio.usdt_balance_atoms);
-        try std.testing.expectEqual(@as(i128, if (wide) 100_000_000_000_000_000_000 else if (cumulative) 99_990_000_000_000 else if (nonunit) 99_987_500_000_000 else 99_995_000_000_000), economic.exchange.usdt_balance_atoms);
+        try std.testing.expectEqual(@as(i128, if (wide) 80_000_000_000_000_000_000 else if (cumulative) 89_990_000_000_000 else if (nonunit) 89_987_500_000_000 else 89_995_000_000_000), economic.portfolio.settlement_balance_atoms);
+        try std.testing.expectEqual(@as(i128, if (wide) 100_000_000_000_000_000_000 else if (cumulative) 99_990_000_000_000 else if (nonunit) 99_987_500_000_000 else 99_995_000_000_000), economic.exchange.settlement_balance_atoms);
         try std.testing.expectEqual(@as(i128, if (wide) 100_000_000_000_000_000_000 else if (cumulative) 10_000_000_000 else if (nonunit) 12_500_000_000 else 5_000_000_000), economic.portfolio.spot.open_cost_atoms);
         try std.testing.expectEqual(@as(i128, 0), economic.portfolio.realized_pnl_atoms);
         for ([_]@import("../../../portfolio/economics.zig").LedgerLayer{ .portfolio, .exchange }) |layer| {
@@ -1611,7 +1611,7 @@ test "activated balance limits reject cumulative Suspense growth before Owner co
     }
     const trading = @import("../../../trading/trading_shard.zig");
     const bootstrap = [_]trading.CorePayload{
-        .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 3, .quantity_denominator = 10_000, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = 1 } },
+        .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 3, .quantity_denominator = 10_000, .reservation_model = .leveraged, .product = .isolated_linear, .venue = 1 } },
         .{ .margin_rules_activated = .{ .version = 1 } },
         .{ .account_configuration = .{ .exchange_account_identity = 2 } },
         .{ .exchange_balance = .{ .cash_atoms = 100 } },
@@ -1621,7 +1621,7 @@ test "activated balance limits reject cumulative Suspense growth before Owner co
     };
     for (bootstrap, 0..) |payload, index|
         _ = try owner.apply(.{ .core = .{ .identity = index + 3, .payload = payload } });
-    try std.testing.expectEqual(@as(i64, -100), owner.shard.economicSummary().suspense_usdt_atoms);
+    try std.testing.expectEqual(@as(i64, -100), owner.shard.economicSummary().suspense_settlement_atoms);
     const before = owner.shard.economicSummary();
     try owner.sealBootstrap();
     const digest = owner.shard.canonicalStateDigest();
@@ -1840,7 +1840,7 @@ fn checkNativeThirdFees(mode: enum { normal, wide, unknown, inexact, conflict, c
         try std.testing.expectEqual(applied, economic.portfolio.spot.quantity);
         try std.testing.expectEqual(@as(i128, applied) * 100, economic.portfolio.spot_asset_atoms);
         try std.testing.expectEqual(@as(i128, applied) * 5_000_000_000, economic.portfolio.spot.open_cost_atoms);
-        try std.testing.expectEqual(@as(i128, 90_000_000_000_000) - @as(i128, applied) * 5_000_000_000, economic.portfolio.usdt_balance_atoms);
+        try std.testing.expectEqual(@as(i128, 90_000_000_000_000) - @as(i128, applied) * 5_000_000_000, economic.portfolio.settlement_balance_atoms);
         try std.testing.expectEqual(@as(i128, 0), economic.portfolio.fee_atoms);
         try std.testing.expectEqual(@as(i128, 0), economic.portfolio.base_fee_atoms);
         try std.testing.expectEqual(opening, economic.treasury_native_assets[0].atoms);
@@ -1938,7 +1938,7 @@ fn checkNativeFundingBills(mode: enum { normal, unknown, inexact, range, conflic
         .instrument_identity = okx.btc_usdt_swap,
         .quantity_denominator = 100,
         .reservation_model = .leveraged,
-        .product = .isolated_linear_usdt,
+        .product = .isolated_linear,
         .venue = 1,
         .settlement_asset = okx.usdt,
     } } } });
@@ -1999,7 +1999,7 @@ fn checkNativeFundingBills(mode: enum { normal, unknown, inexact, range, conflic
                 exhausted = true;
                 break;
             };
-            try std.testing.expectEqual(@as(i128, 100000000000000) - @as(i128, @intCast(index + 1)), owner.shard.economicSummary().exchange.usdt_balance_atoms);
+            try std.testing.expectEqual(@as(i128, 100000000000000) - @as(i128, @intCast(index + 1)), owner.shard.economicSummary().exchange.settlement_balance_atoms);
         }
         try std.testing.expect(exhausted);
     }
@@ -2046,9 +2046,9 @@ fn checkNativeFundingBills(mode: enum { normal, unknown, inexact, range, conflic
         try retained.applyBatch(owner, output);
         try std.testing.expect(try retained.contains(output.events[0]));
         const economic = owner.shard.economicSummary();
-        try std.testing.expectEqual(@as(i128, 100_000_000_000_000) + totals[index], economic.exchange.usdt_balance_atoms);
-        try std.testing.expectEqual(@as(i128, 90_000_000_000_000), economic.portfolio.usdt_balance_atoms);
-        try std.testing.expectEqual(totals[index], economic.suspense_usdt_atoms);
+        try std.testing.expectEqual(@as(i128, 100_000_000_000_000) + totals[index], economic.exchange.settlement_balance_atoms);
+        try std.testing.expectEqual(@as(i128, 90_000_000_000_000), economic.portfolio.settlement_balance_atoms);
+        try std.testing.expectEqual(totals[index], economic.suspense_settlement_atoms);
         try std.testing.expectEqual(totals[index], economic.exchange.funding_atoms);
         try std.testing.expectEqual(@as(i128, 0), economic.portfolio.funding_atoms);
         try std.testing.expectEqual(@as(i128, 0), economic.portfolio.realized_pnl_atoms);

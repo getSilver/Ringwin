@@ -25,7 +25,7 @@ pub fn verify(owners: []demo.Owner, store: durable.Store) !void {
             var margin = owner.shard.instrument_registry.get(instrument).?.margin;
             margin.version = 3;
             margin.native_settlement_atoms = true;
-            margin.native = .{ .model = .isolated_linear_usdt_v1, .tier_identity = 1, .notional_lower_atoms = 0, .notional_upper_atoms = 100000, .initial_margin_ppm = 20000, .maintenance_ppm = 11000, .maintenance_deduction_atoms = 0, .close_fee_ppm = 0, .margin_rounding_atoms = 1, .price_rounding_ticks = 1 };
+            margin.native = .{ .model = .isolated_linear_v1, .tier_identity = 1, .notional_lower_atoms = 0, .notional_upper_atoms = 100000, .initial_margin_ppm = 20000, .maintenance_ppm = 11000, .maintenance_deduction_atoms = 0, .close_fee_ppm = 0, .margin_rounding_atoms = 1, .price_rounding_ticks = 1 };
             margin.native.?.margin_rounding_atoms = 10;
             _ = try owner.apply(fixture.atGroup(59, .{ .identity = @intCast(6000 + instrument), .account_scope = 2, .payload = .{ .margin_rules_activated = margin } }));
             if (instrument == domain) {

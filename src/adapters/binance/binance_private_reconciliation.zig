@@ -312,7 +312,7 @@ pub const Reconciler = struct {
         if (self.pending_economic) |request| {
             const binding = self.binding orelse return error.StaleSession;
             const through = self.account_source_time orelse request.economic_through_utc_ns orelse request.economic_boundary_utc_ns.?;
-            var economics: canonical.AccountEconomicEvidence = .{ .scope = .spot_and_isolated_linear_usdt, .exchange_account = binding.account, .from_utc_ns = request.economic_boundary_utc_ns.?, .through_utc_ns = through, .source = .{ .stream = rawStream(binding.session), .sequence = evidence.stream_sequence, .digest = evidence.sha256 }, .balance_count = self.balance_count };
+            var economics: canonical.AccountEconomicEvidence = .{ .scope = .spot_and_isolated_linear, .exchange_account = binding.account, .from_utc_ns = request.economic_boundary_utc_ns.?, .through_utc_ns = through, .source = .{ .stream = rawStream(binding.session), .sequence = evidence.stream_sequence, .digest = evidence.sha256 }, .balance_count = self.balance_count };
             for (self.balances[0..self.balance_count], 0..) |balance, index| {
                 economics.balances[index] = balance.total;
                 economics.asset_versions[index] = self.asset_definitions.get(balance.asset).?.definition.version;

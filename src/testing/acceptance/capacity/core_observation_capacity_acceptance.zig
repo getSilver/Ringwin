@@ -34,7 +34,7 @@ fn priceStep(index: usize) i128 {
     return if (index < 75) 100_000_000 else 10_000;
 }
 pub fn product(index: usize) canonical.Product {
-    return if (index < 75) .spot else .isolated_linear_usdt;
+    return if (index < 75) .spot else .isolated_linear;
 }
 
 const Source = struct {
@@ -652,7 +652,7 @@ test "Observation capacity 500 combinations four continuous Owners retain 100 se
             .instrument_identity = instrument(route, 125),
             .quantity_denominator = 10_000,
             .reservation_model = .leveraged,
-            .product = .isolated_linear_usdt,
+            .product = .isolated_linear,
             .venue = venues[route],
             .base_asset = 1050,
         } } } }));
@@ -664,7 +664,7 @@ test "Observation capacity 500 combinations four continuous Owners retain 100 se
         const spot = owner.shard.instrument_registry.get(instrument(route, 0)).?;
         const swap = owner.shard.instrument_registry.get(instrument(route, 75)).?;
         try std.testing.expectEqual(@import("../../../risk/risk.zig").Product.spot, spot.product);
-        try std.testing.expectEqual(@import("../../../risk/risk.zig").Product.isolated_linear_usdt, swap.product);
+        try std.testing.expectEqual(@import("../../../risk/risk.zig").Product.isolated_linear, swap.product);
         try std.testing.expectEqual(spot.rules.base_asset, swap.rules.base_asset);
         try std.testing.expectEqual(@as(i128, 100_000) * spot.rules.quantity_numerator * swap.rules.quantity_denominator, @as(i128, 10) * swap.rules.quantity_numerator * spot.rules.quantity_denominator);
         try std.testing.expectEqual(venues[route], adapters[route].source.venue_identity);

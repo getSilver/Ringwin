@@ -52,6 +52,15 @@ class DepthSnapshotTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             host.encode_depth_snapshot(dict(decoded, instrument=True))
 
+    def test_capture_sequence_is_preserved_without_venue_continuity(self):
+        payload = self.wire()
+        payload[44] = 1
+        payload[48:56] = (2).to_bytes(8, "little")
+        book = host.decode_depth_snapshot(payload)
+        self.assertEqual(book["sequence_kind"], "capture")
+        self.assertEqual(book["capture_epoch"], 2)
+        self.assertEqual(host.encode_depth_snapshot(book), bytes(payload))
+
     def test_absent_quantity_is_distinct_from_zero(self):
         payload = self.wire()
         offset = 64 + 9 * 40
@@ -62,7 +71,7 @@ class DepthSnapshotTests(unittest.TestCase):
 
     def test_invalid_capacity_partial_tail_and_order_fail_closed(self):
         variants = []
-        for field, value in ((40, 9), (41, 0), (42, 2), (44, 1), (64 + 2 * 40, 1)):
+        for field, value in ((40, 9), (41, 0), (42, 2), (44, 2), (64 + 2 * 40, 1)):
             bad = self.wire()
             bad[field] = value
             variants.append(bad)

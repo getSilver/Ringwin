@@ -8,6 +8,7 @@ pub const Quote = struct { gross_lots: i128, base_lots: i128, quote_tick_lots: i
 
 pub fn validate(book: c.L2BookSnapshot) !void {
     const depth = book.depth orelse return error.MissingDepth;
+    try book.validateSequence();
     if (!book.complete) return error.IncompleteBookSnapshot;
     if (book.instrument == 0 or book.best_bid.instrument != book.instrument or book.best_ask.instrument != book.instrument or
         book.best_bid.rules_version == 0 or book.best_bid.rules_version != book.best_ask.rules_version)
@@ -82,6 +83,8 @@ pub fn encode(destination: []u8, book: c.L2BookSnapshot) ![]const u8 {
     bytes[41] = depth.ask_count;
     bytes[42] = @intFromBool(depth.bids_truncated);
     bytes[43] = @intFromBool(depth.asks_truncated);
+    bytes[44] = @intFromEnum(book.sequence_kind);
+    put(u64, bytes, 48, book.capture_epoch);
     for ([_][c.max_depth_levels]c.DepthLevel{ depth.bids, depth.asks }, 0..) |levels, side| {
         for (levels, 0..) |level, i| {
             const offset = 64 + (side * c.max_depth_levels + i) * 40;
@@ -93,7 +96,7 @@ pub fn encode(destination: []u8, book: c.L2BookSnapshot) ![]const u8 {
     return bytes;
 }
 pub fn decode(bytes: []const u8) !c.L2BookSnapshot {
-    if (bytes.len != wire_len or bytes[42] > 1 or bytes[43] > 1 or !zero(bytes[44..64])) return error.InvalidDepthWire;
+    if (bytes.len != wire_len or bytes[42] > 1 or bytes[43] > 1 or !zero(bytes[45..48]) or !zero(bytes[56..64])) return error.InvalidDepthWire;
     var depth: c.BookDepth = .{ .visible_at_ns = get(u64, bytes, 32), .bid_count = bytes[40], .ask_count = bytes[41], .bids_truncated = bytes[42] == 1, .asks_truncated = bytes[43] == 1 };
     for (0..2) |side| for (0..c.max_depth_levels) |i| {
         const offset = 64 + (side * c.max_depth_levels + i) * 40;
@@ -105,7 +108,7 @@ pub fn decode(bytes: []const u8) !c.L2BookSnapshot {
     };
     const instrument = get(u128, bytes, 0);
     const rules = get(u64, bytes, 16);
-    const book: c.L2BookSnapshot = .{ .instrument = instrument, .sequence = get(u64, bytes, 24), .depth = depth, .best_bid = .{ .instrument = instrument, .rules_version = rules, .ticks = depth.bids[0].ticks }, .best_ask = .{ .instrument = instrument, .rules_version = rules, .ticks = depth.asks[0].ticks }, .best_bid_quantity = if (depth.bids[0].lots) |n| .{ .instrument = instrument, .rules_version = rules, .lots = n } else null, .best_ask_quantity = if (depth.asks[0].lots) |n| .{ .instrument = instrument, .rules_version = rules, .lots = n } else null, .next_ask = if (depth.ask_count > 1) .{ .instrument = instrument, .rules_version = rules, .ticks = depth.asks[1].ticks } else null, .next_ask_quantity = if (depth.ask_count > 1 and depth.asks[1].lots != null) .{ .instrument = instrument, .rules_version = rules, .lots = depth.asks[1].lots.? } else null };
+    const book: c.L2BookSnapshot = .{ .capture_epoch = get(u64, bytes, 48), .sequence_kind = std.enums.fromInt(c.BookSequenceKind, bytes[44]) orelse return error.InvalidDepthWire, .instrument = instrument, .sequence = get(u64, bytes, 24), .depth = depth, .best_bid = .{ .instrument = instrument, .rules_version = rules, .ticks = depth.bids[0].ticks }, .best_ask = .{ .instrument = instrument, .rules_version = rules, .ticks = depth.asks[0].ticks }, .best_bid_quantity = if (depth.bids[0].lots) |n| .{ .instrument = instrument, .rules_version = rules, .lots = n } else null, .best_ask_quantity = if (depth.asks[0].lots) |n| .{ .instrument = instrument, .rules_version = rules, .lots = n } else null, .next_ask = if (depth.ask_count > 1) .{ .instrument = instrument, .rules_version = rules, .ticks = depth.asks[1].ticks } else null, .next_ask_quantity = if (depth.ask_count > 1 and depth.asks[1].lots != null) .{ .instrument = instrument, .rules_version = rules, .lots = depth.asks[1].lots.? } else null };
     try validate(book);
     return book;
 }

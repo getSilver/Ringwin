@@ -23,7 +23,7 @@ Status: open
 
 ## Route
 
-以下八张实施票已按用户确认发布；01 已在 `feat/hyperliquid-adapter` 完成协议合同与样本并 resolved，其余 open、未认领，按依赖逐票推进。
+以下八张实施票已按用户确认发布；01 协议合同与样本、02 共享领域合同已在 `feat/hyperliquid-adapter` resolved；03–08 仍 open、未认领，按依赖逐票推进。
 
 | 切片 | 交付与验收 | 前置 |
 |---|---|---|
@@ -42,11 +42,12 @@ Status: open
 
 ## Frontier
 
-- [02 USDC 逐仓与必要共享合同](issues/02-shared-domain-contracts.md)：open，01 已完成，无未完成前置，尚未认领。
 - [03 API 钱包凭证与签名](issues/03-api-wallet-signing.md)：open，01 已完成，无未完成前置，尚未认领。
+- [04 公共行情](issues/04-public-market-feed.md)：open，02 已完成，无未完成前置，尚未认领。
 
 ## Decisions so far
 
+- 2026-11-02：按用户要求完成 02：真实结算 Asset 绑定贯通风险与经济路径，新增捕获 epoch/顺序证据、通用精确价格约束及严格恢复校验；canonical 19 / codec 14 / journal 51 / state 55 / registry 49。Debug/ReleaseSafe 公共核心回归通过；全量运行中的旧版本断言、摘要与 native 夹具构建来源问题已修正并定向通过，最终 native 生命周期 6/6。完整运行及失败修复证据见 [02](issues/02-shared-domain-contracts.md)，不将初次失败日志视为最终全量全绿。Standards/Spec 审查问题已修复，02 resolved；03/04 未自动开始，无在线或生产资格。
 - 2026-11-02：用户要求新建分支完成 01；`feat/hyperliquid-adapter` 已交付[协议合同](../../docs/research/2026-11-02-hyperliquid-protocol-contract.md)、字段矩阵、固定 SDK/公开 hash 向量及有来源身份的公开/合成样本。样本哈希/链接检查与 Standards/Spec 双轴审查通过，01 resolved；`zig build test` 运行一次但在 30 分钟预算内未完成并主动停止，未取得全套回归通过结论。无运行时代码或持久格式变更，未取得签名、Adapter、Testnet 交易或生产资格；02/03 仍 open，未自动开始。
 - 2026-11-02：用户最终确认整体理解与八个切片，已发布 01–08 本地实施票并保持既定依赖；发布不表示实现完成、在线授权或资格通过。
 - 2026-11-02：用户确定首期覆盖永续、现货，BTC、ETH 为验收目标。

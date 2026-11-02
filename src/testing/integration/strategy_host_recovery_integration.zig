@@ -687,7 +687,7 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
             .adapter = target.interface(),
             .venue_identity = venue,
             .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 },
-            .supported_products = execution.productMask(.isolated_linear_usdt),
+            .supported_products = execution.productMask(.isolated_linear),
         });
         try dispatcher.pinDeploymentDigest(owner.shard.deployment.header.?.expected_digest);
         try dual.observe(dispatcher, &owner.shard);
@@ -986,7 +986,7 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
             .adapter = target.interface(),
             .venue_identity = venue,
             .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 },
-            .supported_products = execution.productMask(.isolated_linear_usdt),
+            .supported_products = execution.productMask(.isolated_linear),
         });
         try execution_gateway.attachRecoveredDurableDispatch(adapter.interface(), init.io, .{ .domain = .control, .id = 92 });
         try std.testing.expectEqual(@as(usize, 2), execution_gateway.accepted_dispatch_count);
@@ -1324,7 +1324,7 @@ fn cycleProjection(owner: *const @import("../../runtime/demo/demo_authority.zig"
         std.mem.writeInt(u64, projection[8 + 16 * index ..][0..8], @intCast(applied), .little);
         std.mem.writeInt(u64, projection[16 + 16 * index ..][0..8], @intCast(possible), .little);
         const portfolio = economics.portfolioLayer(10).?;
-        nav += portfolio.usdt_balance_atoms;
+        nav += portfolio.settlement_balance_atoms;
         realized += portfolio.realized_pnl_atoms;
         const quantity = portfolio.positionForInstrument(instrument).quantity;
         std.mem.writeInt(u64, projection[48 + 8 * index ..][0..8], @intCast(@abs(quantity)), .little);

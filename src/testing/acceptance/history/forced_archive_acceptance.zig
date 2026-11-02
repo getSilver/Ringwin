@@ -10,8 +10,8 @@ test "08 forced archive retains original source complete economics and all posti
     const projection = try allocator.create(economics.Projection);
     defer allocator.destroy(projection);
     projection.* = .{};
-    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .product = .isolated_linear_usdt, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 4 }, .price = .{ .instrument = 1, .rules_version = 1, .ticks = 100 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1 } });
-    const forced: economics.VenueForcedExecution = .{ .identity = 5, .source_identity = 99, .side = .sell, .product = .isolated_linear_usdt, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 2 }, .price = .{ .instrument = 1, .rules_version = 1, .ticks = 110 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1, .fee = .{ .asset = 1, .atoms = 3 }, .penalty = .{ .asset = 1, .atoms = 1 }, .expected_realized_pnl_atoms = 20 };
+    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .product = .isolated_linear, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 4 }, .price = .{ .instrument = 1, .rules_version = 1, .ticks = 100 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1 } });
+    const forced: economics.VenueForcedExecution = .{ .identity = 5, .source_identity = 99, .side = .sell, .product = .isolated_linear, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 2 }, .price = .{ .instrument = 1, .rules_version = 1, .ticks = 110 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1, .fee = .{ .asset = 1, .atoms = 3 }, .penalty = .{ .asset = 1, .atoms = 1 }, .expected_realized_pnl_atoms = 20 };
     const original: events.VenueForcedExecution = .{ .execution_id = 5, .source_identity = 99, .side = .sell, .quantity = 2, .price_ticks = 110, .fee_atoms = 3, .penalty_atoms = 1, .expected_realized_pnl_atoms = 20 };
     var source: economics.ForcedSource = .{ .core_event_identity = 50, .core_times = .{ .source = 100, .receive = 101, .monotonic = 102, .wall = 103, .presence = .{ .source = true, .receive = true, .monotonic = true, .wall = true } }, .accepted_input_digest = history.hash("accepted original forced input"), .exchange_account = 7, .portfolio = 8, .strategy = 9, .instrument = 1, .rules_version = 1 };
     source.core_payload_len = @intCast((try codec.encodeBare(&source.core_payload_bytes, original)).len);
@@ -19,7 +19,7 @@ test "08 forced archive retains original source complete economics and all posti
     try std.testing.expect(!try projection.applyForcedWithSource(forced, source));
     try std.testing.expectEqual(@as(i64, 2), projection.portfolio.swap.quantity);
     try std.testing.expectEqual(@as(i128, 200), projection.portfolio.swap.open_cost_atoms);
-    try std.testing.expectEqual(@as(i128, 16), projection.portfolio.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 16), projection.portfolio.settlement_balance_atoms);
     const applied = projection.applied_forced_executions[0];
     try std.testing.expectEqualDeep(source, applied.source);
     try std.testing.expect(!std.mem.eql(u8, &applied.source_digest, &applied.payload_digest));

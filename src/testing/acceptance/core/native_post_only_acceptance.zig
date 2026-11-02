@@ -74,7 +74,7 @@ const Harness = struct {
             .account = account,
             .adapter = adapter.interface(),
             .venue_identity = identity,
-            .supported_products = execution.productMask(.isolated_linear_usdt),
+            .supported_products = execution.productMask(.isolated_linear),
             .capability = .{ .version = 2, .rules_version = 1, .config_version = 1, .session = 1, .supports_post_only = true },
         });
     }
@@ -289,7 +289,7 @@ test "07 single Host native maker retains exact semantics and missing capability
             .instrument = 3,
             .venue = 1,
             .environment = .simulation,
-            .product = .isolated_linear_usdt,
+            .product = .isolated_linear,
             .version = 1,
             .rules_version = 1,
             .config_version = 1,

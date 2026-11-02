@@ -705,7 +705,7 @@ pub const OkxVenueAdapter = struct {
                 const mapped = self.mapPrivateInstrument(settlement.instrument) orelse return error.UnsupportedInstrument;
                 const configured = self.instrument_definitions.get(mapped.identity) orelse return error.UnsupportedInstrument;
                 const asset = try self.asset_definitions.resolveCode(binding.venue, settlement.asset.slice());
-                if (configured.product != .isolated_linear_usdt or configured.rules.settlement_asset != asset)
+                if (configured.product != .isolated_linear or configured.rules.settlement_asset != asset)
                     return error.UnsupportedMarginUnit;
                 const identity = digestIdentity(event.envelope.source_fact_identity);
                 try self.appendPrivate(output, event.envelope, .account, mapped.identity, asset, identity, .{ .funding_settlement = .{
@@ -878,7 +878,7 @@ pub const OkxVenueAdapter = struct {
         const snapshot = event.payload.exchange_balance_snapshot;
         var evidence: canonical.AccountEconomicEvidence = .{
             .exchange_account = binding.account,
-            .scope = .spot_and_isolated_linear_usdt,
+            .scope = .spot_and_isolated_linear,
             .from_utc_ns = boundary,
             .through_utc_ns = snapshot.venue_update_time_utc_ns,
             .source = .{ .stream = binding.session, .sequence = event.envelope.raw_evidence.stream_sequence, .digest = event.envelope.raw_evidence.sha256 },
@@ -1940,7 +1940,7 @@ test "OKX adapter releases ready private WS facts through the canonical seam" {
     while (try adapter.tryDrain()) |_| {}
     try std.testing.expect(reconciler.readiness().reconciliation_ready);
     try std.testing.expect(implementation.pending_account_reconciliation == null);
-    _ = try implementation.instrument_definitions.register(.{ .instrument = btc_usdt_swap, .venue = 1, .product = .isolated_linear_usdt, .rules = .{ .version = 8, .instrument_identity = btc_usdt_swap, .quantity_denominator = 10000, .reservation_model = .leveraged, .venue = 1, .settlement_asset = usdt }, .margin = .{ .version = 1 } });
+    _ = try implementation.instrument_definitions.register(.{ .instrument = btc_usdt_swap, .venue = 1, .product = .isolated_linear, .rules = .{ .version = 8, .instrument_identity = btc_usdt_swap, .quantity_denominator = 10000, .reservation_model = .leveraged, .venue = 1, .settlement_asset = usdt }, .margin = .{ .version = 1 } });
     const native_positions =
         \\{"arg":{"channel":"positions"},"eventType":"snapshot","curPage":1,"lastPage":true,"data":[{"posId":"55","instId":"BTC-USDT-SWAP","mgnMode":"isolated","posSide":"net","pos":"1","margin":"1.000001","upl":"0.000001","ccy":"USDT","uTime":"1800000000300"}]}
     ;
@@ -2151,7 +2151,7 @@ test "OKX private facts normalize fee signs into canonical execution fill and ac
     observed_positions.includes_zero_positions = true;
     observed_positions.positions[0] = .{ .venue_position_id = @enumFromInt(1), .instrument = .btc_usdt_swap, .margin_mode = .isolated, .position_side = .net, .quantity = try private.Decimal.parse("1"), .average_price = try private.Decimal.parse("50000"), .mark_price = try private.Decimal.parse("50001"), .liquidation_price = try private.Decimal.parse("40000"), .margin = try private.Decimal.parse("2"), .leverage = try private.Decimal.parse("3"), .unrealized_pnl = try private.Decimal.parse("1"), .venue_update_time_utc_ns = 1 };
     observed_positions.positions[0].currency = try private.AssetCode.init("USDT");
-    _ = try implementation.instrument_definitions.register(.{ .instrument = btc_usdt_swap, .venue = 1, .product = .isolated_linear_usdt, .rules = .{ .version = 8, .instrument_identity = btc_usdt_swap, .quantity_denominator = 10000, .reservation_model = .leveraged, .venue = 1, .settlement_asset = usdt }, .margin = .{ .version = 1 } });
+    _ = try implementation.instrument_definitions.register(.{ .instrument = btc_usdt_swap, .venue = 1, .product = .isolated_linear, .rules = .{ .version = 8, .instrument_identity = btc_usdt_swap, .quantity_denominator = 10000, .reservation_model = .leveraged, .venue = 1, .settlement_asset = usdt }, .margin = .{ .version = 1 } });
     try implementation.translatePrivate(&output, .{ .envelope = privateEnvelope(6, 6), .payload = .{ .exchange_position_snapshot = observed_positions } }, false);
     const observed = output.events[3].event.account_observed.value.position;
     try std.testing.expectEqual(@as(i128, 500_010), observed.value.mark_price.?.ticks);

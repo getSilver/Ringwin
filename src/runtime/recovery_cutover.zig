@@ -128,11 +128,11 @@ fn expectedVenueEvidenceFor(shard: *const trading.TradingShard) VenueEvidence {
         .exchange_open_cost_atoms = economic.exchange.swap.open_cost_atoms,
         .portfolio_spot_open_cost_atoms = economic.portfolio.spot.open_cost_atoms,
         .exchange_spot_open_cost_atoms = economic.exchange.spot.open_cost_atoms,
-        .portfolio_cash_atoms = economic.portfolio.usdt_balance_atoms,
-        .exchange_cash_atoms = economic.exchange.usdt_balance_atoms,
+        .portfolio_cash_atoms = economic.portfolio.settlement_balance_atoms,
+        .exchange_cash_atoms = economic.exchange.settlement_balance_atoms,
         .portfolio_fee_atoms = economic.portfolio.fee_atoms,
         .exchange_fee_atoms = economic.exchange.fee_atoms,
-        .suspense_atoms = economic.suspense_usdt_atoms,
+        .suspense_atoms = economic.suspense_settlement_atoms,
         .active_reservations_atoms = blk: {
             const reservations = shard.oms.activeReservations(settlement_asset) catch break :blk std.math.maxInt(i128);
             break :blk reservations.atoms;
@@ -763,7 +763,7 @@ test "cutover failures and forward rollback never regress economic state or gene
         .instrument_identity = swap_instrument,
         .quantity_denominator = 1,
         .reservation_model = .leveraged,
-        .product = .isolated_linear_usdt,
+        .product = .isolated_linear,
         .venue = 1,
     } } } });
     _ = try shard.apply(.{ .core = .{ .identity = 2, .payload = .{ .margin_rules_activated = .{

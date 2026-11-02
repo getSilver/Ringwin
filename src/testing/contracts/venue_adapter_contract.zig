@@ -38,7 +38,7 @@ pub fn exerciseEconomicFaultRecovery(batch: canonical.AdapterOutputBatch) !void 
     defer allocator.destroy(owner);
     try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, stream);
     try activateTestAssets(owner);
-    _ = try owner.apply(.{ .core = .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 3, .quantity_denominator = 10_000, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = batch.events[0].envelope.venue } } } });
+    _ = try owner.apply(.{ .core = .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 3, .quantity_denominator = 10_000, .reservation_model = .leveraged, .product = .isolated_linear, .venue = batch.events[0].envelope.venue } } } });
     _ = try owner.apply(.{ .core = .{ .identity = 2, .payload = .{ .margin_rules_activated = .{ .version = 1 } } } });
     _ = try owner.apply(.{ .core = .{ .identity = 3, .payload = .{ .account_configuration = .{ .exchange_account_identity = batch.events[0].envelope.exchange_account orelse return error.MissingAccount } } } });
     const economics_before = owner.shard.economicSummary();

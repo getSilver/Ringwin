@@ -312,7 +312,7 @@ _Avoid_: SourceSequence, global sequence, per-segment offset
 _Avoid_: StreamIdentity, channel name, connection object
 
 **VenueSourceSequence**:
-VenueSourceStreamIdentity 内由 Venue 提供或由适配器按接收顺序分配的序号；它只证明该来源可观察范围内的顺序，不得跨来源比较或伪装成全局顺序。
+VenueSourceStreamIdentity 内由 Venue 提供或由适配器按接收顺序分配的序号；必须区分 Venue 连续性证据与本地捕获顺序，后者不证明交易所消息连续。它不得跨来源比较或伪装成全局顺序。
 _Avoid_: StreamSequence, global sequence, exchange-time order
 
 **BootstrapSnapshotIdentity**:

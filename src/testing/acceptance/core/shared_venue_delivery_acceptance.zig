@@ -111,7 +111,7 @@ fn initializeOwner(owner: *demo.Owner, index: usize, multiple_portfolios: bool) 
     for (@import("../../../trading/asset_registry.zig").testDefinitions(6, 8)) |definition|
         _ = try owner.apply(.{ .core = .{ .identity = definition.asset, .payload = .{ .asset_definition_activated = definition } } });
     const payloads = [_]trading.CorePayload{
-        .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = domain, .quantity_denominator = 10000, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = 1 } },
+        .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = domain, .quantity_denominator = 10000, .reservation_model = .leveraged, .product = .isolated_linear, .venue = 1 } },
         .{ .margin_rules_activated = .{ .version = 1, .instrument = domain } },
         .{ .account_configuration = .{ .exchange_account_identity = 2 } },
         .{ .exchange_balance = .{ .cash_atoms = 25 } },
@@ -134,7 +134,7 @@ fn initializeOwner(owner: *demo.Owner, index: usize, multiple_portfolios: bool) 
             .instrument_identity = instrument,
             .quantity_denominator = 10000,
             .reservation_model = .leveraged,
-            .product = .isolated_linear_usdt,
+            .product = .isolated_linear,
             .venue = 1,
         } } }));
     }
@@ -169,7 +169,7 @@ test "03 one VenueAdapter broadcasts original facts through four durable Owners"
             try std.testing.expect(try coordinator.deliverVenueFact(@enumFromInt(index), owner));
         }
         try std.testing.expect(!try coordinator.deliverVenueFact(@enumFromInt(index), owner));
-        try std.testing.expectEqual(@as(i128, 25), owner.shard.economic_projection.portfolio.usdt_balance_atoms);
+        try std.testing.expectEqual(@as(i128, 25), owner.shard.economic_projection.portfolio.settlement_balance_atoms);
     }
     try coordinator.checkpoint();
     var recovered = try coordination.CoordinatorOwner.recover(coordinator.stream, memory.interface(), undefined);
@@ -184,7 +184,7 @@ test "03 one VenueAdapter broadcasts original facts through four durable Owners"
     try std.testing.expectEqual(@as(u64, 7), source.next_event_identity);
     try std.testing.expectEqual(@as(?@import("../../../model/canonical_event.zig").AdapterOutputBatch, null), try adapter.tryDrain());
     for (owners) |*owner| {
-        try std.testing.expectEqual(@as(i128, 25), owner.shard.economic_projection.portfolio.usdt_balance_atoms);
+        try std.testing.expectEqual(@as(i128, 25), owner.shard.economic_projection.portfolio.settlement_balance_atoms);
         try std.testing.expectEqual(owners[0].shard.authoritativeBarrier(), owner.shard.authoritativeBarrier());
     }
     var funding = fixture.canonicalAt(40, 7, .{ .funding_settlement = .{
@@ -203,7 +203,7 @@ test "03 one VenueAdapter broadcasts original facts through four durable Owners"
         try std.testing.expect(!try recovered.deliverVenueFact(@enumFromInt(index), owner));
     // Crash after the target commit and before the coordinator acknowledgement.
     _ = try owners[0].apply(funding);
-    try std.testing.expectEqual(@as(i128, 22), owners[0].shard.economic_projection.portfolio.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 22), owners[0].shard.economic_projection.portfolio.settlement_balance_atoms);
     try std.testing.expectEqual(@as(i128, -3), owners[0].shard.economic_projection.portfolio.funding_atoms);
     const applied_barrier = owners[0].shard.authoritativeBarrier();
     const applied_digest = owners[0].shard.canonicalStateDigest();
@@ -212,7 +212,7 @@ test "03 one VenueAdapter broadcasts original facts through four durable Owners"
     try std.testing.expectEqual(applied_barrier, owners[0].shard.authoritativeBarrier());
     try std.testing.expectEqualDeep(applied_digest, owners[0].shard.canonicalStateDigest());
     for (owners[1..]) |*owner|
-        try std.testing.expectEqual(@as(i128, 25), owner.shard.economic_projection.portfolio.usdt_balance_atoms);
+        try std.testing.expectEqual(@as(i128, 25), owner.shard.economic_projection.portfolio.settlement_balance_atoms);
     var first_pending: trading.canonical.EventRecord = undefined;
     for (8..48) |cursor| {
         var queued = funding.venue;
@@ -237,8 +237,8 @@ test "03 one VenueAdapter broadcasts original facts through four durable Owners"
     independent.event.funding_settlement.amount.atoms = -2;
     try retried.acceptVenueFactFromOwners(independent, .{ &owners[0], &owners[1], &owners[2], &owners[3] });
     try std.testing.expect(try retried.deliverVenueFact(.shard_1, &owners[1]));
-    try std.testing.expectEqual(@as(i128, 23), owners[1].shard.economic_projection.portfolio.usdt_balance_atoms);
-    try std.testing.expectEqual(@as(i128, 22), owners[0].shard.economic_projection.portfolio.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 23), owners[1].shard.economic_projection.portfolio.settlement_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 22), owners[0].shard.economic_projection.portfolio.settlement_balance_atoms);
     try retried.checkpoint();
     var paused = try coordination.CoordinatorOwner.recover(coordinator.stream, memory.interface(), undefined);
     try std.testing.expectEqualDeep(first_pending, (try paused.pendingVenueFact(.shard_0)).?);
@@ -249,7 +249,7 @@ test "03 one VenueAdapter broadcasts original facts through four durable Owners"
     try std.testing.expectError(error.InjectedEio, paused.deliverVenueFact(.shard_0, &owners[0]));
     const quarantined = try coordination.CoordinatorOwner.recover(coordinator.stream, memory.interface(), undefined);
     try std.testing.expect(quarantined.closed);
-    try std.testing.expectEqual(@as(i128, 19), owners[0].shard.economic_projection.portfolio.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 19), owners[0].shard.economic_projection.portfolio.settlement_balance_atoms);
     const restored = try allocator.create(demo.Owner);
     defer allocator.destroy(restored);
     for (owners) |*owner| {
@@ -288,14 +288,14 @@ test "03 immutable deployment ownership attributes canonical funding" {
     event.venue.envelope.instrument = 1;
     event.venue.envelope.asset = 1;
     _ = try owner.apply(event);
-    try std.testing.expectEqual(@as(i128, 22), owner.shard.economic_projection.portfolio.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 22), owner.shard.economic_projection.portfolio.settlement_balance_atoms);
     try std.testing.expectEqual(@as(i128, -3), owner.shard.economic_projection.portfolio.funding_atoms);
-    try std.testing.expectEqual(@as(i128, 0), owner.shard.economic_projection.suspense_usdt_atoms);
+    try std.testing.expectEqual(@as(i128, 0), owner.shard.economic_projection.suspense_settlement_atoms);
     try owner.checkpoint();
     const recovered = try allocator.create(demo.Owner);
     defer allocator.destroy(recovered);
     try demo.Owner.recoverInto(recovered, memory.interface(), undefined, owner.stream);
-    try std.testing.expectEqual(@as(i128, 22), recovered.shard.economic_projection.portfolio.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 22), recovered.shard.economic_projection.portfolio.settlement_balance_atoms);
     try std.testing.expectEqual(@as(i128, -3), recovered.shard.economic_projection.portfolio.funding_atoms);
     var foreign = event;
     foreign.venue.envelope.identity.sequence = 2;
@@ -307,15 +307,15 @@ test "03 immutable deployment ownership attributes canonical funding" {
     foreign.venue.event.funding_settlement.venue_bill_id = 501;
     foreign.venue.event.funding_settlement.instrument = 2;
     _ = try owner.apply(foreign);
-    try std.testing.expectEqual(@as(i128, 22), owner.shard.economic_projection.portfolio.usdt_balance_atoms);
-    try std.testing.expectEqual(@as(i128, -3), owner.shard.economic_projection.suspense_usdt_atoms);
+    try std.testing.expectEqual(@as(i128, 22), owner.shard.economic_projection.portfolio.settlement_balance_atoms);
+    try std.testing.expectEqual(@as(i128, -3), owner.shard.economic_projection.suspense_settlement_atoms);
     const digest = owner.shard.canonicalStateDigest();
     try std.testing.expectError(error.CanonicalScopeMismatch, owner.shard.apply(fixture.atGroup(40, .{ .identity = 90, .account_scope = 2, .payload = .{ .instrument_rules_activated = .{
         .version = 1,
         .instrument_identity = 9,
         .quantity_denominator = 10000,
         .reservation_model = .leveraged,
-        .product = .isolated_linear_usdt,
+        .product = .isolated_linear,
         .venue = 1,
     } } })));
     try std.testing.expectEqualDeep(digest, owner.shard.canonicalStateDigest());

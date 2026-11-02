@@ -24,7 +24,7 @@ test "04 account summary includes funded portfolios without duplicating account 
     const summary = try coordination.shardSummaryFromShardForAccount(&owner.shard, 20, .shard_0, 1, 1);
     try std.testing.expectEqual(@as(i128, 600), summary.cash_atoms);
     try std.testing.expectEqual(@as(i128, 0), summary.reservation_atoms);
-    try std.testing.expectEqual(@as(i128, 1_000), owner.shard.accountState(20).?.economic_projection.exchange.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 1_000), owner.shard.accountState(20).?.economic_projection.exchange.settlement_balance_atoms);
 }
 
 fn apply(owner: *demo.Owner, account: ?u128, payload: trading.CorePayload) !void {
@@ -42,7 +42,7 @@ noinline fn placeGroups(owner: *demo.Owner, comptime forced_case: bool) !void {
         margin.internal_maintenance_margin_ppm = 50_000;
         margin.fee_ppm = 0;
         margin.native_settlement_atoms = true;
-        margin.native = .{ .model = .isolated_linear_usdt_v1, .tier_identity = 1, .notional_lower_atoms = 0, .notional_upper_atoms = 100_000, .initial_margin_ppm = 100_000, .maintenance_ppm = 50_000, .maintenance_deduction_atoms = 0, .close_fee_ppm = 0, .margin_rounding_atoms = 1, .price_rounding_ticks = 1 };
+        margin.native = .{ .model = .isolated_linear_v1, .tier_identity = 1, .notional_lower_atoms = 0, .notional_upper_atoms = 100_000, .initial_margin_ppm = 100_000, .maintenance_ppm = 50_000, .maintenance_deduction_atoms = 0, .close_fee_ppm = 0, .margin_rounding_atoms = 1, .price_rounding_ticks = 1 };
         try apply(owner, 2, .{ .margin_rules_activated = margin });
     }
     try apply(owner, null, .{ .strategy_activated = .{ .portfolio_identity = 15, .strategy_identity = 5, .config_version = 2, .activation_identity = 1 } });
@@ -242,8 +242,8 @@ noinline fn verifySecondaryFee(coordinator: *coordination.CoordinatorOwner, owne
         }
     }
     const original = origin orelse return error.TestMissingSecondaryFillOrigin;
-    const before_primary = projection.portfolioLayer(11).?.usdt_balance_atoms;
-    const before_secondary = projection.portfolioLayer(15).?.usdt_balance_atoms;
+    const before_primary = projection.portfolioLayer(11).?.settlement_balance_atoms;
+    const before_secondary = projection.portfolioLayer(15).?.settlement_balance_atoms;
     const source: canonical.RawEvidenceRef = .{ .stream = 1, .sequence = 40_001, .digest = @splat(7) };
     const ingress = coordinator.coordinator.venue_ingress;
     var fee = fixture.canonicalAt(61, ingress.sequence + 1, .{ .fee_adjustment = .{
@@ -268,8 +268,8 @@ noinline fn verifySecondaryFee(coordinator: *coordination.CoordinatorOwner, owne
     fee.venue.envelope.raw_evidence = source;
     try coordinator.acceptVenueFactFromOwners(fee.venue, .{ &owners[0], &owners[1], &owners[2], &owners[3] });
     try std.testing.expect(try coordinator.deliverVenueFact(.shard_0, &owners[0]));
-    try std.testing.expectEqual(before_primary, owners[0].shard.economic_projection.portfolioLayer(11).?.usdt_balance_atoms);
-    try std.testing.expectEqual(before_secondary - 1, owners[0].shard.economic_projection.portfolioLayer(15).?.usdt_balance_atoms);
+    try std.testing.expectEqual(before_primary, owners[0].shard.economic_projection.portfolioLayer(11).?.settlement_balance_atoms);
+    try std.testing.expectEqual(before_secondary - 1, owners[0].shard.economic_projection.portfolioLayer(15).?.settlement_balance_atoms);
     for (owners[1..], 1..) |*owner, index| try std.testing.expect(!try coordinator.deliverVenueFact(@enumFromInt(index), owner));
     try owners[0].checkpoint();
     const recovered = try std.testing.allocator.create(demo.Owner);
@@ -342,7 +342,7 @@ fn exercisePortfolioFills(comptime forced_case: bool, comptime recovery_case: bo
     initializeSimulatorInto(simulator, .{ .source_utc_ns = when.source_time, .receive_utc_ns = when.receive_time, .monotonic_ns = when.monotonic_time, .audit_utc_ns = when.wall_time });
     var adapter = simulator.adapter();
     try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1, .asset_definitions = owners[0].shard.asset_registry, .instrument_definitions = owners[0].shard.instrument_registry });
-    try gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .supported_products = execution.productMask(.isolated_linear_usdt), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+    try gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .supported_products = execution.productMask(.isolated_linear), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
     const coordinator = try allocator.create(coordination.CoordinatorOwner);
     defer allocator.destroy(coordinator);
     try initializeCoordinatorInto(coordinator, memory.interface());
@@ -380,8 +380,8 @@ fn exercisePortfolioFills(comptime forced_case: bool, comptime recovery_case: bo
 noinline fn verifyPortfolioForced(coordinator: *coordination.CoordinatorOwner, owners: []demo.Owner, gateway: *execution.Gateway) !void {
     try owners[0].bindAccountCoordinator(coordinator);
     const before_a = owners[0].shard.economic_projection.portfolioLayer(11).?.*;
-    const before_b = owners[0].shard.economic_projection.portfolioLayer(15).?.usdt_balance_atoms;
-    const before_exchange = owners[0].shard.economic_projection.exchange.usdt_balance_atoms;
+    const before_b = owners[0].shard.economic_projection.portfolioLayer(15).?.settlement_balance_atoms;
+    const before_exchange = owners[0].shard.economic_projection.exchange.settlement_balance_atoms;
     const forced: canonical.ForcedExecution = .{
         .identity = 40_001,
         .execution_time_utc_ns = fixture.atGroup(47, .{ .identity = 0, .payload = .recovery_completed }).core.source_time,
@@ -411,8 +411,8 @@ noinline fn verifyPortfolioForced(coordinator: *coordination.CoordinatorOwner, o
     _ = try owners[0].apply(.{ .core = core });
     const projection = &owners[0].shard.economic_projection;
     try std.testing.expectEqualDeep(before_a, projection.portfolioLayer(11).?.*);
-    try std.testing.expectEqual(before_b - 2, projection.portfolioLayer(15).?.usdt_balance_atoms);
-    try std.testing.expectEqual(before_exchange + 1, projection.exchange.usdt_balance_atoms);
+    try std.testing.expectEqual(before_b - 2, projection.portfolioLayer(15).?.settlement_balance_atoms);
+    try std.testing.expectEqual(before_exchange + 1, projection.exchange.settlement_balance_atoms);
     try std.testing.expectEqual(@as(i128, 3), projection.netting_settlement_atoms);
     try std.testing.expectEqual(@as(u128, 5), projection.applied_forced_executions[0].source.strategy);
     const forced_id = projection.applied_forced_executions[0].forced.identity;

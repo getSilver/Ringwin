@@ -72,8 +72,11 @@ pub const Registry = struct {
     }
     /// Every activated native asset uses the same bounded economic consumer.
     pub fn consumerCompatible(self: *const Registry, native_settlement_atoms: bool) bool {
-        if (!native_settlement_atoms) return self.legacyConsumerCompatible();
-        _ = self.get(1) orelse return false;
+        return self.consumerCompatibleFor(native_settlement_atoms, 1);
+    }
+    pub fn consumerCompatibleFor(self: *const Registry, native_settlement_atoms: bool, asset: canonical.AssetIdentity) bool {
+        if (!native_settlement_atoms) return asset == 1 and self.legacyConsumerCompatible();
+        _ = self.get(asset) orelse return false;
         return true;
     }
     pub fn checkAmount(self: *const Registry, amount_value: canonical.AssetAmount, single: bool) !void {

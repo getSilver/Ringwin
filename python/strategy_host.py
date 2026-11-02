@@ -221,10 +221,13 @@ def validate_batch_schema(batch):
 
 def decode_depth_snapshot(payload):
     """Canonical depth v1: eight levels per side, integer ticks/lots only."""
-    if len(payload) != 704 or any(payload[44:64]) or any(x > 1 for x in payload[42:44]):
+    if len(payload) != 704 or any(payload[45:48]) or any(payload[56:64]) or payload[44] > 1 or any(x > 1 for x in payload[42:44]):
         raise RecoveryNeeded(2)
     instrument = int.from_bytes(payload[:16], "little")
     rules, sequence, visible_at = struct.unpack_from("<QQQ", payload, 16)
+    epoch = int.from_bytes(payload[48:56], "little")
+    if (payload[44] == 1 and (not epoch or not sequence)) or (payload[44] == 0 and epoch):
+        raise RecoveryNeeded(2)
     counts = payload[40:42]
     if not instrument or not rules or any(n < 1 or n > 8 for n in counts):
         raise RecoveryNeeded(2)
@@ -252,15 +255,23 @@ def decode_depth_snapshot(payload):
         raise RecoveryNeeded(2)
     return {"instrument": instrument, "rules_version": rules, "sequence": sequence,
             "visible_at_ns": visible_at, "bids": sides[0], "asks": sides[1],
-            "bids_truncated": bool(payload[42]), "asks_truncated": bool(payload[43])}
+            "bids_truncated": bool(payload[42]), "asks_truncated": bool(payload[43]),
+            **({"sequence_kind": "capture", "capture_epoch": epoch} if payload[44] else {})}
 
 
 def encode_depth_snapshot(book):
     """Canonical depth inverse for offline joint-path replay; same validated wire."""
-    if type(book) is not dict or set(book) != {"instrument", "rules_version", "sequence", "visible_at_ns",
+    if type(book) is not dict or set(book) - {"sequence_kind", "capture_epoch"} != {"instrument", "rules_version", "sequence", "visible_at_ns",
                                              "bids", "asks", "bids_truncated", "asks_truncated"}:
         raise ValueError("invalid depth fields")
     payload = bytearray(704)
+    if book.get("sequence_kind", "venue") not in ("venue", "capture"):
+        raise ValueError("invalid sequence kind")
+    payload[44] = book.get("sequence_kind") == "capture"
+    epoch = book.get("capture_epoch", 0)
+    if type(epoch) is not int:
+        raise ValueError("invalid capture epoch")
+    payload[48:56] = epoch.to_bytes(8, "little")
     for name, offset, size in (("instrument", 0, 16), ("rules_version", 16, 8),
                                 ("sequence", 24, 8), ("visible_at_ns", 32, 8)):
         if type(book[name]) is not int:

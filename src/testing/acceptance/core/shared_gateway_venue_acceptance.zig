@@ -63,7 +63,7 @@ pub fn prepareInstruments(owner: *demo.Owner, index: usize, quantum: i128) !void
         if (quantum != 1 and instrument == domain) {
             margin.fee_ppm = 0;
             margin.native_settlement_atoms = true;
-            margin.native = .{ .model = .isolated_linear_usdt_v1, .tier_identity = 1, .notional_lower_atoms = 0, .notional_upper_atoms = 100000, .initial_margin_ppm = 20000, .maintenance_ppm = 11000, .maintenance_deduction_atoms = 0, .close_fee_ppm = 0, .margin_rounding_atoms = quantum, .price_rounding_ticks = 1 };
+            margin.native = .{ .model = .isolated_linear_v1, .tier_identity = 1, .notional_lower_atoms = 0, .notional_upper_atoms = 100000, .initial_margin_ppm = 20000, .maintenance_ppm = 11000, .maintenance_deduction_atoms = 0, .close_fee_ppm = 0, .margin_rounding_atoms = quantum, .price_rounding_ticks = 1 };
         }
         _ = try owner.apply(fixture.atGroup(42, .{ .identity = @intCast(1000 + instrument), .account_scope = 2, .payload = .{ .margin_rules_activated = margin } }));
         _ = try owner.apply(fixture.atGroup(42, .{ .identity = @intCast(1100 + instrument), .account_scope = 2, .payload = .{ .capability_profile_activation = .{
@@ -71,7 +71,7 @@ pub fn prepareInstruments(owner: *demo.Owner, index: usize, quantum: i128) !void
             .instrument = instrument,
             .venue = 1,
             .environment = .simulation,
-            .product = .isolated_linear_usdt,
+            .product = .isolated_linear,
             .version = 1,
             .rules_version = 1,
             .config_version = 1,
@@ -244,7 +244,7 @@ test "03 actual shared Gateway routes colliding local orders through one VenueAd
     var simulator: simulated.SimulatedVenue = .{ .receipt_times = .{ .source_utc_ns = fixture.atGroup(46, .{ .identity = 0, .payload = .recovery_completed }).core.source_time, .receive_utc_ns = fixture.atGroup(46, .{ .identity = 0, .payload = .recovery_completed }).core.receive_time, .monotonic_ns = 1461000000, .audit_utc_ns = fixture.atGroup(46, .{ .identity = 0, .payload = .recovery_completed }).core.wall_time } };
     var adapter = simulator.adapter();
     try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1, .asset_definitions = owners[0].shard.asset_registry, .instrument_definitions = definitions });
-    const route: execution.Route = .{ .account = 2, .adapter = adapter, .venue_identity = 1, .supported_products = execution.productMask(.isolated_linear_usdt), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } };
+    const route: execution.Route = .{ .account = 2, .adapter = adapter, .venue_identity = 1, .supported_products = execution.productMask(.isolated_linear), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } };
     try gateway.add(route);
     var coordinator = try coordination.CoordinatorOwner.init(.init(2, 100, 100), .{ .domain = .control, .id = 9291 }, memory.interface(), undefined);
     for (owners, 0..) |*owner, index| try coordinator.apply(.{ .publish_summary = .{ .identity = index + 1, .summary = try coordination.shardSummaryFromShard(&owner.shard, @enumFromInt(index), 1, index + 1) } });
@@ -281,7 +281,7 @@ test "03 actual shared Gateway routes colliding local orders through one VenueAd
         try std.testing.expectEqual(@as(i128, 2), try owners[index].shard.activeReservationAtoms());
         try std.testing.expectEqual(@as(i128, 4), before_reservation);
         try std.testing.expect(owners[index].shard.oms.orderById(1).?.state == .filled);
-        try std.testing.expectEqual(@as(i128, 25), owners[index].shard.economic_projection.portfolio.usdt_balance_atoms);
+        try std.testing.expectEqual(@as(i128, 25), owners[index].shard.economic_projection.portfolio.settlement_balance_atoms);
     }
     const origin = owners[0].shard.economic_projection.feeOrigin(3).?;
     try std.testing.expectEqual(@as(u128, 11), origin.portfolio);
@@ -307,10 +307,10 @@ test "03 actual shared Gateway routes colliding local orders through one VenueAd
     fee.venue.envelope.raw_evidence = fee_source;
     try coordinator.acceptVenueFactFromOwners(fee.venue, .{ &owners[0], &owners[1], &owners[2], &owners[3] });
     try std.testing.expect(try coordinator.deliverVenueFact(.shard_0, &owners[0]));
-    try std.testing.expectEqual(@as(i128, 24), owners[0].shard.economic_projection.portfolio.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 24), owners[0].shard.economic_projection.portfolio.settlement_balance_atoms);
     for (owners[1..], 1..) |*owner, index| {
         try std.testing.expect(!try coordinator.deliverVenueFact(@enumFromInt(index), owner));
-        try std.testing.expectEqual(@as(i128, 25), owner.shard.economic_projection.portfolio.usdt_balance_atoms);
+        try std.testing.expectEqual(@as(i128, 25), owner.shard.economic_projection.portfolio.settlement_balance_atoms);
     }
     const after_fee = owners[0].shard.canonicalStateDigest();
     try coordinator.acceptVenueFactFromOwners(fee.venue, .{ &owners[0], &owners[1], &owners[2], &owners[3] });
@@ -526,7 +526,7 @@ fn exerciseSharedBatch(scenario: BatchScenario) !void {
     try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1, .asset_definitions = owners[0].shard.asset_registry, .instrument_definitions = definitions });
     var transport: BatchVenue = .{ .simulator = &simulator, .scenario = scenario, .memory = memory };
     const shared_adapter = transport.adapter();
-    const route: execution.Route = .{ .account = 2, .adapter = shared_adapter, .venue_identity = 1, .supported_products = execution.productMask(.isolated_linear_usdt), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } };
+    const route: execution.Route = .{ .account = 2, .adapter = shared_adapter, .venue_identity = 1, .supported_products = execution.productMask(.isolated_linear), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } };
     try gateway.add(route);
 
     var requests: [4]execution.ShardDispatch = undefined;

@@ -50,3 +50,20 @@ Python 示例 accumulator 的九字节策略状态重放 schema 不消费深度�
 L2 不提供 maker 队列位置、主动成交概率、条件执行、共同准入或收益证据。本票仅覆盖 I1 的快照部分与 V2 的对称覆盖；完整策略、各 Venue 深度、增量、Demo/Testnet/生产及执行模式资格分别验收。
 
 任务 03 当前格式为 Canonical schema 15 / codec 13 / journal 42 / state 46 / registry 40；上述 02 版本记录保留为历史变更说明。
+
+
+## Hyperliquid 02 共享合同演进（2026-11-02）
+
+快照现在明确携带 `sequence_kind`（`venue` 或 `capture`）。`venue` 延续原有源前序链；
+`capture` 只证明本地捕获顺序，必须提供非零 `capture_epoch` 与 sequence，不能接 delta。
+Feed owner 为每次新 incarnation 分配严格递增 epoch，并从恢复状态继续；同 epoch 序号严格递增。
+连接中断先发布 gap；只有 gap 后更大 epoch 的完整新快照才能用归零后的计数恢复健康，
+旧 epoch 即使序号更大仍拒绝。健康只声明当前有限范围的新鲜快照，不承诺 Venue 连续性。
+序号类型改变须重新激活规则以清除旧证据。覆盖、截断、未知数量和不外推规则不变。
+
+704-byte Host 深度负载保留长度和现有字段：偏移 44 为序号类型（0=venue、1=capture），
+48–55 为小端 capture_epoch u64；45–47、56–63 继续要求零。Venue 型 epoch 必须零。
+旧 Host 因保留位非零拒绝 capture 负载；当前 Zig/Python 编解码保留此证据，不冒充源序号。
+
+当前持久身份为 canonical 19 / codec 14 / journal 51 / state 55 / registry 49，
+StateDigestV15；账户协调快照为 19。格式精确匹配，旧日志和旧快照失败关闭，无自动迁移。

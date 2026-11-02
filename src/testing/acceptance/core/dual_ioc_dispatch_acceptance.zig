@@ -89,7 +89,7 @@ const Harness = struct {
             .adapter = adapter.interface(),
             .venue_identity = identity,
             .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 },
-            .supported_products = execution.productMask(.isolated_linear_usdt),
+            .supported_products = execution.productMask(.isolated_linear),
         });
     }
 

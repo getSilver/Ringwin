@@ -21,7 +21,8 @@ pub fn build(b: *std.Build) void {
     }, .{ .whitespace = .indent_2 }) catch @panic("out of memory");
     const native_files = b.addWriteFiles();
     const native_json_path = native_files.add("native-strategies.json", native_json);
-    b.getInstallStep().dependOn(&b.addInstallFile(native_json_path, "share/ringwin/native-strategies.json").step);
+    const install_native_json = b.addInstallFile(native_json_path, "share/ringwin/native-strategies.json");
+    b.getInstallStep().dependOn(&install_native_json.step);
     for ([_][]const u8{ "native_observer_config.json", "native_observer_state.json" }) |file| {
         b.getInstallStep().dependOn(&b.addInstallFile(b.path(b.fmt("src/strategy/{s}", .{file})), b.fmt("share/ringwin/contracts/{s}", .{file})).step);
     }
@@ -77,6 +78,7 @@ pub fn build(b: *std.Build) void {
     authority_probe.stack_size = 512 * 1024 * 1024;
     const authority_step = b.step("strategy-authority-probe", "Build the offline package activation acceptance node");
     authority_step.dependOn(&b.addInstallArtifact(authority_probe, .{}).step);
+    authority_step.dependOn(&install_native_json.step);
 
     const run = b.addRunArtifact(exe);
     if (b.args) |args| run.addArgs(args);

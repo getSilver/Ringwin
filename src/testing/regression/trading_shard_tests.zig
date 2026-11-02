@@ -34,6 +34,97 @@ const startScenario = fixture.startScenario;
 const startScenarioAuthorized = fixture.startScenarioAuthorized;
 const applyLive = engine.applyStable;
 
+test "USDC isolated economics and capture snapshots survive canonical replay and snapshots" {
+    const allocator = std.testing.allocator;
+    const live = try allocator.create(TradingShard);
+    defer allocator.destroy(live);
+    live.* = .{};
+    const initial = try allocator.create(TradingShard);
+    defer allocator.destroy(initial);
+    initial.* = .{};
+    const recovered = try allocator.create(TradingShard);
+    defer allocator.destroy(recovered);
+    var log = engine.journal.Journal.init();
+    const usdc: u64 = 0x55534443;
+    var definition = @import("../../trading/asset_registry.zig").testDefinitions(6, 8)[0];
+    definition.asset = usdc;
+    definition.source_identity = usdc;
+    for (definition.code_bindings[0..definition.code_binding_count]) |*binding|
+        binding.* = try canonical.AssetCodeBinding.init(binding.venue, "USDC");
+    _ = try applyLive(live, &log, .{ .core = .{ .identity = usdc, .payload = .{ .asset_definition_activated = definition } } });
+    for (genesis) |original| {
+        var event = original;
+        switch (event.core.payload) {
+            .instrument_rules_activated => |*rules| {
+                rules.settlement_asset = usdc;
+                rules.price_constraints = .{ .max_significant_digits = 5, .max_decimal_places = 2, .integer_exception = true };
+            },
+            .margin_rules_activated => |*rules| rules.native_settlement_atoms = true,
+            .account_configuration => |*configuration| configuration.settlement_asset = usdc,
+            else => {},
+        }
+        _ = try applyLive(live, &log, event);
+    }
+    _ = try applyLive(live, &log, fixture.atGroup(11, .{ .identity = 3, .payload = .{ .host_activated = .{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .session = .{ .fencing = 1, .shard = 0, .generation = 1 }, .activation_barrier = 0, .state_digest = live.canonicalStateDigest() } } }));
+    _ = try applyLive(live, &log, fixture.atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = swap_instrument, .price_atoms = 50_000_000_000 } } }));
+    try std.testing.expectEqual(usdc, live.economic_projection.settlement_asset);
+    try std.testing.expectEqual(usdc, live.economicSummary().settlement_asset);
+    try std.testing.expect(live.settlementConsumersCompatible(swap_instrument));
+    var book = fixture.snapshotAt(12, 100);
+    book.venue.event.l2_book_snapshot.sequence_kind = .capture;
+    book.venue.event.l2_book_snapshot.capture_epoch = 1;
+    _ = try applyLive(live, &log, book);
+    try std.testing.expect(live.expected_source_sequence == null);
+    var invalid_price = fixture.timer(100);
+    invalid_price.limit_price_micros = 50_100_123_456;
+    try std.testing.expect((try applyLive(live, &log, fixture.atGroup(13, .{ .identity = 99, .payload = .{ .timer = invalid_price } }))) == null);
+    try std.testing.expectEqual(shard_event.RejectReason.unsupported_order_spec, live.last_reject_reason);
+    try std.testing.expectEqual(@as(usize, 0), live.oms.order_count);
+    const command = (try applyLive(live, &log, fixture.atGroup(13, .{ .identity = 100, .payload = .{ .timer = fixture.timer(100) } }))).?;
+    try std.testing.expectEqual(usdc, command.reservation.asset);
+    const fill: canonical.Fill = .{ .client_order_id = try canonical.ClientOrderId.init("USDC-101"), .venue_order = try canonical.VenueOrderRef.init(1, "101"), .venue_trade = try canonical.VenueTradeRef.init(1, "101"), .exchange_account = 2, .liquidity = .taker, .identity = 101, .order = command.order_id, .instrument = swap_instrument, .side = .buy, .quantity = .{ .instrument = swap_instrument, .rules_version = 1, .lots = 100 }, .price = command.limit_price, .fee = .{ .asset = usdc, .atoms = 10 } };
+    _ = try applyLive(live, &log, fixture.canonicalAt(14, 101, .{ .fill = fill }));
+    try std.testing.expectEqual(@as(i128, 10), live.economic_projection.portfolio.fee_atoms);
+    try live.assertClosures();
+    const snapshot_storage = try allocator.alloc(u8, @import("../../persistence/durable_store.zig").max_snapshot_bytes);
+    defer allocator.free(snapshot_storage);
+    try log.seal();
+    const encoded = try live.snapshot(&log, live.authoritativeBarrier(), snapshot_storage);
+    _ = try TradingShard.restoreSnapshotInto(recovered, encoded);
+    try std.testing.expectEqualSlices(u8, &live.canonicalStateDigest(), &recovered.canonicalStateDigest());
+    _ = try engine.recoverStableInto(recovered, initial, log.bytes());
+    try std.testing.expectEqualSlices(u8, &live.canonicalStateDigest(), &recovered.canonicalStateDigest());
+    var tail = engine.journal.Journal.initAt(live.authoritativeBarrier() + 1);
+    const delta = fixture.deltaAt(15, 100, 102, 49_800_000_000);
+    _ = try applyLive(live, &tail, delta);
+    try std.testing.expectEqual(canonical.MarketDataHealth.gap, live.canonical_market.get(swap_instrument).?.health);
+    var fresh = fixture.snapshotAt(16, 103);
+    fresh.venue.event.l2_book_snapshot.sequence = 1;
+    fresh.venue.event.l2_book_snapshot.sequence_kind = .capture;
+    fresh.venue.event.l2_book_snapshot.capture_epoch = 2;
+    _ = try applyLive(live, &tail, fresh);
+    try std.testing.expectEqual(canonical.MarketDataHealth.healthy, live.canonical_market.get(swap_instrument).?.health);
+    var stale = fixture.snapshotAt(17, 104);
+    stale.venue.event.l2_book_snapshot.sequence_kind = .capture;
+    stale.venue.event.l2_book_snapshot.capture_epoch = 1;
+    try std.testing.expectError(error.StaleBookSnapshot, applyLive(live, &tail, stale));
+    try tail.seal();
+    _ = try TradingShard.restoreSegmentsInto(recovered, encoded, &.{tail.bytes()});
+    try std.testing.expectEqualSlices(u8, &live.canonicalStateDigest(), &recovered.canonicalStateDigest());
+    var wrong_rules = genesis[0].core.payload.instrument_rules_activated;
+    wrong_rules.instrument_identity = 99;
+    var rejection_tail = engine.journal.Journal.initAt(live.authoritativeBarrier() + 1);
+    try std.testing.expectError(error.SettlementAssetMismatch, applyLive(live, &rejection_tail, .{ .core = .{ .identity = 99, .payload = .{ .instrument_rules_activated = wrong_rules } } }));
+    var wrong_funding = fixture.canonicalAt(18, 105, .{ .funding_settlement = .{ .identity = 105, .exchange_account = 2, .instrument = swap_instrument, .rules_version = 1, .venue_bill_id = 105, .amount = .{ .asset = 1, .atoms = 1 }, .settlement_time_utc_ns = 1 } });
+    wrong_funding.venue.envelope.instrument = swap_instrument;
+    wrong_funding.venue.envelope.asset = 1;
+    try std.testing.expectError(error.InvalidEconomicFact, applyLive(live, &rejection_tail, wrong_funding));
+    try rejection_tail.seal();
+    live.instrument_registry.getPtr(swap_instrument).?.rules.price_atomic_scale = 255;
+    const malformed = try live.snapshot(&rejection_tail, live.authoritativeBarrier(), snapshot_storage);
+    try std.testing.expectError(error.InvalidInstrumentRegistry, TradingShard.restoreSnapshotInto(recovered, malformed));
+}
+
 test "successor and forward rollback preserve economics and latches through stable replay" {
     const run = try std.testing.allocator.create(LiveRun);
     defer std.testing.allocator.destroy(run);
@@ -432,10 +523,10 @@ test "Owner native settlements retain partial cost remainder reversal and classi
         }
         const economic = owner.shard.economicSummary();
         try std.testing.expectEqual(funding_atoms, economic.portfolio.funding_atoms);
-        try std.testing.expectEqual(@as(i128, 0), economic.suspense_usdt_atoms);
+        try std.testing.expectEqual(@as(i128, 0), economic.suspense_settlement_atoms);
         try std.testing.expectEqual(costs[index], economic.portfolio.swap.open_cost_atoms);
         try std.testing.expectEqual(pnls[index], economic.portfolio.realized_pnl_atoms);
-        try std.testing.expectEqual(@as(i128, 90_000_000_000_000) + funding_atoms + pnls[index] - @as(i128, index + 1), economic.portfolio.usdt_balance_atoms);
+        try std.testing.expectEqual(@as(i128, 90_000_000_000_000) + funding_atoms + pnls[index] - @as(i128, index + 1), economic.portfolio.settlement_balance_atoms);
         try owner.shard.assertClosures();
     }
     var reopen: oms_module.IntentGroup = .{ .first_intent_sequence = 600, .count = 1 };
@@ -449,7 +540,7 @@ test "Owner native settlements retain partial cost remainder reversal and classi
     historical.venue.envelope.asset = settlement_asset;
     _ = try owner.apply(historical);
     const unallocated = owner.shard.economicSummary();
-    try std.testing.expectEqual(@as(i128, -7), unallocated.suspense_usdt_atoms);
+    try std.testing.expectEqual(@as(i128, -7), unallocated.suspense_settlement_atoms);
     try std.testing.expectEqual(funding_atoms, unallocated.portfolio.funding_atoms);
     try std.testing.expect(unallocated.reconciliation_break);
     try owner.shard.assertClosures();
@@ -460,7 +551,7 @@ test "Owner native settlements retain partial cost remainder reversal and classi
     try std.testing.expectEqual(@as(i128, 59_000_000_000), closed.portfolio.realized_pnl_atoms);
     try std.testing.expectEqual(@as(i128, 4_000_000_006), closed.portfolio.fee_atoms);
     try std.testing.expectEqual(@as(i128, 2_000_000_003), closed.portfolio.penalty_atoms);
-    try std.testing.expectEqual(@as(i128, 90_000_000_000_000 - 4_198_632_165 + 59_000_000_000 - 4_000_000_006 - 2_000_000_003), closed.portfolio.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 90_000_000_000_000 - 4_198_632_165 + 59_000_000_000 - 4_000_000_006 - 2_000_000_003), closed.portfolio.settlement_balance_atoms);
     try std.testing.expect(!owner.shard.operational_state.effectiveTradingAuthority());
     try owner.shard.assertClosures();
     const once = owner.shard.canonicalStateDigest();
@@ -549,7 +640,7 @@ test "OMS command binds scoped capability and source-owned authority barriers" {
         .instrument = swap_instrument,
         .venue = 1,
         .environment = .simulation,
-        .product = .isolated_linear_usdt,
+        .product = .isolated_linear,
         .version = 4,
         .rules_version = 1,
         .config_version = 1,
@@ -634,7 +725,7 @@ test "unsupported OMS order semantics reject as replayable exact-only facts" {
         .instrument = swap_instrument,
         .venue = 1,
         .environment = .simulation,
-        .product = .isolated_linear_usdt,
+        .product = .isolated_linear,
         .version = 1,
         .rules_version = 1,
         .config_version = 1,
@@ -965,7 +1056,7 @@ test "configurable Genesis fails closed until authority is complete" {
     defer std.testing.allocator.destroy(mismatched);
     mismatched.* = .{};
     var cash_as_linear = fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 1 }, .cash)[0];
-    cash_as_linear.core.payload.instrument_rules_activated.product = .isolated_linear_usdt;
+    cash_as_linear.core.payload.instrument_rules_activated.product = .isolated_linear;
     const before_mismatch = mismatched.canonicalStateDigest();
     try std.testing.expectError(error.IncompatibleProductReservationModel, mismatched.apply(cash_as_linear));
     try std.testing.expectEqualSlices(u8, &before_mismatch, &mismatched.canonicalStateDigest());
@@ -2520,7 +2611,7 @@ test "OMS outbox crosses the sole Gateway and SimulatedVenue seam" {
         .instrument = swap_instrument,
         .venue = 1,
         .environment = .simulation,
-        .product = .isolated_linear_usdt,
+        .product = .isolated_linear,
         .version = 1,
         .rules_version = 1,
         .config_version = 1,
@@ -3156,7 +3247,7 @@ test "economic fills derive ownership from OMS and close Portfolio Exchange ledg
     try std.testing.expectEqual(@as(u8, 10), summary.ledger_transactions);
     try std.testing.expect(try run.shard.riskLeaseRemainingAtoms() < run.shard.risk_lease_atoms);
     try std.testing.expectEqual(summary.portfolio.swap.quantity, run.shard.economicSummary().portfolio.swap.quantity);
-    try std.testing.expectEqual(summary.portfolio.usdt_balance_atoms, run.shard.economicSummary().portfolio.usdt_balance_atoms);
+    try std.testing.expectEqual(summary.portfolio.settlement_balance_atoms, run.shard.economicSummary().portfolio.settlement_balance_atoms);
     try std.testing.expect(!summary.reconciliation_break);
 }
 
@@ -3170,14 +3261,14 @@ test "funding forced execution and snapshots preserve auditable local economics"
     const projected = run.shard.economicSummary();
     try std.testing.expectEqual(@as(i64, 0), projected.portfolio.swap.quantity);
     try std.testing.expectEqual(@as(i64, -2), projected.exchange.swap.quantity);
-    try std.testing.expectEqual(@as(i64, -30), projected.suspense_usdt_atoms);
+    try std.testing.expectEqual(@as(i64, -30), projected.suspense_settlement_atoms);
     try std.testing.expectEqual(projected.exchange.swap.quantity, run.shard.economicSummary().exchange.swap.quantity);
-    try std.testing.expectEqual(projected.exchange.usdt_balance_atoms, run.shard.economicSummary().exchange.usdt_balance_atoms);
+    try std.testing.expectEqual(projected.exchange.settlement_balance_atoms, run.shard.economicSummary().exchange.settlement_balance_atoms);
     try std.testing.expect(projected.reconciliation_break);
     try std.testing.expectEqual(@as(u8, 4), projected.ledger_transactions);
 
     const local_exchange = projected.exchange;
-    _ = try run.shard.apply(atGroup(14, .{ .identity = 12, .payload = .{ .economic_account_snapshot = .{ .snapshot_id = 12, .usdt_balance_atoms = before.exchange.usdt_balance_atoms, .spot_asset_atoms = 99, .swap_position_quantity = 99, .margin_atoms = 99 } } }));
+    _ = try run.shard.apply(atGroup(14, .{ .identity = 12, .payload = .{ .economic_account_snapshot = .{ .snapshot_id = 12, .settlement_balance_atoms = before.exchange.settlement_balance_atoms, .spot_asset_atoms = 99, .swap_position_quantity = 99, .margin_atoms = 99 } } }));
     try std.testing.expectEqualDeep(local_exchange, run.shard.economicSummary().exchange);
     try std.testing.expectError(error.ConflictingEconomicIdentity, run.shard.apply(atGroup(15, .{ .identity = 10, .payload = .{ .funding_settlement = .{ .settlement_id = 10, .amount_atoms = -26 } } })));
 }
@@ -3462,7 +3553,7 @@ test "multiple SPOT and SWAP orders independently close place amend and cancel" 
     };
     _ = try run.shard.apply(atGroup(16, .{ .identity = 100, .payload = .{ .capability_profile_activation = amend_capability } }));
     amend_capability.instrument = swap_instrument;
-    amend_capability.product = .isolated_linear_usdt;
+    amend_capability.product = .isolated_linear;
     _ = try run.shard.apply(atGroup(16, .{ .identity = 101, .payload = .{ .capability_profile_activation = amend_capability } }));
 
     var amend: oms_module.IntentGroup = .{ .first_intent_sequence = 84, .count = 4 };
@@ -3514,7 +3605,7 @@ test "core safety invariants replay CCC intent conflict suspense and archive win
 
     _ = try applyLive(&run.shard, &run.decision_journal, atGroup(18, .{ .identity = 406, .payload = .{ .venue_forced_execution = .{ .execution_id = 406, .side = .sell, .quantity = 2, .price_ticks = 50_000_000, .fee_atoms = 3, .penalty_atoms = 2 } } }));
     try std.testing.expectEqual(@as(i64, -2), run.shard.economicSummary().exchange.swap.quantity);
-    try std.testing.expect(run.shard.economicSummary().suspense_usdt_atoms != 0);
+    try std.testing.expect(run.shard.economicSummary().suspense_settlement_atoms != 0);
 
     const archive = try createOmsScenario();
     defer std.testing.allocator.destroy(archive);

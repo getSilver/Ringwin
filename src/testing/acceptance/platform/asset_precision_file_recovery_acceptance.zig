@@ -550,8 +550,8 @@ fn checkFileRecovery(io: std.Io, path: []const u8, case: FileCase) !void {
         try std.testing.expectEqual(expected_fee, recovered.shard.economicSummary().exchange.fee_atoms);
         if (native) {
             try std.testing.expectEqual(@as(i128, 200_000), recovered.shard.economicSummary().portfolio.spot_asset_atoms);
-            try std.testing.expectEqual(@as(i128, 19_999_999_985_801_367_835), recovered.shard.economicSummary().portfolio.usdt_balance_atoms);
-            try std.testing.expectEqual(@as(i128, 24_999_999_985_801_367_835), recovered.shard.economicSummary().exchange.usdt_balance_atoms);
+            try std.testing.expectEqual(@as(i128, 19_999_999_985_801_367_835), recovered.shard.economicSummary().portfolio.settlement_balance_atoms);
+            try std.testing.expectEqual(@as(i128, 24_999_999_985_801_367_835), recovered.shard.economicSummary().exchange.settlement_balance_atoms);
             try std.testing.expectEqualDeep(owner.shard.activatedAssets(), recovered.shard.activatedAssets());
         }
         try std.testing.expectEqual(@import("../../../execution/oms.zig").OrderState.filled, recovered.shard.oms.orderById(command.order_id).?.state);

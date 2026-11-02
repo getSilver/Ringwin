@@ -118,7 +118,7 @@ fn expectState(actual: *const trading.TradingShard, expected: *const trading.Tra
     inline for (.{ "portfolio", "exchange" }) |layer| {
         const left = &@field(expected.economic_projection, layer);
         const right = &@field(actual.economic_projection, layer);
-        try std.testing.expectEqual(left.usdt_balance_atoms, right.usdt_balance_atoms);
+        try std.testing.expectEqual(left.settlement_balance_atoms, right.settlement_balance_atoms);
         try std.testing.expectEqual(left.spotInventoryAtoms(0x425443), right.spotInventoryAtoms(0x425443));
         try std.testing.expectEqual(left.fee_atoms, right.fee_atoms);
         try std.testing.expectEqualDeep(left.positionForInstrument(3), right.positionForInstrument(3));

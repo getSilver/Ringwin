@@ -369,17 +369,18 @@ pub const VenueForcedExecution = struct {
 };
 pub const EconomicAccountSnapshot = struct {
     snapshot_id: u64,
-    usdt_balance_atoms: i128,
+    settlement_balance_atoms: i128,
     spot_asset_atoms: i128,
     swap_position_quantity: i64,
     margin_atoms: i128,
 };
 
 pub const EconomicSummary = struct {
+    settlement_asset: canonical.AssetIdentity,
     portfolio: economics_module.Layer,
     exchange: economics_module.Layer,
-    treasury_usdt_atoms: i128,
-    suspense_usdt_atoms: i128,
+    treasury_settlement_atoms: i128,
+    suspense_settlement_atoms: i128,
     ledger_transactions: u8,
     reconciliation_break: bool,
     valuation_complete: bool,
@@ -456,10 +457,12 @@ pub const InstrumentRules = struct {
     reservation_model: ReservationModel,
     /// Explicit product semantics. A zero-value legacy Genesis is normalized
     /// from reservation_model at the compatibility boundary only.
-    product: Product = .isolated_linear_usdt,
+    product: Product = .isolated_linear,
     venue: canonical.VenueIdentity = 0,
     settlement_asset: canonical.AssetIdentity = 1,
     base_asset: canonical.AssetIdentity = 0,
+    price_constraints: canonical.PriceConstraints = .{},
+    price_atomic_scale: u8 = 6,
 };
 
 pub const MarginRules = struct {
@@ -482,7 +485,7 @@ pub const MarginRules = struct {
     warning_liquidation_distance_ticks: i64 = 0,
     kill_liquidation_distance_ticks: i64 = 0,
 };
-pub const AccountConfiguration = struct { exchange_account_identity: u128 };
+pub const AccountConfiguration = struct { exchange_account_identity: u128, settlement_asset: canonical.AssetIdentity = 1 };
 pub const Balance = struct { cash_atoms: i128 };
 pub const OpeningBalance = struct {
     cash_atoms: i128,
@@ -784,6 +787,10 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u64, value.venue);
             try encoded.put(u64, value.settlement_asset);
             try encoded.put(u64, value.base_asset);
+            try encoded.put(u8, value.price_atomic_scale);
+            try encoded.put(u8, value.price_constraints.max_significant_digits);
+            try encoded.put(u8, value.price_constraints.max_decimal_places);
+            try encoded.put(u8, @intFromBool(value.price_constraints.integer_exception));
         },
         .margin_rules_activated => |value| {
             try encoded.put(u8, @intFromBool(value.native_settlement_atoms));
@@ -804,7 +811,10 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(i64, value.warning_liquidation_distance_ticks);
             try encoded.put(i64, value.kill_liquidation_distance_ticks);
         },
-        .account_configuration => |value| try encoded.put(u128, value.exchange_account_identity),
+        .account_configuration => |value| {
+            try encoded.put(u128, value.exchange_account_identity);
+            try encoded.put(u64, value.settlement_asset);
+        },
         .exchange_balance => |value| try encoded.put(i128, value.cash_atoms),
         .opening_balance => |value| {
             if (value.native_balance_count > value.native_balances.len) return error.InvalidOpeningBalance;
@@ -962,7 +972,7 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
         },
         .economic_account_snapshot => |value| {
             try encoded.put(u64, value.snapshot_id);
-            try encoded.put(i128, value.usdt_balance_atoms);
+            try encoded.put(i128, value.settlement_balance_atoms);
             try encoded.put(i128, value.spot_asset_atoms);
             try encoded.put(i64, value.swap_position_quantity);
             try encoded.put(i128, value.margin_atoms);
@@ -1217,6 +1227,8 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             .venue = try readInputValue(u64, record.payload, &offset),
             .settlement_asset = try readInputValue(u64, record.payload, &offset),
             .base_asset = try readInputValue(u64, record.payload, &offset),
+            .price_atomic_scale = try readInputValue(u8, record.payload, &offset),
+            .price_constraints = .{ .max_significant_digits = try readInputValue(u8, record.payload, &offset), .max_decimal_places = try readInputValue(u8, record.payload, &offset), .integer_exception = try readInputBool(record.payload, &offset) },
         } },
         .margin_rules_activated => .{ .margin_rules_activated = .{
             .native_settlement_atoms = try readInputValue(u8, record.payload, &offset) == 1,
@@ -1239,6 +1251,7 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
         } },
         .account_configuration => .{ .account_configuration = .{
             .exchange_account_identity = try readInputValue(u128, record.payload, &offset),
+            .settlement_asset = try readInputValue(u64, record.payload, &offset),
         } },
         .exchange_balance => .{ .exchange_balance = .{
             .cash_atoms = try readInputValue(i128, record.payload, &offset),
@@ -1453,7 +1466,7 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
         },
         .economic_account_snapshot => .{ .economic_account_snapshot = .{
             .snapshot_id = try readInputValue(u64, record.payload, &offset),
-            .usdt_balance_atoms = try readInputValue(i128, record.payload, &offset),
+            .settlement_balance_atoms = try readInputValue(i128, record.payload, &offset),
             .spot_asset_atoms = try readInputValue(i128, record.payload, &offset),
             .swap_position_quantity = try readInputValue(i64, record.payload, &offset),
             .margin_atoms = try readInputValue(i128, record.payload, &offset),

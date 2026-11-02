@@ -313,7 +313,7 @@ fn verifyAccount(owner: *const owner_module.Owner, account: u128, fence: u64, ne
     if (archive.receipt.root.barrier < fence or state.pending_reconciliation_window != null or
         state.reconciliation_completed_fact < state.reconciliation_started_fact or state.open_economic_fact_count != 0 or
         state.open_economic_unknown_time_count != 0 or state.economic_fault_count != 0 or owner.shard.oms.recovery_only or
-        state.economic_projection.reconciliation_break or state.economic_projection.suspense_usdt_atoms != 0 or
+        state.economic_projection.reconciliation_break or state.economic_projection.suspense_settlement_atoms != 0 or
         state.economic_projection.suspense_native_asset_count != 0 or std.mem.allEqual(u8, &cursor.root_digest, 0))
         return error.AccountRecoveryIncomplete;
     try state.economic_projection.assertClosed();

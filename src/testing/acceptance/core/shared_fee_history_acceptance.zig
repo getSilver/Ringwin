@@ -72,7 +72,7 @@ fn exerciseColdFee(account: u128) !void {
     record.envelope.source_fact_identity = 800;
     record.envelope.raw_evidence = record.event.fee_adjustment.source;
     const before = accountEconomics(&recovered.shard, account).semanticDigest();
-    const before_cash = accountEconomics(&recovered.shard, account).portfolio.usdt_balance_atoms;
+    const before_cash = accountEconomics(&recovered.shard, account).portfolio.settlement_balance_atoms;
     const other_account: u128 = if (account == 20) 30 else 20;
     const untouched = accountEconomics(&recovered.shard, other_account).semanticDigest();
     const view = try allocator.create(@import("../../../trading/trading_shard.zig").TradingShard);
@@ -106,7 +106,7 @@ fn exerciseColdFee(account: u128) !void {
         try std.testing.expectEqualDeep(before, accountEconomics(&recovered.shard, account).semanticDigest());
         if (mode == .same) {
             try std.testing.expect(try restored.deliverVenueFact(.shard_0, recovered));
-            try std.testing.expectEqual(before_cash - 1, accountEconomics(&recovered.shard, account).portfolio.usdt_balance_atoms);
+            try std.testing.expectEqual(before_cash - 1, accountEconomics(&recovered.shard, account).portfolio.settlement_balance_atoms);
             const applied = recovered.shard.canonicalStateDigest();
             try restored.acceptVenueFactFromOwners(candidate, .{ recovered, recovered, recovered, recovered });
             try std.testing.expect(!try restored.deliverVenueFact(.shard_0, recovered));

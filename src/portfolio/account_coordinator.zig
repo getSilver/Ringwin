@@ -3,7 +3,7 @@ const durable = @import("../persistence/durable_store.zig");
 const trading = @import("../trading/trading_shard.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const snapshot_magic: u64 = 0x54434341574e4952;
-const coordinator_snapshot_version: u16 = 18;
+const coordinator_snapshot_version: u16 = 19;
 const NativeAccountProjection = @import("account_projection.zig").AccountProjection;
 const ingress = @import("shared_venue_ingress.zig");
 const canonical = @import("../model/canonical_event.zig");
@@ -57,7 +57,7 @@ fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journa
 pub const max_shards = 4;
 const max_completed_forced_allocations = 32;
 
-/// Account-level margin mode; IsolatedLinearUsdtV1 stays the only supported model.
+/// Account-level margin mode; IsolatedLinearV1 stays the only supported model.
 pub const AccountMarginMode = enum(u8) { isolated, cross };
 
 /// Deterministic classification of one margin reconciliation observation.
@@ -79,6 +79,7 @@ pub const InstrumentContribution = struct {
 
 /// Versioned publication containing only cross-account coordination inputs.
 pub const ShardSummary = struct {
+    settlement_asset: canonical.AssetIdentity = 1,
     shard_id: ShardId,
     decision_domain: u128,
     virtual_portfolio: u128,
@@ -362,7 +363,7 @@ pub fn accountFactEvent(delivery: Delivery) !trading.CoreEvent {
         .payload = switch (delivery.fact.payload) {
             .account_snapshot => |snapshot| .{ .economic_account_snapshot = .{
                 .snapshot_id = identity,
-                .usdt_balance_atoms = snapshot.cash_atoms,
+                .settlement_balance_atoms = snapshot.cash_atoms,
                 .spot_asset_atoms = snapshot.spot_asset_atoms,
                 .swap_position_quantity = snapshot.swap_quantity,
                 .margin_atoms = snapshot.margin_atoms,
@@ -586,7 +587,7 @@ fn summaryFromAccountView(
     var spot_asset_atoms: i128 = 0;
     for (layers[0 .. 1 + view.economic_projection.extra_portfolio_count]) |owned| {
         margin_atoms = try std.math.add(i128, margin_atoms, owned.margin_atoms);
-        cash_atoms = try std.math.add(i128, cash_atoms, owned.usdt_balance_atoms);
+        cash_atoms = try std.math.add(i128, cash_atoms, owned.settlement_balance_atoms);
         spot_quantity = try std.math.add(i64, spot_quantity, owned.spot.quantity);
         swap_quantity = try std.math.add(i64, swap_quantity, owned.swap.quantity);
         spot_asset_atoms = try std.math.add(i128, spot_asset_atoms, owned.spot_asset_atoms);
@@ -608,6 +609,7 @@ fn summaryFromAccountView(
         }
     }
     return .{
+        .settlement_asset = view.economic_projection.settlement_asset,
         .shard_id = shard_id,
         .decision_domain = decision_domain,
         .virtual_portfolio = view.portfolio_identity,
@@ -876,6 +878,9 @@ pub const AccountCoordinator = struct {
             summary.rules_version == 0 or summary.reservation_atoms < 0 or
             !summaryOrderCountsValid(summary.open_orders, summary.unknown_orders))
             return error.InvalidShardSummary;
+        if (summary.settlement_asset == 0) return error.InvalidShardSummary;
+        for (self.summaries) |record| if (record.present and record.value.settlement_asset != summary.settlement_asset) return error.SettlementAssetMismatch;
+        for (self.native_rules.entries[0..self.native_rules.count]) |entry| if (entry.rules.settlement_asset != summary.settlement_asset) return error.SettlementAssetMismatch;
         if (summary.contribution_count > summary.contributions.len) return error.InvalidShardSummary;
         for (summary.contributions[0..summary.contribution_count], 0..) |item, contribution_index| {
             if (item.instrument == 0 or item.rules_version == 0 or item.margin_rules_version == 0 or item.margin_atoms < 0) return error.InvalidShardSummary;
@@ -1459,11 +1464,12 @@ pub const AccountCoordinator = struct {
         for (self.native_rules.entries[0..self.native_rules.count]) |entry| {
             if (self.venue_ingress.venue == 0 or entry.venue == 0 or entry.rules.venue == 0) return .{ .state = .unknown };
             if (entry.venue != self.venue_ingress.venue or entry.rules.venue != self.venue_ingress.venue) return .{ .state = .broken };
+            for (self.summaries) |summary| if (summary.present and summary.value.settlement_asset != entry.rules.settlement_asset) return .{ .state = .broken };
             const rules = entry.margin.native orelse return .{ .state = .unknown };
             if (settlement_asset) |asset| {
                 if (asset != entry.rules.settlement_asset) return .{ .state = .unknown };
             } else settlement_asset = entry.rules.settlement_asset;
-            if (entry.product != .isolated_linear_usdt or !entry.margin.native_settlement_atoms or entry.rules.settlement_asset != 1) return .{ .state = .unknown };
+            if (entry.product != .isolated_linear or !entry.margin.native_settlement_atoms) return .{ .state = .unknown };
             var quantity: i64 = 0;
             for (self.summaries) |summary| {
                 if (!summary.present) return .{ .state = .unknown };
@@ -2043,6 +2049,11 @@ pub const AccountCoordinator = struct {
             _ = try result.native_rules.register(entry);
             _ = try result.native_rules.configureMargin(entry.instrument, entry.margin);
         }
+        for (result.summaries) |record| if (record.present) {
+            if (record.value.settlement_asset == 0) return error.InvalidCoordinatorSnapshot;
+            for (result.summaries) |other| if (other.present and other.value.settlement_asset != record.value.settlement_asset) return error.InvalidCoordinatorSnapshot;
+            for (result.native_rules.entries[0..result.native_rules.count]) |entry| if (entry.rules.settlement_asset != record.value.settlement_asset) return error.InvalidCoordinatorSnapshot;
+        };
         result.native_account = try readNativeAccount(&reader);
         result.last_margin_observation = try readOptionalMarginObservation(&reader);
         result.margin_gate = .{
@@ -2821,7 +2832,7 @@ test "unowned economics stay in suspense until an immutable allocation" {
         .instrument_identity = 3,
         .quantity_denominator = 1,
         .reservation_model = .leveraged,
-        .product = .isolated_linear_usdt,
+        .product = .isolated_linear,
         .venue = 1,
     } } });
     _ = try applyCoreStable(shard, &stable_journal, .{ .identity = 2, .payload = .{ .margin_rules_activated = .{
@@ -3012,9 +3023,9 @@ test "forced delivery retry after shard commit does not charge penalty twice" {
     shard.* = .{};
     var stable_journal = trading.journal.Journal.init();
     try activateFixtureAssets(shard, &stable_journal);
-    _ = try applyCoreStable(shard, &stable_journal, .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 3, .quantity_denominator = 1, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = 1 } } });
+    _ = try applyCoreStable(shard, &stable_journal, .{ .identity = 1, .payload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 3, .quantity_denominator = 1, .reservation_model = .leveraged, .product = .isolated_linear, .venue = 1 } } });
     _ = try applyCoreStable(shard, &stable_journal, .{ .identity = 2, .payload = .{ .margin_rules_activated = .{ .version = 1, .instrument = 3 } } });
-    try shard.economic_projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = .{ .instrument = 3, .rules_version = 1, .lots = 1 }, .price = .{ .instrument = 3, .rules_version = 1, .ticks = 100 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1, .product = .isolated_linear_usdt } });
+    try shard.economic_projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .quantity = .{ .instrument = 3, .rules_version = 1, .lots = 1 }, .price = .{ .instrument = 3, .rules_version = 1, .ticks = 100 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1, .product = .isolated_linear } });
     try std.testing.expectError(error.ForcedDeliveryNotCommitted, coordinator.ackForcedDeliveryFromShard(&coordination_journal, delivery, shard));
     _ = try applyCoreStable(shard, &stable_journal, try accountFactEvent(delivery));
     const after_first = shard.economic_projection.digest();
@@ -3232,7 +3243,7 @@ test "account recovery retains a forced shard commit awaiting coordinator ack" {
             snapshot.best_ask_quantity.?.instrument = 1;
             snapshot.next_ask_quantity.?.instrument = 1;
             _ = try trading.applyStable(shard, &journal, book);
-            _ = try trading.applyStable(shard, &journal, fixture.atGroup(15, .{ .identity = 11, .payload = .{ .capability_profile_activation = .{ .exchange_account = 900, .instrument = 1, .venue = 1, .environment = .simulation, .product = .isolated_linear_usdt, .version = 1, .rules_version = 1, .config_version = 1, .adapter_session = 1, .max_dispatch_age_ns = 10 * std.time.ns_per_s, .supports_place = true, .supports_cancel = true, .supports_native_amend = false, .supports_venue_reduce_only = false, .supports_post_only = false, .supports_market_protection = false } } }));
+            _ = try trading.applyStable(shard, &journal, fixture.atGroup(15, .{ .identity = 11, .payload = .{ .capability_profile_activation = .{ .exchange_account = 900, .instrument = 1, .venue = 1, .environment = .simulation, .product = .isolated_linear, .version = 1, .rules_version = 1, .config_version = 1, .adapter_session = 1, .max_dispatch_age_ns = 10 * std.time.ns_per_s, .supports_place = true, .supports_cancel = true, .supports_native_amend = false, .supports_venue_reduce_only = false, .supports_post_only = false, .supports_market_protection = false } } }));
             const command = (try trading.applyStable(shard, &journal, fixture.atGroup(16, .{ .identity = 12, .payload = .{ .timer = .{ .side = .buy, .time_in_force = .immediate_or_cancel, .portfolio_reduce_only = false, .quantity = 1, .limit_price_micros = 100 } } }))) orelse return error.ExpectedOwnedSeedOrder;
             _ = try trading.applyStable(shard, &journal, fixture.atGroup(17, .{ .identity = 13, .payload = .{ .economic_fill = .{ .fill_id = 1, .order_id = command.order_id, .quantity = 1, .price_ticks = 100 } } }));
             _ = try trading.applyStable(shard, &journal, fixture.atGroup(18, .{ .identity = 14, .payload = .{ .oms_execution_report = .{ .report_id = 14, .order_id = command.order_id, .revision = 1, .status = .filled, .cumulative_quantity = 1, .remaining_quantity = 0 } } }));
@@ -4881,7 +4892,7 @@ test "04 native isolated rules reconcile independent venue margin and literal li
         memory.* = durable.MemoryAdapter.initWithAllocator(std.testing.allocator);
         defer memory.deinit();
         var owner = try CoordinatorOwner.init(AccountCoordinator.init(900, 4000, 4000), .{ .domain = .control, .id = 942 }, memory.interface(), undefined);
-        const entry: InstrumentRegistry.Entry = .{ .instrument = 10, .venue = rules_venue, .product = .isolated_linear_usdt, .rules = .{ .version = 1, .instrument_identity = 10, .quantity_denominator = 1, .reservation_model = .leveraged, .venue = rules_venue }, .margin = .{ .version = 1, .instrument = 10, .native_settlement_atoms = true, .venue_initial_margin_ppm = 200000, .internal_initial_margin_ppm = 220000, .internal_maintenance_margin_ppm = 110000, .native = .{ .model = .isolated_linear_usdt_v1, .tier_identity = 1, .notional_lower_atoms = 0, .notional_upper_atoms = 100000, .initial_margin_ppm = 200000, .maintenance_ppm = 100000, .maintenance_deduction_atoms = 0, .close_fee_ppm = 0, .margin_rounding_atoms = 1, .price_rounding_ticks = 1 } } };
+        const entry: InstrumentRegistry.Entry = .{ .instrument = 10, .venue = rules_venue, .product = .isolated_linear, .rules = .{ .version = 1, .instrument_identity = 10, .quantity_denominator = 1, .reservation_model = .leveraged, .venue = rules_venue }, .margin = .{ .version = 1, .instrument = 10, .native_settlement_atoms = true, .venue_initial_margin_ppm = 200000, .internal_initial_margin_ppm = 220000, .internal_maintenance_margin_ppm = 110000, .native = .{ .model = .isolated_linear_v1, .tier_identity = 1, .notional_lower_atoms = 0, .notional_upper_atoms = 100000, .initial_margin_ppm = 200000, .maintenance_ppm = 100000, .maintenance_deduction_atoms = 0, .close_fee_ppm = 0, .margin_rounding_atoms = 1, .price_rounding_ticks = 1 } } };
         for (0..3) |invalid_case| {
             var inconsistent = entry;
             switch (invalid_case) {
@@ -5036,4 +5047,14 @@ test "07 recovery fence loss cannot release coordinator authority" {
     recovery.shards[2].operational_state.trading_authorized = false;
     try recovery.completeCoordinatorRecovery();
     try std.testing.expect(!recovery.coordinator.recovery_only);
+}
+
+test "account summaries reject mixing independent settlement assets" {
+    var coordinator = AccountCoordinator.init(900, 1000, 1000);
+    var usdc = ShardSummary.fixture(.shard_0, 1, 100);
+    usdc.settlement_asset = 0x55534443;
+    _ = try coordinator.publishSummary(1, usdc);
+    const usdt = ShardSummary.fixture(.shard_1, 1, 100);
+    try std.testing.expectError(error.SettlementAssetMismatch, coordinator.publishSummary(2, usdt));
+    try std.testing.expect(coordinator.summary_protocol_fault);
 }

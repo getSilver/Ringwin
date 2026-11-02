@@ -114,17 +114,17 @@ pub fn assess(rules: Rules, limits: Limits, state: State, request: Request) !Ass
 
     const notional = try notionalAtoms(request.quantity.lots, request.risk_price.ticks, rules.price_tick_value.atoms, rules.quantity_numerator, rules.quantity_denominator);
     const fee = try rateAtoms(notional, rules.fee_ppm, rules.margin_rounding_atoms);
-    const venue_initial = if (request.product == .isolated_linear_usdt and !venue_reduces)
+    const venue_initial = if (request.product == .isolated_linear and !venue_reduces)
         try rateAtoms(notional, rules.venue_initial_margin_ppm, rules.margin_rounding_atoms)
     else
         0;
-    const internal_initial = if (request.product == .isolated_linear_usdt and !portfolio_reduces)
+    const internal_initial = if (request.product == .isolated_linear and !portfolio_reduces)
         try rateAtoms(notional, rules.internal_initial_margin_ppm, rules.margin_rounding_atoms)
     else
         0;
     const reservation = switch (request.product) {
         .spot => if (request.side == .buy) try std.math.add(i128, notional, fee) else fee,
-        .isolated_linear_usdt => try std.math.add(i128, @max(internal_initial, venue_initial), fee),
+        .isolated_linear => try std.math.add(i128, @max(internal_initial, venue_initial), fee),
     };
 
     const base = try std.math.sub(i128, state.active_order_reservations.atoms, state.replaced_order_reservation.atoms);
@@ -136,11 +136,11 @@ pub fn assess(rules: Rules, limits: Limits, state: State, request: Request) !Ass
     const portfolio_total = try std.math.add(i128, try std.math.sub(i128, portfolio_active.atoms, state.replaced_order_reservation.atoms), replacement_reservation);
     try checkLimits(limits, portfolio_total, total);
 
-    const portfolio_maintenance = if (request.product == .isolated_linear_usdt)
+    const portfolio_maintenance = if (request.product == .isolated_linear)
         try maintenanceWithCloseFee(rules, portfolio_after, state.mark_price.ticks)
     else
         0;
-    const exchange_maintenance = if (request.product == .isolated_linear_usdt)
+    const exchange_maintenance = if (request.product == .isolated_linear)
         try maintenanceWithCloseFee(rules, exchange_after, state.mark_price.ticks)
     else
         0;
@@ -288,13 +288,13 @@ test "five layers, cash, isolated margin, and dual reduce-only are deterministic
     const spot = try assess(rules, limits, state, .{ .product = .spot, .side = .buy, .quantity = testQuantity(2), .risk_price = price(50_000_000) });
     try std.testing.expectEqual(@as(i128, 1_000_750), spot.order_reservation.atoms);
 
-    const swap = try assess(rules, limits, state, .{ .product = .isolated_linear_usdt, .side = .sell, .quantity = testQuantity(8), .risk_price = price(50_000_000), .portfolio_reduce_only = true });
+    const swap = try assess(rules, limits, state, .{ .product = .isolated_linear, .side = .sell, .quantity = testQuantity(8), .risk_price = price(50_000_000), .portfolio_reduce_only = true });
     try std.testing.expect(swap.portfolio_reduce_only);
     try std.testing.expect(!swap.venue_reduce_only);
     try std.testing.expectEqual(@as(i128, 400_000), swap.venue_initial_margin.atoms);
     try std.testing.expectEqual(@as(i128, 403_000), swap.order_reservation.atoms);
 
-    const inferred = try assess(rules, limits, state, .{ .product = .isolated_linear_usdt, .side = .sell, .quantity = testQuantity(8), .risk_price = price(50_000_000) });
+    const inferred = try assess(rules, limits, state, .{ .product = .isolated_linear, .side = .sell, .quantity = testQuantity(8), .risk_price = price(50_000_000) });
     try std.testing.expect(inferred.portfolio_reduce_only);
     try std.testing.expect(!inferred.venue_reduce_only);
 
@@ -327,7 +327,7 @@ test "margin safety gate takes the strictest amount bps and liquidation distance
     rules.warning_liquidation_distance_ticks = 50_000;
     rules.kill_liquidation_distance_ticks = 15_000;
     const state: State = .{ .portfolio_cash = amount(2_000_000), .exchange_cash = amount(2_000_000), .portfolio_position = testQuantity(10), .exchange_position = testQuantity(10), .active_order_reservations = amount(0), .replaced_order_reservation = amount(0), .mark_price = price(50_000) };
-    const assessment = try assess(rules, fixtureLimits(), state, .{ .product = .isolated_linear_usdt, .side = .buy, .quantity = testQuantity(1), .risk_price = price(50_000) });
+    const assessment = try assess(rules, fixtureLimits(), state, .{ .product = .isolated_linear, .side = .buy, .quantity = testQuantity(1), .risk_price = price(50_000) });
     try std.testing.expectEqual(MarginGate.kill, assessment.portfolio_gate);
     try std.testing.expect(assessment.portfolio_buffer_bps > 500);
     try std.testing.expectEqual(@as(i64, 14_595), assessment.portfolio_liquidation_distance_ticks);
@@ -338,7 +338,7 @@ test "opening gate rejects sufficient cash with insufficient liquidation distanc
     rules.price_tick_value = amount(1_000);
     rules.opening_liquidation_distance_ticks = 20_000;
     const state: State = .{ .portfolio_cash = amount(2_000_000), .exchange_cash = amount(2_000_000), .portfolio_position = testQuantity(10), .exchange_position = testQuantity(10), .active_order_reservations = amount(0), .replaced_order_reservation = amount(0), .mark_price = price(50_000) };
-    try std.testing.expectError(error.PortfolioOpeningGateClosed, assess(rules, fixtureLimits(), state, .{ .product = .isolated_linear_usdt, .side = .buy, .quantity = testQuantity(1), .risk_price = price(50_000) }));
+    try std.testing.expectError(error.PortfolioOpeningGateClosed, assess(rules, fixtureLimits(), state, .{ .product = .isolated_linear, .side = .buy, .quantity = testQuantity(1), .risk_price = price(50_000) }));
 }
 
 test "extreme risk arithmetic fails closed" {

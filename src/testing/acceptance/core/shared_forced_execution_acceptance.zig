@@ -117,7 +117,7 @@ test "03 complete forced source closes only its instrument through typed allocat
     var simulator: simulated.SimulatedVenue = .{ .receipt_times = .{ .source_utc_ns = when.source_time, .receive_utc_ns = when.receive_time, .monotonic_ns = when.monotonic_time, .audit_utc_ns = when.wall_time } };
     var adapter = simulator.adapter();
     try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1, .asset_definitions = owners[0].shard.asset_registry, .instrument_definitions = owners[0].shard.instrument_registry });
-    try gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .supported_products = execution.productMask(.isolated_linear_usdt), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+    try gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .supported_products = execution.productMask(.isolated_linear), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
     var coordinator = try coordination.CoordinatorOwner.init(.init(2, 100, 100), .{ .domain = .control, .id = 9491 }, memory.interface(), undefined);
     for (owners, 0..) |*owner, index| try coordinator.apply(.{ .publish_summary = .{ .identity = index + 1, .summary = try coordination.shardSummaryFromShard(&owner.shard, @enumFromInt(index), 1, index + 1) } });
     try coordinator.checkpoint();
@@ -165,8 +165,8 @@ test "03 complete forced source closes only its instrument through typed allocat
     try std.testing.expectEqual(@as(usize, 0), (try recovered.coordinator.pendingForcedDeliveries()).len);
     try std.testing.expectEqual(@as(i64, 0), owners[0].shard.economic_projection.portfolio.instrumentPosition(5).?.position.quantity);
     try std.testing.expectEqualDeep(other_instrument, owners[0].shard.economic_projection.portfolio.instrumentPosition(1).?);
-    try std.testing.expectEqual(@as(i128, 22), owners[0].shard.economic_projection.portfolio.usdt_balance_atoms);
-    for (owners[1..]) |*owner| try std.testing.expectEqual(@as(i128, 25), owner.shard.economic_projection.portfolio.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 22), owners[0].shard.economic_projection.portfolio.settlement_balance_atoms);
+    for (owners[1..]) |*owner| try std.testing.expectEqual(@as(i128, 25), owner.shard.economic_projection.portfolio.settlement_balance_atoms);
     _ = try recovered.archiveForcedSource();
     try recovered.acceptAccountFact(.{ .identity = 702, .exchange_account = 2, .version = 1, .barrier = 2, .payload = .{ .account_snapshot = .{ .cash_atoms = 100, .swap_quantity = 0, .margin_atoms = 0 } } });
     const closed = recovered.coordinator.digest();
@@ -197,7 +197,7 @@ fn proveForcedGateRecovery(coordinator: *coordination.CoordinatorOwner, owners: 
             margin.version = 3;
             margin.instrument = instrument;
             margin.native_settlement_atoms = true;
-            margin.native = .{ .model = .isolated_linear_usdt_v1, .tier_identity = 1, .notional_lower_atoms = 0, .notional_upper_atoms = 100000, .initial_margin_ppm = 20000, .maintenance_ppm = 11000, .maintenance_deduction_atoms = 0, .close_fee_ppm = 0, .margin_rounding_atoms = 1, .price_rounding_ticks = 1 };
+            margin.native = .{ .model = .isolated_linear_v1, .tier_identity = 1, .notional_lower_atoms = 0, .notional_upper_atoms = 100000, .initial_margin_ppm = 20000, .maintenance_ppm = 11000, .maintenance_deduction_atoms = 0, .close_fee_ppm = 0, .margin_rounding_atoms = 1, .price_rounding_ticks = 1 };
             _ = try owner.apply(fixture.atGroup(59, .{ .identity = @intCast(6000 + instrument), .account_scope = 2, .payload = .{ .margin_rules_activated = margin } }));
             try coordinator.apply(.{ .native_margin_configuration = owner.shard.instrument_registry.get(instrument).? });
         }

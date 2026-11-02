@@ -226,7 +226,7 @@ fn exercise(comptime kind: Kind, case: Case) ![32]u8 {
         try std.testing.expectEqual(@as(i64, 1), owner.shard.oms.orderById(command.order_id).?.cumulative_quantity);
         try std.testing.expectEqual(@as(i128, if (!base_fee and !third_fee and !rebate and case != .zero) 1 else 0), owner.shard.economicSummary().portfolio.fee_atoms);
         try std.testing.expectEqual(@as(i128, if (base_fee) (if (rebate) 201 else 199) else 200), owner.shard.economicSummary().portfolio.spot_asset_atoms);
-        try std.testing.expectEqual(@as(i128, if (base_fee or third_fee or case == .zero) 89990000000000 else if (rebate) 89990000000001 else 89989999999999), owner.shard.economicSummary().portfolio.usdt_balance_atoms);
+        try std.testing.expectEqual(@as(i128, if (base_fee or third_fee or case == .zero) 89990000000000 else if (rebate) 89990000000001 else 89989999999999), owner.shard.economicSummary().portfolio.settlement_balance_atoms);
     }
     if (third_fee) {
         const economic = owner.shard.economicSummary();

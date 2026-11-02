@@ -65,7 +65,7 @@ fn exercise(comptime kind: Kind) !void {
             .instrument_identity = instrument,
             .quantity_denominator = 10_000,
             .reservation_model = if (index == 0) .cash else .leveraged,
-            .product = if (index == 0) .spot else .isolated_linear_usdt,
+            .product = if (index == 0) .spot else .isolated_linear,
             .venue = venue_id,
             .settlement_asset = 1,
             .base_asset = if (index == 0) Private.btc else 0,

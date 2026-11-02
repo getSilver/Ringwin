@@ -8,9 +8,9 @@ const canonical = @import("../model/canonical_event.zig");
 
 pub const contract_version: u16 = 1;
 pub const acceptance_schema_version: u16 = 13;
-pub const journal_schema_version: u16 = 50;
-pub const state_schema_version: u32 = 54;
-pub const schema_registry_identity: u64 = 48;
+pub const journal_schema_version: u16 = 51;
+pub const state_schema_version: u32 = 55;
+pub const schema_registry_identity: u64 = 49;
 pub const previous_journal_schema_version: u16 = journal_schema_version - 1;
 pub const previous_state_schema_version: u32 = state_schema_version - 1;
 pub const production_optimize = std.builtin.OptimizeMode.ReleaseSafe;
@@ -90,18 +90,18 @@ const no_capabilities = [_]OrderCapability{};
 /// The exchange account is intentionally a scope, not a fabricated account ID.
 pub const support_matrix = [_]SupportMatrixEntry{
     .{ .venue = .okx, .environment = .production, .exchange_account = .explicit_qualified_account, .product = .spot, .instrument = .btc_usdt_spot, .capabilities = &spot_capabilities, .status = .production_candidate },
-    .{ .venue = .okx, .environment = .production, .exchange_account = .explicit_qualified_account, .product = .isolated_linear_usdt, .instrument = .btc_usdt_isolated_linear_perpetual, .capabilities = &linear_capabilities, .status = .production_candidate },
+    .{ .venue = .okx, .environment = .production, .exchange_account = .explicit_qualified_account, .product = .isolated_linear, .instrument = .btc_usdt_isolated_linear_perpetual, .capabilities = &linear_capabilities, .status = .production_candidate },
     .{ .venue = .binance, .environment = .production, .exchange_account = .explicit_qualified_account, .product = .spot, .instrument = .btc_usdt_spot, .capabilities = &spot_capabilities, .status = .production_candidate },
-    .{ .venue = .binance, .environment = .production, .exchange_account = .explicit_qualified_account, .product = .isolated_linear_usdt, .instrument = .btc_usdt_isolated_linear_perpetual, .capabilities = &linear_capabilities, .status = .production_candidate },
+    .{ .venue = .binance, .environment = .production, .exchange_account = .explicit_qualified_account, .product = .isolated_linear, .instrument = .btc_usdt_isolated_linear_perpetual, .capabilities = &linear_capabilities, .status = .production_candidate },
     .{ .venue = .bybit, .environment = .production, .exchange_account = .explicit_qualified_account, .product = .spot, .instrument = .btc_usdt_spot, .capabilities = &spot_capabilities, .status = .production_candidate },
-    .{ .venue = .bybit, .environment = .production, .exchange_account = .explicit_qualified_account, .product = .isolated_linear_usdt, .instrument = .btc_usdt_isolated_linear_perpetual, .capabilities = &linear_capabilities, .status = .production_candidate },
+    .{ .venue = .bybit, .environment = .production, .exchange_account = .explicit_qualified_account, .product = .isolated_linear, .instrument = .btc_usdt_isolated_linear_perpetual, .capabilities = &linear_capabilities, .status = .production_candidate },
 
     .{ .venue = .okx, .environment = .demo, .exchange_account = .explicit_qualified_account, .product = .spot, .instrument = .btc_usdt_spot, .capabilities = &spot_capabilities, .status = .non_production_reference },
-    .{ .venue = .okx, .environment = .demo, .exchange_account = .explicit_qualified_account, .product = .isolated_linear_usdt, .instrument = .btc_usdt_isolated_linear_perpetual, .capabilities = &linear_capabilities, .status = .non_production_reference },
+    .{ .venue = .okx, .environment = .demo, .exchange_account = .explicit_qualified_account, .product = .isolated_linear, .instrument = .btc_usdt_isolated_linear_perpetual, .capabilities = &linear_capabilities, .status = .non_production_reference },
     .{ .venue = .binance, .environment = .testnet, .exchange_account = .explicit_qualified_account, .product = .spot, .instrument = .btc_usdt_spot, .capabilities = &spot_capabilities, .status = .non_production_reference },
-    .{ .venue = .binance, .environment = .testnet, .exchange_account = .explicit_qualified_account, .product = .isolated_linear_usdt, .instrument = .btc_usdt_isolated_linear_perpetual, .capabilities = &linear_capabilities, .status = .non_production_reference },
+    .{ .venue = .binance, .environment = .testnet, .exchange_account = .explicit_qualified_account, .product = .isolated_linear, .instrument = .btc_usdt_isolated_linear_perpetual, .capabilities = &linear_capabilities, .status = .non_production_reference },
     .{ .venue = .bybit, .environment = .testnet, .exchange_account = .explicit_qualified_account, .product = .spot, .instrument = .btc_usdt_spot, .capabilities = &spot_capabilities, .status = .non_production_reference },
-    .{ .venue = .bybit, .environment = .testnet, .exchange_account = .explicit_qualified_account, .product = .isolated_linear_usdt, .instrument = .btc_usdt_isolated_linear_perpetual, .capabilities = &linear_capabilities, .status = .non_production_reference },
+    .{ .venue = .bybit, .environment = .testnet, .exchange_account = .explicit_qualified_account, .product = .isolated_linear, .instrument = .btc_usdt_isolated_linear_perpetual, .capabilities = &linear_capabilities, .status = .non_production_reference },
 
     .{ .venue = .gate_io, .environment = .production, .exchange_account = .none, .product = .spot, .instrument = .none, .capabilities = &no_capabilities, .status = .disabled },
     .{ .venue = .bitget, .environment = .production, .exchange_account = .none, .product = .spot, .instrument = .none, .capabilities = &no_capabilities, .status = .disabled },
@@ -178,11 +178,11 @@ pub fn isWindowsProcessChainVerified(evidence: WindowsChainEvidence) bool {
 }
 
 test "production contract freezes Linux scope and schema" {
-    try std.testing.expectEqual(@as(u16, 50), journal_schema_version);
-    try std.testing.expectEqual(@as(u32, 54), state_schema_version);
-    try std.testing.expectEqual(@as(u16, 49), previous_journal_schema_version);
-    try std.testing.expectEqual(@as(u32, 53), previous_state_schema_version);
-    try std.testing.expectEqual(@as(u64, 48), schema_registry_identity);
+    try std.testing.expectEqual(@as(u16, 51), journal_schema_version);
+    try std.testing.expectEqual(@as(u32, 55), state_schema_version);
+    try std.testing.expectEqual(@as(u16, 50), previous_journal_schema_version);
+    try std.testing.expectEqual(@as(u32, 54), previous_state_schema_version);
+    try std.testing.expectEqual(@as(u64, 49), schema_registry_identity);
     try std.testing.expectEqual(@as(usize, 14), support_matrix.len);
     try std.testing.expectEqual(std.builtin.OptimizeMode.ReleaseSafe, production_optimize);
     try std.testing.expectEqual(ProductionPlatform.linux, production_platform);

@@ -349,7 +349,7 @@ fn exerciseInterval(owner: *demo.Owner, implementation: *okx.OkxVenueAdapter, ch
     if (!unapplied) try owner.applyAdapterBatch(actual);
     const before = owner.shard.economicSummary();
     if (!unapplied) {
-        try std.testing.expectEqual(@as(i128, if (third_fee) 99_995_000_000_000 else 99_994_999_999_999), before.exchange.usdt_balance_atoms);
+        try std.testing.expectEqual(@as(i128, if (third_fee) 99_995_000_000_000 else 99_994_999_999_999), before.exchange.settlement_balance_atoms);
         try std.testing.expectEqual(@as(i128, 100), before.exchange.spot_asset_atoms);
         try std.testing.expectEqual(@as(i128, if (third_fee) 0 else 1), before.exchange.fee_atoms);
     }

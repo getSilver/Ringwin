@@ -92,8 +92,8 @@ fn exercise(case: Case) !void {
     } else {
         try owner.applyAdapterBatch(batch);
         const summary = owner.shard.economicSummary();
-        try std.testing.expectEqual(@as(i128, if (case == .quote or case == .conflict) 89_959_999_999_998 else 89_960_000_000_000), summary.portfolio.usdt_balance_atoms);
-        try std.testing.expectEqual(@as(i128, if (case == .quote or case == .conflict) 99_959_999_999_998 else 99_960_000_000_000), summary.exchange.usdt_balance_atoms);
+        try std.testing.expectEqual(@as(i128, if (case == .quote or case == .conflict) 89_959_999_999_998 else 89_960_000_000_000), summary.portfolio.settlement_balance_atoms);
+        try std.testing.expectEqual(@as(i128, if (case == .quote or case == .conflict) 99_959_999_999_998 else 99_960_000_000_000), summary.exchange.settlement_balance_atoms);
         try std.testing.expectEqual(@as(i128, if (case == .base) 798 else 800), summary.exchange.spot_asset_atoms);
         try std.testing.expectEqual(@as(i128, 40_000_000_000), summary.portfolio.spot.open_cost_atoms);
         try std.testing.expectEqual(@as(i128, if (case == .quote or case == .conflict) 3 else 0), summary.portfolio.fee_atoms);

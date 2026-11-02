@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const Model = enum(u8) { isolated_linear_usdt_v1 = 1, unsupported = 255, _ };
+pub const Model = enum(u8) { isolated_linear_v1 = 1, unsupported = 255, _ };
 
 /// Explicit native model: mark-based margin and fees; exact linear liquidation
 /// equation followed by adverse-direction price rounding. Activation is required.
@@ -17,7 +17,7 @@ pub const Rules = struct {
     price_rounding_ticks: i128,
 
     pub fn validate(self: Rules) !void {
-        if (self.model != .isolated_linear_usdt_v1) return error.UnsupportedNativeMarginModel;
+        if (self.model != .isolated_linear_v1) return error.UnsupportedNativeMarginModel;
         if (self.tier_identity == 0 or self.notional_lower_atoms < 0 or
             self.notional_upper_atoms <= self.notional_lower_atoms or
             self.initial_margin_ppm < 0 or self.initial_margin_ppm >= ppm_scale or
@@ -51,7 +51,7 @@ pub fn calculate(
     mark_price_ticks: i128,
     collateral_atoms: i128,
 ) !?Assessment {
-    if (rules.model != .isolated_linear_usdt_v1) return null;
+    if (rules.model != .isolated_linear_v1) return null;
     try rules.validate();
     if (quantity_numerator <= 0 or quantity_denominator <= 0 or
         price_tick_atoms <= 0 or collateral_atoms < 0) return error.InvalidNativeMarginInput;

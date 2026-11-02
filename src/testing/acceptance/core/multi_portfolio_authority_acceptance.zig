@@ -48,7 +48,7 @@ fn exercisePortfolioForced(comptime scenario: enum { provenance, tamper, pnl }) 
     if (scenario == .pnl) try applyForcedOpeningFill(owner, 1, 53003, 10000, 80, 102);
     const before_a = owner.shard.economic_projection.portfolioLayer(10).?.*;
     const before_b = owner.shard.economic_projection.portfolioLayer(11).?.*;
-    const before_exchange = owner.shard.economic_projection.exchange.usdt_balance_atoms;
+    const before_exchange = owner.shard.economic_projection.exchange.settlement_balance_atoms;
     const before_netting = owner.shard.economic_projection.netting_settlement_atoms;
     const forced: trading.CoreEvent = fixture.atGroup(60, .{ .identity = 54001, .account_scope = 20, .payload = .{ .venue_forced_execution = .{
         .portfolio_identity = if (scenario == .pnl) 10 else 11,
@@ -63,8 +63,8 @@ fn exercisePortfolioForced(comptime scenario: enum { provenance, tamper, pnl }) 
     _ = try owner.apply(.{ .core = forced });
     const projection = &owner.shard.economic_projection;
     if (scenario == .pnl) {
-        try std.testing.expectEqual(before_a.usdt_balance_atoms + 45, projection.portfolioLayer(10).?.usdt_balance_atoms);
-        try std.testing.expectEqual(before_exchange + 50, projection.exchange.usdt_balance_atoms);
+        try std.testing.expectEqual(before_a.settlement_balance_atoms + 45, projection.portfolioLayer(10).?.settlement_balance_atoms);
+        try std.testing.expectEqual(before_exchange + 50, projection.exchange.settlement_balance_atoms);
         try std.testing.expectEqual(before_netting + 5, projection.netting_settlement_atoms);
         try std.testing.expectEqualDeep(before_b, projection.portfolioLayer(11).?.*);
     } else {
@@ -255,7 +255,7 @@ fn exercisePortfolioDispatchArchive(comptime account: u128) !void {
     var simulator: archive.RestingSimulator = .{ .next_sequence = 1000 };
     const adapter = simulator.adapter();
     try adapter.start(.{ .venue = venue_identity, .environment = .simulation, .exchange_account = account, .adapter_session = 1, .request_capacity = 1, .output_capacity = 1 });
-    try gateway.add(.{ .account = account, .adapter = adapter, .venue_identity = venue_identity, .supported_products = execution.productMask(.isolated_linear_usdt), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+    try gateway.add(.{ .account = account, .adapter = adapter, .venue_identity = venue_identity, .supported_products = execution.productMask(.isolated_linear), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
     const account_view = try allocator.create(trading.TradingShard);
     defer allocator.destroy(account_view);
     for (0..2) |round| {
@@ -352,7 +352,7 @@ pub fn initializeEconomicsOwner(owner: *demo.Owner) !void {
         identity += 1;
     }
     const payloads = [_]trading.CorePayload{
-        .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 101, .quantity_denominator = 1, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = 1 } },
+        .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 101, .quantity_denominator = 1, .reservation_model = .leveraged, .product = .isolated_linear, .venue = 1 } },
         .{ .margin_rules_activated = .{ .version = 1, .instrument = 101 } },
         .{ .account_configuration = .{ .exchange_account_identity = 20 } },
         .{ .exchange_balance = .{ .cash_atoms = 1000 } },
@@ -385,9 +385,9 @@ test "04 Owner activates and funds independent portfolio layers through Core sna
     try std.testing.expectEqual(@as(u128, 10), projection.primary_portfolio_identity);
     try std.testing.expect(projection.portfolioLayer(10).?.funded);
     try std.testing.expect(projection.portfolioLayer(11).?.funded);
-    try std.testing.expectEqual(@as(i128, 400), projection.portfolioLayer(10).?.usdt_balance_atoms);
-    try std.testing.expectEqual(@as(i128, 200), projection.portfolioLayer(11).?.usdt_balance_atoms);
-    try std.testing.expectEqual(@as(i128, 400), projection.treasury_usdt_atoms);
+    try std.testing.expectEqual(@as(i128, 400), projection.portfolioLayer(10).?.settlement_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 200), projection.portfolioLayer(11).?.settlement_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 400), projection.treasury_settlement_atoms);
     const buffer = try std.testing.allocator.alloc(u8, 32 * 1024 * 1024);
     defer std.testing.allocator.free(buffer);
     try owner.decision_journal.seal();
@@ -441,10 +441,10 @@ test "04 three portfolio economics have canonical identity order across activati
         for ([_]u128{ 20, 30 }, 0..) |account, index| {
             const projection = &recovered.shard.accountState(account).?.economic_projection;
             try std.testing.expectEqual(@as(u128, 10), projection.primary_portfolio_identity);
-            try std.testing.expectEqual(@as(i128, if (account == 20) 400 else 600), projection.portfolioLayer(10).?.usdt_balance_atoms);
-            try std.testing.expectEqual(@as(i128, 200), projection.portfolioLayer(11).?.usdt_balance_atoms);
-            try std.testing.expectEqual(@as(i128, 100), projection.portfolioLayer(12).?.usdt_balance_atoms);
-            try std.testing.expectEqual(@as(i128, if (account == 20) 300 else 1100), projection.treasury_usdt_atoms);
+            try std.testing.expectEqual(@as(i128, if (account == 20) 400 else 600), projection.portfolioLayer(10).?.settlement_balance_atoms);
+            try std.testing.expectEqual(@as(i128, 200), projection.portfolioLayer(11).?.settlement_balance_atoms);
+            try std.testing.expectEqual(@as(i128, 100), projection.portfolioLayer(12).?.settlement_balance_atoms);
+            try std.testing.expectEqual(@as(i128, if (account == 20) 300 else 1100), projection.treasury_settlement_atoms);
             digests[index] = projection.semanticDigest();
         }
         if (expected) |baseline| {
@@ -520,7 +520,7 @@ test "04 two portfolio Host authorities share session and revoke independently" 
     for (@import("../../../trading/asset_registry.zig").testDefinitions(6, 8)) |definition|
         try applyHostCore(owner, null, .{ .asset_definition_activated = definition });
     const initialization = [_]trading.CorePayload{
-        .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 101, .quantity_denominator = 10000, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = 1 } },
+        .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 101, .quantity_denominator = 10000, .reservation_model = .leveraged, .product = .isolated_linear, .venue = 1 } },
         .{ .margin_rules_activated = .{ .version = 1, .instrument = 101 } },
         .{ .account_configuration = .{ .exchange_account_identity = 20 } },
         .{ .exchange_balance = .{ .cash_atoms = 1000 } },
@@ -601,7 +601,7 @@ test "04 physical capability configuration is independent of portfolio strategy 
         .instrument = 101,
         .venue = 1,
         .environment = .simulation,
-        .product = .isolated_linear_usdt,
+        .product = .isolated_linear,
         .version = 1,
         .rules_version = 1,
         .config_version = 1,
@@ -838,8 +838,8 @@ fn exerciseLifecycleProgress(filled: bool) !void {
     try std.testing.expectEqual(if (filled) @import("../../../trading/operational.zig").OperationalMode.draining else .ready, owner.shard.operational_state.mode);
     for ([_]u128{ 20, 30 }, [_]i128{ 400, 600 }) |account, primary_cash| {
         const projection = &owner.shard.accountState(account).?.economic_projection;
-        try std.testing.expectEqual(primary_cash, projection.portfolioLayer(10).?.usdt_balance_atoms);
-        try std.testing.expectEqual(@as(i128, 100), projection.portfolioLayer(11).?.usdt_balance_atoms);
+        try std.testing.expectEqual(primary_cash, projection.portfolioLayer(10).?.settlement_balance_atoms);
+        try std.testing.expectEqual(@as(i128, 100), projection.portfolioLayer(11).?.settlement_balance_atoms);
         try std.testing.expectEqual(@as(i64, 0), projection.portfolioLayer(10).?.swap.quantity);
     }
     if (filled) try std.testing.expectEqual(@as(u128, 64001), owner.shard.operational_state.active_operation_identity);
@@ -1242,7 +1242,7 @@ test "04 another portfolio reservation does not consume a small portfolios cash 
     }
     try std.testing.expectEqual(@as(i128, 20), (try owner.shard.oms.reservationsForPortfolio(20, 10, 1)).atoms);
     try std.testing.expectEqual(@as(i128, 2), (try owner.shard.oms.reservationsForPortfolio(20, 11, 1)).atoms);
-    try std.testing.expectEqual(@as(i128, 7), owner.shard.accountState(20).?.economic_projection.portfolioLayer(11).?.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 7), owner.shard.accountState(20).?.economic_projection.portfolioLayer(11).?.settlement_balance_atoms);
 }
 
 test "04 Core funding preserves a unique portfolio and suspends an unactivated multi portfolio domain" {
@@ -1285,9 +1285,9 @@ test "04 Core funding preserves a unique portfolio and suspends an unactivated m
         _ = try owner.apply(funding);
         const projection = &owner.shard.accountState(20).?.economic_projection;
         try std.testing.expectEqual(@as(u8, 0), projection.extra_portfolio_count);
-        try std.testing.expectEqual(@as(i128, if (multiple) 400 else 405), projection.portfolioLayer(10).?.usdt_balance_atoms);
-        try std.testing.expectEqual(@as(i128, 1005), projection.exchange.usdt_balance_atoms);
-        try std.testing.expectEqual(@as(i128, if (multiple) 5 else 0), projection.suspense_usdt_atoms);
+        try std.testing.expectEqual(@as(i128, if (multiple) 400 else 405), projection.portfolioLayer(10).?.settlement_balance_atoms);
+        try std.testing.expectEqual(@as(i128, 1005), projection.exchange.settlement_balance_atoms);
+        try std.testing.expectEqual(@as(i128, if (multiple) 5 else 0), projection.suspense_settlement_atoms);
         const before = owner.shard.canonicalStateDigest();
         _ = try owner.apply(funding);
         try std.testing.expectEqualSlices(u8, &before, &owner.shard.canonicalStateDigest());

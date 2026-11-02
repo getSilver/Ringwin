@@ -63,13 +63,13 @@ pub const definitions = [_]Definition{ base, blk: {
         if result.returncode:
             raise AssertionError(result.stdout + result.stderr)
         cls.node = root / ('zig-out/bin/ringwin-strategy-authority-probe' + ('.exe' if os.name == 'nt' else ''))
-        cls.build = json.loads((ROOT / 'zig-out/share/ringwin/native-strategies.json').read_bytes())
-        cls.build['definitions'].append(dict(cls.build['definitions'][0], definition_identity=B))
+        cls.build = json.loads((root / 'zig-out/share/ringwin/native-strategies.json').read_bytes())
 
     def install_native(self, definition=A, artifact='native-a', binary=None):
         files, self.manager.strategy_policy = native_files(binary=binary or self.node.read_bytes(), build=self.build)
         manifest = write_artifact(str(self.root), artifact, archive(files), KEY,
-                                  payload_format='strategy_bundle_v2', schema_registry=48)
+                                  payload_format='strategy_bundle_v2',
+                                  schema_registry=self.build['definitions'][0]['compatibility']['schema_registry'])
         result = self.deploy(manifest, identity=str(time.time_ns() % 2**62), expected=self.manager.active_artifact())
         self.assertEqual(result['status'], 'activated', result)
         installed = self.root / 'versions' / artifact

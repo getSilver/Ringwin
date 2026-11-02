@@ -16,7 +16,7 @@ pub fn windowInput(harness: *acceptance.ArchiveHarness, round: u64, facts: []con
     const sequence = 10 + round * 3;
     var evidence: canonical.AccountEconomicEvidence = .{
         .exchange_account = 2,
-        .scope = .spot_and_isolated_linear_usdt,
+        .scope = .spot_and_isolated_linear,
         .from_utc_ns = if (current.reconciliation_cursor) |cursor| cursor.through_utc_ns else current.economic_baseline_utc_ns,
         .through_utc_ns = 1,
         .source = .{ .stream = 7, .sequence = sequence, .digest = history.hash("complete account after") },
@@ -34,7 +34,7 @@ pub fn windowInput(harness: *acceptance.ArchiveHarness, round: u64, facts: []con
         evidence.before_balance_count = cursor.balance_count;
         @memcpy(evidence.before_balances[0..cursor.balance_count], cursor.balances[0..cursor.balance_count]);
     }
-    evidence.balances[0] = .{ .asset = 1, .atoms = current.economic_projection.exchange.usdt_balance_atoms };
+    evidence.balances[0] = .{ .asset = 1, .atoms = current.economic_projection.exchange.settlement_balance_atoms };
     evidence.balances[1] = .{ .asset = 0x425443, .atoms = 0 };
     evidence.asset_versions[0] = 1;
     evidence.asset_versions[1] = 1;
@@ -186,7 +186,7 @@ fn expectHeldEconomics(initial: trading.EconomicSummary, current: *const trading
         try std.testing.expectEqual(before.realized_pnl_atoms, actual.realized_pnl_atoms);
         try std.testing.expectEqual(before.unrealized_pnl_atoms, actual.unrealized_pnl_atoms);
         try std.testing.expectEqual(-7 * count, actual.funding_atoms);
-        try std.testing.expectEqual(before.usdt_balance_atoms - 7 * count, actual.usdt_balance_atoms);
+        try std.testing.expectEqual(before.settlement_balance_atoms - 7 * count, actual.settlement_balance_atoms);
     }
     try std.testing.expectEqual(@as(u16, 0), current.oms.order_count);
     try std.testing.expectEqual(@as(u64, round + 2), current.reconciliation_cursor.?.closed_economic_fact_count);

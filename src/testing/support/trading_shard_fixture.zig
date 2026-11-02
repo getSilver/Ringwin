@@ -18,14 +18,14 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-// StateDigestV14 / SemanticAuthorityDigestV4 / journal50 / state54 / canonical16 / registry48; recaptured after economic and stable replay assertions.
-pub const expected_happy_digest = "1be43b386c07805c062d48c88c9a01358c64b99279a200e20035365cb78eea21";
+// StateDigestV15 / SemanticAuthorityDigestV4 / journal51 / state55 / canonical19 / registry49; recaptured after economic and stable replay assertions.
+pub const expected_happy_digest = "5aa5733e876d3c01cc7d6975586012252e98a3ea2b1dc8660bf680bcb8d41b64";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "430cb28a908922d20d9313fa2be493aae517f54f143830ac5b8834fa4429f1fc",
-    "94da83bc055586e458ee438dff9d63ab873185f4ff3e8690f82d388900f3f69d",
-    "94acc83d6e87e92eb606fca8696566a000bf3619837e5a62c034191bd4b0fbe9",
-    "627ae0d2083e2beea8f32c0b1cbec6a0848a4cabd310af24a696e54ef9e94275",
+    "9f0a8f7ab259e001b1fafd40ab3b3567d012a22b6e686491257ecac77c1eaf14",
+    "9cfd802d698e96113834989e63901e60f5e8dbef7df3a532d43c5dd6ae6012e4",
+    "3fbe5cff9ce6dfafb1364667d32e6adfdc83881ed69a878caaf42d1fb87aaf2b",
+    "36865c2a85f3cade573c77ba71cd78ee4cf3ef426899d7504f9e7dc616ce7e51",
 };
 pub const order_limit_price: i64 = 50_100_000_000;
 
@@ -213,7 +213,7 @@ pub fn genesisEvents(authorization: host_gateway.Authorization, reservation_mode
             .instrument_identity = 3,
             .quantity_denominator = denominator,
             .reservation_model = reservation_model,
-            .product = if (reservation_model == .cash) .spot else .isolated_linear_usdt,
+            .product = if (reservation_model == .cash) .spot else .isolated_linear,
             .base_asset = if (reservation_model == .cash) 0x425443 else 0,
             .venue = 1,
         } } }),
@@ -518,8 +518,8 @@ fn assertPartialState(shard: *const engine.TradingShard) !void {
         economic.exchange.swap.quantity != 40 or
         economic.exchange.swap.open_cost_atoms != 199_600_000 or
         economic.portfolio.fee_atoms != 149_700 or
-        economic.portfolio.usdt_balance_atoms != 19_999_850_300 or
-        economic.exchange.usdt_balance_atoms != 24_999_850_300 or
+        economic.portfolio.settlement_balance_atoms != 19_999_850_300 or
+        economic.exchange.settlement_balance_atoms != 24_999_850_300 or
         shard.economic_projection.portfolio.margin_atoms != 4_391_200 or
         // The fill ledger is not allowed to guess OMS remaining quantity:
         // reservation changes only once the authoritative report is applied.

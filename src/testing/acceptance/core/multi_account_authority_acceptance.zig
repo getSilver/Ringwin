@@ -597,7 +597,7 @@ fn exerciseAccountRecovery(scenario: Scenario) !void {
     try std.testing.expectEqual(encoded_snapshot.len, try shard.snapshotEncodedSize());
     _ = try trading.TradingShard.restoreSnapshotInto(recovered, encoded_snapshot);
     try std.testing.expectEqualSlices(u8, &shard.canonicalStateDigest(), &recovered.canonicalStateDigest());
-    try std.testing.expectEqual(@as(i128, if (scenario == .domain_history or (closing and scenario != .cycle_spot_zero)) 605 else 600), recovered.accountState(30).?.economic_projection.portfolio.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i128, if (scenario == .domain_history or (closing and scenario != .cycle_spot_zero)) 605 else 600), recovered.accountState(30).?.economic_projection.portfolio.settlement_balance_atoms);
     if (scenario == .cycle_spot_carry_increase) try std.testing.expect(!recovered.oms.recovery_only);
     if (carrying(scenario)) {
         try std.testing.expectEqual(@as(i128, if (scenario == .cycle_spot_carry_increase or scenario == .cycle_spot_carry_fee) 0 else if (scenario == .cycle_spot_carry_return) 2 else 1), try recovered.cycles.outstandingAtoms(20, 10, 0x425443));
@@ -824,7 +824,7 @@ fn initializeForScenarioWithConfiguration(owner: *demo.Owner, scenario: Scenario
     const transfers = [_]i128{ 400, 600, 800, 1000 };
     for (accounts[0..account_count], instruments[0..account_count], venues[0..account_count], balances[0..account_count], transfers[0..account_count]) |account, instrument, venue, balance, transfer| {
         const payloads = [_]trading.CorePayload{
-            .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = instrument, .quantity_denominator = 10000, .reservation_model = if (spot) .cash else .leveraged, .product = if (spot) .spot else .isolated_linear_usdt, .venue = venue, .base_asset = if (spot) 0x425443 else 0 } },
+            .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = instrument, .quantity_denominator = 10000, .reservation_model = if (spot) .cash else .leveraged, .product = if (spot) .spot else .isolated_linear, .venue = venue, .base_asset = if (spot) 0x425443 else 0 } },
             .{ .margin_rules_activated = .{ .version = 1, .instrument = instrument } },
             .{ .account_configuration = .{ .exchange_account_identity = account } },
             .{ .exchange_balance = .{ .cash_atoms = balance } },
@@ -838,10 +838,10 @@ fn initializeForScenarioWithConfiguration(owner: *demo.Owner, scenario: Scenario
             identity += 1;
         }
     }
-    try std.testing.expectEqual(@as(i128, 400), shard.accountState(20).?.economic_projection.portfolio.usdt_balance_atoms);
-    try std.testing.expectEqual(@as(i128, 600), shard.accountState(30).?.economic_projection.portfolio.usdt_balance_atoms);
-    try std.testing.expectEqual(@as(i128, 1000), shard.accountState(20).?.economic_projection.exchange.usdt_balance_atoms);
-    try std.testing.expectEqual(@as(i128, 2000), shard.accountState(30).?.economic_projection.exchange.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 400), shard.accountState(20).?.economic_projection.portfolio.settlement_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 600), shard.accountState(30).?.economic_projection.portfolio.settlement_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 1000), shard.accountState(20).?.economic_projection.exchange.settlement_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 2000), shard.accountState(30).?.economic_projection.exchange.settlement_balance_atoms);
     try std.testing.expectEqual(@as(u8, 0), shard.account_view);
     _ = try owner.apply(.{ .core = .{ .identity = identity, .payload = .{ .strategy_activated = .{ .strategy_identity = 9, .config_version = 1, .activation_identity = 1 } } } });
     identity += 1;
@@ -888,8 +888,8 @@ fn initializeForScenarioWithConfiguration(owner: *demo.Owner, scenario: Scenario
     try std.testing.expectEqual(@as(?u128, 30), shard.accountState(30).?.canonical_account.exchange_account);
     if (scenario == .four_accounts) {
         try std.testing.expectEqual(@as(u8, 3), shard.secondary_account_count);
-        try std.testing.expectEqual(@as(i128, 3000), shard.accountState(40).?.economic_projection.exchange.usdt_balance_atoms);
-        try std.testing.expectEqual(@as(i128, 4000), shard.accountState(50).?.economic_projection.exchange.usdt_balance_atoms);
+        try std.testing.expectEqual(@as(i128, 3000), shard.accountState(40).?.economic_projection.exchange.settlement_balance_atoms);
+        try std.testing.expectEqual(@as(i128, 4000), shard.accountState(50).?.economic_projection.exchange.settlement_balance_atoms);
     }
     try owner.sealBootstrap();
 }
@@ -914,7 +914,7 @@ fn prepareTradingForScenario(owner: *demo.Owner, scenario: Scenario) !void {
                 .instrument_identity = instrument,
                 .quantity_denominator = if (scenario == .cycle_spot_carry and instrument == 103) 100000000 else 10000,
                 .reservation_model = if (scenario == .cycle_spot_carry and instrument == 103) .cash else .leveraged,
-                .product = if (scenario == .cycle_spot_carry and instrument == 103) .spot else .isolated_linear_usdt,
+                .product = if (scenario == .cycle_spot_carry and instrument == 103) .spot else .isolated_linear,
                 .base_asset = if (scenario == .cycle_spot_carry and instrument == 103) 0x425443 else 0,
                 .venue = venue,
             } } }));
@@ -925,7 +925,7 @@ fn prepareTradingForScenario(owner: *demo.Owner, scenario: Scenario) !void {
             .instrument = instrument,
             .venue = venue,
             .environment = .simulation,
-            .product = if ((spot and instrument <= 102) or (scenario == .cycle_spot_carry and instrument == 103)) .spot else .isolated_linear_usdt,
+            .product = if ((spot and instrument <= 102) or (scenario == .cycle_spot_carry and instrument == 103)) .spot else .isolated_linear,
             .version = 1,
             .rules_version = 1,
             .config_version = 1,
@@ -1345,7 +1345,7 @@ test "09a fee adjustment reverses currency independently and preserves original 
     try exercisePartitionOrders(owner, .cycle_spot_zero);
     var event = feeEvent(owner, 1);
     const original = owner.shard.economic_projection.applied_fills[0];
-    const cash = owner.shard.economic_projection.portfolio.usdt_balance_atoms;
+    const cash = owner.shard.economic_projection.portfolio.settlement_balance_atoms;
     const base = owner.shard.economic_projection.portfolio.spotInventoryAtoms(0x425443);
     try applyAdapterInput(owner, event);
     event.venue.envelope.identity.sequence = 2;
@@ -1357,7 +1357,7 @@ test "09a fee adjustment reverses currency independently and preserves original 
     event.venue.event.fee_adjustment.source.digest = history.hash("base fee correction");
     event.venue.envelope.raw_evidence = event.venue.event.fee_adjustment.source;
     try applyAdapterInput(owner, event);
-    try std.testing.expectEqual(cash, owner.shard.economic_projection.portfolio.usdt_balance_atoms);
+    try std.testing.expectEqual(cash, owner.shard.economic_projection.portfolio.settlement_balance_atoms);
     try std.testing.expectEqual(@as(i128, 0), owner.shard.economic_projection.portfolio.fee_atoms);
     try std.testing.expectEqual(base - 1, owner.shard.economic_projection.portfolio.spotInventoryAtoms(0x425443));
     try std.testing.expectEqual(@as(i128, 1), owner.shard.economic_projection.portfolio.base_fee_atoms);
@@ -1624,7 +1624,7 @@ fn exerciseClosedHistory(owner: *demo.Owner) !void {
 
 fn verifyScopeRejections(shard: *trading.TradingShard) !void {
     const before = shard.canonicalStateDigest();
-    const wrong_venue: trading.CorePayload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 101, .quantity_denominator = 10000, .reservation_model = .leveraged, .product = .isolated_linear_usdt, .venue = 21 } };
+    const wrong_venue: trading.CorePayload = .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = 101, .quantity_denominator = 10000, .reservation_model = .leveraged, .product = .isolated_linear, .venue = 21 } };
     try std.testing.expectError(error.CanonicalScopeMismatch, shard.apply(fixture.atGroup(45, .{ .identity = 2000, .account_scope = 20, .payload = wrong_venue })));
     try std.testing.expectError(error.CanonicalScopeMismatch, shard.apply(fixture.atGroup(45, .{ .identity = 2001, .account_scope = 30, .payload = wrong_venue })));
     try std.testing.expectError(error.CanonicalScopeMismatch, shard.apply(fixture.atGroup(45, .{ .identity = 2002, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } })));
@@ -1661,8 +1661,8 @@ fn exerciseDomainHistory(owner: *demo.Owner) !void {
         try reconcileDomainAccount(owner, account, gateway);
         try owner.checkpoint();
     }
-    try std.testing.expectEqual(@as(i128, 405), owner.shard.accountState(20).?.economic_projection.portfolio.usdt_balance_atoms);
-    try std.testing.expectEqual(@as(i128, 605), owner.shard.accountState(30).?.economic_projection.portfolio.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 405), owner.shard.accountState(20).?.economic_projection.portfolio.settlement_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 605), owner.shard.accountState(30).?.economic_projection.portfolio.settlement_balance_atoms);
     const root = owner.shard.business_history_root.?;
     try std.testing.expectEqual(@as(std.meta.Tag(history.OriginScope), .decision_domain), std.meta.activeTag(root.origin.scope));
     _ = try owner.archiveControlHistory(gateway);
@@ -1684,7 +1684,7 @@ noinline fn reconcileAccountView(owner: *demo.Owner, account: u128, gateway: *@i
     const source_sequence = 10 + round * 3;
     var evidence: trading.canonical.AccountEconomicEvidence = .{
         .exchange_account = account,
-        .scope = .spot_and_isolated_linear_usdt,
+        .scope = .spot_and_isolated_linear,
         .from_utc_ns = if (cursor) |prior| prior.through_utc_ns else state.economic_baseline_utc_ns,
         .through_utc_ns = 1,
         .source = .{ .stream = 7, .sequence = source_sequence, .digest = history.hash("complete account after") },
@@ -1698,7 +1698,7 @@ noinline fn reconcileAccountView(owner: *demo.Owner, account: u128, gateway: *@i
         .bill_chain_digest = history.hash("all bills in exact interval"),
     };
     for (evidence.before_balances[0..evidence.before_balance_count], 0..) |balance, index| {
-        evidence.balances[index] = .{ .asset = balance.asset, .atoms = if (balance.asset == 1) state.economic_projection.exchange.usdt_balance_atoms else if (state.economic_projection.exchange.nativeAsset(balance.asset)) |native| native.balance_atoms else 0 };
+        evidence.balances[index] = .{ .asset = balance.asset, .atoms = if (balance.asset == 1) state.economic_projection.exchange.settlement_balance_atoms else if (state.economic_projection.exchange.nativeAsset(balance.asset)) |native| native.balance_atoms else 0 };
         evidence.asset_versions[index] = 1;
     }
     if (state.economic_projection.base_asset != 0 and cursor == null) {
@@ -1813,7 +1813,7 @@ fn exerciseDispatch(owner: *demo.Owner, first_command: u64) !void {
         .adapter = adapter.adapter(),
         .venue_identity = configured.venue,
         .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 },
-        .supported_products = gateway_module.productMask(.isolated_linear_usdt) | gateway_module.productMask(.spot),
+        .supported_products = gateway_module.productMask(.isolated_linear) | gateway_module.productMask(.spot),
     });
     const view = try allocator.create(trading.TradingShard);
     defer allocator.destroy(view);

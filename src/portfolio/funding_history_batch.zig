@@ -88,7 +88,7 @@ test "07 funding Store records preserve complete postings zero identity source c
     const projection = try allocator.create(economics.Projection);
     defer allocator.destroy(projection);
     projection.* = .{};
-    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .product = .isolated_linear_usdt, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 3 }, .price = .{ .instrument = 1, .rules_version = 1, .ticks = 100 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1 } });
+    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .product = .isolated_linear, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 3 }, .price = .{ .instrument = 1, .rules_version = 1, .ticks = 100 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1 } });
     const origin: history.Origin = .{ .stream = .{ .domain = .decision_log, .id = 9 }, .account = 7 };
     const memory = try allocator.create(@import("../persistence/durable_store.zig").MemoryAdapter);
     defer allocator.destroy(memory);
@@ -151,7 +151,7 @@ test "07 funding archive pins unknown canonical ownership missing source clocks 
     const projection = try allocator.create(economics.Projection);
     defer allocator.destroy(projection);
     projection.* = .{};
-    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .product = .isolated_linear_usdt, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 3 }, .price = .{ .instrument = 1, .rules_version = 1, .ticks = 100 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1 } });
+    try projection.apply(.{ .fill = .{ .identity = 1, .side = .buy, .product = .isolated_linear, .quantity = .{ .instrument = 1, .rules_version = 1, .lots = 3 }, .price = .{ .instrument = 1, .rules_version = 1, .ticks = 100 }, .price_tick_value = .{ .asset = 1, .atoms = 1 }, .quantity_denominator = 1 } });
     const origin: history.Origin = .{ .stream = .{ .domain = .decision_log, .id = 9 }, .account = 7 };
     const original: @import("../trading/trading_shard_event.zig").FundingSettlement = .{ .settlement_id = 2, .amount_atoms = 5 };
     var source: economics.FundingSource = .{ .exchange_account = 7, .portfolio = 8, .strategy = 9, .instrument = 1, .rules_version = 1, .received_time_utc_ns = 202, .received_monotonic_ns = 302 };

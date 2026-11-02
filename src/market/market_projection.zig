@@ -20,6 +20,7 @@ pub const InstrumentProjection = struct {
     index: ?canonical.InstrumentPrice = null,
 
     fn applySnapshot(self: *InstrumentProjection, snapshot: canonical.L2BookSnapshot) !void {
+        snapshot.validateSequence() catch |err| return self.gap(.scope_mismatch, err);
         if (snapshot.depth != null) depth_snapshot.validate(snapshot) catch |err| return self.gap(.invalid_depth, err);
         if (!snapshot.complete) return self.gap(.incomplete_snapshot, error.IncompleteBookSnapshot);
         if (snapshot.instrument != self.instrument or snapshot.best_bid.instrument != self.instrument or
@@ -28,9 +29,13 @@ pub const InstrumentProjection = struct {
         if (self.active_rules_version == null or self.active_rules_version.? != snapshot.best_bid.rules_version or
             snapshot.best_bid.rules_version != snapshot.best_ask.rules_version)
             return self.gap(.scope_mismatch, error.InstrumentRulesInactive);
-        if (self.last_book) |previous| if (snapshot.sequence <= previous.sequence) {
-            return self.gap(.stale_snapshot, error.StaleBookSnapshot);
-        };
+        if (self.last_book) |previous| {
+            if (snapshot.sequence_kind != previous.sequence_kind or snapshot.capture_epoch < previous.capture_epoch or
+                (snapshot.capture_epoch == previous.capture_epoch and snapshot.sequence <= previous.sequence))
+                return self.gap(.stale_snapshot, error.StaleBookSnapshot);
+            if (snapshot.capture_epoch > previous.capture_epoch and self.health == .healthy)
+                return self.gap(.scope_mismatch, error.FreshSnapshotRequired);
+        }
         self.last_book = snapshot;
         self.last_delta = null;
         self.health = .healthy;
@@ -39,6 +44,7 @@ pub const InstrumentProjection = struct {
 
     fn applyDelta(self: *InstrumentProjection, delta: canonical.L2BookDelta) !void {
         const previous = self.last_book orelse return self.gap(.missing_snapshot, error.MissingBookSnapshot);
+        if (previous.sequence_kind != .venue) return self.gap(.sequence_gap, error.BookSequenceGap);
         if (delta.instrument != self.instrument or delta.best_bid.instrument != self.instrument or
             delta.best_ask.instrument != self.instrument)
             return self.gap(.scope_mismatch, error.MarketInstrumentMismatch);

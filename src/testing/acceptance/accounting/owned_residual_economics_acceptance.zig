@@ -99,7 +99,7 @@ test "owned residual finer lot sale keeps real Fill quantity without creating gr
     try std.testing.expectEqual(@import("../../../trading/trading_shard_event.zig").RejectReason.none, owner.shard.last_reject_reason);
     try std.testing.expectEqual(@as(u16, 6), owner.shard.oms.order_count);
     const order = owner.shard.oms.orderById(5).?;
-    const cash = owner.shard.economic_projection.portfolio.usdt_balance_atoms;
+    const cash = owner.shard.economic_projection.portfolio.settlement_balance_atoms;
     const pnl = owner.shard.economic_projection.portfolio.realized_pnl_atoms;
     const rebate = owner.shard.economic_projection.portfolio.instrumentPosition(101).?.base_rebate_atoms;
     var fill = fixture.canonicalAt(63, 1, .{ .fill = .{
@@ -130,7 +130,7 @@ test "owned residual finer lot sale keeps real Fill quantity without creating gr
         try std.testing.expectEqual(@as(i128, 0), layer.instrumentPosition(101).?.spot_asset_atoms);
         try std.testing.expectEqual(@as(i128, 0), layer.instrumentPosition(103).?.spot_asset_atoms);
     }
-    try std.testing.expectEqual(cash + 1, owner.shard.economic_projection.portfolio.usdt_balance_atoms);
+    try std.testing.expectEqual(cash + 1, owner.shard.economic_projection.portfolio.settlement_balance_atoms);
     try std.testing.expectEqual(pnl + 1, owner.shard.economic_projection.portfolio.realized_pnl_atoms);
     try std.testing.expectEqual(rebate, owner.shard.economic_projection.portfolio.instrumentPosition(101).?.base_rebate_atoms);
     try std.testing.expectEqual(@as(i64, 1), try owner.shard.economic_projection.appliedCanonicalFillQuantity(5));

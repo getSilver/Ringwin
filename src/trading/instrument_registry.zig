@@ -80,7 +80,7 @@ pub const Registry = struct {
         const entry = self.get(instrument) orelse return false;
         if (!assets.hasVenueCode(entry.rules.settlement_asset, entry.venue) or
             (entry.product == .spot and !assets.hasVenueCode(entry.rules.base_asset, entry.venue))) return false;
-        return entry.margin_configured and assets.consumerCompatible(entry.margin.native_settlement_atoms);
+        return entry.margin_configured and assets.consumerCompatibleFor(entry.margin.native_settlement_atoms, entry.rules.settlement_asset);
     }
 
     /// Venue parsing units must equal the committed Core lot and tick authority.
@@ -92,6 +92,7 @@ pub const Registry = struct {
         if (try std.math.mul(i128, lot.coefficient, entry.rules.quantity_denominator) !=
             try std.math.mul(i128, entry.rules.quantity_numerator, lot_power)) return error.InvalidInstrumentConfiguration;
         const quote = assets.get(entry.rules.settlement_asset) orelse return error.UnknownAssetDefinition;
+        if (!std.meta.eql(entry.rules.price_constraints, canonical.PriceConstraints{}) and entry.rules.price_atomic_scale != quote.definition.atomic_scale) return error.InvalidInstrumentConfiguration;
         if (!assets.hasVenueCode(entry.rules.settlement_asset, entry.venue) or
             (entry.product == .spot and !assets.hasVenueCode(entry.rules.base_asset, entry.venue))) return error.InvalidInstrumentConfiguration;
         if (try tick.exactAtoms(quote.definition.atomic_scale) != entry.margin.price_tick_atoms)
@@ -101,6 +102,7 @@ pub const Registry = struct {
     /// Adds an entry or confirms an exact duplicate. A changed identity is
     /// never silently replaced, which keeps replay and snapshot state stable.
     pub fn register(self: *Registry, entry: Entry) !bool {
+        if (entry.rules.price_atomic_scale > canonical.Decimal.max_scale or entry.rules.price_constraints.max_decimal_places > canonical.Decimal.max_scale or entry.rules.price_constraints.max_significant_digits > 38) return error.InvalidInstrumentConfiguration;
         if (entry.instrument == 0 or entry.rules.version == 0 or
             entry.rules.instrument_identity != entry.instrument or
             entry.rules.quantity_denominator <= 0 or entry.rules.quantity_numerator <= 0 or
@@ -148,6 +150,7 @@ pub const Registry = struct {
     pub fn validate(self: *const Registry) !void {
         if (self.count > self.entries.len) return error.InvalidInstrumentRegistry;
         for (self.entries[0..self.count], 0..) |entry, index| {
+            if (entry.rules.price_atomic_scale > canonical.Decimal.max_scale or entry.rules.price_constraints.max_decimal_places > canonical.Decimal.max_scale or entry.rules.price_constraints.max_significant_digits > 38) return error.InvalidInstrumentRegistry;
             if (entry.strategy_authorization_count > entry.strategy_authorizations.len) return error.InvalidInstrumentRegistry;
             for (entry.strategy_authorizations[0..entry.strategy_authorization_count], 0..) |authorization, authorization_index| {
                 if (authorization.strategy == 0 or authorization.version == 0 or authorization.barrier == 0) return error.InvalidInstrumentRegistry;

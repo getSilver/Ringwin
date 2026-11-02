@@ -897,6 +897,8 @@ pub const Gateway = struct {
             if (market.health != .healthy) return error.NotSent;
         }
         if (oms_command.operation != .cancel) {
+            instrument.rules.price_constraints.validate(oms_command.limit_price.ticks, instrument.margin.price_tick_atoms, instrument.rules.price_atomic_scale) catch return error.NotSent;
+            if (oms_command.market_protection_price) |price| instrument.rules.price_constraints.validate(price.ticks, instrument.margin.price_tick_atoms, instrument.rules.price_atomic_scale) catch return error.NotSent;
             if (!instrument.tradingAuthorization(oms_command.strategy_instance).enabled) return error.NotSent;
             const native_cash = shard.currentNativeRiskCash(oms_command.instrument) catch return error.NotSent;
             const committed_requirement = std.math.add(i128, shard.activeReservationAtoms() catch return error.NotSent, shard.economic_projection.exchange.margin_atoms) catch return error.NotSent;
@@ -2337,7 +2339,7 @@ test "Gateway public proof preserves physical binding and rechecks per instrumen
                 .account = 2,
                 .adapter = implementation.adapter(),
                 .venue_identity = 1,
-                .supported_products = productMask(.spot) | productMask(.isolated_linear_usdt),
+                .supported_products = productMask(.spot) | productMask(.isolated_linear),
                 // A physical route does not own the version of every symbol's rules.
                 .capability = .{ .version = 1, .rules_version = 99, .config_version = 1, .session = 1, .supports_post_only = true },
             };
@@ -2354,7 +2356,7 @@ test "Gateway public proof preserves physical binding and rechecks per instrumen
                     2 => gateway.routes[0].environment = .demo,
                     3 => gateway.routes[0].capability.session = 2,
                     4 => gateway.routes[0].capability.version = 2,
-                    5 => gateway.routes[0].supported_products = productMask(.isolated_linear_usdt),
+                    5 => gateway.routes[0].supported_products = productMask(.isolated_linear),
                     6 => gateway.routes[0].capability.config_version = 2,
                     7 => gateway.routes[0].capability.supports_cancel = false,
                     else => unreachable,

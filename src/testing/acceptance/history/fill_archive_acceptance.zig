@@ -13,7 +13,7 @@ fn coreFillCoverage(harness: *acceptance.ArchiveHarness, sequence: u64, identity
     const projection = &harness.owner.shard.economic_projection;
     var evidence: canonical.AccountEconomicEvidence = .{
         .exchange_account = 2,
-        .scope = .spot_and_isolated_linear_usdt,
+        .scope = .spot_and_isolated_linear,
         .from_utc_ns = harness.owner.shard.economic_baseline_utc_ns,
         .through_utc_ns = 1,
         .source = .{ .stream = 7, .sequence = sequence, .digest = history.hash("complete account snapshot") },
@@ -29,7 +29,7 @@ fn coreFillCoverage(harness: *acceptance.ArchiveHarness, sequence: u64, identity
     evidence.facts[0] = .{ .identity = fill_id, .kind = .fill, .digest = digest, .fee_confirmed = true };
     evidence.before_balances[0] = .{ .asset = 1, .atoms = 25_000_000_000 };
     evidence.before_balances[1] = .{ .asset = 0x425443, .atoms = 0 };
-    evidence.balances[0] = .{ .asset = 1, .atoms = projection.exchange.usdt_balance_atoms };
+    evidence.balances[0] = .{ .asset = 1, .atoms = projection.exchange.settlement_balance_atoms };
     evidence.balances[1] = .{ .asset = 0x425443, .atoms = projection.exchange.nativeAsset(0x425443).?.balance_atoms };
     evidence.asset_versions[0] = 1;
     evidence.asset_versions[1] = 1;
@@ -50,7 +50,7 @@ test "Owner fill archive preserves Core fill economic coverage through cold proo
     const command = try place(harness, &simulator, 101);
     _ = try harness.owner.apply(fixture.atGroup(24, .{ .identity = 8001, .payload = .{ .economic_fill = .{ .fill_id = 8001, .order_id = command.order_id, .quantity = 2, .price_ticks = 50_000_000 } } }));
     const digest = harness.owner.shard.economic_projection.canonical_fill_evidence[0].digest;
-    try std.testing.expectEqual(@as(i128, 24_999_999_999), harness.owner.shard.economic_projection.exchange.usdt_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 24_999_999_999), harness.owner.shard.economic_projection.exchange.settlement_balance_atoms);
     try std.testing.expectEqual(@as(i128, 2), harness.owner.shard.economic_projection.exchange.nativeAsset(0x425443).?.balance_atoms);
     _ = try harness.owner.apply(coreFillCoverage(harness, 3, 8201, 8001, digest));
     try std.testing.expect(!harness.owner.shard.economic_projection.reconciliation_break);

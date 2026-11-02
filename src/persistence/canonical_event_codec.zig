@@ -8,7 +8,7 @@ const std = @import("std");
 const canonical = @import("../model/canonical_event.zig");
 const value_codec = @import("snapshot_codec.zig");
 
-pub const encoding_version: u16 = 13;
+pub const encoding_version: u16 = 14;
 pub const max_encoded_len: usize = @import("journal.zig").max_payload_size;
 
 const BootstrapHeader = struct {
@@ -277,7 +277,7 @@ test "funding codec retains wide signed native amount bill time and identity und
 test "native economic proof codec retains bounded full source chain and wide cash under current schema" {
     var evidence: canonical.AccountEconomicEvidence = .{
         .exchange_account = 2,
-        .scope = .spot_and_isolated_linear_usdt,
+        .scope = .spot_and_isolated_linear,
         .from_utc_ns = 1800000000002000000,
         .through_utc_ns = 1800000000200000000,
         .source = .{ .stream = 3, .sequence = 99, .digest = @splat(7) },
