@@ -60,7 +60,17 @@ def main():
             assert hashlib.sha256(encoded).hexdigest() == (
                 "5149cc2ecf929663bdeeaf9a1287d5220ca2bf0be091fcb662d9488aff1eb156"
             )
-    print("3 pinned SDK hash/digest/recovery vectors and RFC6979 signature oracle passed")
+    order = 115792089237316195423570985008687907852837564279074904382605163141518161494337
+    for scalar, digest, expected in [
+        (1, bytes(32), "bf0a07f83d9bc6d8116d68d8f677816382621084a58f832d905318cef7779d0e"),
+        (order - 1, bytes([255]) * 32, "ddfb99c8c43477b94e399c78cc2b29ef2201433d734e76184110ace9a027ecff"),
+    ]:
+        key = scalar.to_bytes(32, "big")
+        result = Account._sign_hash(digest, key)
+        assert Account._recover_hash(digest, vrs=(result.v, result.r, result.s)) == Account.from_key(key).address
+        encoded = result.r.to_bytes(32, "big") + result.s.to_bytes(32, "big") + bytes([result.v])
+        assert hashlib.sha256(encoded).hexdigest() == expected
+    print("3 pinned SDK vectors and RFC6979 signature/edge oracles passed")
 
 
 

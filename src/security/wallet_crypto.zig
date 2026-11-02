@@ -189,3 +189,21 @@ test "wallet signing workspace is erased on success and native protection failur
     try std.testing.expect(observer.erased);
     try std.testing.expectEqual(@as(usize, 1), observer.released);
 }
+
+test "wallet RFC6979 matches independent zero and maximum scalar digest edges" {
+    // eth-account 0.13.7 _sign_hash + _recover_hash, public synthetic scalars.
+    for ([_]struct { scalar: u256, digest_byte: u8, signature_hash: []const u8 }{
+        .{ .scalar = 1, .digest_byte = 0, .signature_hash = "bf0a07f83d9bc6d8116d68d8f677816382621084a58f832d905318cef7779d0e" },
+        .{ .scalar = Curve.scalar.field_order - 1, .digest_byte = 255, .signature_hash = "ddfb99c8c43477b94e399c78cc2b29ef2201433d734e76184110ace9a027ecff" },
+    }) |vector| {
+        var key: [32]u8 = undefined;
+        defer std.crypto.secureZero(u8, &key);
+        std.mem.writeInt(u256, &key, vector.scalar, .big);
+        const signature = try sign(&key, @splat(vector.digest_byte));
+        var actual: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(&(signature.r ++ signature.s ++ [_]u8{signature.v}), &actual, .{});
+        var expected: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&expected, vector.signature_hash);
+        try std.testing.expectEqual(expected, actual);
+    }
+}

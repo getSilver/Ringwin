@@ -1,7 +1,7 @@
 # 03：Hyperliquid API 钱包凭证与签名
 
 Type: task
-Status: in_progress
+Status: resolved
 Assignee: Codex
 Blocked by: [01 协议与字段合同](01-protocol-field-contract.md)
 Parent: [模块地图](../map.md)
@@ -16,17 +16,17 @@ API 钱包即 Hyperliquid agent wallet，与 AI Agent 无关。复用 Credential
 
 ## 完成条件
 
-- [ ] 明确私钥、签名钱包地址与资金账户地址的不同职责；查询/订阅使用显式资金账户，不回退到 agent 地址；环境、账户或凭证变更产生新 session。
-- [ ] 凭证类型准确表示私钥，不以虚假 api_key/passphrase 填充旧三元组；列明凭证编码版本及既有凭证兼容处理。
-- [ ] 私钥只经现有受限安全能力使用，保留加密、受保护内存、清零与撤销处理；不进入策略、日志、RawIngress、普通配置或 fixture。
-- [ ] 通过可追溯的合成/官方向量验证签名、序列化、网络域及账户绑定；错误私钥/地址/环境在发送前拒绝。
-- [ ] 明确 nonce 唯一性与时效、时钟回退、重启、主备切换和共享 signer 竞争的处理；旧 owner/session 不能签发可发送请求。
-- [ ] 证明结果 Unknown 时不能因新 nonce 重发；钱包授权不等于 Ringwin 交易授权。
-- [ ] 默认离线测试不读取真实凭证；既有凭证与权限回归通过，平台秘密内存未验证项明确保留。
+- [x] 明确私钥、签名钱包地址与资金账户地址的不同职责；查询/订阅使用显式资金账户，不回退到 agent 地址；环境、账户或凭证变更产生新 session。
+- [x] 凭证类型准确表示私钥，不以虚假 api_key/passphrase 填充旧三元组；列明凭证编码版本及既有凭证兼容处理。
+- [x] 私钥只经现有受限安全能力使用，保留加密、受保护内存、清零与撤销处理；不进入策略、日志、RawIngress、普通配置或 fixture。
+- [x] 通过可追溯的合成/官方向量验证签名、序列化、网络域及账户绑定；错误私钥/地址/环境在发送前拒绝。
+- [x] 明确 nonce 唯一性与时效、时钟回退、重启、主备切换和共享 signer 竞争的处理；旧 owner/session 不能签发可发送请求。
+- [x] 证明结果 Unknown 时不能因新 nonce 重发；钱包授权不等于 Ringwin 交易授权。
+- [x] 默认离线测试不读取真实凭证；既有凭证与权限回归通过，平台秘密内存未验证项明确保留。
 
 ## Answer
 
-已实现，最终全量回归进行中；未创建或授权真实钱包，不提供资金划转或 vault 能力。
+已完成离线实现与审查；未创建或授权真实钱包，不提供资金划转或 vault 能力。
 
 - 安全凭证改为 API 三元组 / API 钱包 tagged union；钱包 payload v2，CRD4 envelope/v1 三元组兼容不变。私钥原位解码到受保护目标，签名地址由私钥校验，资金地址单独绑定。
 - `CredentialStore.signWallet` 强制 session、GatewayLeaseGuard、账户和当前 owner 校验；受限输入、解密、nonce 持久消费、签名和最终复查在现有 writer 锁内完成。digest 回调只获得 nonce，不获得 lease 或私钥；没有公开的 lease 裸签名入口，也没有新交易授权入口。
@@ -38,8 +38,11 @@ API 钱包即 Hyperliquid agent wallet，与 AI Agent 无关。复用 Credential
 
 - 固定 Zig `0.17.0-dev.315+5b647b792`，Windows，全部离线，未读取真实凭证。
 - 独立 Python oracle：3 组固定 SDK hash/digest/recovery 向量及 RFC6979 签名 hash 通过；仅在忽略的临时 venv 安装校验依赖。
-- 审查前 Debug / ReleaseSafe 定向各 55/55；修复后 ReleaseSafe 定向 56/56，新增签名 workspace 成功/锁失败时的释放前清零观察。最终 Debug 定向 56/56，通过新增原语 workspace 检查；最新公开安全入口 lease 中途失效与请求消费的 ReleaseSafe 回归 2/2。全量结果待填写。
-- 初次 Debug 全量测试在超过 20 分钟后主动停止，以验证审查修复后的最终代码；未取得那次全量通过结论。最终 `zig build test -Doptimize=ReleaseSafe` 运行中。
+- 审查前 Debug / ReleaseSafe 定向各 55/55；修复后 ReleaseSafe 定向 56/56，新增签名 workspace 成功/锁失败时的释放前清零观察。最终 Debug 定向 56/56；最新公开安全入口 lease 中途失效与请求消费的 ReleaseSafe 回归 2/2。
+- 最终新增边界用例后 ReleaseSafe 定向 **57/57**；零 digest / 最大合法私钥与最大 digest 的独立 oracle 同步通过。
+- 初次 Debug 全量测试在超过 20 分钟后主动停止，以验证审查修复后的最终代码；未取得那次全量通过结论。最终 `zig build test -Doptimize=ReleaseSafe` 的 wrapper 返回 0，但 listen 模式日志含 `failed command` 字样，不单独以此声称全量全绿。直接运行同一完整 ReleaseSafe 测试二进制（无 `--listen`）：**834/834 全部通过，退出 0**。
+- 完整二进制 `.zig-cache/o/d57dbac5550346d8638f93502b016d59/test.exe`，SHA-256 `8768b6527445fdbbb28bd4bba524b5cd31343c52e904e0cd2a01971ef941eac6`。它编译于最后新增边界 test case 之前；生产实现相同，新增用例与最终公开入口断言由最新 57/57 定向运行覆盖，未声称重新编译后的完整 suite 为 835/835。
+- 详细日志位于忽略的 `.scratch/build/hyperliquid-03-final-debug.log`、`hyperliquid-03-final-targeted.log`、`hyperliquid-03-final-full.log` 和 `hyperliquid-03-full-diagnostic.log`。
 
 #### Standards
 

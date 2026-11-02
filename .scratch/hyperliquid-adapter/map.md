@@ -23,7 +23,7 @@ Status: open
 
 ## Route
 
-以下八张实施票已按用户确认发布；01 协议合同与样本、02 共享领域合同已在 `feat/hyperliquid-adapter` resolved；03–08 仍 open、未认领，按依赖逐票推进。
+以下八张实施票已按用户确认发布；01 协议合同与样本、02 共享领域合同及 03 钱包凭证与签名已在 `feat/hyperliquid-adapter` resolved；04–08 仍 open、未认领，按依赖逐票推进。
 
 | 切片 | 交付与验收 | 前置 |
 |---|---|---|
@@ -42,11 +42,12 @@ Status: open
 
 ## Frontier
 
-- [03 API 钱包凭证与签名](issues/03-api-wallet-signing.md)：open，01 已完成，无未完成前置，尚未认领。
 - [04 公共行情](issues/04-public-market-feed.md)：open，02 已完成，无未完成前置，尚未认领。
+- [05 订单与私有事实](issues/05-orders-private-facts.md)：open，02、03 已完成，无未完成前置，尚未认领。
 
 ## Decisions so far
 
+- 2026-11-02：按用户要求完成 [03](issues/03-api-wallet-signing.md)：真实 API 钱包凭证与旧 CRD4 兼容、原位受保护解码、资金账户与 session 绑定、安全入口强制 nonce 持久消费和既有 fencing、受保护 RFC6979/HMAC 工作区。Debug 定向 56/56、最终 ReleaseSafe 定向 57/57；直接运行完整 ReleaseSafe 测试二进制 834/834 通过，构建监听日志及新增边界用例的证据范围详见票证。双轴审查发现的两个安全阻塞项已修复并复审，03 resolved；04/05 未自动开始，无在线或生产资格。算术临时值、跨机 fencing 和断电持久化仍待平台资格；ledger 的 65,536 条容量限制保持明确。
 - 2026-11-02：按用户要求完成 02：真实结算 Asset 绑定贯通风险与经济路径，新增捕获 epoch/顺序证据、通用精确价格约束及严格恢复校验；canonical 19 / codec 14 / journal 51 / state 55 / registry 49。Debug/ReleaseSafe 公共核心回归通过；全量运行中的旧版本断言、摘要与 native 夹具构建来源问题已修正并定向通过，最终 native 生命周期 6/6。完整运行及失败修复证据见 [02](issues/02-shared-domain-contracts.md)，不将初次失败日志视为最终全量全绿。Standards/Spec 审查问题已修复，02 resolved；03/04 未自动开始，无在线或生产资格。
 - 2026-11-02：用户要求新建分支完成 01；`feat/hyperliquid-adapter` 已交付[协议合同](../../docs/research/2026-11-02-hyperliquid-protocol-contract.md)、字段矩阵、固定 SDK/公开 hash 向量及有来源身份的公开/合成样本。样本哈希/链接检查与 Standards/Spec 双轴审查通过，01 resolved；`zig build test` 运行一次但在 30 分钟预算内未完成并主动停止，未取得全套回归通过结论。无运行时代码或持久格式变更，未取得签名、Adapter、Testnet 交易或生产资格；02/03 仍 open，未自动开始。
 - 2026-11-02：用户最终确认整体理解与八个切片，已发布 01–08 本地实施票并保持既定依赖；发布不表示实现完成、在线授权或资格通过。
@@ -78,7 +79,7 @@ Status: open
 
 - BTC/ETH 现货对应的实际 token、包装/桥接资产及 Testnet 可用性。
 - 现有跨所策略规格限定 USDT，需扩展到同结算资产的 USDC—USDC 组合；不引入跨币种组合。
-- 01 已固定上游签名/nonce 协议；agent signer 的凭证、nonce 持久生命周期及主备 fencing 仍由 03 实现验证。
+- 01 已固定上游签名/nonce 协议，03 已完成凭证、nonce 持久生命周期和主备 fencing 的离线实现；真实 agent 授权、共享存储与外部隔离仍须部署实例验证。
 - 01 已交付订单、行情、限流、Unknown 与补回的[协议合同](../../docs/research/2026-11-02-hyperliquid-protocol-contract.md)；02–06 仍须完成共享表达、Adapter 和完整性证据，资金费/ADL 身份等未证明项保持 pending。
 - 跨所验收对手 Venue、产品组合与资金配置。
 

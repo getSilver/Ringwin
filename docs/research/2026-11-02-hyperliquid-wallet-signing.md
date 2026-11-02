@@ -112,7 +112,9 @@ directly into its protected destination instead of returning key material by val
 The independent Python oracle verifies all network/account/digest variants with
 the pinned SDK. The public CredentialStore regression compares the resulting
 RFC6979 signature hash with the SDK and recovers the expected public address.
-Tests use publicly known synthetic scalar 1 and expired timestamps, never a real
+Additional independent edge vectors cover scalar 1 with zero digest and scalar
+`n-1` with maximum digest, including bits2octets reduction and low-s handling.
+Tests use publicly known synthetic scalars and expired timestamps, never a real
 wallet. No private key file or signature fixture is created.
 
 Reproduce the oracle in a disposable environment with `msgpack==1.1.2`,
@@ -139,3 +141,14 @@ Linux target behavior,
 dump resistance for those temporaries, power-loss persistence, real external
 node fencing, remote agent authorization and Testnet trading remain unqualified.
 Do not treat offline completion as secret-memory or production qualification.
+
+## Final offline evidence
+
+Debug public credential/signing regressions passed 56/56; final ReleaseSafe
+regressions including the additional edge case passed 57/57. Direct execution of
+the complete ReleaseSafe test binary passed 834/834, exit 0. That full binary was
+compiled before the last test-only edge addition; production implementation was
+unchanged, and the latest targeted run covers the new case. The build-listener
+log contains a `failed command` diagnostic despite its wrapper returning 0; the
+explicit complete-binary output is the full-suite evidence. Artifact identity,
+logs and review disposition are in [ticket 03](../../.scratch/hyperliquid-adapter/issues/03-api-wallet-signing.md).
