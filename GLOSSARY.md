@@ -698,7 +698,7 @@ Venue 对某个 Instrument 的价位级数量变更事实，具有可验证的�
 _Avoid_: Full snapshot, derived depth, unordered update
 
 **MarketTrade**:
-Venue 公开行情中的市场成交，不表示本系统参与其中。
+Venue 公开行情中具有稳定身份、品种、方向、价格、数量和源时间的市场成交；不表示本系统参与其中，也没有本系统订单或账户经济归属。
 _Avoid_: Trade, Fill
 
 **ReferencePrice**:

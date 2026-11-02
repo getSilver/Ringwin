@@ -211,8 +211,11 @@ def validate_batch_schema(batch):
     offset = 128
     while offset < len(batch):
         record_len, _, event_type, schema_version = struct.unpack_from("<IIHH", batch, offset)
-        if event_type not in range(1, 8) or schema_version != 1:
+        if event_type not in range(1, 9) or schema_version != 1:
             raise RecoveryNeeded(2)
+        if event_type == 8:
+            payload_len = struct.unpack_from("<I", batch, offset + 4)[0]
+            decode_market_trade(batch[offset + 64:offset + 64 + payload_len])
         if event_type == 7:
             payload_len = struct.unpack_from("<I", batch, offset + 4)[0]
             decode_depth_snapshot(batch[offset + 64:offset + 64 + payload_len])
@@ -660,11 +663,13 @@ def decode_component_batch(batch, session, number, cursor):
             raise ValueError("short component record")
         length, size, kind, version, flags, sequence = struct.unpack_from("<IIHHIQ", batch, offset)
         if (length < 64 or length % 8 or length > len(batch)-offset or size > length-64 or
-                kind not in range(1, 8) or version != 1 or flags & ~0x1f or
+                kind not in range(1, 9) or version != 1 or flags & ~0x1f or
                 any(batch[offset+56:offset+64]) or not previous < sequence <= last or
                 any(batch[offset+64+size:offset+length])):
             raise ValueError("invalid component record")
         payload = batch[offset+64:offset+64+size]
+        if kind == 8:
+            decode_market_trade(payload)
         if kind == 7:
             decode_depth_snapshot(payload)
         if len(records) >= count:
@@ -871,6 +876,24 @@ def main(runtime_factory=None):
     write_frame(sys.stdout.buffer, SHUTDOWN_ACK, session, control_sequence[0])
     return 0
 
+
+
+def decode_market_trade(payload):
+    """Public tape v1; no account attribution or economic Fill."""
+    if len(payload) != 96 or payload[80] > 1 or any(payload[81:]):
+        raise RecoveryNeeded(2)
+    values = {
+        "instrument": int.from_bytes(payload[0:16], "little"),
+        "trade_identity": int.from_bytes(payload[16:32], "little"),
+        "rules_version": int.from_bytes(payload[32:40], "little"),
+        "ticks": int.from_bytes(payload[40:56], "little", signed=True),
+        "lots": int.from_bytes(payload[56:72], "little", signed=True),
+        "source_time_utc_ns": int.from_bytes(payload[72:80], "little"),
+        "side": "buy" if payload[80] == 0 else "sell",
+    }
+    if any(values[name] <= 0 for name in values if name != "side"):
+        raise RecoveryNeeded(2)
+    return values
 
 if __name__ == "__main__":
     raise SystemExit(main())

@@ -143,6 +143,9 @@ const selected = switch (@import("entry_options").index) {
     139 => @import("testing/acceptance/strategy/native_contract.zig"),
     140 => @import("testing/acceptance/strategy/strategy_authority_probe.zig"),
     141 => @import("adapters/hyperliquid/hyperliquid_signer.zig"),
+    142 => @import("market/market_trade.zig"),
+    143 => @import("adapters/hyperliquid/hyperliquid_market_feed.zig"),
+    144 => @import("testing/acceptance/venues/hyperliquid_market_acceptance.zig"),
     else => @compileError("unknown standalone source entry"),
 };
 

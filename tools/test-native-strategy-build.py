@@ -55,7 +55,7 @@ class NativeStrategyBuild(unittest.TestCase):
         for before, after in [
             ('.entrypoint = "native_observer"', '.entrypoint = "unregistered"'),
             ('a21994db11534bf5b193c5aa89000001', 'a21994db11534bf5b193c5aa89000004'),
-            ('.canonical_schema = 19', '.canonical_schema = 20'),
+            ('.canonical_schema = 20', '.canonical_schema = 21'),
         ]:
             with self.subTest(change=before):
                 def change_manifest(fixture):

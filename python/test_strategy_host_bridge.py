@@ -22,6 +22,27 @@ class BridgeFrameTests(unittest.TestCase):
             host.read_frame(stream)
 
 
+class MarketTradeTests(unittest.TestCase):
+    def test_public_tape_has_exact_units_and_rejects_invalid_evidence(self):
+        payload = bytearray(96)
+        for begin, end, value in ((0, 16, 123), (16, 32, 99), (32, 40, 7),
+                                  (40, 56, 1001), (56, 72, 2), (72, 80, 1000)):
+            payload[begin:end] = value.to_bytes(end - begin, "little")
+        decoded = host.decode_market_trade(payload)
+        self.assertEqual((decoded["instrument"], decoded["trade_identity"], decoded["ticks"],
+                          decoded["lots"], decoded["side"]), (123, 99, 1001, 2, "buy"))
+        for offset in (0, 16, 32, 40, 56, 72):
+            invalid = bytearray(payload)
+            invalid[offset:offset + (8 if offset in (32, 72) else 16)] = bytes(8 if offset in (32, 72) else 16)
+            with self.subTest(offset=offset), self.assertRaises(host.RecoveryNeeded):
+                host.decode_market_trade(invalid)
+        for offset in (80, 81):
+            invalid = bytearray(payload)
+            invalid[offset] = 2
+            with self.assertRaises(host.RecoveryNeeded):
+                host.decode_market_trade(invalid)
+
+
 class DepthSnapshotTests(unittest.TestCase):
     def wire(self):
         payload = bytearray(704)

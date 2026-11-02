@@ -130,6 +130,7 @@ pub const EventKind = enum(u16) {
     spot_residual_rule,
     residual_consumed,
     residual_state_committed,
+    canonical_market_trade,
 };
 
 pub const Fact = struct {

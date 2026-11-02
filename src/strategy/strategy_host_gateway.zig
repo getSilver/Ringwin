@@ -24,6 +24,7 @@ pub const EventType = enum(u16) {
     account = 5,
     fill = 6,
     depth_snapshot = 7,
+    market_trade = 8,
 };
 
 pub const EventEnvelope = struct {
@@ -341,6 +342,7 @@ pub const Gateway = struct {
                 return error.InvalidBatch;
             previous_sequence = event.shard_sequence;
             if (self.subscription_mask & eventBit(event.event_type) == 0) continue;
+            if (event.event_type == .market_trade) _ = try @import("../market/market_trade.zig").decode(event.payload);
             if (event.event_type == .depth_snapshot) _ = try depth_snapshot.decode(event.payload);
             const record_len = std.mem.alignForward(usize, event_header_len + event.payload.len, 8);
             if (destination.len -| offset < record_len) return error.BatchTooLarge;
@@ -782,4 +784,11 @@ pub fn depthSnapshotInput(projection: *const market_projection.Projection, instr
     const payload = try depth_snapshot.encode(destination, book);
     const visible = std.math.cast(i64, book.depth.?.visible_at_ns) orelse return error.InvalidDepthTime;
     return .{ .event_type = .depth_snapshot, .shard_sequence = shard_sequence, .time_presence = 0x1e, .source_time_ns = 0, .receive_time_ns = visible, .monotonic_time_ns = monotonic_ns, .wall_time_utc_ns = wall_ns, .payload = payload };
+}
+
+/// Caller supplies a successfully applied canonical trade and its authoritative cursor.
+pub fn marketTradeInput(record: @import("../model/canonical_event.zig").EventRecord, shard_sequence: u64, destination: []u8) !EventEnvelope {
+    if (record.event != .market_trade) return error.InvalidMarketTrade;
+    const payload = try @import("../market/market_trade.zig").encode(destination, record.event.market_trade);
+    return .{ .event_type = .market_trade, .shard_sequence = shard_sequence, .time_presence = @as(u32, 1) | (if (record.envelope.times.receive_utc_ns != null) @as(u32, 2) else 0) | (if (record.envelope.times.monotonic_ns != null) @as(u32, 4) else 0) | (if (record.envelope.times.audit_utc_ns != null) @as(u32, 8) else 0), .source_time_ns = std.math.cast(i64, record.event.market_trade.source_time_utc_ns) orelse return error.InvalidMarketTrade, .receive_time_ns = std.math.cast(i64, record.envelope.times.receive_utc_ns orelse 0) orelse return error.InvalidMarketTrade, .monotonic_time_ns = std.math.cast(i64, record.envelope.times.monotonic_ns orelse 0) orelse return error.InvalidMarketTrade, .wall_time_utc_ns = std.math.cast(i64, record.envelope.times.audit_utc_ns orelse 0) orelse return error.InvalidMarketTrade, .payload = payload };
 }

@@ -65,5 +65,10 @@ Feed owner 为每次新 incarnation 分配严格递增 epoch，并从恢复状�
 48–55 为小端 capture_epoch u64；45–47、56–63 继续要求零。Venue 型 epoch 必须零。
 旧 Host 因保留位非零拒绝 capture 负载；当前 Zig/Python 编解码保留此证据，不冒充源序号。
 
-当前持久身份为 canonical 19 / codec 14 / journal 51 / state 55 / registry 49，
+Hyperliquid 02 的持久身份为 canonical 19 / codec 14 / journal 51 / state 55 / registry 49，
 StateDigestV15；账户协调快照为 19。格式精确匹配，旧日志和旧快照失败关闭，无自动迁移。
+
+Hyperliquid 04 补充公共 MarketTrade 后，当前身份为 canonical 20 / codec 15 / journal 52 /
+state 56 / registry 50；深度 wire、StateDigestV15、账户协调快照 19 不变。旧持久格式失败关闭。
+MarketTrade 仅为公共成交流，Host type 8/schema 1 的独立 96-byte 负载不提供账户 Fill、
+maker 队列位置或成交概率资格。

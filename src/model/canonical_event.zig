@@ -15,7 +15,7 @@ test "price constraints preserve integer exception and exact significant digits"
     try std.testing.expectError(error.Overflow, rules.validate(std.math.maxInt(i128), 2, 2));
 }
 
-pub const schema_version: u16 = 19;
+pub const schema_version: u16 = 20;
 
 pub const VenueIdentity = u64;
 pub const Product = enum(u8) { spot, isolated_linear };
@@ -382,6 +382,22 @@ pub const OrderDispatchResult = struct {
     reason: ?CanonicalRejectReason = null,
 };
 pub const InstrumentDefinitionObserved = struct { instrument: InstrumentIdentity, rules_version: u64 };
+/// Public tape evidence; never an account Fill or an economic posting.
+pub const MarketTrade = struct {
+    instrument: InstrumentIdentity,
+    trade_identity: u128,
+    price: InstrumentPrice,
+    quantity: InstrumentQuantity,
+    side: OrderSide,
+    source_time_utc_ns: u64,
+
+    pub fn validate(self: MarketTrade) !void {
+        if (self.instrument == 0 or self.trade_identity == 0 or self.price.instrument != self.instrument or
+            self.quantity.instrument != self.instrument or self.price.rules_version == 0 or
+            self.quantity.rules_version != self.price.rules_version or self.price.ticks <= 0 or
+            self.quantity.lots <= 0 or self.source_time_utc_ns == 0) return error.InvalidMarketTrade;
+    }
+};
 pub const max_depth_levels = 8;
 pub const DepthLevel = struct { ticks: i128 = 0, lots: ?i128 = null };
 /// Prices/quantities share the enclosing snapshot Instrument and rules version.
@@ -736,9 +752,11 @@ pub const Payload = union(enum) {
     order_reconciliation_result: ReconciliationResult,
     account_reconciliation_result: ReconciliationResult,
     funding_settlement: FundingSettlement,
+    market_trade: MarketTrade,
 };
 
 pub const EventType = enum(u32) {
+    market_trade = 26,
     forced_execution = 25,
     economic_fault = 22,
     funding_settlement = 23,
@@ -765,6 +783,7 @@ pub const TimeInForce = enum(u8) { good_til_canceled, immediate_or_cancel, fill_
 
 pub fn eventType(event: Payload) EventType {
     return switch (event) {
+        .market_trade => .market_trade,
         .forced_execution => .forced_execution,
         .economic_fault => .economic_fault,
         .funding_settlement => .funding_settlement,

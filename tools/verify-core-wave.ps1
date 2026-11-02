@@ -229,6 +229,10 @@ foreach ($venue in $requiredVenueMarkers.Keys) {
     if (-not [regex]::IsMatch($debugText, $marker)) { throw "Offline venue evidence is missing: $marker" }
     $offlineVenueContracts += $venue
 }
+if (-not [regex]::IsMatch($debugText, 'hyperliquid_market_feed\.') -or
+    -not [regex]::IsMatch($releaseText, 'hyperliquid_market_feed\.')) {
+    throw 'Hyperliquid offline public-market evidence is missing'
+}
 if (-not $debugMatch.Success -or -not $releaseMatch.Success -or -not $barrierMatch.Success -or
     -not $sharedMatch.Success -or -not $gatewayMatch.Success -or -not $ownershipMatch.Success) {
     throw 'Acceptance child output did not contain complete machine-readable evidence'

@@ -23,30 +23,31 @@ Status: open
 
 ## Route
 
-以下八张实施票已按用户确认发布；01 协议合同与样本、02 共享领域合同及 03 钱包凭证与签名已在 `feat/hyperliquid-adapter` resolved；04–08 仍 open、未认领，按依赖逐票推进。
+以下八张实施票已按用户确认发布；01–04 及实施 04 时追加的共享前置 04a 已在 `feat/hyperliquid-adapter` resolved；05–08 仍 open、未认领，按依赖逐票推进。
 
 | 切片 | 交付与验收 | 前置 |
 |---|---|---|
 | [01 协议与字段合同](issues/01-protocol-field-contract.md) | 消息/字段处置矩阵、资产与品种身份、精度及有效价格约束、事实身份、历史覆盖、签名和限流依据；形成脱敏样本及必须补查的协议缺口 | 无 |
 | [02 共享领域合同](issues/02-shared-domain-contracts.md) | 支持真实 USDC 结算的线性逐仓；区分捕获顺序与行情连续性证据；必要的通用价格规则。覆盖风险、经济、codec、日志、快照、digest 与既有 Venue 回归，不能仅改枚举名称 | 01 |
 | [03 Hyperliquid API 钱包凭证与签名](issues/03-api-wallet-signing.md) | API 钱包私钥的安全凭证表示、资金账户绑定、签名向量、nonce 生命周期、主备 fencing；复用 CredentialStore/GatewayLease，不泄露秘密或创建第二套授权入口 | 01 |
-| [04 公共行情](issues/04-public-market-feed.md) | MarketFeedAdapter：品种/规则观察、有限深度快照、市场成交、标记/指数价格、资金费率及健康；公开接缝回放、断连和覆盖范围检查 | 02 |
+| [04 公共行情](issues/04-public-market-feed.md) | MarketFeedAdapter：品种/规则观察、有限深度快照、市场成交、标记/指数价格、资金费率及健康；公开接缝回放、断连和覆盖范围检查 | 02、04a |
+| [04a 公共 MarketTrade 共享合同](issues/04a-market-trade-contract.md) | 04 实施时发现现有 CanonicalEvent 缺公共成交流；补 Venue 中立事件、codec、核心与 Host、格式身份及恢复证据 | 02；04 的追加前置 |
 | [05 订单与私有事实](issues/05-orders-private-facts.md) | VenueAdapter：已确认订单集、CLOID、发送结果、私有报告/Fill/账户事实、背压和限流；覆盖拒单、部分成交、重复/冲突及两种 report/fill 顺序 | 02、03 |
 | [06 对账与恢复](issues/06-reconciliation-recovery.md) | 启动/重连/重启、Unknown、历史分页与截断、账户和经济事实完整性；公开核心应用、RawIngress 回放及快照加尾部重放收敛，恢复不重发 | 05 |
 | [07 运行与跨所接线](issues/07-runtime-cross-venue-wiring.md) | 注册配置、账户路由、capability 和现有控制面/Owner 接线；核对策略同结算资产 USDC—USDC 合同，复用双 IOC 与 Maker–Taker；默认离线、既有 Venue 不回退 | 04、06 |
 | [08 分批 Testnet 验收](issues/08-testnet-qualification.md) | 先双 IOC 后 Maker–Taker，覆盖永续—永续与现货—永续；记录 revision、真实资产身份、环境、请求/事实及清理。未获批准资产或缺市场条件的指定品种保持 pending | 07；在线写入须独立明确授权及可用市场 |
 
-关键依赖：`01 -> {02,03}; 02 -> 04; {02,03} -> 05 -> 06; {04,06} -> 07 -> 08`。
+关键依赖：`01 -> {02,03}; 02 -> 04a -> 04; {02,03} -> 05 -> 06; {04,06} -> 07 -> 08`。
 
 02 中只有经 01 与当前源码证明的真实共享缺口才改变合同；任何持久语义变化必须按仓库版本约定处理。账户配置写入能力先核对现有控制合同，有必要时独立列清影响，不把任意 Venue API 透传塞入 Adapter。
 
 ## Frontier
 
-- [04 公共行情](issues/04-public-market-feed.md)：open，02 已完成，无未完成前置，尚未认领。
 - [05 订单与私有事实](issues/05-orders-private-facts.md)：open，02、03 已完成，无未完成前置，尚未认领。
 
 ## Decisions so far
 
+- 2026-11-03：按用户要求完成 [04](issues/04-public-market-feed.md) 及真实共享前置 [04a](issues/04a-market-trade-contract.md)：独立公共行情、批准元数据摘要及 margin table/重启变化校验、有限深度、公共成交、分离参考价、带真实时点的精确费率、健康与背压/停机、公开核心与 Host、RawIngress/规范/快照加尾恢复。最终 Debug/ReleaseSafe 定向各 13/13、完整 ReleaseSafe 848/848、Python Host 8/8、native 构建 8/8；两轴复审无剩余阻塞。当前 canonical 20 / codec 15 / journal 52 / state 56 / registry 50，旧格式拒绝。实施限制与实际命令见票证；05 未自动开始，真实 transport/共享 IP 限流/部署 epoch 与摘要审批由后续接线完成，无在线或生产资格。
 - 2026-11-02：按用户要求完成 [03](issues/03-api-wallet-signing.md)：真实 API 钱包凭证与旧 CRD4 兼容、原位受保护解码、资金账户与 session 绑定、安全入口强制 nonce 持久消费和既有 fencing、受保护 RFC6979/HMAC 工作区。Debug 定向 56/56、最终 ReleaseSafe 定向 57/57；直接运行完整 ReleaseSafe 测试二进制 834/834 通过，构建监听日志及新增边界用例的证据范围详见票证。双轴审查发现的两个安全阻塞项已修复并复审，03 resolved；04/05 未自动开始，无在线或生产资格。算术临时值、跨机 fencing 和断电持久化仍待平台资格；ledger 的 65,536 条容量限制保持明确。
 - 2026-11-02：按用户要求完成 02：真实结算 Asset 绑定贯通风险与经济路径，新增捕获 epoch/顺序证据、通用精确价格约束及严格恢复校验；canonical 19 / codec 14 / journal 51 / state 55 / registry 49。Debug/ReleaseSafe 公共核心回归通过；全量运行中的旧版本断言、摘要与 native 夹具构建来源问题已修正并定向通过，最终 native 生命周期 6/6。完整运行及失败修复证据见 [02](issues/02-shared-domain-contracts.md)，不将初次失败日志视为最终全量全绿。Standards/Spec 审查问题已修复，02 resolved；03/04 未自动开始，无在线或生产资格。
 - 2026-11-02：用户要求新建分支完成 01；`feat/hyperliquid-adapter` 已交付[协议合同](../../docs/research/2026-11-02-hyperliquid-protocol-contract.md)、字段矩阵、固定 SDK/公开 hash 向量及有来源身份的公开/合成样本。样本哈希/链接检查与 Standards/Spec 双轴审查通过，01 resolved；`zig build test` 运行一次但在 30 分钟预算内未完成并主动停止，未取得全套回归通过结论。无运行时代码或持久格式变更，未取得签名、Adapter、Testnet 交易或生产资格；02/03 仍 open，未自动开始。
@@ -77,6 +78,7 @@ Status: open
 
 以下是实施前的协议核实与部署实例输入，不应把尚无证据的实现细节视为已批准事实；不再重新询问已确认的业务范围。
 
+- 04 已要求每个公共行情 Binding 绑定经批准的 `expected_metadata_digest`，永续覆盖选中产品及其引用的完整 margin table；07 需接入既有配置审批并恢复 durable epoch 高水位，不得在首次观察/重启时自行批准摘要。
 - BTC/ETH 现货对应的实际 token、包装/桥接资产及 Testnet 可用性。
 - 现有跨所策略规格限定 USDT，需扩展到同结算资产的 USDC—USDC 组合；不引入跨币种组合。
 - 01 已固定上游签名/nonce 协议，03 已完成凭证、nonce 持久生命周期和主备 fencing 的离线实现；真实 agent 授权、共享存储与外部隔离仍须部署实例验证。

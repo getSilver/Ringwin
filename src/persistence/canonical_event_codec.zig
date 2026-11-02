@@ -8,7 +8,7 @@ const std = @import("std");
 const canonical = @import("../model/canonical_event.zig");
 const value_codec = @import("snapshot_codec.zig");
 
-pub const encoding_version: u16 = 14;
+pub const encoding_version: u16 = 15;
 pub const max_encoded_len: usize = @import("journal.zig").max_payload_size;
 
 const BootstrapHeader = struct {
@@ -117,6 +117,10 @@ fn decodeBootstrap(reader: *Reader) !canonical.AccountBootstrapSnapshot {
 
 fn encodeEvent(cursor: *Cursor, event: canonical.Payload) !void {
     switch (event) {
+        .market_trade => |value| {
+            try value.validate();
+            try putValue(cursor, value);
+        },
         .forced_execution => |value| try putValue(cursor, value),
         .economic_fault => |value| try putValue(cursor, value),
         .account_bootstrap_snapshot => |snapshot| try encodeBootstrap(cursor, snapshot),
@@ -165,6 +169,7 @@ pub fn decode(encoded: []const u8) !canonical.EventRecord {
     const envelope = try takeValue(&reader, canonical.EventEnvelope);
     const event_type = std.enums.fromInt(canonical.EventType, envelope.event_type) orelse return error.InvalidCanonicalEnvelope;
     const event: canonical.Payload = switch (event_type) {
+        .market_trade => .{ .market_trade = try takeValue(&reader, canonical.MarketTrade) },
         .forced_execution => .{ .forced_execution = try takeValue(&reader, canonical.ForcedExecution) },
         .economic_fault => .{ .economic_fault = try takeValue(&reader, canonical.EconomicFault) },
         .account_bootstrap_snapshot => .{ .account_bootstrap_snapshot = try decodeBootstrap(&reader) },
@@ -189,6 +194,7 @@ pub fn decode(encoded: []const u8) !canonical.EventRecord {
     if (reader.position != encoded.len or envelope.schema_version != canonical.schema_version or
         envelope.event_type != @intFromEnum(canonical.eventType(event)))
         return error.InvalidCanonicalEnvelope;
+    if (event == .market_trade) try event.market_trade.validate();
     return .{ .envelope = envelope, .event = event };
 }
 

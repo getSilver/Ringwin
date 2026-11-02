@@ -1602,6 +1602,7 @@ pub const TradingShard = struct {
                     .instrument_definition_observed => |value| value.instrument,
                     .l2_book_snapshot => |value| value.instrument,
                     .l2_book_delta => |value| value.instrument,
+                    .market_trade => |value| value.instrument,
                     .reference_price => |value| value.instrument,
                     .market_data_health_changed => |value| value.instrument,
                     else => break :blk null,
@@ -3380,6 +3381,7 @@ pub const TradingShard = struct {
             .instrument_definition_observed => |value| value.instrument,
             .l2_book_snapshot => |value| value.instrument,
             .l2_book_delta => |value| value.instrument,
+            .market_trade => |value| value.instrument,
             .reference_price => |value| value.instrument,
             .market_data_health_changed => |value| value.instrument,
             else => null,
@@ -3563,6 +3565,15 @@ pub const TradingShard = struct {
                 // A delta is valid only while the projection is already
                 // healthy. It never proves recovery after a gap; only the
                 // complete snapshot branch above can reopen the gate.
+            },
+            .market_trade => |trade| {
+                try trade.validate();
+                if (record.envelope.scope != .instrument or record.envelope.instrument != trade.instrument or
+                    record.envelope.source_fact_identity != trade.trade_identity or
+                    record.envelope.times.source_utc_ns != trade.source_time_utc_ns) return error.CanonicalScopeMismatch;
+                const entry = self.canonical_market.get(trade.instrument) orelse return error.MissingInstrumentDefinition;
+                if (entry.active_rules_version != trade.price.rules_version) return error.InstrumentRulesInactive;
+                try self.trace.append(.canonical_market_trade, fact_identity);
             },
             .reference_price => |price| {
                 try self.canonical_market.apply(record.event);
