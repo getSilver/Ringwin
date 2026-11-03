@@ -23,7 +23,7 @@ Status: open
 
 ## Route
 
-以下八张实施票已按用户确认发布；01–05 及实施 04 时追加的共享前置 04a 已在 `feat/hyperliquid-adapter` resolved；06–08 仍 open、未认领，按依赖逐票推进。
+以下八张实施票已按用户确认发布；01–06 及实施 04 时追加的共享前置 04a 已在 `feat/hyperliquid-adapter` resolved；07–08 仍 open、未认领，按依赖逐票推进。
 
 | 切片 | 交付与验收 | 前置 |
 |---|---|---|
@@ -43,10 +43,11 @@ Status: open
 
 ## Frontier
 
-- [06 对账与恢复](issues/06-reconciliation-recovery.md)：open，05 已完成，无未完成前置，尚未认领。
+- [07 运行与跨所接线](issues/07-runtime-cross-venue-wiring.md)：open，04/06 已完成，无未完成前置，尚未认领。
 
 ## Decisions so far
 
+- 2026-11-03：按用户要求完成 [06](issues/06-reconciliation-recovery.md)：固定经济窗口的八项有界恢复查询、原始请求/页/终止证据、发送上下文与查询结果回放、原命令/Unknown/终态正面证据的绑定检查点、明确的不完整尾部拒绝与只读恢复。公开 Gateway→Adapter→Owner→DurableStore 验证发送及原文提交后的崩溃、两种 report/Fill 顺序、归档后重复、真实查询/故障回放与 snapshot 加尾部摘要收敛，回放零发送、不重授权限。统一 64 MiB 主入口 Debug/ReleaseSafe 定向各 21/21，最终完整 ReleaseSafe 868/868；Standards/Spec 审查问题已修复并复审无阻塞。账户共同屏障、历史保留、资金费修订与强制执行来源无法证明的范围仍保持 pending；06 resolved，07 未自动开始，无 Testnet 写入或生产资格。
 - 2026-11-03：按用户要求完成 [05](issues/05-orders-private-facts.md)：Hyperliquid VenueAdapter 的 Gtc/Ioc/Alo、永续 Reduce-only、CLOID 持久发送接点、取消与只读查询、独立 report/Fill、费用/返佣、受批准 token 绑定的账户增量、有界背压/限流与安全故障。恢复模式撤单沿用 Gateway 风险分类，旧 fencing 仍拒绝；部分聚合保留 oid/Unknown 以接受迟到真实 Fill。Debug/ReleaseSafe 定向各 15/15，真实凭证签名定向 2/2，最终完整 ReleaseSafe 862/862；Standards 无实质阻塞，Spec 两项 P1 修复并复审通过。05 resolved；06 未自动开始。历史覆盖、完整恢复、真实 transport/全局额度接线与 Testnet 写入资格仍由 06–08 分别完成。
 - 2026-11-03：按用户要求完成 [04](issues/04-public-market-feed.md) 及真实共享前置 [04a](issues/04a-market-trade-contract.md)：独立公共行情、批准元数据摘要及 margin table/重启变化校验、有限深度、公共成交、分离参考价、带真实时点的精确费率、健康与背压/停机、公开核心与 Host、RawIngress/规范/快照加尾恢复。最终 Debug/ReleaseSafe 定向各 13/13、完整 ReleaseSafe 848/848、Python Host 8/8、native 构建 8/8；两轴复审无剩余阻塞。当前 canonical 20 / codec 15 / journal 52 / state 56 / registry 50，旧格式拒绝。实施限制与实际命令见票证；05 未自动开始，真实 transport/共享 IP 限流/部署 epoch 与摘要审批由后续接线完成，无在线或生产资格。
 - 2026-11-02：按用户要求完成 [03](issues/03-api-wallet-signing.md)：真实 API 钱包凭证与旧 CRD4 兼容、原位受保护解码、资金账户与 session 绑定、安全入口强制 nonce 持久消费和既有 fencing、受保护 RFC6979/HMAC 工作区。Debug 定向 56/56、最终 ReleaseSafe 定向 57/57；直接运行完整 ReleaseSafe 测试二进制 834/834 通过，构建监听日志及新增边界用例的证据范围详见票证。双轴审查发现的两个安全阻塞项已修复并复审，03 resolved；04/05 未自动开始，无在线或生产资格。算术临时值、跨机 fencing 和断电持久化仍待平台资格；ledger 的 65,536 条容量限制保持明确。

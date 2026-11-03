@@ -26,7 +26,7 @@
 | OKX | 私有 `orders`、`fills`、`balance_and_position`；`public/instruments?instType=SPOT` | 私有 `orders`、`fills`、`positions`、`balance_and_position`；`public/instruments?instType=SWAP` | [orders](https://www.okx.com/docs-v5/en/#web3-dex-solana-trading-websocket-private-channel-order-channel)、[account/positions](https://www.okx.com/docs-v5/en/#trading-account-rest-api-get-positions)、[instruments](https://www.okx.com/docs-v5/en/#public-data-rest-api-get-instruments) |
 | Binance | User Data Stream `executionReport`、`outboundAccountPosition`、`balanceUpdate`；`exchangeInfo`；public depth | USD-M User Data Stream `ORDER_TRADE_UPDATE`、`ACCOUNT_UPDATE`；`exchangeInfo`；public depth / mark price | [Spot user stream](https://developers.binance.com/docs/binance-spot-api-docs/user-data-stream)、[Spot exchange info](https://developers.binance.com/docs/binance-spot-api-docs/rest-api/general-endpoints#exchange-information)、[Spot depth](https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams#diff-depth-stream)、[USD-M user stream](https://developers.binance.com/docs/derivatives/usds-margined-futures/user-data-streams/Event-Order-Update)、[USD-M exchange info](https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Exchange-Information)、[USD-M market streams](https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Mark-Price-Stream) |
 | Bybit | v5 private `order`、`execution`、`wallet`；`instruments-info?category=spot`；public orderbook | v5 private `order`、`execution`、`position`、`wallet`；`instruments-info?category=linear`；public orderbook/ticker | [order](https://bybit-exchange.github.io/docs/v5/websocket/private/order)、[execution](https://bybit-exchange.github.io/docs/v5/websocket/private/execution)、[wallet](https://bybit-exchange.github.io/docs/v5/websocket/private/wallet)、[position](https://bybit-exchange.github.io/docs/v5/websocket/private/position)、[instruments](https://bybit-exchange.github.io/docs/v5/market/instrument)、[orderbook](https://bybit-exchange.github.io/docs/v5/websocket/public/orderbook)、[ticker](https://bybit-exchange.github.io/docs/v5/websocket/public/ticker) |
-| Hyperliquid（合同候选，未实现） | `spotMeta`、`spotClearinghouseState`/`spotState`、订单/成交、公共快照/交易 | 标准逐仓 `meta`、`clearinghouseState`、订单/成交/资金费/强平、公共快照/参考价 | [01 协议依据与样本](research/2026-11-02-hyperliquid-protocol-contract.md)；本表 §3.8；不是已激活 Profile |
+| Hyperliquid（离线实现；未取得在线资格） | `spotMeta`、`spotClearinghouseState`/`spotState`、订单/成交、公共快照/交易 | 标准逐仓 `meta`、`clearinghouseState`、订单/成交/资金费/强平、公共快照/参考价 | [01 协议依据与样本](research/2026-11-02-hyperliquid-protocol-contract.md)；本表 §3.8；不是已激活 Profile |
 
 既有实现仅限 `SPOT`、`SWAP` / USD-M、Bybit `spot` / `linear`；Hyperliquid 候选另限标准 USDC 逐仓和现货。期权、交割合约、组合保证金和
 算法订单不在产品范围；它们出现的字段仍在本表中标明拒绝原因，不能被忽略。
@@ -176,7 +176,14 @@
 05 的执行实现与实际离线证据见[本地票](../.scratch/hyperliquid-adapter/issues/05-orders-private-facts.md)：
 订单、独立 Fill、逐仓杠杆与有 bootstrap 引用的账户增量已接共享 VenueAdapter；
 spot 余额另需批准的 token index→Asset 映射。资金费/强制执行缺完整身份时输出安全故障，
-所有历史覆盖与 Unknown 闭合仍留给 06；本表不授予这些未完成能力。
+06 的有界恢复实现见[本地票](../.scratch/hyperliquid-adapter/issues/06-reconciliation-recovery.md)：
+固定账户/session/经济窗口，逐轮查询账户模式、永续账户、spot 账户、未完成订单、历史订单、
+成交、资金费与非资金费账务；请求、页原文及终止结果均保留 RawIngress。每轮最多一页查询或
+16 行应用，时间分页使用 inclusive 重叠；满页同毫秒不能前进即 stalled。
+短页仅表示可访问集合耗尽；最近历史保留、资金费修订、强制执行来源、完整逐仓金额与多查询
+共同账户屏障尚无证明，因此整体 complete 保持 false，Unknown 不输出 ConfirmedAbsent。
+发送上下文在 transport 前持久捕获，发送结果与查询结果均可回放；检查点绑定原 CLOID、
+原命令期限、去重事实与原始高水位，回放不发送、不恢复授权。具体容量与离线证据见票证。
 表中逗号分隔字段逐个适用处置；括号内对象只是容器，下面列全所用成员。
 没有值、null、未知 enum 均不自动变成零/false/USDC。所有输入保留 C5 原文；
 新增未知字段留 RE，改变经济/风险语义则停用该范围并对账。

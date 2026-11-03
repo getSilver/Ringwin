@@ -5,7 +5,7 @@ const venue = @import("../../execution/venue_adapter.zig");
 const signer = @import("hyperliquid_signer.zig");
 pub const Times = struct { receive_time_utc_ns: u64, monotonic_time_ns: u64, wall_time_utc_ns: u64 };
 pub const RawError = error{ Unavailable, Backpressure };
-pub const Input = enum { exchange, orders, fills, account, spot_account, account_mode, funding, user_events, ledger, order_status };
+pub const Input = enum { exchange, orders, fills, account, spot_account, account_mode, funding, user_events, ledger, order_status, recovery_request, recovery_query, historical_orders, open_orders, fill_history, funding_history, ledger_history, recovery_end, disconnected, dispatch_context, dispatch_outcome, query_result };
 pub const RawRecord = struct {
     venue: u64,
     environment: venue.Environment,
@@ -111,8 +111,58 @@ pub const Budget = struct {
         return true;
     }
 };
-const Order = struct { command: c.OrderCommand, oid: ?u64 = null, sent: bool = false, unknown: bool = false };
+const TerminalObservation = struct { report: c.ExecutionReport, source: c.RawEvidenceRef, observed_at_utc_ns: u64 };
+const Order = struct { command: c.OrderCommand, oid: ?u64 = null, sent: bool = false, unknown: bool = false, terminal: ?TerminalObservation = null };
 const Seen = struct { identity: u128, event: c.Payload, reported_pnl: ?c.Decimal };
+const checkpoint_codec = @import("../../persistence/snapshot_codec.zig");
+const recovery_inputs = [_]Input{ .account_mode, .account, .spot_account, .open_orders, .historical_orders, .fill_history, .funding_history, .ledger_history };
+pub const RecoveryTermination = enum { pending, accessible_exhausted, retention_unproven, stalled, capacity, transport, protocol, budget, interrupted, deadline };
+pub const RecoveryPage = struct {
+    input: Input,
+    from_ms: u64,
+    through_ms: u64,
+    source: c.RawEvidenceRef,
+    count: u16 = 0,
+    min_ms: ?u64 = null,
+    max_ms: ?u64 = null,
+    termination: RecoveryTermination = .pending,
+};
+pub const RecoveryCoverage = struct {
+    request: c.AccountReconciliationRequest,
+    pages: [16]RecoveryPage = undefined,
+    page_count: u8 = 0,
+    termination: RecoveryTermination = .pending,
+    /// Accessible REST exhaustion cannot certify retention, funding revisions, forced provenance, or an atomic account barrier.
+    complete: bool = false,
+};
+const RecoveryRequest = struct { request: c.AccountReconciliationRequest, deadline_ns: u64 };
+const RecoveryEnd = struct { reason: RecoveryTermination, fault: ?c.EconomicFaultReason = null };
+const DispatchOutcome = struct { command: c.OrderCommand, state: c.DispatchState, reason: ?c.CanonicalRejectReason, decoded: bool, failed: bool, retained_order: bool };
+const QueryResult = struct { account: bool, result: c.ReconciliationResult };
+const ReplayResponse = struct { bytes: [@import("../../persistence/raw_ingress.zig").max_frame_bytes]u8 = undefined, len: usize, evidence: c.RawEvidenceRef, times: Times };
+const Recovery = struct {
+    begin: RecoveryRequest,
+    phase: u8 = 0,
+    cursor_ms: u64,
+    query_recorded: bool = false,
+    waiting_end: bool = false,
+    page: [@import("../../persistence/raw_ingress.zig").max_frame_bytes]u8 = undefined,
+    page_len: usize = 0,
+    row: usize = 0,
+    times: Times = undefined,
+    evidence: c.RawEvidenceRef = undefined,
+};
+const ResumeCheckpoint = struct {
+    schema: u16 = 1,
+    binding: [32]u8,
+    sequence: u64,
+    raw_sequence: u64,
+    failed: bool,
+    orders: [64]Order = @splat(std.mem.zeroes(Order)),
+    order_count: u8,
+    seen: [128]Seen = @splat(.{ .identity = 0, .event = .{ .economic_fault = .{ .reason = .invalid_economic_fact } }, .reported_pnl = null }),
+    seen_count: u8,
+};
 
 pub const HyperliquidVenueAdapter = struct {
     profile: Profile,
@@ -128,12 +178,378 @@ pub const HyperliquidVenueAdapter = struct {
     sequence: u64 = 0,
     raw_sequence: u64 = 0,
     failed: bool = false,
-    // shortcut: retain 64 orders and 128 private facts; exhaustion fails closed until durable recovery in 06.
+    // shortcut: retain 64 order links and 128 facts per checkpoint; exhaustion requires a qualified history continuation.
     orders: [64]Order = undefined,
     order_count: usize = 0,
     seen: [128]Seen = undefined,
     seen_count: usize = 0,
     fencing_token: u64 = 0,
+    replay_only: bool = false,
+    recovery_required: bool = false,
+    recovery: ?Recovery = null,
+    coverage: ?RecoveryCoverage = null,
+    replay_command: ?c.OrderCommand = null,
+    replay_response: ?ReplayResponse = null,
+    dispatch_decoded: bool = false,
+    dispatch_recorded: bool = false,
+
+    fn bindingDigest(self: *const @This()) ![32]u8 {
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        var bytes: [65536]u8 = undefined;
+        const p = self.profile;
+        hash.update(try checkpoint_codec.encodeBare(&bytes, .{ p.venue, p.account, p.session, p.funding, p.environment, p.version, p.rules_version, p.config_version, p.bootstrap_identity, p.bindings.len, p.tokens.len }));
+        for (p.bindings) |b| {
+            hash.update(try checkpoint_codec.encodeBare(&bytes, .{ b.instrument, b.wire_asset, b.product, b.size_decimals, b.price_scale, b.tick_atoms, b.quantity_scale, b.lot_atoms, b.coin.len }));
+            hash.update(b.coin);
+        }
+        for (p.tokens) |token| hash.update(try checkpoint_codec.encodeBare(&bytes, token));
+        hash.update(try checkpoint_codec.encodeBare(&bytes, self.assets.count));
+        for (self.assets.entries[0..self.assets.count]) |entry| hash.update(try checkpoint_codec.encodeBare(&bytes, entry));
+        hash.update(try checkpoint_codec.encodeBare(&bytes, self.instruments.count));
+        for (self.instruments.entries[0..self.instruments.count]) |entry| hash.update(try checkpoint_codec.encodeBare(&bytes, entry));
+        return hash.finalResult();
+    }
+
+    /// Drained decoder state only; Owner binds these bytes to its durable core/raw barrier.
+    pub fn exportResumeCheckpoint(self: *const @This(), destination: []u8) ![]const u8 {
+        if (self.state != .running or self.pending != null or self.recovery != null or self.replay_command != null) return error.PrivateRecoveryBoundaryUnavailable;
+        var seed: ResumeCheckpoint = .{ .binding = try self.bindingDigest(), .sequence = self.sequence, .raw_sequence = self.raw_sequence, .failed = self.failed, .order_count = @intCast(self.order_count), .seen_count = @intCast(self.seen_count) };
+        @memcpy(seed.orders[0..self.order_count], self.orders[0..self.order_count]);
+        @memcpy(seed.seen[0..self.seen_count], self.seen[0..self.seen_count]);
+        return checkpoint_codec.encodeBare(destination, seed);
+    }
+
+    pub fn restoreResumeCheckpoint(self: *@This(), encoded: []const u8) !void {
+        if (self.state != .running or !self.replay_only or self.sequence != 0 or self.raw_sequence != 0 or self.order_count != 0 or self.pending != null) return error.InvalidState;
+        const seed = try checkpoint_codec.decodeBare(encoded, ResumeCheckpoint);
+        if (seed.schema != 1 or seed.order_count > self.orders.len or seed.seen_count > self.seen.len or
+            seed.sequence == std.math.maxInt(u64) or seed.raw_sequence == std.math.maxInt(u64) or
+            !std.mem.eql(u8, &seed.binding, &try self.bindingDigest())) return error.InvalidPrivateResumeCheckpoint;
+        for (seed.orders[0..seed.order_count], 0..) |o, index| {
+            if (o.command.exchange_account != self.profile.account or o.command.adapter_session != self.profile.session or o.command.orderIdentity() == 0 or o.command.quantity == null or o.command.quantity.?.lots <= 0 or o.command.limit_price == null) return error.InvalidPrivateResumeCheckpoint;
+            _ = self.binding(o.command.instrument) catch return error.InvalidPrivateResumeCheckpoint;
+            checkCloid(o.command.client_order_id) catch return error.InvalidPrivateResumeCheckpoint;
+            if (o.oid != null and o.oid.? == 0) return error.InvalidPrivateResumeCheckpoint;
+            if (o.terminal) |terminal| {
+                const report = terminal.report;
+                if (report.order != o.command.orderIdentity() or report.instrument != o.command.instrument or report.exchange_account != self.profile.account or report.revision != o.command.revision or
+                    !std.meta.eql(report.client_order_id, o.command.client_order_id) or (report.status != .filled and report.status != .canceled and report.status != .rejected) or
+                    report.cumulative_quantity.instrument != report.instrument or report.remaining_quantity.instrument != report.instrument or report.cumulative_quantity.rules_version != o.command.rules_version or report.remaining_quantity.rules_version != o.command.rules_version or
+                    report.cumulative_quantity.lots < 0 or report.remaining_quantity.lots < 0 or (std.math.add(i128, report.cumulative_quantity.lots, report.remaining_quantity.lots) catch return error.InvalidPrivateResumeCheckpoint) != o.command.quantity.?.lots or
+                    terminal.source.stream != self.profile.session or terminal.source.sequence == 0 or terminal.source.sequence > seed.raw_sequence or terminal.observed_at_utc_ns == 0 or std.mem.allEqual(u8, &terminal.source.digest, 0)) return error.InvalidPrivateResumeCheckpoint;
+            }
+            for (seed.orders[0..index]) |other| if (other.command.orderIdentity() == o.command.orderIdentity() or std.meta.eql(other.command.client_order_id, o.command.client_order_id) or (o.oid != null and other.oid == o.oid)) return error.InvalidPrivateResumeCheckpoint;
+        }
+        for (seed.seen[0..seed.seen_count], 0..) |fact, index| {
+            const order_id = switch (fact.event) {
+                .fill => |v| if (v.identity == fact.identity and v.exchange_account == self.profile.account) v.order else return error.InvalidPrivateResumeCheckpoint,
+                .execution_report => |v| if (v.identity == fact.identity and v.exchange_account == self.profile.account) v.order else return error.InvalidPrivateResumeCheckpoint,
+                else => return error.InvalidPrivateResumeCheckpoint,
+            };
+            var found = false;
+            for (seed.orders[0..seed.order_count]) |o| if (o.command.orderIdentity() == order_id) {
+                found = true;
+            };
+            if (!found or fact.identity == 0) return error.InvalidPrivateResumeCheckpoint;
+            for (seed.seen[0..index]) |other| if (other.identity == fact.identity) return error.InvalidPrivateResumeCheckpoint;
+        }
+        self.orders = seed.orders;
+        self.order_count = seed.order_count;
+        self.seen = seed.seen;
+        self.seen_count = seed.seen_count;
+        self.sequence = seed.sequence;
+        self.raw_sequence = seed.raw_sequence;
+        self.failed = seed.failed;
+        self.recovery_required = true;
+    }
+
+    /// Owner completes the durable sweep first; this permits queries/cancels and retains every risk restriction.
+    pub fn resumeReadOnly(self: *@This()) !void {
+        if (!self.replay_only or self.state != .running or self.pending != null or self.recovery != null or self.replay_command != null) return error.InvalidState;
+        self.replay_only = false;
+        self.recovery_required = true;
+    }
+
+    /// Already committed ingress: no recapture, signing, query, or submission capability.
+    pub fn replay(self: *@This(), input: Input, times: Times, evidence: c.RawEvidenceRef, bytes: []const u8) !void {
+        if (!self.replay_only or self.state != .running or self.pending != null or evidence.stream != self.profile.session or evidence.sequence <= self.raw_sequence) return error.InvalidReplayRoute;
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        if (bytes.len == 0 or bytes.len > 65536 or !std.mem.eql(u8, &digest, &evidence.digest)) return error.InvalidRawEvidence;
+        var buffer: [131072]u8 = undefined;
+        var allocator = std.heap.FixedBufferAllocator.init(&buffer);
+        var staged = self.*;
+        var output: c.AdapterOutputBatch = .{};
+        switch (input) {
+            .query_result => {
+                var result = try checkpoint_codec.decodeBare(bytes, QueryResult);
+                if (result.result.status == .confirmed_absent or (result.account and result.result.complete)) return error.InvalidReplayRoute;
+                if (result.result.evidence) |*source| if (source.source.stream == 0) {
+                    source.source = evidence;
+                };
+                try staged.append(&output, if (result.account) .{ .account_reconciliation_result = result.result } else .{ .order_reconciliation_result = result.result }, if (result.result.evidence) |source| source.scope.instrument else null, times, evidence);
+            },
+            .dispatch_context => {
+                if (staged.replay_command != null) return error.IncompleteDispatchRecovery;
+                const command = try checkpoint_codec.decodeBare(bytes, c.OrderCommand);
+                if (command.exchange_account != staged.profile.account or command.adapter_session != staged.profile.session) return error.InvalidReplayRoute;
+                _ = try staged.binding(command.instrument);
+                try checkCloid(command.client_order_id);
+                staged.replay_command = command;
+            },
+            .exchange => {
+                if (staged.replay_command == null or staged.replay_response != null) return error.InvalidReplayRoute;
+                var response: ReplayResponse = .{ .len = bytes.len, .evidence = evidence, .times = times };
+                if (bytes.len > response.bytes.len) return error.InvalidReplayRoute;
+                @memcpy(response.bytes[0..bytes.len], bytes);
+                staged.replay_response = response;
+            },
+            .dispatch_outcome => {
+                const outcome = try checkpoint_codec.decodeBare(bytes, DispatchOutcome);
+                if (outcome.command.exchange_account != staged.profile.account or outcome.command.adapter_session != staged.profile.session) return error.InvalidReplayRoute;
+                if (staged.replay_command) |command| if (!std.meta.eql(command, outcome.command)) return error.InvalidReplayRoute;
+                const new_order = outcome.retained_order and staged.order(outcome.command.orderIdentity()) == null;
+                if (new_order) try staged.rememberDispatch(outcome.command);
+                staged.failed = staged.failed or outcome.failed;
+                if (staged.order(outcome.command.orderIdentity())) |o| if ((staged.replay_command != null or new_order) and outcome.command.operation == .place) {
+                    o.sent = outcome.state != .not_sent;
+                    o.unknown = outcome.state == .unknown;
+                };
+                if (outcome.decoded) {
+                    const response = staged.replay_response orelse return error.IncompleteDispatchRecovery;
+                    var parsed = try std.json.parseFromSlice(std.json.Value, allocator.allocator(), response.bytes[0..response.len], .{});
+                    defer parsed.deinit();
+                    var remote = staged;
+                    remote.sequence += 1;
+                    var facts: c.AdapterOutputBatch = .{};
+                    try remote.exchange(&facts, outcome.command, parsed.value, response.times, response.evidence);
+                    staged.dispatchResult(&output, outcome.command, outcome.state, outcome.reason, times, response.evidence);
+                    staged.sequence = remote.sequence;
+                    staged.orders = remote.orders;
+                    for (facts.slice()) |fact| try output.append(fact);
+                } else {
+                    if (staged.order(outcome.command.orderIdentity())) |o| if (outcome.state == .unknown) {
+                        o.unknown = true;
+                    };
+                    staged.dispatchResult(&output, outcome.command, outcome.state, outcome.reason, times, if (staged.replay_response) |response| response.evidence else null);
+                }
+                staged.replay_command = null;
+                staged.replay_response = null;
+            },
+            .recovery_request => {
+                const begin = try checkpoint_codec.decodeBare(bytes, RecoveryRequest);
+                try staged.beginRecovery(begin);
+                try staged.append(&output, .{ .account_reconciliation_started = begin.request.identity }, null, times, evidence);
+            },
+            .recovery_end => try staged.emitRecoveryEnd(&output, try checkpoint_codec.decodeBare(bytes, RecoveryEnd), times, evidence),
+            .disconnected => {
+                if (!std.mem.eql(u8, bytes, "disconnected")) return error.InvalidReplayRoute;
+                try staged.disconnection(&output, times, evidence);
+            },
+            .recovery_query => {
+                var query_bytes: [512]u8 = undefined;
+                if (staged.recovery == null or staged.recovery.?.query_recorded or !std.mem.eql(u8, bytes, try staged.recoveryQuery(&query_bytes))) return error.InvalidReplayRoute;
+                staged.recovery.?.query_recorded = true;
+            },
+            else => if (staged.recovery != null and staged.recovery.?.query_recorded and input == recovery_inputs[staged.recovery.?.phase]) {
+                try staged.loadRecoveryPage(input, times, evidence, bytes);
+            } else staged.decode(allocator.allocator(), &output, input, times, evidence, bytes) catch {
+                staged = self.*;
+                staged.failed = true;
+                output = .{};
+                try staged.append(&output, .{ .economic_fault = .{ .reason = .decoder_rejected } }, null, times, evidence);
+            },
+        }
+        staged.raw_sequence = evidence.sequence;
+        staged.pending = output;
+        self.* = staged;
+    }
+
+    fn rememberDispatch(self: *@This(), command: c.OrderCommand) !void {
+        if (command.identity == 0 or command.orderIdentity() == 0 or command.exchange_account != self.profile.account or command.adapter_session != self.profile.session or
+            (command.operation == .place and (command.quantity == null or command.quantity.?.lots <= 0 or command.limit_price == null))) return error.InvalidReplayRoute;
+        _ = try self.binding(command.instrument);
+        try checkCloid(command.client_order_id);
+        if (self.order(command.orderIdentity())) |known| {
+            if (command.operation != .cancel and !std.meta.eql(known.command, command)) return error.OrderConflict;
+            if (known.command.instrument != command.instrument or !std.meta.eql(known.command.client_order_id, command.client_order_id)) return error.OrderConflict;
+        } else {
+            if (command.operation != .place or self.order_count == self.orders.len) return error.InvalidReplayRoute;
+            self.orders[self.order_count] = .{ .command = command, .sent = true, .unknown = true };
+            self.order_count += 1;
+        }
+    }
+
+    pub fn finishReplay(self: *const @This()) !void {
+        if (!self.replay_only or self.pending != null or self.replay_command != null or self.recovery != null) return error.IncompleteReplay;
+    }
+
+    fn beginRecovery(self: *@This(), begin: RecoveryRequest) !void {
+        const r = begin.request;
+        const from = r.economic_boundary_utc_ns orelse return error.InvalidRequest;
+        const through = r.economic_through_utc_ns orelse return error.InvalidRequest;
+        if (self.recovery != null or r.identity == 0 or r.exchange_account != self.profile.account or r.expected_session != self.profile.session or from > through or from % std.time.ns_per_ms != 0 or through % std.time.ns_per_ms != 0 or begin.deadline_ns == 0) return error.InvalidRequest;
+        self.recovery = .{ .begin = begin, .cursor_ms = from / std.time.ns_per_ms };
+        self.coverage = .{ .request = r };
+        self.recovery_required = true;
+    }
+
+    fn recoveryQuery(self: *const @This(), bytes: []u8) ![]const u8 {
+        const r = self.recovery orelse return error.InvalidState;
+        const input = recovery_inputs[r.phase];
+        const name = switch (input) {
+            .account_mode => "userAbstraction",
+            .account => "clearinghouseState",
+            .spot_account => "spotClearinghouseState",
+            .open_orders => "frontendOpenOrders",
+            .historical_orders => "historicalOrders",
+            .fill_history => "userFillsByTime",
+            .funding_history => "userFunding",
+            .ledger_history => "userNonFundingLedgerUpdates",
+            else => unreachable,
+        };
+        const address = std.fmt.bytesToHex(self.profile.funding, .lower);
+        if (r.phase >= 5) return std.fmt.bufPrint(bytes, "{{\"type\":\"{s}\",\"user\":\"0x{s}\",\"startTime\":{d},\"endTime\":{d}{s}}}", .{ name, address, r.cursor_ms, r.begin.request.economic_through_utc_ns.? / std.time.ns_per_ms, if (input == .fill_history) ",\"aggregateByTime\":false" else "" });
+        return std.fmt.bufPrint(bytes, "{{\"type\":\"{s}\",\"user\":\"0x{s}\"}}", .{ name, address });
+    }
+
+    fn loadRecoveryPage(self: *@This(), input: Input, times: Times, evidence: c.RawEvidenceRef, bytes: []const u8) !void {
+        const r = if (self.recovery) |*value| value else return error.InvalidState;
+        if (times.monotonic_time_ns >= r.begin.deadline_ns) {
+            r.waiting_end = true;
+            return;
+        }
+        if (!r.query_recorded or r.page_len != 0 or recovery_inputs[r.phase] != input or bytes.len > r.page.len or self.coverage.?.page_count == 16) return error.RecoveryCapacity;
+        @memcpy(r.page[0..bytes.len], bytes);
+        r.page_len = bytes.len;
+        r.times = times;
+        r.evidence = evidence;
+        r.row = 0;
+        const coverage = &self.coverage.?;
+        coverage.pages[coverage.page_count] = .{ .input = input, .from_ms = r.cursor_ms, .through_ms = r.begin.request.economic_through_utc_ns.? / std.time.ns_per_ms, .source = evidence };
+        coverage.page_count += 1;
+    }
+
+    fn emitRecoveryEnd(self: *@This(), output: *c.AdapterOutputBatch, end: RecoveryEnd, times: Times, evidence: ?c.RawEvidenceRef) !void {
+        if (self.recovery == null or end.reason == .pending) return error.InvalidReplayRoute;
+        const request = self.recovery.?.begin.request;
+        self.coverage.?.termination = end.reason;
+        self.recovery = null;
+        try self.append(output, .{ .account_reconciliation_result = .{ .identity = request.identity, .complete = false } }, null, times, evidence);
+        if (end.fault) |reason| {
+            self.failed = true;
+            try self.append(output, .{ .economic_fault = .{ .reason = reason } }, null, times, evidence);
+        }
+    }
+
+    fn finishRecovery(self: *@This(), output: *c.AdapterOutputBatch, reason: RecoveryTermination, times: Times) !void {
+        if (self.replay_only) {
+            self.recovery.?.waiting_end = true;
+            return;
+        }
+        var bytes: [64]u8 = undefined;
+        const end: RecoveryEnd = .{ .reason = reason };
+        const encoded = try checkpoint_codec.encodeBare(&bytes, end);
+        const evidence = try self.capture(.recovery_end, times, encoded, self.profile.session);
+        try self.emitRecoveryEnd(output, end, times, evidence);
+    }
+
+    fn disconnection(self: *@This(), output: *c.AdapterOutputBatch, times: Times, evidence: c.RawEvidenceRef) !void {
+        self.recovery_required = true;
+        if (self.recovery != null) try self.emitRecoveryEnd(output, .{ .reason = .interrupted }, times, evidence);
+        try self.append(output, .{ .economic_fault = .{ .reason = .invalid_economic_fact } }, null, times, evidence);
+    }
+
+    pub fn disconnected(self: *@This(), times: Times) !void {
+        if (self.state != .running or self.replay_only or self.pending != null) return error.InvalidState;
+        const evidence = self.capture(.disconnected, times, "disconnected", self.profile.session) catch |err| {
+            self.fault(times, null, .persistence_failure);
+            return err;
+        };
+        var output: c.AdapterOutputBatch = .{};
+        try self.disconnection(&output, times, evidence);
+        self.pending = output;
+    }
+
+    /// One bounded query or sixteen decoded rows per drain. WS waits under the existing output backpressure.
+    fn pumpRecovery(self: *@This(), output: *c.AdapterOutputBatch) !void {
+        if (self.recovery == null or self.recovery.?.waiting_end) return;
+        const now = self.clock.now_fn(self.clock.ptr);
+        if (!self.replay_only and now.monotonic_time_ns >= self.recovery.?.begin.deadline_ns) return self.finishRecovery(output, .deadline, now);
+        if (self.recovery.?.page_len == 0) {
+            if (self.replay_only) return;
+            if (self.coverage.?.page_count == 16) return self.finishRecovery(output, .capacity, now);
+            const input = recovery_inputs[self.recovery.?.phase];
+            if (!self.budget.take(now.monotonic_time_ns, false, if (input == .account or input == .spot_account or input == .open_orders) 2 else 20)) return self.finishRecovery(output, .budget, now);
+            var request_bytes: [512]u8 = undefined;
+            const request = try self.recoveryQuery(&request_bytes);
+            _ = try self.capture(.recovery_query, now, request, self.profile.session);
+            self.recovery.?.query_recorded = true;
+            const response = self.transport.query_fn(self.transport.ptr, request);
+            if (response.outcome != .response or response.bytes == null or response.session != self.profile.session) return self.finishRecovery(output, .transport, now);
+            const evidence = try self.capture(input, response.times, response.bytes.?, response.session);
+            if (response.times.monotonic_time_ns >= self.recovery.?.begin.deadline_ns) return self.finishRecovery(output, .deadline, response.times);
+            try self.loadRecoveryPage(input, response.times, evidence, response.bytes.?);
+            return;
+        }
+        var buffer: [512 * 1024]u8 = undefined;
+        var allocator = std.heap.FixedBufferAllocator.init(&buffer);
+        const r = &self.recovery.?;
+        const input = recovery_inputs[r.phase];
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator.allocator(), r.page[0..r.page_len], .{ .allocate = .alloc_always });
+        defer parsed.deinit();
+        var page = &self.coverage.?.pages[self.coverage.?.page_count - 1];
+        if (r.phase <= 2) {
+            try self.decode(allocator.allocator(), output, input, r.times, r.evidence, r.page[0..r.page_len]);
+        } else {
+            const rows = try array(parsed.value);
+            if (rows.len > 2000) return error.RecoveryCapacity;
+            page.count = @intCast(rows.len);
+            if (r.row == 0 and !self.replay_only and (input == .historical_orders or input == .fill_history or input == .funding_history) and !self.budget.take(now.monotonic_time_ns, false, @intCast((rows.len + 19) / 20))) return self.finishRecovery(output, .budget, now);
+            const end = @min(rows.len, r.row + 16);
+            for (rows[r.row..end]) |row| {
+                if (r.phase >= 5) {
+                    const time = try uint(try field(row, "time"));
+                    if (time < r.cursor_ms or time > page.through_ms or (page.max_ms != null and time < page.max_ms.?)) return error.InvalidHistoryTime;
+                    page.min_ms = page.min_ms orelse time;
+                    page.max_ms = time;
+                }
+                switch (input) {
+                    .historical_orders => try self.orderUpdate(output, row, r.times, r.evidence),
+                    .fill_history => try self.fillUpdate(output, row, r.times, r.evidence),
+                    .open_orders => {
+                        const oid = try uint(try field(row, "oid"));
+                        const known = try self.findWireOrder(row, oid);
+                        const b = try self.byCoin(try field(row, "coin"));
+                        if (known.command.instrument != b.instrument or !eq(try field(row, "side"), if (known.command.side == .buy) "B" else "A")) return error.OrderConflict;
+                        if ((try quantity(b, self.profile.rules_version, try string(try field(row, "origSz")))).lots != known.command.quantity.?.lots or !std.meta.eql(try price(b, self.profile.rules_version, try string(try field(row, "limitPx"))), known.command.limit_price.?)) return error.OrderConflict;
+                    },
+                    // The approved protocol has no proven revision key/provenance for these economic facts.
+                    .funding_history, .ledger_history => return error.UnsupportedFact,
+                    else => unreachable,
+                }
+            }
+            r.row = end;
+            if (end != rows.len) return;
+            if (r.phase >= 5 and rows.len >= 500) {
+                if (page.max_ms.? <= r.cursor_ms) {
+                    page.termination = .stalled;
+                    return self.finishRecovery(output, .stalled, r.times);
+                }
+                r.cursor_ms = page.max_ms.?; // Inclusive overlap; never skip a saturated millisecond.
+                r.page_len = 0;
+                r.query_recorded = false;
+                page.termination = .retention_unproven;
+                return;
+            }
+        }
+        page.termination = if (r.phase == 4 or r.phase == 5) .retention_unproven else .accessible_exhausted;
+        r.phase += 1;
+        r.cursor_ms = r.begin.request.economic_boundary_utc_ns.? / std.time.ns_per_ms;
+        r.page_len = 0;
+        r.query_recorded = false;
+        if (r.phase == recovery_inputs.len) try self.finishRecovery(output, .retention_unproven, r.times);
+    }
 
     pub fn adapter(self: *@This()) venue.VenueAdapter {
         return .{ .ptr = self, .vtable = &.{ .start = start, .try_send = send, .try_drain = drain, .stop = stop, .prepare_client_order_id = prepareCloid } };
@@ -173,28 +589,61 @@ pub const HyperliquidVenueAdapter = struct {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         if (self.state == .idle) return error.NotStarted;
         if (self.state == .stopped) return .stopped;
+        if (self.replay_only) return error.InvalidRequest;
         if (self.pending != null) return .backpressure;
+        if (self.recovery != null and request != .order_command) return .backpressure;
         var output: c.AdapterOutputBatch = .{};
         switch (request) {
             .order_reconciliation => |r| {
                 if (r.exchange_account != self.profile.account or !self.profile.can_read) return error.InvalidRequest;
-                if (self.order(r.order)) |known| {
+                const known = self.order(r.order) orelse return error.InvalidRequest;
+                {
                     var query_bytes: [256]u8 = undefined;
                     const address = std.fmt.bytesToHex(self.profile.funding, .lower);
                     const request_bytes = std.fmt.bufPrint(&query_bytes, "{{\"type\":\"orderStatus\",\"user\":\"0x{s}\",\"oid\":\"{s}\"}}", .{ address, known.command.client_order_id.slice() }) catch return error.InvalidRequest;
                     self.query(&output, .order_status, request_bytes);
                 }
-                self.append(&output, .{ .order_reconciliation_result = .{ .identity = r.identity, .order = r.order, .complete = false } }, null, self.clock.now_fn(self.clock.ptr), null) catch return error.InvalidRequest;
+                const now = self.clock.now_fn(self.clock.ptr);
+                const command = known.command;
+                var result: c.ReconciliationResult = .{ .identity = r.identity, .order = r.order, .complete = false, .revision = command.revision, .rules_version = command.rules_version, .cumulative_quantity = q(command.instrument, command.rules_version, 0), .remaining_quantity = command.quantity, .evidence = .{ .scope = .{ .exchange_account = self.profile.account, .instrument = command.instrument, .order = r.order, .revision = command.revision, .from_utc_ns = now.wall_time_utc_ns, .through_utc_ns = now.wall_time_utc_ns }, .observed_at_utc_ns = now.wall_time_utc_ns, .source = .{ .stream = 0, .sequence = 0, .digest = @splat(0) } } };
+                if (known.terminal) |terminal| {
+                    // A lookup miss cannot erase an independent positive terminal witness; this is no archive or economic coverage proof.
+                    result.complete = true;
+                    result.status = .found_terminal;
+                    result.cumulative_quantity = terminal.report.cumulative_quantity;
+                    result.remaining_quantity = terminal.report.remaining_quantity;
+                    result.terminal_status = terminal.report.status;
+                    result.evidence.?.source = terminal.source;
+                    result.evidence.?.scope.from_utc_ns = terminal.report.venue_create_time_utc_ns orelse terminal.observed_at_utc_ns;
+                    result.evidence.?.scope.through_utc_ns = terminal.report.venue_update_time_utc_ns orelse terminal.observed_at_utc_ns;
+                }
+                self.appendQueryResult(&output, .{ .account = false, .result = result }) catch {
+                    self.fault(self.clock.now_fn(self.clock.ptr), null, .persistence_failure);
+                    return .accepted;
+                };
             },
             .account_reconciliation => |r| {
                 if (r.exchange_account != self.profile.account or r.expected_session != self.profile.session or !self.profile.can_read) return error.InvalidRequest;
-                const address = std.fmt.bytesToHex(self.profile.funding, .lower);
-                var query_bytes: [256]u8 = undefined;
-                for ([_]Input{ .account, .spot_account }) |input| {
-                    const request_bytes = std.fmt.bufPrint(&query_bytes, "{{\"type\":\"{s}\",\"user\":\"0x{s}\"}}", .{ if (input == .account) "clearinghouseState" else "spotClearinghouseState", address }) catch return error.InvalidRequest;
-                    self.query(&output, input, request_bytes);
+                if (r.economic_boundary_utc_ns != null and r.economic_through_utc_ns != null) {
+                    const now = self.clock.now_fn(self.clock.ptr);
+                    if (r.economic_through_utc_ns.? > now.wall_time_utc_ns) return error.InvalidRequest;
+                    const begin: RecoveryRequest = .{ .request = r, .deadline_ns = std.math.add(u64, now.monotonic_time_ns, 30 * std.time.ns_per_s) catch return error.InvalidRequest };
+                    // Validate before recording the immutable recovery scope.
+                    self.beginRecovery(begin) catch return error.InvalidRequest;
+                    var bytes: [256]u8 = undefined;
+                    const encoded = checkpoint_codec.encodeBare(&bytes, begin) catch unreachable;
+                    const evidence = self.capture(.recovery_request, now, encoded, self.profile.session) catch {
+                        self.recovery = null;
+                        self.fault(now, null, .persistence_failure);
+                        return .accepted;
+                    };
+                    self.append(&output, .{ .account_reconciliation_started = r.identity }, null, now, evidence) catch return error.InvalidRequest;
+                } else {
+                    self.appendQueryResult(&output, .{ .account = true, .result = .{ .identity = r.identity, .complete = false } }) catch {
+                        self.fault(self.clock.now_fn(self.clock.ptr), null, .persistence_failure);
+                        return .accepted;
+                    };
                 }
-                self.append(&output, .{ .account_reconciliation_result = .{ .identity = r.identity, .complete = false } }, null, self.clock.now_fn(self.clock.ptr), null) catch return error.InvalidRequest;
             },
             .order_command => |command| self.dispatch(&output, command),
             .order_batch => |batch| {
@@ -205,17 +654,50 @@ pub const HyperliquidVenueAdapter = struct {
         self.pending = output;
         return .accepted;
     }
+    fn appendQueryResult(self: *@This(), output: *c.AdapterOutputBatch, result: QueryResult) !void {
+        const now = self.clock.now_fn(self.clock.ptr);
+        var bytes: [2048]u8 = undefined;
+        const encoded = try checkpoint_codec.encodeBare(&bytes, result);
+        const evidence = try self.capture(.query_result, now, encoded, self.profile.session);
+        var prepared = result.result;
+        if (prepared.evidence) |*source| if (source.source.stream == 0) {
+            source.source = evidence;
+        };
+        try self.append(output, if (result.account) .{ .account_reconciliation_result = prepared } else .{ .order_reconciliation_result = prepared }, if (prepared.evidence) |source| source.scope.instrument else null, now, evidence);
+    }
     fn drain(ptr: *anyopaque) venue.DrainError!?c.AdapterOutputBatch {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         if (self.state == .idle) return error.NotStarted;
         const pending = self.pending;
         self.pending = null;
-        return pending;
+        if (pending != null) return pending;
+        if (self.recovery == null or (self.replay_only and (self.recovery.?.page_len == 0 or self.recovery.?.waiting_end))) return null;
+        var staged = self.*;
+        var output: c.AdapterOutputBatch = .{};
+        staged.pumpRecovery(&output) catch |err| {
+            self.failed = true;
+            output = .{};
+            // The raw high water can advance before a decode fails; it must never regress.
+            self.raw_sequence = staged.raw_sequence;
+            if (self.replay_only) {
+                self.recovery.?.waiting_end = true;
+                return output;
+            }
+            const now = self.clock.now_fn(self.clock.ptr);
+            const end: RecoveryEnd = .{ .reason = if (err == error.RecoveryCapacity or err == error.FrameTooLarge) .capacity else .protocol, .fault = if (err == error.Unavailable or err == error.Backpressure) .persistence_failure else .decoder_rejected };
+            var bytes: [64]u8 = undefined;
+            const encoded = checkpoint_codec.encodeBare(&bytes, end) catch unreachable;
+            const evidence = self.capture(.recovery_end, now, encoded, self.profile.session) catch null;
+            self.emitRecoveryEnd(&output, end, now, evidence) catch unreachable;
+            return output;
+        };
+        self.* = staged;
+        return output;
     }
     fn stop(ptr: *anyopaque, _: venue.DrainDeadline) venue.StopError!void {
         const self: *@This() = @ptrCast(@alignCast(ptr));
         if (self.state == .idle) return error.NotStarted;
-        if (self.pending != null) return error.OutputPending;
+        if (self.pending != null or self.recovery != null) return error.OutputPending;
         self.state = .stopped;
     }
     fn binding(self: *const @This(), instrument: u128) !Binding {
@@ -239,7 +721,7 @@ pub const HyperliquidVenueAdapter = struct {
             if (existing.command.instrument != command.instrument or !std.meta.eql(existing.command.client_order_id, command.client_order_id)) return error.OrderConflict;
             return b;
         }
-        if (self.failed) return error.Unavailable;
+        if (self.failed or self.recovery_required) return error.Unavailable;
         for (self.orders[0..self.order_count]) |existing| if (existing.unknown) return error.Unavailable;
         if (self.order(command.orderIdentity())) |known| {
             if (known.sent or !std.meta.eql(known.command, command)) return error.UnknownOrder;
@@ -261,6 +743,7 @@ pub const HyperliquidVenueAdapter = struct {
         return b;
     }
     fn dispatch(self: *@This(), output: *c.AdapterOutputBatch, command: c.OrderCommand) void {
+        self.dispatch_decoded = false;
         const now = self.clock.now_fn(self.clock.ptr);
         const b = self.validate(command, now) catch |err| {
             self.dispatchResult(output, command, .not_sent, switch (err) {
@@ -297,6 +780,22 @@ pub const HyperliquidVenueAdapter = struct {
             self.order_count += 1;
         }
         const existing = self.order(command.orderIdentity()).?;
+        var context_bytes: [2048]u8 = undefined;
+        const context = checkpoint_codec.encodeBare(&context_bytes, command) catch unreachable;
+        _ = self.capture(.dispatch_context, send_time, context, self.profile.session) catch {
+            self.failed = true;
+            self.dispatchResult(output, command, .not_sent, .venue_unavailable, send_time, null);
+            return;
+        };
+        const submit_time = self.clock.now_fn(self.clock.ptr);
+        self.auth.check_fn(self.auth.ptr, submit_time.monotonic_time_ns, self.fencing_token, command.operation != .cancel) catch {
+            self.dispatchResult(output, command, .not_sent, .venue_unavailable, submit_time, null);
+            return;
+        };
+        if (submit_time.monotonic_time_ns >= command.dispatch_deadline_monotonic_ns or !self.profile.can_trade) {
+            self.dispatchResult(output, command, .not_sent, .deadline_expired, submit_time, null);
+            return;
+        }
         const response = self.transport.submit_fn(self.transport.ptr, .{ .action_json = encoded.json[0..encoded.json_len], .signed = signed });
         if (response.outcome == .proven_before_send) {
             self.dispatchResult(output, command, .not_sent, .venue_unavailable, response.times, null);
@@ -324,14 +823,32 @@ pub const HyperliquidVenueAdapter = struct {
             self.dispatchResult(output, command, .unknown, null, response.times, evidence);
             return;
         };
+        self.dispatch_decoded = true;
         self.dispatchResult(output, command, if (command.operation == .place and staged.order(command.orderIdentity()).?.unknown) .unknown else .submitted, null, response.times, evidence);
+        if (!self.dispatch_recorded) {
+            self.order(command.orderIdentity()).?.unknown = true;
+            return;
+        }
         self.sequence = staged.sequence;
         self.orders = staged.orders;
         for (facts.slice()) |record| output.append(record) catch unreachable;
     }
 
     fn dispatchResult(self: *@This(), output: *c.AdapterOutputBatch, command: c.OrderCommand, state: c.DispatchState, reason: ?c.CanonicalRejectReason, times: Times, evidence: ?c.RawEvidenceRef) void {
-        self.append(output, .{ .order_dispatch_result = .{ .command = command.identity, .client_order_id = command.client_order_id, .state = state, .reason = reason } }, command.instrument, times, evidence) catch unreachable;
+        self.dispatch_recorded = false;
+        var actual = state;
+        if (!self.replay_only) {
+            var bytes: [2048]u8 = undefined;
+            const encoded = checkpoint_codec.encodeBare(&bytes, DispatchOutcome{ .command = command, .state = state, .reason = reason, .decoded = self.dispatch_decoded, .failed = self.failed, .retained_order = self.order(command.orderIdentity()) != null }) catch unreachable;
+            _ = self.capture(.dispatch_outcome, times, encoded, self.profile.session) catch {
+                self.failed = true;
+                if (state == .submitted) actual = .unknown;
+                self.append(output, .{ .order_dispatch_result = .{ .command = command.identity, .client_order_id = command.client_order_id, .state = actual, .reason = reason } }, command.instrument, times, evidence) catch unreachable;
+                return;
+            };
+        }
+        self.dispatch_recorded = true;
+        self.append(output, .{ .order_dispatch_result = .{ .command = command.identity, .client_order_id = command.client_order_id, .state = actual, .reason = reason } }, command.instrument, times, evidence) catch unreachable;
     }
     fn capture(self: *@This(), input: Input, times: Times, bytes: []const u8, source_session: u64) !c.RawEvidenceRef {
         if (bytes.len == 0 or bytes.len > 65536) return error.FrameTooLarge;
@@ -367,6 +884,12 @@ pub const HyperliquidVenueAdapter = struct {
         for (facts.slice()) |fact| output.append(fact) catch unreachable;
     }
     fn append(self: *@This(), output: *c.AdapterOutputBatch, event: c.Payload, instrument: ?u128, times: Times, evidence: ?c.RawEvidenceRef) !void {
+        if (event == .execution_report and evidence != null) {
+            const report = event.execution_report;
+            if (report.status == .filled or report.status == .canceled or report.status == .rejected) if (self.order(report.order)) |known| {
+                known.terminal = .{ .report = report, .source = evidence.?, .observed_at_utc_ns = times.receive_time_utc_ns };
+            };
+        }
         self.sequence = try std.math.add(u64, self.sequence, 1);
         const identity: u128 = switch (event) {
             .execution_report => |v| v.identity,
@@ -427,7 +950,9 @@ pub const HyperliquidVenueAdapter = struct {
     /// Transport authenticates the route; frames cannot select another account/session.
     pub fn ingest(self: *@This(), allocator: std.mem.Allocator, session: u64, funding: [20]u8, input: Input, times: Times, bytes: []const u8) !void {
         if (self.state != .running) return error.NotStarted;
+        if (self.replay_only) return error.InvalidReplayRoute;
         if (self.pending != null) return error.OutputCapacityExceeded;
+        if (self.recovery != null and self.recovery.?.page_len != 0) return error.OutputCapacityExceeded;
         if (session != self.profile.session or !std.mem.eql(u8, &funding, &self.profile.funding)) return error.StaleSession;
         const evidence = self.capture(input, times, bytes, session) catch |err| {
             self.fault(times, null, .persistence_failure);
@@ -492,7 +1017,7 @@ pub const HyperliquidVenueAdapter = struct {
                 // Default abstraction alone proves neither trading permission nor isolated leverage.
             },
             // No stable funding bill or complete forced-execution provenance in the approved contract.
-            .funding, .user_events, .ledger, .exchange => return error.UnsupportedFact,
+            .funding, .user_events, .ledger, .exchange, .recovery_request, .recovery_query, .historical_orders, .open_orders, .fill_history, .funding_history, .ledger_history, .recovery_end, .disconnected, .dispatch_context, .dispatch_outcome, .query_result => return error.UnsupportedFact,
         }
     }
     fn checkUser(self: *const @This(), value: std.json.Value) !void {
@@ -886,10 +1411,12 @@ const TestIO = struct {
     sends: u64 = 0,
     fail_raw: bool = false,
     revoked: bool = false,
+    on_context: enum { none, revoke, expire } = .none,
+    now_value: Times = test_times,
     expected_action: ?[]const u8 = null,
     outcome: TransportResult = .{ .outcome = .response, .bytes = "{\"status\":\"ok\",\"response\":{\"type\":\"order\",\"data\":{\"statuses\":[{\"resting\":{\"oid\":42}}]}}}", .session = 3, .times = test_times },
-    fn now(_: *anyopaque) Times {
-        return test_times;
+    fn now(ptr: *anyopaque) Times {
+        return @as(*TestIO, @ptrCast(@alignCast(ptr))).now_value;
     }
     fn sign(ptr: *anyopaque, request: signer.Request) !signer.SignedAction {
         const self: *TestIO = @ptrCast(@alignCast(ptr));
@@ -909,9 +1436,14 @@ const TestIO = struct {
         std.debug.assert(std.mem.indexOf(u8, request, "0x0202020202020202020202020202020202020202") != null);
         return .{ .outcome = .response, .bytes = "{\"status\":\"unknownOid\"}", .session = 3, .times = test_times };
     }
-    fn rawAppend(ptr: *anyopaque, _: RawRecord, _: []const u8) RawError!u64 {
+    fn rawAppend(ptr: *anyopaque, record: RawRecord, _: []const u8) RawError!u64 {
         const self: *TestIO = @ptrCast(@alignCast(ptr));
         if (self.fail_raw) return error.Unavailable;
+        if (record.input == .dispatch_context) switch (self.on_context) {
+            .none => {},
+            .revoke => self.revoked = true,
+            .expire => self.now_value.monotonic_time_ns = 100,
+        };
         self.raw += 1;
         return self.raw;
     }
@@ -920,6 +1452,269 @@ const TestIO = struct {
     }
 };
 const test_times: Times = .{ .receive_time_utc_ns = 1_800_000_000_000_000_000, .wall_time_utc_ns = 1_800_000_000_000_000_000, .monotonic_time_ns = 1 };
+test "Hyperliquid durable context cannot carry an expired or revoked command across submit" {
+    for ([_]bool{ false, true }) |expire| {
+        var io: TestIO = .{ .on_context = if (expire) .expire else .revoke };
+        var budget: Budget = .{};
+        var implementation = io.implementation(&budget);
+        try implementation.adapter().start(try testConfig());
+        _ = try implementation.adapter().trySend(.{ .order_command = try testCommand() });
+        try std.testing.expectEqual(c.DispatchState.not_sent, (try implementation.adapter().tryDrain()).?.slice()[0].event.order_dispatch_result.state);
+        try std.testing.expectEqual(@as(u64, 0), io.sends);
+    }
+}
+test "Hyperliquid raw Unknown dispatch reload keeps original reduce-only identity and accepts late partial canceled fills" {
+    const Recording = struct {
+        records: [8]RawRecord = undefined,
+        frames: [8][2048]u8 = undefined,
+        count: usize = 0,
+        fail_context_once: bool = false,
+        fn append(ptr: *anyopaque, record: RawRecord, bytes: []const u8) RawError!u64 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (self.fail_context_once and record.input == .dispatch_context) {
+                self.fail_context_once = false;
+                return error.Unavailable;
+            }
+            if (self.count == 8 or bytes.len > 2048) return error.Backpressure;
+            self.records[self.count] = record;
+            @memcpy(self.frames[self.count][0..bytes.len], bytes);
+            self.count += 1;
+            return self.count;
+        }
+    };
+    for ([_]enum { normal, reduce, context_failure }{ .normal, .reduce, .context_failure }) |case| {
+        const reduce_only = case == .reduce;
+        const context_failure = case == .context_failure;
+        var io: TestIO = .{};
+        io.outcome.outcome = .uncertain;
+        io.outcome.bytes = null;
+        var recording: Recording = .{ .fail_context_once = context_failure };
+        var budget: Budget = .{};
+        var live = io.implementation(&budget);
+        live.raw_sink = .{ .ptr = &recording, .append_fn = Recording.append };
+        try live.adapter().start(try testConfig());
+        var command = try testCommand();
+        command.venue_reduce_only = reduce_only;
+        _ = try live.adapter().trySend(.{ .order_command = command });
+        const result = (try live.adapter().tryDrain()).?;
+        _ = try live.adapter().trySend(.{ .order_command = command });
+        const rejected_retry = (try live.adapter().tryDrain()).?;
+        var replay = io.implementation(&budget);
+        replay.replay_only = true;
+        try replay.adapter().start(try testConfig());
+        var replayed: c.AdapterOutputBatch = .{};
+        for (recording.records[0..recording.count], 0..) |record, index| {
+            try replay.replay(record.input, record.times, .{ .stream = 3, .sequence = index + 1, .digest = record.sha256 }, recording.frames[index][0..record.byte_len]);
+            while (try replay.adapter().tryDrain()) |batch| for (batch.slice()) |fact| try replayed.append(fact);
+            if (index == 0 and !context_failure) try std.testing.expectError(error.IncompleteReplay, replay.finishReplay());
+        }
+        try replay.finishReplay();
+        var expected: c.AdapterOutputBatch = .{};
+        for (result.slice()) |fact| try expected.append(fact);
+        for (rejected_retry.slice()) |fact| try expected.append(fact);
+        try std.testing.expectEqualDeep(expected.slice(), replayed.slice());
+        var live_seed: [192 * 1024]u8 = undefined;
+        var replay_seed: [192 * 1024]u8 = undefined;
+        try std.testing.expectEqualSlices(u8, try live.exportResumeCheckpoint(&live_seed), try replay.exportResumeCheckpoint(&replay_seed));
+        if (context_failure) {
+            try std.testing.expectEqual(@as(u64, 0), io.sends);
+            continue;
+        }
+        var bytes: [192 * 1024]u8 = undefined;
+        const seed = try replay.exportResumeCheckpoint(&bytes);
+        var restored = io.implementation(&budget);
+        restored.replay_only = true;
+        try restored.adapter().start(try testConfig());
+        try restored.restoreResumeCheckpoint(seed);
+        try restored.resumeReadOnly();
+        io.raw = @intCast(recording.count);
+        var frame: [2048]u8 = undefined;
+        const report = try std.fmt.bufPrint(&frame, "[{{\"order\":{{\"coin\":\"BTC\",\"side\":\"B\",\"limitPx\":\"50100\",\"sz\":\"0.006\",\"origSz\":\"0.01\",\"oid\":42,\"cloid\":\"{s}\",\"reduceOnly\":{},\"timestamp\":1800000000000}},\"status\":\"canceled\",\"statusTimestamp\":1800000000001}}]", .{ command.client_order_id.slice(), reduce_only });
+        try restored.ingest(std.testing.allocator, 3, @splat(2), .orders, test_times, report);
+        const terminal = (try restored.adapter().tryDrain()).?.slice()[0].event.execution_report;
+        try std.testing.expectEqual(c.ExecutionReportStatus.canceled, terminal.status);
+        try std.testing.expectEqual(@as(i128, 40), terminal.cumulative_quantity.lots);
+        try std.testing.expectEqual(@as(i128, 60), terminal.remaining_quantity.lots);
+        try std.testing.expectEqual(reduce_only, terminal.venue_reduce_only);
+        try restored.ingest(std.testing.allocator, 3, @splat(2), .fills, test_times, fill_frame);
+        const fill = (try restored.adapter().tryDrain()).?.slice()[0].event.fill;
+        try std.testing.expectEqualDeep(command.client_order_id, fill.client_order_id);
+        try std.testing.expectEqual(@as(i128, 40), fill.quantity.lots);
+        try std.testing.expectEqual(@as(i128, 149700), fill.fee.?.atoms);
+        _ = try restored.adapter().trySend(.{ .order_command = command });
+        try std.testing.expectEqual(c.DispatchState.not_sent, (try restored.adapter().tryDrain()).?.slice()[0].event.order_dispatch_result.state);
+        try std.testing.expectEqual(@as(u64, 1), io.sends);
+    }
+}
+test "Hyperliquid recovery checkpoint retains Unknown and duplicate facts without authority or sends" {
+    var io: TestIO = .{};
+    var budget: Budget = .{};
+    var live = io.implementation(&budget);
+    try live.adapter().start(try testConfig());
+    io.outcome.outcome = .uncertain;
+    io.outcome.bytes = null;
+    _ = try live.adapter().trySend(.{ .order_command = try testCommand() });
+    _ = try live.adapter().tryDrain();
+    // The fill carries an oid; use the original CLOID to bind an uncertain submit.
+    var bytes: [2048]u8 = undefined;
+    const fill = try std.fmt.bufPrint(&bytes, "[{{\"coin\":\"BTC\",\"px\":\"50100\",\"sz\":\"0.004\",\"side\":\"B\",\"time\":1800000000001,\"oid\":42,\"tid\":8,\"cloid\":\"{s}\",\"fee\":\"0.1\",\"feeToken\":\"USDT\",\"crossed\":true,\"closedPnl\":\"0\",\"dir\":\"Open Long\"}}]", .{(try testCommand()).client_order_id.slice()});
+    try live.ingest(std.testing.allocator, 3, @splat(2), .fills, test_times, fill);
+    _ = try live.adapter().tryDrain();
+    var seed: [192 * 1024]u8 = undefined;
+    const encoded = try live.exportResumeCheckpoint(&seed);
+    var replay = io.implementation(&budget);
+    replay.replay_only = true;
+    try replay.adapter().start(try testConfig());
+    try replay.restoreResumeCheckpoint(encoded);
+    try replay.replay(.fills, test_times, .{ .stream = 3, .sequence = live.raw_sequence + 1, .digest = blk: {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(fill, &digest, .{});
+        break :blk digest;
+    } }, fill);
+    try std.testing.expectEqual(@as(usize, 0), (try replay.adapter().tryDrain()).?.slice().len);
+    try std.testing.expectError(error.InvalidRequest, replay.adapter().trySend(.{ .order_command = try testCommand() }));
+    try std.testing.expectEqual(@as(u64, 1), io.sends);
+    var wrong = io.implementation(&budget);
+    wrong.replay_only = true;
+    wrong.profile.funding = @splat(4);
+    try wrong.adapter().start(try testConfig());
+    try std.testing.expectError(error.InvalidPrivateResumeCheckpoint, wrong.restoreResumeCheckpoint(encoded));
+}
+const RecoveryTestTransport = struct {
+    count: usize = 0,
+    fail_at: ?usize = null,
+    session: u64 = 3,
+    late: bool = false,
+    fill_page: []const u8 = "[]",
+    funding_page: []const u8 = "[]",
+    fn query(ptr: *anyopaque, bytes: []const u8) TransportResult {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        const names = [_][]const u8{ "userAbstraction", "clearinghouseState", "spotClearinghouseState", "frontendOpenOrders", "historicalOrders", "userFillsByTime", "userFunding", "userNonFundingLedgerUpdates" };
+        std.debug.assert(self.count < names.len and std.mem.indexOf(u8, bytes, names[self.count]) != null);
+        std.debug.assert(std.mem.indexOf(u8, bytes, "0x0202020202020202020202020202020202020202") != null);
+        if (self.count >= 5) std.debug.assert(std.mem.indexOf(u8, bytes, "\"startTime\":1800000000000,\"endTime\":1800000000000") != null);
+        const response = switch (self.count) {
+            0 => "\"default\"",
+            1 => "{\"assetPositions\":[]}",
+            2 => "{\"balances\":[]}",
+            5 => self.fill_page,
+            6 => self.funding_page,
+            else => "[]",
+        };
+        const failed = self.fail_at == self.count;
+        self.count += 1;
+        var response_times = test_times;
+        if (self.late) response_times.monotonic_time_ns += 31 * std.time.ns_per_s;
+        return .{ .outcome = if (failed) .uncertain else .response, .bytes = response, .session = self.session, .times = response_times };
+    }
+};
+
+test "Hyperliquid recovery queries cover fixed economic window and cannot certify empty retained history" {
+    var io: TestIO = .{};
+    var transport: RecoveryTestTransport = .{};
+    var budget: Budget = .{ .limit = 1200 };
+    var implementation = io.implementation(&budget);
+    implementation.profile.bootstrap_identity = 1;
+    implementation.transport.query_fn = RecoveryTestTransport.query;
+    implementation.transport.ptr = &transport;
+    try implementation.adapter().start(try testConfig());
+    _ = try implementation.adapter().trySend(.{ .account_reconciliation = .{ .identity = 9, .exchange_account = 2, .expected_session = 3, .economic_boundary_utc_ns = test_times.wall_time_utc_ns, .economic_through_utc_ns = test_times.wall_time_utc_ns } });
+    var result = false;
+    for (0..40) |_| {
+        const batch = try implementation.adapter().tryDrain() orelse break;
+        for (batch.slice()) |record| if (record.event == .account_reconciliation_result) {
+            result = true;
+            try std.testing.expect(!record.event.account_reconciliation_result.complete);
+        };
+    }
+    try std.testing.expect(result);
+    try std.testing.expectEqual(@as(usize, 8), transport.count);
+    try std.testing.expectEqual(RecoveryTermination.retention_unproven, implementation.coverage.?.termination);
+    try std.testing.expectEqual(@as(u64, 0), io.sends);
+}
+
+test "Hyperliquid recovery preserves pending on timeout old session funding capacity and repeated disconnect" {
+    const cases = [_]enum { timeout, stale, funding, capacity, deadline, disconnect, persistence, budget }{ .timeout, .stale, .funding, .capacity, .deadline, .disconnect, .persistence, .budget };
+    for (cases) |case| {
+        var io: TestIO = .{};
+        var transport: RecoveryTestTransport = .{};
+        var budget: Budget = .{ .limit = 1200 };
+        var implementation = io.implementation(&budget);
+        implementation.profile.bootstrap_identity = 1;
+        try implementation.adapter().start(try testConfig());
+        _ = try implementation.adapter().trySend(.{ .order_command = try testCommand() });
+        _ = try implementation.adapter().tryDrain();
+        implementation.transport.query_fn = RecoveryTestTransport.query;
+        implementation.transport.ptr = &transport;
+        var oversized: [20000]u8 = @splat(' ');
+        oversized[0] = '[';
+        oversized[oversized.len - 1] = ']';
+        switch (case) {
+            .timeout => transport.fail_at = 0,
+            .stale => transport.session = 2,
+            .funding => transport.funding_page = "[{\"time\":1800000000000,\"delta\":{\"type\":\"funding\",\"usdc\":\"-0.1\"}}]",
+            .capacity => transport.fill_page = &oversized,
+            .deadline => transport.late = true,
+            else => {},
+        }
+        _ = try implementation.adapter().trySend(.{ .account_reconciliation = .{ .identity = 9, .exchange_account = 2, .expected_session = 3, .economic_boundary_utc_ns = test_times.wall_time_utc_ns, .economic_through_utc_ns = test_times.wall_time_utc_ns } });
+        _ = try implementation.adapter().tryDrain();
+        if (case == .persistence) io.fail_raw = true;
+        if (case == .budget) budget.used = 1200;
+        if (case == .disconnect) try implementation.disconnected(test_times);
+        var result = false;
+        for (0..40) |_| {
+            const batch = try implementation.adapter().tryDrain() orelse break;
+            for (batch.slice()) |record| if (record.event == .account_reconciliation_result) {
+                result = true;
+                try std.testing.expect(!record.event.account_reconciliation_result.complete);
+            };
+        }
+        try std.testing.expect(result);
+        try std.testing.expectEqual(switch (case) {
+            .timeout, .stale => RecoveryTermination.transport,
+            .funding, .persistence => .protocol,
+            .capacity => .capacity,
+            .deadline => .deadline,
+            .disconnect => .interrupted,
+            .budget => .budget,
+        }, implementation.coverage.?.termination);
+        implementation.transport.ptr = &io;
+        const count_before = io.sends;
+        var next = try testCommand();
+        next.identity = 2;
+        _ = try implementation.adapter().trySend(.{ .order_command = next });
+        try std.testing.expectEqual(c.DispatchState.not_sent, (try implementation.adapter().tryDrain()).?.slice()[0].event.order_dispatch_result.state);
+        try std.testing.expectEqual(count_before, io.sends);
+    }
+}
+
+test "Hyperliquid recovery backpressures a REST page and deduplicates overlapping live fills" {
+    var io: TestIO = .{};
+    var transport: RecoveryTestTransport = .{};
+    var budget: Budget = .{ .limit = 1200 };
+    var implementation = io.implementation(&budget);
+    implementation.profile.bootstrap_identity = 1;
+    try implementation.adapter().start(try testConfig());
+    _ = try implementation.adapter().trySend(.{ .order_command = try testCommand() });
+    _ = try implementation.adapter().tryDrain();
+    implementation.transport.query_fn = RecoveryTestTransport.query;
+    implementation.transport.ptr = &transport;
+    try implementation.ingest(std.testing.allocator, 3, @splat(2), .fills, test_times, fill_frame);
+    _ = try implementation.adapter().tryDrain();
+    const rows_begin = std.mem.indexOf(u8, fill_frame, "[{\"coin\"").?;
+    transport.fill_page = fill_frame[rows_begin .. fill_frame.len - 2];
+    _ = try implementation.adapter().trySend(.{ .account_reconciliation = .{ .identity = 9, .exchange_account = 2, .expected_session = 3, .economic_boundary_utc_ns = test_times.wall_time_utc_ns, .economic_through_utc_ns = test_times.wall_time_utc_ns } });
+    _ = try implementation.adapter().tryDrain();
+    _ = try implementation.adapter().tryDrain(); // Load account-mode page.
+    try std.testing.expectError(error.OutputCapacityExceeded, implementation.ingest(std.testing.allocator, 3, @splat(2), .fills, test_times, fill_frame));
+    try std.testing.expectError(error.OutputPending, implementation.adapter().stop(.{ .monotonic_ns = 100 }));
+    while (try implementation.adapter().tryDrain()) |batch| for (batch.slice()) |record| try std.testing.expect(record.event != .fill);
+    try std.testing.expectEqual(@as(usize, 8), transport.count);
+    try std.testing.expectEqual(@as(u16, 1), implementation.coverage.?.pages[5].count);
+    try std.testing.expectEqual(@as(?u64, 1800000000000), implementation.coverage.?.pages[5].min_ms);
+    try std.testing.expectEqual(@as(u64, 1), io.sends);
+}
 const test_bindings = [_]Binding{.{ .instrument = 3, .coin = "BTC", .wire_asset = 3, .product = .isolated_linear, .size_decimals = 4, .price_scale = 6, .tick_atoms = 1, .quantity_scale = 4, .lot_atoms = 1 }};
 fn testCommand() !c.OrderCommand {
     var context: u8 = 0;
@@ -964,10 +1759,10 @@ test "Hyperliquid uncertain writes and raw failures cannot resend or affect a si
         const command = try testCommand();
         _ = try adapter.trySend(.{ .order_command = command });
         const result = (try adapter.tryDrain()).?;
-        try std.testing.expectEqual(c.DispatchState.unknown, result.slice()[0].event.order_dispatch_result.state);
+        try std.testing.expectEqual(if (raw_failure) c.DispatchState.not_sent else .unknown, result.slice()[0].event.order_dispatch_result.state);
         _ = try adapter.trySend(.{ .order_command = command });
         _ = try adapter.tryDrain();
-        try std.testing.expectEqual(@as(u64, 1), io.sends);
+        try std.testing.expectEqual(@as(u64, if (raw_failure) 0 else 1), io.sends);
         var sibling_io: TestIO = .{};
         var sibling = sibling_io.implementation(&budget);
         sibling.profile.account = 4;
@@ -1171,7 +1966,7 @@ test "Hyperliquid order queries use funding account and never prove absence or r
     const result = (try adapter.tryDrain()).?.slice()[0].event.order_reconciliation_result;
     try std.testing.expectEqual(c.ReconciliationStatus.unresolved, result.status);
     try std.testing.expect(!result.complete);
-    try std.testing.expectEqual(before + 1, io.raw);
+    try std.testing.expectEqual(before + 2, io.raw);
     _ = try adapter.trySend(.{ .order_command = try testCommand() });
     _ = try adapter.tryDrain();
     try std.testing.expectEqual(@as(u64, 1), io.sends);
