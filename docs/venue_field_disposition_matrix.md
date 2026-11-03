@@ -173,6 +173,10 @@
 [协议合同](research/2026-11-02-hyperliquid-protocol-contract.md)，签名/分页细节见
 [固定 SDK 与历史依据](research/2026-11-02-hyperliquid-signing-history.md)。
 以下是 **02–06 的目标映射**，不是当前 decoder 已接受字段的声明。
+05 的执行实现与实际离线证据见[本地票](../.scratch/hyperliquid-adapter/issues/05-orders-private-facts.md)：
+订单、独立 Fill、逐仓杠杆与有 bootstrap 引用的账户增量已接共享 VenueAdapter；
+spot 余额另需批准的 token index→Asset 映射。资金费/强制执行缺完整身份时输出安全故障，
+所有历史覆盖与 Unknown 闭合仍留给 06；本表不授予这些未完成能力。
 表中逗号分隔字段逐个适用处置；括号内对象只是容器，下面列全所用成员。
 没有值、null、未知 enum 均不自动变成零/false/USDC。所有输入保留 C5 原文；
 新增未知字段留 RE，改变经济/风险语义则停用该范围并对账。

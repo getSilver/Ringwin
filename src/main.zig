@@ -251,6 +251,8 @@ test {
     _ = @import("adapters/hyperliquid/hyperliquid_signer.zig");
     _ = @import("adapters/hyperliquid/hyperliquid_market_feed.zig");
     _ = @import("testing/acceptance/venues/hyperliquid_market_acceptance.zig");
+    _ = @import("adapters/hyperliquid/hyperliquid_venue_adapter.zig");
+    _ = @import("testing/acceptance/venues/hyperliquid_execution_acceptance.zig");
     _ = windows_verification_runtime;
     _ = @import("testing/audit/historical_fee_audit.zig");
     _ = venue_fill_recovery_acceptance;

@@ -16,6 +16,7 @@ pub const Request = struct {
     now_ms: u64,
     now_monotonic_ns: u64,
     fencing_token: u64,
+    increases_risk: bool = true,
     expires_after: ?u64 = null,
 };
 
@@ -59,7 +60,7 @@ pub const Signer = struct {
         if (request.session != self.session()) return error.StaleSignerSession;
         if (request.environment != self.metadata.environment) return error.EnvironmentMismatch;
         if (request.fencing_token != self.owner_token or guard.lease.key.exchange_account != self.metadata.account) return error.StaleFencingToken;
-        try guard.check(request.now_monotonic_ns, request.fencing_token, true);
+        try guard.check(request.now_monotonic_ns, request.fencing_token, request.increases_risk);
     }
 
     pub fn sign(self: Signer, store: *credentials.CredentialStore, io: std.Io, password_file: std.Io.File, input_kind: credentials.InputKind, password_buffer: []u8, runtime: credentials.RuntimeContext, guard: *failover.GatewayLeaseGuard, request: Request) !SignedAction {
@@ -78,6 +79,7 @@ pub const Signer = struct {
             .command_identity = request.command_identity,
             .now_ms = request.now_ms,
             .now_monotonic_ns = request.now_monotonic_ns,
+            .increases_risk = request.increases_risk,
         }, &context);
         return .{ .nonce = result.nonce, .digest = result.digest, .signature = result.signature, .session = self.session(), .funding_account = self.funding_account, .subaccount = if (self.account_kind == .subaccount) self.funding_account else null };
     }

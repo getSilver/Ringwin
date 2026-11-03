@@ -255,12 +255,13 @@ pub const WalletSigningRequest = struct {
     command_identity: u128,
     now_ms: u64,
     now_monotonic_ns: u64,
+    increases_risk: bool = true,
 
     fn check(self: WalletSigningRequest, metadata: Metadata) !void {
         if (self.command_identity == 0 or self.now_ms == 0) return error.InvalidSigningRequest;
         if (self.owner_token == 0 or self.guard.lease.key.exchange_account != metadata.account) return error.StaleFencingToken;
         if (self.session != try walletSession(metadata, self.signer, self.funding, self.scope, self.owner_token)) return error.StaleSignerSession;
-        try self.guard.check(self.now_monotonic_ns, self.owner_token, true);
+        try self.guard.check(self.now_monotonic_ns, self.owner_token, self.increases_risk);
     }
 
     fn checkElapsed(self: WalletSigningRequest, metadata: Metadata, io: std.Io, started_ns: i96) !void {
@@ -1653,6 +1654,18 @@ test "Hyperliquid signer consumes Unknown across restart and fences old owner" {
     var expired = try lifecyclePasswordPipe(std.testing.io);
     defer expired.close(std.testing.io);
     try std.testing.expectError(error.PrimaryLeaseExpired, signer.sign(&store, std.testing.io, expired, .restricted_fd, &password, runtime, &guard, request));
+    // Recovery-only permits a separately identified cancellation, never a new-risk signature.
+    request.increases_risk = false;
+    request.action = "\x82\xa4type\xadcancelByCloid\xa7cancels\x90";
+    var cancel_input = try lifecyclePasswordPipe(std.testing.io);
+    defer cancel_input.close(std.testing.io);
+    const authorization_module = @import("../adapters/hyperliquid/hyperliquid_venue_adapter.zig");
+    var cancellation_authorization: authorization_module.WalletAuthorization = .{ .wallet = signer, .store = &store, .io = std.testing.io, .password_file = cancel_input, .input_kind = .restricted_fd, .password_buffer = &password, .runtime = runtime, .guard = &guard };
+    const cancel_authorizer = cancellation_authorization.interface();
+    const canceled = try cancel_authorizer.sign_fn(cancel_authorizer.ptr, request);
+    try cancel_authorizer.check_fn(cancel_authorizer.ptr, request.now_monotonic_ns, lease.token, false);
+    try std.testing.expectEqual(address, try @import("wallet_crypto.zig").recover(canceled.digest, canceled.signature));
+    request.increases_risk = true;
     request.now_monotonic_ns = 1;
     try authority.revoke(&lease);
     var replacement = try authority.acquire(.{ .exchange_account = 7, .decision_domain = 1 }, 2, 2);

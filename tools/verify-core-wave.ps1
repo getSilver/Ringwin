@@ -222,6 +222,7 @@ $requiredVenueMarkers = [ordered]@{
     OKX = 'okx_venue_adapter\.'
     Binance = 'binance_venue_adapter\.'
     Bybit = 'bybit_venue_adapter\.'
+    Hyperliquid = 'hyperliquid_venue_adapter\.'
 }
 $offlineVenueContracts = @()
 foreach ($venue in $requiredVenueMarkers.Keys) {
