@@ -87,7 +87,7 @@ pub const Fault = enum {
     corruption,
 };
 
-pub const FaultPoint = enum { any, append, commit, seal, publish, rotate, snapshot_sync, archive_sync, root_publish, reclaim };
+pub const FaultPoint = enum { any, append, commit, seal, publish, rotate, snapshot_sync, archive_sync, root_publish, reclaim, manifest_write, manifest_sync, manifest_rename, manifest_directory_sync };
 
 // Returned slices borrow adapter storage and remain valid until its next IO.
 pub const Recovery = struct {
@@ -1163,7 +1163,7 @@ pub const LinuxFileAdapter = struct {
             self.gate = .closed;
             return err;
         };
-        self.persistSegment(io, stream, false) catch |err| {
+        self.persistSegment(io, stream) catch |err| {
             self.gate = .closed;
             return err;
         };
@@ -1183,7 +1183,7 @@ pub const LinuxFileAdapter = struct {
             return error.InvalidCommitBarrier;
         }
         stream.committed_barrier = barrier;
-        self.persistSegment(io, stream, true) catch |err| {
+        self.persistSegment(io, stream) catch |err| {
             self.gate = .closed;
             return err;
         };
@@ -1202,7 +1202,7 @@ pub const LinuxFileAdapter = struct {
             self.gate = .closed;
             return err;
         };
-        self.persistSegment(io, stream, true) catch |err| {
+        self.persistSegment(io, stream) catch |err| {
             self.gate = .closed;
             return err;
         };
@@ -1245,7 +1245,7 @@ pub const LinuxFileAdapter = struct {
         entry.segment_index = next_index;
         stream.segment_index = next_index;
         stream.journal = journal.Journal.initAt(next_sequence);
-        self.persistSegment(io, stream, true) catch |err| {
+        self.persistSegment(io, stream) catch |err| {
             entry.* = old_entry;
             self.gate = .closed;
             return err;
@@ -1319,7 +1319,7 @@ pub const LinuxFileAdapter = struct {
         }
         entry.snapshot_barrier = barrier;
         entry.snapshot_digest = snapshot_digest;
-        self.writeManifest(io, true) catch |err| {
+        self.writeManifest(io) catch |err| {
             entry.* = old_entry;
             self.gate = .closed;
             return err;
@@ -1697,12 +1697,12 @@ pub const LinuxFileAdapter = struct {
 
     const file_vtable: Store.VTable = .{ .append = appendImpl, .commit = commitImpl, .seal = sealImpl, .rotate = rotateImpl, .publish = publishImpl, .recover = recoverImpl, .gate = gateImpl, .replay_segments = replaySegmentsImpl, .archive_receipt = archiveReceiptImpl, .verify_archive_receipt = verifyArchiveReceiptImpl, .replay_segments_after = replaySegmentsAfterImpl, .publish_order_history = publishOrderHistoryImpl, .query_order_history = queryOrderHistoryImpl, .recover_order_history = recoverOrderHistoryImpl };
 
-    fn persistSegment(self: *LinuxFileAdapter, io: std.Io, stream: *Stream, sync: bool) !void {
+    fn persistSegment(self: *LinuxFileAdapter, io: std.Io, stream: *Stream) !void {
         const identity = stream.identity;
         const name = try segmentName(identity, stream.segment_index);
         // Replacing a segment with an unsynchronised inode can lose an older
         // committed prefix on power failure, so segment publication is always
-        // durable even when the following manifest update is only advisory.
+        // durable before publishing the manifest that authenticates it.
         try writeAtomicFile(self.dir, io, name.slice(), stream.journal.bytes(), true);
         const entry = try findManifest(&self.manifest, identity, stream.segment_index, true);
         entry.records = @intCast(stream.journal.records);
@@ -1711,10 +1711,11 @@ pub const LinuxFileAdapter = struct {
         entry.committed_barrier = stream.committed_barrier;
         entry.byte_len = @intCast(stream.journal.bytes().len);
         entry.digest = digest(stream.journal.bytes());
-        try self.writeManifest(io, sync);
+        try self.writeManifest(io);
     }
 
-    fn writeManifest(self: *LinuxFileAdapter, io: std.Io, sync: bool) !void {
+    fn writeManifest(self: *LinuxFileAdapter, io: std.Io) !void {
+        // Advisory appends still replace the global index of committed roots.
         var bytes: [manifest_header_len + max_manifest_entries * manifest_entry_len]u8 = undefined;
         @memset(&bytes, 0);
         var count: usize = 0;
@@ -1733,10 +1734,19 @@ pub const LinuxFileAdapter = struct {
         };
         const encoded_len = manifest_header_len + count * manifest_entry_len;
         put(u32, &bytes, 12, manifestChecksum(bytes[0..encoded_len]));
-        try writeFile(self.dir, io, "manifest.tmp", bytes[0..encoded_len], sync);
+        try self.failAt(.manifest_write);
+        {
+            const file = try self.dir.createFile(io, "manifest.tmp", .{ .truncate = true });
+            defer file.close(io);
+            try file.writeStreamingAll(io, bytes[0..encoded_len]);
+            try self.failAt(.manifest_sync);
+            try file.sync(io);
+        }
         try self.failAt(.root_publish);
+        try self.failAt(.manifest_rename);
         try self.dir.rename("manifest.tmp", self.dir, "manifest.bin", io);
-        if (sync) try syncDirectory(self.dir);
+        try self.failAt(.manifest_directory_sync);
+        try syncDirectory(self.dir);
     }
 
     fn loadSnapshot(self: *LinuxFileAdapter, io: std.Io, identity: StreamIdentity, stream: *Stream, index: usize) !bool {
@@ -2586,6 +2596,71 @@ test "checkpoint store shared seven streams reclaim active metadata and replay m
     }
 }
 
+test "advisory append preserves committed multi stream manifest roots at publication faults" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const points = [_]FaultPoint{ .manifest_sync, .manifest_write, .manifest_rename, .manifest_directory_sync, .root_publish };
+    for ([_]Fault{ .none, .short_write, .sync_timeout, .eio }) |fault| for (points) |point| {
+        if (fault == .none and point != .manifest_sync) continue;
+        var temp = std.testing.tmpDir(.{ .iterate = true });
+        defer temp.cleanup();
+        const file = try gpa.create(LinuxFileAdapter);
+        defer gpa.destroy(file);
+        file.* = .{ .dir = temp.dir };
+        defer file.deinit();
+        const store = file.interface();
+        const streams = [_]StreamIdentity{ .{ .domain = .decision_log, .id = 906 }, .{ .domain = .raw_ingress, .id = 907 } };
+        var roots: [2][32]u8 = undefined;
+        for (streams, 0..) |stream, index| {
+            try appendCheckpointRecord(store, io, stream, 1);
+            try store.commit(io, stream, 1);
+            try store.seal(io, stream);
+            try store.publishSnapshot(io, stream, 1, &.{@intCast(index + 71)});
+            try store.rotate(io, stream);
+            try appendCheckpointRecord(store, io, stream, 2);
+            try store.commit(io, stream, 2);
+            roots[index] = (try store.archiveReceipt(io, stream)).ordered_root;
+        }
+        file.injectFaultAt(fault, point);
+        if (fault == .none) {
+            try appendCheckpointRecord(store, io, streams[0], 3);
+            try std.testing.expectEqual(GateState.open, store.safetyGate());
+        } else {
+            try std.testing.expectError(faultErrorValue(fault), appendCheckpointRecord(store, io, streams[0], 3));
+            try std.testing.expectEqual(GateState.closed, store.safetyGate());
+            try std.testing.expectError(error.DurableStoreClosed, appendCheckpointRecord(store, io, streams[0], 4));
+            try std.testing.expectError(error.DurableStoreClosed, store.commit(io, streams[0], 3));
+            try std.testing.expectError(error.DurableStoreClosed, store.seal(io, streams[0]));
+            try std.testing.expectError(error.DurableStoreClosed, store.publishSnapshot(io, streams[0], 3, &.{99}));
+            try std.testing.expectError(error.DurableStoreClosed, store.rotate(io, streams[0]));
+        }
+
+        const reopened = try gpa.create(LinuxFileAdapter);
+        defer gpa.destroy(reopened);
+        reopened.* = .{ .dir = temp.dir };
+        defer reopened.deinit();
+        const recovered_store = reopened.interface();
+        for (streams, 0..) |stream, index| {
+            const recovered = try recovered_store.recover(io, stream);
+            try std.testing.expectEqual(RecoveryStatus.ready, recovered.status);
+            try std.testing.expectEqual(@as(u64, 2), recovered.committed_barrier);
+            try std.testing.expectEqual(@as(u64, if (index == 0) 3 else 2), recovered.last_sequence);
+            try std.testing.expectEqual(@as(u64, 1), recovered.snapshot_barrier);
+            try std.testing.expectEqualSlices(u8, &.{@intCast(index + 71)}, recovered.snapshot);
+            var reader = try journal.Reader.init(recovered.tail);
+            switch (try reader.next()) {
+                .record => |record| try std.testing.expectEqual(@as(u64, 2), record.sequence),
+                .end => return error.MissingCommittedRecord,
+            }
+            switch (try reader.next()) {
+                .record => return error.ReplayedUncommittedRecord,
+                .end => {},
+            }
+            try std.testing.expect(try recovered_store.verifyArchiveReceipt(io, stream, 1, roots[index]));
+        }
+    };
+}
+
 test "checkpoint store file fault boundaries select complete old or new roots" {
     const faults = [_]Fault{ .short_write, .sync_timeout, .enospc, .eio, .corruption };
     const points = [_]FaultPoint{ .append, .commit, .seal, .publish, .rotate, .snapshot_sync, .archive_sync, .root_publish, .reclaim };
@@ -2764,7 +2839,7 @@ test "checkpoint store virgin committed journal remains available before first s
     var file: LinuxFileAdapter = .{ .dir = temp.dir };
     try checkVirginCommittedRecovery(file.interface(), std.testing.io, stream);
     file.manifest[0].archived_barrier = 1;
-    try file.writeManifest(std.testing.io, true);
+    try file.writeManifest(std.testing.io);
     const invalid_file = try file.interface().recover(std.testing.io, stream);
     try std.testing.expectEqual(GateState.closed, invalid_file.gate);
 }
@@ -2883,7 +2958,7 @@ test "checkpoint store rejects unknown journal schema despite valid frame manife
     try prepareSchemaRecoveryFixture(file.interface(), std.testing.io, stream);
     const file_resident = try findStream(&file.streams, stream, false);
     replaceCurrentRecordSchema(file_resident);
-    try file.persistSegment(std.testing.io, file_resident, true);
+    try file.persistSegment(std.testing.io, file_resident);
     const bad_file = try file.interface().recover(std.testing.io, stream);
     try std.testing.expectEqual(RecoveryStatus.recovery_only, bad_file.status);
     try std.testing.expectEqual(GateState.closed, bad_file.gate);
