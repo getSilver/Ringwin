@@ -83,6 +83,9 @@ test "USDC isolated economics and capture snapshots survive canonical replay and
     const command = (try applyLive(live, &log, fixture.atGroup(13, .{ .identity = 100, .payload = .{ .timer = fixture.timer(100) } }))).?;
     try std.testing.expectEqual(usdc, command.reservation.asset);
     const fill: canonical.Fill = .{ .client_order_id = try canonical.ClientOrderId.init("USDC-101"), .venue_order = try canonical.VenueOrderRef.init(1, "101"), .venue_trade = try canonical.VenueTradeRef.init(1, "101"), .exchange_account = 2, .liquidity = .taker, .identity = 101, .order = command.order_id, .instrument = swap_instrument, .side = .buy, .quantity = .{ .instrument = swap_instrument, .rules_version = 1, .lots = 100 }, .price = command.limit_price, .fee = .{ .asset = usdc, .atoms = 10 } };
+    var wrong_side = fixture.canonicalAt(14, 101, .{ .fill = fill });
+    wrong_side.venue.event.fill.side = .sell;
+    try expectFillSideRejected(live, wrong_side);
     _ = try applyLive(live, &log, fixture.canonicalAt(14, 101, .{ .fill = fill }));
     try std.testing.expectEqual(@as(i128, 10), live.economic_projection.portfolio.fee_atoms);
     try live.assertClosures();
@@ -2123,6 +2126,82 @@ test "shared canonical adapter facts enter the TradingShard state seam" {
     try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.canonicalStateDigest());
 }
 
+fn expectFillSideRejected(shard: *const TradingShard, wrong: CanonicalEvent) !void {
+    const rejected = try std.testing.allocator.create(TradingShard);
+    defer std.testing.allocator.destroy(rejected);
+    rejected.* = shard.*;
+    const before = rejected.economic_projection.digest();
+    const applied = try rejected.economic_projection.appliedCanonicalFillQuantity(@intCast(wrong.venue.event.fill.order));
+    try std.testing.expectError(error.InvalidFill, rejected.apply(wrong));
+    try std.testing.expectEqualSlices(u8, &before, &rejected.economic_projection.digest());
+    try std.testing.expectEqual(applied, try rejected.economic_projection.appliedCanonicalFillQuantity(@intCast(wrong.venue.event.fill.order)));
+    try std.testing.expect(rejected.oms.recovery_only);
+    try std.testing.expectEqual(@as(u64, 1), rejected.economic_fault_count);
+    try std.testing.expectEqual(canonical.EconomicFaultReason.invalid_economic_fact, rejected.economic_fault_reason);
+}
+
+test "canonical Fill side must match Order before economics in either arrival order" {
+    for ([_]bool{ false, true }) |native| {
+        for ([_]oms_module.Side{ .buy, .sell }) |side| {
+            for ([_]bool{ false, true }) |report_first| {
+                const run = try createScenario();
+                defer std.testing.allocator.destroy(run);
+                if (native) _ = try applyLive(&run.shard, &run.decision_journal, atGroup(11, .{ .identity = 2, .payload = .{ .margin_rules_activated = .{
+                    .version = 2,
+                    .instrument = swap_instrument,
+                    .native_settlement_atoms = true,
+                } } }));
+                try applyHealthyPrelude(run);
+                const command = try placeIntentGroup(run, 15, 100, 100, side, happy_order_quantity);
+                var facts = try privateFactsWithSplit(command, 40);
+                for (&facts) |*event| switch (event.venue.event) {
+                    .fill => |*fill| fill.side = if (side == .buy) .buy else .sell,
+                    .execution_report => |*report| {
+                        report.side = if (side == .buy) .buy else .sell;
+                        report.position_side = if (side == .buy) .long else .short;
+                    },
+                    else => {},
+                };
+                const order = if (report_first) private_fact_permutations[3].order else private_fact_permutations[0].order;
+                for (order, 0..) |index, arrival| {
+                    var event = facts[index];
+                    stampPrivateFact(&event, 200 + arrival);
+                    if (event.venue.event == .fill) {
+                        var wrong = event;
+                        wrong.venue.event.fill.side = if (side == .buy) .sell else .buy;
+                        try expectFillSideRejected(&run.shard, wrong);
+                    }
+                    _ = try applyLive(&run.shard, &run.decision_journal, event);
+                }
+                try std.testing.expectEqual(@as(i64, if (side == .buy) 100 else -100), run.shard.economicSummary().portfolio.swap.quantity);
+                try std.testing.expectEqual(@as(i64, 100), try run.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
+                var duplicate = facts[2];
+                stampPrivateFact(&duplicate, 210);
+                const before = run.shard.economic_projection.digest();
+                try std.testing.expectEqual(@as(usize, 0), (try run.shard.apply(duplicate)).facts.len);
+                try std.testing.expectEqualSlices(u8, &before, &run.shard.economic_projection.digest());
+                const restored = try std.testing.allocator.create(TradingShard);
+                defer std.testing.allocator.destroy(restored);
+                restored.* = run.shard;
+                duplicate.venue.event.fill.side = if (side == .buy) .sell else .buy;
+                try std.testing.expectError(error.ConflictingFillIdentity, restored.apply(duplicate));
+                try std.testing.expectEqualSlices(u8, &before, &restored.economic_projection.digest());
+                try run.decision_journal.seal();
+                const replayed = try fixture.replayDigest(run);
+                try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &replayed);
+                const storage = try std.testing.allocator.alloc(u8, @import("../../persistence/durable_store.zig").max_snapshot_bytes);
+                defer std.testing.allocator.free(storage);
+                const snapshot = try run.shard.snapshot(&run.decision_journal, run.shard.authoritativeBarrier(), storage);
+                _ = try TradingShard.restoreSnapshotInto(restored, snapshot);
+                try std.testing.expectEqualSlices(u8, &run.shard.canonicalStateDigest(), &restored.canonicalStateDigest());
+                run.shard.oms.orders[0].side = if (side == .buy) .sell else .buy;
+                const invalid = try run.shard.snapshot(&run.decision_journal, run.shard.authoritativeBarrier(), storage);
+                try std.testing.expectError(error.InvalidSnapshotState, TradingShard.restoreSnapshotInto(restored, invalid));
+            }
+        }
+    }
+}
+
 const PrivateFactPermutation = struct {
     name: []const u8,
     /// Distinct Fill postings stay ordered: their weighted-cost accounting is
@@ -2529,6 +2608,21 @@ test "SPOT and linear instruments close economics and replay independently" {
     try std.testing.expectEqual(spot_instrument, commands[0].instrument);
     try std.testing.expectEqual(swap_instrument, commands[1].instrument);
     try std.testing.expect(commands[0].reservation.atoms != commands[1].reservation.atoms);
+
+    for (commands) |command| try expectFillSideRejected(&prefix.shard, fixture.canonicalAt(13, 200, .{ .fill = .{
+        .identity = 200,
+        .order = command.order_id,
+        .client_order_id = command.client_order_id,
+        .venue_order = try canonical.VenueOrderRef.init(1, "side-order"),
+        .venue_trade = try canonical.VenueTradeRef.init(1, "side-trade"),
+        .instrument = command.instrument,
+        .exchange_account = 2,
+        .side = .sell,
+        .quantity = .{ .instrument = command.instrument, .rules_version = 1, .lots = command.quantity },
+        .price = command.limit_price,
+        .fee = .{ .asset = settlement_asset, .atoms = 12 },
+        .liquidity = .taker,
+    } }));
 
     try prefix.decision_journal.seal();
     const snapshot_storage = try std.testing.allocator.alloc(u8, @import("../../persistence/durable_store.zig").max_snapshot_bytes);

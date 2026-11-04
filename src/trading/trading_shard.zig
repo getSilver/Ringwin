@@ -4390,6 +4390,7 @@ pub const TradingShard = struct {
         const order = self.oms.orderById(order_id) orelse return error.UnknownOrder;
         if (order.last_reconciliation_status == .confirmed_absent) return error.TerminalFactConflict;
         if (order.instrument != fill.instrument) return error.CanonicalScopeMismatch;
+        if (@intFromEnum(fill.side) != @intFromEnum(order.side)) return error.InvalidFill;
         const instrument_config = self.instrumentEntry(fill.instrument) orelse return error.UnknownOmsInstrument;
         if (fill.quantity.rules_version != instrument_config.rules.version or
             fill.price.rules_version != instrument_config.rules.version)
@@ -6930,6 +6931,7 @@ fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: b
     for (shard.economic_projection.applied_fills[0..shard.economic_projection.applied_fill_count]) |applied| {
         if (!applied.canonical_accounted) continue;
         const order = shard.oms.orderById(applied.fill.order_id) orelse return error.InvalidSnapshotState;
+        if (@intFromEnum(applied.fill.side) != @intFromEnum(order.side)) return error.InvalidSnapshotState;
         const portfolio = if (order.portfolio != 0) order.portfolio else if (!shard.deployment.sealed) shard.portfolio_identity else return error.InvalidSnapshotState;
         if (applied.source.portfolio != portfolio or applied.source.strategy != order.strategy_instance) return error.InvalidSnapshotState;
     }
