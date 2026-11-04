@@ -346,6 +346,10 @@ pub const BinanceVenueAdapter = struct {
             self.append(output, command, .not_sent, .venue_unavailable, null);
             return;
         };
+        if (self.clock.now() >= command.dispatch_deadline_monotonic_ns) {
+            self.append(output, command, .not_sent, .deadline_expired, null);
+            return;
+        }
         if (command.operation == .amend) if (self.private_reconciler) |reconciler| reconciler.consumeAmend(command.orderIdentity());
         const response = self.transport.submit(.{ .method = encoded.method, .path = encoded.path, .body = encoded.body(), .timestamp_ns = encoded.timestamp_ns, .signature = signature });
         const evidence = self.commitResponse(response) catch {
@@ -599,10 +603,18 @@ const TestClock = struct {
     }
 };
 const TestAuth = struct {
+    clock: ?*TestClock = null,
+    advance_ns: u64 = 0,
+    fail: bool = false,
+    calls: u64 = 0,
     fn interface(self: *TestAuth) Authenticator {
         return .{ .ptr = self, .sign_fn = sign };
     }
-    fn sign(_: *anyopaque, _: u64, _: []const u8) ![32]u8 {
+    fn sign(ptr: *anyopaque, _: u64, _: []const u8) ![32]u8 {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.calls += 1;
+        if (self.clock) |clock| clock.now += self.advance_ns;
+        if (self.fail) return error.SigningFailed;
         return @splat(1);
     }
 };
@@ -1362,4 +1374,68 @@ test "Binance amend admission binds partial fills revision and batch limits" {
             }
         }
     }
+}
+
+test "final dispatch deadline Binance rechecks after signing for place and cancel" {
+    for ([_]bool{ false, true }) |cancel| {
+        for ([_]u64{ 7, 8, 10 }) |advance| {
+            for ([_]bool{ false, true }) |fail| {
+                var clock = TestClock{};
+                var auth = TestAuth{ .clock = &clock, .advance_ns = advance, .fail = fail };
+                var sink = TestRaw{};
+                var transport = TestTransport{};
+                var implementation = BinanceVenueAdapter.init(clock.interface(), testProfile(), auth.interface(), sink.interface(), transport.interface());
+                const adapter = implementation.adapter();
+                try startTest(adapter);
+                var command = try testCommand(1);
+                command.dispatch_deadline_monotonic_ns = 9;
+                if (cancel) {
+                    command.operation = .cancel;
+                    command.venue_order = try canonical.VenueOrderRef.init(21, "existing");
+                }
+                try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .order_command = command }));
+                const output = (try adapter.tryDrain()).?;
+                try std.testing.expectEqual(@as(u8, 1), output.len);
+                const result = output.events[0].event.order_dispatch_result;
+                const sent = !fail and advance == 7;
+                try std.testing.expectEqual(if (sent) canonical.DispatchState.submitted else .not_sent, result.state);
+                if (!sent) try std.testing.expectEqual(if (fail) canonical.CanonicalRejectReason.venue_unavailable else .deadline_expired, result.reason.?);
+                try std.testing.expectEqual(command.identity, result.command);
+                try std.testing.expectEqualDeep(command.client_order_id, result.client_order_id);
+                try std.testing.expectEqual(@as(u64, 1), auth.calls);
+                try std.testing.expectEqual(@as(u64, if (sent) 1 else 0), transport.calls);
+                try std.testing.expectEqual(transport.calls, sink.calls);
+            }
+        }
+    }
+}
+
+test "final dispatch deadline Binance rechecks each signed command in a batch" {
+    var clock = TestClock{};
+    var auth = TestAuth{ .clock = &clock, .advance_ns = 4 };
+    var sink = TestRaw{};
+    var transport = TestTransport{};
+    var implementation = BinanceVenueAdapter.init(clock.interface(), testProfile(), auth.interface(), sink.interface(), transport.interface());
+    const adapter = implementation.adapter();
+    try startTest(adapter);
+    var first = try testCommand(1);
+    first.dispatch_deadline_monotonic_ns = 9;
+    var second = first;
+    second.identity += 1;
+    second.operation = .cancel;
+    second.venue_order = try canonical.VenueOrderRef.init(21, "existing");
+    var batch: canonical.OrderCommandBatch = .{};
+    try batch.append(first);
+    try batch.append(second);
+    try std.testing.expectEqual(venue.SendResult.accepted, try adapter.trySend(.{ .order_batch = batch }));
+    const output = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(@as(u8, 2), output.len);
+    try std.testing.expectEqual(canonical.DispatchState.submitted, output.events[0].event.order_dispatch_result.state);
+    const rejected = output.events[1].event.order_dispatch_result;
+    try std.testing.expectEqual(canonical.DispatchState.not_sent, rejected.state);
+    try std.testing.expectEqual(canonical.CanonicalRejectReason.deadline_expired, rejected.reason.?);
+    try std.testing.expectEqual(second.identity, rejected.command);
+    try std.testing.expectEqual(@as(u64, 2), auth.calls);
+    try std.testing.expectEqual(@as(u64, 1), transport.calls);
+    try std.testing.expectEqual(@as(u64, 1), sink.calls);
 }
