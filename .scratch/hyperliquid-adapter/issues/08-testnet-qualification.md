@@ -1,30 +1,42 @@
-# 08：分批 Testnet 闭环验收
+# 08：Hyperliquid Adapter 功能验收
 
 Type: task
-Status: open
-Assignee:
+Status: resolved
+Assignee: Codex
 Blocked by: [07 运行与跨所接线](07-runtime-cross-venue-wiring.md)
 Parent: [模块地图](../map.md)
 
 ## Question
 
-如何取得 BTC/ETH 指定产品、两类跨所组合和两种执行模式的真实 Testnet 证据，同时保留无法验收的缺项？
+如何确认 Hyperliquid Adapter 支持范围内的行情、订单、私有事实、签名和恢复功能正常？
 
-## What to build
+## Scope correction
 
-复用现有 Venue 验收框架建立 Hyperliquid 专用入口与证据表，先双 IOC 后 Maker–Taker。在线写入须独立明确授权，凭证存在、票已发布或离线通过都不代替授权。
+2026-11-04 用户明确：本次只确认 Hyperliquid Adapter 功能。原票的跨所策略真实闭环、
+节点装配、批准部署配置、对手账户、交易预算和独立在线写入授权不作为 Adapter 验收前置。
+按该澄清修正本票，不将离线通过描述为真实 Testnet 成交或生产资格。
 
 ## 完成条件
 
-- [ ] 每次执行记录源码 revision、相关未提交改动、平台、配置/fixture 身份、命令、环境和结果；只读、离线、Testnet 和生产证据分开。
-- [ ] 列出 BTC/ETH、现货/标准逐仓永续、永续—永续/现货—永续、双 IOC/Maker–Taker 的适用验收矩阵；各项明确通过、pending 或不适用及依据。
-- [ ] 运行前确认真实 token/Instrument/结算资产、批准配对、逐仓账户配置、对手 Venue、资金和流动性；固定元数据观察不能替代当次检查。
-- [ ] 经正式运行路径验证下单、拒单、部分成交、撤单、实际费用、资金费事实，以及断线对账、Unknown 和重启恢复；无法现场触发的场景明确标注离线证据及在线缺项。
-- [ ] 两种执行模式独立取得资格；单腿异常不会放开新增风险、释放未闭合占用或盲目重发；不能以单所成交代替跨所组合证据。
-- [ ] 提交前明确交易预算、数量/价格边界、期限、清理与停止条件；结束后核对未完成订单、残余仓位和经济事实，保留未清理项。
-- [ ] 可用市场分批验收；指定现货资产身份或市场条件不足保持 pending，不替换品种、不转主网、不关闭整票或模块。
-- [ ] 所有指定适用项达到证据要求后才 resolved；生产、平台生产资格另行取得，本票不授予。
+- [x] 记录源码 revision、相关改动、平台、fixture 身份、命令与结果，区分离线与公开只读观察。
+- [x] 经公开 Adapter 接缝验证产品/资产/规则、有限深度、公共成交、参考价、费率与健康。
+- [x] 验证签名身份、支持的订单编码、撤单/查询、发送分类、拒单/部分成交、Fill/费用/账户事实。
+- [x] 验证重复/冲突、两种 report/Fill 顺序、背压/限流、撤权/旧 session 和 Unknown 不重发。
+- [x] 验证对账覆盖不足失败关闭、RawIngress 回放及 snapshot 加尾部恢复收敛。
+- [x] 既有 Venue 完整离线回归通过；真实市场身份与网络交易未测范围明确记录，不冒充资格。
+- [x] 最终证据与 Standards/Spec 复审收口，提交本票范围改动。
 
 ## Answer
 
-尚未开始。地图中的 Testnet 元数据观察不证明可成交或完整接入；在线授权与实际市场条件仍是执行前置条件。
+源码基线 `ddc4eaad2cde73fbed99467439c735a756ed374c`，开始时工作树干净。
+本次仅修正文档/验收范围，未更改 Adapter、fixture、配置或持久格式；复用已有行为测试。
+功能矩阵、命令、源码/fixture 哈希及证据见
+[Adapter 功能验收记录](../../../docs/hyperliquid-testnet-qualification.md)。
+
+- Adapter/行情/核心恢复定向 ReleaseSafe：35/35，退出 0。
+- 原正式离线入口：`hyperliquid_runtime_offline=passed`，退出 0；只作兼容性补充，不要求真实对手。
+- 完整 `zig build test -Doptimize=ReleaseSafe`：本次运行退出 0，原日志已保留。
+- 公开 Testnet metadata/book 观察已保存，未读取凭证或发送交易；该观察不作为下单/成交证明。
+- 签名 SDK 向量及身份绑定由主测试入口明确导入并包含在已通过的完整套件中；额外 signer-only 编译因重复验证主动停止，不当作独立通过结果。
+- Standards / Spec 按用户修正的 Adapter 范围复审均无阻塞；相对链接、证据响应哈希和 `git diff --check` 通过。
+- 按用户澄清的支持范围，Adapter 离线功能验收完成，本票 resolved；真实网络交易/生产资格未取得，不再要求项目部署与策略条件。

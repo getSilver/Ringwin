@@ -1,17 +1,17 @@
 # Hyperliquid 接入设计
 
-Status: open
+Status: closed
 
 ## Destination
 
-通过设计访谈明确 Hyperliquid 现货与永续接入，并完成面向跨所交易的 Testnet 闭环。
+完成 Hyperliquid 现货与标准线性永续 Adapter 接入及功能验收；按 2026-11-04 用户澄清，项目部署与跨所策略真实交易另行验收。
 
 ## Definition of done
 
 - 产品、资产身份、账户与保证金模式、订单和行情能力、恢复语义均有明确合同。
 - 离线协议、共享接缝、核心应用及持久恢复验证完成。
-- 显式授权后完成 Testnet 下单、撤单、成交、费用、断线对账与重启恢复验收。
-- 跨所永续—永续、现货—永续组合具有集成证据；生产资格单独记录。
+- Adapter 支持的行情、签名、订单/私有事实、错误处理与恢复经公开接缝离线验证，既有 Venue 回归通过。
+- 明确真实网络与市场未测范围；真实 Testnet 交易、跨所策略及生产资格另行取得，不阻塞 Adapter 模块关闭。
 
 ## Rules
 
@@ -23,7 +23,7 @@ Status: open
 
 ## Route
 
-以下八张实施票已按用户确认发布；01–07 及实施 04 时追加的共享前置 04a 已在 `feat/hyperliquid-adapter` resolved；08 仍 open、未认领，按依赖逐票推进。
+以下八张实施票及追加共享前置 04a 均已在 `feat/hyperliquid-adapter` resolved；08 按用户澄清完成 Adapter 功能验收，模块 closed。真实交易与部署资格另行验收。
 
 | 切片 | 交付与验收 | 前置 |
 |---|---|---|
@@ -35,7 +35,7 @@ Status: open
 | [05 订单与私有事实](issues/05-orders-private-facts.md) | VenueAdapter：已确认订单集、CLOID、发送结果、私有报告/Fill/账户事实、背压和限流；覆盖拒单、部分成交、重复/冲突及两种 report/fill 顺序 | 02、03 |
 | [06 对账与恢复](issues/06-reconciliation-recovery.md) | 启动/重连/重启、Unknown、历史分页与截断、账户和经济事实完整性；公开核心应用、RawIngress 回放及快照加尾部重放收敛，恢复不重发 | 05 |
 | [07 运行与跨所接线](issues/07-runtime-cross-venue-wiring.md) | 注册配置、账户路由、capability 和现有控制面/Owner 接线；核对策略同结算资产 USDC—USDC 合同，复用双 IOC 与 Maker–Taker；默认离线、既有 Venue 不回退 | 04、06 |
-| [08 分批 Testnet 验收](issues/08-testnet-qualification.md) | 先双 IOC 后 Maker–Taker，覆盖永续—永续与现货—永续；记录 revision、真实资产身份、环境、请求/事实及清理。未获批准资产或缺市场条件的指定品种保持 pending | 07；在线写入须独立明确授权及可用市场 |
+| [08 Adapter 功能验收](issues/08-testnet-qualification.md) | 行情、签名、订单/私有事实、错误处理和恢复的公开接缝离线验证及既有 Venue 回归；保留真实网络未测范围 | 07 |
 
 关键依赖：`01 -> {02,03}; 02 -> 04a -> 04; {02,03} -> 05 -> 06; {04,06} -> 07 -> 08`。
 
@@ -43,10 +43,13 @@ Status: open
 
 ## Frontier
 
-- [08 分批 Testnet 验收](issues/08-testnet-qualification.md)：open、未认领；07 的离线前置已完成，在线写入仍需独立明确授权及可用市场，不自动开始。
+- 无未完成 Adapter Frontier。08 已完成；真实 transport/节点部署、策略交易及生产资格属于后续范围，不以此图关闭表示已取得。
 
 ## Decisions so far
 
+- 2026-11-04：按用户澄清的 Adapter 范围完成 [08](issues/08-testnet-qualification.md)。定向 ReleaseSafe 35/35、原离线入口及完整 ReleaseSafe 构建测试均退出 0；签名向量与身份绑定在完整套件覆盖内，额外独立编译主动停止以避免重复验证。功能矩阵、原文/命令/源码身份及未测范围见[验收记录](../../docs/hyperliquid-testnet-qualification.md)。Standards/Spec 复审无阻塞；08 resolved、Adapter 模块 closed，无真实网络交易或生产资格。
+- 2026-11-04 范围澄清：用户明确只需确认 Hyperliquid Adapter 功能正常，真实 transport/节点装配、批准部署配置、对手账户、交易预算和在线授权属于项目/策略/部署工作，不作为 Adapter 验收前置。08 据此修正；前一条启动记录中的扩大范围及阻塞结论已被本决策取代。真实网络未测仍如实记录，不声称 Testnet 成交或生产资格。
+- 2026-11-04：开始 [08](issues/08-testnet-qualification.md)，完成当前源码边界核查与公开只读 `meta`/`spotMeta`/BTC、ETH、UETH book 观察，建立八项批次矩阵和执行/停止/清理记录；不改变资产批准或运行配置。BTC 同名现货身份与 UETH 批准/流动性继续 pending；真实在线 transport/资源装配及独立写入授权、对手 Venue、资金/预算未齐，08 保持 in_progress、模块 open，无 Testnet 交易或生产资格。
 - 2026-11-04：按用户要求完成 [07](issues/07-runtime-cross-venue-wiring.md)：批准配置/真实 capability、独立 Testnet 权限边界、持久公共 epoch/generation 与捕获尾部恢复、现有主入口及 Web/package/Host 接线；既有策略支持同结算资产 USDC—USDC 与显式批准的同单位包装现货配对，保留真实资产身份。实际离线入口覆盖 24 种组合；Debug/ReleaseSafe 定向各 35/35，最终完整 ReleaseSafe 二进制 870/870，Python 策略 225/225、配对 4/4、Web/Host 3/3；两轴复审无阻塞。Zig stderr 诊断的误导性 `failed command` 已按本机源码核对，完整直接运行退出 0。07 resolved，08 未自动开始；真实 transport/共享 egress/在线节点资源、指定 BTC/ETH 现货市场和 Testnet/生产资格仍 pending。
 - 2026-11-03：按用户要求完成 [06](issues/06-reconciliation-recovery.md)：固定经济窗口的八项有界恢复查询、原始请求/页/终止证据、发送上下文与查询结果回放、原命令/Unknown/终态正面证据的绑定检查点、明确的不完整尾部拒绝与只读恢复。公开 Gateway→Adapter→Owner→DurableStore 验证发送及原文提交后的崩溃、两种 report/Fill 顺序、归档后重复、真实查询/故障回放与 snapshot 加尾部摘要收敛，回放零发送、不重授权限。统一 64 MiB 主入口 Debug/ReleaseSafe 定向各 21/21，最终完整 ReleaseSafe 868/868；Standards/Spec 审查问题已修复并复审无阻塞。账户共同屏障、历史保留、资金费修订与强制执行来源无法证明的范围仍保持 pending；06 resolved，07 未自动开始，无 Testnet 写入或生产资格。
 - 2026-11-03：按用户要求完成 [05](issues/05-orders-private-facts.md)：Hyperliquid VenueAdapter 的 Gtc/Ioc/Alo、永续 Reduce-only、CLOID 持久发送接点、取消与只读查询、独立 report/Fill、费用/返佣、受批准 token 绑定的账户增量、有界背压/限流与安全故障。恢复模式撤单沿用 Gateway 风险分类，旧 fencing 仍拒绝；部分聚合保留 oid/Unknown 以接受迟到真实 Fill。Debug/ReleaseSafe 定向各 15/15，真实凭证签名定向 2/2，最终完整 ReleaseSafe 862/862；Standards 无实质阻塞，Spec 两项 P1 修复并复审通过。05 resolved；06 未自动开始。历史覆盖、完整恢复、真实 transport/全局额度接线与 Testnet 写入资格仍由 06–08 分别完成。

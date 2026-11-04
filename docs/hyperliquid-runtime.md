@@ -70,5 +70,9 @@ python -m unittest discover -s python -p test_strategy_instance.py -k hyperliqui
 Web/package 验证复用现有 authority probe 的 `hyperliquid` 离线模式及原有认证协议，
 不新增控制面。对手为 SimulatedVenue；两腿准入、发送故障与恢复证据不能替代真实跨所成交。
 Linux production dispatcher 目前仍仅提供模拟生命周期，Windows Demo 节点仍是其既有 OKX
-流程；本票没有将离线 probe 冒充在线部署。真实 transport/节点资源装配及分批 Testnet
-证据由 08 的显式授权验收完成，生产资格仍关闭。
+流程；本票没有将离线 probe 冒充在线部署。真实 transport/节点资源装配及真实 Testnet
+证据属于后续部署验收；按用户澄清不再作为 08 Adapter 功能验收的前置，生产资格仍关闭。
+
+08 的 Adapter 功能矩阵、公开只读观察与验证证据见
+[Adapter 功能验收记录](hyperliquid-testnet-qualification.md)。真实 transport、部署配置、
+策略及对手账户不阻塞 Adapter 功能验收；离线通过不表示 Testnet 真实成交或生产资格。
