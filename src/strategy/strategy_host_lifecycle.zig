@@ -590,6 +590,47 @@ pub const ManagedHost = struct {
     last_input_cursor: ?u64 = null,
     checkpoint_request: ?struct { identity: u64, expected: checkpoint_codec.Metadata, advanced: bool = false } = null,
     last_checkpoint_request: u64 = 0,
+    io_deadline_ns: ?i96 = null,
+    // Candidate instances borrow one process; their owner handles group cleanup.
+    owns_child: bool = true,
+
+    fn bounded(self: *ManagedHost, io: std.Io, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) anyerror!@typeInfo(@typeInfo(@TypeOf(function)).@"fn".return_type.?).error_union.payload {
+        if (self.supervisor.state == .failed) return error.InvalidState;
+        errdefer {
+            self.supervisor.state = .failed;
+            if (self.owns_child) self.child.kill(io);
+        }
+        if (self.io_deadline_ns == null and self.supervisor.state == .starting)
+            self.io_deadline_ns = std.Io.Clock.awake.now(io).nanoseconds + self.supervisor.plan.startup_timeout_ns;
+        const deadline = self.io_deadline_ns orelse (std.Io.Clock.awake.now(io).nanoseconds + self.supervisor.plan.hang_timeout_ns);
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.HostTimeout;
+        const Outcome = union(enum) {
+            operation: @typeInfo(@TypeOf(function)).@"fn".return_type.?,
+            timeout: std.Io.Cancelable!void,
+        };
+        var outcomes: [2]Outcome = undefined;
+        var select = std.Io.Select(Outcome).init(io, &outcomes);
+        // Join cancellation before touching child handles or borrowed frame storage.
+        defer select.cancelDiscard();
+        try select.concurrent(.operation, function, args);
+        try select.concurrent(.timeout, std.Io.Clock.Timestamp.wait, .{ std.Io.Clock.Timestamp{ .raw = .{ .nanoseconds = deadline }, .clock = .awake }, io });
+        const outcome = try select.await();
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) return error.HostTimeout;
+        return switch (outcome) {
+            .operation => |result| result,
+            .timeout => |result| {
+                try result;
+                return error.HostTimeout;
+            },
+        };
+    }
+
+    fn acceptFrame(self: *ManagedHost, frame: []const u8, now_ns: i64) Result {
+        const result = self.supervisor.acceptHostFrame(frame, now_ns);
+        if (result == .accepted and self.supervisor.state != .stopped and self.supervisor.state != .stopping)
+            self.io_deadline_ns = null;
+        return result;
+    }
 
     pub fn start(
         init: std.process.Init,
@@ -609,6 +650,7 @@ pub const ManagedHost = struct {
             argv[0..4].* = .{ python, script, "--mode", mode };
         }
         @memcpy(argv[prefix..][0..extra_args.len], extra_args);
+        const supervisor = try HostSupervisor.init(plan, 0);
         const child = try std.process.spawn(init.io, .{
             .argv = argv[0 .. prefix + extra_args.len],
             .stdin = .pipe,
@@ -618,7 +660,8 @@ pub const ManagedHost = struct {
         });
         return .{
             .child = child,
-            .supervisor = try HostSupervisor.init(plan, 0),
+            .supervisor = supervisor,
+            .io_deadline_ns = std.Io.Clock.awake.now(init.io).nanoseconds + plan.startup_timeout_ns,
         };
     }
 
@@ -626,21 +669,21 @@ pub const ManagedHost = struct {
         var frame_storage: [4 + bridge_header_len + plan_len]u8 = undefined;
         const frame = try self.supervisor.encodePlanFrame(frame_storage[4..]);
         put(u32, &frame_storage, 0, @intCast(frame.len));
-        try self.child.stdin.?.writeStreamingAll(io, frame_storage[0 .. 4 + frame.len]);
+        try self.bounded(io, std.Io.File.writeStreamingAll, .{ (self.child.stdin orelse return error.InvalidState), io, frame_storage[0 .. 4 + frame.len] });
     }
 
     pub fn receive(self: *ManagedHost, io: std.Io, now_ns: i64) !Result {
         var frame_storage: [bridge_header_len + max_bridge_payload]u8 = undefined;
-        const frame = try readPipeFrame(self.child.stdout.?, io, &frame_storage);
-        return self.supervisor.acceptHostFrame(frame, now_ns);
+        const frame = try self.bounded(io, readPipeFrame, .{ (self.child.stdout orelse return error.InvalidState), io, &frame_storage });
+        return self.acceptFrame(frame, now_ns);
     }
 
     pub fn receiveBatchAck(self: *ManagedHost, io: std.Io, now_ns: i64, max_outputs: u64) !u64 {
         var storage: [bridge_header_len + 16]u8 = undefined;
-        const frame = try readPipeFrame(self.child.stdout.?, io, &storage);
+        const frame = try self.bounded(io, readPipeFrame, .{ (self.child.stdout orelse return error.InvalidState), io, &storage });
         const decoded = try decodeBridgeFrame(frame);
         if (decoded.message_type != .host_heartbeat or decoded.payload.len != 16 or
-            self.supervisor.acceptHostFrame(frame, now_ns) != .accepted or
+            self.acceptFrame(frame, now_ns) != .accepted or
             get(u64, decoded.payload, 0) != self.last_input_cursor or
             get(u64, decoded.payload, 8) > max_outputs) return error.InvalidBatchAck;
         return get(u64, decoded.payload, 8);
@@ -650,21 +693,22 @@ pub const ManagedHost = struct {
         if (batch.len > self.supervisor.plan.input_capacity) return error.InputFrameTooLarge;
         if (ipc.validateBatchAt(batch, self.supervisor.plan.session, self.next_input_batch, self.last_input_cursor, now_ns).status != .ok)
             return error.InvalidInputBatch;
-        try writePipeParts(
-            self.child.stdin.?,
+        self.io_deadline_ns = std.Io.Clock.awake.now(io).nanoseconds + self.supervisor.plan.hang_timeout_ns;
+        try self.bounded(io, writePipeParts, .{
+            (self.child.stdin orelse return error.InvalidState),
             io,
             .input_batch,
             self.supervisor.plan.session,
             self.supervisor.next_zig_sequence,
             batch,
-        );
+        });
         self.supervisor.next_zig_sequence += 1;
         self.next_input_batch += 1;
         self.last_input_cursor = std.mem.readInt(u64, batch[88..96], .little);
     }
 
     pub fn receiveOutput(self: *ManagedHost, io: std.Io, now_ns: i64, storage: []u8) ![]const u8 {
-        const frame = try readPipeFrame(self.child.stdout.?, io, storage);
+        const frame = try self.bounded(io, readPipeFrame, .{ (self.child.stdout orelse return error.InvalidState), io, storage });
         const decoded = decodeBridgeFrame(frame) catch {
             self.supervisor.state = .failed;
             return error.InvalidOutputFrame;
@@ -695,7 +739,7 @@ pub const ManagedHost = struct {
             barrier,
             checkpoint,
         );
-        try writePipeFrame(self.child.stdin.?, io, frame);
+        try self.bounded(io, writePipeFrame, .{ (self.child.stdin orelse return error.InvalidState), io, frame });
     }
 
     pub fn activate(
@@ -705,7 +749,7 @@ pub const ManagedHost = struct {
     ) !void {
         var frame_storage: [bridge_header_len + 72]u8 = undefined;
         const frame = try self.supervisor.encodeActivateFrame(&frame_storage, activation);
-        try writePipeFrame(self.child.stdin.?, io, frame);
+        try self.bounded(io, writePipeFrame, .{ (self.child.stdin orelse return error.InvalidState), io, frame });
     }
 
     /// Request an exact input boundary, never a partially updated model state.
@@ -729,7 +773,8 @@ pub const ManagedHost = struct {
         var payload: [16]u8 = undefined;
         put(u64, &payload, 0, identity);
         put(u64, &payload, 8, expected.strategy_cursor);
-        try writePipeParts(self.child.stdin.?, io, .request_checkpoint, self.supervisor.plan.session, self.supervisor.next_zig_sequence, &payload);
+        self.io_deadline_ns = std.Io.Clock.awake.now(io).nanoseconds + self.supervisor.plan.hang_timeout_ns;
+        try self.bounded(io, writePipeParts, .{ (self.child.stdin orelse return error.InvalidState), io, .request_checkpoint, self.supervisor.plan.session, self.supervisor.next_zig_sequence, &payload });
         self.supervisor.next_zig_sequence += 1;
         self.checkpoint_request = .{ .identity = identity, .expected = expected, .advanced = advanced };
         self.last_checkpoint_request = identity;
@@ -740,7 +785,7 @@ pub const ManagedHost = struct {
     pub fn receiveCheckpoint(self: *ManagedHost, io: std.Io, storage: []u8) ![]const u8 {
         const pending = self.checkpoint_request orelse return error.NoCheckpointRequest;
         errdefer self.supervisor.state = .failed;
-        const frame = try readPipeFrame(self.child.stdout.?, io, storage);
+        const frame = try self.bounded(io, readPipeFrame, .{ (self.child.stdout orelse return error.InvalidState), io, storage });
         const decoded = try decodeBridgeFrame(frame);
         if (decoded.message_type != .checkpoint_content or
             !sameSession(decoded.session, self.supervisor.plan.session) or
@@ -759,17 +804,19 @@ pub const ManagedHost = struct {
         _ = try checkpoint_codec.decodePayloadCheckpoint(container, expected);
         self.supervisor.next_host_sequence += 1;
         self.checkpoint_request = null;
+        self.io_deadline_ns = null;
         return container;
     }
 
     pub fn shutdown(self: *ManagedHost, io: std.Io, now_ns: i64) !void {
         try self.supervisor.beginShutdown(now_ns);
+        self.io_deadline_ns = std.Io.Clock.awake.now(io).nanoseconds + self.supervisor.plan.shutdown_grace_ns;
         var frame_storage: [4 + bridge_header_len + 16]u8 = undefined;
         const frame = try self.supervisor.encodeShutdownFrame(frame_storage[4..]);
         put(u32, &frame_storage, 0, @intCast(frame.len));
-        try self.child.stdin.?.writeStreamingAll(io, frame_storage[0 .. 4 + frame.len]);
+        try self.bounded(io, std.Io.File.writeStreamingAll, .{ (self.child.stdin orelse return error.InvalidState), io, frame_storage[0 .. 4 + frame.len] });
         try expectResult(.accepted, try self.receive(io, now_ns + 1));
-        const term = try self.child.wait(io);
+        const term = try self.bounded(io, std.process.Child.wait, .{ &self.child, io });
         const clean = switch (term) {
             .exited => |code| code == 0,
             else => false,
@@ -779,7 +826,7 @@ pub const ManagedHost = struct {
     }
 
     pub fn deinit(self: *ManagedHost, io: std.Io) void {
-        self.child.kill(io);
+        if (self.owns_child) self.child.kill(io);
     }
 };
 
@@ -840,9 +887,10 @@ pub fn developmentPlan(shard: u32, generation: u64, python_abi: u32) Plan {
         .output_slots = 4,
         .output_capacity = 512,
         .heartbeat_interval_ns = 10 * std.time.ns_per_ms,
-        .startup_timeout_ns = 100 * std.time.ns_per_ms,
-        .hang_timeout_ns = 50 * std.time.ns_per_ms,
-        .shutdown_grace_ns = 20 * std.time.ns_per_ms,
+        // Development hosts include Python interpreter and module startup.
+        .startup_timeout_ns = 5 * std.time.ns_per_s,
+        .hang_timeout_ns = std.time.ns_per_s,
+        .shutdown_grace_ns = std.time.ns_per_s,
     };
 }
 

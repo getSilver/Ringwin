@@ -98,6 +98,16 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the offline Zig regression suite");
     test_step.dependOn(&run_tests.step);
 
+    const bounded_host = b.addExecutable(.{
+        .name = "strategy-host-bounded-io",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/entry.zig"), .target = target, .optimize = optimize }),
+    });
+    const bounded_options = b.addOptions();
+    bounded_options.addOption(usize, "index", 148);
+    bounded_host.root_module.addOptions("entry_options", bounded_options);
+    bounded_host.stack_size = 512 * 1024 * 1024;
+    test_step.dependOn(&b.addRunArtifact(bounded_host).step);
+
     const core_wave = b.addSystemCommand(&.{ "powershell.exe", "-NoProfile", "-File", "tools\\verify-core-wave.ps1" });
     const core_wave_step = b.step("core-wave", "Run the fail-fast offline core acceptance wave");
     core_wave_step.dependOn(&core_wave.step);

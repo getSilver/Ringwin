@@ -139,8 +139,11 @@ const Instance = struct {
         _ = try std.fmt.hexToBytes(&plan.compatibility.checkpoint_manifest, request.checkpoint_manifest);
         plan.input_capacity = 1_048_576;
         plan.output_capacity = 262_144;
+        // The package watchdog owns callback/warmup budgets and group termination.
+        plan.hang_timeout_ns = (std.math.cast(i64, request.manifest.limits.max_callback_ns) orelse std.math.maxInt(i64)) +| plan.hang_timeout_ns;
+        plan.startup_timeout_ns = (std.math.cast(i64, request.manifest.limits.max_warmup_ns) orelse std.math.maxInt(i64)) +| plan.startup_timeout_ns;
         const started = now(init.io);
-        var host: lifecycle.ManagedHost = .{ .child = child, .supervisor = try lifecycle.HostSupervisor.init(plan, 0) };
+        var host: lifecycle.ManagedHost = .{ .child = child, .supervisor = try lifecycle.HostSupervisor.init(plan, 0), .owns_child = false };
         try host.sendPlan(init.io);
         if (try host.receive(init.io, now(init.io)) != .accepted) return error.CandidateHandshakeFailed;
         const frame = try init.gpa.alloc(u8, 72 + checkpoint.len);
