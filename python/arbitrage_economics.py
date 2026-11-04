@@ -116,6 +116,8 @@ class InstrumentRules:
     min_notional_atoms: int
     valid_from_ns: int
     valid_until_ns: int
+    # Same atomic unit only; approval belongs to the immutable configuration.
+    approved_base_pair: Optional[Tuple[int, str]] = None
 
     def __post_init__(self):
         for value in (self.instrument, self.version, self.base_asset, self.quote_asset,
@@ -128,6 +130,17 @@ class InstrumentRules:
         integer(self.min_notional_atoms)
         integer(self.valid_from_ns)
         integer(self.valid_until_ns, self.valid_from_ns+1)
+        if self.approved_base_pair is not None:
+            pair = self.approved_base_pair
+            if (type(pair) is not tuple or len(pair) != 2 or type(pair[0]) is not int
+                    or pair[0] <= 0 or pair[0] in (self.base_asset, self.quote_asset)
+                    or type(pair[1]) is not str or not 0 < len(pair[1]) <= 128
+                    or not pair[1].isascii() or any(ord(x) < 33 for x in pair[1])):
+                raise ValueError("invalid economic pairing approval")
+
+    @property
+    def exposure_asset(self):
+        return self.base_asset if self.approved_base_pair is None else self.approved_base_pair[0]
 
     def notional(self, ticks, lots):
         return exact(integer(ticks, 1)*integer(lots)*self.base_atoms_per_lot

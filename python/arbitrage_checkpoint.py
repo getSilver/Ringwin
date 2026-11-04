@@ -26,7 +26,8 @@ def content(value):
     """Hash frozen dependencies/input caches without putting them in checkpoints."""
     def tree(v):
         if is_dataclass(v):
-            return [type(v).__module__, type(v).__name__, [[f.name, tree(getattr(v, f.name))] for f in fields(v)]]
+            return [type(v).__module__, type(v).__name__, [[f.name, tree(getattr(v, f.name))] for f in fields(v)
+                if not (isinstance(v, b.InstrumentRules) and f.name == "approved_base_pair" and v.approved_base_pair is None)]]
         if type(v) is float:
             return ["binary64_bits_v1", s.encode_number(v)]
         if type(v) is Fraction:

@@ -86,6 +86,8 @@ class Leg:
             raise b.Rejected("leg_product")
         if self.kind == "spot" and self.direction != 1:
             raise b.Rejected("spot_short_not_allowed")
+        if self.kind != "spot" and self.rules.approved_base_pair is not None:
+            raise b.Rejected("pairing_requires_spot")
         if (self.exit_fee.instrument, self.exit_fee.rules_version) != (self.rules.instrument, self.rules.version):
             raise b.Rejected("fee_scope")
         for trade in _tuple(self.entries, 64):
@@ -140,7 +142,7 @@ class Entry:
             raise b.Rejected("flat_position")
         if self.legs:
             a, z = self.legs
-            if (a.rules.base_asset != z.rules.base_asset or a.rules.quote_asset != z.rules.quote_asset
+            if (a.rules.exposure_asset != z.rules.exposure_asset or a.rules.quote_asset != z.rules.quote_asset
                     or a.rules.instrument == z.rules.instrument or a.direction != -z.direction
                     or a.account == z.account):
                 raise b.Rejected("pair_asset_or_direction")
@@ -392,7 +394,7 @@ def value_exit(entry, market, policy, *, normal):
         raise b.Rejected("economic_projection_input")
     if type(normal) is not bool:
         raise b.Rejected("exit_policy_kind")
-    if any(x.rules.base_asset != policy.base_asset or x.rules.quote_asset != policy.quote_asset for x in entry.legs):
+    if any(x.rules.exposure_asset != policy.base_asset or x.rules.quote_asset != policy.quote_asset for x in entry.legs):
         raise b.Rejected("candidate_asset_scope")
     if entry.state != "matched" or not market.qualified or market.unknown:
         return ExitValue(None, False, tuple(x.base_atoms for x in entry.legs), "unqualified_exit", ())
@@ -425,7 +427,8 @@ def _entry_payload(entry):
             _ratio(t.fee.quote_atoms), t.fee.base_atoms] for t in leg.entries],
           [leg.exit_fee.instrument, leg.exit_fee.rules_version, leg.exit_fee.fee_asset,
            _ratio(leg.exit_fee.taker_ppm), _ratio(leg.exit_fee.maker_ppm),
-           leg.exit_fee.valid_from_ns, leg.exit_fee.valid_until_ns]] for leg in entry.legs],
+           leg.exit_fee.valid_from_ns, leg.exit_fee.valid_until_ns]]
+          + ([] if leg.rules.approved_base_pair is None else [list(leg.rules.approved_base_pair)]) for leg in entry.legs],
         [[x.identity, x.net_atoms] for x in entry.completed], list(entry.unknown_refs),
         [[_ratio(a), _ratio(z)] for a, z in entry.possible_base],
         None if entry.model_point is None else [entry.model_point.grid_ns, entry.model_point.cursor,
@@ -461,7 +464,7 @@ class Context:
         if not isinstance(self.entry, Entry) or not isinstance(self.market, Market) or not isinstance(self.policy, Policy):
             raise b.Rejected("holding_context")
         e.integer(self.target_atoms, 1)
-        if any(x.rules.base_asset != self.policy.base_asset or x.rules.quote_asset != self.policy.quote_asset for x in self.entry.legs):
+        if any(x.rules.exposure_asset != self.policy.base_asset or x.rules.quote_asset != self.policy.quote_asset for x in self.entry.legs):
             raise b.Rejected("candidate_asset_scope")
         if self.market.at_ns < self.entry.holding_at_ns or self.market.at_ns < self.policy.at_ns:
             raise b.Rejected("holding_context_time")
@@ -881,7 +884,7 @@ def _simulation_weights(scenarios, simulation_error):
 def _simulate(scenario, policy, target, mode, estimator, work):
     work.consume(len(scenario.markets)+1)
     entry = scenario.entry
-    if any(x.rules.base_asset != policy.base_asset or x.rules.quote_asset != policy.quote_asset for x in entry.legs):
+    if any(x.rules.exposure_asset != policy.base_asset or x.rules.quote_asset != policy.quote_asset for x in entry.legs):
         raise b.Rejected("candidate_asset_scope")
     if entry.state == "flat":
         return PathResult(scenario.identity, scenario.weight, target, False, None, entry.holding_at_ns,

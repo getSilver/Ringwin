@@ -433,8 +433,8 @@ class WebInstanceTests(unittest.TestCase):
         self.assertEqual(status, 400, failed)
         self.assertIn("budget exhausted", failed["error"])
 
-    def native_authority(self, *, group=False, multiple=False):
-        group = group or multiple
+    def native_authority(self, *, group=False, multiple=False, hyperliquid=False):
+        group = group or multiple or hyperliquid
         self.app.clock = lambda: 1767225601
         status, login = self.client.call("POST", "/login", {
             "passphrase": "correct horse battery staple",
@@ -445,7 +445,7 @@ class WebInstanceTests(unittest.TestCase):
         self.assertTrue(probe.is_file(), "zig build strategy-authority-probe is required")
         key = self.root / "node-control.key"
         key.write_bytes(self.command_server.key)
-        process = subprocess.Popen([str(probe), str(key), *(["multiple" if multiple else "group"] if group else [])], stdin=subprocess.PIPE,
+        process = subprocess.Popen([str(probe), str(key), *(["multiple" if multiple else "hyperliquid" if hyperliquid else "group"] if group else [])], stdin=subprocess.PIPE,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         # This first response includes cold fixture bootstrap, before node readiness.
         authority = strategy_instance.NativeAuthority(process, timeout=30)
@@ -1165,8 +1165,15 @@ finally:
             self.instances.deliver(identity, self.node_batch(cursor, first))
 
     def test_complete_group_is_one_actual_frame_and_gateway_accepts_it_before_safety_revokes(self):
-        authority = self.native_authority(group=True)
-        self.install(GROUP_TRADER)
+        self.assert_complete_group()
+
+    def test_hyperliquid_uses_existing_web_package_host_authority_and_revocation(self):
+        self.assert_complete_group(hyperliquid=True)
+
+    def assert_complete_group(self, hyperliquid=False):
+        authority = self.native_authority(group=True, hyperliquid=hyperliquid)
+        code = GROUP_TRADER.replace(b"False, 10, 10", b"False, 1, 10000") if hyperliquid else GROUP_TRADER
+        self.install(code)
         self.binding["strategy_identity"] = f"{9:032x}"
         ready = self.create()[1]["result"]
         self.assertEqual(ready["status"], "Ready", ready)

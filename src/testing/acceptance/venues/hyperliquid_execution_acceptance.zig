@@ -1,5 +1,6 @@
 //! Synthetic offline Gateway -> adapter -> Owner evidence. No credentials or network.
 const std = @import("std");
+const runtime = @import("../../../runtime/hyperliquid_runtime.zig");
 const hl = @import("../../../adapters/hyperliquid/hyperliquid_venue_adapter.zig");
 const signer = @import("../../../adapters/hyperliquid/hyperliquid_signer.zig");
 const c = @import("../../../model/canonical_event.zig");
@@ -10,36 +11,9 @@ const durable = @import("../../../persistence/durable_store.zig");
 const raw = @import("../../../persistence/raw_ingress.zig");
 const fixture = @import("../../support/trading_shard_fixture.zig");
 const engine = @import("../../../trading/trading_shard.zig");
-const times: hl.Times = .{ .receive_time_utc_ns = 1_800_000_000_100_000_000, .wall_time_utc_ns = 1_800_000_000_100_000_000, .monotonic_time_ns = 2 * std.time.ns_per_s };
-const IO = struct {
-    sink: raw.DurableSink,
-    sends: u64 = 0,
-    recover_funding: bool = false,
-    fn now(_: *anyopaque) hl.Times {
-        return times;
-    }
-    fn sign(_: *anyopaque, request: signer.Request) !signer.SignedAction {
-        return .{ .nonce = request.now_ms, .digest = @splat(1), .signature = .{ .r = @splat(1), .s = @splat(1), .v = 27 }, .session = request.session, .funding_account = @splat(2), .subaccount = null };
-    }
-    fn check(_: *anyopaque, _: u64, _: u64, _: bool) !void {}
-    fn query(ptr: *anyopaque, bytes: []const u8) hl.TransportResult {
-        const self: *@This() = @ptrCast(@alignCast(ptr));
-        const response = if (std.mem.indexOf(u8, bytes, "orderStatus") != null) "{\"status\":\"unknownOid\"}" else if (std.mem.indexOf(u8, bytes, "userAbstraction") != null) "\"default\"" else if (std.mem.indexOf(u8, bytes, "\"clearinghouseState\"") != null) "{\"assetPositions\":[]}" else if (std.mem.indexOf(u8, bytes, "spotClearinghouseState") != null) "{\"balances\":[]}" else if (self.recover_funding and std.mem.indexOf(u8, bytes, "\"userFunding\"") != null) "[{\"time\":1800000000001,\"delta\":{\"type\":\"funding\",\"usdc\":\"-0.01\"}}]" else "[]";
-        return .{ .outcome = .response, .bytes = response, .session = 7, .times = times };
-    }
-    fn submit(ptr: *anyopaque, request: hl.SignedRequest) hl.TransportResult {
-        const self: *@This() = @ptrCast(@alignCast(ptr));
-        self.sends += 1;
-        std.debug.assert(std.mem.indexOf(u8, request.action_json, "0x") != null);
-        return .{ .session = 7, .times = times, .outcome = .response, .bytes = "{\"status\":\"ok\",\"response\":{\"type\":\"order\",\"data\":{\"statuses\":[{\"resting\":{\"oid\":42}}]}}}" };
-    }
-    fn append(ptr: *anyopaque, record: hl.RawRecord, bytes: []const u8) hl.RawError!u64 {
-        const self: *@This() = @ptrCast(@alignCast(ptr));
-        const sink = self.sink.interface();
-        if (record.venue != 1 or record.account != 2 or record.session != 7) return error.Unavailable;
-        return sink.append_fn(sink.ptr, .{ .origin = @intFromEnum(record.input), .source_session = @intCast(record.session), .receive_time_utc_ns = record.times.receive_time_utc_ns, .monotonic_time_ns = record.times.monotonic_time_ns, .wall_time_utc_ns = record.times.wall_time_utc_ns, .byte_len = record.byte_len, .sha256 = record.sha256 }, bytes);
-    }
-};
+const offline_io = @import("../../support/hyperliquid_runtime_io.zig");
+const IO = offline_io.IO;
+const times = offline_io.times;
 
 const Sweep = struct {
     decoder: *hl.HyperliquidVenueAdapter,
@@ -73,6 +47,242 @@ const Sweep = struct {
         if (sequence == self.last_raw_sequence) try self.decoder.finishReplay();
     }
 };
+
+test "Hyperliquid runtime cross venue Host USDC joint admission IOC maker Unknown and recovery" {
+    try runOffline(std.testing.allocator);
+}
+
+/// Existing executable's offline fixture; no credential or socket owners exist.
+pub fn runOffline(a: std.mem.Allocator) !void {
+    const Context = struct {
+        allocator: std.mem.Allocator,
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            exerciseCrossVenue(self.allocator) catch |err| {
+                self.failure = err;
+            };
+        }
+    };
+    var context: Context = .{ .allocator = a };
+    const thread = try std.Thread.spawn(.{ .stack_size = 512 * 1024 * 1024 }, Context.run, .{&context});
+    thread.join();
+    if (context.failure) |err| return err;
+}
+
+fn exerciseCrossVenue(a: std.mem.Allocator) !void {
+    for ([_]u64{ 1, 3 }) |settlement| for ([_]bool{ false, true }) |spot| for ([_]bool{ false, true }) |maker| for ([_]@FieldType(hl.TransportResult, "outcome"){ .response, .proven_before_send, .uncertain }) |outcome| {
+        const memory = try a.create(durable.MemoryAdapter);
+        defer a.destroy(memory);
+        memory.* = .initWithAllocator(a);
+        defer memory.deinit();
+        const owner = try a.create(demo.Owner);
+        defer a.destroy(owner);
+        try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 91 });
+        const accounts = @import("../core/multi_account_authority_acceptance.zig");
+        if (spot) try accounts.initializeSpotLinearOwnerWithSettlement(owner, settlement) else try accounts.initializePythonOwnerWithSettlement(owner, settlement);
+        var capability = owner.shard.registryInstrument(101).?.capability.?;
+        {
+            capability.version = 2;
+            capability.adapter_session = 7;
+            capability.supports_post_only = maker;
+            _ = try owner.apply(fixture.atGroup(44, .{ .identity = 2000, .account_scope = 20, .payload = .{ .capability_profile_activation = capability } }));
+        }
+        const gateway = try a.create(execution.Gateway);
+        defer a.destroy(gateway);
+        gateway.init();
+        var io: IO = .{ .sink = try raw.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = 7 }), .session = 7, .outcome = outcome };
+        var budget: hl.Budget = .{};
+        const bindings = [_]hl.Binding{.{ .instrument = 101, .coin = if (spot) "@3" else "BTC", .wire_asset = if (spot) 10003 else 3, .product = if (spot) .spot else .isolated_linear, .size_decimals = 4, .quantity_scale = 4, .lot_atoms = 1, .price_scale = 6, .tick_atoms = 1 }};
+        const feeds = [_]runtime.FeedConfiguration{.{ .binding = .{ .instrument = 101, .coin = if (spot) "@3" else "BTC", .product = if (spot) .spot else .isolated_linear, .base_token = 1, .base_token_id = "offline-base", .quote_token_id = "offline-quote", .universe_index = 3, .size_decimals = 4, .rules_version = 1, .expected_metadata_digest = @splat(1), .quantity_scale = 4, .lot_atoms = 1, .price_scale = 6, .tick_atoms = 1 }, .subscription_set = 70, .session = 60 }};
+        const assembly = try a.create(runtime.Runtime);
+        defer a.destroy(assembly);
+        try runtime.Runtime.initInto(assembly, a, .{ .epoch_startup = .virgin, .profile = .{ .venue = 1, .account = 20, .session = 7, .funding = @splat(2), .environment = .simulation, .bindings = &bindings, .version = capability.version, .rules_version = 1, .config_version = 1 }, .feeds = &feeds }, .{ .offline = .{ .transport = .{ .ptr = &io, .submit_fn = IO.submit, .query_fn = IO.query }, .authorizer = .{ .ptr = &io, .sign_fn = IO.sign, .check_fn = IO.check } } }, owner, gateway, .{ .ptr = &io, .now_fn = IO.now }, &budget, io.sink, try raw.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = 8 }), .{ .domain = .control, .id = 94 });
+        const peer_view = try a.create(engine.TradingShard);
+        defer a.destroy(peer_view);
+        try owner.shard.copyAccountViewInto(peer_view, 30);
+        var counterpart: @import("../../../adapters/simulated/simulated_venue.zig").SimulatedVenue = .{ .next_event_identity = 2 };
+        try counterpart.adapter().start(.{ .venue = 21, .environment = .simulation, .exchange_account = 30, .adapter_session = 1, .request_capacity = 1, .output_capacity = 32, .asset_definitions = peer_view.activatedAssets(), .instrument_definitions = peer_view.instrument_registry, .native_settlement_atoms = settlement != 1 });
+        try gateway.add(.{ .account = 30, .venue_identity = 21, .adapter = counterpart.adapter(), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 }, .supported_products = execution.productMask(.isolated_linear) });
+        var bootstrap: [4096]u8 = undefined;
+        try gateway.bootstrapDurableDispatchWithBuffer(memory.interface(), undefined, .{ .domain = .control, .id = 92 }, &bootstrap);
+        try gateway.pinDeploymentDigest(owner.shard.deployment.header.?.expected_digest);
+        const host = @import("../../../strategy/strategy_host_gateway.zig");
+        const barrier = owner.shard.authoritativeBarrier();
+        const config: host.Config = .{ .schema_registry = engine.schema_registry_identity, .decision_domain = 1, .session = .{ .fencing = 1, .shard = 1, .generation = 1 }, .authorization = .{ .strategy_identity = 9, .config_version = 1, .activation_identity = 1, .activation_barrier = barrier } };
+        _ = try owner.apply(fixture.atGroup(45, .{ .identity = 3000, .payload = .{ .host_activated = .{ .strategy_identity = 9, .config_version = 1, .activation_identity = 1, .activation_barrier = barrier, .session = config.session, .state_digest = owner.shard.canonicalStateDigest() } } }));
+        var bridge = try host.Gateway.init(config, &.{host.Subscription.of(9, &.{.mark_price})});
+        const cursor = owner.shard.authoritativeBarrier() + 1;
+        try bridge.recordPublished(1, cursor, 100);
+        try bridge.activate(&owner.shard, &owner.decision_journal);
+        var storage: [host.max_group_frame_len]u8 = undefined;
+        const orders = [_]host.OutputOrder{
+            .{ .portfolio_identity = 10, .exchange_account_identity = 20, .instrument_identity = 101, .order_type = if (maker) .post_only else .limit, .time_in_force = if (maker) .post_only else .immediate_or_cancel, .quantity = 1, .limit_price_micros = 10000 },
+            .{ .portfolio_identity = 10, .exchange_account_identity = 30, .instrument_identity = 102, .side = .sell, .time_in_force = .immediate_or_cancel, .quantity = 1, .limit_price_micros = 10000 },
+        };
+        const frame = try host.encodeOutputGroupFrame(&storage, config, 1, cursor, 1, &orders);
+        const accepted = bridge.ingest(frame, 101);
+        try std.testing.expect(accepted == .accepted_group);
+        _ = try owner.apply(fixture.atGroup(46, .{ .identity = 4000, .payload = .{ .external_intent_group = accepted.accepted_group } }));
+        try std.testing.expectEqual(@as(u16, 2), owner.shard.oms.command_history_count);
+        try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.count);
+        for (owner.shard.oms.command_history[0..2]) |command| try std.testing.expectEqual(settlement, command.reservation.asset);
+        try @import("../core/dual_ioc_dispatch_acceptance.zig").observe(gateway, &owner.shard);
+        const now = owner.shard.oms.findCommand(1).?.authority.dispatch_deadline_monotonic_ns - 1;
+        io.current.monotonic_time_ns = now;
+        counterpart.receipt_times = .{ .receive_utc_ns = times.receive_time_utc_ns, .monotonic_ns = now, .audit_utc_ns = times.wall_time_utc_ns };
+        try std.testing.expectEqual(venue.SendResult.accepted, try assembly.send(1, now));
+        try std.testing.expectEqual(venue.SendResult.accepted, try gateway.sendFromShard(&owner.shard, 2, now));
+        try std.testing.expectEqual(@as(u64, 1), io.sends);
+        try assembly.drain();
+        try owner.applyAdapterBatch((try counterpart.adapter().tryDrain()).?);
+        if (outcome == .uncertain) try std.testing.expectEqual(engine.oms.OrderState.unknown, owner.shard.oms.orderById(1).?.state);
+        try owner.checkpoint();
+        const before = owner.shard.canonicalStateDigest();
+        const recovered = try a.create(demo.Owner);
+        defer a.destroy(recovered);
+        try demo.Owner.recoverInto(recovered, memory.interface(), undefined, owner.stream);
+        try std.testing.expectEqualSlices(u8, &before, &recovered.shard.canonicalStateDigest());
+        try std.testing.expectEqual(@as(u8, 1), recovered.shard.cycles.count);
+        try std.testing.expectEqual(@as(u64, 1), io.sends);
+    };
+}
+
+test "Hyperliquid runtime approved configuration durable epochs and read only isolation" {
+    const Context = struct {
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            exerciseAssembly() catch |err| {
+                if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
+                self.failure = err;
+            };
+        }
+    };
+    var context: Context = .{};
+    const thread = try std.Thread.spawn(.{ .stack_size = 512 * 1024 * 1024 }, Context.run, .{&context});
+    thread.join();
+    if (context.failure) |err| return err;
+}
+
+fn exerciseAssembly() !void {
+    const a = std.testing.allocator;
+    const memory = try a.create(durable.MemoryAdapter);
+    defer a.destroy(memory);
+    memory.* = .initWithAllocator(a);
+    defer memory.deinit();
+    const owner = try a.create(demo.Owner);
+    defer a.destroy(owner);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 91 });
+    for (fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged)) |event| _ = try owner.apply(event);
+    var activation: engine.CoreEvent = .{ .identity = 100, .payload = .{ .capability_profile_activation = .{ .exchange_account = 2, .instrument = 3, .venue = 1, .environment = .simulation, .product = .isolated_linear, .version = 1, .rules_version = 1, .config_version = 1, .adapter_session = 7, .max_dispatch_age_ns = 10 * std.time.ns_per_s, .supports_place = true, .supports_cancel = true, .supports_native_amend = false, .supports_venue_reduce_only = true, .supports_post_only = true, .supports_market_protection = false } } };
+    _ = try owner.apply(.{ .core = activation });
+    var io: IO = .{ .sink = try raw.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = 7 }) };
+    const bindings = [_]hl.Binding{.{ .instrument = 3, .coin = "BTC", .wire_asset = 3, .product = .isolated_linear, .size_decimals = 4, .quantity_scale = 4, .lot_atoms = 1, .price_scale = 6, .tick_atoms = 1 }};
+    const feeds = [_]runtime.FeedConfiguration{.{ .binding = .{ .instrument = 3, .coin = "BTC", .product = .isolated_linear, .universe_index = 3, .size_decimals = 4, .rules_version = 1, .expected_metadata_digest = @splat(1), .quantity_scale = 4, .lot_atoms = 1, .price_scale = 6, .tick_atoms = 1 }, .subscription_set = 70, .session = 60 }};
+    var configuration: runtime.Configuration = .{ .epoch_startup = .virgin, .profile = .{ .venue = 1, .account = 2, .session = 7, .funding = @splat(2), .environment = .simulation, .bindings = &bindings, .version = 1, .rules_version = 1, .config_version = 1 }, .feeds = &feeds };
+    const json = try std.json.Stringify.valueAlloc(a, configuration, .{});
+    defer a.free(json);
+    var approved: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(json, &approved, .{});
+    const parsed = try runtime.Configuration.parse(a, json, approved);
+    defer parsed.deinit();
+    try std.testing.expectError(error.ConfigurationNotApproved, runtime.Configuration.parse(a, json, @splat(0)));
+    approved[0] ^= 1;
+    try std.testing.expectError(error.ConfigurationNotApproved, runtime.Configuration.parse(a, json, approved));
+    var wrong_binding = bindings;
+    wrong_binding[0].wire_asset += 1;
+    var wrong = configuration;
+    wrong.profile.bindings = &wrong_binding;
+    try std.testing.expectError(error.InvalidConfiguration, wrong.validate());
+    var budget: hl.Budget = .{};
+    const assembly = try a.create(runtime.Runtime);
+    defer a.destroy(assembly);
+    const gateway = try a.create(execution.Gateway);
+    defer a.destroy(gateway);
+    gateway.init();
+    const resources: runtime.Resources = .{ .offline = .{ .transport = .{ .ptr = &io, .submit_fn = IO.submit, .query_fn = IO.query }, .authorizer = .{ .ptr = &io, .sign_fn = IO.sign, .check_fn = IO.check } } };
+    const market_raw = try raw.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = 8 });
+    try runtime.Runtime.initInto(assembly, a, parsed.value, resources, owner, gateway, .{ .ptr = &io, .now_fn = IO.now }, &budget, io.sink, market_raw, .{ .domain = .control, .id = 94 });
+    try std.testing.expectEqual(@as(u64, 1), try assembly.subscribe(a, 0, .{ .receive_time_utc_ns = times.receive_time_utc_ns, .monotonic_time_ns = times.monotonic_time_ns, .wall_time_utc_ns = times.wall_time_utc_ns }));
+    // Crash after committed market capture, before applying its pending facts.
+    for (owner.shard.canonical_ingress_cursors[0..owner.shard.canonical_ingress_cursor_count]) |cursor| try std.testing.expect(cursor.identity.stream != 60);
+    try std.testing.expectEqual(@as(u64, 0), io.sends);
+    configuration.epoch_startup = .recover;
+    for ([_]bool{ false, true }, 0..) |after_snapshot, index| {
+        var crash = memory.interface().vtable.*;
+        if (after_snapshot) crash.rotate = crashEpochRotate else crash.publish = crashEpochPublish;
+        assembly.private_raw.store = .{ .context = memory, .vtable = &crash };
+        try std.testing.expectError(error.EpochUnavailable, assembly.reserveEpoch(0, times.monotonic_time_ns));
+        gateway.init();
+        try runtime.Runtime.initInto(assembly, a, configuration, resources, owner, gateway, .{ .ptr = &io, .now_fn = IO.now }, &budget, io.sink, try raw.DurableSink.recover(memory.interface(), undefined, market_raw.stream), .{ .domain = .control, .id = 94 });
+        try std.testing.expectEqual(@as(u64, 3) + 2 * index, try assembly.subscribe(a, 0, .{ .receive_time_utc_ns = times.receive_time_utc_ns, .monotonic_time_ns = times.monotonic_time_ns, .wall_time_utc_ns = times.wall_time_utc_ns }));
+        try assembly.drain();
+    }
+    const replay = try a.create(runtime.MarketReplay);
+    defer a.destroy(replay);
+    try runtime.MarketReplay.initInto(replay, configuration, owner, a);
+    const before_replay = owner.shard.canonicalStateDigest();
+    try raw.replayCommitted(memory.interface(), undefined, market_raw.stream, replay.consumer());
+    try replay.finish();
+    try std.testing.expectEqualSlices(u8, &before_replay, &owner.shard.canonicalStateDigest());
+    var wrong_configuration = configuration;
+    wrong_configuration.profile.version += 1;
+    try runtime.MarketReplay.initInto(replay, wrong_configuration, owner, a);
+    try std.testing.expectError(error.ConfigurationNotApproved, raw.replayCommitted(memory.interface(), undefined, market_raw.stream, replay.consumer()));
+    // A different incarnation consumes the durable high-water mark, not zero.
+    gateway.init();
+    try runtime.Runtime.initInto(assembly, a, configuration, resources, owner, gateway, .{ .ptr = &io, .now_fn = IO.now }, &budget, io.sink, try raw.DurableSink.recover(memory.interface(), undefined, market_raw.stream), .{ .domain = .control, .id = 94 });
+    try std.testing.expectEqual(@as(u64, 6), try assembly.subscribe(a, 0, .{ .receive_time_utc_ns = times.receive_time_utc_ns, .monotonic_time_ns = times.monotonic_time_ns, .wall_time_utc_ns = times.wall_time_utc_ns }));
+    try assembly.drain();
+    try std.testing.expectError(error.StaleSession, assembly.feeds[0].ingest(a, 1, .book, .{ .receive_time_utc_ns = times.receive_time_utc_ns, .monotonic_time_ns = times.monotonic_time_ns, .wall_time_utc_ns = times.wall_time_utc_ns }, "{}"));
+    try assembly.drain();
+    try std.testing.expectError(error.MissingField, assembly.feeds[0].ingest(a, 6, .metadata, .{ .receive_time_utc_ns = times.receive_time_utc_ns, .monotonic_time_ns = times.monotonic_time_ns, .wall_time_utc_ns = times.wall_time_utc_ns }, "{}"));
+    try assembly.drain();
+    try runtime.MarketReplay.initInto(replay, configuration, owner, a);
+    const rejected_digest = owner.shard.canonicalStateDigest();
+    try raw.replayCommitted(memory.interface(), undefined, market_raw.stream, replay.consumer());
+    try replay.finish();
+    try std.testing.expectEqualSlices(u8, &rejected_digest, &owner.shard.canonicalStateDigest());
+    gateway.init();
+    configuration.profile.environment = .demo;
+    try std.testing.expectError(error.InvalidConfiguration, runtime.Runtime.initInto(assembly, a, configuration, resources, owner, gateway, .{ .ptr = &io, .now_fn = IO.now }, &budget, io.sink, market_raw, .{ .domain = .control, .id = 94 }));
+    configuration.profile.environment = .testnet;
+    var unavailable_wallet: hl.WalletAuthorization = undefined;
+    const denied: runtime.Resources = .{ .testnet_write = .{ .transport = resources.offline.transport, .wallet = &unavailable_wallet, .hyperliquid_testnet_write_authorized = false, .expires_monotonic_ns = times.monotonic_time_ns + 1 } };
+    try std.testing.expectError(error.TestnetWriteNotAuthorized, runtime.Runtime.initInto(assembly, a, configuration, denied, owner, gateway, .{ .ptr = &io, .now_fn = IO.now }, &budget, io.sink, market_raw, .{ .domain = .control, .id = 94 }));
+    var expired = denied;
+    expired.testnet_write.hyperliquid_testnet_write_authorized = true;
+    expired.testnet_write.expires_monotonic_ns = times.monotonic_time_ns;
+    try std.testing.expectError(error.TestnetWriteNotAuthorized, runtime.Runtime.initInto(assembly, a, configuration, expired, owner, gateway, .{ .ptr = &io, .now_fn = IO.now }, &budget, io.sink, market_raw, .{ .domain = .control, .id = 94 }));
+    const readonly: runtime.Resources = .{ .read_only = resources.offline.transport };
+    try std.testing.expectError(error.CapabilityMismatch, runtime.Runtime.initInto(assembly, a, configuration, readonly, owner, gateway, .{ .ptr = &io, .now_fn = IO.now }, &budget, io.sink, market_raw, .{ .domain = .control, .id = 94 }));
+    activation.identity += 1;
+    activation.payload.capability_profile_activation.version = 2;
+    activation.payload.capability_profile_activation.environment = .testnet;
+    _ = try owner.apply(.{ .core = activation });
+    configuration.profile.version = 2;
+    const authorization = owner.shard.registryInstrument(3).?.tradingAuthorization(1);
+    _ = try owner.apply(.{ .core = .{ .identity = 200, .payload = .{ .instrument_trading_authorization = .{ .strategy_identity = 1, .exchange_account = 2, .instrument = 3, .strategy_activation_identity = 1, .config_version = 1, .expected_version = authorization.version, .enabled = false } } } });
+    activation.identity += 1;
+    activation.payload.capability_profile_activation.version = 3;
+    _ = try owner.apply(.{ .core = activation });
+    configuration.profile.version = 3;
+    try std.testing.expect(!owner.shard.registryInstrument(3).?.tradingAuthorization(1).enabled);
+    const readonly_market = try raw.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = 10 });
+    try runtime.Runtime.initInto(assembly, a, configuration, readonly, owner, gateway, .{ .ptr = &io, .now_fn = IO.now }, &budget, io.sink, readonly_market, .{ .domain = .control, .id = 94 });
+    try std.testing.expectError(error.ReadOnly, assembly.send(1, times.monotonic_time_ns));
+    try std.testing.expect(!assembly.private.profile.can_trade);
+    try std.testing.expectEqual(@as(u64, 0), io.sends);
+    gateway.init();
+    configuration.profile.session += 1;
+    try std.testing.expectError(error.CapabilityMismatch, runtime.Runtime.initInto(assembly, a, configuration, readonly, owner, gateway, .{ .ptr = &io, .now_fn = IO.now }, &budget, io.sink, market_raw, .{ .domain = .control, .id = 94 }));
+}
+
+fn crashEpochPublish(_: *anyopaque, _: std.Io, _: durable.StreamIdentity, _: u64, _: []const u8) anyerror!void {
+    return error.InjectedCrash;
+}
+fn crashEpochRotate(_: *anyopaque, _: std.Io, _: durable.StreamIdentity) anyerror!void {
+    return error.InjectedCrash;
+}
 
 test "Hyperliquid Gateway durable CLOID Owner raw crash recovery and snapshot tails converge in both Fill orders" {
     const Context = struct {
@@ -126,18 +336,20 @@ fn exerciseRecovery() !void {
         var io: IO = .{ .sink = try raw.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = 7 }) };
         var budget: hl.Budget = .{};
         const bindings = [_]hl.Binding{.{ .instrument = 3, .coin = "BTC", .wire_asset = 3, .product = .isolated_linear, .size_decimals = 4, .quantity_scale = 4, .lot_atoms = 1, .price_scale = 6, .tick_atoms = 1 }};
-        var implementation: hl.HyperliquidVenueAdapter = .{ .profile = .{ .venue = 1, .account = 2, .session = 7, .funding = @splat(2), .environment = .simulation, .bindings = &bindings, .version = 1, .rules_version = 1, .config_version = 1, .can_trade = true, .bootstrap_identity = 1 }, .clock = .{ .ptr = &io, .now_fn = IO.now }, .auth = .{ .ptr = &io, .sign_fn = IO.sign, .check_fn = IO.check }, .raw_sink = .{ .ptr = &io, .append_fn = IO.append }, .transport = .{ .ptr = &io, .submit_fn = IO.submit, .query_fn = IO.query }, .budget = &budget, .fencing_token = 1 };
-        const adapter = implementation.adapter();
-        try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 7, .request_capacity = 1, .output_capacity = 1, .asset_definitions = owner.shard.activatedAssets(), .instrument_definitions = owner.shard.instrument_registry });
         const gateway = try allocator.create(execution.Gateway);
         defer allocator.destroy(gateway);
         gateway.init();
-        const route: execution.Route = .{ .account = 2, .adapter = adapter, .venue_identity = 1, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 7 } };
-        try gateway.add(route);
+        const feeds = [_]runtime.FeedConfiguration{.{ .binding = .{ .instrument = 3, .coin = "BTC", .product = .isolated_linear, .universe_index = 3, .size_decimals = 4, .rules_version = 1, .expected_metadata_digest = @splat(1), .quantity_scale = 4, .lot_atoms = 1, .price_scale = 6, .tick_atoms = 1 }, .subscription_set = 70, .session = 60 }};
+        const assembly = try allocator.create(runtime.Runtime);
+        defer allocator.destroy(assembly);
+        try runtime.Runtime.initInto(assembly, allocator, .{ .epoch_startup = .virgin, .profile = .{ .venue = 1, .account = 2, .session = 7, .funding = @splat(2), .environment = .simulation, .bindings = &bindings, .version = 1, .rules_version = 1, .config_version = 1, .bootstrap_identity = 1 }, .feeds = &feeds }, .{ .offline = .{ .transport = .{ .ptr = &io, .submit_fn = IO.submit, .query_fn = IO.query }, .authorizer = .{ .ptr = &io, .sign_fn = IO.sign, .check_fn = IO.check } } }, owner, gateway, .{ .ptr = &io, .now_fn = IO.now }, &budget, io.sink, try raw.DurableSink.init(memory.interface(), undefined, .{ .domain = .raw_ingress, .id = 8 }), .{ .domain = .control, .id = 94 });
+        const implementation = &assembly.private;
+        const adapter = implementation.adapter();
+        const route = gateway.routes[0];
         var bootstrap_buffer: [4096]u8 = undefined;
         try gateway.bootstrapDurableDispatchWithBuffer(memory.interface(), undefined, .{ .domain = .control, .id = 92 }, &bootstrap_buffer);
         try gateway.observeAuthorityFromShard(&owner.shard, .{ .account = 2, .effective_trading_authority = owner.shard.operational_state.effectiveTradingAuthority(), .reservation_identity = command.reservation_identity, .reservation = command.reservation, .primary_lease_expires_at_monotonic_ns = 20 * std.time.ns_per_s, .fencing_token = 1, .exchange_position = owner.shard.currentNetExchangePosition(3).?, .authority_barrier = 1 });
-        try std.testing.expectEqual(venue.SendResult.accepted, try gateway.sendFromShard(&owner.shard, command.command_id, 2 * std.time.ns_per_s));
+        try std.testing.expectEqual(venue.SendResult.accepted, try assembly.send(command.command_id, 2 * std.time.ns_per_s));
         try std.testing.expectEqual(@as(u64, 1), io.sends);
         const cloid = gateway.acceptedClientOrderId(2, command.command_id).?;
         try std.testing.expectEqual(@as(usize, 34), cloid.slice().len);
@@ -150,23 +362,23 @@ fn exerciseRecovery() !void {
         for (initial.slice()) |record| _ = try engine.applyStable(expected_dispatch, &dispatch_log, .{ .venue = record });
         const dispatch_recovered = try allocator.create(demo.Owner);
         defer allocator.destroy(dispatch_recovered);
-        try demo.Owner.recoverWithIngressInto(dispatch_recovered, memory.interface(), undefined, owner.stream, io.sink.stream);
+        try demo.Owner.recoverWithIngressInto(dispatch_recovered, memory.interface(), undefined, owner.stream, assembly.private_raw.stream);
         var dispatch_decoder: hl.HyperliquidVenueAdapter = .{ .profile = implementation.profile, .clock = implementation.clock, .auth = implementation.auth, .raw_sink = implementation.raw_sink, .transport = implementation.transport, .budget = &budget, .fencing_token = 1, .replay_only = true };
         try dispatch_decoder.adapter().start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 7, .request_capacity = 1, .output_capacity = 1, .asset_definitions = owner.shard.activatedAssets(), .instrument_definitions = owner.shard.instrument_registry });
         var dispatch_sweep: Sweep = .{ .decoder = &dispatch_decoder, .owner = dispatch_recovered, .expected = &initial, .last_raw_sequence = implementation.raw_sequence };
-        try dispatch_recovered.replayCommittedIngress(io.sink.stream, .{ .ptr = &dispatch_sweep, .consume_fn = Sweep.consume });
+        try dispatch_recovered.replayCommittedIngress(assembly.private_raw.stream, .{ .ptr = &dispatch_sweep, .consume_fn = Sweep.consume });
         try std.testing.expectEqual(initial.len, dispatch_sweep.count);
         try std.testing.expectEqualSlices(u8, &expected_dispatch.canonicalStateDigest(), &dispatch_recovered.shard.canonicalStateDigest());
         try std.testing.expectEqual(@as(u64, 1), io.sends);
         @memcpy(std.mem.asBytes(owner), std.mem.asBytes(dispatch_recovered));
         var seed_buffer: [192 * 1024]u8 = undefined;
         const seed = try implementation.exportResumeCheckpoint(&seed_buffer);
-        try io.sink.checkpoint();
-        const raw_receipt = try memory.interface().archiveReceipt(undefined, io.sink.stream);
+        try assembly.private_raw.checkpoint();
+        const raw_receipt = try memory.interface().archiveReceipt(undefined, assembly.private_raw.stream);
         var seed_digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(seed, &seed_digest, .{});
         const prefix_raw_sequence = implementation.raw_sequence;
-        try owner.checkpointPrivate(.{ .decision_stream = owner.stream.id, .decision_barrier = owner.shard.authoritativeBarrier(), .core_digest = owner.shard.canonicalStateDigest(), .raw_stream = io.sink.stream, .raw_sequence = prefix_raw_sequence, .raw_digest = initial.slice()[0].envelope.raw_evidence.digest, .raw_archive_root = raw_receipt.ordered_root, .adapter_session = 7, .canonical_stream = 7, .canonical_sequence = implementation.sequence, .seed_digest = seed_digest }, seed);
+        try owner.checkpointPrivate(.{ .decision_stream = owner.stream.id, .decision_barrier = owner.shard.authoritativeBarrier(), .core_digest = owner.shard.canonicalStateDigest(), .raw_stream = assembly.private_raw.stream, .raw_sequence = prefix_raw_sequence, .raw_digest = initial.slice()[0].envelope.raw_evidence.digest, .raw_archive_root = raw_receipt.ordered_root, .adapter_session = 7, .canonical_stream = 7, .canonical_sequence = implementation.sequence, .seed_digest = seed_digest }, seed);
         const reference = try allocator.create(engine.TradingShard);
         defer allocator.destroy(reference);
         @memcpy(std.mem.asBytes(reference), std.mem.asBytes(&owner.shard));
@@ -189,7 +401,7 @@ fn exerciseRecovery() !void {
             // Crash after durable raw capture, before applying the batch. Retire the old Owner.
             const restarted = try allocator.create(demo.Owner);
             defer allocator.destroy(restarted);
-            try demo.Owner.recoverWithIngressInto(restarted, memory.interface(), undefined, owner.stream, io.sink.stream);
+            try demo.Owner.recoverWithIngressInto(restarted, memory.interface(), undefined, owner.stream, assembly.private_raw.stream);
             var decoder: hl.HyperliquidVenueAdapter = .{ .profile = implementation.profile, .clock = implementation.clock, .auth = implementation.auth, .raw_sink = implementation.raw_sink, .transport = implementation.transport, .budget = &budget, .fencing_token = 1, .replay_only = true };
             try decoder.adapter().start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 7, .request_capacity = 1, .output_capacity = 1, .asset_definitions = owner.shard.activatedAssets(), .instrument_definitions = owner.shard.instrument_registry });
             const view = try demo.recoverPrivateCheckpoint(memory.interface(), undefined, owner.stream);
@@ -197,10 +409,10 @@ fn exerciseRecovery() !void {
             restarted.private_seed_restored = true;
             var sweep: Sweep = .{ .decoder = &decoder, .owner = restarted, .committed_sequence = Sweep.appliedThrough(restarted) };
             const sends_before = io.sends;
-            const raw_before = io.sink.next_sequence;
-            try restarted.replayCommittedIngress(io.sink.stream, .{ .ptr = &sweep, .consume_fn = Sweep.consume });
+            const raw_before = assembly.private_raw.next_sequence;
+            try restarted.replayCommittedIngress(assembly.private_raw.stream, .{ .ptr = &sweep, .consume_fn = Sweep.consume });
             try std.testing.expectEqual(sends_before, io.sends);
-            try std.testing.expectEqual(raw_before, io.sink.next_sequence);
+            try std.testing.expectEqual(raw_before, assembly.private_raw.next_sequence);
             try std.testing.expectEqualSlices(u8, &reference.canonicalStateDigest(), &restarted.shard.canonicalStateDigest());
             @memcpy(std.mem.asBytes(owner), std.mem.asBytes(restarted));
         }
@@ -236,12 +448,12 @@ fn exerciseRecovery() !void {
 
         // Exercise an actual recovery query and its safety result through the same durable public chain.
         const recovery_seed = try implementation.exportResumeCheckpoint(&seed_buffer);
-        try io.sink.checkpoint();
-        const recovery_raw_receipt = try memory.interface().archiveReceipt(undefined, io.sink.stream);
+        try assembly.private_raw.checkpoint();
+        const recovery_raw_receipt = try memory.interface().archiveReceipt(undefined, assembly.private_raw.stream);
         std.crypto.hash.sha2.Sha256.hash(recovery_seed, &seed_digest, .{});
         var last_raw_digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(fill, &last_raw_digest, .{});
-        try owner.checkpointPrivate(.{ .decision_stream = owner.stream.id, .decision_barrier = owner.shard.authoritativeBarrier(), .core_digest = owner.shard.canonicalStateDigest(), .raw_stream = io.sink.stream, .raw_sequence = implementation.raw_sequence, .raw_digest = last_raw_digest, .raw_archive_root = recovery_raw_receipt.ordered_root, .adapter_session = 7, .canonical_stream = 7, .canonical_sequence = implementation.sequence, .seed_digest = seed_digest }, recovery_seed);
+        try owner.checkpointPrivate(.{ .decision_stream = owner.stream.id, .decision_barrier = owner.shard.authoritativeBarrier(), .core_digest = owner.shard.canonicalStateDigest(), .raw_stream = assembly.private_raw.stream, .raw_sequence = implementation.raw_sequence, .raw_digest = last_raw_digest, .raw_archive_root = recovery_raw_receipt.ordered_root, .adapter_session = 7, .canonical_stream = 7, .canonical_sequence = implementation.sequence, .seed_digest = seed_digest }, recovery_seed);
         io.recover_funding = fill_first;
         var observed: c.AdapterOutputBatch = .{};
         _ = try adapter.trySend(.{ .order_reconciliation = .{ .identity = 898, .exchange_account = 2, .order = command.order_id } });
@@ -270,19 +482,19 @@ fn exerciseRecovery() !void {
         const fault_digest = owner.shard.canonicalStateDigest();
         const fault_recovered = try allocator.create(demo.Owner);
         defer allocator.destroy(fault_recovered);
-        try demo.Owner.recoverWithIngressInto(fault_recovered, memory.interface(), undefined, owner.stream, io.sink.stream);
+        try demo.Owner.recoverWithIngressInto(fault_recovered, memory.interface(), undefined, owner.stream, assembly.private_raw.stream);
         var fault_decoder: hl.HyperliquidVenueAdapter = .{ .profile = implementation.profile, .clock = implementation.clock, .auth = implementation.auth, .raw_sink = implementation.raw_sink, .transport = implementation.transport, .budget = &budget, .fencing_token = 1, .replay_only = true };
         try fault_decoder.adapter().start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 7, .request_capacity = 1, .output_capacity = 1, .asset_definitions = owner.shard.activatedAssets(), .instrument_definitions = owner.shard.instrument_registry });
         try fault_decoder.restoreResumeCheckpoint((try demo.recoverPrivateCheckpoint(memory.interface(), undefined, owner.stream)).seed);
         fault_recovered.private_seed_restored = true;
         var fault_sweep: Sweep = .{ .decoder = &fault_decoder, .owner = fault_recovered, .expected = &observed, .committed_sequence = Sweep.appliedThrough(fault_recovered) };
-        const raw_before_recovery = io.sink.next_sequence;
-        try fault_recovered.replayCommittedIngress(io.sink.stream, .{ .ptr = &fault_sweep, .consume_fn = Sweep.consume });
+        const raw_before_recovery = assembly.private_raw.next_sequence;
+        try fault_recovered.replayCommittedIngress(assembly.private_raw.stream, .{ .ptr = &fault_sweep, .consume_fn = Sweep.consume });
         try std.testing.expectEqual(observed.len, fault_sweep.count);
         try fault_decoder.finishReplay();
         try std.testing.expectEqualSlices(u8, &fault_digest, &fault_recovered.shard.canonicalStateDigest());
         try std.testing.expect(!fault_recovered.shard.operational_state.effectiveTradingAuthority());
-        try std.testing.expectEqual(raw_before_recovery, io.sink.next_sequence);
+        try std.testing.expectEqual(raw_before_recovery, assembly.private_raw.next_sequence);
         try std.testing.expectEqual(@as(u64, 1), io.sends);
     }
 }

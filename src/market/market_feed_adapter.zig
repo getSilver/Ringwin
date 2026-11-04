@@ -3,7 +3,7 @@
 const canonical = @import("../model/canonical_event.zig");
 const std = @import("std");
 
-pub const Environment = enum { simulation, demo };
+pub const Environment = enum { simulation, demo, testnet };
 pub const SubscriptionSetIdentity = u128;
 pub const MarketFeedSessionIdentity = u128;
 pub const Config = struct {

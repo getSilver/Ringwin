@@ -20,7 +20,7 @@ pub fn prepareNamespacedClientOrderId(_: *anyopaque, namespace: [16]u8, account:
     return canonical.ClientOrderId.init(&encoded);
 }
 
-pub const Environment = enum { simulation, demo };
+pub const Environment = enum { simulation, demo, testnet };
 
 pub const VenueConfig = struct {
     /// Copied only after Owner committed AssetDefinition activation. No implicit units.

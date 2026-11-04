@@ -251,7 +251,7 @@ class GridSampler:
         if any(not isinstance(r, InstrumentRules) for r in (first_rules, second_rules)):
             raise Rejected("missing_rules")
         if (first_rules.instrument == second_rules.instrument
-                or first_rules.base_asset != second_rules.base_asset
+                or first_rules.exposure_asset != second_rules.exposure_asset
                 or first_rules.quote_asset != second_rules.quote_asset):
             raise Rejected("pair_asset_scope")
         self.rules = (first_rules, second_rules)

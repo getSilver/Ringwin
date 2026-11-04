@@ -42,6 +42,8 @@ class LegSpec:
         if (self.kind not in ("spot", "linear") or type(self.direction) is not int
                 or self.direction not in (-1, 1) or self.kind == "spot" and self.direction != 1):
             raise b.Rejected("leg_product")
+        if self.kind != "spot" and self.rules.approved_base_pair is not None:
+            raise b.Rejected("pairing_requires_spot")
         e.integer(self.target_lots, self.rules.min_lots)
         if self.target_lots >= 1 << 63:
             raise b.Rejected("wire_quantity")
@@ -86,7 +88,7 @@ class Plan:
                 or a.kind == z.kind == "spot"):
             raise b.Rejected("pair_scope")
         for leg in self.legs:
-            if ((leg.rules.base_asset, leg.rules.quote_asset) != (self.policy.base_asset, self.policy.quote_asset)
+            if ((leg.rules.exposure_asset, leg.rules.quote_asset) != (self.policy.base_asset, self.policy.quote_asset)
                     or e.exact(leg.target_lots*leg.rules.base_atoms_per_lot) < self.policy.original_base
                     or leg.kind == "linear" and leg.target_lots*leg.rules.base_atoms_per_lot != self.policy.original_base):
                 raise b.Rejected("quantity_scope")

@@ -28,7 +28,9 @@ def quote(p=None, *, ticks=1000, at=0, bid=1000, economic_ref=None, applied=((),
     evaluated_policy = replace(p.policy, at_ns=T+at)
     position = entry(10)
     legs = [replace(leg, rules=p.legs[i].rules, kind=p.legs[i].kind,
-                    direction=p.legs[i].direction, account=p.legs[i].account) for i, leg in enumerate(position.legs)]
+                    direction=p.legs[i].direction, account=p.legs[i].account,
+                    entries=tuple(replace(t, fee=replace(t.fee, asset=p.legs[i].rules.quote_asset)) for t in leg.entries),
+                    exit_fee=replace(leg.exit_fee, fee_asset=p.legs[i].rules.quote_asset)) for i, leg in enumerate(position.legs)]
     spec = legs[p.maker_leg]
     legs[p.maker_leg] = replace(spec, entries=(replace(spec.entries[0], ticks=ticks),))
     for i, prefix in enumerate(applied):

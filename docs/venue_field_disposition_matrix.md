@@ -245,11 +245,13 @@ Profile 是一项不可变配置事实，键为
 `Venue + Environment + ExchangeAccount + ProductScope + CapabilityVersion + RulesVersion + ConfigVersion`。
 同一个 Venue 的现货、线性、Demo/Testnet 和生产账户不能互相继承资格。
 
-Hyperliquid 当前只有本节前的协议合同及样本，没有运行时 Profile、签名/发送实现或 Testnet
-资格；02–08 的实现与验收完成前不加入已实现能力表。
+Hyperliquid 已有签名、公共/私有 Adapter、有界恢复及离线运行组装；以下 Profile 仍是配置候选，
+不代表 Testnet 资格。运行配置与批准摘要、epoch、权限边界见 [运行接线](hyperliquid-runtime.md)。
 
 | Profile candidate | 精确范围 | 文档证据 | 实现/资格证据 | 允许状态 |
 |---|---|---|---|---|
+| `hyperliquid-spot-testnet-v1` | Testnet、明确资金账户及批准的 token/pair/Asset | §3.8、01 固定合同 | 03/05 的 API wallet、GTC/IOC/ALO、CLOID、独立 report/Fill；07 runtime 配置、账户路由、Owner/Host 与恢复离线证据 | 离线验证；真实资产身份、市场和 Testnet 写入验收 pending；生产拒绝。 |
+| `hyperliquid-linear-testnet-v1` | Testnet、标准 USDC 线性逐仓及明确账户/品种 | §3.8、01 固定合同 | 同上，支持 VenueReduceOnly；07 验证 limit + IOC 的既有 Host 表示、capability 与授权分离、共享预算及 Unknown | 离线验证；完整历史/账户屏障仍受 06 限制；Testnet 与生产资格未取得。 |
 | `okx-demo-spot-v1` | OKX + Demo + 指定 ExchangeAccount + BTC-USDT SPOT | §1.1 OKX orders/account/instruments | `src/adapters/okx/okx_order_entry.zig` 的固定订单编码和 tests；`src/adapters/okx/okx_private_reconciliation.zig` 的 RawIngress/bootstrap tests | `demo_qualified` 仅在单独的 Demo 证据通过后；生产一律 `U:authority`。 |
 | `okx-demo-linear-v1` | OKX + Demo + 指定 ExchangeAccount + BTC-USDT-SWAP isolated | §1.1 OKX orders/positions/instruments | 同上；只声明明确测试过的 limit/IOC/FOK/post-only、native amend、批量和 VenueReduceOnly | 不得扩展到 cross、hedge、auto-add margin 或其它 instrument。 |
 | `binance-spot-testnet-v1` | Binance Spot Testnet + 指定账户 + BTC-USDT | §1.1 Spot messages/exchangeInfo；§3.5 public depth | `src/adapters/binance/binance_market_feed.zig` 的官方 fixture、RawIngress 与 MarketFeedAdapter contract；`src/adapters/binance/binance_venue_adapter.zig` 与 `src/adapters/binance/binance_private_reconciliation.zig` 的私有 seam、分页 bootstrap、去重和显式 Testnet/no-withdraw/notional guard tests；`src/testing/acceptance/venues/binance_testnet_acceptance.zig` 的前后清洁状态与证据范围 tests | `testnet_run`；不授予生产交易或 Linux 性能资格。 |

@@ -99,7 +99,7 @@ pub const Budget = struct {
     start: u64 = 0,
     used: u16 = 0,
     limit: u16 = 100,
-    fn take(self: *Budget, now: u64, cancel: bool, weight: u16) bool {
+    pub fn take(self: *Budget, now: u64, cancel: bool, weight: u16) bool {
         if (self.limit < 2 or self.limit > 1200 or now < self.start) return false;
         if (now - self.start >= 60 * std.time.ns_per_s) {
             self.start = now;
@@ -559,7 +559,7 @@ pub const HyperliquidVenueAdapter = struct {
         if (self.state == .running) return error.AlreadyStarted;
         if (self.state == .stopped) return error.Stopped;
         const p = self.profile;
-        if ((p.environment == .demo and (!config.native_settlement_atoms or config.instrument_definitions == null)) or self.fencing_token == 0 or p.venue == 0 or p.account == 0 or p.session == 0 or p.version == 0 or p.rules_version == 0 or p.config_version == 0 or
+        if ((p.environment != .simulation and (!config.native_settlement_atoms or config.instrument_definitions == null)) or self.fencing_token == 0 or p.venue == 0 or p.account == 0 or p.session == 0 or p.version == 0 or p.rules_version == 0 or p.config_version == 0 or
             std.mem.allEqual(u8, &p.funding, 0) or config.venue != p.venue or config.exchange_account != p.account or
             config.adapter_session != p.session or config.environment != p.environment or config.request_capacity == 0 or config.output_capacity == 0 or
             p.bindings.len == 0 or p.bindings.len > 8) return error.InvalidConfig;
@@ -727,13 +727,13 @@ pub const HyperliquidVenueAdapter = struct {
             if (known.sent or !std.meta.eql(known.command, command)) return error.UnknownOrder;
         } else if (self.order_count == self.orders.len) return error.Capacity;
         for (self.orders[0..self.order_count]) |known| if (known.command.orderIdentity() != command.orderIdentity() and std.meta.eql(known.command.client_order_id, command.client_order_id)) return error.OrderConflict;
-        const tif: c.TimeInForce = switch (command.order_type) {
-            .limit => .good_til_canceled,
-            .ioc => .immediate_or_cancel,
-            .post_only => .post_only,
-            else => return error.Unsupported,
+        const supported_tif = switch (command.order_type) {
+            .limit => command.time_in_force == .good_til_canceled or command.time_in_force == .immediate_or_cancel,
+            .ioc => command.time_in_force == .immediate_or_cancel,
+            .post_only => command.time_in_force == .post_only,
+            else => false,
         };
-        if (tif != command.time_in_force or command.market_protection_price != null or (command.venue_reduce_only and b.product != .isolated_linear)) return error.Unsupported;
+        if (!supported_tif or command.market_protection_price != null or (command.venue_reduce_only and b.product != .isolated_linear)) return error.Unsupported;
         const qty = command.quantity orelse return error.InvalidQuantity;
         const px = command.limit_price orelse return error.InvalidPrice;
         if (qty.instrument != b.instrument or px.instrument != b.instrument or qty.rules_version != self.profile.rules_version or px.rules_version != self.profile.rules_version or qty.lots <= 0) return error.InvalidQuantity;

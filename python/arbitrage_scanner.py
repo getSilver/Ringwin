@@ -120,7 +120,7 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns):
     pairs = {}
     for a, z in combinations(sorted(observations, key=lambda x: x.identity), 2):
         if (a.venue == z.venue or a.account == z.account or a.rules.instrument == z.rules.instrument
-                or (a.rules.base_asset, a.rules.quote_asset) != (z.rules.base_asset, z.rules.quote_asset)):
+                or (a.rules.exposure_asset, a.rules.quote_asset) != (z.rules.exposure_asset, z.rules.quote_asset)):
             continue
         pairs[a.identity, z.identity] = a, z
     if len(pairs) > 256:
@@ -157,7 +157,7 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns):
                     policy = plan.policy
                     reason = health or ("expired" if at_ns >= plan.valid_until_ns or at_ns >= policy.deadline_ns else
                                         "evaluation_cutoff" if policy.at_ns != at_ns else "")
-                    if (policy.base_asset, policy.quote_asset) != (a.rules.base_asset, a.rules.quote_asset):
+                    if (policy.base_asset, policy.quote_asset) != (a.rules.exposure_asset, a.rules.quote_asset):
                         raise b.Rejected("scan_asset_scope")
                     for scenario in plan.scenarios:
                         if len(scenario.entry.legs) != 2:

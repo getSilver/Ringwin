@@ -636,6 +636,18 @@ fn initializeResidualOwnerScenario(owner: *demo.Owner, scenario: Scenario) !void
     try owner.checkpoint();
 }
 
+pub fn initializePythonOwnerWithSettlement(owner: *demo.Owner, settlement: u64) !void {
+    if (settlement != 1 and settlement != 3) return error.UnsupportedFixtureAsset;
+    try initializeWithSettlement(owner, .joint, null, settlement, false);
+    try prepareTradingForScenario(owner, .joint);
+}
+
+pub fn initializeSpotLinearOwnerWithSettlement(owner: *demo.Owner, settlement: u64) !void {
+    if (settlement != 1 and settlement != 3) return error.UnsupportedFixtureAsset;
+    try initializeWithSettlement(owner, .joint, null, settlement, true);
+    try prepareTradingWithSpot(owner, .joint, true);
+}
+
 pub fn initializePythonOwner(owner: *demo.Owner) !void {
     try initializeForScenario(owner, .joint);
     try prepareTradingForScenario(owner, .joint);
@@ -757,6 +769,10 @@ fn initializeForScenario(owner: *demo.Owner, scenario: Scenario) !void {
 }
 
 fn initializeForScenarioWithConfiguration(owner: *demo.Owner, scenario: Scenario, manifest: ?*const allocation.Configuration) !void {
+    return initializeWithSettlement(owner, scenario, manifest, 1, false);
+}
+
+fn initializeWithSettlement(owner: *demo.Owner, scenario: Scenario, manifest: ?*const allocation.Configuration, settlement: u64, first_spot: bool) !void {
     const spot = scenario == .cycle_spot_zero or scenario == .cycle_spot_residual or carrying(scenario);
     const shard = &owner.shard;
     var rows = try configurationRows();
@@ -776,6 +792,17 @@ fn initializeForScenarioWithConfiguration(owner: *demo.Owner, scenario: Scenario
         for (rows[0 .. rows.len - 1]) |row| try configuration.apply(row);
         rows[0].begin.expected_digest = configuration.contentDigest();
     }
+    if (settlement != 1) {
+        for (&rows) |*row| switch (row.*) {
+            .asset_limit => |*value| value.asset = settlement,
+            .account_limit => |*value| value.asset = settlement,
+            .slice => |*value| value.asset = settlement,
+            else => {},
+        };
+        var configured: allocation.Configuration = .{};
+        for (rows[0 .. rows.len - 1]) |row| try configured.apply(row);
+        rows[0].begin.expected_digest = configured.contentDigest();
+    }
     if (manifest) |configured| rows[0].begin.expected_digest = configured.header.?.expected_digest;
     if (scenario != .four_accounts) try owner.pinDeploymentDigest(rows[0].begin.expected_digest);
     var identity: u64 = 1;
@@ -793,8 +820,8 @@ fn initializeForScenarioWithConfiguration(owner: *demo.Owner, scenario: Scenario
         for (rows[0 .. rows.len - 1]) |row| try configuration.apply(row);
         for ([_]u128{ 40, 50 }, [_]u64{ 1, 21 }) |account, venue| {
             try configuration.apply(.{ .account = .{ .identity = account, .venue = venue } });
-            try configuration.apply(.{ .account_limit = .{ .account = account, .asset = 1, .atoms = 20 } });
-            try configuration.apply(.{ .slice = .{ .account = account, .asset = 1, .domain = 1, .atoms = 20 } });
+            try configuration.apply(.{ .account_limit = .{ .account = account, .asset = settlement, .atoms = 20 } });
+            try configuration.apply(.{ .slice = .{ .account = account, .asset = settlement, .domain = 1, .atoms = 20 } });
         }
         try configuration.apply(.{ .ownership = .{ .account = 50, .instrument = 105, .domain = 1 } });
         rows[0].begin.expected_digest = configuration.contentDigest();
@@ -812,7 +839,12 @@ fn initializeForScenarioWithConfiguration(owner: *demo.Owner, scenario: Scenario
     }
     _ = try owner.apply(.{ .core = .{ .identity = identity, .payload = .{ .decision_domain_bound = .{ .domain = 1, .stream = 91 } } } });
     identity += 1;
-    for (@import("../../../trading/asset_registry.zig").testDefinitions(6, 8)) |definition| {
+    var definitions = @import("../../../trading/asset_registry.zig").testDefinitions(6, 8);
+    if (settlement != 1) {
+        definitions[0].asset = settlement;
+        for (definitions[0].code_bindings[0..definitions[0].code_binding_count]) |*binding| binding.* = try trading.canonical.AssetCodeBinding.init(binding.venue, "USDC");
+    }
+    for (definitions) |definition| {
         _ = try owner.apply(.{ .core = .{ .identity = identity, .payload = .{ .asset_definition_activated = definition } } });
         identity += 1;
     }
@@ -823,10 +855,11 @@ fn initializeForScenarioWithConfiguration(owner: *demo.Owner, scenario: Scenario
     const balances = [_]i128{ 1000, 2000, 3000, 4000 };
     const transfers = [_]i128{ 400, 600, 800, 1000 };
     for (accounts[0..account_count], instruments[0..account_count], venues[0..account_count], balances[0..account_count], transfers[0..account_count]) |account, instrument, venue, balance, transfer| {
+        const cash = spot or (first_spot and instrument == 101);
         const payloads = [_]trading.CorePayload{
-            .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = instrument, .quantity_denominator = 10000, .reservation_model = if (spot) .cash else .leveraged, .product = if (spot) .spot else .isolated_linear, .venue = venue, .base_asset = if (spot) 0x425443 else 0 } },
-            .{ .margin_rules_activated = .{ .version = 1, .instrument = instrument } },
-            .{ .account_configuration = .{ .exchange_account_identity = account } },
+            .{ .instrument_rules_activated = .{ .version = 1, .instrument_identity = instrument, .quantity_denominator = 10000, .reservation_model = if (cash) .cash else .leveraged, .product = if (cash) .spot else .isolated_linear, .venue = venue, .settlement_asset = settlement, .base_asset = if (cash) 0x425443 else 0 } },
+            .{ .margin_rules_activated = .{ .version = 1, .instrument = instrument, .native_settlement_atoms = settlement != 1 } },
+            .{ .account_configuration = .{ .exchange_account_identity = account, .settlement_asset = settlement } },
             .{ .exchange_balance = .{ .cash_atoms = balance } },
             .exchange_positions,
             .{ .opening_balance = .{ .cash_atoms = balance } },
@@ -853,7 +886,7 @@ fn initializeForScenarioWithConfiguration(owner: *demo.Owner, scenario: Scenario
         var grant: trading.CoreEvent = .{ .identity = identity, .account_scope = account, .payload = .{ .risk_lease_granted = .{ .amount_atoms = limit } } };
         try std.testing.expectError(error.UnverifiedRiskLeaseAllocation, shard.apply(.{ .core = grant }));
         try std.testing.expectEqualSlices(u8, &before, &shard.canonicalStateDigest());
-        grant.payload.risk_lease_granted.allocation = .{ .configuration_digest = rows[0].begin.expected_digest, .account = account, .asset = 1, .domain = 1, .stream = 91 };
+        grant.payload.risk_lease_granted.allocation = .{ .configuration_digest = rows[0].begin.expected_digest, .account = account, .asset = settlement, .domain = 1, .stream = 91 };
         grant.payload.risk_lease_granted.amount_atoms = limit + 1;
         try std.testing.expectError(error.RiskLeaseOversubscribed, shard.apply(.{ .core = grant }));
         grant.payload.risk_lease_granted.amount_atoms = limit;
@@ -871,9 +904,9 @@ fn initializeForScenarioWithConfiguration(owner: *demo.Owner, scenario: Scenario
             .position_count = 0,
             .margin_count = if (account <= 30) 2 else 1,
         };
-        const zero: trading.canonical.AssetAmount = .{ .asset = 1, .atoms = 0 };
-        const amount: trading.canonical.AssetAmount = .{ .asset = 1, .atoms = balance };
-        bootstrap.balances[0] = .{ .asset = 1, .total = amount, .available = amount, .held = zero, .cash_balance = amount, .liability = zero, .isolated_liability = zero, .cross_liability = zero };
+        const zero: trading.canonical.AssetAmount = .{ .asset = settlement, .atoms = 0 };
+        const amount: trading.canonical.AssetAmount = .{ .asset = settlement, .atoms = balance };
+        bootstrap.balances[0] = .{ .asset = settlement, .total = amount, .available = amount, .held = zero, .cash_balance = amount, .liability = zero, .isolated_liability = zero, .cross_liability = zero };
         bootstrap.margins[0] = .{ .instrument = instrument, .amount = zero, .initial_margin = zero, .maintenance_margin = zero, .isolated_equity = zero };
         bootstrap.margins[1] = bootstrap.margins[0];
         bootstrap.margins[1].instrument = if (account == 20) 103 else 104;
@@ -895,6 +928,11 @@ fn initializeForScenarioWithConfiguration(owner: *demo.Owner, scenario: Scenario
 }
 
 fn prepareTradingForScenario(owner: *demo.Owner, scenario: Scenario) !void {
+    return prepareTradingWithSpot(owner, scenario, false);
+}
+
+fn prepareTradingWithSpot(owner: *demo.Owner, scenario: Scenario, first_spot: bool) !void {
+    const settlement = owner.shard.economic_projection.settlement_asset;
     const spot = scenario == .cycle_spot_zero or scenario == .cycle_spot_residual or carrying(scenario);
     const controls = [_]trading.CorePayload{
         .{ .control_command = .{ .command_identity = 900, .content_hash = 900, .target_identity = 1, .expected_version = 0, .expires_at = std.math.maxInt(u64), .kind = .start_recovery } },
@@ -917,15 +955,16 @@ fn prepareTradingForScenario(owner: *demo.Owner, scenario: Scenario) !void {
                 .product = if (scenario == .cycle_spot_carry and instrument == 103) .spot else .isolated_linear,
                 .base_asset = if (scenario == .cycle_spot_carry and instrument == 103) 0x425443 else 0,
                 .venue = venue,
+                .settlement_asset = settlement,
             } } }));
-            _ = try owner.apply(fixture.atGroup(42, .{ .identity = @intCast(960 + instrument), .account_scope = account, .payload = .{ .margin_rules_activated = .{ .version = 1, .instrument = instrument } } }));
+            _ = try owner.apply(fixture.atGroup(42, .{ .identity = @intCast(960 + instrument), .account_scope = account, .payload = .{ .margin_rules_activated = .{ .version = 1, .instrument = instrument, .native_settlement_atoms = settlement != 1 } } }));
         }
         _ = try owner.apply(fixture.atGroup(42, .{ .identity = @intCast(1000 + instrument), .account_scope = account, .payload = .{ .capability_profile_activation = .{
             .exchange_account = account,
             .instrument = instrument,
             .venue = venue,
             .environment = .simulation,
-            .product = if ((spot and instrument <= 102) or (scenario == .cycle_spot_carry and instrument == 103)) .spot else .isolated_linear,
+            .product = if ((spot and instrument <= 102) or (first_spot and instrument == 101) or (scenario == .cycle_spot_carry and instrument == 103)) .spot else .isolated_linear,
             .version = 1,
             .rules_version = 1,
             .config_version = 1,

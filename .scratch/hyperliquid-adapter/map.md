@@ -23,7 +23,7 @@ Status: open
 
 ## Route
 
-以下八张实施票已按用户确认发布；01–06 及实施 04 时追加的共享前置 04a 已在 `feat/hyperliquid-adapter` resolved；07–08 仍 open、未认领，按依赖逐票推进。
+以下八张实施票已按用户确认发布；01–07 及实施 04 时追加的共享前置 04a 已在 `feat/hyperliquid-adapter` resolved；08 仍 open、未认领，按依赖逐票推进。
 
 | 切片 | 交付与验收 | 前置 |
 |---|---|---|
@@ -43,10 +43,11 @@ Status: open
 
 ## Frontier
 
-- [07 运行与跨所接线](issues/07-runtime-cross-venue-wiring.md)：open，04/06 已完成，无未完成前置，尚未认领。
+- [08 分批 Testnet 验收](issues/08-testnet-qualification.md)：open、未认领；07 的离线前置已完成，在线写入仍需独立明确授权及可用市场，不自动开始。
 
 ## Decisions so far
 
+- 2026-11-04：按用户要求完成 [07](issues/07-runtime-cross-venue-wiring.md)：批准配置/真实 capability、独立 Testnet 权限边界、持久公共 epoch/generation 与捕获尾部恢复、现有主入口及 Web/package/Host 接线；既有策略支持同结算资产 USDC—USDC 与显式批准的同单位包装现货配对，保留真实资产身份。实际离线入口覆盖 24 种组合；Debug/ReleaseSafe 定向各 35/35，最终完整 ReleaseSafe 二进制 870/870，Python 策略 225/225、配对 4/4、Web/Host 3/3；两轴复审无阻塞。Zig stderr 诊断的误导性 `failed command` 已按本机源码核对，完整直接运行退出 0。07 resolved，08 未自动开始；真实 transport/共享 egress/在线节点资源、指定 BTC/ETH 现货市场和 Testnet/生产资格仍 pending。
 - 2026-11-03：按用户要求完成 [06](issues/06-reconciliation-recovery.md)：固定经济窗口的八项有界恢复查询、原始请求/页/终止证据、发送上下文与查询结果回放、原命令/Unknown/终态正面证据的绑定检查点、明确的不完整尾部拒绝与只读恢复。公开 Gateway→Adapter→Owner→DurableStore 验证发送及原文提交后的崩溃、两种 report/Fill 顺序、归档后重复、真实查询/故障回放与 snapshot 加尾部摘要收敛，回放零发送、不重授权限。统一 64 MiB 主入口 Debug/ReleaseSafe 定向各 21/21，最终完整 ReleaseSafe 868/868；Standards/Spec 审查问题已修复并复审无阻塞。账户共同屏障、历史保留、资金费修订与强制执行来源无法证明的范围仍保持 pending；06 resolved，07 未自动开始，无 Testnet 写入或生产资格。
 - 2026-11-03：按用户要求完成 [05](issues/05-orders-private-facts.md)：Hyperliquid VenueAdapter 的 Gtc/Ioc/Alo、永续 Reduce-only、CLOID 持久发送接点、取消与只读查询、独立 report/Fill、费用/返佣、受批准 token 绑定的账户增量、有界背压/限流与安全故障。恢复模式撤单沿用 Gateway 风险分类，旧 fencing 仍拒绝；部分聚合保留 oid/Unknown 以接受迟到真实 Fill。Debug/ReleaseSafe 定向各 15/15，真实凭证签名定向 2/2，最终完整 ReleaseSafe 862/862；Standards 无实质阻塞，Spec 两项 P1 修复并复审通过。05 resolved；06 未自动开始。历史覆盖、完整恢复、真实 transport/全局额度接线与 Testnet 写入资格仍由 06–08 分别完成。
 - 2026-11-03：按用户要求完成 [04](issues/04-public-market-feed.md) 及真实共享前置 [04a](issues/04a-market-trade-contract.md)：独立公共行情、批准元数据摘要及 margin table/重启变化校验、有限深度、公共成交、分离参考价、带真实时点的精确费率、健康与背压/停机、公开核心与 Host、RawIngress/规范/快照加尾恢复。最终 Debug/ReleaseSafe 定向各 13/13、完整 ReleaseSafe 848/848、Python Host 8/8、native 构建 8/8；两轴复审无剩余阻塞。当前 canonical 20 / codec 15 / journal 52 / state 56 / registry 50，旧格式拒绝。实施限制与实际命令见票证；05 未自动开始，真实 transport/共享 IP 限流/部署 epoch 与摘要审批由后续接线完成，无在线或生产资格。
@@ -80,11 +81,11 @@ Status: open
 
 以下是实施前的协议核实与部署实例输入，不应把尚无证据的实现细节视为已批准事实；不再重新询问已确认的业务范围。
 
-- 04 已要求每个公共行情 Binding 绑定经批准的 `expected_metadata_digest`，永续覆盖选中产品及其引用的完整 margin table；07 需接入既有配置审批并恢复 durable epoch 高水位，不得在首次观察/重启时自行批准摘要。
+- 04 已要求每个公共行情 Binding 绑定经批准的 `expected_metadata_digest`，永续覆盖选中产品及其引用的完整 margin table；07 已接入批准配置摘要并恢复 durable epoch 高水位。部署实例仍须提供真实批准配置，不得在首次观察/重启时自行批准摘要。
 - BTC/ETH 现货对应的实际 token、包装/桥接资产及 Testnet 可用性。
-- 现有跨所策略规格限定 USDT，需扩展到同结算资产的 USDC—USDC 组合；不引入跨币种组合。
+- 07 已将既有跨所策略扩展到同结算资产的 USDC—USDC 组合，不引入跨币种组合；真实市场与资金配置仍待在线验收。
 - 01 已固定上游签名/nonce 协议，03 已完成凭证、nonce 持久生命周期和主备 fencing 的离线实现；真实 agent 授权、共享存储与外部隔离仍须部署实例验证。
-- 01 已交付订单、行情、限流、Unknown 与补回的[协议合同](../../docs/research/2026-11-02-hyperliquid-protocol-contract.md)；02–06 仍须完成共享表达、Adapter 和完整性证据，资金费/ADL 身份等未证明项保持 pending。
+- 01 已交付订单、行情、限流、Unknown 与补回的[协议合同](../../docs/research/2026-11-02-hyperliquid-protocol-contract.md)；02–07 已交付共享表达、Adapter、恢复及离线运行证据，资金费/ADL 身份等未证明项与在线资格保持 pending。
 - 跨所验收对手 Venue、产品组合与资金配置。
 
 ## Testnet 只读元数据核查

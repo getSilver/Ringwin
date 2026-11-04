@@ -128,6 +128,8 @@ Write-Output '== phase=four_shard_wave'
 # faults, margin break latching, and three recovery paths that must converge
 # to one shared summary digest. Historical replay never resends side effects.
 $fourShardEvidence = Invoke-Captured @('run', (Join-Path $workspace 'src\main.zig'), '-OReleaseSafe', '--', '--four-shard-acceptance')
+$hyperliquidEvidence = Invoke-Captured @('run', (Join-Path $workspace 'src\main.zig'), '-OReleaseSafe', '--stack', '67108864', '--', '--hyperliquid-offline')
+if (-not ($hyperliquidEvidence -match 'hyperliquid_runtime_offline=passed')) { throw 'Hyperliquid runtime offline acceptance missing' }
 
 Write-Output '== phase=python_seam'
 # StrategyHost product acceptance: same core risk/OMS seam for Python
