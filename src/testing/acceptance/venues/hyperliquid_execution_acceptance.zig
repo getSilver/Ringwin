@@ -289,6 +289,7 @@ test "Hyperliquid Gateway durable CLOID Owner raw crash recovery and snapshot ta
         failure: ?anyerror = null,
         fn run(self: *@This()) void {
             exerciseRecovery() catch |err| {
+                if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
                 self.failure = err;
             };
         }
@@ -301,8 +302,8 @@ test "Hyperliquid Gateway durable CLOID Owner raw crash recovery and snapshot ta
 
 fn exerciseRecovery() !void {
     const allocator = std.testing.allocator;
-    var expected: ?@import("../../../trading/trading_shard.zig").EconomicSummary = null;
-    for ([_]bool{ false, true }) |fill_first| {
+    var expected: [4]?engine.EconomicSummary = @splat(null);
+    for ([_][]const u8{ "0.25", "0", "-0.001", "-0.000001" }, 0..) |fee_text, fee_index| for ([_]bool{ false, true }) |fill_first| {
         const memory = try allocator.create(durable.MemoryAdapter);
         defer allocator.destroy(memory);
         memory.* = .initWithAllocator(allocator);
@@ -311,6 +312,19 @@ fn exerciseRecovery() !void {
         defer allocator.destroy(owner);
         try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 91 });
         for (fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .leveraged)) |event| _ = try owner.apply(event);
+        for (owner.shard.instrument_registry.entries[0..owner.shard.instrument_registry.count]) |configured| {
+            var margin = configured.margin;
+            margin.instrument = configured.instrument;
+            margin.version += 1;
+            margin.native_settlement_atoms = true;
+            _ = try owner.apply(fixture.atGroup(11, .{ .identity = @intCast(configured.instrument), .payload = .{ .margin_rules_activated = margin } }));
+        }
+        var usdc = @import("../../../trading/asset_registry.zig").testDefinitions(6, 8)[0];
+        usdc.asset = 5;
+        usdc.code_bindings = @splat(.{});
+        usdc.code_binding_count = 1;
+        usdc.code_bindings[0] = try c.AssetCodeBinding.init(1, "USDC");
+        _ = try owner.apply(fixture.atGroup(11, .{ .identity = 5, .payload = .{ .asset_definition_activated = usdc } }));
         const digest = owner.shard.canonicalStateDigest();
         _ = try owner.apply(fixture.atGroup(11, .{ .identity = 3, .payload = .{ .host_activated = .{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .session = .{ .fencing = 1, .shard = 0, .generation = 1 }, .activation_barrier = 0, .state_digest = digest } } }));
         try owner.sealBootstrap();
@@ -388,17 +402,32 @@ fn exerciseRecovery() !void {
         var tail = engine.journal.Journal.initAt(owner.shard.authoritativeBarrier() + 1);
         var frame: [2048]u8 = undefined;
         const report = try std.fmt.bufPrint(&frame, "[{{\"order\":{{\"coin\":\"BTC\",\"side\":\"B\",\"limitPx\":\"50100\",\"sz\":\"0\",\"origSz\":\"0.01\",\"oid\":42,\"cloid\":\"{s}\",\"timestamp\":1800000000000}},\"status\":\"filled\",\"statusTimestamp\":1800000000001}}]", .{cloid.slice()});
-        const fill = "[{\"coin\":\"BTC\",\"px\":\"50100\",\"sz\":\"0.01\",\"side\":\"B\",\"time\":1800000000001,\"oid\":42,\"tid\":8,\"fee\":\"0.25\",\"feeToken\":\"USDT\",\"crossed\":true,\"closedPnl\":\"0\",\"dir\":\"Open Long\"}]";
+        const fill_template = "[{\"coin\":\"BTC\",\"px\":\"50100\",\"sz\":\"0.01\",\"side\":\"B\",\"time\":1800000000001,\"oid\":42,\"tid\":8,\"fee\":\"0.25\",\"feeToken\":\"USDT\",\"crossed\":true,\"closedPnl\":\"0\",\"dir\":\"Open Long\"}]";
+        const fee_frame = try std.mem.replaceOwned(u8, allocator, fill_template, "0.25", fee_text);
+        defer allocator.free(fee_frame);
+        const fee_asset: u64 = if (fee_index >= 2) 5 else 1;
+        const fill = try std.mem.replaceOwned(u8, allocator, fee_frame, "USDT", if (fee_asset == 5) "USDC" else "USDT");
+        defer allocator.free(fill);
+        const expected_fee: i128 = if (std.mem.eql(u8, fee_text, "0.25")) 250000 else 0;
+        const expected_rebate: i128 = if (std.mem.eql(u8, fee_text, "-0.001")) 1000 else if (std.mem.eql(u8, fee_text, "-0.000001")) 1 else 0;
         var fill_identity: u64 = 0;
+        var original_fill: c.AdapterOutputBatch = .{};
         for (0..2) |index| {
             const is_fill = (index == 0) == fill_first;
             try implementation.ingest(allocator, 7, @splat(2), if (is_fill) .fills else .orders, times, if (is_fill) fill else report);
             const batch = (try adapter.tryDrain()).?;
             for (batch.slice()) |record| {
-                if (record.event == .fill) fill_identity = @intCast(record.event.fill.identity);
+                if (record.event == .fill) {
+                    try original_fill.append(record);
+                    fill_identity = @intCast(record.event.fill.identity);
+                    try std.testing.expectEqualDeep(c.AssetAmount{ .asset = fee_asset, .atoms = expected_fee }, record.event.fill.fee.?);
+                    if (expected_rebate > 0) try std.testing.expectEqualDeep(c.AssetAmount{ .asset = fee_asset, .atoms = expected_rebate }, record.event.fill.rebate.?);
+                }
                 _ = try engine.applyStable(reference, &tail, .{ .venue = record });
             }
-            // Crash after durable raw capture, before applying the batch. Retire the old Owner.
+            // Keep a raw-only crash and an online Owner application in each arrival order.
+            if (index == 1) try owner.applyAdapterBatch(batch);
+            // Retire the old Owner and recover the committed prefix plus raw tail.
             const restarted = try allocator.create(demo.Owner);
             defer allocator.destroy(restarted);
             try demo.Owner.recoverWithIngressInto(restarted, memory.interface(), undefined, owner.stream, assembly.private_raw.stream);
@@ -423,10 +452,18 @@ fn exerciseRecovery() !void {
         try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &snapshot_restored.canonicalStateDigest());
         try std.testing.expectEqual(@as(i64, 100), try owner.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
         try std.testing.expectEqual(@as(i64, 100), owner.shard.oms.orderById(command.order_id).?.cumulative_quantity);
-        try std.testing.expectEqual(@as(i64, 250000), owner.shard.economicSummary().portfolio.fee_atoms);
+        try std.testing.expectEqual(expected_fee, owner.shard.economicSummary().portfolio.fee_atoms);
+        try std.testing.expectEqual(@as(i128, 0), owner.shard.economicSummary().portfolio.rebate_atoms);
+        if (fee_asset == 5) {
+            const native = owner.shard.economic_projection.portfolio.nativeAsset(5).?;
+            try std.testing.expectEqual(expected_rebate, native.rebate_atoms);
+            try std.testing.expectEqual(expected_rebate, native.balance_atoms);
+            try std.testing.expectEqual(@as(i128, 0), native.fee_atoms);
+            try std.testing.expectEqual(expected_rebate, owner.shard.economic_projection.exchange.nativeAsset(5).?.rebate_atoms);
+        }
         const economics = owner.shard.economicSummary();
         // Each virgin Gateway creates a fresh random namespace and therefore a different CLOID.
-        if (expected) |value| try std.testing.expectEqualDeep(value, economics) else expected = economics;
+        if (expected[fee_index]) |value| try std.testing.expectEqualDeep(value, economics) else expected[fee_index] = economics;
         const before = owner.shard.canonicalStateDigest();
         try implementation.ingest(allocator, 7, @splat(2), .fills, times, fill);
         try owner.applyAdapterBatch((try adapter.tryDrain()).?);
@@ -445,6 +482,11 @@ fn exerciseRecovery() !void {
         try owner.applyAdapterBatch((try adapter.tryDrain()).?);
         try std.testing.expectEqualSlices(u8, &archived_digest, &owner.shard.canonicalStateDigest());
         try std.testing.expectEqual(@as(i64, 100), try owner.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
+
+        const archived_economics = owner.shard.economic_projection.semanticDigest();
+        try owner.applyAdapterBatch(original_fill);
+        try std.testing.expectEqualSlices(u8, &archived_economics, &owner.shard.economic_projection.semanticDigest());
+        try std.testing.expect(!owner.shard.history_conflict_latched);
 
         // Exercise an actual recovery query and its safety result through the same durable public chain.
         const recovery_seed = try implementation.exportResumeCheckpoint(&seed_buffer);
@@ -496,5 +538,11 @@ fn exerciseRecovery() !void {
         try std.testing.expect(!fault_recovered.shard.operational_state.effectiveTradingAuthority());
         try std.testing.expectEqual(raw_before_recovery, assembly.private_raw.next_sequence);
         try std.testing.expectEqual(@as(u64, 1), io.sends);
-    }
+        const economics_before_conflict = fault_recovered.shard.economic_projection.semanticDigest();
+        var conflict = original_fill;
+        conflict.events[0].event.fill.fee.?.atoms += 1;
+        try fault_recovered.applyAdapterBatch(conflict);
+        try std.testing.expect(fault_recovered.shard.history_conflict_latched);
+        try std.testing.expectEqualSlices(u8, &economics_before_conflict, &fault_recovered.shard.economic_projection.semanticDigest());
+    };
 }

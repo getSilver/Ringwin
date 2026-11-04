@@ -153,7 +153,7 @@ const Recovery = struct {
     evidence: c.RawEvidenceRef = undefined,
 };
 const ResumeCheckpoint = struct {
-    schema: u16 = 1,
+    schema: u16 = 2,
     binding: [32]u8,
     sequence: u64,
     raw_sequence: u64,
@@ -222,7 +222,7 @@ pub const HyperliquidVenueAdapter = struct {
     pub fn restoreResumeCheckpoint(self: *@This(), encoded: []const u8) !void {
         if (self.state != .running or !self.replay_only or self.sequence != 0 or self.raw_sequence != 0 or self.order_count != 0 or self.pending != null) return error.InvalidState;
         const seed = try checkpoint_codec.decodeBare(encoded, ResumeCheckpoint);
-        if (seed.schema != 1 or seed.order_count > self.orders.len or seed.seen_count > self.seen.len or
+        if (seed.schema != 2 or seed.order_count > self.orders.len or seed.seen_count > self.seen.len or
             seed.sequence == std.math.maxInt(u64) or seed.raw_sequence == std.math.maxInt(u64) or
             !std.mem.eql(u8, &seed.binding, &try self.bindingDigest())) return error.InvalidPrivateResumeCheckpoint;
         for (seed.orders[0..seed.order_count], 0..) |o, index| {
@@ -1129,7 +1129,7 @@ pub const HyperliquidVenueAdapter = struct {
         const trade_hex = std.fmt.bytesToHex(identity_bytes, .lower);
         const qty = try quantity(b, self.profile.rules_version, try string(try field(row, "sz")));
         if (qty.lots <= 0) return error.InvalidQuantity;
-        const fill: c.Fill = .{ .identity = identity, .order = known.command.orderIdentity(), .client_order_id = known.command.client_order_id, .venue_order = try c.VenueOrderRef.init(self.profile.venue, try std.fmt.bufPrint(&text, "{d}", .{oid})), .venue_trade = try c.VenueTradeRef.init(self.profile.venue, &trade_hex), .instrument = b.instrument, .exchange_account = self.profile.account, .side = side, .quantity = qty, .price = try price(b, self.profile.rules_version, try string(try field(row, "px"))), .fee = if (fee.atoms >= 0) fee else null, .rebate = if (fee.atoms < 0) .{ .asset = fee.asset, .atoms = try std.math.negate(fee.atoms) } else null, .liquidity = if (crossed.bool) .taker else .maker, .venue_fill_time_utc_ns = try std.math.mul(u64, time, std.time.ns_per_ms) };
+        const fill: c.Fill = .{ .identity = identity, .order = known.command.orderIdentity(), .client_order_id = known.command.client_order_id, .venue_order = try c.VenueOrderRef.init(self.profile.venue, try std.fmt.bufPrint(&text, "{d}", .{oid})), .venue_trade = try c.VenueTradeRef.init(self.profile.venue, &trade_hex), .instrument = b.instrument, .exchange_account = self.profile.account, .side = side, .quantity = qty, .price = try price(b, self.profile.rules_version, try string(try field(row, "px"))), .fee = .{ .asset = fee.asset, .atoms = @max(fee.atoms, 0) }, .rebate = if (fee.atoms < 0) .{ .asset = fee.asset, .atoms = try std.math.negate(fee.atoms) } else null, .liquidity = if (crossed.bool) .taker else .maker, .venue_fill_time_utc_ns = try std.math.mul(u64, time, std.time.ns_per_ms) };
         // Reported PnL participates in conflicts but is not a second local economic posting.
         if (try self.unique(identity, .{ .fill = fill }, closed_pnl)) try self.append(output, .{ .fill = fill }, b.instrument, times, evidence);
     }
@@ -1574,6 +1574,13 @@ test "Hyperliquid recovery checkpoint retains Unknown and duplicate facts withou
     try std.testing.expectEqual(@as(usize, 0), (try replay.adapter().tryDrain()).?.slice().len);
     try std.testing.expectError(error.InvalidRequest, replay.adapter().trySend(.{ .order_command = try testCommand() }));
     try std.testing.expectEqual(@as(u64, 1), io.sends);
+    var legacy = try checkpoint_codec.decodeBare(encoded, ResumeCheckpoint);
+    legacy.schema = 1;
+    var legacy_bytes: [192 * 1024]u8 = undefined;
+    var old = io.implementation(&budget);
+    old.replay_only = true;
+    try old.adapter().start(try testConfig());
+    try std.testing.expectError(error.InvalidPrivateResumeCheckpoint, old.restoreResumeCheckpoint(try checkpoint_codec.encodeBare(&legacy_bytes, legacy)));
     var wrong = io.implementation(&budget);
     wrong.replay_only = true;
     wrong.profile.funding = @splat(4);
@@ -1825,7 +1832,7 @@ test "Hyperliquid revocation stale binding deadline unsupported orders and reser
     try std.testing.expectEqual(@as(u64, 2), io.sends);
 }
 test "Hyperliquid private conflicting identity unknown assets forced and funding facts fail safely" {
-    for (0..7) |case| {
+    for (0..11) |case| {
         var io: TestIO = .{};
         var budget: Budget = .{};
         var implementation = io.implementation(&budget);
@@ -1864,6 +1871,22 @@ test "Hyperliquid private conflicting identity unknown assets forced and funding
                 break :blk bytes[0..fill_frame.len];
             },
             6 => "{}",
+            7, 8, 9, 10 => blk: {
+                const old_text = switch (case) {
+                    7 => "\"fee\":\"0.1497\",",
+                    8 => "\"feeToken\":\"USDT\",",
+                    else => "0.1497",
+                };
+                const new_text = switch (case) {
+                    7, 8 => "",
+                    9 => "-0.0000001",
+                    else => "-170141183460469231731687303715884105729",
+                };
+                const replaced = try std.mem.replaceOwned(u8, std.testing.allocator, fill_frame, old_text, new_text);
+                defer std.testing.allocator.free(replaced);
+                @memcpy(bytes[0..replaced.len], replaced);
+                break :blk bytes[0..replaced.len];
+            },
             else => unreachable,
         };
         if (implementation.ingest(std.testing.allocator, 3, @splat(2), input, test_times, frame)) |_| return error.ExpectedFault else |_| {}
@@ -1894,7 +1917,7 @@ test "Hyperliquid private rebate order status mapping and partial IOC terminal q
     _ = std.mem.replace(u8, fill_frame, "0.1497", "-0.147", &rebate_frame);
     try implementation.ingest(std.testing.allocator, 3, @splat(2), .fills, test_times, rebate_frame[0..fill_frame.len]);
     const fill = (try adapter.tryDrain()).?.slice()[0].event.fill;
-    try std.testing.expect(fill.fee == null);
+    try std.testing.expectEqualDeep(c.AssetAmount{ .asset = fill.rebate.?.asset, .atoms = 0 }, fill.fee.?);
     try std.testing.expectEqual(@as(i128, 147000), fill.rebate.?.atoms);
     // A future status suffix cannot be interpreted as a known rejection.
     const invalid = std.mem.replace(u8, update, "canceled", "xReject!", &rebate_frame);
@@ -2034,6 +2057,23 @@ test "Hyperliquid spot execution retains activated USDC fee Asset instead of a q
     const fill = (try adapter.tryDrain()).?.slice()[0].event.fill;
     try std.testing.expectEqual(@as(u64, 5), fill.fee.?.asset);
     try std.testing.expectEqual(@as(i128, 149700), fill.fee.?.atoms);
+    const fixtures = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, @embedFile("../../testing/fixtures/hyperliquid/private-synthetic.json"), .{ .allocate = .alloc_always });
+    defer fixtures.deinit();
+    var found = false;
+    for (fixtures.value.object.get("cases").?.array.items) |case| {
+        if (!eq(case.object.get("id").?, "rebate")) continue;
+        found = true;
+        const rows = case.object.get("payload").?.object.get("data").?.object.get("fills").?;
+        try rows.array.items[0].object.put(fixtures.arena.allocator(), "coin", .{ .string = "@11" });
+        try rows.array.items[0].object.put(fixtures.arena.allocator(), "oid", .{ .integer = 42 });
+        const bytes = try std.json.Stringify.valueAlloc(std.testing.allocator, rows, .{});
+        defer std.testing.allocator.free(bytes);
+        try implementation.ingest(std.testing.allocator, 3, @splat(2), .fills, test_times, bytes);
+        const rebate = (try adapter.tryDrain()).?.slice()[0].event.fill;
+        try std.testing.expectEqualDeep(c.AssetAmount{ .asset = 5, .atoms = 0 }, rebate.fee.?);
+        try std.testing.expectEqualDeep(c.AssetAmount{ .asset = 5, .atoms = 1000 }, rebate.rebate.?);
+    }
+    try std.testing.expect(found);
 }
 test "Hyperliquid partial IOC aggregate retains oid without inventing a terminal report or economic Fill" {
     var io: TestIO = .{};
