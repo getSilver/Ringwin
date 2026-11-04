@@ -12,7 +12,7 @@ Parent: [模块地图](../map.md)
 
 ## What to build
 
-遵循 [Adapter 手册](../../../docs/adapter-onboarding.md)，扩展现有字段处置矩阵，建立首期消息、来源及脱敏样本清单。主要参考 `D:/github/nautilus_trader/docs/integrations/hyperliquid.md`；只有缺失、矛盾或必须验证的关键事实补查官方资料，不继承 Nautilus 的回退策略或资格。
+遵循 [Adapter 手册](../../../docs/integrations/adapter-onboarding.md)，扩展现有字段处置矩阵，建立首期消息、来源及脱敏样本清单。主要参考 `D:/github/nautilus_trader/docs/integrations/hyperliquid.md`；只有缺失、矛盾或必须验证的关键事实补查官方资料，不继承 Nautilus 的回退策略或资格。
 
 ## 完成条件
 

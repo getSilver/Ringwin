@@ -17,7 +17,7 @@ Status: closed
 
 - 2026-11-02 用户确认整体设计与八个切片，授权发布本地实施票；当次仅发布计划。随后用户明确要求新建 Adapter 分支完成 01，已授权该票离线实施；未授权在线写入。
 - 参考用户提供的 Nautilus Hyperliquid 文档；其实现选择与验收结果不作为 Ringwin 合同或资格。
-- 遵循根级 GLOSSARY、ADR 0001/0012/0017 和 docs/adapter-onboarding.md。
+- 遵循根级 GLOSSARY、ADR 0001/0012/0017 和 docs/integrations/adapter-onboarding.md。
 - 复用现有跨所策略与核心合同；真实共享缺口单列前置任务。
 - 只维护本地文档，不同步 GitHub。
 

@@ -1,5 +1,7 @@
 # Hyperliquid 运行接线
 
+产品、订单、行情与配置的使用总览见 [Hyperliquid Adapter](hyperliquid.md)。
+
 本配置及入口完成离线组装，不授予 Testnet 或生产资格。协议依据见
 [字段合同](research/2026-11-02-hyperliquid-protocol-contract.md)，实际实施证据见
 [07](../.scratch/hyperliquid-adapter/issues/07-runtime-cross-venue-wiring.md)。
