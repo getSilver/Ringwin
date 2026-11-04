@@ -816,13 +816,17 @@ pub const ManagedHost = struct {
         put(u32, &frame_storage, 0, @intCast(frame.len));
         try self.bounded(io, std.Io.File.writeStreamingAll, .{ (self.child.stdin orelse return error.InvalidState), io, frame_storage[0 .. 4 + frame.len] });
         try expectResult(.accepted, try self.receive(io, now_ns + 1));
-        const term = try self.bounded(io, std.process.Child.wait, .{ &self.child, io });
+        const term = try self.waitForExit(io);
         const clean = switch (term) {
             .exited => |code| code == 0,
             else => false,
         };
         self.supervisor.processExited(clean);
         try std.testing.expectEqual(State.stopped, self.supervisor.state);
+    }
+
+    pub fn waitForExit(self: *ManagedHost, io: std.Io) !std.process.Child.Term {
+        return self.bounded(io, std.process.Child.wait, .{ &self.child, io });
     }
 
     pub fn deinit(self: *ManagedHost, io: std.Io) void {
@@ -1015,7 +1019,7 @@ fn integrationChecks(init: std.process.Init, python: []const u8, script: []const
         defer crashed.deinit(init.io);
         try crashed.sendPlan(init.io);
         try expectResult(.accepted, try crashed.receive(init.io, 10));
-        const crash_term = try crashed.child.wait(init.io);
+        const crash_term = try crashed.waitForExit(init.io);
         crashed.supervisor.processExited(switch (crash_term) {
             .exited => |code| code == 0,
             else => false,

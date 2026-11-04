@@ -122,7 +122,7 @@ fn runScenario(
             try expectLifecycle(.accepted, try running.receive(init.io, monotonicNow(init.io)));
     }
     if (scenario == .crash) {
-        const term = try hosts[0].?.child.wait(init.io);
+        const term = try hosts[0].?.waitForExit(init.io);
         hosts[0].?.supervisor.processExited(switch (term) {
             .exited => |code| code == 0,
             else => false,

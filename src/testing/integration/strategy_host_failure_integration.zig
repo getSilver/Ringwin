@@ -67,7 +67,7 @@ fn runCheck(init: std.process.Init, python: []const u8, script: []const u8) !voi
     try runStrategyFault(init, &host0, plans[0]);
     try runOutputFull(&host1, plans[1], init.io);
 
-    const crash_term = try host2.child.wait(init.io);
+    const crash_term = try host2.waitForExit(init.io);
     host2.supervisor.processExited(switch (crash_term) {
         .exited => |code| code == 0,
         else => false,
