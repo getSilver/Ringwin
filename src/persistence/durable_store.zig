@@ -1892,7 +1892,21 @@ fn syncDirectory(dir: std.Io.Dir) !void {
         else => return error.DirectorySyncFailed,
     };
     if (builtin.os.tag == .windows) {
-        _ = windows_flush(dir.handle);
+        const w = std.os.windows;
+        var handle: w.HANDLE = undefined;
+        var status: w.IO_STATUS_BLOCK = undefined;
+        var name = w.UNICODE_STRING.init(&.{});
+        const attributes: w.OBJECT.ATTRIBUTES = .{ .RootDirectory = dir.handle, .ObjectName = &name };
+        // std.Io opens directories without the write access required to flush.
+        if (w.ntdll.NtCreateFile(&handle, .{
+            .GENERIC = .{ .WRITE = true },
+            .STANDARD = .{ .SYNCHRONIZE = true },
+        }, &attributes, &status, null, .{ .NORMAL = true }, .VALID_FLAGS, .OPEN, .{
+            .DIRECTORY_FILE = true,
+            .IO = .SYNCHRONOUS_NONALERT,
+        }, null, 0) != .SUCCESS) return error.DirectorySyncFailed;
+        defer w.CloseHandle(handle);
+        if (windows_flush(handle) == 0) return error.DirectorySyncFailed;
     }
 }
 
@@ -2594,6 +2608,73 @@ test "checkpoint store shared seven streams reclaim active metadata and replay m
         const receipt = try store.archiveReceipt(undefined, stream);
         try std.testing.expect(try store.verifyArchiveReceipt(undefined, stream, 100, receipt.ordered_root));
     }
+}
+
+test "Windows store directory sync access failure closes writes and retains committed roots" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+    const w = std.os.windows;
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{ .iterate = true });
+    defer temp.cleanup();
+    const file = try gpa.create(LinuxFileAdapter);
+    defer gpa.destroy(file);
+    file.* = .{ .dir = temp.dir };
+    defer file.deinit();
+    const store = file.interface();
+    const stream: StreamIdentity = .{ .domain = .decision_log, .id = 908 };
+    try appendCheckpointRecord(store, io, stream, 1);
+    try store.commit(io, stream, 1);
+    try store.seal(io, stream);
+    try store.publishSnapshot(io, stream, 1, &.{73});
+    try store.rotate(io, stream);
+    try appendCheckpointRecord(store, io, stream, 2);
+    try store.commit(io, stream, 2);
+    const root = (try store.archiveReceipt(io, stream)).ordered_root;
+
+    const DenyDirectoryWrite = struct {
+        var handle: ?w.HANDLE = null;
+
+        fn rename(userdata: ?*anyopaque, old_dir: std.Io.Dir, old_path: []const u8, new_dir: std.Io.Dir, new_path: []const u8) std.Io.Dir.RenameError!void {
+            try std.testing.io.vtable.dirRename(userdata, old_dir, old_path, new_dir, new_path);
+            if (!std.mem.eql(u8, new_path, "manifest.bin")) return;
+            var locked: w.HANDLE = undefined;
+            var status: w.IO_STATUS_BLOCK = undefined;
+            var name = w.UNICODE_STRING.init(&.{});
+            const attributes: w.OBJECT.ATTRIBUTES = .{ .RootDirectory = new_dir.handle, .ObjectName = &name };
+            // Acquire a real sharing conflict after rename, before directory sync.
+            if (w.ntdll.NtCreateFile(&locked, .{
+                .GENERIC = .{ .READ = true },
+                .STANDARD = .{ .SYNCHRONIZE = true },
+            }, &attributes, &status, null, .{ .NORMAL = true }, .{ .READ = true, .DELETE = true }, .OPEN, .{
+                .DIRECTORY_FILE = true,
+                .IO = .SYNCHRONOUS_NONALERT,
+            }, null, 0) != .SUCCESS) return error.Unexpected;
+            handle = locked;
+        }
+    };
+    defer {
+        if (DenyDirectoryWrite.handle) |handle| w.CloseHandle(handle);
+        DenyDirectoryWrite.handle = null;
+    }
+    var fault_vtable = io.vtable.*;
+    fault_vtable.dirRename = DenyDirectoryWrite.rename;
+    const fault_io: std.Io = .{ .userdata = io.userdata, .vtable = &fault_vtable };
+    try std.testing.expectError(error.DirectorySyncFailed, appendCheckpointRecord(store, fault_io, stream, 3));
+    try std.testing.expectEqual(GateState.closed, store.safetyGate());
+    try std.testing.expectError(error.DurableStoreClosed, store.commit(io, stream, 3));
+
+    const reopened = try gpa.create(LinuxFileAdapter);
+    defer gpa.destroy(reopened);
+    reopened.* = .{ .dir = temp.dir };
+    defer reopened.deinit();
+    const recovered = try reopened.interface().recover(io, stream);
+    try std.testing.expectEqual(RecoveryStatus.ready, recovered.status);
+    try std.testing.expectEqual(@as(u64, 2), recovered.committed_barrier);
+    try std.testing.expectEqual(@as(u64, 3), recovered.last_sequence);
+    try std.testing.expectEqual(@as(u64, 1), recovered.snapshot_barrier);
+    try std.testing.expectEqualSlices(u8, &.{73}, recovered.snapshot);
+    try std.testing.expect(try reopened.interface().verifyArchiveReceipt(io, stream, 1, root));
 }
 
 test "advisory append preserves committed multi stream manifest roots at publication faults" {
