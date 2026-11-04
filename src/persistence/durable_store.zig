@@ -454,9 +454,21 @@ fn snapshotTailIsContinuous(stream: *const Stream, barrier: u64) bool {
 
 fn virginJournalRecovery(stream: *const Stream, entry: ManifestEntry, gate: GateState) !Recovery {
     _ = try verifyJournal(stream);
-    if (entry.snapshot_barrier != 0 or entry.previous_snapshot_barrier != 0 or entry.archived_barrier != 0 or !std.mem.eql(u8, &entry.archive_root, &@as([32]u8, @splat(0))) or !std.mem.eql(u8, &entry.snapshot_digest, &@as([32]u8, @splat(0))) or !std.mem.eql(u8, &entry.previous_snapshot_digest, &@as([32]u8, @splat(0))) or entry.segment_index != 0 or entry.last_sequence != stream.journal.last_sequence or entry.records != stream.journal.records or entry.committed_barrier != stream.committed_barrier or entry.committed_barrier > entry.last_sequence or entry.first_sequence != firstSequence(stream) or entry.byte_len != stream.journal.bytes().len or !std.mem.eql(u8, &entry.digest, &digest(stream.journal.bytes()))) return error.ManifestConflict;
+    try verifyManifestPrefix(stream.journal.bytes(), entry);
+    if (entry.snapshot_barrier != 0 or entry.previous_snapshot_barrier != 0 or entry.archived_barrier != 0 or !std.mem.eql(u8, &entry.archive_root, &@as([32]u8, @splat(0))) or !std.mem.eql(u8, &entry.snapshot_digest, &@as([32]u8, @splat(0))) or !std.mem.eql(u8, &entry.previous_snapshot_digest, &@as([32]u8, @splat(0))) or entry.segment_index != 0 or entry.committed_barrier != stream.committed_barrier) return error.ManifestConflict;
     const tail = stream.journal.bytes();
-    return .{ .status = .recovery_only, .snapshot = &.{}, .tail = tail, .committed_barrier = stream.committed_barrier, .last_sequence = stream.journal.last_sequence, .segment_index = stream.segment_index, .segment_digest = entry.digest, .active_segment = tail, .segment_sealed = stream.journal.sealed, .tail_segments = .{ tail, &.{}, &.{} }, .tail_count = 1, .gate = gate };
+    return .{ .status = .recovery_only, .snapshot = &.{}, .tail = tail, .committed_barrier = stream.committed_barrier, .last_sequence = stream.journal.last_sequence, .segment_index = stream.segment_index, .segment_digest = digest(tail), .active_segment = tail, .segment_sealed = stream.journal.sealed, .tail_segments = .{ tail, &.{}, &.{} }, .tail_count = 1, .gate = gate };
+}
+
+fn verifyManifestPrefix(bytes: []const u8, entry: ManifestEntry) !void {
+    if (bytes.len < entry.byte_len or !std.mem.eql(u8, &entry.digest, &digest(bytes[0..entry.byte_len]))) return error.ManifestConflict;
+    var reader = try journal.Reader.init(bytes[0..entry.byte_len]);
+    if (reader.next_sequence != entry.first_sequence) return error.ManifestConflict;
+    while (true) switch (try reader.next()) {
+        .record => |record| try requireCurrentJournalSchema(record),
+        .end => break,
+    };
+    if (reader.offset != entry.byte_len or reader.records != entry.records or reader.last_sequence != entry.last_sequence or entry.committed_barrier > entry.last_sequence) return error.ManifestConflict;
 }
 
 fn snapshotCacheView(inline_bytes: *[inline_snapshot_bytes]u8, large: *std.ArrayList(u8), len: usize) []u8 {
@@ -1106,10 +1118,12 @@ pub const LinuxFileAdapter = struct {
             }
             const name = try segmentName(identity, entry.segment_index);
             const length = try readInto(self.dir, io, name.slice(), &self.scratch);
-            if (length < entry.byte_len or !std.mem.eql(u8, &entry.digest, &digest(self.scratch[0..entry.byte_len]))) return error.ManifestConflict;
+            try verifyManifestPrefix(self.scratch[0..length], entry);
             stream.segment_index = entry.segment_index;
             stream.committed_barrier = entry.committed_barrier;
-            try rebuildJournal(stream, self.scratch[0..entry.byte_len]);
+            // The manifest authenticates its prefix; a later physical suffix is
+            // still evidence and must reach Owner quarantine without promotion.
+            try rebuildJournal(stream, self.scratch[0..length]);
         }
         return stream;
     }
@@ -1790,6 +1804,9 @@ fn rebuildJournal(stream: *Stream, bytes: []const u8) !void {
             break;
         },
     };
+    if (reader.offset != bytes.len) return error.InvalidPhysicalTail;
+    @memcpy(stream.journal.storage[0..bytes.len], bytes);
+    stream.journal.len = bytes.len;
 }
 
 fn readInto(dir: std.Io.Dir, io: std.Io, name: []const u8, destination: []u8) !usize {
@@ -2991,9 +3008,15 @@ test "committed recovery prefix retains physical uncommitted suffix across file 
         try store.rotate(store_io, stream);
         try appendCheckpointRecord(store, store_io, stream, 2);
         try store.commit(store_io, stream, 2);
-        try appendCheckpointRecord(store, store_io, stream, 3);
-        const physical = try store.recover(store_io, stream);
-        const original_digest = digest(physical.active_segment);
+        if (index == 1) {
+            file.injectFaultAt(.eio, .root_publish);
+            try std.testing.expectError(error.InputOutput, appendCheckpointRecord(store, store_io, stream, 3));
+        } else try appendCheckpointRecord(store, store_io, stream, 3);
+        const original_digest = if (index == 0) digest((try store.recover(store_io, stream)).active_segment) else blk: {
+            const name = try segmentName(stream, 1);
+            const len = try readInto(temp.dir, io, name.slice(), &file.scratch);
+            break :blk digest(file.scratch[0..len]);
+        };
         const recovered = try (if (index == 0) store else reopened.interface()).recover(store_io, stream);
         try std.testing.expectEqual(@as(u64, 3), recovered.last_sequence);
         try std.testing.expectEqual(@as(u64, 2), recovered.committed_barrier);
@@ -3013,6 +3036,93 @@ test "committed recovery prefix retains physical uncommitted suffix across file 
             .record => |record| try std.testing.expectEqual(@as(u64, 3), record.sequence),
             .end => return error.LostPhysicalSuffix,
         }
+    }
+}
+
+test "physical crash suffix file boundaries reject damage and retain seal rotation and virgin evidence" {
+    const Case = enum { partial, corrupt, after_footer, prefix_damage, gap, seal_publish, rotate_publish, virgin_suffix };
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    for (std.enums.values(Case)) |case| {
+        var temp = std.testing.tmpDir(.{ .iterate = true });
+        defer temp.cleanup();
+        const file = try allocator.create(LinuxFileAdapter);
+        defer allocator.destroy(file);
+        file.* = .{ .dir = temp.dir };
+        defer file.deinit();
+        const store = file.interface();
+        const stream: StreamIdentity = .{ .domain = .decision_log, .id = 809 };
+        try appendCheckpointRecord(store, io, stream, 1);
+        try store.commit(io, stream, 1);
+        if (case != .virgin_suffix) {
+            try store.seal(io, stream);
+            try store.publishSnapshot(io, stream, 1, &.{71});
+            try store.rotate(io, stream);
+        }
+        try appendCheckpointRecord(store, io, stream, 2);
+        try store.commit(io, stream, 2);
+        if (case == .rotate_publish) {
+            try store.seal(io, stream);
+            try store.publishSnapshot(io, stream, 2, &.{72});
+        }
+        file.injectFaultAt(.eio, .root_publish);
+        if (case == .seal_publish) {
+            try std.testing.expectError(error.InputOutput, store.seal(io, stream));
+        } else if (case == .rotate_publish) {
+            try std.testing.expectError(error.InputOutput, store.rotate(io, stream));
+        } else try std.testing.expectError(error.InputOutput, appendCheckpointRecord(store, io, stream, 3));
+        const name = try segmentName(stream, if (case == .virgin_suffix) 0 else 1);
+        var len = try readInto(temp.dir, io, name.slice(), &file.scratch);
+        switch (case) {
+            .partial => len -= 1,
+            .corrupt => file.scratch[len - 1] ^= 1,
+            .prefix_damage => file.scratch[journal.segment_header_size] ^= 1,
+            .gap => {
+                const offset = len - journal.record_header_size - 1;
+                put(u64, &file.scratch, offset + 16, 4);
+                put(u32, &file.scratch, offset + 68, Crc32c.hash(file.scratch[offset..][0..68]));
+            },
+            .after_footer => {
+                const resident = try findStream(&file.streams, stream, false);
+                try resident.journal.seal();
+                @memcpy(file.scratch[0..resident.journal.len], resident.journal.bytes());
+                len = resident.journal.len + 1;
+                file.scratch[len - 1] = 71;
+            },
+            else => {},
+        }
+        switch (case) {
+            .partial, .corrupt, .after_footer, .prefix_damage, .gap => try writeFile(temp.dir, io, name.slice(), file.scratch[0..len], true),
+            else => {},
+        }
+        const segment_before = digest(file.scratch[0..len]);
+        const manifest_len = try readInto(temp.dir, io, "manifest.bin", &file.scratch);
+        const manifest_before = digest(file.scratch[0..manifest_len]);
+        const reopened = try allocator.create(LinuxFileAdapter);
+        defer allocator.destroy(reopened);
+        reopened.* = .{ .dir = temp.dir };
+        defer reopened.deinit();
+        const recovered = try reopened.interface().recover(io, stream);
+        switch (case) {
+            .partial, .corrupt, .after_footer, .prefix_damage, .gap => {
+                try std.testing.expectEqual(RecoveryStatus.recovery_only, recovered.status);
+                try std.testing.expectEqual(GateState.closed, recovered.gate);
+                try std.testing.expectError(error.DurableStoreClosed, appendCheckpointRecord(reopened.interface(), io, stream, 3));
+            },
+            else => {
+                try std.testing.expectEqual(if (case == .virgin_suffix) RecoveryStatus.recovery_only else .ready, recovered.status);
+                try std.testing.expectEqual(GateState.open, recovered.gate);
+                try std.testing.expectEqual(@as(u64, 2), recovered.committed_barrier);
+                try std.testing.expectEqual(@as(u64, if (case == .virgin_suffix) 3 else 2), recovered.last_sequence);
+                try std.testing.expectEqual(case != .virgin_suffix, recovered.segment_sealed);
+                try std.testing.expectEqualSlices(u8, &segment_before, &recovered.segment_digest);
+            },
+        }
+        const after_len = try readInto(temp.dir, io, name.slice(), &file.scratch);
+        try std.testing.expectEqual(len, after_len);
+        try std.testing.expectEqualSlices(u8, &segment_before, &digest(file.scratch[0..after_len]));
+        const after_manifest_len = try readInto(temp.dir, io, "manifest.bin", &file.scratch);
+        try std.testing.expectEqualSlices(u8, &manifest_before, &digest(file.scratch[0..after_manifest_len]));
     }
 }
 

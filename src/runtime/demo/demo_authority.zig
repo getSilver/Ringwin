@@ -1513,6 +1513,90 @@ fn setupOwnerCheckpointFixture(owner: *Owner) !trading.OrderCommand {
     return command;
 }
 
+test "physical crash suffix file reopen quarantines Owner without changing economics or disk evidence" {
+    const fixture = @import("../../testing/support/trading_shard_fixture.zig");
+    const Evidence = struct {
+        fn hash(dir: std.Io.Dir) ![32]u8 {
+            var result: [32]u8 = @splat(0);
+            var iterator = dir.iterate();
+            while (try iterator.next(std.testing.io)) |entry| {
+                const bytes = try dir.readFileAlloc(std.testing.io, entry.name, std.testing.allocator, .limited(durable.max_snapshot_bytes + 1024));
+                defer std.testing.allocator.free(bytes);
+                var sha = std.crypto.hash.sha2.Sha256.init(.{});
+                sha.update(entry.name);
+                sha.update(bytes);
+                const file_hash = sha.finalResult();
+                for (&result, file_hash) |*byte, part| byte.* ^= part;
+            }
+            return result;
+        }
+    };
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    for ([_]bool{ false, true }) |crash| {
+        var temp = std.testing.tmpDir(.{ .iterate = true });
+        defer temp.cleanup();
+        const file = try allocator.create(durable.LinuxFileAdapter);
+        defer allocator.destroy(file);
+        file.* = .{ .dir = temp.dir };
+        defer file.deinit();
+        const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 908 };
+        const owner = try allocator.create(Owner);
+        defer allocator.destroy(owner);
+        try Owner.bootstrapInto(owner, file.interface(), io, stream);
+        const command = try setupOwnerCheckpointFixture(owner);
+        const barrier = owner.shard.authoritativeBarrier();
+        const economics = owner.shard.economicSummary();
+        const digest_before = owner.shard.canonicalStateDigest();
+        if (crash) {
+            const facts = try fixture.happyVenueFacts(command);
+            const fill = fixture.canonicalAt(30, 200, facts[4].venue.event);
+            file.injectFaultAt(.eio, .root_publish);
+            try std.testing.expectError(error.DecisionLogUnavailable, owner.apply(fill));
+            try std.testing.expect(owner.closed);
+        }
+        const disk_before = try Evidence.hash(temp.dir);
+        const reopened = try allocator.create(durable.LinuxFileAdapter);
+        defer allocator.destroy(reopened);
+        reopened.* = .{ .dir = temp.dir };
+        defer reopened.deinit();
+        const physical = try reopened.interface().recover(io, stream);
+        try std.testing.expectEqual(barrier, physical.committed_barrier);
+        try std.testing.expectEqual(barrier + @as(u64, @intFromBool(crash)), physical.last_sequence);
+        const physical_digest = physical.segment_digest;
+        const recovered = try allocator.create(Owner);
+        defer allocator.destroy(recovered);
+        try Owner.recoverInto(recovered, reopened.interface(), io, stream);
+        try std.testing.expectEqual(crash, recovered.closed);
+        try std.testing.expect(recovered.shard.recovery_admission_pending);
+        try std.testing.expectEqual(barrier, recovered.shard.authoritativeBarrier());
+        try std.testing.expectEqualDeep(economics, recovered.shard.economicSummary());
+        try std.testing.expectEqualSlices(u8, &digest_before, &recovered.shard.canonicalStateDigest());
+        try std.testing.expectEqual(@as(i64, 40), try recovered.shard.economic_projection.appliedCanonicalFillQuantity(command.order_id));
+        const gateway = try allocator.create(execution.Gateway);
+        defer allocator.destroy(gateway);
+        gateway.init();
+        var simulator: @import("../../testing/acceptance/history/order_gateway_archive_acceptance.zig").CountingSimulator = .{};
+        const adapter = simulator.adapter();
+        try adapter.start(.{ .venue = 1, .environment = .simulation, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4 });
+        var authority = failover.authorityForTesting();
+        var lease = try authority.acquire(.{ .exchange_account = 2, .decision_domain = 1 }, 1, 1);
+        var guard: failover.GatewayLeaseGuard = .{ .authority = &authority, .lease = &lease };
+        try gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .lease_guard = &guard, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+        try std.testing.expectError(error.DecisionLogUnavailable, recovered.send(gateway, &guard, command.command_id, 2));
+        try std.testing.expectEqual(@as(u64, 0), simulator.sends);
+        if (crash) {
+            try std.testing.expectError(error.DecisionLogUnavailable, recovered.apply(fixture.atGroup(30, .{ .identity = 300, .payload = .{ .timer = fixture.timer(20) } })));
+            try std.testing.expectError(error.DecisionLogUnavailable, recovered.checkpoint());
+        } else _ = try recovered.source();
+        const retained = try reopened.interface().recover(io, stream);
+        try std.testing.expectEqual(barrier + @as(u64, @intFromBool(crash)), retained.last_sequence);
+        try std.testing.expectEqual(barrier, retained.committed_barrier);
+        try std.testing.expectEqualSlices(u8, &physical_digest, &retained.segment_digest);
+        try std.testing.expectEqualSlices(u8, &disk_before, &try Evidence.hash(temp.dir));
+    }
+}
+
 fn checkOwnerCheckpointRounds(store: durable.Store, io: std.Io) ![32]u8 {
     const fixture = @import("../../testing/support/trading_shard_fixture.zig");
     const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 903 };
