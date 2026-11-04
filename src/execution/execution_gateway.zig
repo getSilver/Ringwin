@@ -2237,21 +2237,58 @@ test "Gateway observation universe and resident authority facts remain independe
 }
 
 fn initializeGatewaySelectionFixture(shard: *trading.TradingShard, shard_id: u32) !void {
+    return initializeGatewaySelectionFixtureForVenue(shard, shard_id, 3, 1);
+}
+
+fn initializeGatewaySelectionFixtureForVenue(shard: *trading.TradingShard, shard_id: u32, instrument: u128, venue_id: u64) !void {
     const fixture = @import("../testing/support/trading_shard_fixture.zig");
     const run = try std.testing.allocator.create(fixture.LiveRun);
     defer std.testing.allocator.destroy(run);
     run.* = .{ .shard = .{}, .decision_journal = trading.journal.Journal.init() };
-    for (fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .cash)) |event| _ = try fixture.apply(run, event);
+    for (fixture.genesisEvents(.{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .activation_barrier = 0 }, .cash)) |input| {
+        var event = input;
+        switch (event.core.payload) {
+            .instrument_rules_activated => |*rules| {
+                if (rules.instrument_identity == 3) rules.instrument_identity = instrument;
+                rules.venue = venue_id;
+            },
+            .margin_rules_activated => |*rules| {
+                if (rules.instrument == 3) rules.instrument = instrument;
+            },
+            .instrument_trading_authorization => |*authorization| {
+                if (authorization.instrument == 3) authorization.instrument = instrument;
+            },
+            .mark_price => |*mark| {
+                if (mark.instrument == 3) mark.instrument = instrument;
+            },
+            else => {},
+        }
+        _ = try fixture.apply(run, event);
+    }
     const digest = run.shard.canonicalStateDigest();
     _ = try fixture.apply(run, fixture.atGroup(11, .{ .identity = 3, .payload = .{ .host_activated = .{ .strategy_identity = 1, .config_version = 1, .activation_identity = 1, .session = .{ .fencing = 1, .shard = shard_id, .generation = 1 }, .activation_barrier = 0, .state_digest = digest } } }));
     // The generic prelude observes linear rules; this fixture already owns spot rules.
-    _ = try run.shard.apply(fixture.atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = 3, .price_atoms = 50_000_000_000 } } }));
-    _ = try run.shard.apply(fixture.snapshotAt(13, 100));
-    _ = try run.shard.apply(fixture.deltaAt(14, 100, 101, 49_850_000_000));
+    _ = try run.shard.apply(fixture.atGroup(12, .{ .identity = 1, .payload = .{ .mark_price = .{ .instrument = instrument, .price_atoms = 50_000_000_000 } } }));
+    var book = fixture.snapshotAt(13, 100);
+    book.venue.envelope.venue = venue_id;
+    book.venue.event.l2_book_snapshot.instrument = instrument;
+    book.venue.event.l2_book_snapshot.best_bid.instrument = instrument;
+    book.venue.event.l2_book_snapshot.best_ask.instrument = instrument;
+    book.venue.event.l2_book_snapshot.next_ask.?.instrument = instrument;
+    book.venue.event.l2_book_snapshot.best_bid_quantity.?.instrument = instrument;
+    book.venue.event.l2_book_snapshot.best_ask_quantity.?.instrument = instrument;
+    book.venue.event.l2_book_snapshot.next_ask_quantity.?.instrument = instrument;
+    _ = try run.shard.apply(book);
+    var delta = fixture.deltaAt(14, 100, 101, 49_850_000_000);
+    delta.venue.envelope.venue = venue_id;
+    delta.venue.event.l2_book_delta.instrument = instrument;
+    delta.venue.event.l2_book_delta.best_bid.instrument = instrument;
+    delta.venue.event.l2_book_delta.best_ask.instrument = instrument;
+    _ = try run.shard.apply(delta);
     const profile: shard_event.CapabilityProfileActivation = .{
         .exchange_account = 2,
-        .instrument = 3,
-        .venue = 1,
+        .instrument = instrument,
+        .venue = venue_id,
         .environment = .simulation,
         .product = .spot,
         .version = 1,
@@ -2295,7 +2332,7 @@ fn initializeGatewaySelectionFixture(shard: *trading.TradingShard, shard_id: u32
     input.venue.envelope.source_stream = 2;
     _ = try run.shard.apply(input);
     var group: oms.IntentGroup = .{ .first_intent_sequence = 101, .count = 1 };
-    group.members[0] = .{ .intent_sequence = 101, .operation = .place, .instrument = 3, .quantity = 10, .limit_price = fixture.omsPrice(3, 50_000_000) };
+    group.members[0] = .{ .intent_sequence = 101, .operation = .place, .instrument = instrument, .quantity = 10, .limit_price = fixture.omsPrice(instrument, 50_000_000) };
     const placed = try run.shard.apply(fixture.atGroup(17, .{ .identity = 101, .payload = .{ .oms_intent_group = group } }));
     try std.testing.expectEqual(@as(usize, 1), placed.oms_commands.len);
     @memcpy(std.mem.asBytes(shard), std.mem.asBytes(&run.shard));
@@ -2747,4 +2784,58 @@ test "Gateway economic history binds committed adjacent roots without retiring d
     try std.testing.expectError(error.DispatchArchiveNotCommitted, recovered.completePreviousOrderArchive(shard));
     try std.testing.expectEqual(barrier, recovered.durable_dispatch.?.next_sequence);
     try std.testing.expectEqual(@as(u64, 1), implementation.sends);
+}
+
+test "amend admission Gateway risk qualification does not replace adapter permission" {
+    inline for ([_]bool{ false, true }) |is_binance| {
+        const Module = if (is_binance) @import("../adapters/binance/binance_venue_adapter.zig") else @import("../adapters/bybit/bybit_venue_adapter.zig");
+        const Raw = if (is_binance) @import("../adapters/binance/binance_order_raw.zig") else @import("../adapters/bybit/bybit_private_reconciliation.zig");
+        const Adapter = if (is_binance) Module.BinanceVenueAdapter else Module.BybitVenueAdapter;
+        const instrument = if (is_binance) Module.btc_usdt_spot else @import("../adapters/bybit/bybit_private_reconciliation.zig").btc_usdt_spot;
+        const TestIo = struct {
+            calls: usize = 0,
+            fn now(_: *anyopaque) u64 {
+                return 1;
+            }
+            fn sign(_: *anyopaque, _: u64, _: []const u8) ![32]u8 {
+                return @splat(1);
+            }
+            fn append(_: *anyopaque, _: Raw.RawIngressRecord, _: []const u8) Raw.RawSinkError!u64 {
+                return 1;
+            }
+            fn submit(ptr: *anyopaque, _: Module.SignedRequest) Module.TransportResult {
+                const self: *@This() = @ptrCast(@alignCast(ptr));
+                self.calls += 1;
+                return .{ .outcome = .proven_before_send, .source_session = 1, .times = .{ .receive_time_utc_ns = 1, .monotonic_time_ns = 1, .wall_time_utc_ns = 1 } };
+            }
+        };
+        for ([_]bool{ false, true }) |enabled| {
+            const shard = try std.testing.allocator.create(trading.TradingShard);
+            defer std.testing.allocator.destroy(shard);
+            try initializeGatewaySelectionFixtureForVenue(shard, 0, instrument, 1);
+            var io: TestIo = .{};
+            const rules: Module.InstrumentRules = .{ .identity = instrument, .lot_size = .{ .coefficient = 1, .scale = 4 }, .tick_size = .{ .coefficient = 1, .scale = 1 } };
+            const profile: Module.CapabilityProfile = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1, .spot = rules, .linear = .{ .identity = if (is_binance) Module.btc_usdt_linear else @import("../adapters/bybit/bybit_private_reconciliation.zig").btc_usdt_linear, .lot_size = rules.lot_size, .tick_size = rules.tick_size }, .testnet_admission = .{ .explicit_enable = enabled, .endpoint_is_testnet = true, .credential_can_read = true, .credential_can_trade = true, .credential_can_withdraw = false, .max_order_notional_usdt_micros = std.math.maxInt(u64) } };
+            var implementation = Adapter.init(.{ .ptr = &io, .now_fn = TestIo.now }, profile, .{ .ptr = &io, .sign_fn = TestIo.sign }, .{ .ptr = &io, .append_fn = TestIo.append }, .{ .ptr = &io, .submit_fn = TestIo.submit });
+            const adapter = implementation.adapter();
+            try adapter.start(.{ .venue = 1, .environment = .demo, .exchange_account = 2, .adapter_session = 1, .request_capacity = 4, .output_capacity = 4, .asset_definitions = try @import("../testing/contracts/venue_adapter_contract.zig").activatedTestAssets() });
+            const memory = try std.testing.allocator.create(durable.MemoryAdapter);
+            defer std.testing.allocator.destroy(memory);
+            memory.* = .initWithAllocator(std.testing.allocator);
+            defer memory.deinit();
+            const gateway = try std.testing.allocator.create(Gateway);
+            defer std.testing.allocator.destroy(gateway);
+            gateway.init();
+            try gateway.add(.{ .account = 2, .adapter = adapter, .venue_identity = 1, .supported_products = productMask(.spot) | productMask(.isolated_linear), .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+            try gateway.bootstrapDurableDispatch(memory.interface(), undefined, .{ .domain = .control, .id = 905 });
+            const command_value = shard.oms.emitted()[0];
+            try observeGatewayCommand(gateway, shard, command_value, 1);
+            try std.testing.expectEqual(venue.SendResult.accepted, try gateway.sendFromShard(shard, command_value.command_id, 2 * std.time.ns_per_s));
+            try std.testing.expectEqual(@as(u64, 1), gateway.send_attempt_count);
+            try std.testing.expectEqual(@as(usize, if (enabled) 1 else 0), io.calls);
+            const result = (try adapter.tryDrain()).?.events[0].event.order_dispatch_result;
+            try std.testing.expectEqual(canonical.DispatchState.not_sent, result.state);
+            if (!enabled) try std.testing.expectEqual(canonical.CanonicalRejectReason.venue_unavailable, result.reason.?);
+        }
+    }
 }

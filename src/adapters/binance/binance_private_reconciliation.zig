@@ -23,7 +23,7 @@ const max_seen_facts = 128;
 const max_order_links = 32;
 const max_pending_observations = 24;
 const SeenFact = struct { key: [32]u8, content: [32]u8 };
-const OrderLink = struct { order: canonical.OrderIdentity, client_order_id: canonical.ClientOrderId, portfolio_reduce_only: bool, status: ?canonical.ExecutionReportStatus = null };
+const OrderLink = struct { order: canonical.OrderIdentity, client_order_id: canonical.ClientOrderId, portfolio_reduce_only: bool, status: ?canonical.ExecutionReportStatus = null, amend_report: ?canonical.ExecutionReport = null, amend_consumed: bool = false };
 const PendingObservation = union(enum) {
     balance: struct { value: canonical.AccountBalance, times: raw.Times, evidence: raw.RawEvidenceRef, source: Source, source_sequence: u64, source_time: ?u64 },
     position: struct { value: canonical.AccountPosition, times: raw.Times, evidence: raw.RawEvidenceRef, source: Source, source_sequence: u64 },
@@ -121,6 +121,32 @@ pub const Reconciler = struct {
     }
     pub fn readiness(self: *const Reconciler) Readiness {
         return .{ .stage = self.stage, .session = (self.binding orelse Binding{ .venue = 0, .account = 0, .session = 0 }).session, .raw_watermark = self.raw_watermark, .bootstrap = self.bootstrap };
+    }
+    /// shortcut: decoders prove revision 1 only; support later amendments when revision correlation is implemented.
+    pub fn amendReport(self: *const Reconciler, order: canonical.OrderIdentity) ?canonical.ExecutionReport {
+        if (self.stage == .offline or self.stage == .failed) return null;
+        for (self.links[0..self.link_count]) |link| if (link.order == order and !link.amend_consumed) return link.amend_report;
+        return null;
+    }
+    pub fn consumeAmend(self: *Reconciler, order: canonical.OrderIdentity) void {
+        for (self.links[0..self.link_count]) |*link| if (link.order == order) {
+            link.amend_consumed = true;
+        };
+    }
+    fn observeAmendReport(self: *Reconciler, report: canonical.ExecutionReport) void {
+        for (self.links[0..self.link_count]) |*link| if (link.order == report.order) {
+            if (link.amend_report) |previous| {
+                if (report.cumulative_quantity.lots < previous.cumulative_quantity.lots or
+                    (report.venue_update_time_utc_ns orelse 0) < (previous.venue_update_time_utc_ns orelse 0))
+                {
+                    link.amend_consumed = true;
+                    return;
+                }
+            }
+            if (report.status != .accepted and report.status != .partially_filled) link.amend_consumed = true;
+            link.amend_report = report;
+            return;
+        };
     }
     pub fn registerOrder(self: *Reconciler, order: canonical.OrderIdentity, client_order_id: canonical.ClientOrderId, portfolio_reduce_only: bool) !void {
         for (self.links[0..self.link_count]) |link| if (std.mem.eql(u8, link.client_order_id.slice(), client_order_id.slice())) {
@@ -289,6 +315,7 @@ pub const Reconciler = struct {
             const event: canonical.Payload = .{ .execution_report = .{ .identity = digestIdentity(key), .order = link.order, .client_order_id = link.client_order_id, .venue_order = try canonical.VenueOrderRef.init(binding.venue, order_id), .instrument = rules.identity, .exchange_account = binding.account, .revision = 1, .side = try sideFor(try anyStringField(object, &.{ "S", "side" })), .order_type = try orderTypeFor(try anyStringField(object, &.{ "o", "type" })), .time_in_force = try tifFor(try anyStringField(object, &.{ "f", "timeInForce" })), .venue_reduce_only = try optionalBoolField(object, "R"), .portfolio_reduce_only = link.portfolio_reduce_only, .position_mode_net = if (position_side) |value| value == .net else null, .position_side = position_side, .status = mapped_status, .reject_reason = if (mapped_status == .rejected) .other_venue_reject else null, .original_quantity = original, .cumulative_quantity = cumulative, .remaining_quantity = .{ .instrument = rules.identity, .rules_version = rules.rules_version, .lots = original.lots - cumulative.lots }, .limit_price = try optionalPrice(rules, try anyStringField(object, &.{ "p", "price" })), .average_fill_price = if (try optionalStringAny(object, &.{ "ap", "avgPrice", "L" })) |value| try optionalPrice(rules, value) else null, .venue_create_time_utc_ns = if (create_ms) |millis| try std.math.mul(u64, millis, 1_000_000) else null, .venue_update_time_utc_ns = source_time } };
             if (try self.seenBefore(key, event)) return;
             try self.emit(.account, rules.identity, null, digestIdentity(key), source_time, times, evidence, event);
+            self.observeAmendReport(event.execution_report);
         } else {
             const trade_id = try anyStringField(object, &.{ "t", "id" });
             if (std.mem.eql(u8, trade_id, "-1") or std.mem.eql(u8, trade_id, "0")) return;

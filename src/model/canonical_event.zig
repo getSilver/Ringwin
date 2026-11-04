@@ -324,6 +324,8 @@ pub const OrderCommand = struct {
     quantity: ?InstrumentQuantity = null,
     limit_price: ?InstrumentPrice = null,
     market_protection_price: ?InstrumentPrice = null,
+    /// Amend is anchored to the prior revision and this exact cumulative-fill barrier.
+    amend_expected_cumulative_quantity: ?InstrumentQuantity = null,
     fee_asset: ?AssetIdentity = null,
     fee_atoms: i128 = 0,
     rebate_asset: ?AssetIdentity = null,

@@ -229,6 +229,7 @@ pub const BybitVenueAdapter = struct {
         if (command.exchange_account != binding.account or command.capability_version != self.profile.version or command.rules_version != self.profile.rules_version or command.config_version != self.profile.config_version or command.adapter_session != binding.session) return .stale_version;
         if (command.dispatch_deadline_monotonic_ns <= self.clock.now()) return .deadline_expired;
         const rules = self.rulesFor(command.instrument) orelse return .unsupported_instrument;
+        if (command.instrument != private.btc_usdt_spot and command.instrument != private.btc_usdt_linear) return .unsupported_instrument;
         if (command.operation == .amend and !self.profile.native_amend) return .capability_unsupported;
         if (command.operation != .place and (command.venue_order == null or command.venue_order.?.venue != binding.venue)) return .unsupported_value;
         if (command.operation != .cancel and command.order_type == .post_only and !self.profile.native_post_only) return .capability_unsupported;
@@ -238,7 +239,7 @@ pub const BybitVenueAdapter = struct {
             if (quantity.instrument != rules.identity or quantity.rules_version != self.profile.rules_version or quantity.lots <= 0) return .unsupported_value;
         }
         if (command.limit_price) |value| if (value.instrument != rules.identity or value.rules_version != self.profile.rules_version or value.ticks <= 0) return .unsupported_value;
-        if (command.operation == .place) {
+        if (command.operation != .cancel) {
             if (!self.profile.testnet_admission.permitsPlace()) return .venue_unavailable;
             const expected: canonical.TimeInForce = switch (command.order_type) {
                 .market, .ioc => .immediate_or_cancel,
@@ -251,13 +252,22 @@ pub const BybitVenueAdapter = struct {
                 if (command.limit_price != null or command.market_protection_price == null) return .unsupported_value;
             } else if (command.limit_price == null or command.market_protection_price != null) return .unsupported_value;
             const price = command.limit_price orelse command.market_protection_price orelse return .unsupported_value;
-            if ((self.notionalMicros(command.quantity orelse return .unsupported_value, price, rules) orelse return .unsupported_value) > self.profile.testnet_admission.max_order_notional_usdt_micros) return .unsupported_value;
+            if (price.instrument != command.instrument or price.rules_version != command.rules_version or price.ticks <= 0) return .unsupported_value;
+            if (command.operation == .amend and command.order_type != .limit) return .unsupported_value;
+            if ((self.notionalMicros(self.wireQuantity(command) orelse return .unsupported_value, price, rules) orelse return .unsupported_value) > self.profile.testnet_admission.max_order_notional_usdt_micros) return .unsupported_value;
         }
         return null;
     }
+    fn wireQuantity(self: *const BybitVenueAdapter, command: canonical.OrderCommand) ?canonical.InstrumentQuantity {
+        if (command.operation != .amend) return command.quantity;
+        const reconciler = self.reconciler orelse return null;
+        const report = reconciler.amendReport(command.orderIdentity()) orelse return null;
+        const total = venue.amendTotalQuantity(command, report) orelse return null;
+        return total;
+    }
     fn notionalMicros(self: *const BybitVenueAdapter, quantity: canonical.InstrumentQuantity, price_value: canonical.InstrumentPrice, rules: InstrumentRules) ?u64 {
         _ = self;
-        if (quantity.lots <= 0 or price_value.ticks <= 0) return null;
+        if (quantity.lots <= 0 or price_value.ticks <= 0 or rules.lot_size.coefficient <= 0 or rules.tick_size.coefficient <= 0) return null;
         var numerator = std.math.mul(i128, quantity.lots, rules.lot_size.coefficient) catch return null;
         numerator = std.math.mul(i128, numerator, price_value.ticks) catch return null;
         numerator = std.math.mul(i128, numerator, rules.tick_size.coefficient) catch return null;
@@ -269,9 +279,9 @@ pub const BybitVenueAdapter = struct {
     fn batchWithinNotional(self: *const BybitVenueAdapter, commands: []const canonical.OrderCommand) bool {
         var total: u64 = 0;
         for (commands) |command| {
-            if (command.operation != .place) continue;
+            if (command.operation == .cancel) continue;
             const rules = self.rulesFor(command.instrument) orelse return false;
-            const quantity = command.quantity orelse return false;
+            const quantity = self.wireQuantity(command) orelse return false;
             const price = command.limit_price orelse command.market_protection_price orelse return false;
             total = std.math.add(u64, total, self.notionalMicros(quantity, price, rules) orelse return false) catch return false;
             if (total > self.profile.testnet_admission.max_order_notional_usdt_micros) return false;
@@ -292,6 +302,7 @@ pub const BybitVenueAdapter = struct {
             self.appendDispatch(output, command, .not_sent, .venue_unavailable, null);
             return;
         };
+        if (command.operation == .amend) if (self.reconciler) |reconciler| reconciler.consumeAmend(command.orderIdentity());
         const response = self.transport.submit(.{ .path = encoded.path, .body = encoded.body(), .timestamp_ns = timestamp, .signature = signature });
         const evidence = self.commitResponse(response) catch {
             self.markUnknown(command.orderIdentity());
@@ -361,9 +372,10 @@ pub const BybitVenueAdapter = struct {
             .amend => "/v5/order/amend",
             .cancel => "/v5/order/cancel",
         } };
+        if (command.operation == .amend and self.wireQuantity(command) == null) return error.MissingAmendEvidence;
         var quantity_text: [64]u8 = undefined;
         var price_text: [64]u8 = undefined;
-        const quantity_value = if (command.quantity) |value| try decimalText(&quantity_text, value.lots, rules.lot_size) else "";
+        const quantity_value = if (if (command.operation == .cancel) command.quantity else self.wireQuantity(command)) |value| try decimalText(&quantity_text, value.lots, rules.lot_size) else "";
         const price_value = if (command.limit_price) |value| try decimalText(&price_text, value.ticks, rules.tick_size) else "";
         const category = if (command.instrument == private.btc_usdt_spot) "spot" else "linear";
         const body = try std.fmt.bufPrint(&result.bytes, "{{\"category\":\"{s}\",\"symbol\":\"BTCUSDT\",\"orderLinkId\":\"{s}\",\"orderId\":\"{s}\",\"side\":\"{s}\",\"orderType\":\"{s}\",\"timeInForce\":\"{s}\",\"qty\":\"{s}\",\"price\":\"{s}\",\"reduceOnly\":{}}}", .{ category, command.client_order_id.slice(), if (command.venue_order) |value| value.value.slice() else "", switch (command.side) {
@@ -758,7 +770,7 @@ test "Bybit place amend cancel use official v5 paths" {
     try std.testing.expectEqualStrings("/v5/order/create", place.path);
     var amend = try testCommand();
     amend.operation = .amend;
-    try std.testing.expectEqualStrings("/v5/order/amend", (try adapter.encode(amend)).path);
+    try std.testing.expectError(error.MissingAmendEvidence, adapter.encode(amend));
     var cancel = try testCommand();
     cancel.operation = .cancel;
     try std.testing.expectEqualStrings("/v5/order/cancel", (try adapter.encode(cancel)).path);
@@ -805,4 +817,154 @@ test "Bybit activated precision converts private fills without trading authority
     try std.testing.expectEqual(@as(usize, 2), fills);
     try std.testing.expectEqual(venue.SendResult.backpressure, try adapter.trySend(.{ .order_command = try testCommand() }));
     try std.testing.expectEqual(@as(u64, 0), transport.calls);
+}
+
+test "Bybit amend admission rejects each missing permission without transport" {
+    for (0..7) |failure| {
+        var clock = TestClock{};
+        var auth = TestAuth{};
+        var sink = TestRaw{};
+        var transport = TestTransport{};
+        var profile = testProfile();
+        switch (failure) {
+            0 => profile.testnet_admission.explicit_enable = false,
+            1 => profile.testnet_admission.endpoint_is_testnet = false,
+            2 => profile.testnet_admission.credential_can_read = false,
+            3 => profile.testnet_admission.credential_can_trade = false,
+            4 => profile.testnet_admission.credential_can_withdraw = true,
+            5 => profile.testnet_admission.max_order_notional_usdt_micros = 1,
+            6 => {
+                profile.testnet_admission.explicit_enable = false;
+                profile.testnet_admission.max_order_notional_usdt_micros = 1;
+            },
+            else => unreachable,
+        }
+        var implementation = BybitVenueAdapter.init(clock.interface(), profile, auth.interface(), sink.sink(), transport.interface());
+        var reconciler = private.Reconciler.init(sink.sink(), .{ .spot = .{ .identity = profile.spot.identity, .rules_version = 1, .tick_size = profile.spot.tick_size, .lot_size = profile.spot.lot_size }, .linear = .{ .identity = profile.linear.identity, .rules_version = 1, .tick_size = profile.linear.tick_size, .lot_size = profile.linear.lot_size } });
+        implementation.attachPrivateReconciler(&reconciler);
+        const adapter = implementation.adapter();
+        try adapter.start(.{ .venue = 1, .asset_definitions = try contract.activatedTestAssets(), .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 4, .output_capacity = 4 });
+        var command = try testCommand();
+        command.operation = .amend;
+        command.venue_order = try canonical.VenueOrderRef.init(1, "existing");
+        command.revision = 2;
+        command.amend_expected_cumulative_quantity = command.quantity;
+        command.amend_expected_cumulative_quantity.?.lots = 2;
+        try testObserveAmend(&implementation, command);
+        const raw_before = sink.calls;
+        _ = try adapter.trySend(.{ .order_command = command });
+        try std.testing.expectEqual(canonical.DispatchState.not_sent, (try adapter.tryDrain()).?.events[0].event.order_dispatch_result.state);
+        try std.testing.expectEqual(@as(u64, 0), transport.calls);
+        try std.testing.expectEqual(raw_before, sink.calls);
+        command.operation = .cancel;
+        command.quantity = null;
+        command.limit_price = null;
+        _ = try adapter.trySend(.{ .order_command = command });
+        try std.testing.expectEqual(canonical.DispatchState.submitted, (try adapter.tryDrain()).?.events[0].event.order_dispatch_result.state);
+        try std.testing.expectEqual(@as(u64, 1), transport.calls);
+    }
+}
+
+fn testObserveAmend(implementation: *BybitVenueAdapter, command: canonical.OrderCommand) !void {
+    const reconciler = implementation.reconciler.?;
+    try reconciler.registerOrder(command.orderIdentity(), command.client_order_id, false);
+    if (reconciler.stage == .buffering) try implementation.beginPrivateReconciliation();
+    var bytes: [1024]u8 = undefined;
+    const payload = try std.fmt.bufPrint(&bytes, "{{\"result\":{{\"list\":[{{\"category\":\"{s}\",\"symbol\":\"BTCUSDT\",\"orderId\":\"{s}\",\"orderLinkId\":\"{s}\",\"side\":\"Buy\",\"orderType\":\"Limit\",\"timeInForce\":\"GTC\",\"orderStatus\":\"PartiallyFilled\",\"qty\":\"0.0003\",\"cumExecQty\":\"0.0002\",\"price\":\"50000.0\",\"avgPrice\":\"50000.0\",\"updatedTime\":\"2\",\"reduceOnly\":false}}]}}}}", .{ if (command.instrument == private.btc_usdt_spot) "spot" else "linear", command.venue_order.?.value.slice(), command.client_order_id.slice() });
+    _ = try implementation.ingestPrivate(std.testing.allocator, .rest_orders, .{ .final = true }, .{ .receive_time_utc_ns = 1, .monotonic_time_ns = 2, .wall_time_utc_ns = 3 }, payload);
+}
+
+test "Bybit amend admission binds partial fills revision and batch limits" {
+    for ([_]bool{ false, true }) |linear| {
+        for (0..15) |scenario| {
+            var clock = TestClock{};
+            var auth = TestAuth{};
+            var sink = TestRaw{};
+            var transport = TestTransport{};
+            var profile = testProfile();
+            const notional: u64 = 15_000_000;
+            profile.testnet_admission.max_order_notional_usdt_micros = switch (scenario) {
+                0 => notional - 1,
+                2 => notional * 2 - 1,
+                3 => notional * 2,
+                else => notional,
+            };
+            var implementation = BybitVenueAdapter.init(clock.interface(), profile, auth.interface(), sink.sink(), transport.interface());
+            var reconciler = private.Reconciler.init(sink.sink(), .{ .spot = .{ .identity = profile.spot.identity, .rules_version = 1, .tick_size = profile.spot.tick_size, .lot_size = profile.spot.lot_size }, .linear = .{ .identity = profile.linear.identity, .rules_version = 1, .tick_size = profile.linear.tick_size, .lot_size = profile.linear.lot_size } });
+            implementation.attachPrivateReconciler(&reconciler);
+            const adapter = implementation.adapter();
+            try adapter.start(.{ .venue = 1, .asset_definitions = try contract.activatedTestAssets(), .environment = .demo, .exchange_account = 2, .adapter_session = 3, .request_capacity = 4, .output_capacity = 4 });
+            var command = try testCommand();
+            command.instrument = if (linear) profile.linear.identity else profile.spot.identity;
+            command.quantity.?.instrument = command.instrument;
+            command.limit_price.?.instrument = command.instrument;
+            command.operation = .amend;
+            command.revision = 2;
+            command.amend_expected_cumulative_quantity = command.quantity;
+            command.amend_expected_cumulative_quantity.?.lots = 2;
+            command.venue_order = try canonical.VenueOrderRef.init(1, "existing");
+            try testObserveAmend(&implementation, command);
+            if (scenario == 12) {
+                var place = command;
+                place.operation = .place;
+                place.revision = 1;
+                place.venue_order = null;
+                transport.outcome = .write_or_response_uncertain;
+                transport.response = null;
+                _ = try adapter.trySend(.{ .order_command = place });
+                try std.testing.expectEqual(canonical.DispatchState.unknown, (try adapter.tryDrain()).?.events[0].event.order_dispatch_result.state);
+                for ([_]bool{ false, true }) |enabled| {
+                    implementation.profile.testnet_admission.explicit_enable = enabled;
+                    _ = try adapter.trySend(.{ .order_command = command });
+                    try std.testing.expectEqual(canonical.DispatchState.not_sent, (try adapter.tryDrain()).?.events[0].event.order_dispatch_result.state);
+                    try std.testing.expectEqual(@as(u64, 1), transport.calls);
+                }
+                continue;
+            }
+            var second = command;
+            second.identity += 1;
+            second.client_order_id = try canonical.ClientOrderId.init("SECOND");
+            second.venue_order = try canonical.VenueOrderRef.init(1, "second");
+            if (scenario == 2 or scenario == 3) try testObserveAmend(&implementation, second);
+            switch (scenario) {
+                4 => command.revision = 1,
+                5 => command.revision = 3,
+                6 => implementation.reconciler = null,
+                7 => command.limit_price.?.rules_version += 1,
+                8 => implementation.privateSourceGap(),
+                9 => command.quantity.?.lots = std.math.maxInt(i128),
+                10 => command.limit_price = null,
+                13 => command.amend_expected_cumulative_quantity.?.lots = 1,
+                14 => command.amend_expected_cumulative_quantity = null,
+                11 => command.venue_order = try canonical.VenueOrderRef.init(1, "wrong-order"),
+                else => {},
+            }
+            const before = sink.calls;
+            const passes = scenario == 1 or scenario == 3;
+            if (passes) transport.expected_native = "\"qty\":\"0.0003\"";
+            var batch: canonical.OrderCommandBatch = .{};
+            try batch.append(command);
+            if (scenario == 2 or scenario == 3) try batch.append(second);
+            if (scenario == 0) {
+                var cancel = command;
+                cancel.identity += 10;
+                cancel.operation = .cancel;
+                cancel.quantity = null;
+                cancel.limit_price = null;
+                try batch.append(cancel);
+            }
+            _ = try adapter.trySend(if (batch.len > 1) .{ .order_batch = batch } else .{ .order_command = command });
+            const output = (try adapter.tryDrain()).?;
+            try std.testing.expectEqual(batch.len, output.len);
+            for (output.slice()) |record| try std.testing.expectEqual(if (passes) canonical.DispatchState.submitted else .not_sent, record.event.order_dispatch_result.state);
+            const sent: u64 = if (passes) batch.len else 0;
+            try std.testing.expectEqual(sent, transport.calls);
+            try std.testing.expectEqual(before + sent, sink.calls);
+            if (passes) {
+                _ = try adapter.trySend(.{ .order_command = command });
+                try std.testing.expectEqual(canonical.DispatchState.not_sent, (try adapter.tryDrain()).?.events[0].event.order_dispatch_result.state);
+                try std.testing.expectEqual(sent, transport.calls);
+            }
+        }
+    }
 }

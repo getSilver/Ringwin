@@ -20,6 +20,26 @@ pub fn prepareNamespacedClientOrderId(_: *anyopaque, namespace: [16]u8, account:
     return canonical.ClientOrderId.init(&encoded);
 }
 
+/// Convert TargetRemainingQuantity against a known prior revision, with checked units.
+pub fn amendTotalQuantity(command: canonical.OrderCommand, report: canonical.ExecutionReport) ?canonical.InstrumentQuantity {
+    const remaining = command.quantity orelse return null;
+    const expected_cumulative = command.amend_expected_cumulative_quantity orelse return null;
+    if (!std.meta.eql(expected_cumulative, report.cumulative_quantity)) return null;
+    if (report.status != .accepted and report.status != .partially_filled) return null;
+    if (command.revision <= 1 or report.revision != command.revision - 1 or
+        report.order != command.orderIdentity() or report.exchange_account != command.exchange_account or
+        report.instrument != command.instrument or !std.meta.eql(report.client_order_id, command.client_order_id) or
+        report.venue_order == null or !std.meta.eql(report.venue_order, command.venue_order) or
+        report.side != command.side or report.order_type != command.order_type or
+        (report.venue_reduce_only orelse false) != command.venue_reduce_only or report.portfolio_reduce_only != command.portfolio_reduce_only or
+        remaining.instrument != command.instrument or remaining.rules_version != command.rules_version or remaining.lots <= 0 or
+        report.cumulative_quantity.instrument != command.instrument or report.cumulative_quantity.rules_version != command.rules_version or
+        report.cumulative_quantity.lots < 0) return null;
+    var total = remaining;
+    total.lots = std.math.add(i128, total.lots, report.cumulative_quantity.lots) catch return null;
+    return total;
+}
+
 pub const Environment = enum { simulation, demo, testnet };
 
 pub const VenueConfig = struct {

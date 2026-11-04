@@ -34,7 +34,7 @@ pub const Readiness = struct { stage: Stage, session: canonical.AdapterSessionId
 const max_events = 96;
 const max_links = 32;
 const max_seen = 128;
-const Link = struct { order: canonical.OrderIdentity, client: canonical.ClientOrderId, portfolio_reduce_only: bool, status: ?canonical.ExecutionReportStatus = null };
+const Link = struct { order: canonical.OrderIdentity, client: canonical.ClientOrderId, portfolio_reduce_only: bool, status: ?canonical.ExecutionReportStatus = null, amend_report: ?canonical.ExecutionReport = null, amend_consumed: bool = false };
 
 pub const Reconciler = struct {
     asset_definitions: @import("../../trading/asset_registry.zig").Registry = .{},
@@ -92,6 +92,32 @@ pub const Reconciler = struct {
     }
     pub fn readiness(self: *const Reconciler) Readiness {
         return .{ .stage = self.stage, .session = if (self.binding) |value| value.session else 0, .raw_watermark = self.raw_watermark, .bootstrap = self.bootstrap };
+    }
+    /// shortcut: decoders prove revision 1 only; support later amendments when revision correlation is implemented.
+    pub fn amendReport(self: *const Reconciler, order: canonical.OrderIdentity) ?canonical.ExecutionReport {
+        if (self.stage == .offline or self.stage == .failed) return null;
+        for (self.links[0..self.link_count]) |link| if (link.order == order and !link.amend_consumed) return link.amend_report;
+        return null;
+    }
+    pub fn consumeAmend(self: *Reconciler, order: canonical.OrderIdentity) void {
+        for (self.links[0..self.link_count]) |*link| if (link.order == order) {
+            link.amend_consumed = true;
+        };
+    }
+    fn observeAmendReport(self: *Reconciler, report: canonical.ExecutionReport) void {
+        for (self.links[0..self.link_count]) |*link| if (link.order == report.order) {
+            if (link.amend_report) |previous| {
+                if (report.cumulative_quantity.lots < previous.cumulative_quantity.lots or
+                    (report.venue_update_time_utc_ns orelse 0) < (previous.venue_update_time_utc_ns orelse 0))
+                {
+                    link.amend_consumed = true;
+                    return;
+                }
+            }
+            if (report.status != .accepted and report.status != .partially_filled) link.amend_consumed = true;
+            link.amend_report = report;
+            return;
+        };
     }
     pub fn registerOrder(self: *Reconciler, order: canonical.OrderIdentity, client: canonical.ClientOrderId, portfolio_reduce_only: bool) !void {
         for (self.links[0..self.link_count]) |link| if (std.mem.eql(u8, link.client.slice(), client.slice())) {
@@ -219,6 +245,7 @@ pub const Reconciler = struct {
             const event: canonical.Payload = .{ .execution_report = .{ .identity = identity(key), .order = link.order, .client_order_id = link.client, .venue_order = try canonical.VenueOrderRef.init((self.binding orelse return error.StaleSession).venue, order_id), .instrument = rules.identity, .exchange_account = (self.binding orelse return error.StaleSession).account, .revision = 1, .side = try side(try string(item, "side")), .order_type = try orderType(try string(item, "orderType")), .time_in_force = try tif(try string(item, "timeInForce")), .venue_reduce_only = try optionalBool(item, "reduceOnly"), .portfolio_reduce_only = link.portfolio_reduce_only, .position_mode_net = if (position_side) |position| position == .net else null, .position_side = position_side, .status = status, .reject_reason = if (status == .rejected) .other_venue_reject else null, .original_quantity = original, .cumulative_quantity = executed, .remaining_quantity = .{ .instrument = rules.identity, .rules_version = rules.rules_version, .lots = original.lots - executed.lots }, .limit_price = try optionalPrice(rules, (try optionalString(item, "price")) orelse "0"), .average_fill_price = try optionalPrice(rules, (try optionalString(item, "avgPrice")) orelse "0"), .venue_create_time_utc_ns = try optionalMillis(item, "createdTime"), .venue_update_time_utc_ns = update } };
             if (try self.seenBefore(key, event)) continue;
             try self.emit(.account, rules.identity, null, identity(key), update, times, evidence, event);
+            self.observeAmendReport(event.execution_report);
         }
     }
     fn decodeExecutions(self: *Reconciler, times: Times, evidence: RawEvidenceRef, value: std.json.Value) !void {
