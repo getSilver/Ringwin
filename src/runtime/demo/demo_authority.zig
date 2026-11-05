@@ -1771,6 +1771,7 @@ test "Checkpoint owner file interruptions preserve coherent Unknown fill economi
                     try expectCheckpointBusinessState(&recovered.shard, if (case.apply_input) old else before_receipt);
                     continue;
                 }
+                try std.testing.expect(!recovered.closed);
                 try std.testing.expect(recovered.shard.recovery_admission_pending);
                 try expectCheckpointAdmissionClosed(recovered);
                 const expected = if (case.apply_input) old else if (recovered.shard.authoritativeBarrier() == new.authoritativeBarrier()) new else before_receipt;
@@ -1788,6 +1789,8 @@ test "Checkpoint owner file interruptions preserve coherent Unknown fill economi
                 defer std.testing.allocator.destroy(repeated);
                 try Owner.recoverInto(repeated, again.interface(), io, stream);
                 try expectCheckpointBusinessState(&repeated.shard, &recovered.shard);
+                try std.testing.expect(!repeated.closed);
+                try expectCheckpointAdmissionClosed(repeated);
             };
         }
     };

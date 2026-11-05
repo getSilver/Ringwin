@@ -1228,7 +1228,11 @@ pub const LinuxFileAdapter = struct {
         }
         const next_index = try std.math.add(u32, stream.segment_index, 1);
         const next_sequence = try std.math.add(u64, stream.journal.last_sequence, 1);
-        const page = archivePage(entry.*);
+        // A recovered seal can extend the manifest prefix without adding records.
+        var archived_entry = entry.*;
+        archived_entry.byte_len = @intCast(stream.journal.bytes().len);
+        archived_entry.digest = digest(stream.journal.bytes());
+        const page = archivePage(archived_entry);
         _ = try receiptFromPage(&page, digest(&page));
         const page_name = try archiveName(digest(&page));
         writeAtomicFile(self.dir, io, page_name.slice(), &page, true) catch |err| {
@@ -3279,6 +3283,15 @@ test "physical crash suffix file boundaries reject damage and retain seal rotati
         try std.testing.expectEqualSlices(u8, &segment_before, &digest(file.scratch[0..after_len]));
         const after_manifest_len = try readInto(temp.dir, io, "manifest.bin", &file.scratch);
         try std.testing.expectEqualSlices(u8, &manifest_before, &digest(file.scratch[0..after_manifest_len]));
+        if (case == .seal_publish) {
+            // Explicit checkpoint continuation must authenticate the recovered footer.
+            try reopened.interface().publishSnapshot(io, stream, 2, &.{72});
+            try reopened.interface().rotate(io, stream);
+            const receipt = try reopened.interface().archiveReceipt(io, stream);
+            try std.testing.expectEqual(@as(u32, @intCast(len)), receipt.latest_byte_len);
+            try std.testing.expectEqualSlices(u8, &segment_before, &receipt.latest_payload_digest);
+            try std.testing.expect(try reopened.interface().verifyArchiveReceipt(io, stream, 2, receipt.ordered_root));
+        }
     }
 }
 
