@@ -25,7 +25,7 @@ const exchange_account: u128 = 900;
 pub const acceptance_schema_version: u16 = production_contract.acceptance_schema_version;
 // journal52 / state56 / registry50 / Coordinator v19;
 // recaptured only after economics and three-path recovery equality.
-const expected_shared_summary = "c77321fddc87a8ba4a248e80fa03cf2d542ecd81ef5a7d9be77ce9d92aac2225";
+const expected_shared_summary = "9ef68e99edf0fb694deda2a7a8b47bee146fa97d0d2b102001661d2bda6b842b";
 
 fn applyCoreStable(shard: *trading.TradingShard, stable_journal: *trading.journal.Journal, input: trading.CoreEvent) !?trading.OrderCommand {
     return trading.applyStable(shard, stable_journal, .{ .core = input });

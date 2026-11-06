@@ -110,6 +110,7 @@ pub const DispatchBatch = struct {
 pub const FactRef = struct { identity: u128 = 0, version: u64 = 0, barrier: u64 = 0 };
 /// References to source-owned facts, not a replayable authorization grant.
 pub const DispatchAuthorityRefs = struct {
+    pair_approval_version: u64 = 0,
     decision_domain: u128 = 0,
     configuration_digest: [32]u8 = @splat(0),
     cycle: FactRef = .{},

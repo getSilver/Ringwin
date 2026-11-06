@@ -17,6 +17,7 @@ Status: open
 - 交易范围、资金与数量、费用、资产身份、执行失败、库存和恢复均有明确规则。
 - 每项规则有正常及异常场景的可检查结果。
 - 03–11通过Python公开接口、数学验证及离线合同回放后，可标记策略开发完成。
+- 16 的扫描运行、历史和 Web 展示真实实施与集成另行验收；独立 UI Demo 不代表功能已接通。
 - 12/13经济资格、14/15运行资格及[独立集成验收](integration-acceptance.md)分别记录，不阻塞策略开发完成；整个地图须全部范围完成才关闭。
 
 ## Rules
@@ -51,8 +52,11 @@ Status: open
 13. [Maker–Taker 独立校准与资格判定](issues/13-maker-calibration.md)
 14. [双 IOC 只读影子验收](issues/14-taker-shadow.md)
 15. [Maker–Taker 只读影子验收](issues/15-maker-shadow.md)
+16. [机会扫描运行、历史与 Web 展示规格](issues/16-scanner-console-spec.md)
 
 ## Frontier
+
+- [16 扫描控制台](issues/16-scanner-console-spec.md)：in_progress，Codex实施整张运行／历史／Web/UI／核心批准；用户本轮明确排除真实行情联调。策略分支 `spread-arbitrage-strategy-python`，见[实施证据](scanner-console-implementation.md)。
 
 - [12 双 IOC 样本外校准与资格判定](issues/12-taker-calibration.md)：依赖05/10已完成，离线研究工具已开发，真实研究输入不足，in_progress，经济资格pending；见[12证据](taker-calibration-evidence.md)。
 - [13 Maker–Taker 独立校准与资格判定](issues/13-maker-calibration.md)：依赖05/11已完成，独立Maker离线研究工具已开发，in_progress，真实经济资格pending；见[13证据](maker-calibration-evidence.md)。
@@ -60,6 +64,12 @@ Status: open
 - 原01/02为来源规格，保持原状态；其他会话施工及资格见核心接口地图。其余新票按各自 Blocked by 推进。
 
 ## Decisions so far
+
+- 2026-11-07：用户授权实施整张16，随后明确不做真实行情联调；已在独立策略工作区开发规范范围过滤、生命周期、SQLite派生历史、现有OwnerSession Web接口、RingwinUi及TradingShard配对批准。当前离线验收、双轴审查及提交收尾中；不将离线输入视为真实行情或交易资格。
+
+- 2026-11-06追加：16规格补充Venue／产品多选、资产纳入／排除均可空及用户确认的盘口可用深度最低／最高金额。按用户最新要求仅更新文档，本轮代码尝试已撤回，原Demo保留；对应实现、Web/核心及行情接线均待后续处理。
+
+- 2026-11-06：按用户要求将扫描启停、人工范围、候选证据、历史统计和核心确认流程整理为[16规格](issues/16-scanner-console-spec.md)，交付独立 RingwinUi Demo。不同步 GitHub、不连接交易所、不交易；07/08边界不变，真实实施仍未完成。
 
 - 2026-10-28：本轮12→13→14→15可开发离线工具范围均已交付；真实经济/运行资格分别pending，12–15仍in_progress，跨模块集成仍pending；模块保持open，不将合成回归或工具交付视为真实资格。
 

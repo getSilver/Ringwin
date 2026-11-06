@@ -92,6 +92,7 @@ pub const Authority = struct {
         build_inventory: []const u8 = "",
         binary_sha256: []const u8 = "",
         config_json: []const u8 = "",
+        pair_request: ?@import("../trading/pair_trading_authorization.zig").Request = null,
         evidence: ?struct { host_generation: u64, cursor: u64, next_input_batch: u64 } = null,
     };
 
@@ -178,6 +179,39 @@ pub const Authority = struct {
         if (value.strategy_identity.len != 32 or try std.fmt.parseInt(u128, value.strategy_identity, 16) != self.strategy)
             return error.StrategyIdentityMismatch;
         const op = value.operation;
+        if (std.mem.eql(u8, op, "pair_authorization_version")) {
+            const version = try std.fmt.allocPrint(gpa, "{d}", .{self.shard.pair_authorizations.version});
+            defer gpa.free(version);
+            return std.json.Stringify.valueAlloc(gpa, .{ .core_version = version }, .{});
+        }
+        if (std.mem.eql(u8, op, "pair_authorize") or std.mem.eql(u8, op, "pair_authorization_status")) {
+            const request_value = value.pair_request orelse return error.InvalidPairAuthorization;
+            if (request_value.strategy != self.strategy) return error.StrategyIdentityMismatch;
+            const identity = try std.fmt.allocPrint(gpa, "{d}", .{request_value.identity});
+            defer gpa.free(identity);
+            if (self.shard.pair_authorizations.receipt(request_value.identity)) |record| {
+                if (!std.meta.eql(record.request, request_value)) return error.PairAuthorizationIdentityConflict;
+                const version = try std.fmt.allocPrint(gpa, "{d}", .{record.version});
+                defer gpa.free(version);
+                const barrier = try std.fmt.allocPrint(gpa, "{d}", .{record.barrier});
+                defer gpa.free(barrier);
+                return std.json.Stringify.valueAlloc(gpa, .{ .identity = identity, .status = "accepted", .core_version = version, .barrier = barrier }, .{});
+            }
+            if (std.mem.eql(u8, op, "pair_authorization_status"))
+                return std.json.Stringify.valueAlloc(gpa, .{ .identity = identity, .status = "unknown" }, .{});
+            self.shard.validatePairAuthorization(request_value) catch |err|
+                return std.json.Stringify.valueAlloc(gpa, .{ .identity = identity, .status = "rejected", .reason = @errorName(err) }, .{});
+            if (request_value.expected_version != self.shard.pair_authorizations.version)
+                return std.json.Stringify.valueAlloc(gpa, .{ .identity = identity, .status = "rejected", .reason = "PairAuthorizationVersionConflict" }, .{});
+            self.commit(self.context, .{ .pair_trading_authorization = request_value }) catch |err|
+                return std.json.Stringify.valueAlloc(gpa, .{ .identity = identity, .status = "unknown", .reason = @errorName(err) }, .{});
+            const record = self.shard.pair_authorizations.receipt(request_value.identity) orelse return error.PairConfirmationUnavailable;
+            const version = try std.fmt.allocPrint(gpa, "{d}", .{record.version});
+            defer gpa.free(version);
+            const barrier = try std.fmt.allocPrint(gpa, "{d}", .{record.barrier});
+            defer gpa.free(barrier);
+            return std.json.Stringify.valueAlloc(gpa, .{ .identity = identity, .status = "accepted", .core_version = version, .barrier = barrier }, .{});
+        }
         const successor = std.mem.eql(u8, op, "begin_successor") or std.mem.eql(u8, op, "commit_successor");
         if (successor or std.mem.eql(u8, op, "begin_config") or std.mem.eql(u8, op, "commit_config")) {
             if (self.native_instance != null and !successor) return error.UnsupportedNativeConfigTransition;

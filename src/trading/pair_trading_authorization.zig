@@ -1,0 +1,114 @@
+//! Core-owned, bounded approval of an observed pair. Approval is not send permission.
+const std = @import("std");
+const deployment = @import("deployment_allocation.zig");
+const oms = @import("../execution/oms.zig");
+pub const Mode = enum(u8) { taker_taker, maker_first, maker_second };
+pub const Leg = struct {
+    venue: u64,
+    environment: deployment.Environment,
+    account: u128,
+    instrument: u128,
+    rules_version: u32,
+};
+pub const Request = struct {
+    identity: u128,
+    strategy: u128,
+    portfolio: u128,
+    activation: u128,
+    config_version: u64,
+    expected_version: u64,
+    legs: [2]Leg,
+    direction: i8,
+    mode: Mode,
+    enabled: bool,
+};
+pub const Record = struct { request: Request, version: u64, barrier: u64 };
+pub const State = struct {
+    records: [256]Record = std.mem.zeroes([256]Record),
+    count: u16 = 0,
+    version: u64 = 0,
+
+    pub fn receipt(self: *const State, identity: u128) ?Record {
+        for (self.records[0..self.count]) |record| if (record.request.identity == identity) return record;
+        return null;
+    }
+
+    pub fn validate(self: *const State) !void {
+        if (self.count > self.records.len or self.version != self.count) return error.InvalidPairAuthorizationState;
+        for (self.records[0..self.count], 0..) |record, index| {
+            if (record.version != index + 1 or record.barrier == 0) return error.InvalidPairAuthorizationState;
+            try validateRequest(record.request);
+            for (self.records[0..index]) |previous| if (previous.request.identity == record.request.identity)
+                return error.InvalidPairAuthorizationState;
+        }
+    }
+
+    pub fn append(self: *State, request: Request, barrier: u64) !bool {
+        try validateRequest(request);
+        if (self.receipt(request.identity)) |previous| {
+            if (!std.meta.eql(previous.request, request)) return error.PairAuthorizationIdentityConflict;
+            return false;
+        }
+        if (request.expected_version != self.version) return error.PairAuthorizationVersionConflict;
+        if (self.count == self.records.len) return error.PairAuthorizationCapacity;
+        self.records[self.count] = .{ .request = request, .version = self.version + 1, .barrier = barrier };
+        self.count += 1;
+        self.version += 1;
+        return true;
+    }
+
+    pub fn requiresApproval(self: *const State, strategy: u128) bool {
+        for (self.records[0..self.count]) |record| if (record.request.strategy == strategy) return true;
+        return false;
+    }
+
+    pub fn allowedRequest(self: *const State, group: oms.IntentGroup, config_version: u64) ?Request {
+        if (group.count == 0 or group.count > 2) return null;
+        var i: usize = self.count;
+        while (i > 0) {
+            i -= 1;
+            const request = self.records[i].request;
+            if (request.strategy != group.members[0].strategy_instance or request.portfolio != group.members[0].portfolio or
+                request.config_version != config_version) continue;
+            // A later revocation of this exact selector supersedes the old grant.
+            var superseded = false;
+            for (self.records[i + 1 .. self.count]) |later| if (sameSelector(request, later.request)) {
+                superseded = true;
+                break;
+            };
+            if (superseded or !request.enabled) continue;
+            var matched = true;
+            for (group.members[0..group.count]) |member| {
+                const leg: usize = if (member.exchange_account == request.legs[0].account and member.instrument == request.legs[0].instrument) 0 else if (member.exchange_account == request.legs[1].account and member.instrument == request.legs[1].instrument) 1 else {
+                    matched = false;
+                    break;
+                };
+                const buy = (leg == 0) == (request.direction == 1);
+                const maker = (request.mode == .maker_first and leg == 0) or (request.mode == .maker_second and leg == 1);
+                if (member.operation != .place or member.portfolio_reduce_only or
+                    member.side != (if (buy) oms.Side.buy else oms.Side.sell) or
+                    (maker and member.order_type != .post_only) or
+                    (!maker and (member.order_type != .limit or member.time_in_force != .immediate_or_cancel))) matched = false;
+            }
+            if (group.count == 1 and request.mode == .taker_taker) matched = false;
+            if (matched) return request;
+        }
+        return null;
+    }
+};
+
+fn sameSelector(a: Request, b: Request) bool {
+    return a.strategy == b.strategy and a.portfolio == b.portfolio and a.direction == b.direction and a.mode == b.mode and
+        a.legs[0].account == b.legs[0].account and a.legs[1].account == b.legs[1].account and
+        a.legs[0].instrument == b.legs[0].instrument and a.legs[1].instrument == b.legs[1].instrument;
+}
+
+pub fn validateRequest(request: Request) !void {
+    if (request.identity == 0 or request.strategy == 0 or request.portfolio == 0 or request.activation == 0 or
+        request.config_version == 0 or (request.direction != 1 and request.direction != -1) or
+        request.legs[0].venue >= request.legs[1].venue or request.legs[0].account == request.legs[1].account or
+        request.legs[0].instrument == request.legs[1].instrument or request.legs[0].environment != request.legs[1].environment)
+        return error.InvalidPairAuthorization;
+    for (request.legs) |leg| if (leg.venue == 0 or leg.account == 0 or leg.instrument == 0 or leg.rules_version == 0)
+        return error.InvalidPairAuthorization;
+}

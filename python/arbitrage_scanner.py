@@ -19,6 +19,80 @@ SCHEMA = "arbitrage_candidates_v1"
 
 
 @dataclass(frozen=True)
+class Scope:
+    version: int
+    venues: tuple = ()
+    products: tuple = ()
+    include_assets: tuple = ()
+    exclude_assets: tuple = ()
+    quote_asset: object = None
+    min_depth_atoms: object = None
+    max_depth_atoms: object = None
+    environment: object = None
+    members: tuple = ()
+
+    def __post_init__(self):
+        b.uint(self.version, 1)
+        v._tuple(self.members, 64)
+        if any(not isinstance(x, Scope) or x.members for x in self.members):
+            raise b.Rejected("scan_scope_members")
+        if self.environment is not None and self.environment not in ("simulation", "demo", "testnet", "production"):
+            raise b.Rejected("scan_environment")
+        for name in ("venues", "products", "include_assets", "exclude_assets"):
+            values = getattr(self, name)
+            v._tuple(values)
+            if len(set(values)) != len(values):
+                raise b.Rejected("duplicate_scan_scope")
+            for value in values:
+                if name == "products":
+                    if value not in ("spot", "linear"):
+                        raise b.Rejected("scan_product_scope")
+                else:
+                    e.integer(value, 1)
+        if self.quote_asset is not None:
+            e.integer(self.quote_asset, 1)
+        for value in (self.min_depth_atoms, self.max_depth_atoms):
+            if value is not None:
+                e.integer(value)
+                if self.quote_asset is None:
+                    raise b.Rejected("scan_depth_unit")
+        if (self.min_depth_atoms is not None and self.max_depth_atoms is not None
+                and self.min_depth_atoms > self.max_depth_atoms):
+            raise b.Rejected("scan_depth_range")
+
+    def contains(self, observation):
+        asset = observation.rules.exposure_asset
+        if ((self.venues and observation.venue not in self.venues)
+                or (self.environment is not None and observation.environment != self.environment)
+                or (self.products and observation.kind not in self.products)
+                or (self.include_assets and asset not in self.include_assets)
+                or asset in self.exclude_assets):
+            return False
+        if self.members and not any(x.contains(observation) for x in self.members):
+            return False
+        if self.min_depth_atoms is None and self.max_depth_atoms is None:
+            return True
+        if observation.rules.quote_asset != self.quote_asset:
+            return False
+        book = decode_depth_snapshot(observation.book)
+        if any(lots is None for side in ("bids", "asks") for _, lots in book[side]):
+            return False
+        depth = min(e.exact(sum(observation.rules.notional(ticks, lots)
+                    for ticks, lots in book[side])) for side in ("bids", "asks"))
+        return ((self.min_depth_atoms is None or depth >= self.min_depth_atoms)
+                and (self.max_depth_atoms is None or depth <= self.max_depth_atoms))
+
+    def display(self):
+        return {"schema": "arbitrage_scope_v1", "version": str(self.version),
+                "environment": self.environment, "members": [x.display() for x in self.members],
+                "venues": [str(x) for x in self.venues], "products": list(self.products),
+                "include_assets": [str(x) for x in self.include_assets],
+                "exclude_assets": [str(x) for x in self.exclude_assets],
+                **{name: None if getattr(self, name) is None else str(getattr(self, name))
+                   for name in ("quote_asset", "min_depth_atoms", "max_depth_atoms")}}
+
+
+@dataclass(frozen=True)
 class Observation:
     venue: int
     account: int
@@ -26,6 +100,7 @@ class Observation:
     rules: e.InstrumentRules
     book: bytes
     continuous: bool
+    environment: str = "simulation"
 
     def __post_init__(self):
         for identity in (self.venue, self.account):
@@ -35,6 +110,8 @@ class Observation:
             raise b.Rejected("observation_product")
         if type(self.book) is not bytes or type(self.continuous) is not bool:
             raise b.Rejected("observation_depth")
+        if self.environment not in ("simulation", "demo", "testnet", "production"):
+            raise b.Rejected("observation_environment")
         try:
             book = decode_depth_snapshot(self.book)
         except RecoveryNeeded as error:
@@ -100,7 +177,7 @@ def candidate_id(pair, direction, mode, maker_leg):
     return hashlib.sha256(json.dumps([SCHEMA, key], separators=(",", ":")).encode("ascii")).hexdigest()
 
 
-def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns):
+def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=None):
     """Full replacement snapshot; omitted/expired rows cannot retain eligibility.
 
     Plans are frozen research scenario inputs, not scanner-generated forecasts.
@@ -117,27 +194,47 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns):
     indexed = {x.identity: x for x in observations}
     if len(indexed) != len(observations):
         raise b.Rejected("duplicate_observation")
+    if scope is not None and not isinstance(scope, Scope):
+        raise b.Rejected("scan_scope")
     pairs = {}
     for a, z in combinations(sorted(observations, key=lambda x: x.identity), 2):
-        if (a.venue == z.venue or a.account == z.account or a.rules.instrument == z.rules.instrument
+        if (a.venue == z.venue or a.environment != z.environment or a.account == z.account or a.rules.instrument == z.rules.instrument
                 or (a.rules.exposure_asset, a.rules.quote_asset) != (z.rules.exposure_asset, z.rules.quote_asset)):
             continue
         pairs[a.identity, z.identity] = a, z
-    if len(pairs) > 256:
+    selected_identities = {x.identity for x in observations if scope is None or scope.contains(x)}
+    active_pairs = {pair: legs for pair, legs in pairs.items() if all(x.identity in selected_identities for x in legs)}
+    if len(active_pairs) > 256:
         raise b.Rejected("scan_pair_capacity")
     grouped = {}
     for plan in plans:
         if plan.pair not in pairs:
             raise b.Rejected("plan_outside_observation")
+        # Validate the original binding even when a new observation filter hides it.
+        legs = pairs[plan.pair]
+        if (plan.policy.base_asset, plan.policy.quote_asset) != (
+                legs[0].rules.exposure_asset, legs[0].rules.quote_asset):
+            raise b.Rejected("scan_asset_scope")
+        for scenario in plan.scenarios:
+            if len(scenario.entry.legs) != 2:
+                if scenario.entry.state == "flat":
+                    continue
+                raise b.Rejected("scan_entry_scope")
+            for observed, projected in zip(legs, scenario.entry.legs):
+                if (observed.account, observed.rules, observed.kind) != (projected.account, projected.rules, projected.kind):
+                    raise b.Rejected("scan_entry_scope")
+            if scenario.markets[0].at_ns == at_ns and scenario.markets[0].books != tuple(x.book for x in legs):
+                raise b.Rejected("scan_depth_scope")
         quantities = grouped.setdefault(plan.key, {})
         quantity = e.exact(plan.policy.original_base)
         if quantity in quantities:
             raise b.Rejected("duplicate_scan_plan")
         quantities[quantity] = plan
     rows = []
-    for pair, legs in pairs.items():
+    books_by_identity = {x.identity: decode_depth_snapshot(x.book) for x in observations if x.identity in selected_identities}
+    for pair, legs in active_pairs.items():
         a, z = legs
-        books = tuple(decode_depth_snapshot(x.book) for x in legs)
+        books = tuple(books_by_identity[x.identity] for x in legs)
         times = tuple(x["visible_at_ns"] for x in books)
         if any(t > at_ns for t in times):
             raise b.Rejected("future_observation")
@@ -157,19 +254,6 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns):
                     policy = plan.policy
                     reason = health or ("expired" if at_ns >= plan.valid_until_ns or at_ns >= policy.deadline_ns else
                                         "evaluation_cutoff" if policy.at_ns != at_ns else "")
-                    if (policy.base_asset, policy.quote_asset) != (a.rules.exposure_asset, a.rules.quote_asset):
-                        raise b.Rejected("scan_asset_scope")
-                    for scenario in plan.scenarios:
-                        if len(scenario.entry.legs) != 2:
-                            if scenario.entry.state == "flat":
-                                continue
-                            raise b.Rejected("scan_entry_scope")
-                        for observed, projected in zip(legs, scenario.entry.legs):
-                            if (observed.account, observed.rules, observed.kind) != (projected.account, projected.rules, projected.kind):
-                                raise b.Rejected("scan_entry_scope")
-                        # Same-cutoff projections must bind the exact canonical input.
-                        if scenario.markets[0].at_ns == at_ns and scenario.markets[0].books != tuple(x.book for x in legs):
-                            raise b.Rejected("scan_depth_scope")
                     result = None
                     if not reason and a.kind == z.kind == "spot":
                         reason = "spot_spot_observation_only"
@@ -192,6 +276,7 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns):
                 rows.append({"id": candidate_id(*key), "pair": [[str(n) for n in x] for x in pair],
                     "base_asset": str(a.rules.base_asset), "quote_asset": str(a.rules.quote_asset),
                     "direction": direction, "mode": mode, "maker_leg": maker,
+                    "products": [x.kind for x in legs],
                     "status": "evaluated" if result is not None and result.allowed and not reason else "pending",
                     "reason": reason, "trading_qualified": False,
                     "quantity_base": _ratio(plan.policy.original_base) if plan else None,
@@ -209,7 +294,7 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns):
                     "scenario_digest": result.scenario_digest if result else None,
                     "estimator_digest": result.estimator_digest if result else None,
                     "data_cutoff_ns": str(min(times)), "valid_until_ns": str(end), "recommended": False})
-    for pair in pairs:
+    for pair in active_pairs:
         for direction in (1, -1):
             eligible = [row for row in rows if row["pair"] == [[str(n) for n in x] for x in pair]
                         and row["direction"] == direction and row["status"] == "evaluated"]
@@ -217,7 +302,8 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns):
                 best = min(eligible, key=lambda row: (-int(row["plan_atoms"]), int(row["occupied_atoms"]), row["id"]))
                 best["recommended"] = True
     return {"schema": SCHEMA, "at_ns": str(at_ns), "cursor": str(cursor),
-            "replacement": True, "candidates": rows}
+            "replacement": True, "candidates": rows,
+            **({"scope": scope.display()} if scope is not None else {})}
 
 
 def display_json(snapshot, *, at_ns):

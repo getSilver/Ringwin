@@ -14,6 +14,8 @@ import hashlib
 import hmac
 import json
 import os
+from pathlib import Path
+import mimetypes
 import secrets
 import struct
 import threading
@@ -186,7 +188,7 @@ class ControlPlaneApp:
     def __init__(self, directory: str, server: control_plane.CommandServer,
                  clock=lambda: int(time.time()),
                  projection_provider=None, ui_path=None, release_manager=None,
-                 lifecycle_outbox=None, instance_source=None):
+                 lifecycle_outbox=None, instance_source=None, scanner_console=None):
         self.directory = directory
         self.clock = clock
         self.passphrases = owner_session.PassphraseStore(directory)
@@ -203,6 +205,7 @@ class ControlPlaneApp:
         self.instance_manager = (strategy_instance.InstanceManager(directory, release_manager, instance_source)
                                  if release_manager is not None and instance_source is not None else None)
         self.lifecycle_outbox = lifecycle_outbox
+        self.scanner_console = scanner_console
         self._command_results: dict[int, tuple[str, dict]] = {}
         self._lifecycle_results: dict[int, tuple[str, dict]] = {}
         for record in self.records.read_all():
@@ -467,6 +470,56 @@ class ControlPlaneApp:
             html = handle.read()
         return 200, html, "text/html; charset=utf-8"
 
+    def ui_asset(self, path):
+        if self.ui_path is None or not path.startswith("/assets/") or "?" in path or "\\" in path:
+            return 404, b"asset not found", "text/plain"
+        root = (Path(self.ui_path).resolve().parent / "assets").resolve()
+        target = (root / path[len("/assets/"):]).resolve()
+        if not target.is_relative_to(root) or not target.is_file() or target.stat().st_size > 16 * 1024 * 1024:
+            return 404, b"asset not found", "text/plain"
+        return 200, target.read_bytes(), mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+
+    def scanner(self, headers, request=None):
+        status, body = self.authorize(headers)
+        if status != 200:
+            return status, body
+        if self.scanner_console is None:
+            return 503, {"ok": False, "error": "scanner node source unavailable"}
+        console = self.scanner_console
+        try:
+            if request is None:
+                result = console.view()
+            elif type(request) is not dict or "operation" not in request:
+                raise ValueError("scanner operation required")
+            else:
+                operation = request["operation"]
+                expected = {"operation"} if operation in ("start", "stop", "summary") else {"operation", "payload"}
+                if set(request) != expected:
+                    raise ValueError("scanner request fields")
+                if operation == "start":
+                    result = console.start()
+                elif operation == "stop":
+                    result = console.stop()
+                elif operation == "configure":
+                    result = console.configure(request["payload"])
+                elif operation == "history":
+                    result = {"rows": console.history.query(**request["payload"])}
+                elif operation == "summary":
+                    result = console.history.summarize()
+                elif operation == "approve":
+                    result = console.request_approval(request["payload"])
+                elif operation == "approval_status":
+                    result = console.query_approval(request["payload"])
+                elif operation == "core_version":
+                    result = console.core_version(request["payload"])
+                else:
+                    raise ValueError("unknown scanner operation")
+            return 200, {"ok": True, "result": result}
+        except (ValueError, KeyError, TypeError) as error:
+            return 409 if "conflict" in str(error) else 400, {"ok": False, "error": str(error)}
+        except OSError as error:
+            return 503, {"ok": False, "error": str(error)}
+
     def strategy_instances(self, headers, binding=None):
         status, body = self.authorize(headers)
         if status != 200:
@@ -597,6 +650,8 @@ def make_handler(app: ControlPlaneApp):
                     lambda body: app.lifecycle(dict(self.headers), body)),
                 "/api/strategy-instances": lambda: self._post(
                     lambda body: app.strategy_instances(dict(self.headers), body)),
+                "/api/scanner": lambda: self._post(
+                    lambda body: app.scanner(dict(self.headers), body)),
             }
             handler = routes.get(self.path)
             if handler is None:
@@ -605,8 +660,8 @@ def make_handler(app: ControlPlaneApp):
             handler()
 
         def do_GET(self):
-            if self.path in ("/", "/index.html"):
-                status, body, content_type = app.ui_page()
+            if self.path.split("?", 1)[0] in ("/", "/index.html") or self.path.startswith("/assets/"):
+                status, body, content_type = app.ui_asset(self.path) if self.path.startswith("/assets/") else app.ui_page()
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
@@ -618,6 +673,7 @@ def make_handler(app: ControlPlaneApp):
                 "/api/projection": lambda: self._get(app.projection),
                 "/api/releases": lambda: self._get(app.releases),
                 "/api/strategy-instances": lambda: self._get(app.strategy_instances),
+                "/api/scanner": lambda: self._get(app.scanner),
             }
             handler = routes.get(self.path)
             if handler is None:

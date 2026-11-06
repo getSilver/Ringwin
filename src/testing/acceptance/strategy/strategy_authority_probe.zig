@@ -56,7 +56,8 @@ pub fn main(init: std.process.Init) !void {
     const group = mode != null;
     const multiple = if (mode) |value| std.mem.eql(u8, value, "multiple") else false;
     const use_hyperliquid = if (mode) |value| std.mem.eql(u8, value, "hyperliquid") else false;
-    if (mode) |value| if (!multiple and !use_hyperliquid and !std.mem.eql(u8, value, "group")) return error.InvalidOfflineMode;
+    const scanner = if (mode) |value| std.mem.eql(u8, value, "scanner") else false;
+    if (mode) |value| if (!multiple and !use_hyperliquid and !scanner and !std.mem.eql(u8, value, "group")) return error.InvalidOfflineMode;
     if (args.next() != null) return error.UnknownArgument;
     const key = try std.Io.Dir.cwd().readFileAlloc(init.io, key_path, init.gpa, .limited(33));
     defer init.gpa.free(key);
@@ -84,6 +85,7 @@ pub fn main(init: std.process.Init) !void {
                 _ = try joint.apply(fixture.atGroup(45, .{ .identity = joint.shard.authoritativeBarrier() + 1, .account_scope = account, .payload = .{ .instrument_trading_authorization = .{ .strategy_identity = 19, .exchange_account = account, .instrument = instrument, .strategy_activation_identity = 1, .config_version = 1, .expected_version = 1, .enabled = true } } }));
             }
         } else try @import("../core/multi_account_authority_acceptance.zig").initializePythonOwner(joint);
+        if (scanner) try @import("../core/scanner_authorization_acceptance.zig").configurePairAssets(joint);
         if (use_hyperliquid) {
             var capability = joint.shard.registryInstrument(101).?.capability.?;
             capability.version = 2;

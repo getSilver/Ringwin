@@ -359,6 +359,7 @@ pub const PortfolioAuthority = struct {
 
 pub const TradingShard = struct {
     pub const native_definitions = @import("../strategy/native_registry.zig");
+    pair_authorizations: @import("pair_trading_authorization.zig").State = .{},
     cycles: @import("cycle_occupancy.zig").State = .{},
     last_business_archive_account: u128 = 0,
     domain_binding_receipt: ?history.Receipt = null,
@@ -1651,6 +1652,41 @@ pub const TradingShard = struct {
         return self.secondary_accounts[index].state;
     }
 
+    pub fn pairInstrument(self: *const TradingShard, account: u128, instrument: u128) ?InstrumentEntry {
+        if (account == self.exchange_account_identity) return self.instrument_registry.get(instrument);
+        const index = self.secondaryAccountIndex(account) orelse return null;
+        return self.secondary_accounts[index].state.instrument_registry.get(instrument);
+    }
+
+    pub fn validatePairAuthorization(self: *const TradingShard, request: @import("pair_trading_authorization.zig").Request) !void {
+        try @import("pair_trading_authorization.zig").validateRequest(request);
+        if (!self.deployment.sealed) return error.DeploymentConfigurationRequired;
+        const authority = self.strategyAuthority(request.strategy);
+        if (!authority.strategy_active or authority.portfolio_identity != request.portfolio or
+            authority.strategy_activation_identity != request.activation or authority.strategy_config_version != request.config_version or
+            self.strategyFenced(request.strategy)) return error.InvalidPairStrategy;
+        var entries: [2]InstrumentEntry = undefined;
+        for (request.legs, 0..) |leg, index| {
+            const account = self.deployment.account(leg.account) orelse return error.InvalidPairAccount;
+            if (account.venue != leg.venue or account.environment != leg.environment or
+                self.deployment.owner(leg.account, leg.instrument) != self.decision_domain_identity) return error.InvalidPairAccount;
+            entries[index] = self.pairInstrument(leg.account, leg.instrument) orelse return error.UnknownInstrument;
+            const entry = entries[index];
+            if (entry.venue != leg.venue or entry.rules.version != leg.rules_version or !entry.margin_configured) return error.InvalidPairRules;
+            if (request.enabled) {
+                const capability = entry.capability orelse return error.InvalidPairCapability;
+                if (!capability.supports_place or
+                    (((request.mode == .maker_first and index == 0) or (request.mode == .maker_second and index == 1)) and
+                        !capability.supports_post_only)) return error.InvalidPairCapability;
+            }
+        }
+        if (entries[0].rules.base_asset == 0 or entries[0].rules.base_asset != entries[1].rules.base_asset or
+            entries[0].rules.settlement_asset != entries[1].rules.settlement_asset or
+            (request.enabled and entries[0].product == .spot and entries[1].product == .spot)) return error.InvalidPairAssets;
+        if (request.enabled and ((entries[0].product == .spot and request.direction != 1) or
+            (entries[1].product == .spot and request.direction != -1))) return error.InvalidPairDirection;
+    }
+
     pub fn copyAccountViewInto(self: *const TradingShard, destination: *TradingShard, identity: u128) !void {
         if (self == destination) return error.InvalidAccountView;
         copyTradingState(destination, self);
@@ -2895,6 +2931,7 @@ pub const TradingShard = struct {
         const authority = self.strategyAuthority(strategy);
         try self.trace.validate();
         var refs: oms_module.DispatchAuthorityRefs = .{
+            .pair_approval_version = if (self.pair_authorizations.requiresApproval(strategy)) self.pair_authorizations.version else 0,
             .decision_domain = self.decision_domain_identity,
             .configuration_digest = if (self.deployment.sealed) self.deployment.header.?.expected_digest else @splat(0),
             .exchange_account = self.exchange_account_identity,
@@ -4700,6 +4737,10 @@ pub const TradingShard = struct {
         const authority = self.strategyAuthority(original.members[0].strategy_instance);
         const opening = original.members[0].operation == .place and !original.members[0].portfolio_reduce_only and !original.members[0].venue_reduce_only;
         if (opening and original.count != occupancy.max_members) return error.InvalidCycleMembers;
+        if (opening and self.pair_authorizations.requiresApproval(authority.strategy_identity)) {
+            const approval = self.pair_authorizations.allowedRequest(original, authority.strategy_config_version) orelse return error.PairNotAuthorized;
+            try self.validatePairAuthorization(approval);
+        }
         if (!input.time_presence.monotonic or input.monotonic_time == 0 or (opening and !authority.strategy_active)) return error.TradingNotAuthorized;
         if (opening and self.oms.blocksNewSend()) return error.OmsRecoveryOnly;
         if (opening) try self.cycles.residual_lifecycle.checkNewRiskCapacity();
@@ -5511,6 +5552,17 @@ pub const TradingShard = struct {
                     }
                 }
             },
+            .pair_trading_authorization => |request| {
+                if (self.pair_authorizations.receipt(request.identity)) |receipt| {
+                    if (!std.meta.eql(receipt.request, request)) return error.PairAuthorizationIdentityConflict;
+                    return null;
+                }
+                try self.validatePairAuthorization(request);
+                if (request.expected_version != self.pair_authorizations.version) return error.PairAuthorizationVersionConflict;
+                if (self.pair_authorizations.count == self.pair_authorizations.records.len) return error.PairAuthorizationCapacity;
+                try self.trace.append(.pair_trading_authorized, input.identity);
+                _ = try self.pair_authorizations.append(request, self.authoritativeBarrier());
+            },
             .instrument_trading_authorization => |authorization| {
                 const entry = self.instrument_registry.getPtr(authorization.instrument) orelse return error.UnknownInstrument;
                 const strategy = if (authorization.strategy_identity == 0) self.strategy_identity else authorization.strategy_identity;
@@ -6167,7 +6219,18 @@ fn domainAdmissionRejection(err: anyerror) ?RejectReason {
         error.Overflow => .arithmetic_overflow,
         error.UnsupportedOrderSpec, error.InvalidRiskInput, error.InvalidOrderSpec, error.AssetPrecisionUnsupported, error.QuantityOutOfRange, error.PriceOutOfRange, error.AssetAmountOutOfRange => .unsupported_order_spec,
         error.CapabilityUnsupported => .capability_unsupported,
-        error.TradingNotAuthorized, error.DeRiskTargetViolation, error.StrategyCutoverFenced, error.UncertainOrderBlocksSend, error.OmsRecoveryOnly => .authorization_closed,
+        error.TradingNotAuthorized,
+        error.DeRiskTargetViolation,
+        error.StrategyCutoverFenced,
+        error.UncertainOrderBlocksSend,
+        error.OmsRecoveryOnly,
+        error.PairNotAuthorized,
+        error.InvalidPairStrategy,
+        error.InvalidPairRules,
+        error.InvalidPairCapability,
+        error.InvalidPairAssets,
+        error.InvalidPairDirection,
+        => .authorization_closed,
         error.MarketDataGap, error.MissingInstrumentDefinition, error.InvalidMarkPrice => .market_data_gap,
         error.MarginSafetyGateClosed => .margin_safety_gate_closed,
         error.StrategyLimitExceeded => .strategy_limit_exceeded,
@@ -6370,6 +6433,7 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
 }
 
 fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: bool) !void {
+    try shard.pair_authorizations.validate();
     try shard.deployment.validateSnapshot();
     if (shard.deployment.sealed) {
         for (shard.oms.orders[0..shard.oms.order_count]) |order| {
@@ -7103,6 +7167,7 @@ pub fn applyStableOnCandidate(
         if (input == .core and input.core.payload == .control_command) return null;
         if (input == .core and input.core.payload == .spot_residual_rule) return null;
         if (input == .core and input.core.payload == .instrument_trading_authorization) return null;
+        if (input == .core and input.core.payload == .pair_trading_authorization) return null;
         if (input == .core and (input.core.payload == .external_order_intent or input.core.payload == .external_intent_group)) return null;
         if (input == .core and input.core.payload == .oms_intent_group and
             (previous.oms.groupIdentityStatus(input.core.payload.oms_intent_group) catch .fresh) == .duplicate)
@@ -7176,6 +7241,7 @@ fn digestOmsCommand(hasher: *Sha256, command: oms_module.Command) void {
     digestInt(hasher, u64, command.risk_decision_identity);
     digestInt(hasher, u64, command.reservation_identity);
     const refs = command.authority;
+    digestInt(hasher, u64, refs.pair_approval_version);
     digestInt(hasher, u128, refs.decision_domain);
     hasher.update(&refs.configuration_digest);
     digestBare(hasher, refs.cycle);
@@ -7224,7 +7290,10 @@ fn stateDigestBorrowed(shard: *const TradingShard) [Sha256.digest_length]u8 {
     const spot_portfolio_position = shard.spotPortfolioPosition();
     const spot_exchange_position = shard.spotExchangePosition();
     const ledger = shard.economic_projection.ledger_summary;
-    hasher.update("StateDigestV15\x00");
+    hasher.update("StateDigestV16\x00");
+    digestInt(&hasher, u16, shard.pair_authorizations.count);
+    digestInt(&hasher, u64, shard.pair_authorizations.version);
+    for (shard.pair_authorizations.records[0..shard.pair_authorizations.count]) |record| digestBare(&hasher, record);
     digestInt(&hasher, u8, shard.cycles.count);
     for (shard.cycles.records[0..shard.cycles.count]) |cycle| digestBare(&hasher, cycle);
     digestResidualLifecycle(&hasher, &shard.cycles.residual_lifecycle);

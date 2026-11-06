@@ -877,6 +877,8 @@ pub const Gateway = struct {
                 !std.meta.eql(order.reservation, oms_command.reservation))))
             return error.NotSent;
         const latest = shard.currentDispatchAuthorityRefsForStrategy(oms_command.instrument, oms_command.strategy_instance) catch return error.NotSent;
+        if (oms_command.operation != .cancel and !oms_command.portfolio_reduce_only and !oms_command.venue_reduce_only and
+            refs.pair_approval_version != latest.pair_approval_version) return error.NotSent;
         if (!std.meta.eql(refs.trading_authorization, latest.trading_authorization) or
             !std.meta.eql(refs.primary_lease, latest.primary_lease) or
             !std.meta.eql(refs.risk_lease, latest.risk_lease) or

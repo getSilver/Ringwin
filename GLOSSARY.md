@@ -249,6 +249,10 @@ _Avoid_: Adapter endpoint flags, raw Venue features, execution guarantee
 在明确 StrategyActivationIdentity、ConfigVersion 和 ExchangeAccount 下，允许某个 Instrument 接收新增或替换订单的版本化权威事实；停用后保留观察、已存在的订单及撤单能力。它独立于 Venue 的 CapabilityProfile，恢复或能力刷新不能自动恢复被停用的交易权限。
 _Avoid_: Venue capability version, feed subscription, implicit send permission
 
+**PairTradingAuthorization**:
+核心接受的跨 Venue 配对、方向和执行模式批准，绑定两腿 ExchangeAccount 与 Instrument、StrategyInstance 和 VirtualPortfolio。它界定新增交易周期可使用的范围；批准本身不代表交易启用、经济资格、运行资格或订单发送许可。
+_Avoid_: Scanner recommendation, UI whitelist, EnableTrading
+
 **TransportBatch**:
 为减少传输开销而按稳定顺序装入一次 Venue 请求的一组独立 OrderCommand；它不提供领域原子性，每项结果、风险占用和 Unknown 恢复仍独立。
 _Avoid_: Atomic batch, basket order, batch transaction

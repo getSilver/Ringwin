@@ -128,6 +128,7 @@ pub const EventKind = enum(u16) {
     cycle_occupied,
     cycle_closed,
     spot_residual_rule,
+    pair_trading_authorized,
     residual_consumed,
     residual_state_committed,
     canonical_market_trade,
@@ -445,6 +446,7 @@ pub const PayloadTag = enum(u16) {
     decision_domain_bound,
     cycle_closed,
     spot_residual_rule,
+    pair_trading_authorization,
 };
 
 pub const ReservationModel = enum(u8) { leveraged, cash };
@@ -639,6 +641,7 @@ pub const CorePayload = union(PayloadTag) {
     decision_domain_bound: @import("deployment_allocation.zig").DomainBinding,
     cycle_closed: @import("cycle_occupancy.zig").Closure,
     spot_residual_rule: @import("cycle_occupancy.zig").ResidualRule,
+    pair_trading_authorization: @import("pair_trading_authorization.zig").Request,
 };
 
 /// Typed core-originated event carried by the authoritative CanonicalEvent.
@@ -681,6 +684,10 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
     try encoded.put(u8, @intFromBool(input.account_scope != null));
     if (input.account_scope) |account| try encoded.put(u128, account);
     switch (input.payload) {
+        .pair_trading_authorization => |value| {
+            const bytes = try @import("../persistence/snapshot_codec.zig").encodeBare(encoded.bytes[encoded.len..], value);
+            encoded.len += bytes.len;
+        },
         .spot_residual_rule => |value| {
             const bytes = try snapshot_codec.encodeBare(encoded.bytes[encoded.len..], value);
             encoded.len += bytes.len;
@@ -1092,6 +1099,12 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
     ) orelse return error.UnknownInputType;
     const account_scope: ?u128 = if (try readInputBool(record.payload, &offset)) try readInputValue(u128, record.payload, &offset) else null;
     const payload: CorePayload = switch (tag) {
+        .pair_trading_authorization => blk: {
+            var value: @import("pair_trading_authorization.zig").Request = undefined;
+            value = try @import("../persistence/snapshot_codec.zig").decodeBare(record.payload[offset..], @TypeOf(value));
+            offset = record.payload.len;
+            break :blk .{ .pair_trading_authorization = value };
+        },
         .spot_residual_rule => blk: {
             const value = try snapshot_codec.decodeBare(record.payload[offset..], @import("cycle_occupancy.zig").ResidualRule);
             offset = record.payload.len;

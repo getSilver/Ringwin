@@ -22,9 +22,9 @@ pub const definitions = [_]Definition{.{
     .compatibility = .{
         .native_api = 1,
         .canonical_schema = 20,
-        .schema_registry = 50,
-        .journal_schema = 52,
-        .core_state_schema = 56,
+        .schema_registry = 51,
+        .journal_schema = 53,
+        .core_state_schema = 57,
     },
     .subscription = 19,
     .output = .none,

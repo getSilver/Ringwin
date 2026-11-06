@@ -150,6 +150,7 @@ const selected = switch (@import("entry_options").index) {
     146 => @import("testing/acceptance/venues/hyperliquid_execution_acceptance.zig"),
     147 => @import("runtime/hyperliquid_runtime.zig"),
     148 => @import("testing/integration/strategy_host_bounded_io.zig"),
+    149 => @import("testing/acceptance/core/scanner_authorization_acceptance.zig"),
     else => @compileError("unknown standalone source entry"),
 };
 

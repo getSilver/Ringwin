@@ -6,6 +6,7 @@ import unittest
 
 import arbitrage_scanner as s
 import arbitrage_evaluation as v
+from strategy_host import decode_depth_snapshot, encode_depth_snapshot
 from test_arbitrage_evaluation import (T, EXACT, LIMITS, path, policy, estimator_for, wire)
 from test_arbitrage_probability import calibration
 
@@ -39,6 +40,37 @@ def selected(snapshot):
 
 
 class ScannerTests(unittest.TestCase):
+    def test_scope_depth_exact_bounds_unknown_quantity_and_quote_unit(self):
+        observations, _ = fixture()
+        # Leg A: min(1000*100,1001*100)*100000 = 10,000,000,000 atoms.
+        # Leg B is deeper, so its upper bound must cover both independently.
+        scope = s.Scope(1, min_depth_atoms=10_000_000_000, max_depth_atoms=10_990_000_000, quote_asset=1)
+        self.assertEqual(len(scan(observations, scope=scope)["candidates"]), 6)
+        self.assertEqual(scan(observations, scope=replace(scope, min_depth_atoms=10_000_000_001))["candidates"], [])
+        self.assertEqual(scan(observations, scope=replace(scope, max_depth_atoms=10_989_999_999))["candidates"], [])
+        self.assertEqual(scan(observations, scope=replace(scope, quote_asset=2))["candidates"], [])
+        book = decode_depth_snapshot(observations[0].book)
+        book["bids"] = ((1000, None),)
+        unknown = (replace(observations[0], book=encode_depth_snapshot(book)), observations[1])
+        self.assertEqual(scan(unknown, scope=s.Scope(1, min_depth_atoms=0, quote_asset=1))["candidates"], [])
+        self.assertEqual(len(scan(unknown, scope=s.Scope(1))["candidates"]), 6)
+        for changes in (dict(min_depth_atoms=-1), dict(min_depth_atoms=1, max_depth_atoms=0),
+                        dict(min_depth_atoms=0, quote_asset=None), dict(max_depth_atoms=1.0)):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                replace(scope, **changes)
+
+    def test_versioned_scope_filters_without_invalidating_original_plans(self):
+        observations, plan = fixture()
+        scope = s.Scope(1, (10, 11), ("linear",), (), (), None, None, None)
+        result = scan(observations, (plan,), scope=scope)
+        self.assertEqual(selected(result)["status"], "evaluated")
+        self.assertEqual(result["scope"]["version"], "1")
+        self.assertEqual(scan(observations, (plan,), scope=replace(scope,
+            exclude_assets=(observations[0].rules.exposure_asset,)))["candidates"], [])
+        with self.assertRaisesRegex(ValueError, "scan_asset_scope"):
+            scan(observations, (replace(plan, policy=replace(plan.policy, base_asset=3)),),
+                 scope=replace(scope, venues=(99,)))
+
     def test_public_input_to_display_exactly_reuses_trade_evaluation(self):
         observations, plan = fixture()
         expected = v.evaluate(plan.scenarios, plan.policy, plan.estimator, plan.calibration,

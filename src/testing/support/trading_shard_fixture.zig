@@ -18,14 +18,14 @@ const risk_lease_total: i64 = 10_000_000_000;
 const fixture_utc_base: u64 = 1_767_225_600_000_000_000;
 const fixture_monotonic_base: u64 = 1_000_000_000;
 pub const happy_order_quantity: i64 = 100;
-// StateDigestV15 / SemanticAuthorityDigestV4 / journal52 / state56 / canonical20 / registry50; recaptured after economic and stable replay assertions.
-pub const expected_happy_digest = "ee3276ab01b0c668bb96d1dd3d7f16f55f33c5271ac97063028ad10f18577cfb";
+// StateDigestV16 / SemanticAuthorityDigestV4 / journal53 / state57 / canonical20 / registry51; recaptured after economic and stable replay assertions.
+pub const expected_happy_digest = "a36a373c715e57c54826e1683c0e4ccaafbe02444b60f57c634c769e0782fbbd";
 const expected_trajectory_digests = [_][]const u8{
     expected_happy_digest,
-    "5d30b98ea3ba0c5ed3a67330807f69c747baafce23c2ee95f4caf3080bcab091",
-    "56f4463d18badae8845280a13f12c0d473d78d2c41696772c4bf7189a18d505f",
-    "1a3da269ca6cd259748915c210564f025b2930be59479ae31c6728e4e7424838",
-    "e0c9d527b78d2646d9847ae1eb739f544f6ef0f638306a9f2e9e4b5ee2e2b3c0",
+    "ad7779496ec4acb803d617757b5327a6837a8d408e17dc28b230b0642d142c01",
+    "4898a31df52c869786702039b9291f256ff02d7145c50c0ee026b9711d98333d",
+    "d71142e2f4559c2916bb9006fac79c2cc25107f4c758267add7d998367c9f2d5",
+    "f680cd7466d87034faccbeb648ad0263179e4617a673e9f41fe916892a2d06a0",
 };
 pub const order_limit_price: i64 = 50_100_000_000;
 
