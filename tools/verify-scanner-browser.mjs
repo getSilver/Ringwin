@@ -206,6 +206,35 @@ try {
     await click('停止扫描'); await count(0);
     await page.setViewportSize({width:1600,height:1100});
   });
+  await check('memory history survives page reload and expires after 24 hours', async () => {
+    const before = (await api('history',{kind:'events'})).body.result.rows.length;
+    assert(before>0);
+    const code = new Promise(resolve => {
+      let buffer='';
+      const read=data=>{buffer+=data; if(buffer.includes('\n')){fixture.stdout.off('data',read);resolve(JSON.parse(buffer.split('\n')[0]).totp);}};
+      fixture.stdout.on('data',read);
+    });
+    fixture.stdin.write('login_code\n');
+    await page.reload();
+    await textbox('口令').fill(ready.passphrase); await textbox('TOTP 验证码').fill(await code);
+    const response=page.waitForResponse(r=>r.url()===base+'/login');
+    await click('登录扫描控制台'); csrf=(await(await response).json()).csrf_token;
+    await tab('历史与统计'); await click('查询历史');
+    assert.equal((await api('history',{kind:'events'})).body.result.rows.length,before);
+    await page.getByText('最近 24 小时 · 服务端内存记录 · 刷新页面保留，服务重启清空。',{exact:true}).waitFor();
+    await command('advance_day');
+    assert.equal((await api('history',{kind:'events'})).body.result.rows.length,0);
+    const summary=(await api('summary')).body.result;
+    assert.deepEqual(summary.groups,{}); assert.equal(summary.storage,'memory');
+  });
+  await check('scanner service restart clears history but preserves core approval', async () => {
+    await command('restart_console');
+    assert.equal((await api('history',{kind:'events'})).body.result.rows.length,0);
+    assert.equal((await api('history',{kind:'operations'})).body.result.rows.length,0);
+    assert.equal((await api('core_version','9')).body.result.core_version,'3');
+    await tab('当前候选'); await count(0);
+    await page.getByText('Stopped · 配置 v1',{exact:true}).waitFor();
+  });
   await check('expired owner session clears projection and reload offers login', async () => {
     await context.clearCookies();
     await page.getByText(/连接中断，候选已撤销/).waitFor(); await count(0);
@@ -224,10 +253,10 @@ try {
     assert(await page.getByRole('table',{name:'当前跨所机会'}).getByRole('button',{name:/^查看 /}).count()>0);
     await shot('demo-multiple-products');
     await click('模拟行情中断'); await click('恢复并重新预热'); await click('推进 1 秒'); await click('推进 1 秒');
-    await click('模拟历史写入失败'); await click('推进 1 秒'); await click('恢复历史写入');
+    await click('模拟历史容量不足'); await click('推进 1 秒'); await click('恢复历史记录');
     await click('无新行情 16 秒'); await tab('历史统计');
     await page.getByRole('table',{name:'历史机会事件'}).waitFor();
-    await page.getByText('历史存在写入缺口',{exact:true}).waitFor();
+    await page.getByText('历史存在覆盖缺口',{exact:true}).waitFor();
     await tab('扫描范围'); await textbox('排除资产').fill('BTC'); await click('添加到草稿');
     await click('应用扫描范围'); await click('推进 1 秒'); await click('推进 1 秒'); await tab('当前机会');
     assert.equal(await page.getByRole('table',{name:'当前跨所机会'}).getByText('BTC / USDT',{exact:true}).count(),0);

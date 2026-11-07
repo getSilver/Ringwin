@@ -206,6 +206,8 @@ class ControlPlaneApp:
                                  if release_manager is not None and instance_source is not None else None)
         self.lifecycle_outbox = lifecycle_outbox
         self.scanner_console = scanner_console
+        if scanner_console is not None and scanner_console.config_store is None:
+            scanner_console.bind_config(Path(directory)/"scanner-config.json")
         self._command_results: dict[int, tuple[str, dict]] = {}
         self._lifecycle_results: dict[int, tuple[str, dict]] = {}
         for record in self.records.read_all():

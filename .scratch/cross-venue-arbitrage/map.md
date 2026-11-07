@@ -56,7 +56,7 @@ Status: open
 
 ## Frontier
 
-- [16 扫描控制台](issues/16-scanner-console-spec.md)：in_progress，运行／历史／Web/UI／核心批准已交付离线范围；用户后续重新授权的离线浏览器13组验收通过，真实行情联调仍排除。策略分支 `spread-arbitrage-strategy-python`，见[实施证据](scanner-console-implementation.md)及[浏览器记录](scanner-browser-acceptance.md)。
+- [16 扫描控制台](issues/16-scanner-console-spec.md)：in_progress，运行／历史／Web/UI／核心批准已交付离线范围；按用户最新要求取消扫描SQLite，历史改为24小时有界内存、范围配置独立JSON持久保存，离线浏览器15组通过。真实行情联调仍排除。策略分支 `spread-arbitrage-strategy-python`，见[内存历史记录](scanner-memory-history.md)、[实施证据](scanner-console-implementation.md)及[浏览器记录](scanner-browser-acceptance.md)。
 
 - [12 双 IOC 样本外校准与资格判定](issues/12-taker-calibration.md)：依赖05/10已完成，离线研究工具已开发，真实研究输入不足，in_progress，经济资格pending；见[12证据](taker-calibration-evidence.md)。
 - [13 Maker–Taker 独立校准与资格判定](issues/13-maker-calibration.md)：依赖05/11已完成，独立Maker离线研究工具已开发，in_progress，真实经济资格pending；见[13证据](maker-calibration-evidence.md)。

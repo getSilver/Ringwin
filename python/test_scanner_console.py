@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 from dataclasses import replace
 import http.client
 import threading
@@ -19,7 +20,7 @@ class ConsoleTests(unittest.TestCase):
     def make_console(self, directory, now=None):
         observations, plan = fixture()
         now = now if now is not None else [T]
-        console = c.ScannerConsole(c.CanonicalSource(observations), c.History(Path(directory) / "scanner.sqlite"),
+        console = c.ScannerConsole(c.CanonicalSource(observations), c.History(clock=lambda: 1000),
                                    clock=lambda: now[0], wall_clock=lambda: 1000, max_age_ns=1000)
         self.addCleanup(console.close)
         config = {"expected_version": "0", "scopes": [
@@ -110,7 +111,7 @@ class ConsoleTests(unittest.TestCase):
             finally:
                 console.close()
 
-    def test_history_idempotence_conflict_events_summary_and_backup(self):
+    def test_memory_history_idempotence_conflict_events_and_summary(self):
         with tempfile.TemporaryDirectory() as directory:
             console, observations, plan, _ = self.make_console(directory)
             try:
@@ -130,17 +131,9 @@ class ConsoleTests(unittest.TestCase):
                 summary = console.history.summarize()
                 self.assertEqual(sum(x["events"] for x in summary["groups"].values()), 1)
                 self.assertEqual(summary, console.history.summarize())
-                identity = console.history.query("batches")[0]["identity"]
-                console.history.pin("batches", identity, "acceptance-16")
-                console.history.prune(before_wall_ms=2000)
-                self.assertEqual(len(console.history.query("batches")), 1)
-                target = Path(directory) / "backup.sqlite"
-                console.history.backup(target)
-                recovered = c.History(target)
-                try:
-                    self.assertEqual(len(recovered.query("events")), 1)
-                finally:
-                    recovered.close()
+                self.assertEqual(console.history.status()["storage"], "memory")
+                self.assertTrue(console.history.status()["restart_clears_history"])
+                self.assertEqual(list(Path(directory).iterdir()), [])
             finally:
                 console.close()
 
@@ -178,11 +171,11 @@ class ConsoleTests(unittest.TestCase):
                 channel.close()
                 console.close()
 
-    def test_start_publish_stop_and_restart_preserve_history_without_authority(self):
+    def test_start_publish_stop_and_restart_clear_history_without_authority(self):
         observations, plan = fixture()
         with tempfile.TemporaryDirectory() as directory:
             source = c.CanonicalSource(observations)
-            history = c.History(Path(directory) / "scanner.sqlite")
+            history = c.History(clock=lambda: 1000)
             console = c.ScannerConsole(source, history, clock=lambda: T, wall_clock=lambda: 1000)
             self.assertEqual(console.view()["phase"], "Stopped")
             console.configure({"expected_version": "0", "scopes": [
@@ -199,11 +192,50 @@ class ConsoleTests(unittest.TestCase):
             self.assertFalse(console.view()["snapshot"]["candidates"])
             self.assertEqual(history.query("events")[0]["end_reason"], "stopped")
             console.close()
-            restored = c.ScannerConsole(source, c.History(Path(directory) / "scanner.sqlite"),
+            restored = c.ScannerConsole(source, c.History(clock=lambda: 1000),
                                          clock=lambda: T, wall_clock=lambda: 1000)
             self.assertEqual(restored.view()["desired"], "stopped")
-            self.assertEqual(len(restored.history.query("batches")), 1)
+            self.assertEqual(restored.history.query("batches"), [])
+            self.assertEqual(restored.history.query("events"), [])
+            self.assertEqual(restored.view()["config"]["version"], "0")
             restored.close()
+
+    def test_config_file_survives_restart_while_history_and_receipts_clear(self):
+        observations, _ = fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            console, _, _, config = self.make_console(directory)
+            target = Path(directory)/"scanner-config.json"
+            console.bind_config(target)
+            saved = target.read_text(encoding="utf-8")
+            console.history.request("1", {"selection": {}}, {"status": "unknown"})
+            change = {**config, "expected_version": "1", "scopes": [{**row, "min_depth_atoms": "0"} for row in config["scopes"]]}
+            with patch("scanner_config.os.replace", side_effect=OSError("injected config rename failure")):
+                with self.assertRaisesRegex(OSError, "rename failure"):
+                    console.configure(change)
+            self.assertEqual(console.view()["config"]["version"], "1")
+            self.assertEqual(target.read_text(encoding="utf-8"), saved)
+            self.assertEqual(list(Path(directory).glob("*.tmp")), [])
+            console.close()
+            restored = c.ScannerConsole(c.CanonicalSource(observations), c.History(clock=lambda: 1000),
+                config_path=target, clock=lambda: T, wall_clock=lambda: 1000)
+            try:
+                self.assertEqual(restored.view()["phase"], "Stopped")
+                self.assertEqual(restored.view()["config"]["version"], "1")
+                self.assertEqual(len(restored.view()["config"]["scopes"]), 2)
+                self.assertEqual(restored.history.query("events"), [])
+                self.assertEqual(restored.history.query("operations"), [])
+                with self.assertRaisesRegex(ValueError, "unknown scanner request"):
+                    restored.history.request("1")
+            finally:
+                restored.close()
+
+    def test_corrupt_saved_config_is_rejected_instead_of_reset(self):
+        observations, _ = fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)/"scanner-config.json"
+            target.write_text('{"schema":"scanner_config_v1","config":{}}', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                c.ScannerConsole(c.CanonicalSource(observations), c.History(), config_path=target)
 
 
 class BrowserFixtureTests(unittest.TestCase):

@@ -1,188 +1,268 @@
-"""Derived scanner history. One SQLite writer; never a trading authority store."""
-from concurrent.futures import Future, TimeoutError
+"""Bounded rolling 24-hour scanner projections in process memory.
+
+Restart clears these derived records. Core trading facts and approvals still
+belong to DurableStore. Batch/replay caches may be shorter than event history.
+"""
+from collections import OrderedDict
 import hashlib
 import json
-from pathlib import Path
-from queue import Queue, Full
-import sqlite3
-from threading import Thread
+import secrets
+from threading import RLock
+import time
+
+WINDOW_MS = 86_400_000
 
 
 def encoded(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def detached(value):
+    return json.loads(encoded(value))
+
+
 class History:
-    def __init__(self, path, *, capacity=64, timeout=5):
-        if type(capacity) is not int or not 1 <= capacity <= 4096 or not 0 < timeout <= 30:
-            raise ValueError("history capacity/timeout")
-        self.path, self.timeout = Path(path), timeout
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.queue = Queue(capacity)
+    def __init__(self, *, clock=lambda: time.time_ns()//1_000_000, max_records=50_000,
+                 max_bytes=64*1024*1024, max_batches=2048, max_evidence_bytes=16*1024*1024,
+                 max_requests=1024):
+        for value in (max_records, max_bytes, max_batches, max_evidence_bytes, max_requests):
+            if type(value) is not int or value < 1:
+                raise ValueError("history memory capacity")
+        self.clock, self.lock = clock, RLock()
+        self.max_records, self.max_bytes, self.max_batches = max_records, max_bytes, max_batches
+        self.max_evidence_bytes, self.max_requests = max_evidence_bytes, max_requests
+        self.started_ms = self.last_now = clock()
+        self.instance_id = secrets.token_hex(16)
+        self.last_pruned = None
+        self.records, self.events, self.batches = OrderedDict(), OrderedDict(), OrderedDict()
+        self.artifacts, self.requests = OrderedDict(), {}
+        self.open_events, self.batch_heads = {}, {}
+        self.weights, self.bytes, self.evidence_bytes = {}, 0, 0
+        self.request_bytes = 0
+        self.config, self.gaps = None, []
         self.healthy, self.error, self.closed = True, "", False
-        self.thread = Thread(target=self._writer, daemon=True, name="scanner-history")
-        self.thread.start()
-        self._call(self._initialize)
 
-    @staticmethod
-    def _initialize(db):
-        db.executescript("""
-          PRAGMA journal_mode=WAL;
-          PRAGMA synchronous=FULL;
-          PRAGMA foreign_keys=ON;
-          CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-          INSERT OR IGNORE INTO metadata VALUES ('schema','1');
-          CREATE TABLE IF NOT EXISTS records (
-            kind TEXT NOT NULL, identity TEXT NOT NULL, session TEXT NOT NULL,
-            sequence INTEGER NOT NULL, wall_ms INTEGER NOT NULL, payload TEXT NOT NULL,
-            PRIMARY KEY(kind, identity));
-          CREATE INDEX IF NOT EXISTS records_page ON records(kind,wall_ms,identity);
-          CREATE TABLE IF NOT EXISTS events (
-            identity TEXT PRIMARY KEY, session TEXT NOT NULL, candidate TEXT NOT NULL,
-            started_ns TEXT NOT NULL, last_ns TEXT NOT NULL, ended_ns TEXT,
-            wall_ms INTEGER NOT NULL, end_reason TEXT, payload TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS pins (kind TEXT NOT NULL, identity TEXT NOT NULL,
-            reference TEXT NOT NULL, PRIMARY KEY(kind,identity,reference));
-          CREATE TABLE IF NOT EXISTS artifacts (digest TEXT PRIMARY KEY, content TEXT NOT NULL);
-          CREATE TABLE IF NOT EXISTS requests (identity TEXT PRIMARY KEY, request TEXT NOT NULL, response TEXT NOT NULL);
-        """)
-        if db.execute("SELECT value FROM metadata WHERE key='schema'").fetchone()[0] != "1":
-            raise ValueError("unsupported scanner history schema")
-        stopped = {row[0] for row in db.execute("SELECT session,payload FROM records WHERE kind='operations'")
-                   if json.loads(row[1]).get("action") == "stop"}
-        for run in db.execute("SELECT session FROM records WHERE kind='runs'").fetchall():
-            if run[0] not in stopped:
-                latest = db.execute("SELECT MAX(sequence),MAX(wall_ms) FROM records WHERE kind='batches' AND session=?", (run[0],)).fetchone()
-                History._record(db, "gaps", "restart:" + run[0], run[0], latest[0] or 0, latest[1] or 0,
-                                dict(reason="process_restart_unconfirmed_tail", after_sequence=str(latest[0] or 0)))
-        # A crash cannot extend an event across an interval we did not observe.
-        db.execute("UPDATE events SET ended_ns=last_ns,end_reason='process_interrupted' WHERE ended_ns IS NULL")
-        db.commit()
-
-    def _writer(self):
-        try:
-            db = sqlite3.connect(self.path, timeout=self.timeout)
-            db.row_factory = sqlite3.Row
-        except Exception as error:
-            self.healthy, self.error = False, str(error)
-            db = None
-        while True:
-            item = self.queue.get()
-            if item is None:
-                break
-            fn, future = item
-            try:
-                if db is None:
-                    raise OSError(self.error)
-                result = fn(db)
-                db.commit()
-                self.healthy, self.error = True, ""
-                future.set_result(result)
-            except Exception as error:
-                if db is not None:
-                    db.rollback()
-                self.healthy, self.error = False, str(error)
-                future.set_exception(error)
-        if db is not None:
-            db.close()
-
-    def _call(self, fn):
+    def _now(self):
         if self.closed:
             raise OSError("history closed")
-        future = Future()
-        try:
-            self.queue.put_nowait((fn, future))
-            return future.result(timeout=self.timeout)
-        except (Full, TimeoutError) as error:
-            self.healthy, self.error = False, "history queue overflow or commit timeout"
-            raise OSError(self.error) from error
+        now = self.clock()
+        if type(now) is not int or now < 0:
+            raise ValueError("history clock")
+        if now < self.last_now:
+            self._gap(self.last_now, "history_clock_regression")
+        self.last_now = max(now, self.last_now)
+        return self.last_now
 
-    @staticmethod
-    def _record(db, kind, identity, session, sequence, wall_ms, payload):
-        content = encoded(payload)
-        previous = db.execute("SELECT payload FROM records WHERE kind=? AND identity=?", (kind, identity)).fetchone()
-        if previous:
-            if previous[0] != content:
-                raise ValueError("history identity conflict")
-            return False
-        db.execute("INSERT INTO records VALUES(?,?,?,?,?,?)", (kind, identity, session, sequence, wall_ms, content))
-        return True
+    def _gap(self, now, reason):
+        if not self.gaps or self.gaps[-1] != dict(wall_ms=now, reason=reason):
+            self.gaps.append(dict(wall_ms=now, reason=reason))
+        self.gaps = self.gaps[-64:]
 
-    def record(self, kind, identity, payload, *, session="", sequence=0, wall_ms=0):
-        return self._call(lambda db: self._record(db, kind, identity, session, sequence, wall_ms, payload))
+    def _put(self, table, kind, identity, row):
+        key = kind, identity
+        size = len(encoded(row).encode())
+        self.bytes += size-self.weights.get(key, 0)
+        self.weights[key] = size
+        table[identity] = row
+
+    def _drop(self, table, kind, identity):
+        row = table.pop(identity)
+        self.bytes -= self.weights.pop((kind, identity))
+        if kind == "events":
+            selector = row["session"], row["candidate"]
+            if self.open_events.get(selector) == identity:
+                self.open_events.pop(selector)
+
+    def _prune(self, now, *, force=False):
+        if not force and self.last_pruned is not None and now-self.last_pruned < 1000:
+            return
+        self.last_pruned = now
+        cutoff = now-WINDOW_MS
+        for table, kind in ((self.records, "records"), (self.batches, "batches"), (self.events, "events")):
+            for identity, row in list(table.items()):
+                if row.get("last_wall_ms", row["wall_ms"]) < cutoff:
+                    self._drop(table, kind, identity)
+        self.batch_heads = {key: head for key, head in self.batch_heads.items() if head[2] >= cutoff}
+        for digest, (_, stamp) in list(self.artifacts.items()):
+            if stamp < cutoff:
+                self._drop_artifact(digest)
+        self.gaps = [gap for gap in self.gaps if gap["wall_ms"] >= cutoff]
+
+    def _trim(self, now):
+        # Evict batch/replay material before losing event statistics.
+        while len(self.batches) > self.max_batches:
+            self._drop(self.batches, "batches", next(iter(self.batches)))
+        while self.bytes > self.max_bytes or len(self.records)+len(self.events)+len(self.batches) > self.max_records:
+            if self.batches:
+                self._drop(self.batches, "batches", next(iter(self.batches)))
+            elif self.records:
+                self._drop(self.records, "records", next(iter(self.records)))
+                self._gap(now, "history_memory_capacity")
+            elif self.events:
+                self._drop(self.events, "events", next(iter(self.events)))
+                self._gap(now, "history_memory_capacity")
+            else:
+                break
+        while self.evidence_bytes > self.max_evidence_bytes:
+            self._drop_artifact(next(iter(self.artifacts)))
+        while len(self.batch_heads) > self.max_records:
+            self.batch_heads.pop(next(iter(self.batch_heads)))
+            self._gap(now, "history_memory_capacity")
+
+    def _drop_artifact(self, digest):
+        content, _ = self.artifacts.pop(digest)
+        self.evidence_bytes -= len(content.encode())
+
+    def record(self, kind, identity, payload, *, session="", sequence=0, wall_ms=None):
+        payload = detached(payload)
+        with self.lock:
+            now = self._now()
+            self._prune(now)
+            key = kind, identity
+            previous = self.records.get(key)
+            if previous:
+                if previous["payload"] != payload:
+                    raise ValueError("history identity conflict")
+                return False
+            row = dict(kind=kind, identity=identity, session=session, sequence=sequence,
+                       wall_ms=now if wall_ms is None else wall_ms, payload=payload)
+            self._put(self.records, "records", key, row)
+            if kind == "config":
+                self.config = payload
+            self._trim(now)
+            return True
 
     def latest_config(self):
-        def read(db):
-            row = db.execute("SELECT payload FROM records WHERE kind='config' ORDER BY sequence DESC LIMIT 1").fetchone()
-            return json.loads(row[0]) if row else None
-        return self._call(read)
+        with self.lock:
+            self._now()
+            return detached(self.config)
 
     def batch(self, envelope, *, wall_ms, threshold, evidence):
-        # Copy before enqueueing: the producer cannot change a pending transaction.
-        envelope, evidence = json.loads(encoded(envelope)), json.loads(encoded(evidence))
-        def write(db):
+        envelope, threshold, evidence = detached(envelope), detached(threshold), detached(evidence)
+        for digest, content in evidence.items():
+            if hashlib.sha256(content.encode()).hexdigest() != digest:
+                raise ValueError("history evidence digest")
+        active = {}
+        rows = envelope["snapshot"]["candidates"]
+        for row in rows:
+            if (row["status"] != "evaluated" or not row["recommended"]
+                    or int(row["plan_atoms"]) < int(threshold["min_profit_atoms"])
+                    or row["probability_lower_ppm"] < threshold["min_probability_ppm"]):
+                continue
+            key = encoded([row["id"], row["quantity_base"], envelope["config_version"],
+                           row["model_hash"], row["policy_version"], row["calibration_version"], threshold])
+            active[key] = row
+        with self.lock:
+            now = self._now()
+            self._prune(now)
             session, sequence = envelope["session"], int(envelope["sequence"])
-            identity = session + ":" + str(sequence)
-            if not self._record(db, "batches", identity, session, sequence, wall_ms, envelope):
+            identity = session+":"+str(sequence)
+            fingerprint = hashlib.sha256(encoded([envelope, threshold, wall_ms]).encode()).hexdigest()
+            previous = self.batches.get(identity)
+            if previous:
+                if previous["payload"] != envelope or previous["threshold"] != threshold or previous["wall_ms"] != wall_ms:
+                    raise ValueError("history identity conflict")
                 return
-            for digest, content in evidence.items():
-                if hashlib.sha256(content.encode()).hexdigest() != digest:
-                    raise ValueError("history evidence digest")
-                db.execute("INSERT OR IGNORE INTO artifacts VALUES(?,?)", (digest, content))
-            rows = envelope["snapshot"]["candidates"]
-            active = {}
-            for row in rows:
-                if (row["status"] != "evaluated" or not row["recommended"]
-                        or int(row["plan_atoms"]) < int(threshold["min_profit_atoms"])
-                        or row["probability_lower_ppm"] < threshold["min_probability_ppm"]):
+            head = self.batch_heads.get(session)
+            if head and sequence <= head[0]:
+                if sequence == head[0] and fingerprint == head[1]:
+                    return
+                raise ValueError("history batch sequence conflict")
+            for (event_session, key), event_id in list(self.open_events.items()):
+                if event_session != session:
                     continue
-                # Quantity/evidence/config changes start a distinct statistical event.
-                key = encoded([row["id"], row["quantity_base"], envelope["config_version"],
-                               row["model_hash"], row["policy_version"], row["calibration_version"], threshold])
-                active[key] = row
-            open_rows = db.execute("SELECT * FROM events WHERE session=? AND ended_ns IS NULL", (session,)).fetchall()
-            for event in open_rows:
-                if event["candidate"] not in active:
-                    row = next((x for x in rows if x["id"] == json.loads(event["payload"])["candidate"]["id"]), None)
-                    reason = (row["reason"] or "below_threshold") if row else "removed"
-                    interrupted = reason in ("expired", "stale_data", "data_gap", "data_skew", "rules_expired", "removed")
-                    db.execute("UPDATE events SET ended_ns=?,end_reason=? WHERE identity=?",
-                               (event["last_ns"] if interrupted else envelope["snapshot"]["at_ns"], reason, event["identity"]))
+                event = self.events[event_id]
+                if key in active:
+                    event["last_ns"], event["last_wall_ms"] = envelope["snapshot"]["at_ns"], wall_ms
+                    self._put(self.events, "events", event_id, event)
+                    active.pop(key)
                 else:
-                    db.execute("UPDATE events SET last_ns=? WHERE identity=?", (envelope["snapshot"]["at_ns"], event["identity"]))
-                    active.pop(event["candidate"])
+                    candidate = next((r for r in rows if r["id"] == event["payload"]["candidate"]["id"]), None)
+                    reason = (candidate["reason"] or ("context_changed" if candidate["recommended"] else "below_threshold")) if candidate else "removed"
+                    natural = reason == "below_threshold"
+                    event.update(ended_ns=envelope["snapshot"]["at_ns"] if natural else event["last_ns"],
+                        last_wall_ms=wall_ms if natural else event["last_wall_ms"], end_reason=reason)
+                    self.open_events.pop((session, key))
+                    self._put(self.events, "events", event_id, event)
             for key, row in active.items():
-                event_id = hashlib.sha256((identity + key).encode()).hexdigest()
-                payload = dict(candidate=row, threshold=threshold, representative="first_evaluation",
-                               config_version=envelope["config_version"], evidence=list(evidence))
-                db.execute("INSERT INTO events VALUES(?,?,?,?,?,?,?,NULL,?)", (event_id, session, key,
-                    envelope["snapshot"]["at_ns"], envelope["snapshot"]["at_ns"], None, wall_ms, encoded(payload)))
-        self._call(write)
+                event_id = hashlib.sha256((identity+key).encode()).hexdigest()
+                event = dict(identity=event_id, session=session, candidate=key,
+                    started_ns=envelope["snapshot"]["at_ns"], last_ns=envelope["snapshot"]["at_ns"],
+                    ended_ns=None, wall_ms=wall_ms, last_wall_ms=wall_ms, end_reason=None,
+                    payload=dict(candidate=row, threshold=threshold, representative="first_evaluation",
+                                 config_version=envelope["config_version"], evidence=list(evidence)))
+                self._put(self.events, "events", event_id, event)
+                self.open_events[session, key] = event_id
+            self._put(self.batches, "batches", identity, dict(kind="batches", identity=identity, session=session,
+                sequence=sequence, wall_ms=wall_ms, payload=envelope, threshold=threshold))
+            self.batch_heads[session] = sequence, fingerprint, wall_ms
+            for digest, content in evidence.items():
+                if digest in self.artifacts:
+                    self._drop_artifact(digest)
+                self.artifacts[digest] = content, wall_ms
+                self.evidence_bytes += len(content.encode())
+            self._trim(now)
 
     def interrupt(self, session, reason):
-        self._call(lambda db: db.execute("UPDATE events SET ended_ns=last_ns,end_reason=? WHERE session=? AND ended_ns IS NULL",
-                                         (reason, session)).rowcount)
+        with self.lock:
+            now = self._now()
+            self._prune(now)
+            for (event_session, key), event_id in list(self.open_events.items()):
+                if event_session == session:
+                    event = self.events[event_id]
+                    event.update(ended_ns=event["last_ns"], end_reason=reason)
+                    self._put(self.events, "events", event_id, event)
+                    self.open_events.pop((session, key))
+            self._trim(now)
 
     def request(self, identity, request=None, response=None):
-        def transact(db):
-            row = db.execute("SELECT request,response FROM requests WHERE identity=?", (identity,)).fetchone()
-            if row is not None and request is not None and row[0] != encoded(request):
+        # Keep operational idempotency state until restart; never evict pending
+        # identities to make room for new requests.
+        with self.lock:
+            self._now()
+            row = self.requests.get(identity)
+            if row is not None and request is not None and row["request"] != request:
                 raise ValueError("scanner request identity conflict")
             if row is None:
                 if request is None:
                     raise ValueError("unknown scanner request")
-                db.execute("INSERT INTO requests VALUES(?,?,?)", (identity, encoded(request), encoded(response)))
-                return dict(request=request, response=response)
-            if response is not None:
-                db.execute("UPDATE requests SET response=? WHERE identity=?", (encoded(response), identity))
-            return dict(request=json.loads(row[0]), response=response if response is not None else json.loads(row[1]))
-        return self._call(transact)
+                if len(self.requests) >= self.max_requests:
+                    raise OSError("scanner request capacity")
+                proposed = dict(request=detached(request), response=detached(response))
+            else:
+                proposed = dict(request=row["request"], response=row["response"] if response is None else detached(response))
+            change = len(encoded(proposed).encode())-(len(encoded(row).encode()) if row else 0)
+            if self.request_bytes+change > self.max_bytes:
+                raise OSError("scanner request capacity")
+            self.request_bytes += change
+            row = self.requests[identity] = proposed
+            return detached(row)
+
+    def request_candidate(self, selection):
+        """Keep revocation selectors with live request identities, beyond history expiry."""
+        with self.lock:
+            self._now()
+            for row in reversed(list(self.requests.values())):
+                request = row["request"]
+                original = request.get("selection", {})
+                if all(original.get(field) == selection.get(field) for field in
+                       ("candidate_id", "strategy_identity", "portfolio_identity")) and request.get("candidate"):
+                    return detached(request["candidate"])
+            return None
 
     def artifact(self, digest):
-        def read(db):
-            row = db.execute("SELECT content FROM artifacts WHERE digest=?", (digest,)).fetchone()
-            return row[0] if row else None
-        return self._call(read)
+        with self.lock:
+            self._prune(self._now(), force=True)
+            return self.artifacts[digest][0] if digest in self.artifacts else None
+
+    def _event_view(self, row, cutoff):
+        item = detached(row)
+        duration = max(0, int(row["ended_ns"] or row["last_ns"])-int(row["started_ns"]))
+        item.update(right_censored=row["end_reason"] != "below_threshold", duration_ns=str(duration),
+            started_before_window=row["wall_ms"] < cutoff,
+            window_duration_ns=str(min(duration, max(0, row["last_wall_ms"]-cutoff)*1_000_000)),
+            replayable=bool(row["payload"]["evidence"]) and all(d in self.artifacts for d in row["payload"]["evidence"]))
+        return item
 
     def query(self, kind, *, offset=0, limit=100, session=None, asset=None, venue=None,
               mode=None, direction=None, end_reason=None, since_wall_ms=None, until_wall_ms=None):
@@ -190,129 +270,86 @@ class History:
             raise ValueError("history query kind")
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 500:
             raise ValueError("history pagination")
-        if any(x is not None for x in (asset, venue, mode, direction, end_reason)) and kind != "events":
+        if kind != "events" and any(x is not None for x in (asset, venue, mode, direction, end_reason)):
             raise ValueError("candidate filters require event history")
         if direction is not None and (type(direction) is not int or direction not in (-1, 1)):
             raise ValueError("history direction")
         for stamp in (since_wall_ms, until_wall_ms):
-            if stamp is not None and (type(stamp) is not int or stamp < 0 or stamp >= 1 << 63):
+            if stamp is not None and (type(stamp) is not int or not 0 <= stamp < 1 << 63):
                 raise ValueError("history wall time")
-        def read(db):
-            clauses, params = [], []
-            if session is not None:
-                clauses.append("session=?")
-                params.append(session)
-            for field, value, comparison in (("wall_ms", since_wall_ms, ">="), ("wall_ms", until_wall_ms, "<")):
-                if value is not None:
-                    clauses.append(field + comparison + "?")
-                    params.append(value)
-            for expression, value in (("json_extract(payload,'$.candidate.base_asset')", asset),
-                                      ("json_extract(payload,'$.candidate.mode')", mode),
-                                      ("json_extract(payload,'$.candidate.direction')", direction), ("end_reason", end_reason)):
-                if value is not None:
-                    clauses.append(expression + "=?")
-                    params.append(value)
-            if venue is not None:
-                clauses.append("(json_extract(payload,'$.candidate.pair[0][0]')=? OR json_extract(payload,'$.candidate.pair[1][0]')=?)")
-                params.extend((venue, venue))
-            where = " WHERE " + " AND ".join(clauses) if clauses else ""
-            if kind == "events":
-                rows = db.execute("SELECT * FROM events" + where + " ORDER BY wall_ms,identity LIMIT ? OFFSET ?",
-                                  (*params, limit, offset)).fetchall()
-                result = []
-                for row in rows:
-                    item = dict(row)
-                    item["payload"] = json.loads(item["payload"])
-                    item["right_censored"] = item["end_reason"] != "below_threshold"
-                    item["duration_ns"] = str(int(item["ended_ns"] or item["last_ns"]) - int(item["started_ns"]))
-                    item["replayable"] = all(db.execute("SELECT 1 FROM artifacts WHERE digest=?", (d,)).fetchone()
-                                              for d in item["payload"]["evidence"]) and bool(item["payload"]["evidence"])
-                    result.append(item)
-                return result
-            condition = " WHERE kind=?" + (" AND " + " AND ".join(clauses) if clauses else "")
-            rows = db.execute("SELECT * FROM records" + condition + " ORDER BY wall_ms,identity LIMIT ? OFFSET ?",
-                              (kind, *params, limit, offset)).fetchall()
-            return [dict(row, payload=json.loads(row["payload"])) for row in rows]
-        return self._call(read)
+        with self.lock:
+            now = self._now()
+            self._prune(now, force=True)
+            source = self.events.values() if kind == "events" else self.batches.values() if kind == "batches" else (
+                row for row in self.records.values() if row["kind"] == kind)
+            if kind == "summaries":
+                source = [dict(kind=kind, identity="current", session="", sequence=0, wall_ms=now, payload=self.summarize())]
+            elif kind == "gaps":
+                source = list(source)+[dict(kind=kind, identity="memory:"+encoded(gap), session="", sequence=0,
+                    wall_ms=gap["wall_ms"], payload=gap) for gap in self.gaps]
+            selected = []
+            for row in source:
+                if session is not None and row["session"] != session:
+                    continue
+                if since_wall_ms is not None and row.get("last_wall_ms", row["wall_ms"]) < since_wall_ms:
+                    continue
+                if until_wall_ms is not None and row["wall_ms"] >= until_wall_ms:
+                    continue
+                if kind == "events":
+                    candidate = row["payload"]["candidate"]
+                    if any(value is not None and candidate[field] != value for field, value in
+                           (("base_asset", asset), ("mode", mode), ("direction", direction))):
+                        continue
+                    if venue is not None and not any(leg[0] == venue for leg in candidate["pair"]):
+                        continue
+                    if end_reason is not None and row["end_reason"] != end_reason:
+                        continue
+                selected.append(row)
+            selected.sort(key=lambda row: (row["wall_ms"], row["identity"]))
+            return [self._event_view(row, now-WINDOW_MS) if kind == "events" else detached(row)
+                    for row in selected[offset:offset+limit]]
+
+    def status(self):
+        with self.lock:
+            now = self._now()
+            self._prune(now, force=True)
+            gaps = self.gaps+[row["payload"] for row in self.records.values() if row["kind"] == "gaps"]
+            return detached(dict(storage="memory", instance_id=self.instance_id, window_ms=str(WINDOW_MS), window_start_wall_ms=str(max(0, now-WINDOW_MS)),
+                window_end_wall_ms=str(now), coverage_from_wall_ms=str(max(self.started_ms, now-WINDOW_MS)),
+                coverage_complete=self.started_ms <= now-WINDOW_MS and not gaps, gaps=gaps,
+                payload_bytes=self.bytes, evidence_bytes=self.evidence_bytes, request_bytes=self.request_bytes, max_payload_bytes=self.max_bytes,
+                max_evidence_bytes=self.max_evidence_bytes, retained_batches=len(self.batches),
+                retained_events=len(self.events), restart_clears_history=True))
 
     def summarize(self, *, timezone="UTC"):
         if timezone != "UTC":
             raise ValueError("summary timezone must be UTC")
-        def compute(db):
+        with self.lock:
+            status = self.status()
+            cutoff = int(status["window_start_wall_ms"])
             groups = {}
-            for row in db.execute("SELECT * FROM events ORDER BY identity"):
-                payload = json.loads(row["payload"])
-                candidate = payload["candidate"]
-                # Every mode-specific event has exactly one half-open UTC day/profit bin.
-                profit = int(candidate["plan_atoms"])
-                key = encoded([row["wall_ms"] // 86_400_000, candidate["quote_asset"],
-                               candidate["mode"], candidate["maker_leg"], payload["threshold"],
-                               "negative" if profit < 0 else "nonnegative"])
-                value = groups.setdefault(key, dict(events=0, censored=0, profit_atoms="0"))
+            for event in self.events.values():
+                payload = event["payload"]
+                candidate, profit = payload["candidate"], int(payload["candidate"]["plan_atoms"])
+                key = encoded([max(cutoff, event["wall_ms"])//WINDOW_MS, candidate["quote_asset"], candidate["mode"],
+                               candidate["maker_leg"], payload["threshold"], "negative" if profit < 0 else "nonnegative"])
+                value = groups.setdefault(key, dict(events=0, censored=0, carried_in=0, profit_atoms="0", window_duration_ns="0"))
+                view = self._event_view(event, cutoff)
                 value["events"] += 1
-                value["censored"] += row["end_reason"] != "below_threshold"
-                value["profit_atoms"] = str(int(value["profit_atoms"]) + profit)
-            result = dict(schema="scanner_summary_v1", timezone=timezone, weighting="event",
-                          representative="first_evaluation", groups=groups,
-                          coverage_complete=db.execute("SELECT 1 FROM records WHERE kind='gaps' LIMIT 1").fetchone() is None)
-            self._record(db, "summaries", "current", "", 0, 0, result) if not db.execute(
-                "SELECT 1 FROM records WHERE kind='summaries'").fetchone() else db.execute(
-                "UPDATE records SET payload=? WHERE kind='summaries' AND identity='current'", (encoded(result),))
-            return result
-        return self._call(compute)
-
-    def pin(self, kind, identity, reference):
-        if kind not in ("batches", "events", "artifacts") or not reference:
-            raise ValueError("history pin")
-        self._call(lambda db: db.execute("INSERT OR IGNORE INTO pins VALUES(?,?,?)", (kind, identity, reference)).rowcount)
-
-    def prune(self, *, before_wall_ms):
-        if type(before_wall_ms) is not int or before_wall_ms < 0:
-            raise ValueError("history retention cutoff")
-        self.summarize()
-        def remove(db):
-            # Event evidence and pinned evaluations retain their content-addressed materials.
-            db.execute("DELETE FROM records WHERE kind='batches' AND wall_ms<? AND NOT EXISTS "
-                       "(SELECT 1 FROM pins WHERE kind='batches' AND identity=records.identity)", (before_wall_ms,))
-            used = {digest for row in db.execute("SELECT payload FROM events") for digest in json.loads(row[0])["evidence"]}
-            for row in db.execute("SELECT payload FROM records WHERE kind='batches'"):
-                used.update(json.loads(row[0]).get("evidence", []))
-            for row in db.execute("SELECT digest FROM artifacts").fetchall():
-                if row[0] not in used:
-                    db.execute("DELETE FROM artifacts WHERE digest=? AND NOT EXISTS "
-                               "(SELECT 1 FROM pins WHERE kind='artifacts' AND identity=?)", (row[0], row[0]))
-        self._call(remove)
-
-    def prune_evidence(self, *, before_wall_ms):
-        """Retain queryable results, protect research pins transitively."""
-        if type(before_wall_ms) is not int or before_wall_ms < 0:
-            raise ValueError("history retention cutoff")
-        def remove(db):
-            keep = {r[0] for r in db.execute("SELECT identity FROM pins WHERE kind='artifacts'")}
-            for row in db.execute("SELECT payload FROM records WHERE kind='batches' AND (wall_ms>=? OR EXISTS "
-                                  "(SELECT 1 FROM pins WHERE kind='batches' AND identity=records.identity))", (before_wall_ms,)):
-                keep.update(json.loads(row[0]).get("evidence", []))
-            for row in db.execute("SELECT payload FROM events WHERE wall_ms>=? OR EXISTS "
-                                  "(SELECT 1 FROM pins WHERE kind='events' AND identity=events.identity)", (before_wall_ms,)):
-                keep.update(json.loads(row[0])["evidence"])
-            for row in db.execute("SELECT digest FROM artifacts").fetchall():
-                if row[0] not in keep:
-                    db.execute("DELETE FROM artifacts WHERE digest=?", (row[0],))
-        self._call(remove)
-
-    def backup(self, destination):
-        destination = Path(destination)
-        if destination.resolve() == self.path.resolve() or destination.exists():
-            raise ValueError("backup destination must be a new file")
-        def copy(db):
-            with sqlite3.connect(destination) as target:
-                db.backup(target)
-        self._call(copy)
+                value["censored"] += view["right_censored"]
+                value["carried_in"] += view["started_before_window"]
+                value["profit_atoms"] = str(int(value["profit_atoms"])+profit)
+                value["window_duration_ns"] = str(int(value["window_duration_ns"])+int(view["window_duration_ns"]))
+            return dict(schema="scanner_summary_v1", timezone=timezone, weighting="event", representative="first_evaluation",
+                groups=groups, coverage_complete=status["coverage_complete"], window_start_wall_ms=status["window_start_wall_ms"],
+                window_end_wall_ms=status["window_end_wall_ms"], coverage_from_wall_ms=status["coverage_from_wall_ms"],
+                storage="memory", gaps=status["gaps"])
 
     def close(self):
-        if not self.closed:
+        with self.lock:
             self.closed = True
-            self.queue.put(None, timeout=self.timeout)
-            self.thread.join(timeout=self.timeout)
-            if self.thread.is_alive():
-                raise OSError("history writer did not stop")
+            for table in (self.records, self.events, self.batches, self.artifacts, self.requests, self.open_events,
+                          self.batch_heads, self.weights):
+                table.clear()
+            self.config, self.gaps = None, []
+            self.bytes = self.evidence_bytes = self.request_bytes = 0

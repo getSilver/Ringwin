@@ -15,15 +15,7 @@ import arbitrage_checkpoint as checkpoint
 import arbitrage_scanner as scanner
 from scanner_archive import freeze, load, MAX_BYTES
 from scanner_history import History, encoded
-
-
-def uint_text(value, *, minimum=0):
-    if type(value) is not str or not value.isascii() or not value.isdecimal() or str(int(value)) != value:
-        raise ValueError("canonical decimal string required")
-    result = int(value)
-    if not minimum <= result < 1 << 127:
-        raise ValueError("integer outside capacity")
-    return result
+from scanner_config import ConfigStore, uint_text
 
 
 class CanonicalSource:
@@ -111,7 +103,7 @@ class ScannerConsole:
     def __init__(self, source, history, *, clock=time.monotonic_ns,
                  wall_clock=lambda: time.time_ns() // 1_000_000,
                  max_age_ns=5_000_000_000, max_skew_ns=1_000_000_000,
-                 authority=None, resolve_selection=None, trading_bindings=()):
+                 authority=None, resolve_selection=None, trading_bindings=(), config_path=None):
         self.source, self.history, self.clock, self.wall_clock = source, history, clock, wall_clock
         self.max_age_ns, self.max_skew_ns = max_age_ns, max_skew_ns
         self.authority = authority
@@ -121,6 +113,9 @@ class ScannerConsole:
         self.desired, self.phase, self.session = "stopped", "Stopped", ""
         self.config = history.latest_config() or dict(version="0", scopes=[], registered=[],
             statistics=dict(version="1", min_profit_atoms="0", min_probability_ppm=0))
+        self.config_store = None
+        if config_path is not None:
+            self.bind_config(config_path)
         self.sequence = self.committed = self.cursor = 0
         self.snapshot = self._empty()
         self.last_publication = None
@@ -134,6 +129,21 @@ class ScannerConsole:
         self.shutdown = Event()
         self.worker = Thread(target=self._run, daemon=True, name="scanner-runtime")
         self.worker.start()
+
+    def bind_config(self, path):
+        """Bind node-owned configuration independently of ephemeral history."""
+        with self.lock:
+            if self.desired != "stopped":
+                raise ValueError("scanner config binding requires stopped scanner")
+            store = ConfigStore(path)
+            loaded = store.load()
+            if loaded is not None:
+                if self.config["version"] != "0" and self.config != loaded:
+                    raise ValueError("scanner config binding conflict")
+                self.config = loaded
+            elif self.config["version"] != "0":
+                store.save(self.config)
+            self.config_store = store
 
     def _enqueue(self, cursor, observations, plans, at_ns):
         with self.lock:
@@ -222,6 +232,8 @@ class ScannerConsole:
 
     def configure(self, request):
         with self.lock:
+            if self.shutdown.is_set():
+                raise ValueError("scanner is closed")
             if type(request) is not dict or set(request) - {"expected_version", "scopes", "statistics"}:
                 raise ValueError("scanner config fields")
             if request["expected_version"] != self.config["version"]:
@@ -269,6 +281,8 @@ class ScannerConsole:
                 selected = self._selected()
                 if self.desired == "running":
                     self.source.acquire(self.session, selected)
+                if self.config_store is not None:
+                    self.config_store.save(candidate)
                 self.history.record("config", candidate["version"], candidate,
                                     sequence=int(candidate["version"]), wall_ms=self.wall_clock())
             except Exception:
@@ -412,7 +426,7 @@ class ScannerConsole:
         self.phase = "Degraded" if bad or self.pending_gap else "Warming" if self.warming else "Running"
 
     def request_approval(self, selection):
-        """Stable request identity is saved before invoking the node-owned core bridge."""
+        """Retain identity in process memory before invoking the core bridge."""
         with self.lock:
             fields = {"identity", "candidate_id", "strategy_identity", "portfolio_identity",
                       "expected_config_version", "expected_core_version", "enabled"}
@@ -443,7 +457,7 @@ class ScannerConsole:
             binding = self.resolve_selection(selection, row)
             if type(binding) is not dict:
                 raise ValueError("core pair binding unavailable")
-            request = dict(selection=selection, core=binding)
+            request = dict(selection=selection, core=binding, candidate=row)
             response = dict(identity=selection["identity"], status="pending", trading_qualified=False)
             self.history.request(selection["identity"], request, response)
             self._record("operations", secrets.token_hex(16), dict(action="pair_request", identity=selection["identity"]))
@@ -456,9 +470,7 @@ class ScannerConsole:
             raise ValueError("unregistered strategy/portfolio binding")
         if row is None:
             # Revocation refers to the original trusted selector even after TTL/stop.
-            prior = self.history.query("requests", limit=500)
-            row = next((p["payload"]["candidate"] for p in reversed(prior)
-                        if (p["payload"].get("candidate") or {}).get("id") == selection["candidate_id"]), None)
+            row = self.history.request_candidate(selection)
         if row is None:
             raise ValueError("unknown pair selector")
         legs = []
@@ -546,14 +558,17 @@ class ScannerConsole:
             catalogue = [dict(venue=str(x.venue), account=str(x.account), instrument=str(x.rules.instrument),
                 product=x.kind, environment=x.environment, base_asset=str(x.rules.exposure_asset),
                 quote_asset=str(x.rules.quote_asset), rules_version=str(x.rules.version)) for x in self.source.registered.values()]
+            history_window = self.history.status()
+            cutoff = int(history_window["window_start_wall_ms"])
+            self.coverage_gaps = [gap for gap in self.coverage_gaps if gap["wall_ms"] >= cutoff][-64:]
             return json.loads(encoded(dict(self._envelope(), phase=self.phase, desired=self.desired, config=self.config,
                         catalogue=catalogue, wall_ms=str(self.wall_clock()), clock_domain="server_monotonic_ns",
                         remaining_validity_ns={r["id"]: str(max(0, int(r["valid_until_ns"])-now)) for r in self.snapshot["candidates"]},
                         trading_bindings=self.trading_bindings,
                         assets=self.source.assets,
                         latest_sequence=str(self.sequence), committed_sequence=str(self.committed),
-                        backlog=self.history.queue.qsize(), storage_healthy=self.history.healthy,
-                        storage_error=self.history.error, coverage_gaps=list(self.coverage_gaps), errors=list(self.errors),
+                        backlog=0, storage_healthy=self.history.healthy, history_window=history_window,
+                        storage_error=self.history.error, coverage_gaps=list(self.coverage_gaps)+history_window["gaps"], errors=list(self.errors[-64:]),
                         warming=[list(map(str, x)) for x in sorted(self.warming)], trading_qualified=False)))
 
     def close(self):

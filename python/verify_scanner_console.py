@@ -95,6 +95,8 @@ class Fixture:
     def __init__(self, directory, ui_path=None):
         self.directory = Path(directory)
         self.now = T
+        self.wall_offset_ms = 0
+        self.owner_offset = 0
         self.channel = control_plane.CommandServer(b"s"*32)
         key = self.directory / "offline-control.key"
         key.write_bytes(self.channel.key)
@@ -119,10 +121,9 @@ class Fixture:
         self.observations = observations
         self.source = CanonicalSource(observations, assets=(dict(identity="1", code="USDT", atomic_scale=6),
                                                           dict(identity=str(0x425443), code="BTC", atomic_scale=8)))
-        self.console = ScannerConsole(self.source, History(self.directory / "scanner.sqlite"), clock=lambda: self.now,
-            authority=self.authority, max_age_ns=1000*self.time_scale, max_skew_ns=10*self.time_scale,
-            trading_bindings=(dict(strategy_identity="9", portfolio_identity="10", activation="1", config_version="1"),))
-        self.app = control_plane_web.ControlPlaneApp(directory, self.channel, scanner_console=self.console, ui_path=ui_path)
+        self.console = self.new_console()
+        self.app = control_plane_web.ControlPlaneApp(directory, self.channel, scanner_console=self.console, ui_path=ui_path,
+            clock=lambda: int(time.time())+self.owner_offset)
         self.app.setup(PASSPHRASE)
         self.server = control_plane_web.serve(self.app)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -131,10 +132,25 @@ class Fixture:
         self.publisher = threading.Thread(target=self._publish, daemon=True)
         self.publisher.start()
 
+    def wall_clock(self):
+        return time.time_ns()//1_000_000+self.wall_offset_ms
+
+    def new_console(self):
+        return ScannerConsole(self.source, History(clock=self.wall_clock), clock=lambda: self.now,
+            wall_clock=self.wall_clock, authority=self.authority, max_age_ns=1000*self.time_scale,
+            max_skew_ns=10*self.time_scale, config_path=self.directory/"scanner-config.json",
+            trading_bindings=(dict(strategy_identity="9", portfolio_identity="10", activation="1", config_version="1"),))
+
+    def restart_console(self):
+        self.console.close()
+        self.console = self.new_console()
+        self.app.scanner_console = self.console
+
     def _publish(self):
         while not self.closing.wait(.02):
-            with self.console.lock:
-                if self.console.desired == "running" and self.console.cursor == 0:
+            console = self.console
+            with console.lock:
+                if console is self.console and console.desired == "running" and console.cursor == 0:
                     self.source.deliver(self.observations, (self.plan,), cursor=1, at_ns=T*self.time_scale)
 
     def call(self, operation, payload=None, headers=None):
@@ -200,6 +216,7 @@ def verify(fixture):
     assert fixture.console.view()["snapshot"]["candidates"] == []
     assert fixture.call("approval_status", "16001")[1]["result"]["status"] == "accepted"
     assert fixture.console.history.query("events")
+    assert not (fixture.directory / "scanner.sqlite").exists()
     print("scanner_web_core_offline=passed; authority=actual_Zig; real_market=not_run; trading=false", flush=True)
 
 
@@ -219,6 +236,13 @@ def main():
                         fixture.now = (T+1001)*fixture.time_scale
                     elif line.strip() == "reset":
                         fixture.now = T*fixture.time_scale
+                    elif line.strip() == "advance_day":
+                        fixture.wall_offset_ms += 86_400_001
+                    elif line.strip() == "restart_console":
+                        fixture.restart_console()
+                    elif line.strip() == "login_code":
+                        fixture.owner_offset += owner_session.TOTP_STEP
+                        print(json.dumps(dict(totp=owner_session.totp_at(fixture.app.totp.read_secret(), fixture.app.clock()))), flush=True)
                     elif line.strip() == "drop_next_pair_ack":
                         fixture.drop_next_pair_ack = True
                     elif line.strip() == "quit":
