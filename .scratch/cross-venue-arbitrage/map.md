@@ -56,7 +56,7 @@ Status: open
 
 ## Frontier
 
-- [16 扫描控制台](issues/16-scanner-console-spec.md)：in_progress，Codex实施整张运行／历史／Web/UI／核心批准；用户本轮明确排除真实行情联调和浏览器验收。策略分支 `spread-arbitrage-strategy-python`，见[实施证据](scanner-console-implementation.md)。
+- [16 扫描控制台](issues/16-scanner-console-spec.md)：in_progress，运行／历史／Web/UI／核心批准已交付离线范围；用户后续重新授权的离线浏览器13组验收通过，真实行情联调仍排除。策略分支 `spread-arbitrage-strategy-python`，见[实施证据](scanner-console-implementation.md)及[浏览器记录](scanner-browser-acceptance.md)。
 
 - [12 双 IOC 样本外校准与资格判定](issues/12-taker-calibration.md)：依赖05/10已完成，离线研究工具已开发，真实研究输入不足，in_progress，经济资格pending；见[12证据](taker-calibration-evidence.md)。
 - [13 Maker–Taker 独立校准与资格判定](issues/13-maker-calibration.md)：依赖05/11已完成，独立Maker离线研究工具已开发，in_progress，真实经济资格pending；见[13证据](maker-calibration-evidence.md)。
@@ -64,6 +64,8 @@ Status: open
 - 原01/02为来源规格，保持原状态；其他会话施工及资格见核心接口地图。其余新票按各自 Blocked by 推进。
 
 ## Decisions so far
+
+- 2026-11-07后续：用户重新授权离线确定性输入＋本地Zig核心的浏览器验收。Chromium桌面／窄屏13组通过并重复确认，外部请求0；修复配置冲突提示被轮询抹除的问题，扫描／控制台21项回归通过。真实行情及生产容量资格未取证，见[浏览器记录](scanner-browser-acceptance.md)。
 
 - 2026-11-07：用户授权实施整张16，随后明确不做真实行情联调与浏览器验收；已在独立策略工作区提交规范范围过滤、生命周期、SQLite派生历史、现有OwnerSession Web接口、RingwinUi及TradingShard配对批准。Zig最终全量889/889、Python全量355通过/3跳过、扫描定向20项、离线Web→真实核心及UI类型／构建／状态自检通过，双轴审查修复完成。16保留未取得的浏览器／真实行情验收条件，不将离线输入视为真实行情或交易资格；见[实施证据](scanner-console-implementation.md)。
 

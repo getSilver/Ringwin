@@ -3,7 +3,7 @@
 --serve-ui PATH serves the built RingwinUi against deterministic canonical input
 and the real offline Zig authority probe. All state and login material are temporary.
 """
-from dataclasses import replace
+from dataclasses import fields, is_dataclass, replace
 from fractions import Fraction as F
 import argparse
 import http.client
@@ -59,6 +59,38 @@ def canonical_fixture():
     return observations, replace(plan, pair=pair, policy=policy, scenarios=paths, estimator=estimator, calibration=artifact)
 
 
+def browser_inputs(observations, plan, scale):
+    """Retain the offline economics with human-operable, consistently scaled time.
+
+    Rebind model/calibration identities after scaling; never extend a result's
+    TTL alone or disable the browser's expiry checks.
+    """
+    def retime(value, field=""):
+        if field.endswith("_ns") and type(value) is int:
+            return value*scale
+        if isinstance(value, bytes) and len(value) == 704:
+            book = s.decode_depth_snapshot(value)
+            return v.encode_depth_snapshot({key: retime(item, key) for key, item in book.items()})
+        if is_dataclass(value):
+            return replace(value, **{item.name: retime(getattr(value, item.name), item.name) for item in fields(value)})
+        if isinstance(value, tuple):
+            return tuple(retime(item, field) for item in value)
+        return value
+    observations, scaled = retime(observations), retime(plan)
+    policy = replace(scaled.policy, model_hash=scaled.estimator.model_hash)
+    scopes = {}
+    for old, new in zip(plan.scenarios, scaled.scenarios):
+        target = 8_000_000
+        scopes[v.Context(old.entry, old.markets[0], target, plan.policy).scope] = v.Context(new.entry, new.markets[0], target, policy).scope
+    estimator = replace(scaled.estimator, rows=tuple(replace(row, scope=scopes[row.scope],
+        calibration=replace(row.calibration, scope=scopes[row.scope], model_hash=policy.model_hash)) for row in scaled.estimator.rows))
+    simulation_hash = estimator.probability_model_hash(policy)
+    estimator = replace(estimator, rows=tuple(replace(row, calibration=replace(row.calibration, simulation_hash=simulation_hash)) for row in estimator.rows))
+    artifact = replace(scaled.calibration, model_hash=policy.model_hash, simulation_hash=simulation_hash,
+        scope=v.probability_scope(policy, 8_000_000, policy.original_base, policy.at_ns))
+    return observations, replace(scaled, policy=policy, estimator=estimator, calibration=artifact)
+
+
 class Fixture:
     def __init__(self, directory, ui_path=None):
         self.directory = Path(directory)
@@ -80,11 +112,15 @@ class Fixture:
             return result
         self.authority.request = transport
         observations, self.plan = canonical_fixture()
+        self.time_scale = 10_000_000_000 if ui_path else 1
+        if ui_path:
+            observations, self.plan = browser_inputs(observations, self.plan, self.time_scale)
+            self.now *= self.time_scale
         self.observations = observations
         self.source = CanonicalSource(observations, assets=(dict(identity="1", code="USDT", atomic_scale=6),
                                                           dict(identity=str(0x425443), code="BTC", atomic_scale=8)))
         self.console = ScannerConsole(self.source, History(self.directory / "scanner.sqlite"), clock=lambda: self.now,
-            authority=self.authority, max_age_ns=1000, max_skew_ns=10,
+            authority=self.authority, max_age_ns=1000*self.time_scale, max_skew_ns=10*self.time_scale,
             trading_bindings=(dict(strategy_identity="9", portfolio_identity="10", activation="1", config_version="1"),))
         self.app = control_plane_web.ControlPlaneApp(directory, self.channel, scanner_console=self.console, ui_path=ui_path)
         self.app.setup(PASSPHRASE)
@@ -99,7 +135,7 @@ class Fixture:
         while not self.closing.wait(.02):
             with self.console.lock:
                 if self.console.desired == "running" and self.console.cursor == 0:
-                    self.source.deliver(self.observations, (self.plan,), cursor=1, at_ns=T)
+                    self.source.deliver(self.observations, (self.plan,), cursor=1, at_ns=T*self.time_scale)
 
     def call(self, operation, payload=None, headers=None):
         body = dict(operation=operation)
@@ -180,7 +216,9 @@ def main():
                 import sys
                 for line in sys.stdin:
                     if line.strip() == "expire":
-                        fixture.now = T+1001
+                        fixture.now = (T+1001)*fixture.time_scale
+                    elif line.strip() == "reset":
+                        fixture.now = T*fixture.time_scale
                     elif line.strip() == "drop_next_pair_ack":
                         fixture.drop_next_pair_ack = True
                     elif line.strip() == "quit":

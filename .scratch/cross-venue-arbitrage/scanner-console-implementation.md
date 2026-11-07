@@ -2,6 +2,8 @@
 
 日期：2026-11-07（Asia/Shanghai）。用户授权整张16的实施，随后明确排除真实行情联调和浏览器验收。未部署、未调用交易所、未执行真实或Demo交易、未同步GitHub。
 
+后续用户重新授权以离线确定性输入和本地Zig核心执行浏览器验收；本轮已完成，见[浏览器验收记录](scanner-browser-acceptance.md)。真实行情仍明确排除。
+
 ## 工作区与起点
 
 - Ringwin：`D:/github/Ringwin-scanner`，分支 `spread-arbitrage-strategy-python`。先快进至已提交的main `937587450acd5ccf09a3c733e07f98f64bb0c4fd`，复用现有Web／原生权威路径。
@@ -32,7 +34,8 @@
 - RingwinUi：`npm.cmd run typecheck`、`npm.cmd run build`、`node src/scanner/scannerApi.check.mjs`、`node src/scanner/scannerDemoModel.check.mjs`均通过。构建仍提示主bundle超过500kB。
 - 双轴审查已执行并完成复核，当前源码无待处理P1/P2。修复状态展示Token、请求超时与轮询重叠、跨时钟TTL与完整往返耗时、重放输入身份及live配置隔离；核心增补部分成交／改单／取消确认后替换的撤权检查。审查结论不代替运行验收。
 - 浏览器尝试未通过：两次均在查找“扫描范围”tab时超时；页面已登录并显示Stopped。用户随后明确不处理浏览器验收，已停止且不再补跑，不能据此声明界面交互通过。
+- 后续重新授权的离线浏览器验收：Chromium桌面／窄屏13组场景通过并重复确认，真实本地Web→Zig批准／撤销、历史与TTL、断网／旧会话恢复均覆盖；外部请求0。修复操作错误被成功轮询清除的问题。扫描／控制台回归增至21项通过，详见独立记录。
 
 ## 边界
 
-真实行情联调按用户明确要求未执行，浏览器验收已停止。节点接线须提供可信登记目录、CanonicalSource订阅回调及deliver输入、冻结计划与NativeAuthority；离线验收使用确定性规范输入和真实Zig核心，不证明Venue生产输入接线。适配器源码能力与离线合同不能替代真实连接、吞吐、经济或运行资格。12–15的pending资格不因本次交付改变。保留期限与队列容量的部署选择仍须运行测量，当前边界显式失败，不静默丢弃。
+真实行情联调按用户明确要求未执行，浏览器验收已按后续授权以离线输入完成。节点接线须提供可信登记目录、CanonicalSource订阅回调及deliver输入、冻结计划与NativeAuthority；离线验收使用确定性规范输入和真实Zig核心，不证明Venue生产输入接线。适配器源码能力与离线合同不能替代真实连接、吞吐、经济或运行资格。12–15的pending资格不因本次交付改变。保留期限与队列容量的部署选择仍须运行测量，当前边界显式失败，不静默丢弃。

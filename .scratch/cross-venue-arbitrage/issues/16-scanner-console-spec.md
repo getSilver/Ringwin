@@ -11,7 +11,7 @@ Triage: ready-for-agent
 
 用户本轮明确要求实施整张16，随后明确排除真实行情联调和浏览器验收。下文“本次仅规格／Demo”“不交付真实后端”等措辞保留上次规格交付记录，不限制本轮已授权的运行、历史、Web/UI与核心批准实施。仍不部署、不做真实或Demo交易、不同步GitHub。
 
-施工分支 `spread-arbitrage-strategy-python`；Ringwin工作区 `D:/github/Ringwin-scanner`，RingwinUi工作区 `D:/github/RingwinUi-scanner`。两处原工作区的未提交工作均保留。实现与验收见[16实施证据](../scanner-console-implementation.md)。真实行情联调与浏览器验收按用户指示不再执行，未取得的证据继续独立记录。
+施工分支 `spread-arbitrage-strategy-python`；Ringwin工作区 `D:/github/Ringwin-scanner`，RingwinUi工作区 `D:/github/RingwinUi-scanner`。两处原工作区的未提交工作均保留。实现与验收见[16实施证据](../scanner-console-implementation.md)。用户随后重新授权离线确定性输入＋本地Zig核心的浏览器验收，13组场景已通过，见[浏览器记录](../scanner-browser-acceptance.md)。真实行情联调仍排除。
 
 ## Question
 
@@ -131,10 +131,10 @@ Python 扫描器已有规范输入到完整替换快照及展示 JSON；当前�
 
 ## 完成条件
 
-- [ ] Demo与正式扫描范围均支持Venue／产品多选、纳入／排除可空及两腿盘口深度上下限，并按上述口径完成公共接口与浏览器验收；本次只记录要求，不修改代码。
+- [x] Demo与正式扫描范围均支持Venue／产品多选、纳入／排除可空及两腿盘口深度上下限；公共接口和离线浏览器验收已完成。
 
 - [x] 运行状态、人工范围和版本合同实现并通过公开接口测试，见2026-11-07实施证据。
-- [ ] 真实 Web/UI 候选、证据、错误／过期／恢复接线通过。
+- [x] 实际Web/UI候选、证据、错误／过期／恢复接线以离线规范输入通过；未宣称真实Venue接线。
 - [ ] 历史存储、事件统计、缺口、保留和恢复通过验收。
 - [x] 核心配对批准合同、接受／拒绝／待查及越权离线回归通过；真实行情／交易资格独立。
 - [ ] 最后完成适配器能力核对与真实行情到界面联调证据。
@@ -154,4 +154,4 @@ Python 扫描器已有规范输入到完整替换快照及展示 JSON；当前�
 
 ## Answer
 
-2026-11-07：已在独立策略分支交付范围过滤、扫描运行、SQLite派生历史、现有Web授权接口、RingwinUi和核心持久配对批准，离线验证及审查记录见[实施证据](../scanner-console-implementation.md)。浏览器验收尝试未通过，用户随后明确不再处理；真实行情联调明确排除。上述两项不以离线结果替代，本票保持in_progress，不改变12–15的pending资格。
+2026-11-07：已在独立策略分支交付范围过滤、扫描运行、SQLite派生历史、现有Web授权接口、RingwinUi和核心持久配对批准，离线验证及审查记录见[实施证据](../scanner-console-implementation.md)。按用户后续重新授权，离线Chromium浏览器13组验收通过并重复确认，含实际本地Zig批准／拒绝／撤销及回执待查，修复轮询清除配置冲突提示的问题。真实行情联调仍明确排除，历史部署保留／容量等完整运行条件未取证；本票保持in_progress，不改变12–15的pending资格。

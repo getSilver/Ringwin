@@ -206,5 +206,21 @@ class ConsoleTests(unittest.TestCase):
             restored.close()
 
 
+class BrowserFixtureTests(unittest.TestCase):
+    def test_browser_timescale_rebinds_evidence_and_keeps_expiry(self):
+        from verify_scanner_console import canonical_fixture, browser_inputs
+        observations, plan = canonical_fixture()
+        scale = 10_000_000_000
+        observations, plan = browser_inputs(observations, plan, scale)
+        snapshot = c.scanner.scan(observations, (plan,), at_ns=plan.policy.at_ns,
+            cursor=1, max_age_ns=1000*scale, max_skew_ns=10*scale)
+        row = next(x for x in snapshot["candidates"] if x["recommended"])
+        self.assertEqual(row["plan_atoms"], "8000000")
+        self.assertEqual(int(row["valid_until_ns"])-plan.policy.at_ns, 50*scale)
+        expired = c.scanner.scan(observations, (plan,), at_ns=int(row["valid_until_ns"]),
+            cursor=2, max_age_ns=1000*scale, max_skew_ns=10*scale)
+        self.assertFalse(any(x["recommended"] for x in expired["candidates"]))
+
+
 if __name__ == "__main__":
     unittest.main()
