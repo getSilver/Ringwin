@@ -95,6 +95,40 @@ pub const State = struct {
         }
         return null;
     }
+
+    pub fn allowedAmendment(self: *const State, intent: oms.Intent, members: []const @import("cycle_occupancy.zig").Member, config_version: u64) ?Request {
+        if (members.len != 2) return null;
+        var i: usize = self.count;
+        while (i > 0) {
+            i -= 1;
+            const request = self.records[i].request;
+            if (!request.enabled or request.strategy != intent.strategy_instance or request.portfolio != intent.portfolio or request.config_version != config_version) continue;
+            var superseded = false;
+            for (self.records[i + 1 .. self.count]) |later| if (sameSelector(request, later.request)) {
+                superseded = true;
+                break;
+            };
+            if (superseded) continue;
+            var matches_cycle = true;
+            for (request.legs) |leg| {
+                var found = false;
+                for (members) |member| if (member.account == leg.account and member.instrument == leg.instrument) {
+                    found = true;
+                    break;
+                };
+                if (!found) matches_cycle = false;
+            }
+            if (!matches_cycle) continue;
+            for (request.legs, 0..) |leg, index| {
+                if (leg.account != intent.exchange_account or leg.instrument != intent.instrument) continue;
+                const buy = (index == 0) == (request.direction == 1);
+                const maker = (request.mode == .maker_first and index == 0) or (request.mode == .maker_second and index == 1);
+                if (intent.side != (if (buy) oms.Side.buy else oms.Side.sell)) continue;
+                if ((maker and intent.order_type == .post_only) or (!maker and intent.order_type == .limit and intent.time_in_force == .immediate_or_cancel)) return request;
+            }
+        }
+        return null;
+    }
 };
 
 fn sameSelector(a: Request, b: Request) bool {

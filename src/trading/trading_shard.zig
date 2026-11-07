@@ -1654,8 +1654,9 @@ pub const TradingShard = struct {
 
     pub fn pairInstrument(self: *const TradingShard, account: u128, instrument: u128) ?InstrumentEntry {
         if (account == self.exchange_account_identity) return self.instrument_registry.get(instrument);
-        const index = self.secondaryAccountIndex(account) orelse return null;
-        return self.secondary_accounts[index].state.instrument_registry.get(instrument);
+        for (self.secondary_accounts[0..self.secondary_account_count]) |*partition|
+            if (partition.state.exchange_account_identity == account) return partition.state.instrument_registry.get(instrument);
+        return null;
     }
 
     pub fn validatePairAuthorization(self: *const TradingShard, request: @import("pair_trading_authorization.zig").Request) !void {
@@ -2130,6 +2131,25 @@ pub const TradingShard = struct {
         }
     }
 
+    fn requireCurrentPairApproval(self: *const TradingShard, intent: oms.Intent) !void {
+        if (intent.portfolio_reduce_only or intent.venue_reduce_only or !self.pair_authorizations.requiresApproval(intent.strategy_instance)) return;
+        const cycle = self.cycles.owningForPortfolio(.{ .account = intent.exchange_account, .instrument = intent.instrument }, intent.portfolio) orelse return error.PairNotAuthorized;
+        if (cycle.strategy != intent.strategy_instance) return error.PairNotAuthorized;
+        const authority = self.strategyAuthority(intent.strategy_instance);
+        const approval = self.pair_authorizations.allowedAmendment(intent, cycle.members[0..cycle.count], authority.strategy_config_version) orelse return error.PairNotAuthorized;
+        try self.validatePairAuthorization(approval);
+    }
+
+    fn increasesOrderRisk(intent: oms.Intent, target: oms.Order) !bool {
+        if (intent.portfolio_reduce_only or intent.venue_reduce_only) return false;
+        const remaining = @max(0, target.quantity - target.cumulative_quantity);
+        const proposed_notional = std.math.mul(i128, intent.quantity, intent.limit_price.ticks) catch return error.UnsupportedOrderSpec;
+        const current_notional = std.math.mul(i128, remaining, target.limit_price.ticks) catch return error.UnsupportedOrderSpec;
+        return target.portfolio_reduce_only or target.venue_reduce_only or intent.side != target.side or
+            intent.quantity > remaining or proposed_notional > current_notional or
+            intent.order_type != target.order_type or intent.time_in_force != target.time_in_force;
+    }
+
     fn qualifyOmsGroup(self: *TradingShard, group: oms_module.IntentGroup) !QualifiedIntentGroup {
         var qualified = group;
         var active: canonical.AssetAmount = .{ .asset = self.economic_projection.settlement_asset, .atoms = try self.activeReservationAtoms() };
@@ -2146,6 +2166,13 @@ pub const TradingShard = struct {
             var replaced: canonical.AssetAmount = .{ .asset = self.economic_projection.settlement_asset, .atoms = 0 };
             if (intent.operation == .amend) {
                 const target = self.oms.orderById(intent.target_order_id) orelse return error.UnknownOrder;
+                // Native amendments retain these fields in OMS and on the wire.
+                if (intent.native_amend and (intent.side != target.side or
+                    intent.portfolio_reduce_only != target.portfolio_reduce_only or
+                    intent.venue_reduce_only != target.venue_reduce_only)) return error.UnsupportedOrderSpec;
+                // OMS amendments specify remaining lots and normalized ticks.
+                if (self.pair_authorizations.requiresApproval(intent.strategy_instance) and try increasesOrderRisk(intent.*, target))
+                    try self.requireCurrentPairApproval(intent.*);
                 if (target.reservation_active) replaced = target.reservation;
             }
             const instrument_config = self.instrumentEntry(intent.instrument) orelse return error.UnknownOmsInstrument;
@@ -2394,6 +2421,11 @@ pub const TradingShard = struct {
     // Ordinary reports have no replacement; do not reserve a full shard
     // candidate in those callers' already transactional frames.
     noinline fn qualifyAndConfirmReplacement(self: *TradingShard, order_id: u64, replacement: oms_module.Intent, now_monotonic_ns: u64) !?i128 {
+        const predecessor = self.oms.orderById(order_id) orelse return error.UnknownOrder;
+        if (try increasesOrderRisk(replacement, predecessor)) self.requireCurrentPairApproval(replacement) catch {
+            try self.oms.discardReplacement(order_id);
+            return null;
+        };
         var candidate: TradingShard = undefined;
         copyTradingState(&candidate, self);
         var group: oms_module.IntentGroup = .{ .first_intent_sequence = replacement.intent_sequence, .count = 1 };

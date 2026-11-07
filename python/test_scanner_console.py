@@ -53,6 +53,26 @@ class ConsoleTests(unittest.TestCase):
             finally:
                 console.close()
 
+    def test_new_instruments_policy_replays_effective_registered_scope(self):
+        from test_arbitrage_evaluation import wire
+        with tempfile.TemporaryDirectory() as directory:
+            console, observations, _, config = self.make_console(directory)
+            try:
+                config["expected_version"] = "1"
+                for row in config["scopes"]:
+                    row["new_instruments"] = True
+                console.configure(config)
+                run = console.start()
+                added = replace(observations[0], rules=replace(observations[0].rules, instrument=3),
+                                book=wire(3, T, 1000, 1001))
+                console.source.register((added,))
+                console.publish(run["session"], 1, observations+(added,), at_ns=T)
+                self.assertEqual(len(console.view()["snapshot"]["candidates"]), 12)
+                digest = console.history.query("batches")[0]["payload"]["evidence"][0]
+                self.assertTrue(console.replay(digest)["matches"])
+            finally:
+                console.close()
+
     def test_config_conflict_invalid_bounds_and_empty_filter(self):
         with tempfile.TemporaryDirectory() as directory:
             console, observations, _, config = self.make_console(directory)

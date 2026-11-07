@@ -70,6 +70,15 @@ class Fixture:
         self.process = subprocess.Popen([str(probe), str(key), "scanner"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.authority = strategy_instance.NativeAuthority(self.process, timeout=30)
         self.authority.request(dict(operation="status", strategy_identity=f"{9:032x}"))
+        self.drop_next_pair_ack = False
+        request = self.authority.request
+        def transport(value):
+            result = request(value)
+            if value["operation"] == "pair_authorize" and self.drop_next_pair_ack:
+                self.drop_next_pair_ack = False
+                raise TimeoutError("offline injected lost core acknowledgement")
+            return result
+        self.authority.request = transport
         observations, self.plan = canonical_fixture()
         self.observations = observations
         self.source = CanonicalSource(observations, assets=(dict(identity="1", code="USDT", atomic_scale=6),
@@ -146,6 +155,11 @@ def verify(fixture):
     assert fixture.call("approve", conflict)[1]["result"]["status"] == "rejected"
     revoke = dict(request, identity="16004", expected_core_version="1", enabled=False)
     assert fixture.call("approve", revoke)[1]["result"]["status"] == "accepted"
+    fixture.drop_next_pair_ack = True
+    lost = dict(request, identity="16005", expected_core_version="2")
+    assert fixture.call("approve", lost)[1]["result"]["status"] == "unknown"
+    confirmed = fixture.call("approval_status", "16005")[1]["result"]
+    assert confirmed["status"] == "accepted" and confirmed["core_version"] == "3", confirmed
     fixture.call("stop")
     assert fixture.console.view()["snapshot"]["candidates"] == []
     assert fixture.call("approval_status", "16001")[1]["result"]["status"] == "accepted"
@@ -167,6 +181,8 @@ def main():
                 for line in sys.stdin:
                     if line.strip() == "expire":
                         fixture.now = T+1001
+                    elif line.strip() == "drop_next_pair_ack":
+                        fixture.drop_next_pair_ack = True
                     elif line.strip() == "quit":
                         break
             else:

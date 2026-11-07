@@ -128,6 +128,7 @@ class ScannerConsole:
         self.coverage_gaps, self.errors = [], []
         self.pending_gap = None
         self.started_ns = 0
+        self.last_input_ns = 0
         self.warming = set()
         self.input_queue = Queue(64)
         self.shutdown = Event()
@@ -189,16 +190,17 @@ class ScannerConsole:
         self.pending_gap = gap
         self.coverage_gaps.append(gap)
 
-    def _scope(self):
+    def _scope(self, config=None):
+        config = self.config if config is None else config
         members = []
-        for row in self.config["scopes"]:
-            members.append(scanner.Scope(int(self.config["version"]), (int(row["venue"]),),
+        for row in config["scopes"]:
+            members.append(scanner.Scope(int(config["version"]), (int(row["venue"]),),
                 (row["product"],), tuple(map(int, row["include_assets"])), tuple(map(int, row["exclude_assets"])),
                 int(row["quote_asset"]) if row["quote_asset"] else None,
                 int(row["min_depth_atoms"]) if row["min_depth_atoms"] is not None else None,
                 int(row["max_depth_atoms"]) if row["max_depth_atoms"] is not None else None,
                 environment=row["environment"]))
-        return scanner.Scope(max(1, int(self.config["version"])), members=tuple(members))
+        return scanner.Scope(max(1, int(config["version"])), members=tuple(members))
 
     def _selected(self):
         scope = self._scope()
@@ -305,6 +307,7 @@ class ScannerConsole:
             self.sequence = self.committed = self.cursor = 0
             self.snapshot, self.last_publication = self._empty(), None
             self.started_ns = self.clock()
+            self.last_input_ns = self.started_ns
             try:
                 self._record("runs", self.session, dict(phase="Starting", config_version=self.config["version"],
                                                         started_ns=str(self.started_ns)))
@@ -345,7 +348,7 @@ class ScannerConsole:
                 if self.last_publication != digest:
                     raise ValueError("scanner input identity conflict")
                 return self.view()
-            if cursor < self.cursor or at_ns < self.started_ns or at_ns > self.clock():
+            if cursor < self.cursor or at_ns < self.last_input_ns or at_ns > self.clock():
                 raise ValueError("scanner input order/time")
             if any(x.identity not in self.source.registered or
                    (x.kind, x.environment, x.rules) != (self.source.registered[x.identity].kind,
@@ -373,12 +376,14 @@ class ScannerConsole:
                 self._gap("input_cursor_gap_full_snapshot")
                 self.history.interrupt(self.session, "input_gap")
             self.cursor, self.last_publication, self.snapshot = cursor, digest, snapshot
+            self.last_input_ns = at_ns
             self.sequence += 1
             envelope = self._envelope()
             material = encoded(dict(schema="scanner_inputs_v1", canonical_observations=freeze(observations),
                                     frozen_plans=freeze(plans), config=self.config,
                                     at_ns=str(at_ns), cursor=str(cursor), max_age_ns=str(self.max_age_ns),
                                     max_skew_ns=str(self.max_skew_ns), snapshot=snapshot,
+                                    selected_identities=[list(map(str, x)) for x in sorted(selected)],
                                     supplied_evidence=evidence or {}))
             if len(material.encode()) > MAX_BYTES:
                 self._gap("scanner archive capacity")
@@ -510,17 +515,12 @@ class ScannerConsole:
         archive = load(material)
         if archive["schema"] != "scanner_inputs_v1":
             raise ValueError("scanner replay schema")
-        previous = self.config
-        self.config = archive["config"]
-        try:
-            result = scanner.scan(archive["canonical_observations"], archive["frozen_plans"],
-                at_ns=int(archive["at_ns"]), cursor=int(archive["cursor"]),
-                max_age_ns=int(archive["max_age_ns"]), max_skew_ns=int(archive["max_skew_ns"]), scope=self._scope())
-            registered = {tuple(map(int, x)) for x in archive["config"]["registered"]}
-            result["candidates"] = [r for r in result["candidates"] if all(tuple(map(int, x)) in registered for x in r["pair"])]
-            return dict(replayable=True, matches=result == archive["snapshot"], snapshot=result)
-        finally:
-            self.config = previous
+        result = scanner.scan(archive["canonical_observations"], archive["frozen_plans"],
+            at_ns=int(archive["at_ns"]), cursor=int(archive["cursor"]),
+            max_age_ns=int(archive["max_age_ns"]), max_skew_ns=int(archive["max_skew_ns"]), scope=self._scope(archive["config"]))
+        registered = {tuple(map(int, x)) for x in archive["selected_identities"]}
+        result["candidates"] = [r for r in result["candidates"] if all(tuple(map(int, x)) in registered for x in r["pair"])]
+        return dict(replayable=True, matches=result == archive["snapshot"], snapshot=result)
 
     def _envelope(self):
         return dict(schema="scanner_console_v1", session=self.session, config_version=self.config["version"],
@@ -548,6 +548,7 @@ class ScannerConsole:
                 quote_asset=str(x.rules.quote_asset), rules_version=str(x.rules.version)) for x in self.source.registered.values()]
             return json.loads(encoded(dict(self._envelope(), phase=self.phase, desired=self.desired, config=self.config,
                         catalogue=catalogue, wall_ms=str(self.wall_clock()), clock_domain="server_monotonic_ns",
+                        remaining_validity_ns={r["id"]: str(max(0, int(r["valid_until_ns"])-now)) for r in self.snapshot["candidates"]},
                         trading_bindings=self.trading_bindings,
                         assets=self.source.assets,
                         latest_sequence=str(self.sequence), committed_sequence=str(self.committed),
