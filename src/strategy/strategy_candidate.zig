@@ -219,6 +219,9 @@ const Instance = struct {
         const container = try host.receiveCheckpoint(init.io, storage);
         const decoded = try codec.decodePayloadCheckpoint(container, expected);
         if (!std.mem.eql(u8, &decoded.state_digest, &ready.state_digest)) return error.CheckpointDigestMismatch;
+        // The Python callback has finished. Publication is bounded storage I/O.
+        try output.interface.writeAll("{\"phase\":\"publish_checkpoint\"}\n");
+        try output.interface.flush();
         const published = try repository.publish(init.io, container, expected);
         const content_identity = std.fmt.bytesToHex(published.content_identity, .lower);
         const digest = std.fmt.bytesToHex(ready.state_digest, .lower);
@@ -262,6 +265,8 @@ const Instance = struct {
             const current = try host.receiveCheckpoint(init.io, storage);
             expected.next_intent_sequence = std.mem.readInt(u64, current[104..112], .little);
             const validated = try codec.decodePayloadCheckpoint(current, expected);
+            try output.interface.writeAll("{\"phase\":\"publish_checkpoint\"}\n");
+            try output.interface.flush();
             const saved = try repository.publish(init.io, current, expected);
             const content = std.fmt.bytesToHex(saved.content_identity, .lower);
             const state_digest = std.fmt.bytesToHex(validated.state_digest, .lower);

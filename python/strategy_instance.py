@@ -413,9 +413,10 @@ class InstanceManager:
     def _exchange_io(self, host, identity, command):
         data = package.canonical(dict(command, strategy_identity=identity))
         package.require(len(data) <= 256 * 1024, "runtime command capacity exceeded")
-        deadline = time.monotonic() + host["callback_timeout"]
+        started = time.monotonic()
+        deadline = started + host["callback_timeout"]
         host["pipes"].write(struct.pack("<I", len(data)) + data, host["callback_timeout"])
-        pending, frames = b"", []
+        pending, frames, publishing = b"", [], False
         while True:
             remaining = deadline - time.monotonic()
             package.require(remaining > 0, "runtime callback budget exhausted")
@@ -429,7 +430,14 @@ class InstanceManager:
                 line, pending = pending.split(b"\n", 1)
                 response = json.loads(line)
                 package.require(type(response) is dict, "invalid runtime response")
-                if "output" in response:
+                if "phase" in response:
+                    package.require(command.get("checkpoint") and not publishing
+                                    and response == {"phase": "publish_checkpoint"}, "invalid checkpoint publication phase")
+                    publishing = True
+                    # The adapter has received and validated the callback bytes;
+                    # durable publication uses the bounded operation budget.
+                    deadline = started + host["request"]["manifest"]["limits"]["max_warmup_ns"] / 1e9
+                elif "output" in response:
                     package.require(len(frames) < command["max_outputs"], "runtime output capacity exceeded")
                     frames.append(response["output"])
                 else:
@@ -863,7 +871,10 @@ class InstanceManager:
                     line, pending = pending.split(b"\n", 1)
                     result = json.loads(line)
                     if "phase" in result:
-                        phase_budget, phase_started = limits["max_callback_ns"], time.monotonic_ns()
+                        if result["phase"] == "publish_checkpoint":
+                            phase_budget, phase_started = limits["max_warmup_ns"], started
+                        else:
+                            phase_budget, phase_started = limits["max_callback_ns"], time.monotonic_ns()
                         if "cursor" in result:
                             record["recovery"]["cursor"] = result["cursor"]
                             self._records[identity] = json.loads(package.canonical(record))
@@ -1010,7 +1021,8 @@ class InstanceManager:
                     line, pending = pending.split(b"\n", 1)
                     result = json.loads(line)
                     if "phase" in result:
-                        phase_deadline = time.monotonic() + limits["max_callback_ns"] / 1e9
+                        phase_deadline = (deadline if result["phase"] == "publish_checkpoint" else
+                                          time.monotonic() + limits["max_callback_ns"] / 1e9)
                         continue
                     package.require(result["strategy_identity"] == member and not result["trading_authorized"]
                                     and result["cursor"] == request["barrier"], "invalid shared Host Ready evidence")

@@ -15,6 +15,7 @@ import tempfile
 import textwrap
 import time
 import unittest
+from unittest.mock import patch
 import zipfile
 
 import strategy_host
@@ -905,9 +906,11 @@ finally:
         self.install(definition="b" * 32, artifact="candidate-b")
         request = self.replacement(old)
         exchange = authority.request
+        lost_ack = []
         def lose_ack(value):
             response = exchange(value)
             if value["operation"] == "commit_successor":
+                lost_ack.append(value["operation"])
                 raise OSError("commit ACK lost")
             return response
         authority.request = lose_ack
@@ -915,7 +918,8 @@ finally:
         self.assertEqual(status, 200, body)
         self.assertFalse(body["ok"], body)
         progress = body["result"]["successor_transition"]
-        self.assertEqual(progress["status"], "unknown")
+        self.assertEqual(lost_ack, ["commit_successor"], body)
+        self.assertEqual(progress["status"], "unknown", body)
         self.assertEqual(body["result"]["status"], "Stopped")
         self.assertFalse(self.instances._hosts)
         self.assertFalse(exchange(dict(operation="status", strategy_identity=progress["to_instance"]))["trading_authorized"])
@@ -1507,6 +1511,41 @@ finally:
         self.assertEqual(body["result"]["status"], "Stopped", body)
         self.assertIn("budget exhausted", body["result"]["reason"])
         self.assertEqual(self.instances._hosts, {})
+
+    def test_checkpoint_publication_does_not_consume_strategy_callback_budget(self):
+        self.native_authority()
+        self.install(transitions={"Keep": {"mutable_config_fields": ["warmup_events"], "rebuild_state_fields": []}})
+        read = os.read
+        pending, publishing = {}, set()
+        marker = b'{"phase":"publish_checkpoint"}\n'
+        publications = []
+        def delayed_storage_reply(fd, size):
+            data = pending.pop(fd, None)
+            if data is None:
+                data = read(fd, size)
+            if marker in data:
+                before, after = data.split(marker, 1)
+                if after:
+                    pending[fd] = after
+                publishing.add(fd)
+                publications.append(fd)
+                return before+marker
+            if fd in publishing:
+                publishing.remove(fd)
+                # Delay the real pipe bytes after the callback has completed;
+                # no synthetic Ready, checkpoint or core confirmation is used.
+                time.sleep(1.2)
+            return data
+        with patch("os.read", side_effect=delayed_storage_reply):
+            status, body = self.create()
+            self.assertEqual(status, 200, body)
+            self.assertEqual(body["result"]["status"], "Ready", body)
+            status, body = self.update_config()
+            self.assertEqual(status, 200, body)
+            self.assertTrue(body["ok"], body)
+            self.assertEqual(body["result"]["config_transition"]["status"], "completed", body)
+            self.assertFalse(body["result"]["trading_authorized"])
+        self.assertGreaterEqual(len(publications), 4)
 
     def test_candidate_intents_consume_sequence_but_cannot_enter_admission(self):
         code = OBSERVER.replace(b"return ()", b'''intent = OrderIntent(self.next_intent_sequence, 1, 2, 3, "buy", "gtc", False, 1, 100)
