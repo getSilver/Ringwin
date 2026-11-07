@@ -2166,13 +2166,8 @@ pub const TradingShard = struct {
             var replaced: canonical.AssetAmount = .{ .asset = self.economic_projection.settlement_asset, .atoms = 0 };
             if (intent.operation == .amend) {
                 const target = self.oms.orderById(intent.target_order_id) orelse return error.UnknownOrder;
-                // Native amendments retain these fields in OMS and on the wire.
-                if (intent.native_amend and (intent.side != target.side or
-                    intent.portfolio_reduce_only != target.portfolio_reduce_only or
-                    intent.venue_reduce_only != target.venue_reduce_only)) return error.UnsupportedOrderSpec;
-                // OMS amendments specify remaining lots and normalized ticks.
-                if (self.pair_authorizations.requiresApproval(intent.strategy_instance) and try increasesOrderRisk(intent.*, target))
-                    try self.requireCurrentPairApproval(intent.*);
+                // Native amendments retain the original direction on the wire.
+                if (intent.native_amend and intent.side != target.side) return error.UnsupportedOrderSpec;
                 if (target.reservation_active) replaced = target.reservation;
             }
             const instrument_config = self.instrumentEntry(intent.instrument) orelse return error.UnknownOmsInstrument;
@@ -2356,6 +2351,15 @@ pub const TradingShard = struct {
             if (intent.venue_reduce_only and !assessment.venue_reduce_only) return error.UnsupportedOrderSpec;
             intent.venue_reduce_only = assessment.venue_reduce_only and
                 (if (instrument_config.capability) |capability| capability.supports_venue_reduce_only else false);
+            if (intent.operation == .amend) {
+                const target = self.oms.orderById(intent.target_order_id) orelse return error.UnknownOrder;
+                // Compare flags after risk has inferred the effective reduce-only
+                // spec. Native OMS retains these flags instead of amending them.
+                if (intent.native_amend and (intent.portfolio_reduce_only != target.portfolio_reduce_only or
+                    intent.venue_reduce_only != target.venue_reduce_only)) return error.UnsupportedOrderSpec;
+                if (self.pair_authorizations.requiresApproval(intent.strategy_instance) and try increasesOrderRisk(intent.*, target))
+                    try self.requireCurrentPairApproval(intent.*);
+            }
             active = assessment.total_reserved;
             self.portfolio_margin_buffer_atoms = assessment.portfolio_margin_buffer.atoms;
             self.exchange_margin_buffer_atoms = assessment.exchange_margin_buffer.atoms;

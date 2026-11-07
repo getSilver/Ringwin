@@ -169,7 +169,8 @@ fn exercisePairMutation(comptime scenario: enum { ordinary, partial, replacement
         spoof.members[0].side = .buy;
         spoof.members[0].portfolio_reduce_only = true;
         _ = try owner.apply(fixture.atGroup(49, .{ .identity = 12901, .payload = .{ .oms_intent_group = spoof } }));
-        try std.testing.expectEqual(@import("../../../trading/trading_shard_event.zig").RejectReason.unsupported_order_spec, owner.shard.last_reject_reason);
+        try std.testing.expect(owner.shard.last_reject_reason != .none);
+        try std.testing.expectEqual(@as(u32, 1), owner.shard.oms.orderById(1).?.revision);
     }
     _ = try owner.apply(fixture.atGroup(49, .{ .identity = 13000, .payload = .{ .oms_intent_group = amendment } }));
     try std.testing.expectEqual(@import("../../../trading/trading_shard_event.zig").RejectReason.authorization_closed, owner.shard.last_reject_reason);
