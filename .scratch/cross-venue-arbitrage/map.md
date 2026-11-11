@@ -18,6 +18,7 @@ Status: open
 - 每项规则有正常及异常场景的可检查结果。
 - 03–11通过Python公开接口、数学验证及离线合同回放后，可标记策略开发完成。
 - 16 的扫描运行、历史和 Web 展示真实实施与集成另行验收；独立 UI Demo 不代表功能已接通。
+- [17 OKX／Hyperliquid 内部整合](issues/17-okx-hyperliquid-scanner-integration-spec.md)以正式内部链路和确定性协议夹具独立验收；交易所在线行情数据验收另立计划，不阻塞17关闭，也不因17通过而获得资格。
 - 12/13经济资格、14/15运行资格及[独立集成验收](integration-acceptance.md)分别记录，不阻塞策略开发完成；整个地图须全部范围完成才关闭。
 
 ## Rules
@@ -34,6 +35,7 @@ Status: open
 - 用户已确认的约束与建议、待决问题分开记录。
 - 按 Blocked by 领取 Frontier，每次只认领一张；ready-for-agent 不取消依赖。三项核心接口能力由其他会话处理，复用当前实现及验收证据；原规格票不因拆票自动关闭。
 - 交易所选择属于部署配置，不作为策略访谈问题。具体账户、币种名单和资金数值由运行配置提供；策略规格定义输入语义、约束及校验，不要求先选择部署实例。
+- 2026-11-11 用户调用 to-spec 授权发布[17内部整合规格](issues/17-okx-hyperliquid-scanner-integration-spec.md)，本轮选定 OKX／Hyperliquid；本次仅规格发布，不修改实现、不连接交易所，在线行情数据验收另立计划。
 
 ## Route
 
@@ -53,8 +55,11 @@ Status: open
 14. [双 IOC 只读影子验收](issues/14-taker-shadow.md)
 15. [Maker–Taker 只读影子验收](issues/15-maker-shadow.md)
 16. [机会扫描运行、历史与 Web 展示规格](issues/16-scanner-console-spec.md)
+17. [OKX／Hyperliquid 扫描器项目内部整合规格](issues/17-okx-hyperliquid-scanner-integration-spec.md)
 
 ## Frontier
+
+- [17 OKX／Hyperliquid 内部整合](issues/17-okx-hyperliquid-scanner-integration-spec.md)：open、ready-for-agent，无未完成的实施前置 blocker；按控制面整合 → 环境目录 → 两家内部数据链 → Web 展示 → 故障与启动交付推进。主验收使用正式链路和协议夹具，在线行情另验。16已交付的离线实现作为基线复用，不重复认领相同范围。
 
 2026-11-11：前端策略分支已快进合入RingwinUi主工作区，用户定型UI接入默认正式跨所入口，新增实际暂停、精确bp／数量展示及历史热力图，见[定型UI接线记录](scanner-final-ui.md)。原主工作区未提交UI保留，真实行情及资格边界不变。
 
@@ -68,6 +73,8 @@ Status: open
 - 原01/02为来源规格，保持原状态；其他会话施工及资格见核心接口地图。其余新票按各自 Blocked by 推进。
 
 ## Decisions so far
+
+- 2026-11-11：用户选定 OKX／Hyperliquid 并确认项目内部整合优先、在线行情数据验收另立计划；已发布[17规格](issues/17-okx-hyperliquid-scanner-integration-spec.md)。用户随后授权提交规格并建立整合工作区；整合分支 codex/okx-hyperliquid-scanner-integration 基于 spread-arbitrage-strategy-python 创建，保留16最新实施和验收记录。沿用正式内部链路与 transport 协议夹具的五阶段计划，复用现有滚动历史，不新增历史数据库；在线行情计划尚未成文，12–15资格不变，本次未实施功能代码或执行行情验收。
 
 - 2026-11-07后续：用户重新授权离线确定性输入＋本地Zig核心的浏览器验收。Chromium桌面／窄屏13组通过并重复确认，外部请求0；修复配置冲突提示被轮询抹除的问题，扫描／控制台21项回归通过。真实行情及生产容量资格未取证，见[浏览器记录](scanner-browser-acceptance.md)。
 
@@ -182,6 +189,7 @@ Status: open
 ## Not yet specified
 
 
+- OKX／Hyperliquid 在线行情数据验收计划：实际端点、环境可用性、盘口正确性、新鲜度、限流、网络恢复与持续运行门槛须另行规定；不作为17内部整合关闭前置条件。
 - [S4参数结构、单位、范围及缺失处理](parameter-contract.md)已定义；仍缺实际运行值、校准证据及校验器，不要求本会话选择部署名单或本金。
 - Maker 报价/队列、预测/保守折减、数量网格及模型监测已有[研究算法候选](algorithm-validation.md)，仍缺数据校准、适用范围与运行证据，不能作为已启用默认值。
 - 共享账户权威占用/减仓冲突的核心实现由H2/H3设计；策略关联和版本切换语义见S6，实际兼容性未验证。
@@ -192,5 +200,5 @@ Status: open
 
 ## Out of scope
 
-- 具体交易所、账户、币种名单和部署资金数值的选择。
+- 除17已明确选定的 OKX／Hyperliquid 外，其他交易所、具体账户、币种名单和部署资金数值的选择。
 - 部署、真实或 Demo 交易、GitHub同步；12–15本轮仅完成可开发离线工具，真实经济/运行资格仍须实际证据。
