@@ -59,8 +59,6 @@ Status: open
 
 ## Frontier
 
-- [17 OKX／Hyperliquid 内部整合](issues/17-okx-hyperliquid-scanner-integration-spec.md)：in_progress、Codex 已认领，无未完成的实施前置 blocker；按控制面整合 → 环境目录 → 两家内部数据链 → Web 展示 → 故障与启动交付推进。主验收使用正式链路和协议夹具，在线行情另验。16已交付的离线实现作为基线复用，不重复认领相同范围。
-
 2026-11-11：前端策略分支已快进合入RingwinUi主工作区，用户定型UI接入默认正式跨所入口，新增实际暂停、精确bp／数量展示及历史热力图，见[定型UI接线记录](scanner-final-ui.md)。原主工作区未提交UI保留，真实行情及资格边界不变。
 
 补充诊断：16实施后的两项Python全量失败已定位到Host checkpoint发布与回调预算混用；原始记录和修复回归见[根因记录](scanner-host-budget-diagnosis.md)，不改变真实行情及12–15资格边界。
@@ -73,6 +71,8 @@ Status: open
 - 原01/02为来源规格，保持原状态；其他会话施工及资格见核心接口地图。其余新票按各自 Blocked by 推进。
 
 ## Decisions so far
+
+- 2026-11-12：按用户在指定整合分支完整实施17的授权，五阶段内部整合已完成，[17](issues/17-okx-hyperliquid-scanner-integration-spec.md)为 resolved。正式 Web 控制面、公共 transport、OKX／Hyperliquid 实际适配器、规范投影、扫描与 UI 完成内部验收；HTTP 17/17、浏览器6/6、受影响 Zig Debug／ReleaseSafe 各18/18，Python 全量391项（3跳过）、Zig ReleaseSafe 全量889/889。全量 Debug 长运行未完成，不计通过。双轴 P2 均修复，补审无剩余硬性问题。见[内部整合证据](scanner-integration-evidence.md)及[启动说明](../../docs/scanner-runtime.md)。UI交付位于独立 `RingwinUi-scanner-integration` 工作区同名分支，保留原UI工作区未提交内容；没有合并主分支、部署、下单或GitHub同步。在线行情仍另验，16及12–15未完成条件和资格保持原状，模块地图仍open。
 
 - 2026-11-11：用户选定 OKX／Hyperliquid 并确认项目内部整合优先、在线行情数据验收另立计划；已发布[17规格](issues/17-okx-hyperliquid-scanner-integration-spec.md)。用户随后授权提交规格并建立整合工作区；整合分支 codex/okx-hyperliquid-scanner-integration 基于 spread-arbitrage-strategy-python 创建，保留16最新实施和验收记录。沿用正式内部链路与 transport 协议夹具的五阶段计划，复用现有滚动历史，不新增历史数据库；在线行情计划尚未成文，12–15资格不变，本次未实施功能代码或执行行情验收。
 
