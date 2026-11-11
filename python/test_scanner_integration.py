@@ -347,5 +347,16 @@ class IntegrationTests(unittest.TestCase):
                 app.scanner_runtime.close()
                 app.command_server.close()
 
+    def test_relative_run_directory_starts_the_normal_native_feed(self):
+        import os
+        self.runtime.close()
+        with tempfile.TemporaryDirectory(dir=Path.cwd()/".scratch/build") as directory:
+            self.runtime=ScannerRuntime(os.path.relpath(directory),configuration(),transport=self.transport,
+                clock=lambda:self.now[0],utc_clock=lambda:self.now[1],automatic=False)
+            self.app.scanner_console=self.runtime.console
+            self.start()
+            self.assertEqual(self.call("start")["phase"],"Running")
+            self.runtime.close()
+
 
 if __name__ == "__main__": unittest.main()

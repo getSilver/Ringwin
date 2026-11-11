@@ -35,6 +35,7 @@ def main():
         server.server_close()
         if app.scanner_runtime:
             app.scanner_runtime.close()
+        app.command_server.close()
 
 
 if __name__ == "__main__":

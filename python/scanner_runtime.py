@@ -64,7 +64,7 @@ class ScannerRuntime:
         bindings = configuration["bindings"]
         if type(bindings) is not list or not 1 <= len(bindings) <= 16:
             raise ValueError("scanner market binding capacity")
-        self.directory = Path(directory)
+        self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.clock, self.utc_clock, self.transport = clock, utc_clock, transport or PublicTransport()
         self.lock = threading.RLock()

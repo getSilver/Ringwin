@@ -87,7 +87,7 @@ pub fn build(b: *std.Build) void {
     const scanner_options = b.addOptions();
     scanner_options.addOption(usize, "index", 150);
     scanner_node.root_module.addOptions("entry_options", scanner_options);
-    scanner_node.stack_size = 16 * 1024 * 1024;
+    scanner_node.stack_size = 512 * 1024 * 1024;
     b.installArtifact(scanner_node);
 
     const run = b.addRunArtifact(exe);
