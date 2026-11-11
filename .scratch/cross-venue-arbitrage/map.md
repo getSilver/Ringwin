@@ -56,6 +56,8 @@ Status: open
 
 ## Frontier
 
+2026-11-11：前端策略分支已快进合入RingwinUi主工作区，用户定型UI接入默认正式跨所入口，新增实际暂停、精确bp／数量展示及历史热力图，见[定型UI接线记录](scanner-final-ui.md)。原主工作区未提交UI保留，真实行情及资格边界不变。
+
 补充诊断：16实施后的两项Python全量失败已定位到Host checkpoint发布与回调预算混用；原始记录和修复回归见[根因记录](scanner-host-budget-diagnosis.md)，不改变真实行情及12–15资格边界。
 
 - [16 扫描控制台](issues/16-scanner-console-spec.md)：in_progress，运行／历史／Web/UI／核心批准已交付离线范围；按用户最新要求取消扫描SQLite，历史改为24小时有界内存、范围配置独立JSON持久保存，离线浏览器15组通过。真实行情联调仍排除。策略分支 `spread-arbitrage-strategy-python`，见[内存历史记录](scanner-memory-history.md)、[实施证据](scanner-console-implementation.md)及[浏览器记录](scanner-browser-acceptance.md)。

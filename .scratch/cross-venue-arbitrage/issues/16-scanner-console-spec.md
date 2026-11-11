@@ -9,6 +9,8 @@ Triage: ready-for-agent
 
 ## 2026-11-07 实施授权与范围
 
+2026-11-11后续授权：前端合入RingwinUi主工作区，以用户确认的`/?variant=A&demo=scanner#opportunities`为定型UI并接入正式入口；保留独立Demo及主工作区UI修改。实现、暂停与精确展示验证见[定型UI接线记录](../scanner-final-ui.md)。真实行情仍不执行。
+
 用户本轮明确要求实施整张16，随后明确排除真实行情联调和浏览器验收。下文“本次仅规格／Demo”“不交付真实后端”等措辞保留上次规格交付记录，不限制本轮已授权的运行、历史、Web/UI与核心批准实施。仍不部署、不做真实或Demo交易、不同步GitHub。
 
 施工分支 `spread-arbitrage-strategy-python`；Ringwin工作区 `D:/github/Ringwin-scanner`，RingwinUi工作区 `D:/github/RingwinUi-scanner`。两处原工作区的未提交工作均保留。实现与验收见[16实施证据](../scanner-console-implementation.md)。用户随后重新授权离线确定性输入＋本地Zig核心的浏览器验收，13组场景已通过，见[浏览器记录](../scanner-browser-acceptance.md)。真实行情联调仍排除。

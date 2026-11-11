@@ -335,19 +335,28 @@ class ScannerConsole:
             return self.view()
 
     def stop(self):
+        return self._halt("stopped")
+
+    def pause(self):
         with self.lock:
-            if self.desired == "stopped":
+            if self.desired != "running":
                 return self.view()
-            self.desired, self.phase = "stopped", "Stopping"
+            return self._halt("paused")
+
+    def _halt(self, reason):
+        with self.lock:
+            if self.desired == reason:
+                return self.view()
+            self.desired, self.phase = reason, "Stopping"
             self.source.listeners.pop(self.session, None)
             self.sequence += 1
             self.snapshot = self._empty()  # Revoke before releasing shared subscriptions.
             try:
-                self.history.interrupt(self.session, "stopped")
-                self._record("operations", secrets.token_hex(16), dict(action="stop"))
+                self.history.interrupt(self.session, reason)
+                self._record("operations", secrets.token_hex(16), dict(action="pause" if reason == "paused" else "stop"))
             finally:
                 self.source.release(self.session)
-                self.phase = "Stopped"
+                self.phase = "Paused" if reason == "paused" else "Stopped"
             return self.view()
 
     def publish(self, session, cursor, observations, plans=(), *, at_ns, evidence=None):
@@ -419,7 +428,7 @@ class ScannerConsole:
             return self.view()
 
     def _health(self):
-        if self.desired == "stopped":
+        if self.desired != "running":
             return
         bad = any(r["reason"] in ("data_gap", "stale_data", "data_skew", "expired", "rules_expired")
                   for r in self.snapshot["candidates"])

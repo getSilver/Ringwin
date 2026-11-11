@@ -253,8 +253,9 @@ class ControlPlaneApp:
         return 200, {"ok": True, "session_token": token, "csrf_token": csrf}
 
     def authorize(self, headers: dict) -> tuple[int, dict]:
+        headers = {name.lower(): value for name, value in headers.items()}
         clock = self.clock
-        raw_cookie = headers.get("Cookie", "")
+        raw_cookie = headers.get("cookie", "")
         token = ""
         try:
             jar = http_cookies.SimpleCookie(raw_cookie)
@@ -266,7 +267,7 @@ class ControlPlaneApp:
             return 401, {"ok": False, "error": "unauthenticated"}
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         expected_csrf = self.csrf_by_token_hash.get(token_hash)
-        provided_csrf = headers.get(CSRF_HEADER, "")
+        provided_csrf = headers.get(CSRF_HEADER.lower(), "")
         if not expected_csrf or not hmac.compare_digest(expected_csrf, provided_csrf):
             return 403, {"ok": False, "error": "csrf check failed"}
         if not self.sessions.renew(token, clock):
@@ -495,13 +496,15 @@ class ControlPlaneApp:
                 raise ValueError("scanner operation required")
             else:
                 operation = request["operation"]
-                expected = {"operation"} if operation in ("start", "stop", "summary") else {"operation", "payload"}
+                expected = {"operation"} if operation in ("start", "pause", "stop", "summary") else {"operation", "payload"}
                 if set(request) != expected:
                     raise ValueError("scanner request fields")
                 if operation == "start":
                     result = console.start()
                 elif operation == "stop":
                     result = console.stop()
+                elif operation == "pause":
+                    result = console.pause()
                 elif operation == "configure":
                     result = console.configure(request["payload"])
                 elif operation == "history":

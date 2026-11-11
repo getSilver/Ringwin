@@ -54,6 +54,25 @@ class ConsoleTests(unittest.TestCase):
             finally:
                 console.close()
 
+    def test_pause_revokes_projection_and_resume_uses_new_warmup_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            console, observations, plan, _ = self.make_console(directory)
+            run = console.start()
+            console.publish(run["session"], 1, observations, (plan,), at_ns=T)
+            console.source.acquire("other-consumer", set(console.source.registered))
+            paused = console.pause()
+            self.assertEqual((paused["phase"], paused["desired"]), ("Paused", "paused"))
+            self.assertEqual(paused["snapshot"]["candidates"], [])
+            self.assertIn("other-consumer", console.source.owners)
+            self.assertEqual(console.history.query("events")[0]["end_reason"], "paused")
+            self.assertEqual(console.pause()["sequence"], paused["sequence"])
+            with self.assertRaisesRegex(ValueError, "inactive scanner session"):
+                console.publish(run["session"], 2, observations, (plan,), at_ns=T)
+            resumed = console.start()
+            self.assertNotEqual(run["session"], resumed["session"])
+            self.assertEqual(resumed["phase"], "Warming")
+            console.stop()
+
     def test_new_instruments_policy_replays_effective_registered_scope(self):
         from test_arbitrage_evaluation import wire
         with tempfile.TemporaryDirectory() as directory:
@@ -160,6 +179,15 @@ class ConsoleTests(unittest.TestCase):
                 headers = {"Cookie": "owner_session="+token}
                 self.assertEqual(call({"operation": "start"}, headers)[0], 403)
                 headers["X-Owner-CSRF"] = "scanner-csrf"
+                self.assertEqual(call({"operation": "start"}, headers)[0], 200)
+                lower = {"cookie": "owner_session="+token}
+                self.assertEqual(call({"operation": "pause"}, lower)[0], 403)
+                lower["x-owner-csrf"] = "scanner-csrf"
+                self.assertEqual(call({"operation": "pause"}, lower)[0], 200)
+                self.assertEqual(call({"operation": "start"}, headers)[0], 200)
+                pause_status, pause_body = call({"operation": "pause"}, headers)
+                self.assertEqual(pause_status, 200)
+                self.assertEqual(pause_body["result"]["desired"], "paused")
                 self.assertEqual(call({"operation": "start"}, headers)[0], 200)
                 self.assertEqual(call({"operation": "receipt", "payload": {"status": "accepted"}}, headers)[0], 400)
                 self.assertEqual(call({"operation": "publish", "payload": {}}, headers)[0], 400)
