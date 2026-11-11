@@ -59,7 +59,7 @@ Status: open
 
 ## Frontier
 
-- [17 OKX／Hyperliquid 内部整合](issues/17-okx-hyperliquid-scanner-integration-spec.md)：open、ready-for-agent，无未完成的实施前置 blocker；按控制面整合 → 环境目录 → 两家内部数据链 → Web 展示 → 故障与启动交付推进。主验收使用正式链路和协议夹具，在线行情另验。16已交付的离线实现作为基线复用，不重复认领相同范围。
+- [17 OKX／Hyperliquid 内部整合](issues/17-okx-hyperliquid-scanner-integration-spec.md)：in_progress、Codex 已认领，无未完成的实施前置 blocker；按控制面整合 → 环境目录 → 两家内部数据链 → Web 展示 → 故障与启动交付推进。主验收使用正式链路和协议夹具，在线行情另验。16已交付的离线实现作为基线复用，不重复认领相同范围。
 
 2026-11-11：前端策略分支已快进合入RingwinUi主工作区，用户定型UI接入默认正式跨所入口，新增实际暂停、精确bp／数量展示及历史热力图，见[定型UI接线记录](scanner-final-ui.md)。原主工作区未提交UI保留，真实行情及资格边界不变。
 

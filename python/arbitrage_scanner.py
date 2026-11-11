@@ -244,6 +244,10 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=N
                   "rules_expired" if any(not x.rules.valid_from_ns <= at_ns < x.rules.valid_until_ns for x in legs) else "")
         directions = (1, -1) if a.kind == z.kind else ((1,) if a.kind == "spot" else (-1,))
         for direction in directions:
+            buy, sell = (0, 1) if direction == 1 else (1, 0)
+            buy_price = books[buy]["asks"][0][0] * legs[buy].rules.tick_quote_atoms_per_base_atom
+            sell_price = books[sell]["bids"][0][0] * legs[sell].rules.tick_quote_atoms_per_base_atom
+            observed_edge = None if health else (sell_price - buy_price) * 10_000 / buy_price
             for mode, maker in (("taker_taker", None), ("maker_taker", 0), ("maker_taker", 1)):
                 key = pair, direction, mode, maker
                 options = grouped.get(key, {})
@@ -277,6 +281,7 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=N
                     "base_asset": str(a.rules.base_asset), "quote_asset": str(a.rules.quote_asset),
                     "direction": direction, "mode": mode, "maker_leg": maker,
                     "products": [x.kind for x in legs],
+                    "observed_edge_bp": _ratio(observed_edge),
                     "status": "evaluated" if result is not None and result.allowed and not reason else "pending",
                     "reason": reason, "trading_qualified": False,
                     "quantity_base": _ratio(plan.policy.original_base) if plan else None,

@@ -1576,6 +1576,7 @@ fn privateInstrumentIdentity(value: private.Instrument) ?canonical.InstrumentIde
     return switch (value) {
         .btc_usdt_spot => btc_usdt_spot,
         .btc_usdt_swap => btc_usdt_swap,
+        .btc_usdc_spot => null,
     };
 }
 

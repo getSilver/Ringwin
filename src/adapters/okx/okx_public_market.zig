@@ -14,6 +14,7 @@ pub const max_events_per_ingress = 2;
 pub const Instrument = enum(u8) {
     btc_usdt_spot,
     btc_usdt_swap,
+    btc_usdc_spot,
 };
 
 pub const Decimal = @import("../../model/canonical_event.zig").Decimal;
@@ -241,10 +242,13 @@ const FeedMemory = struct {
 };
 
 pub const Decoder = struct {
+    /// REST books omit instId; the transport owner binds the requested endpoint.
+    rest_book_instrument: ?Instrument = null,
     spot_book: BookState = .{},
     swap_book: BookState = .{},
-    rules_observed: [2]bool = .{ false, false },
-    instrument_memory: [2]FeedMemory = .{ .{}, .{} },
+    usdc_book: BookState = .{},
+    rules_observed: [3]bool = @splat(false),
+    instrument_memory: [3]FeedMemory = @splat(.{}),
     mark_memory: FeedMemory = .{},
     index_memory: FeedMemory = .{},
     funding_memory: FeedMemory = .{},
@@ -419,6 +423,11 @@ pub const Decoder = struct {
         const data = try asArray(try objectField(root, "data"));
         if (data.items.len != 1) return error.InvalidField;
         const datum = try asObject(data.items[0]);
+        if (datum.get("bids") != null) {
+            const instrument = self.rest_book_instrument orelse return error.UnsupportedInstrument;
+            if (datum.get("instId")) |value| if (try parseInstrument(try valueString(value)) != instrument) return error.UnsupportedInstrument;
+            return self.decodeBook(instrument, "snapshot", datum, times, raw_evidence, batch, true);
+        }
         if (datum.get("tickSz") != null) {
             const instrument = try parseInstrument(try stringField(datum, "instId"));
             return self.decodeInstrument(instrument, datum, times, raw_evidence, batch) catch |err| {
@@ -444,7 +453,7 @@ pub const Decoder = struct {
         batch: *IngressBatch,
     ) !void {
         const declared_type = try stringField(datum, "instType");
-        if ((instrument == .btc_usdt_spot and !std.mem.eql(u8, declared_type, "SPOT")) or
+        if ((instrument != .btc_usdt_swap and !std.mem.eql(u8, declared_type, "SPOT")) or
             (instrument == .btc_usdt_swap and !std.mem.eql(u8, declared_type, "SWAP")))
             return error.InvalidField;
         const source_ms = try optionalMillis(datum, "ts");
@@ -692,6 +701,7 @@ pub const Decoder = struct {
         return switch (instrument) {
             .btc_usdt_spot => &self.spot_book,
             .btc_usdt_swap => &self.swap_book,
+            .btc_usdc_spot => &self.usdc_book,
         };
     }
 
@@ -699,6 +709,7 @@ pub const Decoder = struct {
         return switch (instrument) {
             .btc_usdt_spot => &self.spot_book,
             .btc_usdt_swap => &self.swap_book,
+            .btc_usdc_spot => &self.usdc_book,
         };
     }
 };
@@ -752,6 +763,7 @@ fn healthEvent(
 }
 
 fn parseInstrument(text: []const u8) !Instrument {
+    if (std.mem.eql(u8, text, "BTC-USDC")) return .btc_usdc_spot;
     if (std.mem.eql(u8, text, "BTC-USDT")) return .btc_usdt_spot;
     if (std.mem.eql(u8, text, "BTC-USDT-SWAP")) return .btc_usdt_swap;
     return error.UnsupportedInstrument;

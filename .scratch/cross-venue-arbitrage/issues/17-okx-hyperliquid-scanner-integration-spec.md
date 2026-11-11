@@ -1,8 +1,8 @@
 # 17：OKX／Hyperliquid 扫描器项目内部整合规格
 
 Type: spec
-Status: open
-Assignee:
+Status: in_progress
+Assignee: Codex
 Blocked by:
 Parent: [模块地图](../map.md)
 Triage: ready-for-agent

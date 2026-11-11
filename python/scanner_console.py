@@ -3,6 +3,7 @@
 The node supplies the registered canonical observations, frozen research plans
 and optional core authority bridge. HTTP cannot inject market data or receipts.
 """
+from dataclasses import dataclass
 import hashlib
 import json
 import secrets
@@ -18,6 +19,19 @@ from scanner_history import History, encoded
 from scanner_config import ConfigStore, uint_text
 
 
+@dataclass(frozen=True)
+class CatalogueEntry:
+    venue: int
+    account: int  # Trusted observation namespace; never an ExchangeAccount authorization.
+    kind: str
+    rules: object
+    environment: str
+
+    @property
+    def identity(self):
+        return self.venue, self.account, self.rules.instrument
+
+
 class CanonicalSource:
     """Node-owned admitted catalogue and shared subscription ownership.
 
@@ -31,6 +45,7 @@ class CanonicalSource:
         self.listeners = {}
         self.subscribe, self.unsubscribe = subscribe, unsubscribe
         self.assets = json.loads(encoded(assets))
+        self.runtime_status = lambda: {}
         for asset in self.assets:
             if (set(asset) != {"identity", "code", "atomic_scale"} or type(asset["code"]) is not str
                     or not 1 <= len(asset["code"]) <= 32 or type(asset["atomic_scale"]) is not int
@@ -44,7 +59,7 @@ class CanonicalSource:
     def register(self, observations):
         with self.lock:
             for item in observations:
-                if not isinstance(item, scanner.Observation):
+                if not isinstance(item, (scanner.Observation, CatalogueEntry)):
                     raise ValueError("canonical observation required")
                 previous = self.registered.get(item.identity)
                 if previous is not None and (previous.environment, previous.kind) != (item.environment, item.kind):
@@ -432,6 +447,7 @@ class ScannerConsole:
             return
         bad = any(r["reason"] in ("data_gap", "stale_data", "data_skew", "expired", "rules_expired")
                   for r in self.snapshot["candidates"])
+        bad = bad or bool(self.source.runtime_status().get("failures"))
         self.phase = "Degraded" if bad or self.pending_gap else "Warming" if self.warming else "Running"
 
     def request_approval(self, selection):
@@ -578,7 +594,7 @@ class ScannerConsole:
                         latest_sequence=str(self.sequence), committed_sequence=str(self.committed),
                         backlog=0, storage_healthy=self.history.healthy, history_window=history_window,
                         storage_error=self.history.error, coverage_gaps=list(self.coverage_gaps)+history_window["gaps"], errors=list(self.errors[-64:]),
-                        warming=[list(map(str, x)) for x in sorted(self.warming)], trading_qualified=False)))
+                        warming=[list(map(str, x)) for x in sorted(self.warming)], market=self.source.runtime_status(), trading_qualified=False)))
 
     def close(self):
         if not self.shutdown.is_set():

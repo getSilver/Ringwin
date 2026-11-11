@@ -131,7 +131,7 @@ pub const OrderCommand = struct {
 
     pub fn product(self: *const OrderCommand) Product {
         return switch (self.instrument) {
-            .btc_usdt_spot => .spot,
+            .btc_usdt_spot, .btc_usdc_spot => .spot,
             .btc_usdt_swap => .swap,
         };
     }
@@ -441,6 +441,7 @@ fn validateCommand(
     guard: Guard,
     now_ns: u64,
 ) ?RejectReason {
+    if (command.instrument == .btc_usdc_spot) return .invalid_spec; // Public observation only.
     if (command.command_id == 0 or command.order_id == 0 or command.client_order_id.len == 0)
         return .invalid_spec;
     if (command.dispatch_deadline_monotonic_ns <= now_ns) return .deadline_expired;
@@ -671,6 +672,7 @@ fn instrumentId(instrument: Instrument) []const u8 {
     return switch (instrument) {
         .btc_usdt_spot => "BTC-USDT",
         .btc_usdt_swap => "BTC-USDT-SWAP",
+        .btc_usdc_spot => "BTC-USDC",
     };
 }
 

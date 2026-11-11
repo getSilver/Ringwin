@@ -205,6 +205,14 @@ class ControlPlaneApp:
         self.instance_manager = (strategy_instance.InstanceManager(directory, release_manager, instance_source)
                                  if release_manager is not None and instance_source is not None else None)
         self.lifecycle_outbox = lifecycle_outbox
+        self.scanner_runtime = None
+        market_config = Path(directory)/"scanner-market.json"
+        if scanner_console is None and market_config.is_file():
+            from scanner_runtime import ScannerRuntime
+            if market_config.stat().st_size > 65536:
+                raise ValueError("scanner market configuration capacity")
+            self.scanner_runtime = ScannerRuntime(directory, json.loads(market_config.read_text(encoding="utf-8")))
+            scanner_console = self.scanner_runtime.console
         self.scanner_console = scanner_console
         if scanner_console is not None and scanner_console.config_store is None:
             scanner_console.bind_config(Path(directory)/"scanner-config.json")

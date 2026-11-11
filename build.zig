@@ -80,6 +80,15 @@ pub fn build(b: *std.Build) void {
     authority_step.dependOn(&b.addInstallArtifact(authority_probe, .{}).step);
     authority_step.dependOn(&install_native_json.step);
 
+    const scanner_node = b.addExecutable(.{
+        .name = "ringwin-scanner-market",
+        .root_module = b.createModule(.{ .root_source_file = b.path("src/entry.zig"), .target = target, .optimize = optimize }),
+    });
+    const scanner_options = b.addOptions();
+    scanner_options.addOption(usize, "index", 150);
+    scanner_node.root_module.addOptions("entry_options", scanner_options);
+    b.installArtifact(scanner_node);
+
     const run = b.addRunArtifact(exe);
     if (b.args) |args| run.addArgs(args);
     const run_step = b.step("run", "Run the deterministic acceptance fixture");

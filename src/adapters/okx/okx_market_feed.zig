@@ -9,6 +9,7 @@ const market = @import("../../market/market_feed_adapter.zig");
 const okx = @import("okx_public_market.zig");
 
 pub const btc_usdt_spot: canonical.InstrumentIdentity = 0x4f4b58_00000001;
+pub const btc_usdc_spot: canonical.InstrumentIdentity = 0x4f4b58_00000003;
 pub const btc_usdt_swap: canonical.InstrumentIdentity = 0x4f4b58_00000002;
 
 const State = enum { idle, running, stopped };
@@ -16,6 +17,8 @@ const Rules = struct {
     tick_size: okx.Decimal,
     lot_size: okx.Decimal,
     version: u64,
+    contract_value: ?okx.Decimal,
+    state: okx.InstrumentState,
 };
 const BookState = struct {
     ready: bool = false,
@@ -29,8 +32,8 @@ pub const OkxMarketFeed = struct {
     config: ?market.Config = null,
     pending: ?canonical.AdapterOutputBatch = null,
     next_event_sequence: u64 = 0,
-    rules: [2]?Rules = .{ null, null },
-    books: [2]BookState = .{ undefined, undefined },
+    rules: [3]?Rules = @splat(null),
+    books: [3]BookState = @splat(.{}),
 
     pub fn init(raw_sink: okx.RawSink) OkxMarketFeed {
         return .{ .raw_sink = raw_sink };
@@ -108,7 +111,7 @@ pub const OkxMarketFeed = struct {
         const self: *OkxMarketFeed = @ptrCast(@alignCast(ptr));
         if (self.state == .running) return error.AlreadyStarted;
         if (self.state == .stopped) return error.Stopped;
-        if (config.environment != .demo or config.venue == 0 or config.subscription_set == 0 or config.session == 0 or
+        if ((config.environment != .demo and config.environment != .production) or config.venue == 0 or config.subscription_set == 0 or config.session == 0 or
             config.session > std.math.maxInt(u64) or config.output_capacity < okx.max_events_per_ingress or
             config.output_capacity > canonical.max_events_per_adapter_batch)
             return error.InvalidConfig;
@@ -148,7 +151,7 @@ pub const OkxMarketFeed = struct {
             .instrument_definition_observed => |definition| {
                 const index = @intFromEnum(definition.instrument);
                 const version = (self.config orelse return error.NotStarted).config_version;
-                self.rules[index] = .{ .tick_size = definition.tick_size, .lot_size = definition.lot_size, .version = version };
+                self.rules[index] = .{ .tick_size = definition.tick_size, .lot_size = definition.lot_size, .version = version, .contract_value = definition.contract_value, .state = definition.state };
                 self.books[index].ready = false;
                 try self.append(output, event.envelope, instrumentIdentity(definition.instrument), event.envelope.raw_evidence.stream_sequence, null, .{
                     .instrument_definition_observed = .{ .instrument = instrumentIdentity(definition.instrument), .rules_version = version },
@@ -279,6 +282,7 @@ fn instrumentIdentity(instrument: okx.Instrument) canonical.InstrumentIdentity {
     return switch (instrument) {
         .btc_usdt_spot => btc_usdt_spot,
         .btc_usdt_swap => btc_usdt_swap,
+        .btc_usdc_spot => btc_usdc_spot,
     };
 }
 
